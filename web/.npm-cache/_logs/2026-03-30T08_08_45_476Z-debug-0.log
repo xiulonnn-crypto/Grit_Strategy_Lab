@@ -1,0 +1,14 @@
+0 verbose cli C:\Program Files\nodejs\node.exe C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js
+1 info using npm@10.7.0
+2 info using node@v18.20.4
+3 silly config:load:file:C:\Program Files\nodejs\node_modules\npm\npmrc
+4 silly config:load:file:C:\Fin\Grit_Strategy_Lab2\baseline_restore_staging\web\.npmrc
+5 silly config:load:file:C:\Users\TradeAdmin\.npmrc
+6 silly config:load:file:C:\Users\TradeAdmin\AppData\Roaming\npm\etc\npmrc
+7 verbose title npm run build
+8 verbose argv "run" "build"
+9 verbose logfile logs-max:10 dir:C:\Fin\Grit_Strategy_Lab2\baseline_restore_staging\web\.npm-cache\_logs\2026-03-30T08_08_45_476Z-
+10 verbose logfile C:\Fin\Grit_Strategy_Lab2\baseline_restore_staging\web\.npm-cache\_logs\2026-03-30T08_08_45_476Z-debug-0.log
+11 silly logfile done cleaning log files
+12 verbose exit 1
+13 verbose code 1

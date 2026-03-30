@@ -1,0 +1,22 @@
+# Runtime & Environment
+.venv/
+.python-runtime/
+__pycache__/
+*.pyc
+
+# Frontend Artifacts
+web/node_modules/
+web/dist/
+web/.eslintcache
+
+# Local Data (Crucial!)
+*.db
+!web/src/assets/demo_backtest.db # 如果你想保留一个展示用的 demo 库
+web/dist/plots/*
+artifact_storage/
+logs/
+
+# OS/IDE
+.DS_Store
+.vscode/
+.idea/
