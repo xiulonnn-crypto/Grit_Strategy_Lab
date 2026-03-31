@@ -125,8 +125,27 @@ export type ApiStrategyCreationSession = {
   mode?: string;
   base_strategy_id?: string | null;
   base_parameter_version_id?: string | null;
-  messages?: Array<{ content: string }>;
+  top_level?: {
+    strategy_type?: StrategyType | null;
+    universe_name?: string | null;
+    rebalance_frequency?: string | null;
+  };
+  messages?: Array<{
+    role?: string | null;
+    content: string;
+    created_at?: string | null;
+  }>;
+  confirmation_fields?: {
+    top_level: Array<{ key: string; label: string; value: unknown; source: string }>;
+    parameters: Array<{ key: string; label: string; value: unknown; source: string }>;
+  };
   pending_inputs?: Array<{ key: string; label: string; message: string }>;
+  manual_conflicts?: Array<{
+    key: string;
+    label: string;
+    message: string;
+    suggested_value?: ParameterValue;
+  }>;
 };
 
 export type ApiConfirmationUpdateRequest = {
@@ -167,6 +186,10 @@ export type ApiBacktestRunTradePage = {
   total: number;
   total_pages?: number;
 };
+
+export type ApiBacktestRunTradeAudit = ApiBacktestTradeAudit;
+export type BacktestRunListItem = ApiBacktestRunListItem;
+export type BacktestRunDetail = ApiBacktestRunDetail;
 
 export type ApiBacktestRunDetail = {
   id: string;

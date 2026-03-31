@@ -27,7 +27,7 @@ function readIdempotencyKey(request: Request, body: Record<string, unknown> | un
   return request.headers.get('Idempotency-Key') ?? (typeof body?.idempotency_key === 'string' ? body.idempotency_key : '') ?? '';
 }
 
-export function installMockApiServer(): { restore: () => void; fetchSpy: ReturnType<typeof vi.spyOn> } {
+export function installMockApiServer() {
   resetDemoStore();
   const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
     const baseUrl = 'http://localhost';
@@ -60,7 +60,10 @@ export function installMockApiServer(): { restore: () => void; fetchSpy: ReturnT
       if (method === 'PATCH' && segments[0] === 'strategy-creation-sessions' && segments[2] === 'confirmation') {
         return json(await demoApi.updateConfirmation(segments[1], {
           revision: Number(body?.revision ?? 1),
-          strategy_type: typeof body?.strategy_type === 'string' ? body.strategy_type : undefined,
+          strategy_type:
+            typeof body?.strategy_type === 'string'
+              ? (body.strategy_type as import('./types').StrategyType)
+              : undefined,
           core: (body?.core as Record<string, string | number | boolean> | undefined) ?? {},
           logic: (body?.logic as Record<string, string | number | boolean> | undefined) ?? {},
           parameters: (body?.parameters as Record<string, string | number | boolean> | undefined) ?? {},

@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import App from './App';
+import App from './app-runtime';
 import { installMockApiServer, setMockPromoteConflict } from './testApiMock';
 
 let mockServer: ReturnType<typeof installMockApiServer> | null = null;

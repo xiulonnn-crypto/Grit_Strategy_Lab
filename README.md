@@ -1,20 +1,27 @@
 ﻿# Grit Backtest Platform
 
-Grit Backtest Platform is a local strategy research and backtesting workspace. The restored build ships the current vertical slice end to end: workspace compare, conversation-based strategy creation, snapshot refresh, real backtest submission and review, optimization manual lab management, and interactive trade audit.
+Grit Backtest Platform is a local strategy research and backtesting workspace. The current restored frontend runs through `web/src/app-runtime.tsx` and ships the usable product skeleton for the main chain: workspace, creation session, materialize, backtest preview and submit, run detail, and optimization manual lab.
 
 ## What Is Implemented
 
-Available workflow:
+Current restore checklist:
 
-1. Workspace strategy board with compare cockpit and hidden cleanup audit contract
-2. Template-driven conversation-based strategy creation
-3. Editable confirmation draft before materialization
-4. Strategy detail with explicit parameter history and revision comments
-5. Snapshot refresh that ingests local historical market data
-6. Real backtest preview before submission
-7. Real backtest run detail with metrics, chart series, trade audit items, and interactive trade audit
-8. Optimization manual lab with candidate creation, deletion, compare top 3, and promote-with-note flow
-9. Data snapshot remediation page
+- [x] Workspace dashboard with compare cockpit, recent backtests, and empty-workspace CTA
+- [x] Template-driven strategy creation at `#/creation/new`
+- [x] Session route at `#/creation/sessions/:id`
+- [x] Confirmation preparation, manual confirmation patch, and materialize flow
+- [x] Backtest preview and submit at `#/strategies/{id}/backtest-runs/new`
+- [x] Run detail shell with KPI summary, curve container, and interactive trade audit
+- [x] Optimization manual lab at `#/optimization-jobs/{id}` with candidate compare, delete, and promote-with-note
+- [x] End-to-end create -> backtest -> compare/review chain in the active hash router
+
+Current frontend runtime architecture:
+
+- Active browser entrypoint: `web/src/app-runtime.tsx`
+- Browser bootstrap: `web/src/main.tsx`
+- Shared hash routing: `web/src/lib/appRouteContext.tsx`
+- Real HTTP runtime client: `web/src/lib/demoStoreContext.tsx`
+- Legacy `App.tsx` and `phase4-app.tsx` no longer carry independent runtime logic
 
 Important product constraints in this slice:
 
@@ -86,7 +93,7 @@ powershell -ExecutionPolicy Bypass -File .\QuickStart-Grit.ps1 -RepairPython -No
 - Node 18+
 - npm
 
-The frontend toolchain is pinned to a Node 18-compatible Vite stack. `npm run dev`, `npm run build`, and `npm run test` are expected to work on the current local runtime.
+The frontend toolchain is pinned to a Node 18-compatible Vite stack. `npm run dev` and `npm run build` use the current runtime path. In sandboxed Windows environments, `npm run test` can still fail before startup with `esbuild spawn EPERM`; see the fallback verification path below.
 
 ## Backend Setup
 
@@ -134,6 +141,7 @@ The app uses hash routing. The primary entry routes are:
 
 - `#/workspace`
 - `#/creation/new`
+- `#/creation/sessions/{sessionId}`
 - `#/runs/{runId}`
 - `#/optimization-jobs/{jobId}`
 - `#/strategies/{id}/backtest-runs/new`
@@ -180,6 +188,22 @@ Set-Location web
 npm run test
 ```
 
+If Vitest fails before startup with `esbuild spawn EPERM`, use the documented fallback path instead:
+
+```powershell
+Set-Location web
+npm run test:doctor
+Set-Location ..
+powershell -ExecutionPolicy Bypass -File .\scripts\run-recovery-tests.ps1 -Target frontend
+```
+
+For a frontend-only structural scan that does not rely on Vite's config-loader:
+
+```powershell
+Set-Location web
+npx tsc --noEmit
+```
+
 ### Frontend production build
 
 ```powershell
@@ -201,19 +225,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\push-to-github.ps1 -SourceBra
 
 ## Current Verification Baseline
 
-The current implementation has been verified with:
+Current known verification state:
 
-- `pytest tests/test_backend_api.py -q`
-- `pytest tests/test_real_backtest_api.py -q`
-- `pytest tests/test_creation_templates.py tests/test_creation_session_refresh.py -q`
-- `npm test -- --run src/workspace.compare.phase3.test.tsx src/optimization.manual-lab.test.tsx src/run-detail.audit.test.tsx src/App.phase4.test.tsx`
-- `npm run build`
-
-At the time this README was updated, the known result was:
-
-- backend regression tests passing for creation, real backtest contracts, cleanup, optimization lab flows, and trade audit flows
-- frontend targeted Phase 3 and Phase 4 route and UI contract tests passing for the workspace compare cockpit, optimization manual lab, and interactive run detail audit
-- frontend quick-start launcher using the repo-local runtime and self-healing the Node toolchain when needed
+- The active frontend runtime is `app-runtime.tsx`; `main.tsx` imports it directly.
+- Focused frontend tests now exist for workspace, creation flow, backtest submit, run detail, and manual lab.
+- In the current Codex sandbox, Vitest can fail before executing tests because Vite's config-loader hits `esbuild spawn EPERM`.
+- The supported fallback path is `.\scripts\run-recovery-tests.ps1 -Target frontend` from the repo root, plus `Set-Location web; npm run test:doctor` for quick diagnosis.
+- `Set-Location web; npx tsc --noEmit` is the preferred no-browser structural check when Vitest cannot start.
+- At the time this README was updated, the remaining known TypeScript holdout was the unrelated legacy test `web/src/page-sections/run-detail.evidence.test.tsx`.
 
 ## Key API Behaviors
 

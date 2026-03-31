@@ -40,7 +40,12 @@ export function buildParameterDiffRows(
   baseline: Record<string, ParameterValue>,
   candidate: ApiOptimizationCandidate | Record<string, ParameterValue>,
 ): ParameterDiffRow[] {
-  const snapshot = 'parameter_snapshot' in candidate ? candidate.parameter_snapshot : candidate;
+  const snapshot =
+    'parameter_snapshot' in candidate &&
+    candidate.parameter_snapshot !== null &&
+    typeof candidate.parameter_snapshot === 'object'
+      ? (candidate.parameter_snapshot as Record<string, ParameterValue>)
+      : (candidate as Record<string, ParameterValue>);
   const rows: ParameterDiffRow[] = [];
   for (const key of [...new Set([...Object.keys(baseline), ...Object.keys(snapshot)])].sort()) {
     const previousValue = baseline[key];

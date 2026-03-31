@@ -83,6 +83,15 @@ button {
   backdrop-filter: blur(12px);
 }
 
+.topnav a {
+  padding: 4px 2px;
+  border-radius: 999px;
+}
+
+.topnav-link-active {
+  font-weight: 700;
+}
+
 .page-shell {
   margin: 0 auto;
   max-width: 1180px;
@@ -425,6 +434,33 @@ button {
 }
 
 .empty-state {
+  margin: 0;
+  color: var(--muted);
+}
+
+.blank-state-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 40px 32px;
+  border: 1px dashed rgba(32, 79, 60, 0.2);
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.blank-state-title {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.7rem;
+  letter-spacing: -0.03em;
+}
+
+.blank-state-copy {
+  max-width: 58ch;
   margin: 0;
   color: var(--muted);
 }

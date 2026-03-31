@@ -105,20 +105,24 @@ export function RunDetailAuditPanel({
           <div className="panel-header">
             <h3>Trade Episodes</h3>
           </div>
-          <div className="audit-row-list">
-            {auditItems.map((item) => (
-              <button
-                className={`audit-row-button ${item.trade_id === activeTradeId ? 'audit-row-button-active' : ''}`}
-                key={item.trade_id}
-                onClick={() => onSelectTrade(item.trade_id)}
-                type="button"
-              >
-                <strong>{item.symbol}</strong>
-                <span>{formatPercent(item.pnl_pct)}</span>
-                <small>{item.commentary}</small>
-              </button>
-            ))}
-          </div>
+          {auditItems.length ? (
+            <div className="audit-row-list">
+              {auditItems.map((item) => (
+                <button
+                  className={`audit-row-button ${item.trade_id === activeTradeId ? 'audit-row-button-active' : ''}`}
+                  key={item.trade_id}
+                  onClick={() => onSelectTrade(item.trade_id)}
+                  type="button"
+                >
+                  <strong>{item.symbol}</strong>
+                  <span>{formatPercent(item.pnl_pct)}</span>
+                  <small>{item.commentary}</small>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="empty-state">No trade audit episodes are available for this run.</p>
+          )}
         </div>
 
         <div>

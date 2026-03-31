@@ -84,19 +84,23 @@ export function OptimizationManualLabPhase4({
         <div className="panel-header">
           <h3>Candidate Differences Only</h3>
         </div>
-        <div className="candidate-grid">
-          {job.candidates.map((candidate) => (
-            <OptimizationCandidateCard
-              baselineParameters={strategy.parameters ?? {}}
-              candidate={candidate}
-              deleting={deletingCandidateId === candidate.id}
-              key={candidate.id}
-              onDelete={(candidateId) => void onDeleteCandidate(candidateId)}
-              onPromote={(candidateId) => setNoteCandidateId(candidateId)}
-              promoting={promotingCandidateId === candidate.id}
-            />
-          ))}
-        </div>
+        {job.candidates.length ? (
+          <div className="candidate-grid">
+            {job.candidates.map((candidate) => (
+              <OptimizationCandidateCard
+                baselineParameters={strategy.parameters ?? {}}
+                candidate={candidate}
+                deleting={deletingCandidateId === candidate.id}
+                key={candidate.id}
+                onDelete={(candidateId) => void onDeleteCandidate(candidateId)}
+                onPromote={(candidateId) => setNoteCandidateId(candidateId)}
+                promoting={promotingCandidateId === candidate.id}
+              />
+            ))}
+          </div>
+        ) : (
+          <p className="empty-state">No candidates are available for this optimization job yet.</p>
+        )}
       </section>
 
       {compareOpen ? (

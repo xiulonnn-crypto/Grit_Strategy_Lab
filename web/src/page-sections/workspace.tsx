@@ -83,6 +83,7 @@ export function WorkspaceStrategySection({
         <div>
           <p className="eyebrow">Compare Cockpit</p>
           <h3>Stable Current-Version Strategies</h3>
+          <p className="hero-copy">Pick 2 to 4 strategies. Locked cards explain why compare is disabled.</p>
         </div>
         <button
           className="ghost-button"

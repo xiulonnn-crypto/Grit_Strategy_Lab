@@ -2,6 +2,7 @@ import {
   ApiError,
   type ApiBacktestRunDetail,
   type ApiBacktestRunListItem,
+  type ApiBacktestTradeAudit,
   type ApiBacktestRunTradePage,
   type ApiBacktestSubmissionPreview,
   type ApiConfirmationUpdateRequest,
@@ -309,6 +310,57 @@ export const demoApi: DemoApi = {
     return { items: [], page: 1, page_size: 50, total: 0, total_pages: 1 };
   },
 
+  async getBacktestTradeAudit(): Promise<ApiBacktestTradeAudit> {
+    return {
+      trade_id: 'trade-001',
+      symbol: 'QQQ',
+      segment: 'IS',
+      opened_at: '2024-04-01T09:30:00Z',
+      closed_at: '2024-04-08T16:00:00Z',
+      pnl_pct: 2.4,
+      max_favorable_excursion_pct: 3.1,
+      max_adverse_excursion_pct: -1.2,
+      slippage_cost_pct: 0.12,
+      commentary: 'Recovered audit sample.',
+      price_series: [
+        {
+          date: '2024-04-01',
+          open: 100,
+          high: 102,
+          low: 99,
+          close: 101,
+          adj_close: 101,
+          volume: 1000000,
+        },
+        {
+          date: '2024-04-08',
+          open: 102,
+          high: 104,
+          low: 101,
+          close: 103,
+          adj_close: 103,
+          volume: 1100000,
+        },
+      ],
+      trigger_snapshot: { lookback_months: 6, top_n: 5 },
+      risk_evaluation: {
+        max_favorable_excursion_pct: 3.1,
+        max_adverse_excursion_pct: -1.2,
+        mfe_mae_ratio: 2.58,
+        slippage_cost_pct: 0.12,
+        commentary: 'Risk stayed within the expected band.',
+      },
+      entry_marker: { date: '2024-04-01', price: 101 },
+      exit_marker: { date: '2024-04-08', price: 103 },
+      chart_band: {
+        start_date: '2024-04-01',
+        end_date: '2024-04-08',
+        color: 'green',
+        pnl_pct: 2.4,
+      },
+    };
+  },
+
   async previewBacktestRun(): Promise<ApiBacktestSubmissionPreview> {
     return { warnings: [], effective_start_date: '2024-01-02', effective_end_date: '2025-01-31', data_segment_type: 'FULL' };
   },
@@ -399,6 +451,14 @@ export const demoApi: DemoApi = {
       strategy.current_parameter_version = (strategy.current_parameter_version ?? 1) + 1;
       strategy.current_parameter_version_id = `${strategy.id}-v${strategy.current_parameter_version}`;
     }
+    return clone(job);
+  },
+
+  async deleteOptimizationCandidate(jobId: string, trialId: string): Promise<ApiOptimizationJobDetail> {
+    const job = findJob(jobId);
+    job.candidates = job.candidates.filter((candidate) => candidate.id !== trialId);
+    job.summary.candidate_count = job.candidates.length;
+    job.updated_at = nowIso();
     return clone(job);
   },
 
