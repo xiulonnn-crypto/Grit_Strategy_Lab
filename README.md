@@ -188,6 +188,17 @@ $env:VITE_API_BASE_URL='http://127.0.0.1:8000'
 npm run build
 ```
 
+## GitHub 推送修复（当前会话）
+
+若当前 PowerShell 会话出现 `connect to github.com port 443 via 127.0.0.1` 的推送错误，先用以下脚本走一条无代理路径推送远端引用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\push-to-github.ps1 -SourceBranch main -TargetBranch restore/skeleton
+```
+
+脚本会自动清理环境变量中的 `HTTP(S)_PROXY` / `ALL_PROXY`，并把 `git push` 限制为不走这类代理配置。  
+如仍报证书/凭据类错误，请先执行 `git -c credential.helper=manager-core push ...` 触发一次登录后再重试。
+
 ## Current Verification Baseline
 
 The current implementation has been verified with:
