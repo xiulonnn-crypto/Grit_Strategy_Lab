@@ -43,4 +43,15 @@ foreach ($name in $proxyEnvVars) {
 $refSpec = "${SourceBranch}:${TargetBranch}"
 Write-Host "Pushing ${refSpec} to ${Remote} with direct Git transport settings." -ForegroundColor Cyan
 
-git -c http.proxy= -c https.proxy= push -u $Remote $refSpec
+git -c http.proxy= -c https.proxy= -c http.sslVerify=true push -u $Remote $refSpec
+$exitCode = $LASTEXITCODE
+if ($exitCode -ne 0) {
+    Write-Host "Push command failed with exit code $exitCode." -ForegroundColor Yellow
+    Write-Host "If you see proxy errors, the script already clears proxy variables."
+    Write-Host "If you still see credential errors, run:"
+    Write-Host "  git -c http.proxy= -c https.proxy= -c credential.helper=manager-core push -u $Remote $refSpec"
+    Write-Host "or log in to GitHub and retry this script."
+    exit $exitCode
+}
+
+Write-Host "Push completed." -ForegroundColor Green
