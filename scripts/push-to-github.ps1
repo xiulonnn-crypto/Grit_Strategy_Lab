@@ -43,15 +43,54 @@ foreach ($name in $proxyEnvVars) {
 $refSpec = "${SourceBranch}:${TargetBranch}"
 Write-Host "Pushing ${refSpec} to ${Remote} with direct Git transport settings." -ForegroundColor Cyan
 
-git -c http.proxy= -c https.proxy= -c http.sslVerify=true push -u $Remote $refSpec
-$exitCode = $LASTEXITCODE
-if ($exitCode -ne 0) {
-    Write-Host "Push command failed with exit code $exitCode." -ForegroundColor Yellow
-    Write-Host "If you see proxy errors, the script already clears proxy variables."
-    Write-Host "If you still see credential errors, run:"
-    Write-Host "  git -c http.proxy= -c https.proxy= -c credential.helper=manager-core push -u $Remote $refSpec"
-    Write-Host "or log in to GitHub and retry this script."
-    exit $exitCode
+function Invoke-GitPush {
+    param(
+        [string[]]$Arguments
+    )
+
+    & git @Arguments
+    return $LASTEXITCODE
 }
 
-Write-Host "Push completed." -ForegroundColor Green
+$baseArgs = @(
+    "-c", "http.proxy=",
+    "-c", "https.proxy=",
+    "-c", "http.sslVerify=true",
+    "push",
+    "-u",
+    $Remote,
+    $refSpec
+)
+
+$first = Invoke-GitPush -Arguments $baseArgs
+if ($first -eq 0) {
+    Write-Host "Push completed." -ForegroundColor Green
+    exit 0
+}
+
+Write-Host "Direct transport push failed with exit code $first." -ForegroundColor Yellow
+Write-Host "Retrying with manager-core credential helper." -ForegroundColor Cyan
+
+$managerArgs = @(
+    "-c", "http.proxy=",
+    "-c", "https.proxy=",
+    "-c", "credential.helper=manager-core",
+    "-c", "http.sslVerify=true",
+    "push",
+    "-u",
+    $Remote,
+    $refSpec
+)
+
+$second = Invoke-GitPush -Arguments $managerArgs
+if ($second -eq 0) {
+    Write-Host "Push completed." -ForegroundColor Green
+    exit 0
+}
+
+Write-Host "Push still failed with exit code $second." -ForegroundColor Yellow
+Write-Host "If you still see proxy errors, the script already clears proxy variables."
+Write-Host "If you still see credential errors, confirm your GitHub credentials helper is available:"
+Write-Host "  git config --global credential.helper manager-core"
+Write-Host "Then run: $PSCommandPath again."
+exit $second
