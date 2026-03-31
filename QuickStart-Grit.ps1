@@ -46,9 +46,16 @@ function Get-RepoRelativePath {
 }
 
 function Test-HttpReady {
-    param([string]$Url)
+    param(
+        [string]$Url,
+        [int]$TimeoutSec = 3,
+        [int[]]$ExpectedStatusCodes = @(200)
+    )
     try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 3
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec $TimeoutSec
+        if ($ExpectedStatusCodes -and $ExpectedStatusCodes.Count -gt 0) {
+            return $ExpectedStatusCodes -contains [int]$response.StatusCode
+        }
         return $response.StatusCode -ge 200 -and $response.StatusCode -lt 500
     } catch {
         return $false
@@ -56,10 +63,16 @@ function Test-HttpReady {
 }
 
 function Wait-HttpReady {
-    param([string]$Name, [string]$Url, [int]$TimeoutSeconds)
+    param(
+        [string]$Name,
+        [string]$Url,
+        [int]$TimeoutSeconds,
+        [int]$ProbeTimeoutSec = 3,
+        [int[]]$ExpectedStatusCodes = @(200)
+    )
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
-        if (Test-HttpReady -Url $Url) {
+        if (Test-HttpReady -Url $Url -TimeoutSec $ProbeTimeoutSec -ExpectedStatusCodes $ExpectedStatusCodes) {
             Write-Host "$Name is ready at $Url" -ForegroundColor Green
             return $true
         }
@@ -354,10 +367,10 @@ if ($DryRun) {
     exit 0
 }
 
-if (-not (Test-HttpReady -Url $backendHealthUrl)) {
+if (-not (Test-HttpReady -Url $backendHealthUrl -TimeoutSec 10 -ExpectedStatusCodes @(200))) {
     Write-Host 'Starting backend...' -ForegroundColor Yellow
     Start-BackendWindow -PythonExe $effectiveState.Python.PythonExe
-    if (-not (Wait-HttpReady -Name 'Backend' -Url $backendHealthUrl -TimeoutSeconds $BackendStartupTimeoutSeconds)) {
+    if (-not (Wait-HttpReady -Name 'Backend' -Url $backendHealthUrl -TimeoutSeconds $BackendStartupTimeoutSeconds -ProbeTimeoutSec 10 -ExpectedStatusCodes @(200))) {
         throw "Backend failed to become ready at $backendHealthUrl within $BackendStartupTimeoutSeconds seconds."
     }
 }
@@ -374,7 +387,7 @@ if (-not (Test-Path -LiteralPath $frontendPreviewScript)) {
 
 Ensure-FrontendDependencies
 
-if (Test-HttpReady -Url $frontendHealthUrl) {
+if (Test-HttpReady -Url $frontendHealthUrl -TimeoutSec 5 -ExpectedStatusCodes @(200)) {
     Write-Host "Frontend already running at $frontendHealthUrl" -ForegroundColor DarkGreen
     if (-not $NoBrowser) {
         Start-Process $workspaceUrl | Out-Null

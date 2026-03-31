@@ -17,6 +17,8 @@ web/.eslintcache
 # Local Data (Crucial!)
 *.db
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 !web/src/assets/demo_backtest.db # 如果你想保留一个展示用的 demo 库
 web/dist/plots/*
 artifact_storage/
