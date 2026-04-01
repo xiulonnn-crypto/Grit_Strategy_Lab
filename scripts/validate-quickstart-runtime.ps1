@@ -11,6 +11,8 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $launcherPath = Join-Path $repoRoot 'QuickStart-Grit.ps1'
 $powershellExe = (Get-Command powershell.exe -ErrorAction Stop).Source
 $manifestPath = Join-Path $repoRoot '.python-runtime-manifest.json'
+$frontendMainEntry = Join-Path $repoRoot 'web\src\main.tsx'
+$frontendRuntimeEntry = Join-Path $repoRoot 'web\src\app-runtime.tsx'
 
 function Write-Section {
     param([string]$Title)
@@ -38,11 +40,28 @@ function Invoke-LauncherMode {
     }
 }
 
+function Assert-FrontendEntryChain {
+    if (-not (Test-Path -LiteralPath $frontendMainEntry)) {
+        throw "Frontend main entry not found: $frontendMainEntry"
+    }
+    if (-not (Test-Path -LiteralPath $frontendRuntimeEntry)) {
+        throw "Frontend runtime entry not found: $frontendRuntimeEntry"
+    }
+
+    $mainEntrySource = Get-Content -LiteralPath $frontendMainEntry -Raw
+    if ($mainEntrySource -notmatch "import\s+App\s+from\s+'\.\/app-runtime';") {
+        throw "Expected web/src/main.tsx to import './app-runtime'."
+    }
+}
+
 $modes = if ($Mode -eq 'All') { @('DryRun', 'Validate') } else { @($Mode) }
 
 Write-Section 'Grit QuickStart Runtime Validation'
 Write-Host "Repository : $repoRoot"
 Write-Host "Launcher   : $launcherPath"
+Write-Host "UI Entry   : .\\web\\src\\main.tsx -> .\\web\\src\\app-runtime.tsx"
+
+Assert-FrontendEntryChain
 
 foreach ($modeName in $modes) {
     $args = switch ($modeName) {

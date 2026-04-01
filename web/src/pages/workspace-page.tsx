@@ -1,5 +1,5 @@
 ﻿import { useEffect, useMemo, useState } from 'react';
-import { buildWorkspaceStrategyCards } from '../lib/adapters';
+import { buildRecentRunScore, buildWorkspaceStrategyCards } from '../lib/workspace-adapters';
 import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
 import { WorkspaceStrategySection } from '../page-sections/workspace';
@@ -12,6 +12,25 @@ import type {
   ApiWorkspaceOverview,
 } from '../types';
 import './workspace-page.css';
+
+const TEXT = {
+  heroEyebrow: '工作台',
+  heroTitle: '策略工作台',
+  heroCopy: '创建、回测和优化的统一工作台。',
+  openCreation: '创建策略',
+  openLatestLab: '打开最近优化',
+  loadingCopy: '加载工作台契约中...',
+  noStrategyTitle: '创建第一个策略',
+  noStrategyCopy: '当前数据库还没有可用策略，先进入创建流程把主链路打通。',
+  noStrategyAction: '创建第一个策略',
+  healthTitle: '工作台健康度',
+  strategiesLabel: '策略数',
+  activeRunsLabel: '活跃回测',
+  optimizationsLabel: '运行中的优化',
+  latestRunLabel: '最新回测',
+  warningLabel: '最新提醒',
+  quickActionsLabel: '快捷动作',
+} as const;
 
 function MetricCard({ label, value }: { label: string; value: string }): JSX.Element {
   return (
@@ -29,24 +48,26 @@ function buildRecentRunItems(
 ): WorkspaceRecentRunItem[] {
   return runs.map((run) => {
     const detail = detailsById[run.id];
-    const strategyName = strategyNamesById[run.strategy_id] ?? run.strategy_id;
-    const totalReturn = detail?.metrics.total_return;
-    const sharpe = detail?.metrics.sharpe;
+    const strategyName = strategyNamesById[run.strategy_id] ?? run.strategy_name ?? run.strategy_id;
+    const score = buildRecentRunScore(detail);
     const oosStart =
-      detail?.configuration && typeof detail.configuration === 'object'
+      detail?.oos_start_date ??
+      (detail?.configuration && typeof detail.configuration === 'object'
         ? (detail.configuration as { oos_start_date?: string }).oos_start_date
-        : undefined;
+        : undefined) ??
+      run.preview?.oos_start_date ??
+      run.preview?.effective_date;
 
     return {
       id: run.id,
       runId: run.id,
       strategyName,
       status: run.status,
-      totalReturn: typeof totalReturn === 'number' ? totalReturn : 0,
-      sharpe: typeof sharpe === 'number' ? sharpe : 0,
-      completedAt: run.created_at,
-      periodLabel: oosStart ? `OOS starts ${oosStart}` : run.created_at ?? 'Completion pending',
-      statusLabel: run.status,
+      totalReturn: score.totalReturn,
+      sharpe: score.sharpe,
+      completedAt: run.completed_at ?? detail?.completed_at ?? run.updated_at ?? run.created_at,
+      periodLabel: oosStart ? `OOS 起始 ${oosStart}` : '还没有完整区间',
+      statusLabel: run.status === 'QUEUED' ? '排队中' : run.status === 'RUNNING' ? '运行中' : run.status === 'COMPLETED' ? '已完成' : run.status === 'COMPLETED_WITH_WARNINGS' ? '已完成有提醒' : '失败',
     };
   });
 }
@@ -55,7 +76,8 @@ export function WorkspacePage(): JSX.Element {
   const api = useApiClient();
   const [overview, setOverview] = useState<ApiWorkspaceOverview | null>(null);
   const [strategies, setStrategies] = useState<ApiStrategyListItem[]>([]);
-  const [details, setDetails] = useState<Record<string, ApiStrategyDetail>>({});
+  const [strategyDetails, setStrategyDetails] = useState<Record<string, ApiStrategyDetail>>({});
+  const [strategyLatestRuns, setStrategyLatestRuns] = useState<Record<string, ApiBacktestRunDetail>>({});
   const [recentRuns, setRecentRuns] = useState<ApiBacktestRunListItem[]>([]);
   const [recentRunDetails, setRecentRunDetails] = useState<Record<string, ApiBacktestRunDetail>>({});
   const [loading, setLoading] = useState(true);
@@ -71,10 +93,19 @@ export function WorkspacePage(): JSX.Element {
         const [workspaceOverview, strategyItems, backtestRuns] = await Promise.all([
           api.getWorkspaceOverview(),
           api.listStrategies(),
-          api.listBacktestRuns({ limit: 6 }),
+          api.listBacktestRuns({ limit: 8 }),
         ]);
         const detailEntries = await Promise.all(
           strategyItems.map(async (strategy) => [strategy.id, await api.getStrategyDetail(strategy.id)] as const),
+        );
+        const latestRunIds = strategyItems
+          .map((strategy) => {
+            const detail = detailEntries.find(([id]) => id === strategy.id)?.[1];
+            return detail?.latest_successful_run_id ?? detail?.latest_run_id ?? strategy.latest_successful_run_id ?? strategy.latest_run_id;
+          })
+          .filter((runId): runId is string => Boolean(runId));
+        const latestRunDetailEntries = await Promise.all(
+          [...new Set(latestRunIds)].map(async (runId) => [runId, await api.getBacktestRunDetail(runId)] as const),
         );
         const recentRunDetailEntries = await Promise.all(
           backtestRuns.map(async (run) => [run.id, await api.getBacktestRunDetail(run.id)] as const),
@@ -84,7 +115,8 @@ export function WorkspacePage(): JSX.Element {
         }
         setOverview(workspaceOverview);
         setStrategies(strategyItems);
-        setDetails(Object.fromEntries(detailEntries));
+        setStrategyDetails(Object.fromEntries(detailEntries));
+        setStrategyLatestRuns(Object.fromEntries(latestRunDetailEntries));
         setRecentRuns(backtestRuns);
         setRecentRunDetails(Object.fromEntries(recentRunDetailEntries));
       } catch (caught) {
@@ -104,7 +136,10 @@ export function WorkspacePage(): JSX.Element {
     };
   }, [api]);
 
-  const cards = useMemo(() => buildWorkspaceStrategyCards(strategies, details), [details, strategies]);
+  const cards = useMemo(
+    () => buildWorkspaceStrategyCards(strategies, strategyDetails, strategyLatestRuns),
+    [strategies, strategyDetails, strategyLatestRuns],
+  );
   const recentRunItems = useMemo(() => {
     const strategyNamesById = Object.fromEntries(strategies.map((strategy) => [strategy.id, strategy.name] as const));
     return buildRecentRunItems(recentRuns, recentRunDetails, strategyNamesById);
@@ -115,13 +150,13 @@ export function WorkspacePage(): JSX.Element {
     <div className="stack workspace-page">
       <section className="hero-card">
         <div>
-          <p className="eyebrow">Workspace</p>
-          <h2>{overview?.workspace_name ?? 'Grit Strategy Lab'}</h2>
-          <p className="hero-copy">{overview?.subtitle ?? 'Loading workspace contract...'}</p>
+          <p className="eyebrow">{TEXT.heroEyebrow}</p>
+          <h2>{overview?.workspace_name ?? TEXT.heroTitle}</h2>
+          <p className="hero-copy">{overview?.subtitle ?? TEXT.loadingCopy}</p>
         </div>
         <div className="hero-actions">
           <button className="primary-button" onClick={() => navigateTo('/creation/new')} type="button">
-            Open Creation
+            {TEXT.openCreation}
           </button>
           {overview?.latest_optimization_job_id ? (
             <button
@@ -129,7 +164,7 @@ export function WorkspacePage(): JSX.Element {
               onClick={() => navigateTo(`/optimization-jobs/${overview.latest_optimization_job_id}`)}
               type="button"
             >
-              Open Latest Manual Lab
+              {TEXT.openLatestLab}
             </button>
           ) : null}
         </div>
@@ -137,22 +172,42 @@ export function WorkspacePage(): JSX.Element {
 
       {error ? <div className="error-banner">{error}</div> : null}
 
-      <section className="stats-grid">
-        <MetricCard label="Strategies" value={String(overview?.strategy_count ?? 0)} />
-        <MetricCard label="Active Runs" value={String(overview?.active_run_count ?? 0)} />
-        <MetricCard label="Optimizations" value={String(overview?.running_optimization_count ?? 0)} />
+      <section className="workspace-health panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">{TEXT.healthTitle}</p>
+            <h3>{overview?.workspace_name ?? TEXT.heroTitle}</h3>
+          </div>
+          {overview?.top_momentum_warning ? <p className="workspace-warning-banner">{overview.top_momentum_warning}</p> : null}
+        </div>
+        <div className="stats-grid">
+          <MetricCard label={TEXT.strategiesLabel} value={String(overview?.strategy_count ?? 0)} />
+          <MetricCard label={TEXT.activeRunsLabel} value={String(overview?.active_run_count ?? 0)} />
+          <MetricCard label={TEXT.optimizationsLabel} value={String(overview?.running_optimization_count ?? 0)} />
+          <MetricCard label={TEXT.latestRunLabel} value={overview?.latest_backtest_run_id ?? '暂无'} />
+        </div>
+        {overview?.quick_actions?.length ? (
+          <div className="workspace-health__quick-actions">
+            <span className="workspace-health__quick-actions-label">{TEXT.quickActionsLabel}</span>
+            <div className="workspace-health__chips">
+              {overview.quick_actions.map((action) => (
+                <span className="workspace-health__chip" key={action}>
+                  {action}
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </section>
 
       <div className="workspace-page__content">
         {isEmptyWorkspace ? (
-          <section className="blank-state-card workspace-empty-state">
-            <h3 className="blank-state-title">Create the first strategy</h3>
-            <p className="blank-state-copy">
-              The workspace is connected to the real backend, but the current database has no materialized
-              strategies yet. Start a creation session to restore the main product chain.
-            </p>
+          <section className="workspace-empty-state panel">
+            <p className="eyebrow">{TEXT.warningLabel}</p>
+            <h3 className="blank-state-title">{TEXT.noStrategyTitle}</h3>
+            <p className="blank-state-copy">{TEXT.noStrategyCopy}</p>
             <button className="primary-button" onClick={() => navigateTo('/creation/new')} type="button">
-              Create First Strategy
+              {TEXT.noStrategyAction}
             </button>
           </section>
         ) : (
@@ -163,3 +218,5 @@ export function WorkspacePage(): JSX.Element {
     </div>
   );
 }
+
+

@@ -185,6 +185,87 @@ function createInitialState(): DemoState {
   };
 }
 
+function createSnapshotOverview(refreshedAt = '2026-04-01T07:48:00Z'): ApiSnapshotOverview {
+  return {
+    overall_status: 'READY',
+    last_refreshed_at: refreshedAt,
+    dataset_snapshots: [
+      {
+        id: 'dataset-corporate-actions',
+        name: '公司行为数据',
+        status: 'READY',
+        as_of: refreshedAt,
+        freshness_label: '刚刚刷新',
+        start_date: '1996-01-01',
+        end_date: '2026-04-01',
+        row_count: 182430,
+        source: 'Yahoo',
+        fallback_source: 'fallback unavailable',
+        blocker: null,
+      },
+      {
+        id: 'dataset-price-bars',
+        name: '股票价格数据',
+        status: 'READY',
+        as_of: refreshedAt,
+        freshness_label: '刚刚刷新',
+        start_date: '1996-01-01',
+        end_date: '2026-04-01',
+        row_count: 4320,
+        source: 'Yahoo',
+        fallback_source: 'fallback unavailable',
+        blocker: null,
+      },
+    ],
+    universe_snapshots: [
+      {
+        id: 'universe-sp500',
+        name: '标普500',
+        status: 'READY',
+        as_of: refreshedAt,
+        freshness_label: '刚刚刷新',
+        window_start: '1996-01-01',
+        window_end: '2026-04-01',
+        anchor_schedule: '01-01 / 07-01',
+        member_count: 500,
+        source: 'Yahoo',
+        fallback_source: '本地冷备',
+        blocker: null,
+      },
+      {
+        id: 'universe-nasdaq100',
+        name: '纳指100',
+        status: 'READY',
+        as_of: refreshedAt,
+        freshness_label: '刚刚刷新',
+        window_start: '1996-01-01',
+        window_end: '2026-04-01',
+        anchor_schedule: '01-01 / 07-01',
+        member_count: 100,
+        source: 'Yahoo',
+        fallback_source: '本地冷备',
+        blocker: null,
+      },
+    ],
+    latest_job: {
+      id: 'snap-job-20260401',
+      status: 'COMPLETED',
+      started_at: '2026-04-01T07:30:00Z',
+      completed_at: refreshedAt,
+      summary: {
+        dataset_snapshot_count: 2,
+        universe_snapshot_count: 2,
+      },
+      warnings: [],
+      errors: [],
+    },
+    blocking_code: null,
+    blocking_target: null,
+    message: '这里会集中展示价格数据、公司行为和股票池的最新状态。',
+    allowed_actions: ['refresh_snapshots'],
+  };
+}
+
 let state = createInitialState();
 
 function findStrategy(id: string): ApiStrategyDetail {
@@ -463,10 +544,10 @@ export const demoApi: DemoApi = {
   },
 
   async getSnapshotOverview(): Promise<ApiSnapshotOverview> {
-    return { status: 'READY', latest_job: null };
+    return createSnapshotOverview();
   },
 
   async refreshSnapshots(): Promise<ApiSnapshotOverview> {
-    return { status: 'READY', latest_job: null };
+    return createSnapshotOverview('2026-04-01T10:00:00Z');
   },
 };

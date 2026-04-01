@@ -999,27 +999,34 @@ class BacktestPlatformService:
 
     def get_snapshot_overview(self) -> dict[str, Any]:
         jobs = self.storage.fetch_all("SELECT * FROM snapshot_refresh_jobs ORDER BY created_at DESC LIMIT 1")
-        latest_job = jobs[0] if jobs else None
+        latest_job = self._decode_snapshot_refresh_job(jobs[0]) if jobs else None
         return {
-            "status": "EMPTY" if latest_job is None else latest_job["status"],
-            "latest_job": {
-                **latest_job,
-                "request": loads(latest_job.get("request_json"), {}),
-                "summary": loads(latest_job.get("summary_json"), {}),
-                "warnings": loads(latest_job.get("warnings_json"), []),
-            }
-            if latest_job
-            else None,
+            "overall_status": "INCOMPLETE" if latest_job is None else str(latest_job.get("status") or "INCOMPLETE").upper(),
+            "last_refreshed_at": latest_job.get("completed_at") if latest_job else None,
+            "dataset_snapshots": [],
+            "universe_snapshots": [],
+            "latest_job": latest_job,
+            "blocking_code": "SNAPSHOT_REFRESH_REQUIRED",
+            "blocking_target": "data_snapshots",
+            "message": "还没有生成快照。先刷新快照，再继续正式回测。",
+            "allowed_actions": ["refresh_snapshots"],
         }
 
     def refresh_snapshots(self, request: Any | None = None) -> dict[str, Any]:
-        del request
+        payload = _as_mapping(request)
         now = iso_now()
         job = {
             "id": self._new_id("snap"),
-            "status": "EMPTY",
-            "request": {},
-            "summary": {"status": "EMPTY", "symbol_count": 0, "row_count": 0, "blocking": True},
+            "status": "INCOMPLETE",
+            "request": payload,
+            "summary": {
+                "status": "INCOMPLETE",
+                "symbol_count": 0,
+                "row_count": 0,
+                "blocking": True,
+                "blocking_code": "SNAPSHOT_REFRESH_REQUIRED",
+                "blocking_target": "data_snapshots",
+            },
             "warnings": ["No market data repository is attached"],
             "errors": [],
             "created_at": now,
@@ -1042,7 +1049,21 @@ class BacktestPlatformService:
                 "completed_at": now,
             },
         )
-        return job
+        overview = self.get_snapshot_overview()
+        overview["latest_job"] = job
+        overview["last_refreshed_at"] = now
+        return overview
+
+    def _decode_snapshot_refresh_job(self, row: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        return {
+            **dict(row),
+            "request": loads(row.get("request_json"), {}),
+            "summary": loads(row.get("summary_json"), {}),
+            "warnings": loads(row.get("warnings_json"), []),
+            "errors": loads(row.get("errors_json"), []),
+        }
 
     def create_optimization_job(self, strategy_id: str, request: Any | None = None) -> dict[str, Any]:
         strategy = self.get_strategy_detail(strategy_id)

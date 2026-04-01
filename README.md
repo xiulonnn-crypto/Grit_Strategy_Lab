@@ -17,10 +17,15 @@ Current restore checklist:
 
 Current frontend runtime architecture:
 
-- Active browser entrypoint: `web/src/app-runtime.tsx`
+- Active browser entrypoint shim: `web/src/app-runtime.tsx`
+- Active runtime implementation: `web/src/app-runtime-cn.tsx`
 - Browser bootstrap: `web/src/main.tsx`
 - Shared hash routing: `web/src/lib/appRouteContext.tsx`
+- Shared shell frame: `web/src/shell-frame-cn.tsx`
+- Shared route meta: `web/src/shell-route-meta-cn.ts`
+- Shared shell tokens/layout: `web/src/app-shell-frame.css`
 - Real HTTP runtime client: `web/src/lib/demoStoreContext.tsx`
+- Workspace adapter truth: `web/src/lib/workspace-adapters.ts`
 - Legacy `App.tsx` and `phase4-app.tsx` no longer carry independent runtime logic
 
 Important product constraints in this slice:
@@ -57,6 +62,7 @@ Important product constraints in this slice:
 The fastest local entrypoint is the repo-root launcher:
 
 - `QuickStart-Grit.ps1`
+- `QuickStart-Grit.cmd` for double-click launch from Windows Explorer
 
 What it does:
 
@@ -79,6 +85,8 @@ powershell -ExecutionPolicy Bypass -File .\QuickStart-Grit.ps1 -NoBrowser
 powershell -ExecutionPolicy Bypass -File .\QuickStart-Grit.ps1 -ValidatePythonOnly
 powershell -ExecutionPolicy Bypass -File .\QuickStart-Grit.ps1 -RepairPython -NoBrowser
 ```
+
+Double-clicking `QuickStart-Grit.cmd` from Explorer now forwards to the same launcher, starts from the repo root, and keeps the console open on failure so the error is visible instead of flashing away.
 
 ## Prerequisites
 
@@ -142,9 +150,12 @@ The app uses hash routing. The primary entry routes are:
 - `#/workspace`
 - `#/creation/new`
 - `#/creation/sessions/{sessionId}`
-- `#/runs/{runId}`
-- `#/optimization-jobs/{jobId}`
+- `#/strategies/{id}`
 - `#/strategies/{id}/backtest-runs/new`
+- `#/runs`
+- `#/runs/{runId}`
+- `#/snapshots`
+- `#/optimization-jobs/{jobId}`
 
 ## Core Flows
 
@@ -227,7 +238,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\push-to-github.ps1 -SourceBra
 
 Current known verification state:
 
-- The active frontend runtime is `app-runtime.tsx`; `main.tsx` imports it directly.
+- The active frontend runtime enters through `app-runtime.tsx`, which delegates to `app-runtime-cn.tsx`.
+- The unified Chinese shell is defined by `shell-frame-cn.tsx`, `shell-route-meta-cn.ts`, and `app-shell-frame.css`.
+- The route smoke truth file is `web/src/app.routes.foundation.test.tsx`; `web/src/app.routes.test.tsx` is only a compatibility shim.
 - Focused frontend tests now exist for workspace, creation flow, backtest submit, run detail, and manual lab.
 - In the current Codex sandbox, Vitest can fail before executing tests because Vite's config-loader hits `esbuild spawn EPERM`.
 - The supported fallback path is `.\scripts\run-recovery-tests.ps1 -Target frontend` from the repo root, plus `Set-Location web; npm run test:doctor` for quick diagnosis.

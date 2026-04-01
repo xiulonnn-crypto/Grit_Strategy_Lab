@@ -1,0 +1,25 @@
+.strategy-detail-page {
+  min-width: 0;
+}
+
+.strategy-detail-page .summary-grid {
+  margin-top: 12px;
+}
+
+.strategy-detail-page .history-list {
+  margin-top: 12px;
+}
+
+.strategy-detail-page .chip-row,
+.strategy-detail-page .hero-actions {
+  margin-top: 12px;
+}
+
+.strategy-detail-page .metric-card,
+.strategy-detail-page .history-card {
+  min-width: 0;
+}
+
+.strategy-detail-page .panel + .panel {
+  margin-top: 0;
+}

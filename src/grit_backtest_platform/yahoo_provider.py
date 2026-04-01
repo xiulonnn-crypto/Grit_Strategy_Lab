@@ -5,7 +5,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -20,9 +20,16 @@ class SymbolMarketData:
     symbol: str
     bars: list[MarketBar]
     actions: list[dict[str, Any]]
+    source: str = "yahoo"
+    fallback_source: str | None = None
+    partial: bool = False
+    warnings: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class YahooMarketDataProvider:
+    provider_name = "yahoo"
+
     def __init__(self, retries: int = 3, timeout: int = 20) -> None:
         self.retries = retries
         self.timeout = timeout
@@ -79,55 +86,85 @@ class YahooMarketDataProvider:
         volumes = quote.get("volume") or []
         events = chart.get("events") or {}
 
+        warnings: list[str] = []
         dividends = {
             datetime.fromtimestamp(int(timestamp), tz=timezone.utc).date(): float(item.get("amount", 0.0))
             for timestamp, item in (events.get("dividends") or {}).items()
         }
         splits = {
-            datetime.fromtimestamp(int(timestamp), tz=timezone.utc).date(): float(item.get("numerator", 1.0)) / float(item.get("denominator", 1.0))
+            datetime.fromtimestamp(int(timestamp), tz=timezone.utc).date(): float(item.get("numerator", 1.0))
+            / float(item.get("denominator", 1.0))
             for timestamp, item in (events.get("splits") or {}).items()
         }
 
         bars: list[MarketBar] = []
         actions: list[dict[str, Any]] = []
+        skipped_rows = 0
         for index, timestamp in enumerate(timestamps):
             if index >= len(opens) or index >= len(closes) or index >= len(adjusted):
+                skipped_rows += 1
                 continue
             raw_open = opens[index]
             raw_close = closes[index]
             adj_close = adjusted[index]
             if raw_open is None or raw_close is None or adj_close is None:
+                skipped_rows += 1
                 continue
             trade_date = datetime.fromtimestamp(int(timestamp), tz=timezone.utc).date()
             close_value = float(raw_close)
-            adjustment_factor = float(adj_close) / close_value if close_value not in (0.0, None) else 1.0
-            split_ratio = splits.get(trade_date, 1.0)
-            dividend = dividends.get(trade_date, 0.0)
-            if dividend or split_ratio != 1.0:
-                actions.append(
-                    {
-                        "trade_date": trade_date.isoformat(),
-                        "dividend": dividend,
-                        "split_ratio": split_ratio,
-                    }
-                )
+            volume = float(volumes[index] if index < len(volumes) and volumes[index] is not None else 0.0)
             bars.append(
                 MarketBar(
-                    symbol=symbol,
-                    trade_date=trade_date,
+                    date=trade_date.isoformat(),
                     open=float(raw_open),
                     high=float(highs[index] if index < len(highs) and highs[index] is not None else raw_open),
                     low=float(lows[index] if index < len(lows) and lows[index] is not None else raw_open),
                     close=close_value,
                     adj_close=float(adj_close),
-                    volume=float(volumes[index] if index < len(volumes) and volumes[index] is not None else 0.0),
-                    adjustment_factor=adjustment_factor,
-                    split_ratio=split_ratio,
+                    volume=volume,
                 )
             )
+            dividend = dividends.get(trade_date)
+            if dividend:
+                actions.append(
+                    {
+                        "date": trade_date.isoformat(),
+                        "action_type": "dividend",
+                        "value": dividend,
+                        "source": self.provider_name,
+                        "payload": {"amount": dividend},
+                    }
+                )
+            split_ratio = splits.get(trade_date)
+            if split_ratio and split_ratio != 1.0:
+                actions.append(
+                    {
+                        "date": trade_date.isoformat(),
+                        "action_type": "split",
+                        "value": split_ratio,
+                        "source": self.provider_name,
+                        "payload": {"split_ratio": split_ratio},
+                    }
+                )
 
+        coverage_note = "Yahoo chart endpoint only returns dividends and splits; earnings and other company events require a secondary source."
+        warnings.append(coverage_note)
+        if skipped_rows:
+            warnings.append(f"Skipped {skipped_rows} Yahoo rows because required price fields were incomplete.")
         if not bars:
             raise RuntimeError(f"No usable daily bars returned for {symbol}")
 
-        return SymbolMarketData(symbol=symbol, bars=bars, actions=actions)
-
+        return SymbolMarketData(
+            symbol=symbol,
+            bars=bars,
+            actions=actions,
+            partial=bool(warnings),
+            warnings=warnings,
+            metadata={
+                "provider": self.provider_name,
+                "actions_partial": True,
+                "coverage_limits": [coverage_note],
+                "event_types": sorted({item["action_type"] for item in actions}),
+                "bar_count": len(bars),
+            },
+        )

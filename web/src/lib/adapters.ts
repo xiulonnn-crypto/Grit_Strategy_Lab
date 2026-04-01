@@ -1,5 +1,13 @@
+export type { ParameterDiffRow } from './workspace-adapters';
+export {
+  buildParameterDiffRows,
+  buildRecentRunScore,
+  formatParameterValue,
+} from './workspace-adapters';
+/*
+import { formatPercent, formatRatio } from '../lib/format';
 import type {
-  ApiOptimizationCandidate,
+  ApiBacktestRunDetail,
   ApiStrategyDetail,
   ApiStrategyListItem,
   ParameterValue,
@@ -19,7 +27,9 @@ export function buildWorkspaceStrategyCards(
   return strategies.map((strategy) => {
     const detail = details[strategy.id];
     const parameterVersion = detail?.current_parameter_version ?? strategy.current_parameter_version ?? 1;
-    const compareEligible = Boolean(detail?.latest_run_id ?? strategy.latest_run_id);
+    const latestRunId = detail?.latest_successful_run_id ?? strategy.latest_successful_run_id ?? strategy.latest_run_id ?? null;
+    const compareEligible = Boolean(latestRunId);
+    const latestStatus = detail?.lifecycle_status ?? strategy.lifecycle_status ?? 'PENDING_RUN';
     return {
       id: strategy.id,
       name: strategy.name,
@@ -29,34 +39,42 @@ export function buildWorkspaceStrategyCards(
       parameterVersionId: detail?.current_parameter_version_id ?? strategy.current_parameter_version_id ?? null,
       latestOptimizationJobId: detail?.latest_optimization_job_id ?? strategy.latest_optimization_job_id ?? null,
       compareEligible,
-      compareBlocker: compareEligible ? null : 'Run the current parameter version before compare.',
-      cardState: compareEligible ? 'READY' : 'PENDING_RUN',
+      compareBlocker: compareEligible ? null : '当前版本还没有正式回测，暂时不能加入对比。',
+      cardState: latestStatus === 'RUNNING' ? 'RUNNING_CURRENT_VERSION' : compareEligible ? 'READY' : 'PENDING_RUN',
       parameters: detail?.parameters ?? strategy.parameters ?? {},
     };
   });
 }
+*/
 
+/*
 export function buildParameterDiffRows(
   baseline: Record<string, ParameterValue>,
-  candidate: ApiOptimizationCandidate | Record<string, ParameterValue>,
+  candidate: Record<string, ParameterValue>,
 ): ParameterDiffRow[] {
-  const snapshot =
-    'parameter_snapshot' in candidate &&
-    candidate.parameter_snapshot !== null &&
-    typeof candidate.parameter_snapshot === 'object'
-      ? (candidate.parameter_snapshot as Record<string, ParameterValue>)
-      : (candidate as Record<string, ParameterValue>);
   const rows: ParameterDiffRow[] = [];
-  for (const key of [...new Set([...Object.keys(baseline), ...Object.keys(snapshot)])].sort()) {
+  for (const key of [...new Set([...Object.keys(baseline), ...Object.keys(candidate)])].sort()) {
     const previousValue = baseline[key];
-    const nextValue = snapshot[key];
+    const nextValue = candidate[key];
     if (previousValue !== nextValue) {
       rows.push({ key, previousValue, nextValue });
     }
   }
   return rows;
 }
+*/
 
+/*
+export function buildRecentRunScore(run?: ApiBacktestRunDetail): { totalReturn: string; sharpe: string } {
+  const metrics = run?.metrics ?? {};
+  return {
+    totalReturn: formatPercent(metrics.total_return ?? 0),
+    sharpe: formatRatio(metrics.sharpe ?? 0),
+  };
+}
+*/
+
+/*
 export function formatParameterValue(value: ParameterValue | undefined): string {
   if (value === null) {
     return 'null';
@@ -69,3 +87,4 @@ export function formatParameterValue(value: ParameterValue | undefined): string 
   }
   return String(value);
 }
+*/

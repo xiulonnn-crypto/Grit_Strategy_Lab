@@ -18,7 +18,7 @@ export function OptimizationCandidateCard({
   promoting,
   deleting,
 }: OptimizationCandidateCardProps): JSX.Element {
-  const diffRows = buildParameterDiffRows(baselineParameters, candidate);
+  const diffRows = buildParameterDiffRows(baselineParameters, candidate.parameter_snapshot);
   const totalReturn = candidate.metrics.total_return;
 
   return (

@@ -18,15 +18,21 @@ $legacyRuntimeHome = Join-Path $repoRoot '.python314-home'
 $venvPath = Join-Path $repoRoot '.venv'
 $venvPython = Join-Path $venvPath 'Scripts\python.exe'
 $venvCfgPath = Join-Path $venvPath 'pyvenv.cfg'
-$backendHealthUrl = 'http://127.0.0.1:8000/workspace/overview'
+$backendHealthUrl = 'http://127.0.0.1:8000/healthz'
 $frontendHealthUrl = 'http://127.0.0.1:4173/'
 $workspaceUrl = 'http://127.0.0.1:4173/#/workspace'
 $frontendDir = Join-Path $repoRoot 'web'
+$frontendMainEntry = Join-Path $frontendDir 'src\main.tsx'
+$frontendRuntimeEntry = Join-Path $frontendDir 'src\app-runtime.tsx'
 $frontendPreviewScript = Join-Path $frontendDir 'preview-server.mjs'
 $frontendDistIndex = Join-Path $frontendDir 'dist\index.html'
 $frontendCacheDir = Join-Path $frontendDir '.npm-cache'
 $apiBaseUrl = 'http://127.0.0.1:8000'
 $manifestPath = Join-Path $repoRoot '.python-runtime-manifest.json'
+$backendDbPath = Join-Path $repoRoot '.grit_backtest_platform.sqlite3'
+$marketDataDbPath = Join-Path $repoRoot '.grit_backtest_platform_market_data.sqlite3'
+$marketDataJournalPath = "$marketDataDbPath-journal"
+$backendRecoveryDir = Join-Path $repoRoot 'artifacts\quickstart-recovery'
 
 function Get-RepoRelativePath {
     param([string]$Path)
@@ -201,7 +207,17 @@ function Write-VenvConfig {
         "executable = $RuntimePython"
         "command = $RuntimePython -m venv --without-pip --system-site-packages $venvPath"
     )
-    $cfg | Set-Content -LiteralPath $venvCfgPath -Encoding UTF8
+    $desiredContent = (($cfg -join [Environment]::NewLine) + [Environment]::NewLine)
+    if (Test-Path -LiteralPath $venvCfgPath) {
+        try {
+            $currentContent = Get-Content -LiteralPath $venvCfgPath -Raw -ErrorAction Stop
+            if ($currentContent -eq $desiredContent) {
+                return
+            }
+        } catch {
+        }
+    }
+    $desiredContent | Set-Content -LiteralPath $venvCfgPath -Encoding UTF8
 }
 
 function Ensure-VenvBinding {
@@ -294,6 +310,81 @@ function Test-NodeModulesIntegrity {
     return $true
 }
 
+function Get-FrontendBundleFreshness {
+    $sourcePaths = @(
+        (Join-Path $frontendDir 'index.html'),
+        $frontendMainEntry,
+        $frontendRuntimeEntry,
+        $frontendPreviewScript
+    )
+    $sourceFiles = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
+    foreach ($sourcePath in $sourcePaths) {
+        if (Test-Path -LiteralPath $sourcePath) {
+            $sourceFiles.Add((Get-Item -LiteralPath $sourcePath)) | Out-Null
+        }
+    }
+    foreach ($file in Get-ChildItem -LiteralPath (Join-Path $frontendDir 'src') -File -Recurse) {
+        if (
+            $file.Name -match '\.(test|spec)\.[^.]+$' -or
+            $file.Name -match '\.stories\.[^.]+$' -or
+            $file.FullName -match '[\\/](?:__tests__|__mocks__)[\\/]'
+        ) {
+            continue
+        }
+        $sourceFiles.Add($file) | Out-Null
+    }
+
+    $distInfo = if (Test-Path -LiteralPath $frontendDistIndex) {
+        Get-Item -LiteralPath $frontendDistIndex
+    } else {
+        $null
+    }
+    $latestSource = $sourceFiles | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+
+    [pscustomobject]@{
+        DistExists = ($null -ne $distInfo)
+        DistIndex = $distInfo
+        LatestSource = $latestSource
+        IsFresh = ($null -ne $distInfo) -and ($null -ne $latestSource) -and ($distInfo.LastWriteTimeUtc -ge $latestSource.LastWriteTimeUtc)
+    }
+}
+
+function Format-FrontendBundleFreshnessMessage {
+    param([pscustomobject]$Freshness)
+
+    if (-not $Freshness.DistExists) {
+        return 'No frontend dist bundle exists yet.'
+    }
+
+    $distStamp = $Freshness.DistIndex.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
+    $sourceStamp = if ($Freshness.LatestSource) {
+        $Freshness.LatestSource.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
+    } else {
+        'unknown'
+    }
+    $sourcePath = if ($Freshness.LatestSource) {
+        Get-RepoRelativePath $Freshness.LatestSource.FullName
+    } else {
+        'unknown'
+    }
+
+    return "dist/index.html timestamp: $distStamp; latest source: $sourceStamp at $sourcePath"
+}
+
+function Assert-FrontendEntryChain {
+    if (-not (Test-Path -LiteralPath $frontendMainEntry)) {
+        throw "Frontend main entry not found at $frontendMainEntry"
+    }
+    if (-not (Test-Path -LiteralPath $frontendRuntimeEntry)) {
+        throw "Frontend runtime entry not found at $frontendRuntimeEntry"
+    }
+
+    $mainEntrySource = Get-Content -LiteralPath $frontendMainEntry -Raw
+    if ($mainEntrySource -notmatch "import\s+App\s+from\s+'\.\/app-runtime';") {
+        throw "Frontend startup entry drifted. Expected $frontendMainEntry to import './app-runtime'."
+    }
+}
+
 function Ensure-FrontendDependencies {
     if (Test-NodeModulesIntegrity) {
         return
@@ -315,11 +406,218 @@ function Ensure-FrontendDependencies {
     }
 }
 
+function Join-OutputLines {
+    param([object[]]$Lines)
+    return (($Lines | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join [Environment]::NewLine).Trim()
+}
+
+function Get-BackendListenerProcessIds {
+    param([int]$Port = 8000)
+
+    $ids = New-Object 'System.Collections.Generic.List[int]'
+    $pattern = "^\s*TCP\s+\S+:$Port\s+\S+\s+LISTENING\s+(\d+)\s*$"
+    foreach ($line in (netstat -ano -p TCP 2>$null)) {
+        if ($line -match $pattern) {
+            $pid = [int]$matches[1]
+            if (-not $ids.Contains($pid)) {
+                $ids.Add($pid) | Out-Null
+            }
+        }
+    }
+    return $ids.ToArray()
+}
+
+function Get-FrontendListenerProcessIds {
+    param([int]$Port = 4173)
+
+    $ids = New-Object 'System.Collections.Generic.List[int]'
+    $pattern = "^\s*TCP\s+\S+:$Port\s+\S+\s+LISTENING\s+(\d+)\s*$"
+    foreach ($line in (netstat -ano -p TCP 2>$null)) {
+        if ($line -match $pattern) {
+            $listenerId = [int]$matches[1]
+            if (-not $ids.Contains($listenerId)) {
+                $ids.Add($listenerId) | Out-Null
+            }
+        }
+    }
+    return $ids.ToArray()
+}
+
+function Get-ProcessPathSafely {
+    param([int]$ProcessId)
+
+    try {
+        $process = Get-Process -Id $ProcessId -ErrorAction Stop
+        return [string]$process.Path
+    } catch {
+        return $null
+    }
+}
+
+function Get-ProcessCommandLineSafely {
+    param([int]$ProcessId)
+
+    try {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+        return [string]$process.CommandLine
+    } catch {
+        return $null
+    }
+}
+
+function Stop-UnhealthyBackendListeners {
+    param([int]$Port = 8000)
+
+    $listenerIds = @(Get-BackendListenerProcessIds -Port $Port)
+    if (-not $listenerIds -or $listenerIds.Count -eq 0) {
+        return
+    }
+
+    $stopped = New-Object 'System.Collections.Generic.List[int]'
+    $blocked = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($listenerId in $listenerIds) {
+        $processPath = Get-ProcessPathSafely -ProcessId $listenerId
+        if ($processPath -and $processPath.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Write-Host "Stopping stale backend listener on port $Port (PID $listenerId)." -ForegroundColor Yellow
+            Stop-Process -Id $listenerId -Force -ErrorAction Stop
+            $stopped.Add($listenerId) | Out-Null
+            continue
+        }
+
+        $blocked.Add(("PID {0}{1}" -f $listenerId, $(if ($processPath) { " at $processPath" } else { '' }))) | Out-Null
+    }
+
+    if ($blocked.Count -gt 0) {
+        throw "Port $Port is already occupied by a non-repo process. Listener(s): $($blocked -join ', ')"
+    }
+
+    if ($stopped.Count -gt 0) {
+        Start-Sleep -Seconds 1
+    }
+}
+
+function Stop-StaleFrontendListeners {
+    param([int]$Port = 4173)
+
+    $listenerIds = @(Get-FrontendListenerProcessIds -Port $Port)
+    if (-not $listenerIds -or $listenerIds.Count -eq 0) {
+        return
+    }
+
+    $stopped = New-Object 'System.Collections.Generic.List[int]'
+    $blocked = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($listenerId in $listenerIds) {
+        $processPath = Get-ProcessPathSafely -ProcessId $listenerId
+        $commandLine = Get-ProcessCommandLineSafely -ProcessId $listenerId
+        $belongsToRepo =
+            ($commandLine -and $commandLine.IndexOf($repoRoot, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
+            ($commandLine -and $commandLine.IndexOf($frontendDir, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
+            ($commandLine -and $commandLine.IndexOf($frontendPreviewScript, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+
+        if ($belongsToRepo) {
+            Write-Host "Stopping stale frontend listener on port $Port (PID $listenerId)." -ForegroundColor Yellow
+            Stop-Process -Id $listenerId -Force -ErrorAction Stop
+            $stopped.Add($listenerId) | Out-Null
+            continue
+        }
+
+        $details = if ($commandLine) { $commandLine } elseif ($processPath) { $processPath } else { 'unknown process' }
+        $blocked.Add(("PID {0} ({1})" -f $listenerId, $details)) | Out-Null
+    }
+
+    if ($blocked.Count -gt 0) {
+        throw "Port $Port is already occupied by a non-repo frontend process. Listener(s): $($blocked -join ', ')"
+    }
+
+    if ($stopped.Count -gt 0) {
+        Start-Sleep -Seconds 1
+    }
+}
+
+function Invoke-BackendProbe {
+    param([string]$PythonExe)
+
+    $probe = @"
+import os
+import sys
+import traceback
+
+os.environ['GRIT_BACKTEST_DB'] = r'$backendDbPath'
+sys.path.insert(0, r'$(Join-Path $repoRoot 'src')')
+sys.path.insert(0, r'$(Join-Path $repoRoot '.venv\Lib\site-packages')')
+
+try:
+    from grit_backtest_platform.real_service import RealBacktestPlatformService
+    service = RealBacktestPlatformService(r'$backendDbPath')
+    service.get_workspace_overview()
+    print('BACKEND_PROBE_OK')
+except Exception:
+    traceback.print_exc()
+    sys.exit(1)
+"@
+
+    $output = & $PythonExe -c $probe 2>&1
+    return [pscustomobject]@{
+        Succeeded = ($LASTEXITCODE -eq 0)
+        Output = @($output)
+        Summary = (Join-OutputLines -Lines $output)
+    }
+}
+
+function Repair-MarketDataHotJournal {
+    if (-not (Test-Path -LiteralPath $marketDataJournalPath)) {
+        return $false
+    }
+
+    $journalInfo = Get-Item -LiteralPath $marketDataJournalPath
+    if ($journalInfo.Length -le 0) {
+        return $false
+    }
+
+    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $recoveryDir = Join-Path $backendRecoveryDir "market-data-$timestamp"
+    New-Item -ItemType Directory -Force -Path $recoveryDir | Out-Null
+
+    if (Test-Path -LiteralPath $marketDataDbPath) {
+        Copy-Item -LiteralPath $marketDataDbPath -Destination (Join-Path $recoveryDir 'market_data.sqlite3') -Force
+    }
+    Copy-Item -LiteralPath $marketDataJournalPath -Destination (Join-Path $recoveryDir 'market_data.sqlite3-journal') -Force
+
+    $stream = [System.IO.File]::Open($marketDataJournalPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    try {
+        $stream.SetLength(0)
+    } finally {
+        $stream.Dispose()
+    }
+
+    Write-Warning "Recovered market-data hot journal by truncating $(Get-RepoRelativePath $marketDataJournalPath). Backup saved to $(Get-RepoRelativePath $recoveryDir)."
+    return $true
+}
+
+function Ensure-BackendProbeReady {
+    param([string]$PythonExe)
+
+    $probe = Invoke-BackendProbe -PythonExe $PythonExe
+    if ($probe.Succeeded) {
+        return
+    }
+
+    if ($probe.Summary -match 'disk I/O error' -and (Repair-MarketDataHotJournal)) {
+        $probe = Invoke-BackendProbe -PythonExe $PythonExe
+        if ($probe.Succeeded) {
+            return
+        }
+    }
+
+    $summary = if ([string]::IsNullOrWhiteSpace($probe.Summary)) { 'No backend probe output was captured.' } else { $probe.Summary }
+    throw "Backend probe failed before startup.`n$summary"
+}
+
 function Start-BackendWindow {
     param([string]$PythonExe)
     $command = @"
 Set-Location '$repoRoot'
-`$env:GRIT_BACKTEST_DB = '$(Join-Path $repoRoot '.grit_backtest_platform.sqlite3')'
+`$env:GRIT_BACKTEST_DB = '$backendDbPath'
 `$env:PYTHONPATH = '$(Join-Path $repoRoot 'src');$(Join-Path $repoRoot '.venv\Lib\site-packages')'
 & '$PythonExe' @('-m', 'uvicorn', '--app-dir', 'src', 'grit_backtest_platform.main:app', '--host', '127.0.0.1', '--port', '8000')
 "@
@@ -354,11 +652,20 @@ Write-Host "Repository : $repoRoot"
 Write-Host 'Config     : embedded in QuickStart-Grit.ps1'
 Write-Host "Backend    : $backendHealthUrl"
 Write-Host "Frontend   : $workspaceUrl"
+Write-Host "UI Entry   : $(Get-RepoRelativePath $frontendMainEntry) -> $(Get-RepoRelativePath $frontendRuntimeEntry)"
+
+Assert-FrontendEntryChain
 
 if ($DryRun) {
+    $bundleFreshness = Get-FrontendBundleFreshness
     Write-Host ''
     Write-Host 'Backend command:' -ForegroundColor Yellow
     Write-Host "& '$($effectiveState.Python.PythonExe)' -m uvicorn --app-dir src grit_backtest_platform.main:app --host 127.0.0.1 --port 8000"
+    Write-Host ''
+    Write-Host 'Frontend entry chain:' -ForegroundColor Yellow
+    Write-Host "- $(Get-RepoRelativePath $frontendMainEntry) imports ./app-runtime"
+    Write-Host "- $(Get-RepoRelativePath $frontendRuntimeEntry) is the active route orchestrator"
+    Write-Host "- Dist freshness: $((Format-FrontendBundleFreshnessMessage -Freshness $bundleFreshness))"
     Write-Host ''
     Write-Host 'Checked runtime paths:' -ForegroundColor Yellow
     foreach ($path in $checkedPaths) {
@@ -368,10 +675,14 @@ if ($DryRun) {
 }
 
 if (-not (Test-HttpReady -Url $backendHealthUrl -TimeoutSec 10 -ExpectedStatusCodes @(200))) {
+    Stop-UnhealthyBackendListeners -Port 8000
+    Ensure-BackendProbeReady -PythonExe $effectiveState.Python.PythonExe
     Write-Host 'Starting backend...' -ForegroundColor Yellow
     Start-BackendWindow -PythonExe $effectiveState.Python.PythonExe
     if (-not (Wait-HttpReady -Name 'Backend' -Url $backendHealthUrl -TimeoutSeconds $BackendStartupTimeoutSeconds -ProbeTimeoutSec 10 -ExpectedStatusCodes @(200))) {
-        throw "Backend failed to become ready at $backendHealthUrl within $BackendStartupTimeoutSeconds seconds."
+        $probe = Invoke-BackendProbe -PythonExe $effectiveState.Python.PythonExe
+        $probeSummary = if ([string]::IsNullOrWhiteSpace($probe.Summary)) { 'No backend probe output was captured after startup.' } else { $probe.Summary }
+        throw "Backend failed to become ready at $backendHealthUrl within $BackendStartupTimeoutSeconds seconds.`n$probeSummary"
     }
 }
 
@@ -387,12 +698,19 @@ if (-not (Test-Path -LiteralPath $frontendPreviewScript)) {
 
 Ensure-FrontendDependencies
 
+$initialBundleFreshness = Get-FrontendBundleFreshness
+
 if (Test-HttpReady -Url $frontendHealthUrl -TimeoutSec 5 -ExpectedStatusCodes @(200)) {
-    Write-Host "Frontend already running at $frontendHealthUrl" -ForegroundColor DarkGreen
-    if (-not $NoBrowser) {
-        Start-Process $workspaceUrl | Out-Null
+    if (-not $initialBundleFreshness.IsFresh) {
+        Write-Host "Frontend preview is responding, but the local dist bundle is stale. $(Format-FrontendBundleFreshnessMessage -Freshness $initialBundleFreshness)" -ForegroundColor Yellow
+        Stop-StaleFrontendListeners -Port 4173
+    } else {
+        Write-Host "Frontend already running at $frontendHealthUrl" -ForegroundColor DarkGreen
+        if (-not $NoBrowser) {
+            Start-Process $workspaceUrl | Out-Null
+        }
+        exit 0
     }
-    exit 0
 }
 
 Write-Host 'Building frontend for static preview...' -ForegroundColor Yellow
@@ -401,8 +719,12 @@ try {
     $env:VITE_API_BASE_URL = $apiBaseUrl
     npm run build
     if ($LASTEXITCODE -ne 0) {
-        if (-not (Test-Path -LiteralPath $frontendDistIndex)) {
+        $bundleFreshness = Get-FrontendBundleFreshness
+        if (-not $bundleFreshness.DistExists) {
             throw "Frontend build failed with exit code $LASTEXITCODE and no existing dist bundle was found."
+        }
+        if (-not $bundleFreshness.IsFresh) {
+            throw "Frontend build failed with exit code $LASTEXITCODE and the existing dist bundle is stale. $(Format-FrontendBundleFreshnessMessage -Freshness $bundleFreshness) This machine is currently hitting vite/esbuild spawn EPERM, so QuickStart cannot refresh the UI bundle here."
         }
         Write-Warning 'Frontend build failed, but an existing dist bundle was found. Reusing the last successful build.'
     }

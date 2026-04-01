@@ -24,9 +24,23 @@ web/dist/plots/*
 artifact_storage/
 logs/
 
-# Preserve baseline database files
-!.grit_backtest_platform.sqlite3
-!.grit_backtest_platform_market_data.sqlite3
+# Local runtime databases
+.grit_backtest_platform.sqlite3
+.grit_backtest_platform.sqlite3-*
+.grit_backtest_platform_market_data.sqlite3
+.grit_backtest_platform_market_data.sqlite3-*
+
+# Local restore / QA artifacts
+artifacts/browser-acceptance-*/
+artifacts/visual-checks/
+artifacts/*.bundle.lock
+artifacts/*.zip
+artifacts/*.quarantine
+artifacts/*.err.log
+artifacts/*.out.log
+artifacts/vite-*.log
+artifacts/uvicorn-*.log
+artifacts/market-data-recovery*/
 
 # Test Artifacts
 .tmp/

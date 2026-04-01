@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
 from grit_backtest_platform.api import create_app
+from grit_backtest_platform.universe_history import (
+    ANCHOR_SCHEDULE,
+    NASDAQ100_UNIVERSE_KEY,
+    NASDAQ100_UNIVERSE_NAME,
+    SP500_UNIVERSE_KEY,
+    SP500_UNIVERSE_NAME,
+    UniverseMembershipSnapshot,
+    semiannual_anchor_dates,
+)
 
 
 EXPECTED_WORKSPACE_OVERVIEW_KEYS = {
@@ -25,10 +36,117 @@ EXPECTED_WORKSPACE_OVERVIEW_KEYS = {
 GRID_MESSAGE = "grid strategy for QQQ"
 MOMENTUM_MESSAGE = "momentum strategy for SPY equal 01/01 07/01"
 
+EXPECTED_SNAPSHOT_OVERVIEW_KEYS = {
+    "overall_status",
+    "last_refreshed_at",
+    "dataset_snapshots",
+    "universe_snapshots",
+    "latest_job",
+    "blocking_code",
+    "blocking_target",
+    "message",
+    "allowed_actions",
+}
+
+
+class FakeMarketDataProvider:
+    provider_name = "fake_yahoo"
+
+    def __init__(self) -> None:
+        self.fallback_provider = None
+        self.universe_history_providers = [
+            FakeUniverseHistoryProvider(
+                universe_key=SP500_UNIVERSE_KEY,
+                universe_name=SP500_UNIVERSE_NAME,
+                symbols=["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "AVGO", "COST"],
+            ),
+            FakeUniverseHistoryProvider(
+                universe_key=NASDAQ100_UNIVERSE_KEY,
+                universe_name=NASDAQ100_UNIVERSE_NAME,
+                symbols=["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "AMD", "NFLX"],
+            ),
+        ]
+
+    def fetch_history(self, symbol: str, start_date: date, end_date: date) -> Any:
+        effective_start = max(start_date, date(2024, 1, 1))
+        bars = []
+        cursor = effective_start
+        price = 100.0 + (sum(ord(char) for char in symbol) % 17)
+        day_index = 0
+        while cursor <= end_date:
+            if cursor.weekday() < 5:
+                open_price = price
+                close_price = round(open_price * (1.0 + 0.0007 + (day_index % 5) * 0.0001), 4)
+                high_price = round(max(open_price, close_price) * 1.002, 4)
+                low_price = round(min(open_price, close_price) * 0.998, 4)
+                bars.append(
+                    SimpleNamespace(
+                        date=cursor.isoformat(),
+                        open=round(open_price, 4),
+                        high=high_price,
+                        low=low_price,
+                        close=close_price,
+                        adj_close=close_price,
+                        volume=float(1_000_000 + day_index * 100),
+                    )
+                )
+                price = close_price
+                day_index += 1
+            cursor += timedelta(days=1)
+        actions = [
+            {"date": effective_start.isoformat(), "action_type": "dividend", "value": 0.25, "source": self.provider_name, "payload": {"amount": 0.25}},
+            {"date": (effective_start + timedelta(days=30)).isoformat(), "action_type": "split", "value": 2.0, "source": self.provider_name, "payload": {"split_ratio": 2.0}},
+            {"date": (effective_start + timedelta(days=60)).isoformat(), "action_type": "earnings", "value": None, "source": self.provider_name, "payload": {"reported": True}},
+        ]
+        return SimpleNamespace(
+            symbol=symbol,
+            bars=bars,
+            actions=actions,
+            source=self.provider_name,
+            fallback_source=None,
+            partial=False,
+            warnings=[],
+            metadata={"provider": self.provider_name, "bar_count": len(bars), "actions_partial": False},
+        )
+
+
+class FakeUniverseHistoryProvider:
+    provider_name = "test_revision_history"
+
+    def __init__(self, *, universe_key: str, universe_name: str, symbols: list[str]) -> None:
+        self.universe_key = universe_key
+        self.universe_name = universe_name
+        self.symbols = list(symbols)
+
+    def load_snapshots(self, start_date: date, end_date: date) -> list[UniverseMembershipSnapshot]:
+        snapshots: list[UniverseMembershipSnapshot] = []
+        for anchor in semiannual_anchor_dates(start_date, end_date):
+            snapshots.append(
+                UniverseMembershipSnapshot(
+                    universe_key=self.universe_key,
+                    universe_name=self.universe_name,
+                    effective_date=anchor,
+                    normalized_symbols=list(self.symbols),
+                    raw_symbols=list(self.symbols),
+                    unmapped_symbols=[],
+                    source=self.provider_name,
+                    fallback_source=None,
+                    anchor_schedule=ANCHOR_SCHEDULE,
+                    source_revision_id=f"{self.provider_name}-{anchor.isoformat()}",
+                    source_page_title=f"{self.universe_name} test page",
+                    metadata={
+                        "coverage_mode": "point_in_time_anchor",
+                        "source_quality": "historical_revision_snapshot",
+                        "anchor_mode": "test_complete_history",
+                    },
+                )
+            )
+        return snapshots
+
 
 def create_test_client(tmp_path: Path) -> tuple[TestClient, Path]:
     db_path = tmp_path / "test_backtest.db"
-    return TestClient(create_app(db_path)), db_path
+    return TestClient(create_app(db_path, market_data_provider=FakeMarketDataProvider())), db_path
 
 
 def assert_ok(response) -> dict[str, Any]:
@@ -42,6 +160,11 @@ def assert_workspace_overview_contract(payload: dict[str, Any], *, include_clean
         expected_keys.add("last_cleanup_count")
     assert set(payload.keys()) == expected_keys
     assert len(payload) == len(expected_keys)
+
+
+def assert_snapshot_overview_contract(payload: dict[str, Any]) -> None:
+    assert set(payload.keys()) == EXPECTED_SNAPSHOT_OVERVIEW_KEYS
+    assert len(payload) == len(EXPECTED_SNAPSHOT_OVERVIEW_KEYS)
 
 
 def momentum_confirmation_payload(
@@ -281,8 +404,11 @@ def create_optimization_candidate(
     return assert_ok(client.post(f"/optimization-jobs/{job_id}/candidates", json=payload))
 
 
-def refresh_snapshots(client: TestClient) -> dict[str, Any]:
-    return assert_ok(client.post("/admin/snapshot-refresh-jobs", json={}))
+def refresh_snapshots(client: TestClient, *, reason: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if reason is not None:
+        payload["reason"] = reason
+    return assert_ok(client.post("/admin/snapshot-refresh-jobs", json=payload))
 
 
 def preview_backtest(

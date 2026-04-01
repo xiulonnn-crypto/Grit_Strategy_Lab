@@ -45,8 +45,8 @@ export function OptimizationManualLabPhase4({
   }
 
   return (
-    <div className="stack">
-      <section className="hero-card">
+    <div className="stack optimization-page">
+      <section className="hero-card optimization-page__hero">
         <div>
           <p className="eyebrow">Manual Lab</p>
           <h2>{strategy.name}</h2>
@@ -80,7 +80,7 @@ export function OptimizationManualLabPhase4({
 
       {conflictMessage ? <div className="error-banner">{conflictMessage}</div> : null}
 
-      <section className="panel">
+      <section className="panel optimization-page__candidate-panel">
         <div className="panel-header">
           <h3>Candidate Differences Only</h3>
         </div>
@@ -104,7 +104,7 @@ export function OptimizationManualLabPhase4({
       </section>
 
       {compareOpen ? (
-        <section aria-label="Top 3 compare panel" className="workspace-compare-panel" role="dialog">
+        <section aria-label="Top 3 compare panel" className="workspace-compare-panel optimization-page__compare-panel" role="dialog">
           <div className="panel-header">
             <div>
               <p className="eyebrow">Rank Ordered Compare</p>
@@ -132,7 +132,7 @@ export function OptimizationManualLabPhase4({
                 <h4>{candidate.label}</h4>
                 <p>Rank {candidate.rank}</p>
                 <div className="candidate-diff-list">
-                  {buildParameterDiffRows(strategy.parameters ?? {}, candidate).map((row) => (
+                  {buildParameterDiffRows(strategy.parameters ?? {}, candidate.parameter_snapshot).map((row) => (
                     <div className="candidate-diff-row" key={`${candidate.id}-${row.key}`}>
                       <span>{row.key}</span>
                       <strong>{String(row.nextValue)}</strong>
@@ -147,7 +147,7 @@ export function OptimizationManualLabPhase4({
 
       {noteCandidateId ? (
         <div className="modal-shell" role="dialog" aria-label="Revision note modal">
-          <div className="modal-card">
+          <div className="modal-card optimization-page__note-modal">
             <div className="panel-header">
               <div>
                 <p className="eyebrow">Atomic Promote</p>

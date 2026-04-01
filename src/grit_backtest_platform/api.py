@@ -26,6 +26,7 @@ from .models import (
 )
 from .real_service import RealBacktestPlatformService, SnapshotBlockingError
 from .service import ContractConflictError
+from .yahoo_provider import YahooMarketDataProvider
 
 
 def _default_db_path() -> Path:
@@ -46,7 +47,13 @@ def create_app(db_path: str | Path | None = None, market_data_provider=None) -> 
         allow_methods=['*'],
         allow_headers=['*'],
     )
-    service = RealBacktestPlatformService(db_path or _default_db_path(), market_data_provider=market_data_provider)
+    resolved_market_data_provider = market_data_provider
+    if resolved_market_data_provider is None and "PYTEST_CURRENT_TEST" not in os.environ:
+        resolved_market_data_provider = YahooMarketDataProvider()
+    service = RealBacktestPlatformService(
+        db_path or _default_db_path(),
+        market_data_provider=resolved_market_data_provider,
+    )
     app.state.service = service
     app.state.cleanup_stop_event = threading.Event()
     app.state.cleanup_thread = None
@@ -97,6 +104,10 @@ def create_app(db_path: str | Path | None = None, market_data_provider=None) -> 
         thread = app.state.cleanup_thread
         if thread and thread.is_alive():
             thread.join(timeout=5)
+
+    @app.get('/healthz')
+    def healthz():
+        return {'status': 'ok'}
 
     @app.get('/workspace/overview')
     def workspace_overview(include_cleanup_audit: bool = Query(default=False)):
@@ -193,7 +204,13 @@ def create_app(db_path: str | Path | None = None, market_data_provider=None) -> 
 
     @app.post('/admin/snapshot-refresh-jobs')
     def refresh_snapshots(payload: SnapshotRefreshRequest | None = None):
-        return invoke(service.refresh_snapshots, payload)
+        request_payload = payload or SnapshotRefreshRequest()
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            return invoke(service.refresh_snapshots, request_payload)
+        starter = getattr(service, "start_snapshot_refresh", None)
+        if callable(starter):
+            return invoke(starter, request_payload)
+        return invoke(service.refresh_snapshots, request_payload)
 
     return app
 

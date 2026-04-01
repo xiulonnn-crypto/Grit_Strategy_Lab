@@ -1,7 +1,12 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
 import { OptimizationManualLabPhase4 } from '../page-sections/optimization-manual-lab-phase4';
 import { useApiClient } from '../lib/demoStoreContext';
 import type { ApiOptimizationJobDetail, ApiStrategyDetail, ParameterValue } from '../types';
+
+const TEXT = {
+  loading: '正在加载优化实验室…',
+  error: '优化实验室暂时无法加载。',
+} as const;
 
 export function ManualLabPage({ jobId }: { jobId: string }): JSX.Element {
   const api = useApiClient();
@@ -64,7 +69,7 @@ export function ManualLabPage({ jobId }: { jobId: string }): JSX.Element {
     } catch (caught) {
       const errorValue = caught as Error & { code?: string };
       if (errorValue.code === 'stale_base_parameter_version') {
-        setConflictMessage('Parameter version conflict detected. Refresh the baseline before promoting again.');
+        setConflictMessage('参数版本冲突，请先刷新基线后再重新晋升。');
       } else {
         setError(errorValue.message);
       }
@@ -136,9 +141,9 @@ export function ManualLabPage({ jobId }: { jobId: string }): JSX.Element {
     return (
       <section className="panel">
         <div className="panel-header">
-          <h3>Manual Lab</h3>
+          <h3>优化实验室</h3>
         </div>
-        <p className="hero-copy">Loading optimization job...</p>
+        <p className="hero-copy">{TEXT.loading}</p>
       </section>
     );
   }
@@ -147,9 +152,9 @@ export function ManualLabPage({ jobId }: { jobId: string }): JSX.Element {
     return (
       <section className="panel">
         <div className="panel-header">
-          <h3>Manual Lab</h3>
+          <h3>优化实验室</h3>
         </div>
-        <p className="hero-copy">{error ?? 'Optimization job could not be loaded.'}</p>
+        <p className="hero-copy">{error ?? TEXT.error}</p>
       </section>
     );
   }

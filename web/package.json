@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:doctor": "node ./scripts/diagnose-vitest-spawn.cjs"
+    "test:doctor": "node ./scripts/diagnose-vitest-spawn.cjs",
+    "test:live-acceptance": "node ./scripts/run-live-acceptance.cjs"
   },
   "dependencies": {
     "echarts": "^6.0.0",

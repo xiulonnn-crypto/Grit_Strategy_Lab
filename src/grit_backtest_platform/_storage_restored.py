@@ -52,9 +52,18 @@ def _dict_row_factory(cursor: sqlite3.Cursor, row: tuple[Any, ...]) -> dict[str,
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA busy_timeout = 3000")
+
+def _try_enable_wal_mode(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+    except sqlite3.OperationalError as exc:
+        # Switching journal mode requires stronger locks than ordinary reads.
+        # If another short-lived connection overlaps startup, keep the database
+        # usable instead of stalling every request on WAL negotiation.
+        if "database is locked" not in str(exc).lower():
+            raise
 
 
 SCHEMA_STATEMENTS = [
@@ -245,6 +254,7 @@ class SQLiteStorage:
         if self.path.parent and self.path.parent != Path("."):
             self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as conn:
+            _try_enable_wal_mode(conn)
             initialize_storage_schema(conn)
 
     @contextmanager

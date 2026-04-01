@@ -32,8 +32,13 @@ The storage layer persists the workspace contract, strategy records, backtest ru
 Key pieces:
 
 - `strategy_parameter_versions` is the authoritative parameter-version table.
+- `strategies` keeps `dataset_snapshot_id` and `universe_snapshot_id` so formal backtests stay bound to explicit snapshot records instead of ambient market data.
 - `backtest_runs` records whether a run is permanent or temporary through `is_permanent`.
 - `backtest_runs` also stores `artifact_paths_json` and `trade_audit_json` so artifacts and audits can be replayed or cleaned up consistently.
+- The market-data SQLite now carries snapshot-scoped tables: `dataset_snapshots`, `universe_snapshots`, `dataset_price_bars`, `dataset_corporate_actions`, `dataset_symbol_coverage`, and `universe_membership_snapshots`.
+- `snapshot_refresh_jobs` is the refresh audit log for both the API and the CLI entrypoint.
+- `snapshot_recovery.py` is the cold-backup probe/import boundary for `C:\Fin\Grit_Strategy_Lab2`; Lab2 is treated as a recovery source, never as a live runtime dependency.
+- `universe_history.py` now owns the point-in-time universe source chain: wikipedia revision-history snapshots first, the current wikipedia page as a softer fallback, and the old static seed only as the last resort.
 - `app_runtime_state` stores cleanup bookkeeping, including `last_cleanup_count` and `last_cleanup_at`.
 
 Cleanup behavior:
@@ -104,11 +109,53 @@ The stable API surface is intentionally narrow and concrete.
 - `/strategy-creation-sessions/*` handles create and revision workflows.
 - `/backtest-runs/*` covers preview, submit, clone, detail, trades, and single-trade audit.
 - `/optimization-jobs/*` covers job detail, candidate creation, candidate deletion, and promote-with-note.
-- `/admin/snapshot-refresh-jobs` refreshes local snapshot state.
+- `/data-snapshots/overview` returns the formal snapshot contract: `overall_status`, `last_refreshed_at`, `dataset_snapshots[]`, `universe_snapshots[]`, `latest_job`, `blocking_code`, `blocking_target`, `message`, and `allowed_actions`.
+- `/admin/snapshot-refresh-jobs` runs a synchronous refresh and returns the refreshed overview contract instead of a bare job payload.
+- `python -m grit_backtest_platform.main refresh-snapshots --reason ...` is the scheduler-safe CLI entrypoint used by Windows Task Scheduler; the API process does not own the 18:00 trigger.
+- Universe snapshots are only `READY` when every anchor came from a historical revision snapshot; current-page or static-seed fallbacks remain explicitly incomplete so formal backtests do not silently drift into survivorship-biased universes.
 
 The frontend and backend tests are written against these contracts rather than against internal implementation details.
 
-## 8. Design Principles
+## 8. Frontend Runtime Truth
+
+The restored frontend now has an explicit runtime boundary and should be treated as a first-class architectural surface.
+
+- `web/src/app-runtime.tsx` is the stable entry shim.
+- `web/src/app-runtime-cn.tsx` is the active runtime implementation.
+- `web/src/lib/appRouteContext.tsx` is the only hash-route parser and navigation truth.
+- `web/src/shell-frame-cn.tsx`, `web/src/shell-route-meta-cn.ts`, and `web/src/app-shell-frame.css` define the shared application shell.
+- `web/src/lib/demoStoreContext.tsx` is the real browser HTTP client boundary through `useApiClient`.
+- `web/src/app.routes.foundation.test.tsx` is the route smoke truth file; `web/src/app.routes.test.tsx` is compatibility-only.
+
+The formal frontend route map is fixed to:
+
+- `#/workspace`
+- `#/creation/new`
+- `#/creation/sessions/:id`
+- `#/strategies/:id`
+- `#/strategies/:id/backtest-runs/new`
+- `#/runs`
+- `#/runs/:id`
+- `#/snapshots`
+- `#/optimization-jobs/:id`
+
+The orchestrator rule is simple: workers may build page-local views, but they do not redefine route parsing, shell layout, shared tokens, or runtime client boundaries.
+
+## 9. Frontend View-Model Boundaries
+
+The screenshot-driven restore depends on frontend view models, not on changing backend contracts.
+
+- `web/src/types.ts` now models snapshots as two explicit arrays: `dataset_snapshots[]` and `universe_snapshots[]`.
+- `web/src/pages/snapshots-page.tsx` consumes only the formal overview contract and renders a single header card plus the two snapshot cards; it no longer derives UI from legacy `coverages`.
+- The snapshots page maps backend source codes such as `wikipedia_revision_history`, `wikipedia_current_page`, `static_seed`, and `local_cold_backup` into user-facing source-chain labels instead of exposing raw provider ids.
+- `web/src/shell-route-meta-cn.ts` keeps `#/snapshots` shell headings disabled so the page owns its single in-card heading.
+- These fields are still real backend contract fields; the frontend must treat them as optional and must not narrow them into screenshot-only shapes.
+- `web/src/lib/workspace-adapters.ts` is the sole workspace adapter truth for dashboard cards, compare state, and recent-run projections.
+- `web/src/lib/adapters.ts` remains only as a compatibility export surface for non-workspace consumers.
+
+This keeps the UI expressive without inventing a second source of truth outside the API.
+
+## 10. Design Principles
 
 A few practical rules guide the shipped system:
 

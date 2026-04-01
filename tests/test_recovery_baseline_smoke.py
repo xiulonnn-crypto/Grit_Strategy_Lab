@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from grit_backtest_platform.api import create_app
+from tests.api_test_support import FakeMarketDataProvider
 
 
 GRID_MESSAGE = "纳指网格策略 目标QQQ，本金100000，初始买入10%，后续每跌2%买入5%，每涨5%卖出5%"
@@ -8,7 +9,7 @@ GRID_MESSAGE = "纳指网格策略 目标QQQ，本金100000，初始买入10%，
 
 def _client(tmp_path):
     db_path = tmp_path / "grit_backtest.sqlite3"
-    return TestClient(create_app(db_path))
+    return TestClient(create_app(db_path, market_data_provider=FakeMarketDataProvider()))
 
 
 def test_recovery_baseline_vertical_slice(tmp_path):
@@ -38,7 +39,8 @@ def test_recovery_baseline_vertical_slice(tmp_path):
 
     refreshed = client.post("/admin/snapshot-refresh-jobs", json={})
     assert refreshed.status_code == 200
-    assert refreshed.json()["summary"]["status"] == "READY"
+    assert refreshed.json()["overall_status"] == "READY"
+    assert refreshed.json()["latest_job"]["summary"]["status"] == "READY"
 
     preview = client.post(
         f"/strategies/{strategy_id}/backtest-runs/preview",

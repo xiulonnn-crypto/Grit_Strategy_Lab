@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from tests.api_test_support import (
     assert_ok,
+    assert_snapshot_overview_contract,
     assert_workspace_overview_contract,
     create_momentum_strategy,
     create_optimization_candidate,
@@ -13,6 +14,12 @@ from tests.api_test_support import (
 )
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import json
+import threading
+from typing import Any
+
+from grit_backtest_platform._real_service_rebuilt import RealBacktestPlatformService
+from grit_backtest_platform.market_data_repository import CoverageSummary, MarketDataRepository
 
 
 def test_workspace_overview_contract_is_exact_on_fresh_database(tmp_path):
@@ -34,6 +41,124 @@ def test_workspace_overview_can_include_cleanup_audit_without_changing_default_c
 
     assert_workspace_overview_contract(overview, include_cleanup_audit=True)
     assert overview["last_cleanup_count"] == 0
+
+
+def test_snapshot_overview_contract_is_exact_on_fresh_database(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    overview = assert_ok(client.get("/data-snapshots/overview"))
+
+    assert_snapshot_overview_contract(overview)
+    assert overview["overall_status"] == "INCOMPLETE"
+    assert [item["id"] for item in overview["dataset_snapshots"]] == ["ds-corporate-actions", "ds-price"]
+    assert [item["id"] for item in overview["universe_snapshots"]] == ["un-sp500", "un-ndx100"]
+    assert overview["latest_job"] is None
+    assert overview["blocking_code"] == "SNAPSHOT_REFRESH_REQUIRED"
+    assert overview["allowed_actions"] == ["refresh_snapshots"]
+
+
+def test_snapshot_refresh_returns_refreshed_overview_with_embedded_latest_job(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    refreshed = assert_ok(client.post("/admin/snapshot-refresh-jobs", json={"reason": "test-run"}))
+
+    assert_snapshot_overview_contract(refreshed)
+    assert refreshed["overall_status"] == "READY"
+    assert refreshed["latest_job"] is not None
+    assert refreshed["latest_job"]["request"]["reason"] == "test-run"
+    assert refreshed["latest_job"]["summary"]["status"] == "READY"
+    assert refreshed["latest_job"]["summary"]["dataset_snapshot_id"] == "ds-price"
+    assert [item["status"] for item in refreshed["dataset_snapshots"]] == ["READY", "READY"]
+    assert [item["status"] for item in refreshed["universe_snapshots"]] == ["READY", "READY"]
+    assert refreshed["allowed_actions"] == ["refresh_snapshots", "start_backtest"]
+
+
+def test_snapshot_overview_seeds_legacy_local_cache_when_snapshot_tables_are_empty(tmp_path):
+    client, db_path = create_test_client(tmp_path)
+    market_data_path = db_path.with_name(f"{db_path.stem}_market_data.sqlite3")
+    repository = MarketDataRepository(market_data_path)
+    repository.replace_bars(
+        "AAPL",
+        [
+            {"date": "2025-05-16", "open": 210.0, "high": 212.0, "low": 209.0, "close": 211.0, "adj_close": 211.0, "volume": 1000},
+            {"date": "2025-05-19", "open": 211.0, "high": 213.0, "low": 210.5, "close": 212.0, "adj_close": 212.0, "volume": 1100},
+        ],
+    )
+    repository.replace_bars(
+        "SPY",
+        [
+            {"date": "2025-05-16", "open": 500.0, "high": 502.0, "low": 499.5, "close": 501.0, "adj_close": 501.0, "volume": 2000},
+            {"date": "2025-05-19", "open": 501.0, "high": 503.0, "low": 500.0, "close": 502.0, "adj_close": 502.0, "volume": 2100},
+        ],
+    )
+    repository.replace_coverages(
+        [
+            CoverageSummary(symbol="AAPL", start_date="2025-05-16", end_date="2025-05-19", trade_days=2),
+            CoverageSummary(symbol="SPY", start_date="2025-05-16", end_date="2025-05-19", trade_days=2),
+        ]
+    )
+
+    overview = assert_ok(client.get("/data-snapshots/overview"))
+    price_snapshot = next(item for item in overview["dataset_snapshots"] if item["id"] == "ds-price")
+    actions_snapshot = next(item for item in overview["dataset_snapshots"] if item["id"] == "ds-corporate-actions")
+
+    assert price_snapshot["status"] == "STALE"
+    assert price_snapshot["row_count"] == 4
+    assert price_snapshot["source"] == "legacy_local_cache"
+    assert price_snapshot["freshness_label"] == "已从本地缓存恢复"
+    assert actions_snapshot["status"] == "INCOMPLETE"
+    assert actions_snapshot["source"] == "legacy_local_cache"
+    assert "本地暂时没有公司行为快照" in actions_snapshot["blocker"]["message"]
+
+
+def test_start_snapshot_refresh_returns_running_overview_immediately(tmp_path, monkeypatch):
+    service = RealBacktestPlatformService(tmp_path / "async.db", market_data_provider=None)
+    finished = threading.Event()
+
+    def fake_refresh(payload):
+        finished.set()
+        return {"overall_status": "READY"}
+
+    monkeypatch.setattr(service, "refresh_snapshots", fake_refresh)
+
+    overview = service.start_snapshot_refresh({"reason": "async-check"})
+
+    assert overview["overall_status"] == "RUNNING"
+    assert overview["latest_job"]["status"] == "RUNNING"
+    assert overview["message"] == "正在刷新快照，页面会自动更新。当前先显示已有数据。"
+    assert finished.wait(1)
+
+
+def test_main_refresh_snapshots_cli_uses_service_and_preserves_default_server_path(monkeypatch, tmp_path, capsys):
+    from grit_backtest_platform import main as main_module
+
+    refresh_calls: list[dict[str, Any]] = []
+    server_calls: list[dict[str, Any]] = []
+
+    class StubService:
+        def __init__(self, database_path, market_data_provider=None, market_data_path=None):
+            self.database_path = database_path
+
+        def refresh_snapshots(self, payload):
+            refresh_calls.append(dict(payload))
+            return {"overall_status": "READY", "latest_job": {"request": dict(payload)}}
+
+    def fake_run(app, host, port):
+        server_calls.append({"app": app, "host": host, "port": port})
+
+    monkeypatch.setattr(main_module, "RealBacktestPlatformService", StubService)
+    monkeypatch.setattr(main_module.uvicorn, "run", fake_run)
+
+    main_module.main(["refresh-snapshots", "--reason", "scheduled-18hkt", "--db-path", str(tmp_path / "cli.db")])
+    printed = capsys.readouterr().out.strip()
+    cli_payload = json.loads(printed)
+
+    assert refresh_calls == [{"reason": "scheduled-18hkt"}]
+    assert cli_payload["latest_job"]["request"]["reason"] == "scheduled-18hkt"
+    assert server_calls == []
+
+    main_module.main([])
+    assert server_calls and server_calls[0]["port"] == 8000
 
 
 def test_creation_session_workflow_materializes_and_lists_strategy(tmp_path):

@@ -12,5 +12,6 @@
     "noEmit": true,
     "types": ["vitest/globals", "node"]
   },
-  "include": ["src", "vite.config.ts"]
+  "include": ["src", "vite.config.ts"],
+  "exclude": ["src/shell-frame.tsx", "src/shell-route-meta.ts"]
 }

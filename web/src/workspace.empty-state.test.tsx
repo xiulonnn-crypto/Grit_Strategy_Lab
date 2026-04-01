@@ -1,65 +1,74 @@
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import App from './app-runtime';
+import { WorkspacePage } from './pages/workspace-page-lane-b';
+import { ShellFrameCn } from './shell-frame-cn';
 
-let fetchSpy: { mockRestore: () => void } | null = null;
+type FakeApi = {
+  getWorkspaceOverview: ReturnType<typeof vi.fn>;
+  listStrategies: ReturnType<typeof vi.fn>;
+  getStrategyDetail: ReturnType<typeof vi.fn>;
+  listBacktestRuns: ReturnType<typeof vi.fn>;
+  getBacktestRunDetail: ReturnType<typeof vi.fn>;
+};
 
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  });
-}
+const fakeApi = vi.hoisted<FakeApi>(() => ({
+  getWorkspaceOverview: vi.fn(),
+  listStrategies: vi.fn(),
+  getStrategyDetail: vi.fn(),
+  listBacktestRuns: vi.fn(),
+  getBacktestRunDetail: vi.fn(),
+}));
+
+vi.mock('./lib/demoStoreContext', () => ({
+  useApiClient: () => fakeApi,
+}));
 
 beforeEach(() => {
-  fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
-    const requestUrl = input instanceof Request ? input.url : String(input);
-    const url = new URL(requestUrl, 'http://localhost');
-
-    if (url.pathname === '/workspace/overview') {
-      return json({
-        workspace_name: 'Grit Strategy Lab',
-        subtitle: 'Creation, backtest, and optimization workspace for local strategy recovery.',
-        strategy_count: 0,
-        active_run_count: 0,
-        running_optimization_count: 0,
-        latest_strategy_id: null,
-        latest_backtest_run_id: null,
-        latest_optimization_job_id: null,
-        top_momentum_warning: 'Empty workspace.',
-        quick_actions: [],
-      });
-    }
-
-    if (url.pathname === '/strategies') {
-      return json([]);
-    }
-
-    if (url.pathname === '/backtest-runs') {
-      return json([]);
-    }
-
-    return json({ status: 404, code: 'not_found', message: `No mock handler for ${url.pathname}` }, 404);
+  fakeApi.getWorkspaceOverview.mockResolvedValue({
+    workspace_name: 'Grit 策略实验室',
+    subtitle: '创建、回测和优化的统一工作台。',
+    strategy_count: 0,
+    active_run_count: 0,
+    running_optimization_count: 0,
+    latest_strategy_id: null,
+    latest_backtest_run_id: null,
+    latest_optimization_job_id: null,
+    top_momentum_warning: '空库模式。',
+    quick_actions: [],
   });
+  fakeApi.listStrategies.mockResolvedValue([]);
+  fakeApi.getStrategyDetail.mockResolvedValue(null);
+  fakeApi.listBacktestRuns.mockResolvedValue([]);
+  fakeApi.getBacktestRunDetail.mockResolvedValue(null);
+  window.location.hash = '';
 });
 
 afterEach(() => {
-  fetchSpy?.mockRestore();
-  fetchSpy = null;
   cleanup();
   window.location.hash = '';
 });
 
 describe('workspace empty state', () => {
-  it('shows a blank-state CTA when the workspace has no strategies', async () => {
+  it('shows a Chinese blank-state CTA when the workspace has no strategies', async () => {
+    let container: HTMLElement | null = null;
     await act(async () => {
-      window.location.hash = '#/workspace';
-      render(<App />);
+      ({ container } = render(
+        <ShellFrameCn route={{ kind: 'workspace' }}>
+          <WorkspacePage />
+        </ShellFrameCn>,
+      ));
     });
 
-    expect(await screen.findByText('Create the first strategy')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Create First Strategy' })).toBeInTheDocument();
-    expect(await screen.findByText('Latest runs')).toBeInTheDocument();
-    expect(await screen.findByText('No recent backtests yet. Materialize a strategy to populate the run history.')).toBeInTheDocument();
+    expect(container!.querySelector('.page-heading')).toBeNull();
+    expect(await screen.findByRole('heading', { name: '工作台健康度', level: 2 })).toBeInTheDocument();
+    expect(screen.getByText('当前研究工作台的核心状态与风险提示。')).toBeInTheDocument();
+    expect(screen.queryByText('创建、回测和优化的统一工作台。')).not.toBeInTheDocument();
+    expect(screen.queryByText('空库模式。')).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '数据快照' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '创建第一个策略' })).toBeInTheDocument();
+    expect(await screen.findByText('当前数据库还没有可用策略，先进入创建流程把主链路打通。')).toBeInTheDocument();
+    expect(await screen.findByText('暂无最近回测。先 materialize 一个策略再填充历史。')).toBeInTheDocument();
+    expect(screen.getAllByText('策略看板').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('0').length).toBeGreaterThan(0);
   });
 });

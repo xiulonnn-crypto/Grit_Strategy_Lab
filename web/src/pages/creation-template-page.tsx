@@ -1,29 +1,46 @@
-﻿import { useState } from 'react';
+import { useState } from 'react';
 import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
 import type { StrategyType } from '../types';
 import './creation-backtest.css';
 
-const templates: Array<{ description: string; label: string; strategyType: StrategyType }> = [
+type TemplateCard = {
+  strategyType: StrategyType;
+  label: string;
+  description: string;
+};
+
+const TEXT = {
+  templateRegion: '策略模板',
+  startSession: '使用此模板',
+  creating: '创建中...',
+} as const;
+
+const templates: TemplateCard[] = [
   {
-    label: 'Momentum Rotation',
-    description: 'Restore a momentum session with universe, turnover, and allocation prompts.',
     strategyType: 'MOMENTUM',
+    label: '动量 / 趋势跟随',
+    description: '适合过去一段时间强势延续持有的轮动策略。',
   },
   {
-    label: 'Grid Trading',
-    description: 'Start a grid-based session and fill the missing execution parameters interactively.',
     strategyType: 'GRID',
+    label: '网格交易',
+    description: '适合区间震荡，以规则化挂单分批买卖。',
   },
   {
-    label: 'Mean Reversion',
-    description: 'Use a mean reversion template and prepare the confirmation draft from real backend state.',
     strategyType: 'MEAN_REVERSION',
+    label: '均值回归',
+    description: '适合偏离均值回归的交易框架。',
   },
   {
-    label: 'Buy and Hold',
-    description: 'Materialize a simple baseline strategy and continue into preview and backtest submission.',
     strategyType: 'BUY_AND_HOLD',
+    label: '指数 / 定投',
+    description: '适合长期持有和固定节奏增持。',
+  },
+  {
+    strategyType: 'GENERAL',
+    label: '通用策略',
+    description: '自定义规则，不强制固定模板参数。',
   },
 ];
 
@@ -47,44 +64,28 @@ export function CreationTemplatePage(): JSX.Element {
 
   return (
     <div className="stack creation-template-page">
-      <section className="hero-card">
-        <div>
-          <p className="eyebrow">Creation</p>
-          <h2>Select a strategy template</h2>
-          <p className="hero-copy">
-            Foundation now routes real session creation to `#/creation/sessions/:id`. Worker 2 will extend
-            this into the full restored conversation and confirmation flow.
-          </p>
-        </div>
-      </section>
-
       {error ? <div className="error-banner">{error}</div> : null}
 
-      <section className="panel">
-        <div className="panel-header">
-          <h3>Available Templates</h3>
-        </div>
-        <div className="workspace-card-grid">
-          {templates.map((template) => (
-            <article className="workspace-strategy-card" key={template.strategyType}>
-              <div>
-                <p className="eyebrow">Template</p>
-                <h4>{template.label}</h4>
-              </div>
-              <p className="workspace-card-copy">{template.description}</p>
-              <div className="card-actions">
-                <button
-                  className="primary-button"
-                  disabled={busyStrategyType !== null}
-                  onClick={() => void handleCreateSession(template.strategyType)}
-                  type="button"
-                >
-                  {busyStrategyType === template.strategyType ? 'Creating...' : 'Start Session'}
-                </button>
-              </div>
-            </article>
-          ))}
-        </div>
+      <section
+        aria-label={TEXT.templateRegion}
+        className="creation-template-grid creation-template-grid--page"
+      >
+        {templates.map((template) => (
+          <article className="creation-template-card" key={template.strategyType}>
+            <div className="creation-template-card__body">
+              <h3 className="creation-template-card__title">{template.label}</h3>
+              <p className="creation-template-card__description">{template.description}</p>
+            </div>
+            <button
+              className="primary-button"
+              disabled={busyStrategyType !== null}
+              onClick={() => void handleCreateSession(template.strategyType)}
+              type="button"
+            >
+              {busyStrategyType === template.strategyType ? TEXT.creating : TEXT.startSession}
+            </button>
+          </article>
+        ))}
       </section>
     </div>
   );

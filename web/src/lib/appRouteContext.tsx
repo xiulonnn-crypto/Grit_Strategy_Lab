@@ -4,8 +4,11 @@ export type AppRoute =
   | { kind: 'workspace' }
   | { kind: 'creation-template' }
   | { kind: 'creation-session'; sessionId: string }
-  | { kind: 'backtest'; strategyId: string }
+  | { kind: 'strategy-detail'; strategyId: string }
+  | { kind: 'backtest'; strategyId: string; sourceRunId?: string }
+  | { kind: 'runs-index' }
   | { kind: 'run'; runId: string }
+  | { kind: 'snapshots' }
   | { kind: 'optimization'; jobId: string };
 
 type AppRouteContextValue = {
@@ -17,25 +20,42 @@ const AppRouteContext = createContext<AppRouteContextValue | null>(null);
 
 export function parseAppHash(hash: string): AppRoute {
   const clean = hash.replace(/^#/, '') || '/workspace';
-  if (clean === '/' || clean === '/workspace') {
+  const [path, queryString = ''] = clean.split('?');
+  const searchParams = new URLSearchParams(queryString);
+  if (path === '/' || path === '/workspace') {
     return { kind: 'workspace' };
   }
-  if (clean === '/creation/new') {
+  if (path === '/creation/new') {
     return { kind: 'creation-template' };
   }
-  const creationSessionMatch = clean.match(/^\/creation\/sessions\/([^/]+)$/);
+  const creationSessionMatch = path.match(/^\/creation\/sessions\/([^/]+)$/);
   if (creationSessionMatch) {
     return { kind: 'creation-session', sessionId: decodeURIComponent(creationSessionMatch[1]) };
   }
-  const backtestMatch = clean.match(/^\/strategies\/([^/]+)\/backtest-runs\/new$/);
-  if (backtestMatch) {
-    return { kind: 'backtest', strategyId: decodeURIComponent(backtestMatch[1]) };
+  const strategyDetailMatch = path.match(/^\/strategies\/([^/]+)$/);
+  if (strategyDetailMatch) {
+    return { kind: 'strategy-detail', strategyId: decodeURIComponent(strategyDetailMatch[1]) };
   }
-  const runMatch = clean.match(/^\/runs\/([^/]+)$/);
+  const backtestMatch = path.match(/^\/strategies\/([^/]+)\/backtest-runs\/new$/);
+  if (backtestMatch) {
+    const sourceRunId = searchParams.get('source_run_id');
+    return {
+      kind: 'backtest',
+      strategyId: decodeURIComponent(backtestMatch[1]),
+      sourceRunId: sourceRunId ? decodeURIComponent(sourceRunId) : undefined,
+    };
+  }
+  if (path === '/runs') {
+    return { kind: 'runs-index' };
+  }
+  const runMatch = path.match(/^\/runs\/([^/]+)$/);
   if (runMatch) {
     return { kind: 'run', runId: decodeURIComponent(runMatch[1]) };
   }
-  const optimizationMatch = clean.match(/^\/optimization-jobs\/([^/]+)$/);
+  if (path === '/snapshots') {
+    return { kind: 'snapshots' };
+  }
+  const optimizationMatch = path.match(/^\/optimization-jobs\/([^/]+)$/);
   if (optimizationMatch) {
     return { kind: 'optimization', jobId: decodeURIComponent(optimizationMatch[1]) };
   }

@@ -32,14 +32,21 @@ def test_preview_submit_detail_and_trades_preserve_parameter_snapshot_and_defaul
     detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail"))
     trades = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/trades"))
 
-    assert refresh["summary"]["status"] == "READY"
+    assert refresh["overall_status"] == "READY"
+    assert refresh["latest_job"]["summary"]["status"] == "READY"
     assert preview["data_segment_type"] == "FULL"
+    assert preview["dataset_snapshot_id"] == "ds-price"
+    assert preview["universe_snapshot_id"] == "un-ndx100"
     assert preview["parameter_snapshot"]["initial_position"] == 10
     assert submitted["data_segment_type"] == "FULL"
     assert submitted["request"]["data_segment_type"] == "FULL"
+    assert submitted["request"]["dataset_snapshot_id"] == "ds-price"
+    assert submitted["request"]["universe_snapshot_id"] == "un-ndx100"
     assert submitted["is_permanent"] is True
     assert submitted["parameter_snapshot"] == preview["parameter_snapshot"]
     assert detail["data_segment_type"] == "FULL"
+    assert detail["dataset_snapshot_id"] == "ds-price"
+    assert detail["universe_snapshot_id"] == "un-ndx100"
     assert detail["snapshot_summary"]["status"] == "READY"
     assert trades["total"] == detail["trades_count"]
     assert detail["trade_audit_items"]
