@@ -179,7 +179,9 @@ export function installMockApiServer() {
         return json(await demoApi.deleteOptimizationCandidate(segments[1], segments[3]));
       }
       if (method === 'GET' && url.pathname === '/data-snapshots/overview') return json(await demoApi.getSnapshotOverview());
-      if (method === 'POST' && url.pathname === '/admin/snapshot-refresh-jobs') return json(await demoApi.refreshSnapshots());
+        if (method === 'POST' && url.pathname === '/admin/snapshot-refresh-jobs') {
+          return json(await demoApi.refreshSnapshots(body as import('./types').ApiSnapshotRefreshRequest | undefined));
+        }
 
       return json({ status: 404, code: 'not_found', message: `No mock handler for ${method} ${url.pathname}` }, 404);
     } catch (error) {

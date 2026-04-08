@@ -93,6 +93,7 @@ SCHEMA_STATEMENTS = [
         session_id TEXT NOT NULL,
         role TEXT NOT NULL DEFAULT 'user',
         content TEXT NOT NULL,
+        extracted_fields_json TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL,
         FOREIGN KEY(session_id) REFERENCES strategy_creation_sessions(id) ON DELETE CASCADE
     )
@@ -206,10 +207,27 @@ SCHEMA_STATEMENTS = [
         FOREIGN KEY(strategy_id) REFERENCES strategies(id) ON DELETE CASCADE
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS symbol_identity_cache (
+        symbol TEXT PRIMARY KEY,
+        canonical_symbol TEXT NOT NULL DEFAULT '',
+        company_name TEXT NOT NULL DEFAULT '',
+        cik TEXT NOT NULL DEFAULT '',
+        exchange TEXT NOT NULL DEFAULT '',
+        ipo_date TEXT,
+        delisting_date TEXT,
+        source TEXT NOT NULL DEFAULT '',
+        valid_from TEXT,
+        valid_to TEXT
+    )
+    """,
 ]
 
 
 MIGRATION_COLUMNS = {
+    "strategy_creation_messages": [
+        ("extracted_fields_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ],
     "backtest_runs": [
         ("is_permanent", "INTEGER NOT NULL DEFAULT 1"),
         ("artifact_paths_json", "TEXT NOT NULL DEFAULT '[]'"),

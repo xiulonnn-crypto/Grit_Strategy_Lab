@@ -3,6 +3,9 @@
 import os
 import threading
 from pathlib import Path
+import importlib
+import json
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -26,7 +29,341 @@ from .models import (
 )
 from .real_service import RealBacktestPlatformService, SnapshotBlockingError
 from .service import ContractConflictError
+from .universe_history import default_universe_history_providers
 from .yahoo_provider import YahooMarketDataProvider
+
+
+def _provider_name(provider: Any) -> str:
+    return str(getattr(provider, "provider_name", provider.__class__.__name__.lower()))
+
+
+def _load_provider(module_name: str, class_names: tuple[str, ...]) -> Any | None:
+    try:
+        module = importlib.import_module(f".{module_name}", package=__package__)
+    except Exception:
+        return None
+    for class_name in class_names:
+        provider_class = getattr(module, class_name, None)
+        if provider_class is None:
+            continue
+        try:
+            provider = provider_class()
+        except Exception:
+            continue
+        availability = getattr(provider, "availability", None)
+        if callable(availability):
+            try:
+                report = availability()
+            except Exception:
+                continue
+            if not getattr(report, "available", False):
+                continue
+        return provider
+    return None
+
+
+def _merge_action_payload(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(existing)
+    if merged.get("value") is None and incoming.get("value") is not None:
+        merged["value"] = incoming.get("value")
+    if not merged.get("source") and incoming.get("source"):
+        merged["source"] = incoming.get("source")
+    if not merged.get("fallback_source") and incoming.get("fallback_source"):
+        merged["fallback_source"] = incoming.get("fallback_source")
+    merged_payload = dict(merged.get("payload") or {})
+    for key, value in dict(incoming.get("payload") or {}).items():
+        if key not in merged_payload or merged_payload.get(key) is None:
+            merged_payload[key] = value
+    if merged_payload:
+        merged["payload"] = merged_payload
+    return merged
+
+
+def _dedupe_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    index_by_signature: dict[str, int] = {}
+    deduped: list[dict[str, Any]] = []
+    for action in actions:
+        signature = json.dumps(
+            {
+                "symbol": str(action.get("symbol") or "").strip().upper(),
+                "date": action.get("date") or action.get("event_date"),
+                "action_type": action.get("action_type") or action.get("event_type"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        existing_index = index_by_signature.get(signature)
+        if existing_index is None:
+            index_by_signature[signature] = len(deduped)
+            deduped.append(dict(action))
+            continue
+        deduped[existing_index] = _merge_action_payload(deduped[existing_index], action)
+    return deduped
+
+
+class RuntimeMarketDataProvider:
+    provider_name = "yahoo"
+
+    def __init__(self, providers: list[Any], missing_providers: list[str] | None = None) -> None:
+        self.providers = [provider for provider in providers if provider is not None]
+        self.universe_history_providers = list(default_universe_history_providers())
+        self.price_providers = [
+            provider
+            for provider in self.providers
+            if callable(getattr(provider, "fetch_history", None))
+            and _provider_name(provider) not in {"alpha_vantage", "sec_edgar"}
+        ]
+        self.identity_providers = [
+            provider for provider in self.providers if callable(getattr(provider, "resolve_identity", None))
+        ]
+        self.earnings_providers = [
+            provider for provider in self.providers if callable(getattr(provider, "fetch_earnings", None))
+        ]
+        self.report_providers = [
+            provider for provider in self.providers if callable(getattr(provider, "fetch_report_filings", None))
+        ]
+        self.fallback_provider = self.price_providers[1] if len(self.price_providers) > 1 else None
+        self.missing_providers = list(missing_providers or [])
+
+    def resolve_identity(self, symbol: str) -> dict[str, Any] | None:
+        for provider in self.identity_providers:
+            resolver = getattr(provider, "resolve_identity", None)
+            if resolver is None:
+                continue
+            try:
+                identity = resolver(symbol)
+            except Exception:
+                continue
+            if isinstance(identity, dict) and identity.get("symbol"):
+                return identity
+        return None
+
+    def _normalize_history_payload(self, provider_name: str, result: Any) -> dict[str, Any]:
+        if isinstance(result, dict):
+            payload = dict(result)
+        else:
+            payload = {
+                "source": getattr(result, "source", None),
+                "fallback_source": getattr(result, "fallback_source", None),
+                "bars": list(getattr(result, "bars", []) or []),
+                "actions": list(getattr(result, "actions", []) or []),
+                "warnings": list(getattr(result, "warnings", []) or []),
+                "partial": bool(getattr(result, "partial", False)),
+                "metadata": dict(getattr(result, "metadata", {}) or {}),
+            }
+        payload.setdefault("source", provider_name)
+        payload.setdefault("fallback_source", None)
+        payload.setdefault("bars", [])
+        payload.setdefault("actions", [])
+        payload.setdefault("warnings", [])
+        payload.setdefault("partial", False)
+        payload.setdefault("metadata", {})
+        return payload
+
+    def _append_actions(
+        self,
+        actions: list[dict[str, Any]],
+        rows: list[dict[str, Any]],
+        provider_name: str,
+        *,
+        primary_source: str | None,
+    ) -> None:
+        for item in rows:
+            action = dict(item)
+            action.setdefault("source", provider_name)
+            if (
+                primary_source
+                and action.get("source") != primary_source
+                and not action.get("fallback_source")
+            ):
+                action["fallback_source"] = action.get("source")
+            actions.append(action)
+
+    def fetch_history(self, symbol, start_date, end_date):
+        warnings: list[str] = []
+        provider_results: list[dict[str, Any]] = []
+        missing_labels: list[str] = []
+        primary_source: str | None = None
+        bars: list[Any] = []
+        actions: list[dict[str, Any]] = []
+        identity = self.resolve_identity(symbol)
+
+        for provider in self.price_providers:
+            provider_name = _provider_name(provider)
+            try:
+                payload = self._normalize_history_payload(
+                    provider_name,
+                    provider.fetch_history(symbol, start_date, end_date),
+                )
+            except Exception as exc:
+                missing_labels.append(provider_name)
+                warnings.append(f"{provider_name}: {exc}")
+                continue
+
+            provider_warnings = list(payload["warnings"] or [])
+            warnings.extend(str(item) for item in provider_warnings if item)
+            provider_bars = list(payload.get("bars") or [])
+            provider_actions = [dict(item) for item in (payload["actions"] or []) if isinstance(item, dict)]
+            provider_results.append(
+                {
+                    "provider": provider_name,
+                    "kind": "history",
+                    "source": str(payload.get("source") or provider_name),
+                    "fallback_source": payload.get("fallback_source"),
+                    "bar_count": len(provider_bars),
+                    "action_count": len(provider_actions),
+                    "partial": bool(payload.get("partial")),
+                }
+            )
+
+            if provider_bars and not bars:
+                bars = provider_bars
+                primary_source = str(payload.get("source") or provider_name)
+            if provider_actions:
+                self._append_actions(actions, provider_actions, provider_name, primary_source=primary_source)
+            if bars:
+                break
+
+        for provider in self.earnings_providers:
+            provider_name = _provider_name(provider)
+            fetch_earnings = getattr(provider, "fetch_earnings", None)
+            if fetch_earnings is None:
+                continue
+            try:
+                earnings_rows = list(fetch_earnings(symbol) or [])
+            except Exception as exc:
+                missing_labels.append(provider_name)
+                warnings.append(f"{provider_name}: {exc}")
+                continue
+            converted: list[dict[str, Any]] = []
+            for item in earnings_rows:
+                if not isinstance(item, dict):
+                    continue
+                reported_date = str(item.get("reported_date") or "")[:10]
+                if not reported_date or reported_date < start_date.isoformat() or reported_date > end_date.isoformat():
+                    continue
+                converted.append(
+                    {
+                        "date": reported_date,
+                        "action_type": "earnings_report",
+                        "value": item.get("reported_eps"),
+                        "source": provider_name,
+                        "payload": {
+                            "period": item.get("period"),
+                            "fiscal_date_ending": item.get("fiscal_date_ending"),
+                            "reported_eps": item.get("reported_eps"),
+                            "estimated_eps": item.get("estimated_eps"),
+                            "surprise": item.get("surprise"),
+                            "surprise_percentage": item.get("surprise_percentage"),
+                        },
+                    }
+                )
+            provider_results.append(
+                {
+                    "provider": provider_name,
+                    "kind": "earnings",
+                    "source": provider_name,
+                    "fallback_source": None,
+                    "bar_count": 0,
+                    "action_count": len(converted),
+                    "partial": False,
+                }
+            )
+            self._append_actions(actions, converted, provider_name, primary_source=primary_source)
+
+        for provider in self.report_providers:
+            provider_name = _provider_name(provider)
+            fetch_report_filings = getattr(provider, "fetch_report_filings", None)
+            if fetch_report_filings is None:
+                continue
+            try:
+                filing_rows = list(fetch_report_filings(symbol, start_date, end_date) or [])
+            except Exception as exc:
+                missing_labels.append(provider_name)
+                warnings.append(f"{provider_name}: {exc}")
+                continue
+            converted = [dict(item) for item in filing_rows if isinstance(item, dict)]
+            provider_results.append(
+                {
+                    "provider": provider_name,
+                    "kind": "filings",
+                    "source": provider_name,
+                    "fallback_source": None,
+                    "bar_count": 0,
+                    "action_count": len(converted),
+                    "partial": False,
+                }
+            )
+            self._append_actions(actions, converted, provider_name, primary_source=primary_source)
+
+        actions = _dedupe_actions(actions)
+        if not bars:
+            raise RuntimeError(
+                f"No provider returned market data for {symbol}. "
+                + ("; ".join(warnings) if warnings else "No usable providers were configured.")
+            )
+
+        contributing_sources = sorted(
+            {
+                str(item.get("source") or "")
+                for item in actions
+                if item.get("source")
+            }
+            | {primary_source or ""}
+        )
+        fallback_sources = sorted(
+            {
+                str(action.get("fallback_source"))
+                for action in actions
+                if action.get("fallback_source") and str(action.get("fallback_source")) != (primary_source or "")
+            }
+        )
+        primary_source = primary_source or (self.price_providers[0].provider_name if self.price_providers else "yahoo")
+        secondary_sources = [source for source in contributing_sources if source and source != primary_source]
+        fallback_source: str | None = None
+        if fallback_sources:
+            fallback_source = fallback_sources[0] if len(fallback_sources) == 1 else "mixed_fallbacks"
+        elif secondary_sources:
+            fallback_source = secondary_sources[0] if len(secondary_sources) == 1 else "mixed_fallbacks"
+        elif len(self.price_providers) > 1:
+            fallback_source = "mixed_fallbacks"
+
+        provider_gaps = list(self.missing_providers)
+        return {
+            "symbol": symbol,
+            "bars": bars,
+            "actions": actions,
+            "source": primary_source,
+            "fallback_source": fallback_source,
+            "warnings": warnings,
+            "partial": bool(missing_labels or provider_gaps),
+            "metadata": {
+                "provider_chain": [_provider_name(provider) for provider in self.providers],
+                "provider_results": provider_results,
+                "bar_source": primary_source,
+                "fallback_sources": fallback_sources or secondary_sources,
+                "missing_providers": provider_gaps + missing_labels,
+                "identity": identity or {},
+            },
+        }
+
+
+def build_runtime_market_data_provider() -> RuntimeMarketDataProvider:
+    providers: list[Any] = [YahooMarketDataProvider()]
+    missing_providers: list[str] = []
+    for module_name, class_names in (
+        ("tiingo_provider", ("TiingoMarketDataProvider", "TiingoProvider")),
+        ("fmp_identity_provider", ("FmpIdentityRepairProvider", "FmpMarketDataProvider", "FmpPriceRepairProvider")),
+        ("alpha_vantage_provider", ("AlphaVantageProvider", "AlphaVantageEventProvider", "AlphaVantageMarketDataProvider")),
+        ("sec_edgar_provider", ("SecEdgarEventProvider", "SecEdgarProvider")),
+    ):
+        provider = _load_provider(module_name, class_names)
+        if provider is not None:
+            providers.append(provider)
+        else:
+            missing_providers.append(module_name)
+    return RuntimeMarketDataProvider(providers, missing_providers=missing_providers)
 
 
 def _default_db_path() -> Path:
@@ -49,7 +386,7 @@ def create_app(db_path: str | Path | None = None, market_data_provider=None) -> 
     )
     resolved_market_data_provider = market_data_provider
     if resolved_market_data_provider is None and "PYTEST_CURRENT_TEST" not in os.environ:
-        resolved_market_data_provider = YahooMarketDataProvider()
+        resolved_market_data_provider = build_runtime_market_data_provider()
     service = RealBacktestPlatformService(
         db_path or _default_db_path(),
         market_data_provider=resolved_market_data_provider,

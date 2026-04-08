@@ -1,6 +1,8 @@
 export type StrategyType = 'GENERAL' | 'GRID' | 'MOMENTUM' | 'MEAN_REVERSION' | 'BUY_AND_HOLD';
 export type BacktestRunStatus = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'COMPLETED_WITH_WARNINGS' | 'FAILED';
 export type PromoteMode = 'set_current' | 'create_copy';
+export type SnapshotRefreshMode = 'incremental' | 'repair' | 'full';
+export type SnapshotRefreshTarget = 'price' | 'corporate' | 'universes';
 export type ParameterValue = string | number | boolean | null;
 
 export class ApiError extends Error {
@@ -139,9 +141,16 @@ export type ApiStrategyCreationSession = {
     rebalance_frequency?: string | null;
   };
   messages?: Array<{
+    id?: string;
     role?: string | null;
     content: string;
     created_at?: string | null;
+    extracted_tags?: Array<{
+      key: string;
+      label: string;
+      value: string;
+      status: 'synced' | 'manual_override_preserved';
+    }>;
   }>;
   confirmation_fields?: {
     top_level: Array<{ key: string; label: string; value: unknown; source: string }>;
@@ -371,6 +380,7 @@ export type ApiDatasetSnapshot = {
   source?: string | null;
   fallback_source?: string | null;
   blocker?: ApiSnapshotBlocker | null;
+  metadata?: Record<string, unknown>;
   [key: string]: unknown;
 };
 
@@ -387,6 +397,7 @@ export type ApiUniverseSnapshot = {
   source?: string | null;
   fallback_source?: string | null;
   blocker?: ApiSnapshotBlocker | null;
+  metadata?: Record<string, unknown>;
   [key: string]: unknown;
 };
 
@@ -414,6 +425,12 @@ export type ApiSnapshotOverview = {
   blocking_target?: unknown;
   message?: string | null;
   allowed_actions?: string[];
+};
+
+export type ApiSnapshotRefreshRequest = {
+  reason?: string | null;
+  mode?: SnapshotRefreshMode;
+  targets?: SnapshotRefreshTarget[];
 };
 
 export type BacktestRunListQuery = {
@@ -452,7 +469,7 @@ export type DemoApi = {
   promoteOptimizationCandidate: (jobId: string, trialId: string, mode: PromoteMode, idempotencyKey: string, comment?: string) => Promise<ApiOptimizationJobDetail>;
   deleteOptimizationCandidate: (jobId: string, trialId: string) => Promise<ApiOptimizationJobDetail>;
   getSnapshotOverview: () => Promise<ApiSnapshotOverview>;
-  refreshSnapshots: () => Promise<ApiSnapshotOverview>;
+  refreshSnapshots: (payload?: ApiSnapshotRefreshRequest) => Promise<ApiSnapshotOverview>;
 };
 
 export type StrategyCompareCard = {

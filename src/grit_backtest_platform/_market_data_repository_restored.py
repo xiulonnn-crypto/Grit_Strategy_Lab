@@ -194,6 +194,22 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS symbol_identity_cache (
+            symbol TEXT PRIMARY KEY,
+            canonical_symbol TEXT NOT NULL DEFAULT '',
+            company_name TEXT NOT NULL DEFAULT '',
+            cik TEXT NOT NULL DEFAULT '',
+            exchange TEXT NOT NULL DEFAULT '',
+            ipo_date TEXT,
+            delisting_date TEXT,
+            source TEXT NOT NULL DEFAULT '',
+            valid_from TEXT,
+            valid_to TEXT
+        )
+        """
+    )
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_dataset_price_bars_symbol_date ON dataset_price_bars(symbol, date)"
     )
     conn.execute(
@@ -222,6 +238,48 @@ class MarketDataRepository:
     def _normalize_symbol(self, value: str) -> str:
         return _normalize_symbol(value)
 
+    def _merge_action_entry(self, existing: dict[str, Any], incoming: Mapping[str, Any]) -> dict[str, Any]:
+        merged = dict(existing)
+        incoming_payload = _ensure_json_dict(incoming.get("payload"))
+        existing_payload = _ensure_json_dict(merged.get("payload"))
+        if merged.get("value") is None and incoming.get("value") is not None:
+            merged["value"] = incoming.get("value")
+        if not merged.get("source") and incoming.get("source"):
+            merged["source"] = str(incoming.get("source") or "")
+        if not merged.get("fallback_source") and incoming.get("fallback_source"):
+            merged["fallback_source"] = incoming.get("fallback_source")
+        for key, value in incoming_payload.items():
+            if key not in existing_payload or existing_payload.get(key) is None:
+                existing_payload[key] = value
+        merged["payload"] = existing_payload
+        return merged
+
+    def _dedupe_actions_for_storage(
+        self,
+        actions: Iterable[Mapping[str, Any]],
+        *,
+        default_source: str = "",
+        default_fallback_source: Any = None,
+    ) -> list[dict[str, Any]]:
+        deduped: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for action in actions:
+            normalized = {
+                "symbol": self._normalize_symbol(str(action.get("symbol") or "")),
+                "date": str(action.get("date") or action.get("event_date") or ""),
+                "action_type": str(action.get("action_type") or action.get("type") or action.get("event_type") or "unknown"),
+                "value": action.get("value"),
+                "source": str(action.get("source") or default_source or ""),
+                "fallback_source": action.get("fallback_source", default_fallback_source),
+                "payload": _ensure_json_dict(action.get("payload")),
+            }
+            key = (normalized["symbol"], normalized["date"], normalized["action_type"])
+            existing = deduped.get(key)
+            if existing is None:
+                deduped[key] = normalized
+                continue
+            deduped[key] = self._merge_action_entry(existing, normalized)
+        return list(deduped.values())
+
     def replace_bars(self, symbol: str, bars: Iterable[Mapping[str, Any]]) -> None:
         normalized_symbol = self._normalize_symbol(symbol)
         rows = [
@@ -249,15 +307,18 @@ class MarketDataRepository:
 
     def replace_actions(self, symbol: str, actions: Iterable[Mapping[str, Any]]) -> None:
         normalized_symbol = self._normalize_symbol(symbol)
+        normalized_actions = self._dedupe_actions_for_storage(
+            (dict(action, symbol=normalized_symbol) for action in actions),
+        )
         rows = [
             (
                 normalized_symbol,
                 str(action["date"]),
-                str(action.get("action_type") or action.get("type") or "unknown"),
+                str(action["action_type"]),
                 action.get("value"),
-                dumps(dict(action.get("payload") or action)),
+                dumps(_ensure_json_dict(action.get("payload")) or dict(action)),
             )
-            for action in actions
+            for action in normalized_actions
         ]
         with self.connect() as conn:
             conn.execute("DELETE FROM market_actions WHERE symbol = ?", (normalized_symbol,))
@@ -367,18 +428,23 @@ class MarketDataRepository:
                     price_rows,
                 )
 
+            normalized_actions = self._dedupe_actions_for_storage(
+                corporate_actions,
+                default_source=str(snapshot.get("source") or ""),
+                default_fallback_source=snapshot.get("fallback_source"),
+            )
             action_rows = [
                 (
                     dataset_snapshot_id,
-                    self._normalize_symbol(str(action["symbol"])),
+                    action["symbol"],
                     str(action["date"]),
-                    str(action.get("action_type") or action.get("type") or "unknown"),
+                    str(action["action_type"]),
                     action.get("value"),
                     str(action.get("source") or snapshot.get("source") or ""),
                     action.get("fallback_source", snapshot.get("fallback_source")),
                     dumps(_ensure_json_dict(action.get("payload"))),
                 )
-                for action in corporate_actions
+                for action in normalized_actions
             ]
             if action_rows:
                 conn.executemany(
@@ -533,6 +599,78 @@ class MarketDataRepository:
             "symbol_coverage": [self._decode_json_row(dict(row), "metadata_json") for row in coverage_rows],
         }
 
+    def load_dataset_symbol_coverage(self, dataset_snapshot_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM dataset_symbol_coverage WHERE dataset_snapshot_id = ? ORDER BY symbol",
+                (dataset_snapshot_id,),
+            ).fetchall()
+        return [self._decode_json_row(dict(row), "metadata_json") for row in rows]
+
+    def summarize_dataset_symbols(self, dataset_snapshot_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            price_rows = conn.execute(
+                """
+                SELECT
+                    symbol,
+                    MIN(date) AS start_date,
+                    MAX(date) AS end_date,
+                    COUNT(*) AS trade_days
+                FROM dataset_price_bars
+                WHERE dataset_snapshot_id = ?
+                GROUP BY symbol
+                ORDER BY symbol
+                """,
+                (dataset_snapshot_id,),
+            ).fetchall()
+            if price_rows:
+                return [dict(row) for row in price_rows]
+
+            action_rows = conn.execute(
+                """
+                SELECT
+                    symbol,
+                    MIN(event_date) AS start_date,
+                    MAX(event_date) AS end_date,
+                    COUNT(*) AS trade_days
+                FROM dataset_corporate_actions
+                WHERE dataset_snapshot_id = ?
+                GROUP BY symbol
+                ORDER BY symbol
+                """,
+                (dataset_snapshot_id,),
+            ).fetchall()
+        return [dict(row) for row in action_rows]
+
+    def load_dataset_price_bars(
+        self,
+        dataset_snapshot_id: str,
+        symbols: Iterable[str] | None = None,
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        sql = "SELECT * FROM dataset_price_bars WHERE dataset_snapshot_id = ?"
+        params: list[Any] = [dataset_snapshot_id]
+        normalized_symbols = [self._normalize_symbol(symbol) for symbol in (symbols or []) if symbol]
+        if normalized_symbols:
+            sql += f" AND symbol IN ({','.join('?' for _ in normalized_symbols)})"
+            params.extend(normalized_symbols)
+        if start_date:
+            sql += " AND date >= ?"
+            params.append(start_date)
+        if end_date:
+            sql += " AND date <= ?"
+            params.append(end_date)
+        sql += " ORDER BY symbol ASC, date ASC"
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            decoded = self._decode_json_row(dict(row), "metadata_json")
+            grouped.setdefault(str(decoded["symbol"]), []).append(decoded)
+        return grouped
+
     def load_universe_memberships(
         self,
         *,
@@ -658,6 +796,70 @@ class MarketDataRepository:
     def list_coverage(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM market_coverages ORDER BY symbol").fetchall()]
+
+    def replace_symbol_identity_cache(self, identities: Iterable[Mapping[str, Any]]) -> None:
+        rows = [self._normalize_identity_row(identity) for identity in identities]
+        with self.connect() as conn:
+            conn.execute("DELETE FROM symbol_identity_cache")
+            if rows:
+                conn.executemany(
+                    """
+                    INSERT INTO symbol_identity_cache (
+                        symbol, canonical_symbol, company_name, cik, exchange,
+                        ipo_date, delisting_date, source, valid_from, valid_to
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+
+    def upsert_symbol_identity(self, identity: Mapping[str, Any]) -> None:
+        row = self._normalize_identity_row(identity)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO symbol_identity_cache (
+                    symbol, canonical_symbol, company_name, cik, exchange,
+                    ipo_date, delisting_date, source, valid_from, valid_to
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                row,
+            )
+
+    def list_symbol_identity_cache(self, symbols: Iterable[str] | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM symbol_identity_cache"
+        params: list[Any] = []
+        normalized_symbols = [self._normalize_symbol(symbol) for symbol in (symbols or []) if symbol]
+        if normalized_symbols:
+            sql += f" WHERE symbol IN ({','.join('?' for _ in normalized_symbols)})"
+            params.extend(normalized_symbols)
+        sql += " ORDER BY symbol ASC"
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+    def load_symbol_identity(self, symbol: str) -> dict[str, Any] | None:
+        normalized_symbol = self._normalize_symbol(symbol)
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM symbol_identity_cache WHERE symbol = ?",
+                (normalized_symbol,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def _normalize_identity_row(self, identity: Mapping[str, Any]) -> tuple[Any, ...]:
+        symbol = self._normalize_symbol(str(identity.get("symbol") or identity.get("canonical_symbol") or ""))
+        canonical_symbol = self._normalize_symbol(str(identity.get("canonical_symbol") or symbol))
+        return (
+            symbol,
+            canonical_symbol,
+            str(identity.get("company_name") or identity.get("name") or ""),
+            str(identity.get("cik") or ""),
+            str(identity.get("exchange") or ""),
+            identity.get("ipo_date"),
+            identity.get("delisting_date"),
+            str(identity.get("source") or ""),
+            identity.get("valid_from"),
+            identity.get("valid_to"),
+        )
 
     def store_run_artifacts(
         self,

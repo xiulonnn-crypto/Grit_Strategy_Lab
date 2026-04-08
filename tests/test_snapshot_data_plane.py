@@ -218,6 +218,15 @@ def _constituents_html(header: str, symbols: list[str]) -> str:
     return f"<table class='wikitable'><tr><th>{header}</th><th>Security</th></tr>{rows}</table>"
 
 
+def _slickcharts_html(symbols: list[str]) -> str:
+    rows = "".join(
+        f"<tr><td>{index}</td><td><a href=\"/symbol/{symbol}\">Test Co {index}</a></td>"
+        f"<td><a href=\"/symbol/{symbol}\">{symbol}</a></td><td>1.0%</td></tr>"
+        for index, symbol in enumerate(symbols, start=1)
+    )
+    return f"<table><thead><tr><th>Company</th><th>Symbol</th><th>Weight</th></tr></thead><tbody>{rows}</tbody></table>"
+
+
 def test_wikipedia_revision_provider_parses_historical_anchor_tables(monkeypatch):
     provider = WikipediaRevisionUniverseHistoryProvider(
         definition=UniverseDefinition(
@@ -307,6 +316,37 @@ def test_wikipedia_revision_provider_falls_back_to_current_page_when_history_is_
     assert snapshots[0].source == provider.current_page_source_name
     assert snapshots[0].fallback_source == provider.provider_name
     assert snapshots[0].metadata["source_quality"] == "current_page_fallback"
+    assert snapshots[0].normalized_symbols == ["AAPL", "MSFT", "NVDA", "AMZN"]
+
+
+def test_wikipedia_revision_provider_uses_secondary_current_page_before_static_seed(monkeypatch):
+    provider = WikipediaRevisionUniverseHistoryProvider(
+        definition=UniverseDefinition(
+            universe_key=NASDAQ100_UNIVERSE_KEY,
+            display_name=NASDAQ100_UNIVERSE_NAME,
+            snapshot_id=NASDAQ100_UNIVERSE_SNAPSHOT_ID,
+            source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
+            minimum_member_count=3,
+        ),
+        fallback_provider=StaticNasdaq100UniverseHistoryProvider(raw_symbols=["AAPL", "MSFT", "NVDA"]),
+    )
+
+    def fake_urlopen(request, timeout=0):
+        full_url = request.full_url
+        if "w/api.php" in full_url:
+            raise urllib.error.HTTPError(full_url, 429, "Too Many Requests", hdrs=None, fp=None)
+        if full_url == "https://www.slickcharts.com/nasdaq100":
+            return _FakeHttpResponse(_slickcharts_html(["AAPL", "MSFT", "NVDA", "AMZN"]))
+        raise AssertionError(f"Unexpected universe-history request: {full_url}")
+
+    monkeypatch.setattr(universe_history_module.urllib.request, "urlopen", fake_urlopen)
+
+    snapshots = provider.load_snapshots(start_date=date(2026, 1, 1), end_date=date(2026, 1, 1))
+
+    assert len(snapshots) == 1
+    assert snapshots[0].source == provider.secondary_current_source_name
+    assert snapshots[0].fallback_source == provider.provider_name
+    assert snapshots[0].metadata["source_quality"] == "secondary_current_page_fallback"
     assert snapshots[0].normalized_symbols == ["AAPL", "MSFT", "NVDA", "AMZN"]
 
 

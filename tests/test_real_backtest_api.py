@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from grit_backtest_platform.backtest_metrics import build_drawdown_events, build_relative_metrics
 
 from tests.api_test_support import (
@@ -36,19 +38,23 @@ def test_preview_submit_detail_and_trades_preserve_parameter_snapshot_and_defaul
     assert refresh["latest_job"]["summary"]["status"] == "READY"
     assert preview["data_segment_type"] == "FULL"
     assert preview["dataset_snapshot_id"] == "ds-price"
-    assert preview["universe_snapshot_id"] == "un-ndx100"
+    assert preview["universe_snapshot_id"] is None
+    assert preview["warnings"] == []
     assert preview["parameter_snapshot"]["initial_position"] == 10
     assert submitted["data_segment_type"] == "FULL"
     assert submitted["request"]["data_segment_type"] == "FULL"
     assert submitted["request"]["dataset_snapshot_id"] == "ds-price"
-    assert submitted["request"]["universe_snapshot_id"] == "un-ndx100"
+    assert submitted["request"]["universe_snapshot_id"] is None
+    assert submitted["request"]["execution_policy"] == "T_CLOSE_TO_T1_OPEN"
     assert submitted["is_permanent"] is True
     assert submitted["parameter_snapshot"] == preview["parameter_snapshot"]
     assert detail["data_segment_type"] == "FULL"
     assert detail["dataset_snapshot_id"] == "ds-price"
-    assert detail["universe_snapshot_id"] == "un-ndx100"
+    assert detail["universe_snapshot_id"] is None
     assert detail["snapshot_summary"]["status"] == "READY"
     assert trades["total"] == detail["trades_count"]
+    assert detail["coverage_ratio"] > 0.9
+    assert trades["items"][0]["trade_date"] == START_DATE
     assert detail["trade_audit_items"]
     assert set(detail["trade_audit_items"][0].keys()) == {
         "trade_id",
@@ -62,6 +68,162 @@ def test_preview_submit_detail_and_trades_preserve_parameter_snapshot_and_defaul
         "slippage_cost_pct",
         "commentary",
     }
+    assert all(abs(event["drawdown_pct"]) <= 100 for event in detail["drawdown_events"])
+
+
+def test_backtest_run_detail_backfills_missing_execution_policy_for_legacy_runs(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_grid_strategy(client, idempotency_key="materialize-grid-legacy-policy")["strategy"]
+    refresh_snapshots(client)
+    submitted = submit_backtest(
+        client,
+        strategy["id"],
+        start_date=START_DATE,
+        end_date=END_DATE,
+        idempotency_key="run-grid-legacy-policy",
+    )
+    service = client.app.state.service
+    legacy_request = dict(submitted["request"])
+    legacy_request["execution_policy"] = None
+    service.storage.execute(
+        "UPDATE backtest_runs SET request_json = ? WHERE id = ?",
+        (json.dumps(legacy_request), submitted["id"]),
+    )
+
+    detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail"))
+
+    assert detail["request"]["execution_policy"] == "T_CLOSE_TO_T1_OPEN"
+    assert detail["preview"]["execution_policy"] == "T_CLOSE_TO_T1_OPEN"
+
+
+def test_single_symbol_preview_submit_bypasses_incomplete_universe_and_corporate_snapshots(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_grid_strategy(
+        client,
+        idempotency_key="materialize-grid-single-symbol",
+        benchmark_symbol="QQQ",
+    )["strategy"]
+    refresh_snapshots(client)
+    service = client.app.state.service
+    repository = service.market_data_repository
+
+    assert_ok(client.patch(f"/strategies/{strategy['id']}", json={"universe_snapshot_id": "un-ndx100"}))
+
+    corporate_snapshot = next(
+        item for item in repository.list_dataset_snapshots() if item["id"] == "ds-corporate-actions"
+    )
+    corporate_rows = repository.load_dataset_snapshot_rows("ds-corporate-actions")
+    repository.replace_dataset_snapshot(
+        {
+            **dict(corporate_snapshot),
+            "status": "INCOMPLETE",
+            "blocker": {
+                "code": "CORPORATE_ACTIONS_INCOMPLETE",
+                "message": "公司行为数据已部分可用，但仍有事件缺口待修复。",
+            },
+        },
+        corporate_actions=corporate_rows.get("corporate_actions") or [],
+        symbol_coverage=corporate_rows.get("symbol_coverage") or [],
+    )
+
+    universe_snapshot = next(item for item in repository.list_universe_snapshots() if item["id"] == "un-ndx100")
+    universe_memberships = repository.load_universe_memberships(universe_snapshot_id="un-ndx100")
+    repository.replace_universe_snapshot(
+        {
+            **dict(universe_snapshot),
+            "status": "INCOMPLETE",
+            "blocker": {
+                "code": "UNIVERSE_HISTORY_INCOMPLETE",
+                "message": "股票池历史成分仍在补齐，当前还不能视为完整的点时成分快照。",
+            },
+        },
+        memberships=universe_memberships,
+    )
+
+    detail = assert_ok(client.get(f"/strategies/{strategy['id']}/detail"))
+    assert detail["universe_snapshot_id"] is None
+
+    preview = preview_backtest(client, strategy["id"], start_date=START_DATE, end_date=END_DATE)
+    assert preview["universe_snapshot_id"] is None
+    assert preview["environment_summary"]["symbols"] == ["QQQ"]
+    assert preview["snapshot_summary"]["status"] == "READY"
+    assert preview["snapshot_summary"]["blocking"] is False
+    assert preview["snapshot_summary"]["corporate_actions_status"] == "INCOMPLETE"
+    assert preview["snapshot_summary"]["universe_status"] == "NOT_REQUIRED"
+
+    submitted = submit_backtest(
+        client,
+        strategy["id"],
+        start_date=START_DATE,
+        end_date=END_DATE,
+        idempotency_key="run-grid-single-symbol",
+    )
+    assert submitted["request"]["universe_snapshot_id"] is None
+    assert submitted["preview"]["snapshot_summary"]["blocking"] is False
+    assert submitted["preview"]["environment_summary"]["symbols"] == ["QQQ"]
+
+
+def test_single_symbol_preview_submit_ignores_global_price_snapshot_incomplete_when_requested_symbols_exist(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_grid_strategy(
+        client,
+        idempotency_key="materialize-grid-price-status-only",
+        benchmark_symbol="SPY",
+    )["strategy"]
+    refresh_snapshots(client)
+    service = client.app.state.service
+    repository = service.market_data_repository
+
+    price_snapshot = next(item for item in repository.list_dataset_snapshots() if item["id"] == "ds-price")
+    price_rows = repository.load_dataset_snapshot_rows("ds-price")
+    repository.replace_dataset_snapshot(
+        {
+            **dict(price_snapshot),
+            "status": "INCOMPLETE",
+            "blocker": {
+                "code": "PRICE_SNAPSHOT_INCOMPLETE",
+                "message": "Some unrelated symbols are still missing from the global price snapshot.",
+            },
+        },
+        price_bars=price_rows.get("price_bars") or [],
+        symbol_coverage=price_rows.get("symbol_coverage") or [],
+    )
+
+    preview = preview_backtest(client, strategy["id"], start_date=START_DATE, end_date=END_DATE)
+    assert preview["environment_summary"]["symbols"] == ["QQQ"]
+    assert preview["snapshot_summary"]["price_dataset_status"] == "INCOMPLETE"
+    assert preview["snapshot_summary"]["status"] == "READY"
+    assert preview["snapshot_summary"]["blocking"] is False
+
+    submitted = submit_backtest(
+        client,
+        strategy["id"],
+        start_date=START_DATE,
+        end_date=END_DATE,
+        idempotency_key="run-grid-price-status-only",
+    )
+    assert submitted["preview"]["snapshot_summary"]["price_dataset_status"] == "INCOMPLETE"
+    assert submitted["preview"]["snapshot_summary"]["blocking"] is False
+    assert submitted["preview"]["environment_summary"]["symbols"] == ["QQQ"]
+
+
+def test_grid_materialize_uses_session_name_description_and_benchmark(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_grid_strategy(
+        client,
+        idempotency_key="materialize-grid-session-fields",
+        strategy_name="QQQ 自定义网格策略",
+        strategy_description="围绕QQQ执行网格买卖。",
+        benchmark_symbol="SPY",
+    )["strategy"]
+
+    assert strategy["name"] == "QQQ 自定义网格策略"
+    assert strategy["description"] == "围绕QQQ执行网格买卖。"
+    assert strategy["benchmark_symbol"] == "SPY"
 
 
 def test_trade_audit_endpoint_returns_price_context_and_risk_evaluation(tmp_path):

@@ -200,11 +200,16 @@ def grid_confirmation_payload(
     *,
     revision: int,
     universe_name: str = "QQQ",
+    strategy_name: str = "QQQ 网格交易策略",
+    strategy_description: str = "围绕QQQ做网格轮动。",
+    benchmark_symbol: str = "SPY",
+    rebalance_frequency: str = "never",
     initial_position: int = 10,
     grid_interval: int = 2,
     buy_size_pct: int = 5,
     sell_step_pct: int = 5,
     sell_size_pct: int = 5,
+    max_stop_loss_pct: int = -4,
     capital: int = 100000,
 ) -> dict[str, Any]:
     return {
@@ -212,14 +217,19 @@ def grid_confirmation_payload(
         "strategy_type": "GRID",
         "core": {
             "universe_name": universe_name,
+            "rebalance_frequency": rebalance_frequency,
         },
         "logic": {},
         "parameters": {
+            "strategy_name": strategy_name,
+            "strategy_description": strategy_description,
+            "benchmark_symbol": benchmark_symbol,
             "initial_position": initial_position,
             "grid_interval": grid_interval,
             "buy_size_pct": buy_size_pct,
             "sell_step_pct": sell_step_pct,
             "sell_size_pct": sell_size_pct,
+            "max_stop_loss_pct": max_stop_loss_pct,
             "capital": capital,
         },
     }
@@ -340,11 +350,16 @@ def create_grid_strategy(
     client: TestClient,
     *,
     universe_name: str = "QQQ",
+    strategy_name: str = "QQQ 网格交易策略",
+    strategy_description: str = "围绕QQQ做网格轮动。",
+    benchmark_symbol: str = "SPY",
+    rebalance_frequency: str = "never",
     initial_position: int = 10,
     grid_interval: int = 2,
     buy_size_pct: int = 5,
     sell_step_pct: int = 5,
     sell_size_pct: int = 5,
+    max_stop_loss_pct: int = -4,
     capital: int = 100000,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
@@ -355,11 +370,16 @@ def create_grid_strategy(
         confirmation_payload=grid_confirmation_payload(
             revision=1,
             universe_name=universe_name,
+            strategy_name=strategy_name,
+            strategy_description=strategy_description,
+            benchmark_symbol=benchmark_symbol,
+            rebalance_frequency=rebalance_frequency,
             initial_position=initial_position,
             grid_interval=grid_interval,
             buy_size_pct=buy_size_pct,
             sell_step_pct=sell_step_pct,
             sell_size_pct=sell_size_pct,
+            max_stop_loss_pct=max_stop_loss_pct,
             capital=capital,
         ),
     )
@@ -404,10 +424,20 @@ def create_optimization_candidate(
     return assert_ok(client.post(f"/optimization-jobs/{job_id}/candidates", json=payload))
 
 
-def refresh_snapshots(client: TestClient, *, reason: str | None = None) -> dict[str, Any]:
+def refresh_snapshots(
+    client: TestClient,
+    *,
+    reason: str | None = None,
+    mode: str | None = None,
+    targets: list[str] | None = None,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     if reason is not None:
         payload["reason"] = reason
+    if mode is not None:
+        payload["mode"] = mode
+    if targets is not None:
+        payload["targets"] = targets
     return assert_ok(client.post("/admin/snapshot-refresh-jobs", json=payload))
 
 

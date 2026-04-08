@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
-from .creation_templates import DEFAULT_ALLOWED_ACTIONS, blank_confirmation_fields, build_confirmation
+from .creation_templates import DEFAULT_ALLOWED_ACTIONS, STRATEGY_TYPE_TITLES, blank_confirmation_fields, build_confirmation
 from .storage import SQLiteStorage, dumps, iso_now, loads, utc_now
 
 
@@ -44,6 +44,68 @@ def _top_level_from_confirmation(confirmation_fields: Mapping[str, Any], fallbac
         "universe_name": mapping.get("universe_name", {}).get("value") or fallback.get("universe_name") or "",
         "rebalance_frequency": mapping.get("rebalance_frequency", {}).get("value") or fallback.get("rebalance_frequency"),
     }
+
+
+def _confirmation_entries(confirmation_fields: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    fields = dict(confirmation_fields or {})
+    return [*list(fields.get("top_level", [])), *list(fields.get("parameters", []))]
+
+
+def _entry_index(confirmation_fields: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
+    entries: dict[str, dict[str, Any]] = {}
+    for entry in _confirmation_entries(confirmation_fields):
+        key = str(entry.get("key") or "").strip()
+        if key:
+            entries[key] = dict(entry)
+    return entries
+
+
+def _dedupe_top_level_parameters(confirmation_fields: Mapping[str, Any] | None) -> dict[str, list[dict[str, Any]]]:
+    fields = dict(confirmation_fields or {})
+    top_level = [dict(entry) for entry in fields.get("top_level", [])]
+    top_level_keys = {
+        str(entry.get("key") or "").strip()
+        for entry in top_level
+        if str(entry.get("key") or "").strip()
+    }
+    parameters = [
+        dict(entry)
+        for entry in fields.get("parameters", [])
+        if str(entry.get("key") or "").strip() not in top_level_keys
+    ]
+    return {"top_level": top_level, "parameters": parameters}
+
+
+def _conflict_index(conflicts: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    indexed: dict[str, dict[str, Any]] = {}
+    for item in conflicts or []:
+        key = str(item.get("key") or "").strip()
+        if key:
+            indexed[key] = dict(item)
+    return indexed
+
+
+def _stringify_tag_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else str(value)
+    return str(value).strip()
+
+
+def _manual_conflict_changed(before: Mapping[str, Any] | None, after: Mapping[str, Any] | None) -> bool:
+    if not after:
+        return False
+    if not before:
+        return True
+    for key in ("ai_value", "manual_value", "suggested_value", "message"):
+        if _stringify_tag_value(before.get(key)) != _stringify_tag_value(after.get(key)):
+            return True
+    return False
 
 
 class ContractConflictError(ValueError):
@@ -122,15 +184,21 @@ class BacktestPlatformService:
         return f"{prefix}_{uuid4().hex[:12]}"
 
     def _session_messages(self, session_id: str) -> list[dict[str, Any]]:
-        return self.storage.fetch_all(
+        rows = self.storage.fetch_all(
             """
-            SELECT id, session_id, role, content, created_at
+            SELECT id, session_id, role, content, extracted_fields_json, created_at
             FROM strategy_creation_messages
             WHERE session_id = ?
             ORDER BY created_at ASC, id ASC
             """,
             (session_id,),
         )
+        messages: list[dict[str, Any]] = []
+        for row in rows:
+            message = dict(row)
+            message["extracted_tags"] = loads(message.pop("extracted_fields_json", None), [])
+            messages.append(message)
+        return messages
 
     def _decode_session_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
         confirmation_fields = loads(row.get("confirmation_fields_json"), blank_confirmation_fields(row.get("strategy_type") or "GENERAL"))
@@ -395,9 +463,134 @@ class BacktestPlatformService:
         return list(DEFAULT_ALLOWED_ACTIONS)
 
     def _build_suggested_name(self, top_level: Mapping[str, Any]) -> str:
-        universe_name = str(top_level.get("universe_name") or "Draft")
-        strategy_type = str(top_level.get("strategy_type") or "Strategy")
-        return f"{universe_name} {strategy_type}"
+        universe_name = str(top_level.get("universe_name") or "").strip()
+        strategy_type = str(top_level.get("strategy_type") or "GENERAL").upper()
+        strategy_label = STRATEGY_TYPE_TITLES.get(strategy_type, strategy_type)
+        return " ".join(part for part in [universe_name, strategy_label] if part) or strategy_label
+
+    def _build_message_extracted_tags(
+        self,
+        before_session: Mapping[str, Any],
+        after_session: Mapping[str, Any],
+    ) -> list[dict[str, str]]:
+        before_entries = _entry_index(before_session.get("confirmation_fields"))
+        after_entries = _entry_index(after_session.get("confirmation_fields"))
+        before_conflicts = _conflict_index(before_session.get("manual_conflicts"))
+        after_conflicts = _conflict_index(after_session.get("manual_conflicts"))
+        ordered_keys = [str(entry.get("key") or "").strip() for entry in _confirmation_entries(after_session.get("confirmation_fields"))]
+        tags: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        for key in ordered_keys:
+            if not key or key in seen or key == "strategy_type":
+                continue
+
+            after_entry = after_entries.get(key)
+            if not after_entry:
+                continue
+
+            label = str(after_entry.get("label") or key)
+            after_value = _stringify_tag_value(after_entry.get("value"))
+            after_source = str(after_entry.get("source") or "")
+            before_entry = before_entries.get(key, {})
+            before_value = _stringify_tag_value(before_entry.get("value"))
+            before_source = str(before_entry.get("source") or "")
+            synced_changed = (
+                after_source in {"user_input", "system_inference"}
+                and bool(after_value)
+                and (after_value != before_value or after_source != before_source)
+            )
+
+            after_conflict = after_conflicts.get(key)
+            before_conflict = before_conflicts.get(key)
+            conflict_changed = (
+                after_source == "manual_override"
+                and _manual_conflict_changed(before_conflict, after_conflict)
+            )
+
+            if synced_changed:
+                tags.append(
+                    {
+                        "key": key,
+                        "label": label,
+                        "value": after_value,
+                        "status": "synced",
+                    }
+                )
+                seen.add(key)
+                continue
+
+            if conflict_changed:
+                manual_value = _stringify_tag_value(
+                    after_conflict.get("manual_value") if after_conflict else after_entry.get("value")
+                )
+                if manual_value:
+                    tags.append(
+                        {
+                            "key": key,
+                            "label": label,
+                            "value": manual_value,
+                            "status": "manual_override_preserved",
+                        }
+                    )
+                    seen.add(key)
+
+        return tags
+
+    def _backfill_missing_message_extracted_tags(self, session_id: str, strategy_type: str | None = None) -> bool:
+        rows = self.storage.fetch_all(
+            """
+            SELECT id, role, content, extracted_fields_json, created_at
+            FROM strategy_creation_messages
+            WHERE session_id = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (session_id,),
+        )
+        if not rows:
+            return False
+
+        forced_type = str(strategy_type or "").upper() or None
+        if forced_type == "GENERAL":
+            forced_type = None
+
+        running_messages: list[dict[str, Any]] = []
+        current_confirmation = None
+        updated = False
+
+        for row in rows:
+            before_payload = build_confirmation(
+                running_messages,
+                existing=current_confirmation,
+                forced_type=forced_type,
+            )
+            running_messages.append({"role": row.get("role"), "content": row.get("content")})
+            after_payload = build_confirmation(
+                running_messages,
+                existing=before_payload["confirmation_fields"],
+                forced_type=forced_type,
+            )
+            current_confirmation = after_payload["confirmation_fields"]
+
+            existing_tags = loads(row.get("extracted_fields_json"), [])
+            if str(row.get("role") or "") == "user" and not existing_tags:
+                tags = self._build_message_extracted_tags(
+                    {
+                        "confirmation_fields": before_payload["confirmation_fields"],
+                        "manual_conflicts": before_payload["manual_conflicts"],
+                    },
+                    {
+                        "confirmation_fields": after_payload["confirmation_fields"],
+                        "manual_conflicts": after_payload["manual_conflicts"],
+                    },
+                )
+                self.storage.execute(
+                    "UPDATE strategy_creation_messages SET extracted_fields_json = ? WHERE id = ?",
+                    (dumps(tags), row["id"]),
+                )
+                updated = True
+
+        return updated
 
     def _parameter_snapshot_for_version(self, strategy: Mapping[str, Any], parameter_version_id: str | None = None) -> dict[str, Any]:
         if not parameter_version_id:
@@ -624,6 +817,7 @@ class BacktestPlatformService:
             raise KeyError(f"Creation session not found: {session_id}")
         messages = self._session_messages(session_id)
         decoded = self._decode_session_row(row)
+        decoded["confirmation_fields"] = _dedupe_top_level_parameters(decoded["confirmation_fields"])
         forced_type = decoded["strategy_type"] if str(decoded.get("strategy_type") or "").upper() != "GENERAL" else None
         payload = build_confirmation(messages, existing=decoded["confirmation_fields"], forced_type=forced_type)
         if decoded["status"] == "LOCKED":
@@ -633,6 +827,8 @@ class BacktestPlatformService:
         else:
             status = "READY_FOR_CONFIRMATION" if not payload["pending_inputs"] else "NEEDS_INPUT"
         hydrated = self._persist_session_state(row, payload, status=status, messages=messages)
+        if self._backfill_missing_message_extracted_tags(session_id, hydrated.get("strategy_type")):
+            hydrated["messages"] = self._session_messages(session_id)
         hydrated["strategy_id"] = decoded.get("strategy_id")
         hydrated["suggested_name"] = hydrated.get("suggested_name") or decoded.get("suggested_name")
         return hydrated
@@ -699,17 +895,29 @@ class BacktestPlatformService:
         content = str(body.get("content") or "").strip()
         if not content:
             raise ValueError("Creation message content is required")
+        before_session = self.get_creation_session(session_id)
+        message_id = self._new_id("msg")
+        role = str(body.get("role") or "user")
         self.storage.insert_json_row(
             "strategy_creation_messages",
             {
-                "id": self._new_id("msg"),
+                "id": message_id,
                 "session_id": session_id,
-                "role": body.get("role", "user"),
+                "role": role,
                 "content": content,
+                "extracted_fields_json": dumps([]),
                 "created_at": iso_now(),
             },
         )
-        return self.get_creation_session(session_id)
+        after_session = self.get_creation_session(session_id)
+        if role == "user":
+            tags = self._build_message_extracted_tags(before_session, after_session)
+            self.storage.execute(
+                "UPDATE strategy_creation_messages SET extracted_fields_json = ? WHERE id = ?",
+                (dumps(tags), message_id),
+            )
+            return self.get_creation_session(session_id)
+        return after_session
 
     def prepare_confirmation(self, session_id: str, request: Any | None = None) -> dict[str, Any]:
         del request
@@ -725,7 +933,12 @@ class BacktestPlatformService:
         session = self._decode_session_row(row)
         payload = _as_mapping(request)
         confirmation_fields = deepcopy(session["confirmation_fields"])
-        strategy_type = str(payload.get("strategy_type") or _field_map(confirmation_fields["top_level"]).get("strategy_type", {}).get("value") or session["strategy_type"]).upper()
+        strategy_type = str(
+            payload.get("strategy_type")
+            or payload.get("core", {}).get("strategy_type")
+            or _field_map(confirmation_fields["top_level"]).get("strategy_type", {}).get("value")
+            or session["strategy_type"]
+        ).upper()
 
         if strategy_type != session["strategy_type"]:
             fresh = blank_confirmation_fields(strategy_type)
@@ -753,9 +966,21 @@ class BacktestPlatformService:
         for bucket_name in ("core", "logic", "parameters"):
             bucket = payload.get(bucket_name, {})
             for key, value in bucket.items():
-                if value is None or key in {"universe_name", "rebalance_frequency"}:
+                if value is None or key in {"strategy_type", "universe_name", "rebalance_frequency"}:
                     continue
                 _upsert_field(confirmation_fields["parameters"], key, key, value, "manual_override")
+
+        confirmation_fields = _dedupe_top_level_parameters(confirmation_fields)
+
+        label_map = {
+            str(entry.get("key")): str(entry.get("label") or entry.get("key"))
+            for entry in _confirmation_entries(blank_confirmation_fields(strategy_type))
+        }
+        for bucket_name in ("top_level", "parameters"):
+            for entry in confirmation_fields.get(bucket_name, []):
+                key = str(entry.get("key") or "")
+                if key in label_map:
+                    entry["label"] = label_map[key]
 
         messages = self._session_messages(session_id)
         rebuilt = build_confirmation(messages, existing=confirmation_fields, forced_type=strategy_type)
@@ -795,6 +1020,14 @@ class BacktestPlatformService:
         now = iso_now()
         top_level = session["top_level"]
         parameters = self._flatten_confirmation(session["confirmation_fields"], top_level)
+        strategy_name = str(
+            parameters.get("strategy_name")
+            or session.get("suggested_name")
+            or self._build_suggested_name(top_level)
+        ).strip() or self._build_suggested_name(top_level)
+        raw_description = parameters.get("strategy_description")
+        strategy_description = str(raw_description).strip() if raw_description is not None else ""
+        benchmark_symbol = str(parameters.get("benchmark_symbol") or "SPY").strip().upper() or "SPY"
         session_mode = str(session.get("mode") or "CREATE").upper()
         if session_mode == "REVISION":
             base_strategy_id = session.get("base_strategy_id")
@@ -841,8 +1074,11 @@ class BacktestPlatformService:
             )
             strategy_row["parameters_json"] = dumps(parameters)
             strategy_row["confirmation_fields_json"] = dumps(session["confirmation_fields"])
-            if payload.get("description") is not None:
-                strategy_row["description"] = payload["description"]
+            strategy_row["name"] = strategy_name
+            strategy_row["description"] = strategy_description or strategy_row.get("description")
+            strategy_row["benchmark_symbol"] = benchmark_symbol
+            strategy_row["universe_name"] = top_level.get("universe_name") or strategy_row.get("universe_name") or ""
+            strategy_row["rebalance_frequency"] = top_level.get("rebalance_frequency")
             self._write_strategy_record(
                 strategy_row,
                 parameter_history=parameter_history,
@@ -852,7 +1088,6 @@ class BacktestPlatformService:
             strategy_id = str(base_strategy_id)
         else:
             strategy_id = self._new_id("strat")
-            benchmark_symbol = "QQQ" if top_level.get("strategy_type") == "GRID" and top_level.get("universe_name") else "SPY"
             version_history = [
                 {
                     "version_number": 1,
@@ -865,8 +1100,8 @@ class BacktestPlatformService:
             ]
             strategy_row = {
                 "id": strategy_id,
-                "name": payload.get("name") or session.get("suggested_name") or self._build_suggested_name(top_level),
-                "description": payload.get("description"),
+                "name": strategy_name,
+                "description": strategy_description or None,
                 "strategy_type": top_level["strategy_type"],
                 "universe_name": top_level.get("universe_name") or "",
                 "rebalance_frequency": top_level.get("rebalance_frequency"),

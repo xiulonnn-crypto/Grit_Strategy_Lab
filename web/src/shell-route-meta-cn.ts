@@ -100,6 +100,7 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         eyebrow: TEXT.backtestEyebrow,
         title: TEXT.backtestTitle,
         description: TEXT.backtestDesc,
+        showPageHeading: false,
       };
     case 'runs-index':
       return {

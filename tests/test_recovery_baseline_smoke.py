@@ -24,11 +24,12 @@ def test_recovery_baseline_vertical_slice(tmp_path):
         json={"content": GRID_MESSAGE},
     )
     assert appended.status_code == 200
-    assert appended.json()["status"] == "READY_FOR_CONFIRMATION"
+    assert appended.json()["status"] == "NEEDS_INPUT"
 
     prepared = client.post(f"/strategy-creation-sessions/{session_id}/prepare-confirmation", json={})
     assert prepared.status_code == 200
     assert prepared.json()["top_level"]["strategy_type"] == "GRID"
+    assert prepared.json()["top_level"]["rebalance_frequency"] == "never"
 
     materialized = client.post(
         f"/strategy-creation-sessions/{session_id}/materialize",

@@ -179,7 +179,11 @@ function createHttpApiClient(): DemoApi {
         { method: 'DELETE' },
       ),
     getSnapshotOverview: () => requestJson<ApiSnapshotOverview>('/data-snapshots/overview'),
-    refreshSnapshots: () => requestJson<ApiSnapshotOverview>('/admin/snapshot-refresh-jobs', { method: 'POST' }),
+    refreshSnapshots: (payload) =>
+      requestJson<ApiSnapshotOverview>(
+        '/admin/snapshot-refresh-jobs',
+        withJsonBody(payload ?? {}, { method: 'POST' }),
+      ),
   };
 }
 

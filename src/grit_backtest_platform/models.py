@@ -31,6 +31,8 @@ SnapshotStatus = Literal['READY', 'STALE', 'INCOMPLETE', 'FAILED']
 SnapshotKind = Literal['DATASET', 'UNIVERSE']
 TrialStatus = Literal['SUCCEEDED', 'FAILED', 'PENDING']
 PromoteMode = Literal['set_current', 'create_copy']
+SnapshotRefreshMode = Literal['incremental', 'repair', 'full']
+SnapshotRefreshTarget = Literal['price', 'corporate', 'universes']
 DataSegmentType = Literal['FULL', 'TRAIN', 'TEST', 'VALIDATION']
 
 
@@ -120,4 +122,6 @@ class PromoteTrialRequest(BaseModel):
 
 class SnapshotRefreshRequest(BaseModel):
     reason: str | None = None
+    mode: SnapshotRefreshMode = 'incremental'
+    targets: list[SnapshotRefreshTarget] = Field(default_factory=list)
 

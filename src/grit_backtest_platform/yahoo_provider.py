@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
 
+from .fallback_provider import ProviderAvailability
 from .backtest_engine import MarketBar
 
 
@@ -33,6 +34,13 @@ class YahooMarketDataProvider:
     def __init__(self, retries: int = 3, timeout: int = 20) -> None:
         self.retries = retries
         self.timeout = timeout
+
+    def availability(self) -> ProviderAvailability:
+        return ProviderAvailability(
+            provider_name=self.provider_name,
+            available=True,
+            metadata={"mode": "primary_yahoo"},
+        )
 
     def fetch_history(self, symbol: str, start_date: date, end_date: date) -> SymbolMarketData:
         period1 = int(datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc).timestamp())

@@ -18,6 +18,19 @@ SNAPSHOT_TABLES = {
     "dataset_symbol_coverage",
     "universe_membership_snapshots",
 }
+LEGACY_MARKET_TABLES = {
+    "market_bars",
+    "market_coverages",
+    "market_actions",
+}
+WORKSPACE_SQLITE_SKIP_PARTS = {
+    ".git",
+    ".venv",
+    ".python-runtime",
+    "node_modules",
+    "dist",
+    "__pycache__",
+}
 
 
 @dataclass(frozen=True)
@@ -37,6 +50,34 @@ class SqliteAssetProbe:
 class SnapshotRecoveryReport:
     root: str
     probes: list[SqliteAssetProbe]
+    usable_assets: list[str]
+    notes: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "root": self.root,
+            "probes": [asdict(probe) for probe in self.probes],
+            "usable_assets": list(self.usable_assets),
+            "notes": list(self.notes),
+        }
+
+
+@dataclass(frozen=True)
+class LegacyMarketDataAssetProbe:
+    path: str
+    exists: bool
+    status: str
+    size_bytes: int = 0
+    table_count: int = 0
+    tables: list[str] = field(default_factory=list)
+    row_counts: dict[str, int] = field(default_factory=dict)
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class LegacyMarketDataRecoveryReport:
+    root: str
+    probes: list[LegacyMarketDataAssetProbe]
     usable_assets: list[str]
     notes: list[str] = field(default_factory=list)
 
@@ -127,6 +168,88 @@ def probe_lab2_snapshot_assets(root: str | Path = DEFAULT_LAB2_ROOT) -> Snapshot
     if any(probe.status == "empty" for probe in probes):
         notes.append("At least one Lab2 sqlite file is empty or uninitialized.")
     return SnapshotRecoveryReport(
+        root=str(resolved_root),
+        probes=probes,
+        usable_assets=usable_assets,
+        notes=notes,
+    )
+
+
+def probe_legacy_market_data_asset(path: str | Path) -> LegacyMarketDataAssetProbe:
+    resolved = Path(path)
+    if not resolved.exists():
+        return LegacyMarketDataAssetProbe(path=str(resolved), exists=False, status="missing")
+
+    try:
+        conn = sqlite3.connect(resolved)
+        try:
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            )
+            tables = [str(row[0]) for row in cursor.fetchall()]
+            if not tables:
+                return LegacyMarketDataAssetProbe(
+                    path=str(resolved),
+                    exists=True,
+                    status="empty",
+                    size_bytes=resolved.stat().st_size,
+                )
+            row_counts = {
+                table_name: _count_rows(conn, table_name)
+                for table_name in sorted(LEGACY_MARKET_TABLES.intersection(tables))
+            }
+            usable = row_counts.get("market_bars", 0) > 0 and row_counts.get("market_coverages", 0) > 0
+            status = "usable" if usable else ("legacy_only" if row_counts else "non_market_data")
+            return LegacyMarketDataAssetProbe(
+                path=str(resolved),
+                exists=True,
+                status=status,
+                size_bytes=resolved.stat().st_size,
+                table_count=len(tables),
+                tables=tables,
+                row_counts=row_counts,
+            )
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as exc:
+        return LegacyMarketDataAssetProbe(
+            path=str(resolved),
+            exists=True,
+            status="error",
+            size_bytes=resolved.stat().st_size,
+            error=str(exc),
+        )
+
+
+def probe_workspace_market_data_assets(
+    root: str | Path,
+    *,
+    exclude_paths: list[str | Path] | tuple[str | Path, ...] = (),
+) -> LegacyMarketDataRecoveryReport:
+    resolved_root = Path(root)
+    excluded = {Path(path).resolve() for path in exclude_paths}
+    probes: list[LegacyMarketDataAssetProbe] = []
+    for path in resolved_root.rglob("*.sqlite3"):
+        if path.resolve() in excluded:
+            continue
+        if any(part in WORKSPACE_SQLITE_SKIP_PARTS for part in path.parts):
+            continue
+        probes.append(probe_legacy_market_data_asset(path))
+
+    ranked = sorted(
+        (probe for probe in probes if probe.status == "usable"),
+        key=lambda probe: (
+            int(probe.row_counts.get("market_bars", 0)),
+            int(probe.row_counts.get("market_coverages", 0)),
+            int(probe.size_bytes),
+        ),
+        reverse=True,
+    )
+    usable_assets = [probe.path for probe in ranked]
+    notes: list[str] = []
+    if not usable_assets:
+        notes.append("No usable legacy market-data backup was found in the workspace.")
+    return LegacyMarketDataRecoveryReport(
         root=str(resolved_root),
         probes=probes,
         usable_assets=usable_assets,
@@ -293,4 +416,66 @@ def import_snapshot_cold_backup(
         "source_database_path": str(source_database_path),
         "probe": asdict(probe),
         "imported_tables": imported_tables,
+    }
+
+
+def import_legacy_market_data_backup(
+    repository: MarketDataRepository,
+    source_database_path: str | Path,
+) -> dict[str, Any]:
+    probe = probe_legacy_market_data_asset(source_database_path)
+    if probe.status != "usable":
+        return {
+            "status": "skipped",
+            "source_database_path": str(source_database_path),
+            "probe": asdict(probe),
+            "imported_tables": {},
+        }
+
+    with sqlite3.connect(source_database_path) as source_conn:
+        source_conn.row_factory = sqlite3.Row
+        bars_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for row in source_conn.execute("SELECT * FROM market_bars ORDER BY symbol, date").fetchall():
+            item = dict(row)
+            bars_by_symbol.setdefault(str(item["symbol"]), []).append(item)
+
+        actions_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        if probe.row_counts.get("market_actions", 0) > 0:
+            for row in source_conn.execute(
+                "SELECT * FROM market_actions ORDER BY symbol, date, action_type"
+            ).fetchall():
+                item = dict(row)
+                actions_by_symbol.setdefault(str(item["symbol"]), []).append(
+                    {
+                        "date": item["date"],
+                        "action_type": item["action_type"],
+                        "value": item["value"],
+                        "payload": loads(item.get("payload_json"), {}),
+                    }
+                )
+
+        coverage_rows = [
+            {
+                "symbol": row["symbol"],
+                "start_date": row["start_date"],
+                "end_date": row["end_date"],
+                "trade_days": row["trade_days"],
+            }
+            for row in source_conn.execute("SELECT * FROM market_coverages ORDER BY symbol").fetchall()
+        ]
+
+    for symbol, bars in bars_by_symbol.items():
+        repository.replace_bars(symbol, bars)
+    for symbol, actions in actions_by_symbol.items():
+        repository.replace_actions(symbol, actions)
+    repository.replace_coverages(coverage_rows)
+    return {
+        "status": "imported",
+        "source_database_path": str(source_database_path),
+        "probe": asdict(probe),
+        "imported_tables": {
+            "market_bars": sum(len(rows) for rows in bars_by_symbol.values()),
+            "market_actions": sum(len(rows) for rows in actions_by_symbol.values()),
+            "market_coverages": len(coverage_rows),
+        },
     }

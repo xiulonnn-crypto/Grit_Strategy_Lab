@@ -143,6 +143,105 @@ function createSnapshotOverview(refreshedAt = '2026-04-01T07:48:00Z'): ApiSnapsh
   };
 }
 
+function buildCleanSnapshotOverview(
+  refreshedAt = '2026-04-01T07:48:00Z',
+  mode: 'incremental' | 'repair' | 'full' = 'incremental',
+): ApiSnapshotOverview {
+  return {
+    overall_status: 'INCOMPLETE',
+    last_refreshed_at: refreshedAt,
+    dataset_snapshots: [
+      {
+        id: 'ds-corporate-actions',
+        name: '公司行为数据',
+        status: 'INCOMPLETE',
+        as_of: refreshedAt,
+        freshness_label: '刚刚刷新',
+        start_date: '1996-01-01',
+        end_date: '2026-04-01',
+        row_count: 182430,
+        source: 'tiingo',
+        fallback_source: 'alpha_vantage',
+        blocker: {
+          code: 'CORPORATE_ACTIONS_INCOMPLETE',
+          message: '公司行为数据部分可用，正式回测仍会受限。',
+        },
+      },
+      {
+        id: 'ds-price',
+        name: '股票价格数据',
+        status: 'READY',
+        as_of: refreshedAt,
+        freshness_label: '刚刚刷新',
+        start_date: '1996-01-01',
+        end_date: '2026-04-01',
+        row_count: 4320,
+        source: 'yahoo',
+        fallback_source: 'sec_edgar',
+        blocker: null,
+      },
+    ],
+    universe_snapshots: [
+      {
+        id: 'un-sp500',
+        name: '标普500',
+        status: 'INCOMPLETE',
+        as_of: refreshedAt,
+        freshness_label: '历史锚点补齐中 (38/61)',
+        window_start: '1996-01-01',
+        window_end: '2026-04-01',
+        anchor_schedule: '01-01 / 07-01',
+        member_count: 502,
+        source: 'official_announcement',
+        fallback_source: 'wikipedia_revision_history',
+        blocker: {
+          code: 'UNIVERSE_HISTORY_INCOMPLETE',
+          message: '股票池历史成分仍在补齐，当前还不能视为完整的点时成分快照。',
+        },
+      },
+      {
+        id: 'un-ndx100',
+        name: '纳指100',
+        status: 'INCOMPLETE',
+        as_of: refreshedAt,
+        freshness_label: '历史锚点补齐中 (14/61)',
+        window_start: '1996-01-01',
+        window_end: '2026-04-01',
+        anchor_schedule: '01-01 / 07-01',
+        member_count: 101,
+        source: 'nasdaq_official_annual_changes',
+        fallback_source: 'wikipedia_revision_history',
+        blocker: {
+          code: 'UNIVERSE_HISTORY_INCOMPLETE',
+          message: '股票池历史成分仍在补齐，当前还不能视为完整的点时成分快照。',
+        },
+      },
+    ],
+    latest_job: {
+      id: 'snap-job-20260401',
+      status: 'COMPLETED',
+      started_at: '2026-04-01T07:30:00Z',
+      completed_at: refreshedAt,
+      request: {
+        mode,
+        targets: ['price', 'corporate', 'universes'],
+      },
+      summary: {
+        dataset_snapshot_count: 2,
+        universe_snapshot_count: 2,
+        status: 'INCOMPLETE',
+        mode,
+      },
+      warnings: [],
+      errors: [],
+    },
+    blocking_code: 'CORPORATE_ACTIONS_INCOMPLETE',
+    blocking_target: 'ds-corporate-actions',
+    message: '当前已有可用数据，但还不是完整正式快照。',
+    allowed_actions: ['refresh_snapshots'],
+  };
+}
+
 export const demoApi: DemoApi = {
   async getWorkspaceOverview(includeCleanupAudit = false): Promise<ApiWorkspaceOverview> {
     const overview: ApiWorkspaceOverview = {
@@ -258,6 +357,8 @@ export const demoApi: DemoApi = {
     recalculateJob(job);
     return clone(job);
   },
-  async getSnapshotOverview(): Promise<ApiSnapshotOverview> { return createSnapshotOverview(); },
-  async refreshSnapshots(): Promise<ApiSnapshotOverview> { return createSnapshotOverview('2026-04-01T10:00:00Z'); },
+  async getSnapshotOverview(): Promise<ApiSnapshotOverview> { return buildCleanSnapshotOverview(); },
+  async refreshSnapshots(payload): Promise<ApiSnapshotOverview> {
+    return buildCleanSnapshotOverview('2026-04-01T10:00:00Z', payload?.mode ?? 'incremental');
+  },
 };
