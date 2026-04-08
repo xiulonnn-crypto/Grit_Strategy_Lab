@@ -27,7 +27,7 @@ type WorkspaceRecentRunsSectionProps = {
 const TEXT = {
   title: '最近回测',
   copy: '展示最近 10 次已完成的回测任务，点击可追溯审计详情。',
-  empty: '暂无最近回测。先 materialize 一个策略再填充历史。',
+  empty: '暂无最近回测。先创建一个策略再填充历史。',
   error: '最近回测加载失败。',
   retry: '重试',
 } as const;

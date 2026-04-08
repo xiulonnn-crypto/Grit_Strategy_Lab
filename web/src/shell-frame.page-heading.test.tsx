@@ -28,5 +28,13 @@ describe('shell frame page heading hooks', () => {
     );
 
     expect(container.querySelector('.page-heading')).toBeNull();
+
+    rerender(
+      <ShellFrameCn route={{ kind: 'backtest', strategyId: 'strat-001' }}>
+        <div>backtest submit</div>
+      </ShellFrameCn>,
+    );
+
+    expect(container.querySelector('.page-heading')).toBeNull();
   });
 });

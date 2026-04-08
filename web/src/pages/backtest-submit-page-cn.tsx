@@ -1,7 +1,7 @@
-﻿import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
-import { ApiError, type ApiBacktestRunDetail, type ApiBacktestSubmissionPreview, type ApiStrategyDetail } from '../types';
+import { ApiError, type ApiBacktestRunDetail, type ApiStrategyDetail } from '../types';
 import './creation-backtest.css';
 
 type RunPrefill = {
@@ -13,13 +13,23 @@ type RunPrefill = {
 };
 
 const TEXT = {
-  loading: '正在加载策略...',
+  loading: '正在加载策略',
+  eyebrow: '真实执行',
+  description: '确认回测区间、参数版本和快照状态，再生成正式回测。',
   backToStrategy: '返回策略',
-  refreshSnapshots: '刷新快照',
-  preview: '预览发起',
   submit: '提交回测',
   parameterTitle: '提交参数',
-  summaryTitle: '提交摘要',
+  panelTitle: '提交前确认',
+  panelCopy: '请先检查回测时间窗、提交所用参数版本，以及当前快照是否已经就绪。',
+  rangeEyebrow: '回测区间',
+  rangeTitle: '确认时间窗',
+  rangeCopy: '先确认本次正式回测的开始和结束日期，再决定是否沿用快捷区间。',
+  versionEyebrow: '参数版本',
+  versionTitle: '确认策略版本',
+  versionCopy: '这里展示当前准备提交的策略名称、参数版本、股票池以及再平衡设置。',
+  snapshotEyebrow: '快照状态',
+  snapshotTitle: '确认快照状态',
+  snapshotCopy: '提交前请确认数据集与股票池快照是否可用，单标的策略不需要额外股票池快照。',
   startDate: '开始日期',
   endDate: '结束日期',
   lastTenYears: '最近10年',
@@ -27,31 +37,29 @@ const TEXT = {
   lastThirtyYears: '最近30年',
   invalidDates: '开始日期必须早于或等于结束日期。',
   missingDates: '请先选择开始日期和结束日期。',
-  noPreview: '尚未生成预览，请先运行一次预览。',
-  previewWarnings: '预览警告',
-  previewMetrics: '预览指标',
-  previewSnapshot: '快照摘要',
+  sourceRunLoadFailed: '来源回测加载失败，已退回策略当前版本。',
+  strategyName: '策略名称',
   parameterVersion: '参数版本',
+  universeName: '股票池',
+  rebalance: '再平衡',
   datasetSnapshot: '数据集快照',
   universeSnapshot: '股票池快照',
-  sourceRunLoadFailed: '来源回测读取失败，已回退到当前策略默认参数。',
+  sourceRun: '来源回测',
+  submitState: '提交状态',
+  readyToSubmit: '可提交',
+  waitingConfirm: '待确认',
+  refreshNeeded: '待刷新',
+  singleSymbolDirect: '不适用（单标的）',
 } as const;
+
+const DEFAULT_START_DATE = '2016-03-24';
+const DEFAULT_END_DATE = '2026-03-24';
 
 function formatDate(date: Date): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
-}
-
-function formatValue(value: unknown): string {
-  if (value === null || value === undefined) {
-    return '-';
-  }
-  if (typeof value === 'number') {
-    return Number.isInteger(value) ? String(value) : value.toFixed(2);
-  }
-  return String(value);
 }
 
 function readString(value: unknown): string | null {
@@ -69,6 +77,25 @@ function readSnapshotValue(snapshot: Record<string, unknown> | undefined, keys: 
     }
   }
   return null;
+}
+
+function isDirectSymbolUniverse(
+  strategy: Pick<ApiStrategyDetail, 'strategy_type' | 'universe_name' | 'benchmark_symbol'> | null,
+): boolean {
+  if (!strategy) {
+    return false;
+  }
+  const universeName = (strategy.universe_name ?? '').trim().toUpperCase();
+  if (universeName) {
+    if (['SP500', 'S&P500', 'SP-500', 'NASDAQ100', 'NASDAQ-100', 'NDX100', 'NDX-100'].includes(universeName)) {
+      return false;
+    }
+    if (/^[A-Z0-9.]+$/.test(universeName)) {
+      return true;
+    }
+  }
+  const benchmarkSymbol = (strategy.benchmark_symbol ?? '').trim().toUpperCase();
+  return strategy.strategy_type === 'GRID' && /^[A-Z0-9.]+$/.test(benchmarkSymbol || 'QQQ');
 }
 
 function readRunPrefill(detail: ApiBacktestRunDetail): RunPrefill {
@@ -89,7 +116,7 @@ function readRunPrefill(detail: ApiBacktestRunDetail): RunPrefill {
 
 function KeyValue({ label, value }: { label: string; value: string }): JSX.Element {
   return (
-    <div className="kv-item">
+    <div className="kv-item creation-kv-item">
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
@@ -106,13 +133,12 @@ export function BacktestSubmitPageCn({
   const api = useApiClient();
   const [strategy, setStrategy] = useState<ApiStrategyDetail | null>(null);
   const [sourceRunDetail, setSourceRunDetail] = useState<ApiBacktestRunDetail | null>(null);
-  const [preview, setPreview] = useState<ApiBacktestSubmissionPreview | null>(null);
   const [loading, setLoading] = useState(true);
   const [sourceRunError, setSourceRunError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [startDate, setStartDate] = useState('2016-03-24');
-  const [endDate, setEndDate] = useState('2026-03-24');
+  const [startDate, setStartDate] = useState(DEFAULT_START_DATE);
+  const [endDate, setEndDate] = useState(DEFAULT_END_DATE);
 
   useEffect(() => {
     let cancelled = false;
@@ -181,21 +207,28 @@ export function BacktestSubmitPageCn({
   }, [api, sourceRunId]);
 
   const sourcePrefill = sourceRunDetail ? readRunPrefill(sourceRunDetail) : null;
-  const effectiveParameterVersionId = sourcePrefill?.parameterVersionId ?? strategy?.current_parameter_version_id ?? null;
-  const effectiveDatasetSnapshotId = sourcePrefill?.datasetSnapshotId ?? strategy?.dataset_snapshot_id ?? null;
-  const effectiveUniverseSnapshotId = sourcePrefill?.universeSnapshotId ?? strategy?.universe_snapshot_id ?? null;
+  const directSymbolUniverse = isDirectSymbolUniverse(strategy);
+  const effectiveParameterVersionId =
+    sourcePrefill?.parameterVersionId ?? strategy?.current_parameter_version_id ?? null;
+  const effectiveDatasetSnapshotId =
+    sourcePrefill?.datasetSnapshotId ?? strategy?.dataset_snapshot_id ?? null;
+  const effectiveUniverseSnapshotId =
+    directSymbolUniverse ? null : sourcePrefill?.universeSnapshotId ?? strategy?.universe_snapshot_id ?? null;
+  const submitState = strategy?.allowed_actions?.includes('backtest')
+    ? TEXT.readyToSubmit
+    : TEXT.waitingConfirm;
 
   function applyPreset(years: number): void {
-    const end = new Date();
+    const end = new Date(DEFAULT_END_DATE);
     const start = new Date(end);
     start.setFullYear(end.getFullYear() - years);
     setStartDate(formatDate(start));
-    setEndDate(formatDate(end));
+    setEndDate(DEFAULT_END_DATE);
   }
 
-  function validateDates(missingMessage: string): boolean {
+  function validateDates(): boolean {
     if (!startDate || !endDate) {
-      setError(missingMessage);
+      setError(TEXT.missingDates);
       return false;
     }
     if (startDate > endDate) {
@@ -205,45 +238,8 @@ export function BacktestSubmitPageCn({
     return true;
   }
 
-  async function refreshSnapshots(): Promise<void> {
-    try {
-      setBusy(true);
-      setError(null);
-      await api.refreshSnapshots();
-    } catch (caught) {
-      setError((caught as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function runPreview(): Promise<void> {
-    if (!validateDates(TEXT.missingDates)) {
-      return;
-    }
-
-    try {
-      setBusy(true);
-      setError(null);
-      const payload = await api.previewBacktestRun(strategyId, {
-        start_date: startDate,
-        end_date: endDate,
-        parameter_version_id: effectiveParameterVersionId ?? undefined,
-        dataset_snapshot_id: effectiveDatasetSnapshotId ?? undefined,
-        universe_snapshot_id: effectiveUniverseSnapshotId ?? undefined,
-        ...(sourceRunId ? { source_run_id: sourceRunId } : {}),
-      });
-      setPreview(payload);
-    } catch (caught) {
-      const errorValue = caught as ApiError;
-      setError(errorValue.blocking_code ? `${errorValue.message} (${errorValue.blocking_code})` : errorValue.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function submit(): Promise<void> {
-    if (!validateDates(TEXT.missingDates)) {
+    if (!validateDates()) {
       return;
     }
 
@@ -268,9 +264,6 @@ export function BacktestSubmitPageCn({
     }
   }
 
-  const previewMetrics = useMemo(() => Object.entries(preview?.metrics ?? {}), [preview]);
-  const previewSnapshots = useMemo(() => Object.entries(preview?.snapshot_summary ?? {}), [preview]);
-
   if (loading) {
     return (
       <section className="panel backtest-submit-page">
@@ -286,13 +279,13 @@ export function BacktestSubmitPageCn({
 
   return (
     <div className="stack creation-shell backtest-submit-page">
-      <section className="panel creation-hero">
-        <div className="creation-hero__copy">
-          <p className="eyebrow">真实执行</p>
-          <h2>{strategy?.name ?? strategyId}</h2>
-          <p className="hero-copy">为 {strategy?.name ?? strategyId} 生成正式回测预览，并保留本次相关的快照信息。</p>
+      <section className="panel backtest-hero">
+        <div className="backtest-hero__copy">
+          <p className="eyebrow">{TEXT.eyebrow}</p>
+          <h1>{strategy?.name ?? strategyId}</h1>
+          <p className="hero-copy">{TEXT.description}</p>
         </div>
-        <div className="hero-actions">
+        <div className="backtest-hero__actions">
           <button className="ghost-button" onClick={() => navigateTo(`/strategies/${strategyId}`)} type="button">
             {TEXT.backToStrategy}
           </button>
@@ -305,128 +298,90 @@ export function BacktestSubmitPageCn({
       {sourceRunError ? <div className="error-banner">{TEXT.sourceRunLoadFailed} {sourceRunError}</div> : null}
       {error ? <div className="error-banner">{error}</div> : null}
 
-      <div className="creation-session-grid">
-        <section className="panel creation-session-main">
-          <div className="panel-header">
-            <div>
-              <h3>{TEXT.parameterTitle}</h3>
-              <p className="hero-copy creation-panel-copy">先确认回测区间、参数版本与快照状态，再预览或提交。</p>
-            </div>
+      <section className="panel backtest-submit-panel backtest-submit-panel--stack">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">{TEXT.parameterTitle}</p>
+            <h3>{TEXT.panelTitle}</h3>
+            <p className="hero-copy creation-panel-copy">{TEXT.panelCopy}</p>
           </div>
+        </div>
 
-          <div className="kv-grid">
-            <KeyValue label="股票池" value={strategy?.universe_name ?? '-'} />
-            <KeyValue label={TEXT.parameterVersion} value={effectiveParameterVersionId ?? '-'} />
-            <KeyValue label={TEXT.datasetSnapshot} value={effectiveDatasetSnapshotId ?? '-'} />
-            <KeyValue label={TEXT.universeSnapshot} value={effectiveUniverseSnapshotId ?? '-'} />
-            <KeyValue label="再平衡" value={strategy?.rebalance_frequency ?? '-'} />
-            <KeyValue label="动作" value={strategy?.allowed_actions?.includes('backtest') ? '可提交' : '待确认'} />
-          </div>
-
-          <div className="creation-date-grid">
-            <label>
-              <span>{TEXT.startDate}</span>
-              <input aria-label={TEXT.startDate} onChange={(event) => setStartDate(event.target.value)} type="date" value={startDate} />
-            </label>
-            <label>
-              <span>{TEXT.endDate}</span>
-              <input aria-label={TEXT.endDate} onChange={(event) => setEndDate(event.target.value)} type="date" value={endDate} />
-            </label>
-          </div>
-
-          <div className="hero-actions">
-            <button className="ghost-button" onClick={() => applyPreset(10)} type="button">
-              {TEXT.lastTenYears}
-            </button>
-            <button className="ghost-button" onClick={() => applyPreset(20)} type="button">
-              {TEXT.lastTwentyYears}
-            </button>
-            <button className="ghost-button" onClick={() => applyPreset(30)} type="button">
-              {TEXT.lastThirtyYears}
-            </button>
-          </div>
-
-          <div className="hero-actions">
-            <button className="ghost-button" disabled={busy} onClick={() => void refreshSnapshots()} type="button">
-              {TEXT.refreshSnapshots}
-            </button>
-            <button className="primary-button" disabled={busy} onClick={() => void runPreview()} type="button">
-              {TEXT.preview}
-            </button>
-          </div>
-        </section>
-
-        <aside className="creation-session-sidebar">
-          <section className="panel">
-            <div className="panel-header">
+        <div className="backtest-submit-sections">
+          <section className="creation-subpanel backtest-submit-section">
+            <div className="field-group__header">
               <div>
-                <p className="eyebrow">{TEXT.summaryTitle}</p>
-                <h3>提交前要先看的信息</h3>
+                <p className="eyebrow">{TEXT.rangeEyebrow}</p>
+                <h4>{TEXT.rangeTitle}</h4>
               </div>
             </div>
-
-            {preview ? (
-              <div className="creation-preview-stack">
-                <div className="kv-grid">
-                  <KeyValue label="生效开始" value={formatValue(preview.effective_start_date ?? preview.effective_date)} />
-                  <KeyValue label="生效结束" value={formatValue(preview.effective_end_date)} />
-                  <KeyValue label="样本外切点" value={formatValue(preview.oos_start_date)} />
-                  <KeyValue label="数据区间" value={formatValue(preview.data_segment_type)} />
-                </div>
-
-                <section className="creation-preview-group">
-                  <h4>{TEXT.previewWarnings}</h4>
-                  {preview.warnings?.length ? (
-                    <div className="parameter-list">
-                      {preview.warnings.map((warning, index) => (
-                        <div className="parameter-row creation-parameter-row" key={`${warning}-${index}`}>
-                          <strong>{TEXT.previewWarnings}</strong>
-                          <span>{warning}</span>
-                          <small>预览</small>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="empty-state">未返回预览警告。</p>
-                  )}
-                </section>
-
-                <section className="creation-preview-group">
-                  <h4>{TEXT.previewMetrics}</h4>
-                  {previewMetrics.length ? (
-                    <div className="kv-grid">
-                      {previewMetrics.map(([key, value]) => (
-                        <KeyValue key={key} label={key} value={formatValue(value)} />
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="empty-state">暂无预览指标。</p>
-                  )}
-                </section>
-
-                <section className="creation-preview-group">
-                  <h4>{TEXT.previewSnapshot}</h4>
-                  {previewSnapshots.length ? (
-                    <div className="parameter-list">
-                      {previewSnapshots.map(([key, value]) => (
-                        <div className="parameter-row creation-parameter-row" key={key}>
-                          <span>{key}</span>
-                          <strong>{formatValue(value)}</strong>
-                          <small>{TEXT.previewSnapshot}</small>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="empty-state">暂无快照摘要。</p>
-                  )}
-                </section>
-              </div>
-            ) : (
-              <p className="empty-state">尚未生成预览，请先运行一次预览。</p>
-            )}
+            <p className="creation-step-card__copy">{TEXT.rangeCopy}</p>
+            <div className="creation-date-grid">
+              <label className="date-field">
+                <span>{TEXT.startDate}</span>
+                <input
+                  aria-label={TEXT.startDate}
+                  onChange={(event) => setStartDate(event.target.value)}
+                  type="date"
+                  value={startDate}
+                />
+              </label>
+              <label className="date-field">
+                <span>{TEXT.endDate}</span>
+                <input
+                  aria-label={TEXT.endDate}
+                  onChange={(event) => setEndDate(event.target.value)}
+                  type="date"
+                  value={endDate}
+                />
+              </label>
+            </div>
+            <div className="chip-row">
+              <button className="ghost-button" onClick={() => applyPreset(10)} type="button">
+                {TEXT.lastTenYears}
+              </button>
+              <button className="ghost-button" onClick={() => applyPreset(20)} type="button">
+                {TEXT.lastTwentyYears}
+              </button>
+              <button className="ghost-button" onClick={() => applyPreset(30)} type="button">
+                {TEXT.lastThirtyYears}
+              </button>
+            </div>
           </section>
-        </aside>
-      </div>
+
+          <section className="creation-subpanel backtest-submit-section">
+            <div className="field-group__header">
+              <div>
+                <p className="eyebrow">{TEXT.versionEyebrow}</p>
+                <h4>{TEXT.versionTitle}</h4>
+              </div>
+            </div>
+            <p className="creation-step-card__copy">{TEXT.versionCopy}</p>
+            <div className="kv-grid backtest-submit-kv-grid">
+              <KeyValue label={TEXT.strategyName} value={strategy?.name ?? strategyId} />
+              <KeyValue label={TEXT.parameterVersion} value={effectiveParameterVersionId ?? '-'} />
+              <KeyValue label={TEXT.universeName} value={strategy?.universe_name ?? '-'} />
+              <KeyValue label={TEXT.rebalance} value={strategy?.rebalance_frequency ?? '-'} />
+            </div>
+          </section>
+
+          <section className="creation-subpanel backtest-submit-section">
+            <div className="field-group__header">
+              <div>
+                <p className="eyebrow">{TEXT.snapshotEyebrow}</p>
+                <h4>{TEXT.snapshotTitle}</h4>
+              </div>
+            </div>
+            <p className="creation-step-card__copy">{TEXT.snapshotCopy}</p>
+            <div className="kv-grid backtest-submit-kv-grid">
+              <KeyValue label={TEXT.datasetSnapshot} value={effectiveDatasetSnapshotId ?? TEXT.refreshNeeded} />
+              <KeyValue label={TEXT.universeSnapshot} value={effectiveUniverseSnapshotId ?? TEXT.singleSymbolDirect} />
+              <KeyValue label={TEXT.sourceRun} value={sourceRunId ?? '-'} />
+              <KeyValue label={TEXT.submitState} value={submitState} />
+            </div>
+          </section>
+        </div>
+      </section>
     </div>
   );
 }

@@ -102,7 +102,7 @@
   display: grid;
   gap: 16px;
   min-height: 320px;
-  align-content: center;
+  align-content: start;
 }
 
 .workspace-board-panel {

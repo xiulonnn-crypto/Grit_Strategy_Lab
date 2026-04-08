@@ -63,7 +63,7 @@ const detail: ApiBacktestRunDetail = {
   id: 'bt-9.6802970000',
   strategy_name: '美股质量动量',
   status: 'COMPLETED',
-  metrics: { total_return: 232.3, sharpe: 0.85, max_drawdown: -24.9 },
+  metrics: { total_return: 2.323, sharpe: 0.85, max_drawdown: -0.249 },
   trade_audit_items: Object.values(audits).map((audit) => ({
     trade_id: audit.trade_id,
     symbol: audit.symbol,

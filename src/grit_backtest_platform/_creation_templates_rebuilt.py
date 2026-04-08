@@ -43,6 +43,15 @@ class StrategyTemplate:
         }
 
 
+STRATEGY_TYPE_TITLES = {
+    "GENERAL": "通用策略",
+    "GRID": "网格交易策略",
+    "MOMENTUM": "动量 / 趋势跟随策略",
+    "MEAN_REVERSION": "均值回归策略",
+    "BUY_AND_HOLD": "定投策略",
+}
+
+
 STRATEGY_TEMPLATES: dict[str, StrategyTemplate] = {
     "GENERAL": StrategyTemplate(
         key="GENERAL",
@@ -57,21 +66,29 @@ STRATEGY_TEMPLATES: dict[str, StrategyTemplate] = {
         name="Grid Strategy",
         description="Grid accumulation / trim strategy around a single target symbol.",
         prompt_hints=("网格", "grid"),
-        top_level_defaults={"strategy_type": "GRID", "universe_name": "", "rebalance_frequency": None},
+        top_level_defaults={"strategy_type": "GRID", "universe_name": "", "rebalance_frequency": "never"},
         parameter_defaults={
+            "strategy_name": None,
+            "strategy_description": None,
+            "benchmark_symbol": "SPY",
             "initial_position": None,
             "grid_interval": None,
             "buy_size_pct": None,
             "sell_step_pct": None,
             "sell_size_pct": None,
+            "max_stop_loss_pct": None,
             "capital": None,
         },
         fields=[
-            TemplateField("initial_position", "初始买入(%)", "number"),
-            TemplateField("grid_interval", "每跌间距(%)", "number"),
-            TemplateField("buy_size_pct", "每次加仓(%)", "number"),
-            TemplateField("sell_step_pct", "每涨步长(%)", "number"),
-            TemplateField("sell_size_pct", "每次减仓(%)", "number"),
+            TemplateField("strategy_name", "策略名称", "string"),
+            TemplateField("strategy_description", "策略描述", "string"),
+            TemplateField("benchmark_symbol", "基准", "enum", "SPY"),
+            TemplateField("initial_position", "初始仓位(%)", "number"),
+            TemplateField("grid_interval", "下跌间距(%)", "number"),
+            TemplateField("buy_size_pct", "下跌买入仓位(%)", "number"),
+            TemplateField("sell_step_pct", "上涨间距(%)", "number"),
+            TemplateField("sell_size_pct", "上涨卖出仓位(%)", "number"),
+            TemplateField("max_stop_loss_pct", "最大止损仓位(%)", "number"),
             TemplateField("capital", "本金", "number"),
         ],
     ),
@@ -94,6 +111,54 @@ STRATEGY_TEMPLATES: dict[str, StrategyTemplate] = {
             TemplateField("top_n", "选股数量", "integer"),
             TemplateField("weighting_method", "权重方法", "string"),
             TemplateField("rebalance_anchor_dates", "调仓锚点", "string"),
+        ],
+    ),
+    "MEAN_REVERSION": StrategyTemplate(
+        key="MEAN_REVERSION",
+        name="Mean Reversion",
+        description="Mean reversion strategy around a target symbol or universe.",
+        prompt_hints=("均值回归", "mean reversion", "reversion"),
+        top_level_defaults={"strategy_type": "MEAN_REVERSION", "universe_name": "", "rebalance_frequency": "weekly"},
+        parameter_defaults={
+            "strategy_name": None,
+            "strategy_description": None,
+            "benchmark_symbol": "SPY",
+            "trading_logic": None,
+            "deviation_threshold": None,
+            "window_size": None,
+            "mean_target": None,
+            "risk_budget": None,
+        },
+        fields=[
+            TemplateField("strategy_name", "策略名称", "string"),
+            TemplateField("strategy_description", "策略描述", "string"),
+            TemplateField("benchmark_symbol", "基准", "enum", "SPY"),
+            TemplateField("trading_logic", "交易逻辑", "string"),
+            TemplateField("deviation_threshold", "标准差阈值", "number"),
+            TemplateField("window_size", "窗口大小", "integer"),
+            TemplateField("mean_target", "回归目标", "string"),
+            TemplateField("risk_budget", "风险预算(%)", "number"),
+        ],
+    ),
+    "BUY_AND_HOLD": StrategyTemplate(
+        key="BUY_AND_HOLD",
+        name="DCA Strategy",
+        description="Periodic ETF accumulation strategy.",
+        prompt_hints=("定投", "buy and hold", "dca"),
+        top_level_defaults={"strategy_type": "BUY_AND_HOLD", "universe_name": "", "rebalance_frequency": "never"},
+        parameter_defaults={
+            "strategy_name": None,
+            "strategy_description": None,
+            "benchmark_symbol": "SPY",
+            "contribution_amount": None,
+            "investment_frequency": "monthly",
+        },
+        fields=[
+            TemplateField("strategy_name", "策略名称", "string"),
+            TemplateField("strategy_description", "策略描述", "string"),
+            TemplateField("benchmark_symbol", "基准", "enum", "SPY"),
+            TemplateField("contribution_amount", "定投金额(USD)", "number"),
+            TemplateField("investment_frequency", "定投频率", "enum", "monthly"),
         ],
     ),
 }
@@ -125,8 +190,8 @@ def blank_confirmation_fields(strategy_type: str) -> dict[str, list[dict[str, An
     template = STRATEGY_TEMPLATES.get(normalized_type, STRATEGY_TEMPLATES["GENERAL"])
     top_level = [
         _field("策略类型", "strategy_type", template.top_level_defaults.get("strategy_type"), "system_default"),
-        _field("标的范围", "universe_name", template.top_level_defaults.get("universe_name"), "system_default"),
-        _field("调仓频率", "rebalance_frequency", template.top_level_defaults.get("rebalance_frequency"), "system_default"),
+        _field("股票池", "universe_name", template.top_level_defaults.get("universe_name"), "system_default"),
+        _field("再平衡频次", "rebalance_frequency", template.top_level_defaults.get("rebalance_frequency"), "system_default"),
     ]
     parameters = [
         _field(field.label, field.key, template.parameter_defaults.get(field.key), "system_default")
@@ -135,11 +200,24 @@ def blank_confirmation_fields(strategy_type: str) -> dict[str, list[dict[str, An
     return {"top_level": top_level, "parameters": parameters}
 
 
+def _coerce_number(raw: str) -> int | float:
+    value = float(raw)
+    return int(value) if value.is_integer() else value
+
+
 def _extract_number(text: str, patterns: Sequence[str]) -> int | None:
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
             return int(match.group(1))
+    return None
+
+
+def _extract_numeric(text: str, patterns: Sequence[str]) -> int | float | None:
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return _coerce_number(match.group(1))
     return None
 
 
@@ -155,6 +233,20 @@ def _extract_anchor_dates(text: str) -> str | None:
 
 def detect_universe(messages: Sequence[Mapping[str, Any]] | str) -> tuple[str, str | None, list[dict[str, Any]]]:
     text = _messages_to_text(messages)
+    buy_ticker_match = re.search(
+        r"(?:买入|围绕|交易)\s*([A-Za-z]{1,10})\s*(?:-?\d+(?:\.\d+)?)?%\s*(?:仓位)?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if buy_ticker_match:
+        return buy_ticker_match.group(1).upper(), "user_input", []
+    generic_ticker_match = re.search(
+        r"(?<![A-Za-z])(QQQ|SPY|DIA|IWM|AAPL|MSFT|NVDA|TSLA|META|GOOGL|AMZN)(?![A-Za-z])",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if generic_ticker_match:
+        return generic_ticker_match.group(1).upper(), "user_input", []
     ticker_match = re.search(r"目标\s*([A-Za-z]{1,10})", text, flags=re.IGNORECASE)
     if ticker_match:
         return ticker_match.group(1).upper(), "user_input", []
@@ -172,6 +264,8 @@ def _detect_strategy_type(text: str, forced_type: str | None = None) -> str:
     if forced_type and forced_type.upper() != "GENERAL":
         return forced_type.upper()
     lowered = text.lower()
+    if re.search(r"(每下跌|每跌|下跌).*(买入)", text) and re.search(r"(每上涨|每涨|上涨).*(卖出)", text):
+        return "GRID"
     if "网格" in text or "grid" in lowered:
         return "GRID"
     if "动量" in text or "momentum" in lowered:
@@ -187,12 +281,345 @@ def _extract_grid_payload(text: str) -> tuple[dict[str, Any], dict[str, Any]]:
         "rebalance_frequency": (None, "system_default"),
     }
     parameters = {
-        "initial_position": (_extract_number(text, [r"初始买入\s*(\d+)%", r"初始仓位\s*(\d+)%"]), "user_input"),
-        "grid_interval": (_extract_number(text, [r"每跌\s*(\d+)%", r"下跌\s*(\d+)%"]), "user_input"),
-        "buy_size_pct": (_extract_number(text, [r"每跌\s*\d+%\s*买入\s*(\d+)%", r"买入\s*(\d+)%"]), "user_input"),
-        "sell_step_pct": (_extract_number(text, [r"每涨\s*(\d+)%", r"上涨\s*(\d+)%"]), "user_input"),
-        "sell_size_pct": (_extract_number(text, [r"卖出\s*(\d+)%"]), "user_input"),
+        "initial_position": (
+            _extract_numeric(
+                text,
+                [
+                    r"初始买入\s*(-?\d+(?:\.\d+)?)%",
+                    r"初始仓位\s*(-?\d+(?:\.\d+)?)%",
+                    r"买入(?:[A-Za-z]{1,10})?\s*(-?\d+(?:\.\d+)?)%\s*仓位",
+                ],
+            ),
+            "user_input",
+        ),
+        "grid_interval": (_extract_numeric(text, [r"每跌\s*(-?\d+(?:\.\d+)?)%", r"下跌\s*(-?\d+(?:\.\d+)?)%"]), "user_input"),
+        "buy_size_pct": (
+            _extract_numeric(
+                text,
+                [
+                    r"每跌\s*-?\d+(?:\.\d+)?%\s*买入\s*(-?\d+(?:\.\d+)?)%",
+                    r"下跌\s*-?\d+(?:\.\d+)?%\s*买入\s*(-?\d+(?:\.\d+)?)%",
+                ],
+            ),
+            "user_input",
+        ),
+        "sell_step_pct": (_extract_numeric(text, [r"每涨\s*(-?\d+(?:\.\d+)?)%", r"上涨\s*(-?\d+(?:\.\d+)?)%"]), "user_input"),
+        "sell_size_pct": (
+            _extract_numeric(
+                text,
+                [
+                    r"每涨\s*-?\d+(?:\.\d+)?%\s*卖出\s*(-?\d+(?:\.\d+)?)%",
+                    r"上涨\s*-?\d+(?:\.\d+)?%\s*卖出\s*(-?\d+(?:\.\d+)?)%",
+                    r"卖出\s*(-?\d+(?:\.\d+)?)%",
+                ],
+            ),
+            "user_input",
+        ),
+        "max_stop_loss_pct": (
+            _extract_numeric(
+                text,
+                [
+                    r"最大止损(?:仓位)?\s*(-?\d+(?:\.\d+)?)%",
+                    r"止损(?:仓位)?\s*(-?\d+(?:\.\d+)?)%",
+                    r"单笔亏损达到\s*(-?\d+(?:\.\d+)?)%",
+                ],
+            ),
+            "user_input",
+        ),
         "capital": (_extract_number(text, [r"本金\s*(\d+)"]), "user_input"),
+    }
+    return top_level, parameters
+
+
+def _format_extracted_value(value: int | float | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _build_grid_strategy_description(
+    *,
+    text: str,
+    universe_name: str,
+    capital: int | None,
+    initial_position: int | float | None,
+    grid_interval: int | float | None,
+    buy_size_pct: int | float | None,
+    sell_step_pct: int | float | None,
+    sell_size_pct: int | float | None,
+) -> str | None:
+    if not text.strip():
+        return None
+
+    extracted_values = [
+        universe_name,
+        capital,
+        initial_position,
+        grid_interval,
+        buy_size_pct,
+        sell_step_pct,
+        sell_size_pct,
+    ]
+    if not any(value not in (None, "", []) for value in extracted_values):
+        return None
+
+    details: list[str] = []
+    if capital is not None:
+        details.append(f"本金{_format_extracted_value(capital)}")
+
+    details.append(f"围绕{universe_name}执行网格交易" if universe_name else "执行网格交易")
+
+    if initial_position is not None:
+        details.append(f"初始仓位{_format_extracted_value(initial_position)}%")
+
+    if grid_interval is not None and buy_size_pct is not None:
+        details.append(
+            f"每下跌{_format_extracted_value(grid_interval)}%买入{_format_extracted_value(buy_size_pct)}%"
+        )
+    elif grid_interval is not None:
+        details.append(f"下跌间距{_format_extracted_value(grid_interval)}%")
+
+    if sell_step_pct is not None and sell_size_pct is not None:
+        details.append(
+            f"每上涨{_format_extracted_value(sell_step_pct)}%卖出{_format_extracted_value(sell_size_pct)}%"
+        )
+    elif sell_step_pct is not None:
+        details.append(f"上涨间距{_format_extracted_value(sell_step_pct)}%")
+
+    return "，".join(details) + "。"
+
+
+def _infer_benchmark_symbol(universe_name: str) -> tuple[str, str]:
+    normalized = str(universe_name or "").strip().upper()
+    if normalized in {"SPY", "QQQ"}:
+        return normalized, "system_inference"
+    return "SPY", "system_default"
+
+
+def _extract_frequency_value(text: str, *, default: str | None = None) -> tuple[str | None, str]:
+    lowered = text.lower()
+    if "每月" in text or "月度" in text or "monthly" in lowered:
+        return "monthly", "user_input"
+    if "每周" in text or "weekly" in lowered:
+        return "weekly", "user_input"
+    if "每天" in text or "每日" in text or "daily" in lowered:
+        return "daily", "user_input"
+    if "每季" in text or "季度" in text or "quarterly" in lowered:
+        return "quarterly", "user_input"
+    if "每年" in text or "年度" in text or "yearly" in lowered:
+        return "yearly", "user_input"
+    return default, "system_default"
+
+
+def _investment_frequency_label(value: str | None) -> str:
+    return {
+        "daily": "每日",
+        "weekly": "每周",
+        "monthly": "月度",
+        "quarterly": "季度",
+        "yearly": "年度",
+    }.get(str(value or "").lower(), "定期")
+
+
+def _build_buy_and_hold_strategy_name(universe_name: str, investment_frequency: str | None) -> str | None:
+    normalized_universe = str(universe_name or "").strip()
+    if not normalized_universe:
+        return None
+    frequency_label = _investment_frequency_label(investment_frequency)
+    return f"{normalized_universe} {frequency_label}定投策略"
+
+
+def _build_buy_and_hold_strategy_description(
+    *,
+    text: str,
+    universe_name: str,
+    contribution_amount: int | float | None,
+    investment_frequency: str | None,
+) -> str | None:
+    if not text.strip():
+        return None
+    details: list[str] = []
+    if universe_name:
+        details.append(f"围绕{universe_name}执行{_investment_frequency_label(investment_frequency)}定投")
+    else:
+        details.append(f"执行{_investment_frequency_label(investment_frequency)}定投")
+    if contribution_amount is not None:
+        details.append(f"每期买入{_format_extracted_value(contribution_amount)}USD")
+    if "第一个交易日" in text:
+        details.append("按每期首个交易日执行")
+    if "持有" in text:
+        details.append("长期持有")
+    return "，".join(details) + "。"
+
+
+def _build_mean_reversion_strategy_description(
+    *,
+    text: str,
+    universe_name: str,
+    trading_logic: str | None,
+    deviation_threshold: int | float | None,
+    window_size: int | None,
+    mean_target: str | None,
+) -> str | None:
+    if not text.strip():
+        return None
+    details: list[str] = []
+    if universe_name:
+        details.append(f"围绕{universe_name}执行均值回归交易")
+    else:
+        details.append("执行均值回归交易")
+    if trading_logic:
+        details.append(trading_logic)
+    if window_size is not None:
+        details.append(f"窗口{window_size}")
+    if deviation_threshold is not None:
+        details.append(f"阈值{_format_extracted_value(deviation_threshold)}")
+    if mean_target:
+        details.append(f"回归目标{mean_target}")
+    return "，".join(details) + "。"
+
+
+def detect_universe(messages: Sequence[Mapping[str, Any]] | str) -> tuple[str, str | None, list[dict[str, Any]]]:
+    text = _messages_to_text(messages)
+    buy_ticker_match = re.search(
+        r"(?:买入|围绕|交易|标的(?:为|是)?|股票池(?:为|是)?|目标)\s*([A-Za-z]{1,10})\s*(?:-?\d+(?:\.\d+)?)?%\s*(?:仓位)?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if buy_ticker_match:
+        return buy_ticker_match.group(1).upper(), "user_input", []
+
+    generic_ticker_match = re.search(
+        r"(?<![A-Za-z])(QQQ|SPY|DIA|IWM|AAPL|MSFT|NVDA|TSLA|META|GOOGL|AMZN)(?![A-Za-z])",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if generic_ticker_match:
+        return generic_ticker_match.group(1).upper(), "user_input", []
+
+    ticker_match = re.search(r"网格\s*([A-Za-z]{1,10})", text, flags=re.IGNORECASE)
+    if ticker_match:
+        return ticker_match.group(1).upper(), "user_input", []
+
+    generic_ticker_match = re.search(
+        r"\b(QQQ|SPY|DIA|IWM|AAPL|MSFT|NVDA|TSLA|META|GOOGL|AMZN)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if generic_ticker_match:
+        return generic_ticker_match.group(1).upper(), "user_input", []
+
+    if "标普" in text and "成分股" in text:
+        return "标普500成分股", "user_input", []
+    if ("纳指" in text or "纳斯达克" in text) and "成分股" in text:
+        return "纳斯达克100成分股", "user_input", []
+    return "", None, []
+
+
+def _detect_strategy_type(text: str, forced_type: str | None = None) -> str:
+    if forced_type and forced_type.upper() != "GENERAL":
+        return forced_type.upper()
+    lowered = text.lower()
+    if re.search(r"(每下跌|每跌|下跌|网格).*(买入)", text) and re.search(r"(每上涨|每涨|上涨).*(卖出)", text):
+        return "GRID"
+    if "网格" in text or "grid" in lowered:
+        return "GRID"
+    if "均值回归" in text or "回归均值" in text or "mean reversion" in lowered or "reversion" in lowered:
+        return "MEAN_REVERSION"
+    if "动量" in text or "momentum" in lowered:
+        return "MOMENTUM"
+    if "定投" in text or "buy and hold" in lowered or "dca" in lowered:
+        return "BUY_AND_HOLD"
+    if re.search(r"每(月|周|日|天|季|年).*(买入)", text):
+        return "BUY_AND_HOLD"
+    return forced_type.upper() if forced_type else "GENERAL"
+
+
+def _extract_grid_payload(text: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    universe_name, universe_source, _ = detect_universe(text)
+    initial_position = _extract_numeric(
+        text,
+        [
+            r"初始买入(?:[A-Za-z]{1,10})?\s*(-?\d+(?:\.\d+)?)%\s*仓位",
+            r"初始仓位\s*(-?\d+(?:\.\d+)?)%",
+            r"买入(?:[A-Za-z]{1,10})\s*(-?\d+(?:\.\d+)?)%\s*仓位",
+        ],
+    )
+    grid_interval = _extract_numeric(
+        text,
+        [
+            r"每下跌\s*(-?\d+(?:\.\d+)?)%",
+            r"每跌\s*(-?\d+(?:\.\d+)?)%",
+            r"下跌\s*(-?\d+(?:\.\d+)?)%",
+        ],
+    )
+    buy_size_pct = _extract_numeric(
+        text,
+        [
+            r"每下跌\s*-?\d+(?:\.\d+)?%\s*买入\s*(-?\d+(?:\.\d+)?)%",
+            r"每跌\s*-?\d+(?:\.\d+)?%\s*买入\s*(-?\d+(?:\.\d+)?)%",
+            r"下跌\s*-?\d+(?:\.\d+)?%\s*买入\s*(-?\d+(?:\.\d+)?)%",
+        ],
+    )
+    sell_step_pct = _extract_numeric(
+        text,
+        [
+            r"每上涨\s*(-?\d+(?:\.\d+)?)%",
+            r"每涨\s*(-?\d+(?:\.\d+)?)%",
+            r"上涨\s*(-?\d+(?:\.\d+)?)%",
+        ],
+    )
+    sell_size_pct = _extract_numeric(
+        text,
+        [
+            r"每上涨\s*-?\d+(?:\.\d+)?%\s*卖出\s*(-?\d+(?:\.\d+)?)%",
+            r"每涨\s*-?\d+(?:\.\d+)?%\s*卖出\s*(-?\d+(?:\.\d+)?)%",
+            r"上涨\s*-?\d+(?:\.\d+)?%\s*卖出\s*(-?\d+(?:\.\d+)?)%",
+            r"卖出\s*(-?\d+(?:\.\d+)?)%",
+        ],
+    )
+    max_stop_loss_pct = _extract_numeric(
+        text,
+        [
+            r"最大止损(?:仓位)?\s*(-?\d+(?:\.\d+)?)%",
+            r"止损(?:仓位)?\s*(-?\d+(?:\.\d+)?)%",
+            r"单笔亏损达到\s*(-?\d+(?:\.\d+)?)%",
+        ],
+    )
+    capital = _extract_number(text, [r"本金\s*(\d+)"])
+    strategy_name = (
+        _default_strategy_name({"strategy_type": "GRID", "universe_name": universe_name})
+        if universe_name
+        else None
+    )
+    strategy_description = _build_grid_strategy_description(
+        text=text,
+        universe_name=universe_name,
+        capital=capital,
+        initial_position=initial_position,
+        grid_interval=grid_interval,
+        buy_size_pct=buy_size_pct,
+        sell_step_pct=sell_step_pct,
+        sell_size_pct=sell_size_pct,
+    )
+
+    top_level = {
+        "strategy_type": ("GRID", "user_input"),
+        "universe_name": (universe_name, universe_source or "system_default"),
+        "rebalance_frequency": ("never", "system_default"),
+    }
+    parameters = {
+        "strategy_name": (strategy_name, "system_inference"),
+        "strategy_description": (strategy_description, "system_inference"),
+        "initial_position": (initial_position, "user_input"),
+        "grid_interval": (grid_interval, "user_input"),
+        "buy_size_pct": (buy_size_pct, "user_input"),
+        "sell_step_pct": (sell_step_pct, "user_input"),
+        "sell_size_pct": (sell_size_pct, "user_input"),
+        "max_stop_loss_pct": (max_stop_loss_pct, "user_input"),
+        "capital": (capital, "user_input"),
     }
     return top_level, parameters
 
@@ -214,6 +641,95 @@ def _extract_momentum_payload(text: str) -> tuple[dict[str, Any], dict[str, Any]
         "top_n": (_extract_number(text, [r"前\s*(\d+)\s*名", r"选前\s*(\d+)\s*名"]), "user_input"),
         "weighting_method": (weighting_method, "user_input" if weighting_method else "system_default"),
         "rebalance_anchor_dates": (anchors, "user_input" if anchors else "system_default"),
+    }
+    return top_level, parameters
+
+
+def _extract_buy_and_hold_payload(text: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    universe_name, universe_source, _ = detect_universe(text)
+    contribution_amount = _extract_numeric(
+        text,
+        [
+            r"(?:每月|每周|每日|每天|每季|季度|每年)[^，。\n]*买入(?:[A-Za-z]{1,10})?\s*(\d+(?:\.\d+)?)\s*(?:USD|usd|美元|元)?",
+            r"定投\s*(\d+(?:\.\d+)?)\s*(?:USD|usd|美元|元)?",
+            r"买入(?:[A-Za-z]{1,10})?\s*(\d+(?:\.\d+)?)\s*(?:USD|usd|美元|元)",
+        ],
+    )
+    investment_frequency, frequency_source = _extract_frequency_value(text, default="monthly")
+    benchmark_symbol, benchmark_source = _infer_benchmark_symbol(universe_name)
+    strategy_name = _build_buy_and_hold_strategy_name(universe_name, investment_frequency)
+    strategy_description = _build_buy_and_hold_strategy_description(
+        text=text,
+        universe_name=universe_name,
+        contribution_amount=contribution_amount,
+        investment_frequency=investment_frequency,
+    )
+
+    top_level = {
+        "strategy_type": ("BUY_AND_HOLD", "user_input"),
+        "universe_name": (universe_name, universe_source or "system_default"),
+        "rebalance_frequency": ("never", "system_default"),
+    }
+    parameters = {
+        "strategy_name": (strategy_name, "system_inference"),
+        "strategy_description": (strategy_description, "system_inference"),
+        "benchmark_symbol": (benchmark_symbol, benchmark_source),
+        "contribution_amount": (contribution_amount, "user_input"),
+        "investment_frequency": (investment_frequency, frequency_source),
+    }
+    return top_level, parameters
+
+
+def _extract_mean_reversion_payload(text: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    universe_name, universe_source, _ = detect_universe(text)
+    benchmark_symbol, benchmark_source = _infer_benchmark_symbol(universe_name)
+    rebalance_frequency, rebalance_source = _extract_frequency_value(text, default="weekly")
+    deviation_threshold = _extract_numeric(
+        text,
+        [
+            r"标准差阈值\s*(-?\d+(?:\.\d+)?)",
+            r"阈值\s*(-?\d+(?:\.\d+)?)",
+            r"偏离\s*(-?\d+(?:\.\d+)?)",
+        ],
+    )
+    window_size = _extract_number(
+        text,
+        [
+            r"窗口(?:大小)?\s*(\d+)",
+            r"回看(?:窗口)?\s*(\d+)",
+            r"(\d+)\s*(?:日|天)窗口",
+        ],
+    )
+    mean_target_match = re.search(r"回归目标[:：]?\s*([A-Za-z0-9._-]+)", text, flags=re.IGNORECASE)
+    mean_target = mean_target_match.group(1).upper() if mean_target_match else None
+    trading_logic = text.strip()[:120] or None
+    strategy_name = _default_strategy_name({"strategy_type": "MEAN_REVERSION", "universe_name": universe_name}) if universe_name else None
+    strategy_description = _build_mean_reversion_strategy_description(
+        text=text,
+        universe_name=universe_name,
+        trading_logic=trading_logic,
+        deviation_threshold=deviation_threshold,
+        window_size=window_size,
+        mean_target=mean_target,
+    )
+
+    top_level = {
+        "strategy_type": ("MEAN_REVERSION", "user_input"),
+        "universe_name": (universe_name, universe_source or "system_default"),
+        "rebalance_frequency": (rebalance_frequency, rebalance_source),
+    }
+    parameters = {
+        "strategy_name": (strategy_name, "system_inference"),
+        "strategy_description": (strategy_description, "system_inference"),
+        "benchmark_symbol": (benchmark_symbol, benchmark_source),
+        "trading_logic": (trading_logic, "user_input" if trading_logic else "system_default"),
+        "deviation_threshold": (deviation_threshold, "user_input"),
+        "window_size": (window_size, "user_input"),
+        "mean_target": (mean_target, "user_input" if mean_target else "system_default"),
+        "risk_budget": (
+            _extract_numeric(text, [r"风险预算\s*(-?\d+(?:\.\d+)?)%", r"止损\s*(-?\d+(?:\.\d+)?)%"]),
+            "user_input",
+        ),
     }
     return top_level, parameters
 
@@ -249,6 +765,38 @@ def _entry_value(entries: Sequence[Mapping[str, Any]], key: str) -> Any:
     return None
 
 
+def _entry_label(entries: Sequence[Mapping[str, Any]], key: str, fallback: str | None = None) -> str:
+    for entry in entries:
+        if entry.get("key") == key:
+            return str(entry.get("label") or fallback or key)
+    return fallback or key
+
+
+def _default_strategy_name(top_level: Mapping[str, Any]) -> str:
+    universe_name = str(top_level.get("universe_name") or "").strip()
+    strategy_type = str(top_level.get("strategy_type") or "GENERAL").upper()
+    title = STRATEGY_TYPE_TITLES.get(strategy_type, "策略")
+    return f"{universe_name} {title}".strip() if universe_name else title
+
+
+def _set_system_default(entries: list[dict[str, Any]], key: str, label: str, value: Any) -> None:
+    for entry in entries:
+        if entry.get("key") != key:
+            continue
+        entry["label"] = label
+        current_source = str(entry.get("source") or "system_default")
+        current_value = entry.get("value")
+        if current_source == "manual_override":
+            return
+        if current_source == "user_input" and current_value not in (None, "", []):
+            return
+        if current_value in (None, "", []) or current_source == "system_default":
+            entry["value"] = value
+            entry["source"] = "system_default"
+        return
+    entries.append({"key": key, "label": label, "value": value, "source": "system_default"})
+
+
 def _normalize_existing(existing: Mapping[str, Any] | None, strategy_type: str) -> dict[str, list[dict[str, Any]]]:
     if not existing:
         return blank_confirmation_fields(strategy_type)
@@ -260,11 +808,44 @@ def _normalize_existing(existing: Mapping[str, Any] | None, strategy_type: str) 
     existing_top_keys = {item["key"] for item in normalized["top_level"]}
     existing_param_keys = {item["key"] for item in normalized["parameters"]}
     for entry in defaults["top_level"]:
+        for current in normalized["top_level"]:
+            if current["key"] == entry["key"]:
+                current["label"] = entry["label"]
         if entry["key"] not in existing_top_keys:
             normalized["top_level"].append(entry)
     for entry in defaults["parameters"]:
+        for current in normalized["parameters"]:
+            if current["key"] == entry["key"]:
+                current["label"] = entry["label"]
         if entry["key"] not in existing_param_keys:
             normalized["parameters"].append(entry)
+    return normalized
+
+
+def _normalize_manual_conflicts(
+    manual_conflicts: Sequence[Mapping[str, Any]],
+    confirmation_fields: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    parameter_entries = list(confirmation_fields.get("parameters", []))
+    top_level_entries = list(confirmation_fields.get("top_level", []))
+    normalized: list[dict[str, Any]] = []
+    for item in manual_conflicts:
+        key = str(item.get("key") or "")
+        label = _entry_label(parameter_entries, key, None)
+        if label == key:
+            label = _entry_label(top_level_entries, key, key)
+        ai_value = item.get("ai_value")
+        normalized.append(
+            {
+                "key": key,
+                "label": label,
+                "message": f"{label} 已保留人工修正值",
+                "suggested_value": ai_value,
+                "manual_value": item.get("manual_value"),
+                "ai_value": ai_value,
+                "reason": item.get("reason"),
+            }
+        )
     return normalized
 
 
@@ -283,10 +864,14 @@ def build_confirmation(
         top_level_payload, parameter_payload = _extract_grid_payload(text)
     elif strategy_type == "MOMENTUM":
         top_level_payload, parameter_payload = _extract_momentum_payload(text)
+    elif strategy_type == "MEAN_REVERSION":
+        top_level_payload, parameter_payload = _extract_mean_reversion_payload(text)
+    elif strategy_type == "BUY_AND_HOLD":
+        top_level_payload, parameter_payload = _extract_buy_and_hold_payload(text)
     else:
         universe_name, universe_source, _ = detect_universe(text)
         top_level_payload = {
-            "strategy_type": ("GENERAL", "system_default"),
+            "strategy_type": (strategy_type, "system_default"),
             "universe_name": (universe_name, universe_source or "system_default"),
             "rebalance_frequency": (None, "system_default"),
         }
@@ -303,8 +888,91 @@ def build_confirmation(
         "rebalance_frequency": _entry_value(confirmation_fields["top_level"], "rebalance_frequency"),
     }
 
+    if strategy_type == "GRID":
+        _set_system_default(
+            confirmation_fields["parameters"],
+            "strategy_name",
+            "策略名称",
+            _default_strategy_name(top_level),
+        )
+        _set_system_default(
+            confirmation_fields["parameters"],
+            "benchmark_symbol",
+            "基准",
+            "SPY",
+        )
+        _set_system_default(
+            confirmation_fields["top_level"],
+            "rebalance_frequency",
+            "再平衡频次",
+            "never",
+        )
+        top_level["rebalance_frequency"] = _entry_value(confirmation_fields["top_level"], "rebalance_frequency")
+    elif strategy_type == "BUY_AND_HOLD":
+        _set_system_default(
+            confirmation_fields["parameters"],
+            "strategy_name",
+            "策略名称",
+            _build_buy_and_hold_strategy_name(
+                str(top_level.get("universe_name") or "").strip(),
+                _entry_value(confirmation_fields["parameters"], "investment_frequency") or "monthly",
+            )
+            or _default_strategy_name(top_level),
+        )
+        benchmark_symbol, _ = _infer_benchmark_symbol(str(top_level.get("universe_name") or "").strip())
+        _set_system_default(
+            confirmation_fields["parameters"],
+            "benchmark_symbol",
+            "基准",
+            benchmark_symbol,
+        )
+        _set_system_default(
+            confirmation_fields["parameters"],
+            "investment_frequency",
+            "定投频率",
+            "monthly",
+        )
+        _set_system_default(
+            confirmation_fields["top_level"],
+            "rebalance_frequency",
+            "再平衡频次",
+            "never",
+        )
+        top_level["rebalance_frequency"] = _entry_value(confirmation_fields["top_level"], "rebalance_frequency")
+    elif strategy_type == "MEAN_REVERSION":
+        _set_system_default(
+            confirmation_fields["parameters"],
+            "strategy_name",
+            "策略名称",
+            _default_strategy_name(top_level),
+        )
+        benchmark_symbol, _ = _infer_benchmark_symbol(str(top_level.get("universe_name") or "").strip())
+        _set_system_default(
+            confirmation_fields["parameters"],
+            "benchmark_symbol",
+            "基准",
+            benchmark_symbol,
+        )
+        _set_system_default(
+            confirmation_fields["top_level"],
+            "rebalance_frequency",
+            "再平衡频次",
+            "weekly",
+        )
+        top_level["rebalance_frequency"] = _entry_value(confirmation_fields["top_level"], "rebalance_frequency")
+
     required_keys = {
-        "GRID": ["universe_name", "initial_position", "grid_interval", "buy_size_pct", "sell_step_pct", "sell_size_pct"],
+        "GRID": [
+            "universe_name",
+            "strategy_name",
+            "strategy_description",
+            "initial_position",
+            "grid_interval",
+            "buy_size_pct",
+            "sell_step_pct",
+            "sell_size_pct",
+            "max_stop_loss_pct",
+        ],
         "MOMENTUM": [
             "universe_name",
             "lookback_months",
@@ -313,16 +981,36 @@ def build_confirmation(
             "weighting_method",
             "rebalance_anchor_dates",
         ],
+        "MEAN_REVERSION": [
+            "universe_name",
+            "strategy_name",
+            "strategy_description",
+            "benchmark_symbol",
+            "trading_logic",
+            "deviation_threshold",
+            "window_size",
+        ],
+        "BUY_AND_HOLD": [
+            "universe_name",
+            "strategy_name",
+            "strategy_description",
+            "benchmark_symbol",
+            "contribution_amount",
+            "investment_frequency",
+        ],
         "GENERAL": ["universe_name"],
     }
     pending_inputs: list[dict[str, Any]] = []
     for key in required_keys.get(strategy_type, []):
         if key == "universe_name":
             if not top_level.get("universe_name"):
-                pending_inputs.append({"key": key, "label": "标的范围", "message": "请补充标的范围"})
+                pending_inputs.append({"key": key, "label": "股票池", "message": "请补充股票池"})
             continue
         if _entry_value(confirmation_fields["parameters"], key) in (None, "", []):
-            pending_inputs.append({"key": key, "label": key, "message": f"请补充 {key}"})
+            label = _entry_label(confirmation_fields["parameters"], key, key)
+            pending_inputs.append({"key": key, "label": label, "message": f"请补充{label}"})
+
+    manual_conflicts = _normalize_manual_conflicts(manual_conflicts, confirmation_fields)
 
     return {
         "top_level": top_level,

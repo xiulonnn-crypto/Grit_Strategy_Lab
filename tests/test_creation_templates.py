@@ -19,9 +19,9 @@ def test_detect_universe_recognizes_target_prefix_without_separator():
     assert conflicts == []
 
 
-def test_build_confirmation_extracts_universe_and_initial_position_from_embedded_text():
+def test_build_confirmation_extracts_grid_fields_from_real_user_message():
     payload = build_confirmation(
-        _messages('纳指网格策略 目标QQQ，本金100000，初始买入10%，后续每跌2%买入5%，每涨5%卖出5%')
+        _messages('本金10000，初始买入QQQ20%仓位，每下跌5%买入10%，每上涨10%卖出10%')
     )
 
     pending_keys = {item['key'] for item in payload['pending_inputs']}
@@ -29,15 +29,29 @@ def test_build_confirmation_extracts_universe_and_initial_position_from_embedded
         item['key']: item.get('value')
         for item in payload['confirmation_fields']['parameters']
     }
+    parameter_sources = {
+        item['key']: item.get('source')
+        for item in payload['confirmation_fields']['parameters']
+    }
 
     assert payload['top_level']['universe_name'] == 'QQQ'
+    assert payload['top_level']['rebalance_frequency'] == 'never'
     assert 'universe_name' not in pending_keys
     assert 'initial_position' not in pending_keys
-    assert parameter_values['initial_position'] == 10
-    assert parameter_values['grid_interval'] == 2
-    assert parameter_values['buy_size_pct'] == 5
-    assert parameter_values['sell_step_pct'] == 5
-    assert parameter_values['sell_size_pct'] == 5
+    assert 'benchmark_symbol' not in pending_keys
+    assert 'strategy_name' not in pending_keys
+    assert 'strategy_description' not in pending_keys
+    assert 'max_stop_loss_pct' in pending_keys
+    assert parameter_values['strategy_name'] == 'QQQ 网格交易策略'
+    assert parameter_sources['strategy_name'] == 'system_inference'
+    assert parameter_values['strategy_description'] == '本金10000，围绕QQQ执行网格交易，初始仓位20%，每下跌5%买入10%，每上涨10%卖出10%。'
+    assert parameter_sources['strategy_description'] == 'system_inference'
+    assert parameter_values['benchmark_symbol'] == 'SPY'
+    assert parameter_values['initial_position'] == 20
+    assert parameter_values['grid_interval'] == 5
+    assert parameter_values['buy_size_pct'] == 10
+    assert parameter_values['sell_step_pct'] == 10
+    assert parameter_values['sell_size_pct'] == 10
 
 
 def test_build_confirmation_extracts_sp500_momentum_rotation_fields():
@@ -65,6 +79,59 @@ def test_build_confirmation_extracts_sp500_momentum_rotation_fields():
     assert 'top_n' not in pending_keys
     assert 'weighting_method' not in pending_keys
     assert payload['manual_conflicts'] == []
+
+
+def test_build_confirmation_keeps_buy_and_hold_type_and_extracts_dca_fields():
+    payload = build_confirmation(
+        _messages('QQQ月度定投策略 每月第一个交易日买入QQQ1000USD'),
+        forced_type='BUY_AND_HOLD',
+    )
+
+    top_level = payload['top_level']
+    parameter_values = {
+        item['key']: item.get('value')
+        for item in payload['confirmation_fields']['parameters']
+    }
+    pending_keys = {item['key'] for item in payload['pending_inputs']}
+
+    assert top_level['strategy_type'] == 'BUY_AND_HOLD'
+    assert top_level['universe_name'] == 'QQQ'
+    assert top_level['rebalance_frequency'] == 'never'
+    assert parameter_values['strategy_name'] == 'QQQ 月度定投策略'
+    assert parameter_values['strategy_description'] == '围绕QQQ执行月度定投，每期买入1000USD，按每期首个交易日执行。'
+    assert parameter_values['benchmark_symbol'] == 'QQQ'
+    assert parameter_values['contribution_amount'] == 1000
+    assert parameter_values['investment_frequency'] == 'monthly'
+    assert pending_keys == set()
+
+
+def test_build_confirmation_keeps_mean_reversion_type_and_extracts_core_fields():
+    payload = build_confirmation(
+        _messages('QQQ均值回归策略 交易逻辑：价格偏离均值过大时反向建仓。标准差阈值2，窗口大小50，回归目标MA50'),
+        forced_type='MEAN_REVERSION',
+    )
+
+    top_level = payload['top_level']
+    parameter_values = {
+        item['key']: item.get('value')
+        for item in payload['confirmation_fields']['parameters']
+    }
+    pending_keys = {item['key'] for item in payload['pending_inputs']}
+
+    assert top_level['strategy_type'] == 'MEAN_REVERSION'
+    assert top_level['universe_name'] == 'QQQ'
+    assert top_level['rebalance_frequency'] == 'weekly'
+    assert parameter_values['strategy_name'] == 'QQQ 均值回归策略'
+    assert parameter_values['benchmark_symbol'] == 'QQQ'
+    assert parameter_values['trading_logic'].startswith('QQQ均值回归策略')
+    assert parameter_values['deviation_threshold'] == 2
+    assert parameter_values['window_size'] == 50
+    assert parameter_values['mean_target'] == 'MA50'
+    assert 'strategy_name' not in pending_keys
+    assert 'strategy_description' not in pending_keys
+    assert 'trading_logic' not in pending_keys
+    assert 'deviation_threshold' not in pending_keys
+    assert 'window_size' not in pending_keys
 
 
 def test_build_confirmation_preserves_manual_override_and_emits_manual_conflict():

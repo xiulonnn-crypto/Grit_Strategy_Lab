@@ -13,6 +13,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from .backtest_engine import BacktestConfig, _normalize_bars, _signal_score, run_backtest
 from .backtest_metrics import (
+    build_run_detail_analysis,
     build_consistency_score,
     build_drawdown_events,
     build_monthly_returns,
@@ -3318,6 +3319,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             for item in run.get("trade_audit", [])
         ]
         run.pop("trade_audit", None)
+        run["analysis"] = build_run_detail_analysis(run)
         return run
 
     def get_backtest_run_trades(self, run_id: str, page: int = 1, page_size: int = 50, segment: str = "all") -> dict[str, Any]:

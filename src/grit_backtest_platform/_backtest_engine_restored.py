@@ -122,6 +122,8 @@ def _normalize_bars(bars: Iterable[Mapping[str, Any]]) -> list[MarketBar]:
 def _rebalance_keys(trade_dates: list[str], frequency: str) -> list[int]:
     if not trade_dates:
         return []
+    if str(frequency or "").lower() == "never":
+        return [0]
     keys: list[int] = [0]
     previous_date = _parse_date(trade_dates[0])
     previous_bucket = (previous_date.isocalendar().year, previous_date.isocalendar().week)
@@ -158,6 +160,26 @@ def _curve_metrics(equity_curve: list[float], returns: list[float]) -> tuple[flo
     return total_return, cagr, volatility, sharpe if math.isfinite(sharpe) else 0.0, max_drawdown
 
 
+def _clamp_weight(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def _tradeable_open(bar: MarketBar) -> float:
+    if bar.open > 0:
+        return bar.open
+    if bar.close > 0:
+        return bar.close
+    return bar.adj_close
+
+
+def _tradeable_close(bar: MarketBar) -> float:
+    if bar.close > 0:
+        return bar.close
+    if bar.adj_close > 0:
+        return bar.adj_close
+    return bar.open
+
+
 def _signal_score(series: list[MarketBar], index: int, lookback_days: int, template_key: str) -> float | None:
     if index - lookback_days < 0:
         return None
@@ -169,6 +191,353 @@ def _signal_score(series: list[MarketBar], index: int, lookback_days: int, templ
     if template_key in {"mean_reversion", "reversion"}:
         return -raw
     return raw
+
+
+def _run_grid_backtest(
+    symbol_series: Mapping[str, list[MarketBar]],
+    *,
+    config: BacktestConfig,
+    parameters: Mapping[str, Any],
+    benchmark_series: list[MarketBar],
+    master_dates: list[str],
+) -> BacktestResult:
+    primary_symbol = config.benchmark_symbol if config.benchmark_symbol in symbol_series else next(iter(symbol_series.keys()))
+    primary_series = symbol_series.get(primary_symbol, [])
+    if len(master_dates) < 2 or len(primary_series) < 2:
+        empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        return BacktestResult(metrics=empty_metrics, warnings=["Not enough benchmark dates for requested range"])
+
+    primary_index = {bar.date: idx for idx, bar in enumerate(primary_series)}
+    benchmark_index = {bar.date: idx for idx, bar in enumerate(benchmark_series)}
+
+    initial_weight = _clamp_weight(_to_float(parameters.get("initial_position"), 0.0) / 100.0)
+    buy_trigger = max(_to_float(parameters.get("grid_interval"), 0.0) / 100.0, 0.0)
+    buy_step = max(_to_float(parameters.get("buy_size_pct"), 0.0) / 100.0, 0.0)
+    sell_trigger = max(_to_float(parameters.get("sell_step_pct"), 0.0) / 100.0, 0.0)
+    sell_step = max(_to_float(parameters.get("sell_size_pct"), 0.0) / 100.0, 0.0)
+    max_stop_loss_pct = _to_float(parameters.get("max_stop_loss_pct"), 0.0)
+
+    equity = config.initial_equity
+    equity_curve = [equity]
+    returns: list[float] = []
+    daily_points: list[DailyPerformancePoint] = []
+    trades: list[TradeRecord] = []
+    total_turnover = 0.0
+    winning_days = 0
+    position_weight = 0.0
+    anchor_price: float | None = None
+    entry_anchor_price: float | None = None
+    oos_cut = max(int(len(master_dates) * (1.0 - config.oos_fraction)), 1)
+    first_index = primary_index.get(master_dates[0])
+    if first_index is not None and initial_weight > 0:
+        first_bar = primary_series[first_index]
+        first_open = _tradeable_open(first_bar)
+        first_close = _tradeable_close(first_bar)
+        if first_open > 0 and first_close > 0:
+            position_weight = initial_weight
+            anchor_price = first_open
+            entry_anchor_price = first_open
+            trades.append(
+                TradeRecord(
+                    date=master_dates[0],
+                    symbol=primary_symbol,
+                    action="buy",
+                    price=first_open,
+                    weight_before=0.0,
+                    weight_after=position_weight,
+                    reason="grid:init",
+                )
+            )
+            total_turnover += position_weight
+            strategy_return = position_weight * (first_close / first_open - 1.0)
+            equity *= 1.0 + strategy_return
+            returns.append(strategy_return)
+            if strategy_return > 0:
+                winning_days += 1
+            equity_curve.append(equity)
+            peak = max(equity_curve)
+            drawdown = equity / peak - 1.0 if peak else 0.0
+            benchmark_return = 0.0
+            benchmark_pos = benchmark_index.get(master_dates[0])
+            if benchmark_pos is not None:
+                benchmark_bar = benchmark_series[benchmark_pos]
+                benchmark_open = _tradeable_open(benchmark_bar)
+                benchmark_close = _tradeable_close(benchmark_bar)
+                if benchmark_open > 0 and benchmark_close > 0:
+                    benchmark_return = benchmark_close / benchmark_open - 1.0
+            daily_points.append(
+                DailyPerformancePoint(
+                    date=master_dates[0],
+                    equity=equity,
+                    strategy_return=strategy_return,
+                    benchmark_return=benchmark_return,
+                    drawdown=drawdown,
+                    exposure=position_weight,
+                    universe_size=1,
+                    in_sample=0 < oos_cut,
+                )
+            )
+
+    for index in range(1, len(master_dates)):
+        execution_date = master_dates[index]
+        previous_date = master_dates[index - 1]
+        position_index = primary_index.get(execution_date)
+        previous_index = primary_index.get(previous_date)
+        if position_index is None or previous_index is None:
+            continue
+
+        bar = primary_series[position_index]
+        previous_bar = primary_series[previous_index]
+        execution_price = _tradeable_open(bar)
+        previous_close = _tradeable_close(previous_bar)
+        current_close = _tradeable_close(bar)
+        previous_weight = position_weight
+        trade_reason: str | None = None
+
+        if entry_anchor_price and max_stop_loss_pct < 0 and previous_close <= entry_anchor_price * (1.0 + max_stop_loss_pct / 100.0) and position_weight > 0:
+            position_weight = 0.0
+            anchor_price = execution_price
+            trade_reason = "grid:stop"
+        elif anchor_price and buy_trigger > 0 and buy_step > 0 and position_weight < 1.0 and previous_close <= anchor_price * (1.0 - buy_trigger):
+            position_weight = _clamp_weight(position_weight + buy_step)
+            anchor_price = execution_price
+            trade_reason = "grid:buy"
+        elif anchor_price and sell_trigger > 0 and sell_step > 0 and position_weight > 0.0 and previous_close >= anchor_price * (1.0 + sell_trigger):
+            position_weight = _clamp_weight(position_weight - sell_step)
+            anchor_price = execution_price
+            trade_reason = "grid:sell"
+
+        if trade_reason and abs(position_weight - previous_weight) > 1e-9:
+            trades.append(
+                TradeRecord(
+                    date=execution_date,
+                    symbol=primary_symbol,
+                    action="buy" if position_weight > previous_weight else "sell",
+                    price=execution_price,
+                    weight_before=previous_weight,
+                    weight_after=position_weight,
+                    reason=trade_reason,
+                )
+            )
+            total_turnover += abs(position_weight - previous_weight)
+            if position_weight <= 0:
+                entry_anchor_price = None
+            elif entry_anchor_price is None:
+                entry_anchor_price = execution_price
+
+        strategy_return = 0.0
+        if previous_close > 0 and execution_price > 0:
+            overnight_return = execution_price / previous_close - 1.0
+            strategy_return += previous_weight * overnight_return
+        if execution_price > 0 and current_close > 0:
+            intraday_return = current_close / execution_price - 1.0
+            strategy_return += position_weight * intraday_return
+        equity *= 1.0 + strategy_return
+        returns.append(strategy_return)
+        if strategy_return > 0:
+            winning_days += 1
+        equity_curve.append(equity)
+        peak = max(equity_curve)
+        drawdown = equity / peak - 1.0 if peak else 0.0
+
+        benchmark_return = 0.0
+        benchmark_pos = benchmark_index.get(execution_date)
+        if benchmark_pos is not None and benchmark_pos > 0:
+            current = _tradeable_close(benchmark_series[benchmark_pos])
+            prior = _tradeable_close(benchmark_series[benchmark_pos - 1])
+            if prior > 0:
+                benchmark_return = current / prior - 1.0
+
+        daily_points.append(
+            DailyPerformancePoint(
+                date=execution_date,
+                equity=equity,
+                strategy_return=strategy_return,
+                benchmark_return=benchmark_return,
+                drawdown=drawdown,
+                exposure=position_weight,
+                universe_size=1,
+                in_sample=index < oos_cut,
+            )
+        )
+
+    total_return, cagr, volatility, sharpe, max_drawdown = _curve_metrics(equity_curve, returns)
+    oos_returns = [point.strategy_return for point in daily_points if not point.in_sample]
+    oos_curve = [1.0]
+    for value in oos_returns:
+        oos_curve.append(oos_curve[-1] * (1.0 + value))
+    _, oos_cagr, _, oos_sharpe, _ = _curve_metrics(oos_curve, oos_returns)
+    metrics = BacktestMetrics(
+        total_return=total_return,
+        cagr=cagr,
+        annualized_volatility=volatility,
+        sharpe=sharpe,
+        max_drawdown=max_drawdown,
+        turnover=total_turnover / max(len(daily_points), 1),
+        win_rate=winning_days / max(len(returns), 1),
+        oos_cagr=oos_cagr,
+        oos_sharpe=oos_sharpe,
+    )
+    return BacktestResult(
+        metrics=metrics,
+        daily_performance=daily_points,
+        trades=trades,
+        warnings=[],
+        effective_date=master_dates[0] if master_dates else None,
+        oos_start_date=master_dates[oos_cut] if master_dates and oos_cut < len(master_dates) else (master_dates[-1] if master_dates else None),
+        coverage_ratio=1.0 if daily_points else 0.0,
+        coverage_days=len(daily_points),
+    )
+
+
+def _run_buy_and_hold_backtest(
+    symbol_series: Mapping[str, list[MarketBar]],
+    *,
+    config: BacktestConfig,
+    parameters: Mapping[str, Any],
+    benchmark_series: list[MarketBar],
+    master_dates: list[str],
+) -> BacktestResult:
+    primary_symbol = config.benchmark_symbol if config.benchmark_symbol in symbol_series else next(iter(symbol_series.keys()))
+    primary_series = symbol_series.get(primary_symbol, [])
+    if not master_dates or not primary_series:
+        empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        return BacktestResult(metrics=empty_metrics, warnings=["Not enough benchmark dates for requested range"])
+
+    primary_index = {bar.date: idx for idx, bar in enumerate(primary_series)}
+    benchmark_index = {bar.date: idx for idx, bar in enumerate(benchmark_series)}
+
+    contribution_amount = _to_float(parameters.get("contribution_amount"), 0.0)
+    frequency = str(parameters.get("investment_frequency") or parameters.get("rebalance_frequency") or "never").lower()
+    if contribution_amount <= 0:
+        contribution_amount = config.initial_equity
+        frequency = "never"
+
+    contribution_indexes = [idx for idx in _rebalance_keys(master_dates, frequency) if 0 <= idx < len(master_dates)]
+    if not contribution_indexes:
+        contribution_indexes = [0]
+    contribution_set = set(contribution_indexes)
+
+    cash = 0.0
+    shares = 0.0
+    total_contributed = 0.0
+    prior_account_value = 0.0
+    equity_curve = [1.0]
+    returns: list[float] = []
+    oos_cut = max(int(len(master_dates) * (1.0 - config.oos_fraction)), 1)
+    daily_points: list[DailyPerformancePoint] = []
+    trades: list[TradeRecord] = []
+    total_turnover = 0.0
+    coverage_days = 0
+    effective_date: str | None = None
+    warnings: list[str] = []
+
+    for master_index, trade_date in enumerate(master_dates):
+        position_index = primary_index.get(trade_date)
+        if position_index is None:
+            continue
+
+        bar = primary_series[position_index]
+        execution_price = bar.adj_close if bar.adj_close > 0 else _tradeable_open(bar)
+        trade_flow = 0.0
+        if master_index in contribution_set:
+            trade_flow = contribution_amount
+            market_value_before = shares * execution_price
+            total_equity_before = cash + market_value_before
+            weight_before = market_value_before / total_equity_before if total_equity_before > 0 else 0.0
+            cash += contribution_amount
+            total_contributed += contribution_amount
+
+            if execution_price > 0:
+                fee = cash * (config.transaction_cost_bps / 10000.0)
+                deployable_cash = max(cash - fee, 0.0)
+                purchased_shares = deployable_cash / execution_price if deployable_cash > 0 else 0.0
+                shares += purchased_shares
+                cash -= purchased_shares * execution_price + fee
+                total_equity_after = cash + shares * execution_price
+                weight_after = (shares * execution_price) / total_equity_after if total_equity_after > 0 else 0.0
+                trades.append(
+                    TradeRecord(
+                        date=trade_date,
+                        symbol=primary_symbol,
+                        action="buy",
+                        price=execution_price,
+                        weight_before=weight_before,
+                        weight_after=weight_after,
+                        reason=f"buy_and_hold:{frequency}",
+                    )
+                )
+                total_turnover += 1.0
+                if effective_date is None:
+                    effective_date = trade_date
+            else:
+                warnings.append(f"Skipped scheduled contribution on {trade_date} because no tradeable price was available.")
+
+        mark_price = bar.adj_close if bar.adj_close > 0 else _tradeable_close(bar)
+        account_value = cash + shares * mark_price
+        nav_multiple = account_value / total_contributed if total_contributed > 0 else 1.0
+        strategy_return = 0.0
+        if prior_account_value > 0:
+            strategy_return = (account_value - trade_flow - prior_account_value) / prior_account_value
+        benchmark_return = 0.0
+        benchmark_pos = benchmark_index.get(trade_date)
+        if benchmark_pos is not None and benchmark_pos > 0:
+            current = benchmark_series[benchmark_pos].adj_close
+            prior = benchmark_series[benchmark_pos - 1].adj_close
+            if prior > 0:
+                benchmark_return = current / prior - 1.0
+
+        returns.append(strategy_return)
+        equity_curve.append(nav_multiple)
+        peak = max(equity_curve)
+        drawdown = nav_multiple / peak - 1.0 if peak else 0.0
+        exposure = (shares * mark_price) / account_value if account_value > 0 else 0.0
+        active = total_contributed > 0 and account_value > 0
+        if active:
+            coverage_days += 1
+        daily_points.append(
+            DailyPerformancePoint(
+                date=trade_date,
+                equity=nav_multiple,
+                strategy_return=strategy_return,
+                benchmark_return=benchmark_return,
+                drawdown=drawdown,
+                exposure=exposure,
+                universe_size=1 if active else 0,
+                in_sample=master_index < oos_cut,
+            )
+        )
+        prior_account_value = account_value
+
+    total_return, cagr, volatility, sharpe, max_drawdown = _curve_metrics(equity_curve, returns)
+    winning_days = sum(1 for value in returns if value > 0)
+    oos_returns = [point.strategy_return for point in daily_points if not point.in_sample]
+    oos_curve = [1.0]
+    for value in oos_returns:
+        oos_curve.append(oos_curve[-1] * (1.0 + value))
+    _, oos_cagr, _, oos_sharpe, _ = _curve_metrics(oos_curve, oos_returns)
+    metrics = BacktestMetrics(
+        total_return=total_return,
+        cagr=cagr,
+        annualized_volatility=volatility,
+        sharpe=sharpe,
+        max_drawdown=max_drawdown,
+        turnover=total_turnover / max(len(daily_points), 1),
+        win_rate=winning_days / max(len(returns), 1),
+        oos_cagr=oos_cagr,
+        oos_sharpe=oos_sharpe,
+    )
+    coverage_ratio = coverage_days / len(daily_points) if daily_points else 0.0
+    return BacktestResult(
+        metrics=metrics,
+        daily_performance=daily_points,
+        trades=trades,
+        warnings=warnings,
+        effective_date=effective_date,
+        oos_start_date=master_dates[oos_cut] if master_dates and oos_cut < len(master_dates) else (master_dates[-1] if master_dates else None),
+        coverage_ratio=coverage_ratio,
+        coverage_days=coverage_days,
+    )
 
 
 def run_backtest(
@@ -195,6 +564,22 @@ def run_backtest(
         master_dates = [value for value in master_dates if value >= str(config.start_date)]
     if config.end_date:
         master_dates = [value for value in master_dates if value <= str(config.end_date)]
+    if str(template_key).lower() == "grid":
+        return _run_grid_backtest(
+            symbol_series,
+            config=config,
+            parameters=parameters,
+            benchmark_series=benchmark_series,
+            master_dates=master_dates,
+        )
+    if str(template_key).lower() in {"buy_and_hold", "dca"}:
+        return _run_buy_and_hold_backtest(
+            symbol_series,
+            config=config,
+            parameters=parameters,
+            benchmark_series=benchmark_series,
+            master_dates=master_dates,
+        )
     if len(master_dates) < lookback_days + 2:
         empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         return BacktestResult(metrics=empty_metrics, warnings=["Not enough benchmark dates for requested lookback"])
@@ -204,7 +589,7 @@ def run_backtest(
     }
     rebalance_indexes = [idx for idx in _rebalance_keys(master_dates, frequency) if idx >= lookback_days and idx < len(master_dates) - 1]
     if not rebalance_indexes:
-        rebalance_indexes = [len(master_dates) - 2]
+        rebalance_indexes = [min(max(lookback_days, 0), len(master_dates) - 2)]
     target_weights: dict[str, float] = {}
     equity = config.initial_equity
     equity_curve = [equity]

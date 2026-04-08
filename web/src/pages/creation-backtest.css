@@ -100,17 +100,17 @@
 .creation-session-page .creation-reminder-chip--warning,
 .creation-session-page .creation-warning-chip--warning,
 .creation-session-page .creation-step-chip--warning {
-  border-color: color-mix(in srgb, var(--warning) 26%, var(--line));
-  background: #fff8ef;
-  color: var(--creation-step-warning);
+  border-color: #ecd8bb;
+  background: #fffdf9;
+  color: #b45309;
 }
 
 .creation-session-page .creation-reminder-chip--success,
 .creation-session-page .creation-warning-chip--success,
 .creation-session-page .creation-step-chip--success {
-  border-color: color-mix(in srgb, var(--success) 20%, var(--line));
-  background: #eef9f1;
-  color: var(--creation-step-success);
+  border-color: #d6e8dc;
+  background: #ffffff;
+  color: #16794d;
 }
 
 .creation-session-page .creation-reminder-chip--info,
@@ -121,9 +121,7 @@
 }
 
 .creation-session-page .creation-step-chip--active {
-  border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
-  background: var(--accent-soft);
-  color: var(--accent-strong);
+  box-shadow: 0 0 0 2px rgba(17, 24, 39, 0.04);
 }
 
 .creation-session-page .creation-save-status--saving {
@@ -188,8 +186,67 @@
 .creation-session-page .creation-step-chip {
   appearance: none;
   cursor: pointer;
+  justify-content: flex-start;
+  position: relative;
+  min-height: 38px;
+  padding: 0 14px 0 12px;
+  border-color: #d7e5df;
+  background: #ffffff;
+  color: #24443b;
   transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease,
     background-color 140ms ease;
+}
+
+.creation-session-page .creation-step-chip::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  background: var(--step-chip-dot, #94a3b8);
+  box-shadow: 0 0 0 4px var(--step-chip-ring, rgba(148, 163, 184, 0.14));
+}
+
+.creation-session-page .creation-step-chip span:first-child {
+  color: var(--step-chip-title, currentColor);
+  font-weight: 800;
+}
+
+.creation-session-page .creation-step-chip span:last-child {
+  color: var(--step-chip-meta, #6f827b);
+  opacity: 1;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.creation-session-page .creation-step-chip--active span:last-child {
+  opacity: 1;
+}
+
+.creation-session-page .creation-step-chip--warning {
+  --step-chip-dot: #d97706;
+  --step-chip-ring: rgba(217, 119, 6, 0.14);
+  --step-chip-title: #c66a00;
+  --step-chip-meta: #d18a32;
+}
+
+.creation-session-page .creation-step-chip--success {
+  --step-chip-dot: #17945e;
+  --step-chip-ring: rgba(23, 148, 94, 0.14);
+  --step-chip-title: #17845a;
+  --step-chip-meta: #6ca685;
+}
+
+.creation-session-page .creation-step-chip--active.creation-step-chip--warning {
+  border-color: #efc38d;
+  background: linear-gradient(180deg, #fff7eb 0%, #ffefd8 100%);
+  box-shadow: 0 0 0 2px rgba(217, 119, 6, 0.12);
+}
+
+.creation-session-page .creation-step-chip--active.creation-step-chip--success {
+  border-color: #9fd2ae;
+  background: linear-gradient(180deg, #eef9f1 0%, #e0f2e7 100%);
+  box-shadow: 0 0 0 2px rgba(23, 148, 94, 0.12);
 }
 
 .creation-session-page .creation-step-chip:hover {
@@ -245,6 +302,32 @@
 .creation-session-page .message-bubble__time {
   color: var(--muted);
   font-size: 0.78rem;
+}
+
+.creation-session-page .creation-message-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.creation-session-page .creation-message-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #eef9f5;
+  color: var(--accent-strong);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.creation-session-page .creation-message-tag--manual_override_preserved {
+  background: #eef3ff;
+  border-color: color-mix(in srgb, var(--accent) 18%, var(--line));
+  color: #3358c8;
 }
 
 .creation-session-page .creation-step-card,
@@ -322,6 +405,18 @@
   padding: 10px 12px;
   transition: border-color 140ms ease, box-shadow 140ms ease;
   resize: vertical;
+}
+
+.creation-session-page .creation-inline-select {
+  appearance: none;
+  cursor: pointer;
+}
+
+.creation-session-page .creation-inline-display {
+  display: flex;
+  align-items: center;
+  color: var(--ink);
+  background: #f9fafb;
 }
 
 .creation-session-page .creation-inline-input:focus-visible {
@@ -660,6 +755,74 @@
   gap: 16px;
 }
 
+.backtest-submit-page .backtest-hero__copy {
+  display: grid;
+  gap: 12px;
+}
+
+.backtest-submit-page .backtest-hero__copy h1 {
+  margin: 0;
+  color: var(--gsl-text-title);
+  font-size: 1.75rem;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.backtest-submit-page .creation-panel-copy,
+.backtest-submit-page .creation-step-card__copy {
+  margin: 0;
+  color: var(--muted);
+}
+
+.backtest-submit-panel--stack {
+  gap: 22px;
+}
+
+.backtest-submit-sections {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.backtest-submit-section {
+  min-height: 100%;
+  margin-top: 0;
+  align-content: start;
+  background: linear-gradient(180deg, #fbfcfd 0%, #f8fafc 100%);
+}
+
+.backtest-submit-page .creation-date-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.backtest-submit-kv-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.backtest-submit-section__actions {
+  justify-content: flex-start;
+}
+
+.backtest-submit-feedback {
+  display: grid;
+  gap: 10px;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
+}
+
+.backtest-submit-feedback__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 12px;
+}
+
 .creation-controls-panel,
 .backtest-summary-panel {
   position: sticky;
@@ -681,6 +844,10 @@
   .backtest-summary-panel {
     position: static;
     top: auto;
+  }
+
+  .backtest-submit-sections {
+    grid-template-columns: 1fr;
   }
 
   .creation-session-page .creation-step-panel__header,
@@ -727,6 +894,11 @@
   .creation-session-page .creation-step-panel__header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .backtest-submit-page .creation-date-grid,
+  .backtest-submit-kv-grid {
+    grid-template-columns: 1fr;
   }
 
   .field-card__header {

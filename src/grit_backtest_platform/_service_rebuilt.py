@@ -573,7 +573,7 @@ class BacktestPlatformService:
             current_confirmation = after_payload["confirmation_fields"]
 
             existing_tags = loads(row.get("extracted_fields_json"), [])
-            if str(row.get("role") or "") == "user" and not existing_tags:
+            if str(row.get("role") or "") == "user":
                 tags = self._build_message_extracted_tags(
                     {
                         "confirmation_fields": before_payload["confirmation_fields"],
@@ -584,11 +584,12 @@ class BacktestPlatformService:
                         "manual_conflicts": after_payload["manual_conflicts"],
                     },
                 )
-                self.storage.execute(
-                    "UPDATE strategy_creation_messages SET extracted_fields_json = ? WHERE id = ?",
-                    (dumps(tags), row["id"]),
-                )
-                updated = True
+                if tags != existing_tags:
+                    self.storage.execute(
+                        "UPDATE strategy_creation_messages SET extracted_fields_json = ? WHERE id = ?",
+                        (dumps(tags), row["id"]),
+                    )
+                    updated = True
 
         return updated
 

@@ -28,11 +28,15 @@ const detail: ApiBacktestRunDetail = {
   strategy_id: 'strat-001',
   strategy_name: '美股质量动量',
   status: 'COMPLETED',
-  metrics: { total_return: 232.3, sharpe: 0.85, max_drawdown: -24.9 },
+  request: {
+    benchmark_id: 'SPY',
+    rebalance: 'monthly',
+  },
+  metrics: { total_return: 2.323, sharpe: 0.85, max_drawdown: -0.249 },
   chart_series: [
     { trade_date: '2024-03-21', equity: 100, benchmark: 100, drawdown: 0, is_oos: false },
     { trade_date: '2025-03-24', equity: 170.3, benchmark: 132.1, drawdown: -8.2, is_oos: false },
-    { trade_date: '2026-03-24', equity: 232.3, benchmark: 142.4, drawdown: -24.9, is_oos: true },
+    { trade_date: '2026-03-24', equity: 332.3, benchmark: 142.4, drawdown: -24.9, is_oos: true },
   ],
   monthly_returns: [
     { month: '2024-03', return_pct: 0.8, segment: 'IS' },
@@ -65,6 +69,90 @@ const detail: ApiBacktestRunDetail = {
   oos_start_date: '2024-03-21',
   is_permanent: true,
   trades_count: 222,
+  analysis: {
+    subtitle: '测试集仍为正收益，但回撤修复仍需观察。',
+    kpi_cards: [
+      {
+        key: 'total_return',
+        label: '总收益',
+        primary_text: '+232.3%',
+        trend_direction: 'up',
+        trend_text: '↑ 90.0%',
+        compare_text: '基准: +142.4% | 差值: +89.9%',
+        insight_text: '收益仍显著跑赢基准，建议继续检查 Beta 暴露。',
+        insight_tone: 'positive',
+        state: 'healthy',
+      },
+      {
+        key: 'sharpe',
+        label: '夏普比率',
+        primary_text: '0.85',
+        trend_direction: 'up',
+        trend_text: '↑ 0.23',
+        compare_text: '基准: 0.62 | 差值: +0.23',
+        insight_text: '风险回报尚可，建议进一步压缩尾部波动。',
+        insight_tone: 'positive',
+        state: 'healthy',
+      },
+      {
+        key: 'max_drawdown',
+        label: '最大回撤',
+        primary_text: '-24.9%',
+        trend_direction: 'down',
+        trend_text: '↓ 4.8%',
+        compare_text: '基准: -29.7% | 差值: +4.8%',
+        insight_text: '回撤仍偏深，建议复核止损与仓位节奏。',
+        insight_tone: 'warning',
+        state: 'watch',
+      },
+      {
+        key: 'latest_252_return',
+        label: '最新 252 日滚动收益',
+        primary_text: '+17.1%',
+        trend_direction: 'flat',
+        trend_text: 'Sharpe 0.81',
+        compare_text: '基准: +11.6% | 差值: +5.5%',
+        insight_text: '最近窗口仍领先，但测试集稳定性还需继续观察。',
+        insight_tone: 'neutral',
+        state: 'watch',
+      },
+      {
+        key: 'trade_count',
+        label: '交易数',
+        primary_text: '222',
+        trend_direction: 'down',
+        trend_text: '测试集 1 笔',
+        compare_text: '训练集 1 | 测试集 1',
+        insight_text: '测试集样本偏少，警惕随机性造成的过拟合。',
+        insight_tone: 'warning',
+        state: 'watch',
+      },
+    ],
+    decision_rail: {
+      score: 67,
+      summary: '测试集维持正收益，但回撤修复速度偏慢。',
+      items: [
+        {
+          key: 'result',
+          title: '结果判断',
+          body: '测试集仍跑赢基准，方向暂未失真。',
+          tone: 'positive',
+        },
+        {
+          key: 'risk',
+          title: '风险判断',
+          body: '最近一段回撤恢复偏慢，需要核查仓位与退出规则。',
+          tone: 'warning',
+        },
+        {
+          key: 'next',
+          title: '下一步动作',
+          body: '优先查看测试集交易证据，再决定是否进入下一轮调参。',
+          tone: 'neutral',
+        },
+      ],
+    },
+  },
   trade_audit_items: [
     {
       trade_id: 'trade-001',
@@ -194,7 +282,7 @@ afterEach(() => {
 });
 
 describe('RunDetailPage', () => {
-  it('renders diagnostics by default and expands trades and evidence on demand', async () => {
+  it('renders diagnostics by default and switches between trades, evidence, and properties tabs', async () => {
     fakeApi.getBacktestRunDetail.mockResolvedValue(detail);
     fakeApi.getBacktestRunTrades.mockResolvedValue(trades);
     fakeApi.getBacktestTradeAudit.mockImplementation(async (_runId: string, tradeId: string) =>
@@ -204,23 +292,169 @@ describe('RunDetailPage', () => {
     render(<RunDetailPage runId="bt-9.6802970000" />);
 
     expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '风险诊断' })).not.toBeInTheDocument();
-    expect(screen.getByText('主绩效曲线')).toBeInTheDocument();
+    expect(screen.getByText('业绩曲线')).toBeInTheDocument();
+    expect(screen.queryByText(/参数版本/, { selector: '.run-detail-hero__tag' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/测试集起点/, { selector: '.run-detail-hero__tag' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/回测区间/, { selector: '.run-detail-hero__tag' })).not.toBeInTheDocument();
     expect(screen.getAllByText('+232.3%').length).toBeGreaterThan(0);
-    expect(screen.getByText('点击展开查看成交明细。')).toBeInTheDocument();
-    expect(screen.getByText('点击展开查看证据轨迹。')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '诊断', selected: true })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '交易' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '证据' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '配置' })).toBeInTheDocument();
+    expect(screen.getByText('回撤曲线')).toBeInTheDocument();
+    expect(fakeApi.getBacktestRunTrades).not.toHaveBeenCalled();
+    expect(fakeApi.getBacktestTradeAudit).not.toHaveBeenCalled();
+    expect(screen.getAllByRole('button', { name: '全部' }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('button', { name: '最近1年' }).length).toBeGreaterThan(0);
+    expect(screen.getByText('最低 -24.9%')).toBeInTheDocument();
 
-    fireEvent.click(screen.getAllByRole('button', { name: '展开' })[0]);
-    expect(await screen.findByText('真实 /backtest-runs/bt-9.6802970000/trades')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: '交易' }));
     expect(screen.getByRole('tablist', { name: '成交区段' })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(fakeApi.getBacktestRunTrades).toHaveBeenCalledWith('bt-9.6802970000', {
+        page: 1,
+        page_size: 12,
+        segment: 'all',
+      }),
+    );
     expect(screen.getAllByText('QQQ').length).toBeGreaterThan(0);
     expect(screen.getAllByText('AAPL').length).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByRole('button', { name: '展开' }));
+    fireEvent.click(screen.getByRole('tab', { name: '证据' }));
     expect(await screen.findByText('QQQ 证据卡')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(fakeApi.getBacktestTradeAudit).toHaveBeenCalledWith('bt-9.6802970000', 'trade-001'),
+    );
     expect(screen.getByText('数据快照摘要')).toBeInTheDocument();
     expect(screen.getByText('参数快照')).toBeInTheDocument();
     expect(screen.getByText('环境摘要')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: '配置' }));
+    expect(await screen.findByText('benchmark_id')).toBeInTheDocument();
+    expect(screen.getByText('SPY')).toBeInTheDocument();
+    expect(screen.getByText('rebalance')).toBeInTheDocument();
+    expect(screen.getByText('monthly')).toBeInTheDocument();
+    expect(screen.getAllByText('参数快照').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('数据快照摘要').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('环境摘要').length).toBeGreaterThan(0);
+  });
+
+  it('shows a month tooltip when hovering the monthly return heatmap', async () => {
+    fakeApi.getBacktestRunDetail.mockResolvedValue(detail);
+
+    const { container } = render(<RunDetailPage runId="bt-9.6802970000" />);
+
+    expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
+
+    const heatCell = container.querySelector('.run-detail-heat-cell:not(.run-detail-heat-cell--empty)') as HTMLButtonElement | null;
+    expect(heatCell).toBeTruthy();
+
+    fireEvent.mouseEnter(heatCell!, { clientX: 120, clientY: 160 });
+
+    expect(screen.getByText('2024年3月')).toBeInTheDocument();
+    expect(container.querySelector('.run-detail-heatmap-tooltip span')?.textContent).toBe('+0.8%');
+  });
+
+  it('keeps drawdown values in percentage-point units on the diagnostics chart', async () => {
+    fakeApi.getBacktestRunDetail.mockResolvedValue({
+      ...detail,
+      chart_series: [
+        { trade_date: '2026-03-22', equity: 101, benchmark: 100, drawdown: -0.2, is_oos: false },
+        { trade_date: '2026-03-23', equity: 100, benchmark: 100, drawdown: -1, is_oos: false },
+        { trade_date: '2026-03-24', equity: 102, benchmark: 100, drawdown: -0.4, is_oos: true },
+      ],
+    } satisfies ApiBacktestRunDetail);
+
+    render(<RunDetailPage runId="bt-drawdown-percent-points" />);
+
+    expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
+    expect(screen.getByText('最低 -1.0%')).toBeInTheDocument();
+    expect(screen.queryByText('最低 -100.0%')).not.toBeInTheDocument();
+  });
+
+  it('renders strategy and benchmark curves on a shared normalized scale', async () => {
+    fakeApi.getBacktestRunDetail.mockResolvedValue({
+      ...detail,
+      chart_series: [
+        { trade_date: '2024-03-21', equity: 100000, benchmark: 100, drawdown: 0, is_oos: false },
+        { trade_date: '2025-03-24', equity: 110000, benchmark: 150, drawdown: -8.2, is_oos: false },
+        { trade_date: '2026-03-24', equity: 105000, benchmark: 125, drawdown: -24.9, is_oos: true },
+      ],
+    });
+
+    const { container } = render(<RunDetailPage runId="bt-9.6802970000" />);
+
+    expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
+
+    const equityPath = container.querySelector('.run-detail-equity-path');
+    const benchmarkPath = container.querySelector('.run-detail-benchmark-path');
+    const axisLabels = container.querySelectorAll('.run-detail-chart-axis-label');
+
+    expect(equityPath?.getAttribute('d')).toBeTruthy();
+    expect(benchmarkPath?.getAttribute('d')).toBeTruthy();
+    expect(equityPath?.getAttribute('d')).not.toBe(benchmarkPath?.getAttribute('d'));
+    expect(axisLabels.length).toBeGreaterThan(0);
+    expect(screen.getAllByText('+232.3%').length).toBeGreaterThan(0);
+  });
+
+  it('maps hovered curve position to the matching tooltip date', async () => {
+    fakeApi.getBacktestRunDetail.mockResolvedValue({
+      ...detail,
+      chart_series: [
+        { trade_date: '2024-01-31', equity: 100, benchmark: 100, drawdown: 0, is_oos: false },
+        { trade_date: '2024-02-29', equity: 120, benchmark: 110, drawdown: -3.2, is_oos: false },
+        { trade_date: '2024-04-30', equity: 140, benchmark: 120, drawdown: -5.4, is_oos: true },
+      ],
+    } satisfies ApiBacktestRunDetail);
+
+    const { container } = render(<RunDetailPage runId="bt-hover" />);
+
+    expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
+
+    const hoverTarget = container.querySelector('.run-detail-line-chart rect[fill="transparent"]') as SVGRectElement | null;
+    expect(hoverTarget).toBeTruthy();
+
+    Object.defineProperty(hoverTarget, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: 300,
+        bottom: 100,
+        width: 300,
+        height: 100,
+        toJSON: () => ({}),
+      }),
+    });
+
+    fireEvent.mouseMove(hoverTarget!, { clientX: 150 });
+
+    await waitFor(() =>
+      expect(container.querySelector('.run-detail-chart-tooltip strong')?.textContent).toBe('2月29日'),
+    );
+  });
+
+  it('requests fullscreen from the whole performance panel', async () => {
+    fakeApi.getBacktestRunDetail.mockResolvedValue(detail);
+
+    const { container } = render(<RunDetailPage runId="bt-fullscreen" />);
+
+    expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
+
+    const chartPanel = container.querySelector('.run-detail-curve-card--overview') as HTMLElement | null;
+    expect(chartPanel).toBeTruthy();
+
+    const requestFullscreen = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(chartPanel, 'requestFullscreen', {
+      configurable: true,
+      value: requestFullscreen,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '全屏查看业绩曲线' }));
+
+    await waitFor(() => expect(requestFullscreen).toHaveBeenCalledTimes(1));
   });
 
   it('supports copy and rerun actions from the hero', async () => {
@@ -271,7 +505,86 @@ describe('RunDetailPage', () => {
     render(<RunDetailPage runId="bt-empty" />);
 
     expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
-    expect(screen.getByText('暂无主绩效曲线数据。')).toBeInTheDocument();
+    expect(screen.getByText('暂无业绩曲线数据。')).toBeInTheDocument();
     expect(screen.getByText('暂无回撤事件。')).toBeInTheDocument();
+  });
+
+  it('uses real trade events instead of audit episode count in the fallback trade KPI', async () => {
+    fakeApi.getBacktestRunDetail.mockResolvedValue({
+      ...detail,
+      analysis: undefined,
+      trades_count: 121,
+      trades: [
+        {
+          trade_date: '2026-03-20',
+          symbol: 'QQQ',
+          action: 'buy',
+          price: 580,
+          weight_before: 0,
+          weight_after: 1,
+          segment: 'IS',
+          reason: 'buy_and_hold:monthly',
+        },
+        {
+          trade_date: '2026-03-24',
+          symbol: 'QQQ',
+          action: 'buy',
+          price: 585,
+          weight_before: 1,
+          weight_after: 1,
+          segment: 'OOS',
+          reason: 'buy_and_hold:monthly',
+        },
+        {
+          trade_date: '2026-03-25',
+          symbol: 'QQQ',
+          action: 'buy',
+          price: 587,
+          weight_before: 1,
+          weight_after: 1,
+          segment: 'OOS',
+          reason: 'buy_and_hold:monthly',
+        },
+      ],
+      trade_audit_items: [
+        {
+          ...auditTwo,
+          symbol: 'QQQ',
+          segment: 'OOS',
+        },
+      ],
+    });
+
+    render(<RunDetailPage runId="bt-dca" />);
+
+    expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
+    expect(document.body.textContent).toContain('训练集 1 | 测试集 2');
+  });
+
+  it('uses the equity curve instead of strategy_return-like metrics in the fallback KPI cards', async () => {
+    fakeApi.getBacktestRunDetail.mockResolvedValue({
+      ...detail,
+      analysis: undefined,
+      metrics: {
+        total_return: 4.843769,
+        sharpe: 0.91,
+        max_drawdown: -0.249,
+      },
+      chart_series: [
+        { trade_date: '2024-01-31', equity: 1.0, benchmark: 100.0, drawdown: 0, is_oos: false },
+        { trade_date: '2024-02-29', equity: 1.1, benchmark: 110.0, drawdown: -1.2, is_oos: false },
+        { trade_date: '2024-03-29', equity: 1.3, benchmark: 150.0, drawdown: -2.6, is_oos: true },
+        { trade_date: '2024-04-30', equity: 1.64, benchmark: 200.0, drawdown: -1.8, is_oos: true },
+      ],
+    } satisfies ApiBacktestRunDetail);
+
+    render(<RunDetailPage runId="bt-dca-fallback" />);
+
+    expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
+    expect(document.body.textContent).toContain('+64.0%');
+    expect(document.body.textContent).toContain('基准: +100.0%');
+    expect(document.body.textContent).toContain('差值: -36.0%');
+    expect(document.body.textContent).not.toContain('基准: +484.4% | 差值: -0.0%');
+    expect(document.body.textContent).not.toContain('当前累计收益为 +484.4%');
   });
 });

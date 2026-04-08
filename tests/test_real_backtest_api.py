@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import json
 
-from grit_backtest_platform.backtest_metrics import build_drawdown_events, build_relative_metrics
+from grit_backtest_platform.backtest_metrics import (
+    build_drawdown_events,
+    build_relative_metrics,
+    build_run_detail_analysis,
+)
 
 from tests.api_test_support import (
     assert_ok,
+    create_buy_and_hold_strategy,
     create_grid_strategy,
     create_test_client,
     preview_backtest,
@@ -210,6 +215,42 @@ def test_single_symbol_preview_submit_ignores_global_price_snapshot_incomplete_w
     assert submitted["preview"]["environment_summary"]["symbols"] == ["QQQ"]
 
 
+def test_buy_and_hold_dca_preview_submit_generates_recurring_monthly_trades(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_buy_and_hold_strategy(
+        client,
+        idempotency_key="materialize-buy-and-hold-dca",
+        benchmark_symbol="QQQ",
+        contribution_amount=1000,
+        investment_frequency="monthly",
+    )["strategy"]
+    refresh_snapshots(client)
+
+    preview = preview_backtest(client, strategy["id"], start_date=START_DATE, end_date=END_DATE)
+    submitted = submit_backtest(
+        client,
+        strategy["id"],
+        start_date=START_DATE,
+        end_date=END_DATE,
+        idempotency_key="run-buy-and-hold-dca",
+    )
+    detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail"))
+    trades = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/trades?page=1&page_size=100"))
+
+    assert preview["parameter_snapshot"]["contribution_amount"] == 1000
+    assert preview["parameter_snapshot"]["investment_frequency"] == "monthly"
+    assert detail["trades_count"] == trades["total"]
+    assert detail["trades_count"] > 10
+    assert trades["items"][0]["trade_date"] == START_DATE
+    assert all(item["reason"] == "buy_and_hold:monthly" for item in trades["items"])
+    total_return_card = next(card for card in detail["analysis"]["kpi_cards"] if card["key"] == "total_return")
+    sharpe_card = next(card for card in detail["analysis"]["kpi_cards"] if card["key"] == "sharpe")
+    assert total_return_card["primary_text"] != total_return_card["compare_text"].split(" | ")[0].replace("基准: ", "")
+    assert "| 差值: -0.0%" not in total_return_card["compare_text"]
+    assert "| 差值: +0.00" not in sharpe_card["compare_text"]
+
+
 def test_grid_materialize_uses_session_name_description_and_benchmark(tmp_path):
     client, _ = create_test_client(tmp_path)
 
@@ -370,3 +411,50 @@ def test_backtest_run_detail_matches_relative_and_drawdown_metric_builders(tmp_p
             "status",
             "segment",
         }
+
+
+def test_backtest_run_detail_includes_analysis_contract_with_derived_kpis(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_grid_strategy(client, idempotency_key="materialize-grid-analysis-contract")["strategy"]
+    refresh_snapshots(client)
+    submitted = submit_backtest(
+        client,
+        strategy["id"],
+        start_date=START_DATE,
+        end_date=END_DATE,
+        idempotency_key="run-grid-analysis-contract",
+    )
+    detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail"))
+
+    expected_analysis = build_run_detail_analysis(detail)
+    analysis = detail["analysis"]
+    total_return_card = next(card for card in analysis["kpi_cards"] if card["key"] == "total_return")
+
+    benchmark_total_return = (
+        float(detail["chart_series"][-1]["benchmark"]) / float(detail["chart_series"][0]["benchmark"]) - 1.0
+        if detail["chart_series"] and float(detail["chart_series"][0]["benchmark"])
+        else 0.0
+    )
+
+    assert analysis == expected_analysis
+    assert isinstance(analysis["subtitle"], str) and analysis["subtitle"]
+    assert len(analysis["kpi_cards"]) == 5
+    assert set(total_return_card.keys()) == {
+        "key",
+        "label",
+        "primary_text",
+        "trend_direction",
+        "trend_text",
+        "compare_text",
+        "insight_text",
+        "insight_tone",
+        "state",
+    }
+    assert f"基准: {benchmark_total_return * 100.0:+.1f}%" in total_return_card["compare_text"]
+    assert 0 <= analysis["decision_rail"]["score"] <= 100
+    assert [item["key"] for item in analysis["decision_rail"]["items"]] == [
+        "result_judgement",
+        "risk_judgement",
+        "next_action",
+    ]

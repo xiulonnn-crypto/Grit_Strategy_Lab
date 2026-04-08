@@ -313,6 +313,41 @@ export type ApiBacktestTradeAuditItem = {
   commentary: string;
 };
 
+export type ApiRunDetailTrendDirection = 'up' | 'down' | 'flat';
+export type ApiRunDetailInsightTone = 'neutral' | 'positive' | 'warning' | 'critical';
+export type ApiRunDetailKpiState = 'healthy' | 'watch' | 'risk' | 'insufficient_data';
+
+export type ApiRunDetailKpiCard = {
+  key: string;
+  label: string;
+  primary_text: string;
+  trend_direction: ApiRunDetailTrendDirection;
+  trend_text: string;
+  compare_text: string;
+  insight_text: string;
+  insight_tone: ApiRunDetailInsightTone;
+  state: ApiRunDetailKpiState;
+};
+
+export type ApiRunDetailDecisionItem = {
+  key: string;
+  title: string;
+  body: string;
+  tone: ApiRunDetailInsightTone;
+};
+
+export type ApiRunDetailDecisionRail = {
+  score: number;
+  summary?: string;
+  items: ApiRunDetailDecisionItem[];
+};
+
+export type ApiBacktestRunDetailAnalysis = {
+  subtitle: string;
+  kpi_cards: ApiRunDetailKpiCard[];
+  decision_rail: ApiRunDetailDecisionRail;
+};
+
 export type ApiBacktestRunDetail = {
   id: string;
   strategy_id?: string;
@@ -323,6 +358,16 @@ export type ApiBacktestRunDetail = {
   preview?: ApiBacktestSubmissionPreview;
   chart_series?: ApiBacktestChartPoint[];
   monthly_returns?: ApiMonthlyReturn[];
+  trades?: Array<{
+    trade_date: string;
+    symbol: string;
+    action: string;
+    price: number;
+    weight_before: number;
+    weight_after: number;
+    reason?: string;
+    segment?: string;
+  }>;
   trade_details?: Array<{
     trade_date: string;
     symbol: string;
@@ -359,6 +404,7 @@ export type ApiBacktestRunDetail = {
   completed_at?: string | null;
   trade_audit_items?: ApiBacktestTradeAuditItem[];
   trade_audit?: ApiBacktestTradeAudit[];
+  analysis?: ApiBacktestRunDetailAnalysis;
 };
 
 export type ApiSnapshotBlocker = {

@@ -1,9 +1,12 @@
-﻿export function formatPercent(value: number): string {
-  return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
+export function formatPercent(value: number | null | undefined): string {
+  const normalized = typeof value === 'number' && Number.isFinite(value) ? value : 0;
+  const percent = normalized * 100;
+  return `${percent >= 0 ? '+' : ''}${percent.toFixed(1)}%`;
 }
 
-export function formatRatio(value: number): string {
-  return value.toFixed(2);
+export function formatRatio(value: number | null | undefined): string {
+  const normalized = typeof value === 'number' && Number.isFinite(value) ? value : 0;
+  return normalized.toFixed(2);
 }
 
 export function formatDateTime(value: string): string {

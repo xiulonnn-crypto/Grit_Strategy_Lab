@@ -35,6 +35,7 @@ EXPECTED_WORKSPACE_OVERVIEW_KEYS = {
 
 GRID_MESSAGE = "grid strategy for QQQ"
 MOMENTUM_MESSAGE = "momentum strategy for SPY equal 01/01 07/01"
+BUY_AND_HOLD_MESSAGE = "QQQ monthly dca strategy"
 
 EXPECTED_SNAPSHOT_OVERVIEW_KEYS = {
     "overall_status",
@@ -235,6 +236,34 @@ def grid_confirmation_payload(
     }
 
 
+def buy_and_hold_confirmation_payload(
+    *,
+    revision: int,
+    universe_name: str = "QQQ",
+    strategy_name: str = "QQQ 月度定投策略",
+    strategy_description: str = "围绕QQQ执行月度定投，每期买入1000USD，按每期首个交易日执行。",
+    benchmark_symbol: str = "QQQ",
+    contribution_amount: int = 1000,
+    investment_frequency: str = "monthly",
+) -> dict[str, Any]:
+    return {
+        "revision": revision,
+        "strategy_type": "BUY_AND_HOLD",
+        "core": {
+            "universe_name": universe_name,
+            "rebalance_frequency": "never",
+        },
+        "logic": {},
+        "parameters": {
+            "strategy_name": strategy_name,
+            "strategy_description": strategy_description,
+            "benchmark_symbol": benchmark_symbol,
+            "contribution_amount": contribution_amount,
+            "investment_frequency": investment_frequency,
+        },
+    }
+
+
 def draft_strategy_session(
     client: TestClient,
     *,
@@ -381,6 +410,35 @@ def create_grid_strategy(
             sell_size_pct=sell_size_pct,
             max_stop_loss_pct=max_stop_loss_pct,
             capital=capital,
+        ),
+    )
+    materialized = assert_ok(materialize_session(client, session["session_id"], idempotency_key=idempotency_key))
+    return {**session, "strategy": materialized}
+
+
+def create_buy_and_hold_strategy(
+    client: TestClient,
+    *,
+    universe_name: str = "QQQ",
+    strategy_name: str = "QQQ 月度定投策略",
+    strategy_description: str = "围绕QQQ执行月度定投，每期买入1000USD，按每期首个交易日执行。",
+    benchmark_symbol: str = "QQQ",
+    contribution_amount: int = 1000,
+    investment_frequency: str = "monthly",
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    session = draft_strategy_session(
+        client,
+        strategy_type="BUY_AND_HOLD",
+        message=BUY_AND_HOLD_MESSAGE,
+        confirmation_payload=buy_and_hold_confirmation_payload(
+            revision=1,
+            universe_name=universe_name,
+            strategy_name=strategy_name,
+            strategy_description=strategy_description,
+            benchmark_symbol=benchmark_symbol,
+            contribution_amount=contribution_amount,
+            investment_frequency=investment_frequency,
         ),
     )
     materialized = assert_ok(materialize_session(client, session["session_id"], idempotency_key=idempotency_key))

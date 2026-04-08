@@ -1,5 +1,6 @@
 from grit_backtest_platform.backtest_metrics import (
     build_drawdown_events,
+    build_run_detail_analysis,
     build_monthly_returns,
     build_relative_metrics,
     build_rolling_metrics,
@@ -63,8 +64,8 @@ def test_relative_metrics_preserve_nonzero_capture_ratio():
 def test_drawdown_events_mark_recovered_oos_segment_on_recovery_date():
     chart_series = [
         {'trade_date': '2024-01-01', 'equity': 100.0, 'benchmark': 100.0, 'drawdown': 0.0, 'is_oos': False},
-        {'trade_date': '2024-01-02', 'equity': 98.0, 'benchmark': 100.5, 'drawdown': -0.02, 'is_oos': False},
-        {'trade_date': '2024-01-03', 'equity': 95.0, 'benchmark': 101.0, 'drawdown': -0.05, 'is_oos': False},
+        {'trade_date': '2024-01-02', 'equity': 98.0, 'benchmark': 100.5, 'drawdown': -2.0, 'is_oos': False},
+        {'trade_date': '2024-01-03', 'equity': 95.0, 'benchmark': 101.0, 'drawdown': -5.0, 'is_oos': False},
         {'trade_date': '2024-01-04', 'equity': 100.0, 'benchmark': 101.5, 'drawdown': 0.0, 'is_oos': True},
     ]
     events = build_drawdown_events(chart_series, '2024-01-04')
@@ -76,3 +77,127 @@ def test_drawdown_events_mark_recovered_oos_segment_on_recovery_date():
         'status': 'recovered',
         'segment': 'OOS',
     }
+
+
+def test_drawdown_events_do_not_double_scale_chart_series_percent_values():
+    chart_series = [
+        {'trade_date': '2024-01-01', 'equity': 100.0, 'benchmark': 100.0, 'drawdown': 0.0, 'is_oos': False},
+        {'trade_date': '2024-01-02', 'equity': 99.4, 'benchmark': 100.2, 'drawdown': -0.6, 'is_oos': False},
+        {'trade_date': '2024-01-03', 'equity': 100.0, 'benchmark': 100.3, 'drawdown': 0.0, 'is_oos': False},
+    ]
+
+    events = build_drawdown_events(chart_series)
+
+    assert events[0]['drawdown_pct'] == -0.6
+
+
+def test_run_detail_analysis_prefers_real_trade_events_over_audit_episode_counts():
+    detail = {
+        'metrics': {'total_return': 0.12, 'sharpe': 0.9, 'max_drawdown': -0.08},
+        'chart_series': [
+            {
+                'trade_date': '2024-01-31',
+                'equity': 100.0,
+                'benchmark': 100.0,
+                'drawdown': 0.0,
+                'is_oos': False,
+                'strategy_return': 0.0,
+                'benchmark_return': 0.0,
+            },
+            {
+                'trade_date': '2024-02-29',
+                'equity': 108.0,
+                'benchmark': 104.0,
+                'drawdown': -1.0,
+                'is_oos': False,
+                'strategy_return': 0.08,
+                'benchmark_return': 0.04,
+            },
+            {
+                'trade_date': '2024-03-29',
+                'equity': 112.0,
+                'benchmark': 106.0,
+                'drawdown': -2.0,
+                'is_oos': True,
+                'strategy_return': 0.037,
+                'benchmark_return': 0.019,
+            },
+        ],
+        'oos_start_date': '2024-03-01',
+        'trades_count': 121,
+        'trades': [
+            {'trade_date': '2024-02-01', 'segment': 'IS'},
+            {'trade_date': '2024-03-05', 'segment': 'OOS'},
+            {'trade_date': '2024-03-20', 'segment': 'OOS'},
+        ],
+        'trade_audit_items': [
+            {'opened_at': '2024-02-01', 'closed_at': '2024-03-20', 'segment': 'OOS'},
+        ],
+    }
+
+    analysis = build_run_detail_analysis(detail)
+    trade_card = next(card for card in analysis['kpi_cards'] if card['key'] == 'trade_count')
+
+    assert trade_card['primary_text'] == '121'
+    assert trade_card['trend_text'] == '训练集 1 / 测试集 2'
+    assert trade_card['compare_text'] == '训练集: 1 | 测试集: 2'
+
+
+def test_run_detail_analysis_uses_equity_curve_for_dca_style_strategy_comparison():
+    detail = {
+        'metrics': {'total_return': 0.64, 'sharpe': 0.91, 'max_drawdown': -0.12},
+        'chart_series': [
+            {
+                'trade_date': '2024-01-31',
+                'equity': 1.0,
+                'benchmark': 100.0,
+                'drawdown': 0.0,
+                'is_oos': False,
+                'strategy_return': 0.0,
+                'benchmark_return': 0.0,
+            },
+            {
+                'trade_date': '2024-02-29',
+                'equity': 1.1,
+                'benchmark': 110.0,
+                'drawdown': -1.0,
+                'is_oos': False,
+                'strategy_return': 0.1,
+                'benchmark_return': 0.1,
+            },
+            {
+                'trade_date': '2024-03-29',
+                'equity': 1.3,
+                'benchmark': 150.0,
+                'drawdown': -2.0,
+                'is_oos': True,
+                'strategy_return': 0.3636363636,
+                'benchmark_return': 0.3636363636,
+            },
+            {
+                'trade_date': '2024-04-30',
+                'equity': 1.64,
+                'benchmark': 200.0,
+                'drawdown': -1.5,
+                'is_oos': True,
+                'strategy_return': 0.3333333333,
+                'benchmark_return': 0.3333333333,
+            },
+        ],
+        'oos_start_date': '2024-03-01',
+        'trades_count': 4,
+        'trades': [
+            {'trade_date': '2024-02-01', 'segment': 'IS'},
+            {'trade_date': '2024-03-05', 'segment': 'OOS'},
+            {'trade_date': '2024-03-20', 'segment': 'OOS'},
+            {'trade_date': '2024-04-03', 'segment': 'OOS'},
+        ],
+    }
+
+    analysis = build_run_detail_analysis(detail)
+    total_return_card = next(card for card in analysis['kpi_cards'] if card['key'] == 'total_return')
+    sharpe_card = next(card for card in analysis['kpi_cards'] if card['key'] == 'sharpe')
+
+    assert total_return_card['primary_text'] == '+64.0%'
+    assert total_return_card['compare_text'] == '基准: +100.0% | 差值: -36.0% | 测试集: -7.2%'
+    assert sharpe_card['compare_text'] != '基准: 0.91 | 差值: +0.00 | 测试集: 0.91'
