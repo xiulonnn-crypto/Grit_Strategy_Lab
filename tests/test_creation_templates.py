@@ -56,7 +56,13 @@ def test_build_confirmation_extracts_grid_fields_from_real_user_message():
 
 def test_build_confirmation_extracts_sp500_momentum_rotation_fields():
     payload = build_confirmation(
-        _messages('标普动量策略 每年1.1和7.1取标普成分股过去12个月（移除最近1个月）的收益排名前10名，按各成分10%标准建仓、调仓，不再前10的清仓')
+        _messages(
+            '标普动量策略\n'
+            '每年1月第1个交易日和7月第一个交易日（每半年1次）\n'
+            '取标普成分股，前12个月-前1个月的总收益率排行前100名，买入或保留持仓；若不在前120名，移除持仓\n'
+            '持仓比例按数量均分仓位\n'
+            '初始100000刀'
+        )
     )
 
     top_level = payload['top_level']
@@ -68,16 +74,27 @@ def test_build_confirmation_extracts_sp500_momentum_rotation_fields():
 
     assert top_level['strategy_type'] == 'MOMENTUM'
     assert top_level['universe_name'] == '标普500成分股'
-    assert top_level['rebalance_frequency'] == '每半年'
+    assert top_level['rebalance_frequency'] == 'semiannual'
+    assert parameter_values['strategy_name'] == '标普动量策略'
+    assert parameter_values['strategy_description'] == '在标普500成分股内做横截面动量轮动，每半年按每年01月第1个交易日；07月第1个交易日调仓，按前12个月剔除最近1个月收益排序，买入或保留前100名，跌出前120名移除，持仓按数量等权分配，初始资金100000USD。'
+    assert parameter_values['benchmark_symbol'] == 'SPY'
     assert parameter_values['lookback_months'] == 12
     assert parameter_values['skip_recent_months'] == 1
-    assert parameter_values['top_n'] == 10
+    assert parameter_values['top_n'] == 100
+    assert parameter_values['hold_rank_threshold'] == 120
     assert parameter_values['weighting_method'] == 'equal_weight'
-    assert parameter_values['rebalance_anchor_dates'] == '01-01,07-01'
+    assert parameter_values['rebalance_anchor_dates'] == '每年01月第1个交易日；07月第1个交易日'
+    assert parameter_values['capital'] == 100000
+    assert 'strategy_name' not in pending_keys
+    assert 'strategy_description' not in pending_keys
+    assert 'benchmark_symbol' not in pending_keys
     assert 'lookback_months' not in pending_keys
     assert 'skip_recent_months' not in pending_keys
     assert 'top_n' not in pending_keys
+    assert 'hold_rank_threshold' not in pending_keys
     assert 'weighting_method' not in pending_keys
+    assert 'rebalance_anchor_dates' not in pending_keys
+    assert 'capital' not in pending_keys
     assert payload['manual_conflicts'] == []
 
 

@@ -253,6 +253,7 @@ export function BacktestSubmitPageCn({
         parameter_version_id: effectiveParameterVersionId ?? undefined,
         dataset_snapshot_id: effectiveDatasetSnapshotId ?? undefined,
         universe_snapshot_id: effectiveUniverseSnapshotId ?? undefined,
+        is_permanent: false,
         ...(sourceRunId ? { source_run_id: sourceRunId } : {}),
       });
       navigateTo(`/runs/${payload.id}`);

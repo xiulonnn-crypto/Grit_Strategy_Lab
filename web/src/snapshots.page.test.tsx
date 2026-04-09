@@ -36,7 +36,7 @@ const overview: ApiSnapshotOverview = {
       },
       blocker: {
         code: 'CORPORATE_ACTIONS_INCOMPLETE',
-        message: '公司行为数据部分可用，正式回测仍会受限。',
+        message: 'Corporate action data is partially available, but the snapshot is not complete yet.',
       },
     },
     {
@@ -76,7 +76,7 @@ const overview: ApiSnapshotOverview = {
       },
       blocker: {
         code: 'UNIVERSE_HISTORY_INCOMPLETE',
-        message: '股票池历史成分仍在补齐，当前还不能视为完整的点时成分快照。',
+        message: 'Universe history is partially available, but more historical anchors still need to be repaired.',
       },
     },
     {
@@ -84,7 +84,7 @@ const overview: ApiSnapshotOverview = {
       name: '纳指100',
       status: 'READY',
       as_of: '2026-04-01T07:48:00Z',
-      freshness_label: '历史锚点已刷新',
+      freshness_label: '历史锚点已就绪',
       window_start: '1996-01-01',
       window_end: '2026-04-01',
       anchor_schedule: '01-01 / 07-01',
@@ -102,12 +102,38 @@ const overview: ApiSnapshotOverview = {
     id: 'snap-job-20260401',
     status: 'COMPLETED',
     completed_at: '2026-04-01T07:48:00Z',
+    summary: {
+      refresh_stats: {
+        datasets: {
+          'ds-corporate-actions': {
+            name: '公司行为数据',
+            updated_symbol_count: 7,
+            updated_row_count: 49,
+          },
+          'ds-price': {
+            name: '股票价格数据',
+            updated_symbol_count: 7,
+            updated_row_count: 49,
+          },
+        },
+        universes: {
+          'un-sp500': {
+            name: '标普500',
+            updated_row_count: 4,
+          },
+          'un-ndx100': {
+            name: '纳指100',
+            updated_row_count: 2,
+          },
+        },
+      },
+    },
     warnings: [],
     errors: [],
   },
   blocking_code: 'CORPORATE_ACTIONS_INCOMPLETE',
   blocking_target: 'ds-corporate-actions',
-  message: '当前已有可用数据，但还不是完整正式快照。',
+  message: 'Corporate action data is partially available, but the snapshot is not complete yet.',
   allowed_actions: ['refresh_snapshots'],
 };
 
@@ -152,13 +178,23 @@ describe('SnapshotsPage', () => {
     expect(screen.getAllByText('19960101至20260401').length).toBeGreaterThan(1);
     expect(screen.getByText(/官方公告 \/ Wikipedia 历史修订/)).toBeInTheDocument();
     expect(screen.getAllByText(/过去 30 年历史时点成分股/).length).toBeGreaterThan(0);
-    expect(screen.queryByText('这里会告诉你公司行为和价格数据是不是已经准备好。')).not.toBeInTheDocument();
     expect(
-      screen.queryByText('这里会告诉你股票池是不是已经准备好。当前先显示历史锚点快照，完整历史成分仍会继续补齐。'),
+      screen.getByText(
+        '最近刷新 4月1日 下午03:48 ·新增公司行为数据7家49行，股票价格数据7家49行，标普500股票池4行，纳指100股票池2行。',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText('这里会告诉你公司行为和价格数据是不是已经准备好。'),
     ).not.toBeInTheDocument();
-    expect(screen.queryByText('部分可用')).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        '这里会告诉你股票池是不是已经准备好。当前先显示历史锚点快照，完整历史成分仍会继续补齐。',
+      ),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText('返回工作台')).not.toBeInTheDocument();
     expect(screen.queryByText('修复入口')).not.toBeInTheDocument();
+    expect(screen.queryByText('部分可用')).not.toBeInTheDocument();
+    expect(screen.getAllByText('公司行为数据已部分可用，仍有少量公司事件待继续补齐。').length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole('button', { name: '刷新快照' }));
     await waitFor(() =>
@@ -182,11 +218,11 @@ describe('SnapshotsPage', () => {
   });
 
   it('shows an error banner when the overview request fails', async () => {
-    fakeApi.getSnapshotOverview.mockRejectedValue(new Error('后端返回 500'));
+    fakeApi.getSnapshotOverview.mockRejectedValue(new Error('模拟接口 500'));
 
     render(<SnapshotsPage />);
 
-    expect(await screen.findByText('加载数据快照失败：后端返回 500')).toBeInTheDocument();
+    expect(await screen.findByText('加载数据快照失败：模拟接口 500')).toBeInTheDocument();
   });
 
   it('shows a blocker banner when a snapshot is blocked', async () => {
@@ -195,12 +231,14 @@ describe('SnapshotsPage', () => {
       overall_status: 'BLOCKED',
       blocking_code: 'UNIVERSE_HISTORY_INCOMPLETE',
       blocking_target: 'un-sp500',
-      message: '股票池历史数据部分可用，当前不能提交正式回测。',
+      message: 'Universe history is partially available, but more historical anchors still need to be repaired.',
     });
 
     render(<SnapshotsPage />);
 
-    expect(await screen.findByText('股票池历史数据部分可用，当前不能提交正式回测。')).toBeInTheDocument();
+    expect(
+      await screen.findAllByText('股票池历史成分已部分可用，仍有部分历史锚点待继续补齐。'),
+    ).toHaveLength(2);
     expect(screen.getByText('股票池历史数据部分可用')).toBeInTheDocument();
     expect(screen.getAllByText('有阻塞').length).toBeGreaterThan(0);
   });
@@ -212,7 +250,7 @@ describe('SnapshotsPage', () => {
         status: 'READY',
       },
       coverages: [],
-    });
+    } as unknown as ApiSnapshotOverview);
 
     render(<SnapshotsPage />);
 
@@ -222,6 +260,45 @@ describe('SnapshotsPage', () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getAllByText('待刷新').length).toBeGreaterThan(0);
-    expect(screen.getByText('最近刷新 待显示')).toBeInTheDocument();
+    expect(screen.getByText('最近刷新 · 摘要待显示')).toBeInTheDocument();
+  });
+
+  it('shows a no-change summary when the latest refresh has no additions', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue({
+      ...overview,
+      latest_job: {
+        ...overview.latest_job,
+        summary: {
+          refresh_stats: {
+            datasets: {
+              'ds-corporate-actions': {
+                name: '公司行为数据',
+                updated_symbol_count: 0,
+                updated_row_count: 0,
+              },
+              'ds-price': {
+                name: '股票价格数据',
+                updated_symbol_count: 0,
+                updated_row_count: 0,
+              },
+            },
+            universes: {
+              'un-sp500': {
+                name: '标普500',
+                updated_row_count: 0,
+              },
+              'un-ndx100': {
+                name: '纳指100',
+                updated_row_count: 0,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    render(<SnapshotsPage />);
+
+    expect(await screen.findByText('最近刷新 4月1日 下午03:48 ·本次未新增数据。')).toBeInTheDocument();
   });
 });

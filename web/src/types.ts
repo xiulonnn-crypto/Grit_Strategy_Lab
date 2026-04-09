@@ -205,6 +205,10 @@ export type ApiRollingMetricPoint = {
   date?: string;
   trailing_252_return?: number;
   trailing_252_sharpe?: number;
+  window_days?: number;
+  window_return_pct?: number;
+  window_volatility_pct?: number;
+  window_sharpe?: number;
   [key: string]: unknown;
 };
 
@@ -230,6 +234,10 @@ export type ApiBacktestRunListItem = {
   strategy_id: string;
   strategy_name?: string;
   status: BacktestRunStatus;
+  start_date?: string | null;
+  end_date?: string | null;
+  effective_date?: string | null;
+  oos_start_date?: string | null;
   created_at?: string;
   updated_at?: string;
   completed_at?: string | null;
@@ -244,12 +252,16 @@ export type ApiBacktestRunListItem = {
 };
 
 export type ApiBacktestTradeItem = {
-  trade_time: string;
+  trade_time?: string;
   symbol: string;
-  side: string;
-  quantity: number;
-  price: number;
-  segment: string;
+  side?: string;
+  quantity?: number;
+  price?: number;
+  segment?: string;
+  trade_date?: string;
+  action?: string;
+  weight_before?: number;
+  weight_after?: number;
   signal_date?: string;
   signal_time?: string;
   fill_date?: string;
@@ -259,6 +271,7 @@ export type ApiBacktestTradeItem = {
   fill_price_adj?: number;
   fee_paid?: number;
   net_amount?: number;
+  pnl_amount?: number;
   pnl_contribution?: number;
   reason?: string;
   adjustment_factor_t1?: number;
@@ -392,6 +405,8 @@ export type ApiBacktestRunDetail = {
   data_segment_type?: string;
   parameter_version_id?: string | null;
   request?: Record<string, unknown>;
+  start_date?: string | null;
+  end_date?: string | null;
   oos_start_date?: string | null;
   effective_date?: string | null;
   coverage_ratio?: number;
@@ -504,6 +519,7 @@ export type DemoApi = {
   materializeStrategy: (id: string, idempotencyKey: string, confirmedRevision?: number) => Promise<ApiStrategyDetail>;
   listBacktestRuns: (params?: BacktestRunListQuery) => Promise<ApiBacktestRunListItem[]>;
   getBacktestRunDetail: (id: string) => Promise<ApiBacktestRunDetail>;
+  saveBacktestRun: (id: string) => Promise<ApiBacktestRunDetail>;
   getBacktestRunTrades: (id: string, params?: { page?: number; page_size?: number; segment?: string }) => Promise<ApiBacktestRunTradePage>;
   getBacktestTradeAudit: (runId: string, tradeId: string) => Promise<ApiBacktestTradeAudit>;
   previewBacktestRun: (strategyId: string, payload: Record<string, unknown>) => Promise<ApiBacktestSubmissionPreview>;

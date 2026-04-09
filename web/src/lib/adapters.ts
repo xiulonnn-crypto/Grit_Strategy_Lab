@@ -2,6 +2,7 @@ export type { ParameterDiffRow } from './workspace-adapters';
 export {
   buildParameterDiffRows,
   buildRecentRunScore,
+  formatParameterLabel,
   formatParameterValue,
 } from './workspace-adapters';
 /*

@@ -74,6 +74,7 @@ describe('回测提交页', () => {
         end_date: '2026-03-24',
         parameter_version_id: 'pv-002',
         dataset_snapshot_id: 'ds-001',
+        is_permanent: false,
       }),
     );
     expect(window.location.hash).toBe('#/runs/bt-001');
@@ -185,6 +186,7 @@ describe('回测提交页', () => {
         end_date: '2025-03-28',
         parameter_version_id: 'pv-seed',
         dataset_snapshot_id: 'ds-seed',
+        is_permanent: false,
         source_run_id: 'bt-seed',
       }),
     );

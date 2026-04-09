@@ -173,11 +173,16 @@ def momentum_confirmation_payload(
     revision: int,
     universe_name: str = "SPY",
     rebalance_frequency: str = "monthly",
+    strategy_name: str = "SPY 动量策略",
+    strategy_description: str = "围绕SPY执行动量轮动。",
+    benchmark_symbol: str = "SPY",
     lookback_months: int = 6,
     skip_recent_months: int = 1,
     top_n: int = 1,
+    hold_rank_threshold: int = 2,
     weighting_method: str = "equal_weight",
     rebalance_anchor_dates: str = "01-01,07-01",
+    capital: int = 100000,
 ) -> dict[str, Any]:
     return {
         "revision": revision,
@@ -188,11 +193,16 @@ def momentum_confirmation_payload(
         },
         "logic": {},
         "parameters": {
+            "strategy_name": strategy_name,
+            "strategy_description": strategy_description,
+            "benchmark_symbol": benchmark_symbol,
             "lookback_months": lookback_months,
             "skip_recent_months": skip_recent_months,
             "top_n": top_n,
+            "hold_rank_threshold": hold_rank_threshold,
             "weighting_method": weighting_method,
             "rebalance_anchor_dates": rebalance_anchor_dates,
+            "capital": capital,
         },
     }
 

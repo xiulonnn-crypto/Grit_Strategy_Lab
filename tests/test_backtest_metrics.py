@@ -39,6 +39,34 @@ def test_rolling_metrics_short_windows_return_empty_list():
     assert build_rolling_metrics(chart_series, None) == []
 
 
+def test_rolling_metrics_emit_trailing_252_return_and_sharpe_for_default_window():
+    chart_series = []
+    returns = [0.01, 0.004, -0.002, 0.006] * 65
+    equity = 100.0
+    for index, daily_return in enumerate(returns, start=1):
+        equity *= 1.0 + daily_return
+        chart_series.append(
+            {
+                'trade_date': f'd{index}',
+                'equity': round(equity, 6),
+                'benchmark': 100.0,
+                'drawdown': 0.0,
+                'is_oos': index > 252,
+                'strategy_return': daily_return,
+            }
+        )
+
+    rolling = build_rolling_metrics(chart_series, 252)
+
+    assert rolling
+    assert rolling[0]['trade_date'] == 'd252'
+    assert rolling[0]['window_days'] == 252
+    assert rolling[0]['window_return_pct'] == rolling[0]['trailing_252_return']
+    assert isinstance(rolling[0]['trailing_252_return'], float)
+    assert isinstance(rolling[0]['trailing_252_sharpe'], float)
+    assert rolling[0]['trailing_252_sharpe'] != 0.0
+
+
 def test_relative_metrics_handles_zero_benchmark_sum_without_division_error():
     chart_series = [
         {'trade_date': '2024-01-01', 'strategy_return': 0.02, 'benchmark_return': 0.0},

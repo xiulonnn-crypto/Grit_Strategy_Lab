@@ -126,6 +126,21 @@ class RuntimeMarketDataProvider:
         self.fallback_provider = self.price_providers[1] if len(self.price_providers) > 1 else None
         self.missing_providers = list(missing_providers or [])
 
+    def scoped_copy(self, *, exclude_provider_names: set[str] | list[str] | tuple[str, ...] | None = None) -> "RuntimeMarketDataProvider":
+        excluded = {str(name or "").strip().lower() for name in (exclude_provider_names or []) if str(name or "").strip()}
+        if not excluded:
+            clone = type(self)(list(self.providers), missing_providers=list(self.missing_providers))
+            clone.universe_history_providers = list(self.universe_history_providers)
+            return clone
+        filtered = [
+            provider
+            for provider in self.providers
+            if _provider_name(provider).strip().lower() not in excluded
+        ]
+        clone = type(self)(filtered, missing_providers=list(self.missing_providers))
+        clone.universe_history_providers = list(self.universe_history_providers)
+        return clone
+
     def resolve_identity(self, symbol: str) -> dict[str, Any] | None:
         for provider in self.identity_providers:
             resolver = getattr(provider, "resolve_identity", None)
@@ -354,6 +369,10 @@ def build_runtime_market_data_provider() -> RuntimeMarketDataProvider:
     missing_providers: list[str] = []
     for module_name, class_names in (
         ("tiingo_provider", ("TiingoMarketDataProvider", "TiingoProvider")),
+        ("tiingo_symbology_provider", ("TiingoSymbologyProvider",)),
+        ("longbridge_provider", ("LongbridgeStaticInfoProvider",)),
+        ("longbridge_provider", ("LongbridgeQuoteProvider",)),
+        ("akshare_us_provider", ("AkshareUsPriceProvider", "AkShareUsPriceProvider")),
         ("fmp_identity_provider", ("FmpIdentityRepairProvider", "FmpMarketDataProvider", "FmpPriceRepairProvider")),
         ("alpha_vantage_provider", ("AlphaVantageProvider", "AlphaVantageEventProvider", "AlphaVantageMarketDataProvider")),
         ("sec_edgar_provider", ("SecEdgarEventProvider", "SecEdgarProvider")),
@@ -428,7 +447,7 @@ def create_app(db_path: str | Path | None = None, market_data_provider=None) -> 
         run_cleanup_cycle()
 
         def loop() -> None:
-            while not app.state.cleanup_stop_event.wait(6 * 60 * 60):
+            while not app.state.cleanup_stop_event.wait(24 * 60 * 60):
                 run_cleanup_cycle()
 
         thread = threading.Thread(target=loop, name='cleanup-worker', daemon=True)
@@ -494,6 +513,10 @@ def create_app(db_path: str | Path | None = None, market_data_provider=None) -> 
     @app.get('/backtest-runs/{run_id}/detail')
     def backtest_run_detail(run_id: str):
         return invoke(service.get_backtest_run_detail, run_id)
+
+    @app.post('/backtest-runs/{run_id}/save')
+    def save_backtest_run(run_id: str):
+        return invoke(service.save_backtest_run, run_id)
 
     @app.get('/backtest-runs/{run_id}/trades')
     def backtest_run_trades(run_id: str, page: int = 1, page_size: int = 50, segment: str = 'all'):

@@ -418,9 +418,9 @@ function Get-BackendListenerProcessIds {
     $pattern = "^\s*TCP\s+\S+:$Port\s+\S+\s+LISTENING\s+(\d+)\s*$"
     foreach ($line in (netstat -ano -p TCP 2>$null)) {
         if ($line -match $pattern) {
-            $pid = [int]$matches[1]
-            if (-not $ids.Contains($pid)) {
-                $ids.Add($pid) | Out-Null
+            $listenerPid = [int]$matches[1]
+            if (-not $ids.Contains($listenerPid)) {
+                $ids.Add($listenerPid) | Out-Null
             }
         }
     }
@@ -674,16 +674,17 @@ if ($DryRun) {
     exit 0
 }
 
-if (-not (Test-HttpReady -Url $backendHealthUrl -TimeoutSec 10 -ExpectedStatusCodes @(200))) {
-    Stop-UnhealthyBackendListeners -Port 8000
-    Ensure-BackendProbeReady -PythonExe $effectiveState.Python.PythonExe
-    Write-Host 'Starting backend...' -ForegroundColor Yellow
-    Start-BackendWindow -PythonExe $effectiveState.Python.PythonExe
-    if (-not (Wait-HttpReady -Name 'Backend' -Url $backendHealthUrl -TimeoutSeconds $BackendStartupTimeoutSeconds -ProbeTimeoutSec 10 -ExpectedStatusCodes @(200))) {
-        $probe = Invoke-BackendProbe -PythonExe $effectiveState.Python.PythonExe
-        $probeSummary = if ([string]::IsNullOrWhiteSpace($probe.Summary)) { 'No backend probe output was captured after startup.' } else { $probe.Summary }
-        throw "Backend failed to become ready at $backendHealthUrl within $BackendStartupTimeoutSeconds seconds.`n$probeSummary"
-    }
+if (@(Get-BackendListenerProcessIds -Port 8000).Count -gt 0) {
+    Write-Host 'Restarting existing backend listener on port 8000...' -ForegroundColor Yellow
+}
+Stop-UnhealthyBackendListeners -Port 8000
+Ensure-BackendProbeReady -PythonExe $effectiveState.Python.PythonExe
+Write-Host 'Starting backend...' -ForegroundColor Yellow
+Start-BackendWindow -PythonExe $effectiveState.Python.PythonExe
+if (-not (Wait-HttpReady -Name 'Backend' -Url $backendHealthUrl -TimeoutSeconds $BackendStartupTimeoutSeconds -ProbeTimeoutSec 10 -ExpectedStatusCodes @(200))) {
+    $probe = Invoke-BackendProbe -PythonExe $effectiveState.Python.PythonExe
+    $probeSummary = if ([string]::IsNullOrWhiteSpace($probe.Summary)) { 'No backend probe output was captured after startup.' } else { $probe.Summary }
+    throw "Backend failed to become ready at $backendHealthUrl within $BackendStartupTimeoutSeconds seconds.`n$probeSummary"
 }
 
 if (-not (Test-Path -LiteralPath $frontendDir)) {
@@ -700,18 +701,14 @@ Ensure-FrontendDependencies
 
 $initialBundleFreshness = Get-FrontendBundleFreshness
 
-if (Test-HttpReady -Url $frontendHealthUrl -TimeoutSec 5 -ExpectedStatusCodes @(200)) {
+if (@(Get-FrontendListenerProcessIds -Port 4173).Count -gt 0) {
     if (-not $initialBundleFreshness.IsFresh) {
-        Write-Host "Frontend preview is responding, but the local dist bundle is stale. $(Format-FrontendBundleFreshnessMessage -Freshness $initialBundleFreshness)" -ForegroundColor Yellow
-        Stop-StaleFrontendListeners -Port 4173
+        Write-Host "Restarting existing frontend preview because the local dist bundle is stale. $(Format-FrontendBundleFreshnessMessage -Freshness $initialBundleFreshness)" -ForegroundColor Yellow
     } else {
-        Write-Host "Frontend already running at $frontendHealthUrl" -ForegroundColor DarkGreen
-        if (-not $NoBrowser) {
-            Start-Process $workspaceUrl | Out-Null
-        }
-        exit 0
+        Write-Host 'Restarting existing frontend preview on port 4173...' -ForegroundColor Yellow
     }
 }
+Stop-StaleFrontendListeners -Port 4173
 
 Write-Host 'Building frontend for static preview...' -ForegroundColor Yellow
 Push-Location $frontendDir

@@ -17,6 +17,7 @@ from .official_index_announcements import (
     parse_nasdaq_annual_changes_release,
     parse_sp_global_constituent_change_release,
 )
+from .fmp_constituent_provider import FmpHistoricalConstituentUniverseHistoryProvider
 
 
 ANCHOR_SCHEDULE = "01-01,07-01"
@@ -1027,44 +1028,42 @@ def static_universe_history_providers() -> list[StaticUniverseHistoryProvider]:
 
 
 def default_universe_history_providers() -> list[Any]:
-    return [
-        WikipediaRevisionUniverseHistoryProvider(
-            definition=UniverseDefinition(
-                universe_key=SP500_UNIVERSE_KEY,
-                display_name=SP500_UNIVERSE_NAME,
-                snapshot_id=SP500_UNIVERSE_SNAPSHOT_ID,
-                source_page_title=SP500_SOURCE_PAGE_TITLE,
-                minimum_member_count=400,
-            ),
-            official_provider=SpGlobalAnnouncementUniverseProvider(
-                definition=UniverseDefinition(
-                    universe_key=SP500_UNIVERSE_KEY,
-                    display_name=SP500_UNIVERSE_NAME,
-                    snapshot_id=SP500_UNIVERSE_SNAPSHOT_ID,
-                    source_page_title=SP500_SOURCE_PAGE_TITLE,
-                    minimum_member_count=400,
-                ),
-            ),
-            fallback_provider=StaticSp500UniverseHistoryProvider(),
+    sp500_definition = UniverseDefinition(
+        universe_key=SP500_UNIVERSE_KEY,
+        display_name=SP500_UNIVERSE_NAME,
+        snapshot_id=SP500_UNIVERSE_SNAPSHOT_ID,
+        source_page_title=SP500_SOURCE_PAGE_TITLE,
+        minimum_member_count=400,
+    )
+    nasdaq100_definition = UniverseDefinition(
+        universe_key=NASDAQ100_UNIVERSE_KEY,
+        display_name=NASDAQ100_UNIVERSE_NAME,
+        snapshot_id=NASDAQ100_UNIVERSE_SNAPSHOT_ID,
+        source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
+        minimum_member_count=80,
+    )
+    sp500_wikipedia_provider = WikipediaRevisionUniverseHistoryProvider(
+        definition=sp500_definition,
+        official_provider=SpGlobalAnnouncementUniverseProvider(
+            definition=sp500_definition,
         ),
-        WikipediaRevisionUniverseHistoryProvider(
-            definition=UniverseDefinition(
-                universe_key=NASDAQ100_UNIVERSE_KEY,
-                display_name=NASDAQ100_UNIVERSE_NAME,
-                snapshot_id=NASDAQ100_UNIVERSE_SNAPSHOT_ID,
-                source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
-                minimum_member_count=80,
-            ),
-            official_provider=NasdaqAnnouncementUniverseProvider(
-                definition=UniverseDefinition(
-                    universe_key=NASDAQ100_UNIVERSE_KEY,
-                    display_name=NASDAQ100_UNIVERSE_NAME,
-                    snapshot_id=NASDAQ100_UNIVERSE_SNAPSHOT_ID,
-                    source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
-                    minimum_member_count=80,
-                ),
-            ),
-            fallback_provider=StaticNasdaq100UniverseHistoryProvider(),
+        fallback_provider=StaticSp500UniverseHistoryProvider(),
+    )
+    nasdaq100_wikipedia_provider = WikipediaRevisionUniverseHistoryProvider(
+        definition=nasdaq100_definition,
+        official_provider=NasdaqAnnouncementUniverseProvider(
+            definition=nasdaq100_definition,
+        ),
+        fallback_provider=StaticNasdaq100UniverseHistoryProvider(),
+    )
+    return [
+        FmpHistoricalConstituentUniverseHistoryProvider(
+            definition=sp500_definition,
+            fallback_provider=sp500_wikipedia_provider,
+        ),
+        FmpHistoricalConstituentUniverseHistoryProvider(
+            definition=nasdaq100_definition,
+            fallback_provider=nasdaq100_wikipedia_provider,
         ),
     ]
 

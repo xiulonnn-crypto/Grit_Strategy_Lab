@@ -291,6 +291,11 @@ export const demoApi: DemoApi = {
     return clone(filtered.slice(0, limit).map((run) => ({ id: run.id, strategy_id: run.strategy_id ?? 'strat-001', status: run.status, created_at: nowIso() })));
   },
   async getBacktestRunDetail(id: string): Promise<ApiBacktestRunDetail> { return clone(findRun(id)); },
+  async saveBacktestRun(id: string): Promise<ApiBacktestRunDetail> {
+    const run = findRun(id);
+    run.is_permanent = true;
+    return clone(run);
+  },
   async getBacktestRunTrades(id: string, params): Promise<ApiBacktestRunTradePage> {
     const run = findRun(id);
     const page = Math.max(1, params?.page ?? 1);
@@ -325,7 +330,7 @@ export const demoApi: DemoApi = {
     const job = findJob(jobId);
     const strategy = findStrategy(job.strategy_id);
     const nextRank = job.candidates.length + 1;
-    job.candidates.push(createCandidate(strategy, { label: payload.label ?? `Manual Candidate ${nextRank}`, summary: payload.summary ?? 'Created directly from the recovered manual lab.', parameter_snapshot: payload.parameter_snapshot, metrics: payload.metrics ?? { total_return: 3.8, sharpe: 0.84 }, base_parameter_version_id: payload.base_parameter_version_id ?? job.base_parameter_version_id ?? null, score: typeof payload.metrics?.total_return === 'number' ? Number((payload.metrics.total_return / 10).toFixed(2)) : 0.5 }, nextRank));
+    job.candidates.push(createCandidate(strategy, { label: payload.label ?? `手动候选 ${nextRank}`, summary: payload.summary ?? '已根据当前实验室参数新建候选。', parameter_snapshot: payload.parameter_snapshot, metrics: payload.metrics ?? { total_return: 3.8, sharpe: 0.84 }, base_parameter_version_id: payload.base_parameter_version_id ?? job.base_parameter_version_id ?? null, score: typeof payload.metrics?.total_return === 'number' ? Number((payload.metrics.total_return / 10).toFixed(2)) : 0.5 }, nextRank));
     recalculateJob(job);
     return clone(job);
   },

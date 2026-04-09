@@ -80,10 +80,10 @@ export function createInitialState(): DemoState {
   });
 
   const candidates = [
-    createCandidate(qualityMomentum, { id: 'trial-001', label: 'Risk Dialed In', summary: 'Tighter breadth with a slightly more patient lookback.', parameter_snapshot: { ...qualityMomentum.parameters, top_n: 6, max_position_pct: 12 }, metrics: { total_return: 14.6, sharpe: 1.31 }, score: 1.34 }, 1),
-    createCandidate(qualityMomentum, { id: 'trial-002', label: 'Volatility Cushion', summary: 'More selective entry with extra skip window.', parameter_snapshot: { ...qualityMomentum.parameters, lookback_months: 9, skip_recent_months: 2 }, metrics: { total_return: 11.2, sharpe: 1.24 }, score: 1.28 }, 2),
-    createCandidate(qualityMomentum, { id: 'trial-003', label: 'Aggressive Breakout', summary: 'Wider basket that captured more upside but with thinner conviction.', parameter_snapshot: { ...qualityMomentum.parameters, top_n: 9, weighting_method: 'volatility_adjusted' }, metrics: { total_return: 5.1, sharpe: 0.92 }, score: 1.11 }, 3),
-    createCandidate(qualityMomentum, { id: 'trial-004', label: 'Overfit Reversal', summary: 'Negative OOS behavior, should be cleaned from the lab.', parameter_snapshot: { ...qualityMomentum.parameters, lookback_months: 2, top_n: 12 }, metrics: { total_return: -4.2, sharpe: -0.18 }, score: -0.22 }, 4),
+    createCandidate(qualityMomentum, { id: 'trial-001', label: '风险收敛版', summary: '收紧持仓广度，并适度拉长回看窗口。', parameter_snapshot: { ...qualityMomentum.parameters, top_n: 6, max_position_pct: 12 }, metrics: { total_return: 14.6, sharpe: 1.31 }, score: 1.34 }, 1),
+    createCandidate(qualityMomentum, { id: 'trial-002', label: '波动缓冲版', summary: '提高筛选强度，并增加跳过最近月份。', parameter_snapshot: { ...qualityMomentum.parameters, lookback_months: 9, skip_recent_months: 2 }, metrics: { total_return: 11.2, sharpe: 1.24 }, score: 1.28 }, 2),
+    createCandidate(qualityMomentum, { id: 'trial-003', label: '进攻突破版', summary: '扩大持仓篮子以增强上行捕捉，但信号置信度更薄。', parameter_snapshot: { ...qualityMomentum.parameters, top_n: 9, weighting_method: 'volatility_adjusted' }, metrics: { total_return: 5.1, sharpe: 0.92 }, score: 1.11 }, 3),
+    createCandidate(qualityMomentum, { id: 'trial-004', label: '过拟合反转版', summary: '样本外表现转弱，建议从实验室中清理。', parameter_snapshot: { ...qualityMomentum.parameters, lookback_months: 2, top_n: 12 }, metrics: { total_return: -4.2, sharpe: -0.18 }, score: -0.22 }, 4),
   ];
   const optimizationJob: ApiOptimizationJobDetail = {
     id: 'opt-001',
@@ -115,7 +115,7 @@ export function createInitialState(): DemoState {
     data_segment_type: 'FULL',
     parameter_version_id: qualityMomentum.current_parameter_version_id,
     request: { start_date: '2025-01-02', end_date: '2025-02-28', fee_bps: 5, slippage_bps: 5, execution_policy: 'T_CLOSE_TO_T1_OPEN' },
-    is_permanent: true,
+    is_permanent: false,
     source_run_id: null,
     trade_audit_items: [clone({ trade_id: qqqAudit.trade_id, symbol: qqqAudit.symbol, segment: qqqAudit.segment, opened_at: qqqAudit.opened_at, closed_at: qqqAudit.closed_at, pnl_pct: qqqAudit.pnl_pct, max_favorable_excursion_pct: qqqAudit.max_favorable_excursion_pct, max_adverse_excursion_pct: qqqAudit.max_adverse_excursion_pct, slippage_cost_pct: qqqAudit.slippage_cost_pct, commentary: qqqAudit.commentary }), clone({ trade_id: aaplAudit.trade_id, symbol: aaplAudit.symbol, segment: aaplAudit.segment, opened_at: aaplAudit.opened_at, closed_at: aaplAudit.closed_at, pnl_pct: aaplAudit.pnl_pct, max_favorable_excursion_pct: aaplAudit.max_favorable_excursion_pct, max_adverse_excursion_pct: aaplAudit.max_adverse_excursion_pct, slippage_cost_pct: aaplAudit.slippage_cost_pct, commentary: aaplAudit.commentary })],
     trade_audit: [qqqAudit, aaplAudit],

@@ -36,10 +36,10 @@ describe('App Phase 3 routes', () => {
     setMockPromoteConflict('opt-001', 'trial-001');
     await renderApp('#/optimization-jobs/opt-001');
 
-    const [promoteButton] = await screen.findAllByRole('button', { name: 'Promote Current Version' });
+    const [promoteButton] = await screen.findAllByRole('button', { name: '晋升为当前版本' });
     fireEvent.click(promoteButton);
 
-    expect(await screen.findByText('Parameter version conflict detected. Refresh the baseline before promoting again.')).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: 'Promote Current Version' }).length).toBeGreaterThan(0);
+    expect(await screen.findByText('参数版本冲突，请先刷新基线后再重新晋升。')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '晋升为当前版本' }).length).toBeGreaterThan(0);
   });
 });

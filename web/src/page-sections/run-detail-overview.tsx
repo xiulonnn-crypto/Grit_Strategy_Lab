@@ -1,11 +1,12 @@
-import { useMemo, useRef, useState } from 'react';
-import { formatShortDate } from '../lib/format';
+import { useMemo, useRef, useState, type CSSProperties } from 'react';
+import { formatCompactDate } from '../lib/format';
 import type { ApiBacktestRunDetail, ApiBacktestChartPoint } from '../types';
 
 type ViewWindow = 'all' | '1y' | '3y';
 type RunDetailTab = 'diagnostics' | 'trades' | 'evidence' | 'properties';
 type TrendDirection = 'up' | 'down' | 'flat';
 type InsightTone = 'teal' | 'blue' | 'warm' | 'gray' | 'positive' | 'warning' | 'neutral' | 'critical';
+type KpiTrendTone = 'better' | 'worse' | 'neutral';
 
 type RunDetailOverviewProps = {
   detail: ApiBacktestRunDetail;
@@ -57,6 +58,24 @@ type ChartPadding = {
   right: number;
   bottom: number;
   left: number;
+};
+
+type KpiFooterItem = {
+  label: string;
+  value: string;
+};
+
+type ResolvedKpiCard = ApiRunDetailKpiCard & {
+  footer_items: KpiFooterItem[];
+  trend_tone: KpiTrendTone;
+  hide_trend: boolean;
+};
+
+const KPI_HELP_COPY: Partial<Record<ApiRunDetailKpiCard['key'], string>> = {
+  sharpe: '夏普比率用于衡量单位波动承担下的收益效率，数值越高说明风险回报越优。',
+  latest_252_return: '最新252日滚动收益表示最近252个交易日的累计收益，约等于过去一年的阶段表现，用来判断策略近期斜率是否仍优于基准。',
+  rolling_252_return: '最新252日滚动收益表示最近252个交易日的累计收益，约等于过去一年的阶段表现，用来判断策略近期斜率是否仍优于基准。',
+  rolling_return: '最新252日滚动收益表示最近252个交易日的累计收益，约等于过去一年的阶段表现，用来判断策略近期斜率是否仍优于基准。',
 };
 
 function formatSmartPercent(value: number | null | undefined, digits = 1): string {
@@ -184,6 +203,118 @@ function calculateDrawdown(points: number[]): number | null {
   return maxDrawdown;
 }
 
+function isTestPoint(detail: ApiBacktestRunDetail, point: ApiBacktestChartPoint): boolean {
+  if (point.is_oos) {
+    return true;
+  }
+  return Boolean(detail.oos_start_date && point.trade_date >= detail.oos_start_date);
+}
+
+function getSegmentSeries(detail: ApiBacktestRunDetail): {
+  trainSeries: ApiBacktestChartPoint[];
+  testSeries: ApiBacktestChartPoint[];
+} {
+  const chartSeries = detail.chart_series ?? [];
+  return {
+    trainSeries: chartSeries.filter((point) => !isTestPoint(detail, point)),
+    testSeries: chartSeries.filter((point) => isTestPoint(detail, point)),
+  };
+}
+
+function getTradeCounts(detail: ApiBacktestRunDetail): { trainCount: number; testCount: number } {
+  const tradeItems = detail.trades?.length
+    ? detail.trades
+    : detail.trade_details?.length
+      ? detail.trade_details
+      : detail.trade_audit_items ?? [];
+
+  return {
+    trainCount: tradeItems.filter((item) => item.segment === 'IS').length,
+    testCount: tradeItems.filter((item) => item.segment === 'OOS').length,
+  };
+}
+
+function buildKpiFooterItems(detail: ApiBacktestRunDetail, key: string): KpiFooterItem[] {
+  const chartSeries = detail.chart_series ?? [];
+  const { trainSeries, testSeries } = getSegmentSeries(detail);
+  const { trainCount, testCount } = getTradeCounts(detail);
+
+  switch (key) {
+    case 'total_return':
+      return [
+        { label: '基准值', value: formatRatioPercent(calculateTotalReturn(chartSeries, (point) => point.benchmark)) },
+        { label: '训练集', value: formatRatioPercent(calculateTotalReturn(trainSeries, (point) => point.equity)) },
+        { label: '测试集', value: formatRatioPercent(calculateTotalReturn(testSeries, (point) => point.equity)) },
+      ];
+    case 'sharpe':
+      return [
+        { label: '基准值', value: formatSmartNumber(calculateSharpe(chartSeries, (point) => point.benchmark)) },
+        { label: '训练集', value: formatSmartNumber(calculateSharpe(trainSeries, (point) => point.equity)) },
+        { label: '测试集', value: formatSmartNumber(calculateSharpe(testSeries, (point) => point.equity)) },
+      ];
+    case 'max_drawdown':
+      return [
+        { label: '基准值', value: formatRatioPercent(calculateDrawdown(chartSeries.map((point) => point.benchmark))) },
+        { label: '训练集', value: formatRatioPercent(calculateDrawdown(trainSeries.map((point) => point.equity))) },
+        { label: '测试集', value: formatRatioPercent(calculateDrawdown(testSeries.map((point) => point.equity))) },
+      ];
+    case 'latest_252_return':
+    case 'rolling_252_return':
+    case 'rolling_return':
+      return [{ label: '基准值', value: formatRatioPercent(calculateWindowReturn(chartSeries, (point) => point.benchmark, 252)) }];
+    case 'trade_count':
+      return [
+        { label: '训练集', value: formatSmartInteger(trainCount) },
+        { label: '测试集', value: formatSmartInteger(testCount) },
+      ];
+    default:
+      return [
+        { label: '基准值', value: '—' },
+        { label: '训练集', value: '—' },
+        { label: '测试集', value: '—' },
+      ];
+  }
+}
+
+function resolveKpiTrendTone(detail: ApiBacktestRunDetail, key: string): KpiTrendTone {
+  const chartSeries = detail.chart_series ?? [];
+  const strategyTotalReturn = calculateTotalReturn(chartSeries, (point) => point.equity);
+  const benchmarkTotalReturn = calculateTotalReturn(chartSeries, (point) => point.benchmark);
+  const strategySharpe = calculateSharpe(chartSeries, (point) => point.equity);
+  const benchmarkSharpe = calculateSharpe(chartSeries, (point) => point.benchmark);
+  const strategyDrawdown = calculateDrawdown(chartSeries.map((point) => point.equity));
+  const benchmarkDrawdown = calculateDrawdown(chartSeries.map((point) => point.benchmark));
+  const latestRollingReturn = calculateWindowReturn(chartSeries, (point) => point.equity, 252);
+  const benchmarkRollingReturn = calculateWindowReturn(chartSeries, (point) => point.benchmark, 252);
+
+  switch (key) {
+    case 'total_return':
+      if (strategyTotalReturn === null || benchmarkTotalReturn === null) {
+        return 'neutral';
+      }
+      return strategyTotalReturn >= benchmarkTotalReturn ? 'better' : 'worse';
+    case 'sharpe':
+      if (strategySharpe === null || benchmarkSharpe === null) {
+        return 'neutral';
+      }
+      return strategySharpe >= benchmarkSharpe ? 'better' : 'worse';
+    case 'max_drawdown':
+      if (strategyDrawdown === null || benchmarkDrawdown === null) {
+        return 'neutral';
+      }
+      return Math.abs(strategyDrawdown) <= Math.abs(benchmarkDrawdown) ? 'better' : 'worse';
+    case 'latest_252_return':
+    case 'rolling_252_return':
+    case 'rolling_return':
+      if (latestRollingReturn === null || benchmarkRollingReturn === null) {
+        return 'neutral';
+      }
+      return latestRollingReturn >= benchmarkRollingReturn ? 'better' : 'worse';
+    default:
+      return 'neutral';
+  }
+}
+
 function buildFallbackKpis(detail: ApiBacktestRunDetail): ApiRunDetailKpiCard[] {
   const chartSeries = detail.chart_series ?? [];
   const strategyTotalReturn = calculateTotalReturn(chartSeries, (point) => point.equity);
@@ -259,7 +390,7 @@ function buildFallbackKpis(detail: ApiBacktestRunDetail): ApiRunDetailKpiCard[] 
       insight_tone: 'warm',
     },
     {
-      key: 'rolling_return',
+      key: 'rolling_252_return',
       label: '最新 252 日滚动收益',
       primary_text: formatSmartPercent(latestRollingReturn),
       trend_direction: 'flat',
@@ -436,13 +567,56 @@ function buildDateTicks(series: ApiBacktestChartPoint[], count = 4): Array<{ ind
   );
   return [...new Set(candidates)].map((index) => ({
     index,
-    label: formatShortDate(series[index]?.trade_date ?? ''),
+    label: formatCompactDate(series[index]?.trade_date ?? ''),
   }));
 }
 
 function formatAxisLabel(value: number): string {
   const relative = value - 100;
   return `${relative >= 0 ? '+' : ''}${relative.toFixed(Math.abs(relative) >= 10 ? 0 : 1)}%`;
+}
+
+function getTooltipStyle(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  padding: ChartPadding,
+  phasePillCenterX?: number,
+): CSSProperties {
+  const plotMidY = padding.top + (height - padding.top - padding.bottom) / 2;
+  const xRatio = width > 0 ? x / width : 0.5;
+  const topSafeInset = Math.max(12, padding.top + 10);
+  const forceBottom =
+    y <= padding.top + 108 ||
+    (typeof phasePillCenterX === 'number' && Math.abs(x - phasePillCenterX) <= 96);
+  const verticalAnchor =
+    forceBottom || y <= plotMidY
+      ? { bottom: `${padding.bottom + 12}px` }
+      : { top: `${topSafeInset}px` };
+
+  if (xRatio <= 0.28) {
+    return {
+      ...verticalAnchor,
+      left: `${padding.left + 10}px`,
+      transform: 'none',
+    };
+  }
+
+  if (xRatio >= 0.72) {
+    return {
+      ...verticalAnchor,
+      right: `${padding.right + 10}px`,
+      left: 'auto',
+      transform: 'none',
+    };
+  }
+
+  return {
+    ...verticalAnchor,
+    left: `${Math.max(24, Math.min((x / width) * 100, 76))}%`,
+    transform: 'translateX(-50%)',
+  };
 }
 
 function normalizeInsightTone(tone: InsightTone | undefined): InsightTone {
@@ -465,6 +639,10 @@ function normalizeInsightTone(tone: InsightTone | undefined): InsightTone {
   }
 }
 
+function getKpiHelpCopy(key: ApiRunDetailKpiCard['key']): string | null {
+  return KPI_HELP_COPY[key] ?? null;
+}
+
 export function RunDetailOverviewSection({
   detail,
   windowRange,
@@ -473,7 +651,18 @@ export function RunDetailOverviewSection({
   onTabChange,
 }: RunDetailOverviewProps): JSX.Element {
   const analysis = getAnalysis(detail);
-  const kpiCards = analysis?.kpi_cards?.length ? analysis.kpi_cards : buildFallbackKpis(detail);
+  const kpiCards = useMemo<ResolvedKpiCard[]>(
+    () =>
+      (analysis?.kpi_cards?.length ? analysis.kpi_cards : buildFallbackKpis(detail))
+        .slice(0, 5)
+        .map((card) => ({
+          ...card,
+          footer_items: buildKpiFooterItems(detail, card.key),
+          trend_tone: resolveKpiTrendTone(detail, card.key),
+          hide_trend: card.key === 'trade_count',
+        })),
+    [analysis?.kpi_cards, detail],
+  );
   const decisionRail = analysis?.decision_rail?.items?.length
     ? analysis.decision_rail
     : buildFallbackDecisionRailFromCurves(detail);
@@ -496,6 +685,16 @@ export function RunDetailOverviewSection({
   const hoveredBenchmark = benchmarkValues[activeIndex];
   const tooltipX = hoveredPoint ? getXCoordinate(activeIndex, series.length, chartWidth, chartPadding) : chartPadding.left;
   const tooltipY = hoveredPoint ? getYCoordinate(hoveredEquity ?? 100, chartHeight, chartPadding, bounds) : chartPadding.top;
+  const phasePillCenterX =
+    oosStartIndex >= 0 && series[oosStartIndex]
+      ? Math.max(
+          chartPadding.left + 50,
+          Math.min(getXCoordinate(oosStartIndex, series.length, chartWidth, chartPadding), chartWidth - chartPadding.right - 42),
+        )
+      : undefined;
+  const tooltipStyle = hoveredPoint
+    ? getTooltipStyle(tooltipX, tooltipY, chartWidth, chartHeight, chartPadding, phasePillCenterX)
+    : undefined;
 
   async function handleFullscreen(): Promise<void> {
     const container = fullscreenRef.current;
@@ -520,26 +719,45 @@ export function RunDetailOverviewSection({
     <div className="run-detail-overview-stack">
       <section className="panel run-detail-kpi-panel">
         <div className="run-detail-kpi-grid run-detail-kpi-grid--five">
-          {kpiCards.slice(0, 5).map((card) => {
+          {kpiCards.map((card) => {
             const trendDirection = card.trend_direction ?? 'flat';
             const insightTone = normalizeInsightTone(card.insight_tone);
             const trendArrow = trendDirection === 'up' ? '↑' : trendDirection === 'down' ? '↓' : '→';
+            const helpCopy = getKpiHelpCopy(card.key);
             return (
               <article className="run-detail-kpi-card" key={card.key}>
                 <div className="run-detail-kpi-card__head">
                   <span className="run-detail-kpi-card__label">{card.label}</span>
-                  <button aria-label={`${card.label} 指标说明`} className="run-detail-kpi-card__hint" type="button">
-                    ?
-                  </button>
+                  {helpCopy ? (
+                    <span className="run-detail-kpi-card__hint-shell">
+                      <button aria-label={`${card.label} 指标说明`} className="run-detail-kpi-card__hint" type="button">
+                        ?
+                      </button>
+                      <span className="run-detail-kpi-card__tooltip" role="tooltip">
+                        {helpCopy}
+                      </span>
+                    </span>
+                  ) : null}
                 </div>
                 <div className="run-detail-kpi-card__core">
                   <strong>{card.primary_text}</strong>
-                  <span className={`run-detail-kpi-card__trend run-detail-kpi-card__trend--${trendDirection}`}>
-                    <span aria-hidden="true">{trendArrow}</span>
-                    {card.trend_text ?? '暂无变化'}
-                  </span>
+                  {!card.hide_trend ? (
+                    <span className={`run-detail-kpi-card__trend run-detail-kpi-card__trend--${card.trend_tone}`}>
+                      <span aria-hidden="true">{trendArrow}</span>
+                      {card.trend_text ?? '暂无变化'}
+                    </span>
+                  ) : null}
                 </div>
-                <div className="run-detail-kpi-card__compare">{card.compare_text ?? '暂无对比'}</div>
+                <div
+                  className={`run-detail-kpi-card__compare run-detail-kpi-card__compare--${card.footer_items.length === 1 ? 'single' : card.footer_items.length === 2 ? 'double' : 'triple'}`}
+                >
+                  {card.footer_items.map((item) => (
+                    <div className="run-detail-kpi-card__compare-item" key={`${card.key}-${item.label}`}>
+                      <span>{item.label}</span>
+                      <strong>{item.value}</strong>
+                    </div>
+                  ))}
+                </div>
                 <div className={`run-detail-kpi-card__insight run-detail-kpi-card__insight--${insightTone}`}>
                   {card.insight_text ?? '暂无优化建议'}
                 </div>
@@ -554,7 +772,6 @@ export function RunDetailOverviewSection({
           <div className="panel-header">
             <div>
               <h3>业绩曲线</h3>
-              <p className="run-detail-section-copy">{subtitle}</p>
             </div>
             <div className="run-detail-window-switcher" role="tablist" aria-label="绩效区间筛选">
               {([
@@ -577,12 +794,12 @@ export function RunDetailOverviewSection({
 
           <div className="run-detail-chart-copy">
             <span>
-              训练集 {series[0] ? formatShortDate(series[0].trade_date) : '—'} 至{' '}
-              {series[oosStartIndex > 0 ? oosStartIndex - 1 : Math.max(series.length - 1, 0)] ? formatShortDate(series[oosStartIndex > 0 ? oosStartIndex - 1 : Math.max(series.length - 1, 0)].trade_date) : '—'}
+              训练集 {series[0] ? formatCompactDate(series[0].trade_date) : '—'} 至{' '}
+              {series[oosStartIndex > 0 ? oosStartIndex - 1 : Math.max(series.length - 1, 0)] ? formatCompactDate(series[oosStartIndex > 0 ? oosStartIndex - 1 : Math.max(series.length - 1, 0)].trade_date) : '—'}
             </span>
             <span className="run-detail-chart-copy--accent">
               {oosStartIndex >= 0 && series[oosStartIndex]
-                ? `测试集 ${formatShortDate(series[oosStartIndex].trade_date)} 至 ${formatShortDate(series[series.length - 1]?.trade_date ?? series[oosStartIndex].trade_date)}`
+                ? `测试集 ${formatCompactDate(series[oosStartIndex].trade_date)} 至 ${formatCompactDate(series[series.length - 1]?.trade_date ?? series[oosStartIndex].trade_date)}`
                 : '无测试集分区'}
             </span>
           </div>
@@ -703,12 +920,9 @@ export function RunDetailOverviewSection({
                 {hoveredPoint ? (
                   <div
                     className="run-detail-chart-tooltip"
-                    style={{
-                      left: `${Math.max(18, Math.min(((tooltipX / chartWidth) * 100), 82))}%`,
-                      top: `${Math.max(16, ((tooltipY / chartHeight) * 100) - 8)}%`,
-                    }}
+                    style={tooltipStyle}
                   >
-                    <strong>{formatShortDate(hoveredPoint.trade_date)}</strong>
+                    <strong>{formatCompactDate(hoveredPoint.trade_date)}</strong>
                     <div className="run-detail-chart-tooltip__row">
                       <span className="run-detail-chart-tooltip__dot run-detail-chart-tooltip__dot--strategy" />
                       <span>策略曲线</span>

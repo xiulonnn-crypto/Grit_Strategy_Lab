@@ -72,6 +72,16 @@ const INVESTMENT_FREQUENCY_OPTIONS: FieldOption[] = [
   { value: 'quarterly', label: '每季' },
   { value: 'yearly', label: '每年' },
 ];
+const MOMENTUM_REBALANCE_OPTIONS: FieldOption[] = [
+  { value: 'monthly', label: '每月' },
+  { value: 'quarterly', label: '每季度' },
+  { value: 'semiannual', label: '每半年' },
+  { value: 'yearly', label: '每年' },
+];
+const MOMENTUM_WEIGHTING_OPTIONS: FieldOption[] = [
+  { value: 'equal_weight', label: '等权' },
+  { value: 'score_weighted', label: '按动量分数加权' },
+];
 type FieldConfigMap = Record<string, Omit<EditableField, 'source' | 'value' | 'isTopLevel'>>;
 const GRID_FIELDS: Record<string, Omit<EditableField, 'source' | 'value' | 'isTopLevel'>> = {
   strategy_type: { key: 'strategy_type', label: '策略类型', bucket: 'core', step: 'basic', required: true, control: 'readonly', order: 10, showKey: false },
@@ -98,6 +108,21 @@ const BUY_AND_HOLD_FIELDS: FieldConfigMap = {
   investment_frequency: { key: 'investment_frequency', label: '定投频率', bucket: 'logic', step: 'selection', required: true, control: 'select', order: 70, showKey: false, options: INVESTMENT_FREQUENCY_OPTIONS },
   rebalance_frequency: { key: 'rebalance_frequency', label: '再平衡频次', bucket: 'core', step: 'risk', required: true, control: 'select', order: 80, showKey: false, options: REBALANCE_OPTIONS },
 };
+const MOMENTUM_FIELDS: FieldConfigMap = {
+  strategy_type: { key: 'strategy_type', label: '策略类型', bucket: 'core', step: 'basic', required: true, control: 'readonly', order: 10, showKey: false },
+  strategy_name: { key: 'strategy_name', label: '策略名称', bucket: 'parameters', step: 'basic', required: true, control: 'text', order: 20, showKey: false, placeholder: '例如 标普动量策略' },
+  strategy_description: { key: 'strategy_description', label: '策略描述', bucket: 'parameters', step: 'basic', required: true, control: 'textarea', order: 30, showKey: false, placeholder: '简要描述调仓频率、股票池和持仓规则' },
+  universe_name: { key: 'universe_name', label: '股票池', bucket: 'core', step: 'basic', required: true, control: 'text', order: 40, showKey: false, placeholder: '例如 标普500成分股' },
+  benchmark_symbol: { key: 'benchmark_symbol', label: '基准', bucket: 'parameters', step: 'basic', required: true, control: 'select', order: 50, showKey: false, options: BENCHMARK_OPTIONS },
+  capital: { key: 'capital', label: '初始资金(USD)', bucket: 'parameters', step: 'basic', required: true, control: 'text', order: 60, showKey: false, placeholder: '例如 100000' },
+  lookback_months: { key: 'lookback_months', label: '动量回看(月)', bucket: 'logic', step: 'selection', required: true, control: 'text', order: 70, showKey: false, placeholder: '例如 12' },
+  skip_recent_months: { key: 'skip_recent_months', label: '跳过最近(月)', bucket: 'logic', step: 'selection', required: true, control: 'text', order: 80, showKey: false, placeholder: '例如 1' },
+  top_n: { key: 'top_n', label: '买入排名阈值', bucket: 'logic', step: 'selection', required: true, control: 'text', order: 90, showKey: false, placeholder: '例如 100' },
+  hold_rank_threshold: { key: 'hold_rank_threshold', label: '保留排名阈值', bucket: 'logic', step: 'selection', required: true, control: 'text', order: 100, showKey: false, placeholder: '例如 120' },
+  weighting_method: { key: 'weighting_method', label: '权重方法', bucket: 'logic', step: 'selection', required: true, control: 'select', order: 110, showKey: false, options: MOMENTUM_WEIGHTING_OPTIONS },
+  rebalance_frequency: { key: 'rebalance_frequency', label: '调仓频率', bucket: 'core', step: 'risk', required: true, control: 'select', order: 120, showKey: false, options: MOMENTUM_REBALANCE_OPTIONS },
+  rebalance_anchor_dates: { key: 'rebalance_anchor_dates', label: '调仓锚点', bucket: 'logic', step: 'risk', required: true, control: 'textarea', order: 130, showKey: false, placeholder: '例如 每年01月第1个交易日；07月第1个交易日' },
+};
 const MEAN_REVERSION_FIELDS: FieldConfigMap = {
   strategy_type: { key: 'strategy_type', label: '策略类型', bucket: 'core', step: 'basic', required: true, control: 'readonly', order: 10, showKey: false },
   strategy_name: { key: 'strategy_name', label: '策略名称', bucket: 'parameters', step: 'basic', required: true, control: 'text', order: 20, showKey: false, placeholder: '例如 QQQ 均值回归策略' },
@@ -115,6 +140,7 @@ const MEAN_REVERSION_FIELDS: FieldConfigMap = {
 const CONFIGURED_FIELDS: Partial<Record<StrategyType, FieldConfigMap>> = {
   GRID: GRID_FIELDS,
   BUY_AND_HOLD: BUY_AND_HOLD_FIELDS,
+  MOMENTUM: MOMENTUM_FIELDS,
   MEAN_REVERSION: MEAN_REVERSION_FIELDS,
 };
 const CONFIGURED_TOP_LEVEL_KEYS = new Set(['strategy_type', 'universe_name', 'rebalance_frequency']);
@@ -188,6 +214,34 @@ function defaultConfiguredFieldValue(session: ApiStrategyCreationSession, key: s
           return 'SPY';
         case 'rebalance_frequency':
           return normalizeFieldValue(session.top_level?.rebalance_frequency).trim() || 'never';
+        default:
+          return '';
+      }
+    case 'MOMENTUM':
+      switch (key) {
+        case 'strategy_type':
+          return session.top_level?.strategy_type ?? 'MOMENTUM';
+        case 'strategy_name':
+          if (findFieldValue(session, 'strategy_name')) return findFieldValue(session, 'strategy_name');
+          return universeName ? `${universeName} 动量策略` : deriveStrategyTitle(session);
+        case 'strategy_description':
+          return '';
+        case 'universe_name':
+          return universeName;
+        case 'benchmark_symbol':
+          return universeName.includes('纳指') || universeName.includes('纳斯达克') ? 'QQQ' : 'SPY';
+        case 'capital':
+        case 'lookback_months':
+        case 'skip_recent_months':
+        case 'top_n':
+        case 'hold_rank_threshold':
+          return '';
+        case 'weighting_method':
+          return 'equal_weight';
+        case 'rebalance_frequency':
+          return normalizeFieldValue(session.top_level?.rebalance_frequency).trim() || 'semiannual';
+        case 'rebalance_anchor_dates':
+          return '';
         default:
           return '';
       }
@@ -515,7 +569,7 @@ export function CreationSessionPage({ sessionId }: { sessionId: string }): JSX.E
                     <div className="creation-message-tags" aria-label="参数提取标签">
                       {message.extracted_tags.map((tag) => (
                         <span className={`creation-message-tag creation-message-tag--${tag.status}`} key={`${message.id ?? index}-${tag.key}-${tag.status}`}>
-                          <span>{`${tag.label}：${displayValue({ key: tag.key, options: GRID_FIELDS[tag.key]?.options }, tag.value)}`}</span>
+                          <span>{`${tag.label}：${displayValue(resolveField(session.top_level?.strategy_type ?? null, tag.key, tag.label, CONFIGURED_TOP_LEVEL_KEYS.has(tag.key)), tag.value)}`}</span>
                           <span>{tagStatusLabel(tag.status)}</span>
                         </span>
                       ))}

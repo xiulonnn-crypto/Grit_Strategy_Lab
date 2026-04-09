@@ -12,6 +12,7 @@ from tests.api_test_support import (
     assert_ok,
     create_buy_and_hold_strategy,
     create_grid_strategy,
+    create_momentum_strategy,
     create_test_client,
     preview_backtest,
     refresh_snapshots,
@@ -37,7 +38,7 @@ def test_preview_submit_detail_and_trades_preserve_parameter_snapshot_and_defaul
         idempotency_key="run-grid-default-segment",
     )
     detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail"))
-    trades = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/trades"))
+    trades = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/trades?page=1&page_size=200"))
 
     assert refresh["overall_status"] == "READY"
     assert refresh["latest_job"]["summary"]["status"] == "READY"
@@ -51,7 +52,7 @@ def test_preview_submit_detail_and_trades_preserve_parameter_snapshot_and_defaul
     assert submitted["request"]["dataset_snapshot_id"] == "ds-price"
     assert submitted["request"]["universe_snapshot_id"] is None
     assert submitted["request"]["execution_policy"] == "T_CLOSE_TO_T1_OPEN"
-    assert submitted["is_permanent"] is True
+    assert submitted["is_permanent"] is False
     assert submitted["parameter_snapshot"] == preview["parameter_snapshot"]
     assert detail["data_segment_type"] == "FULL"
     assert detail["dataset_snapshot_id"] == "ds-price"
@@ -60,7 +61,24 @@ def test_preview_submit_detail_and_trades_preserve_parameter_snapshot_and_defaul
     assert trades["total"] == detail["trades_count"]
     assert detail["coverage_ratio"] > 0.9
     assert trades["items"][0]["trade_date"] == START_DATE
+    first_trade = trades["items"][0]
+    first_point = next(point for point in detail["chart_series"] if point["trade_date"] == first_trade["trade_date"])
+    expected_equity_before = float(first_point["equity"]) / (1.0 + float(first_point["strategy_return"]))
+    expected_notional = expected_equity_before * abs(float(first_trade["weight_after"]) - float(first_trade["weight_before"]))
+    expected_quantity = expected_notional / float(first_trade["price"])
+    assert first_trade["side"] == "BUY"
+    assert abs(float(first_trade["net_amount"]) - expected_notional) < 1e-3
+    assert abs(float(first_trade["quantity"]) - expected_quantity) < 1e-6
+    sell_trade = next(item for item in trades["items"] if item["side"] == "SELL")
+    assert sell_trade["pnl_amount"] not in (None, "")
+    assert sell_trade["pnl_contribution"] not in (None, "")
+    assert trades["total_pages"] >= 1
     assert detail["trade_audit_items"]
+    assert detail["rolling_metrics"]
+    rolling_point = detail["rolling_metrics"][-1]
+    assert rolling_point["window_days"] == 252
+    assert rolling_point["trailing_252_return"] is not None
+    assert rolling_point["trailing_252_sharpe"] is not None
     assert set(detail["trade_audit_items"][0].keys()) == {
         "trade_id",
         "symbol",
@@ -213,6 +231,77 @@ def test_single_symbol_preview_submit_ignores_global_price_snapshot_incomplete_w
     assert submitted["preview"]["snapshot_summary"]["price_dataset_status"] == "INCOMPLETE"
     assert submitted["preview"]["snapshot_summary"]["blocking"] is False
     assert submitted["preview"]["environment_summary"]["symbols"] == ["QQQ"]
+
+
+def test_named_sp500_universe_preview_bypasses_global_snapshot_status_when_request_data_is_usable(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_momentum_strategy(
+        client,
+        idempotency_key="materialize-momentum-sp500-cn-name",
+        universe_name="标普500成分股",
+        rebalance_frequency="semiannual",
+        top_n=3,
+    )["strategy"]
+    refresh_snapshots(client)
+    service = client.app.state.service
+    repository = service.market_data_repository
+
+    price_snapshot = next(item for item in repository.list_dataset_snapshots() if item["id"] == "ds-price")
+    price_rows = repository.load_dataset_snapshot_rows("ds-price")
+    repository.replace_dataset_snapshot(
+        {
+            **dict(price_snapshot),
+            "status": "INCOMPLETE",
+            "blocker": {
+                "code": "PRICE_SNAPSHOT_INCOMPLETE",
+                "message": "Some unrelated symbols are still missing from the global price snapshot.",
+            },
+        },
+        price_bars=price_rows.get("price_bars") or [],
+        symbol_coverage=price_rows.get("symbol_coverage") or [],
+    )
+
+    corporate_snapshot = next(item for item in repository.list_dataset_snapshots() if item["id"] == "ds-corporate-actions")
+    corporate_rows = repository.load_dataset_snapshot_rows("ds-corporate-actions")
+    repository.replace_dataset_snapshot(
+        {
+            **dict(corporate_snapshot),
+            "status": "STALE",
+            "blocker": {
+                "code": "CORPORATE_ACTIONS_INCOMPLETE",
+                "message": "Corporate action snapshot stayed on the previous rows because this refresh did not return new events.",
+            },
+        },
+        corporate_actions=corporate_rows.get("corporate_actions") or [],
+        symbol_coverage=corporate_rows.get("symbol_coverage") or [],
+    )
+
+    universe_snapshot = next(item for item in repository.list_universe_snapshots() if item["id"] == "un-sp500")
+    universe_memberships = repository.load_universe_memberships(universe_snapshot_id="un-sp500")
+    repository.replace_universe_snapshot(
+        {
+            **dict(universe_snapshot),
+            "status": "INCOMPLETE",
+            "blocker": {
+                "code": "UNIVERSE_HISTORY_INCOMPLETE",
+                "message": "Universe history is partially available, but some historical anchors are still missing.",
+            },
+        },
+        memberships=universe_memberships,
+    )
+
+    preview = preview_backtest(client, strategy["id"], start_date=START_DATE, end_date=END_DATE)
+
+    assert preview["universe_snapshot_id"] == "un-sp500"
+    assert preview["snapshot_summary"]["blocking"] is False
+    assert preview["snapshot_summary"]["status"] == "READY"
+    assert preview["snapshot_summary"]["symbol_count"] > 0
+    assert preview["snapshot_summary"]["price_dataset_status"] == "INCOMPLETE"
+    assert preview["snapshot_summary"]["corporate_actions_status"] == "STALE"
+    assert preview["snapshot_summary"]["universe_status"] == "INCOMPLETE"
+    assert "标普500成分股" not in (preview["environment_summary"].get("symbols") or [])
+    assert "AAPL" in (preview["environment_summary"].get("symbols") or [])
 
 
 def test_buy_and_hold_dca_preview_submit_generates_recurring_monthly_trades(tmp_path):

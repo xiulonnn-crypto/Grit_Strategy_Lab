@@ -68,8 +68,13 @@ function formatDisplayDate(value?: string | null): string | null {
 }
 
 function formatDateRange(start?: string | null, end?: string | null): string {
-  const formattedStart = formatDisplayDate(start);
-  const formattedEnd = formatDisplayDate(end);
+  const normalizedStart = start ? new Date(start).getTime() : Number.NaN;
+  const normalizedEnd = end ? new Date(end).getTime() : Number.NaN;
+  const orderedStart = Number.isFinite(normalizedStart) && Number.isFinite(normalizedEnd) && normalizedStart > normalizedEnd ? end : start;
+  const orderedEnd = Number.isFinite(normalizedStart) && Number.isFinite(normalizedEnd) && normalizedStart > normalizedEnd ? start : end;
+
+  const formattedStart = formatDisplayDate(orderedStart);
+  const formattedEnd = formatDisplayDate(orderedEnd);
 
   if (formattedStart && formattedEnd) {
     return `${formattedStart} - ${formattedEnd}`;
@@ -117,27 +122,60 @@ function getConfigDate(configuration: ApiBacktestRunDetail['configuration'], key
   return typeof value === 'string' ? value : undefined;
 }
 
+function toRunSummaryDetail(run: ApiBacktestRunListItem): ApiBacktestRunDetail {
+  return {
+    id: run.id,
+    strategy_id: run.strategy_id,
+    strategy_name: run.strategy_name,
+    status: run.status,
+    metrics: run.metrics ?? {},
+    warnings: run.warnings ?? [],
+    preview: run.preview,
+    data_segment_type: run.data_segment_type,
+    parameter_version_id: run.parameter_version_id ?? run.preview?.parameter_version_id ?? null,
+    request: {},
+    start_date: run.start_date ?? null,
+    end_date: run.end_date ?? null,
+    oos_start_date: run.oos_start_date ?? run.preview?.oos_start_date ?? null,
+    effective_date: run.effective_date ?? run.preview?.effective_date ?? null,
+    is_permanent: run.is_permanent,
+    source_run_id: run.source_run_id ?? null,
+    trades_count: run.trades_count,
+    created_at: run.created_at,
+    updated_at: run.updated_at,
+    completed_at: run.completed_at ?? null,
+  };
+}
+
 function buildRecentRunItems(
   runs: ApiBacktestRunListItem[],
   detailsById: Record<string, ApiBacktestRunDetail>,
   strategyNamesById: Record<string, string>,
 ): WorkspaceRecentRunItem[] {
   return runs.map((run) => {
-    const detail = detailsById[run.id];
+    const detail = detailsById[run.id] ?? toRunSummaryDetail(run);
     const strategyName = strategyNamesById[run.strategy_id] ?? run.strategy_name ?? run.strategy_id;
     const score = buildRecentRunScore(detail);
     const preview = detail?.preview ?? run.preview;
     const rangeStart =
+      detail?.start_date ??
+      run.start_date ??
+      getConfigDate(detail?.configuration, 'start_date') ??
       preview?.effective_start_date ??
       getConfigDate(detail?.configuration, 'effective_start_date') ??
       preview?.oos_start_date ??
       detail?.oos_start_date ??
+      run.oos_start_date ??
       run.preview?.oos_start_date ??
       run.created_at;
     const rangeEnd =
+      detail?.end_date ??
+      run.end_date ??
+      getConfigDate(detail?.configuration, 'end_date') ??
       preview?.effective_end_date ??
       getConfigDate(detail?.configuration, 'effective_end_date') ??
       detail?.effective_date ??
+      run.effective_date ??
       run.preview?.effective_date ??
       run.completed_at ??
       detail?.completed_at ??
@@ -175,10 +213,9 @@ export function WorkspacePage(): JSX.Element {
   const api = useApiClient();
   const [overview, setOverview] = useState<ApiWorkspaceOverview | null>(null);
   const [strategies, setStrategies] = useState<ApiStrategyListItem[]>([]);
-  const [strategyDetails, setStrategyDetails] = useState<Record<string, ApiStrategyDetail>>({});
+  const [strategyDetails] = useState<Record<string, ApiStrategyDetail>>({});
   const [strategyLatestRuns, setStrategyLatestRuns] = useState<Record<string, ApiBacktestRunDetail>>({});
   const [recentRuns, setRecentRuns] = useState<ApiBacktestRunListItem[]>([]);
-  const [recentRunDetails, setRecentRunDetails] = useState<Record<string, ApiBacktestRunDetail>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -194,26 +231,6 @@ export function WorkspacePage(): JSX.Element {
           api.listStrategies(),
           api.listBacktestRuns({ limit: 8 }),
         ]);
-        const detailEntries = await Promise.all(
-          strategyItems.map(async (strategy) => [strategy.id, await api.getStrategyDetail(strategy.id)] as const),
-        );
-        const latestRunIds = strategyItems
-          .map((strategy) => {
-            const detail = detailEntries.find(([id]) => id === strategy.id)?.[1];
-            return (
-              detail?.latest_successful_run_id ??
-              detail?.latest_run_id ??
-              strategy.latest_successful_run_id ??
-              strategy.latest_run_id
-            );
-          })
-          .filter((runId): runId is string => Boolean(runId));
-        const latestRunDetailEntries = await Promise.all(
-          [...new Set(latestRunIds)].map(async (runId) => [runId, await api.getBacktestRunDetail(runId)] as const),
-        );
-        const recentRunDetailEntries = await Promise.all(
-          backtestRuns.map(async (run) => [run.id, await api.getBacktestRunDetail(run.id)] as const),
-        );
 
         if (cancelled) {
           return;
@@ -221,10 +238,44 @@ export function WorkspacePage(): JSX.Element {
 
         setOverview(workspaceOverview);
         setStrategies(strategyItems);
-        setStrategyDetails(Object.fromEntries(detailEntries));
-        setStrategyLatestRuns(Object.fromEntries(latestRunDetailEntries));
         setRecentRuns(backtestRuns);
-        setRecentRunDetails(Object.fromEntries(recentRunDetailEntries));
+
+        const latestRunIds = strategyItems
+          .map((strategy) => {
+            return (
+              strategy.latest_successful_run_id ??
+              strategy.latest_run_id
+            );
+          })
+          .filter((runId): runId is string => Boolean(runId));
+        const runSummariesById = Object.fromEntries(
+          backtestRuns.map((run) => [run.id, toRunSummaryDetail(run)] as const),
+        );
+        setStrategyLatestRuns(
+          Object.fromEntries(
+            [...new Set(latestRunIds)]
+              .map((runId) => [runId, runSummariesById[runId]] as const)
+              .filter((entry): entry is readonly [string, ApiBacktestRunDetail] => Boolean(entry[1])),
+          ),
+        );
+        setLoading(false);
+
+        if (!latestRunIds.length) {
+          return;
+        }
+
+        const latestRunDetailEntries = await Promise.all(
+          [...new Set(latestRunIds)].map(async (runId) => [runId, await api.getBacktestRunDetail(runId)] as const),
+        );
+
+        if (cancelled) {
+          return;
+        }
+
+        setStrategyLatestRuns((current) => ({
+          ...current,
+          ...Object.fromEntries(latestRunDetailEntries),
+        }));
       } catch (caught) {
         if (!cancelled) {
           setError((caught as Error).message);
@@ -249,8 +300,8 @@ export function WorkspacePage(): JSX.Element {
   const latestStrategyId = overview?.latest_strategy_id ?? cards[0]?.id ?? null;
   const recentRunItems = useMemo(() => {
     const strategyNamesById = Object.fromEntries(strategies.map((strategy) => [strategy.id, strategy.name] as const));
-    return buildRecentRunItems(recentRuns, recentRunDetails, strategyNamesById);
-  }, [recentRunDetails, recentRuns, strategies]);
+    return buildRecentRunItems(recentRuns, strategyLatestRuns, strategyNamesById);
+  }, [recentRuns, strategies, strategyLatestRuns]);
   const isEmptyWorkspace = !loading && !error && cards.length === 0;
 
   return (

@@ -52,7 +52,7 @@ describe('OptimizationManualLab diff rendering', () => {
     expect(screen.queryByText('param_5')).toBeNull();
     expect(screen.queryByText('param_20')).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Promote Current Version' }));
+    fireEvent.click(screen.getByRole('button', { name: '晋升为当前版本' }));
   });
 
   it('opens top-3 compare and collects a revision note before promote', async () => {
@@ -142,21 +142,21 @@ describe('OptimizationManualLab diff rendering', () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Compare Top 3/i }));
-    const compareDialog = screen.getByRole('dialog', { name: 'Top 3 compare panel' });
+    fireEvent.click(screen.getByRole('button', { name: '对比前 3 名' }));
+    const compareDialog = screen.getByRole('dialog', { name: '前 3 名对比面板' });
     expect(compareDialog).toBeInTheDocument();
-    expect(compareDialog).toHaveTextContent('Candidate 3');
-    expect(compareDialog).not.toHaveTextContent('Candidate 4');
+    expect(compareDialog).toHaveTextContent('候选方案 3');
+    expect(compareDialog).not.toHaveTextContent('候选方案 4');
 
-    fireEvent.click(screen.getByRole('button', { name: /Delete Losing Candidates/i }));
+    fireEvent.click(screen.getByRole('button', { name: /删除亏损候选/i }));
     expect(onDeleteLosingCandidates).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'Promote Current Version' })[0]);
-    fireEvent.change(screen.getByLabelText('Revision Note'), { target: { value: 'Tighten breadth after volatility break.' } });
+    fireEvent.click(screen.getAllByRole('button', { name: '晋升为当前版本' })[0]);
+    fireEvent.change(screen.getByLabelText('晋升备注'), { target: { value: '波动放大后收紧参数范围。' } });
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Promote with Note' }));
+      fireEvent.click(screen.getByRole('button', { name: '附备注晋升' }));
     });
 
-    expect(onPromote).toHaveBeenCalledWith('trial-001', 'Tighten breadth after volatility break.');
+    expect(onPromote).toHaveBeenCalledWith('trial-001', '波动放大后收紧参数范围。');
   });
 });

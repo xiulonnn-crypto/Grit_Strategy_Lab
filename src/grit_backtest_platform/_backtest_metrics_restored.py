@@ -153,7 +153,16 @@ def build_drawdown_events(
     return events
 
 
-def build_rolling_metrics(points: Iterable[Mapping[str, Any]], window: int | None = 21) -> list[dict[str, Any]]:
+def _annualized_sharpe(returns: list[float]) -> float:
+    if not returns:
+        return 0.0
+    volatility = pstdev(returns) if len(returns) > 1 else 0.0
+    if abs(volatility) <= 1e-12:
+        return 0.0
+    return (mean(returns) / volatility) * sqrt(252.0)
+
+
+def build_rolling_metrics(points: Iterable[Mapping[str, Any]], window: int | None = 252) -> list[dict[str, Any]]:
     if window is None or window <= 1:
         return []
     rows = list(points)
@@ -163,11 +172,18 @@ def build_rolling_metrics(points: Iterable[Mapping[str, Any]], window: int | Non
     returns = _strategy_returns(rows)
     for index in range(window - 1, len(rows)):
         chunk = returns[index - window + 1 : index + 1]
+        window_return_pct = round(sum(chunk) * 100.0, 4)
+        window_volatility_pct = round((pstdev(chunk) if len(chunk) > 1 else 0.0) * 100.0, 4)
+        window_sharpe = round(_annualized_sharpe(chunk), 4)
         rolling.append(
             {
                 "trade_date": _trade_date(rows[index]),
-                "window_return_pct": round(sum(chunk) * 100.0, 4),
-                "window_volatility_pct": round((pstdev(chunk) if len(chunk) > 1 else 0.0) * 100.0, 4),
+                "window_days": window,
+                "window_return_pct": window_return_pct,
+                "window_volatility_pct": window_volatility_pct,
+                "window_sharpe": window_sharpe,
+                "trailing_252_return": window_return_pct if window == 252 else None,
+                "trailing_252_sharpe": window_sharpe if window == 252 else None,
             }
         )
     return rolling

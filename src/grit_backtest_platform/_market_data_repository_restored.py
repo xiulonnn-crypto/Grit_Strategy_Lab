@@ -360,11 +360,24 @@ class MarketDataRepository:
         created_at = str(snapshot.get("created_at") or now)
         conn.execute(
             """
-            INSERT OR REPLACE INTO dataset_snapshots (
+            INSERT INTO dataset_snapshots (
                 id, name, status, as_of, freshness_label, start_date, end_date,
                 row_count, source, fallback_source, blocker_json, metadata_json,
                 created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                status = excluded.status,
+                as_of = excluded.as_of,
+                freshness_label = excluded.freshness_label,
+                start_date = excluded.start_date,
+                end_date = excluded.end_date,
+                row_count = excluded.row_count,
+                source = excluded.source,
+                fallback_source = excluded.fallback_source,
+                blocker_json = excluded.blocker_json,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
             """,
             (
                 snapshot_id,
@@ -481,6 +494,107 @@ class MarketDataRepository:
                 conn.executemany(
                     """
                     INSERT INTO dataset_symbol_coverage (
+                        dataset_snapshot_id, symbol, start_date, end_date, trade_days,
+                        source, fallback_source, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    coverage_rows,
+                )
+        return dataset_snapshot_id
+
+    def merge_dataset_snapshot(
+        self,
+        snapshot: Mapping[str, Any],
+        *,
+        price_bars: Iterable[Mapping[str, Any]] = (),
+        corporate_actions: Iterable[Mapping[str, Any]] = (),
+        symbol_coverage: Iterable[CoverageSummary | Mapping[str, Any]] = (),
+    ) -> str:
+        dataset_snapshot_id = str(snapshot["id"])
+        with self.connect() as conn:
+            self._upsert_dataset_snapshot(conn, snapshot)
+
+            price_rows = [
+                (
+                    dataset_snapshot_id,
+                    self._normalize_symbol(str(bar["symbol"])),
+                    str(bar["date"]),
+                    bar.get("open"),
+                    bar.get("high"),
+                    bar.get("low"),
+                    bar.get("close"),
+                    bar.get("adj_close", bar.get("close")),
+                    bar.get("volume"),
+                    str(bar.get("source") or snapshot.get("source") or ""),
+                    bar.get("fallback_source", snapshot.get("fallback_source")),
+                    dumps(_ensure_json_dict(bar.get("metadata"))),
+                )
+                for bar in price_bars
+            ]
+            if price_rows:
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO dataset_price_bars (
+                        dataset_snapshot_id, symbol, date, open, high, low, close, adj_close,
+                        volume, source, fallback_source, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    price_rows,
+                )
+
+            normalized_actions = self._dedupe_actions_for_storage(
+                corporate_actions,
+                default_source=str(snapshot.get("source") or ""),
+                default_fallback_source=snapshot.get("fallback_source"),
+            )
+            action_rows = [
+                (
+                    dataset_snapshot_id,
+                    action["symbol"],
+                    str(action["date"]),
+                    str(action["action_type"]),
+                    action.get("value"),
+                    str(action.get("source") or snapshot.get("source") or ""),
+                    action.get("fallback_source", snapshot.get("fallback_source")),
+                    dumps(_ensure_json_dict(action.get("payload"))),
+                )
+                for action in normalized_actions
+            ]
+            if action_rows:
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO dataset_corporate_actions (
+                        dataset_snapshot_id, symbol, event_date, event_type, value,
+                        source, fallback_source, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    action_rows,
+                )
+
+            coverage_rows = []
+            for coverage in symbol_coverage:
+                item = coverage if isinstance(coverage, Mapping) else {
+                    "symbol": coverage.symbol,
+                    "start_date": coverage.start_date,
+                    "end_date": coverage.end_date,
+                    "trade_days": coverage.trade_days,
+                }
+                coverage_rows.append(
+                    (
+                        dataset_snapshot_id,
+                        self._normalize_symbol(str(item["symbol"])),
+                        item.get("start_date"),
+                        item.get("end_date"),
+                        int(item.get("trade_days") or 0),
+                        str(item.get("source") or snapshot.get("source") or ""),
+                        item.get("fallback_source", snapshot.get("fallback_source")),
+                        dumps(_ensure_json_dict(item.get("metadata"))),
+                    )
+                )
+            if coverage_rows:
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO dataset_symbol_coverage (
                         dataset_snapshot_id, symbol, start_date, end_date, trade_days,
                         source, fallback_source, metadata_json
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -606,6 +720,26 @@ class MarketDataRepository:
                 (dataset_snapshot_id,),
             ).fetchall()
         return [self._decode_json_row(dict(row), "metadata_json") for row in rows]
+
+    def count_dataset_snapshot_rows(self, dataset_snapshot_id: str) -> dict[str, int]:
+        with self.connect() as conn:
+            price_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM dataset_price_bars WHERE dataset_snapshot_id = ?",
+                (dataset_snapshot_id,),
+            ).fetchone()
+            action_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM dataset_corporate_actions WHERE dataset_snapshot_id = ?",
+                (dataset_snapshot_id,),
+            ).fetchone()
+            coverage_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM dataset_symbol_coverage WHERE dataset_snapshot_id = ?",
+                (dataset_snapshot_id,),
+            ).fetchone()
+        return {
+            "price_bars": int((price_row or {}).get("count") or 0),
+            "corporate_actions": int((action_row or {}).get("count") or 0),
+            "symbol_coverage": int((coverage_row or {}).get("count") or 0),
+        }
 
     def summarize_dataset_symbols(self, dataset_snapshot_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:

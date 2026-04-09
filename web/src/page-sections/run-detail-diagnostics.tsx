@@ -1,8 +1,8 @@
 import { useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FocusEvent, MouseEvent as ReactMouseEvent } from 'react';
-import { formatShortDate } from '../lib/format';
+import { formatCompactDate } from '../lib/format';
 import { RunDetailOverviewSection } from './run-detail-overview';
-import type { ApiBacktestChartPoint, ApiBacktestRunDetail } from '../types';
+import type { ApiBacktestChartPoint, ApiBacktestRunDetail, ApiRollingMetricPoint } from '../types';
 
 type ViewWindow = 'all' | '1y' | '3y';
 type DrawdownWindow = 'all' | '1y';
@@ -43,6 +43,12 @@ type HeatmapTooltip = {
   left: number;
   top: number;
 } | null;
+
+type ResolvedRollingMetricPoint = {
+  trade_date: string;
+  trailing_252_return: number | null;
+  trailing_252_sharpe: number | null;
+};
 
 const MONTH_LABELS = ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'];
 
@@ -176,19 +182,99 @@ function buildTicks(bounds: Bounds, count = 4): number[] {
   return Array.from({ length: count }, (_, index) => bounds.max - (range * index) / (count - 1));
 }
 
-function latestMetric(points: Array<Record<string, unknown>> | undefined, key: string): number | null {
-  if (!points?.length) {
-    return null;
-  }
-
+function latestResolvedRollingMetric(
+  points: ResolvedRollingMetricPoint[],
+  key: 'trailing_252_return' | 'trailing_252_sharpe',
+): number | null {
   for (let index = points.length - 1; index >= 0; index -= 1) {
     const value = points[index]?.[key];
     if (typeof value === 'number' && Number.isFinite(value)) {
       return value;
     }
   }
-
   return null;
+}
+
+function getRollingReturnMetric(point: ApiRollingMetricPoint): number | null {
+  if (typeof point.trailing_252_return === 'number' && Number.isFinite(point.trailing_252_return)) {
+    return point.trailing_252_return;
+  }
+  if (typeof point.window_return_pct === 'number' && Number.isFinite(point.window_return_pct)) {
+    return point.window_return_pct;
+  }
+  return null;
+}
+
+function getRollingSharpeMetric(point: ApiRollingMetricPoint): number | null {
+  if (typeof point.trailing_252_sharpe === 'number' && Number.isFinite(point.trailing_252_sharpe)) {
+    return point.trailing_252_sharpe;
+  }
+  if (typeof point.window_sharpe === 'number' && Number.isFinite(point.window_sharpe)) {
+    return point.window_sharpe;
+  }
+  return null;
+}
+
+function buildRollingMetricsFromChartSeries(
+  chartSeries: ApiBacktestChartPoint[] | undefined,
+  window = 252,
+): ResolvedRollingMetricPoint[] {
+  const points = chartSeries ?? [];
+  if (window <= 1 || points.length < window) {
+    return [];
+  }
+
+  const returns: number[] = [];
+  let previousEquity: number | null = null;
+  for (const point of points) {
+    if (typeof point.strategy_return === 'number' && Number.isFinite(point.strategy_return)) {
+      returns.push(point.strategy_return);
+      continue;
+    }
+    if (previousEquity !== null && previousEquity > 0 && Number.isFinite(point.equity)) {
+      returns.push(point.equity / previousEquity - 1);
+    }
+    previousEquity = point.equity;
+  }
+
+  const rolling: ResolvedRollingMetricPoint[] = [];
+  for (let index = window - 1; index < points.length; index += 1) {
+    const chunk = returns.slice(index - window + 1, index + 1);
+    if (chunk.length !== window) {
+      continue;
+    }
+
+    const average = chunk.reduce((sum, value) => sum + value, 0) / chunk.length;
+    const variance = chunk.reduce((sum, value) => sum + (value - average) ** 2, 0) / chunk.length;
+    const volatility = Math.sqrt(variance);
+    const sharpe = volatility > 1e-12 ? (average / volatility) * Math.sqrt(252) : 0;
+
+    rolling.push({
+      trade_date: points[index]?.trade_date ?? '',
+      trailing_252_return: Number((chunk.reduce((sum, value) => sum + value, 0) * 100).toFixed(4)),
+      trailing_252_sharpe: Number(sharpe.toFixed(4)),
+    });
+  }
+
+  return rolling.filter((point) => point.trade_date);
+}
+
+function resolveRollingMetrics(detail: ApiBacktestRunDetail): ResolvedRollingMetricPoint[] {
+  const metrics = (detail.rolling_metrics ?? [])
+    .map((point) => ({
+      trade_date: typeof point.trade_date === 'string' ? point.trade_date : typeof point.date === 'string' ? point.date : '',
+      trailing_252_return: getRollingReturnMetric(point),
+      trailing_252_sharpe: getRollingSharpeMetric(point),
+    }))
+    .filter((point) => point.trade_date);
+
+  const hasRollingReturn = metrics.some((point) => typeof point.trailing_252_return === 'number');
+  const hasRollingSharpe = metrics.some((point) => typeof point.trailing_252_sharpe === 'number');
+  if (hasRollingReturn && hasRollingSharpe) {
+    return metrics;
+  }
+
+  return buildRollingMetricsFromChartSeries(detail.chart_series, 252);
 }
 
 function buildMonthlyRows(detail: ApiBacktestRunDetail): MonthlyRow[] {
@@ -229,7 +315,7 @@ function filterDrawdownSeries(series: ApiBacktestChartPoint[] | undefined, drawd
 }
 
 function buildRollingSeries(
-  rollingMetrics: ApiBacktestRunDetail['rolling_metrics'],
+  rollingMetrics: ResolvedRollingMetricPoint[],
 ): { returnSeries: number[]; sharpeSeries: number[] } {
   const metrics = rollingMetrics ?? [];
   const returnSeries = normalizeSeries(
@@ -269,7 +355,7 @@ function buildRangeCaption(series: ApiBacktestChartPoint[] | undefined): string 
   if (!series?.length) {
     return '暂无区间';
   }
-  return `${formatShortDate(series[0].trade_date)} - ${formatShortDate(series[series.length - 1].trade_date)}`;
+  return `${formatCompactDate(series[0].trade_date)} - ${formatCompactDate(series[series.length - 1].trade_date)}`;
 }
 
 function renderDrawdownChart(series: ApiBacktestChartPoint[], windowLabel: string): JSX.Element {
@@ -297,18 +383,18 @@ function renderDrawdownChart(series: ApiBacktestChartPoint[], windowLabel: strin
   const labelX = Math.max(20, Math.min(minX - labelWidth / 2, width - 20 - labelWidth));
   const labelY = Math.max(8, minY - 28);
   const dateTicks = [
-    { index: 0, label: formatShortDate(drawdownSeries[0].tradeDate), anchor: 'start' as const },
+    { index: 0, label: formatCompactDate(drawdownSeries[0].tradeDate), anchor: 'start' as const },
     {
       index: Math.round((drawdownSeries.length - 1) / 2),
-      label: formatShortDate(drawdownSeries[Math.round((drawdownSeries.length - 1) / 2)].tradeDate),
+      label: formatCompactDate(drawdownSeries[Math.round((drawdownSeries.length - 1) / 2)].tradeDate),
       anchor: 'middle' as const,
     },
     {
       index: drawdownSeries.length - 1,
-      label: formatShortDate(drawdownSeries[drawdownSeries.length - 1].tradeDate),
+      label: formatCompactDate(drawdownSeries[drawdownSeries.length - 1].tradeDate),
       anchor: 'end' as const,
     },
-  ];
+  ].filter((tick, index, ticks) => ticks.findIndex((candidate) => candidate.index === tick.index) === index);
 
   return (
     <div className="run-detail-diagnostics-shell run-detail-diagnostics-shell--chart">
@@ -456,11 +542,11 @@ function renderDrawdownEvents(detail: ApiBacktestRunDetail): JSX.Element {
           <div className="run-detail-diagnostics-event__content">
             <div className="run-detail-diagnostics-event__title-row">
               <strong>
-                {formatShortDate(event.start_date)} - {formatShortDate(event.trough_date)}
+                {formatCompactDate(event.start_date)} - {formatCompactDate(event.trough_date)}
               </strong>
               <span className="status-chip status-chip--soft">{segmentLabel(event.segment)}</span>
             </div>
-            <p>{event.recovery_date ? `修复至 ${formatShortDate(event.recovery_date)}` : '尚未完成修复'}</p>
+            <p>{event.recovery_date ? `修复至 ${formatCompactDate(event.recovery_date)}` : '尚未完成修复'}</p>
           </div>
           <span className="run-detail-diagnostics-event__loss">{formatPercentPoints(event.drawdown_pct)}</span>
         </article>
@@ -470,15 +556,15 @@ function renderDrawdownEvents(detail: ApiBacktestRunDetail): JSX.Element {
 }
 
 function renderRollingChart(detail: ApiBacktestRunDetail): JSX.Element {
-  const rollingMetrics = detail.rolling_metrics ?? [];
+  const rollingMetrics = resolveRollingMetrics(detail);
   if (!rollingMetrics.length) {
     return <p className="empty-state">暂无滚动指标。</p>;
   }
 
   const { returnSeries, sharpeSeries } = buildRollingSeries(rollingMetrics);
   const bounds = getBounds([returnSeries, sharpeSeries]);
-  const latestRollingReturn = latestMetric(rollingMetrics, 'trailing_252_return');
-  const latestRollingSharpe = latestMetric(rollingMetrics, 'trailing_252_sharpe');
+  const latestRollingReturn = latestResolvedRollingMetric(rollingMetrics, 'trailing_252_return');
+  const latestRollingSharpe = latestResolvedRollingMetric(rollingMetrics, 'trailing_252_sharpe');
   const width = 420;
   const height = 176;
   const padding: ChartPadding = { top: 18, right: 18, bottom: 22, left: 18 };

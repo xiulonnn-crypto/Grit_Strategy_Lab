@@ -59,6 +59,10 @@
   width: 1%;
 }
 
+.runs-index-table__type-cell {
+  width: 1%;
+}
+
 .runs-index-table__row {
   transition: background-color 120ms ease;
 }
@@ -123,6 +127,18 @@
   color: var(--danger);
   background: var(--danger-soft);
   border-color: color-mix(in srgb, var(--danger) 22%, var(--line));
+}
+
+.runs-index-badge--permanent {
+  color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent-soft) 70%, white);
+  border-color: color-mix(in srgb, var(--accent) 20%, var(--line));
+}
+
+.runs-index-badge--temporary {
+  color: #b86813;
+  background: #fff7e8;
+  border-color: color-mix(in srgb, var(--warning) 24%, var(--line));
 }
 
 @media (max-width: 960px) {

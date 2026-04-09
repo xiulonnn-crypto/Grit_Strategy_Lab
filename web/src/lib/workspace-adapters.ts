@@ -43,6 +43,51 @@ const STRATEGY_TYPE_LABELS: Record<string, string> = {
   GENERAL: '通用',
 };
 
+const PARAMETER_LABELS: Record<string, string> = {
+  benchmark_symbol: '基准',
+  buy_step_pct: '买入步长(%)',
+  capital: '初始资金(USD)',
+  contribution_amount: '定投金额(USD)',
+  grid_count: '网格数量',
+  hold_rank_threshold: '保留排名阈值',
+  investment_frequency: '定投频率',
+  lookback_months: '动量回看(月)',
+  max_position_pct: '单标的上限(%)',
+  max_stop_loss_pct: '最大止损仓位(%)',
+  mean_target: '回归目标',
+  rebalance_anchor_dates: '调仓锚点',
+  rebalance_frequency: '调仓频率',
+  risk_budget: '风险预算(%)',
+  sell_size_pct: '上涨卖出仓位(%)',
+  sell_step_pct: '卖出步长(%)',
+  skip_recent_months: '跳过最近(月)',
+  strategy_description: '策略描述',
+  strategy_name: '策略名称',
+  strategy_type: '策略类型',
+  top_n: '买入排名阈值',
+  universe_name: '股票池',
+  weighting_method: '权重方法',
+};
+
+const PARAMETER_VALUE_LABELS: Record<string, string> = {
+  BUY_AND_HOLD: '买入持有',
+  GENERAL: '通用',
+  GRID: '网格',
+  MEAN_REVERSION: '均值回归',
+  MOMENTUM: '动量',
+  daily: '每天',
+  equal_weight: '等权',
+  monthly: '每月',
+  never: '从不',
+  quarterly: '每季度',
+  risk_parity: '风险平价',
+  score_weighted: '按动量分数加权',
+  semiannual: '每半年',
+  volatility_adjusted: '波动率调整',
+  weekly: '每周',
+  yearly: '每年',
+};
+
 function getStrategyTypeLabel(strategyType: string): string {
   return STRATEGY_TYPE_LABELS[strategyType] ?? strategyType;
 }
@@ -202,15 +247,29 @@ export function buildRecentRunScore(run?: ApiBacktestRunDetail): { totalReturn: 
   };
 }
 
-export function formatParameterValue(value: ParameterValue | undefined): string {
+export function formatParameterLabel(key: string): string {
+  return PARAMETER_LABELS[key] ?? key;
+}
+
+export function formatParameterValue(value: ParameterValue | undefined, key?: string): string {
   if (value === null) {
-    return 'null';
+    return '空';
   }
   if (value === undefined) {
     return '-';
   }
   if (typeof value === 'boolean') {
-    return value ? 'true' : 'false';
+    return value ? '是' : '否';
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+    if (!normalized) {
+      return '-';
+    }
+    if (key === 'strategy_type') {
+      return STRATEGY_TYPE_LABELS[normalized] ?? normalized;
+    }
+    return PARAMETER_VALUE_LABELS[normalized] ?? normalized;
   }
   return String(value);
 }

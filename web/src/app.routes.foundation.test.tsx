@@ -63,7 +63,7 @@ describe('App runtime routes', () => {
   it('loads the optimization manual lab route inside the unified shell', async () => {
     await renderApp('#/optimization-jobs/opt-001');
 
-    expect(await screen.findByRole('button', { name: /Delete Losing Candidates/i })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /删除亏损候选/i })).toBeInTheDocument();
   });
 
   it('renders the runs index page on the formal route', async () => {

@@ -138,6 +138,7 @@ describe('runs index page', () => {
 
     expect(await screen.findByRole('heading', { name: '回测列表', level: 2 })).toBeInTheDocument();
     expect(await screen.findByText('回测号')).toBeInTheDocument();
+    expect(screen.getByText('类型')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '创建策略' })).not.toBeInTheDocument();
     expect(screen.queryByText('点击一行直接进入运行详情。')).not.toBeInTheDocument();
     expect(screen.queryByText('样本外')).not.toBeInTheDocument();
@@ -145,6 +146,7 @@ describe('runs index page', () => {
     const tableRows = screen.getAllByRole('row');
     expect(tableRows[1]).toHaveTextContent('bt-102');
     expect(tableRows[1]).toHaveTextContent('策略 Beta');
+    expect(tableRows[1]).toHaveTextContent('临时回测');
     expect(tableRows[1]).toHaveTextContent('有提醒');
     expect(tableRows[1]).toHaveTextContent('25.1%');
     expect(tableRows[1]).toHaveTextContent('1.42');

@@ -23,8 +23,15 @@ from grit_backtest_platform._real_service_rebuilt import RealBacktestPlatformSer
 from grit_backtest_platform import _real_service_rebuilt as real_service_module
 from grit_backtest_platform.market_data_repository import CoverageSummary, MarketDataRepository
 from grit_backtest_platform.universe_history import (
+    ANCHOR_SCHEDULE,
+    NASDAQ100_UNIVERSE_KEY,
+    NASDAQ100_UNIVERSE_NAME,
+    NASDAQ100_UNIVERSE_SNAPSHOT_ID,
+    NASDAQ100_SOURCE_PAGE_TITLE,
     SP500_UNIVERSE_KEY,
+    SP500_UNIVERSE_NAME,
     SP500_UNIVERSE_SNAPSHOT_ID,
+    SP500_SOURCE_PAGE_TITLE,
     UniverseMembershipSnapshot,
 )
 
@@ -64,6 +71,211 @@ def test_snapshot_overview_contract_is_exact_on_fresh_database(tmp_path):
     assert overview["allowed_actions"] == ["refresh_snapshots"]
 
 
+def test_scoped_market_data_provider_excludes_longbridge_for_full_history(tmp_path):
+    class _NamedProvider:
+        def __init__(self, provider_name: str) -> None:
+            self.provider_name = provider_name
+
+    class _FakeRuntimeProvider:
+        provider_name = "runtime"
+
+        def __init__(self, providers: list[_NamedProvider], captured: list[set[str]] | None = None) -> None:
+            self.providers = list(providers)
+            self.missing_providers: list[str] = []
+            self.universe_history_providers: list[object] = []
+            self.captured = captured if captured is not None else []
+
+        def scoped_copy(self, *, exclude_provider_names=None):
+            excluded = {str(item) for item in (exclude_provider_names or [])}
+            self.captured.append(excluded)
+            return _FakeRuntimeProvider(
+                [provider for provider in self.providers if provider.provider_name not in excluded],
+                captured=self.captured,
+            )
+
+    runtime_provider = _FakeRuntimeProvider(
+        [
+            _NamedProvider("yahoo"),
+            _NamedProvider("tiingo"),
+            _NamedProvider("longbridge_static_info"),
+            _NamedProvider("longbridge"),
+            _NamedProvider("akshare_us"),
+        ]
+    )
+    service = RealBacktestPlatformService(tmp_path / "scoped-full.db", market_data_provider=runtime_provider)
+
+    scoped = service._scoped_market_data_provider(mode="full", window_start=date(1996, 1, 1))
+
+    assert runtime_provider.captured == [{"longbridge", "longbridge_static_info", "futu", "futu_rehab"}]
+    assert [provider.provider_name for provider in scoped.providers] == ["yahoo", "tiingo", "akshare_us"]
+
+
+def test_scoped_market_data_provider_keeps_longbridge_for_recent_incremental_window(tmp_path):
+    class _NamedProvider:
+        def __init__(self, provider_name: str) -> None:
+            self.provider_name = provider_name
+
+    class _FakeRuntimeProvider:
+        provider_name = "runtime"
+
+        def __init__(self, providers: list[_NamedProvider]) -> None:
+            self.providers = list(providers)
+            self.missing_providers: list[str] = []
+            self.universe_history_providers: list[object] = []
+            self.scoped_calls = 0
+
+        def scoped_copy(self, *, exclude_provider_names=None):
+            self.scoped_calls += 1
+            return self
+
+    runtime_provider = _FakeRuntimeProvider(
+        [_NamedProvider("yahoo"), _NamedProvider("tiingo"), _NamedProvider("longbridge")]
+    )
+    service = RealBacktestPlatformService(tmp_path / "scoped-incremental.db", market_data_provider=runtime_provider)
+
+    scoped = service._scoped_market_data_provider(mode="incremental", window_start=date(2026, 4, 1))
+
+    assert scoped is runtime_provider
+    assert runtime_provider.scoped_calls == 0
+
+
+def test_snapshot_refresh_counts_fmp_history_anchors_as_ready(tmp_path):
+    class _FakeUniverseProvider:
+        provider_name = "fmp_historical_constituent"
+
+        def load_snapshots(self, start_date: date, end_date: date):
+            return [
+                UniverseMembershipSnapshot(
+                    universe_key=SP500_UNIVERSE_KEY,
+                    universe_name=SP500_UNIVERSE_NAME,
+                    effective_date=date(2026, 1, 1),
+                    normalized_symbols=["AAPL", "MSFT"],
+                    raw_symbols=["AAPL", "MSFT"],
+                    unmapped_symbols=[],
+                    source="fmp_historical_constituent",
+                    fallback_source=None,
+                    anchor_schedule=ANCHOR_SCHEDULE,
+                    source_revision_id="fmp-sp500-2026-01-01",
+                    source_page_title=SP500_SOURCE_PAGE_TITLE,
+                    metadata={"coverage_mode": "point_in_time_anchor", "source_quality": "historical_constituent_api"},
+                ),
+                UniverseMembershipSnapshot(
+                    universe_key=NASDAQ100_UNIVERSE_KEY,
+                    universe_name=NASDAQ100_UNIVERSE_NAME,
+                    effective_date=date(2026, 1, 1),
+                    normalized_symbols=["AAPL", "MSFT"],
+                    raw_symbols=["AAPL", "MSFT"],
+                    unmapped_symbols=[],
+                    source="fmp_historical_constituent",
+                    fallback_source=None,
+                    anchor_schedule=ANCHOR_SCHEDULE,
+                    source_revision_id="fmp-ndx100-2026-01-01",
+                    source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
+                    metadata={"coverage_mode": "point_in_time_anchor", "source_quality": "historical_constituent_api"},
+                ),
+            ]
+
+    service = RealBacktestPlatformService(tmp_path / "fmp-ready.db", market_data_provider=None)
+    service._universe_history_providers = lambda: [_FakeUniverseProvider()]  # type: ignore[method-assign]
+
+    overview = service.refresh_snapshots({"mode": "repair", "targets": ["universes"]})
+
+    assert [item["status"] for item in overview["universe_snapshots"]] == ["READY", "READY"]
+
+
+def test_snapshot_refresh_surfaces_fmp_probe_status_when_universe_falls_back(tmp_path):
+    class _FallbackUniverseProvider:
+        provider_name = "fmp_historical_constituent"
+
+        def load_snapshots(self, start_date: date, end_date: date):
+            return [
+                UniverseMembershipSnapshot(
+                    universe_key=SP500_UNIVERSE_KEY,
+                    universe_name=SP500_UNIVERSE_NAME,
+                    effective_date=date(2025, 7, 1),
+                    normalized_symbols=["AAPL", "MSFT"],
+                    raw_symbols=["AAPL", "MSFT"],
+                    unmapped_symbols=[],
+                    source="wikipedia_revision_history",
+                    fallback_source=None,
+                    anchor_schedule=ANCHOR_SCHEDULE,
+                    source_revision_id="wiki-sp500-2025-07-01",
+                    source_page_title=SP500_SOURCE_PAGE_TITLE,
+                    metadata={
+                        "coverage_mode": "point_in_time_anchor",
+                        "source_quality": "historical_revision_snapshot",
+                        "historical_constituent_provider": "fmp",
+                        "historical_constituent_probe_status": "capability_unavailable",
+                    },
+                ),
+                UniverseMembershipSnapshot(
+                    universe_key=SP500_UNIVERSE_KEY,
+                    universe_name=SP500_UNIVERSE_NAME,
+                    effective_date=date(2026, 1, 1),
+                    normalized_symbols=["AAPL", "MSFT"],
+                    raw_symbols=["AAPL", "MSFT"],
+                    unmapped_symbols=[],
+                    source="wikipedia_revision_history",
+                    fallback_source="wikipedia_current_page",
+                    anchor_schedule=ANCHOR_SCHEDULE,
+                    source_revision_id="wiki-sp500-2026-01-01",
+                    source_page_title=SP500_SOURCE_PAGE_TITLE,
+                    metadata={
+                        "coverage_mode": "point_in_time_anchor",
+                        "source_quality": "current_page_fallback",
+                        "historical_constituent_provider": "fmp",
+                        "historical_constituent_probe_status": "capability_unavailable",
+                    },
+                ),
+                UniverseMembershipSnapshot(
+                    universe_key=NASDAQ100_UNIVERSE_KEY,
+                    universe_name=NASDAQ100_UNIVERSE_NAME,
+                    effective_date=date(2025, 7, 1),
+                    normalized_symbols=["AAPL", "MSFT"],
+                    raw_symbols=["AAPL", "MSFT"],
+                    unmapped_symbols=[],
+                    source="wikipedia_revision_history",
+                    fallback_source=None,
+                    anchor_schedule=ANCHOR_SCHEDULE,
+                    source_revision_id="wiki-ndx100-2025-07-01",
+                    source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
+                    metadata={
+                        "coverage_mode": "point_in_time_anchor",
+                        "source_quality": "historical_revision_snapshot",
+                        "historical_constituent_provider": "fmp",
+                        "historical_constituent_probe_status": "capability_unavailable",
+                    },
+                ),
+                UniverseMembershipSnapshot(
+                    universe_key=NASDAQ100_UNIVERSE_KEY,
+                    universe_name=NASDAQ100_UNIVERSE_NAME,
+                    effective_date=date(2026, 1, 1),
+                    normalized_symbols=["AAPL", "MSFT"],
+                    raw_symbols=["AAPL", "MSFT"],
+                    unmapped_symbols=[],
+                    source="wikipedia_revision_history",
+                    fallback_source="wikipedia_current_page",
+                    anchor_schedule=ANCHOR_SCHEDULE,
+                    source_revision_id="wiki-ndx100-2026-01-01",
+                    source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
+                    metadata={
+                        "coverage_mode": "point_in_time_anchor",
+                        "source_quality": "current_page_fallback",
+                        "historical_constituent_provider": "fmp",
+                        "historical_constituent_probe_status": "capability_unavailable",
+                    },
+                ),
+            ]
+
+    service = RealBacktestPlatformService(tmp_path / "fmp-fallback-warning.db", market_data_provider=None)
+    service._universe_history_providers = lambda: [_FallbackUniverseProvider()]  # type: ignore[method-assign]
+
+    overview = service.refresh_snapshots({"mode": "repair", "targets": ["universes"]})
+
+    warnings = overview["latest_job"]["warnings"]
+    assert any("FMP historical constituent capability unavailable" in warning for warning in warnings)
+
+
 def test_snapshot_refresh_returns_refreshed_overview_with_embedded_latest_job(tmp_path):
     client, _ = create_test_client(tmp_path)
 
@@ -87,6 +299,9 @@ def test_snapshot_refresh_returns_refreshed_overview_with_embedded_latest_job(tm
     assert refreshed["latest_job"]["summary"]["status"] == "READY"
     assert refreshed["latest_job"]["summary"]["mode"] == "repair"
     assert refreshed["latest_job"]["summary"]["dataset_snapshot_id"] == "ds-price"
+    assert "refresh_stats" in refreshed["latest_job"]["summary"]
+    assert "datasets" in refreshed["latest_job"]["summary"]["refresh_stats"]
+    assert "universes" in refreshed["latest_job"]["summary"]["refresh_stats"]
     assert [item["status"] for item in refreshed["dataset_snapshots"]] == ["READY", "READY"]
     assert [item["status"] for item in refreshed["universe_snapshots"]] == ["READY", "READY"]
     assert refreshed["allowed_actions"] == ["refresh_snapshots", "start_backtest"]
@@ -164,7 +379,7 @@ def test_start_snapshot_refresh_updates_same_job_when_background_work_finishes(t
 
     assert finished.wait(1)
     overview = None
-    deadline = datetime.now(timezone.utc) + timedelta(seconds=1)
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=2)
     while datetime.now(timezone.utc) < deadline:
         candidate = service.get_snapshot_overview()
         if candidate["latest_job"]["status"] == "READY":
@@ -481,7 +696,7 @@ def test_snapshot_overview_repairs_placeholder_snapshot_headers_from_existing_ro
             """
             UPDATE dataset_snapshots
             SET row_count = 0, as_of = NULL, freshness_label = '尚未刷新', source = '', fallback_source = NULL,
-                blocker_json = '{}', metadata_json = '{}'
+                blocker_json = '{}', metadata_json = '{"total_symbol_count": 1398}'
             WHERE id IN ('ds-price', 'ds-corporate-actions')
             """
         )
@@ -503,11 +718,11 @@ def test_snapshot_overview_repairs_placeholder_snapshot_headers_from_existing_ro
     assert price_snapshot["row_count"] == 2
     assert price_snapshot["freshness_label"] == "已从现有快照恢复"
     assert price_snapshot["metadata"]["covered_symbol_count"] == 1
-    assert price_snapshot["metadata"]["total_symbol_count"] == 1
+    assert price_snapshot["metadata"]["total_symbol_count"] == 2
     assert actions_snapshot["row_count"] == 1
     assert actions_snapshot["freshness_label"] == "已从现有快照恢复"
     assert actions_snapshot["metadata"]["covered_symbol_count"] == 1
-    assert actions_snapshot["metadata"]["total_symbol_count"] == 1
+    assert actions_snapshot["metadata"]["total_symbol_count"] == 2
     assert universe_snapshot["member_count"] == 2
     assert universe_snapshot["freshness_label"] == "已从现有快照恢复"
 
@@ -1142,7 +1357,7 @@ def _insert_backtest_run(
     )
 
 
-def test_purge_expired_temporary_runs_deletes_only_old_temporary_runs_and_artifacts(tmp_path):
+def test_purge_expired_temporary_runs_logically_deletes_only_old_temporary_runs_and_artifacts(tmp_path):
     client, db_path = create_test_client(tmp_path)
     strategy = create_momentum_strategy(client, idempotency_key="cleanup-base")["strategy"]
     service = client.app.state.service
@@ -1194,12 +1409,20 @@ def test_purge_expired_temporary_runs_deletes_only_old_temporary_runs_and_artifa
     removed = service.purge_expired_temporary_runs()
     overview = assert_ok(client.get("/workspace/overview?include_cleanup_audit=1"))
     runs = assert_ok(client.get("/backtest-runs"))
+    deleted_row = service.storage.fetch_one("SELECT * FROM backtest_runs WHERE id = ?", (temp_old_run_id,))
+    deleted_detail_response = client.get(f"/backtest-runs/{temp_old_run_id}/detail")
 
     assert removed == 1
     assert overview["last_cleanup_count"] == 1
     assert temp_old_run_id not in [run["id"] for run in runs]
     assert temp_fresh_run_id in [run["id"] for run in runs]
     assert permanent_old_run_id in [run["id"] for run in runs]
+    assert deleted_row is not None
+    assert deleted_row["status"] == "DELETED"
+    assert deleted_row["deleted_at"] is not None
+    assert deleted_row["deleted_reason"] == "temporary_run_ttl_24h"
+    assert deleted_row["artifact_paths_json"] == "[]"
+    assert deleted_detail_response.status_code == 404
     assert not temp_old_file.exists()
     assert not temp_old_plot_dir.exists()
     assert temp_fresh_file.exists()

@@ -91,7 +91,7 @@ class BacktestRunPreviewRequest(BaseModel):
 class BacktestRunCreateRequest(BacktestRunPreviewRequest):
     idempotency_key: str = Field(min_length=1)
     simulate_warning: bool = False
-    is_permanent: bool = True
+    is_permanent: bool = False
 
 
 class BacktestRunCloneRequest(BaseModel):

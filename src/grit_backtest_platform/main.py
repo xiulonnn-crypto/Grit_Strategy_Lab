@@ -13,6 +13,7 @@ from .real_service import RealBacktestPlatformService
 from .storage import iso_now
 
 app = create_app()
+_WINDOWS_MEMORY_JOB_HANDLE = None
 
 
 def _default_db_path() -> Path:
@@ -24,6 +25,99 @@ def _parse_refresh_targets(raw: str | None) -> list[str]:
     if not raw:
         return []
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _configure_refresh_memory_guard() -> None:
+    if os.name != "nt":
+        return
+    raw_ratio = os.getenv("GRIT_SNAPSHOT_MEMORY_LIMIT_RATIO")
+    try:
+        limit_ratio = float(raw_ratio) if raw_ratio is not None else 0.8
+    except (TypeError, ValueError):
+        limit_ratio = 0.8
+    limit_ratio = min(max(limit_ratio, 0.10), 0.95)
+
+    import ctypes
+    from ctypes import wintypes
+
+    class MEMORYSTATUSEX(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", wintypes.DWORD),
+            ("dwMemoryLoad", wintypes.DWORD),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_void_p),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_ulonglong),
+            ("WriteOperationCount", ctypes.c_ulonglong),
+            ("OtherOperationCount", ctypes.c_ulonglong),
+            ("ReadTransferCount", ctypes.c_ulonglong),
+            ("WriteTransferCount", ctypes.c_ulonglong),
+            ("OtherTransferCount", ctypes.c_ulonglong),
+        ]
+
+    class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+            ("IoInfo", IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    memory_status = MEMORYSTATUSEX()
+    memory_status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    if not kernel32.GlobalMemoryStatusEx(ctypes.byref(memory_status)):
+        return
+    total_physical_bytes = int(memory_status.ullTotalPhys or 0)
+    if total_physical_bytes <= 0:
+        return
+
+    JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100
+    JobObjectExtendedLimitInformation = 9
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        return
+    info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY
+    info.ProcessMemoryLimit = int(total_physical_bytes * limit_ratio)
+    if not kernel32.SetInformationJobObject(
+        job,
+        JobObjectExtendedLimitInformation,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    ):
+        kernel32.CloseHandle(job)
+        return
+    current_process = kernel32.GetCurrentProcess()
+    if not kernel32.AssignProcessToJobObject(job, current_process):
+        kernel32.CloseHandle(job)
+        return
+
+    global _WINDOWS_MEMORY_JOB_HANDLE
+    _WINDOWS_MEMORY_JOB_HANDLE = job
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -39,6 +133,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.command == "refresh-snapshots":
+        _configure_refresh_memory_guard()
         service = RealBacktestPlatformService(
             args.db_path or _default_db_path(),
             market_data_provider=build_runtime_market_data_provider(),

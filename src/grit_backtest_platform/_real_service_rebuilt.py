@@ -59,6 +59,8 @@ SNAPSHOT_MARKET_DATA_MAX_WORKERS = 12
 SNAPSHOT_MARKET_DATA_REPAIR_MAX_WORKERS = 2
 SNAPSHOT_REPAIR_SYMBOL_BATCH_SIZE = 24
 SNAPSHOT_REFRESH_RUNTIME_STATE_KEY = "snapshot_refresh_runtime"
+LONGBRIDGE_MIN_HISTORY_DATE = date(2010, 6, 1)
+SNAPSHOT_MEMORY_USAGE_LIMIT = 0.80
 
 
 class SnapshotBlockingError(ValueError):
@@ -75,6 +77,10 @@ class SnapshotBlockingError(ValueError):
         super().__init__(detail["message"])
         self.status_code = 409
         self.detail = detail
+
+
+class SnapshotMemoryPressureError(RuntimeError):
+    pass
 
 
 def _default_market_data_path(database_path: str | Path) -> Path:
@@ -103,6 +109,85 @@ def _segment_for_trade_window(opened_at: str, closed_at: str, oos_start_date: st
     return "IS"
 
 
+def _equity_before_trade(chart_point: Mapping[str, Any] | None) -> float:
+    if not chart_point:
+        return 0.0
+    equity_after = _coerce_float(chart_point.get("equity"))
+    strategy_return = _coerce_float(chart_point.get("strategy_return"))
+    if equity_after <= 0:
+        return 0.0
+    denominator = 1.0 + strategy_return
+    if abs(denominator) <= 1e-9:
+        return equity_after
+    return equity_after / denominator
+
+
+def _enrich_trade_records_with_execution_values(
+    run: Mapping[str, Any],
+    trades: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    chart_points_by_date = {
+        str(point.get("trade_date") or ""): point
+        for point in run.get("chart_series") or []
+        if str(point.get("trade_date") or "")
+    }
+    enriched: list[dict[str, Any]] = []
+    open_positions: dict[str, dict[str, float]] = {}
+    for item in trades:
+        trade = dict(item)
+        action = str(trade.get("action") or trade.get("side") or "").strip()
+        if action and not trade.get("side"):
+            trade["side"] = action.upper()
+
+        quantity = trade.get("quantity")
+        net_amount = trade.get("net_amount")
+
+        trade_date = str(
+            trade.get("trade_date")
+            or trade.get("fill_date")
+            or trade.get("signal_date")
+            or ""
+        ).strip()
+        price = _coerce_float(trade.get("price"))
+        delta_weight = abs(_coerce_float(trade.get("weight_after")) - _coerce_float(trade.get("weight_before")))
+        equity_before = _equity_before_trade(chart_points_by_date.get(trade_date))
+        traded_notional = equity_before * delta_weight if equity_before > 0 and delta_weight > 0 else 0.0
+
+        if net_amount in (None, "") and traded_notional > 0:
+            trade["net_amount"] = round(traded_notional, 4)
+        if quantity in (None, "") and traded_notional > 0 and price > 0:
+            trade["quantity"] = round(traded_notional / price, 6)
+
+        symbol = str(trade.get("symbol") or "").upper()
+        side = str(trade.get("side") or action).upper()
+        resolved_quantity = _coerce_float(trade.get("quantity"))
+        position = open_positions.get(symbol, {"quantity": 0.0, "avg_price": 0.0})
+        open_quantity = _coerce_float(position.get("quantity"))
+        average_price = _coerce_float(position.get("avg_price"))
+
+        if side == "BUY" and resolved_quantity > 0 and price > 0:
+            next_quantity = open_quantity + resolved_quantity
+            if next_quantity > 0:
+                total_cost = open_quantity * average_price + resolved_quantity * price
+                open_positions[symbol] = {
+                    "quantity": next_quantity,
+                    "avg_price": total_cost / next_quantity,
+                }
+        elif side == "SELL" and resolved_quantity > 0:
+            if trade.get("pnl_contribution") in (None, "") and open_quantity > 0 and average_price > 0 and price > 0:
+                trade["pnl_contribution"] = _pct_change(price, average_price)
+            if trade.get("pnl_amount") in (None, "") and open_quantity > 0 and average_price > 0 and price > 0:
+                trade["pnl_amount"] = round((price - average_price) * resolved_quantity, 4)
+            remaining_quantity = max(open_quantity - resolved_quantity, 0.0)
+            open_positions[symbol] = {
+                "quantity": remaining_quantity,
+                "avg_price": average_price if remaining_quantity > 1e-9 else 0.0,
+            }
+
+        enriched.append(trade)
+    return enriched
+
+
 class RealBacktestPlatformService(BacktestPlatformService):
     def __init__(
         self,
@@ -120,7 +205,30 @@ class RealBacktestPlatformService(BacktestPlatformService):
     def _primary_market_data_provider(self) -> Any:
         return self.market_data_provider or YahooMarketDataProvider()
 
-    def _fallback_market_data_provider(self) -> Any:
+    def _provider_name(self, provider: Any) -> str:
+        return str(getattr(provider, "provider_name", provider.__class__.__name__)).strip().lower()
+
+    def _provider_is_current_window_enhancer(self, provider_name: str) -> bool:
+        normalized = str(provider_name or "").strip().lower()
+        return normalized in {"longbridge", "longbridge_static_info", "futu", "futu_rehab"} or normalized.startswith("futu")
+
+    def _scoped_market_data_provider(self, *, mode: str, window_start: date) -> Any:
+        provider = self._primary_market_data_provider()
+        scoped_copy = getattr(provider, "scoped_copy", None)
+        if not callable(scoped_copy):
+            return provider
+        excluded: set[str] = set()
+        if mode == "full":
+            excluded.update({"longbridge", "longbridge_static_info", "futu", "futu_rehab"})
+        if window_start < LONGBRIDGE_MIN_HISTORY_DATE:
+            excluded.update({"longbridge", "longbridge_static_info"})
+        if not excluded:
+            return provider
+        return scoped_copy(exclude_provider_names=excluded)
+
+    def _fallback_market_data_provider(self, primary_provider: Any | None = None) -> Any:
+        if primary_provider is not None and getattr(primary_provider, "providers", None):
+            return UnconfiguredFallbackProvider("Runtime market-data provider handles its own fallback chain.")
         provider = getattr(self.market_data_provider, "fallback_provider", None)
         if provider is not None:
             return provider
@@ -162,8 +270,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
     def _refresh_snapshot_message(self, mode: str) -> str:
         if mode == "repair":
-            return "正在修复快照，页面会自动更新。当前先显示已有数据。"
-        return "正在刷新快照，页面会自动更新。当前先显示已有数据。"
+            return "\u6b63\u5728\u4fee\u590d\u5feb\u7167\u7f3a\u53e3\uff0c\u9875\u9762\u4f1a\u81ea\u52a8\u66f4\u65b0\u3002\u5f53\u524d\u5148\u663e\u793a\u5df2\u6709\u6570\u636e\u3002"
+        return "\u6b63\u5728\u5237\u65b0\u5feb\u7167\uff0c\u9875\u9762\u4f1a\u81ea\u52a8\u66f4\u65b0\u3002\u5f53\u524d\u5148\u663e\u793a\u5df2\u6709\u6570\u636e\u3002"
 
     def _build_snapshot_refresh_summary(
         self,
@@ -177,6 +285,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         message: str | None = None,
         blocking_code: str | None = None,
         blocking_target: str | None = None,
+        refresh_stats: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         resolved_status = str(status or overview.get("overall_status") or "INCOMPLETE").upper()
         resolved_blocking = resolved_status != "READY"
@@ -192,6 +301,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "message": message if message is not None else overview.get("message"),
             "dataset_snapshot_id": DATASET_PRICE_SNAPSHOT_ID,
             "universe_snapshot_ids": [SP500_UNIVERSE_SNAPSHOT_ID, NASDAQ100_UNIVERSE_SNAPSHOT_ID],
+            "refresh_stats": dict(refresh_stats or {}),
         }
 
     def _build_snapshot_refresh_job(
@@ -213,6 +323,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         message: str | None = None,
         blocking_code: str | None = None,
         blocking_target: str | None = None,
+        refresh_stats: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         resolved_status = str(status or overview.get("overall_status") or "INCOMPLETE").upper()
         updated_at = completed_at or started_at
@@ -230,6 +341,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 message=message,
                 blocking_code=blocking_code,
                 blocking_target=blocking_target,
+                refresh_stats=refresh_stats,
             ),
             "warnings": sorted(set(str(item) for item in warnings if item)),
             "errors": [str(item) for item in errors if item],
@@ -247,11 +359,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
         ).strip()
         return universe_name.upper()
 
+    def _looks_like_direct_symbol(self, value: str) -> bool:
+        normalized = str(value or "").strip().upper()
+        return bool(normalized) and normalized.isascii() and normalized.replace(".", "").isalnum()
+
     def _direct_symbol_universe_symbol(self, strategy: Mapping[str, Any]) -> str | None:
         universe_name = self._normalized_universe_name(strategy)
         if universe_name in {"SP500", "S&P500", "SP-500", "NASDAQ100", "NASDAQ-100", "NDX100", "NDX-100"}:
             return None
-        if universe_name and universe_name.replace(".", "").isalnum():
+        if self._looks_like_direct_symbol(universe_name):
             return universe_name
         if str(strategy.get("strategy_type") or "").upper() == "GRID":
             benchmark_symbol = str(
@@ -259,7 +375,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 or (strategy.get("parameters") or {}).get("benchmark_symbol")
                 or "QQQ"
             ).strip().upper()
-            if benchmark_symbol.replace(".", "").isalnum():
+            if self._looks_like_direct_symbol(benchmark_symbol):
                 return benchmark_symbol
         return None
 
@@ -301,29 +417,35 @@ class RealBacktestPlatformService(BacktestPlatformService):
         return [
             {
                 "id": DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
-                "name": "公司行为数据",
+                "name": "\u516c\u53f8\u884c\u4e3a\u6570\u636e",
                 "status": "INCOMPLETE",
                 "as_of": None,
-                "freshness_label": "尚未刷新",
+                "freshness_label": "\u5c1a\u672a\u5237\u65b0",
                 "start_date": SNAPSHOT_START_DATE.isoformat(),
                 "end_date": None,
                 "row_count": 0,
                 "source": "",
                 "fallback_source": None,
-                "blocker": {"code": "SNAPSHOT_REFRESH_REQUIRED", "message": "公司行为数据尚未刷新。"},
+                "blocker": {
+                    "code": "SNAPSHOT_REFRESH_REQUIRED",
+                    "message": "\u8bf7\u5148\u5237\u65b0\u5feb\u7167\uff0c\u518d\u67e5\u770b\u516c\u53f8\u884c\u4e3a\u6570\u636e\u3002",
+                },
             },
             {
                 "id": DATASET_PRICE_SNAPSHOT_ID,
-                "name": "股票价格数据",
+                "name": "\u80a1\u7968\u4ef7\u683c\u6570\u636e",
                 "status": "INCOMPLETE",
                 "as_of": None,
-                "freshness_label": "尚未刷新",
+                "freshness_label": "\u5c1a\u672a\u5237\u65b0",
                 "start_date": SNAPSHOT_START_DATE.isoformat(),
                 "end_date": None,
                 "row_count": 0,
                 "source": "",
                 "fallback_source": None,
-                "blocker": {"code": "SNAPSHOT_REFRESH_REQUIRED", "message": "股票价格数据尚未刷新。"},
+                "blocker": {
+                    "code": "SNAPSHOT_REFRESH_REQUIRED",
+                    "message": "\u8bf7\u5148\u5237\u65b0\u5feb\u7167\uff0c\u518d\u67e5\u770b\u80a1\u7968\u4ef7\u683c\u6570\u636e\u3002",
+                },
             },
         ]
 
@@ -331,31 +453,37 @@ class RealBacktestPlatformService(BacktestPlatformService):
         return [
             {
                 "id": SP500_UNIVERSE_SNAPSHOT_ID,
-                "name": "标普500",
+                "name": "\u6807\u666e500",
                 "status": "INCOMPLETE",
                 "as_of": None,
-                "freshness_label": "尚未刷新",
+                "freshness_label": "\u5c1a\u672a\u5237\u65b0",
                 "window_start": SNAPSHOT_START_DATE.isoformat(),
                 "window_end": None,
                 "anchor_schedule": ANCHOR_SCHEDULE,
                 "member_count": 0,
                 "source": "",
                 "fallback_source": None,
-                "blocker": {"code": "SNAPSHOT_REFRESH_REQUIRED", "message": "标普500 股票池尚未刷新。"},
+                "blocker": {
+                    "code": "SNAPSHOT_REFRESH_REQUIRED",
+                    "message": "\u8bf7\u5148\u5237\u65b0\u5feb\u7167\uff0c\u518d\u67e5\u770b\u6807\u666e500\u80a1\u7968\u6c60\u5feb\u7167\u3002",
+                },
             },
             {
                 "id": NASDAQ100_UNIVERSE_SNAPSHOT_ID,
-                "name": "纳指100",
+                "name": "\u7eb3\u6307100",
                 "status": "INCOMPLETE",
                 "as_of": None,
-                "freshness_label": "尚未刷新",
+                "freshness_label": "\u5c1a\u672a\u5237\u65b0",
                 "window_start": SNAPSHOT_START_DATE.isoformat(),
                 "window_end": None,
                 "anchor_schedule": ANCHOR_SCHEDULE,
                 "member_count": 0,
                 "source": "",
                 "fallback_source": None,
-                "blocker": {"code": "SNAPSHOT_REFRESH_REQUIRED", "message": "纳指100 股票池尚未刷新。"},
+                "blocker": {
+                    "code": "SNAPSHOT_REFRESH_REQUIRED",
+                    "message": "\u8bf7\u5148\u5237\u65b0\u5feb\u7167\uff0c\u518d\u67e5\u770b\u7eb3\u6307100\u80a1\u7968\u6c60\u5feb\u7167\u3002",
+                },
             },
         ]
 
@@ -472,6 +600,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         existing_metadata: Mapping[str, Any] | None = None,
         covered_symbols: Sequence[str] | None = None,
         total_symbol_count_override: int | None = None,
+        target_symbols: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         metadata = dict(existing_metadata or {})
         if covered_symbols is None:
@@ -483,8 +612,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
             covered_symbol_set = {str(item or "").strip().upper() for item in covered_symbols if str(item or "").strip()}
         covered_symbol_set.discard("")
         missing_symbol_set = {str(item or "").strip().upper() for item in (missing_symbols or []) if str(item or "").strip()}
+        target_symbol_set = {str(item or "").strip().upper() for item in (target_symbols or []) if str(item or "").strip()}
+        if target_symbol_set:
+            covered_symbol_set &= target_symbol_set
+            missing_symbol_set &= target_symbol_set
         covered_symbol_count = len(covered_symbol_set)
-        total_symbol_count = len(covered_symbol_set | missing_symbol_set)
+        total_symbol_count = len(target_symbol_set) if target_symbol_set else len(covered_symbol_set | missing_symbol_set)
 
         legacy_symbol_count = metadata.get("legacy_symbol_count")
         try:
@@ -497,21 +630,28 @@ class RealBacktestPlatformService(BacktestPlatformService):
             except (TypeError, ValueError):
                 explicit_total = 0
             if explicit_total > 0:
-                total_symbol_count = max(explicit_total, covered_symbol_count + len(missing_symbol_set))
+                total_symbol_count = max(
+                    explicit_total,
+                    len(target_symbol_set) if target_symbol_set else covered_symbol_count + len(missing_symbol_set),
+                )
                 metadata["target_symbol_count"] = explicit_total
-        if covered_symbol_count == 0 and fallback_count > 0:
-            covered_symbol_count = fallback_count
-        if total_symbol_count == 0 and covered_symbol_count > 0:
-            total_symbol_count = covered_symbol_count + len(missing_symbol_set)
-        if total_symbol_count == 0 and fallback_count > 0:
-            total_symbol_count = fallback_count
-        forced_total_symbol_count = metadata.get("total_symbol_count")
-        try:
-            forced_total_count = int(forced_total_symbol_count)
-        except (TypeError, ValueError):
-            forced_total_count = 0
-        if forced_total_count > 0:
-            total_symbol_count = forced_total_count
+        elif target_symbol_set:
+            metadata["target_symbol_count"] = len(target_symbol_set)
+        if not target_symbol_set:
+            if covered_symbol_count == 0 and fallback_count > 0:
+                covered_symbol_count = fallback_count
+            if total_symbol_count == 0 and covered_symbol_count > 0:
+                total_symbol_count = covered_symbol_count + len(missing_symbol_set)
+            if total_symbol_count == 0 and fallback_count > 0:
+                total_symbol_count = fallback_count
+        if not target_symbol_set:
+            forced_total_symbol_count = metadata.get("total_symbol_count")
+            try:
+                forced_total_count = int(forced_total_symbol_count)
+            except (TypeError, ValueError):
+                forced_total_count = 0
+            if forced_total_count > 0:
+                total_symbol_count = forced_total_count
 
         metadata["covered_symbol_count"] = covered_symbol_count
         metadata["total_symbol_count"] = total_symbol_count
@@ -554,6 +694,281 @@ class RealBacktestPlatformService(BacktestPlatformService):
             return window_end
         return latest_start
 
+    def _memory_usage_limit(self) -> float:
+        raw_value = os.getenv("GRIT_SNAPSHOT_MEMORY_LIMIT_RATIO")
+        try:
+            value = float(raw_value) if raw_value is not None else SNAPSHOT_MEMORY_USAGE_LIMIT
+        except (TypeError, ValueError):
+            value = SNAPSHOT_MEMORY_USAGE_LIMIT
+        return min(max(value, 0.10), 0.95)
+
+    def _snapshot_memory_status(self) -> dict[str, float]:
+        total_physical_bytes = 0
+        available_physical_bytes = 0
+        process_working_set_bytes = 0
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", wintypes.DWORD),
+                    ("dwMemoryLoad", wintypes.DWORD),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            class PROCESS_MEMORY_COUNTERS_EX(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                    ("PrivateUsage", ctypes.c_size_t),
+                ]
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            memory_status = MEMORYSTATUSEX()
+            memory_status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if kernel32.GlobalMemoryStatusEx(ctypes.byref(memory_status)):
+                total_physical_bytes = int(memory_status.ullTotalPhys or 0)
+                available_physical_bytes = int(memory_status.ullAvailPhys or 0)
+            counters = PROCESS_MEMORY_COUNTERS_EX()
+            counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS_EX)
+            current_process = kernel32.GetCurrentProcess()
+            if psapi.GetProcessMemoryInfo(current_process, ctypes.byref(counters), counters.cb):
+                process_working_set_bytes = int(counters.WorkingSetSize or 0)
+        else:
+            try:
+                page_size = int(os.sysconf("SC_PAGE_SIZE"))
+                total_pages = int(os.sysconf("SC_PHYS_PAGES"))
+                available_pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+                total_physical_bytes = page_size * total_pages
+                available_physical_bytes = page_size * available_pages
+            except (AttributeError, OSError, ValueError):
+                total_physical_bytes = 0
+                available_physical_bytes = 0
+            try:
+                import resource
+
+                usage = resource.getrusage(resource.RUSAGE_SELF)
+                process_working_set_bytes = int(usage.ru_maxrss) * 1024
+            except Exception:
+                process_working_set_bytes = 0
+
+        used_physical_bytes = max(0, total_physical_bytes - available_physical_bytes)
+        system_memory_ratio = (used_physical_bytes / total_physical_bytes) if total_physical_bytes else 0.0
+        process_memory_ratio = (process_working_set_bytes / total_physical_bytes) if total_physical_bytes else 0.0
+        return {
+            "total_physical_bytes": float(total_physical_bytes),
+            "available_physical_bytes": float(available_physical_bytes),
+            "process_working_set_bytes": float(process_working_set_bytes),
+            "system_memory_ratio": float(system_memory_ratio),
+            "process_memory_ratio": float(process_memory_ratio),
+        }
+
+    def _raise_if_snapshot_memory_limit_exceeded(self, *, stage: str) -> None:
+        memory_status = self._snapshot_memory_status()
+        memory_limit = self._memory_usage_limit()
+        system_ratio = float(memory_status.get("system_memory_ratio") or 0.0)
+        process_ratio = float(memory_status.get("process_memory_ratio") or 0.0)
+        if system_ratio < memory_limit and process_ratio < memory_limit:
+            return
+        raise SnapshotMemoryPressureError(
+            "Snapshot refresh stopped to protect memory usage. "
+            f"stage={stage}; "
+            f"system={system_ratio:.1%}; "
+            f"process={process_ratio:.1%}; "
+            f"limit={memory_limit:.0%}"
+        )
+
+    def _effective_snapshot_worker_cap(self, requested_cap: int) -> int:
+        if requested_cap <= 1:
+            return 1
+        memory_status = self._snapshot_memory_status()
+        system_ratio = float(memory_status.get("system_memory_ratio") or 0.0)
+        process_ratio = float(memory_status.get("process_memory_ratio") or 0.0)
+        if system_ratio >= 0.75 or process_ratio >= 0.60:
+            return 1
+        if system_ratio >= 0.70 or process_ratio >= 0.45:
+            return min(requested_cap, 2)
+        if system_ratio >= 0.60 or process_ratio >= 0.30:
+            return min(requested_cap, 4)
+        return requested_cap
+
+    def _canonical_progress_total_symbol_count(
+        self,
+        *,
+        progress_target_symbols: Sequence[str],
+        existing_price_snapshot: Mapping[str, Any] | None,
+        existing_corporate_snapshot: Mapping[str, Any] | None,
+        existing_price_coverage: Sequence[Mapping[str, Any]],
+        existing_corporate_coverage: Sequence[Mapping[str, Any]],
+        existing_price_missing: Sequence[str],
+        existing_corporate_missing: Sequence[str],
+    ) -> int:
+        return len(
+            self._canonical_progress_target_symbols(
+                progress_target_symbols=progress_target_symbols,
+                existing_price_coverage=existing_price_coverage,
+                existing_corporate_coverage=existing_corporate_coverage,
+                existing_price_missing=existing_price_missing,
+                existing_corporate_missing=existing_corporate_missing,
+            )
+        )
+
+    def _snapshot_progress_extra_symbols(self) -> set[str]:
+        extras: set[str] = set()
+        for strategy in self.list_strategies():
+            direct_symbol = self._direct_symbol_universe_symbol(strategy)
+            if direct_symbol:
+                extras.add(direct_symbol)
+            benchmark_symbol = str(
+                strategy.get("benchmark_symbol")
+                or (strategy.get("parameters") or {}).get("benchmark_symbol")
+                or ""
+            ).strip().upper()
+            if self._looks_like_direct_symbol(benchmark_symbol):
+                extras.add(benchmark_symbol)
+        return extras
+
+    def _canonical_progress_target_symbols(
+        self,
+        *,
+        progress_target_symbols: Sequence[str],
+        existing_price_coverage: Sequence[Mapping[str, Any]],
+        existing_corporate_coverage: Sequence[Mapping[str, Any]],
+        existing_price_missing: Sequence[str],
+        existing_corporate_missing: Sequence[str],
+    ) -> list[str]:
+        target_symbols = {
+            str(row.get("symbol") or "").strip().upper()
+            for row in self.market_data_repository.load_universe_memberships()
+            if str(row.get("symbol") or "").strip()
+        }
+        target_symbols.update(self._snapshot_progress_extra_symbols())
+        if target_symbols:
+            return sorted(target_symbols)
+
+        candidate_symbols = {
+            str(item or "").strip().upper()
+            for item in progress_target_symbols
+            if str(item or "").strip()
+        }
+        candidate_symbols.update(
+            str(item.get("symbol") or "").strip().upper()
+            for item in existing_price_coverage
+            if str(item.get("symbol") or "").strip()
+        )
+        candidate_symbols.update(
+            str(item.get("symbol") or "").strip().upper()
+            for item in existing_corporate_coverage
+            if str(item.get("symbol") or "").strip()
+        )
+        candidate_symbols.update(
+            str(item or "").strip().upper()
+            for item in [*existing_price_missing, *existing_corporate_missing]
+            if str(item or "").strip()
+        )
+        return sorted(candidate_symbols)
+
+    def _latest_universe_membership_state(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> tuple[str | None, set[str]]:
+        latest_effective_date: str | None = None
+        latest_symbols: set[str] = set()
+        for row in rows:
+            effective_date = str(row.get("effective_date") or "").strip()
+            symbol = str(row.get("symbol") or "").strip().upper()
+            if not effective_date or not symbol:
+                continue
+            if latest_effective_date is None or effective_date > latest_effective_date:
+                latest_effective_date = effective_date
+                latest_symbols = {symbol}
+            elif effective_date == latest_effective_date:
+                latest_symbols.add(symbol)
+        return latest_effective_date, latest_symbols
+
+    def _build_refresh_stats(
+        self,
+        *,
+        price_bars: Sequence[Mapping[str, Any]],
+        corporate_actions: Sequence[Mapping[str, Any]],
+        grouped_universe_snapshots: Mapping[str, Sequence[Any]],
+        memberships_by_snapshot: Mapping[str, Sequence[Mapping[str, Any]]],
+        existing_universe_memberships: Mapping[str, Sequence[Mapping[str, Any]]],
+    ) -> dict[str, Any]:
+        price_symbols = {
+            str(item.get("symbol") or "").strip().upper()
+            for item in price_bars
+            if str(item.get("symbol") or "").strip()
+        }
+        corporate_symbols = {
+            str(item.get("symbol") or "").strip().upper()
+            for item in corporate_actions
+            if str(item.get("symbol") or "").strip()
+        }
+        universes: dict[str, dict[str, Any]] = {}
+        for snapshot_id, anchor_snapshots in grouped_universe_snapshots.items():
+            ordered_anchor_snapshots = sorted(anchor_snapshots, key=lambda item: item.effective_date)
+            if not ordered_anchor_snapshots:
+                continue
+            latest_snapshot = ordered_anchor_snapshots[-1]
+            latest_anchor_date = latest_snapshot.effective_date.isoformat()
+            latest_members = {
+                str(row.get("symbol") or "").strip().upper()
+                for row in memberships_by_snapshot.get(snapshot_id, [])
+                if str(row.get("effective_date") or "") == latest_anchor_date and str(row.get("symbol") or "").strip()
+            }
+            previous_rows = list(existing_universe_memberships.get(snapshot_id) or [])
+            previous_same_anchor = {
+                str(row.get("symbol") or "").strip().upper()
+                for row in previous_rows
+                if str(row.get("effective_date") or "") == latest_anchor_date and str(row.get("symbol") or "").strip()
+            }
+            if previous_same_anchor:
+                changed_rows = len(latest_members.symmetric_difference(previous_same_anchor))
+            else:
+                _, previous_latest_members = self._latest_universe_membership_state(previous_rows)
+                changed_rows = (
+                    len(latest_members.symmetric_difference(previous_latest_members))
+                    if previous_latest_members
+                    else len(latest_members)
+                )
+            universes[snapshot_id] = {
+                "name": str(latest_snapshot.universe_name or snapshot_id),
+                "updated_row_count": int(changed_rows),
+                "latest_anchor_date": latest_anchor_date,
+            }
+        return {
+            "datasets": {
+                DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID: {
+                    "name": "\u516c\u53f8\u884c\u4e3a\u6570\u636e",
+                    "updated_symbol_count": int(len(corporate_symbols)),
+                    "updated_row_count": int(len(corporate_actions)),
+                },
+                DATASET_PRICE_SNAPSHOT_ID: {
+                    "name": "\u80a1\u7968\u4ef7\u683c\u6570\u636e",
+                    "updated_symbol_count": int(len(price_symbols)),
+                    "updated_row_count": int(len(price_bars)),
+                },
+            },
+            "universes": universes,
+        }
+
     def _collect_market_data_refresh_batch(
         self,
         *,
@@ -576,7 +991,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
         action_partial = False
         ordered_symbols = sorted({str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()})
         synthetic_dates = self._business_days_between(window_start, window_end) if primary_provider is None else []
-        max_workers = min(worker_cap, len(ordered_symbols)) if ordered_symbols else 0
+        self._raise_if_snapshot_memory_limit_exceeded(stage="market_data_batch_preflight")
+        dynamic_worker_cap = self._effective_snapshot_worker_cap(worker_cap)
+        max_workers = min(dynamic_worker_cap, len(ordered_symbols)) if ordered_symbols else 0
         with ThreadPoolExecutor(max_workers=max_workers or 1, thread_name_prefix="snapshot-market-data") as executor:
             futures = {
                 executor.submit(
@@ -594,6 +1011,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             }
             for future in as_completed(futures):
                 symbol = futures[future]
+                self._raise_if_snapshot_memory_limit_exceeded(stage=f"market_data_batch_collect:{symbol}")
                 try:
                     fetch_result = future.result()
                 except Exception as exc:
@@ -951,18 +1369,19 @@ class RealBacktestPlatformService(BacktestPlatformService):
             price_bars = list(snapshot_rows.get("price_bars") or [])
             corporate_actions = list(snapshot_rows.get("corporate_actions") or [])
             coverage_rows = list(snapshot_rows.get("symbol_coverage") or [])
+            preferred_freshness_label = (
+                existing_row.get("freshness_label")
+                if existing_row
+                and existing_row.get("freshness_label")
+                and str(existing_row.get("freshness_label")) not in {"freshness_pending", "pending", "\u5c1a\u672a\u5237\u65b0"}
+                else "\u5df2\u4ece\u73b0\u6709\u5feb\u7167\u6062\u590d"
+            )
             if snapshot_id == DATASET_PRICE_SNAPSHOT_ID and price_bars:
-                preferred_freshness_label = (
-                    existing_row.get("freshness_label")
-                    if existing_row
-                    and existing_row.get("freshness_label")
-                    and str(existing_row.get("freshness_label")) not in {"freshness_pending", "pending", "尚未刷新"}
-                    else "已从现有快照恢复"
-                )
+                effective_coverage = coverage_rows or self._coverage_rows_from_price_bars(price_bars)
                 self.market_data_repository.replace_dataset_snapshot(
                     {
                         "id": snapshot_id,
-                        "name": "股票价格数据",
+                        "name": "\u80a1\u7968\u4ef7\u683c\u6570\u636e",
                         "status": str(existing_row.get("status") or "STALE") if existing_row else "STALE",
                         "as_of": existing_row.get("as_of") if existing_row and existing_row.get("as_of") else as_of,
                         "freshness_label": preferred_freshness_label,
@@ -989,7 +1408,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                         ),
                         "blocker": dict(existing_row.get("blocker") or {}) if existing_row else {},
                         "metadata": self._dataset_progress_metadata(
-                            symbol_coverage=coverage_rows or self._coverage_rows_from_price_bars(price_bars),
+                            symbol_coverage=effective_coverage,
                             missing_symbols=(dict(existing_row.get("metadata") or {}).get("missing_symbols") if existing_row else []),
                             existing_metadata={
                                 **(dict(existing_row.get("metadata") or {}) if existing_row else {}),
@@ -998,17 +1417,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
                         ),
                     },
                     price_bars=price_bars,
-                    symbol_coverage=coverage_rows or self._coverage_rows_from_price_bars(price_bars),
+                    symbol_coverage=effective_coverage,
                 )
                 restored_ids.append(snapshot_id)
             elif snapshot_id == DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID and corporate_actions:
-                preferred_freshness_label = (
-                    existing_row.get("freshness_label")
-                    if existing_row
-                    and existing_row.get("freshness_label")
-                    and str(existing_row.get("freshness_label")) not in {"freshness_pending", "pending", "尚未刷新"}
-                    else "已从现有快照恢复"
-                )
                 restored_actions = [
                     {
                         "symbol": str(item.get("symbol") or ""),
@@ -1024,7 +1436,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 self.market_data_repository.replace_dataset_snapshot(
                     {
                         "id": snapshot_id,
-                        "name": "公司行为数据",
+                        "name": "\u516c\u53f8\u884c\u4e3a\u6570\u636e",
                         "status": str(existing_row.get("status") or "STALE") if existing_row else "STALE",
                         "as_of": existing_row.get("as_of") if existing_row and existing_row.get("as_of") else as_of,
                         "freshness_label": preferred_freshness_label,
@@ -1057,6 +1469,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                                 **(dict(existing_row.get("metadata") or {}) if existing_row else {}),
                                 "restored_from": "dataset_corporate_actions",
                             },
+                            covered_symbols=[str(item.get("symbol") or "") for item in restored_actions],
                         ),
                     },
                     corporate_actions=restored_actions,
@@ -1082,48 +1495,30 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 existing_row.get("freshness_label")
                 if existing_row
                 and existing_row.get("freshness_label")
-                and str(existing_row.get("freshness_label")) not in {"freshness_pending", "pending", "尚未刷新"}
-                else "已从现有快照恢复"
+                and str(existing_row.get("freshness_label")) not in {"freshness_pending", "pending", "\u5c1a\u672a\u5237\u65b0"}
+                else "\u5df2\u4ece\u73b0\u6709\u5feb\u7167\u6062\u590d"
             )
             source_names = sorted({str(item.get("source") or "") for item in memberships if item.get("source")})
-            fallback_sources = sorted(
-                {str(item.get("fallback_source") or "") for item in memberships if item.get("fallback_source")}
-            )
+            fallback_sources = sorted({str(item.get("fallback_source") or "") for item in memberships if item.get("fallback_source")})
             self.market_data_repository.replace_universe_snapshot(
                 {
                     "id": snapshot_id,
-                    "universe_key": (
-                        existing_row.get("universe_key")
-                        if existing_row and existing_row.get("universe_key")
-                        else snapshot_id
-                    ),
+                    "universe_key": existing_row.get("universe_key") if existing_row and existing_row.get("universe_key") else defaults["id"],
                     "name": defaults["name"],
                     "status": str(existing_row.get("status") or "INCOMPLETE") if existing_row else "INCOMPLETE",
                     "as_of": existing_row.get("as_of") if existing_row and existing_row.get("as_of") else as_of,
                     "freshness_label": preferred_freshness_label,
-                    "window_start": min(str(item.get("effective_date")) for item in memberships if item.get("effective_date")),
-                    "window_end": max(str(item.get("effective_date")) for item in memberships if item.get("effective_date")),
-                    "anchor_schedule": (
-                        existing_row.get("anchor_schedule")
-                        if existing_row and existing_row.get("anchor_schedule")
-                        else ANCHOR_SCHEDULE
-                    ),
+                    "window_start": existing_row.get("window_start") if existing_row and existing_row.get("window_start") else min(str(item.get("effective_date")) for item in memberships if item.get("effective_date")),
+                    "window_end": existing_row.get("window_end") if existing_row and existing_row.get("window_end") else latest_effective_date,
+                    "anchor_schedule": existing_row.get("anchor_schedule") if existing_row and existing_row.get("anchor_schedule") else ANCHOR_SCHEDULE,
                     "member_count": len(latest_members),
-                    "source": (
-                        str(existing_row.get("source") or "")
-                        if existing_row and existing_row.get("source")
-                        else (source_names[0] if len(source_names) == 1 else "existing_snapshot_rows")
-                    ),
-                    "fallback_source": (
-                        existing_row.get("fallback_source")
-                        if existing_row and existing_row.get("fallback_source")
-                        else (fallback_sources[0] if len(fallback_sources) == 1 else None)
-                    ),
+                    "source": source_names[0] if len(source_names) == 1 else ("mixed_sources" if source_names else str(existing_row.get("source") or "")),
+                    "fallback_source": fallback_sources[0] if len(fallback_sources) == 1 else ("mixed_fallbacks" if fallback_sources else existing_row.get("fallback_source") if existing_row else None),
                     "blocker": dict(existing_row.get("blocker") or {}) if existing_row else {},
                     "metadata": {
                         **(dict(existing_row.get("metadata") or {}) if existing_row else {}),
                         "restored_from": "universe_membership_snapshots",
-                        "latest_anchor_date": latest_effective_date,
+                        "latest_effective_date": latest_effective_date,
                     },
                 },
                 memberships=memberships,
@@ -1232,7 +1627,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 str(blocker.get("target") or item["id"]),
                 self._snapshot_status_message(
                     blocker_code,
-                    default_message=str(blocker.get("message") or f"{item['name']} 当前仍未准备好。"),
+                    default_message=str(blocker.get("message") or f"{item['name']} snapshot data is not ready yet."),
                     item_name=str(item.get("name") or ""),
                 ),
                 BLOCKED_SNAPSHOT_ACTIONS,
@@ -1245,11 +1640,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 str(summary.get("blocking_target") or "data_snapshots"),
                 self._snapshot_status_message(
                     summary_code,
-                    default_message=str(summary.get("message") or "当前快照仍未准备好，暂时不能继续正式回测。"),
+                    default_message=str(summary.get("message") or "Snapshot data is not ready yet. Please refresh snapshots before using this view."),
                 ),
                 BLOCKED_SNAPSHOT_ACTIONS,
             )
-        return (None, None, "快照已准备好，可以继续正式回测。", READY_SNAPSHOT_ACTIONS)
+        return (None, None, "Snapshot data is ready enough to continue. You can refresh again later if you want the latest data.", READY_SNAPSHOT_ACTIONS)
 
     def _snapshot_status_message(
         self,
@@ -1260,88 +1655,63 @@ class RealBacktestPlatformService(BacktestPlatformService):
     ) -> str:
         normalized = str(code or "").upper()
         messages = {
-            "CORPORATE_ACTIONS_INCOMPLETE": "公司行为数据部分可用，正式回测仍会受限。",
-            "CORPORATE_ACTIONS_PENDING": "公司行为数据还没生成，刷新后会继续补齐。",
-            "CORPORATE_ACTIONS_FAILED": "公司行为数据刷新失败，请稍后重试。",
-            "PRICE_SNAPSHOT_INCOMPLETE": "价格数据已部分可用，但仍有历史缺口待修复。",
-            "PRICE_SNAPSHOT_FAILED": "价格数据刷新失败，请稍后重试。",
-            "UNIVERSE_HISTORY_INCOMPLETE": "股票池历史成分部分可用，完整点时成分仍在补齐。",
-            "UNIVERSE_HISTORY_FAILED": "股票池历史成分刷新失败，当前没有可用的正式锚点。",
-            "LIVE_REFRESH_PENDING": "后台更新中，页面会先显示本地已恢复的数据。",
-            "SNAPSHOT_REFRESH_REQUIRED": "还没有生成完整快照，请先刷新快照。",
-            "SNAPSHOT_REFRESH_INTERRUPTED": "后台刷新中断了，请重新触发一次刷新。",
-            "SNAPSHOT_REFRESH_FAILED": "快照刷新失败，请查看错误后重试。",
+            "CORPORATE_ACTIONS_INCOMPLETE": "Corporate action data is partially available, but the snapshot is not complete yet.",
+            "CORPORATE_ACTIONS_PENDING": "Corporate action data has not been built yet. Run refresh to populate it.",
+            "CORPORATE_ACTIONS_FAILED": "Corporate action data refresh failed.",
+            "PRICE_SNAPSHOT_INCOMPLETE": "Price data is partially available, but historical gaps still remain.",
+            "PRICE_SNAPSHOT_FAILED": "Price data refresh failed.",
+            "UNIVERSE_HISTORY_INCOMPLETE": "Universe history is partially available, but some historical anchors are still missing.",
+            "UNIVERSE_HISTORY_FAILED": "Universe history refresh failed and no usable historical anchors are available.",
+            "LIVE_REFRESH_PENDING": "A background refresh is still pending. The page is showing the locally recovered snapshot first.",
+            "SNAPSHOT_REFRESH_REQUIRED": "Please refresh snapshots before using this view.",
+            "SNAPSHOT_REFRESH_INTERRUPTED": "Snapshot refresh was interrupted. Please run it again.",
+            "SNAPSHOT_REFRESH_FAILED": "Snapshot refresh failed. Check the errors and try again.",
         }
         if normalized in messages:
             return messages[normalized]
         if default_message:
             return default_message
         if item_name:
-            return f"{item_name} 当前仍未准备好。"
-        return "当前快照仍未准备好，暂时不能继续正式回测。"
+            return f"{item_name} needs a snapshot refresh before it can be used."
+        return "Snapshot refresh is required before this view can be used."
 
     def _seed_dataset_snapshots_from_legacy_cache(self, *, as_of: str) -> dict[str, Any] | None:
-        self._restore_dataset_snapshots_from_snapshot_rows(as_of=as_of)
-        existing_rows = {str(item["id"]): item for item in self.market_data_repository.list_dataset_snapshots()}
+        dataset_rows = {str(item["id"]): item for item in self.market_data_repository.list_dataset_snapshots()}
         needs_price_snapshot = self._snapshot_row_is_placeholder(
-            existing_rows.get(DATASET_PRICE_SNAPSHOT_ID),
+            dataset_rows.get(DATASET_PRICE_SNAPSHOT_ID),
             count_key="row_count",
         )
         needs_actions_snapshot = self._snapshot_row_is_placeholder(
-            existing_rows.get(DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID),
+            dataset_rows.get(DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID),
             count_key="row_count",
         )
         if not needs_price_snapshot and not needs_actions_snapshot:
             return None
 
         legacy_bars_by_symbol = self.market_data_repository.load_bars()
-        if not legacy_bars_by_symbol:
-            recovery_report = probe_workspace_market_data_assets(
-                self.market_data_repository.path.parent,
-                exclude_paths=(self.market_data_repository.path,),
-            )
-            if recovery_report.usable_assets:
-                import_legacy_market_data_backup(self.market_data_repository, recovery_report.usable_assets[0])
-                legacy_bars_by_symbol = self.market_data_repository.load_bars()
-            if not legacy_bars_by_symbol:
-                return None
-
         legacy_actions = self.market_data_repository.load_actions()
-        legacy_coverages = {
-            str(item.get("symbol") or "").upper(): dict(item) for item in self.market_data_repository.list_coverage()
-        }
+        coverage_rows = [CoverageSummary(**row) for row in self.market_data_repository.list_coverage()]
+
+        price_bars: list[dict[str, Any]] = []
         snapshot_start_dates: list[str] = []
         snapshot_end_dates: list[str] = []
-        coverage_rows: list[CoverageSummary] = []
-        price_bars: list[dict[str, Any]] = []
-
-        for symbol, bars in legacy_bars_by_symbol.items():
-            if not bars:
+        for symbol, rows in legacy_bars_by_symbol.items():
+            if not rows:
                 continue
-            coverage = legacy_coverages.get(symbol, {})
-            start_date = str(coverage.get("start_date") or bars[0].get("date") or SNAPSHOT_START_DATE.isoformat())
-            end_date = str(coverage.get("end_date") or bars[-1].get("date") or start_date)
-            snapshot_start_dates.append(start_date)
-            snapshot_end_dates.append(end_date)
-            coverage_rows.append(
-                CoverageSummary(
-                    symbol=symbol,
-                    start_date=start_date,
-                    end_date=end_date,
-                    trade_days=int(coverage.get("trade_days") or len(bars)),
-                )
-            )
-            for bar in bars:
+            ordered_rows = sorted(rows, key=lambda item: str(item.get("date") or ""))
+            snapshot_start_dates.append(str(ordered_rows[0].get("date") or ""))
+            snapshot_end_dates.append(str(ordered_rows[-1].get("date") or ""))
+            for row in ordered_rows:
                 price_bars.append(
                     {
-                        "symbol": symbol,
-                        "date": str(bar.get("date")),
-                        "open": bar.get("open"),
-                        "high": bar.get("high"),
-                        "low": bar.get("low"),
-                        "close": bar.get("close"),
-                        "adj_close": bar.get("adj_close", bar.get("close")),
-                        "volume": bar.get("volume"),
+                        "symbol": str(symbol),
+                        "date": str(row.get("date") or ""),
+                        "open": row.get("open"),
+                        "high": row.get("high"),
+                        "low": row.get("low"),
+                        "close": row.get("close"),
+                        "adj_close": row.get("adj_close", row.get("close")),
+                        "volume": row.get("volume"),
                         "source": "legacy_local_cache",
                         "fallback_source": "live_refresh_pending",
                         "metadata": {"restored_from": "market_bars"},
@@ -1354,7 +1724,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         corporate_actions = [
             {
                 "symbol": str(action.get("symbol") or ""),
-                "date": str(action.get("date")),
+                "date": str(action.get("date") or ""),
                 "action_type": str(action.get("action_type") or "unknown"),
                 "value": action.get("value"),
                 "source": "legacy_local_cache",
@@ -1370,10 +1740,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
             self.market_data_repository.replace_dataset_snapshot(
                 {
                     "id": DATASET_PRICE_SNAPSHOT_ID,
-                    "name": "股票价格数据",
+                    "name": "\u80a1\u7968\u4ef7\u683c\u6570\u636e",
                     "status": "STALE",
                     "as_of": as_of,
-                    "freshness_label": "已从本地缓存恢复",
+                    "freshness_label": "\u5df2\u4ece\u672c\u5730\u7f13\u5b58\u6062\u590d",
                     "start_date": snapshot_start,
                     "end_date": snapshot_end,
                     "row_count": len(price_bars),
@@ -1381,7 +1751,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "fallback_source": "live_refresh_pending",
                     "blocker": {
                         "code": "LIVE_REFRESH_PENDING",
-                        "message": "已先恢复本地价格缓存，完整在线刷新仍在补齐。",
+                        "message": "\u5df2\u5148\u6062\u590d\u672c\u5730\u4ef7\u683c\u7f13\u5b58\uff0c\u540e\u7eed\u4f1a\u7ee7\u7eed\u5728\u7ebf\u8865\u9f50\u7f3a\u5931\u80a1\u7968\u3002",
                     },
                     "metadata": self._dataset_progress_metadata(
                         symbol_coverage=coverage_rows,
@@ -1401,21 +1771,21 @@ class RealBacktestPlatformService(BacktestPlatformService):
             actions_blocker = (
                 {
                     "code": "LIVE_REFRESH_PENDING",
-                    "message": "已先恢复本地公司行为缓存，完整在线刷新仍在补齐。",
+                    "message": "\u5df2\u5148\u6062\u590d\u672c\u5730\u516c\u53f8\u884c\u4e3a\u6570\u636e\uff0c\u540e\u7eed\u4f1a\u7ee7\u7eed\u5728\u7ebf\u8865\u9f50\u7f3a\u5931\u4e8b\u4ef6\u3002",
                 }
                 if corporate_actions
                 else {
                     "code": "CORPORATE_ACTIONS_PENDING",
-                    "message": "本地暂时没有公司行为快照，刷新后会继续补齐。",
+                    "message": "\u672c\u5730\u6682\u65f6\u6ca1\u6709\u516c\u53f8\u884c\u4e3a\u5feb\u7167\uff0c\u70b9\u51fb\u5237\u65b0\u540e\u4f1a\u4ece\u5df2\u914d\u7f6e\u7684\u6570\u636e\u6e90\u7ee7\u7eed\u8865\u9f50\u3002",
                 }
             )
             self.market_data_repository.replace_dataset_snapshot(
                 {
                     "id": DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
-                    "name": "公司行为数据",
+                    "name": "\u516c\u53f8\u884c\u4e3a\u6570\u636e",
                     "status": actions_status,
                     "as_of": as_of,
-                    "freshness_label": "已从本地缓存恢复" if corporate_actions else "等待在线补齐",
+                    "freshness_label": "\u5df2\u4ece\u672c\u5730\u7f13\u5b58\u6062\u590d" if corporate_actions else "\u5c1a\u672a\u5237\u65b0",
                     "start_date": snapshot_start,
                     "end_date": snapshot_end,
                     "row_count": len(corporate_actions),
@@ -1432,13 +1802,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     ),
                 },
                 corporate_actions=corporate_actions,
-                symbol_coverage=coverage_rows,
             )
 
         return {
             "price_row_count": len(price_bars),
-            "corporate_action_count": len(corporate_actions),
             "coverage_symbol_count": len(coverage_rows),
+            "actions_row_count": len(corporate_actions),
         }
 
     def _upsert_snapshot_refresh_job(self, job: Mapping[str, Any]) -> None:
@@ -1646,8 +2015,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
         recovered_at = iso_now()
         summary = dict(latest_job.get("summary") or {})
         warnings = list(latest_job.get("warnings") or [])
-        if "后台刷新在完成前中断了。" not in warnings:
-            warnings.append("后台刷新在完成前中断了。")
+        if "Background snapshot refresh was interrupted before completion." not in warnings:
+            warnings.append("Background snapshot refresh was interrupted before completion.")
         recovered_job = {
             **dict(latest_job),
             "status": "FAILED",
@@ -1657,7 +2026,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "blocking": True,
                 "blocking_code": "SNAPSHOT_REFRESH_INTERRUPTED",
                 "blocking_target": "data_snapshots",
-                "message": "后台刷新在完成前中断了，请重新触发一次刷新。",
+                "message": "Background snapshot refresh was interrupted before completion. Please run refresh again.",
             },
             "warnings": warnings,
             "errors": list(latest_job.get("errors") or []),
@@ -1798,14 +2167,26 @@ class RealBacktestPlatformService(BacktestPlatformService):
     def _build_snapshot_overview(self, latest_job: Mapping[str, Any] | None = None) -> dict[str, Any]:
         restored_at = iso_now()
         self._seed_dataset_snapshots_from_legacy_cache(as_of=restored_at)
+        self._restore_dataset_snapshots_from_snapshot_rows(as_of=restored_at)
         self._restore_universe_snapshots_from_memberships(as_of=restored_at)
         latest_job = self._recover_interrupted_snapshot_job(latest_job)
         raw_dataset_rows = {str(item["id"]): dict(item) for item in self.market_data_repository.list_dataset_snapshots()}
-        price_row = self._backfill_dataset_snapshot_progress(raw_dataset_rows.get(DATASET_PRICE_SNAPSHOT_ID))
+        canonical_target_symbols = self._canonical_progress_target_symbols(
+            progress_target_symbols=[],
+            existing_price_coverage=[],
+            existing_corporate_coverage=[],
+            existing_price_missing=[],
+            existing_corporate_missing=[],
+        )
+        price_row = self._backfill_dataset_snapshot_progress(
+            raw_dataset_rows.get(DATASET_PRICE_SNAPSHOT_ID),
+            target_symbols=canonical_target_symbols,
+        )
         price_total_symbol_count = dict(price_row.get("metadata") or {}).get("total_symbol_count")
         corporate_row = self._backfill_dataset_snapshot_progress(
             raw_dataset_rows.get(DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID),
             total_symbol_count_hint=price_total_symbol_count,
+            target_symbols=canonical_target_symbols,
         )
         dataset_rows = {
             DATASET_PRICE_SNAPSHOT_ID: price_row,
@@ -1861,13 +2242,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
         item: Mapping[str, Any] | None,
         *,
         total_symbol_count_hint: int | None = None,
+        target_symbols: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         row = dict(item or {})
         metadata = dict(row.get("metadata") or {})
         covered_symbol_count = metadata.get("covered_symbol_count")
         total_symbol_count = metadata.get("total_symbol_count")
         row_count = int(row.get("row_count") or 0)
-        if row.get("id") != DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID and (
+        if not target_symbols and row.get("id") != DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID and (
             isinstance(covered_symbol_count, int)
             and isinstance(total_symbol_count, int)
             and (total_symbol_count > 0 or row_count == 0)
@@ -1910,6 +2292,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             total_symbol_count_override=(
                 total_symbol_count_hint if snapshot_id == DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID else None
             ),
+            target_symbols=target_symbols,
         )
         return row
 
@@ -2153,7 +2536,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             return list(DEFAULT_UNIVERSE_SYMBOLS["SP500"])
         if universe_name in {"NASDAQ100", "NASDAQ-100", "NDX100", "NDX-100"}:
             return list(DEFAULT_UNIVERSE_SYMBOLS["NASDAQ100"])
-        if universe_name and universe_name.replace(".", "").isalnum():
+        if self._looks_like_direct_symbol(universe_name):
             return [universe_name]
         return ["QQQ"] if str(strategy.get("strategy_type")) == "GRID" else list(DEFAULT_UNIVERSE_SYMBOLS["SP500"])
 
@@ -2164,6 +2547,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         direct_symbol_universe = self._uses_direct_symbol_universe(strategy)
         universe_snapshot_id = self._resolved_universe_snapshot_id(strategy, request_payload)
         supporting_dataset_id = DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID
+        universe_membership_symbols: list[str] = []
         try:
             price_dataset = self._select_dataset_snapshot(dataset_snapshot_id)
         except KeyError:
@@ -2179,7 +2563,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "blocking": True,
                 "blocking_code": "SNAPSHOT_REFRESH_REQUIRED",
                 "blocking_target": "data_snapshots",
-                "message": "快照记录还没生成，请先刷新快照。",
+                "message": "Snapshot data is not ready yet. Refresh snapshots before running this flow.",
             }
 
         corporate_dataset: dict[str, Any] | None
@@ -2187,21 +2571,6 @@ class RealBacktestPlatformService(BacktestPlatformService):
             corporate_dataset = self._select_dataset_snapshot(supporting_dataset_id)
         except KeyError:
             corporate_dataset = None
-            if not direct_symbol_universe:
-                return {
-                    "status": "INCOMPLETE",
-                    "dataset_snapshot_id": dataset_snapshot_id,
-                    "universe_snapshot_id": universe_snapshot_id,
-                    "supporting_dataset_snapshot_id": supporting_dataset_id,
-                    "symbol_count": 0,
-                    "row_count": 0,
-                    "benchmark_trade_days": 0,
-                    "coverage_days": 0,
-                    "blocking": True,
-                    "blocking_code": "SNAPSHOT_REFRESH_REQUIRED",
-                    "blocking_target": "data_snapshots",
-                    "message": "快照记录还没生成，请先刷新快照。",
-                }
 
         universe_snapshot: dict[str, Any] | None = None
         if universe_snapshot_id:
@@ -2220,8 +2589,24 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "blocking": True,
                     "blocking_code": "SNAPSHOT_REFRESH_REQUIRED",
                     "blocking_target": "data_snapshots",
-                    "message": "快照记录还没生成，请先刷新快照。",
+                    "message": "Snapshot data is not ready yet. Refresh snapshots before running this flow.",
                 }
+            memberships = self.market_data_repository.load_universe_memberships(universe_snapshot_id=universe_snapshot_id)
+            if memberships:
+                requested_end_date = str(request_payload.get("end_date") or date.today().isoformat())
+                eligible_dates = sorted(
+                    {
+                        str(item.get("effective_date"))
+                        for item in memberships
+                        if str(item.get("effective_date")) <= requested_end_date
+                    }
+                )
+                target_date = eligible_dates[-1] if eligible_dates else str(memberships[-1].get("effective_date"))
+                universe_membership_symbols = [
+                    str(item.get("symbol") or "").upper()
+                    for item in memberships
+                    if str(item.get("effective_date")) == target_date
+                ]
 
         requested_symbols = list(dict.fromkeys([benchmark_symbol, *symbols]))
         bars = self._load_snapshot_price_bars(
@@ -2239,13 +2624,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
             else sum(len(series) for symbol, series in bars.items() if symbol != benchmark_symbol)
         )
         blocking_items = []
-        price_snapshot_ready_for_request = benchmark_trade_days > 0 and len(available_symbols) == len(symbols)
+        all_requested_symbols_available = len(available_symbols) == len(symbols)
+        price_snapshot_ready_for_request = benchmark_trade_days > 0 and bool(available_symbols)
+        universe_snapshot_ready_for_request = direct_symbol_universe or bool(universe_membership_symbols)
         required_snapshots = []
         if not price_snapshot_ready_for_request:
             required_snapshots.append(price_dataset)
-        if not direct_symbol_universe and corporate_dataset is not None:
-            required_snapshots.append(corporate_dataset)
-        if universe_snapshot is not None:
+        if universe_snapshot is not None and not universe_snapshot_ready_for_request:
             required_snapshots.append(universe_snapshot)
         for item in required_snapshots:
             if str(item.get("status") or "INCOMPLETE").upper() != "READY":
@@ -2260,19 +2645,25 @@ class RealBacktestPlatformService(BacktestPlatformService):
             status = "INCOMPLETE"
         corporate_status = str(corporate_dataset.get("status") or "INCOMPLETE").upper() if corporate_dataset else "NOT_REQUIRED"
         universe_status = str(universe_snapshot.get("status") or "INCOMPLETE").upper() if universe_snapshot else "NOT_REQUIRED"
-        message = blocker.get("message") or ("快照还没准备好，暂时不能提交正式回测。" if blocking else "快照已准备好。")
+        message = blocker.get("message") or ("Snapshot is partially available. Review the blocker details for the remaining gaps." if blocking else "Snapshot is available for request.")
         if (
             not blocking
             and price_snapshot_ready_for_request
-            and str(price_dataset.get("status") or "INCOMPLETE").upper() != "READY"
+            and (str(price_dataset.get("status") or "INCOMPLETE").upper() != "READY" or not all_requested_symbols_available)
         ):
-            message = "当前策略所需的价格数据已可用于回测；其余符号仍在后台补齐。"
+            message = "Price snapshot is still incomplete. The run can proceed using the currently available symbols."
         elif (
             not blocking
-            and direct_symbol_universe
+            and universe_snapshot is not None
+            and universe_snapshot_ready_for_request
+            and universe_status != "READY"
+        ):
+            message = "Universe history snapshot is still incomplete. The run can proceed using the latest available anchor membership."
+        elif (
+            not blocking
             and corporate_status != "READY"
         ):
-            message = "价格快照已准备好，单标的测试可继续；公司行为快照仍在补齐。"
+            message = "Corporate action snapshot is still incomplete. The run can proceed, but formal backtests may still be limited."
         return {
             "status": status,
             "dataset_snapshot_id": dataset_snapshot_id,
@@ -2323,15 +2714,27 @@ class RealBacktestPlatformService(BacktestPlatformService):
             ),
             None,
         )
-        existing_price_rows = self.market_data_repository.load_dataset_snapshot_rows(DATASET_PRICE_SNAPSHOT_ID)
-        existing_corporate_rows = self.market_data_repository.load_dataset_snapshot_rows(DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID)
-        window_start = SNAPSHOT_START_DATE
+        existing_price_coverage = list(self.market_data_repository.load_dataset_symbol_coverage(DATASET_PRICE_SNAPSHOT_ID))
+        existing_corporate_coverage = list(
+            self.market_data_repository.load_dataset_symbol_coverage(DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID)
+        )
+        existing_universe_memberships = {
+            SP500_UNIVERSE_SNAPSHOT_ID: self.market_data_repository.load_universe_memberships(
+                universe_snapshot_id=SP500_UNIVERSE_SNAPSHOT_ID
+            ),
+            NASDAQ100_UNIVERSE_SNAPSHOT_ID: self.market_data_repository.load_universe_memberships(
+                universe_snapshot_id=NASDAQ100_UNIVERSE_SNAPSHOT_ID
+            ),
+        }
+        existing_price_rows = {"price_bars": [], "symbol_coverage": existing_price_coverage}
+        existing_corporate_rows = self.market_data_repository.load_dataset_snapshot_rows(
+            DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID
+        )
+        snapshot_window_start = SNAPSHOT_START_DATE
         window_end = date.today()
-        primary_provider = self._primary_market_data_provider() if refresh_market_data else None
-        fallback_provider = self._fallback_market_data_provider() if refresh_market_data else UnconfiguredFallbackProvider()
-        fallback_availability = fallback_provider.availability() if refresh_market_data and hasattr(fallback_provider, "availability") else None
         warnings: list[str] = []
         errors: list[str] = []
+        self._raise_if_snapshot_memory_limit_exceeded(stage="refresh_preflight")
         if seeded_legacy_snapshot:
             warnings.append(
                 "Seeded dataset snapshots from legacy local cache "
@@ -2341,7 +2744,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
         universe_snapshots: list[Any] = []
         for provider in (self._universe_history_providers() if refresh_universes else []):
-            universe_snapshots.extend(provider.load_snapshots(window_start, window_end))
+            universe_snapshots.extend(provider.load_snapshots(snapshot_window_start, window_end))
 
         memberships_by_snapshot: dict[str, list[dict[str, Any]]] = {}
         grouped_universe_snapshots: dict[str, list[Any]] = {}
@@ -2370,12 +2773,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
             ordered_anchor_snapshots = sorted(anchor_snapshots, key=lambda item: item.effective_date)
             latest_snapshot = ordered_anchor_snapshots[-1]
             latest_anchor_date = latest_snapshot.effective_date.isoformat()
-            historical_anchor_count = sum(
-                1
-                for item in ordered_anchor_snapshots
-                if str((item.metadata or {}).get("source_quality") or "").lower() == "historical_revision_snapshot"
-                and not item.fallback_source
-            )
+            source_quality_breakdown: dict[str, int] = {}
+            historical_anchor_count = 0
+            for item in ordered_anchor_snapshots:
+                source_quality = str((item.metadata or {}).get("source_quality") or "").lower()
+                source_quality_breakdown[source_quality or "unknown"] = (
+                    source_quality_breakdown.get(source_quality or "unknown", 0) + 1
+                )
+                if source_quality in {"historical_revision_snapshot", "historical_constituent_api"} and not item.fallback_source:
+                    historical_anchor_count += 1
             total_anchor_count = len(ordered_anchor_snapshots)
             latest_members = [
                 row
@@ -2392,9 +2798,16 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 else ("FAILED" if not latest_members else "INCOMPLETE")
             )
             if universe_status != "READY":
-                warnings.append(
-                    f"{latest_snapshot.universe_name}: historical anchors {historical_anchor_count}/{total_anchor_count} came from revision history."
-                )
+                probe_status = str((latest_snapshot.metadata or {}).get("historical_constituent_probe_status") or "").strip()
+                if probe_status and probe_status != "available":
+                    warnings.append(
+                        f"{latest_snapshot.universe_name}: FMP historical constituent {probe_status.replace('_', ' ')}; "
+                        f"fell back to {latest_snapshot.source} ({historical_anchor_count}/{total_anchor_count})."
+                    )
+                else:
+                    warnings.append(
+                        f"{latest_snapshot.universe_name}: historical anchors {historical_anchor_count}/{total_anchor_count} came from revision history."
+                    )
             self.market_data_repository.replace_universe_snapshot(
                 {
                     "id": snapshot_id,
@@ -2403,11 +2816,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "status": universe_status,
                     "as_of": started_at,
                     "freshness_label": (
-                        "历史锚点已刷新"
+                        "Historical anchors are complete"
                         if universe_status == "READY"
-                        else f"历史锚点补齐中 ({historical_anchor_count}/{total_anchor_count})"
+                        else f"Historical anchors are still being repaired ({historical_anchor_count}/{total_anchor_count})"
                     ),
-                    "window_start": window_start.isoformat(),
+                    "window_start": snapshot_window_start.isoformat(),
                     "window_end": window_end.isoformat(),
                     "anchor_schedule": latest_snapshot.anchor_schedule or ANCHOR_SCHEDULE,
                     "member_count": len(latest_members) if latest_members else len(latest_snapshot.normalized_symbols),
@@ -2422,9 +2835,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     else {
                         "code": "UNIVERSE_HISTORY_INCOMPLETE" if latest_members else "UNIVERSE_HISTORY_FAILED",
                         "message": (
-                            "股票池历史成分仍在补齐，当前还不能视为完整的点时成分快照。"
+                            "Universe history is partially available, but some historical anchors are still missing."
                             if latest_members
-                            else "股票池历史成分刷新失败，当前没有可用的锚点成员数据。"
+                            else "Universe history refresh failed and no usable historical anchors are available."
                         ),
                     },
                     "metadata": {
@@ -2434,6 +2847,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
                         "anchor_count": total_anchor_count,
                         "historical_anchor_count": historical_anchor_count,
                         "fallback_anchor_count": total_anchor_count - historical_anchor_count,
+                        "historical_constituent_provider": (latest_snapshot.metadata or {}).get("historical_constituent_provider"),
+                        "historical_constituent_probe_status": (latest_snapshot.metadata or {}).get("historical_constituent_probe_status"),
+                        "source_quality_breakdown": source_quality_breakdown,
                         "source_names": source_names,
                         "fallback_sources": fallback_sources,
                         **dict(latest_snapshot.metadata),
@@ -2446,6 +2862,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
             self._sync_strategy_snapshot_bindings(updated_at=started_at)
             preview_overview = self._build_snapshot_overview()
             completed_at = iso_now()
+            refresh_stats = self._build_refresh_stats(
+                price_bars=[],
+                corporate_actions=[],
+                grouped_universe_snapshots=grouped_universe_snapshots,
+                memberships_by_snapshot=memberships_by_snapshot,
+                existing_universe_memberships=existing_universe_memberships,
+            )
             job = self._build_snapshot_refresh_job(
                 job_id=job_id,
                 request=payload,
@@ -2459,6 +2882,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 created_at=job_created_at,
                 started_at=job_started_at,
                 completed_at=completed_at,
+                refresh_stats=refresh_stats,
             )
             self._upsert_snapshot_refresh_job(job)
             if existing_job_id:
@@ -2518,42 +2942,77 @@ class RealBacktestPlatformService(BacktestPlatformService):
         if not progress_target_symbols:
             progress_target_symbols = set(symbols) | extras
 
+        latest_window_start = (
+            self._latest_market_data_window_start(
+                existing_price_snapshot=existing_price_snapshot,
+                existing_corporate_snapshot=existing_corporate_snapshot,
+                window_end=window_end,
+            )
+            if mode in {"incremental", "repair"}
+            else snapshot_window_start
+        )
+
         batch_results: list[dict[str, Any]] = []
         if mode == "repair":
             if latest_batch_symbols:
-                recent_window_start = self._latest_market_data_window_start(
-                    existing_price_snapshot=existing_price_snapshot,
-                    existing_corporate_snapshot=existing_corporate_snapshot,
-                    window_end=window_end,
+                latest_primary_provider = self._scoped_market_data_provider(
+                    mode="incremental",
+                    window_start=latest_window_start,
+                )
+                latest_fallback_provider = self._fallback_market_data_provider(latest_primary_provider)
+                latest_fallback_availability = (
+                    latest_fallback_provider.availability()
+                    if hasattr(latest_fallback_provider, "availability")
+                    else None
                 )
                 batch_results.append(
                     self._collect_market_data_refresh_batch(
                         symbols=sorted(latest_batch_symbols),
-                        window_start=recent_window_start,
+                        window_start=latest_window_start,
                         window_end=window_end,
-                        primary_provider=primary_provider,
-                        fallback_provider=fallback_provider,
-                        fallback_availability=fallback_availability,
+                        primary_provider=latest_primary_provider,
+                        fallback_provider=latest_fallback_provider,
+                        fallback_availability=latest_fallback_availability,
                         worker_cap=SNAPSHOT_MARKET_DATA_MAX_WORKERS,
                     )
                 )
             if repair_batch_symbols:
+                repair_primary_provider = self._scoped_market_data_provider(
+                    mode="repair",
+                    window_start=snapshot_window_start,
+                )
+                repair_fallback_provider = self._fallback_market_data_provider(repair_primary_provider)
+                repair_fallback_availability = (
+                    repair_fallback_provider.availability()
+                    if hasattr(repair_fallback_provider, "availability")
+                    else None
+                )
                 batch_results.append(
                     self._collect_market_data_refresh_batch(
                         symbols=sorted(repair_batch_symbols),
-                        window_start=window_start,
+                        window_start=snapshot_window_start,
                         window_end=window_end,
-                        primary_provider=primary_provider,
-                        fallback_provider=fallback_provider,
-                        fallback_availability=fallback_availability,
+                        primary_provider=repair_primary_provider,
+                        fallback_provider=repair_fallback_provider,
+                        fallback_availability=repair_fallback_availability,
                         worker_cap=SNAPSHOT_MARKET_DATA_REPAIR_MAX_WORKERS,
                     )
                 )
         else:
+            primary_provider = self._scoped_market_data_provider(
+                mode=mode,
+                window_start=latest_window_start if mode == "incremental" else snapshot_window_start,
+            )
+            fallback_provider = self._fallback_market_data_provider(primary_provider)
+            fallback_availability = (
+                fallback_provider.availability()
+                if hasattr(fallback_provider, "availability")
+                else None
+            )
             batch_results.append(
                 self._collect_market_data_refresh_batch(
                     symbols=sorted(latest_batch_symbols),
-                    window_start=window_start,
+                    window_start=latest_window_start if mode == "incremental" else snapshot_window_start,
                     window_end=window_end,
                     primary_provider=primary_provider,
                     fallback_provider=fallback_provider,
@@ -2595,6 +3054,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
         corporate_missing_symbols = sorted(corporate_missing_symbol_set)
         existing_price_missing = self._snapshot_missing_symbols(existing_price_snapshot)
         existing_corporate_missing = self._snapshot_missing_symbols(existing_corporate_snapshot)
+        canonical_target_symbols = self._canonical_progress_target_symbols(
+            progress_target_symbols=sorted(progress_target_symbols),
+            existing_price_coverage=existing_price_coverage,
+            existing_corporate_coverage=existing_corporate_coverage,
+            existing_price_missing=existing_price_missing,
+            existing_corporate_missing=existing_corporate_missing,
+        )
+        canonical_total_symbol_count = len(canonical_target_symbols)
         attempted_symbol_set = set(progress_target_symbols)
         if mode == "repair":
             existing_missing_set = set(existing_price_missing) | set(existing_corporate_missing)
@@ -2636,11 +3103,40 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 return cleaned[0] if len(cleaned) == 1 else "mixed_fallbacks"
             return fallback_default
 
+        representative_provider = None
+        representative_fallback_availability = None
+        if mode == "repair":
+            representative_provider = self._scoped_market_data_provider(
+                mode="incremental",
+                window_start=latest_window_start,
+            )
+            representative_fallback_provider = self._fallback_market_data_provider(representative_provider)
+            representative_fallback_availability = (
+                representative_fallback_provider.availability()
+                if hasattr(representative_fallback_provider, "availability")
+                else None
+            )
+        elif refresh_market_data:
+            representative_provider = self._scoped_market_data_provider(
+                mode=mode,
+                window_start=latest_window_start if mode == "incremental" else snapshot_window_start,
+            )
+            representative_fallback_provider = self._fallback_market_data_provider(representative_provider)
+            representative_fallback_availability = (
+                representative_fallback_provider.availability()
+                if hasattr(representative_fallback_provider, "availability")
+                else None
+            )
+
         default_source_name = str(
-            getattr(primary_provider, "provider_name", "synthetic_seed") if primary_provider is not None else "synthetic_seed"
+            getattr(representative_provider, "provider_name", "synthetic_seed")
+            if representative_provider is not None
+            else "synthetic_seed"
         )
         default_fallback_name = (
-            fallback_availability.provider_name if (effective_missing_symbols or action_partial) and fallback_availability else None
+            representative_fallback_availability.provider_name
+            if (effective_missing_symbols or action_partial) and representative_fallback_availability
+            else None
         )
         price_source_name = summarize_source(price_sources, default_source_name)
         price_fallback_name = summarize_fallback(price_fallback_sources, default_fallback_name)
@@ -2654,33 +3150,49 @@ class RealBacktestPlatformService(BacktestPlatformService):
         elif action_partial or effective_corporate_missing_symbols:
             corporate_status = "INCOMPLETE"
 
+        merge_existing_market_data = mode in {"incremental", "repair"}
         merged_price_bars = (
-            self._merge_price_snapshot_rows(existing_price_rows.get("price_bars") or [], price_bars)
-            if mode == "repair"
+            list(price_bars)
+            if merge_existing_market_data
             else list(price_bars)
         )
         merged_coverage_rows = (
             self._merge_coverage_rows(existing_price_rows.get("symbol_coverage") or [], coverage_rows)
-            if mode == "repair"
+            if merge_existing_market_data
             else list(coverage_rows)
         )
+        price_start_date = (
+            min(str(item.start_date) for item in merged_coverage_rows if getattr(item, "start_date", None))
+            if merged_coverage_rows
+            else (existing_price_snapshot.get("start_date") if existing_price_snapshot else snapshot_window_start.isoformat())
+        )
+        price_end_date = (
+            max(str(item.end_date) for item in merged_coverage_rows if getattr(item, "end_date", None))
+            if merged_coverage_rows
+            else (existing_price_snapshot.get("end_date") if existing_price_snapshot else window_end.isoformat())
+        )
 
+        price_snapshot_writer = (
+            self.market_data_repository.merge_dataset_snapshot
+            if merge_existing_market_data
+            else self.market_data_repository.replace_dataset_snapshot
+        )
         if merged_price_bars:
-            self.market_data_repository.replace_dataset_snapshot(
+            price_snapshot_writer(
                 {
                     "id": DATASET_PRICE_SNAPSHOT_ID,
-                    "name": "股票价格数据",
+                    "name": "\u80a1\u7968\u4ef7\u683c\u6570\u636e",
                     "status": price_status,
                     "as_of": started_at,
-                    "freshness_label": "刚刚刷新",
-                    "start_date": window_start.isoformat(),
-                    "end_date": window_end.isoformat(),
+                    "freshness_label": "\u521a\u521a\u5237\u65b0",
+                    "start_date": price_start_date,
+                    "end_date": price_end_date,
                     "row_count": len(merged_price_bars),
                     "source": price_source_name,
                     "fallback_source": price_fallback_name,
                     "blocker": {} if price_status == "READY" else {
                         "code": "PRICE_SNAPSHOT_INCOMPLETE" if price_bars else "PRICE_SNAPSHOT_FAILED",
-                        "message": "价格数据已部分可用，但仍有历史符号缺口待修复。",
+                        "message": "Price snapshot is still incomplete. Please retry after the missing symbols are repaired.",
                     },
                     "metadata": self._dataset_progress_metadata(
                         symbol_coverage=merged_coverage_rows,
@@ -2691,43 +3203,104 @@ class RealBacktestPlatformService(BacktestPlatformService):
                             "fallback_sources": price_fallback_sources,
                             "cold_backup_result": cold_backup_result or {},
                             "recovery_report": recovery_report.as_dict() if recovery_report else {},
-                            "target_symbol_count": len(progress_target_symbols),
+                            "target_symbol_count": canonical_total_symbol_count,
                             **selection_metadata,
                         },
-                        total_symbol_count_override=len(progress_target_symbols),
+                        total_symbol_count_override=canonical_total_symbol_count,
+                        target_symbols=canonical_target_symbols,
                     ),
                 },
                 price_bars=merged_price_bars,
                 symbol_coverage=merged_coverage_rows,
             )
+            if merge_existing_market_data:
+                corrected_price_metadata = self._dataset_progress_metadata(
+                    symbol_coverage=self.market_data_repository.load_dataset_symbol_coverage(DATASET_PRICE_SNAPSHOT_ID),
+                    missing_symbols=effective_missing_symbols,
+                    existing_metadata={
+                        "missing_symbols": effective_missing_symbols,
+                        "source_names": price_sources,
+                        "fallback_sources": price_fallback_sources,
+                        "cold_backup_result": cold_backup_result or {},
+                        "recovery_report": recovery_report.as_dict() if recovery_report else {},
+                        "target_symbol_count": canonical_total_symbol_count,
+                        **selection_metadata,
+                    },
+                    total_symbol_count_override=canonical_total_symbol_count,
+                    target_symbols=canonical_target_symbols,
+                )
+                self.market_data_repository.merge_dataset_snapshot(
+                    {
+                        "id": DATASET_PRICE_SNAPSHOT_ID,
+                        "name": "\u80a1\u7968\u4ef7\u683c\u6570\u636e",
+                        "status": price_status,
+                        "as_of": started_at,
+                        "freshness_label": "\u521a\u521a\u5237\u65b0",
+                        "start_date": price_start_date,
+                        "end_date": price_end_date,
+                        "row_count": self.market_data_repository.count_dataset_snapshot_rows(DATASET_PRICE_SNAPSHOT_ID)["price_bars"],
+                        "source": price_source_name,
+                        "fallback_source": price_fallback_name,
+                        "blocker": {} if price_status == "READY" else {
+                            "code": "PRICE_SNAPSHOT_INCOMPLETE" if price_bars else "PRICE_SNAPSHOT_FAILED",
+                            "message": "Price snapshot is still incomplete. Please retry after the missing symbols are repaired.",
+                        },
+                        "metadata": corrected_price_metadata,
+                    },
+                )
         existing_corporate_actions = list(existing_corporate_rows.get("corporate_actions") or [])
         existing_corporate_coverage = list(existing_corporate_rows.get("symbol_coverage") or [])
-        merged_corporate_actions = (
-            self._merge_action_snapshot_rows(existing_corporate_actions, corporate_actions)
-            if mode == "repair"
-            else list(corporate_actions)
-        )
+        merged_corporate_actions = list(corporate_actions)
         merged_corporate_coverage = (
             self._merge_coverage_rows(existing_corporate_coverage, corporate_coverage_rows)
-            if mode == "repair"
+            if merge_existing_market_data
             else list(corporate_coverage_rows)
         )
-        if merged_corporate_actions or not existing_corporate_actions:
-            self.market_data_repository.replace_dataset_snapshot(
+        corporate_start_date = (
+            min(str(item.start_date) for item in merged_corporate_coverage if getattr(item, "start_date", None))
+            if merged_corporate_coverage
+            else (
+                min(str(item.get("date")) for item in merged_corporate_actions if item.get("date"))
+                if merged_corporate_actions
+                else (existing_corporate_snapshot.get("start_date") if existing_corporate_snapshot else snapshot_window_start.isoformat())
+            )
+        )
+        corporate_end_date = (
+            max(str(item.end_date) for item in merged_corporate_coverage if getattr(item, "end_date", None))
+            if merged_corporate_coverage
+            else (
+                max(str(item.get("date")) for item in merged_corporate_actions if item.get("date"))
+                if merged_corporate_actions
+                else (existing_corporate_snapshot.get("end_date") if existing_corporate_snapshot else window_end.isoformat())
+            )
+        )
+        preserve_existing_corporate_snapshot = (
+            merge_existing_market_data
+            and not corporate_actions
+            and bool(existing_corporate_snapshot)
+            and int(existing_corporate_snapshot.get("row_count") or 0) > 0
+        )
+        corporate_snapshot_writer = (
+            self.market_data_repository.merge_dataset_snapshot
+            if merge_existing_market_data
+            else self.market_data_repository.replace_dataset_snapshot
+        )
+        if (merged_corporate_actions or not existing_corporate_actions) and not preserve_existing_corporate_snapshot:
+            corporate_snapshot_writer(
                 {
                     "id": DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
-                    "name": "公司行为数据",
+                    "name": "\u516c\u53f8\u884c\u4e3a\u6570\u636e",
                     "status": corporate_status,
                     "as_of": started_at,
-                    "freshness_label": "刚刚刷新",
-                    "start_date": window_start.isoformat(),
-                    "end_date": window_end.isoformat(),
+                    "freshness_label": "\u521a\u521a\u5237\u65b0",
+                    "start_date": corporate_start_date,
+                    "end_date": corporate_end_date,
                     "row_count": len(merged_corporate_actions),
                     "source": action_source_name,
                     "fallback_source": action_fallback_name,
                     "blocker": {} if corporate_status == "READY" else {
                         "code": "CORPORATE_ACTIONS_INCOMPLETE" if merged_corporate_actions else "CORPORATE_ACTIONS_FAILED",
-                        "message": "公司行为数据已部分可用，但仍有事件缺口待修复。",
+                        "message": "Corporate action snapshot is still incomplete. Please retry after the missing events are repaired.",
                     },
                     "metadata": self._dataset_progress_metadata(
                         symbol_coverage=merged_corporate_coverage,
@@ -2740,22 +3313,69 @@ class RealBacktestPlatformService(BacktestPlatformService):
                             "cold_backup_result": cold_backup_result or {},
                             "recovery_report": recovery_report.as_dict() if recovery_report else {},
                             "progress_metric": "corporate_action_symbols",
-                            "target_symbol_count": len(progress_target_symbols),
-                            "selected_symbol_count": len(progress_target_symbols),
+                            "target_symbol_count": canonical_total_symbol_count,
+                            "selected_symbol_count": canonical_total_symbol_count,
                             **selection_metadata,
                         },
                         covered_symbols=[str(item.get("symbol") or "") for item in merged_corporate_actions],
-                        total_symbol_count_override=len(progress_target_symbols),
+                        total_symbol_count_override=canonical_total_symbol_count,
+                        target_symbols=canonical_target_symbols,
                     ),
                 },
                 corporate_actions=merged_corporate_actions,
                 symbol_coverage=merged_corporate_coverage,
             )
+            if merge_existing_market_data:
+                corrected_corporate_rows = self.market_data_repository.summarize_dataset_symbols(
+                    DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID
+                )
+                corrected_corporate_coverage = self.market_data_repository.load_dataset_symbol_coverage(
+                    DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID
+                )
+                self.market_data_repository.merge_dataset_snapshot(
+                    {
+                        "id": DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
+                        "name": "\u516c\u53f8\u884c\u4e3a\u6570\u636e",
+                        "status": corporate_status,
+                        "as_of": started_at,
+                        "freshness_label": "\u521a\u521a\u5237\u65b0",
+                        "start_date": corporate_start_date,
+                        "end_date": corporate_end_date,
+                        "row_count": self.market_data_repository.count_dataset_snapshot_rows(
+                            DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID
+                        )["corporate_actions"],
+                        "source": action_source_name,
+                        "fallback_source": action_fallback_name,
+                        "blocker": {} if corporate_status == "READY" else {
+                            "code": "CORPORATE_ACTIONS_INCOMPLETE" if merged_corporate_actions else "CORPORATE_ACTIONS_FAILED",
+                            "message": "Corporate action snapshot is still incomplete. Please retry after the missing events are repaired.",
+                        },
+                        "metadata": self._dataset_progress_metadata(
+                            symbol_coverage=corrected_corporate_coverage or corrected_corporate_rows,
+                            missing_symbols=effective_corporate_missing_symbols,
+                            existing_metadata={
+                                "missing_symbols": effective_corporate_missing_symbols,
+                                "partial": action_partial,
+                                "source_names": action_sources,
+                                "fallback_sources": action_fallback_sources,
+                                "cold_backup_result": cold_backup_result or {},
+                                "recovery_report": recovery_report.as_dict() if recovery_report else {},
+                                "progress_metric": "corporate_action_symbols",
+                                "target_symbol_count": canonical_total_symbol_count,
+                                "selected_symbol_count": canonical_total_symbol_count,
+                                **selection_metadata,
+                            },
+                            covered_symbols=[str(item.get("symbol") or "") for item in corrected_corporate_rows],
+                            total_symbol_count_override=canonical_total_symbol_count,
+                            target_symbols=canonical_target_symbols,
+                        ),
+                    },
+                )
         else:
-            warnings.append("在线刷新没有返回新的公司行为事件，因此保留了上一次较完整的快照。")
+            warnings.append("Preserved the existing corporate-action snapshot because this refresh did not return new events.")
             preserved_blocker = {
                 "code": "CORPORATE_ACTIONS_INCOMPLETE",
-                "message": "公司行为数据未被新的空结果覆盖，当前继续沿用上一版更完整的快照。",
+                "message": "Corporate action snapshot stayed on the previous rows because this refresh did not return new events.",
             }
             preserved_actions = [
                 {
@@ -2772,11 +3392,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
             self.market_data_repository.replace_dataset_snapshot(
                 {
                     "id": DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
-                    "name": "公司行为数据",
+                    "name": "\u516c\u53f8\u884c\u4e3a\u6570\u636e",
                     "status": "STALE",
                     "as_of": existing_corporate_snapshot.get("as_of") if existing_corporate_snapshot else started_at,
-                    "freshness_label": "继续使用已有快照",
-                    "start_date": existing_corporate_snapshot.get("start_date") if existing_corporate_snapshot else window_start.isoformat(),
+                    "freshness_label": "\u7ee7\u7eed\u4f7f\u7528\u5df2\u6709\u5feb\u7167",
+                    "start_date": existing_corporate_snapshot.get("start_date") if existing_corporate_snapshot else snapshot_window_start.isoformat(),
                     "end_date": existing_corporate_snapshot.get("end_date") if existing_corporate_snapshot else window_end.isoformat(),
                     "row_count": len(preserved_actions),
                     "source": (
@@ -2799,12 +3419,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
                             "recovery_report": recovery_report.as_dict() if recovery_report else {},
                             "preserved_existing_snapshot": True,
                             "progress_metric": "corporate_action_symbols",
-                            "target_symbol_count": len(progress_target_symbols),
-                            "selected_symbol_count": len(progress_target_symbols),
+                            "target_symbol_count": canonical_total_symbol_count,
+                            "selected_symbol_count": canonical_total_symbol_count,
                             **selection_metadata,
                         },
                         covered_symbols=[str(item.get("symbol") or "") for item in preserved_actions],
-                        total_symbol_count_override=len(progress_target_symbols),
+                        total_symbol_count_override=canonical_total_symbol_count,
+                        target_symbols=canonical_target_symbols,
                     ),
                 },
                 corporate_actions=preserved_actions,
@@ -2814,6 +3435,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
         self._sync_strategy_snapshot_bindings(updated_at=started_at)
         preview_overview = self._build_snapshot_overview()
         completed_at = iso_now()
+        refresh_stats = self._build_refresh_stats(
+            price_bars=price_bars,
+            corporate_actions=corporate_actions,
+            grouped_universe_snapshots=grouped_universe_snapshots,
+            memberships_by_snapshot=memberships_by_snapshot,
+            existing_universe_memberships=existing_universe_memberships,
+        )
         job = self._build_snapshot_refresh_job(
             job_id=job_id,
             request=payload,
@@ -2827,6 +3455,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             created_at=job_created_at,
             started_at=job_started_at,
             completed_at=completed_at,
+            refresh_stats=refresh_stats,
         )
         self._upsert_snapshot_refresh_job(job)
         if existing_job_id:
@@ -2878,7 +3507,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             or "T_CLOSE_TO_T1_OPEN"
         )
         normalized["universe_snapshot_id"] = self._resolved_universe_snapshot_id(strategy, normalized)
-        normalized["is_permanent"] = bool(normalized.get("is_permanent", True))
+        normalized["is_permanent"] = bool(normalized.get("is_permanent", False))
         return normalized
 
     def _strategy_for_run(self, strategy: Mapping[str, Any], request_payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -3228,7 +3857,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "status": "COMPLETED_WITH_WARNINGS" if preview["warnings"] else "COMPLETED",
             "source_run_id": payload.get("source_run_id"),
             "request_kind": "official",
-            "is_permanent": 1 if bool(payload.get("is_permanent", True)) else 0,
+            "is_permanent": 1 if bool(payload.get("is_permanent", False)) else 0,
             "start_date": payload.get("start_date"),
             "end_date": payload.get("end_date"),
             "effective_date": preview.get("effective_date"),
@@ -3245,7 +3874,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "consistency_score_json": dumps(build_consistency_score(chart_series)),
             "risk_metrics_json": dumps(build_risk_metrics(metrics, chart_series)),
             "drawdown_events_json": dumps(build_drawdown_events(chart_series, preview.get("oos_start_date"))),
-            "rolling_metrics_json": dumps(build_rolling_metrics(chart_series, 21)),
+            "rolling_metrics_json": dumps(build_rolling_metrics(chart_series, 252)),
             "monthly_returns_json": dumps(build_monthly_returns(chart_series, preview.get("oos_start_date"))),
             "chart_series_json": dumps(chart_series),
             "trades_json": dumps(trades),
@@ -3271,6 +3900,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
     def get_backtest_run_detail(self, run_id: str) -> dict[str, Any]:
         run = super().get_backtest_run_detail(run_id)
+        chart_series = list(run.get("chart_series") or [])
+        if chart_series:
+            # Rebuild rolling metrics at read time so historical runs created with
+            # the old 21-day/volatility payload immediately regain 252-day
+            # rolling return and rolling Sharpe without requiring a rerun.
+            run["rolling_metrics"] = build_rolling_metrics(chart_series, 252)
         request_payload = dict(run.get("request") or {})
         request_payload["execution_policy"] = str(
             request_payload.get("execution_policy")
@@ -3303,6 +3938,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             run.get("preview", {}).get("parameter_version_id")
             or run.get("request", {}).get("parameter_version_id")
         )
+        run["trades"] = _enrich_trade_records_with_execution_values(run, run.get("trades") or [])
         run["trade_audit_items"] = [
             {
                 "trade_id": item["trade_id"],
@@ -3322,8 +3958,39 @@ class RealBacktestPlatformService(BacktestPlatformService):
         run["analysis"] = build_run_detail_analysis(run)
         return run
 
+    def save_backtest_run(self, run_id: str) -> dict[str, Any]:
+        run = super().get_backtest_run_detail(run_id)
+        if bool(run.get("is_permanent")):
+            return self.get_backtest_run_detail(run_id)
+
+        request_payload = dict(run.get("request") or {})
+        request_payload["is_permanent"] = True
+        now = iso_now()
+        self.storage.execute(
+            "UPDATE backtest_runs SET is_permanent = 1, request_json = ?, updated_at = ? WHERE id = ?",
+            (dumps(request_payload), now, run_id),
+        )
+        return self.get_backtest_run_detail(run_id)
+
     def get_backtest_run_trades(self, run_id: str, page: int = 1, page_size: int = 50, segment: str = "all") -> dict[str, Any]:
-        return super().get_backtest_run_trades(run_id, page=page, page_size=page_size, segment=segment)
+        run = self.get_backtest_run_detail(run_id)
+        trades = list(run.get("trades", []))
+        normalized_segment = str(segment or "all").upper()
+        if normalized_segment in {"IS", "OOS"}:
+            trades = [item for item in trades if str(item.get("segment") or "").upper() == normalized_segment]
+        page_size = max(int(page_size), 1)
+        page = max(int(page), 1)
+        total = len(trades)
+        start = (page - 1) * page_size
+        end = start + page_size
+        total_pages = max(1, math.ceil(total / page_size)) if total else 1
+        return {
+            "items": trades[start:end],
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+        }
 
     def get_backtest_trade_audit(self, run_id: str, trade_id: str) -> dict[str, Any]:
         run = super().get_backtest_run_detail(run_id)

@@ -30,6 +30,9 @@ const TEXT = {
   empty: '暂无最近回测。先创建一个策略再填充历史。',
   error: '最近回测加载失败。',
   retry: '重试',
+  pendingRange: '日期待定',
+  totalReturn: '收益率',
+  sharpe: '夏普比率',
 } as const;
 
 function getStatusTone(status: WorkspaceRecentRunItem['status']): 'positive' | 'warning' | 'negative' {
@@ -72,15 +75,17 @@ function WorkspaceRecentRunRow({ item, navigate }: { item: WorkspaceRecentRunIte
           {item.strategyName}
         </h4>
 
-        <p className="workspace-recent-runs__period">{item.dateRangeLabel || item.periodLabel || '区间待补充'}</p>
+        <p className="workspace-recent-runs__period">{item.dateRangeLabel || item.periodLabel || TEXT.pendingRange}</p>
 
         <div className="workspace-recent-runs__badge-row">
-          <span className={`workspace-recent-runs__badge workspace-recent-runs__badge--${totalReturnTone}`}>收益率 {item.totalReturn}</span>
-          <span className="workspace-recent-runs__badge workspace-recent-runs__badge--neutral">夏普比率 {item.sharpe}</span>
-        </div>
-
-        <div className="workspace-recent-runs__footer">
-          <span className={`workspace-recent-runs__status workspace-recent-runs__status--${tone}`}>{item.statusLabel}</span>
+          <div className="workspace-recent-runs__badges">
+            <span className={`workspace-recent-runs__badge workspace-recent-runs__badge--${totalReturnTone}`}>
+              {TEXT.totalReturn} {item.totalReturn}
+            </span>
+            <span className="workspace-recent-runs__badge workspace-recent-runs__badge--neutral">
+              {TEXT.sharpe} {item.sharpe}
+            </span>
+          </div>
           <span className="workspace-recent-runs__completed">{item.completedRelativeLabel}</span>
         </div>
       </button>
@@ -112,7 +117,7 @@ export function WorkspaceRecentRunsSection({
       </div>
 
       {loading ? (
-        <ol className="workspace-recent-runs__timeline" aria-label="最近回测">
+        <ol className="workspace-recent-runs__timeline" aria-label={TEXT.title}>
           {Array.from({ length: 4 }, (_, index) => (
             <RecentRunSkeleton key={index} />
           ))}
@@ -122,7 +127,7 @@ export function WorkspaceRecentRunsSection({
           <p>{error || TEXT.error}</p>
         </div>
       ) : normalizedRuns.length > 0 ? (
-        <ol className="workspace-recent-runs__timeline" aria-label="最近回测">
+        <ol className="workspace-recent-runs__timeline" aria-label={TEXT.title}>
           {normalizedRuns.map((item) => (
             <WorkspaceRecentRunRow key={item.id} item={item} navigate={navigate} />
           ))}

@@ -213,6 +213,7 @@ export function BacktestSubmitPage({ strategyId }: { strategyId: string }): JSX.
         parameter_version_id: strategy?.current_parameter_version_id ?? undefined,
         dataset_snapshot_id: strategy?.dataset_snapshot_id ?? undefined,
         universe_snapshot_id: strategy?.universe_snapshot_id ?? undefined,
+        is_permanent: false,
       });
       navigateTo(`/runs/${payload.id}`);
     } catch (caught) {

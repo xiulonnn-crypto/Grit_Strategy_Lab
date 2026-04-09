@@ -220,6 +220,55 @@ function buildMeanReversionSession(): ApiStrategyCreationSession {
   };
 }
 
+function buildMomentumSession(): ApiStrategyCreationSession {
+  return {
+    id: 'cs-mom',
+    status: 'READY_FOR_CONFIRMATION',
+    revision: 1,
+    top_level: {
+      strategy_type: 'MOMENTUM',
+      universe_name: '标普500成分股',
+      rebalance_frequency: 'semiannual',
+    },
+    messages: [
+      {
+        id: 'msg-mom-001',
+        role: 'user',
+        content:
+          '标普动量策略\n每年1月第1个交易日和7月第一个交易日（每半年1次）\n取标普成分股，前12个月-前1个月的总收益率排行前100名，买入或保留持仓；若不在前120名，移除持仓\n持仓比例按数量均分仓位\n初始100000刀',
+        created_at: '2026-04-09 15:30',
+        extracted_tags: [
+          { key: 'strategy_name', label: '策略名称', value: '标普动量策略', status: 'synced' },
+          { key: 'top_n', label: '买入排名阈值', value: '100', status: 'synced' },
+          { key: 'hold_rank_threshold', label: '保留排名阈值', value: '120', status: 'synced' },
+          { key: 'weighting_method', label: '权重方法', value: 'equal_weight', status: 'synced' },
+        ],
+      },
+    ],
+    pending_inputs: [],
+    manual_conflicts: [],
+    confirmation_fields: {
+      top_level: [
+        { key: 'strategy_type', label: '策略类型', value: 'MOMENTUM', source: 'user_input' },
+        { key: 'universe_name', label: '股票池', value: '标普500成分股', source: 'user_input' },
+        { key: 'rebalance_frequency', label: '调仓频率', value: 'semiannual', source: 'user_input' },
+      ],
+      parameters: [
+        { key: 'strategy_name', label: '策略名称', value: '标普动量策略', source: 'user_input' },
+        { key: 'strategy_description', label: '策略描述', value: '在标普500成分股内做横截面动量轮动，每半年按每年01月第1个交易日；07月第1个交易日调仓，按前12个月剔除最近1个月收益排序，买入或保留前100名，跌出前120名移除，持仓按数量等权分配，初始资金100000USD。', source: 'system_inference' },
+        { key: 'benchmark_symbol', label: '基准', value: 'SPY', source: 'system_inference' },
+        { key: 'capital', label: '初始资金(USD)', value: 100000, source: 'user_input' },
+        { key: 'lookback_months', label: '动量回看(月)', value: 12, source: 'user_input' },
+        { key: 'skip_recent_months', label: '跳过最近(月)', value: 1, source: 'user_input' },
+        { key: 'top_n', label: '买入排名阈值', value: 100, source: 'user_input' },
+        { key: 'hold_rank_threshold', label: '保留排名阈值', value: 120, source: 'user_input' },
+        { key: 'weighting_method', label: '权重方法', value: 'equal_weight', source: 'user_input' },
+        { key: 'rebalance_anchor_dates', label: '调仓锚点', value: '每年01月第1个交易日；07月第1个交易日', source: 'user_input' },
+      ],
+    },
+  };
+}
+
 beforeEach(() => {
   fakeApi.appendCreationMessage.mockReset();
   fakeApi.createCreationSession.mockReset();
@@ -338,6 +387,27 @@ describe('creation flow', () => {
     expect(screen.getByLabelText('窗口大小')).toHaveValue('');
     expect(screen.getByLabelText('回归目标')).toHaveValue('');
     expect(screen.queryByLabelText('定投金额(USD)')).not.toBeInTheDocument();
+  });
+
+  it('renders momentum sessions with the momentum-specific parameter groups', async () => {
+    fakeApi.getCreationSession.mockResolvedValue(buildMomentumSession());
+
+    render(<CreationSessionPage sessionId="cs-mom" />);
+
+    expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent('标普动量策略');
+    expect(screen.getByLabelText('策略类型')).toHaveTextContent('动量 / 趋势跟随');
+    expect(screen.getByLabelText('策略名称')).toHaveValue('标普动量策略');
+    expect(screen.getByLabelText('股票池')).toHaveValue('标普500成分股');
+    expect(screen.getByRole('combobox', { name: '基准' })).toHaveValue('SPY');
+    expect(screen.getByLabelText('初始资金(USD)')).toHaveValue('100000');
+
+    fireEvent.click(screen.getByText('选股规则').closest('button')!);
+
+    expect(await screen.findByLabelText('动量回看(月)')).toHaveValue('12');
+    expect(screen.getByLabelText('跳过最近(月)')).toHaveValue('1');
+    expect(screen.getByLabelText('买入排名阈值')).toHaveValue('100');
+    expect(screen.getByLabelText('保留排名阈值')).toHaveValue('120');
+    expect(screen.getByRole('combobox', { name: '权重方法' })).toHaveValue('equal_weight');
   });
 
   it('deduplicates strategy type rows and keeps completion text in step tabs only', async () => {

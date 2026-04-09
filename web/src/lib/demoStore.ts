@@ -92,8 +92,8 @@ function createCandidate(
   };
   return {
     id: overrides.id ?? nextId('trial'),
-    label: overrides.label ?? `Candidate ${rank}`,
-    summary: overrides.summary ?? 'Recovered optimization candidate',
+    label: overrides.label ?? `候选方案 ${rank}`,
+    summary: overrides.summary ?? '已恢复优化候选方案。',
     status: overrides.status ?? 'SUCCEEDED',
     rank,
     score: overrides.score ?? 0.67 + rank / 100,
@@ -142,12 +142,12 @@ function createInitialState(): DemoState {
         baseline_parameter_version_id: strategies[0].current_parameter_version_id,
       },
       candidates: [
-        createCandidate(strategies[0], { id: 'trial-001', label: 'Baseline + 1' }, 1),
+        createCandidate(strategies[0], { id: 'trial-001', label: '基线 + 1' }, 1),
         createCandidate(
           strategies[0],
           {
             id: 'trial-002',
-            label: 'Diff Only Candidate',
+            label: '差异示例候选',
             parameter_snapshot: {
               ...strategies[0].parameters,
               top_n: 8,
@@ -468,6 +468,15 @@ export const demoApi: DemoApi = {
     if (!run) {
       throw new ApiError({ status: 404, code: 'run_not_found', message: `Run ${id} was not found.` });
     }
+    return clone(run);
+  },
+
+  async saveBacktestRun(id: string): Promise<ApiBacktestRunDetail> {
+    const run = state.runs.find((item) => item.id === id);
+    if (!run) {
+      throw new ApiError({ status: 404, code: 'run_not_found', message: `Run ${id} was not found.` });
+    }
+    run.is_permanent = true;
     return clone(run);
   },
 

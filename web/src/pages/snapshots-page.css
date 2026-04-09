@@ -48,6 +48,12 @@
   margin-top: 18px;
 }
 
+.snapshots-header__summary {
+  max-width: min(100%, 920px);
+  white-space: normal !important;
+  line-height: 1.4;
+}
+
 .snapshots-header__actions {
   display: flex;
   align-items: flex-start;

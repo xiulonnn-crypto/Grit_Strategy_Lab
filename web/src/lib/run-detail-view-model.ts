@@ -1,4 +1,4 @@
-import { formatShortDate } from './format';
+import { formatCompactDate } from './format';
 import type { ApiBacktestRunDetail } from '../types';
 
 export type ViewWindow = 'all' | '1y' | '3y';
@@ -102,7 +102,7 @@ export function formatRunRange(detail: ApiBacktestRunDetail): string {
   if (!start || !end) {
     return '暂无区间';
   }
-  return `${formatShortDate(start)} - ${formatShortDate(end)}`;
+  return `${formatCompactDate(start)} - ${formatCompactDate(end)}`;
 }
 
 export function buildCopyPayload(detail: ApiBacktestRunDetail): Record<string, unknown> {

@@ -99,18 +99,28 @@ STRATEGY_TEMPLATES: dict[str, StrategyTemplate] = {
         prompt_hints=("动量", "momentum"),
         top_level_defaults={"strategy_type": "MOMENTUM", "universe_name": "", "rebalance_frequency": None},
         parameter_defaults={
+            "strategy_name": None,
+            "strategy_description": None,
+            "benchmark_symbol": "SPY",
             "lookback_months": None,
             "skip_recent_months": None,
             "top_n": None,
+            "hold_rank_threshold": None,
             "weighting_method": None,
             "rebalance_anchor_dates": None,
+            "capital": None,
         },
         fields=[
+            TemplateField("strategy_name", "策略名称", "string"),
+            TemplateField("strategy_description", "策略描述", "string"),
+            TemplateField("benchmark_symbol", "基准", "enum", "SPY"),
             TemplateField("lookback_months", "回看(月)", "integer"),
             TemplateField("skip_recent_months", "跳过最近(月)", "integer"),
-            TemplateField("top_n", "选股数量", "integer"),
+            TemplateField("top_n", "买入排名阈值", "integer"),
+            TemplateField("hold_rank_threshold", "保留排名阈值", "integer"),
             TemplateField("weighting_method", "权重方法", "string"),
             TemplateField("rebalance_anchor_dates", "调仓锚点", "string"),
+            TemplateField("capital", "初始资金(USD)", "number"),
         ],
     ),
     "MEAN_REVERSION": StrategyTemplate(
@@ -645,6 +655,136 @@ def _extract_momentum_payload(text: str) -> tuple[dict[str, Any], dict[str, Any]
     return top_level, parameters
 
 
+def _extract_momentum_payload_v2(text: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    universe_name, universe_source, _ = detect_universe(text)
+    lowered = text.lower()
+
+    def infer_benchmark() -> tuple[str, str]:
+        normalized = str(universe_name or "").strip().upper()
+        if normalized in {"SPY", "QQQ"}:
+            return normalized, "system_inference"
+        if "标普" in str(universe_name or "") or "SP500" in normalized or "S&P" in normalized:
+            return "SPY", "system_inference"
+        if "纳指" in str(universe_name or "") or "纳斯达克" in str(universe_name or "") or "NASDAQ" in normalized:
+            return "QQQ", "system_inference"
+        return "SPY", "system_default"
+
+    explicit_name = None
+    for line in [segment.strip() for segment in text.splitlines() if segment.strip()]:
+        if "策略" in line:
+            explicit_name = line
+            break
+
+    lookback_months = _extract_number(
+        text,
+        [
+            r"前\s*(\d+)\s*个月\s*[-到至]\s*前\s*\d+\s*个月",
+            r"过去\s*(\d+)\s*个月",
+            r"回看\s*(\d+)\s*个月",
+        ],
+    )
+    skip_recent_months = _extract_number(
+        text,
+        [
+            r"前\d+\s*个月\s*[-到至]\s*前\s*(\d+)\s*个月",
+            r"移除最近\s*(\d+)\s*个月",
+            r"跳过最近\s*(\d+)\s*个月",
+            r"前\d+\s*个月[^\n，。；]*前\s*(\d+)\s*个月",
+        ],
+    )
+    top_n = _extract_number(text, [r"排行前\s*(\d+)\s*名", r"排名前\s*(\d+)\s*名", r"前\s*(\d+)\s*名"])
+    hold_rank_threshold = _extract_number(
+        text,
+        [
+            r"若不在前\s*(\d+)\s*名",
+            r"不在前\s*(\d+)\s*名",
+            r"跌出前\s*(\d+)\s*名",
+            r"移除持仓[^\n，。；]*前\s*(\d+)\s*名",
+        ],
+    )
+    capital = _extract_numeric(text, [r"初始(?:资金|本金)?\s*(\d+(?:\.\d+)?)", r"本金\s*(\d+(?:\.\d+)?)"])
+    weighting_method = (
+        "equal_weight"
+        if "等权" in text or "均分仓位" in text or "均分持仓" in text or "按数量均分" in text or "equal weight" in lowered or "equal_weight" in lowered
+        else None
+    )
+    frequency = (
+        "semiannual"
+        if "每半年" in text or "半年一次" in text or "每半年1次" in text or "semiannual" in lowered or "semi-annual" in lowered
+        else None
+    )
+    frequency_source = "user_input" if frequency else "system_default"
+    if not frequency:
+        frequency, frequency_source = _extract_frequency_value(text, default=None)
+
+    anchor_labels: list[str] = []
+    if re.search(r"1月第\s*1\s*个交易日|1月第一个交易日", text):
+        anchor_labels.append("每年01月第1个交易日")
+    if re.search(r"7月第\s*1\s*个交易日|7月第一个交易日", text):
+        anchor_labels.append("07月第1个交易日")
+    anchors = "；".join(anchor_labels) if anchor_labels else _extract_anchor_dates(text)
+    if anchors and not frequency:
+        frequency, frequency_source = "semiannual", "user_input"
+
+    benchmark_symbol, benchmark_source = infer_benchmark()
+
+    if explicit_name:
+        strategy_name = explicit_name
+    elif "标普" in str(universe_name or ""):
+        strategy_name = "标普动量策略"
+    elif "纳指" in str(universe_name or "") or "纳斯达克" in str(universe_name or ""):
+        strategy_name = "纳指动量策略"
+    elif universe_name:
+        strategy_name = f"{universe_name} 动量策略"
+    else:
+        strategy_name = None
+
+    description_bits: list[str] = []
+    if universe_name:
+        description_bits.append(f"在{universe_name}内做横截面动量轮动")
+    else:
+        description_bits.append("做横截面动量轮动")
+    if frequency == "semiannual" and anchors:
+        description_bits.append(f"每半年按{anchors}调仓")
+    elif anchors:
+        description_bits.append(f"按{anchors}调仓")
+    elif frequency:
+        description_bits.append(f"按{frequency}调仓")
+    if lookback_months is not None:
+        if skip_recent_months is not None:
+            description_bits.append(f"按前{lookback_months}个月剔除最近{skip_recent_months}个月收益排序")
+        else:
+            description_bits.append(f"按前{lookback_months}个月收益排序")
+    if top_n is not None:
+        description_bits.append(f"买入或保留前{top_n}名")
+    if hold_rank_threshold is not None:
+        description_bits.append(f"跌出前{hold_rank_threshold}名移除")
+    if weighting_method == "equal_weight":
+        description_bits.append("持仓按数量等权分配")
+    if capital is not None:
+        description_bits.append(f"初始资金{_format_extracted_value(capital)}USD")
+    strategy_description = "，".join(description_bits) + "。" if description_bits else None
+
+    top_level = {
+        "strategy_type": ("MOMENTUM", "user_input"),
+        "universe_name": (universe_name, universe_source or "system_default"),
+        "rebalance_frequency": (frequency, frequency_source),
+    }
+    parameters = {
+        "strategy_name": (strategy_name, "user_input" if explicit_name else "system_inference"),
+        "strategy_description": (strategy_description, "system_inference"),
+        "benchmark_symbol": (benchmark_symbol, benchmark_source),
+        "lookback_months": (lookback_months, "user_input"),
+        "skip_recent_months": (skip_recent_months, "user_input"),
+        "top_n": (top_n, "user_input"),
+        "hold_rank_threshold": (hold_rank_threshold, "user_input"),
+        "weighting_method": (weighting_method, "user_input" if weighting_method else "system_default"),
+        "rebalance_anchor_dates": (anchors, "user_input" if anchors else "system_default"),
+        "capital": (capital, "user_input"),
+    }
+    return top_level, parameters
+
+
 def _extract_buy_and_hold_payload(text: str) -> tuple[dict[str, Any], dict[str, Any]]:
     universe_name, universe_source, _ = detect_universe(text)
     contribution_amount = _extract_numeric(
@@ -863,7 +1003,7 @@ def build_confirmation(
     if strategy_type == "GRID":
         top_level_payload, parameter_payload = _extract_grid_payload(text)
     elif strategy_type == "MOMENTUM":
-        top_level_payload, parameter_payload = _extract_momentum_payload(text)
+        top_level_payload, parameter_payload = _extract_momentum_payload_v2(text)
     elif strategy_type == "MEAN_REVERSION":
         top_level_payload, parameter_payload = _extract_mean_reversion_payload(text)
     elif strategy_type == "BUY_AND_HOLD":
@@ -975,11 +1115,16 @@ def build_confirmation(
         ],
         "MOMENTUM": [
             "universe_name",
+            "strategy_name",
+            "strategy_description",
+            "benchmark_symbol",
             "lookback_months",
             "skip_recent_months",
             "top_n",
+            "hold_rank_threshold",
             "weighting_method",
             "rebalance_anchor_dates",
+            "capital",
         ],
         "MEAN_REVERSION": [
             "universe_name",

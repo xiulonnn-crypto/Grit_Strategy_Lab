@@ -39,7 +39,7 @@ Key pieces:
 - `symbol_identity_cache` is the internal identity-repair table for delisted symbols, ticker lifecycle fixes, and CIK/exchange metadata stitched from Alpha Vantage, SEC EDGAR, and FMP.
 - `snapshot_refresh_jobs` is the refresh audit log for both the API and the CLI entrypoint.
 - `snapshot_recovery.py` is the cold-backup probe/import boundary for `C:\Fin\Grit_Strategy_Lab2`; Lab2 is treated as a recovery source, never as a live runtime dependency.
-- `universe_history.py` now owns the point-in-time universe source chain: official index announcements plus wikipedia revision-history snapshots first, the current wikipedia page as a softer fallback, and the old static seed only as the last resort.
+- `universe_history.py` now owns the point-in-time universe source chain: `FMP historical constituent` first when available, then wikipedia revision-history snapshots plus official index announcements, with the current wikipedia page and the old static seed only as softer fallbacks.
 - `app_runtime_state` stores cleanup bookkeeping, including `last_cleanup_count` and `last_cleanup_at`.
 
 Cleanup behavior:
@@ -113,8 +113,9 @@ The stable API surface is intentionally narrow and concrete.
 - `/data-snapshots/overview` returns the formal snapshot contract: `overall_status`, `last_refreshed_at`, `dataset_snapshots[]`, `universe_snapshots[]`, `latest_job`, `blocking_code`, `blocking_target`, `message`, and `allowed_actions`.
 - `/admin/snapshot-refresh-jobs` accepts `reason`, `mode`, and `targets`, then returns the refreshed overview contract instead of a bare job payload.
 - `python -m grit_backtest_platform.main refresh-snapshots --reason ... --mode incremental|repair|full --targets price,corporate,universes` is the scheduler-safe CLI entrypoint used by Windows Task Scheduler; the API process does not own the 18:00 trigger.
-- The runtime market-data chain is role-based: `Yahoo -> Tiingo -> FMP` for price repair, `Yahoo/Tiingo -> Alpha Vantage -> SEC EDGAR` for company events, and `symbol_identity_cache` for ticker lifecycle repair.
-- Universe snapshots are only `READY` when every anchor came from a historical revision snapshot; current-page or static-seed fallbacks remain explicitly incomplete so formal backtests do not silently drift into survivorship-biased universes.
+- The runtime market-data chain is role-based: `Yahoo -> Tiingo -> Longbridge -> AkShare -> FMP` for prices, `Yahoo/Tiingo -> Alpha Vantage -> SEC EDGAR` for canonical company events, and `Tiingo symbology -> Longbridge static info -> FMP delisted -> Alpha listing status` for ticker lifecycle repair.
+- `Longbridge` is a cloud-based enhancer for current/latest-window US data only; it is never used as the canonical 1996-start full-history source and it never participates in historical universe anchors.
+- Universe snapshots are only `READY` when every anchor came from a historical source (`FMP historical constituent` or a historical revision snapshot); current-page or static-seed fallbacks remain explicitly incomplete so formal backtests do not silently drift into survivorship-biased universes.
 
 The frontend and backend tests are written against these contracts rather than against internal implementation details.
 
@@ -149,7 +150,7 @@ The screenshot-driven restore depends on frontend view models, not on changing b
 
 - `web/src/types.ts` now models snapshots as two explicit arrays: `dataset_snapshots[]` and `universe_snapshots[]`.
 - `web/src/pages/snapshots-page.tsx` consumes only the formal overview contract and renders a single header card plus the two snapshot cards; it no longer derives UI from legacy `coverages`.
-- The snapshots page maps backend source codes such as `tiingo`, `alpha_vantage`, `sec_edgar`, `official_announcement`, `wikipedia_revision_history`, `wikipedia_current_page`, `static_seed`, and `local_cold_backup` into user-facing source-chain labels instead of exposing raw provider ids.
+- The snapshots page maps backend source codes such as `longbridge`, `akshare_us`, `fmp_historical_constituent`, `tiingo`, `alpha_vantage`, `sec_edgar`, `official_announcement`, `wikipedia_revision_history`, `wikipedia_current_page`, `static_seed`, and `local_cold_backup` into user-facing source-chain labels instead of exposing raw provider ids.
 - The snapshots page keeps status semantics human-readable: incomplete snapshots render as “部分可用”, only running jobs render “后台更新中”, and legacy-contract responses surface a backend-restart hint instead of silently failing.
 - `web/src/shell-route-meta-cn.ts` keeps `#/snapshots` shell headings disabled so the page owns its single in-card heading.
 - These fields are still real backend contract fields; the frontend must treat them as optional and must not narrow them into screenshot-only shapes.

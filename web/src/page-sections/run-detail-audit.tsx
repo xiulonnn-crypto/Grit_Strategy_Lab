@@ -1,4 +1,4 @@
-import { formatDateTime, formatShortDate } from '../lib/format';
+import { formatCompactDate, formatCompactDateTime } from '../lib/format';
 import type { ApiBacktestRunDetail, ApiBacktestRunTradeAudit } from '../types';
 
 type RunDetailAuditPanelProps = {
@@ -136,7 +136,7 @@ export function RunDetailAuditPanel({
                 <div className="run-detail-audit-row__row">
                   <strong>{formatSmartPercent(item.pnl_pct)}</strong>
                   <span>
-                    {formatShortDate(item.opened_at)} - {formatShortDate(item.closed_at)}
+                    {formatCompactDate(item.opened_at)} - {formatCompactDate(item.closed_at)}
                   </span>
                 </div>
                 <small>{item.commentary}</small>
@@ -167,11 +167,11 @@ export function RunDetailAuditPanel({
               <div className="run-detail-kv-grid">
                 <div className="run-detail-kv-row">
                   <span>开仓时间</span>
-                  <strong>{formatDateTime(audit.opened_at)}</strong>
+                  <strong>{formatCompactDateTime(audit.opened_at)}</strong>
                 </div>
                 <div className="run-detail-kv-row">
                   <span>平仓时间</span>
-                  <strong>{formatDateTime(audit.closed_at)}</strong>
+                  <strong>{formatCompactDateTime(audit.closed_at)}</strong>
                 </div>
                 <div className="run-detail-kv-row">
                   <span>净盈亏</span>
@@ -189,7 +189,7 @@ export function RunDetailAuditPanel({
               <div className="run-detail-evidence-price-head">
                 <strong>价格轨迹</strong>
                 <span>
-                  {priceSeries.length ? `${formatShortDate(priceSeries[0].date)} - ${formatShortDate(priceSeries[priceSeries.length - 1].date)}` : '暂无区间'}
+                  {priceSeries.length ? `${formatCompactDate(priceSeries[0].date)} - ${formatCompactDate(priceSeries[priceSeries.length - 1].date)}` : '暂无区间'}
                 </span>
               </div>
               {priceSeries.length ? (

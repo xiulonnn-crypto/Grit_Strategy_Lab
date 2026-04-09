@@ -9,11 +9,13 @@ import type {
 
 const fakeApi = vi.hoisted(() => ({
   getBacktestRunDetail: vi.fn(),
+  saveBacktestRun: vi.fn(),
   getBacktestTradeAudit: vi.fn(),
   getBacktestRunTrades: vi.fn(),
   createOptimizationJob: vi.fn(),
 })) as {
   getBacktestRunDetail: ReturnType<typeof vi.fn>;
+  saveBacktestRun: ReturnType<typeof vi.fn>;
   getBacktestTradeAudit: ReturnType<typeof vi.fn>;
   getBacktestRunTrades: ReturnType<typeof vi.fn>;
   createOptimizationJob: ReturnType<typeof vi.fn>;
@@ -106,7 +108,7 @@ const detail: ApiBacktestRunDetail = {
         state: 'watch',
       },
       {
-        key: 'latest_252_return',
+        key: 'rolling_252_return',
         label: '最新 252 日滚动收益',
         primary_text: '+17.1%',
         trend_direction: 'flat',
@@ -251,6 +253,7 @@ const trades: ApiBacktestRunTradePage = {
       quantity: 5,
       price: 189,
       net_amount: 945,
+      pnl_amount: -67,
       pnl_contribution: -1.4,
       segment: 'OOS',
     },
@@ -261,12 +264,36 @@ const trades: ApiBacktestRunTradePage = {
   total_pages: 1,
 };
 
+const legacyTradeEvents: ApiBacktestRunTradePage = {
+  items: [
+    {
+      trade_date: '2016-03-24',
+      symbol: 'SPY',
+      action: 'buy',
+      price: 202,
+      weight_before: 0,
+      weight_after: 0.2,
+      reason: 'grid:init',
+      segment: 'IS',
+    },
+  ],
+  page: 1,
+  page_size: 12,
+  total: 1,
+};
+
 beforeEach(() => {
   fakeApi.getBacktestRunDetail.mockReset();
+  fakeApi.saveBacktestRun.mockReset();
   fakeApi.getBacktestTradeAudit.mockReset();
   fakeApi.getBacktestRunTrades.mockReset();
   fakeApi.createOptimizationJob.mockReset();
+  fakeApi.saveBacktestRun.mockResolvedValue({
+    ...detail,
+    is_permanent: true,
+  });
   fakeApi.createOptimizationJob.mockResolvedValue({ id: 'opt-001' });
+  vi.stubGlobal('confirm', vi.fn(() => true));
   Object.defineProperty(window.navigator, 'clipboard', {
     configurable: true,
     value: {
@@ -278,6 +305,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   window.location.hash = '';
 });
 
@@ -289,14 +317,31 @@ describe('RunDetailPage', () => {
       tradeId === 'trade-001' ? auditOne : auditTwo,
     );
 
-    render(<RunDetailPage runId="bt-9.6802970000" />);
+    const { container } = render(<RunDetailPage runId="bt-9.6802970000" />);
 
     expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
     expect(screen.getByText('业绩曲线')).toBeInTheDocument();
+    const curveCard = container.querySelector('.run-detail-curve-card--overview');
+    expect(curveCard?.textContent).not.toContain('测试集仍为正收益，但回撤修复仍需观察。');
     expect(screen.queryByText(/参数版本/, { selector: '.run-detail-hero__tag' })).not.toBeInTheDocument();
     expect(screen.queryByText(/测试集起点/, { selector: '.run-detail-hero__tag' })).not.toBeInTheDocument();
     expect(screen.queryByText(/回测区间/, { selector: '.run-detail-hero__tag' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/来源/, { selector: '.run-detail-hero__tag' })).not.toBeInTheDocument();
     expect(screen.getAllByText('+232.3%').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('基准值').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('训练集').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('测试集').length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: '总收益 指标说明' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '最新 252 日滚动收益 指标说明' })).toBeInTheDocument();
+    const rollingCard = screen.getByText('最新 252 日滚动收益').closest('.run-detail-kpi-card');
+    const rollingCompare = rollingCard?.querySelector('.run-detail-kpi-card__compare');
+    expect(rollingCompare?.textContent).toContain('基准值');
+    expect(rollingCompare?.textContent).not.toContain('训练集');
+    expect(rollingCompare?.textContent).not.toContain('测试集');
+    const tradeCountCard = screen.getByText('交易数').closest('.run-detail-kpi-card');
+    const tradeCountCompare = tradeCountCard?.querySelector('.run-detail-kpi-card__compare');
+    expect(tradeCountCompare?.textContent).not.toContain('基准值');
+    expect(tradeCountCard?.textContent).not.toContain('测试集 1 笔');
     expect(screen.getByRole('tab', { name: '诊断', selected: true })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '交易' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '证据' })).toBeInTheDocument();
@@ -319,6 +364,9 @@ describe('RunDetailPage', () => {
     );
     expect(screen.getAllByText('QQQ').length).toBeGreaterThan(0);
     expect(screen.getAllByText('AAPL').length).toBeGreaterThan(0);
+    expect(screen.getByText('-US$67')).toBeInTheDocument();
+    expect(screen.getByText('-1.4%')).toBeInTheDocument();
+    expect(screen.getByText('AAPL').closest('tr')?.textContent).toContain('测试集');
 
     fireEvent.click(screen.getByRole('tab', { name: '证据' }));
     expect(await screen.findByText('QQQ 证据卡')).toBeInTheDocument();
@@ -355,6 +403,24 @@ describe('RunDetailPage', () => {
     expect(container.querySelector('.run-detail-heatmap-tooltip span')?.textContent).toBe('+0.8%');
   });
 
+  it('renders rolling return and sharpe from generic rolling metric fields when trailing fields are absent', async () => {
+    fakeApi.getBacktestRunDetail.mockResolvedValue({
+      ...detail,
+      rolling_metrics: [
+        { trade_date: '2026-03-20', window_days: 252, window_return_pct: 13.8, window_sharpe: 1.02 },
+        { trade_date: '2026-03-24', window_days: 252, window_return_pct: 17.1, window_sharpe: 0.81 },
+      ],
+    } satisfies ApiBacktestRunDetail);
+
+    const { container } = render(<RunDetailPage runId="bt-rolling-generic-fields" />);
+
+    expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
+
+    const note = container.querySelector('.run-detail-diagnostics-note');
+    expect(note?.textContent).toContain('收益 +17.1%');
+    expect(note?.textContent).toContain('夏普 0.81');
+  });
+
   it('keeps drawdown values in percentage-point units on the diagnostics chart', async () => {
     fakeApi.getBacktestRunDetail.mockResolvedValue({
       ...detail,
@@ -370,6 +436,29 @@ describe('RunDetailPage', () => {
     expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
     expect(screen.getByText('最低 -1.0%')).toBeInTheDocument();
     expect(screen.queryByText('最低 -100.0%')).not.toBeInTheDocument();
+  });
+
+  it('renders trade rows from legacy action-based payloads without crashing the trades tab', async () => {
+    fakeApi.getBacktestRunDetail.mockResolvedValue({
+      ...detail,
+      chart_series: [
+        { trade_date: '2016-03-24', equity: 10000, benchmark: 100, drawdown: 0, is_oos: false },
+        { trade_date: '2016-03-25', equity: 10100, benchmark: 101, drawdown: 0, is_oos: false },
+      ],
+    });
+    fakeApi.getBacktestRunTrades.mockResolvedValue(legacyTradeEvents);
+
+    render(<RunDetailPage runId="bt-legacy-trades" />);
+
+    expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: '交易' }));
+
+    expect(await screen.findByText('SPY')).toBeInTheDocument();
+    expect(screen.getByText('买入')).toBeInTheDocument();
+    expect(screen.getAllByText('20160324').length).toBeGreaterThan(0);
+    expect(screen.getByText('9.90')).toBeInTheDocument();
+    expect(screen.getByText(/2,000/)).toBeInTheDocument();
   });
 
   it('renders strategy and benchmark curves on a shared normalized scale', async () => {
@@ -432,8 +521,50 @@ describe('RunDetailPage', () => {
     fireEvent.mouseMove(hoverTarget!, { clientX: 150 });
 
     await waitFor(() =>
-      expect(container.querySelector('.run-detail-chart-tooltip strong')?.textContent).toBe('2月29日'),
+      expect(container.querySelector('.run-detail-chart-tooltip strong')?.textContent).toBe('20240229'),
     );
+  });
+
+  it('keeps the performance tooltip away from the top phase label zone', async () => {
+    fakeApi.getBacktestRunDetail.mockResolvedValue({
+      ...detail,
+      chart_series: [
+        { trade_date: '2024-01-31', equity: 100, benchmark: 100, drawdown: 0, is_oos: false },
+        { trade_date: '2024-02-29', equity: 120, benchmark: 118, drawdown: -2.1, is_oos: false },
+        { trade_date: '2024-04-30', equity: 145, benchmark: 132, drawdown: -4.2, is_oos: true },
+      ],
+    } satisfies ApiBacktestRunDetail);
+
+    const { container } = render(<RunDetailPage runId="bt-tooltip-phase-rail" />);
+
+    expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
+
+    const hoverTarget = container.querySelector('.run-detail-line-chart rect[fill="transparent"]') as SVGRectElement | null;
+    expect(hoverTarget).toBeTruthy();
+
+    Object.defineProperty(hoverTarget, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: 300,
+        bottom: 100,
+        width: 300,
+        height: 100,
+        toJSON: () => ({}),
+      }),
+    });
+
+    fireEvent.mouseMove(hoverTarget!, { clientX: 300 });
+
+    await waitFor(() => {
+      const tooltip = container.querySelector('.run-detail-chart-tooltip') as HTMLDivElement | null;
+      expect(tooltip).toBeTruthy();
+      expect(tooltip?.style.bottom).not.toBe('');
+      expect(tooltip?.style.top).toBe('');
+    });
   });
 
   it('requests fullscreen from the whole performance panel', async () => {
@@ -457,25 +588,55 @@ describe('RunDetailPage', () => {
     await waitFor(() => expect(requestFullscreen).toHaveBeenCalledTimes(1));
   });
 
-  it('supports copy and rerun actions from the hero', async () => {
+  it('shows only rerun and optimization actions for permanent runs', async () => {
     fakeApi.getBacktestRunDetail.mockResolvedValue(detail);
 
     render(<RunDetailPage runId="bt-9.6802970000" />);
 
     expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: '复制配置' }));
-    await waitFor(() =>
-      expect(window.navigator.clipboard.writeText).toHaveBeenCalledWith(
-        expect.stringContaining('"run_id": "bt-9.6802970000"'),
-      ),
-    );
-    expect(await screen.findByText('已复制配置 JSON。')).toBeInTheDocument();
+    expect(screen.getByText('永久回测')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '保存回测' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '重跑回测' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '启动优化' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '重跑回测' }));
     await waitFor(() =>
       expect(window.location.hash).toBe('#/strategies/strat-001/backtest-runs/new?source_run_id=bt-9.6802970000'),
     );
+  });
+
+  it('saves temporary runs as permanent after confirmation', async () => {
+    fakeApi.getBacktestRunDetail.mockResolvedValue({
+      ...detail,
+      id: 'bt-temp-run',
+      is_permanent: false,
+    } satisfies ApiBacktestRunDetail);
+    fakeApi.saveBacktestRun.mockResolvedValue({
+      ...detail,
+      id: 'bt-temp-run',
+      is_permanent: true,
+    } satisfies ApiBacktestRunDetail);
+
+    render(<RunDetailPage runId="bt-temp-run" />);
+
+    expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
+    const temporaryTag = screen.getByText('临时回测');
+    expect(temporaryTag).toBeInTheDocument();
+    expect(temporaryTag.className).toContain('run-detail-hero__tag--temporary');
+    expect(screen.getByRole('button', { name: '保存回测' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '保存回测' }));
+
+    await waitFor(() =>
+      expect(window.confirm).toHaveBeenCalledWith('是否要将该回测保存为永久回测？保存后将不再按临时回测自动清理。'),
+    );
+    await waitFor(() => expect(fakeApi.saveBacktestRun).toHaveBeenCalledWith('bt-temp-run'));
+    expect(await screen.findByText('已保存为永久回测。')).toBeInTheDocument();
+    expect(screen.getByText('永久回测')).toBeInTheDocument();
+    expect(screen.queryByText('临时回测')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '保存回测' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '重跑回测' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '启动优化' })).toBeInTheDocument();
   });
 
   it('creates an optimization job from the hero action', async () => {
@@ -558,7 +719,8 @@ describe('RunDetailPage', () => {
     render(<RunDetailPage runId="bt-dca" />);
 
     expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
-    expect(document.body.textContent).toContain('训练集 1 | 测试集 2');
+    expect(document.body.textContent).toContain('训练集1');
+    expect(document.body.textContent).toContain('测试集2');
   });
 
   it('uses the equity curve instead of strategy_return-like metrics in the fallback KPI cards', async () => {
@@ -582,7 +744,8 @@ describe('RunDetailPage', () => {
 
     expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
     expect(document.body.textContent).toContain('+64.0%');
-    expect(document.body.textContent).toContain('基准: +100.0%');
+    expect(document.body.textContent).toContain('基准值');
+    expect(document.body.textContent).toContain('+100.0%');
     expect(document.body.textContent).toContain('差值: -36.0%');
     expect(document.body.textContent).not.toContain('基准: +484.4% | 差值: -0.0%');
     expect(document.body.textContent).not.toContain('当前累计收益为 +484.4%');

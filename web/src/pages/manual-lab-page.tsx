@@ -127,7 +127,7 @@ export function ManualLabPage({ jobId }: { jobId: string }): JSX.Element {
     try {
       setError(null);
       await api.createOptimizationCandidate(job.id, {
-        label: `Manual Candidate ${job.candidates.length + 1}`,
+        label: `手动候选 ${job.candidates.length + 1}`,
         parameter_snapshot: parameterSnapshot,
         base_parameter_version_id: job.base_parameter_version_id ?? undefined,
       });

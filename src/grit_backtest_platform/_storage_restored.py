@@ -140,7 +140,7 @@ SCHEMA_STATEMENTS = [
         status TEXT NOT NULL,
         source_run_id TEXT,
         request_kind TEXT NOT NULL DEFAULT 'official',
-        is_permanent INTEGER NOT NULL DEFAULT 1,
+        is_permanent INTEGER NOT NULL DEFAULT 0,
         start_date TEXT,
         end_date TEXT,
         effective_date TEXT,
@@ -165,6 +165,8 @@ SCHEMA_STATEMENTS = [
         trade_audit_json TEXT NOT NULL DEFAULT '[]',
         trades_count INTEGER NOT NULL DEFAULT 0,
         error_message TEXT,
+        deleted_at TEXT,
+        deleted_reason TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         completed_at TEXT,
@@ -229,9 +231,11 @@ MIGRATION_COLUMNS = {
         ("extracted_fields_json", "TEXT NOT NULL DEFAULT '[]'"),
     ],
     "backtest_runs": [
-        ("is_permanent", "INTEGER NOT NULL DEFAULT 1"),
+        ("is_permanent", "INTEGER NOT NULL DEFAULT 0"),
         ("artifact_paths_json", "TEXT NOT NULL DEFAULT '[]'"),
         ("trade_audit_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("deleted_at", "TEXT"),
+        ("deleted_reason", "TEXT"),
     ]
 }
 

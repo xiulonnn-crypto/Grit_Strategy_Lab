@@ -16,7 +16,11 @@ function formatMetric(value: number | undefined, kind: 'percent' | 'ratio'): str
   if (typeof value !== 'number' || Number.isNaN(value)) {
     return '待补充';
   }
-  return kind === 'percent' ? `${value >= 0 ? '+' : ''}${value.toFixed(1)}%` : value.toFixed(2);
+  if (kind === 'percent') {
+    const percent = value * 100;
+    return `${percent >= 0 ? '+' : ''}${percent.toFixed(1)}%`;
+  }
+  return value.toFixed(2);
 }
 
 function formatDate(value?: string | null): string {
@@ -77,13 +81,14 @@ function buildRows(
         id: run.id,
         strategyId: run.strategy_id,
         strategyName: strategyNamesById[run.strategy_id] ?? run.strategy_name ?? detail?.strategy_name ?? run.strategy_id,
+        runTypeText: (detail?.is_permanent ?? run.is_permanent) ? '永久回测' : '临时回测',
+        runTypeTone: (detail?.is_permanent ?? run.is_permanent) ? 'permanent' : 'temporary',
         status: run.status,
         statusText: statusLabel(run.status),
         statusTone: getTone(run.status),
         totalReturn: formatMetric(metrics.total_return, 'percent'),
         sharpe: formatMetric(metrics.sharpe, 'ratio'),
         maxDrawdown: formatMetric(metrics.max_drawdown, 'percent'),
-        warnings: detail?.warnings?.length ?? run.warnings?.length ?? 0,
         completedAt,
       };
     })
@@ -157,11 +162,11 @@ export function RunsIndexPage(): JSX.Element {
               <tr>
                 <th>回测号</th>
                 <th>策略</th>
+                <th>类型</th>
                 <th>状态</th>
                 <th>收益</th>
                 <th>夏普</th>
                 <th>回撤</th>
-                <th>提醒</th>
                 <th>完成时间</th>
               </tr>
             </thead>
@@ -178,13 +183,15 @@ export function RunsIndexPage(): JSX.Element {
                       {row.strategyName}
                     </button>
                   </td>
+                  <td className="runs-index-table__type-cell">
+                    <span className={`runs-index-badge runs-index-badge--${row.runTypeTone}`}>{row.runTypeText}</span>
+                  </td>
                   <td className="runs-index-table__status-cell">
                     <span className={`runs-index-badge runs-index-badge--${row.statusTone}`}>{row.statusText}</span>
                   </td>
                   <td>{row.totalReturn}</td>
                   <td>{row.sharpe}</td>
                   <td>{row.maxDrawdown}</td>
-                  <td>{row.warnings}</td>
                   <td>{formatDate(row.completedAt)}</td>
                 </tr>
               ))}

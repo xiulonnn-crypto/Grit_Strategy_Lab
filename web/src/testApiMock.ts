@@ -128,6 +128,9 @@ export function installMockApiServer() {
       if (method === 'GET' && segments[0] === 'backtest-runs' && segments[2] === 'trades' && segments[4] === 'audit') {
         return json(await demoApi.getBacktestTradeAudit(segments[1], segments[3]));
       }
+      if (method === 'POST' && segments[0] === 'backtest-runs' && segments[2] === 'save') {
+        return json(await demoApi.saveBacktestRun(segments[1]));
+      }
       if (method === 'POST' && segments[0] === 'strategies' && segments[2] === 'backtest-runs' && segments[3] === 'preview') {
         return json(await demoApi.previewBacktestRun(segments[1], {
           start_date: typeof body?.start_date === 'string' ? body.start_date : undefined,
@@ -153,6 +156,7 @@ export function installMockApiServer() {
         slippage_bps: typeof body?.slippage_bps === 'number' ? body.slippage_bps : undefined,
         source_run_id: typeof body?.source_run_id === 'string' ? body.source_run_id : undefined,
         simulate_warning: Boolean(body?.simulate_warning),
+        is_permanent: typeof body?.is_permanent === 'boolean' ? body.is_permanent : undefined,
       }));
       if (method === 'POST' && segments[0] === 'backtest-runs' && segments[2] === 'clone') return json(await demoApi.cloneBacktestRun(segments[1], readIdempotencyKey(request, body)));
       if (method === 'GET' && segments[0] === 'optimization-jobs' && segments[2] === 'detail') return json(await demoApi.getOptimizationJobDetail(segments[1]));

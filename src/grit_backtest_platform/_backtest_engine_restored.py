@@ -122,24 +122,42 @@ def _normalize_bars(bars: Iterable[Mapping[str, Any]]) -> list[MarketBar]:
 def _rebalance_keys(trade_dates: list[str], frequency: str) -> list[int]:
     if not trade_dates:
         return []
-    if str(frequency or "").lower() == "never":
+    normalized_frequency = str(frequency or "").lower()
+    if normalized_frequency == "never":
         return [0]
     keys: list[int] = [0]
     previous_date = _parse_date(trade_dates[0])
     previous_bucket = (previous_date.isocalendar().year, previous_date.isocalendar().week)
     previous_month = (previous_date.year, previous_date.month)
+    previous_quarter = (previous_date.year, (previous_date.month - 1) // 3)
+    previous_half = (previous_date.year, 1 if previous_date.month <= 6 else 2)
+    previous_year = previous_date.year
     for index, raw_date in enumerate(trade_dates[1:], start=1):
         current_date = _parse_date(raw_date)
         current_bucket = (current_date.isocalendar().year, current_date.isocalendar().week)
         current_month = (current_date.year, current_date.month)
-        if frequency == "daily":
+        current_quarter = (current_date.year, (current_date.month - 1) // 3)
+        current_half = (current_date.year, 1 if current_date.month <= 6 else 2)
+        current_year = current_date.year
+        if normalized_frequency == "daily":
             keys.append(index)
-        elif frequency == "monthly" and current_month != previous_month:
+        elif normalized_frequency == "weekly" and current_bucket != previous_bucket:
             keys.append(index)
-        elif frequency != "monthly" and current_bucket != previous_bucket:
+        elif normalized_frequency == "monthly" and current_month != previous_month:
+            keys.append(index)
+        elif normalized_frequency == "quarterly" and current_quarter != previous_quarter:
+            keys.append(index)
+        elif normalized_frequency == "semiannual" and current_half != previous_half:
+            keys.append(index)
+        elif normalized_frequency == "yearly" and current_year != previous_year:
+            keys.append(index)
+        elif normalized_frequency not in {"daily", "weekly", "monthly", "quarterly", "semiannual", "yearly"} and current_bucket != previous_bucket:
             keys.append(index)
         previous_bucket = current_bucket
         previous_month = current_month
+        previous_quarter = current_quarter
+        previous_half = current_half
+        previous_year = current_year
     return keys
 
 

@@ -179,6 +179,7 @@ def _build_parameter_delta(
 class BacktestPlatformService:
     def __init__(self, database_path: str | Path = "data/platform.sqlite3"):
         self.storage = SQLiteStorage(database_path)
+        self._normalize_existing_backtest_runs_to_temporary_once()
 
     def _new_id(self, prefix: str) -> str:
         return f"{prefix}_{uuid4().hex[:12]}"
@@ -272,6 +273,64 @@ class BacktestPlatformService:
         strategy["current_parameter_version_id"] = _parameter_version_id(str(strategy["id"]), strategy["current_parameter_version"])
         return strategy
 
+    def _decode_strategy_list_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        strategy = dict(row)
+        strategy["parameters"] = loads(strategy.pop("parameters_json", None), {})
+        strategy["current_parameter_version"] = int(strategy.get("current_parameter_version") or 1)
+        strategy["current_parameter_version_id"] = _parameter_version_id(
+            str(strategy["id"]),
+            strategy["current_parameter_version"],
+        )
+        return strategy
+
+    def _resolve_strategy_run_refs(self, strategy_id: str) -> dict[str, str | None]:
+        row = self.storage.fetch_one(
+            """
+            SELECT
+                (
+                    SELECT id
+                    FROM backtest_runs
+                    WHERE strategy_id = ?
+                      AND deleted_at IS NULL
+                    ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC, id DESC
+                    LIMIT 1
+                ) AS latest_run_id,
+                (
+                    SELECT id
+                    FROM backtest_runs
+                    WHERE strategy_id = ?
+                      AND deleted_at IS NULL
+                      AND UPPER(COALESCE(status, '')) IN ('COMPLETED', 'COMPLETED_WITH_WARNINGS')
+                    ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC, id DESC
+                    LIMIT 1
+                ) AS latest_successful_run_id
+            """,
+            (strategy_id, strategy_id),
+        ) or {}
+        return {
+            "latest_run_id": row.get("latest_run_id"),
+            "latest_successful_run_id": row.get("latest_successful_run_id"),
+        }
+
+    def _with_live_strategy_run_refs(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        strategy = dict(row)
+        strategy_id = str(strategy.get("id") or "")
+        if not strategy_id:
+            return strategy
+        strategy.update(self._resolve_strategy_run_refs(strategy_id))
+        return strategy
+
+    def _sync_strategy_run_refs(self, strategy_id: str) -> None:
+        refs = self._resolve_strategy_run_refs(strategy_id)
+        self.storage.execute(
+            """
+            UPDATE strategies
+            SET latest_run_id = ?, latest_successful_run_id = ?
+            WHERE id = ?
+            """,
+            (refs["latest_run_id"], refs["latest_successful_run_id"], strategy_id),
+        )
+
     def _strategy_parameter_version_rows(self, strategy_id: str) -> list[dict[str, Any]]:
         try:
             return self.storage.fetch_all(
@@ -330,6 +389,36 @@ class BacktestPlatformService:
             },
         )
 
+    def _normalize_existing_backtest_runs_to_temporary_once(self) -> int:
+        migration_key = "backtest_runs_force_temporary_once_v1"
+        migration_state = self._read_runtime_state(migration_key)
+        if migration_state.get("state_json", {}).get("applied"):
+            return int(migration_state.get("state_json", {}).get("converted_count") or 0)
+
+        rows = self.storage.fetch_all("SELECT id, is_permanent, request_json FROM backtest_runs")
+        converted = 0
+        now = iso_now()
+        for row in rows:
+            request_payload = loads(row.get("request_json"), {})
+            needs_update = bool(int(row.get("is_permanent") or 0)) or request_payload.get("is_permanent") is not False
+            request_payload["is_permanent"] = False
+            if needs_update:
+                self.storage.execute(
+                    "UPDATE backtest_runs SET is_permanent = 0, request_json = ?, updated_at = ? WHERE id = ?",
+                    (dumps(request_payload), now, row["id"]),
+                )
+                converted += 1
+
+        self._write_runtime_state(
+            migration_key,
+            {
+                "applied": True,
+                "applied_at": now,
+                "converted_count": converted,
+            },
+        )
+        return converted
+
     def _write_strategy_record(
         self,
         strategy_row: Mapping[str, Any],
@@ -387,10 +476,13 @@ class BacktestPlatformService:
             SELECT *
             FROM backtest_runs
             WHERE COALESCE(is_permanent, 1) = 0
+              AND deleted_at IS NULL
             ORDER BY created_at ASC
             """
         )
         removed = 0
+        deleted_at = iso_now()
+        affected_strategy_ids: set[str] = set()
         for row in rows:
             created_at = str(row.get("created_at") or "")
             try:
@@ -400,8 +492,18 @@ class BacktestPlatformService:
             if created_value >= cutoff:
                 continue
             self._cleanup_run_artifacts(str(row["id"]), loads(row.get("artifact_paths_json"), []))
-            self.storage.execute("DELETE FROM backtest_runs WHERE id = ?", (row["id"],))
+            self.storage.execute(
+                """
+                UPDATE backtest_runs
+                SET status = ?, deleted_at = ?, deleted_reason = ?, artifact_paths_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                ("DELETED", deleted_at, "temporary_run_ttl_24h", "[]", deleted_at, row["id"]),
+            )
+            affected_strategy_ids.add(str(row.get("strategy_id") or ""))
             removed += 1
+        for strategy_id in sorted(item for item in affected_strategy_ids if item):
+            self._sync_strategy_run_refs(strategy_id)
         self._write_runtime_state(
             "cleanup_audit",
             {
@@ -445,6 +547,45 @@ class BacktestPlatformService:
             run[decoded_name] = loads(run.pop(column, None), default)
         run["is_permanent"] = bool(int(run.get("is_permanent") or 0))
         return run
+
+    def _decode_run_list_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        preview = loads(row.get("preview_json"), {})
+        if not isinstance(preview, dict):
+            preview = {}
+        metrics = loads(row.get("metrics_json"), {})
+        if not isinstance(metrics, dict):
+            metrics = {}
+        warnings = loads(row.get("warnings_json"), [])
+        if not isinstance(warnings, list):
+            warnings = []
+
+        return {
+            "id": row["id"],
+            "strategy_id": row["strategy_id"],
+            "status": row["status"],
+            "start_date": row.get("start_date"),
+            "end_date": row.get("end_date"),
+            "effective_date": row.get("effective_date"),
+            "oos_start_date": row.get("oos_start_date"),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+            "completed_at": row.get("completed_at"),
+            "metrics": metrics,
+            "warnings": warnings,
+            "preview": {
+                "effective_date": preview.get("effective_date"),
+                "effective_start_date": preview.get("effective_start_date"),
+                "effective_end_date": preview.get("effective_end_date"),
+                "oos_start_date": preview.get("oos_start_date"),
+                "data_segment_type": preview.get("data_segment_type"),
+                "parameter_version_id": preview.get("parameter_version_id"),
+            },
+            "data_segment_type": preview.get("data_segment_type"),
+            "parameter_version_id": preview.get("parameter_version_id"),
+            "is_permanent": bool(int(row.get("is_permanent") or 0)),
+            "source_run_id": row.get("source_run_id"),
+            "trades_count": row.get("trades_count"),
+        }
 
     def _flatten_confirmation(self, confirmation_fields: Mapping[str, Any], top_level: Mapping[str, Any]) -> dict[str, Any]:
         parameters = {str(item.get("key")): item.get("value") for item in confirmation_fields.get("parameters", [])}
@@ -1146,14 +1287,62 @@ class BacktestPlatformService:
         return self.get_strategy_detail(strategy_id)
 
     def list_strategies(self) -> list[dict[str, Any]]:
-        rows = self.storage.fetch_all("SELECT * FROM strategies ORDER BY updated_at DESC, created_at DESC")
-        return [self._decode_strategy_row(row) for row in rows]
+        rows = self.storage.fetch_all(
+            """
+            SELECT
+                id,
+                name,
+                description,
+                strategy_type,
+                universe_name,
+                rebalance_frequency,
+                lifecycle_status,
+                (
+                    SELECT backtest_runs.id
+                    FROM backtest_runs
+                    WHERE backtest_runs.strategy_id = strategies.id
+                      AND backtest_runs.deleted_at IS NULL
+                    ORDER BY COALESCE(backtest_runs.completed_at, backtest_runs.created_at) DESC,
+                             backtest_runs.created_at DESC,
+                             backtest_runs.id DESC
+                    LIMIT 1
+                ) AS latest_run_id,
+                (
+                    SELECT backtest_runs.id
+                    FROM backtest_runs
+                    WHERE backtest_runs.strategy_id = strategies.id
+                      AND backtest_runs.deleted_at IS NULL
+                      AND UPPER(COALESCE(backtest_runs.status, '')) IN ('COMPLETED', 'COMPLETED_WITH_WARNINGS')
+                    ORDER BY COALESCE(backtest_runs.completed_at, backtest_runs.created_at) DESC,
+                             backtest_runs.created_at DESC,
+                             backtest_runs.id DESC
+                    LIMIT 1
+                ) AS latest_successful_run_id,
+                (
+                    SELECT optimization_jobs.id
+                    FROM optimization_jobs
+                    WHERE optimization_jobs.strategy_id = strategies.id
+                    ORDER BY optimization_jobs.created_at DESC
+                    LIMIT 1
+                ) AS latest_optimization_job_id,
+                current_parameter_version,
+                dataset_snapshot_id,
+                universe_snapshot_id,
+                benchmark_symbol,
+                created_at,
+                updated_at,
+                parameters_json
+            FROM strategies
+            ORDER BY updated_at DESC, created_at DESC
+            """
+        )
+        return [self._decode_strategy_list_row(row) for row in rows]
 
     def get_strategy_detail(self, strategy_id: str) -> dict[str, Any]:
         row = self.storage.fetch_one("SELECT * FROM strategies WHERE id = ?", (strategy_id,))
         if not row:
             raise KeyError(f"Strategy not found: {strategy_id}")
-        return self._decode_strategy_row(row)
+        return self._decode_strategy_row(self._with_live_strategy_run_refs(row))
 
     get_strategy = get_strategy_detail
 
@@ -1173,20 +1362,40 @@ class BacktestPlatformService:
         return self.get_strategy_detail(strategy_id)
 
     def list_backtest_runs(self, limit: int | None = None, status: str | None = None) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM backtest_runs"
+        sql = """
+            SELECT
+                id,
+                strategy_id,
+                status,
+                start_date,
+                end_date,
+                effective_date,
+                oos_start_date,
+                warnings_json,
+                preview_json,
+                metrics_json,
+                source_run_id,
+                is_permanent,
+                trades_count,
+                created_at,
+                updated_at,
+                completed_at
+            FROM backtest_runs
+            WHERE deleted_at IS NULL
+        """
         params: list[Any] = []
         if status:
-            sql += " WHERE status = ?"
+            sql += " AND status = ?"
             params.append(status)
-        sql += " ORDER BY created_at DESC"
+        sql += " ORDER BY COALESCE(completed_at, created_at) DESC"
         if limit:
             sql += " LIMIT ?"
             params.append(limit)
         rows = self.storage.fetch_all(sql, params)
-        return [self._decode_run_row(row) for row in rows]
+        return [self._decode_run_list_row(row) for row in rows]
 
     def get_backtest_run(self, run_id: str) -> dict[str, Any]:
-        row = self.storage.fetch_one("SELECT * FROM backtest_runs WHERE id = ?", (run_id,))
+        row = self.storage.fetch_one("SELECT * FROM backtest_runs WHERE id = ? AND deleted_at IS NULL", (run_id,))
         if not row:
             raise KeyError(f"Backtest run not found: {run_id}")
         return self._decode_run_row(row)
@@ -1527,17 +1736,32 @@ class BacktestPlatformService:
         return self.get_optimization_job_detail(job_id)
 
     def get_workspace_overview(self, include_cleanup_audit: bool = False) -> dict[str, Any]:
-        strategies = self.list_strategies()
-        recent_runs = self.list_backtest_runs(limit=5)
+        strategy_count_row = self.storage.fetch_one("SELECT COUNT(*) AS count FROM strategies")
+        active_run_count_row = self.storage.fetch_one(
+            "SELECT COUNT(*) AS count FROM backtest_runs WHERE deleted_at IS NULL AND status = ?",
+            ("RUNNING",),
+        )
+        latest_strategy = self.storage.fetch_one(
+            "SELECT id FROM strategies ORDER BY updated_at DESC, created_at DESC LIMIT 1"
+        )
+        latest_run = self.storage.fetch_one(
+            """
+            SELECT id
+            FROM backtest_runs
+            WHERE deleted_at IS NULL
+            ORDER BY COALESCE(completed_at, created_at) DESC
+            LIMIT 1
+            """
+        )
         latest_job = self.storage.fetch_one("SELECT * FROM optimization_jobs ORDER BY created_at DESC LIMIT 1")
         overview = {
             "workspace_name": "Grit Strategy Lab",
             "subtitle": "Creation, backtest, and optimization workspace for local strategy recovery.",
-            "strategy_count": len(strategies),
-            "active_run_count": len([item for item in recent_runs if item.get("status") == "RUNNING"]),
+            "strategy_count": int((strategy_count_row or {}).get("count") or 0),
+            "active_run_count": int((active_run_count_row or {}).get("count") or 0),
             "running_optimization_count": 1 if latest_job and latest_job.get("status") == "RUNNING" else 0,
-            "latest_strategy_id": strategies[0]["id"] if strategies else None,
-            "latest_backtest_run_id": recent_runs[0]["id"] if recent_runs else None,
+            "latest_strategy_id": latest_strategy["id"] if latest_strategy else None,
+            "latest_backtest_run_id": latest_run["id"] if latest_run else None,
             "latest_optimization_job_id": latest_job["id"] if latest_job else None,
             "top_momentum_warning": "Refresh snapshots before trusting any newly materialized momentum strategy.",
             "quick_actions": ["open_creation", "start_backtest", "open_optimization"],

@@ -32,6 +32,11 @@ const SOURCE_LABELS: Record<string, string> = {
   SecEdgar: 'SEC EDGAR',
   fmp: 'Financial Modeling Prep',
   Fmp: 'Financial Modeling Prep',
+  fmp_historical_constituent: 'FMP 历史成分',
+  FmpHistoricalConstituent: 'FMP 历史成分',
+  longbridge: 'Longbridge',
+  longbridge_static_info: 'Longbridge',
+  akshare_us: 'AkShare',
   official_announcement: '官方公告',
   officialAnnouncement: '官方公告',
   nasdaq_official_annual_changes: '纳指官方公告',
@@ -63,6 +68,29 @@ const BLOCKER_LABELS: Record<string, string> = {
   LIVE_REFRESH_PENDING: '后台更新中',
   SNAPSHOT_REFRESH_REQUIRED: '还没有生成快照',
   SNAPSHOT_API_NEEDS_RESTART: '本地后端需要重启',
+};
+
+const BLOCKER_MESSAGES: Record<string, string> = {
+  CORPORATE_ACTIONS_INCOMPLETE: '公司行为数据已部分可用，仍有少量公司事件待继续补齐。',
+  CORPORATE_ACTIONS_PENDING: '公司行为数据还在准备，刷新完成后会显示完整结果。',
+  CORPORATE_ACTIONS_FAILED: '公司行为数据刷新失败，请稍后重试。',
+  PRICE_SNAPSHOT_INCOMPLETE: '股票价格数据已部分可用，仍有少量股票待继续补齐。',
+  PRICE_SNAPSHOT_FAILED: '股票价格数据刷新失败，请稍后重试。',
+  UNIVERSE_HISTORY_INCOMPLETE: '股票池历史成分已部分可用，仍有部分历史锚点待继续补齐。',
+  UNIVERSE_HISTORY_FAILED: '股票池历史数据刷新失败，请稍后重试。',
+  LIVE_REFRESH_PENDING: '后台正在刷新快照，页面会在完成后自动更新。',
+  SNAPSHOT_REFRESH_REQUIRED: '还没有生成快照，点右上角“刷新快照”后会显示结果。',
+  SNAPSHOT_API_NEEDS_RESTART: '当前本地后端仍在返回旧版快照接口，重启后端后再刷新即可。',
+};
+
+const OVERVIEW_MESSAGE_TRANSLATIONS: Record<string, string> = {
+  'Corporate action data is partially available, but the snapshot is not complete yet.':
+    '公司行为数据已部分可用，仍有少量公司事件待继续补齐。',
+  'Price snapshot is still incomplete. Please retry after the missing symbols are repaired.':
+    '股票价格数据已部分可用，仍有少量股票待继续补齐。',
+  'Universe history is partially available, but some historical anchors are still missing.':
+    '股票池历史成分已部分可用，仍有部分历史锚点待继续补齐。',
+  'Please refresh snapshots before using this view.': '请先刷新快照，再查看当前快照结果。',
 };
 
 type SnapshotItem = ApiDatasetSnapshot | ApiUniverseSnapshot;
@@ -163,7 +191,7 @@ function getStatusChipClassName(status?: string | null, blocked = false): string
 
 function shouldRenderStatusChip(status?: string | null, blocked = false): boolean {
   const normalizedStatus = String(status ?? '').toUpperCase();
-  if (normalizedStatus === 'INCOMPLETE') {
+  if (normalizedStatus === 'INCOMPLETE' || normalizedStatus === 'STALE') {
     return false;
   }
   return blocked || Boolean(normalizedStatus);
@@ -250,12 +278,128 @@ function getBlockerTitle(blocker?: ApiSnapshotBlocker | null): string {
   return BLOCKER_LABELS[code] ?? '快照状态提醒';
 }
 
-function getLastRefreshedLabel(overview: ApiSnapshotOverview | null): string {
+function getBlockerMessage(blocker?: ApiSnapshotBlocker | null): string {
+  const code = String(blocker?.code ?? '').toUpperCase();
+  if (BLOCKER_MESSAGES[code]) {
+    return BLOCKER_MESSAGES[code];
+  }
+  const raw = String(blocker?.message ?? '').trim();
+  if (!raw) {
+    return '当前快照状态仍需继续确认。';
+  }
+  if (raw.startsWith('Corporate action data is partially available')) {
+    return '公司行为数据已部分可用，仍有少量公司事件待继续补齐。';
+  }
+  if (raw.startsWith('Price snapshot is still incomplete')) {
+    return '股票价格数据已部分可用，仍有少量股票待继续补齐。';
+  }
+  if (raw.startsWith('Universe history is partially available')) {
+    return '股票池历史成分已部分可用，仍有部分历史锚点待继续补齐。';
+  }
+  return raw;
+}
+
+function translateOverviewMessage(raw?: string | null): string | null {
+  const text = String(raw ?? '').trim();
+  if (!text) {
+    return null;
+  }
+  if (OVERVIEW_MESSAGE_TRANSLATIONS[text]) {
+    return OVERVIEW_MESSAGE_TRANSLATIONS[text];
+  }
+  if (text.startsWith('Corporate action data is partially available')) {
+    return '公司行为数据已部分可用，仍有少量公司事件待继续补齐。';
+  }
+  if (text.startsWith('Price snapshot is still incomplete')) {
+    return '股票价格数据已部分可用，仍有少量股票待继续补齐。';
+  }
+  if (text.startsWith('Universe history is partially available')) {
+    return '股票池历史成分已部分可用，仍有部分历史锚点待继续补齐。';
+  }
+  return text;
+}
+
+function getRefreshStats(overview: ApiSnapshotOverview | null): Record<string, unknown> {
+  const summary = overview?.latest_job?.summary;
+  if (!summary || typeof summary !== 'object') {
+    return {};
+  }
+  const refreshStats = (summary as Record<string, unknown>).refresh_stats;
+  return refreshStats && typeof refreshStats === 'object' ? (refreshStats as Record<string, unknown>) : {};
+}
+
+function getDatasetRefreshStat(
+  refreshStats: Record<string, unknown>,
+  snapshotId: string,
+): Record<string, unknown> | null {
+  const datasets =
+    refreshStats.datasets && typeof refreshStats.datasets === 'object'
+      ? (refreshStats.datasets as Record<string, unknown>)
+      : null;
+  const item = datasets?.[snapshotId];
+  return item && typeof item === 'object' ? (item as Record<string, unknown>) : null;
+}
+
+function getUniverseRefreshStat(
+  refreshStats: Record<string, unknown>,
+  snapshotId: string,
+): Record<string, unknown> | null {
+  const universes =
+    refreshStats.universes && typeof refreshStats.universes === 'object'
+      ? (refreshStats.universes as Record<string, unknown>)
+      : null;
+  const item = universes?.[snapshotId];
+  return item && typeof item === 'object' ? (item as Record<string, unknown>) : null;
+}
+
+function getPositiveCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function getLastRefreshSummaryLabel(overview: ApiSnapshotOverview | null): string {
   const value =
     overview?.last_refreshed_at ??
     overview?.latest_job?.completed_at ??
     overview?.latest_job?.updated_at;
-  return value ? `最近刷新 ${formatDateTime(value)}` : '最近刷新 待显示';
+  const prefix = value ? `最近刷新 ${formatDateTime(value)}` : '最近刷新';
+  if (!overview) {
+    return `${prefix} · 摘要待显示`;
+  }
+  const refreshStats = getRefreshStats(overview);
+  const corporateStat = getDatasetRefreshStat(refreshStats, 'ds-corporate-actions');
+  const priceStat = getDatasetRefreshStat(refreshStats, 'ds-price');
+  const sp500Stat = getUniverseRefreshStat(refreshStats, 'un-sp500');
+  const ndx100Stat = getUniverseRefreshStat(refreshStats, 'un-ndx100');
+  const parts = [
+    (() => {
+      const symbols = getPositiveCount(corporateStat?.updated_symbol_count);
+      const rows = getPositiveCount(corporateStat?.updated_row_count);
+      if (!symbols && !rows) return null;
+      if (symbols && rows) return `公司行为数据${symbols.toLocaleString('zh-HK')}家${rows.toLocaleString('zh-HK')}行`;
+      if (symbols) return `公司行为数据${symbols.toLocaleString('zh-HK')}家`;
+      return `公司行为数据${rows?.toLocaleString('zh-HK')}行`;
+    })(),
+    (() => {
+      const symbols = getPositiveCount(priceStat?.updated_symbol_count);
+      const rows = getPositiveCount(priceStat?.updated_row_count);
+      if (!symbols && !rows) return null;
+      if (symbols && rows) return `股票价格数据${symbols.toLocaleString('zh-HK')}家${rows.toLocaleString('zh-HK')}行`;
+      if (symbols) return `股票价格数据${symbols.toLocaleString('zh-HK')}家`;
+      return `股票价格数据${rows?.toLocaleString('zh-HK')}行`;
+    })(),
+    (() => {
+      const rows = getPositiveCount(sp500Stat?.updated_row_count);
+      return rows ? `标普500股票池${rows.toLocaleString('zh-HK')}行` : null;
+    })(),
+    (() => {
+      const rows = getPositiveCount(ndx100Stat?.updated_row_count);
+      return rows ? `纳指100股票池${rows.toLocaleString('zh-HK')}行` : null;
+    })(),
+  ].filter(Boolean);
+  if (parts.length) {
+    return `${prefix} ·新增${parts.join('，')}。`;
+  }
+  return value ? `${prefix} ·本次未新增数据。` : `${prefix} · 摘要待显示`;
 }
 
 function getOverviewMessage(overview: ApiSnapshotOverview | null): string {
@@ -271,8 +415,9 @@ function getOverviewMessage(overview: ApiSnapshotOverview | null): string {
       : '正在刷新快照，页面会自动更新。当前先显示已有数据。';
   }
 
-  if (overview.message) {
-    return overview.message;
+  const translatedOverviewMessage = translateOverviewMessage(overview.message);
+  if (translatedOverviewMessage) {
+    return translatedOverviewMessage;
   }
 
   const hasItems = overview.dataset_snapshots.length > 0 || overview.universe_snapshots.length > 0;
@@ -350,7 +495,7 @@ function SnapshotListCard({
       {blocker ? (
         <div className={`snapshots-banner ${blocked ? 'snapshots-banner--danger' : ''}`}>
           <strong>{getBlockerTitle(blocker)}</strong>
-          <p>{blocker.message}</p>
+          <p>{getBlockerMessage(blocker)}</p>
         </div>
       ) : null}
     </section>
@@ -533,7 +678,9 @@ export function SnapshotsPage(): JSX.Element {
                   {pageStatus}
                 </span>
               ) : null}
-              <span className="status-chip status-chip--soft">{getLastRefreshedLabel(overview)}</span>
+              <span className="status-chip status-chip--soft snapshots-header__summary">
+                {getLastRefreshSummaryLabel(overview)}
+              </span>
             </div>
           </div>
           <div className="snapshots-header__actions">

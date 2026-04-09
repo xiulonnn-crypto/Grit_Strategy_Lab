@@ -131,6 +131,10 @@ function createHttpApiClient(): DemoApi {
       return requestJson<ApiBacktestRunListItem[]>(`/backtest-runs${suffix ? `?${suffix}` : ''}`);
     },
     getBacktestRunDetail: (id) => requestJson<ApiBacktestRunDetail>(`/backtest-runs/${encodeURIComponent(id)}/detail`),
+    saveBacktestRun: (id) =>
+      requestJson<ApiBacktestRunDetail>(`/backtest-runs/${encodeURIComponent(id)}/save`, {
+        method: 'POST',
+      }),
     getBacktestRunTrades: (id, params) => {
       const query = new URLSearchParams();
       if (params?.page !== undefined) query.set('page', String(params.page));
