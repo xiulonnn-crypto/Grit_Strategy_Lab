@@ -103,6 +103,11 @@ class OptimizationJobCreateRequest(BaseModel):
     objective: str | None = None
     simulate_partial_failure: bool = False
     base_parameter_version_id: str | None = None
+    source_run_id: str | None = None
+    entry_point: str | None = None
+    validation_mode: str | None = None
+    budget_combinations: int | None = Field(default=None, ge=1)
+    search_space: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class OptimizationCandidateCreateRequest(BaseModel):

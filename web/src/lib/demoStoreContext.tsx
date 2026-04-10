@@ -7,7 +7,9 @@ import type {
   ApiBacktestRunTradePage,
   ApiBacktestSubmissionPreview,
   ApiConfirmationUpdateRequest,
+  ApiOptimizationJobCreatePayload,
   ApiOptimizationJobDetail,
+  ApiOptimizationJobListItem,
   ApiSnapshotOverview,
   ApiStrategyCreationSession,
   ApiStrategyDetail,
@@ -88,11 +90,12 @@ function withJsonBody(body: unknown, init?: RequestInit): RequestInit {
 
 function createHttpApiClient(): DemoApi {
   return {
-    getWorkspaceOverview: (includeCleanupAudit = false) =>
+    getWorkspaceOverview: (includeCleanupAudit = false, signal) =>
       requestJson<ApiWorkspaceOverview>(
         `/workspace/overview${includeCleanupAudit ? '?include_cleanup_audit=1' : ''}`,
+        { signal },
       ),
-    listStrategies: () => requestJson<ApiStrategyListItem[]>('/strategies'),
+    listStrategies: (signal) => requestJson<ApiStrategyListItem[]>('/strategies', { signal }),
     getStrategyDetail: (id) => requestJson<ApiStrategyDetail>(`/strategies/${encodeURIComponent(id)}/detail`),
     getCreationSession: (id) => requestJson<ApiStrategyCreationSession>(`/strategy-creation-sessions/${encodeURIComponent(id)}`),
     createCreationSession: (payload) =>
@@ -119,7 +122,7 @@ function createHttpApiClient(): DemoApi {
         `/strategy-creation-sessions/${encodeURIComponent(id)}/materialize`,
         withJsonBody({ idempotency_key: idempotencyKey, confirmed_revision: confirmedRevision }, { method: 'POST' }),
       ),
-    listBacktestRuns: (params?: BacktestRunListQuery) => {
+    listBacktestRuns: (params?: BacktestRunListQuery, signal?: AbortSignal) => {
       const query = new URLSearchParams();
       if (params?.limit !== undefined) {
         query.set('limit', String(params.limit));
@@ -128,9 +131,10 @@ function createHttpApiClient(): DemoApi {
         query.set('status', params.status);
       }
       const suffix = query.toString();
-      return requestJson<ApiBacktestRunListItem[]>(`/backtest-runs${suffix ? `?${suffix}` : ''}`);
+      return requestJson<ApiBacktestRunListItem[]>(`/backtest-runs${suffix ? `?${suffix}` : ''}`, { signal });
     },
-    getBacktestRunDetail: (id) => requestJson<ApiBacktestRunDetail>(`/backtest-runs/${encodeURIComponent(id)}/detail`),
+    getBacktestRunDetail: (id, signal) =>
+      requestJson<ApiBacktestRunDetail>(`/backtest-runs/${encodeURIComponent(id)}/detail`, { signal }),
     saveBacktestRun: (id) =>
       requestJson<ApiBacktestRunDetail>(`/backtest-runs/${encodeURIComponent(id)}/save`, {
         method: 'POST',
@@ -164,9 +168,13 @@ function createHttpApiClient(): DemoApi {
         `/backtest-runs/${encodeURIComponent(id)}/clone`,
         withJsonBody({ idempotency_key: idempotencyKey }, { method: 'POST' }),
       ),
+    listOptimizationJobs: () => requestJson<ApiOptimizationJobListItem[]>('/optimization-jobs'),
     getOptimizationJobDetail: (id) => requestJson<ApiOptimizationJobDetail>(`/optimization-jobs/${encodeURIComponent(id)}/detail`),
-    createOptimizationJob: (strategyId) =>
-      requestJson<ApiOptimizationJobDetail>(`/strategies/${encodeURIComponent(strategyId)}/optimization-jobs`, { method: 'POST' }),
+    createOptimizationJob: (strategyId, payload?: ApiOptimizationJobCreatePayload) =>
+      requestJson<ApiOptimizationJobDetail>(
+        `/strategies/${encodeURIComponent(strategyId)}/optimization-jobs`,
+        withJsonBody(payload ?? {}, { method: 'POST' }),
+      ),
     createOptimizationCandidate: (jobId, payload) =>
       requestJson<ApiOptimizationJobDetail>(
         `/optimization-jobs/${encodeURIComponent(jobId)}/candidates`,

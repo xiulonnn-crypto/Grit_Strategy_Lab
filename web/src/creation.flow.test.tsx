@@ -105,6 +105,15 @@ function buildGridSession({
   };
 }
 
+function buildRevisionGridSession(): ApiStrategyCreationSession {
+  return {
+    ...buildGridSession({ revision: 2, ready: true }),
+    mode: 'REVISION',
+    base_strategy_id: 'strat-001',
+    base_parameter_version_id: 'pv-002',
+  };
+}
+
 function buildDraftGridSession(): ApiStrategyCreationSession {
   return {
     id: 'cs-001',
@@ -191,30 +200,73 @@ function buildDcaSession(): ApiStrategyCreationSession {
 function buildMeanReversionSession(): ApiStrategyCreationSession {
   return {
     id: 'cs-mr',
-    status: 'NEEDS_INPUT',
+    status: 'READY_FOR_CONFIRMATION',
     revision: 1,
     top_level: {
       strategy_type: 'MEAN_REVERSION',
       universe_name: 'QQQ',
-      rebalance_frequency: 'weekly',
+      rebalance_frequency: 'never',
     },
-    messages: [],
-    pending_inputs: [
-      { key: 'trading_logic', label: '交易逻辑', message: '请补充交易逻辑' },
-      { key: 'deviation_threshold', label: '标准差阈值', message: '请补充标准差阈值' },
-      { key: 'window_size', label: '窗口大小', message: '请补充窗口大小' },
+    messages: [
+      {
+        id: 'msg-mr-001',
+        role: 'user',
+        content:
+          'QQQ均值回归策略 观察QQQ日线，通过 20 日布林带 + 6 周期 RSI 识别超买超卖，结合 14 周期 ATR 动态止损止盈 1、开仓：当前空仓且收盘价 跌破布林带下轨且RSI(6) ＜ 30时买入5%，当前空仓且收盘价 突破布林带上轨且RSI(6) > 80时卖出5% 2、盈利达到 1.5 倍 ATR时止盈，亏损达到 1 倍 ATR止损 初始100000刀',
+        created_at: '2026-04-10 14:18',
+        extracted_tags: [
+          { key: 'strategy_name', label: '策略名称', value: 'QQQ均值回归策略', status: 'synced' },
+          { key: 'universe_name', label: '股票池', value: 'QQQ', status: 'synced' },
+          { key: 'observation_timeframe', label: '观察周期', value: 'daily', status: 'synced' },
+          { key: 'bollinger_period', label: '布林带周期', value: '20', status: 'synced' },
+          { key: 'rsi_period', label: 'RSI周期', value: '6', status: 'synced' },
+          { key: 'rsi_buy_threshold', label: 'RSI超卖阈值', value: '30', status: 'synced' },
+          { key: 'rsi_sell_threshold', label: 'RSI超买阈值', value: '80', status: 'synced' },
+          { key: 'atr_period', label: 'ATR周期', value: '14', status: 'synced' },
+          { key: 'take_profit_atr', label: '止盈倍数(ATR)', value: '1.5', status: 'synced' },
+          { key: 'stop_loss_atr', label: '止损倍数(ATR)', value: '1', status: 'synced' },
+          { key: 'long_entry_size_pct', label: '买入仓位(%)', value: '5', status: 'synced' },
+          { key: 'short_entry_size_pct', label: '卖出仓位(%)', value: '5', status: 'synced' },
+          { key: 'capital', label: '初始资金(USD)', value: '100000', status: 'synced' },
+        ],
+      },
     ],
+    pending_inputs: [],
     manual_conflicts: [],
     confirmation_fields: {
       top_level: [
         { key: 'strategy_type', label: '策略类型', value: 'MEAN_REVERSION', source: 'system_default' },
         { key: 'universe_name', label: '股票池', value: 'QQQ', source: 'user_input' },
-        { key: 'rebalance_frequency', label: '再平衡频次', value: 'weekly', source: 'system_default' },
+        { key: 'rebalance_frequency', label: '再平衡频次', value: 'never', source: 'system_default' },
       ],
       parameters: [
-        { key: 'strategy_name', label: '策略名称', value: 'QQQ 均值回归策略', source: 'system_inference' },
-        { key: 'strategy_description', label: '策略描述', value: '', source: 'system_default' },
+        { key: 'strategy_name', label: '策略名称', value: 'QQQ均值回归策略', source: 'user_input' },
+        {
+          key: 'strategy_description',
+          label: '策略描述',
+          value:
+            '观察QQQ日线，执行均值回归交易，使用20日布林带、RSI(6)、ATR(14)识别超买超卖与动态风控，空仓时跌破布林带下轨且RSI(6)<30买入5%；空仓时突破布林带上轨且RSI(6)>80卖出5%，1.5倍ATR止盈，1倍ATR止损。',
+          source: 'system_inference',
+        },
         { key: 'benchmark_symbol', label: '基准', value: 'QQQ', source: 'system_inference' },
+        { key: 'observation_timeframe', label: '观察周期', value: 'daily', source: 'user_input' },
+        {
+          key: 'trading_logic',
+          label: '交易逻辑',
+          value:
+            '观察QQQ日线；使用20日布林带 + RSI(6)识别超买超卖；结合ATR(14)动态止盈止损；空仓时跌破布林带下轨且RSI(6)<30买入5%；空仓时突破布林带上轨且RSI(6)>80卖出5%；1.5倍ATR止盈，1倍ATR止损',
+          source: 'system_inference',
+        },
+        { key: 'bollinger_period', label: '布林带周期', value: 20, source: 'user_input' },
+        { key: 'rsi_period', label: 'RSI周期', value: 6, source: 'user_input' },
+        { key: 'rsi_buy_threshold', label: 'RSI超卖阈值', value: 30, source: 'user_input' },
+        { key: 'rsi_sell_threshold', label: 'RSI超买阈值', value: 80, source: 'user_input' },
+        { key: 'atr_period', label: 'ATR周期', value: 14, source: 'user_input' },
+        { key: 'take_profit_atr', label: '止盈倍数(ATR)', value: 1.5, source: 'user_input' },
+        { key: 'stop_loss_atr', label: '止损倍数(ATR)', value: 1, source: 'user_input' },
+        { key: 'long_entry_size_pct', label: '买入仓位(%)', value: 5, source: 'user_input' },
+        { key: 'short_entry_size_pct', label: '卖出仓位(%)', value: 5, source: 'user_input' },
+        { key: 'capital', label: '初始资金(USD)', value: 100000, source: 'user_input' },
       ],
     },
   };
@@ -375,17 +427,30 @@ describe('creation flow', () => {
 
     render(<CreationSessionPage sessionId="cs-mr" />);
 
-    expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent('QQQ 均值回归策略');
+    expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent('QQQ均值回归策略');
     expect(screen.getByLabelText('策略类型')).toHaveTextContent('均值回归');
-    expect(screen.getByLabelText('策略名称')).toHaveValue('QQQ 均值回归策略');
+    expect(screen.getByLabelText('策略名称')).toHaveValue('QQQ均值回归策略');
     expect(screen.getByRole('combobox', { name: '基准' })).toHaveValue('QQQ');
 
     fireEvent.click(screen.getByText('选股规则').closest('button')!);
 
-    expect(await screen.findByLabelText('交易逻辑')).toHaveValue('');
-    expect(screen.getByLabelText('标准差阈值')).toHaveValue('');
-    expect(screen.getByLabelText('窗口大小')).toHaveValue('');
-    expect(screen.getByLabelText('回归目标')).toHaveValue('');
+    expect(await screen.findByRole('combobox', { name: '观察周期' })).toHaveValue('daily');
+    expect((screen.getByLabelText('交易逻辑') as HTMLTextAreaElement).value).toContain('观察QQQ日线');
+    expect(screen.getByLabelText('布林带周期')).toHaveValue('20');
+    expect(screen.getByLabelText('RSI周期')).toHaveValue('6');
+    expect(screen.getByLabelText('RSI超卖阈值')).toHaveValue('30');
+    expect(screen.getByLabelText('RSI超买阈值')).toHaveValue('80');
+
+    fireEvent.click(screen.getByText('风控 / 再平衡').closest('button')!);
+
+    expect(await screen.findByLabelText('ATR周期')).toHaveValue('14');
+    expect(screen.getByLabelText('止盈倍数(ATR)')).toHaveValue('1.5');
+    expect(screen.getByLabelText('止损倍数(ATR)')).toHaveValue('1');
+    expect(screen.getByRole('combobox', { name: '再平衡频次' })).toHaveValue('never');
+
+    fireEvent.click(screen.getByText('其他参数').closest('button')!);
+
+    expect(await screen.findByLabelText('初始资金(USD)')).toHaveValue('100000');
     expect(screen.queryByLabelText('定投金额(USD)')).not.toBeInTheDocument();
   });
 
@@ -468,6 +533,21 @@ describe('creation flow', () => {
       expect(fakeApi.materializeStrategy).toHaveBeenCalledWith('cs-001', 'materialize-cs-001', 2),
     );
     expect(window.location.hash).toBe('#/strategies/strat-001/backtest-runs/new');
+  });
+
+  it('shows 保存新版本 for revision sessions and returns to strategy detail after saving', async () => {
+    fakeApi.getCreationSession.mockResolvedValue(buildRevisionGridSession());
+    fakeApi.materializeStrategy.mockResolvedValue({ id: 'strat-001' });
+
+    render(<CreationSessionPage sessionId="cs-001" />);
+
+    expect(await screen.findByRole('button', { name: '保存新版本' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '保存新版本' }));
+
+    await waitFor(() =>
+      expect(fakeApi.materializeStrategy).toHaveBeenCalledWith('cs-001', 'materialize-cs-001', 2),
+    );
+    expect(window.location.hash).toBe('#/strategies/strat-001');
   });
 
   it('prevents primary action when autosave fails', async () => {

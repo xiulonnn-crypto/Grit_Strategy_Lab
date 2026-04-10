@@ -1,7 +1,7 @@
 ﻿import { useEffect, useMemo, useState } from 'react';
 import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
-import type { ApiBacktestRunDetail, ApiBacktestRunListItem, ApiStrategyListItem } from '../types';
+import type { ApiBacktestRunListItem } from '../types';
 import './runs-index-page.css';
 
 const TEXT = {
@@ -11,6 +11,12 @@ const TEXT = {
   loading: '加载回测历史中...',
   retry: '重试',
 } as const;
+
+function isAbortError(caught: unknown): boolean {
+  return caught instanceof DOMException
+    ? caught.name === 'AbortError'
+    : typeof caught === 'object' && caught !== null && 'name' in caught && (caught as { name?: string }).name === 'AbortError';
+}
 
 function formatMetric(value: number | undefined, kind: 'percent' | 'ratio'): string {
   if (typeof value !== 'number' || Number.isNaN(value)) {
@@ -59,30 +65,17 @@ function getTone(status: ApiBacktestRunListItem['status']): string {
   return status === 'FAILED' ? 'danger' : status === 'COMPLETED_WITH_WARNINGS' ? 'warning' : 'success';
 }
 
-function buildStrategyNameMap(strategies: ApiStrategyListItem[]): Record<string, string> {
-  return Object.fromEntries(
-    strategies
-      .filter((strategy) => Boolean(strategy.id && strategy.name))
-      .map((strategy) => [strategy.id, strategy.name] as const),
-  );
-}
-
-function buildRows(
-  runs: ApiBacktestRunListItem[],
-  details: Record<string, ApiBacktestRunDetail>,
-  strategyNamesById: Record<string, string>,
-) {
+function buildRows(runs: ApiBacktestRunListItem[]) {
   return runs
     .map((run) => {
-      const detail = details[run.id];
-      const metrics = detail?.metrics ?? run.metrics ?? {};
-      const completedAt = run.completed_at ?? detail?.completed_at ?? run.updated_at ?? run.created_at;
+      const metrics = run.metrics ?? {};
+      const completedAt = run.completed_at ?? run.updated_at ?? run.created_at;
       return {
         id: run.id,
         strategyId: run.strategy_id,
-        strategyName: strategyNamesById[run.strategy_id] ?? run.strategy_name ?? detail?.strategy_name ?? run.strategy_id,
-        runTypeText: (detail?.is_permanent ?? run.is_permanent) ? '永久回测' : '临时回测',
-        runTypeTone: (detail?.is_permanent ?? run.is_permanent) ? 'permanent' : 'temporary',
+        strategyName: run.strategy_name ?? run.strategy_id,
+        runTypeText: run.is_permanent ? '永久回测' : '临时回测',
+        runTypeTone: run.is_permanent ? 'permanent' : 'temporary',
         status: run.status,
         statusText: statusLabel(run.status),
         statusTone: getTone(run.status),
@@ -102,32 +95,29 @@ function buildRows(
 export function RunsIndexPage(): JSX.Element {
   const api = useApiClient();
   const [runs, setRuns] = useState<ApiBacktestRunListItem[]>([]);
-  const [runDetails, setRunDetails] = useState<Record<string, ApiBacktestRunDetail>>({});
-  const [strategyNamesById, setStrategyNamesById] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
 
     async function load(): Promise<void> {
       try {
         setLoading(true);
         setError(null);
-        const [items, strategies] = await Promise.all([api.listBacktestRuns({ limit: 20 }), api.listStrategies()]);
-        const detailEntries = await Promise.all(items.map(async (run) => [run.id, await api.getBacktestRunDetail(run.id)] as const));
+        const items = await api.listBacktestRuns({ limit: 20 }, controller.signal);
         if (cancelled) {
           return;
         }
         setRuns(items);
-        setRunDetails(Object.fromEntries(detailEntries));
-        setStrategyNamesById(buildStrategyNameMap(strategies));
+        setLoading(false);
       } catch (caught) {
+        if (isAbortError(caught)) {
+          return;
+        }
         if (!cancelled) {
           setError((caught as Error).message);
-        }
-      } finally {
-        if (!cancelled) {
           setLoading(false);
         }
       }
@@ -136,10 +126,11 @@ export function RunsIndexPage(): JSX.Element {
     void load();
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [api]);
 
-  const rows = useMemo(() => buildRows(runs, runDetails, strategyNamesById), [runDetails, runs, strategyNamesById]);
+  const rows = useMemo(() => buildRows(runs), [runs]);
 
   return (
     <div className="runs-index-page panel">

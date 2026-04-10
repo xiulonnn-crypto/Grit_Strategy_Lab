@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { navigateTo } from '../lib/appRouteContext';
 import { formatCompactDate, formatCurrency } from '../lib/format';
+import { buildOptimizationConfigPath } from '../lib/optimization-routes';
 import {
   formatRunStatusLabel,
   getDefaultTradeId,
@@ -445,16 +446,20 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
     );
   }
 
-  async function handleCreateOptimization(): Promise<void> {
+  function handleCreateOptimization(): void {
     if (!detail?.strategy_id) {
       return;
     }
 
     try {
-      setOptimizationBusy(true);
       setActionNotice(null);
-      const job = await api.createOptimizationJob(detail.strategy_id);
-      navigateTo(`/optimization-jobs/${job.id}`);
+      navigateTo(
+        buildOptimizationConfigPath({
+          strategyId: detail.strategy_id,
+          sourceRunId: detail.id,
+          entryPoint: 'run_detail',
+        }),
+      );
     } catch (caught) {
       setActionNotice(`启动优化失败：${(caught as Error).message}`);
     } finally {

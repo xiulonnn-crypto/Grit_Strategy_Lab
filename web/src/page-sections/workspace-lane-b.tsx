@@ -240,7 +240,10 @@ export function WorkspaceStrategySection({
 
   useEffect(() => {
     if (compareOpen && selectedStrategies.length >= 2 && comparePanelRef.current) {
-      comparePanelRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const { scrollIntoView } = comparePanelRef.current;
+      if (typeof scrollIntoView === 'function') {
+        scrollIntoView.call(comparePanelRef.current, { behavior: 'smooth', block: 'start' });
+      }
     }
   }, [compareOpen, selectedStrategies.length]);
 

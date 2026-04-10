@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from pathlib import Path
+import time
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -461,11 +462,47 @@ def create_optimization_job(
     *,
     objective: str = "sharpe",
     base_parameter_version_id: str | None = None,
+    source_run_id: str | None = None,
+    entry_point: str | None = None,
+    validation_mode: str | None = None,
+    budget_combinations: int | None = None,
+    search_space: list[dict[str, Any]] | None = None,
+    wait_until_complete: bool = True,
+    timeout_seconds: float = 5.0,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"objective": objective}
+    if budget_combinations is None and search_space is None:
+        budget_combinations = 4
     if base_parameter_version_id is not None:
         payload["base_parameter_version_id"] = base_parameter_version_id
-    return assert_ok(client.post(f"/strategies/{strategy_id}/optimization-jobs", json=payload))
+    if source_run_id is not None:
+        payload["source_run_id"] = source_run_id
+    if entry_point is not None:
+        payload["entry_point"] = entry_point
+    if validation_mode is not None:
+        payload["validation_mode"] = validation_mode
+    if budget_combinations is not None:
+        payload["budget_combinations"] = budget_combinations
+    if search_space is not None:
+        payload["search_space"] = search_space
+    created = assert_ok(client.post(f"/strategies/{strategy_id}/optimization-jobs", json=payload))
+    if wait_until_complete and str(created.get("status") or "").upper() in {"QUEUED", "RUNNING"}:
+        return wait_for_optimization_job(client, created["id"], timeout_seconds=timeout_seconds)
+    return created
+
+
+def wait_for_optimization_job(
+    client: TestClient,
+    job_id: str,
+    *,
+    timeout_seconds: float = 5.0,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    latest = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail"))
+    while time.monotonic() < deadline and str(latest.get("status") or "").upper() in {"QUEUED", "RUNNING"}:
+        time.sleep(0.02)
+        latest = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail"))
+    return latest
 
 
 def create_optimization_candidate(

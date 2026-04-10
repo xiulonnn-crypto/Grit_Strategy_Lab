@@ -1,7 +1,10 @@
-import { fireEvent, render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WorkspaceStrategySection } from './page-sections/workspace-lane-b';
 import type { WorkspaceStrategyCardVM } from './lib/workspace-adapters';
+
+const OPEN_COMPARE = /\u6253\u5f00\u5bf9\u6bd4/;
+const COMPARE_DIALOG = /\u7b56\u7565\u5bf9\u6bd4/;
 
 function makeStrategy(id: string, name: string, compareEligible = true): WorkspaceStrategyCardVM {
   return {
@@ -14,7 +17,7 @@ function makeStrategy(id: string, name: string, compareEligible = true): Workspa
     latestOptimizationJobId: compareEligible ? 'opt-001' : null,
     latestRunId: compareEligible ? `${id}-run` : null,
     compareEligible,
-    compareBlocker: compareEligible ? null : '当前参数版本还没有正式回测，暂时不能加入对比。',
+    compareBlocker: compareEligible ? null : 'Not ready for compare yet.',
     cardState: compareEligible ? 'READY' : 'PENDING_RUN',
     parameters: {
       lookback_months: 6,
@@ -28,37 +31,42 @@ function makeStrategy(id: string, name: string, compareEligible = true): Workspa
       oosTotalReturn: '+5.4%',
       oosSharpe: '0.67',
     },
-    auxiliaryCopy: compareEligible ? '当前参数版本已可加入对比。' : '当前参数版本还没有正式回测，暂时不能加入对比。',
+    auxiliaryCopy: compareEligible ? 'Ready for compare.' : 'Not ready for compare yet.',
   };
 }
 
 describe('WorkspaceStrategySection Phase 3', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
   it('reveals compare controls only after two selections', () => {
-    render(
+    const { container } = render(
       <WorkspaceStrategySection
         latestStrategyId="str-a"
         navigate={vi.fn()}
         strategies={[
-          makeStrategy('str-a', '策略 A'),
-          makeStrategy('str-b', '策略 B'),
-          makeStrategy('str-c', '策略 C', false),
+          makeStrategy('str-a', 'Strategy A'),
+          makeStrategy('str-b', 'Strategy B'),
+          makeStrategy('str-c', 'Strategy C', false),
         ]}
       />,
     );
 
-    expect(screen.getByText('策略 A')).toBeInTheDocument();
-    expect(screen.getByText('策略 B')).toBeInTheDocument();
-    expect(screen.getByText('当前参数版本还没有正式回测，暂时不能加入对比。')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '打开对比' })).not.toBeInTheDocument();
+    expect(screen.getByText('Strategy A')).toBeInTheDocument();
+    expect(screen.getByText('Strategy B')).toBeInTheDocument();
+    expect(screen.getByText('Not ready for compare yet.')).toBeInTheDocument();
+    expect(container.querySelector('.workspace-compare-dock')).toBeNull();
 
-    fireEvent.click(screen.getByLabelText('选择 策略 A 进行对比'));
-    fireEvent.click(screen.getByLabelText('选择 策略 B 进行对比'));
+    fireEvent.click(screen.getByLabelText(/\u9009\u62e9 Strategy A \u8fdb\u884c\u5bf9\u6bd4/));
+    expect(container.querySelector('.workspace-compare-dock')).not.toBeNull();
+    fireEvent.click(screen.getByLabelText(/\u9009\u62e9 Strategy B \u8fdb\u884c\u5bf9\u6bd4/));
 
-    const compareButton = screen.getByRole('button', { name: '打开对比' });
+    const compareButton = screen.getByRole('button', { name: OPEN_COMPARE });
     fireEvent.click(compareButton);
 
-    expect(screen.getByRole('dialog', { name: '策略对比' })).toBeInTheDocument();
-    expect(screen.getAllByText('策略 A').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('策略 B').length).toBeGreaterThan(0);
+    expect(screen.getByRole('region', { name: COMPARE_DIALOG })).toBeInTheDocument();
+    expect(screen.getAllByText('Strategy A').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Strategy B').length).toBeGreaterThan(0);
   });
 });

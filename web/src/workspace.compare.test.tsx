@@ -49,15 +49,16 @@ describe('WorkspaceStrategySection', () => {
       />,
     );
 
-    expect(screen.queryByRole('button', { name: '打开对比' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /打开对比舱/ })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByLabelText('选择 策略一 进行对比'));
     fireEvent.click(screen.getByLabelText('选择 策略二 进行对比'));
 
-    const openCompareButton = screen.getByRole('button', { name: '打开对比' });
+    const openCompareButton = screen.getByRole('button', { name: /打开对比舱/ });
     fireEvent.click(openCompareButton);
 
-    expect(screen.getByRole('dialog', { name: '策略对比' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: /对比选择/ })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: /策略对比舱/ })).toBeInTheDocument();
     expect(screen.getAllByText('策略一').length).toBeGreaterThan(0);
     expect(screen.getAllByText('策略二').length).toBeGreaterThan(0);
     expect(screen.getAllByText('累计收益').length).toBeGreaterThan(0);

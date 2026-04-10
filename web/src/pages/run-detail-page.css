@@ -352,6 +352,16 @@
   gap: 12px;
 }
 
+.run-detail-audit-list {
+  max-height: min(68vh, 720px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 6px;
+  align-content: start;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+
 .run-detail-event-card,
 .run-detail-audit-row,
 .run-detail-snapshot-card,
@@ -1552,6 +1562,12 @@
   padding: 18px 20px;
 }
 
+.run-detail-evidence-list-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 16px;
+}
+
 .run-detail-evidence-detail-stack,
 .run-detail-properties-grid,
 .run-detail-properties-grid--stacked {
@@ -1715,6 +1731,10 @@
 
   .run-detail-line-chart {
     height: 300px;
+  }
+
+  .run-detail-audit-list {
+    max-height: min(52vh, 480px);
   }
 
   .run-detail-chart-tooltip {

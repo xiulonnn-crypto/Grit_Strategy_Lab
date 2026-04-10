@@ -122,9 +122,14 @@ def test_build_confirmation_keeps_buy_and_hold_type_and_extracts_dca_fields():
     assert pending_keys == set()
 
 
-def test_build_confirmation_keeps_mean_reversion_type_and_extracts_core_fields():
+def test_build_confirmation_keeps_mean_reversion_type_and_extracts_structured_signal_fields():
     payload = build_confirmation(
-        _messages('QQQ均值回归策略 交易逻辑：价格偏离均值过大时反向建仓。标准差阈值2，窗口大小50，回归目标MA50'),
+        _messages(
+            'QQQ均值回归策略 观察QQQ日线，通过 20 日布林带 + 6 周期 RSI 识别超买超卖，'
+            '结合 14 周期 ATR 动态止损止盈 1、开仓：当前空仓且收盘价 跌破布林带下轨且RSI(6) ＜ 30时买入5%，'
+            '当前空仓且收盘价 突破布林带上轨且RSI(6) > 80时卖出5% '
+            '2、盈利达到 1.5 倍 ATR时止盈，亏损达到 1 倍 ATR止损 初始100000刀'
+        ),
         forced_type='MEAN_REVERSION',
     )
 
@@ -137,18 +142,37 @@ def test_build_confirmation_keeps_mean_reversion_type_and_extracts_core_fields()
 
     assert top_level['strategy_type'] == 'MEAN_REVERSION'
     assert top_level['universe_name'] == 'QQQ'
-    assert top_level['rebalance_frequency'] == 'weekly'
-    assert parameter_values['strategy_name'] == 'QQQ 均值回归策略'
+    assert top_level['rebalance_frequency'] == 'never'
+    assert parameter_values['strategy_name'] == 'QQQ均值回归策略'
     assert parameter_values['benchmark_symbol'] == 'QQQ'
-    assert parameter_values['trading_logic'].startswith('QQQ均值回归策略')
-    assert parameter_values['deviation_threshold'] == 2
-    assert parameter_values['window_size'] == 50
-    assert parameter_values['mean_target'] == 'MA50'
+    assert parameter_values['observation_timeframe'] == 'daily'
+    assert '观察QQQ日线' in parameter_values['trading_logic']
+    assert parameter_values['bollinger_period'] == 20
+    assert parameter_values['rsi_period'] == 6
+    assert parameter_values['rsi_buy_threshold'] == 30
+    assert parameter_values['rsi_sell_threshold'] == 80
+    assert parameter_values['atr_period'] == 14
+    assert parameter_values['take_profit_atr'] == 1.5
+    assert parameter_values['stop_loss_atr'] == 1
+    assert parameter_values['long_entry_size_pct'] == 5
+    assert parameter_values['short_entry_size_pct'] == 5
+    assert parameter_values['capital'] == 100000
+    assert '20日布林带' in parameter_values['strategy_description']
+    assert 'RSI(6)' in parameter_values['strategy_description']
+    assert 'ATR(14)' in parameter_values['strategy_description']
     assert 'strategy_name' not in pending_keys
     assert 'strategy_description' not in pending_keys
+    assert 'observation_timeframe' not in pending_keys
     assert 'trading_logic' not in pending_keys
-    assert 'deviation_threshold' not in pending_keys
-    assert 'window_size' not in pending_keys
+    assert 'bollinger_period' not in pending_keys
+    assert 'rsi_period' not in pending_keys
+    assert 'rsi_buy_threshold' not in pending_keys
+    assert 'rsi_sell_threshold' not in pending_keys
+    assert 'atr_period' not in pending_keys
+    assert 'take_profit_atr' not in pending_keys
+    assert 'stop_loss_atr' not in pending_keys
+    assert 'long_entry_size_pct' not in pending_keys
+    assert 'short_entry_size_pct' not in pending_keys
 
 
 def test_build_confirmation_preserves_manual_override_and_emits_manual_conflict():

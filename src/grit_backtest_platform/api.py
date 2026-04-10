@@ -445,6 +445,10 @@ def create_app(db_path: str | Path | None = None, market_data_provider=None) -> 
     @app.on_event('startup')
     def startup_cleanup_worker():
         run_cleanup_cycle()
+        try:
+            invoke(service.resume_incomplete_optimization_jobs)
+        except Exception:
+            pass
 
         def loop() -> None:
             while not app.state.cleanup_stop_event.wait(24 * 60 * 60):
@@ -537,6 +541,10 @@ def create_app(db_path: str | Path | None = None, market_data_provider=None) -> 
     @app.post('/backtest-runs/{run_id}/clone')
     def clone_backtest_run(run_id: str, payload: BacktestRunCloneRequest):
         return invoke(service.clone_backtest_run, run_id, payload)
+
+    @app.get('/optimization-jobs')
+    def list_optimization_jobs():
+        return invoke(service.list_optimization_jobs)
 
     @app.get('/optimization-jobs/{job_id}/detail')
     def optimization_job_detail(job_id: str):

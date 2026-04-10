@@ -1,6 +1,6 @@
 import type { AppRoute } from './lib/appRouteContext';
 
-export type ShellNavKey = 'workspace' | 'creation' | 'runs' | 'snapshots';
+export type ShellNavKey = 'workspace' | 'creation' | 'runs' | 'optimization' | 'snapshots';
 
 export type ShellNavItem = {
   key: ShellNavKey;
@@ -59,6 +59,7 @@ export const SHELL_NAV_ITEMS: ShellNavItem[] = [
   { key: 'workspace', href: '#/workspace', label: TEXT.workspace },
   { key: 'creation', href: '#/creation/new', label: TEXT.creation },
   { key: 'runs', href: '#/runs', label: TEXT.runs },
+  { key: 'optimization', href: '#/optimization-jobs', label: TEXT.optimizationTitle },
   { key: 'snapshots', href: '#/snapshots', label: TEXT.snapshots },
 ];
 
@@ -93,6 +94,7 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         eyebrow: TEXT.strategyDetailEyebrow,
         title: TEXT.strategyDetailTitle,
         description: TEXT.strategyDetailDesc,
+        showPageHeading: false,
       };
     case 'backtest':
       return {
@@ -125,12 +127,16 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         description: TEXT.snapshotsDesc,
         showPageHeading: false,
       };
+    case 'optimization-index':
+    case 'optimization-select':
+    case 'optimization-config':
     case 'optimization':
       return {
-        navKey: 'workspace',
+        navKey: 'optimization',
         eyebrow: TEXT.optimizationEyebrow,
         title: TEXT.optimizationTitle,
         description: TEXT.optimizationDesc,
+        showPageHeading: false,
       };
   }
 }

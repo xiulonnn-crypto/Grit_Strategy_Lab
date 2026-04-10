@@ -13,6 +13,7 @@ import { RunDetailPage } from './pages/run-detail-page';
 import { RunsIndexPage } from './pages/runs-index-page';
 import { SnapshotsPage } from './pages/snapshots-page';
 import { StrategyDetailPage } from './pages/strategy-detail-page';
+import { OptimizationConfigPage } from './pages/optimization-lab-page';
 import { WorkspacePage } from './pages/workspace-page-lane-b';
 import { ShellFrameCn } from './shell-frame-cn';
 
@@ -202,6 +203,25 @@ describeLiveApi('live api acceptance', () => {
         await screen.findByText('运行概览', {}, { timeout: LIVE_QUERY_TIMEOUT }),
       ).toBeInTheDocument();
       expect(screen.getAllByText('run_403158bf649b').length).toBeGreaterThan(0);
+      expectNoFetchFailure();
+    },
+    LIVE_TEST_TIMEOUT,
+  );
+
+  it(
+    'hydrates optimization config data against the live local API',
+    async () => {
+      await renderLiveRoute(
+        '#/optimization-jobs/new/config?strategy_id=strat_7df2b7091ef4',
+        <OptimizationConfigPage strategyId="strat_7df2b7091ef4" />,
+      );
+
+      expect(
+        await screen.findByDisplayValue('20', {}, { timeout: LIVE_QUERY_TIMEOUT }),
+      ).toBeInTheDocument();
+      expect(
+        await screen.findByText('strat_7df2b7091ef4-v1', {}, { timeout: LIVE_QUERY_TIMEOUT }),
+      ).toBeInTheDocument();
       expectNoFetchFailure();
     },
     LIVE_TEST_TIMEOUT,

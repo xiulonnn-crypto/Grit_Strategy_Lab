@@ -50,7 +50,11 @@ export function installMockApiServer() {
       if (method === 'GET' && url.pathname === '/strategies') return json(await demoApi.listStrategies());
       if (method === 'GET' && segments[0] === 'strategies' && segments[2] === 'detail') return json(await demoApi.getStrategyDetail(segments[1]));
       if (method === 'POST' && url.pathname === '/strategy-creation-sessions') {
-        return json(await demoApi.createCreationSession(body as { strategy_type?: import('./types').StrategyType } | undefined));
+        return json(
+          await demoApi.createCreationSession(
+            body as import('./types').CreateCreationSessionPayload | undefined,
+          ),
+        );
       }
       if (method === 'GET' && segments[0] === 'strategy-creation-sessions' && segments.length === 2) return json(await demoApi.getCreationSession(segments[1]));
       if (method === 'POST' && segments[0] === 'strategy-creation-sessions' && segments[2] === 'messages') {
@@ -159,8 +163,22 @@ export function installMockApiServer() {
         is_permanent: typeof body?.is_permanent === 'boolean' ? body.is_permanent : undefined,
       }));
       if (method === 'POST' && segments[0] === 'backtest-runs' && segments[2] === 'clone') return json(await demoApi.cloneBacktestRun(segments[1], readIdempotencyKey(request, body)));
+      if (method === 'GET' && url.pathname === '/optimization-jobs') return json(await demoApi.listOptimizationJobs());
       if (method === 'GET' && segments[0] === 'optimization-jobs' && segments[2] === 'detail') return json(await demoApi.getOptimizationJobDetail(segments[1]));
-      if (method === 'POST' && segments[0] === 'strategies' && segments[2] === 'optimization-jobs') return json(await demoApi.createOptimizationJob(segments[1]));
+      if (method === 'POST' && segments[0] === 'strategies' && segments[2] === 'optimization-jobs') {
+        return json(await demoApi.createOptimizationJob(segments[1], {
+          objective: typeof body?.objective === 'string' ? body.objective : undefined,
+          base_parameter_version_id:
+            typeof body?.base_parameter_version_id === 'string' ? body.base_parameter_version_id : null,
+          source_run_id: typeof body?.source_run_id === 'string' ? body.source_run_id : null,
+          entry_point: typeof body?.entry_point === 'string' ? body.entry_point : null,
+          validation_mode: typeof body?.validation_mode === 'string' ? body.validation_mode : undefined,
+          budget_combinations: typeof body?.budget_combinations === 'number' ? body.budget_combinations : undefined,
+          search_space: Array.isArray(body?.search_space)
+            ? (body?.search_space as import('./types').ApiOptimizationSearchSpaceField[])
+            : undefined,
+        }));
+      }
       if (method === 'POST' && segments[0] === 'optimization-jobs' && segments[2] === 'candidates' && segments.length === 3) {
         return json(await demoApi.createOptimizationCandidate(segments[1], {
           label: typeof body?.label === 'string' ? body.label : undefined,

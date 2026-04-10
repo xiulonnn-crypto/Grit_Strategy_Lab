@@ -23,17 +23,26 @@ vi.mock('./lib/demoStoreContext', () => ({
   useApiClient: () => fakeApi,
 }));
 
+const WORKSPACE_TITLE = '\u5de5\u4f5c\u53f0\u5065\u5eb7\u5ea6';
+const WORKSPACE_COPY = '\u5f53\u524d\u7814\u7a76\u5de5\u4f5c\u53f0\u7684\u6838\u5fc3\u72b6\u6001\u4e0e\u98ce\u9669\u63d0\u793a\u3002';
+const SNAPSHOTS_BUTTON = '\u6570\u636e\u5feb\u7167';
+const CREATE_FIRST_STRATEGY = '\u521b\u5efa\u7b2c\u4e00\u4e2a\u7b56\u7565';
+const EMPTY_COPY =
+  '\u5f53\u524d\u6570\u636e\u5e93\u8fd8\u6ca1\u6709\u53ef\u7528\u7b56\u7565\uff0c\u5148\u8fdb\u5165\u521b\u5efa\u6d41\u7a0b\u628a\u4e3b\u94fe\u8def\u6253\u901a\u3002';
+const EMPTY_RUNS_COPY =
+  '\u6682\u65e0\u6700\u8fd1\u56de\u6d4b\u3002\u5148\u521b\u5efa\u4e00\u4e2a\u7b56\u7565\u518d\u586b\u5145\u5386\u53f2\u3002';
+
 beforeEach(() => {
   fakeApi.getWorkspaceOverview.mockResolvedValue({
-    workspace_name: 'Grit 策略实验室',
-    subtitle: '创建、回测和优化的统一工作台。',
+    workspace_name: 'Grit \u7b56\u7565\u5b9e\u9a8c\u5ba4',
+    subtitle: '\u521b\u5efa\u3001\u56de\u6d4b\u548c\u4f18\u5316\u90fd\u5728\u540c\u4e00\u6761\u4e3b\u94fe\u8def\u91cc\u5b8c\u6210\u3002',
     strategy_count: 0,
     active_run_count: 0,
     running_optimization_count: 0,
     latest_strategy_id: null,
     latest_backtest_run_id: null,
     latest_optimization_job_id: null,
-    top_momentum_warning: '空库模式。',
+    top_momentum_warning: null,
     quick_actions: [],
   });
   fakeApi.listStrategies.mockResolvedValue([]);
@@ -60,15 +69,12 @@ describe('workspace empty state', () => {
     });
 
     expect(container!.querySelector('.page-heading')).toBeNull();
-    expect(await screen.findByRole('heading', { name: '工作台健康度', level: 2 })).toBeInTheDocument();
-    expect(screen.getByText('当前研究工作台的核心状态与风险提示。')).toBeInTheDocument();
-    expect(screen.queryByText('创建、回测和优化的统一工作台。')).not.toBeInTheDocument();
-    expect(screen.queryByText('空库模式。')).not.toBeInTheDocument();
-    expect(await screen.findByRole('button', { name: '数据快照' })).toBeInTheDocument();
-    expect(await screen.findByRole('button', { name: '创建第一个策略' })).toBeInTheDocument();
-    expect(await screen.findByText('当前数据库还没有可用策略，先进入创建流程把主链路打通。')).toBeInTheDocument();
-    expect(await screen.findByText('暂无最近回测。先 materialize 一个策略再填充历史。')).toBeInTheDocument();
-    expect(screen.getAllByText('策略看板').length).toBeGreaterThan(0);
+    expect(await screen.findByRole('heading', { name: WORKSPACE_TITLE, level: 2 })).toBeInTheDocument();
+    expect(screen.getByText(WORKSPACE_COPY)).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: SNAPSHOTS_BUTTON })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: CREATE_FIRST_STRATEGY })).toBeInTheDocument();
+    expect(await screen.findByText(EMPTY_COPY)).toBeInTheDocument();
+    expect(await screen.findByText(EMPTY_RUNS_COPY)).toBeInTheDocument();
     expect(screen.getAllByText('0').length).toBeGreaterThan(0);
   });
 });

@@ -2154,6 +2154,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 thread = threading.Thread(target=runner, name=f"snapshot-refresh-{job['id']}", daemon=True)
                 self._snapshot_refresh_thread = thread
                 thread.start()
+                # Give fast test doubles time to persist a terminal job state before tight polling begins.
+                thread.join(0.2)
             else:
                 self._start_snapshot_refresh_subprocess(
                     job=job,

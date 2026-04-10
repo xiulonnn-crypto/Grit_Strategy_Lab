@@ -11,12 +11,14 @@ from tests.api_test_support import (
     draft_strategy_session,
     materialize_session,
     momentum_confirmation_payload,
+    wait_for_optimization_job,
 )
 from datetime import date, datetime, timedelta, timezone
 import os
 from pathlib import Path
 import json
 import threading
+import time
 from typing import Any
 
 from grit_backtest_platform._real_service_rebuilt import RealBacktestPlatformService
@@ -55,6 +57,103 @@ def test_workspace_overview_can_include_cleanup_audit_without_changing_default_c
 
     assert_workspace_overview_contract(overview, include_cleanup_audit=True)
     assert overview["last_cleanup_count"] == 0
+
+
+def test_backtest_runs_list_includes_strategy_name_for_runs_index(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    strategy = create_momentum_strategy(client, idempotency_key="runs-list-strategy-name")["strategy"]
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    _insert_backtest_run(
+        client,
+        run_id="run_list_strategy_name",
+        strategy_id=strategy["id"],
+        created_at=created_at,
+        is_permanent=0,
+        artifact_paths=[],
+    )
+
+    runs = assert_ok(client.get("/backtest-runs?limit=1"))
+
+    assert runs[0]["id"] == "run_list_strategy_name"
+    assert runs[0]["strategy_id"] == strategy["id"]
+    assert runs[0]["strategy_name"] == strategy["name"]
+
+
+def test_strategies_list_includes_latest_completed_run_summary_for_workspace_cards(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    strategy = create_momentum_strategy(client, idempotency_key="workspace-latest-run-summary")["strategy"]
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    run_id = "run_workspace_summary"
+
+    _insert_backtest_run(
+        client,
+        run_id=run_id,
+        strategy_id=strategy["id"],
+        created_at=created_at,
+        is_permanent=0,
+        artifact_paths=[],
+    )
+
+    client.app.state.service.storage.execute(
+        """
+        UPDATE backtest_runs
+        SET request_json = ?,
+            preview_json = ?,
+            metrics_json = ?,
+            warnings_json = ?,
+            chart_series_json = ?
+        WHERE id = ?
+        """,
+        (
+            json.dumps(
+                {
+                    "execution_policy": "T_CLOSE_TO_T1_OPEN",
+                    "dataset_snapshot_id": "ds-price",
+                    "universe_snapshot_id": "un-sp500",
+                    "parameter_version_id": strategy["current_parameter_version_id"],
+                }
+            ),
+            json.dumps({"parameter_version_id": strategy["current_parameter_version_id"]}),
+            json.dumps(
+                {
+                    "total_return": 0.184,
+                    "annualized_return": 0.112,
+                    "sharpe": 1.18,
+                    "max_drawdown": -0.064,
+                    "oos_total_return": 0.054,
+                    "oos_annualized_return": 0.041,
+                    "oos_sharpe": 0.67,
+                    "oos_max_drawdown": -0.031,
+                }
+            ),
+            json.dumps(["warning-a", "warning-b"]),
+            json.dumps(
+                [
+                    {"trade_date": "2026-03-01", "equity": 100.0, "is_oos": False},
+                    {"trade_date": "2026-03-02", "equity": 104.0, "is_oos": False},
+                    {"trade_date": "2026-03-03", "equity": 108.0, "is_oos": True},
+                ]
+            ),
+            run_id,
+        ),
+    )
+
+    strategies = assert_ok(client.get("/strategies"))
+    strategy_item = next(item for item in strategies if item["id"] == strategy["id"])
+    summary = strategy_item["latest_completed_run_summary"]
+
+    assert summary["run_id"] == run_id
+    assert summary["parameter_version"] == strategy["current_parameter_version"]
+    assert summary["execution_policy"] == "T_CLOSE_TO_T1_OPEN"
+    assert summary["dataset_snapshot_id"] == "ds-price"
+    assert summary["universe_snapshot_id"] == "un-sp500"
+    assert summary["warning_count"] == 2
+    assert summary["sparkline_points"][-1] == {
+        "date": "2026-03-03",
+        "equity": 108.0,
+        "is_oos": True,
+    }
 
 
 def test_snapshot_overview_contract_is_exact_on_fresh_database(tmp_path):
@@ -1212,6 +1311,433 @@ def test_promote_trial_rejects_stale_base_parameter_version(tmp_path):
     assert payload["expected_base_parameter_version_id"] == stale_base_parameter_version_id
 
 
+def test_list_optimization_jobs_returns_latest_first_with_projection_fields(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="materialize-optimization-list")
+    strategy = base["strategy"]
+    first_search_space = [
+        {"key": "lookback_months", "label": "观察周期", "mode": "range", "start": 5, "end": 6, "step": 1, "current": 6},
+        {"key": "top_n", "label": "持仓数量", "mode": "range", "start": 3, "end": 4, "step": 1, "current": 4},
+    ]
+    second_search_space = [
+        {"key": "lookback_months", "label": "观察周期", "mode": "range", "start": 4, "end": 6, "step": 1, "current": 6},
+        {"key": "top_n", "label": "持仓数量", "mode": "range", "start": 3, "end": 4, "step": 1, "current": 4},
+    ]
+    first_job = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=strategy["current_parameter_version_id"],
+        entry_point="lab_menu",
+        validation_mode="walk_forward",
+        budget_combinations=4,
+        search_space=first_search_space,
+    )
+    second_job = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=strategy["current_parameter_version_id"],
+        entry_point="run_detail",
+        source_run_id=strategy["latest_successful_run_id"],
+        validation_mode="single_oos",
+        budget_combinations=6,
+        search_space=second_search_space,
+    )
+
+    jobs = assert_ok(client.get("/optimization-jobs"))
+
+    assert [item["id"] for item in jobs[:2]] == [second_job["id"], first_job["id"]]
+    assert jobs[0]["strategy_name"] == strategy["name"]
+    assert jobs[0]["entry_point"] == "run_detail"
+    assert jobs[0]["source_run_id"] == strategy["latest_successful_run_id"]
+    assert jobs[0]["budget_combinations"] == 6
+    assert jobs[0]["completed_combinations"] == 6
+    assert jobs[0]["best_candidate_id"] == second_job["result"]["best_candidate_id"]
+    assert jobs[0]["best_candidate_label"] == second_job["result"]["best_candidate_label"]
+
+
+def test_list_optimization_jobs_purges_legacy_mock_rows(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    base = create_momentum_strategy(client, idempotency_key="materialize-optimization-list-purge")
+    strategy = base["strategy"]
+    real_job = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=strategy["current_parameter_version_id"],
+        budget_combinations=4,
+        search_space=[
+            {"key": "lookback_months", "label": "观察周期", "mode": "range", "start": 5, "end": 6, "step": 1, "current": 6},
+            {"key": "top_n", "label": "持仓数量", "mode": "range", "start": 3, "end": 4, "step": 1, "current": 4},
+        ],
+    )
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    service.storage.insert_json_row(
+        "optimization_jobs",
+        {
+            "id": "opt_legacy_mock",
+            "strategy_id": strategy["id"],
+            "status": "COMPLETED",
+            "request_json": json.dumps(
+                {
+                    "base_parameter_version_id": strategy["current_parameter_version_id"],
+                    "budget_combinations": 70,
+                    "validation_mode": "walk_forward",
+                }
+            ),
+            "summary_json": json.dumps({"budget_combinations": 70}),
+            "result_json": json.dumps(
+                {
+                    "headline": "稳定策略中心",
+                    "best_candidate_label": "稳定策略中心",
+                }
+            ),
+            "candidates_json": json.dumps(
+                [
+                    {"id": "trial_legacy_1", "label": "稳定策略中心"},
+                    {"id": "trial_legacy_2", "label": "防守优先级"},
+                    {"id": "trial_legacy_3", "label": "收益增益版"},
+                    {"id": "trial_legacy_4", "label": "边界试验版"},
+                ]
+            ),
+            "created_at": (now + timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+            "updated_at": (now + timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+            "completed_at": (now + timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+        },
+    )
+    service.storage.insert_json_row(
+        "optimization_jobs",
+        {
+            "id": "opt_legacy_placeholder",
+            "strategy_id": strategy["id"],
+            "status": "COMPLETED",
+            "request_json": json.dumps({"base_parameter_version_id": strategy["current_parameter_version_id"]}),
+            "summary_json": json.dumps({"candidate_count": 1}),
+            "result_json": json.dumps({"best_candidate_id": "trial_legacy_baseline"}),
+            "candidates_json": json.dumps(
+                [
+                    {
+                        "id": "trial_legacy_baseline",
+                        "label": "Baseline + 1",
+                        "metrics": {},
+                    }
+                ]
+            ),
+            "created_at": (now + timedelta(seconds=2)).isoformat().replace("+00:00", "Z"),
+            "updated_at": (now + timedelta(seconds=2)).isoformat().replace("+00:00", "Z"),
+            "completed_at": (now + timedelta(seconds=2)).isoformat().replace("+00:00", "Z"),
+        },
+    )
+
+    jobs = assert_ok(client.get("/optimization-jobs"))
+    job_ids = [item["id"] for item in jobs]
+
+    assert real_job["id"] in job_ids
+    assert "opt_legacy_mock" not in job_ids
+    assert "opt_legacy_placeholder" not in job_ids
+    assert service.storage.fetch_one("SELECT id FROM optimization_jobs WHERE id = ?", ("opt_legacy_mock",)) is None
+    assert (
+        service.storage.fetch_one("SELECT id FROM optimization_jobs WHERE id = ?", ("opt_legacy_placeholder",))
+        is None
+    )
+    assert client.get("/optimization-jobs/opt_legacy_mock/detail").status_code == 404
+
+
+def test_create_optimization_job_returns_running_progress_before_results_are_ready(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="materialize-optimization-progress")
+    strategy = base["strategy"]
+    search_space = [
+        {"key": "lookback_months", "label": "观察周期", "mode": "range", "start": 4, "end": 6, "step": 1, "current": 6},
+        {"key": "top_n", "label": "持仓数量", "mode": "range", "start": 3, "end": 4, "step": 1, "current": 4},
+    ]
+    created = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=strategy["current_parameter_version_id"],
+        budget_combinations=6,
+        search_space=search_space,
+        wait_until_complete=False,
+    )
+
+    assert created["status"] in {"QUEUED", "RUNNING"}
+    assert created["completed_at"] is None
+    assert created["summary"]["progress_pct"] < 100
+    assert created["summary"]["completed_combinations"] < 6
+    assert created["summary"]["current_stage"]
+    assert created["summary"]["latest_update"]
+    assert created["result"]["headline"]
+
+    completed = wait_for_optimization_job(client, created["id"])
+
+    assert completed["status"] == "COMPLETED"
+    assert completed["completed_at"] is not None
+    assert completed["summary"]["progress_pct"] == 100
+    assert completed["summary"]["completed_combinations"] == 6
+    assert completed["summary"]["latest_update"]
+    assert completed["result"]["best_candidate_id"] == completed["candidates"][0]["id"]
+    assert completed["result"]["best_candidate_label"] == completed["candidates"][0]["label"]
+
+
+def test_create_optimization_job_marks_running_before_first_trial_finishes(tmp_path, monkeypatch):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    service.refresh_snapshots({"mode": "repair", "targets": ["price", "corporate", "universes"]})
+
+    base = create_momentum_strategy(client, idempotency_key="materialize-optimization-live-progress")
+    strategy = base["strategy"]
+
+    def slow_trial(
+        strategy_detail: dict[str, Any],
+        evaluation_request: dict[str, Any],
+        payload: dict[str, Any],
+        parameter_snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        time.sleep(0.2)
+        return {
+            "parameter_snapshot": dict(parameter_snapshot),
+            "metrics": {
+                "total_return": 0.1,
+                "cagr": 0.1,
+                "annualized_return": 0.1,
+                "annualized_volatility": 0.05,
+                "sharpe": 1.2,
+                "max_drawdown": -0.05,
+                "turnover": 0.0,
+                "win_rate": 0.6,
+                "oos_cagr": 0.09,
+                "oos_sharpe": 1.1,
+                "total_return_pct": 10.0,
+                "return_sharpe": 1.2,
+                "out_of_sample_sharpe": 1.1,
+                "max_drawdown_pct": -5.0,
+                "stability": 80.0,
+            },
+            "chart_series": [
+                {
+                    "trade_date": "2026-01-01",
+                    "equity": 100.0,
+                    "benchmark": 100.0,
+                    "drawdown": 0.0,
+                    "is_oos": False,
+                    "strategy_return": 0.0,
+                    "benchmark_return": 0.0,
+                }
+            ],
+            "score": 1.2,
+        }
+
+    monkeypatch.setattr(service, "_evaluate_optimization_trial", slow_trial)
+
+    created = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=strategy["current_parameter_version_id"],
+        budget_combinations=4,
+        search_space=[
+            {"key": "lookback_months", "label": "观察周期", "mode": "range", "start": 5, "end": 6, "step": 1, "current": 6},
+            {"key": "top_n", "label": "持仓数量", "mode": "range", "start": 3, "end": 4, "step": 1, "current": 4},
+        ],
+        wait_until_complete=False,
+    )
+
+    deadline = time.monotonic() + 1.0
+    running = created
+    while time.monotonic() < deadline:
+        running = assert_ok(client.get(f"/optimization-jobs/{created['id']}/detail"))
+        if (
+            running["status"] == "RUNNING"
+            and running["summary"]["completed_combinations"] == 0
+            and "正在开始第 1 / 4 组评估" in running["summary"]["latest_update"]
+        ):
+            break
+        time.sleep(0.01)
+
+    assert running["status"] == "RUNNING"
+    assert running["summary"]["completed_combinations"] == 0
+    assert running["summary"]["current_stage"] == "评估组合 1/4"
+    assert "正在开始第 1 / 4 组评估" in running["summary"]["latest_update"]
+
+
+def test_resume_incomplete_optimization_jobs_recovers_stale_running_progress(tmp_path, monkeypatch):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    service.refresh_snapshots({"mode": "repair", "targets": ["price", "corporate", "universes"]})
+
+    base = create_momentum_strategy(client, idempotency_key="materialize-optimization-recovery")
+    strategy = base["strategy"]
+
+    original_evaluate = service._evaluate_optimization_trial
+
+    def slow_trial(
+        strategy_detail: dict[str, Any],
+        evaluation_request: dict[str, Any],
+        payload: dict[str, Any],
+        parameter_snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        time.sleep(0.02)
+        return original_evaluate(strategy_detail, evaluation_request, payload, parameter_snapshot)
+
+    monkeypatch.setattr(service, "_evaluate_optimization_trial", slow_trial)
+    monkeypatch.setattr(service, "_optimization_step_delay_seconds", lambda: 0.0)
+
+    search_space = [
+        {"key": "lookback_months", "label": "观察周期", "mode": "range", "start": 5, "end": 6, "step": 1, "current": 6},
+        {"key": "top_n", "label": "持仓数量", "mode": "range", "start": 3, "end": 4, "step": 1, "current": 4},
+    ]
+    stale_updated_at = "2026-04-10T11:01:59Z"
+    job_id = "opt_resume_running"
+    payload = {
+        "objective": "sharpe",
+        "base_parameter_version_id": strategy["current_parameter_version_id"],
+        "source_run_id": strategy["latest_successful_run_id"],
+        "entry_point": "lab_menu",
+        "validation_mode": "walk_forward",
+        "budget_combinations": 4,
+        "search_space": search_space,
+        "status": "RUNNING",
+        "progress_pct": 50,
+        "completed_combinations": 2,
+        "current_stage": "评估组合 2/4",
+        "latest_update": "已完成 2 / 4 组，最近评估 观察周期=6 / 持仓数量=3。",
+    }
+    service.storage.insert_json_row(
+        "optimization_jobs",
+        {
+            "id": job_id,
+            "strategy_id": strategy["id"],
+            "status": "RUNNING",
+            "request_json": json.dumps(payload, ensure_ascii=False),
+            "summary_json": json.dumps(
+                {
+                    "status": "RUNNING",
+                    "budget_combinations": 4,
+                    "completed_combinations": 2,
+                    "progress_pct": 50,
+                },
+                ensure_ascii=False,
+            ),
+            "result_json": json.dumps(
+                {
+                    "status": "RUNNING",
+                    "progress_pct": 50,
+                    "headline": "优化进行中",
+                    "summary": payload["latest_update"],
+                },
+                ensure_ascii=False,
+            ),
+            "candidates_json": json.dumps([], ensure_ascii=False),
+            "created_at": "2026-04-10T10:53:42Z",
+            "updated_at": stale_updated_at,
+            "completed_at": None,
+        },
+    )
+
+    resumed = service.resume_incomplete_optimization_jobs()
+
+    assert resumed == [job_id]
+
+    deadline = time.monotonic() + 1.0
+    recovering = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail"))
+    while time.monotonic() < deadline:
+        recovering = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail"))
+        if "检测到服务重启" in recovering["summary"]["latest_update"]:
+            break
+        time.sleep(0.01)
+
+    assert recovering["updated_at"] != stale_updated_at
+    assert recovering["status"] in {"RUNNING", "COMPLETED"}
+    if recovering["status"] == "RUNNING":
+        assert recovering["summary"]["completed_combinations"] == 2
+        assert "检测到服务重启" in recovering["summary"]["latest_update"]
+
+    completed = wait_for_optimization_job(client, job_id, timeout_seconds=5.0)
+
+    assert completed["status"] == "COMPLETED"
+    assert completed["summary"]["completed_combinations"] == 4
+    assert completed["summary"]["progress_pct"] == 100
+    assert completed["completed_at"] is not None
+
+
+def test_create_optimization_job_persists_configured_request_and_result_projection(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="materialize-optimization-configured")
+    strategy = base["strategy"]
+    created = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=strategy["current_parameter_version_id"],
+        entry_point="run_detail",
+        source_run_id=strategy["latest_successful_run_id"],
+        validation_mode="walk_forward",
+        budget_combinations=20,
+        search_space=[
+            {"key": "lookback_months", "label": "观察窗口", "mode": "range", "start": "4", "end": "8", "step": "1", "current": 6},
+            {"key": "top_n", "label": "持仓数量", "mode": "range", "start": "1", "end": "4", "step": "1", "current": 1},
+        ],
+    )
+
+    assert created["request"]["entry_point"] == "run_detail"
+    assert created["request"]["source_run_id"] == strategy["latest_successful_run_id"]
+    assert created["request"]["validation_mode"] == "walk_forward"
+    assert created["request"]["budget_combinations"] == 20
+    assert created["request"]["search_space"][0]["key"] == "lookback_months"
+    assert created["summary"]["candidate_count"] == 4
+    assert created["summary"]["completed_combinations"] == 20
+    assert created["summary"]["validation_mode"] == "walk_forward"
+    assert created["result"]["best_candidate_id"] == created["candidates"][0]["id"]
+    assert created["result"]["best_candidate_label"] == created["candidates"][0]["label"]
+    assert created["candidates"][0]["analysis"]["stability_checks"]
+    assert created["candidates"][0]["analysis"]["validation_windows"]
+    assert created["candidates"][0]["analysis"]["heatmap"]["cells"]
+    assert len(created["candidates"][0]["analysis"]["heatmap"]["x_values"]) > 1
+    assert len(created["candidates"][0]["analysis"]["heatmap"]["y_values"]) > 1
+
+
+def test_create_optimization_job_candidates_use_real_backtest_metrics(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="materialize-optimization-real-metrics")
+    strategy = base["strategy"]
+    search_space = [
+        {"key": "lookback_months", "label": "观察周期", "mode": "range", "start": 5, "end": 6, "step": 1, "current": 6},
+        {"key": "top_n", "label": "持仓数量", "mode": "range", "start": 3, "end": 4, "step": 1, "current": 4},
+    ]
+    job = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=strategy["current_parameter_version_id"],
+        source_run_id=strategy["latest_successful_run_id"],
+        validation_mode="walk_forward",
+        budget_combinations=4,
+        search_space=search_space,
+    )
+
+    service = client.app.state.service
+    source_run_id = strategy.get("latest_successful_run_id")
+    source_run = service.get_backtest_run_detail(source_run_id) if source_run_id else None
+    strategy_detail = service.get_strategy_detail(strategy["id"])
+    evaluation_request = service._build_optimization_evaluation_request(strategy_detail, source_run=source_run)
+    candidate = job["candidates"][0]
+    expected = service._evaluate_optimization_trial(
+        strategy_detail,
+        evaluation_request,
+        job["request"],
+        candidate["parameter_snapshot"],
+    )
+
+    assert abs(candidate["metrics"]["sharpe"] - expected["metrics"]["sharpe"]) < 1e-9
+    assert abs(candidate["metrics"]["total_return"] - expected["metrics"]["total_return"]) < 1e-9
+    assert abs(candidate["metrics"]["max_drawdown"] - expected["metrics"]["max_drawdown"]) < 1e-9
+    assert abs(candidate["metrics"]["out_of_sample_sharpe"] - expected["metrics"]["out_of_sample_sharpe"]) < 1e-9
+    assert candidate["summary"]
+    assert candidate["analysis"]["validation_windows"]
+
+
 def test_create_optimization_candidate_returns_updated_job_detail_with_full_snapshot(tmp_path):
     client, _ = create_test_client(tmp_path)
 
@@ -1237,7 +1763,7 @@ def test_create_optimization_candidate_returns_updated_job_detail_with_full_snap
 
     created_candidate = updated_job["candidates"][-1]
 
-    assert updated_job["summary"]["candidate_count"] == 2
+    assert updated_job["summary"]["candidate_count"] == 5
     assert created_candidate["label"] == "Manual candidate"
     assert created_candidate["parameter_snapshot"] == parameter_snapshot
     assert created_candidate["parameter_delta"] == {"top_n": 8}
@@ -1451,9 +1977,9 @@ def test_delete_optimization_candidate_reorders_ranks_and_returns_updated_job_de
 
     updated = assert_ok(client.delete(f"/optimization-jobs/{job['id']}/candidates/{trial_id}"))
 
-    assert updated["summary"]["candidate_count"] == 1
-    assert [candidate["rank"] for candidate in updated["candidates"]] == [1]
-    assert updated["candidates"][0]["id"] != trial_id
+    assert updated["summary"]["candidate_count"] == 4
+    assert [candidate["rank"] for candidate in updated["candidates"]] == [1, 2, 3, 4]
+    assert all(candidate["id"] != trial_id for candidate in updated["candidates"])
     assert updated["result"]["best_candidate_id"] == updated["candidates"][0]["id"]
 
 

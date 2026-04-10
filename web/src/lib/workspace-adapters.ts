@@ -1,5 +1,11 @@
 import { formatPercent, formatRatio } from './format';
-import type { ApiBacktestRunDetail, ApiStrategyDetail, ApiStrategyListItem, ParameterValue } from '../types';
+import type {
+  ApiBacktestRunDetail,
+  ApiStrategyDetail,
+  ApiStrategyLatestCompletedRunSummary,
+  ApiStrategyListItem,
+  ParameterValue,
+} from '../types';
 
 export type WorkspaceStrategyCardVM = {
   id: string;
@@ -41,6 +47,12 @@ const STRATEGY_TYPE_LABELS: Record<string, string> = {
   MEAN_REVERSION: '均值回归',
   BUY_AND_HOLD: '买入持有',
   GENERAL: '通用',
+  momentum: '动量',
+  grid: '网格',
+  mean_reversion: '均值回归',
+  buy_and_hold: '买入持有',
+  general: '通用',
+  quality_momentum: '质量动量',
 };
 
 const PARAMETER_LABELS: Record<string, string> = {
@@ -75,11 +87,14 @@ const PARAMETER_VALUE_LABELS: Record<string, string> = {
   GRID: '网格',
   MEAN_REVERSION: '均值回归',
   MOMENTUM: '动量',
+  buy_and_hold: '买入持有',
   daily: '每天',
   equal_weight: '等权',
+  mean_reversion: '均值回归',
   monthly: '每月',
   never: '从不',
   quarterly: '每季度',
+  quality_momentum: '质量动量',
   risk_parity: '风险平价',
   score_weighted: '按动量分数加权',
   semiannual: '每半年',
@@ -131,8 +146,10 @@ function buildMetaPrimary(
   strategy: ApiStrategyListItem,
   detail: ApiStrategyDetail | undefined,
   latestRunDetail: ApiBacktestRunDetail | undefined,
+  latestCompletedRunSummary: ApiStrategyLatestCompletedRunSummary | null | undefined,
 ): string {
   const executionPolicy =
+    latestCompletedRunSummary?.execution_policy ??
     readString(latestRunDetail?.configuration as UnknownRecord | undefined, ['execution_policy', 'executionPolicy']) ??
     readString(latestRunDetail?.request as UnknownRecord | undefined, ['execution_policy', 'executionPolicy']);
 
@@ -149,8 +166,22 @@ function buildMetaSecondary(
   strategy: ApiStrategyListItem,
   detail: ApiStrategyDetail | undefined,
   latestRunDetail: ApiBacktestRunDetail | undefined,
+  latestCompletedRunSummary: ApiStrategyLatestCompletedRunSummary | null | undefined,
   parameterVersion: number,
 ): string {
+  const summaryDatasetSnapshotId = latestCompletedRunSummary?.dataset_snapshot_id?.trim() ?? '';
+  const summaryUniverseSnapshotId = latestCompletedRunSummary?.universe_snapshot_id?.trim() ?? '';
+
+  if (summaryDatasetSnapshotId && summaryUniverseSnapshotId) {
+    return `敹怎 ${summaryDatasetSnapshotId} / ${summaryUniverseSnapshotId}`;
+  }
+  if (summaryDatasetSnapshotId) {
+    return `?唳敹怎 ${summaryDatasetSnapshotId}`;
+  }
+  if (summaryUniverseSnapshotId) {
+    return `?∠巨瘙翰??${summaryUniverseSnapshotId}`;
+  }
+
   const snapshotSummary = latestRunDetail?.snapshot_summary as UnknownRecord | undefined;
   const datasetSnapshotId = readString(snapshotSummary, ['dataset_snapshot_id', 'datasetSnapshotId']);
   const universeSnapshotId = readString(snapshotSummary, ['universe_snapshot_id', 'universeSnapshotId']);
@@ -175,21 +206,39 @@ export function buildWorkspaceStrategyCards(
 ): WorkspaceStrategyCardVM[] {
   return strategies.map((strategy) => {
     const detail = details[strategy.id];
-    const latestRunId = detail?.latest_successful_run_id ?? strategy.latest_successful_run_id ?? strategy.latest_run_id ?? null;
+    const latestCompletedRunSummary = strategy.latest_completed_run_summary;
+    const latestRunId =
+      latestCompletedRunSummary?.run_id ??
+      detail?.latest_successful_run_id ??
+      strategy.latest_successful_run_id ??
+      strategy.latest_run_id ??
+      null;
     const latestRunDetail = latestRunId ? latestRunDetails[latestRunId] : undefined;
     const parameterVersion = detail?.current_parameter_version ?? strategy.current_parameter_version ?? 1;
     const compareEligible = Boolean(latestRunId);
     const compareBlocker = compareEligible ? null : '当前参数版本还没有正式回测，暂时不能加入对比。';
-    const latestStatus = latestRunDetail?.status ?? detail?.lifecycle_status ?? strategy.lifecycle_status ?? 'PENDING_RUN';
-    const metrics = latestRunDetail?.metrics ?? {};
-    const summary = latestRunDetail
+    const latestStatus =
+      latestCompletedRunSummary?.status ??
+      latestRunDetail?.status ??
+      detail?.lifecycle_status ??
+      strategy.lifecycle_status ??
+      'PENDING_RUN';
+    const detailMetrics = latestRunDetail?.metrics ?? {};
+    const summary = latestRunDetail || latestCompletedRunSummary
       ? {
-          totalReturn: formatPercent(metrics.total_return ?? 0),
-          annualizedReturn: formatPercent(metrics.annualized_return ?? 0),
-          sharpe: formatRatio(metrics.sharpe ?? 0),
-          maxDrawdown: formatPercent(metrics.max_drawdown ?? 0),
-          oosTotalReturn: formatPercent(metrics.oos_total_return ?? metrics.oos_return ?? 0),
-          oosSharpe: formatRatio(metrics.oos_sharpe ?? 0),
+          totalReturn: formatPercent(latestCompletedRunSummary?.total_return ?? detailMetrics.total_return ?? 0),
+          annualizedReturn: formatPercent(
+            latestCompletedRunSummary?.annualized_return ?? detailMetrics.annualized_return ?? 0,
+          ),
+          sharpe: formatRatio(latestCompletedRunSummary?.sharpe ?? detailMetrics.sharpe ?? 0),
+          maxDrawdown: formatPercent(latestCompletedRunSummary?.max_drawdown ?? detailMetrics.max_drawdown ?? 0),
+          oosTotalReturn: formatPercent(
+            latestCompletedRunSummary?.oos_total_return ??
+              detailMetrics.oos_total_return ??
+              detailMetrics.oos_return ??
+              0,
+          ),
+          oosSharpe: formatRatio(latestCompletedRunSummary?.oos_sharpe ?? detailMetrics.oos_sharpe ?? 0),
         }
       : null;
 
@@ -212,13 +261,23 @@ export function buildWorkspaceStrategyCards(
           date: point.trade_date,
           equity: point.equity,
           isOos: point.is_oos,
-        })) ?? [],
+        })) ??
+        latestCompletedRunSummary?.sparkline_points?.map((point) => ({
+          date: point.date,
+          equity: point.equity,
+          isOos: point.is_oos,
+        })) ??
+        [],
       summary,
       auxiliaryCopy: compareEligible ? '当前参数版本已可加入对比。' : compareBlocker,
-      metaPrimary: buildMetaPrimary(strategy, detail, latestRunDetail),
-      metaSecondary: buildMetaSecondary(strategy, detail, latestRunDetail, parameterVersion),
+      metaPrimary: buildMetaPrimary(strategy, detail, latestRunDetail, latestCompletedRunSummary),
+      metaSecondary: buildMetaSecondary(strategy, detail, latestRunDetail, latestCompletedRunSummary, parameterVersion),
       metaTimestamp: formatCardTimestamp(
-        latestRunDetail?.completed_at ?? latestRunDetail?.updated_at ?? latestRunDetail?.created_at ?? null,
+        latestRunDetail?.completed_at ??
+          latestRunDetail?.updated_at ??
+          latestRunDetail?.created_at ??
+          latestCompletedRunSummary?.completed_at ??
+          null,
       ),
     };
   });
@@ -267,7 +326,7 @@ export function formatParameterValue(value: ParameterValue | undefined, key?: st
       return '-';
     }
     if (key === 'strategy_type') {
-      return STRATEGY_TYPE_LABELS[normalized] ?? normalized;
+      return STRATEGY_TYPE_LABELS[normalized] ?? STRATEGY_TYPE_LABELS[normalized.toUpperCase()] ?? normalized;
     }
     return PARAMETER_VALUE_LABELS[normalized] ?? normalized;
   }

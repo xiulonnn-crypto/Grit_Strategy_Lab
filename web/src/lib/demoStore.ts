@@ -381,7 +381,7 @@ export function setPromoteConflict(jobId: string, candidateId: string): void {
 }
 
 export const demoApi: DemoApi = {
-  async getWorkspaceOverview(): Promise<ApiWorkspaceOverview> {
+  async getWorkspaceOverview(_includeCleanupAudit = false, _signal?: AbortSignal): Promise<ApiWorkspaceOverview> {
     return clone({
       workspace_name: 'Grit Strategy Lab',
       subtitle: 'Creation, backtest, and optimization workspace for local strategy recovery.',
@@ -396,7 +396,7 @@ export const demoApi: DemoApi = {
     });
   },
 
-  async listStrategies(): Promise<ApiStrategyListItem[]> {
+  async listStrategies(_signal?: AbortSignal): Promise<ApiStrategyListItem[]> {
     return clone(state.strategies);
   },
 
@@ -451,7 +451,7 @@ export const demoApi: DemoApi = {
     return this.getStrategyDetail('strat-001');
   },
 
-  async listBacktestRuns(params): Promise<ApiBacktestRunListItem[]> {
+  async listBacktestRuns(params, _signal?: AbortSignal): Promise<ApiBacktestRunListItem[]> {
     const limit = params?.limit ?? state.runs.length;
     return clone(
       state.runs.slice(0, limit).map((run) => ({
@@ -463,7 +463,7 @@ export const demoApi: DemoApi = {
     );
   },
 
-  async getBacktestRunDetail(id: string): Promise<ApiBacktestRunDetail> {
+  async getBacktestRunDetail(id: string, _signal?: AbortSignal): Promise<ApiBacktestRunDetail> {
     const run = state.runs.find((item) => item.id === id);
     if (!run) {
       throw new ApiError({ status: 404, code: 'run_not_found', message: `Run ${id} was not found.` });

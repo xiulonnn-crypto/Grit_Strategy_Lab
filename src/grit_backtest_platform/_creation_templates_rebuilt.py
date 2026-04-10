@@ -128,26 +128,40 @@ STRATEGY_TEMPLATES: dict[str, StrategyTemplate] = {
         name="Mean Reversion",
         description="Mean reversion strategy around a target symbol or universe.",
         prompt_hints=("均值回归", "mean reversion", "reversion"),
-        top_level_defaults={"strategy_type": "MEAN_REVERSION", "universe_name": "", "rebalance_frequency": "weekly"},
+        top_level_defaults={"strategy_type": "MEAN_REVERSION", "universe_name": "", "rebalance_frequency": "never"},
         parameter_defaults={
             "strategy_name": None,
             "strategy_description": None,
             "benchmark_symbol": "SPY",
+            "observation_timeframe": None,
             "trading_logic": None,
-            "deviation_threshold": None,
-            "window_size": None,
-            "mean_target": None,
-            "risk_budget": None,
+            "bollinger_period": None,
+            "rsi_period": None,
+            "rsi_buy_threshold": None,
+            "rsi_sell_threshold": None,
+            "atr_period": None,
+            "take_profit_atr": None,
+            "stop_loss_atr": None,
+            "long_entry_size_pct": None,
+            "short_entry_size_pct": None,
+            "capital": None,
         },
         fields=[
             TemplateField("strategy_name", "策略名称", "string"),
             TemplateField("strategy_description", "策略描述", "string"),
             TemplateField("benchmark_symbol", "基准", "enum", "SPY"),
+            TemplateField("observation_timeframe", "观察周期", "enum", "daily"),
             TemplateField("trading_logic", "交易逻辑", "string"),
-            TemplateField("deviation_threshold", "标准差阈值", "number"),
-            TemplateField("window_size", "窗口大小", "integer"),
-            TemplateField("mean_target", "回归目标", "string"),
-            TemplateField("risk_budget", "风险预算(%)", "number"),
+            TemplateField("bollinger_period", "布林带周期", "integer"),
+            TemplateField("rsi_period", "RSI周期", "integer"),
+            TemplateField("rsi_buy_threshold", "RSI超卖阈值", "number"),
+            TemplateField("rsi_sell_threshold", "RSI超买阈值", "number"),
+            TemplateField("atr_period", "ATR周期", "integer"),
+            TemplateField("take_profit_atr", "止盈倍数(ATR)", "number"),
+            TemplateField("stop_loss_atr", "止损倍数(ATR)", "number"),
+            TemplateField("long_entry_size_pct", "买入仓位(%)", "number"),
+            TemplateField("short_entry_size_pct", "卖出仓位(%)", "number"),
+            TemplateField("capital", "初始资金(USD)", "number"),
         ],
     ),
     "BUY_AND_HOLD": StrategyTemplate(
@@ -468,27 +482,134 @@ def _build_mean_reversion_strategy_description(
     *,
     text: str,
     universe_name: str,
-    trading_logic: str | None,
-    deviation_threshold: int | float | None,
-    window_size: int | None,
-    mean_target: str | None,
+    observation_timeframe: str | None,
+    bollinger_period: int | None,
+    rsi_period: int | None,
+    rsi_buy_threshold: int | float | None,
+    rsi_sell_threshold: int | float | None,
+    atr_period: int | None,
+    take_profit_atr: int | float | None,
+    stop_loss_atr: int | float | None,
+    long_entry_size_pct: int | float | None,
+    short_entry_size_pct: int | float | None,
 ) -> str | None:
     if not text.strip():
         return None
     details: list[str] = []
-    if universe_name:
-        details.append(f"围绕{universe_name}执行均值回归交易")
-    else:
-        details.append("执行均值回归交易")
-    if trading_logic:
-        details.append(trading_logic)
-    if window_size is not None:
-        details.append(f"窗口{window_size}")
-    if deviation_threshold is not None:
-        details.append(f"阈值{_format_extracted_value(deviation_threshold)}")
-    if mean_target:
-        details.append(f"回归目标{mean_target}")
+    timeframe_label = {
+        "daily": "日线",
+        "weekly": "周线",
+        "hourly": "小时线",
+    }.get(str(observation_timeframe or "").lower(), "")
+    target = f"{universe_name}{timeframe_label}" if universe_name and timeframe_label else universe_name or timeframe_label or "目标标的"
+    details.append(f"观察{target}，执行均值回归交易")
+    indicator_bits: list[str] = []
+    if bollinger_period is not None:
+        indicator_bits.append(f"{bollinger_period}日布林带")
+    if rsi_period is not None:
+        indicator_bits.append(f"RSI({rsi_period})")
+    if atr_period is not None:
+        indicator_bits.append(f"ATR({atr_period})")
+    if indicator_bits:
+        details.append(f"使用{'、'.join(indicator_bits)}识别超买超卖与动态风控")
+    entry_bits: list[str] = []
+    if long_entry_size_pct is not None:
+        buy_trigger = "跌破布林带下轨"
+        if rsi_buy_threshold is not None and rsi_period is not None:
+            buy_trigger += f"且RSI({rsi_period})<{_format_extracted_value(rsi_buy_threshold)}"
+        entry_bits.append(f"空仓时{buy_trigger}买入{_format_extracted_value(long_entry_size_pct)}%")
+    if short_entry_size_pct is not None:
+        sell_trigger = "突破布林带上轨"
+        if rsi_sell_threshold is not None and rsi_period is not None:
+            sell_trigger += f"且RSI({rsi_period})>{_format_extracted_value(rsi_sell_threshold)}"
+        entry_bits.append(f"空仓时{sell_trigger}卖出{_format_extracted_value(short_entry_size_pct)}%")
+    if entry_bits:
+        details.append("；".join(entry_bits))
+    exit_bits: list[str] = []
+    if take_profit_atr is not None:
+        exit_bits.append(f"{_format_extracted_value(take_profit_atr)}倍ATR止盈")
+    if stop_loss_atr is not None:
+        exit_bits.append(f"{_format_extracted_value(stop_loss_atr)}倍ATR止损")
+    if exit_bits:
+        details.append("，".join(exit_bits))
     return "，".join(details) + "。"
+
+
+def _build_mean_reversion_trading_logic_summary(
+    *,
+    universe_name: str,
+    observation_timeframe: str | None,
+    bollinger_period: int | None,
+    rsi_period: int | None,
+    rsi_buy_threshold: int | float | None,
+    rsi_sell_threshold: int | float | None,
+    atr_period: int | None,
+    take_profit_atr: int | float | None,
+    stop_loss_atr: int | float | None,
+    long_entry_size_pct: int | float | None,
+    short_entry_size_pct: int | float | None,
+) -> str | None:
+    timeframe_label = {
+        "daily": "日线",
+        "weekly": "周线",
+        "hourly": "小时线",
+    }.get(str(observation_timeframe or "").lower(), "")
+    target = f"{universe_name}{timeframe_label}" if universe_name and timeframe_label else universe_name or timeframe_label or "目标标的"
+
+    logic_bits: list[str] = [f"观察{target}"]
+    indicator_bits: list[str] = []
+    if bollinger_period is not None:
+        indicator_bits.append(f"{bollinger_period}日布林带")
+    if rsi_period is not None:
+        indicator_bits.append(f"RSI({rsi_period})")
+    if atr_period is not None:
+        indicator_bits.append(f"ATR({atr_period})")
+    if indicator_bits:
+        logic_bits.append(f"通过{' + '.join(indicator_bits)}识别超买超卖与动态风控")
+
+    entry_bits: list[str] = []
+    if long_entry_size_pct is not None:
+        buy_trigger = "跌破布林带下轨"
+        if rsi_period is not None and rsi_buy_threshold is not None:
+            buy_trigger += f"且RSI({rsi_period})<{_format_extracted_value(rsi_buy_threshold)}"
+        entry_bits.append(f"{buy_trigger}时买入{_format_extracted_value(long_entry_size_pct)}%")
+    if short_entry_size_pct is not None:
+        sell_trigger = "突破布林带上轨"
+        if rsi_period is not None and rsi_sell_threshold is not None:
+            sell_trigger += f"且RSI({rsi_period})>{_format_extracted_value(rsi_sell_threshold)}"
+        entry_bits.append(f"{sell_trigger}时卖出{_format_extracted_value(short_entry_size_pct)}%")
+    if entry_bits:
+        logic_bits.append("；".join(entry_bits))
+
+    exit_bits: list[str] = []
+    if take_profit_atr is not None:
+        exit_bits.append(f"{_format_extracted_value(take_profit_atr)}倍ATR止盈")
+    if stop_loss_atr is not None:
+        exit_bits.append(f"{_format_extracted_value(stop_loss_atr)}倍ATR止损")
+    if exit_bits:
+        logic_bits.append("，".join(exit_bits))
+
+    return "；".join(bit for bit in logic_bits if bit) if logic_bits else None
+
+
+def _extract_mean_reversion_timeframe(text: str) -> tuple[str | None, str]:
+    lowered = text.lower()
+    if "日线" in text or "daily" in lowered:
+        return "daily", "user_input"
+    if "周线" in text or "weekly" in lowered:
+        return "weekly", "user_input"
+    if "小时" in text or "hourly" in lowered:
+        return "hourly", "user_input"
+    return None, "system_default"
+
+
+def _extract_mean_reversion_strategy_name(text: str, universe_name: str) -> tuple[str | None, str]:
+    explicit = re.search(r"([A-Za-z0-9\u4e00-\u9fff]+?均值回归策略)", text)
+    if explicit:
+        return explicit.group(1).strip(), "user_input"
+    if universe_name:
+        return _default_strategy_name({"strategy_type": "MEAN_REVERSION", "universe_name": universe_name}), "system_inference"
+    return None, "system_default"
 
 
 def detect_universe(messages: Sequence[Mapping[str, Any]] | str) -> tuple[str, str | None, list[dict[str, Any]]]:
@@ -823,34 +944,131 @@ def _extract_buy_and_hold_payload(text: str) -> tuple[dict[str, Any], dict[str, 
 def _extract_mean_reversion_payload(text: str) -> tuple[dict[str, Any], dict[str, Any]]:
     universe_name, universe_source, _ = detect_universe(text)
     benchmark_symbol, benchmark_source = _infer_benchmark_symbol(universe_name)
-    rebalance_frequency, rebalance_source = _extract_frequency_value(text, default="weekly")
-    deviation_threshold = _extract_numeric(
+    rebalance_frequency, rebalance_source = _extract_frequency_value(text, default="never")
+    observation_timeframe, observation_timeframe_source = _extract_mean_reversion_timeframe(text)
+    bollinger_period = _extract_number(
         text,
         [
-            r"标准差阈值\s*(-?\d+(?:\.\d+)?)",
-            r"阈值\s*(-?\d+(?:\.\d+)?)",
-            r"偏离\s*(-?\d+(?:\.\d+)?)",
+            r"(\d+)\s*日布林带",
+            r"(\d+)\s*周期\s*布林带",
+            r"布林带\s*\(?\s*(\d+)\s*\)?",
         ],
     )
-    window_size = _extract_number(
+    rsi_period = _extract_number(
         text,
         [
-            r"窗口(?:大小)?\s*(\d+)",
-            r"回看(?:窗口)?\s*(\d+)",
-            r"(\d+)\s*(?:日|天)窗口",
+            r"RSI\s*\(\s*(\d+)\s*\)",
+            r"(\d+)\s*周期\s*RSI",
+            r"RSI\s*(\d+)",
         ],
     )
-    mean_target_match = re.search(r"回归目标[:：]?\s*([A-Za-z0-9._-]+)", text, flags=re.IGNORECASE)
-    mean_target = mean_target_match.group(1).upper() if mean_target_match else None
-    trading_logic = text.strip()[:120] or None
-    strategy_name = _default_strategy_name({"strategy_type": "MEAN_REVERSION", "universe_name": universe_name}) if universe_name else None
+    rsi_buy_threshold = _extract_numeric(
+        text,
+        [
+            r"RSI\s*\(\s*\d+\s*\)\s*[＜<]\s*(-?\d+(?:\.\d+)?)",
+            r"RSI\s*\(\s*\d+\s*\)\s*小于\s*(-?\d+(?:\.\d+)?)",
+        ],
+    )
+    rsi_sell_threshold = _extract_numeric(
+        text,
+        [
+            r"RSI\s*\(\s*\d+\s*\)\s*[＞>]\s*(-?\d+(?:\.\d+)?)",
+            r"RSI\s*\(\s*\d+\s*\)\s*大于\s*(-?\d+(?:\.\d+)?)",
+        ],
+    )
+    atr_period = _extract_number(
+        text,
+        [
+            r"(\d+)\s*周期\s*ATR",
+            r"ATR\s*\(\s*(\d+)\s*\)",
+            r"ATR\s*(\d+)",
+        ],
+    )
+    take_profit_atr = _extract_numeric(
+        text,
+        [
+            r"盈利达到\s*(-?\d+(?:\.\d+)?)\s*倍\s*ATR",
+            r"止盈(?:达到|为)?\s*(-?\d+(?:\.\d+)?)\s*倍\s*ATR",
+        ],
+    )
+    stop_loss_atr = _extract_numeric(
+        text,
+        [
+            r"亏损达到\s*(-?\d+(?:\.\d+)?)\s*倍\s*ATR",
+            r"止损(?:达到|为)?\s*(-?\d+(?:\.\d+)?)\s*倍\s*ATR",
+        ],
+    )
+    long_entry_size_pct = _extract_numeric(
+        text,
+        [
+            r"跌破布林带下轨[^\n，。；;]*?买入\s*(-?\d+(?:\.\d+)?)%",
+            r"RSI\s*\(\s*\d+\s*\)\s*[＜<]\s*-?\d+(?:\.\d+)?[^\n，。；;]*?买入\s*(-?\d+(?:\.\d+)?)%",
+        ],
+    )
+    short_entry_size_pct = _extract_numeric(
+        text,
+        [
+            r"突破布林带上轨[^\n，。；;]*?卖出\s*(-?\d+(?:\.\d+)?)%",
+            r"RSI\s*\(\s*\d+\s*\)\s*[＞>]\s*-?\d+(?:\.\d+)?[^\n，。；;]*?卖出\s*(-?\d+(?:\.\d+)?)%",
+        ],
+    )
+    capital = _extract_numeric(
+        text,
+        [
+            r"初始(?:资金|本金)?\s*(\d+(?:\.\d+)?)\s*(?:USD|usd|美元|刀)?",
+            r"本金\s*(\d+(?:\.\d+)?)",
+        ],
+    )
+    strategy_name, strategy_name_source = _extract_mean_reversion_strategy_name(text, universe_name)
+    logic_bits: list[str] = []
+    if universe_name or observation_timeframe:
+        timeframe_label = {
+            "daily": "日线",
+            "weekly": "周线",
+            "hourly": "小时线",
+        }.get(str(observation_timeframe or "").lower(), "")
+        target = f"{universe_name}{timeframe_label}" if universe_name and timeframe_label else universe_name or timeframe_label or "目标标的"
+        logic_bits.append(f"观察{target}")
+    indicator_bits: list[str] = []
+    if bollinger_period is not None:
+        indicator_bits.append(f"{bollinger_period}日布林带")
+    if rsi_period is not None:
+        indicator_bits.append(f"RSI({rsi_period})")
+    if indicator_bits:
+        logic_bits.append(f"使用{' + '.join(indicator_bits)}识别超买超卖")
+    if atr_period is not None:
+        logic_bits.append(f"结合ATR({atr_period})动态止盈止损")
+    if long_entry_size_pct is not None:
+        trigger = "跌破布林带下轨"
+        if rsi_period is not None and rsi_buy_threshold is not None:
+            trigger += f"且RSI({rsi_period})<{_format_extracted_value(rsi_buy_threshold)}"
+        logic_bits.append(f"空仓时{trigger}买入{_format_extracted_value(long_entry_size_pct)}%")
+    if short_entry_size_pct is not None:
+        trigger = "突破布林带上轨"
+        if rsi_period is not None and rsi_sell_threshold is not None:
+            trigger += f"且RSI({rsi_period})>{_format_extracted_value(rsi_sell_threshold)}"
+        logic_bits.append(f"空仓时{trigger}卖出{_format_extracted_value(short_entry_size_pct)}%")
+    if take_profit_atr is not None or stop_loss_atr is not None:
+        exits: list[str] = []
+        if take_profit_atr is not None:
+            exits.append(f"{_format_extracted_value(take_profit_atr)}倍ATR止盈")
+        if stop_loss_atr is not None:
+            exits.append(f"{_format_extracted_value(stop_loss_atr)}倍ATR止损")
+        logic_bits.append("，".join(exits))
+    trading_logic = "；".join(logic_bits) if logic_bits else (text.strip()[:160] or None)
     strategy_description = _build_mean_reversion_strategy_description(
         text=text,
         universe_name=universe_name,
-        trading_logic=trading_logic,
-        deviation_threshold=deviation_threshold,
-        window_size=window_size,
-        mean_target=mean_target,
+        observation_timeframe=observation_timeframe,
+        bollinger_period=bollinger_period,
+        rsi_period=rsi_period,
+        rsi_buy_threshold=rsi_buy_threshold,
+        rsi_sell_threshold=rsi_sell_threshold,
+        atr_period=atr_period,
+        take_profit_atr=take_profit_atr,
+        stop_loss_atr=stop_loss_atr,
+        long_entry_size_pct=long_entry_size_pct,
+        short_entry_size_pct=short_entry_size_pct,
     )
 
     top_level = {
@@ -859,17 +1077,167 @@ def _extract_mean_reversion_payload(text: str) -> tuple[dict[str, Any], dict[str
         "rebalance_frequency": (rebalance_frequency, rebalance_source),
     }
     parameters = {
-        "strategy_name": (strategy_name, "system_inference"),
+        "strategy_name": (strategy_name, strategy_name_source),
         "strategy_description": (strategy_description, "system_inference"),
         "benchmark_symbol": (benchmark_symbol, benchmark_source),
-        "trading_logic": (trading_logic, "user_input" if trading_logic else "system_default"),
-        "deviation_threshold": (deviation_threshold, "user_input"),
-        "window_size": (window_size, "user_input"),
-        "mean_target": (mean_target, "user_input" if mean_target else "system_default"),
-        "risk_budget": (
-            _extract_numeric(text, [r"风险预算\s*(-?\d+(?:\.\d+)?)%", r"止损\s*(-?\d+(?:\.\d+)?)%"]),
-            "user_input",
-        ),
+        "observation_timeframe": (observation_timeframe, observation_timeframe_source),
+        "trading_logic": (trading_logic, "system_inference" if logic_bits else "user_input" if trading_logic else "system_default"),
+        "bollinger_period": (bollinger_period, "user_input"),
+        "rsi_period": (rsi_period, "user_input"),
+        "rsi_buy_threshold": (rsi_buy_threshold, "user_input"),
+        "rsi_sell_threshold": (rsi_sell_threshold, "user_input"),
+        "atr_period": (atr_period, "user_input"),
+        "take_profit_atr": (take_profit_atr, "user_input"),
+        "stop_loss_atr": (stop_loss_atr, "user_input"),
+        "long_entry_size_pct": (long_entry_size_pct, "user_input"),
+        "short_entry_size_pct": (short_entry_size_pct, "user_input"),
+        "capital": (capital, "user_input"),
+    }
+    return top_level, parameters
+
+
+def _extract_mean_reversion_payload(text: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    universe_name, universe_source, _ = detect_universe(text)
+    universe_name = str(universe_name or "").strip() or None
+    benchmark_symbol, benchmark_source = _infer_benchmark_symbol(universe_name) if universe_name else (None, "system_default")
+    rebalance_frequency, rebalance_source = _extract_frequency_value(text, default="never")
+    observation_timeframe, observation_timeframe_source = _extract_mean_reversion_timeframe(text)
+    bollinger_period = _extract_number(
+        text,
+        [
+            r"(\d+)\s*日布林带",
+            r"(\d+)\s*周期\s*布林带",
+            r"布林带\s*\(?\s*(\d+)\s*\)?",
+        ],
+    )
+    rsi_period = _extract_number(
+        text,
+        [
+            r"RSI\s*\(\s*(\d+)\s*\)",
+            r"(\d+)\s*周期\s*RSI",
+            r"RSI\s*(\d+)",
+        ],
+    )
+    rsi_buy_threshold = _extract_numeric(
+        text,
+        [
+            r"RSI\s*\(\s*\d+\s*\)\s*[<＜]\s*(-?\d+(?:\.\d+)?)",
+            r"RSI\s*\(\s*\d+\s*\)\s*低于\s*(-?\d+(?:\.\d+)?)",
+        ],
+    )
+    rsi_sell_threshold = _extract_numeric(
+        text,
+        [
+            r"RSI\s*\(\s*\d+\s*\)\s*[>＞]\s*(-?\d+(?:\.\d+)?)",
+            r"RSI\s*\(\s*\d+\s*\)\s*高于\s*(-?\d+(?:\.\d+)?)",
+        ],
+    )
+    atr_period = _extract_number(
+        text,
+        [
+            r"(\d+)\s*周期\s*ATR",
+            r"ATR\s*\(\s*(\d+)\s*\)",
+            r"ATR\s*(\d+)",
+        ],
+    )
+    take_profit_atr = _extract_numeric(
+        text,
+        [
+            r"止盈(?:达到)?\s*(-?\d+(?:\.\d+)?)\s*倍\s*ATR",
+            r"盈利达到\s*(-?\d+(?:\.\d+)?)\s*倍\s*ATR",
+        ],
+    )
+    stop_loss_atr = _extract_numeric(
+        text,
+        [
+            r"止损(?:达到)?\s*(-?\d+(?:\.\d+)?)\s*倍\s*ATR",
+            r"亏损达到\s*(-?\d+(?:\.\d+)?)\s*倍\s*ATR",
+        ],
+    )
+    shared_entry_size_pct = _extract_numeric(
+        text,
+        [
+            r"买入仓位和卖出仓位(?:都)?改(?:成|为)\s*(-?\d+(?:\.\d+)?)%",
+            r"买入和卖出仓位(?:都)?改(?:成|为)\s*(-?\d+(?:\.\d+)?)%",
+            r"仓位(?:都)?改(?:成|为)\s*(-?\d+(?:\.\d+)?)%",
+        ],
+    )
+    long_entry_size_pct = shared_entry_size_pct if shared_entry_size_pct is not None else _extract_numeric(
+        text,
+        [
+            r"跌破布林带下轨[^\n，。；;]*?买入\s*(-?\d+(?:\.\d+)?)%",
+            r"RSI\s*\(\s*\d+\s*\)\s*[<＜]\s*-?\d+(?:\.\d+)?[^\n，。；;]*?买入\s*(-?\d+(?:\.\d+)?)%",
+            r"买入仓位(?:都)?改(?:成|为)\s*(-?\d+(?:\.\d+)?)%",
+            r"买入(?:仓位)?调整(?:到|为)?\s*(-?\d+(?:\.\d+)?)%",
+        ],
+    )
+    short_entry_size_pct = shared_entry_size_pct if shared_entry_size_pct is not None else _extract_numeric(
+        text,
+        [
+            r"突破布林带上轨[^\n，。；;]*?卖出\s*(-?\d+(?:\.\d+)?)%",
+            r"RSI\s*\(\s*\d+\s*\)\s*[>＞]\s*-?\d+(?:\.\d+)?[^\n，。；;]*?卖出\s*(-?\d+(?:\.\d+)?)%",
+            r"卖出仓位(?:都)?改(?:成|为)\s*(-?\d+(?:\.\d+)?)%",
+            r"卖出(?:仓位)?调整(?:到|为)?\s*(-?\d+(?:\.\d+)?)%",
+        ],
+    )
+    capital = _extract_numeric(
+        text,
+        [
+            r"初始(?:资金|本金)?\s*(\d+(?:\.\d+)?)\s*(?:USD|usd|刀|元)?",
+            r"本金\s*(\d+(?:\.\d+)?)",
+        ],
+    )
+    strategy_name, strategy_name_source = _extract_mean_reversion_strategy_name(text, universe_name or "")
+    patch_message = bool(re.search(r"(改成|改为|调整|修改)", text))
+    trading_logic = None if patch_message else _build_mean_reversion_trading_logic_summary(
+        universe_name=universe_name or "",
+        observation_timeframe=observation_timeframe,
+        bollinger_period=bollinger_period,
+        rsi_period=rsi_period,
+        rsi_buy_threshold=rsi_buy_threshold,
+        rsi_sell_threshold=rsi_sell_threshold,
+        atr_period=atr_period,
+        take_profit_atr=take_profit_atr,
+        stop_loss_atr=stop_loss_atr,
+        long_entry_size_pct=long_entry_size_pct,
+        short_entry_size_pct=short_entry_size_pct,
+    )
+    strategy_description = None if patch_message else _build_mean_reversion_strategy_description(
+        text=text,
+        universe_name=universe_name or "",
+        observation_timeframe=observation_timeframe,
+        bollinger_period=bollinger_period,
+        rsi_period=rsi_period,
+        rsi_buy_threshold=rsi_buy_threshold,
+        rsi_sell_threshold=rsi_sell_threshold,
+        atr_period=atr_period,
+        take_profit_atr=take_profit_atr,
+        stop_loss_atr=stop_loss_atr,
+        long_entry_size_pct=long_entry_size_pct,
+        short_entry_size_pct=short_entry_size_pct,
+    )
+
+    top_level = {
+        "strategy_type": ("MEAN_REVERSION", "user_input"),
+        "universe_name": (universe_name, universe_source or "system_default"),
+        "rebalance_frequency": (rebalance_frequency, rebalance_source),
+    }
+    parameters = {
+        "strategy_name": (strategy_name, strategy_name_source),
+        "strategy_description": (strategy_description, "system_inference"),
+        "benchmark_symbol": (benchmark_symbol, benchmark_source),
+        "observation_timeframe": (observation_timeframe, observation_timeframe_source),
+        "trading_logic": (trading_logic, "system_inference" if trading_logic else "system_default"),
+        "bollinger_period": (bollinger_period, "user_input"),
+        "rsi_period": (rsi_period, "user_input"),
+        "rsi_buy_threshold": (rsi_buy_threshold, "user_input"),
+        "rsi_sell_threshold": (rsi_sell_threshold, "user_input"),
+        "atr_period": (atr_period, "user_input"),
+        "take_profit_atr": (take_profit_atr, "user_input"),
+        "stop_loss_atr": (stop_loss_atr, "user_input"),
+        "long_entry_size_pct": (long_entry_size_pct, "user_input"),
+        "short_entry_size_pct": (short_entry_size_pct, "user_input"),
+        "capital": (capital, "user_input"),
     }
     return top_level, parameters
 
@@ -1000,7 +1368,12 @@ def build_confirmation(
     confirmation_fields = _normalize_existing(existing, strategy_type)
     manual_conflicts: list[dict[str, Any]] = []
 
-    if strategy_type == "GRID":
+    if not text.strip() and existing is not None:
+        top_level_payload = {
+            "strategy_type": (strategy_type, "system_default"),
+        }
+        parameter_payload = {}
+    elif strategy_type == "GRID":
         top_level_payload, parameter_payload = _extract_grid_payload(text)
     elif strategy_type == "MOMENTUM":
         top_level_payload, parameter_payload = _extract_momentum_payload_v2(text)
@@ -1097,7 +1470,7 @@ def build_confirmation(
             confirmation_fields["top_level"],
             "rebalance_frequency",
             "再平衡频次",
-            "weekly",
+            "never",
         )
         top_level["rebalance_frequency"] = _entry_value(confirmation_fields["top_level"], "rebalance_frequency")
 
@@ -1131,9 +1504,17 @@ def build_confirmation(
             "strategy_name",
             "strategy_description",
             "benchmark_symbol",
+            "observation_timeframe",
             "trading_logic",
-            "deviation_threshold",
-            "window_size",
+            "bollinger_period",
+            "rsi_period",
+            "rsi_buy_threshold",
+            "rsi_sell_threshold",
+            "atr_period",
+            "take_profit_atr",
+            "stop_loss_atr",
+            "long_entry_size_pct",
+            "short_entry_size_pct",
         ],
         "BUY_AND_HOLD": [
             "universe_name",

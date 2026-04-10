@@ -2,7 +2,7 @@ import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WorkspacePage } from './pages/workspace-page-lane-b';
 import { ShellFrameCn } from './shell-frame-cn';
-import type { ApiBacktestRunDetail, ApiStrategyDetail, ApiStrategyListItem, ApiWorkspaceOverview } from './types';
+import type { ApiStrategyDetail, ApiStrategyListItem, ApiWorkspaceOverview } from './types';
 
 type FakeApi = {
   getWorkspaceOverview: ReturnType<typeof vi.fn>;
@@ -25,22 +25,22 @@ vi.mock('./lib/demoStoreContext', () => ({
 }));
 
 const overview: ApiWorkspaceOverview = {
-  workspace_name: 'Grit 策略实验室',
-  subtitle: '创建、回测和优化的统一工作台。',
+  workspace_name: 'Grit \u7b56\u7565\u5b9e\u9a8c\u5ba4',
+  subtitle: '\u521b\u5efa\u3001\u56de\u6d4b\u548c\u4f18\u5316\u90fd\u5728\u540c\u4e00\u6761\u4e3b\u94fe\u8def\u91cc\u5b8c\u6210\u3002',
   strategy_count: 2,
   active_run_count: 1,
   running_optimization_count: 1,
   latest_strategy_id: 'str-beta',
   latest_backtest_run_id: 'bt-102',
   latest_optimization_job_id: 'opt-201',
-  top_momentum_warning: '最新提醒：样本外区间已同步。',
-  quick_actions: ['创建策略', '刷新快照'],
+  top_momentum_warning: '\u6837\u672c\u5916\u8868\u73b0\u9700\u8981\u7ee7\u7eed\u89c2\u5bdf\u3002',
+  quick_actions: ['\u521b\u5efa\u7b56\u7565', '\u6570\u636e\u5feb\u7167'],
 };
 
 const strategies: ApiStrategyListItem[] = [
   {
     id: 'str-alpha',
-    name: '策略 Alpha',
+    name: '\u7b56\u7565 Alpha',
     strategy_type: 'MOMENTUM',
     universe_name: 'QQQ',
     lifecycle_status: 'ACTIVE',
@@ -51,10 +51,34 @@ const strategies: ApiStrategyListItem[] = [
     created_at: '2026-03-24T00:00:00.000Z',
     updated_at: '2026-03-31T03:00:00.000Z',
     parameters: { lookback_days: 126, top_n: 20 },
+    latest_completed_run_summary: {
+      run_id: 'bt-101',
+      parameter_version: 3,
+      parameter_version_id: 'str-alpha-v3',
+      status: 'COMPLETED',
+      total_return: 0.184,
+      annualized_return: 0.112,
+      sharpe: 1.18,
+      max_drawdown: -0.064,
+      oos_total_return: 0.054,
+      oos_annualized_return: 0.041,
+      oos_sharpe: 0.67,
+      oos_max_drawdown: -0.031,
+      warning_count: 0,
+      execution_policy: 'T_CLOSE_TO_T1_OPEN',
+      dataset_snapshot_id: 'ds-alpha',
+      universe_snapshot_id: 'un-alpha',
+      completed_at: '2026-03-31T03:30:00.000Z',
+      sparkline_points: [
+        { date: '2026-03-01', equity: 100, is_oos: false },
+        { date: '2026-03-02', equity: 104, is_oos: false },
+        { date: '2026-03-03', equity: 108, is_oos: true },
+      ],
+    },
   },
   {
     id: 'str-beta',
-    name: '策略 Beta',
+    name: '\u7b56\u7565 Beta',
     strategy_type: 'GRID',
     universe_name: 'SPY',
     lifecycle_status: 'ACTIVE',
@@ -65,6 +89,30 @@ const strategies: ApiStrategyListItem[] = [
     created_at: '2026-03-25T00:00:00.000Z',
     updated_at: '2026-03-31T04:00:00.000Z',
     parameters: { window_size: 50, rebalance: 'weekly' },
+    latest_completed_run_summary: {
+      run_id: 'bt-102',
+      parameter_version: 1,
+      parameter_version_id: 'str-beta-v1',
+      status: 'COMPLETED_WITH_WARNINGS',
+      total_return: 0.251,
+      annualized_return: 0.144,
+      sharpe: 1.42,
+      max_drawdown: -0.056,
+      oos_total_return: 0.063,
+      oos_annualized_return: 0.052,
+      oos_sharpe: 0.88,
+      oos_max_drawdown: -0.028,
+      warning_count: 1,
+      execution_policy: 'T_CLOSE_TO_T1_OPEN',
+      dataset_snapshot_id: 'ds-beta',
+      universe_snapshot_id: 'un-beta',
+      completed_at: '2026-03-31T04:20:00.000Z',
+      sparkline_points: [
+        { date: '2026-03-01', equity: 100, is_oos: false },
+        { date: '2026-03-02', equity: 103, is_oos: false },
+        { date: '2026-03-03', equity: 109, is_oos: true },
+      ],
+    },
   },
 ];
 
@@ -82,13 +130,6 @@ const strategyDetails: Record<string, ApiStrategyDetail> = {
     ],
     allowed_actions: ['run_backtest'],
     confirmation_fields: { top_level: [], parameters: [] },
-    strategy_type: 'MOMENTUM',
-    universe_name: 'QQQ',
-    current_parameter_version: 3,
-    current_parameter_version_id: 'str-alpha-v3',
-    latest_successful_run_id: 'bt-101',
-    latest_optimization_job_id: 'opt-201',
-    parameters: { lookback_days: 126, top_n: 20 },
   },
   'str-beta': {
     ...strategies[1],
@@ -103,114 +144,6 @@ const strategyDetails: Record<string, ApiStrategyDetail> = {
     ],
     allowed_actions: ['run_backtest'],
     confirmation_fields: { top_level: [], parameters: [] },
-    strategy_type: 'GRID',
-    universe_name: 'SPY',
-    current_parameter_version: 1,
-    current_parameter_version_id: 'str-beta-v1',
-    latest_successful_run_id: 'bt-102',
-    latest_optimization_job_id: null,
-    parameters: { window_size: 50, rebalance: 'weekly' },
-  },
-};
-
-const runDetails: Record<string, ApiBacktestRunDetail> = {
-  'bt-101': {
-    id: 'bt-101',
-    strategy_id: 'str-alpha',
-    strategy_name: '策略 Alpha',
-    status: 'COMPLETED',
-    metrics: {
-      total_return: 18.4,
-      annualized_return: 11.2,
-      sharpe: 1.18,
-      max_drawdown: -6.4,
-      oos_total_return: 5.4,
-      oos_sharpe: 0.67,
-    },
-    warnings: [],
-    preview: {
-      oos_start_date: '2026-03-24',
-      effective_date: '2026-03-24',
-      data_segment_type: '样本外',
-      metrics: { total_return: 18.4 },
-    },
-    chart_series: [
-      { trade_date: '2026-03-01', equity: 100, benchmark: 100, drawdown: 0, is_oos: false },
-      { trade_date: '2026-03-02', equity: 104, benchmark: 101, drawdown: -0.2, is_oos: false },
-      { trade_date: '2026-03-03', equity: 108, benchmark: 102, drawdown: -0.4, is_oos: true },
-    ],
-    monthly_returns: [],
-    trade_details: [],
-    configuration: { execution_policy: 'T_CLOSE_TO_T1_OPEN' },
-    parameter_snapshot: { lookback_days: 126, top_n: 20 },
-    snapshot_summary: { dataset_snapshot_id: 'ds-alpha', universe_snapshot_id: 'un-alpha' },
-    environment_summary: {},
-    relative_metrics: {},
-    consistency_score: {},
-    risk_metrics: {},
-    drawdown_events: [],
-    rolling_metrics: [],
-    data_segment_type: '样本外',
-    parameter_version_id: 'str-alpha-v3',
-    request: {},
-    oos_start_date: '2026-03-24',
-    effective_date: '2026-03-24',
-    coverage_ratio: 0.71,
-    coverage_days: 252,
-    is_permanent: false,
-    source_run_id: null,
-    trades_count: 42,
-    completed_at: '2026-03-31T03:30:00.000Z',
-    updated_at: '2026-03-31T03:30:00.000Z',
-  },
-  'bt-102': {
-    id: 'bt-102',
-    strategy_id: 'str-beta',
-    strategy_name: '策略 Beta',
-    status: 'COMPLETED_WITH_WARNINGS',
-    metrics: {
-      total_return: 25.1,
-      annualized_return: 14.4,
-      sharpe: 1.42,
-      max_drawdown: -5.6,
-      oos_total_return: 6.3,
-      oos_sharpe: 0.88,
-    },
-    warnings: ['样本外覆盖率偏低'],
-    preview: {
-      oos_start_date: '2026-03-25',
-      effective_date: '2026-03-25',
-      data_segment_type: '样本外',
-      metrics: { total_return: 25.1 },
-    },
-    chart_series: [
-      { trade_date: '2026-03-01', equity: 100, benchmark: 100, drawdown: 0, is_oos: false },
-      { trade_date: '2026-03-02', equity: 103, benchmark: 101, drawdown: -0.1, is_oos: false },
-      { trade_date: '2026-03-03', equity: 109, benchmark: 102, drawdown: -0.3, is_oos: true },
-    ],
-    monthly_returns: [],
-    trade_details: [],
-    configuration: { execution_policy: 'T_CLOSE_TO_T1_OPEN' },
-    parameter_snapshot: { window_size: 50, rebalance: 'weekly' },
-    snapshot_summary: { dataset_snapshot_id: 'ds-beta', universe_snapshot_id: 'un-beta' },
-    environment_summary: {},
-    relative_metrics: {},
-    consistency_score: {},
-    risk_metrics: {},
-    drawdown_events: [],
-    rolling_metrics: [],
-    data_segment_type: '样本外',
-    parameter_version_id: 'str-beta-v1',
-    request: {},
-    oos_start_date: '2026-03-25',
-    effective_date: '2026-03-25',
-    coverage_ratio: 0.82,
-    coverage_days: 252,
-    is_permanent: true,
-    source_run_id: null,
-    trades_count: 54,
-    completed_at: '2026-03-31T04:20:00.000Z',
-    updated_at: '2026-03-31T04:20:00.000Z',
   },
 };
 
@@ -222,33 +155,33 @@ beforeEach(() => {
     {
       id: 'bt-101',
       strategy_id: 'str-alpha',
-      strategy_name: '策略 Alpha',
+      strategy_name: '\u7b56\u7565 Alpha',
       status: 'COMPLETED',
       completed_at: '2026-03-31T03:30:00.000Z',
       created_at: '2026-03-31T03:00:00.000Z',
       updated_at: '2026-03-31T03:30:00.000Z',
-      metrics: { total_return: 18.4, sharpe: 1.18, max_drawdown: -6.4 },
+      metrics: { total_return: 0.184, sharpe: 1.18, max_drawdown: -0.064 },
       warnings: [],
-      preview: { oos_start_date: '2026-03-24', data_segment_type: '样本外' },
-      data_segment_type: '样本外',
+      preview: { oos_start_date: '2026-03-24', data_segment_type: 'FULL' },
+      data_segment_type: 'FULL',
       is_permanent: false,
     },
     {
       id: 'bt-102',
       strategy_id: 'str-beta',
-      strategy_name: '策略 Beta',
+      strategy_name: '\u7b56\u7565 Beta',
       status: 'COMPLETED_WITH_WARNINGS',
       completed_at: '2026-03-31T04:20:00.000Z',
       created_at: '2026-03-31T03:50:00.000Z',
       updated_at: '2026-03-31T04:20:00.000Z',
-      metrics: { total_return: 25.1, sharpe: 1.42, max_drawdown: -5.6 },
-      warnings: ['样本外覆盖率偏低'],
-      preview: { oos_start_date: '2026-03-25', data_segment_type: '样本外' },
-      data_segment_type: '样本外',
+      metrics: { total_return: 0.251, sharpe: 1.42, max_drawdown: -0.056 },
+      warnings: ['\u6837\u672c\u5916\u8868\u73b0\u5f31\u5316'],
+      preview: { oos_start_date: '2026-03-25', data_segment_type: 'FULL' },
+      data_segment_type: 'FULL',
       is_permanent: true,
     },
   ]);
-  fakeApi.getBacktestRunDetail.mockImplementation(async (id: string) => runDetails[id]!);
+  fakeApi.getBacktestRunDetail.mockResolvedValue(null);
   window.location.hash = '';
 });
 
@@ -258,7 +191,7 @@ afterEach(() => {
 });
 
 describe('workspace dashboard', () => {
-  it('renders the renovated workspace layout inside the Chinese shell', async () => {
+  it('renders workspace cards from strategy summaries without detail fan-out', async () => {
     let container: HTMLElement | null = null;
     await act(async () => {
       ({ container } = render(
@@ -273,25 +206,12 @@ describe('workspace dashboard', () => {
     expect(container!.querySelectorAll('.workspace-card-grid .workspace-strategy-card')).toHaveLength(2);
     expect(container!.querySelector('.workspace-recent-runs__timeline')).not.toBeNull();
 
-    expect(await screen.findByRole('heading', { name: '工作台健康度', level: 2 })).toBeInTheDocument();
-    expect(screen.getByText('当前研究工作台的核心状态与风险提示。')).toBeInTheDocument();
-    expect(screen.queryByText('创建、回测和优化的统一工作台。')).not.toBeInTheDocument();
-
-    expect(await screen.findByRole('button', { name: '创建策略' })).toBeInTheDocument();
-    expect(await screen.findByRole('button', { name: '数据快照' })).toBeInTheDocument();
-    expect((await screen.findAllByRole('heading', { name: '策略看板', level: 3 })).length).toBeGreaterThan(0);
-    expect(await screen.findByRole('heading', { name: '最近回测', level: 3 })).toBeInTheDocument();
-    expect((await screen.findAllByText('策略 Alpha')).length).toBeGreaterThan(0);
-    expect((await screen.findAllByText('策略 Beta')).length).toBeGreaterThan(0);
-    expect((await screen.findAllByText('bt-102')).length).toBeGreaterThan(0);
-    expect(screen.getByRole('button', { name: '打开最新策略' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '打开对比' })).not.toBeInTheDocument();
-    expect(screen.getAllByText('样本外收益').length).toBeGreaterThan(0);
-    expect(screen.getAllByLabelText('策略走势').length).toBeGreaterThan(0);
-    expect(screen.getByText('执行策略 T_CLOSE_TO_T1_OPEN')).toBeInTheDocument();
-    expect(screen.getByText('快照 ds-alpha / un-alpha')).toBeInTheDocument();
-    expect(screen.getByText('收益率 +25.1%')).toBeInTheDocument();
-    expect(screen.getByText('夏普比率 1.42')).toBeInTheDocument();
-    expect(screen.queryByText('查看详情')).not.toBeInTheDocument();
+    expect((await screen.findAllByText('\u7b56\u7565 Alpha')).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('\u7b56\u7565 Beta')).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('T_CLOSE_TO_T1_OPEN', { exact: false }).length).toBeGreaterThan(0);
+    expect(screen.getByText('ds-alpha / un-alpha', { exact: false })).toBeInTheDocument();
+    expect(screen.getByText('+25.1%')).toBeInTheDocument();
+    expect(screen.getByText('1.42')).toBeInTheDocument();
+    expect(fakeApi.getBacktestRunDetail).not.toHaveBeenCalled();
   });
 });

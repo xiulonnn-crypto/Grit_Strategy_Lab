@@ -65,6 +65,7 @@ const detail: ApiBacktestRunDetail = {
   environment_summary: {
     runtime: 'local',
     mode: 'production',
+    symbols: ['AAPL', 'AMZN', 'MSFT', 'NVDA', 'META', 'GOOGL', 'TSLA', 'AVGO', 'BRK-B', 'JPM', 'LLY', 'COST'],
   },
   data_segment_type: 'FULL',
   parameter_version_id: 'v2',
@@ -373,18 +374,28 @@ describe('RunDetailPage', () => {
     await waitFor(() =>
       expect(fakeApi.getBacktestTradeAudit).toHaveBeenCalledWith('bt-9.6802970000', 'trade-001'),
     );
-    expect(screen.getByText('数据快照摘要')).toBeInTheDocument();
-    expect(screen.getByText('参数快照')).toBeInTheDocument();
-    expect(screen.getByText('环境摘要')).toBeInTheDocument();
+    expect(screen.getAllByText('数据快照摘要').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('参数快照').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('环境摘要').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('执行策略').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('T日收盘信号，T+1开盘成交').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('运行环境').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('本地').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('运行模式').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('生产').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('AAPL, AMZN, MSFT, NVDA, META, GOOGL, TSLA, AVGO, BRK-B, JPM ...').length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole('tab', { name: '配置' }));
-    expect(await screen.findByText('benchmark_id')).toBeInTheDocument();
+    expect(await screen.findByText('基准标的')).toBeInTheDocument();
     expect(screen.getByText('SPY')).toBeInTheDocument();
-    expect(screen.getByText('rebalance')).toBeInTheDocument();
-    expect(screen.getByText('monthly')).toBeInTheDocument();
+    expect(screen.getByText('再平衡')).toBeInTheDocument();
+    expect(screen.getByText('每月')).toBeInTheDocument();
+    expect(screen.getByText('策略类型')).toBeInTheDocument();
+    expect(screen.getByText('质量动量')).toBeInTheDocument();
     expect(screen.getAllByText('参数快照').length).toBeGreaterThan(0);
     expect(screen.getAllByText('数据快照摘要').length).toBeGreaterThan(0);
     expect(screen.getAllByText('环境摘要').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('AAPL, AMZN, MSFT, NVDA, META, GOOGL, TSLA, AVGO, BRK-B, JPM ...').length).toBeGreaterThan(0);
   });
 
   it('shows a month tooltip when hovering the monthly return heatmap', async () => {
@@ -639,7 +650,7 @@ describe('RunDetailPage', () => {
     expect(screen.getByRole('button', { name: '启动优化' })).toBeInTheDocument();
   });
 
-  it('creates an optimization job from the hero action', async () => {
+  it('opens the optimization config page from the hero action', async () => {
     fakeApi.getBacktestRunDetail.mockResolvedValue(detail);
 
     render(<RunDetailPage runId="bt-9.6802970000" />);
@@ -648,8 +659,12 @@ describe('RunDetailPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '启动优化' }));
 
-    await waitFor(() => expect(fakeApi.createOptimizationJob).toHaveBeenCalledWith('strat-001'));
-    await waitFor(() => expect(window.location.hash).toBe('#/optimization-jobs/opt-001'));
+    await waitFor(() =>
+      expect(window.location.hash).toBe(
+        '#/optimization-jobs/new/config?strategy_id=strat-001&source_run_id=bt-9.6802970000&entry_point=run_detail',
+      ),
+    );
+    expect(fakeApi.createOptimizationJob).not.toHaveBeenCalled();
   });
 
   it('keeps the diagnostics empty state when the run has no chart series', async () => {

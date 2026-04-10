@@ -1,7 +1,13 @@
-﻿import { render, screen } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { RunDetailAuditPanel } from './run-detail-audit';
 import type { ApiBacktestRunDetail } from '../types';
+
+const LOADING_COPY = '\u6b63\u5728\u52a0\u8f7d\u8bc1\u636e\u8f68\u8ff9\u2026';
+const SNAPSHOT_SUMMARY = '\u6570\u636e\u5feb\u7167\u6458\u8981';
+const PARAMETER_SNAPSHOT = '\u53c2\u6570\u5feb\u7167';
+const RUNTIME_LABEL = '\u8fd0\u884c\u73af\u5883';
+const PREVIEW_VALUE = '\u9884\u89c8';
 
 const detail: ApiBacktestRunDetail = {
   id: 'bt-preview',
@@ -42,10 +48,11 @@ describe('RunDetailAuditPanel evidence fold-in', () => {
       />,
     );
 
-    expect(screen.getByText('正在加载证据轨迹…')).toBeInTheDocument();
-    expect(screen.getByText('数据快照摘要')).toBeInTheDocument();
+    expect(screen.getByText(LOADING_COPY)).toBeInTheDocument();
+    expect(screen.getAllByText(SNAPSHOT_SUMMARY).length).toBeGreaterThan(0);
     expect(screen.getByText('ds-preview')).toBeInTheDocument();
-    expect(screen.getByText('参数快照')).toBeInTheDocument();
-    expect(screen.getByText('runtime')).toBeInTheDocument();
+    expect(screen.getAllByText(PARAMETER_SNAPSHOT).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(RUNTIME_LABEL).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(PREVIEW_VALUE).length).toBeGreaterThan(0);
   });
 });

@@ -51,6 +51,27 @@ export type ApiWorkspaceOverview = {
   last_cleanup_count?: number;
 };
 
+export type ApiStrategyLatestCompletedRunSummary = {
+  run_id: string;
+  parameter_version: number;
+  parameter_version_id?: string | null;
+  status: string;
+  total_return: number;
+  annualized_return: number;
+  sharpe: number;
+  max_drawdown: number;
+  oos_total_return: number;
+  oos_annualized_return: number;
+  oos_sharpe: number;
+  oos_max_drawdown: number;
+  warning_count: number;
+  execution_policy: string;
+  dataset_snapshot_id: string;
+  universe_snapshot_id: string;
+  completed_at?: string | null;
+  sparkline_points: Array<{ date: string; equity: number; is_oos: boolean }>;
+};
+
 export type ApiStrategyListItem = {
   id: string;
   name: string;
@@ -70,6 +91,7 @@ export type ApiStrategyListItem = {
   created_at?: string | null;
   updated_at?: string | null;
   parameters?: Record<string, ParameterValue>;
+  latest_completed_run_summary?: ApiStrategyLatestCompletedRunSummary | null;
 };
 
 export type ApiParameterHistoryEntry = {
@@ -99,6 +121,91 @@ export type ApiOptimizationCandidate = {
   metrics: Record<string, number>;
   base_parameter_version_id?: string | null;
   allowed_actions?: string[];
+  title?: string | null;
+  status_label?: string | null;
+  analysis?: {
+    title?: string | null;
+    thesis?: string | null;
+    shelf_copy?: string | null;
+    stability_verdict?: string | null;
+    stability_summary?: string | null;
+    stability_checks?: ApiOptimizationStabilityCheck[];
+    validation_windows?: ApiOptimizationValidationWindow[];
+    heatmap?: ApiOptimizationHeatmap | null;
+  };
+};
+
+export type ApiOptimizationStabilityCheck = {
+  key: string;
+  label: string;
+  value: number;
+  verdict: 'pass' | 'watch' | 'risk';
+  detail: string;
+};
+
+export type ApiOptimizationValidationWindow = {
+  label: string;
+  return_sharpe: number;
+  out_of_sample_sharpe: number;
+  max_drawdown_pct: number;
+  stability: number;
+  verdict: 'pass' | 'watch' | 'risk';
+};
+
+export type ApiOptimizationHeatmap = {
+  x_key: string | null;
+  y_key: string | null;
+  x_label?: string | null;
+  y_label?: string | null;
+  x_values: number[];
+  y_values: number[];
+  cells: Array<{
+    x: number;
+    y: number;
+    score: number;
+    is_candidate?: boolean;
+    tone?: 'hot' | 'warm' | 'cool';
+  }>;
+};
+
+export type ApiOptimizationSearchSpaceField = {
+  key: string;
+  label: string;
+  mode: 'range' | 'fixed';
+  current?: ParameterValue;
+  start?: ParameterValue;
+  end?: ParameterValue;
+  step?: ParameterValue;
+  value?: ParameterValue;
+  tag?: string | null;
+};
+
+export type ApiOptimizationJobListItem = {
+  id: string;
+  strategy_id: string;
+  strategy_name?: string | null;
+  status: string;
+  entry_point?: string | null;
+  validation_mode?: string | null;
+  source_run_id?: string | null;
+  budget_combinations?: number | null;
+  completed_combinations?: number | null;
+  best_candidate_id?: string | null;
+  best_candidate_label?: string | null;
+  base_parameter_version_id?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  completed_at?: string | null;
+};
+
+export type ApiOptimizationJobCreatePayload = {
+  objective?: string;
+  base_parameter_version_id?: string | null;
+  source_run_id?: string | null;
+  entry_point?: string | null;
+  validation_mode?: string | null;
+  budget_combinations?: number;
+  search_space?: ApiOptimizationSearchSpaceField[];
 };
 
 export type ApiOptimizationJobDetail = {
@@ -108,17 +215,32 @@ export type ApiOptimizationJobDetail = {
   request: {
     objective?: string;
     base_parameter_version_id?: string | null;
+    source_run_id?: string | null;
+    entry_point?: string | null;
+    validation_mode?: string | null;
+    budget_combinations?: number | null;
+    search_space?: ApiOptimizationSearchSpaceField[];
     [key: string]: unknown;
   };
   summary: {
     objective?: string;
     candidate_count: number;
     baseline_parameter_version_id?: string | null;
+    entry_point?: string | null;
+    validation_mode?: string | null;
+    source_run_id?: string | null;
+    budget_combinations?: number | null;
+    completed_combinations?: number | null;
+    search_space?: ApiOptimizationSearchSpaceField[];
     [key: string]: unknown;
   };
   result: {
     best_candidate_id?: string | null;
+    best_candidate_label?: string | null;
     baseline_parameter_version_id?: string | null;
+    headline?: string | null;
+    summary?: string | null;
+    stability_verdict?: string | null;
     [key: string]: unknown;
   };
   candidates: ApiOptimizationCandidate[];
@@ -163,6 +285,13 @@ export type ApiStrategyCreationSession = {
     message: string;
     suggested_value?: ParameterValue;
   }>;
+};
+
+export type CreateCreationSessionPayload = {
+  strategy_type?: StrategyType;
+  mode?: 'CREATE' | 'REVISION';
+  base_strategy_id?: string | null;
+  base_parameter_version_id?: string | null;
 };
 
 export type ApiConfirmationUpdateRequest = {
@@ -508,25 +637,26 @@ export type CreateCandidatePayload = {
 };
 
 export type DemoApi = {
-  getWorkspaceOverview: (includeCleanupAudit?: boolean) => Promise<ApiWorkspaceOverview>;
-  listStrategies: () => Promise<ApiStrategyListItem[]>;
+  getWorkspaceOverview: (includeCleanupAudit?: boolean, signal?: AbortSignal) => Promise<ApiWorkspaceOverview>;
+  listStrategies: (signal?: AbortSignal) => Promise<ApiStrategyListItem[]>;
   getStrategyDetail: (id: string) => Promise<ApiStrategyDetail>;
   getCreationSession: (id: string) => Promise<ApiStrategyCreationSession>;
-  createCreationSession: (payload?: { strategy_type?: StrategyType }) => Promise<ApiStrategyCreationSession>;
+  createCreationSession: (payload?: CreateCreationSessionPayload) => Promise<ApiStrategyCreationSession>;
   appendCreationMessage: (id: string, content: string, revision?: number) => Promise<ApiStrategyCreationSession>;
   prepareConfirmation: (id: string) => Promise<ApiStrategyCreationSession>;
   updateConfirmation: (id: string, payload: ApiConfirmationUpdateRequest) => Promise<ApiStrategyCreationSession>;
   materializeStrategy: (id: string, idempotencyKey: string, confirmedRevision?: number) => Promise<ApiStrategyDetail>;
-  listBacktestRuns: (params?: BacktestRunListQuery) => Promise<ApiBacktestRunListItem[]>;
-  getBacktestRunDetail: (id: string) => Promise<ApiBacktestRunDetail>;
+  listBacktestRuns: (params?: BacktestRunListQuery, signal?: AbortSignal) => Promise<ApiBacktestRunListItem[]>;
+  getBacktestRunDetail: (id: string, signal?: AbortSignal) => Promise<ApiBacktestRunDetail>;
   saveBacktestRun: (id: string) => Promise<ApiBacktestRunDetail>;
   getBacktestRunTrades: (id: string, params?: { page?: number; page_size?: number; segment?: string }) => Promise<ApiBacktestRunTradePage>;
   getBacktestTradeAudit: (runId: string, tradeId: string) => Promise<ApiBacktestTradeAudit>;
   previewBacktestRun: (strategyId: string, payload: Record<string, unknown>) => Promise<ApiBacktestSubmissionPreview>;
   submitBacktestRun: (strategyId: string, payload: Record<string, unknown>) => Promise<ApiBacktestRunDetail>;
   cloneBacktestRun: (id: string, idempotencyKey: string) => Promise<ApiBacktestRunDetail>;
+  listOptimizationJobs: () => Promise<ApiOptimizationJobListItem[]>;
   getOptimizationJobDetail: (id: string) => Promise<ApiOptimizationJobDetail>;
-  createOptimizationJob: (strategyId: string) => Promise<ApiOptimizationJobDetail>;
+  createOptimizationJob: (strategyId: string, payload?: ApiOptimizationJobCreatePayload) => Promise<ApiOptimizationJobDetail>;
   createOptimizationCandidate: (jobId: string, payload: CreateCandidatePayload) => Promise<ApiOptimizationJobDetail>;
   promoteOptimizationCandidate: (jobId: string, trialId: string, mode: PromoteMode, idempotencyKey: string, comment?: string) => Promise<ApiOptimizationJobDetail>;
   deleteOptimizationCandidate: (jobId: string, trialId: string) => Promise<ApiOptimizationJobDetail>;

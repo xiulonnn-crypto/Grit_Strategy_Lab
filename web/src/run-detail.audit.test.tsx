@@ -41,17 +41,23 @@ const audits: Record<string, ApiBacktestRunTradeAudit> = {
     max_favorable_excursion_pct: 0.8,
     max_adverse_excursion_pct: -2.4,
     slippage_cost_pct: 0.22,
-    commentary: '样本外回撤略高，但仍保持在阈值范围内。',
+    commentary: 'Held the favorable move without taking deep heat.',
     price_series: [
       { date: '2026-03-24', open: 189, high: 190, low: 185, close: 186, adj_close: 186, volume: 1_100_000 },
     ],
-    trigger_snapshot: { execution_policy: 'T_CLOSE_TO_T1_OPEN', signal: 'mean_reversion', threshold: 3 },
+    trigger_snapshot: {
+      execution_policy: 'T_CLOSE_TO_T1_OPEN',
+      signal: 'mean_reversion',
+      threshold: 3,
+      template_key: 'momentum',
+      reason: 'momentum:semiannual',
+    },
     risk_evaluation: {
       max_favorable_excursion_pct: 0.8,
       max_adverse_excursion_pct: -2.4,
       mfe_mae_ratio: 0.33,
       slippage_cost_pct: 0.22,
-      commentary: '样本外回撤略高，但仍保持在阈值范围内。',
+      commentary: 'Held the favorable move without taking deep heat.',
     },
     entry_marker: { date: '2026-03-24', price: 189 },
     exit_marker: { date: '2026-03-24', price: 186 },
@@ -133,7 +139,11 @@ describe('RunDetailAuditPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: /AAPL/i }));
 
     expect(screen.getByText('AAPL 证据卡')).toBeInTheDocument();
-    expect(screen.getAllByText('样本外回撤略高，但仍保持在阈值范围内。').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('持仓期间延续了有利走势，且未经历明显回撤。').length).toBeGreaterThan(0);
+    expect(screen.getByText('策略模板')).toBeInTheDocument();
+    expect(screen.getByText('动量')).toBeInTheDocument();
+    expect(screen.getByText('触发原因')).toBeInTheDocument();
+    expect(screen.getByText('动量：每半年调仓')).toBeInTheDocument();
     expect(screen.queryByText('trade-002')).not.toBeInTheDocument();
   });
 });

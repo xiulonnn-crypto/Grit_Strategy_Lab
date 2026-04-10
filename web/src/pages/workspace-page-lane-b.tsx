@@ -28,6 +28,12 @@ const TEXT = {
   latestRunFallback: '暂无',
 } as const;
 
+function isAbortError(caught: unknown): boolean {
+  return caught instanceof DOMException
+    ? caught.name === 'AbortError'
+    : typeof caught === 'object' && caught !== null && 'name' in caught && (caught as { name?: string }).name === 'AbortError';
+}
+
 function MetricCard({
   label,
   value,
@@ -221,15 +227,16 @@ export function WorkspacePage(): JSX.Element {
 
   useEffect(() => {
     let cancelled = false;
+    const overviewController = new AbortController();
 
     async function load(): Promise<void> {
       try {
         setLoading(true);
         setError(null);
         const [workspaceOverview, strategyItems, backtestRuns] = await Promise.all([
-          api.getWorkspaceOverview(),
-          api.listStrategies(),
-          api.listBacktestRuns({ limit: 8 }),
+          api.getWorkspaceOverview(false, overviewController.signal),
+          api.listStrategies(overviewController.signal),
+          api.listBacktestRuns({ limit: 8 }, overviewController.signal),
         ]);
 
         if (cancelled) {
@@ -240,43 +247,21 @@ export function WorkspacePage(): JSX.Element {
         setStrategies(strategyItems);
         setRecentRuns(backtestRuns);
 
-        const latestRunIds = strategyItems
-          .map((strategy) => {
-            return (
-              strategy.latest_successful_run_id ??
-              strategy.latest_run_id
-            );
-          })
-          .filter((runId): runId is string => Boolean(runId));
         const runSummariesById = Object.fromEntries(
           backtestRuns.map((run) => [run.id, toRunSummaryDetail(run)] as const),
         );
         setStrategyLatestRuns(
           Object.fromEntries(
-            [...new Set(latestRunIds)]
+            Object.keys(runSummariesById)
               .map((runId) => [runId, runSummariesById[runId]] as const)
               .filter((entry): entry is readonly [string, ApiBacktestRunDetail] => Boolean(entry[1])),
           ),
         );
         setLoading(false);
-
-        if (!latestRunIds.length) {
-          return;
-        }
-
-        const latestRunDetailEntries = await Promise.all(
-          [...new Set(latestRunIds)].map(async (runId) => [runId, await api.getBacktestRunDetail(runId)] as const),
-        );
-
-        if (cancelled) {
-          return;
-        }
-
-        setStrategyLatestRuns((current) => ({
-          ...current,
-          ...Object.fromEntries(latestRunDetailEntries),
-        }));
       } catch (caught) {
+        if (isAbortError(caught)) {
+          return;
+        }
         if (!cancelled) {
           setError((caught as Error).message);
         }
@@ -290,6 +275,7 @@ export function WorkspacePage(): JSX.Element {
     void load();
     return () => {
       cancelled = true;
+      overviewController.abort();
     };
   }, [api]);
 

@@ -1,21 +1,9 @@
 import type { ApiBacktestRunDetail } from '../types';
+import { formatRunDetailKvLabel, formatRunDetailKvValue } from '../lib/run-detail-kv-format';
 
 type RunDetailPropertiesProps = {
   detail: ApiBacktestRunDetail;
 };
-
-function formatValue(value: unknown): string {
-  if (value === null || typeof value === 'undefined') {
-    return '—';
-  }
-  if (typeof value === 'number') {
-    return Number.isInteger(value) ? value.toLocaleString('zh-HK') : value.toFixed(2);
-  }
-  if (typeof value === 'object') {
-    return JSON.stringify(value);
-  }
-  return String(value);
-}
 
 function PropertiesCard({
   title,
@@ -39,8 +27,8 @@ function PropertiesCard({
         <div className="run-detail-kv-grid">
           {entries.map(([key, nextValue]) => (
             <div className="run-detail-kv-row" key={`${title}-${key}`}>
-              <span>{key}</span>
-              <strong>{formatValue(nextValue)}</strong>
+              <span>{formatRunDetailKvLabel(key)}</span>
+              <strong>{formatRunDetailKvValue(key, nextValue)}</strong>
             </div>
           ))}
         </div>

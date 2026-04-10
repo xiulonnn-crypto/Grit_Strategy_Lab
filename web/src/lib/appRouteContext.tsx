@@ -9,6 +9,9 @@ export type AppRoute =
   | { kind: 'runs-index' }
   | { kind: 'run'; runId: string }
   | { kind: 'snapshots' }
+  | { kind: 'optimization-index' }
+  | { kind: 'optimization-select'; strategyId?: string; sourceRunId?: string; entryPoint?: string }
+  | { kind: 'optimization-config'; strategyId: string; sourceRunId?: string; entryPoint?: string }
   | { kind: 'optimization'; jobId: string };
 
 type AppRouteContextValue = {
@@ -54,6 +57,34 @@ export function parseAppHash(hash: string): AppRoute {
   }
   if (path === '/snapshots') {
     return { kind: 'snapshots' };
+  }
+  if (path === '/optimization-jobs') {
+    return { kind: 'optimization-index' };
+  }
+  if (path === '/optimization-jobs/new') {
+    const strategyId = searchParams.get('strategy_id');
+    const sourceRunId = searchParams.get('source_run_id');
+    const entryPoint = searchParams.get('entry_point');
+    return {
+      kind: 'optimization-select',
+      strategyId: strategyId ? decodeURIComponent(strategyId) : undefined,
+      sourceRunId: sourceRunId ? decodeURIComponent(sourceRunId) : undefined,
+      entryPoint: entryPoint ? decodeURIComponent(entryPoint) : undefined,
+    };
+  }
+  if (path === '/optimization-jobs/new/config') {
+    const strategyId = searchParams.get('strategy_id');
+    if (!strategyId) {
+      return { kind: 'optimization-select' };
+    }
+    const sourceRunId = searchParams.get('source_run_id');
+    const entryPoint = searchParams.get('entry_point');
+    return {
+      kind: 'optimization-config',
+      strategyId: decodeURIComponent(strategyId),
+      sourceRunId: sourceRunId ? decodeURIComponent(sourceRunId) : undefined,
+      entryPoint: entryPoint ? decodeURIComponent(entryPoint) : undefined,
+    };
   }
   const optimizationMatch = path.match(/^\/optimization-jobs\/([^/]+)$/);
   if (optimizationMatch) {

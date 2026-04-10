@@ -1,6 +1,6 @@
 import type { AppRoute } from './lib/appRouteContext';
 
-export type ShellNavKey = 'workspace' | 'creation' | 'runs' | 'snapshots';
+export type ShellNavKey = 'workspace' | 'creation' | 'runs' | 'optimization' | 'snapshots';
 
 export type ShellNavItem = {
   key: ShellNavKey;
@@ -20,6 +20,7 @@ export const SHELL_NAV_ITEMS: ShellNavItem[] = [
   { key: 'workspace', href: '#/workspace', label: '工作台' },
   { key: 'creation', href: '#/creation/new', label: '新建策略' },
   { key: 'runs', href: '#/runs', label: '回测列表' },
+  { key: 'optimization', href: '#/optimization-jobs', label: '优化实验室' },
   { key: 'snapshots', href: '#/snapshots', label: '数据快照' },
 ];
 
@@ -31,6 +32,7 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         eyebrow: '工作台',
         title: '工作台健康度',
         description: '查看策略看板、最近回测和可直接进入主链路的恢复入口。',
+        showPageHeading: false,
       };
     case 'creation-template':
       return {
@@ -45,13 +47,15 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         eyebrow: '策略创建',
         title: '创建会话',
         description: '由对话驱动确认稿，再进入策略落地与回测提交。',
+        showPageHeading: false,
       };
     case 'strategy-detail':
       return {
         navKey: 'workspace',
         eyebrow: '策略详情',
         title: '策略详情',
-        description: '查看策略概况、当前参数版本与下一步可执行操作。',
+        description: '查看策略概况、当前参数版本与下一步可执行动作。',
+        showPageHeading: false,
       };
     case 'backtest':
       return {
@@ -59,11 +63,12 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         eyebrow: '真实执行',
         title: '真实回测提交',
         description: '确认回测区间、参数版本和快照状态，再生成正式回测。',
+        showPageHeading: false,
       };
     case 'runs-index':
       return {
         navKey: 'runs',
-        eyebrow: '回测列表',
+        eyebrow: '回测数据',
         title: '回测历史',
         description: '用于在结果和详情之间切换的列表视图。',
       };
@@ -73,6 +78,7 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         eyebrow: '运行详情',
         title: '诊断视图',
         description: '风险摘要、主曲线、交易明细与证据轨迹都会在这里展开。',
+        showPageHeading: false,
       };
     case 'snapshots':
       return {
@@ -80,13 +86,18 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         eyebrow: '数据快照',
         title: '快照总览',
         description: '集中查看数据集与股票池快照状态，并提供刷新与修复入口。',
+        showPageHeading: false,
       };
+    case 'optimization-index':
+    case 'optimization-select':
+    case 'optimization-config':
     case 'optimization':
       return {
-        navKey: 'workspace',
+        navKey: 'optimization',
         eyebrow: '优化实验',
         title: '优化实验室',
-        description: '保留现有候选版本管理行为，并接入统一的中文应用壳。',
+        description: '围绕策略参数搜索、候选回看和版本晋升的统一工作区。',
+        showPageHeading: false,
       };
   }
 }

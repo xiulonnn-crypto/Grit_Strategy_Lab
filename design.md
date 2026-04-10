@@ -172,14 +172,23 @@
 - heading 结构固定为 `eyebrow + h1 + 一句话说明`。
 - CTA 放在 heading 同级或下一张 hero 卡，不塞进标题行末尾做挤压式布局。
 
-### 6.2 Workspace Family
+### 6.2 Buttons
+
+- 全站动作按钮统一分为 **Primary / Ghost / Text** 三类，不再为单页单独发明新按钮语法。
+- **Primary button**：`44px` 高，`0 16px` padding，`6px` 圆角，`600` 字重，底色 `#1F877B`，白字，hover 压深到 `#264239`。
+- **Ghost button**：`44px` 高，`0 16px` padding，`6px` 圆角，白底，`1px solid #D8DDE4` 边框，正文色文字，hover 只做浅灰底和轻阴影。
+- **Text button**：透明底、无描边、青绿色文字，只用于行内次动作或链接式操作，不承担页面主 CTA。
+- 按钮默认只做 `translateY(-1px)` 的轻抬，不做厚投影、不做胶囊大圆角；研究页 CTA 保持克制。
+- 同一操作区优先使用 `1 个主按钮 + 1-2 个 ghost 按钮`，尺寸和高度保持一致。
+
+### 6.3 Workspace Family
 
 - **工作台健康度卡**：四个指标块 + 双 CTA，指标块本身也用轻渐变白卡。
 - **策略卡**：标题、版本 / 状态 badge、sparkline、2x2 指标矩阵、底部元信息和 CTA。
 - **最近回测列表**：左侧状态点，中部 run 信息，右侧状态 / 时间胶囊。
 - **Compare dock**：允许轻 blur、半透明白底和更强阴影，但只在选择对比时出现。
 
-### 6.3 Creation Family
+### 6.4 Creation Family
 
 - **模板卡**：`24px` 圆角、较高阴影、按钮全宽，是全站最柔和的一组卡片。
 - **创建标题卡**：`28px` 圆角，允许轻渐变顶色。
@@ -187,19 +196,19 @@
 - **步骤 chip**：胶囊结构，带状态点；warning 用暖橙，success 用绿。
 - **字段卡**：20px 左右圆角，输入框 14px 圆角，来源标签常驻右上。
 
-### 6.4 Strategy Detail / Backtest Submit
+### 6.5 Strategy Detail / Backtest Submit
 
 - **策略详情** 不是 dense table，而是摘要卡 + 当前版本卡 + 最近回测卡 + 下一步动作卡。
 - **提交回测** 当前视觉是三段式确认卡，不是表单左栏 + 摘要右栏。
 - 参数、快照、运行来源都走键值卡片，不堆原始 JSON。
 
-### 6.5 Runs / Dense Table
+### 6.6 Runs / Dense Table
 
 - runs index 使用单张大表卡，表头浅灰底，hover 轻高亮。
 - dense table 只在列表和 compare 内使用，不向 workspace / creation 蔓延。
 - badge 高度保持紧凑，颜色轻，不做整行着色。
 
-### 6.6 Run Detail Family
+### 6.7 Run Detail Family
 
 - **KPI 卡**：当前是 5 张并列卡，含主值、趋势、对照、洞察，不再是简单四格数值块。
 - **主图表卡**：左大图右判断轨，图表背景轻渐变，tooltip 可轻 blur。
@@ -207,7 +216,7 @@
 - **tab strip**：使用 pill tab，不再是硬分段器或下划线 tab。
 - **诊断卡**：drawdown、月度矩阵、最差事件、滚动指标采用统一白卡 + 轻色底图。
 
-### 6.7 Snapshots Family
+### 6.8 Snapshots Family
 
 - 当前快照页以 **覆盖卡 / 修复卡** 为主，不是顶部 KPI 墙。
 - 不完整状态通过浅红 / 浅橙 message panel 表示，文字说明比颜色更重要。

@@ -57,3 +57,4 @@ docs/key.txt
 .DS_Store
 .vscode/
 .idea/
+.gstack/

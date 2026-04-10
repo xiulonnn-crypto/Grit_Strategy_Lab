@@ -1,4 +1,5 @@
 import { formatCompactDate, formatCompactDateTime } from '../lib/format';
+import { formatRunDetailCommentary, formatRunDetailKvLabel, formatRunDetailKvValue } from '../lib/run-detail-kv-format';
 import type { ApiBacktestRunDetail, ApiBacktestRunTradeAudit } from '../types';
 
 type RunDetailAuditPanelProps = {
@@ -21,19 +22,6 @@ function formatSmartPercent(value: number | null | undefined, digits = 1): strin
   }
   const normalized = Math.abs(value) > 1 ? value : value * 100;
   return `${normalized >= 0 ? '+' : ''}${normalized.toFixed(digits)}%`;
-}
-
-function formatValue(value: unknown): string {
-  if (value === null || typeof value === 'undefined') {
-    return '—';
-  }
-  if (typeof value === 'number') {
-    return Number.isInteger(value) ? value.toLocaleString('zh-HK') : value.toFixed(2);
-  }
-  if (typeof value === 'object') {
-    return JSON.stringify(value);
-  }
-  return String(value);
 }
 
 function buildPricePath(priceSeries: PricePoint[], width: number, height: number): string {
@@ -78,8 +66,8 @@ function KeyValueCard({
         <div className="run-detail-kv-grid">
           {entries.map(([key, nextValue]) => (
             <div className="run-detail-kv-row" key={`${title}-${key}`}>
-              <span>{key}</span>
-              <strong>{formatValue(nextValue)}</strong>
+              <span>{formatRunDetailKvLabel(key)}</span>
+              <strong>{formatRunDetailKvValue(key, nextValue)}</strong>
             </div>
           ))}
         </div>
@@ -139,7 +127,7 @@ export function RunDetailAuditPanel({
                     {formatCompactDate(item.opened_at)} - {formatCompactDate(item.closed_at)}
                   </span>
                 </div>
-                <small>{item.commentary}</small>
+                <small>{formatRunDetailCommentary(item.commentary)}</small>
               </button>
             ))}
           </div>
@@ -182,7 +170,7 @@ export function RunDetailAuditPanel({
                   <strong>{formatSmartPercent(audit.slippage_cost_pct)}</strong>
                 </div>
               </div>
-              <p className="run-detail-audit-copy">{audit.commentary}</p>
+              <p className="run-detail-audit-copy">{formatRunDetailCommentary(audit.commentary)}</p>
             </div>
 
             <div className="run-detail-evidence-price-shell">

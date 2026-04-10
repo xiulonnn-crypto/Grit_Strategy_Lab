@@ -31,7 +31,7 @@ const TEXT = {
   errorFallback: '加载策略创建会话失败，请稍后重试。',
   titleCopy: '先在对话里用自然语言描述策略，系统会自动提取策略参数，可以在右侧表单中手动补充后再确认提交',
   backToWorkspace: '返回工作台', sendMessage: '发送消息',
-  prepare: '生成确认稿', materialize: '生成策略', chatTitle: '对话',
+  prepare: '生成确认稿', materialize: '生成策略', materializeRevision: '保存新版本', chatTitle: '对话',
   chatPromptCard: '请说明你策略的交易逻辑、关键参数阈值。', formTitle: '动态表单控制台',
   formCopy: '左侧对话提取参数，右侧按步骤补齐与覆盖。', promptLabel: '消息', promptPlaceholder: '请说明...',
   stepBasic: '基础配置', stepSelection: '选股规则', stepRisk: '风控 / 再平衡', stepOther: '其他参数',
@@ -71,6 +71,11 @@ const INVESTMENT_FREQUENCY_OPTIONS: FieldOption[] = [
   { value: 'daily', label: '每天' },
   { value: 'quarterly', label: '每季' },
   { value: 'yearly', label: '每年' },
+];
+const OBSERVATION_TIMEFRAME_OPTIONS: FieldOption[] = [
+  { value: 'daily', label: '日线' },
+  { value: 'weekly', label: '周线' },
+  { value: 'hourly', label: '小时线' },
 ];
 const MOMENTUM_REBALANCE_OPTIONS: FieldOption[] = [
   { value: 'monthly', label: '每月' },
@@ -126,15 +131,22 @@ const MOMENTUM_FIELDS: FieldConfigMap = {
 const MEAN_REVERSION_FIELDS: FieldConfigMap = {
   strategy_type: { key: 'strategy_type', label: '策略类型', bucket: 'core', step: 'basic', required: true, control: 'readonly', order: 10, showKey: false },
   strategy_name: { key: 'strategy_name', label: '策略名称', bucket: 'parameters', step: 'basic', required: true, control: 'text', order: 20, showKey: false, placeholder: '例如 QQQ 均值回归策略' },
-  strategy_description: { key: 'strategy_description', label: '策略描述', bucket: 'parameters', step: 'basic', required: true, control: 'textarea', order: 30, showKey: false, placeholder: '简要描述均值回归假设、窗口和回归目标' },
+  strategy_description: { key: 'strategy_description', label: '策略描述', bucket: 'parameters', step: 'basic', required: true, control: 'textarea', order: 30, showKey: false, placeholder: '简要描述均值回归信号、开仓条件和ATR风控规则' },
   universe_name: { key: 'universe_name', label: '股票池', bucket: 'core', step: 'basic', required: true, control: 'text', order: 40, showKey: false, placeholder: '例如 QQQ' },
   benchmark_symbol: { key: 'benchmark_symbol', label: '基准', bucket: 'parameters', step: 'basic', required: true, control: 'select', order: 50, showKey: false, options: BENCHMARK_OPTIONS },
-  trading_logic: { key: 'trading_logic', label: '交易逻辑', bucket: 'logic', step: 'selection', required: true, control: 'textarea', order: 60, showKey: false, placeholder: '例如 当价格偏离均值超过阈值时买入，回归到目标时卖出' },
-  deviation_threshold: { key: 'deviation_threshold', label: '标准差阈值', bucket: 'logic', step: 'selection', required: true, control: 'text', order: 70, showKey: false, placeholder: '例如 2' },
-  window_size: { key: 'window_size', label: '窗口大小', bucket: 'logic', step: 'selection', required: true, control: 'text', order: 80, showKey: false, placeholder: '例如 50' },
-  mean_target: { key: 'mean_target', label: '回归目标', bucket: 'logic', step: 'selection', required: false, control: 'text', order: 90, showKey: false, placeholder: '例如 MA50' },
-  risk_budget: { key: 'risk_budget', label: '风险预算(%)', bucket: 'logic', step: 'risk', required: false, control: 'text', order: 100, showKey: false, placeholder: '例如 -4' },
-  rebalance_frequency: { key: 'rebalance_frequency', label: '再平衡频次', bucket: 'core', step: 'risk', required: true, control: 'select', order: 110, showKey: false, options: REBALANCE_OPTIONS },
+  observation_timeframe: { key: 'observation_timeframe', label: '观察周期', bucket: 'logic', step: 'selection', required: true, control: 'select', order: 60, showKey: false, options: OBSERVATION_TIMEFRAME_OPTIONS },
+  trading_logic: { key: 'trading_logic', label: '交易逻辑', bucket: 'logic', step: 'selection', required: true, control: 'textarea', order: 70, showKey: false, placeholder: '例如 跌破下轨且RSI超卖买入，突破上轨且RSI超买卖出' },
+  bollinger_period: { key: 'bollinger_period', label: '布林带周期', bucket: 'logic', step: 'selection', required: true, control: 'text', order: 80, showKey: false, placeholder: '例如 20' },
+  rsi_period: { key: 'rsi_period', label: 'RSI周期', bucket: 'logic', step: 'selection', required: true, control: 'text', order: 90, showKey: false, placeholder: '例如 6' },
+  rsi_buy_threshold: { key: 'rsi_buy_threshold', label: 'RSI超卖阈值', bucket: 'logic', step: 'selection', required: true, control: 'text', order: 100, showKey: false, placeholder: '例如 30' },
+  rsi_sell_threshold: { key: 'rsi_sell_threshold', label: 'RSI超买阈值', bucket: 'logic', step: 'selection', required: true, control: 'text', order: 110, showKey: false, placeholder: '例如 80' },
+  long_entry_size_pct: { key: 'long_entry_size_pct', label: '买入仓位(%)', bucket: 'logic', step: 'selection', required: true, control: 'text', order: 120, showKey: false, placeholder: '例如 5' },
+  short_entry_size_pct: { key: 'short_entry_size_pct', label: '卖出仓位(%)', bucket: 'logic', step: 'selection', required: true, control: 'text', order: 130, showKey: false, placeholder: '例如 5' },
+  atr_period: { key: 'atr_period', label: 'ATR周期', bucket: 'logic', step: 'risk', required: true, control: 'text', order: 140, showKey: false, placeholder: '例如 14' },
+  take_profit_atr: { key: 'take_profit_atr', label: '止盈倍数(ATR)', bucket: 'logic', step: 'risk', required: true, control: 'text', order: 150, showKey: false, placeholder: '例如 1.5' },
+  stop_loss_atr: { key: 'stop_loss_atr', label: '止损倍数(ATR)', bucket: 'logic', step: 'risk', required: true, control: 'text', order: 160, showKey: false, placeholder: '例如 1' },
+  rebalance_frequency: { key: 'rebalance_frequency', label: '再平衡频次', bucket: 'core', step: 'risk', required: true, control: 'select', order: 170, showKey: false, options: REBALANCE_OPTIONS },
+  capital: { key: 'capital', label: '初始资金(USD)', bucket: 'parameters', step: 'other', required: false, control: 'text', order: 180, showKey: false, placeholder: '例如 100000' },
 };
 
 const CONFIGURED_FIELDS: Partial<Record<StrategyType, FieldConfigMap>> = {
@@ -144,6 +156,7 @@ const CONFIGURED_FIELDS: Partial<Record<StrategyType, FieldConfigMap>> = {
   MEAN_REVERSION: MEAN_REVERSION_FIELDS,
 };
 const CONFIGURED_TOP_LEVEL_KEYS = new Set(['strategy_type', 'universe_name', 'rebalance_frequency']);
+const MEAN_REVERSION_LEGACY_KEYS = new Set(['deviation_threshold', 'window_size', 'mean_target', 'risk_budget']);
 const ETF_BENCHMARK_VALUES = new Set(['SPY', 'QQQ']);
 const normalizeFieldValue = (value: unknown): string => value === null || value === undefined ? '' : String(value);
 const normalizeSearchText = (value: string): string => value.replace(/\s+/g, '').toLowerCase();
@@ -278,14 +291,22 @@ function defaultConfiguredFieldValue(session: ApiStrategyCreationSession, key: s
           return universeName;
         case 'benchmark_symbol':
           return ETF_BENCHMARK_VALUES.has(universeName.toUpperCase()) ? universeName.toUpperCase() : 'SPY';
+        case 'observation_timeframe':
+          return '';
         case 'trading_logic':
-        case 'deviation_threshold':
-        case 'window_size':
-        case 'mean_target':
-        case 'risk_budget':
+        case 'bollinger_period':
+        case 'rsi_period':
+        case 'rsi_buy_threshold':
+        case 'rsi_sell_threshold':
+        case 'atr_period':
+        case 'take_profit_atr':
+        case 'stop_loss_atr':
+        case 'long_entry_size_pct':
+        case 'short_entry_size_pct':
+        case 'capital':
           return '';
         case 'rebalance_frequency':
-          return normalizeFieldValue(session.top_level?.rebalance_frequency).trim() || 'weekly';
+          return normalizeFieldValue(session.top_level?.rebalance_frequency).trim() || 'never';
         default:
           return '';
       }
@@ -326,6 +347,7 @@ function collectEditableFields(session: ApiStrategyCreationSession | null): Edit
   const topLevelKeys = new Set(top.map((field) => field.key));
   const params = (confirmationFields.parameters ?? [])
     .filter((field) => !topLevelKeys.has(field.key))
+    .filter((field) => type !== 'MEAN_REVERSION' || !MEAN_REVERSION_LEGACY_KEYS.has(field.key))
     .map((field) => ({ ...resolveField(type, field.key, field.label, false), source: field.source, value: field.value }));
   const hydratedFields = configuredFieldsForType(type) ? injectMissingConfiguredFields(session, [...top, ...params]) : [...top, ...params];
   return hydratedFields.sort((a, b) => STEP_ORDER.indexOf(a.step) - STEP_ORDER.indexOf(b.step) || a.order - b.order || a.key.localeCompare(b.key));
@@ -418,7 +440,12 @@ export function CreationSessionPage({ sessionId }: { sessionId: string }): JSX.E
   const coverageRatio = requiredFields.length ? Math.round((filledRequiredCount / requiredFields.length) * 100) : 100;
   const completedStepCount = stepViews.filter((step) => step.isComplete).length;
   const canMaterialize = Boolean(session?.revision) && stepViews.every((step) => step.isComplete) && !hasUnsavedChanges && saveState === 'synced';
-  const primaryActionLabel = canMaterialize ? TEXT.materialize : TEXT.prepare;
+  const primaryActionLabel =
+    canMaterialize
+      ? session?.mode === 'REVISION'
+        ? TEXT.materializeRevision
+        : TEXT.materialize
+      : TEXT.prepare;
   const guidanceTimestamp = formatConversationTimestamp(session?.messages?.find((message) => message.created_at)?.created_at ?? new Date().toISOString());
 
   function syncState(nextSession: ApiStrategyCreationSession, options?: { preserveActiveStep?: boolean }): void {
@@ -507,7 +534,7 @@ export function CreationSessionPage({ sessionId }: { sessionId: string }): JSX.E
     try {
       setBusyAction(true); setError(null);
       const strategy = await api.materializeStrategy(sessionToUse.id, `materialize-${sessionToUse.id}`, sessionToUse.revision);
-      navigateTo(`/strategies/${strategy.id}/backtest-runs/new`);
+      navigateTo(sessionToUse.mode === 'REVISION' ? `/strategies/${strategy.id}` : `/strategies/${strategy.id}/backtest-runs/new`);
     } catch (caught) {
       const errorValue = caught as ApiError | undefined;
       setError(errorValue?.code === 'stale_base_parameter_version' ? TEXT.staleBase : errorValue?.message ?? TEXT.errorFallback);

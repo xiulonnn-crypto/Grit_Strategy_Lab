@@ -109,7 +109,10 @@ The stable API surface is intentionally narrow and concrete.
 - `/workspace/overview` keeps the top-level workspace contract stable.
 - `/strategy-creation-sessions/*` handles create and revision workflows.
 - `/backtest-runs/*` covers preview, submit, clone, detail, trades, and single-trade audit.
+- `/optimization-jobs` lists optimization jobs ordered by `updated_at DESC`, projecting task status, strategy linkage, budget progress, and the latest winner summary for the optimization lab index.
+- `POST /strategies/{strategy_id}/optimization-jobs` now accepts `base_parameter_version_id`, `source_run_id`, `entry_point`, `validation_mode`, `budget_combinations`, and `search_space`; the job is created only when the parameter-config screen explicitly starts optimization.
 - `/optimization-jobs/*` covers job detail, candidate creation, candidate deletion, and promote-with-note.
+- `GET /optimization-jobs/{id}` returns hydrated `request`, `summary`, and `result` sections so the result center can render boundaries, best candidate, stability checks, heatmap, validation windows, and the candidate shelf without frontend-only synthesis.
 - `/data-snapshots/overview` returns the formal snapshot contract: `overall_status`, `last_refreshed_at`, `dataset_snapshots[]`, `universe_snapshots[]`, `latest_job`, `blocking_code`, `blocking_target`, `message`, and `allowed_actions`.
 - `/admin/snapshot-refresh-jobs` accepts `reason`, `mode`, and `targets`, then returns the refreshed overview contract instead of a bare job payload.
 - `python -m grit_backtest_platform.main refresh-snapshots --reason ... --mode incremental|repair|full --targets price,corporate,universes` is the scheduler-safe CLI entrypoint used by Windows Task Scheduler; the API process does not own the 18:00 trigger.
@@ -139,8 +142,11 @@ The formal frontend route map is fixed to:
 - `#/strategies/:id/backtest-runs/new`
 - `#/runs`
 - `#/runs/:id`
-- `#/snapshots`
+- `#/optimization-jobs`
+- `#/optimization-jobs/new`
+- `#/optimization-jobs/new/config?...`
 - `#/optimization-jobs/:id`
+- `#/snapshots`
 
 The orchestrator rule is simple: workers may build page-local views, but they do not redefine route parsing, shell layout, shared tokens, or runtime client boundaries.
 

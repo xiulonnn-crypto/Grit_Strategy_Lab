@@ -92,8 +92,10 @@ export function createCandidate(
   return {
     id: overrides.id ?? nextId('trial'),
     label: overrides.label ?? `Candidate ${rank}`,
+    title: overrides.title ?? null,
     summary: overrides.summary ?? 'Recovered optimization candidate',
     status: overrides.status ?? 'SUCCEEDED',
+    status_label: overrides.status_label ?? null,
     rank,
     score: overrides.score ?? Number((1.35 - rank * 0.08).toFixed(2)),
     parameter_snapshot: snapshot,
@@ -102,6 +104,7 @@ export function createCandidate(
       total_return: Number((12 - rank * 1.8).toFixed(2)),
       sharpe: Number((1.25 - rank * 0.06).toFixed(2)),
     },
+    analysis: overrides.analysis,
     base_parameter_version_id:
       overrides.base_parameter_version_id ?? strategy.current_parameter_version_id ?? null,
     allowed_actions: overrides.allowed_actions ?? ['promote', 'delete'],

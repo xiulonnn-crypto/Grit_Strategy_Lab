@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import App from './app-runtime';
 import { installMockApiServer, setMockPromoteConflict } from './testApiMock';
@@ -23,23 +23,25 @@ afterEach(() => {
   window.location.hash = '';
 });
 
-describe('App Phase 3 routes', () => {
+describe('App optimization routes', () => {
   it('renders the restored workspace contract', async () => {
     await renderApp('#/workspace');
 
-    expect((await screen.findAllByText('Grit Strategy Lab')).length).toBeGreaterThan(0);
-    expect(await screen.findByText('Creation, backtest, and optimization workspace for local strategy recovery.')).toBeInTheDocument();
-    expect(await screen.findByRole('button', { name: 'Open Latest Manual Lab' })).toBeInTheDocument();
+    expect(await screen.findByText('Grit 策略实验室')).toBeInTheDocument();
+    expect(await screen.findByText('工作台')).toBeInTheDocument();
+    expect(await screen.findByText('优化实验室')).toBeInTheDocument();
+    expect(document.querySelector('.workspace-page')).not.toBeNull();
   });
 
   it('shows stale-base conflict UI without optimistic promote state', async () => {
     setMockPromoteConflict('opt-001', 'trial-001');
     await renderApp('#/optimization-jobs/opt-001');
 
-    const [promoteButton] = await screen.findAllByRole('button', { name: '晋升为当前版本' });
-    fireEvent.click(promoteButton);
+    const promoteButton = document.querySelector('.optimization-hero-actions .primary-button') as HTMLButtonElement | null;
+    expect(promoteButton).toBeTruthy();
+    fireEvent.click(promoteButton!);
 
-    expect(await screen.findByText('参数版本冲突，请先刷新基线后再重新晋升。')).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: '晋升为当前版本' }).length).toBeGreaterThan(0);
+    expect(await screen.findByText('The strategy has moved to a newer parameter version.')).toBeInTheDocument();
+    expect(document.querySelectorAll('.optimization-hero-actions .primary-button').length).toBeGreaterThan(0);
   });
 });

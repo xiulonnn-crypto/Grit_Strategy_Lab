@@ -9,7 +9,12 @@ import {
 import { BacktestSubmitPage } from './pages/backtest-submit-page-cn';
 import { CreationSessionPage } from './pages/creation-session-page';
 import { CreationTemplatePage } from './pages/creation-template-page';
-import { ManualLabPage } from './pages/manual-lab-page';
+import {
+  OptimizationConfigPage,
+  OptimizationJobsIndexPage,
+  OptimizationResultsPage,
+  OptimizationStrategySelectPage,
+} from './pages/optimization-lab-page';
 import { RunDetailPage } from './pages/run-detail-page';
 import { RunsIndexPage } from './pages/runs-index-page';
 import { SnapshotsPage } from './pages/snapshots-page';
@@ -55,7 +60,22 @@ function AppShell(): JSX.Element {
         {route.kind === 'runs-index' ? <RunsIndexPage /> : null}
         {route.kind === 'run' ? <RunDetailPage runId={route.runId} /> : null}
         {route.kind === 'snapshots' ? <SnapshotsPage /> : null}
-        {route.kind === 'optimization' ? <ManualLabPage jobId={route.jobId} /> : null}
+        {route.kind === 'optimization-index' ? <OptimizationJobsIndexPage /> : null}
+        {route.kind === 'optimization-select' ? (
+          <OptimizationStrategySelectPage
+            entryPoint={route.entryPoint}
+            sourceRunId={route.sourceRunId}
+            strategyId={route.strategyId}
+          />
+        ) : null}
+        {route.kind === 'optimization-config' ? (
+          <OptimizationConfigPage
+            entryPoint={route.entryPoint}
+            sourceRunId={route.sourceRunId}
+            strategyId={route.strategyId}
+          />
+        ) : null}
+        {route.kind === 'optimization' ? <OptimizationResultsPage jobId={route.jobId} /> : null}
       </ShellFrameCn>
     </AppRouteProvider>
   );

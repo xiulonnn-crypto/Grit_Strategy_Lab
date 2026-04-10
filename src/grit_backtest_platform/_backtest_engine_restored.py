@@ -182,6 +182,10 @@ def _clamp_weight(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
+def _clamp_signed_weight(value: float) -> float:
+    return max(-1.0, min(1.0, value))
+
+
 def _tradeable_open(bar: MarketBar) -> float:
     if bar.open > 0:
         return bar.open
@@ -209,6 +213,53 @@ def _signal_score(series: list[MarketBar], index: int, lookback_days: int, templ
     if template_key in {"mean_reversion", "reversion"}:
         return -raw
     return raw
+
+
+def _bollinger_bands(series: list[MarketBar], index: int, period: int, width: float = 2.0) -> tuple[float, float] | None:
+    if period <= 1 or index + 1 < period:
+        return None
+    closes = [_tradeable_close(bar) for bar in series[index - period + 1 : index + 1]]
+    if any(value <= 0 for value in closes):
+        return None
+    basis = mean(closes)
+    deviation = pstdev(closes) if len(closes) > 1 else 0.0
+    return basis + width * deviation, basis - width * deviation
+
+
+def _rsi(series: list[MarketBar], index: int, period: int) -> float | None:
+    if period <= 0 or index < period:
+        return None
+    gains: list[float] = []
+    losses: list[float] = []
+    for position in range(index - period + 1, index + 1):
+        current = _tradeable_close(series[position])
+        previous = _tradeable_close(series[position - 1])
+        if current <= 0 or previous <= 0:
+            return None
+        delta = current - previous
+        gains.append(max(delta, 0.0))
+        losses.append(abs(min(delta, 0.0)))
+    average_gain = sum(gains) / period
+    average_loss = sum(losses) / period
+    if average_loss <= 0:
+        return 100.0 if average_gain > 0 else 50.0
+    relative_strength = average_gain / average_loss
+    return 100.0 - (100.0 / (1.0 + relative_strength))
+
+
+def _atr(series: list[MarketBar], index: int, period: int) -> float | None:
+    if period <= 0 or index < period:
+        return None
+    true_ranges: list[float] = []
+    for position in range(index - period + 1, index + 1):
+        bar = series[position]
+        previous_close = _tradeable_close(series[position - 1])
+        if previous_close <= 0:
+            return None
+        high = bar.high if bar.high > 0 else max(_tradeable_open(bar), _tradeable_close(bar))
+        low = bar.low if bar.low > 0 else min(_tradeable_open(bar), _tradeable_close(bar))
+        true_ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)))
+    return sum(true_ranges) / len(true_ranges) if true_ranges else None
 
 
 def _run_grid_backtest(
@@ -408,6 +459,189 @@ def _run_grid_backtest(
     )
 
 
+def _run_mean_reversion_backtest(
+    symbol_series: Mapping[str, list[MarketBar]],
+    *,
+    config: BacktestConfig,
+    parameters: Mapping[str, Any],
+    benchmark_series: list[MarketBar],
+    master_dates: list[str],
+) -> BacktestResult:
+    primary_symbol = config.benchmark_symbol if config.benchmark_symbol in symbol_series else next(iter(symbol_series.keys()))
+    primary_series = symbol_series.get(primary_symbol, [])
+    if len(master_dates) < 2 or len(primary_series) < 2:
+        empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        return BacktestResult(metrics=empty_metrics, warnings=["Not enough benchmark dates for requested range"])
+
+    primary_index = {bar.date: idx for idx, bar in enumerate(primary_series)}
+    benchmark_index = {bar.date: idx for idx, bar in enumerate(benchmark_series)}
+
+    bollinger_period = max(int(parameters.get("bollinger_period") or 20), 2)
+    bollinger_width = max(_to_float(parameters.get("bollinger_width"), 2.0), 0.5)
+    rsi_period = max(int(parameters.get("rsi_period") or 6), 1)
+    rsi_buy_threshold = _to_float(parameters.get("rsi_buy_threshold"), 30.0)
+    rsi_sell_threshold = _to_float(parameters.get("rsi_sell_threshold"), 70.0)
+    atr_period = max(int(parameters.get("atr_period") or 14), 1)
+    take_profit_atr = max(_to_float(parameters.get("take_profit_atr"), 1.5), 0.0)
+    stop_loss_atr = max(_to_float(parameters.get("stop_loss_atr"), 1.0), 0.0)
+    long_entry_weight = _clamp_weight(_to_float(parameters.get("long_entry_size_pct"), 0.0) / 100.0)
+    short_entry_weight = _clamp_weight(_to_float(parameters.get("short_entry_size_pct"), 0.0) / 100.0)
+
+    equity = max(_to_float(parameters.get("capital"), config.initial_equity), 1.0)
+    equity_curve = [equity]
+    returns: list[float] = []
+    daily_points: list[DailyPerformancePoint] = []
+    trades: list[TradeRecord] = []
+    total_turnover = 0.0
+    winning_days = 0
+    position_weight = 0.0
+    entry_price: float | None = None
+    effective_date: str | None = None
+    oos_cut = max(int(len(master_dates) * (1.0 - config.oos_fraction)), 1)
+
+    for index in range(1, len(master_dates)):
+        execution_date = master_dates[index]
+        previous_date = master_dates[index - 1]
+        position_index = primary_index.get(execution_date)
+        previous_index = primary_index.get(previous_date)
+        if position_index is None or previous_index is None:
+            continue
+
+        current_bar = primary_series[position_index]
+        previous_bar = primary_series[previous_index]
+        execution_price = _tradeable_open(current_bar)
+        previous_close = _tradeable_close(previous_bar)
+        current_close = _tradeable_close(current_bar)
+        signal_index = previous_index
+        previous_weight = position_weight
+        trade_reason: str | None = None
+
+        if entry_price is not None and position_weight != 0.0:
+            atr_value = _atr(primary_series, signal_index, atr_period)
+            if atr_value is not None and atr_value > 0:
+                if position_weight > 0:
+                    take_profit_price = entry_price + take_profit_atr * atr_value if take_profit_atr > 0 else None
+                    stop_loss_price = entry_price - stop_loss_atr * atr_value if stop_loss_atr > 0 else None
+                    if take_profit_price is not None and previous_close >= take_profit_price:
+                        position_weight = 0.0
+                        entry_price = None
+                        trade_reason = "mean_reversion:take_profit_long"
+                    elif stop_loss_price is not None and previous_close <= stop_loss_price:
+                        position_weight = 0.0
+                        entry_price = None
+                        trade_reason = "mean_reversion:stop_loss_long"
+                else:
+                    take_profit_price = entry_price - take_profit_atr * atr_value if take_profit_atr > 0 else None
+                    stop_loss_price = entry_price + stop_loss_atr * atr_value if stop_loss_atr > 0 else None
+                    if take_profit_price is not None and previous_close <= take_profit_price:
+                        position_weight = 0.0
+                        entry_price = None
+                        trade_reason = "mean_reversion:take_profit_short"
+                    elif stop_loss_price is not None and previous_close >= stop_loss_price:
+                        position_weight = 0.0
+                        entry_price = None
+                        trade_reason = "mean_reversion:stop_loss_short"
+
+        if trade_reason is None and position_weight == 0.0:
+            bands = _bollinger_bands(primary_series, signal_index, bollinger_period, bollinger_width)
+            rsi_value = _rsi(primary_series, signal_index, rsi_period)
+            if bands is not None and rsi_value is not None and execution_price > 0:
+                upper_band, lower_band = bands
+                if long_entry_weight > 0 and previous_close <= lower_band and rsi_value < rsi_buy_threshold:
+                    position_weight = _clamp_signed_weight(long_entry_weight)
+                    entry_price = execution_price
+                    trade_reason = "mean_reversion:long_entry"
+                elif short_entry_weight > 0 and previous_close >= upper_band and rsi_value > rsi_sell_threshold:
+                    position_weight = _clamp_signed_weight(-short_entry_weight)
+                    entry_price = execution_price
+                    trade_reason = "mean_reversion:short_entry"
+
+        if trade_reason and abs(position_weight - previous_weight) > 1e-9:
+            trades.append(
+                TradeRecord(
+                    date=execution_date,
+                    symbol=primary_symbol,
+                    action="buy" if position_weight > previous_weight else "sell",
+                    price=execution_price,
+                    weight_before=previous_weight,
+                    weight_after=position_weight,
+                    reason=trade_reason,
+                )
+            )
+            total_turnover += abs(position_weight - previous_weight)
+            if effective_date is None:
+                effective_date = execution_date
+
+        strategy_return = 0.0
+        if previous_close > 0 and execution_price > 0:
+            overnight_return = execution_price / previous_close - 1.0
+            strategy_return += previous_weight * overnight_return
+        if execution_price > 0 and current_close > 0:
+            intraday_return = current_close / execution_price - 1.0
+            strategy_return += position_weight * intraday_return
+        if trade_reason:
+            strategy_return -= (config.transaction_cost_bps / 10000.0) * abs(position_weight - previous_weight)
+
+        equity *= 1.0 + strategy_return
+        returns.append(strategy_return)
+        if strategy_return > 0:
+            winning_days += 1
+        equity_curve.append(equity)
+        peak = max(equity_curve)
+        drawdown = equity / peak - 1.0 if peak else 0.0
+
+        benchmark_return = 0.0
+        benchmark_pos = benchmark_index.get(execution_date)
+        if benchmark_pos is not None and benchmark_pos > 0:
+            current = _tradeable_close(benchmark_series[benchmark_pos])
+            prior = _tradeable_close(benchmark_series[benchmark_pos - 1])
+            if prior > 0:
+                benchmark_return = current / prior - 1.0
+
+        daily_points.append(
+            DailyPerformancePoint(
+                date=execution_date,
+                equity=equity,
+                strategy_return=strategy_return,
+                benchmark_return=benchmark_return,
+                drawdown=drawdown,
+                exposure=abs(position_weight),
+                universe_size=1,
+                in_sample=index < oos_cut,
+            )
+        )
+
+    total_return, cagr, volatility, sharpe, max_drawdown = _curve_metrics(equity_curve, returns)
+    oos_returns = [point.strategy_return for point in daily_points if not point.in_sample]
+    oos_curve = [1.0]
+    for value in oos_returns:
+        oos_curve.append(oos_curve[-1] * (1.0 + value))
+    _, oos_cagr, _, oos_sharpe, _ = _curve_metrics(oos_curve, oos_returns)
+    metrics = BacktestMetrics(
+        total_return=total_return,
+        cagr=cagr,
+        annualized_volatility=volatility,
+        sharpe=sharpe,
+        max_drawdown=max_drawdown,
+        turnover=total_turnover / max(len(daily_points), 1),
+        win_rate=winning_days / max(len(returns), 1),
+        oos_cagr=oos_cagr,
+        oos_sharpe=oos_sharpe,
+    )
+    fallback_effective_date = master_dates[1] if len(master_dates) > 1 else (master_dates[0] if master_dates else None)
+    oos_start_date = master_dates[oos_cut] if master_dates and oos_cut < len(master_dates) else (master_dates[-1] if master_dates else None)
+    return BacktestResult(
+        metrics=metrics,
+        daily_performance=daily_points,
+        trades=trades,
+        warnings=[],
+        effective_date=effective_date or fallback_effective_date,
+        oos_start_date=oos_start_date,
+        coverage_ratio=1.0 if daily_points else 0.0,
+        coverage_days=len(daily_points),
+    )
+
+
 def _run_buy_and_hold_backtest(
     symbol_series: Mapping[str, list[MarketBar]],
     *,
@@ -584,6 +818,14 @@ def run_backtest(
         master_dates = [value for value in master_dates if value <= str(config.end_date)]
     if str(template_key).lower() == "grid":
         return _run_grid_backtest(
+            symbol_series,
+            config=config,
+            parameters=parameters,
+            benchmark_series=benchmark_series,
+            master_dates=master_dates,
+        )
+    if str(template_key).lower() in {"mean_reversion", "reversion"}:
+        return _run_mean_reversion_backtest(
             symbol_series,
             config=config,
             parameters=parameters,
