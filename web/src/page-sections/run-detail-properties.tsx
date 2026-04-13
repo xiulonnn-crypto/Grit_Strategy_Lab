@@ -1,5 +1,6 @@
 import type { ApiBacktestRunDetail } from '../types';
 import { formatRunDetailKvLabel, formatRunDetailKvValue } from '../lib/run-detail-kv-format';
+import { getRunDetailParameterSnapshot } from '../lib/run-detail-view-model';
 
 type RunDetailPropertiesProps = {
   detail: ApiBacktestRunDetail;
@@ -49,9 +50,9 @@ export function RunDetailPropertiesPanel({ detail }: RunDetailPropertiesProps): 
           value={detail.request}
         />
         <PropertiesCard
-          description="实际执行所使用的参数快照。"
+          description="实际执行所使用的参数快照，缺失项会补入运行配置上下文。"
           title="参数快照"
-          value={(detail.parameter_snapshot ?? detail.preview?.parameter_snapshot ?? undefined) as Record<string, unknown> | undefined}
+          value={getRunDetailParameterSnapshot(detail)}
         />
         <PropertiesCard
           description="当前运行绑定的数据集与快照信息。"

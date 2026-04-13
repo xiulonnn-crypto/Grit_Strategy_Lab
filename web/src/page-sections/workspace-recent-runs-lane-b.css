@@ -145,6 +145,12 @@
   color: #c27a1d;
 }
 
+.workspace-recent-runs__kind--optimization {
+  background: #eef6f4;
+  border-color: #d9ebe7;
+  color: #24685f;
+}
+
 .workspace-recent-runs__strategy {
   margin: 0;
   min-width: 0;

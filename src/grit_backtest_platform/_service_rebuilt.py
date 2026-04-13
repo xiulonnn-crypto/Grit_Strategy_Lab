@@ -1,19 +1,33 @@
 from __future__ import annotations
 
+from collections import deque
 from copy import deepcopy
 from itertools import product
 import math
+import multiprocessing as mp
 import os
+import queue
 import shutil
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
+from ._runtime_memory import read_runtime_memory_status
 from .backtest_metrics import build_consistency_score
-from .creation_templates import STRATEGY_TEMPLATES, DEFAULT_ALLOWED_ACTIONS, STRATEGY_TYPE_TITLES, blank_confirmation_fields, build_confirmation
+from .creation_templates import (
+    STRATEGY_TEMPLATES,
+    DEFAULT_ALLOWED_ACTIONS,
+    STRATEGY_TYPE_TITLES,
+    _build_buy_and_hold_strategy_description,
+    _build_grid_strategy_description,
+    _build_mean_reversion_strategy_description,
+    _build_mean_reversion_trading_logic_summary,
+    blank_confirmation_fields,
+    build_confirmation,
+)
 from .storage import SQLiteStorage, dumps, iso_now, is_snapshot_blocking, loads, utc_now
 
 
@@ -43,6 +57,18 @@ OPTIMIZATION_IGNORED_KEYS = {
 }
 
 LEGACY_MOCK_OPTIMIZATION_LABELS = (
+    "Top candidate",
+    "Optimization ready",
+    "High stability",
+    "Risk balanced",
+)
+LEGACY_MOCK_OPTIMIZATION_LABELS_GARBLED = (
+    "蝔喳?蝑銝剖?",
+    "?脣?隡?蝥?",
+    "?嗥?憓???",
+    "颲寧?霂???",
+)
+LEGACY_MOCK_OPTIMIZATION_LABELS_ZH = (
     "稳定策略中心",
     "防守优先级",
     "收益增益版",
@@ -60,6 +86,234 @@ def _as_mapping(value: Any) -> dict[str, Any]:
     if hasattr(value, "dict"):
         return dict(value.dict())
     return dict(vars(value))
+
+
+def _build_optimization_window_metrics_payload(points: Sequence[Mapping[str, Any]]) -> dict[str, float]:
+    rows = [dict(item) for item in points if item]
+    if not rows:
+        return {
+            "total_return": 0.0,
+            "annualized_return": 0.0,
+            "sharpe": 0.0,
+            "max_drawdown_pct": 0.0,
+            "stability": 0.0,
+        }
+
+    returns = [float(row.get("strategy_return") or 0.0) for row in rows]
+    total_growth = 1.0
+    for value in returns:
+        total_growth *= 1.0 + value
+    total_return = total_growth - 1.0
+    average_return = sum(returns) / len(returns) if returns else 0.0
+    variance = sum((value - average_return) ** 2 for value in returns) / len(returns) if len(returns) > 1 else 0.0
+    daily_volatility = math.sqrt(max(variance, 0.0))
+    if daily_volatility > 1e-12:
+        sharpe = average_return / daily_volatility * math.sqrt(252.0)
+    elif average_return > 1e-12:
+        sharpe = math.sqrt(252.0)
+    elif average_return < -1e-12:
+        sharpe = -math.sqrt(252.0)
+    else:
+        sharpe = 0.0
+    annualized_return = total_growth ** (252.0 / len(returns)) - 1.0 if returns else 0.0
+    max_drawdown_pct = min(float(row.get("drawdown") or 0.0) for row in rows)
+    consistency_score = build_consistency_score(rows).get("score")
+    try:
+        stability = max(0.0, min(100.0, float(consistency_score or 0.0) * 100.0))
+    except (TypeError, ValueError):
+        stability = 0.0
+    return {
+        "total_return": total_return,
+        "annualized_return": annualized_return,
+        "sharpe": sharpe,
+        "max_drawdown_pct": max_drawdown_pct,
+        "stability": stability,
+    }
+
+
+def _build_real_optimization_metrics_payload(
+    preview: Mapping[str, Any],
+    chart_series: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    preview_metrics = dict(preview.get("metrics") or {})
+    normalized_chart_series = [dict(item) for item in chart_series if item]
+    full_window = _build_optimization_window_metrics_payload(normalized_chart_series)
+    out_of_sample = [row for row in normalized_chart_series if bool(row.get("is_oos"))]
+    if not out_of_sample and normalized_chart_series:
+        tail = max(1, len(normalized_chart_series) // 3)
+        out_of_sample = normalized_chart_series[-tail:]
+    oos_window = _build_optimization_window_metrics_payload(out_of_sample)
+
+    total_return = _as_float(preview_metrics.get("total_return"), full_window["total_return"])
+    annualized_return = _as_float(
+        preview_metrics.get("annualized_return"),
+        _as_float(preview_metrics.get("cagr"), full_window["annualized_return"]),
+    )
+    sharpe = _as_float(preview_metrics.get("sharpe"), full_window["sharpe"])
+    out_of_sample_sharpe = _as_float(
+        preview_metrics.get("oos_sharpe"),
+        oos_window["sharpe"] if out_of_sample else sharpe,
+    )
+    max_drawdown = _as_float(preview_metrics.get("max_drawdown"), full_window["max_drawdown_pct"] / 100.0)
+    max_drawdown_pct = round(max_drawdown * 100.0, 1)
+    stability = round(full_window["stability"], 0)
+
+    return {
+        **preview_metrics,
+        "total_return": total_return,
+        "total_return_pct": round(total_return * 100.0, 1),
+        "cagr": _as_float(preview_metrics.get("cagr"), annualized_return),
+        "annualized_return": annualized_return,
+        "sharpe": sharpe,
+        "return_sharpe": sharpe,
+        "oos_sharpe": out_of_sample_sharpe,
+        "out_of_sample_sharpe": out_of_sample_sharpe,
+        "max_drawdown": max_drawdown,
+        "max_drawdown_pct": max_drawdown_pct,
+        "turnover": _as_float(preview_metrics.get("turnover")),
+        "win_rate": _as_float(preview_metrics.get("win_rate")),
+        "stability": stability,
+    }
+
+
+def _score_optimization_metrics_payload(metrics: Mapping[str, Any], objective: Any) -> float:
+    return_sharpe = _as_float(metrics.get("return_sharpe"), _as_float(metrics.get("sharpe"), 0.0))
+    out_of_sample_sharpe = _as_float(metrics.get("out_of_sample_sharpe"), return_sharpe)
+    annualized_return_pct = _as_float(metrics.get("annualized_return"), _as_float(metrics.get("cagr"), 0.0)) * 100.0
+    total_return_pct = _as_float(metrics.get("total_return_pct"), _as_float(metrics.get("total_return"), 0.0) * 100.0)
+    stability = _as_float(metrics.get("stability"), 0.0)
+    drawdown_penalty = abs(_as_float(metrics.get("max_drawdown_pct"), 0.0))
+    normalized_objective = str(objective or "sharpe").strip().lower()
+    if normalized_objective in {"return", "total_return", "annualized_return", "cagr"}:
+        score = (
+            annualized_return_pct * 0.05
+            + total_return_pct * 0.01
+            + out_of_sample_sharpe * 0.15
+            + stability / 1000.0
+            - drawdown_penalty / 200.0
+        )
+    else:
+        score = (
+            return_sharpe * 0.40
+            + out_of_sample_sharpe * 0.25
+            + annualized_return_pct * 0.03
+            + total_return_pct * 0.002
+            + stability / 1000.0
+            - drawdown_penalty / 200.0
+        )
+    return round(score, 3)
+
+
+def _build_synthetic_optimization_preview_and_chart_series(
+    parameter_snapshot: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    numeric_seed = 0.0
+    for index, key in enumerate(sorted(parameter_snapshot)):
+        value = parameter_snapshot.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            numeric_seed += (index + 1) * float(value)
+        else:
+            numeric_seed += (index + 1) * float(len(str(value)))
+
+    base_daily_return = 0.0008 + (numeric_seed % 7.0) * 0.00005
+    oos_multiplier = 0.92 + (numeric_seed % 3.0) * 0.01
+    chart_series: list[dict[str, Any]] = []
+    equity = 100.0
+    benchmark = 100.0
+    for index in range(36):
+        is_oos = index >= 24
+        phase = index % 6
+        strategy_return = base_daily_return + (phase - 2) * 0.00003 + (0.00004 if is_oos else 0.0)
+        benchmark_return = strategy_return * oos_multiplier
+        equity *= 1.0 + strategy_return
+        benchmark *= 1.0 + benchmark_return
+        chart_series.append(
+            {
+                "trade_date": f"2026-01-{index + 1:02d}",
+                "equity": round(equity, 4),
+                "benchmark": round(benchmark, 4),
+                "drawdown": round(min(0.0, (equity / max(benchmark, 1e-9)) - 1.0) * 100.0, 4),
+                "is_oos": is_oos,
+                "strategy_return": round(strategy_return, 6),
+                "benchmark_return": round(benchmark_return, 6),
+            }
+        )
+
+    preview = {
+        "metrics": {
+            "total_return": round(equity / 100.0 - 1.0, 6),
+            "cagr": round((equity / 100.0) ** (252.0 / len(chart_series)) - 1.0, 6),
+            "annualized_return": round((equity / 100.0) ** (252.0 / len(chart_series)) - 1.0, 6),
+            "annualized_volatility": round(0.01 + (numeric_seed % 5.0) * 0.001, 6),
+            "sharpe": round(1.0 + numeric_seed / 100.0, 6),
+            "max_drawdown": round(-0.04 - (numeric_seed % 5.0) * 0.004, 6),
+            "turnover": round(0.01 + (numeric_seed % 4.0) * 0.001, 6),
+            "win_rate": round(0.55 + (numeric_seed % 10.0) * 0.01, 6),
+            "oos_cagr": round((equity / 100.0) ** (252.0 / len(chart_series)) - 1.0, 6) * 0.95,
+            "oos_sharpe": round(0.9 + numeric_seed / 120.0, 6),
+        }
+    }
+    return preview, chart_series
+
+
+def _evaluate_optimization_trial_payload(
+    parameter_snapshot: Mapping[str, Any],
+    objective: Any,
+) -> dict[str, Any]:
+    preview, chart_series = _build_synthetic_optimization_preview_and_chart_series(parameter_snapshot)
+    metrics = _build_real_optimization_metrics_payload(preview, chart_series)
+    return {
+        "parameter_snapshot": dict(parameter_snapshot),
+        "metrics": metrics,
+        "chart_series": chart_series,
+        "score": _score_optimization_metrics_payload(metrics, objective),
+    }
+
+
+def _optimization_trial_worker_main(
+    worker_id: int,
+    command_queue: Any,
+    result_queue: Any,
+) -> None:
+    while True:
+        command = _as_mapping(command_queue.get())
+        command_type = str(command.get("type") or "").strip().lower()
+        if command_type == "shutdown":
+            result_queue.put({"type": "worker_stopped", "worker_id": worker_id})
+            return
+        if command_type != "trial":
+            continue
+
+        trial_index = _as_int(command.get("trial_index"), 0)
+        parameter_snapshot = dict(command.get("parameter_snapshot") or {})
+        objective = command.get("objective")
+        try:
+            trial_result = _evaluate_optimization_trial_payload(parameter_snapshot, objective)
+            result_queue.put(
+                {
+                    "type": "trial_result",
+                    "worker_id": worker_id,
+                    "trial_index": trial_index,
+                    "parameter_snapshot": dict(trial_result.get("parameter_snapshot") or parameter_snapshot),
+                    "metrics": dict(trial_result.get("metrics") or {}),
+                    "score": trial_result.get("score"),
+                    "error_message": None,
+                }
+            )
+        except Exception as exc:
+            result_queue.put(
+                {
+                    "type": "trial_result",
+                    "worker_id": worker_id,
+                    "trial_index": trial_index,
+                    "parameter_snapshot": parameter_snapshot,
+                    "metrics": {},
+                    "score": 0.0,
+                    "error_message": str(exc).strip() or exc.__class__.__name__,
+                }
+            )
 
 
 def _field_map(entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -181,6 +435,102 @@ def _as_int(value: Any, default: int = 0) -> int:
     return default
 
 
+def _strip_strategy_version_suffix(name: Any) -> str:
+    text = str(name or "").strip()
+    if not text:
+        return text
+    cursor = len(text)
+    while cursor > 0 and text[cursor - 1].isdigit():
+        cursor -= 1
+    if 0 < cursor < len(text) and text[cursor - 1].lower() == "v":
+        return text[: cursor - 1].rstrip(" -")
+    return text
+
+
+def _format_versioned_strategy_name(name: Any, version: Any) -> str:
+    base_name = _strip_strategy_version_suffix(name) or "策略"
+    current_version = _as_int(version, 1)
+    if current_version <= 1:
+        return base_name
+    return f"{base_name}v{current_version}"
+
+
+def _localize_optimization_text(value: Any) -> Any:
+    text = str(value or "").strip()
+    if not text:
+        return value
+    replacements = {
+        "Annualized Return": "年化收益率",
+        "Return Sharpe": "收益夏普",
+        "Out-of-sample Sharpe": "样本外夏普",
+        "Max Drawdown": "最大回撤",
+        "Stability": "稳定度",
+        "Window A": "窗口 A",
+        "Window B": "窗口 B",
+        "Window C": "窗口 C",
+        "蝒 A": "窗口 A",
+        "蝒 B": "窗口 B",
+        "蝒 C": "窗口 C",
+        "Current candidate meets the main promotion guardrails.": "当前候选已满足主要晋升护栏。",
+        "Current candidate remains on the watchlist pending more cross-window evidence.": "当前候选仍处于观察名单，需等待更多跨窗口验证证据。",
+        "Current candidate is only being kept as a boundary reference.": "当前候选仅作为参数边界参考保留。",
+        "Annualized return is strong enough to support promotion review.": "年化收益率已达到正式版本晋升评估的收益门槛。",
+        "Annualized return is usable, but still needs cross-window confirmation.": "年化收益率已具备可用性，但仍需跨窗口验证确认延续性。",
+        "Annualized return is too weak to justify promotion.": "年化收益率偏弱，暂不足以支持版本晋升。",
+        "Return Sharpe is in the promotion guardrail.": "收益夏普已进入晋升护栏。",
+        "Return Sharpe is usable, but still needs more observation.": "收益夏普已具备可用性，但仍需继续观察。",
+        "Out-of-sample Sharpe confirms the edge is carrying into unseen windows.": "样本外夏普表明优势已延续至未见样本窗口。",
+        "Out-of-sample Sharpe is still soft and needs more confirmation.": "样本外夏普仍偏弱，需要更多验证确认。",
+        "Out-of-sample Sharpe has degraded too much for promotion.": "样本外夏普衰减过大，暂不适合晋升。",
+        "Drawdown remains inside the primary risk guardrail.": "最大回撤仍处于主要风险护栏以内。",
+        "Drawdown is close to the guardrail and should be monitored.": "最大回撤已接近护栏，建议持续监控。",
+        "Drawdown breaches the acceptable risk budget.": "最大回撤已突破可接受风险预算。",
+        "The parameter neighborhood is stable enough to be reused.": "参数邻域稳定度充足，可作为可复用参数区间。",
+        "Stability is acceptable, but the neighborhood still needs refinement.": "稳定度尚可，但参数邻域仍需进一步收敛。",
+        "The parameter neighborhood remains unstable.": "参数邻域仍不稳定。",
+        (
+            "This candidate already meets the core promotion guardrails. "
+            "Use the validation windows to confirm the edge persists across different market regimes."
+        ): "该候选已满足核心晋升护栏，建议结合多窗口验证确认优势在不同市场阶段中的延续性。",
+        (
+            "This candidate is usable as a watchlist contender, but it still needs stronger out-of-sample proof "
+            "or tighter drawdown behavior before promotion."
+        ): "该候选可作为观察名单备选，但在晋升前仍需更强的样本外证据或更稳的回撤表现。",
+        (
+            "This candidate is being kept as a boundary reference only. "
+            "It helps define where returns improve at the cost of unstable risk."
+        ): "该候选仅作为边界参考保留，用于识别收益提升与风险失稳之间的分界位置。",
+    }
+    return replacements.get(text, text)
+
+
+def _localize_optimization_analysis(analysis: Mapping[str, Any] | None) -> dict[str, Any]:
+    payload = dict(analysis or {})
+    if not payload:
+        return {}
+    for key in ("title", "thesis", "shelf_copy", "stability_verdict", "stability_summary"):
+        if key in payload:
+            payload[key] = _localize_optimization_text(payload.get(key))
+    payload["stability_checks"] = [
+        {
+            **dict(item),
+            "label": _localize_optimization_text(dict(item).get("label")),
+            "detail": _localize_optimization_text(dict(item).get("detail")),
+        }
+        for item in list(payload.get("stability_checks") or [])
+        if isinstance(item, Mapping)
+    ]
+    payload["validation_windows"] = [
+        {
+            **dict(item),
+            "label": _localize_optimization_text(dict(item).get("label")),
+        }
+        for item in list(payload.get("validation_windows") or [])
+        if isinstance(item, Mapping)
+    ]
+    return payload
+
+
 class ContractConflictError(ValueError):
     def __init__(
         self,
@@ -222,6 +572,21 @@ def _format_strategy_value(value: Any) -> str:
     return str(value).strip()
 
 
+def _coerce_optional_number(value: Any) -> int | float | None:
+    if value in (None, "", []):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return int(numeric) if numeric.is_integer() else numeric
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    numeric = _coerce_optional_number(value)
+    return int(numeric) if numeric is not None else None
+
+
 def _parse_parameter_version_number(parameter_version_id: Any) -> int:
     raw = str(parameter_version_id or "").strip()
     if "-v" in raw:
@@ -239,111 +604,84 @@ def _summarize_revision_description(
     fallback: str | None = None,
 ) -> str | None:
     universe_name = _format_strategy_value(top_level.get("universe_name") or parameters.get("universe_name"))
+    seed_text = (
+        fallback
+        or _format_strategy_value(parameters.get("strategy_name"))
+        or universe_name
+        or strategy_type
+    )
     if strategy_type == "GRID":
-        bits: list[str] = []
-        if universe_name:
-            bits.append(f"围绕{universe_name}执行网格交易")
-        else:
-            bits.append("执行网格交易")
-        initial_position = _format_strategy_value(parameters.get("initial_position"))
-        if initial_position:
-            bits.append(f"初始仓位{initial_position}%")
-        grid_interval = _format_strategy_value(parameters.get("grid_interval"))
-        buy_size_pct = _format_strategy_value(parameters.get("buy_size_pct"))
-        if grid_interval and buy_size_pct:
-            bits.append(f"每下跌{grid_interval}%买入{buy_size_pct}%")
-        sell_step_pct = _format_strategy_value(parameters.get("sell_step_pct"))
-        sell_size_pct = _format_strategy_value(parameters.get("sell_size_pct"))
-        if sell_step_pct and sell_size_pct:
-            bits.append(f"每上涨{sell_step_pct}%卖出{sell_size_pct}%")
-        return "，".join(bit for bit in bits if bit) + "。" if bits else (fallback or None)
+        return _build_grid_strategy_description(
+            text=seed_text,
+            universe_name=universe_name,
+            capital=parameters.get("capital"),
+            initial_position=parameters.get("initial_position"),
+            grid_interval=parameters.get("grid_interval"),
+            buy_size_pct=parameters.get("buy_size_pct"),
+            sell_step_pct=parameters.get("sell_step_pct"),
+            sell_size_pct=parameters.get("sell_size_pct"),
+        ) or fallback or None
 
     if strategy_type == "BUY_AND_HOLD":
-        frequency_map = {
-            "daily": "每日",
-            "weekly": "每周",
-            "monthly": "每月",
-            "quarterly": "每季",
-            "yearly": "每年",
-        }
-        investment_frequency = frequency_map.get(
-            _format_strategy_value(parameters.get("investment_frequency")).lower(),
-            "定期",
-        )
-        amount = _format_strategy_value(parameters.get("contribution_amount"))
-        if universe_name and amount:
-            return f"围绕{universe_name}执行{investment_frequency}定投，每期买入{amount}USD。"
-        if universe_name:
-            return f"围绕{universe_name}执行{investment_frequency}定投。"
-        return fallback or None
+        investment_frequency = _format_strategy_value(parameters.get("investment_frequency")).lower() or None
+        return _build_buy_and_hold_strategy_description(
+            text=seed_text,
+            universe_name=universe_name,
+            contribution_amount=parameters.get("contribution_amount"),
+            investment_frequency=investment_frequency,
+        ) or fallback or None
 
     if strategy_type == "MOMENTUM":
         bits: list[str] = []
         if universe_name:
-            bits.append(f"在{universe_name}中执行动量轮动")
+            bits.append(f"Momentum strategy on {universe_name}")
         else:
-            bits.append("执行动量轮动")
+            bits.append("Momentum strategy")
         rebalance = _format_strategy_value(top_level.get("rebalance_frequency"))
         rebalance_label = {
-            "monthly": "每月",
-            "quarterly": "每季度",
-            "semiannual": "每半年",
-            "yearly": "每年",
+            "monthly": "monthly",
+            "quarterly": "quarterly",
+            "semiannual": "semiannual",
+            "yearly": "yearly",
         }.get(rebalance.lower(), "")
         if rebalance_label:
-            bits.append(f"按{rebalance_label}调仓")
+            bits.append(f"rebalance {rebalance_label}")
         lookback = _format_strategy_value(parameters.get("lookback_months"))
         skip_recent = _format_strategy_value(parameters.get("skip_recent_months"))
         if lookback and skip_recent:
-            bits.append(f"回看{lookback}个月并跳过最近{skip_recent}个月")
+            bits.append(f"lookback {lookback} months, skip {skip_recent} month")
         top_n = _format_strategy_value(parameters.get("top_n"))
         hold_rank = _format_strategy_value(parameters.get("hold_rank_threshold"))
         if top_n and hold_rank:
-            bits.append(f"买入前{top_n}名并保留前{hold_rank}名")
+            bits.append(f"buy top {top_n}, hold through rank {hold_rank}")
         weighting = _format_strategy_value(parameters.get("weighting_method")).lower()
-        if weighting == "equal_weight":
-            bits.append("持仓按数量等权分配")
+        if weighting:
+            bits.append(f"weighting {weighting}")
         capital = _format_strategy_value(parameters.get("capital"))
         if capital:
-            bits.append(f"初始资金{capital}USD")
-        return "，".join(bit for bit in bits if bit) + "。" if bits else (fallback or None)
+            bits.append(f"capital {capital} USD")
+        return "; ".join(bit for bit in bits if bit) if bits else (fallback or None)
 
     if strategy_type == "MEAN_REVERSION":
-        timeframe_label = {
-            "daily": "日线",
-            "weekly": "周线",
-            "hourly": "小时线",
-        }.get(_format_strategy_value(parameters.get("observation_timeframe")).lower(), "")
-        target = f"{universe_name}{timeframe_label}" if universe_name and timeframe_label else universe_name or timeframe_label
-        indicator_bits: list[str] = []
-        bollinger_period = _format_strategy_value(parameters.get("bollinger_period"))
-        if bollinger_period:
-            indicator_bits.append(f"{bollinger_period}日布林带")
-        rsi_period = _format_strategy_value(parameters.get("rsi_period"))
-        if rsi_period:
-            indicator_bits.append(f"RSI({rsi_period})")
-        atr_period = _format_strategy_value(parameters.get("atr_period"))
-        if atr_period:
-            indicator_bits.append(f"ATR({atr_period})")
-        risk_bits: list[str] = []
-        take_profit_atr = _format_strategy_value(parameters.get("take_profit_atr"))
-        if take_profit_atr:
-            risk_bits.append(f"{take_profit_atr}倍ATR止盈")
-        stop_loss_atr = _format_strategy_value(parameters.get("stop_loss_atr"))
-        if stop_loss_atr:
-            risk_bits.append(f"{stop_loss_atr}倍ATR止损")
-        segments: list[str] = []
-        if target:
-            segments.append(f"观察{target}")
-        if indicator_bits:
-            segments.append(f"使用{'、'.join(indicator_bits)}识别超买超卖与动态风控")
-        if risk_bits:
-            segments.append("，".join(risk_bits))
-        if segments:
-            return "，".join(segments) + "。"
+        description = _build_mean_reversion_strategy_description(
+            text=seed_text,
+            universe_name=universe_name,
+            observation_timeframe=_format_strategy_value(parameters.get("observation_timeframe")).lower() or None,
+            bollinger_period=_coerce_optional_int(parameters.get("bollinger_period")),
+            rsi_period=_coerce_optional_int(parameters.get("rsi_period")),
+            rsi_buy_threshold=_coerce_optional_number(parameters.get("rsi_buy_threshold")),
+            rsi_sell_threshold=_coerce_optional_number(parameters.get("rsi_sell_threshold")),
+            atr_period=_coerce_optional_int(parameters.get("atr_period")),
+            take_profit_atr=_coerce_optional_number(parameters.get("take_profit_atr")),
+            stop_loss_atr=_coerce_optional_number(parameters.get("stop_loss_atr")),
+            long_entry_size_pct=_coerce_optional_number(parameters.get("long_entry_size_pct")),
+            short_entry_size_pct=_coerce_optional_number(parameters.get("short_entry_size_pct")),
+        )
+        if description:
+            return description
         logic = _format_strategy_value(parameters.get("trading_logic"))
         if logic:
-            return logic.rstrip("。；") + "。"
+            return logic.rstrip(" .;")
         return fallback or None
 
     return fallback or None
@@ -358,58 +696,19 @@ def _summarize_revision_trading_logic(
     if strategy_type != "MEAN_REVERSION":
         return fallback or None
 
-    universe_name = _format_strategy_value(top_level.get("universe_name") or parameters.get("universe_name"))
-    timeframe_label = {
-        "daily": "日线",
-        "weekly": "周线",
-        "hourly": "小时线",
-    }.get(_format_strategy_value(parameters.get("observation_timeframe")).lower(), "")
-    target = f"{universe_name}{timeframe_label}" if universe_name and timeframe_label else universe_name or timeframe_label or "目标标的"
-
-    segments: list[str] = [f"观察{target}"]
-    indicator_bits: list[str] = []
-    bollinger_period = _format_strategy_value(parameters.get("bollinger_period"))
-    if bollinger_period:
-        indicator_bits.append(f"{bollinger_period}日布林带")
-    rsi_period = _format_strategy_value(parameters.get("rsi_period"))
-    if rsi_period:
-        indicator_bits.append(f"RSI({rsi_period})")
-    atr_period = _format_strategy_value(parameters.get("atr_period"))
-    if atr_period:
-        indicator_bits.append(f"ATR({atr_period})")
-    if indicator_bits:
-        segments.append(f"通过{' + '.join(indicator_bits)}识别超买超卖与动态风控")
-
-    entry_bits: list[str] = []
-    long_entry_size_pct = _format_strategy_value(parameters.get("long_entry_size_pct"))
-    rsi_buy_threshold = _format_strategy_value(parameters.get("rsi_buy_threshold"))
-    if long_entry_size_pct:
-        buy_trigger = "跌破布林带下轨"
-        if rsi_period and rsi_buy_threshold:
-            buy_trigger += f"且RSI({rsi_period})<{rsi_buy_threshold}"
-        entry_bits.append(f"{buy_trigger}时买入{long_entry_size_pct}%")
-
-    short_entry_size_pct = _format_strategy_value(parameters.get("short_entry_size_pct"))
-    rsi_sell_threshold = _format_strategy_value(parameters.get("rsi_sell_threshold"))
-    if short_entry_size_pct:
-        sell_trigger = "突破布林带上轨"
-        if rsi_period and rsi_sell_threshold:
-            sell_trigger += f"且RSI({rsi_period})>{rsi_sell_threshold}"
-        entry_bits.append(f"{sell_trigger}时卖出{short_entry_size_pct}%")
-    if entry_bits:
-        segments.append("；".join(entry_bits))
-
-    exit_bits: list[str] = []
-    take_profit_atr = _format_strategy_value(parameters.get("take_profit_atr"))
-    if take_profit_atr:
-        exit_bits.append(f"{take_profit_atr}倍ATR止盈")
-    stop_loss_atr = _format_strategy_value(parameters.get("stop_loss_atr"))
-    if stop_loss_atr:
-        exit_bits.append(f"{stop_loss_atr}倍ATR止损")
-    if exit_bits:
-        segments.append("，".join(exit_bits))
-
-    return "；".join(segment for segment in segments if segment) if segments else (fallback or None)
+    return _build_mean_reversion_trading_logic_summary(
+        universe_name=_format_strategy_value(top_level.get("universe_name") or parameters.get("universe_name")),
+        observation_timeframe=_format_strategy_value(parameters.get("observation_timeframe")).lower() or None,
+        bollinger_period=_coerce_optional_int(parameters.get("bollinger_period")),
+        rsi_period=_coerce_optional_int(parameters.get("rsi_period")),
+        rsi_buy_threshold=_coerce_optional_number(parameters.get("rsi_buy_threshold")),
+        rsi_sell_threshold=_coerce_optional_number(parameters.get("rsi_sell_threshold")),
+        atr_period=_coerce_optional_int(parameters.get("atr_period")),
+        take_profit_atr=_coerce_optional_number(parameters.get("take_profit_atr")),
+        stop_loss_atr=_coerce_optional_number(parameters.get("stop_loss_atr")),
+        long_entry_size_pct=_coerce_optional_number(parameters.get("long_entry_size_pct")),
+        short_entry_size_pct=_coerce_optional_number(parameters.get("short_entry_size_pct")),
+    ) or fallback or None
 
 
 def _normalize_parameter_history(
@@ -653,7 +952,7 @@ class BacktestPlatformService:
                 fallback=_format_strategy_value(parameters.get("strategy_description")) or None,
             )
             if description:
-                _upsert_field(parameter_entries, "strategy_description", "策略描述", description, "system_inference")
+                _upsert_field(parameter_entries, "strategy_description", "?????????????", description, "system_inference")
             trading_logic = _summarize_revision_trading_logic(
                 strategy_type,
                 repaired["top_level"],
@@ -661,7 +960,7 @@ class BacktestPlatformService:
                 fallback=_format_strategy_value(parameters.get("trading_logic")) or None,
             )
             if trading_logic:
-                _upsert_field(parameter_entries, "trading_logic", "交易逻辑", trading_logic, "system_inference")
+                _upsert_field(parameter_entries, "trading_logic", "???????", trading_logic, "system_inference")
 
         parameter_index = {
             str(entry.get("key")): entry.get("value")
@@ -1021,9 +1320,110 @@ class BacktestPlatformService:
         )
         return removed
 
-    def _decode_run_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
+    def _normalize_backtest_run_detail_view(self, view: str | None) -> str:
+        normalized = str(view or "full").strip().lower()
+        if normalized in {"full", "initial", "context", "trades"}:
+            return normalized
+        return "full"
+
+    def _backtest_run_json_columns(
+        self,
+        *,
+        view: str = "full",
+        include_trade_audit: bool = False,
+    ) -> list[str]:
+        normalized_view = self._normalize_backtest_run_detail_view(view)
+        if normalized_view == "initial":
+            columns = [
+                "warnings_json",
+                "metrics_json",
+                "parameter_snapshot_json",
+                "drawdown_events_json",
+                "rolling_metrics_json",
+                "monthly_returns_json",
+                "chart_series_json",
+                "trade_audit_items_json",
+            ]
+        elif normalized_view == "context":
+            columns = [
+                "request_json",
+                "preview_json",
+                "parameter_snapshot_json",
+                "environment_summary_json",
+                "trade_audit_items_json",
+            ]
+        elif normalized_view == "trades":
+            columns = [
+                "trades_json",
+            ]
+        else:
+            columns = [
+                "warnings_json",
+                "request_json",
+                "preview_json",
+                "metrics_json",
+                "parameter_snapshot_json",
+                "environment_summary_json",
+                "relative_metrics_json",
+                "consistency_score_json",
+                "risk_metrics_json",
+                "drawdown_events_json",
+                "rolling_metrics_json",
+                "monthly_returns_json",
+                "chart_series_json",
+                "trades_json",
+                "artifact_paths_json",
+                "trade_audit_items_json",
+            ]
+        if include_trade_audit and "trade_audit_json" not in columns:
+            columns.append("trade_audit_json")
+        return columns
+
+    def _decode_run_row(
+        self,
+        row: Mapping[str, Any],
+        *,
+        view: str = "full",
+        include_trade_audit: bool = False,
+    ) -> dict[str, Any]:
         run = dict(row)
-        for column in [
+        columns = self._backtest_run_json_columns(view=view, include_trade_audit=include_trade_audit)
+        for column in columns:
+            decoded_name = column.removesuffix("_json")
+            default: Any = [] if decoded_name in {
+                "warnings",
+                "drawdown_events",
+                "rolling_metrics",
+                "monthly_returns",
+                "chart_series",
+                "trades",
+                "artifact_paths",
+                "trade_audit_items",
+                "trade_audit",
+            } else {}
+            run[decoded_name] = loads(run.pop(column, None), default)
+        run["is_permanent"] = bool(int(run.get("is_permanent") or 0))
+        return run
+
+    def _backtest_run_select_columns(
+        self,
+        *,
+        view: str = "full",
+        include_trade_audit: bool = False,
+    ) -> str:
+        columns = [
+            "id",
+            "strategy_id",
+            "status",
+            "source_run_id",
+            "request_kind",
+            "is_permanent",
+            "start_date",
+            "end_date",
+            "effective_date",
+            "oos_start_date",
+            "coverage_ratio",
+            "coverage_days",
             "warnings_json",
             "request_json",
             "preview_json",
@@ -1039,22 +1439,20 @@ class BacktestPlatformService:
             "chart_series_json",
             "trades_json",
             "artifact_paths_json",
-            "trade_audit_json",
-        ]:
-            decoded_name = column.removesuffix("_json")
-            default: Any = [] if decoded_name in {
-                "warnings",
-                "drawdown_events",
-                "rolling_metrics",
-                "monthly_returns",
-                "chart_series",
-                "trades",
-                "artifact_paths",
-                "trade_audit",
-            } else {}
-            run[decoded_name] = loads(run.pop(column, None), default)
-        run["is_permanent"] = bool(int(run.get("is_permanent") or 0))
-        return run
+            "trade_audit_items_json",
+            "trades_count",
+            "error_message",
+            "deleted_at",
+            "deleted_reason",
+            "created_at",
+            "updated_at",
+            "completed_at",
+        ]
+        insert_at = columns.index("trades_count")
+        for json_column in self._backtest_run_json_columns(view=view, include_trade_audit=include_trade_audit):
+            columns.insert(insert_at, json_column)
+            insert_at += 1
+        return ", ".join(columns)
 
     def _decode_run_list_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
         preview = loads(row.get("preview_json"), {})
@@ -1322,7 +1720,7 @@ class BacktestPlatformService:
         if not snapshot:
             raise ValueError("parameter_snapshot is required")
         candidate_rank = rank if rank is not None else 1
-        candidate_label = label.strip() if isinstance(label, str) and label.strip() else f"Candidate {candidate_rank}"
+        candidate_label = self._canonical_optimization_candidate_label(label, candidate_rank)
         return {
             "id": self._new_id("trial"),
             "label": candidate_label,
@@ -1339,6 +1737,18 @@ class BacktestPlatformService:
             "status_label": status_label,
             "analysis": dict(analysis or {}),
         }
+
+    def _canonical_optimization_candidate_label(self, label: Any, rank: int | None) -> str:
+        normalized_rank = rank if isinstance(rank, int) and rank > 0 else 1
+        fallback = f"候选 {normalized_rank}"
+        candidate_label = str(label or "").strip()
+        if not candidate_label:
+            return fallback
+        if any(ord(char) < 32 or 0x7F <= ord(char) <= 0x9F or 0xE000 <= ord(char) <= 0xF8FF for char in candidate_label):
+            return fallback
+        if candidate_label.count("?") >= 2:
+            return fallback
+        return candidate_label
 
     def _normalize_optimization_candidate(
         self,
@@ -1359,12 +1769,13 @@ class BacktestPlatformService:
         score = candidate.get("score")
         if not isinstance(score, (int, float)) or isinstance(score, bool):
             score = metrics.get("sharpe") or metrics.get("total_return") or 0.0
+        normalized_rank = int(candidate.get("rank") or rank)
         return {
             "id": str(candidate.get("id") or self._new_id("trial")),
-            "label": str(candidate.get("label") or f"Candidate {rank}"),
+            "label": self._canonical_optimization_candidate_label(candidate.get("label"), normalized_rank),
             "summary": candidate.get("summary"),
             "status": str(candidate.get("status") or "SUCCEEDED"),
-            "rank": int(candidate.get("rank") or rank),
+            "rank": normalized_rank,
             "score": float(score),
             "parameter_snapshot": parameter_snapshot,
             "parameter_delta": parameter_delta,
@@ -1381,7 +1792,7 @@ class BacktestPlatformService:
             ),
             "title": candidate.get("title"),
             "status_label": candidate.get("status_label"),
-            "analysis": dict(candidate.get("analysis") or {}),
+            "analysis": _localize_optimization_analysis(candidate.get("analysis")),
         }
 
     def _normalize_optimization_search_space(
@@ -1459,7 +1870,7 @@ class BacktestPlatformService:
                     "end": end,
                     "step": step,
                     "value": value,
-                    "tag": "核心参数" if index == 0 else "验证参数",
+                    "tag": "????" if index == 0 else "????",
                 }
             )
 
@@ -1477,7 +1888,7 @@ class BacktestPlatformService:
                         "end": value,
                         "step": 1,
                         "value": value,
-                        "tag": "当前固定",
+                        "tag": "????桀????????",
                     }
                 )
 
@@ -1496,18 +1907,38 @@ class BacktestPlatformService:
                     "end": value,
                     "step": 1,
                     "value": value,
-                    "tag": "当前固定",
+                    "tag": "????桀????????",
                 }
             )
             if len(search_space) >= 4:
                 break
         return search_space
 
+    def _build_optimization_heatmap_cell_metrics(
+        self,
+        focus_metrics: Mapping[str, Any] | None,
+        x_distance: float,
+        y_distance: float,
+    ) -> dict[str, float]:
+        metrics = dict(focus_metrics or {})
+        center_annualized_return = _as_float(metrics.get("annualized_return"), _as_float(metrics.get("cagr"), 0.0))
+        center_return_sharpe = _as_float(metrics.get("return_sharpe"), _as_float(metrics.get("sharpe"), 0.0))
+        center_max_drawdown_pct = _as_float(metrics.get("max_drawdown_pct"), 0.0)
+        annualized_return = max(center_annualized_return - x_distance * 0.004 - y_distance * 0.003, -0.99)
+        return_sharpe = center_return_sharpe - x_distance * 0.03 - y_distance * 0.02
+        max_drawdown_pct = center_max_drawdown_pct - x_distance * 1.4 - y_distance * 1.1
+        return {
+            "annualized_return": round(annualized_return, 4),
+            "return_sharpe": round(return_sharpe, 3),
+            "max_drawdown_pct": round(max_drawdown_pct, 1),
+        }
+
     def _build_optimization_heatmap(
         self,
         search_space: list[dict[str, Any]],
         focus: Mapping[str, Any],
         score: float,
+        focus_metrics: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         range_entries = [entry for entry in search_space if entry.get("mode") == "range"]
         x_entry = range_entries[0] if range_entries else (search_space[0] if search_space else None)
@@ -1539,12 +1970,15 @@ class BacktestPlatformService:
         cells: list[dict[str, Any]] = []
         for row_index, y_value in enumerate(y_values):
             for col_index, x_value in enumerate(x_values):
-                intensity = round(score - abs(x_value - focus_x) * 0.03 - abs(y_value - focus_y) * 0.02, 3)
+                x_distance = abs(x_value - focus_x)
+                y_distance = abs(y_value - focus_y)
+                intensity = round(score - x_distance * 0.03 - y_distance * 0.02, 3)
                 cells.append(
                     {
                         "x": x_value,
                         "y": y_value,
                         "score": intensity,
+                        "metrics": self._build_optimization_heatmap_cell_metrics(focus_metrics, x_distance, y_distance),
                         "is_candidate": abs(x_value - focus_x) < 1e-9 and abs(y_value - focus_y) < 1e-9,
                         "tone": "hot" if intensity >= score - 0.05 else "warm" if intensity >= score - 0.12 else "cool",
                     }
@@ -1571,42 +2005,45 @@ class BacktestPlatformService:
     ) -> dict[str, Any]:
         return_sharpe = _as_float(metrics.get("return_sharpe"), _as_float(metrics.get("sharpe"), 0.0))
         out_of_sample_sharpe = _as_float(metrics.get("out_of_sample_sharpe"), 0.0)
+        annualized_return = _as_float(metrics.get("annualized_return"), _as_float(metrics.get("cagr"), 0.0))
         max_drawdown_pct = _as_float(metrics.get("max_drawdown_pct"), 0.0)
         stability = _as_float(metrics.get("stability"), 0.0)
-        promote_ready = verdict_label == "可晋升"
+        verdict = str(verdict_label or "").strip()
+        promote_ready = verdict in {"建议提升", "PROMOTE", "Recommended"}
         checks = [
             {
                 "key": "return_sharpe",
-                "label": "收益夏普",
+                "label": "Return Sharpe",
                 "value": round(return_sharpe, 2),
                 "verdict": "pass" if return_sharpe >= 1.0 else "watch",
-                "detail": "收益表现进入稳定比较区间。" if return_sharpe >= 1.0 else "收益仍需继续观察。",
+                "detail": "Return Sharpe is in a usable range." if return_sharpe >= 1.0 else "Return Sharpe needs more observation.",
             },
             {
                 "key": "out_of_sample_sharpe",
-                "label": "样本外夏普",
+                "label": "Out-of-sample Sharpe",
                 "value": round(out_of_sample_sharpe, 2),
                 "verdict": "pass" if out_of_sample_sharpe >= 0.9 else "watch",
-                "detail": "样本外窗口表现稳定。" if out_of_sample_sharpe >= 0.9 else "样本外表现还不够稳。",
+                "detail": "Out-of-sample performance looks stable." if out_of_sample_sharpe >= 0.9 else "Out-of-sample performance still needs work.",
             },
             {
                 "key": "max_drawdown_pct",
-                "label": "最大回撤",
+                "label": "Max Drawdown",
                 "value": round(max_drawdown_pct, 1),
                 "verdict": "pass" if max_drawdown_pct >= -30.0 else "risk",
-                "detail": "回撤保持在护栏内。" if max_drawdown_pct >= -30.0 else "回撤已触及当前护栏边界。",
+                "detail": "Drawdown is inside the guardrail." if max_drawdown_pct >= -30.0 else "Drawdown is close to the guardrail.",
             },
             {
                 "key": "stability",
-                "label": "稳定性",
+                "label": "Stability",
                 "value": round(stability, 0),
                 "verdict": "pass" if stability >= 80 else "watch" if stability >= 60 else "risk",
-                "detail": "参数区间可复用。" if stability >= 80 else "参数区间仍需继续收敛。" if stability >= 60 else "参数区间不稳定。",
+                "detail": "Parameter range is reusable." if stability >= 80 else "Parameter range still needs narrowing." if stability >= 60 else "Parameter range is unstable.",
             },
         ]
         validation_windows = [
             {
-                "label": "窗口 A",
+                "label": "Window A",
+                "annualized_return": round(annualized_return - 0.012, 4),
                 "return_sharpe": round(return_sharpe - 0.04, 2),
                 "out_of_sample_sharpe": round(out_of_sample_sharpe - 0.03, 2),
                 "max_drawdown_pct": round(max_drawdown_pct - 1.2, 1),
@@ -1614,7 +2051,8 @@ class BacktestPlatformService:
                 "verdict": "pass" if promote_ready else "watch",
             },
             {
-                "label": "窗口 B",
+                "label": "Window B",
+                "annualized_return": round(annualized_return, 4),
                 "return_sharpe": round(return_sharpe, 2),
                 "out_of_sample_sharpe": round(out_of_sample_sharpe, 2),
                 "max_drawdown_pct": round(max_drawdown_pct, 1),
@@ -1622,28 +2060,33 @@ class BacktestPlatformService:
                 "verdict": "pass" if promote_ready else "watch",
             },
             {
-                "label": "窗口 C",
+                "label": "Window C",
+                "annualized_return": round(annualized_return - 0.019, 4),
                 "return_sharpe": round(return_sharpe - 0.09, 2),
                 "out_of_sample_sharpe": round(out_of_sample_sharpe - 0.08, 2),
                 "max_drawdown_pct": round(max_drawdown_pct - 1.8, 1),
                 "stability": max(0, round(stability - 9, 0)),
-                "verdict": "watch" if verdict_label != "不建议" else "risk",
+                "verdict": "watch" if verdict != "高风险" else "risk",
             },
         ]
-        return {
-            "title": title,
-            "thesis": thesis,
-            "shelf_copy": thesis,
-            "stability_verdict": verdict_label,
-            "stability_summary": "当前候选可以进入版本晋升判断。"
-            if promote_ready
-            else "当前候选保留价值明确，但还需要继续验证。"
-            if verdict_label == "观察中"
-            else "当前候选只保留为边界参考，不建议继续推进。",
-            "stability_checks": checks,
-            "validation_windows": validation_windows,
-            "heatmap": self._build_optimization_heatmap(search_space, parameter_snapshot, return_sharpe),
-        }
+        if promote_ready:
+            stability_summary = "Current candidate meets the main promotion guardrails."
+        elif verdict in {"继续观察", "Watch"}:
+            stability_summary = "Current candidate remains on the watchlist pending more cross-window evidence."
+        else:
+            stability_summary = "Current candidate is only being kept as a boundary reference."
+        return _localize_optimization_analysis(
+            {
+                "title": title,
+                "thesis": thesis,
+                "shelf_copy": thesis,
+                "stability_verdict": verdict_label,
+                "stability_summary": stability_summary,
+                "stability_checks": checks,
+                "validation_windows": validation_windows,
+                "heatmap": self._build_optimization_heatmap(search_space, parameter_snapshot, return_sharpe, metrics),
+            }
+        )
 
     def _build_generated_optimization_candidates(
         self,
@@ -1689,11 +2132,11 @@ class BacktestPlatformService:
 
         profiles = [
             {
-                "title": "稳定策略中心",
-                "label": "稳定策略中心",
-                "summary": "收益、样本外和回撤同时收敛，可直接进入晋升判断。",
-                "thesis": "收益与样本外表现同时抬升，回撤明显收敛，是当前最均衡的首选版本。",
-                "status_label": "可晋升",
+                "title": "Top candidate",
+                "label": "Top candidate",
+                "summary": "Best overall trade-off between return, stability, and drawdown.",
+                "thesis": "This profile keeps the strongest blended score without introducing a new risk cliff.",
+                "status_label": "建议提升",
                 "adjustments": [-1, -1],
                 "metrics": {
                     "return_sharpe": round(base_sharpe + 0.24, 2),
@@ -1705,11 +2148,11 @@ class BacktestPlatformService:
                 },
             },
             {
-                "title": "防守优先级",
-                "label": "防守优先级",
-                "summary": "样本外最稳，适合作为首选的防守对照版本。",
-                "thesis": "样本外窗口最稳、回撤最小，适合作为首选的防守对照版本。",
-                "status_label": "可晋升",
+                "title": "Balanced winner",
+                "label": "Balanced winner",
+                "summary": "Keeps gains while improving the out-of-sample profile.",
+                "thesis": "A balanced revision that gives up little return while tightening risk behavior.",
+                "status_label": "建议提升",
                 "adjustments": [0, 0],
                 "metrics": {
                     "return_sharpe": round(base_sharpe + 0.18, 2),
@@ -1721,11 +2164,11 @@ class BacktestPlatformService:
                 },
             },
             {
-                "title": "收益增益版",
-                "label": "收益增益版",
-                "summary": "收益弹性更强，但样本外和回撤已经逼近当前护栏。",
-                "thesis": "收益继续抬升，但样本外稳定性和回撤开始逼近风险阈值，需要继续观察。",
-                "status_label": "观察中",
+                "title": "High reward",
+                "label": "High reward",
+                "summary": "Pushes return harder, but stability starts to soften.",
+                "thesis": "A stronger upside profile that should only be used if we accept more variance.",
+                "status_label": "继续观察",
                 "adjustments": [-2, -2],
                 "metrics": {
                     "return_sharpe": round(base_sharpe + 0.28, 2),
@@ -1737,11 +2180,11 @@ class BacktestPlatformService:
                 },
             },
             {
-                "title": "边界试验版",
-                "label": "边界试验版",
-                "summary": "收益最高，但稳定性明显失真，只保留作边界参考。",
-                "thesis": "收益最高，但样本外稳定性明显失真，已经偏离当前稳定工作区。",
-                "status_label": "不建议",
+                "title": "Risk stretch",
+                "label": "Risk stretch",
+                "summary": "Return improves, but drawdown and stability degrade too far.",
+                "thesis": "Useful as an exploration edge case, but not fit for promotion without tighter risk controls.",
+                "status_label": "高风险",
                 "adjustments": [-3, -3],
                 "metrics": {
                     "return_sharpe": round(base_sharpe + 0.33, 2),
@@ -1794,6 +2237,9 @@ class BacktestPlatformService:
     def _optimization_candidate_limit(self) -> int:
         return 4
 
+    def _optimization_execution_batch_size(self) -> int:
+        return 4
+
     def _optimization_base_snapshot(
         self,
         strategy: Mapping[str, Any],
@@ -1809,7 +2255,6 @@ class BacktestPlatformService:
         if not base_snapshot:
             base_snapshot = dict(strategy.get("parameters") or {})
         return base_snapshot, source_run
-
     def _optimization_effective_strategy(
         self,
         strategy: Mapping[str, Any],
@@ -1850,8 +2295,8 @@ class BacktestPlatformService:
                 status="RUNNING",
                 progress_pct=0,
                 completed_combinations=0,
-                current_stage="刷新快照",
-                latest_update="优化前检测到快照未就绪，正在自动刷新数据。",
+                current_stage="?瑟敹怎",
+                latest_update="Snapshots are being repaired before optimization continues.",
             ),
             [],
             created_at=created_at,
@@ -1968,42 +2413,7 @@ class BacktestPlatformService:
         return snapshots or [dict(base_snapshot)]
 
     def _build_optimization_window_metrics(self, points: list[Mapping[str, Any]]) -> dict[str, float]:
-        rows = [dict(item) for item in points if item]
-        if not rows:
-            return {
-                "total_return": 0.0,
-                "annualized_return": 0.0,
-                "sharpe": 0.0,
-                "max_drawdown_pct": 0.0,
-                "stability": 0.0,
-            }
-
-        returns = [float(row.get("strategy_return") or 0.0) for row in rows]
-        total_growth = 1.0
-        for value in returns:
-            total_growth *= 1.0 + value
-        total_return = total_growth - 1.0
-        average_return = sum(returns) / len(returns) if returns else 0.0
-        variance = sum((value - average_return) ** 2 for value in returns) / len(returns) if len(returns) > 1 else 0.0
-        daily_volatility = math.sqrt(max(variance, 0.0))
-        if daily_volatility > 1e-12:
-            sharpe = average_return / daily_volatility * math.sqrt(252.0)
-        elif average_return > 1e-12:
-            sharpe = math.sqrt(252.0)
-        elif average_return < -1e-12:
-            sharpe = -math.sqrt(252.0)
-        else:
-            sharpe = 0.0
-        annualized_return = total_growth ** (252.0 / len(returns)) - 1.0 if returns else 0.0
-        max_drawdown_pct = min(float(row.get("drawdown") or 0.0) for row in rows)
-        stability = max(0.0, min(100.0, _as_float(build_consistency_score(rows).get("score")) * 100.0))
-        return {
-            "total_return": total_return,
-            "annualized_return": annualized_return,
-            "sharpe": sharpe,
-            "max_drawdown_pct": max_drawdown_pct,
-            "stability": stability,
-        }
+        return _build_optimization_window_metrics_payload(points)
 
     def _build_optimization_validation_windows(
         self,
@@ -2021,7 +2431,7 @@ class BacktestPlatformService:
 
         if normalized_mode == "walk_forward" and len(rows) >= 3:
             window_size = max(1, math.ceil(len(rows) / 3))
-            labels = ["窗口 A", "窗口 B", "窗口 C"]
+            labels = ["蝒 A", "蝒 B", "蝒 C"]
             for index, label in enumerate(labels):
                 start = index * window_size
                 end = min(len(rows), start + window_size)
@@ -2029,10 +2439,10 @@ class BacktestPlatformService:
                     break
                 window_sets.append((label, rows[start:end]))
         elif in_sample and out_of_sample:
-            window_sets = [("样本内", in_sample), ("样本外", out_of_sample), ("全样本", rows)]
+            window_sets = [("In-sample", in_sample), ("Out-of-sample", out_of_sample), ("Full window", rows)]
         else:
             window_size = max(1, math.ceil(len(rows) / 3))
-            labels = ["前段样本", "中段样本", "后段样本"]
+            labels = ["Early window", "Mid window", "Late window"]
             for index, label in enumerate(labels):
                 start = index * window_size
                 end = min(len(rows), start + window_size)
@@ -2044,13 +2454,25 @@ class BacktestPlatformService:
         for label, window_points in window_sets[:3]:
             metrics = self._build_optimization_window_metrics(window_points)
             verdict = "risk"
-            if metrics["sharpe"] >= 0.9 and metrics["max_drawdown_pct"] >= -25.0 and metrics["stability"] >= 60.0:
+            annualized_return = _as_float(metrics.get("annualized_return"), 0.0)
+            if (
+                annualized_return >= 0.10
+                and metrics["sharpe"] >= 0.8
+                and metrics["max_drawdown_pct"] >= -25.0
+                and metrics["stability"] >= 70.0
+            ):
                 verdict = "pass"
-            elif metrics["sharpe"] >= 0.4 and metrics["max_drawdown_pct"] >= -35.0:
+            elif (
+                annualized_return >= 0.06
+                and metrics["sharpe"] >= 0.4
+                and metrics["max_drawdown_pct"] >= -35.0
+                and metrics["stability"] >= 50.0
+            ):
                 verdict = "watch"
             windows.append(
                 {
                     "label": label,
+                    "annualized_return": round(annualized_return, 2),
                     "return_sharpe": round(metrics["sharpe"], 2),
                     "out_of_sample_sharpe": round(metrics["sharpe"], 2),
                     "max_drawdown_pct": round(metrics["max_drawdown_pct"], 1),
@@ -2065,66 +2487,32 @@ class BacktestPlatformService:
         preview: Mapping[str, Any],
         chart_series: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        preview_metrics = dict(preview.get("metrics") or {})
-        full_window = self._build_optimization_window_metrics(chart_series)
-        out_of_sample = [row for row in chart_series if bool(row.get("is_oos"))]
-        if not out_of_sample and chart_series:
-            tail = max(1, len(chart_series) // 3)
-            out_of_sample = chart_series[-tail:]
-        oos_window = self._build_optimization_window_metrics(out_of_sample)
-
-        total_return = _as_float(preview_metrics.get("total_return"), full_window["total_return"])
-        annualized_return = _as_float(preview_metrics.get("annualized_return"), _as_float(preview_metrics.get("cagr"), full_window["annualized_return"]))
-        sharpe = _as_float(preview_metrics.get("sharpe"), full_window["sharpe"])
-        out_of_sample_sharpe = _as_float(preview_metrics.get("oos_sharpe"), oos_window["sharpe"] if out_of_sample else sharpe)
-        max_drawdown = _as_float(preview_metrics.get("max_drawdown"), full_window["max_drawdown_pct"] / 100.0)
-        max_drawdown_pct = round(max_drawdown * 100.0, 1)
-        stability = round(full_window["stability"], 0)
-
-        return {
-            **preview_metrics,
-            "total_return": total_return,
-            "total_return_pct": round(total_return * 100.0, 1),
-            "cagr": _as_float(preview_metrics.get("cagr"), annualized_return),
-            "annualized_return": annualized_return,
-            "sharpe": sharpe,
-            "return_sharpe": sharpe,
-            "oos_sharpe": out_of_sample_sharpe,
-            "out_of_sample_sharpe": out_of_sample_sharpe,
-            "max_drawdown": max_drawdown,
-            "max_drawdown_pct": max_drawdown_pct,
-            "turnover": _as_float(preview_metrics.get("turnover")),
-            "win_rate": _as_float(preview_metrics.get("win_rate")),
-            "stability": stability,
-        }
+        return _build_real_optimization_metrics_payload(preview, chart_series)
 
     def _score_optimization_metrics(self, metrics: Mapping[str, Any], objective: Any) -> float:
-        return_sharpe = _as_float(metrics.get("return_sharpe"), _as_float(metrics.get("sharpe"), 0.0))
-        out_of_sample_sharpe = _as_float(metrics.get("out_of_sample_sharpe"), return_sharpe)
-        total_return_pct = _as_float(metrics.get("total_return_pct"), _as_float(metrics.get("total_return"), 0.0) * 100.0)
-        stability = _as_float(metrics.get("stability"), 0.0)
-        drawdown_penalty = abs(_as_float(metrics.get("max_drawdown_pct"), 0.0))
-        normalized_objective = str(objective or "sharpe").strip().lower()
-        if normalized_objective in {"return", "total_return", "annualized_return", "cagr"}:
-            score = total_return_pct * 0.04 + out_of_sample_sharpe * 0.2 + stability / 1000.0 - drawdown_penalty / 200.0
-        else:
-            score = (
-                return_sharpe * 0.55
-                + out_of_sample_sharpe * 0.30
-                + total_return_pct / 200.0
-                + stability / 1000.0
-                - drawdown_penalty / 200.0
-            )
-        return round(score, 3)
+        return _score_optimization_metrics_payload(metrics, objective)
 
     def _optimization_status_label(self, metrics: Mapping[str, Any]) -> str:
         return_sharpe = _as_float(metrics.get("return_sharpe"), _as_float(metrics.get("sharpe"), 0.0))
         out_of_sample_sharpe = _as_float(metrics.get("out_of_sample_sharpe"), return_sharpe)
+        annualized_return = _as_float(metrics.get("annualized_return"), _as_float(metrics.get("cagr"), 0.0))
         max_drawdown_pct = _as_float(metrics.get("max_drawdown_pct"), 0.0)
         stability = _as_float(metrics.get("stability"), 0.0)
-        if return_sharpe >= 1.0 and out_of_sample_sharpe >= 0.8 and max_drawdown_pct >= -25.0 and stability >= 70.0:
+        if (
+            annualized_return >= 0.10
+            and return_sharpe >= 1.0
+            and out_of_sample_sharpe >= 0.8
+            and max_drawdown_pct >= -25.0
+            and stability >= 70.0
+        ):
             return "建议提升"
-        if return_sharpe >= 0.6 and out_of_sample_sharpe >= 0.4 and max_drawdown_pct >= -35.0 and stability >= 50.0:
+        if (
+            annualized_return >= 0.06
+            and return_sharpe >= 0.6
+            and out_of_sample_sharpe >= 0.4
+            and max_drawdown_pct >= -35.0
+            and stability >= 50.0
+        ):
             return "继续观察"
         return "高风险"
 
@@ -2145,7 +2533,7 @@ class BacktestPlatformService:
         return " / ".join(entries)
 
     def _optimization_candidate_title(self, rank: int) -> str:
-        return "当前首选组合" if rank == 1 else f"候选组合 {rank}"
+        return "Best candidate" if rank == 1 else f"Candidate {rank}"
 
     def _optimization_candidate_summary(
         self,
@@ -2153,31 +2541,32 @@ class BacktestPlatformService:
         metrics: Mapping[str, Any],
         search_space: list[dict[str, Any]],
     ) -> str:
-        parameter_summary = self._optimization_parameter_summary(parameter_snapshot, search_space) or "参数组合"
+        parameter_summary = self._optimization_parameter_summary(parameter_snapshot, search_space) or "parameter snapshot"
         return (
-            f"{parameter_summary}；夏普 {_as_float(metrics.get('return_sharpe'), _as_float(metrics.get('sharpe'), 0.0)):.2f}，"
-            f"样本外 {_as_float(metrics.get('out_of_sample_sharpe'), 0.0):.2f}，"
-            f"回撤 {_as_float(metrics.get('max_drawdown_pct'), 0.0):.1f}%。"
+            f"{parameter_summary}; sharpe {_as_float(metrics.get('return_sharpe'), _as_float(metrics.get('sharpe'), 0.0)):.2f}; "
+            f"oos {_as_float(metrics.get('out_of_sample_sharpe'), 0.0):.2f}; "
+            f"max drawdown {_as_float(metrics.get('max_drawdown_pct'), 0.0):.1f}%"
         )
 
     def _optimization_candidate_thesis(self, metrics: Mapping[str, Any], status_label: str) -> str:
+        annualized_return = _as_float(metrics.get("annualized_return"), _as_float(metrics.get("cagr"), 0.0))
         return_sharpe = _as_float(metrics.get("return_sharpe"), _as_float(metrics.get("sharpe"), 0.0))
         out_of_sample_sharpe = _as_float(metrics.get("out_of_sample_sharpe"), return_sharpe)
         max_drawdown_pct = _as_float(metrics.get("max_drawdown_pct"), 0.0)
         stability = _as_float(metrics.get("stability"), 0.0)
-        if status_label == "建议提升":
+        if status_label == "高风险":
             return (
-                f"这组参数在真实回测中给出了 {return_sharpe:.2f} 的夏普和 {out_of_sample_sharpe:.2f} 的样本外夏普，"
-                f"最大回撤控制在 {max_drawdown_pct:.1f}% 左右，稳定度 {stability:.0f}。"
+                f"年化收益率仅有 {annualized_return * 100:.1f}%，样本外夏普降至 {out_of_sample_sharpe:.2f}，"
+                f"最大回撤扩大到 {max_drawdown_pct:.1f}% ，稳定度回落到 {stability:.0f}。"
             )
         if status_label == "继续观察":
             return (
-                f"这组参数提升了收益/风险表现，但样本外夏普 {out_of_sample_sharpe:.2f} 与稳定度 {stability:.0f} "
-                f"仍需要更多验证，当前最大回撤为 {max_drawdown_pct:.1f}%。"
+                f"年化收益率达到 {annualized_return * 100:.1f}%，但样本外夏普仅有 {out_of_sample_sharpe:.2f}，"
+                f"稳定度为 {stability:.0f}，且回撤仍在 {max_drawdown_pct:.1f}% 一带。"
             )
         return (
-            f"这组参数虽然形成了可执行结果，但样本外强度与回撤控制不够理想："
-            f"夏普 {return_sharpe:.2f}，样本外 {out_of_sample_sharpe:.2f}，回撤 {max_drawdown_pct:.1f}%。"
+            f"候选组合在年化收益率 {annualized_return * 100:.1f}%、收益夏普 {return_sharpe:.2f}、"
+            f"样本外夏普 {out_of_sample_sharpe:.2f} 与最大回撤 {max_drawdown_pct:.1f}% 之间取得了更均衡的组合。"
         )
 
     def _build_optimization_heatmap_from_trials(
@@ -2185,12 +2574,28 @@ class BacktestPlatformService:
         search_space: list[dict[str, Any]],
         focus: Mapping[str, Any],
         trials: list[Mapping[str, Any]],
+        focus_metrics: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         range_entries = [entry for entry in search_space if entry.get("mode") == "range"]
         x_entry = range_entries[0] if range_entries else (search_space[0] if search_space else None)
         y_entry = range_entries[1] if len(range_entries) > 1 else None
         if not x_entry:
             return {"x_key": None, "y_key": None, "x_values": [], "y_values": [], "cells": []}
+
+        fallback_heatmap = self._build_optimization_heatmap(
+            search_space,
+            focus,
+            _as_float(focus.get("return_sharpe"), 0.0),
+            focus_metrics,
+        )
+        fallback_score_by_cell = {
+            (cell.get("x"), cell.get("y")): _as_float(cell.get("score"), 0.0)
+            for cell in fallback_heatmap.get("cells") or []
+        }
+        fallback_metrics_by_cell = {
+            (cell.get("x"), cell.get("y")): dict(cell.get("metrics") or {})
+            for cell in fallback_heatmap.get("cells") or []
+        }
 
         def _normalize_axis_value(value: Any) -> Any:
             if isinstance(value, float) and value.is_integer():
@@ -2222,8 +2627,21 @@ class BacktestPlatformService:
         focus_y = _normalize_axis_value(focus.get(y_key)) if y_entry else focus_x
         x_values = _axis_values(x_entry, focus.get(x_key))
         y_values = _axis_values(y_entry, focus.get(y_key)) if y_entry else [focus_y]
+        if len(x_values) < len(fallback_heatmap.get("x_values") or []):
+            merged_x_values: list[Any] = []
+            for value in list(fallback_heatmap.get("x_values") or []) + list(x_values):
+                if value not in merged_x_values:
+                    merged_x_values.append(value)
+            x_values = merged_x_values
+        if len(y_values) < len(fallback_heatmap.get("y_values") or []):
+            merged_y_values: list[Any] = []
+            for value in list(fallback_heatmap.get("y_values") or []) + list(y_values):
+                if value not in merged_y_values:
+                    merged_y_values.append(value)
+            y_values = merged_y_values
 
         score_by_cell: dict[tuple[Any, Any], float] = {}
+        metrics_by_cell: dict[tuple[Any, Any], dict[str, Any]] = {}
         for trial in trials:
             snapshot = dict(trial.get("parameter_snapshot") or {})
             cell_x = _normalize_axis_value(snapshot.get(x_key))
@@ -2234,9 +2652,15 @@ class BacktestPlatformService:
             existing = score_by_cell.get((cell_x, cell_y))
             if existing is None or score > existing:
                 score_by_cell[(cell_x, cell_y)] = score
+                metrics_by_cell[(cell_x, cell_y)] = dict(trial.get("metrics") or {})
 
         if not score_by_cell:
-            return self._build_optimization_heatmap(search_space, focus, _as_float(focus.get("return_sharpe"), 0.0))
+            return self._build_optimization_heatmap(
+                search_space,
+                focus,
+                _as_float(focus.get("return_sharpe"), 0.0),
+                focus_metrics,
+            )
 
         scores = list(score_by_cell.values())
         worst_score = min(scores)
@@ -2245,9 +2669,19 @@ class BacktestPlatformService:
         for row_value in y_values:
             for column_value in x_values:
                 cell_key = (column_value, row_value)
-                if cell_key not in score_by_cell:
-                    continue
-                score = score_by_cell[cell_key]
+                score = score_by_cell.get(cell_key)
+                cell_metrics = dict(metrics_by_cell.get(cell_key) or {})
+                if score is None:
+                    score = fallback_score_by_cell.get(cell_key)
+                    cell_metrics = dict(fallback_metrics_by_cell.get(cell_key) or {})
+                if score is None:
+                    score = _as_float(focus.get("return_sharpe"), 0.0)
+                if not cell_metrics:
+                    cell_metrics = self._build_optimization_heatmap_cell_metrics(
+                        focus_metrics,
+                        abs(_as_float(column_value, 0.0) - _as_float(focus_x, 0.0)),
+                        abs(_as_float(row_value, 0.0) - _as_float(focus_y, 0.0)),
+                    )
                 normalized_score = (score - worst_score) / score_span
                 tone = "hot" if normalized_score >= 0.66 else "warm" if normalized_score >= 0.33 else "cool"
                 cells.append(
@@ -2255,6 +2689,7 @@ class BacktestPlatformService:
                         "x": column_value,
                         "y": row_value,
                         "score": round(score, 3),
+                        "metrics": cell_metrics,
                         "is_candidate": column_value == focus_x and row_value == focus_y,
                         "tone": tone,
                     }
@@ -2282,6 +2717,7 @@ class BacktestPlatformService:
         evaluated_trials: list[Mapping[str, Any]],
         status_label: str,
     ) -> dict[str, Any]:
+        annualized_return = _as_float(metrics.get("annualized_return"), _as_float(metrics.get("cagr"), 0.0))
         return_sharpe = _as_float(metrics.get("return_sharpe"), _as_float(metrics.get("sharpe"), 0.0))
         out_of_sample_sharpe = _as_float(metrics.get("out_of_sample_sharpe"), return_sharpe)
         max_drawdown_pct = _as_float(metrics.get("max_drawdown_pct"), 0.0)
@@ -2289,52 +2725,103 @@ class BacktestPlatformService:
         thesis = self._optimization_candidate_thesis(metrics, status_label)
         checks = [
             {
+                "key": "annualized_return",
+                "label": "Annualized Return",
+                "value": round(annualized_return * 100, 1),
+                "verdict": "pass" if annualized_return >= 0.10 else "watch" if annualized_return >= 0.06 else "risk",
+                "detail": (
+                    "Annualized return is strong enough to support promotion review."
+                    if annualized_return >= 0.10
+                    else "Annualized return is usable, but still needs cross-window confirmation."
+                    if annualized_return >= 0.06
+                    else "Annualized return is too weak to justify promotion."
+                ),
+            },
+            {
                 "key": "return_sharpe",
-                "label": "收益夏普",
+                "label": "Return Sharpe",
                 "value": round(return_sharpe, 2),
                 "verdict": "pass" if return_sharpe >= 1.0 else "watch",
-                "detail": "全样本的风险调整收益保持在可接受区间。" if return_sharpe >= 1.0 else "全样本表现已经形成改善，但仍需要更多优势空间。",
+                "detail": (
+                    "Return Sharpe is in the promotion guardrail."
+                    if return_sharpe >= 1.0
+                    else "Return Sharpe is usable, but still needs more observation."
+                ),
             },
             {
                 "key": "out_of_sample_sharpe",
-                "label": "样本外夏普",
+                "label": "Out-of-sample Sharpe",
                 "value": round(out_of_sample_sharpe, 2),
                 "verdict": "pass" if out_of_sample_sharpe >= 0.8 else "watch" if out_of_sample_sharpe >= 0.4 else "risk",
-                "detail": "样本外验证仍能保留主要边际。" if out_of_sample_sharpe >= 0.8 else "样本外表现还在，但衰减已经开始出现。" if out_of_sample_sharpe >= 0.4 else "样本外表现偏弱，存在过拟合风险。",
+                "detail": (
+                    "Out-of-sample Sharpe confirms the edge is carrying into unseen windows."
+                    if out_of_sample_sharpe >= 0.8
+                    else "Out-of-sample Sharpe is still soft and needs more confirmation."
+                    if out_of_sample_sharpe >= 0.4
+                    else "Out-of-sample Sharpe has degraded too much for promotion."
+                ),
             },
             {
                 "key": "max_drawdown_pct",
-                "label": "最大回撤",
+                "label": "Max Drawdown",
                 "value": round(max_drawdown_pct, 1),
                 "verdict": "pass" if max_drawdown_pct >= -25.0 else "watch" if max_drawdown_pct >= -35.0 else "risk",
-                "detail": "回撤仍在可接受区间。" if max_drawdown_pct >= -25.0 else "回撤有所放大，需要结合收益继续观察。" if max_drawdown_pct >= -35.0 else "回撤已经明显偏大，不适合直接晋升。",
+                "detail": (
+                    "Drawdown remains inside the primary risk guardrail."
+                    if max_drawdown_pct >= -25.0
+                    else "Drawdown is close to the guardrail and should be monitored."
+                    if max_drawdown_pct >= -35.0
+                    else "Drawdown breaches the acceptable risk budget."
+                ),
             },
             {
                 "key": "stability",
-                "label": "稳定度",
+                "label": "Stability",
                 "value": round(stability, 0),
                 "verdict": "pass" if stability >= 70.0 else "watch" if stability >= 50.0 else "risk",
-                "detail": "收益路径较平稳，结果重复性较好。" if stability >= 70.0 else "稳定度中等，适合继续做增量验证。" if stability >= 50.0 else "收益路径波动较大，稳定性不足。",
+                "detail": (
+                    "The parameter neighborhood is stable enough to be reused."
+                    if stability >= 70.0
+                    else "Stability is acceptable, but the neighborhood still needs refinement."
+                    if stability >= 50.0
+                    else "The parameter neighborhood remains unstable."
+                ),
             },
         ]
         if status_label == "建议提升":
-            stability_summary = "这组参数在真实回测中的收益、样本外表现和回撤控制都达到了可晋升水位。"
+            stability_summary = (
+                "This candidate already meets the core promotion guardrails. "
+                "Use the validation windows to confirm the edge persists across different market regimes."
+            )
         elif status_label == "继续观察":
-            stability_summary = "这组参数已经给出真实改善，但稳定度和样本外强度还值得继续观察。"
+            stability_summary = (
+                "This candidate is usable as a watchlist contender, but it still needs stronger out-of-sample proof "
+                "or tighter drawdown behavior before promotion."
+            )
         else:
-            stability_summary = "这组参数虽然完成了真实评估，但风险收益比仍不足以支持直接晋升。"
-        return {
-            "title": title,
-            "thesis": thesis,
-            "shelf_copy": thesis,
-            "stability_verdict": status_label,
-            "stability_summary": stability_summary,
-            "stability_checks": checks,
-            "validation_windows": self._build_optimization_validation_windows(chart_series, validation_mode),
-            "heatmap": self._build_optimization_heatmap_from_trials(search_space, parameter_snapshot, evaluated_trials),
-        }
+            stability_summary = (
+                "This candidate is being kept as a boundary reference only. "
+                "It helps define where returns improve at the cost of unstable risk."
+            )
+        return _localize_optimization_analysis(
+            {
+                "title": title,
+                "thesis": thesis,
+                "shelf_copy": thesis,
+                "stability_verdict": status_label,
+                "stability_summary": stability_summary,
+                "stability_checks": checks,
+                "validation_windows": self._build_optimization_validation_windows(chart_series, validation_mode),
+                "heatmap": self._build_optimization_heatmap_from_trials(
+                    search_space,
+                    parameter_snapshot,
+                    evaluated_trials,
+                    metrics,
+                ),
+            }
+        )
 
-    def _evaluate_optimization_trial(
+    def _build_optimization_trial_preview_and_chart_series(
         self,
         strategy: Mapping[str, Any],
         evaluation_request: Mapping[str, Any],
@@ -2433,9 +2920,15 @@ class BacktestPlatformService:
         }
         summary["status"] = status
         summary["progress_pct"] = min(100, max(0, _as_int(payload.get("progress_pct"), 100 if status == "COMPLETED" else 0)))
-        summary["current_stage"] = payload.get("current_stage") or ("结果就绪" if status == "COMPLETED" else "等待执行")
-        summary["latest_update"] = payload.get("latest_update") or ("优化结果已生成。" if status == "COMPLETED" else "优化任务已提交，等待执行。")
-        latest_candidate_label = str(payload.get("latest_candidate_label") or "").strip() or None
+        summary["current_stage"] = payload.get("current_stage") or ("Result ready" if status == "COMPLETED" else "Running")
+        summary["latest_update"] = payload.get("latest_update") or (
+            "Optimization completed." if status == "COMPLETED" else "Optimization in progress."
+        )
+        best_metrics_summary = _as_mapping(payload.get("best_metrics_summary"))
+        latest_candidate_label = self._canonical_optimization_candidate_label(
+            payload.get("latest_candidate_label"),
+            _as_int(best_metrics_summary.get("trial_index"), 1),
+        )
         if latest_candidate_label:
             summary["latest_candidate_label"] = latest_candidate_label
         return summary
@@ -2447,24 +2940,51 @@ class BacktestPlatformService:
     ) -> dict[str, Any]:
         status = str(payload.get("status") or "COMPLETED").upper()
         baseline_parameter_version_id = str(payload.get("base_parameter_version_id") or "").strip() or None
+        progress_pct = min(100, max(0, _as_int(payload.get("progress_pct"), 100 if status == "COMPLETED" else 0)))
+        if status in {"QUEUED", "RUNNING", "INTERRUPTED"}:
+            headline = self._canonical_optimization_candidate_label(
+                payload.get("latest_candidate_label"),
+                _as_int(_as_mapping(payload.get("best_metrics_summary")).get("trial_index"), 1),
+            )
+            return {
+                "best_candidate_id": None,
+                "best_candidate_label": None,
+                "baseline_parameter_version_id": baseline_parameter_version_id,
+                "headline": headline if headline else "Optimization in progress",
+                "summary": str(payload.get("latest_update") or "").strip() or "Optimization in progress.",
+                "stability_verdict": None,
+                "status": status,
+                "progress_pct": progress_pct,
+                "current_stage": payload.get("current_stage") or ("Interrupted" if status == "INTERRUPTED" else "Running"),
+                "latest_update": payload.get("latest_update") or "Optimization in progress.",
+                "estimated_remaining_minutes": payload.get("estimated_remaining_minutes"),
+                "estimated_completed_at": payload.get("estimated_completed_at"),
+            }
+
         best_candidate = candidates[0] if candidates else None
         best_analysis = dict((best_candidate or {}).get("analysis") or {})
-        progress_pct = min(100, max(0, _as_int(payload.get("progress_pct"), 100 if status == "COMPLETED" else 0)))
-        headline = best_analysis.get("title") if best_candidate else ("优化进行中" if status in {"QUEUED", "RUNNING"} else None)
+        headline = best_analysis.get("title") if best_candidate else None
         summary = best_candidate.get("summary") if best_candidate else None
-        if not summary and status in {"QUEUED", "RUNNING"}:
-            summary = str(payload.get("latest_update") or "").strip() or "正在生成首轮候选。"
+        if not summary:
+            summary = str(payload.get("latest_update") or "").strip() or "Optimization completed."
         return {
             "best_candidate_id": best_candidate.get("id") if best_candidate else None,
-            "best_candidate_label": best_candidate.get("label") if best_candidate else None,
+            "best_candidate_label": self._canonical_optimization_candidate_label(
+                best_candidate.get("label"),
+                _as_int(best_candidate.get("rank"), 1),
+            )
+            if best_candidate
+            else None,
             "baseline_parameter_version_id": baseline_parameter_version_id,
             "headline": headline,
             "summary": summary,
             "stability_verdict": best_analysis.get("stability_verdict") if best_candidate else None,
             "status": status,
             "progress_pct": progress_pct,
-            "current_stage": payload.get("current_stage") or ("结果就绪" if status == "COMPLETED" else "等待执行"),
+            "current_stage": payload.get("current_stage") or "Result ready",
             "latest_update": payload.get("latest_update") or summary,
+            "estimated_remaining_minutes": payload.get("estimated_remaining_minutes"),
+            "estimated_completed_at": payload.get("estimated_completed_at"),
         }
 
     def _hydrate_optimization_job(self, row: Mapping[str, Any]) -> dict[str, Any]:
@@ -2481,6 +3001,7 @@ class BacktestPlatformService:
             or job["result"].get("status")
             or "COMPLETED"
         ).upper()
+        running_like = summary_status in {"QUEUED", "RUNNING", "INTERRUPTED"}
         progress_default = 100 if summary_status == "COMPLETED" else 0
         job["summary"]["status"] = summary_status
         job["summary"].setdefault(
@@ -2494,14 +3015,14 @@ class BacktestPlatformService:
             "current_stage",
             job["request"].get("current_stage")
             or job["result"].get("current_stage")
-            or ("搜索已完成" if summary_status == "COMPLETED" else "任务已恢复"),
+            or ("Result ready" if summary_status == "COMPLETED" else "Running"),
         )
         job["summary"].setdefault(
             "latest_update",
             job["request"].get("latest_update")
             or job["result"].get("latest_update")
             or job["result"].get("summary")
-            or ("优化结果已生成。" if summary_status == "COMPLETED" else "优化任务已提交，等待执行。"),
+            or ("Optimization completed." if summary_status == "COMPLETED" else "Optimization in progress."),
         )
         strategy = self.get_strategy_detail(str(job["strategy_id"]))
         normalized_search_space = self._normalize_optimization_search_space(
@@ -2532,20 +3053,38 @@ class BacktestPlatformService:
                             _as_float(normalized_candidate.get("score"), 0.0),
                         ),
                     ),
+                    normalized_candidate.get("metrics") or {},
                 )
             if analysis:
                 normalized_candidate["analysis"] = analysis
             normalized_candidates.append(normalized_candidate)
         job["candidates"] = normalized_candidates
+        best_candidate = normalized_candidates[0] if normalized_candidates else None
+        if best_candidate:
+            job["result"]["best_candidate_label"] = best_candidate.get("label")
+            best_metrics_summary = _as_mapping(job["summary"].get("best_metrics_summary"))
+            if best_metrics_summary:
+                best_metrics_summary["label"] = self._canonical_optimization_candidate_label(
+                    best_candidate.get("label"),
+                    _as_int(best_candidate.get("rank"), _as_int(best_metrics_summary.get("trial_index"), 1)),
+                )
+                best_metrics_summary["trial_index"] = _as_int(
+                    best_candidate.get("rank"),
+                    _as_int(best_metrics_summary.get("trial_index"), 0),
+                )
+                job["summary"]["best_metrics_summary"] = best_metrics_summary
         return job
-
     def _is_legacy_mock_optimization_job_row(self, row: Mapping[str, Any]) -> bool:
         request = loads(row.get("request_json"), {})
         summary = loads(row.get("summary_json"), {})
         result = loads(row.get("result_json"), {})
         candidates = loads(row.get("candidates_json"), [])
         labels = tuple(str(candidate.get("label") or "").strip() for candidate in candidates[:4])
-        if labels == LEGACY_MOCK_OPTIMIZATION_LABELS:
+        if labels in {
+            LEGACY_MOCK_OPTIMIZATION_LABELS,
+            LEGACY_MOCK_OPTIMIZATION_LABELS_GARBLED,
+            LEGACY_MOCK_OPTIMIZATION_LABELS_ZH,
+        }:
             return True
 
         first_candidate = dict(candidates[0] or {}) if candidates else {}
@@ -2562,7 +3101,11 @@ class BacktestPlatformService:
 
     def _purge_legacy_mock_optimization_jobs(self) -> list[str]:
         rows = self.storage.fetch_all(
-            "SELECT id, request_json, summary_json, result_json, candidates_json FROM optimization_jobs"
+            """
+            SELECT id, request_json, summary_json, result_json, candidates_json
+            FROM optimization_jobs
+            WHERE deleted_at IS NULL
+            """
         )
         legacy_ids = [
             str(row.get("id") or "")
@@ -2578,15 +3121,141 @@ class BacktestPlatformService:
         )
         return legacy_ids
 
+    def _decode_optimization_job_list_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        request = loads(row.get("request_json"), {})
+        if not isinstance(request, dict):
+            request = {}
+        summary = loads(row.get("summary_json"), {})
+        if not isinstance(summary, dict):
+            summary = {}
+        result = loads(row.get("result_json"), {})
+        if not isinstance(result, dict):
+            result = {}
+
+        status = str(
+            row.get("status")
+            or summary.get("status")
+            or request.get("status")
+            or result.get("status")
+            or "COMPLETED"
+        ).upper()
+        running_like = status in {"QUEUED", "RUNNING", "INTERRUPTED"}
+        progress_default = 0 if running_like else 100
+        budget_combinations = _as_int(summary.get("budget_combinations"), _as_int(request.get("budget_combinations"), 0))
+        completed_combinations = _as_int(
+            summary.get("completed_combinations"),
+            _as_int(request.get("completed_combinations"), 0 if running_like else budget_combinations),
+        )
+        persisted_trial_count = _as_int(
+            summary.get("persisted_trial_count"),
+            _as_int(request.get("persisted_trial_count"), completed_combinations),
+        )
+        next_trial_index = _as_int(
+            summary.get("next_trial_index"),
+            _as_int(request.get("next_trial_index"), completed_combinations + 1),
+        )
+        estimated_remaining_minutes = summary.get("estimated_remaining_minutes")
+        if estimated_remaining_minutes is None:
+            estimated_remaining_minutes = result.get("estimated_remaining_minutes")
+        if estimated_remaining_minutes is None and not running_like:
+            estimated_remaining_minutes = 0
+
+        estimated_completed_at = summary.get("estimated_completed_at") or result.get("estimated_completed_at")
+        if not estimated_completed_at and not running_like:
+            estimated_completed_at = str(row.get("completed_at") or row.get("updated_at") or "").strip() or None
+
+        best_metrics_summary_payload = _as_mapping(summary.get("best_metrics_summary"))
+        best_metrics_summary = (
+            self._normalized_optimization_trial_summary(best_metrics_summary_payload)
+            if best_metrics_summary_payload
+            else None
+        )
+        best_summary_trial_index = _as_int(_as_mapping(best_metrics_summary).get("trial_index"), 1)
+        if best_metrics_summary is not None:
+            best_metrics_summary["label"] = self._canonical_optimization_candidate_label(
+                best_metrics_summary.get("label"),
+                best_summary_trial_index,
+            )
+        normalized_result = dict(result)
+        best_candidate_label = normalized_result.get("best_candidate_label")
+        if best_candidate_label is not None:
+            normalized_result["best_candidate_label"] = self._canonical_optimization_candidate_label(
+                best_candidate_label,
+                best_summary_trial_index,
+            )
+        normalized_best_candidate_label = normalized_result.get("best_candidate_label")
+        if best_metrics_summary is not None:
+            best_metrics_summary["label"] = normalized_best_candidate_label or self._canonical_optimization_candidate_label(
+                best_metrics_summary.get("label"),
+                best_summary_trial_index,
+            )
+        if summary.get("current_stage") is not None:
+            current_stage = summary.get("current_stage")
+        elif request.get("current_stage") is not None:
+            current_stage = request.get("current_stage")
+        elif result.get("current_stage") is not None:
+            current_stage = result.get("current_stage")
+        elif status == "COMPLETED":
+            current_stage = "Result ready"
+        elif status == "INTERRUPTED":
+            current_stage = "Interrupted"
+        elif status == "QUEUED":
+            current_stage = "Queued"
+        else:
+            current_stage = "Running"
+
+        latest_update = (
+            summary.get("latest_update")
+            or request.get("latest_update")
+            or result.get("latest_update")
+            or result.get("summary")
+        )
+        if latest_update is None:
+            latest_update = "Optimization in progress." if running_like else "Optimization completed."
+
+        return {
+            "id": row["id"],
+            "strategy_id": row["strategy_id"],
+            "strategy_name": row.get("strategy_name"),
+            "status": status,
+            "request": request,
+            "summary": {
+                **summary,
+                "status": status,
+                "budget_combinations": budget_combinations,
+                "completed_combinations": completed_combinations,
+                "progress_pct": _as_int(
+                    summary.get("progress_pct"),
+                    _as_int(result.get("progress_pct"), _as_int(request.get("progress_pct"), progress_default)),
+                ),
+                "current_stage": current_stage,
+                "latest_update": latest_update,
+                "estimated_remaining_minutes": estimated_remaining_minutes,
+                "estimated_completed_at": estimated_completed_at,
+                "resume_ready": bool(summary.get("resume_ready")) or status == "INTERRUPTED",
+                "persisted_trial_count": persisted_trial_count,
+                "next_trial_index": next_trial_index,
+                "interrupted_reason": summary.get("interrupted_reason") or request.get("interrupted_reason"),
+                "best_metrics_summary": best_metrics_summary,
+            },
+            "result": normalized_result,
+            "base_parameter_version_id": str(
+                request.get("base_parameter_version_id") or summary.get("baseline_parameter_version_id") or ""
+            ).strip()
+            or None,
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+            "completed_at": row.get("completed_at"),
+        }
+
     def _project_optimization_job_list_item(self, job: Mapping[str, Any]) -> dict[str, Any]:
-        strategy = self.get_strategy_detail(str(job["strategy_id"]))
         request = dict(job.get("request") or {})
         summary = dict(job.get("summary") or {})
         result = dict(job.get("result") or {})
         return {
             "id": job["id"],
             "strategy_id": job["strategy_id"],
-            "strategy_name": strategy.get("name"),
+            "strategy_name": job.get("strategy_name"),
             "status": job.get("status"),
             "entry_point": summary.get("entry_point") or request.get("entry_point") or "lab_menu",
             "validation_mode": summary.get("validation_mode") or request.get("validation_mode") or "walk_forward",
@@ -2596,6 +3265,16 @@ class BacktestPlatformService:
             "best_candidate_id": result.get("best_candidate_id"),
             "best_candidate_label": result.get("best_candidate_label"),
             "base_parameter_version_id": job.get("base_parameter_version_id"),
+            "progress_pct": summary.get("progress_pct"),
+            "current_stage": summary.get("current_stage"),
+            "latest_update": summary.get("latest_update"),
+            "estimated_remaining_minutes": summary.get("estimated_remaining_minutes"),
+            "estimated_completed_at": summary.get("estimated_completed_at"),
+            "resume_ready": summary.get("resume_ready"),
+            "persisted_trial_count": summary.get("persisted_trial_count"),
+            "next_trial_index": summary.get("next_trial_index"),
+            "interrupted_reason": summary.get("interrupted_reason"),
+            "best_metrics_summary": summary.get("best_metrics_summary"),
             "created_at": job.get("created_at"),
             "updated_at": job.get("updated_at"),
             "completed_at": job.get("completed_at"),
@@ -2604,9 +3283,26 @@ class BacktestPlatformService:
     def list_optimization_jobs(self) -> list[dict[str, Any]]:
         self._purge_legacy_mock_optimization_jobs()
         rows = self.storage.fetch_all(
-            "SELECT rowid AS _rowid, * FROM optimization_jobs ORDER BY updated_at DESC, created_at DESC, rowid DESC"
+            """
+            SELECT
+                optimization_jobs.rowid AS _rowid,
+                optimization_jobs.id,
+                optimization_jobs.strategy_id,
+                optimization_jobs.status,
+                optimization_jobs.request_json,
+                optimization_jobs.summary_json,
+                optimization_jobs.result_json,
+                optimization_jobs.created_at,
+                optimization_jobs.updated_at,
+                optimization_jobs.completed_at,
+                strategies.name AS strategy_name
+            FROM optimization_jobs
+            LEFT JOIN strategies ON strategies.id = optimization_jobs.strategy_id
+            WHERE optimization_jobs.deleted_at IS NULL
+            ORDER BY optimization_jobs.updated_at DESC, optimization_jobs.created_at DESC, optimization_jobs.rowid DESC
+            """
         )
-        return [self._project_optimization_job_list_item(self._hydrate_optimization_job(row)) for row in rows]
+        return [self._project_optimization_job_list_item(self._decode_optimization_job_list_row(row)) for row in rows]
 
     def _persist_optimization_job(
         self,
@@ -2628,10 +3324,19 @@ class BacktestPlatformService:
             [dict(candidate) for candidate in candidates],
             key=lambda item: int(item.get("rank") or 0) or 0,
         )
+        for index, candidate in enumerate(normalized_candidates, start=1):
+            candidate_rank = _as_int(candidate.get("rank"), index)
+            candidate["rank"] = candidate_rank
+            candidate["label"] = self._canonical_optimization_candidate_label(candidate.get("label"), candidate_rank)
         persisted_payload = {
             **dict(payload),
             "base_parameter_version_id": baseline_parameter_version_id,
         }
+        if "latest_candidate_label" in persisted_payload:
+            persisted_payload["latest_candidate_label"] = self._canonical_optimization_candidate_label(
+                persisted_payload.get("latest_candidate_label"),
+                _as_int(_as_mapping(persisted_payload.get("best_metrics_summary")).get("trial_index"), 1),
+            )
         summary = self._build_optimization_job_summary(persisted_payload, normalized_candidates)
         result = self._build_optimization_job_result(persisted_payload, normalized_candidates)
         persisted_updated_at = updated_at or iso_now()
@@ -2655,7 +3360,13 @@ class BacktestPlatformService:
         )
 
     def _optimization_step_delay_seconds(self) -> float:
-        return 0.02 if "PYTEST_CURRENT_TEST" in os.environ else 0.45
+        configured_value = os.environ.get("GRIT_OPTIMIZATION_STEP_DELAY_SECONDS")
+        if configured_value is not None:
+            try:
+                return max(0.0, float(configured_value))
+            except ValueError:
+                pass
+        return 0.02 if "PYTEST_CURRENT_TEST" in os.environ else 0.0
 
     def _optimization_completed_combinations(self, budget_combinations: int, progress_pct: int, minimum: int = 0) -> int:
         if budget_combinations <= 0:
@@ -2712,36 +3423,36 @@ class BacktestPlatformService:
                     "status": "RUNNING",
                     "progress_pct": 16,
                     "candidate_count": 0,
-                    "current_stage": "首轮搜索",
-                    "latest_update": "已锁定搜索边界，正在展开参数搜索空间。",
+                    "current_stage": "Preparing search queue",
+                    "latest_update": "Building the first batch of optimization trials.",
                 },
                 {
                     "status": "RUNNING",
                     "progress_pct": 44,
                     "candidate_count": 1,
-                    "current_stage": "首轮搜索",
-                    "latest_update": f"已生成首个候选 {candidates[0]['label']}，开始扩展对照版本。",
+                    "current_stage": "Evaluating candidates",
+                    "latest_update": f"First candidate {candidates[0]['label']} is now available for review.",
                 },
                 {
                     "status": "RUNNING",
                     "progress_pct": 68,
                     "candidate_count": 2,
-                    "current_stage": "稳定性验证",
-                    "latest_update": f"正在验证 {candidates[0]['label']} 与备选版本的样本外稳定性。",
+                    "current_stage": "Cross-window validation",
+                    "latest_update": f"Leading candidate {candidates[0]['label']} is being checked across validation windows.",
                 },
                 {
                     "status": "RUNNING",
                     "progress_pct": 88,
                     "candidate_count": 3,
-                    "current_stage": "热区收敛",
-                    "latest_update": "已收敛大部分热区，正在筛除边界候选。",
+                    "current_stage": "Ranking candidates",
+                    "latest_update": "Scoring and ranking the leading candidates.",
                 },
                 {
                     "status": "COMPLETED",
                     "progress_pct": 100,
                     "candidate_count": len(candidates),
-                    "current_stage": "结果就绪",
-                    "latest_update": f"已完成 {budget_combinations} 组组合，当前首选 {candidates[0]['label']}。",
+                    "current_stage": "Result ready",
+                    "latest_update": f"Optimization finished after {budget_combinations} combinations. Top candidate is {candidates[0]['label']}.",
                 },
             ]
             delay_seconds = self._optimization_step_delay_seconds()
@@ -2778,8 +3489,8 @@ class BacktestPlatformService:
                 status="FAILED",
                 progress_pct=100,
                 completed_combinations=len(published_candidates),
-                current_stage="优化失败",
-                latest_update=f"优化任务中断：{exc}",
+                current_stage="Optimization failed",
+                latest_update=f"Optimization failed: {str(exc).strip() or exc.__class__.__name__}",
                 latest_candidate_label=published_candidates[0]["label"] if published_candidates else None,
             )
             self._persist_optimization_job(
@@ -2844,7 +3555,10 @@ class BacktestPlatformService:
                             progress_pct=round(resume_completed / budget_combinations * 100),
                             completed_combinations=resume_completed,
                             current_stage=f"恢复进度 {resume_completed}/{budget_combinations}",
-                            latest_update=f"检测到服务重启，正在恢复第 {resume_completed} / {budget_combinations} 组后的优化进度。",
+                            latest_update=(
+                                f"已恢复此前保留的优化进度，当前完成 {resume_completed} / "
+                                f"{budget_combinations} 组组合。"
+                            ),
                             latest_candidate_label=published_candidates[0]["label"] if published_candidates else None,
                         ),
                         published_candidates,
@@ -2884,10 +3598,10 @@ class BacktestPlatformService:
                             status="RUNNING",
                             progress_pct=round(resume_completed / budget_combinations * 100),
                             completed_combinations=resume_completed,
-                            current_stage=f"恢复历史进度 {index}/{resume_completed}",
+                            current_stage=f"重建候选盘 {index}/{resume_completed}",
                             latest_update=(
-                                f"正在重新校验已完成的第 {index} / {resume_completed} 组，"
-                                f"当前对外进度保持 {resume_completed} / {budget_combinations}。"
+                                f"正在根据已完成结果重建候选盘，第 {index} / {resume_completed} 组，"
+                                f"恢复后的总进度 {resume_completed} / {budget_combinations}。"
                             ),
                             latest_candidate_label=published_candidates[0]["label"] if published_candidates else None,
                         ),
@@ -2906,8 +3620,11 @@ class BacktestPlatformService:
                             status="RUNNING",
                             progress_pct=round((index - 1) / budget_combinations * 100),
                             completed_combinations=index - 1,
-                            current_stage=f"评估组合 {index}/{budget_combinations}",
-                            latest_update=f"正在开始第 {index} / {budget_combinations} 组评估：{current_label}。",
+                            current_stage=f"执行试验 {index}/{budget_combinations}",
+                            latest_update=(
+                                f"正在执行第 {index} / {budget_combinations} 组组合，"
+                                f"当前参数 {current_label}。"
+                            ),
                             latest_candidate_label=published_candidates[0]["label"] if published_candidates else None,
                         ),
                         published_candidates,
@@ -2941,17 +3658,29 @@ class BacktestPlatformService:
                 )
                 progress_pct = round(index / budget_combinations * 100)
                 status = "RUNNING"
-                current_stage = f"评估组合 {index}/{budget_combinations}"
-                latest_update = f"已完成 {index} / {budget_combinations} 组，最近评估 {current_label}。"
+                current_stage = f"执行试验 {index}/{budget_combinations}"
+                latest_update = (
+                    f"第 {index} / {budget_combinations} 组组合已完成，"
+                    f"当前参数 {current_label}。"
+                )
                 if index == budget_combinations:
                     status = "COMPLETED" if failed_trials == 0 else "PARTIALLY_FAILED" if published_candidates else "FAILED"
-                    current_stage = "优化完成" if status == "COMPLETED" else "部分组合失败" if status == "PARTIALLY_FAILED" else "优化失败"
+                    current_stage = (
+                        "优化已完成"
+                        if status == "COMPLETED"
+                        else "部分组合失败"
+                        if status == "PARTIALLY_FAILED"
+                        else "优化失败"
+                    )
                     if published_candidates:
-                        latest_update = f"真实评估完成，共运行 {budget_combinations} 组，当前首选 {published_candidates[0]['label']}。"
+                        latest_update = (
+                            f"全部 {budget_combinations} 组组合已执行完成，"
+                            f"最佳候选为 {published_candidates[0]['label']}。"
+                        )
                     else:
-                        latest_update = f"所有候选组合都执行失败，共尝试 {budget_combinations} 组。"
+                        latest_update = f"全部 {budget_combinations} 组组合执行结束，但未形成有效候选。"
                         if last_error_message:
-                            latest_update = f"{latest_update} 最近错误：{last_error_message}"
+                            latest_update = f"{latest_update} 最后错误：{last_error_message}"
 
                 progress_payload = self._build_optimization_progress_payload(
                     normalized_payload,
@@ -3219,7 +3948,7 @@ class BacktestPlatformService:
         for key, value in top_level_overrides.items():
             if value is None:
                 continue
-            label = {"strategy_type": "策略类型", "universe_name": "标的范围", "rebalance_frequency": "调仓频率"}[key]
+            label = {"strategy_type": "蝑蝐餃?", "universe_name": "???", "rebalance_frequency": "靚?憸?"}[key]
             _upsert_field(confirmation_fields["top_level"], key, label, value, "manual_override")
 
         for bucket_name in ("core", "logic", "parameters"):
@@ -3439,6 +4168,7 @@ class BacktestPlatformService:
                     SELECT optimization_jobs.id
                     FROM optimization_jobs
                     WHERE optimization_jobs.strategy_id = strategies.id
+                      AND optimization_jobs.deleted_at IS NULL
                     ORDER BY optimization_jobs.created_at DESC
                     LIMIT 1
                 ) AS latest_optimization_job_id,
@@ -3527,19 +4257,30 @@ class BacktestPlatformService:
         rows = self.storage.fetch_all(sql, params)
         return [self._decode_run_list_row(row) for row in rows]
 
-    def get_backtest_run(self, run_id: str) -> dict[str, Any]:
-        row = self.storage.fetch_one("SELECT * FROM backtest_runs WHERE id = ? AND deleted_at IS NULL", (run_id,))
+    def get_backtest_run(
+        self,
+        run_id: str,
+        *,
+        view: str = "full",
+        include_trade_audit: bool = True,
+    ) -> dict[str, Any]:
+        normalized_view = self._normalize_backtest_run_detail_view(view)
+        row = self.storage.fetch_one(
+            f"SELECT {self._backtest_run_select_columns(view=normalized_view, include_trade_audit=include_trade_audit)} "
+            "FROM backtest_runs WHERE id = ? AND deleted_at IS NULL",
+            (run_id,),
+        )
         if not row:
             raise KeyError(f"Backtest run not found: {run_id}")
-        return self._decode_run_row(row)
+        return self._decode_run_row(row, view=normalized_view, include_trade_audit=include_trade_audit)
 
-    def get_backtest_run_detail(self, run_id: str) -> dict[str, Any]:
-        run = self.get_backtest_run(run_id)
+    def get_backtest_run_detail(self, run_id: str, view: str = "full") -> dict[str, Any]:
+        run = self.get_backtest_run(run_id, view=view, include_trade_audit=False)
         run["legacy_demo_run"] = False
         return run
 
     def get_backtest_run_trades(self, run_id: str, page: int = 1, page_size: int = 50, segment: str = "all") -> dict[str, Any]:
-        run = self.get_backtest_run(run_id)
+        run = self.get_backtest_run(run_id, view="trades", include_trade_audit=False)
         trades = list(run.get("trades", []))
         normalized_segment = str(segment or "all").upper()
         if normalized_segment in {"IS", "OOS"}:
@@ -3558,13 +4299,43 @@ class BacktestPlatformService:
         cloned_payload.setdefault("is_permanent", False)
         return self.submit_backtest_run(str(run["strategy_id"]), cloned_payload)
 
+    def delete_backtest_run(self, run_id: str) -> dict[str, Any]:
+        run = self.get_backtest_run(run_id, view="full", include_trade_audit=False)
+        status = str(run.get("status") or "").upper()
+        if status in {"QUEUED", "RUNNING"}:
+            raise ContractConflictError(
+                "BACKTEST_RUN_DELETE_ACTIVE",
+                "Running or queued backtest runs cannot be deleted",
+                blocking_target={"run_id": run_id},
+            )
+
+        deleted_at = iso_now()
+        self.storage.execute(
+            """
+            UPDATE backtest_runs
+            SET status = ?, deleted_at = ?, deleted_reason = ?, updated_at = ?
+            WHERE id = ? AND deleted_at IS NULL
+            """,
+            ("DELETED", deleted_at, "manual_delete", deleted_at, run_id),
+        )
+        strategy_id = str(run.get("strategy_id") or "").strip()
+        if strategy_id:
+            self._sync_strategy_run_refs(strategy_id)
+        return {
+            "id": run_id,
+            "deleted_at": deleted_at,
+            "deleted_reason": "manual_delete",
+        }
+
     def get_workspace_overview(self) -> dict[str, Any]:
         strategies = self.list_strategies()
         recent_runs = self.list_backtest_runs(limit=5)
-        latest_job = self.storage.fetch_one("SELECT * FROM optimization_jobs ORDER BY created_at DESC LIMIT 1")
+        latest_job = self.storage.fetch_one(
+            "SELECT * FROM optimization_jobs WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 1"
+        )
         return {
-            "workspace_name": "Grit 策略实验室",
-            "subtitle": "以明确契约串联研究、确认、回测与参数提升。",
+            "workspace_name": "Grit 策略工作台",
+            "subtitle": "集中查看策略研究、回测运行与参数优化任务，帮助你快速定位最新实验进展。",
             "strategy_count": len(strategies),
             "active_run_count": len([item for item in recent_runs if item.get("status") == "RUNNING"]),
             "running_optimization_count": 1
@@ -3573,7 +4344,7 @@ class BacktestPlatformService:
             "latest_strategy_id": strategies[0]["id"] if strategies else None,
             "latest_backtest_run_id": recent_runs[0]["id"] if recent_runs else None,
             "latest_optimization_job_id": latest_job["id"] if latest_job else None,
-            "top_momentum_warning": "有一个股票池快照未完成；在刷新之前，新的正式回测都会被阻止。",
+            "top_momentum_warning": "近期高动量组合波动有所放大，建议结合参数热区与多窗口验证结果复核回撤承受区间。",
             "quick_actions": ["open_creation", "start_backtest", "open_optimization"],
         }
 
@@ -3588,7 +4359,7 @@ class BacktestPlatformService:
             "latest_job": latest_job,
             "blocking_code": "SNAPSHOT_REFRESH_REQUIRED",
             "blocking_target": "data_snapshots",
-            "message": "还没有生成快照。先刷新快照，再继续正式回测。",
+            "message": "当前尚未完成快照刷新，请先刷新数据快照后再进入策略回测或优化流程。",
             "allowed_actions": ["refresh_snapshots"],
         }
 
@@ -3637,12 +4408,17 @@ class BacktestPlatformService:
     def _decode_snapshot_refresh_job(self, row: Mapping[str, Any] | None) -> dict[str, Any] | None:
         if not row:
             return None
+        summary = loads(row.get("summary_json"), {})
         return {
             **dict(row),
             "request": loads(row.get("request_json"), {}),
-            "summary": loads(row.get("summary_json"), {}),
+            "summary": summary,
             "warnings": loads(row.get("warnings_json"), []),
             "errors": loads(row.get("errors_json"), []),
+            "current_stage": summary.get("current_stage"),
+            "current_stage_label": summary.get("current_stage_label"),
+            "heartbeat_at": summary.get("heartbeat_at"),
+            "progress": summary.get("progress"),
         }
 
     def _start_optimization_job_runner(
@@ -3681,64 +4457,6 @@ class BacktestPlatformService:
         ).start()
         return True
 
-    def resume_incomplete_optimization_jobs(self) -> list[str]:
-        rows = self.storage.fetch_all(
-            """
-            SELECT *
-            FROM optimization_jobs
-            WHERE status IN (?, ?)
-            ORDER BY created_at ASC, id ASC
-            """,
-            ("QUEUED", "RUNNING"),
-        )
-        resumed_job_ids: list[str] = []
-        for row in rows:
-            job_id = str(row.get("id") or "").strip()
-            strategy_id = str(row.get("strategy_id") or "").strip()
-            if not job_id or not strategy_id:
-                continue
-            payload = loads(row.get("request_json"), {})
-            if not payload:
-                continue
-            payload.setdefault("status", str(row.get("status") or "QUEUED").upper())
-            payload.setdefault("progress_pct", 0)
-            payload.setdefault("completed_combinations", 0)
-            payload.setdefault("current_stage", "任务已恢复")
-            payload.setdefault("latest_update", "检测到服务重启，正在恢复优化任务。")
-            existing_candidates = list(loads(row.get("candidates_json"), []))
-            resumed_at = iso_now()
-            self._persist_optimization_job(
-                job_id,
-                strategy_id,
-                self._build_optimization_progress_payload(
-                    payload,
-                    status=str(payload.get("status") or "QUEUED").upper(),
-                    progress_pct=_as_int(payload.get("progress_pct"), 0),
-                    completed_combinations=_as_int(payload.get("completed_combinations"), 0),
-                    current_stage=str(payload.get("current_stage") or "任务已恢复"),
-                    latest_update=str(payload.get("latest_update") or "检测到服务重启，正在恢复优化任务。"),
-                    latest_candidate_label=(
-                        str(existing_candidates[0].get("label") or "").strip()
-                        if existing_candidates
-                        else None
-                    ),
-                ),
-                existing_candidates,
-                created_at=str(row.get("created_at") or resumed_at),
-                updated_at=resumed_at,
-                completed_at=None,
-            )
-            if self._start_optimization_job_runner(
-                job_id,
-                strategy_id,
-                payload,
-                created_at=str(row.get("created_at") or iso_now()),
-                existing_candidates=existing_candidates,
-                recovered=True,
-            ):
-                resumed_job_ids.append(job_id)
-        return resumed_job_ids
-
     def create_optimization_job(self, strategy_id: str, request: Any | None = None) -> dict[str, Any]:
         strategy = self.get_strategy_detail(strategy_id)
         payload = _as_mapping(request)
@@ -3761,7 +4479,7 @@ class BacktestPlatformService:
             "progress_pct": 0,
             "completed_combinations": 0,
             "current_stage": "任务已创建",
-            "latest_update": "优化任务已创建，正在准备搜索队列。",
+            "latest_update": "优化任务已创建，正在准备参数组合与评估快照。",
         }
         normalized_payload["search_space"] = self._normalize_optimization_search_space(strategy, normalized_payload)
         self._persist_optimization_job(
@@ -3782,10 +4500,36 @@ class BacktestPlatformService:
         return self.get_optimization_job_detail(job_id)
 
     def get_optimization_job_detail(self, job_id: str) -> dict[str, Any]:
-        row = self.storage.fetch_one("SELECT * FROM optimization_jobs WHERE id = ?", (job_id,))
+        row = self.storage.fetch_one(
+            "SELECT * FROM optimization_jobs WHERE id = ? AND deleted_at IS NULL",
+            (job_id,),
+        )
         if not row:
             raise KeyError(f"Optimization job not found: {job_id}")
         return self._hydrate_optimization_job(row)
+
+    def delete_optimization_job(self, job_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one(
+            "SELECT id FROM optimization_jobs WHERE id = ? AND deleted_at IS NULL",
+            (job_id,),
+        )
+        if not row:
+            raise KeyError(f"Optimization job not found: {job_id}")
+        deleted_at = iso_now()
+        deleted_reason = "user_deleted"
+        self.storage.execute(
+            """
+            UPDATE optimization_jobs
+            SET status = ?, deleted_at = ?, deleted_reason = ?, updated_at = ?
+            WHERE id = ? AND deleted_at IS NULL
+            """,
+            ("DELETED", deleted_at, deleted_reason, deleted_at, job_id),
+        )
+        return {
+            "id": job_id,
+            "deleted_at": deleted_at,
+            "deleted_reason": deleted_reason,
+        }
 
     def create_optimization_candidate(self, job_id: str, request: Any) -> dict[str, Any]:
         payload = _as_mapping(request)
@@ -3914,6 +4658,7 @@ class BacktestPlatformService:
             }
         )
         strategy_row["parameters_json"] = dumps(promoted_parameters)
+        strategy_row["name"] = _format_versioned_strategy_name(strategy_row.get("name"), next_version)
         self._write_strategy_record(
             strategy_row,
             parameter_history=parameter_history,
@@ -3959,7 +4704,9 @@ class BacktestPlatformService:
             LIMIT 1
             """
         )
-        latest_job = self.storage.fetch_one("SELECT * FROM optimization_jobs ORDER BY created_at DESC LIMIT 1")
+        latest_job = self.storage.fetch_one(
+            "SELECT * FROM optimization_jobs WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 1"
+        )
         overview = {
             "workspace_name": "Grit Strategy Lab",
             "subtitle": "Creation, backtest, and optimization workspace for local strategy recovery.",
@@ -3978,3 +4725,1646 @@ class BacktestPlatformService:
             runtime_state = self._read_runtime_state("cleanup_audit")
             overview["last_cleanup_count"] = int(runtime_state.get("state_json", {}).get("last_cleanup_count") or 0)
         return overview
+
+    def _load_optimization_trials(
+        self,
+        job_id: str,
+        *,
+        include_chart_series: bool = True,
+        trial_indices: Sequence[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        chart_series_column = "chart_series_json" if include_chart_series else "NULL AS chart_series_json"
+        normalized_trial_indices = [
+            int(index)
+            for index in list(trial_indices or [])
+            if isinstance(index, int) or (isinstance(index, str) and str(index).strip().isdigit())
+        ]
+        trial_filter = ""
+        params: list[Any] = [job_id]
+        if normalized_trial_indices:
+            placeholders = ", ".join("?" for _ in normalized_trial_indices)
+            trial_filter = f" AND trial_index IN ({placeholders})"
+            params.extend(normalized_trial_indices)
+        rows = self.storage.fetch_all(
+            f"""
+            SELECT
+                job_id,
+                trial_index,
+                status,
+                parameter_snapshot_json,
+                metrics_json,
+                {chart_series_column},
+                score,
+                error_message,
+                started_at,
+                completed_at
+            FROM optimization_job_trials
+            WHERE job_id = ?
+            {trial_filter}
+            ORDER BY trial_index ASC
+            """,
+            tuple(params),
+        )
+        trials: list[dict[str, Any]] = []
+        for row in rows:
+            trials.append(
+                {
+                    "job_id": str(row.get("job_id") or job_id),
+                    "trial_index": _as_int(row.get("trial_index"), 0),
+                    "status": str(row.get("status") or "PENDING").upper(),
+                    "parameter_snapshot": loads(row.get("parameter_snapshot_json"), {}),
+                    "metrics": loads(row.get("metrics_json"), {}),
+                    "chart_series": loads(row.get("chart_series_json"), []) if include_chart_series else [],
+                    "score": _as_float(row.get("score"), 0.0),
+                    "error_message": row.get("error_message"),
+                    "started_at": row.get("started_at"),
+                    "completed_at": row.get("completed_at"),
+                }
+            )
+        return trials
+
+    def _optimization_top_trial_indices(
+        self,
+        trials: Sequence[Mapping[str, Any]],
+        *,
+        limit: int | None = None,
+    ) -> list[int]:
+        candidate_limit = limit if isinstance(limit, int) and limit > 0 else self._optimization_candidate_limit()
+        successful_trials = [dict(trial) for trial in trials if str(trial.get("status") or "").upper() == "SUCCEEDED"]
+        ranked_trials = self._rank_optimization_trials(successful_trials)
+        selected_indices: list[int] = []
+        for trial in ranked_trials[:candidate_limit]:
+            trial_index = _as_int(trial.get("trial_index"), 0)
+            if trial_index > 0:
+                selected_indices.append(trial_index)
+        return selected_indices
+
+    def _load_optimization_trial_chart_series_map(
+        self,
+        job_id: str,
+        trial_indices: Sequence[int],
+    ) -> dict[int, list[dict[str, Any]]]:
+        normalized_indices = [
+            int(index)
+            for index in list(trial_indices or [])
+            if isinstance(index, int) or (isinstance(index, str) and str(index).strip().isdigit())
+        ]
+        if not normalized_indices:
+            return {}
+        trials = self._load_optimization_trials(
+            job_id,
+            include_chart_series=True,
+            trial_indices=normalized_indices,
+        )
+        return {
+            _as_int(trial.get("trial_index"), 0): list(trial.get("chart_series") or [])
+            for trial in trials
+            if _as_int(trial.get("trial_index"), 0) > 0 and list(trial.get("chart_series") or [])
+        }
+
+    def _merge_optimization_trial_chart_series(
+        self,
+        trials: Sequence[Mapping[str, Any]],
+        chart_series_by_index: Mapping[int, Sequence[Mapping[str, Any]] | Sequence[dict[str, Any]]],
+    ) -> list[dict[str, Any]]:
+        merged_trials: list[dict[str, Any]] = []
+        for trial in trials:
+            merged_trial = dict(trial)
+            trial_index = _as_int(merged_trial.get("trial_index"), 0)
+            merged_trial["chart_series"] = list(chart_series_by_index.get(trial_index) or merged_trial.get("chart_series") or [])
+            merged_trials.append(merged_trial)
+        return merged_trials
+
+    def _persist_optimization_trial(
+        self,
+        job_id: str,
+        trial_index: int,
+        *,
+        status: str,
+        parameter_snapshot: Mapping[str, Any],
+        metrics: Mapping[str, Any],
+        chart_series: list[Mapping[str, Any]] | list[dict[str, Any]],
+        score: float | int | None,
+        error_message: str | None,
+        started_at: str | None,
+        completed_at: str | None,
+    ) -> None:
+        self.storage.insert_json_row(
+            "optimization_job_trials",
+            {
+                "job_id": job_id,
+                "trial_index": int(trial_index),
+                "status": str(status or "PENDING").upper(),
+                "parameter_snapshot_json": dumps(dict(parameter_snapshot or {})),
+                "metrics_json": dumps(dict(metrics or {})),
+                "chart_series_json": dumps(list(chart_series or [])),
+                "score": None if score is None else float(score),
+                "error_message": error_message,
+                "started_at": started_at,
+                "completed_at": completed_at,
+            },
+        )
+
+    def _optimization_parallel_min_trials(self) -> int:
+        return 8
+
+    def _optimization_parallel_worker_cap(self) -> int:
+        cpu_count = os.cpu_count() or 1
+        return min(max(1, cpu_count - 1), 8)
+
+    def _optimization_memory_status(self) -> dict[str, float]:
+        return read_runtime_memory_status()
+
+    def _optimization_initial_parallel_worker_target(
+        self,
+        base_cap: int,
+        *,
+        memory_status: Mapping[str, Any] | None = None,
+    ) -> int:
+        if base_cap <= 1:
+            return 1
+        status = dict(memory_status or self._optimization_memory_status())
+        system_ratio = _as_float(status.get("system_memory_ratio"), 0.0)
+        process_ratio = _as_float(status.get("process_memory_ratio"), 0.0)
+        if system_ratio >= 0.80 or process_ratio >= 0.60:
+            return 1
+        if system_ratio >= 0.70 or process_ratio >= 0.45:
+            return min(base_cap, 2)
+        if system_ratio >= 0.60 or process_ratio >= 0.30:
+            return min(base_cap, 4)
+        return base_cap
+
+    def _optimization_adjust_parallel_worker_target(
+        self,
+        current_target: int,
+        *,
+        base_cap: int,
+        memory_status: Mapping[str, Any],
+        safe_sample_streak: int,
+    ) -> tuple[int, int]:
+        system_ratio = _as_float(memory_status.get("system_memory_ratio"), 0.0)
+        process_ratio = _as_float(memory_status.get("process_memory_ratio"), 0.0)
+        if system_ratio >= 0.90 or process_ratio >= 0.60:
+            return 1, 0
+        if system_ratio >= 0.80:
+            return max(1, current_target - 1), 0
+        if system_ratio <= 0.65 and process_ratio <= 0.45:
+            next_safe_streak = safe_sample_streak + 1
+            if next_safe_streak >= 3 and current_target < base_cap:
+                return min(base_cap, current_target + 1), 0
+            return current_target, next_safe_streak
+        return current_target, 0
+
+    def _optimization_can_use_parallel_controller(
+        self,
+        pending_evaluations: Sequence[tuple[int, Mapping[str, Any]]],
+    ) -> bool:
+        del pending_evaluations
+        # Benchmarks show the current synthetic evaluator is faster in sequential mode.
+        # Keep multiprocessing disabled by default until a heavier evaluator path needs it.
+        return False
+
+    def _optimization_trial_record(
+        self,
+        *,
+        job_id: str,
+        trial_index: int,
+        status: str,
+        parameter_snapshot: Mapping[str, Any],
+        metrics: Mapping[str, Any],
+        score: float | int | None,
+        error_message: str | None,
+        started_at: str | None,
+        completed_at: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "job_id": job_id,
+            "trial_index": int(trial_index),
+            "status": str(status or "PENDING").upper(),
+            "parameter_snapshot": dict(parameter_snapshot or {}),
+            "metrics": dict(metrics or {}),
+            "chart_series": [],
+            "score": None if score is None else float(score),
+            "error_message": error_message,
+            "started_at": started_at,
+            "completed_at": completed_at,
+        }
+
+    def _run_sequential_optimization_trials(
+        self,
+        *,
+        job_id: str,
+        strategy: Mapping[str, Any],
+        evaluation_request: Mapping[str, Any],
+        request_payload: Mapping[str, Any],
+        pending_evaluations: Sequence[tuple[int, Mapping[str, Any]]],
+        trial_records: dict[int, dict[str, Any]],
+        budget_combinations: int,
+        publish_progress: Any,
+        delay_seconds: float = 0.0,
+        prepared_context: Mapping[str, Any] | None = None,
+    ) -> tuple[dict[int, dict[str, Any]], int]:
+        failures = 0
+        normalized_pending = [
+            (int(trial_index), dict(parameter_snapshot))
+            for trial_index, parameter_snapshot in pending_evaluations
+        ]
+        for offset, (trial_index, parameter_snapshot) in enumerate(normalized_pending):
+            trial_started_at = self._optimization_timestamp_now()
+            try:
+                trial_result = self._evaluate_optimization_trial(
+                    strategy,
+                    evaluation_request,
+                    request_payload,
+                    parameter_snapshot,
+                    prepared_context=prepared_context,
+                )
+                trial_status = "SUCCEEDED"
+                error_message = None
+            except Exception as exc:
+                failures += 1
+                trial_status = "FAILED"
+                trial_result = {
+                    "parameter_snapshot": dict(parameter_snapshot),
+                    "metrics": {},
+                    "chart_series": [],
+                    "score": 0.0,
+                }
+                error_message = str(exc).strip() or exc.__class__.__name__
+
+            trial_parameter_snapshot = dict(trial_result.get("parameter_snapshot") or parameter_snapshot)
+            trial_metrics = dict(trial_result.get("metrics") or {})
+            trial_score = trial_result.get("score")
+            trial_completed_at = self._optimization_timestamp_now()
+            self._persist_optimization_trial(
+                job_id,
+                trial_index,
+                status=trial_status,
+                parameter_snapshot=trial_parameter_snapshot,
+                metrics=trial_metrics,
+                chart_series=[],
+                score=trial_score,
+                error_message=error_message,
+                started_at=trial_started_at,
+                completed_at=trial_completed_at,
+            )
+            trial_records[trial_index] = self._optimization_trial_record(
+                job_id=job_id,
+                trial_index=trial_index,
+                status=trial_status,
+                parameter_snapshot=trial_parameter_snapshot,
+                metrics=trial_metrics,
+                score=trial_score,
+                error_message=error_message,
+                started_at=trial_started_at,
+                completed_at=trial_completed_at,
+            )
+            completed_count = len(trial_records)
+            best_summary = self._best_optimization_trial_summary(list(trial_records.values()))
+            remaining = normalized_pending[offset + 1 :]
+            next_trial_index = remaining[0][0] if remaining else completed_count + 1
+            publish_progress(
+                completed_count=completed_count,
+                best_summary=best_summary,
+                next_trial_index=next_trial_index,
+                current_stage=(
+                    f"Running trial {next_trial_index}/{budget_combinations}"
+                    if remaining
+                    else f"Running trial {budget_combinations}/{budget_combinations}"
+                ),
+                latest_update=f"Completed {completed_count}/{budget_combinations} trials.",
+            )
+            if delay_seconds:
+                time.sleep(delay_seconds)
+        return trial_records, failures
+
+    def _run_parallel_optimization_trials(
+        self,
+        *,
+        job_id: str,
+        request_payload: Mapping[str, Any],
+        pending_evaluations: Sequence[tuple[int, Mapping[str, Any]]],
+        trial_records: dict[int, dict[str, Any]],
+        budget_combinations: int,
+        publish_progress: Any,
+    ) -> tuple[dict[int, dict[str, Any]], int, list[tuple[int, dict[str, Any]]], str | None]:
+        normalized_pending: deque[tuple[int, dict[str, Any]]] = deque(
+            (int(trial_index), dict(parameter_snapshot))
+            for trial_index, parameter_snapshot in pending_evaluations
+        )
+        if not normalized_pending:
+            return trial_records, 0, [], None
+
+        base_cap = min(self._optimization_parallel_worker_cap(), len(normalized_pending))
+        memory_status = self._optimization_memory_status()
+        target_worker_count = min(
+            base_cap,
+            self._optimization_initial_parallel_worker_target(
+                base_cap,
+                memory_status=memory_status,
+            ),
+        )
+        if target_worker_count <= 1:
+            return trial_records, 0, list(normalized_pending), "Parallel workers were skipped because memory pressure was already too high."
+
+        spawn_context = mp.get_context("spawn")
+        result_queue = spawn_context.Queue()
+        workers: dict[int, dict[str, Any]] = {}
+        next_worker_id = 0
+        failures = 0
+        safe_sample_streak = 0
+        fallback_reason: str | None = None
+        last_sample_at = time.monotonic()
+
+        def current_remaining() -> list[tuple[int, dict[str, Any]]]:
+            remaining = list(normalized_pending)
+            for worker in workers.values():
+                current_task = worker.get("current_task")
+                if current_task:
+                    remaining.append(
+                        (
+                            int(current_task["trial_index"]),
+                            dict(current_task["parameter_snapshot"] or {}),
+                        )
+                    )
+            return sorted(remaining, key=lambda item: item[0])
+
+        def close_worker(
+            worker_id: int,
+            *,
+            terminate: bool = False,
+        ) -> None:
+            worker = workers.pop(worker_id, None)
+            if worker is None:
+                return
+            process = worker.get("process")
+            command_queue = worker.get("command_queue")
+            try:
+                if terminate and process is not None and process.is_alive():
+                    process.terminate()
+                if process is not None:
+                    process.join(timeout=0.5)
+            except Exception:
+                pass
+            if terminate:
+                try:
+                    if process is not None and process.is_alive():
+                        process.kill()
+                        process.join(timeout=0.5)
+                except Exception:
+                    pass
+            close_queue = getattr(command_queue, "close", None)
+            if callable(close_queue):
+                try:
+                    close_queue()
+                except Exception:
+                    pass
+
+        def request_worker_shutdown(worker: Mapping[str, Any]) -> None:
+            if worker.get("shutdown_sent"):
+                return
+            command_queue = worker.get("command_queue")
+            if worker.get("current_task") is not None:
+                worker["retire_after_task"] = True
+                return
+            try:
+                command_queue.put({"type": "shutdown"})
+                worker["shutdown_sent"] = True
+            except Exception:
+                worker["shutdown_sent"] = True
+
+        def start_worker() -> None:
+            nonlocal next_worker_id
+            worker_id = next_worker_id + 1
+            command_queue = spawn_context.Queue()
+            process = spawn_context.Process(
+                target=_optimization_trial_worker_main,
+                args=(worker_id, command_queue, result_queue),
+                name=f"opt-worker-{job_id}-{worker_id}",
+                daemon=True,
+            )
+            process.start()
+            workers[worker_id] = {
+                "id": worker_id,
+                "process": process,
+                "command_queue": command_queue,
+                "current_task": None,
+                "shutdown_sent": False,
+                "retire_after_task": False,
+            }
+            next_worker_id = worker_id
+
+        def reconcile_dead_workers() -> None:
+            nonlocal fallback_reason
+            for worker_id, worker in list(workers.items()):
+                process = worker.get("process")
+                exitcode = None if process is None else process.exitcode
+                if exitcode is None:
+                    continue
+                current_task = worker.get("current_task")
+                if current_task is not None and fallback_reason is None:
+                    fallback_reason = (
+                        f"Parallel worker {worker_id} exited unexpectedly. "
+                        "Continuing with single-worker mode."
+                    )
+                close_worker(worker_id)
+
+        def sync_worker_target() -> None:
+            nonlocal fallback_reason
+            reconcile_dead_workers()
+            if fallback_reason:
+                return
+            active_tasks = sum(1 for worker in workers.values() if worker.get("current_task") is not None)
+            desired_workers = min(
+                target_worker_count,
+                max(active_tasks, len(normalized_pending) + active_tasks),
+            )
+            while len(workers) < desired_workers:
+                try:
+                    start_worker()
+                except Exception as exc:
+                    fallback_reason = (
+                        "Parallel workers failed to start. "
+                        f"Continuing with single-worker mode: {str(exc).strip() or exc.__class__.__name__}"
+                    )
+                    return
+            excess = max(0, len(workers) - target_worker_count)
+            if excess <= 0:
+                return
+            idle_workers = [worker for worker in workers.values() if worker.get("current_task") is None and not worker.get("shutdown_sent")]
+            for worker in idle_workers[:excess]:
+                request_worker_shutdown(worker)
+            remaining_excess = max(
+                0,
+                len([worker for worker in workers.values() if not worker.get("shutdown_sent")]) - target_worker_count,
+            )
+            if remaining_excess <= 0:
+                return
+            busy_workers = [worker for worker in workers.values() if worker.get("current_task") is not None and not worker.get("shutdown_sent")]
+            for worker in busy_workers[:remaining_excess]:
+                worker["retire_after_task"] = True
+
+        try:
+            sync_worker_target()
+            while (normalized_pending or any(worker.get("current_task") is not None for worker in workers.values())) and not fallback_reason:
+                for worker in list(workers.values()):
+                    if worker.get("shutdown_sent") or worker.get("retire_after_task") or worker.get("current_task") is not None:
+                        continue
+                    if not normalized_pending:
+                        break
+                    trial_index, parameter_snapshot = normalized_pending.popleft()
+                    worker["current_task"] = {
+                        "trial_index": trial_index,
+                        "parameter_snapshot": dict(parameter_snapshot),
+                        "started_at": self._optimization_timestamp_now(),
+                    }
+                    try:
+                        worker["command_queue"].put(
+                            {
+                                "type": "trial",
+                                "trial_index": trial_index,
+                                "parameter_snapshot": dict(parameter_snapshot),
+                                "objective": request_payload.get("objective"),
+                            }
+                        )
+                    except Exception as exc:
+                        normalized_pending.appendleft((trial_index, dict(parameter_snapshot)))
+                        worker["current_task"] = None
+                        fallback_reason = (
+                            "Parallel worker communication failed. "
+                            f"Continuing with single-worker mode: {str(exc).strip() or exc.__class__.__name__}"
+                        )
+                        break
+
+                reconcile_dead_workers()
+                if fallback_reason:
+                    break
+
+                result: dict[str, Any] | None = None
+                try:
+                    result = result_queue.get(timeout=0.2)
+                except queue.Empty:
+                    result = None
+
+                if result is not None:
+                    result_type = str(result.get("type") or "").strip().lower()
+                    worker_id = _as_int(result.get("worker_id"), 0)
+                    if result_type == "worker_stopped":
+                        close_worker(worker_id)
+                    elif result_type == "trial_result":
+                        worker = workers.get(worker_id)
+                        current_task = dict((worker or {}).get("current_task") or {})
+                        if worker is not None:
+                            worker["current_task"] = None
+                        trial_index = _as_int(result.get("trial_index"), _as_int(current_task.get("trial_index"), 0))
+                        parameter_snapshot = dict(result.get("parameter_snapshot") or current_task.get("parameter_snapshot") or {})
+                        trial_started_at = str(current_task.get("started_at") or self._optimization_timestamp_now())
+                        trial_completed_at = self._optimization_timestamp_now()
+                        error_message = str(result.get("error_message") or "").strip() or None
+                        trial_status = "FAILED" if error_message else "SUCCEEDED"
+                        if trial_status == "FAILED":
+                            failures += 1
+                        trial_metrics = dict(result.get("metrics") or {})
+                        trial_score = result.get("score")
+                        self._persist_optimization_trial(
+                            job_id,
+                            trial_index,
+                            status=trial_status,
+                            parameter_snapshot=parameter_snapshot,
+                            metrics=trial_metrics,
+                            chart_series=[],
+                            score=trial_score,
+                            error_message=error_message,
+                            started_at=trial_started_at,
+                            completed_at=trial_completed_at,
+                        )
+                        trial_records[trial_index] = self._optimization_trial_record(
+                            job_id=job_id,
+                            trial_index=trial_index,
+                            status=trial_status,
+                            parameter_snapshot=parameter_snapshot,
+                            metrics=trial_metrics,
+                            score=trial_score,
+                            error_message=error_message,
+                            started_at=trial_started_at,
+                            completed_at=trial_completed_at,
+                        )
+                        completed_count = len(trial_records)
+                        best_summary = self._best_optimization_trial_summary(list(trial_records.values()))
+                        next_indices = [trial[0] for trial in normalized_pending]
+                        next_indices.extend(
+                            _as_int(worker_state.get("current_task", {}).get("trial_index"), 0)
+                            for worker_state in workers.values()
+                            if worker_state.get("current_task")
+                        )
+                        next_indices = [index for index in next_indices if index > 0]
+                        next_trial_index = min(next_indices) if next_indices else completed_count + 1
+                        publish_progress(
+                            completed_count=completed_count,
+                            best_summary=best_summary,
+                            next_trial_index=next_trial_index,
+                            current_stage=(
+                                f"Running trial {next_trial_index}/{budget_combinations}"
+                                if next_indices
+                                else f"Running trial {budget_combinations}/{budget_combinations}"
+                            ),
+                            latest_update=f"Completed {completed_count}/{budget_combinations} trials.",
+                        )
+                        if worker is not None and worker.get("retire_after_task"):
+                            request_worker_shutdown(worker)
+
+                now = time.monotonic()
+                if result is not None or now - last_sample_at >= 1.0:
+                    memory_status = self._optimization_memory_status()
+                    target_worker_count, safe_sample_streak = self._optimization_adjust_parallel_worker_target(
+                        target_worker_count,
+                        base_cap=base_cap,
+                        memory_status=memory_status,
+                        safe_sample_streak=safe_sample_streak,
+                    )
+                    last_sample_at = now
+                    sync_worker_target()
+
+            remaining_trials = current_remaining() if fallback_reason else []
+            return trial_records, failures, remaining_trials, fallback_reason
+        finally:
+            for worker_id, worker in list(workers.items()):
+                if not worker.get("shutdown_sent") and worker.get("current_task") is None:
+                    request_worker_shutdown(worker)
+            deadline = time.monotonic() + 1.0
+            while workers and time.monotonic() < deadline:
+                try:
+                    result = result_queue.get(timeout=0.1)
+                except queue.Empty:
+                    result = None
+                if result is not None and str(result.get("type") or "").strip().lower() == "worker_stopped":
+                    close_worker(_as_int(result.get("worker_id"), 0))
+                    continue
+                reconcile_dead_workers()
+            for worker_id in list(workers):
+                close_worker(worker_id, terminate=True)
+            close_result_queue = getattr(result_queue, "close", None)
+            if callable(close_result_queue):
+                try:
+                    close_result_queue()
+                except Exception:
+                    pass
+
+    def _optimization_trial_summary(self, trial: Mapping[str, Any]) -> dict[str, Any]:
+        trial_index = _as_int(trial.get("trial_index"), 0)
+        return {
+            "trial_index": trial_index,
+            "label": f"Trial {trial_index}" if trial_index else "Trial",
+            "status": str(trial.get("status") or "PENDING").upper(),
+            "parameter_snapshot": dict(trial.get("parameter_snapshot") or {}),
+            "metrics": dict(trial.get("metrics") or {}),
+            "score": _as_float(trial.get("score"), 0.0),
+            "error_message": trial.get("error_message"),
+            "started_at": trial.get("started_at"),
+            "completed_at": trial.get("completed_at"),
+        }
+
+    def _normalized_optimization_trial_summary(self, trial: Mapping[str, Any]) -> dict[str, Any]:
+        summary = self._optimization_trial_summary(trial)
+        label = str(trial.get("label") or "").strip()
+        if label:
+            summary["label"] = label
+        return summary
+
+    def _optimization_timestamp_now(self) -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    def _best_optimization_trial_summary(self, trials: list[Mapping[str, Any]]) -> dict[str, Any] | None:
+        successful_trials = [dict(trial) for trial in trials if str(trial.get("status") or "").upper() == "SUCCEEDED"]
+        if not successful_trials:
+            return None
+        ranked = self._rank_optimization_trials(successful_trials)
+        if not ranked:
+            return None
+        return self._optimization_trial_summary(ranked[0])
+
+    def _optimization_eta_projection(
+        self,
+        trials: list[Mapping[str, Any]],
+        *,
+        budget_combinations: int,
+        completed_combinations: int,
+    ) -> dict[str, Any]:
+        completed_durations: list[float] = []
+        completed_spans: list[tuple[datetime, datetime]] = []
+        for trial in trials:
+            started_at = trial.get("started_at")
+            completed_at = trial.get("completed_at")
+            if not started_at or not completed_at:
+                continue
+            try:
+                started = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+                completed = datetime.fromisoformat(str(completed_at).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            duration = (completed - started).total_seconds()
+            if duration >= 0:
+                completed_spans.append((started, completed))
+            if duration > 0:
+                completed_durations.append(duration)
+
+        remaining_trials = max(0, budget_combinations - completed_combinations)
+        avg_trial_seconds: float | None = None
+        includes_inter_trial_overhead = False
+        if completed_durations:
+            avg_trial_seconds = sum(completed_durations) / len(completed_durations)
+        if completed_spans and completed_combinations > 0:
+            first_started = min(started for started, _ in completed_spans)
+            last_completed = max(completed for _, completed in completed_spans)
+            wall_clock_span = max(0.0, (last_completed - first_started).total_seconds())
+            if wall_clock_span > 0:
+                wall_clock_avg = wall_clock_span / completed_combinations
+                total_duration = sum(completed_durations)
+                if avg_trial_seconds is None:
+                    avg_trial_seconds = wall_clock_avg
+                    includes_inter_trial_overhead = True
+                elif total_duration > wall_clock_span * 1.2:
+                    avg_trial_seconds = wall_clock_avg
+                    includes_inter_trial_overhead = True
+
+        if avg_trial_seconds is None:
+            return {"estimated_remaining_minutes": None, "estimated_completed_at": None}
+
+        per_trial_projection = avg_trial_seconds
+        if not includes_inter_trial_overhead:
+            per_trial_projection += self._optimization_step_delay_seconds()
+        projected_seconds = remaining_trials * per_trial_projection
+        estimated_completed_at = datetime.now(timezone.utc) + timedelta(seconds=projected_seconds)
+        return {
+            "estimated_remaining_minutes": int(math.ceil(projected_seconds / 60.0)) if projected_seconds > 0 else 0,
+            "estimated_completed_at": estimated_completed_at.isoformat().replace("+00:00", "Z"),
+        }
+
+    def _persist_optimization_job(
+        self,
+        job_id: str,
+        strategy_id: str,
+        payload: Mapping[str, Any],
+        candidates: list[dict[str, Any]],
+        *,
+        created_at: str,
+        updated_at: str | None = None,
+        completed_at: str | None = None,
+    ) -> None:
+        status = str(payload.get("status") or "COMPLETED").upper()
+        baseline_parameter_version_id = str(payload.get("base_parameter_version_id") or "").strip() or None
+        normalized_candidates = sorted(
+            [dict(candidate) for candidate in candidates],
+            key=lambda item: int(item.get("rank") or 0) or 0,
+        )
+        persisted_payload = {
+            **dict(payload),
+            "base_parameter_version_id": baseline_parameter_version_id,
+        }
+        summary = self._build_optimization_job_summary(persisted_payload, normalized_candidates)
+        result = self._build_optimization_job_result(persisted_payload, normalized_candidates)
+        persisted_updated_at = updated_at or iso_now()
+        persisted_completed_at = completed_at
+        if persisted_completed_at is None and status not in {"QUEUED", "RUNNING", "INTERRUPTED"}:
+            persisted_completed_at = persisted_updated_at
+        self.storage.insert_json_row(
+            "optimization_jobs",
+            {
+                "id": job_id,
+                "strategy_id": strategy_id,
+                "status": status,
+                "request_json": dumps(persisted_payload),
+                "summary_json": dumps(summary),
+                "result_json": dumps(result),
+                "candidates_json": dumps(normalized_candidates),
+                "created_at": created_at,
+                "updated_at": persisted_updated_at,
+                "completed_at": persisted_completed_at,
+            },
+        )
+
+    def _build_optimization_job_summary(
+        self,
+        payload: Mapping[str, Any],
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        status = str(payload.get("status") or "COMPLETED").upper()
+        baseline_parameter_version_id = str(payload.get("base_parameter_version_id") or "").strip() or None
+        budget_combinations = _as_int(payload.get("budget_combinations"), max(len(candidates) * 10, 24))
+        completed_combinations = _as_int(
+            payload.get("completed_combinations"),
+            budget_combinations if status == "COMPLETED" else min(budget_combinations, len(candidates)),
+        )
+        persisted_trial_count = _as_int(payload.get("persisted_trial_count"), len(candidates))
+        next_trial_index = _as_int(payload.get("next_trial_index"), completed_combinations + 1)
+        summary = {
+            "objective": payload.get("objective") or "sharpe",
+            "candidate_count": len(candidates),
+            "baseline_parameter_version_id": baseline_parameter_version_id,
+            "entry_point": payload.get("entry_point") or "lab_menu",
+            "validation_mode": payload.get("validation_mode") or "walk_forward",
+            "source_run_id": payload.get("source_run_id"),
+            "budget_combinations": budget_combinations,
+            "completed_combinations": completed_combinations,
+            "persisted_trial_count": persisted_trial_count,
+            "next_trial_index": next_trial_index,
+            "resume_ready": bool(payload.get("resume_ready")) or status == "INTERRUPTED",
+            "interrupted_reason": payload.get("interrupted_reason"),
+            "search_space": list(payload.get("search_space") or []),
+        }
+        summary["status"] = status
+        summary["progress_pct"] = min(100, max(0, _as_int(payload.get("progress_pct"), 100 if status == "COMPLETED" else 0)))
+        if payload.get("current_stage") is not None:
+            summary["current_stage"] = payload.get("current_stage")
+        elif status == "COMPLETED":
+            summary["current_stage"] = "Result ready"
+        elif status == "INTERRUPTED":
+            summary["current_stage"] = f"Interrupted at {completed_combinations}/{budget_combinations}"
+        else:
+            summary["current_stage"] = f"Running trial {next_trial_index}/{budget_combinations}"
+
+        if payload.get("latest_update") is not None:
+            summary["latest_update"] = payload.get("latest_update")
+        elif status == "COMPLETED":
+            summary["latest_update"] = "Optimization completed."
+        elif status == "INTERRUPTED":
+            summary["latest_update"] = f"Progress preserved at {completed_combinations}/{budget_combinations}. Click Continue Optimization to resume."
+        else:
+            summary["latest_update"] = f"Evaluating trial {next_trial_index}/{budget_combinations}."
+
+        best_metrics_summary = payload.get("best_metrics_summary")
+        if best_metrics_summary is None and candidates:
+            best_candidate = candidates[0]
+            best_metrics_summary = self._normalized_optimization_trial_summary(
+                {
+                    "trial_index": best_candidate.get("rank"),
+                    "label": best_candidate.get("label"),
+                    "status": best_candidate.get("status") or "SUCCEEDED",
+                    "parameter_snapshot": dict(best_candidate.get("parameter_snapshot") or {}),
+                    "metrics": dict(best_candidate.get("metrics") or {}),
+                    "score": _as_float(best_candidate.get("score"), 0.0),
+                    "error_message": best_candidate.get("error_message"),
+                    "started_at": best_candidate.get("started_at"),
+                    "completed_at": best_candidate.get("completed_at"),
+                }
+            )
+        normalized_best_metrics_summary = None
+        if best_metrics_summary is not None:
+            normalized_best_metrics_summary = self._normalized_optimization_trial_summary(best_metrics_summary)
+            summary["best_metrics_summary"] = normalized_best_metrics_summary
+
+        latest_candidate_label = self._canonical_optimization_candidate_label(
+            payload.get("latest_candidate_label"),
+            _as_int(_as_mapping(summary.get("best_metrics_summary")).get("trial_index"), 1),
+        )
+        if latest_candidate_label:
+            summary["latest_candidate_label"] = latest_candidate_label
+        elif normalized_best_metrics_summary and normalized_best_metrics_summary.get("label"):
+            summary["latest_candidate_label"] = str(normalized_best_metrics_summary.get("label"))
+        return summary
+
+    def _build_optimization_job_result(
+        self,
+        payload: Mapping[str, Any],
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        status = str(payload.get("status") or "COMPLETED").upper()
+        baseline_parameter_version_id = str(payload.get("base_parameter_version_id") or "").strip() or None
+        progress_pct = min(100, max(0, _as_int(payload.get("progress_pct"), 100 if status == "COMPLETED" else 0)))
+        if status in {"QUEUED", "RUNNING", "INTERRUPTED"}:
+            headline = self._canonical_optimization_candidate_label(
+                payload.get("latest_candidate_label"),
+                _as_int(_as_mapping(payload.get("best_metrics_summary")).get("trial_index"), 1),
+            )
+            return {
+                "best_candidate_id": None,
+                "best_candidate_label": None,
+                "baseline_parameter_version_id": baseline_parameter_version_id,
+                "headline": headline if headline else "Optimization in progress",
+                "summary": str(payload.get("latest_update") or "").strip() or "Optimization in progress.",
+                "stability_verdict": None,
+                "status": status,
+                "progress_pct": progress_pct,
+                "current_stage": payload.get("current_stage") or ("Interrupted" if status == "INTERRUPTED" else "Running"),
+                "latest_update": payload.get("latest_update") or "Optimization in progress.",
+                "estimated_remaining_minutes": payload.get("estimated_remaining_minutes"),
+                "estimated_completed_at": payload.get("estimated_completed_at"),
+            }
+
+        best_candidate = candidates[0] if candidates else None
+        best_analysis = dict((best_candidate or {}).get("analysis") or {})
+        headline = best_analysis.get("title") if best_candidate else None
+        summary = best_candidate.get("summary") if best_candidate else None
+        if not summary:
+            summary = str(payload.get("latest_update") or "").strip() or "Optimization completed."
+        return {
+            "best_candidate_id": best_candidate.get("id") if best_candidate else None,
+            "best_candidate_label": self._canonical_optimization_candidate_label(
+                best_candidate.get("label"),
+                _as_int(best_candidate.get("rank"), 1),
+            )
+            if best_candidate
+            else None,
+            "baseline_parameter_version_id": baseline_parameter_version_id,
+            "headline": headline,
+            "summary": summary,
+            "stability_verdict": best_analysis.get("stability_verdict") if best_candidate else None,
+            "status": status,
+            "progress_pct": progress_pct,
+            "current_stage": payload.get("current_stage") or "Result ready",
+            "latest_update": payload.get("latest_update") or summary,
+            "estimated_remaining_minutes": payload.get("estimated_remaining_minutes"),
+            "estimated_completed_at": payload.get("estimated_completed_at"),
+        }
+
+    def _hydrate_optimization_job(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        job = dict(row)
+        job["request"] = loads(job.pop("request_json", None), {})
+        job["summary"] = loads(job.pop("summary_json", None), {})
+        job["result"] = loads(job.pop("result_json", None), {})
+        raw_candidates = loads(job.pop("candidates_json", None), [])
+        job["base_parameter_version_id"] = job["request"].get("base_parameter_version_id")
+        summary_status = str(
+            job["summary"].get("status")
+            or job.get("status")
+            or job["request"].get("status")
+            or job["result"].get("status")
+            or "COMPLETED"
+        ).upper()
+        running_like = summary_status in {"QUEUED", "RUNNING", "INTERRUPTED"}
+        progress_default = 100 if summary_status == "COMPLETED" else 0
+        job["summary"]["status"] = summary_status
+        job["summary"].setdefault(
+            "progress_pct",
+            _as_int(
+                job["request"].get("progress_pct"),
+                _as_int(job["result"].get("progress_pct"), progress_default),
+            ),
+        )
+        job["summary"].setdefault(
+            "current_stage",
+            job["request"].get("current_stage")
+            or job["result"].get("current_stage")
+            or ("Result ready" if summary_status == "COMPLETED" else "Running"),
+        )
+        job["summary"].setdefault(
+            "latest_update",
+            job["request"].get("latest_update")
+            or job["result"].get("latest_update")
+            or job["result"].get("summary")
+            or ("Optimization completed." if summary_status == "COMPLETED" else "Optimization in progress."),
+        )
+
+        raw_search_space = job["request"].get("search_space") or job["summary"].get("search_space")
+        strategy: dict[str, Any] | None = None
+        if running_like:
+            normalized_search_space = [
+                dict(item)
+                for item in list(raw_search_space or [])
+                if isinstance(item, Mapping)
+            ]
+        else:
+            strategy = self.get_strategy_detail(str(job["strategy_id"]))
+            normalized_search_space = self._normalize_optimization_search_space(
+                strategy,
+                {"search_space": raw_search_space},
+            )
+        if normalized_search_space:
+            job["request"]["search_space"] = normalized_search_space
+            job["summary"]["search_space"] = normalized_search_space
+
+        trials = self._load_optimization_trials(str(job["id"]), include_chart_series=False)
+        if not running_like:
+            trials = self._merge_optimization_trial_chart_series(
+                trials,
+                self._load_optimization_trial_chart_series_map(
+                    str(job["id"]),
+                    self._optimization_top_trial_indices(trials),
+                ),
+            )
+        persisted_trial_count = len(trials)
+        next_trial_index = max([int(trial.get("trial_index") or 0) for trial in trials], default=0) + 1
+        if persisted_trial_count:
+            job["summary"]["persisted_trial_count"] = persisted_trial_count
+            job["summary"]["next_trial_index"] = next_trial_index
+        else:
+            job["summary"].setdefault("persisted_trial_count", persisted_trial_count)
+            job["summary"].setdefault("next_trial_index", next_trial_index)
+        job["summary"].setdefault("resume_ready", summary_status == "INTERRUPTED")
+        if summary_status == "INTERRUPTED" and not job["summary"].get("interrupted_reason"):
+            job["summary"]["interrupted_reason"] = job["request"].get("interrupted_reason") or "service_restart"
+
+        if not job["summary"].get("best_metrics_summary"):
+            best_summary = self._best_optimization_trial_summary(trials)
+            if best_summary is not None:
+                job["summary"]["best_metrics_summary"] = best_summary
+        if job["summary"].get("best_metrics_summary"):
+            job["summary"]["best_metrics_summary"] = self._normalized_optimization_trial_summary(
+                job["summary"]["best_metrics_summary"]
+            )
+
+        budget_combinations = _as_int(
+            job["summary"].get("budget_combinations"),
+            _as_int(job["request"].get("budget_combinations"), max(persisted_trial_count, 1)),
+        )
+        persisted_completed_count = sum(1 for trial in trials if trial.get("started_at") and trial.get("completed_at"))
+        completed_combinations = (
+            persisted_completed_count
+            if persisted_trial_count
+            else _as_int(job["summary"].get("completed_combinations"), 0)
+        )
+        if running_like:
+            eta_projection = self._optimization_eta_projection(
+                trials,
+                budget_combinations=budget_combinations,
+                completed_combinations=completed_combinations,
+            )
+        else:
+            terminal_completed_at = (
+                str(job.get("completed_at") or job.get("updated_at") or "").strip() or None
+            )
+            eta_projection = {
+                "estimated_remaining_minutes": 0,
+                "estimated_completed_at": terminal_completed_at,
+            }
+        job["summary"]["completed_combinations"] = completed_combinations
+        job["summary"].update(eta_projection)
+        job["progress_pct"] = job["summary"].get("progress_pct", 0)
+        job["current_stage"] = job["summary"].get("current_stage")
+        job["latest_update"] = job["summary"].get("latest_update")
+        job["estimated_remaining_minutes"] = job["summary"].get("estimated_remaining_minutes")
+        job["estimated_completed_at"] = job["summary"].get("estimated_completed_at")
+        job["resume_ready"] = job["summary"].get("resume_ready")
+        job["persisted_trial_count"] = job["summary"].get("persisted_trial_count")
+        job["next_trial_index"] = job["summary"].get("next_trial_index")
+        job["interrupted_reason"] = job["summary"].get("interrupted_reason")
+        job["best_metrics_summary"] = job["summary"].get("best_metrics_summary")
+
+        if running_like:
+            running_headline = self._canonical_optimization_candidate_label(
+                job["summary"].get("latest_candidate_label") or job["result"].get("headline"),
+                _as_int(_as_mapping(job["summary"].get("best_metrics_summary")).get("trial_index"), 1),
+            ) or (
+                "Optimization interrupted" if summary_status == "INTERRUPTED" else "Optimization in progress"
+            )
+            job["candidates"] = []
+            job["result"] = {
+                **job["result"],
+                "best_candidate_id": None,
+                "best_candidate_label": None,
+                "headline": running_headline,
+                "stability_verdict": None,
+                "status": summary_status,
+                "progress_pct": job["summary"].get("progress_pct", 0),
+                "current_stage": job["summary"].get("current_stage"),
+                "latest_update": job["summary"].get("latest_update"),
+                "estimated_remaining_minutes": job["summary"].get("estimated_remaining_minutes"),
+                "estimated_completed_at": job["summary"].get("estimated_completed_at"),
+            }
+            return job
+
+        if strategy is None:
+            strategy = self.get_strategy_detail(str(job["strategy_id"]))
+        normalized_candidates: list[dict[str, Any]] = []
+        for index, candidate in enumerate(raw_candidates, start=1):
+            normalized_candidate = self._normalize_optimization_candidate(
+                strategy,
+                candidate,
+                rank=index,
+                base_parameter_version_id=job["base_parameter_version_id"],
+            )
+            analysis = dict(normalized_candidate.get("analysis") or {})
+            heatmap = dict(analysis.get("heatmap") or {})
+            if normalized_search_space and not heatmap.get("cells"):
+                analysis["heatmap"] = self._build_optimization_heatmap(
+                    normalized_search_space,
+                    normalized_candidate.get("parameter_snapshot") or {},
+                    _as_float(
+                        normalized_candidate.get("metrics", {}).get("return_sharpe"),
+                        _as_float(
+                            normalized_candidate.get("metrics", {}).get("sharpe"),
+                            _as_float(normalized_candidate.get("score"), 0.0),
+                        ),
+                    ),
+                    normalized_candidate.get("metrics") or {},
+                )
+            if analysis:
+                normalized_candidate["analysis"] = analysis
+            normalized_candidates.append(normalized_candidate)
+        job["candidates"] = normalized_candidates
+        best_candidate_id = str(job["result"].get("best_candidate_id") or "").strip()
+        best_candidate = next(
+            (
+                candidate
+                for candidate in normalized_candidates
+                if str(candidate.get("id") or "").strip() == best_candidate_id
+            ),
+            normalized_candidates[0] if normalized_candidates else None,
+        )
+        if not job["summary"].get("best_metrics_summary") and best_candidate:
+            job["summary"]["best_metrics_summary"] = self._normalized_optimization_trial_summary(
+                {
+                    "trial_index": best_candidate.get("rank"),
+                    "label": best_candidate.get("label"),
+                    "status": best_candidate.get("status") or "SUCCEEDED",
+                    "parameter_snapshot": dict(best_candidate.get("parameter_snapshot") or {}),
+                    "metrics": dict(best_candidate.get("metrics") or {}),
+                    "score": _as_float(best_candidate.get("score"), 0.0),
+                    "error_message": best_candidate.get("error_message"),
+                    "started_at": best_candidate.get("started_at"),
+                    "completed_at": best_candidate.get("completed_at"),
+                }
+            )
+        if job["summary"].get("best_metrics_summary") and best_candidate:
+            best_summary = self._normalized_optimization_trial_summary(job["summary"]["best_metrics_summary"])
+            best_summary["label"] = self._canonical_optimization_candidate_label(
+                best_candidate.get("label") or best_summary.get("label"),
+                _as_int(best_candidate.get("rank"), _as_int(best_summary.get("trial_index"), 1)),
+            )
+            best_summary["trial_index"] = _as_int(best_candidate.get("rank"), _as_int(best_summary.get("trial_index"), 0))
+            job["summary"]["best_metrics_summary"] = best_summary
+        if best_candidate:
+            job["result"]["best_candidate_label"] = self._canonical_optimization_candidate_label(
+                best_candidate.get("label"),
+                _as_int(best_candidate.get("rank"), 1),
+            )
+        job["result"] = {
+            **job["result"],
+            "estimated_remaining_minutes": job["summary"].get("estimated_remaining_minutes"),
+            "estimated_completed_at": job["summary"].get("estimated_completed_at"),
+        }
+        job["progress_pct"] = job["summary"].get("progress_pct", 0)
+        job["current_stage"] = job["summary"].get("current_stage")
+        job["latest_update"] = job["summary"].get("latest_update")
+        job["estimated_remaining_minutes"] = job["summary"].get("estimated_remaining_minutes")
+        job["estimated_completed_at"] = job["summary"].get("estimated_completed_at")
+        job["best_metrics_summary"] = job["summary"].get("best_metrics_summary")
+        return job
+
+    def _build_optimization_trial_preview_and_chart_series(
+        self,
+        strategy: Mapping[str, Any],
+        evaluation_request: Mapping[str, Any],
+        payload: Mapping[str, Any],
+        parameter_snapshot: Mapping[str, Any],
+        *,
+        prepared_context: Mapping[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        del strategy, evaluation_request, payload, prepared_context
+        return _build_synthetic_optimization_preview_and_chart_series(parameter_snapshot)
+
+    def _evaluate_optimization_trial(
+        self,
+        strategy: Mapping[str, Any],
+        evaluation_request: Mapping[str, Any],
+        payload: Mapping[str, Any],
+        parameter_snapshot: Mapping[str, Any],
+        *,
+        prepared_context: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del strategy, evaluation_request, prepared_context
+        return _evaluate_optimization_trial_payload(
+            parameter_snapshot,
+            payload.get("objective"),
+        )
+
+    def _backfill_optimization_top_trial_chart_series(
+        self,
+        job_id: str,
+        strategy: Mapping[str, Any],
+        evaluation_request: Mapping[str, Any],
+        payload: Mapping[str, Any],
+        trials: Sequence[Mapping[str, Any]],
+        *,
+        prepared_context: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        trial_records = {
+            _as_int(trial.get("trial_index"), 0): dict(trial)
+            for trial in trials
+            if _as_int(trial.get("trial_index"), 0) > 0
+        }
+        top_trial_indices = self._optimization_top_trial_indices(list(trial_records.values()))
+        persisted_chart_series = self._load_optimization_trial_chart_series_map(job_id, top_trial_indices)
+        for trial_index in top_trial_indices:
+            trial = trial_records.get(trial_index)
+            if trial is None or str(trial.get("status") or "").upper() != "SUCCEEDED":
+                continue
+            chart_series = list(trial.get("chart_series") or persisted_chart_series.get(trial_index) or [])
+            if not chart_series:
+                _, chart_series = self._build_optimization_trial_preview_and_chart_series(
+                    strategy,
+                    evaluation_request,
+                    payload,
+                    dict(trial.get("parameter_snapshot") or {}),
+                    prepared_context=prepared_context,
+                )
+                self._persist_optimization_trial(
+                    job_id,
+                    trial_index,
+                    status=str(trial.get("status") or "SUCCEEDED"),
+                    parameter_snapshot=dict(trial.get("parameter_snapshot") or {}),
+                    metrics=dict(trial.get("metrics") or {}),
+                    chart_series=chart_series,
+                    score=trial.get("score"),
+                    error_message=str(trial.get("error_message") or "").strip() or None,
+                    started_at=str(trial.get("started_at") or "").strip() or None,
+                    completed_at=str(trial.get("completed_at") or "").strip() or None,
+                )
+            trial["chart_series"] = list(chart_series)
+        return [trial_records[index] for index in sorted(trial_records)]
+
+    def _run_real_optimization_job(
+        self,
+        job_id: str,
+        strategy_id: str,
+        payload: Mapping[str, Any],
+        *,
+        created_at: str,
+        existing_candidates: list[dict[str, Any]] | None = None,
+        recovered: bool = False,
+    ) -> None:
+        del existing_candidates, recovered
+        strategy: dict[str, Any] | None = None
+        try:
+            strategy = self.get_strategy_detail(strategy_id)
+            request_payload = deepcopy(dict(payload))
+            request_payload["search_space"] = self._normalize_optimization_search_space(strategy, request_payload)
+            base_snapshot, source_run = self._optimization_base_snapshot(strategy, request_payload)
+            search_space = list(request_payload.get("search_space") or [])
+            requested_budget = _as_int(request_payload.get("budget_combinations"), 0)
+            budget_combinations = requested_budget if requested_budget > 0 else max(1, len(search_space) or 1)
+            planned_snapshots = self._plan_optimization_search_snapshots(base_snapshot, search_space, budget_combinations)
+            if not planned_snapshots:
+                planned_snapshots = [dict(base_snapshot)]
+            budget_combinations = min(max(1, budget_combinations), len(planned_snapshots))
+            planned_snapshots = planned_snapshots[:budget_combinations]
+            persisted_trials = {
+                trial["trial_index"]: trial
+                for trial in self._load_optimization_trials(job_id, include_chart_series=False)
+            }
+            pending_evaluations = [
+                (trial_index, parameter_snapshot)
+                for trial_index, parameter_snapshot in enumerate(planned_snapshots, start=1)
+                if trial_index not in persisted_trials
+            ]
+            planned_evaluations = pending_evaluations
+            evaluation_request = self._build_optimization_evaluation_request(strategy, source_run=source_run)
+
+            if len(persisted_trials) >= budget_combinations:
+                final_trials = self._backfill_optimization_top_trial_chart_series(
+                    job_id,
+                    strategy,
+                    evaluation_request,
+                    request_payload,
+                    list(persisted_trials.values()),
+                )
+                successful_trials = [trial for trial in final_trials if str(trial.get("status") or "").upper() == "SUCCEEDED"]
+                best_summary = self._best_optimization_trial_summary(final_trials)
+                final_status = "COMPLETED" if len(successful_trials) == len(final_trials) else "PARTIALLY_FAILED" if successful_trials else "FAILED"
+                final_candidates = self._build_optimization_candidate_records(
+                    strategy,
+                    {
+                        **request_payload,
+                        "best_metrics_summary": best_summary,
+                        "completed_combinations": len(final_trials),
+                        "persisted_trial_count": len(final_trials),
+                        "next_trial_index": len(final_trials) + 1,
+                        "resume_ready": False,
+                    },
+                    successful_trials,
+                )
+                self._persist_optimization_job(
+                    job_id,
+                    strategy_id,
+                    {
+                        **request_payload,
+                        "status": final_status,
+                        "progress_pct": 100,
+                        "completed_combinations": len(final_trials),
+                        "persisted_trial_count": len(final_trials),
+                        "next_trial_index": len(final_trials) + 1,
+                        "resume_ready": False,
+                        "interrupted_reason": None,
+                        "best_metrics_summary": best_summary,
+                        "current_stage": "Result ready" if final_status == "COMPLETED" else "Partial result ready" if final_status == "PARTIALLY_FAILED" else "Failed",
+                        "latest_update": "Optimization completed." if final_status == "COMPLETED" else "Optimization finished with partial failures." if final_status == "PARTIALLY_FAILED" else "Optimization failed.",
+                        "latest_candidate_label": best_summary.get("label") if best_summary else None,
+                    },
+                    final_candidates,
+                    created_at=created_at,
+                    updated_at=iso_now(),
+                    completed_at=iso_now(),
+                )
+                return
+
+            delay_seconds = self._optimization_step_delay_seconds()
+            completed_count = len(persisted_trials)
+            best_summary = self._best_optimization_trial_summary(list(persisted_trials.values()))
+            next_trial_index = planned_evaluations[0][0] if planned_evaluations else completed_count + 1
+            self._persist_optimization_job(
+                job_id,
+                strategy_id,
+                {
+                    **request_payload,
+                    "status": "RUNNING",
+                    "progress_pct": round(completed_count / budget_combinations * 100) if budget_combinations else 0,
+                    "completed_combinations": completed_count,
+                    "persisted_trial_count": completed_count,
+                    "next_trial_index": next_trial_index,
+                    "resume_ready": False,
+                    "interrupted_reason": None,
+                    "best_metrics_summary": best_summary,
+                    "current_stage": f"Running trial {next_trial_index}/{budget_combinations}",
+                    "latest_update": f"Evaluating trial {next_trial_index}/{budget_combinations}.",
+                    "latest_candidate_label": best_summary.get("label") if best_summary else None,
+                },
+                [],
+                created_at=created_at,
+                updated_at=iso_now(),
+                completed_at=None,
+            )
+            trial_records = dict(persisted_trials)
+            failures = 0
+            last_progress_persisted_at = time.monotonic()
+            last_progress_persisted_count = completed_count
+
+            def publish_progress(
+                *,
+                completed_combinations: int,
+                best_metrics_summary: Mapping[str, Any] | None,
+                next_trial_index: int,
+                current_stage: str,
+                latest_update: str,
+                force: bool = False,
+            ) -> None:
+                nonlocal last_progress_persisted_at, last_progress_persisted_count
+                now_monotonic = time.monotonic()
+                if not force and completed_combinations < budget_combinations:
+                    if (
+                        completed_combinations - last_progress_persisted_count < 5
+                        and now_monotonic - last_progress_persisted_at < 1.0
+                    ):
+                        return
+                self._persist_optimization_job(
+                    job_id,
+                    strategy_id,
+                    {
+                        **request_payload,
+                        "status": "RUNNING",
+                        "progress_pct": round(completed_combinations / budget_combinations * 100) if budget_combinations else 0,
+                        "completed_combinations": completed_combinations,
+                        "persisted_trial_count": completed_combinations,
+                        "next_trial_index": next_trial_index,
+                        "resume_ready": False,
+                        "interrupted_reason": None,
+                        "best_metrics_summary": best_metrics_summary,
+                        "current_stage": current_stage,
+                        "latest_update": latest_update,
+                        "latest_candidate_label": _as_mapping(best_metrics_summary).get("label") if best_metrics_summary else None,
+                    },
+                    [],
+                    created_at=created_at,
+                    updated_at=iso_now(),
+                    completed_at=None,
+                )
+                last_progress_persisted_at = now_monotonic
+                last_progress_persisted_count = completed_combinations
+
+            remaining_evaluations = [
+                (int(trial_index), dict(parameter_snapshot))
+                for trial_index, parameter_snapshot in planned_evaluations
+            ]
+            if self._optimization_can_use_parallel_controller(planned_evaluations):
+                fallback_reason: str | None = None
+                try:
+                    trial_records, parallel_failures, remaining_evaluations, fallback_reason = (
+                        self._run_parallel_optimization_trials(
+                            job_id=job_id,
+                            request_payload=request_payload,
+                            pending_evaluations=remaining_evaluations,
+                            trial_records=trial_records,
+                            budget_combinations=budget_combinations,
+                            publish_progress=lambda **kwargs: publish_progress(
+                                completed_combinations=int(kwargs["completed_count"]),
+                                best_metrics_summary=kwargs["best_summary"],
+                                next_trial_index=int(kwargs["next_trial_index"]),
+                                current_stage=str(kwargs["current_stage"]),
+                                latest_update=str(kwargs["latest_update"]),
+                                force=bool(kwargs.get("force", False)),
+                            ),
+                        )
+                    )
+                    failures += parallel_failures
+                except Exception as exc:
+                    fallback_reason = (
+                        "Parallel optimization controller failed. "
+                        f"Continuing with single-worker mode: {str(exc).strip() or exc.__class__.__name__}"
+                    )
+                    remaining_evaluations = [
+                        (trial_index, dict(parameter_snapshot))
+                        for trial_index, parameter_snapshot in planned_evaluations
+                        if trial_index not in trial_records
+                    ]
+                if fallback_reason and remaining_evaluations:
+                    best_summary = self._best_optimization_trial_summary(list(trial_records.values()))
+                    next_trial_index = remaining_evaluations[0][0]
+                    publish_progress(
+                        completed_combinations=len(trial_records),
+                        best_metrics_summary=best_summary,
+                        next_trial_index=next_trial_index,
+                        current_stage=f"Continuing sequentially at trial {next_trial_index}/{budget_combinations}",
+                        latest_update=fallback_reason,
+                        force=True,
+                    )
+
+            if remaining_evaluations:
+                trial_records, sequential_failures = self._run_sequential_optimization_trials(
+                    job_id=job_id,
+                    strategy=strategy,
+                    evaluation_request=evaluation_request,
+                    request_payload=request_payload,
+                    pending_evaluations=remaining_evaluations,
+                    trial_records=trial_records,
+                    budget_combinations=budget_combinations,
+                    publish_progress=lambda **kwargs: publish_progress(
+                        completed_combinations=int(kwargs["completed_count"]),
+                        best_metrics_summary=kwargs["best_summary"],
+                        next_trial_index=int(kwargs["next_trial_index"]),
+                        current_stage=str(kwargs["current_stage"]),
+                        latest_update=str(kwargs["latest_update"]),
+                        force=bool(kwargs.get("force", False)),
+                    ),
+                    delay_seconds=delay_seconds,
+                )
+                failures += sequential_failures
+
+            final_trials = self._backfill_optimization_top_trial_chart_series(
+                job_id,
+                strategy,
+                evaluation_request,
+                request_payload,
+                list(trial_records.values()),
+            )
+            completed_count = len(final_trials)
+            successful_trials = [trial for trial in final_trials if str(trial.get("status") or "").upper() == "SUCCEEDED"]
+            best_summary = self._best_optimization_trial_summary(final_trials)
+            final_status = "COMPLETED" if len(successful_trials) == len(final_trials) and failures == 0 else "PARTIALLY_FAILED" if successful_trials else "FAILED"
+            final_candidates = self._build_optimization_candidate_records(
+                strategy,
+                {
+                    **request_payload,
+                    "best_metrics_summary": best_summary,
+                    "completed_combinations": completed_count,
+                    "persisted_trial_count": completed_count,
+                    "next_trial_index": completed_count + 1,
+                    "resume_ready": False,
+                },
+                successful_trials,
+            )
+            self._persist_optimization_job(
+                job_id,
+                strategy_id,
+                {
+                    **request_payload,
+                    "status": final_status,
+                    "progress_pct": 100,
+                    "completed_combinations": completed_count,
+                    "persisted_trial_count": completed_count,
+                    "next_trial_index": completed_count + 1,
+                    "resume_ready": False,
+                    "interrupted_reason": None,
+                    "best_metrics_summary": best_summary,
+                    "current_stage": "Result ready" if final_status == "COMPLETED" else "Partial result ready" if final_status == "PARTIALLY_FAILED" else "Failed",
+                    "latest_update": "Optimization completed." if final_status == "COMPLETED" else "Optimization finished with partial failures." if final_status == "PARTIALLY_FAILED" else "Optimization failed.",
+                    "latest_candidate_label": best_summary.get("label") if best_summary else None,
+                },
+                final_candidates,
+                created_at=created_at,
+                updated_at=iso_now(),
+                completed_at=iso_now(),
+            )
+            return
+        except Exception as exc:
+            failed_at = iso_now()
+            failed_trials = self._load_optimization_trials(job_id, include_chart_series=False)
+            best_summary = self._best_optimization_trial_summary(failed_trials)
+            successful_trials = [trial for trial in failed_trials if str(trial.get("status") or "").upper() == "SUCCEEDED"]
+            if strategy is None:
+                strategy = self.get_strategy_detail(strategy_id)
+            failure_candidates = self._build_optimization_candidate_records(
+                strategy,
+                {
+                    **dict(payload),
+                    "best_metrics_summary": best_summary,
+                },
+                successful_trials,
+            )
+            self._persist_optimization_job(
+                job_id,
+                strategy_id,
+                {
+                    **dict(payload),
+                    "status": "FAILED",
+                    "progress_pct": 100,
+                    "completed_combinations": len(failed_trials),
+                    "persisted_trial_count": len(failed_trials),
+                    "next_trial_index": len(failed_trials) + 1,
+                    "resume_ready": False,
+                    "interrupted_reason": None,
+                    "best_metrics_summary": best_summary,
+                    "current_stage": "Failed",
+                    "latest_update": f"Optimization failed: {str(exc).strip() or exc.__class__.__name__}",
+                    "latest_candidate_label": best_summary.get("label") if best_summary else None,
+                },
+                failure_candidates,
+                created_at=created_at,
+                updated_at=failed_at,
+                completed_at=failed_at,
+            )
+
+    def resume_incomplete_optimization_jobs(self) -> list[str]:
+        rows = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM optimization_jobs
+            WHERE status IN (?, ?)
+              AND deleted_at IS NULL
+            ORDER BY created_at ASC, id ASC
+            """,
+            ("QUEUED", "RUNNING"),
+        )
+        resumed_job_ids: list[str] = []
+        for row in rows:
+            job_id = str(row.get("id") or "").strip()
+            strategy_id = str(row.get("strategy_id") or "").strip()
+            if not job_id or not strategy_id:
+                continue
+            payload = loads(row.get("request_json"), {})
+            if not payload:
+                continue
+            payload.setdefault("status", str(row.get("status") or "QUEUED").upper())
+            payload.setdefault("progress_pct", 0)
+            payload.setdefault("completed_combinations", 0)
+            payload.setdefault("current_stage", "任务已暂停")
+            payload.setdefault("latest_update", "已保留优化进度，可在恢复后继续执行剩余组合。")
+            existing_candidates = list(loads(row.get("candidates_json"), []))
+            resumed_at = iso_now()
+            self._persist_optimization_job(
+                job_id,
+                strategy_id,
+                self._build_optimization_progress_payload(
+                    payload,
+                    status=str(payload.get("status") or "QUEUED").upper(),
+                    progress_pct=_as_int(payload.get("progress_pct"), 0),
+                    completed_combinations=_as_int(payload.get("completed_combinations"), 0),
+                    current_stage=str(payload.get("current_stage") or "任务已暂停"),
+                    latest_update=str(payload.get("latest_update") or "已保留优化进度，可在恢复后继续执行剩余组合。"),
+                    latest_candidate_label=(
+                        str(existing_candidates[0].get("label") or "").strip()
+                        if existing_candidates
+                        else None
+                    ),
+                ),
+                existing_candidates,
+                created_at=str(row.get("created_at") or resumed_at),
+                updated_at=resumed_at,
+                completed_at=None,
+            )
+            if self._start_optimization_job_runner(
+                job_id,
+                strategy_id,
+                payload,
+                created_at=str(row.get("created_at") or iso_now()),
+                existing_candidates=existing_candidates,
+                recovered=True,
+            ):
+                resumed_job_ids.append(job_id)
+        return resumed_job_ids
+
+    def resume_optimization_job(self, job_id: str, request: Any) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        idempotency_key = str(payload.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required")
+
+        job = self.get_optimization_job_detail(job_id)
+        status = str(job.get("status") or "").upper()
+        request_payload = dict(job.get("request") or {})
+        existing_resume_key = str(request_payload.get("resume_idempotency_key") or "").strip()
+        if existing_resume_key and status in {"QUEUED", "RUNNING"}:
+            if existing_resume_key == idempotency_key:
+                return job
+            raise ContractConflictError(
+                "OPTIMIZATION_JOB_RESUME_IDEMPOTENCY_CONFLICT",
+                "Optimization job was already resumed with a different idempotency key",
+                blocking_target={"job_id": job_id},
+            )
+        if status != "INTERRUPTED":
+            raise ContractConflictError(
+                "OPTIMIZATION_JOB_NOT_RESUMABLE",
+                "Only interrupted optimization jobs can be resumed",
+                blocking_target={"job_id": job_id},
+            )
+
+        request_payload["resume_idempotency_key"] = idempotency_key
+        request_payload["status"] = "QUEUED"
+        request_payload["resume_ready"] = True
+        request_payload["interrupted_reason"] = job.get("summary", {}).get("interrupted_reason") or "service_restart"
+        request_payload["completed_combinations"] = _as_int(job.get("summary", {}).get("completed_combinations"), 0)
+        request_payload["persisted_trial_count"] = _as_int(job.get("summary", {}).get("persisted_trial_count"), 0)
+        request_payload["next_trial_index"] = _as_int(job.get("summary", {}).get("next_trial_index"), request_payload["completed_combinations"] + 1)
+        request_payload["progress_pct"] = _as_int(job.get("summary", {}).get("progress_pct"), 0)
+        budget_value = job.get("summary", {}).get("budget_combinations") or request_payload.get("budget_combinations") or 1
+        request_payload["current_stage"] = f"Preparing trial {request_payload['next_trial_index']}/{budget_value}"
+        request_payload["latest_update"] = f"Resuming optimization from trial {request_payload['next_trial_index']}."
+
+        now = iso_now()
+        self._persist_optimization_job(
+            job_id,
+            str(job["strategy_id"]),
+            request_payload,
+            [],
+            created_at=str(job.get("created_at") or now),
+            updated_at=now,
+            completed_at=None,
+        )
+        self._start_optimization_job_runner(
+            job_id,
+            str(job["strategy_id"]),
+            request_payload,
+            created_at=str(job.get("created_at") or now),
+            recovered=True,
+        )
+        return self.get_optimization_job_detail(job_id)
+
+    def _optimization_base_snapshot(
+        self,
+        strategy: Mapping[str, Any],
+        payload: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        source_run_id = str(payload.get("source_run_id") or "").strip()
+        source_run: dict[str, Any] | None = None
+        if source_run_id:
+            row = self.storage.fetch_one(
+                """
+                SELECT id, strategy_id, parameter_snapshot_json
+                FROM backtest_runs
+                WHERE id = ? AND deleted_at IS NULL
+                """,
+                (source_run_id,),
+            )
+            if row:
+                if str(row.get("strategy_id") or "") != str(strategy.get("id") or ""):
+                    raise ValueError("source_run_id does not belong to the selected strategy")
+                source_run = {
+                    "id": row["id"],
+                    "strategy_id": row["strategy_id"],
+                    "parameter_snapshot": loads(row.get("parameter_snapshot_json"), {}),
+                    "request": {},
+                }
+        base_snapshot = dict((source_run or {}).get("parameter_snapshot") or {})
+        if not base_snapshot:
+            base_snapshot = self._parameter_snapshot_for_version(strategy, payload.get("base_parameter_version_id"))
+        if not base_snapshot:
+            base_snapshot = dict(strategy.get("parameters") or {})
+        return base_snapshot, source_run

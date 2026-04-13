@@ -269,7 +269,7 @@ export function buildWorkspaceStrategyCards(
         })) ??
         [],
       summary,
-      auxiliaryCopy: compareEligible ? '当前参数版本已可加入对比。' : compareBlocker,
+      auxiliaryCopy: compareEligible ? '当前参数版本已可加入对比。' : compareBlocker ?? undefined,
       metaPrimary: buildMetaPrimary(strategy, detail, latestRunDetail, latestCompletedRunSummary),
       metaSecondary: buildMetaSecondary(strategy, detail, latestRunDetail, latestCompletedRunSummary, parameterVersion),
       metaTimestamp: formatCardTimestamp(

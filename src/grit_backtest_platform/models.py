@@ -26,7 +26,7 @@ StrategyType = Literal['GENERAL', 'GRID', 'MOMENTUM', 'MEAN_REVERSION', 'BUY_AND
 FieldSource = Literal['user_input', 'system_inference', 'system_default', 'manual_override']
 BacktestRunStatus = Literal['QUEUED', 'RUNNING', 'COMPLETED', 'COMPLETED_WITH_WARNINGS', 'FAILED']
 BacktestExecutionStage = Literal['DATA_FETCHING', 'SIMULATING', 'METRIC_CALCULATING']
-OptimizationJobStatus = Literal['QUEUED', 'RUNNING', 'COMPLETED', 'PARTIALLY_FAILED', 'FAILED']
+OptimizationJobStatus = Literal['QUEUED', 'RUNNING', 'INTERRUPTED', 'COMPLETED', 'PARTIALLY_FAILED', 'FAILED']
 SnapshotStatus = Literal['READY', 'STALE', 'INCOMPLETE', 'FAILED']
 SnapshotKind = Literal['DATASET', 'UNIVERSE']
 TrialStatus = Literal['SUCCEEDED', 'FAILED', 'PENDING']
@@ -108,6 +108,10 @@ class OptimizationJobCreateRequest(BaseModel):
     validation_mode: str | None = None
     budget_combinations: int | None = Field(default=None, ge=1)
     search_space: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ResumeOptimizationJobRequest(BaseModel):
+    idempotency_key: str = Field(min_length=1)
 
 
 class OptimizationCandidateCreateRequest(BaseModel):

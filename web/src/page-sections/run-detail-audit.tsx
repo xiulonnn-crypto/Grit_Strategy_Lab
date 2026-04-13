@@ -1,5 +1,12 @@
+import { useState } from 'react';
 import { formatCompactDate, formatCompactDateTime } from '../lib/format';
 import { formatRunDetailCommentary, formatRunDetailKvLabel, formatRunDetailKvValue } from '../lib/run-detail-kv-format';
+import {
+  DEFAULT_EVIDENCE_SORT,
+  EVIDENCE_SORT_OPTIONS,
+  sortTradeAuditItems,
+  type TradeAuditSort,
+} from '../lib/run-detail-view-model';
 import type { ApiBacktestRunDetail, ApiBacktestRunTradeAudit } from '../types';
 
 type RunDetailAuditPanelProps = {
@@ -86,10 +93,8 @@ export function RunDetailAuditPanel({
   auditError,
   onSelectTrade,
 }: RunDetailAuditPanelProps): JSX.Element {
-  const auditItems = detail.trade_audit_items ?? [];
-  const snapshotSummary = detail.snapshot_summary ?? detail.preview?.snapshot_summary ?? undefined;
-  const parameterSnapshot = detail.parameter_snapshot ?? detail.preview?.parameter_snapshot ?? undefined;
-  const environmentSummary = detail.environment_summary ?? detail.preview?.environment_summary ?? undefined;
+  const [sortBy, setSortBy] = useState<TradeAuditSort>(DEFAULT_EVIDENCE_SORT);
+  const auditItems = sortTradeAuditItems(detail.trade_audit_items, sortBy);
   const priceSeries = (audit?.price_series ?? []).map((point) => ({
     date: point.date,
     close: point.close,
@@ -98,12 +103,24 @@ export function RunDetailAuditPanel({
   return (
     <div className="run-detail-tab-panel run-detail-evidence-layout">
       <section className="panel run-detail-evidence-list-panel">
-        <div className="panel-header">
+        <div className="panel-header run-detail-evidence-list-head">
           <div>
             <h3>交易证据列表</h3>
             <p className="run-detail-section-copy">选择一笔成交后，右侧同步展示证据卡与触发快照。</p>
           </div>
-          <span className="status-chip status-chip--soft">{auditItems.length} 笔</span>
+          <div className="run-detail-evidence-list-meta">
+            <label className="run-detail-evidence-sort">
+              <span>排序</span>
+              <select aria-label="排序" onChange={(event) => setSortBy(event.target.value as TradeAuditSort)} value={sortBy}>
+                {EVIDENCE_SORT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span className="status-chip status-chip--soft">{auditItems.length} 笔</span>
+          </div>
         </div>
 
         {auditError ? <div className="error-banner">{auditError}</div> : null}
@@ -198,20 +215,6 @@ export function RunDetailAuditPanel({
             <KeyValueCard title="触发快照" value={audit.trigger_snapshot as Record<string, unknown>} />
           </div>
         ) : null}
-      </section>
-
-      <section className="panel run-detail-evidence-snapshot-panel">
-        <div className="panel-header">
-          <div>
-            <h3>配置与环境快照</h3>
-            <p className="run-detail-section-copy">保留当前回测上下文，便于解释成交证据是否受参数或数据集影响。</p>
-          </div>
-        </div>
-        <div className="run-detail-properties-grid run-detail-properties-grid--stacked">
-          <KeyValueCard title="数据快照摘要" value={snapshotSummary} />
-          <KeyValueCard title="参数快照" value={parameterSnapshot} />
-          <KeyValueCard title="环境摘要" value={environmentSummary} />
-        </div>
       </section>
     </div>
   );

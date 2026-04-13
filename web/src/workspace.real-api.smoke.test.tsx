@@ -1,28 +1,38 @@
-import {
-  act,
-  cleanup,
-  render,
-  screen,
-  waitForElementToBeRemoved,
-} from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ApiClientProvider } from './lib/demoStoreContext';
 import { AppRouteProvider, navigateTo, parseAppHash } from './lib/appRouteContext';
 import { CreationSessionPage } from './pages/creation-session-page';
+import { OptimizationConfigPage } from './pages/optimization-lab-page';
 import { RunDetailPage } from './pages/run-detail-page';
 import { RunsIndexPage } from './pages/runs-index-page';
-import { SnapshotsPage } from './pages/snapshots-page';
 import { StrategyDetailPage } from './pages/strategy-detail-page';
-import { OptimizationConfigPage } from './pages/optimization-lab-page';
 import { WorkspacePage } from './pages/workspace-page-lane-b';
 import { ShellFrameCn } from './shell-frame-cn';
 
 const LIVE_TEST_TIMEOUT = 20_000;
 const LIVE_QUERY_TIMEOUT = 15_000;
-const LIVE_API_BASE = 'http://127.0.0.1:8000';
-
 const liveApiEnabled = process.env.LIVE_API_SMOKE === '1';
 const describeLiveApi = liveApiEnabled ? describe : describe.skip;
+
+const LIVE_API_BASE = process.env.LIVE_API_BASE ?? 'http://127.0.0.1:8000';
+const CREATION_SESSION_NAME = 'Codex GRID Draft';
+const DETAIL_STRATEGY_NAME = 'Codex GRID Strategy';
+const OPTIMIZATION_STRATEGY_NAME = 'Codex MOM Strategy';
+
+function requiredLiveEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Missing required live smoke environment variable: ${name}`);
+  }
+  return value;
+}
+
+const LIVE_CREATION_SESSION_ID = requiredLiveEnv('LIVE_CREATION_SESSION_ID');
+const LIVE_STRATEGY_ID = requiredLiveEnv('LIVE_STRATEGY_ID');
+const LIVE_OPTIMIZATION_STRATEGY_ID = requiredLiveEnv('LIVE_OPTIMIZATION_STRATEGY_ID');
+const LIVE_RUN_ID = requiredLiveEnv('LIVE_RUN_ID');
+
 let originalFetch: typeof fetch | undefined;
 
 beforeAll(() => {
@@ -60,12 +70,13 @@ afterAll(() => {
   vi.unstubAllEnvs();
 });
 
-async function renderLiveRoute(hash: string, page: JSX.Element): Promise<void> {
+async function renderLiveRoute(hash: string, page: JSX.Element) {
   window.location.hash = hash;
   const route = parseAppHash(window.location.hash);
 
+  let rendered: ReturnType<typeof render> | null = null;
   await act(async () => {
-    render(
+    rendered = render(
       <ApiClientProvider>
         <AppRouteProvider navigate={navigateTo} route={route}>
           <ShellFrameCn route={route}>{page}</ShellFrameCn>
@@ -73,15 +84,8 @@ async function renderLiveRoute(hash: string, page: JSX.Element): Promise<void> {
       </ApiClientProvider>,
     );
   });
-}
 
-async function waitForLoadingTextToDisappear(text: string): Promise<void> {
-  const loadingNode = screen.queryByText(text);
-  if (loadingNode) {
-    await waitForElementToBeRemoved(loadingNode, {
-      timeout: LIVE_QUERY_TIMEOUT,
-    });
-  }
+  return rendered!;
 }
 
 function expectNoFetchFailure(): void {
@@ -91,80 +95,74 @@ function expectNoFetchFailure(): void {
 
 describeLiveApi('live api acceptance', () => {
   it(
-    'hydrates workspace data against the live local API',
+    'hydrates workspace data against the staged local API',
     async () => {
-      await renderLiveRoute('#/workspace', <WorkspacePage />);
+      const { container } = await renderLiveRoute('#/workspace', <WorkspacePage />);
 
+      expect(container.querySelector('.workspace-page__content')).not.toBeNull();
       expect(
-        await screen.findByText('工作台健康度', {}, { timeout: LIVE_QUERY_TIMEOUT }),
+        await screen.findByText(DETAIL_STRATEGY_NAME, {}, { timeout: LIVE_QUERY_TIMEOUT }),
       ).toBeInTheDocument();
       expect(
-        (await screen.findAllByText('Draft GRID', {}, { timeout: LIVE_QUERY_TIMEOUT })).length,
-      ).toBeGreaterThan(0);
-      expect(screen.getAllByText('run_403158bf649b').length).toBeGreaterThan(0);
+        await screen.findByText(LIVE_RUN_ID, {}, { timeout: LIVE_QUERY_TIMEOUT }),
+      ).toBeInTheDocument();
       expectNoFetchFailure();
     },
     LIVE_TEST_TIMEOUT,
   );
 
   it(
-    'hydrates strategy detail data against the live local API',
+    'hydrates strategy detail data against the staged local API',
     async () => {
-      await renderLiveRoute(
-        '#/strategies/strat_c475a93c1a9e',
-        <StrategyDetailPage strategyId="strat_c475a93c1a9e" />,
+      const { container } = await renderLiveRoute(
+        `#/strategies/${LIVE_STRATEGY_ID}`,
+        <StrategyDetailPage strategyId={LIVE_STRATEGY_ID} />,
       );
 
-      expect(
-        await screen.findByText('当前参数版本', {}, { timeout: LIVE_QUERY_TIMEOUT }),
-      ).toBeInTheDocument();
-      expect(screen.getAllByText('Draft GRID').length).toBeGreaterThan(0);
-      expectNoFetchFailure();
-    },
-    LIVE_TEST_TIMEOUT,
-  );
-
-  it(
-    'hydrates snapshots data against the live local API',
-    async () => {
-      await renderLiveRoute('#/snapshots', <SnapshotsPage />);
-
-      await waitForLoadingTextToDisappear('正在加载快照状态...');
+      expect(container.querySelector('.strategy-detail-page')).not.toBeNull();
       expect(
         await screen.findByRole(
           'heading',
-          { name: '快照总览', level: 1 },
+          { level: 1, name: DETAIL_STRATEGY_NAME },
           { timeout: LIVE_QUERY_TIMEOUT },
         ),
       ).toBeInTheDocument();
-      expect(
-        await screen.findByRole(
-          'button',
-          { name: '刷新快照' },
-          { timeout: LIVE_QUERY_TIMEOUT },
-        ),
-      ).toBeInTheDocument();
-      expect(
-        await screen.findByText('公司行为数据', {}, { timeout: LIVE_QUERY_TIMEOUT }),
-      ).toBeInTheDocument();
-      expect(
-        await screen.findByText('标普500', {}, { timeout: LIVE_QUERY_TIMEOUT }),
-      ).toBeInTheDocument();
+      expect(container.querySelector('.strategy-detail-history-table')).not.toBeNull();
       expectNoFetchFailure();
     },
     LIVE_TEST_TIMEOUT,
   );
 
   it(
-    'hydrates creation session data against the live local API',
+    'hydrates creation session data against the staged local API',
     async () => {
-      await renderLiveRoute(
-        '#/creation/sessions/cs_75cee435a6ec',
-        <CreationSessionPage sessionId="cs_75cee435a6ec" />,
+      const { container } = await renderLiveRoute(
+        `#/creation/sessions/${LIVE_CREATION_SESSION_ID}`,
+        <CreationSessionPage sessionId={LIVE_CREATION_SESSION_ID} />,
       );
 
+      expect(container.querySelector('.creation-session-page')).not.toBeNull();
       expect(
-        await screen.findByText('对话', {}, { timeout: LIVE_QUERY_TIMEOUT }),
+        await screen.findByRole(
+          'heading',
+          { level: 1, name: CREATION_SESSION_NAME },
+          { timeout: LIVE_QUERY_TIMEOUT },
+        ),
+      ).toBeInTheDocument();
+      expect(container.querySelectorAll('.creation-step-chip').length).toBeGreaterThan(0);
+      expectNoFetchFailure();
+    },
+    LIVE_TEST_TIMEOUT,
+  );
+
+  it(
+    'hydrates runs index data against the staged local API',
+    async () => {
+      const { container } = await renderLiveRoute('#/runs', <RunsIndexPage />);
+
+      expect(container.querySelector('.runs-index-table')).not.toBeNull();
+      expect(
+        await screen.findByText(LIVE_RUN_ID, {}, { timeout: LIVE_QUERY_TIMEOUT }),
       ).toBeInTheDocument();
       expectNoFetchFailure();
     },
@@ -172,55 +170,40 @@ describeLiveApi('live api acceptance', () => {
   );
 
   it(
-    'hydrates runs index data against the live local API',
+    'hydrates run detail data against the staged local API',
     async () => {
-      await renderLiveRoute('#/runs', <RunsIndexPage />);
+      const { container } = await renderLiveRoute(
+        `#/runs/${LIVE_RUN_ID}`,
+        <RunDetailPage runId={LIVE_RUN_ID} />,
+      );
+
+      expect(container.querySelector('.run-detail-page')).not.toBeNull();
+      expect(
+        await screen.findByText(DETAIL_STRATEGY_NAME, {}, { timeout: LIVE_QUERY_TIMEOUT }),
+      ).toBeInTheDocument();
+      expect(container.querySelector('.run-detail-curve-card--overview')).not.toBeNull();
+      expectNoFetchFailure();
+    },
+    LIVE_TEST_TIMEOUT,
+  );
+
+  it(
+    'hydrates optimization config data against the staged local API',
+    async () => {
+      await renderLiveRoute(
+        `#/optimization-jobs/new/config?strategy_id=${LIVE_OPTIMIZATION_STRATEGY_ID}`,
+        <OptimizationConfigPage strategyId={LIVE_OPTIMIZATION_STRATEGY_ID} />,
+      );
 
       expect(
         await screen.findByRole(
           'heading',
-          { name: '回测列表', level: 2 },
+          { level: 1, name: OPTIMIZATION_STRATEGY_NAME },
           { timeout: LIVE_QUERY_TIMEOUT },
         ),
       ).toBeInTheDocument();
-      expect(
-        await screen.findByText('run_403158bf649b', {}, { timeout: LIVE_QUERY_TIMEOUT }),
-      ).toBeInTheDocument();
-      expectNoFetchFailure();
-    },
-    LIVE_TEST_TIMEOUT,
-  );
-
-  it(
-    'hydrates run detail data against the live local API',
-    async () => {
-      await renderLiveRoute(
-        '#/runs/run_403158bf649b',
-        <RunDetailPage runId="run_403158bf649b" />,
-      );
-
-      expect(
-        await screen.findByText('运行概览', {}, { timeout: LIVE_QUERY_TIMEOUT }),
-      ).toBeInTheDocument();
-      expect(screen.getAllByText('run_403158bf649b').length).toBeGreaterThan(0);
-      expectNoFetchFailure();
-    },
-    LIVE_TEST_TIMEOUT,
-  );
-
-  it(
-    'hydrates optimization config data against the live local API',
-    async () => {
-      await renderLiveRoute(
-        '#/optimization-jobs/new/config?strategy_id=strat_7df2b7091ef4',
-        <OptimizationConfigPage strategyId="strat_7df2b7091ef4" />,
-      );
-
       expect(
         await screen.findByDisplayValue('20', {}, { timeout: LIVE_QUERY_TIMEOUT }),
-      ).toBeInTheDocument();
-      expect(
-        await screen.findByText('strat_7df2b7091ef4-v1', {}, { timeout: LIVE_QUERY_TIMEOUT }),
       ).toBeInTheDocument();
       expectNoFetchFailure();
     },

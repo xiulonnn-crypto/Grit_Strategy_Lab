@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import threading
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -14,6 +15,8 @@ LONGBRIDGE_MIN_HISTORY_DATE = date(2010, 6, 1)
 _LONGBRIDGE_SDK_MODULES = ("longbridge.openapi", "longport.openapi")
 _LONGBRIDGE_PROBE_SYMBOL = "AAPL.US"
 _LONGBRIDGE_PROBE_DAYS = 14
+_LONGBRIDGE_CLIENTS: dict[tuple[str, str, str], dict[str, Any]] = {}
+_LONGBRIDGE_CLIENTS_LOCK = threading.Lock()
 
 
 def _read_env(*names: str) -> str:
@@ -57,7 +60,23 @@ def _as_mapping(item: Any) -> dict[str, Any]:
         except Exception:
             pass
     if hasattr(item, "__dict__"):
-        return {key: value for key, value in vars(item).items() if not key.startswith("_")}
+        try:
+            return {key: value for key, value in vars(item).items() if not key.startswith("_")}
+        except Exception:
+            pass
+    values: dict[str, Any] = {}
+    for name in dir(item):
+        if name.startswith("_"):
+            continue
+        try:
+            value = getattr(item, name)
+        except Exception:
+            continue
+        if callable(value):
+            continue
+        values[name] = value
+    if values:
+        return values
     return {}
 
 
@@ -174,6 +193,49 @@ def _build_quote_context(lb: Any, config: Any) -> Any:
     return quote_context(config)
 
 
+def _close_quote_context(ctx: Any) -> None:
+    if ctx is None:
+        return
+    for method_name in ("close", "release", "destroy", "disconnect"):
+        method = getattr(ctx, method_name, None)
+        if callable(method):
+            try:
+                method()
+            except Exception:
+                pass
+            return
+
+
+def _credential_key(app_key: str, app_secret: str, access_token: str) -> tuple[str, str, str]:
+    return app_key, app_secret, access_token
+
+
+def _build_client_bundle(app_key: str, app_secret: str, access_token: str) -> dict[str, Any]:
+    lb = _load_sdk()
+    config = _build_config(lb, app_key, app_secret, access_token)
+    ctx = _build_quote_context(lb, config)
+    return {"sdk": lb, "config": config, "ctx": ctx, "probe_payload": None}
+
+
+def _get_client_bundle(app_key: str, app_secret: str, access_token: str, *, reset: bool = False) -> dict[str, Any]:
+    key = _credential_key(app_key, app_secret, access_token)
+    with _LONGBRIDGE_CLIENTS_LOCK:
+        if reset:
+            cached = _LONGBRIDGE_CLIENTS.pop(key, None)
+            if cached:
+                _close_quote_context(cached.get("ctx"))
+        cached = _LONGBRIDGE_CLIENTS.get(key)
+        if cached is not None:
+            return cached
+        bundle = _build_client_bundle(app_key, app_secret, access_token)
+        _LONGBRIDGE_CLIENTS[key] = bundle
+        return bundle
+
+
+def _is_connection_limit_error(exc: Exception) -> bool:
+    return "connections limitation" in str(exc or "").lower()
+
+
 class _LongbridgeBase:
     history_since = LONGBRIDGE_MIN_HISTORY_DATE
 
@@ -185,25 +247,43 @@ class _LongbridgeBase:
     def _has_credentials(self) -> bool:
         return bool(self.app_key and self.app_secret and self.access_token)
 
+    def _client_bundle(self, *, reset: bool = False) -> dict[str, Any]:
+        if not self._has_credentials():
+            raise RuntimeError("Longbridge credentials are not configured.")
+        return _get_client_bundle(self.app_key, self.app_secret, self.access_token, reset=reset)
+
     def _probe_payload(self) -> dict[str, Any]:
-        lb = _load_sdk()
-        config = _build_config(lb, self.app_key, self.app_secret, self.access_token)
-        ctx = _build_quote_context(lb, config)
-        probe_symbol = _LONGBRIDGE_PROBE_SYMBOL
-        quote_payload = _call_quote(ctx, probe_symbol)
-        static_payload = _call_static_info(ctx, probe_symbol)
-        recent_end = date.today()
-        recent_start = recent_end - timedelta(days=_LONGBRIDGE_PROBE_DAYS)
-        history_payload = _call_history_by_date(ctx, lb, probe_symbol, recent_start, recent_end)
-        return {
-            "sdk_module": getattr(lb, "__name__", "longbridge.openapi"),
-            "quote_count": len(_extract_rows(quote_payload, "secu_quote", "quotes")),
-            "static_count": len(_extract_rows(static_payload, "secu_static_info", "static_info")),
-            "history_count": len(_extract_rows(history_payload, "candlesticks", "secu_candlesticks")),
-            "history_since": self.history_since.isoformat(),
-            "quote_authority_required": True,
-            "supports_current_latest_window": True,
-        }
+        retried = False
+        while True:
+            bundle = self._client_bundle(reset=retried)
+            cached_payload = bundle.get("probe_payload")
+            if isinstance(cached_payload, dict) and cached_payload:
+                return dict(cached_payload)
+            try:
+                lb = bundle["sdk"]
+                ctx = bundle["ctx"]
+                probe_symbol = _LONGBRIDGE_PROBE_SYMBOL
+                quote_payload = _call_quote(ctx, probe_symbol)
+                static_payload = _call_static_info(ctx, probe_symbol)
+                recent_end = date.today()
+                recent_start = recent_end - timedelta(days=_LONGBRIDGE_PROBE_DAYS)
+                history_payload = _call_history_by_date(ctx, lb, probe_symbol, recent_start, recent_end)
+                payload = {
+                    "sdk_module": getattr(lb, "__name__", "longbridge.openapi"),
+                    "quote_count": len(_extract_rows(quote_payload, "secu_quote", "quotes")),
+                    "static_count": len(_extract_rows(static_payload, "secu_static_info", "static_info")),
+                    "history_count": len(_extract_rows(history_payload, "candlesticks", "secu_candlesticks")),
+                    "history_since": self.history_since.isoformat(),
+                    "quote_authority_required": True,
+                    "supports_current_latest_window": True,
+                }
+                bundle["probe_payload"] = dict(payload)
+                return payload
+            except Exception as exc:
+                if not retried and _is_connection_limit_error(exc):
+                    retried = True
+                    continue
+                raise
 
     def _availability_failure(self, reason: str, *, stage: str) -> ProviderAvailability:
         return ProviderAvailability(
@@ -240,9 +320,7 @@ class LongbridgeQuoteProvider(_LongbridgeBase):
             raise RuntimeError("Longbridge US history is available from 2010-06-01 onward.")
 
         normalized_symbol, base_symbol = _normalize_us_symbol(symbol)
-        lb = _load_sdk()
-        config = _build_config(lb, self.app_key, self.app_secret, self.access_token)
-        ctx = _build_quote_context(lb, config)
+        retried = False
 
         bars: list[MarketBar] = []
         warnings: list[str] = []
@@ -253,6 +331,9 @@ class LongbridgeQuoteProvider(_LongbridgeBase):
         while current_start <= end_date:
             current_end = min(end_date, current_start + timedelta(days=chunk_days))
             try:
+                bundle = self._client_bundle(reset=retried)
+                lb = bundle["sdk"]
+                ctx = bundle["ctx"]
                 payload = _call_history_by_date(ctx, lb, normalized_symbol, current_start, current_end)
                 rows = _extract_rows(payload, "candlesticks", "secu_candlesticks")
                 if not rows and isinstance(payload, dict):
@@ -285,6 +366,9 @@ class LongbridgeQuoteProvider(_LongbridgeBase):
                         f"Longbridge returned no usable candlesticks for {normalized_symbol} between {current_start.isoformat()} and {current_end.isoformat()}."
                     )
             except Exception as exc:
+                if not retried and _is_connection_limit_error(exc):
+                    retried = True
+                    continue
                 warnings.append(
                     f"Longbridge history chunk {current_start.isoformat()} to {current_end.isoformat()} failed: {exc}"
                 )
@@ -344,15 +428,23 @@ class LongbridgeStaticInfoProvider(_LongbridgeBase):
         if not self._has_credentials():
             return None
         normalized_symbol, base_symbol = _normalize_us_symbol(symbol)
-        lb = _load_sdk()
-        config = _build_config(lb, self.app_key, self.app_secret, self.access_token)
-        ctx = _build_quote_context(lb, config)
-        payload = _call_static_info(ctx, normalized_symbol)
-        rows = _extract_rows(payload, "secu_static_info", "static_info")
-        if not rows:
-            rows = _extract_rows(payload, "data", "results")
-        if not rows:
-            return None
+        retried = False
+        while True:
+            try:
+                bundle = self._client_bundle(reset=retried)
+                ctx = bundle["ctx"]
+                payload = _call_static_info(ctx, normalized_symbol)
+                rows = _extract_rows(payload, "secu_static_info", "static_info")
+                if not rows:
+                    rows = _extract_rows(payload, "data", "results")
+                if not rows:
+                    return None
+                break
+            except Exception as exc:
+                if not retried and _is_connection_limit_error(exc):
+                    retried = True
+                    continue
+                raise
 
         for row in rows:
             row_map = _as_mapping(row)

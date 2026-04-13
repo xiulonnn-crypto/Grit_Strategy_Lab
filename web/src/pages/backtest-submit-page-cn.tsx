@@ -174,12 +174,13 @@ export function BacktestSubmitPageCn({
       setSourceRunError(null);
       return;
     }
+    const requestedSourceRunId: string = sourceRunId;
 
     let cancelled = false;
 
     async function loadSourceRun(): Promise<void> {
       try {
-        const payload = await api.getBacktestRunDetail(sourceRunId);
+        const payload = await api.getBacktestRunDetail(requestedSourceRunId);
         if (cancelled) {
           return;
         }

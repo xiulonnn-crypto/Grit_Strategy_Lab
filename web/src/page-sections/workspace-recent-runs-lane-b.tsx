@@ -1,19 +1,24 @@
 import { useMemo } from 'react';
 import './workspace-recent-runs-lane-b.css';
 
+type WorkspaceRecentRunBadgeTone = 'positive' | 'warning' | 'negative' | 'neutral';
+
 export type WorkspaceRecentRunItem = {
   id: string;
-  runId: string;
+  kind: 'backtest' | 'optimization';
+  activityId: string;
   strategyName: string;
-  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'COMPLETED_WITH_WARNINGS' | 'FAILED';
-  totalReturn: string;
-  sharpe: string;
+  status: string;
   completedAt?: string | null;
-  periodLabel?: string | null;
   statusLabel: string;
-  runKindLabel: string;
-  dateRangeLabel: string;
+  kindLabel: string;
+  metaLabel: string;
+  badges: Array<{
+    text: string;
+    tone: WorkspaceRecentRunBadgeTone;
+  }>;
   completedRelativeLabel: string;
+  navigatePath: string;
 };
 
 type WorkspaceRecentRunsSectionProps = {
@@ -25,18 +30,32 @@ type WorkspaceRecentRunsSectionProps = {
 };
 
 const TEXT = {
-  title: '最近回测',
-  copy: '展示最近 10 次已完成的回测任务，点击可追溯审计详情。',
-  empty: '暂无最近回测。先创建一个策略再填充历史。',
-  error: '最近回测加载失败。',
+  title: '最近回测优化',
+  copy: '展示最近 8 条回测与优化活动，按最新进展混合排序。',
+  empty: '暂无最近回测或优化任务。',
+  error: '最近回测优化加载失败。',
   retry: '重试',
-  pendingRange: '日期待定',
-  totalReturn: '收益率',
-  sharpe: '夏普比率',
 } as const;
 
-function getStatusTone(status: WorkspaceRecentRunItem['status']): 'positive' | 'warning' | 'negative' {
-  return status === 'FAILED' ? 'negative' : status === 'COMPLETED_WITH_WARNINGS' ? 'warning' : 'positive';
+function getStatusTone(status: string): WorkspaceRecentRunBadgeTone {
+  const normalized = status.toUpperCase();
+  if (['FAILED'].includes(normalized)) {
+    return 'negative';
+  }
+  if (['INTERRUPTED', 'COMPLETED_WITH_WARNINGS', 'PARTIALLY_FAILED'].includes(normalized)) {
+    return 'warning';
+  }
+  if (['QUEUED', 'RUNNING'].includes(normalized)) {
+    return 'neutral';
+  }
+  return 'positive';
+}
+
+function getKindTone(kindLabel: string): 'permanent' | 'temporary' | 'optimization' {
+  if (kindLabel.includes('优化')) {
+    return 'optimization';
+  }
+  return kindLabel.includes('永久') ? 'permanent' : 'temporary';
 }
 
 function normalizeRecentRuns(recentRuns: WorkspaceRecentRunItem[] | undefined): WorkspaceRecentRunItem[] {
@@ -57,34 +76,32 @@ function RecentRunSkeleton(): JSX.Element {
 
 function WorkspaceRecentRunRow({ item, navigate }: { item: WorkspaceRecentRunItem; navigate: (path: string) => void }): JSX.Element {
   const tone = getStatusTone(item.status);
-  const totalReturnTone = item.totalReturn.startsWith('-') ? 'negative' : 'positive';
-  const kindTone = item.runKindLabel.includes('永久') ? 'permanent' : 'temporary';
+  const kindTone = getKindTone(item.kindLabel);
 
   return (
     <li className={`workspace-recent-runs__item workspace-recent-runs__item--${tone}`}>
       <span className={`workspace-recent-runs__rail-dot workspace-recent-runs__rail-dot--${tone}`} aria-hidden="true" />
-      <button className="workspace-recent-runs__card gsl-card" onClick={() => navigate(`/runs/${item.runId}`)} type="button">
+      <button className="workspace-recent-runs__card gsl-card" onClick={() => navigate(item.navigatePath)} type="button">
         <div className="workspace-recent-runs__row-top">
           <div className="workspace-recent-runs__identity">
-            <span className="workspace-recent-runs__run-id">{item.runId}</span>
+            <span className="workspace-recent-runs__run-id">{item.activityId}</span>
           </div>
-          <span className={`workspace-recent-runs__kind workspace-recent-runs__kind--${kindTone}`}>{item.runKindLabel}</span>
+          <span className={`workspace-recent-runs__kind workspace-recent-runs__kind--${kindTone}`}>{item.kindLabel}</span>
         </div>
 
         <h4 className="workspace-recent-runs__strategy" title={item.strategyName}>
           {item.strategyName}
         </h4>
 
-        <p className="workspace-recent-runs__period">{item.dateRangeLabel || item.periodLabel || TEXT.pendingRange}</p>
+        <p className="workspace-recent-runs__period">{item.metaLabel}</p>
 
         <div className="workspace-recent-runs__badge-row">
           <div className="workspace-recent-runs__badges">
-            <span className={`workspace-recent-runs__badge workspace-recent-runs__badge--${totalReturnTone}`}>
-              {TEXT.totalReturn} {item.totalReturn}
-            </span>
-            <span className="workspace-recent-runs__badge workspace-recent-runs__badge--neutral">
-              {TEXT.sharpe} {item.sharpe}
-            </span>
+            {item.badges.map((badge) => (
+              <span className={`workspace-recent-runs__badge workspace-recent-runs__badge--${badge.tone}`} key={`${item.id}-${badge.text}`}>
+                {badge.text}
+              </span>
+            ))}
           </div>
           <span className="workspace-recent-runs__completed">{item.completedRelativeLabel}</span>
         </div>

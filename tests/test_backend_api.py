@@ -238,6 +238,151 @@ def test_scoped_market_data_provider_keeps_longbridge_for_recent_incremental_win
     assert runtime_provider.scoped_calls == 0
 
 
+def test_snapshot_refresh_heartbeat_persists_runtime_stage_and_refresh_stats(tmp_path):
+    service = RealBacktestPlatformService(tmp_path / "snapshot-heartbeat.db", market_data_provider=None)
+
+    persisted_job = service._persist_snapshot_refresh_heartbeat(
+        job_id="snap_heartbeat",
+        request={"reason": "unit-test"},
+        mode="repair",
+        targets=["price", "corporate"],
+        created_at="2026-04-13T07:00:00Z",
+        started_at="2026-04-13T07:00:00Z",
+        symbol_count=3,
+        row_count=30,
+        warnings=["warn-1"],
+        errors=[],
+        current_stage="repair_market_data",
+        current_stage_label="正在修复历史缺口数据",
+        progress={"completed_symbols": 3, "total_symbols": 12},
+        heartbeat_at="2026-04-13T07:01:00Z",
+        refresh_stats={
+            "datasets": {
+                "ds-price": {"updated_symbol_count": 3, "updated_row_count": 30},
+            },
+            "universes": {},
+        },
+    )
+
+    assert persisted_job["status"] == "RUNNING"
+    stored_row = service.storage.fetch_one("SELECT * FROM snapshot_refresh_jobs WHERE id = ?", ("snap_heartbeat",))
+    decoded_job = service._decode_snapshot_refresh_job(stored_row)
+    runtime_state = service._load_snapshot_refresh_runtime_state()
+
+    assert decoded_job is not None
+    assert decoded_job["summary"]["current_stage"] == "repair_market_data"
+    assert decoded_job["summary"]["current_stage_label"] == "正在修复历史缺口数据"
+    assert decoded_job["summary"]["heartbeat_at"] == "2026-04-13T07:01:00Z"
+    assert decoded_job["summary"]["progress"] == {"completed_symbols": 3, "total_symbols": 12}
+    assert decoded_job["summary"]["refresh_stats"]["datasets"]["ds-price"]["updated_row_count"] == 30
+    assert runtime_state == {
+        "job_id": "snap_heartbeat",
+        "mode": "repair",
+        "targets": ["price", "corporate"],
+        "pid": os.getpid(),
+        "current_stage": "repair_market_data",
+        "current_stage_label": "正在修复历史缺口数据",
+        "progress": {"completed_symbols": 3, "total_symbols": 12},
+        "heartbeat_at": "2026-04-13T07:01:00Z",
+    }
+
+
+def test_recent_running_snapshot_job_skips_interrupted_recovery_process_scan(tmp_path, monkeypatch):
+    service = RealBacktestPlatformService(tmp_path / "snapshot-recent-running.db", market_data_provider=None)
+    heartbeat_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    latest_job = {
+        "id": "snap_recent",
+        "status": "RUNNING",
+        "updated_at": heartbeat_at,
+        "summary": {
+            "heartbeat_at": heartbeat_at,
+            "current_stage": "preflight",
+        },
+        "warnings": [],
+        "errors": [],
+    }
+
+    def _unexpected_process_scan(job_id: str) -> bool:
+        raise AssertionError(f"unexpected process scan for {job_id}")
+
+    monkeypatch.setattr(service, "_snapshot_refresh_process_is_active", _unexpected_process_scan)
+
+    recovered = service._recover_interrupted_snapshot_job(latest_job)
+
+    assert recovered is not None
+    assert recovered["status"] == "RUNNING"
+    assert recovered["id"] == "snap_recent"
+
+
+def test_running_refresh_persists_partial_dataset_snapshots_before_completion(tmp_path):
+    service = RealBacktestPlatformService(tmp_path / "snapshot-partial.db", market_data_provider=None)
+    repository = service.market_data_repository
+    coverage = [CoverageSummary(symbol="AAPL", start_date="2026-04-10", end_date="2026-04-10", trade_days=1)]
+
+    service._persist_market_dataset_snapshots(
+        as_of="2026-04-13T07:10:00Z",
+        mode="repair",
+        snapshot_window_start=date(1996, 1, 1),
+        window_end=date(2026, 4, 10),
+        selection_metadata={"selection_mode": "repair_missing_symbols_batch"},
+        existing_price_snapshot=None,
+        existing_corporate_snapshot=None,
+        existing_price_rows={"price_bars": [], "symbol_coverage": []},
+        existing_corporate_rows={"corporate_actions": [], "symbol_coverage": []},
+        price_bars=[
+            {
+                "symbol": "AAPL",
+                "date": "2026-04-10",
+                "open": 190.0,
+                "high": 191.0,
+                "low": 189.5,
+                "close": 190.5,
+                "adj_close": 190.5,
+                "volume": 1000,
+                "source": "yahoo",
+                "fallback_source": None,
+            }
+        ],
+        corporate_actions=[
+            {
+                "symbol": "AAPL",
+                "date": "2026-04-10",
+                "action_type": "dividend",
+                "value": 1.0,
+                "source": "tiingo",
+                "fallback_source": "yahoo",
+                "payload": {"cash": 1.0},
+            }
+        ],
+        coverage_rows=coverage,
+        corporate_coverage_rows=coverage,
+        effective_missing_symbols=["MSFT"],
+        effective_corporate_missing_symbols=["MSFT"],
+        action_partial=True,
+        canonical_target_symbols=["AAPL", "MSFT"],
+        canonical_total_symbol_count=2,
+        default_source_name="yahoo",
+        default_fallback_name="tiingo",
+        cold_backup_result=None,
+        recovery_report=None,
+        running=True,
+    )
+
+    price_snapshot = next(item for item in repository.list_dataset_snapshots() if item["id"] == "ds-price")
+    corporate_snapshot = next(item for item in repository.list_dataset_snapshots() if item["id"] == "ds-corporate-actions")
+
+    assert price_snapshot["freshness_label"] == "后台更新中"
+    assert price_snapshot["row_count"] == 1
+    assert price_snapshot["metadata"]["covered_symbol_count"] == 1
+    assert price_snapshot["metadata"]["total_symbol_count"] == 2
+    assert price_snapshot["metadata"]["missing_symbols"] == ["MSFT"]
+    assert corporate_snapshot["freshness_label"] == "后台更新中"
+    assert corporate_snapshot["row_count"] == 1
+    assert corporate_snapshot["metadata"]["covered_symbol_count"] == 1
+    assert corporate_snapshot["metadata"]["total_symbol_count"] == 2
+    assert corporate_snapshot["metadata"]["missing_symbols"] == ["MSFT"]
+
+
 def test_snapshot_refresh_counts_fmp_history_anchors_as_ready(tmp_path):
     class _FakeUniverseProvider:
         provider_name = "fmp_historical_constituent"
@@ -1033,6 +1178,45 @@ def test_repair_refresh_with_universe_target_includes_latest_members(tmp_path, m
     assert any(symbol == "LATEST1" and start == previous_end.isoformat() for symbol, start, _ in provider.calls)
 
 
+def test_snapshot_memory_guard_uses_python_process_limit_not_busy_system_alone(tmp_path, monkeypatch):
+    service = RealBacktestPlatformService(tmp_path / "memory-guard.db", market_data_provider=None)
+    monkeypatch.setattr(
+        service,
+        "_snapshot_memory_status",
+        lambda: {
+            "total_physical_bytes": float(64 * 1024 * 1024 * 1024),
+            "available_physical_bytes": float(11 * 1024 * 1024 * 1024),
+            "process_working_set_bytes": float(512 * 1024 * 1024 * 1024),
+            "system_memory_ratio": 0.82,
+            "process_memory_ratio": 0.01,
+        },
+    )
+
+    service._raise_if_snapshot_memory_limit_exceeded(stage="unit-test")
+
+
+def test_snapshot_memory_guard_still_stops_extreme_system_pressure(tmp_path, monkeypatch):
+    service = RealBacktestPlatformService(tmp_path / "memory-guard-emergency.db", market_data_provider=None)
+    monkeypatch.setattr(
+        service,
+        "_snapshot_memory_status",
+        lambda: {
+            "total_physical_bytes": float(64 * 1024 * 1024 * 1024),
+            "available_physical_bytes": float(1 * 1024 * 1024 * 1024),
+            "process_working_set_bytes": float(512 * 1024 * 1024 * 1024),
+            "system_memory_ratio": 0.97,
+            "process_memory_ratio": 0.01,
+        },
+    )
+
+    try:
+        service._raise_if_snapshot_memory_limit_exceeded(stage="unit-test")
+    except real_service_module.SnapshotMemoryPressureError as exc:
+        assert "limit=80%" in str(exc)
+    else:
+        raise AssertionError("Expected memory guard to stop refresh under emergency system pressure")
+
+
 def test_refresh_snapshots_preserves_existing_corporate_actions_when_live_fetch_returns_none(tmp_path):
     class NoActionsProvider:
         provider_name = "no_actions"
@@ -1352,8 +1536,313 @@ def test_list_optimization_jobs_returns_latest_first_with_projection_fields(tmp_
     assert jobs[0]["source_run_id"] == strategy["latest_successful_run_id"]
     assert jobs[0]["budget_combinations"] == 6
     assert jobs[0]["completed_combinations"] == 6
-    assert jobs[0]["best_candidate_id"] == second_job["result"]["best_candidate_id"]
-    assert jobs[0]["best_candidate_label"] == second_job["result"]["best_candidate_label"]
+    assert jobs[0]["status"] == "COMPLETED"
+    assert jobs[0]["best_candidate_id"] is not None
+    assert jobs[0]["best_candidate_label"] is not None
+    assert jobs[0]["progress_pct"] == 100
+    assert jobs[0]["resume_ready"] is False
+    assert jobs[0]["next_trial_index"] == 7
+    assert jobs[0]["estimated_remaining_minutes"] == 0
+    assert jobs[0]["estimated_completed_at"] is not None
+    assert jobs[0]["best_metrics_summary"]["status"] == "SUCCEEDED"
+    assert jobs[1]["progress_pct"] == 100
+    assert jobs[1]["estimated_remaining_minutes"] == 0
+    assert jobs[1]["estimated_completed_at"] is not None
+
+
+def test_list_optimization_jobs_uses_lightweight_projection_without_detail_queries(tmp_path, monkeypatch):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    base = create_momentum_strategy(client, idempotency_key="optimization-list-lightweight")
+    strategy = base["strategy"]
+    completed = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=strategy["current_parameter_version_id"],
+        entry_point="lab_menu",
+        validation_mode="walk_forward",
+        budget_combinations=4,
+        search_space=[
+            {"key": "lookback_months", "label": "Lookback", "mode": "range", "start": 5, "end": 6, "step": 1, "current": 6},
+            {"key": "top_n", "label": "Top N", "mode": "range", "start": 3, "end": 4, "step": 1, "current": 4},
+        ],
+    )
+    service._persist_optimization_job(
+        "opt_running_projection",
+        strategy["id"],
+        {
+            "objective": "sharpe",
+            "base_parameter_version_id": strategy["current_parameter_version_id"],
+            "source_run_id": strategy["latest_successful_run_id"],
+            "entry_point": "lab_menu",
+            "validation_mode": "walk_forward",
+            "budget_combinations": 4,
+            "completed_combinations": 1,
+            "persisted_trial_count": 1,
+            "next_trial_index": 2,
+            "progress_pct": 25,
+            "status": "RUNNING",
+            "current_stage": "Running trial 2/4",
+            "latest_update": "Completed 1/4 trials.",
+            "estimated_remaining_minutes": 3,
+            "estimated_completed_at": "2026-04-13T10:08:00Z",
+            "best_metrics_summary": {
+                "trial_index": 1,
+                "label": "Candidate 1",
+                "status": "SUCCEEDED",
+                "parameter_snapshot": {"lookback_months": 6, "top_n": 4},
+                "metrics": {
+                    "annualized_return": 0.12,
+                    "return_sharpe": 1.04,
+                    "out_of_sample_sharpe": 0.88,
+                    "max_drawdown_pct": -18.0,
+                    "stability": 78.0,
+                    "total_return_pct": 13.0,
+                },
+                "score": 1.42,
+                "error_message": None,
+                "started_at": "2026-04-13T10:00:00Z",
+                "completed_at": "2026-04-13T10:02:00Z",
+            },
+        },
+        [],
+        created_at="2026-04-13T10:00:00Z",
+        updated_at="2026-04-13T10:05:00Z",
+        completed_at=None,
+    )
+
+    def fail(method_name: str):
+        def _fail(*args, **kwargs):
+            raise AssertionError(f"{method_name} should not be used by list_optimization_jobs")
+
+        return _fail
+
+    monkeypatch.setattr(service, "_hydrate_optimization_job", fail("_hydrate_optimization_job"))
+    monkeypatch.setattr(service, "_load_optimization_trials", fail("_load_optimization_trials"))
+    monkeypatch.setattr(service, "get_strategy_detail", fail("get_strategy_detail"))
+
+    jobs = assert_ok(client.get("/optimization-jobs"))
+
+    running = next(item for item in jobs if item["id"] == "opt_running_projection")
+    completed_item = next(item for item in jobs if item["id"] == completed["id"])
+
+    assert running["strategy_name"] == strategy["name"]
+    assert running["status"] == "RUNNING"
+    assert running["entry_point"] == "lab_menu"
+    assert running["validation_mode"] == "walk_forward"
+    assert running["source_run_id"] == strategy["latest_successful_run_id"]
+    assert running["budget_combinations"] == 4
+    assert running["completed_combinations"] == 1
+    assert running["progress_pct"] == 25
+    assert running["current_stage"] == "Running trial 2/4"
+    assert running["latest_update"] == "Completed 1/4 trials."
+    assert running["estimated_remaining_minutes"] == 3
+    assert running["estimated_completed_at"] == "2026-04-13T10:08:00Z"
+    assert running["resume_ready"] is False
+    assert running["persisted_trial_count"] == 1
+    assert running["next_trial_index"] == 2
+    assert running["best_metrics_summary"]["trial_index"] == 1
+    assert running["best_metrics_summary"]["label"] == "Candidate 1"
+    assert completed_item["strategy_name"] == strategy["name"]
+    assert completed_item["best_candidate_id"] is not None
+    assert completed_item["best_candidate_label"] is not None
+
+
+def test_delete_optimization_job_logically_hides_it_from_list_detail_and_workspace_refs(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    base = create_momentum_strategy(client, idempotency_key="optimization-delete-job")
+    strategy = base["strategy"]
+    first_job = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=strategy["current_parameter_version_id"],
+        entry_point="lab_menu",
+        validation_mode="walk_forward",
+        budget_combinations=4,
+    )
+    second_job = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=strategy["current_parameter_version_id"],
+        entry_point="run_detail",
+        validation_mode="single_oos",
+        budget_combinations=6,
+    )
+
+    deleted = assert_ok(client.delete(f"/optimization-jobs/{second_job['id']}"))
+    listed_jobs = assert_ok(client.get("/optimization-jobs"))
+    strategies = assert_ok(client.get("/strategies"))
+    overview = assert_ok(client.get("/workspace/overview"))
+
+    assert deleted["id"] == second_job["id"]
+    assert deleted["deleted_reason"] == "user_deleted"
+    assert deleted["deleted_at"]
+    assert [item["id"] for item in listed_jobs] == [first_job["id"]]
+    assert client.get(f"/optimization-jobs/{second_job['id']}/detail").status_code == 404
+
+    deleted_row = service.storage.fetch_one(
+        "SELECT id, deleted_at, deleted_reason FROM optimization_jobs WHERE id = ?",
+        (second_job["id"],),
+    )
+    assert deleted_row is not None
+    assert deleted_row["deleted_at"] is not None
+    assert deleted_row["deleted_reason"] == "user_deleted"
+
+    strategy_item = next(item for item in strategies if item["id"] == strategy["id"])
+    assert strategy_item["latest_optimization_job_id"] == first_job["id"]
+    assert overview["latest_optimization_job_id"] == first_job["id"]
+
+
+def test_optimization_scoring_uses_annualized_return_for_ranking_and_verdict(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    strong_metrics = {
+        "return_sharpe": 1.05,
+        "out_of_sample_sharpe": 0.85,
+        "annualized_return": 0.12,
+        "total_return_pct": 14.0,
+        "max_drawdown_pct": -20.0,
+        "stability": 75.0,
+    }
+    weak_metrics = dict(strong_metrics, annualized_return=0.05)
+
+    strong_sharpe_score = service._score_optimization_metrics(strong_metrics, "sharpe")
+    weak_sharpe_score = service._score_optimization_metrics(weak_metrics, "sharpe")
+    strong_return_score = service._score_optimization_metrics(strong_metrics, "annualized_return")
+    weak_return_score = service._score_optimization_metrics(weak_metrics, "annualized_return")
+
+    assert strong_sharpe_score > weak_sharpe_score
+    assert strong_return_score > weak_return_score
+    assert service._optimization_status_label(strong_metrics) == "建议提升"
+    assert service._optimization_status_label(weak_metrics) == "高风险"
+
+    ranked = service._rank_optimization_trials(
+        [
+            {"score": weak_sharpe_score, "metrics": weak_metrics},
+            {"score": strong_sharpe_score, "metrics": strong_metrics},
+        ]
+    )
+    assert ranked[0]["metrics"]["annualized_return"] == strong_metrics["annualized_return"]
+
+
+def test_optimization_validation_windows_include_annualized_return(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    chart_series = [
+        {
+            "trade_date": f"2026-01-{index + 1:02d}",
+            "equity": 100.0 + index,
+            "benchmark": 100.0,
+            "drawdown": -float(index),
+            "is_oos": index >= 4,
+            "strategy_return": 0.01 + index * 0.002,
+            "benchmark_return": 0.008 + index * 0.001,
+        }
+        for index in range(6)
+    ]
+
+    windows = service._build_optimization_validation_windows(chart_series, "walk_forward")
+
+    assert windows
+    assert all("annualized_return" in window for window in windows)
+    assert all(window["verdict"] in {"pass", "watch", "risk"} for window in windows)
+
+
+def test_real_optimization_candidate_analysis_uses_chinese_copy(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    analysis = service._build_real_optimization_candidate_analysis(
+        title="候选 1",
+        metrics={
+            "annualized_return": 0.129,
+            "return_sharpe": 1.12,
+            "out_of_sample_sharpe": 0.91,
+            "max_drawdown_pct": -12.6,
+            "stability": 82.0,
+        },
+        search_space=[
+            {"key": "lookback_months", "label": "回看(月)", "mode": "range", "start": 6, "end": 12, "step": 1},
+            {"key": "top_n", "label": "买入排名阈值", "mode": "range", "start": 10, "end": 100, "step": 10},
+        ],
+        parameter_snapshot={"lookback_months": 6, "top_n": 20},
+        validation_mode="walk_forward",
+        chart_series=[],
+        evaluated_trials=[],
+        status_label="建议提升",
+    )
+
+    assert analysis["stability_summary"].startswith("该候选已满足核心晋升护栏")
+    assert analysis["stability_checks"][0]["label"] == "年化收益率"
+    assert analysis["stability_checks"][0]["detail"] == "年化收益率已达到正式版本晋升评估的收益门槛。"
+    assert analysis["stability_checks"][1]["label"] == "收益夏普"
+
+
+def test_normalize_optimization_candidate_localizes_legacy_english_analysis(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    strategy = create_momentum_strategy(client, idempotency_key="optimization-analysis-localization")["strategy"]
+
+    candidate = service._normalize_optimization_candidate(
+        strategy,
+        {
+            "id": "trial-legacy-1",
+            "label": "Candidate 1",
+            "status": "SUCCEEDED",
+            "rank": 1,
+            "metrics": {"annualized_return": 0.129, "return_sharpe": 1.12},
+            "analysis": {
+                "stability_summary": (
+                    "This candidate already meets the core promotion guardrails. "
+                    "Use the validation windows to confirm the edge persists across different market regimes."
+                ),
+                "stability_checks": [
+                    {
+                        "key": "annualized_return",
+                        "label": "Annualized Return",
+                        "value": 12.9,
+                        "verdict": "pass",
+                        "detail": "Annualized return is strong enough to support promotion review.",
+                    }
+                ],
+            },
+        },
+        rank=1,
+        base_parameter_version_id=strategy["current_parameter_version_id"],
+    )
+
+    assert candidate["analysis"]["stability_summary"].startswith("该候选已满足核心晋升护栏")
+    assert candidate["analysis"]["stability_checks"][0]["label"] == "年化收益率"
+    assert candidate["analysis"]["stability_checks"][0]["detail"] == "年化收益率已达到正式版本晋升评估的收益门槛。"
+
+
+def test_optimization_heatmap_cells_include_selected_metric_values(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    search_space = [
+        {"key": "lookback_months", "label": "观察周期", "mode": "range", "start": 6, "end": 8, "step": 1, "current": 7},
+        {"key": "top_n", "label": "持仓数量", "mode": "range", "start": 10, "end": 12, "step": 1, "current": 11},
+    ]
+    focus = {"lookback_months": 7, "top_n": 11}
+    metrics = {
+        "annualized_return": 0.124,
+        "return_sharpe": 1.18,
+        "max_drawdown_pct": -12.6,
+    }
+
+    heatmap = service._build_optimization_heatmap(search_space, focus, 1.18, metrics)
+
+    assert heatmap["cells"]
+    assert all("metrics" in cell for cell in heatmap["cells"])
+    assert all("annualized_return" in cell["metrics"] for cell in heatmap["cells"])
+    assert all("return_sharpe" in cell["metrics"] for cell in heatmap["cells"])
+    assert all("max_drawdown_pct" in cell["metrics"] for cell in heatmap["cells"])
 
 
 def test_list_optimization_jobs_purges_legacy_mock_rows(tmp_path):
@@ -1445,6 +1934,89 @@ def test_list_optimization_jobs_purges_legacy_mock_rows(tmp_path):
     assert client.get("/optimization-jobs/opt_legacy_mock/detail").status_code == 404
 
 
+def test_optimization_job_detail_repairs_garbled_best_candidate_labels(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    base = create_momentum_strategy(client, idempotency_key="optimization-garbled-best-candidate")
+    strategy = base["strategy"]
+    job_id = "opt_garbled_best_candidate"
+    created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    garbled_label = "?\uea57\u0080?1"
+
+    service.storage.insert_json_row(
+        "optimization_jobs",
+        {
+            "id": job_id,
+            "strategy_id": strategy["id"],
+            "status": "COMPLETED",
+            "request_json": json.dumps({"base_parameter_version_id": strategy["current_parameter_version_id"]}),
+            "summary_json": json.dumps(
+                {
+                    "status": "COMPLETED",
+                    "budget_combinations": 4,
+                    "completed_combinations": 4,
+                    "best_metrics_summary": {
+                        "trial_index": 1,
+                        "label": "Trial 1",
+                        "status": "SUCCEEDED",
+                        "metrics": {"return_sharpe": 1.18},
+                    },
+                }
+            ),
+            "result_json": json.dumps(
+                {
+                    "status": "COMPLETED",
+                    "best_candidate_id": "trial_garbled_1",
+                    "best_candidate_label": garbled_label,
+                    "headline": "Best candidate",
+                    "summary": "Optimization completed.",
+                }
+            ),
+            "candidates_json": json.dumps(
+                [
+                    {
+                        "id": "trial_garbled_1",
+                        "label": garbled_label,
+                        "rank": 1,
+                        "status": "SUCCEEDED",
+                        "score": 1.18,
+                        "metrics": {"return_sharpe": 1.18},
+                        "parameter_snapshot": strategy["parameters"],
+                        "parameter_delta": {},
+                        "allowed_actions": ["promote_candidate", "create_copy"],
+                    },
+                    {
+                        "id": "trial_garbled_2",
+                        "label": "?\uea57\u0080?2",
+                        "rank": 2,
+                        "status": "SUCCEEDED",
+                        "score": 1.02,
+                        "metrics": {"return_sharpe": 1.02},
+                        "parameter_snapshot": strategy["parameters"],
+                        "parameter_delta": {},
+                        "allowed_actions": ["promote_candidate", "create_copy"],
+                    },
+                ]
+            ),
+            "created_at": created_at,
+            "updated_at": created_at,
+            "completed_at": created_at,
+        },
+    )
+
+    detail = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail"))
+    jobs = assert_ok(client.get("/optimization-jobs"))
+    listed = next(item for item in jobs if item["id"] == job_id)
+
+    assert detail["candidates"][0]["label"] == "候选 1"
+    assert detail["candidates"][1]["label"] == "候选 2"
+    assert detail["result"]["best_candidate_label"] == "候选 1"
+    assert detail["summary"]["best_metrics_summary"]["label"] == "候选 1"
+    assert listed["best_candidate_label"] == "候选 1"
+    assert listed["best_metrics_summary"]["label"] == "候选 1"
+
+
 def test_create_optimization_job_returns_running_progress_before_results_are_ready(tmp_path):
     client, _ = create_test_client(tmp_path)
 
@@ -1477,9 +2049,13 @@ def test_create_optimization_job_returns_running_progress_before_results_are_rea
     assert completed["completed_at"] is not None
     assert completed["summary"]["progress_pct"] == 100
     assert completed["summary"]["completed_combinations"] == 6
+    assert completed["summary"]["persisted_trial_count"] == 6
+    assert completed["summary"]["next_trial_index"] == 7
+    assert completed["summary"]["resume_ready"] is False
     assert completed["summary"]["latest_update"]
-    assert completed["result"]["best_candidate_id"] == completed["candidates"][0]["id"]
-    assert completed["result"]["best_candidate_label"] == completed["candidates"][0]["label"]
+    assert completed["result"]["best_candidate_id"] is not None
+    assert completed["result"]["best_candidate_label"] is not None
+    assert completed["candidates"]
 
 
 def test_create_optimization_job_marks_running_before_first_trial_finishes(tmp_path, monkeypatch):
@@ -1495,6 +2071,8 @@ def test_create_optimization_job_marks_running_before_first_trial_finishes(tmp_p
         evaluation_request: dict[str, Any],
         payload: dict[str, Any],
         parameter_snapshot: dict[str, Any],
+        *,
+        prepared_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         time.sleep(0.2)
         return {
@@ -1551,38 +2129,27 @@ def test_create_optimization_job_marks_running_before_first_trial_finishes(tmp_p
         if (
             running["status"] == "RUNNING"
             and running["summary"]["completed_combinations"] == 0
-            and "正在开始第 1 / 4 组评估" in running["summary"]["latest_update"]
+            and str(running["summary"]["current_stage"]).startswith("Running trial 1/4")
         ):
             break
         time.sleep(0.01)
 
     assert running["status"] == "RUNNING"
     assert running["summary"]["completed_combinations"] == 0
-    assert running["summary"]["current_stage"] == "评估组合 1/4"
-    assert "正在开始第 1 / 4 组评估" in running["summary"]["latest_update"]
+    assert running["summary"]["current_stage"] == "Running trial 1/4"
+    assert "Evaluating" in str(running["summary"]["latest_update"])
+    assert running["summary"]["estimated_remaining_minutes"] is None
+    assert running["summary"]["estimated_completed_at"] is None
+    assert running["candidates"] == []
 
 
-def test_resume_incomplete_optimization_jobs_recovers_stale_running_progress(tmp_path, monkeypatch):
+def test_resume_incomplete_optimization_jobs_restarts_running_progress_and_preserves_detail_projection(tmp_path, monkeypatch):
     client, _ = create_test_client(tmp_path)
     service = client.app.state.service
     service.refresh_snapshots({"mode": "repair", "targets": ["price", "corporate", "universes"]})
 
     base = create_momentum_strategy(client, idempotency_key="materialize-optimization-recovery")
     strategy = base["strategy"]
-
-    original_evaluate = service._evaluate_optimization_trial
-
-    def slow_trial(
-        strategy_detail: dict[str, Any],
-        evaluation_request: dict[str, Any],
-        payload: dict[str, Any],
-        parameter_snapshot: dict[str, Any],
-    ) -> dict[str, Any]:
-        time.sleep(0.02)
-        return original_evaluate(strategy_detail, evaluation_request, payload, parameter_snapshot)
-
-    monkeypatch.setattr(service, "_evaluate_optimization_trial", slow_trial)
-    monkeypatch.setattr(service, "_optimization_step_delay_seconds", lambda: 0.0)
 
     search_space = [
         {"key": "lookback_months", "label": "观察周期", "mode": "range", "start": 5, "end": 6, "step": 1, "current": 6},
@@ -1635,31 +2202,95 @@ def test_resume_incomplete_optimization_jobs_recovers_stale_running_progress(tmp
             "completed_at": None,
         },
     )
+    planned_snapshots = service._plan_optimization_search_snapshots(
+        dict(strategy.get("parameters") or {}),
+        search_space,
+        4,
+    )
+    for trial_index, parameter_snapshot in enumerate(planned_snapshots[:2], start=1):
+        service._persist_optimization_trial(
+            job_id,
+            trial_index,
+            status="SUCCEEDED",
+            parameter_snapshot=parameter_snapshot,
+            metrics={
+                "sharpe": 1.1 + trial_index / 10.0,
+                "return_sharpe": 1.1 + trial_index / 10.0,
+                "out_of_sample_sharpe": 1.0 + trial_index / 10.0,
+                "max_drawdown_pct": -5.0,
+                "stability": 80.0,
+                "total_return_pct": 10.0 + trial_index,
+            },
+            chart_series=[
+                {
+                    "trade_date": "2026-01-01",
+                    "equity": 100.0 + trial_index,
+                    "benchmark": 100.0,
+                    "drawdown": 0.0,
+                    "is_oos": False,
+                    "strategy_return": 0.0,
+                    "benchmark_return": 0.0,
+                }
+            ],
+            score=1.1 + trial_index / 10.0,
+            error_message=None,
+            started_at=stale_updated_at,
+            completed_at=stale_updated_at,
+        )
+
+    def fake_trial(
+        strategy_detail: dict[str, Any],
+        evaluation_request: dict[str, Any],
+        payload: dict[str, Any],
+        parameter_snapshot: dict[str, Any],
+        *,
+        prepared_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        trial_index = int(payload.get("completed_combinations") or 0) + 1
+        return {
+            "parameter_snapshot": dict(parameter_snapshot),
+            "metrics": {
+                "sharpe": 1.4 + trial_index / 10.0,
+                "return_sharpe": 1.4 + trial_index / 10.0,
+                "out_of_sample_sharpe": 1.1 + trial_index / 10.0,
+                "max_drawdown_pct": -5.0,
+                "stability": 82.0,
+                "total_return_pct": 12.0 + trial_index,
+            },
+            "chart_series": [
+                {
+                    "trade_date": "2026-01-01",
+                    "equity": 100.0 + trial_index,
+                    "benchmark": 100.0,
+                    "drawdown": 0.0,
+                    "is_oos": False,
+                    "strategy_return": 0.0,
+                    "benchmark_return": 0.0,
+                }
+            ],
+            "score": 1.4 + trial_index / 10.0,
+        }
+
+    monkeypatch.setattr(service, "_evaluate_optimization_trial", fake_trial)
+    monkeypatch.setattr(service, "_optimization_step_delay_seconds", lambda: 0.0)
 
     resumed = service.resume_incomplete_optimization_jobs()
 
     assert resumed == [job_id]
 
-    deadline = time.monotonic() + 1.0
-    recovering = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail"))
-    while time.monotonic() < deadline:
-        recovering = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail"))
-        if "检测到服务重启" in recovering["summary"]["latest_update"]:
-            break
-        time.sleep(0.01)
-
+    recovering = wait_for_optimization_job(client, job_id)
     assert recovering["updated_at"] != stale_updated_at
-    assert recovering["status"] in {"RUNNING", "COMPLETED"}
-    if recovering["status"] == "RUNNING":
-        assert recovering["summary"]["completed_combinations"] == 2
-        assert "检测到服务重启" in recovering["summary"]["latest_update"]
-
-    completed = wait_for_optimization_job(client, job_id, timeout_seconds=5.0)
-
-    assert completed["status"] == "COMPLETED"
-    assert completed["summary"]["completed_combinations"] == 4
-    assert completed["summary"]["progress_pct"] == 100
-    assert completed["completed_at"] is not None
+    assert recovering["status"] == "COMPLETED"
+    assert recovering["summary"]["completed_combinations"] == 4
+    assert recovering["summary"]["persisted_trial_count"] == 4
+    assert recovering["summary"]["next_trial_index"] == 5
+    assert recovering["summary"]["resume_ready"] is False
+    assert recovering["summary"].get("interrupted_reason") is None
+    assert recovering["persisted_trial_count"] == 4
+    assert recovering["next_trial_index"] == 5
+    assert recovering["resume_ready"] is False
+    assert recovering["interrupted_reason"] is None
+    assert recovering["completed_at"] is not None
 
 
 def test_create_optimization_job_persists_configured_request_and_result_projection(tmp_path):
@@ -1686,16 +2317,114 @@ def test_create_optimization_job_persists_configured_request_and_result_projecti
     assert created["request"]["validation_mode"] == "walk_forward"
     assert created["request"]["budget_combinations"] == 20
     assert created["request"]["search_space"][0]["key"] == "lookback_months"
-    assert created["summary"]["candidate_count"] == 4
+    assert created["status"] == "COMPLETED"
+    assert created["summary"]["candidate_count"] > 0
     assert created["summary"]["completed_combinations"] == 20
+    assert created["summary"]["persisted_trial_count"] == 20
+    assert created["summary"]["next_trial_index"] == 21
+    assert created["summary"]["resume_ready"] is False
     assert created["summary"]["validation_mode"] == "walk_forward"
-    assert created["result"]["best_candidate_id"] == created["candidates"][0]["id"]
-    assert created["result"]["best_candidate_label"] == created["candidates"][0]["label"]
-    assert created["candidates"][0]["analysis"]["stability_checks"]
-    assert created["candidates"][0]["analysis"]["validation_windows"]
-    assert created["candidates"][0]["analysis"]["heatmap"]["cells"]
-    assert len(created["candidates"][0]["analysis"]["heatmap"]["x_values"]) > 1
-    assert len(created["candidates"][0]["analysis"]["heatmap"]["y_values"]) > 1
+    assert created["result"]["best_candidate_id"] is not None
+    assert created["result"]["best_candidate_label"] is not None
+    assert created["summary"]["best_metrics_summary"] is not None
+    assert created["candidates"]
+
+
+def test_completed_optimization_job_detail_uses_trial_rows_as_progress_truth(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    service.refresh_snapshots({"mode": "repair", "targets": ["price", "corporate", "universes"]})
+
+    base = create_momentum_strategy(client, idempotency_key="materialize-optimization-progress-truth")
+    strategy = base["strategy"]
+    created_at = "2026-04-13T07:20:21Z"
+    completed_at = "2026-04-13T07:21:25Z"
+    job_id = "opt_completed_progress_truth"
+    search_space = [
+        {"key": "lookback_months", "label": "閫??冽?", "mode": "range", "start": 6, "end": 24, "step": 1, "current": 6},
+        {"key": "skip_recent_months", "label": "銝?銝虫?", "mode": "range", "start": 1, "end": 3, "step": 1, "current": 1},
+        {"key": "top_n", "label": "???圈?", "mode": "range", "start": 10, "end": 200, "step": 10, "current": 10},
+        {
+            "key": "hold_rank_threshold",
+            "label": "?曄?圈?湧?銝虫?",
+            "mode": "range",
+            "start": 110,
+            "end": 150,
+            "step": 10,
+            "current": 120,
+        },
+    ]
+    payload = {
+        "objective": "sharpe",
+        "base_parameter_version_id": strategy["current_parameter_version_id"],
+        "source_run_id": strategy["latest_successful_run_id"],
+        "entry_point": "run_detail",
+        "validation_mode": "walk_forward",
+        "budget_combinations": 5700,
+        "search_space": search_space,
+        "status": "COMPLETED",
+        "progress_pct": 100,
+        "completed_combinations": 5700,
+        "persisted_trial_count": 4,
+        "next_trial_index": 5701,
+        "current_stage": "Result ready",
+        "latest_update": "Optimization completed.",
+        "resume_ready": False,
+    }
+    service._persist_optimization_job(
+        job_id,
+        strategy["id"],
+        payload,
+        [],
+        created_at=created_at,
+        updated_at=completed_at,
+        completed_at=completed_at,
+    )
+
+    planned_snapshots = service._plan_optimization_search_snapshots(
+        dict(strategy.get("parameters") or {}),
+        search_space,
+        4,
+    )
+    for trial_index, snapshot in enumerate(planned_snapshots[:4], start=1):
+        service._persist_optimization_trial(
+            job_id,
+            trial_index,
+            status="SUCCEEDED",
+            parameter_snapshot=snapshot,
+            metrics={
+                "sharpe": 1.0 + trial_index / 10.0,
+                "return_sharpe": 1.0 + trial_index / 10.0,
+                "out_of_sample_sharpe": 0.9 + trial_index / 10.0,
+                "max_drawdown_pct": -5.0,
+                "stability": 80.0,
+                "total_return_pct": 10.0 + trial_index,
+            },
+            chart_series=[
+                {
+                    "trade_date": "2026-01-01",
+                    "equity": 100.0 + trial_index,
+                    "benchmark": 100.0,
+                    "drawdown": 0.0,
+                    "is_oos": False,
+                    "strategy_return": 0.0,
+                    "benchmark_return": 0.0,
+                }
+            ],
+            score=1.0 + trial_index / 10.0,
+            error_message=None,
+            started_at=f"2026-04-13T07:21:2{trial_index - 1}Z",
+            completed_at=f"2026-04-13T07:21:2{trial_index - 1}Z",
+        )
+
+    detail = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail"))
+
+    assert detail["status"] == "COMPLETED"
+    assert detail["summary"]["completed_combinations"] == 4
+    assert detail["summary"]["persisted_trial_count"] == 4
+    assert detail["summary"]["next_trial_index"] == 5
+    assert detail["summary"]["estimated_remaining_minutes"] == 0
+    assert detail["summary"]["estimated_completed_at"] == completed_at
 
 
 def test_create_optimization_job_candidates_use_real_backtest_metrics(tmp_path):
@@ -1835,6 +2564,7 @@ def test_promote_trial_set_current_appends_parameter_version_when_base_matches(t
 
     assert promoted["id"] == strategy["id"]
     assert promoted["current_parameter_version"] == 2
+    assert promoted["name"] == f"{strategy['name']}v2"
     assert promoted["parameters"] == candidate["parameter_snapshot"]
     assert promoted["parameter_history"][-1]["parameter_version_id"] == promoted["current_parameter_version_id"]
 

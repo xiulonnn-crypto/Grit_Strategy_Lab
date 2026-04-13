@@ -181,16 +181,19 @@ export function OptimizationManualLabPhase4({
       ) : null}
 
       {noteCandidateId ? (
-        <div className="modal-shell" role="dialog" aria-label={TEXT.noteDialogLabel}>
-          <div className="modal-card optimization-page__note-modal">
+        <div
+          aria-label={TEXT.noteDialogLabel}
+          aria-modal="true"
+          className="modal-shell"
+          onClick={() => setNoteCandidateId(null)}
+          role="dialog"
+        >
+          <div className="modal-card optimization-page__note-modal" onClick={(event) => event.stopPropagation()}>
             <div className="panel-header">
               <div>
                 <p className="eyebrow">{TEXT.promoteEyebrow}</p>
                 <h3>{TEXT.noteTitle}</h3>
               </div>
-              <button className="text-button" onClick={() => setNoteCandidateId(null)} type="button">
-                {TEXT.cancel}
-              </button>
             </div>
             <textarea
               aria-label={TEXT.noteInputLabel}
@@ -199,9 +202,12 @@ export function OptimizationManualLabPhase4({
               placeholder={TEXT.notePlaceholder}
               value={revisionNote}
             />
-            <div className="hero-actions">
+            <div className="modal-card__footer">
+              <button className="ghost-button" onClick={() => setNoteCandidateId(null)} type="button">
+                {TEXT.cancel}
+              </button>
               <button className="primary-button" onClick={() => void submitPromoteNote()} type="button">
-                {TEXT.promoteWithNote}
+                确认
               </button>
             </div>
           </div>

@@ -162,6 +162,7 @@ SCHEMA_STATEMENTS = [
         chart_series_json TEXT NOT NULL DEFAULT '[]',
         trades_json TEXT NOT NULL DEFAULT '[]',
         artifact_paths_json TEXT NOT NULL DEFAULT '[]',
+        trade_audit_items_json TEXT NOT NULL DEFAULT '[]',
         trade_audit_json TEXT NOT NULL DEFAULT '[]',
         trades_count INTEGER NOT NULL DEFAULT 0,
         error_message TEXT,
@@ -206,8 +207,29 @@ SCHEMA_STATEMENTS = [
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         completed_at TEXT,
+        deleted_at TEXT,
+        deleted_reason TEXT,
         FOREIGN KEY(strategy_id) REFERENCES strategies(id) ON DELETE CASCADE
     )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS optimization_job_trials (
+        job_id TEXT NOT NULL,
+        trial_index INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        parameter_snapshot_json TEXT NOT NULL DEFAULT '{}',
+        metrics_json TEXT NOT NULL DEFAULT '{}',
+        chart_series_json TEXT NOT NULL DEFAULT '[]',
+        score REAL,
+        error_message TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        FOREIGN KEY(job_id) REFERENCES optimization_jobs(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_optimization_job_trials_job_id_trial_index
+    ON optimization_job_trials(job_id, trial_index)
     """,
     """
     CREATE TABLE IF NOT EXISTS symbol_identity_cache (
@@ -233,7 +255,12 @@ MIGRATION_COLUMNS = {
     "backtest_runs": [
         ("is_permanent", "INTEGER NOT NULL DEFAULT 0"),
         ("artifact_paths_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("trade_audit_items_json", "TEXT NOT NULL DEFAULT '[]'"),
         ("trade_audit_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("deleted_at", "TEXT"),
+        ("deleted_reason", "TEXT"),
+    ],
+    "optimization_jobs": [
         ("deleted_at", "TEXT"),
         ("deleted_reason", "TEXT"),
     ]

@@ -176,7 +176,7 @@ export function WorkspaceStrategySection({ strategies, loading, error, navigate 
 
               <div className="workspace-card-stats">
                 <StatChip label="累计收益" value={strategy.summary?.totalReturn ?? '待回测'} />
-                <StatChip label="年化收益" value={strategy.summary?.annualizedReturn ?? '待回测'} />
+                <StatChip label="年化收益率" value={strategy.summary?.annualizedReturn ?? '待回测'} />
                 <StatChip label="夏普比率" value={strategy.summary?.sharpe ?? '待回测'} />
                 <StatChip label="最大回撤" value={strategy.summary?.maxDrawdown ?? '待回测'} />
               </div>

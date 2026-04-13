@@ -7,6 +7,7 @@ import type {
   ApiOptimizationJobListItem,
   ApiOptimizationSearchSpaceField,
   ApiOptimizationStabilityCheck,
+  ApiOptimizationTrialSummary,
   ApiOptimizationValidationWindow,
   ApiStrategyDetail,
   ParameterValue,
@@ -102,7 +103,7 @@ export function buildOptimizationSearchSpace(
 function buildOptimizationHeatmap(
   searchSpace: ApiOptimizationSearchSpaceField[],
   parameterSnapshot: Record<string, ParameterValue>,
-  centerScore: number,
+  metrics: Record<string, number>,
 ): ApiOptimizationHeatmap {
   const rangeEntries = searchSpace.filter((entry) => entry.mode === 'range');
   const xEntry = rangeEntries[0];
@@ -113,6 +114,10 @@ function buildOptimizationHeatmap(
   const yStep = Math.max(asNumber(yEntry?.step, 1), 1);
   const xValues = [xCenter - xStep, xCenter, xCenter + xStep].map((value) => Number(value.toFixed(2)));
   const yValues = [yCenter - yStep, yCenter, yCenter + yStep].map((value) => Number(value.toFixed(2)));
+  const centerAnnualizedReturn = asNumber(metrics.annualized_return ?? metrics.cagr, 0);
+  const centerReturnSharpe = asNumber(metrics.return_sharpe ?? metrics.sharpe, 0);
+  const centerMaxDrawdownPct = asNumber(metrics.max_drawdown_pct, 0);
+  const centerScore = asNumber(metrics.return_sharpe ?? metrics.sharpe, 0);
   const cells = yValues.flatMap((y, rowIndex) =>
     xValues.map((x, columnIndex) => {
       const distance = Math.abs(rowIndex - 1) + Math.abs(columnIndex - 1);
@@ -121,8 +126,16 @@ function buildOptimizationHeatmap(
         x,
         y,
         score,
+        metrics: {
+          annualized_return: Number((centerAnnualizedReturn - distance * 0.008).toFixed(4)),
+          return_sharpe: Number((centerReturnSharpe - distance * 0.07).toFixed(2)),
+          max_drawdown_pct: Number((centerMaxDrawdownPct - distance * 1.8).toFixed(1)),
+        },
         is_candidate: distance === 0,
-        tone: score >= centerScore - 0.02 ? 'hot' : score >= centerScore - 0.12 ? 'warm' : 'cool',
+        tone: (score >= centerScore - 0.02 ? 'hot' : score >= centerScore - 0.12 ? 'warm' : 'cool') as
+          | 'hot'
+          | 'warm'
+          | 'cool',
       };
     }),
   );
@@ -139,12 +152,25 @@ function buildOptimizationHeatmap(
 }
 
 function buildStabilityChecks(metrics: Record<string, number>): ApiOptimizationStabilityCheck[] {
+  const annualizedReturn = asNumber(metrics.annualized_return ?? metrics.cagr, 0);
   const returnSharpe = asNumber(metrics.return_sharpe ?? metrics.sharpe, 0);
   const outOfSampleSharpe = asNumber(metrics.out_of_sample_sharpe, 0);
   const maxDrawdownPct = asNumber(metrics.max_drawdown_pct, 0);
   const stability = asNumber(metrics.stability, 0);
 
   return [
+    {
+      key: 'annualized_return',
+      label: '年化收益率',
+      value: Number((annualizedReturn * 100).toFixed(1)),
+      verdict: annualizedReturn >= 0.1 ? 'pass' : annualizedReturn >= 0.06 ? 'watch' : 'risk',
+      detail:
+        annualizedReturn >= 0.1
+          ? '年化收益率已进入晋升阈值，可作为首要筛选指标。'
+          : annualizedReturn >= 0.06
+            ? '年化收益率已进入观察区，需要继续结合样本外表现复核。'
+            : '年化收益率仍偏弱，暂不建议直接晋升。',
+    },
     {
       key: 'return_sharpe',
       label: '收益夏普',
@@ -181,42 +207,78 @@ function buildStabilityChecks(metrics: Record<string, number>): ApiOptimizationS
   ];
 }
 
-function buildValidationWindows(
-  metrics: Record<string, number>,
-  statusLabel: string,
-): ApiOptimizationValidationWindow[] {
+function resolveOptimizationVerdict(metrics: Record<string, number>): 'pass' | 'watch' | 'risk' {
+  const annualizedReturn = asNumber(metrics.annualized_return ?? metrics.cagr, 0);
   const returnSharpe = asNumber(metrics.return_sharpe ?? metrics.sharpe, 0);
   const outOfSampleSharpe = asNumber(metrics.out_of_sample_sharpe, 0);
   const maxDrawdownPct = asNumber(metrics.max_drawdown_pct, 0);
   const stability = asNumber(metrics.stability, 0);
-  const bestVerdict = statusLabel === '可晋升' ? 'pass' : statusLabel === '继续观察' ? 'watch' : 'risk';
 
-  return [
+  if (
+    annualizedReturn >= 0.1 &&
+    returnSharpe >= 1 &&
+    outOfSampleSharpe >= 0.8 &&
+    maxDrawdownPct >= -25 &&
+    stability >= 70
+  ) {
+    return 'pass';
+  }
+  if (
+    annualizedReturn >= 0.06 &&
+    returnSharpe >= 0.6 &&
+    outOfSampleSharpe >= 0.4 &&
+    maxDrawdownPct >= -35 &&
+    stability >= 50
+  ) {
+    return 'watch';
+  }
+  return 'risk';
+}
+
+function buildValidationWindows(metrics: Record<string, number>): ApiOptimizationValidationWindow[] {
+  const annualizedReturn = asNumber(metrics.annualized_return ?? metrics.cagr, 0);
+  const returnSharpe = asNumber(metrics.return_sharpe ?? metrics.sharpe, 0);
+  const outOfSampleSharpe = asNumber(metrics.out_of_sample_sharpe, 0);
+  const maxDrawdownPct = asNumber(metrics.max_drawdown_pct, 0);
+  const stability = asNumber(metrics.stability, 0);
+
+  const windows = [
     {
       label: '窗口 A',
+      annualized_return: Number((annualizedReturn - 0.012).toFixed(4)),
       return_sharpe: Number((returnSharpe - 0.04).toFixed(2)),
       out_of_sample_sharpe: Number((outOfSampleSharpe - 0.03).toFixed(2)),
       max_drawdown_pct: Number((maxDrawdownPct - 1.2).toFixed(1)),
       stability: Math.max(0, Number((stability - 4).toFixed(0))),
-      verdict: bestVerdict === 'pass' ? 'pass' : 'watch',
     },
     {
       label: '窗口 B',
+      annualized_return: Number(annualizedReturn.toFixed(4)),
       return_sharpe: Number(returnSharpe.toFixed(2)),
       out_of_sample_sharpe: Number(outOfSampleSharpe.toFixed(2)),
       max_drawdown_pct: Number(maxDrawdownPct.toFixed(1)),
       stability: Number(stability.toFixed(0)),
-      verdict: bestVerdict,
     },
     {
       label: '窗口 C',
+      annualized_return: Number((annualizedReturn - 0.019).toFixed(4)),
       return_sharpe: Number((returnSharpe - 0.09).toFixed(2)),
       out_of_sample_sharpe: Number((outOfSampleSharpe - 0.08).toFixed(2)),
       max_drawdown_pct: Number((maxDrawdownPct - 1.8).toFixed(1)),
       stability: Math.max(0, Number((stability - 9).toFixed(0))),
-      verdict: bestVerdict === 'risk' ? 'risk' : 'watch',
     },
   ];
+
+  return windows.map((windowMetrics) => ({
+    ...windowMetrics,
+    verdict: resolveOptimizationVerdict({
+      annualized_return: windowMetrics.annualized_return,
+      return_sharpe: windowMetrics.return_sharpe,
+      out_of_sample_sharpe: windowMetrics.out_of_sample_sharpe,
+      max_drawdown_pct: windowMetrics.max_drawdown_pct,
+      stability: windowMetrics.stability,
+    }),
+  }));
 }
 
 function resolveCandidatePresentation(rank: number): {
@@ -255,16 +317,18 @@ function resolveCandidatePresentation(rank: number): {
 }
 
 function resolveStatusLabel(candidate: ApiOptimizationCandidate): string {
-  const outOfSampleSharpe = asNumber(candidate.metrics.out_of_sample_sharpe, 0);
-  const stability = asNumber(candidate.metrics.stability, 0);
-  const drawdown = asNumber(candidate.metrics.max_drawdown_pct, 0);
-  if (outOfSampleSharpe >= 0.9 && stability >= 80 && drawdown >= -30) {
+  const verdict = resolveOptimizationVerdict(candidate.metrics);
+  if (verdict === 'pass') {
     return '可晋升';
   }
-  if (stability >= 60 && drawdown >= -32) {
+  if (verdict === 'watch') {
     return '继续观察';
   }
   return '需回退';
+}
+
+function isOptimizationTerminalStatus(status: string): boolean {
+  return ['COMPLETED', 'PARTIALLY_FAILED', 'FAILED'].includes(status);
 }
 
 function hydrateCandidate(
@@ -316,11 +380,65 @@ function hydrateCandidate(
       validation_windows:
         candidate.analysis?.validation_windows?.length
           ? clone(candidate.analysis.validation_windows)
-          : buildValidationWindows(metrics, statusLabel),
+          : buildValidationWindows(metrics),
       heatmap:
         candidate.analysis?.heatmap ??
-        buildOptimizationHeatmap(searchSpace, candidate.parameter_snapshot ?? {}, asNumber(metrics.return_sharpe, 0)),
+        buildOptimizationHeatmap(searchSpace, candidate.parameter_snapshot ?? {}, metrics),
     },
+  };
+}
+
+function scoreOptimizationMetrics(metrics: Record<string, number>, objective?: string | null): number {
+  const normalizedObjective = String(objective ?? 'sharpe').trim().toLowerCase();
+  const annualizedReturnPct = asNumber(metrics.annualized_return ?? metrics.cagr, 0) * 100;
+  const returnSharpe = asNumber(metrics.return_sharpe ?? metrics.sharpe, 0);
+  const outOfSampleSharpe = asNumber(metrics.out_of_sample_sharpe, 0);
+  const totalReturnPct =
+    typeof metrics.total_return_pct === 'number'
+      ? metrics.total_return_pct
+      : asNumber(metrics.total_return, 0) * 100;
+  const stability = asNumber(metrics.stability, 0);
+  const drawdownPenalty = Math.abs(asNumber(metrics.max_drawdown_pct, 0));
+
+  if (['return', 'total_return', 'annualized_return', 'cagr'].includes(normalizedObjective)) {
+    return Number(
+      (
+        annualizedReturnPct * 0.05 +
+        totalReturnPct * 0.01 +
+        outOfSampleSharpe * 0.15 +
+        stability / 1000 -
+        drawdownPenalty / 200
+      ).toFixed(3),
+    );
+  }
+
+  return Number(
+    (
+      returnSharpe * 0.4 +
+      outOfSampleSharpe * 0.25 +
+      annualizedReturnPct * 0.03 +
+      totalReturnPct * 0.002 +
+      stability / 1000 -
+      drawdownPenalty / 200
+    ).toFixed(3),
+  );
+}
+
+function buildOptimizationTrialSummary(candidate: ApiOptimizationCandidate | undefined | null): ApiOptimizationTrialSummary | undefined {
+  if (!candidate) {
+    return undefined;
+  }
+
+  return {
+    trial_index: candidate.rank,
+    label: candidate.label,
+    status: candidate.status,
+    parameter_snapshot: clone(candidate.parameter_snapshot ?? {}),
+    metrics: clone(candidate.metrics ?? {}),
+    score: asNumber(candidate.score, 0),
+    error_message: null,
+    started_at: null,
+    completed_at: null,
   };
 }
 
@@ -333,6 +451,10 @@ function buildGeneratedCandidates(
   const strategyParameters = clone(strategy.parameters ?? {});
   const rangeEntries = searchSpace.filter((entry) => entry.mode === 'range');
   const baseReturn = asNumber(sourceRun?.metrics?.total_return, 0.16) * 100;
+  const baseAnnualizedReturn = asNumber(
+    sourceRun?.metrics?.annualized_return,
+    Math.max(asNumber(sourceRun?.metrics?.total_return, 0.16) * 0.65, 0.08),
+  );
   const baseSharpe = asNumber(sourceRun?.metrics?.sharpe, 0.92);
   const baseDrawdown = Math.abs(asNumber(sourceRun?.metrics?.max_drawdown, 0.3)) * 100 || 30;
 
@@ -360,6 +482,7 @@ function buildGeneratedCandidates(
     {
       adjustments: [-1, -1],
       metrics: {
+        annualized_return_pct: Number(((baseAnnualizedReturn + 0.038) * 100).toFixed(1)),
         return_sharpe: Number((baseSharpe + 0.24).toFixed(2)),
         out_of_sample_sharpe: Number((baseSharpe + 0.08).toFixed(2)),
         max_drawdown_pct: Number((-(baseDrawdown - 4.8)).toFixed(1)),
@@ -371,6 +494,7 @@ function buildGeneratedCandidates(
     {
       adjustments: [0, 0],
       metrics: {
+        annualized_return_pct: Number(((baseAnnualizedReturn + 0.028) * 100).toFixed(1)),
         return_sharpe: Number((baseSharpe + 0.18).toFixed(2)),
         out_of_sample_sharpe: Number((baseSharpe + 0.12).toFixed(2)),
         max_drawdown_pct: Number((-(baseDrawdown - 6.2)).toFixed(1)),
@@ -382,6 +506,7 @@ function buildGeneratedCandidates(
     {
       adjustments: [-2, -2],
       metrics: {
+        annualized_return_pct: Number(((baseAnnualizedReturn + 0.016) * 100).toFixed(1)),
         return_sharpe: Number((baseSharpe + 0.28).toFixed(2)),
         out_of_sample_sharpe: Number((baseSharpe - 0.03).toFixed(2)),
         max_drawdown_pct: Number((-(baseDrawdown - 1.4)).toFixed(1)),
@@ -393,6 +518,7 @@ function buildGeneratedCandidates(
     {
       adjustments: [-3, -3],
       metrics: {
+        annualized_return_pct: Number((Math.max((baseAnnualizedReturn - 0.01) * 100, 3)).toFixed(1)),
         return_sharpe: Number((baseSharpe + 0.33).toFixed(2)),
         out_of_sample_sharpe: Number((baseSharpe - 0.21).toFixed(2)),
         max_drawdown_pct: Number((-(baseDrawdown + 3.6)).toFixed(1)),
@@ -408,18 +534,14 @@ function buildGeneratedCandidates(
     const presentation = resolveCandidatePresentation(rank);
     const metrics = {
       ...profile.metrics,
+      annualized_return: Number((profile.metrics.annualized_return_pct / 100).toFixed(4)),
+      cagr: Number((profile.metrics.annualized_return_pct / 100).toFixed(4)),
       sharpe: profile.metrics.return_sharpe,
       total_return: Number((profile.metrics.total_return_pct / 100).toFixed(4)),
+      max_drawdown: Number((profile.metrics.max_drawdown_pct / 100).toFixed(4)),
     };
     const parameterSnapshot = applyAdjustments(profile.adjustments);
-    const score = Number(
-      (
-        asNumber(metrics.return_sharpe) * 0.55 +
-        asNumber(metrics.out_of_sample_sharpe) * 0.35 +
-        asNumber(metrics.stability) / 1000 -
-        Math.abs(asNumber(metrics.max_drawdown_pct)) / 1000
-      ).toFixed(3),
-    );
+    const score = scoreOptimizationMetrics(metrics, payload.objective ?? 'sharpe');
 
     const candidate = createCandidate(
       strategy,
@@ -464,7 +586,7 @@ export function hydrateOptimizationJob(
     budget_combinations: asNumber(job.request.budget_combinations ?? job.summary.budget_combinations, 42),
     search_space: cloneSearchSpace(searchSpace),
   };
-  const shouldGenerateCandidates = job.candidates.length > 0 || !['QUEUED', 'RUNNING'].includes(status);
+  const shouldGenerateCandidates = job.candidates.length > 0 || isOptimizationTerminalStatus(status);
   const generatedCandidates =
     job.candidates.length > 0
       ? [...job.candidates]
@@ -494,20 +616,40 @@ export function hydrateOptimizationJob(
       null,
     budget_combinations: asNumber(job.summary.budget_combinations ?? request.budget_combinations, 42),
     completed_combinations: asNumber(
-      job.summary.completed_combinations ?? (status === 'COMPLETED' ? request.budget_combinations : 0),
-      status === 'COMPLETED' ? asNumber(request.budget_combinations, 42) : 0,
+      job.summary.completed_combinations ??
+        (isOptimizationTerminalStatus(status) ? request.budget_combinations : 0),
+      isOptimizationTerminalStatus(status) ? asNumber(request.budget_combinations, 42) : 0,
     ),
     search_space: cloneSearchSpace(searchSpace),
+    resume_ready: typeof job.summary.resume_ready === 'boolean' ? job.summary.resume_ready : undefined,
+    persisted_trial_count:
+      typeof job.summary.persisted_trial_count === 'number' ? job.summary.persisted_trial_count : undefined,
+    next_trial_index: typeof job.summary.next_trial_index === 'number' ? job.summary.next_trial_index : undefined,
+    interrupted_reason:
+      typeof job.summary.interrupted_reason === 'string' ? job.summary.interrupted_reason : undefined,
+    best_metrics_summary:
+      job.summary.best_metrics_summary && typeof job.summary.best_metrics_summary === 'object'
+        ? clone(job.summary.best_metrics_summary as ApiOptimizationTrialSummary)
+        : undefined,
+    estimated_remaining_minutes:
+      typeof job.summary.estimated_remaining_minutes === 'number' ? job.summary.estimated_remaining_minutes : undefined,
+    estimated_completed_at:
+      typeof job.summary.estimated_completed_at === 'string' ? job.summary.estimated_completed_at : undefined,
   };
   summary.status = (job.summary.status as string | undefined) ?? status;
-  summary.progress_pct = asNumber(job.summary.progress_pct, status === 'COMPLETED' ? 100 : 0);
+  summary.progress_pct = asNumber(job.summary.progress_pct, isOptimizationTerminalStatus(status) ? 100 : 0);
   summary.current_stage =
-    (job.summary.current_stage as string | undefined) ?? (status === 'COMPLETED' ? '优化完成' : '正在准备');
+    (job.summary.current_stage as string | undefined) ?? (isOptimizationTerminalStatus(status) ? '优化完成' : '正在准备');
   summary.latest_update =
     (job.summary.latest_update as string | undefined) ??
-    (status === 'COMPLETED' ? '优化任务已完成。' : '优化任务已创建，正在准备搜索队列。');
+    (isOptimizationTerminalStatus(status) ? '优化任务已完成。' : '优化任务已创建，正在准备搜索队列。');
   if (typeof job.summary.latest_candidate_label === 'string') {
     summary.latest_candidate_label = job.summary.latest_candidate_label;
+  }
+  if (!summary.best_metrics_summary) {
+    summary.best_metrics_summary =
+      buildOptimizationTrialSummary(bestCandidate) ??
+      (job.best_metrics_summary ? clone(job.best_metrics_summary as ApiOptimizationTrialSummary) : undefined);
   }
   const result: ApiOptimizationJobDetail['result'] = {
     ...job.result,
@@ -525,7 +667,10 @@ export function hydrateOptimizationJob(
       null,
   };
   result.status = (job.result.status as string | undefined) ?? status;
-  result.progress_pct = asNumber(job.result.progress_pct, asNumber(summary.progress_pct, status === 'COMPLETED' ? 100 : 0));
+  result.progress_pct = asNumber(
+    job.result.progress_pct,
+    asNumber(summary.progress_pct, isOptimizationTerminalStatus(status) ? 100 : 0),
+  );
   result.current_stage =
     (job.result.current_stage as string | undefined) ?? (summary.current_stage as string | undefined) ?? null;
   result.latest_update =
@@ -548,7 +693,8 @@ export function hydrateOptimizationJob(
       (request.base_parameter_version_id as string | null | undefined) ??
       strategy.current_parameter_version_id ??
       null,
-    updated_at: job.updated_at ?? job.completed_at ?? job.created_at ?? null ?? undefined,
+    best_metrics_summary: summary.best_metrics_summary ?? null,
+    updated_at: job.updated_at ?? job.completed_at ?? job.created_at ?? undefined,
     completed_at: completedAt,
   };
 }
@@ -580,6 +726,13 @@ export function buildOptimizationJobListItem(
       job.summary.completed_combinations ?? job.summary.budget_combinations ?? job.request.budget_combinations,
       42,
     ),
+    progress_pct: asNumber(job.summary.progress_pct, isOptimizationTerminalStatus(job.status) ? 100 : 0),
+    current_stage: typeof job.summary.current_stage === 'string' ? job.summary.current_stage : null,
+    latest_update: typeof job.summary.latest_update === 'string' ? job.summary.latest_update : null,
+    estimated_remaining_minutes:
+      typeof job.summary.estimated_remaining_minutes === 'number' ? job.summary.estimated_remaining_minutes : null,
+    estimated_completed_at:
+      typeof job.summary.estimated_completed_at === 'string' ? job.summary.estimated_completed_at : null,
     best_candidate_id:
       typeof job.result.best_candidate_id === 'string'
         ? job.result.best_candidate_id
@@ -597,5 +750,15 @@ export function buildOptimizationJobListItem(
     created_at: job.created_at ?? null,
     updated_at: job.updated_at ?? null,
     completed_at: job.completed_at ?? null,
+    resume_ready: typeof job.summary.resume_ready === 'boolean' ? job.summary.resume_ready : undefined,
+    persisted_trial_count:
+      typeof job.summary.persisted_trial_count === 'number' ? job.summary.persisted_trial_count : undefined,
+    next_trial_index: typeof job.summary.next_trial_index === 'number' ? job.summary.next_trial_index : undefined,
+    interrupted_reason:
+      typeof job.summary.interrupted_reason === 'string' ? job.summary.interrupted_reason : undefined,
+    best_metrics_summary:
+      job.summary.best_metrics_summary && typeof job.summary.best_metrics_summary === 'object'
+        ? clone(job.summary.best_metrics_summary as ApiOptimizationTrialSummary)
+        : buildOptimizationTrialSummary(job.candidates[0]),
   };
 }

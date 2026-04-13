@@ -1,5 +1,6 @@
 import {
   ApiError,
+  type ApiBacktestRunDeleteResult,
   type ApiBacktestRunDetail,
   type ApiBacktestRunListItem,
   type ApiBacktestRunTradeAudit,
@@ -15,12 +16,13 @@ import {
   type ApiStrategyDetail,
   type ApiStrategyListItem,
   type ApiWorkspaceOverview,
+  type BacktestRunDetailRequest,
   type CreateCandidatePayload,
   type DemoApi,
   type PromoteMode,
 } from '../types';
 import { createInitialState } from './demoStoreSeed';
-import { clone, createCandidate, nextId, nowIso } from './demoStoreShared';
+import { clone, createCandidate, formatVersionedStrategyName, nextId, nowIso } from './demoStoreShared';
 import { buildOptimizationJobListItem, hydrateOptimizationJob } from './optimization-demo';
 
 let state = createInitialState();
@@ -95,11 +97,22 @@ function isOptimizationInFlight(status: string | null | undefined): boolean {
   return ['QUEUED', 'RUNNING'].includes(String(status ?? '').toUpperCase());
 }
 
+function estimateCompletedAt(remainingMinutes: number | null): string | null {
+  if (remainingMinutes === null) {
+    return null;
+  }
+  if (remainingMinutes <= 0) {
+    return nowIso();
+  }
+  return new Date(Date.now() + remainingMinutes * 60_000).toISOString();
+}
+
 function buildDemoOptimizationProgressPlan(): Array<{
   status: ApiOptimizationJobDetail['status'];
   progressPct: number;
   candidateCount: number;
   currentStage: string;
+  estimatedRemainingMinutes: number | null;
   latestUpdate: string | ((candidate: ApiOptimizationCandidate | undefined) => string);
 }> {
   return [
@@ -108,6 +121,7 @@ function buildDemoOptimizationProgressPlan(): Array<{
       progressPct: 0,
       candidateCount: 0,
       currentStage: '任务已创建',
+      estimatedRemainingMinutes: null,
       latestUpdate: '优化任务已创建，正在准备搜索队列。',
     },
     {
@@ -115,6 +129,7 @@ function buildDemoOptimizationProgressPlan(): Array<{
       progressPct: 16,
       candidateCount: 0,
       currentStage: '首轮搜索',
+      estimatedRemainingMinutes: null,
       latestUpdate: '正在收集首轮组合表现，结果中心会自动刷新。',
     },
     {
@@ -122,6 +137,7 @@ function buildDemoOptimizationProgressPlan(): Array<{
       progressPct: 44,
       candidateCount: 1,
       currentStage: '候选生成',
+      estimatedRemainingMinutes: 18,
       latestUpdate: (candidate) => `首个候选 ${candidate?.label ?? '已生成'} 已进入稳定性检查。`,
     },
     {
@@ -129,6 +145,7 @@ function buildDemoOptimizationProgressPlan(): Array<{
       progressPct: 68,
       candidateCount: 2,
       currentStage: '稳定性验证',
+      estimatedRemainingMinutes: 11,
       latestUpdate: (candidate) => `正在扩大验证窗口，当前首位候选为 ${candidate?.label ?? '待更新'}。`,
     },
     {
@@ -136,6 +153,7 @@ function buildDemoOptimizationProgressPlan(): Array<{
       progressPct: 88,
       candidateCount: 3,
       currentStage: '热区扫描',
+      estimatedRemainingMinutes: 5,
       latestUpdate: '参数热区和多窗口验证即将完成。',
     },
     {
@@ -143,6 +161,7 @@ function buildDemoOptimizationProgressPlan(): Array<{
       progressPct: 100,
       candidateCount: 4,
       currentStage: '优化完成',
+      estimatedRemainingMinutes: 0,
       latestUpdate: (candidate) => `优化已完成，当前首选为 ${candidate?.label ?? '最新候选'}。`,
     },
   ];
@@ -184,6 +203,8 @@ function advanceOptimizationJob(job: ApiOptimizationJobDetail): ApiOptimizationJ
     typeof nextStage.latestUpdate === 'function'
       ? nextStage.latestUpdate(leadingCandidate)
       : nextStage.latestUpdate;
+  const estimatedRemainingMinutes = nextStage.estimatedRemainingMinutes;
+  const estimatedCompletedAt = estimateCompletedAt(estimatedRemainingMinutes);
 
   job.status = nextStage.status;
   job.candidates = publishedCandidates;
@@ -202,6 +223,8 @@ function advanceOptimizationJob(job: ApiOptimizationJobDetail): ApiOptimizationJ
     latest_update: latestUpdate,
     latest_candidate_label: leadingCandidate?.label ?? null,
     progress_pct: nextStage.progressPct,
+    estimated_remaining_minutes: estimatedRemainingMinutes,
+    estimated_completed_at: estimatedCompletedAt,
   };
   job.result = {
     ...job.result,
@@ -217,6 +240,31 @@ function advanceOptimizationJob(job: ApiOptimizationJobDetail): ApiOptimizationJ
     latest_update: latestUpdate,
   };
 
+  return recalculateJob(job);
+}
+
+function resumeOptimizationJob(job: ApiOptimizationJobDetail): ApiOptimizationJobDetail {
+  if (job.status !== 'INTERRUPTED') {
+    return syncOptimizationJob(job);
+  }
+
+  job.status = 'RUNNING';
+  job.updated_at = nowIso();
+  job.summary = {
+    ...job.summary,
+    status: 'RUNNING',
+    current_stage: job.summary.current_stage ?? '断点恢复中',
+    latest_update: '已继续优化，正在从断点恢复。',
+    resume_ready: false,
+    estimated_remaining_minutes: 12,
+    estimated_completed_at: estimateCompletedAt(12),
+  };
+  job.result = {
+    ...job.result,
+    status: 'RUNNING',
+    current_stage: job.summary.current_stage ?? job.result.current_stage ?? '断点恢复中',
+    latest_update: '已继续优化，正在从断点恢复。',
+  };
   return recalculateJob(job);
 }
 
@@ -439,13 +487,24 @@ export const demoApi: DemoApi = {
     const limit = params?.limit ?? filtered.length;
     return clone(filtered.slice(0, limit).map(toRunListItem));
   },
-  async getBacktestRunDetail(id: string, _signal?: AbortSignal): Promise<ApiBacktestRunDetail> {
+  async getBacktestRunDetail(
+    id: string,
+    _options?: BacktestRunDetailRequest | AbortSignal,
+  ): Promise<ApiBacktestRunDetail> {
     return clone(findRun(id));
   },
   async saveBacktestRun(id: string): Promise<ApiBacktestRunDetail> {
     const run = findRun(id);
     run.is_permanent = true;
     return clone(run);
+  },
+  async deleteBacktestRun(id: string): Promise<ApiBacktestRunDeleteResult> {
+    const run = findRun(id);
+    if (run.status === 'QUEUED' || run.status === 'RUNNING') {
+      throw new ApiError({ status: 409, code: 'backtest_run_delete_active', message: '进行中的回测暂不支持删除。' });
+    }
+    state.runs = state.runs.filter((item) => item.id !== id);
+    return { id, deleted_at: nowIso(), deleted_reason: 'manual_delete' };
   },
   async getBacktestRunTrades(id: string, params): Promise<ApiBacktestRunTradePage> {
     const run = findRun(id);
@@ -518,6 +577,20 @@ export const demoApi: DemoApi = {
     const job = findJob(id);
     return clone(isOptimizationInFlight(job.status) ? advanceOptimizationJob(job) : job);
   },
+  async deleteOptimizationJob(id: string) {
+    const job = findJob(id);
+    const deletedAt = nowIso();
+    state.optimizationJobs = state.optimizationJobs.filter((item) => item.id !== id);
+    sortOptimizationJobs();
+    const strategy = findStrategy(job.strategy_id);
+    strategy.latest_optimization_job_id =
+      state.optimizationJobs.find((item) => item.strategy_id === strategy.id)?.id ?? null;
+    return {
+      id,
+      deleted_at: deletedAt,
+      deleted_reason: 'user_deleted',
+    };
+  },
   async createOptimizationJob(strategyId: string, payload?: ApiOptimizationJobCreatePayload): Promise<ApiOptimizationJobDetail> {
     const strategy = findStrategy(strategyId);
     const job: ApiOptimizationJobDetail = {
@@ -542,6 +615,8 @@ export const demoApi: DemoApi = {
         progress_pct: 0,
         current_stage: '任务已创建',
         latest_update: '优化任务已创建，正在准备搜索队列。',
+        estimated_remaining_minutes: null,
+        estimated_completed_at: null,
         mock_progress_stage: 0,
       },
       result: {
@@ -563,6 +638,11 @@ export const demoApi: DemoApi = {
     state.optimizationJobs.unshift(job);
     strategy.latest_optimization_job_id = job.id;
     return clone(recalculateJob(job));
+  },
+  async resumeOptimizationJob(jobId: string): Promise<ApiOptimizationJobDetail> {
+    const job = findJob(jobId);
+    const resumed = resumeOptimizationJob(job);
+    return clone(resumed);
   },
   async createOptimizationCandidate(jobId: string, payload: CreateCandidatePayload): Promise<ApiOptimizationJobDetail> {
     const job = findJob(jobId);
@@ -609,6 +689,7 @@ export const demoApi: DemoApi = {
       strategy.parameters = clone(candidate.parameter_snapshot);
       strategy.current_parameter_version = (strategy.current_parameter_version ?? 1) + 1;
       strategy.current_parameter_version_id = `${strategy.id}-v${strategy.current_parameter_version}`;
+      strategy.name = formatVersionedStrategyName(strategy.name, strategy.current_parameter_version);
       strategy.latest_optimization_job_id = job.id;
       strategy.parameter_history = [
         {

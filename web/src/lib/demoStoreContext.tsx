@@ -1,6 +1,7 @@
 ﻿import React, { createContext, useContext, useMemo } from 'react';
 import { ApiError } from '../types';
 import type {
+  ApiBacktestRunDeleteResult,
   ApiBacktestRunDetail,
   ApiBacktestRunListItem,
   ApiBacktestRunTradeAudit,
@@ -8,6 +9,7 @@ import type {
   ApiBacktestSubmissionPreview,
   ApiConfirmationUpdateRequest,
   ApiOptimizationJobCreatePayload,
+  ApiOptimizationJobDeleteResult,
   ApiOptimizationJobDetail,
   ApiOptimizationJobListItem,
   ApiSnapshotOverview,
@@ -15,6 +17,7 @@ import type {
   ApiStrategyDetail,
   ApiStrategyListItem,
   ApiWorkspaceOverview,
+  BacktestRunDetailRequest,
   DemoApi,
   BacktestRunListQuery,
 } from '../types';
@@ -88,6 +91,18 @@ function withJsonBody(body: unknown, init?: RequestInit): RequestInit {
   };
 }
 
+function normalizeBacktestRunDetailRequest(
+  options?: BacktestRunDetailRequest | AbortSignal,
+): BacktestRunDetailRequest {
+  if (!options) {
+    return {};
+  }
+  if (typeof AbortSignal !== 'undefined' && options instanceof AbortSignal) {
+    return { signal: options };
+  }
+  return options as BacktestRunDetailRequest;
+}
+
 function createHttpApiClient(): DemoApi {
   return {
     getWorkspaceOverview: (includeCleanupAudit = false, signal) =>
@@ -133,11 +148,25 @@ function createHttpApiClient(): DemoApi {
       const suffix = query.toString();
       return requestJson<ApiBacktestRunListItem[]>(`/backtest-runs${suffix ? `?${suffix}` : ''}`, { signal });
     },
-    getBacktestRunDetail: (id, signal) =>
-      requestJson<ApiBacktestRunDetail>(`/backtest-runs/${encodeURIComponent(id)}/detail`, { signal }),
+    getBacktestRunDetail: (id, options) => {
+      const request = normalizeBacktestRunDetailRequest(options);
+      const query = new URLSearchParams();
+      if (request.view && request.view !== 'full') {
+        query.set('view', request.view);
+      }
+      const suffix = query.toString();
+      return requestJson<ApiBacktestRunDetail>(
+        `/backtest-runs/${encodeURIComponent(id)}/detail${suffix ? `?${suffix}` : ''}`,
+        { signal: request.signal },
+      );
+    },
     saveBacktestRun: (id) =>
       requestJson<ApiBacktestRunDetail>(`/backtest-runs/${encodeURIComponent(id)}/save`, {
         method: 'POST',
+      }),
+    deleteBacktestRun: (id) =>
+      requestJson<ApiBacktestRunDeleteResult>(`/backtest-runs/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
       }),
     getBacktestRunTrades: (id, params) => {
       const query = new URLSearchParams();
@@ -170,10 +199,19 @@ function createHttpApiClient(): DemoApi {
       ),
     listOptimizationJobs: () => requestJson<ApiOptimizationJobListItem[]>('/optimization-jobs'),
     getOptimizationJobDetail: (id) => requestJson<ApiOptimizationJobDetail>(`/optimization-jobs/${encodeURIComponent(id)}/detail`),
+    deleteOptimizationJob: (id) =>
+      requestJson<ApiOptimizationJobDeleteResult>(`/optimization-jobs/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      }),
     createOptimizationJob: (strategyId, payload?: ApiOptimizationJobCreatePayload) =>
       requestJson<ApiOptimizationJobDetail>(
         `/strategies/${encodeURIComponent(strategyId)}/optimization-jobs`,
         withJsonBody(payload ?? {}, { method: 'POST' }),
+      ),
+    resumeOptimizationJob: (jobId, idempotencyKey) =>
+      requestJson<ApiOptimizationJobDetail>(
+        `/optimization-jobs/${encodeURIComponent(jobId)}/resume`,
+        withJsonBody({ idempotency_key: idempotencyKey }, { method: 'POST' }),
       ),
     createOptimizationCandidate: (jobId, payload) =>
       requestJson<ApiOptimizationJobDetail>(

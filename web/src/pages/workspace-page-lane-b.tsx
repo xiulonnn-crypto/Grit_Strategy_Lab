@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import { buildRecentRunScore, buildWorkspaceStrategyCards } from '../lib/workspace-adapters';
 import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
@@ -7,6 +7,7 @@ import { WorkspaceStrategySection } from '../page-sections/workspace-lane-b';
 import type {
   ApiBacktestRunDetail,
   ApiBacktestRunListItem,
+  ApiOptimizationJobListItem,
   ApiStrategyDetail,
   ApiStrategyListItem,
   ApiWorkspaceOverview,
@@ -15,15 +16,15 @@ import './workspace-page-lane-b.css';
 
 const TEXT = {
   healthTitle: '工作台健康度',
-  healthCopy: '当前研究工作台的核心状态与风险提示。',
+  healthCopy: '集中查看策略数量、活跃回测与优化进度，快速进入最近有动作的任务。',
   createStrategy: '创建策略',
   openSnapshots: '数据快照',
   noStrategyTitle: '创建第一个策略',
-  noStrategyCopy: '当前数据库还没有可用策略，先进入创建流程把主链路打通。',
+  noStrategyCopy: '当前还没有可用策略，先创建一个策略，把回测与优化主链路跑通。',
   noStrategyAction: '创建第一个策略',
   strategiesLabel: '策略数',
   activeRunsLabel: '活跃回测',
-  optimizationsLabel: '运行中的优化',
+  optimizationsLabel: '优化任务',
   latestRunLabel: '最新回测',
   latestRunFallback: '暂无',
 } as const;
@@ -86,23 +87,23 @@ function formatDateRange(start?: string | null, end?: string | null): string {
     return `${formattedStart} - ${formattedEnd}`;
   }
   if (formattedStart) {
-    return `${formattedStart} - 区间待补充`;
+    return `${formattedStart} - 区间待定`;
   }
   if (formattedEnd) {
-    return `区间待补充 - ${formattedEnd}`;
+    return `区间待定 - ${formattedEnd}`;
   }
 
-  return '区间待补充';
+  return '区间待定';
 }
 
 function formatRelativeTime(value?: string | null): string {
   if (!value) {
-    return '完成时间待定';
+    return '时间未知';
   }
 
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
-    return '完成时间待定';
+    return '时间未知';
   }
 
   const diffMs = Date.now() - parsed.getTime();
@@ -119,6 +120,67 @@ function formatRelativeTime(value?: string | null): string {
   return `${Math.round(diffHours / 24)} 天前`;
 }
 
+function formatOptimizationStatus(status?: string | null): string {
+  switch (String(status ?? '').toUpperCase()) {
+    case 'QUEUED':
+      return '排队中';
+    case 'RUNNING':
+      return '进行中';
+    case 'INTERRUPTED':
+      return '已中断';
+    case 'COMPLETED':
+      return '已完成';
+    case 'PARTIALLY_FAILED':
+      return '部分失败';
+    case 'FAILED':
+      return '失败';
+    default:
+      return '未知状态';
+  }
+}
+
+function formatOptimizationRate(value?: number | null): string {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return '-';
+  }
+  return `${value >= 0 ? '+' : ''}${(value * 100).toFixed(1)}%`;
+}
+
+function formatOptimizationMetric(value?: number | null): string {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return '-';
+  }
+  return value.toFixed(2);
+}
+
+function pickActivityTime(...values: Array<string | null | undefined>): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function buildOptimizationKindLabel(status: string): string {
+  return status === 'INTERRUPTED' ? '优化已中断' : '优化任务';
+}
+
+function formatOptimizationEntryPoint(value?: string | null): string {
+  switch (String(value ?? '').toLowerCase()) {
+    case 'run_detail':
+      return '回测详情';
+    case 'strategy_detail':
+      return '策略详情';
+    default:
+      return '工作台';
+  }
+}
+
+function formatOptimizationValidationMode(value?: string | null): string {
+  return String(value ?? '').toLowerCase() === 'single_oos' ? '单窗口样本外' : 'Walk Forward';
+}
+
 function getConfigDate(configuration: ApiBacktestRunDetail['configuration'], key: string): string | undefined {
   if (!configuration || typeof configuration !== 'object') {
     return undefined;
@@ -126,6 +188,12 @@ function getConfigDate(configuration: ApiBacktestRunDetail['configuration'], key
 
   const value = (configuration as Record<string, unknown>)[key];
   return typeof value === 'string' ? value : undefined;
+}
+
+
+function formatOptimizationVersionTag(value?: string | null): string | null {
+  const match = String(value ?? '').trim().match(/-v(\d+)$/i);
+  return match ? `V${match[1]}` : null;
 }
 
 function toRunSummaryDetail(run: ApiBacktestRunListItem): ApiBacktestRunDetail {
@@ -153,7 +221,7 @@ function toRunSummaryDetail(run: ApiBacktestRunListItem): ApiBacktestRunDetail {
   };
 }
 
-function buildRecentRunItems(
+function buildBacktestRecentRunItems(
   runs: ApiBacktestRunListItem[],
   detailsById: Record<string, ApiBacktestRunDetail>,
   strategyNamesById: Record<string, string>,
@@ -191,13 +259,11 @@ function buildRecentRunItems(
 
     return {
       id: run.id,
-      runId: run.id,
+      kind: 'backtest',
+      activityId: run.id,
       strategyName,
       status: run.status,
-      totalReturn: score.totalReturn,
-      sharpe: score.sharpe,
       completedAt,
-      periodLabel: rangeStart ? `OOS 起始 ${formatDisplayDate(rangeStart) ?? '待补充'}` : '还没有完整区间',
       statusLabel:
         run.status === 'QUEUED'
           ? '排队中'
@@ -208,9 +274,107 @@ function buildRecentRunItems(
               : run.status === 'COMPLETED_WITH_WARNINGS'
                 ? '已完成有提醒'
                 : '失败',
-      runKindLabel: (detail?.is_permanent ?? run.is_permanent) ? '永久回测' : '临时回测',
-      dateRangeLabel: formatDateRange(rangeStart, rangeEnd),
+      kindLabel: (detail?.is_permanent ?? run.is_permanent) ? '永久回测' : '临时回测',
+      metaLabel: formatDateRange(rangeStart, rangeEnd),
+      badges: [
+        { text: `总收益 ${score.totalReturn}`, tone: score.totalReturn.startsWith('-') ? 'negative' : 'positive' },
+        { text: `收益夏普 ${score.sharpe}`, tone: 'neutral' },
+        {
+          text: `状态 ${
+            run.status === 'COMPLETED_WITH_WARNINGS'
+              ? '已完成有提醒'
+              : run.status === 'COMPLETED'
+                ? '已完成'
+                : run.status === 'RUNNING'
+                  ? '运行中'
+                  : run.status === 'QUEUED'
+                    ? '排队中'
+                    : '失败'
+          }`,
+          tone: run.status === 'FAILED' ? 'negative' : run.status === 'COMPLETED_WITH_WARNINGS' ? 'warning' : 'neutral',
+        },
+      ],
       completedRelativeLabel: formatRelativeTime(completedAt),
+      navigatePath: `/runs/${run.id}`,
+    };
+  });
+}
+
+function buildOptimizationRecentRunItems(
+  jobs: ApiOptimizationJobListItem[],
+  strategyNamesById: Record<string, string>,
+): WorkspaceRecentRunItem[] {
+  return jobs.map((job) => {
+    const status = String(job.status ?? '').toUpperCase();
+    const strategyBaseName = strategyNamesById[job.strategy_id] ?? job.strategy_name ?? job.strategy_id;
+    const strategyVersionTag = formatOptimizationVersionTag(job.base_parameter_version_id);
+    const completedAt = pickActivityTime(job.completed_at, job.updated_at, job.created_at);
+    const bestMetrics = job.best_metrics_summary?.metrics ?? {};
+    const annualizedReturn =
+      typeof bestMetrics.annualized_return === 'number'
+        ? bestMetrics.annualized_return
+        : typeof bestMetrics.cagr === 'number'
+          ? bestMetrics.cagr
+          : null;
+    const returnSharpe =
+      typeof bestMetrics.return_sharpe === 'number'
+        ? bestMetrics.return_sharpe
+        : typeof bestMetrics.sharpe === 'number'
+          ? bestMetrics.sharpe
+          : null;
+    const progressPct = typeof job.progress_pct === 'number' ? job.progress_pct : 0;
+    const etaLabel =
+      typeof job.estimated_remaining_minutes === 'number'
+        ? `${Math.max(0, Math.round(job.estimated_remaining_minutes))} 分钟`
+        : '等待首批样本';
+    const progressLabel = job.budget_combinations
+      ? `${job.completed_combinations ?? 0} / ${job.budget_combinations}`
+      : `${job.completed_combinations ?? 0}`;
+
+    const badges =
+      status === 'INTERRUPTED'
+        ? [
+            { text: `已完成 ${progressLabel}`, tone: 'warning' as const },
+            { text: '进度已保留', tone: 'warning' as const },
+            { text: `恢复起点 第 ${job.next_trial_index ?? (job.completed_combinations ?? 0) + 1} 轮`, tone: 'neutral' as const },
+          ]
+        : ['QUEUED', 'RUNNING'].includes(status)
+          ? [
+              { text: `进度 ${progressPct}%`, tone: 'neutral' as const },
+              { text: `ETA ${etaLabel}`, tone: typeof job.estimated_remaining_minutes === 'number' ? 'positive' as const : 'neutral' as const },
+              { text: `阶段 ${job.current_stage ?? '等待中'}`, tone: 'neutral' as const },
+            ]
+          : [
+              { text: `年化收益率 ${formatOptimizationRate(annualizedReturn)}`, tone: annualizedReturn !== null && annualizedReturn < 0 ? 'negative' as const : 'positive' as const },
+              { text: `收益夏普 ${formatOptimizationMetric(returnSharpe)}`, tone: 'neutral' as const },
+              { text: `状态 ${formatOptimizationStatus(status)}`, tone: status === 'FAILED' ? 'negative' as const : status === 'PARTIALLY_FAILED' ? 'warning' as const : 'neutral' as const },
+            ];
+
+    const metaLabel =
+      status === 'INTERRUPTED'
+        ? job.latest_update ?? '优化已中断，当前进度已保留，可继续恢复任务。'
+        : ['QUEUED', 'RUNNING'].includes(status)
+          ? job.latest_update ?? `当前阶段 ${job.current_stage ?? '等待中'}`
+          : [
+              formatOptimizationEntryPoint(job.entry_point),
+              formatOptimizationValidationMode(job.validation_mode),
+            ]
+              .filter((value): value is string => Boolean(value))
+              .join(' · ');
+
+    return {
+      id: job.id,
+      kind: 'optimization',
+      activityId: job.id,
+      strategyName: strategyVersionTag ? `${strategyBaseName} ${strategyVersionTag}` : strategyBaseName,
+      status,
+      completedAt,
+      statusLabel: formatOptimizationStatus(status),
+      kindLabel: buildOptimizationKindLabel(status),
+      metaLabel,
+      badges,
+      completedRelativeLabel: formatRelativeTime(completedAt),
+      navigatePath: `/optimization-jobs/${job.id}`,
     };
   });
 }
@@ -222,6 +386,7 @@ export function WorkspacePage(): JSX.Element {
   const [strategyDetails] = useState<Record<string, ApiStrategyDetail>>({});
   const [strategyLatestRuns, setStrategyLatestRuns] = useState<Record<string, ApiBacktestRunDetail>>({});
   const [recentRuns, setRecentRuns] = useState<ApiBacktestRunListItem[]>([]);
+  const [recentOptimizations, setRecentOptimizations] = useState<ApiOptimizationJobListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -233,10 +398,11 @@ export function WorkspacePage(): JSX.Element {
       try {
         setLoading(true);
         setError(null);
-        const [workspaceOverview, strategyItems, backtestRuns] = await Promise.all([
+        const [workspaceOverview, strategyItems, backtestRuns, optimizationJobs] = await Promise.all([
           api.getWorkspaceOverview(false, overviewController.signal),
           api.listStrategies(overviewController.signal),
           api.listBacktestRuns({ limit: 8 }, overviewController.signal),
+          api.listOptimizationJobs(),
         ]);
 
         if (cancelled) {
@@ -246,6 +412,7 @@ export function WorkspacePage(): JSX.Element {
         setOverview(workspaceOverview);
         setStrategies(strategyItems);
         setRecentRuns(backtestRuns);
+        setRecentOptimizations(optimizationJobs);
 
         const runSummariesById = Object.fromEntries(
           backtestRuns.map((run) => [run.id, toRunSummaryDetail(run)] as const),
@@ -286,8 +453,17 @@ export function WorkspacePage(): JSX.Element {
   const latestStrategyId = overview?.latest_strategy_id ?? cards[0]?.id ?? null;
   const recentRunItems = useMemo(() => {
     const strategyNamesById = Object.fromEntries(strategies.map((strategy) => [strategy.id, strategy.name] as const));
-    return buildRecentRunItems(recentRuns, strategyLatestRuns, strategyNamesById);
-  }, [recentRuns, strategies, strategyLatestRuns]);
+    return [
+      ...buildBacktestRecentRunItems(recentRuns, strategyLatestRuns, strategyNamesById),
+      ...buildOptimizationRecentRunItems(recentOptimizations, strategyNamesById),
+    ]
+      .sort((left, right) => {
+        const leftTime = left.completedAt ? new Date(left.completedAt).getTime() : 0;
+        const rightTime = right.completedAt ? new Date(right.completedAt).getTime() : 0;
+        return rightTime - leftTime;
+      })
+      .slice(0, 8);
+  }, [recentOptimizations, recentRuns, strategies, strategyLatestRuns]);
   const isEmptyWorkspace = !loading && !error && cards.length === 0;
 
   return (

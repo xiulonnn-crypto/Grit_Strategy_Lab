@@ -346,7 +346,7 @@ export function WorkspaceStrategySection({
 
               <div className="workspace-card-stats strategy-grid-2x2">
                 <StatChip label="累计收益" value={strategy.summary?.totalReturn ?? '待回测'} />
-                <StatChip label="年化收益" value={strategy.summary?.annualizedReturn ?? '待回测'} />
+                <StatChip label="年化收益率" value={strategy.summary?.annualizedReturn ?? '待回测'} />
                 <StatChip label="夏普比率" value={strategy.summary?.sharpe ?? '待回测'} />
                 <StatChip label="样本外收益" value={strategy.summary?.oosTotalReturn ?? '待回测'} />
               </div>
@@ -448,7 +448,7 @@ export function WorkspaceStrategySection({
                     render: (strategy: WorkspaceStrategyCardVM) => strategy.summary?.totalReturn ?? '待回测',
                   },
                   {
-                    label: '年化收益',
+                    label: '年化收益率',
                     render: (strategy: WorkspaceStrategyCardVM) => strategy.summary?.annualizedReturn ?? '待回测',
                   },
                   {

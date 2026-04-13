@@ -2,13 +2,14 @@ import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WorkspacePage } from './pages/workspace-page-lane-b';
 import { ShellFrameCn } from './shell-frame-cn';
-import type { ApiStrategyDetail, ApiStrategyListItem, ApiWorkspaceOverview } from './types';
+import type { ApiOptimizationJobListItem, ApiStrategyDetail, ApiStrategyListItem, ApiWorkspaceOverview } from './types';
 
 type FakeApi = {
   getWorkspaceOverview: ReturnType<typeof vi.fn>;
   listStrategies: ReturnType<typeof vi.fn>;
   getStrategyDetail: ReturnType<typeof vi.fn>;
   listBacktestRuns: ReturnType<typeof vi.fn>;
+  listOptimizationJobs: ReturnType<typeof vi.fn>;
   getBacktestRunDetail: ReturnType<typeof vi.fn>;
 };
 
@@ -17,6 +18,7 @@ const fakeApi = vi.hoisted<FakeApi>(() => ({
   listStrategies: vi.fn(),
   getStrategyDetail: vi.fn(),
   listBacktestRuns: vi.fn(),
+  listOptimizationJobs: vi.fn(),
   getBacktestRunDetail: vi.fn(),
 }));
 
@@ -147,6 +149,87 @@ const strategyDetails: Record<string, ApiStrategyDetail> = {
   },
 };
 
+const optimizationJobs: ApiOptimizationJobListItem[] = [
+  {
+    id: 'opt-201',
+    strategy_id: 'str-alpha',
+    strategy_name: '策略 Alpha',
+    status: 'RUNNING',
+    entry_point: 'run_detail',
+    validation_mode: 'walk_forward',
+    source_run_id: 'bt-101',
+    budget_combinations: 24,
+    completed_combinations: 10,
+    progress_pct: 42,
+    current_stage: '稳定性验证',
+    latest_update: '正在扩大验证窗口，当前首位候选为 稳定策略中心。',
+    estimated_remaining_minutes: 12,
+    estimated_completed_at: '2026-03-31T05:22:00.000Z',
+    best_candidate_id: null,
+    best_candidate_label: '稳定策略中心',
+    base_parameter_version_id: 'str-alpha-v3',
+    created_at: '2026-03-31T04:40:00.000Z',
+    updated_at: '2026-03-31T05:10:00.000Z',
+    completed_at: null,
+    best_metrics_summary: {
+      trial_index: 1,
+      label: '稳定策略中心',
+      status: 'SUCCEEDED',
+      parameter_snapshot: { lookback_days: 126, top_n: 20 },
+      metrics: {
+        annualized_return: 0.138,
+        return_sharpe: 1.21,
+        out_of_sample_sharpe: 0.93,
+        max_drawdown_pct: -8.4,
+        stability: 84,
+      },
+      score: 1.043,
+      error_message: null,
+      started_at: '2026-03-31T04:42:00.000Z',
+      completed_at: '2026-03-31T04:44:00.000Z',
+    },
+  },
+  {
+    id: 'opt-199',
+    strategy_id: 'str-beta',
+    strategy_name: '策略 Beta',
+    status: 'COMPLETED',
+    entry_point: 'strategy_detail',
+    validation_mode: 'walk_forward',
+    source_run_id: 'bt-102',
+    budget_combinations: 18,
+    completed_combinations: 18,
+    progress_pct: 100,
+    current_stage: '优化完成',
+    latest_update: '优化已完成，当前首选为 稳态晋升候选。',
+    estimated_remaining_minutes: 0,
+    estimated_completed_at: '2026-03-31T03:10:00.000Z',
+    best_candidate_id: 'trial-1',
+    best_candidate_label: '稳态晋升候选',
+    base_parameter_version_id: 'str-beta-v1',
+    created_at: '2026-03-31T02:20:00.000Z',
+    updated_at: '2026-03-31T03:10:00.000Z',
+    completed_at: '2026-03-31T03:10:00.000Z',
+    best_metrics_summary: {
+      trial_index: 1,
+      label: '稳态晋升候选',
+      status: 'SUCCEEDED',
+      parameter_snapshot: { window_size: 50, rebalance: 'weekly' },
+      metrics: {
+        annualized_return: 0.184,
+        return_sharpe: 1.34,
+        out_of_sample_sharpe: 0.98,
+        max_drawdown_pct: -7.2,
+        stability: 87,
+      },
+      score: 1.188,
+      error_message: null,
+      started_at: '2026-03-31T02:22:00.000Z',
+      completed_at: '2026-03-31T02:24:00.000Z',
+    },
+  },
+];
+
 beforeEach(() => {
   fakeApi.getWorkspaceOverview.mockResolvedValue(overview);
   fakeApi.listStrategies.mockResolvedValue(strategies);
@@ -181,6 +264,7 @@ beforeEach(() => {
       is_permanent: true,
     },
   ]);
+  fakeApi.listOptimizationJobs.mockResolvedValue(optimizationJobs);
   fakeApi.getBacktestRunDetail.mockResolvedValue(null);
   window.location.hash = '';
 });
@@ -205,6 +289,7 @@ describe('workspace dashboard', () => {
     expect(container!.querySelector('.workspace-page__content')).not.toBeNull();
     expect(container!.querySelectorAll('.workspace-card-grid .workspace-strategy-card')).toHaveLength(2);
     expect(container!.querySelector('.workspace-recent-runs__timeline')).not.toBeNull();
+    expect(screen.getByText('最近回测优化')).toBeInTheDocument();
 
     expect((await screen.findAllByText('\u7b56\u7565 Alpha')).length).toBeGreaterThan(0);
     expect((await screen.findAllByText('\u7b56\u7565 Beta')).length).toBeGreaterThan(0);
@@ -212,6 +297,11 @@ describe('workspace dashboard', () => {
     expect(screen.getByText('ds-alpha / un-alpha', { exact: false })).toBeInTheDocument();
     expect(screen.getByText('+25.1%')).toBeInTheDocument();
     expect(screen.getByText('1.42')).toBeInTheDocument();
+    expect(container!.textContent).toContain('opt-201');
+    expect(container!.textContent).toContain('ETA 12 分钟');
+    expect(container!.textContent).toContain('年化收益率 +18.4%');
+    const recentIds = Array.from(container!.querySelectorAll('.workspace-recent-runs__run-id')).map((node) => node.textContent?.trim());
+    expect(recentIds[0]).toBe('opt-201');
     expect(fakeApi.getBacktestRunDetail).not.toHaveBeenCalled();
   });
 });

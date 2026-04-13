@@ -1,13 +1,11 @@
-import { render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { RunDetailAuditPanel } from './run-detail-audit';
 import type { ApiBacktestRunDetail } from '../types';
 
 const LOADING_COPY = '\u6b63\u5728\u52a0\u8f7d\u8bc1\u636e\u8f68\u8ff9\u2026';
-const SNAPSHOT_SUMMARY = '\u6570\u636e\u5feb\u7167\u6458\u8981';
-const PARAMETER_SNAPSHOT = '\u53c2\u6570\u5feb\u7167';
-const RUNTIME_LABEL = '\u8fd0\u884c\u73af\u5883';
-const PREVIEW_VALUE = '\u9884\u89c8';
+const TRADE_EVIDENCE_LIST = '\u4ea4\u6613\u8bc1\u636e\u5217\u8868';
+const PROFIT_DESC = '\u6536\u76ca\u5012\u5e8f';
 
 const detail: ApiBacktestRunDetail = {
   id: 'bt-preview',
@@ -36,8 +34,10 @@ const detail: ApiBacktestRunDetail = {
   is_permanent: true,
 };
 
-describe('RunDetailAuditPanel evidence fold-in', () => {
-  it('renders preview-backed snapshot evidence even before trade audit data arrives', () => {
+describe('RunDetailAuditPanel evidence panel', () => {
+  it('keeps the trade list interactive while audit details are still loading', () => {
+    cleanup();
+
     render(
       <RunDetailAuditPanel
         activeTradeId="trade-preview"
@@ -49,10 +49,9 @@ describe('RunDetailAuditPanel evidence fold-in', () => {
     );
 
     expect(screen.getByText(LOADING_COPY)).toBeInTheDocument();
-    expect(screen.getAllByText(SNAPSHOT_SUMMARY).length).toBeGreaterThan(0);
-    expect(screen.getByText('ds-preview')).toBeInTheDocument();
-    expect(screen.getAllByText(PARAMETER_SNAPSHOT).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(RUNTIME_LABEL).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(PREVIEW_VALUE).length).toBeGreaterThan(0);
+    expect(screen.getByText(TRADE_EVIDENCE_LIST)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(PROFIT_DESC)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /QQQ/i })).toBeInTheDocument();
+    expect(screen.queryByText('配置与环境快照')).not.toBeInTheDocument();
   });
 });

@@ -22,6 +22,7 @@ from .models import (
     MaterializeRequest,
     OptimizationCandidateCreateRequest,
     OptimizationJobCreateRequest,
+    ResumeOptimizationJobRequest,
     PromoteTrialRequest,
     PrepareConfirmationRequest,
     SnapshotRefreshRequest,
@@ -195,6 +196,9 @@ class RuntimeMarketDataProvider:
                 action["fallback_source"] = action.get("source")
             actions.append(action)
 
+    def _supports_action_enrichment(self, provider: Any) -> bool:
+        return bool(getattr(provider, "supports_action_enrichment", False))
+
     def fetch_history(self, symbol, start_date, end_date):
         warnings: list[str] = []
         provider_results: list[dict[str, Any]] = []
@@ -204,7 +208,7 @@ class RuntimeMarketDataProvider:
         actions: list[dict[str, Any]] = []
         identity = self.resolve_identity(symbol)
 
-        for provider in self.price_providers:
+        for index, provider in enumerate(self.price_providers):
             provider_name = _provider_name(provider)
             try:
                 payload = self._normalize_history_payload(
@@ -237,7 +241,10 @@ class RuntimeMarketDataProvider:
                 primary_source = str(payload.get("source") or provider_name)
             if provider_actions:
                 self._append_actions(actions, provider_actions, provider_name, primary_source=primary_source)
-            if bars:
+            if bars and not any(
+                self._supports_action_enrichment(candidate)
+                for candidate in self.price_providers[index + 1 :]
+            ):
                 break
 
         for provider in self.earnings_providers:
@@ -446,6 +453,10 @@ def create_app(db_path: str | Path | None = None, market_data_provider=None) -> 
     def startup_cleanup_worker():
         run_cleanup_cycle()
         try:
+            invoke(service.resume_incomplete_backtest_runs)
+        except Exception:
+            pass
+        try:
             invoke(service.resume_incomplete_optimization_jobs)
         except Exception:
             pass
@@ -515,12 +526,16 @@ def create_app(db_path: str | Path | None = None, market_data_provider=None) -> 
         return invoke(service.list_backtest_runs, limit=limit, status=status)
 
     @app.get('/backtest-runs/{run_id}/detail')
-    def backtest_run_detail(run_id: str):
-        return invoke(service.get_backtest_run_detail, run_id)
+    def backtest_run_detail(run_id: str, view: str = Query(default="full")):
+        return invoke(service.get_backtest_run_detail, run_id, view=view)
 
     @app.post('/backtest-runs/{run_id}/save')
     def save_backtest_run(run_id: str):
         return invoke(service.save_backtest_run, run_id)
+
+    @app.delete('/backtest-runs/{run_id}')
+    def delete_backtest_run(run_id: str):
+        return invoke(service.delete_backtest_run, run_id)
 
     @app.get('/backtest-runs/{run_id}/trades')
     def backtest_run_trades(run_id: str, page: int = 1, page_size: int = 50, segment: str = 'all'):
@@ -550,9 +565,17 @@ def create_app(db_path: str | Path | None = None, market_data_provider=None) -> 
     def optimization_job_detail(job_id: str):
         return invoke(service.get_optimization_job_detail, job_id)
 
+    @app.delete('/optimization-jobs/{job_id}')
+    def delete_optimization_job(job_id: str):
+        return invoke(service.delete_optimization_job, job_id)
+
     @app.post('/strategies/{strategy_id}/optimization-jobs')
     def create_optimization_job(strategy_id: str, payload: OptimizationJobCreateRequest | None = None):
         return invoke(service.create_optimization_job, strategy_id, payload)
+
+    @app.post('/optimization-jobs/{job_id}/resume')
+    def resume_optimization_job(job_id: str, payload: ResumeOptimizationJobRequest):
+        return invoke(service.resume_optimization_job, job_id, payload)
 
     @app.post('/optimization-jobs/{job_id}/candidates')
     def create_optimization_candidate(job_id: str, payload: OptimizationCandidateCreateRequest):

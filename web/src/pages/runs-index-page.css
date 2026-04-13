@@ -63,6 +63,11 @@
   width: 1%;
 }
 
+.runs-index-table__actions-cell {
+  width: 1%;
+  white-space: nowrap;
+}
+
 .runs-index-table__row {
   transition: background-color 120ms ease;
 }
@@ -96,6 +101,17 @@
 
 .runs-index-link--strategy {
   font-weight: 700;
+}
+
+.runs-index-table__action-button {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.runs-index-table__action-button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  transform: none;
 }
 
 .runs-index-badge {
@@ -141,8 +157,60 @@
   border-color: color-mix(in srgb, var(--warning) 24%, var(--line));
 }
 
+.runs-index-delete-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.runs-index-delete-modal__copy {
+  margin: 8px 0 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.runs-index-delete-modal__summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--accent-soft) 32%, white);
+}
+
+.runs-index-delete-modal__summary div {
+  min-width: 0;
+}
+
+.runs-index-delete-modal__summary dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.runs-index-delete-modal__summary dd {
+  margin: 6px 0 0;
+  color: var(--gsl-text-title);
+  font-weight: 700;
+  word-break: break-word;
+}
+
+.runs-index-delete-modal__confirm {
+  background: var(--danger);
+}
+
+.runs-index-delete-modal__confirm:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 86%, black);
+}
+
 @media (max-width: 960px) {
   .runs-index-page__hero {
     flex-direction: column;
+  }
+
+  .runs-index-delete-modal__summary {
+    grid-template-columns: 1fr;
   }
 }

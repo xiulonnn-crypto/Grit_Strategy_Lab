@@ -356,7 +356,14 @@ function getPositiveCount(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
 }
 
-function getLastRefreshSummaryLabel(overview: ApiSnapshotOverview | null): string {
+function getLastRefreshSummaryLabel(
+  overview: ApiSnapshotOverview | null,
+  options?: { optimisticRefreshing?: boolean },
+): string {
+  const optimisticRefreshing = Boolean(options?.optimisticRefreshing);
+  if (!overview && optimisticRefreshing) {
+    return '数据刷新中...';
+  }
   const value =
     overview?.last_refreshed_at ??
     overview?.latest_job?.completed_at ??
@@ -365,6 +372,7 @@ function getLastRefreshSummaryLabel(overview: ApiSnapshotOverview | null): strin
   if (!overview) {
     return `${prefix} · 摘要待显示`;
   }
+  const latestJobStatus = String(overview.latest_job?.status ?? overview.overall_status ?? '').toUpperCase();
   const refreshStats = getRefreshStats(overview);
   const corporateStat = getDatasetRefreshStat(refreshStats, 'ds-corporate-actions');
   const priceStat = getDatasetRefreshStat(refreshStats, 'ds-price');
@@ -396,8 +404,12 @@ function getLastRefreshSummaryLabel(overview: ApiSnapshotOverview | null): strin
       return rows ? `纳指100股票池${rows.toLocaleString('zh-HK')}行` : null;
     })(),
   ].filter(Boolean);
-  if (parts.length) {
-    return `${prefix} ·新增${parts.join('，')}。`;
+  const additionsLabel = parts.length ? `新增${parts.join('，')}。` : null;
+  if (latestJobStatus === 'RUNNING' || optimisticRefreshing) {
+    return additionsLabel ? `数据刷新中... ·${additionsLabel}` : '数据刷新中...';
+  }
+  if (additionsLabel) {
+    return `${prefix} ·${additionsLabel}`;
   }
   return value ? `${prefix} ·本次未新增数据。` : `${prefix} · 摘要待显示`;
 }
@@ -590,6 +602,7 @@ export function SnapshotsPage(): JSX.Element {
   const [overview, setOverview] = useState<ApiSnapshotOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [optimisticRefreshing, setOptimisticRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -641,15 +654,49 @@ export function SnapshotsPage(): JSX.Element {
 
   async function handleRefresh(): Promise<void> {
     try {
+      const requestedAt = new Date().toISOString();
       setRefreshing(true);
+      setOptimisticRefreshing(true);
       setError(null);
+      setOverview((current) => {
+        if (!current) {
+          return current;
+        }
+        const optimisticJob: ApiSnapshotJob = {
+          ...(current.latest_job ?? { id: 'snap-pending' }),
+          status: 'RUNNING',
+          updated_at: requestedAt,
+          started_at: current.latest_job?.started_at ?? requestedAt,
+          completed_at: null,
+          request: {
+            ...(current.latest_job?.request ?? {}),
+            mode: 'repair',
+            targets: ['price', 'corporate', 'universes'],
+            reason: 'manual-refresh-latest-and-repair',
+          },
+          summary: {
+            current_stage: 'preflight',
+            current_stage_label: '准备刷新快照',
+            refresh_stats: {},
+          },
+        };
+        return {
+          ...current,
+          overall_status: 'RUNNING',
+          latest_job: optimisticJob,
+          message: '正在修复快照缺口，页面会自动更新。当前先显示已有数据。',
+          allowed_actions: [],
+        };
+      });
       const response = await api.refreshSnapshots({
         mode: 'repair',
         targets: ['price', 'corporate', 'universes'],
         reason: 'manual-refresh-latest-and-repair',
       });
       setOverview(normalizeSnapshotOverview(response));
+      setOptimisticRefreshing(false);
     } catch (caught) {
+      setOptimisticRefreshing(false);
       setError(`刷新数据快照失败：${(caught as Error).message}`);
     } finally {
       setRefreshing(false);
@@ -659,6 +706,10 @@ export function SnapshotsPage(): JSX.Element {
   const datasetSnapshots = useMemo(() => overview?.dataset_snapshots ?? [], [overview]);
   const universeSnapshots = useMemo(() => overview?.universe_snapshots ?? [], [overview]);
   const pageStatus = getStatusLabel(overview?.overall_status);
+  const isSnapshotJobRunning =
+    String(overview?.latest_job?.status ?? overview?.overall_status ?? '').toUpperCase() === 'RUNNING';
+  const isRefreshRunning = refreshing || optimisticRefreshing || isSnapshotJobRunning;
+  const isRefreshDisabled = loading || isRefreshRunning;
   const pageBlocked = Boolean(
     overview?.blocking_code &&
       ['FAILED', 'BLOCKED'].includes(String(overview?.overall_status ?? '').toUpperCase()),
@@ -679,20 +730,20 @@ export function SnapshotsPage(): JSX.Element {
                 </span>
               ) : null}
               <span className="status-chip status-chip--soft snapshots-header__summary">
-                {getLastRefreshSummaryLabel(overview)}
+                {getLastRefreshSummaryLabel(overview, { optimisticRefreshing })}
               </span>
             </div>
           </div>
           <div className="snapshots-header__actions">
             <button
               className="primary-button snapshots-header__primary"
-              disabled={loading || refreshing}
+              disabled={isRefreshDisabled}
               onClick={() => {
                 void handleRefresh();
               }}
               type="button"
             >
-              {refreshing ? '刷新中...' : '刷新快照'}
+              {isRefreshRunning ? '刷新中...' : '刷新快照'}
             </button>
           </div>
         </div>

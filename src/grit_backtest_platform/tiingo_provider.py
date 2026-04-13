@@ -32,6 +32,7 @@ def _parse_float(value: Any, default: float = 0.0) -> float:
 
 class TiingoMarketDataProvider:
     provider_name = "tiingo"
+    supports_action_enrichment = True
 
     def __init__(self, token: str | None = None, retries: int = 3, timeout: int = 20) -> None:
         self.token = str(token or os.getenv("TIINGO_API_TOKEN") or "").strip()

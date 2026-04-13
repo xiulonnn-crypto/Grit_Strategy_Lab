@@ -25,6 +25,44 @@ import type {
 } from '../types';
 import './run-detail-page.css';
 
+const RUN_DETAIL_POLL_INTERVAL_MS = 2000;
+const SAVE_CONFIRM_DIALOG = {
+  eyebrow: '保存回测',
+  title: '保存回测',
+  copy: '确认后该回测会转为永久回测，不再按临时回测自动清理。',
+  cancel: '取消',
+  confirm: '确认',
+  pending: '保存中...',
+  success: '已保存为永久回测。',
+  errorPrefix: '保存回测失败：',
+  runIdLabel: '回测号',
+  strategyLabel: '策略',
+} as const;
+
+function isBacktestRunInProgress(status: string | null | undefined): boolean {
+  const normalized = String(status ?? '').toUpperCase();
+  return normalized === 'QUEUED' || normalized === 'RUNNING';
+}
+
+function hasRunDetailContext(detail: ApiBacktestRunDetail | null): boolean {
+  if (!detail) {
+    return false;
+  }
+  return (
+    'request' in detail &&
+    'environment_summary' in detail &&
+    'trade_audit_items' in detail &&
+    ('snapshot_summary' in detail || 'preview' in detail)
+  );
+}
+
+function mergeRunDetail(
+  current: ApiBacktestRunDetail | null,
+  payload: ApiBacktestRunDetail,
+): ApiBacktestRunDetail {
+  return current ? { ...current, ...payload } : payload;
+}
+
 function formatTradeSide(side: string): string {
   const normalized = side.toUpperCase();
   if (normalized === 'BUY') {
@@ -273,8 +311,12 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
   const [audit, setAudit] = useState<ApiBacktestRunTradeAudit | null>(null);
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState<string | null>(null);
+  const [contextLoading, setContextLoading] = useState(false);
+  const [contextError, setContextError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [saveBusy, setSaveBusy] = useState(false);
+  const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
+  const [saveDialogError, setSaveDialogError] = useState<string | null>(null);
   const [optimizationBusy, setOptimizationBusy] = useState(false);
 
   useEffect(() => {
@@ -284,11 +326,11 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
       try {
         setDetailLoading(true);
         setDetailError(null);
-        const payload = await api.getBacktestRunDetail(runId);
+        const payload = await api.getBacktestRunDetail(runId, { view: 'initial' });
         if (cancelled) {
           return;
         }
-        setDetail(payload);
+        setDetail((current) => mergeRunDetail(current, payload));
         setSelectedTradeId((current) => current ?? getDefaultTradeId(payload));
       } catch (caught) {
         if (!cancelled) {
@@ -308,14 +350,86 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
   }, [api, runId]);
 
   useEffect(() => {
+    if (!detail || !isBacktestRunInProgress(detail.status)) {
+      return;
+    }
+
+    let cancelled = false;
+    let inFlight = false;
+    const timer = window.setInterval(() => {
+      if (inFlight) {
+        return;
+      }
+      inFlight = true;
+      void (async () => {
+        try {
+          const payload = await api.getBacktestRunDetail(runId, { view: 'initial' });
+          if (cancelled) {
+            return;
+          }
+          setDetail((current) => mergeRunDetail(current, payload));
+          setSelectedTradeId((current) => current ?? getDefaultTradeId(payload));
+          setDetailError(null);
+        } catch {
+        } finally {
+          inFlight = false;
+        }
+      })();
+    }, RUN_DETAIL_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [api, detail?.status, runId]);
+
+  useEffect(() => {
+    if (!detail || (activeTab !== 'properties' && activeTab !== 'evidence') || hasRunDetailContext(detail)) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadContext(): Promise<void> {
+      try {
+        setContextLoading(true);
+        setContextError(null);
+        const payload = await api.getBacktestRunDetail(runId, { view: 'context' });
+        if (cancelled) {
+          return;
+        }
+        setDetail((current) => mergeRunDetail(current, payload));
+        setSelectedTradeId((current) => current ?? getDefaultTradeId(payload));
+      } catch (caught) {
+        if (!cancelled) {
+          setContextError((caught as Error).message);
+        }
+      } finally {
+        if (!cancelled) {
+          setContextLoading(false);
+        }
+      }
+    }
+
+    void loadContext();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, api, detail, runId]);
+
+  useEffect(() => {
     setActiveTab('diagnostics');
     setTradeSegment('all');
     setTradePage(1);
+    setDetail(null);
+    setDetailError(null);
     setTrades(null);
     setTradesError(null);
     setSelectedTradeId(null);
     setAudit(null);
     setAuditError(null);
+    setContextLoading(false);
+    setContextError(null);
   }, [runId]);
 
   useEffect(() => {
@@ -352,7 +466,7 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [activeTab, api, runId, tradePage, tradeSegment]);
+  }, [activeTab, api, runId, tradePage, tradeSegment, detail?.status]);
 
   useEffect(() => {
     if (activeTab !== 'evidence') {
@@ -366,6 +480,7 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
       setAuditError(null);
       return;
     }
+    const tradeId: string = selectedTradeId;
 
     let cancelled = false;
 
@@ -373,7 +488,7 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
       try {
         setAuditLoading(true);
         setAuditError(null);
-        const payload = await api.getBacktestTradeAudit(runId, selectedTradeId);
+        const payload = await api.getBacktestTradeAudit(runId, tradeId);
         if (!cancelled) {
           setAudit(payload);
         }
@@ -412,6 +527,22 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
     return () => window.clearTimeout(timer);
   }, [actionNotice]);
 
+  function openSaveConfirm(): void {
+    if (!detail || detail.is_permanent) {
+      return;
+    }
+    setSaveDialogError(null);
+    setSaveConfirmOpen(true);
+  }
+
+  function closeSaveConfirm(): void {
+    if (saveBusy) {
+      return;
+    }
+    setSaveDialogError(null);
+    setSaveConfirmOpen(false);
+  }
+
   async function handleSaveRun(): Promise<void> {
     if (!detail) {
       return;
@@ -419,18 +550,17 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
     if (detail.is_permanent) {
       return;
     }
-    if (!window.confirm('是否要将该回测保存为永久回测？保存后将不再按临时回测自动清理。')) {
-      return;
-    }
 
     try {
       setSaveBusy(true);
       setActionNotice(null);
+      setSaveDialogError(null);
       const payload = await api.saveBacktestRun(detail.id);
       setDetail(payload);
-      setActionNotice('已保存为永久回测。');
+      setSaveConfirmOpen(false);
+      setActionNotice(SAVE_CONFIRM_DIALOG.success);
     } catch (caught) {
-      setActionNotice(`保存回测失败：${(caught as Error).message}`);
+      setSaveDialogError(`${SAVE_CONFIRM_DIALOG.errorPrefix}${(caught as Error).message}`);
     } finally {
       setSaveBusy(false);
     }
@@ -489,19 +619,24 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
     );
   }
 
-  const strategyName = getStrategyTitle(detail);
-  const runStatus = formatRunStatusLabel(detail.status);
-  const canRerun = Boolean(detail.strategy_id);
-  const canOptimize = Boolean(detail.strategy_id);
+  const resolvedDetail = detail;
+  const tradePageData = trades ?? { items: [], page: 1, page_size: 50, total: 0, total_pages: 1 };
+  const strategyName = getStrategyTitle(resolvedDetail);
+  const runStatus = formatRunStatusLabel(resolvedDetail.status);
+  const runInProgress = isBacktestRunInProgress(resolvedDetail.status);
+  const canRerun = Boolean(resolvedDetail.strategy_id) && !runInProgress;
+  const canOptimize = Boolean(resolvedDetail.strategy_id) && !runInProgress;
+  const detailContextReady = hasRunDetailContext(resolvedDetail);
   const heroSubtitle =
     actionNotice ??
-    detail.analysis?.subtitle ??
-    '查看本次回测的关键结果、交易证据与配置上下文。';
+    (runInProgress
+      ? '回测正在执行，页面会自动刷新；你可以先查看已锁定的区间与配置。'
+      : resolvedDetail.analysis?.subtitle ?? '查看本次回测的关键结果、交易证据与配置上下文。');
 
-  const tradePnlAmountLedger = buildTradePnlAmountMap(detail);
+  const tradePnlAmountLedger = buildTradePnlAmountMap(resolvedDetail);
 
   function renderTradesTab(): JSX.Element {
-    const tradeRows = (trades?.items ?? []).map((trade) => normalizeTradeRow(detail, trade, tradePnlAmountLedger));
+    const tradeRows = tradePageData.items.map((trade) => normalizeTradeRow(resolvedDetail, trade, tradePnlAmountLedger));
 
     return (
       <>
@@ -562,8 +697,8 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
 
             <div className="run-detail-trade-pagination">
               <span>
-                第 {trades.page} / {trades.total_pages ?? Math.max(1, Math.ceil(trades.total / trades.page_size || 1))} 页，共{' '}
-                {trades.total.toLocaleString('zh-HK')} 笔
+                第 {tradePageData.page} / {tradePageData.total_pages ?? Math.max(1, Math.ceil(tradePageData.total / tradePageData.page_size || 1))} 页，共{' '}
+                {tradePageData.total.toLocaleString('zh-HK')} 笔
               </span>
               <div className="hero-actions">
                 <button
@@ -576,7 +711,7 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
                 </button>
                 <button
                   className="ghost-button"
-                  disabled={tradePage >= (trades.total_pages ?? 1) || tradesLoading}
+                  disabled={tradePage >= (tradePageData.total_pages ?? 1) || tradesLoading}
                   onClick={() => setTradePage((current) => current + 1)}
                   type="button"
                 >
@@ -599,7 +734,7 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
         audit={audit}
         auditError={auditError}
         auditLoading={auditLoading}
-        detail={detail}
+        detail={resolvedDetail}
         onSelectTrade={setSelectedTradeId}
       />
     );
@@ -632,7 +767,7 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
             <button
               className="ghost-button"
               disabled={saveBusy}
-              onClick={() => void handleSaveRun()}
+              onClick={openSaveConfirm}
               type="button"
             >
               保存回测
@@ -675,9 +810,64 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
           />
         ) : null}
         {activeTab === 'trades' ? renderTradesTab() : null}
-        {activeTab === 'evidence' ? renderEvidenceTab() : null}
-        {activeTab === 'properties' ? <RunDetailPropertiesPanel detail={detail} /> : null}
+        {activeTab === 'evidence'
+          ? detailContextReady
+            ? renderEvidenceTab()
+            : contextLoading
+              ? <p className="empty-state">正在加载证据上下文…</p>
+              : contextError
+                ? <div className="error-banner">{contextError}</div>
+                : <p className="empty-state">证据上下文暂时不可用。</p>
+          : null}
+        {activeTab === 'properties'
+          ? detailContextReady
+            ? <RunDetailPropertiesPanel detail={detail} />
+            : contextLoading
+              ? <p className="empty-state">正在加载配置上下文…</p>
+              : contextError
+                ? <div className="error-banner">{contextError}</div>
+                : <p className="empty-state">配置上下文暂时不可用。</p>
+          : null}
       </section>
+
+      {saveConfirmOpen ? (
+        <div
+          aria-label={SAVE_CONFIRM_DIALOG.title}
+          aria-modal="true"
+          className="modal-shell"
+          onClick={closeSaveConfirm}
+          role="dialog"
+        >
+          <div className="modal-card run-detail-save-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">{SAVE_CONFIRM_DIALOG.eyebrow}</p>
+                <h3>{SAVE_CONFIRM_DIALOG.title}</h3>
+                <p className="creation-panel-copy">{SAVE_CONFIRM_DIALOG.copy}</p>
+              </div>
+            </div>
+            <div className="run-detail-save-modal__summary">
+              <div>
+                <span className="run-detail-save-modal__label">{SAVE_CONFIRM_DIALOG.runIdLabel}</span>
+                <strong>{detail.id}</strong>
+              </div>
+              <div>
+                <span className="run-detail-save-modal__label">{SAVE_CONFIRM_DIALOG.strategyLabel}</span>
+                <strong>{strategyName}</strong>
+              </div>
+            </div>
+            {saveDialogError ? <div className="error-banner">{saveDialogError}</div> : null}
+            <div className="modal-card__footer">
+              <button className="ghost-button" disabled={saveBusy} onClick={closeSaveConfirm} type="button">
+                {SAVE_CONFIRM_DIALOG.cancel}
+              </button>
+              <button className="primary-button" disabled={saveBusy} onClick={() => void handleSaveRun()} type="button">
+                {saveBusy ? SAVE_CONFIRM_DIALOG.pending : SAVE_CONFIRM_DIALOG.confirm}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

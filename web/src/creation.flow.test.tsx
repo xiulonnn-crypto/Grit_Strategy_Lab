@@ -477,9 +477,9 @@ describe('creation flow', () => {
 
   it('deduplicates strategy type rows and keeps completion text in step tabs only', async () => {
     const duplicateSession = buildGridSession({ ready: true });
-    duplicateSession.confirmation_fields.parameters = [
+    duplicateSession.confirmation_fields!.parameters = [
       { key: 'strategy_type', label: '蝑蝐餃?', value: 'GRID', source: 'manual_override' },
-      ...duplicateSession.confirmation_fields.parameters,
+      ...duplicateSession.confirmation_fields!.parameters,
     ];
     fakeApi.getCreationSession.mockResolvedValue(duplicateSession);
 

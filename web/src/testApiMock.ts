@@ -135,6 +135,9 @@ export function installMockApiServer() {
       if (method === 'POST' && segments[0] === 'backtest-runs' && segments[2] === 'save') {
         return json(await demoApi.saveBacktestRun(segments[1]));
       }
+      if (method === 'DELETE' && segments[0] === 'backtest-runs' && segments.length === 2) {
+        return json(await demoApi.deleteBacktestRun(segments[1]));
+      }
       if (method === 'POST' && segments[0] === 'strategies' && segments[2] === 'backtest-runs' && segments[3] === 'preview') {
         return json(await demoApi.previewBacktestRun(segments[1], {
           start_date: typeof body?.start_date === 'string' ? body.start_date : undefined,
@@ -178,6 +181,9 @@ export function installMockApiServer() {
             ? (body?.search_space as import('./types').ApiOptimizationSearchSpaceField[])
             : undefined,
         }));
+      }
+      if (method === 'DELETE' && segments[0] === 'optimization-jobs' && segments.length === 2) {
+        return json(await demoApi.deleteOptimizationJob(segments[1]));
       }
       if (method === 'POST' && segments[0] === 'optimization-jobs' && segments[2] === 'candidates' && segments.length === 3) {
         return json(await demoApi.createOptimizationCandidate(segments[1], {

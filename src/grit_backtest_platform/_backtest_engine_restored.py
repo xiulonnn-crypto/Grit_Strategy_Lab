@@ -101,6 +101,13 @@ class BacktestResult:
     coverage_days: int = 0
 
 
+@dataclass(slots=True)
+class PreparedBacktestInputs:
+    symbol_series: dict[str, list[MarketBar]]
+    benchmark_series: list[MarketBar]
+    master_dates: list[str]
+
+
 def _normalize_bars(bars: Iterable[Mapping[str, Any]]) -> list[MarketBar]:
     normalized = [
         MarketBar(
@@ -800,22 +807,59 @@ def run_backtest(
     benchmark_bars: Iterable[Mapping[str, Any]] | None = None,
 ) -> BacktestResult:
     config = config or BacktestConfig()
+    prepared = prepare_backtest_inputs(
+        bars_by_symbol,
+        config=config,
+        benchmark_bars=benchmark_bars,
+    )
+    return run_backtest_prepared(
+        prepared,
+        config=config,
+        parameters=parameters,
+    )
+
+
+def prepare_backtest_inputs(
+    bars_by_symbol: Mapping[str, Iterable[Mapping[str, Any]]],
+    *,
+    config: BacktestConfig | None = None,
+    benchmark_bars: Iterable[Mapping[str, Any]] | None = None,
+) -> PreparedBacktestInputs:
+    config = config or BacktestConfig()
+    symbol_series = {symbol: _normalize_bars(bars) for symbol, bars in bars_by_symbol.items()}
+    symbol_series = {symbol: bars for symbol, bars in symbol_series.items() if bars}
+    benchmark_series = _normalize_bars(benchmark_bars or [])
+    reference_series = benchmark_series or (next(iter(symbol_series.values())) if symbol_series else [])
+    master_dates = [bar.date for bar in reference_series]
+    if config.start_date:
+        master_dates = [value for value in master_dates if value >= str(config.start_date)]
+    if config.end_date:
+        master_dates = [value for value in master_dates if value <= str(config.end_date)]
+    return PreparedBacktestInputs(
+        symbol_series=symbol_series,
+        benchmark_series=benchmark_series,
+        master_dates=master_dates,
+    )
+
+
+def run_backtest_prepared(
+    prepared: PreparedBacktestInputs,
+    *,
+    config: BacktestConfig | None = None,
+    parameters: Mapping[str, Any] | None = None,
+) -> BacktestResult:
+    config = config or BacktestConfig()
     parameters = dict(parameters or {})
     template_key = str(parameters.get("template_key") or parameters.get("strategy_type") or "momentum")
     holding_count = max(int(parameters.get("holding_count") or parameters.get("top_n") or 5), 1)
     lookback_days = max(int(parameters.get("lookback_days") or parameters.get("signal_lookback_days") or 63), 5)
     frequency = str(parameters.get("rebalance_frequency") or "weekly").lower()
-    symbol_series = {symbol: _normalize_bars(bars) for symbol, bars in bars_by_symbol.items()}
-    symbol_series = {symbol: bars for symbol, bars in symbol_series.items() if bars}
+    symbol_series = prepared.symbol_series
+    benchmark_series = prepared.benchmark_series
+    master_dates = list(prepared.master_dates)
     if not symbol_series:
         empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         return BacktestResult(metrics=empty_metrics, warnings=["No market bars available"])
-    benchmark_series = _normalize_bars(benchmark_bars or [])
-    master_dates = [bar.date for bar in (benchmark_series or next(iter(symbol_series.values())))]
-    if config.start_date:
-        master_dates = [value for value in master_dates if value >= str(config.start_date)]
-    if config.end_date:
-        master_dates = [value for value in master_dates if value <= str(config.end_date)]
     if str(template_key).lower() == "grid":
         return _run_grid_backtest(
             symbol_series,

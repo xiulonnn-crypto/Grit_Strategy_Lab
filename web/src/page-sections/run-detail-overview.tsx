@@ -78,6 +78,11 @@ const KPI_HELP_COPY: Partial<Record<ApiRunDetailKpiCard['key'], string>> = {
   rolling_return: '最新252日滚动收益表示最近252个交易日的累计收益，约等于过去一年的阶段表现，用来判断策略近期斜率是否仍优于基准。',
 };
 
+function isBacktestRunInProgress(status: string | null | undefined): boolean {
+  const normalized = String(status ?? '').toUpperCase();
+  return normalized === 'QUEUED' || normalized === 'RUNNING';
+}
+
 function formatSmartPercent(value: number | null | undefined, digits = 1): string {
   if (typeof value !== 'number' || Number.isNaN(value)) {
     return '—';
@@ -440,6 +445,30 @@ function buildFallbackDecisionRail(detail: ApiBacktestRunDetail): ApiRunDetailDe
 }
 
 function buildFallbackDecisionRailFromCurves(detail: ApiBacktestRunDetail): ApiRunDetailDecisionRail {
+  if (isBacktestRunInProgress(detail.status)) {
+    return {
+      score: 0,
+      label: '回测状态',
+      items: [
+        {
+          title: '执行状态',
+          body: '回测已提交，后台正在计算净值曲线与交易明细。',
+          tone: 'blue',
+        },
+        {
+          title: '刷新方式',
+          body: '当前页面会自动刷新；结果一旦生成，指标、图表和证据会自动回填。',
+          tone: 'blue',
+        },
+        {
+          title: '下一步动作',
+          body: '可以先查看已锁定的区间、参数版本和快照上下文，无需停留在提交页等待。',
+          tone: 'orange',
+        },
+      ],
+    };
+  }
+
   const chartSeries = detail.chart_series ?? [];
   const strategyTotalReturn = calculateTotalReturn(chartSeries, (point) => point.equity) ?? detail.metrics.total_return ?? 0;
   const benchmarkTotalReturn = calculateTotalReturn(chartSeries, (point) => point.benchmark) ?? 0;
@@ -651,6 +680,7 @@ export function RunDetailOverviewSection({
   onTabChange,
 }: RunDetailOverviewProps): JSX.Element {
   const analysis = getAnalysis(detail);
+  const runInProgress = isBacktestRunInProgress(detail.status);
   const kpiCards = useMemo<ResolvedKpiCard[]>(
     () =>
       (analysis?.kpi_cards?.length ? analysis.kpi_cards : buildFallbackKpis(detail))
@@ -666,7 +696,9 @@ export function RunDetailOverviewSection({
   const decisionRail = analysis?.decision_rail?.items?.length
     ? analysis.decision_rail
     : buildFallbackDecisionRailFromCurves(detail);
-  const subtitle = analysis?.subtitle ?? '主图保留训练集与测试集切换关系，先判断，再决定是否继续下钻。';
+  const subtitle = runInProgress
+    ? '回测正在执行中，完成后会自动刷新收益曲线、指标和交易证据。'
+    : analysis?.subtitle ?? '主图保留训练集与测试集切换关系，先判断，再决定是否继续下钻。';
   const series = useMemo(() => filterSeries(detail, windowRange), [detail, windowRange]);
   const equityValues = useMemo(() => normalizeCurve(series.map((point) => point.equity)), [series]);
   const benchmarkValues = useMemo(() => normalizeCurve(series.map((point) => point.benchmark)), [series]);
@@ -937,7 +969,7 @@ export function RunDetailOverviewSection({
                 ) : null}
               </>
             ) : (
-              <p className="empty-state">暂无业绩曲线数据。</p>
+              <p className="empty-state">{runInProgress ? '回测正在执行中，结果生成后会自动刷新。' : '暂无业绩曲线数据。'}</p>
             )}
           </div>
 
@@ -976,9 +1008,9 @@ export function RunDetailOverviewSection({
           </div>
           <div className="run-detail-decision-score">
             <span className="run-detail-decision-score__label">{decisionRail.label ?? '综合判断'}</span>
-            <strong>{Math.round(decisionRail.score ?? 0)} / 100</strong>
+            <strong>{runInProgress ? '进行中' : `${Math.round(decisionRail.score ?? 0)} / 100`}</strong>
             <div className="run-detail-decision-score__bar">
-              <span style={{ width: `${Math.max(0, Math.min(100, decisionRail.score ?? 0))}%` }} />
+              <span style={{ width: `${Math.max(0, Math.min(100, runInProgress ? 24 : decisionRail.score ?? 0))}%` }} />
             </div>
           </div>
           <div className="run-detail-decision-list">

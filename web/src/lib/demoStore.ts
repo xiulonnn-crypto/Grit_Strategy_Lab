@@ -1,5 +1,6 @@
 import {
   ApiError,
+  type ApiBacktestRunDeleteResult,
   type ApiBacktestRunDetail,
   type ApiBacktestRunListItem,
   type ApiBacktestTradeAudit,
@@ -8,17 +9,20 @@ import {
   type ApiConfirmationUpdateRequest,
   type ApiOptimizationCandidate,
   type ApiOptimizationJobDetail,
+  type ApiOptimizationJobListItem,
   type ApiSnapshotOverview,
   type ApiStrategyCreationSession,
   type ApiStrategyDetail,
   type ApiStrategyListItem,
   type ApiWorkspaceOverview,
+  type BacktestRunDetailRequest,
   type CreateCandidatePayload,
   type DemoApi,
   type ParameterValue,
   type PromoteMode,
 } from '../types';
 import { buildParameterDiffRows } from './adapters';
+import { formatVersionedStrategyName } from './demoStoreShared';
 
 type DemoState = {
   strategies: ApiStrategyDetail[];
@@ -75,7 +79,7 @@ function createStrategy(overrides: Partial<ApiStrategyDetail>): ApiStrategyDetai
         },
       },
     ],
-    confirmation_fields: overrides.confirmation_fields ?? {},
+    confirmation_fields: overrides.confirmation_fields ?? { top_level: [], parameters: [] },
     allowed_actions: overrides.allowed_actions ?? ['run_backtest', 'open_optimization'],
     benchmark_symbol: overrides.benchmark_symbol ?? 'SPY',
   };
@@ -463,7 +467,10 @@ export const demoApi: DemoApi = {
     );
   },
 
-  async getBacktestRunDetail(id: string, _signal?: AbortSignal): Promise<ApiBacktestRunDetail> {
+  async getBacktestRunDetail(
+    id: string,
+    _options?: BacktestRunDetailRequest | AbortSignal,
+  ): Promise<ApiBacktestRunDetail> {
     const run = state.runs.find((item) => item.id === id);
     if (!run) {
       throw new ApiError({ status: 404, code: 'run_not_found', message: `Run ${id} was not found.` });
@@ -478,6 +485,18 @@ export const demoApi: DemoApi = {
     }
     run.is_permanent = true;
     return clone(run);
+  },
+
+  async deleteBacktestRun(id: string): Promise<ApiBacktestRunDeleteResult> {
+    const run = state.runs.find((item) => item.id === id);
+    if (!run) {
+      throw new ApiError({ status: 404, code: 'run_not_found', message: `Run ${id} was not found.` });
+    }
+    if (run.status === 'QUEUED' || run.status === 'RUNNING') {
+      throw new ApiError({ status: 409, code: 'backtest_run_delete_active', message: '进行中的回测暂不支持删除。' });
+    }
+    state.runs = state.runs.filter((item) => item.id !== id);
+    return { id, deleted_at: nowIso(), deleted_reason: 'manual_delete' };
   },
 
   async getBacktestRunTrades(): Promise<ApiBacktestRunTradePage> {
@@ -551,6 +570,58 @@ export const demoApi: DemoApi = {
     return clone(findJob(id));
   },
 
+  async listOptimizationJobs(): Promise<ApiOptimizationJobListItem[]> {
+    return clone(
+      state.optimizationJobs.map((job) => ({
+        id: job.id,
+        strategy_id: job.strategy_id,
+        strategy_name: findStrategy(job.strategy_id).name,
+        status: job.status,
+        entry_point: (job.summary.entry_point as string | null | undefined) ?? null,
+        validation_mode: (job.summary.validation_mode as string | null | undefined) ?? null,
+        source_run_id: (job.summary.source_run_id as string | null | undefined) ?? null,
+        budget_combinations:
+          typeof job.summary.budget_combinations === 'number' ? job.summary.budget_combinations : null,
+        completed_combinations:
+          typeof job.summary.completed_combinations === 'number' ? job.summary.completed_combinations : null,
+        progress_pct: typeof job.summary.progress_pct === 'number' ? job.summary.progress_pct : null,
+        current_stage: (job.summary.current_stage as string | null | undefined) ?? null,
+        latest_update: (job.summary.latest_update as string | null | undefined) ?? null,
+        estimated_remaining_minutes:
+          typeof job.summary.estimated_remaining_minutes === 'number'
+            ? job.summary.estimated_remaining_minutes
+            : null,
+        estimated_completed_at: (job.summary.estimated_completed_at as string | null | undefined) ?? null,
+        best_candidate_id: (job.result.best_candidate_id as string | null | undefined) ?? null,
+        best_candidate_label: (job.result.best_candidate_label as string | null | undefined) ?? null,
+        base_parameter_version_id: job.base_parameter_version_id ?? null,
+        created_at: job.created_at ?? null,
+        updated_at: job.updated_at ?? null,
+        completed_at: job.completed_at ?? null,
+        resume_ready: typeof job.resume_ready === 'boolean' ? job.resume_ready : undefined,
+        persisted_trial_count:
+          typeof job.persisted_trial_count === 'number' ? job.persisted_trial_count : null,
+        next_trial_index: typeof job.next_trial_index === 'number' ? job.next_trial_index : null,
+        interrupted_reason: job.interrupted_reason ?? null,
+        best_metrics_summary: job.best_metrics_summary ?? null,
+      })),
+    );
+  },
+
+  async deleteOptimizationJob(id: string) {
+    const job = findJob(id);
+    const deletedAt = nowIso();
+    state.optimizationJobs = state.optimizationJobs.filter((item) => item.id !== id);
+    const strategy = findStrategy(job.strategy_id);
+    strategy.latest_optimization_job_id =
+      state.optimizationJobs.find((item) => item.strategy_id === strategy.id)?.id ?? null;
+    return {
+      id,
+      deleted_at: deletedAt,
+      deleted_reason: 'user_deleted',
+    };
+  },
+
   async createOptimizationJob(strategyId: string): Promise<ApiOptimizationJobDetail> {
     const strategy = findStrategy(strategyId);
     const job: ApiOptimizationJobDetail = {
@@ -579,6 +650,24 @@ export const demoApi: DemoApi = {
     job.result.best_candidate_id = job.candidates[0].id;
     state.optimizationJobs.unshift(job);
     strategy.latest_optimization_job_id = job.id;
+    return clone(job);
+  },
+
+  async resumeOptimizationJob(jobId: string): Promise<ApiOptimizationJobDetail> {
+    const job = findJob(jobId);
+    job.status = 'QUEUED';
+    job.summary = {
+      ...job.summary,
+      status: 'QUEUED',
+      resume_ready: false,
+      latest_update: '优化任务已继续执行。',
+    };
+    job.result = {
+      ...job.result,
+      status: 'QUEUED',
+      latest_update: '优化任务已继续执行。',
+    };
+    job.updated_at = nowIso();
     return clone(job);
   },
 
@@ -624,6 +713,7 @@ export const demoApi: DemoApi = {
       strategy.parameters = clone(candidate.parameter_snapshot);
       strategy.current_parameter_version = (strategy.current_parameter_version ?? 1) + 1;
       strategy.current_parameter_version_id = `${strategy.id}-v${strategy.current_parameter_version}`;
+      strategy.name = formatVersionedStrategyName(strategy.name, strategy.current_parameter_version);
     }
     return clone(job);
   },

@@ -1,9 +1,10 @@
 import { formatCompactDate } from './format';
-import type { ApiBacktestRunDetail } from '../types';
+import type { ApiBacktestRunDetail, ApiBacktestTradeAuditItem } from '../types';
 
 export type ViewWindow = 'all' | '1y' | '3y';
 export type TradeSegment = 'all' | 'IS' | 'OOS';
 export type RunDetailTab = 'diagnostics' | 'trades' | 'evidence' | 'properties';
+export type TradeAuditSort = 'time_asc' | 'time_desc' | 'pnl_asc' | 'pnl_desc';
 
 export type RunDetailPropertyEntry = {
   key: string;
@@ -31,6 +32,15 @@ export const TRADE_SEGMENT_OPTIONS: Array<{ value: TradeSegment; label: string }
   { value: 'all', label: '全部' },
   { value: 'IS', label: '训练集' },
   { value: 'OOS', label: '测试集' },
+];
+
+export const DEFAULT_EVIDENCE_SORT: TradeAuditSort = 'pnl_desc';
+
+export const EVIDENCE_SORT_OPTIONS: Array<{ value: TradeAuditSort; label: string }> = [
+  { value: 'time_asc', label: '时间正序' },
+  { value: 'time_desc', label: '时间倒序' },
+  { value: 'pnl_asc', label: '收益正序' },
+  { value: 'pnl_desc', label: '收益倒序' },
 ];
 
 function readRecordString(record: Record<string, unknown> | undefined, key: string): string | null {
@@ -120,8 +130,77 @@ export function buildCopyPayload(detail: ApiBacktestRunDetail): Record<string, u
   };
 }
 
-export function getDefaultTradeId(detail: ApiBacktestRunDetail): string | null {
-  return detail.trade_audit_items?.[0]?.trade_id ?? null;
+function getAuditSortTimestamp(item: ApiBacktestTradeAuditItem): number {
+  const normalized =
+    Date.parse(item.closed_at ?? '') ||
+    Date.parse(item.opened_at ?? '') ||
+    Date.parse(item.closed_at?.slice(0, 10) ?? '') ||
+    Date.parse(item.opened_at?.slice(0, 10) ?? '');
+  return Number.isFinite(normalized) ? normalized : 0;
+}
+
+function getAuditSortPnl(item: ApiBacktestTradeAuditItem): number {
+  return typeof item.pnl_pct === 'number' && Number.isFinite(item.pnl_pct) ? item.pnl_pct : 0;
+}
+
+function compareTradeAuditItems(
+  left: ApiBacktestTradeAuditItem,
+  right: ApiBacktestTradeAuditItem,
+  sort: TradeAuditSort,
+): number {
+  const pnlDelta = getAuditSortPnl(left) - getAuditSortPnl(right);
+  const timeDelta = getAuditSortTimestamp(left) - getAuditSortTimestamp(right);
+
+  if (sort === 'time_asc') {
+    return timeDelta || pnlDelta || left.symbol.localeCompare(right.symbol) || left.trade_id.localeCompare(right.trade_id);
+  }
+  if (sort === 'time_desc') {
+    return -timeDelta || -pnlDelta || left.symbol.localeCompare(right.symbol) || left.trade_id.localeCompare(right.trade_id);
+  }
+  if (sort === 'pnl_asc') {
+    return pnlDelta || timeDelta || left.symbol.localeCompare(right.symbol) || left.trade_id.localeCompare(right.trade_id);
+  }
+  return -pnlDelta || -timeDelta || left.symbol.localeCompare(right.symbol) || left.trade_id.localeCompare(right.trade_id);
+}
+
+export function sortTradeAuditItems(
+  items: ApiBacktestTradeAuditItem[] | undefined,
+  sort: TradeAuditSort = DEFAULT_EVIDENCE_SORT,
+): ApiBacktestTradeAuditItem[] {
+  return [...(items ?? [])].sort((left, right) => compareTradeAuditItems(left, right, sort));
+}
+
+function compactRecord(record: Record<string, unknown>): Record<string, unknown> | undefined {
+  const entries = Object.entries(record).filter(([, value]) => value !== null && typeof value !== 'undefined');
+  return entries.length ? Object.fromEntries(entries) : undefined;
+}
+
+export function getRunDetailParameterSnapshot(detail: ApiBacktestRunDetail): Record<string, unknown> | undefined {
+  const parameterSnapshot = (detail.parameter_snapshot ?? detail.preview?.parameter_snapshot ?? undefined) as
+    | Record<string, unknown>
+    | undefined;
+  const configuration =
+    detail.configuration && typeof detail.configuration === 'object'
+      ? (detail.configuration as Record<string, unknown>)
+      : undefined;
+  const derivedContext = compactRecord({
+    data_segment_type: detail.data_segment_type ?? detail.preview?.data_segment_type,
+    oos_start_date: detail.oos_start_date ?? undefined,
+    parameter_version_id: detail.parameter_version_id ?? detail.preview?.parameter_version_id,
+  });
+  const merged = {
+    ...(derivedContext ?? {}),
+    ...(configuration ?? {}),
+    ...(parameterSnapshot ?? {}),
+  };
+  return Object.keys(merged).length ? merged : undefined;
+}
+
+export function getDefaultTradeId(
+  detail: ApiBacktestRunDetail,
+  sort: TradeAuditSort = DEFAULT_EVIDENCE_SORT,
+): string | null {
+  return sortTradeAuditItems(detail.trade_audit_items, sort)[0]?.trade_id ?? null;
 }
 
 export function buildRunDetailPropertySections(detail: ApiBacktestRunDetail): RunDetailPropertySection[] {
@@ -136,7 +215,7 @@ export function buildRunDetailPropertySections(detail: ApiBacktestRunDetail): Ru
       key: 'parameter_snapshot',
       title: '参数快照',
       description: '当前回测锁定的参数值快照。',
-      entries: buildEntries(detail.parameter_snapshot as Record<string, unknown> | undefined),
+      entries: buildEntries(getRunDetailParameterSnapshot(detail)),
     },
     {
       key: 'snapshot_summary',

@@ -1,4 +1,4 @@
-﻿import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+﻿import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunDetailPage } from './pages/run-detail-page';
 import type {
@@ -33,6 +33,9 @@ const detail: ApiBacktestRunDetail = {
   request: {
     benchmark_id: 'SPY',
     rebalance: 'monthly',
+  },
+  configuration: {
+    hold_rank_threshold: 20,
   },
   metrics: { total_return: 2.323, sharpe: 0.85, max_drawdown: -0.249 },
   chart_series: [
@@ -158,6 +161,18 @@ const detail: ApiBacktestRunDetail = {
   },
   trade_audit_items: [
     {
+      trade_id: 'trade-002',
+      symbol: 'AAPL',
+      segment: 'OOS',
+      opened_at: '2026-03-24T09:30:00Z',
+      closed_at: '2026-03-24T16:00:00Z',
+      pnl_pct: -1.4,
+      max_favorable_excursion_pct: 0.8,
+      max_adverse_excursion_pct: -2.4,
+      slippage_cost_pct: 0.22,
+      commentary: '样本外回撤略高，但仍保持在阈值范围内。',
+    },
+    {
       trade_id: 'trade-001',
       symbol: 'QQQ',
       segment: 'IS',
@@ -170,16 +185,16 @@ const detail: ApiBacktestRunDetail = {
       commentary: '均线回归继续围绕基线展开。',
     },
     {
-      trade_id: 'trade-002',
-      symbol: 'AAPL',
-      segment: 'OOS',
-      opened_at: '2026-03-24T09:30:00Z',
-      closed_at: '2026-03-24T16:00:00Z',
-      pnl_pct: -1.4,
-      max_favorable_excursion_pct: 0.8,
-      max_adverse_excursion_pct: -2.4,
-      slippage_cost_pct: 0.22,
-      commentary: '样本外回撤略高，但仍保持在阈值范围内。',
+      trade_id: 'trade-003',
+      symbol: 'MSFT',
+      segment: 'IS',
+      opened_at: '2026-03-22T09:30:00Z',
+      closed_at: '2026-03-22T16:00:00Z',
+      pnl_pct: 6.8,
+      max_favorable_excursion_pct: 7.4,
+      max_adverse_excursion_pct: -0.9,
+      slippage_cost_pct: 0.12,
+      commentary: '收益扩张明显，回撤控制仍在容忍区间内。',
     },
   ],
 };
@@ -232,6 +247,22 @@ const auditTwo: ApiBacktestRunTradeAudit = {
     end_date: '2026-03-24T16:00:00Z',
     color: 'red',
     pnl_pct: -1.4,
+  },
+};
+
+const auditThree: ApiBacktestRunTradeAudit = {
+  ...auditOne,
+  trade_id: 'trade-003',
+  symbol: 'MSFT',
+  opened_at: '2026-03-22T09:30:00Z',
+  closed_at: '2026-03-22T16:00:00Z',
+  pnl_pct: 6.8,
+  commentary: '收益扩张明显，回撤控制仍在容忍区间内。',
+  chart_band: {
+    start_date: '2026-03-22T09:30:00Z',
+    end_date: '2026-03-22T16:00:00Z',
+    color: 'green',
+    pnl_pct: 6.8,
   },
 };
 
@@ -294,7 +325,6 @@ beforeEach(() => {
     is_permanent: true,
   });
   fakeApi.createOptimizationJob.mockResolvedValue({ id: 'opt-001' });
-  vi.stubGlobal('confirm', vi.fn(() => true));
   Object.defineProperty(window.navigator, 'clipboard', {
     configurable: true,
     value: {
@@ -307,6 +337,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
   window.location.hash = '';
 });
 
@@ -314,13 +345,20 @@ describe('RunDetailPage', () => {
   it('renders diagnostics by default and switches between trades, evidence, and properties tabs', async () => {
     fakeApi.getBacktestRunDetail.mockResolvedValue(detail);
     fakeApi.getBacktestRunTrades.mockResolvedValue(trades);
-    fakeApi.getBacktestTradeAudit.mockImplementation(async (_runId: string, tradeId: string) =>
-      tradeId === 'trade-001' ? auditOne : auditTwo,
-    );
+    fakeApi.getBacktestTradeAudit.mockImplementation(async (_runId: string, tradeId: string) => {
+      if (tradeId === 'trade-001') {
+        return auditOne;
+      }
+      if (tradeId === 'trade-002') {
+        return auditTwo;
+      }
+      return auditThree;
+    });
 
     const { container } = render(<RunDetailPage runId="bt-9.6802970000" />);
 
     expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
+    expect(fakeApi.getBacktestRunDetail).toHaveBeenNthCalledWith(1, 'bt-9.6802970000', { view: 'initial' });
     expect(screen.getByText('业绩曲线')).toBeInTheDocument();
     const curveCard = container.querySelector('.run-detail-curve-card--overview');
     expect(curveCard?.textContent).not.toContain('测试集仍为正收益，但回撤修复仍需观察。');
@@ -370,20 +408,12 @@ describe('RunDetailPage', () => {
     expect(screen.getByText('AAPL').closest('tr')?.textContent).toContain('测试集');
 
     fireEvent.click(screen.getByRole('tab', { name: '证据' }));
-    expect(await screen.findByText('QQQ 证据卡')).toBeInTheDocument();
+    expect(await screen.findByText('MSFT 证据卡')).toBeInTheDocument();
     await waitFor(() =>
-      expect(fakeApi.getBacktestTradeAudit).toHaveBeenCalledWith('bt-9.6802970000', 'trade-001'),
+      expect(fakeApi.getBacktestTradeAudit).toHaveBeenCalledWith('bt-9.6802970000', 'trade-003'),
     );
-    expect(screen.getAllByText('数据快照摘要').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('参数快照').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('环境摘要').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('执行策略').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('T日收盘信号，T+1开盘成交').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('运行环境').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('本地').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('运行模式').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('生产').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('AAPL, AMZN, MSFT, NVDA, META, GOOGL, TSLA, AVGO, BRK-B, JPM ...').length).toBeGreaterThan(0);
+    expect(screen.getByDisplayValue('收益倒序')).toBeInTheDocument();
+    expect(screen.queryByText('配置与环境快照')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('tab', { name: '配置' }));
     expect(await screen.findByText('基准标的')).toBeInTheDocument();
@@ -392,10 +422,47 @@ describe('RunDetailPage', () => {
     expect(screen.getByText('每月')).toBeInTheDocument();
     expect(screen.getByText('策略类型')).toBeInTheDocument();
     expect(screen.getByText('质量动量')).toBeInTheDocument();
+    expect(screen.getByText('保留排名阈值')).toBeInTheDocument();
+    expect(screen.getByText('20')).toBeInTheDocument();
     expect(screen.getAllByText('参数快照').length).toBeGreaterThan(0);
     expect(screen.getAllByText('数据快照摘要').length).toBeGreaterThan(0);
     expect(screen.getAllByText('环境摘要').length).toBeGreaterThan(0);
     expect(screen.getAllByText('AAPL, AMZN, MSFT, NVDA, META, GOOGL, TSLA, AVGO, BRK-B, JPM ...').length).toBeGreaterThan(0);
+  });
+
+  it('lazy-loads context only when evidence or properties needs it', async () => {
+    const initialDetail = structuredClone(detail) as ApiBacktestRunDetail & Record<string, unknown>;
+    delete initialDetail.request;
+    delete initialDetail.preview;
+    delete initialDetail.environment_summary;
+    delete initialDetail.snapshot_summary;
+    delete initialDetail.trade_audit_items;
+
+    fakeApi.getBacktestRunDetail
+      .mockResolvedValueOnce(initialDetail as ApiBacktestRunDetail)
+      .mockResolvedValueOnce(detail);
+    fakeApi.getBacktestTradeAudit.mockResolvedValue(auditThree);
+
+    render(<RunDetailPage runId="bt-9.6802970000" />);
+
+    expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
+    expect(fakeApi.getBacktestRunDetail).toHaveBeenNthCalledWith(1, 'bt-9.6802970000', { view: 'initial' });
+    expect(fakeApi.getBacktestTradeAudit).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('tab', { name: '证据' }));
+
+    await waitFor(() =>
+      expect(fakeApi.getBacktestRunDetail).toHaveBeenNthCalledWith(2, 'bt-9.6802970000', { view: 'context' }),
+    );
+    expect(await screen.findByText('MSFT 证据卡')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(fakeApi.getBacktestTradeAudit).toHaveBeenCalledWith('bt-9.6802970000', 'trade-003'),
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: '配置' }));
+
+    expect(await screen.findByText('基准标的')).toBeInTheDocument();
+    expect(fakeApi.getBacktestRunDetail).toHaveBeenCalledTimes(2);
   });
 
   it('shows a month tooltip when hovering the monthly return heatmap', async () => {
@@ -430,6 +497,60 @@ describe('RunDetailPage', () => {
     const note = container.querySelector('.run-detail-diagnostics-note');
     expect(note?.textContent).toContain('收益 +17.1%');
     expect(note?.textContent).toContain('夏普 0.81');
+  });
+
+  it('polls running runs until the detail page refreshes to the completed state', async () => {
+    const setIntervalSpy = vi.spyOn(window, 'setInterval').mockImplementation(((
+      handler: TimerHandler,
+    ) => {
+      queueMicrotask(() => {
+        if (typeof handler === 'function') {
+          handler();
+        }
+      });
+      return 1 as unknown as ReturnType<typeof window.setInterval>;
+    }) as unknown as typeof window.setInterval);
+    const clearIntervalSpy = vi.spyOn(window, 'clearInterval').mockImplementation(() => {});
+    fakeApi.getBacktestRunDetail
+      .mockResolvedValueOnce({
+        ...detail,
+        status: 'RUNNING',
+        metrics: {},
+        chart_series: [],
+        rolling_metrics: [],
+        monthly_returns: [],
+        drawdown_events: [],
+        trades_count: 0,
+        analysis: {
+          subtitle: '回测正在执行，页面会自动刷新；你可以先查看已锁定的区间与配置。',
+          kpi_cards: [],
+          decision_rail: {
+            score: 0,
+            label: '回测状态',
+            items: [
+              {
+                key: 'execution_state',
+                title: '执行状态',
+                body: '回测已提交，后台正在生成业绩曲线、指标与交易明细。',
+                tone: 'neutral',
+              },
+            ],
+          },
+        },
+      } satisfies ApiBacktestRunDetail)
+      .mockResolvedValueOnce(detail);
+
+    try {
+      render(<RunDetailPage runId="bt-running" />);
+
+      expect(await screen.findByText('已完成')).toBeInTheDocument();
+      expect(setIntervalSpy.mock.calls.length).toBeGreaterThan(0);
+      await waitFor(() => expect(fakeApi.getBacktestRunDetail).toHaveBeenCalledTimes(2));
+      expect(screen.getByText('测试集仍为正收益，但回撤修复仍需观察。')).toBeInTheDocument();
+    } finally {
+      setIntervalSpy.mockRestore();
+      clearIntervalSpy.mockRestore();
+    }
   });
 
   it('keeps drawdown values in percentage-point units on the diagnostics chart', async () => {
@@ -638,9 +759,10 @@ describe('RunDetailPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '保存回测' }));
 
-    await waitFor(() =>
-      expect(window.confirm).toHaveBeenCalledWith('是否要将该回测保存为永久回测？保存后将不再按临时回测自动清理。'),
-    );
+    const dialog = await screen.findByRole('dialog', { name: '保存回测' });
+    expect(within(dialog).getByText('确认后该回测会转为永久回测，不再按临时回测自动清理。')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: '确认' }));
+
     await waitFor(() => expect(fakeApi.saveBacktestRun).toHaveBeenCalledWith('bt-temp-run'));
     expect(await screen.findByText('已保存为永久回测。')).toBeInTheDocument();
     expect(screen.getByText('永久回测')).toBeInTheDocument();

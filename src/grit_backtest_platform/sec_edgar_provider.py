@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,6 +16,7 @@ from .fallback_provider import ProviderAvailability
 SEC_COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 REPORT_FORMS = {"10-K", "10-Q", "8-K", "20-F", "6-K"}
+_EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
 
 
 def _parse_iso_date(value: Any) -> str | None:
@@ -22,33 +24,64 @@ def _parse_iso_date(value: Any) -> str | None:
     return text[:10] if text else None
 
 
+def _extract_email(value: str) -> str:
+    match = _EMAIL_PATTERN.search(str(value or "").strip())
+    return match.group(0) if match else ""
+
+
+def _build_formal_user_agent(raw_user_agent: str, contact_email: str, contact_name: str) -> str:
+    base = str(raw_user_agent or "").strip()
+    email = _extract_email(contact_email) or _extract_email(base)
+    if not base and contact_name and email:
+        return f"{contact_name} ({email})"
+    if base and email and email not in base:
+        return f"{base} ({email})"
+    return base
+
+
 class SecEdgarProvider:
     provider_name = "sec_edgar"
 
     def __init__(self, user_agent: str | None = None, timeout: int = 20) -> None:
-        self.user_agent = str(user_agent or os.getenv("SEC_USER_AGENT") or "").strip()
+        raw_user_agent = str(user_agent or os.getenv("SEC_USER_AGENT") or "").strip()
+        self.contact_email = _extract_email(
+            str(os.getenv("SEC_CONTACT_EMAIL") or os.getenv("SEC_EDGAR_CONTACT_EMAIL") or "").strip()
+        )
+        self.contact_name = str(
+            os.getenv("SEC_CONTACT_NAME") or os.getenv("SEC_EDGAR_CONTACT_NAME") or "TradeAdmin Grit_Strategy_Lab"
+        ).strip()
+        self.user_agent = _build_formal_user_agent(raw_user_agent, self.contact_email, self.contact_name)
         self.timeout = timeout
         self._ticker_cache: dict[str, dict[str, Any]] | None = None
 
     def availability(self) -> ProviderAvailability:
         return ProviderAvailability(
             provider_name=self.provider_name,
-            available=bool(self.user_agent),
-            reason=None if self.user_agent else "SEC_USER_AGENT is not configured.",
-            metadata={"requires_user_agent": True},
+            available=bool(self.user_agent and _extract_email(self.user_agent)),
+            reason=(
+                None
+                if self.user_agent and _extract_email(self.user_agent)
+                else "SEC_USER_AGENT must include a contact email."
+            ),
+            metadata={"requires_user_agent": True, "requires_contact_email": True},
         )
 
     def _request_json(self, url: str) -> Any:
         if not self.user_agent:
             raise RuntimeError("SEC_USER_AGENT is not configured.")
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": self.user_agent,
-                "Accept": "application/json",
-                "Accept-Encoding": "gzip, deflate",
-            },
-        )
+        if not _extract_email(self.user_agent):
+            raise RuntimeError("SEC_USER_AGENT must include a contact email.")
+        headers = {
+            "User-Agent": self.user_agent,
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Connection": "keep-alive",
+        }
+        contact_email = self.contact_email or _extract_email(self.user_agent)
+        if contact_email:
+            headers["From"] = contact_email
+        request = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 payload = response.read()

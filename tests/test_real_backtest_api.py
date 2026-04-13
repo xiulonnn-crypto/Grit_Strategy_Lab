@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 from grit_backtest_platform.backtest_metrics import (
     build_drawdown_events,
@@ -22,6 +23,58 @@ from tests.api_test_support import (
 
 START_DATE = "2024-03-01"
 END_DATE = "2025-03-31"
+
+
+def test_submit_backtest_returns_immediately_and_finishes_in_background(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_momentum_strategy(
+        client,
+        idempotency_key="materialize-momentum-async-submit",
+        universe_name="标普500成分股",
+        rebalance_frequency="semiannual",
+        top_n=3,
+    )["strategy"]
+    refresh_snapshots(client)
+
+    service = client.app.state.service
+    original_simulate_run = service._simulate_run
+
+    def slow_simulate_run(*args, **kwargs):
+        time.sleep(0.3)
+        return original_simulate_run(*args, **kwargs)
+
+    service._simulate_run = slow_simulate_run
+    started_at = time.perf_counter()
+    submitted = assert_ok(
+        client.post(
+            f"/strategies/{strategy['id']}/backtest-runs",
+            json={
+                "idempotency_key": "run-momentum-async-submit",
+                "start_date": START_DATE,
+                "end_date": END_DATE,
+                "parameter_version_id": strategy["current_parameter_version_id"],
+            },
+        )
+    )
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.25
+    assert submitted["status"] in {"QUEUED", "RUNNING"}
+    assert submitted["completed_at"] is None
+    assert submitted["parameter_version_id"] == strategy["current_parameter_version_id"]
+
+    deadline = time.time() + 5.0
+    latest = submitted
+    while time.time() < deadline:
+        latest = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail"))
+        if latest["status"] not in {"QUEUED", "RUNNING"}:
+            break
+        time.sleep(0.05)
+
+    assert latest["status"] in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
+    assert latest["completed_at"]
+    assert latest["chart_series"]
 
 
 def test_preview_submit_detail_and_trades_preserve_parameter_snapshot_and_default_segment(tmp_path):
@@ -94,6 +147,87 @@ def test_preview_submit_detail_and_trades_preserve_parameter_snapshot_and_defaul
     assert all(abs(event["drawdown_pct"]) <= 100 for event in detail["drawdown_events"])
 
 
+def test_delete_backtest_run_logically_removes_completed_run_from_list_and_detail(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_grid_strategy(client, idempotency_key="materialize-grid-delete-run")["strategy"]
+    refresh_snapshots(client)
+    submitted = submit_backtest(
+        client,
+        strategy["id"],
+        start_date=START_DATE,
+        end_date=END_DATE,
+        idempotency_key="run-grid-delete-completed",
+    )
+
+    deleted = assert_ok(client.delete(f"/backtest-runs/{submitted['id']}"))
+    runs = assert_ok(client.get("/backtest-runs"))
+    strategy_detail = assert_ok(client.get(f"/strategies/{strategy['id']}/detail"))
+    deleted_row = client.app.state.service.storage.fetch_one(
+        "SELECT status, deleted_at, deleted_reason FROM backtest_runs WHERE id = ?",
+        (submitted["id"],),
+    )
+
+    assert deleted["id"] == submitted["id"]
+    assert deleted["deleted_reason"] == "manual_delete"
+    assert submitted["id"] not in [run["id"] for run in runs]
+    assert client.get(f"/backtest-runs/{submitted['id']}/detail").status_code == 404
+    assert deleted_row is not None
+    assert deleted_row["status"] == "DELETED"
+    assert deleted_row["deleted_at"] is not None
+    assert deleted_row["deleted_reason"] == "manual_delete"
+    assert strategy_detail["latest_run_id"] is None
+    assert strategy_detail["latest_successful_run_id"] is None
+
+
+def test_delete_backtest_run_rejects_active_runs(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_momentum_strategy(
+        client,
+        idempotency_key="materialize-momentum-delete-active",
+        universe_name="标普500成分股",
+        rebalance_frequency="semiannual",
+        top_n=3,
+    )["strategy"]
+    refresh_snapshots(client)
+
+    service = client.app.state.service
+    original_simulate_run = service._simulate_run
+
+    def slow_simulate_run(*args, **kwargs):
+        time.sleep(0.3)
+        return original_simulate_run(*args, **kwargs)
+
+    service._simulate_run = slow_simulate_run
+    submitted = assert_ok(
+        client.post(
+            f"/strategies/{strategy['id']}/backtest-runs",
+            json={
+                "idempotency_key": "run-momentum-delete-active",
+                "start_date": START_DATE,
+                "end_date": END_DATE,
+                "parameter_version_id": strategy["current_parameter_version_id"],
+            },
+        )
+    )
+
+    rejected = client.delete(f"/backtest-runs/{submitted['id']}")
+
+    assert rejected.status_code == 409
+    assert rejected.json()["code"] == "BACKTEST_RUN_DELETE_ACTIVE"
+
+    deadline = time.time() + 5.0
+    latest = submitted
+    while time.time() < deadline:
+        latest = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail"))
+        if latest["status"] not in {"QUEUED", "RUNNING"}:
+            break
+        time.sleep(0.05)
+
+    assert latest["status"] in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
+
+
 def test_backtest_run_detail_backfills_missing_execution_policy_for_legacy_runs(tmp_path):
     client, _ = create_test_client(tmp_path)
 
@@ -117,7 +251,94 @@ def test_backtest_run_detail_backfills_missing_execution_policy_for_legacy_runs(
     detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail"))
 
     assert detail["request"]["execution_policy"] == "T_CLOSE_TO_T1_OPEN"
+
+
+def test_backtest_run_detail_backfills_trade_audit_items_projection_for_legacy_rows(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_grid_strategy(client, idempotency_key="materialize-grid-audit-projection")["strategy"]
+    refresh_snapshots(client)
+    submitted = submit_backtest(
+        client,
+        strategy["id"],
+        start_date=START_DATE,
+        end_date=END_DATE,
+        idempotency_key="run-grid-audit-projection",
+    )
+    service = client.app.state.service
+    service.storage.execute(
+        "UPDATE backtest_runs SET trade_audit_items_json = ? WHERE id = ?",
+        ("[]", submitted["id"]),
+    )
+
+    detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail"))
+    persisted_projection = service.storage.fetch_one(
+        "SELECT trade_audit_items_json FROM backtest_runs WHERE id = ?",
+        (submitted["id"],),
+    )
+
+    assert detail["trade_audit_items"]
+    assert persisted_projection is not None
+    restored_items = json.loads(persisted_projection["trade_audit_items_json"])
+    assert restored_items
+    assert restored_items[0]["trade_id"] == detail["trade_audit_items"][0]["trade_id"]
     assert detail["preview"]["execution_policy"] == "T_CLOSE_TO_T1_OPEN"
+
+
+def test_backtest_run_detail_initial_view_returns_only_first_paint_fields(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_grid_strategy(client, idempotency_key="materialize-grid-initial-view")["strategy"]
+    refresh_snapshots(client)
+    submitted = submit_backtest(
+        client,
+        strategy["id"],
+        start_date=START_DATE,
+        end_date=END_DATE,
+        idempotency_key="run-grid-initial-view",
+    )
+
+    detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail?view=initial"))
+
+    assert detail["analysis"]
+    assert detail["chart_series"]
+    assert detail["rolling_metrics"]
+    assert detail["monthly_returns"]
+    assert isinstance(detail["drawdown_events"], list)
+    assert detail["parameter_snapshot"]
+    assert "request" not in detail
+    assert "preview" not in detail
+    assert "environment_summary" not in detail
+    assert "trade_audit_items" not in detail
+    assert "trades" not in detail
+
+
+def test_backtest_run_detail_context_view_returns_only_lazy_tabs_context(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_grid_strategy(client, idempotency_key="materialize-grid-context-view")["strategy"]
+    refresh_snapshots(client)
+    submitted = submit_backtest(
+        client,
+        strategy["id"],
+        start_date=START_DATE,
+        end_date=END_DATE,
+        idempotency_key="run-grid-context-view",
+    )
+
+    detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail?view=context"))
+
+    assert detail["request"]["execution_policy"] == "T_CLOSE_TO_T1_OPEN"
+    assert detail["preview"]["execution_policy"] == "T_CLOSE_TO_T1_OPEN"
+    assert detail["snapshot_summary"]["dataset_snapshot_id"]
+    assert detail["environment_summary"]
+    assert detail["trade_audit_items"]
+    assert "analysis" not in detail
+    assert "chart_series" not in detail
+    assert "rolling_metrics" not in detail
+    assert "monthly_returns" not in detail
+    assert "drawdown_events" not in detail
+    assert "trades" not in detail
 
 
 def test_single_symbol_preview_submit_bypasses_incomplete_universe_and_corporate_snapshots(tmp_path):

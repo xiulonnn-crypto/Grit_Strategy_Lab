@@ -416,7 +416,7 @@ const tagStatusLabel = (status: 'synced' | 'manual_override_preserved'): string 
 export function CreationSessionPage({ sessionId }: { sessionId: string }): JSX.Element {
   const api = useApiClient();
   const [session, setSession] = useState<ApiStrategyCreationSession | null>(null);
-  const [draft, setDraft] = useState(TEXT.defaultDraft);
+  const [draft, setDraft] = useState<string>(TEXT.defaultDraft);
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -487,10 +487,11 @@ export function CreationSessionPage({ sessionId }: { sessionId: string }): JSX.E
     const currentFields = collectEditableFields(currentSession);
     if (sameValues(currentFields, editableValuesRef.current, syncedValuesRef.current)) return currentSession;
     if (typeof currentSession.revision !== 'number') { setSaveState('error'); setSaveError(TEXT.saveErrorBanner); return null; }
+    const confirmedRevision = currentSession.revision;
     setSaveState('saving'); setSaveError(null);
     const savePromise = (async () => {
       try {
-        const updated = await api.updateConfirmation(currentSession.id, buildPayload(currentFields, editableValuesRef.current, currentSession.revision));
+        const updated = await api.updateConfirmation(currentSession.id, buildPayload(currentFields, editableValuesRef.current, confirmedRevision));
         syncState(updated, { preserveActiveStep: true });
         return updated;
       } catch (caught) {

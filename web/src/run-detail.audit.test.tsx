@@ -70,7 +70,10 @@ const detail: ApiBacktestRunDetail = {
   strategy_name: '美股质量动量',
   status: 'COMPLETED',
   metrics: { total_return: 2.323, sharpe: 0.85, max_drawdown: -0.249 },
-  trade_audit_items: Object.values(audits).map((audit) => ({
+  trade_audit_items: [
+    audits['trade-002'],
+    audits['trade-001'],
+  ].map((audit) => ({
     trade_id: audit.trade_id,
     symbol: audit.symbol,
     segment: audit.segment,
@@ -127,14 +130,22 @@ function Harness(): JSX.Element {
 }
 
 describe('RunDetailAuditPanel', () => {
-  it('syncs the selected trade row with the evidence card and configuration snapshot', () => {
-    render(<Harness />);
+  it('defaults to profit-desc sorting and keeps the evidence card in sync with the selected trade', () => {
+    const { container } = render(<Harness />);
 
     expect(screen.getByText('QQQ 证据卡')).toBeInTheDocument();
-    expect(screen.getByText('数据快照摘要')).toBeInTheDocument();
-    expect(screen.getByText('参数快照')).toBeInTheDocument();
-    expect(screen.getByText('环境摘要')).toBeInTheDocument();
-    expect(screen.getByText('ds-001')).toBeInTheDocument();
+    expect(screen.queryByText('配置与环境快照')).not.toBeInTheDocument();
+    expect((screen.getByLabelText('排序') as HTMLSelectElement).value).toBe('pnl_desc');
+
+    const rows = [...container.querySelectorAll('.run-detail-audit-row')];
+    expect(rows[0]?.textContent).toContain('QQQ');
+    expect(rows[1]?.textContent).toContain('AAPL');
+
+    fireEvent.change(screen.getByLabelText('排序'), { target: { value: 'time_desc' } });
+
+    const timeSortedRows = [...container.querySelectorAll('.run-detail-audit-row')];
+    expect(timeSortedRows[0]?.textContent).toContain('AAPL');
+    expect(timeSortedRows[1]?.textContent).toContain('QQQ');
 
     fireEvent.click(screen.getByRole('button', { name: /AAPL/i }));
 

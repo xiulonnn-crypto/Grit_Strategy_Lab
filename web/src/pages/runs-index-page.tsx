@@ -10,6 +10,16 @@ const TEXT = {
   empty: '暂无回测任务。先 materialize 一个策略再回到这里。',
   loading: '加载回测历史中...',
   retry: '重试',
+  actions: '操作',
+  delete: '删除',
+  deleting: '删除中...',
+  deleteDisabledHint: '运行中的回测暂不支持删除',
+  deleteDialogEyebrow: '逻辑删除',
+  deleteDialogTitle: '删除回测',
+  deleteDialogBody: '确认后该回测会从回测列表和详情页隐藏，但不会物理清理底层记录。',
+  deleteDialogCancel: '取消',
+  deleteDialogConfirm: '确认',
+  deleteErrorPrefix: '删除回测失败：',
 } as const;
 
 function isAbortError(caught: unknown): boolean {
@@ -65,6 +75,10 @@ function getTone(status: ApiBacktestRunListItem['status']): string {
   return status === 'FAILED' ? 'danger' : status === 'COMPLETED_WITH_WARNINGS' ? 'warning' : 'success';
 }
 
+function canDeleteRun(status: ApiBacktestRunListItem['status']): boolean {
+  return status !== 'QUEUED' && status !== 'RUNNING';
+}
+
 function buildRows(runs: ApiBacktestRunListItem[]) {
   return runs
     .map((run) => {
@@ -83,6 +97,7 @@ function buildRows(runs: ApiBacktestRunListItem[]) {
         sharpe: formatMetric(metrics.sharpe, 'ratio'),
         maxDrawdown: formatMetric(metrics.max_drawdown, 'percent'),
         completedAt,
+        canDelete: canDeleteRun(run.status),
       };
     })
     .sort((left, right) => {
@@ -97,6 +112,9 @@ export function RunsIndexPage(): JSX.Element {
   const [runs, setRuns] = useState<ApiBacktestRunListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -131,6 +149,41 @@ export function RunsIndexPage(): JSX.Element {
   }, [api]);
 
   const rows = useMemo(() => buildRows(runs), [runs]);
+  const pendingDeleteRow = useMemo(
+    () => rows.find((row) => row.id === pendingDeleteId) ?? null,
+    [pendingDeleteId, rows],
+  );
+
+  function openDeleteDialog(runId: string): void {
+    setDeleteError(null);
+    setPendingDeleteId(runId);
+  }
+
+  function closeDeleteDialog(): void {
+    if (deleteBusy) {
+      return;
+    }
+    setPendingDeleteId(null);
+    setDeleteError(null);
+  }
+
+  async function handleDeleteRun(): Promise<void> {
+    if (!pendingDeleteRow) {
+      return;
+    }
+    const runId = pendingDeleteRow.id;
+    try {
+      setDeleteBusy(true);
+      setDeleteError(null);
+      await api.deleteBacktestRun(runId);
+      setRuns((current) => current.filter((run) => run.id !== runId));
+      setPendingDeleteId(null);
+    } catch (caught) {
+      setDeleteError((caught as Error).message);
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
 
   return (
     <div className="runs-index-page panel">
@@ -159,6 +212,7 @@ export function RunsIndexPage(): JSX.Element {
                 <th>夏普</th>
                 <th>回撤</th>
                 <th>完成时间</th>
+                <th>{TEXT.actions}</th>
               </tr>
             </thead>
             <tbody>
@@ -184,10 +238,72 @@ export function RunsIndexPage(): JSX.Element {
                   <td>{row.sharpe}</td>
                   <td>{row.maxDrawdown}</td>
                   <td>{formatDate(row.completedAt)}</td>
+                  <td className="runs-index-table__actions-cell">
+                    <button
+                      className="text-button runs-index-table__action-button"
+                      disabled={!row.canDelete}
+                      onClick={() => openDeleteDialog(row.id)}
+                      title={row.canDelete ? undefined : TEXT.deleteDisabledHint}
+                      type="button"
+                    >
+                      {TEXT.delete}
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+        </div>
+      ) : null}
+
+      {pendingDeleteRow ? (
+        <div
+          aria-label={TEXT.deleteDialogTitle}
+          aria-modal="true"
+          className="modal-shell"
+          onClick={closeDeleteDialog}
+          role="dialog"
+        >
+          <div className="modal-card runs-index-delete-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">{TEXT.deleteDialogEyebrow}</p>
+                <h3>{TEXT.deleteDialogTitle}</h3>
+                <p className="runs-index-delete-modal__copy">{TEXT.deleteDialogBody}</p>
+              </div>
+            </div>
+
+            <dl className="runs-index-delete-modal__summary">
+              <div>
+                <dt>回测号</dt>
+                <dd>{pendingDeleteRow.id}</dd>
+              </div>
+              <div>
+                <dt>策略</dt>
+                <dd>{pendingDeleteRow.strategyName}</dd>
+              </div>
+              <div>
+                <dt>当前状态</dt>
+                <dd>{pendingDeleteRow.statusText}</dd>
+              </div>
+            </dl>
+
+            {deleteError ? <div className="error-banner" role="alert">{`${TEXT.deleteErrorPrefix}${deleteError}`}</div> : null}
+
+            <div className="modal-card__footer">
+              <button className="ghost-button" disabled={deleteBusy} onClick={closeDeleteDialog} type="button">
+                {TEXT.deleteDialogCancel}
+              </button>
+              <button
+                className="primary-button runs-index-delete-modal__confirm"
+                disabled={deleteBusy}
+                onClick={() => void handleDeleteRun()}
+                type="button"
+              >
+                {deleteBusy ? TEXT.deleting : TEXT.deleteDialogConfirm}
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
     </div>

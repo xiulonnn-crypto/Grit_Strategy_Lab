@@ -230,11 +230,14 @@ def test_alpha_vantage_rate_limit_payload_raises_clear_error(monkeypatch):
 
 
 def test_sec_edgar_provider_resolves_identity_and_emits_report_filed(monkeypatch):
-    monkeypatch.setenv("SEC_USER_AGENT", "Codex Test coder@example.com")
+    monkeypatch.setenv("SEC_USER_AGENT", "Codex Test/1.0")
+    monkeypatch.setenv("SEC_CONTACT_EMAIL", "coder@example.com")
     provider = SecEdgarProvider()
 
     def fake_urlopen(request, timeout=0):
         url = _request_url(request)
+        assert request.headers["User-agent"] == "Codex Test/1.0 (coder@example.com)"
+        assert request.headers["From"] == "coder@example.com"
         if "company_tickers.json" in url:
             return _FakeHttpResponse(
                 json.dumps(
@@ -281,7 +284,8 @@ def test_sec_edgar_provider_resolves_identity_and_emits_report_filed(monkeypatch
 def test_sec_edgar_provider_accepts_gzip_payload(monkeypatch):
     import gzip
 
-    monkeypatch.setenv("SEC_USER_AGENT", "Codex Test coder@example.com")
+    monkeypatch.setenv("SEC_USER_AGENT", "Codex Test/1.0")
+    monkeypatch.setenv("SEC_CONTACT_EMAIL", "coder@example.com")
     provider = SecEdgarProvider()
 
     def fake_urlopen(request, timeout=0):
@@ -395,6 +399,7 @@ def test_runtime_market_data_provider_keeps_primary_actions_when_primary_price_s
 
     class _TiingoProvider:
         provider_name = "tiingo"
+        supports_action_enrichment = True
 
         def fetch_history(self, symbol: str, start_date: date, end_date: date):
             return {
@@ -419,9 +424,10 @@ def test_runtime_market_data_provider_keeps_primary_actions_when_primary_price_s
 
     assert len(result["actions"]) == 1
     assert result["actions"][0]["action_type"] == "dividend"
-    assert result["actions"][0]["value"] is None
+    assert result["actions"][0]["value"] == 0.25
     assert result["actions"][0]["payload"]["from"] == "yahoo"
-    assert result["actions"][0]["payload"]["cash"] is None
+    assert result["actions"][0]["payload"]["cash"] == 0.25
+    assert result["actions"][0]["fallback_source"] == "tiingo"
 
 
 def test_runtime_market_data_provider_stops_after_first_price_provider_success():
@@ -445,18 +451,38 @@ def test_runtime_market_data_provider_stops_after_first_price_provider_success()
 
     class _TiingoProvider:
         provider_name = "tiingo"
+        supports_action_enrichment = True
 
         def fetch_history(self, symbol: str, start_date: date, end_date: date):
             calls.append("tiingo")
-            raise AssertionError("secondary price provider should not be called after yahoo succeeds")
+            return {
+                "source": "tiingo",
+                "bars": [
+                    {"date": "2026-04-01", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "adj_close": 100.5, "volume": 1000}
+                ],
+                "actions": [
+                    {"date": "2026-04-01", "action_type": "dividend", "value": 0.25, "source": "tiingo"}
+                ],
+                "warnings": [],
+                "partial": False,
+                "metadata": {},
+            }
 
-    provider = RuntimeMarketDataProvider([_YahooProvider(), _TiingoProvider()])
+    class _AkshareProvider:
+        provider_name = "akshare_us"
+
+        def fetch_history(self, symbol: str, start_date: date, end_date: date):
+            calls.append("akshare_us")
+            raise AssertionError("non-action enrichment provider should not be called after yahoo succeeds")
+
+    provider = RuntimeMarketDataProvider([_YahooProvider(), _TiingoProvider(), _AkshareProvider()])
 
     result = provider.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 1))
 
-    assert calls == ["yahoo"]
+    assert calls == ["yahoo", "tiingo"]
     assert result["source"] == "yahoo"
     assert len(result["bars"]) == 1
+    assert len(result["actions"]) == 1
 
 
 def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(monkeypatch):
@@ -584,12 +610,15 @@ def test_longbridge_provider_supports_probe_identity_and_history(monkeypatch):
             return {"app_key": app_key, "app_secret": app_secret, "access_token": access_token}
 
     class _FakeQuoteContext:
+        create_calls = 0
+
         def __init__(self, config):
             self.config = config
             self.calls: list[tuple[str, tuple, dict]] = []
 
         @classmethod
         def create(cls, config):
+            cls.create_calls += 1
             return cls(config)
 
         def quote(self, symbols):
@@ -642,6 +671,7 @@ def test_longbridge_provider_supports_probe_identity_and_history(monkeypatch):
     assert result.partial is False
     assert [bar.date for bar in result.bars] == ["2026-04-01", "2026-04-02"]
     assert result.metadata["supports_post_2010_history"] is True
+    assert _FakeQuoteContext.create_calls == 1
 
 
 def test_longbridge_provider_rejects_pre_2010_history(monkeypatch):
@@ -657,6 +687,77 @@ def test_longbridge_provider_rejects_pre_2010_history(monkeypatch):
         assert "2010-06-01" in str(exc)
     else:
         raise AssertionError("Expected Longbridge to reject pre-2010 history")
+
+
+def test_longbridge_provider_parses_list_payload_rows_without_mapping(monkeypatch):
+    monkeypatch.setenv("LONGBRIDGE_APP_KEY", "app-key")
+    monkeypatch.setenv("LONGBRIDGE_APP_SECRET", "app-secret")
+    monkeypatch.setenv("LONGBRIDGE_ACCESS_TOKEN", "access-token")
+
+    fake_openapi = SimpleNamespace()
+
+    class _FakeConfig:
+        @classmethod
+        def from_apikey(cls, app_key, app_secret, access_token):
+            return {"app_key": app_key, "app_secret": app_secret, "access_token": access_token}
+
+    class _FakeCandlestick:
+        __slots__ = ("open", "high", "low", "close", "volume", "timestamp", "trade_session")
+
+        def __init__(self, *, open_value, high, low, close, volume, timestamp):
+            self.open = open_value
+            self.high = high
+            self.low = low
+            self.close = close
+            self.volume = volume
+            self.timestamp = timestamp
+            self.trade_session = "Intraday"
+
+    class _FakeQuoteContext:
+        @classmethod
+        def create(cls, config):
+            return cls()
+
+        def quote(self, symbols):
+            return [{"symbol": symbols[0], "last_done": 200.0}]
+
+        def static_info(self, symbols):
+            return [{"symbol": symbols[0], "name_en": "Apple Inc.", "exchange": "NASD"}]
+
+        def history_candlesticks_by_date(self, symbol, period, adjust_type, start_date, end_date):
+            return [
+                _FakeCandlestick(
+                    open_value=100.0,
+                    high=101.0,
+                    low=99.5,
+                    close=100.5,
+                    volume=1000,
+                    timestamp="2026-04-01 12:00:00",
+                ),
+                _FakeCandlestick(
+                    open_value=100.5,
+                    high=102.0,
+                    low=100.0,
+                    close=101.5,
+                    volume=1100,
+                    timestamp="2026-04-02 12:00:00",
+                ),
+            ]
+
+    fake_openapi.Config = _FakeConfig
+    fake_openapi.QuoteContext = _FakeQuoteContext
+    fake_openapi.Period = SimpleNamespace(Day="Day")
+    fake_openapi.AdjustType = SimpleNamespace(NoAdjust="NoAdjust")
+
+    monkeypatch.setitem(sys.modules, "longport.openapi", fake_openapi)
+    monkeypatch.setitem(sys.modules, "longbridge.openapi", fake_openapi)
+
+    provider = LongbridgeQuoteProvider()
+    result = provider.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 2))
+
+    assert [bar.date for bar in result.bars] == ["2026-04-01", "2026-04-02"]
+    assert result.bars[0].open == 100.0
+    assert result.bars[1].close == 101.5
 
 
 def test_akshare_us_provider_parses_records(monkeypatch):

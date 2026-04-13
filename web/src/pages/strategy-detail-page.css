@@ -107,10 +107,10 @@
 
 .strategy-detail-history-table th:nth-child(3),
 .strategy-detail-history-table td:nth-child(3),
+.strategy-detail-history-table th:nth-child(5),
+.strategy-detail-history-table td:nth-child(5),
 .strategy-detail-history-table th:nth-child(6),
-.strategy-detail-history-table td:nth-child(6),
-.strategy-detail-history-table th:nth-child(7),
-.strategy-detail-history-table td:nth-child(7) {
+.strategy-detail-history-table td:nth-child(6) {
   width: 92px;
 }
 
@@ -127,6 +127,12 @@
   width: min(960px, 100%);
   display: grid;
   gap: 18px;
+}
+
+.strategy-detail-history-modal__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .strategy-detail-page .strategy-detail-side-panel--recent-run {

@@ -83,6 +83,7 @@ const sourceRunDetail: ApiBacktestRunDetail = {
   id: 'run-seed',
   strategy_id: 'strat-mean-001',
   status: 'COMPLETED',
+  metrics: {},
   parameter_snapshot: {
     ...strategyDetail.parameters,
     long_entry_size_pct: 10,
@@ -113,6 +114,7 @@ describe('OptimizationConfigPage', () => {
     expect(screen.getByText('观察周期')).toBeInTheDocument();
     expect(screen.getByText('布林带周期')).toBeInTheDocument();
     expect(screen.getByText('RSI周期')).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '滚动前瞻验证' })).toBeInTheDocument();
     expect(screen.queryByText('策略名称')).not.toBeInTheDocument();
     expect(screen.queryByText('策略描述')).not.toBeInTheDocument();
     expect(screen.queryByText('本轮设置')).not.toBeInTheDocument();

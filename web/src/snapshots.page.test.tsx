@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SnapshotsPage } from './pages/snapshots-page';
 import type { ApiSnapshotOverview } from './types';
@@ -217,6 +217,38 @@ describe('SnapshotsPage', () => {
     expect(screen.getByRole('button', { name: '刷新快照' })).toBeDisabled();
   });
 
+  it('switches to a running summary immediately after refresh is clicked', async () => {
+    let resolveRefresh: ((value: ApiSnapshotOverview) => void) | null = null;
+    fakeApi.getSnapshotOverview.mockResolvedValue(overview);
+    fakeApi.refreshSnapshots.mockImplementation(
+      () =>
+        new Promise<ApiSnapshotOverview>((resolve) => {
+          resolveRefresh = resolve;
+        }),
+    );
+
+    render(<SnapshotsPage />);
+
+    expect(await screen.findByRole('heading', { level: 1, name: '快照总览' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '刷新快照' }));
+
+    expect(await screen.findByText('数据刷新中...')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveRefresh?.({
+        ...overview,
+        overall_status: 'RUNNING',
+        latest_job: {
+          ...overview.latest_job,
+          status: 'RUNNING',
+          completed_at: null,
+          request: { mode: 'repair' },
+        },
+      });
+    });
+  });
+
   it('shows an error banner when the overview request fails', async () => {
     fakeApi.getSnapshotOverview.mockRejectedValue(new Error('模拟接口 500'));
 
@@ -300,5 +332,71 @@ describe('SnapshotsPage', () => {
     render(<SnapshotsPage />);
 
     expect(await screen.findByText('最近刷新 4月1日 下午03:48 ·本次未新增数据。')).toBeInTheDocument();
+  });
+
+  it('does not show a no-change summary while refresh is still running', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue({
+      ...overview,
+      overall_status: 'RUNNING',
+      latest_job: {
+        ...overview.latest_job,
+        status: 'RUNNING',
+        completed_at: null,
+        summary: {
+          refresh_stats: {
+            datasets: {
+              'ds-corporate-actions': {
+                name: '公司行为数据',
+                updated_symbol_count: 0,
+                updated_row_count: 0,
+              },
+              'ds-price': {
+                name: '股票价格数据',
+                updated_symbol_count: 0,
+                updated_row_count: 0,
+              },
+            },
+            universes: {
+              'un-sp500': {
+                name: '标普500',
+                updated_row_count: 0,
+              },
+              'un-ndx100': {
+                name: '纳指100',
+                updated_row_count: 0,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    render(<SnapshotsPage />);
+
+    expect(await screen.findByText('数据刷新中...')).toBeInTheDocument();
+    expect(screen.queryByText(/本次未新增数据/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '刷新中...' })).toBeDisabled();
+  });
+
+  it('shows incremental additions while refresh is still running once partial stats are available', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue({
+      ...overview,
+      overall_status: 'RUNNING',
+      latest_job: {
+        ...overview.latest_job,
+        status: 'RUNNING',
+        completed_at: null,
+      },
+    });
+
+    render(<SnapshotsPage />);
+
+    expect(
+      await screen.findByText(
+        '数据刷新中... ·新增公司行为数据7家49行，股票价格数据7家49行，标普500股票池4行，纳指100股票池2行。',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/本次未新增数据/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '刷新中...' })).toBeDisabled();
   });
 });

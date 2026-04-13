@@ -521,7 +521,6 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
                     <tr>
                       <th>版本</th>
                       <th>参数版本 ID</th>
-                      <th>修订</th>
                       <th>更新时间</th>
                       <th>备注</th>
                       <th>字段数</th>
@@ -535,7 +534,6 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
                           <strong>v{entry.version_number}</strong>
                         </td>
                         <td>{entry.parameter_version_id}</td>
-                        <td>{entry.revision}</td>
                         <td>{entry.created_at ? formatDateTime(entry.created_at) : '-'}</td>
                         <td className="strategy-detail-history-table__comment">{entry.comment ?? TEXT.historyFallbackComment}</td>
                         <td>{Object.keys(entry.parameters ?? {}).length}</td>
@@ -628,6 +626,7 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
       {selectedHistoryEntry ? (
         <div
           aria-label={TEXT.historyDetailTitle}
+          aria-modal="true"
           className="modal-shell"
           onClick={() => setSelectedHistoryId(null)}
           role="dialog"
@@ -642,12 +641,9 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
                   {Object.keys(selectedHistoryEntry.parameters ?? {}).length}
                 </p>
               </div>
-              <div className="hero-actions">
-                <span className="status-chip status-chip--soft">修订 {selectedHistoryEntry.revision}</span>
-                <button className="ghost-button" onClick={() => setSelectedHistoryId(null)} type="button">
-                  {TEXT.historyDetailClose}
-                </button>
-              </div>
+            </div>
+            <div className="strategy-detail-history-modal__meta">
+              <span className="status-chip status-chip--soft">修订 {selectedHistoryEntry.revision}</span>
             </div>
             {selectedHistoryLogic || selectedHistoryCards.length ? (
               <div className="strategy-detail-parameter-grid strategy-detail-parameter-grid--history">
@@ -667,6 +663,11 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
             ) : (
               <p className="empty-state">{TEXT.historyDetailEmpty}</p>
             )}
+            <div className="modal-card__footer">
+              <button className="ghost-button" onClick={() => setSelectedHistoryId(null)} type="button">
+                {TEXT.historyDetailClose}
+              </button>
+            </div>
           </div>
         </div>
       ) : null}

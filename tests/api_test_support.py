@@ -582,4 +582,18 @@ def submit_backtest(
         payload["data_segment_type"] = data_segment_type
     if parameter_version_id is not None:
         payload["parameter_version_id"] = parameter_version_id
-    return assert_ok(client.post(f"/strategies/{strategy_id}/backtest-runs", json=payload))
+    submitted = assert_ok(client.post(f"/strategies/{strategy_id}/backtest-runs", json=payload))
+    status = str(submitted.get("status") or "").upper()
+    if status not in {"QUEUED", "RUNNING"}:
+        return submitted
+
+    run_id = str(submitted["id"])
+    deadline = time.time() + 15.0
+    latest = submitted
+    while time.time() < deadline:
+        latest = assert_ok(client.get(f"/backtest-runs/{run_id}/detail"))
+        status = str(latest.get("status") or "").upper()
+        if status not in {"QUEUED", "RUNNING"}:
+            return latest
+        time.sleep(0.05)
+    raise AssertionError(f"Backtest run {run_id} did not finish within 15 seconds; latest status={status}")

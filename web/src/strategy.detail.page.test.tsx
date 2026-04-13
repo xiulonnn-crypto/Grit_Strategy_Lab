@@ -138,6 +138,7 @@ describe('StrategyDetailPage', () => {
     expect(container.querySelector('.strategy-detail-history-table')).not.toBeNull();
     expect(container.querySelector('.strategy-detail-parameter-card--logic')).not.toBeNull();
     expect(container.querySelector('.workspace-recent-runs__timeline')).not.toBeNull();
+    expect(screen.queryByRole('columnheader', { name: '修订' })).not.toBeInTheDocument();
     expect(screen.getAllByText('pv-002').length).toBeGreaterThan(0);
     expect(screen.getAllByText('pv-001').length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: '返回工作台' })).not.toBeInTheDocument();
