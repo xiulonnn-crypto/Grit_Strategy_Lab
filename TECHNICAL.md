@@ -1,4 +1,4 @@
-# TECHNICAL
+# TECHNICAL（技术手册）
 
 本文件是 Grit Backtest Platform 的工程规则手册，用来整理当前仓库已经存在的技术真相、任务路由规则、验证路径与完成定义。
 
@@ -22,26 +22,26 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 ### 1.2 任务分流规则
 
-- product task：直接进入 `src/grit_backtest_platform/`、`web/src/`、`tests/` 和对应脚本。
-- UI task：先读 `DESIGN.md`，若已有批准的 HTML 与代码级设计规格，再读交付物，然后进入相关 React 页面与测试。
-- harness task：进入 `harness/README.md`、`harness/tasks/*.md`、acceptance 文档和固定 Codex 脚本。
+- 产品任务：直接进入 `src/grit_backtest_platform/`、`web/src/`、`tests/` 和对应脚本。
+- UI 任务：先读 `DESIGN.md`，若已有批准的 HTML 与代码级设计规格，再读交付物，然后进入相关 React 页面与测试。
+- harness 任务：进入 `harness/README.md`、`harness/tasks/*.md`、验收文档和固定 Codex 脚本。
 
 ### 1.3 文档优先级
 
 | 层级 | 主要来源 | 用途 |
 | --- | --- | --- |
-| Runtime truth | `ARCHITECTURE.md`、`src/grit_backtest_platform/*.py` | 运行时边界、恢复口径、模块 ownership |
-| Interface truth | `src/grit_backtest_platform/api.py`、`models.py`、`web/src/types.ts` | API、请求体、状态词汇、前后端契约 |
-| Workflow truth | `scripts/codex-*.ps1`、`QuickStart-Grit.ps1` | 启动、smoke、固定验证入口 |
-| Harness truth | `harness/README.md`、`harness/tasks/*.md` | 任务模板、验收路径、报告收口 |
-| Project guide | `README.md` | 项目介绍、运行方式、目录地图 |
+| 运行时真相 | `ARCHITECTURE.md`、`src/grit_backtest_platform/*.py` | 运行时边界、恢复口径、模块归属 |
+| 接口真相 | `src/grit_backtest_platform/api.py`、`models.py`、`web/src/types.ts` | API、请求体、状态词汇、前后端契约 |
+| 工作流真相 | `scripts/codex-*.ps1`、`QuickStart-Grit.ps1` | 启动、smoke、固定验证入口 |
+| Harness 真相 | `harness/README.md`、`harness/tasks/*.md` | 任务模板、验收路径、报告收口 |
+| 项目指南 | `README.md` | 项目介绍、运行方式、目录地图 |
 
 ### 1.4 当前真相与待补齐项
 
 | 主题 | 当前真相 | 说明 |
 | --- | --- | --- |
 | 固定 Codex 脚本 | `scripts/codex-reset-fixture.ps1`、`scripts/codex-test-backend.ps1`、`scripts/codex-test-frontend.ps1`、`scripts/codex-smoke.ps1` 已存在 | 这是当前 repo 级固定入口 |
-| committed seed fixture | `harness/fixtures/seed_workspace/` 当前尚未提交到仓库 | 因此 fixture reset 与 live acceptance 相关能力还未完全可用 |
+| 已提交种子 fixture | `harness/fixtures/seed_workspace/` 当前尚未提交到仓库 | 因此 fixture reset 与 live acceptance 相关能力还未完全可用 |
 | `codex-reset-fixture.ps1` | 代码已按 committed fixture 模式实现 | 但由于 source fixture 缺失，当前运行会失败 |
 | `codex-test-frontend.ps1 -IncludeLiveAcceptance` | 代码已支持 `LIVE_FIXTURE_MANIFEST` 与 `LIVE_API_BASE` | 但仍依赖缺失的 fixture 资产 |
 | `codex-smoke.ps1` | 当前会先执行 fixture reset，再跑 backend/frontend 固定入口 | 因 fixture 缺失，当前不能把它当作默认可用的全量门禁 |
@@ -68,7 +68,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - 策略逻辑、回测逻辑、优化逻辑的局部实现调整。
 - 单一 API 契约变更，且可通过 focused tests 或单个固定脚本验证。
 
-普通 product task 的默认路径是：
+普通产品任务的默认路径是：
 
 1. `TECHNICAL.md`
 2. `README.md`
@@ -123,7 +123,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 ### 3.4 当前实践建议
 
-在 committed seed fixture 资产缺失前，当前建议如下：
+在已提交种子 fixture 资产缺失前，当前建议如下：
 
 - backend 改动：直接运行 `scripts/codex-test-backend.ps1`
 - frontend 改动：直接运行 `scripts/codex-test-frontend.ps1`
@@ -254,14 +254,17 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 当前优化任务 detail 的补充真相：
 
-- `GET /optimization-jobs/{job_id}/detail` 在 `QUEUED`、`RUNNING`、`INTERRUPTED` 三种运行态必须保持轻量：只读取 persisted trial summary、进度、ETA、resume 元数据，不在热路径解码完整 candidate chart series。
+- `GET /optimization-jobs/{job_id}/detail` 在 `QUEUED`、`RUNNING`、`INTERRUPTED` 三种运行态必须保持零扫描优先：先直接信任 `optimization_jobs.summary_json/result_json` 里的 progress、ETA、heartbeat、resume 元数据，不在热路径扫描 `optimization_job_trials`；只有旧记录缺字段时才回退读取 trial checkpoint。
 - 运行态 ETA 依赖 persisted trial 的 `started_at/completed_at` 时间戳推导，不能假设秒级精度足够。
-- 终态结果中心也不再全量解码所有 trial 曲线：先轻量读取全部 trial 排名，再只为 top-K 候选回补完整 `chart_series`，其余 trial 只保留轻量 summary。
+- 终态结果中心同样优先走零 trial 快路径：当 `optimization_jobs.candidates_json/result_json` 已经持久化完成候选区时，detail 不再重新扫描 `optimization_job_trials`；只有旧记录缺失候选投影时才回退读取 trial checkpoint。
+- `optimization_job_trials.chart_series_json` 仍维持分层存储：大多数 trial 只持久化轻量 `[]`，仅终态 top-K 候选回补完整曲线。
 - 优化执行期默认只持久化 trial 级 `parameter_snapshot`、`metrics`、`score` 与时间戳；完整曲线只在终态 top-K 回补并持久化。
-- The optimization runtime still includes a Windows-safe parent-thread plus `multiprocessing.get_context("spawn")` worker controller, but the current synthetic `_service_rebuilt.py` evaluator keeps it disabled by default because local benchmarks show sequential execution is faster. Child workers, when explicitly re-enabled for future heavier evaluators, never write SQLite rows; the parent remains the single writer.
-- Optimization worker concurrency is internally auto-managed. Startup worker count is reduced from the CPU cap when memory is already elevated, runtime drops one worker at `80%` system memory, forces single-worker mode at `90%`, and only scales back up after three consecutive safe samples.
-- The active optimization evaluator path no longer preloads `_prepare_backtest_run_context()`. For the current `_service_rebuilt.py` evaluator, that preload was unused overhead, so the job runner now skips it entirely.
-- Running optimization job summary writes are throttled to at most once per second or every five completed trials, while terminal state transitions still persist immediately.
+- `optimization_job_trials` 额外下沉了热路径排序列：`return_sharpe`、`oos_sharpe`、`total_return_pct`、`stability`，用于运行态和终态减少 `metrics_json` 解码。
+- 优化运行时仍然保留一套 Windows 安全的父线程加 `multiprocessing.get_context("spawn")` worker 控制器，但当前 synthetic `_service_rebuilt.py` evaluator 默认关闭这条路径，因为本地基准显示顺序执行更快。未来如果为了更重的 evaluator 显式重新启用子 worker，子 worker 也绝不能直接写 SQLite；父线程仍然必须是唯一写入者。
+- 优化 worker 并发度由系统内部自动管理。当系统内存已经偏高时，启动阶段会先从 CPU 上限下调 worker 数；运行期间在系统内存到达 `80%` 时自动减掉一个 worker，到达 `90%` 时强制退回单 worker，只有连续三次采样恢复安全后才允许再次扩容。
+- 当前激活的优化 evaluator 路径不再预加载 `_prepare_backtest_run_context()`。对于现行 `_service_rebuilt.py` evaluator 而言，这个预加载只是无效开销，因此任务运行器现在会完全跳过它。
+- 运行中优化任务的摘要写入由唯一写入者节流：最多每秒一次，或者每完成五个 trial 写一次；每次心跳都会持久化 `completed_combinations`、`next_trial_index`、`best_metrics_summary`、`estimated_remaining_minutes`、`estimated_completed_at` 与 `heartbeat_at`，而终态状态切换仍然立即持久化。
+- 执行期会增量维护 top-K 与 heatmap winner cells；终态优先复用增量摘要并只为终态 top-K 回补完整 metrics，避免全量 successful trials 再次排序和候选分析重算。
 
 ### 5.4 frontend 关键入口
 
@@ -380,10 +383,10 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 | 改动类型 | 当前应跑的最小验证路径 |
 | --- | --- |
-| backend-only | `scripts/codex-test-backend.ps1` |
-| frontend-only | `scripts/codex-test-frontend.ps1` |
-| cross-stack 且不依赖 fixture | backend 与 frontend 固定入口分别执行 |
-| fixture-backed acceptance | `scripts/codex-test-frontend.ps1 -IncludeLiveAcceptance`，但仅在 fixture 资产真实存在后执行 |
+| 仅后端改动 | `scripts/codex-test-backend.ps1` |
+| 仅前端改动 | `scripts/codex-test-frontend.ps1` |
+| 跨栈且不依赖 fixture | backend 与 frontend 固定入口分别执行 |
+| 依赖 fixture 的验收 | `scripts/codex-test-frontend.ps1 -IncludeLiveAcceptance`，但仅在 fixture 资产真实存在后执行 |
 | 全量 Codex smoke | `scripts/codex-smoke.ps1`，但当前仅在 fixture 资产补齐后才应恢复为默认门禁 |
 
 ### 8.2 frontend 验证政策
@@ -404,7 +407,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 ## 9. 完成定义
 
-在本项目里，“代码改完”不等于“任务完成”。以下条件全部满足，任务才算 Done：
+在本项目里，“代码改完”不等于“任务完成”。以下条件全部满足，任务才算真正完成：
 
 - 改动行为已经落地，且与当前代码真相一致。
 - 受影响的契约、状态词汇、页面消费面和测试已经同步。
@@ -436,3 +439,14 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `web/src/lib/appRouteContext.tsx`
 - `web/scripts/run-live-acceptance.cjs`
 - `web/src/workspace.real-api.smoke.test.tsx`
+
+## 11. 优化配置与约束条件事实
+
+- `#/optimization-jobs/new/config` 当前固定为“参数范围 + 约束条件”双栏布局；顶部步骤条与主标题卡片沿用线上既有样式，不单独重设计。
+- 参数范围表固定字段为 `参数 / 当前值 / 模式 / 起点 / 终点 / 步长`，不再展示角色或标签概念。
+- `weighting_method=equal_weight` 在所有配置页、结果页和参数摘要展示层统一翻译为 `等权`，不应直接向用户暴露英文枚举值。
+- 约束条件 contract 已进入 optimization job 的 request、summary、result 三层 JSON，字段固定为 `constraint_preset_key`、`constraint_label`、`constraints[]`。
+- `constraint_preset_key` 当前只允许 `balanced / defensive / offensive`，前端展示文案固定映射为 `平衡型 / 稳健型 / 进攻型`。
+- `constraint_label` 由前端提交前生成并持久化；若当前 6 项护栏阈值与所选预设完全一致，则显示预设名，否则显示 `预设名（自定义）`。
+- 结果中心 hero 在 `约束条件：{constraint_label}` 这一标签位优先读取 `job.summary.constraint_label`，缺失时回退 `job.request.constraint_label`；旧任务若无该字段则不显示该标签。
+- “继续调参 / 重跑优化”必须复用原任务的 `constraint_preset_key`、`constraint_label` 与 `constraints[]`，不能只带回 `search_space`。

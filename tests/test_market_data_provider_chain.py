@@ -3,23 +3,20 @@ from __future__ import annotations
 import json
 import sys
 import urllib.parse
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from datetime import date
 
-_fmp_stub = ModuleType("grit_backtest_platform.fmp_constituent_provider")
-if not hasattr(_fmp_stub, "FmpHistoricalConstituentUniverseHistoryProvider"):
-    _fmp_stub.FmpHistoricalConstituentUniverseHistoryProvider = type(
-        "FmpHistoricalConstituentUniverseHistoryProvider",
-        (),
-        {},
-    )
-sys.modules.setdefault("grit_backtest_platform.fmp_constituent_provider", _fmp_stub)
+import pytest
 
 import grit_backtest_platform.api as api_module
 from grit_backtest_platform.alpha_vantage_provider import AlphaVantageProvider
 from grit_backtest_platform.api import RuntimeMarketDataProvider
 from grit_backtest_platform.akshare_us_provider import AkshareUsPriceProvider
-from grit_backtest_platform.fallback_provider import ProviderAvailability, SequentialMarketDataProviderChain
+from grit_backtest_platform.fallback_provider import (
+    ProviderAvailability,
+    ProviderExecutionSignal,
+    SequentialMarketDataProviderChain,
+)
 from grit_backtest_platform.fmp_identity_provider import FmpIdentityRepairProvider
 from grit_backtest_platform.longbridge_provider import LongbridgeQuoteProvider, LongbridgeStaticInfoProvider
 from grit_backtest_platform.sec_edgar_provider import SecEdgarProvider
@@ -475,7 +472,10 @@ def test_runtime_market_data_provider_stops_after_first_price_provider_success()
             calls.append("akshare_us")
             raise AssertionError("non-action enrichment provider should not be called after yahoo succeeds")
 
-    provider = RuntimeMarketDataProvider([_YahooProvider(), _TiingoProvider(), _AkshareProvider()])
+    provider = RuntimeMarketDataProvider(
+        [_YahooProvider(), _TiingoProvider(), _AkshareProvider()],
+        missing_providers=["sec_edgar"],
+    )
 
     result = provider.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 1))
 
@@ -483,6 +483,53 @@ def test_runtime_market_data_provider_stops_after_first_price_provider_success()
     assert result["source"] == "yahoo"
     assert len(result["bars"]) == 1
     assert len(result["actions"]) == 1
+    provider_results = result["metadata"]["provider_results"]
+    assert [
+        (item["provider"], item["status"])
+        for item in provider_results
+    ] == [
+        ("yahoo", "succeeded"),
+        ("tiingo", "succeeded"),
+        ("akshare_us", "skipped"),
+        ("sec_edgar", "unavailable"),
+    ]
+    assert provider_results[0]["selection_status"] == "selected_primary"
+    assert provider_results[1]["selection_status"] == "succeeded_not_selected"
+    assert provider_results[2]["reason"] == "primary_price_source_already_selected"
+    assert provider_results[3]["kind"] == "filings_availability"
+
+
+def test_runtime_market_data_provider_no_price_bars_keeps_event_provider_failures_out_of_price_message():
+    class _YahooProvider:
+        provider_name = "yahoo"
+
+        def fetch_history(self, symbol: str, start_date: date, end_date: date):
+            raise RuntimeError("yahoo unavailable")
+
+    class _AlphaProvider:
+        provider_name = "alpha_vantage"
+
+        def fetch_earnings(self, symbol: str):
+            raise RuntimeError("alpha limited")
+
+    class _SecProvider:
+        provider_name = "sec_edgar"
+
+        def fetch_report_filings(self, symbol: str, start_date: date, end_date: date):
+            raise RuntimeError("sec unavailable")
+
+    provider = RuntimeMarketDataProvider([_YahooProvider(), _AlphaProvider(), _SecProvider()])
+
+    with pytest.raises(api_module.RuntimeMarketDataFetchError) as exc_info:
+        provider.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 2))
+
+    exc = exc_info.value
+    assert "yahoo unavailable" in str(exc)
+    assert "alpha limited" not in str(exc)
+    assert "sec unavailable" not in str(exc)
+    assert exc.metadata["history_warnings"] == ["yahoo: yahoo unavailable"]
+    assert "alpha_vantage: alpha limited" in exc.metadata["enrichment_warnings"]
+    assert "sec_edgar: sec unavailable" in exc.metadata["enrichment_warnings"]
 
 
 def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(monkeypatch):
@@ -531,7 +578,11 @@ def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(
     }
 
     monkeypatch.setattr(api_module, "YahooMarketDataProvider", _YahooProvider)
-    monkeypatch.setattr(api_module, "_load_provider", lambda module_name, class_names: providers.get((module_name, class_names)))
+    monkeypatch.setattr(
+        api_module,
+        "_load_provider",
+        lambda module_name, class_names: (providers.get((module_name, class_names)), None),
+    )
 
     runtime = api_module.build_runtime_market_data_provider()
 
@@ -595,6 +646,38 @@ def test_tiingo_symbology_provider_resolves_identity(monkeypatch):
     assert identity["canonical_symbol"] == "AAPL.US"
     assert identity["company_name"] == "Apple Inc."
     assert identity["source"] == "tiingo_symbology"
+
+
+def test_tiingo_symbology_provider_requires_exact_symbol_match_for_short_tickers(monkeypatch):
+    monkeypatch.setenv("TIINGO_API_TOKEN", "token")
+    provider = TiingoSymbologyProvider()
+
+    def fake_urlopen(request, timeout=0):
+        return _FakeHttpResponse(
+            json.dumps(
+                [
+                    {
+                        "ticker": "DAYXX",
+                        "tickerRegion": "DAYXX.US",
+                        "name": "Unrelated Day Holdings",
+                        "exchangeCode": "NASDAQ",
+                        "assetType": "Stock",
+                    },
+                    {
+                        "ticker": "MMC.A",
+                        "tickerRegion": "MMCA.US",
+                        "name": "Unrelated MMCA",
+                        "exchangeCode": "NYSE",
+                        "assetType": "Stock",
+                    },
+                ]
+            )
+        )
+
+    monkeypatch.setattr("grit_backtest_platform.tiingo_symbology_provider.urllib.request.urlopen", fake_urlopen)
+
+    assert provider.resolve_identity("DAY") is None
+    assert provider.resolve_identity("MMC") is None
 
 
 def test_longbridge_provider_supports_probe_identity_and_history(monkeypatch):
@@ -749,8 +832,12 @@ def test_longbridge_provider_parses_list_payload_rows_without_mapping(monkeypatc
     fake_openapi.Period = SimpleNamespace(Day="Day")
     fake_openapi.AdjustType = SimpleNamespace(NoAdjust="NoAdjust")
 
+    longbridge_pkg = SimpleNamespace(openapi=fake_openapi)
     monkeypatch.setitem(sys.modules, "longport.openapi", fake_openapi)
+    monkeypatch.setitem(sys.modules, "longbridge", longbridge_pkg)
     monkeypatch.setitem(sys.modules, "longbridge.openapi", fake_openapi)
+    import grit_backtest_platform.longbridge_provider as longbridge_provider_module
+    longbridge_provider_module._LONGBRIDGE_CLIENTS.clear()
 
     provider = LongbridgeQuoteProvider()
     result = provider.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 2))
@@ -758,6 +845,69 @@ def test_longbridge_provider_parses_list_payload_rows_without_mapping(monkeypatc
     assert [bar.date for bar in result.bars] == ["2026-04-01", "2026-04-02"]
     assert result.bars[0].open == 100.0
     assert result.bars[1].close == 101.5
+
+
+def test_longbridge_provider_normalizes_class_share_symbol_and_marks_quota_limit(monkeypatch):
+    monkeypatch.setenv("LONGBRIDGE_APP_KEY", "app-key")
+    monkeypatch.setenv("LONGBRIDGE_APP_SECRET", "app-secret")
+    monkeypatch.setenv("LONGBRIDGE_ACCESS_TOKEN", "access-token")
+
+    fake_openapi = SimpleNamespace()
+
+    class _FakeConfig:
+        @classmethod
+        def from_apikey(cls, app_key, app_secret, access_token):
+            return {"app_key": app_key, "app_secret": app_secret, "access_token": access_token}
+
+    class _OpenApiException(RuntimeError):
+        pass
+
+    class _FakeQuoteContext:
+        @classmethod
+        def create(cls, config):
+            return cls()
+
+        def quote(self, symbols):
+            return [{"symbol": symbols[0], "last_done": 200.0}]
+
+        def static_info(self, symbols):
+            symbol = symbols[0]
+            if symbol == "BRK.B.US":
+                return [{"symbol": symbol, "name_en": "Berkshire Hathaway Inc.", "exchange": "NYSE"}]
+            return []
+
+        def history_candlesticks_by_date(self, symbol, period, adjust_type, start_date, end_date):
+            raise _OpenApiException(
+                "OpenApiException: (kind=ErrorKind.OpenApi, code=301607, trace_id=) history kline symbol count out of limit"
+            )
+
+    fake_openapi.Config = _FakeConfig
+    fake_openapi.QuoteContext = _FakeQuoteContext
+    fake_openapi.Period = SimpleNamespace(Day="Day")
+    fake_openapi.AdjustType = SimpleNamespace(NoAdjust="NoAdjust")
+
+    longbridge_pkg = SimpleNamespace(openapi=fake_openapi)
+    monkeypatch.setitem(sys.modules, "longport.openapi", fake_openapi)
+    monkeypatch.setitem(sys.modules, "longbridge", longbridge_pkg)
+    monkeypatch.setitem(sys.modules, "longbridge.openapi", fake_openapi)
+    import grit_backtest_platform.longbridge_provider as longbridge_provider_module
+    longbridge_provider_module._LONGBRIDGE_CLIENTS.clear()
+
+    provider = LongbridgeQuoteProvider()
+    static_provider = LongbridgeStaticInfoProvider()
+
+    identity = static_provider.resolve_identity("BRK-B")
+    assert identity is not None
+    assert identity["symbol"] == "BRK-B"
+    assert identity["canonical_symbol"] == "BRK.B.US"
+
+    try:
+        provider.fetch_history("BRK-B", date(2026, 4, 1), date(2026, 4, 10))
+    except ProviderExecutionSignal as exc:
+        assert exc.status == "limited"
+        assert exc.reason == "history_kline_symbol_count_out_of_limit"
+    else:
+        raise AssertionError("Expected Longbridge quota limit to surface as a structured provider signal")
 
 
 def test_akshare_us_provider_parses_records(monkeypatch):

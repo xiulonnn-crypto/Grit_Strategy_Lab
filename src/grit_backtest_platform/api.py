@@ -12,6 +12,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .fallback_provider import ProviderExecutionSignal
 from .models import (
     BacktestRunCloneRequest,
     BacktestRunCreateRequest,
@@ -38,29 +39,34 @@ def _provider_name(provider: Any) -> str:
     return str(getattr(provider, "provider_name", provider.__class__.__name__.lower()))
 
 
-def _load_provider(module_name: str, class_names: tuple[str, ...]) -> Any | None:
+def _load_provider(module_name: str, class_names: tuple[str, ...]) -> tuple[Any | None, str | None]:
     try:
         module = importlib.import_module(f".{module_name}", package=__package__)
-    except Exception:
-        return None
+    except Exception as exc:
+        return None, f"module_import_failed: {exc}"
+    last_reason: str | None = None
     for class_name in class_names:
         provider_class = getattr(module, class_name, None)
         if provider_class is None:
+            last_reason = f"class_not_found: {class_name}"
             continue
         try:
             provider = provider_class()
-        except Exception:
+        except Exception as exc:
+            last_reason = f"provider_init_failed: {exc}"
             continue
         availability = getattr(provider, "availability", None)
         if callable(availability):
             try:
                 report = availability()
-            except Exception:
+            except Exception as exc:
+                last_reason = f"availability_probe_failed: {exc}"
                 continue
             if not getattr(report, "available", False):
+                last_reason = str(getattr(report, "reason", None) or "provider unavailable")
                 continue
-        return provider
-    return None
+        return provider, None
+    return None, last_reason or "provider unavailable"
 
 
 def _merge_action_payload(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
@@ -103,10 +109,39 @@ def _dedupe_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return deduped
 
 
+class RuntimeMarketDataFetchError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        warnings: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.warnings = list(warnings or [])
+        self.metadata = dict(metadata or {})
+
+
+def _missing_provider_kind(provider_name: str) -> str:
+    normalized = str(provider_name or "").strip().lower()
+    if normalized == "alpha_vantage":
+        return "earnings_availability"
+    if normalized == "sec_edgar":
+        return "filings_availability"
+    if normalized in {"tiingo_symbology", "longbridge_static_info"}:
+        return "identity_availability"
+    return "history_availability"
+
+
 class RuntimeMarketDataProvider:
     provider_name = "yahoo"
 
-    def __init__(self, providers: list[Any], missing_providers: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        providers: list[Any],
+        missing_providers: list[str] | None = None,
+        missing_provider_reasons: dict[str, str] | None = None,
+    ) -> None:
         self.providers = [provider for provider in providers if provider is not None]
         self.universe_history_providers = list(default_universe_history_providers())
         self.price_providers = [
@@ -126,11 +161,20 @@ class RuntimeMarketDataProvider:
         ]
         self.fallback_provider = self.price_providers[1] if len(self.price_providers) > 1 else None
         self.missing_providers = list(missing_providers or [])
+        self.missing_provider_reasons = {
+            str(provider_name): str(reason)
+            for provider_name, reason in dict(missing_provider_reasons or {}).items()
+            if str(provider_name).strip()
+        }
 
     def scoped_copy(self, *, exclude_provider_names: set[str] | list[str] | tuple[str, ...] | None = None) -> "RuntimeMarketDataProvider":
         excluded = {str(name or "").strip().lower() for name in (exclude_provider_names or []) if str(name or "").strip()}
         if not excluded:
-            clone = type(self)(list(self.providers), missing_providers=list(self.missing_providers))
+            clone = type(self)(
+                list(self.providers),
+                missing_providers=list(self.missing_providers),
+                missing_provider_reasons=dict(self.missing_provider_reasons),
+            )
             clone.universe_history_providers = list(self.universe_history_providers)
             return clone
         filtered = [
@@ -138,7 +182,11 @@ class RuntimeMarketDataProvider:
             for provider in self.providers
             if _provider_name(provider).strip().lower() not in excluded
         ]
-        clone = type(self)(filtered, missing_providers=list(self.missing_providers))
+        clone = type(self)(
+            filtered,
+            missing_providers=list(self.missing_providers),
+            missing_provider_reasons=dict(self.missing_provider_reasons),
+        )
         clone.universe_history_providers = list(self.universe_history_providers)
         return clone
 
@@ -199,10 +247,45 @@ class RuntimeMarketDataProvider:
     def _supports_action_enrichment(self, provider: Any) -> bool:
         return bool(getattr(provider, "supports_action_enrichment", False))
 
+    def _provider_result(
+        self,
+        *,
+        provider_name: str,
+        kind: str,
+        status: str,
+        source: str | None = None,
+        fallback_source: str | None = None,
+        bar_count: int = 0,
+        action_count: int = 0,
+        partial: bool = False,
+        error: str | None = None,
+        reason: str | None = None,
+        selection_status: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "provider": provider_name,
+            "kind": kind,
+            "status": status,
+            "source": str(source or provider_name),
+            "fallback_source": fallback_source,
+            "bar_count": int(bar_count),
+            "action_count": int(action_count),
+            "partial": bool(partial),
+        }
+        if error:
+            payload["error"] = str(error)
+        if reason:
+            payload["reason"] = str(reason)
+        if selection_status:
+            payload["selection_status"] = str(selection_status)
+        return payload
+
     def fetch_history(self, symbol, start_date, end_date):
         warnings: list[str] = []
+        history_warnings: list[str] = []
         provider_results: list[dict[str, Any]] = []
         missing_labels: list[str] = []
+        history_missing_labels: list[str] = []
         primary_source: str | None = None
         bars: list[Any] = []
         actions: list[dict[str, Any]] = []
@@ -211,29 +294,64 @@ class RuntimeMarketDataProvider:
         for index, provider in enumerate(self.price_providers):
             provider_name = _provider_name(provider)
             try:
+                had_primary_before = bool(bars)
                 payload = self._normalize_history_payload(
                     provider_name,
                     provider.fetch_history(symbol, start_date, end_date),
                 )
+            except ProviderExecutionSignal as exc:
+                if exc.status in {"failed", "limited"}:
+                    missing_labels.append(provider_name)
+                    history_missing_labels.append(provider_name)
+                if exc.reason:
+                    warnings.append(f"{provider_name}: {exc.reason}")
+                    history_warnings.append(f"{provider_name}: {exc.reason}")
+                provider_results.append(
+                    self._provider_result(
+                        provider_name=provider_name,
+                        kind="history",
+                        status=exc.status,
+                        error=str(exc),
+                        reason=exc.reason,
+                    )
+                )
+                continue
             except Exception as exc:
                 missing_labels.append(provider_name)
+                history_missing_labels.append(provider_name)
                 warnings.append(f"{provider_name}: {exc}")
+                history_warnings.append(f"{provider_name}: {exc}")
+                provider_results.append(
+                    self._provider_result(
+                        provider_name=provider_name,
+                        kind="history",
+                        status="failed",
+                        error=str(exc),
+                    )
+                )
                 continue
 
             provider_warnings = list(payload["warnings"] or [])
             warnings.extend(str(item) for item in provider_warnings if item)
+            history_warnings.extend(str(item) for item in provider_warnings if item)
             provider_bars = list(payload.get("bars") or [])
             provider_actions = [dict(item) for item in (payload["actions"] or []) if isinstance(item, dict)]
             provider_results.append(
-                {
-                    "provider": provider_name,
-                    "kind": "history",
-                    "source": str(payload.get("source") or provider_name),
-                    "fallback_source": payload.get("fallback_source"),
-                    "bar_count": len(provider_bars),
-                    "action_count": len(provider_actions),
-                    "partial": bool(payload.get("partial")),
-                }
+                self._provider_result(
+                    provider_name=provider_name,
+                    kind="history",
+                    status="succeeded" if provider_bars or provider_actions else "empty",
+                    source=str(payload.get("source") or provider_name),
+                    fallback_source=payload.get("fallback_source"),
+                    bar_count=len(provider_bars),
+                    action_count=len(provider_actions),
+                    partial=bool(payload.get("partial")),
+                    selection_status=(
+                        "selected_primary"
+                        if provider_bars and not had_primary_before
+                        else ("succeeded_not_selected" if provider_bars and had_primary_before else None)
+                    ),
+                )
             )
 
             if provider_bars and not bars:
@@ -245,6 +363,15 @@ class RuntimeMarketDataProvider:
                 self._supports_action_enrichment(candidate)
                 for candidate in self.price_providers[index + 1 :]
             ):
+                provider_results.extend(
+                    self._provider_result(
+                        provider_name=_provider_name(candidate),
+                        kind="history",
+                        status="skipped",
+                        reason="primary_price_source_already_selected",
+                    )
+                    for candidate in self.price_providers[index + 1 :]
+                )
                 break
 
         for provider in self.earnings_providers:
@@ -257,6 +384,14 @@ class RuntimeMarketDataProvider:
             except Exception as exc:
                 missing_labels.append(provider_name)
                 warnings.append(f"{provider_name}: {exc}")
+                provider_results.append(
+                    self._provider_result(
+                        provider_name=provider_name,
+                        kind="earnings",
+                        status="failed",
+                        error=str(exc),
+                    )
+                )
                 continue
             converted: list[dict[str, Any]] = []
             for item in earnings_rows:
@@ -282,15 +417,13 @@ class RuntimeMarketDataProvider:
                     }
                 )
             provider_results.append(
-                {
-                    "provider": provider_name,
-                    "kind": "earnings",
-                    "source": provider_name,
-                    "fallback_source": None,
-                    "bar_count": 0,
-                    "action_count": len(converted),
-                    "partial": False,
-                }
+                self._provider_result(
+                    provider_name=provider_name,
+                    kind="earnings",
+                    status="succeeded" if converted else "empty",
+                    source=provider_name,
+                    action_count=len(converted),
+                )
             )
             self._append_actions(actions, converted, provider_name, primary_source=primary_source)
 
@@ -304,26 +437,66 @@ class RuntimeMarketDataProvider:
             except Exception as exc:
                 missing_labels.append(provider_name)
                 warnings.append(f"{provider_name}: {exc}")
+                provider_results.append(
+                    self._provider_result(
+                        provider_name=provider_name,
+                        kind="filings",
+                        status="failed",
+                        error=str(exc),
+                    )
+                )
                 continue
             converted = [dict(item) for item in filing_rows if isinstance(item, dict)]
             provider_results.append(
-                {
-                    "provider": provider_name,
-                    "kind": "filings",
-                    "source": provider_name,
-                    "fallback_source": None,
-                    "bar_count": 0,
-                    "action_count": len(converted),
-                    "partial": False,
-                }
+                self._provider_result(
+                    provider_name=provider_name,
+                    kind="filings",
+                    status="succeeded" if converted else "empty",
+                    source=provider_name,
+                    action_count=len(converted),
+                )
             )
             self._append_actions(actions, converted, provider_name, primary_source=primary_source)
 
         actions = _dedupe_actions(actions)
+        unavailable_providers = list(self.missing_providers)
+        provider_results.extend(
+            self._provider_result(
+                provider_name=provider_name,
+                kind=_missing_provider_kind(provider_name),
+                status="unavailable",
+                reason=self.missing_provider_reasons.get(provider_name) or "provider_not_configured_or_unavailable",
+            )
+            for provider_name in unavailable_providers
+        )
         if not bars:
-            raise RuntimeError(
+            history_unavailable_providers = [
+                provider_name
+                for provider_name in unavailable_providers
+                if _missing_provider_kind(provider_name) == "history_availability"
+            ]
+            history_missing_provider_reasons = {
+                provider_name: reason
+                for provider_name, reason in self.missing_provider_reasons.items()
+                if _missing_provider_kind(provider_name) == "history_availability"
+            }
+            raise RuntimeMarketDataFetchError(
                 f"No provider returned market data for {symbol}. "
-                + ("; ".join(warnings) if warnings else "No usable providers were configured.")
+                + ("; ".join(history_warnings) if history_warnings else "No usable price providers were configured."),
+                warnings=history_warnings,
+                metadata={
+                    "provider_chain": [_provider_name(provider) for provider in self.providers],
+                    "provider_results": provider_results,
+                    "bar_source": None,
+                    "fallback_sources": [],
+                    "missing_providers": history_unavailable_providers + history_missing_labels,
+                    "missing_provider_reasons": history_missing_provider_reasons,
+                    "history_warnings": history_warnings,
+                    "enrichment_warnings": [
+                        item for item in warnings if item not in history_warnings
+                    ],
+                    "identity": identity or {},
+                },
             )
 
         contributing_sources = sorted(
@@ -351,7 +524,7 @@ class RuntimeMarketDataProvider:
         elif len(self.price_providers) > 1:
             fallback_source = "mixed_fallbacks"
 
-        provider_gaps = list(self.missing_providers)
+        provider_gaps = unavailable_providers
         return {
             "symbol": symbol,
             "bars": bars,
@@ -366,6 +539,11 @@ class RuntimeMarketDataProvider:
                 "bar_source": primary_source,
                 "fallback_sources": fallback_sources or secondary_sources,
                 "missing_providers": provider_gaps + missing_labels,
+                "missing_provider_reasons": dict(self.missing_provider_reasons),
+                "history_warnings": history_warnings,
+                "enrichment_warnings": [
+                    item for item in warnings if item not in history_warnings
+                ],
                 "identity": identity or {},
             },
         }
@@ -374,22 +552,29 @@ class RuntimeMarketDataProvider:
 def build_runtime_market_data_provider() -> RuntimeMarketDataProvider:
     providers: list[Any] = [YahooMarketDataProvider()]
     missing_providers: list[str] = []
-    for module_name, class_names in (
-        ("tiingo_provider", ("TiingoMarketDataProvider", "TiingoProvider")),
-        ("tiingo_symbology_provider", ("TiingoSymbologyProvider",)),
-        ("longbridge_provider", ("LongbridgeStaticInfoProvider",)),
-        ("longbridge_provider", ("LongbridgeQuoteProvider",)),
-        ("akshare_us_provider", ("AkshareUsPriceProvider", "AkShareUsPriceProvider")),
-        ("fmp_identity_provider", ("FmpIdentityRepairProvider", "FmpMarketDataProvider", "FmpPriceRepairProvider")),
-        ("alpha_vantage_provider", ("AlphaVantageProvider", "AlphaVantageEventProvider", "AlphaVantageMarketDataProvider")),
-        ("sec_edgar_provider", ("SecEdgarEventProvider", "SecEdgarProvider")),
+    missing_provider_reasons: dict[str, str] = {}
+    for provider_label, module_name, class_names in (
+        ("tiingo", "tiingo_provider", ("TiingoMarketDataProvider", "TiingoProvider")),
+        ("tiingo_symbology", "tiingo_symbology_provider", ("TiingoSymbologyProvider",)),
+        ("longbridge_static_info", "longbridge_provider", ("LongbridgeStaticInfoProvider",)),
+        ("longbridge", "longbridge_provider", ("LongbridgeQuoteProvider",)),
+        ("akshare_us", "akshare_us_provider", ("AkshareUsPriceProvider", "AkShareUsPriceProvider")),
+        ("fmp", "fmp_identity_provider", ("FmpIdentityRepairProvider", "FmpMarketDataProvider", "FmpPriceRepairProvider")),
+        ("alpha_vantage", "alpha_vantage_provider", ("AlphaVantageProvider", "AlphaVantageEventProvider", "AlphaVantageMarketDataProvider")),
+        ("sec_edgar", "sec_edgar_provider", ("SecEdgarEventProvider", "SecEdgarProvider")),
     ):
-        provider = _load_provider(module_name, class_names)
+        provider, reason = _load_provider(module_name, class_names)
         if provider is not None:
             providers.append(provider)
         else:
-            missing_providers.append(module_name)
-    return RuntimeMarketDataProvider(providers, missing_providers=missing_providers)
+            missing_providers.append(provider_label)
+            if reason:
+                missing_provider_reasons[provider_label] = str(reason)
+    return RuntimeMarketDataProvider(
+        providers,
+        missing_providers=missing_providers,
+        missing_provider_reasons=missing_provider_reasons,
+    )
 
 
 def _default_db_path() -> Path:
@@ -397,7 +582,12 @@ def _default_db_path() -> Path:
     return Path(configured) if configured else Path.cwd() / '.grit_backtest_platform.sqlite3'
 
 
-def create_app(db_path: str | Path | None = None, market_data_provider=None) -> FastAPI:
+def create_app(
+    db_path: str | Path | None = None,
+    market_data_provider=None,
+    *,
+    startup_optimization_recovery_mode: str | None = None,
+) -> FastAPI:
     app = FastAPI(title='Grit Backtest Platform', version='0.1.0')
     app.add_middleware(
         CORSMiddleware,
@@ -417,7 +607,15 @@ def create_app(db_path: str | Path | None = None, market_data_provider=None) -> 
         db_path or _default_db_path(),
         market_data_provider=resolved_market_data_provider,
     )
+    normalized_startup_optimization_recovery_mode = str(
+        startup_optimization_recovery_mode
+        or os.getenv("GRIT_STARTUP_OPTIMIZATION_RECOVERY")
+        or "resume"
+    ).strip().lower()
+    if normalized_startup_optimization_recovery_mode not in {"resume", "interrupt", "skip"}:
+        normalized_startup_optimization_recovery_mode = "resume"
     app.state.service = service
+    app.state.startup_optimization_recovery_mode = normalized_startup_optimization_recovery_mode
     app.state.cleanup_stop_event = threading.Event()
     app.state.cleanup_thread = None
 
@@ -456,10 +654,16 @@ def create_app(db_path: str | Path | None = None, market_data_provider=None) -> 
             invoke(service.resume_incomplete_backtest_runs)
         except Exception:
             pass
-        try:
-            invoke(service.resume_incomplete_optimization_jobs)
-        except Exception:
-            pass
+        if app.state.startup_optimization_recovery_mode == "resume":
+            try:
+                invoke(service.resume_incomplete_optimization_jobs)
+            except Exception:
+                pass
+        elif app.state.startup_optimization_recovery_mode == "interrupt":
+            try:
+                invoke(service.interrupt_incomplete_optimization_jobs)
+            except Exception:
+                pass
 
         def loop() -> None:
             while not app.state.cleanup_stop_event.wait(24 * 60 * 60):

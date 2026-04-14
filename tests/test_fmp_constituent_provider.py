@@ -219,10 +219,7 @@ def test_default_universe_history_providers_use_fmp_wrappers():
     providers = default_universe_history_providers()
 
     assert [provider.provider_name for provider in providers] == [
-        "fmp_historical_constituent",
-        "fmp_historical_constituent",
-    ]
-    assert [getattr(provider.fallback_provider, "provider_name", None) for provider in providers] == [
         "wikipedia_revision_history",
         "wikipedia_revision_history",
     ]
+    assert all(getattr(provider, "official_provider", None) is not None for provider in providers)

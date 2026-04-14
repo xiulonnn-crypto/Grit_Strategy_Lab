@@ -221,6 +221,10 @@ SCHEMA_STATEMENTS = [
         metrics_json TEXT NOT NULL DEFAULT '{}',
         chart_series_json TEXT NOT NULL DEFAULT '[]',
         score REAL,
+        return_sharpe REAL,
+        oos_sharpe REAL,
+        total_return_pct REAL,
+        stability REAL,
         error_message TEXT,
         started_at TEXT,
         completed_at TEXT,
@@ -263,7 +267,13 @@ MIGRATION_COLUMNS = {
     "optimization_jobs": [
         ("deleted_at", "TEXT"),
         ("deleted_reason", "TEXT"),
-    ]
+    ],
+    "optimization_job_trials": [
+        ("return_sharpe", "REAL"),
+        ("oos_sharpe", "REAL"),
+        ("total_return_pct", "REAL"),
+        ("stability", "REAL"),
+    ],
 }
 
 

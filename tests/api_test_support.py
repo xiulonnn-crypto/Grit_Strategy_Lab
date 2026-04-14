@@ -467,6 +467,9 @@ def create_optimization_job(
     validation_mode: str | None = None,
     budget_combinations: int | None = None,
     search_space: list[dict[str, Any]] | None = None,
+    constraint_preset_key: str | None = None,
+    constraint_label: str | None = None,
+    constraints: list[dict[str, Any]] | None = None,
     wait_until_complete: bool = True,
     timeout_seconds: float = 5.0,
 ) -> dict[str, Any]:
@@ -485,6 +488,12 @@ def create_optimization_job(
         payload["budget_combinations"] = budget_combinations
     if search_space is not None:
         payload["search_space"] = search_space
+    if constraint_preset_key is not None:
+        payload["constraint_preset_key"] = constraint_preset_key
+    if constraint_label is not None:
+        payload["constraint_label"] = constraint_label
+    if constraints is not None:
+        payload["constraints"] = constraints
     created = assert_ok(client.post(f"/strategies/{strategy_id}/optimization-jobs", json=payload))
     if wait_until_complete and str(created.get("status") or "").upper() in {"QUEUED", "RUNNING"}:
         return wait_for_optimization_job(client, created["id"], timeout_seconds=timeout_seconds)

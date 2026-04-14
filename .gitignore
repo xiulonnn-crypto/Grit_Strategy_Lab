@@ -57,6 +57,7 @@ harness/reports/smoke/*
 
 # Local secrets
 docs/key.txt
+QuickStart-Grit.local.ps1
 
 # OS/IDE
 .DS_Store

@@ -11,6 +11,7 @@ from tests.api_test_support import (
     draft_strategy_session,
     materialize_session,
     momentum_confirmation_payload,
+    refresh_snapshots,
     wait_for_optimization_job,
 )
 from datetime import date, datetime, timedelta, timezone
@@ -170,6 +171,22 @@ def test_snapshot_overview_contract_is_exact_on_fresh_database(tmp_path):
     assert overview["allowed_actions"] == ["refresh_snapshots"]
 
 
+def test_refresh_target_pool_filters_non_ticker_labels_from_missing_symbols_and_strategies(tmp_path):
+    service = RealBacktestPlatformService(tmp_path / "snapshot-symbol-filter.db", market_data_provider=None)
+    service.list_strategies = lambda: [  # type: ignore[method-assign]
+        {"universe_name": "标普500成分股", "benchmark_symbol": "QQQ", "strategy_type": "MOMENTUM"},
+        {"universe_name": "BRK-B", "benchmark_symbol": "SPY", "strategy_type": "GRID"},
+    ]
+
+    filtered_missing = service._snapshot_missing_symbols(  # type: ignore[attr-defined]
+        {"metadata": {"missing_symbols": ["AAPL", "标普500成分股", "BRK-B", ""]}}
+    )
+
+    assert filtered_missing == ["AAPL", "BRK-B"]
+    assert "标普500成分股" not in service._all_refresh_symbols()  # type: ignore[attr-defined]
+    assert "BRK-B" in service._all_refresh_symbols()  # type: ignore[attr-defined]
+
+
 def test_scoped_market_data_provider_excludes_longbridge_for_full_history(tmp_path):
     class _NamedProvider:
         def __init__(self, provider_name: str) -> None:
@@ -285,6 +302,122 @@ def test_snapshot_refresh_heartbeat_persists_runtime_stage_and_refresh_stats(tmp
         "progress": {"completed_symbols": 3, "total_symbols": 12},
         "heartbeat_at": "2026-04-13T07:01:00Z",
     }
+
+
+def test_snapshot_refresh_persists_provider_summary_for_each_snapshot_pool(tmp_path):
+    class _Provider:
+        provider_name = "runtime"
+
+        def fetch_history(self, symbol, start_date, end_date):
+            return {
+                "source": "yahoo",
+                "fallback_source": "mixed_fallbacks",
+                "bars": [
+                    {
+                        "date": "2026-04-10",
+                        "open": 190.0,
+                        "high": 191.0,
+                        "low": 189.0,
+                        "close": 190.5,
+                        "adj_close": 190.5,
+                        "volume": 1000,
+                    }
+                ],
+                "actions": [
+                    {
+                        "date": "2026-04-10",
+                        "action_type": "dividend",
+                        "value": 1.0,
+                        "source": "alpha_vantage",
+                        "payload": {"cash": 1.0},
+                    }
+                ],
+                "warnings": [],
+                "partial": True,
+                "metadata": {
+                    "provider_results": [
+                        {"provider": "yahoo", "kind": "history", "status": "succeeded", "source": "yahoo", "bar_count": 1, "action_count": 0, "partial": False, "selection_status": "selected_primary"},
+                        {"provider": "tiingo", "kind": "history", "status": "succeeded", "source": "tiingo", "bar_count": 1, "action_count": 1, "partial": False, "selection_status": "succeeded_not_selected"},
+                        {"provider": "akshare_us", "kind": "history", "status": "skipped", "source": "akshare_us", "bar_count": 0, "action_count": 0, "partial": False, "reason": "primary_price_source_already_selected"},
+                        {"provider": "alpha_vantage", "kind": "earnings", "status": "succeeded", "source": "alpha_vantage", "bar_count": 0, "action_count": 1, "partial": False},
+                        {"provider": "sec_edgar", "kind": "filings_availability", "status": "unavailable", "source": "sec_edgar", "bar_count": 0, "action_count": 0, "partial": False, "reason": "SEC_USER_AGENT must include a contact email."},
+                    ],
+                    "provider_chain": ["yahoo", "tiingo", "akshare_us", "alpha_vantage", "sec_edgar"],
+                    "missing_provider_reasons": {
+                        "sec_edgar": "SEC_USER_AGENT must include a contact email.",
+                    },
+                },
+            }
+
+    class _UniverseProvider:
+        provider_name = "fmp_historical_constituent"
+
+        def load_snapshots(self, start_date: date, end_date: date):
+            return [
+                UniverseMembershipSnapshot(
+                    universe_key=SP500_UNIVERSE_KEY,
+                    universe_name=SP500_UNIVERSE_NAME,
+                    effective_date=date(2026, 1, 1),
+                    normalized_symbols=["AAPL", "MSFT"],
+                    raw_symbols=["AAPL", "MSFT"],
+                    unmapped_symbols=[],
+                    source="wikipedia_revision_history",
+                    fallback_source=None,
+                    anchor_schedule=ANCHOR_SCHEDULE,
+                    source_revision_id="wiki-sp500-2026-01-01",
+                    source_page_title=SP500_SOURCE_PAGE_TITLE,
+                    metadata={
+                        "coverage_mode": "point_in_time_anchor",
+                        "source_quality": "historical_revision_snapshot",
+                        "historical_constituent_provider": "fmp",
+                        "historical_constituent_probe_status": "capability_unavailable",
+                        "historical_constituent_probe_error": "FMP_API_KEY is not configured.",
+                    },
+                ),
+                UniverseMembershipSnapshot(
+                    universe_key=NASDAQ100_UNIVERSE_KEY,
+                    universe_name=NASDAQ100_UNIVERSE_NAME,
+                    effective_date=date(2026, 1, 1),
+                    normalized_symbols=["AAPL", "MSFT"],
+                    raw_symbols=["AAPL", "MSFT"],
+                    unmapped_symbols=[],
+                    source="wikipedia_revision_history",
+                    fallback_source=None,
+                    anchor_schedule=ANCHOR_SCHEDULE,
+                    source_revision_id="wiki-ndx100-2026-01-01",
+                    source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
+                    metadata={
+                        "coverage_mode": "point_in_time_anchor",
+                        "source_quality": "historical_revision_snapshot",
+                        "historical_constituent_provider": "fmp",
+                        "historical_constituent_probe_status": "capability_unavailable",
+                        "historical_constituent_probe_error": "FMP_API_KEY is not configured.",
+                    },
+                ),
+            ]
+
+    service = RealBacktestPlatformService(tmp_path / "provider-summary.db", market_data_provider=_Provider())
+    service._universe_history_providers = lambda: [_UniverseProvider()]  # type: ignore[method-assign]
+
+    overview = service.refresh_snapshots({"mode": "repair", "targets": ["price", "corporate", "universes"]})
+    refresh_stats = overview["latest_job"]["summary"]["refresh_stats"]
+
+    price_summary = refresh_stats["datasets"]["ds-price"]["provider_summary"]
+    corporate_summary = refresh_stats["datasets"]["ds-corporate-actions"]["provider_summary"]
+    sp500_summary = refresh_stats["universes"]["un-sp500"]["provider_summary"]
+
+    assert price_summary["providers"]["yahoo"]["landed_row_count"] >= 1
+    assert price_summary["providers"]["yahoo"]["selected_primary_symbols"] >= 1
+    assert price_summary["providers"]["tiingo"]["succeeded_not_selected_symbols"] >= 1
+    assert "akshare_us" in price_summary["skipped_providers"]
+    assert "sec_edgar" not in price_summary["providers"]
+    assert "sec_edgar" in corporate_summary["unavailable_providers"]
+    assert "SEC_USER_AGENT must include a contact email." in corporate_summary["providers"]["sec_edgar"]["reasons"]
+    assert corporate_summary["providers"]["alpha_vantage"]["landed_row_count"] >= 1
+    assert "alpha_vantage" in corporate_summary["attempted_providers"]
+    assert sp500_summary["providers"]["wikipedia_revision_history"]["landed_anchor_count"] == 1
+    assert "fmp" in sp500_summary["skipped_providers"]
+    assert sp500_summary["providers"]["fmp"]["reasons"] == ["FMP_API_KEY is not configured."]
 
 
 def test_recent_running_snapshot_job_skips_interrupted_recovery_process_scan(tmp_path, monkeypatch):
@@ -1550,6 +1683,145 @@ def test_list_optimization_jobs_returns_latest_first_with_projection_fields(tmp_
     assert jobs[1]["estimated_completed_at"] is not None
 
 
+def test_create_optimization_job_round_trips_constraint_contract_fields(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="optimization-constraint-contract")
+    strategy = base["strategy"]
+    constraints = [
+        {
+            "key": "max_drawdown_pct",
+            "label": "Max drawdown",
+            "category": "risk",
+            "operator": "<=",
+            "value": 18,
+            "unit": "%",
+        },
+        {
+            "key": "return_sharpe",
+            "label": "Return Sharpe",
+            "category": "performance",
+            "operator": ">=",
+            "value": 1.1,
+            "unit": "score",
+        },
+    ]
+
+    job = assert_ok(
+        client.post(
+            f"/strategies/{strategy['id']}/optimization-jobs",
+            json={
+                "objective": "sharpe",
+                "base_parameter_version_id": strategy["current_parameter_version_id"],
+                "entry_point": "lab_menu",
+                "validation_mode": "walk_forward",
+                "budget_combinations": 4,
+                "search_space": [
+                    {"key": "lookback_months", "label": "Lookback", "mode": "range", "start": 5, "end": 6, "step": 1, "current": 6},
+                    {"key": "top_n", "label": "Top N", "mode": "range", "start": 3, "end": 4, "step": 1, "current": 4},
+                ],
+                "constraint_preset_key": "offensive",
+                "constraint_label": "Offensive guardrails",
+                "constraints": constraints,
+            },
+        )
+    )
+
+    assert job["constraint_preset_key"] == "offensive"
+    assert job["constraint_label"] == "Offensive guardrails"
+    assert job["constraints"] == constraints
+    assert job["request"]["constraint_preset_key"] == "offensive"
+    assert job["request"]["constraint_label"] == "Offensive guardrails"
+    assert job["request"]["constraints"] == constraints
+    assert job["summary"]["constraint_preset_key"] == "offensive"
+    assert job["summary"]["constraint_label"] == "Offensive guardrails"
+    assert job["summary"]["constraints"] == constraints
+    assert job["result"]["constraint_preset_key"] == "offensive"
+    assert job["result"]["constraint_label"] == "Offensive guardrails"
+    assert job["result"]["constraints"] == constraints
+
+    detail = assert_ok(client.get(f"/optimization-jobs/{job['id']}/detail"))
+    assert detail["constraint_preset_key"] == "offensive"
+    assert detail["constraint_label"] == "Offensive guardrails"
+    assert detail["constraints"] == constraints
+    assert detail["summary"]["constraint_preset_key"] == "offensive"
+    assert detail["result"]["constraint_preset_key"] == "offensive"
+
+
+def test_legacy_optimization_job_detail_backfills_constraint_contract_fields(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="optimization-legacy-constraint")
+    strategy = base["strategy"]
+    legacy_job_id = "opt_legacy_constraint_detail"
+    client.app.state.service.storage.insert_json_row(
+        "optimization_jobs",
+        {
+            "id": legacy_job_id,
+            "strategy_id": strategy["id"],
+            "status": "COMPLETED",
+            "request_json": json.dumps(
+                {
+                    "objective": "sharpe",
+                    "base_parameter_version_id": strategy["current_parameter_version_id"],
+                    "entry_point": "lab_menu",
+                    "validation_mode": "walk_forward",
+                    "budget_combinations": 4,
+                    "status": "COMPLETED",
+                    "progress_pct": 100,
+                    "completed_combinations": 4,
+                    "current_stage": "Result ready",
+                    "latest_update": "Optimization completed.",
+                }
+            ),
+            "summary_json": json.dumps(
+                {
+                    "objective": "sharpe",
+                    "baseline_parameter_version_id": strategy["current_parameter_version_id"],
+                    "entry_point": "lab_menu",
+                    "validation_mode": "walk_forward",
+                    "budget_combinations": 4,
+                    "completed_combinations": 4,
+                    "persisted_trial_count": 4,
+                    "next_trial_index": 5,
+                    "status": "COMPLETED",
+                    "progress_pct": 100,
+                    "current_stage": "Result ready",
+                    "latest_update": "Optimization completed.",
+                    "resume_ready": False,
+                }
+            ),
+            "result_json": json.dumps(
+                {
+                    "best_candidate_id": "trial_1",
+                    "best_candidate_label": "Trial 1",
+                    "baseline_parameter_version_id": strategy["current_parameter_version_id"],
+                    "headline": "Optimization completed",
+                    "summary": "Optimization completed.",
+                    "stability_verdict": None,
+                    "status": "COMPLETED",
+                    "progress_pct": 100,
+                    "current_stage": "Result ready",
+                    "latest_update": "Optimization completed.",
+                }
+            ),
+            "candidates_json": json.dumps([]),
+            "created_at": "2026-04-13T10:00:00Z",
+            "updated_at": "2026-04-13T10:10:00Z",
+            "completed_at": "2026-04-13T10:10:00Z",
+        },
+    )
+
+    detail = assert_ok(client.get(f"/optimization-jobs/{legacy_job_id}/detail"))
+
+    assert detail["constraint_preset_key"] == "balanced"
+    assert detail["constraint_label"] == "平衡型"
+    assert detail["constraints"]
+    assert detail["request"]["constraint_preset_key"] == "balanced"
+    assert detail["summary"]["constraint_preset_key"] == "balanced"
+    assert detail["result"]["constraint_preset_key"] == "balanced"
+
+
 def test_list_optimization_jobs_uses_lightweight_projection_without_detail_queries(tmp_path, monkeypatch):
     client, _ = create_test_client(tmp_path)
     service = client.app.state.service
@@ -1647,6 +1919,160 @@ def test_list_optimization_jobs_uses_lightweight_projection_without_detail_queri
     assert completed_item["strategy_name"] == strategy["name"]
     assert completed_item["best_candidate_id"] is not None
     assert completed_item["best_candidate_label"] is not None
+
+
+def test_queued_and_interrupted_optimization_jobs_hide_stale_eta_projection(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    base = create_momentum_strategy(client, idempotency_key="optimization-hide-stale-eta")
+    strategy = base["strategy"]
+    created_at = "2026-04-13T10:00:00Z"
+    stale_eta_summary = {
+        "objective": "sharpe",
+        "baseline_parameter_version_id": strategy["current_parameter_version_id"],
+        "entry_point": "lab_menu",
+        "validation_mode": "walk_forward",
+        "source_run_id": strategy["latest_successful_run_id"],
+        "budget_combinations": 4,
+        "completed_combinations": 1,
+        "persisted_trial_count": 1,
+        "next_trial_index": 2,
+        "progress_pct": 25,
+        "estimated_remaining_minutes": 14,
+        "estimated_completed_at": "2026-04-13T10:14:00Z",
+        "heartbeat_at": "2026-04-13T10:01:00Z",
+        "best_metrics_summary": {
+            "trial_index": 1,
+            "label": "Candidate 1",
+            "status": "SUCCEEDED",
+            "parameter_snapshot": {"lookback_months": 6, "top_n": 4},
+            "metrics": {
+                "return_sharpe": 1.04,
+                "out_of_sample_sharpe": 0.88,
+                "total_return_pct": 13.0,
+                "stability": 78.0,
+            },
+            "score": 1.42,
+        },
+    }
+    stale_eta_result = {
+        "headline": "Candidate 1",
+        "summary": "Projection preserved from a prior runtime.",
+        "status": "INTERRUPTED",
+        "progress_pct": 25,
+        "current_stage": "Interrupted at 1/4",
+        "latest_update": "Progress preserved at 1/4. Click Continue Optimization to resume.",
+        "estimated_remaining_minutes": 14,
+        "estimated_completed_at": "2026-04-13T10:14:00Z",
+    }
+
+    service.storage.insert_json_row(
+        "optimization_jobs",
+        {
+            "id": "opt_stale_eta_queued",
+            "strategy_id": strategy["id"],
+            "status": "QUEUED",
+            "request_json": json.dumps(
+                {
+                    "objective": "sharpe",
+                    "base_parameter_version_id": strategy["current_parameter_version_id"],
+                    "source_run_id": strategy["latest_successful_run_id"],
+                    "entry_point": "lab_menu",
+                    "validation_mode": "walk_forward",
+                    "budget_combinations": 4,
+                    "status": "QUEUED",
+                    "current_stage": "Preparing trial 2/4",
+                    "latest_update": "Optimization job recreated from the previous configuration.",
+                    "estimated_remaining_minutes": 14,
+                    "estimated_completed_at": "2026-04-13T10:14:00Z",
+                }
+            ),
+            "summary_json": json.dumps(
+                {
+                    **stale_eta_summary,
+                    "status": "QUEUED",
+                    "current_stage": "Preparing trial 2/4",
+                    "latest_update": "Optimization job recreated from the previous configuration.",
+                    "resume_ready": False,
+                    "interrupted_reason": None,
+                }
+            ),
+            "result_json": json.dumps(
+                {
+                    **stale_eta_result,
+                    "status": "QUEUED",
+                    "current_stage": "Preparing trial 2/4",
+                    "latest_update": "Optimization job recreated from the previous configuration.",
+                }
+            ),
+            "candidates_json": json.dumps([]),
+            "created_at": created_at,
+            "updated_at": "2026-04-13T10:01:00Z",
+            "completed_at": None,
+        },
+    )
+    service.storage.insert_json_row(
+        "optimization_jobs",
+        {
+            "id": "opt_stale_eta_interrupted",
+            "strategy_id": strategy["id"],
+            "status": "INTERRUPTED",
+            "request_json": json.dumps(
+                {
+                    "objective": "sharpe",
+                    "base_parameter_version_id": strategy["current_parameter_version_id"],
+                    "source_run_id": strategy["latest_successful_run_id"],
+                    "entry_point": "lab_menu",
+                    "validation_mode": "walk_forward",
+                    "budget_combinations": 4,
+                    "status": "INTERRUPTED",
+                    "current_stage": "Interrupted at 1/4",
+                    "latest_update": "Progress preserved at 1/4. Click Continue Optimization to resume.",
+                    "estimated_remaining_minutes": 14,
+                    "estimated_completed_at": "2026-04-13T10:14:00Z",
+                    "interrupted_reason": "service_restart",
+                }
+            ),
+            "summary_json": json.dumps(
+                {
+                    **stale_eta_summary,
+                    "status": "INTERRUPTED",
+                    "current_stage": "Interrupted at 1/4",
+                    "latest_update": "Progress preserved at 1/4. Click Continue Optimization to resume.",
+                    "resume_ready": True,
+                    "interrupted_reason": "service_restart",
+                }
+            ),
+            "result_json": json.dumps(stale_eta_result),
+            "candidates_json": json.dumps([]),
+            "created_at": created_at,
+            "updated_at": "2026-04-13T10:01:00Z",
+            "completed_at": None,
+        },
+    )
+
+    jobs = assert_ok(client.get("/optimization-jobs"))
+    listed = {item["id"]: item for item in jobs if item["id"] in {"opt_stale_eta_queued", "opt_stale_eta_interrupted"}}
+
+    queued_detail = assert_ok(client.get("/optimization-jobs/opt_stale_eta_queued/detail"))
+    interrupted_detail = assert_ok(client.get("/optimization-jobs/opt_stale_eta_interrupted/detail"))
+
+    assert listed["opt_stale_eta_queued"]["status"] == "QUEUED"
+    assert listed["opt_stale_eta_queued"]["estimated_remaining_minutes"] is None
+    assert listed["opt_stale_eta_queued"]["estimated_completed_at"] is None
+    assert queued_detail["summary"]["estimated_remaining_minutes"] is None
+    assert queued_detail["summary"]["estimated_completed_at"] is None
+    assert queued_detail["result"]["estimated_remaining_minutes"] is None
+    assert queued_detail["result"]["estimated_completed_at"] is None
+
+    assert listed["opt_stale_eta_interrupted"]["status"] == "INTERRUPTED"
+    assert listed["opt_stale_eta_interrupted"]["estimated_remaining_minutes"] is None
+    assert listed["opt_stale_eta_interrupted"]["estimated_completed_at"] is None
+    assert interrupted_detail["summary"]["estimated_remaining_minutes"] is None
+    assert interrupted_detail["summary"]["estimated_completed_at"] is None
+    assert interrupted_detail["result"]["estimated_remaining_minutes"] is None
+    assert interrupted_detail["result"]["estimated_completed_at"] is None
 
 
 def test_delete_optimization_job_logically_hides_it_from_list_detail_and_workspace_refs(tmp_path):
@@ -2020,6 +2446,7 @@ def test_optimization_job_detail_repairs_garbled_best_candidate_labels(tmp_path)
 def test_create_optimization_job_returns_running_progress_before_results_are_ready(tmp_path):
     client, _ = create_test_client(tmp_path)
 
+    refresh_snapshots(client, mode="repair", targets=["price", "corporate", "universes"])
     base = create_momentum_strategy(client, idempotency_key="materialize-optimization-progress")
     strategy = base["strategy"]
     search_space = [
@@ -2296,6 +2723,7 @@ def test_resume_incomplete_optimization_jobs_restarts_running_progress_and_prese
 def test_create_optimization_job_persists_configured_request_and_result_projection(tmp_path):
     client, _ = create_test_client(tmp_path)
 
+    refresh_snapshots(client, mode="repair", targets=["price", "corporate", "universes"])
     base = create_momentum_strategy(client, idempotency_key="materialize-optimization-configured")
     strategy = base["strategy"]
     created = create_optimization_job(
@@ -2430,6 +2858,7 @@ def test_completed_optimization_job_detail_uses_trial_rows_as_progress_truth(tmp
 def test_create_optimization_job_candidates_use_real_backtest_metrics(tmp_path):
     client, _ = create_test_client(tmp_path)
 
+    refresh_snapshots(client, mode="repair", targets=["price", "corporate", "universes"])
     base = create_momentum_strategy(client, idempotency_key="materialize-optimization-real-metrics")
     strategy = base["strategy"]
     search_space = [
@@ -2444,6 +2873,7 @@ def test_create_optimization_job_candidates_use_real_backtest_metrics(tmp_path):
         validation_mode="walk_forward",
         budget_combinations=4,
         search_space=search_space,
+        timeout_seconds=15.0,
     )
 
     service = client.app.state.service
@@ -2452,17 +2882,25 @@ def test_create_optimization_job_candidates_use_real_backtest_metrics(tmp_path):
     strategy_detail = service.get_strategy_detail(strategy["id"])
     evaluation_request = service._build_optimization_evaluation_request(strategy_detail, source_run=source_run)
     candidate = job["candidates"][0]
-    expected = service._evaluate_optimization_trial(
+    effective_strategy = service._optimization_effective_strategy(strategy_detail, candidate["parameter_snapshot"])
+    preview, chart_series, _ = service._simulate_run(effective_strategy, evaluation_request)
+    expected_metrics = service._build_real_optimization_metrics(preview, chart_series)
+    expected_score = service._score_optimization_metrics(expected_metrics, job["request"].get("objective"))
+    evaluated = service._evaluate_optimization_trial(
         strategy_detail,
         evaluation_request,
         job["request"],
         candidate["parameter_snapshot"],
     )
 
-    assert abs(candidate["metrics"]["sharpe"] - expected["metrics"]["sharpe"]) < 1e-9
-    assert abs(candidate["metrics"]["total_return"] - expected["metrics"]["total_return"]) < 1e-9
-    assert abs(candidate["metrics"]["max_drawdown"] - expected["metrics"]["max_drawdown"]) < 1e-9
-    assert abs(candidate["metrics"]["out_of_sample_sharpe"] - expected["metrics"]["out_of_sample_sharpe"]) < 1e-9
+    assert abs(candidate["metrics"]["sharpe"] - expected_metrics["sharpe"]) < 1e-9
+    assert abs(candidate["metrics"]["total_return"] - expected_metrics["total_return"]) < 1e-9
+    assert abs(candidate["metrics"]["max_drawdown"] - expected_metrics["max_drawdown"]) < 1e-9
+    assert abs(candidate["metrics"]["out_of_sample_sharpe"] - expected_metrics["out_of_sample_sharpe"]) < 1e-9
+    assert abs(candidate["score"] - expected_score) < 1e-9
+    assert abs(evaluated["metrics"]["sharpe"] - expected_metrics["sharpe"]) < 1e-9
+    assert abs(evaluated["metrics"]["out_of_sample_sharpe"] - expected_metrics["out_of_sample_sharpe"]) < 1e-9
+    assert len(evaluated["chart_series"]) == len(chart_series)
     assert candidate["summary"]
     assert candidate["analysis"]["validation_windows"]
 

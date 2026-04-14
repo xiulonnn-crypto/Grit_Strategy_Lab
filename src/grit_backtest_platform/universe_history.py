@@ -17,9 +17,6 @@ from .official_index_announcements import (
     parse_nasdaq_annual_changes_release,
     parse_sp_global_constituent_change_release,
 )
-from .fmp_constituent_provider import FmpHistoricalConstituentUniverseHistoryProvider
-
-
 ANCHOR_SCHEDULE = "01-01,07-01"
 WIKIPEDIA_API_ENDPOINT = "https://en.wikipedia.org/w/api.php"
 WIKIPEDIA_HEADERS = {
@@ -1057,14 +1054,8 @@ def default_universe_history_providers() -> list[Any]:
         fallback_provider=StaticNasdaq100UniverseHistoryProvider(),
     )
     return [
-        FmpHistoricalConstituentUniverseHistoryProvider(
-            definition=sp500_definition,
-            fallback_provider=sp500_wikipedia_provider,
-        ),
-        FmpHistoricalConstituentUniverseHistoryProvider(
-            definition=nasdaq100_definition,
-            fallback_provider=nasdaq100_wikipedia_provider,
-        ),
+        sp500_wikipedia_provider,
+        nasdaq100_wikipedia_provider,
     ]
 
 

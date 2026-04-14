@@ -1,9 +1,9 @@
-﻿# GSL Design System
+# GSL 设计系统
 
-> Status: 当前运行中 UI 的视觉真源，基于 2026-04-09 本地运行页面同步  
-> Capture basis: `http://127.0.0.1:4173/#/workspace` 与同批核心路由截图  
-> Source priority: 2026-04-09 live captures > `web/src/*.css` / `web/src/*.tsx` > `docs/GSL_UI_V1_PLAN.md`  
-> Scope: `workspace`、`creation-template`、`creation-session`、`strategy-detail`、`backtest submit`、`runs-index`、`run-detail`、`snapshots`、`optimization`
+> 状态：当前运行中 UI 的视觉真源，基于 2026-04-09 本地运行页面同步  
+> 取样依据：`http://127.0.0.1:4173/#/workspace` 与同批核心路由截图  
+> 来源优先级：2026-04-09 live captures > `web/src/*.css` / `web/src/*.tsx` > `docs/GSL_UI_V1_PLAN.md`  
+> 范围：`workspace`、`creation-template`、`creation-session`、`strategy-detail`、`backtest submit`、`runs-index`、`run-detail`、`snapshots`、`optimization`
 
 ## 1. 设计定位
 
@@ -33,9 +33,9 @@
 
 ## 3. Token 基线
 
-### 3.1 Color
+### 3.1 颜色
 
-| Token | Value | Usage |
+| Token | 值 | 用途 |
 | --- | --- | --- |
 | `--gsl-bg-main` | `#F0F2F5` | 全局背景 |
 | `--gsl-bg-surface` | `#FFFFFF` | 主卡、表格、模态背景 |
@@ -67,9 +67,9 @@
 - 基准、对照、样本外辅助线统一走 **蓝色**，避免再引入第三套比较色。
 - 页面主色出现频率要克制，青绿色负责“方向”和“动作”，不负责铺满页面。
 
-### 3.3 Radius / Border / Shadow
+### 3.3 圆角 / 边框 / 阴影
 
-| Layer | Value | Usage |
+| 层级 | 值 | 用途 |
 | --- | --- | --- |
 | `radius-pill` | `999px` | 状态胶囊、tab、chips |
 | `radius-field` | `12px - 14px` | 输入框、轻量按钮、子卡片 |
@@ -90,9 +90,9 @@
 - **hero / heading card 内边距**：`24px - 28px`
 - **卡片栅格 gap**：`12px - 16px`
 
-### 3.5 Motion / Layering
+### 3.5 动效 / 层级
 
-| Token | Value | Usage |
+| Token | 值 | 用途 |
 | --- | --- | --- |
 | `motion-fast` | `140ms ease` | hover、按钮、chip |
 | `motion-medium` | `160ms ease` | 卡片 hover、导航切换 |
@@ -104,17 +104,17 @@
 - 默认 hover 只允许轻抬 1px，不允许夸张位移。
 - blur 只允许用于 dock / tooltip / modal，不要扩展到页面主体。
 
-## 4. Typography
+## 4. 字体排印
 
-### 4.1 Font Stack
+### 4.1 字体栈
 
 - **UI / Body**：`Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif`
 - **Monospace / IDs**：`"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace`
 - **原则**：全站不引入装饰字体，信息密度靠字重和间距，不靠换字体风格。
 
-### 4.2 Type Scale
+### 4.2 字号层级
 
-| Role | Size / Line Height | Weight | Usage |
+| 角色 | 尺寸 / 行高 | 字重 | 用途 |
 | --- | --- | --- | --- |
 | `page-heading` | `28 / 34` | `700` | 顶部主标题、创建页标题 |
 | `hero-title` | `28 - 38 / 1.18` | `700` | run-detail / hero 大标题 |
@@ -136,16 +136,16 @@
 
 ## 5. 布局规则
 
-### 5.1 App Shell
+### 5.1 应用外壳
 
 - Sidebar 桌面宽度 `240px`，`<1280px` 压缩到 `92px`，`<767px` 折成顶部区块。
 - Sidebar 纯白底，激活态用 `#E6F4F1` + 左侧深青绿色内嵌线。
 - Topbar 高度 `80px`，背景纯白，底边线清晰，不做整条玻璃感。
 - 主内容区使用 `32px` padding，并统一放进 page-shell 中。
 
-### 5.2 Route-Level Layout
+### 5.2 路由级布局
 
-| Route | Current Layout | Notes |
+| 路由 | 当前布局 | 说明 |
 | --- | --- | --- |
 | `#/workspace` | 健康度头卡 + `1.05fr / 0.95fr` 双栏 | 左侧 2x2 策略卡，右侧最近回测列表 |
 | `#/creation/new` | heading card + 2 列模板卡 | 卡片大圆角、按钮全宽 |
@@ -166,13 +166,13 @@
 
 ## 6. 组件家族
 
-### 6.1 Shell / Heading
+### 6.1 外壳 / 标题区
 
 - 统一使用 **page heading card** 作为页面起点。
 - heading 结构固定为 `eyebrow + h1 + 一句话说明`。
 - CTA 放在 heading 同级或下一张 hero 卡，不塞进标题行末尾做挤压式布局。
 
-### 6.2 Buttons
+### 6.2 按钮
 
 - 全站动作按钮统一分为 **Primary / Ghost / Text** 三类，不再为单页单独发明新按钮语法。
 - **Primary button**：`44px` 高，`0 16px` padding，`6px` 圆角，`600` 字重，底色 `#1F877B`，白字，hover 压深到 `#264239`。
@@ -181,14 +181,14 @@
 - 按钮默认只做 `translateY(-1px)` 的轻抬，不做厚投影、不做胶囊大圆角；研究页 CTA 保持克制。
 - 同一操作区优先使用 `1 个主按钮 + 1-2 个 ghost 按钮`，尺寸和高度保持一致。
 
-### 6.3 Workspace Family
+### 6.3 工作台组件家族
 
 - **工作台健康度卡**：四个指标块 + 双 CTA，指标块本身也用轻渐变白卡。
 - **策略卡**：标题、版本 / 状态 badge、sparkline、2x2 指标矩阵、底部元信息和 CTA。
 - **最近回测列表**：左侧状态点，中部 run 信息，右侧状态 / 时间胶囊。
 - **Compare dock**：允许轻 blur、半透明白底和更强阴影，但只在选择对比时出现。
 
-### 6.4 Creation Family
+### 6.4 创建链路组件家族
 
 - **模板卡**：`24px` 圆角、较高阴影、按钮全宽，是全站最柔和的一组卡片。
 - **创建标题卡**：`28px` 圆角，允许轻渐变顶色。
@@ -196,19 +196,19 @@
 - **步骤 chip**：胶囊结构，带状态点；warning 用暖橙，success 用绿。
 - **字段卡**：20px 左右圆角，输入框 14px 圆角，来源标签常驻右上。
 
-### 6.5 Strategy Detail / Backtest Submit
+### 6.5 策略详情 / 回测提交
 
 - **策略详情** 不是 dense table，而是摘要卡 + 当前版本卡 + 最近回测卡 + 下一步动作卡。
 - **提交回测** 当前视觉是三段式确认卡，不是表单左栏 + 摘要右栏。
 - 参数、快照、运行来源都走键值卡片，不堆原始 JSON。
 
-### 6.6 Runs / Dense Table
+### 6.6 Runs / 密集表格
 
 - runs index 使用单张大表卡，表头浅灰底，hover 轻高亮。
 - dense table 只在列表和 compare 内使用，不向 workspace / creation 蔓延。
 - badge 高度保持紧凑，颜色轻，不做整行着色。
 
-### 6.7 Run Detail Family
+### 6.7 Run Detail 组件家族
 
 - **KPI 卡**：当前是 5 张并列卡，含主值、趋势、对照、洞察，不再是简单四格数值块。
 - **主图表卡**：左大图右判断轨，图表背景轻渐变，tooltip 可轻 blur。
@@ -216,13 +216,13 @@
 - **tab strip**：使用 pill tab，不再是硬分段器或下划线 tab。
 - **诊断卡**：drawdown、月度矩阵、最差事件、滚动指标采用统一白卡 + 轻色底图。
 
-### 6.8 Snapshots Family
+### 6.8 快照组件家族
 
 - 当前快照页以 **覆盖卡 / 修复卡** 为主，不是顶部 KPI 墙。
 - 不完整状态通过浅红 / 浅橙 message panel 表示，文字说明比颜色更重要。
 - 时间、覆盖率、窗口、来源全部落在小卡片里，而不是写成长段落。
 
-### 6.8 Optimization Family
+### 6.9 优化组件家族
 
 - 当前优化页更像 **作业页 + 候选列表**，不是满屏 candidate grid。
 - 顶部动作区维持 3 个操作按钮，下面再进入候选差异表述。
@@ -230,7 +230,7 @@
 
 ## 7. 数据可视化语法
 
-### 7.1 Color Semantics
+### 7.1 颜色语义
 
 - **主策略线**：`#1F877B`
 - **基准线 / 第二比较线**：`#4C78C7`
@@ -248,7 +248,7 @@
 
 ## 8. 可访问性与内容语气
 
-### 8.1 Accessibility
+### 8.1 可访问性
 
 - 正文与背景对比度至少 `4.5:1`。
 - 所有状态胶囊除了颜色都必须有文字。
@@ -256,17 +256,17 @@
 - 表格、诊断切换、run-detail tabs 需要清晰 focus ring。
 - 图表必须有文字摘要或判断轨，不靠图像单独表达结论。
 
-### 8.2 Content Tone
+### 8.2 内容语气
 
 - 标题回答“这是什么”，按钮回答“下一步做什么”。
 - 说明文字以操作和判断为主，不写口号。
 - 错误 / 阻塞要贴近上下文写清楚原因，例如快照不完整、公司行为缺口、历史锚点未修复。
 
-## 9. 2026-04-09 Drift Cleanup
+## 9. 2026-04-09 偏移清理
 
 这次同步，文档从“上一轮偏冷硬的设计判断”收敛到当前真实 UI：
 
-| Area | Previous Doc | Current Truth |
+| 区域 | 旧版文档 | 当前真相 |
 | --- | --- | --- |
 | 主色 | `#2D4E44` 深墨绿 | `#1F877B` 青绿色 |
 | 主基调 | 冷灰机构终端，更硬 | 浅雾灰研究工作台，更柔和 |
@@ -280,7 +280,7 @@
 
 ## 10. 实现映射
 
-| Surface | Primary Files |
+| 界面 | 主要文件 |
 | --- | --- |
 | app shell | `web/src/app-shell-frame.css` |
 | workspace | `web/src/pages/workspace-page-lane-b.css`, `web/src/page-sections/workspace-lane-b.tsx`, `web/src/page-sections/workspace-recent-runs-lane-b.css` |
@@ -292,7 +292,7 @@
 | snapshots | `web/src/pages/snapshots-page.css`, `web/src/pages/snapshots-page.tsx` |
 | optimization | `web/src/page-sections/optimization-manual-lab-phase4.tsx`, `web/src/pages/manual-lab-page.tsx` |
 
-## 11. Design QA Checklist
+## 11. 设计 QA 检查表
 
 - 有没有把主色重新拉回更深更硬的旧墨绿，而不是当前青绿色。
 - 有没有把正收益重新画成红色，导致与风险语义冲突。

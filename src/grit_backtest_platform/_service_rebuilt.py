@@ -8,6 +8,8 @@ import multiprocessing as mp
 import os
 import queue
 import shutil
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -56,6 +58,165 @@ OPTIMIZATION_IGNORED_KEYS = {
     "rebalance_frequency",
 }
 
+OPTIMIZATION_CONSTRAINT_PRESET_LABELS: dict[str, str] = {
+    "balanced": "平衡型",
+    "defensive": "稳健型",
+    "offensive": "进攻型",
+}
+
+OPTIMIZATION_CONSTRAINT_PRESET_DEFAULTS: dict[str, tuple[dict[str, Any], ...]] = {
+    "balanced": (
+        {
+            "key": "max_drawdown_pct",
+            "label": "最大回撤",
+            "category": "risk",
+            "operator": "<=",
+            "value": 25.0,
+            "unit": "%",
+        },
+        {
+            "key": "out_of_sample_sharpe",
+            "label": "样本外夏普",
+            "category": "stability",
+            "operator": ">=",
+            "value": 0.8,
+            "unit": "",
+        },
+        {
+            "key": "annualized_return",
+            "label": "年化收益率",
+            "category": "return",
+            "operator": ">=",
+            "value": 8.0,
+            "unit": "%",
+        },
+        {
+            "key": "stability",
+            "label": "稳定度",
+            "category": "stability",
+            "operator": ">=",
+            "value": 70.0,
+            "unit": "pts",
+        },
+        {
+            "key": "turnover",
+            "label": "换手率",
+            "category": "risk",
+            "operator": "<=",
+            "value": 12.0,
+            "unit": "%",
+        },
+        {
+            "key": "return_sharpe",
+            "label": "收益夏普",
+            "category": "return",
+            "operator": ">=",
+            "value": 1.0,
+            "unit": "",
+        },
+    ),
+    "defensive": (
+        {
+            "key": "max_drawdown_pct",
+            "label": "最大回撤",
+            "category": "risk",
+            "operator": "<=",
+            "value": 20.0,
+            "unit": "%",
+        },
+        {
+            "key": "out_of_sample_sharpe",
+            "label": "样本外夏普",
+            "category": "stability",
+            "operator": ">=",
+            "value": 0.92,
+            "unit": "",
+        },
+        {
+            "key": "annualized_return",
+            "label": "年化收益率",
+            "category": "return",
+            "operator": ">=",
+            "value": 6.0,
+            "unit": "%",
+        },
+        {
+            "key": "stability",
+            "label": "稳定度",
+            "category": "stability",
+            "operator": ">=",
+            "value": 78.0,
+            "unit": "pts",
+        },
+        {
+            "key": "turnover",
+            "label": "换手率",
+            "category": "risk",
+            "operator": "<=",
+            "value": 10.0,
+            "unit": "%",
+        },
+        {
+            "key": "return_sharpe",
+            "label": "收益夏普",
+            "category": "return",
+            "operator": ">=",
+            "value": 0.9,
+            "unit": "",
+        },
+    ),
+    "offensive": (
+        {
+            "key": "max_drawdown_pct",
+            "label": "最大回撤",
+            "category": "risk",
+            "operator": "<=",
+            "value": 30.0,
+            "unit": "%",
+        },
+        {
+            "key": "out_of_sample_sharpe",
+            "label": "样本外夏普",
+            "category": "stability",
+            "operator": ">=",
+            "value": 0.65,
+            "unit": "",
+        },
+        {
+            "key": "annualized_return",
+            "label": "年化收益率",
+            "category": "return",
+            "operator": ">=",
+            "value": 12.0,
+            "unit": "%",
+        },
+        {
+            "key": "stability",
+            "label": "稳定度",
+            "category": "stability",
+            "operator": ">=",
+            "value": 60.0,
+            "unit": "pts",
+        },
+        {
+            "key": "turnover",
+            "label": "换手率",
+            "category": "risk",
+            "operator": "<=",
+            "value": 16.0,
+            "unit": "%",
+        },
+        {
+            "key": "return_sharpe",
+            "label": "收益夏普",
+            "category": "return",
+            "operator": ">=",
+            "value": 1.15,
+            "unit": "",
+        },
+    ),
+}
+
 LEGACY_MOCK_OPTIMIZATION_LABELS = (
     "Top candidate",
     "Optimization ready",
@@ -74,6 +235,14 @@ LEGACY_MOCK_OPTIMIZATION_LABELS_ZH = (
     "收益增益版",
     "边界试验版",
 )
+OPTIMIZATION_PREPARED_CONTEXT_KEY = "__optimization_prepared_context"
+OPTIMIZATION_RUNNER_CLAIM_PREFIX = "optimization_runner_claim:"
+OPTIMIZATION_RUNNER_LEASE_SECONDS = 300.0
+OPTIMIZATION_ETA_RECENT_COMPLETIONS_WINDOW = 8
+
+
+class _OptimizationRunnerClaimLost(RuntimeError):
+    pass
 
 
 def _as_mapping(value: Any) -> dict[str, Any]:
@@ -94,6 +263,7 @@ def _build_optimization_window_metrics_payload(points: Sequence[Mapping[str, Any
         return {
             "total_return": 0.0,
             "annualized_return": 0.0,
+            "annualized_volatility": 0.0,
             "sharpe": 0.0,
             "max_drawdown_pct": 0.0,
             "stability": 0.0,
@@ -116,6 +286,7 @@ def _build_optimization_window_metrics_payload(points: Sequence[Mapping[str, Any
     else:
         sharpe = 0.0
     annualized_return = total_growth ** (252.0 / len(returns)) - 1.0 if returns else 0.0
+    annualized_volatility = daily_volatility * math.sqrt(252.0)
     max_drawdown_pct = min(float(row.get("drawdown") or 0.0) for row in rows)
     consistency_score = build_consistency_score(rows).get("score")
     try:
@@ -125,6 +296,7 @@ def _build_optimization_window_metrics_payload(points: Sequence[Mapping[str, Any
     return {
         "total_return": total_return,
         "annualized_return": annualized_return,
+        "annualized_volatility": annualized_volatility,
         "sharpe": sharpe,
         "max_drawdown_pct": max_drawdown_pct,
         "stability": stability,
@@ -149,10 +321,18 @@ def _build_real_optimization_metrics_payload(
         preview_metrics.get("annualized_return"),
         _as_float(preview_metrics.get("cagr"), full_window["annualized_return"]),
     )
+    annualized_volatility = _as_float(
+        preview_metrics.get("annualized_volatility"),
+        full_window["annualized_volatility"],
+    )
     sharpe = _as_float(preview_metrics.get("sharpe"), full_window["sharpe"])
     out_of_sample_sharpe = _as_float(
         preview_metrics.get("oos_sharpe"),
         oos_window["sharpe"] if out_of_sample else sharpe,
+    )
+    oos_cagr = _as_float(
+        preview_metrics.get("oos_cagr"),
+        oos_window["annualized_return"] if out_of_sample else annualized_return,
     )
     max_drawdown = _as_float(preview_metrics.get("max_drawdown"), full_window["max_drawdown_pct"] / 100.0)
     max_drawdown_pct = round(max_drawdown * 100.0, 1)
@@ -164,8 +344,10 @@ def _build_real_optimization_metrics_payload(
         "total_return_pct": round(total_return * 100.0, 1),
         "cagr": _as_float(preview_metrics.get("cagr"), annualized_return),
         "annualized_return": annualized_return,
+        "annualized_volatility": annualized_volatility,
         "sharpe": sharpe,
         "return_sharpe": sharpe,
+        "oos_cagr": oos_cagr,
         "oos_sharpe": out_of_sample_sharpe,
         "out_of_sample_sharpe": out_of_sample_sharpe,
         "max_drawdown": max_drawdown,
@@ -202,6 +384,15 @@ def _score_optimization_metrics_payload(metrics: Mapping[str, Any], objective: A
             - drawdown_penalty / 200.0
         )
     return round(score, 3)
+
+
+def _optimization_metrics_need_repair(metrics: Mapping[str, Any] | None) -> bool:
+    payload = dict(metrics or {})
+    if not payload:
+        return True
+    has_annualized_return = any(key in payload for key in ("annualized_return", "cagr"))
+    has_drawdown = any(key in payload for key in ("max_drawdown_pct", "max_drawdown"))
+    return not has_annualized_return or not has_drawdown
 
 
 def _build_synthetic_optimization_preview_and_chart_series(
@@ -388,6 +579,46 @@ def _stringify_tag_value(value: Any) -> str:
     if isinstance(value, float):
         return str(int(value)) if value.is_integer() else str(value)
     return str(value).strip()
+
+
+def _normalize_optimization_constraints_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    preset_key = str(payload.get("constraint_preset_key") or "balanced").strip().lower()
+    if preset_key not in OPTIMIZATION_CONSTRAINT_PRESET_LABELS:
+        preset_key = "balanced"
+    constraint_label = str(payload.get("constraint_label") or "").strip() or OPTIMIZATION_CONSTRAINT_PRESET_LABELS[preset_key]
+
+    provided_constraints = payload.get("constraints")
+    normalized_constraints: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    if isinstance(provided_constraints, list):
+        for raw_entry in provided_constraints:
+            try:
+                entry = dict(raw_entry or {})
+            except Exception:
+                continue
+            key = str(entry.get("key") or "").strip()
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            normalized_constraints.append(
+                {
+                    "key": key,
+                    "label": str(entry.get("label") or key).strip() or key,
+                    "category": str(entry.get("category") or "general").strip() or "general",
+                    "operator": str(entry.get("operator") or "<=").strip() or "<=",
+                    "value": entry.get("value"),
+                    "unit": str(entry.get("unit") or "").strip(),
+                }
+            )
+
+    if not normalized_constraints:
+        normalized_constraints = [dict(item) for item in OPTIMIZATION_CONSTRAINT_PRESET_DEFAULTS[preset_key]]
+
+    return {
+        "constraint_preset_key": preset_key,
+        "constraint_label": constraint_label,
+        "constraints": normalized_constraints,
+    }
 
 
 def _manual_conflict_changed(before: Mapping[str, Any] | None, after: Mapping[str, Any] | None) -> bool:
@@ -755,6 +986,9 @@ class BacktestPlatformService:
         self.storage = SQLiteStorage(database_path)
         self._optimization_runner_lock = threading.Lock()
         self._optimization_runner_job_ids: set[str] = set()
+        self._optimization_runner_owner_id = str(
+            os.getenv("GRIT_OPTIMIZATION_RUNNER_OWNER_ID") or f"{os.getpid()}:{uuid4().hex[:12]}"
+        )
         self._normalize_existing_backtest_runs_to_temporary_once()
 
     def _new_id(self, prefix: str) -> str:
@@ -1196,6 +1430,312 @@ class BacktestPlatformService:
             },
         )
 
+    def _optimization_runner_claim_key(self, job_id: str) -> str:
+        return f"{OPTIMIZATION_RUNNER_CLAIM_PREFIX}{job_id}"
+
+    def _optimization_runner_claim_payload(self, job_id: str, *, heartbeat_at: str | None = None) -> dict[str, Any]:
+        return {
+            "job_id": job_id,
+            "owner_id": self._optimization_runner_owner_id,
+            "pid": os.getpid(),
+            "heartbeat_at": heartbeat_at or self._optimization_timestamp_now(),
+        }
+
+    def _optimization_runner_process_is_active(self, pid: Any) -> bool:
+        process_id = _as_int(pid, 0)
+        if process_id <= 0:
+            return False
+        if process_id == os.getpid():
+            return True
+        try:
+            os.kill(process_id, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+
+    def _optimization_runner_claim_is_stale(self, heartbeat_at: Any, *, pid: Any = None) -> bool:
+        if pid is not None and not self._optimization_runner_process_is_active(pid):
+            return True
+        heartbeat_text = str(heartbeat_at or "").strip()
+        if not heartbeat_text:
+            return True
+        try:
+            heartbeat_value = datetime.fromisoformat(heartbeat_text.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        return (utc_now() - heartbeat_value).total_seconds() >= OPTIMIZATION_RUNNER_LEASE_SECONDS
+
+    def _try_acquire_optimization_runner_claim(self, job_id: str) -> bool:
+        claim_key = self._optimization_runner_claim_key(job_id)
+        heartbeat_at = self._optimization_timestamp_now()
+        claim_payload = self._optimization_runner_claim_payload(job_id, heartbeat_at=heartbeat_at)
+        with self.storage.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT state_json, updated_at FROM app_runtime_state WHERE state_key = ?",
+                (claim_key,),
+            ).fetchone()
+            existing_state = loads(row.get("state_json"), {}) if row else {}
+            existing_owner_id = str(existing_state.get("owner_id") or "").strip()
+            existing_heartbeat_at = existing_state.get("heartbeat_at") or (row.get("updated_at") if row else None)
+            if (
+                existing_owner_id
+                and existing_owner_id != self._optimization_runner_owner_id
+                and not self._optimization_runner_claim_is_stale(
+                    existing_heartbeat_at,
+                    pid=existing_state.get("pid"),
+                )
+            ):
+                return False
+            conn.execute(
+                """
+                INSERT INTO app_runtime_state (state_key, state_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(state_key) DO UPDATE SET
+                    state_json = excluded.state_json,
+                    updated_at = excluded.updated_at
+                """,
+                (claim_key, dumps(claim_payload), heartbeat_at),
+            )
+        return True
+
+    def _refresh_optimization_runner_claim(self, job_id: str) -> bool:
+        claim_key = self._optimization_runner_claim_key(job_id)
+        heartbeat_at = self._optimization_timestamp_now()
+        with self.storage.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT state_json FROM app_runtime_state WHERE state_key = ?",
+                (claim_key,),
+            ).fetchone()
+            if not row:
+                return False
+            claim_state = loads(row.get("state_json"), {})
+            if str(claim_state.get("owner_id") or "").strip() != self._optimization_runner_owner_id:
+                return False
+            claim_payload = {
+                **claim_state,
+                "job_id": job_id,
+                "owner_id": self._optimization_runner_owner_id,
+                "pid": os.getpid(),
+                "heartbeat_at": heartbeat_at,
+            }
+            conn.execute(
+                "UPDATE app_runtime_state SET state_json = ?, updated_at = ? WHERE state_key = ?",
+                (dumps(claim_payload), heartbeat_at, claim_key),
+            )
+        return True
+
+    def _release_optimization_runner_claim(self, job_id: str) -> None:
+        claim_key = self._optimization_runner_claim_key(job_id)
+        with self.storage.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT state_json FROM app_runtime_state WHERE state_key = ?",
+                (claim_key,),
+            ).fetchone()
+            if not row:
+                return
+            claim_state = loads(row.get("state_json"), {})
+            if str(claim_state.get("owner_id") or "").strip() != self._optimization_runner_owner_id:
+                return
+            conn.execute("DELETE FROM app_runtime_state WHERE state_key = ?", (claim_key,))
+
+    def _clear_optimization_runner_claim(self, job_id: str) -> None:
+        claim_key = self._optimization_runner_claim_key(job_id)
+        with self.storage.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM app_runtime_state WHERE state_key = ?", (claim_key,))
+
+    def _adopt_optimization_runner_claim(self, job_id: str, pid: int) -> bool:
+        claim_key = self._optimization_runner_claim_key(job_id)
+        heartbeat_at = self._optimization_timestamp_now()
+        with self.storage.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT state_json FROM app_runtime_state WHERE state_key = ?",
+                (claim_key,),
+            ).fetchone()
+            if not row:
+                return False
+            claim_state = loads(row.get("state_json"), {})
+            if str(claim_state.get("owner_id") or "").strip() != self._optimization_runner_owner_id:
+                return False
+            claim_payload = {
+                **claim_state,
+                "job_id": job_id,
+                "owner_id": self._optimization_runner_owner_id,
+                "pid": int(pid),
+                "heartbeat_at": heartbeat_at,
+            }
+            conn.execute(
+                "UPDATE app_runtime_state SET state_json = ?, updated_at = ? WHERE state_key = ?",
+                (dumps(claim_payload), heartbeat_at, claim_key),
+            )
+        return True
+
+    def _optimization_runner_mode(self) -> str:
+        configured = str(os.getenv("GRIT_OPTIMIZATION_RUNNER_MODE") or "").strip().lower()
+        if configured in {"thread", "subprocess"}:
+            return configured
+        if os.getenv("PYTEST_CURRENT_TEST"):
+            return "thread"
+        return "subprocess"
+
+    def _optimization_worker_project_root(self) -> Path:
+        return Path(__file__).resolve().parents[2]
+
+    def _optimization_worker_src_root(self) -> Path:
+        return Path(__file__).resolve().parents[1]
+
+    def _build_optimization_runner_subprocess_command(self, job_id: str) -> tuple[list[str], dict[str, str], Path]:
+        project_root = self._optimization_worker_project_root()
+        src_root = self._optimization_worker_src_root()
+        env = os.environ.copy()
+        existing_pythonpath = str(env.get("PYTHONPATH") or "").strip()
+        env["PYTHONPATH"] = (
+            f"{src_root}{os.pathsep}{existing_pythonpath}" if existing_pythonpath else str(src_root)
+        )
+        env["GRIT_BACKTEST_DB"] = str(self.storage.path)
+        env["GRIT_OPTIMIZATION_RUNNER_OWNER_ID"] = self._optimization_runner_owner_id
+        command = [
+            sys.executable,
+            "-m",
+            "grit_backtest_platform.main",
+            "run-optimization",
+            "--db-path",
+            str(self.storage.path),
+            "--job-id",
+            job_id,
+        ]
+        return command, env, project_root
+
+    def run_optimization_job_worker(self, job_id: str) -> bool:
+        row = self.storage.fetch_one(
+            "SELECT * FROM optimization_jobs WHERE id = ? AND deleted_at IS NULL",
+            (job_id,),
+        )
+        if not row:
+            raise KeyError(f"Optimization job not found: {job_id}")
+        strategy_id = str(row.get("strategy_id") or "").strip()
+        if not strategy_id:
+            raise ValueError("Optimization job is missing strategy_id")
+        payload = loads(row.get("request_json"), {})
+        existing_candidates = list(loads(row.get("candidates_json"), []))
+        created_at = str(row.get("created_at") or iso_now())
+        if not self._try_acquire_optimization_runner_claim(job_id):
+            return False
+        try:
+            self._run_real_optimization_job(
+                job_id,
+                strategy_id,
+                payload,
+                created_at=created_at,
+                existing_candidates=existing_candidates,
+                recovered=True,
+            )
+        finally:
+            self._release_optimization_runner_claim(job_id)
+        return True
+
+    def _optimization_trial_progress_snapshot(self, job_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one(
+            """
+            SELECT
+                COUNT(*) AS persisted_trial_count,
+                MAX(trial_index) AS max_trial_index,
+                MAX(completed_at) AS latest_completed_at
+            FROM optimization_job_trials
+            WHERE job_id = ?
+            """,
+            (job_id,),
+        )
+        if not row:
+            return {
+                "persisted_trial_count": 0,
+                "next_trial_index": 1,
+                "completed_combinations": 0,
+                "latest_completed_at": None,
+            }
+        persisted_trial_count = _as_int(row.get("persisted_trial_count"), 0)
+        max_trial_index = _as_int(row.get("max_trial_index"), 0)
+        next_trial_index = max(1, max_trial_index + 1)
+        latest_completed_at = str(row.get("latest_completed_at") or "").strip() or None
+        return {
+            "persisted_trial_count": persisted_trial_count,
+            "next_trial_index": next_trial_index,
+            "completed_combinations": persisted_trial_count,
+            "latest_completed_at": latest_completed_at,
+        }
+
+    def _optimization_trial_best_summary_snapshot(self, job_id: str) -> dict[str, Any] | None:
+        row = self.storage.fetch_one(
+            """
+            SELECT
+                trial_index,
+                status,
+                parameter_snapshot_json,
+                metrics_json,
+                score,
+                return_sharpe,
+                oos_sharpe,
+                total_return_pct,
+                stability,
+                error_message,
+                started_at,
+                completed_at
+            FROM optimization_job_trials
+            WHERE job_id = ?
+              AND UPPER(status) = 'SUCCEEDED'
+            ORDER BY
+                score DESC,
+                return_sharpe DESC,
+                oos_sharpe DESC,
+                total_return_pct DESC,
+                trial_index ASC
+            LIMIT 1
+            """,
+            (job_id,),
+        )
+        if not row:
+            return None
+        metrics = dict(loads(row.get("metrics_json"), {}) or {})
+        return_sharpe = _as_float(
+            row.get("return_sharpe"),
+            _as_float(metrics.get("return_sharpe"), _as_float(metrics.get("sharpe"), 0.0)),
+        )
+        oos_sharpe = _as_float(
+            row.get("oos_sharpe"),
+            _as_float(metrics.get("out_of_sample_sharpe"), _as_float(metrics.get("oos_sharpe"), 0.0)),
+        )
+        total_return_pct = _as_float(
+            row.get("total_return_pct"),
+            _as_float(metrics.get("total_return_pct"), _as_float(metrics.get("total_return"), 0.0) * 100.0),
+        )
+        stability = _as_float(row.get("stability"), _as_float(metrics.get("stability"), 0.0))
+        metrics["return_sharpe"] = return_sharpe
+        metrics.setdefault("sharpe", return_sharpe)
+        metrics["out_of_sample_sharpe"] = oos_sharpe
+        metrics["oos_sharpe"] = oos_sharpe
+        metrics["total_return_pct"] = total_return_pct
+        metrics["stability"] = stability
+        return self._normalized_optimization_trial_summary(
+            {
+                "trial_index": _as_int(row.get("trial_index"), 0),
+                "status": str(row.get("status") or "SUCCEEDED").upper(),
+                "parameter_snapshot": loads(row.get("parameter_snapshot_json"), {}),
+                "metrics": metrics,
+                "score": _as_float(row.get("score"), 0.0),
+                "error_message": row.get("error_message"),
+                "started_at": row.get("started_at"),
+                "completed_at": row.get("completed_at"),
+            }
+        )
+
     def _normalize_existing_backtest_runs_to_temporary_once(self) -> int:
         migration_key = "backtest_runs_force_temporary_once_v1"
         migration_state = self._read_runtime_state(migration_key)
@@ -1322,7 +1862,7 @@ class BacktestPlatformService:
 
     def _normalize_backtest_run_detail_view(self, view: str | None) -> str:
         normalized = str(view or "full").strip().lower()
-        if normalized in {"full", "initial", "context", "trades"}:
+        if normalized in {"full", "initial", "context", "trades", "metrics"}:
             return normalized
         return "full"
 
@@ -1355,6 +1895,10 @@ class BacktestPlatformService:
         elif normalized_view == "trades":
             columns = [
                 "trades_json",
+            ]
+        elif normalized_view == "metrics":
+            columns = [
+                "metrics_json",
             ]
         else:
             columns = [
@@ -1424,22 +1968,6 @@ class BacktestPlatformService:
             "oos_start_date",
             "coverage_ratio",
             "coverage_days",
-            "warnings_json",
-            "request_json",
-            "preview_json",
-            "metrics_json",
-            "parameter_snapshot_json",
-            "environment_summary_json",
-            "relative_metrics_json",
-            "consistency_score_json",
-            "risk_metrics_json",
-            "drawdown_events_json",
-            "rolling_metrics_json",
-            "monthly_returns_json",
-            "chart_series_json",
-            "trades_json",
-            "artifact_paths_json",
-            "trade_audit_items_json",
             "trades_count",
             "error_message",
             "deleted_at",
@@ -2715,6 +3243,7 @@ class BacktestPlatformService:
         validation_mode: str,
         chart_series: list[dict[str, Any]],
         evaluated_trials: list[Mapping[str, Any]],
+        heatmap_trials: Sequence[Mapping[str, Any]] | None = None,
         status_label: str,
     ) -> dict[str, Any]:
         annualized_return = _as_float(metrics.get("annualized_return"), _as_float(metrics.get("cagr"), 0.0))
@@ -2815,7 +3344,7 @@ class BacktestPlatformService:
                 "heatmap": self._build_optimization_heatmap_from_trials(
                     search_space,
                     parameter_snapshot,
-                    evaluated_trials,
+                    [dict(trial) for trial in list(heatmap_trials or evaluated_trials)],
                     metrics,
                 ),
             }
@@ -2838,15 +3367,315 @@ class BacktestPlatformService:
             "score": self._score_optimization_metrics(metrics, payload.get("objective")),
         }
 
+    def _optimization_metric_from_trial(
+        self,
+        trial: Mapping[str, Any],
+        key: str,
+        *fallback_keys: str,
+    ) -> float:
+        metrics = _as_mapping(trial.get("metrics"))
+        value = metrics.get(key)
+        if value is None:
+            value = trial.get(key)
+        if value is None:
+            for fallback_key in fallback_keys:
+                fallback_value = metrics.get(fallback_key)
+                if fallback_value is None:
+                    fallback_value = trial.get(fallback_key)
+                if fallback_value is not None:
+                    value = fallback_value
+                    break
+        return _as_float(value, 0.0)
+
+    def _optimization_trial_rank_key(self, trial: Mapping[str, Any]) -> tuple[float, float, float, float]:
+        return (
+            _as_float(trial.get("score"), 0.0),
+            self._optimization_metric_from_trial(trial, "return_sharpe", "sharpe"),
+            self._optimization_metric_from_trial(trial, "out_of_sample_sharpe", "oos_sharpe"),
+            self._optimization_metric_from_trial(trial, "total_return_pct"),
+        )
+
+    def _update_optimization_trial_metrics(
+        self,
+        job_id: str,
+        trial_index: int,
+        metrics: Mapping[str, Any],
+    ) -> None:
+        metrics_payload = dict(metrics or {})
+        return_sharpe = _as_float(
+            metrics_payload.get("return_sharpe"),
+            _as_float(metrics_payload.get("sharpe"), 0.0),
+        )
+        oos_sharpe = _as_float(
+            metrics_payload.get("out_of_sample_sharpe"),
+            _as_float(metrics_payload.get("oos_sharpe"), 0.0),
+        )
+        total_return_pct = _as_float(
+            metrics_payload.get("total_return_pct"),
+            _as_float(metrics_payload.get("total_return"), 0.0) * 100.0,
+        )
+        stability = _as_float(metrics_payload.get("stability"), 0.0)
+        self.storage.execute(
+            """
+            UPDATE optimization_job_trials
+            SET metrics_json = ?, return_sharpe = ?, oos_sharpe = ?, total_return_pct = ?, stability = ?
+            WHERE job_id = ? AND trial_index = ?
+            """,
+            (
+                dumps(metrics_payload),
+                return_sharpe,
+                oos_sharpe,
+                total_return_pct,
+                stability,
+                job_id,
+                int(trial_index),
+            ),
+        )
+
+    def _repair_optimization_trial_metrics(
+        self,
+        job_id: str,
+        trial_index: int,
+        metrics: Mapping[str, Any],
+        *,
+        chart_series: Sequence[Mapping[str, Any]] | None = None,
+        persist: bool = False,
+    ) -> dict[str, Any]:
+        current_metrics = dict(metrics or {})
+        if not _optimization_metrics_need_repair(current_metrics):
+            return current_metrics
+        normalized_chart_series = [dict(item) for item in list(chart_series or []) if item]
+        if not normalized_chart_series:
+            return current_metrics
+        repaired_metrics = _build_real_optimization_metrics_payload(
+            {"metrics": current_metrics},
+            normalized_chart_series,
+        )
+        if persist and repaired_metrics != current_metrics:
+            self._update_optimization_trial_metrics(job_id, trial_index, repaired_metrics)
+        return repaired_metrics
+
+    def _normalize_optimization_heatmap_axis_value(self, value: Any) -> Any:
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, float):
+            return round(value, 4)
+        return value
+
+    def _optimization_runtime_state(
+        self,
+        search_space: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        range_entries = [
+            dict(entry)
+            for entry in list(search_space or [])
+            if str(_as_mapping(entry).get("mode") or "").strip().lower() == "range"
+        ]
+        x_entry = range_entries[0] if range_entries else (_as_mapping(search_space[0]) if search_space else {})
+        y_entry = range_entries[1] if len(range_entries) > 1 else {}
+        x_key = str(_as_mapping(x_entry).get("key") or "").strip() or None
+        y_key = str(_as_mapping(y_entry).get("key") or "").strip() or x_key
+        return {
+            "candidate_limit": self._optimization_candidate_limit(),
+            "top_trials": [],
+            "x_key": x_key,
+            "y_key": y_key,
+            "cell_winners": {},
+            "x_values": set(),
+            "y_values": set(),
+        }
+
+    def _optimization_runtime_observe_trial(
+        self,
+        runtime_state: dict[str, Any],
+        trial: Mapping[str, Any],
+    ) -> None:
+        if str(trial.get("status") or "").upper() != "SUCCEEDED":
+            return
+
+        top_trials = list(runtime_state.get("top_trials") or [])
+        candidate_limit = _as_int(runtime_state.get("candidate_limit"), self._optimization_candidate_limit())
+        trial_copy = dict(trial)
+        trial_index = _as_int(trial_copy.get("trial_index"), 0)
+        if trial_index > 0:
+            top_trials = [
+                item
+                for item in top_trials
+                if _as_int(_as_mapping(item).get("trial_index"), 0) != trial_index
+            ]
+        top_trials.append(trial_copy)
+        top_trials.sort(key=self._optimization_trial_rank_key, reverse=True)
+        runtime_state["top_trials"] = top_trials[: max(1, candidate_limit)]
+
+        x_key = str(runtime_state.get("x_key") or "").strip()
+        y_key = str(runtime_state.get("y_key") or "").strip() or x_key
+        if not x_key or not y_key:
+            return
+        parameter_snapshot = dict(trial_copy.get("parameter_snapshot") or {})
+        x_value = self._normalize_optimization_heatmap_axis_value(parameter_snapshot.get(x_key))
+        y_value = self._normalize_optimization_heatmap_axis_value(parameter_snapshot.get(y_key))
+        if x_value is None or y_value is None:
+            return
+        x_values = runtime_state.setdefault("x_values", set())
+        y_values = runtime_state.setdefault("y_values", set())
+        cell_winners = runtime_state.setdefault("cell_winners", {})
+        if not isinstance(x_values, set):
+            x_values = set(list(x_values or []))
+            runtime_state["x_values"] = x_values
+        if not isinstance(y_values, set):
+            y_values = set(list(y_values or []))
+            runtime_state["y_values"] = y_values
+        if not isinstance(cell_winners, dict):
+            cell_winners = dict(cell_winners or {})
+            runtime_state["cell_winners"] = cell_winners
+        x_values.add(x_value)
+        y_values.add(y_value)
+        rank_key = self._optimization_trial_rank_key(trial_copy)
+        cell_key = (x_value, y_value)
+        existing = _as_mapping(cell_winners.get(cell_key))
+        existing_rank = self._optimization_trial_rank_key(existing) if existing else None
+        if existing is None or existing_rank is None or rank_key > existing_rank:
+            cell_winners[cell_key] = {
+                "x": x_value,
+                "y": y_value,
+                "score": _as_float(trial_copy.get("score"), 0.0),
+                "metrics": dict(trial_copy.get("metrics") or {}),
+                "status": "SUCCEEDED",
+            }
+
+    def _optimization_runtime_seed(
+        self,
+        runtime_state: dict[str, Any],
+        trials: Sequence[Mapping[str, Any]],
+    ) -> None:
+        for trial in list(trials or []):
+            self._optimization_runtime_observe_trial(runtime_state, trial)
+
+    def _optimization_runtime_top_trials(
+        self,
+        runtime_state: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        return [dict(item) for item in list(runtime_state.get("top_trials") or [])]
+
+    def _optimization_runtime_best_summary(
+        self,
+        runtime_state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        top_trials = self._optimization_runtime_top_trials(runtime_state)
+        if not top_trials:
+            return None
+        return self._optimization_trial_summary(top_trials[0])
+
+    def _optimization_runtime_heatmap_summary(
+        self,
+        runtime_state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        x_key = str(runtime_state.get("x_key") or "").strip()
+        y_key = str(runtime_state.get("y_key") or "").strip()
+        if not x_key or not y_key:
+            return None
+        x_values = list(runtime_state.get("x_values") or [])
+        y_values = list(runtime_state.get("y_values") or [])
+        cell_winners = runtime_state.get("cell_winners") or {}
+        if not x_values or not y_values or not cell_winners:
+            return None
+        if all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in x_values):
+            x_values = sorted(x_values)
+        else:
+            x_values = sorted(x_values, key=lambda item: str(item))
+        if all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in y_values):
+            y_values = sorted(y_values)
+        else:
+            y_values = sorted(y_values, key=lambda item: str(item))
+        cells = [
+            {
+                "x": cell.get("x"),
+                "y": cell.get("y"),
+                "score": _as_float(cell.get("score"), 0.0),
+                "metrics": dict(cell.get("metrics") or {}),
+            }
+            for cell in list(cell_winners.values())
+        ]
+        if all(
+            isinstance(item.get("x"), (int, float)) and isinstance(item.get("y"), (int, float))
+            for item in cells
+        ):
+            cells.sort(key=lambda item: (_as_float(item.get("y"), 0.0), _as_float(item.get("x"), 0.0)))
+        else:
+            cells.sort(key=lambda item: (str(item.get("y")), str(item.get("x"))))
+        return {
+            "x_key": x_key,
+            "y_key": y_key,
+            "x_values": x_values,
+            "y_values": y_values,
+            "cells": cells,
+        }
+
+    def _optimization_heatmap_trials_from_summary(
+        self,
+        heatmap_summary: Mapping[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        summary = _as_mapping(heatmap_summary)
+        x_key = str(summary.get("x_key") or "").strip()
+        y_key = str(summary.get("y_key") or "").strip() or x_key
+        if not x_key or not y_key:
+            return []
+        trials: list[dict[str, Any]] = []
+        for index, cell in enumerate(list(summary.get("cells") or []), start=1):
+            cell_mapping = _as_mapping(cell)
+            parameter_snapshot = {
+                x_key: cell_mapping.get("x"),
+                y_key: cell_mapping.get("y"),
+            }
+            trials.append(
+                {
+                    "trial_index": index,
+                    "status": "SUCCEEDED",
+                    "parameter_snapshot": parameter_snapshot,
+                    "metrics": dict(cell_mapping.get("metrics") or {}),
+                    "score": _as_float(cell_mapping.get("score"), 0.0),
+                    "chart_series": [],
+                }
+            )
+        return trials
+
+    def _optimization_with_full_metrics(
+        self,
+        job_id: str,
+        trials: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        trial_indices = [
+            _as_int(trial.get("trial_index"), 0)
+            for trial in list(trials or [])
+            if _as_int(trial.get("trial_index"), 0) > 0
+        ]
+        if not trial_indices:
+            return [dict(trial) for trial in list(trials or [])]
+        full_trials = self._load_optimization_trials(
+            job_id,
+            include_chart_series=False,
+            trial_indices=trial_indices,
+            include_metrics_json=True,
+        )
+        full_trial_by_index = {
+            _as_int(trial.get("trial_index"), 0): dict(trial)
+            for trial in full_trials
+            if _as_int(trial.get("trial_index"), 0) > 0
+        }
+        merged_trials: list[dict[str, Any]] = []
+        for trial in list(trials or []):
+            trial_index = _as_int(trial.get("trial_index"), 0)
+            merged = dict(trial)
+            full_trial = full_trial_by_index.get(trial_index)
+            if full_trial is not None:
+                merged["metrics"] = dict(full_trial.get("metrics") or {})
+            merged_trials.append(merged)
+        return merged_trials
+
     def _rank_optimization_trials(self, trials: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return sorted(
             [dict(item) for item in trials],
-            key=lambda item: (
-                _as_float(item.get("score"), 0.0),
-                _as_float(item.get("metrics", {}).get("return_sharpe"), _as_float(item.get("metrics", {}).get("sharpe"), 0.0)),
-                _as_float(item.get("metrics", {}).get("out_of_sample_sharpe"), 0.0),
-                _as_float(item.get("metrics", {}).get("total_return_pct"), 0.0),
-            ),
+            key=self._optimization_trial_rank_key,
             reverse=True,
         )
 
@@ -2855,8 +3684,11 @@ class BacktestPlatformService:
         strategy: Mapping[str, Any],
         payload: Mapping[str, Any],
         trials: list[dict[str, Any]],
+        *,
+        heatmap_trials: Sequence[Mapping[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         ranked_trials = self._rank_optimization_trials(trials)
+        heatmap_source_trials = [dict(item) for item in list(heatmap_trials or ranked_trials)]
         search_space = list(payload.get("search_space") or [])
         validation_mode = str(payload.get("validation_mode") or "walk_forward")
         candidates: list[dict[str, Any]] = []
@@ -2876,6 +3708,7 @@ class BacktestPlatformService:
                 validation_mode=validation_mode,
                 chart_series=list(trial.get("chart_series") or []),
                 evaluated_trials=ranked_trials,
+                heatmap_trials=heatmap_source_trials,
                 status_label=status_label,
             )
             candidates.append(
@@ -2895,12 +3728,97 @@ class BacktestPlatformService:
             )
         return candidates
 
+    def _repair_optimization_job_candidates(
+        self,
+        *,
+        job: Mapping[str, Any],
+        strategy: Mapping[str, Any],
+        raw_candidates: Sequence[Mapping[str, Any]],
+        normalized_search_space: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None, bool]:
+        best_metrics_summary = _as_mapping(_as_mapping(job.get("summary")).get("best_metrics_summary"))
+        candidate_list = [dict(candidate) for candidate in list(raw_candidates or [])]
+        needs_repair = any(
+            _optimization_metrics_need_repair(_as_mapping(candidate).get("metrics"))
+            for candidate in candidate_list
+        )
+        if best_metrics_summary and _optimization_metrics_need_repair(best_metrics_summary.get("metrics")):
+            needs_repair = True
+        if not needs_repair:
+            return candidate_list, (best_metrics_summary or None), False
+
+        job_id = str(job.get("id") or "").strip()
+        if not job_id:
+            return candidate_list, (best_metrics_summary or None), False
+
+        trials = self._load_optimization_trials(
+            job_id,
+            include_chart_series=False,
+            include_metrics_json=True,
+        )
+        successful_trials = [
+            dict(trial)
+            for trial in trials
+            if str(trial.get("status") or "").upper() == "SUCCEEDED"
+        ]
+        if not successful_trials:
+            return candidate_list, (best_metrics_summary or None), False
+
+        chart_series_by_index = self._load_optimization_trial_chart_series_map(
+            job_id,
+            self._optimization_top_trial_indices(
+                successful_trials,
+                limit=max(1, min(len(candidate_list), self._optimization_candidate_limit())),
+            ),
+        )
+        repaired_trials: list[dict[str, Any]] = []
+        for trial in successful_trials:
+            trial_copy = dict(trial)
+            trial_index = _as_int(trial_copy.get("trial_index"), 0)
+            chart_series = list(chart_series_by_index.get(trial_index) or [])
+            if chart_series:
+                trial_copy["chart_series"] = chart_series
+                trial_copy["metrics"] = self._repair_optimization_trial_metrics(
+                    job_id,
+                    trial_index,
+                    trial_copy.get("metrics") or {},
+                    chart_series=chart_series,
+                    persist=True,
+                )
+            repaired_trials.append(trial_copy)
+
+        candidate_count = max(1, min(len(candidate_list), self._optimization_candidate_limit()))
+        ranked_trials = self._rank_optimization_trials(repaired_trials)
+        rebuilt_candidates = self._build_optimization_candidate_records(
+            strategy,
+            {
+                **dict(_as_mapping(job.get("request"))),
+                "search_space": list(normalized_search_space or []),
+                "base_parameter_version_id": job.get("base_parameter_version_id"),
+                "validation_mode": (
+                    _as_mapping(job.get("summary")).get("validation_mode")
+                    or _as_mapping(job.get("request")).get("validation_mode")
+                    or "walk_forward"
+                ),
+            },
+            ranked_trials[:candidate_count],
+            heatmap_trials=repaired_trials,
+        )
+        for existing_candidate, rebuilt_candidate in zip(candidate_list, rebuilt_candidates, strict=False):
+            existing_id = str(existing_candidate.get("id") or "").strip()
+            if existing_id:
+                rebuilt_candidate["id"] = existing_id
+
+        repaired_best_metrics_summary = self._best_optimization_trial_summary(repaired_trials)
+        return rebuilt_candidates, repaired_best_metrics_summary, True
+
     def _build_optimization_job_summary(
         self,
         payload: Mapping[str, Any],
         candidates: list[dict[str, Any]],
     ) -> dict[str, Any]:
         status = str(payload.get("status") or "COMPLETED").upper()
+        eta_active = status == "RUNNING"
         baseline_parameter_version_id = str(payload.get("base_parameter_version_id") or "").strip() or None
         budget_combinations = _as_int(payload.get("budget_combinations"), max(len(candidates) * 10, 24))
         completed_combinations = _as_int(
@@ -2993,7 +3911,26 @@ class BacktestPlatformService:
         job["summary"] = loads(job.pop("summary_json", None), {})
         job["result"] = loads(job.pop("result_json", None), {})
         raw_candidates = loads(job.pop("candidates_json", None), [])
+        constraint_payload = _normalize_optimization_constraints_payload(
+            {
+                "constraint_preset_key": job["request"].get("constraint_preset_key")
+                or job["summary"].get("constraint_preset_key")
+                or job["result"].get("constraint_preset_key"),
+                "constraint_label": job["request"].get("constraint_label")
+                or job["summary"].get("constraint_label")
+                or job["result"].get("constraint_label"),
+                "constraints": job["request"].get("constraints")
+                or job["summary"].get("constraints")
+                or job["result"].get("constraints"),
+            }
+        )
+        job["request"].update(constraint_payload)
+        job["summary"].update(constraint_payload)
+        job["result"].update(constraint_payload)
         job["base_parameter_version_id"] = job["request"].get("base_parameter_version_id")
+        raw_request = dict(job["request"])
+        raw_summary = dict(job["summary"])
+        raw_result = dict(job["result"])
         summary_status = str(
             job["summary"].get("status")
             or job.get("status")
@@ -3002,6 +3939,7 @@ class BacktestPlatformService:
             or "COMPLETED"
         ).upper()
         running_like = summary_status in {"QUEUED", "RUNNING", "INTERRUPTED"}
+        eta_active = summary_status == "RUNNING"
         progress_default = 100 if summary_status == "COMPLETED" else 0
         job["summary"]["status"] = summary_status
         job["summary"].setdefault(
@@ -3131,6 +4069,20 @@ class BacktestPlatformService:
         result = loads(row.get("result_json"), {})
         if not isinstance(result, dict):
             result = {}
+        constraint_payload = _normalize_optimization_constraints_payload(
+            {
+                "constraint_preset_key": request.get("constraint_preset_key")
+                or summary.get("constraint_preset_key")
+                or result.get("constraint_preset_key"),
+                "constraint_label": request.get("constraint_label")
+                or summary.get("constraint_label")
+                or result.get("constraint_label"),
+                "constraints": request.get("constraints") or summary.get("constraints") or result.get("constraints"),
+            }
+        )
+        request = {**request, **constraint_payload}
+        summary = {**summary, **constraint_payload}
+        result = {**result, **constraint_payload}
 
         status = str(
             row.get("status")
@@ -3140,6 +4092,7 @@ class BacktestPlatformService:
             or "COMPLETED"
         ).upper()
         running_like = status in {"QUEUED", "RUNNING", "INTERRUPTED"}
+        eta_active = status == "RUNNING"
         progress_default = 0 if running_like else 100
         budget_combinations = _as_int(summary.get("budget_combinations"), _as_int(request.get("budget_combinations"), 0))
         completed_combinations = _as_int(
@@ -3154,14 +4107,15 @@ class BacktestPlatformService:
             summary.get("next_trial_index"),
             _as_int(request.get("next_trial_index"), completed_combinations + 1),
         )
-        estimated_remaining_minutes = summary.get("estimated_remaining_minutes")
-        if estimated_remaining_minutes is None:
-            estimated_remaining_minutes = result.get("estimated_remaining_minutes")
-        if estimated_remaining_minutes is None and not running_like:
+        estimated_remaining_minutes = None
+        estimated_completed_at = None
+        if eta_active:
+            estimated_remaining_minutes = summary.get("estimated_remaining_minutes")
+            if estimated_remaining_minutes is None:
+                estimated_remaining_minutes = result.get("estimated_remaining_minutes")
+            estimated_completed_at = summary.get("estimated_completed_at") or result.get("estimated_completed_at")
+        elif not running_like:
             estimated_remaining_minutes = 0
-
-        estimated_completed_at = summary.get("estimated_completed_at") or result.get("estimated_completed_at")
-        if not estimated_completed_at and not running_like:
             estimated_completed_at = str(row.get("completed_at") or row.get("updated_at") or "").strip() or None
 
         best_metrics_summary_payload = _as_mapping(summary.get("best_metrics_summary"))
@@ -3243,6 +4197,9 @@ class BacktestPlatformService:
                 request.get("base_parameter_version_id") or summary.get("baseline_parameter_version_id") or ""
             ).strip()
             or None,
+            "constraint_preset_key": summary.get("constraint_preset_key") or request.get("constraint_preset_key"),
+            "constraint_label": summary.get("constraint_label") or request.get("constraint_label"),
+            "constraints": summary.get("constraints") or request.get("constraints"),
             "created_at": row.get("created_at"),
             "updated_at": row.get("updated_at"),
             "completed_at": row.get("completed_at"),
@@ -3265,6 +4222,9 @@ class BacktestPlatformService:
             "best_candidate_id": result.get("best_candidate_id"),
             "best_candidate_label": result.get("best_candidate_label"),
             "base_parameter_version_id": job.get("base_parameter_version_id"),
+            "constraint_preset_key": summary.get("constraint_preset_key") or request.get("constraint_preset_key"),
+            "constraint_label": summary.get("constraint_label") or request.get("constraint_label"),
+            "constraints": summary.get("constraints") or request.get("constraints"),
             "progress_pct": summary.get("progress_pct"),
             "current_stage": summary.get("current_stage"),
             "latest_update": summary.get("latest_update"),
@@ -3329,8 +4289,12 @@ class BacktestPlatformService:
             candidate["rank"] = candidate_rank
             candidate["label"] = self._canonical_optimization_candidate_label(candidate.get("label"), candidate_rank)
         persisted_payload = {
-            **dict(payload),
-            "base_parameter_version_id": baseline_parameter_version_id,
+            key: value
+            for key, value in {
+                **dict(payload),
+                "base_parameter_version_id": baseline_parameter_version_id,
+            }.items()
+            if not str(key).startswith("__optimization_")
         }
         if "latest_candidate_label" in persisted_payload:
             persisted_payload["latest_candidate_label"] = self._canonical_optimization_candidate_label(
@@ -3388,6 +4352,7 @@ class BacktestPlatformService:
     ) -> dict[str, Any]:
         progress_payload = {
             **dict(payload),
+            **_normalize_optimization_constraints_payload(payload),
             "status": status,
             "progress_pct": progress_pct,
             "completed_combinations": completed_combinations,
@@ -3413,6 +4378,7 @@ class BacktestPlatformService:
                 **dict(payload),
                 "search_space": self._normalize_optimization_search_space(strategy, payload),
             }
+            normalized_payload.update(_normalize_optimization_constraints_payload(normalized_payload))
             candidates = self._build_generated_optimization_candidates(strategy, normalized_payload)
             budget_combinations = _as_int(
                 normalized_payload.get("budget_combinations"),
@@ -4430,31 +5396,60 @@ class BacktestPlatformService:
         created_at: str,
         existing_candidates: list[dict[str, Any]] | None = None,
         recovered: bool = False,
+        claim_acquired: bool = False,
     ) -> bool:
+        runner_mode = self._optimization_runner_mode()
         with self._optimization_runner_lock:
             if job_id in self._optimization_runner_job_ids:
                 return False
             self._optimization_runner_job_ids.add(job_id)
+        if not claim_acquired and not self._try_acquire_optimization_runner_claim(job_id):
+            with self._optimization_runner_lock:
+                self._optimization_runner_job_ids.discard(job_id)
+            return False
 
-        def run() -> None:
-            try:
-                self._run_real_optimization_job(
-                    job_id,
-                    strategy_id,
-                    deepcopy(dict(payload)),
-                    created_at=created_at,
-                    existing_candidates=deepcopy(existing_candidates or []),
-                    recovered=recovered,
-                )
-            finally:
-                with self._optimization_runner_lock:
-                    self._optimization_runner_job_ids.discard(job_id)
+        try:
+            if runner_mode == "thread":
+                def run() -> None:
+                    try:
+                        self._run_real_optimization_job(
+                            job_id,
+                            strategy_id,
+                            deepcopy(dict(payload)),
+                            created_at=created_at,
+                            existing_candidates=deepcopy(existing_candidates or []),
+                            recovered=recovered,
+                        )
+                    finally:
+                        with self._optimization_runner_lock:
+                            self._optimization_runner_job_ids.discard(job_id)
+                        self._release_optimization_runner_claim(job_id)
 
-        threading.Thread(
-            target=run,
-            name=f"optimization-job-{job_id}",
-            daemon=True,
-        ).start()
+                threading.Thread(
+                    target=run,
+                    name=f"optimization-job-{job_id}",
+                    daemon=True,
+                ).start()
+                return True
+
+            command, env, cwd = self._build_optimization_runner_subprocess_command(job_id)
+            popen_kwargs: dict[str, Any] = {
+                "cwd": str(cwd),
+                "env": env,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            process = subprocess.Popen(command, **popen_kwargs)
+            self._adopt_optimization_runner_claim(job_id, int(process.pid))
+        except Exception:
+            with self._optimization_runner_lock:
+                self._optimization_runner_job_ids.discard(job_id)
+            self._release_optimization_runner_claim(job_id)
+            raise
+        with self._optimization_runner_lock:
+            self._optimization_runner_job_ids.discard(job_id)
         return True
 
     def create_optimization_job(self, strategy_id: str, request: Any | None = None) -> dict[str, Any]:
@@ -4482,6 +5477,7 @@ class BacktestPlatformService:
             "latest_update": "优化任务已创建，正在准备参数组合与评估快照。",
         }
         normalized_payload["search_space"] = self._normalize_optimization_search_space(strategy, normalized_payload)
+        normalized_payload.update(_normalize_optimization_constraints_payload(normalized_payload))
         self._persist_optimization_job(
             job_id,
             strategy_id,
@@ -4548,6 +5544,44 @@ class BacktestPlatformService:
             expected_base_parameter_version_id,
             blocking_target_id=str(job["strategy_id"]),
         )
+        source_run_id = str(
+            job["request"].get("source_run_id")
+            or strategy.get("latest_successful_run_id")
+            or ""
+        ).strip()
+        source_run: dict[str, Any] | None = None
+        if source_run_id:
+            try:
+                source_run = self.get_backtest_run_detail(source_run_id)
+            except KeyError:
+                source_run = None
+        if source_run is not None:
+            evaluation_request = self._build_optimization_evaluation_request(
+                strategy,
+                source_run=source_run,
+            )
+            evaluated_trial = self._evaluate_optimization_trial(
+                strategy,
+                evaluation_request,
+                {
+                    **dict(job["request"]),
+                    "base_parameter_version_id": expected_base_parameter_version_id,
+                },
+                parameter_snapshot,
+            )
+        else:
+            evaluated_trial = _evaluate_optimization_trial_payload(
+                parameter_snapshot,
+                job["request"].get("objective"),
+            )
+        candidate_metrics = dict(evaluated_trial.get("metrics") or {})
+        candidate_metrics.update(dict(payload.get("metrics") or {}))
+        candidate_score = payload.get("score")
+        if not isinstance(candidate_score, (int, float)) or isinstance(candidate_score, bool):
+            candidate_score = self._score_optimization_metrics(
+                candidate_metrics,
+                job["request"].get("objective"),
+            )
         candidates = [dict(candidate) for candidate in job.get("candidates", [])]
         new_candidate = self._normalize_optimization_candidate(
             strategy,
@@ -4557,9 +5591,9 @@ class BacktestPlatformService:
                 "summary": payload.get("summary"),
                 "status": "SUCCEEDED",
                 "rank": len(candidates) + 1,
-                "score": payload.get("score"),
+                "score": candidate_score,
                 "parameter_snapshot": parameter_snapshot,
-                "metrics": dict(payload.get("metrics") or {}),
+                "metrics": candidate_metrics,
                 "base_parameter_version_id": expected_base_parameter_version_id,
             },
             rank=len(candidates) + 1,
@@ -4732,8 +5766,10 @@ class BacktestPlatformService:
         *,
         include_chart_series: bool = True,
         trial_indices: Sequence[int] | None = None,
+        include_metrics_json: bool = True,
     ) -> list[dict[str, Any]]:
         chart_series_column = "chart_series_json" if include_chart_series else "NULL AS chart_series_json"
+        metrics_column = "metrics_json" if include_metrics_json else "NULL AS metrics_json"
         normalized_trial_indices = [
             int(index)
             for index in list(trial_indices or [])
@@ -4752,9 +5788,13 @@ class BacktestPlatformService:
                 trial_index,
                 status,
                 parameter_snapshot_json,
-                metrics_json,
+                {metrics_column},
                 {chart_series_column},
                 score,
+                return_sharpe,
+                oos_sharpe,
+                total_return_pct,
+                stability,
                 error_message,
                 started_at,
                 completed_at
@@ -4767,13 +5807,34 @@ class BacktestPlatformService:
         )
         trials: list[dict[str, Any]] = []
         for row in rows:
+            metrics_payload = loads(row.get("metrics_json"), {}) if include_metrics_json else {}
+            metrics = dict(metrics_payload or {})
+            return_sharpe = _as_float(
+                row.get("return_sharpe"),
+                _as_float(metrics.get("return_sharpe"), _as_float(metrics.get("sharpe"), 0.0)),
+            )
+            oos_sharpe = _as_float(
+                row.get("oos_sharpe"),
+                _as_float(metrics.get("out_of_sample_sharpe"), _as_float(metrics.get("oos_sharpe"), 0.0)),
+            )
+            total_return_pct = _as_float(
+                row.get("total_return_pct"),
+                _as_float(metrics.get("total_return_pct"), _as_float(metrics.get("total_return"), 0.0) * 100.0),
+            )
+            stability = _as_float(row.get("stability"), _as_float(metrics.get("stability"), 0.0))
+            metrics["return_sharpe"] = return_sharpe
+            metrics.setdefault("sharpe", return_sharpe)
+            metrics["out_of_sample_sharpe"] = oos_sharpe
+            metrics["oos_sharpe"] = oos_sharpe
+            metrics["total_return_pct"] = total_return_pct
+            metrics["stability"] = stability
             trials.append(
                 {
                     "job_id": str(row.get("job_id") or job_id),
                     "trial_index": _as_int(row.get("trial_index"), 0),
                     "status": str(row.get("status") or "PENDING").upper(),
                     "parameter_snapshot": loads(row.get("parameter_snapshot_json"), {}),
-                    "metrics": loads(row.get("metrics_json"), {}),
+                    "metrics": metrics,
                     "chart_series": loads(row.get("chart_series_json"), []) if include_chart_series else [],
                     "score": _as_float(row.get("score"), 0.0),
                     "error_message": row.get("error_message"),
@@ -4815,6 +5876,7 @@ class BacktestPlatformService:
             job_id,
             include_chart_series=True,
             trial_indices=normalized_indices,
+            include_metrics_json=False,
         )
         return {
             _as_int(trial.get("trial_index"), 0): list(trial.get("chart_series") or [])
@@ -4849,6 +5911,20 @@ class BacktestPlatformService:
         started_at: str | None,
         completed_at: str | None,
     ) -> None:
+        metrics_payload = dict(metrics or {})
+        return_sharpe = _as_float(
+            metrics_payload.get("return_sharpe"),
+            _as_float(metrics_payload.get("sharpe"), 0.0),
+        )
+        oos_sharpe = _as_float(
+            metrics_payload.get("out_of_sample_sharpe"),
+            _as_float(metrics_payload.get("oos_sharpe"), 0.0),
+        )
+        total_return_pct = _as_float(
+            metrics_payload.get("total_return_pct"),
+            _as_float(metrics_payload.get("total_return"), 0.0) * 100.0,
+        )
+        stability = _as_float(metrics_payload.get("stability"), 0.0)
         self.storage.insert_json_row(
             "optimization_job_trials",
             {
@@ -4856,9 +5932,13 @@ class BacktestPlatformService:
                 "trial_index": int(trial_index),
                 "status": str(status or "PENDING").upper(),
                 "parameter_snapshot_json": dumps(dict(parameter_snapshot or {})),
-                "metrics_json": dumps(dict(metrics or {})),
+                "metrics_json": dumps(metrics_payload),
                 "chart_series_json": dumps(list(chart_series or [])),
                 "score": None if score is None else float(score),
+                "return_sharpe": return_sharpe,
+                "oos_sharpe": oos_sharpe,
+                "total_return_pct": total_return_pct,
+                "stability": stability,
                 "error_message": error_message,
                 "started_at": started_at,
                 "completed_at": completed_at,
@@ -4920,8 +6000,8 @@ class BacktestPlatformService:
         pending_evaluations: Sequence[tuple[int, Mapping[str, Any]]],
     ) -> bool:
         del pending_evaluations
-        # Benchmarks show the current synthetic evaluator is faster in sequential mode.
-        # Keep multiprocessing disabled by default until a heavier evaluator path needs it.
+        # The real evaluator currently depends on in-process service state and snapshot context.
+        # Keep multiprocessing disabled until child workers can produce the same real metrics.
         return False
 
     def _optimization_trial_record(
@@ -4963,6 +6043,7 @@ class BacktestPlatformService:
         publish_progress: Any,
         delay_seconds: float = 0.0,
         prepared_context: Mapping[str, Any] | None = None,
+        runtime_state: dict[str, Any] | None = None,
     ) -> tuple[dict[int, dict[str, Any]], int]:
         failures = 0
         normalized_pending = [
@@ -5020,7 +6101,11 @@ class BacktestPlatformService:
                 completed_at=trial_completed_at,
             )
             completed_count = len(trial_records)
-            best_summary = self._best_optimization_trial_summary(list(trial_records.values()))
+            if runtime_state is not None:
+                self._optimization_runtime_observe_trial(runtime_state, trial_records[trial_index])
+                best_summary = self._optimization_runtime_best_summary(runtime_state)
+            else:
+                best_summary = self._best_optimization_trial_summary(list(trial_records.values()))
             remaining = normalized_pending[offset + 1 :]
             next_trial_index = remaining[0][0] if remaining else completed_count + 1
             publish_progress(
@@ -5047,6 +6132,7 @@ class BacktestPlatformService:
         trial_records: dict[int, dict[str, Any]],
         budget_combinations: int,
         publish_progress: Any,
+        runtime_state: dict[str, Any] | None = None,
     ) -> tuple[dict[int, dict[str, Any]], int, list[tuple[int, dict[str, Any]]], str | None]:
         normalized_pending: deque[tuple[int, dict[str, Any]]] = deque(
             (int(trial_index), dict(parameter_snapshot))
@@ -5290,7 +6376,11 @@ class BacktestPlatformService:
                             completed_at=trial_completed_at,
                         )
                         completed_count = len(trial_records)
-                        best_summary = self._best_optimization_trial_summary(list(trial_records.values()))
+                        if runtime_state is not None:
+                            self._optimization_runtime_observe_trial(runtime_state, trial_records[trial_index])
+                            best_summary = self._optimization_runtime_best_summary(runtime_state)
+                        else:
+                            best_summary = self._best_optimization_trial_summary(list(trial_records.values()))
                         next_indices = [trial[0] for trial in normalized_pending]
                         next_indices.extend(
                             _as_int(worker_state.get("current_task", {}).get("trial_index"), 0)
@@ -5390,8 +6480,7 @@ class BacktestPlatformService:
         budget_combinations: int,
         completed_combinations: int,
     ) -> dict[str, Any]:
-        completed_durations: list[float] = []
-        completed_spans: list[tuple[datetime, datetime]] = []
+        completed_records: list[tuple[datetime, datetime, float]] = []
         for trial in trials:
             started_at = trial.get("started_at")
             completed_at = trial.get("completed_at")
@@ -5404,35 +6493,36 @@ class BacktestPlatformService:
                 continue
             duration = (completed - started).total_seconds()
             if duration >= 0:
-                completed_spans.append((started, completed))
-            if duration > 0:
-                completed_durations.append(duration)
+                completed_records.append((started, completed, duration))
 
         remaining_trials = max(0, budget_combinations - completed_combinations)
-        avg_trial_seconds: float | None = None
-        includes_inter_trial_overhead = False
-        if completed_durations:
-            avg_trial_seconds = sum(completed_durations) / len(completed_durations)
-        if completed_spans and completed_combinations > 0:
-            first_started = min(started for started, _ in completed_spans)
-            last_completed = max(completed for _, completed in completed_spans)
-            wall_clock_span = max(0.0, (last_completed - first_started).total_seconds())
-            if wall_clock_span > 0:
-                wall_clock_avg = wall_clock_span / completed_combinations
-                total_duration = sum(completed_durations)
-                if avg_trial_seconds is None:
-                    avg_trial_seconds = wall_clock_avg
-                    includes_inter_trial_overhead = True
-                elif total_duration > wall_clock_span * 1.2:
-                    avg_trial_seconds = wall_clock_avg
-                    includes_inter_trial_overhead = True
+        if remaining_trials <= 0:
+            estimated_completed_at = datetime.now(timezone.utc)
+            return {
+                "estimated_remaining_minutes": 0,
+                "estimated_completed_at": estimated_completed_at.isoformat().replace("+00:00", "Z"),
+            }
 
-        if avg_trial_seconds is None:
+        if not completed_records:
             return {"estimated_remaining_minutes": None, "estimated_completed_at": None}
 
-        per_trial_projection = avg_trial_seconds
-        if not includes_inter_trial_overhead:
-            per_trial_projection += self._optimization_step_delay_seconds()
+        completed_records.sort(key=lambda item: item[1])
+        recent_records = completed_records[-OPTIMIZATION_ETA_RECENT_COMPLETIONS_WINDOW:]
+        per_trial_projection: float | None = None
+
+        if len(recent_records) >= 2:
+            first_started = min(started for started, _, _ in recent_records)
+            last_completed = max(completed for _, completed, _ in recent_records)
+            wall_clock_span = max(0.0, (last_completed - first_started).total_seconds())
+            if wall_clock_span > 0:
+                per_trial_projection = wall_clock_span / len(recent_records)
+
+        if per_trial_projection is None:
+            completed_durations = [duration for _, _, duration in recent_records if duration > 0]
+            if not completed_durations:
+                return {"estimated_remaining_minutes": None, "estimated_completed_at": None}
+            per_trial_projection = (sum(completed_durations) / len(completed_durations)) + self._optimization_step_delay_seconds()
+
         projected_seconds = remaining_trials * per_trial_projection
         estimated_completed_at = datetime.now(timezone.utc) + timedelta(seconds=projected_seconds)
         return {
@@ -5458,9 +6548,14 @@ class BacktestPlatformService:
             key=lambda item: int(item.get("rank") or 0) or 0,
         )
         persisted_payload = {
-            **dict(payload),
-            "base_parameter_version_id": baseline_parameter_version_id,
+            key: value
+            for key, value in {
+                **dict(payload),
+                "base_parameter_version_id": baseline_parameter_version_id,
+            }.items()
+            if not str(key).startswith("__optimization_")
         }
+        persisted_payload.update(_normalize_optimization_constraints_payload(persisted_payload))
         summary = self._build_optimization_job_summary(persisted_payload, normalized_candidates)
         result = self._build_optimization_job_result(persisted_payload, normalized_candidates)
         persisted_updated_at = updated_at or iso_now()
@@ -5489,6 +6584,7 @@ class BacktestPlatformService:
         candidates: list[dict[str, Any]],
     ) -> dict[str, Any]:
         status = str(payload.get("status") or "COMPLETED").upper()
+        eta_active = status == "RUNNING"
         baseline_parameter_version_id = str(payload.get("base_parameter_version_id") or "").strip() or None
         budget_combinations = _as_int(payload.get("budget_combinations"), max(len(candidates) * 10, 24))
         completed_combinations = _as_int(
@@ -5497,6 +6593,7 @@ class BacktestPlatformService:
         )
         persisted_trial_count = _as_int(payload.get("persisted_trial_count"), len(candidates))
         next_trial_index = _as_int(payload.get("next_trial_index"), completed_combinations + 1)
+        constraint_payload = _normalize_optimization_constraints_payload(payload)
         summary = {
             "objective": payload.get("objective") or "sharpe",
             "candidate_count": len(candidates),
@@ -5511,9 +6608,25 @@ class BacktestPlatformService:
             "resume_ready": bool(payload.get("resume_ready")) or status == "INTERRUPTED",
             "interrupted_reason": payload.get("interrupted_reason"),
             "search_space": list(payload.get("search_space") or []),
+            **constraint_payload,
         }
         summary["status"] = status
         summary["progress_pct"] = min(100, max(0, _as_int(payload.get("progress_pct"), 100 if status == "COMPLETED" else 0)))
+        estimated_remaining_minutes = payload.get("estimated_remaining_minutes") if eta_active else None
+        if estimated_remaining_minutes is None and status not in {"QUEUED", "RUNNING", "INTERRUPTED"}:
+            estimated_remaining_minutes = 0
+        if estimated_remaining_minutes is not None:
+            summary["estimated_remaining_minutes"] = _as_int(estimated_remaining_minutes, 0)
+        estimated_completed_at = (
+            str(payload.get("estimated_completed_at") or "").strip() or None
+            if eta_active or status not in {"QUEUED", "RUNNING", "INTERRUPTED"}
+            else None
+        )
+        if estimated_completed_at:
+            summary["estimated_completed_at"] = estimated_completed_at
+        heartbeat_at = str(payload.get("heartbeat_at") or "").strip() or None
+        if heartbeat_at:
+            summary["heartbeat_at"] = heartbeat_at
         if payload.get("current_stage") is not None:
             summary["current_stage"] = payload.get("current_stage")
         elif status == "COMPLETED":
@@ -5569,8 +6682,10 @@ class BacktestPlatformService:
         candidates: list[dict[str, Any]],
     ) -> dict[str, Any]:
         status = str(payload.get("status") or "COMPLETED").upper()
+        eta_active = status == "RUNNING"
         baseline_parameter_version_id = str(payload.get("base_parameter_version_id") or "").strip() or None
         progress_pct = min(100, max(0, _as_int(payload.get("progress_pct"), 100 if status == "COMPLETED" else 0)))
+        constraint_payload = _normalize_optimization_constraints_payload(payload)
         if status in {"QUEUED", "RUNNING", "INTERRUPTED"}:
             headline = self._canonical_optimization_candidate_label(
                 payload.get("latest_candidate_label"),
@@ -5587,8 +6702,9 @@ class BacktestPlatformService:
                 "progress_pct": progress_pct,
                 "current_stage": payload.get("current_stage") or ("Interrupted" if status == "INTERRUPTED" else "Running"),
                 "latest_update": payload.get("latest_update") or "Optimization in progress.",
-                "estimated_remaining_minutes": payload.get("estimated_remaining_minutes"),
-                "estimated_completed_at": payload.get("estimated_completed_at"),
+                "estimated_remaining_minutes": payload.get("estimated_remaining_minutes") if eta_active else None,
+                "estimated_completed_at": payload.get("estimated_completed_at") if eta_active else None,
+                **constraint_payload,
             }
 
         best_candidate = candidates[0] if candidates else None
@@ -5615,6 +6731,7 @@ class BacktestPlatformService:
             "latest_update": payload.get("latest_update") or summary,
             "estimated_remaining_minutes": payload.get("estimated_remaining_minutes"),
             "estimated_completed_at": payload.get("estimated_completed_at"),
+            **constraint_payload,
         }
 
     def _hydrate_optimization_job(self, row: Mapping[str, Any]) -> dict[str, Any]:
@@ -5623,7 +6740,26 @@ class BacktestPlatformService:
         job["summary"] = loads(job.pop("summary_json", None), {})
         job["result"] = loads(job.pop("result_json", None), {})
         raw_candidates = loads(job.pop("candidates_json", None), [])
+        constraint_payload = _normalize_optimization_constraints_payload(
+            {
+                "constraint_preset_key": job["request"].get("constraint_preset_key")
+                or job["summary"].get("constraint_preset_key")
+                or job["result"].get("constraint_preset_key"),
+                "constraint_label": job["request"].get("constraint_label")
+                or job["summary"].get("constraint_label")
+                or job["result"].get("constraint_label"),
+                "constraints": job["request"].get("constraints")
+                or job["summary"].get("constraints")
+                or job["result"].get("constraints"),
+            }
+        )
+        job["request"].update(constraint_payload)
+        job["summary"].update(constraint_payload)
+        job["result"].update(constraint_payload)
         job["base_parameter_version_id"] = job["request"].get("base_parameter_version_id")
+        raw_request = dict(job["request"])
+        raw_summary = dict(job["summary"])
+        raw_result = dict(job["result"])
         summary_status = str(
             job["summary"].get("status")
             or job.get("status")
@@ -5632,6 +6768,7 @@ class BacktestPlatformService:
             or "COMPLETED"
         ).upper()
         running_like = summary_status in {"QUEUED", "RUNNING", "INTERRUPTED"}
+        eta_active = summary_status == "RUNNING"
         progress_default = 100 if summary_status == "COMPLETED" else 0
         job["summary"]["status"] = summary_status
         job["summary"].setdefault(
@@ -5654,8 +6791,136 @@ class BacktestPlatformService:
             or job["result"].get("summary")
             or ("Optimization completed." if summary_status == "COMPLETED" else "Optimization in progress."),
         )
-
         raw_search_space = job["request"].get("search_space") or job["summary"].get("search_space")
+        budget_default = max(len(raw_candidates), 1) if (raw_candidates or not running_like) else 0
+        budget_combinations = _as_int(
+            job["summary"].get("budget_combinations"),
+            _as_int(job["request"].get("budget_combinations"), budget_default),
+        )
+        completed_default = 0 if running_like else budget_combinations
+        completed_combinations = _as_int(
+            job["summary"].get("completed_combinations"),
+            _as_int(job["request"].get("completed_combinations"), completed_default),
+        )
+        persisted_trial_count = _as_int(
+            job["summary"].get("persisted_trial_count"),
+            _as_int(job["request"].get("persisted_trial_count"), completed_combinations),
+        )
+        next_trial_index = _as_int(
+            job["summary"].get("next_trial_index"),
+            _as_int(job["request"].get("next_trial_index"), completed_combinations + 1),
+        )
+        estimated_remaining_minutes = None
+        estimated_completed_at = None
+        if eta_active:
+            estimated_remaining_minutes = job["summary"].get("estimated_remaining_minutes")
+            if estimated_remaining_minutes is None:
+                estimated_remaining_minutes = job["request"].get("estimated_remaining_minutes")
+            if estimated_remaining_minutes is None:
+                estimated_remaining_minutes = job["result"].get("estimated_remaining_minutes")
+            estimated_completed_at = (
+                str(
+                    job["summary"].get("estimated_completed_at")
+                    or job["request"].get("estimated_completed_at")
+                    or job["result"].get("estimated_completed_at")
+                    or ""
+                ).strip()
+                or None
+            )
+        elif not running_like:
+            estimated_remaining_minutes = 0
+            estimated_completed_at = (
+                str(
+                    job["summary"].get("estimated_completed_at")
+                    or job["request"].get("estimated_completed_at")
+                    or job["result"].get("estimated_completed_at")
+                    or job.get("completed_at")
+                    or job.get("updated_at")
+                    or ""
+                ).strip()
+                or None
+            )
+        heartbeat_at = str(job["summary"].get("heartbeat_at") or job.get("updated_at") or "").strip() or None
+        best_metrics_summary = (
+            job["summary"].get("best_metrics_summary")
+            if job["summary"].get("best_metrics_summary") is not None
+            else job["request"].get("best_metrics_summary")
+        )
+        if best_metrics_summary is not None:
+            job["summary"]["best_metrics_summary"] = self._normalized_optimization_trial_summary(best_metrics_summary)
+        elif "best_metrics_summary" in job["summary"]:
+            job["summary"]["best_metrics_summary"] = None
+        job["summary"]["budget_combinations"] = budget_combinations
+        job["summary"]["completed_combinations"] = completed_combinations
+        job["summary"]["persisted_trial_count"] = persisted_trial_count
+        job["summary"]["next_trial_index"] = next_trial_index
+        job["summary"].setdefault("resume_ready", summary_status == "INTERRUPTED")
+        if summary_status == "INTERRUPTED" and not job["summary"].get("interrupted_reason"):
+            job["summary"]["interrupted_reason"] = job["request"].get("interrupted_reason") or "service_restart"
+        if estimated_remaining_minutes is not None:
+            job["summary"]["estimated_remaining_minutes"] = _as_int(estimated_remaining_minutes, 0)
+        else:
+            job["summary"]["estimated_remaining_minutes"] = None
+        if estimated_completed_at:
+            job["summary"]["estimated_completed_at"] = estimated_completed_at
+        else:
+            job["summary"]["estimated_completed_at"] = None
+        if heartbeat_at:
+            job["summary"]["heartbeat_at"] = heartbeat_at
+        if (
+            "progress_pct" not in raw_summary
+            and "progress_pct" not in raw_request
+            and "progress_pct" not in raw_result
+            and budget_combinations > 0
+        ):
+            job["summary"]["progress_pct"] = min(
+                100,
+                max(0, int(round((completed_combinations / budget_combinations) * 100))),
+            )
+
+        def sync_job_projection() -> None:
+            job["progress_pct"] = job["summary"].get("progress_pct", 0)
+            job["current_stage"] = job["summary"].get("current_stage")
+            job["latest_update"] = job["summary"].get("latest_update")
+            job["estimated_remaining_minutes"] = job["summary"].get("estimated_remaining_minutes")
+            job["estimated_completed_at"] = job["summary"].get("estimated_completed_at")
+            job["resume_ready"] = job["summary"].get("resume_ready")
+            job["persisted_trial_count"] = job["summary"].get("persisted_trial_count")
+            job["next_trial_index"] = job["summary"].get("next_trial_index")
+            job["interrupted_reason"] = job["summary"].get("interrupted_reason")
+            job["best_metrics_summary"] = job["summary"].get("best_metrics_summary")
+            job["constraint_preset_key"] = job["summary"].get("constraint_preset_key") or job["request"].get("constraint_preset_key")
+            job["constraint_label"] = job["summary"].get("constraint_label") or job["request"].get("constraint_label")
+            job["constraints"] = job["summary"].get("constraints") or job["request"].get("constraints")
+
+        def has_running_projection_value(key: str) -> bool:
+            for source in (raw_summary, raw_request, raw_result):
+                if key not in source:
+                    continue
+                value = source.get(key)
+                if value is None:
+                    continue
+                if isinstance(value, str) and not value.strip():
+                    continue
+                return True
+            return False
+
+        running_projection_present = summary_status == "QUEUED" or any(
+            has_running_projection_value(key)
+            for key in (
+                "best_metrics_summary",
+                "heartbeat_at",
+            )
+        ) or (
+            eta_active
+            and any(
+                has_running_projection_value(key)
+                for key in (
+                    "estimated_remaining_minutes",
+                    "estimated_completed_at",
+                )
+            )
+        )
         strategy: dict[str, Any] | None = None
         if running_like:
             normalized_search_space = [
@@ -5673,7 +6938,216 @@ class BacktestPlatformService:
             job["request"]["search_space"] = normalized_search_space
             job["summary"]["search_space"] = normalized_search_space
 
-        trials = self._load_optimization_trials(str(job["id"]), include_chart_series=False)
+        if not running_like and raw_candidates:
+            repaired_candidates, repaired_best_summary, repaired_any = self._repair_optimization_job_candidates(
+                job=job,
+                strategy=strategy or self.get_strategy_detail(str(job["strategy_id"])),
+                raw_candidates=raw_candidates,
+                normalized_search_space=normalized_search_space,
+            )
+            if repaired_any:
+                raw_candidates = repaired_candidates
+                if repaired_best_summary is not None:
+                    job["summary"]["best_metrics_summary"] = repaired_best_summary
+                self._persist_optimization_job(
+                    str(job["id"]),
+                    str(job["strategy_id"]),
+                    {
+                        **dict(job["request"]),
+                        "status": summary_status,
+                        "progress_pct": job["summary"].get("progress_pct"),
+                        "completed_combinations": job["summary"].get("completed_combinations"),
+                        "persisted_trial_count": job["summary"].get("persisted_trial_count"),
+                        "next_trial_index": job["summary"].get("next_trial_index"),
+                        "resume_ready": job["summary"].get("resume_ready"),
+                        "interrupted_reason": job["summary"].get("interrupted_reason"),
+                        "best_metrics_summary": repaired_best_summary,
+                        "current_stage": job["summary"].get("current_stage"),
+                        "latest_update": job["summary"].get("latest_update"),
+                        "latest_candidate_label": (
+                            repaired_candidates[0].get("label")
+                            if repaired_candidates
+                            else job["summary"].get("latest_candidate_label")
+                        ),
+                        "estimated_remaining_minutes": job["summary"].get("estimated_remaining_minutes"),
+                        "estimated_completed_at": job["summary"].get("estimated_completed_at"),
+                        "heartbeat_at": job["summary"].get("heartbeat_at"),
+                        "budget_combinations": job["summary"].get("budget_combinations"),
+                        "search_space": normalized_search_space,
+                    },
+                    repaired_candidates,
+                    created_at=str(job["created_at"]),
+                    updated_at=iso_now(),
+                    completed_at=str(job.get("completed_at") or "").strip() or None,
+                )
+
+        if running_like and running_projection_present:
+            if summary_status == "RUNNING":
+                progress_snapshot = self._optimization_trial_progress_snapshot(str(job["id"]))
+                summary_completed = _as_int(job["summary"].get("completed_combinations"), 0)
+                summary_persisted = _as_int(job["summary"].get("persisted_trial_count"), summary_completed)
+                snapshot_completed = _as_int(progress_snapshot.get("completed_combinations"), summary_completed)
+                snapshot_persisted = _as_int(progress_snapshot.get("persisted_trial_count"), summary_persisted)
+                snapshot_ahead = snapshot_completed > summary_completed or snapshot_persisted > summary_persisted
+                if snapshot_ahead:
+                    job["summary"]["completed_combinations"] = snapshot_completed
+                    job["summary"]["persisted_trial_count"] = snapshot_persisted
+                    job["summary"]["next_trial_index"] = _as_int(
+                        progress_snapshot.get("next_trial_index"),
+                        snapshot_completed + 1,
+                    )
+                    budget_value = _as_int(job["summary"].get("budget_combinations"), 0)
+                    if budget_value > 0:
+                        job["summary"]["progress_pct"] = min(
+                            100,
+                            max(0, int(round((snapshot_completed / budget_value) * 100))),
+                        )
+                        job["summary"]["current_stage"] = f"Running trial {job['summary']['next_trial_index']}/{budget_value}"
+                        job["summary"]["latest_update"] = f"Completed {snapshot_completed}/{budget_value} trials."
+                    latest_completed_at = str(progress_snapshot.get("latest_completed_at") or "").strip() or None
+                    if latest_completed_at:
+                        job["summary"]["heartbeat_at"] = latest_completed_at
+                if snapshot_completed > 0 and (snapshot_ahead or not job["summary"].get("best_metrics_summary")):
+                    best_summary_snapshot = self._optimization_trial_best_summary_snapshot(str(job["id"]))
+                    if best_summary_snapshot is not None:
+                        job["summary"]["best_metrics_summary"] = best_summary_snapshot
+                        job["summary"]["latest_candidate_label"] = self._canonical_optimization_candidate_label(
+                            job["summary"].get("latest_candidate_label") or best_summary_snapshot.get("label"),
+                            _as_int(best_summary_snapshot.get("trial_index"), 1),
+                        )
+            running_headline = self._canonical_optimization_candidate_label(
+                job["summary"].get("latest_candidate_label") or job["result"].get("headline"),
+                _as_int(_as_mapping(job["summary"].get("best_metrics_summary")).get("trial_index"), 1),
+            ) or (
+                "Optimization interrupted" if summary_status == "INTERRUPTED" else "Optimization in progress"
+            )
+            job["candidates"] = []
+            job["result"] = {
+                **job["result"],
+                "best_candidate_id": None,
+                "best_candidate_label": None,
+                "headline": running_headline,
+                "summary": job["result"].get("summary") or job["summary"].get("latest_update"),
+                "stability_verdict": None,
+                "status": summary_status,
+                "progress_pct": job["summary"].get("progress_pct", 0),
+                "current_stage": job["summary"].get("current_stage"),
+                "latest_update": job["summary"].get("latest_update"),
+                "estimated_remaining_minutes": job["summary"].get("estimated_remaining_minutes"),
+                "estimated_completed_at": job["summary"].get("estimated_completed_at"),
+            }
+            sync_job_projection()
+            return job
+
+        if not running_like and raw_candidates:
+            normalized_candidates: list[dict[str, Any]] = []
+            for index, candidate in enumerate(raw_candidates, start=1):
+                normalized_candidate = self._normalize_optimization_candidate(
+                    strategy or self.get_strategy_detail(str(job["strategy_id"])),
+                    candidate,
+                    rank=index,
+                    base_parameter_version_id=job["base_parameter_version_id"],
+                )
+                analysis = dict(normalized_candidate.get("analysis") or {})
+                heatmap = dict(analysis.get("heatmap") or {})
+                if normalized_search_space and not heatmap.get("cells"):
+                    analysis["heatmap"] = self._build_optimization_heatmap(
+                        normalized_search_space,
+                        normalized_candidate.get("parameter_snapshot") or {},
+                        _as_float(
+                            normalized_candidate.get("metrics", {}).get("return_sharpe"),
+                            _as_float(
+                                normalized_candidate.get("metrics", {}).get("sharpe"),
+                                _as_float(normalized_candidate.get("score"), 0.0),
+                            ),
+                        ),
+                        normalized_candidate.get("metrics") or {},
+                    )
+                if analysis:
+                    normalized_candidate["analysis"] = analysis
+                normalized_candidates.append(normalized_candidate)
+            job["candidates"] = normalized_candidates
+            job["summary"]["candidate_count"] = len(normalized_candidates)
+            best_candidate_id = str(job["result"].get("best_candidate_id") or "").strip()
+            best_candidate = next(
+                (
+                    candidate
+                    for candidate in normalized_candidates
+                    if str(candidate.get("id") or "").strip() == best_candidate_id
+                ),
+                normalized_candidates[0] if normalized_candidates else None,
+            )
+            if not job["summary"].get("best_metrics_summary") and best_candidate:
+                job["summary"]["best_metrics_summary"] = self._normalized_optimization_trial_summary(
+                    {
+                        "trial_index": best_candidate.get("rank"),
+                        "label": best_candidate.get("label"),
+                        "status": best_candidate.get("status") or "SUCCEEDED",
+                        "parameter_snapshot": dict(best_candidate.get("parameter_snapshot") or {}),
+                        "metrics": dict(best_candidate.get("metrics") or {}),
+                        "score": _as_float(best_candidate.get("score"), 0.0),
+                        "error_message": best_candidate.get("error_message"),
+                        "started_at": best_candidate.get("started_at"),
+                        "completed_at": best_candidate.get("completed_at"),
+                    }
+                )
+            if job["summary"].get("best_metrics_summary") and best_candidate:
+                best_summary = self._normalized_optimization_trial_summary(job["summary"]["best_metrics_summary"])
+                best_summary["label"] = self._canonical_optimization_candidate_label(
+                    best_candidate.get("label") or best_summary.get("label"),
+                    _as_int(best_candidate.get("rank"), _as_int(best_summary.get("trial_index"), 1)),
+                )
+                best_summary["trial_index"] = _as_int(
+                    best_candidate.get("rank"),
+                    _as_int(best_summary.get("trial_index"), 0),
+                )
+                job["summary"]["best_metrics_summary"] = best_summary
+            if best_candidate:
+                best_analysis = dict(best_candidate.get("analysis") or {})
+                best_label = self._canonical_optimization_candidate_label(
+                    best_candidate.get("label"),
+                    _as_int(best_candidate.get("rank"), 1),
+                )
+                job["result"] = {
+                    **job["result"],
+                    "best_candidate_id": job["result"].get("best_candidate_id") or best_candidate.get("id"),
+                    "best_candidate_label": best_label,
+                    "headline": job["result"].get("headline") or best_analysis.get("title"),
+                    "summary": job["result"].get("summary") or best_candidate.get("summary"),
+                    "stability_verdict": job["result"].get("stability_verdict") or best_analysis.get("stability_verdict"),
+                }
+            job["result"] = {
+                **job["result"],
+                "status": summary_status,
+                "progress_pct": job["summary"].get("progress_pct", 100),
+                "current_stage": job["summary"].get("current_stage"),
+                "latest_update": job["summary"].get("latest_update"),
+                "estimated_remaining_minutes": job["summary"].get("estimated_remaining_minutes"),
+                "estimated_completed_at": job["summary"].get("estimated_completed_at"),
+            }
+            sync_job_projection()
+            return job
+
+        if not running_like and summary_status in {"FAILED", "PARTIALLY_FAILED"}:
+            job["candidates"] = []
+            job["summary"]["candidate_count"] = 0
+            job["result"] = {
+                **job["result"],
+                "status": summary_status,
+                "progress_pct": job["summary"].get("progress_pct", 100),
+                "current_stage": job["summary"].get("current_stage"),
+                "latest_update": job["summary"].get("latest_update"),
+                "estimated_remaining_minutes": job["summary"].get("estimated_remaining_minutes"),
+                "estimated_completed_at": job["summary"].get("estimated_completed_at"),
+            }
+            sync_job_projection()
+            return job
+
+        trials = self._load_optimization_trials(
+            str(job["id"]),
+            include_chart_series=False,
+            include_metrics_json=False,
+        )
         if not running_like:
             trials = self._merge_optimization_trial_chart_series(
                 trials,
@@ -5713,12 +7187,17 @@ class BacktestPlatformService:
             if persisted_trial_count
             else _as_int(job["summary"].get("completed_combinations"), 0)
         )
-        if running_like:
+        if eta_active:
             eta_projection = self._optimization_eta_projection(
                 trials,
                 budget_combinations=budget_combinations,
                 completed_combinations=completed_combinations,
             )
+        elif running_like:
+            eta_projection = {
+                "estimated_remaining_minutes": None,
+                "estimated_completed_at": None,
+            }
         else:
             terminal_completed_at = (
                 str(job.get("completed_at") or job.get("updated_at") or "").strip() or None
@@ -5839,6 +7318,9 @@ class BacktestPlatformService:
         job["estimated_remaining_minutes"] = job["summary"].get("estimated_remaining_minutes")
         job["estimated_completed_at"] = job["summary"].get("estimated_completed_at")
         job["best_metrics_summary"] = job["summary"].get("best_metrics_summary")
+        job["constraint_preset_key"] = job["summary"].get("constraint_preset_key") or job["request"].get("constraint_preset_key")
+        job["constraint_label"] = job["summary"].get("constraint_label") or job["request"].get("constraint_label")
+        job["constraints"] = job["summary"].get("constraints") or job["request"].get("constraints")
         return job
 
     def _build_optimization_trial_preview_and_chart_series(
@@ -5850,8 +7332,27 @@ class BacktestPlatformService:
         *,
         prepared_context: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        del strategy, evaluation_request, payload, prepared_context
-        return _build_synthetic_optimization_preview_and_chart_series(parameter_snapshot)
+        effective_strategy = self._optimization_effective_strategy(strategy, parameter_snapshot)
+        if prepared_context is None:
+            cached_prepared_context = payload.get(OPTIMIZATION_PREPARED_CONTEXT_KEY) if isinstance(payload, dict) else None
+            if isinstance(cached_prepared_context, dict):
+                prepared_context = cached_prepared_context
+            else:
+                prepare_context = getattr(type(self), "_prepare_backtest_run_context", None)
+                if callable(prepare_context):
+                    prepared_context = prepare_context(self, effective_strategy, evaluation_request)
+                    if isinstance(payload, dict):
+                        payload[OPTIMIZATION_PREPARED_CONTEXT_KEY] = prepared_context
+        simulate_from_prepared = getattr(self, "_simulate_run_from_prepared_context", None)
+        if prepared_context is not None and callable(simulate_from_prepared):
+            preview, chart_series, _ = simulate_from_prepared(
+                effective_strategy,
+                evaluation_request,
+                prepared_context,
+            )
+        else:
+            preview, chart_series, _ = self._simulate_run(effective_strategy, evaluation_request)
+        return preview, chart_series
 
     def _evaluate_optimization_trial(
         self,
@@ -5862,11 +7363,20 @@ class BacktestPlatformService:
         *,
         prepared_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        del strategy, evaluation_request, prepared_context
-        return _evaluate_optimization_trial_payload(
+        preview, chart_series = self._build_optimization_trial_preview_and_chart_series(
+            strategy,
+            evaluation_request,
+            payload,
             parameter_snapshot,
-            payload.get("objective"),
+            prepared_context=prepared_context,
         )
+        metrics = self._build_real_optimization_metrics(preview, chart_series)
+        return {
+            "parameter_snapshot": dict(parameter_snapshot),
+            "metrics": metrics,
+            "chart_series": chart_series,
+            "score": self._score_optimization_metrics(metrics, payload.get("objective")),
+        }
 
     def _backfill_optimization_top_trial_chart_series(
         self,
@@ -5890,6 +7400,13 @@ class BacktestPlatformService:
             if trial is None or str(trial.get("status") or "").upper() != "SUCCEEDED":
                 continue
             chart_series = list(trial.get("chart_series") or persisted_chart_series.get(trial_index) or [])
+            repaired_metrics = self._repair_optimization_trial_metrics(
+                job_id,
+                trial_index,
+                trial.get("metrics") or {},
+                chart_series=chart_series,
+                persist=bool(chart_series),
+            )
             if not chart_series:
                 _, chart_series = self._build_optimization_trial_preview_and_chart_series(
                     strategy,
@@ -5898,18 +7415,26 @@ class BacktestPlatformService:
                     dict(trial.get("parameter_snapshot") or {}),
                     prepared_context=prepared_context,
                 )
+                repaired_metrics = self._repair_optimization_trial_metrics(
+                    job_id,
+                    trial_index,
+                    repaired_metrics,
+                    chart_series=chart_series,
+                    persist=False,
+                )
                 self._persist_optimization_trial(
                     job_id,
                     trial_index,
                     status=str(trial.get("status") or "SUCCEEDED"),
                     parameter_snapshot=dict(trial.get("parameter_snapshot") or {}),
-                    metrics=dict(trial.get("metrics") or {}),
+                    metrics=repaired_metrics,
                     chart_series=chart_series,
                     score=trial.get("score"),
                     error_message=str(trial.get("error_message") or "").strip() or None,
                     started_at=str(trial.get("started_at") or "").strip() or None,
                     completed_at=str(trial.get("completed_at") or "").strip() or None,
                 )
+            trial["metrics"] = repaired_metrics
             trial["chart_series"] = list(chart_series)
         return [trial_records[index] for index in sorted(trial_records)]
 
@@ -5929,6 +7454,7 @@ class BacktestPlatformService:
             strategy = self.get_strategy_detail(strategy_id)
             request_payload = deepcopy(dict(payload))
             request_payload["search_space"] = self._normalize_optimization_search_space(strategy, request_payload)
+            request_payload.update(_normalize_optimization_constraints_payload(request_payload))
             base_snapshot, source_run = self._optimization_base_snapshot(strategy, request_payload)
             search_space = list(request_payload.get("search_space") or [])
             requested_budget = _as_int(request_payload.get("budget_combinations"), 0)
@@ -5940,7 +7466,11 @@ class BacktestPlatformService:
             planned_snapshots = planned_snapshots[:budget_combinations]
             persisted_trials = {
                 trial["trial_index"]: trial
-                for trial in self._load_optimization_trials(job_id, include_chart_series=False)
+                for trial in self._load_optimization_trials(
+                    job_id,
+                    include_chart_series=False,
+                    include_metrics_json=False,
+                )
             }
             pending_evaluations = [
                 (trial_index, parameter_snapshot)
@@ -5949,6 +7479,20 @@ class BacktestPlatformService:
             ]
             planned_evaluations = pending_evaluations
             evaluation_request = self._build_optimization_evaluation_request(strategy, source_run=source_run)
+            self._ensure_optimization_snapshots_ready(
+                job_id=job_id,
+                created_at=created_at,
+                strategy=strategy,
+                payload=request_payload,
+                evaluation_request=evaluation_request,
+                parameter_snapshot=base_snapshot,
+            )
+            runtime_state = self._optimization_runtime_state(search_space)
+            self._optimization_runtime_seed(runtime_state, list(persisted_trials.values()))
+
+            def ensure_runner_claim() -> None:
+                if not self._refresh_optimization_runner_claim(job_id):
+                    raise _OptimizationRunnerClaimLost(job_id)
 
             if len(persisted_trials) >= budget_combinations:
                 final_trials = self._backfill_optimization_top_trial_chart_series(
@@ -5959,8 +7503,29 @@ class BacktestPlatformService:
                     list(persisted_trials.values()),
                 )
                 successful_trials = [trial for trial in final_trials if str(trial.get("status") or "").upper() == "SUCCEEDED"]
-                best_summary = self._best_optimization_trial_summary(final_trials)
+                best_summary = self._optimization_runtime_best_summary(runtime_state) or self._best_optimization_trial_summary(final_trials)
                 final_status = "COMPLETED" if len(successful_trials) == len(final_trials) else "PARTIALLY_FAILED" if successful_trials else "FAILED"
+                runtime_top_trials = self._optimization_runtime_top_trials(runtime_state)
+                successful_trial_by_index = {
+                    _as_int(trial.get("trial_index"), 0): dict(trial)
+                    for trial in successful_trials
+                    if _as_int(trial.get("trial_index"), 0) > 0
+                }
+                if runtime_top_trials:
+                    candidate_trials = []
+                    for trial in runtime_top_trials:
+                        trial_index = _as_int(trial.get("trial_index"), 0)
+                        candidate_trials.append(
+                            dict(successful_trial_by_index.get(trial_index) or trial)
+                        )
+                else:
+                    candidate_trials = successful_trials
+                candidate_trials = self._optimization_with_full_metrics(job_id, candidate_trials)
+                heatmap_trials = self._optimization_heatmap_trials_from_summary(
+                    self._optimization_runtime_heatmap_summary(runtime_state)
+                )
+                if not heatmap_trials:
+                    heatmap_trials = [dict(trial) for trial in successful_trials]
                 final_candidates = self._build_optimization_candidate_records(
                     strategy,
                     {
@@ -5971,8 +7536,10 @@ class BacktestPlatformService:
                         "next_trial_index": len(final_trials) + 1,
                         "resume_ready": False,
                     },
-                    successful_trials,
+                    candidate_trials,
+                    heatmap_trials=heatmap_trials,
                 )
+                ensure_runner_claim()
                 self._persist_optimization_job(
                     job_id,
                     strategy_id,
@@ -5999,30 +7566,8 @@ class BacktestPlatformService:
 
             delay_seconds = self._optimization_step_delay_seconds()
             completed_count = len(persisted_trials)
-            best_summary = self._best_optimization_trial_summary(list(persisted_trials.values()))
+            best_summary = self._optimization_runtime_best_summary(runtime_state)
             next_trial_index = planned_evaluations[0][0] if planned_evaluations else completed_count + 1
-            self._persist_optimization_job(
-                job_id,
-                strategy_id,
-                {
-                    **request_payload,
-                    "status": "RUNNING",
-                    "progress_pct": round(completed_count / budget_combinations * 100) if budget_combinations else 0,
-                    "completed_combinations": completed_count,
-                    "persisted_trial_count": completed_count,
-                    "next_trial_index": next_trial_index,
-                    "resume_ready": False,
-                    "interrupted_reason": None,
-                    "best_metrics_summary": best_summary,
-                    "current_stage": f"Running trial {next_trial_index}/{budget_combinations}",
-                    "latest_update": f"Evaluating trial {next_trial_index}/{budget_combinations}.",
-                    "latest_candidate_label": best_summary.get("label") if best_summary else None,
-                },
-                [],
-                created_at=created_at,
-                updated_at=iso_now(),
-                completed_at=None,
-            )
             trial_records = dict(persisted_trials)
             failures = 0
             last_progress_persisted_at = time.monotonic()
@@ -6045,6 +7590,13 @@ class BacktestPlatformService:
                         and now_monotonic - last_progress_persisted_at < 1.0
                     ):
                         return
+                eta_projection = self._optimization_eta_projection(
+                    list(trial_records.values()),
+                    budget_combinations=budget_combinations,
+                    completed_combinations=completed_combinations,
+                )
+                ensure_runner_claim()
+                heartbeat_at = self._optimization_timestamp_now()
                 self._persist_optimization_job(
                     job_id,
                     strategy_id,
@@ -6061,14 +7613,26 @@ class BacktestPlatformService:
                         "current_stage": current_stage,
                         "latest_update": latest_update,
                         "latest_candidate_label": _as_mapping(best_metrics_summary).get("label") if best_metrics_summary else None,
+                        "estimated_remaining_minutes": eta_projection.get("estimated_remaining_minutes"),
+                        "estimated_completed_at": eta_projection.get("estimated_completed_at"),
+                        "heartbeat_at": heartbeat_at,
                     },
                     [],
                     created_at=created_at,
-                    updated_at=iso_now(),
+                    updated_at=heartbeat_at,
                     completed_at=None,
                 )
                 last_progress_persisted_at = now_monotonic
                 last_progress_persisted_count = completed_combinations
+
+            publish_progress(
+                completed_combinations=completed_count,
+                best_metrics_summary=best_summary,
+                next_trial_index=next_trial_index,
+                current_stage=f"Running trial {next_trial_index}/{budget_combinations}",
+                latest_update=f"Evaluating trial {next_trial_index}/{budget_combinations}.",
+                force=True,
+            )
 
             remaining_evaluations = [
                 (int(trial_index), dict(parameter_snapshot))
@@ -6084,6 +7648,7 @@ class BacktestPlatformService:
                             pending_evaluations=remaining_evaluations,
                             trial_records=trial_records,
                             budget_combinations=budget_combinations,
+                            runtime_state=runtime_state,
                             publish_progress=lambda **kwargs: publish_progress(
                                 completed_combinations=int(kwargs["completed_count"]),
                                 best_metrics_summary=kwargs["best_summary"],
@@ -6106,7 +7671,7 @@ class BacktestPlatformService:
                         if trial_index not in trial_records
                     ]
                 if fallback_reason and remaining_evaluations:
-                    best_summary = self._best_optimization_trial_summary(list(trial_records.values()))
+                    best_summary = self._optimization_runtime_best_summary(runtime_state)
                     next_trial_index = remaining_evaluations[0][0]
                     publish_progress(
                         completed_combinations=len(trial_records),
@@ -6135,6 +7700,7 @@ class BacktestPlatformService:
                         force=bool(kwargs.get("force", False)),
                     ),
                     delay_seconds=delay_seconds,
+                    runtime_state=runtime_state,
                 )
                 failures += sequential_failures
 
@@ -6147,8 +7713,29 @@ class BacktestPlatformService:
             )
             completed_count = len(final_trials)
             successful_trials = [trial for trial in final_trials if str(trial.get("status") or "").upper() == "SUCCEEDED"]
-            best_summary = self._best_optimization_trial_summary(final_trials)
+            best_summary = self._optimization_runtime_best_summary(runtime_state) or self._best_optimization_trial_summary(final_trials)
             final_status = "COMPLETED" if len(successful_trials) == len(final_trials) and failures == 0 else "PARTIALLY_FAILED" if successful_trials else "FAILED"
+            runtime_top_trials = self._optimization_runtime_top_trials(runtime_state)
+            successful_trial_by_index = {
+                _as_int(trial.get("trial_index"), 0): dict(trial)
+                for trial in successful_trials
+                if _as_int(trial.get("trial_index"), 0) > 0
+            }
+            if runtime_top_trials:
+                candidate_trials = []
+                for trial in runtime_top_trials:
+                    trial_index = _as_int(trial.get("trial_index"), 0)
+                    candidate_trials.append(
+                        dict(successful_trial_by_index.get(trial_index) or trial)
+                    )
+            else:
+                candidate_trials = successful_trials
+            candidate_trials = self._optimization_with_full_metrics(job_id, candidate_trials)
+            heatmap_trials = self._optimization_heatmap_trials_from_summary(
+                self._optimization_runtime_heatmap_summary(runtime_state)
+            )
+            if not heatmap_trials:
+                heatmap_trials = [dict(trial) for trial in successful_trials]
             final_candidates = self._build_optimization_candidate_records(
                 strategy,
                 {
@@ -6159,8 +7746,10 @@ class BacktestPlatformService:
                     "next_trial_index": completed_count + 1,
                     "resume_ready": False,
                 },
-                successful_trials,
+                candidate_trials,
+                heatmap_trials=heatmap_trials,
             )
+            ensure_runner_claim()
             self._persist_optimization_job(
                 job_id,
                 strategy_id,
@@ -6184,11 +7773,15 @@ class BacktestPlatformService:
                 completed_at=iso_now(),
             )
             return
+        except _OptimizationRunnerClaimLost:
+            return
         except Exception as exc:
             failed_at = iso_now()
             failed_trials = self._load_optimization_trials(job_id, include_chart_series=False)
             best_summary = self._best_optimization_trial_summary(failed_trials)
             successful_trials = [trial for trial in failed_trials if str(trial.get("status") or "").upper() == "SUCCEEDED"]
+            if not self._refresh_optimization_runner_claim(job_id):
+                return
             if strategy is None:
                 strategy = self.get_strategy_detail(strategy_id)
             failure_candidates = self._build_optimization_candidate_records(
@@ -6222,8 +7815,8 @@ class BacktestPlatformService:
                 completed_at=failed_at,
             )
 
-    def resume_incomplete_optimization_jobs(self) -> list[str]:
-        rows = self.storage.fetch_all(
+    def _list_incomplete_optimization_job_rows(self) -> list[Mapping[str, Any]]:
+        return self.storage.fetch_all(
             """
             SELECT *
             FROM optimization_jobs
@@ -6233,6 +7826,77 @@ class BacktestPlatformService:
             """,
             ("QUEUED", "RUNNING"),
         )
+
+    def interrupt_incomplete_optimization_jobs(self) -> list[str]:
+        rows = self._list_incomplete_optimization_job_rows()
+        interrupted_job_ids: list[str] = []
+        for row in rows:
+            hydrated_job = self._hydrate_optimization_job(row)
+            job_id = str(hydrated_job.get("id") or "").strip()
+            strategy_id = str(hydrated_job.get("strategy_id") or "").strip()
+            if not job_id or not strategy_id:
+                continue
+            request_payload = dict(hydrated_job.get("request") or {})
+            summary = dict(hydrated_job.get("summary") or {})
+            interrupted_at = iso_now()
+            budget_combinations = _as_int(
+                summary.get("budget_combinations"),
+                _as_int(request_payload.get("budget_combinations"), 0),
+            )
+            completed_combinations = _as_int(
+                summary.get("completed_combinations"),
+                _as_int(request_payload.get("completed_combinations"), 0),
+            )
+            persisted_trial_count = max(
+                completed_combinations,
+                _as_int(
+                    summary.get("persisted_trial_count"),
+                    _as_int(request_payload.get("persisted_trial_count"), completed_combinations),
+                ),
+            )
+            next_trial_index = max(
+                1,
+                _as_int(
+                    summary.get("next_trial_index"),
+                    _as_int(request_payload.get("next_trial_index"), persisted_trial_count + 1),
+                ),
+            )
+            interrupted_payload = {
+                **request_payload,
+                "status": "INTERRUPTED",
+                "progress_pct": _as_int(
+                    summary.get("progress_pct"),
+                    _as_int(request_payload.get("progress_pct"), 0),
+                ),
+                "completed_combinations": completed_combinations,
+                "persisted_trial_count": persisted_trial_count,
+                "next_trial_index": next_trial_index,
+                "current_stage": None,
+                "latest_update": None,
+                "resume_ready": True,
+                "interrupted_reason": "service_restart",
+            }
+            if budget_combinations > 0:
+                interrupted_payload["budget_combinations"] = budget_combinations
+            if summary.get("best_metrics_summary") is not None:
+                interrupted_payload["best_metrics_summary"] = summary.get("best_metrics_summary")
+            if summary.get("latest_candidate_label") is not None:
+                interrupted_payload["latest_candidate_label"] = summary.get("latest_candidate_label")
+            self._persist_optimization_job(
+                job_id,
+                strategy_id,
+                interrupted_payload,
+                list(loads(row.get("candidates_json"), [])),
+                created_at=str(row.get("created_at") or interrupted_at),
+                updated_at=interrupted_at,
+                completed_at=None,
+            )
+            self._clear_optimization_runner_claim(job_id)
+            interrupted_job_ids.append(job_id)
+        return interrupted_job_ids
+
+    def resume_incomplete_optimization_jobs(self) -> list[str]:
+        rows = self._list_incomplete_optimization_job_rows()
         resumed_job_ids: list[str] = []
         for row in rows:
             job_id = str(row.get("id") or "").strip()
@@ -6247,38 +7911,49 @@ class BacktestPlatformService:
             payload.setdefault("completed_combinations", 0)
             payload.setdefault("current_stage", "任务已暂停")
             payload.setdefault("latest_update", "已保留优化进度，可在恢复后继续执行剩余组合。")
+            payload.update(_normalize_optimization_constraints_payload(payload))
             existing_candidates = list(loads(row.get("candidates_json"), []))
+            if not self._try_acquire_optimization_runner_claim(job_id):
+                continue
             resumed_at = iso_now()
-            self._persist_optimization_job(
-                job_id,
-                strategy_id,
-                self._build_optimization_progress_payload(
-                    payload,
-                    status=str(payload.get("status") or "QUEUED").upper(),
-                    progress_pct=_as_int(payload.get("progress_pct"), 0),
-                    completed_combinations=_as_int(payload.get("completed_combinations"), 0),
-                    current_stage=str(payload.get("current_stage") or "任务已暂停"),
-                    latest_update=str(payload.get("latest_update") or "已保留优化进度，可在恢复后继续执行剩余组合。"),
-                    latest_candidate_label=(
-                        str(existing_candidates[0].get("label") or "").strip()
-                        if existing_candidates
-                        else None
+            try:
+                self._persist_optimization_job(
+                    job_id,
+                    strategy_id,
+                    self._build_optimization_progress_payload(
+                        payload,
+                        status=str(payload.get("status") or "QUEUED").upper(),
+                        progress_pct=_as_int(payload.get("progress_pct"), 0),
+                        completed_combinations=_as_int(payload.get("completed_combinations"), 0),
+                        current_stage=str(payload.get("current_stage") or "任务已暂停"),
+                        latest_update=str(payload.get("latest_update") or "已保留优化进度，可在恢复后继续执行剩余组合。"),
+                        latest_candidate_label=(
+                            str(existing_candidates[0].get("label") or "").strip()
+                            if existing_candidates
+                            else None
+                        ),
                     ),
-                ),
-                existing_candidates,
-                created_at=str(row.get("created_at") or resumed_at),
-                updated_at=resumed_at,
-                completed_at=None,
-            )
-            if self._start_optimization_job_runner(
-                job_id,
-                strategy_id,
-                payload,
-                created_at=str(row.get("created_at") or iso_now()),
-                existing_candidates=existing_candidates,
-                recovered=True,
-            ):
+                    existing_candidates,
+                    created_at=str(row.get("created_at") or resumed_at),
+                    updated_at=resumed_at,
+                    completed_at=None,
+                )
+                started = self._start_optimization_job_runner(
+                    job_id,
+                    strategy_id,
+                    payload,
+                    created_at=str(row.get("created_at") or iso_now()),
+                    existing_candidates=existing_candidates,
+                    recovered=True,
+                    claim_acquired=True,
+                )
+            except Exception:
+                self._release_optimization_runner_claim(job_id)
+                raise
+            if started:
                 resumed_job_ids.append(job_id)
+            else:
+                self._release_optimization_runner_claim(job_id)
         return resumed_job_ids
 
     def resume_optimization_job(self, job_id: str, request: Any) -> dict[str, Any]:
@@ -6317,6 +7992,7 @@ class BacktestPlatformService:
         budget_value = job.get("summary", {}).get("budget_combinations") or request_payload.get("budget_combinations") or 1
         request_payload["current_stage"] = f"Preparing trial {request_payload['next_trial_index']}/{budget_value}"
         request_payload["latest_update"] = f"Resuming optimization from trial {request_payload['next_trial_index']}."
+        request_payload.update(_normalize_optimization_constraints_payload(request_payload))
 
         now = iso_now()
         self._persist_optimization_job(

@@ -34,6 +34,7 @@ PromoteMode = Literal['set_current', 'create_copy']
 SnapshotRefreshMode = Literal['incremental', 'repair', 'full']
 SnapshotRefreshTarget = Literal['price', 'corporate', 'universes']
 DataSegmentType = Literal['FULL', 'TRAIN', 'TEST', 'VALIDATION']
+OptimizationConstraintPresetKey = Literal['balanced', 'defensive', 'offensive']
 
 
 class CreationMessageCreate(BaseModel):
@@ -99,6 +100,15 @@ class BacktestRunCloneRequest(BaseModel):
     is_permanent: bool = False
 
 
+class OptimizationConstraint(BaseModel):
+    key: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    category: str = Field(min_length=1)
+    operator: str = Field(min_length=1)
+    value: Any
+    unit: str = Field(default="")
+
+
 class OptimizationJobCreateRequest(BaseModel):
     objective: str | None = None
     simulate_partial_failure: bool = False
@@ -108,6 +118,9 @@ class OptimizationJobCreateRequest(BaseModel):
     validation_mode: str | None = None
     budget_combinations: int | None = Field(default=None, ge=1)
     search_space: list[dict[str, Any]] = Field(default_factory=list)
+    constraint_preset_key: OptimizationConstraintPresetKey | None = None
+    constraint_label: str | None = None
+    constraints: list[OptimizationConstraint] = Field(default_factory=list)
 
 
 class ResumeOptimizationJobRequest(BaseModel):

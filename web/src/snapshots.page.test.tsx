@@ -109,11 +109,30 @@ const overview: ApiSnapshotOverview = {
             name: '公司行为数据',
             updated_symbol_count: 7,
             updated_row_count: 49,
+            provider_summary: {
+              unavailable_providers: ['sec_edgar', 'tiingo'],
+              providers: {
+                sec_edgar: {
+                  reasons: ['SEC_USER_AGENT must include a contact email.'],
+                },
+                tiingo: {
+                  reasons: ['TIINGO_API_TOKEN is not configured.'],
+                },
+              },
+            },
           },
           'ds-price': {
             name: '股票价格数据',
             updated_symbol_count: 7,
             updated_row_count: 49,
+            provider_summary: {
+              unavailable_providers: ['longbridge'],
+              providers: {
+                longbridge: {
+                  reasons: ['Longbridge credentials are not configured.'],
+                },
+              },
+            },
           },
         },
         universes: {
@@ -195,6 +214,10 @@ describe('SnapshotsPage', () => {
     expect(screen.queryByText('修复入口')).not.toBeInTheDocument();
     expect(screen.queryByText('部分可用')).not.toBeInTheDocument();
     expect(screen.getAllByText('公司行为数据已部分可用，仍有少量公司事件待继续补齐。').length).toBeGreaterThan(0);
+
+    expect(screen.queryByText('SEC_USER_AGENT must include a contact email.')).not.toBeInTheDocument();
+    expect(screen.queryByText('TIINGO_API_TOKEN is not configured.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Longbridge credentials are not configured.')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '刷新快照' }));
     await waitFor(() =>

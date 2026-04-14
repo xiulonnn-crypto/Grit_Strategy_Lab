@@ -33,6 +33,8 @@ $backendDbPath = Join-Path $repoRoot '.grit_backtest_platform.sqlite3'
 $marketDataDbPath = Join-Path $repoRoot '.grit_backtest_platform_market_data.sqlite3'
 $marketDataJournalPath = "$marketDataDbPath-journal"
 $backendRecoveryDir = Join-Path $repoRoot 'artifacts\quickstart-recovery'
+$localQuickStartConfigPath = Join-Path $repoRoot 'QuickStart-Grit.local.ps1'
+$localQuickStartExamplePath = Join-Path $repoRoot 'QuickStart-Grit.local.example.ps1'
 
 function Get-RepoRelativePath {
     param([string]$Path)
@@ -411,6 +413,32 @@ function Join-OutputLines {
     return (($Lines | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join [Environment]::NewLine).Trim()
 }
 
+function Import-QuickStartLocalEnvironment {
+    param([switch]$Quiet)
+
+    $state = [ordered]@{
+        Loaded = $false
+        Path = (Get-RepoRelativePath $localQuickStartConfigPath)
+        ExamplePath = (Get-RepoRelativePath $localQuickStartExamplePath)
+    }
+
+    if (-not (Test-Path -LiteralPath $localQuickStartConfigPath)) {
+        return [pscustomobject]$state
+    }
+
+    try {
+        . $localQuickStartConfigPath
+    } catch {
+        throw "Failed to load local QuickStart environment from $($state.Path). $($_.Exception.Message)"
+    }
+
+    $state.Loaded = $true
+    if (-not $Quiet) {
+        Write-Host "Loaded local startup environment from $($state.Path)." -ForegroundColor Green
+    }
+    return [pscustomobject]$state
+}
+
 function Get-BackendListenerProcessIds {
     param([int]$Port = 8000)
 
@@ -617,6 +645,7 @@ function Start-BackendWindow {
     param([string]$PythonExe)
     $command = @"
 Set-Location '$repoRoot'
+if (Test-Path -LiteralPath '$localQuickStartConfigPath') { . '$localQuickStartConfigPath' }
 `$env:GRIT_BACKTEST_DB = '$backendDbPath'
 `$env:PYTHONPATH = '$(Join-Path $repoRoot 'src');$(Join-Path $repoRoot '.venv\Lib\site-packages')'
 & '$PythonExe' @('-m', 'uvicorn', '--app-dir', 'src', 'grit_backtest_platform.main:app', '--host', '127.0.0.1', '--port', '8000')
@@ -630,6 +659,7 @@ $effectiveState = Ensure-VenvBinding -RuntimeState $runtimeState
 $checkedPaths = @($effectiveState.Checked + $runtimeState.Checked)
 $repairResult = if ($RepairPython) { 'manual' } elseif ($runtimeMigrationMode -eq 'migrated') { 'migrated_legacy_runtime' } elseif ($runtimeMigrationMode -eq 'copied') { 'copied_legacy_runtime' } else { 'none' }
 Write-RuntimeManifest -RuntimeState $runtimeState -EffectiveState $effectiveState -RepairResult $repairResult -CheckedPaths $checkedPaths
+$localEnvironmentState = Import-QuickStartLocalEnvironment
 
 if ($ValidatePythonOnly) {
     Write-Host 'Python runtime validation passed.' -ForegroundColor Green
@@ -650,6 +680,7 @@ if ($RepairPython) {
 Write-Host "Quick start launcher for $projectName" -ForegroundColor Cyan
 Write-Host "Repository : $repoRoot"
 Write-Host 'Config     : embedded in QuickStart-Grit.ps1'
+Write-Host "Local env  : $($localEnvironmentState.Path)$(if ($localEnvironmentState.Loaded) { ' (loaded)' } else { ' (optional, not found)' })"
 Write-Host "Backend    : $backendHealthUrl"
 Write-Host "Frontend   : $workspaceUrl"
 Write-Host "UI Entry   : $(Get-RepoRelativePath $frontendMainEntry) -> $(Get-RepoRelativePath $frontendRuntimeEntry)"
@@ -730,11 +761,11 @@ try {
 }
 
 $nodeExe = (Get-Command node -ErrorAction Stop).Source
-$previewArgs = @($frontendPreviewScript, '--host', '127.0.0.1', '--port', '4173')
+$previewArgs = @($frontendPreviewScript, '--host', '127.0.0.1', '--port', '4173', '--watch')
 if (-not $NoBrowser) {
     $previewArgs += @('--open-url', $workspaceUrl)
 }
 
-Write-Host 'Starting frontend static preview in this window...' -ForegroundColor Green
-Write-Host 'Keep this window open while using the local app.' -ForegroundColor Yellow
+Write-Host 'Starting frontend static preview with auto rebuild in this window...' -ForegroundColor Green
+Write-Host 'Keep this window open while using the local app. Frontend edits under web/ will rebuild dist automatically.' -ForegroundColor Yellow
 & $nodeExe @previewArgs

@@ -93,6 +93,26 @@ const OVERVIEW_MESSAGE_TRANSLATIONS: Record<string, string> = {
   'Please refresh snapshots before using this view.': '请先刷新快照，再查看当前快照结果。',
 };
 
+function isInternalAvailabilityReason(raw?: string | null): boolean {
+  const text = String(raw ?? '').trim().toLowerCase();
+  if (!text) {
+    return false;
+  }
+  return [
+    'api_key',
+    'token',
+    'credentials',
+    'contact email',
+    'not configured',
+    'probe failed',
+    'rate limit',
+    'rate_limited',
+    'capability unavailable',
+    'provider unavailable',
+    'unconfigured',
+  ].some((pattern) => text.includes(pattern));
+}
+
 type SnapshotItem = ApiDatasetSnapshot | ApiUniverseSnapshot;
 
 function normalizeSnapshotOverview(raw: unknown): ApiSnapshotOverview {
@@ -296,6 +316,9 @@ function getBlockerMessage(blocker?: ApiSnapshotBlocker | null): string {
   if (raw.startsWith('Universe history is partially available')) {
     return '股票池历史成分已部分可用，仍有部分历史锚点待继续补齐。';
   }
+  if (isInternalAvailabilityReason(raw)) {
+    return '当前快照仍在整理，请稍后查看最新结果。';
+  }
   return raw;
 }
 
@@ -315,6 +338,9 @@ function translateOverviewMessage(raw?: string | null): string | null {
   }
   if (text.startsWith('Universe history is partially available')) {
     return '股票池历史成分已部分可用，仍有部分历史锚点待继续补齐。';
+  }
+  if (isInternalAvailabilityReason(text)) {
+    return '当前快照状态正在整理，页面会继续显示已可用的数据。';
   }
   return text;
 }

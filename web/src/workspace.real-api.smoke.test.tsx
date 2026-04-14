@@ -28,14 +28,17 @@ function requiredLiveEnv(name: string): string {
   return value;
 }
 
-const LIVE_CREATION_SESSION_ID = requiredLiveEnv('LIVE_CREATION_SESSION_ID');
-const LIVE_STRATEGY_ID = requiredLiveEnv('LIVE_STRATEGY_ID');
-const LIVE_OPTIMIZATION_STRATEGY_ID = requiredLiveEnv('LIVE_OPTIMIZATION_STRATEGY_ID');
-const LIVE_RUN_ID = requiredLiveEnv('LIVE_RUN_ID');
+const LIVE_CREATION_SESSION_ID = liveApiEnabled ? requiredLiveEnv('LIVE_CREATION_SESSION_ID') : '';
+const LIVE_STRATEGY_ID = liveApiEnabled ? requiredLiveEnv('LIVE_STRATEGY_ID') : '';
+const LIVE_OPTIMIZATION_STRATEGY_ID = liveApiEnabled ? requiredLiveEnv('LIVE_OPTIMIZATION_STRATEGY_ID') : '';
+const LIVE_RUN_ID = liveApiEnabled ? requiredLiveEnv('LIVE_RUN_ID') : '';
 
 let originalFetch: typeof fetch | undefined;
 
 beforeAll(() => {
+  if (!liveApiEnabled) {
+    return;
+  }
   vi.stubEnv('VITE_API_BASE_URL', LIVE_API_BASE);
   originalFetch = globalThis.fetch.bind(globalThis);
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
@@ -64,6 +67,9 @@ afterEach(() => {
 });
 
 afterAll(() => {
+  if (!liveApiEnabled) {
+    return;
+  }
   if (originalFetch) {
     globalThis.fetch = originalFetch;
   }

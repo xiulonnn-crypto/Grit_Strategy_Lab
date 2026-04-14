@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from .backtest_engine import MarketBar
-from .fallback_provider import ProviderAvailability
+from .fallback_provider import ProviderAvailability, ProviderExecutionSignal
 from .yahoo_provider import SymbolMarketData
 
 
@@ -17,6 +17,13 @@ _LONGBRIDGE_PROBE_SYMBOL = "AAPL.US"
 _LONGBRIDGE_PROBE_DAYS = 14
 _LONGBRIDGE_CLIENTS: dict[tuple[str, str, str], dict[str, Any]] = {}
 _LONGBRIDGE_CLIENTS_LOCK = threading.Lock()
+_LONGBRIDGE_SYMBOL_ALIASES = {
+    "BRK-A": "BRK.A",
+    "BRK-B": "BRK.B",
+    "BF-A": "BF.A",
+    "BF-B": "BF.B",
+}
+_LONGBRIDGE_SYMBOL_ALIASES_REVERSE = {value: key for key, value in _LONGBRIDGE_SYMBOL_ALIASES.items()}
 
 
 def _read_env(*names: str) -> str:
@@ -27,7 +34,7 @@ def _read_env(*names: str) -> str:
     return ""
 
 
-def _normalize_us_symbol(symbol: str) -> tuple[str, str]:
+def _canonical_us_symbol(symbol: str) -> str:
     text = str(symbol or "").strip().upper()
     if not text:
         raise RuntimeError("Symbol is required.")
@@ -38,7 +45,23 @@ def _normalize_us_symbol(symbol: str) -> tuple[str, str]:
         base_symbol = ticker
     else:
         base_symbol = text
-    return f"{base_symbol}.US", base_symbol
+    normalized_base = _LONGBRIDGE_SYMBOL_ALIASES_REVERSE.get(base_symbol, base_symbol)
+    return normalized_base
+
+
+def _history_symbol_candidates(symbol: str) -> tuple[list[str], str]:
+    base_symbol = _canonical_us_symbol(symbol)
+    provider_symbols: list[str] = []
+    aliased = _LONGBRIDGE_SYMBOL_ALIASES.get(base_symbol)
+    if aliased:
+        provider_symbols.append(aliased)
+    elif "-" in base_symbol:
+        left, right = base_symbol.split("-", 1)
+        if left and right and len(right) <= 2 and left.replace(".", "").isalnum() and right.isalnum():
+            provider_symbols.append(f"{left}.{right}")
+    provider_symbols.append(base_symbol)
+    ordered = [f"{candidate}.US" for candidate in dict.fromkeys(provider_symbols)]
+    return ordered, base_symbol
 
 
 def _load_sdk() -> Any:
@@ -236,6 +259,16 @@ def _is_connection_limit_error(exc: Exception) -> bool:
     return "connections limitation" in str(exc or "").lower()
 
 
+def _is_quota_limited_error(exc: Exception) -> bool:
+    detail = str(exc or "")
+    return "301607" in detail or "out of limit" in detail.lower()
+
+
+def _is_invalid_symbol_error(exc: Exception) -> bool:
+    detail = str(exc or "")
+    return "301600" in detail or "invalid symbol" in detail.lower()
+
+
 class _LongbridgeBase:
     history_since = LONGBRIDGE_MIN_HISTORY_DATE
 
@@ -319,64 +352,130 @@ class LongbridgeQuoteProvider(_LongbridgeBase):
         if start_date < self.history_since:
             raise RuntimeError("Longbridge US history is available from 2010-06-01 onward.")
 
-        normalized_symbol, base_symbol = _normalize_us_symbol(symbol)
+        normalized_symbols, base_symbol = _history_symbol_candidates(symbol)
         retried = False
 
+        selected_symbol: str | None = None
+        last_symbol_error: Exception | None = None
         bars: list[MarketBar] = []
         warnings: list[str] = []
-        seen_dates: set[str] = set()
-        current_start = start_date
-        chunk_days = 720
 
-        while current_start <= end_date:
-            current_end = min(end_date, current_start + timedelta(days=chunk_days))
-            try:
-                bundle = self._client_bundle(reset=retried)
-                lb = bundle["sdk"]
-                ctx = bundle["ctx"]
-                payload = _call_history_by_date(ctx, lb, normalized_symbol, current_start, current_end)
-                rows = _extract_rows(payload, "candlesticks", "secu_candlesticks")
-                if not rows and isinstance(payload, dict):
-                    rows = _extract_rows(payload, "data", "results")
-                chunk_count = 0
-                for row in rows:
-                    row_map = _as_mapping(row)
-                    trade_date = _timestamp_to_date(row_map.get("timestamp") or row_map.get("date"))
-                    if not trade_date or trade_date in seen_dates:
+        for normalized_symbol in normalized_symbols:
+            symbol_rows_found = False
+            symbol_bars: list[MarketBar] = []
+            symbol_warnings: list[str] = []
+            seen_dates: set[str] = set()
+            current_start = start_date
+            chunk_days = 720
+            static_ok = False
+
+            while True:
+                try:
+                    bundle = self._client_bundle(reset=retried)
+                    ctx = bundle["ctx"]
+                    static_rows = _extract_rows(_call_static_info(ctx, normalized_symbol), "secu_static_info", "static_info")
+                    if static_rows:
+                        static_ok = True
+                    break
+                except Exception as exc:
+                    if not retried and _is_connection_limit_error(exc):
+                        retried = True
                         continue
-                    open_value = row_map.get("open")
-                    close_value = row_map.get("close")
-                    if open_value is None or close_value is None:
-                        continue
-                    bars.append(
-                        MarketBar(
-                            date=trade_date,
-                            open=_coerce_float(open_value),
-                            high=_coerce_float(row_map.get("high"), _coerce_float(open_value)),
-                            low=_coerce_float(row_map.get("low"), _coerce_float(open_value)),
-                            close=_coerce_float(close_value),
-                            adj_close=_coerce_float(row_map.get("adj_close", close_value), _coerce_float(close_value)),
-                            volume=_coerce_float(row_map.get("volume")),
+                    last_symbol_error = exc
+                    if _is_invalid_symbol_error(exc):
+                        break
+                    raise ProviderExecutionSignal(
+                        f"Longbridge static info probe failed for {base_symbol}: {exc}",
+                        status="failed",
+                        reason="static_info_probe_failed",
+                        metadata={"provider_symbol": normalized_symbol},
+                    ) from exc
+
+            if not static_ok:
+                continue
+
+            while current_start <= end_date:
+                current_end = min(end_date, current_start + timedelta(days=chunk_days))
+                try:
+                    bundle = self._client_bundle(reset=retried)
+                    lb = bundle["sdk"]
+                    ctx = bundle["ctx"]
+                    payload = _call_history_by_date(ctx, lb, normalized_symbol, current_start, current_end)
+                    rows = _extract_rows(payload, "candlesticks", "secu_candlesticks")
+                    if not rows and isinstance(payload, dict):
+                        rows = _extract_rows(payload, "data", "results")
+                    chunk_count = 0
+                    for row in rows:
+                        row_map = _as_mapping(row)
+                        trade_date = _timestamp_to_date(row_map.get("timestamp") or row_map.get("date"))
+                        if not trade_date or trade_date in seen_dates:
+                            continue
+                        open_value = row_map.get("open")
+                        close_value = row_map.get("close")
+                        if open_value is None or close_value is None:
+                            continue
+                        symbol_bars.append(
+                            MarketBar(
+                                date=trade_date,
+                                open=_coerce_float(open_value),
+                                high=_coerce_float(row_map.get("high"), _coerce_float(open_value)),
+                                low=_coerce_float(row_map.get("low"), _coerce_float(open_value)),
+                                close=_coerce_float(close_value),
+                                adj_close=_coerce_float(row_map.get("adj_close", close_value), _coerce_float(close_value)),
+                                volume=_coerce_float(row_map.get("volume")),
+                            )
                         )
+                        seen_dates.add(trade_date)
+                        chunk_count += 1
+                    if chunk_count == 0:
+                        symbol_warnings.append(
+                            f"Longbridge returned no usable candlesticks for {normalized_symbol} between {current_start.isoformat()} and {current_end.isoformat()}."
+                        )
+                    else:
+                        symbol_rows_found = True
+                except Exception as exc:
+                    if not retried and _is_connection_limit_error(exc):
+                        retried = True
+                        continue
+                    last_symbol_error = exc
+                    if _is_quota_limited_error(exc):
+                        raise ProviderExecutionSignal(
+                            f"Longbridge history is currently quota-limited for {base_symbol}: {exc}",
+                            status="limited",
+                            reason="history_kline_symbol_count_out_of_limit",
+                            metadata={"provider_symbol": normalized_symbol, "error_code": "301607"},
+                        ) from exc
+                    if _is_invalid_symbol_error(exc):
+                        symbol_bars = []
+                        symbol_warnings = []
+                        symbol_rows_found = False
+                        break
+                    symbol_warnings.append(
+                        f"Longbridge history chunk {current_start.isoformat()} to {current_end.isoformat()} failed: {exc}"
                     )
-                    seen_dates.add(trade_date)
-                    chunk_count += 1
-                if chunk_count == 0:
-                    warnings.append(
-                        f"Longbridge returned no usable candlesticks for {normalized_symbol} between {current_start.isoformat()} and {current_end.isoformat()}."
-                    )
-            except Exception as exc:
-                if not retried and _is_connection_limit_error(exc):
-                    retried = True
-                    continue
-                warnings.append(
-                    f"Longbridge history chunk {current_start.isoformat()} to {current_end.isoformat()} failed: {exc}"
-                )
-            current_start = current_end + timedelta(days=1)
+                current_start = current_end + timedelta(days=1)
+
+            if symbol_rows_found:
+                bars = symbol_bars
+                warnings = symbol_warnings
+                selected_symbol = normalized_symbol
+                break
 
         bars.sort(key=lambda item: item.date)
         if not bars:
-            raise RuntimeError(f"No usable Longbridge history rows returned for {base_symbol}")
+            if last_symbol_error and _is_invalid_symbol_error(last_symbol_error):
+                raise ProviderExecutionSignal(
+                    f"Longbridge does not support symbol {base_symbol} for US history.",
+                    status="skipped",
+                    reason="unsupported_symbol_for_longbridge_history",
+                    metadata={"provider_symbols": normalized_symbols},
+                ) from last_symbol_error
+            raise ProviderExecutionSignal(
+                f"No usable Longbridge history rows returned for {base_symbol}",
+                status="empty",
+                reason="no_usable_longbridge_history_rows",
+                metadata={"provider_symbols": normalized_symbols},
+            )
         return SymbolMarketData(
             symbol=base_symbol,
             bars=bars,
@@ -387,6 +486,7 @@ class LongbridgeQuoteProvider(_LongbridgeBase):
             warnings=warnings,
             metadata={
                 "provider": self.provider_name,
+                "provider_symbol": selected_symbol or normalized_symbols[0],
                 "official_api": True,
                 "history_since": self.history_since.isoformat(),
                 "bar_count": len(bars),
@@ -427,52 +527,55 @@ class LongbridgeStaticInfoProvider(_LongbridgeBase):
     def resolve_identity(self, symbol: str) -> dict[str, Any] | None:
         if not self._has_credentials():
             return None
-        normalized_symbol, base_symbol = _normalize_us_symbol(symbol)
+        normalized_symbols, base_symbol = _history_symbol_candidates(symbol)
         retried = False
-        while True:
-            try:
-                bundle = self._client_bundle(reset=retried)
-                ctx = bundle["ctx"]
-                payload = _call_static_info(ctx, normalized_symbol)
-                rows = _extract_rows(payload, "secu_static_info", "static_info")
-                if not rows:
-                    rows = _extract_rows(payload, "data", "results")
-                if not rows:
-                    return None
-                break
-            except Exception as exc:
-                if not retried and _is_connection_limit_error(exc):
-                    retried = True
-                    continue
-                raise
-
-        for row in rows:
-            row_map = _as_mapping(row)
-            row_symbol = str(row_map.get("symbol") or "").upper()
-            if row_symbol and row_symbol not in {normalized_symbol, base_symbol}:
-                continue
-            company_name = (
-                row_map.get("name_en")
-                or row_map.get("name_cn")
-                or row_map.get("name_hk")
-                or row_map.get("name")
-                or base_symbol
-            )
-            return {
-                "symbol": base_symbol,
-                "canonical_symbol": row_symbol or normalized_symbol,
-                "company_name": company_name,
-                "cik": str(row_map.get("cik") or row_map.get("cik_str") or ""),
-                "exchange": row_map.get("exchange") or "",
-                "ipo_date": row_map.get("listing_date") or row_map.get("ipo_date") or "",
-                "delisting_date": row_map.get("delisting_date") or row_map.get("delisted_date") or "",
-                "source": self.provider_name,
-                "valid_from": None,
-                "valid_to": None,
-                "metadata": {
-                    "provider": self.provider_name,
-                    "symbol_region": "US",
-                    "supports_current_latest_window": True,
-                },
-            }
+        for normalized_symbol in normalized_symbols:
+            while True:
+                try:
+                    bundle = self._client_bundle(reset=retried)
+                    ctx = bundle["ctx"]
+                    payload = _call_static_info(ctx, normalized_symbol)
+                    rows = _extract_rows(payload, "secu_static_info", "static_info")
+                    if not rows:
+                        rows = _extract_rows(payload, "data", "results")
+                    if not rows:
+                        break
+                    for row in rows:
+                        row_map = _as_mapping(row)
+                        row_symbol = str(row_map.get("symbol") or "").upper()
+                        if row_symbol and row_symbol not in {normalized_symbol, base_symbol}:
+                            continue
+                        company_name = (
+                            row_map.get("name_en")
+                            or row_map.get("name_cn")
+                            or row_map.get("name_hk")
+                            or row_map.get("name")
+                            or base_symbol
+                        )
+                        return {
+                            "symbol": base_symbol,
+                            "canonical_symbol": row_symbol or normalized_symbol,
+                            "company_name": company_name,
+                            "cik": str(row_map.get("cik") or row_map.get("cik_str") or ""),
+                            "exchange": row_map.get("exchange") or "",
+                            "ipo_date": row_map.get("listing_date") or row_map.get("ipo_date") or "",
+                            "delisting_date": row_map.get("delisting_date") or row_map.get("delisted_date") or "",
+                            "source": self.provider_name,
+                            "valid_from": None,
+                            "valid_to": None,
+                            "metadata": {
+                                "provider": self.provider_name,
+                                "provider_symbol": normalized_symbol,
+                                "symbol_region": "US",
+                                "supports_current_latest_window": True,
+                            },
+                        }
+                    break
+                except Exception as exc:
+                    if not retried and _is_connection_limit_error(exc):
+                        retried = True
+                        continue
+                    if _is_invalid_symbol_error(exc):
+                        break
+                    raise
         return None

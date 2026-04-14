@@ -1,6 +1,6 @@
-## Design System
+## 设计系统
 
-Always read `DESIGN.md` before making any UI, layout, color, spacing, or typography decision.
-If `docs/GSL_UI_V1_PLAN.md` conflicts with `DESIGN.md` on visuals, `DESIGN.md` wins.
-Current visual baseline is the 2026-04-09 live UI: fog-gray background, white cards, teal primary, soft radii, and restrained gradients.
-In reviews and QA, flag regressions toward the older colder/harder style unless the user explicitly asks for that direction.
+在做任何 UI、布局、颜色、间距或字体决策之前，始终先阅读 `DESIGN.md`。
+如果 `docs/GSL_UI_V1_PLAN.md` 与 `DESIGN.md` 在视觉规则上冲突，以 `DESIGN.md` 为准。
+当前视觉基线是 2026-04-09 的运行中 UI：浅雾灰背景、白色卡片、青绿色主色、柔和圆角，以及克制使用的渐变。
+在评审和 QA 中，如果界面回退到更早那种更冷、更硬的风格，应视为视觉回归，除非用户明确要求那个方向。

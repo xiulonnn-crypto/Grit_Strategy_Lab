@@ -1,3 +1,5 @@
+import time
+
 from fastapi.testclient import TestClient
 
 from grit_backtest_platform.api import create_app
@@ -59,9 +61,17 @@ def test_recovery_baseline_vertical_slice(tmp_path):
     assert submitted.status_code == 200
     run_id = submitted.json()["id"]
 
-    detail = client.get(f"/backtest-runs/{run_id}/detail")
-    assert detail.status_code == 200
-    detail_payload = detail.json()
+    deadline = time.time() + 5.0
+    detail_payload = submitted.json()
+    while time.time() < deadline:
+        detail = client.get(f"/backtest-runs/{run_id}/detail")
+        assert detail.status_code == 200
+        detail_payload = detail.json()
+        if detail_payload["status"] not in {"QUEUED", "RUNNING"}:
+            break
+        time.sleep(0.05)
+
+    assert detail_payload["status"] in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
     assert detail_payload["metrics"]["cagr"] is not None
     assert detail_payload["chart_series"]
     assert detail_payload["monthly_returns"]

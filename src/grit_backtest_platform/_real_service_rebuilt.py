@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -75,6 +76,7 @@ SNAPSHOT_SYSTEM_MEMORY_EMERGENCY_LIMIT = 0.95
 SNAPSHOT_REFRESH_HEARTBEAT_INTERVAL_SECONDS = 1.0
 SNAPSHOT_REFRESH_HEARTBEAT_GRACE_SECONDS = 30.0
 SNAPSHOT_REFRESH_WORKER_DISCOVERY_TIMEOUT_SECONDS = 3.0
+DIRECT_REFRESH_SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9.-]{0,11}$")
 
 
 class SnapshotBlockingError(ValueError):
@@ -375,24 +377,44 @@ class RealBacktestPlatformService(BacktestPlatformService):
         ).strip()
         return universe_name.upper()
 
-    def _looks_like_direct_symbol(self, value: str) -> bool:
+    def _normalize_refresh_symbol(self, value: Any) -> str | None:
         normalized = str(value or "").strip().upper()
-        return bool(normalized) and normalized.isascii() and normalized.replace(".", "").isalnum()
+        if not normalized or not normalized.isascii():
+            return None
+        if normalized.endswith(".US"):
+            normalized = normalized[:-3]
+        return normalized if DIRECT_REFRESH_SYMBOL_PATTERN.fullmatch(normalized) else None
+
+    def _normalize_refresh_symbols(self, values: Sequence[Any]) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for item in values:
+            normalized = self._normalize_refresh_symbol(item)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered.append(normalized)
+        return ordered
+
+    def _looks_like_direct_symbol(self, value: str) -> bool:
+        return self._normalize_refresh_symbol(value) is not None
 
     def _direct_symbol_universe_symbol(self, strategy: Mapping[str, Any]) -> str | None:
         universe_name = self._normalized_universe_name(strategy)
         if universe_name in {"SP500", "S&P500", "SP-500", "NASDAQ100", "NASDAQ-100", "NDX100", "NDX-100"}:
             return None
-        if self._looks_like_direct_symbol(universe_name):
-            return universe_name
+        normalized_universe_symbol = self._normalize_refresh_symbol(universe_name)
+        if normalized_universe_symbol:
+            return normalized_universe_symbol
         if str(strategy.get("strategy_type") or "").upper() == "GRID":
             benchmark_symbol = str(
                 strategy.get("benchmark_symbol")
                 or (strategy.get("parameters") or {}).get("benchmark_symbol")
                 or "QQQ"
             ).strip().upper()
-            if self._looks_like_direct_symbol(benchmark_symbol):
-                return benchmark_symbol
+            normalized_benchmark_symbol = self._normalize_refresh_symbol(benchmark_symbol)
+            if normalized_benchmark_symbol:
+                return normalized_benchmark_symbol
         return None
 
     def _uses_direct_symbol_universe(self, strategy: Mapping[str, Any]) -> bool:
@@ -557,15 +579,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         raw_symbols = metadata.get("missing_symbols") or []
         if not isinstance(raw_symbols, list):
             return []
-        seen: set[str] = set()
-        ordered: list[str] = []
-        for item in raw_symbols:
-            symbol = str(item or "").strip().upper()
-            if not symbol or symbol in seen:
-                continue
-            seen.add(symbol)
-            ordered.append(symbol)
-        return ordered
+        return self._normalize_refresh_symbols(raw_symbols)
 
     def _snapshot_repair_cursor(self, snapshot: Mapping[str, Any] | None) -> int:
         metadata = dict(snapshot.get("metadata") or {}) if snapshot else {}
@@ -589,7 +603,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         for universe_key in sorted(latest_by_universe):
             snapshot = latest_by_universe[universe_key]
             for symbol in getattr(snapshot, "normalized_symbols", []) or []:
-                normalized = str(symbol or "").strip().upper()
+                normalized = self._normalize_refresh_symbol(symbol)
                 if not normalized or normalized in seen:
                     continue
                 seen.add(normalized)
@@ -597,7 +611,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         return ordered
 
     def _repair_symbol_batch(self, symbols: Sequence[str], cursor: int, batch_size: int) -> tuple[list[str], int]:
-        ordered = [str(item or "").strip().upper() for item in symbols if str(item or "").strip()]
+        ordered = self._normalize_refresh_symbols(symbols)
         if not ordered:
             return [], 0
         normalized_cursor = cursor % len(ordered)
@@ -609,7 +623,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         return deduped, next_cursor
 
     def _symbol_batches(self, symbols: Sequence[str], batch_size: int) -> list[list[str]]:
-        ordered = [str(item or "").strip().upper() for item in symbols if str(item or "").strip()]
+        ordered = self._normalize_refresh_symbols(symbols)
         if not ordered:
             return []
         normalized_batch_size = max(1, int(batch_size or 1))
@@ -821,8 +835,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 or (strategy.get("parameters") or {}).get("benchmark_symbol")
                 or ""
             ).strip().upper()
-            if self._looks_like_direct_symbol(benchmark_symbol):
-                extras.add(benchmark_symbol)
+            normalized_benchmark_symbol = self._normalize_refresh_symbol(benchmark_symbol)
+            if normalized_benchmark_symbol:
+                extras.add(normalized_benchmark_symbol)
         return extras
 
     def _canonical_progress_target_symbols(
@@ -835,33 +850,38 @@ class RealBacktestPlatformService(BacktestPlatformService):
         existing_corporate_missing: Sequence[str],
     ) -> list[str]:
         target_symbols = {
-            str(row.get("symbol") or "").strip().upper()
+            normalized_symbol
             for row in self.market_data_repository.load_universe_memberships()
-            if str(row.get("symbol") or "").strip()
+            for normalized_symbol in [self._normalize_refresh_symbol(row.get("symbol"))]
+            if normalized_symbol
         }
         target_symbols.update(self._snapshot_progress_extra_symbols())
         if target_symbols:
             return sorted(target_symbols)
 
         candidate_symbols = {
-            str(item or "").strip().upper()
+            normalized_symbol
             for item in progress_target_symbols
-            if str(item or "").strip()
+            for normalized_symbol in [self._normalize_refresh_symbol(item)]
+            if normalized_symbol
         }
         candidate_symbols.update(
-            str(item.get("symbol") or "").strip().upper()
+            normalized_symbol
             for item in existing_price_coverage
-            if str(item.get("symbol") or "").strip()
+            for normalized_symbol in [self._normalize_refresh_symbol(item.get("symbol"))]
+            if normalized_symbol
         )
         candidate_symbols.update(
-            str(item.get("symbol") or "").strip().upper()
+            normalized_symbol
             for item in existing_corporate_coverage
-            if str(item.get("symbol") or "").strip()
+            for normalized_symbol in [self._normalize_refresh_symbol(item.get("symbol"))]
+            if normalized_symbol
         )
         candidate_symbols.update(
-            str(item or "").strip().upper()
+            normalized_symbol
             for item in [*existing_price_missing, *existing_corporate_missing]
-            if str(item or "").strip()
+            for normalized_symbol in [self._normalize_refresh_symbol(item)]
+            if normalized_symbol
         )
         return sorted(candidate_symbols)
 
@@ -883,6 +903,355 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 latest_symbols.add(symbol)
         return latest_effective_date, latest_symbols
 
+    def _empty_dataset_provider_telemetry(self) -> dict[str, dict[str, Any]]:
+        def _bucket() -> dict[str, Any]:
+            return {
+                "providers": {},
+                "attempted_providers": set(),
+                "skipped_providers": set(),
+                "unavailable_providers": set(),
+            }
+
+        return {
+            DATASET_PRICE_SNAPSHOT_ID: _bucket(),
+            DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID: _bucket(),
+        }
+
+    def _provider_metric_bucket(
+        self,
+        telemetry: dict[str, dict[str, Any]],
+        snapshot_id: str,
+        provider_name: str,
+    ) -> dict[str, Any]:
+        snapshot_bucket = telemetry.setdefault(
+            snapshot_id,
+            {
+                "providers": {},
+                "attempted_providers": set(),
+                "skipped_providers": set(),
+                "unavailable_providers": set(),
+            },
+        )
+        providers = snapshot_bucket.setdefault("providers", {})
+        return providers.setdefault(
+            provider_name,
+            {
+                "kinds": set(),
+                "reasons": set(),
+                "attempted_symbols": 0,
+                "succeeded_symbols": 0,
+                "selected_primary_symbols": 0,
+                "succeeded_not_selected_symbols": 0,
+                "failed_symbols": 0,
+                "limited_symbols": 0,
+                "skipped_symbols": 0,
+                "empty_symbols": 0,
+                "unavailable_symbols": 0,
+            },
+        )
+
+    def _record_provider_result(
+        self,
+        telemetry: dict[str, dict[str, Any]],
+        *,
+        snapshot_id: str,
+        result: Mapping[str, Any],
+    ) -> None:
+        provider_name = str(result.get("provider") or "").strip()
+        if not provider_name:
+            return
+        status = str(result.get("status") or "unknown").strip().lower()
+        kind = str(result.get("kind") or "unknown").strip().lower()
+        snapshot_bucket = telemetry.setdefault(
+            snapshot_id,
+            {
+                "providers": {},
+                "attempted_providers": set(),
+                "skipped_providers": set(),
+                "unavailable_providers": set(),
+            },
+        )
+        metric_bucket = self._provider_metric_bucket(telemetry, snapshot_id, provider_name)
+        metric_bucket["kinds"].add(kind)
+        detail = str(result.get("reason") or result.get("error") or "").strip()
+        if detail:
+            metric_bucket.setdefault("reasons", set()).add(detail)
+        if status in {"succeeded", "failed", "empty"}:
+            snapshot_bucket["attempted_providers"].add(provider_name)
+            metric_bucket["attempted_symbols"] += 1
+        if status == "succeeded":
+            metric_bucket["succeeded_symbols"] += 1
+            selection_status = str(result.get("selection_status") or "").strip().lower()
+            if selection_status == "selected_primary":
+                metric_bucket["selected_primary_symbols"] += 1
+            elif selection_status == "succeeded_not_selected":
+                metric_bucket["succeeded_not_selected_symbols"] += 1
+        elif status == "failed":
+            metric_bucket["failed_symbols"] += 1
+        elif status == "limited":
+            snapshot_bucket["attempted_providers"].add(provider_name)
+            metric_bucket["attempted_symbols"] += 1
+            metric_bucket["limited_symbols"] += 1
+        elif status == "empty":
+            metric_bucket["empty_symbols"] += 1
+        elif status == "skipped":
+            snapshot_bucket["skipped_providers"].add(provider_name)
+            metric_bucket["skipped_symbols"] += 1
+        elif status == "unavailable":
+            snapshot_bucket["unavailable_providers"].add(provider_name)
+            metric_bucket["unavailable_symbols"] += 1
+
+    def _record_market_data_provider_metadata(
+        self,
+        telemetry: dict[str, dict[str, Any]],
+        metadata: Mapping[str, Any] | None,
+    ) -> None:
+        if not isinstance(metadata, Mapping):
+            return
+        provider_results = metadata.get("provider_results") or []
+        for item in provider_results:
+            if not isinstance(item, Mapping):
+                continue
+            kind = str(item.get("kind") or "").strip().lower()
+            if kind in {"history", "history_availability"}:
+                self._record_provider_result(
+                    telemetry,
+                    snapshot_id=DATASET_PRICE_SNAPSHOT_ID,
+                    result=item,
+                )
+            if kind in {"history", "history_availability", "earnings", "earnings_availability", "filings", "filings_availability"}:
+                self._record_provider_result(
+                    telemetry,
+                    snapshot_id=DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
+                    result=item,
+                )
+
+    def _merge_dataset_provider_telemetry(
+        self,
+        base: dict[str, dict[str, Any]],
+        incoming: Mapping[str, Any] | None,
+    ) -> dict[str, dict[str, Any]]:
+        if not isinstance(incoming, Mapping):
+            return base
+        for snapshot_id, snapshot_payload in incoming.items():
+            if not isinstance(snapshot_payload, Mapping):
+                continue
+            target_bucket = base.setdefault(
+                str(snapshot_id),
+                {
+                    "providers": {},
+                    "attempted_providers": set(),
+                    "skipped_providers": set(),
+                    "unavailable_providers": set(),
+                },
+            )
+            for field in ("attempted_providers", "skipped_providers", "unavailable_providers"):
+                target_bucket.setdefault(field, set()).update(
+                    str(item)
+                    for item in (snapshot_payload.get(field) or [])
+                    if str(item).strip()
+                )
+            for provider_name, provider_payload in (snapshot_payload.get("providers") or {}).items():
+                if not isinstance(provider_payload, Mapping):
+                    continue
+                metric_bucket = self._provider_metric_bucket(base, str(snapshot_id), str(provider_name))
+                metric_bucket["kinds"].update(
+                    str(item)
+                    for item in (provider_payload.get("kinds") or [])
+                    if str(item).strip()
+                )
+                metric_bucket.setdefault("reasons", set()).update(
+                    str(item)
+                    for item in (provider_payload.get("reasons") or [])
+                    if str(item).strip()
+                )
+                for metric_name in (
+                    "attempted_symbols",
+                    "succeeded_symbols",
+                    "selected_primary_symbols",
+                    "succeeded_not_selected_symbols",
+                    "failed_symbols",
+                    "limited_symbols",
+                    "skipped_symbols",
+                    "empty_symbols",
+                    "unavailable_symbols",
+                ):
+                    metric_bucket[metric_name] += int(provider_payload.get(metric_name) or 0)
+        return base
+
+    def _provider_row_breakdown(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> dict[str, dict[str, int]]:
+        breakdown: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            provider_name = str(row.get("source") or "").strip()
+            symbol = str(row.get("symbol") or "").strip().upper()
+            if not provider_name:
+                continue
+            bucket = breakdown.setdefault(
+                provider_name,
+                {
+                    "landed_row_count": 0,
+                    "symbols": set(),
+                },
+            )
+            bucket["landed_row_count"] += 1
+            if symbol:
+                bucket["symbols"].add(symbol)
+        return {
+            provider_name: {
+                "landed_row_count": int(payload["landed_row_count"]),
+                "landed_symbol_count": len(payload["symbols"]),
+            }
+            for provider_name, payload in breakdown.items()
+        }
+
+    def _finalize_dataset_provider_telemetry(
+        self,
+        telemetry: Mapping[str, Any] | None,
+        *,
+        price_bars: Sequence[Mapping[str, Any]],
+        corporate_actions: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        normalized: dict[str, Any] = {}
+        landed_breakdowns = {
+            DATASET_PRICE_SNAPSHOT_ID: self._provider_row_breakdown(price_bars),
+            DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID: self._provider_row_breakdown(corporate_actions),
+        }
+        for snapshot_id in (DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID, DATASET_PRICE_SNAPSHOT_ID):
+            payload = telemetry.get(snapshot_id) if isinstance(telemetry, Mapping) else None
+            providers_payload = payload.get("providers") if isinstance(payload, Mapping) else {}
+            normalized_providers: dict[str, Any] = {}
+            provider_names = set((providers_payload or {}).keys()) | set(landed_breakdowns[snapshot_id].keys())
+            for provider_name in sorted(provider_names):
+                source_payload = (
+                    providers_payload.get(provider_name)
+                    if isinstance(providers_payload, Mapping)
+                    else {}
+                ) or {}
+                landed_payload = landed_breakdowns[snapshot_id].get(provider_name) or {}
+                normalized_providers[provider_name] = {
+                    "kinds": sorted(
+                        str(item)
+                        for item in (source_payload.get("kinds") or [])
+                        if str(item).strip()
+                    ),
+                    "reasons": sorted(
+                        str(item)
+                        for item in (source_payload.get("reasons") or [])
+                        if str(item).strip()
+                    ),
+                    "attempted_symbols": int(source_payload.get("attempted_symbols") or 0),
+                    "succeeded_symbols": int(source_payload.get("succeeded_symbols") or 0),
+                    "selected_primary_symbols": int(source_payload.get("selected_primary_symbols") or 0),
+                    "succeeded_not_selected_symbols": int(source_payload.get("succeeded_not_selected_symbols") or 0),
+                    "failed_symbols": int(source_payload.get("failed_symbols") or 0),
+                    "limited_symbols": int(source_payload.get("limited_symbols") or 0),
+                    "skipped_symbols": int(source_payload.get("skipped_symbols") or 0),
+                    "empty_symbols": int(source_payload.get("empty_symbols") or 0),
+                    "unavailable_symbols": int(source_payload.get("unavailable_symbols") or 0),
+                    "landed_row_count": int(landed_payload.get("landed_row_count") or 0),
+                    "landed_symbol_count": int(landed_payload.get("landed_symbol_count") or 0),
+                }
+            normalized[snapshot_id] = {
+                "attempted_providers": sorted(
+                    str(item)
+                    for item in ((payload or {}).get("attempted_providers") or [])
+                    if str(item).strip()
+                ),
+                "skipped_providers": sorted(
+                    str(item)
+                    for item in ((payload or {}).get("skipped_providers") or [])
+                    if str(item).strip()
+                ),
+                "unavailable_providers": sorted(
+                    str(item)
+                    for item in ((payload or {}).get("unavailable_providers") or [])
+                    if str(item).strip()
+                ),
+                "providers": normalized_providers,
+            }
+        return normalized
+
+    def _build_universe_provider_summary(
+        self,
+        *,
+        snapshot_id: str,
+        anchor_snapshots: Sequence[Any],
+        membership_rows: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        ordered_anchor_snapshots = sorted(anchor_snapshots, key=lambda item: item.effective_date)
+        source_names = sorted({str(item.source) for item in ordered_anchor_snapshots if item.source})
+        fallback_sources = sorted({str(item.fallback_source) for item in ordered_anchor_snapshots if item.fallback_source})
+        latest_snapshot = ordered_anchor_snapshots[-1] if ordered_anchor_snapshots else None
+        historical_provider = (
+            str((latest_snapshot.metadata or {}).get("historical_constituent_provider") or "").strip()
+            if latest_snapshot is not None
+            else ""
+        )
+        probe_status = (
+            str((latest_snapshot.metadata or {}).get("historical_constituent_probe_status") or "").strip()
+            if latest_snapshot is not None
+            else ""
+        )
+        probe_error = (
+            str((latest_snapshot.metadata or {}).get("historical_constituent_probe_error") or "").strip()
+            if latest_snapshot is not None
+            else ""
+        )
+        providers: dict[str, Any] = {}
+        attempted_providers = set(source_names)
+        skipped_providers: set[str] = set()
+        unavailable_providers: set[str] = set()
+        if historical_provider:
+            attempted_providers.add(historical_provider)
+        if historical_provider and probe_status and probe_status != "available":
+            skipped_providers.add(historical_provider)
+            unavailable_providers.add(historical_provider)
+        membership_breakdown = self._provider_row_breakdown(membership_rows)
+        for provider_name in source_names:
+            landed_anchor_count = sum(1 for item in ordered_anchor_snapshots if str(item.source or "") == provider_name)
+            landed_payload = membership_breakdown.get(provider_name) or {}
+            providers[provider_name] = {
+                "status": "succeeded",
+                "landed_anchor_count": int(landed_anchor_count),
+                "landed_row_count": int(landed_payload.get("landed_row_count") or 0),
+                "landed_symbol_count": int(landed_payload.get("landed_symbol_count") or 0),
+            }
+        if historical_provider:
+            landed_anchor_count = sum(
+                1
+                for item in ordered_anchor_snapshots
+                if str((item.metadata or {}).get("source_quality") or "").lower() == "historical_constituent_api"
+            )
+            provider_bucket = providers.setdefault(
+                historical_provider,
+                {
+                    "status": "succeeded" if landed_anchor_count else "skipped",
+                    "landed_anchor_count": 0,
+                    "landed_row_count": 0,
+                    "landed_symbol_count": 0,
+                },
+            )
+            provider_bucket["status"] = (
+                "succeeded"
+                if landed_anchor_count
+                else ("skipped" if probe_status and probe_status != "available" else provider_bucket.get("status"))
+            )
+            provider_bucket["probe_status"] = probe_status or ("available" if landed_anchor_count else "")
+            if probe_error:
+                provider_bucket["reasons"] = [probe_error]
+            provider_bucket["landed_anchor_count"] = int(landed_anchor_count)
+        return {
+            "attempted_providers": sorted(attempted_providers),
+            "skipped_providers": sorted(skipped_providers),
+            "unavailable_providers": sorted(unavailable_providers),
+            "source_names": source_names,
+            "fallback_sources": fallback_sources,
+            "providers": providers,
+        }
+
     def _build_refresh_stats(
         self,
         *,
@@ -891,6 +1260,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         grouped_universe_snapshots: Mapping[str, Sequence[Any]],
         memberships_by_snapshot: Mapping[str, Sequence[Mapping[str, Any]]],
         existing_universe_memberships: Mapping[str, Sequence[Mapping[str, Any]]],
+        dataset_provider_telemetry: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         price_symbols = {
             str(item.get("symbol") or "").strip().upper()
@@ -933,18 +1303,30 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "name": str(latest_snapshot.universe_name or snapshot_id),
                 "updated_row_count": int(changed_rows),
                 "latest_anchor_date": latest_anchor_date,
+                "provider_summary": self._build_universe_provider_summary(
+                    snapshot_id=snapshot_id,
+                    anchor_snapshots=ordered_anchor_snapshots,
+                    membership_rows=memberships_by_snapshot.get(snapshot_id, []),
+                ),
             }
+        dataset_provider_summary = self._finalize_dataset_provider_telemetry(
+            dataset_provider_telemetry,
+            price_bars=price_bars,
+            corporate_actions=corporate_actions,
+        )
         return {
             "datasets": {
                 DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID: {
                     "name": "\u516c\u53f8\u884c\u4e3a\u6570\u636e",
                     "updated_symbol_count": int(len(corporate_symbols)),
                     "updated_row_count": int(len(corporate_actions)),
+                    "provider_summary": dataset_provider_summary.get(DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID, {}),
                 },
                 DATASET_PRICE_SNAPSHOT_ID: {
                     "name": "\u80a1\u7968\u4ef7\u683c\u6570\u636e",
                     "updated_symbol_count": int(len(price_symbols)),
                     "updated_row_count": int(len(price_bars)),
+                    "provider_summary": dataset_provider_summary.get(DATASET_PRICE_SNAPSHOT_ID, {}),
                 },
             },
             "universes": universes,
@@ -965,6 +1347,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         corporate_actions: list[dict[str, Any]] = []
         coverage_rows: list[CoverageSummary] = []
         corporate_coverage_rows: list[CoverageSummary] = []
+        dataset_provider_telemetry = self._empty_dataset_provider_telemetry()
         missing_symbols: list[str] = []
         corporate_missing_symbols: list[str] = []
         warnings: list[str] = []
@@ -1005,6 +1388,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 identity = fetch_result.get("identity")
                 if isinstance(identity, Mapping) and identity.get("symbol"):
                     self.market_data_repository.upsert_symbol_identity(identity)
+                error_metadata = dict(fetch_result.get("error_metadata") or {})
+                self._record_market_data_provider_metadata(dataset_provider_telemetry, error_metadata)
                 if error:
                     missing_symbols.append(symbol)
                     corporate_missing_symbols.append(symbol)
@@ -1022,6 +1407,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     getattr(market_data, "metadata", None)
                     or (market_data.get("metadata") if isinstance(market_data, Mapping) else {})
                 )
+                self._record_market_data_provider_metadata(dataset_provider_telemetry, market_data_metadata)
                 bars = list(
                     getattr(market_data, "bars", None)
                     or (market_data.get("bars", []) if isinstance(market_data, Mapping) else [])
@@ -1117,6 +1503,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "errors": errors,
             "action_partial": action_partial,
             "ordered_symbols": ordered_symbols,
+            "dataset_provider_telemetry": dataset_provider_telemetry,
         }
 
     def _select_market_data_refresh_symbols(
@@ -2962,18 +3349,32 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
         try:
             market_data = primary_provider.fetch_history(symbol, window_start, window_end)
-            return {"symbol": symbol, "market_data": market_data, "identity": identity, "error": None}
+            return {
+                "symbol": symbol,
+                "market_data": market_data,
+                "identity": identity,
+                "error": None,
+                "error_metadata": {},
+            }
         except Exception as primary_error:
+            error_metadata = dict(getattr(primary_error, "metadata", {}) or {})
             if fallback_availability and bool(fallback_availability.available):
                 try:
                     market_data = fallback_provider.fetch_history(symbol, window_start, window_end)
-                    return {"symbol": symbol, "market_data": market_data, "identity": identity, "error": None}
+                    return {
+                        "symbol": symbol,
+                        "market_data": market_data,
+                        "identity": identity,
+                        "error": None,
+                        "error_metadata": error_metadata,
+                    }
                 except Exception as fallback_error:
                     return {
                         "symbol": symbol,
                         "market_data": None,
                         "identity": identity,
                         "error": f"{symbol}: primary={primary_error}; fallback={fallback_error}",
+                        "error_metadata": error_metadata,
                     }
             reason = fallback_availability.reason if fallback_availability else "Fallback provider unavailable."
             return {
@@ -2981,6 +3382,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "market_data": None,
                 "identity": identity,
                 "error": f"{symbol}: primary={primary_error}; fallback={reason}",
+                "error_metadata": error_metadata,
             }
 
     def _all_refresh_symbols(self) -> list[str]:
@@ -2989,9 +3391,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
             symbols.update(bucket)
         for strategy in self.list_strategies():
             universe_name = str(strategy.get("universe_name") or "").strip()
-            if universe_name and universe_name.isascii() and universe_name.replace(".", "").isalnum():
-                symbols.add(universe_name.upper())
-        return sorted(symbols)
+            normalized_universe_symbol = self._normalize_refresh_symbol(universe_name)
+            if normalized_universe_symbol:
+                symbols.add(normalized_universe_symbol)
+        return sorted(self._normalize_refresh_symbols(symbols))
 
     def _resolve_universe_symbols(
         self,
@@ -3030,8 +3433,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
             return list(DEFAULT_UNIVERSE_SYMBOLS["SP500"])
         if universe_name in {"NASDAQ100", "NASDAQ-100", "NDX100", "NDX-100"}:
             return list(DEFAULT_UNIVERSE_SYMBOLS["NASDAQ100"])
-        if self._looks_like_direct_symbol(universe_name):
-            return [universe_name]
+        normalized_universe_symbol = self._normalize_refresh_symbol(universe_name)
+        if normalized_universe_symbol:
+            return [normalized_universe_symbol]
         return ["QQQ"] if str(strategy.get("strategy_type")) == "GRID" else list(DEFAULT_UNIVERSE_SYMBOLS["SP500"])
 
     def _snapshot_summary_context(self, strategy: Mapping[str, Any], request_payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -3558,6 +3962,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         corporate_actions: list[dict[str, Any]] = []
         coverage_rows: list[CoverageSummary] = []
         corporate_coverage_rows: list[CoverageSummary] = []
+        dataset_provider_telemetry = self._empty_dataset_provider_telemetry()
         missing_symbol_set: set[str] = set()
         corporate_missing_symbol_set: set[str] = set()
         action_partial = False
@@ -3616,6 +4021,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 grouped_universe_snapshots=grouped_universe_snapshots,
                 memberships_by_snapshot=memberships_by_snapshot,
                 existing_universe_memberships=existing_universe_memberships,
+                dataset_provider_telemetry=dataset_provider_telemetry,
             )
 
         def persist_partial_dataset_state() -> None:
@@ -3690,7 +4096,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         )
 
         def consume_batch_result(batch_result: dict[str, Any]) -> None:
-            nonlocal price_bars, corporate_actions, coverage_rows, corporate_coverage_rows, action_partial
+            nonlocal price_bars, corporate_actions, coverage_rows, corporate_coverage_rows, action_partial, dataset_provider_telemetry
             warnings.extend(str(item) for item in (batch_result.get("warnings") or []) if item)
             errors.extend(str(item) for item in (batch_result.get("errors") or []) if item)
             price_bars = self._merge_price_snapshot_rows(price_bars, batch_result.get("price_bars") or [])
@@ -3714,6 +4120,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 if str(item or "").strip()
             )
             action_partial = action_partial or bool(batch_result.get("action_partial"))
+            dataset_provider_telemetry = self._merge_dataset_provider_telemetry(
+                dataset_provider_telemetry,
+                batch_result.get("dataset_provider_telemetry"),
+            )
 
         if mode == "repair":
             if latest_batch_symbols:
@@ -3901,6 +4311,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             grouped_universe_snapshots=grouped_universe_snapshots,
             memberships_by_snapshot=memberships_by_snapshot,
             existing_universe_memberships=existing_universe_memberships,
+            dataset_provider_telemetry=dataset_provider_telemetry,
         )
         job = self._build_snapshot_refresh_job(
             job_id=job_id,

@@ -80,7 +80,7 @@ describe('App runtime routes', () => {
     await renderApp('#/optimization-jobs/new/config?strategy_id=strat-001&source_run_id=bt-001&entry_point=run_detail');
 
     expect(document.querySelector('.optimization-config-grid')).not.toBeNull();
-    expect(await screen.findByRole('spinbutton')).toBeInTheDocument();
+    expect((await screen.findAllByRole('spinbutton')).length).toBeGreaterThan(0);
   });
 
   it('loads the optimization results route inside the unified shell', async () => {

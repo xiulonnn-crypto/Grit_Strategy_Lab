@@ -341,6 +341,40 @@ def test_backtest_run_detail_context_view_returns_only_lazy_tabs_context(tmp_pat
     assert "trades" not in detail
 
 
+def test_backtest_run_detail_metrics_view_returns_only_summary_fields(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_grid_strategy(client, idempotency_key="materialize-grid-metrics-view")["strategy"]
+    refresh_snapshots(client)
+    submitted = submit_backtest(
+        client,
+        strategy["id"],
+        start_date=START_DATE,
+        end_date=END_DATE,
+        idempotency_key="run-grid-metrics-view",
+    )
+
+    detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail?view=metrics"))
+
+    assert detail["metrics"]["sharpe"] > 0
+    assert "analysis" not in detail
+    assert "chart_series" not in detail
+    assert "rolling_metrics" not in detail
+    assert "monthly_returns" not in detail
+    assert "drawdown_events" not in detail
+    assert "request" not in detail
+    assert "preview" not in detail
+    assert "parameter_snapshot" not in detail
+    assert "trades" not in detail
+
+    query = client.app.state.service._backtest_run_select_columns(view="metrics")
+    assert "metrics_json" in query
+    assert "chart_series_json" not in query
+    assert "trades_json" not in query
+    assert "request_json" not in query
+    assert "preview_json" not in query
+
+
 def test_single_symbol_preview_submit_bypasses_incomplete_universe_and_corporate_snapshots(tmp_path):
     client, _ = create_test_client(tmp_path)
 

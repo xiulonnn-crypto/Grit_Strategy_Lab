@@ -12,7 +12,9 @@ from .api import build_runtime_market_data_provider, create_app
 from .real_service import RealBacktestPlatformService
 from .storage import iso_now
 
-app = create_app()
+app = create_app(
+    startup_optimization_recovery_mode=os.getenv("GRIT_STARTUP_OPTIMIZATION_RECOVERY", "interrupt"),
+)
 _WINDOWS_MEMORY_JOB_HANDLE = None
 
 
@@ -122,7 +124,7 @@ def _configure_refresh_memory_guard() -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="grit_backtest_platform.main")
-    parser.add_argument("command", nargs="?", default="serve", choices=["serve", "refresh-snapshots"])
+    parser.add_argument("command", nargs="?", default="serve", choices=["serve", "refresh-snapshots", "run-optimization"])
     parser.add_argument("--reason", dest="reason", default=None)
     parser.add_argument("--mode", dest="mode", default="incremental", choices=["incremental", "repair", "full"])
     parser.add_argument("--targets", dest="targets", default=None)
@@ -182,6 +184,19 @@ def main(argv: list[str] | None = None) -> None:
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(encoding="utf-8")
         print(json.dumps(overview, ensure_ascii=False))
+        return
+
+    if args.command == "run-optimization":
+        if not args.job_id:
+            raise ValueError("--job-id is required for run-optimization")
+        service = RealBacktestPlatformService(
+            args.db_path or _default_db_path(),
+            market_data_provider=build_runtime_market_data_provider(),
+        )
+        started = service.run_optimization_job_worker(args.job_id)
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        print(json.dumps({"job_id": args.job_id, "started": bool(started)}, ensure_ascii=False))
         return
 
     uvicorn.run(app, host="0.0.0.0", port=8000)

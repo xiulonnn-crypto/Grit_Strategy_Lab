@@ -29,6 +29,23 @@ def _coerce_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _normalize_match_symbol(value: Any) -> str:
+    text = _coerce_text(value).upper()
+    if text.endswith(".US"):
+        text = text[:-3]
+    return text
+
+
+def _is_stock_row(row: dict[str, Any]) -> bool:
+    asset_type = _coerce_text(
+        row.get("assetType")
+        or row.get("securityType")
+        or row.get("assetClass")
+        or row.get("instrumentType")
+    ).lower()
+    return asset_type in {"stock", "equity", "common stock", "commonstock"}
+
+
 class TiingoSymbologyProvider:
     provider_name = "tiingo_symbology"
 
@@ -74,18 +91,20 @@ class TiingoSymbologyProvider:
         if not rows:
             return None
 
-        best_row: dict[str, Any] | None = None
+        exact_matches: list[dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            row_ticker = _coerce_text(row.get("ticker") or row.get("symbol") or row.get("tickerSymbol")).upper()
-            if row_ticker == base_symbol or row_ticker == canonical_symbol:
-                best_row = row
-                break
-            if best_row is None:
-                best_row = row
-        if best_row is None:
+            row_ticker = _normalize_match_symbol(row.get("ticker") or row.get("symbol") or row.get("tickerSymbol"))
+            row_canonical = _normalize_match_symbol(
+                row.get("tickerRegion") or row.get("canonicalSymbol") or row.get("permaTicker")
+            )
+            if row_ticker == base_symbol or row_canonical == base_symbol:
+                exact_matches.append(row)
+        if not exact_matches:
             return None
+        stock_matches = [row for row in exact_matches if _is_stock_row(row)]
+        best_row = (stock_matches or exact_matches)[0]
 
         row_ticker = _coerce_text(best_row.get("ticker") or best_row.get("symbol") or best_row.get("tickerSymbol")).upper()
         row_name = (
@@ -98,7 +117,7 @@ class TiingoSymbologyProvider:
         exchange = best_row.get("exchangeCode") or best_row.get("exchange") or best_row.get("mic") or ""
         ipo_date = best_row.get("startDate") or best_row.get("firstDate") or best_row.get("listedDate") or ""
         delisting_date = best_row.get("endDate") or best_row.get("lastDate") or best_row.get("delistingDate") or ""
-        canonical = _coerce_text(best_row.get("permaTicker") or best_row.get("tickerRegion") or best_row.get("canonicalSymbol"))
+        canonical = _coerce_text(best_row.get("tickerRegion") or best_row.get("canonicalSymbol") or best_row.get("permaTicker"))
         if not canonical:
             canonical = canonical_symbol
         return {
@@ -116,5 +135,11 @@ class TiingoSymbologyProvider:
                 "provider": self.provider_name,
                 "symbology_only": True,
                 "symbol": row_ticker or base_symbol,
+                "asset_type": _coerce_text(
+                    best_row.get("assetType")
+                    or best_row.get("securityType")
+                    or best_row.get("assetClass")
+                    or best_row.get("instrumentType")
+                ),
             },
         }

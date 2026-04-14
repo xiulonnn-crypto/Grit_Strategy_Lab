@@ -13,6 +13,21 @@ class ProviderAvailability:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+class ProviderExecutionSignal(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: str,
+        reason: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = str(status or "failed").strip().lower()
+        self.reason = str(reason or message).strip()
+        self.metadata = dict(metadata or {})
+
+
 class SecondaryMarketDataProvider(Protocol):
     provider_name: str
 
