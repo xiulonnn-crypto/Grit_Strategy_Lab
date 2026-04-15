@@ -47,6 +47,9 @@ const strategy: ApiStrategyDetail = {
     trading_logic: 'Buy 5% when RSI(6) < 30 and sell 5% when RSI(6) > 80.',
     benchmark_symbol: 'QQQ',
     observation_timeframe: 'daily',
+    weighting_method: 'equal_weight',
+    hold_rank_threshold: 120,
+    rebalance_anchor_dates: '每年01月第1个交易日；07月第1个交易日',
     bollinger_period: 20,
     rsi_period: 6,
     atr_period: 14,
@@ -138,6 +141,14 @@ describe('StrategyDetailPage', () => {
     expect(container.querySelector('.strategy-detail-history-table')).not.toBeNull();
     expect(container.querySelector('.strategy-detail-parameter-card--logic')).not.toBeNull();
     expect(container.querySelector('.workspace-recent-runs__timeline')).not.toBeNull();
+    expect(screen.getByText('权重方式')).toBeInTheDocument();
+    expect(screen.getByText('等权')).toBeInTheDocument();
+    expect(screen.getByText('保留排名阈值')).toBeInTheDocument();
+    expect(screen.getByText('120')).toBeInTheDocument();
+    expect(screen.queryByText('120%')).not.toBeInTheDocument();
+    expect(screen.getByText('调仓锚点')).toBeInTheDocument();
+    expect(screen.getByText('调优当前设置后晋升为正式版本。')).toBeInTheDocument();
+    expect(screen.getByText('初始导入。')).toBeInTheDocument();
     expect(screen.queryByRole('columnheader', { name: '修订' })).not.toBeInTheDocument();
     expect(screen.getAllByText('pv-002').length).toBeGreaterThan(0);
     expect(screen.getAllByText('pv-001').length).toBeGreaterThan(0);

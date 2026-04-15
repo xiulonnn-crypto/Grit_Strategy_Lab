@@ -3,7 +3,10 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { ApiClientProvider } from './lib/demoStoreContext';
 import { AppRouteProvider, navigateTo, parseAppHash } from './lib/appRouteContext';
 import { CreationSessionPage } from './pages/creation-session-page';
-import { OptimizationConfigPage } from './pages/optimization-lab-page';
+import {
+  OptimizationConfigPage,
+  OptimizationResultsPage,
+} from './pages/optimization-lab-page';
 import { RunDetailPage } from './pages/run-detail-page';
 import { RunsIndexPage } from './pages/runs-index-page';
 import { StrategyDetailPage } from './pages/strategy-detail-page';
@@ -32,6 +35,7 @@ const LIVE_CREATION_SESSION_ID = liveApiEnabled ? requiredLiveEnv('LIVE_CREATION
 const LIVE_STRATEGY_ID = liveApiEnabled ? requiredLiveEnv('LIVE_STRATEGY_ID') : '';
 const LIVE_OPTIMIZATION_STRATEGY_ID = liveApiEnabled ? requiredLiveEnv('LIVE_OPTIMIZATION_STRATEGY_ID') : '';
 const LIVE_RUN_ID = liveApiEnabled ? requiredLiveEnv('LIVE_RUN_ID') : '';
+const LIVE_OPTIMIZATION_JOB_ID = liveApiEnabled ? requiredLiveEnv('LIVE_OPTIMIZATION_JOB_ID') : '';
 
 let originalFetch: typeof fetch | undefined;
 
@@ -211,6 +215,31 @@ describeLiveApi('live api acceptance', () => {
       expect(
         await screen.findByDisplayValue('20', {}, { timeout: LIVE_QUERY_TIMEOUT }),
       ).toBeInTheDocument();
+      expectNoFetchFailure();
+    },
+    LIVE_TEST_TIMEOUT,
+  );
+
+  it(
+    'hydrates optimization results data against the staged local API',
+    async () => {
+      const { container } = await renderLiveRoute(
+        `#/optimization-jobs/${LIVE_OPTIMIZATION_JOB_ID}`,
+        <OptimizationResultsPage jobId={LIVE_OPTIMIZATION_JOB_ID} />,
+      );
+
+      expect(container.querySelector('.optimization-lab-page')).not.toBeNull();
+      expect(
+        await screen.findByRole(
+          'heading',
+          { level: 1, name: /参数优化：/ },
+          { timeout: LIVE_QUERY_TIMEOUT },
+        ),
+      ).toBeInTheDocument();
+      expect(
+        await screen.findAllByText('当前组合', {}, { timeout: LIVE_QUERY_TIMEOUT }),
+      ).not.toHaveLength(0);
+      expect(container.textContent).not.toContain('当前策略组合');
       expectNoFetchFailure();
     },
     LIVE_TEST_TIMEOUT,

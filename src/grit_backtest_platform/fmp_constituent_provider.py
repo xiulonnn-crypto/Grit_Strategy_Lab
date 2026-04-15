@@ -107,8 +107,18 @@ class FmpHistoricalConstituentProvider:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            if exc.code in {402, 429}:
-                raise RuntimeError(f"FMP historical constituent API unavailable ({exc.code}).") from exc
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="ignore")
+            except Exception:
+                detail = ""
+            detail_lower = detail.lower()
+            if exc.code == 429:
+                raise RuntimeError(f"FMP historical constituent API rate limited (429).") from exc
+            if exc.code == 402 or "restricted endpoint" in detail_lower or "subscription" in detail_lower:
+                raise RuntimeError(f"FMP historical constituent API entitlement unavailable (402).") from exc
+            if exc.code == 403 and "legacy endpoint" in detail_lower:
+                raise RuntimeError(f"FMP historical constituent legacy endpoint unavailable (403).") from exc
             raise RuntimeError(f"FMP historical constituent request failed ({exc.code}).") from exc
         except (urllib.error.URLError, TimeoutError, ValueError) as exc:
             raise RuntimeError(f"FMP historical constituent request failed: {exc}") from exc
@@ -236,8 +246,10 @@ class FmpHistoricalConstituentUniverseHistoryProvider:
             detail = detail or "FMP_API_KEY is not configured."
         elif "(429)" in detail or " 429" in detail or "rate limit" in detail_lower:
             status = "rate_limited"
-        elif "(402)" in detail or " 402" in detail or "payment required" in detail_lower:
-            status = "capability_unavailable"
+        elif "(402)" in detail or " 402" in detail or "entitlement unavailable" in detail_lower or "restricted endpoint" in detail_lower:
+            status = "entitlement_unavailable"
+        elif "(403)" in detail or " 403" in detail or "legacy endpoint" in detail_lower:
+            status = "legacy_endpoint_unavailable"
         elif "did not expose" in detail_lower or "returned no members" in detail_lower:
             status = "malformed_payload"
         else:
@@ -274,7 +286,7 @@ class FmpHistoricalConstituentUniverseHistoryProvider:
                 return self._request_json(endpoint)
             except RuntimeError as exc:
                 last_error = exc
-                if "(402)" in str(exc) or "(429)" in str(exc):
+                if any(code in str(exc) for code in ("(402)", "(403)", "(429)")):
                     raise
         raise RuntimeError(f"FMP historical constituent request failed: {last_error}") from last_error
 
@@ -347,7 +359,7 @@ class FmpHistoricalConstituentUniverseHistoryProvider:
         metadata = {
             "historical_constituent_provider": "fmp",
             "historical_constituent_probe_status": "available",
-            "source_quality_breakdown": {"historical_constituent_api": 1},
+            "source_quality_breakdown": {"historical_dataset": 1},
             "historical_constituent_mode": mode,
         }
         if current_count is not None:
@@ -359,7 +371,7 @@ class FmpHistoricalConstituentUniverseHistoryProvider:
             anchor=anchor,
             source=self.provider_name,
             symbols=list(symbols),
-            source_quality="historical_constituent_api",
+            source_quality="historical_dataset",
             extra_metadata=metadata,
             source_revision_id=f"{self.provider_name}-{anchor.isoformat()}",
             source_page_title=self.definition.source_page_title,

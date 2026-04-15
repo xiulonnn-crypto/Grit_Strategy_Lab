@@ -3,6 +3,7 @@ import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
 import { formatDateTime, formatPercent, formatRatio, formatShortDate } from '../lib/format';
 import { buildOptimizationConfigPath } from '../lib/optimization-routes';
+import { formatParameterLabel as formatSharedParameterLabel, formatParameterValue as formatSharedParameterValue } from '../lib/adapters';
 import type { ApiBacktestRunListItem, ApiStrategyDetail, ParameterValue } from '../types';
 import './creation-backtest.css';
 import '../page-sections/workspace-recent-runs-lane-b.css';
@@ -63,8 +64,10 @@ const PARAMETER_LABELS: Record<string, string> = {
   investment_frequency: '投入频次',
   lookback_months: '回看月数',
   skip_recent_months: '跳过最近月数',
+  hold_rank_threshold: '保留排名阈值',
   top_n: '入选数量',
   weighting_method: '权重方式',
+  rebalance_anchor_dates: '调仓锚点',
   max_position_pct: '单票上限',
   holding_count: '持仓数量',
   lookback_days: '回看天数',
@@ -135,6 +138,11 @@ const HIDDEN_HISTORY_PARAMETER_KEYS = new Set([
   'strategy_description',
 ]);
 
+const HISTORY_COMMENT_LABELS: Record<string, string> = {
+  'Initial import.': '初始导入。',
+  'Promoted after tuning the current settings.': '调优当前设置后晋升为正式版本。',
+};
+
 type ParameterCardItem = {
   key: string;
   label: string;
@@ -199,7 +207,19 @@ function timeframeLabel(value: string): string {
 }
 
 function parameterLabel(key: string): string {
-  return PARAMETER_LABELS[key] ?? key.replace(/_/g, ' ');
+  if (PARAMETER_LABELS[key]) {
+    return PARAMETER_LABELS[key];
+  }
+  const sharedLabel = formatSharedParameterLabel(key);
+  return sharedLabel !== key ? sharedLabel : key.replace(/_/g, ' ');
+}
+
+function historyCommentLabel(value: string | null | undefined): string {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) {
+    return TEXT.historyFallbackComment;
+  }
+  return HISTORY_COMMENT_LABELS[normalized] ?? normalized;
 }
 
 function hasParameterValue(value: ParameterValue | undefined): boolean {
@@ -215,10 +235,18 @@ function formatParameterValue(key: string, value: ParameterValue): string {
   if (key === 'rebalance_frequency' || key === 'investment_frequency') return rebalanceLabel(String(value));
   if (key === 'observation_timeframe') return timeframeLabel(String(value));
   if (typeof value === 'number') {
-    if (key.endsWith('_pct') || key.includes('threshold')) return `${value}%`;
+    if (key.endsWith('_pct') || ['rsi_buy_threshold', 'rsi_sell_threshold', 'deviation_threshold'].includes(key)) {
+      return `${value}%`;
+    }
     if (key.endsWith('_atr')) return `${value} ATR`;
-    if (key === 'capital' || key === 'contribution_amount') return `USD ${value.toLocaleString('en-US')}`;
+    if (key === 'capital' || key === 'contribution_amount') return `${value.toLocaleString('zh-HK')} 美元`;
     return String(value);
+  }
+  if (typeof value === 'boolean') {
+    return formatSharedParameterValue(value, key);
+  }
+  if (typeof value === 'string') {
+    return formatSharedParameterValue(value, key);
   }
   return String(value);
 }
@@ -520,7 +548,7 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
                   <thead>
                     <tr>
                       <th>版本</th>
-                      <th>参数版本 ID</th>
+                      <th>参数版本编号</th>
                       <th>更新时间</th>
                       <th>备注</th>
                       <th>字段数</th>
@@ -535,7 +563,7 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
                         </td>
                         <td>{entry.parameter_version_id}</td>
                         <td>{entry.created_at ? formatDateTime(entry.created_at) : '-'}</td>
-                        <td className="strategy-detail-history-table__comment">{entry.comment ?? TEXT.historyFallbackComment}</td>
+                        <td className="strategy-detail-history-table__comment">{historyCommentLabel(entry.comment)}</td>
                         <td>{Object.keys(entry.parameters ?? {}).length}</td>
                         <td>
                           <button className="text-button" onClick={() => setSelectedHistoryId(entry.parameter_version_id)} type="button">

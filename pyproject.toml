@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grit-backtest-platform"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Grit Strategy Lab backtest platform vertical slice"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.110",
   "uvicorn>=0.27",
   "pydantic>=2.6",
+  "yfinance>=0.2.54",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +22,9 @@ test = [
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+
+[tool.setuptools.dynamic]
+version = {attr = "grit_backtest_platform._version.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -357,6 +357,54 @@ describe('SnapshotsPage', () => {
     expect(await screen.findByText('最近刷新 4月1日 下午03:48 ·本次未新增数据。')).toBeInTheDocument();
   });
 
+  it('shows universe anchor progress when stock-pool history improves without changing membership rows', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue({
+      ...overview,
+      latest_job: {
+        ...overview.latest_job,
+        status: 'COMPLETED',
+        summary: {
+          refresh_stats: {
+            datasets: {
+              'ds-corporate-actions': {
+                name: '公司行为数据',
+                updated_symbol_count: 0,
+                updated_row_count: 0,
+              },
+              'ds-price': {
+                name: '股票价格数据',
+                updated_symbol_count: 0,
+                updated_row_count: 0,
+              },
+            },
+            universes: {
+              'un-sp500': {
+                name: '标普500',
+                updated_row_count: 0,
+                historical_anchor_delta: 0,
+                historical_anchor_count: 38,
+                anchor_count: 61,
+              },
+              'un-ndx100': {
+                name: '纳指100',
+                updated_row_count: 0,
+                historical_anchor_delta: 9,
+                historical_anchor_count: 23,
+                anchor_count: 61,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    render(<SnapshotsPage />);
+
+    expect(
+      await screen.findByText('最近刷新 4月1日 下午03:48 ·新增纳指100股票池9个历史锚点，进度23/61。'),
+    ).toBeInTheDocument();
+  });
+
   it('does not show a no-change summary while refresh is still running', async () => {
     fakeApi.getSnapshotOverview.mockResolvedValue({
       ...overview,

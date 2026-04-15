@@ -559,6 +559,32 @@ def test_named_sp500_universe_preview_bypasses_global_snapshot_status_when_reque
     assert "AAPL" in (preview["environment_summary"].get("symbols") or [])
 
 
+def test_snapshot_summary_uses_symbol_coverage_fast_path_for_unbounded_requests(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_grid_strategy(
+        client,
+        idempotency_key="materialize-grid-snapshot-coverage-fast-path",
+        benchmark_symbol="QQQ",
+    )["strategy"]
+    refresh_snapshots(client)
+
+    service = client.app.state.service
+    strategy_detail = service.get_strategy_detail(strategy["id"])
+
+    def fail_load_snapshot_price_bars(*args, **kwargs):
+        raise AssertionError("_snapshot_summary() should rely on symbol coverage for unbounded requests")
+
+    service._load_snapshot_price_bars = fail_load_snapshot_price_bars
+    summary = service._snapshot_summary(strategy_detail, {})
+
+    assert summary["status"] == "READY"
+    assert summary["blocking"] is False
+    assert summary["symbol_count"] > 0
+    assert summary["benchmark_trade_days"] > 0
+    assert summary["latest_trade_date"] is not None
+
+
 def test_buy_and_hold_dca_preview_submit_generates_recurring_monthly_trades(tmp_path):
     client, _ = create_test_client(tmp_path)
 

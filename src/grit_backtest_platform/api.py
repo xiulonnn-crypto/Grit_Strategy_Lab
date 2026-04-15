@@ -12,6 +12,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from ._version import __version__
 from .fallback_provider import ProviderExecutionSignal
 from .models import (
     BacktestRunCloneRequest,
@@ -22,6 +23,7 @@ from .models import (
     CreationMessageCreate,
     MaterializeRequest,
     OptimizationCandidateCreateRequest,
+    OptimizationJobConstraintUpdateRequest,
     OptimizationJobCreateRequest,
     ResumeOptimizationJobRequest,
     PromoteTrialRequest,
@@ -141,15 +143,28 @@ class RuntimeMarketDataProvider:
         providers: list[Any],
         missing_providers: list[str] | None = None,
         missing_provider_reasons: dict[str, str] | None = None,
+        allow_targeted_price_repair: bool = False,
     ) -> None:
         self.providers = [provider for provider in providers if provider is not None]
         self.universe_history_providers = list(default_universe_history_providers())
+        self.allow_targeted_price_repair = bool(allow_targeted_price_repair)
         self.price_providers = [
             provider
             for provider in self.providers
             if callable(getattr(provider, "fetch_history", None))
             and _provider_name(provider) not in {"alpha_vantage", "sec_edgar"}
         ]
+        self.targeted_price_repair_providers = [
+            provider
+            for provider in self.providers
+            if callable(getattr(provider, "fetch_history", None))
+            and _provider_name(provider) == "alpha_vantage"
+            and bool(getattr(provider, "supports_targeted_price_repair", False))
+        ]
+        self.targeted_price_repair_provider_names = {
+            _provider_name(provider)
+            for provider in self.targeted_price_repair_providers
+        }
         self.identity_providers = [
             provider for provider in self.providers if callable(getattr(provider, "resolve_identity", None))
         ]
@@ -167,13 +182,23 @@ class RuntimeMarketDataProvider:
             if str(provider_name).strip()
         }
 
-    def scoped_copy(self, *, exclude_provider_names: set[str] | list[str] | tuple[str, ...] | None = None) -> "RuntimeMarketDataProvider":
+    def scoped_copy(
+        self,
+        *,
+        exclude_provider_names: set[str] | list[str] | tuple[str, ...] | None = None,
+        allow_targeted_price_repair: bool | None = None,
+    ) -> "RuntimeMarketDataProvider":
         excluded = {str(name or "").strip().lower() for name in (exclude_provider_names or []) if str(name or "").strip()}
         if not excluded:
             clone = type(self)(
                 list(self.providers),
                 missing_providers=list(self.missing_providers),
                 missing_provider_reasons=dict(self.missing_provider_reasons),
+                allow_targeted_price_repair=(
+                    self.allow_targeted_price_repair
+                    if allow_targeted_price_repair is None
+                    else bool(allow_targeted_price_repair)
+                ),
             )
             clone.universe_history_providers = list(self.universe_history_providers)
             return clone
@@ -186,6 +211,11 @@ class RuntimeMarketDataProvider:
             filtered,
             missing_providers=list(self.missing_providers),
             missing_provider_reasons=dict(self.missing_provider_reasons),
+            allow_targeted_price_repair=(
+                self.allow_targeted_price_repair
+                if allow_targeted_price_repair is None
+                else bool(allow_targeted_price_repair)
+            ),
         )
         clone.universe_history_providers = list(self.universe_history_providers)
         return clone
@@ -374,6 +404,73 @@ class RuntimeMarketDataProvider:
                 )
                 break
 
+        if not bars and self.allow_targeted_price_repair:
+            for provider in self.targeted_price_repair_providers:
+                provider_name = _provider_name(provider)
+                try:
+                    payload = self._normalize_history_payload(
+                        provider_name,
+                        provider.fetch_history(symbol, start_date, end_date),
+                    )
+                except ProviderExecutionSignal as exc:
+                    if exc.status in {"failed", "limited"}:
+                        missing_labels.append(provider_name)
+                        history_missing_labels.append(provider_name)
+                    if exc.reason:
+                        warnings.append(f"{provider_name}: {exc.reason}")
+                        history_warnings.append(f"{provider_name}: {exc.reason}")
+                    provider_results.append(
+                        self._provider_result(
+                            provider_name=provider_name,
+                            kind="targeted_price_repair",
+                            status=exc.status,
+                            error=str(exc),
+                            reason=exc.reason,
+                        )
+                    )
+                    continue
+                except Exception as exc:
+                    missing_labels.append(provider_name)
+                    history_missing_labels.append(provider_name)
+                    warnings.append(f"{provider_name}: {exc}")
+                    history_warnings.append(f"{provider_name}: {exc}")
+                    provider_results.append(
+                        self._provider_result(
+                            provider_name=provider_name,
+                            kind="targeted_price_repair",
+                            status="failed",
+                            error=str(exc),
+                        )
+                    )
+                    continue
+
+                provider_warnings = list(payload["warnings"] or [])
+                warnings.extend(str(item) for item in provider_warnings if item)
+                history_warnings.extend(str(item) for item in provider_warnings if item)
+                provider_bars = list(payload.get("bars") or [])
+                provider_actions = [dict(item) for item in (payload["actions"] or []) if isinstance(item, dict)]
+                provider_results.append(
+                    self._provider_result(
+                        provider_name=provider_name,
+                        kind="targeted_price_repair",
+                        status="succeeded" if provider_bars or provider_actions else "empty",
+                        source=str(payload.get("source") or provider_name),
+                        fallback_source=payload.get("fallback_source"),
+                        bar_count=len(provider_bars),
+                        action_count=len(provider_actions),
+                        partial=bool(payload.get("partial")),
+                        reason="targeted_price_repair",
+                        selection_status="selected_primary" if provider_bars else None,
+                    )
+                )
+                if provider_bars:
+                    bars = provider_bars
+                    primary_source = str(payload.get("source") or provider_name)
+                if provider_actions:
+                    self._append_actions(actions, provider_actions, provider_name, primary_source=primary_source)
+                if bars:
+                    break
+
         for provider in self.earnings_providers:
             provider_name = _provider_name(provider)
             fetch_earnings = getattr(provider, "fetch_earnings", None)
@@ -463,7 +560,11 @@ class RuntimeMarketDataProvider:
         provider_results.extend(
             self._provider_result(
                 provider_name=provider_name,
-                kind=_missing_provider_kind(provider_name),
+                kind=(
+                    "targeted_price_repair_availability"
+                    if self.allow_targeted_price_repair and provider_name in self.targeted_price_repair_provider_names
+                    else _missing_provider_kind(provider_name)
+                ),
                 status="unavailable",
                 reason=self.missing_provider_reasons.get(provider_name) or "provider_not_configured_or_unavailable",
             )
@@ -473,12 +574,24 @@ class RuntimeMarketDataProvider:
             history_unavailable_providers = [
                 provider_name
                 for provider_name in unavailable_providers
-                if _missing_provider_kind(provider_name) == "history_availability"
+                if (
+                    _missing_provider_kind(provider_name) == "history_availability"
+                    or (
+                        self.allow_targeted_price_repair
+                        and provider_name in self.targeted_price_repair_provider_names
+                    )
+                )
             ]
             history_missing_provider_reasons = {
                 provider_name: reason
                 for provider_name, reason in self.missing_provider_reasons.items()
-                if _missing_provider_kind(provider_name) == "history_availability"
+                if (
+                    _missing_provider_kind(provider_name) == "history_availability"
+                    or (
+                        self.allow_targeted_price_repair
+                        and provider_name in self.targeted_price_repair_provider_names
+                    )
+                )
             }
             raise RuntimeMarketDataFetchError(
                 f"No provider returned market data for {symbol}. "
@@ -554,6 +667,7 @@ def build_runtime_market_data_provider() -> RuntimeMarketDataProvider:
     missing_providers: list[str] = []
     missing_provider_reasons: dict[str, str] = {}
     for provider_label, module_name, class_names in (
+        ("yfinance", "yfinance_provider", ("YfinanceMarketDataProvider",)),
         ("tiingo", "tiingo_provider", ("TiingoMarketDataProvider", "TiingoProvider")),
         ("tiingo_symbology", "tiingo_symbology_provider", ("TiingoSymbologyProvider",)),
         ("longbridge_static_info", "longbridge_provider", ("LongbridgeStaticInfoProvider",)),
@@ -588,7 +702,7 @@ def create_app(
     *,
     startup_optimization_recovery_mode: str | None = None,
 ) -> FastAPI:
-    app = FastAPI(title='Grit Backtest Platform', version='0.1.0')
+    app = FastAPI(title='Grit Backtest Platform', version=__version__)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -768,6 +882,10 @@ def create_app(
     @app.get('/optimization-jobs/{job_id}/detail')
     def optimization_job_detail(job_id: str):
         return invoke(service.get_optimization_job_detail, job_id)
+
+    @app.patch('/optimization-jobs/{job_id}')
+    def update_optimization_job(job_id: str, payload: OptimizationJobConstraintUpdateRequest):
+        return invoke(service.update_optimization_job_constraints, job_id, payload)
 
     @app.delete('/optimization-jobs/{job_id}')
     def delete_optimization_job(job_id: str):

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import csv
 import json
+import io
 import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from html.parser import HTMLParser
 from typing import Any
@@ -27,6 +29,8 @@ CURRENT_HTML_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept": "text/html,application/xhtml+xml",
 }
+INTERNET_ARCHIVE_CDX_ENDPOINT = "https://web.archive.org/cdx/search/cdx"
+INTERNET_ARCHIVE_ARCHIVED_PAGE_TEMPLATE = "https://web.archive.org/web/{timestamp}id_/{original_url}"
 
 SP500_UNIVERSE_KEY = "sp500"
 SP500_UNIVERSE_NAME = "标普500"
@@ -95,6 +99,33 @@ _SYMBOL_HEADER_ALIASES = {
     "ticker symbols",
 }
 
+SOURCE_QUALITY_HISTORICAL_DATASET = "historical_dataset"
+SOURCE_QUALITY_WIKIPEDIA_REVISION = "wikipedia_revision"
+SOURCE_QUALITY_OFFICIAL_ANNOUNCEMENT = "official_announcement"
+SOURCE_QUALITY_CURRENT_PAGE_FALLBACK = "current_page_fallback"
+SOURCE_QUALITY_STATIC_FALLBACK = "static_fallback"
+
+SOURCE_QUALITY_HISTORICAL_EQUIVALENTS = {
+    SOURCE_QUALITY_HISTORICAL_DATASET,
+    SOURCE_QUALITY_WIKIPEDIA_REVISION,
+    SOURCE_QUALITY_OFFICIAL_ANNOUNCEMENT,
+    "historical_revision_snapshot",
+    "historical_constituent_api",
+}
+
+SP500_GITHUB_CURRENT_CONSTITUENTS_URL = (
+    "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
+)
+NASDAQ100_CURATED_DATASET_URL_TEMPLATE = (
+    "https://raw.githubusercontent.com/jmccarrell/n100tickers/main/src/"
+    "nasdaq_100_ticker_history/n100-ticker-changes-{year}.yaml"
+)
+NASDAQ100_CURATED_DATASET_FIRST_YEAR = 2015
+NASDAQ100_ARCHIVED_CANDIDATE_URLS = (
+    "https://en.wikipedia.org/wiki/Nasdaq-100",
+    "https://en.wikipedia.org/wiki/NASDAQ-100",
+)
+
 
 @dataclass(frozen=True)
 class UniverseDefinition:
@@ -128,6 +159,22 @@ class ExtractedUniverseTable:
     normalized_symbols: list[str]
     unmapped_symbols: list[str]
     table_index: int
+
+
+@dataclass(frozen=True)
+class Sp500ConstituentChangeEvent:
+    effective_date: date
+    additions: list[str]
+    removals: list[str]
+    source_row: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Nasdaq100ConstituentChangeEvent:
+    effective_date: date
+    additions: list[str]
+    removals: list[str]
+    source_row: list[str] = field(default_factory=list)
 
 
 def current_fallback_url_for_definition(definition: UniverseDefinition) -> str | None:
@@ -206,6 +253,12 @@ def semiannual_anchor_dates(start_date: date, end_date: date) -> list[date]:
     return anchors
 
 
+def next_semiannual_anchor(anchor: date) -> date:
+    if anchor.month < 7:
+        return date(anchor.year, 7, 1)
+    return date(anchor.year + 1, 1, 1)
+
+
 def normalize_wikipedia_ticker(raw_value: str) -> str | None:
     cleaned = (raw_value or "").strip().upper()
     cleaned = cleaned.replace("\u00A0", "").replace(" ", "")
@@ -238,10 +291,58 @@ def _normalize_static_members(raw_symbols: list[str]) -> tuple[list[str], list[s
     return normalized, unmapped
 
 
+def _is_historical_anchor_quality(value: Any) -> bool:
+    quality = str(value or "").strip().lower()
+    return quality in SOURCE_QUALITY_HISTORICAL_EQUIVALENTS
+
+
 def _normalize_header(text: str) -> str:
     cleaned = re.sub(r"\[[^\]]+\]", "", text or "")
     cleaned = " ".join(cleaned.replace("\u00A0", " ").split()).strip().lower()
     return re.sub(r"[^a-z0-9]+", " ", cleaned).strip()
+
+
+def _strip_html_tags(value: str) -> str:
+    without_tags = re.sub(r"<[^>]+>", " ", value or "")
+    return " ".join(without_tags.replace("\u00A0", " ").split()).strip()
+
+
+def _extract_symbols_from_legacy_list_sections(
+    html: str,
+    *,
+    minimum_member_count: int,
+) -> ExtractedUniverseTable | None:
+    section_patterns = [
+        r'<h2[^>]*id="Components"[^>]*>.*?</h2>(?P<body>.*?)(?=<div class="mw-heading mw-heading2"|<h2[^>]*id=|$)',
+        r'<h2[^>]*id="NASDAQ-100"[^>]*>.*?</h2>(?P<body>.*?)(?=<div class="mw-heading mw-heading2"|<h2[^>]*id=|$)',
+    ]
+    best_symbols: list[str] = []
+    best_raw_symbols: list[str] = []
+    best_unmapped: list[str] = []
+    for pattern in section_patterns:
+        match = re.search(pattern, html or "", flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            continue
+        body = match.group("body") or ""
+        raw_symbols: list[str] = []
+        for item_html in re.findall(r"<li\b[^>]*>(.*?)</li>", body, flags=re.IGNORECASE | re.DOTALL):
+            text = _strip_html_tags(item_html)
+            for ticker_match in re.finditer(r"\(\s*([A-Z][A-Z0-9.\-]{0,9})\s*\)", text):
+                raw_symbols.append(ticker_match.group(1))
+        normalized_symbols, unmapped_symbols = _normalize_static_members(raw_symbols)
+        if len(normalized_symbols) > len(best_symbols):
+            best_symbols = list(normalized_symbols)
+            best_raw_symbols = list(raw_symbols)
+            best_unmapped = list(unmapped_symbols)
+    if len(best_symbols) < minimum_member_count:
+        return None
+    return ExtractedUniverseTable(
+        headers=["Company", "Symbol"],
+        raw_symbols=list(best_raw_symbols),
+        normalized_symbols=list(best_symbols),
+        unmapped_symbols=list(best_unmapped),
+        table_index=-1,
+    )
 
 
 def extract_symbols_from_html(
@@ -286,7 +387,13 @@ def extract_symbols_from_html(
             )
         )
     if not candidates:
-        raise ValueError("No wikipedia constituents table with a symbol or ticker column was found.")
+        legacy_section = _extract_symbols_from_legacy_list_sections(
+            html,
+            minimum_member_count=minimum_member_count,
+        )
+        if legacy_section is None:
+            raise ValueError("No wikipedia constituents table with a symbol or ticker column was found.")
+        return legacy_section
     best = max(candidates, key=lambda item: len(item.normalized_symbols))
     if len(best.normalized_symbols) < minimum_member_count:
         raise ValueError(
@@ -395,7 +502,7 @@ class StaticUniverseHistoryProvider:
                     source_revision_id=f"{self.source}-{anchor.isoformat()}",
                     metadata={
                         "coverage_mode": "point_in_time_anchor",
-                        "source_quality": "static_seed_fallback",
+                        "source_quality": SOURCE_QUALITY_STATIC_FALLBACK,
                         "seed_quality": "partial_static_seed",
                         "seed_note": "Historical universe source is still incomplete; static seed used as the last resort.",
                     },
@@ -414,12 +521,16 @@ class WikipediaRevisionUniverseHistoryProvider:
         *,
         definition: UniverseDefinition,
         official_provider: Any | None = None,
+        historical_dataset_provider: Any | None = None,
+        current_validation_provider: Any | None = None,
         fallback_provider: StaticUniverseHistoryProvider | None = None,
         retries: int = 3,
         timeout: int = 20,
     ) -> None:
         self.definition = definition
         self.official_provider = official_provider
+        self.historical_dataset_provider = historical_dataset_provider
+        self.current_validation_provider = current_validation_provider
         self.fallback_provider = fallback_provider
         self.retries = retries
         self.timeout = timeout
@@ -427,13 +538,22 @@ class WikipediaRevisionUniverseHistoryProvider:
         self._current_page_cache: ExtractedUniverseTable | None = None
 
     def load_snapshots(self, start_date: date, end_date: date) -> list[UniverseMembershipSnapshot]:
+        requested_anchors = semiannual_anchor_dates(start_date, end_date)
+        if not requested_anchors:
+            return []
+        load_end = end_date
+        if self.historical_dataset_provider is not None:
+            load_end = max(load_end, next_semiannual_anchor(requested_anchors[-1]))
         snapshots: list[UniverseMembershipSnapshot] = []
         previous_snapshot: UniverseMembershipSnapshot | None = None
-        for anchor in semiannual_anchor_dates(start_date, end_date):
+        for anchor in semiannual_anchor_dates(start_date, load_end):
             snapshot = self._load_anchor_snapshot(anchor, previous_snapshot=previous_snapshot)
             snapshots.append(snapshot)
             previous_snapshot = snapshot
-        return snapshots
+        if self.historical_dataset_provider is not None:
+            snapshots = self.historical_dataset_provider.enrich_snapshots(snapshots)
+        requested_anchor_set = set(requested_anchors)
+        return [snapshot for snapshot in snapshots if snapshot.effective_date in requested_anchor_set]
 
     def _load_anchor_snapshot(
         self,
@@ -453,11 +573,26 @@ class WikipediaRevisionUniverseHistoryProvider:
             return self._load_current_page_snapshot(anchor, historical_message)
         except Exception as current_page_error:
             current_page_message = str(current_page_error)
+        if self.current_validation_provider is not None:
+            try:
+                return self.current_validation_provider.load_anchor_snapshot(
+                    anchor,
+                    historical_message=historical_message,
+                    current_page_message=current_page_message,
+                )
+            except Exception as current_validation_error:
+                current_validation_message = str(current_validation_error)
+        else:
+            current_validation_message = ""
         try:
             return self._load_secondary_current_page_snapshot(
                 anchor,
                 historical_message=historical_message,
-                current_page_message=current_page_message,
+                current_page_message=(
+                    f"{current_page_message}; current_validation_error={current_validation_message}"
+                    if current_validation_message
+                    else current_page_message
+                ),
             )
         except Exception as secondary_current_page_error:
             secondary_current_page_message = str(secondary_current_page_error)
@@ -481,7 +616,7 @@ class WikipediaRevisionUniverseHistoryProvider:
     ) -> UniverseMembershipSnapshot | None:
         if self.official_provider is None:
             return None
-        if str((previous_snapshot.metadata or {}).get("source_quality") or "").lower() != "historical_revision_snapshot":
+        if not _is_historical_anchor_quality((previous_snapshot.metadata or {}).get("source_quality")):
             return None
         if previous_snapshot.fallback_source:
             return None
@@ -645,7 +780,7 @@ class WikipediaRevisionUniverseHistoryProvider:
             source=self.provider_name,
             fallback_source=None,
             source_revision_id=revision_id,
-            source_quality="historical_revision_snapshot",
+            source_quality=SOURCE_QUALITY_WIKIPEDIA_REVISION,
             extra_metadata={
                 "revision_timestamp": revision.get("timestamp"),
                 "anchor_mode": "historical_revision",
@@ -658,16 +793,26 @@ class WikipediaRevisionUniverseHistoryProvider:
         historical_message: str,
     ) -> UniverseMembershipSnapshot:
         extracted = self._parse_current_page_table()
+        validation_metadata: dict[str, Any] = {}
+        validator = getattr(self.current_validation_provider, "validate_current_symbols", None)
+        if callable(validator):
+            warnings = [str(item) for item in (validator(extracted.normalized_symbols) or []) if str(item).strip()]
+            if warnings:
+                validation_metadata["current_validation_warnings"] = warnings
+            validation_metadata["current_validation_source"] = str(
+                getattr(self.current_validation_provider, "provider_name", "current_validation")
+            )
         return self._build_snapshot(
             anchor=anchor,
             extracted=extracted,
             source=self.current_page_source_name,
             fallback_source=self.provider_name,
             source_revision_id=None,
-            source_quality="current_page_fallback",
+            source_quality=SOURCE_QUALITY_CURRENT_PAGE_FALLBACK,
             extra_metadata={
                 "anchor_mode": "current_page_fallback",
                 "historical_revision_error": historical_message,
+                **validation_metadata,
             },
         )
 
@@ -689,7 +834,7 @@ class WikipediaRevisionUniverseHistoryProvider:
             source=self.secondary_current_source_name,
             fallback_source=self.provider_name,
             source_revision_id=None,
-            source_quality="secondary_current_page_fallback",
+            source_quality=SOURCE_QUALITY_CURRENT_PAGE_FALLBACK,
             extra_metadata={
                 "anchor_mode": "secondary_current_page_fallback",
                 "historical_revision_error": historical_message,
@@ -711,7 +856,7 @@ class WikipediaRevisionUniverseHistoryProvider:
             {
                 "historical_revision_error": historical_message,
                 "current_page_error": current_page_message,
-                "source_quality": "static_seed_fallback",
+                "source_quality": SOURCE_QUALITY_STATIC_FALLBACK,
                 "anchor_mode": "static_seed_fallback",
             }
         )
@@ -728,6 +873,797 @@ class WikipediaRevisionUniverseHistoryProvider:
             source_page_title=fallback_snapshot.source_page_title,
             metadata=metadata,
         )
+
+
+class GithubSp500CurrentValidationProvider:
+    provider_name = "github_sp500_current_dataset"
+
+    def __init__(
+        self,
+        *,
+        definition: UniverseDefinition,
+        dataset_url: str = SP500_GITHUB_CURRENT_CONSTITUENTS_URL,
+        retries: int = 3,
+        timeout: int = 20,
+    ) -> None:
+        self.definition = definition
+        self.dataset_url = dataset_url
+        self.retries = retries
+        self.timeout = timeout
+        self._symbol_cache: list[str] | None = None
+
+    def _fetch_text(self) -> str:
+        request = urllib.request.Request(self.dataset_url, headers=CURRENT_HTML_HEADERS)
+        last_error: Exception | None = None
+        for attempt in range(self.retries):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    return response.read().decode("utf-8", errors="ignore")
+            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
+                last_error = exc
+                if attempt >= self.retries - 1:
+                    break
+                time.sleep(0.4 * (attempt + 1))
+        raise RuntimeError(f"GitHub S&P 500 current constituents request failed: {last_error}") from last_error
+
+    def _load_symbols(self) -> list[str]:
+        if self._symbol_cache is not None:
+            return list(self._symbol_cache)
+        text = self._fetch_text()
+        reader = csv.DictReader(io.StringIO(text))
+        raw_symbols = [str(row.get("Symbol") or "").strip() for row in reader if str(row.get("Symbol") or "").strip()]
+        normalized, _ = _normalize_static_members(raw_symbols)
+        if len(normalized) < self.definition.minimum_member_count:
+            raise RuntimeError(
+                f"GitHub S&P 500 current constituents looked too small ({len(normalized)} symbols < {self.definition.minimum_member_count})."
+            )
+        self._symbol_cache = list(normalized)
+        return list(self._symbol_cache)
+
+    def validate_current_symbols(self, symbols: list[str]) -> list[str]:
+        dataset_symbols = set(self._load_symbols())
+        current_symbols = {normalize_wikipedia_ticker(symbol) for symbol in symbols}
+        current_symbols.discard(None)
+        mismatch_count = len(dataset_symbols.symmetric_difference(set(current_symbols)))
+        if mismatch_count == 0:
+            return []
+        return [f"GitHub current constituents mismatch detected ({mismatch_count} symbols)."]
+
+    def load_anchor_snapshot(
+        self,
+        anchor: date,
+        *,
+        historical_message: str,
+        current_page_message: str,
+    ) -> UniverseMembershipSnapshot:
+        symbols = self._load_symbols()
+        return _snapshot_from_symbol_list(
+            definition=self.definition,
+            anchor=anchor,
+            source=self.provider_name,
+            source_revision_id=f"{self.provider_name}-{anchor.isoformat()}",
+            source_page_title=self.definition.source_page_title,
+            symbols=list(symbols),
+            fallback_source=WikipediaRevisionUniverseHistoryProvider.provider_name,
+            source_quality=SOURCE_QUALITY_CURRENT_PAGE_FALLBACK,
+            extra_metadata={
+                "anchor_mode": "github_current_dataset_fallback",
+                "historical_revision_error": historical_message,
+                "current_page_error": current_page_message,
+                "current_validation_source": self.provider_name,
+                "current_dataset_url": self.dataset_url,
+            },
+        )
+
+
+class WikipediaSp500ChangesUniverseHistoryProvider:
+    provider_name = "wikipedia_sp500_changes_table"
+
+    def __init__(
+        self,
+        *,
+        definition: UniverseDefinition,
+        retries: int = 3,
+        timeout: int = 20,
+    ) -> None:
+        self.definition = definition
+        self.retries = retries
+        self.timeout = timeout
+        self._change_events_cache: list[Sp500ConstituentChangeEvent] | None = None
+
+    def _fetch_html(self) -> str:
+        query = urllib.parse.urlencode(
+            {
+                "format": "json",
+                "formatversion": "2",
+                "action": "parse",
+                "page": self.definition.source_page_title,
+                "prop": "text",
+            }
+        )
+        request = urllib.request.Request(f"{WIKIPEDIA_API_ENDPOINT}?{query}", headers=WIKIPEDIA_HEADERS)
+        last_error: Exception | None = None
+        for attempt in range(self.retries):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                html = (payload.get("parse") or {}).get("text")
+                if not isinstance(html, str):
+                    raise RuntimeError(
+                        f"Wikipedia parse response did not include html for page={self.definition.source_page_title}."
+                    )
+                time.sleep(0.15)
+                return html
+            except urllib.error.HTTPError as exc:
+                last_error = exc
+                if exc.code == 429:
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    delay = min(max(float(retry_after or 0.0), 1.5 * (attempt + 1)), 4.0)
+                    time.sleep(delay)
+                    continue
+                if attempt >= self.retries - 1:
+                    break
+                time.sleep(0.6 * (attempt + 1))
+            except (urllib.error.URLError, TimeoutError, ValueError, KeyError, RuntimeError) as exc:
+                last_error = exc
+                if attempt >= self.retries - 1:
+                    break
+                time.sleep(0.6 * (attempt + 1))
+        raise RuntimeError(
+            f"Wikipedia S&P 500 changes table request failed for {self.definition.display_name}: {last_error}"
+        ) from last_error
+
+    def _parse_change_events(self, html: str) -> list[Sp500ConstituentChangeEvent]:
+        parser = WikipediaTableParser()
+        parser.feed(html or "")
+        selected_rows: list[list[str]] | None = None
+        for table in parser.tables:
+            if len(table) < 3:
+                continue
+            header_preview = " ".join(" ".join(row).lower() for row in table[:2])
+            if "effective date" in header_preview and "added" in header_preview and "removed" in header_preview:
+                selected_rows = table
+                break
+        if not selected_rows:
+            raise RuntimeError("Wikipedia S&P 500 changes table was not found.")
+
+        events: list[Sp500ConstituentChangeEvent] = []
+        for row in selected_rows[2:]:
+            if len(row) < 4:
+                continue
+            raw_effective_date = str(row[0] or "").strip()
+            if not raw_effective_date:
+                continue
+            parsed_effective_date: date | None = None
+            for fmt in ("%B %d, %Y", "%b %d, %Y"):
+                try:
+                    parsed_effective_date = datetime.strptime(raw_effective_date, fmt).date()
+                    break
+                except ValueError:
+                    continue
+            if parsed_effective_date is None:
+                continue
+            additions: list[str] = []
+            removals: list[str] = []
+            if len(row) > 1:
+                normalized = normalize_wikipedia_ticker(row[1])
+                if normalized:
+                    additions.append(normalized)
+            if len(row) > 3:
+                normalized = normalize_wikipedia_ticker(row[3])
+                if normalized:
+                    removals.append(normalized)
+            if not additions and not removals:
+                continue
+            events.append(
+                Sp500ConstituentChangeEvent(
+                    effective_date=parsed_effective_date,
+                    additions=additions,
+                    removals=removals,
+                    source_row=list(row),
+                )
+            )
+        if not events:
+            raise RuntimeError("Wikipedia S&P 500 changes table did not expose usable change events.")
+        return sorted(events, key=lambda item: item.effective_date)
+
+    def _load_change_events(self) -> list[Sp500ConstituentChangeEvent]:
+        if self._change_events_cache is None:
+            self._change_events_cache = self._parse_change_events(self._fetch_html())
+        return list(self._change_events_cache)
+
+    def enrich_snapshots(
+        self,
+        snapshots: Sequence[UniverseMembershipSnapshot],
+    ) -> list[UniverseMembershipSnapshot]:
+        ordered_snapshots = sorted(snapshots, key=lambda item: item.effective_date)
+        if not ordered_snapshots:
+            return []
+        baseline_snapshot: UniverseMembershipSnapshot | None = None
+        baseline_index: int | None = None
+        for index, snapshot in enumerate(ordered_snapshots):
+            if _is_historical_anchor_quality((snapshot.metadata or {}).get("source_quality")) and not snapshot.fallback_source:
+                baseline_snapshot = snapshot
+                baseline_index = index
+                break
+        if baseline_snapshot is None or baseline_index is None or baseline_index == 0:
+            return list(ordered_snapshots)
+
+        change_events = self._load_change_events()
+        oldest_change_date = min(item.effective_date for item in change_events)
+        first_supported_anchor = next(
+            (anchor for anchor in semiannual_anchor_dates(ordered_snapshots[0].effective_date, baseline_snapshot.effective_date) if anchor >= oldest_change_date),
+            None,
+        )
+        if first_supported_anchor is None:
+            return list(ordered_snapshots)
+
+        baseline_symbols = list(dict.fromkeys(baseline_snapshot.normalized_symbols))
+        baseline_anchor = baseline_snapshot.effective_date
+        updated_snapshots = list(ordered_snapshots)
+
+        for index in range(baseline_index - 1, -1, -1):
+            current_snapshot = ordered_snapshots[index]
+            anchor = current_snapshot.effective_date
+            if anchor < first_supported_anchor:
+                continue
+            if _is_historical_anchor_quality((current_snapshot.metadata or {}).get("source_quality")) and not current_snapshot.fallback_source:
+                continue
+
+            state = set(baseline_symbols)
+            applied_change_count = 0
+            for event in change_events:
+                if not (anchor < event.effective_date <= baseline_anchor):
+                    continue
+                for symbol in event.additions:
+                    if symbol in state:
+                        state.remove(symbol)
+                    applied_change_count += 1
+                for symbol in event.removals:
+                    if symbol not in state:
+                        state.add(symbol)
+                    applied_change_count += 1
+            reconstructed_symbols = sorted(state)
+            if len(reconstructed_symbols) < self.definition.minimum_member_count:
+                continue
+            updated_snapshots[index] = _snapshot_from_symbol_list(
+                definition=self.definition,
+                anchor=anchor,
+                source=self.provider_name,
+                source_revision_id=f"{self.provider_name}-{anchor.isoformat()}",
+                source_page_title=self.definition.source_page_title,
+                symbols=reconstructed_symbols,
+                fallback_source=None,
+                source_quality=SOURCE_QUALITY_HISTORICAL_DATASET,
+                extra_metadata={
+                    "anchor_mode": "wikipedia_changes_backfill",
+                    "historical_dataset_provider": self.provider_name,
+                    "historical_dataset_url": f"https://en.wikipedia.org/wiki/{urllib.parse.quote(self.definition.source_page_title.replace(' ', '_'))}",
+                    "historical_dataset_baseline_anchor": baseline_anchor.isoformat(),
+                    "historical_dataset_oldest_change_date": oldest_change_date.isoformat(),
+                    "historical_dataset_change_count": applied_change_count,
+                    "source_origin": "historical_dataset",
+                    "replaced_source_quality": (current_snapshot.metadata or {}).get("source_quality"),
+                },
+            )
+        return updated_snapshots
+
+
+class WikipediaNasdaq100ChangesUniverseHistoryProvider:
+    provider_name = "wikipedia_nasdaq100_changes_table"
+
+    def __init__(
+        self,
+        *,
+        definition: UniverseDefinition,
+        retries: int = 3,
+        timeout: int = 20,
+    ) -> None:
+        self.definition = definition
+        self.retries = retries
+        self.timeout = timeout
+        self._change_events_cache: list[Nasdaq100ConstituentChangeEvent] | None = None
+
+    def _fetch_html(self) -> str:
+        query = urllib.parse.urlencode(
+            {
+                "format": "json",
+                "formatversion": "2",
+                "action": "parse",
+                "page": self.definition.source_page_title,
+                "prop": "text",
+            }
+        )
+        request = urllib.request.Request(f"{WIKIPEDIA_API_ENDPOINT}?{query}", headers=WIKIPEDIA_HEADERS)
+        last_error: Exception | None = None
+        for attempt in range(self.retries):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                html = (payload.get("parse") or {}).get("text")
+                if not isinstance(html, str):
+                    raise RuntimeError(
+                        f"Wikipedia parse response did not include html for page={self.definition.source_page_title}."
+                    )
+                time.sleep(0.15)
+                return html
+            except urllib.error.HTTPError as exc:
+                last_error = exc
+                if exc.code == 429:
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    delay = min(max(float(retry_after or 0.0), 1.5 * (attempt + 1)), 4.0)
+                    time.sleep(delay)
+                    continue
+                if attempt >= self.retries - 1:
+                    break
+                time.sleep(0.6 * (attempt + 1))
+            except (urllib.error.URLError, TimeoutError, ValueError, KeyError, RuntimeError) as exc:
+                last_error = exc
+                if attempt >= self.retries - 1:
+                    break
+                time.sleep(0.6 * (attempt + 1))
+        raise RuntimeError(
+            f"Wikipedia Nasdaq-100 changes table request failed for {self.definition.display_name}: {last_error}"
+        ) from last_error
+
+    def _parse_change_events(self, html: str) -> list[Nasdaq100ConstituentChangeEvent]:
+        parser = WikipediaTableParser()
+        parser.feed(html or "")
+        selected_rows: list[list[str]] | None = None
+        for table in parser.tables:
+            if len(table) < 3:
+                continue
+            header_preview = " ".join(" ".join(row).lower() for row in table[:2])
+            if "date" in header_preview and "added" in header_preview and "removed" in header_preview and "reason" in header_preview:
+                selected_rows = table
+                break
+        if not selected_rows:
+            raise RuntimeError("Wikipedia Nasdaq-100 changes table was not found.")
+
+        events: list[Nasdaq100ConstituentChangeEvent] = []
+        for row in selected_rows[2:]:
+            if len(row) < 5:
+                continue
+            raw_effective_date = str(row[0] or "").strip()
+            if not raw_effective_date:
+                continue
+            parsed_effective_date: date | None = None
+            for fmt in ("%B %d, %Y", "%b %d, %Y"):
+                try:
+                    parsed_effective_date = datetime.strptime(raw_effective_date, fmt).date()
+                    break
+                except ValueError:
+                    continue
+            if parsed_effective_date is None:
+                continue
+            additions: list[str] = []
+            removals: list[str] = []
+            if len(row) > 1:
+                normalized = normalize_wikipedia_ticker(row[1])
+                if normalized:
+                    additions.append(normalized)
+            if len(row) > 3:
+                normalized = normalize_wikipedia_ticker(row[3])
+                if normalized:
+                    removals.append(normalized)
+            if not additions and not removals:
+                continue
+            events.append(
+                Nasdaq100ConstituentChangeEvent(
+                    effective_date=parsed_effective_date,
+                    additions=additions,
+                    removals=removals,
+                    source_row=list(row),
+                )
+            )
+        if not events:
+            raise RuntimeError("Wikipedia Nasdaq-100 changes table did not expose usable change events.")
+        return sorted(events, key=lambda item: item.effective_date)
+
+    def _load_change_events(self) -> list[Nasdaq100ConstituentChangeEvent]:
+        if self._change_events_cache is None:
+            self._change_events_cache = self._parse_change_events(self._fetch_html())
+        return list(self._change_events_cache)
+
+    def enrich_snapshots(
+        self,
+        snapshots: Sequence[UniverseMembershipSnapshot],
+    ) -> list[UniverseMembershipSnapshot]:
+        ordered_snapshots = sorted(snapshots, key=lambda item: item.effective_date)
+        if not ordered_snapshots:
+            return []
+        baseline_snapshot: UniverseMembershipSnapshot | None = None
+        baseline_index: int | None = None
+        for index, snapshot in enumerate(ordered_snapshots):
+            if _is_historical_anchor_quality((snapshot.metadata or {}).get("source_quality")) and not snapshot.fallback_source:
+                baseline_snapshot = snapshot
+                baseline_index = index
+                break
+        if baseline_snapshot is None or baseline_index is None or baseline_index == 0:
+            return list(ordered_snapshots)
+
+        change_events = self._load_change_events()
+        oldest_change_date = min(item.effective_date for item in change_events)
+        first_supported_anchor = next(
+            (
+                anchor
+                for anchor in semiannual_anchor_dates(ordered_snapshots[0].effective_date, baseline_snapshot.effective_date)
+                if anchor >= oldest_change_date
+            ),
+            None,
+        )
+        if first_supported_anchor is None:
+            return list(ordered_snapshots)
+
+        baseline_symbols = list(dict.fromkeys(baseline_snapshot.normalized_symbols))
+        baseline_anchor = baseline_snapshot.effective_date
+        updated_snapshots = list(ordered_snapshots)
+
+        for index in range(baseline_index - 1, -1, -1):
+            current_snapshot = ordered_snapshots[index]
+            anchor = current_snapshot.effective_date
+            if anchor < first_supported_anchor:
+                continue
+            if _is_historical_anchor_quality((current_snapshot.metadata or {}).get("source_quality")) and not current_snapshot.fallback_source:
+                continue
+
+            state = set(baseline_symbols)
+            applied_change_count = 0
+            for event in change_events:
+                if not (anchor < event.effective_date <= baseline_anchor):
+                    continue
+                for symbol in event.additions:
+                    if symbol in state:
+                        state.remove(symbol)
+                    applied_change_count += 1
+                for symbol in event.removals:
+                    if symbol not in state:
+                        state.add(symbol)
+                    applied_change_count += 1
+            reconstructed_symbols = sorted(state)
+            if len(reconstructed_symbols) < self.definition.minimum_member_count:
+                continue
+            updated_snapshots[index] = _snapshot_from_symbol_list(
+                definition=self.definition,
+                anchor=anchor,
+                source=self.provider_name,
+                source_revision_id=f"{self.provider_name}-{anchor.isoformat()}",
+                source_page_title=self.definition.source_page_title,
+                symbols=reconstructed_symbols,
+                fallback_source=None,
+                source_quality=SOURCE_QUALITY_HISTORICAL_DATASET,
+                extra_metadata={
+                    "anchor_mode": "wikipedia_changes_backfill",
+                    "historical_dataset_provider": self.provider_name,
+                    "historical_dataset_url": f"https://en.wikipedia.org/wiki/{urllib.parse.quote(self.definition.source_page_title.replace(' ', '_'))}",
+                    "historical_dataset_baseline_anchor": baseline_anchor.isoformat(),
+                    "historical_dataset_oldest_change_date": oldest_change_date.isoformat(),
+                    "historical_dataset_change_count": applied_change_count,
+                    "source_origin": "historical_dataset",
+                    "replaced_source_quality": (current_snapshot.metadata or {}).get("source_quality"),
+                },
+            )
+        return updated_snapshots
+
+
+class ArchivedNasdaq100UniverseHistoryProvider:
+    provider_name = "internet_archive_wikipedia_snapshot"
+
+    def __init__(
+        self,
+        *,
+        definition: UniverseDefinition,
+        candidate_urls: tuple[str, ...] = NASDAQ100_ARCHIVED_CANDIDATE_URLS,
+        archive_window_days: int = 180,
+        retries: int = 3,
+        timeout: int = 20,
+    ) -> None:
+        self.definition = definition
+        self.candidate_urls = tuple(candidate_urls)
+        self.archive_window_days = archive_window_days
+        self.retries = retries
+        self.timeout = timeout
+        self._text_cache: dict[str, str] = {}
+
+    def _fetch_text(self, url: str) -> str:
+        cached = self._text_cache.get(url)
+        if cached is not None:
+            return cached
+        request = urllib.request.Request(url, headers=CURRENT_HTML_HEADERS)
+        last_error: Exception | None = None
+        for attempt in range(self.retries):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    text = response.read().decode("utf-8", errors="ignore")
+                time.sleep(0.1)
+                self._text_cache[url] = text
+                return text
+            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
+                last_error = exc
+                if attempt >= self.retries - 1:
+                    break
+                time.sleep(0.5 * (attempt + 1))
+        raise RuntimeError(f"Internet Archive request failed for {url}: {last_error}") from last_error
+
+    def _lookup_archived_snapshot(self, source_url: str, anchor: date) -> tuple[str, str] | None:
+        from_timestamp = (anchor - timedelta(days=self.archive_window_days)).strftime("%Y%m%d")
+        to_timestamp = anchor.strftime("%Y%m%d") + "235959"
+        query = urllib.parse.urlencode(
+            {
+                "url": source_url,
+                "output": "json",
+                "fl": "timestamp,original,statuscode,mimetype",
+                "filter": ["statuscode:200", "mimetype:text/html"],
+                "from": from_timestamp,
+                "to": to_timestamp,
+            },
+            doseq=True,
+        )
+        payload = self._fetch_text(f"{INTERNET_ARCHIVE_CDX_ENDPOINT}?{query}")
+        rows = json.loads(payload)
+        if not isinstance(rows, list) or len(rows) <= 1:
+            return None
+        latest_timestamp = ""
+        latest_original = ""
+        for row in rows[1:]:
+            if not isinstance(row, list) or len(row) < 2:
+                continue
+            timestamp = str(row[0] or "").strip()
+            original = str(row[1] or "").strip()
+            if not timestamp or not original:
+                continue
+            if timestamp > to_timestamp:
+                continue
+            if timestamp > latest_timestamp:
+                latest_timestamp = timestamp
+                latest_original = original
+        if not latest_timestamp or not latest_original:
+            return None
+        return latest_timestamp, latest_original
+
+    def _load_anchor_snapshot(self, anchor: date) -> UniverseMembershipSnapshot | None:
+        best_candidate: tuple[str, str, str] | None = None
+        for candidate_url in self.candidate_urls:
+            snapshot = self._lookup_archived_snapshot(candidate_url, anchor)
+            if snapshot is None:
+                continue
+            timestamp, original_url = snapshot
+            if best_candidate is None or timestamp > best_candidate[0]:
+                best_candidate = (timestamp, original_url, candidate_url)
+        if best_candidate is None:
+            return None
+        timestamp, original_url, candidate_url = best_candidate
+        archive_url = INTERNET_ARCHIVE_ARCHIVED_PAGE_TEMPLATE.format(
+            timestamp=timestamp,
+            original_url=original_url,
+        )
+        html = self._fetch_text(archive_url)
+        extracted = extract_symbols_from_html(html, minimum_member_count=self.definition.minimum_member_count)
+        if len(extracted.normalized_symbols) < self.definition.minimum_member_count:
+            return None
+        return _snapshot_from_symbol_list(
+            definition=self.definition,
+            anchor=anchor,
+            source=self.provider_name,
+            source_revision_id=f"{self.provider_name}-{anchor.isoformat()}",
+            source_page_title=self.definition.source_page_title,
+            symbols=list(extracted.normalized_symbols),
+            raw_symbols=list(extracted.raw_symbols),
+            fallback_source=None,
+            source_quality=SOURCE_QUALITY_HISTORICAL_DATASET,
+            extra_metadata={
+                "anchor_mode": "archived_snapshot_backfill",
+                "historical_dataset_provider": self.provider_name,
+                "historical_dataset_url": archive_url,
+                "archived_snapshot_url": archive_url,
+                "archived_snapshot_timestamp": timestamp,
+                "archived_source_url": candidate_url,
+                "source_origin": "historical_dataset",
+            },
+        )
+
+    def enrich_snapshots(
+        self,
+        snapshots: list[UniverseMembershipSnapshot],
+    ) -> list[UniverseMembershipSnapshot]:
+        updated_snapshots = list(snapshots)
+        for index, current_snapshot in enumerate(snapshots):
+            if _is_historical_anchor_quality((current_snapshot.metadata or {}).get("source_quality")) and not current_snapshot.fallback_source:
+                continue
+            try:
+                archived_snapshot = self._load_anchor_snapshot(current_snapshot.effective_date)
+            except Exception:
+                archived_snapshot = None
+            if archived_snapshot is None:
+                continue
+            metadata = dict(archived_snapshot.metadata or {})
+            metadata["replaced_source_quality"] = (current_snapshot.metadata or {}).get("source_quality")
+            updated_snapshots[index] = replace(archived_snapshot, metadata=metadata)
+        return updated_snapshots
+
+
+class CuratedNasdaq100UniverseHistoryProvider:
+    provider_name = "github_nasdaq100_curated_history"
+
+    def __init__(
+        self,
+        *,
+        definition: UniverseDefinition,
+        fallback_provider: Any,
+        historical_dataset_provider: Any | None = None,
+        archived_snapshot_provider: Any | None = None,
+        dataset_url_template: str = NASDAQ100_CURATED_DATASET_URL_TEMPLATE,
+        first_year: int = NASDAQ100_CURATED_DATASET_FIRST_YEAR,
+        retries: int = 3,
+        timeout: int = 20,
+    ) -> None:
+        self.definition = definition
+        self.fallback_provider = fallback_provider
+        self.historical_dataset_provider = historical_dataset_provider
+        self.archived_snapshot_provider = archived_snapshot_provider
+        self.dataset_url_template = dataset_url_template
+        self.first_year = first_year
+        self.retries = retries
+        self.timeout = timeout
+        self._year_cache: dict[int, dict[str, Any]] = {}
+
+    def _fetch_text(self, url: str) -> str:
+        request = urllib.request.Request(url, headers=CURRENT_HTML_HEADERS)
+        last_error: Exception | None = None
+        for attempt in range(self.retries):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    return response.read().decode("utf-8", errors="ignore")
+            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
+                last_error = exc
+                if attempt >= self.retries - 1:
+                    break
+                time.sleep(0.4 * (attempt + 1))
+        raise RuntimeError(f"GitHub Nasdaq-100 curated dataset request failed for {url}: {last_error}") from last_error
+
+    def _parse_year_payload(self, text: str) -> dict[str, Any]:
+        year: int | None = None
+        jan1_symbols: list[str] = []
+        changes: dict[date, dict[str, list[str]]] = {}
+        current_section: str | None = None
+        current_change_date: date | None = None
+        current_change_bucket: str | None = None
+        for raw_line in text.splitlines():
+            line = raw_line.rstrip()
+            stripped = line.strip()
+            if not stripped or stripped == "---" or stripped.startswith("#"):
+                continue
+            if not line.startswith(" "):
+                current_change_date = None
+                current_change_bucket = None
+                if stripped.startswith("year:"):
+                    year = int(stripped.split(":", 1)[1].strip())
+                elif stripped.startswith("tickers_on_Jan_1:"):
+                    current_section = "jan1"
+                elif stripped.startswith("changes:"):
+                    current_section = "changes"
+                continue
+            if current_section == "jan1":
+                match = re.match(r"^\s*-\s*(.+?)\s*$", line)
+                if match:
+                    jan1_symbols.append(match.group(1).strip().strip("'\""))
+                continue
+            if current_section == "changes":
+                match = re.match(r"^\s{2}'?(\d{4}-\d{2}-\d{2})'?:\s*$", line)
+                if match:
+                    current_change_date = date.fromisoformat(match.group(1))
+                    changes.setdefault(current_change_date, {"difference": [], "union": []})
+                    current_change_bucket = None
+                    continue
+                match = re.match(r"^\s{4}(difference|union):\s*$", line)
+                if match and current_change_date is not None:
+                    current_change_bucket = match.group(1)
+                    continue
+                match = re.match(r"^\s{6}-\s*(.+?)\s*$", line)
+                if match and current_change_date is not None and current_change_bucket is not None:
+                    changes[current_change_date][current_change_bucket].append(match.group(1).strip().strip("'\""))
+        normalized_jan1, unmapped = _normalize_static_members(jan1_symbols)
+        if year is None or not normalized_jan1:
+            raise RuntimeError("Curated Nasdaq-100 dataset payload did not expose a valid year baseline.")
+        normalized_changes: dict[date, dict[str, list[str]]] = {}
+        for change_date, payload in changes.items():
+            additions, _ = _normalize_static_members(list(payload.get("union") or []))
+            deletions, _ = _normalize_static_members(list(payload.get("difference") or []))
+            normalized_changes[change_date] = {"union": additions, "difference": deletions}
+        return {
+            "year": year,
+            "tickers_on_jan_1": normalized_jan1,
+            "raw_tickers_on_jan_1": jan1_symbols,
+            "unmapped_jan_1_symbols": unmapped,
+            "changes": normalized_changes,
+        }
+
+    def _load_year(self, year: int) -> dict[str, Any]:
+        cached = self._year_cache.get(year)
+        if cached is not None:
+            return dict(cached)
+        url = self.dataset_url_template.format(year=year)
+        payload = self._parse_year_payload(self._fetch_text(url))
+        payload["dataset_url"] = url
+        self._year_cache[year] = dict(payload)
+        return dict(payload)
+
+    def _snapshot_from_year(self, anchor: date, year_payload: dict[str, Any]) -> UniverseMembershipSnapshot:
+        state = list(year_payload["tickers_on_jan_1"])
+        seen = set(state)
+        applied_changes = 0
+        for change_date in sorted(year_payload["changes"]):
+            if change_date > anchor:
+                continue
+            payload = year_payload["changes"][change_date]
+            for symbol in payload.get("difference", []):
+                if symbol in seen:
+                    seen.remove(symbol)
+                    state = [item for item in state if item != symbol]
+                applied_changes += 1
+            for symbol in payload.get("union", []):
+                if symbol not in seen:
+                    seen.add(symbol)
+                    state.append(symbol)
+                applied_changes += 1
+        return _snapshot_from_symbol_list(
+            definition=self.definition,
+            anchor=anchor,
+            source=self.provider_name,
+            source_revision_id=f"{self.provider_name}-{anchor.isoformat()}",
+            source_page_title=self.definition.source_page_title,
+            symbols=list(state),
+            fallback_source=None,
+            source_quality=SOURCE_QUALITY_HISTORICAL_DATASET,
+            extra_metadata={
+                "anchor_mode": "curated_historical_dataset",
+                "historical_dataset_provider": "jmccarrell_n100tickers",
+                "historical_dataset_year": int(year_payload["year"]),
+                "historical_dataset_url": year_payload["dataset_url"],
+                "historical_dataset_change_count": int(applied_changes),
+            },
+        )
+
+    def load_snapshots(self, start_date: date, end_date: date) -> list[UniverseMembershipSnapshot]:
+        requested_anchors = semiannual_anchor_dates(start_date, end_date)
+        anchors = list(requested_anchors)
+        if not anchors:
+            return []
+        load_end = end_date
+        if self.historical_dataset_provider is not None:
+            first_supported_anchor = date(self.first_year, 1, 1)
+            load_end = max(load_end, first_supported_anchor)
+            anchors = semiannual_anchor_dates(start_date, load_end)
+        fallback_snapshots = {
+            snapshot.effective_date: snapshot
+            for snapshot in self.fallback_provider.load_snapshots(start_date, load_end)
+        }
+        snapshots: list[UniverseMembershipSnapshot] = []
+        for anchor in anchors:
+            if anchor.year < self.first_year:
+                fallback_snapshot = fallback_snapshots.get(anchor)
+                if fallback_snapshot is None:
+                    raise RuntimeError(f"Fallback provider did not return anchor {anchor.isoformat()}.")
+                snapshots.append(fallback_snapshot)
+                continue
+            try:
+                year_payload = self._load_year(anchor.year)
+                snapshots.append(self._snapshot_from_year(anchor, year_payload))
+            except Exception as exc:
+                fallback_snapshot = fallback_snapshots.get(anchor)
+                if fallback_snapshot is None:
+                    raise
+                metadata = dict(fallback_snapshot.metadata or {})
+                metadata.setdefault("historical_dataset_provider", "jmccarrell_n100tickers")
+                metadata["historical_dataset_probe_status"] = "request_failed"
+                metadata["historical_dataset_probe_error"] = str(exc)
+                snapshots.append(replace(fallback_snapshot, metadata=metadata))
+        if self.historical_dataset_provider is not None:
+            snapshots = self.historical_dataset_provider.enrich_snapshots(snapshots)
+        if self.archived_snapshot_provider is not None:
+            snapshots = self.archived_snapshot_provider.enrich_snapshots(snapshots)
+        requested_anchor_set = set(requested_anchors)
+        return [snapshot for snapshot in snapshots if snapshot.effective_date in requested_anchor_set]
 
 
 class StaticSp500UniverseHistoryProvider(StaticUniverseHistoryProvider):
@@ -867,7 +1803,7 @@ class OfficialAnnouncementUniverseHistoryProvider:
             symbols=list(normalized_symbols),
             raw_symbols=list(normalized_symbols),
             fallback_source=None,
-            source_quality="historical_revision_snapshot",
+            source_quality=SOURCE_QUALITY_OFFICIAL_ANNOUNCEMENT,
             extra_metadata={
                 "anchor_mode": "official_announcement",
                 "official_source_kind": announcement.source_kind,
@@ -1025,6 +1961,8 @@ def static_universe_history_providers() -> list[StaticUniverseHistoryProvider]:
 
 
 def default_universe_history_providers() -> list[Any]:
+    from .fmp_constituent_provider import FmpHistoricalConstituentUniverseHistoryProvider
+
     sp500_definition = UniverseDefinition(
         universe_key=SP500_UNIVERSE_KEY,
         display_name=SP500_UNIVERSE_NAME,
@@ -1039,9 +1977,15 @@ def default_universe_history_providers() -> list[Any]:
         source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
         minimum_member_count=80,
     )
-    sp500_wikipedia_provider = WikipediaRevisionUniverseHistoryProvider(
+    sp500_free_provider = WikipediaRevisionUniverseHistoryProvider(
         definition=sp500_definition,
         official_provider=SpGlobalAnnouncementUniverseProvider(
+            definition=sp500_definition,
+        ),
+        historical_dataset_provider=WikipediaSp500ChangesUniverseHistoryProvider(
+            definition=sp500_definition,
+        ),
+        current_validation_provider=GithubSp500CurrentValidationProvider(
             definition=sp500_definition,
         ),
         fallback_provider=StaticSp500UniverseHistoryProvider(),
@@ -1053,9 +1997,25 @@ def default_universe_history_providers() -> list[Any]:
         ),
         fallback_provider=StaticNasdaq100UniverseHistoryProvider(),
     )
+    nasdaq100_free_provider = CuratedNasdaq100UniverseHistoryProvider(
+        definition=nasdaq100_definition,
+        fallback_provider=nasdaq100_wikipedia_provider,
+        historical_dataset_provider=WikipediaNasdaq100ChangesUniverseHistoryProvider(
+            definition=nasdaq100_definition,
+        ),
+        archived_snapshot_provider=ArchivedNasdaq100UniverseHistoryProvider(
+            definition=nasdaq100_definition,
+        ),
+    )
     return [
-        sp500_wikipedia_provider,
-        nasdaq100_wikipedia_provider,
+        FmpHistoricalConstituentUniverseHistoryProvider(
+            definition=sp500_definition,
+            fallback_provider=sp500_free_provider,
+        ),
+        FmpHistoricalConstituentUniverseHistoryProvider(
+            definition=nasdaq100_definition,
+            fallback_provider=nasdaq100_free_provider,
+        ),
     ]
 
 

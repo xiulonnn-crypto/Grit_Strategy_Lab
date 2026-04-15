@@ -199,6 +199,11 @@ function createHttpApiClient(): DemoApi {
       ),
     listOptimizationJobs: () => requestJson<ApiOptimizationJobListItem[]>('/optimization-jobs'),
     getOptimizationJobDetail: (id) => requestJson<ApiOptimizationJobDetail>(`/optimization-jobs/${encodeURIComponent(id)}/detail`),
+    updateOptimizationJobConstraints: (jobId, payload) =>
+      requestJson<ApiOptimizationJobDetail>(
+        `/optimization-jobs/${encodeURIComponent(jobId)}`,
+        withJsonBody(payload, { method: 'PATCH' }),
+      ),
     deleteOptimizationJob: (id) =>
       requestJson<ApiOptimizationJobDeleteResult>(`/optimization-jobs/${encodeURIComponent(id)}`, {
         method: 'DELETE',

@@ -86,8 +86,13 @@ describe('App runtime routes', () => {
   it('loads the optimization results route inside the unified shell', async () => {
     await renderApp('#/optimization-jobs/opt-001');
 
-    expect(document.querySelector('.optimization-results-grid')).not.toBeNull();
-    await waitFor(() => expect(document.querySelectorAll('.optimization-results-grid table').length).toBeGreaterThan(0));
+    expect(document.querySelector('.optimization-lab-panel--hero')).not.toBeNull();
+    await waitFor(() =>
+      expect(
+        document.querySelector('.optimization-results-grid') ??
+          document.querySelector('.optimization-results-empty'),
+      ).not.toBeNull(),
+    );
   });
 
   it('renders the runs index page on the formal route', async () => {

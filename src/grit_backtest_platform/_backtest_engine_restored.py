@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from statistics import mean, pstdev
@@ -126,12 +127,65 @@ def _normalize_bars(bars: Iterable[Mapping[str, Any]]) -> list[MarketBar]:
     return normalized
 
 
-def _rebalance_keys(trade_dates: list[str], frequency: str) -> list[int]:
+def _parse_rebalance_anchor_dates(value: Any) -> list[tuple[int, int]]:
+    if value is None:
+        return []
+    anchors: list[tuple[int, int]] = []
+    raw_values = value if isinstance(value, (list, tuple, set)) else [value]
+    for raw_value in raw_values:
+        text = str(raw_value or "").strip()
+        if not text:
+            continue
+        matches = list(re.finditer(r"(?:(?:\d{4})[-/])?(\d{1,2})[-/月](\d{1,2})", text))
+        matches.extend(re.finditer(r"(\d{1,2})\s*月\s*第?\s*(\d{1,2})", text))
+        for match in matches:
+            month = _to_float(match.group(1), 0.0)
+            day = _to_float(match.group(2), 0.0)
+            try:
+                candidate = (int(month), int(day))
+                date(2000, candidate[0], candidate[1])
+            except (TypeError, ValueError):
+                continue
+            if candidate not in anchors:
+                anchors.append(candidate)
+    return sorted(anchors)
+
+
+def _rebalance_keys(
+    trade_dates: list[str],
+    frequency: str,
+    anchor_dates: list[tuple[int, int]] | None = None,
+) -> list[int]:
     if not trade_dates:
         return []
     normalized_frequency = str(frequency or "").lower()
     if normalized_frequency == "never":
         return [0]
+    if anchor_dates:
+        keys = [0]
+        first_trade_date = _parse_date(trade_dates[0])
+        last_trade_date = _parse_date(trade_dates[-1])
+        scheduled_dates: list[date] = []
+        for year in range(first_trade_date.year, last_trade_date.year + 1):
+            for month, day in anchor_dates:
+                try:
+                    scheduled = date(year, month, day)
+                except ValueError:
+                    continue
+                if first_trade_date < scheduled <= last_trade_date:
+                    scheduled_dates.append(scheduled)
+        scheduled_dates.sort()
+        scheduled_index = 0
+        for index, raw_date in enumerate(trade_dates[1:], start=1):
+            current_date = _parse_date(raw_date)
+            previous_date = _parse_date(trade_dates[index - 1])
+            while scheduled_index < len(scheduled_dates) and scheduled_dates[scheduled_index] <= previous_date:
+                scheduled_index += 1
+            if scheduled_index < len(scheduled_dates) and current_date >= scheduled_dates[scheduled_index]:
+                keys.append(index)
+                while scheduled_index < len(scheduled_dates) and scheduled_dates[scheduled_index] <= current_date:
+                    scheduled_index += 1
+        return keys
     keys: list[int] = [0]
     previous_date = _parse_date(trade_dates[0])
     previous_bucket = (previous_date.isocalendar().year, previous_date.isocalendar().week)
@@ -209,17 +263,47 @@ def _tradeable_close(bar: MarketBar) -> float:
     return bar.open
 
 
-def _signal_score(series: list[MarketBar], index: int, lookback_days: int, template_key: str) -> float | None:
-    if index - lookback_days < 0:
+def _signal_score(
+    series: list[MarketBar],
+    index: int,
+    lookback_days: int,
+    template_key: str,
+    *,
+    skip_recent_days: int = 0,
+) -> float | None:
+    end_index = index - max(skip_recent_days, 0)
+    start_index = end_index - lookback_days
+    if start_index < 0 or end_index < 0 or end_index >= len(series):
         return None
-    current = series[index].adj_close
-    prior = series[index - lookback_days].adj_close
+    current = series[end_index].adj_close
+    prior = series[start_index].adj_close
     if prior <= 0:
         return None
     raw = current / prior - 1.0
     if template_key in {"mean_reversion", "reversion"}:
         return -raw
     return raw
+
+
+def _momentum_target_weights(
+    selected: list[tuple[float, str]],
+    weighting_method: str,
+) -> dict[str, float]:
+    if not selected:
+        return {}
+    normalized_method = str(weighting_method or "equal_weight").strip().lower()
+    if normalized_method == "score_weighted":
+        scores = [score for score, _ in selected]
+        floor = min(scores)
+        adjusted_scores = [max(score - floor, 0.0) + 1e-6 for score in scores]
+        total = sum(adjusted_scores)
+        if total > 0:
+            return {
+                symbol: adjusted_scores[index] / total
+                for index, (_, symbol) in enumerate(selected)
+            }
+    equal_weight = 1.0 / len(selected)
+    return {symbol: equal_weight for _, symbol in selected}
 
 
 def _bollinger_bands(series: list[MarketBar], index: int, period: int, width: float = 2.0) -> tuple[float, float] | None:
@@ -853,7 +937,18 @@ def run_backtest_prepared(
     template_key = str(parameters.get("template_key") or parameters.get("strategy_type") or "momentum")
     holding_count = max(int(parameters.get("holding_count") or parameters.get("top_n") or 5), 1)
     lookback_days = max(int(parameters.get("lookback_days") or parameters.get("signal_lookback_days") or 63), 5)
+    skip_recent_days = max(
+        int(
+            parameters.get("skip_recent_days")
+            or (_to_float(parameters.get("skip_recent_months"), 0.0) * 21)
+            or 0
+        ),
+        0,
+    )
+    hold_rank_threshold = max(int(parameters.get("hold_rank_threshold") or holding_count), 1)
+    weighting_method = str(parameters.get("weighting_method") or "equal_weight").strip().lower()
     frequency = str(parameters.get("rebalance_frequency") or "weekly").lower()
+    anchor_dates = _parse_rebalance_anchor_dates(parameters.get("rebalance_anchor_dates"))
     symbol_series = prepared.symbol_series
     benchmark_series = prepared.benchmark_series
     master_dates = list(prepared.master_dates)
@@ -884,16 +979,21 @@ def run_backtest_prepared(
             benchmark_series=benchmark_series,
             master_dates=master_dates,
         )
-    if len(master_dates) < lookback_days + 2:
+    minimum_history = lookback_days + skip_recent_days
+    if len(master_dates) < minimum_history + 2:
         empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         return BacktestResult(metrics=empty_metrics, warnings=["Not enough benchmark dates for requested lookback"])
     index_by_symbol = {
         symbol: {bar.date: idx for idx, bar in enumerate(series)}
         for symbol, series in symbol_series.items()
     }
-    rebalance_indexes = [idx for idx in _rebalance_keys(master_dates, frequency) if idx >= lookback_days and idx < len(master_dates) - 1]
+    rebalance_indexes = [
+        idx
+        for idx in _rebalance_keys(master_dates, frequency, anchor_dates)
+        if idx >= minimum_history and idx < len(master_dates) - 1
+    ]
     if not rebalance_indexes:
-        rebalance_indexes = [min(max(lookback_days, 0), len(master_dates) - 2)]
+        rebalance_indexes = [min(max(minimum_history, 0), len(master_dates) - 2)]
     target_weights: dict[str, float] = {}
     equity = config.initial_equity
     equity_curve = [equity]
@@ -905,7 +1005,7 @@ def run_backtest_prepared(
     total_turnover = 0.0
     latest_rebalance_turnover = 0.0
     rebalances = set(rebalance_indexes)
-    for master_index in range(lookback_days, len(master_dates) - 1):
+    for master_index in range(minimum_history, len(master_dates) - 1):
         as_of_date = master_dates[master_index]
         execution_date = master_dates[master_index + 1]
         if master_index in rebalances:
@@ -915,13 +1015,39 @@ def run_backtest_prepared(
                 position_index = index_by_symbol[symbol].get(as_of_date)
                 if position_index is None:
                     continue
-                score = _signal_score(series, position_index, lookback_days, template_key)
+                score = _signal_score(
+                    series,
+                    position_index,
+                    lookback_days,
+                    template_key,
+                    skip_recent_days=skip_recent_days,
+                )
                 if score is None:
                     continue
                 scored.append((score, symbol))
             scored.sort(reverse=True)
-            selected = [symbol for _, symbol in scored[:holding_count]]
-            next_weights = {symbol: 1.0 / len(selected) for symbol in selected} if selected else {}
+            retained_positions: list[tuple[float, str]] = []
+            current_symbols = {
+                symbol
+                for symbol, weight in target_weights.items()
+                if weight > 1e-9
+            }
+            if current_symbols:
+                for rank, entry in enumerate(scored, start=1):
+                    score, symbol = entry
+                    if symbol in current_symbols and rank <= hold_rank_threshold:
+                        retained_positions.append((score, symbol))
+            selected_positions = list(retained_positions[:holding_count])
+            selected_symbols = {symbol for _, symbol in selected_positions}
+            for score, symbol in scored:
+                if symbol in selected_symbols:
+                    continue
+                selected_positions.append((score, symbol))
+                selected_symbols.add(symbol)
+                if len(selected_positions) >= holding_count:
+                    break
+            selected_positions = selected_positions[:holding_count]
+            next_weights = _momentum_target_weights(selected_positions, weighting_method)
             all_symbols = set(target_weights) | set(next_weights)
             for symbol in sorted(all_symbols):
                 previous_weight = target_weights.get(symbol, 0.0)
@@ -1011,7 +1137,7 @@ def run_backtest_prepared(
         daily_performance=daily_points,
         trades=trades,
         warnings=[],
-        effective_date=master_dates[lookback_days],
+        effective_date=master_dates[minimum_history],
         oos_start_date=master_dates[oos_cut] if master_dates else None,
         coverage_ratio=coverage_ratio,
         coverage_days=coverage_days,

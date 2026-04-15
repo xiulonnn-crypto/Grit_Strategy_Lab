@@ -269,6 +269,8 @@ function createRunFixture(strategy: ApiStrategyDetail): ApiBacktestRunDetail {
       out_of_sample_sharpe: 0.87,
       max_drawdown: -0.064,
       max_drawdown_pct: -6.4,
+      turnover: 0.013,
+      turnover_pct: 0.013,
     },
     warnings: [],
     chart_series: [],
@@ -840,6 +842,54 @@ function createOptimizationTestApi(): DemoApi {
     ): Promise<ApiOptimizationJobDetail> {
       return advanceJob(findJob(jobId));
     },
+    async updateOptimizationJobConstraints(
+      jobId: string,
+      payload,
+    ): Promise<ApiOptimizationJobDetail> {
+      const state = findJob(jobId);
+      if (String(state.job.status).toUpperCase() !== "COMPLETED") {
+        throw new Error("Only completed optimization jobs can be re-filtered.");
+      }
+      const nextConstraintPresetKey =
+        payload.constraint_preset_key ??
+        state.job.summary.constraint_preset_key ??
+        state.job.request.constraint_preset_key ??
+        "balanced";
+      const nextConstraintLabel =
+        payload.constraint_label ??
+        state.job.summary.constraint_label ??
+        state.job.request.constraint_label ??
+        "平衡型";
+      const nextConstraints = structuredClone(
+        payload.constraints ??
+          state.job.summary.constraints ??
+          state.job.request.constraints ??
+          [],
+      );
+      state.job = {
+        ...state.job,
+        updated_at: nowIso(),
+        request: {
+          ...state.job.request,
+          constraint_preset_key: nextConstraintPresetKey,
+          constraint_label: nextConstraintLabel,
+          constraints: structuredClone(nextConstraints),
+        },
+        summary: {
+          ...state.job.summary,
+          constraint_preset_key: nextConstraintPresetKey,
+          constraint_label: nextConstraintLabel,
+          constraints: structuredClone(nextConstraints),
+        },
+        result: {
+          ...state.job.result,
+          constraint_preset_key: nextConstraintPresetKey,
+          constraint_label: nextConstraintLabel,
+          constraints: structuredClone(nextConstraints),
+        },
+      };
+      return cloneJob(state.job);
+    },
     async deleteOptimizationJob(jobId: string) {
       findJob(jobId);
       jobs.delete(jobId);
@@ -912,6 +962,251 @@ function createOptimizationTestApi(): DemoApi {
       throw new Error("not implemented");
     },
   };
+}
+
+function createZeroPassConstraintApi(): DemoApi {
+  const api = createOptimizationTestApi();
+  const originalGetOptimizationJobDetail =
+    api.getOptimizationJobDetail.bind(api);
+  let currentJob: ApiOptimizationJobDetail | null = null;
+
+  async function ensureJob(jobId: string): Promise<ApiOptimizationJobDetail> {
+    if (jobId !== "opt-001") {
+      return originalGetOptimizationJobDetail(jobId);
+    }
+    if (!currentJob) {
+      currentJob = await originalGetOptimizationJobDetail(jobId);
+      const zeroPassConstraints = defaultConstraintPayload.constraints.map(
+        (constraint) => {
+          if (constraint.key === "max_drawdown_pct") {
+            return {
+              ...constraint,
+              value: 5,
+              baseline_value: 5,
+            };
+          }
+          if (constraint.key === "stability") {
+            return {
+              ...constraint,
+              value: 90,
+              baseline_value: 90,
+            };
+          }
+          return structuredClone(constraint);
+        },
+      );
+      currentJob.request.constraint_preset_key = "defensive";
+      currentJob.request.constraint_label = "稳健型（自定义）";
+      currentJob.request.constraints = structuredClone(zeroPassConstraints);
+      currentJob.summary.constraint_preset_key = "defensive";
+      currentJob.summary.constraint_label = "稳健型（自定义）";
+      currentJob.summary.constraints = structuredClone(zeroPassConstraints);
+      currentJob.result.constraint_preset_key = "defensive";
+      currentJob.result.constraint_label = "稳健型（自定义）";
+      currentJob.result.constraints = structuredClone(zeroPassConstraints);
+      currentJob.candidates = currentJob.candidates.map((candidate, index) => ({
+        ...candidate,
+        title: index === 0 ? "放宽后通过 1" : `暂未通过 ${index + 1}`,
+        label: index === 0 ? "放宽后通过 1" : `暂未通过 ${index + 1}`,
+        metrics: {
+          ...candidate.metrics,
+          annualized_return: 0.132 - index * 0.004,
+          return_sharpe: index === 0 ? 1.12 : 1.07 - index * 0.03,
+          out_of_sample_sharpe: index === 0 ? 0.92 : 0.88 - index * 0.05,
+          max_drawdown_pct: -11.5 - index * 2.1,
+          stability: 72 - index * 4,
+          turnover: 8.6 + index * 0.4,
+        },
+      }));
+      currentJob.result.best_candidate_id = currentJob.candidates[0]?.id ?? null;
+      currentJob.result.best_candidate_label =
+        currentJob.candidates[0]?.label ?? null;
+    }
+    return currentJob;
+  }
+
+  api.getOptimizationJobDetail = async (
+    jobId: string,
+  ): Promise<ApiOptimizationJobDetail> =>
+    structuredClone(await ensureJob(jobId));
+
+  api.updateOptimizationJobConstraints = async (
+    jobId,
+    payload,
+  ): Promise<ApiOptimizationJobDetail> => {
+    const job = await ensureJob(jobId);
+    const nextConstraintPresetKey =
+      payload.constraint_preset_key ??
+      job.summary.constraint_preset_key ??
+      job.request.constraint_preset_key ??
+      "balanced";
+    const nextConstraintLabel =
+      payload.constraint_label ??
+      job.summary.constraint_label ??
+      job.request.constraint_label ??
+      "平衡型";
+    const nextConstraints = structuredClone(
+      payload.constraints ?? job.summary.constraints ?? job.request.constraints,
+    );
+    currentJob = {
+      ...job,
+      updated_at: nowIso(),
+      request: {
+        ...job.request,
+        constraint_preset_key: nextConstraintPresetKey,
+        constraint_label: nextConstraintLabel,
+        constraints: structuredClone(nextConstraints),
+      },
+      summary: {
+        ...job.summary,
+        constraint_preset_key: nextConstraintPresetKey,
+        constraint_label: nextConstraintLabel,
+        constraints: structuredClone(nextConstraints),
+      },
+      result: {
+        ...job.result,
+        constraint_preset_key: nextConstraintPresetKey,
+        constraint_label: nextConstraintLabel,
+        constraints: structuredClone(nextConstraints),
+      },
+    };
+    return structuredClone(currentJob);
+  };
+
+  return api;
+}
+
+function createBaselineOnlyPassApi(): DemoApi {
+  const api = createOptimizationTestApi();
+  const originalGetStrategyDetail = api.getStrategyDetail.bind(api);
+  const originalGetBacktestRunDetail = api.getBacktestRunDetail.bind(api);
+  const originalGetOptimizationJobDetail =
+    api.getOptimizationJobDetail.bind(api);
+
+  api.getStrategyDetail = async (id: string): Promise<ApiStrategyDetail> => {
+    const strategy = await originalGetStrategyDetail(id);
+    strategy.latest_completed_run_summary = {
+      ...strategy.latest_completed_run_summary!,
+      annualized_return: 0.477,
+      sharpe: 1.32,
+      max_drawdown: -0.395,
+      oos_sharpe: 1.32,
+    };
+    return strategy;
+  };
+
+  api.getBacktestRunDetail = async (
+    id: string,
+  ): Promise<ApiBacktestRunDetail> => {
+    const run = await originalGetBacktestRunDetail(id);
+    run.metrics = {
+      ...run.metrics,
+      annualized_return: 0.477,
+      return_sharpe: 1.32,
+      sharpe: 1.32,
+      out_of_sample_sharpe: 1.32,
+      oos_sharpe: 1.32,
+      max_drawdown: -0.395,
+      max_drawdown_pct: -39.5,
+      turnover: 0.013,
+      turnover_pct: 0.013,
+    };
+    return run;
+  };
+
+  api.getOptimizationJobDetail = async (
+    jobId: string,
+  ): Promise<ApiOptimizationJobDetail> => {
+    const job = await originalGetOptimizationJobDetail(jobId);
+    const currentComboFriendlyConstraints = [
+      {
+        key: "max_drawdown_pct",
+        label: "最大回撤",
+        category: "risk" as const,
+        operator: "<=" as const,
+        value: 50,
+        baseline_value: 50,
+        unit: "%",
+        source: "manual" as const,
+      },
+      {
+        key: "out_of_sample_sharpe",
+        label: "样本外夏普",
+        category: "stability" as const,
+        operator: ">=" as const,
+        value: 0.99,
+        baseline_value: 0.99,
+        unit: "",
+        source: "manual" as const,
+      },
+      {
+        key: "annualized_return",
+        label: "年化收益率",
+        category: "return" as const,
+        operator: ">=" as const,
+        value: 9.9,
+        baseline_value: 9.9,
+        unit: "%",
+        source: "manual" as const,
+      },
+      {
+        key: "stability",
+        label: "稳定度",
+        category: "stability" as const,
+        operator: ">=" as const,
+        value: 3,
+        baseline_value: 3,
+        unit: "pts",
+        source: "manual" as const,
+      },
+      {
+        key: "turnover",
+        label: "换手率",
+        category: "risk" as const,
+        operator: "<=" as const,
+        value: 60,
+        baseline_value: 60,
+        unit: "%",
+        source: "manual" as const,
+      },
+      {
+        key: "return_sharpe",
+        label: "收益夏普",
+        category: "return" as const,
+        operator: ">=" as const,
+        value: 0.1,
+        baseline_value: 0.1,
+        unit: "",
+        source: "manual" as const,
+      },
+    ];
+    job.request.constraint_preset_key = "defensive";
+    job.request.constraint_label = "稳健型（自定义）";
+    job.request.constraints = structuredClone(currentComboFriendlyConstraints);
+    job.summary.constraint_preset_key = "defensive";
+    job.summary.constraint_label = "稳健型（自定义）";
+    job.summary.constraints = structuredClone(currentComboFriendlyConstraints);
+    job.result.constraint_preset_key = "defensive";
+    job.result.constraint_label = "稳健型（自定义）";
+    job.result.constraints = structuredClone(currentComboFriendlyConstraints);
+    job.candidates = job.candidates.map((candidate, index) => ({
+      ...candidate,
+      title: `未通过 ${index + 1}`,
+      label: `未通过 ${index + 1}`,
+      metrics: {
+        ...candidate.metrics,
+        annualized_return: 0.11 - index * 0.004,
+        return_sharpe: 0.92 - index * 0.03,
+        out_of_sample_sharpe: 0.88 - index * 0.04,
+        max_drawdown_pct: -55 - index * 3,
+        stability: 2 - index,
+        turnover: 72 + index * 4,
+      },
+    }));
+    return job;
+  };
+
+  return api;
 }
 
 async function renderApp(hash: string): Promise<HTMLElement> {
@@ -1129,6 +1424,31 @@ describe("optimization module flow", () => {
   });
 
   it("syncs the stability center and shelf when selecting a different candidate", async () => {
+    const multiCandidateApi = createOptimizationTestApi();
+    const originalGetOptimizationJobDetail =
+      multiCandidateApi.getOptimizationJobDetail.bind(multiCandidateApi);
+    multiCandidateApi.getOptimizationJobDetail = async (jobId: string) => {
+      const job = await originalGetOptimizationJobDetail(jobId);
+      job.candidates = job.candidates.map((candidate, index) => ({
+        ...candidate,
+        title: `合规候选 ${index + 1}`,
+        label: `合规候选 ${index + 1}`,
+        metrics: {
+          ...candidate.metrics,
+          annualized_return: 0.142 + index * 0.006,
+          return_sharpe: 1.14 + index * 0.03,
+          out_of_sample_sharpe: 0.95 + index * 0.02,
+          max_drawdown_pct: -12.4 - index * 0.8,
+          stability: 76 + index * 2,
+          turnover: 8.4 + index * 0.2,
+        },
+      }));
+      job.result.best_candidate_id = job.candidates[0]?.id ?? null;
+      job.result.best_candidate_label = job.candidates[0]?.label ?? null;
+      return job;
+    };
+    currentApi = multiCandidateApi;
+
     const container = await renderApp("#/optimization-jobs/opt-001");
 
     await waitFor(() =>
@@ -1194,7 +1514,8 @@ describe("optimization module flow", () => {
     expect(chips?.textContent).toContain(
       "参数组合：回看(月)6-12；跳过最近(月)1-4；买入排名阈值10-100；保留排名阈值110-130",
     );
-    expect(chips?.textContent).toContain("约束条件：平衡型");
+    expect(chips?.textContent).toContain("平衡型");
+    expect(chips?.textContent).not.toContain("约束条件：");
     expect(chips?.textContent).not.toContain("策略：");
     expect(chips?.textContent).not.toContain("参数优化：");
 
@@ -1203,7 +1524,7 @@ describe("optimization module flow", () => {
     );
     expect(rows.length).toBeGreaterThan(4);
     const baselineRow = rows[rows.length - 1] as HTMLTableRowElement;
-    expect(baselineRow.textContent).toContain("当前策略组合");
+    expect(baselineRow.textContent).toContain("当前组合");
     expect(baselineRow.children[1]?.querySelector("span")).toBeNull();
     fireEvent.click(rows[1] as HTMLTableRowElement);
 
@@ -1217,6 +1538,292 @@ describe("optimization module flow", () => {
     ) as HTMLButtonElement | null;
     expect(activeShelfCard).toBeTruthy();
     expect(activeShelfCard?.textContent).not.toBe(initialActiveShelfText);
+  });
+
+  it("expands constraint chips and only keeps compliant candidates in the results center", async () => {
+    const constrainedApi = createOptimizationTestApi();
+    const originalGetOptimizationJobDetail =
+      constrainedApi.getOptimizationJobDetail.bind(constrainedApi);
+    constrainedApi.getOptimizationJobDetail = async (jobId: string) => {
+      const job = await originalGetOptimizationJobDetail(jobId);
+      const strictConstraints = [
+        {
+          key: "max_drawdown_pct",
+          label: "最大回撤",
+          category: "risk" as const,
+          operator: "<=" as const,
+          value: 15,
+          baseline_value: 15,
+          unit: "%",
+          source: "preset" as const,
+        },
+        {
+          key: "stability",
+          label: "稳定度",
+          category: "stability" as const,
+          operator: ">=" as const,
+          value: 70,
+          baseline_value: 70,
+          unit: "pts",
+          source: "preset" as const,
+        },
+        {
+          key: "return_sharpe",
+          label: "收益夏普",
+          category: "return" as const,
+          operator: ">=" as const,
+          value: 1.1,
+          baseline_value: 1.1,
+          unit: "",
+          source: "preset" as const,
+        },
+      ];
+      const constrainedCandidates = job.candidates.map((candidate, index) => {
+        if (index === 0) {
+          return {
+            ...candidate,
+            title: "约束通过 1",
+            label: "约束通过 1",
+            metrics: {
+              ...candidate.metrics,
+              annualized_return: 0.154,
+              return_sharpe: 1.23,
+              out_of_sample_sharpe: 1.01,
+              max_drawdown_pct: -12.4,
+              stability: 81,
+              turnover: 8.4,
+            },
+          };
+        }
+        if (index === 1) {
+          return {
+            ...candidate,
+            title: "回撤过大",
+            label: "回撤过大",
+            metrics: {
+              ...candidate.metrics,
+              annualized_return: 0.162,
+              return_sharpe: 1.28,
+              out_of_sample_sharpe: 1.08,
+              max_drawdown_pct: -21.6,
+              stability: 83,
+              turnover: 7.2,
+            },
+          };
+        }
+        if (index === 2) {
+          return {
+            ...candidate,
+            title: "稳定度不足",
+            label: "稳定度不足",
+            metrics: {
+              ...candidate.metrics,
+              annualized_return: 0.149,
+              return_sharpe: 1.18,
+              out_of_sample_sharpe: 0.96,
+              max_drawdown_pct: -14.2,
+              stability: 64,
+              turnover: 8.9,
+            },
+          };
+        }
+        return {
+          ...candidate,
+          title: "夏普不足",
+          label: "夏普不足",
+          metrics: {
+            ...candidate.metrics,
+            annualized_return: 0.142,
+            return_sharpe: 1.04,
+            out_of_sample_sharpe: 0.92,
+            max_drawdown_pct: -13.1,
+            stability: 76,
+            turnover: 8.1,
+          },
+        };
+      });
+      job.request.constraint_preset_key = "defensive";
+      job.request.constraint_label = "稳健型（自定义）";
+      job.request.constraints = structuredClone(strictConstraints);
+      job.summary.constraint_preset_key = "defensive";
+      job.summary.constraint_label = "稳健型（自定义）";
+      job.summary.constraints = structuredClone(strictConstraints);
+      job.result.constraint_preset_key = "defensive";
+      job.result.constraint_label = "稳健型（自定义）";
+      job.result.constraints = structuredClone(strictConstraints);
+      job.candidates = constrainedCandidates;
+      job.result.best_candidate_id = constrainedCandidates[1]?.id ?? null;
+      job.result.best_candidate_label = constrainedCandidates[1]?.label ?? null;
+      return job;
+    };
+    currentApi = constrainedApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(
+        container.querySelector(".optimization-results-grid"),
+      ).not.toBeNull(),
+    );
+    const chips = container.querySelector(
+      ".optimization-meta-chips",
+    ) as HTMLElement | null;
+    expect(chips).toBeTruthy();
+    expect(chips?.textContent).toContain("稳健型（自定义）");
+    expect(chips?.textContent).not.toContain("约束条件：");
+    expect(chips?.textContent).toContain("最大回撤 ≤ 15.0%");
+    expect(chips?.textContent).toContain("稳定度 ≥ 70pts");
+    expect(chips?.textContent).toContain("收益夏普 ≥ 1.10");
+    expect(chips?.textContent).toContain("符合约束：1/5");
+    expect(container.textContent).toContain("快捷过滤");
+    expect(container.textContent).toContain("当前启用 3 项阈值");
+
+    expect(container.textContent).toContain("约束通过 1");
+    expect(container.textContent).not.toContain("回撤过大");
+    expect(container.textContent).not.toContain("稳定度不足");
+    expect(container.textContent).not.toContain("夏普不足");
+  });
+
+  it("keeps the quick filter bar available when no candidate version passes and still preserves the baseline row", async () => {
+    currentApi = createZeroPassConstraintApi();
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("当前约束下暂无候选版本通过过滤"),
+    );
+    expect(
+      container.querySelector(".optimization-results-constraint-bar"),
+    ).not.toBeNull();
+    expect(container.querySelector(".optimization-results-grid")).not.toBeNull();
+    expect(container.querySelector(".optimization-shelf-grid")).not.toBeNull();
+    expect(container.textContent).toContain("已过滤 4 个候选版本");
+    expect(container.textContent).toContain("当前基准");
+    expect(container.textContent).toContain("当前启用 6 项阈值");
+  });
+
+  it("supports loosening quick filters and re-filtering to surface new matching candidates", async () => {
+    currentApi = createZeroPassConstraintApi();
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("当前约束下暂无候选版本通过过滤"),
+    );
+
+    const maxDrawdownInput = container.querySelector(
+      "#optimization-results-constraint-max_drawdown_pct",
+    ) as HTMLInputElement | null;
+    const stabilityInput = container.querySelector(
+      "#optimization-results-constraint-stability",
+    ) as HTMLInputElement | null;
+    const refilterButton = Array.from(
+      container.querySelectorAll("button"),
+    ).find((button) => button.textContent?.includes("重新过滤")) as
+      | HTMLButtonElement
+      | undefined;
+
+    expect(maxDrawdownInput).toBeTruthy();
+    expect(stabilityInput).toBeTruthy();
+    expect(refilterButton).toBeTruthy();
+
+    fireEvent.change(maxDrawdownInput!, { target: { value: "15" } });
+    fireEvent.change(stabilityInput!, { target: { value: "70" } });
+    fireEvent.click(refilterButton!);
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("符合约束：1/5"),
+    );
+    expect(container.textContent).not.toContain(
+      "当前约束下暂无候选版本通过过滤",
+    );
+    expect(container.textContent).toContain("放宽后通过 1");
+  });
+
+  it("applies quick filters locally even when saving the thresholds fails", async () => {
+    const flakyApi = createZeroPassConstraintApi();
+    flakyApi.updateOptimizationJobConstraints = async () => {
+      throw new Error("405 Method Not Allowed");
+    };
+    currentApi = flakyApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("当前约束下暂无候选版本通过过滤"),
+    );
+
+    const maxDrawdownInput = container.querySelector(
+      "#optimization-results-constraint-max_drawdown_pct",
+    ) as HTMLInputElement | null;
+    const stabilityInput = container.querySelector(
+      "#optimization-results-constraint-stability",
+    ) as HTMLInputElement | null;
+    const refilterButton = Array.from(
+      container.querySelectorAll("button"),
+    ).find((button) => button.textContent?.includes("重新过滤")) as
+      | HTMLButtonElement
+      | undefined;
+
+    expect(maxDrawdownInput).toBeTruthy();
+    expect(stabilityInput).toBeTruthy();
+    expect(refilterButton).toBeTruthy();
+
+    fireEvent.change(maxDrawdownInput!, { target: { value: "15" } });
+    fireEvent.change(stabilityInput!, { target: { value: "70" } });
+    fireEvent.click(refilterButton!);
+
+    await waitFor(() => expect(container.textContent).toContain("放宽后通过 1"));
+    expect(container.textContent).not.toContain(
+      "当前约束下暂无候选版本通过过滤",
+    );
+    expect(container.textContent).toContain(
+      "后端未保存本次快捷过滤设置：405 Method Not Allowed",
+    );
+  });
+
+  it("counts the current combination as passing when it satisfies the active filters", async () => {
+    currentApi = createBaselineOnlyPassApi();
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("符合约束：1/5"),
+    );
+    expect(container.textContent).toContain("当前组合");
+    expect(container.textContent).not.toContain("组合5 当前策略组合");
+    expect(container.textContent).not.toContain(
+      "当前约束下暂无候选版本通过过滤",
+    );
+  });
+
+  it("keeps hero action buttons wrapped with consistent sizing instead of vertical text columns", async () => {
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(
+        container.querySelector(".optimization-results-grid"),
+      ).not.toBeNull(),
+    );
+    const heroPanel = container.querySelector(
+      ".optimization-lab-panel--hero",
+    ) as HTMLElement | null;
+    const actions = container.querySelector(
+      ".optimization-hero-actions",
+    ) as HTMLElement | null;
+    const buttons = Array.from(
+      container.querySelectorAll(".optimization-hero-actions button"),
+    ) as HTMLButtonElement[];
+
+    expect(heroPanel).toBeTruthy();
+    expect(actions).toBeTruthy();
+    expect(buttons.length).toBeGreaterThanOrEqual(3);
+    expect(getComputedStyle(heroPanel!).flexWrap).toBe("wrap");
+    expect(getComputedStyle(actions!).flexWrap).toBe("wrap");
+    buttons.forEach((button) => {
+      expect(getComputedStyle(button).whiteSpace).toBe("nowrap");
+      expect(getComputedStyle(button).minWidth).toBe("124px");
+    });
   });
 
   it("updates the hero strategy name with the promoted version after promoting the current candidate", async () => {

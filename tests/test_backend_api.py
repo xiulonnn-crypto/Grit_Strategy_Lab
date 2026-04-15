@@ -255,6 +255,46 @@ def test_scoped_market_data_provider_keeps_longbridge_for_recent_incremental_win
     assert runtime_provider.scoped_calls == 0
 
 
+def test_scoped_market_data_provider_enables_targeted_price_repair_only_when_requested(tmp_path):
+    class _NamedProvider:
+        def __init__(self, provider_name: str) -> None:
+            self.provider_name = provider_name
+
+    class _FakeRuntimeProvider:
+        provider_name = "runtime"
+
+        def __init__(self, providers: list[_NamedProvider], captured: list[dict[str, object]] | None = None) -> None:
+            self.providers = list(providers)
+            self.missing_providers: list[str] = []
+            self.universe_history_providers: list[object] = []
+            self.captured = captured if captured is not None else []
+
+        def scoped_copy(self, *, exclude_provider_names=None, allow_targeted_price_repair=None):
+            self.captured.append(
+                {
+                    "excluded": {str(item) for item in (exclude_provider_names or [])},
+                    "allow_targeted_price_repair": bool(allow_targeted_price_repair),
+                }
+            )
+            return _FakeRuntimeProvider(self.providers, captured=self.captured)
+
+    runtime_provider = _FakeRuntimeProvider(
+        [_NamedProvider("yahoo"), _NamedProvider("yfinance"), _NamedProvider("alpha_vantage")]
+    )
+    service = RealBacktestPlatformService(tmp_path / "scoped-targeted-repair.db", market_data_provider=runtime_provider)
+
+    scoped = service._scoped_market_data_provider(
+        mode="repair",
+        window_start=date(2026, 4, 1),
+        allow_targeted_price_repair=True,
+    )
+
+    assert runtime_provider.captured == [
+        {"excluded": set(), "allow_targeted_price_repair": True}
+    ]
+    assert scoped is not runtime_provider
+
+
 def test_snapshot_refresh_heartbeat_persists_runtime_stage_and_refresh_stats(tmp_path):
     service = RealBacktestPlatformService(tmp_path / "snapshot-heartbeat.db", market_data_provider=None)
 
@@ -445,6 +485,87 @@ def test_recent_running_snapshot_job_skips_interrupted_recovery_process_scan(tmp
     assert recovered is not None
     assert recovered["status"] == "RUNNING"
     assert recovered["id"] == "snap_recent"
+
+
+def test_refresh_stats_reports_universe_anchor_progress_even_when_latest_members_are_unchanged(tmp_path):
+    service = RealBacktestPlatformService(tmp_path / "snapshot-universe-progress.db", market_data_provider=None)
+
+    current_snapshot = UniverseMembershipSnapshot(
+        universe_key=NASDAQ100_UNIVERSE_KEY,
+        universe_name=NASDAQ100_UNIVERSE_NAME,
+        effective_date=date(2026, 1, 1),
+        normalized_symbols=["AAPL", "MSFT"],
+        raw_symbols=["AAPL", "MSFT"],
+        unmapped_symbols=[],
+        source="github_nasdaq100_curated_history",
+        fallback_source=None,
+        anchor_schedule=ANCHOR_SCHEDULE,
+        source_revision_id=None,
+        source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
+        metadata={
+            "coverage_mode": "point_in_time_anchor",
+            "source_quality": "historical_dataset",
+        },
+    )
+    memberships_by_snapshot = {
+        NASDAQ100_UNIVERSE_SNAPSHOT_ID: [
+            {
+                "effective_date": "2026-01-01",
+                "symbol": "AAPL",
+                "raw_symbol": "AAPL",
+                "source": "github_nasdaq100_curated_history",
+                "fallback_source": None,
+                "metadata": {"source_quality": "historical_dataset"},
+            },
+            {
+                "effective_date": "2026-01-01",
+                "symbol": "MSFT",
+                "raw_symbol": "MSFT",
+                "source": "github_nasdaq100_curated_history",
+                "fallback_source": None,
+                "metadata": {"source_quality": "historical_dataset"},
+            },
+        ]
+    }
+    existing_universe_memberships = {
+        NASDAQ100_UNIVERSE_SNAPSHOT_ID: [
+            {
+                "effective_date": "2026-01-01",
+                "symbol": "AAPL",
+                "raw_symbol": "AAPL",
+                "source": "wikipedia_current_page",
+                "fallback_source": "wikipedia_revision_history",
+                "metadata": {"source_quality": "current_page_fallback"},
+            },
+            {
+                "effective_date": "2026-01-01",
+                "symbol": "MSFT",
+                "raw_symbol": "MSFT",
+                "source": "wikipedia_current_page",
+                "fallback_source": "wikipedia_revision_history",
+                "metadata": {"source_quality": "current_page_fallback"},
+            },
+        ]
+    }
+
+    refresh_stats = service._build_refresh_stats(
+        price_bars=[],
+        corporate_actions=[],
+        grouped_universe_snapshots={NASDAQ100_UNIVERSE_SNAPSHOT_ID: [current_snapshot]},
+        memberships_by_snapshot=memberships_by_snapshot,
+        existing_universe_memberships=existing_universe_memberships,
+        dataset_provider_telemetry={},
+    )
+
+    universe_stat = refresh_stats["universes"][NASDAQ100_UNIVERSE_SNAPSHOT_ID]
+
+    assert universe_stat["updated_row_count"] == 0
+    assert universe_stat["anchor_count"] == 1
+    assert universe_stat["previous_historical_anchor_count"] == 0
+    assert universe_stat["historical_anchor_count"] == 1
+    assert universe_stat["historical_anchor_delta"] == 1
+    assert universe_stat["fallback_anchor_count"] == 0
+    assert universe_stat["source_quality_breakdown"] == {"historical_dataset": 1}
 
 
 def test_running_refresh_persists_partial_dataset_snapshots_before_completion(tmp_path):
@@ -1748,6 +1869,390 @@ def test_create_optimization_job_round_trips_constraint_contract_fields(tmp_path
     assert detail["result"]["constraint_preset_key"] == "offensive"
 
 
+def test_patch_optimization_job_constraints_persists_updated_filters_without_losing_existing_results(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="optimization-patch-constraint")
+    strategy = base["strategy"]
+    job = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=strategy["current_parameter_version_id"],
+    )
+    updated_constraints = [
+        {
+            "key": "max_drawdown_pct",
+            "label": "最大回撤",
+            "category": "risk",
+            "operator": "<=",
+            "value": 15,
+            "unit": "%",
+        },
+        {
+            "key": "out_of_sample_sharpe",
+            "label": "样本外夏普",
+            "category": "stability",
+            "operator": ">=",
+            "value": 0.8,
+            "unit": "",
+        },
+        {
+            "key": "annualized_return",
+            "label": "年化收益率",
+            "category": "return",
+            "operator": ">=",
+            "value": 8,
+            "unit": "%",
+        },
+        {
+            "key": "stability",
+            "label": "稳定度",
+            "category": "stability",
+            "operator": ">=",
+            "value": 70,
+            "unit": "pts",
+        },
+        {
+            "key": "turnover",
+            "label": "换手率",
+            "category": "risk",
+            "operator": "<=",
+            "value": 12,
+            "unit": "%",
+        },
+        {
+            "key": "return_sharpe",
+            "label": "收益夏普",
+            "category": "return",
+            "operator": ">=",
+            "value": 1.0,
+            "unit": "",
+        },
+    ]
+
+    updated = assert_ok(
+        client.patch(
+            f"/optimization-jobs/{job['id']}",
+            json={
+                "constraint_preset_key": "defensive",
+                "constraint_label": "稳健型（自定义）",
+                "constraints": updated_constraints,
+            },
+        )
+    )
+
+    assert updated["request"]["constraint_preset_key"] == "defensive"
+    assert updated["request"]["constraint_label"] == "稳健型（自定义）"
+    assert updated["request"]["constraints"] == updated_constraints
+    assert updated["summary"]["constraint_preset_key"] == "defensive"
+    assert updated["summary"]["constraint_label"] == "稳健型（自定义）"
+    assert updated["summary"]["constraints"] == updated_constraints
+    assert updated["result"]["constraint_preset_key"] == "defensive"
+    assert updated["result"]["constraint_label"] == "稳健型（自定义）"
+    assert updated["result"]["constraints"] == updated_constraints
+    assert len(updated["candidates"]) == len(job["candidates"])
+    assert updated["result"]["best_candidate_id"] == job["result"]["best_candidate_id"]
+    assert updated["summary"]["latest_update"] == job["summary"]["latest_update"]
+    assert updated["summary"]["best_metrics_summary"] == job["summary"]["best_metrics_summary"]
+
+    refreshed = assert_ok(client.get(f"/optimization-jobs/{job['id']}/detail"))
+    assert refreshed["summary"]["constraints"] == updated_constraints
+    assert refreshed["result"]["constraints"] == updated_constraints
+    assert refreshed["candidates"] == updated["candidates"]
+
+
+def test_patch_optimization_job_constraints_persists_updated_filters_without_losing_existing_results(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    base = create_momentum_strategy(client, idempotency_key="optimization-patch-constraint")
+    strategy = base["strategy"]
+    job_id = "opt_patch_constraint_refresh"
+    created_at = "2026-04-13T10:00:00Z"
+    request_payload = {
+        "objective": "sharpe",
+        "base_parameter_version_id": strategy["current_parameter_version_id"],
+        "entry_point": "lab_menu",
+        "validation_mode": "walk_forward",
+        "budget_combinations": 5,
+        "search_space": [
+            {"key": "lookback_months", "label": "Lookback", "mode": "range", "start": 6, "end": 7, "step": 1, "current": 6},
+            {
+                "key": "hold_rank_threshold",
+                "label": "Hold Rank",
+                "mode": "range",
+                "start": 120,
+                "end": 160,
+                "step": 10,
+                "current": 120,
+            },
+        ],
+        "status": "COMPLETED",
+        "progress_pct": 100,
+        "completed_combinations": 5,
+        "persisted_trial_count": 5,
+        "next_trial_index": 6,
+        "current_stage": "Result ready",
+        "latest_update": "Optimization completed.",
+    }
+
+    def build_trial(
+        *,
+        trial_index: int,
+        snapshot: dict[str, Any],
+        score: float,
+        annualized_return: float,
+        return_sharpe: float,
+        out_of_sample_sharpe: float,
+        max_drawdown_pct: float,
+        stability: float,
+        total_return_pct: float,
+        turnover: float = 0.08,
+    ) -> dict[str, Any]:
+        metrics = {
+            "total_return": total_return_pct / 100.0,
+            "total_return_pct": total_return_pct,
+            "cagr": annualized_return,
+            "annualized_return": annualized_return,
+            "annualized_volatility": 0.18,
+            "sharpe": return_sharpe,
+            "return_sharpe": return_sharpe,
+            "oos_cagr": annualized_return * 0.9,
+            "oos_sharpe": out_of_sample_sharpe,
+            "out_of_sample_sharpe": out_of_sample_sharpe,
+            "max_drawdown": max_drawdown_pct / 100.0,
+            "max_drawdown_pct": max_drawdown_pct,
+            "turnover": turnover,
+            "win_rate": 0.58,
+            "stability": stability,
+        }
+        return {
+            "trial_index": trial_index,
+            "parameter_snapshot": snapshot,
+            "metrics": metrics,
+            "chart_series": [
+                {
+                    "trade_date": f"2026-01-0{offset + 1}",
+                    "equity": 100.0 + trial_index + offset,
+                    "benchmark": 100.0,
+                    "drawdown": max_drawdown_pct if offset == 1 else 0.0,
+                    "is_oos": offset >= 2,
+                    "strategy_return": 0.01,
+                    "benchmark_return": 0.005,
+                }
+                for offset in range(4)
+            ],
+            "score": score,
+        }
+
+    base_snapshot = dict(strategy.get("parameters") or {})
+    trial_rows = [
+        build_trial(
+            trial_index=1,
+            snapshot={**base_snapshot, "lookback_months": 6, "hold_rank_threshold": 120},
+            score=98.0,
+            annualized_return=0.11,
+            return_sharpe=1.25,
+            out_of_sample_sharpe=0.78,
+            max_drawdown_pct=-38.0,
+            stability=62.0,
+            total_return_pct=65.0,
+        ),
+        build_trial(
+            trial_index=2,
+            snapshot={**base_snapshot, "lookback_months": 6, "hold_rank_threshold": 130},
+            score=97.5,
+            annualized_return=0.11,
+            return_sharpe=1.25,
+            out_of_sample_sharpe=0.78,
+            max_drawdown_pct=-38.0,
+            stability=62.0,
+            total_return_pct=65.0,
+        ),
+        build_trial(
+            trial_index=3,
+            snapshot={**base_snapshot, "lookback_months": 6, "hold_rank_threshold": 140},
+            score=94.0,
+            annualized_return=0.10,
+            return_sharpe=1.10,
+            out_of_sample_sharpe=0.92,
+            max_drawdown_pct=-18.0,
+            stability=79.0,
+            total_return_pct=35.0,
+        ),
+        build_trial(
+            trial_index=4,
+            snapshot={**base_snapshot, "lookback_months": 7, "hold_rank_threshold": 150},
+            score=93.2,
+            annualized_return=0.095,
+            return_sharpe=1.05,
+            out_of_sample_sharpe=0.88,
+            max_drawdown_pct=-21.0,
+            stability=76.0,
+            total_return_pct=33.0,
+        ),
+        build_trial(
+            trial_index=5,
+            snapshot={**base_snapshot, "lookback_months": 7, "hold_rank_threshold": 160},
+            score=91.0,
+            annualized_return=0.085,
+            return_sharpe=0.92,
+            out_of_sample_sharpe=0.75,
+            max_drawdown_pct=-28.0,
+            stability=68.0,
+            total_return_pct=31.0,
+        ),
+    ]
+    service._persist_optimization_job(
+        job_id,
+        strategy["id"],
+        request_payload,
+        [],
+        created_at=created_at,
+        updated_at=created_at,
+        completed_at=created_at,
+    )
+    for trial in trial_rows:
+        service._persist_optimization_trial(
+            job_id,
+            trial["trial_index"],
+            status="SUCCEEDED",
+            parameter_snapshot=trial["parameter_snapshot"],
+            metrics=trial["metrics"],
+            chart_series=trial["chart_series"],
+            score=trial["score"],
+            error_message=None,
+            started_at=created_at,
+            completed_at=created_at,
+        )
+
+    stale_candidates = [
+        service._build_candidate_record(
+            strategy=strategy,
+            parameter_snapshot=trial_rows[0]["parameter_snapshot"],
+            base_parameter_version_id=strategy["current_parameter_version_id"],
+            label="候选 1",
+            title="Best candidate",
+            status_label=service._optimization_status_label(trial_rows[0]["metrics"]),
+            metrics=trial_rows[0]["metrics"],
+            summary="stale duplicate",
+            rank=1,
+            score=trial_rows[0]["score"],
+            analysis={},
+        ),
+        service._build_candidate_record(
+            strategy=strategy,
+            parameter_snapshot=trial_rows[1]["parameter_snapshot"],
+            base_parameter_version_id=strategy["current_parameter_version_id"],
+            label="候选 2",
+            title="Candidate 2",
+            status_label=service._optimization_status_label(trial_rows[1]["metrics"]),
+            metrics=trial_rows[1]["metrics"],
+            summary="stale duplicate",
+            rank=2,
+            score=trial_rows[1]["score"],
+            analysis={},
+        ),
+    ]
+    service._persist_optimization_job(
+        job_id,
+        strategy["id"],
+        {
+            **request_payload,
+            "best_metrics_summary": service._best_optimization_trial_summary([trial_rows[0], trial_rows[1]]),
+        },
+        stale_candidates,
+        created_at=created_at,
+        updated_at=created_at,
+        completed_at=created_at,
+    )
+
+    updated_constraints = [
+        {
+            "key": "max_drawdown_pct",
+            "label": "最大回撤",
+            "category": "risk",
+            "operator": "<=",
+            "value": 25,
+            "unit": "%",
+        },
+        {
+            "key": "out_of_sample_sharpe",
+            "label": "样本外夏普",
+            "category": "stability",
+            "operator": ">=",
+            "value": 0.8,
+            "unit": "",
+        },
+        {
+            "key": "annualized_return",
+            "label": "年化收益率",
+            "category": "return",
+            "operator": ">=",
+            "value": 8,
+            "unit": "%",
+        },
+        {
+            "key": "stability",
+            "label": "稳定度",
+            "category": "stability",
+            "operator": ">=",
+            "value": 70,
+            "unit": "pts",
+        },
+        {
+            "key": "turnover",
+            "label": "换手率",
+            "category": "risk",
+            "operator": "<=",
+            "value": 12,
+            "unit": "%",
+        },
+        {
+            "key": "return_sharpe",
+            "label": "收益夏普",
+            "category": "return",
+            "operator": ">=",
+            "value": 1.0,
+            "unit": "",
+        },
+    ]
+
+    updated = assert_ok(
+        client.patch(
+            f"/optimization-jobs/{job_id}",
+            json={
+                "constraint_preset_key": "defensive",
+                "constraint_label": "蝔喳???芸?銋?",
+                "constraints": updated_constraints,
+            },
+        )
+    )
+
+    assert updated["request"]["constraint_preset_key"] == "defensive"
+    assert updated["request"]["constraint_label"] == "蝔喳???芸?銋?"
+    assert updated["request"]["constraints"] == updated_constraints
+    assert updated["summary"]["constraint_preset_key"] == "defensive"
+    assert updated["summary"]["constraint_label"] == "蝔喳???芸?銋?"
+    assert updated["summary"]["constraints"] == updated_constraints
+    assert updated["result"]["constraint_preset_key"] == "defensive"
+    assert updated["result"]["constraint_label"] == "蝔喳???芸?銋?"
+    assert updated["result"]["constraints"] == updated_constraints
+    assert len(updated["candidates"]) >= 2
+    assert updated["candidates"][0]["parameter_snapshot"]["hold_rank_threshold"] == 140
+    assert updated["candidates"][1]["parameter_snapshot"]["hold_rank_threshold"] == 150
+    assert updated["result"]["best_candidate_id"] == updated["candidates"][0]["id"]
+    assert updated["candidates"][0]["metrics"]["max_drawdown_pct"] >= -25.0
+    assert updated["candidates"][0]["metrics"]["out_of_sample_sharpe"] >= 0.8
+    assert updated["candidates"][1]["metrics"]["max_drawdown_pct"] >= -25.0
+    assert updated["candidates"][1]["metrics"]["out_of_sample_sharpe"] >= 0.8
+
+    refreshed = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail"))
+    assert refreshed["summary"]["constraints"] == updated_constraints
+    assert refreshed["result"]["constraints"] == updated_constraints
+    assert refreshed["candidates"] == updated["candidates"]
+
+
 def test_legacy_optimization_job_detail_backfills_constraint_contract_fields(tmp_path):
     client, _ = create_test_client(tmp_path)
 
@@ -2153,6 +2658,42 @@ def test_optimization_scoring_uses_annualized_return_for_ranking_and_verdict(tmp
         ]
     )
     assert ranked[0]["metrics"]["annualized_return"] == strong_metrics["annualized_return"]
+
+
+def test_optimization_scoring_caps_total_return_bias_against_high_drawdown_outliers(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    balanced_metrics = {
+        "return_sharpe": 1.08,
+        "out_of_sample_sharpe": 0.88,
+        "annualized_return": 0.12,
+        "total_return_pct": 42.0,
+        "max_drawdown_pct": -20.0,
+        "stability": 78.0,
+        "turnover": 0.08,
+    }
+    speculative_metrics = {
+        "return_sharpe": 0.52,
+        "out_of_sample_sharpe": 0.28,
+        "annualized_return": 0.13,
+        "total_return_pct": 520.0,
+        "max_drawdown_pct": -62.0,
+        "stability": 38.0,
+        "turnover": 0.26,
+    }
+
+    balanced_score = service._score_optimization_metrics(balanced_metrics, "annualized_return")
+    speculative_score = service._score_optimization_metrics(speculative_metrics, "annualized_return")
+
+    assert balanced_score > speculative_score
+    ranked = service._rank_optimization_trials(
+        [
+            {"score": speculative_score, "metrics": speculative_metrics},
+            {"score": balanced_score, "metrics": balanced_metrics},
+        ]
+    )
+    assert ranked[0]["metrics"]["max_drawdown_pct"] == balanced_metrics["max_drawdown_pct"]
 
 
 def test_optimization_validation_windows_include_annualized_return(tmp_path):

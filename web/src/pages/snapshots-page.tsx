@@ -382,6 +382,24 @@ function getPositiveCount(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
 }
 
+function getUniverseRefreshSummaryPart(
+  stat: Record<string, unknown> | null,
+  label: string,
+): string | null {
+  const anchorDelta = getPositiveCount(stat?.historical_anchor_delta);
+  const historicalAnchorCount =
+    typeof stat?.historical_anchor_count === 'number' && Number.isFinite(stat.historical_anchor_count)
+      ? stat.historical_anchor_count
+      : null;
+  const anchorCount =
+    typeof stat?.anchor_count === 'number' && Number.isFinite(stat.anchor_count) ? stat.anchor_count : null;
+  if (anchorDelta && historicalAnchorCount && anchorCount) {
+    return `${label}股票池${anchorDelta.toLocaleString('zh-HK')}个历史锚点，进度${historicalAnchorCount.toLocaleString('zh-HK')}/${anchorCount.toLocaleString('zh-HK')}`;
+  }
+  const rows = getPositiveCount(stat?.updated_row_count);
+  return rows ? `${label}股票池${rows.toLocaleString('zh-HK')}行` : null;
+}
+
 function getLastRefreshSummaryLabel(
   overview: ApiSnapshotOverview | null,
   options?: { optimisticRefreshing?: boolean },
@@ -422,12 +440,10 @@ function getLastRefreshSummaryLabel(
       return `股票价格数据${rows?.toLocaleString('zh-HK')}行`;
     })(),
     (() => {
-      const rows = getPositiveCount(sp500Stat?.updated_row_count);
-      return rows ? `标普500股票池${rows.toLocaleString('zh-HK')}行` : null;
+      return getUniverseRefreshSummaryPart(sp500Stat, '标普500');
     })(),
     (() => {
-      const rows = getPositiveCount(ndx100Stat?.updated_row_count);
-      return rows ? `纳指100股票池${rows.toLocaleString('zh-HK')}行` : null;
+      return getUniverseRefreshSummaryPart(ndx100Stat, '纳指100');
     })(),
   ].filter(Boolean);
   const additionsLabel = parts.length ? `新增${parts.join('，')}。` : null;

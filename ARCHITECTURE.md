@@ -49,7 +49,7 @@
 - `symbol_identity_cache` 是内部身份修复表，用于处理已退市符号、ticker 生命周期修正，以及来自 Alpha Vantage、SEC EDGAR 与 FMP 的 CIK/交易所元数据拼接。
 - `snapshot_refresh_jobs` 是 API 与 CLI 共用的刷新审计日志。它的 `summary_json` 现在携带刷新心跳字段，例如 `current_stage`、`current_stage_label`、`heartbeat_at`、`progress` 与部分 `refresh_stats`，让运行中的任务在完成前也具备可观测性。
 - `snapshot_recovery.py` 是 `C:\Fin\Grit_Strategy_Lab2` 的冷备探测与导入边界；Lab2 只被视为恢复来源，绝不能成为实时运行时依赖。
-- `universe_history.py` 现在负责点位时刻一致的 universe 来源链：优先使用 `FMP historical constituent`，其次是 wikipedia revision-history 快照与官方指数公告，而当前 wikipedia 页面与旧静态种子只作为更弱的兜底。
+- `universe_history.py` 现在负责点位时刻一致的 universe 来源链，并默认走免费链优先：`SP500` 先使用 wikipedia revision-history、官方指数公告与 GitHub 当前名单校验，`Nasdaq-100` 先使用 `jmccarrell/n100tickers` 的年度 YAML，再退回 wikipedia revision-history 与官方指数公告；`FMP historical constituent` 只在 entitlement probe 成功时作为高级增强源插到链首。
 - `app_runtime_state` 保存清理账本，包括 `last_cleanup_count` 与 `last_cleanup_at`。它还会镜像当前激活的 snapshot refresh 心跳，让中断后的 worker 恢复逻辑可以区分“仍在运行”和“已经卡住”。
 
 清理行为如下：
@@ -134,7 +134,7 @@
 - 运行中的刷新任务现在会在仍处于 `RUNNING` 时持续写出心跳 checkpoint 与部分合并后的 dataset snapshot；overview 消费方应预期 `latest_job.summary.refresh_stats` 会先变化，再等到终态任务写入落地。
 - 运行中的市场数据来源链按角色分工：价格走 `Yahoo -> Tiingo -> Longbridge -> AkShare -> FMP`，标准公司事件走 `Yahoo/Tiingo -> Alpha Vantage -> SEC EDGAR`，ticker 生命周期修复走 `Tiingo symbology -> Longbridge static info -> FMP delisted -> Alpha listing status`。
 - `Longbridge` 只是当前或最近窗口的美股云端增强源；它绝不能被当成 1996 起全历史的规范来源，也不能参与历史 universe 锚点。
-- Universe snapshot 只有在每个锚点都来自历史来源时才算 `READY`，即必须来自 `FMP historical constituent` 或历史修订快照；当前页面或静态种子回退都必须明确标成不完整，避免正式回测悄悄滑向幸存者偏差 universe。
+- Universe snapshot 只有在每个锚点都来自历史来源时才算 `READY`，即必须来自 `historical_dataset`、`wikipedia_revision` 或 `official_announcement` 这类历史语义来源；当前页面或静态种子回退都必须明确标成不完整，避免正式回测悄悄滑向幸存者偏差 universe。
 
 前后端测试都是围绕这些契约写的，而不是围绕内部实现细节写的。
 

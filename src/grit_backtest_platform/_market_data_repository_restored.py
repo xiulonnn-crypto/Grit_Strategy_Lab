@@ -783,8 +783,14 @@ class MarketDataRepository:
         *,
         start_date: str | None = None,
         end_date: str | None = None,
+        include_metadata: bool = True,
     ) -> dict[str, list[dict[str, Any]]]:
-        sql = "SELECT * FROM dataset_price_bars WHERE dataset_snapshot_id = ?"
+        selected_columns = (
+            "symbol, date, open, high, low, close, adj_close, volume, source, fallback_source, metadata_json"
+            if include_metadata
+            else "symbol, date, open, high, low, close, adj_close, volume"
+        )
+        sql = f"SELECT {selected_columns} FROM dataset_price_bars WHERE dataset_snapshot_id = ?"
         params: list[Any] = [dataset_snapshot_id]
         normalized_symbols = [self._normalize_symbol(symbol) for symbol in (symbols or []) if symbol]
         if normalized_symbols:
@@ -801,8 +807,24 @@ class MarketDataRepository:
             rows = conn.execute(sql, params).fetchall()
         grouped: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
-            decoded = self._decode_json_row(dict(row), "metadata_json")
-            grouped.setdefault(str(decoded["symbol"]), []).append(decoded)
+            if include_metadata:
+                decoded = self._decode_json_row(dict(row), "metadata_json")
+                symbol = str(decoded["symbol"])
+                grouped.setdefault(symbol, []).append(decoded)
+                continue
+            symbol = str(row["symbol"])
+            grouped.setdefault(symbol, []).append(
+                {
+                    "symbol": symbol,
+                    "date": row["date"],
+                    "open": row["open"],
+                    "high": row["high"],
+                    "low": row["low"],
+                    "close": row["close"],
+                    "adj_close": row["adj_close"],
+                    "volume": row["volume"],
+                }
+            )
         return grouped
 
     def load_universe_memberships(

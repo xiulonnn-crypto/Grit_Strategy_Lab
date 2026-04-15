@@ -291,6 +291,12 @@ export type ApiOptimizationJobCreatePayload = {
   constraints?: ApiOptimizationConstraint[];
 };
 
+export type ApiOptimizationJobConstraintUpdatePayload = {
+  constraint_preset_key?: ApiOptimizationConstraintPresetKey | null;
+  constraint_label?: string | null;
+  constraints?: ApiOptimizationConstraint[];
+};
+
 export type ApiOptimizationJobDetail = {
   id: string;
   strategy_id: string;
@@ -830,6 +836,10 @@ export type DemoApi = {
   ) => Promise<ApiBacktestRunDetail>;
   listOptimizationJobs: () => Promise<ApiOptimizationJobListItem[]>;
   getOptimizationJobDetail: (id: string) => Promise<ApiOptimizationJobDetail>;
+  updateOptimizationJobConstraints: (
+    jobId: string,
+    payload: ApiOptimizationJobConstraintUpdatePayload,
+  ) => Promise<ApiOptimizationJobDetail>;
   deleteOptimizationJob: (
     id: string,
   ) => Promise<ApiOptimizationJobDeleteResult>;

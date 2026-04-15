@@ -265,6 +265,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - 当前激活的优化 evaluator 路径不再预加载 `_prepare_backtest_run_context()`。对于现行 `_service_rebuilt.py` evaluator 而言，这个预加载只是无效开销，因此任务运行器现在会完全跳过它。
 - 运行中优化任务的摘要写入由唯一写入者节流：最多每秒一次，或者每完成五个 trial 写一次；每次心跳都会持久化 `completed_combinations`、`next_trial_index`、`best_metrics_summary`、`estimated_remaining_minutes`、`estimated_completed_at` 与 `heartbeat_at`，而终态状态切换仍然立即持久化。
 - 执行期会增量维护 top-K 与 heatmap winner cells；终态优先复用增量摘要并只为终态 top-K 回补完整 metrics，避免全量 successful trials 再次排序和候选分析重算。
+- 优化任务首组启动现在必须遵守两个热路径约束：`_ensure_optimization_snapshots_ready()` 在无 `start_date/end_date` 的优化预检里只允许读取 `dataset_symbol_coverage` 来判断 snapshot readiness，不能再次全量扫描 `dataset_price_bars`；`python -m grit_backtest_platform.main run-optimization` 也必须保持 lazy bootstrap，禁止在 worker 冷启动阶段无条件创建 FastAPI app 或 runtime market-data provider。
 
 ### 5.4 frontend 关键入口
 
@@ -450,3 +451,29 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `constraint_label` 由前端提交前生成并持久化；若当前 6 项护栏阈值与所选预设完全一致，则显示预设名，否则显示 `预设名（自定义）`。
 - 结果中心 hero 在 `约束条件：{constraint_label}` 这一标签位优先读取 `job.summary.constraint_label`，缺失时回退 `job.request.constraint_label`；旧任务若无该字段则不显示该标签。
 - “继续调参 / 重跑优化”必须复用原任务的 `constraint_preset_key`、`constraint_label` 与 `constraints[]`，不能只带回 `search_space`。
+
+## 12. GRIT 协作补充边界
+
+### 12.1 契约与 runtime 边界补充
+
+- backend contract truth 固定以 `src/grit_backtest_platform/models.py` 为起点；frontend contract mirror 固定为 `web/src/types.ts`。
+- frontend runtime truth 固定在：
+  - `web/src/app-runtime-cn.tsx`
+  - `web/src/lib/appRouteContext.tsx`
+  - `web/src/lib/demoStoreContext.tsx`
+- shell truth 固定在：
+  - `web/src/shell-frame-cn.tsx`
+  - `web/src/shell-route-meta-cn.ts`
+- 页面级工作可以扩展 view-model、page-local 组件和 route-local UI，但不得在无明确 ownership 时重定义 route parsing、shared runtime client 或 app shell。
+
+### 12.2 结果页与 snapshot 页面补充
+
+- optimization detail 生命周期真相必须保持三类状态分离：progress、interrupted、terminal。
+- 任何结果页、轮询逻辑或 hero summary 改动都不得把这三类状态拍平成单一“完成/未完成”口径。
+- snapshot pages 必须消费正式 overview contract，不得为截图展示或临时页面发明额外数据 shape 再反向要求 backend 兼容。
+
+### 12.3 项目文档落点规则
+
+- 本仓库的 orchestration、worker/reviewer prompt 基线、handoff 规则、UI 交付物读取顺序写在 `CLAUDE.md`。
+- 本仓库的技术真相、固定测试命令、模块边界、验证路径和 acceptance facts 写在 `TECHNICAL.md`。
+- 如果一次复盘发现的问题只影响本仓库，不要修改 shared skill；应把流程类改进写回 `CLAUDE.md`，把技术与验收类改进写回本文件。

@@ -10,6 +10,12 @@
   flex: 0 0 auto;
 }
 
+.snapshots-page .status-chip--success {
+  border-color: color-mix(in srgb, #1f9d55 28%, var(--line));
+  background: #e9fbef;
+  color: #1f7a3d;
+}
+
 .snapshots-header-card {
   padding: 24px 28px;
 }

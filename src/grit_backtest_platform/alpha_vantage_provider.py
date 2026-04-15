@@ -10,6 +10,9 @@ import urllib.request
 from datetime import date
 from typing import Any
 
+from .backtest_engine import MarketBar
+from .fallback_provider import ProviderExecutionSignal
+from .yahoo_provider import SymbolMarketData
 from .fallback_provider import ProviderAvailability
 
 
@@ -31,6 +34,7 @@ def _parse_float(value: Any, default: float | None = None) -> float | None:
 
 class AlphaVantageProvider:
     provider_name = "alpha_vantage"
+    supports_targeted_price_repair = True
 
     def __init__(self, api_key: str | None = None, timeout: int = 20) -> None:
         self.api_key = str(api_key or os.getenv("ALPHAVANTAGE_API_KEY") or "").strip()
@@ -151,9 +155,88 @@ class AlphaVantageProvider:
         return None
 
     def fetch_history(self, symbol: str, start_date: date, end_date: date) -> Any:
-        raise RuntimeError(
-            "Alpha Vantage does not provide daily price bars in this slice; use Tiingo or FMP for price history."
+        payload = self._request_text(
+            {
+                "function": "TIME_SERIES_DAILY_ADJUSTED",
+                "symbol": symbol.upper(),
+                "outputsize": "full",
+            }
+        )
+        self._parse_rate_limit_payload(payload)
+        data = json.loads(payload)
+        if data.get("Error Message"):
+            raise ProviderExecutionSignal(
+                str(data["Error Message"]),
+                status="failed",
+                reason="symbol_invalid",
+                metadata={"provider_symbol": symbol.upper(), "error_class": "symbol_invalid"},
+            )
+        if data.get("Note") or data.get("Information"):
+            raise ProviderExecutionSignal(
+                str(data.get("Note") or data.get("Information")),
+                status="limited",
+                reason="rate_limited",
+                metadata={"provider_symbol": symbol.upper(), "error_class": "rate_limited"},
+            )
+        rows = data.get("Time Series (Daily)") or {}
+        if not isinstance(rows, dict) or not rows:
+            raise ProviderExecutionSignal(
+                f"No Alpha Vantage daily adjusted rows returned for {symbol}",
+                status="failed",
+                reason="no_history",
+                metadata={"provider_symbol": symbol.upper(), "error_class": "no_history"},
+            )
+
+        bars: list[MarketBar] = []
+        for trade_date, row in rows.items():
+            if not isinstance(row, dict):
+                continue
+            normalized_date = str(trade_date or "").strip()[:10]
+            if not normalized_date or normalized_date < start_date.isoformat() or normalized_date > end_date.isoformat():
+                continue
+            open_value = _parse_float(row.get("1. open"))
+            high_value = _parse_float(row.get("2. high"))
+            low_value = _parse_float(row.get("3. low"))
+            close_value = _parse_float(row.get("4. close"))
+            adj_close = _parse_float(row.get("5. adjusted close"), close_value)
+            volume = _parse_float(row.get("6. volume"), 0.0)
+            if open_value is None or high_value is None or low_value is None or close_value is None:
+                continue
+            bars.append(
+                MarketBar(
+                    date=normalized_date,
+                    open=float(open_value),
+                    high=float(high_value),
+                    low=float(low_value),
+                    close=float(close_value),
+                    adj_close=float(adj_close if adj_close is not None else close_value),
+                    volume=float(volume or 0.0),
+                )
+            )
+        if not bars:
+            raise ProviderExecutionSignal(
+                f"No Alpha Vantage daily adjusted rows matched {symbol} in the requested window",
+                status="failed",
+                reason="no_history",
+                metadata={"provider_symbol": symbol.upper(), "error_class": "no_history"},
+            )
+        bars.sort(key=lambda item: item.date)
+        return SymbolMarketData(
+            symbol=symbol.upper(),
+            bars=bars,
+            actions=[],
+            source=self.provider_name,
+            fallback_source=None,
+            partial=False,
+            warnings=[],
+            metadata={
+                "provider": self.provider_name,
+                "targeted_price_repair": True,
+                "bar_count": len(bars),
+                "adjusted_series": True,
+            },
         )
 
 
 AlphaVantageEventProvider = AlphaVantageProvider
+AlphaVantageMarketDataProvider = AlphaVantageProvider

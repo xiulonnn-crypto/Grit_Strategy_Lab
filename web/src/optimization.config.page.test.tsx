@@ -5,6 +5,7 @@
   screen,
   waitFor,
 } from "@testing-library/react";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ApiBacktestRunDetail,
@@ -13,6 +14,10 @@ import type {
 } from "./types";
 
 let OptimizationConfigPage: typeof import("./pages/optimization-lab-page").OptimizationConfigPage;
+const optimizationLabPageCss = readFileSync(
+  "./src/pages/optimization-lab-page.css",
+  "utf8",
+);
 
 const fakeApi = vi.hoisted(() => ({
   createOptimizationJob: vi.fn(),
@@ -289,5 +294,93 @@ describe("OptimizationConfigPage", () => {
       expect(endInput.value).toBe(originalEndValue);
       expect(constraintInput.value).toBe(originalConstraintValue);
     });
+  });
+
+  it("keeps the parameter range table inside the available panel width", async () => {
+    const { container } = render(
+      <OptimizationConfigPage
+        strategyId="strat-mean-001"
+        sourceRunId="run-seed"
+        entryPoint="run_detail"
+      />,
+    );
+
+    await screen.findByRole("heading", { level: 1, name: "QQQ均值回归策略" });
+
+    const tableShell = container.querySelector(
+      ".optimization-lab-table-shell--form",
+    ) as HTMLDivElement | null;
+    const table = tableShell?.querySelector(
+      ".optimization-lab-table",
+    ) as HTMLTableElement | null;
+    const firstRowLabel = table?.querySelector("tbody td") as
+      | HTMLTableCellElement
+      | null;
+
+    expect(tableShell).toBeTruthy();
+    expect(table).toBeTruthy();
+    expect(firstRowLabel).toBeTruthy();
+    expect(optimizationLabPageCss).toMatch(
+      /\.optimization-lab-table-shell--form\s*\{[^}]*overflow-x:\s*hidden;/s,
+    );
+    expect(optimizationLabPageCss).toMatch(
+      /\.optimization-lab-table-shell--form\s+\.optimization-lab-table\s*\{[^}]*min-width:\s*0;[^}]*table-layout:\s*fixed;/s,
+    );
+    expect(optimizationLabPageCss).toMatch(
+      /\.optimization-lab-table-shell--form\s+\.optimization-lab-table\s+th,\s*\.optimization-lab-table-shell--form\s+\.optimization-lab-table\s+td\s*\{[^}]*white-space:\s*normal;/s,
+    );
+  });
+
+  it("uses wrapped hard-guard badges instead of overflow-prone inline chips", async () => {
+    const { container } = render(
+      <OptimizationConfigPage
+        strategyId="strat-mean-001"
+        sourceRunId="run-seed"
+        entryPoint="run_detail"
+      />,
+    );
+
+    await screen.findByRole("heading", { level: 1, name: "QQQ均值回归策略" });
+
+    const firstCard = container.querySelector(
+      ".optimization-constraint-card",
+    ) as HTMLElement | null;
+    const topline = firstCard?.querySelector(
+      ".optimization-constraint-card__topline",
+    ) as HTMLDivElement | null;
+    const operator = firstCard?.querySelector(
+      ".optimization-constraint-card__operator",
+    ) as HTMLSpanElement | null;
+    const badges = firstCard?.querySelector(
+      ".optimization-constraint-card__badges",
+    ) as HTMLDivElement | null;
+    const baselineChip = firstCard?.querySelector(
+      ".optimization-constraint-card__badge--baseline",
+    ) as HTMLSpanElement | null;
+    const verdictChip = firstCard?.querySelector(
+      ".optimization-constraint-card__verdict",
+    ) as HTMLSpanElement | null;
+
+    expect(firstCard).toBeTruthy();
+    expect(topline).toBeTruthy();
+    expect(operator).toBeTruthy();
+    expect(badges).toBeTruthy();
+    expect(baselineChip).toBeTruthy();
+    expect(verdictChip).toBeTruthy();
+    expect(optimizationLabPageCss).toMatch(
+      /\.optimization-constraint-card__topline\s*\{[^}]*flex-wrap:\s*wrap;/s,
+    );
+    expect(optimizationLabPageCss).toMatch(
+      /\.optimization-constraint-card__category,\s*\.optimization-constraint-card__operator\s*\{[^}]*white-space:\s*normal;/s,
+    );
+    expect(optimizationLabPageCss).toMatch(
+      /\.optimization-constraint-card__badges\s*\{[^}]*display:\s*grid;/s,
+    );
+    expect(optimizationLabPageCss).toMatch(
+      /\.optimization-constraint-card__badge\s*\{[^}]*width:\s*100%;[^}]*overflow-wrap:\s*anywhere;/s,
+    );
+    expect(optimizationLabPageCss).toMatch(
+      /\.optimization-constraint-card__verdict\s*\{[^}]*white-space:\s*normal;/s,
+    );
   });
 });

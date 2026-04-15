@@ -5,16 +5,60 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any, Callable
 
 import uvicorn
 
-from .api import build_runtime_market_data_provider, create_app
 from .real_service import RealBacktestPlatformService
 from .storage import iso_now
 
-app = create_app(
-    startup_optimization_recovery_mode=os.getenv("GRIT_STARTUP_OPTIMIZATION_RECOVERY", "interrupt"),
-)
+
+def _build_runtime_market_data_provider():
+    from .api import build_runtime_market_data_provider
+
+    return build_runtime_market_data_provider()
+
+
+class _LazyRuntimeMarketDataProvider:
+    def __init__(self, builder: Callable[[], Any]) -> None:
+        self._builder = builder
+        self._provider: Any | None = None
+
+    def _resolve(self) -> Any:
+        if self._provider is None:
+            self._provider = self._builder()
+        return self._provider
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._resolve(), name)
+
+
+def _lazy_runtime_market_data_provider() -> _LazyRuntimeMarketDataProvider:
+    return _LazyRuntimeMarketDataProvider(_build_runtime_market_data_provider)
+
+
+class _LazyApp:
+    def __init__(self) -> None:
+        self._app = None
+
+    def _resolve(self):
+        if self._app is None:
+            from .api import create_app
+
+            self._app = create_app(
+                market_data_provider=_lazy_runtime_market_data_provider(),
+                startup_optimization_recovery_mode=os.getenv("GRIT_STARTUP_OPTIMIZATION_RECOVERY", "interrupt"),
+            )
+        return self._app
+
+    async def __call__(self, scope, receive, send):
+        await self._resolve()(scope, receive, send)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._resolve(), name)
+
+
+app = _LazyApp()
 _WINDOWS_MEMORY_JOB_HANDLE = None
 
 
@@ -138,7 +182,7 @@ def main(argv: list[str] | None = None) -> None:
         _configure_refresh_memory_guard()
         service = RealBacktestPlatformService(
             args.db_path or _default_db_path(),
-            market_data_provider=build_runtime_market_data_provider(),
+            market_data_provider=_lazy_runtime_market_data_provider(),
         )
         payload: dict[str, object] = {"mode": args.mode}
         if args.reason is not None:
@@ -191,7 +235,7 @@ def main(argv: list[str] | None = None) -> None:
             raise ValueError("--job-id is required for run-optimization")
         service = RealBacktestPlatformService(
             args.db_path or _default_db_path(),
-            market_data_provider=build_runtime_market_data_provider(),
+            market_data_provider=_lazy_runtime_market_data_provider(),
         )
         started = service.run_optimization_job_worker(args.job_id)
         if hasattr(sys.stdout, "reconfigure"):

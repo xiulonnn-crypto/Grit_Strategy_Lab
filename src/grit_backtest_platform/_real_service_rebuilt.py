@@ -49,11 +49,20 @@ from .service import BacktestPlatformService, _as_mapping
 from .storage import dumps, iso_now, is_snapshot_blocking, loads
 from .universe_history import (
     ANCHOR_SCHEDULE,
+    NASDAQ100_UNIVERSE_KEY,
+    NASDAQ100_UNIVERSE_NAME,
     NASDAQ100_UNIVERSE_SNAPSHOT_ID,
     SP500_UNIVERSE_KEY,
+    SP500_UNIVERSE_NAME,
     SP500_UNIVERSE_SNAPSHOT_ID,
+    SOURCE_QUALITY_HISTORICAL_DATASET,
+    SOURCE_QUALITY_OFFICIAL_ANNOUNCEMENT,
+    SOURCE_QUALITY_WIKIPEDIA_REVISION,
+    UniverseMembershipSnapshot,
+    _is_historical_anchor_quality,
     collect_snapshot_symbols,
     default_universe_history_providers,
+    semiannual_anchor_dates,
 )
 from .yahoo_provider import YahooMarketDataProvider
 DEFAULT_UNIVERSE_SYMBOLS = {
@@ -230,7 +239,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
         normalized = str(provider_name or "").strip().lower()
         return normalized in {"longbridge", "longbridge_static_info", "futu", "futu_rehab"} or normalized.startswith("futu")
 
-    def _scoped_market_data_provider(self, *, mode: str, window_start: date) -> Any:
+    def _scoped_market_data_provider(
+        self,
+        *,
+        mode: str,
+        window_start: date,
+        allow_targeted_price_repair: bool = False,
+    ) -> Any:
         provider = self._primary_market_data_provider()
         scoped_copy = getattr(provider, "scoped_copy", None)
         if not callable(scoped_copy):
@@ -240,8 +255,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
             excluded.update({"longbridge", "longbridge_static_info", "futu", "futu_rehab"})
         if window_start < LONGBRIDGE_MIN_HISTORY_DATE:
             excluded.update({"longbridge", "longbridge_static_info"})
-        if not excluded:
+        if not excluded and not allow_targeted_price_repair:
             return provider
+        if allow_targeted_price_repair:
+            return scoped_copy(
+                exclude_provider_names=excluded,
+                allow_targeted_price_repair=True,
+            )
         return scoped_copy(exclude_provider_names=excluded)
 
     def _fallback_market_data_provider(self, primary_provider: Any | None = None) -> Any:
@@ -609,6 +629,388 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 seen.add(normalized)
                 ordered.append(normalized)
         return ordered
+
+    def _snapshot_id_for_universe_key(self, universe_key: str) -> str | None:
+        normalized_key = str(universe_key or "").strip().lower()
+        if normalized_key == SP500_UNIVERSE_KEY:
+            return SP500_UNIVERSE_SNAPSHOT_ID
+        if normalized_key == NASDAQ100_UNIVERSE_KEY:
+            return NASDAQ100_UNIVERSE_SNAPSHOT_ID
+        return None
+
+    def _universe_identity_for_snapshot_id(self, snapshot_id: str) -> tuple[str, str]:
+        normalized_snapshot_id = str(snapshot_id or "").strip()
+        if normalized_snapshot_id == SP500_UNIVERSE_SNAPSHOT_ID:
+            return SP500_UNIVERSE_KEY, SP500_UNIVERSE_NAME
+        if normalized_snapshot_id == NASDAQ100_UNIVERSE_SNAPSHOT_ID:
+            return NASDAQ100_UNIVERSE_KEY, NASDAQ100_UNIVERSE_NAME
+        return normalized_snapshot_id, normalized_snapshot_id
+
+    def _reconstruct_universe_snapshots_from_memberships(
+        self,
+        *,
+        snapshot_id: str,
+        memberships: Sequence[Mapping[str, Any]],
+    ) -> list[UniverseMembershipSnapshot]:
+        if not memberships:
+            return []
+        grouped_rows: dict[str, list[Mapping[str, Any]]] = {}
+        for row in memberships:
+            effective_date = str(row.get("effective_date") or "").strip()
+            if not effective_date:
+                continue
+            grouped_rows.setdefault(effective_date, []).append(row)
+        universe_key, universe_name = self._universe_identity_for_snapshot_id(snapshot_id)
+        snapshots: list[UniverseMembershipSnapshot] = []
+        for effective_date in sorted(grouped_rows):
+            rows_for_date = sorted(grouped_rows[effective_date], key=lambda item: str(item.get("symbol") or ""))
+            first_row = rows_for_date[0]
+            normalized_symbols = [
+                str(item.get("symbol") or "").strip().upper()
+                for item in rows_for_date
+                if str(item.get("symbol") or "").strip()
+            ]
+            raw_symbols = [
+                str(item.get("raw_symbol") or item.get("symbol") or "").strip()
+                for item in rows_for_date
+                if str(item.get("raw_symbol") or item.get("symbol") or "").strip()
+            ]
+            metadata = dict(first_row.get("metadata") or {})
+            snapshots.append(
+                UniverseMembershipSnapshot(
+                    universe_key=universe_key,
+                    universe_name=universe_name,
+                    effective_date=date.fromisoformat(effective_date),
+                    normalized_symbols=normalized_symbols,
+                    raw_symbols=raw_symbols or normalized_symbols,
+                    unmapped_symbols=list(metadata.get("unmapped_symbols") or []),
+                    source=str(first_row.get("source") or ""),
+                    fallback_source=str(first_row.get("fallback_source") or "") or None,
+                    source_revision_id=str(metadata.get("source_revision_id") or "") or None,
+                    source_page_title=str(metadata.get("source_page_title") or "") or None,
+                    metadata=metadata,
+                )
+            )
+        return snapshots
+
+    def _latest_universe_snapshots_from_memberships(
+        self,
+        existing_universe_memberships: Mapping[str, Sequence[Mapping[str, Any]]],
+    ) -> list[UniverseMembershipSnapshot]:
+        latest_snapshots: list[UniverseMembershipSnapshot] = []
+        for snapshot_id, memberships in existing_universe_memberships.items():
+            anchor_snapshots = self._reconstruct_universe_snapshots_from_memberships(
+                snapshot_id=snapshot_id,
+                memberships=memberships,
+            )
+            if anchor_snapshots:
+                latest_snapshots.append(max(anchor_snapshots, key=lambda item: item.effective_date))
+        return latest_snapshots
+
+    def _build_universe_refresh_windows(
+        self,
+        *,
+        mode: str,
+        snapshot_window_start: date,
+        window_end: date,
+        existing_universe_memberships: Mapping[str, Sequence[Mapping[str, Any]]],
+    ) -> dict[str, dict[str, Any] | None]:
+        all_anchor_dates = semiannual_anchor_dates(snapshot_window_start, window_end)
+        windows: dict[str, dict[str, Any] | None] = {}
+        for snapshot_id in (SP500_UNIVERSE_SNAPSHOT_ID, NASDAQ100_UNIVERSE_SNAPSHOT_ID):
+            if mode != "repair":
+                windows[snapshot_id] = {
+                    "start_date": snapshot_window_start,
+                    "end_date": window_end,
+                    "target_anchor_count": len(all_anchor_dates),
+                    "total_anchor_count": len(all_anchor_dates),
+                }
+                continue
+            grouped_rows: dict[str, list[Mapping[str, Any]]] = {}
+            for row in existing_universe_memberships.get(snapshot_id, []):
+                effective_date = str(row.get("effective_date") or "").strip()
+                if effective_date:
+                    grouped_rows.setdefault(effective_date, []).append(row)
+            incomplete_anchors: list[date] = []
+            for anchor in all_anchor_dates:
+                rows_for_anchor = grouped_rows.get(anchor.isoformat()) or []
+                if not rows_for_anchor:
+                    incomplete_anchors.append(anchor)
+                    continue
+                first_row = rows_for_anchor[0]
+                quality = str((first_row.get("metadata") or {}).get("source_quality") or "")
+                if (not _is_historical_anchor_quality(quality)) or first_row.get("fallback_source"):
+                    incomplete_anchors.append(anchor)
+            if not incomplete_anchors:
+                windows[snapshot_id] = None
+                continue
+            windows[snapshot_id] = {
+                "start_date": min(incomplete_anchors),
+                "end_date": max(incomplete_anchors),
+                "target_anchor_count": len(incomplete_anchors),
+                "total_anchor_count": len(all_anchor_dates),
+            }
+        return windows
+
+    def _group_universe_snapshots(
+        self,
+        universe_snapshots: Sequence[UniverseMembershipSnapshot],
+    ) -> tuple[dict[str, list[UniverseMembershipSnapshot]], dict[str, list[dict[str, Any]]]]:
+        memberships_by_snapshot: dict[str, list[dict[str, Any]]] = {}
+        grouped_universe_snapshots: dict[str, list[UniverseMembershipSnapshot]] = {}
+        for snapshot in universe_snapshots:
+            snapshot_id = self._snapshot_id_for_universe_key(str(snapshot.universe_key or ""))
+            if not snapshot_id:
+                continue
+            grouped_universe_snapshots.setdefault(snapshot_id, [])
+            grouped_universe_snapshots[snapshot_id].append(snapshot)
+            memberships_by_snapshot.setdefault(snapshot_id, [])
+            memberships_by_snapshot[snapshot_id].extend(
+                {
+                    "effective_date": snapshot.effective_date.isoformat(),
+                    "symbol": symbol,
+                    "raw_symbol": symbol,
+                    "membership_status": "ACTIVE",
+                    "source": snapshot.source,
+                    "fallback_source": snapshot.fallback_source,
+                    "metadata": dict(snapshot.metadata),
+                }
+                for symbol in snapshot.normalized_symbols
+            )
+        return grouped_universe_snapshots, memberships_by_snapshot
+
+    def _persist_grouped_universe_snapshots(
+        self,
+        *,
+        grouped_universe_snapshots: Mapping[str, Sequence[UniverseMembershipSnapshot]],
+        memberships_by_snapshot: Mapping[str, Sequence[Mapping[str, Any]]],
+        snapshot_window_start: date,
+        window_end: date,
+        as_of: str,
+    ) -> list[str]:
+        warnings: list[str] = []
+        for snapshot_id, anchor_snapshots in grouped_universe_snapshots.items():
+            if not anchor_snapshots:
+                continue
+            ordered_anchor_snapshots = sorted(anchor_snapshots, key=lambda item: item.effective_date)
+            latest_snapshot = ordered_anchor_snapshots[-1]
+            latest_anchor_date = latest_snapshot.effective_date.isoformat()
+            source_quality_breakdown: dict[str, int] = {}
+            historical_anchor_count = 0
+            for item in ordered_anchor_snapshots:
+                source_quality = str((item.metadata or {}).get("source_quality") or "").lower()
+                source_quality_breakdown[source_quality or "unknown"] = (
+                    source_quality_breakdown.get(source_quality or "unknown", 0) + 1
+                )
+                if source_quality in {
+                    SOURCE_QUALITY_HISTORICAL_DATASET,
+                    SOURCE_QUALITY_WIKIPEDIA_REVISION,
+                    SOURCE_QUALITY_OFFICIAL_ANNOUNCEMENT,
+                    "historical_revision_snapshot",
+                    "historical_constituent_api",
+                } and not item.fallback_source:
+                    historical_anchor_count += 1
+            total_anchor_count = len(ordered_anchor_snapshots)
+            latest_members = [
+                row
+                for row in memberships_by_snapshot.get(snapshot_id, [])
+                if str(row.get("effective_date")) == latest_anchor_date
+            ]
+            source_names = sorted({str(item.source) for item in ordered_anchor_snapshots if item.source})
+            fallback_sources = sorted(
+                {str(item.fallback_source) for item in ordered_anchor_snapshots if item.fallback_source}
+            )
+            universe_status = (
+                "READY"
+                if total_anchor_count and historical_anchor_count == total_anchor_count
+                else ("FAILED" if not latest_members else "INCOMPLETE")
+            )
+            if universe_status != "READY":
+                probe_status = str((latest_snapshot.metadata or {}).get("historical_constituent_probe_status") or "").strip()
+                if probe_status and probe_status != "available":
+                    warnings.append(
+                        f"{latest_snapshot.universe_name}: FMP historical constituent {probe_status.replace('_', ' ')}; "
+                        f"fell back to {latest_snapshot.source} ({historical_anchor_count}/{total_anchor_count})."
+                    )
+                else:
+                    warnings.append(
+                        f"{latest_snapshot.universe_name}: historical anchors {historical_anchor_count}/{total_anchor_count} came from revision history."
+                    )
+            self.market_data_repository.replace_universe_snapshot(
+                {
+                    "id": snapshot_id,
+                    "universe_key": latest_snapshot.universe_key,
+                    "name": latest_snapshot.universe_name,
+                    "status": universe_status,
+                    "as_of": as_of,
+                    "freshness_label": (
+                        "Historical anchors are complete"
+                        if universe_status == "READY"
+                        else f"Historical anchors are still being repaired ({historical_anchor_count}/{total_anchor_count})"
+                    ),
+                    "window_start": snapshot_window_start.isoformat(),
+                    "window_end": window_end.isoformat(),
+                    "anchor_schedule": latest_snapshot.anchor_schedule or ANCHOR_SCHEDULE,
+                    "member_count": len(latest_members) if latest_members else len(latest_snapshot.normalized_symbols),
+                    "source": source_names[0] if len(source_names) == 1 else "mixed_sources",
+                    "fallback_source": (
+                        None
+                        if not fallback_sources
+                        else (fallback_sources[0] if len(fallback_sources) == 1 else "mixed_fallbacks")
+                    ),
+                    "blocker": {}
+                    if universe_status == "READY"
+                    else {
+                        "code": "UNIVERSE_HISTORY_INCOMPLETE" if latest_members else "UNIVERSE_HISTORY_FAILED",
+                        "message": (
+                            "Universe history is partially available, but some historical anchors are still missing."
+                            if latest_members
+                            else "Universe history refresh failed and no usable historical anchors are available."
+                        ),
+                    },
+                    "metadata": {
+                        "source_page_title": latest_snapshot.source_page_title,
+                        "source_revision_id": latest_snapshot.source_revision_id,
+                        "latest_anchor_date": latest_anchor_date,
+                        "anchor_count": total_anchor_count,
+                        "historical_anchor_count": historical_anchor_count,
+                        "fallback_anchor_count": total_anchor_count - historical_anchor_count,
+                        "historical_constituent_provider": (latest_snapshot.metadata or {}).get("historical_constituent_provider"),
+                        "historical_constituent_probe_status": (latest_snapshot.metadata or {}).get("historical_constituent_probe_status"),
+                        "source_quality_breakdown": source_quality_breakdown,
+                        "source_names": source_names,
+                        "fallback_sources": fallback_sources,
+                        **dict(latest_snapshot.metadata),
+                    },
+                },
+                memberships=memberships_by_snapshot.get(snapshot_id, []),
+            )
+        return warnings
+
+    def _run_universe_refresh_phase(
+        self,
+        *,
+        mode: str,
+        snapshot_window_start: date,
+        window_end: date,
+        started_at: str,
+        existing_universe_memberships: Mapping[str, Sequence[Mapping[str, Any]]],
+        emit_heartbeat: Callable[..., None],
+    ) -> tuple[dict[str, list[UniverseMembershipSnapshot]], dict[str, list[dict[str, Any]]], list[str]]:
+        grouped_universe_snapshots: dict[str, list[UniverseMembershipSnapshot]] = {}
+        memberships_by_snapshot: dict[str, list[dict[str, Any]]] = {}
+        warnings: list[str] = []
+        providers = list(self._universe_history_providers())
+        refresh_windows = self._build_universe_refresh_windows(
+            mode=mode,
+            snapshot_window_start=snapshot_window_start,
+            window_end=window_end,
+            existing_universe_memberships=existing_universe_memberships,
+        )
+        total_universe_count = len([item for item in refresh_windows.values() if item is not None]) or len(refresh_windows)
+        for index, provider in enumerate(providers, start=1):
+            definition = getattr(provider, "definition", None)
+            universe_key = str(getattr(definition, "universe_key", "") or "")
+            display_name = str(
+                getattr(definition, "display_name", "") or getattr(provider, "provider_name", "股票池快照")
+            )
+            snapshot_id = self._snapshot_id_for_universe_key(universe_key)
+            targeted_windows: dict[str, dict[str, Any]] = {}
+            if snapshot_id:
+                window = refresh_windows.get(snapshot_id)
+                if window is not None:
+                    targeted_windows[snapshot_id] = dict(window)
+            else:
+                targeted_windows = {
+                    current_snapshot_id: dict(window)
+                    for current_snapshot_id, window in refresh_windows.items()
+                    if window is not None
+                }
+            if not targeted_windows:
+                emit_heartbeat(
+                    current_stage="universe_snapshots",
+                    current_stage_label=f"刷新股票池快照 · {display_name}",
+                    force=True,
+                    progress={
+                        "phase": "universe_snapshots",
+                        "provider": str(getattr(provider, "provider_name", provider.__class__.__name__)),
+                        "completed_universes": index,
+                        "total_universes": max(1, total_universe_count),
+                        "target_anchor_count": 0,
+                        "total_anchor_count": len(semiannual_anchor_dates(snapshot_window_start, window_end)),
+                        "status": "already_historical",
+                    },
+                )
+                continue
+
+            if snapshot_id and len(targeted_windows) == 1:
+                load_start = next(iter(targeted_windows.values()))["start_date"]
+                load_end = next(iter(targeted_windows.values()))["end_date"]
+            else:
+                load_start = min(window["start_date"] for window in targeted_windows.values())
+                load_end = max(window["end_date"] for window in targeted_windows.values())
+
+            emit_heartbeat(
+                current_stage="universe_provider",
+                current_stage_label=f"刷新股票池快照 · {display_name}",
+                force=True,
+                progress={
+                    "phase": "universe_provider",
+                    "provider": str(getattr(provider, "provider_name", provider.__class__.__name__)),
+                    "completed_universes": index - 1,
+                    "total_universes": max(1, total_universe_count),
+                    "target_anchor_count": sum(int(window.get("target_anchor_count") or 0) for window in targeted_windows.values()),
+                    "total_anchor_count": sum(int(window.get("total_anchor_count") or 0) for window in targeted_windows.values()),
+                    "window_start": str(load_start),
+                    "window_end": str(load_end),
+                },
+            )
+            provider_snapshots = list(provider.load_snapshots(load_start, load_end))
+            provider_grouped_snapshots, _ = self._group_universe_snapshots(provider_snapshots)
+
+            for current_snapshot_id, window in targeted_windows.items():
+                provider_specific_snapshots = provider_grouped_snapshots.get(current_snapshot_id, [])
+                if mode == "repair":
+                    merged_by_date = {
+                        item.effective_date: item
+                        for item in self._reconstruct_universe_snapshots_from_memberships(
+                            snapshot_id=current_snapshot_id,
+                            memberships=existing_universe_memberships.get(current_snapshot_id, []),
+                        )
+                    }
+                    for snapshot in provider_specific_snapshots:
+                        merged_by_date[snapshot.effective_date] = snapshot
+                    merged_snapshots = [merged_by_date[key] for key in sorted(merged_by_date)]
+                else:
+                    merged_snapshots = sorted(provider_specific_snapshots, key=lambda item: item.effective_date)
+                grouped_universe_snapshots[current_snapshot_id] = merged_snapshots
+                _, grouped_memberships = self._group_universe_snapshots(merged_snapshots)
+                memberships_by_snapshot[current_snapshot_id] = grouped_memberships.get(current_snapshot_id, [])
+
+            warnings = self._persist_grouped_universe_snapshots(
+                grouped_universe_snapshots=grouped_universe_snapshots,
+                memberships_by_snapshot=memberships_by_snapshot,
+                snapshot_window_start=snapshot_window_start,
+                window_end=window_end,
+                as_of=started_at,
+            )
+            emit_heartbeat(
+                current_stage="universe_snapshots",
+                current_stage_label=f"刷新股票池快照 · {display_name} 已更新",
+                force=True,
+                progress={
+                    "phase": "universe_snapshots",
+                    "provider": str(getattr(provider, "provider_name", provider.__class__.__name__)),
+                    "completed_universes": index,
+                    "total_universes": max(1, total_universe_count),
+                    "target_anchor_count": sum(int(window.get("target_anchor_count") or 0) for window in targeted_windows.values()),
+                    "persisted_anchor_count": sum(
+                        len(grouped_universe_snapshots.get(current_snapshot_id, []))
+                        for current_snapshot_id in targeted_windows
+                    ),
+                },
+            )
+        return grouped_universe_snapshots, memberships_by_snapshot, warnings
 
     def _repair_symbol_batch(self, symbols: Sequence[str], cursor: int, batch_size: int) -> tuple[list[str], int]:
         ordered = self._normalize_refresh_symbols(symbols)
@@ -1013,7 +1415,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if not isinstance(item, Mapping):
                 continue
             kind = str(item.get("kind") or "").strip().lower()
-            if kind in {"history", "history_availability"}:
+            if kind in {"history", "history_availability", "targeted_price_repair", "targeted_price_repair_availability"}:
                 self._record_provider_result(
                     telemetry,
                     snapshot_id=DATASET_PRICE_SNAPSHOT_ID,
@@ -1212,26 +1614,50 @@ class RealBacktestPlatformService(BacktestPlatformService):
         membership_breakdown = self._provider_row_breakdown(membership_rows)
         for provider_name in source_names:
             landed_anchor_count = sum(1 for item in ordered_anchor_snapshots if str(item.source or "") == provider_name)
+            selected_primary_anchors = sum(
+                1
+                for item in ordered_anchor_snapshots
+                if str(item.source or "") == provider_name and not item.fallback_source
+            )
+            fallback_anchors = sum(
+                1
+                for item in ordered_anchor_snapshots
+                if str(item.source or "") == provider_name and bool(item.fallback_source)
+            )
+            source_quality_breakdown: dict[str, int] = {}
+            for item in ordered_anchor_snapshots:
+                if str(item.source or "") != provider_name:
+                    continue
+                quality = str((item.metadata or {}).get("source_quality") or "").strip().lower() or "unknown"
+                source_quality_breakdown[quality] = source_quality_breakdown.get(quality, 0) + 1
             landed_payload = membership_breakdown.get(provider_name) or {}
             providers[provider_name] = {
                 "status": "succeeded",
                 "landed_anchor_count": int(landed_anchor_count),
+                "selected_primary_anchors": int(selected_primary_anchors),
+                "fallback_anchors": int(fallback_anchors),
                 "landed_row_count": int(landed_payload.get("landed_row_count") or 0),
                 "landed_symbol_count": int(landed_payload.get("landed_symbol_count") or 0),
+                "source_quality_breakdown": source_quality_breakdown,
             }
         if historical_provider:
             landed_anchor_count = sum(
                 1
                 for item in ordered_anchor_snapshots
-                if str((item.metadata or {}).get("source_quality") or "").lower() == "historical_constituent_api"
+                if str((item.metadata or {}).get("historical_constituent_provider") or "").strip().lower() == historical_provider
+                and str((item.metadata or {}).get("source_quality") or "").strip().lower() == SOURCE_QUALITY_HISTORICAL_DATASET
+                and not item.fallback_source
             )
             provider_bucket = providers.setdefault(
                 historical_provider,
                 {
                     "status": "succeeded" if landed_anchor_count else "skipped",
                     "landed_anchor_count": 0,
+                    "selected_primary_anchors": 0,
+                    "fallback_anchors": 0,
                     "landed_row_count": 0,
                     "landed_symbol_count": 0,
+                    "source_quality_breakdown": {},
                 },
             )
             provider_bucket["status"] = (
@@ -1250,6 +1676,24 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "source_names": source_names,
             "fallback_sources": fallback_sources,
             "providers": providers,
+        }
+
+    def _summarize_universe_anchor_progress(self, *, anchor_snapshots: Sequence[Any]) -> dict[str, Any]:
+        ordered_anchor_snapshots = sorted(anchor_snapshots, key=lambda item: item.effective_date)
+        source_quality_breakdown: dict[str, int] = {}
+        historical_anchor_count = 0
+        for item in ordered_anchor_snapshots:
+            source_quality = str((item.metadata or {}).get("source_quality") or "").strip().lower()
+            normalized_quality = source_quality or "unknown"
+            source_quality_breakdown[normalized_quality] = source_quality_breakdown.get(normalized_quality, 0) + 1
+            if _is_historical_anchor_quality(source_quality) and not item.fallback_source:
+                historical_anchor_count += 1
+        anchor_count = len(ordered_anchor_snapshots)
+        return {
+            "anchor_count": int(anchor_count),
+            "historical_anchor_count": int(historical_anchor_count),
+            "fallback_anchor_count": int(anchor_count - historical_anchor_count),
+            "source_quality_breakdown": source_quality_breakdown,
         }
 
     def _build_refresh_stats(
@@ -1279,6 +1723,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 continue
             latest_snapshot = ordered_anchor_snapshots[-1]
             latest_anchor_date = latest_snapshot.effective_date.isoformat()
+            anchor_progress = self._summarize_universe_anchor_progress(anchor_snapshots=ordered_anchor_snapshots)
             latest_members = {
                 str(row.get("symbol") or "").strip().upper()
                 for row in memberships_by_snapshot.get(snapshot_id, [])
@@ -1299,9 +1744,24 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     if previous_latest_members
                     else len(latest_members)
                 )
+            previous_anchor_snapshots = self._reconstruct_universe_snapshots_from_memberships(
+                snapshot_id=snapshot_id,
+                memberships=previous_rows,
+            )
+            previous_anchor_progress = self._summarize_universe_anchor_progress(
+                anchor_snapshots=previous_anchor_snapshots
+            )
             universes[snapshot_id] = {
                 "name": str(latest_snapshot.universe_name or snapshot_id),
                 "updated_row_count": int(changed_rows),
+                "anchor_count": int(anchor_progress["anchor_count"]),
+                "historical_anchor_count": int(anchor_progress["historical_anchor_count"]),
+                "previous_historical_anchor_count": int(previous_anchor_progress["historical_anchor_count"]),
+                "historical_anchor_delta": int(
+                    anchor_progress["historical_anchor_count"] - previous_anchor_progress["historical_anchor_count"]
+                ),
+                "fallback_anchor_count": int(anchor_progress["fallback_anchor_count"]),
+                "source_quality_breakdown": dict(anchor_progress["source_quality_breakdown"]),
                 "latest_anchor_date": latest_anchor_date,
                 "provider_summary": self._build_universe_provider_summary(
                     snapshot_id=snapshot_id,
@@ -3220,6 +3680,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             wanted,
             start_date=start_date,
             end_date=end_date,
+            include_metadata=False,
         )
         bars_by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in dict.fromkeys(wanted)}
         for symbol, series in rows.items():
@@ -3525,12 +3986,16 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "end_date": request_payload.get("end_date"),
         }
 
-    def _build_snapshot_summary_from_context(
+    def _build_snapshot_summary_payload(
         self,
         context: Mapping[str, Any],
-        bars: Mapping[str, list[dict[str, Any]]],
+        *,
+        benchmark_trade_days: int,
+        available_symbols: Sequence[str],
+        row_count: int,
+        coverage_days: int,
+        latest_trade_date: str | None,
     ) -> dict[str, Any]:
-        benchmark_symbol = str(context.get("benchmark_symbol") or "SPY").upper()
         symbols = [str(symbol).upper() for symbol in context.get("symbols") or []]
         dataset_snapshot_id = str(context.get("dataset_snapshot_id") or DATASET_PRICE_SNAPSHOT_ID)
         direct_symbol_universe = bool(context.get("direct_symbol_universe"))
@@ -3540,17 +4005,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
         corporate_dataset = dict(context.get("corporate_dataset") or {}) if context.get("corporate_dataset") else None
         universe_snapshot = dict(context.get("universe_snapshot") or {}) if context.get("universe_snapshot") else None
         universe_membership_symbols = [str(symbol).upper() for symbol in context.get("universe_membership_symbols") or []]
-        benchmark_trade_days = len(bars.get(benchmark_symbol, []))
-        available_symbols = [symbol for symbol in symbols if bars.get(symbol)]
-        row_count = sum(len(series) for series in bars.values())
-        coverage_days = (
-            benchmark_trade_days
-            if direct_symbol_universe
-            else sum(len(series) for symbol, series in bars.items() if symbol != benchmark_symbol)
-        )
+        normalized_available_symbols = [str(symbol).upper() for symbol in available_symbols]
         blocking_items = []
-        all_requested_symbols_available = len(available_symbols) == len(symbols)
-        price_snapshot_ready_for_request = benchmark_trade_days > 0 and bool(available_symbols)
+        all_requested_symbols_available = len(normalized_available_symbols) == len(symbols)
+        price_snapshot_ready_for_request = benchmark_trade_days > 0 and bool(normalized_available_symbols)
         universe_snapshot_ready_for_request = direct_symbol_universe or bool(universe_membership_symbols)
         required_snapshots = []
         if not price_snapshot_ready_for_request:
@@ -3560,13 +4018,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
         for item in required_snapshots:
             if str(item.get("status") or "INCOMPLETE").upper() != "READY":
                 blocking_items.append(item)
-        blocking = bool(blocking_items) or benchmark_trade_days == 0 or not available_symbols
+        blocking = bool(blocking_items) or benchmark_trade_days == 0 or not normalized_available_symbols
         blocker = dict(blocking_items[0].get("blocker") or {}) if blocking_items else {}
         status = "READY"
         if blocking_items:
             statuses = [str(item.get("status") or "INCOMPLETE").upper() for item in blocking_items]
             status = "FAILED" if "FAILED" in statuses else ("INCOMPLETE" if "INCOMPLETE" in statuses else "STALE")
-        elif benchmark_trade_days == 0 or not available_symbols:
+        elif benchmark_trade_days == 0 or not normalized_available_symbols:
             status = "INCOMPLETE"
         corporate_status = str(corporate_dataset.get("status") or "INCOMPLETE").upper() if corporate_dataset else "NOT_REQUIRED"
         universe_status = str(universe_snapshot.get("status") or "INCOMPLETE").upper() if universe_snapshot else "NOT_REQUIRED"
@@ -3588,17 +4046,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
             and universe_status != "READY"
         ):
             message = "Universe history snapshot is still incomplete. The run can proceed using the latest available anchor membership."
-        elif (
-            not blocking
-            and corporate_status != "READY"
-        ):
+        elif not blocking and corporate_status != "READY":
             message = "Corporate action snapshot is still incomplete. The run can proceed, but formal backtests may still be limited."
         return {
             "status": status,
             "dataset_snapshot_id": dataset_snapshot_id,
             "universe_snapshot_id": universe_snapshot_id,
             "supporting_dataset_snapshot_id": supporting_dataset_id,
-            "symbol_count": len(available_symbols),
+            "symbol_count": len(normalized_available_symbols),
             "row_count": row_count,
             "benchmark_trade_days": benchmark_trade_days,
             "coverage_days": coverage_days,
@@ -3609,14 +4064,97 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "price_dataset_status": str(price_dataset.get("status") or "INCOMPLETE").upper(),
             "corporate_actions_status": corporate_status,
             "universe_status": universe_status,
-            "latest_trade_date": bars.get(benchmark_symbol, [{}])[-1].get("date") if bars.get(benchmark_symbol) else None,
+            "latest_trade_date": latest_trade_date,
         }
+
+    def _snapshot_summary_from_coverage_context(self, context: Mapping[str, Any]) -> dict[str, Any] | None:
+        if context.get("start_date") or context.get("end_date"):
+            return None
+        def trade_day_count(row: Mapping[str, Any] | None) -> int:
+            return int(_coerce_float((row or {}).get("trade_days"), 0.0))
+
+        benchmark_symbol = str(context.get("benchmark_symbol") or "SPY").upper()
+        symbols = [str(symbol).upper() for symbol in context.get("symbols") or []]
+        dataset_snapshot_id = str(context.get("dataset_snapshot_id") or DATASET_PRICE_SNAPSHOT_ID)
+        coverage_rows = self.market_data_repository.load_dataset_symbol_coverage(dataset_snapshot_id)
+        if not coverage_rows:
+            return self._build_snapshot_summary_payload(
+                context,
+                benchmark_trade_days=0,
+                available_symbols=[],
+                row_count=0,
+                coverage_days=0,
+                latest_trade_date=None,
+            )
+        coverage_by_symbol = {
+            str(row.get("symbol") or "").upper(): dict(row)
+            for row in coverage_rows
+            if str(row.get("symbol") or "").strip()
+        }
+        requested_symbols = list(dict.fromkeys([benchmark_symbol, *symbols]))
+        benchmark_coverage = coverage_by_symbol.get(benchmark_symbol) or {}
+        benchmark_trade_days = trade_day_count(benchmark_coverage)
+        available_symbols = [
+            symbol
+            for symbol in symbols
+            if trade_day_count(coverage_by_symbol.get(symbol)) > 0
+        ]
+        row_count = sum(trade_day_count(coverage_by_symbol.get(symbol)) for symbol in requested_symbols)
+        coverage_days = (
+            benchmark_trade_days
+            if bool(context.get("direct_symbol_universe"))
+            else sum(
+                trade_day_count(coverage_by_symbol.get(symbol))
+                for symbol in dict.fromkeys(available_symbols)
+                if symbol != benchmark_symbol
+            )
+        )
+        latest_trade_date = str(benchmark_coverage.get("end_date") or "").strip() or None
+        return self._build_snapshot_summary_payload(
+            context,
+            benchmark_trade_days=benchmark_trade_days,
+            available_symbols=available_symbols,
+            row_count=row_count,
+            coverage_days=coverage_days,
+            latest_trade_date=latest_trade_date,
+        )
+
+    def _build_snapshot_summary_from_context(
+        self,
+        context: Mapping[str, Any],
+        bars: Mapping[str, list[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        benchmark_symbol = str(context.get("benchmark_symbol") or "SPY").upper()
+        direct_symbol_universe = bool(context.get("direct_symbol_universe"))
+        benchmark_trade_days = len(bars.get(benchmark_symbol, []))
+        available_symbols = [
+            str(symbol).upper()
+            for symbol in context.get("symbols") or []
+            if bars.get(str(symbol).upper())
+        ]
+        row_count = sum(len(series) for series in bars.values())
+        coverage_days = (
+            benchmark_trade_days
+            if direct_symbol_universe
+            else sum(len(series) for symbol, series in bars.items() if symbol != benchmark_symbol)
+        )
+        return self._build_snapshot_summary_payload(
+            context,
+            benchmark_trade_days=benchmark_trade_days,
+            available_symbols=available_symbols,
+            row_count=row_count,
+            coverage_days=coverage_days,
+            latest_trade_date=bars.get(benchmark_symbol, [{}])[-1].get("date") if bars.get(benchmark_symbol) else None,
+        )
 
     def _snapshot_summary(self, strategy: Mapping[str, Any], request_payload: Mapping[str, Any]) -> dict[str, Any]:
         context = self._snapshot_summary_context(strategy, request_payload)
         blocking_summary = context.get("blocking_summary")
         if blocking_summary:
             return dict(blocking_summary)
+        fast_summary = self._snapshot_summary_from_coverage_context(context)
+        if fast_summary is not None:
+            return fast_summary
 
         requested_symbols = list(dict.fromkeys([str(context.get("benchmark_symbol") or "SPY").upper(), *list(context.get("symbols") or [])]))
         bars = self._load_snapshot_price_bars(
@@ -3689,6 +4227,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
         last_heartbeat_monotonic = 0.0
 
         universe_snapshots: list[Any] = []
+        grouped_universe_snapshots: dict[str, list[UniverseMembershipSnapshot]] = {}
+        memberships_by_snapshot: dict[str, list[dict[str, Any]]] = {}
+        selection_universe_snapshots = self._latest_universe_snapshots_from_memberships(existing_universe_memberships)
         heartbeat_at = iso_now()
         self._persist_snapshot_refresh_heartbeat(
             job_id=job_id,
@@ -3708,149 +4249,53 @@ class RealBacktestPlatformService(BacktestPlatformService):
             refresh_stats={},
         )
         last_heartbeat_monotonic = monotonic()
-        for provider in (self._universe_history_providers() if refresh_universes else []):
-            universe_snapshots.extend(provider.load_snapshots(snapshot_window_start, window_end))
 
-        memberships_by_snapshot: dict[str, list[dict[str, Any]]] = {}
-        grouped_universe_snapshots: dict[str, list[Any]] = {}
-        for snapshot in universe_snapshots:
-            snapshot_id = (
-                SP500_UNIVERSE_SNAPSHOT_ID
-                if str(snapshot.universe_key) == SP500_UNIVERSE_KEY
-                else NASDAQ100_UNIVERSE_SNAPSHOT_ID
+        def emit_universe_only_heartbeat(
+            *,
+            current_stage: str,
+            current_stage_label: str,
+            progress: Mapping[str, Any] | None = None,
+            force: bool = False,
+        ) -> None:
+            nonlocal last_heartbeat_monotonic
+            now_monotonic = monotonic()
+            if not force and (now_monotonic - last_heartbeat_monotonic) < SNAPSHOT_REFRESH_HEARTBEAT_INTERVAL_SECONDS:
+                return
+            self._persist_snapshot_refresh_heartbeat(
+                job_id=job_id,
+                request=payload,
+                mode=mode,
+                targets=targets,
+                created_at=job_created_at,
+                started_at=job_started_at,
+                symbol_count=0,
+                row_count=0,
+                warnings=warnings,
+                errors=errors,
+                current_stage=current_stage,
+                current_stage_label=current_stage_label,
+                progress=progress,
+                heartbeat_at=iso_now(),
+                refresh_stats={},
             )
-            grouped_universe_snapshots.setdefault(snapshot_id, [])
-            grouped_universe_snapshots[snapshot_id].append(snapshot)
-            memberships_by_snapshot.setdefault(snapshot_id, [])
-            memberships_by_snapshot[snapshot_id].extend(
-                {
-                    "effective_date": snapshot.effective_date.isoformat(),
-                    "symbol": symbol,
-                    "raw_symbol": symbol,
-                    "membership_status": "ACTIVE",
-                    "source": snapshot.source,
-                    "fallback_source": snapshot.fallback_source,
-                    "metadata": dict(snapshot.metadata),
-                }
-                for symbol in snapshot.normalized_symbols
+            last_heartbeat_monotonic = now_monotonic
+
+        if refresh_universes and not refresh_market_data:
+            grouped_universe_snapshots, memberships_by_snapshot, universe_warnings = self._run_universe_refresh_phase(
+                mode=mode,
+                snapshot_window_start=snapshot_window_start,
+                window_end=window_end,
+                started_at=started_at,
+                existing_universe_memberships=existing_universe_memberships,
+                emit_heartbeat=emit_universe_only_heartbeat,
             )
-        for snapshot_id, anchor_snapshots in grouped_universe_snapshots.items():
-            ordered_anchor_snapshots = sorted(anchor_snapshots, key=lambda item: item.effective_date)
-            latest_snapshot = ordered_anchor_snapshots[-1]
-            latest_anchor_date = latest_snapshot.effective_date.isoformat()
-            source_quality_breakdown: dict[str, int] = {}
-            historical_anchor_count = 0
-            for item in ordered_anchor_snapshots:
-                source_quality = str((item.metadata or {}).get("source_quality") or "").lower()
-                source_quality_breakdown[source_quality or "unknown"] = (
-                    source_quality_breakdown.get(source_quality or "unknown", 0) + 1
-                )
-                if source_quality in {"historical_revision_snapshot", "historical_constituent_api"} and not item.fallback_source:
-                    historical_anchor_count += 1
-            total_anchor_count = len(ordered_anchor_snapshots)
-            latest_members = [
-                row
-                for row in memberships_by_snapshot.get(snapshot_id, [])
-                if str(row.get("effective_date")) == latest_anchor_date
+            universe_snapshots = [
+                snapshot
+                for snapshot_group in grouped_universe_snapshots.values()
+                for snapshot in snapshot_group
             ]
-            source_names = sorted({str(item.source) for item in ordered_anchor_snapshots if item.source})
-            fallback_sources = sorted(
-                {str(item.fallback_source) for item in ordered_anchor_snapshots if item.fallback_source}
-            )
-            universe_status = (
-                "READY"
-                if total_anchor_count and historical_anchor_count == total_anchor_count
-                else ("FAILED" if not latest_members else "INCOMPLETE")
-            )
-            if universe_status != "READY":
-                probe_status = str((latest_snapshot.metadata or {}).get("historical_constituent_probe_status") or "").strip()
-                if probe_status and probe_status != "available":
-                    warnings.append(
-                        f"{latest_snapshot.universe_name}: FMP historical constituent {probe_status.replace('_', ' ')}; "
-                        f"fell back to {latest_snapshot.source} ({historical_anchor_count}/{total_anchor_count})."
-                    )
-                else:
-                    warnings.append(
-                        f"{latest_snapshot.universe_name}: historical anchors {historical_anchor_count}/{total_anchor_count} came from revision history."
-                    )
-            self.market_data_repository.replace_universe_snapshot(
-                {
-                    "id": snapshot_id,
-                    "universe_key": latest_snapshot.universe_key,
-                    "name": latest_snapshot.universe_name,
-                    "status": universe_status,
-                    "as_of": started_at,
-                    "freshness_label": (
-                        "Historical anchors are complete"
-                        if universe_status == "READY"
-                        else f"Historical anchors are still being repaired ({historical_anchor_count}/{total_anchor_count})"
-                    ),
-                    "window_start": snapshot_window_start.isoformat(),
-                    "window_end": window_end.isoformat(),
-                    "anchor_schedule": latest_snapshot.anchor_schedule or ANCHOR_SCHEDULE,
-                    "member_count": len(latest_members) if latest_members else len(latest_snapshot.normalized_symbols),
-                    "source": source_names[0] if len(source_names) == 1 else "mixed_sources",
-                    "fallback_source": (
-                        None
-                        if not fallback_sources
-                        else (fallback_sources[0] if len(fallback_sources) == 1 else "mixed_fallbacks")
-                    ),
-                    "blocker": {}
-                    if universe_status == "READY"
-                    else {
-                        "code": "UNIVERSE_HISTORY_INCOMPLETE" if latest_members else "UNIVERSE_HISTORY_FAILED",
-                        "message": (
-                            "Universe history is partially available, but some historical anchors are still missing."
-                            if latest_members
-                            else "Universe history refresh failed and no usable historical anchors are available."
-                        ),
-                    },
-                    "metadata": {
-                        "source_page_title": latest_snapshot.source_page_title,
-                        "source_revision_id": latest_snapshot.source_revision_id,
-                        "latest_anchor_date": latest_anchor_date,
-                        "anchor_count": total_anchor_count,
-                        "historical_anchor_count": historical_anchor_count,
-                        "fallback_anchor_count": total_anchor_count - historical_anchor_count,
-                        "historical_constituent_provider": (latest_snapshot.metadata or {}).get("historical_constituent_provider"),
-                        "historical_constituent_probe_status": (latest_snapshot.metadata or {}).get("historical_constituent_probe_status"),
-                        "source_quality_breakdown": source_quality_breakdown,
-                        "source_names": source_names,
-                        "fallback_sources": fallback_sources,
-                        **dict(latest_snapshot.metadata),
-                    },
-                },
-                memberships=memberships_by_snapshot.get(snapshot_id, []),
-            )
-
-        universe_refresh_stats = self._build_refresh_stats(
-            price_bars=[],
-            corporate_actions=[],
-            grouped_universe_snapshots=grouped_universe_snapshots,
-            memberships_by_snapshot=memberships_by_snapshot,
-            existing_universe_memberships=existing_universe_memberships,
-        )
-        self._persist_snapshot_refresh_heartbeat(
-            job_id=job_id,
-            request=payload,
-            mode=mode,
-            targets=targets,
-            created_at=job_created_at,
-            started_at=job_started_at,
-            symbol_count=0,
-            row_count=0,
-            warnings=warnings,
-            errors=errors,
-            current_stage="universe_snapshots",
-            current_stage_label="股票池历史锚点已落库",
-            progress={
-                "universes": len(grouped_universe_snapshots),
-                "anchors": sum(len(items) for items in grouped_universe_snapshots.values()),
-            },
-            heartbeat_at=iso_now(),
-            refresh_stats=universe_refresh_stats,
-        )
-        last_heartbeat_monotonic = monotonic()
+            warnings = [warning for warning in warnings if "historical anchors" not in warning and "FMP historical constituent" not in warning]
+            warnings.extend(universe_warnings)
 
         if not refresh_market_data:
             self._sync_strategy_snapshot_bindings(updated_at=started_at)
@@ -3886,7 +4331,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         selected_symbols, selection_metadata = self._select_market_data_refresh_symbols(
             mode=mode,
             targets=targets,
-            universe_snapshots=universe_snapshots,
+            universe_snapshots=selection_universe_snapshots,
             existing_price_snapshot=existing_price_snapshot,
             existing_corporate_snapshot=existing_corporate_snapshot,
         )
@@ -4172,6 +4617,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 repair_primary_provider = self._scoped_market_data_provider(
                     mode="repair",
                     window_start=snapshot_window_start,
+                    allow_targeted_price_repair=True,
                 )
                 repair_fallback_provider = self._fallback_market_data_provider(repair_primary_provider)
                 repair_fallback_availability = (
@@ -4302,6 +4748,23 @@ class RealBacktestPlatformService(BacktestPlatformService):
             running=False,
         )
 
+        if refresh_universes:
+            grouped_universe_snapshots, memberships_by_snapshot, universe_warnings = self._run_universe_refresh_phase(
+                mode=mode,
+                snapshot_window_start=snapshot_window_start,
+                window_end=window_end,
+                started_at=started_at,
+                existing_universe_memberships=existing_universe_memberships,
+                emit_heartbeat=emit_heartbeat,
+            )
+            universe_snapshots = [
+                snapshot
+                for snapshot_group in grouped_universe_snapshots.values()
+                for snapshot in snapshot_group
+            ]
+            warnings = [warning for warning in warnings if "historical anchors" not in warning and "FMP historical constituent" not in warning]
+            warnings.extend(universe_warnings)
+
         self._sync_strategy_snapshot_bindings(updated_at=started_at)
         preview_overview = self._build_snapshot_overview()
         completed_at = iso_now()
@@ -4348,10 +4811,30 @@ class RealBacktestPlatformService(BacktestPlatformService):
         strategy_type = str(strategy.get("strategy_type") or parameters.get("strategy_type") or "MOMENTUM").upper()
         parameters["template_key"] = strategy_type.lower()
         if strategy_type == "MOMENTUM":
-            parameters.setdefault("top_n", 5)
-            parameters.setdefault("holding_count", int(parameters.get("top_n") or 5))
-            parameters.setdefault("lookback_days", int(parameters.get("lookback_months") or 12) * 21)
-            parameters.setdefault("rebalance_frequency", "monthly")
+            top_n = max(int(_coerce_float(parameters.get("top_n"), 5.0) or 5.0), 1)
+            holding_count = max(int(_coerce_float(parameters.get("holding_count"), float(top_n)) or float(top_n)), 1)
+            lookback_months = max(int(_coerce_float(parameters.get("lookback_months"), 12.0) or 12.0), 1)
+            skip_recent_months = max(int(_coerce_float(parameters.get("skip_recent_months"), 0.0) or 0.0), 0)
+            hold_rank_threshold = max(
+                int(_coerce_float(parameters.get("hold_rank_threshold"), float(holding_count)) or float(holding_count)),
+                1,
+            )
+            parameters["top_n"] = top_n
+            parameters["holding_count"] = holding_count
+            parameters["lookback_days"] = max(
+                int(_coerce_float(parameters.get("lookback_days"), float(lookback_months * 21)) or float(lookback_months * 21)),
+                5,
+            )
+            parameters["skip_recent_days"] = max(
+                int(_coerce_float(parameters.get("skip_recent_days"), float(skip_recent_months * 21)) or float(skip_recent_months * 21)),
+                0,
+            )
+            parameters["skip_recent_months"] = skip_recent_months
+            parameters["hold_rank_threshold"] = hold_rank_threshold
+            parameters["weighting_method"] = str(parameters.get("weighting_method") or "equal_weight").strip() or "equal_weight"
+            parameters["rebalance_frequency"] = str(parameters.get("rebalance_frequency") or "monthly").strip() or "monthly"
+            if parameters.get("rebalance_anchor_dates") is None:
+                parameters["rebalance_anchor_dates"] = ""
         elif strategy_type == "GRID":
             parameters.setdefault("holding_count", 1)
             parameters.setdefault("top_n", 1)
@@ -4740,10 +5223,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
             for symbol in symbols
         }
         benchmark_bars = list(raw_bars.get(benchmark_symbol, []))
+        capital = _coerce_float(
+            _as_mapping(strategy.get("parameters")).get("capital"),
+            100000.0,
+        )
         config = BacktestConfig(
             start_date=request_payload.get("start_date"),
             end_date=request_payload.get("end_date"),
             benchmark_symbol=benchmark_symbol,
+            initial_equity=capital if capital > 0 else 100000.0,
         )
         prepared_inputs = prepare_backtest_inputs(
             bars_by_symbol,

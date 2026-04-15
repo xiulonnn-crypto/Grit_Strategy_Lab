@@ -22,6 +22,7 @@ from grit_backtest_platform.longbridge_provider import LongbridgeQuoteProvider, 
 from grit_backtest_platform.sec_edgar_provider import SecEdgarProvider
 from grit_backtest_platform.tiingo_provider import TiingoMarketDataProvider
 from grit_backtest_platform.tiingo_symbology_provider import TiingoSymbologyProvider
+from grit_backtest_platform.yfinance_provider import YfinanceMarketDataProvider
 
 api_module.default_universe_history_providers = lambda: []
 
@@ -134,6 +135,91 @@ def test_tiingo_provider_parses_daily_bars_and_actions(monkeypatch):
     assert result.metadata["bar_count"] == 3
 
 
+def test_yfinance_provider_parses_daily_bars_and_actions(monkeypatch):
+    provider = YfinanceMarketDataProvider()
+
+    class _FakeHistoryFrame:
+        def __init__(self, rows):
+            self._rows = rows
+            self.empty = False
+
+        def reset_index(self):
+            return self
+
+        def to_dict(self, orient):
+            assert orient == "records"
+            return list(self._rows)
+
+    class _FakeTicker:
+        def __init__(self, symbol: str) -> None:
+            self.symbol = symbol
+
+        def history(self, **kwargs):
+            assert kwargs["auto_adjust"] is False
+            assert kwargs["actions"] is True
+            return _FakeHistoryFrame(
+                [
+                    {
+                        "Date": "2026-04-01 00:00:00",
+                        "Open": 100.0,
+                        "High": 101.0,
+                        "Low": 99.0,
+                        "Close": 100.5,
+                        "Adj Close": 100.25,
+                        "Volume": 1000,
+                        "Dividends": 0.25,
+                        "Stock Splits": 0.0,
+                    },
+                    {
+                        "Date": "2026-04-02 00:00:00",
+                        "Open": 100.5,
+                        "High": 102.0,
+                        "Low": 100.0,
+                        "Close": 101.5,
+                        "Adj Close": 101.5,
+                        "Volume": 1200,
+                        "Dividends": 0.0,
+                        "Stock Splits": 2.0,
+                    },
+                ]
+            )
+
+    monkeypatch.setattr(
+        "grit_backtest_platform.yfinance_provider._load_yfinance",
+        lambda: SimpleNamespace(Ticker=_FakeTicker),
+    )
+
+    result = provider.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 2))
+
+    assert provider.availability().available is True
+    assert result.source == "yfinance"
+    assert len(result.bars) == 2
+    assert {item["action_type"] for item in result.actions} == {"dividend", "split"}
+    assert result.bars[0].adj_close == 100.25
+
+
+def test_yfinance_provider_classifies_rate_limit(monkeypatch):
+    provider = YfinanceMarketDataProvider()
+
+    class _FakeTicker:
+        def __init__(self, symbol: str) -> None:
+            self.symbol = symbol
+
+        def history(self, **kwargs):
+            raise RuntimeError("429 Too Many Requests")
+
+    monkeypatch.setattr(
+        "grit_backtest_platform.yfinance_provider._load_yfinance",
+        lambda: SimpleNamespace(Ticker=_FakeTicker),
+    )
+
+    with pytest.raises(ProviderExecutionSignal) as exc:
+        provider.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 2))
+
+    assert exc.value.status == "limited"
+    assert exc.value.reason == "rate_limited_or_blocked"
+
+
 def test_alpha_vantage_provider_parses_earnings_listing_status_and_rate_limit(monkeypatch):
     monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "token")
     provider = AlphaVantageProvider()
@@ -205,6 +291,52 @@ def test_alpha_vantage_provider_parses_earnings_listing_status_and_rate_limit(mo
     assert identity is not None
     assert identity["symbol"] == "TWTR"
     assert identity["company_name"] == "Twitter"
+
+
+def test_alpha_vantage_provider_parses_daily_adjusted_bars(monkeypatch):
+    monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "token")
+    provider = AlphaVantageProvider()
+
+    def fake_urlopen(request, timeout=0):
+        url = _request_url(request)
+        parsed = urllib.parse.urlparse(url)
+        params = urllib.parse.parse_qs(parsed.query)
+        function = params.get("function", [""])[0]
+        assert function == "TIME_SERIES_DAILY_ADJUSTED"
+        return _FakeHttpResponse(
+            json.dumps(
+                {
+                    "Time Series (Daily)": {
+                        "2026-04-02": {
+                            "1. open": "101.0",
+                            "2. high": "102.0",
+                            "3. low": "100.0",
+                            "4. close": "101.5",
+                            "5. adjusted close": "101.25",
+                            "6. volume": "1200",
+                        },
+                        "2026-04-01": {
+                            "1. open": "100.0",
+                            "2. high": "101.0",
+                            "3. low": "99.0",
+                            "4. close": "100.5",
+                            "5. adjusted close": "100.25",
+                            "6. volume": "1000",
+                        },
+                    }
+                }
+            )
+        )
+
+    monkeypatch.setattr("grit_backtest_platform.alpha_vantage_provider.urllib.request.urlopen", fake_urlopen)
+
+    result = provider.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 2))
+
+    assert result.source == "alpha_vantage"
+    assert len(result.bars) == 2
+    assert result.bars[0].date == "2026-04-01"
+    assert result.bars[0].adj_close == 100.25
+    assert result.metadata["targeted_price_repair"] is True
 
 
 def test_alpha_vantage_rate_limit_payload_raises_clear_error(monkeypatch):
@@ -546,6 +678,11 @@ def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(
             }
 
     providers = {
+        ("yfinance_provider", ("YfinanceMarketDataProvider",)): SimpleNamespace(
+            provider_name="yfinance",
+            fetch_history=lambda *args, **kwargs: None,
+            supports_action_enrichment=True,
+        ),
         ("tiingo_provider", ("TiingoMarketDataProvider", "TiingoProvider")): SimpleNamespace(
             provider_name="tiingo", fetch_history=lambda *args, **kwargs: None
         ),
@@ -588,6 +725,7 @@ def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(
 
     assert [getattr(provider, "provider_name", "") for provider in runtime.providers] == [
         "yahoo",
+        "yfinance",
         "tiingo",
         "tiingo_symbology",
         "longbridge_static_info",
@@ -599,6 +737,7 @@ def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(
     ]
     assert [provider.provider_name for provider in runtime.price_providers] == [
         "yahoo",
+        "yfinance",
         "tiingo",
         "longbridge",
         "akshare_us",
@@ -610,7 +749,92 @@ def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(
         "fmp",
         "alpha_vantage",
     ]
-    assert runtime.fallback_provider.provider_name == "tiingo"
+    assert runtime.fallback_provider.provider_name == "yfinance"
+
+
+def test_runtime_market_data_provider_marks_yfinance_as_succeeded_not_selected():
+    class _YahooProvider:
+        provider_name = "yahoo"
+
+        def fetch_history(self, symbol: str, start_date: date, end_date: date):
+            return {
+                "source": "yahoo",
+                "bars": [
+                    {"date": "2026-04-01", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "adj_close": 100.5, "volume": 1000}
+                ],
+                "actions": [],
+            }
+
+    class _YfinanceProvider:
+        provider_name = "yfinance"
+        supports_action_enrichment = True
+
+        def fetch_history(self, symbol: str, start_date: date, end_date: date):
+            return {
+                "source": "yfinance",
+                "bars": [
+                    {"date": "2026-04-01", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "adj_close": 100.5, "volume": 1000}
+                ],
+                "actions": [
+                    {"date": "2026-04-01", "action_type": "dividend", "value": 0.25, "source": "yfinance"}
+                ],
+            }
+
+    provider = RuntimeMarketDataProvider([_YahooProvider(), _YfinanceProvider()])
+
+    result = provider.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 1))
+
+    provider_results = result["metadata"]["provider_results"]
+    assert [(item["provider"], item["selection_status"]) for item in provider_results[:2]] == [
+        ("yahoo", "selected_primary"),
+        ("yfinance", "succeeded_not_selected"),
+    ]
+    assert result["actions"][0]["fallback_source"] == "yfinance"
+
+
+def test_runtime_market_data_provider_uses_alpha_only_for_targeted_price_repair():
+    class _FailingProvider:
+        def __init__(self, provider_name: str) -> None:
+            self.provider_name = provider_name
+
+        def fetch_history(self, symbol: str, start_date: date, end_date: date):
+            raise RuntimeError(f"{self.provider_name} unavailable")
+
+    class _AlphaTargetedProvider:
+        provider_name = "alpha_vantage"
+        supports_targeted_price_repair = True
+
+        def fetch_history(self, symbol: str, start_date: date, end_date: date):
+            return {
+                "source": "alpha_vantage",
+                "bars": [
+                    {"date": "2026-04-01", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "adj_close": 100.25, "volume": 1000}
+                ],
+                "actions": [],
+            }
+
+        def fetch_earnings(self, symbol: str):
+            return []
+
+    providers = [
+        _FailingProvider("yahoo"),
+        _FailingProvider("yfinance"),
+        _FailingProvider("tiingo"),
+        _FailingProvider("longbridge"),
+        _FailingProvider("akshare_us"),
+        _FailingProvider("fmp"),
+        _AlphaTargetedProvider(),
+    ]
+
+    provider = RuntimeMarketDataProvider(providers, allow_targeted_price_repair=True)
+    result = provider.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 1))
+
+    assert result["source"] == "alpha_vantage"
+    alpha_result = next(
+        item for item in result["metadata"]["provider_results"] if item["provider"] == "alpha_vantage" and item["kind"] == "targeted_price_repair"
+    )
+    assert alpha_result["selection_status"] == "selected_primary"
+    assert alpha_result["reason"] == "targeted_price_repair"
 
 
 def test_tiingo_symbology_provider_resolves_identity(monkeypatch):

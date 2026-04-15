@@ -45,6 +45,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\codex-smoke.ps1
 
 ## 文档导航
 
+- [CHANGELOG.md](./CHANGELOG.md)：按 Keep a Changelog 维护的版本与历史变更记录
 - [ARCHITECTURE.md](./ARCHITECTURE.md)：当前架构、运行时自修复、存储设计
 - [DESIGN.md](./DESIGN.md)：当前 UI 视觉真源与设计规则
 - [TECHNICAL.md](./TECHNICAL.md)：实现约束、恢复规则与工程执行细节

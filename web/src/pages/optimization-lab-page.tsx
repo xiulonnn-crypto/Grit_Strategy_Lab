@@ -1,5 +1,6 @@
 ﻿import { useEffect, useMemo, useState } from "react";
 import { navigateTo } from "../lib/appRouteContext";
+import type { FormEvent } from "react";
 import { useApiClient } from "../lib/demoStoreContext";
 import { collectOptimizationParameterSeeds } from "../lib/optimization-config-fields";
 import {
@@ -305,6 +306,12 @@ const RERUN_DIALOG_CONFIRM = "确认生成";
 const RERUN_DIALOG_SUBMITTING = "正在生成...";
 const MISSING_SOURCE_RUN_NOTICE =
   "来源回测已失效，已改用当前策略参数作为优化基线。";
+const HERO_PANEL_LAYOUT_STYLE = { flexWrap: "wrap" } as const;
+const HERO_ACTIONS_LAYOUT_STYLE = { flexWrap: "wrap" } as const;
+const HERO_ACTION_BUTTON_STYLE = {
+  minWidth: "124px",
+  whiteSpace: "nowrap",
+} as const;
 
 function humanizeKey(key: string): string {
   const labels: Record<string, string> = {
@@ -570,6 +577,23 @@ function formatOptimizationConstraintThreshold(
   return `${value}${constraint.unit}`;
 }
 
+function getOptimizationConstraintInputStep(constraintKey: string): string {
+  return constraintKey === "annualized_return"
+    ? "0.1"
+    : constraintKey.includes("sharpe")
+      ? "0.01"
+      : "1";
+}
+
+function getOptimizationConstraintUnitLabel(
+  constraint: Pick<OptimizationConstraint, "key" | "unit">,
+): string {
+  if (constraint.unit.trim()) {
+    return constraint.unit;
+  }
+  return constraint.key.includes("sharpe") ? "ratio" : "";
+}
+
 function evaluateOptimizationConstraint(
   constraint: OptimizationConstraint,
   presetConstraint?: OptimizationConstraint,
@@ -820,6 +844,141 @@ function getOptimizationConstraintLabel(
     return requestLabel;
   }
   return null;
+}
+
+function getOptimizationConstraintState(
+  job: ApiOptimizationJobDetail | null | undefined,
+): {
+  constraintLabel: string | null;
+  constraints: OptimizationConstraint[];
+  presetKey: OptimizationConstraintPresetKey;
+} {
+  const resolvedPresetKey = (job?.summary?.constraint_preset_key ??
+    job?.request?.constraint_preset_key ??
+    job?.result?.constraint_preset_key ??
+    DEFAULT_CONSTRAINT_PRESET_KEY) as OptimizationConstraintPresetKey;
+  const preset = getOptimizationConstraintPreset(resolvedPresetKey);
+  const constraints = cloneOptimizationConstraints(
+    job?.summary?.constraints ??
+      job?.request?.constraints ??
+      job?.result?.constraints ??
+      preset.constraints,
+    preset.key,
+  );
+  return {
+    constraintLabel:
+      getOptimizationConstraintLabel(job) ??
+      buildOptimizationConstraintLabel(preset, constraints),
+    constraints,
+    presetKey: preset.key,
+  };
+}
+
+function buildOptimizationResultConstraintDraft(
+  job: ApiOptimizationJobDetail | null | undefined,
+  strategy?: ApiStrategyDetail | null,
+  sourceRun?: ApiBacktestRunDetail | null,
+): {
+  constraintPresetKey: OptimizationConstraintPresetKey;
+  constraintLabel: string;
+  constraints: OptimizationConstraint[];
+} {
+  const state = getOptimizationConstraintState(job);
+  return buildOptimizationConstraintDraft(
+    state.presetKey,
+    {
+      constraint_preset_key: state.presetKey,
+      constraint_label: state.constraintLabel,
+      constraints: state.constraints,
+    },
+    strategy,
+    sourceRun,
+  );
+}
+
+function formatOptimizationConstraintChip(
+  constraint: OptimizationConstraint,
+): string {
+  return `${constraint.label} ${formatOptimizationConstraintOperator(
+    constraint.operator,
+  )} ${formatOptimizationConstraintThreshold(constraint)}`;
+}
+
+function normalizeConstraintMetricValue(
+  constraintKey: string,
+  value: number,
+): number {
+  switch (constraintKey) {
+    case "annualized_return":
+      return Math.abs(value) <= 1.5 ? value * 100 : value;
+    case "max_drawdown_pct":
+      return Math.abs(value) <= 1.5 ? Math.abs(value * 100) : Math.abs(value);
+    case "turnover":
+      return Math.abs(value) <= 1.5 ? value * 100 : value;
+    default:
+      return value;
+  }
+}
+
+function getCandidateConstraintMetricValue(
+  candidate: OptimizationDisplayCandidate,
+  constraintKey: string,
+): number | null {
+  const metrics = candidate.metrics ?? {};
+  const rawValue =
+    constraintKey === "annualized_return"
+      ? readNumber(metrics.annualized_return ?? metrics.cagr)
+      : constraintKey === "return_sharpe"
+        ? readNumber(metrics.return_sharpe ?? metrics.sharpe)
+        : constraintKey === "out_of_sample_sharpe"
+          ? readNumber(metrics.out_of_sample_sharpe ?? metrics.oos_sharpe)
+          : constraintKey === "max_drawdown_pct"
+            ? readNumber(metrics.max_drawdown_pct) ??
+              (typeof metrics.max_drawdown === "number"
+                ? metrics.max_drawdown * 100
+                : undefined)
+            : constraintKey === "turnover"
+              ? readNumber(metrics.turnover_pct ?? metrics.turnover)
+              : constraintKey === "stability"
+                ? readNumber(metrics.stability)
+                : readNumber(metrics[constraintKey]);
+  return typeof rawValue === "number"
+    ? normalizeConstraintMetricValue(constraintKey, rawValue)
+    : null;
+}
+
+function candidateMeetsOptimizationConstraint(
+  candidate: OptimizationDisplayCandidate,
+  constraint: OptimizationConstraint,
+): boolean {
+  const metricValue = getCandidateConstraintMetricValue(candidate, constraint.key);
+  if (metricValue === null) {
+    return false;
+  }
+  return constraint.operator === ">="
+    ? metricValue >= constraint.value
+    : metricValue <= constraint.value;
+}
+
+function candidatePassesOptimizationConstraints(
+  candidate: OptimizationDisplayCandidate,
+  constraints: OptimizationConstraint[],
+): boolean {
+  if (!constraints.length) {
+    return true;
+  }
+  return constraints.every((constraint) =>
+    candidateMeetsOptimizationConstraint(candidate, constraint),
+  );
+}
+
+function filterOptimizationCandidatesByConstraints(
+  candidates: ApiOptimizationCandidate[],
+  constraints: OptimizationConstraint[],
+): ApiOptimizationCandidate[] {
+  return candidates.filter((candidate) =>
+    candidatePassesOptimizationConstraints(candidate, constraints),
+  );
 }
 
 function isMissingBacktestRunError(caught: unknown): boolean {
@@ -1644,16 +1803,21 @@ function buildBaselineCandidate(
     readNumber(baselineRun.metrics?.cagr);
   const returnSharpe =
     readNumber(latestCompletedRun?.sharpe) ??
+    readNumber(baselineRun.metrics?.return_sharpe) ??
     readNumber(baselineRun.metrics?.sharpe);
   const outOfSampleSharpe =
     readNumber(latestCompletedRun?.oos_sharpe) ??
     readNumber(baselineRun.metrics?.out_of_sample_sharpe) ??
+    readNumber(baselineRun.metrics?.oos_sharpe) ??
     returnSharpe;
   const maxDrawdownPct =
     readNumber(latestCompletedRun?.max_drawdown) !== undefined
       ? (readNumber(latestCompletedRun?.max_drawdown) ?? 0) * 100
       : (readNumber(baselineRun.metrics?.max_drawdown_pct) ??
         (readNumber(baselineRun.metrics?.max_drawdown) ?? 0) * 100);
+  const turnover =
+    readNumber(baselineRun.metrics?.turnover_pct) ??
+    readNumber(baselineRun.metrics?.turnover);
   const totalReturnPct =
     readNumber(latestCompletedRun?.total_return) !== undefined
       ? (readNumber(latestCompletedRun?.total_return) ?? 0) * 100
@@ -1685,8 +1849,11 @@ function buildBaselineCandidate(
     total_return_pct: totalReturnPct ?? 0,
     stability,
   };
+  if (turnover !== undefined) {
+    metrics.turnover = turnover;
+  }
   const parameterSnapshot = { ...(strategy.parameters ?? {}) };
-  const label = `组合${rank} 当前策略组合`;
+  const label = "当前组合";
   const summary = "读取当前策略参数与最近完成回测表现，作为本轮优化基准。";
   const heatmap = buildSyntheticHeatmap(
     searchSpace,
@@ -1710,11 +1877,11 @@ function buildBaselineCandidate(
     analysis: {
       title: label,
       thesis:
-        "当前策略组合仅作为对照基准，用于观察优化候选相对现行参数在收益、样本外延续性与回撤约束上的改善幅度。",
+        "当前组合仅作为对照基准，用于观察优化候选相对现行参数在收益、样本外延续性与回撤约束上的改善幅度。",
       shelf_copy: summary,
       stability_verdict: "当前基准",
       stability_summary:
-        "当前策略组合用于与优化候选横向比较，重点观察年化收益、样本外夏普与回撤改善幅度。",
+        "当前组合用于与优化候选横向比较，重点观察年化收益、样本外夏普与回撤改善幅度。",
       stability_checks: buildDerivedStabilityChecks(metrics),
       validation_windows: buildDerivedValidationWindows(metrics),
       heatmap,
@@ -2281,7 +2448,10 @@ export function OptimizationStrategySelectPage({
     <div className="optimization-lab-page">
       <OptimizationStepBar current="select" />
 
-      <section className="optimization-lab-panel optimization-lab-panel--hero">
+      <section
+        className="optimization-lab-panel optimization-lab-panel--hero"
+        style={HERO_PANEL_LAYOUT_STYLE}
+      >
         <div>
           <p className="optimization-lab-eyebrow">第一步 · 选择策略</p>
           <h1>{TEXT.selectTitle}</h1>
@@ -2290,6 +2460,7 @@ export function OptimizationStrategySelectPage({
         <button
           className="ghost-button"
           onClick={() => navigateTo(buildOptimizationJobsPath())}
+          style={HERO_ACTION_BUTTON_STYLE}
           type="button"
         >
           {TEXT.backToJobs}
@@ -2639,7 +2810,10 @@ export function OptimizationConfigPage({
     <div className="optimization-lab-page">
       <OptimizationStepBar current="config" selectHref={selectHref} />
 
-      <section className="optimization-lab-panel optimization-lab-panel--hero">
+      <section
+        className="optimization-lab-panel optimization-lab-panel--hero"
+        style={HERO_PANEL_LAYOUT_STYLE}
+      >
         <div>
           <p className="optimization-lab-eyebrow">第二步 · 参数配置</p>
           <h1>
@@ -2670,21 +2844,31 @@ export function OptimizationConfigPage({
             </p>
           ) : null}
         </div>
-        <div className="optimization-hero-actions optimization-hero-actions--single-row">
+        <div
+          className="optimization-hero-actions optimization-hero-actions--single-row"
+          style={HERO_ACTIONS_LAYOUT_STYLE}
+        >
           <button
             className="ghost-button"
             onClick={() => navigateTo(buildOptimizationJobsPath())}
+            style={HERO_ACTION_BUTTON_STYLE}
             type="button"
           >
             {TEXT.backToJobs}
           </button>
-          <button className="ghost-button" onClick={resetPreset} type="button">
+          <button
+            className="ghost-button"
+            onClick={resetPreset}
+            style={HERO_ACTION_BUTTON_STYLE}
+            type="button"
+          >
             {TEXT.resetPreset}
           </button>
           <button
             className="primary-button"
             disabled={saving || loading}
             onClick={() => void handleStartOptimization()}
+            style={HERO_ACTION_BUTTON_STYLE}
             type="button"
           >
             {TEXT.startOptimization}
@@ -2900,13 +3084,9 @@ export function OptimizationConfigPage({
                             onChange={(event) =>
                               updateConstraint(index, event.target.value)
                             }
-                            step={
-                              constraint.key === "annualized_return"
-                                ? "0.1"
-                                : constraint.key.includes("sharpe")
-                                  ? "0.01"
-                                  : "1"
-                            }
+                            step={getOptimizationConstraintInputStep(
+                              constraint.key,
+                            )}
                             type="number"
                             value={constraint.value}
                           />
@@ -2918,7 +3098,7 @@ export function OptimizationConfigPage({
                         </div>
                       </label>
                       <div className="optimization-constraint-card__badges">
-                        <span className="status-chip status-chip--soft">
+                        <span className="status-chip status-chip--soft optimization-constraint-card__badge optimization-constraint-card__badge--baseline">
                           当前策略{" "}
                           {formatOptimizationConstraintThreshold({
                             ...constraint,
@@ -2927,7 +3107,7 @@ export function OptimizationConfigPage({
                           })}
                         </span>
                         <span
-                          className={`status-chip status-chip--soft optimization-constraint-card__verdict optimization-constraint-card__verdict--${verdict}`}
+                          className={`status-chip status-chip--soft optimization-constraint-card__badge optimization-constraint-card__verdict optimization-constraint-card__verdict--${verdict}`}
                         >
                           当前判定{" "}
                           {formatOptimizationConstraintVerdict(verdict)}
@@ -3023,6 +3203,21 @@ export function OptimizationResultsPage({
   const [error, setError] = useState<string | null>(null);
   const [rerunConfirmOpen, setRerunConfirmOpen] = useState(false);
   const [rerunError, setRerunError] = useState<string | null>(null);
+  const [constraintPresetKey, setConstraintPresetKey] =
+    useState<OptimizationConstraintPresetKey>(DEFAULT_CONSTRAINT_PRESET_KEY);
+  const [constraintDraftLabel, setConstraintDraftLabel] = useState(
+    getOptimizationConstraintPreset(DEFAULT_CONSTRAINT_PRESET_KEY).label,
+  );
+  const [constraintDrafts, setConstraintDrafts] = useState<
+    OptimizationConstraint[]
+  >([]);
+  const [appliedConstraintLabel, setAppliedConstraintLabel] = useState<
+    string | null
+  >(null);
+  const [appliedConstraints, setAppliedConstraints] = useState<
+    OptimizationConstraint[]
+  >([]);
+  const [constraintLiveMessage, setConstraintLiveMessage] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -3116,6 +3311,52 @@ export function OptimizationResultsPage({
     () => getOptimizationSearchSpace(job),
     [job],
   );
+  const persistedOptimizationConstraintState = useMemo(
+    () => getOptimizationConstraintState(job),
+    [job],
+  );
+
+  useEffect(() => {
+    if (!job || !strategy) {
+      return;
+    }
+    const constraintDraft = buildOptimizationResultConstraintDraft(
+      job,
+      strategy,
+      baselineRun,
+    );
+    setConstraintPresetKey(constraintDraft.constraintPresetKey);
+    setConstraintDraftLabel(constraintDraft.constraintLabel);
+    setConstraintDrafts(constraintDraft.constraints);
+    setAppliedConstraintLabel(constraintDraft.constraintLabel);
+    setAppliedConstraints(constraintDraft.constraints);
+    setConstraintLiveMessage("");
+  }, [baselineRun, job, strategy]);
+
+  const optimizationConstraintLabel =
+    appliedConstraintLabel ??
+    persistedOptimizationConstraintState.constraintLabel;
+  const optimizationConstraints = appliedConstraints.length
+    ? appliedConstraints
+    : persistedOptimizationConstraintState.constraints;
+  const quickFilterConstraints = constraintDrafts.length
+    ? constraintDrafts
+    : optimizationConstraints;
+  const optimizationConstraintChips = useMemo(
+    () =>
+      optimizationConstraints.map((constraint) =>
+        formatOptimizationConstraintChip(constraint),
+      ),
+    [optimizationConstraints],
+  );
+  const matchingCandidates = useMemo(
+    () =>
+      filterOptimizationCandidatesByConstraints(
+        job?.candidates ?? [],
+        optimizationConstraints,
+      ),
+    [job?.candidates, optimizationConstraints],
+  );
   const baselineCandidate = useMemo(
     () =>
       job?.candidates.length
@@ -3130,18 +3371,27 @@ export function OptimizationResultsPage({
   );
   const candidateRows = useMemo<OptimizationDisplayCandidate[]>(
     () => [
-      ...(job?.candidates ?? []),
+      ...matchingCandidates,
       ...(baselineCandidate ? [baselineCandidate] : []),
     ],
-    [baselineCandidate, job?.candidates],
+    [baselineCandidate, matchingCandidates],
+  );
+  const baselineMatchesConstraints = useMemo(
+    () =>
+      baselineCandidate
+        ? candidatePassesOptimizationConstraints(
+            baselineCandidate,
+            optimizationConstraints,
+          )
+        : false,
+    [baselineCandidate, optimizationConstraints],
   );
 
   useEffect(() => {
     if (!job) {
       return;
     }
-    const fallbackCandidateId =
-      job.result.best_candidate_id ?? candidateRows[0]?.id ?? null;
+    const fallbackCandidateId = candidateRows[0]?.id ?? null;
     if (
       !selectedCandidateId ||
       !candidateRows.some((candidate) => candidate.id === selectedCandidateId)
@@ -3161,7 +3411,15 @@ export function OptimizationResultsPage({
     () => buildOptimizationRangeSummary(optimizationSearchSpace),
     [optimizationSearchSpace],
   );
-  const optimizationConstraintLabel = getOptimizationConstraintLabel(job);
+  const totalCandidateCount = job?.candidates.length ?? 0;
+  const totalComparableResultCount =
+    totalCandidateCount + (baselineCandidate ? 1 : 0);
+  const matchingResultCount =
+    matchingCandidates.length + (baselineMatchesConstraints ? 1 : 0);
+  const filteredOutCandidateCount = Math.max(
+    0,
+    totalCandidateCount - matchingCandidates.length,
+  );
   const selectedCandidateParameters = useMemo(
     () =>
       buildCandidateParameterEntries(
@@ -3174,6 +3432,12 @@ export function OptimizationResultsPage({
   const optimizationRunning = isOptimizationRunning(job?.status);
   const optimizationInterrupted =
     String(job?.status ?? "").toUpperCase() === "INTERRUPTED";
+  const noConstraintMatch = Boolean(
+    !optimizationProgressState &&
+      totalCandidateCount > 0 &&
+      matchingCandidates.length === 0 &&
+      !baselineMatchesConstraints,
+  );
   const canRerunOptimization = Boolean(job && !optimizationRunning);
   const progressSummary = (job?.summary ?? {}) as Record<string, unknown>;
   const progressResult = (job?.result ?? {}) as Record<string, unknown>;
@@ -3286,8 +3550,9 @@ export function OptimizationResultsPage({
   const canPromoteSelectedCandidate = Boolean(
     selectedCandidate && selectedCandidate.display_kind !== "baseline",
   );
-  const promoteButtonLabel =
-    selectedCandidate?.display_kind === "baseline"
+  const promoteButtonLabel = !selectedCandidate
+    ? "暂无可晋升候选"
+    : selectedCandidate.display_kind === "baseline"
       ? "当前基准不可晋升"
       : TEXT.promoteVersion;
   const strategyDisplayName = formatVersionedStrategyName(
@@ -3307,6 +3572,8 @@ export function OptimizationResultsPage({
   );
   const heroCopy = optimizationProgressState
     ? latestUpdate
+    : noConstraintMatch
+      ? `当前约束下暂无候选版本通过过滤，已过滤 ${filteredOutCandidateCount} 个候选版本。建议继续调参、放宽阈值，或重新生成任务。`
     : (heroSummary ??
       (optimizationRunning
         ? latestUpdate
@@ -3339,6 +3606,87 @@ export function OptimizationResultsPage({
         ? job.request.entry_point
         : undefined,
   });
+
+  function syncResultConstraintDraft(nextConstraints: OptimizationConstraint[]) {
+    if (!strategy) {
+      return;
+    }
+    const draft = buildOptimizationConstraintDraft(
+      constraintPresetKey,
+      {
+        constraint_preset_key: constraintPresetKey,
+        constraints: nextConstraints,
+      },
+      strategy,
+      baselineRun,
+    );
+    setConstraintPresetKey(draft.constraintPresetKey);
+    setConstraintDraftLabel(draft.constraintLabel);
+    setConstraintDrafts(draft.constraints);
+  }
+
+  function applyResultConstraintState(
+    nextLabel: string,
+    nextConstraints: OptimizationConstraint[],
+  ): void {
+    setAppliedConstraintLabel(nextLabel);
+    setAppliedConstraints(nextConstraints);
+  }
+
+  function updateResultConstraint(index: number, value: string): void {
+    const nextValue = Number(value);
+    if (!Number.isFinite(nextValue)) {
+      return;
+    }
+    const nextConstraints = quickFilterConstraints.map(
+      (constraint, constraintIndex) =>
+        constraintIndex === index
+          ? {
+              ...constraint,
+              value: nextValue,
+              source: "manual" as const,
+            }
+          : constraint,
+    );
+    syncResultConstraintDraft(nextConstraints);
+    setConstraintLiveMessage("已修改快捷阈值，点击“重新过滤”后应用。");
+  }
+
+  async function handleApplyConstraintFilter(
+    event?: FormEvent<HTMLFormElement>,
+  ): Promise<void> {
+    event?.preventDefault();
+    if (!job) {
+      return;
+    }
+    const nextConstraints = cloneOptimizationConstraints(
+      quickFilterConstraints,
+      constraintPresetKey,
+    );
+    const nextConstraintLabel = constraintDraftLabel;
+    try {
+      applyResultConstraintState(nextConstraintLabel, nextConstraints);
+      setSaving(true);
+      setError(null);
+      setNotice(null);
+      const updated = await api.updateOptimizationJobConstraints(job.id, {
+        constraint_preset_key: constraintPresetKey,
+        constraint_label: nextConstraintLabel,
+        constraints: nextConstraints,
+      });
+      setJob(updated);
+      setConstraintLiveMessage("已按最新阈值重新过滤。");
+    } catch (caught) {
+      const message =
+        caught instanceof Error ? caught.message : String(caught ?? "未知错误");
+      setNotice(
+        `已按当前页面阈值重新过滤，后端未保存本次快捷过滤设置：${message}`,
+      );
+      setConstraintLiveMessage("已在当前页面应用最新阈值，但未保存到任务。");
+    } finally {
+      setSaving(false);
+    }
+  }
 
   async function handlePromote(): Promise<void> {
     if (!job || !selectedCandidate) {
@@ -3447,7 +3795,10 @@ export function OptimizationResultsPage({
         configHref={job ? configHref : undefined}
       />
 
-      <section className="optimization-lab-panel optimization-lab-panel--hero">
+      <section
+        className="optimization-lab-panel optimization-lab-panel--hero"
+        style={HERO_PANEL_LAYOUT_STYLE}
+      >
         <div>
           <p className="optimization-lab-eyebrow">任务结果中心</p>
           <h1>{heroTitle}</h1>
@@ -3464,19 +3815,36 @@ export function OptimizationResultsPage({
               ) : null}
               {optimizationConstraintLabel ? (
                 <span className="status-chip status-chip--soft optimization-range-chip">
-                  约束条件：{optimizationConstraintLabel}
+                  {optimizationConstraintLabel}
                 </span>
               ) : null}
+              {!optimizationProgressState && totalComparableResultCount > 0 ? (
+                <span className="status-chip status-chip--soft">
+                  符合约束：{matchingResultCount}/{totalComparableResultCount}
+                </span>
+              ) : null}
+              {optimizationConstraintChips.map((chip) => (
+                <span
+                  className="status-chip status-chip--soft optimization-range-chip"
+                  key={chip}
+                >
+                  {chip}
+                </span>
+              ))}
             </div>
           ) : null}
           {notice ? (
             <p className="optimization-inline-notice">{notice}</p>
           ) : null}
         </div>
-        <div className="optimization-hero-actions optimization-hero-actions--single-row">
+        <div
+          className="optimization-hero-actions optimization-hero-actions--single-row"
+          style={HERO_ACTIONS_LAYOUT_STYLE}
+        >
           <button
             className="ghost-button"
             onClick={() => navigateTo(buildOptimizationJobsPath())}
+            style={HERO_ACTION_BUTTON_STYLE}
             type="button"
           >
             {TEXT.backToJobs}
@@ -3486,6 +3854,7 @@ export function OptimizationResultsPage({
               className="ghost-button optimization-results-rerun-action"
               disabled={saving}
               onClick={openRerunConfirm}
+              style={HERO_ACTION_BUTTON_STYLE}
               type="button"
             >
               {RERUN_ACTION_LABEL}
@@ -3496,6 +3865,7 @@ export function OptimizationResultsPage({
               className="primary-button"
               disabled={saving || !resumeReady}
               onClick={() => void handleResume()}
+              style={HERO_ACTION_BUTTON_STYLE}
               type="button"
             >
               {TEXT.resumeOptimization}
@@ -3506,6 +3876,7 @@ export function OptimizationResultsPage({
                 className="ghost-button"
                 disabled={!job}
                 onClick={() => navigateTo(configHref)}
+                style={HERO_ACTION_BUTTON_STYLE}
                 type="button"
               >
                 {TEXT.continueTune}
@@ -3514,6 +3885,7 @@ export function OptimizationResultsPage({
                 className="primary-button"
                 disabled={saving || !canPromoteSelectedCandidate}
                 onClick={() => void handlePromote()}
+                style={HERO_ACTION_BUTTON_STYLE}
                 type="button"
               >
                 {promoteButtonLabel}
@@ -3575,6 +3947,85 @@ export function OptimizationResultsPage({
 
       {!loading && job ? (
         <>
+          {!optimizationProgressState ? (
+            <section
+              aria-labelledby="optimization-results-constraint-title"
+              className="optimization-lab-panel optimization-results-constraint-bar"
+            >
+              <div className="optimization-lab-panel__heading optimization-results-constraint-bar__heading">
+                <div>
+                  <h2 id="optimization-results-constraint-title">快捷过滤</h2>
+                </div>
+                <div className="optimization-results-constraint-bar__actions">
+                  <span className="status-chip status-chip--soft">
+                    当前启用{" "}
+                    <strong>
+                      {quickFilterConstraints.length}
+                      {" 项阈值"}
+                    </strong>
+                  </span>
+                  <button
+                    className="primary-button optimization-results-constraint-bar__action"
+                    disabled={saving}
+                    form="optimization-results-constraint-form"
+                    type="submit"
+                  >
+                    {saving ? "重新过滤中..." : "重新过滤"}
+                  </button>
+                </div>
+              </div>
+              <form
+                aria-label="约束条件一行编辑条"
+                className="optimization-results-constraint-bar__grid"
+                id="optimization-results-constraint-form"
+                onSubmit={(event) => void handleApplyConstraintFilter(event)}
+              >
+                {quickFilterConstraints.map((constraint, index) => {
+                  const unitLabel = getOptimizationConstraintUnitLabel(
+                    constraint,
+                  );
+                  return (
+                    <label
+                      className={`optimization-results-constraint-pill optimization-results-constraint-pill--${constraint.category}`}
+                      htmlFor={`optimization-results-constraint-${constraint.key}`}
+                      key={constraint.key}
+                    >
+                      <span className="optimization-results-constraint-pill__label">
+                        {constraint.label}
+                      </span>
+                      <span className="optimization-results-constraint-pill__op">
+                        {formatOptimizationConstraintOperator(
+                          constraint.operator,
+                        )}
+                      </span>
+                      <input
+                        aria-label={`${constraint.label} 阈值`}
+                        id={`optimization-results-constraint-${constraint.key}`}
+                        inputMode="decimal"
+                        onChange={(event) =>
+                          updateResultConstraint(index, event.target.value)
+                        }
+                        step={getOptimizationConstraintInputStep(
+                          constraint.key,
+                        )}
+                        type="number"
+                        value={constraint.value}
+                      />
+                      {unitLabel ? (
+                        <span className="optimization-results-constraint-pill__unit">
+                          {unitLabel}
+                        </span>
+                      ) : null}
+                    </label>
+                  );
+                })}
+              </form>
+              <p aria-live="polite" className="sr-only">
+                {constraintLiveMessage}
+              </p>
+            </section>
+          ) : null}
+
           {optimizationProgressState ? (
             <section
               className="optimization-lab-panel optimization-progress-panel"
@@ -3678,6 +4129,21 @@ export function OptimizationResultsPage({
                       ? `${nextActionLabel} · ${interruptedReason}`
                       : nextActionLabel}
                   </strong>
+                </div>
+              </div>
+            </section>
+          ) : null}
+
+          {noConstraintMatch ? (
+            <section className="optimization-lab-panel optimization-results-empty">
+              <div className="optimization-lab-panel__heading">
+                <div>
+                  <p className="optimization-lab-eyebrow">结果过滤</p>
+                  <h2>当前约束下暂无候选版本通过过滤</h2>
+                  <p className="optimization-panel-subtitle">
+                    已过滤 {filteredOutCandidateCount} 个候选版本。可以继续调参、
+                    放宽阈值，或基于当前配置重新生成任务。
+                  </p>
                 </div>
               </div>
             </section>

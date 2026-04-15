@@ -123,6 +123,12 @@ class OptimizationJobCreateRequest(BaseModel):
     constraints: list[OptimizationConstraint] = Field(default_factory=list)
 
 
+class OptimizationJobConstraintUpdateRequest(BaseModel):
+    constraint_preset_key: OptimizationConstraintPresetKey | None = None
+    constraint_label: str | None = None
+    constraints: list[OptimizationConstraint] = Field(default_factory=list)
+
+
 class ResumeOptimizationJobRequest(BaseModel):
     idempotency_key: str = Field(min_length=1)
 

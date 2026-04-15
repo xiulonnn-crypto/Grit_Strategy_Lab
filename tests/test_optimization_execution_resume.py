@@ -489,6 +489,40 @@ def test_resume_continues_from_next_trial_without_rerunning_completed_trials(tmp
     assert len(service._load_optimization_trials(job_id)) == 4
 
 
+def test_resume_optimization_job_returns_running_projection_from_persisted_trials(tmp_path, monkeypatch):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    service.refresh_snapshots({"mode": "repair", "targets": ["price", "corporate", "universes"]})
+    strategy = create_momentum_strategy(client, idempotency_key="opt-exec-resume-projection")["strategy"]
+    job_id, planned = _seed_interrupted_job(service, strategy, completed_trials=2)
+    sample = _sample_trial_result(planned[2], score=1.5)
+    service._persist_optimization_trial(
+        job_id,
+        3,
+        status="SUCCEEDED",
+        parameter_snapshot=sample["parameter_snapshot"],
+        metrics=sample["metrics"],
+        chart_series=sample["chart_series"],
+        score=sample["score"],
+        error_message=None,
+        started_at="2026-04-13T10:03:00Z",
+        completed_at="2026-04-13T10:03:00Z",
+    )
+
+    monkeypatch.setattr(service, "_start_optimization_job_runner", lambda *args, **kwargs: True)
+
+    resumed = service.resume_optimization_job(job_id, {"idempotency_key": "resume-projection"})
+
+    assert resumed["status"] == "RUNNING"
+    assert resumed["resume_ready"] is False
+    assert resumed["interrupted_reason"] is None
+    assert resumed["summary"]["completed_combinations"] == 3
+    assert resumed["summary"]["persisted_trial_count"] == 3
+    assert resumed["summary"]["next_trial_index"] == 4
+    assert resumed["summary"]["current_stage"] == "Preparing trial 4/4"
+    assert resumed["summary"]["latest_update"] == "Resuming optimization from trial 4."
+
+
 def test_budget_larger_than_batch_runs_to_completion_without_auto_pause(tmp_path, monkeypatch):
     client, _ = create_test_client(tmp_path)
     service = client.app.state.service
@@ -787,13 +821,14 @@ def test_resume_is_idempotent_for_same_key_and_conflicts_for_new_key(tmp_path, m
     strategy = create_momentum_strategy(client, idempotency_key="opt-exec-resume-idempotent")["strategy"]
     job_id, _ = _seed_interrupted_job(service, strategy, completed_trials=2)
 
-    monkeypatch.setattr(service, "_start_optimization_job_runner", lambda *args, **kwargs: False)
+    monkeypatch.setattr(service, "_start_optimization_job_runner", lambda *args, **kwargs: True)
 
     resumed = service.resume_optimization_job(job_id, {"idempotency_key": "resume-once"})
     duplicate = service.resume_optimization_job(job_id, {"idempotency_key": "resume-once"})
 
-    assert resumed["status"] == "QUEUED"
-    assert duplicate["status"] == "QUEUED"
+    assert resumed["status"] == "RUNNING"
+    assert duplicate["status"] == "RUNNING"
+    assert duplicate["summary"]["resume_ready"] is False
     assert duplicate["request"]["resume_idempotency_key"] == "resume-once"
 
     with pytest.raises(ContractConflictError):
@@ -832,14 +867,14 @@ def test_interrupted_job_allows_new_resume_key_after_prior_attempt(tmp_path, mon
         completed_at=None,
     )
 
-    monkeypatch.setattr(service, "_start_optimization_job_runner", lambda *args, **kwargs: False)
+    monkeypatch.setattr(service, "_start_optimization_job_runner", lambda *args, **kwargs: True)
 
     resumed = service.resume_optimization_job(job_id, {"idempotency_key": "resume-new-attempt"})
 
-    assert resumed["status"] == "QUEUED"
+    assert resumed["status"] == "RUNNING"
     assert resumed["request"]["resume_idempotency_key"] == "resume-new-attempt"
     assert resumed["summary"]["next_trial_index"] == 3
-    assert resumed["summary"]["resume_ready"] is True
+    assert resumed["summary"]["resume_ready"] is False
 
 
 def test_start_optimization_job_runner_uses_subprocess_worker_outside_pytest(tmp_path, monkeypatch):

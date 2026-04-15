@@ -136,3 +136,197 @@ def test_mean_reversion_strategy_uses_structured_signal_rules_instead_of_generic
     assert len(result.trades) >= 2
     assert result.coverage_days == len(result.daily_performance)
     assert result.coverage_ratio == 1.0
+
+
+def test_rebalance_keys_support_custom_anchor_dates():
+    dates = [
+        "2024-01-02",
+        "2024-02-01",
+        "2024-06-28",
+        "2024-07-01",
+        "2024-07-02",
+        "2025-01-02",
+    ]
+
+    assert _rebalance_keys(dates, "semiannual", [(1, 1), (7, 1)]) == [0, 3, 5]
+
+
+def test_momentum_skip_recent_window_changes_selected_symbol():
+    bars_a = [
+        {"date": "2024-01-02", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-03", "open": 130.0, "high": 131.0, "low": 129.0, "close": 130.0, "adj_close": 130.0},
+        {"date": "2024-01-04", "open": 135.0, "high": 136.0, "low": 134.0, "close": 135.0, "adj_close": 135.0},
+        {"date": "2024-01-05", "open": 140.0, "high": 141.0, "low": 139.0, "close": 140.0, "adj_close": 140.0},
+        {"date": "2024-01-08", "open": 145.0, "high": 146.0, "low": 144.0, "close": 145.0, "adj_close": 145.0},
+        {"date": "2024-01-09", "open": 150.0, "high": 151.0, "low": 149.0, "close": 150.0, "adj_close": 150.0},
+        {"date": "2024-01-10", "open": 110.0, "high": 111.0, "low": 109.0, "close": 110.0, "adj_close": 110.0},
+        {"date": "2024-01-11", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+    ]
+    bars_b = [
+        {"date": "2024-01-02", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-03", "open": 90.0, "high": 91.0, "low": 89.0, "close": 90.0, "adj_close": 90.0},
+        {"date": "2024-01-04", "open": 92.0, "high": 93.0, "low": 91.0, "close": 92.0, "adj_close": 92.0},
+        {"date": "2024-01-05", "open": 94.0, "high": 95.0, "low": 93.0, "close": 94.0, "adj_close": 94.0},
+        {"date": "2024-01-08", "open": 96.0, "high": 97.0, "low": 95.0, "close": 96.0, "adj_close": 96.0},
+        {"date": "2024-01-09", "open": 98.0, "high": 99.0, "low": 97.0, "close": 98.0, "adj_close": 98.0},
+        {"date": "2024-01-10", "open": 120.0, "high": 121.0, "low": 119.0, "close": 120.0, "adj_close": 120.0},
+        {"date": "2024-01-11", "open": 130.0, "high": 131.0, "low": 129.0, "close": 130.0, "adj_close": 130.0},
+    ]
+    config = BacktestConfig(start_date="2024-01-02", end_date="2024-01-11", benchmark_symbol="AAA")
+    base_parameters = {
+        "strategy_type": "MOMENTUM",
+        "template_key": "momentum",
+        "top_n": 1,
+        "holding_count": 1,
+        "lookback_days": 5,
+        "rebalance_frequency": "daily",
+        "weighting_method": "equal_weight",
+    }
+
+    without_skip = run_backtest(
+        {"AAA": bars_a, "BBB": bars_b},
+        config=config,
+        parameters={**base_parameters, "skip_recent_days": 0},
+        benchmark_bars=bars_a,
+    )
+    with_skip = run_backtest(
+        {"AAA": bars_a, "BBB": bars_b},
+        config=config,
+        parameters={**base_parameters, "skip_recent_days": 1},
+        benchmark_bars=bars_a,
+    )
+
+    assert without_skip.trades[-1].symbol == "BBB"
+    assert with_skip.trades[-1].symbol == "AAA"
+    assert without_skip.metrics.total_return != with_skip.metrics.total_return
+
+
+def test_momentum_hold_rank_threshold_retains_existing_holdings_before_replacement():
+    bars_a = [
+        {"date": "2024-01-02", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-03", "open": 120.0, "high": 121.0, "low": 119.0, "close": 120.0, "adj_close": 120.0},
+        {"date": "2024-01-04", "open": 125.0, "high": 126.0, "low": 124.0, "close": 125.0, "adj_close": 125.0},
+        {"date": "2024-01-05", "open": 130.0, "high": 131.0, "low": 129.0, "close": 130.0, "adj_close": 130.0},
+        {"date": "2024-01-08", "open": 135.0, "high": 136.0, "low": 134.0, "close": 135.0, "adj_close": 135.0},
+        {"date": "2024-01-09", "open": 140.0, "high": 141.0, "low": 139.0, "close": 140.0, "adj_close": 140.0},
+        {"date": "2024-01-10", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-11", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+    ]
+    bars_b = [
+        {"date": "2024-01-02", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-03", "open": 105.0, "high": 106.0, "low": 104.0, "close": 105.0, "adj_close": 105.0},
+        {"date": "2024-01-04", "open": 110.0, "high": 111.0, "low": 109.0, "close": 110.0, "adj_close": 110.0},
+        {"date": "2024-01-05", "open": 115.0, "high": 116.0, "low": 114.0, "close": 115.0, "adj_close": 115.0},
+        {"date": "2024-01-08", "open": 120.0, "high": 121.0, "low": 119.0, "close": 120.0, "adj_close": 120.0},
+        {"date": "2024-01-09", "open": 125.0, "high": 126.0, "low": 124.0, "close": 125.0, "adj_close": 125.0},
+        {"date": "2024-01-10", "open": 130.0, "high": 131.0, "low": 129.0, "close": 130.0, "adj_close": 130.0},
+        {"date": "2024-01-11", "open": 135.0, "high": 136.0, "low": 134.0, "close": 135.0, "adj_close": 135.0},
+    ]
+    bars_c = [
+        {"date": "2024-01-02", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-03", "open": 90.0, "high": 91.0, "low": 89.0, "close": 90.0, "adj_close": 90.0},
+        {"date": "2024-01-04", "open": 92.0, "high": 93.0, "low": 91.0, "close": 92.0, "adj_close": 92.0},
+        {"date": "2024-01-05", "open": 94.0, "high": 95.0, "low": 93.0, "close": 94.0, "adj_close": 94.0},
+        {"date": "2024-01-08", "open": 96.0, "high": 97.0, "low": 95.0, "close": 96.0, "adj_close": 96.0},
+        {"date": "2024-01-09", "open": 98.0, "high": 99.0, "low": 97.0, "close": 98.0, "adj_close": 98.0},
+        {"date": "2024-01-10", "open": 140.0, "high": 141.0, "low": 139.0, "close": 140.0, "adj_close": 140.0},
+        {"date": "2024-01-11", "open": 150.0, "high": 151.0, "low": 149.0, "close": 150.0, "adj_close": 150.0},
+    ]
+    config = BacktestConfig(start_date="2024-01-02", end_date="2024-01-11", benchmark_symbol="AAA")
+    base_parameters = {
+        "strategy_type": "MOMENTUM",
+        "template_key": "momentum",
+        "top_n": 2,
+        "holding_count": 2,
+        "lookback_days": 5,
+        "rebalance_frequency": "daily",
+        "weighting_method": "equal_weight",
+    }
+
+    strict_hold = run_backtest(
+        {"AAA": bars_a, "BBB": bars_b, "CCC": bars_c},
+        config=config,
+        parameters={**base_parameters, "hold_rank_threshold": 2},
+        benchmark_bars=bars_a,
+    )
+    loose_hold = run_backtest(
+        {"AAA": bars_a, "BBB": bars_b, "CCC": bars_c},
+        config=config,
+        parameters={**base_parameters, "hold_rank_threshold": 3},
+        benchmark_bars=bars_a,
+    )
+
+    strict_rebalance_symbols = [trade.symbol for trade in strict_hold.trades if trade.date == "2024-01-11"]
+    loose_rebalance_symbols = [trade.symbol for trade in loose_hold.trades if trade.date == "2024-01-11"]
+
+    assert strict_rebalance_symbols == ["AAA", "CCC"]
+    assert loose_rebalance_symbols == []
+    assert strict_hold.metrics.turnover > loose_hold.metrics.turnover
+
+
+def test_momentum_score_weighted_allocates_more_weight_to_stronger_signal():
+    bars_a = [
+        {"date": "2024-01-02", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-03", "open": 110.0, "high": 111.0, "low": 109.0, "close": 110.0, "adj_close": 110.0},
+        {"date": "2024-01-04", "open": 120.0, "high": 121.0, "low": 119.0, "close": 120.0, "adj_close": 120.0},
+        {"date": "2024-01-05", "open": 130.0, "high": 131.0, "low": 129.0, "close": 130.0, "adj_close": 130.0},
+        {"date": "2024-01-08", "open": 140.0, "high": 141.0, "low": 139.0, "close": 140.0, "adj_close": 140.0},
+        {"date": "2024-01-09", "open": 150.0, "high": 151.0, "low": 149.0, "close": 150.0, "adj_close": 150.0},
+        {"date": "2024-01-10", "open": 151.0, "high": 152.0, "low": 150.0, "close": 151.0, "adj_close": 151.0},
+    ]
+    bars_b = [
+        {"date": "2024-01-02", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-03", "open": 105.0, "high": 106.0, "low": 104.0, "close": 105.0, "adj_close": 105.0},
+        {"date": "2024-01-04", "open": 110.0, "high": 111.0, "low": 109.0, "close": 110.0, "adj_close": 110.0},
+        {"date": "2024-01-05", "open": 115.0, "high": 116.0, "low": 114.0, "close": 115.0, "adj_close": 115.0},
+        {"date": "2024-01-08", "open": 118.0, "high": 119.0, "low": 117.0, "close": 118.0, "adj_close": 118.0},
+        {"date": "2024-01-09", "open": 120.0, "high": 121.0, "low": 119.0, "close": 120.0, "adj_close": 120.0},
+        {"date": "2024-01-10", "open": 121.0, "high": 122.0, "low": 120.0, "close": 121.0, "adj_close": 121.0},
+    ]
+    bars_c = [
+        {"date": "2024-01-02", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-03", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-04", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-05", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-08", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-09", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-10", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+    ]
+    config = BacktestConfig(start_date="2024-01-02", end_date="2024-01-10", benchmark_symbol="AAA")
+    base_parameters = {
+        "strategy_type": "MOMENTUM",
+        "template_key": "momentum",
+        "top_n": 2,
+        "holding_count": 2,
+        "lookback_days": 5,
+        "rebalance_frequency": "daily",
+        "hold_rank_threshold": 2,
+    }
+
+    equal_weight = run_backtest(
+        {"AAA": bars_a, "BBB": bars_b, "CCC": bars_c},
+        config=config,
+        parameters={**base_parameters, "weighting_method": "equal_weight"},
+        benchmark_bars=bars_a,
+    )
+    score_weighted = run_backtest(
+        {"AAA": bars_a, "BBB": bars_b, "CCC": bars_c},
+        config=config,
+        parameters={**base_parameters, "weighting_method": "score_weighted"},
+        benchmark_bars=bars_a,
+    )
+
+    equal_weight_allocations = {
+        trade.symbol: trade.weight_after
+        for trade in equal_weight.trades
+        if trade.date == "2024-01-10"
+    }
+    score_weighted_allocations = {
+        trade.symbol: trade.weight_after
+        for trade in score_weighted.trades
+        if trade.date == "2024-01-10"
+    }
+
+    assert abs(equal_weight_allocations["AAA"] - 0.5) < 1e-9
+    assert abs(equal_weight_allocations["BBB"] - 0.5) < 1e-9
+    assert score_weighted_allocations["AAA"] > score_weighted_allocations["BBB"]

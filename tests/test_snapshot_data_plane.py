@@ -21,6 +21,9 @@ from grit_backtest_platform.universe_history import (
     SP500_UNIVERSE_NAME,
     SP500_UNIVERSE_SNAPSHOT_ID,
     SP500_SOURCE_PAGE_TITLE,
+    SOURCE_QUALITY_CURRENT_PAGE_FALLBACK,
+    SOURCE_QUALITY_STATIC_FALLBACK,
+    SOURCE_QUALITY_WIKIPEDIA_REVISION,
     StaticSp500UniverseHistoryProvider,
     StaticNasdaq100UniverseHistoryProvider,
     UniverseDefinition,
@@ -179,6 +182,79 @@ def test_snapshot_schema_persists_snapshot_scoped_records(tmp_path):
     assert {row["effective_date"] for row in sp500_memberships} == {"2026-01-01", "2026-07-01"}
 
 
+def test_load_dataset_price_bars_can_skip_metadata_decode_for_hot_path(tmp_path, monkeypatch):
+    repository = MarketDataRepository(tmp_path / "market.sqlite3")
+    repository.replace_dataset_snapshot(
+        {
+            "id": "ds-price",
+            "name": "Price Snapshot",
+            "status": "READY",
+            "as_of": "2026-04-01",
+            "freshness_label": "Fresh",
+            "start_date": "2026-03-31",
+            "end_date": "2026-04-01",
+            "row_count": 2,
+            "source": "yahoo",
+            "fallback_source": "fallback_unavailable",
+        },
+        price_bars=[
+            {
+                "symbol": "AAPL",
+                "date": "2026-03-31",
+                "open": 200.0,
+                "high": 202.0,
+                "low": 198.0,
+                "close": 201.5,
+                "adj_close": 201.4,
+                "volume": 1_000_000,
+                "source": "yahoo",
+                "fallback_source": "fallback_unavailable",
+                "metadata": {"expensive": True},
+            },
+            {
+                "symbol": "AAPL",
+                "date": "2026-04-01",
+                "open": 201.5,
+                "high": 203.0,
+                "low": 200.0,
+                "close": 202.5,
+                "adj_close": 202.4,
+                "volume": 1_100_000,
+                "source": "yahoo",
+                "fallback_source": "fallback_unavailable",
+                "metadata": {"expensive": True},
+            },
+        ],
+    )
+
+    def fail_loads(*args, **kwargs):
+        raise AssertionError("load_dataset_price_bars(include_metadata=False) should not decode metadata_json")
+
+    monkeypatch.setattr("grit_backtest_platform.market_data_repository.loads", fail_loads)
+
+    rows = repository.load_dataset_price_bars(
+        "ds-price",
+        ["AAPL"],
+        start_date="2026-04-01",
+        include_metadata=False,
+    )
+
+    assert list(rows) == ["AAPL"]
+    assert rows["AAPL"] == [
+        {
+            "symbol": "AAPL",
+            "date": "2026-04-01",
+            "open": 201.5,
+            "high": 203.0,
+            "low": 200.0,
+            "close": 202.5,
+            "adj_close": 202.4,
+            "volume": 1_100_000,
+        }
+    ]
+    assert "metadata" not in rows["AAPL"][0]
+
+
 def test_universe_history_generates_point_in_time_anchors_for_sp500_and_nasdaq100():
     providers = static_universe_history_providers()
     all_snapshots = []
@@ -276,7 +352,7 @@ def test_wikipedia_revision_provider_parses_historical_anchor_tables(monkeypatch
     assert len(snapshots) == 2
     assert all(snapshot.source == provider.provider_name for snapshot in snapshots)
     assert all(snapshot.fallback_source is None for snapshot in snapshots)
-    assert all(snapshot.metadata["source_quality"] == "historical_revision_snapshot" for snapshot in snapshots)
+    assert all(snapshot.metadata["source_quality"] == SOURCE_QUALITY_WIKIPEDIA_REVISION for snapshot in snapshots)
     assert snapshots[0].normalized_symbols[:3] == ["BRK-B", "BF-B", "GOOGL"]
 
 
@@ -315,7 +391,7 @@ def test_wikipedia_revision_provider_falls_back_to_current_page_when_history_is_
     assert len(snapshots) == 1
     assert snapshots[0].source == provider.current_page_source_name
     assert snapshots[0].fallback_source == provider.provider_name
-    assert snapshots[0].metadata["source_quality"] == "current_page_fallback"
+    assert snapshots[0].metadata["source_quality"] == SOURCE_QUALITY_CURRENT_PAGE_FALLBACK
     assert snapshots[0].normalized_symbols == ["AAPL", "MSFT", "NVDA", "AMZN"]
 
 
@@ -346,7 +422,7 @@ def test_wikipedia_revision_provider_uses_secondary_current_page_before_static_s
     assert len(snapshots) == 1
     assert snapshots[0].source == provider.secondary_current_source_name
     assert snapshots[0].fallback_source == provider.provider_name
-    assert snapshots[0].metadata["source_quality"] == "secondary_current_page_fallback"
+    assert snapshots[0].metadata["source_quality"] == SOURCE_QUALITY_CURRENT_PAGE_FALLBACK
     assert snapshots[0].normalized_symbols == ["AAPL", "MSFT", "NVDA", "AMZN"]
 
 
@@ -372,7 +448,7 @@ def test_wikipedia_revision_provider_uses_static_seed_as_last_resort(monkeypatch
     assert len(snapshots) == 1
     assert snapshots[0].source == "static_seed"
     assert snapshots[0].fallback_source == provider.current_page_source_name
-    assert snapshots[0].metadata["source_quality"] == "static_seed_fallback"
+    assert snapshots[0].metadata["source_quality"] == SOURCE_QUALITY_STATIC_FALLBACK
     assert snapshots[0].metadata["historical_revision_error"]
     assert snapshots[0].metadata["current_page_error"]
 

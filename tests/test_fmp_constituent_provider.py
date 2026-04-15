@@ -12,14 +12,20 @@ from grit_backtest_platform.fmp_constituent_provider import (
     FMP_SP500_HISTORICAL_ENDPOINT,
 )
 from grit_backtest_platform.universe_history import (
+    CuratedNasdaq100UniverseHistoryProvider,
+    GithubSp500CurrentValidationProvider,
     SP500_UNIVERSE_KEY,
     SP500_UNIVERSE_NAME,
     SP500_UNIVERSE_SNAPSHOT_ID,
     SP500_SOURCE_PAGE_TITLE,
+    SOURCE_QUALITY_CURRENT_PAGE_FALLBACK,
+    SOURCE_QUALITY_HISTORICAL_DATASET,
+    SOURCE_QUALITY_WIKIPEDIA_REVISION,
     StaticSp500UniverseHistoryProvider,
     UniverseDefinition,
     UniverseMembershipSnapshot,
     WikipediaRevisionUniverseHistoryProvider,
+    WikipediaSp500ChangesUniverseHistoryProvider,
     default_universe_history_providers,
 )
 
@@ -51,7 +57,7 @@ def _snapshot(
         source_page_title=definition.source_page_title,
         metadata={
             "coverage_mode": "point_in_time_anchor",
-            "source_quality": "historical_revision_snapshot",
+            "source_quality": SOURCE_QUALITY_WIKIPEDIA_REVISION,
         },
     )
 
@@ -99,7 +105,7 @@ def test_fmp_historical_constituent_provider_reconstructs_semiannual_anchors(mon
     first_snapshot, second_snapshot = snapshots
     assert first_snapshot.source == provider.provider_name
     assert first_snapshot.fallback_source is None
-    assert first_snapshot.metadata["source_quality"] == "historical_constituent_api"
+    assert first_snapshot.metadata["source_quality"] == SOURCE_QUALITY_HISTORICAL_DATASET
     assert first_snapshot.metadata["historical_constituent_provider"] == "fmp"
     assert first_snapshot.metadata["historical_constituent_current_count"] == 3
     assert first_snapshot.metadata["historical_constituent_change_count"] == 2
@@ -113,7 +119,8 @@ def test_fmp_historical_constituent_provider_reconstructs_semiannual_anchors(mon
     ("failure_mode", "expected_probe_status"),
     [
         ("429", "rate_limited"),
-        ("402", "capability_unavailable"),
+        ("402", "entitlement_unavailable"),
+        ("403", "legacy_endpoint_unavailable"),
         ("malformed", "malformed_payload"),
     ],
 )
@@ -158,19 +165,21 @@ def test_fmp_provider_gracefully_falls_back_to_existing_universe_chain(
             lambda url: [{"name": "broken"}],  # noqa: ANN001
         )
     else:
-        code = int(failure_mode)
+        def raise_runtime_error(url: str):  # noqa: ANN001
+            if failure_mode == "429":
+                raise RuntimeError("FMP historical constituent API rate limited (429).")
+            if failure_mode == "402":
+                raise RuntimeError("FMP historical constituent API entitlement unavailable (402).")
+            raise RuntimeError("FMP historical constituent legacy endpoint unavailable (403).")
 
-        def raise_http_error(url: str):  # noqa: ANN001
-            raise urllib.error.HTTPError(url, code, "rate-limited", hdrs=None, fp=None)
-
-        monkeypatch.setattr(provider, "_request_json", raise_http_error)
+        monkeypatch.setattr(provider, "_request_json", raise_runtime_error)
 
     snapshots = provider.load_snapshots(start_date=date(2025, 1, 1), end_date=date(2025, 7, 1))
 
     assert len(snapshots) == 2
     assert all(snapshot.source == fallback_provider.provider_name for snapshot in snapshots)
     assert all(snapshot.fallback_source is None for snapshot in snapshots)
-    assert all(snapshot.metadata["source_quality"] == "historical_revision_snapshot" for snapshot in snapshots)
+    assert all(snapshot.metadata["source_quality"] == SOURCE_QUALITY_WIKIPEDIA_REVISION for snapshot in snapshots)
     assert all(snapshot.metadata["historical_constituent_provider"] == "fmp" for snapshot in snapshots)
     assert all(snapshot.metadata["historical_constituent_probe_status"] == expected_probe_status for snapshot in snapshots)
     assert snapshots[0].normalized_symbols == ["AAPL", "MSFT", "NVDA", "AMZN"]
@@ -219,7 +228,14 @@ def test_default_universe_history_providers_use_fmp_wrappers():
     providers = default_universe_history_providers()
 
     assert [provider.provider_name for provider in providers] == [
-        "wikipedia_revision_history",
-        "wikipedia_revision_history",
+        "fmp_historical_constituent",
+        "fmp_historical_constituent",
     ]
-    assert all(getattr(provider, "official_provider", None) is not None for provider in providers)
+    sp500_provider, nasdaq_provider = providers
+    assert isinstance(sp500_provider.fallback_provider, WikipediaRevisionUniverseHistoryProvider)
+    assert isinstance(
+        sp500_provider.fallback_provider.historical_dataset_provider,
+        WikipediaSp500ChangesUniverseHistoryProvider,
+    )
+    assert isinstance(sp500_provider.fallback_provider.current_validation_provider, GithubSp500CurrentValidationProvider)
+    assert isinstance(nasdaq_provider.fallback_provider, CuratedNasdaq100UniverseHistoryProvider)
