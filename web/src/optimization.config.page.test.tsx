@@ -331,7 +331,7 @@ describe("OptimizationConfigPage", () => {
     );
   });
 
-  it("uses wrapped hard-guard badges instead of overflow-prone inline chips", async () => {
+  it("renders each hard guard as a single readable rule line", async () => {
     const { container } = render(
       <OptimizationConfigPage
         strategyId="strat-mean-001"
@@ -348,8 +348,20 @@ describe("OptimizationConfigPage", () => {
     const topline = firstCard?.querySelector(
       ".optimization-constraint-card__topline",
     ) as HTMLDivElement | null;
-    const operator = firstCard?.querySelector(
-      ".optimization-constraint-card__operator",
+    const rule = firstCard?.querySelector(
+      ".optimization-constraint-card__rule",
+    ) as HTMLLabelElement | null;
+    const ruleLabel = firstCard?.querySelector(
+      ".optimization-constraint-card__rule-label",
+    ) as HTMLSpanElement | null;
+    const ruleOperator = firstCard?.querySelector(
+      ".optimization-constraint-card__rule-operator",
+    ) as HTMLSpanElement | null;
+    const ruleInput = screen.getByLabelText(
+      "最大回撤 阈值",
+    ) as HTMLInputElement;
+    const ruleUnit = firstCard?.querySelector(
+      ".optimization-constraint-card__rule-unit",
     ) as HTMLSpanElement | null;
     const badges = firstCard?.querySelector(
       ".optimization-constraint-card__badges",
@@ -363,24 +375,27 @@ describe("OptimizationConfigPage", () => {
 
     expect(firstCard).toBeTruthy();
     expect(topline).toBeTruthy();
-    expect(operator).toBeTruthy();
+    expect(rule).toBeTruthy();
+    expect(ruleLabel?.textContent).toBe("最大回撤");
+    expect(ruleOperator?.textContent).toBe("≤");
+    expect(ruleInput.value).toBe("25");
+    expect(ruleUnit?.textContent).toBe("%");
     expect(badges).toBeTruthy();
     expect(baselineChip).toBeTruthy();
-    expect(verdictChip).toBeTruthy();
+    expect(verdictChip).toBeNull();
+    expect(firstCard?.textContent).not.toContain("当前判定");
+    expect(firstCard?.textContent).not.toContain("阈值");
     expect(optimizationLabPageCss).toMatch(
-      /\.optimization-constraint-card__topline\s*\{[^}]*flex-wrap:\s*wrap;/s,
+      /\.optimization-constraint-card__rule\s*\{[^}]*display:\s*flex;[^}]*flex-wrap:\s*nowrap;/s,
     );
     expect(optimizationLabPageCss).toMatch(
-      /\.optimization-constraint-card__category,\s*\.optimization-constraint-card__operator\s*\{[^}]*white-space:\s*normal;/s,
+      /\.optimization-constraint-card__rule-input\s*\{[^}]*text-align:\s*right;/s,
     );
     expect(optimizationLabPageCss).toMatch(
       /\.optimization-constraint-card__badges\s*\{[^}]*display:\s*grid;/s,
     );
     expect(optimizationLabPageCss).toMatch(
-      /\.optimization-constraint-card__badge\s*\{[^}]*width:\s*100%;[^}]*overflow-wrap:\s*anywhere;/s,
-    );
-    expect(optimizationLabPageCss).toMatch(
-      /\.optimization-constraint-card__verdict\s*\{[^}]*white-space:\s*normal;/s,
+      /\.optimization-constraint-card__rule-label\s*\{[^}]*white-space:\s*nowrap;/s,
     );
   });
 });

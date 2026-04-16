@@ -1,4 +1,4 @@
-# 更新日志
+﻿# 更新日志
 
 此文件记录项目中所有值得关注的历史变更。
 
@@ -7,7 +7,34 @@
 
 本文件已于 2026-04-15 根据仓库提交历史与现有项目文档完成历史回填。
 
-## [未发布]
+## [Unreleased]
+
+## [0.1.1-003] - 2026-04-16
+
+### 修复
+
+- 修复 Optimization Lab 选择策略页进入 `#/optimization-jobs/new` 时会为每条策略额外请求一次 `GET /backtest-runs/{run_id}/detail` 的问题；页面现在直接复用 `GET /strategies` 返回的 `latest_completed_run_summary` 来展示夏普、回撤与收益摘要，避免把近 1MB 的完整回测详情拉进列表页，明显缩短首屏等待时间。
+- 修复 `pre-push` 补跑 `CHANGELOG.md` 时的快照编号与日期规则：当分支已经与 upstream 同步后再回填快照，revision 现在会至少从第二次推送编号开始，并统一使用本次推送日作为快照日期。
+- 修复公司行为快照的完成度口径：当 `Yahoo/yfinance/Tiingo` 等正式 action-capable 提供方成功完成 `dividend/split/reverse_split` 探测但该 symbol 本身没有正式事件时，系统现在会记录 `complete_no_events` probe coverage，不再把这类 symbol 误判成 corporate missing。
+- 修复快照修复流程会被陈旧 `missing_symbols` 元数据卡住的问题：repair 现在会自动排除已经有 coverage 的 symbol，并按 `target_symbols - covered_symbols` 重算缺口与状态，避免出现 `READY` 但仍残留大量历史 missing 的假阳性。
+- 修复 Optimization Lab 结果页在“当前基准仍通过、但候选组合全部被快捷过滤挡住”时没有任何放宽入口的问题；现在会显示“一键放宽到有结果”，按当前最佳候选的真实指标回填阈值并立即重新过滤。
+- 修复 Optimization Lab “重新过滤”在会筛掉全部组合时仍落盘并切换本地结果态的问题；现在会弹出“无符合条件的组合，请放宽过滤条件再试。”，并保持当前任务结果与副标题不变。
+- 修复 Optimization Lab 结果页“无符合条件的组合，请放宽过滤条件再试。”提示仍停在右下角私有样式的问题；现在会复用统一 `error-banner` 视觉，并固定显示在屏幕顶部居中。
+- 修复 Optimization Lab 配置页“硬性护栏”卡片把约束标签、比较符号和阈值输入拆散导致阅读混乱的问题；卡片现在会按“最大回撤 ≤ 25%”这类规则句呈现，并同步加宽右侧配置栏以保证两列卡片下的可读性。
+- 修复 Optimization Lab 配置页“硬性护栏”卡片信息冗余的问题；卡片内不再重复显示“当前判定 通过/风险”，把状态说明收敛到页面下方的统一判定区。
+- 修复 Optimization Lab 使用 `source_run_id` 创建优化任务时丢失基准回测 `request_json` 的问题；优化 trial 现在会继承原始 `start_date/end_date` 等请求窗口，并在 evaluator 入口对缺失窗口直接报错，不再错误退回整段历史数据。
+- 修复 Optimization Lab 结果页在终态详情缺少 `matching_combination_count` 时静默退回候选版本数的问题；现在加载、轮询和重新过滤都会直接报错，并停止继续展示结果中心，避免把候选池数量误当成符合条件的组合总数。
+
+
+### 变更
+
+- 优化 Optimization Lab 进度链路的感知体验与后端吞吐：前端改为自适应轮询（运行态起始 `2000ms`，无进展时逐步退避到 `2500ms` / `3000ms`），并补充 5% 抖动与隐藏/失焦暂停及恢复后即时拉取，同时保留 `inFlight` 去重避免并发重复请求。
+- 后端 `get_optimization_job_detail` 运行态详情查询加入 `job_id + updated_at` 维度的 1 秒短时内存复用，减少无变更窗口下重复 `progress_snapshot` 聚合查询；返回字段结构保持不变。
+- 为 `get_optimization_job_detail` 补充请求频率、平均耗时与 snapshot 命中率指标/日志，用于低风险提速方案的回归量化验证。
+- 数据集价格链新增离线 `Stooq` ZIP 提供方，可直接读取 `GRIT_STOOQ_US_DAILY_ZIP` 或默认 `~/Downloads/d_us_txt.zip` 的 `d_us_txt.zip` 冷启动包补齐长历史日线；该源只参与价格快照，不参与公司行为完成度。
+- 快照 provider telemetry 现在会把 `provider_summary` 持久化到数据集 metadata，并且不再把 `Stooq/AkShare` 这类纯价格源计入 corporate action provider summary。
+
+## [0.1.1-002] - 2026-04-15
 
 ### 新增
 
@@ -53,6 +80,12 @@
 - 修复优化进度可见性问题，使运行中或被中断的任务能在 API 与 UI 中呈现更清晰且一致的状态。
 - 修复本地 smoke 与 live acceptance 的准备链路，通过统一 fixture 重置、测试入口和真实 API 验证脚本提升可重复性。
 
+### Fixed
+
+- 修复动量回测只实际使用 `lookback_months` 和 `top_n` 的问题；`skip_recent_months`、`hold_rank_threshold`、`weighting_method`、`rebalance_anchor_dates` 现在都会进入真实调仓逻辑，`capital` 也会同步写入 `initial_equity`。
+- 修复优化评分被 `total_return_pct` 放大的问题；现在改为以 `return_sharpe`、`out_of_sample_sharpe`、Calmar、稳定度、回撤和换手约束为主的风险调整排序。
+- 修复 Optimization Lab 结果中心在调整约束后仍复用旧候选池的问题；现在会基于完整 `optimization_job_trials` 重建候选、去重相同结果，并优先返回满足当前约束的不同候选版本。
+
 ## [0.1.1] - 2026-04-01
 
 ### 新增
@@ -82,10 +115,3 @@
 - 新增 Grit Strategy Lab 在 2026 年 3 月恢复工作后的首个可运行基线，重新建立 FastAPI 后端与 React/Vite 前端工作台。
 - 新增基线恢复提交中提到的生命周期清理、交易审计能力和运行时自愈机制。
 - 新增本地 SQLite 种子数据库、打包后的 Python 运行时资源，以及在 Windows 上启动重建平台所需的初始工程结构。
-## [Unreleased]
-
-### Fixed
-
-- 修复动量回测只实际使用 `lookback_months` 和 `top_n` 的问题；`skip_recent_months`、`hold_rank_threshold`、`weighting_method`、`rebalance_anchor_dates` 现在都会进入真实调仓逻辑，`capital` 也会同步写入 `initial_equity`。
-- 修复优化评分被 `total_return_pct` 放大的问题；现在改为以 `return_sharpe`、`out_of_sample_sharpe`、Calmar、稳定度、回撤和换手约束为主的风险调整排序。
-- 修复 Optimization Lab 结果中心在调整约束后仍复用旧候选池的问题；现在会基于完整 `optimization_job_trials` 重建候选、去重相同结果，并优先返回满足当前约束的不同候选版本。

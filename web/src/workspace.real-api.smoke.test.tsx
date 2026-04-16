@@ -6,6 +6,7 @@ import { CreationSessionPage } from './pages/creation-session-page';
 import {
   OptimizationConfigPage,
   OptimizationResultsPage,
+  OptimizationStrategySelectPage,
 } from './pages/optimization-lab-page';
 import { RunDetailPage } from './pages/run-detail-page';
 import { RunsIndexPage } from './pages/runs-index-page';
@@ -192,6 +193,26 @@ describeLiveApi('live api acceptance', () => {
         await screen.findByText(DETAIL_STRATEGY_NAME, {}, { timeout: LIVE_QUERY_TIMEOUT }),
       ).toBeInTheDocument();
       expect(container.querySelector('.run-detail-curve-card--overview')).not.toBeNull();
+      expectNoFetchFailure();
+    },
+    LIVE_TEST_TIMEOUT,
+  );
+
+  it(
+    'hydrates optimization select data against the staged local API',
+    async () => {
+      const { container } = await renderLiveRoute(
+        '#/optimization-jobs/new',
+        <OptimizationStrategySelectPage />,
+      );
+
+      const selectButtons = await screen.findAllByRole(
+        'button',
+        { name: '选择策略' },
+        { timeout: LIVE_QUERY_TIMEOUT },
+      );
+      expect(selectButtons).not.toHaveLength(0);
+      expect(container.querySelector('.optimization-lab-table')).not.toBeNull();
       expectNoFetchFailure();
     },
     LIVE_TEST_TIMEOUT,

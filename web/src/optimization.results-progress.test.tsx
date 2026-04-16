@@ -270,6 +270,41 @@ function createRun(): ApiBacktestRunDetail {
   };
 }
 
+function setDocumentVisibilityState(isVisible: boolean): () => void {
+  const previousHiddenDescriptor = Object.getOwnPropertyDescriptor(
+    document,
+    "hidden",
+  );
+  const previousVisibilityDescriptor = Object.getOwnPropertyDescriptor(
+    document,
+    "visibilityState",
+  );
+
+  Object.defineProperty(document, "hidden", {
+    configurable: true,
+    get: () => !isVisible,
+  });
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    get: () => (isVisible ? "visible" : "hidden"),
+  });
+
+  return () => {
+    if (previousHiddenDescriptor) {
+      Object.defineProperty(document, "hidden", previousHiddenDescriptor);
+    } else {
+      // @ts-expect-error - test environment cleanup fallback when no prior property exists
+      delete (document as Document & { hidden: boolean }).hidden;
+    }
+    if (previousVisibilityDescriptor) {
+      Object.defineProperty(document, "visibilityState", previousVisibilityDescriptor);
+    } else {
+      // @ts-expect-error - test environment cleanup fallback when no prior property exists
+      delete (document as Document & { visibilityState: string }).visibilityState;
+    }
+  };
+}
+
 async function renderPage(): Promise<HTMLElement> {
   let container: HTMLElement | null = null;
   await act(async () => {
@@ -437,5 +472,77 @@ describe("optimization results progress state", () => {
     expect(container.querySelector(".error-banner")?.textContent).toContain(
       "继续优化未启动",
     );
+  });
+
+  it("stops polling when the page is hidden and refreshes immediately when visible again", async () => {
+    const restoreVisibility = setDocumentVisibilityState(true);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+
+    const runningJob = createInterruptedJob();
+    runningJob.status = "RUNNING";
+    runningJob.summary = {
+      ...runningJob.summary,
+      status: "RUNNING",
+      resume_ready: false,
+      interrupted_reason: null,
+      completed_combinations: 11,
+      persisted_trial_count: 11,
+      next_trial_index: 12,
+      current_stage: "Running trial 12/70",
+      latest_update: "Completed 11/70 trials.",
+      budget_combinations: 70,
+    };
+    runningJob.result = {
+      ...runningJob.result,
+      status: "RUNNING",
+      progress_pct: 16,
+      current_stage: "Running trial 12/70",
+      latest_update: "Completed 11/70 trials.",
+      headline: "Optimization in progress",
+      summary: "Completed 11/70 trials.",
+    };
+    currentApi = {
+      ...currentApi,
+      getOptimizationJobDetail: vi.fn().mockResolvedValue(runningJob),
+    };
+
+    await renderPage();
+
+    const getOptimizationJobDetail = currentApi
+      .getOptimizationJobDetail as ReturnType<typeof vi.fn>;
+    await Promise.resolve();
+    const initialCallCount = getOptimizationJobDetail.mock.calls.length;
+    expect(initialCallCount).toBeGreaterThan(0);
+
+    await act(async () => {
+      vi.advanceTimersByTime(2200);
+      await Promise.resolve();
+    });
+    const callAfterSchedule = getOptimizationJobDetail.mock.calls.length;
+    expect(callAfterSchedule).toBeGreaterThan(initialCallCount);
+
+    const restoreHidden = setDocumentVisibilityState(false);
+    act(() => {
+      fireEvent(document, new Event("visibilitychange"));
+    });
+    await Promise.resolve();
+    const callAfterHidden = getOptimizationJobDetail.mock.calls.length;
+
+    await act(async () => {
+      vi.advanceTimersByTime(10000);
+      await Promise.resolve();
+    });
+    expect(getOptimizationJobDetail.mock.calls.length).toBe(callAfterHidden);
+
+    const restoreVisible = setDocumentVisibilityState(true);
+    act(() => {
+      fireEvent(document, new Event("visibilitychange"));
+    });
+    await Promise.resolve();
+    expect(getOptimizationJobDetail.mock.calls.length).toBe(callAfterHidden + 1);
+    restoreHidden();
+    restoreVisible();
+    restoreVisibility();
   });
 });

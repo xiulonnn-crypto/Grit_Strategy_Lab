@@ -47,6 +47,16 @@ Codex 在本仓库的默认阅读顺序固定如下：
 | `codex-smoke.ps1` | 当前会先执行 fixture reset，再跑 backend/frontend 固定入口 | 因 fixture 缺失，当前不能把它当作默认可用的全量门禁 |
 | `README.md` 中的 Codex smoke 描述 | 仍偏旧 | 若与脚本行为冲突，以 `scripts/codex-*.ps1` 和本文件为准 |
 
+### 1.5 CHANGELOG 维护规则
+
+- 项目根 `CHANGELOG.md` 必须保持 Keep a Changelog 结构。
+- 顶部未发布区块只允许使用标准分类小标题：`新增`、`变更`、`修复`、`已弃用`、`移除`、`安全`。
+- 不允许在 `## [未发布]` 或 `## [Unreleased]` 下再引入主题型小标题，例如 `快照刷新`、`优化实验室`、`数据源修复`。
+- 若一次回填涉及多个主题，也必须把每条内容按语义分别归入标准分类，而不是先按主题聚组再落盘。
+- 当 Codex 或其他代理批量回填历史变更时，若发现某一组条目都来自同一主题，这只能作为内部整理线索，不能直接写成 changelog 分类标题。
+- 非正式推送快照 `x.y.z-00n` 的日期必须使用本次推送所在日期，而不是继承上一个稳定版 `x.y.z` 的发布日期。
+- 若 `pre-push` 在分支已经与 upstream 同步之后才补跑 changelog，revision 编号至少要按“上次发版后的第二次推送”起算，避免把补推送的快照错误写成 `-001`。
+
 ## 2. 何时进入 harness
 
 ### 2.1 必须先进入 `harness/` 的场景
@@ -477,3 +487,11 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - 本仓库的 orchestration、worker/reviewer prompt 基线、handoff 规则、UI 交付物读取顺序写在 `CLAUDE.md`。
 - 本仓库的技术真相、固定测试命令、模块边界、验证路径和 acceptance facts 写在 `TECHNICAL.md`。
 - 如果一次复盘发现的问题只影响本仓库，不要修改 shared skill；应把流程类改进写回 `CLAUDE.md`，把技术与验收类改进写回本文件。
+## 2026-04-16 Snapshot Data Source Notes
+
+- `Stooq` is now supported as an offline price-only cold-start source. Runtime lookup order for price repair is effectively `Yahoo -> yfinance -> Tiingo -> Longbridge -> AkShare -> Stooq -> FMP`, while `Alpha Vantage` remains outside the default price chain.
+- `Stooq` reads `GRIT_STOOQ_US_DAILY_ZIP` first, then prefers the repo-local archive at `data/vendor/stooq/d_us_txt.zip`, and only falls back to `~/Downloads/d_us_txt.zip`. The provider reads the ZIP archive in place and does not require manual extraction.
+- `Stooq` must not be counted as a company-action source. It emits daily price bars only, stores `adj_close` as a close proxy, and is excluded from `incremental` current-window refreshes.
+- Company-action snapshot completeness is now defined by formal `dividend/split/reverse_split` probe coverage, not by “every symbol must have at least one event row”.
+- When an action-capable provider successfully probes a symbol and finds no formal events, the pipeline writes a `dataset_symbol_coverage` row with `coverage_kind=corporate_probe` and `probe_status=complete_no_events`.
+- `earnings_report` and `report_filed` remain stored as supplementary action rows, but they do not satisfy formal company-action completeness on their own.

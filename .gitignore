@@ -19,6 +19,7 @@ web/.eslintcache
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+data/vendor/stooq/
 !harness/fixtures/seed_workspace/*.sqlite3
 !web/src/assets/demo_backtest.db # 如果你想保留一个展示用的 demo 库
 web/dist/plots/*

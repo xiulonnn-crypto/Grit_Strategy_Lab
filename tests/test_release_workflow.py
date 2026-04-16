@@ -55,7 +55,7 @@ def test_prepare_push_creates_revision_snapshot_and_resets_unreleased(tmp_path: 
     assert result.mode == "revision"
     assert result.snapshot_title == "0.1.1-001"
     assert result.changed_files == ["CHANGELOG.md"]
-    assert "## [Unreleased]\n\n## [0.1.1-001] - 2026-03-31" in changelog
+    assert "## [Unreleased]\n\n## [0.1.1-001] - 2026-04-15" in changelog
     assert "- 修复优化结果过滤问题。" in changelog
 
 
@@ -97,7 +97,7 @@ def test_prepare_push_merges_duplicate_unreleased_and_increments_revision(tmp_pa
     assert changelog.count("## [Unreleased]") == 1
     assert "第一批改动" in changelog
     assert "第二批改动" in changelog
-    assert "## [0.1.1-002] - 2026-03-31" in changelog
+    assert "## [0.1.1-002] - 2026-04-15" in changelog
 
 
 def test_prepare_push_release_updates_version_file_and_dates(tmp_path: Path) -> None:
@@ -156,3 +156,65 @@ def test_prepare_push_is_noop_when_unreleased_is_empty(tmp_path: Path) -> None:
     assert result.mode == "noop"
     assert result.changed is False
     assert result.changed_files == []
+
+
+def test_prepare_push_rejects_theme_heading_inside_unreleased(tmp_path: Path) -> None:
+    _write_repo_files(
+        tmp_path,
+        """# 更新日志
+
+## [未发布]
+
+### 快照刷新
+
+- 这是不被允许的主题型小标题。
+
+## [0.1.1] - 2026-03-31
+
+### 新增
+
+- 已发布内容。
+""",
+    )
+
+    try:
+        prepare_push(tmp_path, release=False, effective_date=date(2026, 4, 15))
+    except ValueError as exc:
+        assert "unsupported subsection headings" in str(exc)
+        assert "### 快照刷新" in str(exc)
+    else:
+        raise AssertionError("prepare_push should reject theme headings inside Unreleased")
+
+
+def test_prepare_push_honors_minimum_revision_for_backfilled_post_push_snapshot(
+    tmp_path: Path,
+) -> None:
+    _write_repo_files(
+        tmp_path,
+        """# Changelog
+
+## [Unreleased]
+
+### Fixed
+
+- Backfilled snapshot should not reuse 001.
+
+## [0.1.1] - 2026-03-31
+
+### Added
+
+- Stable release entry.
+""",
+    )
+
+    result = prepare_push(
+        tmp_path,
+        release=False,
+        effective_date=date(2026, 4, 15),
+        minimum_revision=2,
+    )
+    changelog = (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert result.mode == "revision"
+    assert result.snapshot_title == "0.1.1-002"
+    assert "## [Unreleased]\n\n## [0.1.1-002] - 2026-04-15" in changelog

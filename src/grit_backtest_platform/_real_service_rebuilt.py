@@ -86,6 +86,7 @@ SNAPSHOT_REFRESH_HEARTBEAT_INTERVAL_SECONDS = 1.0
 SNAPSHOT_REFRESH_HEARTBEAT_GRACE_SECONDS = 30.0
 SNAPSHOT_REFRESH_WORKER_DISCOVERY_TIMEOUT_SECONDS = 3.0
 DIRECT_REFRESH_SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9.-]{0,11}$")
+FORMAL_CORPORATE_ACTION_TYPES = {"dividend", "split", "reverse_split"}
 
 
 class SnapshotBlockingError(ValueError):
@@ -253,6 +254,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
         excluded: set[str] = set()
         if mode == "full":
             excluded.update({"longbridge", "longbridge_static_info", "futu", "futu_rehab"})
+        if mode == "incremental" and any(
+            self._provider_name(candidate) == "stooq"
+            for candidate in (getattr(provider, "providers", None) or [])
+        ):
+            excluded.add("stooq")
         if window_start < LONGBRIDGE_MIN_HISTORY_DATE:
             excluded.update({"longbridge", "longbridge_static_info"})
         if not excluded and not allow_targeted_price_repair:
@@ -599,7 +605,24 @@ class RealBacktestPlatformService(BacktestPlatformService):
         raw_symbols = metadata.get("missing_symbols") or []
         if not isinstance(raw_symbols, list):
             return []
-        return self._normalize_refresh_symbols(raw_symbols)
+        missing_symbols = self._normalize_refresh_symbols(raw_symbols)
+        snapshot_id = str((snapshot or {}).get("id") or (snapshot or {}).get("snapshot_id") or "").strip()
+        if not snapshot_id or not missing_symbols:
+            return missing_symbols
+        if snapshot_id not in {DATASET_PRICE_SNAPSHOT_ID, DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID}:
+            return missing_symbols
+        try:
+            coverage_rows = self.market_data_repository.load_dataset_symbol_coverage(snapshot_id)
+        except Exception:
+            coverage_rows = []
+        covered_symbols = {
+            str(row.get("symbol") or "").strip().upper()
+            for row in coverage_rows
+            if str(row.get("symbol") or "").strip()
+        }
+        if not covered_symbols:
+            return missing_symbols
+        return [symbol for symbol in missing_symbols if symbol not in covered_symbols]
 
     def _snapshot_repair_cursor(self, snapshot: Mapping[str, Any] | None) -> int:
         metadata = dict(snapshot.get("metadata") or {}) if snapshot else {}
@@ -1052,9 +1075,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
         covered_symbol_set.discard("")
         missing_symbol_set = {str(item or "").strip().upper() for item in (missing_symbols or []) if str(item or "").strip()}
         target_symbol_set = {str(item or "").strip().upper() for item in (target_symbols or []) if str(item or "").strip()}
+        missing_symbol_set -= covered_symbol_set
         if target_symbol_set:
             covered_symbol_set &= target_symbol_set
-            missing_symbol_set &= target_symbol_set
+            missing_symbol_set = target_symbol_set - covered_symbol_set
         covered_symbol_count = len(covered_symbol_set)
         total_symbol_count = len(target_symbol_set) if target_symbol_set else len(covered_symbol_set | missing_symbol_set)
 
@@ -1094,6 +1118,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
         metadata["covered_symbol_count"] = covered_symbol_count
         metadata["total_symbol_count"] = total_symbol_count
+        metadata["missing_symbols"] = sorted(missing_symbol_set)
         return metadata
 
     def _parse_snapshot_date(self, value: Any) -> date | None:
@@ -1421,12 +1446,42 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     snapshot_id=DATASET_PRICE_SNAPSHOT_ID,
                     result=item,
                 )
+            if kind in {"history", "history_availability"} and not self._provider_result_supports_corporate_actions(item):
+                continue
             if kind in {"history", "history_availability", "earnings", "earnings_availability", "filings", "filings_availability"}:
                 self._record_provider_result(
                     telemetry,
                     snapshot_id=DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
                     result=item,
                 )
+
+    def _provider_result_supports_corporate_actions(self, result: Mapping[str, Any]) -> bool:
+        explicit = result.get("actions_supported")
+        if explicit is not None:
+            return bool(explicit)
+        provider_name = str(result.get("provider") or result.get("source") or "").strip().lower()
+        return provider_name in {"yahoo", "yfinance", "tiingo"}
+
+    def _history_action_probe_sources(self, metadata: Mapping[str, Any] | None) -> list[str]:
+        if not isinstance(metadata, Mapping):
+            return []
+        sources: list[str] = []
+        for item in metadata.get("provider_results") or []:
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("kind") or "").strip().lower() != "history":
+                continue
+            if not self._provider_result_supports_corporate_actions(item):
+                continue
+            status = str(item.get("status") or "").strip().lower()
+            if status not in {"succeeded", "empty"}:
+                continue
+            if int(item.get("bar_count") or 0) <= 0 and int(item.get("action_count") or 0) <= 0:
+                continue
+            source = str(item.get("source") or item.get("provider") or "").strip()
+            if source:
+                sources.append(source)
+        return sorted(dict.fromkeys(sources))
 
     def _merge_dataset_provider_telemetry(
         self,
@@ -1701,6 +1756,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         *,
         price_bars: Sequence[Mapping[str, Any]],
         corporate_actions: Sequence[Mapping[str, Any]],
+        corporate_coverage_rows: Sequence[CoverageSummary | Mapping[str, Any]] | None = None,
         grouped_universe_snapshots: Mapping[str, Sequence[Any]],
         memberships_by_snapshot: Mapping[str, Sequence[Mapping[str, Any]]],
         existing_universe_memberships: Mapping[str, Sequence[Mapping[str, Any]]],
@@ -1712,9 +1768,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if str(item.get("symbol") or "").strip()
         }
         corporate_symbols = {
-            str(item.get("symbol") or "").strip().upper()
-            for item in corporate_actions
-            if str(item.get("symbol") or "").strip()
+            str((item.symbol if isinstance(item, CoverageSummary) else item.get("symbol")) or "").strip().upper()
+            for item in (corporate_coverage_rows or [])
+            if str((item.symbol if isinstance(item, CoverageSummary) else item.get("symbol")) or "").strip()
         }
         universes: dict[str, dict[str, Any]] = {}
         for snapshot_id, anchor_snapshots in grouped_universe_snapshots.items():
@@ -1923,23 +1979,78 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     }
                     for item in actions
                 ]
+                formal_actions = [
+                    item
+                    for item in normalized_actions
+                    if str(item.get("action_type") or "").strip().lower() in FORMAL_CORPORATE_ACTION_TYPES
+                ]
+                action_probe_sources = self._history_action_probe_sources(market_data_metadata)
+                action_probe_complete = bool(action_probe_sources)
                 price_bars.extend(normalized_bars)
                 corporate_actions.extend(normalized_actions)
-                if normalized_actions:
+                if formal_actions:
                     action_dates = [
                         str(item.get("date") or "").strip()
-                        for item in normalized_actions
+                        for item in formal_actions
                         if str(item.get("date") or "").strip()
                     ]
                     if not action_dates:
                         action_dates = [str(normalized_bars[0]["date"]), str(normalized_bars[-1]["date"])]
+                    formal_action_sources = sorted(
+                        {
+                            str(item.get("source") or "").strip()
+                            for item in formal_actions
+                            if str(item.get("source") or "").strip()
+                        }
+                    )
                     corporate_coverage_rows.append(
-                        CoverageSummary(
-                            symbol=symbol,
-                            start_date=min(action_dates),
-                            end_date=max(action_dates),
-                            trade_days=len(normalized_actions),
-                        )
+                        {
+                            "symbol": symbol,
+                            "start_date": min(action_dates),
+                            "end_date": max(action_dates),
+                            "trade_days": len(formal_actions),
+                            "source": (
+                                formal_action_sources[0]
+                                if len(formal_action_sources) == 1
+                                else (action_probe_sources[0] if len(action_probe_sources) == 1 else (market_data_source or ""))
+                            ),
+                            "fallback_source": market_data_fallback_source,
+                            "metadata": {
+                                "coverage_kind": "corporate_events",
+                                "probe_status": "complete_with_events",
+                                "event_scope": "dividend_split_only",
+                                "event_count": len(formal_actions),
+                                "formal_event_types": sorted(
+                                    {
+                                        str(item.get("action_type") or "").strip().lower()
+                                        for item in formal_actions
+                                        if str(item.get("action_type") or "").strip()
+                                    }
+                                ),
+                                "probe_provider_names": action_probe_sources,
+                            },
+                        }
+                    )
+                elif action_probe_complete:
+                    corporate_coverage_rows.append(
+                        {
+                            "symbol": symbol,
+                            "start_date": str(normalized_bars[0]["date"]),
+                            "end_date": str(normalized_bars[-1]["date"]),
+                            "trade_days": len(normalized_bars),
+                            "source": action_probe_sources[0] if len(action_probe_sources) == 1 else (market_data_source or ""),
+                            "fallback_source": market_data_fallback_source,
+                            "metadata": {
+                                "coverage_kind": "corporate_probe",
+                                "probe_status": "complete_no_events",
+                                "event_scope": "dividend_split_only",
+                                "event_count": 0,
+                                "probe_provider_names": action_probe_sources,
+                                "probe_window_start": str(normalized_bars[0]["date"]),
+                                "probe_window_end": str(normalized_bars[-1]["date"]),
+                                "price_bar_count": len(normalized_bars),
+                            },
+                        }
                     )
                 else:
                     corporate_missing_symbols.append(symbol)
@@ -2149,8 +2260,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
         self,
         existing_rows: Iterable[CoverageSummary | Mapping[str, Any]],
         refreshed_rows: Iterable[CoverageSummary | Mapping[str, Any]],
-    ) -> list[CoverageSummary]:
-        merged: dict[str, CoverageSummary] = {}
+    ) -> list[dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
         for row in existing_rows:
             item = row if isinstance(row, Mapping) else {
                 "symbol": row.symbol,
@@ -2161,12 +2272,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
             symbol = str(item.get("symbol") or "").upper()
             if not symbol:
                 continue
-            merged[symbol] = CoverageSummary(
-                symbol=symbol,
-                start_date=item.get("start_date"),
-                end_date=item.get("end_date"),
-                trade_days=int(item.get("trade_days") or 0),
-            )
+            merged[symbol] = {
+                "symbol": symbol,
+                "start_date": item.get("start_date"),
+                "end_date": item.get("end_date"),
+                "trade_days": int(item.get("trade_days") or 0),
+                "source": item.get("source"),
+                "fallback_source": item.get("fallback_source"),
+                "metadata": dict(item.get("metadata") or {}),
+            }
         for row in refreshed_rows:
             item = row if isinstance(row, Mapping) else {
                 "symbol": row.symbol,
@@ -2177,12 +2291,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
             symbol = str(item.get("symbol") or "").upper()
             if not symbol:
                 continue
-            merged[symbol] = CoverageSummary(
-                symbol=symbol,
-                start_date=item.get("start_date"),
-                end_date=item.get("end_date"),
-                trade_days=int(item.get("trade_days") or 0),
-            )
+            merged[symbol] = {
+                "symbol": symbol,
+                "start_date": item.get("start_date"),
+                "end_date": item.get("end_date"),
+                "trade_days": int(item.get("trade_days") or 0),
+                "source": item.get("source"),
+                "fallback_source": item.get("fallback_source"),
+                "metadata": dict(item.get("metadata") or {}),
+            }
         return [merged[key] for key in sorted(merged)]
 
     def _persist_market_dataset_snapshots(
@@ -2199,8 +2316,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
         existing_corporate_rows: Mapping[str, Any],
         price_bars: Sequence[Mapping[str, Any]],
         corporate_actions: Sequence[Mapping[str, Any]],
-        coverage_rows: Sequence[CoverageSummary],
-        corporate_coverage_rows: Sequence[CoverageSummary],
+        coverage_rows: Sequence[CoverageSummary | Mapping[str, Any]],
+        corporate_coverage_rows: Sequence[CoverageSummary | Mapping[str, Any]],
         effective_missing_symbols: Sequence[str],
         effective_corporate_missing_symbols: Sequence[str],
         action_partial: bool,
@@ -2208,6 +2325,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         canonical_total_symbol_count: int,
         default_source_name: str,
         default_fallback_name: str | None,
+        dataset_provider_telemetry: Mapping[str, Any] | None = None,
         cold_backup_result: Mapping[str, Any] | None = None,
         recovery_report: Any | None = None,
         running: bool = False,
@@ -2234,17 +2352,29 @@ class RealBacktestPlatformService(BacktestPlatformService):
         action_fallback_sources = sorted(
             {str(item.get("fallback_source") or "") for item in corporate_actions if item.get("fallback_source")}
         )
+        corporate_coverage_sources = sorted(
+            {
+                str((item.get("source") if isinstance(item, Mapping) else getattr(item, "source", "")) or "")
+                for item in corporate_coverage_rows
+                if str((item.get("source") if isinstance(item, Mapping) else getattr(item, "source", "")) or "").strip()
+            }
+        )
+        corporate_coverage_fallback_sources = sorted(
+            {
+                str((item.get("fallback_source") if isinstance(item, Mapping) else getattr(item, "fallback_source", "")) or "")
+                for item in corporate_coverage_rows
+                if str((item.get("fallback_source") if isinstance(item, Mapping) else getattr(item, "fallback_source", "")) or "").strip()
+            }
+        )
         price_source_name = summarize_source(price_sources, default_source_name)
         price_fallback_name = summarize_fallback(price_fallback_sources, default_fallback_name)
-        action_source_name = summarize_source(action_sources, default_source_name)
-        action_fallback_name = summarize_fallback(action_fallback_sources, default_fallback_name)
-
-        price_status = "READY" if price_bars and not effective_missing_symbols else ("FAILED" if not price_bars else "INCOMPLETE")
-        corporate_status = "READY"
-        if not corporate_actions:
-            corporate_status = "FAILED" if not price_bars else "INCOMPLETE"
-        elif action_partial or effective_corporate_missing_symbols:
-            corporate_status = "INCOMPLETE"
+        action_source_name = summarize_source(action_sources or corporate_coverage_sources, default_source_name)
+        action_fallback_name = summarize_fallback(action_fallback_sources or corporate_coverage_fallback_sources, default_fallback_name)
+        dataset_provider_summary = self._finalize_dataset_provider_telemetry(
+            dataset_provider_telemetry,
+            price_bars=price_bars,
+            corporate_actions=corporate_actions,
+        )
 
         existing_price_snapshot = dict(existing_price_snapshot or {})
         existing_corporate_snapshot = dict(existing_corporate_snapshot or {})
@@ -2257,13 +2387,43 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if merge_existing_market_data
             else list(coverage_rows)
         )
+        canonical_target_symbol_set = {
+            str(symbol or "").strip().upper() for symbol in canonical_target_symbols if str(symbol or "").strip()
+        }
+        canonical_price_missing_symbols = (
+            sorted(
+                canonical_target_symbol_set
+                - {
+                    str((item.get("symbol") if isinstance(item, Mapping) else getattr(item, "symbol", "")) or "")
+                    .strip()
+                    .upper()
+                    for item in merged_coverage_rows
+                    if str((item.get("symbol") if isinstance(item, Mapping) else getattr(item, "symbol", "")) or "").strip()
+                }
+            )
+            if canonical_target_symbol_set
+            else list(effective_missing_symbols)
+        )
+        price_status = (
+            "READY"
+            if price_bars and not canonical_price_missing_symbols
+            else ("FAILED" if not price_bars else "INCOMPLETE")
+        )
         price_start_date = (
-            min(str(item.start_date) for item in merged_coverage_rows if getattr(item, "start_date", None))
+            min(
+                str(item.get("start_date") if isinstance(item, Mapping) else item.start_date)
+                for item in merged_coverage_rows
+                if (item.get("start_date") if isinstance(item, Mapping) else getattr(item, "start_date", None))
+            )
             if merged_coverage_rows
             else (existing_price_snapshot.get("start_date") or snapshot_window_start.isoformat())
         )
         price_end_date = (
-            max(str(item.end_date) for item in merged_coverage_rows if getattr(item, "end_date", None))
+            max(
+                str(item.get("end_date") if isinstance(item, Mapping) else item.end_date)
+                for item in merged_coverage_rows
+                if (item.get("end_date") if isinstance(item, Mapping) else getattr(item, "end_date", None))
+            )
             if merged_coverage_rows
             else (existing_price_snapshot.get("end_date") or window_end.isoformat())
         )
@@ -2297,11 +2457,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     },
                     "metadata": self._dataset_progress_metadata(
                         symbol_coverage=merged_coverage_rows,
-                        missing_symbols=effective_missing_symbols,
+                        missing_symbols=canonical_price_missing_symbols,
                         existing_metadata={
-                            "missing_symbols": list(effective_missing_symbols),
+                            "missing_symbols": list(canonical_price_missing_symbols),
                             "source_names": price_sources,
                             "fallback_sources": price_fallback_sources,
+                            "provider_summary": dataset_provider_summary.get(DATASET_PRICE_SNAPSHOT_ID, {}),
                             "cold_backup_result": cold_backup_result or {},
                             "recovery_report": recovery_report.as_dict() if recovery_report else {},
                             "target_symbol_count": canonical_total_symbol_count,
@@ -2317,11 +2478,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if merge_existing_market_data:
                 corrected_price_metadata = self._dataset_progress_metadata(
                     symbol_coverage=self.market_data_repository.load_dataset_symbol_coverage(DATASET_PRICE_SNAPSHOT_ID),
-                    missing_symbols=effective_missing_symbols,
+                    missing_symbols=canonical_price_missing_symbols,
                     existing_metadata={
-                        "missing_symbols": list(effective_missing_symbols),
+                        "missing_symbols": list(canonical_price_missing_symbols),
                         "source_names": price_sources,
                         "fallback_sources": price_fallback_sources,
+                        "provider_summary": dataset_provider_summary.get(DATASET_PRICE_SNAPSHOT_ID, {}),
                         "cold_backup_result": cold_backup_result or {},
                         "recovery_report": recovery_report.as_dict() if recovery_report else {},
                         "target_symbol_count": canonical_total_symbol_count,
@@ -2361,8 +2523,26 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if merge_existing_market_data
             else list(corporate_coverage_rows)
         )
+        canonical_corporate_missing_symbols = (
+            sorted(
+                canonical_target_symbol_set
+                - {
+                    str((item.get("symbol") if isinstance(item, Mapping) else getattr(item, "symbol", "")) or "")
+                    .strip()
+                    .upper()
+                    for item in merged_corporate_coverage
+                    if str((item.get("symbol") if isinstance(item, Mapping) else getattr(item, "symbol", "")) or "").strip()
+                }
+            )
+            if canonical_target_symbol_set
+            else list(effective_corporate_missing_symbols)
+        )
         corporate_start_date = (
-            min(str(item.start_date) for item in merged_corporate_coverage if getattr(item, "start_date", None))
+            min(
+                str(item.get("start_date") if isinstance(item, Mapping) else item.start_date)
+                for item in merged_corporate_coverage
+                if (item.get("start_date") if isinstance(item, Mapping) else getattr(item, "start_date", None))
+            )
             if merged_corporate_coverage
             else (
                 min(str(item.get("date")) for item in corporate_actions if item.get("date"))
@@ -2371,7 +2551,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
             )
         )
         corporate_end_date = (
-            max(str(item.end_date) for item in merged_corporate_coverage if getattr(item, "end_date", None))
+            max(
+                str(item.get("end_date") if isinstance(item, Mapping) else item.end_date)
+                for item in merged_corporate_coverage
+                if (item.get("end_date") if isinstance(item, Mapping) else getattr(item, "end_date", None))
+            )
             if merged_corporate_coverage
             else (
                 max(str(item.get("date")) for item in corporate_actions if item.get("date"))
@@ -2379,9 +2563,16 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 else (existing_corporate_snapshot.get("end_date") or window_end.isoformat())
             )
         )
+        corporate_has_coverage = bool(merged_corporate_coverage)
+        corporate_status = (
+            "READY"
+            if corporate_has_coverage and not canonical_corporate_missing_symbols
+            else ("FAILED" if not corporate_has_coverage and not price_bars else "INCOMPLETE")
+        )
         preserve_existing_corporate_snapshot = (
             merge_existing_market_data
             and not corporate_actions
+            and not corporate_coverage_rows
             and bool(existing_corporate_snapshot)
             and int(existing_corporate_snapshot.get("row_count") or 0) > 0
         )
@@ -2390,7 +2581,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if merge_existing_market_data
             else self.market_data_repository.replace_dataset_snapshot
         )
-        if (corporate_actions or not existing_corporate_actions) and not preserve_existing_corporate_snapshot:
+        if (corporate_actions or corporate_coverage_rows or not existing_corporate_actions) and not preserve_existing_corporate_snapshot:
             corporate_snapshot_writer(
                 {
                     "id": DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
@@ -2415,12 +2606,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     },
                     "metadata": self._dataset_progress_metadata(
                         symbol_coverage=merged_corporate_coverage,
-                        missing_symbols=effective_corporate_missing_symbols,
+                        missing_symbols=canonical_corporate_missing_symbols,
                         existing_metadata={
-                            "missing_symbols": list(effective_corporate_missing_symbols),
+                            "missing_symbols": list(canonical_corporate_missing_symbols),
                             "partial": action_partial,
                             "source_names": action_sources,
                             "fallback_sources": action_fallback_sources,
+                            "provider_summary": dataset_provider_summary.get(DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID, {}),
                             "cold_backup_result": cold_backup_result or {},
                             "recovery_report": recovery_report.as_dict() if recovery_report else {},
                             "progress_metric": "corporate_action_symbols",
@@ -2428,7 +2620,6 @@ class RealBacktestPlatformService(BacktestPlatformService):
                             "selected_symbol_count": canonical_total_symbol_count,
                             **dict(selection_metadata),
                         },
-                        covered_symbols=[str(item.get("symbol") or "") for item in corporate_actions],
                         total_symbol_count_override=canonical_total_symbol_count,
                         target_symbols=canonical_target_symbols,
                     ),
@@ -2469,12 +2660,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
                         },
                         "metadata": self._dataset_progress_metadata(
                             symbol_coverage=corrected_corporate_coverage or corrected_corporate_rows,
-                            missing_symbols=effective_corporate_missing_symbols,
+                            missing_symbols=canonical_corporate_missing_symbols,
                             existing_metadata={
-                                "missing_symbols": list(effective_corporate_missing_symbols),
+                                "missing_symbols": list(canonical_corporate_missing_symbols),
                                 "partial": action_partial,
                                 "source_names": action_sources,
                                 "fallback_sources": action_fallback_sources,
+                                "provider_summary": dataset_provider_summary.get(DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID, {}),
                                 "cold_backup_result": cold_backup_result or {},
                                 "recovery_report": recovery_report.as_dict() if recovery_report else {},
                                 "progress_metric": "corporate_action_symbols",
@@ -2482,7 +2674,6 @@ class RealBacktestPlatformService(BacktestPlatformService):
                                 "selected_symbol_count": canonical_total_symbol_count,
                                 **dict(selection_metadata),
                             },
-                            covered_symbols=[str(item.get("symbol") or "") for item in corrected_corporate_rows],
                             total_symbol_count_override=canonical_total_symbol_count,
                             target_symbols=canonical_target_symbols,
                         ),
@@ -2528,6 +2719,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                             **dict(existing_corporate_snapshot.get("metadata") or {}),
                             "missing_symbols": list(effective_corporate_missing_symbols),
                             "partial": action_partial,
+                            "provider_summary": dataset_provider_summary.get(DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID, {}),
                             "cold_backup_result": cold_backup_result or {},
                             "recovery_report": recovery_report.as_dict() if recovery_report else {},
                             "preserved_existing_snapshot": True,
@@ -2536,13 +2728,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
                             "selected_symbol_count": canonical_total_symbol_count,
                             **dict(selection_metadata),
                         },
-                        covered_symbols=[str(item.get("symbol") or "") for item in preserved_actions],
                         total_symbol_count_override=canonical_total_symbol_count,
                         target_symbols=canonical_target_symbols,
                     ),
                 },
                 corporate_actions=preserved_actions,
-                symbol_coverage=existing_corporate_coverage or coverage_rows,
+                symbol_coverage=existing_corporate_coverage or corporate_coverage_rows or coverage_rows,
             )
 
     def _restore_dataset_snapshots_from_snapshot_rows(self, *, as_of: str) -> list[str]:
@@ -3604,7 +3795,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
             return row
 
         if snapshot_id == DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID:
-            symbol_coverage = list(self.market_data_repository.summarize_dataset_symbols(snapshot_id))
+            symbol_coverage = list(self.market_data_repository.load_dataset_symbol_coverage(snapshot_id))
+            if not symbol_coverage:
+                symbol_coverage = list(self.market_data_repository.summarize_dataset_symbols(snapshot_id))
             if not isinstance(metadata.get("total_symbol_count"), int) or int(metadata.get("total_symbol_count") or 0) <= 0:
                 price_snapshot = next(
                     (
@@ -4230,6 +4423,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         grouped_universe_snapshots: dict[str, list[UniverseMembershipSnapshot]] = {}
         memberships_by_snapshot: dict[str, list[dict[str, Any]]] = {}
         selection_universe_snapshots = self._latest_universe_snapshots_from_memberships(existing_universe_memberships)
+        universe_refresh_completed = False
         heartbeat_at = iso_now()
         self._persist_snapshot_refresh_heartbeat(
             job_id=job_id,
@@ -4296,6 +4490,34 @@ class RealBacktestPlatformService(BacktestPlatformService):
             ]
             warnings = [warning for warning in warnings if "historical anchors" not in warning and "FMP historical constituent" not in warning]
             warnings.extend(universe_warnings)
+            universe_refresh_completed = True
+
+        if refresh_universes and refresh_market_data and not selection_universe_snapshots:
+            grouped_universe_snapshots, memberships_by_snapshot, universe_warnings = self._run_universe_refresh_phase(
+                mode=mode,
+                snapshot_window_start=snapshot_window_start,
+                window_end=window_end,
+                started_at=started_at,
+                existing_universe_memberships=existing_universe_memberships,
+                emit_heartbeat=emit_universe_only_heartbeat,
+            )
+            universe_snapshots = [
+                snapshot
+                for snapshot_group in grouped_universe_snapshots.values()
+                for snapshot in snapshot_group
+            ]
+            existing_universe_memberships = {
+                SP500_UNIVERSE_SNAPSHOT_ID: self.market_data_repository.load_universe_memberships(
+                    universe_snapshot_id=SP500_UNIVERSE_SNAPSHOT_ID
+                ),
+                NASDAQ100_UNIVERSE_SNAPSHOT_ID: self.market_data_repository.load_universe_memberships(
+                    universe_snapshot_id=NASDAQ100_UNIVERSE_SNAPSHOT_ID
+                ),
+            }
+            selection_universe_snapshots = self._latest_universe_snapshots_from_memberships(existing_universe_memberships)
+            warnings = [warning for warning in warnings if "historical anchors" not in warning and "FMP historical constituent" not in warning]
+            warnings.extend(universe_warnings)
+            universe_refresh_completed = True
 
         if not refresh_market_data:
             self._sync_strategy_snapshot_bindings(updated_at=started_at)
@@ -4304,6 +4526,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             refresh_stats = self._build_refresh_stats(
                 price_bars=[],
                 corporate_actions=[],
+                corporate_coverage_rows=[],
                 grouped_universe_snapshots=grouped_universe_snapshots,
                 memberships_by_snapshot=memberships_by_snapshot,
                 existing_universe_memberships=existing_universe_memberships,
@@ -4463,6 +4686,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             return self._build_refresh_stats(
                 price_bars=price_bars,
                 corporate_actions=corporate_actions,
+                corporate_coverage_rows=corporate_coverage_rows,
                 grouped_universe_snapshots=grouped_universe_snapshots,
                 memberships_by_snapshot=memberships_by_snapshot,
                 existing_universe_memberships=existing_universe_memberships,
@@ -4494,6 +4718,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 canonical_total_symbol_count=canonical_total_symbol_count,
                 default_source_name=default_source_name,
                 default_fallback_name=default_fallback_name,
+                dataset_provider_telemetry=dataset_provider_telemetry,
                 cold_backup_result=None,
                 recovery_report=None,
                 running=True,
@@ -4743,12 +4968,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
             canonical_total_symbol_count=canonical_total_symbol_count,
             default_source_name=default_source_name,
             default_fallback_name=default_fallback_name,
+            dataset_provider_telemetry=dataset_provider_telemetry,
             cold_backup_result=cold_backup_result,
             recovery_report=recovery_report,
             running=False,
         )
 
-        if refresh_universes:
+        if refresh_universes and not universe_refresh_completed:
             grouped_universe_snapshots, memberships_by_snapshot, universe_warnings = self._run_universe_refresh_phase(
                 mode=mode,
                 snapshot_window_start=snapshot_window_start,
@@ -4771,6 +4997,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         refresh_stats = self._build_refresh_stats(
             price_bars=price_bars,
             corporate_actions=corporate_actions,
+            corporate_coverage_rows=corporate_coverage_rows,
             grouped_universe_snapshots=grouped_universe_snapshots,
             memberships_by_snapshot=memberships_by_snapshot,
             existing_universe_memberships=existing_universe_memberships,

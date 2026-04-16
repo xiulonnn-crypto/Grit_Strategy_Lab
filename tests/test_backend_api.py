@@ -11,7 +11,9 @@ from tests.api_test_support import (
     draft_strategy_session,
     materialize_session,
     momentum_confirmation_payload,
+    preview_backtest,
     refresh_snapshots,
+    submit_backtest,
     wait_for_optimization_job,
 )
 from datetime import date, datetime, timedelta, timezone
@@ -187,6 +189,47 @@ def test_refresh_target_pool_filters_non_ticker_labels_from_missing_symbols_and_
     assert "BRK-B" in service._all_refresh_symbols()  # type: ignore[attr-defined]
 
 
+def test_snapshot_missing_symbols_excludes_symbols_with_persisted_coverage(tmp_path):
+    service = RealBacktestPlatformService(tmp_path / "snapshot-covered-missing.db", market_data_provider=None)
+    service.market_data_repository.replace_dataset_snapshot(
+        {
+            "id": "ds-price",
+            "name": "?∠巨隞瑟?唳",
+            "status": "INCOMPLETE",
+            "as_of": "2026-04-16T00:00:00Z",
+            "freshness_label": "敺耨憭?",
+            "start_date": "1996-01-01",
+            "end_date": "2026-04-15",
+            "row_count": 1,
+            "source": "yahoo",
+            "fallback_source": None,
+            "blocker": {"code": "PRICE_SNAPSHOT_INCOMPLETE", "message": "waiting"},
+            "metadata": {"missing_symbols": ["AAPL", "MSFT"]},
+        },
+        price_bars=[
+            {
+                "symbol": "AAPL",
+                "date": "2026-04-15",
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.5,
+                "adj_close": 100.5,
+                "volume": 1000,
+                "source": "yahoo",
+                "fallback_source": None,
+            }
+        ],
+        symbol_coverage=[CoverageSummary(symbol="AAPL", start_date="2026-04-15", end_date="2026-04-15", trade_days=1)],
+    )
+
+    filtered_missing = service._snapshot_missing_symbols(  # type: ignore[attr-defined]
+        next(item for item in service.market_data_repository.list_dataset_snapshots() if item["id"] == "ds-price")
+    )
+
+    assert filtered_missing == ["MSFT"]
+
+
 def test_scoped_market_data_provider_excludes_longbridge_for_full_history(tmp_path):
     class _NamedProvider:
         def __init__(self, provider_name: str) -> None:
@@ -253,6 +296,39 @@ def test_scoped_market_data_provider_keeps_longbridge_for_recent_incremental_win
 
     assert scoped is runtime_provider
     assert runtime_provider.scoped_calls == 0
+
+
+def test_scoped_market_data_provider_excludes_stooq_for_incremental_window(tmp_path):
+    class _NamedProvider:
+        def __init__(self, provider_name: str) -> None:
+            self.provider_name = provider_name
+
+    class _FakeRuntimeProvider:
+        provider_name = "runtime"
+
+        def __init__(self, providers: list[_NamedProvider], captured: list[set[str]] | None = None) -> None:
+            self.providers = list(providers)
+            self.missing_providers: list[str] = []
+            self.universe_history_providers: list[object] = []
+            self.captured = captured if captured is not None else []
+
+        def scoped_copy(self, *, exclude_provider_names=None, allow_targeted_price_repair=None):
+            excluded = {str(item) for item in (exclude_provider_names or [])}
+            self.captured.append(excluded)
+            return _FakeRuntimeProvider(
+                [provider for provider in self.providers if provider.provider_name not in excluded],
+                captured=self.captured,
+            )
+
+    runtime_provider = _FakeRuntimeProvider(
+        [_NamedProvider("yahoo"), _NamedProvider("stooq"), _NamedProvider("longbridge")]
+    )
+    service = RealBacktestPlatformService(tmp_path / "scoped-incremental-stooq.db", market_data_provider=runtime_provider)
+
+    scoped = service._scoped_market_data_provider(mode="incremental", window_start=date(2026, 4, 1))
+
+    assert runtime_provider.captured == [{"stooq"}]
+    assert [provider.provider_name for provider in scoped.providers] == ["yahoo", "longbridge"]
 
 
 def test_scoped_market_data_provider_enables_targeted_price_repair_only_when_requested(tmp_path):
@@ -458,6 +534,200 @@ def test_snapshot_refresh_persists_provider_summary_for_each_snapshot_pool(tmp_p
     assert sp500_summary["providers"]["wikipedia_revision_history"]["landed_anchor_count"] == 1
     assert "fmp" in sp500_summary["skipped_providers"]
     assert sp500_summary["providers"]["fmp"]["reasons"] == ["FMP_API_KEY is not configured."]
+
+
+def test_snapshot_refresh_marks_zero_event_action_probe_as_corporate_covered(tmp_path):
+    class _Provider:
+        provider_name = "runtime"
+
+        def fetch_history(self, symbol, start_date, end_date):
+            return {
+                "source": "yahoo",
+                "fallback_source": None,
+                "bars": [
+                    {
+                        "date": "2026-04-10",
+                        "open": 190.0,
+                        "high": 191.0,
+                        "low": 189.0,
+                        "close": 190.5,
+                        "adj_close": 190.5,
+                        "volume": 1000,
+                    }
+                ],
+                "actions": [
+                    {
+                        "date": "2026-04-10",
+                        "action_type": "earnings_report",
+                        "value": 1.0,
+                        "source": "alpha_vantage",
+                        "payload": {"reported_eps": 1.0},
+                    }
+                ],
+                "warnings": [],
+                "partial": False,
+                "metadata": {
+                    "provider_results": [
+                        {
+                            "provider": "yahoo",
+                            "kind": "history",
+                            "status": "succeeded",
+                            "source": "yahoo",
+                            "bar_count": 1,
+                            "action_count": 0,
+                            "partial": False,
+                            "selection_status": "selected_primary",
+                            "actions_supported": True,
+                        },
+                        {
+                            "provider": "alpha_vantage",
+                            "kind": "earnings",
+                            "status": "succeeded",
+                            "source": "alpha_vantage",
+                            "bar_count": 0,
+                            "action_count": 1,
+                            "partial": False,
+                        },
+                    ],
+                },
+            }
+
+    class _UniverseProvider:
+        provider_name = "test_universe"
+
+        def load_snapshots(self, start_date: date, end_date: date):
+            return [
+                UniverseMembershipSnapshot(
+                    universe_key=SP500_UNIVERSE_KEY,
+                    universe_name=SP500_UNIVERSE_NAME,
+                    effective_date=date(2026, 1, 1),
+                    normalized_symbols=["AAPL"],
+                    raw_symbols=["AAPL"],
+                    unmapped_symbols=[],
+                    source="static_seed",
+                    fallback_source=None,
+                    anchor_schedule=ANCHOR_SCHEDULE,
+                    source_revision_id="sp500-2026-01-01",
+                    source_page_title=SP500_SOURCE_PAGE_TITLE,
+                    metadata={"coverage_mode": "point_in_time_anchor", "source_quality": "historical_dataset"},
+                ),
+                UniverseMembershipSnapshot(
+                    universe_key=NASDAQ100_UNIVERSE_KEY,
+                    universe_name=NASDAQ100_UNIVERSE_NAME,
+                    effective_date=date(2026, 1, 1),
+                    normalized_symbols=["AAPL"],
+                    raw_symbols=["AAPL"],
+                    unmapped_symbols=[],
+                    source="static_seed",
+                    fallback_source=None,
+                    anchor_schedule=ANCHOR_SCHEDULE,
+                    source_revision_id="ndx100-2026-01-01",
+                    source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
+                    metadata={"coverage_mode": "point_in_time_anchor", "source_quality": "historical_dataset"},
+                ),
+            ]
+
+    service = RealBacktestPlatformService(tmp_path / "zero-event-probe.db", market_data_provider=_Provider())
+    service._universe_history_providers = lambda: [_UniverseProvider()]  # type: ignore[method-assign]
+
+    overview = service.refresh_snapshots({"mode": "repair", "targets": ["price", "corporate", "universes"]})
+    corporate_snapshot = next(item for item in overview["dataset_snapshots"] if item["id"] == "ds-corporate-actions")
+    coverage_rows = service.market_data_repository.load_dataset_symbol_coverage("ds-corporate-actions")
+
+    assert corporate_snapshot["status"] == "READY"
+    assert corporate_snapshot["metadata"]["missing_symbols"] == []
+    assert corporate_snapshot["metadata"]["provider_summary"]["providers"]["yahoo"]["selected_primary_symbols"] >= 1
+    assert coverage_rows
+    assert all(row["metadata"]["probe_status"] == "complete_no_events" for row in coverage_rows)
+    assert all(row["metadata"]["event_scope"] == "dividend_split_only" for row in coverage_rows)
+
+
+def test_snapshot_refresh_excludes_stooq_history_from_corporate_provider_summary(tmp_path):
+    class _Provider:
+        provider_name = "runtime"
+
+        def fetch_history(self, symbol, start_date, end_date):
+            return {
+                "source": "stooq",
+                "fallback_source": None,
+                "bars": [
+                    {
+                        "date": "2026-04-10",
+                        "open": 190.0,
+                        "high": 191.0,
+                        "low": 189.0,
+                        "close": 190.5,
+                        "adj_close": 190.5,
+                        "volume": 1000,
+                    }
+                ],
+                "actions": [],
+                "warnings": [],
+                "partial": False,
+                "metadata": {
+                    "provider_results": [
+                        {
+                            "provider": "stooq",
+                            "kind": "history",
+                            "status": "succeeded",
+                            "source": "stooq",
+                            "bar_count": 1,
+                            "action_count": 0,
+                            "partial": False,
+                            "selection_status": "selected_primary",
+                            "actions_supported": False,
+                        }
+                    ],
+                },
+            }
+
+    class _UniverseProvider:
+        provider_name = "test_universe"
+
+        def load_snapshots(self, start_date: date, end_date: date):
+            return [
+                UniverseMembershipSnapshot(
+                    universe_key=SP500_UNIVERSE_KEY,
+                    universe_name=SP500_UNIVERSE_NAME,
+                    effective_date=date(2026, 1, 1),
+                    normalized_symbols=["AAPL"],
+                    raw_symbols=["AAPL"],
+                    unmapped_symbols=[],
+                    source="static_seed",
+                    fallback_source=None,
+                    anchor_schedule=ANCHOR_SCHEDULE,
+                    source_revision_id="sp500-2026-01-01",
+                    source_page_title=SP500_SOURCE_PAGE_TITLE,
+                    metadata={"coverage_mode": "point_in_time_anchor", "source_quality": "historical_dataset"},
+                ),
+                UniverseMembershipSnapshot(
+                    universe_key=NASDAQ100_UNIVERSE_KEY,
+                    universe_name=NASDAQ100_UNIVERSE_NAME,
+                    effective_date=date(2026, 1, 1),
+                    normalized_symbols=["AAPL"],
+                    raw_symbols=["AAPL"],
+                    unmapped_symbols=[],
+                    source="static_seed",
+                    fallback_source=None,
+                    anchor_schedule=ANCHOR_SCHEDULE,
+                    source_revision_id="ndx100-2026-01-01",
+                    source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
+                    metadata={"coverage_mode": "point_in_time_anchor", "source_quality": "historical_dataset"},
+                ),
+            ]
+
+    service = RealBacktestPlatformService(tmp_path / "stooq-summary.db", market_data_provider=_Provider())
+    service._universe_history_providers = lambda: [_UniverseProvider()]  # type: ignore[method-assign]
+
+    overview = service.refresh_snapshots({"mode": "repair", "targets": ["price", "corporate", "universes"]})
+    refresh_stats = overview["latest_job"]["summary"]["refresh_stats"]
+    price_summary = refresh_stats["datasets"]["ds-price"]["provider_summary"]
+    corporate_summary = refresh_stats["datasets"]["ds-corporate-actions"]["provider_summary"]
+    corporate_snapshot = next(item for item in overview["dataset_snapshots"] if item["id"] == "ds-corporate-actions")
+
+    assert "stooq" in price_summary["providers"]
+    assert "stooq" not in corporate_summary["providers"]
+    assert corporate_snapshot["status"] == "INCOMPLETE"
 
 
 def test_recent_running_snapshot_job_skips_interrupted_recovery_process_scan(tmp_path, monkeypatch):
@@ -1355,6 +1625,52 @@ def test_repair_refresh_batches_missing_symbols_without_dropping_unattempted_gap
     assert metadata["repair_cursor"] == 2
     assert metadata["covered_symbol_count"] == 4
     assert metadata["total_symbol_count"] == 5
+
+
+def test_snapshot_overview_recomputes_missing_symbols_from_target_minus_coverage(tmp_path):
+    service = RealBacktestPlatformService(tmp_path / "snapshot-progress-recompute.db", market_data_provider=None)
+    repository = service.market_data_repository
+    repository.replace_dataset_snapshot(
+        {
+            "id": "ds-price",
+            "name": "?∠巨隞瑟?唳",
+            "status": "INCOMPLETE",
+            "as_of": "2026-04-16T00:00:00Z",
+            "freshness_label": "敺耨憭?",
+            "start_date": "1996-01-01",
+            "end_date": "2026-04-15",
+            "row_count": 1,
+            "source": "yahoo",
+            "fallback_source": None,
+            "blocker": {"code": "PRICE_SNAPSHOT_INCOMPLETE", "message": "waiting"},
+            "metadata": {
+                "missing_symbols": ["AAPL", "MSFT"],
+                "target_symbol_count": 2,
+            },
+        },
+        price_bars=[
+            {
+                "symbol": "AAPL",
+                "date": "2026-04-15",
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.5,
+                "adj_close": 100.5,
+                "volume": 1000,
+                "source": "yahoo",
+                "fallback_source": None,
+            }
+        ],
+        symbol_coverage=[CoverageSummary(symbol="AAPL", start_date="2026-04-15", end_date="2026-04-15", trade_days=1)],
+    )
+
+    overview = service.get_snapshot_overview()
+    price_snapshot = next(item for item in overview["dataset_snapshots"] if item["id"] == "ds-price")
+
+    assert price_snapshot["metadata"]["covered_symbol_count"] == 1
+    assert price_snapshot["metadata"]["total_symbol_count"] == 2
+    assert price_snapshot["metadata"]["missing_symbols"] == ["MSFT"]
 
 
 def test_repair_refresh_with_universe_target_includes_latest_members(tmp_path, monkeypatch):
@@ -2322,6 +2638,7 @@ def test_legacy_optimization_job_detail_backfills_constraint_contract_fields(tmp
     assert detail["constraint_preset_key"] == "balanced"
     assert detail["constraint_label"] == "平衡型"
     assert detail["constraints"]
+    assert detail["summary"]["matching_combination_count"] == 0
     assert detail["request"]["constraint_preset_key"] == "balanced"
     assert detail["summary"]["constraint_preset_key"] == "balanced"
     assert detail["result"]["constraint_preset_key"] == "balanced"
@@ -3394,6 +3711,97 @@ def test_completed_optimization_job_detail_uses_trial_rows_as_progress_truth(tmp
     assert detail["summary"]["next_trial_index"] == 5
     assert detail["summary"]["estimated_remaining_minutes"] == 0
     assert detail["summary"]["estimated_completed_at"] == completed_at
+
+
+def test_create_optimization_job_reuses_source_run_request_window(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    refresh_snapshots(client, mode="repair", targets=["price", "corporate", "universes"])
+    base = create_momentum_strategy(client, idempotency_key="materialize-optimization-source-window")
+    strategy = base["strategy"]
+    start_date = "2024-03-01"
+    end_date = "2025-03-31"
+    source_run = submit_backtest(
+        client,
+        strategy["id"],
+        start_date=start_date,
+        end_date=end_date,
+        parameter_version_id=strategy["current_parameter_version_id"],
+        idempotency_key="run-optimization-source-window",
+    )
+    preview = preview_backtest(
+        client,
+        strategy["id"],
+        start_date=start_date,
+        end_date=end_date,
+        parameter_version_id=strategy["current_parameter_version_id"],
+    )
+    search_space = [
+        {
+            "key": "lookback_months",
+            "label": "Lookback",
+            "mode": "fixed",
+            "current": strategy["parameters"]["lookback_months"],
+            "value": strategy["parameters"]["lookback_months"],
+        },
+        {
+            "key": "skip_recent_months",
+            "label": "Skip Recent",
+            "mode": "fixed",
+            "current": strategy["parameters"]["skip_recent_months"],
+            "value": strategy["parameters"]["skip_recent_months"],
+        },
+        {
+            "key": "top_n",
+            "label": "Top N",
+            "mode": "fixed",
+            "current": strategy["parameters"]["top_n"],
+            "value": strategy["parameters"]["top_n"],
+        },
+        {
+            "key": "hold_rank_threshold",
+            "label": "Hold Rank Threshold",
+            "mode": "fixed",
+            "current": strategy["parameters"]["hold_rank_threshold"],
+            "value": strategy["parameters"]["hold_rank_threshold"],
+        },
+        {
+            "key": "weighting_method",
+            "label": "Weighting",
+            "mode": "fixed",
+            "current": strategy["parameters"]["weighting_method"],
+            "value": strategy["parameters"]["weighting_method"],
+        },
+    ]
+    job = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=strategy["current_parameter_version_id"],
+        source_run_id=source_run["id"],
+        validation_mode="walk_forward",
+        budget_combinations=1,
+        search_space=search_space,
+        timeout_seconds=15.0,
+    )
+
+    service = client.app.state.service
+    trial_row = service.storage.fetch_one(
+        """
+        SELECT metrics_json, chart_series_json
+        FROM optimization_job_trials
+        WHERE job_id = ? AND trial_index = 1
+        """,
+        (job["id"],),
+    )
+    assert trial_row is not None
+    chart_series = json.loads(trial_row["chart_series_json"])
+    metrics = json.loads(trial_row["metrics_json"])
+
+    assert chart_series
+    assert chart_series[0]["trade_date"] >= start_date
+    assert chart_series[-1]["trade_date"] <= end_date
+    assert abs(metrics["max_drawdown"] - preview["metrics"]["max_drawdown"]) < 0.05
+    assert abs(metrics["return_sharpe"] - preview["metrics"]["sharpe"]) < 0.1
 
 
 def test_create_optimization_job_candidates_use_real_backtest_metrics(tmp_path):

@@ -203,3 +203,10 @@
 - 在让用户排查运行时之前，先让启动器尽量自修复运行时。
 
 这就是当前基线的形状：可恢复、可审计，而且足够务实，能持续在本地工作。
+## 2026-04-16 Snapshot Routing Update
+
+- The snapshot data plane now has an explicit offline `Stooq` price provider for long-history cold starts. It is a price-only source and should never be treated as a formal company-action provider.
+- `Stooq` is registered only when an offline ZIP archive is available, and `incremental` refreshes exclude it so the current-window path keeps using live-capable providers.
+- Corporate-action readiness is determined by formal `dividend/split/reverse_split` probe coverage. A symbol can be complete with zero formal events if an action-capable provider successfully probed the window and returned no events.
+- That zero-event state is persisted in `dataset_symbol_coverage.metadata_json` with `coverage_kind=corporate_probe` and `probe_status=complete_no_events`, allowing `ds-corporate-actions` to reach `READY` without fabricating placeholder events.
+- Snapshot `metadata_json` now stores `provider_summary` so the persisted dataset state reflects which providers were attempted, selected, skipped, or unavailable for both price and corporate refresh phases.

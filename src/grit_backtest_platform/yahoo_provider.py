@@ -30,6 +30,7 @@ class SymbolMarketData:
 
 class YahooMarketDataProvider:
     provider_name = "yahoo"
+    supports_action_enrichment = True
 
     def __init__(self, retries: int = 3, timeout: int = 20) -> None:
         self.retries = retries
@@ -171,6 +172,7 @@ class YahooMarketDataProvider:
             metadata={
                 "provider": self.provider_name,
                 "actions_partial": True,
+                "actions_supported": True,
                 "coverage_limits": [coverage_note],
                 "event_types": sorted({item["action_type"] for item in actions}),
                 "bar_count": len(bars),

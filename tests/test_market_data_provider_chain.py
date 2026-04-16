@@ -699,6 +699,9 @@ def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(
         ("akshare_us_provider", ("AkshareUsPriceProvider", "AkShareUsPriceProvider")): SimpleNamespace(
             provider_name="akshare_us", fetch_history=lambda *args, **kwargs: None
         ),
+        ("stooq_provider", ("StooqZipPriceProvider", "StooqPriceProvider")): SimpleNamespace(
+            provider_name="stooq", fetch_history=lambda *args, **kwargs: None
+        ),
         ("fmp_identity_provider", ("FmpIdentityRepairProvider", "FmpMarketDataProvider", "FmpPriceRepairProvider")): SimpleNamespace(
             provider_name="fmp",
             fetch_history=lambda *args, **kwargs: None,
@@ -731,6 +734,7 @@ def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(
         "longbridge_static_info",
         "longbridge",
         "akshare_us",
+        "stooq",
         "fmp",
         "alpha_vantage",
         "sec_edgar",
@@ -741,6 +745,7 @@ def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(
         "tiingo",
         "longbridge",
         "akshare_us",
+        "stooq",
         "fmp",
     ]
     assert [provider.provider_name for provider in runtime.identity_providers] == [

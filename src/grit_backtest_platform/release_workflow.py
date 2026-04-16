@@ -16,6 +16,20 @@ _SECTION_HEADING_RE = re.compile(
 _STABLE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _REVISION_VERSION_RE = re.compile(r"^(?P<base>\d+\.\d+\.\d+)-(?P<revision>\d{3})$")
 _UNRELEASED_TITLES = {"unreleased", "未发布"}
+_ALLOWED_UNRELEASED_SUBHEADINGS = {
+    "### Added",
+    "### Changed",
+    "### Deprecated",
+    "### Removed",
+    "### Fixed",
+    "### Security",
+    "### 新增",
+    "### 变更",
+    "### 已弃用",
+    "### 移除",
+    "### 修复",
+    "### 安全",
+}
 
 
 @dataclass(frozen=True)
@@ -99,6 +113,25 @@ def _merge_unreleased_sections(sections: Sequence[ChangelogSection]) -> str:
     return "\n\n".join(body for body in bodies if body)
 
 
+def _validate_unreleased_subheadings(sections: Sequence[ChangelogSection]) -> None:
+    invalid_headings: list[str] = []
+    for section in sections:
+        if not _is_unreleased_title(section.title):
+            continue
+        for raw_line in section.body.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("### "):
+                continue
+            if line not in _ALLOWED_UNRELEASED_SUBHEADINGS:
+                invalid_headings.append(line)
+    if invalid_headings:
+        invalid_list = ", ".join(dict.fromkeys(invalid_headings))
+        raise ValueError(
+            "Unreleased contains unsupported subsection headings: "
+            f"{invalid_list}. Use standard Keep a Changelog categories only."
+        )
+
+
 def _find_latest_stable_release(sections: Sequence[ChangelogSection]) -> ChangelogSection | None:
     for section in sections:
         if _STABLE_VERSION_RE.fullmatch(section.title):
@@ -106,13 +139,18 @@ def _find_latest_stable_release(sections: Sequence[ChangelogSection]) -> Changel
     return None
 
 
-def _next_revision_number(sections: Sequence[ChangelogSection], base_version: str) -> int:
+def _next_revision_number(
+    sections: Sequence[ChangelogSection],
+    base_version: str,
+    *,
+    minimum_revision: int = 1,
+) -> int:
     current_max = 0
     for section in sections:
         match = _REVISION_VERSION_RE.fullmatch(section.title)
         if match and match.group("base") == base_version:
             current_max = max(current_max, int(match.group("revision")))
-    return current_max + 1
+    return max(current_max + 1, minimum_revision)
 
 
 def _bump_patch(version: str) -> str:
@@ -154,6 +192,7 @@ def prepare_push(
     release: bool,
     release_version: str | None = None,
     effective_date: date | None = None,
+    minimum_revision: int = 1,
 ) -> PreparePushResult:
     changelog_path = repo_root / "CHANGELOG.md"
     version_path = repo_root / "src" / "grit_backtest_platform" / "_version.py"
@@ -164,6 +203,7 @@ def prepare_push(
     effective_date = effective_date or date.today()
     changelog_text = changelog_path.read_text(encoding="utf-8")
     preamble, sections = _parse_sections(changelog_text)
+    _validate_unreleased_subheadings(sections)
     other_sections = [section for section in sections if not _is_unreleased_title(section.title)]
     unreleased_body = _merge_unreleased_sections(sections)
     latest_stable = _find_latest_stable_release(other_sections)
@@ -171,6 +211,8 @@ def prepare_push(
 
     if release_version and not release:
         raise ValueError("ReleaseVersion requires release mode.")
+    if minimum_revision < 1:
+        raise ValueError("minimum_revision must be >= 1.")
 
     changed_files: list[str] = []
     snapshot_title: str | None = None
@@ -201,11 +243,13 @@ def prepare_push(
         if _body_has_meaningful_content(unreleased_body):
             if latest_stable is None:
                 raise ValueError("Cannot create a push revision without an existing stable release entry.")
-            next_revision = _next_revision_number(other_sections, latest_stable.title)
+            next_revision = _next_revision_number(
+                other_sections,
+                latest_stable.title,
+                minimum_revision=minimum_revision,
+            )
             snapshot_title = f"{latest_stable.title}-{next_revision:03d}"
-            snapshot_date = latest_stable.entry_date
-            if not snapshot_date:
-                raise ValueError(f"Latest stable release {latest_stable.title} is missing a date.")
+            snapshot_date = effective_date.isoformat()
             mode = "revision"
             normalized_sections.append(
                 ChangelogSection(title=snapshot_title, entry_date=snapshot_date, body=unreleased_body)

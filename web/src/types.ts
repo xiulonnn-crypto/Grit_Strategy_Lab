@@ -332,6 +332,7 @@ export type ApiOptimizationJobDetail = {
     constraint_preset_key?: ApiOptimizationConstraintPresetKey | null;
     constraint_label?: string | null;
     constraints?: ApiOptimizationConstraint[];
+    matching_combination_count?: number | null;
     resume_ready?: boolean;
     persisted_trial_count?: number | null;
     next_trial_index?: number | null;
@@ -361,6 +362,7 @@ export type ApiOptimizationJobDetail = {
   next_trial_index?: number | null;
   interrupted_reason?: string | null;
   best_metrics_summary?: ApiOptimizationTrialSummary | null;
+  matching_combination_count?: number | null;
 };
 
 export type ApiStrategyCreationSession = {

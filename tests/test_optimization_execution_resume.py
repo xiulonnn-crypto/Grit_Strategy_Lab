@@ -12,7 +12,13 @@ from fastapi.testclient import TestClient
 from grit_backtest_platform.api import create_app
 from grit_backtest_platform.service import BacktestPlatformService, ContractConflictError
 
-from tests.api_test_support import FakeMarketDataProvider, create_momentum_strategy, create_optimization_job, create_test_client
+from tests.api_test_support import (
+    FakeMarketDataProvider,
+    create_momentum_strategy,
+    create_optimization_job,
+    create_test_client,
+    submit_backtest,
+)
 
 
 SEARCH_SPACE = [
@@ -746,6 +752,44 @@ def test_completed_job_detail_uses_zero_trial_fast_path_when_candidates_are_pers
     assert all(candidate["analysis"]["validation_windows"] for candidate in detail["candidates"])
     assert detail["summary"]["best_metrics_summary"] is not None
     assert detail["result"]["best_candidate_id"] is not None
+
+
+def test_completed_job_detail_reports_total_matching_combinations_beyond_published_candidates(
+    tmp_path,
+    monkeypatch,
+):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    service.refresh_snapshots({"mode": "repair", "targets": ["price", "corporate", "universes"]})
+    strategy = create_momentum_strategy(client, idempotency_key="opt-exec-match-count")["strategy"]
+
+    def fake_trial(
+        strategy_detail: dict[str, Any],
+        evaluation_request: dict[str, Any],
+        payload: dict[str, Any],
+        parameter_snapshot: dict[str, Any],
+        *,
+        prepared_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return _sample_trial_result(parameter_snapshot, score=_wide_snapshot_score(parameter_snapshot))
+
+    monkeypatch.setattr(service, "_evaluate_optimization_trial", fake_trial)
+    monkeypatch.setattr(service, "_optimization_step_delay_seconds", lambda: 0.0)
+
+    created = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=strategy["current_parameter_version_id"],
+        budget_combinations=6,
+        search_space=WIDE_SEARCH_SPACE,
+    )
+
+    detail = service.get_optimization_job_detail(created["id"])
+
+    assert detail["status"] == "COMPLETED"
+    assert detail["summary"]["candidate_count"] == service._optimization_candidate_limit()
+    assert detail["summary"]["matching_combination_count"] == 6
+    assert detail["summary"]["matching_combination_count"] > detail["summary"]["candidate_count"]
 
 
 def test_running_job_eta_falls_back_to_wall_clock_throughput_when_trial_durations_round_to_zero(tmp_path, monkeypatch):
@@ -1617,6 +1661,82 @@ def test_backfill_chart_series_does_not_prepare_context_implicitly(tmp_path, mon
     top_trials = [trial for trial in final_trials if int(trial["trial_index"]) in top_trial_indices]
     assert top_trials
     assert all(list(trial.get("chart_series") or []) for trial in top_trials)
+
+
+def test_build_optimization_evaluation_request_backfills_source_run_window(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    strategy = create_momentum_strategy(client, idempotency_key="opt-eval-window-backfill")["strategy"]
+
+    evaluation_request = service._build_optimization_evaluation_request(
+        strategy,
+        source_run={
+            "id": "run_source_window",
+            "request": {"data_segment_type": "FULL"},
+            "start_date": "2018-01-02",
+            "end_date": "2019-12-31",
+        },
+    )
+
+    assert evaluation_request["source_run_id"] == "run_source_window"
+    assert evaluation_request["start_date"] == "2018-01-02"
+    assert evaluation_request["end_date"] == "2019-12-31"
+    assert evaluation_request["is_permanent"] is False
+
+
+def test_optimization_job_inherits_source_run_window_for_trial_evaluation(tmp_path, monkeypatch):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    service.refresh_snapshots({"mode": "repair", "targets": ["price", "corporate", "universes"]})
+    strategy = create_momentum_strategy(client, idempotency_key="opt-job-source-window")["strategy"]
+    source_run = submit_backtest(
+        client,
+        strategy["id"],
+        start_date="2018-01-02",
+        end_date="2019-12-31",
+        idempotency_key="run-opt-job-source-window",
+    )
+
+    captured_requests: list[dict[str, Any]] = []
+
+    def fake_trial(
+        strategy_detail: dict[str, Any],
+        evaluation_request: dict[str, Any],
+        payload: dict[str, Any],
+        parameter_snapshot: dict[str, Any],
+        *,
+        prepared_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        captured_requests.append(dict(evaluation_request))
+        return _sample_trial_result(parameter_snapshot, score=1.6)
+
+    monkeypatch.setattr(service, "_evaluate_optimization_trial", fake_trial)
+    monkeypatch.setattr(service, "_backfill_optimization_top_trial_chart_series", lambda *args, **kwargs: list(args[4]))
+    monkeypatch.setattr(service, "_optimization_step_delay_seconds", lambda: 0.0)
+
+    job = create_optimization_job(
+        client,
+        strategy["id"],
+        source_run_id=source_run["id"],
+        budget_combinations=1,
+        search_space=[
+            {
+                "key": "lookback_months",
+                "label": "回看(月)",
+                "mode": "range",
+                "start": 6,
+                "end": 6,
+                "step": 1,
+                "current": 6,
+            }
+        ],
+    )
+
+    assert job["status"] == "COMPLETED"
+    assert captured_requests
+    assert captured_requests[0]["source_run_id"] == source_run["id"]
+    assert captured_requests[0]["start_date"] == "2018-01-02"
+    assert captured_requests[0]["end_date"] == "2019-12-31"
 
 
 def test_default_optimization_path_keeps_parallel_controller_disabled(tmp_path, monkeypatch):

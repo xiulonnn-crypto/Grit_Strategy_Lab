@@ -66,6 +66,9 @@ type OptimizationJobState = {
   phase: number;
 };
 
+const MISSING_MATCHING_COMBINATION_COUNT_ERROR =
+  "优化结果缺少 matching_combination_count，无法确认符合过滤条件的组合总数。";
+
 function formatVersionedStrategyName(
   name: string,
   version: number | undefined,
@@ -213,6 +216,108 @@ const defaultConstraintPayload = {
     },
   ],
 };
+
+function readOptimizationMetricNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function normalizeOptimizationConstraintMetricValue(
+  constraintKey: string,
+  value: number,
+): number {
+  switch (constraintKey) {
+    case "annualized_return":
+      return Math.abs(value) <= 1.5 ? value * 100 : value;
+    case "max_drawdown_pct":
+      return Math.abs(value) <= 1.5 ? Math.abs(value * 100) : Math.abs(value);
+    case "turnover":
+      return Math.abs(value) <= 1.5 ? value * 100 : value;
+    default:
+      return value;
+  }
+}
+
+function getOptimizationConstraintMetricValue(
+  candidate: ApiOptimizationJobDetail["candidates"][number],
+  constraintKey: string,
+): number | null {
+  const metrics = candidate.metrics ?? {};
+  const rawValue =
+    constraintKey === "annualized_return"
+      ? readOptimizationMetricNumber(metrics.annualized_return ?? metrics.cagr)
+      : constraintKey === "return_sharpe"
+        ? readOptimizationMetricNumber(metrics.return_sharpe ?? metrics.sharpe)
+        : constraintKey === "out_of_sample_sharpe"
+          ? readOptimizationMetricNumber(
+              metrics.out_of_sample_sharpe ?? metrics.oos_sharpe,
+            )
+          : constraintKey === "max_drawdown_pct"
+            ? readOptimizationMetricNumber(metrics.max_drawdown_pct) ??
+              (typeof metrics.max_drawdown === "number"
+                ? metrics.max_drawdown * 100
+                : null)
+            : constraintKey === "turnover"
+              ? readOptimizationMetricNumber(
+                  metrics.turnover_pct ?? metrics.turnover,
+                )
+              : constraintKey === "stability"
+                ? readOptimizationMetricNumber(metrics.stability)
+                : readOptimizationMetricNumber(metrics[constraintKey]);
+  return typeof rawValue === "number"
+    ? normalizeOptimizationConstraintMetricValue(constraintKey, rawValue)
+    : null;
+}
+
+function countMatchingCombinationCandidates(
+  candidates: ApiOptimizationJobDetail["candidates"],
+  constraints:
+    | ApiOptimizationJobDetail["summary"]["constraints"]
+    | ApiOptimizationJobDetail["request"]["constraints"],
+): number {
+  const activeConstraints = constraints ?? [];
+  if (!activeConstraints.length) {
+    return candidates.length;
+  }
+  return candidates.filter((candidate) =>
+    activeConstraints.every((constraint) => {
+      const metricValue = getOptimizationConstraintMetricValue(
+        candidate,
+        constraint.key,
+      );
+      if (metricValue === null) {
+        return false;
+      }
+      return constraint.operator === ">="
+        ? metricValue >= constraint.value
+        : metricValue <= constraint.value;
+    }),
+  ).length;
+}
+
+function syncMatchingCombinationCount(
+  job: ApiOptimizationJobDetail,
+): ApiOptimizationJobDetail {
+  const status = String(job.status ?? "").toUpperCase();
+  if (["QUEUED", "RUNNING", "INTERRUPTED"].includes(status)) {
+    return job;
+  }
+  const count = countMatchingCombinationCandidates(
+    job.candidates,
+    job.summary.constraints ?? job.request.constraints,
+  );
+  job.summary.matching_combination_count = count;
+  job.matching_combination_count = count;
+  return job;
+}
 
 function createStrategyFixture(): ApiStrategyDetail {
   return createStrategy({
@@ -385,7 +490,7 @@ function createCompletedJob(
     completed_at: nowIso(),
   };
 
-  return hydrateOptimizationJob(strategy, base, run);
+  return syncMatchingCombinationCount(hydrateOptimizationJob(strategy, base, run));
 }
 
 function createInterruptedJob(
@@ -509,7 +614,7 @@ function createEmptyCompletedJob(
     completed_at: nowIso(),
   };
 
-  return base;
+  return syncMatchingCombinationCount(base);
 }
 
 function createOptimizationTestApi(): DemoApi {
@@ -888,6 +993,7 @@ function createOptimizationTestApi(): DemoApi {
           constraints: structuredClone(nextConstraints),
         },
       };
+      syncMatchingCombinationCount(state.job);
       return cloneJob(state.job);
     },
     async deleteOptimizationJob(jobId: string) {
@@ -1021,6 +1127,7 @@ function createZeroPassConstraintApi(): DemoApi {
       currentJob.result.best_candidate_id = currentJob.candidates[0]?.id ?? null;
       currentJob.result.best_candidate_label =
         currentJob.candidates[0]?.label ?? null;
+      syncMatchingCombinationCount(currentJob);
     }
     return currentJob;
   }
@@ -1070,6 +1177,7 @@ function createZeroPassConstraintApi(): DemoApi {
         constraints: structuredClone(nextConstraints),
       },
     };
+    syncMatchingCombinationCount(currentJob);
     return structuredClone(currentJob);
   };
 
@@ -1203,7 +1311,7 @@ function createBaselineOnlyPassApi(): DemoApi {
         turnover: 72 + index * 4,
       },
     }));
-    return job;
+    return syncMatchingCombinationCount(job);
   };
 
   return api;
@@ -1286,10 +1394,63 @@ describe("optimization module flow", () => {
     );
     expect(container.querySelector(".optimization-results-grid")).toBeNull();
     expect(container.textContent).toContain("等待首批样本");
+    await waitFor(
+      () =>
+        expect(
+          container.querySelector(".optimization-results-grid"),
+        ).not.toBeNull(),
+      { timeout: 4000 },
+    );
+  });
+
+  it("renders select page from latest run summary without fetching run detail", async () => {
+    const selectApi = createOptimizationTestApi();
+    const originalListStrategies = selectApi.listStrategies.bind(selectApi);
+    selectApi.listStrategies = async (): Promise<ApiStrategyDetail[]> => {
+      const strategies = await originalListStrategies();
+      return strategies.map((strategy) => ({
+        ...strategy,
+        latest_completed_run_summary: {
+          run_id: "bt-001",
+          parameter_version: 1,
+          parameter_version_id: "strat-001-v1",
+          status: "COMPLETED",
+          total_return: 0.18,
+          annualized_return: 0.124,
+          sharpe: 1.18,
+          max_drawdown: -0.064,
+          oos_total_return: 0.09,
+          oos_annualized_return: 0.098,
+          oos_sharpe: 0.87,
+          oos_max_drawdown: -0.052,
+          warning_count: 0,
+          execution_policy: "T_CLOSE_TO_T1_OPEN",
+          dataset_snapshot_id: "ds-001",
+          universe_snapshot_id: "un-001",
+          completed_at: nowIso(),
+          sparkline_points: [],
+        },
+      }));
+    };
+    selectApi.getBacktestRunDetail = async (): Promise<ApiBacktestRunDetail> => {
+      throw new Error("select page should not fetch run detail");
+    };
+    currentApi = selectApi;
+
+    const container = await renderApp("#/optimization-jobs/new");
+
     await waitFor(() =>
       expect(
-        container.querySelector(".optimization-results-grid"),
-      ).not.toBeNull(),
+        container.querySelector(".optimization-lab-panel__heading h2"),
+      ).toBeTruthy(),
+    );
+
+    expect(container.textContent).toContain("标普动量策略");
+    expect(container.textContent).toContain("1.18");
+    expect(container.textContent).toContain("-6.4%");
+    expect(container.textContent).toContain("+18.0%");
+    expect(container.textContent).not.toContain(
+      "select page should not fetch run detail",
     );
   });
 
@@ -1411,6 +1572,7 @@ describe("optimization module flow", () => {
       expect(
         container.querySelector(".optimization-results-grid"),
       ).not.toBeNull(),
+      { timeout: 4000 },
     );
     expect(container.querySelector(".optimization-progress-panel")).toBeNull();
     expect(
@@ -1443,6 +1605,8 @@ describe("optimization module flow", () => {
           turnover: 8.4 + index * 0.2,
         },
       }));
+      job.summary.matching_combination_count = 23;
+      job.matching_combination_count = 23;
       job.result.best_candidate_id = job.candidates[0]?.id ?? null;
       job.result.best_candidate_label = job.candidates[0]?.label ?? null;
       return job;
@@ -1485,7 +1649,9 @@ describe("optimization module flow", () => {
     expect(container.textContent).toContain("窗口 A 为样本外起始验证窗口");
     expect(container.textContent).toContain("年化收益率");
     expect(container.textContent).toContain("综合评价");
-    expect(container.textContent).toContain("按综合评分排序复核本轮参数组合");
+    expect(container.textContent).toContain(
+      "符合过滤条件的组合共23个，以下是按综合评分排序靠前的候选版本组合",
+    );
     expect(container.textContent).toContain("按不同市场窗口复核策略表现");
     expect(
       container.querySelector(".optimization-mini-metric-strip"),
@@ -1652,6 +1818,7 @@ describe("optimization module flow", () => {
       job.result.constraint_label = "稳健型（自定义）";
       job.result.constraints = structuredClone(strictConstraints);
       job.candidates = constrainedCandidates;
+      syncMatchingCombinationCount(job);
       job.result.best_candidate_id = constrainedCandidates[1]?.id ?? null;
       job.result.best_candidate_label = constrainedCandidates[1]?.label ?? null;
       return job;
@@ -1738,6 +1905,112 @@ describe("optimization module flow", () => {
       "当前约束下暂无候选版本通过过滤",
     );
     expect(container.textContent).toContain("放宽后通过 1");
+    expect(container.textContent).toContain(
+      "符合过滤条件的组合共1个，以下是按综合评分排序靠前的候选版本组合",
+    );
+  });
+
+  it("shows a toast and keeps the current result state when refiltering would remove every combination", async () => {
+    const zeroTotalApi = createBaselineOnlyPassApi();
+    let saveCalled = false;
+    const originalUpdateConstraints =
+      zeroTotalApi.updateOptimizationJobConstraints.bind(zeroTotalApi);
+    zeroTotalApi.updateOptimizationJobConstraints = async (...args) => {
+      saveCalled = true;
+      return originalUpdateConstraints(...args);
+    };
+    currentApi = zeroTotalApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("符合约束：1/5"),
+    );
+
+    const heroCopy = container.querySelector(
+      ".optimization-lab-panel--hero h1 + p",
+    ) as HTMLParagraphElement | null;
+    const initialHeroCopy = heroCopy?.textContent;
+    const maxDrawdownInput = container.querySelector(
+      "#optimization-results-constraint-max_drawdown_pct",
+    ) as HTMLInputElement | null;
+    const stabilityInput = container.querySelector(
+      "#optimization-results-constraint-stability",
+    ) as HTMLInputElement | null;
+    const refilterButton = Array.from(
+      container.querySelectorAll("button"),
+    ).find((button) => button.textContent?.includes("重新过滤")) as
+      | HTMLButtonElement
+      | undefined;
+
+    expect(maxDrawdownInput).toBeTruthy();
+    expect(stabilityInput).toBeTruthy();
+    expect(refilterButton).toBeTruthy();
+
+    fireEvent.change(maxDrawdownInput!, { target: { value: "10" } });
+    fireEvent.change(stabilityInput!, { target: { value: "90" } });
+    fireEvent.click(refilterButton!);
+
+    const toast = await waitFor(() => {
+      const element = container.querySelector(
+        ".optimization-results-toast",
+      ) as HTMLDivElement | null;
+      expect(element).not.toBeNull();
+      return element!;
+    });
+
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        "无符合条件的组合，请放宽过滤条件再试。",
+      ),
+    );
+    expect(toast.className).toContain("error-banner");
+    expect(saveCalled).toBe(false);
+    expect(container.textContent).toContain("符合约束：1/5");
+    expect(container.textContent).not.toContain("符合约束：0/5");
+    expect(container.textContent).toContain("当前组合");
+    expect(heroCopy?.textContent).toBe(initialHeroCopy);
+  });
+
+  it("offers a one-click quick-filter relaxation when no candidate currently passes", async () => {
+    currentApi = createZeroPassConstraintApi();
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("当前约束下暂无候选版本通过过滤"),
+    );
+
+    const relaxButton = Array.from(
+      container.querySelectorAll("button"),
+    ).find((button) => button.textContent?.includes("一键放宽到有结果")) as
+      | HTMLButtonElement
+      | undefined;
+
+    expect(relaxButton).toBeTruthy();
+    fireEvent.click(relaxButton!);
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("符合约束：1/5"),
+    );
+    expect(container.textContent).not.toContain(
+      "当前约束下暂无候选版本通过过滤",
+    );
+    expect(container.textContent).toContain("放宽后通过 1");
+    expect(
+      (
+        container.querySelector(
+          "#optimization-results-constraint-max_drawdown_pct",
+        ) as HTMLInputElement | null
+      )?.value,
+    ).toBe("12");
+    expect(
+      (
+        container.querySelector(
+          "#optimization-results-constraint-stability",
+        ) as HTMLInputElement | null
+      )?.value,
+    ).toBe("72");
   });
 
   it("applies quick filters locally even when saving the thresholds fails", async () => {
@@ -1777,9 +2050,80 @@ describe("optimization module flow", () => {
     expect(container.textContent).not.toContain(
       "当前约束下暂无候选版本通过过滤",
     );
-    expect(container.textContent).toContain(
-      "后端未保存本次快捷过滤设置：405 Method Not Allowed",
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        "后端未保存本次快捷过滤设置：405 Method Not Allowed",
+      ),
     );
+  });
+
+  it("shows a fatal error when a terminal optimization detail response omits matching_combination_count", async () => {
+    const brokenApi = createOptimizationTestApi();
+    const originalGetOptimizationJobDetail =
+      brokenApi.getOptimizationJobDetail.bind(brokenApi);
+    brokenApi.getOptimizationJobDetail = async (jobId: string) => {
+      const job = await originalGetOptimizationJobDetail(jobId);
+      delete job.summary.matching_combination_count;
+      delete job.matching_combination_count;
+      return job;
+    };
+    currentApi = brokenApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        MISSING_MATCHING_COMBINATION_COUNT_ERROR,
+      ),
+    );
+    expect(container.querySelector(".optimization-results-grid")).toBeNull();
+  });
+
+  it("shows a fatal error instead of falling back to local-only notice when refilter response omits matching_combination_count", async () => {
+    const brokenApi = createZeroPassConstraintApi();
+    const originalUpdateConstraints =
+      brokenApi.updateOptimizationJobConstraints.bind(brokenApi);
+    brokenApi.updateOptimizationJobConstraints = async (...args) => {
+      const job = await originalUpdateConstraints(...args);
+      delete job.summary.matching_combination_count;
+      delete job.matching_combination_count;
+      return job;
+    };
+    currentApi = brokenApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("当前约束下暂无候选版本通过过滤"),
+    );
+
+    const maxDrawdownInput = container.querySelector(
+      "#optimization-results-constraint-max_drawdown_pct",
+    ) as HTMLInputElement | null;
+    const stabilityInput = container.querySelector(
+      "#optimization-results-constraint-stability",
+    ) as HTMLInputElement | null;
+    const refilterButton = Array.from(
+      container.querySelectorAll("button"),
+    ).find((button) => button.textContent?.includes("重新过滤")) as
+      | HTMLButtonElement
+      | undefined;
+
+    expect(maxDrawdownInput).toBeTruthy();
+    expect(stabilityInput).toBeTruthy();
+    expect(refilterButton).toBeTruthy();
+
+    fireEvent.change(maxDrawdownInput!, { target: { value: "15" } });
+    fireEvent.change(stabilityInput!, { target: { value: "70" } });
+    fireEvent.click(refilterButton!);
+
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        MISSING_MATCHING_COMBINATION_COUNT_ERROR,
+      ),
+    );
+    expect(container.textContent).not.toContain("后端未保存本次快捷过滤设置");
+    expect(container.querySelector(".optimization-results-grid")).toBeNull();
   });
 
   it("counts the current combination as passing when it satisfies the active filters", async () => {
@@ -1795,6 +2139,44 @@ describe("optimization module flow", () => {
     expect(container.textContent).not.toContain(
       "当前约束下暂无候选版本通过过滤",
     );
+  });
+
+  it("shows the one-click relaxation when only the current combination passes", async () => {
+    currentApi = createBaselineOnlyPassApi();
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("符合约束：1/5"),
+    );
+
+    const relaxButton = Array.from(
+      container.querySelectorAll("button"),
+    ).find((button) => button.textContent?.includes("一键放宽到有结果")) as
+      | HTMLButtonElement
+      | undefined;
+
+    expect(relaxButton).toBeTruthy();
+    fireEvent.click(relaxButton!);
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("符合约束：2/5"),
+    );
+    expect(container.textContent).toContain("未通过 1");
+    expect(
+      (
+        container.querySelector(
+          "#optimization-results-constraint-max_drawdown_pct",
+        ) as HTMLInputElement | null
+      )?.value,
+    ).toBe("55");
+    expect(
+      (
+        container.querySelector(
+          "#optimization-results-constraint-stability",
+        ) as HTMLInputElement | null
+      )?.value,
+    ).toBe("2");
   });
 
   it("keeps hero action buttons wrapped with consistent sizing instead of vertical text columns", async () => {

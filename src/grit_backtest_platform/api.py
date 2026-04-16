@@ -5,7 +5,9 @@ import threading
 from pathlib import Path
 import importlib
 import json
-from typing import Any
+import logging
+import time
+from typing import Any, Mapping
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -36,9 +38,18 @@ from .service import ContractConflictError
 from .universe_history import default_universe_history_providers
 from .yahoo_provider import YahooMarketDataProvider
 
+logger = logging.getLogger(__name__)
+
 
 def _provider_name(provider: Any) -> str:
     return str(getattr(provider, "provider_name", provider.__class__.__name__.lower()))
+
+
+def _supports_corporate_action_probe(provider_or_name: Any) -> bool:
+    if not isinstance(provider_or_name, str) and bool(getattr(provider_or_name, "supports_action_enrichment", False)):
+        return True
+    provider_name = str(provider_or_name if isinstance(provider_or_name, str) else _provider_name(provider_or_name))
+    return provider_name.strip().lower() in {"yahoo", "yfinance", "tiingo"}
 
 
 def _load_provider(module_name: str, class_names: tuple[str, ...]) -> tuple[Any | None, str | None]:
@@ -275,7 +286,7 @@ class RuntimeMarketDataProvider:
             actions.append(action)
 
     def _supports_action_enrichment(self, provider: Any) -> bool:
-        return bool(getattr(provider, "supports_action_enrichment", False))
+        return _supports_corporate_action_probe(provider)
 
     def _provider_result(
         self,
@@ -291,6 +302,7 @@ class RuntimeMarketDataProvider:
         error: str | None = None,
         reason: str | None = None,
         selection_status: str | None = None,
+        actions_supported: bool | None = None,
     ) -> dict[str, Any]:
         payload = {
             "provider": provider_name,
@@ -308,6 +320,8 @@ class RuntimeMarketDataProvider:
             payload["reason"] = str(reason)
         if selection_status:
             payload["selection_status"] = str(selection_status)
+        if actions_supported is not None:
+            payload["actions_supported"] = bool(actions_supported)
         return payload
 
     def fetch_history(self, symbol, start_date, end_date):
@@ -343,6 +357,7 @@ class RuntimeMarketDataProvider:
                         status=exc.status,
                         error=str(exc),
                         reason=exc.reason,
+                        actions_supported=self._supports_action_enrichment(provider),
                     )
                 )
                 continue
@@ -357,6 +372,7 @@ class RuntimeMarketDataProvider:
                         kind="history",
                         status="failed",
                         error=str(exc),
+                        actions_supported=self._supports_action_enrichment(provider),
                     )
                 )
                 continue
@@ -376,6 +392,7 @@ class RuntimeMarketDataProvider:
                     bar_count=len(provider_bars),
                     action_count=len(provider_actions),
                     partial=bool(payload.get("partial")),
+                    actions_supported=self._supports_action_enrichment(provider),
                     selection_status=(
                         "selected_primary"
                         if provider_bars and not had_primary_before
@@ -399,6 +416,7 @@ class RuntimeMarketDataProvider:
                         kind="history",
                         status="skipped",
                         reason="primary_price_source_already_selected",
+                        actions_supported=self._supports_action_enrichment(candidate),
                     )
                     for candidate in self.price_providers[index + 1 :]
                 )
@@ -422,12 +440,13 @@ class RuntimeMarketDataProvider:
                     provider_results.append(
                         self._provider_result(
                             provider_name=provider_name,
-                            kind="targeted_price_repair",
-                            status=exc.status,
-                            error=str(exc),
-                            reason=exc.reason,
-                        )
+                        kind="targeted_price_repair",
+                        status=exc.status,
+                        error=str(exc),
+                        reason=exc.reason,
+                        actions_supported=False,
                     )
+                )
                     continue
                 except Exception as exc:
                     missing_labels.append(provider_name)
@@ -437,11 +456,12 @@ class RuntimeMarketDataProvider:
                     provider_results.append(
                         self._provider_result(
                             provider_name=provider_name,
-                            kind="targeted_price_repair",
-                            status="failed",
-                            error=str(exc),
-                        )
+                        kind="targeted_price_repair",
+                        status="failed",
+                        error=str(exc),
+                        actions_supported=False,
                     )
+                )
                     continue
 
                 provider_warnings = list(payload["warnings"] or [])
@@ -461,6 +481,7 @@ class RuntimeMarketDataProvider:
                         partial=bool(payload.get("partial")),
                         reason="targeted_price_repair",
                         selection_status="selected_primary" if provider_bars else None,
+                        actions_supported=False,
                     )
                 )
                 if provider_bars:
@@ -567,6 +588,7 @@ class RuntimeMarketDataProvider:
                 ),
                 status="unavailable",
                 reason=self.missing_provider_reasons.get(provider_name) or "provider_not_configured_or_unavailable",
+                actions_supported=_supports_corporate_action_probe(provider_name),
             )
             for provider_name in unavailable_providers
         )
@@ -673,6 +695,7 @@ def build_runtime_market_data_provider() -> RuntimeMarketDataProvider:
         ("longbridge_static_info", "longbridge_provider", ("LongbridgeStaticInfoProvider",)),
         ("longbridge", "longbridge_provider", ("LongbridgeQuoteProvider",)),
         ("akshare_us", "akshare_us_provider", ("AkshareUsPriceProvider", "AkShareUsPriceProvider")),
+        ("stooq", "stooq_provider", ("StooqZipPriceProvider", "StooqPriceProvider")),
         ("fmp", "fmp_identity_provider", ("FmpIdentityRepairProvider", "FmpMarketDataProvider", "FmpPriceRepairProvider")),
         ("alpha_vantage", "alpha_vantage_provider", ("AlphaVantageProvider", "AlphaVantageEventProvider", "AlphaVantageMarketDataProvider")),
         ("sec_edgar", "sec_edgar_provider", ("SecEdgarEventProvider", "SecEdgarProvider")),
@@ -881,7 +904,30 @@ def create_app(
 
     @app.get('/optimization-jobs/{job_id}/detail')
     def optimization_job_detail(job_id: str):
-        return invoke(service.get_optimization_job_detail, job_id)
+        start_time = time.perf_counter()
+        response = invoke(service.get_optimization_job_detail, job_id)
+        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        metrics = {}
+        if hasattr(service, "get_optimization_job_detail_metrics"):
+            try:
+                raw_metrics = service.get_optimization_job_detail_metrics()
+                if isinstance(raw_metrics, Mapping):
+                    metrics = dict(raw_metrics)
+            except Exception:
+                metrics = {}
+        logger.info(
+            "optimization_job_detail request",
+            extra={
+                "route": "optimization_job_detail",
+                "job_id": job_id,
+                "duration_ms": round(elapsed_ms, 2),
+                "request_count": metrics.get("request_count"),
+                "avg_duration_ms": metrics.get("avg_duration_ms"),
+                "snapshot_query_count": metrics.get("snapshot_query_count"),
+                "snapshot_cache_hit_rate": metrics.get("snapshot_cache_hit_rate"),
+            },
+        )
+        return response
 
     @app.patch('/optimization-jobs/{job_id}')
     def update_optimization_job(job_id: str, payload: OptimizationJobConstraintUpdateRequest):

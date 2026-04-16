@@ -1,6 +1,7 @@
 import type {
   ApiBacktestRunDetail,
   ApiOptimizationCandidate,
+  ApiOptimizationConstraint,
   ApiOptimizationHeatmap,
   ApiOptimizationJobCreatePayload,
   ApiOptimizationJobDetail,
@@ -25,6 +26,81 @@ function asNumber(value: unknown, fallback = 0): number {
     }
   }
   return fallback;
+}
+
+function readMetricNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function normalizeConstraintMetricValue(
+  constraintKey: string,
+  value: number,
+): number {
+  switch (constraintKey) {
+    case 'annualized_return':
+      return Math.abs(value) <= 1.5 ? value * 100 : value;
+    case 'max_drawdown_pct':
+      return Math.abs(value) <= 1.5 ? Math.abs(value * 100) : Math.abs(value);
+    case 'turnover':
+      return Math.abs(value) <= 1.5 ? value * 100 : value;
+    default:
+      return value;
+  }
+}
+
+function getCandidateConstraintMetricValue(
+  candidate: Pick<ApiOptimizationCandidate, 'metrics'>,
+  constraintKey: string,
+): number | null {
+  const metrics = candidate.metrics ?? {};
+  const rawValue =
+    constraintKey === 'annualized_return'
+      ? readMetricNumber(metrics.annualized_return ?? metrics.cagr)
+      : constraintKey === 'return_sharpe'
+        ? readMetricNumber(metrics.return_sharpe ?? metrics.sharpe)
+        : constraintKey === 'out_of_sample_sharpe'
+          ? readMetricNumber(metrics.out_of_sample_sharpe ?? metrics.oos_sharpe)
+          : constraintKey === 'max_drawdown_pct'
+            ? readMetricNumber(metrics.max_drawdown_pct) ??
+              (typeof metrics.max_drawdown === 'number' ? metrics.max_drawdown * 100 : null)
+            : constraintKey === 'turnover'
+              ? readMetricNumber(metrics.turnover_pct ?? metrics.turnover)
+              : constraintKey === 'stability'
+                ? readMetricNumber(metrics.stability)
+                : readMetricNumber(metrics[constraintKey]);
+  return typeof rawValue === 'number'
+    ? normalizeConstraintMetricValue(constraintKey, rawValue)
+    : null;
+}
+
+function countMatchingCombinationCandidates(
+  candidates: ApiOptimizationCandidate[],
+  constraints: ApiOptimizationConstraint[] | undefined,
+): number {
+  const activeConstraints = constraints ?? [];
+  if (!activeConstraints.length) {
+    return candidates.length;
+  }
+  return candidates.filter((candidate) =>
+    activeConstraints.every((constraint) => {
+      const metricValue = getCandidateConstraintMetricValue(candidate, constraint.key);
+      if (metricValue === null) {
+        return false;
+      }
+      return constraint.operator === '>='
+        ? metricValue >= constraint.value
+        : metricValue <= constraint.value;
+    }),
+  ).length;
 }
 
 function humanizeKey(key: string): string {
@@ -651,6 +727,22 @@ export function hydrateOptimizationJob(
       buildOptimizationTrialSummary(bestCandidate) ??
       (job.best_metrics_summary ? clone(job.best_metrics_summary as ApiOptimizationTrialSummary) : undefined);
   }
+  if (isOptimizationTerminalStatus(status)) {
+    const providedMatchingCombinationCount =
+      typeof job.summary.matching_combination_count === 'number' &&
+      Number.isFinite(job.summary.matching_combination_count)
+        ? job.summary.matching_combination_count
+        : typeof job.matching_combination_count === 'number' &&
+            Number.isFinite(job.matching_combination_count)
+          ? job.matching_combination_count
+          : null;
+    summary.matching_combination_count =
+      providedMatchingCombinationCount ??
+      countMatchingCombinationCandidates(
+        generatedCandidates,
+        (summary.constraints ?? request.constraints) as ApiOptimizationConstraint[] | undefined,
+      );
+  }
   const result: ApiOptimizationJobDetail['result'] = {
     ...job.result,
     best_candidate_id: bestCandidate?.id ?? null,
@@ -693,6 +785,7 @@ export function hydrateOptimizationJob(
       (request.base_parameter_version_id as string | null | undefined) ??
       strategy.current_parameter_version_id ??
       null,
+    matching_combination_count: summary.matching_combination_count ?? null,
     best_metrics_summary: summary.best_metrics_summary ?? null,
     updated_at: job.updated_at ?? job.completed_at ?? job.created_at ?? undefined,
     completed_at: completedAt,

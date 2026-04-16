@@ -168,6 +168,7 @@ class TiingoMarketDataProvider:
                 "official_api": True,
                 "bar_count": len(bars),
                 "event_types": sorted({item["action_type"] for item in actions}),
+                "actions_supported": True,
                 "token_configured": True,
             },
         )

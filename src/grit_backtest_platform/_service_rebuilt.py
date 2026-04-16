@@ -1107,6 +1107,23 @@ class BacktestPlatformService:
         self._optimization_runner_owner_id = str(
             os.getenv("GRIT_OPTIMIZATION_RUNNER_OWNER_ID") or f"{os.getpid()}:{uuid4().hex[:12]}"
         )
+        try:
+            progress_snapshot_ttl = float(
+                os.getenv("GRIT_OPTIMIZATION_PROGRESS_SNAPSHOT_TTL_SECONDS", "1").strip()
+            )
+        except (TypeError, ValueError):
+            progress_snapshot_ttl = 1.0
+        self._optimization_progress_snapshot_ttl_seconds = max(0.0, progress_snapshot_ttl)
+        self._optimization_trial_progress_snapshot_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._optimization_trial_progress_snapshot_cache_lock = threading.Lock()
+        self._optimization_job_detail_metrics_lock = threading.Lock()
+        self._optimization_job_detail_metrics: dict[str, int | float] = {
+            "request_count": 0,
+            "total_duration_ms": 0.0,
+            "snapshot_query_count": 0,
+            "snapshot_cache_hit_count": 0,
+            "snapshot_cache_miss_count": 0,
+        }
         self._normalize_existing_backtest_runs_to_temporary_once()
 
     def _new_id(self, prefix: str) -> str:
@@ -1760,7 +1777,34 @@ class BacktestPlatformService:
             self._release_optimization_runner_claim(job_id)
         return True
 
-    def _optimization_trial_progress_snapshot(self, job_id: str) -> dict[str, Any]:
+    def _optimization_trial_progress_snapshot(
+        self,
+        job_id: str,
+        job_updated_at: str | None = None,
+    ) -> dict[str, Any]:
+        snapshot_key = f"{job_id}:{str(job_updated_at or '').strip()}"
+        ttl_seconds = self._optimization_progress_snapshot_ttl_seconds
+        should_cache = ttl_seconds > 0.0 and bool(snapshot_key)
+        now = time.perf_counter()
+        with self._optimization_job_detail_metrics_lock:
+            self._optimization_job_detail_metrics["snapshot_query_count"] += 1
+        cache_hit = False
+        if should_cache:
+            with self._optimization_trial_progress_snapshot_cache_lock:
+                expired_keys = [
+                    cache_key
+                    for cache_key, (cached_at, _)
+                    in self._optimization_trial_progress_snapshot_cache.items()
+                    if now - cached_at > ttl_seconds
+                ]
+                for cache_key in expired_keys:
+                    self._optimization_trial_progress_snapshot_cache.pop(cache_key, None)
+                cached = self._optimization_trial_progress_snapshot_cache.get(snapshot_key)
+                if cached is not None and (now - cached[0]) <= ttl_seconds:
+                    cache_hit = True
+                    with self._optimization_job_detail_metrics_lock:
+                        self._optimization_job_detail_metrics["snapshot_cache_hit_count"] += 1
+                    return dict(cached[1])
         row = self.storage.fetch_one(
             """
             SELECT
@@ -1773,22 +1817,36 @@ class BacktestPlatformService:
             (job_id,),
         )
         if not row:
-            return {
+            snapshot = {
                 "persisted_trial_count": 0,
                 "next_trial_index": 1,
                 "completed_combinations": 0,
                 "latest_completed_at": None,
             }
+            if should_cache:
+                with self._optimization_trial_progress_snapshot_cache_lock:
+                    self._optimization_trial_progress_snapshot_cache[snapshot_key] = (now, dict(snapshot))
+            if not cache_hit:
+                with self._optimization_job_detail_metrics_lock:
+                    self._optimization_job_detail_metrics["snapshot_cache_miss_count"] += 1
+            return snapshot
         persisted_trial_count = _as_int(row.get("persisted_trial_count"), 0)
         max_trial_index = _as_int(row.get("max_trial_index"), 0)
         next_trial_index = max(1, max_trial_index + 1)
         latest_completed_at = str(row.get("latest_completed_at") or "").strip() or None
-        return {
+        snapshot = {
             "persisted_trial_count": persisted_trial_count,
             "next_trial_index": next_trial_index,
             "completed_combinations": persisted_trial_count,
             "latest_completed_at": latest_completed_at,
         }
+        if should_cache:
+            with self._optimization_trial_progress_snapshot_cache_lock:
+                self._optimization_trial_progress_snapshot_cache[snapshot_key] = (now, dict(snapshot))
+        if not cache_hit:
+            with self._optimization_job_detail_metrics_lock:
+                self._optimization_job_detail_metrics["snapshot_cache_miss_count"] += 1
+        return snapshot
 
     def _optimization_trial_best_summary_snapshot(self, job_id: str) -> dict[str, Any] | None:
         successful_trials = [
@@ -2840,7 +2898,9 @@ class BacktestPlatformService:
         payload: Mapping[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         source_run_id = str(payload.get("source_run_id") or "").strip()
-        source_run = self.get_backtest_run_detail(source_run_id) if source_run_id else None
+        source_run = self._normalized_optimization_source_run(
+            self.get_backtest_run_detail(source_run_id) if source_run_id else None
+        )
         if source_run and str(source_run.get("strategy_id") or "") != str(strategy.get("id") or ""):
             raise ValueError("source_run_id does not belong to the selected strategy")
         base_snapshot = dict((source_run or {}).get("parameter_snapshot") or {})
@@ -2849,6 +2909,23 @@ class BacktestPlatformService:
         if not base_snapshot:
             base_snapshot = dict(strategy.get("parameters") or {})
         return base_snapshot, source_run
+
+    def _normalized_optimization_source_run(
+        self,
+        source_run: Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not source_run:
+            return None
+        normalized_source_run = dict(source_run)
+        normalized_source_run["parameter_snapshot"] = dict(normalized_source_run.get("parameter_snapshot") or {})
+        request_payload = dict(normalized_source_run.get("request") or {})
+        for field in ("start_date", "end_date"):
+            value = str(normalized_source_run.get(field) or "").strip()
+            if value and not str(request_payload.get(field) or "").strip():
+                request_payload[field] = value
+        normalized_source_run["request"] = request_payload
+        return normalized_source_run
+
     def _optimization_effective_strategy(
         self,
         strategy: Mapping[str, Any],
@@ -2911,9 +2988,19 @@ class BacktestPlatformService:
         *,
         source_run: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
-        request_payload = dict((source_run or {}).get("request") or {})
-        if source_run:
-            request_payload["source_run_id"] = source_run["id"]
+        normalized_source_run = self._normalized_optimization_source_run(source_run)
+        request_payload = dict((normalized_source_run or {}).get("request") or {})
+        if normalized_source_run:
+            request_payload["source_run_id"] = normalized_source_run["id"]
+            missing_window_fields = [
+                field for field in ("start_date", "end_date")
+                if not str(request_payload.get(field) or "").strip()
+            ]
+            if missing_window_fields:
+                missing_fields_label = ", ".join(missing_window_fields)
+                raise ValueError(
+                    f"source_run is missing required optimization window fields: {missing_fields_label}"
+                )
         normalized = self._normalize_run_request(strategy, request_payload) if hasattr(self, "_normalize_run_request") else dict(request_payload)
         normalized.pop("parameter_version_id", None)
         normalized.pop("idempotency_key", None)
@@ -3797,6 +3884,55 @@ class BacktestPlatformService:
             constraints,
         )
 
+    def _count_optimization_trials_matching_constraints(
+        self,
+        job_id: str,
+        constraints: Sequence[Mapping[str, Any]],
+    ) -> int:
+        rows = self.storage.fetch_all(
+            """
+            SELECT
+                status,
+                metrics_json,
+                return_sharpe,
+                oos_sharpe,
+                total_return_pct,
+                stability
+            FROM optimization_job_trials
+            WHERE job_id = ?
+            """,
+            (job_id,),
+        )
+        normalized_constraints = [dict(item) for item in list(constraints or []) if item]
+        match_count = 0
+        for row in rows:
+            if str(row.get("status") or "SUCCEEDED").upper() != "SUCCEEDED":
+                continue
+            metrics_payload = loads(row.get("metrics_json"), {})
+            metrics = dict(metrics_payload or {})
+            return_sharpe = _as_float(
+                row.get("return_sharpe"),
+                _as_float(metrics.get("return_sharpe"), _as_float(metrics.get("sharpe"), 0.0)),
+            )
+            oos_sharpe = _as_float(
+                row.get("oos_sharpe"),
+                _as_float(metrics.get("out_of_sample_sharpe"), _as_float(metrics.get("oos_sharpe"), 0.0)),
+            )
+            total_return_pct = _as_float(
+                row.get("total_return_pct"),
+                _as_float(metrics.get("total_return_pct"), _as_float(metrics.get("total_return"), 0.0) * 100.0),
+            )
+            stability = _as_float(row.get("stability"), _as_float(metrics.get("stability"), 0.0))
+            metrics["return_sharpe"] = return_sharpe
+            metrics.setdefault("sharpe", return_sharpe)
+            metrics["out_of_sample_sharpe"] = oos_sharpe
+            metrics["oos_sharpe"] = oos_sharpe
+            metrics["total_return_pct"] = total_return_pct
+            metrics["stability"] = stability
+            if self._optimization_trial_passes_constraints({"metrics": metrics}, normalized_constraints):
+                match_count += 1
+        return match_count
+
     def _select_optimization_candidate_trials(
         self,
         trials: Sequence[Mapping[str, Any]],
@@ -4024,6 +4160,7 @@ class BacktestPlatformService:
         summary = {
             "objective": payload.get("objective") or "sharpe",
             "candidate_count": len(candidates),
+            "matching_combination_count": payload.get("matching_combination_count"),
             "baseline_parameter_version_id": baseline_parameter_version_id,
             "entry_point": payload.get("entry_point") or "lab_menu",
             "validation_mode": payload.get("validation_mode") or "walk_forward",
@@ -5693,13 +5830,49 @@ class BacktestPlatformService:
         return self.get_optimization_job_detail(job_id)
 
     def get_optimization_job_detail(self, job_id: str) -> dict[str, Any]:
+        start_time = time.perf_counter()
         row = self.storage.fetch_one(
             "SELECT * FROM optimization_jobs WHERE id = ? AND deleted_at IS NULL",
             (job_id,),
         )
         if not row:
+            duration_ms = (time.perf_counter() - start_time) * 1000.0
+            with self._optimization_job_detail_metrics_lock:
+                self._optimization_job_detail_metrics["request_count"] += 1
+                self._optimization_job_detail_metrics["total_duration_ms"] += duration_ms
             raise KeyError(f"Optimization job not found: {job_id}")
-        return self._hydrate_optimization_job(row)
+        job = self._hydrate_optimization_job(row)
+        duration_ms = (time.perf_counter() - start_time) * 1000.0
+        with self._optimization_job_detail_metrics_lock:
+            self._optimization_job_detail_metrics["request_count"] += 1
+            self._optimization_job_detail_metrics["total_duration_ms"] += duration_ms
+        return job
+
+    def get_optimization_job_detail_metrics(self) -> dict[str, Any]:
+        with self._optimization_job_detail_metrics_lock:
+            request_count = int(self._optimization_job_detail_metrics.get("request_count", 0))
+            total_duration_ms = float(
+                self._optimization_job_detail_metrics.get("total_duration_ms", 0.0)
+            )
+            snapshot_query_count = int(
+                self._optimization_job_detail_metrics.get("snapshot_query_count", 0)
+            )
+            snapshot_cache_hit_count = int(
+                self._optimization_job_detail_metrics.get("snapshot_cache_hit_count", 0)
+            )
+            snapshot_cache_miss_count = int(
+                self._optimization_job_detail_metrics.get("snapshot_cache_miss_count", 0)
+            )
+        return {
+            "request_count": request_count,
+            "avg_duration_ms": total_duration_ms / request_count if request_count else 0.0,
+            "snapshot_query_count": snapshot_query_count,
+            "snapshot_cache_hit_count": snapshot_cache_hit_count,
+            "snapshot_cache_miss_count": snapshot_cache_miss_count,
+            "snapshot_cache_hit_rate": (
+                snapshot_cache_hit_count / (snapshot_cache_hit_count + snapshot_cache_miss_count)
+            ) if (snapshot_cache_hit_count + snapshot_cache_miss_count) else 0.0,
+        }
 
     def _build_optimization_job_persist_payload(
         self,
@@ -5753,6 +5926,7 @@ class BacktestPlatformService:
             or request.get("interrupted_reason"),
             "best_metrics_summary": summary.get("best_metrics_summary"),
             "latest_candidate_label": latest_candidate_label,
+            "matching_combination_count": summary.get("matching_combination_count"),
         }
 
     def update_optimization_job_constraints(
@@ -5780,6 +5954,12 @@ class BacktestPlatformService:
             }
         )
         persisted_payload.update(next_constraint_payload)
+        persisted_payload["matching_combination_count"] = (
+            self._count_optimization_trials_matching_constraints(
+                job_id,
+                next_constraint_payload.get("constraints") or [],
+            )
+        )
         self._persist_optimization_job(
             job_id,
             str(job["strategy_id"]),
@@ -7062,6 +7242,13 @@ class BacktestPlatformService:
         eta_active = summary_status == "RUNNING"
         progress_default = 100 if summary_status == "COMPLETED" else 0
         job["summary"]["status"] = summary_status
+        if not running_like and job["summary"].get("matching_combination_count") is None:
+            job["summary"]["matching_combination_count"] = (
+                self._count_optimization_trials_matching_constraints(
+                    str(job["id"]),
+                    constraint_payload.get("constraints") or [],
+                )
+            )
         job["summary"].setdefault(
             "progress_pct",
             _as_int(
@@ -7274,7 +7461,10 @@ class BacktestPlatformService:
 
         if running_like and running_projection_present:
             if summary_status in {"QUEUED", "RUNNING", "INTERRUPTED"}:
-                progress_snapshot = self._optimization_trial_progress_snapshot(str(job["id"]))
+                progress_snapshot = self._optimization_trial_progress_snapshot(
+                    str(job["id"]),
+                    str(job.get("updated_at") or ""),
+                )
                 summary_completed = _as_int(job["summary"].get("completed_combinations"), 0)
                 summary_persisted = _as_int(job["summary"].get("persisted_trial_count"), summary_completed)
                 snapshot_completed = _as_int(progress_snapshot.get("completed_combinations"), summary_completed)
@@ -7529,6 +7719,7 @@ class BacktestPlatformService:
         job["next_trial_index"] = job["summary"].get("next_trial_index")
         job["interrupted_reason"] = job["summary"].get("interrupted_reason")
         job["best_metrics_summary"] = job["summary"].get("best_metrics_summary")
+        job["matching_combination_count"] = job["summary"].get("matching_combination_count")
 
         if running_like:
             running_headline = self._canonical_optimization_candidate_label(
@@ -7629,6 +7820,7 @@ class BacktestPlatformService:
         job["estimated_remaining_minutes"] = job["summary"].get("estimated_remaining_minutes")
         job["estimated_completed_at"] = job["summary"].get("estimated_completed_at")
         job["best_metrics_summary"] = job["summary"].get("best_metrics_summary")
+        job["matching_combination_count"] = job["summary"].get("matching_combination_count")
         job["constraint_preset_key"] = job["summary"].get("constraint_preset_key") or job["request"].get("constraint_preset_key")
         job["constraint_label"] = job["summary"].get("constraint_label") or job["request"].get("constraint_label")
         job["constraints"] = job["summary"].get("constraints") or job["request"].get("constraints")
@@ -8263,7 +8455,10 @@ class BacktestPlatformService:
                 blocking_target={"job_id": job_id},
             )
 
-        progress_snapshot = self._optimization_trial_progress_snapshot(job_id)
+        progress_snapshot = self._optimization_trial_progress_snapshot(
+            job_id,
+            str(job.get("updated_at") or ""),
+        )
         summary = _as_mapping(job.get("summary"))
         budget_value = _as_int(
             summary.get("budget_combinations"),
@@ -8358,7 +8553,7 @@ class BacktestPlatformService:
         if source_run_id:
             row = self.storage.fetch_one(
                 """
-                SELECT id, strategy_id, parameter_snapshot_json
+                SELECT id, strategy_id, start_date, end_date, parameter_snapshot_json, request_json
                 FROM backtest_runs
                 WHERE id = ? AND deleted_at IS NULL
                 """,
@@ -8367,12 +8562,16 @@ class BacktestPlatformService:
             if row:
                 if str(row.get("strategy_id") or "") != str(strategy.get("id") or ""):
                     raise ValueError("source_run_id does not belong to the selected strategy")
-                source_run = {
-                    "id": row["id"],
-                    "strategy_id": row["strategy_id"],
-                    "parameter_snapshot": loads(row.get("parameter_snapshot_json"), {}),
-                    "request": {},
-                }
+                source_run = self._normalized_optimization_source_run(
+                    {
+                        "id": row["id"],
+                        "strategy_id": row["strategy_id"],
+                        "start_date": row.get("start_date"),
+                        "end_date": row.get("end_date"),
+                        "parameter_snapshot": loads(row.get("parameter_snapshot_json"), {}),
+                        "request": loads(row.get("request_json"), {}),
+                    }
+                )
         base_snapshot = dict((source_run or {}).get("parameter_snapshot") or {})
         if not base_snapshot:
             base_snapshot = self._parameter_snapshot_for_version(strategy, payload.get("base_parameter_version_id"))

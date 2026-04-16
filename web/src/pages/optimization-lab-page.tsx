@@ -45,8 +45,40 @@ type OptimizationConstraintPreset = {
   constraints: OptimizationConstraint[];
 };
 
-const OPTIMIZATION_POLL_INTERVAL_MS =
-  import.meta.env.MODE === "test" ? 50 : 3000;
+function parsePositiveIntEnvVar(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseFloatEnvVar(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseFloat(value ?? "");
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+const OPTIMIZATION_POLL_FAST_INTERVAL_MS = Math.max(
+  1,
+  parsePositiveIntEnvVar(import.meta.env.VITE_OPTIMIZATION_POLL_FAST_MS, 2000),
+);
+const OPTIMIZATION_POLL_MEDIUM_INTERVAL_MS = Math.max(
+  1,
+  parsePositiveIntEnvVar(import.meta.env.VITE_OPTIMIZATION_POLL_MEDIUM_MS, 2500),
+);
+const OPTIMIZATION_POLL_SLOW_INTERVAL_MS = Math.max(
+  1,
+  parsePositiveIntEnvVar(import.meta.env.VITE_OPTIMIZATION_POLL_SLOW_MS, 3000),
+);
+const OPTIMIZATION_POLL_JITTER = Math.min(
+  1,
+  parseFloatEnvVar(import.meta.env.VITE_OPTIMIZATION_POLL_JITTER, 0.05),
+);
+const OPTIMIZATION_POLL_NO_PROGRESS_MEDIUM_THRESHOLD = parsePositiveIntEnvVar(
+  import.meta.env.VITE_OPTIMIZATION_NO_PROGRESS_MEDIUM_THRESHOLD,
+  2,
+);
+const OPTIMIZATION_POLL_NO_PROGRESS_SLOW_THRESHOLD = parsePositiveIntEnvVar(
+  import.meta.env.VITE_OPTIMIZATION_NO_PROGRESS_SLOW_THRESHOLD,
+  4,
+);
 const HEATMAP_METRIC_OPTIONS: Array<{ key: HeatmapMetricKey; label: string }> =
   [
     { key: "annualized_return", label: "年化收益率" },
@@ -578,11 +610,19 @@ function formatOptimizationConstraintThreshold(
 }
 
 function getOptimizationConstraintInputStep(constraintKey: string): string {
-  return constraintKey === "annualized_return"
+  return getOptimizationConstraintInputPrecision(constraintKey) === 1
     ? "0.1"
-    : constraintKey.includes("sharpe")
+    : getOptimizationConstraintInputPrecision(constraintKey) === 2
       ? "0.01"
       : "1";
+}
+
+function getOptimizationConstraintInputPrecision(constraintKey: string): number {
+  return constraintKey === "annualized_return"
+    ? 1
+    : constraintKey.includes("sharpe")
+      ? 2
+      : 0;
 }
 
 function getOptimizationConstraintUnitLabel(
@@ -970,6 +1010,56 @@ function candidatePassesOptimizationConstraints(
   return constraints.every((constraint) =>
     candidateMeetsOptimizationConstraint(candidate, constraint),
   );
+}
+
+function snapOptimizationConstraintValue(
+  constraint: Pick<OptimizationConstraint, "key" | "operator">,
+  value: number,
+): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  const precision = getOptimizationConstraintInputPrecision(constraint.key);
+  const factor = 10 ** precision;
+  const scaled = value * factor;
+  const snappedScaled =
+    constraint.operator === ">=" ? Math.floor(scaled) : Math.ceil(scaled);
+  const snapped = snappedScaled / factor;
+  return Object.is(snapped, -0) ? 0 : snapped;
+}
+
+function buildSuggestedOptimizationConstraints(
+  candidate: OptimizationDisplayCandidate | null,
+  constraints: OptimizationConstraint[],
+): OptimizationConstraint[] | null {
+  if (!candidate || !constraints.length) {
+    return null;
+  }
+
+  let changed = false;
+  const nextConstraints = constraints.map((constraint) => {
+    const metricValue = getCandidateConstraintMetricValue(candidate, constraint.key);
+    if (metricValue === null) {
+      return constraint;
+    }
+
+    const relaxedValue =
+      constraint.operator === ">="
+        ? Math.min(constraint.value, metricValue)
+        : Math.max(constraint.value, metricValue);
+    const nextValue = snapOptimizationConstraintValue(constraint, relaxedValue);
+    if (nextValue === constraint.value) {
+      return constraint;
+    }
+    changed = true;
+    return {
+      ...constraint,
+      value: nextValue,
+      source: "manual" as const,
+    };
+  });
+
+  return changed ? nextConstraints : null;
 }
 
 function filterOptimizationCandidatesByConstraints(
@@ -1697,6 +1787,45 @@ function readProgressBoolean(
   return fallback;
 }
 
+function buildOptimizationProgressSignature(
+  job: ApiOptimizationJobDetail | null,
+): string {
+  if (!job) {
+    return "";
+  }
+  const headline = readProgressText(job.result, "headline") ?? "";
+  const completedCombinations = readProgressNumber(
+    job.summary,
+    "completed_combinations",
+    0,
+  );
+  return `${headline}|${completedCombinations}`;
+}
+
+function applyOptimizationPollJitter(intervalMs: number): number {
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+    return OPTIMIZATION_POLL_FAST_INTERVAL_MS;
+  }
+  if (!Number.isFinite(OPTIMIZATION_POLL_JITTER) || OPTIMIZATION_POLL_JITTER <= 0) {
+    return intervalMs;
+  }
+  const jitterBudget = intervalMs * OPTIMIZATION_POLL_JITTER;
+  const jitter = (Math.random() * 2 - 1) * jitterBudget;
+  return Math.max(1, Math.round(intervalMs + jitter));
+}
+
+function resolveNextOptimizationPollingInterval(
+  noProgressCount: number,
+): number {
+  if (noProgressCount > OPTIMIZATION_POLL_NO_PROGRESS_SLOW_THRESHOLD) {
+    return OPTIMIZATION_POLL_SLOW_INTERVAL_MS;
+  }
+  if (noProgressCount > OPTIMIZATION_POLL_NO_PROGRESS_MEDIUM_THRESHOLD) {
+    return OPTIMIZATION_POLL_MEDIUM_INTERVAL_MS;
+  }
+  return OPTIMIZATION_POLL_FAST_INTERVAL_MS;
+}
+
 function isOptimizationRunning(status?: string | null): boolean {
   return ["QUEUED", "RUNNING"].includes(String(status ?? "").toUpperCase());
 }
@@ -1705,6 +1834,34 @@ function isOptimizationProgressState(status?: string | null): boolean {
   return ["QUEUED", "RUNNING", "INTERRUPTED"].includes(
     String(status ?? "").toUpperCase(),
   );
+}
+
+const MISSING_MATCHING_COMBINATION_COUNT_ERROR =
+  "优化结果缺少 matching_combination_count，无法确认符合过滤条件的组合总数。";
+
+function getOptimizationMatchingCombinationCount(
+  job: ApiOptimizationJobDetail,
+): number {
+  const value = job.summary?.matching_combination_count;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  throw new Error(MISSING_MATCHING_COMBINATION_COUNT_ERROR);
+}
+
+function ensureOptimizationJobHasMatchingCombinationCount(
+  job: ApiOptimizationJobDetail,
+): ApiOptimizationJobDetail {
+  if (!isOptimizationProgressState(job.status)) {
+    getOptimizationMatchingCombinationCount(job);
+  }
+  return job;
 }
 
 function formatBestMetricsSummary(
@@ -1811,27 +1968,30 @@ function buildBaselineCandidate(
     readNumber(baselineRun.metrics?.oos_sharpe) ??
     returnSharpe;
   const maxDrawdownPct =
-    readNumber(latestCompletedRun?.max_drawdown) !== undefined
+    (readNumber(latestCompletedRun?.max_drawdown) !== undefined
       ? (readNumber(latestCompletedRun?.max_drawdown) ?? 0) * 100
-      : (readNumber(baselineRun.metrics?.max_drawdown_pct) ??
-        (readNumber(baselineRun.metrics?.max_drawdown) ?? 0) * 100);
+      : undefined) ??
+    (readNumber(baselineRun.metrics?.max_drawdown_pct) ??
+      (readNumber(baselineRun.metrics?.max_drawdown) ?? 0) * 100);
   const turnover =
     readNumber(baselineRun.metrics?.turnover_pct) ??
     readNumber(baselineRun.metrics?.turnover);
   const totalReturnPct =
-    readNumber(latestCompletedRun?.total_return) !== undefined
+    (readNumber(latestCompletedRun?.total_return) !== undefined
       ? (readNumber(latestCompletedRun?.total_return) ?? 0) * 100
-      : (readNumber(baselineRun.metrics?.total_return_pct) ??
-        (readNumber(baselineRun.metrics?.total_return) ?? 0) * 100);
-  const stability = clampMetric(
-    Math.round(
-      (outOfSampleSharpe ?? returnSharpe ?? 0) * 32 +
-        (annualizedReturn ?? 0) * 180 -
-        Math.abs(maxDrawdownPct ?? 0) * 0.35,
-    ),
-    35,
-    88,
-  );
+      : undefined) ??
+    (readNumber(baselineRun.metrics?.total_return_pct) ??
+      (readNumber(baselineRun.metrics?.total_return) ?? 0) * 100);
+  const stability =
+    clampMetric(
+      Math.round(
+        (outOfSampleSharpe ?? returnSharpe ?? 0) * 32 +
+          (annualizedReturn ?? 0) * 180 -
+          Math.abs(maxDrawdownPct ?? 0) * 0.35,
+      ),
+      35,
+      88,
+    );
 
   if (
     annualizedReturn === undefined &&
@@ -1852,7 +2012,9 @@ function buildBaselineCandidate(
   if (turnover !== undefined) {
     metrics.turnover = turnover;
   }
-  const parameterSnapshot = { ...(strategy.parameters ?? {}) };
+  const parameterSnapshot = {
+    ...(strategy.parameters ?? {}),
+  };
   const label = "当前组合";
   const summary = "读取当前策略参数与最近完成回测表现，作为本轮优化基准。";
   const heatmap = buildSyntheticHeatmap(
@@ -2074,27 +2236,36 @@ function buildDefaultSearchSpace(
   return fields.map(normalizeSearchField);
 }
 
-function buildStrategyMetricsMap(
-  runDetails: Record<string, ApiBacktestRunDetail>,
-) {
+function buildStrategyMetricsMap(strategies: ApiStrategyListItem[]) {
   return Object.fromEntries(
-    Object.entries(runDetails).map(([runId, runDetail]) => [
-      runId,
-      {
-        sharpe:
-          typeof runDetail.metrics?.sharpe === "number"
-            ? runDetail.metrics.sharpe
-            : undefined,
-        totalReturn:
-          typeof runDetail.metrics?.total_return === "number"
-            ? runDetail.metrics.total_return * 100
-            : undefined,
-        maxDrawdown:
-          typeof runDetail.metrics?.max_drawdown === "number"
-            ? runDetail.metrics.max_drawdown * 100
-            : undefined,
-      },
-    ]),
+    strategies.flatMap((strategy) => {
+      const latestRunId =
+        strategy.latest_successful_run_id ??
+        strategy.latest_run_id ??
+        strategy.latest_completed_run_summary?.run_id ??
+        null;
+      if (!latestRunId) {
+        return [];
+      }
+      const summary = strategy.latest_completed_run_summary;
+      return [
+        [
+          latestRunId,
+          {
+            sharpe:
+              typeof summary?.sharpe === "number" ? summary.sharpe : undefined,
+            totalReturn:
+              typeof summary?.total_return === "number"
+                ? summary.total_return * 100
+                : undefined,
+            maxDrawdown:
+              typeof summary?.max_drawdown === "number"
+                ? summary.max_drawdown * 100
+                : undefined,
+          },
+        ],
+      ];
+    }),
   );
 }
 
@@ -2395,9 +2566,6 @@ export function OptimizationStrategySelectPage({
 }): JSX.Element {
   const api = useApiClient();
   const [strategies, setStrategies] = useState<ApiStrategyListItem[]>([]);
-  const [runDetails, setRunDetails] = useState<
-    Record<string, ApiBacktestRunDetail>
-  >({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -2409,18 +2577,8 @@ export function OptimizationStrategySelectPage({
         setLoading(true);
         setError(null);
         const payload = await api.listStrategies();
-        const latestRunIds = payload
-          .map((item) => item.latest_successful_run_id ?? item.latest_run_id)
-          .filter((value): value is string => Boolean(value));
-        const runEntries = await Promise.all(
-          [...new Set(latestRunIds)].map(
-            async (runId) =>
-              [runId, await api.getBacktestRunDetail(runId)] as const,
-          ),
-        );
         if (!cancelled) {
           setStrategies(payload);
-          setRunDetails(Object.fromEntries(runEntries));
         }
       } catch (caught) {
         if (!cancelled) {
@@ -2440,8 +2598,8 @@ export function OptimizationStrategySelectPage({
   }, [api]);
 
   const metricsByRunId = useMemo(
-    () => buildStrategyMetricsMap(runDetails),
-    [runDetails],
+    () => buildStrategyMetricsMap(strategies),
+    [strategies],
   );
 
   return (
@@ -3058,6 +3216,7 @@ export function OptimizationConfigPage({
               <div className="optimization-constraint-grid">
                 {constraints.map((constraint, index) => {
                   const verdict = evaluateOptimizationConstraint(constraint);
+                  const unitLabel = constraint.unit.trim();
                   return (
                     <article
                       className={`optimization-constraint-card optimization-constraint-card--${verdict}`}
@@ -3069,33 +3228,38 @@ export function OptimizationConfigPage({
                             constraint.category,
                           )}
                         </span>
-                        <span className="optimization-constraint-card__operator">
+                      </div>
+                      <label
+                        className="optimization-constraint-card__rule"
+                        htmlFor={`optimization-constraint-${constraint.key}`}
+                      >
+                        <span className="optimization-constraint-card__rule-label">
+                          {constraint.label}
+                        </span>
+                        <span className="optimization-constraint-card__rule-operator">
                           {formatOptimizationConstraintOperator(
                             constraint.operator,
                           )}
                         </span>
-                      </div>
-                      <h3>{constraint.label}</h3>
-                      <label className="optimization-constraint-card__field">
-                        <span>阈值</span>
-                        <div className="optimization-constraint-card__input-row">
-                          <input
-                            aria-label={`${constraint.label} 阈值`}
-                            onChange={(event) =>
-                              updateConstraint(index, event.target.value)
-                            }
-                            step={getOptimizationConstraintInputStep(
-                              constraint.key,
-                            )}
-                            type="number"
-                            value={constraint.value}
-                          />
-                          {constraint.unit ? (
-                            <span className="optimization-constraint-card__unit">
-                              {constraint.unit}
-                            </span>
-                          ) : null}
-                        </div>
+                        <input
+                          aria-label={`${constraint.label} 阈值`}
+                          className="optimization-constraint-card__rule-input"
+                          id={`optimization-constraint-${constraint.key}`}
+                          inputMode="decimal"
+                          onChange={(event) =>
+                            updateConstraint(index, event.target.value)
+                          }
+                          step={getOptimizationConstraintInputStep(
+                            constraint.key,
+                          )}
+                          type="number"
+                          value={constraint.value}
+                        />
+                        {unitLabel ? (
+                          <span className="optimization-constraint-card__rule-unit">
+                            {unitLabel}
+                          </span>
+                        ) : null}
                       </label>
                       <div className="optimization-constraint-card__badges">
                         <span className="status-chip status-chip--soft optimization-constraint-card__badge optimization-constraint-card__badge--baseline">
@@ -3105,12 +3269,6 @@ export function OptimizationConfigPage({
                             value:
                               constraint.baseline_value ?? constraint.value,
                           })}
-                        </span>
-                        <span
-                          className={`status-chip status-chip--soft optimization-constraint-card__badge optimization-constraint-card__verdict optimization-constraint-card__verdict--${verdict}`}
-                        >
-                          当前判定{" "}
-                          {formatOptimizationConstraintVerdict(verdict)}
                         </span>
                       </div>
                     </article>
@@ -3200,6 +3358,7 @@ export function OptimizationResultsPage({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [constraintToast, setConstraintToast] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [rerunConfirmOpen, setRerunConfirmOpen] = useState(false);
   const [rerunError, setRerunError] = useState<string | null>(null);
@@ -3220,13 +3379,27 @@ export function OptimizationResultsPage({
   const [constraintLiveMessage, setConstraintLiveMessage] = useState("");
 
   useEffect(() => {
+    if (!constraintToast) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setConstraintToast(null);
+    }, 3200);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [constraintToast]);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function load(): Promise<void> {
       try {
         setLoading(true);
         setError(null);
-        const jobPayload = await api.getOptimizationJobDetail(jobId);
+        const jobPayload = ensureOptimizationJobHasMatchingCombinationCount(
+          await api.getOptimizationJobDetail(jobId),
+        );
         const strategyPayload = await api.getStrategyDetail(
           jobPayload.strategy_id,
         );
@@ -3280,30 +3453,83 @@ export function OptimizationResultsPage({
 
     let cancelled = false;
     let inFlight = false;
-    const timer = window.setInterval(() => {
-      if (inFlight) {
+    let isPageVisible = !document.hidden;
+    let timer: number | null = null;
+    let noProgressCount = 0;
+    let currentDelayMs = OPTIMIZATION_POLL_FAST_INTERVAL_MS;
+    let lastProgressSignature = buildOptimizationProgressSignature(job);
+
+    const clearPollingTimer = (): void => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    const scheduleNextPoll = (delayMs: number): void => {
+      clearPollingTimer();
+      if (cancelled || !isPageVisible) {
+        return;
+      }
+      timer = window.setTimeout(() => {
+        void refresh();
+      }, applyOptimizationPollJitter(delayMs));
+    };
+
+    const refresh = async (): Promise<void> => {
+      if (cancelled || !isPageVisible || inFlight) {
         return;
       }
       inFlight = true;
-      void (async () => {
-        try {
-          const jobPayload = await api.getOptimizationJobDetail(jobId);
-          if (!cancelled) {
-            setJob(jobPayload);
-          }
-        } catch (caught) {
-          if (!cancelled) {
-            setError((caught as Error).message);
-          }
-        } finally {
-          inFlight = false;
+      try {
+        const jobPayload = ensureOptimizationJobHasMatchingCombinationCount(
+          await api.getOptimizationJobDetail(jobId),
+        );
+        if (cancelled) {
+          return;
         }
-      })();
-    }, OPTIMIZATION_POLL_INTERVAL_MS);
+        const nextProgressSignature = buildOptimizationProgressSignature(jobPayload);
+        if (nextProgressSignature === lastProgressSignature) {
+          noProgressCount += 1;
+        } else {
+          noProgressCount = 0;
+        }
+        currentDelayMs = resolveNextOptimizationPollingInterval(noProgressCount);
+        lastProgressSignature = nextProgressSignature;
+        setError(null);
+        setJob(jobPayload);
+      } catch (caught) {
+        if (!cancelled) {
+          setError((caught as Error).message);
+        }
+      } finally {
+        inFlight = false;
+        if (!cancelled && isPageVisible) {
+          scheduleNextPoll(currentDelayMs);
+        }
+      }
+    };
+
+    const handleVisibilityChange = (): void => {
+      isPageVisible = !document.hidden;
+      if (!isPageVisible) {
+        clearPollingTimer();
+        return;
+      }
+      noProgressCount = 0;
+      currentDelayMs = OPTIMIZATION_POLL_FAST_INTERVAL_MS;
+      if (isOptimizationRunning(job.status)) {
+        void refresh();
+      }
+    };
+
+    window.addEventListener("visibilitychange", handleVisibilityChange);
+    void refresh();
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      clearPollingTimer();
+      window.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [api, jobId, job?.status]);
 
@@ -3416,10 +3642,19 @@ export function OptimizationResultsPage({
     totalCandidateCount + (baselineCandidate ? 1 : 0);
   const matchingResultCount =
     matchingCandidates.length + (baselineMatchesConstraints ? 1 : 0);
+  const optimizationProgressState = isOptimizationProgressState(job?.status);
+  const optimizationRunning = isOptimizationRunning(job?.status);
+  const optimizationInterrupted =
+    String(job?.status ?? "").toUpperCase() === "INTERRUPTED";
+  const matchingCombinationCount =
+    job && !optimizationProgressState
+      ? Math.max(0, getOptimizationMatchingCombinationCount(job))
+      : 0;
   const filteredOutCandidateCount = Math.max(
     0,
     totalCandidateCount - matchingCandidates.length,
   );
+  const candidatePanelSubtitle = `符合过滤条件的组合共${matchingCombinationCount}个，以下是按综合评分排序靠前的候选版本组合`;
   const selectedCandidateParameters = useMemo(
     () =>
       buildCandidateParameterEntries(
@@ -3428,15 +3663,25 @@ export function OptimizationResultsPage({
       ),
     [optimizationSearchSpace, selectedCandidate],
   );
-  const optimizationProgressState = isOptimizationProgressState(job?.status);
-  const optimizationRunning = isOptimizationRunning(job?.status);
-  const optimizationInterrupted =
-    String(job?.status ?? "").toUpperCase() === "INTERRUPTED";
-  const noConstraintMatch = Boolean(
+  const noCandidateConstraintMatch = Boolean(
     !optimizationProgressState &&
       totalCandidateCount > 0 &&
-      matchingCandidates.length === 0 &&
-      !baselineMatchesConstraints,
+      matchingCandidates.length === 0,
+  );
+  const noConstraintMatch = Boolean(
+    noCandidateConstraintMatch && !baselineMatchesConstraints,
+  );
+  const suggestedResultConstraintCandidate = useMemo(
+    () => (noCandidateConstraintMatch ? (job?.candidates[0] ?? null) : null),
+    [job?.candidates, noCandidateConstraintMatch],
+  );
+  const suggestedResultConstraints = useMemo(
+    () =>
+      buildSuggestedOptimizationConstraints(
+        suggestedResultConstraintCandidate,
+        quickFilterConstraints,
+      ),
+    [quickFilterConstraints, suggestedResultConstraintCandidate],
   );
   const canRerunOptimization = Boolean(job && !optimizationRunning);
   const progressSummary = (job?.summary ?? {}) as Record<string, unknown>;
@@ -3607,9 +3852,17 @@ export function OptimizationResultsPage({
         : undefined,
   });
 
-  function syncResultConstraintDraft(nextConstraints: OptimizationConstraint[]) {
+  function syncResultConstraintDraft(
+    nextConstraints: OptimizationConstraint[],
+  ):
+    | {
+        constraintPresetKey: OptimizationConstraintPresetKey;
+        constraintLabel: string;
+        constraints: OptimizationConstraint[];
+      }
+    | null {
     if (!strategy) {
-      return;
+      return null;
     }
     const draft = buildOptimizationConstraintDraft(
       constraintPresetKey,
@@ -3623,6 +3876,7 @@ export function OptimizationResultsPage({
     setConstraintPresetKey(draft.constraintPresetKey);
     setConstraintDraftLabel(draft.constraintLabel);
     setConstraintDrafts(draft.constraints);
+    return draft;
   }
 
   function applyResultConstraintState(
@@ -3631,6 +3885,22 @@ export function OptimizationResultsPage({
   ): void {
     setAppliedConstraintLabel(nextLabel);
     setAppliedConstraints(nextConstraints);
+  }
+
+  function summarizeConstraintMatches(nextConstraints: OptimizationConstraint[]): {
+    candidateCount: number;
+    baselineMatches: boolean;
+  } {
+    const candidateCount = (job?.candidates ?? []).filter((candidate) =>
+      candidatePassesOptimizationConstraints(candidate, nextConstraints),
+    ).length;
+    const baselineMatches = baselineCandidate
+      ? candidatePassesOptimizationConstraints(
+          baselineCandidate,
+          nextConstraints,
+        )
+      : false;
+    return { candidateCount, baselineMatches };
   }
 
   function updateResultConstraint(index: number, value: string): void {
@@ -3649,43 +3919,95 @@ export function OptimizationResultsPage({
           : constraint,
     );
     syncResultConstraintDraft(nextConstraints);
+    setConstraintToast(null);
     setConstraintLiveMessage("已修改快捷阈值，点击“重新过滤”后应用。");
+  }
+
+  async function applyConstraintFilterUpdate(
+    nextConstraints: OptimizationConstraint[],
+    nextConstraintLabel: string,
+    messages?: {
+      success: string;
+      localOnly: string;
+    },
+  ): Promise<void> {
+    if (!job) {
+      return;
+    }
+    const nextMatchSummary = summarizeConstraintMatches(nextConstraints);
+    if (
+      nextMatchSummary.candidateCount === 0 &&
+      !nextMatchSummary.baselineMatches
+    ) {
+      setConstraintToast("无符合条件的组合，请放宽过滤条件再试。");
+      return;
+    }
+    try {
+      applyResultConstraintState(nextConstraintLabel, nextConstraints);
+      setSaving(true);
+      setError(null);
+      setNotice(null);
+      setConstraintToast(null);
+      const updated = ensureOptimizationJobHasMatchingCombinationCount(
+        await api.updateOptimizationJobConstraints(job.id, {
+          constraint_preset_key: constraintPresetKey,
+          constraint_label: nextConstraintLabel,
+          constraints: nextConstraints,
+        }),
+      );
+      setJob(updated);
+      setConstraintLiveMessage(messages?.success ?? "已按最新阈值重新过滤。");
+    } catch (caught) {
+      const message =
+        caught instanceof Error ? caught.message : String(caught ?? "未知错误");
+      if (message === MISSING_MATCHING_COMBINATION_COUNT_ERROR) {
+        setError(message);
+        setNotice(null);
+        setConstraintLiveMessage("");
+        return;
+      }
+      setNotice(
+        `已按当前页面阈值重新过滤，后端未保存本次快捷过滤设置：${message}`,
+      );
+      setConstraintLiveMessage(
+        messages?.localOnly ?? "已在当前页面应用最新阈值，但未保存到任务。",
+      );
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function handleApplyConstraintFilter(
     event?: FormEvent<HTMLFormElement>,
   ): Promise<void> {
     event?.preventDefault();
-    if (!job) {
+    await applyConstraintFilterUpdate(
+      cloneOptimizationConstraints(quickFilterConstraints, constraintPresetKey),
+      constraintDraftLabel,
+    );
+  }
+
+  async function handleApplySuggestedConstraintFilter(): Promise<void> {
+    if (!suggestedResultConstraints) {
       return;
     }
-    const nextConstraints = cloneOptimizationConstraints(
-      quickFilterConstraints,
-      constraintPresetKey,
-    );
-    const nextConstraintLabel = constraintDraftLabel;
-    try {
-      applyResultConstraintState(nextConstraintLabel, nextConstraints);
-      setSaving(true);
-      setError(null);
-      setNotice(null);
-      const updated = await api.updateOptimizationJobConstraints(job.id, {
-        constraint_preset_key: constraintPresetKey,
-        constraint_label: nextConstraintLabel,
-        constraints: nextConstraints,
-      });
-      setJob(updated);
-      setConstraintLiveMessage("已按最新阈值重新过滤。");
-    } catch (caught) {
-      const message =
-        caught instanceof Error ? caught.message : String(caught ?? "未知错误");
-      setNotice(
-        `已按当前页面阈值重新过滤，后端未保存本次快捷过滤设置：${message}`,
-      );
-      setConstraintLiveMessage("已在当前页面应用最新阈值，但未保存到任务。");
-    } finally {
-      setSaving(false);
+    const draft = syncResultConstraintDraft(suggestedResultConstraints);
+    if (!draft) {
+      return;
     }
+    const candidateLabel = getCandidateDisplayText(
+      suggestedResultConstraintCandidate?.title ??
+        suggestedResultConstraintCandidate?.label,
+      "当前候选",
+    );
+    await applyConstraintFilterUpdate(
+      cloneOptimizationConstraints(draft.constraints, draft.constraintPresetKey),
+      draft.constraintLabel,
+      {
+        success: `已按 ${candidateLabel} 回填建议阈值并重新过滤。`,
+        localOnly: `已按 ${candidateLabel} 回填建议阈值并在当前页面重新过滤，但未保存到任务。`,
+      },
+    );
   }
 
   async function handlePromote(): Promise<void> {
@@ -3789,6 +4111,15 @@ export function OptimizationResultsPage({
 
   return (
     <div className="optimization-lab-page">
+      {constraintToast ? (
+        <div
+          aria-live="polite"
+          className="optimization-results-toast error-banner"
+          role="status"
+        >
+          {constraintToast}
+        </div>
+      ) : null}
       <OptimizationStepBar
         current="results"
         selectHref={selectHref}
@@ -3945,7 +4276,7 @@ export function OptimizationResultsPage({
       {loading ? <p className="empty-state">正在加载结果中心...</p> : null}
       {error ? <div className="error-banner">{error}</div> : null}
 
-      {!loading && job ? (
+      {!loading && !error && job ? (
         <>
           {!optimizationProgressState ? (
             <section
@@ -3964,6 +4295,16 @@ export function OptimizationResultsPage({
                       {" 项阈值"}
                     </strong>
                   </span>
+                  {suggestedResultConstraints ? (
+                    <button
+                      className="ghost-button optimization-results-constraint-bar__action"
+                      disabled={saving}
+                      onClick={() => void handleApplySuggestedConstraintFilter()}
+                      type="button"
+                    >
+                      {saving ? "重新过滤中..." : "一键放宽到有结果"}
+                    </button>
+                  ) : null}
                   <button
                     className="primary-button optimization-results-constraint-bar__action"
                     disabled={saving}
@@ -4162,7 +4503,7 @@ export function OptimizationResultsPage({
                           </p>
                           <h2>{TEXT.candidatePanel}</h2>
                           <p className="optimization-panel-subtitle">
-                            {PANEL_SUBTITLES.candidatePanel}
+                            {candidatePanelSubtitle}
                           </p>
                         </div>
                       </div>

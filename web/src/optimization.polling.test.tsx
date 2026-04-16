@@ -25,7 +25,7 @@ vi.mock("./lib/demoStoreContext", async () => {
   function ApiClientProvider({
     children,
   }: {
-    children: React.ReactNode;
+    children: React.ReactElement | React.ReactNode;
   }): React.ReactElement {
     return ReactModule.createElement(
       ApiClientContext.Provider,
@@ -182,6 +182,33 @@ function createRunningJob(): ApiOptimizationJobDetail {
   };
 }
 
+function createRunningJobWithCompleted(
+  completed: number,
+  headline: string,
+): ApiOptimizationJobDetail {
+  const job = createRunningJob();
+  job.summary = {
+    ...job.summary,
+    completed_combinations: completed,
+    persisted_trial_count: completed,
+    next_trial_index: completed + 1,
+    current_stage: `Running trial ${completed + 1}/70`,
+    latest_update: `Completed ${completed}/70 trials.`,
+    headline: "Optimization in progress",
+    status: "RUNNING",
+  };
+  job.result = {
+    ...job.result,
+    status: "RUNNING",
+    progress_pct: Math.min(100, Math.round((completed / 70) * 100)),
+    current_stage: `Running trial ${completed + 1}/70`,
+    latest_update: `Completed ${completed}/70 trials.`,
+    headline,
+    summary: `Completed ${completed}/70 trials.`,
+  };
+  return job;
+}
+
 function createStrategy(): ApiStrategyDetail {
   return {
     id: "strat-001",
@@ -300,24 +327,122 @@ describe("optimization polling", () => {
       await Promise.resolve();
     });
 
-    expect(
-      (currentApi.getOptimizationJobDetail as ReturnType<typeof vi.fn>).mock
-        .calls.length,
-    ).toBe(1);
+    const callsBefore = (
+      currentApi.getOptimizationJobDetail as ReturnType<typeof vi.fn>
+    ).mock.calls.length;
 
     await act(async () => {
-      vi.advanceTimersByTime(220);
+      vi.advanceTimersByTime(2400);
+      await Promise.resolve();
       await Promise.resolve();
     });
 
     expect(
       (currentApi.getOptimizationJobDetail as ReturnType<typeof vi.fn>).mock
         .calls.length,
-    ).toBe(2);
+    ).toBe(callsBefore);
 
     await act(async () => {
       resolveRefresh?.(runningJob);
       await Promise.resolve();
+      await Promise.resolve();
+      vi.advanceTimersByTime(2050);
+      await Promise.resolve();
+      await Promise.resolve();
     });
+
+    expect(
+      (currentApi.getOptimizationJobDetail as ReturnType<typeof vi.fn>).mock
+        .calls.length,
+    ).toBeGreaterThan(callsBefore);
+  });
+
+  it("backs off polling when running progress has no changes, then returns to fast after progress update", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const spyRandom = vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const base = createRunningJobWithCompleted(11, "Optimization in progress");
+    const progressed = createRunningJobWithCompleted(
+      12,
+      "Optimization in progress",
+    );
+    const callTimes: number[] = [];
+    const responses = [base, base, base, base, base, progressed, progressed];
+    let callIndex = 0;
+
+    currentApi = {
+      ...currentApi,
+      getOptimizationJobDetail: vi.fn().mockImplementation(async () => {
+        callTimes.push(Date.now());
+        const response = responses[Math.min(callIndex, responses.length - 1)];
+        callIndex += 1;
+        return response;
+      }),
+    } as DemoApi;
+
+    await act(async () => {
+      render(
+        <ApiClientProvider>
+          <OptimizationResultsPage jobId="opt-poll-001" />
+        </ApiClientProvider>,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(callTimes.length).toBeGreaterThanOrEqual(2);
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(callTimes.length).toBeGreaterThanOrEqual(3);
+
+    await act(async () => {
+      vi.advanceTimersByTime(2500);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(callTimes.length).toBeGreaterThanOrEqual(4);
+
+    await act(async () => {
+      vi.advanceTimersByTime(2500);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(callTimes.length).toBeGreaterThanOrEqual(5);
+
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(callTimes.length).toBeGreaterThanOrEqual(6);
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(callTimes.length).toBeGreaterThanOrEqual(7);
+
+    const deltas = callTimes
+      .slice(1)
+      .map((next, index) => next - callTimes[index]);
+    expect(deltas[0]).toBe(2000);
+    expect(deltas[1]).toBe(2000);
+    expect(deltas[2]).toBe(2500);
+    expect(deltas[3]).toBe(2500);
+    expect(deltas[4]).toBe(3000);
+    expect(deltas[5]).toBe(2000);
+
+    spyRandom.mockRestore();
   });
 });
+

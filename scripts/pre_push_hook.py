@@ -45,6 +45,39 @@ def _managed_files_dirty(repo_root: Path) -> bool:
     return bool(completed.stdout.strip())
 
 
+def _git_stdout(repo_root: Path, args: list[str]) -> str | None:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip()
+
+
+def _infer_minimum_revision(repo_root: Path) -> int:
+    upstream = _git_stdout(repo_root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+    if not upstream:
+        return 1
+
+    divergence = _git_stdout(repo_root, ["rev-list", "--left-right", "--count", f"{upstream}...HEAD"])
+    if not divergence:
+        return 1
+
+    parts = divergence.split()
+    if len(parts) != 2:
+        return 1
+
+    behind, ahead = (int(part) for part in parts)
+    if behind == 0 and ahead == 0:
+        return 2
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--repo-root", default=".")
@@ -54,12 +87,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         release_date_value = os.getenv("GRIT_CHANGELOG_RELEASE_DATE")
         effective_date = date.fromisoformat(release_date_value) if release_date_value else None
+        minimum_revision = _infer_minimum_revision(repo_root)
         workflow = _load_workflow_module(repo_root)
         result = workflow.prepare_push(
             repo_root,
             release=_truthy_env("GRIT_CHANGELOG_RELEASE"),
             release_version=os.getenv("GRIT_CHANGELOG_RELEASE_VERSION") or None,
             effective_date=effective_date,
+            minimum_revision=minimum_revision,
         )
     except Exception as exc:
         print(f"pre-push: failed to prepare changelog metadata: {exc}", file=sys.stderr)
