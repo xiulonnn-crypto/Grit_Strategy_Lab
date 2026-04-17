@@ -218,3 +218,70 @@ def test_prepare_push_honors_minimum_revision_for_backfilled_post_push_snapshot(
     assert result.mode == "revision"
     assert result.snapshot_title == "0.1.1-002"
     assert "## [Unreleased]\n\n## [0.1.1-002] - 2026-04-15" in changelog
+
+
+def test_prepare_push_adds_one_line_summary_to_revision_snapshot(tmp_path: Path) -> None:
+    _write_repo_files(
+        tmp_path,
+        """# Changelog
+
+## [Unreleased]
+
+### Changed
+
+- **Objective ranking**: Keep primary metric ordering strict when re-filtering.
+- **Constraint cleanup**: Remove the legacy turnover guard from the UI.
+
+### Fixed
+
+- **QuickStart preview**: Rebuild the preview bundle on cold start.
+- **Candidate board**: Prevent the modal table from overflowing on desktop.
+
+## [0.1.1] - 2026-03-31
+
+### Added
+
+- Stable release entry.
+""",
+    )
+
+    prepare_push(tmp_path, release=False, effective_date=date(2026, 4, 15))
+    changelog = (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert "## [0.1.1-001] - 2026-04-15" in changelog
+    assert (
+        "> 摘要：本次快照调整Objective ranking、Constraint cleanup，并修复QuickStart preview、Candidate board。"
+        in changelog
+    )
+
+
+def test_prepare_push_adds_one_line_summary_to_release_snapshot(tmp_path: Path) -> None:
+    _write_repo_files(
+        tmp_path,
+        """# Changelog
+
+## [Unreleased]
+
+### Added
+
+- **Optimization Lab**: Add the first end-to-end optimization workspace flow.
+
+## [0.1.1] - 2026-03-31
+
+### Added
+
+- Stable release entry.
+""",
+        version="0.1.1",
+    )
+
+    prepare_push(
+        tmp_path,
+        release=True,
+        release_version="0.1.2",
+        effective_date=date(2026, 4, 15),
+    )
+    changelog = (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert "## [0.1.2] - 2026-04-15" in changelog
+    assert "> 摘要：本次快照新增Optimization Lab。" in changelog

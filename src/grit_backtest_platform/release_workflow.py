@@ -30,6 +30,24 @@ _ALLOWED_UNRELEASED_SUBHEADINGS = {
     "### 修复",
     "### 安全",
 }
+_SUMMARY_PREFIX = "> 摘要："
+_SUMMARY_HEADING_TO_KIND = {
+    "### Added": "added",
+    "### Changed": "changed",
+    "### Deprecated": "deprecated",
+    "### Removed": "removed",
+    "### Fixed": "fixed",
+    "### Security": "security",
+}
+_SUMMARY_KIND_TO_VERB = {
+    "added": "新增",
+    "changed": "调整",
+    "deprecated": "标记弃用",
+    "removed": "移除",
+    "fixed": "修复",
+    "security": "加固",
+    "other": "同步",
+}
 
 
 @dataclass(frozen=True)
@@ -66,10 +84,103 @@ def _body_has_meaningful_content(body: str) -> bool:
         line = raw_line.strip()
         if not line:
             continue
+        if line.startswith(_SUMMARY_PREFIX):
+            continue
         if line.startswith("### "):
             continue
         return True
     return False
+
+
+def _strip_generated_summary(body: str) -> str:
+    filtered_lines = [
+        raw_line
+        for raw_line in body.splitlines()
+        if not raw_line.strip().startswith(_SUMMARY_PREFIX)
+    ]
+    return _normalize_body("\n".join(filtered_lines))
+
+
+def _clean_summary_topic(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+    cleaned = re.sub(r"`([^`]*)`", r"\1", cleaned)
+    cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
+    cleaned = cleaned.strip(" -*\t")
+    for delimiter in ("：", ":"):
+        if delimiter in cleaned:
+            cleaned = cleaned.split(delimiter, 1)[0].strip()
+            break
+    cleaned = re.split(r"[。；;，,]", cleaned, maxsplit=1)[0].strip()
+    return cleaned.strip(" .。:：;；,，")
+
+
+def _extract_summary_topic(line: str) -> str | None:
+    bullet = line.strip()
+    if not bullet.startswith("- "):
+        return None
+    topic = _clean_summary_topic(bullet[2:])
+    return topic or None
+
+
+def _format_summary_topics(topics: Sequence[str], *, limit: int = 2) -> str:
+    unique_topics: list[str] = []
+    for topic in topics:
+        if topic and topic not in unique_topics:
+            unique_topics.append(topic)
+    if not unique_topics:
+        return ""
+    rendered = "、".join(unique_topics[:limit])
+    if len(unique_topics) > limit:
+        return f"{rendered}等"
+    return rendered
+
+
+def _build_summary_line(body: str) -> str | None:
+    cleaned_body = _strip_generated_summary(body)
+    topics_by_kind: dict[str, list[str]] = {}
+    current_kind = "other"
+
+    for raw_line in cleaned_body.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("### "):
+            current_kind = _SUMMARY_HEADING_TO_KIND.get(line, "other")
+            continue
+        topic = _extract_summary_topic(line)
+        if topic:
+            topics_by_kind.setdefault(current_kind, []).append(topic)
+
+    clauses: list[str] = []
+    for kind in ("added", "changed", "fixed", "removed", "security", "deprecated", "other"):
+        topics = topics_by_kind.get(kind)
+        if not topics:
+            continue
+        rendered_topics = _format_summary_topics(topics)
+        if not rendered_topics:
+            continue
+        clauses.append(f"{_SUMMARY_KIND_TO_VERB[kind]}{rendered_topics}")
+        if len(clauses) == 2:
+            break
+
+    if not clauses:
+        return None
+    if len(clauses) == 1:
+        return f"{_SUMMARY_PREFIX}本次快照{clauses[0]}。"
+    return f"{_SUMMARY_PREFIX}本次快照{clauses[0]}，并{clauses[1]}。"
+
+
+def _with_generated_summary(body: str) -> str:
+    cleaned_body = _strip_generated_summary(body)
+    if not _body_has_meaningful_content(cleaned_body):
+        return cleaned_body
+    summary_line = _build_summary_line(cleaned_body)
+    if not summary_line:
+        return cleaned_body
+    return f"{summary_line}\n\n{cleaned_body}"
 
 
 def _parse_sections(text: str) -> tuple[str, list[ChangelogSection]]:
@@ -234,7 +345,11 @@ def prepare_push(
         expected_version = target_version
         normalized_sections = [
             ChangelogSection(title="Unreleased", body=""),
-            ChangelogSection(title=target_version, entry_date=snapshot_date, body=unreleased_body),
+            ChangelogSection(
+                title=target_version,
+                entry_date=snapshot_date,
+                body=_with_generated_summary(unreleased_body),
+            ),
             *other_sections,
         ]
     else:
@@ -252,7 +367,11 @@ def prepare_push(
             snapshot_date = effective_date.isoformat()
             mode = "revision"
             normalized_sections.append(
-                ChangelogSection(title=snapshot_title, entry_date=snapshot_date, body=unreleased_body)
+                ChangelogSection(
+                    title=snapshot_title,
+                    entry_date=snapshot_date,
+                    body=_with_generated_summary(unreleased_body),
+                )
             )
         normalized_sections.extend(other_sections)
 

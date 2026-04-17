@@ -9,7 +9,17 @@
 
 ## [Unreleased]
 
+## [0.1.1-005] - 2026-04-17
+
+> 摘要：本次快照调整快照摘要。
+
+### Changed
+
+- **快照摘要**: `pre-push` changelog workflow 现在会在自动生成的 revision / release 快照标题下补一行一句话摘要，保留版本概览信息，同时继续兼容标准 Keep a Changelog 标题格式。
+
 ## [0.1.1-004] - 2026-04-17
+
+> 摘要：本次快照调整目标排序、约束条件，并修复QuickStart 前端预览、查看全部组合弹层。
 
 ### Changed
 
