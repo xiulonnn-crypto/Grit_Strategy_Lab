@@ -199,6 +199,10 @@ function parseSnapshotIds(metaSecondary?: string): { datasetSnapshotId: string; 
   return { datasetSnapshotId: '-', universeSnapshotId: '-' };
 }
 
+function formatRecentEditLabel(value?: string | null): string {
+  return `最近编辑时间 ${value ?? '时间未知'}`;
+}
+
 export function WorkspaceStrategySection({
   strategies,
   loading,
@@ -353,15 +357,9 @@ export function WorkspaceStrategySection({
 
               <div className="workspace-card-footer">
                 <div className="workspace-card-meta">
-                  <p className="workspace-card-meta-row">
-                    {strategy.metaPrimary ?? `股票池 ${strategy.universeName} · ${getStrategyTypeLabel(strategy.strategyType)}`}
+                  <p className="workspace-card-meta-row workspace-card-meta-row--time">
+                    {formatRecentEditLabel(strategy.metaTimestamp)}
                   </p>
-                  <p className="workspace-card-meta-row">
-                    {strategy.metaSecondary ?? `参数版本 ${strategy.parameterVersionId ?? `v${strategy.parameterVersion}`}`}
-                  </p>
-                  {strategy.metaTimestamp ? (
-                    <p className="workspace-card-meta-row workspace-card-meta-row--time">{strategy.metaTimestamp}</p>
-                  ) : null}
                 </div>
 
                 <button className="ghost-button workspace-card-action workspace-action-button" onClick={() => navigate(`/strategies/${strategy.id}`)} type="button">

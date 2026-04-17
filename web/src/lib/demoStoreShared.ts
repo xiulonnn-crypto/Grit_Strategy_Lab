@@ -7,6 +7,7 @@ import type {
   ParameterValue,
 } from '../types';
 import { buildParameterDiffRows } from './adapters';
+import { stripStrategyVersionSuffix } from './strategy-version';
 
 export type DemoState = {
   strategies: ApiStrategyDetail[];
@@ -31,27 +32,10 @@ export function nextId(prefix: string): string {
   return `${prefix}-${Math.random().toString(16).slice(2, 10)}`;
 }
 
-export function stripStrategyVersionSuffix(name: string): string {
-  const trimmed = name.trim();
-  if (!trimmed) {
-    return trimmed;
-  }
-  let cursor = trimmed.length;
-  while (cursor > 0 && /\d/.test(trimmed[cursor - 1] ?? '')) {
-    cursor -= 1;
-  }
-  if (cursor > 0 && cursor < trimmed.length && trimmed[cursor - 1]?.toLowerCase() === 'v') {
-    return trimmed.slice(0, cursor - 1).trimEnd();
-  }
-  return trimmed;
-}
-
 export function formatVersionedStrategyName(name: string, version: number | undefined): string {
   const baseName = stripStrategyVersionSuffix(name) || name.trim() || '策略';
-  if (typeof version !== 'number' || !Number.isFinite(version) || version <= 1) {
-    return baseName;
-  }
-  return `${baseName}v${Math.round(version)}`;
+  void version;
+  return baseName;
 }
 
 export function buildDelta(

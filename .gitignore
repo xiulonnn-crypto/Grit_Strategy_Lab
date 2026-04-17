@@ -65,3 +65,4 @@ QuickStart-Grit.local.ps1
 .vscode/
 .idea/
 .gstack/
+.codex-auto-memory.local.json

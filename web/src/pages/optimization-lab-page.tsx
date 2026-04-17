@@ -1,13 +1,19 @@
 ﻿import { useEffect, useMemo, useState } from "react";
 import { navigateTo } from "../lib/appRouteContext";
-import type { FormEvent } from "react";
+import type { FormEvent, WheelEvent as ReactWheelEvent } from "react";
+import { useRef } from "react";
 import { useApiClient } from "../lib/demoStoreContext";
-import { collectOptimizationParameterSeeds } from "../lib/optimization-config-fields";
+import {
+  collectOptimizationParameterSeeds,
+  MOMENTUM_REBALANCE_FREQUENCY_OPTIONS,
+  OBSERVATION_TIMEFRAME_OPTIONS,
+} from "../lib/optimization-config-fields";
 import {
   buildOptimizationConfigPath,
   buildOptimizationJobsPath,
   buildOptimizationSelectPath,
 } from "../lib/optimization-routes";
+import { formatStrategyVersionTag, getStrategyDisplayName } from "../lib/strategy-version";
 import type {
   ApiBacktestRunDetail,
   ApiOptimizationConstraint,
@@ -37,13 +43,204 @@ type OptimizationDisplayCandidate = ApiOptimizationCandidate & {
 type OptimizationConstraintPresetKey = ApiOptimizationConstraintPresetKey;
 type OptimizationConstraint = ApiOptimizationConstraint;
 type OptimizationConstraintVerdict = "pass" | "watch" | "risk" | "info";
-type OptimizationObjective = "return_sharpe" | "annualized_return";
+type OptimizationObjective =
+  | "return_sharpe"
+  | "annualized_return"
+  | "composite_score";
+type OptimizationAllCombinationSortKey =
+  | "parameter_summary"
+  | "annualized_return"
+  | "return_sharpe"
+  | "out_of_sample_sharpe"
+  | "max_drawdown_pct"
+  | "stability"
+  | "composite_score"
+  | "status";
+type SortDirection = "asc" | "desc";
 type OptimizationConstraintPreset = {
   key: OptimizationConstraintPresetKey;
   label: string;
   toneLabel: string;
   constraints: OptimizationConstraint[];
 };
+type OptimizationDiscreteOption = {
+  value: string;
+  label: string;
+};
+
+type OptimizationDiscreteFieldControlProps = {
+  fieldKey: string;
+  label: string;
+  hint: string;
+  options: OptimizationDiscreteOption[];
+  values: string[];
+  onChange: (values: string[]) => void;
+};
+
+const OPTIMIZATION_DISCRETE_FIELD_OPTIONS: Record<
+  string,
+  OptimizationDiscreteOption[]
+> = {
+  observation_timeframe: OBSERVATION_TIMEFRAME_OPTIONS,
+  rebalance_frequency: MOMENTUM_REBALANCE_FREQUENCY_OPTIONS,
+};
+
+function normalizeDiscreteSelectionOrder(
+  options: OptimizationDiscreteOption[],
+  values: string[],
+): string[] {
+  const selected = new Set(values);
+  return options
+    .map((option) => option.value)
+    .filter((value) => selected.has(value));
+}
+
+function OptimizationDiscreteFieldControl({
+  fieldKey,
+  label,
+  hint,
+  options,
+  values,
+  onChange,
+}: OptimizationDiscreteFieldControlProps): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const listboxId = `optimization-discrete-field-${fieldKey}`;
+  const selectedOptions = useMemo(
+    () => options.filter((option) => values.includes(option.value)),
+    [options, values],
+  );
+
+  useEffect(() => {
+    if (!open) {
+      return undefined;
+    }
+
+    function handlePointerDown(event: MouseEvent): void {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+
+    function handleEscape(event: KeyboardEvent): void {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [open]);
+
+  function toggleValue(value: string): void {
+    const selected = values.includes(value);
+    if (selected && values.length === 1) {
+      return;
+    }
+    const nextValues = selected
+      ? values.filter((item) => item !== value)
+      : [...values, value];
+    const normalizedValues = normalizeDiscreteSelectionOrder(options, nextValues);
+    if (!normalizedValues.length) {
+      return;
+    }
+    onChange(normalizedValues);
+  }
+
+  return (
+    <div className="optimization-discrete-field" ref={rootRef}>
+      <button
+        aria-controls={listboxId}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-label={`${label} 可选值`}
+        className="optimization-discrete-field__trigger"
+        onClick={() => setOpen((current) => !current)}
+        type="button"
+      >
+        <span className="optimization-discrete-field__tags">
+          {selectedOptions.map((option) => (
+            <span
+              className="optimization-discrete-field__tag"
+              key={`${fieldKey}-${option.value}`}
+            >
+              {option.label}
+            </span>
+          ))}
+        </span>
+        <span className="optimization-discrete-field__trigger-meta">
+          已选 {selectedOptions.length} 项
+        </span>
+        <span
+          aria-hidden="true"
+          className={`optimization-discrete-field__chevron${
+            open ? " optimization-discrete-field__chevron--open" : ""
+          }`}
+        >
+          ▾
+        </span>
+      </button>
+
+      {open ? (
+        <div className="optimization-discrete-field__panel">
+          <div className="optimization-discrete-field__panel-header">
+            <strong>{label}</strong>
+            <span>{selectedOptions.length} 项已选</span>
+          </div>
+          <ul
+            aria-label={`${label} 可选值`}
+            aria-multiselectable="true"
+            className="optimization-discrete-field__options"
+            id={listboxId}
+            role="listbox"
+          >
+            {options.map((option) => {
+              const checked = values.includes(option.value);
+              return (
+                <li
+                  aria-selected={checked}
+                  className="optimization-discrete-field__option-row"
+                  key={`${fieldKey}-${option.value}`}
+                  role="option"
+                >
+                  <label
+                    className={`optimization-discrete-field__option${
+                      checked
+                        ? " optimization-discrete-field__option--selected"
+                        : ""
+                    }`}
+                  >
+                    <input
+                      className="optimization-discrete-field__checkbox"
+                      checked={checked}
+                      onChange={() => toggleValue(option.value)}
+                      type="checkbox"
+                      value={option.value}
+                    />
+                    <span className="optimization-discrete-field__option-label">
+                      {option.label}
+                    </span>
+                    {checked ? (
+                      <span className="optimization-discrete-field__option-badge">
+                        已选
+                      </span>
+                    ) : null}
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ) : null}
+
+      <span className="optimization-discrete-field__hint">{hint}</span>
+    </div>
+  );
+}
 
 function parsePositiveIntEnvVar(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value ?? "", 10);
@@ -88,13 +285,22 @@ const HEATMAP_METRIC_OPTIONS: Array<{ key: HeatmapMetricKey; label: string }> =
 const DEFAULT_CONSTRAINT_PRESET_KEY: OptimizationConstraintPresetKey =
   "balanced";
 const DEFAULT_OPTIMIZATION_OBJECTIVE: OptimizationObjective = "return_sharpe";
+const SUPPORTED_OPTIMIZATION_CONSTRAINT_KEYS = new Set([
+  "max_drawdown_pct",
+  "out_of_sample_sharpe",
+  "annualized_return",
+  "stability",
+  "return_sharpe",
+]);
 const OPTIMIZATION_OBJECTIVE_OPTIONS: Array<{
   key: OptimizationObjective;
   label: string;
 }> = [
   { key: "return_sharpe", label: "收益夏普 Max" },
   { key: "annualized_return", label: "年化收益率 Max" },
+  { key: "composite_score", label: "综合得分 Max" },
 ];
+const ALL_COMBINATIONS_PAGE_SIZE = 100;
 const OPTIMIZATION_CONSTRAINT_PRESETS: OptimizationConstraintPreset[] = [
   {
     key: "balanced",
@@ -135,15 +341,6 @@ const OPTIMIZATION_CONSTRAINT_PRESETS: OptimizationConstraintPreset[] = [
         operator: ">=",
         value: 70,
         unit: "pts",
-        source: "preset",
-      },
-      {
-        key: "turnover",
-        label: "换手率",
-        category: "risk",
-        operator: "<=",
-        value: 12,
-        unit: "%",
         source: "preset",
       },
       {
@@ -199,15 +396,6 @@ const OPTIMIZATION_CONSTRAINT_PRESETS: OptimizationConstraintPreset[] = [
         source: "preset",
       },
       {
-        key: "turnover",
-        label: "换手率",
-        category: "risk",
-        operator: "<=",
-        value: 10,
-        unit: "%",
-        source: "preset",
-      },
-      {
         key: "return_sharpe",
         label: "收益夏普",
         category: "return",
@@ -257,15 +445,6 @@ const OPTIMIZATION_CONSTRAINT_PRESETS: OptimizationConstraintPreset[] = [
         operator: ">=",
         value: 60,
         unit: "pts",
-        source: "preset",
-      },
-      {
-        key: "turnover",
-        label: "换手率",
-        category: "risk",
-        operator: "<=",
-        value: 16,
-        unit: "%",
         source: "preset",
       },
       {
@@ -523,9 +702,14 @@ function cloneOptimizationConstraints(
 ): OptimizationConstraint[] {
   const preset = getOptimizationConstraintPreset(presetKey);
   const sourceConstraints = Array.isArray(constraints)
-    ? constraints
+    ? constraints.filter((constraint) =>
+        SUPPORTED_OPTIMIZATION_CONSTRAINT_KEYS.has(constraint.key),
+      )
     : preset.constraints;
-  return sourceConstraints.map((constraint) => {
+  const effectiveConstraints = sourceConstraints.length
+    ? sourceConstraints
+    : preset.constraints;
+  return effectiveConstraints.map((constraint) => {
     const presetConstraint = preset.constraints.find(
       (item) => item.key === constraint.key,
     );
@@ -820,10 +1004,242 @@ function resolveConstraintBaselineMetric(
 function getOptimizationObjectiveLabel(
   objective: OptimizationObjective | string | null | undefined,
 ): string {
+  const normalizedObjective = normalizeOptimizationObjective(objective);
   return (
-    OPTIMIZATION_OBJECTIVE_OPTIONS.find((option) => option.key === objective)
+    OPTIMIZATION_OBJECTIVE_OPTIONS.find(
+      (option) => option.key === normalizedObjective,
+    )
       ?.label ?? "收益夏普 Max"
   );
+}
+
+function normalizeOptimizationObjective(
+  objective: OptimizationObjective | string | null | undefined,
+): OptimizationObjective {
+  const normalizedObjective = String(objective ?? "")
+    .trim()
+    .toLowerCase();
+  if (
+    normalizedObjective === "annualized_return" ||
+    normalizedObjective === "cagr" ||
+    normalizedObjective === "return"
+  ) {
+    return "annualized_return";
+  }
+  if (
+    normalizedObjective === "composite_score" ||
+    normalizedObjective === "score"
+  ) {
+    return "composite_score";
+  }
+  return "return_sharpe";
+}
+
+function getOptimizationObjectiveMetricValue(
+  candidate: OptimizationDisplayCandidate,
+  objective: OptimizationObjective,
+): number {
+  if (objective === "annualized_return") {
+    return (
+      getCandidateMetric(candidate, "annualized_return") ??
+      getCandidateMetric(candidate, "cagr") ??
+      0
+    );
+  }
+  if (objective === "composite_score") {
+    return typeof candidate.score === "number" ? candidate.score : 0;
+  }
+  return (
+    getCandidateMetric(candidate, "return_sharpe") ??
+    getCandidateMetric(candidate, "sharpe") ??
+    0
+  );
+}
+
+function rankOptimizationCandidatesByObjective(
+  candidates: OptimizationDisplayCandidate[],
+  objective: OptimizationObjective,
+): OptimizationDisplayCandidate[] {
+  return [...candidates]
+    .sort((left, right) => {
+      const primaryDelta =
+        getOptimizationObjectiveMetricValue(right, objective) -
+        getOptimizationObjectiveMetricValue(left, objective);
+      if (Math.abs(primaryDelta) > 1e-9) {
+        return primaryDelta;
+      }
+      const rankDelta = (left.rank ?? Number.MAX_SAFE_INTEGER) -
+        (right.rank ?? Number.MAX_SAFE_INTEGER);
+      if (rankDelta !== 0) {
+        return rankDelta;
+      }
+      return String(left.id ?? "").localeCompare(String(right.id ?? ""));
+    })
+    .map((candidate, index) => ({
+      ...candidate,
+      rank: index + 1,
+    }));
+}
+
+function getOptimizationAllCombinationsDefaultSortKey(
+  objective: OptimizationObjective,
+): OptimizationAllCombinationSortKey {
+  if (objective === "annualized_return") {
+    return "annualized_return";
+  }
+  if (objective === "composite_score") {
+    return "composite_score";
+  }
+  return "return_sharpe";
+}
+
+function getOptimizationAllCombinationsInitialDirection(
+  key: OptimizationAllCombinationSortKey,
+): SortDirection {
+  return key === "parameter_summary" || key === "status" ? "asc" : "desc";
+}
+
+function getCandidateStatusText(candidate: OptimizationDisplayCandidate): string {
+  return (
+    translateOptimizationText(candidate.status_label) ??
+    formatOptimizationStatus(candidate.status)
+  );
+}
+
+function getCandidateSummaryText(
+  candidate: OptimizationDisplayCandidate,
+  searchSpace: ApiOptimizationSearchSpaceField[],
+): string {
+  const rangeEntries = buildRangeParameterEntries(
+    candidate.parameter_snapshot,
+    searchSpace,
+  );
+  if (rangeEntries.length) {
+    return rangeEntries
+      .map((entry) => `${entry.label} ${entry.value}`)
+      .join("；");
+  }
+  return (
+    buildCandidateParameterSummary(
+      candidate.parameter_snapshot,
+      searchSpace,
+    ) || "-"
+  );
+}
+
+function compareOptionalNumbers(
+  left: number | undefined,
+  right: number | undefined,
+  direction: SortDirection,
+): number {
+  const leftValid = typeof left === "number" && Number.isFinite(left);
+  const rightValid = typeof right === "number" && Number.isFinite(right);
+  if (leftValid && rightValid) {
+    return direction === "asc" ? left - right : right - left;
+  }
+  if (leftValid) {
+    return -1;
+  }
+  if (rightValid) {
+    return 1;
+  }
+  return 0;
+}
+
+function sortOptimizationCandidatesForModal(
+  candidates: OptimizationDisplayCandidate[],
+  searchSpace: ApiOptimizationSearchSpaceField[],
+  sortKey: OptimizationAllCombinationSortKey,
+  direction: SortDirection,
+): OptimizationDisplayCandidate[] {
+  return [...candidates].sort((left, right) => {
+    let comparison = 0;
+
+    switch (sortKey) {
+      case "parameter_summary":
+        comparison =
+          direction === "asc"
+            ? getCandidateSummaryText(left, searchSpace).localeCompare(
+                getCandidateSummaryText(right, searchSpace),
+                "zh-Hans-CN",
+              )
+            : getCandidateSummaryText(right, searchSpace).localeCompare(
+                getCandidateSummaryText(left, searchSpace),
+                "zh-Hans-CN",
+              );
+        break;
+      case "status":
+        comparison =
+          direction === "asc"
+            ? getCandidateStatusText(left).localeCompare(
+                getCandidateStatusText(right),
+                "zh-Hans-CN",
+              )
+            : getCandidateStatusText(right).localeCompare(
+                getCandidateStatusText(left),
+                "zh-Hans-CN",
+              );
+        break;
+      case "annualized_return":
+        comparison = compareOptionalNumbers(
+          getCandidateMetric(left, "annualized_return") ??
+            getCandidateMetric(left, "cagr"),
+          getCandidateMetric(right, "annualized_return") ??
+            getCandidateMetric(right, "cagr"),
+          direction,
+        );
+        break;
+      case "return_sharpe":
+        comparison = compareOptionalNumbers(
+          getCandidateMetric(left, "return_sharpe") ??
+            getCandidateMetric(left, "sharpe"),
+          getCandidateMetric(right, "return_sharpe") ??
+            getCandidateMetric(right, "sharpe"),
+          direction,
+        );
+        break;
+      case "out_of_sample_sharpe":
+        comparison = compareOptionalNumbers(
+          getCandidateMetric(left, "out_of_sample_sharpe"),
+          getCandidateMetric(right, "out_of_sample_sharpe"),
+          direction,
+        );
+        break;
+      case "max_drawdown_pct":
+        comparison = compareOptionalNumbers(
+          getCandidateMetric(left, "max_drawdown_pct"),
+          getCandidateMetric(right, "max_drawdown_pct"),
+          direction,
+        );
+        break;
+      case "stability":
+        comparison = compareOptionalNumbers(
+          getCandidateMetric(left, "stability"),
+          getCandidateMetric(right, "stability"),
+          direction,
+        );
+        break;
+      case "composite_score":
+        comparison = compareOptionalNumbers(left.score, right.score, direction);
+        break;
+      default:
+        comparison = 0;
+        break;
+    }
+
+    if (comparison !== 0) {
+      return comparison;
+    }
+
+    const rankDelta =
+      (left.rank ?? Number.MAX_SAFE_INTEGER) -
+      (right.rank ?? Number.MAX_SAFE_INTEGER);
+    if (rankDelta !== 0) {
+      return rankDelta;
+    }
+
+    return String(left.id ?? "").localeCompare(String(right.id ?? ""));
+  });
 }
 
 export function buildOptimizationRerunPayload(
@@ -851,10 +1267,11 @@ export function buildOptimizationRerunPayload(
   const constraintLabel =
     explicitLabel ?? buildOptimizationConstraintLabel(preset, constraints);
   return {
-    objective:
-      typeof request.objective === "string" && request.objective.trim()
-        ? request.objective
-        : DEFAULT_OPTIMIZATION_OBJECTIVE,
+    objective: normalizeOptimizationObjective(
+      typeof summary.objective === "string" && summary.objective.trim()
+        ? summary.objective
+        : request.objective,
+    ),
     base_parameter_version_id:
       request.base_parameter_version_id ??
       job.base_parameter_version_id ??
@@ -934,14 +1351,6 @@ function buildOptimizationResultConstraintDraft(
     strategy,
     sourceRun,
   );
-}
-
-function formatOptimizationConstraintChip(
-  constraint: OptimizationConstraint,
-): string {
-  return `${constraint.label} ${formatOptimizationConstraintOperator(
-    constraint.operator,
-  )} ${formatOptimizationConstraintThreshold(constraint)}`;
 }
 
 function normalizeConstraintMetricValue(
@@ -1077,6 +1486,62 @@ function isMissingBacktestRunError(caught: unknown): boolean {
   return /Backtest run not found:/i.test(message);
 }
 
+function getDiscreteFieldOptions(
+  key: string,
+): OptimizationDiscreteOption[] {
+  return OPTIMIZATION_DISCRETE_FIELD_OPTIONS[key] ?? [];
+}
+
+function uniqueParameterValues(values: ParameterValue[]): ParameterValue[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    if (value === null || value === undefined || value === "") {
+      return false;
+    }
+    const fingerprint = JSON.stringify(value);
+    if (seen.has(fingerprint)) {
+      return false;
+    }
+    seen.add(fingerprint);
+    return true;
+  });
+}
+
+function getDiscreteFieldValues(
+  field: Pick<
+    ApiOptimizationSearchSpaceField,
+    "key" | "current" | "value" | "start" | "end" | "values"
+  >,
+): ParameterValue[] {
+  const configuredOptions = getDiscreteFieldOptions(field.key);
+  const configuredValues = configuredOptions.map((option) => option.value);
+  const rawValues = uniqueParameterValues(
+    Array.isArray(field.values) ? field.values : [],
+  );
+  const matchedValues = configuredValues.filter((value) =>
+    rawValues.includes(value),
+  );
+  if (matchedValues.length) {
+    return matchedValues;
+  }
+
+  const lockedValue =
+    field.current ?? field.value ?? field.start ?? field.end ?? null;
+  if (lockedValue !== null && lockedValue !== undefined && lockedValue !== "") {
+    if (configuredValues.includes(String(lockedValue))) {
+      return [String(lockedValue)];
+    }
+    return configuredValues.length ? [configuredValues[0]] : [lockedValue];
+  }
+  return configuredValues.length ? [configuredValues[0]] : [];
+}
+
+function isDiscreteSearchField(
+  field: ApiOptimizationSearchSpaceField,
+): boolean {
+  return field.mode === "discrete";
+}
+
 function formatParameterValue(value: ParameterValue | undefined): string {
   if (value === null || value === undefined || value === "") {
     return "-";
@@ -1086,6 +1551,24 @@ function formatParameterValue(value: ParameterValue | undefined): string {
   }
   if (value === "equal_weight") {
     return "等权";
+  }
+  if (value === "daily") {
+    return "每日";
+  }
+  if (value === "weekly") {
+    return "每周";
+  }
+  if (value === "monthly") {
+    return "每月";
+  }
+  if (value === "quarterly") {
+    return "每季度";
+  }
+  if (value === "semiannual") {
+    return "每半年";
+  }
+  if (value === "yearly") {
+    return "每年";
   }
   return String(value);
 }
@@ -1203,11 +1686,14 @@ function formatPercentMetric(value: number | undefined): string {
   return `${value > 0 ? "+" : ""}${value.toFixed(1)}%`;
 }
 
-function formatReturnRate(value: number | undefined): string {
-  if (typeof value !== "number" || Number.isNaN(value)) {
+function formatReturnRate(
+  value: number | string | null | undefined,
+): string {
+  const normalizedValue = readNumber(value);
+  if (normalizedValue === undefined) {
     return "-";
   }
-  return formatPercentMetric(value * 100);
+  return formatPercentMetric(normalizedValue * 100);
 }
 
 function formatEtaMinutes(value: number | undefined): string {
@@ -1255,43 +1741,6 @@ function formatDurationMinutes(elapsedSeconds: number | null): number | null {
   return Math.max(0, Math.round(elapsedSeconds / 60));
 }
 
-function stripStrategyVersionSuffix(name: string): string {
-  const trimmed = name.trim();
-  if (!trimmed) {
-    return trimmed;
-  }
-  let cursor = trimmed.length;
-  while (cursor > 0 && /\d/.test(trimmed[cursor - 1] ?? "")) {
-    cursor -= 1;
-  }
-  if (
-    cursor > 0 &&
-    cursor < trimmed.length &&
-    trimmed[cursor - 1]?.toLowerCase() === "v"
-  ) {
-    return trimmed.slice(0, cursor - 1).trimEnd();
-  }
-  return trimmed;
-}
-
-function formatVersionedStrategyName(
-  name: string | null | undefined,
-  version: number | undefined,
-): string {
-  const baseName =
-    stripStrategyVersionSuffix(String(name ?? "").trim()) ||
-    String(name ?? "").trim() ||
-    TEXT.resultsTitle;
-  if (
-    typeof version !== "number" ||
-    !Number.isFinite(version) ||
-    version <= 1
-  ) {
-    return baseName;
-  }
-  return `${baseName}v${Math.round(version)}`;
-}
-
 function formatOptimizationHeroSummary(
   combinations: number | undefined,
   elapsedSeconds: number | null,
@@ -1332,6 +1781,134 @@ function clampMetric(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function asPercentFromRatio(value: number | undefined): number | undefined {
+  return value === undefined ? undefined : value * 100;
+}
+
+function deriveConsistencyScoreFromChartSeries(
+  chartSeries: ApiBacktestRunDetail["chart_series"] | undefined,
+): number | undefined {
+  const returns = (chartSeries ?? [])
+    .map((point) => readNumber(point.strategy_return) ?? 0)
+    .filter((value) => Number.isFinite(value));
+  if (!returns.length) {
+    return undefined;
+  }
+  const positiveShare =
+    returns.filter((value) => value > 0).length / returns.length;
+  const averageReturn =
+    returns.reduce((sum, value) => sum + value, 0) / returns.length;
+  const variance =
+    returns.reduce((sum, value) => sum + (value - averageReturn) ** 2, 0) /
+    returns.length;
+  const volatility = Math.sqrt(Math.max(variance, 0));
+  return clampMetric(
+    positiveShare * (1 / (1 + volatility * 10)),
+    0,
+    1,
+  );
+}
+
+function resolveComparableOptimizationStability(
+  baselineRun: ApiBacktestRunDetail,
+): number {
+  const explicitStability = readNumber(baselineRun.metrics?.stability);
+  if (explicitStability !== undefined) {
+    return clampMetric(Math.round(explicitStability), 0, 100);
+  }
+  const consistencyScore =
+    readNumber(baselineRun.consistency_score?.score) ??
+    deriveConsistencyScoreFromChartSeries(baselineRun.chart_series);
+  if (consistencyScore === undefined) {
+    return 0;
+  }
+  return clampMetric(Math.round(consistencyScore * 100), 0, 100);
+}
+
+function scoreOptimizationMetrics(
+  metrics: Record<string, number>,
+  objective: OptimizationObjective,
+): number {
+  const returnSharpe = readNumber(metrics.return_sharpe ?? metrics.sharpe) ?? 0;
+  const outOfSampleSharpe =
+    readNumber(metrics.out_of_sample_sharpe ?? metrics.oos_sharpe) ??
+    returnSharpe;
+  const annualizedReturn =
+    readNumber(metrics.annualized_return ?? metrics.cagr) ?? 0;
+  const annualizedReturnPct = normalizeConstraintMetricValue(
+    "annualized_return",
+    annualizedReturn,
+  );
+  const totalReturnPct =
+    readNumber(metrics.total_return_pct) ??
+    (readNumber(metrics.total_return) ?? 0) * 100;
+  const maxDrawdownPct =
+    readNumber(metrics.max_drawdown_pct) ??
+    (readNumber(metrics.max_drawdown) ?? 0) * 100;
+  const stability = readNumber(metrics.stability) ?? 0;
+  const drawdownPenalty = normalizeConstraintMetricValue(
+    "max_drawdown_pct",
+    maxDrawdownPct,
+  );
+  const normalizedObjective = normalizeOptimizationObjective(objective);
+  const calmarRatio = annualizedReturnPct / Math.max(drawdownPenalty, 1);
+
+  function bandScore(value: number, floor: number, ceiling: number): number {
+    if (ceiling <= floor) {
+      return 0;
+    }
+    return Math.max(0, Math.min((value - floor) / (ceiling - floor), 1.25));
+  }
+
+  function inverseBandScore(
+    value: number,
+    floor: number,
+    ceiling: number,
+  ): number {
+    if (ceiling <= floor) {
+      return 0;
+    }
+    return Math.max(0, Math.min((ceiling - value) / (ceiling - floor), 1.25));
+  }
+
+  const returnComponent = bandScore(annualizedReturnPct, 4, 18);
+  const sharpeComponent = bandScore(returnSharpe, 0.3, 1.6);
+  const oosComponent = bandScore(outOfSampleSharpe, 0.2, 1.2);
+  const calmarComponent = bandScore(calmarRatio, 0.25, 1.2);
+  const stabilityComponent = bandScore(stability, 40, 85);
+  const drawdownComponent = inverseBandScore(drawdownPenalty, 15, 45);
+
+  const baseWeights = {
+    sharpe: 0.24,
+    oos: 0.24,
+    calmar: 0.18,
+    stability: 0.14,
+    return: 0.12,
+    drawdown: 0.05,
+  };
+  const baseWeightTotal =
+    Object.values(baseWeights).reduce((sum, value) => sum + value, 0) || 1;
+  const baseScore =
+    sharpeComponent * (baseWeights.sharpe / baseWeightTotal) +
+    oosComponent * (baseWeights.oos / baseWeightTotal) +
+    calmarComponent * (baseWeights.calmar / baseWeightTotal) +
+    stabilityComponent * (baseWeights.stability / baseWeightTotal) +
+    returnComponent * (baseWeights.return / baseWeightTotal) +
+    drawdownComponent * (baseWeights.drawdown / baseWeightTotal);
+
+  const objectiveScore =
+    normalizedObjective === "annualized_return"
+      ? returnComponent * 0.07 + calmarComponent * 0.04
+      : normalizedObjective === "return_sharpe"
+        ? sharpeComponent * 0.07 + oosComponent * 0.04
+        : 0;
+  const totalReturnBonus = clampMetric(Math.min(totalReturnPct, 200) * 0.01, -1, 2);
+
+  return Number(
+    (((baseScore + objectiveScore) * 100 + totalReturnBonus).toFixed(3)),
+  );
+}
+
 function buildDerivedValidationWindows(
   metrics: Record<string, number>,
 ): ApiOptimizationValidationWindow[] {
@@ -1352,6 +1929,7 @@ function buildDerivedValidationWindows(
   return [
     {
       label: "窗口 A",
+      period_label: "训练早段 至 训练早段",
       annualized_return: Number((annualizedReturn - 0.012).toFixed(4)),
       return_sharpe: Number((returnSharpe - 0.04).toFixed(2)),
       out_of_sample_sharpe: Number((outOfSampleSharpe - 0.03).toFixed(2)),
@@ -1361,6 +1939,7 @@ function buildDerivedValidationWindows(
     },
     {
       label: "窗口 B",
+      period_label: "训练中段 至 训练中段",
       annualized_return: Number(annualizedReturn.toFixed(4)),
       return_sharpe: Number(returnSharpe.toFixed(2)),
       out_of_sample_sharpe: Number(outOfSampleSharpe.toFixed(2)),
@@ -1370,6 +1949,7 @@ function buildDerivedValidationWindows(
     },
     {
       label: "窗口 C",
+      period_label: "训练尾段 至 训练尾段",
       annualized_return: Number((annualizedReturn - 0.019).toFixed(4)),
       return_sharpe: Number((returnSharpe - 0.09).toFixed(2)),
       out_of_sample_sharpe: Number((outOfSampleSharpe - 0.08).toFixed(2)),
@@ -1837,7 +2417,7 @@ function isOptimizationProgressState(status?: string | null): boolean {
 }
 
 const MISSING_MATCHING_COMBINATION_COUNT_ERROR =
-  "优化结果缺少 matching_combination_count，无法确认符合过滤条件的组合总数。";
+  "优化结果缺少 matching_combination_count，无法确认符合约束条件的组合总数。";
 
 function getOptimizationMatchingCombinationCount(
   job: ApiOptimizationJobDetail,
@@ -1846,13 +2426,15 @@ function getOptimizationMatchingCombinationCount(
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
   }
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
   throw new Error(MISSING_MATCHING_COMBINATION_COUNT_ERROR);
+}
+
+function isPersistedCandidateOnlyMatchingCount(
+  job: ApiOptimizationJobDetail | null | undefined,
+): boolean {
+  const source =
+    job?.summary?.matching_combination_source ?? job?.matching_combination_source;
+  return source === "persisted_candidates";
 }
 
 function ensureOptimizationJobHasMatchingCombinationCount(
@@ -1948,6 +2530,7 @@ function buildBaselineCandidate(
   baselineRun: ApiBacktestRunDetail | null,
   searchSpace: ApiOptimizationSearchSpaceField[],
   rank: number,
+  objective: OptimizationObjective,
 ): OptimizationDisplayCandidate | null {
   if (!strategy || !baselineRun || !searchSpace.length) {
     return null;
@@ -1955,43 +2538,34 @@ function buildBaselineCandidate(
 
   const latestCompletedRun = strategy.latest_completed_run_summary;
   const annualizedReturn =
-    readNumber(latestCompletedRun?.annualized_return) ??
     readNumber(baselineRun.metrics?.annualized_return) ??
-    readNumber(baselineRun.metrics?.cagr);
+    readNumber(baselineRun.metrics?.cagr) ??
+    readNumber(latestCompletedRun?.annualized_return);
   const returnSharpe =
-    readNumber(latestCompletedRun?.sharpe) ??
     readNumber(baselineRun.metrics?.return_sharpe) ??
-    readNumber(baselineRun.metrics?.sharpe);
+    readNumber(baselineRun.metrics?.sharpe) ??
+    readNumber(latestCompletedRun?.sharpe);
   const outOfSampleSharpe =
-    readNumber(latestCompletedRun?.oos_sharpe) ??
     readNumber(baselineRun.metrics?.out_of_sample_sharpe) ??
     readNumber(baselineRun.metrics?.oos_sharpe) ??
+    readNumber(latestCompletedRun?.oos_sharpe) ??
     returnSharpe;
   const maxDrawdownPct =
-    (readNumber(latestCompletedRun?.max_drawdown) !== undefined
-      ? (readNumber(latestCompletedRun?.max_drawdown) ?? 0) * 100
-      : undefined) ??
-    (readNumber(baselineRun.metrics?.max_drawdown_pct) ??
-      (readNumber(baselineRun.metrics?.max_drawdown) ?? 0) * 100);
+    readNumber(baselineRun.metrics?.max_drawdown_pct) ??
+    asPercentFromRatio(
+      readNumber(baselineRun.metrics?.max_drawdown) ??
+        readNumber(latestCompletedRun?.max_drawdown),
+    );
   const turnover =
     readNumber(baselineRun.metrics?.turnover_pct) ??
     readNumber(baselineRun.metrics?.turnover);
   const totalReturnPct =
-    (readNumber(latestCompletedRun?.total_return) !== undefined
-      ? (readNumber(latestCompletedRun?.total_return) ?? 0) * 100
-      : undefined) ??
-    (readNumber(baselineRun.metrics?.total_return_pct) ??
-      (readNumber(baselineRun.metrics?.total_return) ?? 0) * 100);
-  const stability =
-    clampMetric(
-      Math.round(
-        (outOfSampleSharpe ?? returnSharpe ?? 0) * 32 +
-          (annualizedReturn ?? 0) * 180 -
-          Math.abs(maxDrawdownPct ?? 0) * 0.35,
-      ),
-      35,
-      88,
+    readNumber(baselineRun.metrics?.total_return_pct) ??
+    asPercentFromRatio(
+      readNumber(baselineRun.metrics?.total_return) ??
+        readNumber(latestCompletedRun?.total_return),
     );
+  const stability = resolveComparableOptimizationStability(baselineRun);
 
   if (
     annualizedReturn === undefined &&
@@ -2031,7 +2605,7 @@ function buildBaselineCandidate(
     status: "COMPLETED",
     status_label: "当前基准",
     rank,
-    score: Number((returnSharpe ?? 0).toFixed(3)),
+    score: scoreOptimizationMetrics(metrics, objective),
     parameter_snapshot: parameterSnapshot,
     parameter_delta: {},
     metrics,
@@ -2088,6 +2662,22 @@ function getDefaultFieldStep(value: ParameterValue): ParameterValue {
 function normalizeSearchField(
   field: ApiOptimizationSearchSpaceField,
 ): ApiOptimizationSearchSpaceField {
+  if (field.mode === "discrete") {
+    const values = getDiscreteFieldValues(field);
+    const lockedValue =
+      values[0] ?? field.current ?? field.value ?? field.start ?? field.end ?? null;
+    return {
+      ...field,
+      mode: "discrete",
+      current: field.current ?? lockedValue,
+      value: lockedValue,
+      start: lockedValue,
+      end: lockedValue,
+      step: undefined,
+      values,
+    };
+  }
+
   if (field.mode !== "fixed") {
     return {
       ...field,
@@ -2109,6 +2699,9 @@ function normalizeSearchField(
 function countSearchFieldCombinations(
   field: ApiOptimizationSearchSpaceField,
 ): number {
+  if (field.mode === "discrete") {
+    return Math.max(getDiscreteFieldValues(field).length, 1);
+  }
   if (field.mode === "fixed") {
     return 1;
   }
@@ -2153,6 +2746,23 @@ function buildConfiguredSearchField(
   field: ReturnType<typeof collectOptimizationParameterSeeds>[number],
   index: number,
 ): ApiOptimizationSearchSpaceField {
+  if (field.control === "multiselect") {
+    const configuredValues = (field.options ?? []).map((option) => option.value);
+    const selectedValues =
+      typeof field.value === "string" && field.value.trim()
+        ? configuredValues.filter((value) => value === field.value)
+        : [];
+    return normalizeSearchField({
+      key: field.key,
+      label: field.label,
+      mode: "discrete",
+      current: field.value,
+      value: field.value,
+      values: selectedValues.length ? selectedValues : configuredValues.slice(0, 1),
+      tag: "选股规则",
+    });
+  }
+
   const numericValue = asFiniteNumber(field.value);
   if (numericValue === null) {
     return normalizeSearchField({
@@ -2453,51 +3063,77 @@ export function OptimizationJobsIndexPage(): JSX.Element {
                 </tr>
               </thead>
               <tbody>
-                {jobs.map((job) => (
-                  <tr key={job.id}>
-                    <td>
-                      <button
-                        className="optimization-link"
-                        onClick={() =>
-                          navigateTo(`/optimization-jobs/${job.id}`)
-                        }
-                        type="button"
-                      >
-                        {job.id}
-                      </button>
-                    </td>
-                    <td>
-                      {getDisplayText(job.strategy_name, job.strategy_id)}
-                    </td>
-                    <td>{formatValidationMode(job.validation_mode)}</td>
-                    <td>
-                      {job.completed_combinations ?? 0} /{" "}
-                      {job.budget_combinations ?? 0}
-                    </td>
-                    <td>
-                      {getCandidateDisplayText(job.best_candidate_label, "-")}
-                    </td>
-                    <td>{formatOptimizationListStatus(job)}</td>
-                    <td>
-                      {formatUpdatedAt(job.updated_at ?? job.completed_at)}
-                    </td>
-                    <td className="optimization-jobs-table__actions">
-                      <button
-                        className="ghost-button optimization-jobs-table__delete"
-                        disabled={deleteBusy}
-                        onClick={() => {
-                          setDeleteError(null);
-                          setJobPendingDelete(job);
-                        }}
-                        type="button"
-                      >
-                        {deleteBusy && jobPendingDelete?.id === job.id
-                          ? TEXT.jobsDeleting
-                          : TEXT.jobsDeleteAction}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {jobs.map((job) => {
+                  const strategyDisplayName = getStrategyDisplayName(
+                    translateOptimizationText(job.strategy_name),
+                    job.strategy_id,
+                  );
+                  const strategyVersionTag = formatStrategyVersionTag(
+                    job.base_parameter_version_id,
+                  );
+
+                  return (
+                    <tr key={job.id}>
+                      <td>
+                        <button
+                          className="optimization-link"
+                          onClick={() =>
+                            navigateTo(`/optimization-jobs/${job.id}`)
+                          }
+                          type="button"
+                        >
+                          {job.id}
+                        </button>
+                      </td>
+                      <td>
+                        <div
+                          className="optimization-jobs-table__strategy"
+                          title={
+                            strategyVersionTag
+                              ? `${strategyDisplayName} ${strategyVersionTag}`
+                              : strategyDisplayName
+                          }
+                        >
+                          <span className="optimization-jobs-table__strategy-name">
+                            {strategyDisplayName}
+                          </span>
+                          {strategyVersionTag ? (
+                            <span className="status-chip status-chip--soft optimization-jobs-table__strategy-version">
+                              {strategyVersionTag}
+                            </span>
+                          ) : null}
+                        </div>
+                      </td>
+                      <td>{formatValidationMode(job.validation_mode)}</td>
+                      <td>
+                        {job.completed_combinations ?? 0} /{" "}
+                        {job.budget_combinations ?? 0}
+                      </td>
+                      <td>
+                        {getCandidateDisplayText(job.best_candidate_label, "-")}
+                      </td>
+                      <td>{formatOptimizationListStatus(job)}</td>
+                      <td>
+                        {formatUpdatedAt(job.updated_at ?? job.completed_at)}
+                      </td>
+                      <td className="optimization-jobs-table__actions">
+                        <button
+                          className="ghost-button optimization-jobs-table__delete"
+                          disabled={deleteBusy}
+                          onClick={() => {
+                            setDeleteError(null);
+                            setJobPendingDelete(job);
+                          }}
+                          type="button"
+                        >
+                          {deleteBusy && jobPendingDelete?.id === job.id
+                            ? TEXT.jobsDeleting
+                            : TEXT.jobsDeleteAction}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -2974,8 +3610,13 @@ export function OptimizationConfigPage({
       >
         <div>
           <p className="optimization-lab-eyebrow">第二步 · 参数配置</p>
-          <h1>
-            {translateOptimizationText(strategy?.name) ?? TEXT.configTitle}
+          <h1 className="optimization-lab-panel__hero-title">
+            <span>{getStrategyDisplayName(translateOptimizationText(strategy?.name), TEXT.configTitle)}</span>
+            {formatStrategyVersionTag(strategy?.current_parameter_version_id) ? (
+              <span aria-hidden="true" className="status-chip status-chip--soft optimization-lab-panel__hero-version">
+                {formatStrategyVersionTag(strategy?.current_parameter_version_id)}
+              </span>
+            ) : null}
           </h1>
           <p>{TEXT.configCopy}</p>
           {!loading && strategy ? (
@@ -2984,7 +3625,7 @@ export function OptimizationConfigPage({
                 入口：{formatEntryPoint(entryPoint)}
               </span>
               <span className="status-chip status-chip--soft">
-                参数版本：{strategy.current_parameter_version_id ?? "-"}
+                当前版本：{formatStrategyVersionTag(strategy.current_parameter_version_id) ?? "-"}
               </span>
               <span className="status-chip status-chip--soft">
                 预计组合：{budgetCombinations} 组
@@ -3060,62 +3701,102 @@ export function OptimizationConfigPage({
                   </tr>
                 </thead>
                 <tbody>
-                  {searchSpace.map((field, index) => (
-                    <tr key={field.key}>
-                      <td>{getSearchFieldDisplayLabel(field)}</td>
-                      <td>{formatParameterValue(field.current)}</td>
-                      <td>
-                        <select
-                          aria-label={`${getSearchFieldDisplayLabel(field)} 模式`}
-                          value={field.mode}
-                          onChange={(event) =>
-                            updateSearchField(index, {
-                              mode: event.target.value as "range" | "fixed",
-                            })
-                          }
-                        >
-                          <option value="range">范围</option>
-                          <option value="fixed">固定</option>
-                        </select>
-                      </td>
-                      <td>
-                        <input
-                          aria-label={`${getSearchFieldDisplayLabel(field)} 起点`}
-                          disabled={field.mode === "fixed"}
-                          onChange={(event) =>
-                            updateSearchField(index, {
-                              start: event.target.value,
-                            })
-                          }
-                          value={formatEditableParameterValue(field.start)}
-                        />
-                      </td>
-                      <td>
-                        <input
-                          aria-label={`${getSearchFieldDisplayLabel(field)} 终点`}
-                          disabled={field.mode === "fixed"}
-                          onChange={(event) =>
-                            updateSearchField(index, {
-                              end: event.target.value,
-                            })
-                          }
-                          value={formatEditableParameterValue(field.end)}
-                        />
-                      </td>
-                      <td>
-                        <input
-                          aria-label={`${getSearchFieldDisplayLabel(field)} 步长`}
-                          disabled={field.mode === "fixed"}
-                          onChange={(event) =>
-                            updateSearchField(index, {
-                              step: event.target.value,
-                            })
-                          }
-                          value={formatEditableParameterValue(field.step)}
-                        />
-                      </td>
-                    </tr>
-                  ))}
+                  {searchSpace.map((field, index) => {
+                    const displayLabel = getSearchFieldDisplayLabel(field);
+                    const discreteOptions = getDiscreteFieldOptions(field.key);
+                    const discreteValues = getDiscreteFieldValues(field).map(String);
+
+                    return (
+                      <tr key={field.key}>
+                        <td>{displayLabel}</td>
+                        <td>{formatParameterValue(field.current)}</td>
+                        {isDiscreteSearchField(field) ? (
+                          <>
+                            <td>
+                              <span className="optimization-search-mode-pill">
+                                多选
+                              </span>
+                            </td>
+                            <td
+                              className="optimization-lab-table__cell--wrap"
+                              colSpan={3}
+                            >
+                              <OptimizationDiscreteFieldControl
+                                fieldKey={field.key}
+                                hint="可同时选择多个周期，系统会分别生成组合。"
+                                label={displayLabel}
+                                onChange={(nextValues) =>
+                                  updateSearchField(index, {
+                                    mode: "discrete",
+                                    current: field.current,
+                                    value: nextValues[0] ?? null,
+                                    values: nextValues,
+                                  })
+                                }
+                                options={discreteOptions}
+                                values={discreteValues}
+                              />
+                            </td>
+                          </>
+                        ) : (
+                          <>
+                            <td>
+                              <select
+                                aria-label={`${displayLabel} 模式`}
+                                value={field.mode}
+                                onChange={(event) =>
+                                  updateSearchField(index, {
+                                    mode: event.target.value as
+                                      | "range"
+                                      | "fixed",
+                                  })
+                                }
+                              >
+                                <option value="range">范围</option>
+                                <option value="fixed">固定</option>
+                              </select>
+                            </td>
+                            <td>
+                              <input
+                                aria-label={`${displayLabel} 起点`}
+                                disabled={field.mode === "fixed"}
+                                onChange={(event) =>
+                                  updateSearchField(index, {
+                                    start: event.target.value,
+                                  })
+                                }
+                                value={formatEditableParameterValue(field.start)}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                aria-label={`${displayLabel} 终点`}
+                                disabled={field.mode === "fixed"}
+                                onChange={(event) =>
+                                  updateSearchField(index, {
+                                    end: event.target.value,
+                                  })
+                                }
+                                value={formatEditableParameterValue(field.end)}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                aria-label={`${displayLabel} 步长`}
+                                disabled={field.mode === "fixed"}
+                                onChange={(event) =>
+                                  updateSearchField(index, {
+                                    step: event.target.value,
+                                  })
+                                }
+                                value={formatEditableParameterValue(field.step)}
+                              />
+                            </td>
+                          </>
+                        )}
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -3364,19 +4045,32 @@ export function OptimizationResultsPage({
   const [rerunError, setRerunError] = useState<string | null>(null);
   const [constraintPresetKey, setConstraintPresetKey] =
     useState<OptimizationConstraintPresetKey>(DEFAULT_CONSTRAINT_PRESET_KEY);
+  const [objectiveDraft, setObjectiveDraft] = useState<OptimizationObjective>(
+    DEFAULT_OPTIMIZATION_OBJECTIVE,
+  );
   const [constraintDraftLabel, setConstraintDraftLabel] = useState(
     getOptimizationConstraintPreset(DEFAULT_CONSTRAINT_PRESET_KEY).label,
   );
   const [constraintDrafts, setConstraintDrafts] = useState<
     OptimizationConstraint[]
   >([]);
-  const [appliedConstraintLabel, setAppliedConstraintLabel] = useState<
-    string | null
-  >(null);
+  const [appliedObjective, setAppliedObjective] =
+    useState<OptimizationObjective | null>(null);
   const [appliedConstraints, setAppliedConstraints] = useState<
     OptimizationConstraint[]
   >([]);
   const [constraintLiveMessage, setConstraintLiveMessage] = useState("");
+  const [allCombinationsOpen, setAllCombinationsOpen] = useState(false);
+  const [allCombinationsPage, setAllCombinationsPage] = useState(1);
+  const [allCombinationsSortKey, setAllCombinationsSortKey] =
+    useState<OptimizationAllCombinationSortKey>(
+      getOptimizationAllCombinationsDefaultSortKey(
+        DEFAULT_OPTIMIZATION_OBJECTIVE,
+      ),
+    );
+  const [allCombinationsSortDirection, setAllCombinationsSortDirection] =
+    useState<SortDirection>("desc");
+  const allCombinationsTableShellRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!constraintToast) {
@@ -3389,6 +4083,39 @@ export function OptimizationResultsPage({
       window.clearTimeout(timer);
     };
   }, [constraintToast]);
+
+  useEffect(() => {
+    if (!allCombinationsOpen) {
+      return undefined;
+    }
+
+    function handleEscape(event: KeyboardEvent): void {
+      if (event.key === "Escape") {
+        setAllCombinationsOpen(false);
+      }
+    }
+
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [allCombinationsOpen]);
+
+  useEffect(() => {
+    if (!allCombinationsOpen) {
+      return undefined;
+    }
+
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousDocumentOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+      document.documentElement.style.overflow = previousDocumentOverflow;
+    };
+  }, [allCombinationsOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3413,7 +4140,7 @@ export function OptimizationResultsPage({
         if (baselineRunId) {
           try {
             baselineRunPayload = await api.getBacktestRunDetail(baselineRunId, {
-              view: "metrics",
+              view: "initial",
             });
           } catch {
             baselineRunPayload = null;
@@ -3551,38 +4278,60 @@ export function OptimizationResultsPage({
       strategy,
       baselineRun,
     );
+    const nextObjective = normalizeOptimizationObjective(
+      job.summary.objective ?? job.request.objective,
+    );
+    setObjectiveDraft(nextObjective);
+    setAppliedObjective(nextObjective);
     setConstraintPresetKey(constraintDraft.constraintPresetKey);
     setConstraintDraftLabel(constraintDraft.constraintLabel);
     setConstraintDrafts(constraintDraft.constraints);
-    setAppliedConstraintLabel(constraintDraft.constraintLabel);
     setAppliedConstraints(constraintDraft.constraints);
     setConstraintLiveMessage("");
   }, [baselineRun, job, strategy]);
 
-  const optimizationConstraintLabel =
-    appliedConstraintLabel ??
-    persistedOptimizationConstraintState.constraintLabel;
+  const optimizationObjective = appliedObjective
+    ? normalizeOptimizationObjective(appliedObjective)
+    : normalizeOptimizationObjective(
+        job?.summary.objective ?? job?.request.objective,
+      );
   const optimizationConstraints = appliedConstraints.length
     ? appliedConstraints
     : persistedOptimizationConstraintState.constraints;
   const quickFilterConstraints = constraintDrafts.length
     ? constraintDrafts
     : optimizationConstraints;
-  const optimizationConstraintChips = useMemo(
-    () =>
-      optimizationConstraints.map((constraint) =>
-        formatOptimizationConstraintChip(constraint),
-      ),
-    [optimizationConstraints],
-  );
   const matchingCandidates = useMemo(
-    () =>
-      filterOptimizationCandidatesByConstraints(
+    () => {
+      const filteredCandidates = filterOptimizationCandidatesByConstraints(
         job?.candidates ?? [],
         optimizationConstraints,
-      ),
-    [job?.candidates, optimizationConstraints],
+      );
+      return rankOptimizationCandidatesByObjective(
+        filteredCandidates,
+        optimizationObjective,
+      );
+    },
+    [job?.candidates, optimizationConstraints, optimizationObjective],
   );
+  const allMatchingCombinationCandidates = useMemo<
+    OptimizationDisplayCandidate[]
+  >(() => {
+    if (Array.isArray(job?.matching_combinations) && job.matching_combinations.length) {
+      return sortOptimizationCandidatesForModal(
+        job.matching_combinations,
+        optimizationSearchSpace,
+        getOptimizationAllCombinationsDefaultSortKey(optimizationObjective),
+        "desc",
+      );
+    }
+    return matchingCandidates;
+  }, [
+    job?.matching_combinations,
+    matchingCandidates,
+    optimizationObjective,
+    optimizationSearchSpace,
+  ]);
   const baselineCandidate = useMemo(
     () =>
       job?.candidates.length
@@ -3591,9 +4340,16 @@ export function OptimizationResultsPage({
             baselineRun,
             optimizationSearchSpace,
             (job.candidates.length ?? 0) + 1,
+            optimizationObjective,
           )
         : null,
-    [baselineRun, job?.candidates.length, optimizationSearchSpace, strategy],
+    [
+      baselineRun,
+      job?.candidates.length,
+      optimizationObjective,
+      optimizationSearchSpace,
+      strategy,
+    ],
   );
   const candidateRows = useMemo<OptimizationDisplayCandidate[]>(
     () => [
@@ -3638,10 +4394,6 @@ export function OptimizationResultsPage({
     [optimizationSearchSpace],
   );
   const totalCandidateCount = job?.candidates.length ?? 0;
-  const totalComparableResultCount =
-    totalCandidateCount + (baselineCandidate ? 1 : 0);
-  const matchingResultCount =
-    matchingCandidates.length + (baselineMatchesConstraints ? 1 : 0);
   const optimizationProgressState = isOptimizationProgressState(job?.status);
   const optimizationRunning = isOptimizationRunning(job?.status);
   const optimizationInterrupted =
@@ -3650,11 +4402,68 @@ export function OptimizationResultsPage({
     job && !optimizationProgressState
       ? Math.max(0, getOptimizationMatchingCombinationCount(job))
       : 0;
+  const matchingCombinationCountIsPartial =
+    !optimizationProgressState &&
+    isPersistedCandidateOnlyMatchingCount(job);
+  const plannedCombinationCount =
+    typeof job?.summary.budget_combinations === "number"
+      ? job.summary.budget_combinations
+      : typeof job?.request.budget_combinations === "number"
+        ? job.request.budget_combinations
+        : 0;
   const filteredOutCandidateCount = Math.max(
     0,
     totalCandidateCount - matchingCandidates.length,
   );
-  const candidatePanelSubtitle = `符合过滤条件的组合共${matchingCombinationCount}个，以下是按综合评分排序靠前的候选版本组合`;
+  const candidatePanelSubtitle = matchingCombinationCountIsPartial
+    ? `当前仅基于已保存候选识别到 ${matchingCombinationCount} 个符合约束的组合。该历史任务缺少全量 trial 明细，因此这不是${plannedCombinationCount ? ` ${plannedCombinationCount} ` : ""}组组合的完整筛选结果。`
+    : `符合约束条件的组合共${matchingCombinationCount}个，以下按 ${getOptimizationObjectiveLabel(
+        optimizationObjective,
+      )} 输出当前候选版本排序。`;
+  const allCombinationsButtonLabel = matchingCombinationCountIsPartial
+    ? "查看已保存候选"
+    : "查看全部组合";
+  const allCombinationsDialogTitle = matchingCombinationCountIsPartial
+    ? "已保存的符合约束候选"
+    : "全部符合约束条件的组合";
+  const allCombinationsDialogCopy = matchingCombinationCountIsPartial
+    ? `当前仅有 ${matchingCombinationCount} 组已保存候选可供查看；该历史任务缺少全量 trial 明细，因此不能代表${plannedCombinationCount ? `全部 ${plannedCombinationCount} 组` : "全量"}组合。`
+    : `共 ${matchingCombinationCount} 组，按当前约束条件过滤后展示；每页 ${ALL_COMBINATIONS_PAGE_SIZE} 条，可点击表头切换排序。`;
+  const sortedAllMatchingCombinationCandidates = useMemo(
+    () =>
+      sortOptimizationCandidatesForModal(
+        allMatchingCombinationCandidates,
+        optimizationSearchSpace,
+        allCombinationsSortKey,
+        allCombinationsSortDirection,
+      ),
+    [
+      allCombinationsSortDirection,
+      allCombinationsSortKey,
+      allMatchingCombinationCandidates,
+      optimizationSearchSpace,
+    ],
+  );
+  const totalAllCombinationsPages = Math.max(
+    1,
+    Math.ceil(
+      sortedAllMatchingCombinationCandidates.length / ALL_COMBINATIONS_PAGE_SIZE,
+    ),
+  );
+  const currentAllCombinationsPage = Math.min(
+    allCombinationsPage,
+    totalAllCombinationsPages,
+  );
+  const pagedAllMatchingCombinationCandidates = useMemo(() => {
+    const start = (currentAllCombinationsPage - 1) * ALL_COMBINATIONS_PAGE_SIZE;
+    return sortedAllMatchingCombinationCandidates.slice(
+      start,
+      start + ALL_COMBINATIONS_PAGE_SIZE,
+    );
+  }, [
+    currentAllCombinationsPage,
+    sortedAllMatchingCombinationCandidates,
+  ]);
   const selectedCandidateParameters = useMemo(
     () =>
       buildCandidateParameterEntries(
@@ -3800,13 +4609,18 @@ export function OptimizationResultsPage({
     : selectedCandidate.display_kind === "baseline"
       ? "当前基准不可晋升"
       : TEXT.promoteVersion;
-  const strategyDisplayName = formatVersionedStrategyName(
+  const strategyDisplayName = getStrategyDisplayName(
     translateOptimizationText(strategy?.name) ??
+      job?.strategy_name ??
       job?.strategy_id ??
       TEXT.resultsTitle,
-    strategy?.current_parameter_version,
+    TEXT.resultsTitle,
   );
-  const heroTitle = `参数优化：${strategyDisplayName}`;
+  const strategyVersionTag = formatStrategyVersionTag(
+    job?.base_parameter_version_id ??
+      (job?.request.base_parameter_version_id as string | null | undefined) ??
+      null,
+  );
   const heroElapsedSeconds = calculateElapsedSeconds(
     job?.created_at,
     job?.completed_at ?? job?.updated_at,
@@ -3817,17 +4631,32 @@ export function OptimizationResultsPage({
   );
   const heroCopy = optimizationProgressState
     ? latestUpdate
-    : noConstraintMatch
-      ? `当前约束下暂无候选版本通过过滤，已过滤 ${filteredOutCandidateCount} 个候选版本。建议继续调参、放宽阈值，或重新生成任务。`
     : (heroSummary ??
-      (optimizationRunning
-        ? latestUpdate
-        : (translateOptimizationText(selectedCandidate?.analysis?.thesis) ??
-          translateOptimizationText(job?.result.summary) ??
-          TEXT.resultsCopy)));
+      (noConstraintMatch
+        ? `当前约束下暂无候选版本通过过滤，已过滤 ${filteredOutCandidateCount} 个候选版本。建议继续调参、放宽阈值，或重新生成任务。`
+        : (optimizationRunning
+          ? latestUpdate
+          : (translateOptimizationText(selectedCandidate?.analysis?.thesis) ??
+            translateOptimizationText(job?.result.summary) ??
+            TEXT.resultsCopy))));
   const nextActionLabel = optimizationInterrupted
     ? `第 ${nextTrialIndex} 组（已保留 ${persistedTrialCount} 组）`
     : `第 ${nextTrialIndex} 组`;
+
+  useEffect(() => {
+    if (allCombinationsPage > totalAllCombinationsPages) {
+      setAllCombinationsPage(totalAllCombinationsPages);
+    }
+  }, [allCombinationsPage, totalAllCombinationsPages]);
+
+  useEffect(() => {
+    if (
+      allCombinationsOpen &&
+      !sortedAllMatchingCombinationCandidates.length
+    ) {
+      setAllCombinationsOpen(false);
+    }
+  }, [allCombinationsOpen, sortedAllMatchingCombinationCandidates.length]);
 
   const selectHref = buildOptimizationSelectPath({
     strategyId: job?.strategy_id,
@@ -3851,6 +4680,76 @@ export function OptimizationResultsPage({
         ? job.request.entry_point
         : undefined,
   });
+
+  function openAllCombinationsModal(): void {
+    const defaultKey = getOptimizationAllCombinationsDefaultSortKey(
+      optimizationObjective,
+    );
+    setAllCombinationsSortKey(defaultKey);
+    setAllCombinationsSortDirection("desc");
+    setAllCombinationsPage(1);
+    setAllCombinationsOpen(true);
+  }
+
+  function closeAllCombinationsModal(): void {
+    setAllCombinationsOpen(false);
+  }
+
+  function handleAllCombinationsDialogWheel(
+    event: ReactWheelEvent<HTMLDivElement>,
+  ): void {
+    const tableShell = allCombinationsTableShellRef.current;
+    if (!tableShell || tableShell.contains(event.target as Node)) {
+      return;
+    }
+
+    const maxScrollTop = Math.max(
+      0,
+      tableShell.scrollHeight - tableShell.clientHeight,
+    );
+    const maxScrollLeft = Math.max(
+      0,
+      tableShell.scrollWidth - tableShell.clientWidth,
+    );
+    const nextScrollTop = Math.min(
+      maxScrollTop,
+      Math.max(0, tableShell.scrollTop + event.deltaY),
+    );
+    const nextScrollLeft = Math.min(
+      maxScrollLeft,
+      Math.max(0, tableShell.scrollLeft + event.deltaX),
+    );
+
+    if (
+      nextScrollTop === tableShell.scrollTop &&
+      nextScrollLeft === tableShell.scrollLeft
+    ) {
+      event.preventDefault();
+      return;
+    }
+
+    event.preventDefault();
+    tableShell.scrollTop = nextScrollTop;
+    tableShell.scrollLeft = nextScrollLeft;
+  }
+
+  function toggleAllCombinationsSort(
+    nextKey: OptimizationAllCombinationSortKey,
+  ): void {
+    setAllCombinationsSortKey((currentKey) => {
+      if (currentKey === nextKey) {
+        setAllCombinationsSortDirection((currentDirection) =>
+          currentDirection === "desc" ? "asc" : "desc",
+        );
+        return currentKey;
+      }
+      setAllCombinationsSortDirection(
+        getOptimizationAllCombinationsInitialDirection(nextKey),
+      );
+      return nextKey;
+    });
+    setAllCombinationsPage(1);
+  }
 
   function syncResultConstraintDraft(
     nextConstraints: OptimizationConstraint[],
@@ -3880,10 +4779,10 @@ export function OptimizationResultsPage({
   }
 
   function applyResultConstraintState(
-    nextLabel: string,
+    nextObjective: OptimizationObjective,
     nextConstraints: OptimizationConstraint[],
   ): void {
-    setAppliedConstraintLabel(nextLabel);
+    setAppliedObjective(nextObjective);
     setAppliedConstraints(nextConstraints);
   }
 
@@ -3920,10 +4819,11 @@ export function OptimizationResultsPage({
     );
     syncResultConstraintDraft(nextConstraints);
     setConstraintToast(null);
-    setConstraintLiveMessage("已修改快捷阈值，点击“重新过滤”后应用。");
+    setConstraintLiveMessage("已修改约束条件，点击“重新过滤”后应用。");
   }
 
   async function applyConstraintFilterUpdate(
+    nextObjective: OptimizationObjective,
     nextConstraints: OptimizationConstraint[],
     nextConstraintLabel: string,
     messages?: {
@@ -3939,24 +4839,26 @@ export function OptimizationResultsPage({
       nextMatchSummary.candidateCount === 0 &&
       !nextMatchSummary.baselineMatches
     ) {
-      setConstraintToast("无符合条件的组合，请放宽过滤条件再试。");
+      setConstraintToast("无符合条件的组合，请放宽约束条件再试。");
       return;
     }
     try {
-      applyResultConstraintState(nextConstraintLabel, nextConstraints);
       setSaving(true);
       setError(null);
       setNotice(null);
       setConstraintToast(null);
       const updated = ensureOptimizationJobHasMatchingCombinationCount(
         await api.updateOptimizationJobConstraints(job.id, {
+          objective: nextObjective,
           constraint_preset_key: constraintPresetKey,
           constraint_label: nextConstraintLabel,
           constraints: nextConstraints,
         }),
       );
       setJob(updated);
-      setConstraintLiveMessage(messages?.success ?? "已按最新阈值重新过滤。");
+      setConstraintLiveMessage(
+        messages?.success ?? "已按最新约束条件重新过滤并重排。",
+      );
     } catch (caught) {
       const message =
         caught instanceof Error ? caught.message : String(caught ?? "未知错误");
@@ -3966,11 +4868,13 @@ export function OptimizationResultsPage({
         setConstraintLiveMessage("");
         return;
       }
+      applyResultConstraintState(nextObjective, nextConstraints);
       setNotice(
-        `已按当前页面阈值重新过滤，后端未保存本次快捷过滤设置：${message}`,
+        `已按当前页面约束条件重新过滤，后端未保存本次约束设置：${message}`,
       );
       setConstraintLiveMessage(
-        messages?.localOnly ?? "已在当前页面应用最新阈值，但未保存到任务。",
+        messages?.localOnly ??
+          "已在当前页面应用最新约束条件与排序，但未保存到任务。",
       );
     } finally {
       setSaving(false);
@@ -3982,6 +4886,7 @@ export function OptimizationResultsPage({
   ): Promise<void> {
     event?.preventDefault();
     await applyConstraintFilterUpdate(
+      objectiveDraft,
       cloneOptimizationConstraints(quickFilterConstraints, constraintPresetKey),
       constraintDraftLabel,
     );
@@ -4001,11 +4906,12 @@ export function OptimizationResultsPage({
       "当前候选",
     );
     await applyConstraintFilterUpdate(
+      objectiveDraft,
       cloneOptimizationConstraints(draft.constraints, draft.constraintPresetKey),
       draft.constraintLabel,
       {
-        success: `已按 ${candidateLabel} 回填建议阈值并重新过滤。`,
-        localOnly: `已按 ${candidateLabel} 回填建议阈值并在当前页面重新过滤，但未保存到任务。`,
+        success: `已按 ${candidateLabel} 回填建议约束并重新过滤。`,
+        localOnly: `已按 ${candidateLabel} 回填建议约束并在当前页面重新过滤，但未保存到任务。`,
       },
     );
   }
@@ -4036,7 +4942,9 @@ export function OptimizationResultsPage({
           selectedCandidate.id,
       );
       setNotice(
-        `已完成版本晋升，策略已更新为 ${formatVersionedStrategyName(refreshedStrategy.name, refreshedStrategy.current_parameter_version)}。`,
+        `已完成版本晋升，${getStrategyDisplayName(refreshedStrategy.name, refreshedStrategy.id)} 当前版本已更新为 ${
+          formatStrategyVersionTag(refreshedStrategy.current_parameter_version_id) ?? '最新版本'
+        }。`,
       );
     } catch (caught) {
       setError((caught as Error).message);
@@ -4132,7 +5040,14 @@ export function OptimizationResultsPage({
       >
         <div>
           <p className="optimization-lab-eyebrow">任务结果中心</p>
-          <h1>{heroTitle}</h1>
+          <h1 className="optimization-lab-panel__hero-title">
+            <span>{`参数优化：${strategyDisplayName}`}</span>
+            {strategyVersionTag ? (
+              <span aria-hidden="true" className="status-chip status-chip--soft optimization-lab-panel__hero-version">
+                {strategyVersionTag}
+              </span>
+            ) : null}
+          </h1>
           <p>{heroCopy}</p>
           {job ? (
             <div className="optimization-meta-chips">
@@ -4144,24 +5059,6 @@ export function OptimizationResultsPage({
                   参数组合：{optimizationRangeSummary}
                 </span>
               ) : null}
-              {optimizationConstraintLabel ? (
-                <span className="status-chip status-chip--soft optimization-range-chip">
-                  {optimizationConstraintLabel}
-                </span>
-              ) : null}
-              {!optimizationProgressState && totalComparableResultCount > 0 ? (
-                <span className="status-chip status-chip--soft">
-                  符合约束：{matchingResultCount}/{totalComparableResultCount}
-                </span>
-              ) : null}
-              {optimizationConstraintChips.map((chip) => (
-                <span
-                  className="status-chip status-chip--soft optimization-range-chip"
-                  key={chip}
-                >
-                  {chip}
-                </span>
-              ))}
             </div>
           ) : null}
           {notice ? (
@@ -4273,6 +5170,357 @@ export function OptimizationResultsPage({
         </div>
       ) : null}
 
+      {allCombinationsOpen ? (
+        <div
+          aria-label={allCombinationsDialogTitle}
+          aria-modal="true"
+          className="modal-shell"
+          onClick={closeAllCombinationsModal}
+          role="dialog"
+        >
+          <div
+            className="modal-card optimization-all-combinations-dialog"
+            onClick={(event) => event.stopPropagation()}
+            onWheel={handleAllCombinationsDialogWheel}
+          >
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">参数候选盘</p>
+                <h3>{allCombinationsDialogTitle}</h3>
+                <p className="optimization-all-combinations-dialog__copy">
+                  {allCombinationsDialogCopy}
+                </p>
+              </div>
+            </div>
+
+            <div
+              className="optimization-lab-table-shell optimization-all-combinations-dialog__table-shell"
+              ref={allCombinationsTableShellRef}
+            >
+              <table className="optimization-lab-table optimization-all-combinations-dialog__table">
+                <thead>
+                  <tr>
+                    <th
+                      aria-sort={
+                        allCombinationsSortKey === "parameter_summary"
+                          ? allCombinationsSortDirection === "asc"
+                            ? "ascending"
+                            : "descending"
+                          : "none"
+                      }
+                    >
+                      <button
+                        className="optimization-table-sort-button"
+                        onClick={() =>
+                          toggleAllCombinationsSort("parameter_summary")
+                        }
+                        type="button"
+                      >
+                        <span>参数摘要</span>
+                        <span aria-hidden="true">
+                          {allCombinationsSortKey === "parameter_summary"
+                            ? allCombinationsSortDirection === "asc"
+                              ? "↑"
+                              : "↓"
+                            : "↕"}
+                        </span>
+                      </button>
+                    </th>
+                    <th
+                      aria-sort={
+                        allCombinationsSortKey === "annualized_return"
+                          ? allCombinationsSortDirection === "asc"
+                            ? "ascending"
+                            : "descending"
+                          : "none"
+                      }
+                    >
+                      <button
+                        className="optimization-table-sort-button"
+                        onClick={() =>
+                          toggleAllCombinationsSort("annualized_return")
+                        }
+                        type="button"
+                      >
+                        <span>年化收益率</span>
+                        <span aria-hidden="true">
+                          {allCombinationsSortKey === "annualized_return"
+                            ? allCombinationsSortDirection === "asc"
+                              ? "↑"
+                              : "↓"
+                            : "↕"}
+                        </span>
+                      </button>
+                    </th>
+                    <th
+                      aria-sort={
+                        allCombinationsSortKey === "return_sharpe"
+                          ? allCombinationsSortDirection === "asc"
+                            ? "ascending"
+                            : "descending"
+                          : "none"
+                      }
+                    >
+                      <button
+                        className="optimization-table-sort-button"
+                        onClick={() =>
+                          toggleAllCombinationsSort("return_sharpe")
+                        }
+                        type="button"
+                      >
+                        <span>收益夏普</span>
+                        <span aria-hidden="true">
+                          {allCombinationsSortKey === "return_sharpe"
+                            ? allCombinationsSortDirection === "asc"
+                              ? "↑"
+                              : "↓"
+                            : "↕"}
+                        </span>
+                      </button>
+                    </th>
+                    <th
+                      aria-sort={
+                        allCombinationsSortKey === "out_of_sample_sharpe"
+                          ? allCombinationsSortDirection === "asc"
+                            ? "ascending"
+                            : "descending"
+                          : "none"
+                      }
+                    >
+                      <button
+                        className="optimization-table-sort-button"
+                        onClick={() =>
+                          toggleAllCombinationsSort("out_of_sample_sharpe")
+                        }
+                        type="button"
+                      >
+                        <span>样本外夏普</span>
+                        <span aria-hidden="true">
+                          {allCombinationsSortKey === "out_of_sample_sharpe"
+                            ? allCombinationsSortDirection === "asc"
+                              ? "↑"
+                              : "↓"
+                            : "↕"}
+                        </span>
+                      </button>
+                    </th>
+                    <th
+                      aria-sort={
+                        allCombinationsSortKey === "max_drawdown_pct"
+                          ? allCombinationsSortDirection === "asc"
+                            ? "ascending"
+                            : "descending"
+                          : "none"
+                      }
+                    >
+                      <button
+                        className="optimization-table-sort-button"
+                        onClick={() =>
+                          toggleAllCombinationsSort("max_drawdown_pct")
+                        }
+                        type="button"
+                      >
+                        <span>最大回撤</span>
+                        <span aria-hidden="true">
+                          {allCombinationsSortKey === "max_drawdown_pct"
+                            ? allCombinationsSortDirection === "asc"
+                              ? "↑"
+                              : "↓"
+                            : "↕"}
+                        </span>
+                      </button>
+                    </th>
+                    <th
+                      aria-sort={
+                        allCombinationsSortKey === "stability"
+                          ? allCombinationsSortDirection === "asc"
+                            ? "ascending"
+                            : "descending"
+                          : "none"
+                      }
+                    >
+                      <button
+                        className="optimization-table-sort-button"
+                        onClick={() => toggleAllCombinationsSort("stability")}
+                        type="button"
+                      >
+                        <span>稳定度</span>
+                        <span aria-hidden="true">
+                          {allCombinationsSortKey === "stability"
+                            ? allCombinationsSortDirection === "asc"
+                              ? "↑"
+                              : "↓"
+                            : "↕"}
+                        </span>
+                      </button>
+                    </th>
+                    <th
+                      aria-sort={
+                        allCombinationsSortKey === "composite_score"
+                          ? allCombinationsSortDirection === "asc"
+                            ? "ascending"
+                            : "descending"
+                          : "none"
+                      }
+                    >
+                      <button
+                        className="optimization-table-sort-button"
+                        onClick={() =>
+                          toggleAllCombinationsSort("composite_score")
+                        }
+                        type="button"
+                      >
+                        <span>综合得分</span>
+                        <span aria-hidden="true">
+                          {allCombinationsSortKey === "composite_score"
+                            ? allCombinationsSortDirection === "asc"
+                              ? "↑"
+                              : "↓"
+                            : "↕"}
+                        </span>
+                      </button>
+                    </th>
+                    <th
+                      aria-sort={
+                        allCombinationsSortKey === "status"
+                          ? allCombinationsSortDirection === "asc"
+                            ? "ascending"
+                            : "descending"
+                          : "none"
+                      }
+                    >
+                      <button
+                        className="optimization-table-sort-button"
+                        onClick={() => toggleAllCombinationsSort("status")}
+                        type="button"
+                      >
+                        <span>状态</span>
+                        <span aria-hidden="true">
+                          {allCombinationsSortKey === "status"
+                            ? allCombinationsSortDirection === "asc"
+                              ? "↑"
+                              : "↓"
+                            : "↕"}
+                        </span>
+                      </button>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pagedAllMatchingCombinationCandidates.map((candidate) => (
+                    <tr
+                      className={
+                        candidate.id === selectedCandidate?.id
+                          ? "optimization-lab-table__row--selected"
+                          : ""
+                      }
+                      key={`all-combo-${candidate.id}`}
+                    >
+                      <td className="optimization-lab-table__cell--wrap">
+                        <div className="optimization-parameter-summary">
+                          <strong className="optimization-all-combinations-dialog__candidate-label">
+                            {getCandidateDisplayText(
+                              candidate.title ?? candidate.label,
+                            )}
+                          </strong>
+                          <span className="optimization-all-combinations-dialog__candidate-summary">
+                            {getCandidateSummaryText(
+                              candidate,
+                              optimizationSearchSpace,
+                            )}
+                          </span>
+                        </div>
+                      </td>
+                      <td>
+                        {formatReturnRate(
+                          getCandidateMetric(candidate, "annualized_return") ??
+                            getCandidateMetric(candidate, "cagr"),
+                        )}
+                      </td>
+                      <td>
+                        {formatMetric(
+                          getCandidateMetric(candidate, "return_sharpe") ??
+                            getCandidateMetric(candidate, "sharpe"),
+                        )}
+                      </td>
+                      <td>
+                        {formatMetric(
+                          getCandidateMetric(candidate, "out_of_sample_sharpe"),
+                        )}
+                      </td>
+                      <td>
+                        {formatPercentMetric(
+                          getCandidateMetric(candidate, "max_drawdown_pct"),
+                        )}
+                      </td>
+                      <td>
+                        {formatMetric(
+                          getCandidateMetric(candidate, "stability"),
+                          0,
+                        )}
+                      </td>
+                      <td>{formatMetric(candidate.score, 3)}</td>
+                      <td>{getCandidateStatusText(candidate)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="modal-card__footer optimization-all-combinations-dialog__footer">
+              <div className="optimization-all-combinations-dialog__footer-meta">
+                {sortedAllMatchingCombinationCandidates.length
+                  ? `第 ${currentAllCombinationsPage} / ${totalAllCombinationsPages} 页 · ${(
+                      (currentAllCombinationsPage - 1) *
+                        ALL_COMBINATIONS_PAGE_SIZE +
+                      1
+                    ).toString()}-${Math.min(
+                      currentAllCombinationsPage *
+                        ALL_COMBINATIONS_PAGE_SIZE,
+                      sortedAllMatchingCombinationCandidates.length,
+                    ).toString()} / ${sortedAllMatchingCombinationCandidates.length}`
+                  : "暂无符合条件的组合"}
+              </div>
+              <div className="optimization-all-combinations-dialog__footer-actions">
+                <button
+                  className="ghost-button"
+                  disabled={currentAllCombinationsPage <= 1}
+                  onClick={() =>
+                    setAllCombinationsPage((current) =>
+                      Math.max(1, current - 1),
+                    )
+                  }
+                  type="button"
+                >
+                  上一页
+                </button>
+                <button
+                  className="ghost-button"
+                  disabled={
+                    currentAllCombinationsPage >= totalAllCombinationsPages
+                  }
+                  onClick={() =>
+                    setAllCombinationsPage((current) =>
+                      Math.min(totalAllCombinationsPages, current + 1),
+                    )
+                  }
+                  type="button"
+                >
+                  下一页
+                </button>
+                <button
+                  className="primary-button"
+                  onClick={closeAllCombinationsModal}
+                  type="button"
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {loading ? <p className="empty-state">正在加载结果中心...</p> : null}
       {error ? <div className="error-banner">{error}</div> : null}
 
@@ -4285,16 +5533,9 @@ export function OptimizationResultsPage({
             >
               <div className="optimization-lab-panel__heading optimization-results-constraint-bar__heading">
                 <div>
-                  <h2 id="optimization-results-constraint-title">快捷过滤</h2>
+                  <h2 id="optimization-results-constraint-title">约束条件</h2>
                 </div>
                 <div className="optimization-results-constraint-bar__actions">
-                  <span className="status-chip status-chip--soft">
-                    当前启用{" "}
-                    <strong>
-                      {quickFilterConstraints.length}
-                      {" 项阈值"}
-                    </strong>
-                  </span>
                   {suggestedResultConstraints ? (
                     <button
                       className="ghost-button optimization-results-constraint-bar__action"
@@ -4306,7 +5547,7 @@ export function OptimizationResultsPage({
                     </button>
                   ) : null}
                   <button
-                    className="primary-button optimization-results-constraint-bar__action"
+                    className="ghost-button optimization-results-constraint-bar__action"
                     disabled={saving}
                     form="optimization-results-constraint-form"
                     type="submit"
@@ -4321,6 +5562,31 @@ export function OptimizationResultsPage({
                 id="optimization-results-constraint-form"
                 onSubmit={(event) => void handleApplyConstraintFilter(event)}
               >
+                <label
+                  className="optimization-results-constraint-pill optimization-results-constraint-pill--objective"
+                  htmlFor="optimization-results-objective"
+                >
+                  <span className="optimization-results-constraint-pill__label">
+                    目标排序
+                  </span>
+                  <select
+                    aria-label="目标排序"
+                    className="optimization-results-constraint-pill__select"
+                    id="optimization-results-objective"
+                    onChange={(event) =>
+                      setObjectiveDraft(
+                        normalizeOptimizationObjective(event.target.value),
+                      )
+                    }
+                    value={objectiveDraft}
+                  >
+                    {OPTIMIZATION_OBJECTIVE_OPTIONS.map((option) => (
+                      <option key={option.key} value={option.key}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 {quickFilterConstraints.map((constraint, index) => {
                   const unitLabel = getOptimizationConstraintUnitLabel(
                     constraint,
@@ -4506,6 +5772,15 @@ export function OptimizationResultsPage({
                             {candidatePanelSubtitle}
                           </p>
                         </div>
+                        {allMatchingCombinationCandidates.length ? (
+                          <button
+                            className="text-button optimization-results-card__view-all"
+                            onClick={openAllCombinationsModal}
+                            type="button"
+                          >
+                            {allCombinationsButtonLabel}
+                          </button>
+                        ) : null}
                       </div>
                       <div className="optimization-lab-table-shell">
                         <table className="optimization-lab-table">
@@ -4904,8 +6179,21 @@ export function OptimizationResultsPage({
                               selectedCandidate.analysis?.validation_windows ??
                               []
                             ).map((windowItem) => (
-                              <tr key={windowItem.label}>
-                                <td>{getDisplayText(windowItem.label)}</td>
+                              <tr
+                                key={`${windowItem.label}-${windowItem.period_label ?? ""}`}
+                              >
+                                <td>
+                                  <div className="optimization-lab-table__stack">
+                                    <strong>
+                                      {getDisplayText(windowItem.label)}
+                                    </strong>
+                                    {windowItem.period_label ? (
+                                      <span>
+                                        {getDisplayText(windowItem.period_label)}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                </td>
                                 <td>
                                   {formatReturnRate(
                                     windowItem.annualized_return,

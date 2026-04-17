@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ApiClientProvider } from './lib/demoStoreContext';
 import { AppRouteProvider, navigateTo, parseAppHash } from './lib/appRouteContext';
@@ -138,6 +138,7 @@ describeLiveApi('live api acceptance', () => {
           { timeout: LIVE_QUERY_TIMEOUT },
         ),
       ).toBeInTheDocument();
+      expect(container.querySelector('.strategy-detail-hero__summary')).not.toBeNull();
       expect(container.querySelector('.strategy-detail-history-table')).not.toBeNull();
       expectNoFetchFailure();
     },
@@ -226,16 +227,22 @@ describeLiveApi('live api acceptance', () => {
         <OptimizationConfigPage strategyId={LIVE_OPTIMIZATION_STRATEGY_ID} />,
       );
 
+      const heading = await screen.findByRole(
+        'heading',
+        { level: 1 },
+        { timeout: LIVE_QUERY_TIMEOUT },
+      );
+      expect(heading.textContent?.trim()).toBeTruthy();
+      const timeframeSelect = await screen.findByRole(
+        'listbox',
+        { name: '观察周期 可选值' },
+        { timeout: LIVE_QUERY_TIMEOUT },
+      );
       expect(
-        await screen.findByRole(
-          'heading',
-          { level: 1, name: OPTIMIZATION_STRATEGY_NAME },
-          { timeout: LIVE_QUERY_TIMEOUT },
-        ),
-      ).toBeInTheDocument();
-      expect(
-        await screen.findByDisplayValue('20', {}, { timeout: LIVE_QUERY_TIMEOUT }),
-      ).toBeInTheDocument();
+        within(timeframeSelect)
+          .getAllByRole('option')
+          .map((option) => option.textContent?.trim()),
+      ).toEqual(['每日', '每周', '每月']);
       expectNoFetchFailure();
     },
     LIVE_TEST_TIMEOUT,

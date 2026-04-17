@@ -22,8 +22,12 @@ import {
   type PromoteMode,
 } from '../types';
 import { createInitialState } from './demoStoreSeed';
-import { clone, createCandidate, formatVersionedStrategyName, nextId, nowIso } from './demoStoreShared';
-import { buildOptimizationJobListItem, hydrateOptimizationJob } from './optimization-demo';
+import { clone, createCandidate, nextId, nowIso } from './demoStoreShared';
+import {
+  applyOptimizationJobConstraintUpdate,
+  buildOptimizationJobListItem,
+  hydrateOptimizationJob,
+} from './optimization-demo';
 
 let state = createInitialState();
 
@@ -577,6 +581,26 @@ export const demoApi: DemoApi = {
     const job = findJob(id);
     return clone(isOptimizationInFlight(job.status) ? advanceOptimizationJob(job) : job);
   },
+  async updateOptimizationJobConstraints(jobId, payload): Promise<ApiOptimizationJobDetail> {
+    const job = findJob(jobId);
+    if (!['COMPLETED', 'PARTIALLY_FAILED', 'FAILED'].includes(String(job.status).toUpperCase())) {
+      throw new ApiError({
+        status: 409,
+        code: 'optimization_job_not_terminal',
+        message: '只有已结束的优化任务才能重新过滤约束条件。',
+      });
+    }
+    const updated = applyOptimizationJobConstraintUpdate(
+      job,
+      payload,
+      findStrategy(job.strategy_id),
+      nowIso(),
+      getOptimizationSourceRun(job),
+    );
+    state.optimizationJobs = state.optimizationJobs.map((item) => (item.id === jobId ? updated : item));
+    sortOptimizationJobs();
+    return clone(updated);
+  },
   async deleteOptimizationJob(id: string) {
     const job = findJob(id);
     const deletedAt = nowIso();
@@ -689,7 +713,6 @@ export const demoApi: DemoApi = {
       strategy.parameters = clone(candidate.parameter_snapshot);
       strategy.current_parameter_version = (strategy.current_parameter_version ?? 1) + 1;
       strategy.current_parameter_version_id = `${strategy.id}-v${strategy.current_parameter_version}`;
-      strategy.name = formatVersionedStrategyName(strategy.name, strategy.current_parameter_version);
       strategy.latest_optimization_job_id = job.id;
       strategy.parameter_history = [
         {
@@ -702,14 +725,6 @@ export const demoApi: DemoApi = {
         },
         ...strategy.parameter_history,
       ];
-      job.base_parameter_version_id = strategy.current_parameter_version_id;
-      job.request.base_parameter_version_id = strategy.current_parameter_version_id;
-      job.summary.baseline_parameter_version_id = strategy.current_parameter_version_id;
-      job.result.baseline_parameter_version_id = strategy.current_parameter_version_id;
-      job.candidates = job.candidates.map((item) => ({
-        ...item,
-        base_parameter_version_id: strategy.current_parameter_version_id,
-      }));
     }
 
     return clone(recalculateJob(job));

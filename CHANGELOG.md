@@ -9,82 +9,104 @@
 
 ## [Unreleased]
 
-## [0.1.1-003] - 2026-04-16
+### 优化 (Changed)
 
-### 修复
+- **目标排序**: Optimization Lab 配置页与结果页统一支持 `收益夏普 Max / 年化收益率 Max / 综合得分 Max` 三种目标排序，重新过滤与结果排名现在都会按当前目标字段严格主键重排。
+- **约束条件**: Optimization Lab 结果页将“快捷过滤”统一改名为“约束条件”，并移除顶部预设标签、符合约束计数与逐条约束标签串；配置页与结果页对外公开约束同步收口为 5 项，不再暴露 `换手率`。
+- **策略详情摘要**: `#/strategies/:id` 标题下方不再展示类型 / 股票池 / 基准 / 再平衡等标签串，改为基于当前参数生成一句策略摘要，直接概括信号逻辑、持仓规则与调仓节奏。
 
-- 修复 Optimization Lab 选择策略页进入 `#/optimization-jobs/new` 时会为每条策略额外请求一次 `GET /backtest-runs/{run_id}/detail` 的问题；页面现在直接复用 `GET /strategies` 返回的 `latest_completed_run_summary` 来展示夏普、回撤与收益摘要，避免把近 1MB 的完整回测详情拉进列表页，明显缩短首屏等待时间。
-- 修复 `pre-push` 补跑 `CHANGELOG.md` 时的快照编号与日期规则：当分支已经与 upstream 同步后再回填快照，revision 现在会至少从第二次推送编号开始，并统一使用本次推送日作为快照日期。
-- 修复公司行为快照的完成度口径：当 `Yahoo/yfinance/Tiingo` 等正式 action-capable 提供方成功完成 `dividend/split/reverse_split` 探测但该 symbol 本身没有正式事件时，系统现在会记录 `complete_no_events` probe coverage，不再把这类 symbol 误判成 corporate missing。
-- 修复快照修复流程会被陈旧 `missing_symbols` 元数据卡住的问题：repair 现在会自动排除已经有 coverage 的 symbol，并按 `target_symbols - covered_symbols` 重算缺口与状态，避免出现 `READY` 但仍残留大量历史 missing 的假阳性。
-- 修复 Optimization Lab 结果页在“当前基准仍通过、但候选组合全部被快捷过滤挡住”时没有任何放宽入口的问题；现在会显示“一键放宽到有结果”，按当前最佳候选的真实指标回填阈值并立即重新过滤。
-- 修复 Optimization Lab “重新过滤”在会筛掉全部组合时仍落盘并切换本地结果态的问题；现在会弹出“无符合条件的组合，请放宽过滤条件再试。”，并保持当前任务结果与副标题不变。
-- 修复 Optimization Lab 结果页“无符合条件的组合，请放宽过滤条件再试。”提示仍停在右下角私有样式的问题；现在会复用统一 `error-banner` 视觉，并固定显示在屏幕顶部居中。
-- 修复 Optimization Lab 配置页“硬性护栏”卡片把约束标签、比较符号和阈值输入拆散导致阅读混乱的问题；卡片现在会按“最大回撤 ≤ 25%”这类规则句呈现，并同步加宽右侧配置栏以保证两列卡片下的可读性。
-- 修复 Optimization Lab 配置页“硬性护栏”卡片信息冗余的问题；卡片内不再重复显示“当前判定 通过/风险”，把状态说明收敛到页面下方的统一判定区。
-- 修复 Optimization Lab 使用 `source_run_id` 创建优化任务时丢失基准回测 `request_json` 的问题；优化 trial 现在会继承原始 `start_date/end_date` 等请求窗口，并在 evaluator 入口对缺失窗口直接报错，不再错误退回整段历史数据。
-- 修复 Optimization Lab 结果页在终态详情缺少 `matching_combination_count` 时静默退回候选版本数的问题；现在加载、轮询和重新过滤都会直接报错，并停止继续展示结果中心，避免把候选池数量误当成符合条件的组合总数。
+### 修复 (Fixed)
 
+- **QuickStart 前端预览**: `QuickStart-Grit.ps1` 现在会以 `--rebuild-on-start` 启动 `web/preview-server.mjs`，避免默认 `http://127.0.0.1:4173/#/workspace` 在冷启动时返回 `Frontend build not ready yet.`。
+- **查看全部组合弹层**: `#/optimization-jobs/:id` 的“查看全部组合”弹层改为桌面安全宽度，避免结果表在电脑屏幕上横向撑出滚动条；底部操作栏固定；弹层打开时会锁定背景页面滚动，并将头部/底部区域的滚轮转发到表格区，保证弹层与表格都能顺畅使用滚轮浏览。
+- **演示 API 合同**: `web/src/lib/demoStore.ts` 与 `web/src/lib/demoStorePhase4.ts` 补齐 `updateOptimizationJobConstraints`，前端全局 `tsc --noEmit` 不再被这两条已知基线错误阻塞。
+- **策略版本展示**: 策略主名称恢复为基础名，不再把版本号写进 `策略名vN`；`#/workspace` 最近回测优化、`#/runs`、回测详情、策略详情与优化相关页面改为展示“策略名 + 版本标签”，其中回测与优化任务会优先使用各自持久化的历史版本信息，不再被当前最新版本覆盖。
+- **优化配置版本一致性**: `#/optimization-jobs/new/config` 在无 `source_run_id` 的菜单入口下，参数范围“当前值”现在优先读取策略当前参数版本，不再被历史 `confirmation_fields` 旧值覆盖，避免页面显示高版本标签时仍沿用旧版本默认参数而造成版本判断错误。
+- **旧任务约束清洗**: 旧版 Optimization Lab 任务在详情读取、结果页水合与重新过滤时会主动清洗 legacy `turnover` 约束，避免“约束条件”模块重新冒出已下线的第六项 `换手率`。
+- **优化结果评分一致性**: Optimization Lab 结果页的“当前组合”基线行改为复用候选组合同一套稳定度与综合评分模型，不再出现当前组合显示稳定度 `88`、综合得分 `1.325`，而候选列表却按另一套分数与稳定度排序的口径不一致问题。
+- **优化结果稳定度显示**: Optimization Lab 结果页加载“当前组合”基线行时不再只取 `view=metrics` 的轻量回测详情，避免缺少 `consistency_score` / `chart_series` 时把稳定度错误回退为 `0`。
+- **优化配置**: `#/optimization-jobs/new/config` 的 `观察周期` 不再被错误建模为单值范围，现改为 `每日 / 每周 / 每月` 多选项，并同步支持后端按离散枚举展开优化组合。
+- **动量调仓频率**: `#/optimization-jobs/new/config` 现支持将动量策略 `调仓频率` 作为 `每月 / 每季度 / 每半年 / 每年` 离散优化维度；候选晋升与复制版本时也会同步更新策略顶层 `rebalance_frequency`，保证策略详情页与新建-动量策略页展示一致。
+- **优化结果计数**: 旧版只保存 `candidates_json`、未落 `optimization_job_trials` 的优化任务，现在会按已保存候选重算 `matching_combination_count`，避免出现“符合过滤条件的组合共 0 个”却仍显示“当前首选组合”的矛盾状态。
+- **历史任务结果提示**: `#/optimization-jobs/:id` 遇到缺少全量 `optimization_job_trials` 的旧任务时，会明确标记“仅基于已保存候选”，不再把 4 个历史候选误说成 2880 组组合的完整筛选结果。
+- **参数候选盘排序**: `#/optimization-jobs/:id` 读取完成态优化任务时，若历史 `candidates_json` 的首位候选已经落后于 `matching_combinations` 的真实头名，会自动基于持久化 `optimization_job_trials` 重建候选版本，避免参数候选盘第 1 名低于“查看全部组合”的实际 `年化收益率 Max`。
+- **重新过滤列表闪动**: `#/optimization-jobs/:id` 点击“重新过滤”后，参数候选盘改为等待重新过滤结果返回后再统一刷新，不再先按页面本地状态重排、再跟随后端响应二次更新造成列表连续跳动。
+- **多窗口验证**: 多窗口验证表现在会补充每个窗口的 `YYYY-MM-DD 至 YYYY-MM-DD` 周期说明，并修复窗口年化收益率错误显示为 `-` 的问题。
 
-### 变更
+## [0.1.1-003] - 2026-04-16 - 新增离线价格补源与优化实验室结果兜底入口
 
-- 优化 Optimization Lab 进度链路的感知体验与后端吞吐：前端改为自适应轮询（运行态起始 `2000ms`，无进展时逐步退避到 `2500ms` / `3000ms`），并补充 5% 抖动与隐藏/失焦暂停及恢复后即时拉取，同时保留 `inFlight` 去重避免并发重复请求。
-- 后端 `get_optimization_job_detail` 运行态详情查询加入 `job_id + updated_at` 维度的 1 秒短时内存复用，减少无变更窗口下重复 `progress_snapshot` 聚合查询；返回字段结构保持不变。
-- 为 `get_optimization_job_detail` 补充请求频率、平均耗时与 snapshot 命中率指标/日志，用于低风险提速方案的回归量化验证。
-- 数据集价格链新增离线 `Stooq` ZIP 提供方，可直接读取 `GRIT_STOOQ_US_DAILY_ZIP` 或默认 `~/Downloads/d_us_txt.zip` 的 `d_us_txt.zip` 冷启动包补齐长历史日线；该源只参与价格快照，不参与公司行为完成度。
-- 快照 provider telemetry 现在会把 `provider_summary` 持久化到数据集 metadata，并且不再把 `Stooq/AkShare` 这类纯价格源计入 corporate action provider summary。
+### 新增 (Added)
 
-## [0.1.1-002] - 2026-04-15
+- **数据源**: 引入离线 `Stooq` ZIP 价格源，可从 `GRIT_STOOQ_US_DAILY_ZIP` 或默认冷启动包补齐长历史日线。
+- **交互**: Optimization Lab 结果页新增“一键放宽到有结果”入口，可按当前最佳候选自动回填阈值并立即重新过滤。
 
-### 新增
+### 优化 (Changed)
 
-- 数据集快照新增 `yfinance` 补洞提供方，在 `Yahoo HTTP` 没有 bars 数据、长历史存在缺口或需要补齐 `dividend/split` 时，优先提供 Yahoo 体系的回退能力。
-- 新增股票池阶段的 heartbeat 更新与定向修复窗口，使实时任务现在会以可见的阶段变化依次经过 `selection -> latest_market_data -> finalizing -> universe_provider`。
-- 新增 Optimization Lab 模块，提供独立的参数配置、结果展示、轮询刷新流程，以及针对配置页、进度页、结果页的专项测试覆盖。
-- 新增动量策略支持，贯通策略模板、回测指标、策略详情和相关运行引用链路。
-- 新增更完整的市场数据与股票池历史能力，接入官方指数公告链路，以及 FMP、Tiingo、Alpha Vantage、SEC EDGAR、AkShare US、Longbridge 等数据提供方。
-- 新增纳斯达克 100 的 Wikipedia 变更表回填能力；当历史修订表不可用时，可基于当前页面的成分变更历史并以 `2015` curated dataset 为基线，重建 `2007+` 的锚点缺口。
-- 新增纳斯达克 100 旧版 Wikipedia 列表解析器；即使 `2005-2007` 的旧修订只有 `Components` 或 `NASDAQ-100` 项目列表、没有 wikitable，也仍可生成历史锚点。
-- 新增 Internet Archive / 归档 Wikipedia 快照回填能力，用于补齐 2004 年以前剩余的纳斯达克 100 回退锚点；当实时 Wikipedia 修订历史不足时，仍可重建更早的半年度节点。
-- 新增运行详情总览、诊断、属性等视图，可直接查看执行证据、参数快照和优化上下文。
-- 新增面向贡献与验收的 harness 文档、fixture 生成能力、smoke 脚本和技术操作指南，使本地重复验证成为标准工作流的一部分。
+- **策略列表性能**: 策略选择页改为复用 `latest_completed_run_summary` 摘要数据，不再逐条拉取完整回测详情，显著缩短首屏等待。
+- **轮询链路**: Optimization Lab 进度轮询加入自适应退避、抖动、失焦暂停与恢复后即时拉取，减少无效请求并保留 `inFlight` 去重。
+- **后端吞吐**: `get_optimization_job_detail` 在运行态加入 `job_id + updated_at` 的 1 秒短时复用，降低无变更窗口下的重复聚合查询。
+- **可观测性**: `get_optimization_job_detail` 补充请求频率、平均耗时和 snapshot 命中率指标，便于量化提速方案的回归效果。
+- **快照遥测**: `provider_summary` 现在会持久化到数据集 metadata，并将纯价格源排除在 corporate action provider summary 之外。
 
-### 变更
+### 修复 (Fixed)
 
-- 数据集价格链调整为 `Yahoo HTTP -> yfinance -> Tiingo -> Longbridge -> AkShare -> FMP`，并将 `Alpha Vantage` 价格端限制为仅在 `repair` 缺口批次下执行 `targeted_price_repair`。
-- 运行时提供方遥测新增 `yfinance` 的 `selected_primary_symbols`、`succeeded_not_selected_symbols` 统计，并把 `Alpha Vantage` 的定点补价与普通价格链分开落库。
-- 股票池免费链默认顺序调整为 `Wikipedia 历史修订 + 官方公告 + GitHub curated dataset`，并将 `FMP historical constituent` 降级为仅在 entitlement probe 成功时启用的付费可选源。
-- 将股票池修复范围限制为不完整的半年度锚点，不再在每次运行时都重新加载过去 30 年窗口内所有 `01-01 / 07-01` 锚点。
-- 扩展标普 500 历史修复逻辑，在裁剪结果前额外抓取一个下游半年度锚点，使 Wikipedia 变更表回填可以基于更晚版本重建更旧的回退锚点。
-- 股票池刷新统计新增历史锚点进展字段，支持区分“成员行未变化”和“历史锚点质量已提升”两类刷新结果。
-- 改进快照刷新与恢复逻辑，使官方来源回退、证券身份映射、股票池历史更新更加稳定可靠。
-- 调整快照页 `READY/就绪` 状态标签样式，使已完成的股票池卡片呈现明确的绿色成功态。
-- 扩展工作台、快照页、运行列表、回测提交页、策略详情页的串联体验，让研究链路从创建一路连通到优化阶段。
-- 升级优化任务执行与续跑机制，在后端 API 和前端页面中持久化更多 trial 进度、heartbeat、ETA 与候选结果状态。
-- 提升本地运行时的回测与优化性能，尤其改善 Windows 下长时间任务的执行体验。
-- 同步刷新架构、技术、设计与 README 文档，使当前工作流和运维脚本与代码实现保持一致。
+- **快照编号**: 修正 `pre-push` 补跑 `CHANGELOG.md` 时的快照编号与日期规则，避免补推送被错误记为 `-001`。
+- **公司行为诊断**: 补充 `complete_no_events` probe coverage，消除无正式事件 symbol 被误判为 corporate missing 的假阴性。
+- **快照修复**: repair 会按 `covered_symbols` 重算缺口与状态，避免陈旧 `missing_symbols` 让任务卡在历史假状态。
+- **重新过滤**: 当前组合仍通过但候选全被快捷过滤挡住时不再无入口卡死；筛空结果时也不会错误落盘并切换本地结果态。
+- **错误提示**: “无符合条件的组合” 统一改用顶部居中的 `error-banner` 展示，解决右下角私有样式带来的溢出问题。
+- **护栏卡片**: 配置页将约束改写为“最大回撤 ≤ 25%”这类规则句，并移除卡片内重复的“当前判定”信息，提升两列布局可读性。
+- **时间窗口继承**: 使用 `source_run_id` 创建优化任务时会继承原始 `request_json` 时间窗口，缺失窗口时直接报错，不再回退整段历史数据。
+- **结果计数**: 终态详情缺少 `matching_combination_count` 时会直接报错并停止展示，避免把候选池数量误当成符合条件的组合总数。
 
-### 修复
+## [0.1.1-002] - 2026-04-15 - 引入 Optimization Lab 并补强快照修复与历史数据链路
 
-- 修复实时快照刷新编排问题；当同步重建全部历史锚点时，`repair + universes` 不再长时间显示为卡在 `preflight`。
-- 修复 Optimization Lab 结果页过滤统计与“当前组合”展示割裂的问题：当当前组合满足快捷过滤条件时，顶部“符合约束”统计会纳入当前组合，页面也不再错误显示“当前约束下暂无候选版本通过过滤”。
-- 修复 Optimization Lab 结果页问题：首屏区域现在会展示当前生效的约束标签，候选表只显示满足当前约束规则的版本，零匹配任务也会回退到明确的空结果状态，而不会展示不符合约束的候选项。
-- 修复 Optimization Lab 首屏操作按钮样式，使结果页和配置页保持一致的按钮宽度与换行表现，不再把标签挤压成狭窄的纵向堆叠。
-- 再次修复优化任务首组 trial 启动过慢的问题：将快照就绪预检迁移到 `dataset_symbol_coverage`，并让 `run-optimization` 延迟加载应用与提供方启动逻辑，使真实子进程校验耗时降至 `1.639s`，`opt_c9192c66f58e` 的第 `1/4` 组 trial 启动耗时降至 `1.655s`。
-- 修复参数优化任务首组启动过慢的问题：优化热路径读取 `dataset_price_bars` 时不再为每根 bar 解码无关的 `metadata_json`，使真实策略的首组开始时间从约 84 秒缩短到约 13 秒，首组完成时间从约 160 秒缩短到约 30 秒。
-- 修复 Optimization Lab 手动“继续优化”后返回旧的 `QUEUED` 快照的问题；恢复操作现在会立即基于已持久化 trial 进度返回 `RUNNING` 状态，并同步 `completed_combinations`、`persisted_trial_count` 与 `next_trial_index`，避免前端进度长时间看起来没有变化。
-- 修复 `repair` 路径错误消耗 `Alpha Vantage` 免费价格额度的问题，`incremental` 默认不再触发 Alpha 价格全池尝试。
-- 保持规范数据集快照的事实层语义为原始 `OHLC + adj_close`，不将 adjusted OHLC 或 forward fill 写入持久化快照。
-- 修复快照页顶部“最近刷新”摘要只按股票池成员行增量判断进展的问题；现在即使 `updated_row_count = 0`，只要历史锚点从 fallback 提升为历史来源，前端也会显示如“纳指100股票池9个历史锚点，进度23/61”的新增说明。
-- 修复多处快照与市场数据边界场景，降低刷新或修复任务后本地数据平面不完整或不一致的风险。
-- 修复优化进度可见性问题，使运行中或被中断的任务能在 API 与 UI 中呈现更清晰且一致的状态。
-- 修复本地 smoke 与 live acceptance 的准备链路，通过统一 fixture 重置、测试入口和真实 API 验证脚本提升可重复性。
+### 新增 (Added)
 
-### Fixed
+- **价格补洞**: 数据集快照新增 `yfinance` 回退提供方，用于 `Yahoo HTTP` 缺 bars、长历史缺口或公司行为补齐场景。
+- **任务心跳**: 股票池阶段新增 heartbeat 与定向修复窗口，实时任务会显式经过 `selection -> latest_market_data -> finalizing -> universe_provider`。
+- **参数优化**: 新增 Optimization Lab 模块，打通参数配置、结果展示、轮询刷新及对应页面测试。
+- **策略类型**: 新增动量策略，贯通策略模板、回测指标、策略详情和运行引用链路。
+- **数据覆盖**: 新增更完整的市场数据与股票池历史能力，接入官方指数公告及 FMP、Tiingo、Alpha Vantage、SEC EDGAR、AkShare US、Longbridge 等提供方。
+- **历史回填**: 新增纳斯达克 100 的 Wikipedia 变更表回填能力，可在历史修订不足时基于 `2015` curated dataset 重建 `2007+` 锚点缺口。
+- **旧版解析**: 新增纳斯达克 100 旧版 Wikipedia 列表解析器，支持 `2005-2007` 缺失 wikitable 的历史页面。
+- **归档回退**: 新增 Internet Archive / 归档 Wikipedia 快照回填，用于补齐 2004 年以前的纳斯达克 100 历史锚点。
+- **运行详情**: 新增总览、诊断、属性等视图，可直接查看执行证据、参数快照和优化上下文。
+- **验证工具**: 新增 harness 文档、fixture 生成能力、smoke 脚本和技术操作指南，让本地重复验证成为标准流程。
 
-- 修复动量回测只实际使用 `lookback_months` 和 `top_n` 的问题；`skip_recent_months`、`hold_rank_threshold`、`weighting_method`、`rebalance_anchor_dates` 现在都会进入真实调仓逻辑，`capital` 也会同步写入 `initial_equity`。
-- 修复优化评分被 `total_return_pct` 放大的问题；现在改为以 `return_sharpe`、`out_of_sample_sharpe`、Calmar、稳定度、回撤和换手约束为主的风险调整排序。
-- 修复 Optimization Lab 结果中心在调整约束后仍复用旧候选池的问题；现在会基于完整 `optimization_job_trials` 重建候选、去重相同结果，并优先返回满足当前约束的不同候选版本。
+### 优化 (Changed)
+
+- **价格链路**: 数据集价格链调整为 `Yahoo HTTP -> yfinance -> Tiingo -> Longbridge -> AkShare -> FMP`，并把 `Alpha Vantage` 价格端收敛到 `repair` 缺口批次。
+- **遥测落库**: 运行时 provider telemetry 新增 `yfinance` 选中与未选中成功统计，并将 `Alpha Vantage` 定点补价与普通价格链分开落库。
+- **股票池免费链**: 默认顺序调整为 `Wikipedia 历史修订 + 官方公告 + GitHub curated dataset`，`FMP historical constituent` 降级为 entitlement 成功后的付费可选源。
+- **历史修复范围**: 股票池修复改为只处理不完整的半年度锚点，不再每次重载过去 30 年全部 `01-01 / 07-01` 节点。
+- **标普回填**: 标普 500 历史修复会预抓一个下游半年度锚点，便于基于更晚版本重建更早回退锚点。
+- **刷新统计**: 股票池刷新统计新增历史锚点进展字段，可区分“成员行未变化”和“历史锚点质量提升”。
+- **刷新稳定性**: 快照刷新与恢复逻辑整体加强，使官方来源回退、证券身份映射和股票池历史更新更稳定。
+- **状态视觉**: 快照页 `READY/就绪` 标签调整为明确绿色成功态，完成状态更容易识别。
+- **研究链路**: 工作台、快照页、运行列表、回测提交页与策略详情页的串联体验扩展到优化阶段。
+- **续跑可见性**: 优化任务执行与续跑机制升级，在后端 API 与前端页面中持久化更多 trial 进度、heartbeat、ETA 和候选结果状态。
+- **本地性能**: 本地运行时的回测与优化性能进一步提升，尤其改善 Windows 下的长时间任务体验。
+- **文档同步**: 架构、技术、设计与 README 文档同步刷新，使工作流和运维脚本与当前实现保持一致。
+
+### 修复 (Fixed)
+
+- **快照编排**: 同步重建全部历史锚点时，`repair + universes` 不再长时间卡在 `preflight`。
+- **过滤统计**: 当前组合满足快捷过滤条件时，结果页顶部“符合约束”统计会纳入当前组合，不再错误显示“暂无候选版本通过过滤”。
+- **空结果态**: 结果页首屏会展示当前约束标签，候选表只保留满足约束的版本，零匹配任务会明确回退到空结果状态。
+- **首屏按钮**: Optimization Lab 结果页与配置页的首屏按钮宽度和换行表现保持一致，不再挤成纵向堆叠。
+- **首组启动**: 快照就绪预检迁移到 `dataset_symbol_coverage`，并让 `run-optimization` 延迟加载应用与提供方逻辑，显著缩短首组 trial 启动时间。
+- **热路径读取**: 优化任务读取 `dataset_price_bars` 时不再为每根 bar 解码无关 `metadata_json`，显著缩短真实策略的首组开始与完成时间。
+- **继续优化**: 手动“继续优化”后会立即返回 `RUNNING` 快照，并同步 `completed_combinations`、`persisted_trial_count` 与 `next_trial_index`。
+- **价格额度**: `repair` 路径不再错误消耗 `Alpha Vantage` 免费价格额度，`incremental` 默认也不会触发 Alpha 全池尝试。
+- **事实层语义**: 规范数据集快照继续保持原始 `OHLC + adj_close` 事实层，不再把 adjusted OHLC 或 forward fill 写入持久化快照。
+- **刷新摘要**: 即使 `updated_row_count = 0`，只要历史锚点来源提升，快照页顶部也会显示历史进展摘要。
+- **数据边界**: 多处快照与市场数据边界场景得到修复，降低刷新或 repair 后本地数据平面不完整或不一致的风险。
+- **进度状态**: 运行中或被中断的优化任务现在能在 API 与 UI 中呈现更清晰且一致的状态。
+- **验证链路**: 本地 smoke 与 live acceptance 的准备链路统一为 fixture 重置、测试入口和真实 API 校验脚本，提升重复验证稳定性。
+- **动量参数**: 动量回测现在会真实使用 `skip_recent_months`、`hold_rank_threshold`、`weighting_method` 和 `rebalance_anchor_dates`，并把 `capital` 写入 `initial_equity`。
+- **评分排序**: 优化评分不再被 `total_return_pct` 放大，改为以 `return_sharpe`、`out_of_sample_sharpe`、Calmar、稳定度、回撤和换手约束为主的风险调整排序。
+- **候选重建**: 调整约束后，Optimization Lab 结果中心会基于完整 `optimization_job_trials` 重建候选，并优先返回满足当前约束的不同版本。
 
 ## [0.1.1] - 2026-04-01
 

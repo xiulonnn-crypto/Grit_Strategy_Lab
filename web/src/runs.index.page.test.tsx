@@ -24,6 +24,7 @@ const runs: ApiBacktestRunListItem[] = [
     id: 'bt-101',
     strategy_id: 'str-alpha',
     strategy_name: '策略 Alpha',
+    parameter_version_id: 'str-alpha-v1',
     status: 'COMPLETED',
     created_at: '2026-03-31T03:00:00.000Z',
     updated_at: '2026-03-31T03:30:00.000Z',
@@ -39,6 +40,7 @@ const runs: ApiBacktestRunListItem[] = [
     id: 'bt-102',
     strategy_id: 'str-beta',
     strategy_name: '策略 Beta',
+    parameter_version_id: 'str-beta-v2',
     status: 'COMPLETED_WITH_WARNINGS',
     created_at: '2026-03-31T03:50:00.000Z',
     updated_at: '2026-03-31T04:20:00.000Z',
@@ -86,6 +88,7 @@ describe('runs index page', () => {
     const tableRows = within(runsTable as HTMLElement).getAllByRole('row');
     expect(tableRows[1]).toHaveTextContent('bt-102');
     expect(tableRows[1]).toHaveTextContent('策略 Beta');
+    expect(tableRows[1]).toHaveTextContent('v2');
     expect(tableRows[1]).toHaveTextContent('永久回测');
     expect(tableRows[1]).toHaveTextContent('有提醒');
     expect(tableRows[1]).toHaveTextContent('+25.1%');
@@ -96,6 +99,7 @@ describe('runs index page', () => {
     expect(tableRows[2]).toHaveTextContent('临时回测');
     expect(tableRows[2]).toHaveTextContent('已完成');
     expect(tableRows[2]).toHaveTextContent('+18.4%');
+    expect(tableRows[2]).toHaveTextContent('v1');
 
     expect(fakeApi.getBacktestRunDetail).not.toHaveBeenCalled();
 

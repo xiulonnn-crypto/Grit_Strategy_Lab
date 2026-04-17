@@ -173,13 +173,13 @@ function buildMetaSecondary(
   const summaryUniverseSnapshotId = latestCompletedRunSummary?.universe_snapshot_id?.trim() ?? '';
 
   if (summaryDatasetSnapshotId && summaryUniverseSnapshotId) {
-    return `敹怎 ${summaryDatasetSnapshotId} / ${summaryUniverseSnapshotId}`;
+    return `快照 ${summaryDatasetSnapshotId} / ${summaryUniverseSnapshotId}`;
   }
   if (summaryDatasetSnapshotId) {
-    return `?唳敹怎 ${summaryDatasetSnapshotId}`;
+    return `数据快照 ${summaryDatasetSnapshotId}`;
   }
   if (summaryUniverseSnapshotId) {
-    return `?∠巨瘙翰??${summaryUniverseSnapshotId}`;
+    return `股票池快照 ${summaryUniverseSnapshotId}`;
   }
 
   const snapshotSummary = latestRunDetail?.snapshot_summary as UnknownRecord | undefined;
@@ -273,7 +273,10 @@ export function buildWorkspaceStrategyCards(
       metaPrimary: buildMetaPrimary(strategy, detail, latestRunDetail, latestCompletedRunSummary),
       metaSecondary: buildMetaSecondary(strategy, detail, latestRunDetail, latestCompletedRunSummary, parameterVersion),
       metaTimestamp: formatCardTimestamp(
-        latestRunDetail?.completed_at ??
+        detail?.updated_at ??
+          strategy.updated_at ??
+          detail?.created_at ??
+          strategy.created_at ??
           latestRunDetail?.updated_at ??
           latestRunDetail?.created_at ??
           latestCompletedRunSummary?.completed_at ??
@@ -298,10 +301,22 @@ export function buildParameterDiffRows(
   return rows;
 }
 
-export function buildRecentRunScore(run?: ApiBacktestRunDetail): { totalReturn: string; sharpe: string } {
+export function buildRecentRunScore(run?: ApiBacktestRunDetail): {
+  totalReturn: string;
+  annualizedReturn: string;
+  sharpe: string;
+} {
   const metrics = run?.metrics ?? {};
+  const annualizedReturnValue =
+    typeof metrics.annualized_return === 'number' && Number.isFinite(metrics.annualized_return)
+      ? metrics.annualized_return
+      : typeof metrics.cagr === 'number' && Number.isFinite(metrics.cagr)
+        ? metrics.cagr
+        : null;
+
   return {
     totalReturn: formatPercent(metrics.total_return ?? 0),
+    annualizedReturn: annualizedReturnValue === null ? '待补充' : formatPercent(annualizedReturnValue),
     sharpe: formatRatio(metrics.sharpe ?? 0),
   };
 }

@@ -1,5 +1,8 @@
 ﻿import React from "react";
 import {
+  readFileSync,
+} from "node:fs";
+import {
   act,
   cleanup,
   fireEvent,
@@ -9,6 +12,8 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ApiBacktestRunDetail,
+  ApiOptimizationCandidate,
+  ApiOptimizationConstraintPresetKey,
   ApiOptimizationJobCreatePayload,
   ApiOptimizationJobDetail,
   ApiOptimizationJobListItem,
@@ -67,7 +72,7 @@ type OptimizationJobState = {
 };
 
 const MISSING_MATCHING_COMBINATION_COUNT_ERROR =
-  "优化结果缺少 matching_combination_count，无法确认符合过滤条件的组合总数。";
+  "优化结果缺少 matching_combination_count，无法确认符合约束条件的组合总数。";
 
 function formatVersionedStrategyName(
   name: string,
@@ -195,16 +200,6 @@ const defaultConstraintPayload = {
       source: "preset" as const,
     },
     {
-      key: "turnover",
-      label: "换手率",
-      category: "risk" as const,
-      operator: "<=" as const,
-      value: 120,
-      baseline_value: 120,
-      unit: "%",
-      source: "preset" as const,
-    },
-    {
       key: "return_sharpe",
       label: "收益夏普",
       category: "return" as const,
@@ -216,6 +211,24 @@ const defaultConstraintPayload = {
     },
   ],
 };
+
+type OptimizationObjective =
+  | "return_sharpe"
+  | "annualized_return"
+  | "composite_score";
+
+type OptimizationTestApi = DemoApi & {
+  __requestedRunDetailViews?: string[];
+};
+
+type OptimizationConstraintUpdatePayloadForTest = {
+  objective?: string | null;
+  constraint_preset_key?: ApiOptimizationConstraintPresetKey | null;
+  constraint_label?: string | null;
+  constraints?: ApiOptimizationJobDetail["summary"]["constraints"];
+};
+
+type OptimizationCandidateRecord = ApiOptimizationJobDetail["candidates"][number];
 
 function readOptimizationMetricNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -277,17 +290,160 @@ function getOptimizationConstraintMetricValue(
     : null;
 }
 
+function normalizeOptimizationObjectiveForTest(
+  objective?: string | null,
+): OptimizationObjective {
+  const normalized = String(objective ?? "").trim().toLowerCase();
+  if (normalized === "annualized_return" || normalized === "cagr") {
+    return "annualized_return";
+  }
+  if (normalized === "composite_score" || normalized === "score") {
+    return "composite_score";
+  }
+  return "return_sharpe";
+}
+
+function getOptimizationObjectiveMetricValueForTest(
+  candidate: OptimizationCandidateRecord,
+  objective: OptimizationObjective,
+): number {
+  if (objective === "annualized_return") {
+    return readOptimizationMetricNumber(
+      candidate.metrics?.annualized_return ?? candidate.metrics?.cagr,
+    ) ?? 0;
+  }
+  if (objective === "composite_score") {
+    return typeof candidate.score === "number" ? candidate.score : 0;
+  }
+  return (
+    readOptimizationMetricNumber(
+      candidate.metrics?.return_sharpe ?? candidate.metrics?.sharpe,
+    ) ?? 0
+  );
+}
+
+function rerankOptimizationCandidatesForTest(
+  candidates: ApiOptimizationJobDetail["candidates"],
+  objective: OptimizationObjective,
+): ApiOptimizationJobDetail["candidates"] {
+  return [...candidates]
+    .sort((left, right) => {
+      const primaryDelta =
+        getOptimizationObjectiveMetricValueForTest(right, objective) -
+        getOptimizationObjectiveMetricValueForTest(left, objective);
+      if (Math.abs(primaryDelta) > 1e-9) {
+        return primaryDelta;
+      }
+      const rankDelta = (left.rank ?? Number.MAX_SAFE_INTEGER) -
+        (right.rank ?? Number.MAX_SAFE_INTEGER);
+      if (rankDelta !== 0) {
+        return rankDelta;
+      }
+      return String(left.id ?? "").localeCompare(String(right.id ?? ""));
+    })
+    .map((candidate, index) => ({
+      ...candidate,
+      rank: index + 1,
+    }));
+}
+
+function buildBestMetricsSummaryFromCandidate(
+  previous: ApiOptimizationJobDetail["summary"]["best_metrics_summary"],
+  candidate: OptimizationCandidateRecord | null,
+): ApiOptimizationJobDetail["summary"]["best_metrics_summary"] {
+  if (!candidate) {
+    return previous ?? null;
+  }
+  return {
+    ...(previous ?? {}),
+    trial_index:
+      typeof candidate.rank === "number"
+        ? candidate.rank
+        : previous?.trial_index ?? 0,
+    label: candidate.label,
+    status: candidate.status,
+    parameter_snapshot: structuredClone(candidate.parameter_snapshot ?? {}),
+    metrics: structuredClone(candidate.metrics ?? {}),
+    score: typeof candidate.score === "number" ? candidate.score : 0,
+  };
+}
+
+function applyConstraintUpdateToJob(
+  job: ApiOptimizationJobDetail,
+  payload: OptimizationConstraintUpdatePayloadForTest,
+): ApiOptimizationJobDetail {
+  const nextObjective = normalizeOptimizationObjectiveForTest(
+    payload.objective ?? job.summary.objective ?? job.request.objective,
+  );
+  const nextConstraintPresetKey =
+    payload.constraint_preset_key ??
+    job.summary.constraint_preset_key ??
+    job.request.constraint_preset_key ??
+    "balanced";
+  const nextConstraintLabel =
+    payload.constraint_label ??
+    job.summary.constraint_label ??
+    job.request.constraint_label ??
+    "平衡型";
+  const nextConstraints = structuredClone(
+    payload.constraints ?? job.summary.constraints ?? job.request.constraints ?? [],
+  );
+  const rerankedCandidates = rerankOptimizationCandidatesForTest(
+    job.candidates,
+    nextObjective,
+  );
+  const bestCandidate = rerankedCandidates[0] ?? null;
+
+  return syncMatchingCombinationCount({
+    ...job,
+    updated_at: nowIso(),
+    request: {
+      ...job.request,
+      objective: nextObjective,
+      constraint_preset_key: nextConstraintPresetKey,
+      constraint_label: nextConstraintLabel,
+      constraints: structuredClone(nextConstraints),
+    },
+    summary: {
+      ...job.summary,
+      objective: nextObjective,
+      constraint_preset_key: nextConstraintPresetKey,
+      constraint_label: nextConstraintLabel,
+      constraints: structuredClone(nextConstraints),
+      best_metrics_summary: buildBestMetricsSummaryFromCandidate(
+        job.summary.best_metrics_summary,
+        bestCandidate,
+      ),
+    },
+    result: {
+      ...job.result,
+      constraint_preset_key: nextConstraintPresetKey,
+      constraint_label: nextConstraintLabel,
+      constraints: structuredClone(nextConstraints),
+      best_candidate_id: bestCandidate?.id ?? null,
+      best_candidate_label: bestCandidate?.label ?? null,
+    },
+    candidates: rerankedCandidates,
+  });
+}
+
 function countMatchingCombinationCandidates(
   candidates: ApiOptimizationJobDetail["candidates"],
   constraints:
     | ApiOptimizationJobDetail["summary"]["constraints"]
     | ApiOptimizationJobDetail["request"]["constraints"],
 ): number {
+  const optimizationCandidates = candidates.filter(
+    (candidate) =>
+      candidate.label !== "当前组合" &&
+      candidate.title !== "当前组合" &&
+      candidate.summary !== "当前基准",
+  );
   const activeConstraints = constraints ?? [];
   if (!activeConstraints.length) {
-    return candidates.length;
+    return optimizationCandidates.length;
   }
-  return candidates.filter((candidate) =>
+  return optimizationCandidates.filter((candidate) =>
     activeConstraints.every((constraint) => {
       const metricValue = getOptimizationConstraintMetricValue(
         candidate,
@@ -311,11 +467,27 @@ function syncMatchingCombinationCount(
     return job;
   }
   const count = countMatchingCombinationCandidates(
-    job.candidates,
+    job.matching_combinations ?? job.candidates,
     job.summary.constraints ?? job.request.constraints,
   );
   job.summary.matching_combination_count = count;
   job.matching_combination_count = count;
+  return job;
+}
+
+function setMatchingCombinations(
+  job: ApiOptimizationJobDetail,
+  combinations: ApiOptimizationCandidate[],
+): ApiOptimizationJobDetail {
+  const sanitizedCombinations = combinations.filter(
+    (candidate) =>
+      candidate.label !== "当前组合" &&
+      candidate.title !== "当前组合" &&
+      candidate.summary !== "当前基准",
+  );
+  job.matching_combinations = structuredClone(sanitizedCombinations);
+  job.summary.matching_combination_count = sanitizedCombinations.length;
+  job.matching_combination_count = sanitizedCombinations.length;
   return job;
 }
 
@@ -444,7 +616,7 @@ function createCompletedJob(
     strategy_id: strategy.id,
     status: "COMPLETED",
     request: {
-      objective: "sharpe",
+      objective: "return_sharpe",
       base_parameter_version_id: strategy.current_parameter_version_id,
       source_run_id: run.id,
       entry_point: "run_detail",
@@ -454,7 +626,7 @@ function createCompletedJob(
       ...defaultConstraintPayload,
     },
     summary: {
-      objective: "sharpe",
+      objective: "return_sharpe",
       candidate_count: 0,
       baseline_parameter_version_id: strategy.current_parameter_version_id,
       entry_point: "run_detail",
@@ -503,7 +675,7 @@ function createInterruptedJob(
     strategy_id: strategy.id,
     status: "INTERRUPTED",
     request: {
-      objective: "sharpe",
+      objective: "return_sharpe",
       base_parameter_version_id: strategy.current_parameter_version_id,
       source_run_id: run.id,
       entry_point: "run_detail",
@@ -513,7 +685,7 @@ function createInterruptedJob(
       ...defaultConstraintPayload,
     },
     summary: {
-      objective: "sharpe",
+      objective: "return_sharpe",
       candidate_count: 0,
       baseline_parameter_version_id: strategy.current_parameter_version_id,
       entry_point: "run_detail",
@@ -571,7 +743,7 @@ function createEmptyCompletedJob(
     strategy_id: strategy.id,
     status: "COMPLETED",
     request: {
-      objective: "sharpe",
+      objective: "return_sharpe",
       base_parameter_version_id: strategy.current_parameter_version_id,
       source_run_id: run.id,
       entry_point: "run_detail",
@@ -581,7 +753,7 @@ function createEmptyCompletedJob(
       ...defaultConstraintPayload,
     },
     summary: {
-      objective: "sharpe",
+      objective: "return_sharpe",
       candidate_count: 0,
       baseline_parameter_version_id: strategy.current_parameter_version_id,
       entry_point: "run_detail",
@@ -649,7 +821,7 @@ function createOptimizationTestApi(): DemoApi {
       strategy_id: strategy.id,
       status: "QUEUED",
       request: {
-        objective: "sharpe",
+        objective: "return_sharpe",
         base_parameter_version_id: strategy.current_parameter_version_id,
         source_run_id: run.id,
         entry_point: "run_detail",
@@ -660,7 +832,7 @@ function createOptimizationTestApi(): DemoApi {
         ...payload,
       },
       summary: {
-        objective: "sharpe",
+        objective: "return_sharpe",
         candidate_count: 0,
         baseline_parameter_version_id: strategy.current_parameter_version_id,
         entry_point: "run_detail",
@@ -955,45 +1127,7 @@ function createOptimizationTestApi(): DemoApi {
       if (String(state.job.status).toUpperCase() !== "COMPLETED") {
         throw new Error("Only completed optimization jobs can be re-filtered.");
       }
-      const nextConstraintPresetKey =
-        payload.constraint_preset_key ??
-        state.job.summary.constraint_preset_key ??
-        state.job.request.constraint_preset_key ??
-        "balanced";
-      const nextConstraintLabel =
-        payload.constraint_label ??
-        state.job.summary.constraint_label ??
-        state.job.request.constraint_label ??
-        "平衡型";
-      const nextConstraints = structuredClone(
-        payload.constraints ??
-          state.job.summary.constraints ??
-          state.job.request.constraints ??
-          [],
-      );
-      state.job = {
-        ...state.job,
-        updated_at: nowIso(),
-        request: {
-          ...state.job.request,
-          constraint_preset_key: nextConstraintPresetKey,
-          constraint_label: nextConstraintLabel,
-          constraints: structuredClone(nextConstraints),
-        },
-        summary: {
-          ...state.job.summary,
-          constraint_preset_key: nextConstraintPresetKey,
-          constraint_label: nextConstraintLabel,
-          constraints: structuredClone(nextConstraints),
-        },
-        result: {
-          ...state.job.result,
-          constraint_preset_key: nextConstraintPresetKey,
-          constraint_label: nextConstraintLabel,
-          constraints: structuredClone(nextConstraints),
-        },
-      };
-      syncMatchingCombinationCount(state.job);
+      state.job = applyConstraintUpdateToJob(state.job, payload);
       return cloneJob(state.job);
     },
     async deleteOptimizationJob(jobId: string) {
@@ -1142,177 +1276,344 @@ function createZeroPassConstraintApi(): DemoApi {
     payload,
   ): Promise<ApiOptimizationJobDetail> => {
     const job = await ensureJob(jobId);
-    const nextConstraintPresetKey =
-      payload.constraint_preset_key ??
-      job.summary.constraint_preset_key ??
-      job.request.constraint_preset_key ??
-      "balanced";
-    const nextConstraintLabel =
-      payload.constraint_label ??
-      job.summary.constraint_label ??
-      job.request.constraint_label ??
-      "平衡型";
-    const nextConstraints = structuredClone(
-      payload.constraints ?? job.summary.constraints ?? job.request.constraints,
-    );
-    currentJob = {
-      ...job,
-      updated_at: nowIso(),
-      request: {
-        ...job.request,
-        constraint_preset_key: nextConstraintPresetKey,
-        constraint_label: nextConstraintLabel,
-        constraints: structuredClone(nextConstraints),
-      },
-      summary: {
-        ...job.summary,
-        constraint_preset_key: nextConstraintPresetKey,
-        constraint_label: nextConstraintLabel,
-        constraints: structuredClone(nextConstraints),
-      },
-      result: {
-        ...job.result,
-        constraint_preset_key: nextConstraintPresetKey,
-        constraint_label: nextConstraintLabel,
-        constraints: structuredClone(nextConstraints),
-      },
-    };
-    syncMatchingCombinationCount(currentJob);
+    currentJob = applyConstraintUpdateToJob(job, payload);
     return structuredClone(currentJob);
   };
 
   return api;
 }
 
-function createBaselineOnlyPassApi(): DemoApi {
+function createBaselineOnlyPassApi(): OptimizationTestApi {
   const api = createOptimizationTestApi();
   const originalGetStrategyDetail = api.getStrategyDetail.bind(api);
   const originalGetBacktestRunDetail = api.getBacktestRunDetail.bind(api);
   const originalGetOptimizationJobDetail =
     api.getOptimizationJobDetail.bind(api);
+  let currentJob: ApiOptimizationJobDetail | null = null;
+  const requestedRunDetailViews: string[] = [];
 
   api.getStrategyDetail = async (id: string): Promise<ApiStrategyDetail> => {
     const strategy = await originalGetStrategyDetail(id);
     strategy.latest_completed_run_summary = {
       ...strategy.latest_completed_run_summary!,
-      annualized_return: 0.477,
-      sharpe: 1.32,
-      max_drawdown: -0.395,
-      oos_sharpe: 1.32,
+      total_return: 39.163376141826205,
+      annualized_return: 0.4767919577553905,
+      sharpe: 1.3246162781781354,
+      max_drawdown: -0.3953207278994667,
+      oos_sharpe: 1.6475544195554235,
     };
     return strategy;
   };
 
   api.getBacktestRunDetail = async (
     id: string,
+    request?: { view?: string } | AbortSignal,
   ): Promise<ApiBacktestRunDetail> => {
     const run = await originalGetBacktestRunDetail(id);
+    const requestedView =
+      request && typeof request === "object" && "view" in request
+        ? request.view ?? "full"
+        : "full";
+    requestedRunDetailViews.push(String(requestedView));
     run.metrics = {
       ...run.metrics,
-      annualized_return: 0.477,
-      return_sharpe: 1.32,
-      sharpe: 1.32,
-      out_of_sample_sharpe: 1.32,
-      oos_sharpe: 1.32,
-      max_drawdown: -0.395,
-      max_drawdown_pct: -39.5,
+      total_return: 39.163376141826205,
+      total_return_pct: 3916.3376141826205,
+      annualized_return: 0.4767919577553905,
+      return_sharpe: 1.3246162781781354,
+      sharpe: 1.3246162781781354,
+      out_of_sample_sharpe: 1.6475544195554235,
+      oos_sharpe: 1.6475544195554235,
+      max_drawdown: -0.3953207278994667,
+      max_drawdown_pct: -39.53207278994667,
       turnover: 0.013,
       turnover_pct: 0.013,
     };
+    run.consistency_score = {
+      score: 0.4563299041838,
+      positive_day_share: 0.5534,
+    };
+    if (requestedView === "metrics") {
+      delete (run as Partial<ApiBacktestRunDetail>).consistency_score;
+      delete (run as Partial<ApiBacktestRunDetail>).chart_series;
+    }
     return run;
   };
 
+  async function ensureJob(jobId: string): Promise<ApiOptimizationJobDetail> {
+    if (jobId !== "opt-001") {
+      return originalGetOptimizationJobDetail(jobId);
+    }
+    if (!currentJob) {
+      currentJob = await originalGetOptimizationJobDetail(jobId);
+      const currentComboFriendlyConstraints = [
+        {
+          key: "max_drawdown_pct",
+          label: "最大回撤",
+          category: "risk" as const,
+          operator: "<=" as const,
+          value: 50,
+          baseline_value: 50,
+          unit: "%",
+          source: "manual" as const,
+        },
+        {
+          key: "out_of_sample_sharpe",
+          label: "样本外夏普",
+          category: "stability" as const,
+          operator: ">=" as const,
+          value: 0.99,
+          baseline_value: 0.99,
+          unit: "",
+          source: "manual" as const,
+        },
+        {
+          key: "annualized_return",
+          label: "年化收益率",
+          category: "return" as const,
+          operator: ">=" as const,
+          value: 9.9,
+          baseline_value: 9.9,
+          unit: "%",
+          source: "manual" as const,
+        },
+        {
+          key: "stability",
+          label: "稳定度",
+          category: "stability" as const,
+          operator: ">=" as const,
+          value: 3,
+          baseline_value: 3,
+          unit: "pts",
+          source: "manual" as const,
+        },
+        {
+          key: "return_sharpe",
+          label: "收益夏普",
+          category: "return" as const,
+          operator: ">=" as const,
+          value: 0.1,
+          baseline_value: 0.1,
+          unit: "",
+          source: "manual" as const,
+        },
+      ];
+      currentJob.request.constraint_preset_key = "defensive";
+      currentJob.request.constraint_label = "稳健型（自定义）";
+      currentJob.request.constraints = structuredClone(currentComboFriendlyConstraints);
+      currentJob.summary.constraint_preset_key = "defensive";
+      currentJob.summary.constraint_label = "稳健型（自定义）";
+      currentJob.summary.constraints = structuredClone(currentComboFriendlyConstraints);
+      currentJob.result.constraint_preset_key = "defensive";
+      currentJob.result.constraint_label = "稳健型（自定义）";
+      currentJob.result.constraints = structuredClone(currentComboFriendlyConstraints);
+      currentJob.candidates = currentJob.candidates.map((candidate, index) => ({
+        ...candidate,
+        title: `未通过 ${index + 1}`,
+        label: `未通过 ${index + 1}`,
+        metrics: {
+          ...candidate.metrics,
+          annualized_return: 0.11 - index * 0.004,
+          return_sharpe: 0.92 - index * 0.03,
+          out_of_sample_sharpe: 0.88 - index * 0.04,
+          max_drawdown_pct: -55 - index * 3,
+          stability: 2 - index,
+          turnover: 72 + index * 4,
+        },
+      }));
+      syncMatchingCombinationCount(currentJob);
+    }
+    return currentJob;
+  }
+
   api.getOptimizationJobDetail = async (
     jobId: string,
+  ): Promise<ApiOptimizationJobDetail> =>
+    structuredClone(await ensureJob(jobId));
+
+  api.updateOptimizationJobConstraints = async (
+    jobId,
+    payload,
   ): Promise<ApiOptimizationJobDetail> => {
-    const job = await originalGetOptimizationJobDetail(jobId);
-    const currentComboFriendlyConstraints = [
-      {
-        key: "max_drawdown_pct",
-        label: "最大回撤",
-        category: "risk" as const,
-        operator: "<=" as const,
-        value: 50,
-        baseline_value: 50,
-        unit: "%",
-        source: "manual" as const,
-      },
-      {
-        key: "out_of_sample_sharpe",
-        label: "样本外夏普",
-        category: "stability" as const,
-        operator: ">=" as const,
-        value: 0.99,
-        baseline_value: 0.99,
-        unit: "",
-        source: "manual" as const,
-      },
-      {
-        key: "annualized_return",
-        label: "年化收益率",
-        category: "return" as const,
-        operator: ">=" as const,
-        value: 9.9,
-        baseline_value: 9.9,
-        unit: "%",
-        source: "manual" as const,
-      },
-      {
-        key: "stability",
-        label: "稳定度",
-        category: "stability" as const,
-        operator: ">=" as const,
-        value: 3,
-        baseline_value: 3,
-        unit: "pts",
-        source: "manual" as const,
-      },
-      {
-        key: "turnover",
-        label: "换手率",
-        category: "risk" as const,
-        operator: "<=" as const,
-        value: 60,
-        baseline_value: 60,
-        unit: "%",
-        source: "manual" as const,
-      },
-      {
-        key: "return_sharpe",
-        label: "收益夏普",
-        category: "return" as const,
-        operator: ">=" as const,
-        value: 0.1,
-        baseline_value: 0.1,
-        unit: "",
-        source: "manual" as const,
-      },
-    ];
-    job.request.constraint_preset_key = "defensive";
-    job.request.constraint_label = "稳健型（自定义）";
-    job.request.constraints = structuredClone(currentComboFriendlyConstraints);
-    job.summary.constraint_preset_key = "defensive";
-    job.summary.constraint_label = "稳健型（自定义）";
-    job.summary.constraints = structuredClone(currentComboFriendlyConstraints);
-    job.result.constraint_preset_key = "defensive";
-    job.result.constraint_label = "稳健型（自定义）";
-    job.result.constraints = structuredClone(currentComboFriendlyConstraints);
-    job.candidates = job.candidates.map((candidate, index) => ({
-      ...candidate,
-      title: `未通过 ${index + 1}`,
-      label: `未通过 ${index + 1}`,
-      metrics: {
-        ...candidate.metrics,
-        annualized_return: 0.11 - index * 0.004,
-        return_sharpe: 0.92 - index * 0.03,
-        out_of_sample_sharpe: 0.88 - index * 0.04,
-        max_drawdown_pct: -55 - index * 3,
-        stability: 2 - index,
-        turnover: 72 + index * 4,
-      },
-    }));
-    return syncMatchingCombinationCount(job);
+    const job = await ensureJob(jobId);
+    currentJob = applyConstraintUpdateToJob(job, payload);
+    return structuredClone(currentJob);
   };
+
+  return Object.assign(api, {
+    __requestedRunDetailViews: requestedRunDetailViews,
+  }) as OptimizationTestApi;
+}
+
+function createObjectiveSortingApi(): DemoApi {
+  const api = createOptimizationTestApi();
+  const originalGetOptimizationJobDetail =
+    api.getOptimizationJobDetail.bind(api);
+  let currentJob: ApiOptimizationJobDetail | null = null;
+
+  const keepPassingObjectiveCandidates = (
+    job: ApiOptimizationJobDetail,
+  ): ApiOptimizationJobDetail =>
+    setMatchingCombinations(
+      job,
+      job.candidates.filter((candidate) =>
+        ["夏普第一", "收益第一", "得分第一"].includes(candidate.label ?? ""),
+      ),
+    );
+
+  async function ensureJob(jobId: string): Promise<ApiOptimizationJobDetail> {
+    if (jobId !== "opt-001") {
+      return originalGetOptimizationJobDetail(jobId);
+    }
+    if (!currentJob) {
+      currentJob = await originalGetOptimizationJobDetail(jobId);
+      currentJob.request.objective = "return_sharpe";
+      currentJob.summary.objective = "return_sharpe";
+      currentJob.candidates = currentJob.candidates.map((candidate, index) => {
+        if (
+          candidate.label === "当前组合" ||
+          candidate.title === "当前组合" ||
+          candidate.summary === "当前基准"
+        ) {
+          return candidate;
+        }
+        if (index === 0) {
+          return {
+            ...candidate,
+            label: "夏普第一",
+            title: "夏普第一",
+            score: 96,
+            metrics: {
+              ...candidate.metrics,
+              annualized_return: 0.12,
+              return_sharpe: 1.4,
+              out_of_sample_sharpe: 0.96,
+              max_drawdown_pct: -14.0,
+              stability: 81,
+            },
+          };
+        }
+        if (index === 1) {
+          return {
+            ...candidate,
+            label: "收益第一",
+            title: "收益第一",
+            score: 94,
+            metrics: {
+              ...candidate.metrics,
+              annualized_return: 0.16,
+              return_sharpe: 1.15,
+              out_of_sample_sharpe: 0.95,
+              max_drawdown_pct: -13.6,
+              stability: 82,
+            },
+          };
+        }
+        if (index === 2) {
+          return {
+            ...candidate,
+            label: "得分第一",
+            title: "得分第一",
+            score: 99,
+            metrics: {
+              ...candidate.metrics,
+              annualized_return: 0.13,
+              return_sharpe: 1.18,
+              out_of_sample_sharpe: 0.97,
+              max_drawdown_pct: -12.9,
+              stability: 84,
+            },
+          };
+        }
+        return {
+          ...candidate,
+          label: `未通过 ${index + 1}`,
+          title: `未通过 ${index + 1}`,
+          score: 88 - index,
+          metrics: {
+            ...candidate.metrics,
+            annualized_return: 0.07,
+            return_sharpe: 0.88,
+            out_of_sample_sharpe: 0.74,
+            max_drawdown_pct: -26.0,
+            stability: 60,
+          },
+        };
+      });
+      currentJob = applyConstraintUpdateToJob(currentJob, {
+        objective: "return_sharpe",
+      });
+      currentJob = keepPassingObjectiveCandidates(currentJob);
+    }
+    return currentJob;
+  }
+
+  api.getOptimizationJobDetail = async (
+    jobId: string,
+  ): Promise<ApiOptimizationJobDetail> =>
+    structuredClone(await ensureJob(jobId));
+
+  api.updateOptimizationJobConstraints = async (
+    jobId,
+    payload,
+  ): Promise<ApiOptimizationJobDetail> => {
+    const job = await ensureJob(jobId);
+    currentJob = applyConstraintUpdateToJob(job, payload);
+    currentJob = keepPassingObjectiveCandidates(currentJob);
+    return structuredClone(currentJob);
+  };
+
+  return api;
+}
+
+function createLargeCombinationModalApi(): DemoApi {
+  const api = createOptimizationTestApi();
+  const originalGetOptimizationJobDetail =
+    api.getOptimizationJobDetail.bind(api);
+  let currentJob: ApiOptimizationJobDetail | null = null;
+
+  async function ensureJob(jobId: string): Promise<ApiOptimizationJobDetail> {
+    if (jobId !== "opt-001") {
+      return originalGetOptimizationJobDetail(jobId);
+    }
+    if (!currentJob) {
+      currentJob = await originalGetOptimizationJobDetail(jobId);
+      const baselineCandidate = currentJob.candidates[0];
+      if (!baselineCandidate) {
+        throw new Error("missing baseline candidate");
+      }
+      const combinations = Array.from({ length: 145 }, (_, index) => ({
+        ...structuredClone(baselineCandidate),
+        id: `combo-${index + 1}`,
+        label: `组合 ${String(index + 1).padStart(3, "0")}`,
+        title: `组合 ${String(index + 1).padStart(3, "0")}`,
+        rank: index + 1,
+        score: Number((98 - index * 0.11).toFixed(3)),
+        metrics: {
+          ...baselineCandidate.metrics,
+          annualized_return: Number((0.18 - index * 0.0006).toFixed(4)),
+          return_sharpe: Number((1.8 - index * 0.008).toFixed(3)),
+          out_of_sample_sharpe: Number((1.2 - index * 0.004).toFixed(3)),
+          max_drawdown_pct: Number((-8.5 - index * 0.12).toFixed(1)),
+          stability: 92 - (index % 18),
+        },
+        parameter_snapshot: {
+          ...baselineCandidate.parameter_snapshot,
+          lookback_months: 6 + (index % 12),
+          skip_recent_months: 1 + (index % 4),
+          top_n: 10 + (index % 9) * 10,
+          hold_rank_threshold: 110 + (index % 3) * 10,
+        },
+      }));
+      currentJob = setMatchingCombinations(currentJob, combinations);
+    }
+    return currentJob;
+  }
+
+  api.getOptimizationJobDetail = async (
+    jobId: string,
+  ): Promise<ApiOptimizationJobDetail> =>
+    structuredClone(await ensureJob(jobId));
 
   return api;
 }
@@ -1406,7 +1707,7 @@ describe("optimization module flow", () => {
   it("renders select page from latest run summary without fetching run detail", async () => {
     const selectApi = createOptimizationTestApi();
     const originalListStrategies = selectApi.listStrategies.bind(selectApi);
-    selectApi.listStrategies = async (): Promise<ApiStrategyDetail[]> => {
+    selectApi.listStrategies = async () => {
       const strategies = await originalListStrategies();
       return strategies.map((strategy) => ({
         ...strategy,
@@ -1497,6 +1798,26 @@ describe("optimization module flow", () => {
       ).toBeNull(),
     );
     expect(container.textContent).not.toContain("opt-001");
+  });
+
+  it("renders the strategy version tag next to the strategy name on the jobs list", async () => {
+    const container = await renderApp("#/optimization-jobs");
+
+    await waitFor(() =>
+      expect(container.querySelector(".optimization-lab-table")).not.toBeNull(),
+    );
+
+    const targetRow = Array.from(container.querySelectorAll("tbody tr")).find(
+      (row) => row.textContent?.includes("opt-001"),
+    );
+    expect(targetRow).toBeTruthy();
+
+    const strategyCell = targetRow?.querySelector("td:nth-child(2)");
+    expect(strategyCell?.textContent).toContain("标普动量策略");
+    expect(
+      strategyCell?.querySelector(".optimization-jobs-table__strategy-version")
+        ?.textContent,
+    ).toBe("v1");
   });
 
   it("shows interrupted progress and a continue button without rendering result grids", async () => {
@@ -1650,9 +1971,17 @@ describe("optimization module flow", () => {
     expect(container.textContent).toContain("年化收益率");
     expect(container.textContent).toContain("综合评价");
     expect(container.textContent).toContain(
-      "符合过滤条件的组合共23个，以下是按综合评分排序靠前的候选版本组合",
+      "符合约束条件的组合共23个，以下按 收益夏普 Max 输出当前候选版本排序。",
     );
     expect(container.textContent).toContain("按不同市场窗口复核策略表现");
+    expect(container.textContent).toContain("训练早段 至 训练早段");
+    expect(
+      (
+        container.querySelector(
+          "#optimization-results-objective",
+        ) as HTMLSelectElement | null
+      )?.value,
+    ).toBe("return_sharpe");
     expect(
       container.querySelector(".optimization-mini-metric-strip"),
     ).toBeNull();
@@ -1680,8 +2009,7 @@ describe("optimization module flow", () => {
     expect(chips?.textContent).toContain(
       "参数组合：回看(月)6-12；跳过最近(月)1-4；买入排名阈值10-100；保留排名阈值110-130",
     );
-    expect(chips?.textContent).toContain("平衡型");
-    expect(chips?.textContent).not.toContain("约束条件：");
+    expect(chips?.textContent).not.toContain("平衡型");
     expect(chips?.textContent).not.toContain("策略：");
     expect(chips?.textContent).not.toContain("参数优化：");
 
@@ -1704,6 +2032,424 @@ describe("optimization module flow", () => {
     ) as HTMLButtonElement | null;
     expect(activeShelfCard).toBeTruthy();
     expect(activeShelfCard?.textContent).not.toBe(initialActiveShelfText);
+  });
+
+  it("reuses the candidate scoring model for the current combination baseline", async () => {
+    const baselineApi = createBaselineOnlyPassApi();
+    currentApi = baselineApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    const rows = await waitFor(
+      () => container.querySelectorAll(".optimization-results-grid tbody tr"),
+    );
+    const baselineRow = rows[rows.length - 1] as HTMLTableRowElement;
+    fireEvent.click(baselineRow);
+
+    await waitFor(() =>
+      expect(
+        container.querySelector(".optimization-evaluation-panel__headline strong")
+          ?.textContent,
+      ).toContain("综合得分 99.949"),
+    );
+
+    expect(container.querySelector(".optimization-metric-row")?.textContent).toContain(
+      "稳定度46",
+    );
+    expect(baselineApi.__requestedRunDetailViews).toContain("initial");
+  });
+
+  it("re-ranks candidates by annualized return when re-filtering", async () => {
+    currentApi = createObjectiveSortingApi();
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.querySelector(".optimization-results-grid")).not.toBeNull(),
+    );
+
+    const objectiveSelect = container.querySelector(
+      "#optimization-results-objective",
+    ) as HTMLSelectElement | null;
+    const firstCandidateLabel = () =>
+      (
+        container.querySelector(
+          ".optimization-results-grid tbody tr:first-child",
+        ) as HTMLTableRowElement | null
+      )?.textContent ?? "";
+    const refilterButton = Array.from(
+      container.querySelectorAll("button"),
+    ).find((button) => button.textContent?.includes("重新过滤")) as
+      | HTMLButtonElement
+      | undefined;
+
+    expect(objectiveSelect?.value).toBe("return_sharpe");
+    expect(firstCandidateLabel()).toContain("夏普第一");
+    expect(refilterButton).toBeTruthy();
+
+    fireEvent.change(objectiveSelect!, {
+      target: { value: "annualized_return" },
+    });
+    fireEvent.click(refilterButton!);
+
+    await waitFor(() => {
+      expect(objectiveSelect?.value).toBe("annualized_return");
+      expect(firstCandidateLabel()).toContain("收益第一");
+      expect(container.textContent).toContain(
+        "符合约束条件的组合共3个，以下按 年化收益率 Max 输出当前候选版本排序。",
+      );
+    });
+  });
+
+  it("keeps the candidate list stable until re-filtering returns", async () => {
+    const delayedApi = createObjectiveSortingApi();
+    const originalUpdateConstraints =
+      delayedApi.updateOptimizationJobConstraints.bind(delayedApi);
+    let releaseRefilter:
+      | (() => Promise<ApiOptimizationJobDetail>)
+      | null = null;
+
+    delayedApi.updateOptimizationJobConstraints = (...args) =>
+      new Promise<ApiOptimizationJobDetail>((resolve, reject) => {
+        releaseRefilter = async () => {
+          try {
+            const result = await originalUpdateConstraints(...args);
+            resolve(result);
+            return result;
+          } catch (error) {
+            reject(error);
+            throw error;
+          }
+        };
+      });
+
+    currentApi = delayedApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.querySelector(".optimization-results-grid")).not.toBeNull(),
+    );
+
+    const objectiveSelect = container.querySelector(
+      "#optimization-results-objective",
+    ) as HTMLSelectElement | null;
+    const firstCandidateLabel = () =>
+      (
+        container.querySelector(
+          ".optimization-results-grid tbody tr:first-child",
+        ) as HTMLTableRowElement | null
+      )?.textContent ?? "";
+    const refilterButton = Array.from(
+      container.querySelectorAll("button"),
+    ).find((button) => button.textContent?.includes("重新过滤")) as
+      | HTMLButtonElement
+      | undefined;
+
+    expect(objectiveSelect?.value).toBe("return_sharpe");
+    expect(firstCandidateLabel()).toContain("夏普第一");
+    expect(refilterButton).toBeTruthy();
+
+    fireEvent.change(objectiveSelect!, {
+      target: { value: "annualized_return" },
+    });
+    fireEvent.click(refilterButton!);
+
+    await waitFor(() =>
+      expect(refilterButton?.textContent).toContain("重新过滤中..."),
+    );
+    expect(firstCandidateLabel()).toContain("夏普第一");
+    expect(releaseRefilter).toBeTypeOf("function");
+
+    await act(async () => {
+      await releaseRefilter?.();
+    });
+
+    await waitFor(() => {
+      expect(objectiveSelect?.value).toBe("annualized_return");
+      expect(firstCandidateLabel()).toContain("收益第一");
+    });
+  });
+
+  it("re-ranks candidates by composite score when re-filtering", async () => {
+    currentApi = createObjectiveSortingApi();
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.querySelector(".optimization-results-grid")).not.toBeNull(),
+    );
+
+    const objectiveSelect = container.querySelector(
+      "#optimization-results-objective",
+    ) as HTMLSelectElement | null;
+    const firstCandidateLabel = () =>
+      (
+        container.querySelector(
+          ".optimization-results-grid tbody tr:first-child",
+        ) as HTMLTableRowElement | null
+      )?.textContent ?? "";
+    const refilterButton = Array.from(
+      container.querySelectorAll("button"),
+    ).find((button) => button.textContent?.includes("重新过滤")) as
+      | HTMLButtonElement
+      | undefined;
+
+    expect(objectiveSelect?.value).toBe("return_sharpe");
+    expect(firstCandidateLabel()).toContain("夏普第一");
+    expect(refilterButton).toBeTruthy();
+
+    fireEvent.change(objectiveSelect!, {
+      target: { value: "composite_score" },
+    });
+    fireEvent.click(refilterButton!);
+
+    await waitFor(() => {
+      expect(objectiveSelect?.value).toBe("composite_score");
+      expect(firstCandidateLabel()).toContain("得分第一");
+      expect(container.textContent).toContain(
+        "符合约束条件的组合共3个，以下按 综合得分 Max 输出当前候选版本排序。",
+      );
+    });
+  });
+
+  it("opens the all-combinations modal and sorts rows by the selected metric", async () => {
+    currentApi = createObjectiveSortingApi();
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.querySelector(".optimization-results-grid")).not.toBeNull(),
+    );
+
+    const openButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("查看全部组合"),
+    ) as HTMLButtonElement | undefined;
+    expect(openButton).toBeTruthy();
+
+    fireEvent.click(openButton!);
+
+    const dialog = await waitFor(() => {
+      const element = container.querySelector(
+        ".optimization-all-combinations-dialog",
+      ) as HTMLElement | null;
+      expect(element).not.toBeNull();
+      return element!;
+    });
+    const firstCandidateLabel = () =>
+      (
+        dialog.querySelector(
+          "tbody tr:first-child .optimization-all-combinations-dialog__candidate-label",
+        ) as HTMLElement | null
+      )?.textContent ?? "";
+
+    expect(firstCandidateLabel()).toContain("夏普第一");
+
+    const annualizedSortButton = Array.from(
+      dialog.querySelectorAll(".optimization-table-sort-button"),
+    ).find((button) => button.textContent?.includes("年化收益率")) as
+      | HTMLButtonElement
+      | undefined;
+    expect(annualizedSortButton).toBeTruthy();
+
+    fireEvent.click(annualizedSortButton!);
+
+    await waitFor(() => {
+      expect(firstCandidateLabel()).toContain("收益第一");
+    });
+  });
+
+  it("paginates all matching combinations in 100-row pages", async () => {
+    currentApi = createLargeCombinationModalApi();
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.querySelector(".optimization-results-grid")).not.toBeNull(),
+    );
+
+    const openButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("查看全部组合"),
+    ) as HTMLButtonElement | undefined;
+    expect(openButton).toBeTruthy();
+
+    fireEvent.click(openButton!);
+
+    const dialog = await waitFor(() => {
+      const element = container.querySelector(
+        ".optimization-all-combinations-dialog",
+      ) as HTMLElement | null;
+      expect(element).not.toBeNull();
+      return element!;
+    });
+
+    expect(dialog.querySelectorAll("tbody tr")).toHaveLength(100);
+    expect(dialog.textContent).toContain("第 1 / 2 页");
+    expect(
+      dialog.querySelector(
+        "tbody tr:first-child .optimization-all-combinations-dialog__candidate-label",
+      )?.textContent,
+    ).toContain("组合 001");
+
+    const nextPageButton = Array.from(dialog.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("下一页"),
+    ) as HTMLButtonElement | undefined;
+    expect(nextPageButton).toBeTruthy();
+
+    fireEvent.click(nextPageButton!);
+
+    await waitFor(() => {
+      expect(dialog.querySelectorAll("tbody tr")).toHaveLength(45);
+      expect(dialog.textContent).toContain("第 2 / 2 页");
+      expect(
+        dialog.querySelector(
+          "tbody tr:first-child .optimization-all-combinations-dialog__candidate-label",
+        )?.textContent,
+      ).toContain("组合 101");
+    });
+  });
+
+  it("marks legacy candidate-only totals as saved candidates instead of full combinations", async () => {
+    const api = createOptimizationTestApi() as OptimizationTestApi;
+    const originalGetOptimizationJobDetail =
+      api.getOptimizationJobDetail.bind(api);
+    api.getOptimizationJobDetail = async (
+      jobId: string,
+    ): Promise<ApiOptimizationJobDetail> => {
+      const job = await originalGetOptimizationJobDetail(jobId);
+      if (jobId !== "opt-001") {
+        return job;
+      }
+      const candidateOnlyMatches = structuredClone(
+        (job.matching_combinations?.length
+          ? job.matching_combinations
+          : job.candidates
+        ).slice(0, 2),
+      );
+      job.matching_combinations = candidateOnlyMatches;
+      job.summary.matching_combination_count = candidateOnlyMatches.length;
+      job.matching_combination_count = candidateOnlyMatches.length;
+      job.summary.matching_combination_source = "persisted_candidates";
+      job.matching_combination_source = "persisted_candidates";
+      return job;
+    };
+    currentApi = api;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.querySelector(".optimization-results-grid")).not.toBeNull(),
+    );
+
+    expect(container.textContent).toContain("当前仅基于已保存候选识别到");
+    expect(container.textContent).toContain("缺少全量 trial 明细");
+
+    const openButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("查看已保存候选"),
+    ) as HTMLButtonElement | undefined;
+    expect(openButton).toBeTruthy();
+
+    fireEvent.click(openButton!);
+
+    const dialog = await waitFor(() => {
+      const element = container.querySelector(
+        ".optimization-all-combinations-dialog",
+      ) as HTMLElement | null;
+      expect(element).not.toBeNull();
+      return element!;
+    });
+
+    expect(dialog.textContent).toContain("已保存的符合约束候选");
+    expect(dialog.textContent).toContain("当前仅有 2 组已保存候选可供查看");
+  });
+
+  it("keeps the all-combinations dialog wide, scrollable, and footer-sticky", async () => {
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.querySelector(".optimization-results-grid")).not.toBeNull(),
+    );
+
+    const openButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("查看全部组合"),
+    ) as HTMLButtonElement | undefined;
+    expect(openButton).toBeTruthy();
+
+    fireEvent.click(openButton!);
+
+    const dialog = await waitFor(() => {
+      const element = container.querySelector(
+        ".optimization-all-combinations-dialog",
+      ) as HTMLElement | null;
+      expect(element).not.toBeNull();
+      return element!;
+    });
+    const tableShell = dialog.querySelector(
+      ".optimization-all-combinations-dialog__table-shell",
+    ) as HTMLElement | null;
+    const table = dialog.querySelector(
+      ".optimization-all-combinations-dialog__table",
+    ) as HTMLElement | null;
+    const footer = dialog.querySelector(
+      ".optimization-all-combinations-dialog__footer",
+    ) as HTMLElement | null;
+    const closeButton = footer?.querySelector(
+      ".primary-button",
+    ) as HTMLButtonElement | null;
+    const cssSource = readFileSync("src/pages/optimization-lab-page.css", "utf8");
+
+    expect(tableShell).toBeTruthy();
+    expect(table).toBeTruthy();
+    expect(footer).toBeTruthy();
+    expect(closeButton).toBeTruthy();
+    expect(document.body.style.overflow).toBe("hidden");
+    expect(document.documentElement.style.overflow).toBe("hidden");
+    expect(cssSource).toContain(".modal-card.optimization-all-combinations-dialog {");
+    expect(cssSource).toContain("width: min(1360px, calc(100vw - 32px));");
+    expect(cssSource).toContain("overflow-x: hidden;");
+    expect(cssSource).toContain("overflow-y: auto;");
+    expect(cssSource).toContain("overscroll-behavior: contain;");
+    expect(cssSource).toContain("max-height: min(56vh, 560px);");
+    expect(cssSource).toContain("min-width: 1024px;");
+    expect(cssSource).toContain(
+      ".modal-card__footer.optimization-all-combinations-dialog__footer {",
+    );
+    expect(cssSource).toContain("position: sticky;");
+    expect(cssSource).toContain("bottom: 0;");
+
+    Object.defineProperty(tableShell!, "scrollHeight", {
+      configurable: true,
+      value: 640,
+    });
+    Object.defineProperty(tableShell!, "clientHeight", {
+      configurable: true,
+      value: 320,
+    });
+    Object.defineProperty(tableShell!, "scrollWidth", {
+      configurable: true,
+      value: 1024,
+    });
+    Object.defineProperty(tableShell!, "clientWidth", {
+      configurable: true,
+      value: 1024,
+    });
+
+    tableShell!.scrollTop = 0;
+    tableShell!.scrollLeft = 0;
+
+    fireEvent.wheel(dialog, { deltaY: 140 });
+    expect(tableShell!.scrollTop).toBe(140);
+    expect(fireEvent.wheel(tableShell!, { deltaY: 140 })).toBe(true);
+
+    fireEvent.click(closeButton!);
+
+    await waitFor(() =>
+      expect(
+        container.querySelector(".optimization-all-combinations-dialog"),
+      ).toBeNull(),
+    );
+    expect(document.body.style.overflow).toBe("");
+    expect(document.documentElement.style.overflow).toBe("");
   });
 
   it("expands constraint chips and only keeps compliant candidates in the results center", async () => {
@@ -1835,20 +2581,68 @@ describe("optimization module flow", () => {
     const chips = container.querySelector(
       ".optimization-meta-chips",
     ) as HTMLElement | null;
+    const refilterButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("重新过滤"),
+    ) as HTMLButtonElement | undefined;
     expect(chips).toBeTruthy();
-    expect(chips?.textContent).toContain("稳健型（自定义）");
-    expect(chips?.textContent).not.toContain("约束条件：");
-    expect(chips?.textContent).toContain("最大回撤 ≤ 15.0%");
-    expect(chips?.textContent).toContain("稳定度 ≥ 70pts");
-    expect(chips?.textContent).toContain("收益夏普 ≥ 1.10");
-    expect(chips?.textContent).toContain("符合约束：1/5");
-    expect(container.textContent).toContain("快捷过滤");
-    expect(container.textContent).toContain("当前启用 3 项阈值");
+    expect(chips?.textContent).not.toContain("稳健型（自定义）");
+    expect(chips?.textContent).not.toContain("最大回撤 ≤ 15.0%");
+    expect(chips?.textContent).not.toContain("符合约束：1/5");
+    expect(container.textContent).toContain("约束条件");
+    expect(container.textContent).not.toContain("当前启用 3 项约束");
+    expect(refilterButton).toBeTruthy();
+    expect(refilterButton).toHaveClass("ghost-button");
+    expect(refilterButton).not.toHaveClass("primary-button");
 
     expect(container.textContent).toContain("约束通过 1");
     expect(container.textContent).not.toContain("回撤过大");
     expect(container.textContent).not.toContain("稳定度不足");
     expect(container.textContent).not.toContain("夏普不足");
+  });
+
+  it("sanitizes legacy turnover constraints out of the result constraint bar", async () => {
+    const legacyConstraintApi = createOptimizationTestApi();
+    const originalGetOptimizationJobDetail =
+      legacyConstraintApi.getOptimizationJobDetail.bind(legacyConstraintApi);
+    legacyConstraintApi.getOptimizationJobDetail = async (jobId: string) => {
+      const job = await originalGetOptimizationJobDetail(jobId);
+      const legacyConstraints = [
+        ...structuredClone(defaultConstraintPayload.constraints.slice(0, 4)),
+        {
+          key: "turnover",
+          label: "换手率",
+          category: "risk" as const,
+          operator: "<=" as const,
+          value: 12,
+          baseline_value: 12,
+          unit: "%",
+          source: "manual" as const,
+        },
+        structuredClone(defaultConstraintPayload.constraints[4]),
+      ];
+      job.request.constraint_label = "平衡型（自定义）";
+      job.request.constraints = structuredClone(legacyConstraints);
+      job.summary.constraint_label = "平衡型（自定义）";
+      job.summary.constraints = structuredClone(legacyConstraints);
+      job.result.constraint_label = "平衡型（自定义）";
+      job.result.constraints = structuredClone(legacyConstraints);
+      return job;
+    };
+    currentApi = legacyConstraintApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(
+        container.querySelector(".optimization-results-constraint-bar"),
+      ).not.toBeNull(),
+    );
+
+    expect(container.textContent).not.toContain("当前启用 5 项约束");
+    expect(
+      container.querySelector("#optimization-results-constraint-turnover"),
+    ).toBeNull();
+    expect(container.textContent).not.toContain("换手率");
   });
 
   it("keeps the quick filter bar available when no candidate version passes and still preserves the baseline row", async () => {
@@ -1866,7 +2660,14 @@ describe("optimization module flow", () => {
     expect(container.querySelector(".optimization-shelf-grid")).not.toBeNull();
     expect(container.textContent).toContain("已过滤 4 个候选版本");
     expect(container.textContent).toContain("当前基准");
-    expect(container.textContent).toContain("当前启用 6 项阈值");
+    expect(container.textContent).not.toContain("当前启用 5 项约束");
+    expect(
+      (
+        container.querySelector(
+          ".optimization-lab-panel--hero h1 + p",
+        ) as HTMLParagraphElement | null
+      )?.textContent,
+    ).toContain("优化组合共 70个，耗时 0分钟");
   });
 
   it("supports loosening quick filters and re-filtering to surface new matching candidates", async () => {
@@ -1899,14 +2700,13 @@ describe("optimization module flow", () => {
     fireEvent.click(refilterButton!);
 
     await waitFor(() =>
-      expect(container.textContent).toContain("符合约束：1/5"),
+      expect(container.textContent).toContain("放宽后通过 1"),
     );
     expect(container.textContent).not.toContain(
       "当前约束下暂无候选版本通过过滤",
     );
-    expect(container.textContent).toContain("放宽后通过 1");
     expect(container.textContent).toContain(
-      "符合过滤条件的组合共1个，以下是按综合评分排序靠前的候选版本组合",
+      "符合约束条件的组合共1个，以下按 收益夏普 Max 输出当前候选版本排序。",
     );
   });
 
@@ -1924,7 +2724,9 @@ describe("optimization module flow", () => {
     const container = await renderApp("#/optimization-jobs/opt-001");
 
     await waitFor(() =>
-      expect(container.textContent).toContain("符合约束：1/5"),
+      expect(container.textContent).toContain(
+        "符合约束条件的组合共0个，以下按 收益夏普 Max 输出当前候选版本排序。",
+      ),
     );
 
     const heroCopy = container.querySelector(
@@ -1961,13 +2763,14 @@ describe("optimization module flow", () => {
 
     await waitFor(() =>
       expect(container.textContent).toContain(
-        "无符合条件的组合，请放宽过滤条件再试。",
+        "无符合条件的组合，请放宽约束条件再试。",
       ),
     );
     expect(toast.className).toContain("error-banner");
     expect(saveCalled).toBe(false);
-    expect(container.textContent).toContain("符合约束：1/5");
-    expect(container.textContent).not.toContain("符合约束：0/5");
+    expect(container.textContent).toContain(
+      "符合约束条件的组合共0个，以下按 收益夏普 Max 输出当前候选版本排序。",
+    );
     expect(container.textContent).toContain("当前组合");
     expect(heroCopy?.textContent).toBe(initialHeroCopy);
   });
@@ -1991,7 +2794,7 @@ describe("optimization module flow", () => {
     fireEvent.click(relaxButton!);
 
     await waitFor(() =>
-      expect(container.textContent).toContain("符合约束：1/5"),
+      expect(container.textContent).toContain("放宽后通过 1"),
     );
     expect(container.textContent).not.toContain(
       "当前约束下暂无候选版本通过过滤",
@@ -2052,7 +2855,7 @@ describe("optimization module flow", () => {
     );
     await waitFor(() =>
       expect(container.textContent).toContain(
-        "后端未保存本次快捷过滤设置：405 Method Not Allowed",
+        "后端未保存本次约束设置：405 Method Not Allowed",
       ),
     );
   });
@@ -2122,7 +2925,7 @@ describe("optimization module flow", () => {
         MISSING_MATCHING_COMBINATION_COUNT_ERROR,
       ),
     );
-    expect(container.textContent).not.toContain("后端未保存本次快捷过滤设置");
+    expect(container.textContent).not.toContain("后端未保存本次约束设置");
     expect(container.querySelector(".optimization-results-grid")).toBeNull();
   });
 
@@ -2132,7 +2935,9 @@ describe("optimization module flow", () => {
     const container = await renderApp("#/optimization-jobs/opt-001");
 
     await waitFor(() =>
-      expect(container.textContent).toContain("符合约束：1/5"),
+      expect(container.textContent).toContain(
+        "符合约束条件的组合共0个，以下按 收益夏普 Max 输出当前候选版本排序。",
+      ),
     );
     expect(container.textContent).toContain("当前组合");
     expect(container.textContent).not.toContain("组合5 当前策略组合");
@@ -2147,7 +2952,9 @@ describe("optimization module flow", () => {
     const container = await renderApp("#/optimization-jobs/opt-001");
 
     await waitFor(() =>
-      expect(container.textContent).toContain("符合约束：1/5"),
+      expect(container.textContent).toContain(
+        "符合约束条件的组合共0个，以下按 收益夏普 Max 输出当前候选版本排序。",
+      ),
     );
 
     const relaxButton = Array.from(
@@ -2160,7 +2967,9 @@ describe("optimization module flow", () => {
     fireEvent.click(relaxButton!);
 
     await waitFor(() =>
-      expect(container.textContent).toContain("符合约束：2/5"),
+      expect(container.textContent).toContain(
+        "符合约束条件的组合共1个，以下按 收益夏普 Max 输出当前候选版本排序。",
+      ),
     );
     expect(container.textContent).toContain("未通过 1");
     expect(
@@ -2232,10 +3041,19 @@ describe("optimization module flow", () => {
             ".optimization-lab-panel--hero h1",
           ) as HTMLHeadingElement | null
         )?.textContent,
-      ).toContain("参数优化：标普动量策略v2"),
+      ).toContain("参数优化：标普动量策略"),
     );
-    expect(container.textContent).toContain(
-      "已完成版本晋升，策略已更新为 标普动量策略v2。",
+    expect(
+      (
+        container.querySelector(
+          ".optimization-lab-panel--hero .optimization-lab-panel__hero-version",
+        ) as HTMLElement | null
+      )?.textContent,
+    ).toBe("v1");
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        "已完成版本晋升，标普动量策略 当前版本已更新为 v2。",
+      ),
     );
   });
 

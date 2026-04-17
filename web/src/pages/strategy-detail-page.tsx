@@ -4,6 +4,7 @@ import { useApiClient } from '../lib/demoStoreContext';
 import { formatDateTime, formatPercent, formatRatio, formatShortDate } from '../lib/format';
 import { buildOptimizationConfigPath } from '../lib/optimization-routes';
 import { formatParameterLabel as formatSharedParameterLabel, formatParameterValue as formatSharedParameterValue } from '../lib/adapters';
+import { formatStrategyVersionTag, getStrategyDisplayName } from '../lib/strategy-version';
 import type { ApiBacktestRunListItem, ApiStrategyDetail, ParameterValue } from '../types';
 import './creation-backtest.css';
 import '../page-sections/workspace-recent-runs-lane-b.css';
@@ -38,7 +39,7 @@ const TEXT = {
   historyFallbackComment: '该版本没有额外备注。',
   editError: '打开策略修改页失败，请稍后重试。',
   recentRunRangeFallback: '回测区间待补充',
-  recentRunVersionFallback: '参数版本待补充',
+  recentRunVersionFallback: '版本待补充',
 } as const;
 
 const PARAMETER_LABELS: Record<string, string> = {
@@ -265,8 +266,8 @@ function runStatusTone(status: string): 'positive' | 'warning' | 'negative' {
   return 'positive';
 }
 
-function runVersionLabel(value: string | null | undefined): string {
-  return value ? `参数版本 ${value}` : TEXT.recentRunVersionFallback;
+function runVersionTag(value: string | null | undefined): string {
+  return formatStrategyVersionTag(value) ?? TEXT.recentRunVersionFallback;
 }
 
 function runRangeLabel(run: ApiBacktestRunListItem): string {
@@ -274,6 +275,213 @@ function runRangeLabel(run: ApiBacktestRunListItem): string {
     return `${formatShortDate(run.start_date)} - ${formatShortDate(run.end_date)}`;
   }
   return TEXT.recentRunRangeFallback;
+}
+
+function readStringParameter(value: ParameterValue | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : null;
+}
+
+function readNumberParameter(value: ParameterValue | undefined): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed && /^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+      const parsed = Number(trimmed);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+  }
+  return null;
+}
+
+function rebalanceSummaryLabel(value: string | null | undefined): string | null {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  const map: Record<string, string> = {
+    never: '不主动再平衡',
+    daily: '按日调仓',
+    weekly: '按周调仓',
+    monthly: '按月调仓',
+    quarterly: '按季度调仓',
+    semiannual: '每半年调仓',
+    yearly: '按年调仓',
+    monthly_first_trading_day: '每月首个交易日调仓',
+  };
+  return map[normalized] ?? `按 ${value} 调仓`;
+}
+
+function ensureSentence(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return '基于当前参数执行策略。';
+  }
+  return /[。！？.!?]$/.test(trimmed) ? trimmed : `${trimmed}。`;
+}
+
+function buildStrategySummary(strategy: ApiStrategyDetail): string {
+  const parameters = strategy.parameters ?? {};
+  const universe =
+    strategy.universe_name?.trim() ||
+    readStringParameter(parameters.universe_name) ||
+    '当前股票池';
+  const rawBenchmark =
+    strategy.benchmark_symbol?.trim() ||
+    readStringParameter(parameters.benchmark_symbol);
+  const benchmark = rawBenchmark ? benchmarkLabel(rawBenchmark) : null;
+  const includeBenchmark = Boolean(
+    benchmark &&
+      benchmark !== '-' &&
+      rawBenchmark &&
+      !universe.toUpperCase().includes(rawBenchmark.toUpperCase()) &&
+      !universe.includes(benchmark),
+  );
+  const rebalance = rebalanceSummaryLabel(
+    strategy.rebalance_frequency ?? readStringParameter(parameters.rebalance_frequency),
+  );
+  const weightingMethod = readStringParameter(parameters.weighting_method);
+  const weightingLabel =
+    weightingMethod && weightingMethod !== '-'
+      ? formatSharedParameterValue(weightingMethod, 'weighting_method')
+      : null;
+
+  const parts: string[] = [];
+
+  if (strategy.strategy_type === 'MOMENTUM') {
+    const lookbackMonths = readNumberParameter(parameters.lookback_months);
+    const skipRecentMonths = readNumberParameter(parameters.skip_recent_months);
+    const topN = readNumberParameter(parameters.top_n);
+    const holdRankThreshold = readNumberParameter(parameters.hold_rank_threshold);
+
+    if (lookbackMonths !== null) {
+      parts.push(
+        skipRecentMonths !== null && skipRecentMonths > 0
+          ? `按过去 ${lookbackMonths} 个月剔除最近 ${skipRecentMonths} 个月的收益做动量排序`
+          : `按过去 ${lookbackMonths} 个月收益做动量排序`,
+      );
+    } else {
+      parts.push('执行动量轮动');
+    }
+
+    if (topN !== null) {
+      if (holdRankThreshold !== null && holdRankThreshold >= topN) {
+        parts.push(`持有前 ${topN} 名，跌出前 ${holdRankThreshold} 名时调出`);
+      } else {
+        parts.push(`持有前 ${topN} 名`);
+      }
+    } else if (holdRankThreshold !== null) {
+      parts.push(`以排名前 ${holdRankThreshold} 名作为持仓阈值`);
+    }
+  } else if (strategy.strategy_type === 'MEAN_REVERSION') {
+    const timeframe = readStringParameter(parameters.observation_timeframe);
+    const bollingerPeriod = readNumberParameter(parameters.bollinger_period);
+    const rsiPeriod = readNumberParameter(parameters.rsi_period);
+    const rsiBuyThreshold = readNumberParameter(parameters.rsi_buy_threshold);
+    const rsiSellThreshold = readNumberParameter(parameters.rsi_sell_threshold);
+    const longEntrySize = readNumberParameter(parameters.long_entry_size_pct);
+    const shortEntrySize = readNumberParameter(parameters.short_entry_size_pct);
+
+    parts.push(`基于${timeframe ? timeframeLabel(timeframe) : '当前'}信号做均值回归交易`);
+
+    if (bollingerPeriod !== null && rsiPeriod !== null) {
+      parts.push(`结合 ${bollingerPeriod} 期布林带与 RSI(${rsiPeriod}) 判断偏离`);
+    } else if (rsiPeriod !== null) {
+      parts.push(`使用 RSI(${rsiPeriod}) 识别偏离`);
+    } else if (bollingerPeriod !== null) {
+      parts.push(`使用 ${bollingerPeriod} 期布林带识别偏离`);
+    }
+
+    if (rsiBuyThreshold !== null && rsiSellThreshold !== null) {
+      parts.push(`RSI 低于 ${rsiBuyThreshold} 时分批买入，高于 ${rsiSellThreshold} 时分批减仓`);
+    }
+
+    if (longEntrySize !== null || shortEntrySize !== null) {
+      if (longEntrySize !== null && shortEntrySize !== null && longEntrySize === shortEntrySize) {
+        parts.push(`每次按 ${longEntrySize}% 仓位进出`);
+      } else {
+        if (longEntrySize !== null) {
+          parts.push(`买入仓位 ${longEntrySize}%`);
+        }
+        if (shortEntrySize !== null) {
+          parts.push(`卖出仓位 ${shortEntrySize}%`);
+        }
+      }
+    }
+  } else if (strategy.strategy_type === 'GRID') {
+    const gridInterval = readNumberParameter(parameters.grid_interval);
+    const initialPosition = readNumberParameter(parameters.initial_position);
+    const buySize = readNumberParameter(parameters.buy_size_pct);
+    const sellStep = readNumberParameter(parameters.sell_step_pct);
+    const sellSize = readNumberParameter(parameters.sell_size_pct);
+    const maxStopLoss = readNumberParameter(parameters.max_stop_loss_pct);
+
+    parts.push(
+      gridInterval !== null ? `按 ${gridInterval}% 网格间距分批交易` : '按网格规则分批交易',
+    );
+
+    if (initialPosition !== null) {
+      parts.push(`初始仓位 ${initialPosition}%`);
+    }
+    if (gridInterval !== null && buySize !== null) {
+      parts.push(`每下跌 ${gridInterval}% 加仓 ${buySize}%`);
+    } else if (buySize !== null) {
+      parts.push(`每次加仓 ${buySize}%`);
+    }
+    if (sellStep !== null && sellSize !== null) {
+      parts.push(`每上涨 ${sellStep}% 减仓 ${sellSize}%`);
+    } else if (sellSize !== null) {
+      parts.push(`每次减仓 ${sellSize}%`);
+    }
+    if (maxStopLoss !== null) {
+      parts.push(`最大止损 ${maxStopLoss}%`);
+    }
+  } else if (strategy.strategy_type === 'BUY_AND_HOLD') {
+    const contributionAmount = readNumberParameter(parameters.contribution_amount);
+    const investmentFrequency = readStringParameter(parameters.investment_frequency);
+
+    parts.push('长期持有核心资产');
+    if (contributionAmount !== null && investmentFrequency) {
+      parts.push(
+        `${rebalanceLabel(investmentFrequency)}定投 ${contributionAmount.toLocaleString('zh-HK')} 美元`,
+      );
+    }
+  } else {
+    parts.push(`执行${strategyTypeLabel(strategy.strategy_type)}策略`);
+  }
+
+  if (weightingLabel && weightingLabel !== '-') {
+    parts.push(`按${weightingLabel}配置`);
+  }
+  if (rebalance) {
+    parts.push(rebalance);
+  }
+  if (includeBenchmark && benchmark) {
+    parts.push(`基准为${benchmark}`);
+  }
+
+  const filteredParts = parts
+    .map((part) => part.trim())
+    .filter((part, index, allParts) => part.length > 0 && allParts.indexOf(part) === index);
+
+  if (filteredParts.length) {
+    const [firstPart, ...restParts] = filteredParts;
+    return ensureSentence(`在${universe}中${[firstPart, ...restParts].join('，')}`);
+  }
+
+  const fallbackDescription =
+    readStringParameter(parameters.strategy_description) ??
+    (typeof strategy.description === 'string' ? strategy.description.trim() : null);
+  if (fallbackDescription) {
+    return ensureSentence(fallbackDescription);
+  }
+
+  return ensureSentence(`在${universe}中执行当前策略`);
 }
 
 export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.Element {
@@ -287,7 +495,6 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
   const [recentRunsLoading, setRecentRunsLoading] = useState(true);
   const [recentRunsError, setRecentRunsError] = useState<string | null>(null);
 
-  const latestRun = recentRuns[0] ?? null;
   const canOpenOptimization = Boolean(strategy);
   const canEditStrategy = strategy ? (strategy.allowed_actions?.includes('edit_parameters') ?? true) : false;
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
@@ -329,17 +536,7 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
     }
   }
 
-  const heroMetaItems = useMemo(() => {
-    if (!strategy) return [];
-    return [
-      { key: '类型', value: strategyTypeLabel(strategy.strategy_type) },
-      { key: '股票池', value: strategy.universe_name || '-' },
-      { key: '基准', value: benchmarkLabel(strategy.benchmark_symbol) },
-      { key: '再平衡', value: rebalanceLabel(strategy.rebalance_frequency) },
-      { key: '参数版本', value: strategy.current_parameter_version_id ?? '-' },
-      { key: '最近运行', value: latestRun?.id ?? strategy.latest_successful_run_id ?? strategy.latest_run_id ?? '暂无' },
-    ];
-  }, [latestRun, strategy]);
+  const strategySummary = useMemo(() => (strategy ? buildStrategySummary(strategy) : ''), [strategy]);
 
   const tradingLogic = useMemo(() => {
     const value = strategy?.parameters?.trading_logic;
@@ -469,15 +666,15 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
       <section className="strategy-detail-hero panel">
         <div className="strategy-detail-hero__copy">
           <p className="eyebrow">{TEXT.eyebrow}</p>
-          <h1 className="strategy-detail-hero__title">{strategy.name}</h1>
-          <div className="strategy-detail-hero__meta">
-            {heroMetaItems.map((item) => (
-              <span className="status-chip status-chip--soft" key={item.key}>
-                {item.key}: {item.value}
+          <div className="strategy-detail-hero__title-row">
+            <h1 className="strategy-detail-hero__title">{getStrategyDisplayName(strategy.name, strategy.id)}</h1>
+            {formatStrategyVersionTag(strategy.current_parameter_version_id) ? (
+              <span aria-hidden="true" className="status-chip status-chip--soft strategy-detail-hero__version">
+                {formatStrategyVersionTag(strategy.current_parameter_version_id)}
               </span>
-            ))}
-            {latestRun ? <span className="status-chip status-chip--soft">状态: {strategyStatusLabel(latestRun.status)}</span> : null}
+            ) : null}
           </div>
+          <p className="strategy-detail-hero__summary">{strategySummary}</p>
         </div>
         <div className="strategy-detail-hero__actions">
           <button
@@ -602,6 +799,7 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
               <ol className="workspace-recent-runs__timeline strategy-detail-run-timeline" aria-label={TEXT.recentRunTitle}>
                 {recentRuns.map((run) => {
                   const tone = runStatusTone(run.status);
+                  const versionTag = runVersionTag(run.parameter_version_id);
                   return (
                     <li className={`workspace-recent-runs__item workspace-recent-runs__item--${tone}`} key={run.id}>
                       <span className={`workspace-recent-runs__rail-dot workspace-recent-runs__rail-dot--${tone}`} aria-hidden="true" />
@@ -618,7 +816,10 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
                             {strategyStatusLabel(run.status)}
                           </span>
                         </div>
-                        <h4 className="workspace-recent-runs__strategy">{runVersionLabel(run.parameter_version_id)}</h4>
+                        <div className="workspace-recent-runs__strategy-row">
+                          <h4 className="workspace-recent-runs__strategy">{getStrategyDisplayName(strategy.name, strategy.id)}</h4>
+                          {versionTag ? <span className="workspace-recent-runs__version">{versionTag}</span> : null}
+                        </div>
                         <p className="workspace-recent-runs__period">{runRangeLabel(run)}</p>
                         <div className="workspace-recent-runs__badge-row">
                           <div className="workspace-recent-runs__badges">

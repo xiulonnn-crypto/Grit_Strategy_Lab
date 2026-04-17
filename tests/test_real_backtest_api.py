@@ -299,6 +299,9 @@ def test_backtest_run_detail_initial_view_returns_only_first_paint_fields(tmp_pa
     )
 
     detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail?view=initial"))
+    full_detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail"))
+    initial_trade_card = next(card for card in detail["analysis"]["kpi_cards"] if card["key"] == "trade_count")
+    full_trade_card = next(card for card in full_detail["analysis"]["kpi_cards"] if card["key"] == "trade_count")
 
     assert detail["analysis"]
     assert detail["chart_series"]
@@ -311,6 +314,7 @@ def test_backtest_run_detail_initial_view_returns_only_first_paint_fields(tmp_pa
     assert "environment_summary" not in detail
     assert "trade_audit_items" not in detail
     assert "trades" not in detail
+    assert initial_trade_card == full_trade_card
 
 
 def test_backtest_run_detail_context_view_returns_only_lazy_tabs_context(tmp_path):
@@ -810,6 +814,13 @@ def test_backtest_run_detail_includes_analysis_contract_with_derived_kpis(tmp_pa
     assert analysis == expected_analysis
     assert isinstance(analysis["subtitle"], str) and analysis["subtitle"]
     assert len(analysis["kpi_cards"]) == 5
+    assert [card["key"] for card in analysis["kpi_cards"]] == [
+        "total_return",
+        "annualized_return",
+        "sharpe",
+        "max_drawdown",
+        "trade_count",
+    ]
     assert set(total_return_card.keys()) == {
         "key",
         "label",
@@ -817,6 +828,7 @@ def test_backtest_run_detail_includes_analysis_contract_with_derived_kpis(tmp_pa
         "trend_direction",
         "trend_text",
         "compare_text",
+        "footer_items",
         "insight_text",
         "insight_tone",
         "state",

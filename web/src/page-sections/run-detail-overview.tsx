@@ -23,6 +23,7 @@ type ApiRunDetailKpiCard = {
   trend_direction?: TrendDirection;
   trend_text?: string;
   compare_text?: string;
+  footer_items?: KpiFooterItem[];
   insight_text?: string;
   insight_tone?: InsightTone;
   state?: string;
@@ -77,6 +78,8 @@ const KPI_HELP_COPY: Partial<Record<ApiRunDetailKpiCard['key'], string>> = {
   rolling_252_return: '最新252日滚动收益表示最近252个交易日的累计收益，约等于过去一年的阶段表现，用来判断策略近期斜率是否仍优于基准。',
   rolling_return: '最新252日滚动收益表示最近252个交易日的累计收益，约等于过去一年的阶段表现，用来判断策略近期斜率是否仍优于基准。',
 };
+
+KPI_HELP_COPY.annualized_return = '年化收益率把当前回测区间的总收益折算成年度复合增长速度，用来判断策略长期收益效率是否真的优于基准。';
 
 function isBacktestRunInProgress(status: string | null | undefined): boolean {
   const normalized = String(status ?? '').toUpperCase();
@@ -165,6 +168,22 @@ function calculateTotalReturn(points: ApiBacktestChartPoint[], selector: (point:
     return null;
   }
   return last / first - 1;
+}
+
+function calculateAnnualizedReturn(
+  points: ApiBacktestChartPoint[],
+  selector: (point: ApiBacktestChartPoint) => number,
+): number | null {
+  if (points.length < 2) {
+    return null;
+  }
+  const first = selector(points[0]);
+  const last = selector(points[points.length - 1]);
+  if (!first || !last || !Number.isFinite(first) || !Number.isFinite(last)) {
+    return null;
+  }
+  const tradingYears = Math.max((points.length - 1) / 252, 1 / 252);
+  return (last / first) ** (1 / tradingYears) - 1;
 }
 
 function calculateWindowReturn(
@@ -318,6 +337,63 @@ function resolveKpiTrendTone(detail: ApiBacktestRunDetail, key: string): KpiTren
     default:
       return 'neutral';
   }
+}
+
+function buildKpiFooterItemsV2(detail: ApiBacktestRunDetail, key: string): KpiFooterItem[] {
+  const chartSeries = detail.chart_series ?? [];
+  const { trainSeries, testSeries } = getSegmentSeries(detail);
+  const { trainCount, testCount } = getTradeCounts(detail);
+
+  switch (key) {
+    case 'annualized_return':
+      return [
+        { label: '基准值', value: formatRatioPercent(calculateAnnualizedReturn(chartSeries, (point) => point.benchmark)) },
+        { label: '最新252日滚动', value: formatRatioPercent(calculateWindowReturn(chartSeries, (point) => point.equity, 252)) },
+        { label: '滚动基准', value: formatRatioPercent(calculateWindowReturn(chartSeries, (point) => point.benchmark, 252)) },
+      ];
+    case 'total_return':
+      return [
+        { label: '基准值', value: formatRatioPercent(calculateTotalReturn(chartSeries, (point) => point.benchmark)) },
+        { label: '训练集', value: formatRatioPercent(calculateTotalReturn(trainSeries, (point) => point.equity)) },
+        { label: '测试集', value: formatRatioPercent(calculateTotalReturn(testSeries, (point) => point.equity)) },
+      ];
+    case 'sharpe':
+      return [
+        { label: '基准值', value: formatSmartNumber(calculateSharpe(chartSeries, (point) => point.benchmark)) },
+        { label: '训练集', value: formatSmartNumber(calculateSharpe(trainSeries, (point) => point.equity)) },
+        { label: '测试集', value: formatSmartNumber(calculateSharpe(testSeries, (point) => point.equity)) },
+      ];
+    case 'max_drawdown':
+      return [
+        { label: '基准值', value: formatRatioPercent(calculateDrawdown(chartSeries.map((point) => point.benchmark))) },
+        { label: '训练集', value: formatRatioPercent(calculateDrawdown(trainSeries.map((point) => point.equity))) },
+        { label: '测试集', value: formatRatioPercent(calculateDrawdown(testSeries.map((point) => point.equity))) },
+      ];
+    case 'latest_252_return':
+    case 'rolling_252_return':
+    case 'rolling_return':
+      return [{ label: '基准值', value: formatRatioPercent(calculateWindowReturn(chartSeries, (point) => point.benchmark, 252)) }];
+    case 'trade_count':
+      return [
+        { label: '训练集', value: formatSmartInteger(trainCount) },
+        { label: '测试集', value: formatSmartInteger(testCount) },
+      ];
+    default:
+      return buildKpiFooterItems(detail, key);
+  }
+}
+
+function resolveKpiTrendToneV2(detail: ApiBacktestRunDetail, key: string): KpiTrendTone {
+  if (key !== 'annualized_return') {
+    return resolveKpiTrendTone(detail, key);
+  }
+  const chartSeries = detail.chart_series ?? [];
+  const strategyAnnualized = calculateAnnualizedReturn(chartSeries, (point) => point.equity);
+  const benchmarkAnnualized = calculateAnnualizedReturn(chartSeries, (point) => point.benchmark);
+  if (strategyAnnualized === null || benchmarkAnnualized === null) {
+    return 'neutral';
+  }
+  return strategyAnnualized >= benchmarkAnnualized ? 'better' : 'worse';
 }
 
 function buildFallbackKpis(detail: ApiBacktestRunDetail): ApiRunDetailKpiCard[] {
@@ -687,8 +763,8 @@ export function RunDetailOverviewSection({
         .slice(0, 5)
         .map((card) => ({
           ...card,
-          footer_items: buildKpiFooterItems(detail, card.key),
-          trend_tone: resolveKpiTrendTone(detail, card.key),
+          footer_items: card.footer_items?.length ? card.footer_items : buildKpiFooterItemsV2(detail, card.key),
+          trend_tone: resolveKpiTrendToneV2(detail, card.key),
           hide_trend: card.key === 'trade_count',
         })),
     [analysis?.kpi_cards, detail],

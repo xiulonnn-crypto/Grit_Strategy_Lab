@@ -8,6 +8,7 @@ export type WorkspaceRecentRunItem = {
   kind: 'backtest' | 'optimization';
   activityId: string;
   strategyName: string;
+  strategyVersionTag?: string | null;
   status: string;
   completedAt?: string | null;
   statusLabel: string;
@@ -89,9 +90,15 @@ function WorkspaceRecentRunRow({ item, navigate }: { item: WorkspaceRecentRunIte
           <span className={`workspace-recent-runs__kind workspace-recent-runs__kind--${kindTone}`}>{item.kindLabel}</span>
         </div>
 
-        <h4 className="workspace-recent-runs__strategy" title={item.strategyName}>
-          {item.strategyName}
-        </h4>
+        <div className="workspace-recent-runs__strategy-row">
+          <h4
+            className="workspace-recent-runs__strategy"
+            title={item.strategyVersionTag ? `${item.strategyName} ${item.strategyVersionTag}` : item.strategyName}
+          >
+            {item.strategyName}
+          </h4>
+          {item.strategyVersionTag ? <span className="workspace-recent-runs__version">{item.strategyVersionTag}</span> : null}
+        </div>
 
         <p className="workspace-recent-runs__period">{item.metaLabel}</p>
 

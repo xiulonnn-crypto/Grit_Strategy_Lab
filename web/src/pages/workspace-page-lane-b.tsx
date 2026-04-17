@@ -2,6 +2,7 @@
 import { buildRecentRunScore, buildWorkspaceStrategyCards } from '../lib/workspace-adapters';
 import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
+import { formatStrategyVersionTag, getStrategyDisplayName } from '../lib/strategy-version';
 import { WorkspaceRecentRunsSection, type WorkspaceRecentRunItem } from '../page-sections/workspace-recent-runs-lane-b';
 import { WorkspaceStrategySection } from '../page-sections/workspace-lane-b';
 import type {
@@ -153,6 +154,37 @@ function formatOptimizationMetric(value?: number | null): string {
   return value.toFixed(2);
 }
 
+function translateOptimizationText(value?: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const text = value.trim();
+  if (!text) {
+    return null;
+  }
+
+  const exactReplacements: Array<[RegExp, string]> = [
+    [/^Preparing trial\s+(\d+)\/(\d+)$/i, '准备试验 $1/$2'],
+    [/^Completed\s+(\d+)\/(\d+)\s+trials\.?$/i, '已完成 $1/$2 组试验'],
+    [/^Interrupted at\s+(\d+)\/(\d+)$/i, '已中断（$1/$2）'],
+    [/^Running trial\s+(\d+)\/(\d+)$/i, '正在评估第 $1/$2 组'],
+    [/^Evaluating trial\s+(\d+)\/(\d+)\.?$/i, '正在评估第 $1/$2 组'],
+  ];
+
+  for (const [pattern, replacement] of exactReplacements) {
+    if (pattern.test(text)) {
+      return text.replace(pattern, replacement);
+    }
+  }
+
+  return text.replace(/\bWalk Forward\b/gi, '滚动前瞻验证');
+}
+
+function formatOptimizationStage(value?: string | null): string {
+  return translateOptimizationText(value) ?? '等待中';
+}
+
 function pickActivityTime(...values: Array<string | null | undefined>): string | null {
   for (const value of values) {
     if (typeof value === 'string' && value.trim()) {
@@ -178,7 +210,7 @@ function formatOptimizationEntryPoint(value?: string | null): string {
 }
 
 function formatOptimizationValidationMode(value?: string | null): string {
-  return String(value ?? '').toLowerCase() === 'single_oos' ? '单窗口样本外' : 'Walk Forward';
+  return String(value ?? '').toLowerCase() === 'single_oos' ? '单窗口样本外' : '滚动前瞻验证';
 }
 
 function getConfigDate(configuration: ApiBacktestRunDetail['configuration'], key: string): string | undefined {
@@ -188,12 +220,6 @@ function getConfigDate(configuration: ApiBacktestRunDetail['configuration'], key
 
   const value = (configuration as Record<string, unknown>)[key];
   return typeof value === 'string' ? value : undefined;
-}
-
-
-function formatOptimizationVersionTag(value?: string | null): string | null {
-  const match = String(value ?? '').trim().match(/-v(\d+)$/i);
-  return match ? `V${match[1]}` : null;
 }
 
 function toRunSummaryDetail(run: ApiBacktestRunListItem): ApiBacktestRunDetail {
@@ -228,7 +254,10 @@ function buildBacktestRecentRunItems(
 ): WorkspaceRecentRunItem[] {
   return runs.map((run) => {
     const detail = detailsById[run.id] ?? toRunSummaryDetail(run);
-    const strategyName = strategyNamesById[run.strategy_id] ?? run.strategy_name ?? run.strategy_id;
+    const strategyName = getStrategyDisplayName(
+      strategyNamesById[run.strategy_id] ?? run.strategy_name ?? run.strategy_id,
+      run.strategy_id,
+    );
     const score = buildRecentRunScore(detail);
     const preview = detail?.preview ?? run.preview;
     const rangeStart =
@@ -256,12 +285,16 @@ function buildBacktestRecentRunItems(
       run.updated_at ??
       run.created_at;
     const completedAt = run.completed_at ?? detail?.completed_at ?? run.updated_at ?? run.created_at;
+    const strategyVersionTag = formatStrategyVersionTag(
+      detail?.parameter_version_id ?? run.parameter_version_id ?? preview?.parameter_version_id,
+    );
 
     return {
       id: run.id,
       kind: 'backtest',
       activityId: run.id,
       strategyName,
+      strategyVersionTag,
       status: run.status,
       completedAt,
       statusLabel:
@@ -277,7 +310,14 @@ function buildBacktestRecentRunItems(
       kindLabel: (detail?.is_permanent ?? run.is_permanent) ? '永久回测' : '临时回测',
       metaLabel: formatDateRange(rangeStart, rangeEnd),
       badges: [
-        { text: `总收益 ${score.totalReturn}`, tone: score.totalReturn.startsWith('-') ? 'negative' : 'positive' },
+        {
+          text: `年化收益率 ${score.annualizedReturn}`,
+          tone: score.annualizedReturn.startsWith('-')
+            ? 'negative'
+            : score.annualizedReturn.startsWith('+')
+              ? 'positive'
+              : 'neutral',
+        },
         { text: `收益夏普 ${score.sharpe}`, tone: 'neutral' },
         {
           text: `状态 ${
@@ -306,8 +346,11 @@ function buildOptimizationRecentRunItems(
 ): WorkspaceRecentRunItem[] {
   return jobs.map((job) => {
     const status = String(job.status ?? '').toUpperCase();
-    const strategyBaseName = strategyNamesById[job.strategy_id] ?? job.strategy_name ?? job.strategy_id;
-    const strategyVersionTag = formatOptimizationVersionTag(job.base_parameter_version_id);
+    const strategyBaseName = getStrategyDisplayName(
+      strategyNamesById[job.strategy_id] ?? job.strategy_name ?? job.strategy_id,
+      job.strategy_id,
+    );
+    const strategyVersionTag = formatStrategyVersionTag(job.base_parameter_version_id);
     const completedAt = pickActivityTime(job.completed_at, job.updated_at, job.created_at);
     const bestMetrics = job.best_metrics_summary?.metrics ?? {};
     const annualizedReturn =
@@ -323,13 +366,15 @@ function buildOptimizationRecentRunItems(
           ? bestMetrics.sharpe
           : null;
     const progressPct = typeof job.progress_pct === 'number' ? job.progress_pct : 0;
-    const etaLabel =
+    const etaText =
       typeof job.estimated_remaining_minutes === 'number'
-        ? `${Math.max(0, Math.round(job.estimated_remaining_minutes))} 分钟`
+        ? `预计 ${Math.max(0, Math.round(job.estimated_remaining_minutes))} 分钟`
         : '等待首批样本';
     const progressLabel = job.budget_combinations
       ? `${job.completed_combinations ?? 0} / ${job.budget_combinations}`
       : `${job.completed_combinations ?? 0}`;
+    const stageLabel = formatOptimizationStage(job.current_stage);
+    const latestUpdateLabel = translateOptimizationText(job.latest_update);
 
     const badges =
       status === 'INTERRUPTED'
@@ -341,8 +386,8 @@ function buildOptimizationRecentRunItems(
         : ['QUEUED', 'RUNNING'].includes(status)
           ? [
               { text: `进度 ${progressPct}%`, tone: 'neutral' as const },
-              { text: `ETA ${etaLabel}`, tone: typeof job.estimated_remaining_minutes === 'number' ? 'positive' as const : 'neutral' as const },
-              { text: `阶段 ${job.current_stage ?? '等待中'}`, tone: 'neutral' as const },
+              { text: etaText, tone: typeof job.estimated_remaining_minutes === 'number' ? 'positive' as const : 'neutral' as const },
+              { text: `阶段 ${stageLabel}`, tone: 'neutral' as const },
             ]
           : [
               { text: `年化收益率 ${formatOptimizationRate(annualizedReturn)}`, tone: annualizedReturn !== null && annualizedReturn < 0 ? 'negative' as const : 'positive' as const },
@@ -350,11 +395,11 @@ function buildOptimizationRecentRunItems(
               { text: `状态 ${formatOptimizationStatus(status)}`, tone: status === 'FAILED' ? 'negative' as const : status === 'PARTIALLY_FAILED' ? 'warning' as const : 'neutral' as const },
             ];
 
-    const metaLabel =
+    const baseMetaLabel =
       status === 'INTERRUPTED'
-        ? job.latest_update ?? '优化已中断，当前进度已保留，可继续恢复任务。'
+        ? latestUpdateLabel ?? '优化已中断，当前进度已保留，可继续恢复任务。'
         : ['QUEUED', 'RUNNING'].includes(status)
-          ? job.latest_update ?? `当前阶段 ${job.current_stage ?? '等待中'}`
+          ? latestUpdateLabel ?? `当前阶段 ${stageLabel}`
           : [
               formatOptimizationEntryPoint(job.entry_point),
               formatOptimizationValidationMode(job.validation_mode),
@@ -366,12 +411,13 @@ function buildOptimizationRecentRunItems(
       id: job.id,
       kind: 'optimization',
       activityId: job.id,
-      strategyName: strategyVersionTag ? `${strategyBaseName} ${strategyVersionTag}` : strategyBaseName,
+      strategyName: strategyBaseName,
+      strategyVersionTag,
       status,
       completedAt,
       statusLabel: formatOptimizationStatus(status),
       kindLabel: buildOptimizationKindLabel(status),
-      metaLabel,
+      metaLabel: baseMetaLabel,
       badges,
       completedRelativeLabel: formatRelativeTime(completedAt),
       navigatePath: `/optimization-jobs/${job.id}`,

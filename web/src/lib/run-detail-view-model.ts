@@ -1,5 +1,6 @@
 import { formatCompactDate } from './format';
 import type { ApiBacktestRunDetail, ApiBacktestTradeAuditItem } from '../types';
+import { formatStrategyVersionTag, getStrategyDisplayName } from './strategy-version';
 
 export type ViewWindow = 'all' | '1y' | '3y';
 export type TradeSegment = 'all' | 'IS' | 'OOS';
@@ -84,12 +85,17 @@ export function formatRunStatusLabel(value: string): string {
 }
 
 export function getStrategyTitle(detail: ApiBacktestRunDetail): string {
-  return (
+  return getStrategyDisplayName(
     detail.strategy_name ??
-    readRecordString(detail.parameter_snapshot as Record<string, unknown> | undefined, 'strategy_name') ??
-    readRecordString(detail.parameter_snapshot as Record<string, unknown> | undefined, 'objective') ??
-    detail.id
+      readRecordString(detail.parameter_snapshot as Record<string, unknown> | undefined, 'strategy_name') ??
+      readRecordString(detail.parameter_snapshot as Record<string, unknown> | undefined, 'objective') ??
+      detail.id,
+    detail.id,
   );
+}
+
+export function getStrategyVersionTag(detail: ApiBacktestRunDetail): string | null {
+  return formatStrategyVersionTag(detail.parameter_version_id ?? detail.preview?.parameter_version_id ?? null);
 }
 
 export function getRunWindow(detail: ApiBacktestRunDetail): { startDate: string | null; endDate: string | null } {

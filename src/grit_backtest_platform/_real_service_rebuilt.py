@@ -6015,6 +6015,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 run.get("rolling_metrics") or [],
                 max_points=480,
             )
+            run.pop("trades", None)
             run.pop("trade_audit_items", None)
         return run
 

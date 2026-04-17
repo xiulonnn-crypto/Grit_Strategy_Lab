@@ -162,6 +162,29 @@
   line-height: 1.35;
 }
 
+.workspace-recent-runs__strategy-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.workspace-recent-runs__version {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  color: #64748b;
+  font-size: 0.76rem;
+  font-weight: 700;
+  flex: none;
+  white-space: nowrap;
+}
+
 .workspace-recent-runs__period,
 .workspace-recent-runs__completed {
   margin: 0;

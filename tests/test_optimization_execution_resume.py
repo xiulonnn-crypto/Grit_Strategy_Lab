@@ -749,6 +749,7 @@ def test_completed_job_detail_uses_zero_trial_fast_path_when_candidates_are_pers
 
     assert detail["status"] == "COMPLETED"
     assert detail["summary"]["candidate_count"] == service._optimization_candidate_limit()
+    assert len(detail["matching_combinations"]) == 6
     assert all(candidate["analysis"]["validation_windows"] for candidate in detail["candidates"])
     assert detail["summary"]["best_metrics_summary"] is not None
     assert detail["result"]["best_candidate_id"] is not None
@@ -790,6 +791,7 @@ def test_completed_job_detail_reports_total_matching_combinations_beyond_publish
     assert detail["summary"]["candidate_count"] == service._optimization_candidate_limit()
     assert detail["summary"]["matching_combination_count"] == 6
     assert detail["summary"]["matching_combination_count"] > detail["summary"]["candidate_count"]
+    assert len(detail["matching_combinations"]) == 6
 
 
 def test_running_job_eta_falls_back_to_wall_clock_throughput_when_trial_durations_round_to_zero(tmp_path, monkeypatch):

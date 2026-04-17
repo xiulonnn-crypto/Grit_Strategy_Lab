@@ -103,6 +103,19 @@
   font-weight: 700;
 }
 
+.runs-index-table__strategy-cell {
+  display: grid;
+  gap: 6px;
+}
+
+.runs-index-table__strategy-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
 .runs-index-table__action-button {
   color: var(--danger);
   font-weight: 600;
@@ -157,6 +170,12 @@
   border-color: color-mix(in srgb, var(--warning) 24%, var(--line));
 }
 
+.runs-index-badge--version {
+  color: #64748b;
+  background: #f3f4f6;
+  border-color: #e5e7eb;
+}
+
 .runs-index-delete-modal {
   display: flex;
   flex-direction: column;
@@ -195,6 +214,13 @@
   color: var(--gsl-text-title);
   font-weight: 700;
   word-break: break-word;
+}
+
+.runs-index-delete-modal__strategy-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .runs-index-delete-modal__confirm {

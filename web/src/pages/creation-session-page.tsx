@@ -73,9 +73,9 @@ const INVESTMENT_FREQUENCY_OPTIONS: FieldOption[] = [
   { value: 'yearly', label: '每年' },
 ];
 const OBSERVATION_TIMEFRAME_OPTIONS: FieldOption[] = [
-  { value: 'daily', label: '日线' },
-  { value: 'weekly', label: '周线' },
-  { value: 'hourly', label: '小时线' },
+  { value: 'daily', label: '每日' },
+  { value: 'weekly', label: '每周' },
+  { value: 'monthly', label: '每月' },
 ];
 const MOMENTUM_REBALANCE_OPTIONS: FieldOption[] = [
   { value: 'monthly', label: '每月' },

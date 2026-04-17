@@ -25,6 +25,14 @@
   gap: 20px;
 }
 
+.run-detail-hero__title-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
 .run-detail-hero__title-row h2 {
   margin: 0;
 }
@@ -199,6 +207,12 @@
   background: #ffffff;
   color: var(--accent-strong);
   box-shadow: none;
+}
+
+.status-chip.run-detail-hero__tag.run-detail-hero__tag--version {
+  background: #f3f4f6;
+  border-color: #e5e7eb;
+  color: #64748b;
 }
 
 .status-chip.run-detail-hero__tag.run-detail-hero__tag--temporary {

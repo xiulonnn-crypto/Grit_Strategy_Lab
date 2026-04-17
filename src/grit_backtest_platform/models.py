@@ -27,6 +27,7 @@ FieldSource = Literal['user_input', 'system_inference', 'system_default', 'manua
 BacktestRunStatus = Literal['QUEUED', 'RUNNING', 'COMPLETED', 'COMPLETED_WITH_WARNINGS', 'FAILED']
 BacktestExecutionStage = Literal['DATA_FETCHING', 'SIMULATING', 'METRIC_CALCULATING']
 OptimizationJobStatus = Literal['QUEUED', 'RUNNING', 'INTERRUPTED', 'COMPLETED', 'PARTIALLY_FAILED', 'FAILED']
+OptimizationMatchingCombinationSource = Literal['all_trials', 'persisted_candidates']
 SnapshotStatus = Literal['READY', 'STALE', 'INCOMPLETE', 'FAILED']
 SnapshotKind = Literal['DATASET', 'UNIVERSE']
 TrialStatus = Literal['SUCCEEDED', 'FAILED', 'PENDING']
@@ -124,6 +125,7 @@ class OptimizationJobCreateRequest(BaseModel):
 
 
 class OptimizationJobConstraintUpdateRequest(BaseModel):
+    objective: str | None = None
     constraint_preset_key: OptimizationConstraintPresetKey | None = None
     constraint_label: str | None = None
     constraints: list[OptimizationConstraint] = Field(default_factory=list)

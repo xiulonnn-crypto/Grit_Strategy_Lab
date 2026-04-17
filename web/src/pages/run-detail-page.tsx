@@ -6,6 +6,7 @@ import {
   formatRunStatusLabel,
   getDefaultTradeId,
   getStrategyTitle,
+  getStrategyVersionTag,
   TRADE_PAGE_SIZE,
   TRADE_SEGMENT_OPTIONS,
   type RunDetailTab,
@@ -622,6 +623,7 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
   const resolvedDetail = detail;
   const tradePageData = trades ?? { items: [], page: 1, page_size: 50, total: 0, total_pages: 1 };
   const strategyName = getStrategyTitle(resolvedDetail);
+  const strategyVersionTag = getStrategyVersionTag(resolvedDetail);
   const runStatus = formatRunStatusLabel(resolvedDetail.status);
   const runInProgress = isBacktestRunInProgress(resolvedDetail.status);
   const canRerun = Boolean(resolvedDetail.strategy_id) && !runInProgress;
@@ -745,7 +747,10 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
       <section className="panel run-detail-hero">
         <div className="run-detail-hero__copy">
           <div className="run-detail-hero__title-row">
-            <h2>{strategyName}</h2>
+            <div className="run-detail-hero__title-main">
+              <h2>{strategyName}</h2>
+              {strategyVersionTag ? <span aria-hidden="true" className="status-chip run-detail-hero__tag run-detail-hero__tag--version">{strategyVersionTag}</span> : null}
+            </div>
             <div className="run-detail-hero__meta">
               <span className="status-chip run-detail-hero__tag">{runStatus}</span>
               <span
@@ -853,7 +858,7 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
               </div>
               <div>
                 <span className="run-detail-save-modal__label">{SAVE_CONFIRM_DIALOG.strategyLabel}</span>
-                <strong>{strategyName}</strong>
+                <strong>{strategyVersionTag ? `${strategyName} ${strategyVersionTag}` : strategyName}</strong>
               </div>
             </div>
             {saveDialogError ? <div className="error-banner">{saveDialogError}</div> : null}

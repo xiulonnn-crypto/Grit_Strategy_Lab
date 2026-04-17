@@ -161,8 +161,8 @@ const optimizationJobs: ApiOptimizationJobListItem[] = [
     budget_combinations: 24,
     completed_combinations: 10,
     progress_pct: 42,
-    current_stage: '稳定性验证',
-    latest_update: '正在扩大验证窗口，当前首位候选为 稳定策略中心。',
+    current_stage: 'Running trial 11/24',
+    latest_update: 'Completed 10/24 trials.',
     estimated_remaining_minutes: 12,
     estimated_completed_at: '2026-03-31T05:22:00.000Z',
     best_candidate_id: null,
@@ -239,11 +239,12 @@ beforeEach(() => {
       id: 'bt-101',
       strategy_id: 'str-alpha',
       strategy_name: '\u7b56\u7565 Alpha',
+      parameter_version_id: 'str-alpha-v3',
       status: 'COMPLETED',
       completed_at: '2026-03-31T03:30:00.000Z',
       created_at: '2026-03-31T03:00:00.000Z',
       updated_at: '2026-03-31T03:30:00.000Z',
-      metrics: { total_return: 0.184, sharpe: 1.18, max_drawdown: -0.064 },
+      metrics: { total_return: 0.184, annualized_return: 0.112, sharpe: 1.18, max_drawdown: -0.064 },
       warnings: [],
       preview: { oos_start_date: '2026-03-24', data_segment_type: 'FULL' },
       data_segment_type: 'FULL',
@@ -253,11 +254,12 @@ beforeEach(() => {
       id: 'bt-102',
       strategy_id: 'str-beta',
       strategy_name: '\u7b56\u7565 Beta',
+      parameter_version_id: 'str-beta-v1',
       status: 'COMPLETED_WITH_WARNINGS',
       completed_at: '2026-03-31T04:20:00.000Z',
       created_at: '2026-03-31T03:50:00.000Z',
       updated_at: '2026-03-31T04:20:00.000Z',
-      metrics: { total_return: 0.251, sharpe: 1.42, max_drawdown: -0.056 },
+      metrics: { total_return: 0.251, annualized_return: 0.144, sharpe: 1.42, max_drawdown: -0.056 },
       warnings: ['\u6837\u672c\u5916\u8868\u73b0\u5f31\u5316'],
       preview: { oos_start_date: '2026-03-25', data_segment_type: 'FULL' },
       data_segment_type: 'FULL',
@@ -293,13 +295,27 @@ describe('workspace dashboard', () => {
 
     expect((await screen.findAllByText('\u7b56\u7565 Alpha')).length).toBeGreaterThan(0);
     expect((await screen.findAllByText('\u7b56\u7565 Beta')).length).toBeGreaterThan(0);
-    expect(screen.getAllByText('T_CLOSE_TO_T1_OPEN', { exact: false }).length).toBeGreaterThan(0);
-    expect(screen.getByText('ds-alpha / un-alpha', { exact: false })).toBeInTheDocument();
-    expect(screen.getByText('+25.1%')).toBeInTheDocument();
+    expect(screen.queryByText('ds-alpha / un-alpha', { exact: false })).toBeNull();
+    expect(screen.getByText('最近编辑时间 3月31日 03:00')).toBeInTheDocument();
+    expect(screen.getByText('最近编辑时间 3月31日 04:00')).toBeInTheDocument();
+    expect(screen.getByText('+14.4%')).toBeInTheDocument();
     expect(screen.getByText('1.42')).toBeInTheDocument();
     expect(container!.textContent).toContain('opt-201');
-    expect(container!.textContent).toContain('ETA 12 分钟');
+    expect(container!.textContent).toContain('已完成 10/24 组试验');
+    expect(container!.textContent).toContain('预计 12 分钟');
+    expect(container!.textContent).toContain('阶段 正在评估第 11/24 组');
+    expect(container!.textContent).toContain('策略详情 · 滚动前瞻验证');
+    expect(container!.textContent).not.toContain('版本 v');
+    expect(container!.textContent).not.toContain('基准版本');
+    expect(container!.textContent).not.toContain('ETA');
+    expect(container!.textContent).not.toContain('Running trial');
+    expect(container!.textContent).not.toContain('Completed 10/24 trials.');
+    expect(container!.textContent).not.toContain('Walk Forward');
     expect(container!.textContent).toContain('年化收益率 +18.4%');
+    const recentVersionBadges = Array.from(
+      container!.querySelectorAll('.workspace-recent-runs__version'),
+    ).map((node) => node.textContent?.trim());
+    expect(recentVersionBadges).toEqual(expect.arrayContaining(['v3', 'v1']));
     const recentIds = Array.from(container!.querySelectorAll('.workspace-recent-runs__run-id')).map((node) => node.textContent?.trim());
     expect(recentIds[0]).toBe('opt-201');
     expect(fakeApi.getBacktestRunDetail).not.toHaveBeenCalled();

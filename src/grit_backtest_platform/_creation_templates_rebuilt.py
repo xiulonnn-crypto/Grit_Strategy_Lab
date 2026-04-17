@@ -499,7 +499,7 @@ def _build_mean_reversion_strategy_description(
     timeframe_label = {
         "daily": "日线",
         "weekly": "周线",
-        "hourly": "小时线",
+        "monthly": "月线",
     }.get(str(observation_timeframe or "").lower(), "")
     target = f"{universe_name}{timeframe_label}" if universe_name and timeframe_label else universe_name or timeframe_label or "目标标的"
     details.append(f"观察{target}，执行均值回归交易")
@@ -552,7 +552,7 @@ def _build_mean_reversion_trading_logic_summary(
     timeframe_label = {
         "daily": "日线",
         "weekly": "周线",
-        "hourly": "小时线",
+        "monthly": "月线",
     }.get(str(observation_timeframe or "").lower(), "")
     target = f"{universe_name}{timeframe_label}" if universe_name and timeframe_label else universe_name or timeframe_label or "目标标的"
 
@@ -598,8 +598,8 @@ def _extract_mean_reversion_timeframe(text: str) -> tuple[str | None, str]:
         return "daily", "user_input"
     if "周线" in text or "weekly" in lowered:
         return "weekly", "user_input"
-    if "小时" in text or "hourly" in lowered:
-        return "hourly", "user_input"
+    if "月线" in text or "每月" in text or "monthly" in lowered:
+        return "monthly", "user_input"
     return None, "system_default"
 
 
@@ -1025,7 +1025,7 @@ def _extract_mean_reversion_payload(text: str) -> tuple[dict[str, Any], dict[str
         timeframe_label = {
             "daily": "日线",
             "weekly": "周线",
-            "hourly": "小时线",
+            "monthly": "月线",
         }.get(str(observation_timeframe or "").lower(), "")
         target = f"{universe_name}{timeframe_label}" if universe_name and timeframe_label else universe_name or timeframe_label or "目标标的"
         logic_bits.append(f"观察{target}")

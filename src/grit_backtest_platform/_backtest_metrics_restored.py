@@ -349,6 +349,18 @@ def _insight_payload(text: str, *, tone: str = "neutral", state: str = "ok") -> 
     return text, tone, state
 
 
+def _annualized_return_from_curve(points: Iterable[Mapping[str, Any]], key: str) -> float | None:
+    rows = list(points)
+    if len(rows) < 2:
+        return None
+    start_value = float(rows[0].get(key) or 0.0)
+    end_value = float(rows[-1].get(key) or 0.0)
+    if start_value <= 0 or end_value <= 0:
+        return None
+    trading_years = max((len(rows) - 1) / 252.0, 1.0 / 252.0)
+    return (end_value / start_value) ** (1.0 / trading_years) - 1.0
+
+
 def _build_subtitle(
     *,
     oos_total_return: float,
@@ -516,6 +528,193 @@ def _build_trade_count_card(
     }
 
 
+def _build_total_return_card_v2(
+    *,
+    points: list[Mapping[str, Any]],
+    oos_points: list[Mapping[str, Any]],
+    train_points: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    strategy_total_return = _curve_total_return(points, "equity")
+    benchmark_total_return = _curve_total_return(points, "benchmark")
+    train_total_return = _curve_total_return(train_points, "equity") if train_points else None
+    delta = strategy_total_return - benchmark_total_return
+    oos_total_return = _curve_total_return(oos_points, "equity") if oos_points else 0.0
+    oos_benchmark_return = _curve_total_return(oos_points, "benchmark") if oos_points else 0.0
+    if delta >= 0:
+        insight = _insight_payload("总收益仍明显领先基准，建议继续核查 Beta 暴露是否过高。", tone="positive")
+    else:
+        insight = _insight_payload("总收益已经落后基准，建议先回看近期退化区间与持仓切换。", tone="warning", state="warning")
+    return {
+        "key": "total_return",
+        "label": "总收益",
+        "primary_text": _format_signed_percent(strategy_total_return),
+        "trend_direction": _trend_direction(delta),
+        "trend_text": f"{'↑' if delta >= 0 else '↓'} {abs(delta) * 100.0:.1f}% vs 基准",
+        "compare_text": f"基准: {_format_signed_percent(benchmark_total_return)} | 差值: {_format_signed_percent(delta)} | 测试集: {_format_signed_percent(oos_total_return - oos_benchmark_return)}",
+        "footer_items": [
+            {"label": "基准值", "value": _format_signed_percent(benchmark_total_return)},
+            {"label": "训练集", "value": _format_signed_percent(train_total_return)},
+            {"label": "测试集", "value": _format_signed_percent(oos_total_return)},
+        ],
+        "insight_text": insight[0],
+        "insight_tone": insight[1],
+        "state": insight[2],
+    }
+
+
+def _build_sharpe_card_v2(
+    *,
+    points: list[Mapping[str, Any]],
+    oos_points: list[Mapping[str, Any]],
+    train_points: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    strategy_sharpe = _annualized_sharpe(_curve_return_series(points, "equity"))
+    benchmark_sharpe = _annualized_sharpe(_curve_return_series(points, "benchmark"))
+    train_sharpe = _annualized_sharpe(_curve_return_series(train_points, "equity")) if train_points else None
+    oos_sharpe = _annualized_sharpe(_curve_return_series(oos_points, "equity")) if oos_points else 0.0
+    delta = strategy_sharpe - benchmark_sharpe
+    if oos_sharpe < strategy_sharpe - 0.3:
+        insight = _insight_payload("测试集夏普回落明显，建议先收缩参数空间并复核出场节奏。", tone="warning", state="warning")
+    elif delta >= 0:
+        insight = _insight_payload("风险回报仍优于基准，可继续观察是否具备跨阶段一致性。", tone="positive")
+    else:
+        insight = _insight_payload("夏普比率已经落后基准，建议先处理波动与持仓集中问题。", tone="warning", state="warning")
+    return {
+        "key": "sharpe",
+        "label": "夏普比率",
+        "primary_text": _format_decimal(strategy_sharpe, decimals=2),
+        "trend_direction": _trend_direction(delta),
+        "trend_text": f"{'↑' if delta >= 0 else '↓'} {_format_decimal(abs(delta), decimals=2)}",
+        "compare_text": f"基准: {_format_decimal(benchmark_sharpe, decimals=2)} | 差值: {_format_decimal(delta, decimals=2, signed=True)} | 测试集: {_format_decimal(oos_sharpe, decimals=2)}",
+        "footer_items": [
+            {"label": "基准值", "value": _format_decimal(benchmark_sharpe, decimals=2)},
+            {"label": "训练集", "value": _format_decimal(train_sharpe, decimals=2)},
+            {"label": "测试集", "value": _format_decimal(oos_sharpe, decimals=2)},
+        ],
+        "insight_text": insight[0],
+        "insight_tone": insight[1],
+        "state": insight[2],
+    }
+
+
+def _build_drawdown_card_v2(
+    *,
+    metrics: Mapping[str, Any],
+    points: list[Mapping[str, Any]],
+    train_points: list[Mapping[str, Any]],
+    oos_points: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    strategy_drawdown = float(metrics.get("max_drawdown") or 0.0)
+    benchmark_drawdown = _max_drawdown_from_series(points, "benchmark")
+    train_drawdown = _max_drawdown_from_series(train_points, "equity") if train_points else None
+    oos_drawdown = _max_drawdown_from_series(oos_points, "equity") if oos_points else None
+    advantage = abs(benchmark_drawdown) - abs(strategy_drawdown)
+    drawdown_ratio = abs(strategy_drawdown) / max(abs(benchmark_drawdown), 1e-9) if benchmark_drawdown else 0.0
+    if benchmark_drawdown and drawdown_ratio > 1.5:
+        insight = _insight_payload("最大回撤明显高于基准，建议优先优化出场和仓位控制。", tone="warning", state="warning")
+    elif advantage >= 0:
+        insight = _insight_payload("回撤控制仍优于基准，风险缓冲还有一定余量。", tone="positive")
+    else:
+        insight = _insight_payload("最大回撤已经弱于基准，放大仓位前要先处理回撤斜率。", tone="warning", state="warning")
+    return {
+        "key": "max_drawdown",
+        "label": "最大回撤",
+        "primary_text": _format_signed_percent(strategy_drawdown),
+        "trend_direction": _trend_direction(abs(strategy_drawdown) - abs(benchmark_drawdown), better_when_lower=True),
+        "trend_text": ("↓" if advantage >= 0 else "↑") + f" {abs(advantage) * 100.0:.1f}% 风控差异",
+        "compare_text": f"基准: {_format_signed_percent(benchmark_drawdown)} | 差值: {_format_signed_percent(advantage)}",
+        "footer_items": [
+            {"label": "基准值", "value": _format_signed_percent(benchmark_drawdown)},
+            {"label": "训练集", "value": _format_signed_percent(train_drawdown)},
+            {"label": "测试集", "value": _format_signed_percent(oos_drawdown)},
+        ],
+        "insight_text": insight[0],
+        "insight_tone": insight[1],
+        "state": insight[2],
+    }
+
+
+def _build_annualized_return_card(
+    *,
+    metrics: Mapping[str, Any],
+    points: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    window = 252
+    annualized_return = float(metrics.get("annualized_return") or metrics.get("cagr") or 0.0)
+    returns = _curve_return_series(points, "equity")
+    benchmark_returns = _curve_return_series(points, "benchmark")
+    benchmark_annualized = _annualized_return_from_curve(points, "benchmark")
+    strategy_rolling = _compound_return(returns[-window:]) if len(returns) >= window else None
+    benchmark_rolling = _compound_return(benchmark_returns[-window:]) if len(benchmark_returns) >= window else None
+    delta = annualized_return - benchmark_annualized if benchmark_annualized is not None else 0.0
+    if benchmark_annualized is None:
+        insight = _insight_payload("样本长度仍不足以稳定评估基准年化收益率，先结合滚动窗口观察近期斜率。", tone="neutral", state="insufficient_data")
+        trend_direction = "flat"
+        trend_text = "样本仍在累计"
+    elif annualized_return >= benchmark_annualized and (
+        strategy_rolling is None or benchmark_rolling is None or strategy_rolling >= benchmark_rolling
+    ):
+        insight = _insight_payload("年化收益率与最近 252 日滚动收益都领先基准，收益斜率仍保持优势。", tone="positive")
+        trend_direction = _trend_direction(delta)
+        trend_text = f"↑ {abs(delta) * 100.0:.1f}% vs 基准"
+    elif annualized_return >= benchmark_annualized:
+        insight = _insight_payload("年化收益率仍领先基准，但最近 252 日滚动收益回落，需确认近期收益斜率是否放缓。", tone="warning", state="warning")
+        trend_direction = _trend_direction(delta)
+        trend_text = f"{'↑' if delta >= 0 else '↓'} {abs(delta) * 100.0:.1f}% vs 基准"
+    else:
+        insight = _insight_payload("年化收益率暂时落后基准，建议先修复收益效率再考虑放大仓位。", tone="warning", state="warning")
+        trend_direction = _trend_direction(delta)
+        trend_text = f"{'↑' if delta >= 0 else '↓'} {abs(delta) * 100.0:.1f}% vs 基准"
+    return {
+        "key": "annualized_return",
+        "label": "年化收益率",
+        "primary_text": _format_signed_percent(annualized_return),
+        "trend_direction": trend_direction,
+        "trend_text": trend_text,
+        "compare_text": f"基准: {_format_signed_percent(benchmark_annualized)} | 最新252日滚动: {_format_signed_percent(strategy_rolling)} | 滚动基准: {_format_signed_percent(benchmark_rolling)}",
+        "footer_items": [
+            {"label": "基准值", "value": _format_signed_percent(benchmark_annualized)},
+            {"label": "最新252日滚动", "value": _format_signed_percent(strategy_rolling)},
+            {"label": "滚动基准", "value": _format_signed_percent(benchmark_rolling)},
+        ],
+        "insight_text": insight[0],
+        "insight_tone": insight[1],
+        "state": insight[2],
+    }
+
+
+def _build_trade_count_card_v2(
+    *,
+    run_detail: Mapping[str, Any],
+    train_trade_count: int,
+    test_trade_count: int,
+) -> dict[str, Any]:
+    total_trade_count = int(run_detail.get("trades_count") or (train_trade_count + test_trade_count))
+    coverage_days = int(run_detail.get("coverage_days") or 0)
+    average_daily_trade_count = total_trade_count / coverage_days if coverage_days > 0 else 0.0
+    if average_daily_trade_count > 20:
+        insight = _insight_payload("交易密度偏高，先确认换手是否来自噪声而不是有效信号。", tone="warning", state="warning")
+    elif test_trade_count < 20:
+        insight = _insight_payload("测试集样本偏少，警惕随机性造成的过拟合。", tone="warning", state="warning")
+    else:
+        insight = _insight_payload("样本量处于可读区间，可继续查看测试集逐笔证据。", tone="neutral")
+    return {
+        "key": "trade_count",
+        "label": "交易数",
+        "primary_text": str(total_trade_count),
+        "trend_direction": "flat",
+        "trend_text": f"训练集 {train_trade_count} / 测试集 {test_trade_count}",
+        "compare_text": f"训练集: {train_trade_count} | 测试集: {test_trade_count}",
+        "footer_items": [
+            {"label": "训练集", "value": str(train_trade_count)},
+            {"label": "测试集", "value": str(test_trade_count)},
+        ],
+        "insight_text": insight[0],
+        "insight_tone": insight[1],
+        "state": insight[2],
+    }
+
+
 def build_run_detail_analysis(run_detail: Mapping[str, Any]) -> dict[str, Any]:
     points = list(run_detail.get("chart_series") or [])
     metrics = metric_summary(run_detail.get("metrics"))
@@ -524,11 +723,11 @@ def build_run_detail_analysis(run_detail: Mapping[str, Any]) -> dict[str, Any]:
     train_points = _segment_points(points, oos=False, oos_start_date=oos_start_date)
     train_trade_count, test_trade_count = _segment_trade_counts(run_detail)
 
-    total_return_card = _build_total_return_card(points=points, oos_points=oos_points)
-    sharpe_card = _build_sharpe_card(points=points, oos_points=oos_points)
-    drawdown_card = _build_drawdown_card(metrics=metrics, points=points)
-    rolling_card = _build_rolling_return_card(points)
-    trade_count_card = _build_trade_count_card(
+    total_return_card = _build_total_return_card_v2(points=points, oos_points=oos_points, train_points=train_points)
+    annualized_return_card = _build_annualized_return_card(metrics=metrics, points=points)
+    sharpe_card = _build_sharpe_card_v2(points=points, oos_points=oos_points, train_points=train_points)
+    drawdown_card = _build_drawdown_card_v2(metrics=metrics, points=points, train_points=train_points, oos_points=oos_points)
+    trade_count_card = _build_trade_count_card_v2(
         run_detail=run_detail,
         train_trade_count=train_trade_count,
         test_trade_count=test_trade_count,
@@ -609,9 +808,9 @@ def build_run_detail_analysis(run_detail: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "kpi_cards": [
             total_return_card,
+            annualized_return_card,
             sharpe_card,
             drawdown_card,
-            rolling_card,
             trade_count_card,
         ],
         "decision_rail": {

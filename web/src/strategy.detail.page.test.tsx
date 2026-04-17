@@ -141,6 +141,12 @@ describe('StrategyDetailPage', () => {
     expect(container.querySelector('.strategy-detail-history-table')).not.toBeNull();
     expect(container.querySelector('.strategy-detail-parameter-card--logic')).not.toBeNull();
     expect(container.querySelector('.workspace-recent-runs__timeline')).not.toBeNull();
+    expect(container.querySelector('.strategy-detail-hero__meta')).toBeNull();
+    const summary = container.querySelector('.strategy-detail-hero__summary');
+    expect(summary).not.toBeNull();
+    expect(summary?.textContent).toContain('QQQ');
+    expect(summary?.textContent).toContain('RSI(6)');
+    expect(summary?.textContent).toContain('5%');
     expect(screen.getByText('权重方式')).toBeInTheDocument();
     expect(screen.getByText('等权')).toBeInTheDocument();
     expect(screen.getByText('保留排名阈值')).toBeInTheDocument();

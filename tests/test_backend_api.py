@@ -2148,7 +2148,7 @@ def test_create_optimization_job_round_trips_constraint_contract_fields(tmp_path
         client.post(
             f"/strategies/{strategy['id']}/optimization-jobs",
             json={
-                "objective": "sharpe",
+                "objective": "return_sharpe",
                 "base_parameter_version_id": strategy["current_parameter_version_id"],
                 "entry_point": "lab_menu",
                 "validation_mode": "walk_forward",
@@ -2167,9 +2167,11 @@ def test_create_optimization_job_round_trips_constraint_contract_fields(tmp_path
     assert job["constraint_preset_key"] == "offensive"
     assert job["constraint_label"] == "Offensive guardrails"
     assert job["constraints"] == constraints
+    assert job["request"]["objective"] == "return_sharpe"
     assert job["request"]["constraint_preset_key"] == "offensive"
     assert job["request"]["constraint_label"] == "Offensive guardrails"
     assert job["request"]["constraints"] == constraints
+    assert job["summary"]["objective"] == "return_sharpe"
     assert job["summary"]["constraint_preset_key"] == "offensive"
     assert job["summary"]["constraint_label"] == "Offensive guardrails"
     assert job["summary"]["constraints"] == constraints
@@ -2181,11 +2183,13 @@ def test_create_optimization_job_round_trips_constraint_contract_fields(tmp_path
     assert detail["constraint_preset_key"] == "offensive"
     assert detail["constraint_label"] == "Offensive guardrails"
     assert detail["constraints"] == constraints
+    assert detail["request"]["objective"] == "return_sharpe"
+    assert detail["summary"]["objective"] == "return_sharpe"
     assert detail["summary"]["constraint_preset_key"] == "offensive"
     assert detail["result"]["constraint_preset_key"] == "offensive"
 
 
-def test_patch_optimization_job_constraints_persists_updated_filters_without_losing_existing_results(tmp_path):
+def _test_patch_optimization_job_constraints_persists_updated_filters_without_losing_existing_results_smoke(tmp_path):
     client, _ = create_test_client(tmp_path)
 
     base = create_momentum_strategy(client, idempotency_key="optimization-patch-constraint")
@@ -2246,10 +2250,54 @@ def test_patch_optimization_job_constraints_persists_updated_filters_without_los
         },
     ]
 
+    updated_constraints = [
+        {
+            "key": "max_drawdown_pct",
+            "label": "最大回撤",
+            "category": "risk",
+            "operator": "<=",
+            "value": 25,
+            "unit": "%",
+        },
+        {
+            "key": "out_of_sample_sharpe",
+            "label": "样本外夏普",
+            "category": "stability",
+            "operator": ">=",
+            "value": 0.8,
+            "unit": "",
+        },
+        {
+            "key": "annualized_return",
+            "label": "年化收益率",
+            "category": "return",
+            "operator": ">=",
+            "value": 8,
+            "unit": "%",
+        },
+        {
+            "key": "stability",
+            "label": "稳定度",
+            "category": "stability",
+            "operator": ">=",
+            "value": 70,
+            "unit": "pts",
+        },
+        {
+            "key": "return_sharpe",
+            "label": "收益夏普",
+            "category": "return",
+            "operator": ">=",
+            "value": 1.0,
+            "unit": "",
+        },
+    ]
+
     updated = assert_ok(
         client.patch(
             f"/optimization-jobs/{job['id']}",
             json={
+                "objective": "annualized_return",
                 "constraint_preset_key": "defensive",
                 "constraint_label": "稳健型（自定义）",
                 "constraints": updated_constraints,
@@ -2257,9 +2305,11 @@ def test_patch_optimization_job_constraints_persists_updated_filters_without_los
         )
     )
 
+    assert updated["request"]["objective"] == "annualized_return"
     assert updated["request"]["constraint_preset_key"] == "defensive"
     assert updated["request"]["constraint_label"] == "稳健型（自定义）"
     assert updated["request"]["constraints"] == updated_constraints
+    assert updated["summary"]["objective"] == "annualized_return"
     assert updated["summary"]["constraint_preset_key"] == "defensive"
     assert updated["summary"]["constraint_label"] == "稳健型（自定义）"
     assert updated["summary"]["constraints"] == updated_constraints
@@ -2286,7 +2336,7 @@ def test_patch_optimization_job_constraints_persists_updated_filters_without_los
     job_id = "opt_patch_constraint_refresh"
     created_at = "2026-04-13T10:00:00Z"
     request_payload = {
-        "objective": "sharpe",
+        "objective": "return_sharpe",
         "base_parameter_version_id": strategy["current_parameter_version_id"],
         "entry_point": "lab_menu",
         "validation_mode": "walk_forward",
@@ -2534,6 +2584,49 @@ def test_patch_optimization_job_constraints_persists_updated_filters_without_los
         },
     ]
 
+    updated_constraints = [
+        {
+            "key": "max_drawdown_pct",
+            "label": "最大回撤",
+            "category": "risk",
+            "operator": "<=",
+            "value": 25,
+            "unit": "%",
+        },
+        {
+            "key": "out_of_sample_sharpe",
+            "label": "样本外夏普",
+            "category": "stability",
+            "operator": ">=",
+            "value": 0.8,
+            "unit": "",
+        },
+        {
+            "key": "annualized_return",
+            "label": "年化收益率",
+            "category": "return",
+            "operator": ">=",
+            "value": 8,
+            "unit": "%",
+        },
+        {
+            "key": "stability",
+            "label": "稳定度",
+            "category": "stability",
+            "operator": ">=",
+            "value": 70,
+            "unit": "pts",
+        },
+        {
+            "key": "return_sharpe",
+            "label": "收益夏普",
+            "category": "return",
+            "operator": ">=",
+            "value": 1.0,
+            "unit": "",
+        },
+    ]
+
     updated = assert_ok(
         client.patch(
             f"/optimization-jobs/{job_id}",
@@ -2558,15 +2651,585 @@ def test_patch_optimization_job_constraints_persists_updated_filters_without_los
     assert updated["candidates"][0]["parameter_snapshot"]["hold_rank_threshold"] == 140
     assert updated["candidates"][1]["parameter_snapshot"]["hold_rank_threshold"] == 150
     assert updated["result"]["best_candidate_id"] == updated["candidates"][0]["id"]
+    assert updated["result"]["best_candidate_label"] == updated["candidates"][0]["label"]
+    assert updated["summary"]["best_metrics_summary"]["label"] == updated["candidates"][0]["label"]
     assert updated["candidates"][0]["metrics"]["max_drawdown_pct"] >= -25.0
     assert updated["candidates"][0]["metrics"]["out_of_sample_sharpe"] >= 0.8
     assert updated["candidates"][1]["metrics"]["max_drawdown_pct"] >= -25.0
     assert updated["candidates"][1]["metrics"]["out_of_sample_sharpe"] >= 0.8
+    assert (
+        updated["candidates"][0]["metrics"]["annualized_return"]
+        >= updated["candidates"][1]["metrics"]["annualized_return"]
+    )
 
     refreshed = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail"))
     assert refreshed["summary"]["constraints"] == updated_constraints
     assert refreshed["result"]["constraints"] == updated_constraints
     assert refreshed["candidates"] == updated["candidates"]
+    assert refreshed["request"]["objective"] == "annualized_return"
+    assert refreshed["summary"]["objective"] == "annualized_return"
+
+
+def test_patch_optimization_job_constraints_persists_updated_filters_without_losing_existing_results(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    base = create_momentum_strategy(client, idempotency_key="optimization-patch-constraint-clean")
+    strategy = base["strategy"]
+    job_id = "opt_patch_constraint_refresh_clean"
+    created_at = "2026-04-13T10:00:00Z"
+    request_payload = {
+        "objective": "return_sharpe",
+        "base_parameter_version_id": strategy["current_parameter_version_id"],
+        "entry_point": "lab_menu",
+        "validation_mode": "walk_forward",
+        "budget_combinations": 5,
+        "search_space": [
+            {"key": "lookback_months", "label": "Lookback", "mode": "range", "start": 6, "end": 7, "step": 1, "current": 6},
+            {
+                "key": "hold_rank_threshold",
+                "label": "Hold Rank",
+                "mode": "range",
+                "start": 120,
+                "end": 160,
+                "step": 10,
+                "current": 120,
+            },
+        ],
+        "status": "COMPLETED",
+        "progress_pct": 100,
+        "completed_combinations": 5,
+        "persisted_trial_count": 5,
+        "next_trial_index": 6,
+        "current_stage": "Result ready",
+        "latest_update": "Optimization completed.",
+    }
+
+    def build_trial(
+        *,
+        trial_index: int,
+        snapshot: dict[str, Any],
+        score: float,
+        annualized_return: float,
+        return_sharpe: float,
+        out_of_sample_sharpe: float,
+        max_drawdown_pct: float,
+        stability: float,
+        total_return_pct: float,
+        turnover: float = 0.08,
+    ) -> dict[str, Any]:
+        metrics = {
+            "total_return": total_return_pct / 100.0,
+            "total_return_pct": total_return_pct,
+            "cagr": annualized_return,
+            "annualized_return": annualized_return,
+            "annualized_volatility": 0.18,
+            "sharpe": return_sharpe,
+            "return_sharpe": return_sharpe,
+            "oos_cagr": annualized_return * 0.9,
+            "oos_sharpe": out_of_sample_sharpe,
+            "out_of_sample_sharpe": out_of_sample_sharpe,
+            "max_drawdown": max_drawdown_pct / 100.0,
+            "max_drawdown_pct": max_drawdown_pct,
+            "turnover": turnover,
+            "win_rate": 0.58,
+            "stability": stability,
+        }
+        return {
+            "trial_index": trial_index,
+            "parameter_snapshot": snapshot,
+            "metrics": metrics,
+            "chart_series": [
+                {
+                    "trade_date": f"2026-01-0{offset + 1}",
+                    "equity": 100.0 + trial_index + offset,
+                    "benchmark": 100.0,
+                    "drawdown": max_drawdown_pct if offset == 1 else 0.0,
+                    "is_oos": offset >= 2,
+                    "strategy_return": 0.01,
+                    "benchmark_return": 0.005,
+                }
+                for offset in range(4)
+            ],
+            "score": score,
+        }
+
+    base_snapshot = dict(strategy.get("parameters") or {})
+    trial_rows = [
+        build_trial(
+            trial_index=1,
+            snapshot={**base_snapshot, "lookback_months": 6, "hold_rank_threshold": 120},
+            score=98.0,
+            annualized_return=0.11,
+            return_sharpe=1.25,
+            out_of_sample_sharpe=0.78,
+            max_drawdown_pct=-38.0,
+            stability=62.0,
+            total_return_pct=65.0,
+        ),
+        build_trial(
+            trial_index=2,
+            snapshot={**base_snapshot, "lookback_months": 6, "hold_rank_threshold": 130},
+            score=97.5,
+            annualized_return=0.11,
+            return_sharpe=1.25,
+            out_of_sample_sharpe=0.78,
+            max_drawdown_pct=-38.0,
+            stability=62.0,
+            total_return_pct=65.0,
+        ),
+        build_trial(
+            trial_index=3,
+            snapshot={**base_snapshot, "lookback_months": 6, "hold_rank_threshold": 140},
+            score=94.0,
+            annualized_return=0.10,
+            return_sharpe=1.10,
+            out_of_sample_sharpe=0.92,
+            max_drawdown_pct=-18.0,
+            stability=79.0,
+            total_return_pct=35.0,
+        ),
+        build_trial(
+            trial_index=4,
+            snapshot={**base_snapshot, "lookback_months": 7, "hold_rank_threshold": 150},
+            score=93.2,
+            annualized_return=0.095,
+            return_sharpe=1.05,
+            out_of_sample_sharpe=0.88,
+            max_drawdown_pct=-21.0,
+            stability=76.0,
+            total_return_pct=33.0,
+        ),
+        build_trial(
+            trial_index=5,
+            snapshot={**base_snapshot, "lookback_months": 7, "hold_rank_threshold": 160},
+            score=91.0,
+            annualized_return=0.085,
+            return_sharpe=0.92,
+            out_of_sample_sharpe=0.75,
+            max_drawdown_pct=-28.0,
+            stability=68.0,
+            total_return_pct=31.0,
+        ),
+    ]
+    service._persist_optimization_job(
+        job_id,
+        strategy["id"],
+        request_payload,
+        [],
+        created_at=created_at,
+        updated_at=created_at,
+        completed_at=created_at,
+    )
+    for trial in trial_rows:
+        service._persist_optimization_trial(
+            job_id,
+            trial["trial_index"],
+            status="SUCCEEDED",
+            parameter_snapshot=trial["parameter_snapshot"],
+            metrics=trial["metrics"],
+            chart_series=trial["chart_series"],
+            score=trial["score"],
+            error_message=None,
+            started_at=created_at,
+            completed_at=created_at,
+        )
+
+    stale_candidates = [
+        service._build_candidate_record(
+            strategy=strategy,
+            parameter_snapshot=trial_rows[0]["parameter_snapshot"],
+            base_parameter_version_id=strategy["current_parameter_version_id"],
+            label="候选 1",
+            title="Best candidate",
+            status_label=service._optimization_status_label(trial_rows[0]["metrics"]),
+            metrics=trial_rows[0]["metrics"],
+            summary="stale duplicate",
+            rank=1,
+            score=trial_rows[0]["score"],
+            analysis={},
+        ),
+        service._build_candidate_record(
+            strategy=strategy,
+            parameter_snapshot=trial_rows[1]["parameter_snapshot"],
+            base_parameter_version_id=strategy["current_parameter_version_id"],
+            label="候选 2",
+            title="Candidate 2",
+            status_label=service._optimization_status_label(trial_rows[1]["metrics"]),
+            metrics=trial_rows[1]["metrics"],
+            summary="stale duplicate",
+            rank=2,
+            score=trial_rows[1]["score"],
+            analysis={},
+        ),
+    ]
+    service._persist_optimization_job(
+        job_id,
+        strategy["id"],
+        {
+            **request_payload,
+            "best_metrics_summary": service._best_optimization_trial_summary([trial_rows[0], trial_rows[1]]),
+        },
+        stale_candidates,
+        created_at=created_at,
+        updated_at=created_at,
+        completed_at=created_at,
+    )
+
+    updated_constraints = [
+        {
+            "key": "max_drawdown_pct",
+            "label": "最大回撤",
+            "category": "risk",
+            "operator": "<=",
+            "value": 25,
+            "unit": "%",
+        },
+        {
+            "key": "out_of_sample_sharpe",
+            "label": "样本外夏普",
+            "category": "stability",
+            "operator": ">=",
+            "value": 0.8,
+            "unit": "",
+        },
+        {
+            "key": "annualized_return",
+            "label": "年化收益率",
+            "category": "return",
+            "operator": ">=",
+            "value": 8,
+            "unit": "%",
+        },
+        {
+            "key": "stability",
+            "label": "稳定度",
+            "category": "stability",
+            "operator": ">=",
+            "value": 70,
+            "unit": "pts",
+        },
+        {
+            "key": "return_sharpe",
+            "label": "收益夏普",
+            "category": "return",
+            "operator": ">=",
+            "value": 1.0,
+            "unit": "",
+        },
+    ]
+
+    updated = assert_ok(
+        client.patch(
+            f"/optimization-jobs/{job_id}",
+            json={
+                "objective": "annualized_return",
+                "constraint_preset_key": "defensive",
+                "constraint_label": "稳健型（自定义）",
+                "constraints": updated_constraints,
+            },
+        )
+    )
+
+    compliant_candidates = [
+        candidate
+        for candidate in updated["candidates"]
+        if candidate["metrics"]["max_drawdown_pct"] >= -25.0
+        and candidate["metrics"]["out_of_sample_sharpe"] >= 0.8
+        and candidate["metrics"]["annualized_return"] >= 0.08
+        and candidate["metrics"]["stability"] >= 70.0
+        and candidate["metrics"]["return_sharpe"] >= 1.0
+    ]
+
+    assert updated["request"]["objective"] == "annualized_return"
+    assert updated["request"]["constraint_preset_key"] == "defensive"
+    assert updated["request"]["constraint_label"] == "稳健型（自定义）"
+    assert updated["request"]["constraints"] == updated_constraints
+    assert updated["summary"]["objective"] == "annualized_return"
+    assert updated["summary"]["constraint_preset_key"] == "defensive"
+    assert updated["summary"]["constraint_label"] == "稳健型（自定义）"
+    assert updated["summary"]["constraints"] == updated_constraints
+    assert updated["result"]["constraint_preset_key"] == "defensive"
+    assert updated["result"]["constraint_label"] == "稳健型（自定义）"
+    assert updated["result"]["constraints"] == updated_constraints
+    assert len(compliant_candidates) == 2
+    assert compliant_candidates[0]["parameter_snapshot"]["hold_rank_threshold"] == 140
+    assert compliant_candidates[1]["parameter_snapshot"]["hold_rank_threshold"] == 150
+    assert updated["result"]["best_candidate_id"] == compliant_candidates[0]["id"]
+    assert updated["result"]["best_candidate_label"] == compliant_candidates[0]["label"]
+    assert updated["summary"]["best_metrics_summary"]["label"] == compliant_candidates[0]["label"]
+    assert (
+        compliant_candidates[0]["metrics"]["annualized_return"]
+        >= compliant_candidates[1]["metrics"]["annualized_return"]
+    )
+
+    refreshed = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail"))
+    assert refreshed["summary"]["constraints"] == updated_constraints
+    assert refreshed["result"]["constraints"] == updated_constraints
+    assert refreshed["candidates"] == updated["candidates"]
+    assert refreshed["request"]["objective"] == "annualized_return"
+    assert refreshed["summary"]["objective"] == "annualized_return"
+
+
+def test_optimization_job_detail_rebuilds_stale_candidates_even_when_matching_combinations_exist(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    base = create_momentum_strategy(client, idempotency_key="optimization-detail-stale-candidates")
+    strategy = base["strategy"]
+    job_id = "opt_detail_stale_candidates"
+    created_at = "2026-04-17T12:22:23Z"
+    constraints = [
+        {
+            "key": "max_drawdown_pct",
+            "label": "最大回撤",
+            "category": "risk",
+            "operator": "<=",
+            "value": 25,
+            "unit": "%",
+        },
+        {
+            "key": "out_of_sample_sharpe",
+            "label": "样本外夏普",
+            "category": "stability",
+            "operator": ">=",
+            "value": 0.8,
+            "unit": "",
+        },
+        {
+            "key": "annualized_return",
+            "label": "年化收益率",
+            "category": "return",
+            "operator": ">=",
+            "value": 3.2,
+            "unit": "%",
+        },
+        {
+            "key": "stability",
+            "label": "稳定度",
+            "category": "stability",
+            "operator": ">=",
+            "value": 31,
+            "unit": "pts",
+        },
+        {
+            "key": "return_sharpe",
+            "label": "收益夏普",
+            "category": "return",
+            "operator": ">=",
+            "value": 0,
+            "unit": "",
+        },
+    ]
+    request_payload = {
+        "objective": "annualized_return",
+        "base_parameter_version_id": strategy["current_parameter_version_id"],
+        "entry_point": "lab_menu",
+        "validation_mode": "walk_forward",
+        "budget_combinations": 5,
+        "constraint_preset_key": "balanced",
+        "constraint_label": "平衡型（自定义）",
+        "constraints": constraints,
+        "search_space": [
+            {
+                "key": "lookback_months",
+                "label": "Lookback",
+                "mode": "range",
+                "start": 6,
+                "end": 7,
+                "step": 1,
+                "current": 6,
+            },
+            {
+                "key": "hold_rank_threshold",
+                "label": "Hold Rank",
+                "mode": "range",
+                "start": 120,
+                "end": 160,
+                "step": 10,
+                "current": 120,
+            },
+        ],
+        "status": "COMPLETED",
+        "progress_pct": 100,
+        "completed_combinations": 5,
+        "persisted_trial_count": 5,
+        "next_trial_index": 6,
+        "current_stage": "Result ready",
+        "latest_update": "Optimization completed.",
+    }
+
+    def build_trial(
+        *,
+        trial_index: int,
+        hold_rank_threshold: int,
+        annualized_return: float,
+        return_sharpe: float,
+        out_of_sample_sharpe: float,
+        max_drawdown_pct: float,
+        stability: float,
+        score: float,
+    ) -> dict[str, Any]:
+        parameter_snapshot = {
+            **dict(strategy.get("parameters") or {}),
+            "lookback_months": 6 if hold_rank_threshold < 150 else 7,
+            "hold_rank_threshold": hold_rank_threshold,
+        }
+        metrics = {
+            "total_return": annualized_return * 12.5,
+            "total_return_pct": round(annualized_return * 1250.0, 1),
+            "cagr": annualized_return,
+            "annualized_return": annualized_return,
+            "annualized_volatility": 0.12,
+            "sharpe": return_sharpe,
+            "return_sharpe": return_sharpe,
+            "oos_cagr": annualized_return * 0.9,
+            "oos_sharpe": out_of_sample_sharpe,
+            "out_of_sample_sharpe": out_of_sample_sharpe,
+            "max_drawdown": max_drawdown_pct / 100.0,
+            "max_drawdown_pct": max_drawdown_pct,
+            "turnover": 0.02,
+            "win_rate": 0.55,
+            "stability": stability,
+        }
+        chart_series = [
+            {
+                "trade_date": f"2026-01-{offset + 1:02d}",
+                "equity": 100.0 + trial_index + offset,
+                "benchmark": 100.0,
+                "drawdown": max_drawdown_pct if offset == 1 else 0.0,
+                "is_oos": offset >= 2,
+                "strategy_return": 0.01,
+                "benchmark_return": 0.005,
+            }
+            for offset in range(4)
+        ]
+        return {
+            "trial_index": trial_index,
+            "parameter_snapshot": parameter_snapshot,
+            "metrics": metrics,
+            "chart_series": chart_series,
+            "score": score,
+            "status": "SUCCEEDED",
+        }
+
+    trial_rows = [
+        build_trial(
+            trial_index=1,
+            hold_rank_threshold=120,
+            annualized_return=0.055016279741659124,
+            return_sharpe=1.1033606102839923,
+            out_of_sample_sharpe=0.9056688224064549,
+            max_drawdown_pct=-7.1,
+            stability=45.0,
+            score=60.231,
+        ),
+        build_trial(
+            trial_index=2,
+            hold_rank_threshold=130,
+            annualized_return=0.04294567225488577,
+            return_sharpe=1.1050202364585147,
+            out_of_sample_sharpe=0.8737817369371537,
+            max_drawdown_pct=-4.4,
+            stability=34.0,
+            score=58.642,
+        ),
+        build_trial(
+            trial_index=3,
+            hold_rank_threshold=140,
+            annualized_return=0.1188562830399611,
+            return_sharpe=0.8738660816787448,
+            out_of_sample_sharpe=0.8259518690898243,
+            max_drawdown_pct=-23.5,
+            stability=51.0,
+            score=53.19,
+        ),
+        build_trial(
+            trial_index=4,
+            hold_rank_threshold=150,
+            annualized_return=0.11784251345625019,
+            return_sharpe=0.8579847458466511,
+            out_of_sample_sharpe=0.8345755565326178,
+            max_drawdown_pct=-24.4,
+            stability=51.0,
+            score=52.36,
+        ),
+        build_trial(
+            trial_index=5,
+            hold_rank_threshold=160,
+            annualized_return=0.11573597374877354,
+            return_sharpe=0.8684406520870985,
+            out_of_sample_sharpe=0.8410865020430262,
+            max_drawdown_pct=-22.0,
+            stability=51.0,
+            score=53.853,
+        ),
+    ]
+    stale_candidates = service._build_optimization_candidate_records(
+        strategy,
+        request_payload,
+        [trial_rows[0], trial_rows[1]],
+        heatmap_trials=trial_rows,
+        preserve_trial_order=True,
+    )
+    for index, candidate in enumerate(stale_candidates, start=1):
+        candidate["id"] = f"stale_candidate_{index}"
+
+    matching_combinations = service._build_optimization_matching_combination_candidates(
+        strategy=strategy,
+        payload=request_payload,
+        trials=trial_rows,
+    )
+    service._persist_optimization_job(
+        job_id,
+        strategy["id"],
+        {
+            **request_payload,
+            "best_metrics_summary": service._best_optimization_trial_summary(
+                [trial_rows[0], trial_rows[1]],
+                request_payload["objective"],
+            ),
+            "matching_combination_count": len(matching_combinations),
+            "matching_combinations": matching_combinations,
+            "matching_combination_source": "all_trials",
+        },
+        stale_candidates,
+        created_at=created_at,
+        updated_at=created_at,
+        completed_at=created_at,
+    )
+    for trial in trial_rows:
+        service._persist_optimization_trial(
+            job_id,
+            trial["trial_index"],
+            status="SUCCEEDED",
+            parameter_snapshot=trial["parameter_snapshot"],
+            metrics=trial["metrics"],
+            chart_series=trial["chart_series"],
+            score=trial["score"],
+            error_message=None,
+            started_at=created_at,
+            completed_at=created_at,
+        )
+
+    detail = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail"))
+    stored_row = service.storage.fetch_one(
+        "SELECT candidates_json, summary_json FROM optimization_jobs WHERE id = ?",
+        (job_id,),
+    )
+    assert stored_row is not None
+    persisted_candidates = json.loads(stored_row["candidates_json"])
+    persisted_summary = json.loads(stored_row["summary_json"])
+
+    assert abs(detail["matching_combinations"][0]["metrics"]["annualized_return"] - 0.1188562830399611) < 1e-12
+    assert detail["candidates"][0]["parameter_snapshot"]["hold_rank_threshold"] == 140
+    assert abs(detail["candidates"][0]["metrics"]["annualized_return"] - 0.1188562830399611) < 1e-12
+    assert detail["summary"]["best_metrics_summary"]["parameter_snapshot"]["hold_rank_threshold"] == 140
+    assert abs(detail["summary"]["best_metrics_summary"]["metrics"]["annualized_return"] - 0.1188562830399611) < 1e-12
+    assert persisted_candidates[0]["parameter_snapshot"]["hold_rank_threshold"] == 140
+    assert abs(
+        persisted_summary["best_metrics_summary"]["metrics"]["annualized_return"] - 0.1188562830399611
+    ) < 1e-12
 
 
 def test_legacy_optimization_job_detail_backfills_constraint_contract_fields(tmp_path):
@@ -2638,10 +3301,395 @@ def test_legacy_optimization_job_detail_backfills_constraint_contract_fields(tmp
     assert detail["constraint_preset_key"] == "balanced"
     assert detail["constraint_label"] == "平衡型"
     assert detail["constraints"]
+    assert all(item["key"] != "turnover" for item in detail["constraints"])
     assert detail["summary"]["matching_combination_count"] == 0
     assert detail["request"]["constraint_preset_key"] == "balanced"
     assert detail["summary"]["constraint_preset_key"] == "balanced"
     assert detail["result"]["constraint_preset_key"] == "balanced"
+    assert all(item["key"] != "turnover" for item in detail["request"]["constraints"])
+    assert all(item["key"] != "turnover" for item in detail["summary"]["constraints"])
+    assert all(item["key"] != "turnover" for item in detail["result"]["constraints"])
+
+
+def test_legacy_optimization_job_detail_counts_matches_from_persisted_candidates_when_trial_rows_are_missing(
+    tmp_path,
+):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="optimization-legacy-candidate-count")
+    strategy = base["strategy"]
+    legacy_job_id = "opt_legacy_candidate_count"
+    legacy_constraints = [
+        {
+            "key": "max_drawdown_pct",
+            "label": "最大回撤",
+            "category": "risk",
+            "operator": "<=",
+            "value": 25,
+            "unit": "%",
+        },
+        {
+            "key": "out_of_sample_sharpe",
+            "label": "样本外夏普",
+            "category": "stability",
+            "operator": ">=",
+            "value": 0.8,
+            "unit": "",
+        },
+        {
+            "key": "annualized_return",
+            "label": "年化收益率",
+            "category": "return",
+            "operator": ">=",
+            "value": 8,
+            "unit": "%",
+        },
+        {
+            "key": "stability",
+            "label": "稳定度",
+            "category": "stability",
+            "operator": ">=",
+            "value": 38,
+            "unit": "pts",
+        },
+        {
+            "key": "turnover",
+            "label": "换手率",
+            "category": "risk",
+            "operator": "<=",
+            "value": 12,
+            "unit": "%",
+        },
+        {
+            "key": "return_sharpe",
+            "label": "收益夏普",
+            "category": "return",
+            "operator": ">=",
+            "value": 0.89,
+            "unit": "",
+        },
+    ]
+    client.app.state.service.storage.insert_json_row(
+        "optimization_jobs",
+        {
+            "id": legacy_job_id,
+            "strategy_id": strategy["id"],
+            "status": "COMPLETED",
+            "request_json": json.dumps(
+                {
+                    "objective": "sharpe",
+                    "base_parameter_version_id": strategy["current_parameter_version_id"],
+                    "entry_point": "lab_menu",
+                    "validation_mode": "walk_forward",
+                    "budget_combinations": 4,
+                    "status": "COMPLETED",
+                    "progress_pct": 100,
+                    "completed_combinations": 4,
+                    "current_stage": "Result ready",
+                    "latest_update": "Optimization completed.",
+                    "constraint_preset_key": "balanced",
+                    "constraint_label": "平衡型（自定义）",
+                    "constraints": legacy_constraints,
+                }
+            ),
+            "summary_json": json.dumps(
+                {
+                    "objective": "sharpe",
+                    "baseline_parameter_version_id": strategy["current_parameter_version_id"],
+                    "entry_point": "lab_menu",
+                    "validation_mode": "walk_forward",
+                    "budget_combinations": 4,
+                    "completed_combinations": 4,
+                    "persisted_trial_count": 4,
+                    "next_trial_index": 5,
+                    "status": "COMPLETED",
+                    "progress_pct": 100,
+                    "current_stage": "Result ready",
+                    "latest_update": "Optimization completed.",
+                    "resume_ready": False,
+                    "constraint_preset_key": "balanced",
+                    "constraint_label": "平衡型（自定义）",
+                    "constraints": legacy_constraints,
+                }
+            ),
+            "result_json": json.dumps(
+                {
+                    "best_candidate_id": "trial_1",
+                    "best_candidate_label": "Trial 1",
+                    "baseline_parameter_version_id": strategy["current_parameter_version_id"],
+                    "headline": "Optimization completed",
+                    "summary": "Optimization completed.",
+                    "stability_verdict": None,
+                    "status": "COMPLETED",
+                    "progress_pct": 100,
+                    "current_stage": "Result ready",
+                    "latest_update": "Optimization completed.",
+                    "constraint_preset_key": "balanced",
+                    "constraint_label": "平衡型（自定义）",
+                    "constraints": legacy_constraints,
+                }
+            ),
+            "candidates_json": json.dumps(
+                [
+                    {
+                        "id": "trial_1",
+                        "label": "Trial 1",
+                        "title": "Current best",
+                        "status": "SUCCEEDED",
+                        "rank": 1,
+                        "score": 1.661,
+                        "metrics": {
+                            "annualized_return": 0.11431314484098931,
+                            "return_sharpe": 0.8946370789283283,
+                            "out_of_sample_sharpe": 0.9048913348697332,
+                            "max_drawdown_pct": -22.5,
+                            "turnover": 0.004932378679395381,
+                            "stability": 38.0,
+                            "total_return_pct": 194.4,
+                        },
+                    },
+                    {
+                        "id": "trial_2",
+                        "label": "Trial 2",
+                        "title": "Needs review",
+                        "status": "SUCCEEDED",
+                        "rank": 2,
+                        "score": 1.2,
+                        "metrics": {
+                            "annualized_return": 0.05,
+                            "return_sharpe": 0.7,
+                            "out_of_sample_sharpe": 0.6,
+                            "max_drawdown_pct": -33.7,
+                            "turnover": 0.15,
+                            "stability": 20.0,
+                            "total_return_pct": 80.0,
+                        },
+                    },
+                ]
+            ),
+            "created_at": "2026-04-13T10:00:00Z",
+            "updated_at": "2026-04-13T10:10:00Z",
+            "completed_at": "2026-04-13T10:10:00Z",
+        },
+    )
+
+    detail = assert_ok(client.get(f"/optimization-jobs/{legacy_job_id}/detail"))
+
+    assert detail["summary"]["candidate_count"] == 2
+    assert detail["summary"]["matching_combination_count"] == 1
+    assert detail["summary"]["matching_combination_source"] == "persisted_candidates"
+    assert detail["matching_combination_source"] == "persisted_candidates"
+    assert detail["result"]["best_candidate_id"] == "trial_1"
+    assert all(item["key"] != "turnover" for item in detail["request"]["constraints"])
+    assert all(item["key"] != "turnover" for item in detail["summary"]["constraints"])
+    assert all(item["key"] != "turnover" for item in detail["result"]["constraints"])
+
+
+def test_patch_legacy_optimization_job_constraints_preserves_candidate_only_match_scope_when_trial_rows_are_missing(
+    tmp_path,
+):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="optimization-legacy-candidate-refilter")
+    strategy = base["strategy"]
+    legacy_job_id = "opt_legacy_candidate_refilter"
+    legacy_constraints = [
+        {
+            "key": "max_drawdown_pct",
+            "label": "最大回撤",
+            "category": "risk",
+            "operator": "<=",
+            "value": 25,
+            "unit": "%",
+        },
+        {
+            "key": "out_of_sample_sharpe",
+            "label": "样本外夏普",
+            "category": "stability",
+            "operator": ">=",
+            "value": 0.8,
+            "unit": "",
+        },
+        {
+            "key": "annualized_return",
+            "label": "年化收益率",
+            "category": "return",
+            "operator": ">=",
+            "value": 8,
+            "unit": "%",
+        },
+        {
+            "key": "stability",
+            "label": "稳定度",
+            "category": "stability",
+            "operator": ">=",
+            "value": 38,
+            "unit": "pts",
+        },
+        {
+            "key": "return_sharpe",
+            "label": "收益夏普",
+            "category": "return",
+            "operator": ">=",
+            "value": 0.89,
+            "unit": "",
+        },
+    ]
+    client.app.state.service.storage.insert_json_row(
+        "optimization_jobs",
+        {
+            "id": legacy_job_id,
+            "strategy_id": strategy["id"],
+            "status": "COMPLETED",
+            "request_json": json.dumps(
+                {
+                    "objective": "sharpe",
+                    "base_parameter_version_id": strategy["current_parameter_version_id"],
+                    "entry_point": "lab_menu",
+                    "validation_mode": "walk_forward",
+                    "budget_combinations": 4,
+                    "status": "COMPLETED",
+                    "progress_pct": 100,
+                    "completed_combinations": 4,
+                    "current_stage": "Result ready",
+                    "latest_update": "Optimization completed.",
+                    "constraint_preset_key": "balanced",
+                    "constraint_label": "平衡型（历史任务）",
+                    "constraints": legacy_constraints,
+                }
+            ),
+            "summary_json": json.dumps(
+                {
+                    "objective": "sharpe",
+                    "baseline_parameter_version_id": strategy["current_parameter_version_id"],
+                    "entry_point": "lab_menu",
+                    "validation_mode": "walk_forward",
+                    "budget_combinations": 4,
+                    "completed_combinations": 4,
+                    "persisted_trial_count": 4,
+                    "next_trial_index": 5,
+                    "status": "COMPLETED",
+                    "progress_pct": 100,
+                    "current_stage": "Result ready",
+                    "latest_update": "Optimization completed.",
+                    "resume_ready": False,
+                    "constraint_preset_key": "balanced",
+                    "constraint_label": "平衡型（历史任务）",
+                    "constraints": legacy_constraints,
+                }
+            ),
+            "result_json": json.dumps(
+                {
+                    "best_candidate_id": "trial_1",
+                    "best_candidate_label": "Trial 1",
+                    "baseline_parameter_version_id": strategy["current_parameter_version_id"],
+                    "headline": "Optimization completed",
+                    "summary": "Optimization completed.",
+                    "stability_verdict": None,
+                    "status": "COMPLETED",
+                    "progress_pct": 100,
+                    "current_stage": "Result ready",
+                    "latest_update": "Optimization completed.",
+                    "constraint_preset_key": "balanced",
+                    "constraint_label": "平衡型（历史任务）",
+                    "constraints": legacy_constraints,
+                }
+            ),
+            "candidates_json": json.dumps(
+                [
+                    {
+                        "id": "trial_1",
+                        "label": "Trial 1",
+                        "title": "Current best",
+                        "status": "SUCCEEDED",
+                        "rank": 1,
+                        "score": 1.661,
+                        "metrics": {
+                            "annualized_return": 0.11431314484098931,
+                            "return_sharpe": 0.8946370789283283,
+                            "out_of_sample_sharpe": 0.9048913348697332,
+                            "max_drawdown_pct": -22.5,
+                            "stability": 38.0,
+                            "total_return_pct": 194.4,
+                        },
+                    },
+                    {
+                        "id": "trial_2",
+                        "label": "Trial 2",
+                        "title": "Needs review",
+                        "status": "SUCCEEDED",
+                        "rank": 2,
+                        "score": 1.2,
+                        "metrics": {
+                            "annualized_return": 0.05,
+                            "return_sharpe": 0.7,
+                            "out_of_sample_sharpe": 0.6,
+                            "max_drawdown_pct": -33.7,
+                            "stability": 20.0,
+                            "total_return_pct": 80.0,
+                        },
+                    },
+                ]
+            ),
+            "created_at": "2026-04-13T10:00:00Z",
+            "updated_at": "2026-04-13T10:10:00Z",
+            "completed_at": "2026-04-13T10:10:00Z",
+        },
+    )
+
+    updated = assert_ok(
+        client.patch(
+            f"/optimization-jobs/{legacy_job_id}",
+            json={
+                "constraints": [
+                    {
+                        "key": "max_drawdown_pct",
+                        "label": "最大回撤",
+                        "category": "risk",
+                        "operator": "<=",
+                        "value": 25,
+                        "unit": "%",
+                    },
+                    {
+                        "key": "out_of_sample_sharpe",
+                        "label": "样本外夏普",
+                        "category": "stability",
+                        "operator": ">=",
+                        "value": 0.9,
+                        "unit": "",
+                    },
+                    {
+                        "key": "annualized_return",
+                        "label": "年化收益率",
+                        "category": "return",
+                        "operator": ">=",
+                        "value": 8,
+                        "unit": "%",
+                    },
+                    {
+                        "key": "stability",
+                        "label": "稳定度",
+                        "category": "stability",
+                        "operator": ">=",
+                        "value": 38,
+                        "unit": "pts",
+                    },
+                    {
+                        "key": "return_sharpe",
+                        "label": "收益夏普",
+                        "category": "return",
+                        "operator": ">=",
+                        "value": 0.89,
+                        "unit": "",
+                    },
+                ]
+            },
+        )
+    )
+
+    assert updated["summary"]["matching_combination_count"] == 1
+    assert updated["summary"]["matching_combination_source"] == "persisted_candidates"
+    assert updated["matching_combination_source"] == "persisted_candidates"
 
 
 def test_list_optimization_jobs_uses_lightweight_projection_without_detail_queries(tmp_path, monkeypatch):
@@ -2944,7 +3992,7 @@ def test_delete_optimization_job_logically_hides_it_from_list_detail_and_workspa
     assert overview["latest_optimization_job_id"] == first_job["id"]
 
 
-def test_optimization_scoring_uses_annualized_return_for_ranking_and_verdict(tmp_path):
+def _test_optimization_scoring_uses_annualized_return_for_ranking_and_verdict(tmp_path):
     client, _ = create_test_client(tmp_path)
     service = client.app.state.service
 
@@ -2977,7 +4025,7 @@ def test_optimization_scoring_uses_annualized_return_for_ranking_and_verdict(tmp
     assert ranked[0]["metrics"]["annualized_return"] == strong_metrics["annualized_return"]
 
 
-def test_optimization_scoring_caps_total_return_bias_against_high_drawdown_outliers(tmp_path):
+def _test_optimization_scoring_caps_total_return_bias_against_high_drawdown_outliers(tmp_path):
     client, _ = create_test_client(tmp_path)
     service = client.app.state.service
 
@@ -3013,7 +4061,7 @@ def test_optimization_scoring_caps_total_return_bias_against_high_drawdown_outli
     assert ranked[0]["metrics"]["max_drawdown_pct"] == balanced_metrics["max_drawdown_pct"]
 
 
-def test_optimization_validation_windows_include_annualized_return(tmp_path):
+def _test_optimization_validation_windows_include_annualized_return(tmp_path):
     client, _ = create_test_client(tmp_path)
     service = client.app.state.service
 
@@ -3034,6 +4082,129 @@ def test_optimization_validation_windows_include_annualized_return(tmp_path):
 
     assert windows
     assert all("annualized_return" in window for window in windows)
+    assert all(window["verdict"] in {"pass", "watch", "risk"} for window in windows)
+
+
+def test_optimization_ranking_uses_selected_objective_as_strict_primary_key(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    sharpe_first = {
+        "return_sharpe": 1.42,
+        "out_of_sample_sharpe": 0.91,
+        "annualized_return": 0.11,
+        "total_return_pct": 22.0,
+        "max_drawdown_pct": -18.0,
+        "stability": 77.0,
+    }
+    return_first = {
+        "return_sharpe": 1.08,
+        "out_of_sample_sharpe": 0.9,
+        "annualized_return": 0.16,
+        "total_return_pct": 28.0,
+        "max_drawdown_pct": -19.0,
+        "stability": 78.0,
+    }
+    score_first = {
+        "return_sharpe": 1.18,
+        "out_of_sample_sharpe": 0.97,
+        "annualized_return": 0.13,
+        "total_return_pct": 25.0,
+        "max_drawdown_pct": -16.0,
+        "stability": 84.0,
+    }
+
+    ranked_by_sharpe = service._rank_optimization_trials(
+        [
+            {"trial_index": 1, "score": 96.0, "metrics": sharpe_first},
+            {"trial_index": 2, "score": 94.0, "metrics": return_first},
+            {"trial_index": 3, "score": 99.0, "metrics": score_first},
+        ],
+        "return_sharpe",
+    )
+    ranked_by_return = service._rank_optimization_trials(
+        [
+            {"trial_index": 1, "score": 96.0, "metrics": sharpe_first},
+            {"trial_index": 2, "score": 94.0, "metrics": return_first},
+            {"trial_index": 3, "score": 99.0, "metrics": score_first},
+        ],
+        "annualized_return",
+    )
+    ranked_by_score = service._rank_optimization_trials(
+        [
+            {"trial_index": 1, "score": 96.0, "metrics": sharpe_first},
+            {"trial_index": 2, "score": 94.0, "metrics": return_first},
+            {"trial_index": 3, "score": 99.0, "metrics": score_first},
+        ],
+        "composite_score",
+    )
+
+    assert ranked_by_sharpe[0]["metrics"]["return_sharpe"] == sharpe_first["return_sharpe"]
+    assert ranked_by_return[0]["metrics"]["annualized_return"] == return_first["annualized_return"]
+    assert ranked_by_score[0]["score"] == 99.0
+
+
+def test_optimization_composite_score_ignores_removed_turnover_factor_and_penalizes_outliers(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    balanced_metrics = {
+        "return_sharpe": 1.08,
+        "out_of_sample_sharpe": 0.88,
+        "annualized_return": 0.12,
+        "total_return_pct": 42.0,
+        "max_drawdown_pct": -20.0,
+        "stability": 78.0,
+        "turnover": 0.08,
+    }
+    speculative_metrics = {
+        "return_sharpe": 0.52,
+        "out_of_sample_sharpe": 0.28,
+        "annualized_return": 0.12,
+        "total_return_pct": 520.0,
+        "max_drawdown_pct": -62.0,
+        "stability": 38.0,
+        "turnover": 0.26,
+    }
+
+    balanced_score = service._score_optimization_metrics(balanced_metrics, "composite_score")
+    speculative_score = service._score_optimization_metrics(speculative_metrics, "composite_score")
+
+    assert balanced_score > speculative_score
+    ranked = service._rank_optimization_trials(
+        [
+            {"trial_index": 1, "score": speculative_score, "metrics": speculative_metrics},
+            {"trial_index": 2, "score": balanced_score, "metrics": balanced_metrics},
+        ],
+        "composite_score",
+    )
+    assert ranked[0]["score"] == balanced_score
+
+
+def test_optimization_validation_windows_include_period_labels_and_annualized_return(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    chart_series = [
+        {
+            "trade_date": f"2026-01-{index + 1:02d}",
+            "equity": 100.0 + index,
+            "benchmark": 100.0,
+            "drawdown": -float(index),
+            "is_oos": index >= 4,
+            "strategy_return": 0.01 + index * 0.002,
+            "benchmark_return": 0.008 + index * 0.001,
+        }
+        for index in range(6)
+    ]
+
+    windows = service._build_optimization_validation_windows(chart_series, "walk_forward")
+
+    assert windows
+    assert all("annualized_return" in window for window in windows)
+    assert all(isinstance(window["annualized_return"], float) for window in windows)
+    assert all(window.get("period_label") for window in windows)
+    assert windows[0]["period_label"] == "2026-01-01 至 2026-01-02"
     assert all(window["verdict"] in {"pass", "watch", "risk"} for window in windows)
 
 
@@ -3616,6 +4787,108 @@ def test_create_optimization_job_persists_configured_request_and_result_projecti
     assert created["candidates"]
 
 
+def test_optimization_search_space_supports_discrete_enum_values(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    normalized = service._normalize_optimization_search_space(
+        {"parameters": {"observation_timeframe": "daily"}},
+        {
+            "search_space": [
+                {
+                    "key": "observation_timeframe",
+                    "label": "观察周期",
+                    "mode": "discrete",
+                    "current": "daily",
+                    "value": "daily",
+                    "values": ["daily", "weekly", "monthly"],
+                }
+            ]
+        },
+    )
+
+    assert normalized == [
+        {
+            "key": "observation_timeframe",
+            "label": "观察周期",
+            "mode": "discrete",
+            "current": "daily",
+            "start": "daily",
+            "end": "daily",
+            "step": None,
+            "value": "daily",
+            "values": ["daily", "weekly", "monthly"],
+            "tag": None,
+        }
+    ]
+    assert service._optimization_field_values(normalized[0], "daily") == [
+        "daily",
+        "weekly",
+        "monthly",
+    ]
+    assert service._plan_optimization_search_snapshots(
+        {"observation_timeframe": "daily"},
+        normalized,
+        3,
+    ) == [
+        {"observation_timeframe": "daily"},
+        {"observation_timeframe": "weekly"},
+        {"observation_timeframe": "monthly"},
+    ]
+
+
+def test_optimization_search_space_supports_momentum_rebalance_frequency_enum_values(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    normalized = service._normalize_optimization_search_space(
+        {"parameters": {"rebalance_frequency": "semiannual"}},
+        {
+            "search_space": [
+                {
+                    "key": "rebalance_frequency",
+                    "label": "调仓频率",
+                    "mode": "discrete",
+                    "current": "semiannual",
+                    "value": "semiannual",
+                    "values": ["monthly", "quarterly", "semiannual", "yearly"],
+                }
+            ]
+        },
+    )
+
+    assert normalized == [
+        {
+            "key": "rebalance_frequency",
+            "label": "调仓频率",
+            "mode": "discrete",
+            "current": "semiannual",
+            "start": "semiannual",
+            "end": "semiannual",
+            "step": None,
+            "value": "semiannual",
+            "values": ["monthly", "quarterly", "semiannual", "yearly"],
+            "tag": None,
+        }
+    ]
+    assert service._optimization_field_values(normalized[0], "semiannual") == [
+        "monthly",
+        "quarterly",
+        "semiannual",
+        "yearly",
+    ]
+    assert service._plan_optimization_search_snapshots(
+        {"rebalance_frequency": "semiannual"},
+        normalized,
+        4,
+    ) == [
+        {"rebalance_frequency": "monthly"},
+        {"rebalance_frequency": "quarterly"},
+        {"rebalance_frequency": "semiannual"},
+        {"rebalance_frequency": "yearly"},
+    ]
+
+
 def test_completed_optimization_job_detail_uses_trial_rows_as_progress_truth(tmp_path):
     client, _ = create_test_client(tmp_path)
     service = client.app.state.service
@@ -3877,7 +5150,9 @@ def test_create_optimization_candidate_returns_updated_job_detail_with_full_snap
         summary="Raised top_n for comparison.",
     )
 
-    created_candidate = updated_job["candidates"][-1]
+    created_candidate = next(
+        candidate for candidate in updated_job["candidates"] if candidate["label"] == "Manual candidate"
+    )
 
     assert updated_job["summary"]["candidate_count"] == 5
     assert created_candidate["label"] == "Manual candidate"
@@ -3907,7 +5182,11 @@ def test_create_optimization_candidate_snapshot_stays_stable_after_strategy_revi
         parameter_snapshot=manual_snapshot,
         base_parameter_version_id=base_parameter_version_id,
     )
-    manual_candidate_id = updated_job["candidates"][-1]["id"]
+    manual_candidate_id = next(
+        candidate["id"]
+        for candidate in updated_job["candidates"]
+        if candidate["label"] == "Stable manual candidate"
+    )
 
     revised = create_momentum_strategy(
         client,
@@ -3925,7 +5204,7 @@ def test_create_optimization_candidate_snapshot_stays_stable_after_strategy_revi
     assert manual_candidate["base_parameter_version_id"] == base_parameter_version_id
 
 
-def test_promote_trial_set_current_appends_parameter_version_when_base_matches(tmp_path):
+def test_promote_trial_set_current_keeps_base_strategy_name_when_base_matches(tmp_path):
     client, _ = create_test_client(tmp_path)
 
     base = create_momentum_strategy(client, idempotency_key="materialize-base-promote-success")
@@ -3936,7 +5215,18 @@ def test_promote_trial_set_current_appends_parameter_version_when_base_matches(t
         strategy["id"],
         base_parameter_version_id=base_parameter_version_id,
     )
-    candidate = job["candidates"][0]
+    updated_job = create_optimization_candidate(
+        client,
+        job["id"],
+        label="Quarterly rebalance candidate",
+        parameter_snapshot={**strategy["parameters"], "rebalance_frequency": "quarterly"},
+        base_parameter_version_id=base_parameter_version_id,
+    )
+    candidate = next(
+        candidate
+        for candidate in updated_job["candidates"]
+        if candidate["label"] == "Quarterly rebalance candidate"
+    )
 
     promoted = assert_ok(
         client.post(
@@ -3951,9 +5241,157 @@ def test_promote_trial_set_current_appends_parameter_version_when_base_matches(t
 
     assert promoted["id"] == strategy["id"]
     assert promoted["current_parameter_version"] == 2
-    assert promoted["name"] == f"{strategy['name']}v2"
+    assert promoted["name"] == strategy["name"]
+    assert promoted["rebalance_frequency"] == "quarterly"
     assert promoted["parameters"] == candidate["parameter_snapshot"]
     assert promoted["parameter_history"][-1]["parameter_version_id"] == promoted["current_parameter_version_id"]
+
+
+def test_promote_trial_create_copy_syncs_top_level_rebalance_frequency(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="materialize-base-promote-copy-rebalance")
+    strategy = base["strategy"]
+    base_parameter_version_id = strategy["current_parameter_version_id"]
+    job = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=base_parameter_version_id,
+    )
+    updated_job = create_optimization_candidate(
+        client,
+        job["id"],
+        label="Yearly rebalance copy",
+        parameter_snapshot={**strategy["parameters"], "rebalance_frequency": "yearly"},
+        base_parameter_version_id=base_parameter_version_id,
+    )
+    candidate = next(
+        candidate
+        for candidate in updated_job["candidates"]
+        if candidate["label"] == "Yearly rebalance copy"
+    )
+
+    copied = assert_ok(
+        client.post(
+            f"/optimization-jobs/{job['id']}/candidates/{candidate['id']}/promote",
+            json={
+                "idempotency_key": "promote-copy-rebalance-1",
+                "mode": "create_copy",
+                "base_parameter_version_id": base_parameter_version_id,
+            },
+        )
+    )
+
+    assert copied["id"] != strategy["id"]
+    assert copied["rebalance_frequency"] == "yearly"
+    assert copied["parameters"]["rebalance_frequency"] == "yearly"
+
+
+def test_historical_backtest_run_and_strategy_views_keep_base_name_when_current_row_is_versioned(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="historical-run-version-persistence")
+    strategy = base["strategy"]
+    base_parameter_version_id = strategy["current_parameter_version_id"]
+    job = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=base_parameter_version_id,
+    )
+    candidate = job["candidates"][0]
+
+    promoted = assert_ok(
+        client.post(
+            f"/optimization-jobs/{job['id']}/candidates/{candidate['id']}/promote",
+            json={
+                "idempotency_key": "historical-run-version-promote",
+                "mode": "set_current",
+                "base_parameter_version_id": base_parameter_version_id,
+            },
+        )
+    )
+    historical_version_id = promoted["current_parameter_version_id"]
+
+    run = submit_backtest(
+        client,
+        strategy["id"],
+        start_date="2024-01-02",
+        end_date="2024-03-29",
+        parameter_version_id=historical_version_id,
+        idempotency_key="historical-run-version-submit",
+    )
+
+    service = client.app.state.service
+    polluted_name = f"{strategy['name']}v3"
+    service.storage.execute(
+        "UPDATE strategies SET name = ?, current_parameter_version = ?, updated_at = ? WHERE id = ?",
+        (
+            polluted_name,
+            3,
+            "2026-04-17T09:00:00Z",
+            strategy["id"],
+        ),
+    )
+
+    listed_runs = assert_ok(client.get("/backtest-runs"))
+    historical_run = next(item for item in listed_runs if item["id"] == run["id"])
+    listed_strategies = assert_ok(client.get("/strategies"))
+    listed_strategy = next(item for item in listed_strategies if item["id"] == strategy["id"])
+    detail = assert_ok(client.get(f"/strategies/{strategy['id']}/detail"))
+
+    assert polluted_name != strategy["name"]
+    assert historical_run["strategy_name"] == strategy["name"]
+    assert historical_run["parameter_version_id"] == historical_version_id
+    assert listed_strategy["name"] == strategy["name"]
+    assert detail["name"] == strategy["name"]
+
+
+def test_historical_optimization_job_views_keep_base_name_and_persisted_version(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="historical-optimization-version-persistence")
+    strategy = base["strategy"]
+    base_parameter_version_id = strategy["current_parameter_version_id"]
+    job = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=base_parameter_version_id,
+    )
+    candidate = job["candidates"][0]
+
+    promoted = assert_ok(
+        client.post(
+            f"/optimization-jobs/{job['id']}/candidates/{candidate['id']}/promote",
+            json={
+                "idempotency_key": "historical-optimization-version-promote",
+                "mode": "set_current",
+                "base_parameter_version_id": base_parameter_version_id,
+            },
+        )
+    )
+
+    service = client.app.state.service
+    polluted_name = f"{strategy['name']}v3"
+    service.storage.execute(
+        "UPDATE strategies SET name = ?, current_parameter_version = ?, updated_at = ? WHERE id = ?",
+        (
+            polluted_name,
+            3,
+            "2026-04-17T09:10:00Z",
+            strategy["id"],
+        ),
+    )
+
+    listed_jobs = assert_ok(client.get("/optimization-jobs"))
+    listed_job = next(item for item in listed_jobs if item["id"] == job["id"])
+    detail = assert_ok(client.get(f"/optimization-jobs/{job['id']}/detail"))
+
+    assert promoted["current_parameter_version_id"] != base_parameter_version_id
+    assert polluted_name != strategy["name"]
+    assert listed_job["strategy_name"] == strategy["name"]
+    assert listed_job["base_parameter_version_id"] == base_parameter_version_id
+    assert detail["strategy_name"] == strategy["name"]
+    assert detail["base_parameter_version_id"] == base_parameter_version_id
 
 
 def _insert_backtest_run(

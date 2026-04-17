@@ -1,6 +1,7 @@
 ﻿import { useEffect, useMemo, useState } from 'react';
 import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
+import { formatStrategyVersionTag, getStrategyDisplayName } from '../lib/strategy-version';
 import type { ApiBacktestRunListItem } from '../types';
 import './runs-index-page.css';
 
@@ -87,7 +88,8 @@ function buildRows(runs: ApiBacktestRunListItem[]) {
       return {
         id: run.id,
         strategyId: run.strategy_id,
-        strategyName: run.strategy_name ?? run.strategy_id,
+        strategyName: getStrategyDisplayName(run.strategy_name ?? run.strategy_id, run.strategy_id),
+        strategyVersionTag: formatStrategyVersionTag(run.parameter_version_id ?? run.preview?.parameter_version_id),
         runTypeText: run.is_permanent ? '永久回测' : '临时回测',
         runTypeTone: run.is_permanent ? 'permanent' : 'temporary',
         status: run.status,
@@ -224,9 +226,16 @@ export function RunsIndexPage(): JSX.Element {
                     </button>
                   </td>
                   <td>
-                    <button className="runs-index-link runs-index-link--strategy" onClick={() => navigateTo(`/strategies/${row.strategyId}`)} type="button">
-                      {row.strategyName}
-                    </button>
+                    <div className="runs-index-table__strategy-cell">
+                      <div className="runs-index-table__strategy-inline">
+                        <button className="runs-index-link runs-index-link--strategy" onClick={() => navigateTo(`/strategies/${row.strategyId}`)} type="button">
+                          {row.strategyName}
+                        </button>
+                        {row.strategyVersionTag ? (
+                          <span className="runs-index-badge runs-index-badge--version">{row.strategyVersionTag}</span>
+                        ) : null}
+                      </div>
+                    </div>
                   </td>
                   <td className="runs-index-table__type-cell">
                     <span className={`runs-index-badge runs-index-badge--${row.runTypeTone}`}>{row.runTypeText}</span>
@@ -280,7 +289,12 @@ export function RunsIndexPage(): JSX.Element {
               </div>
               <div>
                 <dt>策略</dt>
-                <dd>{pendingDeleteRow.strategyName}</dd>
+                <dd className="runs-index-delete-modal__strategy-summary">
+                  <span>{pendingDeleteRow.strategyName}</span>
+                  {pendingDeleteRow.strategyVersionTag ? (
+                    <span className="runs-index-badge runs-index-badge--version">{pendingDeleteRow.strategyVersionTag}</span>
+                  ) : null}
+                </dd>
               </div>
               <div>
                 <dt>当前状态</dt>

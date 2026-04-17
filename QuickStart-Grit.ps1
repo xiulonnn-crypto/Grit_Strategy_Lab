@@ -761,7 +761,7 @@ try {
 }
 
 $nodeExe = (Get-Command node -ErrorAction Stop).Source
-$previewArgs = @($frontendPreviewScript, '--host', '127.0.0.1', '--port', '4173', '--watch')
+$previewArgs = @($frontendPreviewScript, '--host', '127.0.0.1', '--port', '4173', '--watch', '--rebuild-on-start')
 if (-not $NoBrowser) {
     $previewArgs += @('--open-url', $workspaceUrl)
 }

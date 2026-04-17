@@ -22,7 +22,7 @@ import {
   type PromoteMode,
 } from '../types';
 import { buildParameterDiffRows } from './adapters';
-import { formatVersionedStrategyName } from './demoStoreShared';
+import { applyOptimizationJobConstraintUpdate } from './optimization-demo';
 
 type DemoState = {
   strategies: ApiStrategyDetail[];
@@ -570,6 +570,25 @@ export const demoApi: DemoApi = {
     return clone(findJob(id));
   },
 
+  async updateOptimizationJobConstraints(jobId, payload): Promise<ApiOptimizationJobDetail> {
+    const job = findJob(jobId);
+    if (!['COMPLETED', 'PARTIALLY_FAILED', 'FAILED'].includes(String(job.status).toUpperCase())) {
+      throw new ApiError({
+        status: 409,
+        code: 'optimization_job_not_terminal',
+        message: '只有已结束的优化任务才能重新过滤约束条件。',
+      });
+    }
+    const updated = applyOptimizationJobConstraintUpdate(
+      job,
+      payload,
+      findStrategy(job.strategy_id),
+      nowIso(),
+    );
+    state.optimizationJobs = state.optimizationJobs.map((item) => (item.id === jobId ? updated : item));
+    return clone(updated);
+  },
+
   async listOptimizationJobs(): Promise<ApiOptimizationJobListItem[]> {
     return clone(
       state.optimizationJobs.map((job) => ({
@@ -713,7 +732,6 @@ export const demoApi: DemoApi = {
       strategy.parameters = clone(candidate.parameter_snapshot);
       strategy.current_parameter_version = (strategy.current_parameter_version ?? 1) + 1;
       strategy.current_parameter_version_id = `${strategy.id}-v${strategy.current_parameter_version}`;
-      strategy.name = formatVersionedStrategyName(strategy.name, strategy.current_parameter_version);
     }
     return clone(job);
   },

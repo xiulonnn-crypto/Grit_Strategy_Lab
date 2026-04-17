@@ -85,9 +85,30 @@ const detail: ApiBacktestRunDetail = {
         trend_direction: 'up',
         trend_text: '↑ 90.0%',
         compare_text: '基准: +142.4% | 差值: +89.9%',
+        footer_items: [
+          { label: '基准值', value: '+142.4%' },
+          { label: '训练集', value: '+70.3%' },
+          { label: '测试集', value: '+95.1%' },
+        ],
         insight_text: '收益仍显著跑赢基准，建议继续检查 Beta 暴露。',
         insight_tone: 'positive',
         state: 'healthy',
+      },
+      {
+        key: 'annualized_return',
+        label: '年化收益率',
+        primary_text: '+28.4%',
+        trend_direction: 'up',
+        trend_text: '↑ 12.1% vs 基准',
+        compare_text: '基准: +16.3% | 最新252日滚动: +17.1% | 滚动基准: +11.6%',
+        footer_items: [
+          { label: '基准值', value: '+16.3%' },
+          { label: '最新252日滚动', value: '+17.1%' },
+          { label: '滚动基准', value: '+11.6%' },
+        ],
+        insight_text: '年化收益率仍领先基准，但最近 252 日滚动收益放缓，需继续确认近期斜率是否还能延续。',
+        insight_tone: 'warning',
+        state: 'watch',
       },
       {
         key: 'sharpe',
@@ -96,6 +117,11 @@ const detail: ApiBacktestRunDetail = {
         trend_direction: 'up',
         trend_text: '↑ 0.23',
         compare_text: '基准: 0.62 | 差值: +0.23',
+        footer_items: [
+          { label: '基准值', value: '0.62' },
+          { label: '训练集', value: '0.91' },
+          { label: '测试集', value: '0.81' },
+        ],
         insight_text: '风险回报尚可，建议进一步压缩尾部波动。',
         insight_tone: 'positive',
         state: 'healthy',
@@ -107,19 +133,13 @@ const detail: ApiBacktestRunDetail = {
         trend_direction: 'down',
         trend_text: '↓ 4.8%',
         compare_text: '基准: -29.7% | 差值: +4.8%',
+        footer_items: [
+          { label: '基准值', value: '-29.7%' },
+          { label: '训练集', value: '-14.3%' },
+          { label: '测试集', value: '-24.9%' },
+        ],
         insight_text: '回撤仍偏深，建议复核止损与仓位节奏。',
         insight_tone: 'warning',
-        state: 'watch',
-      },
-      {
-        key: 'rolling_252_return',
-        label: '最新 252 日滚动收益',
-        primary_text: '+17.1%',
-        trend_direction: 'flat',
-        trend_text: 'Sharpe 0.81',
-        compare_text: '基准: +11.6% | 差值: +5.5%',
-        insight_text: '最近窗口仍领先，但测试集稳定性还需继续观察。',
-        insight_tone: 'neutral',
         state: 'watch',
       },
       {
@@ -129,6 +149,10 @@ const detail: ApiBacktestRunDetail = {
         trend_direction: 'down',
         trend_text: '测试集 1 笔',
         compare_text: '训练集 1 | 测试集 1',
+        footer_items: [
+          { label: '训练集', value: '1' },
+          { label: '测试集', value: '1' },
+        ],
         insight_text: '测试集样本偏少，警惕随机性造成的过拟合。',
         insight_tone: 'warning',
         state: 'watch',
@@ -362,6 +386,7 @@ describe('RunDetailPage', () => {
     expect(screen.getByText('业绩曲线')).toBeInTheDocument();
     const curveCard = container.querySelector('.run-detail-curve-card--overview');
     expect(curveCard?.textContent).not.toContain('测试集仍为正收益，但回撤修复仍需观察。');
+    expect(screen.getByText('v2', { selector: '.run-detail-hero__tag--version' })).toBeInTheDocument();
     expect(screen.queryByText(/参数版本/, { selector: '.run-detail-hero__tag' })).not.toBeInTheDocument();
     expect(screen.queryByText(/测试集起点/, { selector: '.run-detail-hero__tag' })).not.toBeInTheDocument();
     expect(screen.queryByText(/回测区间/, { selector: '.run-detail-hero__tag' })).not.toBeInTheDocument();
@@ -371,16 +396,17 @@ describe('RunDetailPage', () => {
     expect(screen.getAllByText('训练集').length).toBeGreaterThan(0);
     expect(screen.getAllByText('测试集').length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: '总收益 指标说明' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '最新 252 日滚动收益 指标说明' })).toBeInTheDocument();
-    const rollingCard = screen.getByText('最新 252 日滚动收益').closest('.run-detail-kpi-card');
-    const rollingCompare = rollingCard?.querySelector('.run-detail-kpi-card__compare');
-    expect(rollingCompare?.textContent).toContain('基准值');
-    expect(rollingCompare?.textContent).not.toContain('训练集');
-    expect(rollingCompare?.textContent).not.toContain('测试集');
+    expect(screen.getByRole('button', { name: '年化收益率 指标说明' })).toBeInTheDocument();
+    const annualizedCard = screen.getByText('年化收益率').closest('.run-detail-kpi-card');
+    const annualizedCompare = annualizedCard?.querySelector('.run-detail-kpi-card__compare');
+    expect(annualizedCompare?.textContent).toContain('基准值');
+    expect(annualizedCompare?.textContent).toContain('最新252日滚动');
+    expect(annualizedCompare?.textContent).toContain('滚动基准');
     const tradeCountCard = screen.getByText('交易数').closest('.run-detail-kpi-card');
     const tradeCountCompare = tradeCountCard?.querySelector('.run-detail-kpi-card__compare');
     expect(tradeCountCompare?.textContent).not.toContain('基准值');
-    expect(tradeCountCard?.textContent).not.toContain('测试集 1 笔');
+    expect(tradeCountCompare?.textContent).toContain('训练集');
+    expect(tradeCountCompare?.textContent).toContain('测试集');
     expect(screen.getByRole('tab', { name: '诊断', selected: true })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '交易' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '证据' })).toBeInTheDocument();

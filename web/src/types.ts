@@ -25,6 +25,9 @@ export type ApiOptimizationConstraintPresetKey =
   | "balanced"
   | "defensive"
   | "offensive";
+export type ApiOptimizationMatchingCombinationSource =
+  | "all_trials"
+  | "persisted_candidates";
 export type OptimizationConstraintOperator = ">=" | "<=";
 export type OptimizationConstraintCategory = "return" | "risk" | "stability";
 export type OptimizationConstraintSource = "preset" | "manual";
@@ -192,6 +195,7 @@ export type ApiOptimizationStabilityCheck = {
 
 export type ApiOptimizationValidationWindow = {
   label: string;
+  period_label?: string;
   annualized_return: number;
   return_sharpe: number;
   out_of_sample_sharpe: number;
@@ -220,12 +224,13 @@ export type ApiOptimizationHeatmap = {
 export type ApiOptimizationSearchSpaceField = {
   key: string;
   label: string;
-  mode: "range" | "fixed";
+  mode: "range" | "fixed" | "discrete";
   current?: ParameterValue;
   start?: ParameterValue;
   end?: ParameterValue;
   step?: ParameterValue;
   value?: ParameterValue;
+  values?: ParameterValue[];
   tag?: string | null;
 };
 
@@ -292,6 +297,7 @@ export type ApiOptimizationJobCreatePayload = {
 };
 
 export type ApiOptimizationJobConstraintUpdatePayload = {
+  objective?: string | null;
   constraint_preset_key?: ApiOptimizationConstraintPresetKey | null;
   constraint_label?: string | null;
   constraints?: ApiOptimizationConstraint[];
@@ -300,6 +306,7 @@ export type ApiOptimizationJobConstraintUpdatePayload = {
 export type ApiOptimizationJobDetail = {
   id: string;
   strategy_id: string;
+  strategy_name?: string | null;
   status: string;
   request: {
     objective?: string;
@@ -333,6 +340,7 @@ export type ApiOptimizationJobDetail = {
     constraint_label?: string | null;
     constraints?: ApiOptimizationConstraint[];
     matching_combination_count?: number | null;
+    matching_combination_source?: ApiOptimizationMatchingCombinationSource | null;
     resume_ready?: boolean;
     persisted_trial_count?: number | null;
     next_trial_index?: number | null;
@@ -363,6 +371,8 @@ export type ApiOptimizationJobDetail = {
   interrupted_reason?: string | null;
   best_metrics_summary?: ApiOptimizationTrialSummary | null;
   matching_combination_count?: number | null;
+  matching_combination_source?: ApiOptimizationMatchingCombinationSource | null;
+  matching_combinations?: ApiOptimizationCandidate[];
 };
 
 export type ApiStrategyCreationSession = {
@@ -597,6 +607,10 @@ export type ApiRunDetailKpiCard = {
   trend_direction: ApiRunDetailTrendDirection;
   trend_text: string;
   compare_text: string;
+  footer_items?: Array<{
+    label: string;
+    value: string;
+  }>;
   insight_text: string;
   insight_tone: ApiRunDetailInsightTone;
   state: ApiRunDetailKpiState;

@@ -49,9 +49,14 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 ### 1.5 CHANGELOG 维护规则
 
-- 项目根 `CHANGELOG.md` 必须保持 Keep a Changelog 结构。
-- 顶部未发布区块只允许使用标准分类小标题：`新增`、`变更`、`修复`、`已弃用`、`移除`、`安全`。
-- 不允许在 `## [未发布]` 或 `## [Unreleased]` 下再引入主题型小标题，例如 `快照刷新`、`优化实验室`、`数据源修复`。
+- 项目根 `CHANGELOG.md` 必须保持 Keep a Changelog 结构，且顶部固定保留 `## [Unreleased]`。
+- `## [Unreleased]` 不追加版本总结；已发布版本允许使用 `## [version] - YYYY-MM-DD - 版本更新总结`，其中标题摘要必须是一句中文总结，只点出 1 到 2 个最重要结果，不展开实现过程，不写成并列清单。
+- 新写或改写的分类小标题必须与项目模板一致：`### 新增 (Added)`、`### 优化 (Changed)`、`### 修复 (Fixed)`、`### 已弃用 (Deprecated)`、`### 移除 (Removed)`、`### 安全 (Security)`。
+- 不允许在 `## [Unreleased]` 或任何已发布版本段下引入主题型小标题，例如 `快照刷新`、`优化实验室`、`数据源修复`。
+- 同一版本下不得混用重复分类标题，例如同时出现 `### 修复` 与 `### Fixed`。
+- 条目默认写成 `- **领域**: 结果说明。`；若有 Issue、PR 或内部 Task 编号，统一放在句尾，如 `[#123]`、`[PR #45]`、`[Task OPT-12]`。
+- 每条 changelog 必须一条一义，先写结果和影响，再补必要上下文；不要转储接口路径、字段清单或实现过程，除非不写会失真。
+- 仅在有验证证据时写量化收益；没有可靠数据时，使用定性描述。
 - 若一次回填涉及多个主题，也必须把每条内容按语义分别归入标准分类，而不是先按主题聚组再落盘。
 - 当 Codex 或其他代理批量回填历史变更时，若发现某一组条目都来自同一主题，这只能作为内部整理线索，不能直接写成 changelog 分类标题。
 - 非正式推送快照 `x.y.z-00n` 的日期必须使用本次推送所在日期，而不是继承上一个稳定版 `x.y.z` 的发布日期。
@@ -155,6 +160,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 - 启动 backend 到 `http://127.0.0.1:8000`
 - 启动 frontend 到 `http://127.0.0.1:4173/#/workspace`
+- frontend 预览通过 `web/preview-server.mjs --watch --rebuild-on-start` 启动，默认 `4173` 入口需要在启动时自触发一次静态构建，避免冷启动只返回 `Frontend build not ready yet.`
 - 优先使用 repo 内 `.python-runtime/`
 - 优先 Python 3.14，回退到 3.13
 - 维护 `.venv/` 为派生环境
@@ -192,6 +198,16 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `serve` 默认通过 `uvicorn` 启动 FastAPI app
 - `refresh-snapshots` 支持 `incremental`、`repair`、`full`
 - `refresh-snapshots` 在 Windows 下会使用基于 `GRIT_SNAPSHOT_MEMORY_LIMIT_RATIO` 的内存 job object 护栏
+
+### 4.6 Codex Auto Memory 接线真相
+
+- 当前仓库已接入 project-scoped Codex Auto Memory retrieval MCP，配置文件为 `.codex/config.toml`，指向 `cam mcp serve`。
+- 仓库级代理说明中的 Codex Auto Memory guidance 由 `AGENTS.md` 内的 `cam:codex-agents-guidance` managed block 承载。
+- 项目级默认配置文件为 `codex-auto-memory.json`；本地覆盖文件为 `.codex-auto-memory.local.json`，应保持本地忽略。
+- 当前推荐的 durable memory 检索顺序是：优先走 retrieval MCP，其次走本地 bridge bundle 的 `memory-recall.sh`，最后才直接调用 `cam recall`。
+- 检索时使用渐进披露：先 `search`，再 `timeline`，最后 `details`；推荐 preset 为 `state=auto` 与 `limit=8`。
+- 当任务会影响 durable memory 时，优先使用 `cam sync --cwd <repo-root>` 收口，并通过 `cam memory --recent --cwd <repo-root>` 复核最近写回。
+- 当前若仓库尚未形成可用的 durable memory 内容，`cam memory reindex --scope all --state all` 可能会报告没有 sidecar 可重建；这不影响 project-scoped MCP 接线本身生效。
 
 ## 5. 模块地图与代码真相
 
@@ -458,7 +474,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `weighting_method=equal_weight` 在所有配置页、结果页和参数摘要展示层统一翻译为 `等权`，不应直接向用户暴露英文枚举值。
 - 约束条件 contract 已进入 optimization job 的 request、summary、result 三层 JSON，字段固定为 `constraint_preset_key`、`constraint_label`、`constraints[]`。
 - `constraint_preset_key` 当前只允许 `balanced / defensive / offensive`，前端展示文案固定映射为 `平衡型 / 稳健型 / 进攻型`。
-- `constraint_label` 由前端提交前生成并持久化；若当前 6 项护栏阈值与所选预设完全一致，则显示预设名，否则显示 `预设名（自定义）`。
+- `constraint_label` 由前端提交前生成并持久化；若当前 5 项护栏阈值与所选预设完全一致，则显示预设名，否则显示 `预设名（自定义）`。
 - 结果中心 hero 在 `约束条件：{constraint_label}` 这一标签位优先读取 `job.summary.constraint_label`，缺失时回退 `job.request.constraint_label`；旧任务若无该字段则不显示该标签。
 - “继续调参 / 重跑优化”必须复用原任务的 `constraint_preset_key`、`constraint_label` 与 `constraints[]`，不能只带回 `search_space`。
 
@@ -495,3 +511,34 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - Company-action snapshot completeness is now defined by formal `dividend/split/reverse_split` probe coverage, not by “every symbol must have at least one event row”.
 - When an action-capable provider successfully probes a symbol and finds no formal events, the pipeline writes a `dataset_symbol_coverage` row with `coverage_kind=corporate_probe` and `probe_status=complete_no_events`.
 - `earnings_report` and `report_filed` remain stored as supplementary action rows, but they do not satisfy formal company-action completeness on their own.
+
+## 2026-04-17 Optimization Objective / Constraint Alignment
+
+- Optimization job create / patch contracts accept canonical objective values:
+  - `return_sharpe`
+  - `annualized_return`
+  - `composite_score`
+- Result-page re-filter persists `objective` together with `constraints`, and a completed job must refresh:
+  - `request.objective`
+  - `summary.objective`
+  - candidate `rank`
+  - `result.best_candidate_id`
+  - `result.best_candidate_label`
+  - `summary.best_metrics_summary`
+- Objective ranking is strict on the selected primary metric:
+  - `return_sharpe`: rank by `metrics.return_sharpe`
+  - `annualized_return`: rank by `metrics.annualized_return`
+  - `composite_score`: rank by `score`
+  - secondary tie-breakers are only allowed when the primary metric is exactly tied
+- Constraint editing and preset defaults now expose 5 hard constraints only:
+  - `max_drawdown_pct`
+  - `out_of_sample_sharpe`
+  - `annualized_return`
+  - `stability`
+  - `return_sharpe`
+- `turnover` remains available in historical metrics storage, but it is removed from:
+  - optimization config / result constraint editing
+  - preset default constraints
+  - composite score weighting
+- Legacy optimization jobs must sanitize removed constraint keys such as `turnover` on read, patch, and result-page hydration, so old persisted payloads cannot make the UI fall back to the removed sixth constraint.
+- Validation windows expose `period_label` in `YYYY-MM-DD 至 YYYY-MM-DD`, and `annualized_return` must always be populated from the window metrics instead of falling back to `-`.

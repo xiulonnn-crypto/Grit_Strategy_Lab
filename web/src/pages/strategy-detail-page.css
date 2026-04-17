@@ -21,10 +21,24 @@
   letter-spacing: -0.02em;
 }
 
-.strategy-detail-page .strategy-detail-hero__meta {
+.strategy-detail-page .strategy-detail-hero__title-row {
   display: flex;
+  align-items: center;
+  gap: 12px;
   flex-wrap: wrap;
-  gap: 10px;
+}
+
+.strategy-detail-page .strategy-detail-hero__version {
+  white-space: nowrap;
+}
+
+.strategy-detail-page .strategy-detail-hero__summary {
+  margin: 0;
+  max-width: 72ch;
+  color: var(--gsl-text-sub);
+  font-size: 0.98rem;
+  line-height: 1.7;
+  text-wrap: pretty;
 }
 
 .strategy-detail-page .strategy-detail-main-grid {
