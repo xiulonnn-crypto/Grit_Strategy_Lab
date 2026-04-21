@@ -16,10 +16,15 @@ git config --local core.hooksPath .githooks
 
 当 `CHANGELOG.md` 顶部 `Unreleased` 有内容时，hook 会在真正推送前做两件事：
 
-1. 把当前 `Unreleased` 快照成一个历史段落，例如 `## [0.1.1-002] - 2026-03-31`
+1. 把当前 `Unreleased` 快照成一个历史段落，例如 `## [0.1.1-002] - 2026-03-31 - 调整优化结果排序并修复结果页空态`
 2. 在最顶部重新保留一个空的 `## [Unreleased]`
 
 只要 hook 重写了 `CHANGELOG.md`，本次 push 就会被直接拦下。你需要先提交这次 changelog 变更，再重试同一个 push 命令。
+
+额外规则：
+
+- `Unreleased` 下允许使用项目约定的双语分类标题，例如 `### 新增 (Added)`、`### 优化 (Changed)`、`### 修复 (Fixed)`。
+- hook 在生成 revision / release 快照时会保留或生成标题摘要，并把分类标题规范化为双语格式。
 
 ## 发版 push
 

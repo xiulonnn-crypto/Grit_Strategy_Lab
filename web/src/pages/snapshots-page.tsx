@@ -6,6 +6,7 @@ import type {
   ApiSnapshotBlocker,
   ApiSnapshotJob,
   ApiSnapshotOverview,
+  ApiSnapshotProviderSummary,
   ApiUniverseSnapshot,
 } from '../types';
 import './run-detail-page.css';
@@ -204,7 +205,7 @@ function getStatusChipClassName(status?: string | null, blocked = false): string
     return 'status-chip status-chip--warning';
   }
   if (['READY', 'COMPLETED'].includes((status ?? '').toUpperCase())) {
-    return 'status-chip status-chip--success';
+    return 'status-chip status-chip--success snapshots-status-chip--ready';
   }
   return 'status-chip status-chip--soft';
 }
@@ -266,6 +267,114 @@ function getSnapshotMetadata(item: SnapshotItem): Record<string, unknown> {
 function getMetadataCount(metadata: Record<string, unknown>, key: string): number | null {
   const value = metadata[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function getMetadataStringList(metadata: Record<string, unknown>, key: string): string[] {
+  const value = metadata[key];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+}
+
+function getProviderSummary(item: SnapshotItem): ApiSnapshotProviderSummary | null {
+  const metadata = getSnapshotMetadata(item);
+  const summary = metadata.provider_summary;
+  return summary && typeof summary === 'object' ? (summary as ApiSnapshotProviderSummary) : null;
+}
+
+function formatAccessTier(value?: string | null): string {
+  switch (String(value ?? '').trim().toLowerCase()) {
+    case 'free_account':
+      return 'free account';
+    case 'paid_optional':
+      return 'paid optional';
+    default:
+      return 'public';
+  }
+}
+
+function formatIsoDateLabel(value?: string | null): string | null {
+  const normalized = String(value ?? '').trim();
+  return normalized ? normalized.slice(0, 10) : null;
+}
+
+function getQuotaProviderNotes(item: SnapshotItem): string[] {
+  const providers = getProviderSummary(item)?.providers ?? {};
+  return Object.entries(providers)
+    .map(([providerName, payload]) => {
+      if (!payload || typeof payload !== 'object') {
+        return null;
+      }
+      const providerPayload = payload as Record<string, unknown>;
+      const nextRetryAt = formatIsoDateLabel(
+        typeof providerPayload.next_retry_at === 'string' ? providerPayload.next_retry_at : null,
+      );
+      const quotaLimited = Boolean(providerPayload.quota_limited) || Boolean(nextRetryAt);
+      if (!quotaLimited) {
+        return null;
+      }
+      const label = formatSourceLabel(providerName) ?? providerName;
+      const tier = formatAccessTier(
+        typeof providerPayload.access_tier === 'string' ? providerPayload.access_tier : null,
+      );
+      return nextRetryAt
+        ? `${label} (${tier}) retry after ${nextRetryAt}`
+        : `${label} (${tier}) quota-limited`;
+    })
+    .filter((value): value is string => Boolean(value));
+}
+
+function getDatasetDetailLines(item: ApiDatasetSnapshot): string[] {
+  const metadata = getSnapshotMetadata(item);
+  const lines: string[] = [];
+  if (item.id === 'ds-corporate-actions') {
+    const formalEvents = getMetadataCount(metadata, 'formal_event_symbol_count');
+    const noEvents = getMetadataCount(metadata, 'complete_no_events_symbol_count');
+    const missingSymbols = getMetadataStringList(metadata, 'missing_symbols');
+    const coverageParts = [
+      typeof formalEvents === 'number'
+        ? `Formal events: ${formalEvents.toLocaleString('zh-HK')}`
+        : null,
+      typeof noEvents === 'number'
+        ? `Probe-complete, no events: ${noEvents.toLocaleString('zh-HK')}`
+        : null,
+    ].filter((value): value is string => Boolean(value));
+    if (coverageParts.length) {
+      lines.push(coverageParts.join(' | '));
+    }
+    if (missingSymbols.length) {
+      lines.push(
+        `Still missing formal coverage for ${missingSymbols.length.toLocaleString('zh-HK')} symbols.`,
+      );
+    }
+  }
+  const quotaNotes = getQuotaProviderNotes(item);
+  if (quotaNotes.length) {
+    lines.push(`Free-source cooldown: ${quotaNotes.join('; ')}`);
+  }
+  return lines;
+}
+
+function getUniverseDetailLines(item: ApiUniverseSnapshot): string[] {
+  const metadata = getSnapshotMetadata(item);
+  const lines: string[] = [];
+  const officialSeedStatus = String(metadata.official_seed_status ?? '').trim().toLowerCase();
+  const officialSeedSourceCount = getMetadataCount(metadata, 'official_seed_source_count');
+  const missingAnchors = getMetadataStringList(metadata, 'official_seed_missing_anchors');
+  if (officialSeedStatus) {
+    const seedSummary =
+      officialSeedSourceCount && officialSeedSourceCount > 0
+        ? `Official seeds: ${officialSeedStatus} (${officialSeedSourceCount.toLocaleString('zh-HK')} sources)`
+        : `Official seeds: ${officialSeedStatus}`;
+    lines.push(seedSummary);
+  }
+  if (missingAnchors.length) {
+    const preview = missingAnchors.slice(0, 4).join(', ');
+    const remainder = missingAnchors.length > 4 ? ` +${missingAnchors.length - 4} more` : '';
+    lines.push(`Missing anchors: ${preview}${remainder}`);
+  }
+  return lines;
 }
 
 function getDatasetRefreshLabel(item: ApiDatasetSnapshot): string {
@@ -557,6 +666,8 @@ function SnapshotListCard({
 }
 
 function DatasetRow({ item }: { item: ApiDatasetSnapshot }): JSX.Element {
+  const detailLines = getDatasetDetailLines(item);
+  const blocked = Boolean(item.blocker && ['FAILED', 'BLOCKED'].includes(String(item.status ?? '').toUpperCase()));
   return (
     <article className="snapshots-row-card">
       <div className="snapshots-row-card__top">
@@ -564,8 +675,8 @@ function DatasetRow({ item }: { item: ApiDatasetSnapshot }): JSX.Element {
           <strong>{item.name}</strong>
           <p>{DATASET_COPY[item.name] ?? '刷新后会显示这个数据集的覆盖范围与来源。'}</p>
         </div>
-        {shouldRenderStatusChip(item.status, Boolean(item.blocker)) ? (
-          <span className={getStatusChipClassName(item.status, Boolean(item.blocker))}>
+        {shouldRenderStatusChip(item.status, blocked) ? (
+          <span className={getStatusChipClassName(item.status, blocked)}>
             {getStatusLabel(item.status)}
           </span>
         ) : null}
@@ -590,6 +701,14 @@ function DatasetRow({ item }: { item: ApiDatasetSnapshot }): JSX.Element {
         </div>
       </div>
 
+      {detailLines.length ? (
+        <div className="snapshots-row-card__details">
+          {detailLines.map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+        </div>
+      ) : null}
+
       <footer className="snapshots-row-card__footer">
         <span>来源链路 {formatSource(item.source, item.fallback_source)}</span>
       </footer>
@@ -598,6 +717,8 @@ function DatasetRow({ item }: { item: ApiDatasetSnapshot }): JSX.Element {
 }
 
 function UniverseRow({ item }: { item: ApiUniverseSnapshot }): JSX.Element {
+  const detailLines = getUniverseDetailLines(item);
+  const blocked = Boolean(item.blocker && ['FAILED', 'BLOCKED'].includes(String(item.status ?? '').toUpperCase()));
   return (
     <article className="snapshots-row-card">
       <div className="snapshots-row-card__top">
@@ -605,8 +726,8 @@ function UniverseRow({ item }: { item: ApiUniverseSnapshot }): JSX.Element {
           <strong>{item.name}</strong>
           <p>{UNIVERSE_COPY[item.name] ?? '刷新后会显示这个股票池的历史锚点覆盖情况。'}</p>
         </div>
-        {shouldRenderStatusChip(item.status, Boolean(item.blocker)) ? (
-          <span className={getStatusChipClassName(item.status, Boolean(item.blocker))}>
+        {shouldRenderStatusChip(item.status, blocked) ? (
+          <span className={getStatusChipClassName(item.status, blocked)}>
             {getStatusLabel(item.status)}
           </span>
         ) : null}
@@ -630,6 +751,14 @@ function UniverseRow({ item }: { item: ApiUniverseSnapshot }): JSX.Element {
           <strong>{formatCount(item.member_count)}</strong>
         </div>
       </div>
+
+      {detailLines.length ? (
+        <div className="snapshots-row-card__details">
+          {detailLines.map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+        </div>
+      ) : null}
 
       <footer className="snapshots-row-card__footer">
         <span>来源链路 {formatSource(item.source, item.fallback_source)}</span>

@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from ._version import __version__
-from .fallback_provider import ProviderExecutionSignal
+from .fallback_provider import ProviderExecutionSignal, provider_access_tier
 from .models import (
     BacktestRunCloneRequest,
     BacktestRunCreateRequest,
@@ -49,7 +49,7 @@ def _supports_corporate_action_probe(provider_or_name: Any) -> bool:
     if not isinstance(provider_or_name, str) and bool(getattr(provider_or_name, "supports_action_enrichment", False)):
         return True
     provider_name = str(provider_or_name if isinstance(provider_or_name, str) else _provider_name(provider_or_name))
-    return provider_name.strip().lower() in {"yahoo", "yfinance", "tiingo"}
+    return provider_name.strip().lower() in {"yahoo", "yfinance", "tiingo", "alpha_vantage"}
 
 
 def _load_provider(module_name: str, class_names: tuple[str, ...]) -> tuple[Any | None, str | None]:
@@ -165,6 +165,7 @@ class RuntimeMarketDataProvider:
             if callable(getattr(provider, "fetch_history", None))
             and _provider_name(provider) not in {"alpha_vantage", "sec_edgar"}
         ]
+        self.price_provider_names = {_provider_name(provider) for provider in self.price_providers}
         self.targeted_price_repair_providers = [
             provider
             for provider in self.providers
@@ -176,6 +177,12 @@ class RuntimeMarketDataProvider:
             _provider_name(provider)
             for provider in self.targeted_price_repair_providers
         }
+        self.corporate_action_providers = [
+            provider
+            for provider in self.providers
+            if callable(getattr(provider, "fetch_corporate_actions", None))
+            and _provider_name(provider) not in self.price_provider_names
+        ]
         self.identity_providers = [
             provider for provider in self.providers if callable(getattr(provider, "resolve_identity", None))
         ]
@@ -288,6 +295,17 @@ class RuntimeMarketDataProvider:
     def _supports_action_enrichment(self, provider: Any) -> bool:
         return _supports_corporate_action_probe(provider)
 
+    def _provider_access_tier(self, provider_or_name: Any) -> str:
+        return provider_access_tier(provider_or_name)
+
+    def _provider_signal_metadata(self, metadata: Mapping[str, Any] | None) -> dict[str, Any]:
+        payload = dict(metadata or {})
+        normalized: dict[str, Any] = {}
+        for key in ("quota_limited", "probe_complete", "next_retry_at"):
+            if key in payload:
+                normalized[key] = payload.get(key)
+        return normalized
+
     def _provider_result(
         self,
         *,
@@ -303,6 +321,10 @@ class RuntimeMarketDataProvider:
         reason: str | None = None,
         selection_status: str | None = None,
         actions_supported: bool | None = None,
+        access_tier: str | None = None,
+        quota_limited: bool | None = None,
+        probe_complete: bool | None = None,
+        next_retry_at: str | None = None,
     ) -> dict[str, Any]:
         payload = {
             "provider": provider_name,
@@ -320,8 +342,13 @@ class RuntimeMarketDataProvider:
             payload["reason"] = str(reason)
         if selection_status:
             payload["selection_status"] = str(selection_status)
-        if actions_supported is not None:
-            payload["actions_supported"] = bool(actions_supported)
+        payload["actions_supported"] = bool(actions_supported)
+        payload["access_tier"] = (
+            str(access_tier or "").strip().lower() or self._provider_access_tier(provider_name)
+        )
+        payload["quota_limited"] = bool(quota_limited)
+        payload["probe_complete"] = bool(probe_complete)
+        payload["next_retry_at"] = str(next_retry_at) if next_retry_at else None
         return payload
 
     def fetch_history(self, symbol, start_date, end_date):
@@ -358,6 +385,8 @@ class RuntimeMarketDataProvider:
                         error=str(exc),
                         reason=exc.reason,
                         actions_supported=self._supports_action_enrichment(provider),
+                        access_tier=self._provider_access_tier(provider),
+                        **self._provider_signal_metadata(exc.metadata),
                     )
                 )
                 continue
@@ -373,6 +402,7 @@ class RuntimeMarketDataProvider:
                         status="failed",
                         error=str(exc),
                         actions_supported=self._supports_action_enrichment(provider),
+                        access_tier=self._provider_access_tier(provider),
                     )
                 )
                 continue
@@ -393,6 +423,8 @@ class RuntimeMarketDataProvider:
                     action_count=len(provider_actions),
                     partial=bool(payload.get("partial")),
                     actions_supported=self._supports_action_enrichment(provider),
+                    access_tier=self._provider_access_tier(provider),
+                    probe_complete=self._supports_action_enrichment(provider),
                     selection_status=(
                         "selected_primary"
                         if provider_bars and not had_primary_before
@@ -406,9 +438,13 @@ class RuntimeMarketDataProvider:
                 primary_source = str(payload.get("source") or provider_name)
             if provider_actions:
                 self._append_actions(actions, provider_actions, provider_name, primary_source=primary_source)
-            if bars and not any(
-                self._supports_action_enrichment(candidate)
-                for candidate in self.price_providers[index + 1 :]
+            provider_completed_probe = self._supports_action_enrichment(provider)
+            if bars and (
+                provider_completed_probe
+                or not any(
+                    self._supports_action_enrichment(candidate)
+                    for candidate in self.price_providers[index + 1 :]
+                )
             ):
                 provider_results.extend(
                     self._provider_result(
@@ -417,6 +453,7 @@ class RuntimeMarketDataProvider:
                         status="skipped",
                         reason="primary_price_source_already_selected",
                         actions_supported=self._supports_action_enrichment(candidate),
+                        access_tier=self._provider_access_tier(candidate),
                     )
                     for candidate in self.price_providers[index + 1 :]
                 )
@@ -440,13 +477,15 @@ class RuntimeMarketDataProvider:
                     provider_results.append(
                         self._provider_result(
                             provider_name=provider_name,
-                        kind="targeted_price_repair",
-                        status=exc.status,
-                        error=str(exc),
-                        reason=exc.reason,
-                        actions_supported=False,
+                            kind="targeted_price_repair",
+                            status=exc.status,
+                            error=str(exc),
+                            reason=exc.reason,
+                            actions_supported=False,
+                            access_tier=self._provider_access_tier(provider),
+                            **self._provider_signal_metadata(exc.metadata),
+                        )
                     )
-                )
                     continue
                 except Exception as exc:
                     missing_labels.append(provider_name)
@@ -456,12 +495,13 @@ class RuntimeMarketDataProvider:
                     provider_results.append(
                         self._provider_result(
                             provider_name=provider_name,
-                        kind="targeted_price_repair",
-                        status="failed",
-                        error=str(exc),
-                        actions_supported=False,
+                            kind="targeted_price_repair",
+                            status="failed",
+                            error=str(exc),
+                            actions_supported=False,
+                            access_tier=self._provider_access_tier(provider),
+                        )
                     )
-                )
                     continue
 
                 provider_warnings = list(payload["warnings"] or [])
@@ -482,6 +522,7 @@ class RuntimeMarketDataProvider:
                         reason="targeted_price_repair",
                         selection_status="selected_primary" if provider_bars else None,
                         actions_supported=False,
+                        access_tier=self._provider_access_tier(provider),
                     )
                 )
                 if provider_bars:
@@ -491,6 +532,71 @@ class RuntimeMarketDataProvider:
                     self._append_actions(actions, provider_actions, provider_name, primary_source=primary_source)
                 if bars:
                     break
+
+        for provider in self.corporate_action_providers:
+            provider_name = _provider_name(provider)
+            fetch_corporate_actions = getattr(provider, "fetch_corporate_actions", None)
+            if fetch_corporate_actions is None:
+                continue
+            try:
+                corporate_payload = fetch_corporate_actions(symbol, start_date, end_date) or {}
+            except ProviderExecutionSignal as exc:
+                missing_labels.append(provider_name)
+                if exc.reason:
+                    warnings.append(f"{provider_name}: {exc.reason}")
+                provider_results.append(
+                    self._provider_result(
+                        provider_name=provider_name,
+                        kind="history_availability",
+                        status=exc.status,
+                        error=str(exc),
+                        reason=exc.reason,
+                        actions_supported=True,
+                        access_tier=self._provider_access_tier(provider),
+                        **self._provider_signal_metadata(exc.metadata),
+                    )
+                )
+                continue
+            except Exception as exc:
+                missing_labels.append(provider_name)
+                warnings.append(f"{provider_name}: {exc}")
+                provider_results.append(
+                    self._provider_result(
+                        provider_name=provider_name,
+                        kind="history_availability",
+                        status="failed",
+                        error=str(exc),
+                        actions_supported=True,
+                        access_tier=self._provider_access_tier(provider),
+                    )
+                )
+                continue
+
+            provider_actions = [
+                dict(item)
+                for item in (corporate_payload.get("actions") or [])
+                if isinstance(item, dict)
+            ]
+            provider_metadata = dict(corporate_payload.get("metadata") or {})
+            warnings.extend(str(item) for item in (corporate_payload.get("warnings") or []) if item)
+            provider_results.append(
+                self._provider_result(
+                    provider_name=provider_name,
+                    kind="history_availability",
+                    status="succeeded" if provider_actions or corporate_payload.get("probe_complete") else "empty",
+                    source=str(corporate_payload.get("source") or provider_name),
+                    action_count=len(provider_actions),
+                    actions_supported=True,
+                    access_tier=str(provider_metadata.get("access_tier") or self._provider_access_tier(provider)),
+                    quota_limited=provider_metadata.get("quota_limited"),
+                    probe_complete=bool(
+                        corporate_payload.get("probe_complete") or provider_metadata.get("probe_complete")
+                    ),
+                    next_retry_at=str(provider_metadata.get("next_retry_at") or "") or None,
+                )
+            )
+            if provider_actions:
+                self._append_actions(actions, provider_actions, provider_name, primary_source=primary_source)
 
         for provider in self.earnings_providers:
             provider_name = _provider_name(provider)
@@ -508,6 +614,7 @@ class RuntimeMarketDataProvider:
                         kind="earnings",
                         status="failed",
                         error=str(exc),
+                        access_tier=self._provider_access_tier(provider),
                     )
                 )
                 continue
@@ -541,6 +648,7 @@ class RuntimeMarketDataProvider:
                     status="succeeded" if converted else "empty",
                     source=provider_name,
                     action_count=len(converted),
+                    access_tier=self._provider_access_tier(provider),
                 )
             )
             self._append_actions(actions, converted, provider_name, primary_source=primary_source)
@@ -561,6 +669,7 @@ class RuntimeMarketDataProvider:
                         kind="filings",
                         status="failed",
                         error=str(exc),
+                        access_tier=self._provider_access_tier(provider),
                     )
                 )
                 continue
@@ -572,6 +681,7 @@ class RuntimeMarketDataProvider:
                     status="succeeded" if converted else "empty",
                     source=provider_name,
                     action_count=len(converted),
+                    access_tier=self._provider_access_tier(provider),
                 )
             )
             self._append_actions(actions, converted, provider_name, primary_source=primary_source)
@@ -589,6 +699,7 @@ class RuntimeMarketDataProvider:
                 status="unavailable",
                 reason=self.missing_provider_reasons.get(provider_name) or "provider_not_configured_or_unavailable",
                 actions_supported=_supports_corporate_action_probe(provider_name),
+                access_tier=self._provider_access_tier(provider_name),
             )
             for provider_name in unavailable_providers
         )

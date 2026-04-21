@@ -563,12 +563,18 @@ def preview_backtest(
     end_date: str,
     data_segment_type: str | None = None,
     parameter_version_id: str | None = None,
+    fee_bps: float | None = None,
+    slippage_bps: float | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"start_date": start_date, "end_date": end_date}
     if data_segment_type is not None:
         payload["data_segment_type"] = data_segment_type
     if parameter_version_id is not None:
         payload["parameter_version_id"] = parameter_version_id
+    if fee_bps is not None:
+        payload["fee_bps"] = fee_bps
+    if slippage_bps is not None:
+        payload["slippage_bps"] = slippage_bps
     return assert_ok(client.post(f"/strategies/{strategy_id}/backtest-runs/preview", json=payload))
 
 
@@ -581,6 +587,8 @@ def submit_backtest(
     data_segment_type: str | None = None,
     parameter_version_id: str | None = None,
     idempotency_key: str | None = None,
+    fee_bps: float | None = None,
+    slippage_bps: float | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "idempotency_key": idempotency_key or f"run-{uuid4().hex[:8]}",
@@ -591,6 +599,10 @@ def submit_backtest(
         payload["data_segment_type"] = data_segment_type
     if parameter_version_id is not None:
         payload["parameter_version_id"] = parameter_version_id
+    if fee_bps is not None:
+        payload["fee_bps"] = fee_bps
+    if slippage_bps is not None:
+        payload["slippage_bps"] = slippage_bps
     submitted = assert_ok(client.post(f"/strategies/{strategy_id}/backtest-runs", json=payload))
     status = str(submitted.get("status") or "").upper()
     if status not in {"QUEUED", "RUNNING"}:

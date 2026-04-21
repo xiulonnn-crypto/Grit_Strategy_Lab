@@ -5,6 +5,38 @@ from datetime import date
 from typing import Any, Protocol
 
 
+PUBLIC_PROVIDER_NAMES = {
+    "yahoo",
+    "yfinance",
+    "akshare_us",
+    "stooq",
+    "wikipedia_revision_history",
+    "wikipedia_sp500_changes_table",
+    "wikipedia_nasdaq100_changes_table",
+    "github_sp500_current_dataset",
+    "nasdaq_official_annual_changes",
+    "sp_global_official_constituent_change",
+    "internet_archive_wikipedia_snapshot",
+    "static_seed",
+}
+
+FREE_ACCOUNT_PROVIDER_NAMES = {
+    "alpha_vantage",
+    "sec_edgar",
+    "tiingo",
+    "tiingo_symbology",
+}
+
+PAID_OPTIONAL_PROVIDER_NAMES = {
+    "fmp",
+    "fmp_historical_constituent",
+    "longbridge",
+    "longbridge_static_info",
+    "futu",
+    "futu_rehab",
+}
+
+
 @dataclass(frozen=True)
 class ProviderAvailability:
     provider_name: str
@@ -26,6 +58,32 @@ class ProviderExecutionSignal(RuntimeError):
         self.status = str(status or "failed").strip().lower()
         self.reason = str(reason or message).strip()
         self.metadata = dict(metadata or {})
+
+
+def provider_access_tier(provider_or_name: Any) -> str:
+    metadata = getattr(provider_or_name, "metadata", None)
+    if isinstance(metadata, dict):
+        explicit = str(metadata.get("access_tier") or "").strip().lower()
+        if explicit in {"public", "free_account", "paid_optional"}:
+            return explicit
+    if not isinstance(provider_or_name, str):
+        availability = getattr(provider_or_name, "availability", None)
+        if callable(availability):
+            try:
+                report = availability()
+            except Exception:
+                report = None
+            explicit = str(getattr(report, "metadata", {}).get("access_tier") or "").strip().lower() if report else ""
+            if explicit in {"public", "free_account", "paid_optional"}:
+                return explicit
+        provider_name = str(getattr(provider_or_name, "provider_name", provider_or_name.__class__.__name__)).strip().lower()
+    else:
+        provider_name = str(provider_or_name or "").strip().lower()
+    if provider_name in FREE_ACCOUNT_PROVIDER_NAMES:
+        return "free_account"
+    if provider_name in PAID_OPTIONAL_PROVIDER_NAMES:
+        return "paid_optional"
+    return "public"
 
 
 class SecondaryMarketDataProvider(Protocol):

@@ -10,10 +10,10 @@
   flex: 0 0 auto;
 }
 
-.snapshots-page .status-chip--success {
-  border-color: color-mix(in srgb, #1f9d55 28%, var(--line));
-  background: #e9fbef;
-  color: #1f7a3d;
+.snapshots-page .snapshots-status-chip--ready {
+  border-color: color-mix(in srgb, #2b8a3e 26%, var(--line));
+  background: #ecfdf3;
+  color: #2b8a3e;
 }
 
 .snapshots-header-card {
@@ -150,6 +150,21 @@
 .snapshots-row-card__meta strong {
   color: var(--gsl-text-title);
   line-height: 1.3;
+}
+
+.snapshots-row-card__details {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px dashed color-mix(in srgb, var(--line) 78%, #8ea38f 22%);
+  border-radius: 14px;
+  background: #f6faf6;
+}
+
+.snapshots-row-card__details p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
 }
 
 .snapshots-row-card__footer {

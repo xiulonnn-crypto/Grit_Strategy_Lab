@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SnapshotsPage } from './pages/snapshots-page';
 import type { ApiSnapshotOverview } from './types';
@@ -33,6 +33,26 @@ const overview: ApiSnapshotOverview = {
       metadata: {
         covered_symbol_count: 385,
         total_symbol_count: 487,
+        complete_no_events_symbol_count: 250,
+        formal_event_symbol_count: 135,
+        missing_symbols: Array.from({ length: 102 }, (_, index) => `MISS${index + 1}`),
+        provider_summary: {
+          providers: {
+            yahoo: {
+              access_tier: 'public',
+              actions_supported: true,
+              probe_complete: true,
+              quota_limited: false,
+            },
+            alpha_vantage: {
+              access_tier: 'free_account',
+              actions_supported: true,
+              probe_complete: true,
+              quota_limited: true,
+              next_retry_at: '2026-04-02T00:00:00Z',
+            },
+          },
+        },
       },
       blocker: {
         code: 'CORPORATE_ACTIONS_INCOMPLETE',
@@ -53,6 +73,16 @@ const overview: ApiSnapshotOverview = {
       metadata: {
         covered_symbol_count: 402,
         total_symbol_count: 487,
+        provider_summary: {
+          providers: {
+            yahoo: {
+              access_tier: 'public',
+              actions_supported: true,
+              probe_complete: true,
+              quota_limited: false,
+            },
+          },
+        },
       },
       blocker: null,
     },
@@ -73,6 +103,9 @@ const overview: ApiSnapshotOverview = {
       metadata: {
         historical_anchor_count: 38,
         anchor_count: 61,
+        official_seed_status: 'missing',
+        official_seed_source_count: 0,
+        official_seed_missing_anchors: ['1996-01-01', '1996-07-01', '1997-01-01'],
       },
       blocker: {
         code: 'UNIVERSE_HISTORY_INCOMPLETE',
@@ -94,6 +127,9 @@ const overview: ApiSnapshotOverview = {
       metadata: {
         historical_anchor_count: 61,
         anchor_count: 61,
+        official_seed_status: 'complete',
+        official_seed_source_count: 4,
+        official_seed_missing_anchors: [],
       },
       blocker: null,
     },
@@ -194,6 +230,21 @@ describe('SnapshotsPage', () => {
     expect(screen.getByText('402/487')).toBeInTheDocument();
     expect(screen.getByText('38/61')).toBeInTheDocument();
     expect(screen.getByText('61/61')).toBeInTheDocument();
+    expect(screen.getByText('Formal events: 135 | Probe-complete, no events: 250')).toBeInTheDocument();
+    expect(screen.getByText('Still missing formal coverage for 102 symbols.')).toBeInTheDocument();
+    expect(
+      screen.getByText('Free-source cooldown: Alpha Vantage (free account) retry after 2026-04-02'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Official seeds: complete (4 sources)')).toBeInTheDocument();
+    expect(
+      screen.getByText('Official seeds: missing'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('Missing anchors: 1996-01-01, 1996-07-01, 1997-01-01'),
+    ).toBeInTheDocument();
+    for (const readyChip of screen.getAllByText(/^\u5c31\u7eea$/)) {
+      expect(readyChip).toHaveClass('snapshots-status-chip--ready');
+    }
     expect(screen.getAllByText('19960101至20260401').length).toBeGreaterThan(1);
     expect(screen.getByText(/官方公告 \/ Wikipedia 历史修订/)).toBeInTheDocument();
     expect(screen.getAllByText(/过去 30 年历史时点成分股/).length).toBeGreaterThan(0);
@@ -469,5 +520,27 @@ describe('SnapshotsPage', () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/本次未新增数据/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '刷新中...' })).toBeDisabled();
+  });
+
+  it('keeps ready chips green when a snapshot carries non-blocking blocker metadata', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue({
+      ...overview,
+      universe_snapshots: [
+        {
+          ...overview.universe_snapshots[0],
+          status: 'READY',
+          blocker: {},
+        },
+        overview.universe_snapshots[1],
+      ],
+    });
+
+    render(<SnapshotsPage />);
+
+    const sp500Card = (await screen.findByText('标普500')).closest('.snapshots-row-card');
+    expect(sp500Card).not.toBeNull();
+    const readyChip = within(sp500Card as HTMLElement).getByText('就绪');
+    expect(readyChip).toHaveClass('snapshots-status-chip--ready');
+    expect(readyChip).not.toHaveClass('status-chip--danger');
   });
 });

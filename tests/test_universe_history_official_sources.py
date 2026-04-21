@@ -7,13 +7,16 @@ from datetime import date
 import grit_backtest_platform.universe_history as universe_history_module
 from grit_backtest_platform.universe_history import (
     ANCHOR_SCHEDULE,
+    ArchivedNasdaqOfficialActivityUniverseHistoryProvider,
     ArchivedNasdaq100UniverseHistoryProvider,
     CuratedNasdaq100UniverseHistoryProvider,
     GithubSp500CurrentValidationProvider,
+    LocalNasdaq100SeedUniverseHistoryProvider,
     NASDAQ100_UNIVERSE_KEY,
     NASDAQ100_UNIVERSE_NAME,
     NASDAQ100_UNIVERSE_SNAPSHOT_ID,
     NASDAQ100_SOURCE_PAGE_TITLE,
+    SequentialUniverseSnapshotEnricher,
     SP500_UNIVERSE_KEY,
     SP500_UNIVERSE_NAME,
     SP500_UNIVERSE_SNAPSHOT_ID,
@@ -32,6 +35,7 @@ from grit_backtest_platform.universe_history import (
     WikipediaRevisionUniverseHistoryProvider,
     WikipediaSp500ChangesUniverseHistoryProvider,
     extract_symbols_from_html,
+    extract_symbols_from_nasdaq_activity_html,
 )
 
 
@@ -1012,3 +1016,229 @@ def test_sp500_wikipedia_changes_backfill_uses_next_anchor_outside_requested_win
     assert legacy_snapshot.metadata["historical_dataset_baseline_anchor"] == "2007-07-01"
     assert "ORCL" in legacy_snapshot.normalized_symbols
     assert "GOOG" not in legacy_snapshot.normalized_symbols
+
+
+def test_extract_symbols_from_nasdaq_activity_html_parses_official_table():
+    html = """
+        <html>
+          <body>
+            <table>
+              <tr><td>Apple</td><td><a href="/asp/quote.asp?symbol=AAPL&selected=AAPL">AAPL</a></td></tr>
+              <tr><td>Microsoft</td><td><a href="/asp/quote.asp?symbol=MSFT&selected=MSFT">MSFT</a></td></tr>
+              <tr><td>NVIDIA</td><td><a href="/asp/quote.asp?symbol=NVDA&selected=NVDA">NVDA</a></td></tr>
+            </table>
+          </body>
+        </html>
+    """
+
+    extracted = extract_symbols_from_nasdaq_activity_html(html, minimum_member_count=3)
+
+    assert extracted.normalized_symbols == ["AAPL", "MSFT", "NVDA"]
+    assert extracted.raw_symbols == ["AAPL", "MSFT", "NVDA"]
+
+
+def test_local_nasdaq100_seed_provider_replaces_fallback_anchor_when_provenance_complete(tmp_path):
+    definition = UniverseDefinition(
+        universe_key=NASDAQ100_UNIVERSE_KEY,
+        display_name=NASDAQ100_UNIVERSE_NAME,
+        snapshot_id=NASDAQ100_UNIVERSE_SNAPSHOT_ID,
+        source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
+        minimum_member_count=3,
+    )
+    seed_path = tmp_path / "nasdaq100-seed.json"
+    seed_path.write_text(
+        json.dumps(
+            {
+                "anchors": [
+                    {
+                        "effective_date": "1996-01-01",
+                        "published_date": "1995-12-29",
+                        "source_urls": ["https://example.com/official-1995-year-end"],
+                        "provenance": "official_year_end_roster",
+                        "symbols": ["AAPL", "MSFT", "ORCL"],
+                        "additions": ["AAPL"],
+                        "removals": ["OLD1"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    provider = LocalNasdaq100SeedUniverseHistoryProvider(definition=definition, seed_path=seed_path)
+    original_snapshot = _current_page_snapshot(
+        definition=definition,
+        effective_date=date(1996, 1, 1),
+        symbols=["QQQ", "MSFT", "ORCL"],
+        source="wikipedia_current_page",
+        fallback_source="wikipedia_revision_history",
+    )
+
+    updated = provider.enrich_snapshots([original_snapshot])
+
+    assert len(updated) == 1
+    assert updated[0].source == provider.provider_name
+    assert updated[0].fallback_source is None
+    assert updated[0].metadata["source_quality"] == SOURCE_QUALITY_HISTORICAL_DATASET
+    assert updated[0].metadata["official_seed_status"] == "seeded"
+    assert updated[0].metadata["official_seed_source_urls"] == [
+        "https://example.com/official-1995-year-end"
+    ]
+
+
+def test_local_nasdaq100_seed_provider_skips_entries_without_provenance(tmp_path):
+    definition = UniverseDefinition(
+        universe_key=NASDAQ100_UNIVERSE_KEY,
+        display_name=NASDAQ100_UNIVERSE_NAME,
+        snapshot_id=NASDAQ100_UNIVERSE_SNAPSHOT_ID,
+        source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
+        minimum_member_count=3,
+    )
+    seed_path = tmp_path / "nasdaq100-seed-invalid.json"
+    seed_path.write_text(
+        json.dumps(
+            {
+                "anchors": [
+                    {
+                        "effective_date": "1996-01-01",
+                        "published_date": "1995-12-29",
+                        "source_urls": ["https://example.com/official-1995-year-end"],
+                        "symbols": ["AAPL", "MSFT", "ORCL"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    provider = LocalNasdaq100SeedUniverseHistoryProvider(definition=definition, seed_path=seed_path)
+    original_snapshot = _current_page_snapshot(
+        definition=definition,
+        effective_date=date(1996, 1, 1),
+        symbols=["QQQ", "MSFT", "ORCL"],
+        source="wikipedia_current_page",
+        fallback_source="wikipedia_revision_history",
+    )
+
+    updated = provider.enrich_snapshots([original_snapshot])
+
+    assert updated == [original_snapshot]
+
+
+def test_archived_nasdaq_official_activity_provider_prefers_before_anchor_capture(monkeypatch):
+    definition = UniverseDefinition(
+        universe_key=NASDAQ100_UNIVERSE_KEY,
+        display_name=NASDAQ100_UNIVERSE_NAME,
+        snapshot_id=NASDAQ100_UNIVERSE_SNAPSHOT_ID,
+        source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
+        minimum_member_count=3,
+    )
+    provider = ArchivedNasdaqOfficialActivityUniverseHistoryProvider(
+        definition=definition,
+        archive_window_days=30,
+        lookahead_window_days=30,
+        retries=1,
+        timeout=1,
+    )
+    cdx_payload = json.dumps(
+        [
+            ["timestamp", "original", "statuscode", "mimetype"],
+            ["20260115120000", "http://dynamic.nasdaq.com/dynamic/nasdaq100_activity.stm", "200", "text/html"],
+            ["20260122120000", "http://dynamic.nasdaq.com/dynamic/nasdaq100_activity.stm", "200", "text/html"],
+        ]
+    )
+    archive_html = """
+        <html>
+          <body>
+            <table>
+              <tr><td>Apple</td><td><a href="/asp/quote.asp?symbol=AAPL&selected=AAPL">AAPL</a></td></tr>
+              <tr><td>Microsoft</td><td><a href="/asp/quote.asp?symbol=MSFT&selected=MSFT">MSFT</a></td></tr>
+              <tr><td>NVIDIA</td><td><a href="/asp/quote.asp?symbol=NVDA&selected=NVDA">NVDA</a></td></tr>
+            </table>
+          </body>
+        </html>
+    """
+
+    def fake_fetch_text(url: str) -> str:
+        if "cdx/search/cdx" in url:
+            return cdx_payload
+        if "web/20260115120000id_/" in url:
+            return archive_html
+        if "web/20260122120000id_/" in url:
+            raise AssertionError("The provider should prefer the nearest capture before the anchor.")
+        raise AssertionError(f"Unexpected URL {url}")
+
+    monkeypatch.setattr(provider, "_fetch_text", fake_fetch_text)
+
+    snapshot = provider._load_anchor_snapshot(date(2026, 1, 20))
+
+    assert snapshot is not None
+    assert snapshot.source == provider.provider_name
+    assert snapshot.fallback_source is None
+    assert snapshot.metadata["source_quality"] == SOURCE_QUALITY_HISTORICAL_DATASET
+    assert snapshot.metadata["archived_snapshot_timestamp"] == "20260115120000"
+    assert snapshot.metadata["official_seed_status"] == "seeded"
+
+
+def test_sequential_universe_snapshot_enricher_preserves_seed_replacement():
+    definition = UniverseDefinition(
+        universe_key=NASDAQ100_UNIVERSE_KEY,
+        display_name=NASDAQ100_UNIVERSE_NAME,
+        snapshot_id=NASDAQ100_UNIVERSE_SNAPSHOT_ID,
+        source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
+        minimum_member_count=3,
+    )
+    original_snapshot = _current_page_snapshot(
+        definition=definition,
+        effective_date=date(1996, 1, 1),
+        symbols=["QQQ", "MSFT", "ORCL"],
+        source="wikipedia_current_page",
+        fallback_source="wikipedia_revision_history",
+    )
+
+    class _SeedProvider:
+        def enrich_snapshots(self, snapshots):
+            current = snapshots[0]
+            return [
+                UniverseMembershipSnapshot(
+                    universe_key=current.universe_key,
+                    universe_name=current.universe_name,
+                    effective_date=current.effective_date,
+                    normalized_symbols=["AAPL", "MSFT", "ORCL"],
+                    raw_symbols=["AAPL", "MSFT", "ORCL"],
+                    unmapped_symbols=[],
+                    source="local_seed",
+                    fallback_source=None,
+                    anchor_schedule=current.anchor_schedule,
+                    source_revision_id="local-seed-1996-01-01",
+                    source_page_title=current.source_page_title,
+                    metadata={"source_quality": SOURCE_QUALITY_HISTORICAL_DATASET},
+                )
+            ]
+
+    class _ArchiveProvider:
+        def enrich_snapshots(self, snapshots):
+            current = snapshots[0]
+            if current.fallback_source:
+                return [
+                    UniverseMembershipSnapshot(
+                        universe_key=current.universe_key,
+                        universe_name=current.universe_name,
+                        effective_date=current.effective_date,
+                        normalized_symbols=["ARCHIVE1", "ARCHIVE2", "ARCHIVE3"],
+                        raw_symbols=["ARCHIVE1", "ARCHIVE2", "ARCHIVE3"],
+                        unmapped_symbols=[],
+                        source="archive_override",
+                        fallback_source=None,
+                        anchor_schedule=current.anchor_schedule,
+                        source_revision_id="archive-1996-01-01",
+                        source_page_title=current.source_page_title,
+                        metadata={"source_quality": SOURCE_QUALITY_HISTORICAL_DATASET},
+                    )
+                ]
+            return snapshots
+
+    updated = SequentialUniverseSnapshotEnricher(_SeedProvider(), _ArchiveProvider()).enrich_snapshots(
+        [original_snapshot]
+    )
+
+    assert updated[0].source == "local_seed"
+    assert updated[0].normalized_symbols == ["AAPL", "MSFT", "ORCL"]

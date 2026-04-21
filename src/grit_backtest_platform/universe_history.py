@@ -11,6 +11,7 @@ import urllib.request
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
 
 from .official_index_announcements import (
@@ -124,6 +125,12 @@ NASDAQ100_CURATED_DATASET_FIRST_YEAR = 2015
 NASDAQ100_ARCHIVED_CANDIDATE_URLS = (
     "https://en.wikipedia.org/wiki/Nasdaq-100",
     "https://en.wikipedia.org/wiki/NASDAQ-100",
+)
+NASDAQ100_OFFICIAL_ACTIVITY_CANDIDATE_URLS = (
+    "http://dynamic.nasdaq.com/dynamic/nasdaq100_activity.stm",
+)
+LOCAL_NASDAQ100_HISTORICAL_SEED_PATH = (
+    Path(__file__).resolve().parent / "data" / "nasdaq100_historical_seed.json"
 )
 
 
@@ -427,6 +434,35 @@ def extract_symbols_from_slickcharts_html(
     )
 
 
+def extract_symbols_from_nasdaq_activity_html(
+    html: str,
+    *,
+    minimum_member_count: int,
+) -> ExtractedUniverseTable:
+    row_matches = re.findall(
+        r"symbol=([A-Z0-9.\-]+)[^>]*>\s*([A-Z0-9.\-]+)\s*</a>",
+        html or "",
+        flags=re.IGNORECASE,
+    )
+    raw_symbols: list[str] = []
+    for symbol_href, symbol_text in row_matches:
+        candidate = symbol_text or symbol_href
+        if candidate:
+            raw_symbols.append(candidate.upper())
+    normalized_symbols, unmapped_symbols = _normalize_static_members(raw_symbols)
+    if len(normalized_symbols) < minimum_member_count:
+        raise ValueError(
+            f"Archived Nasdaq activity page looked too small ({len(normalized_symbols)} symbols < {minimum_member_count})."
+        )
+    return ExtractedUniverseTable(
+        headers=["Company Name", "Symbol", "% Of Index"],
+        raw_symbols=raw_symbols,
+        normalized_symbols=normalized_symbols,
+        unmapped_symbols=unmapped_symbols,
+        table_index=0,
+    )
+
+
 def _snapshot_from_symbol_list(
     *,
     definition: UniverseDefinition,
@@ -469,6 +505,23 @@ def _snapshot_from_symbol_list(
             **dict(extra_metadata or {}),
         },
     )
+
+
+class SequentialUniverseSnapshotEnricher:
+    def __init__(self, *providers: Any) -> None:
+        self.providers = [provider for provider in providers if provider is not None]
+
+    def enrich_snapshots(
+        self,
+        snapshots: Sequence[UniverseMembershipSnapshot],
+    ) -> list[UniverseMembershipSnapshot]:
+        updated_snapshots = list(snapshots)
+        for provider in self.providers:
+            enrich = getattr(provider, "enrich_snapshots", None)
+            if not callable(enrich):
+                continue
+            updated_snapshots = list(enrich(updated_snapshots))
+        return updated_snapshots
 
 
 class StaticUniverseHistoryProvider:
@@ -1482,6 +1535,221 @@ class ArchivedNasdaq100UniverseHistoryProvider:
         return updated_snapshots
 
 
+class ArchivedNasdaqOfficialActivityUniverseHistoryProvider(ArchivedNasdaq100UniverseHistoryProvider):
+    provider_name = "internet_archive_nasdaq_official_activity"
+
+    def __init__(
+        self,
+        *,
+        definition: UniverseDefinition,
+        candidate_urls: tuple[str, ...] = NASDAQ100_OFFICIAL_ACTIVITY_CANDIDATE_URLS,
+        archive_window_days: int = 365,
+        lookahead_window_days: int = 75,
+        retries: int = 3,
+        timeout: int = 20,
+    ) -> None:
+        super().__init__(
+            definition=definition,
+            candidate_urls=candidate_urls,
+            archive_window_days=archive_window_days,
+            retries=retries,
+            timeout=timeout,
+        )
+        self.lookahead_window_days = lookahead_window_days
+
+    def _lookup_archived_snapshot(self, source_url: str, anchor: date) -> tuple[str, str] | None:
+        from_timestamp = (anchor - timedelta(days=self.archive_window_days)).strftime("%Y%m%d")
+        to_timestamp = (anchor + timedelta(days=self.lookahead_window_days)).strftime("%Y%m%d") + "235959"
+        query = urllib.parse.urlencode(
+            {
+                "url": source_url,
+                "output": "json",
+                "fl": "timestamp,original,statuscode,mimetype",
+                "filter": ["statuscode:200", "mimetype:text/html"],
+                "from": from_timestamp,
+                "to": to_timestamp,
+            },
+            doseq=True,
+        )
+        payload = self._fetch_text(f"{INTERNET_ARCHIVE_CDX_ENDPOINT}?{query}")
+        rows = json.loads(payload)
+        if not isinstance(rows, list) or len(rows) <= 1:
+            return None
+        anchor_end = datetime.combine(anchor, dt_time.max, tzinfo=timezone.utc)
+        best_candidate: tuple[int, float, str, str] | None = None
+        for row in rows[1:]:
+            if not isinstance(row, list) or len(row) < 2:
+                continue
+            timestamp = str(row[0] or "").strip()
+            original = str(row[1] or "").strip()
+            if not timestamp or not original:
+                continue
+            try:
+                capture_dt = datetime.strptime(timestamp, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            after_penalty = 0 if capture_dt <= anchor_end else 1
+            distance_seconds = abs((capture_dt - anchor_end).total_seconds())
+            candidate = (after_penalty, distance_seconds, timestamp, original)
+            if best_candidate is None or candidate < best_candidate:
+                best_candidate = candidate
+        if best_candidate is None:
+            return None
+        return best_candidate[2], best_candidate[3]
+
+    def _load_anchor_snapshot(self, anchor: date) -> UniverseMembershipSnapshot | None:
+        best_candidate: tuple[str, str, str] | None = None
+        for candidate_url in self.candidate_urls:
+            snapshot = self._lookup_archived_snapshot(candidate_url, anchor)
+            if snapshot is None:
+                continue
+            timestamp, original_url = snapshot
+            if best_candidate is None or timestamp > best_candidate[0]:
+                best_candidate = (timestamp, original_url, candidate_url)
+        if best_candidate is None:
+            return None
+        timestamp, original_url, candidate_url = best_candidate
+        archive_url = INTERNET_ARCHIVE_ARCHIVED_PAGE_TEMPLATE.format(
+            timestamp=timestamp,
+            original_url=original_url,
+        )
+        html = self._fetch_text(archive_url)
+        extracted = extract_symbols_from_nasdaq_activity_html(
+            html,
+            minimum_member_count=self.definition.minimum_member_count,
+        )
+        if len(extracted.normalized_symbols) < self.definition.minimum_member_count:
+            return None
+        return _snapshot_from_symbol_list(
+            definition=self.definition,
+            anchor=anchor,
+            source=self.provider_name,
+            source_revision_id=f"{self.provider_name}-{anchor.isoformat()}",
+            source_page_title=self.definition.source_page_title,
+            symbols=list(extracted.normalized_symbols),
+            raw_symbols=list(extracted.raw_symbols),
+            fallback_source=None,
+            source_quality=SOURCE_QUALITY_HISTORICAL_DATASET,
+            extra_metadata={
+                "anchor_mode": "archived_official_activity",
+                "historical_dataset_provider": self.provider_name,
+                "historical_dataset_url": archive_url,
+                "archived_snapshot_url": archive_url,
+                "archived_snapshot_timestamp": timestamp,
+                "archived_source_url": candidate_url,
+                "official_seed_status": "seeded",
+                "official_seed_source_urls": [archive_url],
+                "source_origin": "historical_dataset",
+            },
+        )
+
+
+class LocalNasdaq100SeedUniverseHistoryProvider:
+    provider_name = "local_nasdaq100_historical_seed"
+
+    def __init__(
+        self,
+        *,
+        definition: UniverseDefinition,
+        seed_path: str | Path = LOCAL_NASDAQ100_HISTORICAL_SEED_PATH,
+    ) -> None:
+        self.definition = definition
+        self.seed_path = Path(seed_path)
+        self._seed_cache: dict[date, dict[str, Any]] | None = None
+
+    def _load_seed_entries(self) -> dict[date, dict[str, Any]]:
+        if self._seed_cache is not None:
+            return dict(self._seed_cache)
+        if not self.seed_path.exists():
+            self._seed_cache = {}
+            return {}
+        payload = json.loads(self.seed_path.read_text(encoding="utf-8"))
+        entries = payload if isinstance(payload, list) else payload.get("anchors") or []
+        seed_map: dict[date, dict[str, Any]] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            effective_date_raw = str(entry.get("effective_date") or "").strip()
+            if not effective_date_raw:
+                continue
+            try:
+                effective_date = date.fromisoformat(effective_date_raw)
+            except ValueError:
+                continue
+            raw_symbols = [str(item).strip() for item in (entry.get("symbols") or []) if str(item).strip()]
+            normalized_symbols, unmapped_symbols = _normalize_static_members(raw_symbols)
+            source_urls = entry.get("source_urls") or entry.get("source_url") or []
+            if isinstance(source_urls, str):
+                source_urls = [source_urls]
+            source_urls = [str(url).strip() for url in source_urls if str(url).strip()]
+            published_date = str(entry.get("published_date") or "").strip()
+            provenance = str(entry.get("provenance") or "").strip()
+            if (
+                len(normalized_symbols) < self.definition.minimum_member_count
+                or not source_urls
+                or not published_date
+                or not provenance
+            ):
+                continue
+            seed_map[effective_date] = {
+                "effective_date": effective_date,
+                "raw_symbols": raw_symbols,
+                "normalized_symbols": normalized_symbols,
+                "unmapped_symbols": unmapped_symbols,
+                "source_urls": source_urls,
+                "published_date": published_date,
+                "provenance": provenance,
+                "additions": list(entry.get("additions") or []),
+                "removals": list(entry.get("removals") or []),
+            }
+        self._seed_cache = dict(seed_map)
+        return dict(seed_map)
+
+    def _load_anchor_snapshot(self, anchor: date) -> UniverseMembershipSnapshot | None:
+        seed_entry = self._load_seed_entries().get(anchor)
+        if seed_entry is None:
+            return None
+        return _snapshot_from_symbol_list(
+            definition=self.definition,
+            anchor=anchor,
+            source=self.provider_name,
+            source_revision_id=f"{self.provider_name}-{anchor.isoformat()}",
+            source_page_title=self.definition.source_page_title,
+            symbols=list(seed_entry["normalized_symbols"]),
+            raw_symbols=list(seed_entry["raw_symbols"]),
+            fallback_source=None,
+            source_quality=SOURCE_QUALITY_HISTORICAL_DATASET,
+            extra_metadata={
+                "anchor_mode": "local_historical_seed",
+                "historical_dataset_provider": self.provider_name,
+                "historical_dataset_url": seed_entry["source_urls"][0],
+                "published_date": seed_entry["published_date"],
+                "official_seed_status": "seeded",
+                "official_seed_source_urls": list(seed_entry["source_urls"]),
+                "official_additions": list(seed_entry["additions"]),
+                "official_removals": list(seed_entry["removals"]),
+                "provenance": seed_entry["provenance"],
+                "source_origin": "historical_dataset",
+            },
+        )
+
+    def enrich_snapshots(
+        self,
+        snapshots: Sequence[UniverseMembershipSnapshot],
+    ) -> list[UniverseMembershipSnapshot]:
+        updated_snapshots = list(snapshots)
+        for index, current_snapshot in enumerate(snapshots):
+            if _is_historical_anchor_quality((current_snapshot.metadata or {}).get("source_quality")) and not current_snapshot.fallback_source:
+                continue
+            replacement = self._load_anchor_snapshot(current_snapshot.effective_date)
+            if replacement is None:
+                continue
+            metadata = dict(replacement.metadata or {})
+            metadata["replaced_source_quality"] = (current_snapshot.metadata or {}).get("source_quality")
+            updated_snapshots[index] = replace(replacement, metadata=metadata)
+        return updated_snapshots
+
+
 class CuratedNasdaq100UniverseHistoryProvider:
     provider_name = "github_nasdaq100_curated_history"
 
@@ -2003,8 +2271,16 @@ def default_universe_history_providers() -> list[Any]:
         historical_dataset_provider=WikipediaNasdaq100ChangesUniverseHistoryProvider(
             definition=nasdaq100_definition,
         ),
-        archived_snapshot_provider=ArchivedNasdaq100UniverseHistoryProvider(
-            definition=nasdaq100_definition,
+        archived_snapshot_provider=SequentialUniverseSnapshotEnricher(
+            LocalNasdaq100SeedUniverseHistoryProvider(
+                definition=nasdaq100_definition,
+            ),
+            ArchivedNasdaqOfficialActivityUniverseHistoryProvider(
+                definition=nasdaq100_definition,
+            ),
+            ArchivedNasdaq100UniverseHistoryProvider(
+                definition=nasdaq100_definition,
+            ),
         ),
     )
     return [

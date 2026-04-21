@@ -36,6 +36,8 @@ SnapshotRefreshMode = Literal['incremental', 'repair', 'full']
 SnapshotRefreshTarget = Literal['price', 'corporate', 'universes']
 DataSegmentType = Literal['FULL', 'TRAIN', 'TEST', 'VALIDATION']
 OptimizationConstraintPresetKey = Literal['balanced', 'defensive', 'offensive']
+SnapshotProviderAccessTier = Literal['public', 'free_account', 'paid_optional']
+OfficialSeedStatus = Literal['complete', 'partial', 'missing']
 
 
 class CreationMessageCreate(BaseModel):
@@ -85,8 +87,8 @@ class BacktestRunPreviewRequest(BaseModel):
     dataset_snapshot_id: str | None = None
     universe_snapshot_id: str | None = None
     execution_policy: str | None = None
-    fee_bps: float | None = Field(default=None, ge=0)
-    slippage_bps: float | None = Field(default=None, ge=0)
+    fee_bps: float | None = Field(default=1.5, ge=0)
+    slippage_bps: float | None = Field(default=2.5, ge=0)
     source_run_id: str | None = None
 
 
@@ -154,4 +156,54 @@ class SnapshotRefreshRequest(BaseModel):
     reason: str | None = None
     mode: SnapshotRefreshMode = 'incremental'
     targets: list[SnapshotRefreshTarget] = Field(default_factory=list)
+
+
+class SnapshotProviderSummaryItem(BaseModel):
+    kinds: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+    attempted_symbols: int = 0
+    succeeded_symbols: int = 0
+    selected_primary_symbols: int = 0
+    succeeded_not_selected_symbols: int = 0
+    failed_symbols: int = 0
+    limited_symbols: int = 0
+    skipped_symbols: int = 0
+    empty_symbols: int = 0
+    unavailable_symbols: int = 0
+    landed_row_count: int = 0
+    landed_symbol_count: int = 0
+    actions_supported: bool = False
+    access_tier: SnapshotProviderAccessTier = 'public'
+    quota_limited: bool = False
+    probe_complete: bool = False
+    next_retry_at: str | None = None
+
+
+class SnapshotProviderSummary(BaseModel):
+    attempted_providers: list[str] = Field(default_factory=list)
+    skipped_providers: list[str] = Field(default_factory=list)
+    unavailable_providers: list[str] = Field(default_factory=list)
+    providers: dict[str, SnapshotProviderSummaryItem] = Field(default_factory=dict)
+
+
+class DatasetSnapshotMetadataModel(BaseModel):
+    covered_symbol_count: int | None = None
+    total_symbol_count: int | None = None
+    missing_symbols: list[str] = Field(default_factory=list)
+    probe_status_breakdown: dict[str, int] = Field(default_factory=dict)
+    coverage_kind_breakdown: dict[str, int] = Field(default_factory=dict)
+    complete_no_events_symbol_count: int | None = None
+    formal_event_symbol_count: int | None = None
+    provider_summary: SnapshotProviderSummary = Field(default_factory=SnapshotProviderSummary)
+
+
+class UniverseSnapshotMetadataModel(BaseModel):
+    anchor_count: int | None = None
+    historical_anchor_count: int | None = None
+    fallback_anchor_count: int | None = None
+    source_quality_breakdown: dict[str, int] = Field(default_factory=dict)
+    official_seed_status: OfficialSeedStatus | None = None
+    official_seed_source_count: int | None = None
+    official_seed_missing_anchors: list[str] = Field(default_factory=list)
+    provider_summary: dict[str, Any] = Field(default_factory=dict)
 

@@ -31,7 +31,7 @@ from .backtest_metrics import (
     build_rolling_metrics,
     metric_summary,
 )
-from .fallback_provider import UnconfiguredFallbackProvider
+from .fallback_provider import UnconfiguredFallbackProvider, provider_access_tier
 from .market_data_repository import (
     DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
     DATASET_PRICE_SNAPSHOT_ID,
@@ -87,6 +87,8 @@ SNAPSHOT_REFRESH_HEARTBEAT_GRACE_SECONDS = 30.0
 SNAPSHOT_REFRESH_WORKER_DISCOVERY_TIMEOUT_SECONDS = 3.0
 DIRECT_REFRESH_SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9.-]{0,11}$")
 FORMAL_CORPORATE_ACTION_TYPES = {"dividend", "split", "reverse_split"}
+DEFAULT_BACKTEST_FEE_BPS = 1.5
+DEFAULT_BACKTEST_SLIPPAGE_BPS = 2.5
 
 
 class SnapshotBlockingError(ValueError):
@@ -240,18 +242,53 @@ class RealBacktestPlatformService(BacktestPlatformService):
         normalized = str(provider_name or "").strip().lower()
         return normalized in {"longbridge", "longbridge_static_info", "futu", "futu_rehab"} or normalized.startswith("futu")
 
+    def _provider_access_tier(self, provider_or_name: Any) -> str:
+        return provider_access_tier(provider_or_name)
+
+    def _paid_optional_provider_names(self) -> set[str]:
+        provider = self._primary_market_data_provider()
+        provider_names = {
+            self._provider_name(candidate)
+            for candidate in (getattr(provider, "providers", None) or [])
+        }
+        return {
+            provider_name
+            for provider_name in provider_names
+            if self._provider_access_tier(provider_name) == "paid_optional"
+        }
+
+    def _provider_retry_exclusions(self, *snapshots: Mapping[str, Any] | None) -> set[str]:
+        now = datetime.now(timezone.utc)
+        excluded: set[str] = set()
+        for snapshot in snapshots:
+            metadata = dict((snapshot or {}).get("metadata") or {})
+            provider_summary = dict(metadata.get("provider_summary") or {})
+            providers = dict(provider_summary.get("providers") or {})
+            for provider_name, provider_payload in providers.items():
+                if not isinstance(provider_payload, Mapping):
+                    continue
+                retry_at = self._parse_snapshot_timestamp(provider_payload.get("next_retry_at"))
+                if retry_at is not None and retry_at > now:
+                    excluded.add(str(provider_name).strip().lower())
+        return excluded
+
     def _scoped_market_data_provider(
         self,
         *,
         mode: str,
         window_start: date,
         allow_targeted_price_repair: bool = False,
+        extra_excluded_provider_names: Sequence[str] | None = None,
     ) -> Any:
         provider = self._primary_market_data_provider()
         scoped_copy = getattr(provider, "scoped_copy", None)
         if not callable(scoped_copy):
             return provider
-        excluded: set[str] = set()
+        excluded: set[str] = {
+            str(name or "").strip().lower()
+            for name in (extra_excluded_provider_names or [])
+            if str(name or "").strip()
+        }
         if mode == "full":
             excluded.update({"longbridge", "longbridge_static_info", "futu", "futu_rehab"})
         if mode == "incremental" and any(
@@ -259,6 +296,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
             for candidate in (getattr(provider, "providers", None) or [])
         ):
             excluded.add("stooq")
+        if mode != "repair":
+            excluded.add("tiingo")
+        if str(os.getenv("GRIT_ENABLE_PAID_OPTIONAL_PROVIDERS") or "").strip().lower() not in {"1", "true", "yes", "on"}:
+            excluded.update(self._paid_optional_provider_names())
         if window_start < LONGBRIDGE_MIN_HISTORY_DATE:
             excluded.update({"longbridge", "longbridge_static_info"})
         if not excluded and not allow_targeted_price_repair:
@@ -1065,6 +1106,19 @@ class RealBacktestPlatformService(BacktestPlatformService):
         target_symbols: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         metadata = dict(existing_metadata or {})
+        probe_status_breakdown: dict[str, int] = {}
+        coverage_kind_breakdown: dict[str, int] = {}
+        for item in (symbol_coverage or []):
+            if isinstance(item, Mapping):
+                item_metadata = dict(item.get("metadata") or {})
+            else:
+                item_metadata = dict(getattr(item, "metadata", {}) or {})
+            probe_status = str(item_metadata.get("probe_status") or "").strip().lower()
+            coverage_kind = str(item_metadata.get("coverage_kind") or "").strip().lower()
+            if probe_status:
+                probe_status_breakdown[probe_status] = probe_status_breakdown.get(probe_status, 0) + 1
+            if coverage_kind:
+                coverage_kind_breakdown[coverage_kind] = coverage_kind_breakdown.get(coverage_kind, 0) + 1
         if covered_symbols is None:
             covered_symbol_set = {
                 str((item.symbol if isinstance(item, CoverageSummary) else item.get("symbol")) or "").strip().upper()
@@ -1119,6 +1173,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
         metadata["covered_symbol_count"] = covered_symbol_count
         metadata["total_symbol_count"] = total_symbol_count
         metadata["missing_symbols"] = sorted(missing_symbol_set)
+        metadata["probe_status_breakdown"] = probe_status_breakdown
+        metadata["coverage_kind_breakdown"] = coverage_kind_breakdown
+        metadata["complete_no_events_symbol_count"] = int(probe_status_breakdown.get("complete_no_events") or 0)
+        metadata["formal_event_symbol_count"] = int(probe_status_breakdown.get("complete_with_events") or 0)
         return metadata
 
     def _parse_snapshot_date(self, value: Any) -> date | None:
@@ -1374,7 +1432,24 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "skipped_symbols": 0,
                 "empty_symbols": 0,
                 "unavailable_symbols": 0,
+                "access_tiers": set(),
+                "actions_supported": False,
+                "quota_limited": False,
+                "probe_complete": False,
+                "next_retry_candidates": set(),
             },
+        )
+
+    def _merge_retry_candidate(
+        self,
+        target: dict[str, Any],
+        value: Any,
+    ) -> None:
+        retry_at = self._parse_snapshot_timestamp(value)
+        if retry_at is None:
+            return
+        target.setdefault("next_retry_candidates", set()).add(
+            retry_at.isoformat().replace("+00:00", "Z")
         )
 
     def _record_provider_result(
@@ -1403,6 +1478,21 @@ class RealBacktestPlatformService(BacktestPlatformService):
         detail = str(result.get("reason") or result.get("error") or "").strip()
         if detail:
             metric_bucket.setdefault("reasons", set()).add(detail)
+        metric_bucket.setdefault("access_tiers", set()).add(
+            str(result.get("access_tier") or self._provider_access_tier(provider_name)).strip().lower()
+        )
+        metric_bucket["actions_supported"] = bool(
+            metric_bucket.get("actions_supported") or result.get("actions_supported")
+        )
+        metric_bucket["quota_limited"] = bool(
+            metric_bucket.get("quota_limited")
+            or result.get("quota_limited")
+            or status == "limited"
+        )
+        metric_bucket["probe_complete"] = bool(
+            metric_bucket.get("probe_complete") or result.get("probe_complete")
+        )
+        self._merge_retry_candidate(metric_bucket, result.get("next_retry_at"))
         if status in {"succeeded", "failed", "empty"}:
             snapshot_bucket["attempted_providers"].add(provider_name)
             metric_bucket["attempted_symbols"] += 1
@@ -1460,7 +1550,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         if explicit is not None:
             return bool(explicit)
         provider_name = str(result.get("provider") or result.get("source") or "").strip().lower()
-        return provider_name in {"yahoo", "yfinance", "tiingo"}
+        return provider_name in {"yahoo", "yfinance", "tiingo", "alpha_vantage"}
 
     def _history_action_probe_sources(self, metadata: Mapping[str, Any] | None) -> list[str]:
         if not isinstance(metadata, Mapping):
@@ -1469,14 +1559,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
         for item in metadata.get("provider_results") or []:
             if not isinstance(item, Mapping):
                 continue
-            if str(item.get("kind") or "").strip().lower() != "history":
+            kind = str(item.get("kind") or "").strip().lower()
+            if kind not in {"history", "history_availability"}:
                 continue
             if not self._provider_result_supports_corporate_actions(item):
                 continue
             status = str(item.get("status") or "").strip().lower()
             if status not in {"succeeded", "empty"}:
                 continue
-            if int(item.get("bar_count") or 0) <= 0 and int(item.get("action_count") or 0) <= 0:
+            if not bool(item.get("probe_complete")) and int(item.get("bar_count") or 0) <= 0 and int(item.get("action_count") or 0) <= 0:
                 continue
             source = str(item.get("source") or item.get("provider") or "").strip()
             if source:
@@ -1522,6 +1613,23 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     for item in (provider_payload.get("reasons") or [])
                     if str(item).strip()
                 )
+                metric_bucket.setdefault("access_tiers", set()).update(
+                    str(item)
+                    for item in (provider_payload.get("access_tiers") or [])
+                    if str(item).strip()
+                )
+                metric_bucket["actions_supported"] = bool(
+                    metric_bucket.get("actions_supported") or provider_payload.get("actions_supported")
+                )
+                metric_bucket["quota_limited"] = bool(
+                    metric_bucket.get("quota_limited") or provider_payload.get("quota_limited")
+                )
+                metric_bucket["probe_complete"] = bool(
+                    metric_bucket.get("probe_complete") or provider_payload.get("probe_complete")
+                )
+                self._merge_retry_candidate(metric_bucket, provider_payload.get("next_retry_at"))
+                for retry_at in (provider_payload.get("next_retry_candidates") or []):
+                    self._merge_retry_candidate(metric_bucket, retry_at)
                 for metric_name in (
                     "attempted_symbols",
                     "succeeded_symbols",
@@ -1588,6 +1696,16 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     else {}
                 ) or {}
                 landed_payload = landed_breakdowns[snapshot_id].get(provider_name) or {}
+                access_tiers = sorted(
+                    str(item)
+                    for item in (source_payload.get("access_tiers") or [])
+                    if str(item).strip()
+                )
+                next_retry_candidates = sorted(
+                    str(item)
+                    for item in (source_payload.get("next_retry_candidates") or [])
+                    if str(item).strip()
+                )
                 normalized_providers[provider_name] = {
                     "kinds": sorted(
                         str(item)
@@ -1608,6 +1726,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "skipped_symbols": int(source_payload.get("skipped_symbols") or 0),
                     "empty_symbols": int(source_payload.get("empty_symbols") or 0),
                     "unavailable_symbols": int(source_payload.get("unavailable_symbols") or 0),
+                    "actions_supported": bool(source_payload.get("actions_supported")),
+                    "access_tier": access_tiers[0] if access_tiers else self._provider_access_tier(provider_name),
+                    "quota_limited": bool(source_payload.get("quota_limited")),
+                    "probe_complete": bool(source_payload.get("probe_complete")),
+                    "next_retry_at": next_retry_candidates[0] if next_retry_candidates else None,
                     "landed_row_count": int(landed_payload.get("landed_row_count") or 0),
                     "landed_symbol_count": int(landed_payload.get("landed_symbol_count") or 0),
                 }
@@ -1737,18 +1860,37 @@ class RealBacktestPlatformService(BacktestPlatformService):
         ordered_anchor_snapshots = sorted(anchor_snapshots, key=lambda item: item.effective_date)
         source_quality_breakdown: dict[str, int] = {}
         historical_anchor_count = 0
+        official_seed_sources: set[str] = set()
+        official_seed_missing_anchors: list[str] = []
         for item in ordered_anchor_snapshots:
-            source_quality = str((item.metadata or {}).get("source_quality") or "").strip().lower()
+            item_metadata = dict(item.metadata or {})
+            source_quality = str(item_metadata.get("source_quality") or "").strip().lower()
             normalized_quality = source_quality or "unknown"
             source_quality_breakdown[normalized_quality] = source_quality_breakdown.get(normalized_quality, 0) + 1
             if _is_historical_anchor_quality(source_quality) and not item.fallback_source:
                 historical_anchor_count += 1
+            else:
+                official_seed_missing_anchors.append(item.effective_date.isoformat())
+            seed_urls = item_metadata.get("official_seed_source_urls") or item_metadata.get("source_urls") or []
+            if isinstance(seed_urls, str):
+                seed_urls = [seed_urls]
+            for url in seed_urls:
+                if str(url).strip():
+                    official_seed_sources.add(str(url).strip())
         anchor_count = len(ordered_anchor_snapshots)
+        official_seed_status = (
+            "complete"
+            if anchor_count and not official_seed_missing_anchors
+            else ("partial" if official_seed_sources else "missing")
+        )
         return {
             "anchor_count": int(anchor_count),
             "historical_anchor_count": int(historical_anchor_count),
             "fallback_anchor_count": int(anchor_count - historical_anchor_count),
             "source_quality_breakdown": source_quality_breakdown,
+            "official_seed_status": official_seed_status,
+            "official_seed_source_count": len(official_seed_sources),
+            "official_seed_missing_anchors": official_seed_missing_anchors,
         }
 
     def _build_refresh_stats(
@@ -1818,6 +1960,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 ),
                 "fallback_anchor_count": int(anchor_progress["fallback_anchor_count"]),
                 "source_quality_breakdown": dict(anchor_progress["source_quality_breakdown"]),
+                "official_seed_status": str(anchor_progress.get("official_seed_status") or "missing"),
+                "official_seed_source_count": int(anchor_progress.get("official_seed_source_count") or 0),
+                "official_seed_missing_anchors": list(anchor_progress.get("official_seed_missing_anchors") or []),
                 "latest_anchor_date": latest_anchor_date,
                 "provider_summary": self._build_universe_provider_summary(
                     snapshot_id=snapshot_id,
@@ -2088,11 +2233,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
     ) -> tuple[list[str], dict[str, Any]]:
         metadata: dict[str, Any] = {"selection_mode": mode}
         if mode == "repair":
+            existing_corporate_missing = self._snapshot_missing_symbols(existing_corporate_snapshot)
+            existing_price_missing = self._snapshot_missing_symbols(existing_price_snapshot)
             existing_missing = list(
                 dict.fromkeys(
                     [
-                        *self._snapshot_missing_symbols(existing_price_snapshot),
-                        *self._snapshot_missing_symbols(existing_corporate_snapshot),
+                        *existing_corporate_missing,
+                        *[symbol for symbol in existing_price_missing if symbol not in set(existing_corporate_missing)],
                     ]
                 )
             )
@@ -2114,6 +2261,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                         "selected_latest_symbols": latest_symbols,
                         "selected_symbol_count": len(combined_selection),
                         "repair_cursor": next_cursor,
+                        "repair_priority": "corporate_first_unified_queue",
+                        "existing_corporate_missing_symbol_count": len(existing_corporate_missing),
                     }
                 )
                 return combined_selection, metadata
@@ -4625,6 +4774,17 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if mode in {"incremental", "repair"}
             else snapshot_window_start
         )
+        provider_retry_exclusions = (
+            self._provider_retry_exclusions(existing_price_snapshot, existing_corporate_snapshot)
+            if mode == "repair"
+            else set()
+        )
+        if provider_retry_exclusions:
+            warnings.append(
+                "Provider cooldown active for "
+                + ", ".join(sorted(provider_retry_exclusions))
+                + "; repair will resume after the recorded retry window."
+            )
 
         price_bars: list[dict[str, Any]] = []
         corporate_actions: list[dict[str, Any]] = []
@@ -4644,6 +4804,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             representative_provider = self._scoped_market_data_provider(
                 mode="incremental",
                 window_start=latest_window_start,
+                extra_excluded_provider_names=provider_retry_exclusions,
             )
             representative_fallback_provider = self._fallback_market_data_provider(representative_provider)
             representative_fallback_availability = (
@@ -4655,6 +4816,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             representative_provider = self._scoped_market_data_provider(
                 mode=mode,
                 window_start=latest_window_start if mode == "incremental" else snapshot_window_start,
+                extra_excluded_provider_names=provider_retry_exclusions,
             )
             representative_fallback_provider = self._fallback_market_data_provider(representative_provider)
             representative_fallback_availability = (
@@ -4800,6 +4962,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 latest_primary_provider = self._scoped_market_data_provider(
                     mode="incremental",
                     window_start=latest_window_start,
+                    extra_excluded_provider_names=provider_retry_exclusions,
                 )
                 latest_fallback_provider = self._fallback_market_data_provider(latest_primary_provider)
                 latest_fallback_availability = (
@@ -4843,6 +5006,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     mode="repair",
                     window_start=snapshot_window_start,
                     allow_targeted_price_repair=True,
+                    extra_excluded_provider_names=provider_retry_exclusions,
                 )
                 repair_fallback_provider = self._fallback_market_data_provider(repair_primary_provider)
                 repair_fallback_availability = (
@@ -4886,6 +5050,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             primary_provider = self._scoped_market_data_provider(
                 mode=mode,
                 window_start=market_data_window_start,
+                extra_excluded_provider_names=provider_retry_exclusions,
             )
             fallback_provider = self._fallback_market_data_provider(primary_provider)
             fallback_availability = (
@@ -5072,6 +5237,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
     def _normalize_run_request(self, strategy: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
         normalized = dict(payload)
+        normalized["fee_bps"] = _coerce_float(normalized.get("fee_bps"), DEFAULT_BACKTEST_FEE_BPS)
+        normalized["slippage_bps"] = _coerce_float(normalized.get("slippage_bps"), DEFAULT_BACKTEST_SLIPPAGE_BPS)
         normalized["data_segment_type"] = str(normalized.get("data_segment_type") or "FULL").upper()
         normalized["parameter_version_id"] = str(
             normalized.get("parameter_version_id")
@@ -5459,6 +5626,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
             end_date=request_payload.get("end_date"),
             benchmark_symbol=benchmark_symbol,
             initial_equity=capital if capital > 0 else 100000.0,
+            transaction_cost_bps=(
+                _coerce_float(request_payload.get("fee_bps"))
+                + _coerce_float(request_payload.get("slippage_bps"))
+            ),
         )
         prepared_inputs = prepare_backtest_inputs(
             bars_by_symbol,
@@ -5689,6 +5860,54 @@ class RealBacktestPlatformService(BacktestPlatformService):
         strategy_row["updated_at"] = updated_at
         self.storage.insert_json_row("strategies", strategy_row)
 
+    def _build_completed_backtest_run_row(
+        self,
+        *,
+        run_id: str,
+        strategy_id: str,
+        strategy: Mapping[str, Any],
+        request_payload: Mapping[str, Any],
+        created_at: str,
+    ) -> dict[str, Any]:
+        effective_strategy = self._strategy_for_run(strategy, request_payload)
+        preview, chart_series, trades = self._simulate_run(effective_strategy, request_payload)
+        completed_at = iso_now()
+        metrics = preview["metrics"]
+        trade_audit = self._build_trade_audits(
+            run_id=run_id,
+            strategy=effective_strategy,
+            request_payload=request_payload,
+            trades=trades,
+            oos_start_date=preview.get("oos_start_date"),
+        )
+        trade_audit_items = self._build_trade_audit_items(trade_audit)
+        return self._build_backtest_run_row(
+            run_id=run_id,
+            strategy_id=strategy_id,
+            status="COMPLETED_WITH_WARNINGS" if preview["warnings"] else "COMPLETED",
+            request_payload=request_payload,
+            created_at=created_at,
+            updated_at=completed_at,
+            preview=preview,
+            metrics=metrics,
+            parameter_snapshot=preview.get("parameter_snapshot") or {},
+            environment_summary=preview.get("environment_summary") or {},
+            relative_metrics=build_relative_metrics(chart_series),
+            consistency_score=build_consistency_score(chart_series),
+            risk_metrics=build_risk_metrics(metrics, chart_series),
+            drawdown_events=build_drawdown_events(chart_series, preview.get("oos_start_date")),
+            rolling_metrics=build_rolling_metrics(chart_series, 252),
+            monthly_returns=build_monthly_returns(chart_series, preview.get("oos_start_date")),
+            chart_series=chart_series,
+            trades=trades,
+            trade_audit_items=trade_audit_items,
+            trade_audit=trade_audit,
+            warnings=preview.get("warnings") or [],
+            completed_at=completed_at,
+            coverage_ratio=preview.get("coverage_ratio"),
+            coverage_days=preview.get("coverage_days"),
+        )
+
     def _run_backtest_submission(
         self,
         *,
@@ -5715,47 +5934,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
             ),
         )
         try:
-            effective_strategy = self._strategy_for_run(strategy, request_payload)
-            preview, chart_series, trades = self._simulate_run(effective_strategy, request_payload)
-            completed_at = iso_now()
-            metrics = preview["metrics"]
-            trade_audit = self._build_trade_audits(
+            completed_row = self._build_completed_backtest_run_row(
                 run_id=run_id,
-                strategy=effective_strategy,
+                strategy_id=strategy_id,
+                strategy=strategy,
                 request_payload=request_payload,
-                trades=trades,
-                oos_start_date=preview.get("oos_start_date"),
+                created_at=created_at,
             )
-            trade_audit_items = self._build_trade_audit_items(trade_audit)
-            self.storage.insert_json_row(
-                "backtest_runs",
-                self._build_backtest_run_row(
-                    run_id=run_id,
-                    strategy_id=strategy_id,
-                    status="COMPLETED_WITH_WARNINGS" if preview["warnings"] else "COMPLETED",
-                    request_payload=request_payload,
-                    created_at=created_at,
-                    updated_at=completed_at,
-                    preview=preview,
-                    metrics=metrics,
-                    parameter_snapshot=preview.get("parameter_snapshot") or {},
-                    environment_summary=preview.get("environment_summary") or {},
-                    relative_metrics=build_relative_metrics(chart_series),
-                    consistency_score=build_consistency_score(chart_series),
-                    risk_metrics=build_risk_metrics(metrics, chart_series),
-                    drawdown_events=build_drawdown_events(chart_series, preview.get("oos_start_date")),
-                    rolling_metrics=build_rolling_metrics(chart_series, 252),
-                    monthly_returns=build_monthly_returns(chart_series, preview.get("oos_start_date")),
-                    chart_series=chart_series,
-                    trades=trades,
-                    trade_audit_items=trade_audit_items,
-                    trade_audit=trade_audit,
-                    warnings=preview.get("warnings") or [],
-                    completed_at=completed_at,
-                    coverage_ratio=preview.get("coverage_ratio"),
-                    coverage_days=preview.get("coverage_days"),
-                ),
-            )
+            completed_at = str(completed_row.get("completed_at") or iso_now())
+            self.storage.insert_json_row("backtest_runs", completed_row)
             self._set_latest_run_reference(
                 strategy_id=strategy_id,
                 run_id=run_id,
@@ -5946,6 +6133,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 run["rolling_metrics"] = rolling_metrics
         if normalized_view in {"full", "context"}:
             request_payload = dict(run.get("request") or {})
+            request_payload["fee_bps"] = _coerce_float(request_payload.get("fee_bps"), DEFAULT_BACKTEST_FEE_BPS)
+            request_payload["slippage_bps"] = _coerce_float(request_payload.get("slippage_bps"), DEFAULT_BACKTEST_SLIPPAGE_BPS)
             request_payload["execution_policy"] = str(
                 request_payload.get("execution_policy")
                 or "T_CLOSE_TO_T1_OPEN"
@@ -6069,6 +6258,95 @@ class RealBacktestPlatformService(BacktestPlatformService):
             payload["idempotency_key"] = self._new_id("clone")
         payload.setdefault("is_permanent", False)
         return self.submit_backtest_run(str(run["strategy_id"]), payload)
+
+    def rerun_backtest_run(
+        self,
+        run_id: str,
+        *,
+        fee_bps: float | None = None,
+        slippage_bps: float | None = None,
+    ) -> dict[str, Any]:
+        row = self.storage.fetch_one(
+            """
+            SELECT id, strategy_id, status, source_run_id, start_date, end_date, is_permanent, created_at, request_json
+            FROM backtest_runs
+            WHERE id = ? AND deleted_at IS NULL
+            """,
+            (run_id,),
+        )
+        if row is None:
+            raise KeyError(f"Backtest run not found: {run_id}")
+        if str(row.get("status") or "").upper() in {"QUEUED", "RUNNING"}:
+            raise ValueError(f"Backtest run is still active and cannot be rebuilt: {run_id}")
+
+        strategy_id = str(row.get("strategy_id") or "").strip()
+        if not strategy_id:
+            raise ValueError(f"Backtest run is missing strategy_id: {run_id}")
+
+        strategy = self.get_strategy_detail(strategy_id)
+        request_payload = loads(row.get("request_json"), {})
+        if not isinstance(request_payload, dict):
+            request_payload = {}
+        for field in ("start_date", "end_date", "source_run_id"):
+            row_value = row.get(field)
+            if row_value and not str(request_payload.get(field) or "").strip():
+                request_payload[field] = row_value
+        request_payload["is_permanent"] = bool(int(row.get("is_permanent") or 0))
+        if fee_bps is not None:
+            request_payload["fee_bps"] = float(fee_bps)
+        if slippage_bps is not None:
+            request_payload["slippage_bps"] = float(slippage_bps)
+        normalized_request = self._normalize_run_request(strategy, request_payload)
+
+        completed_row = self._build_completed_backtest_run_row(
+            run_id=run_id,
+            strategy_id=strategy_id,
+            strategy=strategy,
+            request_payload=normalized_request,
+            created_at=str(row.get("created_at") or iso_now()),
+        )
+        self.storage.insert_json_row("backtest_runs", completed_row)
+        self._set_latest_run_reference(
+            strategy_id=strategy_id,
+            run_id=run_id,
+            updated_at=str(completed_row.get("completed_at") or iso_now()),
+            mark_successful=True,
+        )
+        return self.get_backtest_run_detail(run_id)
+
+    def backfill_permanent_backtest_runs(
+        self,
+        *,
+        fee_bps: float = DEFAULT_BACKTEST_FEE_BPS,
+        slippage_bps: float = DEFAULT_BACKTEST_SLIPPAGE_BPS,
+    ) -> list[dict[str, Any]]:
+        rows = self.storage.fetch_all(
+            """
+            SELECT id
+            FROM backtest_runs
+            WHERE deleted_at IS NULL
+              AND is_permanent = 1
+              AND status NOT IN ('QUEUED', 'RUNNING')
+            ORDER BY COALESCE(completed_at, created_at) ASC, created_at ASC, id ASC
+            """
+        )
+        rebuilt_runs: list[dict[str, Any]] = []
+        for row in rows:
+            detail = self.rerun_backtest_run(
+                str(row.get("id") or ""),
+                fee_bps=fee_bps,
+                slippage_bps=slippage_bps,
+            )
+            rebuilt_runs.append(
+                {
+                    "id": detail["id"],
+                    "status": detail["status"],
+                    "fee_bps": float((detail.get("request") or {}).get("fee_bps") or 0.0),
+                    "slippage_bps": float((detail.get("request") or {}).get("slippage_bps") or 0.0),
+                    "completed_at": detail.get("completed_at"),
+                }
+            )
+        return rebuilt_runs
 
 
 RealBacktestService = RealBacktestPlatformService

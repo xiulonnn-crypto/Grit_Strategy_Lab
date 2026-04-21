@@ -5,11 +5,11 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from .backtest_engine import MarketBar
-from .fallback_provider import ProviderAvailability
+from .fallback_provider import ProviderAvailability, ProviderExecutionSignal
 from .yahoo_provider import SymbolMarketData
 
 
@@ -30,6 +30,16 @@ def _parse_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _next_retry_at_from_retry_after(retry_after: str | None, *, default_minutes: int = 30) -> str:
+    try:
+        seconds = max(0, int(float(retry_after or "0")))
+    except (TypeError, ValueError):
+        seconds = 0
+    wait_seconds = seconds if seconds > 0 else default_minutes * 60
+    next_retry = datetime.now(timezone.utc) + timedelta(seconds=wait_seconds)
+    return next_retry.isoformat().replace("+00:00", "Z")
+
+
 class TiingoMarketDataProvider:
     provider_name = "tiingo"
     supports_action_enrichment = True
@@ -44,7 +54,12 @@ class TiingoMarketDataProvider:
             provider_name=self.provider_name,
             available=bool(self.token),
             reason=None if self.token else "TIINGO_API_TOKEN is not configured.",
-            metadata={"mode": "official_api", "requires_token": True},
+            metadata={
+                "mode": "official_api",
+                "requires_token": True,
+                "access_tier": "free_account",
+                "quota_limited": True,
+            },
         )
 
     def fetch_history(self, symbol: str, start_date: date, end_date: date) -> SymbolMarketData:
@@ -72,6 +87,33 @@ class TiingoMarketDataProvider:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 return self._parse_payload(symbol.upper(), payload, start_date, end_date)
+            except urllib.error.HTTPError as exc:
+                last_error = exc
+                detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
+                message = detail or str(exc)
+                if exc.code == 429 or "rate limit" in message.lower() or "too many requests" in message.lower():
+                    raise ProviderExecutionSignal(
+                        message or f"Tiingo rate limit hit for {symbol}",
+                        status="limited",
+                        reason="rate_limited",
+                        metadata={
+                            "provider_symbol": symbol.upper(),
+                            "error_class": "rate_limited",
+                            "quota_limited": True,
+                            "next_retry_at": _next_retry_at_from_retry_after(
+                                exc.headers.get("Retry-After") if exc.headers else None
+                            ),
+                        },
+                    ) from exc
+                if exc.code in {401, 403}:
+                    raise ProviderExecutionSignal(
+                        message or f"Tiingo authentication failed for {symbol}",
+                        status="failed",
+                        reason="auth_failed",
+                        metadata={"provider_symbol": symbol.upper(), "error_class": "auth_failed"},
+                    ) from exc
+                if attempt >= self.retries - 1:
+                    break
             except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as exc:
                 last_error = exc
                 if attempt >= self.retries - 1:
@@ -87,6 +129,19 @@ class TiingoMarketDataProvider:
     ) -> SymbolMarketData:
         if isinstance(payload, dict) and (payload.get("detail") or payload.get("error")):
             message = str(payload.get("detail") or payload.get("error"))
+            lowered = message.lower()
+            if "rate limit" in lowered or "too many requests" in lowered or "429" in lowered:
+                raise ProviderExecutionSignal(
+                    message,
+                    status="limited",
+                    reason="rate_limited",
+                    metadata={
+                        "provider_symbol": symbol,
+                        "error_class": "rate_limited",
+                        "quota_limited": True,
+                        "next_retry_at": _next_retry_at_from_retry_after(None),
+                    },
+                )
             raise RuntimeError(message)
         if not isinstance(payload, list):
             raise RuntimeError(f"Unexpected Tiingo payload for {symbol}: {type(payload).__name__}")
@@ -169,6 +224,9 @@ class TiingoMarketDataProvider:
                 "bar_count": len(bars),
                 "event_types": sorted({item["action_type"] for item in actions}),
                 "actions_supported": True,
+                "probe_complete": True,
                 "token_configured": True,
+                "access_tier": "free_account",
+                "quota_limited": False,
             },
         )

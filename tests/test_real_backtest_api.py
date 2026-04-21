@@ -105,11 +105,15 @@ def test_preview_submit_detail_and_trades_preserve_parameter_snapshot_and_defaul
     assert submitted["request"]["dataset_snapshot_id"] == "ds-price"
     assert submitted["request"]["universe_snapshot_id"] is None
     assert submitted["request"]["execution_policy"] == "T_CLOSE_TO_T1_OPEN"
+    assert submitted["request"]["fee_bps"] == 1.5
+    assert submitted["request"]["slippage_bps"] == 2.5
     assert submitted["is_permanent"] is False
     assert submitted["parameter_snapshot"] == preview["parameter_snapshot"]
     assert detail["data_segment_type"] == "FULL"
     assert detail["dataset_snapshot_id"] == "ds-price"
     assert detail["universe_snapshot_id"] is None
+    assert detail["request"]["fee_bps"] == 1.5
+    assert detail["request"]["slippage_bps"] == 2.5
     assert detail["snapshot_summary"]["status"] == "READY"
     assert trades["total"] == detail["trades_count"]
     assert detail["coverage_ratio"] > 0.9
@@ -127,6 +131,7 @@ def test_preview_submit_detail_and_trades_preserve_parameter_snapshot_and_defaul
     assert sell_trade["pnl_contribution"] not in (None, "")
     assert trades["total_pages"] >= 1
     assert detail["trade_audit_items"]
+    assert any(float(item["slippage_cost_pct"]) > 0 for item in detail["trade_audit_items"])
     assert detail["rolling_metrics"]
     rolling_point = detail["rolling_metrics"][-1]
     assert rolling_point["window_days"] == 252
@@ -251,6 +256,63 @@ def test_backtest_run_detail_backfills_missing_execution_policy_for_legacy_runs(
     detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail"))
 
     assert detail["request"]["execution_policy"] == "T_CLOSE_TO_T1_OPEN"
+
+
+def test_backtest_run_detail_keeps_explicit_zero_cost_overrides(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_grid_strategy(client, idempotency_key="materialize-grid-zero-costs")["strategy"]
+    refresh_snapshots(client)
+    submitted = submit_backtest(
+        client,
+        strategy["id"],
+        start_date=START_DATE,
+        end_date=END_DATE,
+        idempotency_key="run-grid-zero-costs",
+        fee_bps=0.0,
+        slippage_bps=0.0,
+    )
+
+    detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail"))
+
+    assert detail["request"]["fee_bps"] == 0.0
+    assert detail["request"]["slippage_bps"] == 0.0
+    assert detail["trade_audit_items"]
+    assert all(abs(float(item["slippage_cost_pct"])) < 1e-9 for item in detail["trade_audit_items"])
+
+
+def test_backfill_permanent_backtest_runs_rebuilds_saved_runs_with_default_costs(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_grid_strategy(client, idempotency_key="materialize-grid-backfill-default-costs")["strategy"]
+    refresh_snapshots(client)
+    zero_cost_run = submit_backtest(
+        client,
+        strategy["id"],
+        start_date=START_DATE,
+        end_date=END_DATE,
+        idempotency_key="run-grid-backfill-zero-costs",
+        fee_bps=0.0,
+        slippage_bps=0.0,
+    )
+    saved = assert_ok(client.post(f"/backtest-runs/{zero_cost_run['id']}/save"))
+    service = client.app.state.service
+
+    legacy_detail = assert_ok(client.get(f"/backtest-runs/{saved['id']}/detail"))
+    assert legacy_detail["is_permanent"] is True
+    assert legacy_detail["request"]["fee_bps"] == 0.0
+    assert legacy_detail["request"]["slippage_bps"] == 0.0
+    assert all(abs(float(item["slippage_cost_pct"])) < 1e-9 for item in legacy_detail["trade_audit_items"])
+
+    rebuilt = service.backfill_permanent_backtest_runs()
+    rebuilt_ids = {str(item["id"]) for item in rebuilt}
+    detail = assert_ok(client.get(f"/backtest-runs/{saved['id']}/detail"))
+
+    assert saved["id"] in rebuilt_ids
+    assert detail["is_permanent"] is True
+    assert detail["request"]["fee_bps"] == 1.5
+    assert detail["request"]["slippage_bps"] == 2.5
+    assert any(float(item["slippage_cost_pct"]) > 0 for item in detail["trade_audit_items"])
 
 
 def test_backtest_run_detail_backfills_trade_audit_items_projection_for_legacy_rows(tmp_path):

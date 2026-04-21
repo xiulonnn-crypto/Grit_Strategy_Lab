@@ -1445,6 +1445,112 @@ function createBaselineOnlyPassApi(): OptimizationTestApi {
   }) as OptimizationTestApi;
 }
 
+function createFullMatchingCombinationRefilterApi(): DemoApi {
+  const api = createOptimizationTestApi();
+  const originalGetOptimizationJobDetail =
+    api.getOptimizationJobDetail.bind(api);
+  let currentJob: ApiOptimizationJobDetail | null = null;
+
+  async function ensureJob(jobId: string): Promise<ApiOptimizationJobDetail> {
+    if (jobId !== "opt-001") {
+      return originalGetOptimizationJobDetail(jobId);
+    }
+    if (!currentJob) {
+      currentJob = await originalGetOptimizationJobDetail(jobId);
+      const liveLikeConstraints = defaultConstraintPayload.constraints.map(
+        (constraint) => {
+          if (constraint.key === "max_drawdown_pct") {
+            return {
+              ...constraint,
+              value: 25,
+              baseline_value: 25,
+              source: "manual" as const,
+            };
+          }
+          return {
+            ...constraint,
+            value: 0,
+            baseline_value: 0,
+            source: "manual" as const,
+          };
+        },
+      );
+      currentJob.request.constraint_preset_key = "balanced";
+      currentJob.request.constraint_label = "平衡型（自定义）";
+      currentJob.request.constraints = structuredClone(liveLikeConstraints);
+      currentJob.summary.constraint_preset_key = "balanced";
+      currentJob.summary.constraint_label = "平衡型（自定义）";
+      currentJob.summary.constraints = structuredClone(liveLikeConstraints);
+      currentJob.result.constraint_preset_key = "balanced";
+      currentJob.result.constraint_label = "平衡型（自定义）";
+      currentJob.result.constraints = structuredClone(liveLikeConstraints);
+      currentJob.candidates = currentJob.candidates.map((candidate, index) => ({
+        ...candidate,
+        title: `当前候选 ${index + 1}`,
+        label: `当前候选 ${index + 1}`,
+        summary: `当前候选 ${index + 1}`,
+        metrics: {
+          ...candidate.metrics,
+          annualized_return: 0.11 - index * 0.004,
+          return_sharpe: 0.92 - index * 0.03,
+          out_of_sample_sharpe: 0.88 - index * 0.04,
+          max_drawdown_pct: -8 - index * 0.6,
+          stability: 10 + index,
+        },
+      }));
+
+      const seedCandidate = currentJob.candidates[0];
+      if (!seedCandidate) {
+        throw new Error("missing seed candidate");
+      }
+      const combinations = Array.from({ length: 30 }, (_, index) => {
+        const drawdownPct =
+          index < 15 ? (index % 3 === 0 ? -2 : -1.9) : -4.5 - index * 0.1;
+        return {
+          ...structuredClone(seedCandidate),
+          id: `trial-tight-${index + 1}`,
+          label: `Trial ${2002 + index}`,
+          title: `Trial ${2002 + index}`,
+          rank: index + 1,
+          summary: `最大回撤 ${drawdownPct.toFixed(1)}%`,
+          metrics: {
+            ...seedCandidate.metrics,
+            annualized_return: Number((0.018 - index * 0.0002).toFixed(4)),
+            return_sharpe: Number((0.16 - index * 0.0015).toFixed(3)),
+            out_of_sample_sharpe: Number((0.84 - index * 0.001).toFixed(3)),
+            max_drawdown_pct: Number(drawdownPct.toFixed(1)),
+            stability: 12 + (index % 4),
+          },
+          analysis: {},
+        };
+      });
+
+      currentJob = setMatchingCombinations(currentJob, combinations);
+      currentJob.summary.matching_combination_source = "all_trials";
+      currentJob.matching_combination_source = "all_trials";
+    }
+    return currentJob;
+  }
+
+  api.getOptimizationJobDetail = async (
+    jobId: string,
+  ): Promise<ApiOptimizationJobDetail> =>
+    structuredClone(await ensureJob(jobId));
+
+  api.updateOptimizationJobConstraints = async (
+    jobId,
+    payload,
+  ): Promise<ApiOptimizationJobDetail> => {
+    const job = await ensureJob(jobId);
+    currentJob = applyConstraintUpdateToJob(job, payload);
+    currentJob.summary.matching_combination_source = "all_trials";
+    currentJob.matching_combination_source = "all_trials";
+    return structuredClone(currentJob);
+  };
+
+  return api;
+}
+
 function createObjectiveSortingApi(): DemoApi {
   const api = createOptimizationTestApi();
   const originalGetOptimizationJobDetail =
@@ -2034,6 +2140,92 @@ describe("optimization module flow", () => {
     expect(activeShelfCard?.textContent).not.toBe(initialActiveShelfText);
   });
 
+  it("shows discrete observation timeframe values in parameter combination summaries", async () => {
+    const observationTimeframeApi = createOptimizationTestApi();
+    const originalGetOptimizationJobDetail =
+      observationTimeframeApi.getOptimizationJobDetail.bind(
+        observationTimeframeApi,
+      );
+    observationTimeframeApi.getOptimizationJobDetail = async (
+      jobId: string,
+    ) => {
+      const job = await originalGetOptimizationJobDetail(jobId);
+      const observationField: ApiOptimizationSearchSpaceField = {
+        key: "observation_timeframe",
+        label: "观察周期",
+        mode: "discrete",
+        current: "daily",
+        value: "daily",
+        values: ["daily", "weekly", "monthly"],
+        tag: "主搜索维度",
+      };
+      const searchSpace = [
+        observationField,
+        ...(job.request.search_space ?? []),
+      ];
+      job.request.search_space = structuredClone(searchSpace);
+      job.summary.search_space = structuredClone(searchSpace);
+      const candidateTemplate = job.candidates[0];
+      if (!candidateTemplate) {
+        throw new Error("missing optimization candidate template");
+      }
+      const observationCandidates = ["daily", "weekly", "monthly"].map(
+        (timeframe, index) => ({
+          ...structuredClone(candidateTemplate),
+          id: `obs-${index + 1}`,
+          rank: index + 1,
+          title: `观察周期候选 ${index + 1}`,
+          label: `观察周期候选 ${index + 1}`,
+          parameter_snapshot: {
+            ...candidateTemplate.parameter_snapshot,
+            observation_timeframe: timeframe,
+          },
+        }),
+      );
+      job.candidates = observationCandidates;
+      job.result.best_candidate_id = job.candidates[0]?.id ?? null;
+      job.result.best_candidate_label = job.candidates[0]?.label ?? null;
+      setMatchingCombinations(job, observationCandidates);
+      return job;
+    };
+    currentApi = observationTimeframeApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(
+        container.querySelector(".optimization-results-grid"),
+      ).not.toBeNull(),
+    );
+    const chips = container.querySelector(
+      ".optimization-meta-chips",
+    ) as HTMLElement | null;
+    expect(chips?.textContent).toContain(
+      "参数组合：观察周期每日/每周/每月；回看(月)6-12；跳过最近(月)1-4；买入排名阈值10-100；保留排名阈值110-130",
+    );
+    expect(container.textContent).toContain("观察周期：每日");
+    expect(container.textContent).toContain("观察周期：每周");
+    expect(container.textContent).toContain("观察周期：每月");
+
+    const openButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("查看全部组合"),
+    ) as HTMLButtonElement | undefined;
+    expect(openButton).toBeTruthy();
+
+    fireEvent.click(openButton!);
+
+    const dialog = await waitFor(() => {
+      const element = container.querySelector(
+        ".optimization-all-combinations-dialog",
+      ) as HTMLElement | null;
+      expect(element).not.toBeNull();
+      return element!;
+    });
+    expect(dialog.textContent).toContain("观察周期 每日");
+    expect(dialog.textContent).toContain("观察周期 每周");
+    expect(dialog.textContent).toContain("观察周期 每月");
+  });
+
   it("reuses the candidate scoring model for the current combination baseline", async () => {
     const baselineApi = createBaselineOnlyPassApi();
     currentApi = baselineApi;
@@ -2057,6 +2249,96 @@ describe("optimization module flow", () => {
       "稳定度46",
     );
     expect(baselineApi.__requestedRunDetailViews).toContain("initial");
+  });
+
+  it("renders quick-filter constraints in the corrected order for legacy-saved jobs", async () => {
+    const legacyOrderApi = createOptimizationTestApi();
+    const originalGetOptimizationJobDetail =
+      legacyOrderApi.getOptimizationJobDetail.bind(legacyOrderApi);
+
+    legacyOrderApi.getOptimizationJobDetail = async (
+      jobId: string,
+    ): Promise<ApiOptimizationJobDetail> => {
+      const job = await originalGetOptimizationJobDetail(jobId);
+      const legacyConstraintKeys = [
+        "max_drawdown_pct",
+        "out_of_sample_sharpe",
+        "annualized_return",
+        "stability",
+        "return_sharpe",
+      ] as const;
+      const constraintByKey = new Map(
+        (job.summary.constraints ?? []).map((constraint) => [
+          constraint.key,
+          constraint,
+        ]),
+      );
+      const legacyConstraints = legacyConstraintKeys
+        .map((key) => constraintByKey.get(key))
+        .filter(
+          (
+            constraint,
+          ): constraint is NonNullable<ApiOptimizationJobDetail["summary"]["constraints"]>[number] =>
+            Boolean(constraint),
+        )
+        .map((constraint) => structuredClone(constraint));
+
+      job.request.constraints = structuredClone(legacyConstraints);
+      job.summary.constraints = structuredClone(legacyConstraints);
+      job.result.constraints = structuredClone(legacyConstraints);
+      return job;
+    };
+
+    currentApi = legacyOrderApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(
+        container.querySelector("#optimization-results-constraint-return_sharpe"),
+      ).not.toBeNull(),
+    );
+
+    const labels = Array.from(
+      container.querySelectorAll(
+        ".optimization-results-constraint-pill:not(.optimization-results-constraint-pill--objective) .optimization-results-constraint-pill__label",
+      ),
+    )
+      .map((label) => label.textContent?.trim())
+      .filter((label): label is string => Boolean(label));
+
+    expect(labels).toEqual([
+      "最大回撤",
+      "收益夏普",
+      "年化收益率",
+      "稳定度",
+      "样本外夏普",
+    ]);
+  });
+
+  it("keeps cleared quick-filter inputs blank instead of coercing them to 0", async () => {
+    currentApi = createOptimizationTestApi();
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    const returnSharpeInput = await waitFor(() => {
+      const element = container.querySelector(
+        "#optimization-results-constraint-return_sharpe",
+      ) as HTMLInputElement | null;
+      expect(element).not.toBeNull();
+      return element!;
+    });
+    const initialValue = returnSharpeInput.value;
+
+    fireEvent.focus(returnSharpeInput);
+    fireEvent.change(returnSharpeInput, { target: { value: "" } });
+
+    expect(returnSharpeInput.value).toBe("");
+    expect(returnSharpeInput.value).not.toBe("0");
+
+    fireEvent.blur(returnSharpeInput);
+
+    await waitFor(() => expect(returnSharpeInput.value).toBe(initialValue));
   });
 
   it("re-ranks candidates by annualized return when re-filtering", async () => {
@@ -2211,6 +2493,118 @@ describe("optimization module flow", () => {
         "符合约束条件的组合共3个，以下按 综合得分 Max 输出当前候选版本排序。",
       );
     });
+  });
+
+  it("prefers all matching combinations over the current candidate subset in the results center", async () => {
+    const allCombinationApi = createOptimizationTestApi();
+    const originalGetOptimizationJobDetail =
+      allCombinationApi.getOptimizationJobDetail.bind(allCombinationApi);
+
+    allCombinationApi.getOptimizationJobDetail = async (
+      jobId: string,
+    ): Promise<ApiOptimizationJobDetail> => {
+      const job = await originalGetOptimizationJobDetail(jobId);
+      if (jobId !== "opt-001") {
+        return job;
+      }
+
+      job.candidates = job.candidates.map((candidate, index) => {
+        if (index === 0) {
+          return {
+            ...candidate,
+            id: "current-pass-1",
+            label: "当前候选 1",
+            title: "当前候选 1",
+            summary: "当前候选 1",
+            metrics: {
+              ...candidate.metrics,
+              annualized_return: 0.121,
+              return_sharpe: 1.22,
+              out_of_sample_sharpe: 0.95,
+              max_drawdown_pct: -12.2,
+              stability: 81,
+            },
+          };
+        }
+        return {
+          ...candidate,
+          id: `current-fail-${index + 1}`,
+          label: `未通过 ${index + 1}`,
+          title: `未通过 ${index + 1}`,
+          summary: `未通过 ${index + 1}`,
+          metrics: {
+            ...candidate.metrics,
+            annualized_return: 0.07,
+            return_sharpe: 0.86,
+            out_of_sample_sharpe: 0.74,
+            max_drawdown_pct: -26.0,
+            stability: 62,
+          },
+        };
+      });
+
+      const seedCandidate = job.candidates[0];
+      if (!seedCandidate) {
+        throw new Error("missing seed candidate");
+      }
+
+      setMatchingCombinations(job, [
+        {
+          ...structuredClone(seedCandidate),
+          id: "all-match-1",
+          label: "筛出组合 1",
+          title: "筛出组合 1",
+          rank: 1,
+        },
+        {
+          ...structuredClone(seedCandidate),
+          id: "all-match-2",
+          label: "筛出组合 2",
+          title: "筛出组合 2",
+          rank: 2,
+          parameter_snapshot: {
+            ...structuredClone(seedCandidate.parameter_snapshot ?? {}),
+            observation_timeframe: "weekly",
+          },
+        },
+        {
+          ...structuredClone(seedCandidate),
+          id: "all-match-3",
+          label: "筛出组合 3",
+          title: "筛出组合 3",
+          rank: 3,
+          parameter_snapshot: {
+            ...structuredClone(seedCandidate.parameter_snapshot ?? {}),
+            observation_timeframe: "monthly",
+          },
+        },
+      ]);
+      job.summary.matching_combination_source = "all_trials";
+      job.matching_combination_source = "all_trials";
+      return job;
+    };
+
+    currentApi = allCombinationApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(
+        container.querySelector(".optimization-results-grid"),
+      ).not.toBeNull(),
+    );
+
+    const resultRows = container.querySelectorAll(
+      ".optimization-results-card .optimization-lab-table tbody tr",
+    );
+
+    expect(container.textContent).toContain(
+      "符合约束条件的组合共3个",
+    );
+    expect(container.textContent).toContain("筛出组合 1");
+    expect(container.textContent).toContain("筛出组合 2");
+    expect(container.textContent).toContain("筛出组合 3");
+    expect(resultRows).toHaveLength(4);
   });
 
   it("opens the all-combinations modal and sorts rows by the selected metric", async () => {
@@ -2710,6 +3104,55 @@ describe("optimization module flow", () => {
     );
   });
 
+  it("re-filters against full matching combinations when persisted candidates would create a false zero", async () => {
+    const fullMatchingApi = createFullMatchingCombinationRefilterApi();
+    let saveCalled = false;
+    const originalUpdateConstraints =
+      fullMatchingApi.updateOptimizationJobConstraints.bind(fullMatchingApi);
+    fullMatchingApi.updateOptimizationJobConstraints = async (...args) => {
+      saveCalled = true;
+      return originalUpdateConstraints(...args);
+    };
+    currentApi = fullMatchingApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        "符合约束条件的组合共30个，以下按 收益夏普 Max 输出当前候选版本排序。",
+      ),
+    );
+
+    const maxDrawdownInput = container.querySelector(
+      "#optimization-results-constraint-max_drawdown_pct",
+    ) as HTMLInputElement | null;
+    const refilterButton = Array.from(
+      container.querySelectorAll("button"),
+    ).find((button) => button.textContent?.includes("重新过滤")) as
+      | HTMLButtonElement
+      | undefined;
+
+    expect(maxDrawdownInput).toBeTruthy();
+    expect(refilterButton).toBeTruthy();
+
+    fireEvent.change(maxDrawdownInput!, { target: { value: "2" } });
+    fireEvent.click(refilterButton!);
+
+    await waitFor(() => expect(saveCalled).toBe(true));
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        "符合约束条件的组合共15个，以下按 收益夏普 Max 输出当前候选版本排序。",
+      ),
+    );
+    expect(container.textContent).toContain("候选 1");
+    expect(container.textContent).not.toContain(
+      "无符合条件的组合，请放宽约束条件再试。",
+    );
+    expect(container.textContent).not.toContain(
+      "当前约束下暂无候选版本通过过滤",
+    );
+  });
+
   it("shows a toast and keeps the current result state when refiltering would remove every combination", async () => {
     const zeroTotalApi = createBaselineOnlyPassApi();
     let saveCalled = false;
@@ -3125,6 +3568,107 @@ describe("optimization module flow", () => {
     );
     expect(container.textContent).toContain("最佳候选");
     expect(container.textContent).not.toContain("Best candidate");
+  });
+
+  it("uses chinese candidate version names and localized shelf copy for full matching combinations", async () => {
+    const liveLikeApi = createOptimizationTestApi();
+    const originalGetOptimizationJobDetail =
+      liveLikeApi.getOptimizationJobDetail.bind(liveLikeApi);
+    liveLikeApi.getOptimizationJobDetail = async (jobId: string) => {
+      const job = await originalGetOptimizationJobDetail(jobId);
+      if (jobId !== "opt-001") {
+        return job;
+      }
+      const seedCandidate = job.candidates[0];
+      if (!seedCandidate) {
+        throw new Error("missing optimization candidate template");
+      }
+      const liveLikeMatches = [
+        {
+          ...structuredClone(seedCandidate),
+          id: "trial_2402",
+          label: "Trial 2402",
+          title: "Trial 2402",
+          rank: 1,
+          summary:
+            "观察周期=daily / 布林带周期=20; sharpe 0.15; oos 0.87; max drawdown -2.0%",
+          parameter_snapshot: {
+            ...structuredClone(seedCandidate.parameter_snapshot ?? {}),
+            observation_timeframe: "daily",
+          },
+          analysis: {},
+        },
+        {
+          ...structuredClone(seedCandidate),
+          id: "trial_4902",
+          label: "Trial 4902",
+          title: "Trial 4902",
+          rank: 2,
+          summary:
+            "观察周期=weekly / 布林带周期=20; sharpe 0.15; oos 0.87; max drawdown -2.0%",
+          parameter_snapshot: {
+            ...structuredClone(seedCandidate.parameter_snapshot ?? {}),
+            observation_timeframe: "weekly",
+          },
+          analysis: {},
+        },
+        {
+          ...structuredClone(seedCandidate),
+          id: "trial_7402",
+          label: "Trial 7402",
+          title: "Trial 7402",
+          rank: 3,
+          summary:
+            "观察周期=monthly / 布林带周期=20; sharpe 0.15; oos 0.87; max drawdown -2.0%",
+          parameter_snapshot: {
+            ...structuredClone(seedCandidate.parameter_snapshot ?? {}),
+            observation_timeframe: "monthly",
+          },
+          analysis: {},
+        },
+      ];
+      setMatchingCombinations(job, liveLikeMatches);
+      job.summary.matching_combination_source = "all_trials";
+      job.matching_combination_source = "all_trials";
+      return job;
+    };
+    currentApi = liveLikeApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(
+        container.querySelector(".optimization-results-grid"),
+      ).not.toBeNull(),
+    );
+
+    const candidateNames = Array.from(
+      container.querySelectorAll(
+        ".optimization-results-card .optimization-lab-table tbody tr td:nth-child(2) strong",
+      ),
+    )
+      .map((element) => element.textContent?.trim())
+      .filter((text): text is string => Boolean(text));
+    const candidateShelfCards = Array.from(
+      container.querySelectorAll(".optimization-shelf-card"),
+    );
+    const firstCandidateShelfCard = candidateShelfCards.find((card) =>
+      card.textContent?.includes("候选 1"),
+    );
+
+    expect(candidateNames).toEqual(
+      expect.arrayContaining(["候选 1", "候选 2", "候选 3"]),
+    );
+    expect(container.textContent).not.toContain("Trial 2402");
+    expect(firstCandidateShelfCard?.textContent).toContain("候选 1");
+    expect(firstCandidateShelfCard?.textContent).toContain("观察周期=每日");
+    expect(firstCandidateShelfCard?.textContent).toContain("收益夏普 0.15");
+    expect(firstCandidateShelfCard?.textContent).toContain("样本外 0.87");
+    expect(firstCandidateShelfCard?.textContent).toContain("最大回撤 -2.0%");
+    expect(firstCandidateShelfCard?.textContent).not.toContain("daily");
+    expect(firstCandidateShelfCard?.textContent).not.toContain("sharpe");
+    expect(firstCandidateShelfCard?.textContent).not.toContain("oos");
+    expect(firstCandidateShelfCard?.textContent).not.toContain("max drawdown");
   });
 
   it("switches the heatmap between annualized return, sharpe, and drawdown values", async () => {

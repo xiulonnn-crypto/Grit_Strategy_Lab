@@ -6487,7 +6487,7 @@ class BacktestPlatformService:
 
     def promote_trial(self, job_id: str, trial_id: str, request: Any) -> dict[str, Any]:
         job = self.get_optimization_job_detail(job_id)
-        candidate = next((item for item in job.get("candidates", []) if item.get("id") == trial_id), None)
+        candidate = self._resolve_optimization_candidate_for_action(job, trial_id)
         if not candidate:
             raise KeyError(f"Optimization candidate not found: {trial_id}")
         payload = _as_mapping(request)
@@ -6577,6 +6577,85 @@ class BacktestPlatformService:
             comment=payload.get("comment"),
         )
         return self.get_strategy_detail(str(job["strategy_id"]))
+
+    def _resolve_optimization_candidate_for_action(
+        self,
+        job: Mapping[str, Any],
+        trial_id: str,
+    ) -> dict[str, Any] | None:
+        normalized_trial_id = str(trial_id or "").strip()
+        if not normalized_trial_id:
+            return None
+
+        for collection_name in ("candidates", "matching_combinations"):
+            candidate = next(
+                (
+                    item
+                    for item in list(job.get(collection_name) or [])
+                    if isinstance(item, Mapping) and str(item.get("id") or "").strip() == normalized_trial_id
+                ),
+                None,
+            )
+            if candidate is not None:
+                return dict(candidate)
+
+        strategy = self.get_strategy_detail(str(job["strategy_id"]))
+        request_payload = _as_mapping(job.get("request"))
+        summary_payload = _as_mapping(job.get("summary"))
+        normalized_search_space = self._normalize_optimization_search_space(
+            strategy,
+            {
+                "search_space": request_payload.get("search_space")
+                or summary_payload.get("search_space"),
+            },
+        )
+        base_parameter_version_id = str(
+            job.get("base_parameter_version_id")
+            or request_payload.get("base_parameter_version_id")
+            or ""
+        ).strip() or None
+        trial_rows = self._load_optimization_trials(
+            str(job["id"]),
+            include_chart_series=False,
+            include_metrics_json=True,
+        )
+        for trial in trial_rows:
+            trial_index = _as_int(trial.get("trial_index"), 0)
+            resolved_trial_id = str(
+                trial.get("id")
+                or (f"trial_{trial_index}" if trial_index > 0 else "")
+            ).strip()
+            if resolved_trial_id != normalized_trial_id:
+                continue
+            if str(trial.get("status") or "").upper() != "SUCCEEDED":
+                return None
+
+            parameter_snapshot = dict(trial.get("parameter_snapshot") or {})
+            metrics = dict(trial.get("metrics") or {})
+            label = f"Trial {trial_index}" if trial_index > 0 else None
+            candidate = self._build_candidate_record(
+                strategy=strategy,
+                parameter_snapshot=parameter_snapshot,
+                base_parameter_version_id=base_parameter_version_id,
+                label=label,
+                title=label,
+                status="SUCCEEDED",
+                status_label=self._optimization_status_label(metrics),
+                metrics=metrics,
+                summary=self._optimization_candidate_summary(
+                    parameter_snapshot,
+                    metrics,
+                    normalized_search_space,
+                ),
+                rank=trial_index if trial_index > 0 else 1,
+                score=_as_float(trial.get("score"), 0.0),
+                analysis={},
+            )
+            candidate["id"] = resolved_trial_id
+            candidate["allowed_actions"] = []
+            candidate["analysis"] = {}
+            return candidate
+        return None
 
     def delete_optimization_candidate(self, job_id: str, trial_id: str) -> dict[str, Any]:
         job = self.get_optimization_job_detail(job_id)

@@ -188,16 +188,18 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 ### 4.5 main.py 的命令面
 
-`src/grit_backtest_platform/main.py` 当前只暴露两个主命令：
+`src/grit_backtest_platform/main.py` 当前暴露三个主命令：
 
 - `serve`
 - `refresh-snapshots`
+- `backfill-backtest-costs`
 
 补充规则：
 
 - `serve` 默认通过 `uvicorn` 启动 FastAPI app
 - `refresh-snapshots` 支持 `incremental`、`repair`、`full`
 - `refresh-snapshots` 在 Windows 下会使用基于 `GRIT_SNAPSHOT_MEMORY_LIMIT_RATIO` 的内存 job object 护栏
+- `backfill-backtest-costs` 会按默认 `fee_bps=1.5`、`slippage_bps=2.5` 重跑所有永久保存的历史回测，并覆盖原持久化结果；可通过 `--fee-bps` / `--slippage-bps` 改写本次回刷参数
 
 ### 4.6 Codex Auto Memory 接线真相
 
@@ -233,7 +235,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
   - FastAPI 入口与路由定义
   - app 生命周期与 service 装配
 - `src/grit_backtest_platform/main.py`
-  - CLI 启动与 `refresh-snapshots`
+  - CLI 启动、`refresh-snapshots` 与 `backfill-backtest-costs`
 - `src/grit_backtest_platform/models.py`
   - 请求体与关键状态词汇
 - `src/grit_backtest_platform/_service_rebuilt.py`

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
+import urllib.error
 import urllib.parse
 from types import SimpleNamespace
 from datetime import date
@@ -553,10 +555,10 @@ def test_runtime_market_data_provider_keeps_primary_actions_when_primary_price_s
 
     assert len(result["actions"]) == 1
     assert result["actions"][0]["action_type"] == "dividend"
-    assert result["actions"][0]["value"] == 0.25
+    assert result["actions"][0]["value"] is None
     assert result["actions"][0]["payload"]["from"] == "yahoo"
-    assert result["actions"][0]["payload"]["cash"] == 0.25
-    assert result["actions"][0]["fallback_source"] == "tiingo"
+    assert result["actions"][0]["payload"]["cash"] is None
+    assert all(item["provider"] != "tiingo" or item["status"] == "skipped" for item in result["metadata"]["provider_results"])
 
 
 def test_runtime_market_data_provider_stops_after_first_price_provider_success():
@@ -611,22 +613,22 @@ def test_runtime_market_data_provider_stops_after_first_price_provider_success()
 
     result = provider.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 1))
 
-    assert calls == ["yahoo", "tiingo"]
+    assert calls == ["yahoo"]
     assert result["source"] == "yahoo"
     assert len(result["bars"]) == 1
-    assert len(result["actions"]) == 1
+    assert len(result["actions"]) == 0
     provider_results = result["metadata"]["provider_results"]
     assert [
         (item["provider"], item["status"])
         for item in provider_results
     ] == [
         ("yahoo", "succeeded"),
-        ("tiingo", "succeeded"),
+        ("tiingo", "skipped"),
         ("akshare_us", "skipped"),
         ("sec_edgar", "unavailable"),
     ]
     assert provider_results[0]["selection_status"] == "selected_primary"
-    assert provider_results[1]["selection_status"] == "succeeded_not_selected"
+    assert provider_results[1]["reason"] == "primary_price_source_already_selected"
     assert provider_results[2]["reason"] == "primary_price_source_already_selected"
     assert provider_results[3]["kind"] == "filings_availability"
 
@@ -790,11 +792,13 @@ def test_runtime_market_data_provider_marks_yfinance_as_succeeded_not_selected()
     result = provider.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 1))
 
     provider_results = result["metadata"]["provider_results"]
-    assert [(item["provider"], item["selection_status"]) for item in provider_results[:2]] == [
-        ("yahoo", "selected_primary"),
-        ("yfinance", "succeeded_not_selected"),
+    assert [(item["provider"], item["status"]) for item in provider_results[:2]] == [
+        ("yahoo", "succeeded"),
+        ("yfinance", "skipped"),
     ]
-    assert result["actions"][0]["fallback_source"] == "yfinance"
+    assert provider_results[0]["selection_status"] == "selected_primary"
+    assert provider_results[1]["reason"] == "primary_price_source_already_selected"
+    assert result["actions"] == []
 
 
 def test_runtime_market_data_provider_uses_alpha_only_for_targeted_price_repair():
@@ -1177,3 +1181,197 @@ def test_akshare_us_provider_parses_records(monkeypatch):
     assert result.bars[0].adj_close == 100.4
     assert result.bars[1].adj_close == 101.3
     assert result.metadata["actions_supported"] is False
+
+
+def test_alpha_vantage_provider_parses_dividends_and_splits(monkeypatch):
+    monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "token")
+    provider = AlphaVantageProvider()
+
+    def fake_urlopen(request, timeout=0):
+        url = _request_url(request)
+        parsed = urllib.parse.urlparse(url)
+        params = urllib.parse.parse_qs(parsed.query)
+        function = params.get("function", [""])[0]
+        if function == "DIVIDENDS":
+            return _FakeHttpResponse(
+                json.dumps(
+                    {
+                        "data": [
+                            {
+                                "ex_dividend_date": "2026-04-01",
+                                "amount": "0.24",
+                                "record_date": "2026-04-02",
+                                "payment_date": "2026-04-15",
+                            }
+                        ]
+                    }
+                )
+            )
+        if function == "SPLITS":
+            return _FakeHttpResponse(
+                json.dumps(
+                    {
+                        "data": [
+                            {
+                                "effective_date": "2026-04-02",
+                                "split_from": "1",
+                                "split_to": "2",
+                            },
+                            {
+                                "effective_date": "2026-04-03",
+                                "split_from": "4",
+                                "split_to": "1",
+                            },
+                        ]
+                    }
+                )
+            )
+        raise AssertionError(f"Unexpected Alpha Vantage request: {url}")
+
+    monkeypatch.setattr("grit_backtest_platform.alpha_vantage_provider.urllib.request.urlopen", fake_urlopen)
+
+    result = provider.fetch_corporate_actions("AAPL", date(2026, 4, 1), date(2026, 4, 3))
+
+    assert result["source"] == "alpha_vantage"
+    assert result["probe_complete"] is True
+    assert result["metadata"]["actions_supported"] is True
+    assert result["metadata"]["access_tier"] == "free_account"
+    assert {item["action_type"] for item in result["actions"]} == {
+        "dividend",
+        "split",
+        "reverse_split",
+    }
+
+
+def test_alpha_vantage_corporate_action_rate_limit_exposes_retry_metadata(monkeypatch):
+    monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "token")
+    provider = AlphaVantageProvider()
+
+    def fake_urlopen(request, timeout=0):
+        return _FakeHttpResponse(
+            json.dumps(
+                {
+                    "Note": (
+                        "Thank you for using Alpha Vantage! "
+                        "Our standard API call frequency is 25 requests per day."
+                    )
+                }
+            )
+        )
+
+    monkeypatch.setattr("grit_backtest_platform.alpha_vantage_provider.urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(ProviderExecutionSignal) as exc:
+        provider.fetch_corporate_actions("AAPL", date(2026, 4, 1), date(2026, 4, 3))
+
+    assert exc.value.status == "limited"
+    assert exc.value.reason == "rate_limited"
+    assert exc.value.metadata["quota_limited"] is True
+    assert isinstance(exc.value.metadata["next_retry_at"], str)
+
+
+def test_tiingo_provider_429_emits_retry_metadata(monkeypatch):
+    monkeypatch.setenv("TIINGO_API_TOKEN", "token")
+    provider = TiingoMarketDataProvider(timeout=1)
+
+    def fake_urlopen(request, timeout=0):
+        raise urllib.error.HTTPError(
+            url=_request_url(request),
+            code=429,
+            msg="Too Many Requests",
+            hdrs={"Retry-After": "120"},
+            fp=io.BytesIO(b'{"detail":"Rate limit exceeded"}'),
+        )
+
+    monkeypatch.setattr("grit_backtest_platform.tiingo_provider.urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(ProviderExecutionSignal) as exc:
+        provider.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 2))
+
+    assert exc.value.status == "limited"
+    assert exc.value.reason == "rate_limited"
+    assert exc.value.metadata["quota_limited"] is True
+    assert isinstance(exc.value.metadata["next_retry_at"], str)
+
+
+def test_runtime_market_data_provider_records_alpha_vantage_probe_after_public_price_success():
+    class _YahooProvider:
+        provider_name = "yahoo"
+        supports_action_enrichment = True
+
+        def fetch_history(self, symbol: str, start_date: date, end_date: date):
+            return {
+                "source": "yahoo",
+                "fallback_source": None,
+                "bars": [
+                    {
+                        "date": "2026-04-01",
+                        "open": 100.0,
+                        "high": 101.0,
+                        "low": 99.0,
+                        "close": 100.5,
+                        "adj_close": 100.5,
+                        "volume": 1000,
+                    }
+                ],
+                "actions": [],
+                "warnings": [],
+                "partial": False,
+                "metadata": {"provider": "yahoo"},
+            }
+
+    class _TiingoProvider:
+        provider_name = "tiingo"
+        supports_action_enrichment = True
+
+        def __init__(self) -> None:
+            self.called = False
+
+        def fetch_history(self, symbol: str, start_date: date, end_date: date):
+            self.called = True
+            raise AssertionError("Tiingo should be skipped once Yahoo completed the probe.")
+
+    class _AlphaProbeProvider:
+        provider_name = "alpha_vantage"
+
+        def __init__(self) -> None:
+            self.called = False
+
+        def fetch_corporate_actions(self, symbol: str, start_date: date, end_date: date):
+            self.called = True
+            return {
+                "source": "alpha_vantage",
+                "actions": [],
+                "probe_complete": True,
+                "metadata": {
+                    "actions_supported": True,
+                    "probe_complete": True,
+                    "access_tier": "free_account",
+                    "quota_limited": False,
+                },
+            }
+
+    tiingo = _TiingoProvider()
+    alpha_probe = _AlphaProbeProvider()
+    runtime = RuntimeMarketDataProvider([_YahooProvider(), tiingo, alpha_probe])
+
+    result = runtime.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 2))
+    provider_results = result["metadata"]["provider_results"]
+
+    assert tiingo.called is False
+    assert alpha_probe.called is True
+    assert any(
+        item["provider"] == "tiingo"
+        and item["kind"] == "history"
+        and item["status"] == "skipped"
+        and item["reason"] == "primary_price_source_already_selected"
+        for item in provider_results
+    )
+    assert any(
+        item["provider"] == "alpha_vantage"
+        and item["kind"] == "history_availability"
+        and item["status"] == "succeeded"
+        and item["probe_complete"] is True
+        and item["access_tier"] == "free_account"
+        for item in provider_results
+    )

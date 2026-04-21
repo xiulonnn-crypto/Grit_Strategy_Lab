@@ -653,6 +653,61 @@ describe("OptimizationConfigPage", () => {
     );
   });
 
+  it("renders the Sharpe constraint cards in the corrected order", async () => {
+    const { container } = render(
+      <OptimizationConfigPage
+        strategyId="strat-mean-001"
+        sourceRunId="run-seed"
+        entryPoint="run_detail"
+      />,
+    );
+
+    await screen.findByRole("heading", { level: 1, name: "QQQ均值回归策略" });
+
+    const labels = Array.from(
+      container.querySelectorAll(".optimization-constraint-card__rule-label"),
+    )
+      .map((label) => label.textContent?.trim())
+      .filter((label): label is string => Boolean(label));
+
+    expect(labels).toEqual([
+      "最大回撤",
+      "收益夏普",
+      "年化收益率",
+      "稳定度",
+      "样本外夏普",
+    ]);
+  });
+
+  it("keeps cleared constraint inputs blank instead of coercing them to 0", async () => {
+    const { container } = render(
+      <OptimizationConfigPage
+        strategyId="strat-mean-001"
+        sourceRunId="run-seed"
+        entryPoint="run_detail"
+      />,
+    );
+
+    const returnSharpeInput = (await waitFor(() => {
+      const element = container.querySelector(
+        "#optimization-constraint-return_sharpe",
+      ) as HTMLInputElement | null;
+      expect(element).not.toBeNull();
+      return element!;
+    })) as HTMLInputElement;
+    const initialValue = returnSharpeInput.value;
+
+    fireEvent.focus(returnSharpeInput);
+    fireEvent.change(returnSharpeInput, { target: { value: "" } });
+
+    expect(returnSharpeInput.value).toBe("");
+    expect(returnSharpeInput.value).not.toBe("0");
+
+    fireEvent.blur(returnSharpeInput);
+
+    await waitFor(() => expect(returnSharpeInput.value).toBe(initialValue));
+  });
+
   it("resets validation mode, range fields, and constraint thresholds together", async () => {
     const { container } = render(
       <OptimizationConfigPage
@@ -677,11 +732,13 @@ describe("OptimizationConfigPage", () => {
     const originalEndValue = endInput.value;
     fireEvent.change(endInput, { target: { value: "14" } });
 
-    const constraintInput = screen.getByLabelText(
-      "最大回撤 阈值",
-    ) as HTMLInputElement;
-    const originalConstraintValue = constraintInput.value;
-    fireEvent.change(constraintInput, { target: { value: "17" } });
+    const constraintInput = container.querySelector(
+      "#optimization-constraint-max_drawdown_pct",
+    ) as HTMLInputElement | null;
+    expect(constraintInput).toBeTruthy();
+    const originalConstraintValue = constraintInput!.value;
+
+    fireEvent.change(constraintInput!, { target: { value: "17" } });
 
     const validationSelect = container.querySelector(
       "select:not([aria-label])",
@@ -696,7 +753,7 @@ describe("OptimizationConfigPage", () => {
     await waitFor(() => {
       expect(validationSelect!.value).toBe("walk_forward");
       expect(endInput.value).toBe(originalEndValue);
-      expect(constraintInput.value).toBe(originalConstraintValue);
+      expect(constraintInput!.value).toBe(originalConstraintValue);
     });
   });
 
@@ -761,9 +818,9 @@ describe("OptimizationConfigPage", () => {
     const ruleOperator = firstCard?.querySelector(
       ".optimization-constraint-card__rule-operator",
     ) as HTMLSpanElement | null;
-    const ruleInput = screen.getByLabelText(
-      "最大回撤 阈值",
-    ) as HTMLInputElement;
+    const ruleInput = firstCard?.querySelector(
+      "#optimization-constraint-max_drawdown_pct",
+    ) as HTMLInputElement | null;
     const ruleUnit = firstCard?.querySelector(
       ".optimization-constraint-card__rule-unit",
     ) as HTMLSpanElement | null;
@@ -782,7 +839,7 @@ describe("OptimizationConfigPage", () => {
     expect(rule).toBeTruthy();
     expect(ruleLabel?.textContent).toBe("最大回撤");
     expect(ruleOperator?.textContent).toBe("≤");
-    expect(ruleInput.value).toBe("25");
+    expect(ruleInput?.value).toBe("25");
     expect(ruleUnit?.textContent).toBe("%");
     expect(badges).toBeTruthy();
     expect(baselineChip).toBeTruthy();

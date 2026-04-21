@@ -704,6 +704,63 @@ export type ApiSnapshotBlocker = {
   [key: string]: unknown;
 };
 
+export type ApiSnapshotProviderAccessTier =
+  | "public"
+  | "free_account"
+  | "paid_optional";
+
+export type ApiSnapshotProviderSummaryItem = {
+  kinds?: string[];
+  reasons?: string[];
+  attempted_symbols?: number;
+  succeeded_symbols?: number;
+  selected_primary_symbols?: number;
+  succeeded_not_selected_symbols?: number;
+  failed_symbols?: number;
+  limited_symbols?: number;
+  skipped_symbols?: number;
+  empty_symbols?: number;
+  unavailable_symbols?: number;
+  landed_row_count?: number;
+  landed_symbol_count?: number;
+  actions_supported?: boolean;
+  access_tier?: ApiSnapshotProviderAccessTier;
+  quota_limited?: boolean;
+  probe_complete?: boolean;
+  next_retry_at?: string | null;
+  [key: string]: unknown;
+};
+
+export type ApiSnapshotProviderSummary = {
+  attempted_providers?: string[];
+  skipped_providers?: string[];
+  unavailable_providers?: string[];
+  providers?: Record<string, ApiSnapshotProviderSummaryItem>;
+  [key: string]: unknown;
+};
+
+export type ApiDatasetSnapshotMetadata = Record<string, unknown> & {
+  covered_symbol_count?: number;
+  total_symbol_count?: number;
+  missing_symbols?: string[];
+  probe_status_breakdown?: Record<string, number>;
+  coverage_kind_breakdown?: Record<string, number>;
+  complete_no_events_symbol_count?: number;
+  formal_event_symbol_count?: number;
+  provider_summary?: ApiSnapshotProviderSummary;
+};
+
+export type ApiUniverseSnapshotMetadata = Record<string, unknown> & {
+  anchor_count?: number;
+  historical_anchor_count?: number;
+  fallback_anchor_count?: number;
+  source_quality_breakdown?: Record<string, number>;
+  official_seed_status?: "complete" | "partial" | "missing";
+  official_seed_source_count?: number;
+  official_seed_missing_anchors?: string[];
+  provider_summary?: ApiSnapshotProviderSummary;
+};
+
 export type ApiDatasetSnapshot = {
   id: string;
   name: string;
@@ -716,7 +773,7 @@ export type ApiDatasetSnapshot = {
   source?: string | null;
   fallback_source?: string | null;
   blocker?: ApiSnapshotBlocker | null;
-  metadata?: Record<string, unknown>;
+  metadata?: ApiDatasetSnapshotMetadata;
   [key: string]: unknown;
 };
 
@@ -733,7 +790,7 @@ export type ApiUniverseSnapshot = {
   source?: string | null;
   fallback_source?: string | null;
   blocker?: ApiSnapshotBlocker | null;
-  metadata?: Record<string, unknown>;
+  metadata?: ApiUniverseSnapshotMetadata;
   [key: string]: unknown;
 };
 

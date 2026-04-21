@@ -248,11 +248,16 @@ def test_prepare_push_adds_one_line_summary_to_revision_snapshot(tmp_path: Path)
     prepare_push(tmp_path, release=False, effective_date=date(2026, 4, 15))
     changelog = (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
 
-    assert "## [0.1.1-001] - 2026-04-15" in changelog
     assert (
-        "> 摘要：本次快照调整Objective ranking、Constraint cleanup，并修复QuickStart preview、Candidate board。"
+        "## [0.1.1-001] - 2026-04-15 - 调整Objective ranking、Constraint cleanup，并修复QuickStart preview、Candidate board"
         in changelog
     )
+    assert (
+        "### 优化 (Changed)\n\n- **Objective ranking**: Keep primary metric ordering strict when re-filtering."
+        in changelog
+    )
+    assert "### 修复 (Fixed)\n\n- **QuickStart preview**: Rebuild the preview bundle on cold start." in changelog
+    assert "> 摘要：" not in changelog
 
 
 def test_prepare_push_adds_one_line_summary_to_release_snapshot(tmp_path: Path) -> None:
@@ -283,5 +288,69 @@ def test_prepare_push_adds_one_line_summary_to_release_snapshot(tmp_path: Path) 
     )
     changelog = (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
 
-    assert "## [0.1.2] - 2026-04-15" in changelog
-    assert "> 摘要：本次快照新增Optimization Lab。" in changelog
+    assert "## [0.1.2] - 2026-04-15 - 新增Optimization Lab" in changelog
+    assert "### 新增 (Added)\n\n- **Optimization Lab**: Add the first end-to-end optimization workspace flow." in changelog
+    assert "> 摘要：" not in changelog
+
+
+def test_prepare_push_accepts_bilingual_unreleased_headings(tmp_path: Path) -> None:
+    _write_repo_files(
+        tmp_path,
+        """# 更新日志
+
+## [Unreleased]
+
+### 优化 (Changed)
+
+- **目标排序**: 保持重新过滤后的结果按主指标稳定排序。
+
+### 修复 (Fixed)
+
+- **预览冷启动**: 首次打开时主动重建前端预览产物。
+
+## [0.1.1] - 2026-03-31
+
+### 新增 (Added)
+
+- 已发布内容。
+""",
+    )
+
+    prepare_push(tmp_path, release=False, effective_date=date(2026, 4, 15))
+    changelog = (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert "## [0.1.1-001] - 2026-04-15 - 调整目标排序，并修复预览冷启动" in changelog
+    assert "### 优化 (Changed)\n\n- **目标排序**: 保持重新过滤后的结果按主指标稳定排序。" in changelog
+    assert "### 修复 (Fixed)\n\n- **预览冷启动**: 首次打开时主动重建前端预览产物。" in changelog
+
+
+def test_prepare_push_preserves_existing_heading_summary_on_history(tmp_path: Path) -> None:
+    _write_repo_files(
+        tmp_path,
+        """# 更新日志
+
+## [Unreleased]
+
+### 修复 (Fixed)
+
+- **结果页**: 修复历史任务结果计数口径。
+
+## [0.1.1-001] - 2026-04-14 - 既有历史摘要
+
+### 优化 (Changed)
+
+- **旧条目**: 保留已有标题摘要，不在下次快照时丢失。
+
+## [0.1.1] - 2026-03-31
+
+### 新增 (Added)
+
+- 已发布内容。
+""",
+    )
+
+    prepare_push(tmp_path, release=False, effective_date=date(2026, 4, 15))
+    changelog = (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert "## [0.1.1-001] - 2026-04-14 - 既有历史摘要" in changelog
+    assert "## [0.1.1-002] - 2026-04-15 - 修复结果页" in changelog

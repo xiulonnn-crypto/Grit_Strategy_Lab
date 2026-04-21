@@ -242,6 +242,69 @@ function OptimizationDiscreteFieldControl({
   );
 }
 
+function formatOptimizationConstraintInputValue(
+  value: number | null | undefined,
+): string {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+}
+
+function OptimizationConstraintThresholdInput({
+  ariaLabel,
+  className,
+  id,
+  onCommitValue,
+  step,
+  value,
+}: {
+  ariaLabel: string;
+  className?: string;
+  id: string;
+  onCommitValue: (value: number) => void;
+  step: string;
+  value: number | null | undefined;
+}): JSX.Element {
+  const [draftValue, setDraftValue] = useState(() =>
+    formatOptimizationConstraintInputValue(value),
+  );
+  const [editing, setEditing] = useState(false);
+
+  useEffect(() => {
+    if (!editing) {
+      setDraftValue(formatOptimizationConstraintInputValue(value));
+    }
+  }, [editing, value]);
+
+  function handleChange(nextValue: string): void {
+    setDraftValue(nextValue);
+    if (!nextValue.trim()) {
+      return;
+    }
+    const parsed = Number(nextValue);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+    onCommitValue(parsed);
+  }
+
+  return (
+    <input
+      aria-label={ariaLabel}
+      className={className}
+      id={id}
+      inputMode="decimal"
+      onBlur={() => {
+        setEditing(false);
+        setDraftValue(formatOptimizationConstraintInputValue(value));
+      }}
+      onChange={(event) => handleChange(event.target.value)}
+      onFocus={() => setEditing(true)}
+      step={step}
+      type="number"
+      value={draftValue}
+    />
+  );
+}
+
 function parsePositiveIntEnvVar(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -317,11 +380,11 @@ const OPTIMIZATION_CONSTRAINT_PRESETS: OptimizationConstraintPreset[] = [
         source: "preset",
       },
       {
-        key: "out_of_sample_sharpe",
-        label: "样本外夏普",
-        category: "stability",
+        key: "return_sharpe",
+        label: "收益夏普",
+        category: "return",
         operator: ">=",
-        value: 0.8,
+        value: 1,
         unit: "",
         source: "preset",
       },
@@ -344,11 +407,11 @@ const OPTIMIZATION_CONSTRAINT_PRESETS: OptimizationConstraintPreset[] = [
         source: "preset",
       },
       {
-        key: "return_sharpe",
-        label: "收益夏普",
-        category: "return",
+        key: "out_of_sample_sharpe",
+        label: "样本外夏普",
+        category: "stability",
         operator: ">=",
-        value: 1,
+        value: 0.8,
         unit: "",
         source: "preset",
       },
@@ -369,11 +432,11 @@ const OPTIMIZATION_CONSTRAINT_PRESETS: OptimizationConstraintPreset[] = [
         source: "preset",
       },
       {
-        key: "out_of_sample_sharpe",
-        label: "样本外夏普",
-        category: "stability",
+        key: "return_sharpe",
+        label: "收益夏普",
+        category: "return",
         operator: ">=",
-        value: 0.92,
+        value: 0.9,
         unit: "",
         source: "preset",
       },
@@ -396,11 +459,11 @@ const OPTIMIZATION_CONSTRAINT_PRESETS: OptimizationConstraintPreset[] = [
         source: "preset",
       },
       {
-        key: "return_sharpe",
-        label: "收益夏普",
-        category: "return",
+        key: "out_of_sample_sharpe",
+        label: "样本外夏普",
+        category: "stability",
         operator: ">=",
-        value: 0.9,
+        value: 0.92,
         unit: "",
         source: "preset",
       },
@@ -421,11 +484,11 @@ const OPTIMIZATION_CONSTRAINT_PRESETS: OptimizationConstraintPreset[] = [
         source: "preset",
       },
       {
-        key: "out_of_sample_sharpe",
-        label: "样本外夏普",
-        category: "stability",
+        key: "return_sharpe",
+        label: "收益夏普",
+        category: "return",
         operator: ">=",
-        value: 0.65,
+        value: 1.15,
         unit: "",
         source: "preset",
       },
@@ -448,11 +511,11 @@ const OPTIMIZATION_CONSTRAINT_PRESETS: OptimizationConstraintPreset[] = [
         source: "preset",
       },
       {
-        key: "return_sharpe",
-        label: "收益夏普",
-        category: "return",
+        key: "out_of_sample_sharpe",
+        label: "样本外夏普",
+        category: "stability",
         operator: ">=",
-        value: 1.15,
+        value: 0.65,
         unit: "",
         source: "preset",
       },
@@ -647,7 +710,13 @@ function translateOptimizationText(value?: string | null): string | null {
     .replace(/\bOptimization interrupted\b/gi, "优化已中断")
     .replace(/\bCandidate\s+(\d+)\b/gi, "候选方案 $1")
     .replace(/\bManual Candidate\s+(\d+)\b/gi, "手动候选 $1")
-    .replace(/\bTrial\s+(\d+)\b/gi, "试验 $1");
+    .replace(/\bTrial\s+(\d+)\b/gi, "试验 $1")
+    .replace(/\bmax drawdown\b/gi, "最大回撤")
+    .replace(/\boos\b/gi, "样本外")
+    .replace(/\bsharpe\b/gi, "收益夏普")
+    .replace(/\bdaily\b/gi, "每日")
+    .replace(/\bweekly\b/gi, "每周")
+    .replace(/\bmonthly\b/gi, "每月");
 }
 
 function getDisplayText(
@@ -667,6 +736,48 @@ function getCandidateDisplayText(
     return "最佳候选";
   }
   return getDisplayText(value, fallback);
+}
+
+function isTrialLikeCandidateDisplayText(
+  value: string | null | undefined,
+): boolean {
+  const repaired = repairMojibakeText(value);
+  if (!repaired) {
+    return false;
+  }
+  return /^trial\s+\d+$/i.test(repaired.trim()) || /^试验\s+\d+$/u.test(repaired.trim());
+}
+
+function getCandidateVersionDisplayText(
+  candidate: Pick<
+    OptimizationDisplayCandidate,
+    "display_kind" | "label" | "title" | "rank"
+  >,
+  fallback = "-",
+): string {
+  if (candidate.display_kind === "baseline") {
+    return getCandidateDisplayText(candidate.title ?? candidate.label, fallback);
+  }
+
+  const translatedLabel = getCandidateDisplayText(candidate.label, "");
+  if (translatedLabel && !isTrialLikeCandidateDisplayText(translatedLabel)) {
+    return translatedLabel;
+  }
+
+  const translatedTitle = getCandidateDisplayText(candidate.title, "");
+  if (translatedTitle && !isTrialLikeCandidateDisplayText(translatedTitle)) {
+    return translatedTitle;
+  }
+
+  if (
+    typeof candidate.rank === "number" &&
+    Number.isFinite(candidate.rank) &&
+    candidate.rank > 0
+  ) {
+    return `候选 ${candidate.rank}`;
+  }
+
+  return getCandidateDisplayText(candidate.label ?? candidate.title, fallback);
 }
 
 function isMostlyAsciiLabel(value: string): boolean {
@@ -706,9 +817,18 @@ function cloneOptimizationConstraints(
         SUPPORTED_OPTIMIZATION_CONSTRAINT_KEYS.has(constraint.key),
       )
     : preset.constraints;
-  const effectiveConstraints = sourceConstraints.length
-    ? sourceConstraints
-    : preset.constraints;
+  const presetOrder = new Map(
+    preset.constraints.map((constraint, index) => [constraint.key, index]),
+  );
+  const effectiveConstraints = (
+    sourceConstraints.length ? sourceConstraints : preset.constraints
+  )
+    .slice()
+    .sort((left, right) => {
+      const leftOrder = presetOrder.get(left.key) ?? Number.MAX_SAFE_INTEGER;
+      const rightOrder = presetOrder.get(right.key) ?? Number.MAX_SAFE_INTEGER;
+      return leftOrder - rightOrder;
+    });
   return effectiveConstraints.map((constraint) => {
     const presetConstraint = preset.constraints.find(
       (item) => item.key === constraint.key,
@@ -2260,14 +2380,23 @@ function getOptimizationRangeLabel(
 function buildOptimizationRangeSummary(
   fields: ApiOptimizationSearchSpaceField[],
 ): string | null {
-  const rangedFields = fields.filter((field) => field.mode === "range");
-  if (!rangedFields.length) {
+  const summaryFields = fields.filter(
+    (field) => field.mode === "range" || field.mode === "discrete",
+  );
+  if (!summaryFields.length) {
     return null;
   }
-  return rangedFields
+  return summaryFields
     .map(
-      (field) =>
-        `${getOptimizationRangeLabel(field)}${formatEditableParameterValue(field.start)}-${formatEditableParameterValue(field.end)}`,
+      (field) => {
+        if (field.mode === "discrete") {
+          const values = getDiscreteFieldValues(field).map((value) =>
+            formatParameterValue(value),
+          );
+          return `${getOptimizationRangeLabel(field)}${values.join("/")}`;
+        }
+        return `${getOptimizationRangeLabel(field)}${formatEditableParameterValue(field.start)}-${formatEditableParameterValue(field.end)}`;
+      },
     )
     .join("；");
 }
@@ -2307,11 +2436,11 @@ function buildRangeParameterEntries(
   snapshot: Record<string, ParameterValue> | undefined,
   fields: ApiOptimizationSearchSpaceField[],
 ): OptimizationParameterEntry[] {
-  const rangedFields = fields.filter((field) => field.mode === "range");
-  if (!rangedFields.length) {
+  const variableFields = fields.filter((field) => field.mode !== "fixed");
+  if (!variableFields.length) {
     return [];
   }
-  return rangedFields.map((field) => ({
+  return variableFields.map((field) => ({
     key: field.key,
     label: getSearchFieldDisplayLabel(field),
     value: formatParameterValue(
@@ -3922,18 +4051,16 @@ export function OptimizationConfigPage({
                             constraint.operator,
                           )}
                         </span>
-                        <input
-                          aria-label={`${constraint.label} 阈值`}
+                        <OptimizationConstraintThresholdInput
+                          ariaLabel={`${constraint.label} 阈值`}
                           className="optimization-constraint-card__rule-input"
                           id={`optimization-constraint-${constraint.key}`}
-                          inputMode="decimal"
-                          onChange={(event) =>
-                            updateConstraint(index, event.target.value)
+                          onCommitValue={(nextValue) =>
+                            updateConstraint(index, String(nextValue))
                           }
                           step={getOptimizationConstraintInputStep(
                             constraint.key,
                           )}
-                          type="number"
                           value={constraint.value}
                         />
                         {unitLabel ? (
@@ -4301,6 +4428,13 @@ export function OptimizationResultsPage({
   const quickFilterConstraints = constraintDrafts.length
     ? constraintDrafts
     : optimizationConstraints;
+  const optimizationProgressState = isOptimizationProgressState(job?.status);
+  const optimizationRunning = isOptimizationRunning(job?.status);
+  const optimizationInterrupted =
+    String(job?.status ?? "").toUpperCase() === "INTERRUPTED";
+  const matchingCombinationCountIsPartial =
+    !optimizationProgressState &&
+    isPersistedCandidateOnlyMatchingCount(job);
   const matchingCandidates = useMemo(
     () => {
       const filteredCandidates = filterOptimizationCandidatesByConstraints(
@@ -4314,6 +4448,49 @@ export function OptimizationResultsPage({
     },
     [job?.candidates, optimizationConstraints, optimizationObjective],
   );
+  const matchingCandidatesFromAllCombinations = useMemo<
+    OptimizationDisplayCandidate[]
+  >(
+    () => {
+      if (
+        matchingCombinationCountIsPartial ||
+        !Array.isArray(job?.matching_combinations) ||
+        !job.matching_combinations.length
+      ) {
+        return [];
+      }
+      const filteredCandidates = filterOptimizationCandidatesByConstraints(
+        job.matching_combinations,
+        optimizationConstraints,
+      );
+      return rankOptimizationCandidatesByObjective(
+        filteredCandidates,
+        optimizationObjective,
+      );
+    },
+    [
+      job?.matching_combinations,
+      matchingCombinationCountIsPartial,
+      optimizationConstraints,
+      optimizationObjective,
+    ],
+  );
+  const hasFullMatchingCombinations = Boolean(
+    !matchingCombinationCountIsPartial &&
+      Array.isArray(job?.matching_combinations) &&
+      job.matching_combinations.length,
+  );
+  const displayedMatchingCandidates = useMemo<OptimizationDisplayCandidate[]>(
+    () =>
+      hasFullMatchingCombinations
+        ? matchingCandidatesFromAllCombinations
+        : matchingCandidates,
+    [
+      hasFullMatchingCombinations,
+      matchingCandidates,
+      matchingCandidatesFromAllCombinations,
+    ],
+  );
   const allMatchingCombinationCandidates = useMemo<
     OptimizationDisplayCandidate[]
   >(() => {
@@ -4325,10 +4502,10 @@ export function OptimizationResultsPage({
         "desc",
       );
     }
-    return matchingCandidates;
+    return displayedMatchingCandidates;
   }, [
+    displayedMatchingCandidates,
     job?.matching_combinations,
-    matchingCandidates,
     optimizationObjective,
     optimizationSearchSpace,
   ]);
@@ -4353,10 +4530,10 @@ export function OptimizationResultsPage({
   );
   const candidateRows = useMemo<OptimizationDisplayCandidate[]>(
     () => [
-      ...matchingCandidates,
+      ...displayedMatchingCandidates,
       ...(baselineCandidate ? [baselineCandidate] : []),
     ],
-    [baselineCandidate, matchingCandidates],
+    [baselineCandidate, displayedMatchingCandidates],
   );
   const baselineMatchesConstraints = useMemo(
     () =>
@@ -4394,17 +4571,10 @@ export function OptimizationResultsPage({
     [optimizationSearchSpace],
   );
   const totalCandidateCount = job?.candidates.length ?? 0;
-  const optimizationProgressState = isOptimizationProgressState(job?.status);
-  const optimizationRunning = isOptimizationRunning(job?.status);
-  const optimizationInterrupted =
-    String(job?.status ?? "").toUpperCase() === "INTERRUPTED";
   const matchingCombinationCount =
     job && !optimizationProgressState
       ? Math.max(0, getOptimizationMatchingCombinationCount(job))
       : 0;
-  const matchingCombinationCountIsPartial =
-    !optimizationProgressState &&
-    isPersistedCandidateOnlyMatchingCount(job);
   const plannedCombinationCount =
     typeof job?.summary.budget_combinations === "number"
       ? job.summary.budget_combinations
@@ -4413,7 +4583,7 @@ export function OptimizationResultsPage({
         : 0;
   const filteredOutCandidateCount = Math.max(
     0,
-    totalCandidateCount - matchingCandidates.length,
+    totalCandidateCount - displayedMatchingCandidates.length,
   );
   const candidatePanelSubtitle = matchingCombinationCountIsPartial
     ? `当前仅基于已保存候选识别到 ${matchingCombinationCount} 个符合约束的组合。该历史任务缺少全量 trial 明细，因此这不是${plannedCombinationCount ? ` ${plannedCombinationCount} ` : ""}组组合的完整筛选结果。`
@@ -4475,7 +4645,7 @@ export function OptimizationResultsPage({
   const noCandidateConstraintMatch = Boolean(
     !optimizationProgressState &&
       totalCandidateCount > 0 &&
-      matchingCandidates.length === 0,
+      displayedMatchingCandidates.length === 0,
   );
   const noConstraintMatch = Boolean(
     noCandidateConstraintMatch && !baselineMatchesConstraints,
@@ -4790,7 +4960,13 @@ export function OptimizationResultsPage({
     candidateCount: number;
     baselineMatches: boolean;
   } {
-    const candidateCount = (job?.candidates ?? []).filter((candidate) =>
+    const previewSource =
+      !matchingCombinationCountIsPartial &&
+      Array.isArray(job?.matching_combinations) &&
+      job.matching_combinations.length
+        ? job.matching_combinations
+        : (job?.candidates ?? []);
+    const candidateCount = previewSource.filter((candidate) =>
       candidatePassesOptimizationConstraints(candidate, nextConstraints),
     ).length;
     const baselineMatches = baselineCandidate
@@ -4856,6 +5032,7 @@ export function OptimizationResultsPage({
         }),
       );
       setJob(updated);
+      applyResultConstraintState(nextObjective, nextConstraints);
       setConstraintLiveMessage(
         messages?.success ?? "已按最新约束条件重新过滤并重排。",
       );
@@ -5605,17 +5782,15 @@ export function OptimizationResultsPage({
                           constraint.operator,
                         )}
                       </span>
-                      <input
-                        aria-label={`${constraint.label} 阈值`}
+                      <OptimizationConstraintThresholdInput
+                        ariaLabel={`${constraint.label} 阈值`}
                         id={`optimization-results-constraint-${constraint.key}`}
-                        inputMode="decimal"
-                        onChange={(event) =>
-                          updateResultConstraint(index, event.target.value)
+                        onCommitValue={(nextValue) =>
+                          updateResultConstraint(index, String(nextValue))
                         }
                         step={getOptimizationConstraintInputStep(
                           constraint.key,
                         )}
-                        type="number"
                         value={constraint.value}
                       />
                       {unitLabel ? (
@@ -5817,8 +5992,8 @@ export function OptimizationResultsPage({
                                   <td>
                                     <div className="optimization-lab-table__stack">
                                       <strong>
-                                        {getCandidateDisplayText(
-                                          candidate.title ?? candidate.label,
+                                        {getCandidateVersionDisplayText(
+                                          candidate,
                                         )}
                                       </strong>
                                     </div>
@@ -6252,9 +6427,7 @@ export function OptimizationResultsPage({
                         type="button"
                       >
                         <strong>
-                          {getCandidateDisplayText(
-                            candidate.title ?? candidate.label,
-                          )}
+                          {getCandidateVersionDisplayText(candidate)}
                         </strong>
                         <span>
                           {translateOptimizationText(candidate.status_label) ??

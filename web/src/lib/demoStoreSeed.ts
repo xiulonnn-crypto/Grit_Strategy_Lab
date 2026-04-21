@@ -114,7 +114,7 @@ export function createInitialState(): DemoState {
     snapshot_summary: { dataset_snapshot_id: 'dataset-20250330', universe_snapshot_id: 'universe-20250330' },
     data_segment_type: 'FULL',
     parameter_version_id: qualityMomentum.current_parameter_version_id,
-    request: { start_date: '2025-01-02', end_date: '2025-02-28', fee_bps: 5, slippage_bps: 5, execution_policy: 'T_CLOSE_TO_T1_OPEN' },
+    request: { start_date: '2025-01-02', end_date: '2025-02-28', fee_bps: 1.5, slippage_bps: 2.5, execution_policy: 'T_CLOSE_TO_T1_OPEN' },
     is_permanent: false,
     source_run_id: null,
     trade_audit_items: [clone({ trade_id: qqqAudit.trade_id, symbol: qqqAudit.symbol, segment: qqqAudit.segment, opened_at: qqqAudit.opened_at, closed_at: qqqAudit.closed_at, pnl_pct: qqqAudit.pnl_pct, max_favorable_excursion_pct: qqqAudit.max_favorable_excursion_pct, max_adverse_excursion_pct: qqqAudit.max_adverse_excursion_pct, slippage_cost_pct: qqqAudit.slippage_cost_pct, commentary: qqqAudit.commentary }), clone({ trade_id: aaplAudit.trade_id, symbol: aaplAudit.symbol, segment: aaplAudit.segment, opened_at: aaplAudit.opened_at, closed_at: aaplAudit.closed_at, pnl_pct: aaplAudit.pnl_pct, max_favorable_excursion_pct: aaplAudit.max_favorable_excursion_pct, max_adverse_excursion_pct: aaplAudit.max_adverse_excursion_pct, slippage_cost_pct: aaplAudit.slippage_cost_pct, commentary: aaplAudit.commentary })],

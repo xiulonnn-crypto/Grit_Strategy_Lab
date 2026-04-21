@@ -10,34 +10,43 @@ from typing import Sequence
 
 
 _SECTION_HEADING_RE = re.compile(
-    r"^## \[(?P<title>[^\]]+)\](?: - (?P<date>\d{4}-\d{2}-\d{2}))?\s*$",
+    r"^## \[(?P<title>[^\]]+)\](?: - (?P<date>\d{4}-\d{2}-\d{2})(?: - (?P<summary>.+))?)?\s*$",
     re.MULTILINE,
 )
 _STABLE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _REVISION_VERSION_RE = re.compile(r"^(?P<base>\d+\.\d+\.\d+)-(?P<revision>\d{3})$")
 _UNRELEASED_TITLES = {"unreleased", "未发布"}
+_CATEGORY_DEFINITIONS = (
+    ("added", "### 新增 (Added)", ("### 新增 (Added)", "### Added", "### 新增")),
+    (
+        "changed",
+        "### 优化 (Changed)",
+        ("### 优化 (Changed)", "### Changed", "### 变更", "### 变更 (Changed)", "### 优化"),
+    ),
+    (
+        "deprecated",
+        "### 已弃用 (Deprecated)",
+        ("### 已弃用 (Deprecated)", "### Deprecated", "### 已弃用"),
+    ),
+    ("removed", "### 移除 (Removed)", ("### 移除 (Removed)", "### Removed", "### 移除")),
+    ("fixed", "### 修复 (Fixed)", ("### 修复 (Fixed)", "### Fixed", "### 修复")),
+    ("security", "### 安全 (Security)", ("### 安全 (Security)", "### Security", "### 安全")),
+)
 _ALLOWED_UNRELEASED_SUBHEADINGS = {
-    "### Added",
-    "### Changed",
-    "### Deprecated",
-    "### Removed",
-    "### Fixed",
-    "### Security",
-    "### 新增",
-    "### 变更",
-    "### 已弃用",
-    "### 移除",
-    "### 修复",
-    "### 安全",
+    heading
+    for _kind, _canonical_heading, variants in _CATEGORY_DEFINITIONS
+    for heading in variants
 }
 _SUMMARY_PREFIX = "> 摘要："
 _SUMMARY_HEADING_TO_KIND = {
-    "### Added": "added",
-    "### Changed": "changed",
-    "### Deprecated": "deprecated",
-    "### Removed": "removed",
-    "### Fixed": "fixed",
-    "### Security": "security",
+    heading: kind
+    for kind, _canonical_heading, variants in _CATEGORY_DEFINITIONS
+    for heading in variants
+}
+_SUMMARY_HEADING_TO_CANONICAL = {
+    heading: canonical_heading
+    for _kind, canonical_heading, variants in _CATEGORY_DEFINITIONS
+    for heading in variants
 }
 _SUMMARY_KIND_TO_VERB = {
     "added": "新增",
@@ -55,6 +64,7 @@ class ChangelogSection:
     title: str
     body: str
     entry_date: str | None = None
+    heading_summary: str | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +111,20 @@ def _strip_generated_summary(body: str) -> str:
     return _normalize_body("\n".join(filtered_lines))
 
 
+def _normalize_heading_summary(summary: str | None) -> str | None:
+    if not summary:
+        return None
+    cleaned = summary.strip()
+    if not cleaned:
+        return None
+    if cleaned.startswith(_SUMMARY_PREFIX):
+        cleaned = cleaned[len(_SUMMARY_PREFIX) :].strip()
+    if cleaned.startswith("本次快照"):
+        cleaned = cleaned[len("本次快照") :].strip()
+    cleaned = cleaned.rstrip("。.")
+    return cleaned or None
+
+
 def _clean_summary_topic(text: str) -> str:
     cleaned = text.strip()
     if not cleaned:
@@ -138,7 +162,7 @@ def _format_summary_topics(topics: Sequence[str], *, limit: int = 2) -> str:
     return rendered
 
 
-def _build_summary_line(body: str) -> str | None:
+def _build_heading_summary(body: str) -> str | None:
     cleaned_body = _strip_generated_summary(body)
     topics_by_kind: dict[str, list[str]] = {}
     current_kind = "other"
@@ -169,18 +193,30 @@ def _build_summary_line(body: str) -> str | None:
     if not clauses:
         return None
     if len(clauses) == 1:
-        return f"{_SUMMARY_PREFIX}本次快照{clauses[0]}。"
-    return f"{_SUMMARY_PREFIX}本次快照{clauses[0]}，并{clauses[1]}。"
+        return clauses[0]
+    return f"{clauses[0]}，并{clauses[1]}"
 
 
-def _with_generated_summary(body: str) -> str:
+def _normalize_snapshot_body(body: str) -> str:
     cleaned_body = _strip_generated_summary(body)
-    if not _body_has_meaningful_content(cleaned_body):
-        return cleaned_body
-    summary_line = _build_summary_line(cleaned_body)
-    if not summary_line:
-        return cleaned_body
-    return f"{summary_line}\n\n{cleaned_body}"
+    normalized_lines: list[str] = []
+    for raw_line in cleaned_body.splitlines():
+        line = raw_line.strip()
+        if line in _SUMMARY_HEADING_TO_CANONICAL:
+            normalized_lines.append(_SUMMARY_HEADING_TO_CANONICAL[line])
+            continue
+        normalized_lines.append(raw_line)
+    return _normalize_body("\n".join(normalized_lines))
+
+
+def _build_snapshot_section(title: str, entry_date: str, body: str) -> ChangelogSection:
+    normalized_body = _normalize_snapshot_body(body)
+    return ChangelogSection(
+        title=title,
+        entry_date=entry_date,
+        heading_summary=_build_heading_summary(normalized_body),
+        body=normalized_body,
+    )
 
 
 def _parse_sections(text: str) -> tuple[str, list[ChangelogSection]]:
@@ -197,6 +233,7 @@ def _parse_sections(text: str) -> tuple[str, list[ChangelogSection]]:
             ChangelogSection(
                 title=match.group("title").strip(),
                 entry_date=match.group("date"),
+                heading_summary=_normalize_heading_summary(match.group("summary")),
                 body=_normalize_body(body),
             )
         )
@@ -211,6 +248,8 @@ def _render_changelog(preamble: str, sections: Sequence[ChangelogSection]) -> st
         heading = f"## [{section.title}]"
         if section.entry_date:
             heading = f"{heading} - {section.entry_date}"
+        if section.heading_summary:
+            heading = f"{heading} - {section.heading_summary}"
         parts.append(heading)
         body = _normalize_body(section.body)
         if body:
@@ -345,11 +384,7 @@ def prepare_push(
         expected_version = target_version
         normalized_sections = [
             ChangelogSection(title="Unreleased", body=""),
-            ChangelogSection(
-                title=target_version,
-                entry_date=snapshot_date,
-                body=_with_generated_summary(unreleased_body),
-            ),
+            _build_snapshot_section(target_version, snapshot_date, unreleased_body),
             *other_sections,
         ]
     else:
@@ -366,13 +401,7 @@ def prepare_push(
             snapshot_title = f"{latest_stable.title}-{next_revision:03d}"
             snapshot_date = effective_date.isoformat()
             mode = "revision"
-            normalized_sections.append(
-                ChangelogSection(
-                    title=snapshot_title,
-                    entry_date=snapshot_date,
-                    body=_with_generated_summary(unreleased_body),
-                )
-            )
+            normalized_sections.append(_build_snapshot_section(snapshot_title, snapshot_date, unreleased_body))
         normalized_sections.extend(other_sections)
 
     normalized_changelog = _render_changelog(preamble, normalized_sections)

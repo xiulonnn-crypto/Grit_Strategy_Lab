@@ -9,25 +9,29 @@
 
 ## [Unreleased]
 
-## [0.1.1-005] - 2026-04-17
+### 修复 (Fixed)
 
-> 摘要：本次快照调整快照摘要。
+- **快照就绪标签**: `#/snapshots` 中 `READY/就绪` 卡片现在会按真实状态显示绿色成功标签，不再因为附带非阻塞 `blocker` 元数据而被误渲染成红色。
+- **回测默认执行成本**: 真实回测请求现在默认补齐 `fee_bps=1.5` 与 `slippage_bps=2.5`，并将两者合并写入回测引擎交易成本；新增 `python -m grit_backtest_platform.main backfill-backtest-costs` 用于按同一默认值回刷永久保存的历史回测结果。
+- **免费源补齐链**: 快照 repair 现在按 `public -> free_account -> paid_optional` 调度市场数据源；`Yahoo/yfinance` 成为默认价格与公司行为探针主链，`Alpha Vantage DIVIDENDS/SPLITS` 作为免费账号修复通道补齐公司行为，`Tiingo` 仅在 token 可用且未处于冷却窗口时参与额度感知修复。
+- **公司行为覆盖口径**: `ds-corporate-actions` 现在会把 `probe_complete=true` 且确认“无正式 dividend/split/reverse_split 事件”的 symbol 计入覆盖，并稳定暴露 `complete_no_events_symbol_count`、`formal_event_symbol_count` 以及 provider quota/cooldown 元数据给 `#/snapshots`。
+- **Nasdaq-100 历史锚点**: 股票池历史链新增本地官方 provenance 种子与 Internet Archive 官方 Nasdaq activity 页回填；`un-ndx100` 额外公开 `official_seed_status`、`official_seed_source_count` 与 `official_seed_missing_anchors`，便于直接追踪离 100% 还差哪些锚点。
+- **优化结果重新过滤**: `#/optimization-jobs/:id` 在已保存候选全部不满足当前阈值、但全量 `matching_combinations` 仍有命中组合时，不再被前端误判为“无符合条件的组合”；结果页会继续使用全量命中组合完成重新过滤与候选展示，不再出现“筛出 3 个组合却只展示 1 个”的结果中心偏差，`最大回撤 <= 2%` 这类紧约束现在可正确筛出实际满足条件的试验。
+- **候选版本中文展示**: `#/optimization-jobs/:id` 在读取全量 `matching_combinations` 且候选名仍为 `Trial xxxx` 时，结果中心与底部“快速切换候选版本”会统一回退展示为 `候选 N`；卡片摘要中的 `daily / weekly / monthly / sharpe / oos / max drawdown` 也会同步翻译为中文，避免候选版本名和摘要说明混入英文。
+- **候选晋升 trial id**: `#/optimization-jobs/:id` 从全量 `matching_combinations` 选中的 `trial_*` 组合现在也可直接“晋升当前版本”；后端会按匹配组合或持久化 trial 记录解析待晋升参数，不再因只扫描 `candidates_json` 而报 `Optimization candidate not found`。
+- **优化参数摘要**: `#/optimization-jobs/:id` 的顶部“参数组合”、参数候选盘和“查看全部组合”弹层现在会同时展示离散搜索维度与范围搜索维度，均值回归策略的 `观察周期` 不再遗漏 `每日 / 每周 / 每月` 选项。
+- **约束条件顺序**: `#/optimization-jobs/:id` 与 `#/optimization-jobs/new/config` 的“约束条件”模块已将 `收益夏普` 与 `样本外夏普` 按预期互换位置，旧任务读取历史约束时也会按当前预设顺序稳定展示。
+- **约束阈值输入**: Optimization Lab 配置页与结果页的约束阈值输入框清空后不再被立即回写成 `0`，现在会保留空白编辑态，并在失焦时恢复到当前已生效阈值。
 
-### Changed
+## [0.1.1-004] - 2026-04-17 - 调整目标排序与约束条件展示，并修复 QuickStart 预览与结果弹层体验
 
-- **快照摘要**: `pre-push` changelog workflow 现在会在自动生成的 revision / release 快照标题下补一行一句话摘要，保留版本概览信息，同时继续兼容标准 Keep a Changelog 标题格式。
-
-## [0.1.1-004] - 2026-04-17
-
-> 摘要：本次快照调整目标排序、约束条件，并修复QuickStart 前端预览、查看全部组合弹层。
-
-### Changed
+### 优化 (Changed)
 
 - **目标排序**: Optimization Lab 配置页与结果页统一支持 `收益夏普 Max / 年化收益率 Max / 综合得分 Max` 三种目标排序，重新过滤与结果排名现在都会按当前目标字段严格主键重排。
 - **约束条件**: Optimization Lab 结果页将“快捷过滤”统一改名为“约束条件”，并移除顶部预设标签、符合约束计数与逐条约束标签串；配置页与结果页对外公开约束同步收口为 5 项，不再暴露 `换手率`。
 - **策略详情摘要**: `#/strategies/:id` 标题下方不再展示类型 / 股票池 / 基准 / 再平衡等标签串，改为基于当前参数生成一句策略摘要，直接概括信号逻辑、持仓规则与调仓节奏。
 
-### Fixed
+### 修复 (Fixed)
 
 - **QuickStart 前端预览**: `QuickStart-Grit.ps1` 现在会以 `--rebuild-on-start` 启动 `web/preview-server.mjs`，避免默认 `http://127.0.0.1:4173/#/workspace` 在冷启动时返回 `Frontend build not ready yet.`。
 - **查看全部组合弹层**: `#/optimization-jobs/:id` 的“查看全部组合”弹层改为桌面安全宽度，避免结果表在电脑屏幕上横向撑出滚动条；底部操作栏固定；弹层打开时会锁定背景页面滚动，并将头部/底部区域的滚轮转发到表格区，保证弹层与表格都能顺畅使用滚轮浏览。
@@ -45,7 +49,7 @@
 - **重新过滤列表闪动**: `#/optimization-jobs/:id` 点击“重新过滤”后，参数候选盘改为等待重新过滤结果返回后再统一刷新，不再先按页面本地状态重排、再跟随后端响应二次更新造成列表连续跳动。
 - **多窗口验证**: 多窗口验证表现在会补充每个窗口的 `YYYY-MM-DD 至 YYYY-MM-DD` 周期说明，并修复窗口年化收益率错误显示为 `-` 的问题。
 
-## [0.1.1-003] - 2026-04-16
+## [0.1.1-003] - 2026-04-16 - 新增离线价格补源与优化实验室结果兜底入口
 
 ### 新增 (Added)
 
@@ -71,7 +75,7 @@
 - **时间窗口继承**: 使用 `source_run_id` 创建优化任务时会继承原始 `request_json` 时间窗口，缺失窗口时直接报错，不再回退整段历史数据。
 - **结果计数**: 终态详情缺少 `matching_combination_count` 时会直接报错并停止展示，避免把候选池数量误当成符合条件的组合总数。
 
-## [0.1.1-002] - 2026-04-15
+## [0.1.1-002] - 2026-04-15 - 引入 Optimization Lab 并补强快照修复与历史数据链路
 
 ### 新增 (Added)
 
@@ -120,9 +124,9 @@
 - **评分排序**: 优化评分不再被 `total_return_pct` 放大，改为以 `return_sharpe`、`out_of_sample_sharpe`、Calmar、稳定度、回撤和换手约束为主的风险调整排序。
 - **候选重建**: 调整约束后，Optimization Lab 结果中心会基于完整 `optimization_job_trials` 重建候选，并优先返回满足当前约束的不同版本。
 
-## [0.1.1] - 2026-04-01
+## [0.1.1] - 2026-04-01 - 补齐恢复后主链路页面并增强 Windows 本地启动体验
 
-### 新增
+### 新增 (Added)
 
 - 新增更完整的 Windows 快速启动流程，包含运行时校验、修复辅助脚本和更稳妥的本地启动默认项。
 - 新增基于路由的 React 应用入口，以及工作台、策略创建、回测提交、运行详情、运行列表、快照页、策略详情等一组正式页面。
@@ -130,21 +134,21 @@
 - 新增快照恢复、回退提供方支持和 live acceptance 辅助脚本，用于在本地数据上验证恢复后的主链路。
 - 新增恢复方案文档与设计稿沉淀，用于记录重建后的产品方向。
 
-### 变更
+### 优化 (Changed)
 
 - 将恢复后的平台从初始基线扩展为更完整的 `workspace -> creation -> backtest -> run detail -> snapshots` 主链路体验。
 - 改进恢复态后端服务、存储层、市场数据访问和 API 契约，让基于本地 SQLite 的流程更接近可用产品，而不是局部修复快照。
 - 完成围绕 `app-runtime` 路由、共享适配层和页面级测试覆盖的前端架构收口。
 - 更新 README 与架构文档，使其与真实路由图、运行约束和启动方式一致。
 
-### 修复
+### 修复 (Fixed)
 
 - 修复多处本地环境阻塞问题，包括 GitHub 推送辅助链路、凭证受阻场景和快速启动健康检查。
 - 修复策略创建、运行详情、工作台和快照相关视图中的多项恢复回归问题，使项目恢复度提升至约 80%。
 
-## [0.1.0] - 2026-03-30
+## [0.1.0] - 2026-03-30 - 重建恢复后的首个可运行基线并重新接通本地前后端工作台
 
-### 新增
+### 新增 (Added)
 
 - 新增 Grit Strategy Lab 在 2026 年 3 月恢复工作后的首个可运行基线，重新建立 FastAPI 后端与 React/Vite 前端工作台。
 - 新增基线恢复提交中提到的生命周期清理、交易审计能力和运行时自愈机制。

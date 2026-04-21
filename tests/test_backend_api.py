@@ -265,8 +265,8 @@ def test_scoped_market_data_provider_excludes_longbridge_for_full_history(tmp_pa
 
     scoped = service._scoped_market_data_provider(mode="full", window_start=date(1996, 1, 1))
 
-    assert runtime_provider.captured == [{"longbridge", "longbridge_static_info", "futu", "futu_rehab"}]
-    assert [provider.provider_name for provider in scoped.providers] == ["yahoo", "tiingo", "akshare_us"]
+    assert runtime_provider.captured == [{"longbridge", "longbridge_static_info", "futu", "futu_rehab", "tiingo"}]
+    assert [provider.provider_name for provider in scoped.providers] == ["yahoo", "akshare_us"]
 
 
 def test_scoped_market_data_provider_keeps_longbridge_for_recent_incremental_window(tmp_path):
@@ -295,7 +295,7 @@ def test_scoped_market_data_provider_keeps_longbridge_for_recent_incremental_win
     scoped = service._scoped_market_data_provider(mode="incremental", window_start=date(2026, 4, 1))
 
     assert scoped is runtime_provider
-    assert runtime_provider.scoped_calls == 0
+    assert runtime_provider.scoped_calls == 1
 
 
 def test_scoped_market_data_provider_excludes_stooq_for_incremental_window(tmp_path):
@@ -327,8 +327,8 @@ def test_scoped_market_data_provider_excludes_stooq_for_incremental_window(tmp_p
 
     scoped = service._scoped_market_data_provider(mode="incremental", window_start=date(2026, 4, 1))
 
-    assert runtime_provider.captured == [{"stooq"}]
-    assert [provider.provider_name for provider in scoped.providers] == ["yahoo", "longbridge"]
+    assert runtime_provider.captured == [{"stooq", "tiingo", "longbridge"}]
+    assert [provider.provider_name for provider in scoped.providers] == ["yahoo"]
 
 
 def test_scoped_market_data_provider_enables_targeted_price_repair_only_when_requested(tmp_path):
@@ -451,13 +451,73 @@ def test_snapshot_refresh_persists_provider_summary_for_each_snapshot_pool(tmp_p
                 "warnings": [],
                 "partial": True,
                 "metadata": {
-                    "provider_results": [
-                        {"provider": "yahoo", "kind": "history", "status": "succeeded", "source": "yahoo", "bar_count": 1, "action_count": 0, "partial": False, "selection_status": "selected_primary"},
-                        {"provider": "tiingo", "kind": "history", "status": "succeeded", "source": "tiingo", "bar_count": 1, "action_count": 1, "partial": False, "selection_status": "succeeded_not_selected"},
-                        {"provider": "akshare_us", "kind": "history", "status": "skipped", "source": "akshare_us", "bar_count": 0, "action_count": 0, "partial": False, "reason": "primary_price_source_already_selected"},
-                        {"provider": "alpha_vantage", "kind": "earnings", "status": "succeeded", "source": "alpha_vantage", "bar_count": 0, "action_count": 1, "partial": False},
-                        {"provider": "sec_edgar", "kind": "filings_availability", "status": "unavailable", "source": "sec_edgar", "bar_count": 0, "action_count": 0, "partial": False, "reason": "SEC_USER_AGENT must include a contact email."},
-                    ],
+                        "provider_results": [
+                            {
+                                "provider": "yahoo",
+                                "kind": "history",
+                                "status": "succeeded",
+                                "source": "yahoo",
+                                "bar_count": 1,
+                                "action_count": 0,
+                                "partial": False,
+                                "selection_status": "selected_primary",
+                                "actions_supported": True,
+                                "access_tier": "public",
+                                "probe_complete": True,
+                                "quota_limited": False,
+                            },
+                            {
+                                "provider": "tiingo",
+                                "kind": "history",
+                                "status": "succeeded",
+                                "source": "tiingo",
+                                "bar_count": 1,
+                                "action_count": 1,
+                                "partial": False,
+                                "selection_status": "succeeded_not_selected",
+                                "actions_supported": True,
+                                "access_tier": "free_account",
+                                "probe_complete": True,
+                                "quota_limited": False,
+                            },
+                            {
+                                "provider": "akshare_us",
+                                "kind": "history",
+                                "status": "skipped",
+                                "source": "akshare_us",
+                                "bar_count": 0,
+                                "action_count": 0,
+                                "partial": False,
+                                "reason": "primary_price_source_already_selected",
+                                "actions_supported": False,
+                                "access_tier": "public",
+                            },
+                            {
+                                "provider": "alpha_vantage",
+                                "kind": "earnings",
+                                "status": "succeeded",
+                                "source": "alpha_vantage",
+                                "bar_count": 0,
+                                "action_count": 1,
+                                "partial": False,
+                                "actions_supported": True,
+                                "access_tier": "free_account",
+                                "probe_complete": False,
+                                "quota_limited": False,
+                            },
+                            {
+                                "provider": "sec_edgar",
+                                "kind": "filings_availability",
+                                "status": "unavailable",
+                                "source": "sec_edgar",
+                                "bar_count": 0,
+                                "action_count": 0,
+                                "partial": False,
+                                "reason": "SEC_USER_AGENT must include a contact email.",
+                                "actions_supported": True,
+                                "access_tier": "free_account",
+                            },
+                        ],
                     "provider_chain": ["yahoo", "tiingo", "akshare_us", "alpha_vantage", "sec_edgar"],
                     "missing_provider_reasons": {
                         "sec_edgar": "SEC_USER_AGENT must include a contact email.",
@@ -524,12 +584,22 @@ def test_snapshot_refresh_persists_provider_summary_for_each_snapshot_pool(tmp_p
 
     assert price_summary["providers"]["yahoo"]["landed_row_count"] >= 1
     assert price_summary["providers"]["yahoo"]["selected_primary_symbols"] >= 1
+    assert price_summary["providers"]["yahoo"]["actions_supported"] is True
+    assert price_summary["providers"]["yahoo"]["access_tier"] == "public"
+    assert price_summary["providers"]["yahoo"]["probe_complete"] is True
+    assert price_summary["providers"]["yahoo"]["quota_limited"] is False
+    assert price_summary["providers"]["yahoo"]["next_retry_at"] is None
     assert price_summary["providers"]["tiingo"]["succeeded_not_selected_symbols"] >= 1
+    assert price_summary["providers"]["tiingo"]["access_tier"] == "free_account"
     assert "akshare_us" in price_summary["skipped_providers"]
     assert "sec_edgar" not in price_summary["providers"]
     assert "sec_edgar" in corporate_summary["unavailable_providers"]
     assert "SEC_USER_AGENT must include a contact email." in corporate_summary["providers"]["sec_edgar"]["reasons"]
     assert corporate_summary["providers"]["alpha_vantage"]["landed_row_count"] >= 1
+    assert corporate_summary["providers"]["alpha_vantage"]["actions_supported"] is True
+    assert corporate_summary["providers"]["alpha_vantage"]["access_tier"] == "free_account"
+    assert corporate_summary["providers"]["alpha_vantage"]["probe_complete"] is False
+    assert corporate_summary["providers"]["alpha_vantage"]["quota_limited"] is False
     assert "alpha_vantage" in corporate_summary["attempted_providers"]
     assert sp500_summary["providers"]["wikipedia_revision_history"]["landed_anchor_count"] == 1
     assert "fmp" in sp500_summary["skipped_providers"]
@@ -636,7 +706,13 @@ def test_snapshot_refresh_marks_zero_event_action_probe_as_corporate_covered(tmp
 
     assert corporate_snapshot["status"] == "READY"
     assert corporate_snapshot["metadata"]["missing_symbols"] == []
+    assert corporate_snapshot["metadata"]["complete_no_events_symbol_count"] == len(coverage_rows)
+    assert corporate_snapshot["metadata"]["formal_event_symbol_count"] == 0
+    assert corporate_snapshot["metadata"]["probe_status_breakdown"] == {
+        "complete_no_events": len(coverage_rows)
+    }
     assert corporate_snapshot["metadata"]["provider_summary"]["providers"]["yahoo"]["selected_primary_symbols"] >= 1
+    assert corporate_snapshot["metadata"]["provider_summary"]["providers"]["yahoo"]["actions_supported"] is True
     assert coverage_rows
     assert all(row["metadata"]["probe_status"] == "complete_no_events" for row in coverage_rows)
     assert all(row["metadata"]["event_scope"] == "dividend_split_only" for row in coverage_rows)
@@ -836,6 +912,9 @@ def test_refresh_stats_reports_universe_anchor_progress_even_when_latest_members
     assert universe_stat["historical_anchor_delta"] == 1
     assert universe_stat["fallback_anchor_count"] == 0
     assert universe_stat["source_quality_breakdown"] == {"historical_dataset": 1}
+    assert universe_stat["official_seed_status"] == "complete"
+    assert universe_stat["official_seed_source_count"] == 0
+    assert universe_stat["official_seed_missing_anchors"] == []
 
 
 def test_running_refresh_persists_partial_dataset_snapshots_before_completion(tmp_path):
@@ -1584,7 +1663,7 @@ def test_snapshot_overview_uses_independent_company_action_progress(tmp_path):
 
     assert price_snapshot["metadata"]["covered_symbol_count"] == 2
     assert price_snapshot["metadata"]["total_symbol_count"] == 2
-    assert actions_snapshot["metadata"]["covered_symbol_count"] == 1
+    assert actions_snapshot["metadata"]["covered_symbol_count"] == 2
     assert actions_snapshot["metadata"]["total_symbol_count"] == 2
 
 
@@ -1621,6 +1700,8 @@ def test_repair_refresh_batches_missing_symbols_without_dropping_unattempted_gap
     assert price_snapshot["status"] == "INCOMPLETE"
     assert metadata["selection_mode"] == "repair_missing_symbols_batch"
     assert metadata["selected_missing_symbols"] == ["AAA", "BBB"]
+    assert metadata["repair_priority"] == "corporate_first_unified_queue"
+    assert metadata["existing_corporate_missing_symbol_count"] == 0
     assert metadata["missing_symbols"] == ["CCC"]
     assert metadata["repair_cursor"] == 2
     assert metadata["covered_symbol_count"] == 4
@@ -1743,6 +1824,7 @@ def test_repair_refresh_with_universe_target_includes_latest_members(tmp_path, m
     assert refreshed["latest_job"]["request"]["mode"] == "repair"
     assert metadata["selection_mode"] == "repair_missing_symbols_batch_plus_latest_members"
     assert metadata["selected_latest_symbols"] == ["LATEST1", "LATEST2"]
+    assert metadata["repair_priority"] == "corporate_first_unified_queue"
     assert price_snapshot["status"] == "READY"
     assert any(symbol == "AAA" and start == "1996-01-01" for symbol, start, _ in provider.calls)
     assert any(symbol == "LATEST1" and start == previous_end.isoformat() for symbol, start, _ in provider.calls)
@@ -5245,6 +5327,42 @@ def test_promote_trial_set_current_keeps_base_strategy_name_when_base_matches(tm
     assert promoted["rebalance_frequency"] == "quarterly"
     assert promoted["parameters"] == candidate["parameter_snapshot"]
     assert promoted["parameter_history"][-1]["parameter_version_id"] == promoted["current_parameter_version_id"]
+
+
+def test_promote_trial_accepts_matching_combination_trial_id(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="materialize-base-promote-matching-combination")
+    strategy = base["strategy"]
+    base_parameter_version_id = strategy["current_parameter_version_id"]
+    job = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=base_parameter_version_id,
+    )
+    candidate_ids = {candidate["id"] for candidate in job["candidates"]}
+    matching_trial = next(
+        candidate
+        for candidate in job["matching_combinations"]
+        if candidate["id"] not in candidate_ids
+    )
+
+    promoted = assert_ok(
+        client.post(
+            f"/optimization-jobs/{job['id']}/candidates/{matching_trial['id']}/promote",
+            json={
+                "idempotency_key": "promote-matching-combination-1",
+                "mode": "set_current",
+                "base_parameter_version_id": base_parameter_version_id,
+            },
+        )
+    )
+
+    assert matching_trial["id"].startswith("trial_")
+    assert promoted["id"] == strategy["id"]
+    assert promoted["current_parameter_version_id"] != base_parameter_version_id
+    assert promoted["parameters"] == matching_trial["parameter_snapshot"]
+    assert promoted["parameter_history"][-1]["parameters"] == matching_trial["parameter_snapshot"]
 
 
 def test_promote_trial_create_copy_syncs_top_level_rebalance_frequency(tmp_path):

@@ -210,3 +210,13 @@
 - Corporate-action readiness is determined by formal `dividend/split/reverse_split` probe coverage. A symbol can be complete with zero formal events if an action-capable provider successfully probed the window and returned no events.
 - That zero-event state is persisted in `dataset_symbol_coverage.metadata_json` with `coverage_kind=corporate_probe` and `probe_status=complete_no_events`, allowing `ds-corporate-actions` to reach `READY` without fabricating placeholder events.
 - Snapshot `metadata_json` now stores `provider_summary` so the persisted dataset state reflects which providers were attempted, selected, skipped, or unavailable for both price and corporate refresh phases.
+
+## 2026-04-21 Free Snapshot Completion Extension
+
+- Market-data repair now schedules providers by access tier: anonymous/public providers first, then free-account providers, and finally paid-optional providers only when explicitly enabled.
+- `Yahoo`/`yfinance` are the default price plus company-action probe path. Once a public action-capable provider returns bars and completes the probe, later price providers are marked `skipped` instead of spending extra quota.
+- `Alpha Vantage` now has a formal company-action lane built on `DIVIDENDS` and `SPLITS`. It emits `history_availability` results with `actions_supported`, `probe_complete`, `quota_limited`, and `next_retry_at`, so "no verified events" can still count as corporate coverage.
+- `Tiingo` remains available for repair, but it is now treated as a quota-aware free-account source. `429` responses surface structured cooldown metadata, and non-repair scopes exclude it from the hot path.
+- `provider_summary` and `metadata.provider_results` now expose stable fields for snapshot UI and persistence: `actions_supported`, `access_tier`, `quota_limited`, `probe_complete`, and `next_retry_at`.
+- Nasdaq-100 historical repair now has two additional free historical layers ahead of current-page fallback: repo-local official provenance seeds and Internet Archive captures of the official Nasdaq activity page.
+- Universe refresh stats now publish `official_seed_status`, `official_seed_source_count`, and `official_seed_missing_anchors`, allowing `#/snapshots` to show exactly which anchors still block 100% historical readiness.

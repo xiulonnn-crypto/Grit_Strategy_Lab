@@ -11,6 +11,7 @@ import uvicorn
 
 from .real_service import RealBacktestPlatformService
 from .storage import iso_now
+from ._real_service_rebuilt import DEFAULT_BACKTEST_FEE_BPS, DEFAULT_BACKTEST_SLIPPAGE_BPS
 
 
 def _build_runtime_market_data_provider():
@@ -168,11 +169,18 @@ def _configure_refresh_memory_guard() -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="grit_backtest_platform.main")
-    parser.add_argument("command", nargs="?", default="serve", choices=["serve", "refresh-snapshots", "run-optimization"])
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="serve",
+        choices=["serve", "refresh-snapshots", "run-optimization", "backfill-backtest-costs"],
+    )
     parser.add_argument("--reason", dest="reason", default=None)
     parser.add_argument("--mode", dest="mode", default="incremental", choices=["incremental", "repair", "full"])
     parser.add_argument("--targets", dest="targets", default=None)
     parser.add_argument("--db-path", dest="db_path", default=None)
+    parser.add_argument("--fee-bps", dest="fee_bps", type=float, default=DEFAULT_BACKTEST_FEE_BPS)
+    parser.add_argument("--slippage-bps", dest="slippage_bps", type=float, default=DEFAULT_BACKTEST_SLIPPAGE_BPS)
     parser.add_argument("--job-id", dest="job_id", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--job-created-at", dest="job_created_at", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--job-started-at", dest="job_started_at", default=None, help=argparse.SUPPRESS)
@@ -241,6 +249,30 @@ def main(argv: list[str] | None = None) -> None:
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(encoding="utf-8")
         print(json.dumps({"job_id": args.job_id, "started": bool(started)}, ensure_ascii=False))
+        return
+
+    if args.command == "backfill-backtest-costs":
+        service = RealBacktestPlatformService(
+            args.db_path or _default_db_path(),
+            market_data_provider=_lazy_runtime_market_data_provider(),
+        )
+        rebuilt_runs = service.backfill_permanent_backtest_runs(
+            fee_bps=args.fee_bps,
+            slippage_bps=args.slippage_bps,
+        )
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        print(
+            json.dumps(
+                {
+                    "fee_bps": args.fee_bps,
+                    "slippage_bps": args.slippage_bps,
+                    "rebuilt_run_count": len(rebuilt_runs),
+                    "runs": rebuilt_runs,
+                },
+                ensure_ascii=False,
+            )
+        )
         return
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
