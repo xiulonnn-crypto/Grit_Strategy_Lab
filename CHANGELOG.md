@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [0.1.1-006] - 2026-04-22 - 新增组合一期对象面、Compose First 页面链路，并调整数据快照总览、固定验证入口
+
 ### 新增 (Added)
 
 - **组合一期对象面**: 新增 `asset_leg_definitions`、`cash_leg_definitions`、`compositions`、`composition_legs` 与 `composition_source_freezes` 最小持久化结构，并开放 `GET /leg-inventory`、`POST /asset-legs`、`POST /cash-legs`、`GET /compositions`、`GET /compositions/{id}`、`POST /compositions/preview`、`POST /compositions`、`PATCH /compositions/{id}` 一期契约面。
