@@ -166,6 +166,33 @@ export function installMockApiServer() {
         is_permanent: typeof body?.is_permanent === 'boolean' ? body.is_permanent : undefined,
       }));
       if (method === 'POST' && segments[0] === 'backtest-runs' && segments[2] === 'clone') return json(await demoApi.cloneBacktestRun(segments[1], readIdempotencyKey(request, body)));
+      if (method === 'GET' && url.pathname === '/leg-inventory') {
+        return json(await demoApi.getLegInventory!());
+      }
+      if (method === 'POST' && url.pathname === '/asset-legs') {
+        return json(await demoApi.createAssetLeg!(body as import('./types').ApiAssetLegCreatePayload));
+      }
+      if (method === 'POST' && url.pathname === '/cash-legs') {
+        return json(await demoApi.createCashLeg!(body as import('./types').ApiCashLegCreatePayload));
+      }
+      if (method === 'GET' && url.pathname === '/compositions') {
+        return json(await demoApi.listCompositions!());
+      }
+      if (method === 'GET' && segments[0] === 'compositions' && segments.length === 2) {
+        return json(await demoApi.getCompositionDetail!(segments[1]));
+      }
+      if (method === 'POST' && url.pathname === '/compositions/preview') {
+        return json(await demoApi.previewComposition!(body as import('./types').ApiCompositionPreviewPayload));
+      }
+      if (method === 'POST' && url.pathname === '/compositions') {
+        return json(await demoApi.createComposition!(body as import('./types').ApiCompositionCreatePayload));
+      }
+      if (method === 'PATCH' && segments[0] === 'compositions' && segments.length === 2) {
+        return json(await demoApi.updateComposition!(
+          segments[1],
+          body as import('./types').ApiCompositionUpdatePayload,
+        ));
+      }
       if (method === 'GET' && url.pathname === '/optimization-jobs') return json(await demoApi.listOptimizationJobs());
       if (method === 'GET' && segments[0] === 'optimization-jobs' && segments[2] === 'detail') return json(await demoApi.getOptimizationJobDetail(segments[1]));
       if (method === 'POST' && segments[0] === 'strategies' && segments[2] === 'optimization-jobs') {

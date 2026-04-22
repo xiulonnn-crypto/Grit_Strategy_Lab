@@ -7,8 +7,12 @@ import {
   type AppRoute,
 } from './lib/appRouteContext';
 import { BacktestSubmitPage } from './pages/backtest-submit-page-cn';
+import { CompositionDashboardPage } from './pages/composition-dashboard-page';
+import { CompositionDetailPage } from './pages/composition-detail-page';
+import { CompositionWorkbenchPage } from './pages/composition-workbench-page';
 import { CreationSessionPage } from './pages/creation-session-page';
 import { CreationTemplatePage } from './pages/creation-template-page';
+import { LegInventoryPage } from './pages/leg-inventory-page';
 import {
   OptimizationConfigPage,
   OptimizationJobsIndexPage,
@@ -51,6 +55,12 @@ function AppShell(): JSX.Element {
     <AppRouteProvider navigate={navigateTo} route={route}>
       <ShellFrameCn route={route}>
         {route.kind === 'workspace' ? <WorkspacePage /> : null}
+        {route.kind === 'composition-dashboard' ? <CompositionDashboardPage /> : null}
+        {route.kind === 'leg-inventory' ? <LegInventoryPage /> : null}
+        {route.kind === 'composition-workbench' ? <CompositionWorkbenchPage /> : null}
+        {route.kind === 'composition-detail' ? (
+          <CompositionDetailPage compositionId={route.compositionId} />
+        ) : null}
         {route.kind === 'creation-template' ? <CreationTemplatePage /> : null}
         {route.kind === 'creation-session' ? <CreationSessionPage sessionId={route.sessionId} /> : null}
         {route.kind === 'strategy-detail' ? <StrategyDetailPage strategyId={route.strategyId} /> : null}

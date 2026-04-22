@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections import deque
 from copy import deepcopy
+import hashlib
 from itertools import product
+import json
 import math
 import multiprocessing as mp
 import os
@@ -964,6 +966,34 @@ def _as_int(value: Any, default: int = 0) -> int:
         except ValueError:
             return default
     return default
+
+
+def _stable_hash_fraction(*parts: Any) -> float:
+    seed = "::".join(str(part) for part in parts)
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return int(digest[:12], 16) / float(16 ** 12 - 1)
+
+
+def _pct_from_fraction(value: Any, default: float = 0.0) -> float:
+    numeric = _as_float(value, default)
+    if abs(numeric) <= 1.5:
+        return round(numeric * 100.0, 4)
+    return round(numeric, 4)
+
+
+def _strategy_leg_inventory_id(strategy_id: str, parameter_version_id: str) -> str:
+    return f"strategy_leg::{strategy_id}::{parameter_version_id}"
+
+
+def _parse_strategy_leg_inventory_id(value: Any) -> tuple[str, str] | None:
+    text = str(value or "").strip()
+    prefix = "strategy_leg::"
+    if not text.startswith(prefix):
+        return None
+    parts = text.split("::", 2)
+    if len(parts) != 3 or not parts[1] or not parts[2]:
+        return None
+    return parts[1], parts[2]
 
 
 def _strip_strategy_version_suffix(name: Any) -> str:
@@ -3119,6 +3149,1662 @@ class BacktestPlatformService:
         if not base_snapshot:
             base_snapshot = dict(strategy.get("parameters") or {})
         return base_snapshot, source_run
+
+    def _leg_inventory_status_label(self, status: str) -> str:
+        mapping = {
+            "READY": "Ready",
+            "NEEDS_RUN": "Run needed",
+            "STALE": "Newer version available",
+            "ARCHIVED": "Archived",
+            "ACTIVE": "Active",
+            "DRAFT": "Draft",
+        }
+        return mapping.get(str(status or "").upper(), str(status or "Unknown"))
+
+    def _composition_status_label(self, status: str) -> str:
+        mapping = {
+            "DRAFT": "Draft",
+            "ACTIVE": "Active",
+            "ARCHIVED": "Archived",
+        }
+        return mapping.get(str(status or "").upper(), str(status or "Unknown"))
+
+    def _reference_summary(self, count: int) -> str:
+        if count <= 0:
+            return "Not used in saved compositions yet"
+        if count == 1:
+            return "Used in 1 saved composition"
+        return f"Used in {count} saved compositions"
+
+    def _latest_activity_label(self, timestamp: Any) -> str:
+        stamp = str(timestamp or "").strip()
+        if not stamp:
+            return "Updated recently"
+        return f"Updated {stamp[:10]}"
+
+    def _normalize_composition_status(self, value: Any, *, default: str = "DRAFT") -> str:
+        normalized = str(value or default).strip().upper() or default
+        if normalized not in {"DRAFT", "ACTIVE", "ARCHIVED"}:
+            raise ValueError(f"Unsupported composition status: {value}")
+        return normalized
+
+    def _normalize_composition_benchmark_definition(self, value: Any) -> dict[str, Any]:
+        payload = _as_mapping(value)
+        return {
+            "label": str(payload.get("label") or "").strip() or None,
+            "symbol": str(payload.get("symbol") or "").strip().upper() or None,
+            "source": str(payload.get("source") or "").strip() or None,
+            "notes": str(payload.get("notes") or "").strip() or None,
+        }
+
+    def _normalize_composition_cost_policy(self, value: Any) -> dict[str, Any]:
+        payload = _as_mapping(value)
+        return {
+            "expense_ratio_bps": round(_as_float(payload.get("expense_ratio_bps"), 0.0), 4),
+            "turnover_budget_bps": round(_as_float(payload.get("turnover_budget_bps"), 0.0), 4),
+            "trade_cost_bps": round(_as_float(payload.get("trade_cost_bps"), 0.0), 4),
+            "notes": str(payload.get("notes") or "").strip() or None,
+        }
+
+    def _composition_benchmark_label(self, benchmark_definition: Mapping[str, Any] | None) -> str:
+        payload = dict(benchmark_definition or {})
+        return str(payload.get("label") or payload.get("symbol") or "Custom benchmark")
+
+    def _rebalance_checks_per_year(self, rebalance_frequency: Any) -> int:
+        frequency = str(rebalance_frequency or "").strip().lower()
+        mapping = {
+            "weekly": 52,
+            "monthly": 12,
+            "quarterly": 4,
+            "semiannual": 2,
+            "yearly": 1,
+            "annual": 1,
+            "never": 0,
+        }
+        return mapping.get(frequency, 4 if frequency else 0)
+
+    def _completed_run_summaries_for_strategy(self, strategy_id: str) -> list[dict[str, Any]]:
+        rows = self.storage.fetch_all(
+            """
+            SELECT
+                id,
+                status,
+                preview_json,
+                metrics_json,
+                warnings_json,
+                request_json,
+                chart_series_json,
+                completed_at
+            FROM backtest_runs
+            WHERE strategy_id = ?
+              AND deleted_at IS NULL
+              AND UPPER(COALESCE(status, '')) IN ('COMPLETED', 'COMPLETED_WITH_WARNINGS')
+            ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC, id DESC
+            """,
+            (strategy_id,),
+        )
+        return [self._build_strategy_latest_completed_run_summary(row) for row in rows]
+
+    def _composition_reference_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        rows = self.storage.fetch_all("SELECT source_ref_id FROM composition_legs")
+        for row in rows:
+            source_ref_id = str(row.get("source_ref_id") or "").strip()
+            if source_ref_id:
+                counts[source_ref_id] = counts.get(source_ref_id, 0) + 1
+        return counts
+
+    def _strategy_projection_row(
+        self,
+        strategy: Mapping[str, Any],
+        version_entry: Mapping[str, Any],
+        completed_summaries: Sequence[Mapping[str, Any]],
+        reference_count: int,
+    ) -> dict[str, Any]:
+        strategy_id = str(strategy.get("id") or "")
+        version_number = int(version_entry.get("version_number") or 1)
+        parameter_version_id = str(
+            version_entry.get("parameter_version_id")
+            or _parameter_version_id(strategy_id, version_number)
+        )
+        inventory_id = _strategy_leg_inventory_id(strategy_id, parameter_version_id)
+        run_summary = next(
+            (
+                dict(item)
+                for item in completed_summaries
+                if str(item.get("parameter_version_id") or "") == parameter_version_id
+            ),
+            None,
+        )
+        current_parameter_version_id = str(strategy.get("current_parameter_version_id") or "")
+        lifecycle_status = str(strategy.get("lifecycle_status") or "ACTIVE").upper()
+        has_new_version = bool(current_parameter_version_id and current_parameter_version_id != parameter_version_id)
+        is_orphan = run_summary is None
+        status = "READY"
+        if lifecycle_status == "ARCHIVED":
+            status = "ARCHIVED"
+        elif is_orphan:
+            status = "NEEDS_RUN"
+        elif has_new_version:
+            status = "STALE"
+        proof_label = (
+            f"Latest eligible run {run_summary['run_id']}"
+            if run_summary
+            else "No eligible completed run yet"
+        )
+        strategy_type = str(strategy.get("strategy_type") or "GENERAL").upper()
+        rebalance_frequency = str(strategy.get("rebalance_frequency") or "").strip() or None
+        attribute_tags = [
+            "strategy",
+            strategy_type.lower(),
+            f"version:v{version_number}",
+        ]
+        if rebalance_frequency:
+            attribute_tags.append(f"rebalance:{rebalance_frequency.lower()}")
+        if has_new_version:
+            attribute_tags.append("newer_version_available")
+        if is_orphan:
+            attribute_tags.append("needs_run")
+        config = {
+            "strategy_id": strategy_id,
+            "parameter_version_id": parameter_version_id,
+            "parameter_version": version_number,
+            "latest_run_id": run_summary.get("run_id") if run_summary else None,
+            "strategy_type": strategy_type,
+            "universe_name": strategy.get("universe_name"),
+            "rebalance_frequency": rebalance_frequency,
+            "lifecycle_status": lifecycle_status,
+            "annualized_return_pct": _pct_from_fraction(run_summary.get("annualized_return"), 0.0) if run_summary else 0.0,
+            "max_drawdown_pct": abs(_pct_from_fraction(run_summary.get("max_drawdown"), 0.0)) if run_summary else 0.0,
+            "oos_sharpe": _as_float(run_summary.get("oos_sharpe"), 0.0) if run_summary else 0.0,
+        }
+        allowed_actions: list[str] = ["open_strategy_detail", "open_composition_workbench"]
+        if is_orphan:
+            allowed_actions.insert(0, "run_backtest")
+        return {
+            "id": inventory_id,
+            "leg_type": "strategy",
+            "name": str(strategy.get("name") or strategy_id),
+            "version_label": f"v{version_number}",
+            "proof_label": proof_label,
+            "reference_count": reference_count,
+            "reference_summary": self._reference_summary(reference_count),
+            "status": status,
+            "status_label": self._leg_inventory_status_label(status),
+            "has_new_version": has_new_version,
+            "is_orphan": is_orphan,
+            "attribute_tags": attribute_tags,
+            "allowed_actions": allowed_actions,
+            "source_ref_id": inventory_id,
+            "source_ref_type": "strategy_projection",
+            "config": config,
+        }
+
+    def _asset_leg_attribute_tags(self, row: Mapping[str, Any]) -> list[str]:
+        summary = loads(row.get("summary_json"), {})
+        tags = [
+            "asset",
+            str(row.get("asset_kind") or "unknown").strip().lower(),
+            f"freeze:{str(row.get('freeze_mode') or 'live').strip().lower()}",
+        ]
+        snapshot_id = str(row.get("source_snapshot_id") or "").strip()
+        if snapshot_id:
+            tags.append(f"snapshot:{snapshot_id}")
+        provider = str(row.get("source_provider") or "").strip().lower()
+        if provider:
+            tags.append(f"provider:{provider}")
+        if summary.get("notes"):
+            tags.append("notes")
+        return tags
+
+    def _cash_leg_attribute_tags(self, row: Mapping[str, Any]) -> list[str]:
+        summary = loads(row.get("summary_json"), {})
+        tags = [
+            "cash",
+            str(row.get("cash_rule_kind") or "reserve").strip().lower(),
+            f"freeze:{str(row.get('freeze_mode') or 'live').strip().lower()}",
+        ]
+        if row.get("yield_source"):
+            tags.append(f"yield:{str(row.get('yield_source')).strip().lower()}")
+        if summary.get("notes"):
+            tags.append("notes")
+        return tags
+
+    def _decode_asset_leg_row(self, row: Mapping[str, Any], reference_count: int = 0) -> dict[str, Any]:
+        summary = loads(row.get("summary_json"), {})
+        return {
+            "id": str(row.get("id") or ""),
+            "name": str(row.get("name") or ""),
+            "symbol": str(row.get("symbol") or ""),
+            "asset_kind": str(row.get("asset_kind") or ""),
+            "source_snapshot_id": str(row.get("source_snapshot_id") or ""),
+            "source_provider": row.get("source_provider"),
+            "freeze_mode": str(row.get("freeze_mode") or ""),
+            "notes": summary.get("notes"),
+            "summary": summary,
+            "status": str(row.get("status") or "ACTIVE").upper(),
+            "eligibility_summary": {
+                "snapshot_ref": row.get("source_snapshot_id"),
+                "freeze_mode": row.get("freeze_mode"),
+                "reference_count": reference_count,
+            },
+            "attribute_tags": self._asset_leg_attribute_tags(row),
+            "allowed_actions": ["edit_leg_definition", "open_composition_workbench"],
+            "created_at": str(row.get("created_at") or ""),
+            "updated_at": str(row.get("updated_at") or ""),
+        }
+
+    def _decode_cash_leg_row(self, row: Mapping[str, Any], reference_count: int = 0) -> dict[str, Any]:
+        summary = loads(row.get("summary_json"), {})
+        return {
+            "id": str(row.get("id") or ""),
+            "name": str(row.get("name") or ""),
+            "cash_rule_kind": str(row.get("cash_rule_kind") or ""),
+            "buffer_bps": round(_as_float(row.get("buffer_bps"), 0.0), 4),
+            "yield_source": row.get("yield_source"),
+            "freeze_mode": str(row.get("freeze_mode") or ""),
+            "notes": summary.get("notes"),
+            "summary": summary,
+            "status": str(row.get("status") or "ACTIVE").upper(),
+            "attribute_tags": self._cash_leg_attribute_tags(row),
+            "allowed_actions": ["edit_leg_definition", "open_composition_workbench"],
+            "created_at": str(row.get("created_at") or ""),
+            "updated_at": str(row.get("updated_at") or ""),
+        }
+
+    def list_leg_inventory(self) -> dict[str, Any]:
+        reference_counts = self._composition_reference_counts()
+        rows: list[dict[str, Any]] = []
+
+        strategy_rows = self.storage.fetch_all(
+            "SELECT id FROM strategies ORDER BY updated_at DESC, created_at DESC"
+        )
+        for strategy_row in strategy_rows:
+            strategy = self.get_strategy_detail(str(strategy_row["id"]))
+            completed_summaries = self._completed_run_summaries_for_strategy(str(strategy["id"]))
+            for index, version_entry in enumerate(strategy.get("parameter_history", []), start=1):
+                normalized_version_entry = {
+                    **dict(version_entry),
+                    "version_number": int(version_entry.get("version_number") or index),
+                    "parameter_version_id": str(
+                        version_entry.get("parameter_version_id")
+                        or _parameter_version_id(str(strategy["id"]), int(version_entry.get("version_number") or index))
+                    ),
+                }
+                inventory_id = _strategy_leg_inventory_id(
+                    str(strategy["id"]),
+                    str(normalized_version_entry["parameter_version_id"]),
+                )
+                rows.append(
+                    self._strategy_projection_row(
+                        strategy,
+                        normalized_version_entry,
+                        completed_summaries,
+                        reference_counts.get(inventory_id, 0),
+                    )
+                )
+
+        for row in self.storage.fetch_all(
+            "SELECT * FROM asset_leg_definitions ORDER BY updated_at DESC, created_at DESC"
+        ):
+            decoded = self._decode_asset_leg_row(row, reference_counts.get(str(row["id"]), 0))
+            rows.append(
+                {
+                    "id": decoded["id"],
+                    "leg_type": "asset",
+                    "name": decoded["name"],
+                    "version_label": decoded["symbol"],
+                    "proof_label": decoded["source_snapshot_id"],
+                    "reference_count": decoded["eligibility_summary"]["reference_count"],
+                    "reference_summary": self._reference_summary(decoded["eligibility_summary"]["reference_count"]),
+                    "status": decoded["status"],
+                    "status_label": self._leg_inventory_status_label(decoded["status"]),
+                    "has_new_version": False,
+                    "is_orphan": False,
+                    "attribute_tags": decoded["attribute_tags"],
+                    "allowed_actions": decoded["allowed_actions"],
+                    "source_ref_id": decoded["id"],
+                    "source_ref_type": "asset_definition",
+                    "config": {
+                        "symbol": decoded["symbol"],
+                        "asset_kind": decoded["asset_kind"],
+                        "source_snapshot_id": decoded["source_snapshot_id"],
+                        "freeze_mode": decoded["freeze_mode"],
+                    },
+                }
+            )
+
+        for row in self.storage.fetch_all(
+            "SELECT * FROM cash_leg_definitions ORDER BY updated_at DESC, created_at DESC"
+        ):
+            decoded = self._decode_cash_leg_row(row, reference_counts.get(str(row["id"]), 0))
+            rows.append(
+                {
+                    "id": decoded["id"],
+                    "leg_type": "cash",
+                    "name": decoded["name"],
+                    "version_label": decoded["cash_rule_kind"],
+                    "proof_label": decoded["yield_source"] or decoded["freeze_mode"],
+                    "reference_count": reference_counts.get(decoded["id"], 0),
+                    "reference_summary": self._reference_summary(reference_counts.get(decoded["id"], 0)),
+                    "status": decoded["status"],
+                    "status_label": self._leg_inventory_status_label(decoded["status"]),
+                    "has_new_version": False,
+                    "is_orphan": False,
+                    "attribute_tags": decoded["attribute_tags"],
+                    "allowed_actions": decoded["allowed_actions"],
+                    "source_ref_id": decoded["id"],
+                    "source_ref_type": "cash_definition",
+                    "config": {
+                        "cash_rule_kind": decoded["cash_rule_kind"],
+                        "buffer_bps": decoded["buffer_bps"],
+                        "yield_source": decoded["yield_source"],
+                        "freeze_mode": decoded["freeze_mode"],
+                    },
+                }
+            )
+
+        counts = {
+            "all": len(rows),
+            "strategy": len([row for row in rows if row["leg_type"] == "strategy"]),
+            "asset": len([row for row in rows if row["leg_type"] == "asset"]),
+            "cash": len([row for row in rows if row["leg_type"] == "cash"]),
+        }
+        status_counts: dict[str, int] = {}
+        tag_counts: dict[str, int] = {}
+        for row in rows:
+            status = str(row.get("status") or "")
+            status_counts[status] = status_counts.get(status, 0) + 1
+            for tag in row.get("attribute_tags") or []:
+                tag_counts[str(tag)] = tag_counts.get(str(tag), 0) + 1
+        return {
+            "counts": counts,
+            "filters": {
+                "statuses": [
+                    {
+                        "value": status,
+                        "label": self._leg_inventory_status_label(status),
+                        "count": count,
+                    }
+                    for status, count in sorted(status_counts.items())
+                ],
+                "attribute_tags": [
+                    {"value": tag, "label": tag.replace("_", " "), "count": count}
+                    for tag, count in sorted(tag_counts.items())
+                ],
+            },
+            "rows": rows,
+        }
+
+    def create_asset_leg(self, request: Any) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        for field_name in ("name", "symbol", "asset_kind", "source_snapshot_id", "freeze_mode"):
+            if not str(payload.get(field_name) or "").strip():
+                raise ValueError(f"{field_name} is required")
+        leg_id = self._new_id("asset_leg")
+        now = iso_now()
+        summary = dict(payload.get("summary") or {})
+        notes = str(payload.get("notes") or "").strip()
+        if notes:
+            summary["notes"] = notes
+        self.storage.insert_json_row(
+            "asset_leg_definitions",
+            {
+                "id": leg_id,
+                "name": str(payload["name"]).strip(),
+                "symbol": str(payload["symbol"]).strip().upper(),
+                "asset_kind": str(payload["asset_kind"]).strip(),
+                "source_snapshot_id": str(payload["source_snapshot_id"]).strip(),
+                "source_provider": str(payload.get("source_provider") or "").strip() or None,
+                "freeze_mode": str(payload["freeze_mode"]).strip(),
+                "summary_json": dumps(summary),
+                "status": "ACTIVE",
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        row = self.storage.fetch_one("SELECT * FROM asset_leg_definitions WHERE id = ?", (leg_id,))
+        assert row is not None
+        return self._decode_asset_leg_row(row)
+
+    def create_cash_leg(self, request: Any) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        for field_name in ("name", "cash_rule_kind", "freeze_mode"):
+            if not str(payload.get(field_name) or "").strip():
+                raise ValueError(f"{field_name} is required")
+        leg_id = self._new_id("cash_leg")
+        now = iso_now()
+        summary = dict(payload.get("summary") or {})
+        notes = str(payload.get("notes") or "").strip()
+        if notes:
+            summary["notes"] = notes
+        self.storage.insert_json_row(
+            "cash_leg_definitions",
+            {
+                "id": leg_id,
+                "name": str(payload["name"]).strip(),
+                "cash_rule_kind": str(payload["cash_rule_kind"]).strip(),
+                "buffer_bps": round(_as_float(payload.get("buffer_bps"), 0.0), 4),
+                "yield_source": str(payload.get("yield_source") or "").strip() or None,
+                "freeze_mode": str(payload["freeze_mode"]).strip(),
+                "summary_json": dumps(summary),
+                "status": "ACTIVE",
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        row = self.storage.fetch_one("SELECT * FROM cash_leg_definitions WHERE id = ?", (leg_id,))
+        assert row is not None
+        return self._decode_cash_leg_row(row)
+
+    def _inventory_row_map(self) -> dict[str, dict[str, Any]]:
+        inventory = self.list_leg_inventory()
+        return {
+            str(row["id"]): dict(row)
+            for row in inventory.get("rows", [])
+            if row.get("id")
+        }
+
+    def _strategy_profile_defaults(self, strategy_type: str) -> tuple[float, float, float]:
+        mapping = {
+            "MOMENTUM": (12.0, 18.0, 14.0),
+            "GRID": (8.0, 10.0, 8.0),
+            "BUY_AND_HOLD": (9.0, 15.0, 12.0),
+            "MEAN_REVERSION": (7.5, 11.0, 9.0),
+            "GENERAL": (8.5, 12.0, 10.0),
+        }
+        return mapping.get(strategy_type.upper(), mapping["GENERAL"])
+
+    def _asset_profile_defaults(self, asset_kind: str) -> tuple[float, float, float]:
+        mapping = {
+            "BOND": (4.0, 6.0, 5.0),
+            "ETF": (6.0, 10.0, 8.0),
+            "FUND": (5.5, 9.0, 7.5),
+            "INDEX": (6.5, 11.5, 9.5),
+            "EQUITY": (8.0, 14.0, 12.0),
+            "COMMODITY": (6.0, 16.0, 14.0),
+            "CREDIT": (5.0, 8.0, 7.0),
+        }
+        return mapping.get(asset_kind.upper(), (5.5, 9.0, 8.0))
+
+    def _cash_profile_defaults(self, cash_rule_kind: str) -> tuple[float, float, float]:
+        mapping = {
+            "YIELD_RESERVE": (3.5, 1.5, 0.5),
+            "SETTLEMENT_LADDER": (3.0, 0.7, 0.3),
+            "TARGET_BUFFER": (2.0, 0.5, 0.2),
+            "FIXED_AMOUNT": (1.5, 0.3, 0.1),
+        }
+        return mapping.get(cash_rule_kind.upper(), (2.25, 0.5, 0.2))
+
+    def _resolved_leg_profile(self, leg: Mapping[str, Any]) -> dict[str, float]:
+        config = dict(leg.get("config") or {})
+        leg_kind = str(leg.get("leg_kind") or "").lower()
+        if leg_kind == "strategy":
+            annualized_return_pct, volatility_pct, max_drawdown_pct = self._strategy_profile_defaults(
+                str(config.get("strategy_type") or "GENERAL")
+            )
+            annualized_return_pct = _as_float(config.get("annualized_return_pct"), annualized_return_pct)
+            max_drawdown_pct = max(
+                _as_float(config.get("max_drawdown_pct"), max_drawdown_pct),
+                max_drawdown_pct,
+            )
+        elif leg_kind == "asset":
+            annualized_return_pct, volatility_pct, max_drawdown_pct = self._asset_profile_defaults(
+                str(config.get("asset_kind") or "ETF")
+            )
+        else:
+            annualized_return_pct, volatility_pct, max_drawdown_pct = self._cash_profile_defaults(
+                str(config.get("cash_rule_kind") or "TARGET_BUFFER")
+            )
+        return {
+            "annualized_return_pct": round(annualized_return_pct, 4),
+            "volatility_pct": round(volatility_pct, 4),
+            "max_drawdown_pct": round(max_drawdown_pct, 4),
+        }
+
+    def _resolve_composition_legs(self, raw_legs: Sequence[Mapping[str, Any]] | Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+        inventory_map = self._inventory_row_map()
+        resolved: list[dict[str, Any]] = []
+        for index, raw_leg in enumerate(raw_legs, start=1):
+            leg = _as_mapping(raw_leg)
+            leg_kind = str(leg.get("leg_kind") or "").strip().lower()
+            if leg_kind not in {"strategy", "asset", "cash"}:
+                raise ValueError("leg_kind must be one of strategy, asset, cash")
+            source_ref_id = str(leg.get("source_ref_id") or "").strip()
+            if not source_ref_id:
+                raise ValueError("source_ref_id is required for each composition leg")
+            inventory_row = inventory_map.get(source_ref_id)
+            if inventory_row is None and leg_kind == "strategy":
+                parsed = _parse_strategy_leg_inventory_id(source_ref_id)
+                if parsed is not None:
+                    strategy_id, parameter_version_id = parsed
+                    strategy = self.get_strategy_detail(strategy_id)
+                    version_entry = next(
+                        (
+                            dict(entry)
+                            for entry in strategy.get("parameter_history", [])
+                            if str(entry.get("parameter_version_id") or "") == parameter_version_id
+                        ),
+                        None,
+                    )
+                    if version_entry is not None:
+                        inventory_row = self._strategy_projection_row(
+                            strategy,
+                            version_entry,
+                            self._completed_run_summaries_for_strategy(strategy_id),
+                            0,
+                        )
+            if inventory_row is None:
+                raise KeyError(f"Leg not found: {source_ref_id}")
+            ordering = _as_int(leg.get("ordering"), index)
+            resolved_leg = {
+                "id": str(source_ref_id),
+                "leg_kind": leg_kind,
+                "source_ref_id": source_ref_id,
+                "source_ref_type": str(
+                    leg.get("source_ref_type")
+                    or inventory_row.get("source_ref_type")
+                    or f"{leg_kind}_definition"
+                ),
+                "display_name": str(leg.get("display_name") or inventory_row.get("name") or source_ref_id),
+                "weight_pct": round(_as_float(leg.get("weight_pct"), 0.0), 4),
+                "weight_locked": bool(leg.get("weight_locked", False)),
+                "ordering": max(ordering, 1),
+                "version_label": inventory_row.get("version_label"),
+                "proof_label": inventory_row.get("proof_label"),
+                "status": str(inventory_row.get("status") or "ACTIVE"),
+                "status_label": str(inventory_row.get("status_label") or self._leg_inventory_status_label(str(inventory_row.get("status") or "ACTIVE"))),
+                "attribute_tags": list(inventory_row.get("attribute_tags") or []),
+                "reference_summary": str(inventory_row.get("reference_summary") or ""),
+                "config": {
+                    **dict(inventory_row.get("config") or {}),
+                    **dict(leg.get("config") or {}),
+                },
+                "allowed_actions": list(inventory_row.get("allowed_actions") or []),
+            }
+            resolved.append(resolved_leg)
+        resolved.sort(key=lambda item: (int(item.get("ordering") or 1), str(item.get("display_name") or "")))
+        return resolved
+
+    def _benchmark_return_pct(self, benchmark_definition: Mapping[str, Any] | None) -> float:
+        symbol = str((benchmark_definition or {}).get("symbol") or "").strip().upper()
+        mapping = {
+            "SPY": 8.0,
+            "QQQ": 10.0,
+            "AGG": 4.0,
+            "TLT": 4.5,
+            "BND": 4.0,
+        }
+        return mapping.get(symbol, 7.0)
+
+    def _build_composition_preview_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        benchmark_definition = self._normalize_composition_benchmark_definition(
+            payload.get("benchmark_definition")
+        )
+        cost_policy = self._normalize_composition_cost_policy(payload.get("cost_policy"))
+        rebalance_frequency = str(payload.get("rebalance_frequency") or "quarterly").strip().lower() or "quarterly"
+        resolved_legs = self._resolve_composition_legs(payload.get("legs") or [])
+        if not resolved_legs:
+            raise ValueError("At least one composition leg is required")
+
+        total_weight_pct = round(sum(_as_float(leg.get("weight_pct"), 0.0) for leg in resolved_legs), 4)
+        residual_weight_pct = round(100.0 - total_weight_pct, 4)
+        locked_weight_pct = round(
+            sum(_as_float(leg.get("weight_pct"), 0.0) for leg in resolved_legs if leg.get("weight_locked")),
+            4,
+        )
+        unlocked_weight_pct = round(total_weight_pct - locked_weight_pct, 4)
+        within_tolerance = abs(residual_weight_pct) <= 0.5
+
+        benchmark_return_pct = self._benchmark_return_pct(benchmark_definition)
+        preview_anchor = utc_now().date() - timedelta(days=150)
+        returns_preview: list[dict[str, Any]] = []
+        benchmark_series: list[dict[str, Any]] = []
+        spread_series: list[dict[str, Any]] = []
+        cumulative_portfolio_pct = 0.0
+        cumulative_benchmark_pct = 0.0
+        risk_contribution_preview: list[dict[str, Any]] = []
+        correlation_matrix: list[dict[str, Any]] = []
+
+        risk_budget_denominator = 0.0
+        profiles_by_leg_id: dict[str, dict[str, float]] = {}
+        for leg in resolved_legs:
+            profile = self._resolved_leg_profile(leg)
+            profiles_by_leg_id[str(leg["id"])] = profile
+            risk_budget_denominator += abs(_as_float(leg.get("weight_pct"), 0.0) * profile["volatility_pct"])
+
+        for period_index in range(6):
+            point_date = (preview_anchor + timedelta(days=30 * period_index)).isoformat()
+            portfolio_period_pct = 0.0
+            for leg in resolved_legs:
+                profile = profiles_by_leg_id[str(leg["id"])]
+                baseline_period_pct = profile["annualized_return_pct"] / 12.0
+                volatility_swing = (
+                    _stable_hash_fraction(leg["id"], period_index, "portfolio") - 0.5
+                ) * min(profile["volatility_pct"] / 12.0, 1.75)
+                portfolio_period_pct += _as_float(leg.get("weight_pct"), 0.0) / 100.0 * (
+                    baseline_period_pct + volatility_swing
+                )
+            benchmark_period_pct = benchmark_return_pct / 12.0 + (
+                _stable_hash_fraction(self._composition_benchmark_label(benchmark_definition), period_index, "benchmark") - 0.5
+            ) * 0.35
+            cumulative_portfolio_pct = round(
+                ((1.0 + cumulative_portfolio_pct / 100.0) * (1.0 + portfolio_period_pct / 100.0) - 1.0) * 100.0,
+                4,
+            )
+            cumulative_benchmark_pct = round(
+                ((1.0 + cumulative_benchmark_pct / 100.0) * (1.0 + benchmark_period_pct / 100.0) - 1.0) * 100.0,
+                4,
+            )
+            label = f"P{period_index + 1}"
+            returns_preview.append(
+                {
+                    "label": label,
+                    "date": point_date,
+                    "portfolio_return_pct": round(portfolio_period_pct, 4),
+                    "cumulative_return_pct": cumulative_portfolio_pct,
+                }
+            )
+            benchmark_series.append(
+                {
+                    "label": label,
+                    "date": point_date,
+                    "benchmark_return_pct": round(benchmark_period_pct, 4),
+                    "cumulative_return_pct": cumulative_benchmark_pct,
+                }
+            )
+            spread_series.append(
+                {
+                    "label": label,
+                    "date": point_date,
+                    "spread_pct": round(cumulative_portfolio_pct - cumulative_benchmark_pct, 4),
+                }
+            )
+
+        for leg in resolved_legs:
+            profile = profiles_by_leg_id[str(leg["id"])]
+            contribution_raw = abs(_as_float(leg.get("weight_pct"), 0.0) * profile["volatility_pct"])
+            contribution_pct = (
+                round(contribution_raw / risk_budget_denominator * 100.0, 4)
+                if risk_budget_denominator > 0
+                else 0.0
+            )
+            risk_contribution_preview.append(
+                {
+                    "leg_id": str(leg["id"]),
+                    "label": str(leg["display_name"]),
+                    "weight_pct": round(_as_float(leg.get("weight_pct"), 0.0), 4),
+                    "volatility_pct": profile["volatility_pct"],
+                    "contribution_pct": contribution_pct,
+                }
+            )
+
+        for x_leg in resolved_legs:
+            for y_leg in resolved_legs:
+                if x_leg["id"] == y_leg["id"]:
+                    correlation = 1.0
+                elif "cash" in {x_leg["leg_kind"], y_leg["leg_kind"]}:
+                    correlation = 0.08
+                else:
+                    correlation = round(
+                        0.18 + _stable_hash_fraction(x_leg["id"], y_leg["id"], "corr") * 0.62,
+                        4,
+                    )
+                correlation_matrix.append(
+                    {
+                        "x_key": str(x_leg["id"]),
+                        "y_key": str(y_leg["id"]),
+                        "correlation": correlation,
+                    }
+                )
+
+        turnover_budget_bps = cost_policy["turnover_budget_bps"] or (
+            80.0 if rebalance_frequency == "monthly" else 45.0 if rebalance_frequency == "quarterly" else 20.0
+        )
+        expense_ratio_bps = cost_policy["expense_ratio_bps"] or round(
+            sum(
+                14.0
+                if leg["leg_kind"] == "asset"
+                else 18.0
+                if leg["leg_kind"] == "strategy"
+                else 4.0
+                for leg in resolved_legs
+            )
+            / max(len(resolved_legs), 1),
+            4,
+        )
+        trade_cost_bps = cost_policy["trade_cost_bps"] or round(
+            sum(
+                _as_float(leg.get("weight_pct"), 0.0)
+                * (8.0 if leg["leg_kind"] == "strategy" else 5.0 if leg["leg_kind"] == "asset" else 1.0)
+                / 100.0
+                for leg in resolved_legs
+            ),
+            4,
+        )
+        total_estimated_bps = round(
+            expense_ratio_bps + trade_cost_bps + turnover_budget_bps * 0.25,
+            4,
+        )
+        maintenance_cost_summary = {
+            "expense_ratio_bps": round(expense_ratio_bps, 4),
+            "turnover_budget_bps": round(turnover_budget_bps, 4),
+            "trade_cost_bps": round(trade_cost_bps, 4),
+            "total_estimated_bps": total_estimated_bps,
+            "notes": [
+                f"Cadence modeled as {rebalance_frequency}.",
+                "Phase 1 analytics are deterministic placeholders when live composition analytics are unavailable.",
+            ],
+        }
+
+        unique_leg_types = len({str(leg["leg_kind"]) for leg in resolved_legs})
+        max_leg_weight_pct = max(_as_float(leg.get("weight_pct"), 0.0) for leg in resolved_legs)
+        evidence_score = round(
+            25.0
+            * len([leg for leg in resolved_legs if "No eligible completed run yet" not in str(leg.get("proof_label") or "")])
+            / len(resolved_legs),
+            4,
+        )
+        weight_score = max(4.0, round(25.0 - abs(residual_weight_pct) * 8.0, 4))
+        diversification_score = max(
+            4.0,
+            round(
+                min(25.0, 8.0 + unique_leg_types * 5.0 + len(resolved_legs) * 2.5 - max(0.0, max_leg_weight_pct - 45.0) * 0.45),
+                4,
+            ),
+        )
+        cost_score = max(4.0, round(25.0 - total_estimated_bps / 8.0, 4))
+        factors = [
+            {
+                "key": "weight_discipline",
+                "label": "Weight discipline",
+                "score": weight_score,
+                "detail": "Closer to 100% target weight earns more confidence.",
+                "tone": "good" if weight_score >= 18 else "watch" if weight_score >= 12 else "risk",
+            },
+            {
+                "key": "diversification",
+                "label": "Diversification mix",
+                "score": diversification_score,
+                "detail": "Balances sleeve count, sleeve mix, and concentration.",
+                "tone": "good" if diversification_score >= 18 else "watch" if diversification_score >= 12 else "risk",
+            },
+            {
+                "key": "evidence",
+                "label": "Evidence quality",
+                "score": evidence_score,
+                "detail": "Rewards sleeves with concrete run or source evidence.",
+                "tone": "good" if evidence_score >= 18 else "watch" if evidence_score >= 12 else "risk",
+            },
+            {
+                "key": "cost",
+                "label": "Maintenance cost",
+                "score": cost_score,
+                "detail": "Lower expected maintenance overhead preserves optionality.",
+                "tone": "good" if cost_score >= 18 else "watch" if cost_score >= 12 else "risk",
+            },
+        ]
+        composition_score_value = round(sum(factor["score"] for factor in factors), 4)
+        if composition_score_value >= 80:
+            verdict = "strong"
+        elif composition_score_value >= 65:
+            verdict = "balanced"
+        elif composition_score_value >= 50:
+            verdict = "watch"
+        else:
+            verdict = "fragile"
+
+        warnings: list[str] = []
+        advisories: list[str] = []
+        if not within_tolerance:
+            warnings.append(f"Weight total is {total_weight_pct:.2f}% and leaves {residual_weight_pct:.2f}% residual.")
+        if max_leg_weight_pct > 65:
+            warnings.append("One leg exceeds 65% weight and may dominate the composition.")
+        if any(leg["leg_kind"] == "strategy" and leg["status"] == "NEEDS_RUN" for leg in resolved_legs):
+            warnings.append("At least one strategy leg has no eligible completed run yet.")
+        if not benchmark_definition.get("symbol"):
+            advisories.append("Benchmark is running on a generic phase 1 proxy until a benchmark symbol is selected.")
+        if unique_leg_types == 1:
+            advisories.append("Mixing strategy, asset, and cash legs can improve diversification in later iterations.")
+
+        return {
+            "weight_summary": {
+                "total_weight_pct": total_weight_pct,
+                "target_weight_pct": 100.0,
+                "residual_weight_pct": residual_weight_pct,
+                "locked_weight_pct": locked_weight_pct,
+                "unlocked_weight_pct": unlocked_weight_pct,
+                "within_tolerance": within_tolerance,
+            },
+            "normalized_legs": resolved_legs,
+            "returns_preview": returns_preview,
+            "benchmark_series": benchmark_series,
+            "spread_series": spread_series,
+            "correlation_matrix": correlation_matrix,
+            "risk_contribution_preview": risk_contribution_preview,
+            "maintenance_cost_summary": maintenance_cost_summary,
+            "rebalance_summary": {
+                "rebalance_frequency": rebalance_frequency,
+                "cadence_label": rebalance_frequency.replace("_", " ").title(),
+                "checks_per_year": self._rebalance_checks_per_year(rebalance_frequency),
+                "operating_tempo_label": (
+                    "High-touch"
+                    if self._rebalance_checks_per_year(rebalance_frequency) >= 12
+                    else "Steady cadence"
+                    if self._rebalance_checks_per_year(rebalance_frequency) >= 4
+                    else "Low-touch"
+                ),
+            },
+            "composition_score": {
+                "score": composition_score_value,
+                "verdict": verdict,
+                "factors": factors,
+            },
+            "warnings": warnings,
+            "advisories": advisories,
+        }
+
+    def _build_composition_detail_payload(
+        self,
+        *,
+        composition_id: str,
+        name: str,
+        description: str | None,
+        status: str,
+        benchmark_definition: Mapping[str, Any],
+        rebalance_frequency: str | None,
+        cost_policy: Mapping[str, Any],
+        preview_payload: Mapping[str, Any],
+        created_at: str,
+        updated_at: str,
+        source_evidence: Sequence[Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        preview = dict(preview_payload)
+        weight_summary = dict(preview.get("weight_summary") or {})
+        maintenance_cost_summary = dict(preview.get("maintenance_cost_summary") or {})
+        composition_score = dict(preview.get("composition_score") or {})
+        annualized_return = round(
+            sum(
+                _as_float(item.get("weight_pct"), 0.0)
+                / 100.0
+                * self._resolved_leg_profile(item)["annualized_return_pct"]
+                for item in preview.get("normalized_legs", [])
+            ),
+            4,
+        )
+        max_drawdown = round(
+            sum(
+                _as_float(item.get("weight_pct"), 0.0)
+                / 100.0
+                * self._resolved_leg_profile(item)["max_drawdown_pct"]
+                for item in preview.get("normalized_legs", [])
+            ),
+            4,
+        )
+        kpis = [
+            {
+                "key": "composition_score",
+                "label": "Composition score",
+                "value": round(_as_float(composition_score.get("score"), 0.0), 2),
+                "unit": "pts",
+                "tone": "good" if _as_float(composition_score.get("score"), 0.0) >= 75 else "watch",
+            },
+            {
+                "key": "annualized_return",
+                "label": "Annualized return",
+                "value": annualized_return,
+                "unit": "%",
+                "tone": "good" if annualized_return >= 0 else "risk",
+            },
+            {
+                "key": "max_drawdown",
+                "label": "Max drawdown",
+                "value": max_drawdown,
+                "unit": "%",
+                "tone": "watch",
+            },
+            {
+                "key": "leg_count",
+                "label": "Leg count",
+                "value": len(preview.get("normalized_legs", [])),
+                "unit": None,
+                "tone": "neutral",
+            },
+            {
+                "key": "locked_weight",
+                "label": "Locked weight",
+                "value": round(_as_float(weight_summary.get("locked_weight_pct"), 0.0), 2),
+                "unit": "%",
+                "tone": "neutral",
+            },
+            {
+                "key": "residual_weight",
+                "label": "Residual weight",
+                "value": round(_as_float(weight_summary.get("residual_weight_pct"), 0.0), 2),
+                "unit": "%",
+                "tone": "risk" if not weight_summary.get("within_tolerance") else "good",
+            },
+            {
+                "key": "estimated_cost",
+                "label": "Estimated maintenance cost",
+                "value": round(_as_float(maintenance_cost_summary.get("total_estimated_bps"), 0.0), 2),
+                "unit": "bps",
+                "tone": "watch",
+            },
+        ]
+        rebalance_markers = [
+            {
+                "label": row["label"],
+                "date": row.get("date"),
+                "index": index,
+            }
+            for index, row in enumerate(preview.get("returns_preview", []), start=1)
+            if index == 1
+            or (
+                self._rebalance_checks_per_year(rebalance_frequency) >= 12
+                or (
+                    self._rebalance_checks_per_year(rebalance_frequency) >= 4
+                    and index % 3 == 0
+                )
+                or (
+                    self._rebalance_checks_per_year(rebalance_frequency) == 2
+                    and index in {1, len(preview.get("returns_preview", []))}
+                )
+            )
+        ]
+        return {
+            "id": composition_id,
+            "name": name,
+            "description": description,
+            "status": status,
+            "status_label": self._composition_status_label(status),
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "benchmark_definition": dict(benchmark_definition),
+            "rebalance_frequency": rebalance_frequency,
+            "cost_policy": dict(cost_policy),
+            "hero_summary": {
+                "title": name,
+                "subtitle": f"{self._composition_benchmark_label(benchmark_definition)} benchmark · {str(rebalance_frequency or 'quarterly').title()} cadence",
+                "status": status,
+                "status_label": self._composition_status_label(status),
+                "benchmark_label": self._composition_benchmark_label(benchmark_definition),
+                "leg_count": len(preview.get("normalized_legs", [])),
+                "composition_score": round(_as_float(composition_score.get("score"), 0.0), 2),
+                "updated_at": updated_at,
+            },
+            "kpis": kpis,
+            "weight_summary": weight_summary,
+            "normalized_legs": list(preview.get("normalized_legs", [])),
+            "returns_preview": list(preview.get("returns_preview", [])),
+            "benchmark_series": list(preview.get("benchmark_series", [])),
+            "spread_series": list(preview.get("spread_series", [])),
+            "rebalance_markers": rebalance_markers,
+            "correlation_matrix": list(preview.get("correlation_matrix", [])),
+            "risk_contribution_preview": list(preview.get("risk_contribution_preview", [])),
+            "maintenance_cost_summary": maintenance_cost_summary,
+            "scenario_summary": {
+                "base_case": {
+                    "annualized_return_pct": annualized_return,
+                    "max_drawdown_pct": max_drawdown,
+                },
+                "stress_case": {
+                    "drawdown_pct": round(max_drawdown * 1.25, 4),
+                    "return_drag_pct": round(max(annualized_return * 0.35, 0.0), 4),
+                },
+                "dispersion_note": "Scenario outputs are deterministic phase 1 approximations built from sleeve mix and cadence.",
+            },
+            "source_evidence": [dict(item) for item in (source_evidence or [])],
+            "composition_score": composition_score,
+            "latest_activity_label": self._latest_activity_label(updated_at),
+            "deep_link_actions": [
+                "open_composition_workbench",
+                "open_leg_inventory",
+                "inspect_source_evidence",
+                "refresh_snapshots",
+            ],
+        }
+
+    def _build_composition_summary_payload(self, detail_payload: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "composition_score": round(_as_float(detail_payload.get("composition_score", {}).get("score"), 0.0), 4),
+            "leg_count": len(detail_payload.get("normalized_legs", [])),
+            "rebalance_frequency": detail_payload.get("rebalance_frequency"),
+            "benchmark_label": self._composition_benchmark_label(detail_payload.get("benchmark_definition")),
+            "annualized_return": next(
+                (
+                    _as_float(kpi.get("value"), 0.0)
+                    for kpi in detail_payload.get("kpis", [])
+                    if kpi.get("key") == "annualized_return"
+                ),
+                0.0,
+            ),
+            "max_drawdown": next(
+                (
+                    _as_float(kpi.get("value"), 0.0)
+                    for kpi in detail_payload.get("kpis", [])
+                    if kpi.get("key") == "max_drawdown"
+                ),
+                0.0,
+            ),
+            "latest_activity_label": detail_payload.get("latest_activity_label"),
+            "allowed_actions": detail_payload.get("deep_link_actions", []),
+        }
+
+    def preview_composition(self, request: Any) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        return self._build_composition_preview_payload(payload)
+
+    def _composition_leg_rows_as_inputs(self, rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "leg_kind": str(row.get("leg_kind") or ""),
+                "source_ref_id": str(row.get("source_ref_id") or ""),
+                "source_ref_type": str(row.get("source_ref_type") or ""),
+                "display_name": str(row.get("display_name") or ""),
+                "weight_pct": round(_as_float(row.get("weight_pct"), 0.0), 4),
+                "weight_locked": bool(int(row.get("weight_locked") or 0)),
+                "ordering": int(row.get("ordering") or index),
+                "config": loads(row.get("config_json"), {}),
+            }
+            for index, row in enumerate(rows, start=1)
+        ]
+
+    def _load_composition_record(self, composition_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one("SELECT * FROM compositions WHERE id = ?", (composition_id,))
+        if not row:
+            raise KeyError(f"Composition not found: {composition_id}")
+        return row
+
+    def _load_composition_leg_rows(self, composition_id: str) -> list[dict[str, Any]]:
+        return self.storage.fetch_all(
+            """
+            SELECT *
+            FROM composition_legs
+            WHERE composition_id = ?
+            ORDER BY ordering ASC, created_at ASC, id ASC
+            """,
+            (composition_id,),
+        )
+
+    def _load_composition_freeze_rows(self, composition_id: str) -> list[dict[str, Any]]:
+        return self.storage.fetch_all(
+            """
+            SELECT freezes.*, legs.display_name
+            FROM composition_source_freezes AS freezes
+            LEFT JOIN composition_legs AS legs ON legs.id = freezes.leg_id
+            WHERE freezes.composition_id = ?
+            ORDER BY freezes.created_at ASC, freezes.id ASC
+            """,
+            (composition_id,),
+        )
+
+    def _persist_composition(
+        self,
+        *,
+        composition_id: str,
+        name: str,
+        description: str | None,
+        status: str,
+        benchmark_definition: Mapping[str, Any],
+        rebalance_frequency: str | None,
+        cost_policy: Mapping[str, Any],
+        preview_payload: Mapping[str, Any],
+        created_at: str,
+        updated_at: str,
+        existing_leg_rows: Sequence[Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        normalized_legs = list(preview_payload.get("normalized_legs", []))
+        leg_rows: list[dict[str, Any]] = []
+        freeze_rows: list[dict[str, Any]] = []
+        previous_leg_ids = [
+            str(row.get("id") or "")
+            for row in (existing_leg_rows or [])
+            if row.get("id")
+        ]
+        for index, leg in enumerate(normalized_legs, start=1):
+            leg_id = previous_leg_ids[index - 1] if index - 1 < len(previous_leg_ids) else self._new_id("composition_leg")
+            leg_row = {
+                "id": leg_id,
+                "composition_id": composition_id,
+                "leg_kind": str(leg.get("leg_kind") or ""),
+                "source_ref_id": str(leg.get("source_ref_id") or ""),
+                "source_ref_type": str(leg.get("source_ref_type") or ""),
+                "display_name": str(leg.get("display_name") or ""),
+                "weight_pct": round(_as_float(leg.get("weight_pct"), 0.0), 4),
+                "weight_locked": 1 if leg.get("weight_locked") else 0,
+                "ordering": int(leg.get("ordering") or index),
+                "config_json": dumps(dict(leg.get("config") or {})),
+                "created_at": created_at if index - 1 >= len(previous_leg_ids) else str((existing_leg_rows or [])[index - 1].get("created_at") or created_at),
+                "updated_at": updated_at,
+            }
+            snapshot = {
+                "display_name": leg_row["display_name"],
+                "leg_kind": leg_row["leg_kind"],
+                "source_ref_id": leg_row["source_ref_id"],
+                "source_ref_type": leg_row["source_ref_type"],
+                "weight_pct": leg_row["weight_pct"],
+                "weight_locked": bool(leg_row["weight_locked"]),
+                "version_label": leg.get("version_label"),
+                "proof_label": leg.get("proof_label"),
+                "status": leg.get("status"),
+                "status_label": leg.get("status_label"),
+                "attribute_tags": list(leg.get("attribute_tags") or []),
+                "config": dict(leg.get("config") or {}),
+            }
+            freeze_hash = hashlib.sha256(
+                json.dumps(snapshot, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+            ).hexdigest()[:16]
+            freeze_row = {
+                "id": self._new_id("freeze"),
+                "leg_id": leg_id,
+                "display_name": leg_row["display_name"],
+                "freeze_ref_type": leg_row["source_ref_type"],
+                "freeze_ref_id": leg_row["source_ref_id"],
+                "freeze_hash": freeze_hash,
+                "snapshot": snapshot,
+                "captured_at": updated_at,
+            }
+            leg_rows.append(leg_row)
+            freeze_rows.append(freeze_row)
+
+        detail_payload = self._build_composition_detail_payload(
+            composition_id=composition_id,
+            name=name,
+            description=description,
+            status=status,
+            benchmark_definition=benchmark_definition,
+            rebalance_frequency=rebalance_frequency,
+            cost_policy=cost_policy,
+            preview_payload=preview_payload,
+            created_at=created_at,
+            updated_at=updated_at,
+            source_evidence=freeze_rows,
+        )
+        summary_payload = self._build_composition_summary_payload(detail_payload)
+
+        with self.storage.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO compositions (
+                    id,
+                    name,
+                    description,
+                    status,
+                    benchmark_definition_json,
+                    rebalance_frequency,
+                    cost_policy_json,
+                    summary_json,
+                    analysis_json,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    description = excluded.description,
+                    status = excluded.status,
+                    benchmark_definition_json = excluded.benchmark_definition_json,
+                    rebalance_frequency = excluded.rebalance_frequency,
+                    cost_policy_json = excluded.cost_policy_json,
+                    summary_json = excluded.summary_json,
+                    analysis_json = excluded.analysis_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    composition_id,
+                    name,
+                    description,
+                    status,
+                    dumps(dict(benchmark_definition)),
+                    rebalance_frequency,
+                    dumps(dict(cost_policy)),
+                    dumps(summary_payload),
+                    dumps(detail_payload),
+                    created_at,
+                    updated_at,
+                ),
+            )
+            conn.execute("DELETE FROM composition_source_freezes WHERE composition_id = ?", (composition_id,))
+            conn.execute("DELETE FROM composition_legs WHERE composition_id = ?", (composition_id,))
+            for row in leg_rows:
+                conn.execute(
+                    """
+                    INSERT INTO composition_legs (
+                        id,
+                        composition_id,
+                        leg_kind,
+                        source_ref_id,
+                        source_ref_type,
+                        display_name,
+                        weight_pct,
+                        weight_locked,
+                        ordering,
+                        config_json,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["id"],
+                        row["composition_id"],
+                        row["leg_kind"],
+                        row["source_ref_id"],
+                        row["source_ref_type"],
+                        row["display_name"],
+                        row["weight_pct"],
+                        row["weight_locked"],
+                        row["ordering"],
+                        row["config_json"],
+                        row["created_at"],
+                        row["updated_at"],
+                    ),
+                )
+            for row in freeze_rows:
+                conn.execute(
+                    """
+                    INSERT INTO composition_source_freezes (
+                        id,
+                        composition_id,
+                        leg_id,
+                        freeze_ref_type,
+                        freeze_ref_id,
+                        freeze_hash,
+                        snapshot_json,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["id"],
+                        composition_id,
+                        row["leg_id"],
+                        row["freeze_ref_type"],
+                        row["freeze_ref_id"],
+                        row["freeze_hash"],
+                        dumps(row["snapshot"]),
+                        row["captured_at"],
+                    ),
+                )
+        return detail_payload
+
+    def create_composition(self, request: Any) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        now = iso_now()
+        composition_id = self._new_id("composition")
+        name = str(payload.get("name") or "").strip() or f"Composition {composition_id[-6:]}"
+        description = str(payload.get("description") or "").strip() or None
+        status = self._normalize_composition_status(payload.get("status"), default="DRAFT")
+        benchmark_definition = self._normalize_composition_benchmark_definition(payload.get("benchmark_definition"))
+        rebalance_frequency = str(payload.get("rebalance_frequency") or "quarterly").strip().lower() or "quarterly"
+        cost_policy = self._normalize_composition_cost_policy(payload.get("cost_policy"))
+        preview_payload = self._build_composition_preview_payload(
+            {
+                **payload,
+                "benchmark_definition": benchmark_definition,
+                "rebalance_frequency": rebalance_frequency,
+                "cost_policy": cost_policy,
+            }
+        )
+        return self._persist_composition(
+            composition_id=composition_id,
+            name=name,
+            description=description,
+            status=status,
+            benchmark_definition=benchmark_definition,
+            rebalance_frequency=rebalance_frequency,
+            cost_policy=cost_policy,
+            preview_payload=preview_payload,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def list_compositions(self) -> list[dict[str, Any]]:
+        rows = self.storage.fetch_all(
+            "SELECT * FROM compositions ORDER BY updated_at DESC, created_at DESC"
+        )
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            summary = loads(row.get("summary_json"), {})
+            items.append(
+                {
+                    "id": str(row.get("id") or ""),
+                    "name": str(row.get("name") or ""),
+                    "status": str(row.get("status") or "DRAFT"),
+                    "composition_score": round(_as_float(summary.get("composition_score"), 0.0), 4),
+                    "leg_count": _as_int(summary.get("leg_count"), 0),
+                    "rebalance_frequency": summary.get("rebalance_frequency") or row.get("rebalance_frequency"),
+                    "benchmark_label": summary.get("benchmark_label"),
+                    "annualized_return": round(_as_float(summary.get("annualized_return"), 0.0), 4),
+                    "max_drawdown": round(_as_float(summary.get("max_drawdown"), 0.0), 4),
+                    "updated_at": str(row.get("updated_at") or ""),
+                    "latest_activity_label": str(
+                        summary.get("latest_activity_label") or self._latest_activity_label(row.get("updated_at"))
+                    ),
+                    "allowed_actions": list(summary.get("allowed_actions") or ["open_composition_workbench"]),
+                }
+            )
+        return items
+
+    def get_composition_detail(self, composition_id: str) -> dict[str, Any]:
+        row = self._load_composition_record(composition_id)
+        detail_payload = loads(row.get("analysis_json"), {})
+        freeze_rows = self._load_composition_freeze_rows(composition_id)
+        source_evidence = [
+            {
+                "id": str(item.get("id") or ""),
+                "leg_id": str(item.get("leg_id") or ""),
+                "display_name": str(item.get("display_name") or ""),
+                "freeze_ref_type": str(item.get("freeze_ref_type") or ""),
+                "freeze_ref_id": str(item.get("freeze_ref_id") or ""),
+                "freeze_hash": str(item.get("freeze_hash") or ""),
+                "captured_at": str(item.get("created_at") or ""),
+                "snapshot": loads(item.get("snapshot_json"), {}),
+            }
+            for item in freeze_rows
+        ]
+        if not isinstance(detail_payload, dict) or not detail_payload:
+            leg_rows = self._load_composition_leg_rows(composition_id)
+            benchmark_definition = self._normalize_composition_benchmark_definition(
+                loads(row.get("benchmark_definition_json"), {})
+            )
+            cost_policy = self._normalize_composition_cost_policy(loads(row.get("cost_policy_json"), {}))
+            preview_payload = self._build_composition_preview_payload(
+                {
+                    "benchmark_definition": benchmark_definition,
+                    "rebalance_frequency": row.get("rebalance_frequency"),
+                    "cost_policy": cost_policy,
+                    "legs": self._composition_leg_rows_as_inputs(leg_rows),
+                }
+            )
+            detail_payload = self._build_composition_detail_payload(
+                composition_id=composition_id,
+                name=str(row.get("name") or ""),
+                description=str(row.get("description") or "").strip() or None,
+                status=str(row.get("status") or "DRAFT"),
+                benchmark_definition=benchmark_definition,
+                rebalance_frequency=row.get("rebalance_frequency"),
+                cost_policy=cost_policy,
+                preview_payload=preview_payload,
+                created_at=str(row.get("created_at") or ""),
+                updated_at=str(row.get("updated_at") or ""),
+                source_evidence=source_evidence,
+            )
+        else:
+            detail_payload = {**detail_payload, "source_evidence": source_evidence}
+        return detail_payload
+
+    def update_composition(self, composition_id: str, request: Any) -> dict[str, Any]:
+        row = self._load_composition_record(composition_id)
+        payload = _as_mapping(request)
+        existing_leg_rows = self._load_composition_leg_rows(composition_id)
+        name = str(payload.get("name") or row.get("name") or "").strip() or str(row.get("name") or "")
+        description = (
+            str(payload.get("description")).strip()
+            if "description" in payload and payload.get("description") is not None
+            else (str(row.get("description") or "").strip() or None)
+        )
+        status = self._normalize_composition_status(payload.get("status") or row.get("status"), default="DRAFT")
+        benchmark_definition = self._normalize_composition_benchmark_definition(
+            payload.get("benchmark_definition")
+            if "benchmark_definition" in payload
+            else loads(row.get("benchmark_definition_json"), {})
+        )
+        rebalance_frequency = str(
+            payload.get("rebalance_frequency")
+            if "rebalance_frequency" in payload
+            else (row.get("rebalance_frequency") or "quarterly")
+        ).strip().lower() or "quarterly"
+        cost_policy = self._normalize_composition_cost_policy(
+            payload.get("cost_policy")
+            if "cost_policy" in payload
+            else loads(row.get("cost_policy_json"), {})
+        )
+        leg_payloads = (
+            payload.get("legs")
+            if payload.get("legs") is not None
+            else self._composition_leg_rows_as_inputs(existing_leg_rows)
+        )
+        preview_payload = self._build_composition_preview_payload(
+            {
+                "name": name,
+                "description": description,
+                "benchmark_definition": benchmark_definition,
+                "rebalance_frequency": rebalance_frequency,
+                "cost_policy": cost_policy,
+                "legs": leg_payloads,
+            }
+        )
+        return self._persist_composition(
+            composition_id=composition_id,
+            name=name,
+            description=description,
+            status=status,
+            benchmark_definition=benchmark_definition,
+            rebalance_frequency=rebalance_frequency,
+            cost_policy=cost_policy,
+            preview_payload=preview_payload,
+            created_at=str(row.get("created_at") or iso_now()),
+            updated_at=iso_now(),
+            existing_leg_rows=existing_leg_rows,
+        )
+
+    def build_bond_fixed_income_snapshot_overview(
+        self,
+        overview: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        snapshot_overview = dict(overview or self.get_snapshot_overview())
+        dataset_snapshots = [dict(item) for item in snapshot_overview.get("dataset_snapshots", []) if item]
+        universe_snapshots = [dict(item) for item in snapshot_overview.get("universe_snapshots", []) if item]
+        latest_job = _as_mapping(snapshot_overview.get("latest_job"))
+        overall_status = str(snapshot_overview.get("overall_status") or "INCOMPLETE").upper()
+        ready_datasets = len([item for item in dataset_snapshots if str(item.get("status") or "").upper() == "READY"])
+        ready_universes = len([item for item in universe_snapshots if str(item.get("status") or "").upper() == "READY"])
+        pulse_status = (
+            "READY"
+            if overall_status == "READY"
+            else "WATCH"
+            if overall_status in {"RUNNING", "STALE"}
+            else "ACTION_REQUIRED"
+        )
+        last_refreshed_at = snapshot_overview.get("last_refreshed_at")
+        benchmark_key = f"{overall_status}:{last_refreshed_at or 'none'}"
+        curve_preview = []
+        base_curve = [
+            ("3M", 4.68),
+            ("2Y", 4.21),
+            ("5Y", 4.09),
+            ("10Y", 4.15),
+            ("30Y", 4.31),
+        ]
+        front_end_yield = base_curve[0][1]
+        for tenor_label, base_yield in base_curve:
+            shift = (_stable_hash_fraction("bond_curve", benchmark_key, tenor_label) - 0.5) * 0.24
+            yield_pct = round(base_yield + shift, 4)
+            curve_preview.append(
+                {
+                    "tenor_label": tenor_label,
+                    "yield_pct": yield_pct,
+                    "spread_bps": round((yield_pct - front_end_yield) * 100.0, 4),
+                }
+            )
+        refresh_mode = str(latest_job.get("request", {}).get("mode") or "incremental")
+        cards = [
+            {
+                "id": "shared_snapshot_route",
+                "label": "Shared snapshot route",
+                "status": pulse_status,
+                "value": "#/snapshots",
+                "detail": "Bond governance stays on the existing snapshot overview surface.",
+            },
+            {
+                "id": "dataset_coverage",
+                "label": "Dataset coverage",
+                "status": "READY" if ready_datasets == len(dataset_snapshots) and dataset_snapshots else "WATCH",
+                "value": f"{ready_datasets}/{len(dataset_snapshots)} ready",
+                "detail": "Uses the shared dataset snapshot status as the fixed-income data gate.",
+            },
+            {
+                "id": "universe_coverage",
+                "label": "Universe coverage",
+                "status": "READY" if ready_universes == len(universe_snapshots) and universe_snapshots else "WATCH",
+                "value": f"{ready_universes}/{len(universe_snapshots)} ready",
+                "detail": "Universe snapshots remain the membership and selection evidence lane.",
+            },
+            {
+                "id": "scheduler",
+                "label": "Refresh scheduler",
+                "status": "READY" if latest_job else "WATCH",
+                "value": refresh_mode,
+                "detail": "Reuses the existing snapshot refresh job and cadence instead of a bond-only scheduler.",
+            },
+        ]
+        return {
+            "global_pulse": {
+                "status": pulse_status,
+                "headline": "Bond and fixed-income governance is staged on the shared snapshot route for phase 1.",
+                "updated_at": last_refreshed_at,
+                "cards": cards,
+            },
+            "pillar_groups": [
+                {
+                    "id": "coverage",
+                    "label": "Coverage",
+                    "status": "READY" if ready_datasets == len(dataset_snapshots) and dataset_snapshots else "WATCH",
+                    "items": [
+                        {
+                            "id": "price_dataset",
+                            "label": "Price dataset readiness",
+                            "status": "READY" if any(str(item.get("id") or "") == "ds-price" and str(item.get("status") or "").upper() == "READY" for item in dataset_snapshots) else "WATCH",
+                            "value": "Shared dataset gate",
+                            "detail": "Bond visuals reuse shared price snapshot readiness instead of creating a second pipeline.",
+                        },
+                        {
+                            "id": "universe_dataset",
+                            "label": "Universe snapshot readiness",
+                            "status": "READY" if ready_universes == len(universe_snapshots) and universe_snapshots else "WATCH",
+                            "value": f"{ready_universes}/{len(universe_snapshots)} ready",
+                            "detail": "Universe snapshots anchor bond governance membership and coverage diagnostics.",
+                        },
+                    ],
+                },
+                {
+                    "id": "governance",
+                    "label": "Governance",
+                    "status": pulse_status,
+                    "items": [
+                        {
+                            "id": "registry",
+                            "label": "Registry truth",
+                            "status": "READY",
+                            "value": "Shared snapshot overview",
+                            "detail": "Phase 1 stores bond oversight as an extension of the existing overview contract.",
+                        },
+                        {
+                            "id": "evidence",
+                            "label": "Audit evidence",
+                            "status": "READY" if latest_job else "WATCH",
+                            "value": latest_job.get("id") or "Pending first refresh",
+                            "detail": "Latest refresh job is the authoritative job trail for bond oversight in phase 1.",
+                        },
+                    ],
+                },
+                {
+                    "id": "scheduler",
+                    "label": "Scheduler",
+                    "status": "READY" if latest_job else "WATCH",
+                    "items": [
+                        {
+                            "id": "refresh_mode",
+                            "label": "Most recent refresh mode",
+                            "status": "READY" if latest_job else "WATCH",
+                            "value": refresh_mode,
+                            "detail": "No bond-only scheduler is introduced; this remains bound to the shared refresh job.",
+                        },
+                    ],
+                },
+                {
+                    "id": "diagnostics",
+                    "label": "Diagnostics",
+                    "status": pulse_status,
+                    "items": [
+                        {
+                            "id": "blocking_code",
+                            "label": "Blocking code",
+                            "status": pulse_status,
+                            "value": str(snapshot_overview.get("blocking_code") or "none"),
+                            "detail": "Any shared snapshot blocker also blocks the bond governance tab.",
+                        },
+                    ],
+                },
+            ],
+            "curve_preview": curve_preview,
+            "audit_matrix": [
+                {
+                    "id": "shared_route",
+                    "label": "Shared route ownership",
+                    "owner": "snapshot overview",
+                    "status": pulse_status,
+                    "cadence_label": "continuous",
+                    "evidence": "#/snapshots remains the only route for bond governance",
+                },
+                {
+                    "id": "latest_refresh_job",
+                    "label": "Latest refresh job",
+                    "owner": "snapshot_refresh_jobs",
+                    "status": str(latest_job.get("status") or overall_status),
+                    "cadence_label": refresh_mode,
+                    "evidence": str(latest_job.get("id") or "No job yet"),
+                },
+                {
+                    "id": "dataset_gate",
+                    "label": "Dataset gate",
+                    "owner": "dataset_snapshots",
+                    "status": "READY" if ready_datasets == len(dataset_snapshots) and dataset_snapshots else "WATCH",
+                    "cadence_label": "shared",
+                    "evidence": f"{ready_datasets}/{len(dataset_snapshots)} dataset snapshots ready",
+                },
+            ],
+            "raw_registry": [
+                {
+                    "id": "shared_snapshot_overview",
+                    "label": "Shared snapshot overview",
+                    "status": pulse_status,
+                    "source": "api:/data-snapshots/overview",
+                    "snapshot_ref": "data_snapshots",
+                    "updated_at": str(last_refreshed_at or ""),
+                    "notes": ["This remains the single snapshot API surface.", "Bond governance is additive only."],
+                },
+                {
+                    "id": "phase1_curve_proxy",
+                    "label": "Phase 1 curve proxy",
+                    "status": "READY",
+                    "source": "deterministic_phase1_seed",
+                    "snapshot_ref": "bond_fixed_income.curve_preview",
+                    "updated_at": str(last_refreshed_at or ""),
+                    "notes": ["Synthetic until a dedicated fixed-income dataset is approved."],
+                },
+            ],
+            "scheduler": {
+                "status": "READY" if latest_job else "WATCH",
+                "cadence_label": f"Shared snapshot cadence ({refresh_mode})",
+                "next_action": "refresh_snapshots",
+                "last_job_id": str(latest_job.get("id") or "") or None,
+            },
+            "selected_source_summary": {
+                "primary_source": "shared_snapshot_overview",
+                "fallback_source": "deterministic_phase1_seed",
+                "selection_reason": "Phase 1 extends the existing snapshot API instead of adding a bond-only endpoint.",
+            },
+            "system_diagnostics": {
+                "blocking_code": snapshot_overview.get("blocking_code"),
+                "blocking_target": snapshot_overview.get("blocking_target"),
+                "refresh_job_status": latest_job.get("status"),
+                "memory": dict(read_runtime_memory_status() or {}),
+                "notes": [
+                    "Bond governance is blocked whenever the shared snapshot overview is blocked.",
+                    "Phase 1 intentionally keeps fixed-income oversight on the shared route and scheduler.",
+                ],
+            },
+        }
 
     def _normalized_optimization_source_run(
         self,

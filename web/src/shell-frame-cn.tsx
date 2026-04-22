@@ -1,11 +1,11 @@
 import type { ReactNode } from 'react';
 import type { AppRoute } from './lib/appRouteContext';
-import { SHELL_NAV_ITEMS, getRouteMeta } from './shell-route-meta-cn';
+import { SHELL_NAV_GROUPS, SHELL_NAV_ITEMS, getRouteMeta } from './shell-route-meta-cn';
 
 const TEXT = {
   ariaMainNav: '\u4e3b\u5bfc\u822a',
   brandTitle: 'Grit \u7b56\u7565\u5b9e\u9a8c\u5ba4',
-  brandSubTitle: 'V1 \u56de\u6d4b\u5e73\u53f0',
+  brandSubTitle: '\u7b56\u7565\u7814\u7a76\u4e0e\u56de\u6d4b\u5e73\u53f0',
   topbarTitle: '\u516c\u53f8\u7ea7\u6295\u8d44\u7b56\u7565\u56de\u6d4b\u5e73\u53f0',
   topbarCopy:
     '\u4ece\u7814\u7a76\u3001\u786e\u8ba4\u5230\u56de\u6d4b\u4e0e\u53c2\u6570\u4f18\u5316\uff0c\u6240\u6709\u5173\u952e\u72b6\u6001\u90fd\u7531\u660e\u786e\u5951\u7ea6\u9a71\u52a8\u3002',
@@ -45,14 +45,21 @@ export function ShellFrameCn({
         </a>
 
         <nav className="sidebar-nav">
-          {SHELL_NAV_ITEMS.map((item) => (
-            <a
-              className={`sidebar-nav__link ${isNavActive(route, item.key) ? 'sidebar-nav__link--active' : ''}`}
-              href={item.href}
-              key={item.key}
-            >
-              {item.label}
-            </a>
+          {SHELL_NAV_GROUPS.map((group) => (
+            <section className="sidebar-nav__group" key={group.key}>
+              <p className="sidebar-nav__group-label">{group.label}</p>
+              <div className="sidebar-nav__group-items">
+                {group.items.map((item) => (
+                  <a
+                    className={`sidebar-nav__link ${isNavActive(route, item.key) ? 'sidebar-nav__link--active' : ''}`}
+                    href={item.href}
+                    key={item.key}
+                  >
+                    {item.label}
+                  </a>
+                ))}
+              </div>
+            </section>
           ))}
         </nav>
       </aside>

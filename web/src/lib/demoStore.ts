@@ -351,6 +351,59 @@ function createSnapshotOverview(refreshedAt = '2026-04-01T07:48:00Z'): ApiSnapsh
     blocking_target: null,
     message: '这里会集中展示价格数据、公司行为和股票池的最新状态。',
     allowed_actions: ['refresh_snapshots'],
+    bond_fixed_income: {
+      global_pulse: {
+        status: 'READY',
+        headline: '债券快照治理已纳入统一快照总览。',
+        updated_at: refreshedAt,
+        cards: [
+          { id: 'health', label: '就绪比例', status: 'READY', value: '4/4', detail: '债券主清单已完成日终更新' },
+          { id: 'coverage', label: '影子字段覆盖率', status: 'READY', value: '96%', detail: 'Dirty Price / Accrued / Duration / YTM' },
+          { id: 'source', label: '来源健康度', status: 'READY', value: 'FMP / Polygon', detail: '主链路稳定' },
+        ],
+      },
+      pillar_groups: [
+        {
+          id: 'ust',
+          label: '利率债 (UST)',
+          status: 'READY',
+          items: [
+            { id: 'ust-2y', label: '2Y', status: 'READY', value: '4.01%', detail: 'Accrued / Duration 已齐备' },
+            { id: 'ust-10y', label: '10Y', status: 'READY', value: '4.22%', detail: '全价与净价同步' },
+            { id: 'ust-30y', label: '30Y', status: 'READY', value: '4.48%', detail: '曲线点位可用于审计' },
+          ],
+        },
+      ],
+      curve_preview: [
+        { tenor_label: '2Y', yield_pct: 4.01, spread_bps: 0 },
+        { tenor_label: '10Y', yield_pct: 4.22, spread_bps: 21 },
+        { tenor_label: '30Y', yield_pct: 4.48, spread_bps: 47 },
+      ],
+      audit_matrix: [
+        { id: 'bond-ust-10y', label: 'UST 10Y', owner: 'FMP', status: 'READY', cadence_label: '日终', evidence: 'Dirty / Accrued / Duration / YTM' },
+      ],
+      raw_registry: [
+        { id: 'bond-ust-10y', label: 'UST 10Y EOD', status: 'READY', source: 'FMP', snapshot_ref: 'bond_fixed_income.ust_10y', updated_at: refreshedAt, notes: ['可用于镜像生成资产腿'] },
+      ],
+      scheduler: {
+        status: 'READY',
+        cadence_label: '日终刷新',
+        next_action: '下次刷新 18:05 HKT',
+        last_job_id: 'snap-job-20260401',
+      },
+      selected_source_summary: {
+        primary_source: 'FMP',
+        fallback_source: 'Polygon',
+        selection_reason: '固定收益快照优先使用日终预计算 YTM / Duration。',
+      },
+      system_diagnostics: {
+        blocking_code: null,
+        blocking_target: null,
+        refresh_job_status: 'COMPLETED',
+        memory: {},
+        notes: ['债券治理页签使用总览扩展字段，不单独新开快照 API。'],
+      },
+    },
   };
 }
 

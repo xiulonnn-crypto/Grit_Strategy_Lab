@@ -9,6 +9,16 @@
 
 ## [Unreleased]
 
+### 新增 (Added)
+
+- **组合一期对象面**: 新增 `asset_leg_definitions`、`cash_leg_definitions`、`compositions`、`composition_legs` 与 `composition_source_freezes` 最小持久化结构，并开放 `GET /leg-inventory`、`POST /asset-legs`、`POST /cash-legs`、`GET /compositions`、`GET /compositions/{id}`、`POST /compositions/preview`、`POST /compositions`、`PATCH /compositions/{id}` 一期契约面。
+- **Compose First 页面链路**: 新增 `#/compositions` 组合仪表板、`#/legs` 资产库、`#/compositions/workbench` 组合工作台与 `#/compositions/:id` 组合详情页，并把新页面接入现有 shell/runtime 与中文导航分组。
+
+### 优化 (Changed)
+
+- **数据快照总览**: `GET /data-snapshots/overview` 追加 `bond_fixed_income` 分段，在原有 `#/snapshots` 页面内扩展债券/固定收益页签，不再另起第二套快照路由或 API。
+- **固定验证入口**: `scripts/codex-test-backend.ps1` 与 `scripts/codex-test-frontend.ps1` 现已纳入组合 API、组合四页、债券快照页签与新的 shell/route 集成测试，避免一期能力只靠手工补跑维持回归门禁。
+
 ## [0.1.1-005] - 2026-04-21 - 修复快照就绪标签、回测默认执行成本等
 
 ### 修复 (Fixed)

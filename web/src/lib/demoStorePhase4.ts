@@ -1,4 +1,6 @@
 import {
+  ApiAssetLeg,
+  type ApiAssetLegCreatePayload,
   ApiError,
   type ApiBacktestRunDeleteResult,
   type ApiBacktestRunDetail,
@@ -6,7 +8,21 @@ import {
   type ApiBacktestRunTradeAudit,
   type ApiBacktestRunTradePage,
   type ApiBacktestSubmissionPreview,
+  ApiCashLeg,
+  type ApiCashLegCreatePayload,
   type ApiConfirmationUpdateRequest,
+  type ApiCompositionCreatePayload,
+  type ApiCompositionDetail,
+  type ApiCompositionLegInput,
+  type ApiCompositionListItem,
+  type ApiCompositionPreview,
+  type ApiCompositionPreviewPayload,
+  type ApiCompositionPreviewLeg,
+  type ApiCompositionStatus,
+  type ApiCompositionUpdatePayload,
+  type ApiLegInventory,
+  type ApiLegInventoryFilterItem,
+  type ApiLegInventoryRow,
   type ApiOptimizationCandidate,
   type ApiOptimizationJobCreatePayload,
   type ApiOptimizationJobDetail,
@@ -62,6 +78,498 @@ function getOptimizationSourceRun(job: ApiOptimizationJobDetail): ApiBacktestRun
         ? job.summary.source_run_id
         : null;
   return findSourceRun(sourceRunId);
+}
+
+function parseStrategyLegInventoryId(value: string): { strategyId: string; parameterVersionId: string } | null {
+  const parts = value.split('::');
+  if (parts.length !== 3 || parts[0] !== 'strategy_leg' || !parts[1] || !parts[2]) {
+    return null;
+  }
+  return { strategyId: parts[1], parameterVersionId: parts[2] };
+}
+
+function strategyLegInventoryId(strategyId: string, parameterVersionId: string): string {
+  return `strategy_leg::${strategyId}::${parameterVersionId}`;
+}
+
+function referenceCountForLeg(sourceRefId: string): number {
+  return state.compositions.reduce(
+    (count, composition) =>
+      count +
+      composition.normalized_legs.filter((leg) => leg.source_ref_id === sourceRefId).length,
+    0,
+  );
+}
+
+function referenceSummary(count: number): string {
+  if (count <= 0) {
+    return '未被组合引用';
+  }
+  if (count === 1) {
+    return '1 个组合引用';
+  }
+  return `${count} 个组合引用`;
+}
+
+function buildStrategyLegRows(): ApiLegInventoryRow[] {
+  return state.strategies.flatMap((strategy) =>
+    strategy.parameter_history.map((versionEntry) => {
+      const versionId =
+        versionEntry.parameter_version_id ??
+        `${strategy.id}-v${versionEntry.version_number ?? strategy.current_parameter_version ?? 1}`;
+      const rowId = strategyLegInventoryId(strategy.id, versionId);
+      const latestRun =
+        typeof strategy.latest_run_id === 'string'
+          ? state.runs.find((run) => run.id === strategy.latest_run_id)
+          : null;
+      const hasNewVersion =
+        Boolean(strategy.current_parameter_version_id) &&
+        strategy.current_parameter_version_id !== versionId;
+      const needsRun = !latestRun || latestRun.parameter_version_id !== versionId;
+      const referenceCount = referenceCountForLeg(rowId);
+      const tags = ['strategy', String(strategy.strategy_type ?? 'general').toLowerCase()];
+      if (needsRun) tags.push('low_correlation');
+      if (hasNewVersion) tags.push('pending_update');
+      return {
+        id: rowId,
+        leg_type: 'strategy',
+        name: strategy.name,
+        version_label: `v${versionEntry.version_number ?? 1}`,
+        proof_label: latestRun?.id ?? '待补回测',
+        reference_count: referenceCount,
+        reference_summary: referenceSummary(referenceCount),
+        status: needsRun ? 'NEEDS_RUN' : hasNewVersion ? 'STALE' : 'READY',
+        status_label: needsRun ? '待回测' : hasNewVersion ? '有新版本' : '稳定',
+        has_new_version: hasNewVersion,
+        is_orphan: referenceCount === 0,
+        attribute_tags: tags,
+        allowed_actions: needsRun
+          ? ['run_backtest', 'open_strategy_detail', 'open_composition_workbench']
+          : ['open_strategy_detail', 'open_composition_workbench'],
+        source_ref_id: rowId,
+        source_ref_type: 'strategy_projection',
+        config: {
+          strategy_id: strategy.id,
+          parameter_version_id: versionId,
+          rebalance_frequency: strategy.rebalance_frequency,
+        },
+      } satisfies ApiLegInventoryRow;
+    }),
+  );
+}
+
+function buildAssetLegRows(): ApiLegInventoryRow[] {
+  return state.assetLegs.map((leg) => {
+    const referenceCount = referenceCountForLeg(leg.id);
+    return {
+      id: leg.id,
+      leg_type: 'asset',
+      name: leg.name,
+      version_label: leg.symbol,
+      proof_label: leg.source_snapshot_id,
+      reference_count: referenceCount,
+      reference_summary: referenceSummary(referenceCount),
+      status: leg.status,
+      status_label: leg.status === 'ACTIVE' ? '稳定' : leg.status,
+      has_new_version: false,
+      is_orphan: referenceCount === 0,
+      attribute_tags: leg.attribute_tags,
+      allowed_actions: leg.allowed_actions,
+      source_ref_id: leg.id,
+      source_ref_type: 'asset_definition',
+      config: {
+        symbol: leg.symbol,
+        asset_kind: leg.asset_kind,
+        freeze_mode: leg.freeze_mode,
+      },
+    } satisfies ApiLegInventoryRow;
+  });
+}
+
+function buildCashLegRows(): ApiLegInventoryRow[] {
+  return state.cashLegs.map((leg) => {
+    const referenceCount = referenceCountForLeg(leg.id);
+    return {
+      id: leg.id,
+      leg_type: 'cash',
+      name: leg.name,
+      version_label: leg.cash_rule_kind,
+      proof_label: leg.yield_source ?? leg.freeze_mode,
+      reference_count: referenceCount,
+      reference_summary: referenceSummary(referenceCount),
+      status: leg.status,
+      status_label: leg.status === 'ACTIVE' ? '稳定' : leg.status,
+      has_new_version: false,
+      is_orphan: referenceCount === 0,
+      attribute_tags: leg.attribute_tags,
+      allowed_actions: leg.allowed_actions,
+      source_ref_id: leg.id,
+      source_ref_type: 'cash_definition',
+      config: {
+        buffer_bps: leg.buffer_bps,
+        freeze_mode: leg.freeze_mode,
+      },
+    } satisfies ApiLegInventoryRow;
+  });
+}
+
+function buildLegInventory(): ApiLegInventory {
+  const rows = [...buildStrategyLegRows(), ...buildAssetLegRows(), ...buildCashLegRows()];
+  const counts = {
+    all: rows.length,
+    strategy: rows.filter((row) => row.leg_type === 'strategy').length,
+    asset: rows.filter((row) => row.leg_type === 'asset').length,
+    cash: rows.filter((row) => row.leg_type === 'cash').length,
+  };
+  const statusCounts = new Map<string, number>();
+  const tagCounts = new Map<string, number>();
+  rows.forEach((row) => {
+    statusCounts.set(row.status, (statusCounts.get(row.status) ?? 0) + 1);
+    row.attribute_tags.forEach((tag) => tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1));
+  });
+  const toFilterItems = (entries: Iterable<[string, number]>): ApiLegInventoryFilterItem[] =>
+    [...entries].map(([value, count]) => ({ value, count, label: value }));
+  return {
+    counts,
+    filters: {
+      statuses: toFilterItems(statusCounts.entries()),
+      attribute_tags: toFilterItems(tagCounts.entries()),
+    },
+    rows,
+  };
+}
+
+function resolvePreviewLeg(input: ApiCompositionLegInput, ordering: number): ApiCompositionPreviewLeg {
+  if (input.leg_kind === 'strategy') {
+    const strategyRef = parseStrategyLegInventoryId(input.source_ref_id);
+    const strategy = strategyRef ? state.strategies.find((item) => item.id === strategyRef.strategyId) : null;
+    return {
+      id: input.source_ref_id,
+      leg_kind: 'strategy',
+      source_ref_id: input.source_ref_id,
+      source_ref_type: input.source_ref_type ?? 'strategy_projection',
+      display_name: input.display_name ?? strategy?.name ?? '策略腿',
+      weight_pct: input.weight_pct,
+      weight_locked: Boolean(input.weight_locked),
+      ordering,
+      version_label: strategyRef ? strategyRef.parameterVersionId.split('-').at(-1) ?? 'v1' : 'v1',
+      proof_label: strategy?.latest_run_id ?? '待补回测',
+      status: strategy?.latest_run_id ? 'READY' : 'NEEDS_RUN',
+      status_label: strategy?.latest_run_id ? '可用' : '待回测',
+      attribute_tags: ['strategy', String(strategy?.strategy_type ?? 'general').toLowerCase()],
+      reference_summary: referenceSummary(referenceCountForLeg(input.source_ref_id)),
+      config: input.config ?? {},
+      allowed_actions: ['open_strategy_detail', 'open_composition_workbench'],
+    };
+  }
+  if (input.leg_kind === 'asset') {
+    const asset = state.assetLegs.find((item) => item.id === input.source_ref_id);
+    return {
+      id: input.source_ref_id,
+      leg_kind: 'asset',
+      source_ref_id: input.source_ref_id,
+      source_ref_type: input.source_ref_type ?? 'asset_definition',
+      display_name: input.display_name ?? asset?.name ?? '资产腿',
+      weight_pct: input.weight_pct,
+      weight_locked: Boolean(input.weight_locked),
+      ordering,
+      version_label: asset?.symbol ?? null,
+      proof_label: asset?.source_snapshot_id ?? null,
+      status: asset?.status ?? 'ACTIVE',
+      status_label: '已入库',
+      attribute_tags: asset?.attribute_tags ?? ['asset'],
+      reference_summary: referenceSummary(referenceCountForLeg(input.source_ref_id)),
+      config: input.config ?? {},
+      allowed_actions: asset?.allowed_actions ?? ['edit_leg_definition', 'open_composition_workbench'],
+    };
+  }
+  const cash = state.cashLegs.find((item) => item.id === input.source_ref_id);
+  return {
+    id: input.source_ref_id,
+    leg_kind: 'cash',
+    source_ref_id: input.source_ref_id,
+    source_ref_type: input.source_ref_type ?? 'cash_definition',
+    display_name: input.display_name ?? cash?.name ?? '现金腿',
+    weight_pct: input.weight_pct,
+    weight_locked: Boolean(input.weight_locked),
+    ordering,
+    version_label: cash?.cash_rule_kind ?? null,
+    proof_label: cash?.yield_source ?? cash?.freeze_mode ?? null,
+    status: cash?.status ?? 'ACTIVE',
+    status_label: '已入库',
+    attribute_tags: cash?.attribute_tags ?? ['cash'],
+    reference_summary: referenceSummary(referenceCountForLeg(input.source_ref_id)),
+    config: input.config ?? {},
+    allowed_actions: cash?.allowed_actions ?? ['edit_leg_definition', 'open_composition_workbench'],
+  };
+}
+
+function buildCompositionPreview(payload: ApiCompositionPreviewPayload): ApiCompositionPreview {
+  const normalizedLegs = (payload.legs ?? []).map((leg, index) => resolvePreviewLeg(leg, index + 1));
+  const totalWeight = normalizedLegs.reduce((sum, leg) => sum + leg.weight_pct, 0);
+  const lockedWeight = normalizedLegs.reduce(
+    (sum, leg) => sum + (leg.weight_locked ? leg.weight_pct : 0),
+    0,
+  );
+  const benchmarkBase = [100, 101.4, 102.6, 101.8, 103.3, 104.5];
+  const portfolioBase = [100, 101.8, 103.5, 103.1, 105.5, 107.4];
+  const labels = ['2025-11', '2025-12', '2026-01', '2026-02', '2026-03', '2026-04'];
+  const returns_preview = labels.map((label, index) => ({
+    label,
+    date: `${label}-28`.replace('2025-11', '2025-11-30').replace('2025-12', '2025-12-31').replace('2026-01', '2026-01-31').replace('2026-02', '2026-02-28').replace('2026-03', '2026-03-31').replace('2026-04', '2026-04-30'),
+    portfolio_return_pct: index === 0 ? 1.2 : Number((portfolioBase[index] - portfolioBase[index - 1]).toFixed(2)),
+    cumulative_return_pct: Number((portfolioBase[index] - 100).toFixed(2)),
+  }));
+  const benchmark_series = labels.map((label, index) => ({
+    label,
+    date: returns_preview[index]?.date,
+    benchmark_return_pct: index === 0 ? 0.9 : Number((benchmarkBase[index] - benchmarkBase[index - 1]).toFixed(2)),
+    cumulative_return_pct: Number((benchmarkBase[index] - 100).toFixed(2)),
+  }));
+  const spread_series = labels.map((label, index) => ({
+    label,
+    date: returns_preview[index]?.date,
+    spread_pct: Number(
+      (returns_preview[index].cumulative_return_pct - benchmark_series[index].cumulative_return_pct).toFixed(2),
+    ),
+  }));
+  const correlation_matrix = normalizedLegs.flatMap((left, leftIndex) =>
+    normalizedLegs
+      .slice(leftIndex)
+      .map((right, rightIndex) => ({
+        x_key: left.id,
+        y_key: right.id,
+        correlation:
+          left.id === right.id
+            ? 1
+            : Number((0.42 - (leftIndex + rightIndex) * 0.11).toFixed(2)),
+      })),
+  );
+  const risk_contribution_preview = normalizedLegs.map((leg, index) => ({
+    leg_id: leg.id,
+    label: leg.display_name,
+    weight_pct: leg.weight_pct,
+    volatility_pct: Number((Math.max(1.2, 18 - index * 4.1)).toFixed(2)),
+    contribution_pct: Number((leg.weight_pct * (1.25 - index * 0.12)).toFixed(2)),
+  }));
+  const tradeCost = payload.cost_policy?.trade_cost_bps ?? 8;
+  const turnoverBudget = payload.cost_policy?.turnover_budget_bps ?? 12;
+  const expenseRatio = payload.cost_policy?.expense_ratio_bps ?? 18;
+  const score = Math.max(58, Math.min(92, 70 + normalizedLegs.length * 3 + (totalWeight === 100 ? 4 : -6)));
+  return {
+    weight_summary: {
+      total_weight_pct: Number(totalWeight.toFixed(2)),
+      target_weight_pct: 100,
+      residual_weight_pct: Number((100 - totalWeight).toFixed(2)),
+      locked_weight_pct: Number(lockedWeight.toFixed(2)),
+      unlocked_weight_pct: Number((totalWeight - lockedWeight).toFixed(2)),
+      within_tolerance: Math.abs(totalWeight - 100) <= 0.25,
+    },
+    normalized_legs: normalizedLegs,
+    returns_preview,
+    benchmark_series,
+    spread_series,
+    correlation_matrix,
+    risk_contribution_preview,
+    maintenance_cost_summary: {
+      expense_ratio_bps: expenseRatio,
+      turnover_budget_bps: turnoverBudget,
+      trade_cost_bps: tradeCost,
+      total_estimated_bps: expenseRatio + turnoverBudget + tradeCost,
+      notes: ['按季度维护成本估算', '现金腿承担调仓缓冲'],
+    },
+    rebalance_summary: {
+      rebalance_frequency: payload.rebalance_frequency ?? 'quarterly',
+      cadence_label: payload.rebalance_frequency === 'monthly' ? '每月再平衡' : '季度再平衡',
+      checks_per_year: payload.rebalance_frequency === 'monthly' ? 12 : 4,
+      operating_tempo_label: '以维护窗口驱动',
+    },
+    composition_score: {
+      score,
+      verdict: score >= 80 ? '成立' : '观察',
+      factors: [
+        { key: 'diversification', label: '分散度', score: 84, detail: '策略、资产与现金腿形成基础分散。', tone: 'positive' },
+        { key: 'evidence', label: '来源可信度', score: 79, detail: '核心来源均可追溯到快照或回测。', tone: 'positive' },
+        { key: 'cost', label: '成本控制', score: 73, detail: '再平衡维护成本仍需跟踪。', tone: 'warning' },
+        { key: 'alpha', label: '收益增强', score: 80, detail: '相对基准保留超额空间。', tone: 'positive' },
+      ],
+    },
+    warnings: totalWeight < 99.75 || totalWeight > 100.25 ? ['权重未完全对齐到 100%。'] : [],
+    advisories: ['相关性预览仅用于一期装配验证。'],
+  };
+}
+
+function buildCompositionDetailFromPayload(
+  id: string,
+  payload: ApiCompositionCreatePayload,
+  status: ApiCompositionStatus,
+  createdAt: string,
+  updatedAt: string,
+): ApiCompositionDetail {
+  const preview = buildCompositionPreview(payload);
+  const benchmark = payload.benchmark_definition ?? { label: '60/40 基准', symbol: '6040' };
+  return {
+    id,
+    name: payload.name ?? '未命名组合',
+    description: payload.description ?? null,
+    status,
+    status_label: status === 'ACTIVE' ? '运行中' : status === 'ARCHIVED' ? '已归档' : '草稿',
+    created_at: createdAt,
+    updated_at: updatedAt,
+    benchmark_definition: benchmark,
+    rebalance_frequency: payload.rebalance_frequency ?? 'quarterly',
+    cost_policy: payload.cost_policy ?? {
+      expense_ratio_bps: 18,
+      turnover_budget_bps: 12,
+      trade_cost_bps: 8,
+    },
+    hero_summary: {
+      title: payload.name ?? '未命名组合',
+      subtitle: payload.description ?? '由策略腿、资产腿与现金腿组装而成。',
+      status,
+      status_label: status === 'ACTIVE' ? '运行中' : status === 'ARCHIVED' ? '已归档' : '草稿',
+      benchmark_label: benchmark.label ?? benchmark.symbol ?? '基准',
+      leg_count: preview.normalized_legs.length,
+      composition_score: preview.composition_score.score,
+      updated_at: updatedAt,
+    },
+    kpis: [
+      { key: 'annualized_return', label: '年化收益', value: 9.8, unit: '%', tone: 'positive', detail: '超基准 2.1%' },
+      { key: 'max_drawdown', label: '最大回撤', value: -7.4, unit: '%', tone: 'warning', detail: '恢复期 41 天' },
+      { key: 'sharpe', label: '夏普比率', value: 1.24, tone: 'positive', detail: '风险收益平衡稳定' },
+      { key: 'sortino', label: '索提诺比率', value: 1.61, tone: 'positive', detail: '下行波动受控' },
+      { key: 'rebalance_cost', label: '再平衡成本', value: preview.maintenance_cost_summary.trade_cost_bps, unit: 'bps', tone: 'neutral', detail: '单次窗口估算' },
+      { key: 'legs', label: '腿数量', value: preview.normalized_legs.length, tone: 'neutral', detail: '已完成结构归一' },
+      { key: 'composition_score', label: '成立性评分', value: preview.composition_score.score, tone: 'positive', detail: '基于最近 24 个月快照估算' },
+    ],
+    weight_summary: preview.weight_summary,
+    normalized_legs: preview.normalized_legs,
+    returns_preview: preview.returns_preview,
+    benchmark_series: preview.benchmark_series,
+    spread_series: preview.spread_series,
+    rebalance_markers: [
+      { label: '季度再平衡', date: preview.returns_preview[2]?.date ?? null, index: 2 },
+      { label: '季度再平衡', date: preview.returns_preview[5]?.date ?? null, index: 5 },
+    ],
+    correlation_matrix: preview.correlation_matrix,
+    risk_contribution_preview: preview.risk_contribution_preview,
+    maintenance_cost_summary: preview.maintenance_cost_summary,
+    scenario_summary: {
+      base_case: { label: '常态波动', expected_drawdown_pct: -7.4 },
+      stress_case: { label: '加息压力期', expected_drawdown_pct: -11.2 },
+      dispersion_note: '债券腿与策略腿的压力相关性需要持续跟踪。',
+    },
+    source_evidence: preview.normalized_legs.map((leg, index) => ({
+      id: `freeze-${id}-${index + 1}`,
+      leg_id: leg.id,
+      display_name: leg.display_name,
+      freeze_ref_type: leg.source_ref_type,
+      freeze_ref_id: leg.source_ref_id,
+      freeze_hash: `hash-${index + 1}`,
+      captured_at: updatedAt,
+      snapshot: { proof_label: leg.proof_label, config: leg.config },
+    })),
+    composition_score: preview.composition_score,
+    latest_activity_label: `${updatedAt.slice(0, 10)} 更新`,
+    deep_link_actions: [
+      'open_composition_workbench',
+      'open_leg_inventory',
+      'inspect_source_evidence',
+      'refresh_snapshots',
+    ],
+  };
+}
+
+function normalizeCompositionStatus(value?: string | null): ApiCompositionStatus {
+  const normalized = String(value || '').toUpperCase();
+  if (normalized === 'ACTIVE' || normalized === 'ARCHIVED') {
+    return normalized;
+  }
+  return 'DRAFT';
+}
+
+function buildBondFixedIncomeOverview(
+  base: Pick<
+    ApiSnapshotOverview,
+    'overall_status' | 'last_refreshed_at' | 'latest_job' | 'blocking_code' | 'blocking_target'
+  >,
+) {
+  return {
+    global_pulse: {
+      status: base.overall_status === 'READY' ? 'READY' : 'PARTIAL',
+      headline: '债券快照与影子字段已纳入统一快照治理视图。',
+      updated_at: base.last_refreshed_at ?? null,
+      cards: [
+        { id: 'health', label: '就绪比例', status: 'READY', value: '3/4', detail: 'Ready / Partial / Blocked 已拆分显示' },
+        { id: 'coverage', label: '影子字段覆盖率', status: 'READY', value: '94%', detail: 'Dirty Price / Accrued / Duration / YTM' },
+        { id: 'source', label: '来源健康度', status: 'READY', value: 'FMP / Polygon', detail: '主来源链路可用' },
+      ],
+    },
+    pillar_groups: [
+      {
+        id: 'ust',
+        label: '利率债 (UST)',
+        status: 'READY',
+        items: [
+          { id: 'ust-2y', label: '2Y', status: 'READY', value: '4.01%', detail: 'Accrued / Duration 已齐备' },
+          { id: 'ust-10y', label: '10Y', status: 'READY', value: '4.20%', detail: '10Y-2Y 利差 19 bps' },
+          { id: 'ust-30y', label: '30Y', status: 'PARTIAL', value: '4.36%', detail: '待复核凸性字段' },
+        ],
+      },
+      {
+        id: 'tips',
+        label: '抗通胀债 (TIPS)',
+        status: 'READY',
+        items: [
+          { id: 'tips-5y', label: '5Y TIPS', status: 'READY', value: '1.98%', detail: 'Real Yield 抓取成功' },
+          { id: 'tips-10y', label: '10Y TIPS', status: 'READY', value: '2.08%', detail: '可用于实际利率对冲' },
+        ],
+      },
+      {
+        id: 'ig',
+        label: '投资级信用债 (IG)',
+        status: 'PARTIAL',
+        items: [
+          { id: 'ig-aa', label: 'AA Bucket', status: 'PARTIAL', value: '5.02%', detail: '缺少部分应计利息' },
+          { id: 'ig-aaa', label: 'AAA Bucket', status: 'READY', value: '4.81%', detail: 'Carry 字段齐备' },
+        ],
+      },
+    ],
+    curve_preview: [
+      { tenor_label: '2Y', yield_pct: 4.01, spread_bps: 0 },
+      { tenor_label: '5Y', yield_pct: 4.05, spread_bps: 4 },
+      { tenor_label: '10Y', yield_pct: 4.2, spread_bps: 19 },
+      { tenor_label: '30Y', yield_pct: 4.36, spread_bps: 35 },
+    ],
+    audit_matrix: [
+      { id: 'bond-ust-2y', label: 'Bond-UST2Y', owner: 'FMP', status: 'READY', cadence_label: 'EOD', evidence: 'Dirty / Accrued / Duration / YTM' },
+      { id: 'bond-ust-10y', label: 'Bond-UST10Y', owner: 'FMP', status: 'READY', cadence_label: 'EOD', evidence: '影子字段齐全' },
+      { id: 'bond-ig-aa', label: 'Bond-IG-AA', owner: 'Polygon', status: 'PARTIAL', cadence_label: 'EOD', evidence: 'Accrued 缺失，可算法推演' },
+    ],
+    raw_registry: [
+      { id: 'registry-ust10y', label: 'UST10Y 日终快照', status: 'READY', source: 'FMP', snapshot_ref: 'bond-ust-10y', updated_at: base.last_refreshed_at ?? null, notes: ['可镜像生成资产腿'] },
+      { id: 'registry-tips10y', label: '10Y TIPS 日终快照', status: 'READY', source: 'Polygon', snapshot_ref: 'bond-tips-10y', updated_at: base.last_refreshed_at ?? null, notes: ['Real Yield 已就绪'] },
+      { id: 'registry-ig-aa', label: 'IG AA Bucket', status: 'PARTIAL', source: 'Polygon', snapshot_ref: 'bond-ig-aa', updated_at: base.last_refreshed_at ?? null, notes: ['可批量修复应计利息'] },
+    ],
+    scheduler: {
+      status: 'READY',
+      cadence_label: '日终刷新',
+      next_action: '刷新债券快照',
+      last_job_id: base.latest_job?.id ?? null,
+    },
+    selected_source_summary: {
+      primary_source: 'FMP',
+      fallback_source: 'Polygon',
+      selection_reason: '优先复用已有快照总览，再按固定收益字段补强。',
+    },
+    system_diagnostics: {
+      blocking_code: base.blocking_code ?? null,
+      blocking_target: base.blocking_target ?? null,
+      refresh_job_status: base.latest_job?.status ?? null,
+      memory: { ready_ratio: '75%', latency: '15m' },
+      notes: ['IG 债存在应计利息缺口', '曲线形态相对昨日平稳'],
+    },
+  };
 }
 
 function sortOptimizationJobs(): void {
@@ -300,7 +808,7 @@ function buildSnapshotOverview(
   refreshedAt = '2026-04-01T07:48:00Z',
   mode: 'incremental' | 'repair' | 'full' = 'incremental',
 ): ApiSnapshotOverview {
-  return {
+  const overviewBase = {
     overall_status: 'INCOMPLETE',
     last_refreshed_at: refreshedAt,
     dataset_snapshots: [
@@ -392,6 +900,10 @@ function buildSnapshotOverview(
     blocking_target: 'ds-corporate-actions',
     message: '部分快照仍待补齐，正式回测前请先完成刷新。',
     allowed_actions: ['refresh_snapshots'],
+  };
+  return {
+    ...overviewBase,
+    bond_fixed_income: buildBondFixedIncomeOverview(overviewBase),
   };
 }
 
@@ -733,6 +1245,132 @@ export const demoApi: DemoApi = {
     const job = findJob(jobId);
     job.candidates = job.candidates.filter((candidate) => candidate.id !== trialId);
     return clone(recalculateJob(job));
+  },
+  async getLegInventory(): Promise<ApiLegInventory> {
+    return clone(buildLegInventory());
+  },
+  async createAssetLeg(payload: ApiAssetLegCreatePayload): Promise<ApiAssetLeg> {
+    const now = nowIso();
+    const created: ApiAssetLeg = {
+      id: nextId('asset-leg'),
+      name: payload.name,
+      symbol: payload.symbol.toUpperCase(),
+      asset_kind: payload.asset_kind,
+      source_snapshot_id: payload.source_snapshot_id,
+      source_provider: payload.source_provider ?? null,
+      freeze_mode: payload.freeze_mode,
+      notes: payload.notes ?? null,
+      summary: clone(payload.summary ?? {}),
+      status: 'ACTIVE',
+      eligibility_summary: {
+        snapshot_ref: payload.source_snapshot_id,
+        freeze_mode: payload.freeze_mode,
+        reference_count: 0,
+      },
+      attribute_tags: ['asset', payload.asset_kind.toLowerCase()],
+      allowed_actions: ['edit_leg_definition', 'open_composition_workbench'],
+      created_at: now,
+      updated_at: now,
+    };
+    state.assetLegs.unshift(created);
+    return clone(created);
+  },
+  async createCashLeg(payload: ApiCashLegCreatePayload): Promise<ApiCashLeg> {
+    const now = nowIso();
+    const created: ApiCashLeg = {
+      id: nextId('cash-leg'),
+      name: payload.name,
+      cash_rule_kind: payload.cash_rule_kind,
+      buffer_bps: payload.buffer_bps ?? 0,
+      yield_source: payload.yield_source ?? null,
+      freeze_mode: payload.freeze_mode,
+      notes: payload.notes ?? null,
+      summary: clone(payload.summary ?? {}),
+      status: 'ACTIVE',
+      attribute_tags: ['cash', payload.cash_rule_kind.toLowerCase()],
+      allowed_actions: ['edit_leg_definition', 'open_composition_workbench'],
+      created_at: now,
+      updated_at: now,
+    };
+    state.cashLegs.unshift(created);
+    return clone(created);
+  },
+  async listCompositions(): Promise<ApiCompositionListItem[]> {
+    return clone(
+      state.compositions.map((composition) => ({
+        id: composition.id,
+        name: composition.name,
+        status: composition.status,
+        composition_score: composition.composition_score.score,
+        leg_count: composition.normalized_legs.length,
+        rebalance_frequency: composition.rebalance_frequency ?? null,
+        benchmark_label:
+          composition.benchmark_definition?.label ??
+          composition.benchmark_definition?.symbol ??
+          null,
+        annualized_return: Number(composition.kpis.find((item) => item.key === 'annualized_return')?.value ?? 0),
+        max_drawdown: Number(composition.kpis.find((item) => item.key === 'max_drawdown')?.value ?? 0),
+        updated_at: composition.updated_at,
+        latest_activity_label: composition.latest_activity_label,
+        allowed_actions: ['open_composition_workbench', 'inspect_source_evidence'],
+      })),
+    );
+  },
+  async getCompositionDetail(id: string): Promise<ApiCompositionDetail> {
+    const composition = state.compositions.find((item) => item.id === id);
+    if (!composition) {
+      throw new ApiError({ status: 404, code: 'composition_not_found', message: `Composition ${id} was not found.` });
+    }
+    return clone(composition);
+  },
+  async previewComposition(payload: ApiCompositionPreviewPayload): Promise<ApiCompositionPreview> {
+    return clone(buildCompositionPreview(payload));
+  },
+  async createComposition(payload: ApiCompositionCreatePayload): Promise<ApiCompositionDetail> {
+    const now = nowIso();
+    const created = buildCompositionDetailFromPayload(
+      nextId('comp'),
+      payload,
+      payload.status ?? 'DRAFT',
+      now,
+      now,
+    );
+    state.compositions.unshift(created);
+    return clone(created);
+  },
+  async updateComposition(id: string, payload: ApiCompositionUpdatePayload): Promise<ApiCompositionDetail> {
+    const existing = state.compositions.find((item) => item.id === id);
+    if (!existing) {
+      throw new ApiError({ status: 404, code: 'composition_not_found', message: `Composition ${id} was not found.` });
+    }
+    const updated = buildCompositionDetailFromPayload(
+      id,
+      {
+        name: payload.name ?? existing.name,
+        description: payload.description ?? existing.description ?? undefined,
+        benchmark_definition: payload.benchmark_definition ?? existing.benchmark_definition,
+        rebalance_frequency: payload.rebalance_frequency ?? existing.rebalance_frequency,
+        cost_policy: payload.cost_policy ?? existing.cost_policy,
+        legs:
+          payload.legs ??
+          existing.normalized_legs.map((leg) => ({
+            leg_kind: leg.leg_kind,
+            source_ref_id: leg.source_ref_id,
+            source_ref_type: leg.source_ref_type,
+            display_name: leg.display_name,
+            weight_pct: leg.weight_pct,
+            weight_locked: leg.weight_locked,
+            ordering: leg.ordering,
+            config: leg.config,
+          })),
+        status: normalizeCompositionStatus(payload.status ?? existing.status),
+      },
+      normalizeCompositionStatus(payload.status ?? existing.status),
+      existing.created_at,
+      nowIso(),
+    );
+    state.compositions = state.compositions.map((item) => (item.id === id ? updated : item));
+    return clone(updated);
   },
   async getSnapshotOverview(): Promise<ApiSnapshotOverview> {
     return buildSnapshotOverview();

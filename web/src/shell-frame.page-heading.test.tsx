@@ -20,6 +20,34 @@ describe('shell frame page heading hooks', () => {
     expect(container.querySelector('.page-heading')).toBeNull();
 
     rerender(
+      <ShellFrameCn route={{ kind: 'composition-dashboard' }}>
+        <div>composition dashboard</div>
+      </ShellFrameCn>,
+    );
+    expect(container.querySelector('.page-heading')).toBeNull();
+
+    rerender(
+      <ShellFrameCn route={{ kind: 'leg-inventory' }}>
+        <div>leg inventory</div>
+      </ShellFrameCn>,
+    );
+    expect(container.querySelector('.page-heading')).toBeNull();
+
+    rerender(
+      <ShellFrameCn route={{ kind: 'composition-workbench' }}>
+        <div>composition workbench</div>
+      </ShellFrameCn>,
+    );
+    expect(container.querySelector('.page-heading')).toBeNull();
+
+    rerender(
+      <ShellFrameCn route={{ kind: 'composition-detail', compositionId: 'comp-001' }}>
+        <div>composition detail</div>
+      </ShellFrameCn>,
+    );
+    expect(container.querySelector('.page-heading')).toBeNull();
+
+    rerender(
       <ShellFrameCn route={{ kind: 'optimization-index' }}>
         <div>optimization jobs</div>
       </ShellFrameCn>,

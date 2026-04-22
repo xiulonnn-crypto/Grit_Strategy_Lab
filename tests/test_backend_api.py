@@ -173,6 +173,27 @@ def test_snapshot_overview_contract_is_exact_on_fresh_database(tmp_path):
     assert overview["allowed_actions"] == ["refresh_snapshots"]
 
 
+def test_snapshot_overview_includes_bond_fixed_income_extension(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    overview = assert_ok(client.get("/data-snapshots/overview"))
+    bond = overview["bond_fixed_income"]
+
+    assert set(bond.keys()) == {
+        "global_pulse",
+        "pillar_groups",
+        "curve_preview",
+        "audit_matrix",
+        "raw_registry",
+        "scheduler",
+        "selected_source_summary",
+        "system_diagnostics",
+    }
+    assert bond["global_pulse"]["headline"]
+    assert len(bond["curve_preview"]) == 5
+    assert bond["selected_source_summary"]["primary_source"] == "shared_snapshot_overview"
+
+
 def test_refresh_target_pool_filters_non_ticker_labels_from_missing_symbols_and_strategies(tmp_path):
     service = RealBacktestPlatformService(tmp_path / "snapshot-symbol-filter.db", market_data_provider=None)
     service.list_strategies = lambda: [  # type: ignore[method-assign]

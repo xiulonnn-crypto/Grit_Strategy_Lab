@@ -29,6 +29,7 @@ New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
 $pythonExe = Get-PythonExecutable
 $defaultTests = @(
     'tests\test_backend_api.py'
+    'tests\test_composition_api.py'
     'tests\test_creation_session_refresh.py'
     'tests\test_real_backtest_api.py'
     'tests\test_optimization_execution_resume.py'

@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
+import { navigateTo, useAppRoute } from '../lib/appRouteContext';
 import { formatDateTime } from '../lib/format';
 import { useApiClient } from '../lib/demoStoreContext';
+import {
+  BondFixedIncomeSnapshotsTab,
+  normalizeBondFixedIncomeOverview,
+} from '../page-sections/snapshots-bond-fixed-income';
 import type {
   ApiDatasetSnapshot,
   ApiSnapshotBlocker,
@@ -126,7 +131,7 @@ function normalizeSnapshotOverview(raw: unknown): ApiSnapshotOverview {
     const looksLegacy = 'status' in payload || 'coverages' in payload;
 
     if (!looksLegacy && typeof payload.overall_status === 'string') {
-      return {
+      const normalizedOverview = {
         overall_status: String(payload.overall_status).toUpperCase(),
         last_refreshed_at:
           typeof payload.last_refreshed_at === 'string'
@@ -146,9 +151,13 @@ function normalizeSnapshotOverview(raw: unknown): ApiSnapshotOverview {
           ? (payload.allowed_actions as string[])
           : ['refresh_snapshots'],
       };
+      return {
+        ...normalizedOverview,
+        bond_fixed_income: normalizeBondFixedIncomeOverview(payload.bond_fixed_income, normalizedOverview),
+      };
     }
 
-    return {
+    const legacyOverview = {
       overall_status: 'PENDING',
       last_refreshed_at: latestJob?.completed_at ?? latestJob?.updated_at ?? null,
       dataset_snapshots: [],
@@ -160,9 +169,13 @@ function normalizeSnapshotOverview(raw: unknown): ApiSnapshotOverview {
         '当前本地后端还在返回旧版快照接口。重启后端服务后，再点“刷新快照”即可看到完整快照。',
       allowed_actions: ['refresh_snapshots'],
     };
+    return {
+      ...legacyOverview,
+      bond_fixed_income: normalizeBondFixedIncomeOverview(payload.bond_fixed_income, legacyOverview),
+    };
   }
 
-  return {
+  const emptyOverview = {
     overall_status: 'PENDING',
     last_refreshed_at: null,
     dataset_snapshots: [],
@@ -172,6 +185,10 @@ function normalizeSnapshotOverview(raw: unknown): ApiSnapshotOverview {
     blocking_target: 'data_snapshots',
     message: '还没有生成快照，点右上角“刷新快照”后会显示。',
     allowed_actions: ['refresh_snapshots'],
+  };
+  return {
+    ...emptyOverview,
+    bond_fixed_income: normalizeBondFixedIncomeOverview(null, emptyOverview),
   };
 }
 
@@ -769,12 +786,14 @@ function UniverseRow({ item }: { item: ApiUniverseSnapshot }): JSX.Element {
 }
 
 export function SnapshotsPage(): JSX.Element {
+  const { route } = useAppRoute();
   const api = useApiClient();
   const [overview, setOverview] = useState<ApiSnapshotOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [optimisticRefreshing, setOptimisticRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const activeTab = route.kind === 'snapshots' ? route.tab ?? 'equity' : 'equity';
 
   useEffect(() => {
     let cancelled = false;
@@ -876,6 +895,10 @@ export function SnapshotsPage(): JSX.Element {
 
   const datasetSnapshots = useMemo(() => overview?.dataset_snapshots ?? [], [overview]);
   const universeSnapshots = useMemo(() => overview?.universe_snapshots ?? [], [overview]);
+  const bondFixedIncomeOverview = useMemo(
+    () => overview?.bond_fixed_income ?? normalizeBondFixedIncomeOverview(null, overview),
+    [overview],
+  );
   const pageStatus = getStatusLabel(overview?.overall_status);
   const isSnapshotJobRunning =
     String(overview?.latest_job?.status ?? overview?.overall_status ?? '').toUpperCase() === 'RUNNING';
@@ -885,6 +908,16 @@ export function SnapshotsPage(): JSX.Element {
     overview?.blocking_code &&
       ['FAILED', 'BLOCKED'].includes(String(overview?.overall_status ?? '').toUpperCase()),
   );
+  const pageTitle = '数据快照';
+  const headerBody =
+    activeTab === 'bond'
+      ? '按股票/指数与债券/固定收益分栏治理数据来源；债券页签聚焦入库资格、曲线监控与影子字段审计。'
+      : getOverviewMessage(overview);
+  const refreshButtonLabel = isRefreshRunning
+    ? '刷新中...'
+    : activeTab === 'bond'
+      ? '刷新债券快照'
+      : '刷新快照';
 
   return (
     <div className="stack snapshots-page">
@@ -892,8 +925,8 @@ export function SnapshotsPage(): JSX.Element {
         <div className="snapshots-header">
           <div className="snapshots-header__copy">
             <p className="page-heading__eyebrow">数据快照</p>
-            <h1 className="snapshots-header__title">快照总览</h1>
-            <p className="snapshots-header__body">{getOverviewMessage(overview)}</p>
+            <h1 className="snapshots-header__title">{pageTitle}</h1>
+            <p className="snapshots-header__body">{headerBody}</p>
             <div className="snapshots-header__meta">
               {shouldRenderStatusChip(overview?.overall_status, pageBlocked) ? (
                 <span className={getStatusChipClassName(overview?.overall_status, pageBlocked)}>
@@ -904,6 +937,38 @@ export function SnapshotsPage(): JSX.Element {
                 {getLastRefreshSummaryLabel(overview, { optimisticRefreshing })}
               </span>
             </div>
+            <div className="snapshots-tabs" role="tablist" aria-label="快照标签">
+              <button
+                aria-selected={activeTab === 'equity'}
+                className={`snapshots-tab ${activeTab === 'equity' ? 'snapshots-tab--active' : ''}`}
+                onClick={() => {
+                  navigateTo('/snapshots');
+                }}
+                role="tab"
+                type="button"
+              >
+                股票/指数
+              </button>
+              <button
+                aria-selected={activeTab === 'bond'}
+                className={`snapshots-tab ${activeTab === 'bond' ? 'snapshots-tab--active' : ''}`}
+                onClick={() => {
+                  navigateTo('/snapshots?tab=bond');
+                }}
+                role="tab"
+                type="button"
+              >
+                债券/固定收益
+              </button>
+            </div>
+            {activeTab === 'bond' ? (
+              <div className="snapshots-chip-row">
+                <span className="status-chip status-chip--success">资产腿合法来源</span>
+                <span className="status-chip status-chip--soft">日终刷新 (EOD)</span>
+                <span className="status-chip status-chip--soft">到期收益率（YTM） / 久期 / 凸性</span>
+                <span className="status-chip status-chip--soft">净价 / 全价 / 应计</span>
+              </div>
+            ) : null}
           </div>
           <div className="snapshots-header__actions">
             <button
@@ -914,7 +979,7 @@ export function SnapshotsPage(): JSX.Element {
               }}
               type="button"
             >
-              {isRefreshRunning ? '刷新中...' : '刷新快照'}
+              {refreshButtonLabel}
             </button>
           </div>
         </div>
@@ -928,7 +993,7 @@ export function SnapshotsPage(): JSX.Element {
         </section>
       ) : null}
 
-      {!loading ? (
+      {!loading && activeTab === 'equity' ? (
         <div className="snapshots-two-column-grid snapshots-main-grid">
           <SnapshotListCard
             eyebrow="数据集快照"
@@ -946,6 +1011,8 @@ export function SnapshotsPage(): JSX.Element {
           />
         </div>
       ) : null}
+
+      {!loading && activeTab === 'bond' ? <BondFixedIncomeSnapshotsTab overview={bondFixedIncomeOverview} /> : null}
     </div>
   );
 }

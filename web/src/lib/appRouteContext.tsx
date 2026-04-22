@@ -2,13 +2,17 @@ import { createContext, useContext, type ReactNode } from 'react';
 
 export type AppRoute =
   | { kind: 'workspace' }
+  | { kind: 'composition-dashboard' }
+  | { kind: 'leg-inventory' }
+  | { kind: 'composition-workbench'; compositionId?: string; addLeg?: string }
+  | { kind: 'composition-detail'; compositionId: string }
   | { kind: 'creation-template' }
   | { kind: 'creation-session'; sessionId: string }
   | { kind: 'strategy-detail'; strategyId: string }
   | { kind: 'backtest'; strategyId: string; sourceRunId?: string }
   | { kind: 'runs-index' }
   | { kind: 'run'; runId: string }
-  | { kind: 'snapshots' }
+  | { kind: 'snapshots'; tab?: 'equity' | 'bond' }
   | { kind: 'optimization-index' }
   | { kind: 'optimization-select'; strategyId?: string; sourceRunId?: string; entryPoint?: string }
   | { kind: 'optimization-config'; strategyId: string; sourceRunId?: string; entryPoint?: string }
@@ -27,6 +31,25 @@ export function parseAppHash(hash: string): AppRoute {
   const searchParams = new URLSearchParams(queryString);
   if (path === '/' || path === '/workspace') {
     return { kind: 'workspace' };
+  }
+  if (path === '/compositions') {
+    return { kind: 'composition-dashboard' };
+  }
+  if (path === '/legs') {
+    return { kind: 'leg-inventory' };
+  }
+  if (path === '/compositions/workbench') {
+    const compositionId = searchParams.get('composition_id');
+    const addLeg = searchParams.get('add_leg');
+    return {
+      kind: 'composition-workbench',
+      compositionId: compositionId ? decodeURIComponent(compositionId) : undefined,
+      addLeg: addLeg ? decodeURIComponent(addLeg) : undefined,
+    };
+  }
+  const compositionDetailMatch = path.match(/^\/compositions\/([^/]+)$/);
+  if (compositionDetailMatch) {
+    return { kind: 'composition-detail', compositionId: decodeURIComponent(compositionDetailMatch[1]) };
   }
   if (path === '/creation/new') {
     return { kind: 'creation-template' };
@@ -56,7 +79,8 @@ export function parseAppHash(hash: string): AppRoute {
     return { kind: 'run', runId: decodeURIComponent(runMatch[1]) };
   }
   if (path === '/snapshots') {
-    return { kind: 'snapshots' };
+    const tab = searchParams.get('tab');
+    return { kind: 'snapshots', tab: tab === 'bond' ? 'bond' : 'equity' };
   }
   if (path === '/optimization-jobs') {
     return { kind: 'optimization-index' };

@@ -1,11 +1,27 @@
 import type { AppRoute } from './lib/appRouteContext';
 
-export type ShellNavKey = 'workspace' | 'creation' | 'runs' | 'optimization' | 'snapshots';
+export type ShellNavKey =
+  | 'composition-dashboard'
+  | 'leg-inventory'
+  | 'workspace'
+  | 'creation'
+  | 'runs'
+  | 'optimization'
+  | 'snapshots';
+
+export type ShellNavGroupKey = 'compose' | 'strategy';
 
 export type ShellNavItem = {
   key: ShellNavKey;
   href: string;
   label: string;
+  groupKey: ShellNavGroupKey;
+};
+
+export type ShellNavGroup = {
+  key: ShellNavGroupKey;
+  label: string;
+  items: ShellNavItem[];
 };
 
 export type AppRouteMeta = {
@@ -17,60 +33,139 @@ export type AppRouteMeta = {
 };
 
 const TEXT = {
-  workspace: '\u5de5\u4f5c\u53f0',
-  workspaceTitle: '\u5de5\u4f5c\u53f0\u5065\u5eb7\u5ea6',
+  compose: '组合',
+  composeDashboard: '组合仪表板',
+  composeDashboardTitle: '组合仪表板',
+  composeDashboardDesc:
+    '以正式组合、最近维护与待处理动作作为首页叙事，用于组合层的当日决策。',
+  legInventory: '资产库',
+  legInventoryTitle: '策略资产库',
+  legInventoryDesc:
+    '统一管理策略腿、资产腿与现金腿的定义、版本与引用关系，作为正式组合的来源底座。',
+  strategy: '策略',
+  workspace: '策略工作台',
+  workspaceTitle: '策略工作台',
   workspaceDesc:
-    '\u67e5\u770b\u7b56\u7565\u770b\u677f\u3001\u6700\u8fd1\u56de\u6d4b\u548c\u53ef\u76f4\u63a5\u8fdb\u5165\u4e3b\u94fe\u8def\u7684\u6062\u590d\u5165\u53e3\u3002',
-  creation: '\u65b0\u5efa\u7b56\u7565',
-  creationEyebrow: '\u7b56\u7565\u521b\u5efa',
-  creationTemplateTitle: '\u9009\u62e9\u6a21\u677f',
+    '查看策略看板、最近回测和可直接进入主链路的恢复入口。',
+  compositionWorkbenchTitle: '组合工作台',
+  compositionWorkbenchDesc:
+    '在三栏结构中完成来源装配、权重复核与组合成立性判断。',
+  compositionDetailTitle: '组合详情',
+  compositionDetailDesc:
+    '聚合收益流、风险归因、相关性矩阵与来源冻结证据。',
+  creation: '新建策略',
+  creationEyebrow: '策略创建',
+  creationTemplateTitle: '选择模板',
   creationTemplateDesc:
-    '\u5148\u9009\u62e9\u7b56\u7565\u7c7b\u578b\uff0c\u518d\u8fdb\u5165\u5bf9\u8bdd\u548c\u52a8\u6001\u8868\u5355\u534f\u540c\u7f16\u8f91\u3002',
-  creationSessionTitle: '\u521b\u5efa\u4f1a\u8bdd',
+    '先选择策略类型，再进入对话和动态表单协同编辑。',
+  creationSessionTitle: '创建会话',
   creationSessionDesc:
-    '\u7531\u5bf9\u8bdd\u9a71\u52a8\u786e\u8ba4\u7a3f\uff0c\u518d\u8fdb\u5165\u7b56\u7565\u843d\u5730\u4e0e\u56de\u6d4b\u63d0\u4ea4\u3002',
-  strategyDetailEyebrow: '\u7b56\u7565\u8be6\u60c5',
-  strategyDetailTitle: '\u7b56\u7565\u8be6\u60c5',
+    '由对话驱动确认稿，再进入策略落地与回测提交。',
+  strategyDetailEyebrow: '策略详情',
+  strategyDetailTitle: '策略详情',
   strategyDetailDesc:
-    '\u67e5\u770b\u7b56\u7565\u6982\u51b5\u3001\u5f53\u524d\u53c2\u6570\u7248\u672c\u4e0e\u4e0b\u4e00\u6b65\u53ef\u6267\u884c\u64cd\u4f5c\u3002',
-  backtestEyebrow: '\u771f\u5b9e\u6267\u884c',
-  backtestTitle: '\u771f\u5b9e\u56de\u6d4b\u63d0\u4ea4',
+    '查看策略概况、当前参数版本与下一步可执行操作。',
+  backtestEyebrow: '真实执行',
+  backtestTitle: '真实回测提交',
   backtestDesc:
-    '\u786e\u8ba4\u56de\u6d4b\u533a\u95f4\u3001\u53c2\u6570\u7248\u672c\u548c\u5feb\u7167\u72b6\u6001\uff0c\u518d\u751f\u6210\u6b63\u5f0f\u56de\u6d4b\u3002',
-  runs: '\u56de\u6d4b\u5217\u8868',
-  runsEyebrow: '\u56de\u6d4b\u6570\u636e',
-  runsTitle: '\u56de\u6d4b\u5386\u53f2',
-  runsDesc: '\u7528\u4e8e\u5728\u7ed3\u679c\u548c\u8be6\u60c5\u4e4b\u95f4\u5207\u6362\u7684\u5217\u8868\u89c6\u56fe\u3002',
-  runEyebrow: '\u8fd0\u884c\u8be6\u60c5',
-  runTitle: '\u8bca\u65ad\u89c6\u56fe',
+    '确认回测区间、参数版本和快照状态，再生成正式回测。',
+  runs: '回测列表',
+  runsEyebrow: '回测数据',
+  runsTitle: '回测历史',
+  runsDesc: '用于在结果和详情之间切换的列表视图。',
+  runEyebrow: '运行详情',
+  runTitle: '诊断视图',
   runDesc:
-    '\u98ce\u9669\u6458\u8981\u3001\u4e3b\u66f2\u7ebf\u3001\u4ea4\u6613\u660e\u7ec6\u4e0e\u8bc1\u636e\u8f68\u8ff9\u90fd\u4f1a\u5728\u8fd9\u91cc\u5c55\u5f00\u3002',
-  snapshots: '\u6570\u636e\u5feb\u7167',
-  snapshotsTitle: '\u5feb\u7167\u603b\u89c8',
+    '风险摘要、主曲线、交易明细与证据轨迹都会在这里展开。',
+  snapshots: '数据快照',
+  snapshotsTitle: '数据快照',
   snapshotsDesc:
-    '\u96c6\u4e2d\u67e5\u770b\u6570\u636e\u96c6\u4e0e\u80a1\u7968\u6c60\u5feb\u7167\u72b6\u6001\uff0c\u5e76\u63d0\u4f9b\u5237\u65b0\u4e0e\u4fee\u590d\u5165\u53e3\u3002',
-  optimizationEyebrow: '\u4f18\u5316\u5b9e\u9a8c',
-  optimizationTitle: '\u4f18\u5316\u5b9e\u9a8c\u5ba4',
+    '集中查看数据集与股票池快照状态，并提供刷新与修复入口。',
+  optimizationEyebrow: '优化实验',
+  optimizationTitle: '优化实验室',
   optimizationDesc:
-    '\u4fdd\u7559\u73b0\u6709\u5019\u9009\u7248\u672c\u7ba1\u7406\u884c\u4e3a\uff0c\u5e76\u63a5\u5165\u7edf\u4e00\u7684\u4e2d\u6587\u5e94\u7528\u58f3\u3002',
+    '保留现有候选版本管理行为，并接入统一的中文应用壳。',
 } as const;
 
-export const SHELL_NAV_ITEMS: ShellNavItem[] = [
-  { key: 'workspace', href: '#/workspace', label: TEXT.workspace },
-  { key: 'creation', href: '#/creation/new', label: TEXT.creation },
-  { key: 'runs', href: '#/runs', label: TEXT.runs },
-  { key: 'optimization', href: '#/optimization-jobs', label: TEXT.optimizationTitle },
-  { key: 'snapshots', href: '#/snapshots', label: TEXT.snapshots },
+export const SHELL_NAV_GROUPS: ShellNavGroup[] = [
+  {
+    key: 'compose',
+    label: TEXT.compose,
+    items: [
+      {
+        key: 'composition-dashboard',
+        href: '#/compositions',
+        label: TEXT.composeDashboard,
+        groupKey: 'compose',
+      },
+      {
+        key: 'leg-inventory',
+        href: '#/legs',
+        label: TEXT.legInventory,
+        groupKey: 'compose',
+      },
+    ],
+  },
+  {
+    key: 'strategy',
+    label: TEXT.strategy,
+    items: [
+      { key: 'workspace', href: '#/workspace', label: TEXT.workspace, groupKey: 'strategy' },
+      { key: 'creation', href: '#/creation/new', label: TEXT.creation, groupKey: 'strategy' },
+      { key: 'runs', href: '#/runs', label: TEXT.runs, groupKey: 'strategy' },
+      {
+        key: 'optimization',
+        href: '#/optimization-jobs',
+        label: TEXT.optimizationTitle,
+        groupKey: 'strategy',
+      },
+      { key: 'snapshots', href: '#/snapshots', label: TEXT.snapshots, groupKey: 'strategy' },
+    ],
+  },
 ];
+
+export const SHELL_NAV_ITEMS: ShellNavItem[] = SHELL_NAV_GROUPS.flatMap((group) => group.items);
 
 export function getRouteMeta(route: AppRoute): AppRouteMeta {
   switch (route.kind) {
     case 'workspace':
       return {
         navKey: 'workspace',
-        eyebrow: TEXT.workspace,
+        eyebrow: TEXT.strategy,
         title: TEXT.workspaceTitle,
         description: TEXT.workspaceDesc,
+        showPageHeading: false,
+      };
+    case 'composition-dashboard':
+      return {
+        navKey: 'composition-dashboard',
+        eyebrow: TEXT.compose,
+        title: TEXT.composeDashboardTitle,
+        description: TEXT.composeDashboardDesc,
+        showPageHeading: false,
+      };
+    case 'leg-inventory':
+      return {
+        navKey: 'leg-inventory',
+        eyebrow: TEXT.compose,
+        title: TEXT.legInventoryTitle,
+        description: TEXT.legInventoryDesc,
+        showPageHeading: false,
+      };
+    case 'composition-workbench':
+      return {
+        navKey: 'composition-dashboard',
+        eyebrow: TEXT.compose,
+        title: TEXT.compositionWorkbenchTitle,
+        description: TEXT.compositionWorkbenchDesc,
+        showPageHeading: false,
+      };
+    case 'composition-detail':
+      return {
+        navKey: 'composition-dashboard',
+        eyebrow: TEXT.compose,
+        title: TEXT.compositionDetailTitle,
+        description: TEXT.compositionDetailDesc,
         showPageHeading: false,
       };
     case 'creation-template':

@@ -20,11 +20,18 @@ $uvicornOutLog = Join-Path $uvicornLogDir 'uvicorn-8010.out.log'
 $uvicornErrLog = Join-Path $uvicornLogDir 'uvicorn-8010.err.log'
 $focusedTests = @(
     'app.routes.foundation.test.tsx'
+    'composition.dashboard.test.tsx'
+    'leg.inventory.test.tsx'
+    'composition.workbench.test.tsx'
+    'composition.detail.test.tsx'
     'creation.flow.test.tsx'
     'backtest.submit.test.tsx'
     'run-detail.page.test.tsx'
     'workspace.dashboard.test.tsx'
+    'snapshots.page.test.tsx'
     'optimization.module.test.tsx'
+    'App.phase3.test.tsx'
+    'shell-frame.page-heading.test.tsx'
 )
 $resolvedTargetRoot = if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
     [System.IO.Path]::GetFullPath((Join-Path $repoRoot '.tmp\codex-fixture'))

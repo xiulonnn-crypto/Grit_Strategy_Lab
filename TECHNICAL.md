@@ -113,6 +113,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 `scripts/codex-test-backend.ps1` 当前固定跑以下测试：
 
 - `tests/test_backend_api.py`
+- `tests/test_composition_api.py`
 - `tests/test_creation_session_refresh.py`
 - `tests/test_real_backtest_api.py`
 - `tests/test_optimization_execution_resume.py`
@@ -124,11 +125,18 @@ Codex 在本仓库的默认阅读顺序固定如下：
 `scripts/codex-test-frontend.ps1` 当前固定跑以下 focused Vitest 切片：
 
 - `app.routes.foundation.test.tsx`
+- `composition.dashboard.test.tsx`
+- `leg.inventory.test.tsx`
+- `composition.workbench.test.tsx`
+- `composition.detail.test.tsx`
 - `creation.flow.test.tsx`
 - `backtest.submit.test.tsx`
 - `run-detail.page.test.tsx`
 - `workspace.dashboard.test.tsx`
+- `snapshots.page.test.tsx`
 - `optimization.module.test.tsx`
+- `App.phase3.test.tsx`
+- `shell-frame.page-heading.test.tsx`
 
 额外规则：
 
@@ -253,6 +261,9 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 - `GET /healthz`
 - `GET /workspace/overview`
+- `GET /leg-inventory`
+- `POST /asset-legs`
+- `POST /cash-legs`
 - `GET /strategies`
 - `GET /strategies/{strategy_id}/detail`
 - `PATCH /strategies/{strategy_id}`
@@ -270,6 +281,11 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `POST /strategies/{strategy_id}/backtest-runs`
 - `POST /strategies/{strategy_id}/backtest-runs/preview`
 - `POST /backtest-runs/{run_id}/clone`
+- `GET /compositions`
+- `GET /compositions/{composition_id}`
+- `POST /compositions/preview`
+- `POST /compositions`
+- `PATCH /compositions/{composition_id}`
 - `GET /optimization-jobs`
 - `GET /optimization-jobs/{job_id}/detail`
 - `POST /strategies/{strategy_id}/optimization-jobs`
@@ -279,6 +295,14 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `DELETE /optimization-jobs/{job_id}/candidates/{trial_id}`
 - `GET /data-snapshots/overview`
 - `POST /admin/snapshot-refresh-jobs`
+
+当前一期 Compose First 的补充真相：
+
+- `GET /leg-inventory` 是统一读模型入口：策略腿来自 `strategy + parameter version + latest eligible run` 的投影，不落独立真相表；资产腿与现金腿来自最小持久化定义表。
+- `POST /asset-legs` 与 `POST /cash-legs` 只负责最小定义落库，不建立版本树，也不改写策略主链路。
+- `GET /compositions`、`GET /compositions/{id}`、`POST /compositions/preview`、`POST /compositions`、`PATCH /compositions/{id}` 共同组成一期组合工作台与详情页的正式契约面。
+- `POST /compositions/preview` 返回权重摘要、收益流预演、相关性矩阵、风险贡献预览、维护成本与再平衡摘要，供工作台边调边判断。
+- `GET /data-snapshots/overview` 继续作为唯一快照总览入口；债券/固定收益治理页通过新增 `bond_fixed_income` 分段扩展现有契约，不另开第二套快照 API。
 
 当前优化任务 detail 的补充真相：
 
@@ -313,6 +337,10 @@ Codex 在本仓库的默认阅读顺序固定如下：
 `web/src/lib/appRouteContext.tsx` 当前支持的主路由包括：
 
 - `#/workspace`
+- `#/compositions`
+- `#/legs`
+- `#/compositions/workbench`
+- `#/compositions/:id`
 - `#/creation/new`
 - `#/creation/sessions/:id`
 - `#/strategies/:id`
@@ -358,6 +386,14 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `refresh_snapshots`
 - `resolve_snapshot_block`
 - `edit_parameters`
+- `open_strategy_detail`
+- `open_leg_inventory`
+- `open_composition_workbench`
+- `edit_leg_definition`
+- `save_composition`
+- `activate_composition`
+- `archive_composition`
+- `inspect_source_evidence`
 
 前后端只要有一侧新增、删除或重命名 `AllowedAction`，另一侧与相关页面测试必须同步更新。
 
@@ -425,6 +461,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - 只有显式传入 `-StrictGlobalTypes` 时，全局 TypeScript debt 才是阻塞门禁。
 - live acceptance 默认不跑，只在明确需要时通过 `-IncludeLiveAcceptance` 开启。
 - 若改动涉及优化结果页运行态、ETA 或轮询节流，除固定入口外，应额外手工运行 `npx vitest run src/optimization.module.test.tsx src/optimization.results-progress.test.tsx src/optimization.polling.test.tsx`。
+- 若改动涉及 Compose First 一期页面或债券快照页签，固定前端入口已经覆盖 `composition.dashboard / leg.inventory / composition.workbench / composition.detail / snapshots.page / shell-frame.page-heading / App.phase3`；不需要再手工补跑这些页面级测试，除非正在做更细的 focused 调试。
 
 ### 8.3 当前文档统一口径
 
@@ -468,6 +505,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `web/src/lib/appRouteContext.tsx`
 - `web/scripts/run-live-acceptance.cjs`
 - `web/src/workspace.real-api.smoke.test.tsx`
+- `docs/SLEEVE_OS_PHASED_TECHNICAL_PLAN.md`
 
 ## 11. 优化配置与约束条件事实
 

@@ -1,5 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AppRouteProvider } from './lib/appRouteContext';
+import { normalizeBondFixedIncomeOverview } from './page-sections/snapshots-bond-fixed-income';
 import { SnapshotsPage } from './pages/snapshots-page';
 import type { ApiSnapshotOverview } from './types';
 
@@ -15,7 +17,20 @@ vi.mock('./lib/demoStoreContext', () => ({
   useApiClient: () => fakeApi,
 }));
 
-const overview: ApiSnapshotOverview = {
+function renderSnapshotsPage(tab: 'equity' | 'bond' = 'equity'): void {
+  render(
+    <AppRouteProvider
+      navigate={(path) => {
+        window.location.hash = path;
+      }}
+      route={{ kind: 'snapshots', tab }}
+    >
+      <SnapshotsPage />
+    </AppRouteProvider>,
+  );
+}
+
+const overviewBase: Omit<ApiSnapshotOverview, 'bond_fixed_income'> = {
   overall_status: 'INCOMPLETE',
   last_refreshed_at: '2026-04-01T07:48:00Z',
   dataset_snapshots: [
@@ -192,6 +207,11 @@ const overview: ApiSnapshotOverview = {
   allowed_actions: ['refresh_snapshots'],
 };
 
+const overview: ApiSnapshotOverview = {
+  ...overviewBase,
+  bond_fixed_income: normalizeBondFixedIncomeOverview(null, overviewBase),
+};
+
 beforeEach(() => {
   fakeApi.getSnapshotOverview.mockReset();
   fakeApi.refreshSnapshots.mockReset();
@@ -214,9 +234,9 @@ describe('SnapshotsPage', () => {
       },
     });
 
-    render(<SnapshotsPage />);
+    renderSnapshotsPage();
 
-    expect(await screen.findByRole('heading', { level: 1, name: '快照总览' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: '数据快照' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '刷新快照' })).toBeInTheDocument();
     expect(screen.getAllByText('数据集快照').length).toBeGreaterThan(0);
     expect(screen.getAllByText('股票池快照').length).toBeGreaterThan(0);
@@ -280,12 +300,25 @@ describe('SnapshotsPage', () => {
     );
   });
 
+  it('restores the bond snapshots tab', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue(overview);
+    fakeApi.refreshSnapshots.mockResolvedValue(overview);
+
+    renderSnapshotsPage('bond');
+
+    expect(await screen.findByRole('heading', { level: 1, name: '数据快照' })).toBeInTheDocument();
+    const tabs = screen.getAllByRole('tab');
+    expect(tabs[1]).toHaveAttribute('aria-selected', 'true');
+    expect(tabs.length).toBeGreaterThan(2);
+    expect(screen.queryByText('?砍銵蛹?唳')).not.toBeInTheDocument();
+  });
+
   it('shows a loading state before overview data resolves', () => {
     fakeApi.getSnapshotOverview.mockImplementation(
       () => new Promise<ApiSnapshotOverview>(() => undefined),
     );
 
-    render(<SnapshotsPage />);
+    renderSnapshotsPage();
 
     expect(screen.getAllByText('正在加载快照概览...').length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: '刷新快照' })).toBeDisabled();
@@ -301,9 +334,9 @@ describe('SnapshotsPage', () => {
         }),
     );
 
-    render(<SnapshotsPage />);
+    renderSnapshotsPage();
 
-    expect(await screen.findByRole('heading', { level: 1, name: '快照总览' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: '数据快照' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '刷新快照' }));
 
@@ -326,7 +359,7 @@ describe('SnapshotsPage', () => {
   it('shows an error banner when the overview request fails', async () => {
     fakeApi.getSnapshotOverview.mockRejectedValue(new Error('模拟接口 500'));
 
-    render(<SnapshotsPage />);
+    renderSnapshotsPage();
 
     expect(await screen.findByText('加载数据快照失败：模拟接口 500')).toBeInTheDocument();
   });
@@ -340,7 +373,7 @@ describe('SnapshotsPage', () => {
       message: 'Universe history is partially available, but more historical anchors still need to be repaired.',
     });
 
-    render(<SnapshotsPage />);
+    renderSnapshotsPage();
 
     expect(
       await screen.findAllByText('股票池历史成分已部分可用，仍有部分历史锚点待继续补齐。'),
@@ -358,7 +391,7 @@ describe('SnapshotsPage', () => {
       coverages: [],
     } as unknown as ApiSnapshotOverview);
 
-    render(<SnapshotsPage />);
+    renderSnapshotsPage();
 
     expect(
       await screen.findByText(
@@ -403,7 +436,7 @@ describe('SnapshotsPage', () => {
       },
     });
 
-    render(<SnapshotsPage />);
+    renderSnapshotsPage();
 
     expect(await screen.findByText('最近刷新 4月1日 下午03:48 ·本次未新增数据。')).toBeInTheDocument();
   });
@@ -449,7 +482,7 @@ describe('SnapshotsPage', () => {
       },
     });
 
-    render(<SnapshotsPage />);
+    renderSnapshotsPage();
 
     expect(
       await screen.findByText('最近刷新 4月1日 下午03:48 ·新增纳指100股票池9个历史锚点，进度23/61。'),
@@ -493,7 +526,7 @@ describe('SnapshotsPage', () => {
       },
     });
 
-    render(<SnapshotsPage />);
+    renderSnapshotsPage();
 
     expect(await screen.findByText('数据刷新中...')).toBeInTheDocument();
     expect(screen.queryByText(/本次未新增数据/)).not.toBeInTheDocument();
@@ -511,7 +544,7 @@ describe('SnapshotsPage', () => {
       },
     });
 
-    render(<SnapshotsPage />);
+    renderSnapshotsPage();
 
     expect(
       await screen.findByText(
@@ -535,7 +568,7 @@ describe('SnapshotsPage', () => {
       ],
     });
 
-    render(<SnapshotsPage />);
+    renderSnapshotsPage();
 
     const sp500Card = (await screen.findByText('标普500')).closest('.snapshots-row-card');
     expect(sp500Card).not.toBeNull();

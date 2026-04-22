@@ -808,6 +808,421 @@ export type ApiSnapshotJob = {
   [key: string]: unknown;
 };
 
+export type ApiLegType = "strategy" | "asset" | "cash";
+export type ApiCompositionStatus = "DRAFT" | "ACTIVE" | "ARCHIVED";
+
+export type ApiLegInventoryFilterItem = {
+  value: string;
+  label: string;
+  count: number;
+};
+
+export type ApiLegInventoryRow = {
+  id: string;
+  leg_type: ApiLegType;
+  name: string;
+  version_label?: string | null;
+  proof_label?: string | null;
+  reference_count: number;
+  reference_summary: string;
+  status: string;
+  status_label: string;
+  has_new_version: boolean;
+  is_orphan: boolean;
+  attribute_tags: string[];
+  allowed_actions: string[];
+  source_ref_id?: string | null;
+  source_ref_type?: string | null;
+  config?: Record<string, unknown>;
+};
+
+export type ApiLegInventory = {
+  counts: {
+    all: number;
+    strategy: number;
+    asset: number;
+    cash: number;
+  };
+  filters: {
+    statuses: ApiLegInventoryFilterItem[];
+    attribute_tags: ApiLegInventoryFilterItem[];
+  };
+  rows: ApiLegInventoryRow[];
+};
+
+export type ApiAssetLegCreatePayload = {
+  name: string;
+  symbol: string;
+  asset_kind: string;
+  source_snapshot_id: string;
+  source_provider?: string | null;
+  freeze_mode: string;
+  notes?: string | null;
+  summary?: Record<string, unknown>;
+};
+
+export type ApiAssetLeg = {
+  id: string;
+  name: string;
+  symbol: string;
+  asset_kind: string;
+  source_snapshot_id: string;
+  source_provider?: string | null;
+  freeze_mode: string;
+  notes?: string | null;
+  summary: Record<string, unknown>;
+  status: string;
+  eligibility_summary: Record<string, unknown>;
+  attribute_tags: string[];
+  allowed_actions: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type ApiCashLegCreatePayload = {
+  name: string;
+  cash_rule_kind: string;
+  buffer_bps?: number;
+  yield_source?: string | null;
+  freeze_mode: string;
+  notes?: string | null;
+  summary?: Record<string, unknown>;
+};
+
+export type ApiCashLeg = {
+  id: string;
+  name: string;
+  cash_rule_kind: string;
+  buffer_bps: number;
+  yield_source?: string | null;
+  freeze_mode: string;
+  notes?: string | null;
+  summary: Record<string, unknown>;
+  status: string;
+  attribute_tags: string[];
+  allowed_actions: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type ApiCompositionBenchmarkDefinition = {
+  label?: string | null;
+  symbol?: string | null;
+  source?: string | null;
+  notes?: string | null;
+};
+
+export type ApiCompositionCostPolicy = {
+  expense_ratio_bps?: number | null;
+  turnover_budget_bps?: number | null;
+  trade_cost_bps?: number | null;
+  notes?: string | null;
+};
+
+export type ApiCompositionLegInput = {
+  leg_kind: ApiLegType;
+  source_ref_id: string;
+  source_ref_type?: string | null;
+  display_name?: string | null;
+  weight_pct: number;
+  weight_locked?: boolean;
+  ordering?: number | null;
+  config?: Record<string, unknown>;
+};
+
+export type ApiCompositionPreviewLeg = {
+  id: string;
+  leg_kind: ApiLegType;
+  source_ref_id: string;
+  source_ref_type: string;
+  display_name: string;
+  weight_pct: number;
+  weight_locked: boolean;
+  ordering: number;
+  version_label?: string | null;
+  proof_label?: string | null;
+  status: string;
+  status_label: string;
+  attribute_tags: string[];
+  reference_summary: string;
+  config: Record<string, unknown>;
+  allowed_actions: string[];
+};
+
+export type ApiCompositionWeightSummary = {
+  total_weight_pct: number;
+  target_weight_pct: number;
+  residual_weight_pct: number;
+  locked_weight_pct: number;
+  unlocked_weight_pct: number;
+  within_tolerance: boolean;
+};
+
+export type ApiCompositionReturnPoint = {
+  label: string;
+  date?: string | null;
+  portfolio_return_pct: number;
+  cumulative_return_pct: number;
+};
+
+export type ApiCompositionBenchmarkPoint = {
+  label: string;
+  date?: string | null;
+  benchmark_return_pct: number;
+  cumulative_return_pct: number;
+};
+
+export type ApiCompositionSpreadPoint = {
+  label: string;
+  date?: string | null;
+  spread_pct: number;
+};
+
+export type ApiCompositionCorrelationCell = {
+  x_key: string;
+  y_key: string;
+  correlation: number;
+};
+
+export type ApiCompositionRiskContribution = {
+  leg_id: string;
+  label: string;
+  weight_pct: number;
+  volatility_pct: number;
+  contribution_pct: number;
+};
+
+export type ApiCompositionMaintenanceCostSummary = {
+  expense_ratio_bps: number;
+  turnover_budget_bps: number;
+  trade_cost_bps: number;
+  total_estimated_bps: number;
+  notes: string[];
+};
+
+export type ApiCompositionRebalanceSummary = {
+  rebalance_frequency?: string | null;
+  cadence_label?: string | null;
+  checks_per_year: number;
+  operating_tempo_label?: string | null;
+};
+
+export type ApiCompositionScoreFactor = {
+  key: string;
+  label: string;
+  score: number;
+  detail: string;
+  tone: string;
+};
+
+export type ApiCompositionScore = {
+  score: number;
+  verdict: string;
+  factors: ApiCompositionScoreFactor[];
+};
+
+export type ApiCompositionPreviewPayload = {
+  name?: string | null;
+  description?: string | null;
+  benchmark_definition?: ApiCompositionBenchmarkDefinition | null;
+  rebalance_frequency?: string | null;
+  cost_policy?: ApiCompositionCostPolicy | null;
+  legs: ApiCompositionLegInput[];
+};
+
+export type ApiCompositionPreview = {
+  weight_summary: ApiCompositionWeightSummary;
+  normalized_legs: ApiCompositionPreviewLeg[];
+  returns_preview: ApiCompositionReturnPoint[];
+  benchmark_series: ApiCompositionBenchmarkPoint[];
+  spread_series: ApiCompositionSpreadPoint[];
+  correlation_matrix: ApiCompositionCorrelationCell[];
+  risk_contribution_preview: ApiCompositionRiskContribution[];
+  maintenance_cost_summary: ApiCompositionMaintenanceCostSummary;
+  rebalance_summary: ApiCompositionRebalanceSummary;
+  composition_score: ApiCompositionScore;
+  warnings: string[];
+  advisories: string[];
+};
+
+export type ApiCompositionCreatePayload = ApiCompositionPreviewPayload & {
+  status?: ApiCompositionStatus;
+};
+
+export type ApiCompositionUpdatePayload = {
+  name?: string | null;
+  description?: string | null;
+  status?: ApiCompositionStatus;
+  benchmark_definition?: ApiCompositionBenchmarkDefinition | null;
+  rebalance_frequency?: string | null;
+  cost_policy?: ApiCompositionCostPolicy | null;
+  legs?: ApiCompositionLegInput[] | null;
+};
+
+export type ApiCompositionListItem = {
+  id: string;
+  name: string;
+  status: string;
+  composition_score: number;
+  leg_count: number;
+  rebalance_frequency?: string | null;
+  benchmark_label?: string | null;
+  annualized_return: number;
+  max_drawdown: number;
+  updated_at: string;
+  latest_activity_label: string;
+  allowed_actions: string[];
+};
+
+export type ApiCompositionKpi = {
+  key: string;
+  label: string;
+  value: string | number;
+  unit?: string | null;
+  tone: string;
+  detail?: string | null;
+};
+
+export type ApiCompositionHeroSummary = {
+  title: string;
+  subtitle?: string | null;
+  status: string;
+  status_label: string;
+  benchmark_label?: string | null;
+  leg_count: number;
+  composition_score: number;
+  updated_at?: string | null;
+};
+
+export type ApiCompositionRebalanceMarker = {
+  label: string;
+  date?: string | null;
+  index: number;
+};
+
+export type ApiCompositionScenarioSummary = {
+  base_case: Record<string, unknown>;
+  stress_case: Record<string, unknown>;
+  dispersion_note?: string | null;
+};
+
+export type ApiCompositionSourceFreeze = {
+  id: string;
+  leg_id: string;
+  display_name: string;
+  freeze_ref_type: string;
+  freeze_ref_id: string;
+  freeze_hash: string;
+  captured_at: string;
+  snapshot: Record<string, unknown>;
+};
+
+export type ApiCompositionDetail = {
+  id: string;
+  name: string;
+  description?: string | null;
+  status: string;
+  status_label: string;
+  created_at: string;
+  updated_at: string;
+  benchmark_definition?: ApiCompositionBenchmarkDefinition | null;
+  rebalance_frequency?: string | null;
+  cost_policy: ApiCompositionCostPolicy;
+  hero_summary: ApiCompositionHeroSummary;
+  kpis: ApiCompositionKpi[];
+  weight_summary: ApiCompositionWeightSummary;
+  normalized_legs: ApiCompositionPreviewLeg[];
+  returns_preview: ApiCompositionReturnPoint[];
+  benchmark_series: ApiCompositionBenchmarkPoint[];
+  spread_series: ApiCompositionSpreadPoint[];
+  rebalance_markers: ApiCompositionRebalanceMarker[];
+  correlation_matrix: ApiCompositionCorrelationCell[];
+  risk_contribution_preview: ApiCompositionRiskContribution[];
+  maintenance_cost_summary: ApiCompositionMaintenanceCostSummary;
+  scenario_summary: ApiCompositionScenarioSummary;
+  source_evidence: ApiCompositionSourceFreeze[];
+  composition_score: ApiCompositionScore;
+  latest_activity_label: string;
+  deep_link_actions: string[];
+};
+
+export type ApiBondSnapshotCard = {
+  id: string;
+  label: string;
+  status: string;
+  value?: string | null;
+  detail?: string | null;
+};
+
+export type ApiBondSnapshotPillarGroup = {
+  id: string;
+  label: string;
+  status: string;
+  items: ApiBondSnapshotCard[];
+};
+
+export type ApiBondSnapshotCurvePoint = {
+  tenor_label: string;
+  yield_pct: number;
+  spread_bps: number;
+};
+
+export type ApiBondSnapshotAuditRow = {
+  id: string;
+  label: string;
+  owner: string;
+  status: string;
+  cadence_label: string;
+  evidence: string;
+};
+
+export type ApiBondSnapshotRegistryItem = {
+  id: string;
+  label: string;
+  status: string;
+  source: string;
+  snapshot_ref?: string | null;
+  updated_at?: string | null;
+  notes: string[];
+};
+
+export type ApiBondSnapshotScheduler = {
+  status: string;
+  cadence_label: string;
+  next_action?: string | null;
+  last_job_id?: string | null;
+};
+
+export type ApiBondSnapshotSourceSummary = {
+  primary_source: string;
+  fallback_source?: string | null;
+  selection_reason: string;
+};
+
+export type ApiBondSnapshotSystemDiagnostics = {
+  blocking_code?: string | null;
+  blocking_target?: unknown;
+  refresh_job_status?: string | null;
+  memory: Record<string, unknown>;
+  notes: string[];
+};
+
+export type ApiBondFixedIncomeOverview = {
+  global_pulse: {
+    status: string;
+    headline: string;
+    updated_at?: string | null;
+    cards: ApiBondSnapshotCard[];
+  };
+  pillar_groups: ApiBondSnapshotPillarGroup[];
+  curve_preview: ApiBondSnapshotCurvePoint[];
+  audit_matrix: ApiBondSnapshotAuditRow[];
+  raw_registry: ApiBondSnapshotRegistryItem[];
+  scheduler: ApiBondSnapshotScheduler;
+  selected_source_summary: ApiBondSnapshotSourceSummary;
+  system_diagnostics: ApiBondSnapshotSystemDiagnostics;
+};
+
 export type ApiSnapshotOverview = {
   overall_status: string;
   last_refreshed_at?: string | null;
@@ -818,6 +1233,7 @@ export type ApiSnapshotOverview = {
   blocking_target?: unknown;
   message?: string | null;
   allowed_actions?: string[];
+  bond_fixed_income: ApiBondFixedIncomeOverview;
 };
 
 export type ApiSnapshotRefreshRequest = {
@@ -939,6 +1355,21 @@ export type DemoApi = {
     jobId: string,
     trialId: string,
   ) => Promise<ApiOptimizationJobDetail>;
+  getLegInventory?: () => Promise<ApiLegInventory>;
+  createAssetLeg?: (payload: ApiAssetLegCreatePayload) => Promise<ApiAssetLeg>;
+  createCashLeg?: (payload: ApiCashLegCreatePayload) => Promise<ApiCashLeg>;
+  listCompositions?: () => Promise<ApiCompositionListItem[]>;
+  getCompositionDetail?: (id: string) => Promise<ApiCompositionDetail>;
+  previewComposition?: (
+    payload: ApiCompositionPreviewPayload,
+  ) => Promise<ApiCompositionPreview>;
+  createComposition?: (
+    payload: ApiCompositionCreatePayload,
+  ) => Promise<ApiCompositionDetail>;
+  updateComposition?: (
+    id: string,
+    payload: ApiCompositionUpdatePayload,
+  ) => Promise<ApiCompositionDetail>;
   getSnapshotOverview: () => Promise<ApiSnapshotOverview>;
   refreshSnapshots: (
     payload?: ApiSnapshotRefreshRequest,

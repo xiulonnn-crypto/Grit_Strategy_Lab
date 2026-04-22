@@ -1,0 +1,511 @@
+.leg-inventory-page {
+  display: grid;
+  gap: 24px;
+  min-width: 0;
+}
+
+.leg-inventory-hero {
+  display: grid;
+  gap: 18px;
+  padding: 24px 28px;
+  border-radius: 24px;
+  border: 1px solid #e5e7eb;
+  background:
+    radial-gradient(circle at top right, rgba(31, 135, 123, 0.08), transparent 28%),
+    linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+  box-shadow: 0 1px 3px rgba(17, 24, 39, 0.06), 0 1px 2px rgba(17, 24, 39, 0.04);
+}
+
+.leg-inventory-hero__header,
+.leg-inventory-panel__header,
+.leg-inventory-row__identity,
+.leg-inventory-drawer__header,
+.leg-inventory-principles__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.leg-inventory-hero__copy,
+.leg-inventory-panel__copy,
+.leg-inventory-drawer__copy {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.leg-inventory-hero__copy p:last-child,
+.leg-inventory-panel__copy p:last-child,
+.leg-inventory-drawer__copy p:last-child {
+  margin: 0;
+  color: #64748b;
+  line-height: 1.7;
+}
+
+.leg-inventory-hero__actions,
+.leg-inventory-hero__chips,
+.leg-inventory-toolbar__group,
+.leg-inventory-row__tags,
+.leg-inventory-row__actions,
+.leg-inventory-drawer__foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.leg-inventory-chip,
+.leg-inventory-filter,
+.leg-inventory-type-badge,
+.leg-inventory-status,
+.leg-inventory-menu__item-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid #e5e7eb;
+  background: #ffffff;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.leg-inventory-chip--accent,
+.leg-inventory-filter--active,
+.leg-inventory-type-badge--strategy,
+.leg-inventory-status--success {
+  border-color: rgba(31, 135, 123, 0.18);
+  background: #e6f4f1;
+  color: #176b61;
+}
+
+.leg-inventory-chip--warning,
+.leg-inventory-status--warning {
+  border-color: rgba(184, 104, 19, 0.28);
+  background: #fff7e8;
+  color: #a45a0a;
+}
+
+.leg-inventory-chip--danger,
+.leg-inventory-status--danger {
+  border-color: rgba(196, 92, 79, 0.28);
+  background: #fff8f7;
+  color: #c45c4f;
+}
+
+.leg-inventory-type-badge--asset {
+  border-color: rgba(76, 120, 199, 0.18);
+  background: rgba(236, 242, 253, 0.98);
+  color: #456fb2;
+}
+
+.leg-inventory-type-badge--cash {
+  border-color: rgba(181, 146, 82, 0.24);
+  background: rgba(247, 241, 228, 0.98);
+  color: #8b692a;
+}
+
+.leg-inventory-split {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.leg-inventory-split .primary-button {
+  border-radius: 10px 0 0 10px;
+}
+
+.leg-inventory-split__toggle {
+  min-width: 44px;
+  border-radius: 0 10px 10px 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.leg-inventory-menu {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 20;
+  width: min(320px, calc(100vw - 32px));
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 18px;
+  border: 1px solid #e5e7eb;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.12);
+}
+
+.leg-inventory-menu__item {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid transparent;
+  background: #ffffff;
+  text-align: left;
+}
+
+.leg-inventory-menu__item strong {
+  color: #111827;
+  font-size: 14px;
+}
+
+.leg-inventory-menu__item span {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.leg-inventory-menu__item:hover,
+.leg-inventory-menu__item:focus-visible {
+  border-color: rgba(31, 135, 123, 0.18);
+  background: #f5fbf8;
+  outline: none;
+}
+
+.leg-inventory-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.leg-inventory-stat {
+  display: grid;
+  gap: 6px;
+  min-height: 108px;
+  padding: 16px 18px;
+  border-radius: 18px;
+  border: 1px solid #e5e7eb;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+}
+
+.leg-inventory-stat span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.leg-inventory-stat strong {
+  color: #111827;
+  font-size: 28px;
+  line-height: 1;
+}
+
+.leg-inventory-stat small {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.leg-inventory-layout,
+.leg-inventory-main {
+  display: grid;
+  gap: 18px;
+}
+
+.leg-inventory-panel,
+.leg-inventory-principles,
+.leg-inventory-projection-note {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  border-radius: 18px;
+  border: 1px solid #e5e7eb;
+  background: linear-gradient(180deg, #ffffff 0%, #fcfdfe 100%);
+  box-shadow: 0 1px 3px rgba(17, 24, 39, 0.06), 0 1px 2px rgba(17, 24, 39, 0.04);
+}
+
+.leg-inventory-toolbar {
+  display: grid;
+  gap: 14px;
+}
+
+.leg-inventory-search {
+  width: min(360px, 100%);
+  min-height: 44px;
+  padding: 0 14px;
+  border-radius: 14px;
+  border: 1px solid #d7e1e5;
+  background: #ffffff;
+  color: #1f2937;
+  font: inherit;
+}
+
+.leg-inventory-search:focus-visible,
+.leg-inventory-filter:focus-visible,
+.leg-inventory-split__toggle:focus-visible,
+.leg-inventory-menu__item:focus-visible,
+.leg-inventory-table button:focus-visible,
+.leg-inventory-drawer input:focus-visible,
+.leg-inventory-drawer select:focus-visible,
+.leg-inventory-drawer textarea:focus-visible {
+  outline: 2px solid rgba(31, 135, 123, 0.28);
+  outline-offset: 2px;
+}
+
+.leg-inventory-filter {
+  min-height: 34px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff 0%, #fafcfd 100%);
+}
+
+.leg-inventory-projection-note {
+  background:
+    radial-gradient(circle at top right, rgba(31, 135, 123, 0.06), transparent 30%),
+    linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+}
+
+.leg-inventory-projection-note p {
+  margin: 0;
+  color: #64748b;
+  line-height: 1.7;
+}
+
+.leg-inventory-table-shell {
+  overflow: auto;
+  border-radius: 18px;
+  border: 1px solid #e5e7eb;
+  background: #ffffff;
+}
+
+.leg-inventory-table {
+  width: 100%;
+  min-width: 1080px;
+  border-collapse: collapse;
+}
+
+.leg-inventory-table thead th {
+  padding: 14px 16px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f9fafb;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.leg-inventory-table tbody td {
+  padding: 14px 16px;
+  border-bottom: 1px solid #eef2f4;
+  vertical-align: top;
+  color: #1f2937;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.leg-inventory-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.leg-inventory-table tbody tr:hover {
+  background: #fbfcfd;
+}
+
+.leg-inventory-row__identity {
+  display: grid;
+  gap: 8px;
+}
+
+.leg-inventory-row__name {
+  display: grid;
+  gap: 4px;
+}
+
+.leg-inventory-row__name strong {
+  color: #111827;
+  font-size: 14px;
+}
+
+.leg-inventory-row__name span,
+.leg-inventory-row__detail,
+.leg-inventory-row__reference,
+.leg-inventory-empty,
+.leg-inventory-drawer__body p,
+.leg-inventory-drawer__field-help {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.leg-inventory-row__mono {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.leg-inventory-row__actions {
+  align-items: flex-start;
+}
+
+.leg-inventory-principles__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.leg-inventory-principle {
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid #e5e7eb;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
+}
+
+.leg-inventory-principle strong {
+  color: #111827;
+}
+
+.leg-inventory-drawer-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  align-items: stretch;
+  justify-items: end;
+}
+
+.leg-inventory-drawer__overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.28);
+  backdrop-filter: blur(4px);
+}
+
+.leg-inventory-drawer {
+  position: relative;
+  width: min(620px, calc(100vw - 24px));
+  height: 100%;
+  display: grid;
+  gap: 18px;
+  padding: 24px;
+  border-left: 1px solid #d7e1e5;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
+  box-shadow: -18px 0 36px rgba(15, 23, 42, 0.12);
+  overflow: auto;
+}
+
+.leg-inventory-drawer__body {
+  display: grid;
+  gap: 16px;
+}
+
+.leg-inventory-drawer__section {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid #e5e7eb;
+  background: #ffffff;
+}
+
+.leg-inventory-drawer__field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.leg-inventory-drawer__field {
+  display: grid;
+  gap: 6px;
+}
+
+.leg-inventory-drawer__field--full {
+  grid-column: 1 / -1;
+}
+
+.leg-inventory-drawer__field label {
+  color: #1f2937;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.leg-inventory-drawer__field input,
+.leg-inventory-drawer__field select,
+.leg-inventory-drawer__field textarea {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid #d7e1e5;
+  background: #ffffff;
+  color: #1f2937;
+  font: inherit;
+}
+
+.leg-inventory-drawer__field textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
+.leg-inventory-drawer__callout {
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(31, 135, 123, 0.16);
+  background: #f5fbf8;
+  color: #176b61;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.leg-inventory-drawer__summary {
+  display: grid;
+  gap: 10px;
+}
+
+.leg-inventory-drawer__summary-card {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid #e5e7eb;
+  background: #f9fafb;
+}
+
+.leg-inventory-drawer__summary-card span {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.leg-inventory-drawer__summary-card strong {
+  color: #111827;
+  font-size: 14px;
+}
+
+@media (max-width: 1199px) {
+  .leg-inventory-stat-grid,
+  .leg-inventory-principles__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 899px) {
+  .leg-inventory-stat-grid,
+  .leg-inventory-principles__grid,
+  .leg-inventory-drawer__field-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 767px) {
+  .leg-inventory-hero,
+  .leg-inventory-panel,
+  .leg-inventory-principles,
+  .leg-inventory-projection-note,
+  .leg-inventory-drawer {
+    padding: 18px;
+  }
+
+  .leg-inventory-hero__header,
+  .leg-inventory-panel__header,
+  .leg-inventory-principles__header,
+  .leg-inventory-drawer__header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

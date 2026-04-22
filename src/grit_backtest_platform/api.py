@@ -17,9 +17,14 @@ from fastapi.responses import JSONResponse
 from ._version import __version__
 from .fallback_provider import ProviderExecutionSignal, provider_access_tier
 from .models import (
+    AssetLegCreateRequest,
     BacktestRunCloneRequest,
     BacktestRunCreateRequest,
     BacktestRunPreviewRequest,
+    CashLegCreateRequest,
+    CompositionCreateRequest,
+    CompositionPreviewRequest,
+    CompositionUpdateRequest,
     ConfirmationUpdateRequest,
     CreateCreationSessionRequest,
     CreationMessageCreate,
@@ -889,6 +894,51 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={'status': 400, 'code': 'bad_request', 'message': str(exc)}) from exc
 
+    def with_bond_snapshot_extension(payload: Any) -> Any:
+        if not isinstance(payload, Mapping):
+            return payload
+        enriched = dict(payload)
+        builder = getattr(service, "build_bond_fixed_income_snapshot_overview", None)
+        if callable(builder):
+            try:
+                enriched["bond_fixed_income"] = builder(enriched)
+            except Exception:
+                enriched["bond_fixed_income"] = {
+                    "global_pulse": {
+                        "status": "ACTION_REQUIRED",
+                        "headline": "Bond and fixed-income governance is unavailable because the shared snapshot overview could not be extended.",
+                        "updated_at": enriched.get("last_refreshed_at"),
+                        "cards": [],
+                    },
+                    "pillar_groups": [],
+                    "curve_preview": [],
+                    "audit_matrix": [],
+                    "raw_registry": [],
+                    "scheduler": {
+                        "status": "ACTION_REQUIRED",
+                        "cadence_label": "Shared snapshot cadence",
+                        "next_action": "refresh_snapshots",
+                        "last_job_id": None,
+                    },
+                    "selected_source_summary": {
+                        "primary_source": "shared_snapshot_overview",
+                        "fallback_source": None,
+                        "selection_reason": "Fallback payload generated in the API layer.",
+                    },
+                    "system_diagnostics": {
+                        "blocking_code": enriched.get("blocking_code"),
+                        "blocking_target": enriched.get("blocking_target"),
+                        "refresh_job_status": (
+                            dict(enriched.get("latest_job"))
+                            if isinstance(enriched.get("latest_job"), Mapping)
+                            else {}
+                        ).get("status"),
+                        "memory": {},
+                        "notes": ["Snapshot extension fallback was used."],
+                    },
+                }
+        return enriched
+
     def run_cleanup_cycle() -> None:
         try:
             invoke(service.purge_expired_temporary_runs)
@@ -1009,6 +1059,38 @@ def create_app(
     def clone_backtest_run(run_id: str, payload: BacktestRunCloneRequest):
         return invoke(service.clone_backtest_run, run_id, payload)
 
+    @app.get('/leg-inventory')
+    def leg_inventory():
+        return invoke(service.list_leg_inventory)
+
+    @app.post('/asset-legs')
+    def create_asset_leg(payload: AssetLegCreateRequest):
+        return invoke(service.create_asset_leg, payload)
+
+    @app.post('/cash-legs')
+    def create_cash_leg(payload: CashLegCreateRequest):
+        return invoke(service.create_cash_leg, payload)
+
+    @app.get('/compositions')
+    def list_compositions():
+        return invoke(service.list_compositions)
+
+    @app.get('/compositions/{composition_id}')
+    def composition_detail(composition_id: str):
+        return invoke(service.get_composition_detail, composition_id)
+
+    @app.post('/compositions/preview')
+    def preview_composition(payload: CompositionPreviewRequest):
+        return invoke(service.preview_composition, payload)
+
+    @app.post('/compositions')
+    def create_composition(payload: CompositionCreateRequest):
+        return invoke(service.create_composition, payload)
+
+    @app.patch('/compositions/{composition_id}')
+    def update_composition(composition_id: str, payload: CompositionUpdateRequest):
+        return invoke(service.update_composition, composition_id, payload)
+
     @app.get('/optimization-jobs')
     def list_optimization_jobs():
         return invoke(service.list_optimization_jobs)
@@ -1070,17 +1152,17 @@ def create_app(
 
     @app.get('/data-snapshots/overview')
     def snapshot_overview():
-        return invoke(service.get_snapshot_overview)
+        return with_bond_snapshot_extension(invoke(service.get_snapshot_overview))
 
     @app.post('/admin/snapshot-refresh-jobs')
     def refresh_snapshots(payload: SnapshotRefreshRequest | None = None):
         request_payload = payload or SnapshotRefreshRequest()
         if "PYTEST_CURRENT_TEST" in os.environ:
-            return invoke(service.refresh_snapshots, request_payload)
+            return with_bond_snapshot_extension(invoke(service.refresh_snapshots, request_payload))
         starter = getattr(service, "start_snapshot_refresh", None)
         if callable(starter):
-            return invoke(starter, request_payload)
-        return invoke(service.refresh_snapshots, request_payload)
+            return with_bond_snapshot_extension(invoke(starter, request_payload))
+        return with_bond_snapshot_extension(invoke(service.refresh_snapshots, request_payload))
 
     return app
 

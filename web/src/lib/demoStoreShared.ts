@@ -1,5 +1,8 @@
 import type {
+  ApiAssetLeg,
   ApiBacktestRunTradeAudit,
+  ApiCashLeg,
+  ApiCompositionDetail,
   ApiOptimizationCandidate,
   ApiOptimizationJobDetail,
   ApiStrategyCreationSession,
@@ -11,6 +14,9 @@ import { stripStrategyVersionSuffix } from './strategy-version';
 
 export type DemoState = {
   strategies: ApiStrategyDetail[];
+  assetLegs: ApiAssetLeg[];
+  cashLegs: ApiCashLeg[];
+  compositions: ApiCompositionDetail[];
   optimizationJobs: ApiOptimizationJobDetail[];
   sessions: ApiStrategyCreationSession[];
   runs: import('../types').ApiBacktestRunDetail[];

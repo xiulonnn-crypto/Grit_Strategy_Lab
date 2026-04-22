@@ -1,13 +1,24 @@
 ﻿import React, { createContext, useContext, useMemo } from 'react';
 import { ApiError } from '../types';
 import type {
+  ApiAssetLeg,
+  ApiAssetLegCreatePayload,
   ApiBacktestRunDeleteResult,
   ApiBacktestRunDetail,
   ApiBacktestRunListItem,
   ApiBacktestRunTradeAudit,
   ApiBacktestRunTradePage,
   ApiBacktestSubmissionPreview,
+  ApiCashLeg,
+  ApiCashLegCreatePayload,
   ApiConfirmationUpdateRequest,
+  ApiCompositionCreatePayload,
+  ApiCompositionDetail,
+  ApiCompositionListItem,
+  ApiCompositionPreview,
+  ApiCompositionPreviewPayload,
+  ApiCompositionUpdatePayload,
+  ApiLegInventory,
   ApiOptimizationJobCreatePayload,
   ApiOptimizationJobDeleteResult,
   ApiOptimizationJobDetail,
@@ -232,6 +243,29 @@ function createHttpApiClient(): DemoApi {
       requestJson<ApiOptimizationJobDetail>(
         `/optimization-jobs/${encodeURIComponent(jobId)}/candidates/${encodeURIComponent(trialId)}`,
         { method: 'DELETE' },
+      ),
+    getLegInventory: () => requestJson<ApiLegInventory>('/leg-inventory'),
+    createAssetLeg: (payload) =>
+      requestJson<ApiAssetLeg>('/asset-legs', withJsonBody(payload, { method: 'POST' })),
+    createCashLeg: (payload) =>
+      requestJson<ApiCashLeg>('/cash-legs', withJsonBody(payload, { method: 'POST' })),
+    listCompositions: () => requestJson<ApiCompositionListItem[]>('/compositions'),
+    getCompositionDetail: (id) =>
+      requestJson<ApiCompositionDetail>(`/compositions/${encodeURIComponent(id)}`),
+    previewComposition: (payload: ApiCompositionPreviewPayload) =>
+      requestJson<ApiCompositionPreview>(
+        '/compositions/preview',
+        withJsonBody(payload, { method: 'POST' }),
+      ),
+    createComposition: (payload: ApiCompositionCreatePayload) =>
+      requestJson<ApiCompositionDetail>(
+        '/compositions',
+        withJsonBody(payload, { method: 'POST' }),
+      ),
+    updateComposition: (id, payload: ApiCompositionUpdatePayload) =>
+      requestJson<ApiCompositionDetail>(
+        `/compositions/${encodeURIComponent(id)}`,
+        withJsonBody(payload, { method: 'PATCH' }),
       ),
     getSnapshotOverview: () => requestJson<ApiSnapshotOverview>('/data-snapshots/overview'),
     refreshSnapshots: (payload) =>

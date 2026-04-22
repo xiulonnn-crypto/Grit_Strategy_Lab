@@ -50,6 +50,34 @@ describe('App runtime routes', () => {
     expect((await screen.findAllByText('Quality Momentum')).length).toBeGreaterThan(0);
   });
 
+  it('renders the composition dashboard route inside the unified shell', async () => {
+    await renderApp('#/compositions');
+
+    expect(document.querySelector('.composition-dashboard-page')).not.toBeNull();
+    expect(await screen.findByRole('heading', { level: 1, name: '组合仪表板' })).toBeInTheDocument();
+  });
+
+  it('renders the leg inventory route inside the unified shell', async () => {
+    await renderApp('#/legs');
+
+    expect(document.querySelector('.leg-inventory-page')).not.toBeNull();
+    expect(await screen.findByRole('heading', { level: 1, name: '策略资产库' })).toBeInTheDocument();
+  });
+
+  it('renders the composition workbench route inside the unified shell', async () => {
+    await renderApp('#/compositions/workbench?composition_id=comp-001&add_leg=asset-leg-001');
+
+    expect(document.querySelector('.composition-workbench-page')).not.toBeNull();
+    expect(await screen.findByRole('heading', { level: 1, name: '全天候研究组合' })).toBeInTheDocument();
+  });
+
+  it('renders the composition detail route inside the unified shell', async () => {
+    await renderApp('#/compositions/comp-001');
+
+    expect(document.querySelector('.composition-detail-page')).not.toBeNull();
+    expect(await screen.findByRole('heading', { level: 1, name: '全天候研究组合' })).toBeInTheDocument();
+  });
+
   it('submits from backtest into the run detail route', async () => {
     await renderApp('#/strategies/strat-001/backtest-runs/new');
 
@@ -103,9 +131,9 @@ describe('App runtime routes', () => {
   });
 
   it('renders the snapshots page on the formal route', async () => {
-    await renderApp('#/snapshots');
+    await renderApp('#/snapshots?tab=bond');
 
     expect(document.querySelector('.snapshots-page')).not.toBeNull();
-    expect(await screen.findByRole('button')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '刷新债券快照' })).toBeInTheDocument();
   });
 });

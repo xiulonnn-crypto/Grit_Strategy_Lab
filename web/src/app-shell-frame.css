@@ -1,10 +1,12 @@
 :root {
   color-scheme: light;
   --gsl-bg-main: #f0f2f5;
+  --gsl-bg-surface-soft: #fbfcfd;
   --gsl-bg-surface: #ffffff;
   --gsl-bg-subtle: #f9fafb;
   --gsl-text-main: #1f2937;
-  --gsl-text-sub: #6b7280;
+  --gsl-text-sub: #64748b;
+  --gsl-text-muted: #94a3b8;
   --gsl-color-primary: #1f877b;
   --gsl-color-primary-strong: #176b61;
   --gsl-color-primary-soft: #e6f4f1;
@@ -35,7 +37,7 @@
   --radius-xl: 16px !important;
   --radius-lg: 16px !important;
   --radius-md: 12px !important;
-  --sidebar-width: 240px;
+  --sidebar-width: 236px;
   font-family: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif;
   line-height: 1.5;
   font-weight: 400;
@@ -56,7 +58,9 @@ body,
 
 body {
   min-height: 100vh;
-  background: var(--gsl-bg-main);
+  background:
+    radial-gradient(circle at top left, rgba(31, 135, 123, 0.08), transparent 32%),
+    linear-gradient(180deg, #f3f5f8 0%, #edf1f5 100%);
   color: var(--ink);
 }
 
@@ -98,10 +102,12 @@ button {
 .app-sidebar {
   display: flex;
   flex-direction: column;
-  gap: 24px;
-  padding: 24px 16px;
-  border-right: 1px solid var(--line);
-  background: #ffffff;
+  gap: 22px;
+  padding: 24px 16px 20px;
+  border-right: 1px solid rgba(229, 231, 235, 0.92);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(250, 252, 253, 0.98)),
+    #ffffff;
 }
 
 .brand-block {
@@ -116,14 +122,15 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: 34px;
+  height: 34px;
   border-radius: 10px;
-  background: var(--gsl-color-primary-strong);
+  background: linear-gradient(180deg, var(--gsl-color-primary) 0%, var(--gsl-color-primary-strong) 100%);
   color: #fff;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.08em;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 
 .brand-copy {
@@ -133,16 +140,38 @@ button {
 }
 
 .brand-copy strong {
-  font-size: 1rem;
+  color: var(--gsl-text-title);
+  font-size: 0.95rem;
   font-weight: 700;
 }
 
 .brand-copy small {
-  color: var(--muted);
+  color: var(--gsl-text-sub);
   font-size: 0.75rem;
 }
 
 .sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.sidebar-nav__group {
+  display: grid;
+  gap: 8px;
+}
+
+.sidebar-nav__group-label {
+  margin: 0;
+  padding: 0 12px;
+  color: var(--gsl-text-muted);
+  font-size: 0.69rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sidebar-nav__group-items {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -151,12 +180,14 @@ button {
 .sidebar-nav__link {
   display: flex;
   align-items: center;
-  min-height: 48px;
+  min-height: 46px;
   padding: 0 14px;
   border: 1px solid transparent;
-  border-radius: 12px;
-  color: #4b5563;
+  border-radius: 14px;
+  color: #344256;
   transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+  font-size: 0.88rem;
+  font-weight: 600;
 }
 
 .sidebar-nav__link:hover {
@@ -165,8 +196,8 @@ button {
 }
 
 .sidebar-nav__link--active {
-  background: var(--gsl-color-primary-soft);
-  border-color: transparent;
+  border-color: rgba(31, 135, 123, 0.14);
+  background: linear-gradient(180deg, rgba(230, 244, 241, 0.95), rgba(241, 249, 247, 0.98));
   color: var(--accent-strong);
   font-weight: 700;
   box-shadow: inset 3px 0 0 var(--gsl-color-primary-strong);
@@ -219,7 +250,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 24px;
-  padding: 32px;
+  padding: 28px 32px 32px;
 }
 
 .page-heading,
@@ -900,22 +931,11 @@ th {
 
 @media (max-width: 1279px) {
   .app-shell {
-    grid-template-columns: 92px minmax(0, 1fr);
+    grid-template-columns: 220px minmax(0, 1fr);
   }
 
-  .brand-block {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .brand-copy {
-    gap: 2px;
-  }
-
-  .sidebar-nav__link {
-    justify-content: center;
-    padding: 0 10px;
-    text-align: center;
+  .sidebar-nav__group-label {
+    padding: 0 12px;
   }
 }
 
@@ -925,14 +945,7 @@ th {
   }
 
   .app-sidebar {
-    gap: 16px;
-    border-right: none;
-    border-bottom: 1px solid var(--line);
-  }
-
-  .sidebar-nav {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    display: none;
   }
 
   .app-topbar,

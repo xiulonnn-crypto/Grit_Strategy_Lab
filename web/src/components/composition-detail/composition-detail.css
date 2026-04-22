@@ -1,0 +1,570 @@
+.composition-detail-page {
+  min-width: 0;
+}
+
+.composition-detail-hero,
+.composition-detail-panel,
+.composition-detail-rail-panel {
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: #ffffff;
+  box-shadow: var(--shadow);
+}
+
+.composition-detail-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 24px 28px;
+}
+
+.composition-detail-hero__copy {
+  min-width: 0;
+  max-width: 66ch;
+}
+
+.composition-detail-hero__copy h1 {
+  margin: 0;
+}
+
+.composition-detail-hero__copy p:last-child,
+.composition-detail-panel__copy,
+.composition-detail-panel__copy p,
+.composition-detail-kpi-card small,
+.composition-detail-kpi-card p,
+.composition-detail-risk-card p,
+.composition-detail-risk-card__meta,
+.composition-detail-scatter-note,
+.composition-detail-note-card,
+.composition-detail-evidence-card p,
+.composition-detail-evidence-card span,
+.composition-detail-cost-card p,
+.composition-detail-cost-list,
+.composition-detail-drawer__row span {
+  color: var(--muted);
+}
+
+.composition-detail-hero__chips,
+.composition-detail-hero__actions,
+.composition-detail-toggle-row,
+.composition-detail-legend,
+.composition-detail-scatter-note,
+.composition-detail-cost-list,
+.composition-detail-action-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.composition-detail-kpi-panel,
+.composition-detail-panel,
+.composition-detail-rail-panel {
+  padding: 20px;
+}
+
+.composition-detail-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.composition-detail-kpi-card {
+  min-width: 0;
+  min-height: 160px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 10%, var(--line));
+  border-radius: 18px;
+  background: linear-gradient(180deg, #ffffff, #fbfcfc);
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.composition-detail-kpi-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.composition-detail-kpi-card__head span,
+.composition-detail-kpi-card__head small {
+  font-size: 0.82rem;
+}
+
+.composition-detail-kpi-card strong {
+  color: var(--gsl-text-title);
+  font-size: 1.35rem;
+  line-height: 1.1;
+}
+
+.composition-detail-kpi-card__insight {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid transparent;
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.composition-detail-kpi-card__insight--positive {
+  background: rgba(31, 135, 123, 0.08);
+  border-color: rgba(31, 135, 123, 0.12);
+}
+
+.composition-detail-kpi-card__insight--warning {
+  background: rgba(214, 135, 67, 0.1);
+  border-color: rgba(214, 135, 67, 0.16);
+}
+
+.composition-detail-kpi-card__insight--critical {
+  background: rgba(196, 92, 79, 0.1);
+  border-color: rgba(196, 92, 79, 0.16);
+}
+
+.composition-detail-kpi-card__insight--blue {
+  background: rgba(76, 120, 199, 0.08);
+  border-color: rgba(76, 120, 199, 0.16);
+}
+
+.composition-detail-kpi-card__insight--neutral {
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.16);
+}
+
+.composition-detail-main-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.78fr) 330px;
+  gap: 18px;
+  align-items: start;
+}
+
+.composition-detail-main-column,
+.composition-detail-rail,
+.composition-detail-risk-grid,
+.composition-detail-evidence-list,
+.composition-detail-note-list {
+  display: grid;
+  gap: 16px;
+}
+
+.composition-detail-panel__header {
+  align-items: flex-start;
+  margin-bottom: 0;
+}
+
+.composition-detail-toggle {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #ffffff;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.composition-detail-toggle--active {
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--line));
+  background: color-mix(in srgb, var(--accent-soft) 80%, #ffffff);
+  color: var(--accent-strong);
+}
+
+.composition-detail-chart-frame {
+  min-height: 320px;
+  border: 1px solid color-mix(in srgb, var(--accent) 10%, var(--line));
+  border-radius: 18px;
+  background: linear-gradient(180deg, #ffffff, #fbfcfc);
+  overflow: hidden;
+}
+
+.composition-detail-chart {
+  width: 100%;
+  height: 320px;
+  display: block;
+}
+
+.composition-detail-grid-line {
+  stroke: rgba(15, 23, 42, 0.08);
+  stroke-width: 1;
+}
+
+.composition-detail-performance-path,
+.composition-detail-benchmark-path,
+.composition-detail-spread-path {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.composition-detail-performance-path {
+  stroke: #1f877b;
+}
+
+.composition-detail-benchmark-path {
+  stroke: #4c78c7;
+  stroke-dasharray: 7 5;
+}
+
+.composition-detail-spread-path {
+  stroke: #176b61;
+}
+
+.composition-detail-spread-area {
+  fill: rgba(31, 135, 123, 0.12);
+}
+
+.composition-detail-drawdown-area {
+  fill: rgba(196, 92, 79, 0.12);
+  stroke: rgba(196, 92, 79, 0.32);
+}
+
+.composition-detail-marker {
+  fill: #ffffff;
+  stroke: #1f877b;
+  stroke-width: 2;
+}
+
+.composition-detail-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.composition-detail-legend__item::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #1f877b;
+}
+
+.composition-detail-legend__item--benchmark::before {
+  background: #4c78c7;
+}
+
+.composition-detail-legend__item--drawdown::before {
+  background: rgba(196, 92, 79, 0.64);
+}
+
+.composition-detail-legend__item--spread::before {
+  background: #176b61;
+}
+
+.composition-detail-risk-grid {
+  grid-template-columns: minmax(0, 1.08fr) minmax(260px, 0.92fr);
+}
+
+.composition-detail-risk-list {
+  display: grid;
+  gap: 12px;
+}
+
+.composition-detail-risk-card,
+.composition-detail-scenario-card,
+.composition-detail-note-card,
+.composition-detail-evidence-card,
+.composition-detail-cost-card,
+.composition-detail-alert-card {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff, #fbfcfd);
+}
+
+.composition-detail-risk-card,
+.composition-detail-scenario-card,
+.composition-detail-note-card,
+.composition-detail-evidence-card,
+.composition-detail-cost-card {
+  padding: 16px;
+}
+
+.composition-detail-risk-card__head,
+.composition-detail-evidence-card__head,
+.composition-detail-alert-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.composition-detail-risk-card strong,
+.composition-detail-scenario-card strong,
+.composition-detail-evidence-card strong,
+.composition-detail-cost-card strong,
+.composition-detail-drawer__row strong {
+  color: var(--gsl-text-title);
+}
+
+.composition-detail-risk-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  font-size: 0.82rem;
+}
+
+.composition-detail-risk-card__bar,
+.composition-detail-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.16);
+  overflow: hidden;
+}
+
+.composition-detail-risk-card__bar-fill,
+.composition-detail-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #176b61, #1f877b);
+}
+
+.composition-detail-risk-card__bar-fill--warning {
+  background: linear-gradient(90deg, #c45c4f, #d4877b);
+}
+
+.composition-detail-scatter-shell {
+  border: 1px solid color-mix(in srgb, var(--accent) 10%, var(--line));
+  border-radius: 18px;
+  background: linear-gradient(180deg, #ffffff, #fbfcfc);
+  padding: 10px 12px 14px;
+}
+
+.composition-detail-scatter {
+  width: 100%;
+  height: 260px;
+  display: block;
+}
+
+.composition-detail-scatter__dot {
+  fill: rgba(31, 135, 123, 0.9);
+}
+
+.composition-detail-scatter__label {
+  fill: var(--muted);
+  font-size: 11px;
+}
+
+.composition-detail-matrix,
+.composition-detail-matrix__header,
+.composition-detail-matrix__row,
+.composition-detail-scenario-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.composition-detail-matrix__header,
+.composition-detail-matrix__row {
+  grid-template-columns: 112px repeat(auto-fit, minmax(56px, 1fr));
+  align-items: center;
+}
+
+.composition-detail-matrix__header span,
+.composition-detail-matrix__row span:first-child {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.composition-detail-matrix-cell {
+  min-height: 50px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  color: var(--gsl-text-title);
+}
+
+.composition-detail-matrix-cell--high {
+  background: rgba(31, 135, 123, 0.18);
+}
+
+.composition-detail-matrix-cell--mid {
+  background: rgba(76, 120, 199, 0.14);
+}
+
+.composition-detail-matrix-cell--low {
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.composition-detail-matrix-cell--inverse {
+  background: rgba(196, 92, 79, 0.14);
+}
+
+.composition-detail-alert-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.composition-detail-alert-card {
+  padding: 12px 14px;
+  border-color: rgba(196, 92, 79, 0.16);
+  background: #fff8f7;
+}
+
+.composition-detail-scenario-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.composition-detail-scenario-card--stress {
+  border-color: rgba(196, 92, 79, 0.16);
+  background: #fff8f7;
+}
+
+.composition-detail-shield {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line));
+  background: color-mix(in srgb, var(--accent-soft) 82%, #ffffff);
+  color: var(--accent-strong);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.composition-detail-evidence-card {
+  width: 100%;
+  text-align: left;
+}
+
+.composition-detail-evidence-card.is-active {
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--line));
+  box-shadow: 0 0 0 1px rgba(31, 135, 123, 0.14);
+}
+
+.composition-detail-note-list {
+  gap: 10px;
+}
+
+.composition-detail-note-card {
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.composition-detail-drawer-shell {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(15, 23, 42, 0.22);
+  backdrop-filter: blur(4px);
+  z-index: 120;
+}
+
+.composition-detail-drawer {
+  width: min(72vw, 1080px);
+  min-width: 720px;
+  height: 100vh;
+  padding: 24px 26px;
+  background: #ffffff;
+  border-left: 1px solid color-mix(in srgb, var(--accent) 12%, var(--line));
+  box-shadow: -16px 0 42px rgba(15, 23, 42, 0.12);
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  overflow: auto;
+}
+
+.composition-detail-drawer__header,
+.composition-detail-drawer__summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.composition-detail-drawer__header h2 {
+  margin: 0;
+}
+
+.composition-detail-drawer__summary {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #f8fafb;
+}
+
+.composition-detail-drawer__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.composition-detail-drawer__row {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #ffffff;
+}
+
+@media (max-width: 1400px) {
+  .composition-detail-kpi-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1180px) {
+  .composition-detail-main-grid,
+  .composition-detail-risk-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .composition-detail-drawer {
+    width: min(78vw, 980px);
+    min-width: 0;
+  }
+}
+
+@media (max-width: 900px) {
+  .composition-detail-hero,
+  .composition-detail-hero__actions,
+  .composition-detail-kpi-grid,
+  .composition-detail-scenario-grid,
+  .composition-detail-drawer__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .composition-detail-hero,
+  .composition-detail-hero__actions,
+  .composition-detail-evidence-card__head,
+  .composition-detail-alert-card,
+  .composition-detail-drawer__header,
+  .composition-detail-drawer__summary {
+    flex-direction: column;
+  }
+
+  .composition-detail-drawer {
+    width: 100%;
+  }
+}
+
+@media (max-width: 720px) {
+  .composition-detail-hero,
+  .composition-detail-kpi-panel,
+  .composition-detail-panel,
+  .composition-detail-rail-panel,
+  .composition-detail-drawer {
+    padding: 18px;
+  }
+
+  .composition-detail-chart,
+  .composition-detail-scatter {
+    height: 280px;
+  }
+
+  .composition-detail-toggle-row,
+  .composition-detail-legend,
+  .composition-detail-cost-list {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

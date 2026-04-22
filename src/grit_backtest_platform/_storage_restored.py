@@ -236,6 +236,93 @@ SCHEMA_STATEMENTS = [
     ON optimization_job_trials(job_id, trial_index)
     """,
     """
+    CREATE TABLE IF NOT EXISTS asset_leg_definitions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        asset_kind TEXT NOT NULL,
+        source_snapshot_id TEXT NOT NULL,
+        source_provider TEXT,
+        freeze_mode TEXT NOT NULL,
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'ACTIVE',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS cash_leg_definitions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        cash_rule_kind TEXT NOT NULL,
+        buffer_bps REAL NOT NULL DEFAULT 0,
+        yield_source TEXT,
+        freeze_mode TEXT NOT NULL,
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'ACTIVE',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS compositions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        status TEXT NOT NULL DEFAULT 'DRAFT',
+        benchmark_definition_json TEXT NOT NULL DEFAULT '{}',
+        rebalance_frequency TEXT,
+        cost_policy_json TEXT NOT NULL DEFAULT '{}',
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        analysis_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS composition_legs (
+        id TEXT PRIMARY KEY,
+        composition_id TEXT NOT NULL,
+        leg_kind TEXT NOT NULL,
+        source_ref_id TEXT NOT NULL,
+        source_ref_type TEXT NOT NULL,
+        display_name TEXT NOT NULL DEFAULT '',
+        weight_pct REAL NOT NULL DEFAULT 0,
+        weight_locked INTEGER NOT NULL DEFAULT 0,
+        ordering INTEGER NOT NULL DEFAULT 1,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(composition_id) REFERENCES compositions(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS composition_source_freezes (
+        id TEXT PRIMARY KEY,
+        composition_id TEXT NOT NULL,
+        leg_id TEXT NOT NULL,
+        freeze_ref_type TEXT NOT NULL,
+        freeze_ref_id TEXT NOT NULL,
+        freeze_hash TEXT NOT NULL,
+        snapshot_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(composition_id) REFERENCES compositions(id) ON DELETE CASCADE,
+        FOREIGN KEY(leg_id) REFERENCES composition_legs(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_legs_composition_id_ordering
+    ON composition_legs(composition_id, ordering)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_legs_source_ref
+    ON composition_legs(source_ref_id, leg_kind)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_source_freezes_composition_leg
+    ON composition_source_freezes(composition_id, leg_id)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS symbol_identity_cache (
         symbol TEXT PRIMARY KEY,
         canonical_symbol TEXT NOT NULL DEFAULT '',

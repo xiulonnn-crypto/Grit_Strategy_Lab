@@ -62,6 +62,30 @@
 
 这套设计的目的，是避免本地实验室被短命实验塞满，同时保留永久运行及其审计轨迹。
 
+## 3.1 Phase 1 组合与腿部持久化边界
+
+一期 Compose First 采用“组合为核心、腿部分层建模”的边界：
+
+- `组合` 是一期唯一新增的正式持久化核心对象。
+- `资产腿` 与 `现金腿` 只做最小持久化定义，用于支持组合装配、冻结与回看。
+- `策略腿` 不建立独立真相表；它始终是由 `strategies + strategy_parameter_versions + latest eligible run` 投影出来的可管理读模型。
+- 这条边界是刻意保持的：一期不建立统一 `sleeve registry`，也不把策略研究主链路复制成第二套组合子系统。
+
+当前新增或扩展的持久化对象如下：
+
+- `asset_leg_definitions`
+- `cash_leg_definitions`
+- `compositions`
+- `composition_legs`
+- `composition_source_freezes`
+
+其中：
+
+- `asset_leg_definitions` 与 `cash_leg_definitions` 只保存最小定义、状态、引用与配置摘要，不承担完整版本树职责。
+- `compositions` 保存组合级身份、状态、基准、再平衡频次、成本口径与汇总投影。
+- `composition_legs` 保存组合内腿的排序、权重、锁定状态与来源引用。
+- `composition_source_freezes` 保存组合落库时的来源冻结证据，用于详情页审计与后续回看。
+
 ## 4. 参数版本真相
 
 参数版本的真相存放在参数版本表里，而不是散落在临时 UI 状态中。
@@ -118,9 +142,12 @@
 稳定的 API 表面被刻意收窄，并且尽量具体。
 
 - `/workspace/overview` 负责保持顶层工作台契约稳定。
+- `/leg-inventory` 负责输出一期统一腿部读模型。它把策略腿视为投影，把资产腿/现金腿视为最小持久化定义。
+- `/asset-legs` 与 `/cash-legs` 负责写入最小定义能力，不承担策略版本化职责。
 - `/strategy-creation-sessions/*` 负责创建与修订工作流。
 - `/backtest-runs/*` 覆盖预览、提交、克隆、详情、交易列表与单笔交易审计。
 - `GET /backtest-runs/{id}/detail` 明确针对页面加载做了优化。它可以包含 `trade_audit_items`，但不能物化完整的 `trade_audit` 记录；完整审计只属于 `GET /backtest-runs/{run_id}/trades/{trade_id}/audit`。
+- `/compositions`、`/compositions/{id}`、`/compositions/preview` 与 `/compositions/{id}` 的 patch 面共同构成一期组合工作台和组合详情页契约。预演接口负责返回收益流预览、相关性矩阵、风险贡献、维护成本与再平衡摘要，而不直接改写持久化状态。
 - `/optimization-jobs` 返回按 `updated_at DESC` 排序的优化任务列表，并投影任务状态、策略关联、预算进度、`progress_pct`、`current_stage`、`latest_update`、`estimated_remaining_minutes`、`estimated_completed_at` 以及带类型的 `best_metrics_summary`，供优化实验室索引页与工作台混合时间线使用。
 - `POST /strategies/{strategy_id}/optimization-jobs` 现在接收 `base_parameter_version_id`、`source_run_id`、`entry_point`、`validation_mode`、`budget_combinations` 与 `search_space`；只有参数配置页显式发起优化时才会创建任务。
 - `POST /optimization-jobs/{id}/resume` 接收 `idempotency_key`，并且只会从 `next_trial_index` 继续 `INTERRUPTED` 任务；对同一 key 的重复调用必须保持幂等。
@@ -129,6 +156,7 @@
 - 体量较大的优化任务仍然保留了一套 Windows 安全的 `spawn` 进程分发实现，并隐藏在服务边界之后。它不是 API 层用户可配置的能力，会根据运行时内存压力自动下调 worker 目标，也能在不改变持久化任务契约的前提下回退到单 worker 模式；不过当前 synthetic evaluator 默认关闭这条路径，直到出现真正需要它的重型 evaluator。
 - 当前优化 evaluator 路径刻意脱离 `_prepare_backtest_run_context()`。活跃的 `_service_rebuilt.py` evaluator 是 synthetic 且以摘要驱动的，因此优化执行期间不会预加载准备好的 snapshot bars。
 - `/data-snapshots/overview` 返回正式快照契约：`overall_status`、`last_refreshed_at`、`dataset_snapshots[]`、`universe_snapshots[]`、`latest_job`、`blocking_code`、`blocking_target`、`message` 与 `allowed_actions`。
+- 债券治理页不单独新开快照 API。`/data-snapshots/overview` 现在追加 `bond_fixed_income` 分段，用同一条 overview 路由承载全局健康、三位一体工作站、影子数据审计矩阵、调度与来源资格判断。
 - `/admin/snapshot-refresh-jobs` 接收 `reason`、`mode` 与 `targets`，返回的是刷新后的 overview 契约，而不是裸任务载荷。
 - `python -m grit_backtest_platform.main refresh-snapshots --reason ... --mode incremental|repair|full --targets price,corporate,universes` 是供 Windows Task Scheduler 使用的调度安全 CLI 入口；API 进程并不持有 18:00 的触发责任。
 - 运行中的刷新任务现在会在仍处于 `RUNNING` 时持续写出心跳 checkpoint 与部分合并后的 dataset snapshot；overview 消费方应预期 `latest_job.summary.refresh_stats` 会先变化，再等到终态任务写入落地。
@@ -154,6 +182,10 @@
 正式的前端路由表固定为：
 
 - `#/workspace`
+- `#/compositions`
+- `#/legs`
+- `#/compositions/workbench`
+- `#/compositions/:id`
 - `#/creation/new`
 - `#/creation/sessions/:id`
 - `#/strategies/:id`
@@ -165,6 +197,14 @@
 - `#/optimization-jobs/new/config?...`
 - `#/optimization-jobs/:id`
 - `#/snapshots`
+
+一期 Compose First 的前端运行时规则补充如下：
+
+- `#/compositions` 是组合仪表板，不复用旧 workspace 页面换皮。
+- `#/legs` 是资产库，负责管理策略腿投影、资产腿定义与现金腿定义。
+- `#/compositions/workbench` 必须先于 `#/compositions/:id` 被 route parser 匹配，避免工作台被详情路由误吞。
+- `#/compositions/workbench` 与 `#/compositions/:id` 都通过现有 shell/runtime 边界接入，不允许另起第二套路由层。
+- 左侧导航当前分为 `组合` 与 `策略` 两组；组合组包含 `组合仪表板` 与 `资产库`，策略组保留既有主链路，并把 `workspace` 对外标签统一为 `策略工作台`。
 
 优化生命周期真相固定为：
 
