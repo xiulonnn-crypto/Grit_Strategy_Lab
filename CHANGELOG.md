@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [0.1.1-008] - 2026-04-23 - 新增Phase 1.1 组合落库闭环、债券快照真实接入，并调整资产库腿部清单投研化、Compose First 五页真实 runtime等
+
 ### 新增 (Added)
 
 - **Phase 1.1 组合落库闭环**: 组合一期表补齐 revision、当前冻结代、状态、软删除字段、唯一约束与索引；`preview` 保持零写入，`create/patch` 会原子写入组合腿与 `composition_source_freezes`，详情页读取冻结来源而不是实时漂移数据。
