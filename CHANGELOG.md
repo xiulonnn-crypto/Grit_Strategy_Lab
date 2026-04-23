@@ -9,6 +9,29 @@
 
 ## [Unreleased]
 
+### 新增 (Added)
+
+- **Phase 1.1 组合落库闭环**: 组合一期表补齐 revision、当前冻结代、状态、软删除字段、唯一约束与索引；`preview` 保持零写入，`create/patch` 会原子写入组合腿与 `composition_source_freezes`，详情页读取冻结来源而不是实时漂移数据。
+- **债券快照真实接入**: market-data repository 新增 `bond_fixed_income_snapshots` 读写面，`GET /data-snapshots/overview` 的 `bond_fixed_income` 现在公开 eligible runtime sources / instruments，并支持从合格债券快照创建资产腿。
+
+### 优化 (Changed)
+
+- **资产库腿部清单投研化**: `#/legs` 清单表头从行政字段改为投研决策字段，行内直接展示 PIT 快照、YTM/久期/波动率、策略年化/回撤、现金缓冲、引用渗透率与冻结/闲置状态；操作列统一为“详情 / 编辑 / 查看来源 / 归档”，并支持点击行打开来源审计详情抽屉。
+- **Compose First 五页真实 runtime**: `#/compositions`、`#/legs`、`#/compositions/workbench`、`#/compositions/:id` 与 `#/snapshots?tab=bond` 均通过 `ApiClientProvider` 调用真实 HTTP API；dashboard/detail 支持组合状态写入，workbench 支持 create/patch，资产库与债券 tab 支持真实资产/现金腿写入入口。
+- **本地 live 交付门禁**: `http://127.0.0.1:4173` 页面验收必须核对最终代码对应的 backend/preview 监听进程、重建 preview bundle，并用真实浏览器与 API 结果确认，避免旧进程或旧 bundle 被误判为已交付。
+- **生产路由隔离静态预览**: 旧 `#/compositions/detail` 设计预览别名不再进入生产详情页路由，避免把静态批准稿误当作真实组合详情。
+
+### 修复 (Fixed)
+
+- **策略腿刷新保留**: `#/legs` 保存策略腿候选后会记录稳定的 `strategy_leg::{strategy_id}::{parameter_version_id}` 引用，页面刷新后继续用最新候选数据恢复到资产库清单，不再让“标普动量策略”等已保存策略腿从列表中消失。
+- **数据快照视觉回归**: `#/snapshots` 股票 tab 的全局视角指标、EST 刷新时间、原始清单字段/调度列、hero 高度、全局面板高度、工作站卡片高度与就绪标准 rail 重新对齐 Compose First 批准稿；债券 tab 恢复全局健康仪表盘、三位一体工作站、资产腿创建 rail、影子数据审计矩阵/系统诊断双栏、原始调度区按钮位置与批准稿视觉密度，同时继续绑定真实 runtime 快照行。
+- **QuickStart 预览端口重启**: `QuickStart-Grit.ps1` 现在能识别由 `node ./preview-server.mjs --watch --rebuild-on-start` 启动的 repo-local 预览进程，并在重启 `4173` 时正确停止旧监听，不再误报 `non-repo frontend process`。
+- **Workspace 与快照 live 数据**: 本地 `#/workspace` 验收恢复使用有历史策略/回测的 runtime SQLite 数据，`#/snapshots` 股票/指数 tab 继续映射 `GET /data-snapshots/overview` 的 `dataset_snapshots[]` 与 `universe_snapshots[]`，但保持 Compose First 批准稿的全局视角、三位一体工作站 + 数据诊断报告、原始快照清单 + 就绪标准两组双栏结构，不再回退到 `99.8%` 或 `Universe-US-Equity-*` 等静态设计稿值。
+- **数据快照债券稿对齐**: `#/snapshots?tab=bond` 保持批准稿的就绪/待补/阻塞、影子字段覆盖率、入库链路与数据自愈、三栏工作站、资产腿创建侧栏、影子数据审计矩阵、批量修复规则和原始快照与调度结构；页面只展示真实 `bond_fixed_income` runtime 行，资产腿创建侧栏会跟随当前选中的 runtime 债券来源，不再展示 `Bond-UST*`、FMP/Polygon 延迟、phase1 curve proxy 等 mock 文案。
+- **资产库策略腿候选恢复**: `GET /leg-inventory` 与 demo store 仍不把所有策略参数版本自动投影进默认资产库，`#/legs` 默认只展示人工创建/持久化的资产腿与现金腿；“创建策略腿”抽屉会按每个策略的最新已完成回测运行构造临时 `strategy_leg::{strategy_id}::{parameter_version_id}` 候选，并用所选候选的指标驱动右侧验证摘要曲线和 KPI，避免策略库已有合格版本时误报空态或只显示前三个候选。
+- **策略腿入库反馈**: `#/legs` 保存策略腿候选后停留在策略资产库，显示“创建策略腿成功”提示，并把选中的策略腿投影加入当前腿部清单，不再直接跳转组合工作台。
+- **数据快照债券视觉密度**: `#/snapshots?tab=bond` 去除债券模块前的固定大空白，并统一页签、状态标签和面板阴影密度，避免债券 tab 与股票 tab 视觉脱节。
+
 ## [0.1.1-007] - 2026-04-23 - 调整UI 交付门禁，并修复组合详情页、策略资产库等
 
 ### 优化 (Changed)

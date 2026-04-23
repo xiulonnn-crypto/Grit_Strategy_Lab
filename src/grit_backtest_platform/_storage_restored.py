@@ -246,8 +246,12 @@ SCHEMA_STATEMENTS = [
         freeze_mode TEXT NOT NULL,
         summary_json TEXT NOT NULL DEFAULT '{}',
         status TEXT NOT NULL DEFAULT 'ACTIVE',
+        revision INTEGER NOT NULL DEFAULT 1,
+        current_freeze_generation INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT,
+        deleted_reason TEXT
     )
     """,
     """
@@ -260,8 +264,12 @@ SCHEMA_STATEMENTS = [
         freeze_mode TEXT NOT NULL,
         summary_json TEXT NOT NULL DEFAULT '{}',
         status TEXT NOT NULL DEFAULT 'ACTIVE',
+        revision INTEGER NOT NULL DEFAULT 1,
+        current_freeze_generation INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT,
+        deleted_reason TEXT
     )
     """,
     """
@@ -275,8 +283,12 @@ SCHEMA_STATEMENTS = [
         cost_policy_json TEXT NOT NULL DEFAULT '{}',
         summary_json TEXT NOT NULL DEFAULT '{}',
         analysis_json TEXT NOT NULL DEFAULT '{}',
+        revision INTEGER NOT NULL DEFAULT 1,
+        current_freeze_generation INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT,
+        deleted_reason TEXT
     )
     """,
     """
@@ -291,8 +303,13 @@ SCHEMA_STATEMENTS = [
         weight_locked INTEGER NOT NULL DEFAULT 0,
         ordering INTEGER NOT NULL DEFAULT 1,
         config_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'ACTIVE',
+        revision INTEGER NOT NULL DEFAULT 1,
+        current_freeze_generation INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
+        deleted_at TEXT,
+        deleted_reason TEXT,
         FOREIGN KEY(composition_id) REFERENCES compositions(id) ON DELETE CASCADE
     )
     """,
@@ -304,8 +321,15 @@ SCHEMA_STATEMENTS = [
         freeze_ref_type TEXT NOT NULL,
         freeze_ref_id TEXT NOT NULL,
         freeze_hash TEXT NOT NULL,
+        freeze_generation INTEGER NOT NULL DEFAULT 1,
+        is_current INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'ACTIVE',
+        revision INTEGER NOT NULL DEFAULT 1,
         snapshot_json TEXT NOT NULL DEFAULT '{}',
         created_at TEXT NOT NULL,
+        updated_at TEXT,
+        deleted_at TEXT,
+        deleted_reason TEXT,
         FOREIGN KEY(composition_id) REFERENCES compositions(id) ON DELETE CASCADE,
         FOREIGN KEY(leg_id) REFERENCES composition_legs(id) ON DELETE CASCADE
     )
@@ -361,7 +385,112 @@ MIGRATION_COLUMNS = {
         ("total_return_pct", "REAL"),
         ("stability", "REAL"),
     ],
+    "asset_leg_definitions": [
+        ("revision", "INTEGER NOT NULL DEFAULT 1"),
+        ("current_freeze_generation", "INTEGER NOT NULL DEFAULT 1"),
+        ("deleted_at", "TEXT"),
+        ("deleted_reason", "TEXT"),
+    ],
+    "cash_leg_definitions": [
+        ("revision", "INTEGER NOT NULL DEFAULT 1"),
+        ("current_freeze_generation", "INTEGER NOT NULL DEFAULT 1"),
+        ("deleted_at", "TEXT"),
+        ("deleted_reason", "TEXT"),
+    ],
+    "compositions": [
+        ("revision", "INTEGER NOT NULL DEFAULT 1"),
+        ("current_freeze_generation", "INTEGER NOT NULL DEFAULT 1"),
+        ("deleted_at", "TEXT"),
+        ("deleted_reason", "TEXT"),
+    ],
+    "composition_legs": [
+        ("status", "TEXT NOT NULL DEFAULT 'ACTIVE'"),
+        ("revision", "INTEGER NOT NULL DEFAULT 1"),
+        ("current_freeze_generation", "INTEGER NOT NULL DEFAULT 1"),
+        ("deleted_at", "TEXT"),
+        ("deleted_reason", "TEXT"),
+    ],
+    "composition_source_freezes": [
+        ("freeze_generation", "INTEGER NOT NULL DEFAULT 1"),
+        ("is_current", "INTEGER NOT NULL DEFAULT 1"),
+        ("status", "TEXT NOT NULL DEFAULT 'ACTIVE'"),
+        ("revision", "INTEGER NOT NULL DEFAULT 1"),
+        ("updated_at", "TEXT"),
+        ("deleted_at", "TEXT"),
+        ("deleted_reason", "TEXT"),
+    ],
 }
+
+
+POST_MIGRATION_INDEX_STATEMENTS = [
+    """
+    CREATE INDEX IF NOT EXISTS idx_asset_leg_definitions_active_updated
+    ON asset_leg_definitions(status, deleted_at, updated_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_asset_leg_definitions_source_snapshot
+    ON asset_leg_definitions(source_snapshot_id, source_provider, status)
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_leg_definitions_active_unique
+    ON asset_leg_definitions(symbol, asset_kind, source_snapshot_id, freeze_mode)
+    WHERE deleted_at IS NULL
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_asset_leg_definitions_freeze_generation
+    ON asset_leg_definitions(current_freeze_generation, revision)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_cash_leg_definitions_active_updated
+    ON cash_leg_definitions(status, deleted_at, updated_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_cash_leg_definitions_yield_source
+    ON cash_leg_definitions(yield_source, status)
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_cash_leg_definitions_active_unique
+    ON cash_leg_definitions(name, cash_rule_kind, COALESCE(yield_source, ''), freeze_mode)
+    WHERE deleted_at IS NULL
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_cash_leg_definitions_freeze_generation
+    ON cash_leg_definitions(current_freeze_generation, revision)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_compositions_active_updated
+    ON compositions(status, deleted_at, updated_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_compositions_freeze_generation
+    ON compositions(current_freeze_generation, revision)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_legs_active_ordering
+    ON composition_legs(composition_id, status, deleted_at, ordering)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_legs_freeze_generation
+    ON composition_legs(composition_id, current_freeze_generation, revision)
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_composition_legs_current_source_unique
+    ON composition_legs(composition_id, leg_kind, source_ref_id, current_freeze_generation)
+    WHERE deleted_at IS NULL
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_source_freezes_generation
+    ON composition_source_freezes(composition_id, freeze_generation, is_current, status)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_source_freezes_ref_generation
+    ON composition_source_freezes(freeze_ref_type, freeze_ref_id, freeze_generation)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_source_freezes_active
+    ON composition_source_freezes(status, deleted_at, created_at)
+    """,
+]
 
 
 def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
@@ -391,6 +520,8 @@ def initialize_storage_schema(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
     for table_name, columns in MIGRATION_COLUMNS.items():
         _ensure_table_columns(conn, table_name, columns)
+    for statement in POST_MIGRATION_INDEX_STATEMENTS:
+        conn.execute(statement)
     conn.commit()
 
 

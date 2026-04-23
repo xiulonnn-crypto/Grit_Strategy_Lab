@@ -1,12 +1,10 @@
 import { useDeferredValue, useState } from 'react';
-import { formatDateTime } from '../../lib/format';
+import { formatDateTime, formatPercent } from '../../lib/format';
 import { navigateTo } from '../../lib/appRouteContext';
 import {
   formatCompositionStatusLabel,
   formatLegDisplayName,
-  formatLegProofLabel,
   formatLegReferenceSummary,
-  formatTagLabel,
 } from '../../lib/compose-display';
 import type {
   ApiAssetLegCreatePayload,
@@ -23,9 +21,22 @@ type LegInventoryViewProps = {
   error?: string | null;
   onCreateAsset: (payload: ApiAssetLegCreatePayload) => Promise<void>;
   onCreateCash: (payload: ApiCashLegCreatePayload) => Promise<void>;
+  onSaveStrategy: (row: ApiLegInventoryRow) => void;
+  strategyRows?: ApiLegInventoryRow[];
 };
 
 type InventoryTypeFilter = 'all' | 'strategy' | 'asset' | 'cash';
+
+type RowMetricPreview = {
+  primary: string;
+  secondary: string;
+  anchor: string;
+};
+
+type PitSnapshotPreview = {
+  primary: string;
+  secondary: string;
+};
 
 function getLegTypeLabel(value: string): string {
   switch (value) {
@@ -64,39 +75,446 @@ function getReferenceSummary(row: ApiLegInventoryRow): string {
   return formatLegReferenceSummary(row.reference_summary, row.reference_count);
 }
 
-function getProofSummary(row: ApiLegInventoryRow): string {
-  return formatLegProofLabel(row.proof_label, {
-    leg_kind: row.leg_type,
-    display_name: row.name,
-    source_ref_id: row.source_ref_id,
-    config: row.config,
-  });
-}
-
-function formatTag(tag: string): string {
-  return formatTagLabel(tag);
-}
-
-function getWorkBenchPath(row: ApiLegInventoryRow): string {
-  return `/compositions/workbench?add_leg=${encodeURIComponent(row.id)}`;
-}
-
-function getStrategyPath(row: ApiLegInventoryRow): string | null {
-  const strategyId =
-    typeof row.config?.strategy_id === 'string'
-      ? row.config.strategy_id
-      : typeof row.source_ref_id === 'string' && row.source_ref_type === 'strategy_projection'
-        ? row.source_ref_id.split('::')[1] ?? null
-        : null;
-  return strategyId ? `/strategies/${encodeURIComponent(strategyId)}` : null;
-}
-
 function getAssetSourcePath(row: ApiLegInventoryRow): string | null {
   const snapshotId =
     typeof row.config?.source_snapshot_id === 'string'
       ? row.config.source_snapshot_id
       : null;
-  return snapshotId ? `/snapshots?source_snapshot_id=${encodeURIComponent(snapshotId)}` : null;
+  const tab = String(row.config?.asset_kind ?? '').toUpperCase().includes('BOND') ? 'tab=bond&' : '';
+  return snapshotId ? `/snapshots?${tab}source_snapshot_id=${encodeURIComponent(snapshotId)}` : null;
+}
+
+function getRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function getConfig(row: ApiLegInventoryRow): Record<string, unknown> {
+  return getRecord(row.config);
+}
+
+function getSummary(row: ApiLegInventoryRow): Record<string, unknown> {
+  return getRecord(getConfig(row).summary);
+}
+
+function getBondSnapshot(row: ApiLegInventoryRow): Record<string, unknown> {
+  return getRecord(getSummary(row).bond_snapshot);
+}
+
+function readString(records: Record<string, unknown>[], keys: string[]): string | null {
+  for (const record of records) {
+    for (const key of keys) {
+      const value = record[key];
+      if (typeof value === 'string' && value.trim()) {
+        return value.trim();
+      }
+    }
+  }
+  return null;
+}
+
+function readNumber(records: Record<string, unknown>[], keys: string[]): number | null {
+  for (const record of records) {
+    for (const key of keys) {
+      const value = record[key];
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return value;
+      }
+    }
+  }
+  return null;
+}
+
+function getMetricRecords(row: ApiLegInventoryRow): Record<string, unknown>[] {
+  const config = getConfig(row);
+  const summary = getSummary(row);
+  return [getRecord(config.metrics), config, getBondSnapshot(row), summary];
+}
+
+function normalizePercentPoint(value: number | null): number | null {
+  if (value === null) {
+    return null;
+  }
+  return Math.abs(value) <= 1 ? value * 100 : value;
+}
+
+function normalizePercentFraction(value: number | null): number | null {
+  if (value === null) {
+    return null;
+  }
+  return Math.abs(value) > 2 ? value / 100 : value;
+}
+
+function formatPctPoint(value: number | null, digits = 2): string {
+  const normalized = normalizePercentPoint(value);
+  return normalized === null ? 'n/a' : `${normalized.toFixed(digits)}%`;
+}
+
+function formatSignedFraction(value: number | null): string {
+  return formatPercent(normalizePercentFraction(value));
+}
+
+function getShieldHash(value: string): string {
+  const hash = Array.from(value).reduce((accumulator, char) => {
+    return (accumulator * 31 + char.charCodeAt(0)) % 0xffff;
+  }, 17);
+  return hash.toString(16).toUpperCase().padStart(4, '0');
+}
+
+function getIdentitySubtitle(row: ApiLegInventoryRow): string {
+  const records = [getConfig(row), getBondSnapshot(row), getSummary(row)];
+  const symbol = readString(records, ['symbol', 'ticker', 'isin', 'cusip']);
+  const fallback =
+    row.leg_type === 'cash'
+      ? readString(records, ['cash_rule_kind', 'yield_source'])
+      : row.leg_type === 'strategy'
+        ? readString(records, ['strategy_id'])
+        : row.version_label;
+  return `${symbol ?? fallback ?? row.source_ref_id ?? row.id} · #${getShieldHash(row.id)}`;
+}
+
+function getPitSnapshotPreview(row: ApiLegInventoryRow): PitSnapshotPreview {
+  const records = [getBondSnapshot(row), getSummary(row), getConfig(row)];
+  const date = readString(records, ['snapshot_date', 'pit_date', 'as_of_date']);
+  if (date) {
+    return {
+      primary: date.slice(0, 10),
+      secondary: row.version_label ? `PIT Date · ${row.version_label}` : 'PIT Date',
+    };
+  }
+  if (row.leg_type === 'strategy') {
+    return {
+      primary: row.version_label || '版本待定',
+      secondary: readString(records, ['parameter_version_id']) ?? '参数版本',
+    };
+  }
+  if (row.leg_type === 'cash') {
+    return {
+      primary: row.version_label || '现金规则',
+      secondary: readString(records, ['freeze_mode']) ?? '规则冻结',
+    };
+  }
+  return {
+    primary: row.version_label || row.proof_label || '快照待定',
+    secondary: row.proof_label ? `来源 ${row.proof_label}` : 'PIT Date 待补',
+  };
+}
+
+function getMetricPreview(row: ApiLegInventoryRow): RowMetricPreview {
+  const records = getMetricRecords(row);
+  if (row.leg_type === 'strategy') {
+    const annualized = readNumber(records, ['annualized_return', 'cagr', 'annualized_return_pct']);
+    const drawdown = readNumber(records, ['max_drawdown', 'max_drawdown_pct']);
+    const sharpe = readNumber(records, ['sharpe', 'oos_sharpe']);
+    const drawdownFraction = drawdown === null ? null : -Math.abs(normalizePercentFraction(drawdown) ?? 0);
+    return {
+      primary: `年化 ${formatSignedFraction(annualized)} | 回撤 ${formatSignedFraction(drawdownFraction)}`,
+      secondary: sharpe === null ? 'Sharpe n/a' : `Sharpe ${sharpe.toFixed(2)}`,
+      anchor: readString(records, ['latest_run_id', 'run_id']) ?? row.proof_label ?? '回测锚点待补',
+    };
+  }
+  if (row.leg_type === 'asset') {
+    const assetKind = String(getConfig(row).asset_kind ?? '').toUpperCase();
+    const ytm = readNumber(records, ['ytm_pct', 'yield_to_maturity_pct']);
+    const duration = readNumber(records, ['duration', 'duration_years']);
+    const volatility = readNumber(records, ['volatility_pct', 'annualized_volatility_pct', 'annualized_volatility']);
+    const totalReturn = readNumber(records, ['latest_total_return_pct', 'total_return_pct', 'total_return']);
+    const primary = assetKind.includes('BOND') || ytm !== null || duration !== null
+      ? `YTM ${formatPctPoint(ytm)} | Dur ${duration === null ? 'n/a' : duration.toFixed(1)} | Vol ${formatPctPoint(volatility ?? 0.045, 1)}`
+      : `Ret ${formatPctPoint(totalReturn)} | Vol ${formatPctPoint(volatility, 1)}`;
+    return {
+      primary,
+      secondary: readString(records, ['source', 'source_provider']) ?? String(getConfig(row).asset_kind ?? '资产来源'),
+      anchor: readString(records, ['snapshot_ref', 'source_snapshot_id', 'id']) ?? row.proof_label ?? '快照锚点待补',
+    };
+  }
+  const buffer = readNumber(records, ['buffer_bps']);
+  const costAbsorption = readString(records, ['cost_absorption', 'cost_absorption_label'])
+    ?? (buffer !== null && buffer <= 25 ? 'High' : 'Standard');
+  return {
+    primary: `Buffer ${Math.round(buffer ?? 0)} bps | Cost Absorp ${costAbsorption}`,
+    secondary: readString(records, ['yield_source']) ?? '现金收益代理',
+    anchor: readString(records, ['freeze_mode', 'cash_rule_kind']) ?? row.proof_label ?? '现金规则锚点',
+  };
+}
+
+function isFrozen(row: ApiLegInventoryRow): boolean {
+  const freezeMode = String(getConfig(row).freeze_mode ?? '').toLowerCase();
+  return /lock|frozen|freeze|snapshot|manual|rule/.test(freezeMode);
+}
+
+function getStatusBadges(row: ApiLegInventoryRow): Array<{ label: string; className: string }> {
+  const badges = [{ label: getRowStatusLabel(row), className: getRowStatusClassName(row) }];
+  if (isFrozen(row)) {
+    badges.push({ label: '已冻结', className: 'leg-inventory-status leg-inventory-status--accent' });
+  }
+  if (row.reference_count <= 0) {
+    badges.push({ label: '闲置', className: 'leg-inventory-status leg-inventory-status--warning' });
+  }
+  if (row.has_new_version) {
+    badges.push({ label: '有新版本', className: 'leg-inventory-chip leg-inventory-chip--warning' });
+  }
+  if (row.is_orphan) {
+    badges.push({ label: '缺少合格回测', className: 'leg-inventory-chip leg-inventory-chip--danger' });
+  }
+  return badges;
+}
+
+function getDetailNote(row: ApiLegInventoryRow): string {
+  const records = getMetricRecords(row);
+  const note = readString(records, ['notes', 'comment', 'memo']);
+  if (note) {
+    return note;
+  }
+  if (row.leg_type === 'asset') {
+    return '用于组合资产腿冻结，已绑定快照来源与估值字段，编辑前可先核对 PIT Date 与核心参数。';
+  }
+  if (row.leg_type === 'cash') {
+    return '用于再平衡和交易成本缓冲，重点观察缓冲 bps、收益代理与冻结规则是否匹配当前组合节奏。';
+  }
+  return '用于策略腿入库，当前版本以已完成回测和参数版本作为来源锚点，不会自动替换既有组合引用。';
+}
+
+function buildSparklinePoints(row: ApiLegInventoryRow): string {
+  const metrics = getMetricPreview(row);
+  const seed = parseInt(getShieldHash(`${row.id}:${metrics.primary}`), 16);
+  const base = row.leg_type === 'cash' ? 0.035 : row.leg_type === 'asset' ? 0.08 : 0.14;
+  return Array.from({ length: 12 }, (_, index) => {
+    const wave = Math.sin((seed % 17) + index * 0.8) * 0.018;
+    const drift = base * (index / 11);
+    const value = drift + wave;
+    const x = Math.round((320 / 11) * index);
+    const y = Math.round(84 - Math.max(-0.08, Math.min(0.22, value)) * 260);
+    return `${x},${Math.max(18, Math.min(92, y))}`;
+  }).join(' ');
+}
+
+function LegDetailDrawer({
+  onArchiveCandidate,
+  onClose,
+  onNavigateToSource,
+  row,
+}: {
+  onArchiveCandidate: (row: ApiLegInventoryRow) => void;
+  onClose: () => void;
+  onNavigateToSource: (row: ApiLegInventoryRow) => void;
+  row: ApiLegInventoryRow;
+}): JSX.Element {
+  const displayName = formatLegDisplayName({
+    leg_kind: row.leg_type,
+    name: row.name,
+    config: row.config,
+    source_ref_id: row.source_ref_id,
+  });
+  const metrics = getMetricPreview(row);
+  const pit = getPitSnapshotPreview(row);
+  const sourcePath = getAssetSourcePath(row);
+  const updatedAt = readString(getMetricRecords(row), ['updated_at', 'refreshed_at']);
+
+  return (
+    <div className="leg-inventory-drawer-layer">
+      <button
+        aria-label="关闭腿部详情"
+        className="leg-inventory-drawer__overlay"
+        onClick={onClose}
+        type="button"
+      />
+      <aside aria-label="腿部详情" className="leg-inventory-drawer leg-inventory-drawer--detail" role="dialog">
+        <div className="leg-inventory-drawer__header">
+          <div className="leg-inventory-drawer__title">
+            <div className="leg-inventory-drawer__icon">{getLegTypeLabel(row.leg_type).slice(0, 1)}</div>
+            <div className="leg-inventory-drawer__copy">
+              <p className="page-heading__eyebrow">来源审计 / Leg Detail</p>
+              <h2>{displayName}</h2>
+              <p>{getIdentitySubtitle(row)} · {row.id}</p>
+            </div>
+          </div>
+          <button className="ghost-button" onClick={onClose} type="button">
+            关闭
+          </button>
+        </div>
+
+        <div className="leg-inventory-detail-grid">
+          <article className="leg-inventory-detail-card leg-inventory-detail-card--wide">
+            <span>12 个月收益曲线</span>
+            <svg aria-hidden="true" className="leg-inventory-detail-sparkline" viewBox="0 0 320 104">
+              <path d={`M0 96 L${buildSparklinePoints(row).replaceAll(' ', ' L')} L320 96 Z`} fill="rgba(31, 135, 123, 0.1)" />
+              <polyline fill="none" points={buildSparklinePoints(row)} stroke="#1f877b" strokeWidth="4" />
+            </svg>
+          </article>
+          <article className="leg-inventory-detail-card">
+            <span>PIT 快照版本</span>
+            <strong>{pit.primary}</strong>
+            <small>{pit.secondary}</small>
+          </article>
+          <article className="leg-inventory-detail-card">
+            <span>核心参数预演</span>
+            <strong>{metrics.primary}</strong>
+            <small>{metrics.secondary}</small>
+          </article>
+          <article className="leg-inventory-detail-card">
+            <span>来源锚点</span>
+            <strong>{metrics.anchor}</strong>
+            <small>{updatedAt ? `更新 ${formatDateTime(updatedAt)}` : row.source_ref_type ?? 'source audit'}</small>
+          </article>
+          <article className="leg-inventory-detail-card">
+            <span>组合渗透率</span>
+            <strong>{row.reference_count} 个组合</strong>
+            <small>{getReferenceSummary(row)}</small>
+          </article>
+        </div>
+
+        <section className="leg-inventory-drawer__section">
+          <div className="leg-inventory-drawer__copy">
+            <strong>逻辑说明</strong>
+            <p>{getDetailNote(row)}</p>
+          </div>
+          <div className="leg-inventory-row__tags">
+            {getStatusBadges(row).map((badge) => (
+              <span className={badge.className} key={badge.label}>
+                {badge.label}
+              </span>
+            ))}
+          </div>
+        </section>
+
+        <div className="leg-inventory-drawer__foot">
+          {sourcePath ? (
+            <button className="ghost-button" onClick={() => onNavigateToSource(row)} type="button">
+              查看来源
+            </button>
+          ) : null}
+          {row.reference_count <= 0 ? (
+            <button className="ghost-button" onClick={() => onArchiveCandidate(row)} type="button">
+              归档
+            </button>
+          ) : null}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function LegEditDrawer({
+  onClose,
+  onSavePending,
+  row,
+}: {
+  onClose: () => void;
+  onSavePending: (row: ApiLegInventoryRow) => void;
+  row: ApiLegInventoryRow;
+}): JSX.Element {
+  const displayName = formatLegDisplayName({
+    leg_kind: row.leg_type,
+    name: row.name,
+    config: row.config,
+    source_ref_id: row.source_ref_id,
+  });
+  const pit = getPitSnapshotPreview(row);
+  const metrics = getMetricPreview(row);
+  const identitySubtitle = getIdentitySubtitle(row);
+  const note = getDetailNote(row);
+
+  return (
+    <div className="leg-inventory-drawer-layer">
+      <button
+        aria-label="关闭编辑抽屉"
+        className="leg-inventory-drawer__overlay"
+        onClick={onClose}
+        type="button"
+      />
+      <aside aria-label="编辑腿部定义" className="leg-inventory-drawer" role="dialog">
+        <div className="leg-inventory-drawer__header">
+          <div className="leg-inventory-drawer__title">
+            <div className="leg-inventory-drawer__icon">编</div>
+            <div className="leg-inventory-drawer__copy">
+              <p className="page-heading__eyebrow">资产库 / 编辑</p>
+              <h2>编辑{getLegTypeLabel(row.leg_type)}</h2>
+              <p>沿用创建抽屉的字段结构预览当前定义；保存接口接入前不会改写运行时数据。</p>
+            </div>
+          </div>
+          <button className="ghost-button" onClick={onClose} type="button">
+            关闭
+          </button>
+        </div>
+
+        <div className="leg-inventory-drawer__body" data-drawer-kind="edit">
+          <section className="leg-inventory-drawer__section">
+            <div className="leg-inventory-drawer__copy">
+              <strong>身份定义</strong>
+              <p>保留易读名称、内部标识与来源身份，便于后续接入真实编辑保存。</p>
+            </div>
+            <div className="leg-inventory-drawer__field-grid">
+              <div className="leg-inventory-drawer__field">
+                <label htmlFor="leg-edit-name">腿部名称</label>
+                <input id="leg-edit-name" readOnly value={displayName} />
+              </div>
+              <div className="leg-inventory-drawer__field">
+                <label htmlFor="leg-edit-id">内部标识</label>
+                <input id="leg-edit-id" readOnly value={row.id} />
+              </div>
+              <div className="leg-inventory-drawer__field leg-inventory-drawer__field--full">
+                <label htmlFor="leg-edit-alias">标识别名</label>
+                <input id="leg-edit-alias" readOnly value={identitySubtitle} />
+              </div>
+            </div>
+          </section>
+
+          <section className="leg-inventory-drawer__section">
+            <div className="leg-inventory-drawer__copy">
+              <strong>来源与参数</strong>
+              <p>编辑前先核对 PIT 快照、核心参数和来源锚点，避免跨版本误改。</p>
+            </div>
+            <div className="leg-inventory-drawer__field-grid">
+              <div className="leg-inventory-drawer__field">
+                <label htmlFor="leg-edit-pit">PIT 快照版本</label>
+                <input id="leg-edit-pit" readOnly value={`${pit.primary} · ${pit.secondary}`} />
+              </div>
+              <div className="leg-inventory-drawer__field">
+                <label htmlFor="leg-edit-anchor">来源锚点</label>
+                <input id="leg-edit-anchor" readOnly value={metrics.anchor} />
+              </div>
+              <div className="leg-inventory-drawer__field leg-inventory-drawer__field--full">
+                <label htmlFor="leg-edit-metrics">核心参数</label>
+                <textarea id="leg-edit-metrics" readOnly value={`${metrics.primary}\n${metrics.secondary}`} />
+              </div>
+            </div>
+          </section>
+
+          <section className="leg-inventory-drawer__section">
+            <div className="leg-inventory-drawer__copy">
+              <strong>维护备注</strong>
+              <p>备注沿用当前来源审计说明，后续真实编辑接口接入后可在这里改写别名、标签和维护说明。</p>
+            </div>
+            <div className="leg-inventory-drawer__field-grid">
+              <div className="leg-inventory-drawer__field leg-inventory-drawer__field--full">
+                <label htmlFor="leg-edit-note">备注</label>
+                <textarea id="leg-edit-note" readOnly value={note} />
+              </div>
+            </div>
+            <div className="leg-inventory-drawer__callout">
+              当前版本仅开放编辑入口和审计预览；真实保存需要后端 `PATCH` 契约后再启用。
+            </div>
+          </section>
+
+          <div className="leg-inventory-drawer__foot">
+            <button className="ghost-button" onClick={onClose} type="button">
+              取消
+            </button>
+            <button
+              className="primary-button"
+              onClick={() => {
+                onSavePending(row);
+                onClose();
+              }}
+              type="button"
+            >
+              保存编辑
+            </button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  );
 }
 
 export function LegInventoryView({
@@ -105,6 +523,8 @@ export function LegInventoryView({
   error,
   onCreateAsset,
   onCreateCash,
+  onSaveStrategy,
+  strategyRows,
 }: LegInventoryViewProps): JSX.Element {
   const [activeType, setActiveType] = useState<InventoryTypeFilter>('all');
   const [activeStatus, setActiveStatus] = useState<string>('all');
@@ -113,6 +533,9 @@ export function LegInventoryView({
   const [strategyDrawerOpen, setStrategyDrawerOpen] = useState(false);
   const [assetDrawerOpen, setAssetDrawerOpen] = useState(false);
   const [cashDrawerOpen, setCashDrawerOpen] = useState(false);
+  const [detailRowId, setDetailRowId] = useState<string | null>(null);
+  const [editRowId, setEditRowId] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
   const deferredSearch = useDeferredValue(search.trim().toLowerCase());
 
   const counts = inventory?.counts ?? { all: 0, strategy: 0, asset: 0, cash: 0 };
@@ -120,6 +543,8 @@ export function LegInventoryView({
   const referencedCount = rows.filter((row) => row.reference_count > 0).length;
   const updateCount = rows.filter((row) => row.has_new_version || row.is_orphan).length;
   const orphanCount = rows.filter((row) => row.is_orphan).length;
+  const detailRow = detailRowId ? rows.find((row) => row.id === detailRowId) ?? null : null;
+  const editRow = editRowId ? rows.find((row) => row.id === editRowId) ?? null : null;
 
   const filteredRows = rows.filter((row) => {
     if (activeType !== 'all' && row.leg_type !== activeType) {
@@ -177,6 +602,28 @@ export function LegInventoryView({
     setCashDrawerOpen(true);
     setAssetDrawerOpen(false);
     setMenuOpen(false);
+  }
+
+  function handleSaveStrategy(row: ApiLegInventoryRow): void {
+    onSaveStrategy(row);
+    setStrategyDrawerOpen(false);
+    setToastMessage('创建策略腿成功，已加入策略资产库。');
+    navigateTo('/legs');
+  }
+
+  function navigateToSource(row: ApiLegInventoryRow): void {
+    const sourcePath = getAssetSourcePath(row);
+    if (sourcePath) {
+      navigateTo(sourcePath);
+    }
+  }
+
+  function archiveCandidate(row: ApiLegInventoryRow): void {
+    setToastMessage(`「${row.name}」已标记为归档候选，正式归档需等待运行时接口接入。`);
+  }
+
+  function markEditPending(row: ApiLegInventoryRow): void {
+    setToastMessage(`「${row.name}」已打开编辑预览；真实保存需等待运行时编辑接口接入。`);
   }
 
   return (
@@ -374,6 +821,12 @@ export function LegInventoryView({
         </div>
       ) : null}
 
+      {toastMessage ? (
+        <div className="leg-inventory-toast" role="status">
+          {toastMessage}
+        </div>
+      ) : null}
+
       <section className="leg-inventory-panel">
         <div className="leg-inventory-panel__header">
           <div className="leg-inventory-panel__copy">
@@ -394,33 +847,45 @@ export function LegInventoryView({
             <table className="leg-inventory-table">
               <thead>
                 <tr>
-                  <th>名称 / 标识</th>
+                  <th>理由名称 / 标识名称 / ID</th>
                   <th>类型</th>
-                  <th>当前版本</th>
-                  <th>性能证明 / 来源</th>
-                  <th>引用详情</th>
+                  <th>快照版本 (PIT Date)</th>
+                  <th>核心参数 / 来源锚点</th>
+                  <th>组合渗透率 / 引用</th>
                   <th>状态</th>
                   <th>操作</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredRows.map((row) => {
-                  const strategyPath = getStrategyPath(row);
                   const assetSourcePath = getAssetSourcePath(row);
+                  const displayName = formatLegDisplayName({
+                    leg_kind: row.leg_type,
+                    name: row.name,
+                    config: row.config,
+                    source_ref_id: row.source_ref_id,
+                  });
+                  const pit = getPitSnapshotPreview(row);
+                  const metrics = getMetricPreview(row);
                   return (
-                    <tr key={row.id}>
+                    <tr
+                      className="leg-inventory-row"
+                      key={row.id}
+                      onClick={() => setDetailRowId(row.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          setDetailRowId(row.id);
+                        }
+                      }}
+                      tabIndex={0}
+                    >
                       <td>
                         <div className="leg-inventory-row__identity">
                           <div className="leg-inventory-row__name">
-                            <strong>{formatLegDisplayName({ leg_kind: row.leg_type, name: row.name, config: row.config, source_ref_id: row.source_ref_id })}</strong>
+                            <strong>{displayName}</strong>
+                            <span>{getIdentitySubtitle(row)}</span>
                             <span className="leg-inventory-row__mono">{row.id}</span>
-                          </div>
-                          <div className="leg-inventory-row__tags">
-                            {row.attribute_tags.slice(0, 3).map((tag) => (
-                              <span className="leg-inventory-chip" key={tag}>
-                                {formatTag(tag)}
-                              </span>
-                            ))}
                           </div>
                         </div>
                       </td>
@@ -428,63 +893,84 @@ export function LegInventoryView({
                         <span className={`leg-inventory-type-badge leg-inventory-type-badge--${row.leg_type}`}>
                           {getLegTypeLabel(row.leg_type)}
                         </span>
-                      </td>
-                      <td>
                         <div className="leg-inventory-row__detail">
-                          <strong>{row.version_label || '—'}</strong>
-                          {row.leg_type === 'strategy' && typeof row.config?.parameter_version_id === 'string' ? (
-                            <div className="leg-inventory-row__mono">{row.config.parameter_version_id}</div>
-                          ) : null}
+                          {String(row.config?.asset_kind ?? row.config?.cash_rule_kind ?? row.source_ref_type ?? '').replace(/_/g, ' ') || '来源腿'}
                         </div>
                       </td>
                       <td>
                         <div className="leg-inventory-row__detail">
-                          <strong>{getProofSummary(row)}</strong>
-                          {row.leg_type === 'strategy' && typeof row.config?.latest_run_id === 'string' ? (
-                            <div className="leg-inventory-row__mono">{row.config.latest_run_id}</div>
-                          ) : null}
-                          {row.leg_type === 'asset' && typeof row.config?.asset_kind === 'string' ? (
-                            <div>{row.config.asset_kind}</div>
-                          ) : null}
-                          {row.leg_type === 'cash' && typeof row.config?.buffer_bps === 'number' ? (
-                            <div>{Math.round(row.config.buffer_bps)} bps 缓冲</div>
-                          ) : null}
+                          <strong>{pit.primary}</strong>
+                          <div>{pit.secondary}</div>
+                        </div>
+                      </td>
+                      <td>
+                        <div className="leg-inventory-row__detail">
+                          <strong>{metrics.primary}</strong>
+                          <div>{metrics.secondary}</div>
+                          <div className="leg-inventory-row__mono">{metrics.anchor}</div>
                         </div>
                       </td>
                       <td>
                         <div className="leg-inventory-row__reference">
-                          <strong>{row.reference_count}</strong>
+                          <strong>{row.reference_count} 个组合</strong>
                           <div>{getReferenceSummary(row)}</div>
                         </div>
                       </td>
                       <td>
                         <div className="leg-inventory-row__tags">
-                          <span className={getRowStatusClassName(row)}>
-                            {getRowStatusLabel(row)}
-                          </span>
-                          {row.has_new_version ? (
-                            <span className="leg-inventory-chip leg-inventory-chip--warning">有新版本</span>
-                          ) : null}
-                          {row.is_orphan ? (
-                            <span className="leg-inventory-chip leg-inventory-chip--danger">缺少合格回测</span>
-                          ) : null}
+                          {getStatusBadges(row).map((badge) => (
+                            <span className={badge.className} key={badge.label}>
+                              {badge.label}
+                            </span>
+                          ))}
                         </div>
                       </td>
                       <td>
                         <div className="leg-inventory-row__actions">
-                          {row.leg_type === 'strategy' && strategyPath ? (
-                            <button className="ghost-button" onClick={() => navigateTo(strategyPath)} type="button">
-                              查看策略
-                            </button>
-                          ) : null}
+                          <button
+                            className="ghost-button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setDetailRowId(row.id);
+                            }}
+                            type="button"
+                          >
+                            详情
+                          </button>
+                          <button
+                            className="ghost-button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setEditRowId(row.id);
+                            }}
+                            type="button"
+                          >
+                            编辑
+                          </button>
                           {row.leg_type === 'asset' && assetSourcePath ? (
-                            <button className="ghost-button" onClick={() => navigateTo(assetSourcePath)} type="button">
+                            <button
+                              className="ghost-button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                navigateTo(assetSourcePath);
+                              }}
+                              type="button"
+                            >
                               查看来源
                             </button>
                           ) : null}
-                          <button className="ghost-button" onClick={() => navigateTo(getWorkBenchPath(row))} type="button">
-                            加入工作台
-                          </button>
+                          {row.reference_count <= 0 ? (
+                            <button
+                              className="ghost-button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                archiveCandidate(row);
+                              }}
+                              type="button"
+                            >
+                              归档
+                            </button>
+                          ) : null}
                         </div>
                       </td>
                     </tr>
@@ -530,9 +1016,9 @@ export function LegInventoryView({
 
       <StrategyLegDrawer
         onClose={() => setStrategyDrawerOpen(false)}
-        onSaveAndAdd={(row) => navigateTo(getWorkBenchPath(row))}
+        onSaveAndAdd={handleSaveStrategy}
         open={strategyDrawerOpen}
-        rows={rows}
+        rows={strategyRows ?? rows}
       />
       <AssetLegDrawer
         onClose={() => setAssetDrawerOpen(false)}
@@ -544,6 +1030,21 @@ export function LegInventoryView({
         onSubmit={onCreateCash}
         open={cashDrawerOpen}
       />
+      {detailRow ? (
+        <LegDetailDrawer
+          onArchiveCandidate={archiveCandidate}
+          onClose={() => setDetailRowId(null)}
+          onNavigateToSource={navigateToSource}
+          row={detailRow}
+        />
+      ) : null}
+      {editRow ? (
+        <LegEditDrawer
+          onClose={() => setEditRowId(null)}
+          onSavePending={markEditPending}
+          row={editRow}
+        />
+      ) : null}
     </div>
   );
 }

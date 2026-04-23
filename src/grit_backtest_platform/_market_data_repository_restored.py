@@ -170,6 +170,42 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS bond_fixed_income_snapshots (
+            id TEXT PRIMARY KEY,
+            instrument_id TEXT NOT NULL,
+            symbol TEXT NOT NULL DEFAULT '',
+            isin TEXT,
+            cusip TEXT,
+            name TEXT NOT NULL DEFAULT '',
+            instrument_type TEXT NOT NULL DEFAULT 'bond',
+            currency TEXT NOT NULL DEFAULT 'USD',
+            snapshot_date TEXT NOT NULL,
+            maturity_date TEXT,
+            coupon_rate_pct REAL,
+            clean_price REAL,
+            net_price REAL,
+            dirty_price REAL,
+            full_price REAL,
+            accrued_interest REAL,
+            ytm_pct REAL,
+            duration REAL,
+            convexity REAL,
+            source TEXT NOT NULL DEFAULT '',
+            source_snapshot_id TEXT,
+            refresh_status TEXT NOT NULL DEFAULT 'STALE',
+            missing_fields_json TEXT NOT NULL DEFAULT '[]',
+            inferred_fields_json TEXT NOT NULL DEFAULT '{}',
+            raw_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            refreshed_at TEXT,
+            deleted_at TEXT,
+            deleted_reason TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS universe_membership_snapshots (
             universe_snapshot_id TEXT NOT NULL,
             effective_date TEXT NOT NULL,
@@ -214,6 +250,25 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_dataset_actions_symbol_date ON dataset_corporate_actions(symbol, event_date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_bond_fixed_income_instrument_date ON bond_fixed_income_snapshots(instrument_id, snapshot_date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_bond_fixed_income_source_status ON bond_fixed_income_snapshots(source, refresh_status, deleted_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_bond_fixed_income_symbol_date ON bond_fixed_income_snapshots(symbol, snapshot_date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_bond_fixed_income_identifiers ON bond_fixed_income_snapshots(isin, cusip)"
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_bond_fixed_income_active_natural_key
+        ON bond_fixed_income_snapshots(instrument_id, snapshot_date, source)
+        WHERE deleted_at IS NULL
+        """
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_universe_membership_effective ON universe_membership_snapshots(effective_date, symbol)"
@@ -864,6 +919,7 @@ class MarketDataRepository:
             "dataset_price_bars",
             "dataset_corporate_actions",
             "dataset_symbol_coverage",
+            "bond_fixed_income_snapshots",
             "universe_membership_snapshots",
         ]
         with self.connect() as conn:
@@ -877,6 +933,189 @@ class MarketDataRepository:
         target_column = "metadata" if json_column == "metadata_json" else "payload"
         row[target_column] = payload
         return row
+
+    def _decode_bond_fixed_income_snapshot_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        decoded = dict(row)
+        missing_fields = loads(decoded.pop("missing_fields_json", None), [])
+        inferred_fields = loads(decoded.pop("inferred_fields_json", None), {})
+        raw_payload = loads(decoded.pop("raw_json", None), {})
+        decoded["missing_fields"] = missing_fields if isinstance(missing_fields, list) else []
+        decoded["inferred_fields"] = inferred_fields if isinstance(inferred_fields, Mapping) else {}
+        decoded["raw"] = raw_payload if isinstance(raw_payload, Mapping) else {}
+        return decoded
+
+    def upsert_bond_fixed_income_snapshot(self, snapshot: Mapping[str, Any]) -> str:
+        instrument_id = str(
+            snapshot.get("instrument_id")
+            or snapshot.get("id")
+            or snapshot.get("symbol")
+            or snapshot.get("isin")
+            or snapshot.get("cusip")
+            or ""
+        ).strip()
+        if not instrument_id:
+            raise ValueError("instrument_id is required for bond fixed-income snapshots")
+        snapshot_date = str(snapshot.get("snapshot_date") or snapshot.get("as_of") or "").strip()
+        if not snapshot_date:
+            raise ValueError("snapshot_date is required for bond fixed-income snapshots")
+        source = str(snapshot.get("source") or snapshot.get("provider") or "manual").strip()
+        snapshot_id = str(
+            snapshot.get("id")
+            or snapshot.get("source_snapshot_id")
+            or f"bond_fixed_income::{instrument_id}::{snapshot_date}::{source}"
+        ).strip()
+        now = str(snapshot.get("updated_at") or iso_now())
+        created_at = str(snapshot.get("created_at") or now)
+        refreshed_at = snapshot.get("refreshed_at") or now
+        missing_fields = snapshot.get("missing_fields")
+        if missing_fields is None:
+            missing_fields = snapshot.get("missing_fields_json")
+        inferred_fields = snapshot.get("inferred_fields")
+        if inferred_fields is None:
+            inferred_fields = snapshot.get("inferred_fields_json")
+        raw_payload = snapshot.get("raw")
+        if raw_payload is None:
+            raw_payload = snapshot.get("raw_json")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO bond_fixed_income_snapshots (
+                    id,
+                    instrument_id,
+                    symbol,
+                    isin,
+                    cusip,
+                    name,
+                    instrument_type,
+                    currency,
+                    snapshot_date,
+                    maturity_date,
+                    coupon_rate_pct,
+                    clean_price,
+                    net_price,
+                    dirty_price,
+                    full_price,
+                    accrued_interest,
+                    ytm_pct,
+                    duration,
+                    convexity,
+                    source,
+                    source_snapshot_id,
+                    refresh_status,
+                    missing_fields_json,
+                    inferred_fields_json,
+                    raw_json,
+                    created_at,
+                    updated_at,
+                    refreshed_at,
+                    deleted_at,
+                    deleted_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    instrument_id = excluded.instrument_id,
+                    symbol = excluded.symbol,
+                    isin = excluded.isin,
+                    cusip = excluded.cusip,
+                    name = excluded.name,
+                    instrument_type = excluded.instrument_type,
+                    currency = excluded.currency,
+                    snapshot_date = excluded.snapshot_date,
+                    maturity_date = excluded.maturity_date,
+                    coupon_rate_pct = excluded.coupon_rate_pct,
+                    clean_price = excluded.clean_price,
+                    net_price = excluded.net_price,
+                    dirty_price = excluded.dirty_price,
+                    full_price = excluded.full_price,
+                    accrued_interest = excluded.accrued_interest,
+                    ytm_pct = excluded.ytm_pct,
+                    duration = excluded.duration,
+                    convexity = excluded.convexity,
+                    source = excluded.source,
+                    source_snapshot_id = excluded.source_snapshot_id,
+                    refresh_status = excluded.refresh_status,
+                    missing_fields_json = excluded.missing_fields_json,
+                    inferred_fields_json = excluded.inferred_fields_json,
+                    raw_json = excluded.raw_json,
+                    updated_at = excluded.updated_at,
+                    refreshed_at = excluded.refreshed_at,
+                    deleted_at = excluded.deleted_at,
+                    deleted_reason = excluded.deleted_reason
+                """,
+                (
+                    snapshot_id,
+                    instrument_id,
+                    self._normalize_symbol(str(snapshot.get("symbol") or "")) if snapshot.get("symbol") else "",
+                    snapshot.get("isin"),
+                    snapshot.get("cusip"),
+                    str(snapshot.get("name") or snapshot.get("label") or instrument_id),
+                    str(snapshot.get("instrument_type") or "bond"),
+                    str(snapshot.get("currency") or "USD").upper(),
+                    snapshot_date,
+                    snapshot.get("maturity_date"),
+                    snapshot.get("coupon_rate_pct"),
+                    snapshot.get("clean_price"),
+                    snapshot.get("net_price"),
+                    snapshot.get("dirty_price"),
+                    snapshot.get("full_price"),
+                    snapshot.get("accrued_interest"),
+                    snapshot.get("ytm_pct"),
+                    snapshot.get("duration"),
+                    snapshot.get("convexity"),
+                    source,
+                    str(snapshot.get("source_snapshot_id") or snapshot_id),
+                    str(snapshot.get("refresh_status") or "STALE").upper(),
+                    dumps(missing_fields if isinstance(missing_fields, list) else []),
+                    dumps(_ensure_json_dict(inferred_fields)),
+                    dumps(_ensure_json_dict(raw_payload)),
+                    created_at,
+                    now,
+                    refreshed_at,
+                    snapshot.get("deleted_at"),
+                    snapshot.get("deleted_reason"),
+                ),
+            )
+        return snapshot_id
+
+    def list_bond_fixed_income_snapshots(self, *, include_deleted: bool = False) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM bond_fixed_income_snapshots"
+        if not include_deleted:
+            sql += " WHERE deleted_at IS NULL"
+        sql += " ORDER BY snapshot_date DESC, updated_at DESC, instrument_id ASC"
+        with self.connect() as conn:
+            rows = conn.execute(sql).fetchall()
+        return [self._decode_bond_fixed_income_snapshot_row(row) for row in rows]
+
+    def get_bond_fixed_income_snapshot(self, snapshot_ref: str) -> dict[str, Any] | None:
+        normalized_ref = str(snapshot_ref or "").strip()
+        if not normalized_ref:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM bond_fixed_income_snapshots
+                WHERE deleted_at IS NULL
+                  AND (
+                    id = ?
+                    OR source_snapshot_id = ?
+                    OR instrument_id = ?
+                    OR symbol = ?
+                    OR isin = ?
+                    OR cusip = ?
+                  )
+                ORDER BY snapshot_date DESC, updated_at DESC
+                LIMIT 1
+                """,
+                (
+                    normalized_ref,
+                    normalized_ref,
+                    normalized_ref,
+                    self._normalize_symbol(normalized_ref),
+                    normalized_ref,
+                    normalized_ref,
+                ),
+            ).fetchone()
+        return self._decode_bond_fixed_income_snapshot_row(row) if row else None
 
     def load_bars(
         self,

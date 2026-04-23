@@ -18,16 +18,22 @@ from ._version import __version__
 from .fallback_provider import ProviderExecutionSignal, provider_access_tier
 from .models import (
     AssetLegCreateRequest,
+    AssetLegResponseModel,
     BacktestRunCloneRequest,
     BacktestRunCreateRequest,
     BacktestRunPreviewRequest,
     CashLegCreateRequest,
+    CashLegResponseModel,
     CompositionCreateRequest,
+    CompositionDetailResponseModel,
+    CompositionListItemModel,
     CompositionPreviewRequest,
+    CompositionPreviewResponseModel,
     CompositionUpdateRequest,
     ConfirmationUpdateRequest,
     CreateCreationSessionRequest,
     CreationMessageCreate,
+    LegInventoryResponseModel,
     MaterializeRequest,
     OptimizationCandidateCreateRequest,
     OptimizationJobConstraintUpdateRequest,
@@ -1059,35 +1065,35 @@ def create_app(
     def clone_backtest_run(run_id: str, payload: BacktestRunCloneRequest):
         return invoke(service.clone_backtest_run, run_id, payload)
 
-    @app.get('/leg-inventory')
+    @app.get('/leg-inventory', response_model=LegInventoryResponseModel)
     def leg_inventory():
         return invoke(service.list_leg_inventory)
 
-    @app.post('/asset-legs')
+    @app.post('/asset-legs', response_model=AssetLegResponseModel)
     def create_asset_leg(payload: AssetLegCreateRequest):
         return invoke(service.create_asset_leg, payload)
 
-    @app.post('/cash-legs')
+    @app.post('/cash-legs', response_model=CashLegResponseModel)
     def create_cash_leg(payload: CashLegCreateRequest):
         return invoke(service.create_cash_leg, payload)
 
-    @app.get('/compositions')
+    @app.get('/compositions', response_model=list[CompositionListItemModel])
     def list_compositions():
         return invoke(service.list_compositions)
 
-    @app.get('/compositions/{composition_id}')
+    @app.get('/compositions/{composition_id}', response_model=CompositionDetailResponseModel)
     def composition_detail(composition_id: str):
         return invoke(service.get_composition_detail, composition_id)
 
-    @app.post('/compositions/preview')
+    @app.post('/compositions/preview', response_model=CompositionPreviewResponseModel)
     def preview_composition(payload: CompositionPreviewRequest):
         return invoke(service.preview_composition, payload)
 
-    @app.post('/compositions')
+    @app.post('/compositions', response_model=CompositionDetailResponseModel)
     def create_composition(payload: CompositionCreateRequest):
         return invoke(service.create_composition, payload)
 
-    @app.patch('/compositions/{composition_id}')
+    @app.patch('/compositions/{composition_id}', response_model=CompositionDetailResponseModel)
     def update_composition(composition_id: str, payload: CompositionUpdateRequest):
         return invoke(service.update_composition, composition_id, payload)
 

@@ -47,6 +47,7 @@ This repository is a local-first strategy research and backtest workbench. Treat
 - Node `18+` and Python `3.13+` are safe assumptions; `pyproject.toml` currently requires `>=3.12`.
 - For frontend iteration, prefer the dev server or the QuickStart flow over production preview/build loops unless the task explicitly needs build verification.
 - Do not rename restored or rebuilt module files just to normalize naming. The indirection is intentional and part of the recovery architecture.
+- Project docs are the first-stop memory surface. Use this file for promoted agent behavior and `ARCHITECTURE.md` for promoted system facts, data flows, troubleshooting steps, regression test locations, and validation commands without using external memory lookup.
 
 ## Testing instructions
 
@@ -62,6 +63,17 @@ This repository is a local-first strategy research and backtest workbench. Treat
 - The frontend fixed script always emits a `tsc --noEmit` report to `harness/reports/smoke/latest-frontend-global-types.txt`, even when type failures are not blocking.
 - If you change API payloads or response shapes, update both backend and frontend contract mirrors and rerun the relevant fixed slices.
 
+## Promoted Memory Quick Checks
+
+- If `http://127.0.0.1:4173` returns `Frontend build not ready yet.`, inspect the process listening on port `4173` before changing application code. The healthy QuickStart path launches `web/preview-server.mjs` with `--watch --rebuild-on-start`; `web/package.json` `preview:auto` is the known-good baseline. A listener command line like `node ./preview-server.mjs --watch --rebuild-on-start` is repo-local preview even when it lacks an absolute repo path.
+- If a user reports a live page under `http://127.0.0.1:4173`, treat the active localhost listeners as the acceptance target. Before claiming delivery, confirm the `8000` backend and `4173` preview processes were started after the final code, rebuild `web/dist` when serving preview, and verify the reported route with real browser/API checks instead of relying only on fixed slices or mocked tests.
+- Before restarting localhost for a user-reported data regression, verify the active `GRIT_BACKTEST_DB` and companion market-data DB are the intended runtime databases. If root `.grit_backtest_platform.sqlite3` is unexpectedly empty while a richer runtime copy exists under `.tmp/`, back up both root databases before restoring or repointing; do not let a restart against a fresh empty DB look like deleted workspace history.
+- When verifying a rebuilt SPA on `4173`, force a document reload rather than only changing the hash route. Use a cache-busting URL such as `http://127.0.0.1:4173/?v=<timestamp>#/snapshots`, because `#/...` navigation alone can keep the old JavaScript bundle alive in the browser.
+- Snapshot stock and bond tabs must preserve the approved Compose First information architecture while rendering live runtime rows. Stock uses global view, workstation + diagnostics, and raw list + readiness two-column sections; bond must stay attached to the shared snapshots header density with no fixed large spacer, while keeping global health cards, three-column workstation, asset-leg creation rail, audit matrix, and raw registry/scheduler sections. Bond source rows and the asset-leg creation rail must stay linked to the selected runtime instrument. Do not “fix” a drift by swapping back to static approved rows, and do not replace the approved structure with raw runtime table labels.
+- If `#/legs` “创建策略腿” reports no eligible versions while completed backtests exist, check whether the drawer is building one candidate from the latest completed run per strategy plus strategy metadata, rather than relying only on default `/leg-inventory` rows or slicing the list to three. The right validation summary should bind to the selected candidate metrics.
+- Optimization Results regressions usually belong in `web/src/optimization.module.test.tsx`. Reuse that file for results-center row selection, constraint refiltering, candidate labels, shelf copy, and localization guards.
+- If an optimization promotion or selection path reports `Optimization candidate not found: trial_*`, first check whether the UI used transient trial ids from a filtered subset instead of the persisted/full matching-combination candidate identity.
+
 ## Working rules for agents
 
 - Preserve existing uncommitted user changes. The worktree is already dirty.
@@ -70,7 +82,7 @@ This repository is a local-first strategy research and backtest workbench. Treat
 - If you touch UI routing or shared shell behavior, stay inside the established runtime boundaries instead of creating a second routing layer.
 - For UI fixes against an approved HTML/SPEC, do not close on class-name or existence assertions alone. Record a small trace matrix from design requirement to selector/file, and verify spacing, scrolling, sticky positioning, charts, colors, and responsive states with either browser screenshots/DOM geometry evidence or CSS contract tests.
 - Add or update tests for the code you change, especially around optimization jobs, candidate materialization, snapshots, and workspace projections.
-- For non-trivial work, recall durable memory before repeating repo-specific decisions; after verified reusable outcomes, record a short durable memory summary or explicitly note why memory was skipped.
+- For non-trivial work, read promoted project memory first: this `AGENTS.md` for workflow rules and `ARCHITECTURE.md` for system facts, data flows, troubleshooting steps, regression tests, and validation commands.
 - Update `TECHNICAL.md` when repo-specific workflow, validation commands, or truth sources change.
 - Update `ARCHITECTURE.md` when storage layout, recovery mapping, snapshot data plane, or runtime ownership changes.
 - Keep `CHANGELOG.md` in Keep a Changelog format with `## [Unreleased]` at the top.
@@ -88,21 +100,3 @@ This repository is a local-first strategy research and backtest workbench. Treat
 - Backend tests: `tests/`
 - Harness tasks and reports: `harness/`
 - Acceptance note: `harness/acceptance/create-backtest-optimize.md`
-
-<!-- cam:codex-agents-guidance:start -->
-## Codex Auto Memory
-
-<!-- cam:agents-guidance-version codex-agents-guidance-v1 -->
-- Before repeating prior work or repo-specific decisions, recall durable memory first.
-- Use progressive disclosure: search -> timeline -> details.
-- Prefer retrieval MCP when it is already wired in: search_memories -> timeline_memories -> get_memory_details.
-- When using search_memories, pass state: "auto" and limit: 8.
-- If the retrieval MCP server is unavailable and the local bridge bundle is installed, fall back to `memory-recall.sh search "<query>"`, then `memory-recall.sh timeline "<ref>"`, then `memory-recall.sh details "<ref>"`.
-- If the local bridge bundle is unavailable, fall back to `cam recall search "<query>" --state auto --limit 8`, then `cam recall timeline "<ref>"`, then `cam recall details "<ref>"`.
-- After finishing work that should affect durable memory, run `cam sync` or review `cam memory --recent` instead of assuming temporary continuity already updated Markdown memory.
-- Use cam memory for inspect/audit surfaces and startup payload review.
-- Use cam session only for temporary continuity, not durable memory retrieval.
-- Treat archived memory as historical context that does not participate in default startup recall.
-- When the local bridge bundle is installed, `post-work-memory-review.sh` combines `cam sync` with `cam memory --recent`.
-- Hook assets in this repository are local bridge and fallback helpers, not an official Codex hook surface.
-<!-- cam:codex-agents-guidance:end -->

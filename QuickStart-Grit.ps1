@@ -493,6 +493,57 @@ function Get-ProcessCommandLineSafely {
     }
 }
 
+function Test-RepoFrontendPreviewProcess {
+    param(
+        [AllowNull()][string]$ProcessPath,
+        [AllowNull()][string]$CommandLine,
+        [int]$Port = 4173
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return $false
+    }
+
+    foreach ($repoPath in @($repoRoot, $frontendDir, $frontendPreviewScript)) {
+        if (
+            -not [string]::IsNullOrWhiteSpace($repoPath) -and
+            $CommandLine.IndexOf($repoPath, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        ) {
+            return $true
+        }
+    }
+
+    $processName = if (-not [string]::IsNullOrWhiteSpace($ProcessPath)) {
+        [System.IO.Path]::GetFileName($ProcessPath)
+    } else {
+        ''
+    }
+    $looksLikeNode =
+        $processName -in @('node.exe', 'node') -or
+        $CommandLine -match '(?i)(^|\s|")node(\.exe)?("|\s|$)'
+    if (-not $looksLikeNode) {
+        return $false
+    }
+
+    # `npm run preview:auto` and older launcher windows can expose only a relative script path.
+    $normalizedCommandLine = $CommandLine.Replace('/', '\')
+    $hasRelativePreviewScript =
+        $normalizedCommandLine.IndexOf('.\preview-server.mjs', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $CommandLine -match '(?i)(^|\s|")preview-server\.mjs(?=\s|"|$)'
+    if (-not $hasRelativePreviewScript) {
+        return $false
+    }
+
+    $hasWatch = $CommandLine.IndexOf('--watch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    $hasRebuildOnStart = $CommandLine.IndexOf('--rebuild-on-start', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    $escapedPort = [regex]::Escape([string]$Port)
+    $hasExpectedPort = $CommandLine -match "(?i)(^|\s)--port(\s+|=)$escapedPort(\s|$)"
+    $hasAnyPort = $CommandLine -match '(?i)(^|\s)--port(\s+|=)\d+(\s|$)'
+    $usesDefaultPreviewPort = $Port -eq 4173 -and -not $hasAnyPort
+
+    return $hasWatch -and $hasRebuildOnStart -and ($hasExpectedPort -or $usesDefaultPreviewPort)
+}
+
 function Stop-UnhealthyBackendListeners {
     param([int]$Port = 8000)
 
@@ -537,10 +588,7 @@ function Stop-StaleFrontendListeners {
     foreach ($listenerId in $listenerIds) {
         $processPath = Get-ProcessPathSafely -ProcessId $listenerId
         $commandLine = Get-ProcessCommandLineSafely -ProcessId $listenerId
-        $belongsToRepo =
-            ($commandLine -and $commandLine.IndexOf($repoRoot, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
-            ($commandLine -and $commandLine.IndexOf($frontendDir, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
-            ($commandLine -and $commandLine.IndexOf($frontendPreviewScript, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+        $belongsToRepo = Test-RepoFrontendPreviewProcess -ProcessPath $processPath -CommandLine $commandLine -Port $Port
 
         if ($belongsToRepo) {
             Write-Host "Stopping stale frontend listener on port $Port (PID $listenerId)." -ForegroundColor Yellow

@@ -1,14 +1,16 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CompositionDetailPage } from './pages/composition-detail-page';
 import type { ApiCompositionDetail } from './types';
 
 type FakeApi = {
   getCompositionDetail?: ReturnType<typeof vi.fn>;
+  updateComposition?: ReturnType<typeof vi.fn>;
 };
 
 const fakeApi = vi.hoisted<FakeApi>(() => ({
   getCompositionDetail: vi.fn(),
+  updateComposition: vi.fn(),
 }));
 
 vi.mock('./lib/demoStoreContext', () => ({
@@ -209,6 +211,16 @@ const detail: ApiCompositionDetail = {
 
 beforeEach(() => {
   fakeApi.getCompositionDetail = vi.fn().mockResolvedValue(detail);
+  fakeApi.updateComposition = vi.fn().mockResolvedValue({
+    ...detail,
+    status: 'ARCHIVED',
+    status_label: 'Archived',
+    hero_summary: {
+      ...detail.hero_summary,
+      status: 'ARCHIVED',
+      status_label: 'Archived',
+    },
+  });
 });
 
 afterEach(() => {
@@ -217,7 +229,25 @@ afterEach(() => {
 });
 
 describe('composition detail page', () => {
-  it('renders the approved preview for the public detail route alias', async () => {
+  it('writes detail status changes through PATCH without leaving the page', async () => {
+    await act(async () => {
+      render(<CompositionDetailPage compositionId="comp-001" />);
+    });
+
+    const archiveButton = await screen.findByRole('button', { name: 'Archive' });
+    await act(async () => {
+      fireEvent.click(archiveButton);
+    });
+
+    await waitFor(() =>
+      expect(fakeApi.updateComposition).toHaveBeenCalledWith('comp-001', { status: 'ARCHIVED' }),
+    );
+    expect(
+      document.querySelector('.composition-detail-page[data-route-root="compositions"][data-page-root="composition-detail"]'),
+    ).not.toBeNull();
+  });
+
+  it('renders the approved preview only when the component is explicitly placed in preview mode', async () => {
     fakeApi.getCompositionDetail = vi.fn().mockRejectedValue(new Error('Composition not found: detail'));
 
     await act(async () => {

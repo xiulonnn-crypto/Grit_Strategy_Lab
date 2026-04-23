@@ -1186,6 +1186,46 @@ export type ApiBondSnapshotRegistryItem = {
   notes: string[];
 };
 
+export type ApiBondSnapshotEligibleSource = {
+  id: string;
+  label: string;
+  source: string;
+  status: string;
+  access_tier?: string;
+  instrument_types: string[];
+  coverage_notes: string[];
+  updated_at?: string | null;
+};
+
+export type ApiBondSnapshotEligibleInstrument = {
+  id: string;
+  label: string;
+  instrument_type: string;
+  source: string;
+  status: string;
+  symbol?: string | null;
+  isin?: string | null;
+  cusip?: string | null;
+  currency?: string | null;
+  snapshot_date?: string | null;
+  maturity_date?: string | null;
+  coupon_rate_pct?: number | null;
+  clean_price?: number | null;
+  net_price?: number | null;
+  dirty_price?: number | null;
+  full_price?: number | null;
+  accrued_interest?: number | null;
+  ytm_pct?: number | null;
+  duration?: number | null;
+  convexity?: number | null;
+  snapshot_ref?: string | null;
+  refresh_status?: string | null;
+  missing_fields: string[];
+  inferred_fields: Record<string, unknown>;
+  field_status: Record<string, string>;
+  updated_at?: string | null;
+};
+
 export type ApiBondSnapshotScheduler = {
   status: string;
   cadence_label: string;
@@ -1218,6 +1258,8 @@ export type ApiBondFixedIncomeOverview = {
   curve_preview: ApiBondSnapshotCurvePoint[];
   audit_matrix: ApiBondSnapshotAuditRow[];
   raw_registry: ApiBondSnapshotRegistryItem[];
+  eligible_sources: ApiBondSnapshotEligibleSource[];
+  eligible_instruments: ApiBondSnapshotEligibleInstrument[];
   scheduler: ApiBondSnapshotScheduler;
   selected_source_summary: ApiBondSnapshotSourceSummary;
   system_diagnostics: ApiBondSnapshotSystemDiagnostics;

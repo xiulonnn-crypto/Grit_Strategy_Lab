@@ -181,6 +181,9 @@ function buildAssetLegRows(): ApiLegInventoryRow[] {
         symbol: leg.symbol,
         asset_kind: leg.asset_kind,
         freeze_mode: leg.freeze_mode,
+        source_snapshot_id: leg.source_snapshot_id,
+        source_provider: leg.source_provider ?? null,
+        summary: leg.summary ?? {},
       },
     } satisfies ApiLegInventoryRow;
   });
@@ -207,14 +210,17 @@ function buildCashLegRows(): ApiLegInventoryRow[] {
       source_ref_type: 'cash_definition',
       config: {
         buffer_bps: leg.buffer_bps,
+        cash_rule_kind: leg.cash_rule_kind,
+        yield_source: leg.yield_source ?? null,
         freeze_mode: leg.freeze_mode,
+        summary: leg.summary ?? {},
       },
     } satisfies ApiLegInventoryRow;
   });
 }
 
 function buildLegInventory(): ApiLegInventory {
-  const rows = [...buildStrategyLegRows(), ...buildAssetLegRows(), ...buildCashLegRows()];
+  const rows = [...buildAssetLegRows(), ...buildCashLegRows()];
   const counts = {
     all: rows.length,
     strategy: rows.filter((row) => row.leg_type === 'strategy').length,
@@ -550,6 +556,51 @@ function buildBondFixedIncomeOverview(
       { id: 'registry-ust10y', label: 'UST10Y 日终快照', status: 'READY', source: 'FMP', snapshot_ref: 'bond-ust-10y', updated_at: base.last_refreshed_at ?? null, notes: ['可镜像生成资产腿'] },
       { id: 'registry-tips10y', label: '10Y TIPS 日终快照', status: 'READY', source: 'Polygon', snapshot_ref: 'bond-tips-10y', updated_at: base.last_refreshed_at ?? null, notes: ['Real Yield 已就绪'] },
       { id: 'registry-ig-aa', label: 'IG AA Bucket', status: 'PARTIAL', source: 'Polygon', snapshot_ref: 'bond-ig-aa', updated_at: base.last_refreshed_at ?? null, notes: ['可批量修复应计利息'] },
+    ],
+    eligible_sources: [
+      {
+        id: 'bond-source-fmp',
+        label: 'FMP Treasury EOD',
+        source: 'FMP',
+        status: 'READY',
+        access_tier: 'runtime',
+        instrument_types: ['BOND', 'TIPS'],
+        coverage_notes: ['clean/full price', 'accrued interest', 'YTM', 'duration', 'convexity'],
+        updated_at: base.last_refreshed_at ?? null,
+      },
+    ],
+    eligible_instruments: [
+      {
+        id: 'bond-ust-10y',
+        label: 'UST10Y 日终快照',
+        instrument_type: 'BOND',
+        source: 'FMP',
+        status: 'READY',
+        symbol: 'UST10Y',
+        currency: 'USD',
+        snapshot_date: '2026-04-23',
+        clean_price: 99.72,
+        net_price: 99.72,
+        dirty_price: 101.18,
+        full_price: 101.18,
+        accrued_interest: 1.46,
+        ytm_pct: 4.2,
+        duration: 8.4,
+        convexity: 0.76,
+        snapshot_ref: 'bond-ust-10y',
+        refresh_status: 'READY',
+        missing_fields: [],
+        inferred_fields: {},
+        field_status: {
+          clean_price: 'actual',
+          full_price: 'actual',
+          accrued_interest: 'actual',
+          ytm_pct: 'actual',
+          duration: 'actual',
+          convexity: 'actual',
+        },
+        updated_at: base.last_refreshed_at ?? null,
+      },
     ],
     scheduler: {
       status: 'READY',

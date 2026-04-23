@@ -5,10 +5,12 @@ import type { ApiCompositionListItem } from './types';
 
 type FakeApi = {
   listCompositions?: ReturnType<typeof vi.fn>;
+  updateComposition?: ReturnType<typeof vi.fn>;
 };
 
 const fakeApi = vi.hoisted<FakeApi>(() => ({
   listCompositions: vi.fn(),
+  updateComposition: vi.fn(),
 }));
 
 vi.mock('./lib/demoStoreContext', () => ({
@@ -76,6 +78,7 @@ const compositions: ApiCompositionListItem[] = [
 
 beforeEach(() => {
   fakeApi.listCompositions = vi.fn().mockResolvedValue(compositions);
+  fakeApi.updateComposition = vi.fn().mockResolvedValue({ ...compositions[0], status: 'ARCHIVED' });
   window.location.hash = '';
 });
 
@@ -133,5 +136,26 @@ describe('composition dashboard page', () => {
     expect(
       await screen.findByText('当前运行时还未接入组合列表接口，请等待主线程完成路由与 HTTP 客户端集成。'),
     ).toBeInTheDocument();
+  });
+
+  it('writes composition status changes through the runtime PATCH contract', async () => {
+    await act(async () => {
+      render(<CompositionDashboardPage />);
+    });
+
+    await waitFor(() =>
+      expect(
+        document.querySelector('.composition-dashboard-page[data-route-root="compositions"][data-page-root="composition-dashboard"]'),
+      ).not.toBeNull(),
+    );
+    const balancedCard = document.querySelector('.composition-dashboard-card') as HTMLElement;
+    expect(balancedCard).not.toBeNull();
+
+    fireEvent.click(within(balancedCard).getByRole('button', { name: 'Archive' }));
+
+    await waitFor(() =>
+      expect(fakeApi.updateComposition).toHaveBeenCalledWith('comp-balanced', { status: 'ARCHIVED' }),
+    );
+    await waitFor(() => expect(fakeApi.listCompositions).toHaveBeenCalledTimes(2));
   });
 });

@@ -47,6 +47,7 @@ artifacts/market-data-recovery*/
 
 # Test Artifacts
 .tmp/
+tmp/
 /.tmp-*
 pytesttmp-*/
 temp-artifacts/

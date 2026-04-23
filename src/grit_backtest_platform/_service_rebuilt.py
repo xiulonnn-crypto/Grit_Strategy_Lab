@@ -3247,7 +3247,14 @@ class BacktestPlatformService:
 
     def _composition_reference_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
-        rows = self.storage.fetch_all("SELECT source_ref_id FROM composition_legs")
+        rows = self.storage.fetch_all(
+            """
+            SELECT source_ref_id
+            FROM composition_legs
+            WHERE deleted_at IS NULL
+              AND status = 'ACTIVE'
+            """
+        )
         for row in rows:
             source_ref_id = str(row.get("source_ref_id") or "").strip()
             if source_ref_id:
@@ -3370,8 +3377,134 @@ class BacktestPlatformService:
             tags.append("notes")
         return tags
 
+    def _bond_snapshot_repository(self) -> Any | None:
+        repository = getattr(self, "market_data_repository", None)
+        return repository if repository is not None else None
+
+    def _bond_snapshot_rows(self) -> list[dict[str, Any]]:
+        repository = self._bond_snapshot_repository()
+        loader = getattr(repository, "list_bond_fixed_income_snapshots", None)
+        if not callable(loader):
+            return []
+        return [dict(row) for row in loader()]
+
+    def _bond_snapshot_record_by_ref(self, snapshot_ref: str | None) -> dict[str, Any] | None:
+        ref = str(snapshot_ref or "").strip()
+        if not ref:
+            return None
+        repository = self._bond_snapshot_repository()
+        getter = getattr(repository, "get_bond_fixed_income_snapshot", None)
+        if callable(getter):
+            record = getter(ref)
+            if record:
+                return dict(record)
+        normalized_ref = ref.upper()
+        for row in self._bond_snapshot_rows():
+            candidates = {
+                str(row.get("id") or ""),
+                str(row.get("source_snapshot_id") or ""),
+                str(row.get("instrument_id") or ""),
+                str(row.get("symbol") or ""),
+                str(row.get("isin") or ""),
+                str(row.get("cusip") or ""),
+            }
+            if ref in candidates or normalized_ref in {candidate.upper() for candidate in candidates if candidate}:
+                return row
+        return None
+
+    def _bond_snapshot_field_status(self, row: Mapping[str, Any]) -> dict[str, str]:
+        inferred_fields = dict(row.get("inferred_fields") or {})
+        missing_fields = {str(item) for item in (row.get("missing_fields") or [])}
+        field_status: dict[str, str] = {}
+        for field_name in (
+            "clean_price",
+            "net_price",
+            "dirty_price",
+            "full_price",
+            "accrued_interest",
+            "ytm_pct",
+            "duration",
+            "convexity",
+        ):
+            if field_name in missing_fields or row.get(field_name) is None:
+                field_status[field_name] = "MISSING"
+            elif field_name in inferred_fields:
+                field_status[field_name] = "INFERRED"
+            else:
+                field_status[field_name] = "READY"
+        return field_status
+
+    def _bond_snapshot_is_eligible(self, row: Mapping[str, Any]) -> bool:
+        refresh_status = str(row.get("refresh_status") or row.get("status") or "").upper()
+        if refresh_status not in {"READY", "FRESH", "COMPLETED"}:
+            return False
+        return not any(status == "MISSING" for status in self._bond_snapshot_field_status(row).values())
+
+    def _bond_snapshot_instrument_payload(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        field_status = self._bond_snapshot_field_status(row)
+        eligible = self._bond_snapshot_is_eligible(row)
+        label = str(row.get("name") or row.get("symbol") or row.get("instrument_id") or row.get("id") or "")
+        snapshot_ref = str(row.get("source_snapshot_id") or row.get("id") or "")
+        return {
+            "id": str(row.get("id") or snapshot_ref),
+            "label": label,
+            "instrument_type": str(row.get("instrument_type") or "bond"),
+            "source": str(row.get("source") or "manual"),
+            "status": "READY" if eligible else str(row.get("refresh_status") or "STALE").upper(),
+            "symbol": row.get("symbol"),
+            "isin": row.get("isin"),
+            "cusip": row.get("cusip"),
+            "currency": row.get("currency"),
+            "snapshot_date": row.get("snapshot_date"),
+            "maturity_date": row.get("maturity_date"),
+            "coupon_rate_pct": row.get("coupon_rate_pct"),
+            "clean_price": row.get("clean_price"),
+            "net_price": row.get("net_price"),
+            "dirty_price": row.get("dirty_price"),
+            "full_price": row.get("full_price"),
+            "accrued_interest": row.get("accrued_interest"),
+            "ytm_pct": row.get("ytm_pct"),
+            "duration": row.get("duration"),
+            "convexity": row.get("convexity"),
+            "snapshot_ref": snapshot_ref,
+            "refresh_status": str(row.get("refresh_status") or "").upper() or None,
+            "missing_fields": [str(item) for item in (row.get("missing_fields") or [])],
+            "inferred_fields": dict(row.get("inferred_fields") or {}),
+            "field_status": field_status,
+            "updated_at": row.get("updated_at") or row.get("refreshed_at"),
+        }
+
+    def _payload_requires_bond_snapshot_validation(self, payload: Mapping[str, Any]) -> bool:
+        provider = str(payload.get("source_provider") or "").strip().lower()
+        source_snapshot_id = str(payload.get("source_snapshot_id") or "").strip().lower()
+        asset_kind = str(payload.get("asset_kind") or "").strip().upper()
+        return (
+            provider in {"bond_fixed_income", "fixed_income_snapshot", "snapshot_registry"}
+            or source_snapshot_id.startswith("bond_fixed_income::")
+            or source_snapshot_id in {"bond_fixed_income", "bond-fixed-income", "bond_fixed_income.curve_preview"}
+            or (asset_kind == "BOND" and source_snapshot_id.startswith("bond-"))
+        )
+
+    def _validate_bond_asset_source(self, payload: Mapping[str, Any]) -> dict[str, Any] | None:
+        if not self._payload_requires_bond_snapshot_validation(payload):
+            return None
+        snapshot_id = str(payload.get("source_snapshot_id") or "").strip()
+        record = self._bond_snapshot_record_by_ref(snapshot_id)
+        if record is None:
+            raise ValueError("Bond asset legs must use an eligible bond fixed-income snapshot, not a fallback source")
+        if not self._bond_snapshot_is_eligible(record):
+            missing = ", ".join(str(item) for item in (record.get("missing_fields") or [])) or "none"
+            refresh_status = str(record.get("refresh_status") or "STALE").upper()
+            raise ValueError(
+                f"Bond snapshot {snapshot_id} is not eligible (refresh_status={refresh_status}, missing_fields={missing})"
+            )
+        return record
+
     def _decode_asset_leg_row(self, row: Mapping[str, Any], reference_count: int = 0) -> dict[str, Any]:
         summary = loads(row.get("summary_json"), {})
+        allowed_actions = ["open_composition_workbench"]
+        if reference_count <= 0:
+            allowed_actions.insert(0, "edit_leg_definition")
         return {
             "id": str(row.get("id") or ""),
             "name": str(row.get("name") or ""),
@@ -3387,15 +3520,19 @@ class BacktestPlatformService:
                 "snapshot_ref": row.get("source_snapshot_id"),
                 "freeze_mode": row.get("freeze_mode"),
                 "reference_count": reference_count,
+                "reference_protected": reference_count > 0,
             },
             "attribute_tags": self._asset_leg_attribute_tags(row),
-            "allowed_actions": ["edit_leg_definition", "open_composition_workbench"],
+            "allowed_actions": allowed_actions,
             "created_at": str(row.get("created_at") or ""),
             "updated_at": str(row.get("updated_at") or ""),
         }
 
     def _decode_cash_leg_row(self, row: Mapping[str, Any], reference_count: int = 0) -> dict[str, Any]:
         summary = loads(row.get("summary_json"), {})
+        allowed_actions = ["open_composition_workbench"]
+        if reference_count <= 0:
+            allowed_actions.insert(0, "edit_leg_definition")
         return {
             "id": str(row.get("id") or ""),
             "name": str(row.get("name") or ""),
@@ -3407,7 +3544,7 @@ class BacktestPlatformService:
             "summary": summary,
             "status": str(row.get("status") or "ACTIVE").upper(),
             "attribute_tags": self._cash_leg_attribute_tags(row),
-            "allowed_actions": ["edit_leg_definition", "open_composition_workbench"],
+            "allowed_actions": allowed_actions,
             "created_at": str(row.get("created_at") or ""),
             "updated_at": str(row.get("updated_at") or ""),
         }
@@ -3416,36 +3553,13 @@ class BacktestPlatformService:
         reference_counts = self._composition_reference_counts()
         rows: list[dict[str, Any]] = []
 
-        strategy_rows = self.storage.fetch_all(
-            "SELECT id FROM strategies ORDER BY updated_at DESC, created_at DESC"
-        )
-        for strategy_row in strategy_rows:
-            strategy = self.get_strategy_detail(str(strategy_row["id"]))
-            completed_summaries = self._completed_run_summaries_for_strategy(str(strategy["id"]))
-            for index, version_entry in enumerate(strategy.get("parameter_history", []), start=1):
-                normalized_version_entry = {
-                    **dict(version_entry),
-                    "version_number": int(version_entry.get("version_number") or index),
-                    "parameter_version_id": str(
-                        version_entry.get("parameter_version_id")
-                        or _parameter_version_id(str(strategy["id"]), int(version_entry.get("version_number") or index))
-                    ),
-                }
-                inventory_id = _strategy_leg_inventory_id(
-                    str(strategy["id"]),
-                    str(normalized_version_entry["parameter_version_id"]),
-                )
-                rows.append(
-                    self._strategy_projection_row(
-                        strategy,
-                        normalized_version_entry,
-                        completed_summaries,
-                        reference_counts.get(inventory_id, 0),
-                    )
-                )
-
         for row in self.storage.fetch_all(
-            "SELECT * FROM asset_leg_definitions ORDER BY updated_at DESC, created_at DESC"
+            """
+            SELECT *
+            FROM asset_leg_definitions
+            WHERE deleted_at IS NULL
+            ORDER BY updated_at DESC, created_at DESC
+            """
         ):
             decoded = self._decode_asset_leg_row(row, reference_counts.get(str(row["id"]), 0))
             rows.append(
@@ -3469,13 +3583,20 @@ class BacktestPlatformService:
                         "symbol": decoded["symbol"],
                         "asset_kind": decoded["asset_kind"],
                         "source_snapshot_id": decoded["source_snapshot_id"],
+                        "source_provider": decoded["source_provider"],
                         "freeze_mode": decoded["freeze_mode"],
+                        "summary": dict(decoded.get("summary") or {}),
                     },
                 }
             )
 
         for row in self.storage.fetch_all(
-            "SELECT * FROM cash_leg_definitions ORDER BY updated_at DESC, created_at DESC"
+            """
+            SELECT *
+            FROM cash_leg_definitions
+            WHERE deleted_at IS NULL
+            ORDER BY updated_at DESC, created_at DESC
+            """
         ):
             decoded = self._decode_cash_leg_row(row, reference_counts.get(str(row["id"]), 0))
             rows.append(
@@ -3544,6 +3665,14 @@ class BacktestPlatformService:
         leg_id = self._new_id("asset_leg")
         now = iso_now()
         summary = dict(payload.get("summary") or {})
+        bond_snapshot = self._validate_bond_asset_source(payload)
+        source_provider = str(payload.get("source_provider") or "").strip() or None
+        source_snapshot_id = str(payload["source_snapshot_id"]).strip()
+        if bond_snapshot is not None:
+            bond_payload = self._bond_snapshot_instrument_payload(bond_snapshot)
+            summary["bond_snapshot"] = bond_payload
+            source_provider = str(bond_snapshot.get("source") or source_provider or "bond_fixed_income")
+            source_snapshot_id = str(bond_payload.get("snapshot_ref") or source_snapshot_id)
         notes = str(payload.get("notes") or "").strip()
         if notes:
             summary["notes"] = notes
@@ -3554,11 +3683,13 @@ class BacktestPlatformService:
                 "name": str(payload["name"]).strip(),
                 "symbol": str(payload["symbol"]).strip().upper(),
                 "asset_kind": str(payload["asset_kind"]).strip(),
-                "source_snapshot_id": str(payload["source_snapshot_id"]).strip(),
-                "source_provider": str(payload.get("source_provider") or "").strip() or None,
+                "source_snapshot_id": source_snapshot_id,
+                "source_provider": source_provider,
                 "freeze_mode": str(payload["freeze_mode"]).strip(),
                 "summary_json": dumps(summary),
                 "status": "ACTIVE",
+                "revision": 1,
+                "current_freeze_generation": 1,
                 "created_at": now,
                 "updated_at": now,
             },
@@ -3589,6 +3720,8 @@ class BacktestPlatformService:
                 "freeze_mode": str(payload["freeze_mode"]).strip(),
                 "summary_json": dumps(summary),
                 "status": "ACTIVE",
+                "revision": 1,
+                "current_freeze_generation": 1,
                 "created_at": now,
                 "updated_at": now,
             },
@@ -4004,6 +4137,32 @@ class BacktestPlatformService:
             "advisories": advisories,
         }
 
+    def _validate_composition_save_payload(self, preview_payload: Mapping[str, Any]) -> None:
+        weight_summary = dict(preview_payload.get("weight_summary") or {})
+        if not bool(weight_summary.get("within_tolerance")):
+            total_weight = round(_as_float(weight_summary.get("total_weight_pct"), 0.0), 4)
+            raise ValueError(f"Composition weights must total 100% before saving (got {total_weight:.2f}%)")
+        seen: set[tuple[str, str]] = set()
+        for leg in preview_payload.get("normalized_legs", []):
+            leg_kind = str(leg.get("leg_kind") or "").lower()
+            source_ref_id = str(leg.get("source_ref_id") or "").strip()
+            key = (leg_kind, source_ref_id)
+            if key in seen:
+                raise ValueError(f"Duplicate composition leg source is not allowed: {source_ref_id}")
+            seen.add(key)
+            status = str(leg.get("status") or "").upper()
+            if leg_kind == "strategy" and status != "READY":
+                raise ValueError(f"Strategy leg {source_ref_id} must have an eligible completed run before saving")
+            if leg_kind in {"asset", "cash"} and status not in {"ACTIVE", "READY"}:
+                raise ValueError(f"Composition leg {source_ref_id} is not active")
+            config = dict(leg.get("config") or {})
+            if leg_kind == "asset" and self._payload_requires_bond_snapshot_validation(config):
+                bond_snapshot = self._bond_snapshot_record_by_ref(str(config.get("source_snapshot_id") or ""))
+                if bond_snapshot is None:
+                    raise ValueError(f"Bond source snapshot is missing for asset leg {source_ref_id}")
+                if not self._bond_snapshot_is_eligible(bond_snapshot):
+                    raise ValueError(f"Bond source snapshot is not eligible for asset leg {source_ref_id}")
+
     def _build_composition_detail_payload(
         self,
         *,
@@ -4211,7 +4370,10 @@ class BacktestPlatformService:
         ]
 
     def _load_composition_record(self, composition_id: str) -> dict[str, Any]:
-        row = self.storage.fetch_one("SELECT * FROM compositions WHERE id = ?", (composition_id,))
+        row = self.storage.fetch_one(
+            "SELECT * FROM compositions WHERE id = ? AND deleted_at IS NULL",
+            (composition_id,),
+        )
         if not row:
             raise KeyError(f"Composition not found: {composition_id}")
         return row
@@ -4222,6 +4384,13 @@ class BacktestPlatformService:
             SELECT *
             FROM composition_legs
             WHERE composition_id = ?
+              AND deleted_at IS NULL
+              AND status = 'ACTIVE'
+              AND current_freeze_generation = (
+                  SELECT current_freeze_generation
+                  FROM compositions
+                  WHERE id = composition_legs.composition_id
+              )
             ORDER BY ordering ASC, created_at ASC, id ASC
             """,
             (composition_id,),
@@ -4234,6 +4403,9 @@ class BacktestPlatformService:
             FROM composition_source_freezes AS freezes
             LEFT JOIN composition_legs AS legs ON legs.id = freezes.leg_id
             WHERE freezes.composition_id = ?
+              AND freezes.deleted_at IS NULL
+              AND freezes.is_current = 1
+              AND freezes.status = 'ACTIVE'
             ORDER BY freezes.created_at ASC, freezes.id ASC
             """,
             (composition_id,),
@@ -4255,15 +4427,15 @@ class BacktestPlatformService:
         existing_leg_rows: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         normalized_legs = list(preview_payload.get("normalized_legs", []))
+        current_record = self.storage.fetch_one("SELECT * FROM compositions WHERE id = ?", (composition_id,))
+        previous_revision = _as_int((current_record or {}).get("revision"), 0)
+        previous_generation = _as_int((current_record or {}).get("current_freeze_generation"), 0)
+        revision = max(previous_revision + 1, 1)
+        freeze_generation = max(previous_generation + 1, 1)
         leg_rows: list[dict[str, Any]] = []
         freeze_rows: list[dict[str, Any]] = []
-        previous_leg_ids = [
-            str(row.get("id") or "")
-            for row in (existing_leg_rows or [])
-            if row.get("id")
-        ]
         for index, leg in enumerate(normalized_legs, start=1):
-            leg_id = previous_leg_ids[index - 1] if index - 1 < len(previous_leg_ids) else self._new_id("composition_leg")
+            leg_id = self._new_id("composition_leg")
             leg_row = {
                 "id": leg_id,
                 "composition_id": composition_id,
@@ -4275,7 +4447,10 @@ class BacktestPlatformService:
                 "weight_locked": 1 if leg.get("weight_locked") else 0,
                 "ordering": int(leg.get("ordering") or index),
                 "config_json": dumps(dict(leg.get("config") or {})),
-                "created_at": created_at if index - 1 >= len(previous_leg_ids) else str((existing_leg_rows or [])[index - 1].get("created_at") or created_at),
+                "status": "ACTIVE",
+                "revision": revision,
+                "current_freeze_generation": freeze_generation,
+                "created_at": updated_at,
                 "updated_at": updated_at,
             }
             snapshot = {
@@ -4291,6 +4466,8 @@ class BacktestPlatformService:
                 "status_label": leg.get("status_label"),
                 "attribute_tags": list(leg.get("attribute_tags") or []),
                 "config": dict(leg.get("config") or {}),
+                "freeze_generation": freeze_generation,
+                "revision": revision,
             }
             freeze_hash = hashlib.sha256(
                 json.dumps(snapshot, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
@@ -4304,6 +4481,8 @@ class BacktestPlatformService:
                 "freeze_hash": freeze_hash,
                 "snapshot": snapshot,
                 "captured_at": updated_at,
+                "freeze_generation": freeze_generation,
+                "revision": revision,
             }
             leg_rows.append(leg_row)
             freeze_rows.append(freeze_row)
@@ -4336,9 +4515,11 @@ class BacktestPlatformService:
                     cost_policy_json,
                     summary_json,
                     analysis_json,
+                    revision,
+                    current_freeze_generation,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     description = excluded.description,
@@ -4348,6 +4529,8 @@ class BacktestPlatformService:
                     cost_policy_json = excluded.cost_policy_json,
                     summary_json = excluded.summary_json,
                     analysis_json = excluded.analysis_json,
+                    revision = excluded.revision,
+                    current_freeze_generation = excluded.current_freeze_generation,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -4360,12 +4543,37 @@ class BacktestPlatformService:
                     dumps(dict(cost_policy)),
                     dumps(summary_payload),
                     dumps(detail_payload),
+                    revision,
+                    freeze_generation,
                     created_at,
                     updated_at,
                 ),
             )
-            conn.execute("DELETE FROM composition_source_freezes WHERE composition_id = ?", (composition_id,))
-            conn.execute("DELETE FROM composition_legs WHERE composition_id = ?", (composition_id,))
+            conn.execute(
+                """
+                UPDATE composition_source_freezes
+                SET is_current = 0,
+                    status = 'SUPERSEDED',
+                    updated_at = ?,
+                    deleted_at = ?,
+                    deleted_reason = ?
+                WHERE composition_id = ?
+                  AND deleted_at IS NULL
+                """,
+                (updated_at, updated_at, f"superseded_by_revision_{revision}", composition_id),
+            )
+            conn.execute(
+                """
+                UPDATE composition_legs
+                SET status = 'SUPERSEDED',
+                    updated_at = ?,
+                    deleted_at = ?,
+                    deleted_reason = ?
+                WHERE composition_id = ?
+                  AND deleted_at IS NULL
+                """,
+                (updated_at, updated_at, f"superseded_by_revision_{revision}", composition_id),
+            )
             for row in leg_rows:
                 conn.execute(
                     """
@@ -4380,9 +4588,12 @@ class BacktestPlatformService:
                         weight_locked,
                         ordering,
                         config_json,
+                        status,
+                        revision,
+                        current_freeze_generation,
                         created_at,
                         updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["id"],
@@ -4395,6 +4606,9 @@ class BacktestPlatformService:
                         row["weight_locked"],
                         row["ordering"],
                         row["config_json"],
+                        row["status"],
+                        row["revision"],
+                        row["current_freeze_generation"],
                         row["created_at"],
                         row["updated_at"],
                     ),
@@ -4409,9 +4623,14 @@ class BacktestPlatformService:
                         freeze_ref_type,
                         freeze_ref_id,
                         freeze_hash,
+                        freeze_generation,
+                        is_current,
+                        status,
+                        revision,
                         snapshot_json,
-                        created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["id"],
@@ -4420,7 +4639,12 @@ class BacktestPlatformService:
                         row["freeze_ref_type"],
                         row["freeze_ref_id"],
                         row["freeze_hash"],
+                        row["freeze_generation"],
+                        1,
+                        "ACTIVE",
+                        row["revision"],
                         dumps(row["snapshot"]),
+                        row["captured_at"],
                         row["captured_at"],
                     ),
                 )
@@ -4444,6 +4668,7 @@ class BacktestPlatformService:
                 "cost_policy": cost_policy,
             }
         )
+        self._validate_composition_save_payload(preview_payload)
         return self._persist_composition(
             composition_id=composition_id,
             name=name,
@@ -4459,7 +4684,12 @@ class BacktestPlatformService:
 
     def list_compositions(self) -> list[dict[str, Any]]:
         rows = self.storage.fetch_all(
-            "SELECT * FROM compositions ORDER BY updated_at DESC, created_at DESC"
+            """
+            SELECT *
+            FROM compositions
+            WHERE deleted_at IS NULL
+            ORDER BY updated_at DESC, created_at DESC
+            """
         )
         items: list[dict[str, Any]] = []
         for row in rows:
@@ -4529,12 +4759,66 @@ class BacktestPlatformService:
                 source_evidence=source_evidence,
             )
         else:
-            detail_payload = {**detail_payload, "source_evidence": source_evidence}
+            current_status = str(row.get("status") or detail_payload.get("status") or "DRAFT")
+            detail_payload = {
+                **detail_payload,
+                "status": current_status,
+                "status_label": self._composition_status_label(current_status),
+                "updated_at": str(row.get("updated_at") or detail_payload.get("updated_at") or ""),
+                "source_evidence": source_evidence,
+            }
+            hero_summary = dict(detail_payload.get("hero_summary") or {})
+            if hero_summary:
+                hero_summary["status"] = current_status
+                hero_summary["status_label"] = self._composition_status_label(current_status)
+                hero_summary["updated_at"] = detail_payload["updated_at"]
+                detail_payload["hero_summary"] = hero_summary
         return detail_payload
 
     def update_composition(self, composition_id: str, request: Any) -> dict[str, Any]:
         row = self._load_composition_record(composition_id)
         payload = _as_mapping(request)
+        payload_keys = {str(key) for key, value in payload.items() if value is not None}
+        if payload_keys and payload_keys <= {"status"}:
+            status = self._normalize_composition_status(payload.get("status") or row.get("status"), default="DRAFT")
+            updated_at = iso_now()
+            detail_payload = self.get_composition_detail(composition_id)
+            detail_payload = {
+                **detail_payload,
+                "status": status,
+                "status_label": self._composition_status_label(status),
+                "updated_at": updated_at,
+                "latest_activity_label": self._latest_activity_label(updated_at),
+            }
+            hero_summary = dict(detail_payload.get("hero_summary") or {})
+            hero_summary["status"] = status
+            hero_summary["status_label"] = self._composition_status_label(status)
+            hero_summary["updated_at"] = updated_at
+            detail_payload["hero_summary"] = hero_summary
+            summary_payload = self._build_composition_summary_payload(detail_payload)
+            revision = _as_int(row.get("revision"), 1) + 1
+            with self.storage.connection() as conn:
+                conn.execute(
+                    """
+                    UPDATE compositions
+                    SET status = ?,
+                        summary_json = ?,
+                        analysis_json = ?,
+                        revision = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                      AND deleted_at IS NULL
+                    """,
+                    (
+                        status,
+                        dumps(summary_payload),
+                        dumps(detail_payload),
+                        revision,
+                        updated_at,
+                        composition_id,
+                    ),
+                )
+            return detail_payload
         existing_leg_rows = self._load_composition_leg_rows(composition_id)
         name = str(payload.get("name") or row.get("name") or "").strip() or str(row.get("name") or "")
         description = (
@@ -4573,6 +4857,7 @@ class BacktestPlatformService:
                 "legs": leg_payloads,
             }
         )
+        self._validate_composition_save_payload(preview_payload)
         return self._persist_composition(
             composition_id=composition_id,
             name=name,
@@ -4606,26 +4891,42 @@ class BacktestPlatformService:
             else "ACTION_REQUIRED"
         )
         last_refreshed_at = snapshot_overview.get("last_refreshed_at")
-        benchmark_key = f"{overall_status}:{last_refreshed_at or 'none'}"
-        curve_preview = []
-        base_curve = [
-            ("3M", 4.68),
-            ("2Y", 4.21),
-            ("5Y", 4.09),
-            ("10Y", 4.15),
-            ("30Y", 4.31),
+        curve_preview: list[dict[str, Any]] = []
+        bond_rows = self._bond_snapshot_rows()
+        eligible_instruments = [self._bond_snapshot_instrument_payload(row) for row in bond_rows]
+        ready_bond_instruments = [
+            item for item in eligible_instruments if str(item.get("status") or "").upper() == "READY"
         ]
-        front_end_yield = base_curve[0][1]
-        for tenor_label, base_yield in base_curve:
-            shift = (_stable_hash_fraction("bond_curve", benchmark_key, tenor_label) - 0.5) * 0.24
-            yield_pct = round(base_yield + shift, 4)
-            curve_preview.append(
+        source_groups: dict[str, dict[str, Any]] = {}
+        for row in bond_rows:
+            source_key = str(row.get("source") or "manual")
+            source_group = source_groups.setdefault(
+                source_key,
                 {
-                    "tenor_label": tenor_label,
-                    "yield_pct": yield_pct,
-                    "spread_bps": round((yield_pct - front_end_yield) * 100.0, 4),
-                }
+                    "id": source_key,
+                    "label": source_key.replace("_", " ").title(),
+                    "source": source_key,
+                    "status": "READY",
+                    "access_tier": "runtime",
+                    "instrument_types": set(),
+                    "coverage_notes": [],
+                    "updated_at": row.get("updated_at") or row.get("refreshed_at"),
+                },
             )
+            source_group["instrument_types"].add(str(row.get("instrument_type") or "bond"))
+            if not self._bond_snapshot_is_eligible(row):
+                source_group["status"] = "WATCH"
+            if row.get("updated_at") and str(row.get("updated_at")) > str(source_group.get("updated_at") or ""):
+                source_group["updated_at"] = row.get("updated_at")
+        eligible_sources = []
+        for source_group in source_groups.values():
+            instrument_types = sorted(str(item) for item in source_group.pop("instrument_types"))
+            source_group["instrument_types"] = instrument_types
+            source_group["coverage_notes"] = [
+                f"{len([row for row in bond_rows if str(row.get('source') or 'manual') == source_group['source']])} runtime bond snapshot rows",
+                f"{len([item for item in ready_bond_instruments if item.get('source') == source_group['source']])} eligible for asset-leg creation",
+            ]
+            eligible_sources.append(source_group)
         refresh_mode = str(latest_job.get("request", {}).get("mode") or "incremental")
         cards = [
             {
@@ -4655,6 +4956,13 @@ class BacktestPlatformService:
                 "status": "READY" if latest_job else "WATCH",
                 "value": refresh_mode,
                 "detail": "Reuses the existing snapshot refresh job and cadence instead of a bond-only scheduler.",
+            },
+            {
+                "id": "eligible_bond_sources",
+                "label": "Eligible bond sources",
+                "status": "READY" if ready_bond_instruments else "WATCH",
+                "value": f"{len(ready_bond_instruments)}/{len(eligible_instruments)} eligible",
+                "detail": "Only READY runtime bond rows with complete or inferred fields can create asset legs.",
             },
         ]
         return {
@@ -4765,24 +5073,21 @@ class BacktestPlatformService:
             ],
             "raw_registry": [
                 {
-                    "id": "shared_snapshot_overview",
-                    "label": "Shared snapshot overview",
-                    "status": pulse_status,
-                    "source": "api:/data-snapshots/overview",
-                    "snapshot_ref": "data_snapshots",
-                    "updated_at": str(last_refreshed_at or ""),
-                    "notes": ["This remains the single snapshot API surface.", "Bond governance is additive only."],
-                },
-                {
-                    "id": "phase1_curve_proxy",
-                    "label": "Phase 1 curve proxy",
-                    "status": "READY",
-                    "source": "deterministic_phase1_seed",
-                    "snapshot_ref": "bond_fixed_income.curve_preview",
-                    "updated_at": str(last_refreshed_at or ""),
-                    "notes": ["Synthetic until a dedicated fixed-income dataset is approved."],
-                },
+                    "id": str(item.get("id") or ""),
+                    "label": str(item.get("label") or ""),
+                    "status": str(item.get("status") or ""),
+                    "source": str(item.get("source") or ""),
+                    "snapshot_ref": item.get("snapshot_ref"),
+                    "updated_at": item.get("updated_at"),
+                    "notes": [
+                        "Runtime bond_fixed_income_snapshots row.",
+                        "Eligible for asset-leg creation only when status is READY.",
+                    ],
+                }
+                for item in eligible_instruments
             ],
+            "eligible_sources": eligible_sources,
+            "eligible_instruments": eligible_instruments,
             "scheduler": {
                 "status": "READY" if latest_job else "WATCH",
                 "cadence_label": f"Shared snapshot cadence ({refresh_mode})",
@@ -4790,9 +5095,13 @@ class BacktestPlatformService:
                 "last_job_id": str(latest_job.get("id") or "") or None,
             },
             "selected_source_summary": {
-                "primary_source": "shared_snapshot_overview",
-                "fallback_source": "deterministic_phase1_seed",
-                "selection_reason": "Phase 1 extends the existing snapshot API instead of adding a bond-only endpoint.",
+                "primary_source": str(ready_bond_instruments[0]["source"]) if ready_bond_instruments else "bond_fixed_income_snapshots",
+                "fallback_source": None,
+                "selection_reason": (
+                    "Runtime bond_fixed_income_snapshots rows are eligible for asset-leg creation."
+                    if ready_bond_instruments
+                    else "No eligible runtime bond source is available yet."
+                ),
             },
             "system_diagnostics": {
                 "blocking_code": snapshot_overview.get("blocking_code"),
@@ -4801,7 +5110,7 @@ class BacktestPlatformService:
                 "memory": dict(read_runtime_memory_status() or {}),
                 "notes": [
                     "Bond governance is blocked whenever the shared snapshot overview is blocked.",
-                    "Phase 1 intentionally keeps fixed-income oversight on the shared route and scheduler.",
+                    "Only runtime bond_fixed_income_snapshots rows are eligible asset-leg sources.",
                 ],
             },
         }

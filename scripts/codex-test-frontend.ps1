@@ -32,6 +32,7 @@ $focusedTests = @(
     'optimization.module.test.tsx'
     'App.phase3.test.tsx'
     'shell-frame.page-heading.test.tsx'
+    'quickstart.preview.test.ts'
 )
 $resolvedTargetRoot = if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
     [System.IO.Path]::GetFullPath((Join-Path $repoRoot '.tmp\codex-fixture'))

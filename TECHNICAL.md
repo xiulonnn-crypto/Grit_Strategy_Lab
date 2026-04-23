@@ -160,6 +160,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `optimization.module.test.tsx`
 - `App.phase3.test.tsx`
 - `shell-frame.page-heading.test.tsx`
+- `quickstart.preview.test.ts`
 
 额外规则：
 
@@ -607,3 +608,39 @@ Codex 在本仓库的默认阅读顺序固定如下：
   - composite score weighting
 - Legacy optimization jobs must sanitize removed constraint keys such as `turnover` on read, patch, and result-page hydration, so old persisted payloads cannot make the UI fall back to the removed sixth constraint.
 - Validation windows expose `period_label` in `YYYY-MM-DD 至 YYYY-MM-DD`, and `annualized_return` must always be populated from the window metrics instead of falling back to `-`.
+
+## Phase 1.1 Compose First runtime baseline
+
+Phase 1.1 的默认回归范围包含五个真实 runtime 页面：`#/compositions`、`#/legs`、`#/compositions/workbench`、`#/compositions/:id`、`#/snapshots?tab=bond`。生产路径必须通过 `ApiClientProvider` 的 HTTP client 访问 FastAPI/SQLite runtime；`demoStorePhase4` 与 `testApiMock` 只作为测试 fixture 使用。
+
+当前真实接口入口：
+
+- `GET /compositions`、`PATCH /compositions/{id}`：组合仪表板读取与状态切换。
+- `GET /leg-inventory`、`POST /asset-legs`、`POST /cash-legs`：资产库读取与资产/现金腿创建；策略腿仍只来自策略版本 + eligible run 投影。
+- `GET /leg-inventory`、`GET /compositions/{id}`、`POST /compositions/preview`、`POST /compositions`、`PATCH /compositions/{id}`：组合工作台读取、零写入预演、创建与覆盖当前 revision。
+- `GET /compositions/{id}`、`PATCH /compositions/{id}`：组合详情读取冻结来源并支持状态写入；结构性修改跳转 workbench。
+- `GET /data-snapshots/overview`、`POST /admin/snapshot-refresh-jobs`、`POST /asset-legs`：债券 tab 读取 `bond_fixed_income`、触发刷新、从 eligible runtime bond snapshot 创建资产腿。
+
+验证入口：
+
+- 后端固定切片：`powershell -ExecutionPolicy Bypass -File .\scripts\codex-test-backend.ps1`
+- 前端固定切片：`powershell -ExecutionPolicy Bypass -File .\scripts\codex-test-frontend.ps1`
+- 契约/类型变更后：`powershell -ExecutionPolicy Bypass -File .\scripts\codex-test-frontend.ps1 -StrictGlobalTypes`
+
+不要声明 fixture-backed live smoke 通过，除非 `harness/fixtures/seed_workspace/` 被恢复并重新跑过对应 live acceptance。
+
+## 2026-04-23 QuickStart preview listener note
+
+- QuickStart 清理 `4173` 旧监听时，绝对 `web/preview-server.mjs` 命令和 `node ./preview-server.mjs --watch --rebuild-on-start` 相对命令都属于 repo-local preview，可作为 stale listener 重启目标，不应被判为 `non-repo frontend process`。
+- `web/src/quickstart.preview.test.ts` 已纳入 `scripts/codex-test-frontend.ps1` 固定前端切片，用来守住 preview listener 识别和 `--rebuild-on-start` 启动参数。
+
+### Localhost delivery gate
+
+当用户给出 `http://127.0.0.1:4173/...` 或其它本地 live URL 作为验收入口时，交付前必须验证当前正在监听的本地进程，而不能只引用 mocked tests 或 fixed slice。最低要求：
+
+- 确认 `8000` 的 `uvicorn` 和 `4173` 的 preview 进程是在最终代码之后启动的；如果不是，先停止 repo-local 旧监听并重启。
+- 重新执行 `npm run build`，避免 `preview-server.mjs` 因 dist promotion 失败继续服务旧 bundle。
+- 核对 `GRIT_BACKTEST_DB` 指向的主库以及同名 `_market_data.sqlite3` companion 不是新建空库；`/workspace/overview` 应先用 API 证明策略/回测历史仍在，再打开页面。
+- 重新验证 hash SPA 页面时必须强制 document reload，例如 `http://127.0.0.1:4173/?v=<timestamp>#/snapshots`；只从 `#/workspace` 跳到 `#/snapshots` 可能继续运行旧 bundle。
+- 对用户提到的页面跑一次真实浏览器或等价 live check，并记录 `GET /compositions`、`GET /leg-inventory`、`GET /data-snapshots/overview` 的 HTTP 结果。
+- 如果验收包含债券 eligible source，确认 `bond_fixed_income_snapshots` 至少有一条 `READY` runtime row；fallback/proxy curve 只能作为只读展示，不能算作真实入库来源。

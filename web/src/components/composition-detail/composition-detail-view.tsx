@@ -15,6 +15,7 @@ import type {
   ApiCompositionKpi,
   ApiCompositionRiskContribution,
   ApiCompositionSourceFreeze,
+  ApiCompositionStatus,
 } from '../../types';
 import './composition-detail.css';
 
@@ -26,6 +27,9 @@ type CompositionDetailViewProps = {
   loading?: boolean;
   error?: string | null;
   approvedPreview?: boolean;
+  savingStatus?: boolean;
+  writeError?: string | null;
+  onStatusChange?: (status: ApiCompositionStatus) => Promise<void> | void;
 };
 
 function getToneClassName(tone?: string | null): string {
@@ -118,6 +122,26 @@ function getCadenceLabel(value?: string | null): string {
     default:
       return '维护节奏待确认';
   }
+}
+
+function getStatusWriteActions(status: string): Array<{ label: string; nextStatus: ApiCompositionStatus }> {
+  const normalized = String(status || '').toUpperCase();
+  if (normalized === 'ACTIVE') {
+    return [
+      { label: 'Archive', nextStatus: 'ARCHIVED' },
+      { label: 'Restore draft', nextStatus: 'DRAFT' },
+    ];
+  }
+  if (normalized === 'ARCHIVED') {
+    return [
+      { label: 'Restore draft', nextStatus: 'DRAFT' },
+      { label: 'Activate', nextStatus: 'ACTIVE' },
+    ];
+  }
+  return [
+    { label: 'Activate', nextStatus: 'ACTIVE' },
+    { label: 'Archive', nextStatus: 'ARCHIVED' },
+  ];
 }
 
 function getIntervalDays(value?: string | null): number {
@@ -857,6 +881,9 @@ export function CompositionDetailView({
   loading,
   error,
   approvedPreview,
+  savingStatus = false,
+  writeError = null,
+  onStatusChange,
 }: CompositionDetailViewProps): JSX.Element {
   const [performanceMode, setPerformanceMode] = useState<PerformanceMode>('cumulative');
   const [correlationMode, setCorrelationMode] = useState<CorrelationMode>('current');
@@ -972,6 +999,7 @@ export function CompositionDetailView({
   const stableSourceCount = detail.normalized_legs.filter((leg) =>
     ['READY', 'ACTIVE'].includes(String(leg.status ?? '').toUpperCase()),
   ).length;
+  const statusActions = getStatusWriteActions(detail.status);
   const heroTitle = formatCompositionName({
     name: detail.hero_summary.title || detail.name,
     benchmarkLabel: detail.hero_summary.benchmark_label ?? detail.benchmark_definition?.label,
@@ -1003,6 +1031,19 @@ export function CompositionDetailView({
           </div>
         </div>
         <div className="composition-detail-hero__actions">
+          {statusActions.map((action) => (
+            <button
+              className="ghost-button"
+              disabled={savingStatus || !onStatusChange}
+              key={action.nextStatus}
+              onClick={() => {
+                void onStatusChange?.(action.nextStatus);
+              }}
+              type="button"
+            >
+              {savingStatus ? 'Saving...' : action.label}
+            </button>
+          ))}
           <button
             className="ghost-button"
             onClick={() => navigateTo('/compositions')}
@@ -1019,6 +1060,12 @@ export function CompositionDetailView({
           </button>
         </div>
       </section>
+
+      {writeError ? (
+        <div className="error-banner" role="alert">
+          {writeError}
+        </div>
+      ) : null}
 
       <section className="panel composition-detail-kpi-panel">
         <div className="composition-detail-kpi-grid">

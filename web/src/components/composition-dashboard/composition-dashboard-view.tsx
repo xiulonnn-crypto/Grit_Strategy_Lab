@@ -8,13 +8,16 @@ import {
   normalizePercentLike,
 } from '../../lib/compose-display';
 import { navigateTo } from '../../lib/appRouteContext';
-import type { ApiCompositionListItem } from '../../types';
+import type { ApiCompositionListItem, ApiCompositionStatus } from '../../types';
 import './composition-dashboard.css';
 
 type CompositionDashboardViewProps = {
   compositions: ApiCompositionListItem[];
   loading?: boolean;
   error?: string | null;
+  savingCompositionId?: string | null;
+  writeError?: string | null;
+  onStatusChange?: (compositionId: string, status: ApiCompositionStatus) => Promise<void> | void;
 };
 
 type DashboardTask = {
@@ -43,6 +46,17 @@ function getStatusTone(status: string): 'accent' | 'warning' | 'danger' | 'succe
 
 function getStatusLabel(status: string): string {
   return formatCompositionStatusLabel(status);
+}
+
+function getStatusWriteAction(status: string): { label: string; nextStatus: ApiCompositionStatus } {
+  const normalized = String(status || '').toUpperCase();
+  if (normalized === 'ACTIVE') {
+    return { label: 'Archive', nextStatus: 'ARCHIVED' };
+  }
+  if (normalized === 'ARCHIVED') {
+    return { label: 'Restore draft', nextStatus: 'DRAFT' };
+  }
+  return { label: 'Activate', nextStatus: 'ACTIVE' };
 }
 
 function getRebalanceLabel(value?: string | null): string {
@@ -167,6 +181,9 @@ export function CompositionDashboardView({
   compositions,
   loading,
   error,
+  savingCompositionId = null,
+  writeError = null,
+  onStatusChange,
 }: CompositionDashboardViewProps): JSX.Element {
   const activeCompositions = compositions.filter(
     (composition) => String(composition.status || '').toUpperCase() === 'ACTIVE',
@@ -261,6 +278,12 @@ export function CompositionDashboardView({
           </span>
         </div>
 
+        {writeError ? (
+          <div className="error-banner" role="alert">
+            {writeError}
+          </div>
+        ) : null}
+
         <div className="composition-dashboard-metric-grid">
           <article className="composition-dashboard-metric composition-dashboard-metric--accent">
             <span>正式组合</span>
@@ -313,6 +336,8 @@ export function CompositionDashboardView({
                 {visibleCompositions.map((composition) => {
                   const tone = getStatusTone(composition.status);
                   const normalizedStatus = String(composition.status || '').toUpperCase();
+                  const statusAction = getStatusWriteAction(composition.status);
+                  const isSavingStatus = savingCompositionId === composition.id;
                   return (
                     <article className="composition-dashboard-card" key={composition.id}>
                       <div className="composition-dashboard-card__header">
@@ -370,6 +395,16 @@ export function CompositionDashboardView({
                       <p className="composition-dashboard-card__next-step">{getCompositionNextStep(composition)}</p>
 
                       <div className="composition-dashboard-card__actions">
+                        <button
+                          className="ghost-button"
+                          disabled={isSavingStatus || !onStatusChange}
+                          onClick={() => {
+                            void onStatusChange?.(composition.id, statusAction.nextStatus);
+                          }}
+                          type="button"
+                        >
+                          {isSavingStatus ? 'Saving...' : statusAction.label}
+                        </button>
                         {normalizedStatus === 'DRAFT' ? (
                           <ActionButton
                             className="ghost-button"

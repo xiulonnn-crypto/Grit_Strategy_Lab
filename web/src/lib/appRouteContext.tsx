@@ -47,6 +47,9 @@ export function parseAppHash(hash: string): AppRoute {
       addLeg: addLeg ? decodeURIComponent(addLeg) : undefined,
     };
   }
+  if (path === '/compositions/detail') {
+    return { kind: 'composition-dashboard' };
+  }
   const compositionDetailMatch = path.match(/^\/compositions\/([^/]+)$/);
   if (compositionDetailMatch) {
     return { kind: 'composition-detail', compositionId: decodeURIComponent(compositionDetailMatch[1]) };

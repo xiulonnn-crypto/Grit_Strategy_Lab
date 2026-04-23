@@ -185,13 +185,19 @@ def test_snapshot_overview_includes_bond_fixed_income_extension(tmp_path):
         "curve_preview",
         "audit_matrix",
         "raw_registry",
+        "eligible_sources",
+        "eligible_instruments",
         "scheduler",
         "selected_source_summary",
         "system_diagnostics",
     }
     assert bond["global_pulse"]["headline"]
-    assert len(bond["curve_preview"]) == 5
-    assert bond["selected_source_summary"]["primary_source"] == "shared_snapshot_overview"
+    assert bond["curve_preview"] == []
+    assert bond["raw_registry"] == []
+    assert bond["eligible_sources"] == []
+    assert bond["eligible_instruments"] == []
+    assert bond["selected_source_summary"]["primary_source"] == "bond_fixed_income_snapshots"
+    assert bond["selected_source_summary"]["fallback_source"] is None
 
 
 def test_refresh_target_pool_filters_non_ticker_labels_from_missing_symbols_and_strategies(tmp_path):

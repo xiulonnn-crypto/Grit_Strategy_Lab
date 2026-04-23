@@ -653,6 +653,46 @@ class BondSnapshotRegistryItemModel(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class BondSnapshotEligibleSourceModel(BaseModel):
+    id: str
+    label: str
+    source: str
+    status: str
+    access_tier: str = 'public'
+    instrument_types: list[str] = Field(default_factory=list)
+    coverage_notes: list[str] = Field(default_factory=list)
+    updated_at: str | None = None
+
+
+class BondSnapshotEligibleInstrumentModel(BaseModel):
+    id: str
+    label: str
+    instrument_type: str
+    source: str
+    status: str
+    symbol: str | None = None
+    isin: str | None = None
+    cusip: str | None = None
+    currency: str | None = None
+    snapshot_date: str | None = None
+    maturity_date: str | None = None
+    coupon_rate_pct: float | None = None
+    clean_price: float | None = None
+    net_price: float | None = None
+    dirty_price: float | None = None
+    full_price: float | None = None
+    accrued_interest: float | None = None
+    ytm_pct: float | None = None
+    duration: float | None = None
+    convexity: float | None = None
+    snapshot_ref: str | None = None
+    refresh_status: str | None = None
+    missing_fields: list[str] = Field(default_factory=list)
+    inferred_fields: dict[str, Any] = Field(default_factory=dict)
+    field_status: dict[str, str] = Field(default_factory=dict)
+    updated_at: str | None = None
+
+
 class BondSnapshotSchedulerModel(BaseModel):
     status: str
     cadence_label: str
@@ -680,6 +720,8 @@ class BondFixedIncomeOverviewModel(BaseModel):
     curve_preview: list[BondSnapshotCurvePointModel] = Field(default_factory=list)
     audit_matrix: list[BondSnapshotAuditRowModel] = Field(default_factory=list)
     raw_registry: list[BondSnapshotRegistryItemModel] = Field(default_factory=list)
+    eligible_sources: list[BondSnapshotEligibleSourceModel] = Field(default_factory=list)
+    eligible_instruments: list[BondSnapshotEligibleInstrumentModel] = Field(default_factory=list)
     scheduler: BondSnapshotSchedulerModel
     selected_source_summary: BondSnapshotSourceSummaryModel
     system_diagnostics: BondSnapshotSystemDiagnosticsModel

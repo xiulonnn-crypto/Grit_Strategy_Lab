@@ -9,6 +9,7 @@ import {
 import { EquitySnapshotsTab } from '../page-sections/snapshots-equity';
 import type {
   ApiDatasetSnapshot,
+  ApiBondSnapshotEligibleInstrument,
   ApiSnapshotBlocker,
   ApiSnapshotJob,
   ApiSnapshotOverview,
@@ -794,6 +795,9 @@ export function SnapshotsPage(): JSX.Element {
   const [refreshing, setRefreshing] = useState(false);
   const [optimisticRefreshing, setOptimisticRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [creatingBondAssetLegId, setCreatingBondAssetLegId] = useState<string | null>(null);
+  const [bondCreateError, setBondCreateError] = useState<string | null>(null);
+  const [bondCreateMessage, setBondCreateMessage] = useState<string | null>(null);
   const activeTab = route.kind === 'snapshots' ? route.tab ?? 'equity' : 'equity';
 
   useEffect(() => {
@@ -891,6 +895,40 @@ export function SnapshotsPage(): JSX.Element {
       setError(`刷新数据快照失败：${(caught as Error).message}`);
     } finally {
       setRefreshing(false);
+    }
+  }
+
+  async function handleCreateBondAssetLeg(instrument: ApiBondSnapshotEligibleInstrument): Promise<void> {
+    if (!api.createAssetLeg) {
+      setBondCreateError('创建债券资产腿需要运行时 HTTP 客户端。');
+      return;
+    }
+    const snapshotRef = instrument.snapshot_ref ?? instrument.id;
+    if (!snapshotRef) {
+      setBondCreateError('创建债券资产腿需要 runtime snapshot_ref。');
+      return;
+    }
+    try {
+      setCreatingBondAssetLegId(instrument.id);
+      setBondCreateError(null);
+      setBondCreateMessage(null);
+      const created = await api.createAssetLeg({
+        name: instrument.label,
+        symbol: instrument.symbol ?? instrument.isin ?? instrument.cusip ?? instrument.id,
+        asset_kind: 'BOND',
+        source_snapshot_id: snapshotRef,
+        source_provider: instrument.source || 'bond_fixed_income',
+        freeze_mode: 'snapshot_locked',
+        notes: `Created from bond snapshot ${snapshotRef}`,
+        summary: {
+          bond_snapshot: instrument,
+        },
+      });
+      setBondCreateMessage(`资产腿已创建：${created.name}`);
+    } catch (caught) {
+      setBondCreateError(`创建债券资产腿失败：${(caught as Error).message}`);
+    } finally {
+      setCreatingBondAssetLegId(null);
     }
   }
 
@@ -1014,6 +1052,7 @@ export function SnapshotsPage(): JSX.Element {
 
       {!loading && activeTab === 'equity' ? (
         <EquitySnapshotsTab
+          overview={overview}
           onRefresh={() => {
             void handleRefresh();
           }}
@@ -1025,6 +1064,12 @@ export function SnapshotsPage(): JSX.Element {
       {!loading && activeTab === 'bond' ? (
         <BondFixedIncomeSnapshotsTab
           overview={bondFixedIncomeOverview}
+          createAssetLegError={bondCreateError}
+          createAssetLegMessage={bondCreateMessage}
+          creatingAssetLegId={creatingBondAssetLegId}
+          onCreateAssetLeg={(instrument) => {
+            void handleCreateBondAssetLeg(instrument);
+          }}
           onRefresh={() => {
             void handleRefresh();
           }}

@@ -57,6 +57,13 @@ describe('App runtime routes', () => {
     expect(await screen.findByRole('heading', { level: 1, name: '组合仪表板' })).toBeInTheDocument();
   });
 
+  it('keeps the retired composition detail preview alias out of production routing', async () => {
+    await renderApp('#/compositions/detail');
+
+    await waitFor(() => expect(document.querySelector('.composition-dashboard-page')).not.toBeNull());
+    expect(document.querySelector('.composition-detail-page')).toBeNull();
+  });
+
   it('renders the leg inventory route inside the unified shell', async () => {
     await renderApp('#/legs');
 

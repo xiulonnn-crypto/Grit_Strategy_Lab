@@ -10,4 +10,14 @@ describe("QuickStart frontend preview bootstrap", () => {
       /\$previewArgs\s*=\s*@\(\$frontendPreviewScript,\s*'--host',\s*'127\.0\.0\.1',\s*'--port',\s*'4173',\s*'--watch',\s*'--rebuild-on-start'\)/s,
     );
   });
+
+  it("treats the repo preview:auto command line as a restartable frontend listener", () => {
+    expect(quickStartSource).toContain("function Test-RepoFrontendPreviewProcess");
+    expect(quickStartSource).toContain("$hasRelativePreviewScript");
+    expect(quickStartSource).toContain(".\\preview-server.mjs");
+    expect(quickStartSource).toContain("--rebuild-on-start");
+    expect(quickStartSource).toMatch(
+      /\$belongsToRepo\s*=\s*Test-RepoFrontendPreviewProcess\s+-ProcessPath\s+\$processPath\s+-CommandLine\s+\$commandLine\s+-Port\s+\$Port/s,
+    );
+  });
 });

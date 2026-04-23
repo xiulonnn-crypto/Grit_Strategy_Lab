@@ -46,6 +46,7 @@
 - 这个父线程也是优化任务心跳的唯一写入者：摘要写入最多每秒一次或每完成五个组合时批量落库，而 trial checkpoint 与终态状态切换仍然立即刷盘。
 - 在执行过程中，父线程会增量维护 top-K trial 与 heatmap 单元赢家的运行时摘要；终态物化阶段会直接复用这些摘要，只为最终 top 候选回补完整 metrics，从而避免对所有成功 trial 再次做全量重排与重建。
 - 市场数据 companion SQLite 现在包含按快照作用域组织的表：`dataset_snapshots`、`universe_snapshots`、`dataset_price_bars`、`dataset_corporate_actions`、`dataset_symbol_coverage` 与 `universe_membership_snapshots`。
+- 本地 live runtime 的主库与 companion 库是一组数据面。`GRIT_BACKTEST_DB=.grit_backtest_platform.sqlite3` 会派生 `.grit_backtest_platform_market_data.sqlite3`；如果 backend 误指向新建空主库，`/workspace/overview` 会显示 0 策略，快照页也会只看到空 market-data 状态。这种情况应先备份再恢复或重指向正确 runtime DB，而不是把页面空态当作真实删除。
 - `symbol_identity_cache` 是内部身份修复表，用于处理已退市符号、ticker 生命周期修正，以及来自 Alpha Vantage、SEC EDGAR 与 FMP 的 CIK/交易所元数据拼接。
 - `snapshot_refresh_jobs` 是 API 与 CLI 共用的刷新审计日志。它的 `summary_json` 现在携带刷新心跳字段，例如 `current_stage`、`current_stage_label`、`heartbeat_at`、`progress` 与部分 `refresh_stats`，让运行中的任务在完成前也具备可观测性。
 - `snapshot_recovery.py` 是 `C:\Fin\Grit_Strategy_Lab2` 的冷备探测与导入边界；Lab2 只被视为恢复来源，绝不能成为实时运行时依赖。
@@ -156,7 +157,7 @@
 - 体量较大的优化任务仍然保留了一套 Windows 安全的 `spawn` 进程分发实现，并隐藏在服务边界之后。它不是 API 层用户可配置的能力，会根据运行时内存压力自动下调 worker 目标，也能在不改变持久化任务契约的前提下回退到单 worker 模式；不过当前 synthetic evaluator 默认关闭这条路径，直到出现真正需要它的重型 evaluator。
 - 当前优化 evaluator 路径刻意脱离 `_prepare_backtest_run_context()`。活跃的 `_service_rebuilt.py` evaluator 是 synthetic 且以摘要驱动的，因此优化执行期间不会预加载准备好的 snapshot bars。
 - `/data-snapshots/overview` 返回正式快照契约：`overall_status`、`last_refreshed_at`、`dataset_snapshots[]`、`universe_snapshots[]`、`latest_job`、`blocking_code`、`blocking_target`、`message` 与 `allowed_actions`。
-- 债券治理页不单独新开快照 API。`/data-snapshots/overview` 现在追加 `bond_fixed_income` 分段，用同一条 overview 路由承载全局健康、三位一体工作站、影子数据审计矩阵、调度与来源资格判断。
+- 债券治理页不单独新开快照 API。`/data-snapshots/overview` 追加 `bond_fixed_income` 分段，只发布 market-data repository 中真实的 runtime eligible sources / instruments / raw registry；没有 runtime 债券行时，曲线预览与 registry 必须为空，不允许 deterministic seed 或 phase1 proxy 兜底。
 - `/admin/snapshot-refresh-jobs` 接收 `reason`、`mode` 与 `targets`，返回的是刷新后的 overview 契约，而不是裸任务载荷。
 - `python -m grit_backtest_platform.main refresh-snapshots --reason ... --mode incremental|repair|full --targets price,corporate,universes` 是供 Windows Task Scheduler 使用的调度安全 CLI 入口；API 进程并不持有 18:00 的触发责任。
 - 运行中的刷新任务现在会在仍处于 `RUNNING` 时持续写出心跳 checkpoint 与部分合并后的 dataset snapshot；overview 消费方应预期 `latest_job.summary.refresh_stats` 会先变化，再等到终态任务写入落地。
@@ -220,7 +221,9 @@
 截图驱动的恢复依赖的是前端视图模型，而不是去改写后端契约。
 
 - `web/src/types.ts` 现在把快照建模成两个显式数组：`dataset_snapshots[]` 与 `universe_snapshots[]`。
-- `web/src/pages/snapshots-page.tsx` 只消费正式 overview 契约，并渲染一张单头卡加两张快照卡；它不再从旧 `coverages` 推导 UI。
+- `web/src/pages/snapshots-page.tsx` 只消费正式 overview 契约；股票/指数 tab 必须保留 Compose First 批准稿的全局视角、三位一体工作站、原始快照清单、数据诊断报告与就绪标准结构，同时只从 `dataset_snapshots[]` 与 `universe_snapshots[]` 映射真实 runtime 行。
+- `#/snapshots` 的股票/指数 tab 不能使用批准稿静态行作为生产兜底；如果 runtime 表为空，页面显示 0 或待补，不显示 `99.8%`、`Universe-US-Equity-*` 这类设计稿数字。
+- `#/snapshots?tab=bond` 同样保留批准稿的中文信息架构，但所有来源、可创建资产腿、审计和 raw registry 内容都必须来自 `bond_fixed_income` runtime 分段；后端英文运行标签进入 UI 前需要本地化，不能用 mock 债券、deterministic 曲线或 phase1 proxy 填充。
 - 当刷新任务处于 `RUNNING` 时，只要部分 `refresh_stats` 已经被持久化，快照页就可以提前显示增量“新增...”摘要；如果还没有部分统计，则回退为简单的“最近刷新 ...”时间戳。
 - 快照页会把后端源代码值 `longbridge`、`akshare_us`、`fmp_historical_constituent`、`tiingo`、`alpha_vantage`、`sec_edgar`、`official_announcement`、`wikipedia_revision_history`、`wikipedia_current_page`、`static_seed` 与 `local_cold_backup` 映射成面向用户的来源链标签，而不是直接暴露原始 provider id。
 - 快照页保持人类可读的状态语义：不完整快照显示“部分可用”，只有运行中的任务显示“后台更新中”，旧契约响应则展示“需要重启后端”的提示，而不是静默失败。
@@ -260,3 +263,29 @@
 - `provider_summary` and `metadata.provider_results` now expose stable fields for snapshot UI and persistence: `actions_supported`, `access_tier`, `quota_limited`, `probe_complete`, and `next_retry_at`.
 - Nasdaq-100 historical repair now has two additional free historical layers ahead of current-page fallback: repo-local official provenance seeds and Internet Archive captures of the official Nasdaq activity page.
 - Universe refresh stats now publish `official_seed_status`, `official_seed_source_count`, and `official_seed_missing_anchors`, allowing `#/snapshots` to show exactly which anchors still block 100% historical readiness.
+
+## 2026-04-23 Optimization Results Promotion Rules
+
+- When `matching_combination_source` is `all_trials`, the Optimization Results page must prefer the full `detail.matching_combinations` collection over filtered `job.candidates`. Otherwise a completed job can report more valid matching combinations from the API than the rows rendered in the results center.
+- The persisted detail payload is the stable source for all-trials matching rows. A filtered candidate subset may be useful for the current view, but it must not hide eligible completed combinations from the results center.
+- Constraint refiltering must wait for `updateOptimizationJobConstraints` to resolve before re-ranking or replacing candidate rows. Only fall back to a local constraint application when saving constraints fails.
+- Candidate display should prefer version-style candidate labels over raw `Trial` ids when rendering full matching combinations. Trial-like labels such as `Trial 2402` should fall back to `候选 N` by rank.
+- Mixed English summary tokens such as `daily`, `weekly`, `monthly`, `sharpe`, `oos`, and `max drawdown` should be localized before they reach shelf or row copy.
+- Regression coverage for these rules lives in `web/src/optimization.module.test.tsx`, including tests for full matching combinations, stable refilter behavior, Chinese candidate labels, and localized shelf copy.
+
+## Phase 1.1 composition persistence and freeze model
+
+Compose First Phase 1.1 treats the persisted composition tables as the source of truth for saved portfolios:
+
+- `asset_leg_definitions` and `cash_leg_definitions` are durable truth tables for asset/cash legs. They carry `status`, `revision`, `current_freeze_generation`, `created_at`, `updated_at`, `deleted_at`, and `deleted_reason`. Active natural-key uniqueness is enforced with partial indexes, and referenced legs expose `reference_protected` instead of allowing in-place edits.
+- Strategy legs remain projection-only, but `GET /leg-inventory` no longer auto-lists every strategy parameter version. Inventory defaults to durable asset/cash rows; the create-strategy-leg drawer builds transient candidates from the latest completed backtest run per strategy plus strategy metadata, using `strategy_leg::{strategy_id}::{parameter_version_id}` refs and the selected run metrics for the validation chart/KPIs until explicit strategy-leg persistence is added. Saving a strategy-leg candidate records that stable `strategy_leg` ref in the browser inventory preference, rehydrates the row from the latest candidate data after a document refresh, shows a success toast, and must not redirect to the composition workbench.
+- `compositions` carries the saved composition header, `status`, `revision`, and `current_freeze_generation`. `PATCH /compositions/{id}` with only `status` is a status write; structural patches replace the current revision and freeze generation.
+- `composition_legs` is append/supersede by generation. Old rows are soft-deleted when a structural update writes a new generation.
+- `composition_source_freezes` stores the frozen evidence used by detail pages. Current detail reads only current, non-deleted freezes, so later leg or bond snapshot changes cannot drift saved composition evidence.
+
+Save semantics:
+
+- `POST /compositions/preview` is zero-write and only calculates the normalized draft.
+- `POST /compositions` and structural `PATCH /compositions/{id}` validate total weight, duplicate legs, stale or invalid sources, missing snapshots, and non-eligible bond sources before writing.
+- Bond asset legs can be created only from runtime eligible `bond_fixed_income` snapshots; fallback/proxy curve data is not published as a promotable or display source.
+- `GET /data-snapshots/overview` publishes `bond_fixed_income.eligible_sources`, `eligible_instruments`, and `raw_registry` from the market-data repository. The repository stores clean/net price, dirty/full price, accrued interest, YTM, duration, convexity, source, refresh status, missing-field status, inferred-field status, and raw payload evidence; `curve_preview` remains empty until a real runtime curve source exists.

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { formatPercent, formatRatio } from '../../lib/format';
 import type { ApiAssetLegCreatePayload, ApiCashLegCreatePayload, ApiLegInventoryRow } from '../../types';
 import './leg-inventory.css';
 
@@ -39,6 +40,84 @@ const DEFAULT_CASH_FORM: ApiCashLegCreatePayload = {
   freeze_mode: 'manual',
   notes: '',
 };
+
+type StrategyDrawerMetrics = {
+  annualizedReturn: number | null;
+  maxDrawdown: number | null;
+  sharpe: number | null;
+  totalReturn: number | null;
+};
+
+function readNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function getConfigRecord(row: ApiLegInventoryRow | null | undefined): Record<string, unknown> {
+  return row?.config && typeof row.config === 'object' ? row.config : {};
+}
+
+function getMetricsRecord(row: ApiLegInventoryRow | null | undefined): Record<string, unknown> {
+  const metrics = getConfigRecord(row).metrics;
+  return metrics && typeof metrics === 'object' ? (metrics as Record<string, unknown>) : {};
+}
+
+function getStrategyDrawerMetrics(row: ApiLegInventoryRow | null | undefined): StrategyDrawerMetrics {
+  const metrics = getMetricsRecord(row);
+  return {
+    annualizedReturn: readNumber(metrics.annualized_return) ?? readNumber(metrics.cagr),
+    maxDrawdown: readNumber(metrics.max_drawdown),
+    sharpe: readNumber(metrics.sharpe),
+    totalReturn: readNumber(metrics.total_return),
+  };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function normalizeReturn(value: number | null): number {
+  const normalized = value ?? 0.08;
+  if (Math.abs(normalized) > 2) {
+    return clamp(normalized / 50, -0.35, 1.2);
+  }
+  return clamp(normalized, -0.35, 1.2);
+}
+
+function buildCurveValues(metrics: StrategyDrawerMetrics, kind: 'strategy' | 'benchmark'): number[] {
+  const totalReturn = normalizeReturn(metrics.totalReturn);
+  const drawdown = clamp(Math.abs(metrics.maxDrawdown ?? 0.06), 0, 0.3);
+  const sharpeBend = clamp(((metrics.sharpe ?? 0.8) - 0.8) / 8, -0.08, 0.1);
+  const benchmarkScale = kind === 'benchmark' ? 0.58 : 1;
+  const bendScale = kind === 'benchmark' ? 0.45 : 1;
+
+  return [
+    0,
+    totalReturn * 0.08 * benchmarkScale,
+    totalReturn * 0.18 * benchmarkScale - drawdown * 0.16 * bendScale,
+    totalReturn * 0.34 * benchmarkScale - drawdown * 0.08 * bendScale,
+    totalReturn * 0.52 * benchmarkScale + sharpeBend * bendScale,
+    totalReturn * 0.7 * benchmarkScale + sharpeBend * 1.2 * bendScale,
+    totalReturn * 0.86 * benchmarkScale - drawdown * 0.04 * bendScale,
+    totalReturn * benchmarkScale,
+  ];
+}
+
+function buildPolylinePoints(values: number[]): string {
+  const minValue = Math.min(-0.05, ...values);
+  const maxValue = Math.max(0.08, ...values);
+  const spread = maxValue - minValue || 1;
+  return values
+    .map((value, index) => {
+      const x = Math.round((420 / (values.length - 1)) * index);
+      const y = Math.round(184 - ((value - minValue) / spread) * 140);
+      return `${x},${clamp(y, 36, 190)}`;
+    })
+    .join(' ');
+}
+
+function buildFillPath(points: string): string {
+  return `M${points.replaceAll(' ', ' L')} L420 220 L0 220 Z`;
+}
 
 function DrawerShell({
   children,
@@ -115,6 +194,10 @@ export function StrategyLegDrawer({
 
   const selectedRow = strategyRows.find((row) => row.id === selectedId) ?? strategyRows[0] ?? null;
   const tags = selectedRow?.attribute_tags.map((tag) => tag.replaceAll('_', ' ')).slice(0, 3) ?? [];
+  const metrics = getStrategyDrawerMetrics(selectedRow);
+  const strategyCurvePoints = buildPolylinePoints(buildCurveValues(metrics, 'strategy'));
+  const benchmarkCurvePoints = buildPolylinePoints(buildCurveValues(metrics, 'benchmark'));
+  const strategyCurveFillPath = buildFillPath(strategyCurvePoints);
 
   return (
     <DrawerShell
@@ -158,7 +241,7 @@ export function StrategyLegDrawer({
             </div>
             {strategyRows.length > 0 ? (
               <div className="leg-inventory-run-list">
-                {strategyRows.slice(0, 3).map((row, index) => (
+                {strategyRows.map((row, index) => (
                   <button
                     className={`leg-inventory-run-item${row.id === selectedRow?.id ? ' leg-inventory-run-item--active' : ''}`}
                     key={row.id}
@@ -242,26 +325,26 @@ export function StrategyLegDrawer({
                     <stop offset="100%" stopColor="rgba(31, 135, 123, 0)" />
                   </linearGradient>
                 </defs>
-                <path d="M0 174 L60 168 L120 158 L180 142 L240 116 L300 92 L360 66 L420 44 L420 220 L0 220 Z" fill="url(#strategyDrawerFill)" />
-                <polyline fill="none" points="0,184 60,178 120,172 180,164 240,156 300,146 360,136 420,128" stroke="#4c78c7" strokeDasharray="8 7" strokeWidth="3" />
-                <polyline fill="none" points="0,174 60,168 120,158 180,142 240,116 300,92 360,66 420,44" stroke="#1f877b" strokeWidth="4" />
+                <path d={strategyCurveFillPath} fill="url(#strategyDrawerFill)" />
+                <polyline data-series="benchmark" fill="none" points={benchmarkCurvePoints} stroke="#4c78c7" strokeDasharray="8 7" strokeWidth="3" />
+                <polyline data-series="strategy" fill="none" points={strategyCurvePoints} stroke="#1f877b" strokeWidth="4" />
               </svg>
             </div>
             <div className="leg-inventory-drawer__kpi-grid">
               <div className="leg-inventory-drawer__kpi">
-                <span>引用</span>
-                <strong>{selectedRow?.reference_count ?? 0}</strong>
-                <small>{selectedRow?.reference_summary || '可加入正式组合'}</small>
+                <span>年化</span>
+                <strong>{formatPercent(metrics.annualizedReturn ?? metrics.totalReturn)}</strong>
+                <small>{selectedRow?.proof_label || '已完成回测'}</small>
               </div>
               <div className="leg-inventory-drawer__kpi">
-                <span>版本</span>
-                <strong>{selectedRow?.version_label || '待选'}</strong>
+                <span>夏普</span>
+                <strong>{formatRatio(metrics.sharpe)}</strong>
+                <small>{selectedRow?.version_label || '待选版本'}</small>
+              </div>
+              <div className="leg-inventory-drawer__kpi">
+                <span>最大回撤</span>
+                <strong>{formatPercent(metrics.maxDrawdown)}</strong>
                 <small>{selectedRow?.has_new_version ? '存在新版本' : '当前可冻结'}</small>
-              </div>
-              <div className="leg-inventory-drawer__kpi">
-                <span>状态</span>
-                <strong>{selectedRow?.is_orphan ? '孤儿' : '稳定'}</strong>
-                <small>适合正式入库</small>
               </div>
             </div>
             <div className="leg-inventory-drawer__summary-list">
