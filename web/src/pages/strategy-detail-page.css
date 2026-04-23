@@ -1,0 +1,194 @@
+.strategy-detail-page {
+  min-width: 0;
+  display: grid;
+  gap: 20px;
+}
+
+.strategy-detail-page .strategy-detail-hero {
+  align-items: flex-start;
+}
+
+.strategy-detail-page .strategy-detail-hero__copy {
+  display: grid;
+  gap: 12px;
+}
+
+.strategy-detail-page .strategy-detail-hero__title {
+  margin: 0;
+  color: var(--gsl-text-title);
+  font-size: 1.75rem;
+  line-height: 1.18;
+  letter-spacing: -0.02em;
+}
+
+.strategy-detail-page .strategy-detail-hero__title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.strategy-detail-page .strategy-detail-hero__version {
+  white-space: nowrap;
+}
+
+.strategy-detail-page .strategy-detail-hero__summary {
+  margin: 0;
+  max-width: 72ch;
+  color: var(--gsl-text-sub);
+  font-size: 0.98rem;
+  line-height: 1.7;
+  text-wrap: pretty;
+}
+
+.strategy-detail-page .strategy-detail-main-grid {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: minmax(0, 1.58fr) minmax(320px, 0.84fr);
+  align-items: start;
+}
+
+.strategy-detail-page .strategy-detail-content-stack,
+.strategy-detail-page .strategy-detail-sidebar {
+  display: grid;
+  gap: 20px;
+}
+
+.strategy-detail-page .strategy-detail-sidebar {
+  position: sticky;
+  top: 32px;
+}
+
+.strategy-detail-page .strategy-detail-parameter-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 10px;
+}
+
+.strategy-detail-page .strategy-detail-parameter-card {
+  display: grid;
+  gap: 8px;
+  min-height: 92px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #ffffff;
+}
+
+.strategy-detail-page .strategy-detail-parameter-card--logic {
+  grid-column: 1 / -1;
+  min-height: 0;
+  background:
+    radial-gradient(circle at top left, rgba(31, 135, 123, 0.06), transparent 40%),
+    linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
+}
+
+.strategy-detail-page .strategy-detail-parameter-card span,
+.strategy-detail-page .strategy-detail-run-meta span,
+.strategy-detail-page .strategy-detail-history-card__revision,
+.strategy-detail-page .strategy-detail-history-item__meta span {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.strategy-detail-page .strategy-detail-parameter-card strong {
+  color: var(--gsl-text-title);
+  font-size: 1.02rem;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.strategy-detail-history-table-shell {
+  margin-top: 10px;
+}
+
+.strategy-detail-history-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.strategy-detail-history-table th,
+.strategy-detail-history-table td {
+  white-space: normal;
+  vertical-align: top;
+}
+
+.strategy-detail-history-table th:nth-child(1),
+.strategy-detail-history-table td:nth-child(1) {
+  width: 72px;
+}
+
+.strategy-detail-history-table th:nth-child(3),
+.strategy-detail-history-table td:nth-child(3),
+.strategy-detail-history-table th:nth-child(5),
+.strategy-detail-history-table td:nth-child(5),
+.strategy-detail-history-table th:nth-child(6),
+.strategy-detail-history-table td:nth-child(6) {
+  width: 92px;
+}
+
+.strategy-detail-history-table__comment {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.strategy-detail-page .strategy-detail-parameter-grid--history {
+  margin-top: 0;
+}
+
+.strategy-detail-history-modal {
+  width: min(960px, 100%);
+  display: grid;
+  gap: 18px;
+}
+
+.strategy-detail-history-modal__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.strategy-detail-page .strategy-detail-side-panel--recent-run {
+  gap: 0;
+}
+
+.strategy-detail-page .strategy-detail-run-timeline {
+  margin-top: 10px;
+}
+
+.strategy-detail-page .strategy-detail-run-card {
+  gap: 8px;
+  padding: 16px;
+}
+
+.strategy-detail-page .strategy-detail-run-card .workspace-recent-runs__strategy {
+  white-space: normal;
+}
+
+.strategy-detail-page .chip-row,
+.strategy-detail-page .hero-actions {
+  margin-top: 12px;
+}
+
+.strategy-detail-page .empty-state {
+  margin-top: 10px;
+}
+
+@media (max-width: 1279px) {
+  .strategy-detail-page .strategy-detail-main-grid,
+  .strategy-detail-page .strategy-detail-parameter-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .strategy-detail-page .strategy-detail-sidebar {
+    position: static;
+    top: auto;
+  }
+}
+
+@media (max-width: 767px) {
+  .strategy-detail-page .strategy-detail-hero__actions {
+    width: 100%;
+  }
+}

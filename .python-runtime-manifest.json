@@ -1,0 +1,26 @@
+﻿{
+    "schema_version":  "3.0",
+    "status":  {
+                   "preferred_is_ready":  true,
+                   "legacy_runtime_present":  true,
+                   "last_repair_attempt":  null,
+                   "repair_result":  "none"
+               },
+    "runtime":  {
+                    "preferred_home":  ".\\.python-runtime",
+                    "runtime_python":  ".\\.python-runtime\\python.exe",
+                    "effective_python":  ".\\.venv\\Scripts\\python.exe",
+                    "version":  "3.13.12",
+                    "source_origin":  "repo:.python-runtime"
+                },
+    "environment":  {
+                        "venv_path":  ".\\.venv",
+                        "venv_is_ready":  true
+                    },
+    "diagnostics":  {
+                        "checked_paths_last":  [
+                                                   ".\\.venv\\Scripts\\python.exe",
+                                                   "repo:.python-runtime"
+                                               ]
+                    }
+}

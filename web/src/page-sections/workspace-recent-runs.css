@@ -1,0 +1,136 @@
+﻿.workspace-recent-runs {
+  display: grid;
+}
+
+.workspace-recent-runs__timeline {
+  position: relative;
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workspace-recent-runs__item {
+  position: relative;
+}
+
+.workspace-recent-runs__card {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.84);
+  text-align: left;
+  transition:
+    transform 160ms ease,
+    background 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.workspace-recent-runs__card:hover,
+.workspace-recent-runs__card:focus-visible {
+  transform: translateY(-1px);
+  border-color: rgba(13, 123, 116, 0.2);
+  background: rgba(13, 123, 116, 0.05);
+  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
+  outline: none;
+}
+
+.workspace-recent-runs__header,
+.workspace-recent-runs__badge-row,
+.workspace-recent-runs__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.workspace-recent-runs__run-id,
+.workspace-recent-runs__strategy,
+.workspace-recent-runs__period {
+  margin: 0;
+}
+
+.workspace-recent-runs__strategy {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.workspace-recent-runs__period,
+.workspace-recent-runs__completed {
+  color: var(--muted);
+}
+
+.workspace-recent-runs__status,
+.workspace-recent-runs__badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.8rem;
+}
+
+.workspace-recent-runs__status--success {
+  background: rgba(32, 79, 60, 0.12);
+  color: var(--accent);
+}
+
+.workspace-recent-runs__status--warning {
+  background: rgba(239, 155, 60, 0.14);
+  color: var(--warning);
+}
+
+.workspace-recent-runs__status--danger {
+  background: rgba(143, 63, 47, 0.16);
+  color: var(--danger);
+}
+
+.workspace-recent-runs__badge--positive {
+  background: rgba(32, 79, 60, 0.12);
+  color: var(--accent);
+}
+
+.workspace-recent-runs__badge--negative {
+  background: rgba(143, 63, 47, 0.12);
+  color: var(--danger);
+}
+
+.workspace-recent-runs__badge--neutral {
+  background: rgba(255, 255, 255, 0.75);
+  color: var(--muted);
+}
+
+.workspace-recent-runs__empty {
+  min-height: 140px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: var(--muted);
+}
+
+.workspace-recent-runs__empty--error {
+  color: var(--danger);
+}
+
+.workspace-recent-runs__card--skeleton {
+  min-height: 120px;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.3)),
+    rgba(255, 255, 255, 0.55);
+  background-size: 200% 100%;
+  animation: workspace-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes workspace-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+
+  100% {
+    background-position: -200% 0;
+  }
+}

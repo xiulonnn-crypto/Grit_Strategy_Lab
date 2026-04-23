@@ -1,0 +1,68 @@
+# Runtime & Environment
+.venv/
+.python-runtime/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Frontend Artifacts
+web/node_modules/
+web/dist/
+web/.eslintcache
+
+# Local Data (Crucial!)
+*.db
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+data/vendor/stooq/
+!harness/fixtures/seed_workspace/*.sqlite3
+!web/src/assets/demo_backtest.db # 如果你想保留一个展示用的 demo 库
+web/dist/plots/*
+artifact_storage/
+logs/
+
+# Local runtime databases
+.grit_backtest_platform.sqlite3
+.grit_backtest_platform.sqlite3-*
+.grit_backtest_platform_market_data.sqlite3
+.grit_backtest_platform_market_data.sqlite3-*
+
+# Local restore / QA artifacts
+artifacts/
+artifacts/browser-acceptance-*/
+artifacts/visual-checks/
+artifacts/*.bundle.lock
+artifacts/*.zip
+artifacts/*.quarantine
+artifacts/*.err.log
+artifacts/*.out.log
+artifacts/vite-*.log
+artifacts/uvicorn-*.log
+artifacts/market-data-recovery*/
+
+# Test Artifacts
+.tmp/
+/.tmp-*
+pytesttmp-*/
+temp-artifacts/
+pytest-cache-files-*/
+tmp-uvicorn-*.log
+.tmp/codex-fixture/
+harness/reports/smoke/*
+!harness/reports/smoke/.gitkeep
+
+# Local secrets
+docs/key.txt
+QuickStart-Grit.local.ps1
+
+# OS/IDE
+.DS_Store
+.vscode/
+.idea/
+.gstack/
+.codex-auto-memory.local.json
