@@ -190,6 +190,34 @@ STRATEGY_TEMPLATES: dict[str, StrategyTemplate] = {
 
 TEMPLATE_REGISTRY = STRATEGY_TEMPLATES
 
+FIELD_LABEL_OVERRIDES = {
+    "contribution_anchor": "定投执行锚点",
+    "dynamic_investment_logic": "动态定投逻辑",
+}
+
+DYNAMIC_BUY_AND_HOLD_MULTIPLIER_BANDS: tuple[tuple[str, str], ...] = (
+    ("极度高估", ">90%"),
+    ("温和高估", "70%-90%"),
+    ("合理区间", "30%-70%"),
+    ("低估区间", "10%-30%"),
+    ("极度低估", "<10%"),
+)
+
+DYNAMIC_BUY_AND_HOLD_PROXY_KEY = "nasdaq100"
+DYNAMIC_BUY_AND_HOLD_METRIC_KEY = "pe_ttm_percentile_10y"
+DYNAMIC_BUY_AND_HOLD_RULES = [
+    {"min_percentile": 90.0, "max_percentile": 100.0, "multiplier": 0.5},
+    {"min_percentile": 70.0, "max_percentile": 90.0, "multiplier": 0.8},
+    {"min_percentile": 30.0, "max_percentile": 70.0, "multiplier": 1.0},
+    {"min_percentile": 10.0, "max_percentile": 30.0, "multiplier": 1.5},
+    {"min_percentile": 0.0, "max_percentile": 10.0, "multiplier": 2.0},
+]
+
+
+def confirmation_field_label(key: str, fallback: str | None = None) -> str:
+    normalized_key = str(key or "").strip()
+    return FIELD_LABEL_OVERRIDES.get(normalized_key, fallback or normalized_key)
+
 
 def template_catalog() -> list[dict[str, Any]]:
     return [template.to_dict() for template in STRATEGY_TEMPLATES.values()]
@@ -447,8 +475,104 @@ def _investment_frequency_label(value: str | None) -> str:
     }.get(str(value or "").lower(), "定期")
 
 
-def _build_buy_and_hold_strategy_name(universe_name: str, investment_frequency: str | None) -> str | None:
+def _buy_and_hold_anchor_prefix(value: str | None) -> str:
+    return {
+        "daily": "每日",
+        "weekly": "每周",
+        "monthly": "每月",
+        "quarterly": "每季度",
+        "yearly": "每年",
+    }.get(str(value or "").lower(), "")
+
+
+def _normalize_dynamic_buy_and_hold_range(value: str | None, fallback: str) -> str:
+    normalized = re.sub(r"\s+", "", str(value or ""))
+    if not normalized:
+        return fallback
+    return (
+        normalized
+        .replace("％", "%")
+        .replace("~", "-")
+        .replace("至", "-")
+        .replace("—", "-")
+        .replace("–", "-")
+    )
+
+
+def _is_dynamic_buy_and_hold_prompt(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text or "")
+    upper_compact = compact.upper()
+    if "动态定投" in compact:
+        return True
+    if "倍率" not in compact:
+        return False
+    return any(
+        token in upper_compact
+        for token in (
+            "PE",
+            "TTM",
+        )
+    ) or any(token in compact for token in ("估值", "百分位", "极度高估", "极度低估"))
+
+
+def _extract_buy_and_hold_anchor(text: str, investment_frequency: str | None) -> str | None:
+    compact = re.sub(r"\s+", "", text or "")
+    match = re.search(r"(每(?:日|天|周|月|季|年)[^，。\n]*?第(?:一|1)个交易日)", compact)
+    if match:
+        return match.group(1).replace("固定", "").replace("首个交易日", "第一个交易日") or None
+    if "首个交易日" in compact or "第一个交易日" in compact:
+        prefix = _buy_and_hold_anchor_prefix(investment_frequency)
+        return f"{prefix}第一个交易日" if prefix else "第一个交易日"
+    return None
+
+
+def _extract_dynamic_buy_and_hold_logic(text: str, universe_name: str | None) -> str | None:
+    if not _is_dynamic_buy_and_hold_prompt(text):
+        return None
+    compact = (
+        re.sub(r"\s+", "", text or "")
+        .replace("（", "(")
+        .replace("）", ")")
+        .replace("：", ":")
+    )
+    target = str(universe_name or "").strip() or "目标标的"
+    upper_compact = compact.upper()
+    if re.search(r"滚动10年PE(?:\(TTM\))?", compact, re.IGNORECASE):
+        metric = f"{target}滚动10年PE(TTM)百分位"
+    elif "PE(TTM)" in upper_compact:
+        metric = f"{target}PE(TTM)估值百分位"
+    elif "PE" in upper_compact:
+        metric = f"{target}PE估值百分位"
+    else:
+        metric = f"{target}估值百分位"
+
+    bands: list[str] = []
+    for label, fallback_range in DYNAMIC_BUY_AND_HOLD_MULTIPLIER_BANDS:
+        match = re.search(
+            rf"{label}(?:\(([^()]+)\))?:倍率([0-9]+(?:\.[0-9]+)?)x?",
+            compact,
+            re.IGNORECASE,
+        )
+        if not match:
+            continue
+        range_text = _normalize_dynamic_buy_and_hold_range(match.group(1), fallback_range)
+        multiplier = match.group(2)
+        bands.append(f"{label}{range_text}乘{multiplier}x")
+
+    if bands:
+        return f"读取{metric}：{'；'.join(bands)}"
+    return f"读取{metric}，按估值区间动态调整定投倍率"
+
+
+def _build_buy_and_hold_strategy_name(
+    universe_name: str,
+    investment_frequency: str | None,
+    *,
+    dynamic_investment_logic: str | None = None,
+) -> str | None:
     normalized_universe = str(universe_name or "").strip()
+    if dynamic_investment_logic:
+        return " ".join(part for part in (normalized_universe, "动态定投策略") if part) or "动态定投策略"
     if not normalized_universe:
         return None
     frequency_label = _investment_frequency_label(investment_frequency)
@@ -461,6 +585,8 @@ def _build_buy_and_hold_strategy_description(
     universe_name: str,
     contribution_amount: int | float | None,
     investment_frequency: str | None,
+    contribution_anchor: str | None = None,
+    dynamic_investment_logic: str | None = None,
 ) -> str | None:
     if not text.strip():
         return None
@@ -470,9 +596,14 @@ def _build_buy_and_hold_strategy_description(
     else:
         details.append(f"执行{_investment_frequency_label(investment_frequency)}定投")
     if contribution_amount is not None:
-        details.append(f"每期买入{_format_extracted_value(contribution_amount)}USD")
-    if "第一个交易日" in text:
+        amount_prefix = "每期基准买入" if dynamic_investment_logic else "每期买入"
+        details.append(f"{amount_prefix}{_format_extracted_value(contribution_amount)}USD")
+    if contribution_anchor:
+        details.append(f"按{contribution_anchor}执行")
+    elif "第一个交易日" in text:
         details.append("按每期首个交易日执行")
+    if dynamic_investment_logic:
+        details.append(dynamic_investment_logic)
     if "持有" in text:
         details.append("长期持有")
     return "，".join(details) + "。"
@@ -917,13 +1048,21 @@ def _extract_buy_and_hold_payload(text: str) -> tuple[dict[str, Any], dict[str, 
         ],
     )
     investment_frequency, frequency_source = _extract_frequency_value(text, default="monthly")
+    contribution_anchor = _extract_buy_and_hold_anchor(text, investment_frequency)
+    dynamic_investment_logic = _extract_dynamic_buy_and_hold_logic(text, universe_name)
     benchmark_symbol, benchmark_source = _infer_benchmark_symbol(universe_name)
-    strategy_name = _build_buy_and_hold_strategy_name(universe_name, investment_frequency)
+    strategy_name = _build_buy_and_hold_strategy_name(
+        universe_name,
+        investment_frequency,
+        dynamic_investment_logic=dynamic_investment_logic,
+    )
     strategy_description = _build_buy_and_hold_strategy_description(
         text=text,
         universe_name=universe_name,
         contribution_amount=contribution_amount,
         investment_frequency=investment_frequency,
+        contribution_anchor=contribution_anchor,
+        dynamic_investment_logic=dynamic_investment_logic,
     )
 
     top_level = {
@@ -937,6 +1076,23 @@ def _extract_buy_and_hold_payload(text: str) -> tuple[dict[str, Any], dict[str, 
         "benchmark_symbol": (benchmark_symbol, benchmark_source),
         "contribution_amount": (contribution_amount, "user_input"),
         "investment_frequency": (investment_frequency, frequency_source),
+        "contribution_anchor": (contribution_anchor, "user_input" if contribution_anchor else "system_default"),
+        "dynamic_investment_logic": (
+            dynamic_investment_logic,
+            "system_inference" if dynamic_investment_logic else "system_default",
+        ),
+        "dynamic_investment_proxy_key": (
+            DYNAMIC_BUY_AND_HOLD_PROXY_KEY if dynamic_investment_logic else None,
+            "system_inference" if dynamic_investment_logic else "system_default",
+        ),
+        "dynamic_investment_metric_key": (
+            DYNAMIC_BUY_AND_HOLD_METRIC_KEY if dynamic_investment_logic else None,
+            "system_inference" if dynamic_investment_logic else "system_default",
+        ),
+        "dynamic_investment_rules": (
+            list(DYNAMIC_BUY_AND_HOLD_RULES) if dynamic_investment_logic else None,
+            "system_inference" if dynamic_investment_logic else "system_default",
+        ),
     }
     return top_level, parameters
 
@@ -1263,7 +1419,7 @@ def _set_value(
             entry["value"] = ai_value
             entry["source"] = ai_source
         return
-    entries.append({"key": key, "label": key, "value": ai_value, "source": ai_source})
+    entries.append({"key": key, "label": confirmation_field_label(key, key), "value": ai_value, "source": ai_source})
 
 
 def _entry_value(entries: Sequence[Mapping[str, Any]], key: str) -> Any:
@@ -1276,8 +1432,8 @@ def _entry_value(entries: Sequence[Mapping[str, Any]], key: str) -> Any:
 def _entry_label(entries: Sequence[Mapping[str, Any]], key: str, fallback: str | None = None) -> str:
     for entry in entries:
         if entry.get("key") == key:
-            return str(entry.get("label") or fallback or key)
-    return fallback or key
+            return str(entry.get("label") or confirmation_field_label(key, fallback or key))
+    return confirmation_field_label(key, fallback or key)
 
 
 def _default_strategy_name(top_level: Mapping[str, Any]) -> str:

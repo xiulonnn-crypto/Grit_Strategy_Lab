@@ -41,7 +41,7 @@ SnapshotKind = Literal['DATASET', 'UNIVERSE']
 TrialStatus = Literal['SUCCEEDED', 'FAILED', 'PENDING']
 PromoteMode = Literal['set_current', 'create_copy']
 SnapshotRefreshMode = Literal['incremental', 'repair', 'full']
-SnapshotRefreshTarget = Literal['price', 'corporate', 'universes']
+SnapshotRefreshTarget = Literal['price', 'corporate', 'valuations', 'universes', 'bond']
 DataSegmentType = Literal['FULL', 'TRAIN', 'TEST', 'VALIDATION']
 OptimizationConstraintPresetKey = Literal['balanced', 'defensive', 'offensive']
 SnapshotProviderAccessTier = Literal['public', 'free_account', 'paid_optional']
@@ -200,10 +200,16 @@ class DatasetSnapshotMetadataModel(BaseModel):
     covered_symbol_count: int | None = None
     total_symbol_count: int | None = None
     missing_symbols: list[str] = Field(default_factory=list)
+    benchmark_etf_coverage: dict[str, Any] = Field(default_factory=dict)
     probe_status_breakdown: dict[str, int] = Field(default_factory=dict)
     coverage_kind_breakdown: dict[str, int] = Field(default_factory=dict)
     complete_no_events_symbol_count: int | None = None
     formal_event_symbol_count: int | None = None
+    proxy_keys: list[str] = Field(default_factory=list)
+    observation_frequency: str | None = None
+    latest_date: str | None = None
+    latest_pe_ttm: float | None = None
+    latest_percentile_10y: float | None = None
     provider_summary: SnapshotProviderSummary = Field(default_factory=SnapshotProviderSummary)
 
 
@@ -229,6 +235,18 @@ class AssetLegCreateRequest(BaseModel):
     summary: dict[str, Any] = Field(default_factory=dict)
 
 
+class AssetLegUpdateRequest(BaseModel):
+    name: str | None = None
+    symbol: str | None = None
+    asset_kind: str | None = None
+    source_snapshot_id: str | None = None
+    source_provider: str | None = None
+    freeze_mode: str | None = None
+    notes: str | None = None
+    summary: dict[str, Any] | None = None
+    status: Literal['ACTIVE', 'ARCHIVED'] | None = None
+
+
 class CashLegCreateRequest(BaseModel):
     name: str = Field(min_length=1)
     cash_rule_kind: str = Field(min_length=1)
@@ -237,6 +255,17 @@ class CashLegCreateRequest(BaseModel):
     freeze_mode: str = Field(min_length=1)
     notes: str | None = None
     summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class CashLegUpdateRequest(BaseModel):
+    name: str | None = None
+    cash_rule_kind: str | None = None
+    buffer_bps: float | None = Field(default=None, ge=0)
+    yield_source: str | None = None
+    freeze_mode: str | None = None
+    notes: str | None = None
+    summary: dict[str, Any] | None = None
+    status: Literal['ACTIVE', 'ARCHIVED'] | None = None
 
 
 class CompositionBenchmarkDefinitionModel(BaseModel):
@@ -396,7 +425,15 @@ class CompositionReturnPointModel(BaseModel):
     label: str
     date: str | None = None
     portfolio_return_pct: float = 0.0
+    gross_return_pct: float = 0.0
+    net_return_pct: float = 0.0
+    maintenance_cost_drag_pct: float = 0.0
+    slippage_drag_pct: float = 0.0
+    rebalance_cost_drag_pct: float = 0.0
+    cash_buffer_drag_pct: float = 0.0
+    total_cost_drag_pct: float = 0.0
     cumulative_return_pct: float = 0.0
+    cumulative_net_return_pct: float = 0.0
 
 
 class CompositionBenchmarkPointModel(BaseModel):
@@ -424,6 +461,11 @@ class CompositionRiskContributionModel(BaseModel):
     weight_pct: float = 0.0
     volatility_pct: float = 0.0
     contribution_pct: float = 0.0
+    return_contribution_pct: float = 0.0
+    marginal_contribution_pct: float = 0.0
+    budget_usage_pct: float = 0.0
+    duration_contribution_years: float | None = None
+    convexity_contribution: float | None = None
 
 
 class CompositionMaintenanceCostSummaryModel(BaseModel):
@@ -455,6 +497,52 @@ class CompositionScoreModel(BaseModel):
     factors: list[CompositionScoreFactorModel] = Field(default_factory=list)
 
 
+class CompositionReturnQualitySummaryModel(BaseModel):
+    status: str = 'limited'
+    alignment_window_start: str | None = None
+    alignment_window_end: str | None = None
+    aligned_points: int = 0
+    missing_points: int = 0
+    coverage_pct: float = 0.0
+    fallback_used: bool = False
+    notes: list[str] = Field(default_factory=list)
+
+
+class CompositionRebalanceEventModel(BaseModel):
+    label: str
+    date: str | None = None
+    index: int = 0
+    turnover_pct: float = 0.0
+    estimated_cost_bps: float = 0.0
+    cost_drag_pct: float = 0.0
+    cash_buffer_pct: float = 0.0
+    weight_before: dict[str, float] = Field(default_factory=dict)
+    weight_after: dict[str, float] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)
+
+
+class CompositionSourceIntegrityModel(BaseModel):
+    leg_id: str
+    display_name: str
+    source_ref_id: str | None = None
+    freeze_hash: str | None = None
+    signature_status: str = 'unverified'
+    drift_status: str = 'unknown'
+    current_ref_id: str | None = None
+    checked_at: str | None = None
+    alerts: list[str] = Field(default_factory=list)
+
+
+class CompositionAuditTrailItemModel(BaseModel):
+    id: str
+    action: str
+    actor: str = 'system'
+    at: str
+    summary: str
+    hash_before: str | None = None
+    hash_after: str | None = None
+
+
 class CompositionPreviewResponseModel(BaseModel):
     weight_summary: CompositionWeightSummaryModel = Field(default_factory=CompositionWeightSummaryModel)
     normalized_legs: list[CompositionPreviewLegModel] = Field(default_factory=list)
@@ -466,6 +554,9 @@ class CompositionPreviewResponseModel(BaseModel):
     maintenance_cost_summary: CompositionMaintenanceCostSummaryModel = Field(default_factory=CompositionMaintenanceCostSummaryModel)
     rebalance_summary: CompositionRebalanceSummaryModel = Field(default_factory=CompositionRebalanceSummaryModel)
     composition_score: CompositionScoreModel = Field(default_factory=CompositionScoreModel)
+    return_quality_summary: CompositionReturnQualitySummaryModel = Field(default_factory=CompositionReturnQualitySummaryModel)
+    rebalance_events: list[CompositionRebalanceEventModel] = Field(default_factory=list)
+    source_integrity: list[CompositionSourceIntegrityModel] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     advisories: list[str] = Field(default_factory=list)
 
@@ -479,6 +570,7 @@ class CompositionListItemModel(BaseModel):
     rebalance_frequency: str | None = None
     benchmark_label: str | None = None
     annualized_return: float = 0.0
+    sharpe: float = 0.0
     max_drawdown: float = 0.0
     updated_at: str
     latest_activity_label: str
@@ -514,6 +606,7 @@ class CompositionRebalanceMarkerModel(BaseModel):
 class CompositionScenarioSummaryModel(BaseModel):
     base_case: dict[str, Any] = Field(default_factory=dict)
     stress_case: dict[str, Any] = Field(default_factory=dict)
+    cases: list[dict[str, Any]] = Field(default_factory=list)
     dispersion_note: str | None = None
 
 
@@ -526,6 +619,10 @@ class CompositionSourceFreezeModel(BaseModel):
     freeze_hash: str
     captured_at: str
     snapshot: dict[str, Any] = Field(default_factory=dict)
+    signature_status: str | None = None
+    drift_status: str | None = None
+    current_ref_id: str | None = None
+    alerts: list[str] = Field(default_factory=list)
 
 
 class CompositionDetailResponseModel(BaseModel):
@@ -550,8 +647,12 @@ class CompositionDetailResponseModel(BaseModel):
     correlation_matrix: list[CompositionCorrelationCellModel] = Field(default_factory=list)
     risk_contribution_preview: list[CompositionRiskContributionModel] = Field(default_factory=list)
     maintenance_cost_summary: CompositionMaintenanceCostSummaryModel = Field(default_factory=CompositionMaintenanceCostSummaryModel)
+    return_quality_summary: CompositionReturnQualitySummaryModel = Field(default_factory=CompositionReturnQualitySummaryModel)
+    rebalance_events: list[CompositionRebalanceEventModel] = Field(default_factory=list)
     scenario_summary: CompositionScenarioSummaryModel = Field(default_factory=CompositionScenarioSummaryModel)
     source_evidence: list[CompositionSourceFreezeModel] = Field(default_factory=list)
+    source_integrity: list[CompositionSourceIntegrityModel] = Field(default_factory=list)
+    audit_trail: list[CompositionAuditTrailItemModel] = Field(default_factory=list)
     composition_score: CompositionScoreModel = Field(default_factory=CompositionScoreModel)
     latest_activity_label: str
     deep_link_actions: list[AllowedAction | str] = Field(default_factory=list)
@@ -648,6 +749,20 @@ class BondSnapshotRegistryItemModel(BaseModel):
     label: str
     status: str
     source: str
+    asset_type: str | None = None
+    tenor_label: str | None = None
+    audit_profile: str | None = None
+    discount_rate_pct: float | None = None
+    real_yield_pct: float | None = None
+    inflation_factor: float | None = None
+    breakeven_inflation_bps: float | None = None
+    effective_duration: float | None = None
+    sec_yield_30d_pct: float | None = None
+    credit_quality: dict[str, Any] | str | None = None
+    tracking_error_bps: float | None = None
+    audit_alerts: list[str] = Field(default_factory=list)
+    audit_notes: list[str] = Field(default_factory=list)
+    tracking_status: str | None = None
     snapshot_ref: str | None = None
     updated_at: str | None = None
     notes: list[str] = Field(default_factory=list)
@@ -670,6 +785,9 @@ class BondSnapshotEligibleInstrumentModel(BaseModel):
     instrument_type: str
     source: str
     status: str
+    asset_type: str | None = None
+    tenor_label: str | None = None
+    audit_profile: str | None = None
     symbol: str | None = None
     isin: str | None = None
     cusip: str | None = None
@@ -682,9 +800,20 @@ class BondSnapshotEligibleInstrumentModel(BaseModel):
     dirty_price: float | None = None
     full_price: float | None = None
     accrued_interest: float | None = None
+    discount_rate_pct: float | None = None
     ytm_pct: float | None = None
+    real_yield_pct: float | None = None
+    inflation_factor: float | None = None
+    breakeven_inflation_bps: float | None = None
     duration: float | None = None
+    effective_duration: float | None = None
     convexity: float | None = None
+    sec_yield_30d_pct: float | None = None
+    credit_quality: dict[str, Any] | str | None = None
+    tracking_error_bps: float | None = None
+    audit_alerts: list[str] = Field(default_factory=list)
+    audit_notes: list[str] = Field(default_factory=list)
+    tracking_status: str | None = None
     snapshot_ref: str | None = None
     refresh_status: str | None = None
     missing_fields: list[str] = Field(default_factory=list)
@@ -725,6 +854,32 @@ class BondFixedIncomeOverviewModel(BaseModel):
     scheduler: BondSnapshotSchedulerModel
     selected_source_summary: BondSnapshotSourceSummaryModel
     system_diagnostics: BondSnapshotSystemDiagnosticsModel
+    group_counts: dict[str, dict[str, int]] = Field(default_factory=dict)
+    sourced_ready_counts: dict[str, dict[str, int]] = Field(default_factory=dict)
+    instrument_counts: dict[str, dict[str, int]] = Field(default_factory=dict)
+    ust_metrics: dict[str, Any] | None = None
+    tips_metrics: dict[str, Any] | None = None
+    lqd_metrics: dict[str, Any] | None = None
+    group_metrics: dict[str, dict[str, Any] | None] | None = None
+    ust_sourced_count: int | None = None
+    ust_ready_count: int | None = None
+    tips_sourced_count: int | None = None
+    tips_ready_count: int | None = None
+    ig_sourced_count: int | None = None
+    ig_ready_count: int | None = None
+    ust_10y_2y_spread_bps: float | None = None
+    top_ust_10y_2y_spread_bps: float | None = None
+    tips_real_yield_pct: float | None = None
+    tips_inflation_factor: float | None = None
+    tips_breakeven_pct: float | None = None
+    lqd_effective_duration: float | None = None
+    lqd_sec_yield_30d_pct: float | None = None
+    lqd_credit_quality: dict[str, Any] | str | None = None
+    lqd_tracking_status: str | None = None
+    quality_audit: list[dict[str, Any]] = Field(default_factory=list)
+    repair_rules: list[dict[str, Any]] = Field(default_factory=list)
+    daily_accrual_status: list[dict[str, Any]] = Field(default_factory=list)
+    risk_budget_inputs: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SnapshotOverviewResponseModel(BaseModel):

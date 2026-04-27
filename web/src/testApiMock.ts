@@ -27,6 +27,14 @@ function readIdempotencyKey(request: Request, body: Record<string, unknown> | un
   return request.headers.get('Idempotency-Key') ?? (typeof body?.idempotency_key === 'string' ? body.idempotency_key : '') ?? '';
 }
 
+function withoutAbortSignal(init?: RequestInit): RequestInit | undefined {
+  if (!init) {
+    return undefined;
+  }
+  const { signal: _signal, ...rest } = init;
+  return rest;
+}
+
 export function installMockApiServer() {
   resetDemoStore();
   const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -34,7 +42,7 @@ export function installMockApiServer() {
     const request =
       input instanceof Request
         ? new Request(new URL(input.url, baseUrl).toString(), input)
-        : new Request(new URL(String(input), baseUrl).toString(), init);
+        : new Request(new URL(String(input), baseUrl).toString(), withoutAbortSignal(init));
     const url = new URL(request.url, 'http://localhost');
     const segments = url.pathname.replace(/^\/+/, '').split('/').filter(Boolean);
     const method = request.method.toUpperCase();
@@ -172,8 +180,14 @@ export function installMockApiServer() {
       if (method === 'POST' && url.pathname === '/asset-legs') {
         return json(await demoApi.createAssetLeg!(body as import('./types').ApiAssetLegCreatePayload));
       }
+      if (method === 'PATCH' && segments[0] === 'asset-legs' && segments.length === 2) {
+        return json(await demoApi.updateAssetLeg!(segments[1], body as import('./types').ApiAssetLegUpdatePayload));
+      }
       if (method === 'POST' && url.pathname === '/cash-legs') {
         return json(await demoApi.createCashLeg!(body as import('./types').ApiCashLegCreatePayload));
+      }
+      if (method === 'PATCH' && segments[0] === 'cash-legs' && segments.length === 2) {
+        return json(await demoApi.updateCashLeg!(segments[1], body as import('./types').ApiCashLegUpdatePayload));
       }
       if (method === 'GET' && url.pathname === '/compositions') {
         return json(await demoApi.listCompositions!());
@@ -228,6 +242,7 @@ export function installMockApiServer() {
           String(body?.mode ?? 'set_current') as 'set_current' | 'create_copy',
           readIdempotencyKey(request, body),
           typeof body?.comment === 'string' ? body.comment : undefined,
+          typeof body?.base_parameter_version_id === 'string' ? body.base_parameter_version_id : undefined,
         ));
       }
       if (method === 'DELETE' && segments[0] === 'optimization-jobs' && segments[2] === 'candidates' && segments.length === 4) {

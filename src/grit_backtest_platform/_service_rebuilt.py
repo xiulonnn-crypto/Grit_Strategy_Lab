@@ -16,7 +16,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 from uuid import uuid4
 
 from ._runtime_memory import read_runtime_memory_status
@@ -31,6 +31,7 @@ from .creation_templates import (
     _build_mean_reversion_trading_logic_summary,
     blank_confirmation_fields,
     build_confirmation,
+    confirmation_field_label,
 )
 from .storage import SQLiteStorage, dumps, iso_now, is_snapshot_blocking, loads, utc_now
 
@@ -72,6 +73,7 @@ OPTIMIZATION_CONSTRAINT_PRESET_LABELS: dict[str, str] = {
     "offensive": "进攻型",
 }
 OPTIMIZATION_DEFAULT_OBJECTIVE = "return_sharpe"
+COMPOSITION_RECENT_WINDOW_MONTHS = 120
 OPTIMIZATION_OBJECTIVE_ALIASES: dict[str, str] = {
     "sharpe": "return_sharpe",
     "return_sharpe": "return_sharpe",
@@ -1200,6 +1202,8 @@ def _summarize_revision_description(
             universe_name=universe_name,
             contribution_amount=parameters.get("contribution_amount"),
             investment_frequency=investment_frequency,
+            contribution_anchor=_format_strategy_value(parameters.get("contribution_anchor")) or None,
+            dynamic_investment_logic=_format_strategy_value(parameters.get("dynamic_investment_logic")) or None,
         ) or fallback or None
 
     if strategy_type == "MOMENTUM":
@@ -3188,6 +3192,12 @@ class BacktestPlatformService:
             raise ValueError(f"Unsupported composition status: {value}")
         return normalized
 
+    def _normalize_leg_definition_status(self, value: Any, *, default: str = "ACTIVE") -> str:
+        normalized = str(value or default).strip().upper() or default
+        if normalized not in {"ACTIVE", "ARCHIVED"}:
+            raise ValueError(f"Unsupported leg definition status: {value}")
+        return normalized
+
     def _normalize_composition_benchmark_definition(self, value: Any) -> dict[str, Any]:
         payload = _as_mapping(value)
         return {
@@ -3249,10 +3259,13 @@ class BacktestPlatformService:
         counts: dict[str, int] = {}
         rows = self.storage.fetch_all(
             """
-            SELECT source_ref_id
+            SELECT composition_legs.source_ref_id
             FROM composition_legs
-            WHERE deleted_at IS NULL
-              AND status = 'ACTIVE'
+            INNER JOIN compositions ON compositions.id = composition_legs.composition_id
+            WHERE composition_legs.deleted_at IS NULL
+              AND composition_legs.status = 'ACTIVE'
+              AND compositions.deleted_at IS NULL
+              AND UPPER(COALESCE(compositions.status, 'DRAFT')) != 'ARCHIVED'
             """
         )
         for row in rows:
@@ -3260,6 +3273,188 @@ class BacktestPlatformService:
             if source_ref_id:
                 counts[source_ref_id] = counts.get(source_ref_id, 0) + 1
         return counts
+
+    def _refresh_composition_leg_reference_summaries(
+        self,
+        normalized_legs: Sequence[Mapping[str, Any]] | Sequence[dict[str, Any]],
+        *,
+        minimum_reference_ids: Iterable[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        reference_counts = self._composition_reference_counts()
+        minimum_refs = {
+            str(item or "").strip()
+            for item in (minimum_reference_ids or [])
+            if str(item or "").strip()
+        }
+        refreshed: list[dict[str, Any]] = []
+        for raw_leg in normalized_legs:
+            leg = dict(_as_mapping(raw_leg))
+            source_ref_id = str(leg.get("source_ref_id") or leg.get("id") or "").strip()
+            reference_count = reference_counts.get(source_ref_id, 0)
+            if source_ref_id in minimum_refs:
+                reference_count = max(reference_count, 1)
+            leg["reference_count"] = reference_count
+            leg["reference_summary"] = self._reference_summary(reference_count)
+            refreshed.append(leg)
+        return refreshed
+
+    def _raise_if_leg_reference_protected(self, leg_id: str, leg_type: str) -> None:
+        reference_count = self._composition_reference_counts().get(leg_id, 0)
+        if reference_count <= 0:
+            return
+        raise ContractConflictError(
+            "leg_reference_protected",
+            "This leg is already referenced by a composition. Copy it and change the parameters instead.",
+            blocking_target={
+                "leg_id": leg_id,
+                "leg_type": leg_type,
+                "reference_count": reference_count,
+            },
+            next_action="copy_leg_definition",
+        )
+
+    @classmethod
+    def _normalize_leg_signature_value(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return round(float(value), 8)
+        if isinstance(value, Mapping):
+            return tuple(
+                (str(key), cls._normalize_leg_signature_value(nested_value))
+                for key, nested_value in sorted(value.items(), key=lambda item: str(item[0]))
+            )
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            normalized = [cls._normalize_leg_signature_value(item) for item in value]
+            return tuple(sorted(normalized, key=repr))
+        return str(value).strip()
+
+    @classmethod
+    def _asset_leg_semantic_signature(
+        cls,
+        *,
+        symbol: Any,
+        asset_kind: Any,
+        source_snapshot_id: Any,
+        source_provider: Any,
+        freeze_mode: Any,
+        summary: Mapping[str, Any],
+    ) -> tuple[Any, ...]:
+        return (
+            ("symbol", str(symbol or "").strip().upper()),
+            ("asset_kind", str(asset_kind or "").strip().upper()),
+            ("source_snapshot_id", str(source_snapshot_id or "").strip()),
+            ("source_provider", str(source_provider or "").strip()),
+            ("freeze_mode", str(freeze_mode or "").strip()),
+            (
+                "summary",
+                tuple(
+                    (
+                        key,
+                        cls._normalize_leg_signature_value(summary.get(key)),
+                    )
+                    for key in (
+                        "valuation_basis",
+                        "portfolio_roles",
+                        "rebalance_affinity",
+                        "maintenance_cadence",
+                    )
+                ),
+            ),
+        )
+
+    @classmethod
+    def _cash_leg_semantic_signature(
+        cls,
+        *,
+        cash_rule_kind: Any,
+        buffer_bps: Any,
+        yield_source: Any,
+        freeze_mode: Any,
+        summary: Mapping[str, Any],
+    ) -> tuple[Any, ...]:
+        return (
+            ("cash_rule_kind", str(cash_rule_kind or "").strip().upper().replace("-", "_")),
+            ("buffer_bps", round(_as_float(buffer_bps, 0.0), 4)),
+            ("yield_source", str(yield_source or "").strip()),
+            ("freeze_mode", str(freeze_mode or "").strip()),
+            (
+                "summary",
+                (
+                    (
+                        "target_weight_pct",
+                        cls._normalize_leg_signature_value(summary.get("target_weight_pct", 20)),
+                    ),
+                    (
+                        "rebalance_frequency",
+                        cls._normalize_leg_signature_value(summary.get("rebalance_frequency", "quarterly")),
+                    ),
+                ),
+            ),
+        )
+
+    def _raise_duplicate_asset_leg_if_needed(
+        self,
+        *,
+        signature: tuple[Any, ...],
+        exclude_id: str | None = None,
+    ) -> None:
+        for row in self.storage.fetch_all("SELECT * FROM asset_leg_definitions WHERE deleted_at IS NULL"):
+            duplicate_id = str(row.get("id") or "")
+            if exclude_id and duplicate_id == exclude_id:
+                continue
+            row_signature = self._asset_leg_semantic_signature(
+                symbol=row.get("symbol"),
+                asset_kind=row.get("asset_kind"),
+                source_snapshot_id=row.get("source_snapshot_id"),
+                source_provider=row.get("source_provider"),
+                freeze_mode=row.get("freeze_mode"),
+                summary=loads(row.get("summary_json"), {}),
+            )
+            if row_signature == signature:
+                raise ContractConflictError(
+                    "duplicate_leg_definition",
+                    "A leg with the same source and semantic parameters already exists. Change a core parameter before copying.",
+                    blocking_target={
+                        "leg_id": duplicate_id,
+                        "leg_type": "asset",
+                        "name": row.get("name"),
+                    },
+                    next_action="copy_with_parameter_changes",
+                )
+
+    def _raise_duplicate_cash_leg_if_needed(
+        self,
+        *,
+        signature: tuple[Any, ...],
+        exclude_id: str | None = None,
+    ) -> None:
+        for row in self.storage.fetch_all("SELECT * FROM cash_leg_definitions WHERE deleted_at IS NULL"):
+            duplicate_id = str(row.get("id") or "")
+            if exclude_id and duplicate_id == exclude_id:
+                continue
+            row_signature = self._cash_leg_semantic_signature(
+                cash_rule_kind=row.get("cash_rule_kind"),
+                buffer_bps=row.get("buffer_bps"),
+                yield_source=row.get("yield_source"),
+                freeze_mode=row.get("freeze_mode"),
+                summary=loads(row.get("summary_json"), {}),
+            )
+            if row_signature == signature:
+                raise ContractConflictError(
+                    "duplicate_leg_definition",
+                    "A cash leg with the same rule and semantic parameters already exists. Change a core parameter before copying.",
+                    blocking_target={
+                        "leg_id": duplicate_id,
+                        "leg_type": "cash",
+                        "name": row.get("name"),
+                    },
+                    next_action="copy_with_parameter_changes",
+                )
 
     def _strategy_projection_row(
         self,
@@ -3328,6 +3523,22 @@ class BacktestPlatformService:
         allowed_actions: list[str] = ["open_strategy_detail", "open_composition_workbench"]
         if is_orphan:
             allowed_actions.insert(0, "run_backtest")
+        source_integrity = self._leg_source_integrity_summary(
+            source_ref_id=inventory_id,
+            source_ref_type="strategy_projection",
+            display_name=str(strategy.get("name") or strategy_id),
+            status=status,
+            updated_at=str(strategy.get("updated_at") or iso_now()),
+            payload=config,
+        )
+        if has_new_version:
+            source_integrity["drift_status"] = "drifted"
+            source_integrity["signature_status"] = "stale"
+            source_integrity["alerts"] = ["A newer parameter version exists; saved compositions keep the frozen version."]
+        elif is_orphan:
+            source_integrity["drift_status"] = "needs_repair"
+            source_integrity["signature_status"] = "unverified"
+            source_integrity["alerts"] = ["No eligible completed run exists for this strategy version."]
         return {
             "id": inventory_id,
             "leg_type": "strategy",
@@ -3344,7 +3555,16 @@ class BacktestPlatformService:
             "allowed_actions": allowed_actions,
             "source_ref_id": inventory_id,
             "source_ref_type": "strategy_projection",
-            "config": config,
+            "source_integrity": source_integrity,
+            "freeze_hash": source_integrity["freeze_hash"],
+            "signature_status": source_integrity["signature_status"],
+            "drift_status": source_integrity["drift_status"],
+            "current_ref_id": source_integrity["current_ref_id"],
+            "alerts": list(source_integrity["alerts"]),
+            "config": {
+                **config,
+                "source_integrity": source_integrity,
+            },
         }
 
     def _asset_leg_attribute_tags(self, row: Mapping[str, Any]) -> list[str]:
@@ -3412,11 +3632,212 @@ class BacktestPlatformService:
                 return row
         return None
 
-    def _bond_snapshot_field_status(self, row: Mapping[str, Any]) -> dict[str, str]:
-        inferred_fields = dict(row.get("inferred_fields") or {})
-        missing_fields = {str(item) for item in (row.get("missing_fields") or [])}
-        field_status: dict[str, str] = {}
-        for field_name in (
+    def _bond_snapshot_raw_payload(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        raw = row.get("raw")
+        if isinstance(raw, Mapping):
+            return dict(raw)
+        raw_json = row.get("raw_json")
+        if raw_json is not None:
+            if isinstance(raw_json, Mapping):
+                return dict(raw_json)
+            decoded = loads(raw_json, {})
+            if isinstance(decoded, Mapping):
+                return dict(decoded)
+        return {}
+
+    def _bond_snapshot_value(self, row: Mapping[str, Any], *field_names: str) -> Any:
+        raw = self._bond_snapshot_raw_payload(row)
+        for field_name in field_names:
+            value = row.get(field_name)
+            if value not in (None, ""):
+                return value
+            value = raw.get(field_name)
+            if value not in (None, ""):
+                return value
+        for container_name in ("instrument", "profile", "audit", "metrics", "metadata", "official", "raw_fields"):
+            container = raw.get(container_name)
+            if not isinstance(container, Mapping):
+                continue
+            for field_name in field_names:
+                value = container.get(field_name)
+                if value not in (None, ""):
+                    return value
+        return None
+
+    @staticmethod
+    def _bond_snapshot_optional_float(value: Any) -> float | None:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            numeric_value = float(value)
+            return numeric_value if math.isfinite(numeric_value) else None
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                numeric_value = float(stripped)
+            except ValueError:
+                return None
+            return numeric_value if math.isfinite(numeric_value) else None
+        return None
+
+    @staticmethod
+    def _bond_snapshot_optional_text(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _bond_snapshot_text_list(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            text = value.strip()
+            return [text] if text else []
+        if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return [str(value).strip()] if str(value).strip() else []
+
+    @staticmethod
+    def _bond_snapshot_unique_texts(*groups: Sequence[str]) -> list[str]:
+        seen: set[str] = set()
+        values: list[str] = []
+        for group in groups:
+            for item in group:
+                text = str(item).strip()
+                if not text or text in seen:
+                    continue
+                seen.add(text)
+                values.append(text)
+        return values
+
+    def _bond_snapshot_profile(self, row: Mapping[str, Any]) -> str | None:
+        raw_profile = self._bond_snapshot_optional_text(
+            self._bond_snapshot_value(row, "audit_profile", "auditProfile", "profile")
+        )
+        if raw_profile:
+            return raw_profile.upper()
+        identifier_blob = " ".join(
+            str(row.get(key) or "")
+            for key in ("instrument_id", "symbol", "name", "id", "source_snapshot_id")
+        ).upper()
+        if "UST_BILL_3M" in identifier_blob:
+            return "UST_BILL_3M"
+        if "UST_CMT_30Y" in identifier_blob:
+            return "UST_CMT_30Y"
+        if "UST_CMT_10Y" in identifier_blob:
+            return "UST_CMT_10Y"
+        if "UST_CMT_2Y" in identifier_blob:
+            return "UST_CMT_2Y"
+        if "TIPS_10Y" in identifier_blob or "TIPS10Y" in identifier_blob:
+            return "TIPS_10Y"
+        if "TIPS_5Y" in identifier_blob or "TIPS5Y" in identifier_blob:
+            return "TIPS_5Y"
+        if "TIPS" in identifier_blob:
+            return "TIPS"
+        if "LQD" in identifier_blob:
+            return "LQD"
+        return None
+
+    def _bond_snapshot_asset_type(self, row: Mapping[str, Any]) -> str | None:
+        raw_asset_type = self._bond_snapshot_optional_text(
+            self._bond_snapshot_value(row, "asset_type", "assetType")
+        )
+        if raw_asset_type:
+            return raw_asset_type.upper()
+        if self._bond_snapshot_profile(row) in {"LQD", "LQD_BOND_ETF"}:
+            return "BOND_ETF"
+        return None
+
+    def _bond_snapshot_tenor_label(self, row: Mapping[str, Any]) -> str | None:
+        raw_tenor = self._bond_snapshot_optional_text(
+            self._bond_snapshot_value(row, "tenor_label", "tenorLabel", "tenor")
+        )
+        if raw_tenor:
+            return raw_tenor
+        profile = self._bond_snapshot_profile(row)
+        if profile and profile.startswith(("UST_BILL_", "UST_CMT_", "TIPS_")):
+            return profile.rsplit("_", 1)[-1]
+        return None
+
+    def _bond_snapshot_official_tracking_error_bps(self, row: Mapping[str, Any]) -> float | None:
+        return self._bond_snapshot_optional_float(
+            self._bond_snapshot_value(
+                row,
+                "official_tracking_error_bps",
+                "officialTrackingErrorBps",
+            )
+        )
+
+    def _bond_snapshot_tracking_error_bps(self, row: Mapping[str, Any]) -> float | None:
+        official_value = self._bond_snapshot_official_tracking_error_bps(row)
+        if official_value is not None:
+            return official_value
+        return self._bond_snapshot_optional_float(
+            self._bond_snapshot_value(row, "tracking_error_bps", "trackingErrorBps")
+        )
+
+    def _bond_snapshot_tracking_error_source(self, row: Mapping[str, Any]) -> str | None:
+        source = self._bond_snapshot_optional_text(
+            self._bond_snapshot_value(row, "tracking_error_source", "trackingErrorSource", "tracking_source")
+        )
+        return source.strip().upper() if source else None
+
+    def _bond_snapshot_raw_tracking_status(self, row: Mapping[str, Any]) -> str | None:
+        tracking_status = self._bond_snapshot_optional_text(
+            self._bond_snapshot_value(
+                row,
+                "tracking_status",
+                "trackingStatus",
+                "tracking_error_status",
+                "trackingErrorStatus",
+            )
+        )
+        return tracking_status.upper() if tracking_status else None
+
+    def _bond_snapshot_has_official_tracking_error(self, row: Mapping[str, Any]) -> bool:
+        raw_status = self._bond_snapshot_raw_tracking_status(row)
+        if raw_status in {"WATCH", "MISSING", "UNOFFICIAL", "ESTIMATED", "INFERRED", "PROXY"}:
+            return False
+        source = self._bond_snapshot_tracking_error_source(row)
+        if source in {"UNOFFICIAL", "ESTIMATED", "INFERRED", "MODEL", "PROXY"}:
+            return False
+        if self._bond_snapshot_official_tracking_error_bps(row) is not None:
+            return True
+        tracking_error_bps = self._bond_snapshot_optional_float(
+            self._bond_snapshot_value(row, "tracking_error_bps", "trackingErrorBps")
+        )
+        if tracking_error_bps is None:
+            return False
+        return source in {
+            "OFFICIAL",
+            "OFFICIAL_SOURCE",
+            "ISHARES",
+            "ISHARES_OFFICIAL",
+            "ISHARES_PRODUCT_PAGE",
+            "BLACKROCK",
+            "BLACKROCK_OFFICIAL",
+            "BLACKROCK_PRODUCT_PAGE",
+        }
+
+    def _bond_snapshot_tracking_status(self, row: Mapping[str, Any]) -> str | None:
+        raw_status = self._bond_snapshot_raw_tracking_status(row)
+        if raw_status:
+            return raw_status
+        if self._bond_snapshot_asset_type(row) == "BOND_ETF":
+            return "READY" if self._bond_snapshot_has_official_tracking_error(row) else "WATCH"
+        return None
+
+    def _bond_snapshot_required_fields(self, row: Mapping[str, Any]) -> tuple[str, ...]:
+        profile = self._bond_snapshot_profile(row)
+        asset_type = self._bond_snapshot_asset_type(row)
+        if asset_type == "BOND_ETF":
+            return ("effective_duration", "sec_yield_30d_pct", "credit_quality", "tracking_error_bps")
+        if profile and profile.startswith("UST_CMT_"):
+            return ("ytm_pct",)
+        base_fields = (
             "clean_price",
             "net_price",
             "dirty_price",
@@ -3425,8 +3846,136 @@ class BacktestPlatformService:
             "ytm_pct",
             "duration",
             "convexity",
-        ):
-            if field_name in missing_fields or row.get(field_name) is None:
+        )
+        if profile == "TIPS_10Y":
+            return base_fields + ("real_yield_pct", "inflation_factor", "breakeven_inflation_bps")
+        if profile and profile.startswith("TIPS"):
+            return base_fields + ("real_yield_pct", "inflation_factor")
+        return base_fields
+
+    def _bond_snapshot_field_value(self, row: Mapping[str, Any], field_name: str) -> Any:
+        if field_name == "real_yield_pct":
+            return self._bond_snapshot_value(row, "real_yield_pct", "realYieldPct", "real_yield", "realYield")
+        if field_name == "inflation_factor":
+            return self._bond_snapshot_value(row, "inflation_factor", "inflationFactor")
+        if field_name == "breakeven_inflation_bps":
+            return self._bond_snapshot_value(
+                row,
+                "breakeven_inflation_bps",
+                "breakevenInflationBps",
+                "breakeven_bps",
+                "breakevenBps",
+            )
+        if field_name == "discount_rate_pct":
+            return self._bond_snapshot_value(row, "discount_rate_pct", "discountRatePct", "discount_rate")
+        if field_name == "effective_duration":
+            return self._bond_snapshot_value(row, "effective_duration", "effectiveDuration")
+        if field_name == "sec_yield_30d_pct":
+            return self._bond_snapshot_value(row, "sec_yield_30d_pct", "secYield30dPct", "sec_yield_30d")
+        if field_name == "credit_quality":
+            return self._bond_snapshot_value(row, "credit_quality", "creditQuality")
+        if field_name == "tracking_error_bps":
+            return self._bond_snapshot_tracking_error_bps(row)
+        return row.get(field_name)
+
+    def _bond_snapshot_row_keys(self, row: Mapping[str, Any]) -> set[str]:
+        return {
+            str(row.get(key) or "")
+            for key in ("id", "source_snapshot_id", "instrument_id", "symbol", "isin", "cusip")
+            if str(row.get(key) or "")
+        }
+
+    def _bond_snapshot_audit_context(self, rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, list[str]]]:
+        context: dict[str, dict[str, list[str]]] = {}
+        cmt_rows: dict[str, Mapping[str, Any]] = {}
+        for row in rows:
+            profile = self._bond_snapshot_profile(row)
+            if profile in {"UST_CMT_2Y", "UST_CMT_10Y"} and profile not in cmt_rows:
+                cmt_rows[profile] = row
+        two_year = cmt_rows.get("UST_CMT_2Y")
+        ten_year = cmt_rows.get("UST_CMT_10Y")
+        if two_year is not None and ten_year is not None:
+            two_year_yield = self._bond_snapshot_optional_float(two_year.get("ytm_pct"))
+            ten_year_yield = self._bond_snapshot_optional_float(ten_year.get("ytm_pct"))
+            if two_year_yield is not None and ten_year_yield is not None:
+                spread_bps = round((ten_year_yield - two_year_yield) * 100.0, 4)
+                note = f"UST_CMT_2Y/10Y spread {spread_bps:g} bps; audit band -100..300 bps."
+                alert = (
+                    f"UST_CMT_2Y/10Y spread {spread_bps:g} bps is outside the -100..300 bps audit band."
+                    if spread_bps < -100.0 or spread_bps > 300.0
+                    else None
+                )
+                for row in (two_year, ten_year):
+                    for key in self._bond_snapshot_row_keys(row):
+                        bucket = context.setdefault(key, {"audit_alerts": [], "audit_notes": []})
+                        bucket["audit_notes"].append(note)
+                        if alert:
+                            bucket["audit_alerts"].append(alert)
+        return context
+
+    def _bond_snapshot_generated_audit(
+        self,
+        row: Mapping[str, Any],
+        audit_context: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
+    ) -> tuple[list[str], list[str]]:
+        alerts: list[str] = []
+        notes: list[str] = []
+        profile = self._bond_snapshot_profile(row)
+        asset_type = self._bond_snapshot_asset_type(row)
+        if profile == "UST_BILL_3M":
+            notes.append("Accrued interest is waived for the UST_BILL_3M audit profile.")
+        if asset_type == "BOND_ETF" and not self._bond_snapshot_has_official_tracking_error(row):
+            alerts.append("Official tracking_error_bps is required for BOND_ETF readiness.")
+        if profile == "UST_CMT_30Y":
+            jump_bps = self._bond_snapshot_optional_float(
+                self._bond_snapshot_value(
+                    row,
+                    "ytm_jump_bps",
+                    "ytmJumpBps",
+                    "yield_jump_bps",
+                    "yieldJumpBps",
+                    "daily_ytm_change_bps",
+                    "dailyYtmChangeBps",
+                    "ytm_change_bps",
+                    "ytmChangeBps",
+                )
+            )
+            jump_threshold_bps = self._bond_snapshot_optional_float(
+                self._bond_snapshot_value(row, "ytm_jump_threshold_bps", "ytmJumpThresholdBps")
+            )
+            threshold_bps = jump_threshold_bps if jump_threshold_bps is not None else 50.0
+            jump_flag = str(
+                self._bond_snapshot_value(row, "ytm_jump_alert", "ytmJumpAlert", "yield_jump_alert", "yieldJumpAlert")
+                or ""
+            ).strip().lower() in {"1", "true", "yes", "alert"}
+            if jump_flag or (jump_bps is not None and abs(jump_bps) > threshold_bps):
+                if jump_bps is None:
+                    alerts.append("UST_CMT_30Y YTM jump alert is active.")
+                else:
+                    alerts.append(
+                        f"UST_CMT_30Y YTM jump {jump_bps:g} bps exceeds the {threshold_bps:g} bps alert threshold."
+                    )
+            elif jump_bps is not None:
+                notes.append(f"UST_CMT_30Y YTM jump {jump_bps:g} bps is within the {threshold_bps:g} bps threshold.")
+        for key in self._bond_snapshot_row_keys(row):
+            bucket = audit_context.get(key) if audit_context else None
+            if not bucket:
+                continue
+            alerts.extend(str(item) for item in bucket.get("audit_alerts", []) if str(item).strip())
+            notes.extend(str(item) for item in bucket.get("audit_notes", []) if str(item).strip())
+        return self._bond_snapshot_unique_texts(alerts), self._bond_snapshot_unique_texts(notes)
+
+    def _bond_snapshot_field_status(self, row: Mapping[str, Any]) -> dict[str, str]:
+        inferred_fields = dict(row.get("inferred_fields") or {})
+        missing_fields = {str(item) for item in (row.get("missing_fields") or [])}
+        field_status: dict[str, str] = {}
+        for field_name in self._bond_snapshot_required_fields(row):
+            value = self._bond_snapshot_field_value(row, field_name)
+            if field_name == "accrued_interest" and self._bond_snapshot_profile(row) == "UST_BILL_3M":
+                field_status[field_name] = "WAIVED"
+            elif field_name == "tracking_error_bps" and not self._bond_snapshot_has_official_tracking_error(row):
+                field_status[field_name] = "MISSING"
+            elif field_name in missing_fields or value is None or value == "":
                 field_status[field_name] = "MISSING"
             elif field_name in inferred_fields:
                 field_status[field_name] = "INFERRED"
@@ -3434,23 +3983,59 @@ class BacktestPlatformService:
                 field_status[field_name] = "READY"
         return field_status
 
-    def _bond_snapshot_is_eligible(self, row: Mapping[str, Any]) -> bool:
+    def _bond_snapshot_is_eligible(
+        self,
+        row: Mapping[str, Any],
+        audit_context: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
+    ) -> bool:
         refresh_status = str(row.get("refresh_status") or row.get("status") or "").upper()
         if refresh_status not in {"READY", "FRESH", "COMPLETED"}:
             return False
-        return not any(status == "MISSING" for status in self._bond_snapshot_field_status(row).values())
+        if any(status == "MISSING" for status in self._bond_snapshot_field_status(row).values()):
+            return False
+        generated_alerts, _ = self._bond_snapshot_generated_audit(row, audit_context=audit_context)
+        raw_alerts = self._bond_snapshot_text_list(
+            self._bond_snapshot_value(row, "audit_alerts", "auditAlerts")
+        )
+        if raw_alerts or generated_alerts:
+            return False
+        if self._bond_snapshot_tracking_status(row) in {"WATCH", "MISSING", "UNOFFICIAL", "ESTIMATED", "INFERRED"}:
+            return False
+        return True
 
-    def _bond_snapshot_instrument_payload(self, row: Mapping[str, Any]) -> dict[str, Any]:
+    def _bond_snapshot_payload_status(self, row: Mapping[str, Any], eligible: bool) -> str:
+        if eligible:
+            return "READY"
+        refresh_status = str(row.get("refresh_status") or row.get("status") or "STALE").upper()
+        if refresh_status in {"FAILED", "STALE", "RUNNING", "QUEUED", "INCOMPLETE"}:
+            return refresh_status
+        return "WATCH"
+
+    def _bond_snapshot_instrument_payload(
+        self,
+        row: Mapping[str, Any],
+        audit_context: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
+    ) -> dict[str, Any]:
         field_status = self._bond_snapshot_field_status(row)
-        eligible = self._bond_snapshot_is_eligible(row)
+        eligible = self._bond_snapshot_is_eligible(row, audit_context=audit_context)
         label = str(row.get("name") or row.get("symbol") or row.get("instrument_id") or row.get("id") or "")
         snapshot_ref = str(row.get("source_snapshot_id") or row.get("id") or "")
+        generated_alerts, generated_notes = self._bond_snapshot_generated_audit(row, audit_context=audit_context)
+        raw_alerts = self._bond_snapshot_text_list(
+            self._bond_snapshot_value(row, "audit_alerts", "auditAlerts")
+        )
+        raw_notes = self._bond_snapshot_text_list(
+            self._bond_snapshot_value(row, "audit_notes", "auditNotes")
+        )
         return {
             "id": str(row.get("id") or snapshot_ref),
             "label": label,
             "instrument_type": str(row.get("instrument_type") or "bond"),
             "source": str(row.get("source") or "manual"),
-            "status": "READY" if eligible else str(row.get("refresh_status") or "STALE").upper(),
+            "status": self._bond_snapshot_payload_status(row, eligible),
+            "asset_type": self._bond_snapshot_asset_type(row),
+            "tenor_label": self._bond_snapshot_tenor_label(row),
+            "audit_profile": self._bond_snapshot_profile(row),
             "symbol": row.get("symbol"),
             "isin": row.get("isin"),
             "cusip": row.get("cusip"),
@@ -3463,9 +4048,36 @@ class BacktestPlatformService:
             "dirty_price": row.get("dirty_price"),
             "full_price": row.get("full_price"),
             "accrued_interest": row.get("accrued_interest"),
+            "discount_rate_pct": self._bond_snapshot_optional_float(
+                self._bond_snapshot_field_value(row, "discount_rate_pct")
+            ),
             "ytm_pct": row.get("ytm_pct"),
+            "real_yield_pct": self._bond_snapshot_optional_float(
+                self._bond_snapshot_field_value(row, "real_yield_pct")
+            ),
+            "inflation_factor": self._bond_snapshot_optional_float(
+                self._bond_snapshot_field_value(row, "inflation_factor")
+            ),
+            "breakeven_inflation_bps": self._bond_snapshot_optional_float(
+                self._bond_snapshot_field_value(row, "breakeven_inflation_bps")
+            ),
             "duration": row.get("duration"),
+            "effective_duration": self._bond_snapshot_optional_float(
+                self._bond_snapshot_field_value(row, "effective_duration")
+            ),
             "convexity": row.get("convexity"),
+            "sec_yield_30d_pct": self._bond_snapshot_optional_float(
+                self._bond_snapshot_field_value(row, "sec_yield_30d_pct")
+            ),
+            "credit_quality": (
+                dict(self._bond_snapshot_field_value(row, "credit_quality"))
+                if isinstance(self._bond_snapshot_field_value(row, "credit_quality"), Mapping)
+                else self._bond_snapshot_field_value(row, "credit_quality")
+            ),
+            "tracking_error_bps": self._bond_snapshot_tracking_error_bps(row),
+            "audit_alerts": self._bond_snapshot_unique_texts(raw_alerts, generated_alerts),
+            "audit_notes": self._bond_snapshot_unique_texts(raw_notes, generated_notes),
+            "tracking_status": self._bond_snapshot_tracking_status(row),
             "snapshot_ref": snapshot_ref,
             "refresh_status": str(row.get("refresh_status") or "").upper() or None,
             "missing_fields": [str(item) for item in (row.get("missing_fields") or [])],
@@ -3482,7 +4094,7 @@ class BacktestPlatformService:
             provider in {"bond_fixed_income", "fixed_income_snapshot", "snapshot_registry"}
             or source_snapshot_id.startswith("bond_fixed_income::")
             or source_snapshot_id in {"bond_fixed_income", "bond-fixed-income", "bond_fixed_income.curve_preview"}
-            or (asset_kind == "BOND" and source_snapshot_id.startswith("bond-"))
+            or (asset_kind in {"BOND", "BOND_ETF"} and source_snapshot_id.startswith("bond-"))
         )
 
     def _validate_bond_asset_source(self, payload: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -3492,7 +4104,8 @@ class BacktestPlatformService:
         record = self._bond_snapshot_record_by_ref(snapshot_id)
         if record is None:
             raise ValueError("Bond asset legs must use an eligible bond fixed-income snapshot, not a fallback source")
-        if not self._bond_snapshot_is_eligible(record):
+        audit_context = self._bond_snapshot_audit_context(self._bond_snapshot_rows())
+        if not self._bond_snapshot_is_eligible(record, audit_context=audit_context):
             missing = ", ".join(str(item) for item in (record.get("missing_fields") or [])) or "none"
             refresh_status = str(record.get("refresh_status") or "STALE").upper()
             raise ValueError(
@@ -3549,6 +4162,40 @@ class BacktestPlatformService:
             "updated_at": str(row.get("updated_at") or ""),
         }
 
+    def _leg_source_integrity_summary(
+        self,
+        *,
+        source_ref_id: str,
+        source_ref_type: str,
+        display_name: str,
+        status: str,
+        updated_at: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        freeze_hash = hashlib.sha256(
+            json.dumps(dict(payload), sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+        ).hexdigest()[:16]
+        normalized_status = str(status or "").upper()
+        alerts: list[str] = []
+        drift_status = "current"
+        signature_status = "verified"
+        if normalized_status not in {"ACTIVE", "READY"}:
+            alerts.append("Leg definition is not active and should be repaired before composition use.")
+            drift_status = "needs_repair"
+            signature_status = "stale"
+        return {
+            "leg_id": source_ref_id,
+            "display_name": display_name,
+            "source_ref_id": source_ref_id,
+            "source_ref_type": source_ref_type,
+            "freeze_hash": freeze_hash,
+            "signature_status": signature_status,
+            "drift_status": drift_status,
+            "current_ref_id": source_ref_id,
+            "checked_at": updated_at or iso_now(),
+            "alerts": alerts,
+        }
+
     def list_leg_inventory(self) -> dict[str, Any]:
         reference_counts = self._composition_reference_counts()
         rows: list[dict[str, Any]] = []
@@ -3562,6 +4209,21 @@ class BacktestPlatformService:
             """
         ):
             decoded = self._decode_asset_leg_row(row, reference_counts.get(str(row["id"]), 0))
+            source_integrity = self._leg_source_integrity_summary(
+                source_ref_id=decoded["id"],
+                source_ref_type="asset_definition",
+                display_name=decoded["name"],
+                status=decoded["status"],
+                updated_at=decoded["updated_at"],
+                payload={
+                    "symbol": decoded["symbol"],
+                    "asset_kind": decoded["asset_kind"],
+                    "source_snapshot_id": decoded["source_snapshot_id"],
+                    "source_provider": decoded["source_provider"],
+                    "freeze_mode": decoded["freeze_mode"],
+                    "summary": dict(decoded.get("summary") or {}),
+                },
+            )
             rows.append(
                 {
                     "id": decoded["id"],
@@ -3579,6 +4241,12 @@ class BacktestPlatformService:
                     "allowed_actions": decoded["allowed_actions"],
                     "source_ref_id": decoded["id"],
                     "source_ref_type": "asset_definition",
+                    "source_integrity": source_integrity,
+                    "freeze_hash": source_integrity["freeze_hash"],
+                    "signature_status": source_integrity["signature_status"],
+                    "drift_status": source_integrity["drift_status"],
+                    "current_ref_id": source_integrity["current_ref_id"],
+                    "alerts": list(source_integrity["alerts"]),
                     "config": {
                         "symbol": decoded["symbol"],
                         "asset_kind": decoded["asset_kind"],
@@ -3586,6 +4254,7 @@ class BacktestPlatformService:
                         "source_provider": decoded["source_provider"],
                         "freeze_mode": decoded["freeze_mode"],
                         "summary": dict(decoded.get("summary") or {}),
+                        "source_integrity": source_integrity,
                     },
                 }
             )
@@ -3599,6 +4268,20 @@ class BacktestPlatformService:
             """
         ):
             decoded = self._decode_cash_leg_row(row, reference_counts.get(str(row["id"]), 0))
+            source_integrity = self._leg_source_integrity_summary(
+                source_ref_id=decoded["id"],
+                source_ref_type="cash_definition",
+                display_name=decoded["name"],
+                status=decoded["status"],
+                updated_at=decoded["updated_at"],
+                payload={
+                    "cash_rule_kind": decoded["cash_rule_kind"],
+                    "buffer_bps": decoded["buffer_bps"],
+                    "yield_source": decoded["yield_source"],
+                    "freeze_mode": decoded["freeze_mode"],
+                    "summary": dict(decoded.get("summary") or {}),
+                },
+            )
             rows.append(
                 {
                     "id": decoded["id"],
@@ -3616,11 +4299,19 @@ class BacktestPlatformService:
                     "allowed_actions": decoded["allowed_actions"],
                     "source_ref_id": decoded["id"],
                     "source_ref_type": "cash_definition",
+                    "source_integrity": source_integrity,
+                    "freeze_hash": source_integrity["freeze_hash"],
+                    "signature_status": source_integrity["signature_status"],
+                    "drift_status": source_integrity["drift_status"],
+                    "current_ref_id": source_integrity["current_ref_id"],
+                    "alerts": list(source_integrity["alerts"]),
                     "config": {
                         "cash_rule_kind": decoded["cash_rule_kind"],
                         "buffer_bps": decoded["buffer_bps"],
                         "yield_source": decoded["yield_source"],
                         "freeze_mode": decoded["freeze_mode"],
+                        "summary": dict(decoded.get("summary") or {}),
+                        "source_integrity": source_integrity,
                     },
                 }
             )
@@ -3669,13 +4360,24 @@ class BacktestPlatformService:
         source_provider = str(payload.get("source_provider") or "").strip() or None
         source_snapshot_id = str(payload["source_snapshot_id"]).strip()
         if bond_snapshot is not None:
-            bond_payload = self._bond_snapshot_instrument_payload(bond_snapshot)
+            audit_context = self._bond_snapshot_audit_context(self._bond_snapshot_rows())
+            bond_payload = self._bond_snapshot_instrument_payload(bond_snapshot, audit_context=audit_context)
             summary["bond_snapshot"] = bond_payload
             source_provider = str(bond_snapshot.get("source") or source_provider or "bond_fixed_income")
             source_snapshot_id = str(bond_payload.get("snapshot_ref") or source_snapshot_id)
         notes = str(payload.get("notes") or "").strip()
         if notes:
             summary["notes"] = notes
+        self._raise_duplicate_asset_leg_if_needed(
+            signature=self._asset_leg_semantic_signature(
+                symbol=payload["symbol"],
+                asset_kind=payload["asset_kind"],
+                source_snapshot_id=source_snapshot_id,
+                source_provider=source_provider,
+                freeze_mode=payload["freeze_mode"],
+                summary=summary,
+            )
+        )
         self.storage.insert_json_row(
             "asset_leg_definitions",
             {
@@ -3698,6 +4400,102 @@ class BacktestPlatformService:
         assert row is not None
         return self._decode_asset_leg_row(row)
 
+    def update_asset_leg(self, leg_id: str, request: Any) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        existing = self.storage.fetch_one(
+            "SELECT * FROM asset_leg_definitions WHERE id = ? AND deleted_at IS NULL",
+            (leg_id,),
+        )
+        if existing is None:
+            raise ValueError(f"asset leg not found: {leg_id}")
+        payload_keys = {str(key) for key, value in payload.items() if value is not None}
+        if payload_keys and payload_keys <= {"status"}:
+            status = self._normalize_leg_definition_status(payload.get("status") or existing.get("status"), default="ACTIVE")
+            if status == "ARCHIVED":
+                self._raise_if_leg_reference_protected(leg_id, "asset")
+                deleted_at = iso_now()
+                revision = int(existing.get("revision") or 1) + 1
+                self.storage.execute(
+                    """
+                    UPDATE asset_leg_definitions
+                    SET status = ?,
+                        revision = ?,
+                        updated_at = ?,
+                        deleted_at = ?,
+                        deleted_reason = ?
+                    WHERE id = ? AND deleted_at IS NULL
+                    """,
+                    ("ARCHIVED", revision, deleted_at, deleted_at, "user_archived", leg_id),
+                )
+            row = self.storage.fetch_one("SELECT * FROM asset_leg_definitions WHERE id = ?", (leg_id,))
+            assert row is not None
+            return self._decode_asset_leg_row(row, self._composition_reference_counts().get(leg_id, 0))
+        self._raise_if_leg_reference_protected(leg_id, "asset")
+        for field_name in ("name", "symbol", "asset_kind", "source_snapshot_id", "freeze_mode"):
+            if not str(payload.get(field_name) or "").strip():
+                raise ValueError(f"{field_name} is required")
+        now = iso_now()
+        summary = dict(payload.get("summary") or {})
+        notes = str(payload.get("notes") or "").strip()
+        if notes:
+            summary["notes"] = notes
+        else:
+            summary.pop("notes", None)
+        bond_snapshot = self._validate_bond_asset_source(payload)
+        source_provider = str(payload.get("source_provider") or "").strip() or None
+        source_snapshot_id = str(payload["source_snapshot_id"]).strip()
+        if bond_snapshot is not None:
+            audit_context = self._bond_snapshot_audit_context(self._bond_snapshot_rows())
+            bond_payload = self._bond_snapshot_instrument_payload(bond_snapshot, audit_context=audit_context)
+            summary["bond_snapshot"] = bond_payload
+            source_provider = str(bond_snapshot.get("source") or source_provider or "bond_fixed_income")
+            source_snapshot_id = str(bond_payload.get("snapshot_ref") or source_snapshot_id)
+        self._raise_duplicate_asset_leg_if_needed(
+            signature=self._asset_leg_semantic_signature(
+                symbol=payload["symbol"],
+                asset_kind=payload["asset_kind"],
+                source_snapshot_id=source_snapshot_id,
+                source_provider=source_provider,
+                freeze_mode=payload["freeze_mode"],
+                summary=summary,
+            ),
+            exclude_id=leg_id,
+        )
+        revision = int(existing.get("revision") or 1) + 1
+        freeze_generation = int(existing.get("current_freeze_generation") or 1) + 1
+        self.storage.execute(
+            """
+            UPDATE asset_leg_definitions
+            SET name = ?,
+                symbol = ?,
+                asset_kind = ?,
+                source_snapshot_id = ?,
+                source_provider = ?,
+                freeze_mode = ?,
+                summary_json = ?,
+                revision = ?,
+                current_freeze_generation = ?,
+                updated_at = ?
+            WHERE id = ? AND deleted_at IS NULL
+            """,
+            (
+                str(payload["name"]).strip(),
+                str(payload["symbol"]).strip().upper(),
+                str(payload["asset_kind"]).strip(),
+                source_snapshot_id,
+                source_provider,
+                str(payload["freeze_mode"]).strip(),
+                dumps(summary),
+                revision,
+                freeze_generation,
+                now,
+                leg_id,
+            ),
+        )
+        row = self.storage.fetch_one("SELECT * FROM asset_leg_definitions WHERE id = ?", (leg_id,))
+        assert row is not None
+        return self._decode_asset_leg_row(row)
+
     def create_cash_leg(self, request: Any) -> dict[str, Any]:
         payload = _as_mapping(request)
         for field_name in ("name", "cash_rule_kind", "freeze_mode"):
@@ -3706,17 +4504,31 @@ class BacktestPlatformService:
         leg_id = self._new_id("cash_leg")
         now = iso_now()
         summary = dict(payload.get("summary") or {})
+        summary.setdefault("target_weight_pct", 20)
+        summary.setdefault("rebalance_frequency", "quarterly")
         notes = str(payload.get("notes") or "").strip()
         if notes:
             summary["notes"] = notes
+        cash_rule_kind = str(payload["cash_rule_kind"]).strip().upper().replace("-", "_")
+        yield_source = str(payload.get("yield_source") or "").strip() or None
+        buffer_bps = round(_as_float(payload.get("buffer_bps"), 0.0), 4)
+        self._raise_duplicate_cash_leg_if_needed(
+            signature=self._cash_leg_semantic_signature(
+                cash_rule_kind=cash_rule_kind,
+                buffer_bps=buffer_bps,
+                yield_source=yield_source,
+                freeze_mode=payload["freeze_mode"],
+                summary=summary,
+            )
+        )
         self.storage.insert_json_row(
             "cash_leg_definitions",
             {
                 "id": leg_id,
                 "name": str(payload["name"]).strip(),
-                "cash_rule_kind": str(payload["cash_rule_kind"]).strip(),
-                "buffer_bps": round(_as_float(payload.get("buffer_bps"), 0.0), 4),
-                "yield_source": str(payload.get("yield_source") or "").strip() or None,
+                "cash_rule_kind": cash_rule_kind,
+                "buffer_bps": buffer_bps,
+                "yield_source": yield_source,
                 "freeze_mode": str(payload["freeze_mode"]).strip(),
                 "summary_json": dumps(summary),
                 "status": "ACTIVE",
@@ -3725,6 +4537,95 @@ class BacktestPlatformService:
                 "created_at": now,
                 "updated_at": now,
             },
+        )
+        row = self.storage.fetch_one("SELECT * FROM cash_leg_definitions WHERE id = ?", (leg_id,))
+        assert row is not None
+        return self._decode_cash_leg_row(row)
+
+    def update_cash_leg(self, leg_id: str, request: Any) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        existing = self.storage.fetch_one(
+            "SELECT * FROM cash_leg_definitions WHERE id = ? AND deleted_at IS NULL",
+            (leg_id,),
+        )
+        if existing is None:
+            raise ValueError(f"cash leg not found: {leg_id}")
+        payload_keys = {str(key) for key, value in payload.items() if value is not None}
+        if payload_keys and payload_keys <= {"status"}:
+            status = self._normalize_leg_definition_status(payload.get("status") or existing.get("status"), default="ACTIVE")
+            if status == "ARCHIVED":
+                self._raise_if_leg_reference_protected(leg_id, "cash")
+                deleted_at = iso_now()
+                revision = int(existing.get("revision") or 1) + 1
+                self.storage.execute(
+                    """
+                    UPDATE cash_leg_definitions
+                    SET status = ?,
+                        revision = ?,
+                        updated_at = ?,
+                        deleted_at = ?,
+                        deleted_reason = ?
+                    WHERE id = ? AND deleted_at IS NULL
+                    """,
+                    ("ARCHIVED", revision, deleted_at, deleted_at, "user_archived", leg_id),
+                )
+            row = self.storage.fetch_one("SELECT * FROM cash_leg_definitions WHERE id = ?", (leg_id,))
+            assert row is not None
+            return self._decode_cash_leg_row(row, self._composition_reference_counts().get(leg_id, 0))
+        self._raise_if_leg_reference_protected(leg_id, "cash")
+        for field_name in ("name", "cash_rule_kind", "freeze_mode"):
+            if not str(payload.get(field_name) or "").strip():
+                raise ValueError(f"{field_name} is required")
+        now = iso_now()
+        summary = dict(payload.get("summary") or {})
+        summary.setdefault("target_weight_pct", 20)
+        summary.setdefault("rebalance_frequency", "quarterly")
+        notes = str(payload.get("notes") or "").strip()
+        if notes:
+            summary["notes"] = notes
+        else:
+            summary.pop("notes", None)
+        cash_rule_kind = str(payload["cash_rule_kind"]).strip().upper().replace("-", "_")
+        yield_source = str(payload.get("yield_source") or "").strip() or None
+        buffer_bps = round(_as_float(payload.get("buffer_bps"), 0.0), 4)
+        self._raise_duplicate_cash_leg_if_needed(
+            signature=self._cash_leg_semantic_signature(
+                cash_rule_kind=cash_rule_kind,
+                buffer_bps=buffer_bps,
+                yield_source=yield_source,
+                freeze_mode=payload["freeze_mode"],
+                summary=summary,
+            ),
+            exclude_id=leg_id,
+        )
+        revision = int(existing.get("revision") or 1) + 1
+        freeze_generation = int(existing.get("current_freeze_generation") or 1) + 1
+        self.storage.execute(
+            """
+            UPDATE cash_leg_definitions
+            SET name = ?,
+                cash_rule_kind = ?,
+                buffer_bps = ?,
+                yield_source = ?,
+                freeze_mode = ?,
+                summary_json = ?,
+                revision = ?,
+                current_freeze_generation = ?,
+                updated_at = ?
+            WHERE id = ? AND deleted_at IS NULL
+            """,
+            (
+                str(payload["name"]).strip(),
+                cash_rule_kind,
+                buffer_bps,
+                yield_source,
+                str(payload["freeze_mode"]).strip(),
+                dumps(summary),
+                revision,
+                freeze_generation,
+                now,
+                leg_id,
+            ),
         )
         row = self.storage.fetch_one("SELECT * FROM cash_leg_definitions WHERE id = ?", (leg_id,))
         assert row is not None
@@ -3751,6 +4652,7 @@ class BacktestPlatformService:
     def _asset_profile_defaults(self, asset_kind: str) -> tuple[float, float, float]:
         mapping = {
             "BOND": (4.0, 6.0, 5.0),
+            "BOND_ETF": (4.75, 7.0, 6.0),
             "ETF": (6.0, 10.0, 8.0),
             "FUND": (5.5, 9.0, 7.5),
             "INDEX": (6.5, 11.5, 9.5),
@@ -3795,8 +4697,23 @@ class BacktestPlatformService:
             "max_drawdown_pct": round(max_drawdown_pct, 4),
         }
 
+    def _leg_duration_convexity_inputs(self, leg: Mapping[str, Any]) -> tuple[float, float]:
+        config = dict(leg.get("config") or {})
+        summary = dict(config.get("summary") or {})
+        bond_snapshot = dict(summary.get("bond_snapshot") or {})
+        duration = _as_float(
+            config.get("duration")
+            or config.get("effective_duration")
+            or bond_snapshot.get("duration")
+            or bond_snapshot.get("effective_duration"),
+            0.0,
+        )
+        convexity = _as_float(config.get("convexity") or bond_snapshot.get("convexity"), 0.0)
+        return duration, convexity
+
     def _resolve_composition_legs(self, raw_legs: Sequence[Mapping[str, Any]] | Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         inventory_map = self._inventory_row_map()
+        reference_counts = self._composition_reference_counts()
         resolved: list[dict[str, Any]] = []
         for index, raw_leg in enumerate(raw_legs, start=1):
             leg = _as_mapping(raw_leg)
@@ -3825,7 +4742,7 @@ class BacktestPlatformService:
                             strategy,
                             version_entry,
                             self._completed_run_summaries_for_strategy(strategy_id),
-                            0,
+                            reference_counts.get(source_ref_id, 0),
                         )
             if inventory_row is None:
                 raise KeyError(f"Leg not found: {source_ref_id}")
@@ -3859,55 +4776,292 @@ class BacktestPlatformService:
         resolved.sort(key=lambda item: (int(item.get("ordering") or 1), str(item.get("display_name") or "")))
         return resolved
 
-    def _benchmark_return_pct(self, benchmark_definition: Mapping[str, Any] | None) -> float:
-        symbol = str((benchmark_definition or {}).get("symbol") or "").strip().upper()
-        mapping = {
-            "SPY": 8.0,
-            "QQQ": 10.0,
-            "AGG": 4.0,
-            "TLT": 4.5,
-            "BND": 4.0,
+    def _series_month_label(self, value: Any) -> str | None:
+        text = str(value or "").strip()
+        if len(text) < 7:
+            return None
+        return text[:7]
+
+    def _recent_composition_labels(self, labels: Iterable[str]) -> list[str]:
+        ordered_labels = sorted({str(label).strip() for label in labels if str(label).strip()})
+        return ordered_labels[-COMPOSITION_RECENT_WINDOW_MONTHS:]
+
+    def _synthetic_leg_period_return_map(
+        self,
+        leg: Mapping[str, Any],
+        labels: Sequence[str],
+        profile: Mapping[str, float] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        leg_id = str(leg.get("id") or leg.get("source_ref_id") or "")
+        profile_payload = dict(profile or self._resolved_leg_profile(leg))
+        baseline_period_pct = _as_float(profile_payload.get("annualized_return_pct"), 0.0) / 12.0
+        volatility_pct = max(_as_float(profile_payload.get("volatility_pct"), 0.0), 0.0)
+        return {
+            str(label): {
+                "label": str(label),
+                "date": f"{label}-28",
+                "return": (
+                    baseline_period_pct
+                    + (_stable_hash_fraction(leg_id, index, "composition-fallback-return") - 0.5)
+                    * min(volatility_pct / 12.0, 1.75)
+                )
+                / 100.0,
+                "fallback": True,
+            }
+            for index, label in enumerate(labels)
         }
-        return mapping.get(symbol, 7.0)
 
-    def _build_composition_preview_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        benchmark_definition = self._normalize_composition_benchmark_definition(
-            payload.get("benchmark_definition")
+    def _series_point_date(self, row: Mapping[str, Any]) -> str:
+        return str(row.get("trade_date") or row.get("date") or "").strip()
+
+    def _series_numeric_value(self, row: Mapping[str, Any], *keys: str) -> float | None:
+        for key in keys:
+            if key not in row:
+                continue
+            value = _as_float(row.get(key), math.nan)
+            if math.isfinite(value):
+                return value
+        return None
+
+    def _monthly_returns_from_value_rows(
+        self,
+        rows: Sequence[Mapping[str, Any]] | Sequence[dict[str, Any]],
+        *value_keys: str,
+    ) -> dict[str, dict[str, Any]]:
+        monthly_closes: dict[str, dict[str, Any]] = {}
+        for raw_row in rows:
+            row = _as_mapping(raw_row)
+            point_date = self._series_point_date(row)
+            label = self._series_month_label(point_date)
+            value = self._series_numeric_value(row, *value_keys)
+            if not label or value is None or value <= 0:
+                continue
+            existing = monthly_closes.get(label)
+            if existing is None or point_date >= str(existing.get("date") or ""):
+                monthly_closes[label] = {
+                    "label": label,
+                    "date": point_date or f"{label}-01",
+                    "value": value,
+                }
+        period_map: dict[str, dict[str, Any]] = {}
+        previous_value: float | None = None
+        for label in sorted(monthly_closes):
+            point = monthly_closes[label]
+            value = _as_float(point.get("value"), 0.0)
+            period_return = 0.0
+            if previous_value is not None and previous_value > 0:
+                period_return = value / previous_value - 1.0
+            period_map[label] = {
+                "label": label,
+                "date": point.get("date") or f"{label}-01",
+                "return": period_return,
+            }
+            previous_value = value
+        return period_map
+
+    def _monthly_returns_from_bond_snapshot_rows(
+        self,
+        rows: Sequence[Mapping[str, Any]] | Sequence[dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        value_rows: list[dict[str, Any]] = []
+        for raw_row in rows:
+            row = _as_mapping(raw_row)
+            clean_price = self._bond_snapshot_optional_float(row.get("clean_price") or row.get("net_price"))
+            dirty_price = self._bond_snapshot_optional_float(row.get("dirty_price") or row.get("full_price"))
+            accrued_interest = self._bond_snapshot_optional_float(row.get("accrued_interest"))
+            value = dirty_price
+            if value is None and clean_price is not None:
+                value = clean_price + (accrued_interest or 0.0)
+            if value is None:
+                continue
+            value_rows.append(
+                {
+                    "date": row.get("snapshot_date") or row.get("refreshed_at") or row.get("updated_at"),
+                    "dirty_value": value,
+                }
+            )
+        return self._monthly_returns_from_value_rows(value_rows, "dirty_value")
+
+    def _bond_snapshot_return_rows_for_leg(self, leg: Mapping[str, Any]) -> list[dict[str, Any]]:
+        config = dict(leg.get("config") or {})
+        snapshot_ref = str(config.get("source_snapshot_id") or "").strip()
+        record = self._bond_snapshot_record_by_ref(snapshot_ref)
+        if not record:
+            return []
+        instrument_id = str(record.get("instrument_id") or "").strip().upper()
+        symbol = str(record.get("symbol") or "").strip().upper()
+        rows = []
+        for row in self._bond_snapshot_rows():
+            if instrument_id and str(row.get("instrument_id") or "").strip().upper() == instrument_id:
+                rows.append(row)
+            elif symbol and str(row.get("symbol") or "").strip().upper() == symbol:
+                rows.append(row)
+        return sorted(rows, key=lambda item: str(item.get("snapshot_date") or item.get("updated_at") or ""))
+
+    def _monthly_returns_from_return_rows(
+        self,
+        rows: Sequence[Mapping[str, Any]] | Sequence[dict[str, Any]],
+        *return_keys: str,
+    ) -> dict[str, dict[str, Any]]:
+        monthly_compounders: dict[str, float] = {}
+        monthly_dates: dict[str, str] = {}
+        sorted_rows = sorted(
+            (_as_mapping(raw_row) for raw_row in rows),
+            key=lambda row: self._series_point_date(row),
         )
-        cost_policy = self._normalize_composition_cost_policy(payload.get("cost_policy"))
-        rebalance_frequency = str(payload.get("rebalance_frequency") or "quarterly").strip().lower() or "quarterly"
-        resolved_legs = self._resolve_composition_legs(payload.get("legs") or [])
-        if not resolved_legs:
-            raise ValueError("At least one composition leg is required")
+        for row in sorted_rows:
+            point_date = self._series_point_date(row)
+            label = self._series_month_label(point_date)
+            period_return = self._series_numeric_value(row, *return_keys)
+            if not label or period_return is None:
+                continue
+            monthly_compounders[label] = monthly_compounders.get(label, 1.0) * (1.0 + period_return)
+            monthly_dates[label] = max(point_date or f"{label}-01", monthly_dates.get(label, ""))
+        return {
+            label: {
+                "label": label,
+                "date": monthly_dates.get(label) or f"{label}-01",
+                "return": compounded - 1.0,
+            }
+            for label, compounded in monthly_compounders.items()
+        }
 
-        total_weight_pct = round(sum(_as_float(leg.get("weight_pct"), 0.0) for leg in resolved_legs), 4)
-        residual_weight_pct = round(100.0 - total_weight_pct, 4)
-        locked_weight_pct = round(
-            sum(_as_float(leg.get("weight_pct"), 0.0) for leg in resolved_legs if leg.get("weight_locked")),
-            4,
+    def _find_strategy_projection_run_id(self, leg: Mapping[str, Any]) -> str | None:
+        config = dict(leg.get("config") or {})
+        for key in ("latest_run_id", "run_id"):
+            run_id = str(config.get(key) or "").strip()
+            if run_id:
+                return run_id
+        parsed = _parse_strategy_leg_inventory_id(str(leg.get("source_ref_id") or leg.get("id") or ""))
+        if parsed is None:
+            return None
+        strategy_id, parameter_version_id = parsed
+        rows = self.storage.fetch_all(
+            """
+            SELECT id, preview_json, request_json
+            FROM backtest_runs
+            WHERE strategy_id = ?
+              AND deleted_at IS NULL
+              AND UPPER(status) IN ('COMPLETED', 'COMPLETED_WITH_WARNINGS')
+            ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC, id DESC
+            """,
+            (strategy_id,),
         )
-        unlocked_weight_pct = round(total_weight_pct - locked_weight_pct, 4)
-        within_tolerance = abs(residual_weight_pct) <= 0.5
+        for row in rows:
+            preview = loads(row.get("preview_json"), {})
+            if not isinstance(preview, Mapping):
+                preview = {}
+            request = loads(row.get("request_json"), {})
+            if not isinstance(request, Mapping):
+                request = {}
+            resolved_parameter_version_id = str(
+                preview.get("parameter_version_id") or request.get("parameter_version_id") or ""
+            ).strip()
+            if resolved_parameter_version_id == parameter_version_id:
+                return str(row.get("id") or "")
+        return None
 
+    def _load_backtest_run_chart_series(self, run_id: str) -> list[dict[str, Any]]:
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return []
+        row = self.storage.fetch_one(
+            """
+            SELECT chart_series_json
+            FROM backtest_runs
+            WHERE id = ?
+              AND deleted_at IS NULL
+            """,
+            (normalized_run_id,),
+        )
+        chart_series = loads(row.get("chart_series_json"), []) if row else []
+        if isinstance(chart_series, list) and chart_series:
+            return [dict(item) for item in chart_series if isinstance(item, Mapping)]
+        daily_performance = self.market_data_repository.load_run_daily_performance(normalized_run_id)
+        return [dict(item) for item in daily_performance if isinstance(item, Mapping)]
+
+    def _load_price_rows_for_symbol(
+        self,
+        symbol: str | None,
+        *,
+        dataset_snapshot_ids: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        normalized_symbol = str(symbol or "").strip().upper()
+        if not normalized_symbol:
+            return []
+        market_rows = self.market_data_repository.load_bars([normalized_symbol]).get(normalized_symbol, [])
+        if market_rows:
+            return [dict(item) for item in market_rows if isinstance(item, Mapping)]
+        for dataset_snapshot_id in dataset_snapshot_ids or []:
+            normalized_snapshot_id = str(dataset_snapshot_id or "").strip()
+            if not normalized_snapshot_id:
+                continue
+            dataset_rows = self.market_data_repository.load_dataset_price_bars(
+                normalized_snapshot_id,
+                [normalized_symbol],
+                include_metadata=False,
+            ).get(normalized_symbol, [])
+            if dataset_rows:
+                return [dict(item) for item in dataset_rows if isinstance(item, Mapping)]
+        return []
+
+    def _load_leg_period_returns(
+        self,
+        leg: Mapping[str, Any],
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+        leg_kind = str(leg.get("leg_kind") or "").lower()
+        config = dict(leg.get("config") or {})
+        if leg_kind == "strategy":
+            run_id = self._find_strategy_projection_run_id(leg)
+            if not run_id:
+                return {}, {}
+            chart_series = self._load_backtest_run_chart_series(run_id)
+            portfolio_returns = self._monthly_returns_from_value_rows(chart_series, "equity")
+            benchmark_returns = self._monthly_returns_from_value_rows(chart_series, "benchmark")
+            if not benchmark_returns:
+                benchmark_returns = self._monthly_returns_from_return_rows(chart_series, "benchmark_return")
+            return portfolio_returns, benchmark_returns
+        if leg_kind == "asset":
+            if self._payload_requires_bond_snapshot_validation(config):
+                bond_period_returns = self._monthly_returns_from_bond_snapshot_rows(
+                    self._bond_snapshot_return_rows_for_leg(leg)
+                )
+                if bond_period_returns:
+                    return bond_period_returns, {}
+            price_rows = self._load_price_rows_for_symbol(
+                str(config.get("symbol") or "").strip(),
+                dataset_snapshot_ids=[str(config.get("source_snapshot_id") or "").strip()],
+            )
+            return self._monthly_returns_from_value_rows(price_rows, "adj_close", "close"), {}
+        if leg_kind == "cash":
+            price_rows = self._load_price_rows_for_symbol(str(config.get("yield_source") or "").strip())
+            return self._monthly_returns_from_value_rows(price_rows, "adj_close", "close"), {}
+        return {}, {}
+
+    def _build_synthetic_composition_preview_series(
+        self,
+        resolved_legs: Sequence[Mapping[str, Any]],
+        profiles_by_leg_id: Mapping[str, Mapping[str, float]],
+        benchmark_definition: Mapping[str, Any] | None,
+        *,
+        labels: Sequence[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         benchmark_return_pct = self._benchmark_return_pct(benchmark_definition)
-        preview_anchor = utc_now().date() - timedelta(days=150)
+        ordered_labels = [str(label) for label in labels or [] if str(label).strip()]
+        if not ordered_labels:
+            preview_anchor = utc_now().date() - timedelta(days=150)
+            ordered_labels = [
+                (preview_anchor + timedelta(days=30 * period_index)).isoformat()[:7]
+                for period_index in range(6)
+            ]
         returns_preview: list[dict[str, Any]] = []
         benchmark_series: list[dict[str, Any]] = []
         spread_series: list[dict[str, Any]] = []
         cumulative_portfolio_pct = 0.0
         cumulative_benchmark_pct = 0.0
-        risk_contribution_preview: list[dict[str, Any]] = []
-        correlation_matrix: list[dict[str, Any]] = []
-
-        risk_budget_denominator = 0.0
-        profiles_by_leg_id: dict[str, dict[str, float]] = {}
-        for leg in resolved_legs:
-            profile = self._resolved_leg_profile(leg)
-            profiles_by_leg_id[str(leg["id"])] = profile
-            risk_budget_denominator += abs(_as_float(leg.get("weight_pct"), 0.0) * profile["volatility_pct"])
-
-        for period_index in range(6):
-            point_date = (preview_anchor + timedelta(days=30 * period_index)).isoformat()
+        benchmark_label = self._composition_benchmark_label(benchmark_definition)
+        for period_index, label in enumerate(ordered_labels):
+            point_date = f"{label}-01"
             portfolio_period_pct = 0.0
             for leg in resolved_legs:
                 profile = profiles_by_leg_id[str(leg["id"])]
@@ -3919,7 +5073,7 @@ class BacktestPlatformService:
                     baseline_period_pct + volatility_swing
                 )
             benchmark_period_pct = benchmark_return_pct / 12.0 + (
-                _stable_hash_fraction(self._composition_benchmark_label(benchmark_definition), period_index, "benchmark") - 0.5
+                _stable_hash_fraction(benchmark_label, period_index, "benchmark") - 0.5
             ) * 0.35
             cumulative_portfolio_pct = round(
                 ((1.0 + cumulative_portfolio_pct / 100.0) * (1.0 + portfolio_period_pct / 100.0) - 1.0) * 100.0,
@@ -3929,7 +5083,6 @@ class BacktestPlatformService:
                 ((1.0 + cumulative_benchmark_pct / 100.0) * (1.0 + benchmark_period_pct / 100.0) - 1.0) * 100.0,
                 4,
             )
-            label = f"P{period_index + 1}"
             returns_preview.append(
                 {
                     "label": label,
@@ -3953,22 +5106,1046 @@ class BacktestPlatformService:
                     "spread_pct": round(cumulative_portfolio_pct - cumulative_benchmark_pct, 4),
                 }
             )
+        return returns_preview, benchmark_series, spread_series
+
+    def _build_real_composition_preview_series(
+        self,
+        resolved_legs: Sequence[Mapping[str, Any]],
+        benchmark_definition: Mapping[str, Any] | None,
+        profiles_by_leg_id: Mapping[str, Mapping[str, float]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
+        leg_period_maps: list[tuple[Mapping[str, Any], dict[str, dict[str, Any]]]] = []
+        strategy_benchmark_maps: list[dict[str, dict[str, Any]]] = []
+        dataset_snapshot_ids: list[str] = []
+        for leg in resolved_legs:
+            config = dict(leg.get("config") or {})
+            snapshot_id = str(config.get("source_snapshot_id") or "").strip()
+            if snapshot_id and snapshot_id not in dataset_snapshot_ids:
+                dataset_snapshot_ids.append(snapshot_id)
+            leg_periods, benchmark_periods = self._load_leg_period_returns(leg)
+            if leg_periods:
+                leg_period_maps.append((leg, leg_periods))
+            if benchmark_periods:
+                strategy_benchmark_maps.append(benchmark_periods)
+        ordered_labels = self._recent_composition_labels(
+            {
+                label
+                for _, period_map in leg_period_maps
+                for label in period_map
+            }
+        )
+        if not ordered_labels:
+            returns_preview, benchmark_series, spread_series = self._build_synthetic_composition_preview_series(
+                resolved_legs,
+                profiles_by_leg_id,
+                benchmark_definition,
+            )
+            return (
+                returns_preview,
+                benchmark_series,
+                spread_series,
+                "Phase 1 analytics are using fallback preview data because no real leg history was available.",
+            )
+
+        real_leg_ids = {str(leg.get("id") or "") for leg, _period_map in leg_period_maps}
+        fallback_point_count = 0
+        completed_leg_period_maps: list[tuple[Mapping[str, Any], dict[str, dict[str, Any]]]] = []
+        for leg, period_map in leg_period_maps:
+            synthetic_map = self._synthetic_leg_period_return_map(
+                leg,
+                ordered_labels,
+                profiles_by_leg_id.get(str(leg.get("id") or ""), {}),
+            )
+            completed_map: dict[str, dict[str, Any]] = {}
+            for label in ordered_labels:
+                if label in period_map:
+                    completed_map[label] = dict(period_map[label])
+                else:
+                    completed_map[label] = dict(synthetic_map[label])
+                    fallback_point_count += 1
+            completed_leg_period_maps.append((leg, completed_map))
+        for leg in resolved_legs:
+            leg_id = str(leg.get("id") or "")
+            if leg_id in real_leg_ids:
+                continue
+            synthetic_map = self._synthetic_leg_period_return_map(
+                leg,
+                ordered_labels,
+                profiles_by_leg_id.get(leg_id, {}),
+            )
+            completed_leg_period_maps.append((leg, synthetic_map))
+            fallback_point_count += len(ordered_labels)
+        leg_period_maps = completed_leg_period_maps
+
+        benchmark_symbol = str((benchmark_definition or {}).get("symbol") or "").strip()
+        benchmark_period_map = self._monthly_returns_from_value_rows(
+            self._load_price_rows_for_symbol(benchmark_symbol, dataset_snapshot_ids=dataset_snapshot_ids),
+            "adj_close",
+            "close",
+        )
+        if not benchmark_period_map and strategy_benchmark_maps:
+            benchmark_period_map = max(strategy_benchmark_maps, key=len)
+
+        fallback_returns_preview, fallback_benchmark_series, fallback_spread_series = (
+            self._build_synthetic_composition_preview_series(
+                resolved_legs,
+                profiles_by_leg_id,
+                benchmark_definition,
+                labels=ordered_labels,
+            )
+        )
+        fallback_benchmark_by_label = {
+            str(point.get("label") or ""): dict(point)
+            for point in fallback_benchmark_series
+        }
+
+        returns_preview: list[dict[str, Any]] = []
+        benchmark_series: list[dict[str, Any]] = []
+        spread_series: list[dict[str, Any]] = []
+        cumulative_portfolio_return = 0.0
+        cumulative_benchmark_return = 0.0
+        for label in ordered_labels:
+            point_dates = [
+                str(period_map[label].get("date") or "")
+                for _, period_map in leg_period_maps
+                if label in period_map
+            ]
+            point_date = max(point_dates) if point_dates else f"{label}-01"
+            portfolio_period_return = sum(
+                _as_float(leg.get("weight_pct"), 0.0) / 100.0 * _as_float(period_map.get(label, {}).get("return"), 0.0)
+                for leg, period_map in leg_period_maps
+            )
+            cumulative_portfolio_return = (
+                (1.0 + cumulative_portfolio_return) * (1.0 + portfolio_period_return) - 1.0
+            )
+            benchmark_point = benchmark_period_map.get(label) if benchmark_period_map else None
+            if benchmark_point is None:
+                fallback_point = fallback_benchmark_by_label.get(label, {})
+                benchmark_period_return = _as_float(fallback_point.get("benchmark_return_pct"), 0.0) / 100.0
+                benchmark_point_date = str(fallback_point.get("date") or point_date)
+            else:
+                benchmark_period_return = _as_float(benchmark_point.get("return"), 0.0)
+                benchmark_point_date = str(benchmark_point.get("date") or point_date)
+            cumulative_benchmark_return = (
+                (1.0 + cumulative_benchmark_return) * (1.0 + benchmark_period_return) - 1.0
+            )
+            returns_preview.append(
+                {
+                    "label": label,
+                    "date": point_date,
+                    "portfolio_return_pct": round(portfolio_period_return * 100.0, 4),
+                    "cumulative_return_pct": round(cumulative_portfolio_return * 100.0, 4),
+                }
+            )
+            benchmark_series.append(
+                {
+                    "label": label,
+                    "date": benchmark_point_date,
+                    "benchmark_return_pct": round(benchmark_period_return * 100.0, 4),
+                    "cumulative_return_pct": round(cumulative_benchmark_return * 100.0, 4),
+                }
+            )
+            spread_series.append(
+                {
+                    "label": label,
+                    "date": point_date,
+                    "spread_pct": round(
+                        (cumulative_portfolio_return - cumulative_benchmark_return) * 100.0,
+                        4,
+                    ),
+                }
+            )
+        if fallback_point_count:
+            analytics_note = (
+                "Composition preview uses real leg return series where available and profile fallback streams "
+                f"for {fallback_point_count} missing leg periods."
+            )
+        elif benchmark_period_map:
+            analytics_note = "Composition preview is aggregated from the latest real leg return series."
+        else:
+            analytics_note = "Composition preview is aggregated from real leg return series; benchmark remains on fallback data."
+        return returns_preview, benchmark_series, spread_series, analytics_note
+
+    def _benchmark_return_pct(self, benchmark_definition: Mapping[str, Any] | None) -> float:
+        symbol = str((benchmark_definition or {}).get("symbol") or "").strip().upper()
+        mapping = {
+            "SPY": 8.0,
+            "QQQ": 10.0,
+            "AGG": 4.0,
+            "TLT": 4.5,
+            "BND": 4.0,
+        }
+        return mapping.get(symbol, 7.0)
+
+    def _composition_period_returns(
+        self,
+        returns_preview: Sequence[Mapping[str, Any]] | Sequence[dict[str, Any]],
+        key: str,
+    ) -> list[float]:
+        period_returns: list[float] = []
+        for raw_row in returns_preview:
+            row = _as_mapping(raw_row)
+            raw_value = _as_float(row.get(key), math.nan)
+            if math.isfinite(raw_value):
+                period_returns.append(raw_value / 100.0)
+        return period_returns
+
+    def _aligned_leg_return_analysis(
+        self,
+        resolved_legs: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        leg_maps_by_id: dict[str, tuple[Mapping[str, Any], dict[str, dict[str, Any]]]] = {}
+        all_labels: set[str] = set()
+        for leg in resolved_legs:
+            period_map, _benchmark_map = self._load_leg_period_returns(leg)
+            if period_map:
+                leg_maps_by_id[str(leg.get("id") or "")] = (leg, period_map)
+                all_labels.update(str(label) for label in period_map)
+        if not leg_maps_by_id or not all_labels:
+            return {
+                "labels": [],
+                "vectors": {},
+                "quality": {
+                    "status": "fallback",
+                    "alignment_window_start": None,
+                    "alignment_window_end": None,
+                    "aligned_points": 0,
+                    "missing_points": len(resolved_legs),
+                    "coverage_pct": 0.0,
+                    "fallback_used": True,
+                    "notes": ["No aligned leg return stream was available; preview used fallback analytics."],
+                },
+            }
+
+        common_labels = sorted(set.intersection(*(set(period_map) for _leg, period_map in leg_maps_by_id.values())))
+        ordered_labels = self._recent_composition_labels(common_labels or all_labels)
+        vectors: dict[str, list[float]] = {}
+        missing_points = 0
+        for leg in resolved_legs:
+            leg_id = str(leg.get("id") or "")
+            period_map = dict((leg_maps_by_id.get(leg_id) or (leg, {}))[1])
+            synthetic_map = self._synthetic_leg_period_return_map(leg, ordered_labels)
+            values: list[float] = []
+            for label in ordered_labels:
+                if label not in period_map:
+                    missing_points += 1
+                    values.append(_as_float(synthetic_map.get(label, {}).get("return"), 0.0))
+                else:
+                    values.append(_as_float(period_map[label].get("return"), 0.0))
+            vectors[leg_id] = values
+
+        possible_points = max(len(ordered_labels) * max(len(resolved_legs), 1), 1)
+        coverage_pct = round(max(0.0, 100.0 * (possible_points - missing_points) / possible_points), 2)
+        status = "verified" if coverage_pct >= 92.0 and missing_points == 0 and len(ordered_labels) >= 3 else "limited"
+        notes = [
+            f"Aligned {len(ordered_labels)} periods across {len(vectors)} leg streams.",
+        ]
+        if missing_points:
+            notes.append(f"{missing_points} missing leg periods used profile fallback streams.")
+        return {
+            "labels": ordered_labels,
+            "vectors": vectors,
+            "quality": {
+                "status": status,
+                "alignment_window_start": ordered_labels[0] if ordered_labels else None,
+                "alignment_window_end": ordered_labels[-1] if ordered_labels else None,
+                "aligned_points": len(ordered_labels),
+                "missing_points": missing_points,
+                "coverage_pct": coverage_pct,
+                "fallback_used": missing_points > 0,
+                "notes": notes,
+            },
+        }
+
+    def _pearson_correlation(self, x_values: Sequence[float], y_values: Sequence[float]) -> float | None:
+        if len(x_values) != len(y_values) or len(x_values) < 2:
+            return None
+        x_mean = sum(x_values) / len(x_values)
+        y_mean = sum(y_values) / len(y_values)
+        numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_values, y_values))
+        x_var = sum((x - x_mean) ** 2 for x in x_values)
+        y_var = sum((y - y_mean) ** 2 for y in y_values)
+        denominator = math.sqrt(x_var * y_var)
+        if denominator <= 0:
+            return None
+        return max(-1.0, min(1.0, numerator / denominator))
+
+    def _sample_covariance(self, x_values: Sequence[float], y_values: Sequence[float]) -> float | None:
+        if len(x_values) != len(y_values) or len(x_values) < 2:
+            return None
+        x_mean = sum(x_values) / len(x_values)
+        y_mean = sum(y_values) / len(y_values)
+        return sum((x - x_mean) * (y - y_mean) for x, y in zip(x_values, y_values)) / (len(x_values) - 1)
+
+    def _composition_covariance_risk_contributions(
+        self,
+        resolved_legs: Sequence[Mapping[str, Any]],
+        aligned_vectors: Mapping[str, Sequence[float]],
+    ) -> dict[str, dict[str, float]]:
+        leg_ids = [str(leg.get("id") or "") for leg in resolved_legs]
+        if not leg_ids:
+            return {}
+        vector_lengths = {len(aligned_vectors.get(leg_id) or []) for leg_id in leg_ids}
+        if len(vector_lengths) != 1 or next(iter(vector_lengths or {0})) < 2:
+            return {}
+        weights = {
+            str(leg.get("id") or ""): _as_float(leg.get("weight_pct"), 0.0) / 100.0
+            for leg in resolved_legs
+        }
+        covariance: dict[tuple[str, str], float] = {}
+        for x_id in leg_ids:
+            for y_id in leg_ids:
+                cov = self._sample_covariance(aligned_vectors.get(x_id) or [], aligned_vectors.get(y_id) or [])
+                if cov is None:
+                    return {}
+                covariance[(x_id, y_id)] = cov * 12.0
+        portfolio_variance = 0.0
+        for x_id in leg_ids:
+            for y_id in leg_ids:
+                portfolio_variance += weights[x_id] * weights[y_id] * covariance[(x_id, y_id)]
+        if portfolio_variance <= 0:
+            return {}
+        portfolio_volatility = math.sqrt(portfolio_variance)
+        contributions: dict[str, dict[str, float]] = {}
+        for leg_id in leg_ids:
+            covariance_weight_sum = sum(weights[y_id] * covariance[(leg_id, y_id)] for y_id in leg_ids)
+            contribution_pct = weights[leg_id] * covariance_weight_sum / portfolio_variance * 100.0
+            marginal_pct = covariance_weight_sum / portfolio_volatility * 100.0 if portfolio_volatility > 0 else 0.0
+            contributions[leg_id] = {
+                "contribution_pct": round(max(0.0, contribution_pct), 4),
+                "marginal_contribution_pct": round(marginal_pct, 4),
+                "budget_usage_pct": round(min(100.0, max(0.0, contribution_pct)), 4),
+            }
+        return contributions
+
+    def _composition_rebalance_events(
+        self,
+        *,
+        returns_preview: Sequence[Mapping[str, Any]],
+        resolved_legs: Sequence[Mapping[str, Any]],
+        rebalance_frequency: str,
+        trade_cost_bps: float,
+        aligned_vectors: Mapping[str, Sequence[float]] | None = None,
+        aligned_labels: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        checks_per_year = self._rebalance_checks_per_year(rebalance_frequency)
+        if checks_per_year >= 12:
+            interval = 1
+        elif checks_per_year >= 4:
+            interval = 3
+        elif checks_per_year == 2:
+            interval = 6
+        else:
+            interval = 12
+        rows = list(returns_preview)
+        if not rows:
+            return []
+        target_weights_pct = {
+            str(leg.get("id") or ""): round(_as_float(leg.get("weight_pct"), 0.0), 4)
+            for leg in resolved_legs
+        }
+        target_weights = {leg_id: weight / 100.0 for leg_id, weight in target_weights_pct.items()}
+        current_weights = dict(target_weights)
+        vectors = {
+            str(leg_id): [_as_float(value, 0.0) for value in values]
+            for leg_id, values in dict(aligned_vectors or {}).items()
+        }
+        label_positions = {
+            str(label): index
+            for index, label in enumerate(aligned_labels or [])
+        }
+        events: list[dict[str, Any]] = []
+        cash_buffer_pct = round(
+            sum(
+                _as_float(leg.get("weight_pct"), 0.0)
+                for leg in resolved_legs
+                if str(leg.get("leg_kind") or "").lower() == "cash"
+            ),
+            4,
+        )
+        for index, row in enumerate(rows, start=1):
+            label = str(row.get("label") or "")
+            vector_index = label_positions.get(label, index - 1)
+            grown_weights: dict[str, float] = {}
+            for leg_id, weight in current_weights.items():
+                vector = vectors.get(leg_id) or []
+                period_return = _as_float(vector[vector_index], 0.0) if 0 <= vector_index < len(vector) else 0.0
+                grown_weights[leg_id] = max(0.0, weight * (1.0 + period_return))
+            total_grown_weight = sum(grown_weights.values())
+            if total_grown_weight > 0:
+                current_weights = {
+                    leg_id: grown_weight / total_grown_weight
+                    for leg_id, grown_weight in grown_weights.items()
+                }
+            if index != 1 and index % interval != 0 and index != len(rows):
+                continue
+            before_weights = {leg_id: round(weight * 100.0, 4) for leg_id, weight in current_weights.items()}
+            turnover_pct = round(
+                sum(abs(before_weights.get(leg_id, 0.0) - target) for leg_id, target in target_weights_pct.items()) / 2.0,
+                4,
+            )
+            estimated_cost_bps = round(turnover_pct * max(trade_cost_bps, 0.0) / 100.0, 4)
+            has_real_leg_streams = bool(vectors)
+            events.append(
+                {
+                    "label": label or f"Event {index}",
+                    "date": row.get("date"),
+                    "index": index,
+                    "turnover_pct": turnover_pct,
+                    "estimated_cost_bps": estimated_cost_bps,
+                    "cost_drag_pct": round(estimated_cost_bps / 100.0, 4),
+                    "cash_buffer_pct": cash_buffer_pct,
+                    "weight_before": before_weights,
+                    "weight_after": target_weights_pct,
+                    "notes": [
+                        f"Simulated from {rebalance_frequency} cadence using aligned leg return streams."
+                        if has_real_leg_streams
+                        else f"Simulated from {rebalance_frequency} cadence with limited drift evidence.",
+                        "Saved compositions keep frozen source evidence; rebalance simulation does not mutate legs.",
+                    ],
+                }
+            )
+            current_weights = dict(target_weights)
+        return events[:8]
+
+    def _apply_composition_return_cost_breakdown(
+        self,
+        returns_preview: Sequence[Mapping[str, Any]] | Sequence[dict[str, Any]],
+        *,
+        resolved_legs: Sequence[Mapping[str, Any]],
+        maintenance_cost_summary: Mapping[str, Any],
+        rebalance_events: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        event_drag_by_label = {
+            str(event.get("label") or ""): _as_float(event.get("cost_drag_pct"), 0.0)
+            for event in rebalance_events
+        }
+        expense_ratio_bps = _as_float(maintenance_cost_summary.get("expense_ratio_bps"), 0.0)
+        trade_cost_bps = _as_float(maintenance_cost_summary.get("trade_cost_bps"), 0.0)
+        maintenance_drag_pct = round(expense_ratio_bps / 100.0 / 12.0, 6)
+        slippage_drag_pct = round(trade_cost_bps / 100.0 / 12.0, 6)
+        cash_buffer_pct = sum(
+            _as_float(leg.get("weight_pct"), 0.0)
+            for leg in resolved_legs
+            if str(leg.get("leg_kind") or "").lower() == "cash"
+        )
+        cash_buffer_drag_pct = round(cash_buffer_pct * 0.02 / 12.0, 6)
+        cumulative_net_return = 0.0
+        enriched: list[dict[str, Any]] = []
+        for raw_row in returns_preview:
+            row = dict(raw_row)
+            label = str(row.get("label") or "")
+            gross_return_pct = round(_as_float(row.get("portfolio_return_pct"), 0.0), 4)
+            rebalance_cost_drag_pct = round(event_drag_by_label.get(label, 0.0), 6)
+            total_cost_drag_pct = round(
+                maintenance_drag_pct + slippage_drag_pct + rebalance_cost_drag_pct + cash_buffer_drag_pct,
+                6,
+            )
+            net_return_pct = round(gross_return_pct - total_cost_drag_pct, 4)
+            cumulative_net_return = (1.0 + cumulative_net_return) * (1.0 + net_return_pct / 100.0) - 1.0
+            row.update(
+                {
+                    "gross_return_pct": gross_return_pct,
+                    "net_return_pct": net_return_pct,
+                    "maintenance_cost_drag_pct": maintenance_drag_pct,
+                    "slippage_drag_pct": slippage_drag_pct,
+                    "rebalance_cost_drag_pct": rebalance_cost_drag_pct,
+                    "cash_buffer_drag_pct": cash_buffer_drag_pct,
+                    "total_cost_drag_pct": total_cost_drag_pct,
+                    "cumulative_net_return_pct": round(cumulative_net_return * 100.0, 4),
+                }
+            )
+            enriched.append(row)
+        return enriched
+
+    def _composition_source_integrity(
+        self,
+        *,
+        resolved_legs: Sequence[Mapping[str, Any]],
+        source_evidence: Sequence[Mapping[str, Any]] | None = None,
+        checked_at: str | None = None,
+    ) -> list[dict[str, Any]]:
+        evidence_by_ref = {
+            str(item.get("freeze_ref_id") or ""): dict(item)
+            for item in (source_evidence or [])
+        }
+        current_inventory_by_ref = self._inventory_row_map() if source_evidence else {}
+        rows: list[dict[str, Any]] = []
+        now_label = checked_at or iso_now()
+        for leg in resolved_legs:
+            leg_id = str(leg.get("id") or "")
+            source_ref_id = str(leg.get("source_ref_id") or "")
+            evidence = evidence_by_ref.get(source_ref_id, {})
+            status = str(leg.get("status") or "").upper()
+            tags = [str(item).lower() for item in (leg.get("attribute_tags") or [])]
+            alerts: list[str] = []
+            if status in {"NEEDS_RUN", "REPAIR_REQUIRED", "MISSING"}:
+                alerts.append("Source is not currently eligible for a saved composition.")
+            if "watch" in tags or status == "WATCH":
+                alerts.append("Source is watch-only and may be limited to read-only risk budget checks.")
+            current_inventory_row = current_inventory_by_ref.get(source_ref_id) or {}
+            current_integrity = dict(
+                current_inventory_row.get("source_integrity")
+                or dict(leg.get("config") or {}).get("source_integrity")
+                or {}
+            )
+            frozen_snapshot = dict(evidence.get("snapshot") or {})
+            frozen_integrity = dict(dict(frozen_snapshot.get("config") or {}).get("source_integrity") or {})
+            current_source_hash = str(current_integrity.get("freeze_hash") or "")
+            frozen_source_hash = str(frozen_integrity.get("freeze_hash") or "")
+            if evidence and current_source_hash and frozen_source_hash and current_source_hash != frozen_source_hash:
+                alerts.append("Current source version differs from the frozen source signature.")
+            drift_status = "current"
+            signature_status = "verified" if evidence.get("freeze_hash") else "preview"
+            if alerts:
+                drift_status = "drifted" if signature_status == "verified" else "needs_repair"
+                signature_status = "stale" if signature_status == "verified" else "unverified"
+            rows.append(
+                {
+                    "leg_id": leg_id,
+                    "display_name": str(leg.get("display_name") or source_ref_id or leg_id),
+                    "source_ref_id": source_ref_id or None,
+                    "freeze_hash": evidence.get("freeze_hash"),
+                    "signature_status": signature_status,
+                    "drift_status": drift_status,
+                    "current_ref_id": current_integrity.get("current_ref_id") or source_ref_id or None,
+                    "checked_at": now_label,
+                    "alerts": alerts,
+                }
+            )
+        return rows
+
+    def _decode_composition_audit_event(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        summary_payload = loads(row.get("summary_json"), {})
+        return {
+            "id": str(row.get("id") or ""),
+            "action": str(row.get("action") or ""),
+            "actor": str(row.get("actor") or "system"),
+            "at": str(row.get("occurred_at") or row.get("created_at") or ""),
+            "summary": str(summary_payload.get("summary") or ""),
+            "hash_before": row.get("hash_before"),
+            "hash_after": row.get("hash_after"),
+        }
+
+    def _load_composition_audit_events(self, composition_id: str) -> list[dict[str, Any]]:
+        rows = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM composition_audit_events
+            WHERE composition_id = ?
+            ORDER BY occurred_at ASC, rowid ASC, id ASC
+            """,
+            (composition_id,),
+        )
+        return [self._decode_composition_audit_event(row) for row in rows]
+
+    def _insert_composition_audit_event(
+        self,
+        conn: Any,
+        *,
+        composition_id: str,
+        revision: int,
+        action: str,
+        summary: str,
+        occurred_at: str,
+        actor: str = "system",
+        hash_before: str | None = None,
+        hash_after: str | None = None,
+        source_ref_id: str | None = None,
+    ) -> dict[str, Any]:
+        event_id = self._new_id("composition_audit")
+        conn.execute(
+            """
+            INSERT INTO composition_audit_events (
+                id,
+                composition_id,
+                revision,
+                action,
+                actor,
+                summary_json,
+                hash_before,
+                hash_after,
+                source_ref_id,
+                occurred_at,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                composition_id,
+                revision,
+                action,
+                actor,
+                dumps({"summary": summary}),
+                hash_before,
+                hash_after,
+                source_ref_id,
+                occurred_at,
+                occurred_at,
+            ),
+        )
+        return {
+            "id": event_id,
+            "action": action,
+            "actor": actor,
+            "at": occurred_at,
+            "summary": summary,
+            "hash_before": hash_before,
+            "hash_after": hash_after,
+        }
+
+    def _composition_audit_trail(
+        self,
+        *,
+        composition_id: str,
+        created_at: str,
+        updated_at: str,
+        status: str,
+        source_evidence: Sequence[Mapping[str, Any]],
+        rebalance_events: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        persisted_rows = self._load_composition_audit_events(composition_id)
+        if persisted_rows:
+            return persisted_rows
+        first_hash = str((source_evidence[0] if source_evidence else {}).get("freeze_hash") or "")
+        latest_hash = str((source_evidence[-1] if source_evidence else {}).get("freeze_hash") or "")
+        rows = [
+            {
+                "id": f"{composition_id}:created",
+                "action": "created",
+                "actor": "system",
+                "at": created_at,
+                "summary": "Composition record created with normalized legs and cost policy.",
+                "hash_before": None,
+                "hash_after": first_hash or None,
+            },
+            {
+                "id": f"{composition_id}:source_freeze",
+                "action": "source_freeze",
+                "actor": "system",
+                "at": updated_at,
+                "summary": f"Captured {len(source_evidence)} source freeze signatures.",
+                "hash_before": first_hash or None,
+                "hash_after": latest_hash or None,
+            },
+            {
+                "id": f"{composition_id}:rebalance_check",
+                "action": "rebalance_check",
+                "actor": "system",
+                "at": updated_at,
+                "summary": f"Simulated {len(rebalance_events)} rebalance events without mutating frozen sources.",
+                "hash_before": latest_hash or None,
+                "hash_after": latest_hash or None,
+            },
+            {
+                "id": f"{composition_id}:status",
+                "action": "status",
+                "actor": "system",
+                "at": updated_at,
+                "summary": f"Composition status is {status}; drift warnings remain advisory.",
+                "hash_before": latest_hash or None,
+                "hash_after": latest_hash or None,
+            },
+        ]
+        return rows
+
+    def _record_snapshot_refresh_composition_impact(
+        self,
+        *,
+        job_id: str,
+        targets: Sequence[str],
+        refresh_stats: Mapping[str, Any] | None,
+        occurred_at: str,
+    ) -> int:
+        normalized_targets = {str(item).strip().lower() for item in targets if str(item).strip()}
+        if "bond" not in normalized_targets and "bond_fixed_income" not in dict(refresh_stats or {}):
+            return 0
+        rows = self.storage.fetch_all(
+            """
+            SELECT
+                c.id AS composition_id,
+                c.revision AS revision,
+                f.freeze_hash AS freeze_hash
+            FROM compositions AS c
+            JOIN composition_source_freezes AS f
+              ON f.composition_id = c.id
+             AND f.is_current = 1
+             AND f.deleted_at IS NULL
+            LEFT JOIN asset_leg_definitions AS a
+              ON a.id = f.freeze_ref_id
+            WHERE c.deleted_at IS NULL
+              AND UPPER(COALESCE(c.status, 'DRAFT')) != 'ARCHIVED'
+              AND (
+                f.snapshot_json LIKE '%bond_fixed_income%'
+                OR LOWER(COALESCE(a.source_provider, '')) = 'bond_fixed_income'
+                OR COALESCE(a.source_snapshot_id, '') LIKE 'bond_fixed_income::%'
+              )
+            ORDER BY c.id ASC, f.created_at ASC
+            """
+        )
+        latest_hash_by_composition: dict[str, str | None] = {}
+        revision_by_composition: dict[str, int] = {}
+        for row in rows:
+            composition_id = str(row.get("composition_id") or "")
+            if not composition_id:
+                continue
+            latest_hash_by_composition[composition_id] = str(row.get("freeze_hash") or "") or None
+            revision_by_composition[composition_id] = _as_int(row.get("revision"), 1)
+        if not latest_hash_by_composition:
+            return 0
+        with self.storage.connection() as conn:
+            for composition_id, latest_hash in latest_hash_by_composition.items():
+                self._insert_composition_audit_event(
+                    conn,
+                    composition_id=composition_id,
+                    revision=revision_by_composition.get(composition_id, 1),
+                    action="snapshot_refresh_impact_check",
+                    occurred_at=occurred_at,
+                    summary=(
+                        f"Checked bond snapshot refresh job {job_id} against frozen source signatures; "
+                        "no saved composition source evidence was rewritten."
+                    ),
+                    hash_before=latest_hash,
+                    hash_after=latest_hash,
+                    source_ref_id=job_id,
+                )
+        return len(latest_hash_by_composition)
+
+    def _annualized_volatility_from_period_returns(
+        self,
+        period_returns: Sequence[float],
+        *,
+        periods_per_year: float = 12.0,
+    ) -> float | None:
+        if len(period_returns) < 2:
+            return None
+        mean = sum(period_returns) / len(period_returns)
+        variance = sum((value - mean) ** 2 for value in period_returns) / len(period_returns)
+        if variance <= 0:
+            return None
+        return math.sqrt(variance) * math.sqrt(periods_per_year)
+
+    def _annualized_return_from_period_returns(
+        self,
+        period_returns: Sequence[float],
+        *,
+        periods_per_year: float = 12.0,
+    ) -> float | None:
+        if not period_returns:
+            return None
+        compounded = 1.0
+        for value in period_returns:
+            compounded *= 1.0 + value
+        total_years = max(len(period_returns) / periods_per_year, 1.0 / periods_per_year)
+        if compounded <= 0:
+            return None
+        return compounded ** (1.0 / total_years) - 1.0
+
+    def _annualized_sharpe_from_period_returns(
+        self,
+        period_returns: Sequence[float],
+        *,
+        periods_per_year: float = 12.0,
+    ) -> float | None:
+        volatility = self._annualized_volatility_from_period_returns(
+            period_returns,
+            periods_per_year=periods_per_year,
+        )
+        if volatility is None or volatility <= 0:
+            return None
+        mean = sum(period_returns) / len(period_returns)
+        return mean / (volatility / math.sqrt(periods_per_year)) * math.sqrt(periods_per_year)
+
+    def _annualized_sortino_from_period_returns(
+        self,
+        period_returns: Sequence[float],
+        *,
+        periods_per_year: float = 12.0,
+        target_return: float = 0.0,
+    ) -> float | None:
+        if not period_returns:
+            return None
+        downside_returns = [min(value - target_return, 0.0) for value in period_returns]
+        downside_variance = sum(value * value for value in downside_returns) / len(period_returns)
+        if downside_variance <= 0:
+            return None
+        mean = sum(period_returns) / len(period_returns)
+        downside_deviation = math.sqrt(downside_variance)
+        return mean / downside_deviation * math.sqrt(periods_per_year)
+
+    def _rolling_compounded_return(
+        self,
+        period_returns: Sequence[float],
+        window: int,
+    ) -> float | None:
+        if window <= 0 or len(period_returns) < window:
+            return None
+        worst_window: float | None = None
+        for start_index in range(0, len(period_returns) - window + 1):
+            compounded = 1.0
+            for value in period_returns[start_index : start_index + window]:
+                compounded *= 1.0 + value
+            total_return = compounded - 1.0
+            if worst_window is None or total_return < worst_window:
+                worst_window = total_return
+        return worst_window
+
+    def _max_drawdown_from_period_returns(self, period_returns: Sequence[float]) -> float | None:
+        if not period_returns:
+            return None
+        equity = 1.0
+        peak = 1.0
+        max_drawdown = 0.0
+        for value in period_returns:
+            equity *= 1.0 + value
+            peak = max(peak, equity)
+            if peak > 0:
+                max_drawdown = min(max_drawdown, equity / peak - 1.0)
+        return max_drawdown
+
+    def _build_composition_scenario_summary(
+        self,
+        *,
+        period_returns: Sequence[float],
+        correlation_matrix: Sequence[Mapping[str, Any]] | Sequence[dict[str, Any]],
+        normalized_legs: Sequence[Mapping[str, Any]] | Sequence[dict[str, Any]],
+        annualized_return_pct: float,
+        max_drawdown_pct: float,
+    ) -> dict[str, Any]:
+        realized_drawdown_pct = round(
+            abs(self._max_drawdown_from_period_returns(period_returns) or 0.0) * 100.0,
+            2,
+        )
+        stress_3m_pct = round(
+            abs(self._rolling_compounded_return(period_returns, 3) or 0.0) * 100.0,
+            2,
+        )
+        stress_6m_pct = round(
+            abs(self._rolling_compounded_return(period_returns, 6) or 0.0) * 100.0,
+            2,
+        )
+        off_diagonal_correlations = [
+            _as_float(cell.get("correlation"), 0.0)
+            for raw_cell in correlation_matrix
+            for cell in [_as_mapping(raw_cell)]
+            if str(cell.get("x_key") or "") != str(cell.get("y_key") or "")
+        ]
+        max_positive_correlation = max(
+            [value for value in off_diagonal_correlations if value > 0],
+            default=0.0,
+        )
+        bond_weight_pct = round(
+            sum(
+                _as_float(leg.get("weight_pct"), 0.0)
+                for raw_leg in normalized_legs
+                for leg in [_as_mapping(raw_leg)]
+                if str(leg.get("leg_kind") or "").lower() == "asset"
+            ),
+            1,
+        )
+        cash_weight_pct = round(
+            sum(
+                _as_float(leg.get("weight_pct"), 0.0)
+                for raw_leg in normalized_legs
+                for leg in [_as_mapping(raw_leg)]
+                if str(leg.get("leg_kind") or "").lower() == "cash"
+            ),
+            1,
+        )
+        base_drawdown_pct = round(
+            max(
+                realized_drawdown_pct,
+                abs(max_drawdown_pct),
+                min(max(abs(annualized_return_pct) * 0.18, cash_weight_pct * 0.08), 6.0),
+                0.25,
+            ),
+            2,
+        )
+        rolling_stress_drawdown_pct = round(
+            max(base_drawdown_pct * 0.82, stress_3m_pct, 0.01),
+            2,
+        )
+        correlation_stress_drawdown_pct = round(
+            max(
+                base_drawdown_pct * (1.0 + max_positive_correlation * 0.45),
+                stress_6m_pct,
+                rolling_stress_drawdown_pct,
+            ),
+            2,
+        )
+        return {
+            "base_case": {
+                "key": "historical_base",
+                "label": "历史基准场景",
+                "expected_drawdown_pct": -base_drawdown_pct,
+                "annualized_return_pct": round(annualized_return_pct, 2),
+                "tag": f"已实现最大回撤 {base_drawdown_pct:.1f}%",
+                "tone": "accent",
+                "body": (
+                    f"基于最近 {len(period_returns)} 个有效月度收益回放，组合历史最大回撤约为 {base_drawdown_pct:.1f}%，"
+                    f"当前现金缓冲约为 {cash_weight_pct:.1f}%。"
+                ),
+            },
+            "stress_case": {
+                "key": "rolling_quarter_stress",
+                "label": "滚动三个月压力",
+                "expected_drawdown_pct": -rolling_stress_drawdown_pct,
+                "window_months": 3,
+                "tag": f"最差 3 个月 {stress_3m_pct:.1f}%",
+                "tone": "warning",
+                "body": (
+                    f"按历史最差三个月复合跌幅推演，短期连续走弱时组合可能承受约 {rolling_stress_drawdown_pct:.1f}% 的压力。"
+                ),
+            },
+            "cases": [
+                {
+                    "key": "historical_base",
+                    "label": "历史基准场景",
+                    "expected_drawdown_pct": -base_drawdown_pct,
+                    "tag": f"年化收益 {annualized_return_pct:.1f}%",
+                    "tone": "accent",
+                    "body": (
+                        f"历史回放显示组合最大回撤约 {base_drawdown_pct:.1f}%，当前现金缓冲 {cash_weight_pct:.1f}% 可部分吸收波动。"
+                    ),
+                },
+                {
+                    "key": "rolling_quarter_stress",
+                    "label": "滚动三个月压力",
+                    "expected_drawdown_pct": -rolling_stress_drawdown_pct,
+                    "tag": f"最差 3 个月 {stress_3m_pct:.1f}%",
+                    "tone": "warning",
+                    "body": (
+                        f"如果组合重复历史上最差的三个月节奏，预估回撤会逼近 {rolling_stress_drawdown_pct:.1f}%。"
+                    ),
+                },
+                {
+                    "key": "correlation_spike",
+                    "label": "相关性抬升冲击",
+                    "expected_drawdown_pct": -correlation_stress_drawdown_pct,
+                    "tag": f"最高正相关 {max_positive_correlation:.2f}",
+                    "tone": "danger",
+                    "body": (
+                        f"当高相关腿同步放大回撤时，特别是 {bond_weight_pct:.1f}% 的资产腿一起承压，"
+                        f"组合压力区间可能扩大到 {correlation_stress_drawdown_pct:.1f}%。"
+                    ),
+                },
+            ],
+            "dispersion_note": "情景结果基于组合月度收益、滚动窗口损失和腿间相关性推演，用于快速筛查尾部风险。",
+        }
+
+    def _build_composition_preview_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        benchmark_definition = self._normalize_composition_benchmark_definition(
+            payload.get("benchmark_definition")
+        )
+        cost_policy = self._normalize_composition_cost_policy(payload.get("cost_policy"))
+        rebalance_frequency = str(payload.get("rebalance_frequency") or "quarterly").strip().lower() or "quarterly"
+        resolved_legs = self._resolve_composition_legs(payload.get("legs") or [])
+        if not resolved_legs:
+            raise ValueError("At least one composition leg is required")
+
+        total_weight_pct = round(sum(_as_float(leg.get("weight_pct"), 0.0) for leg in resolved_legs), 4)
+        residual_weight_pct = round(100.0 - total_weight_pct, 4)
+        locked_weight_pct = round(
+            sum(_as_float(leg.get("weight_pct"), 0.0) for leg in resolved_legs if leg.get("weight_locked")),
+            4,
+        )
+        unlocked_weight_pct = round(total_weight_pct - locked_weight_pct, 4)
+        within_tolerance = abs(residual_weight_pct) <= 0.5
+
+        risk_contribution_preview: list[dict[str, Any]] = []
+        correlation_matrix: list[dict[str, Any]] = []
+
+        risk_budget_denominator = 0.0
+        profiles_by_leg_id: dict[str, dict[str, float]] = {}
+        for leg in resolved_legs:
+            profile = self._resolved_leg_profile(leg)
+            profiles_by_leg_id[str(leg["id"])] = profile
+            risk_budget_denominator += abs(_as_float(leg.get("weight_pct"), 0.0) * profile["volatility_pct"])
+        returns_preview, benchmark_series, spread_series, analytics_note = (
+            self._build_real_composition_preview_series(
+                resolved_legs,
+                benchmark_definition,
+                profiles_by_leg_id,
+            )
+        )
+        aligned_return_analysis = self._aligned_leg_return_analysis(resolved_legs)
+        aligned_vectors = dict(aligned_return_analysis.get("vectors") or {})
+        aligned_labels = [str(label) for label in (aligned_return_analysis.get("labels") or [])]
+        covariance_risk_contributions = self._composition_covariance_risk_contributions(
+            resolved_legs,
+            aligned_vectors,
+        )
+        if aligned_vectors:
+            risk_budget_denominator = 0.0
+            for leg in resolved_legs:
+                leg_vector = [_as_float(value, 0.0) for value in aligned_vectors.get(str(leg["id"]), [])]
+                realized_volatility_pct = (
+                    round((self._annualized_volatility_from_period_returns(leg_vector) or 0.0) * 100.0, 4)
+                    if len(leg_vector) >= 2
+                    else profiles_by_leg_id[str(leg["id"])]["volatility_pct"]
+                )
+                risk_budget_denominator += abs(_as_float(leg.get("weight_pct"), 0.0) * realized_volatility_pct)
 
         for leg in resolved_legs:
             profile = profiles_by_leg_id[str(leg["id"])]
-            contribution_raw = abs(_as_float(leg.get("weight_pct"), 0.0) * profile["volatility_pct"])
+            leg_vector = [
+                _as_float(value, 0.0)
+                for value in aligned_vectors.get(str(leg["id"]), [])
+            ]
+            realized_volatility_pct = (
+                round((self._annualized_volatility_from_period_returns(leg_vector) or 0.0) * 100.0, 4)
+                if len(leg_vector) >= 2
+                else profile["volatility_pct"]
+            )
+            contribution_raw = abs(_as_float(leg.get("weight_pct"), 0.0) * realized_volatility_pct)
             contribution_pct = (
                 round(contribution_raw / risk_budget_denominator * 100.0, 4)
                 if risk_budget_denominator > 0
                 else 0.0
             )
+            covariance_contribution = covariance_risk_contributions.get(str(leg["id"]), {})
+            if covariance_contribution:
+                contribution_pct = _as_float(covariance_contribution.get("contribution_pct"), contribution_pct)
+            duration, convexity = self._leg_duration_convexity_inputs(leg)
             risk_contribution_preview.append(
                 {
                     "leg_id": str(leg["id"]),
                     "label": str(leg["display_name"]),
                     "weight_pct": round(_as_float(leg.get("weight_pct"), 0.0), 4),
-                    "volatility_pct": profile["volatility_pct"],
+                    "volatility_pct": realized_volatility_pct,
                     "contribution_pct": contribution_pct,
+                    "return_contribution_pct": round(
+                        _as_float(leg.get("weight_pct"), 0.0) / 100.0 * profile["annualized_return_pct"],
+                        4,
+                    ),
+                    "marginal_contribution_pct": round(
+                        _as_float(
+                            covariance_contribution.get("marginal_contribution_pct")
+                            if covariance_contribution
+                            else contribution_pct * (_as_float(leg.get("weight_pct"), 0.0) / 100.0),
+                            0.0,
+                        ),
+                        4,
+                    ),
+                    "budget_usage_pct": round(
+                        _as_float(
+                            covariance_contribution.get("budget_usage_pct")
+                            if covariance_contribution
+                            else min(100.0, contribution_pct),
+                            0.0,
+                        ),
+                        4,
+                    ),
+                    "duration_contribution_years": (
+                        round(duration * _as_float(leg.get("weight_pct"), 0.0) / 100.0, 4)
+                        if duration > 0
+                        else None
+                    ),
+                    "convexity_contribution": (
+                        round(convexity * _as_float(leg.get("weight_pct"), 0.0) / 100.0, 4)
+                        if convexity > 0
+                        else None
+                    ),
                 }
             )
 
@@ -3976,13 +6153,14 @@ class BacktestPlatformService:
             for y_leg in resolved_legs:
                 if x_leg["id"] == y_leg["id"]:
                     correlation = 1.0
-                elif "cash" in {x_leg["leg_kind"], y_leg["leg_kind"]}:
-                    correlation = 0.08
-                else:
-                    correlation = round(
-                        0.18 + _stable_hash_fraction(x_leg["id"], y_leg["id"], "corr") * 0.62,
-                        4,
+                elif str(x_leg["id"]) in aligned_vectors and str(y_leg["id"]) in aligned_vectors:
+                    realized_correlation = self._pearson_correlation(
+                        aligned_vectors[str(x_leg["id"])],
+                        aligned_vectors[str(y_leg["id"])],
                     )
+                    correlation = round(realized_correlation, 4) if realized_correlation is not None else 0.0
+                else:
+                    correlation = 0.0
                 correlation_matrix.append(
                     {
                         "x_key": str(x_leg["id"]),
@@ -4019,6 +6197,14 @@ class BacktestPlatformService:
             expense_ratio_bps + trade_cost_bps + turnover_budget_bps * 0.25,
             4,
         )
+        rebalance_events = self._composition_rebalance_events(
+            returns_preview=returns_preview,
+            resolved_legs=resolved_legs,
+            rebalance_frequency=rebalance_frequency,
+            trade_cost_bps=trade_cost_bps,
+            aligned_vectors=aligned_vectors,
+            aligned_labels=aligned_labels,
+        )
         maintenance_cost_summary = {
             "expense_ratio_bps": round(expense_ratio_bps, 4),
             "turnover_budget_bps": round(turnover_budget_bps, 4),
@@ -4026,9 +6212,15 @@ class BacktestPlatformService:
             "total_estimated_bps": total_estimated_bps,
             "notes": [
                 f"Cadence modeled as {rebalance_frequency}.",
-                "Phase 1 analytics are deterministic placeholders when live composition analytics are unavailable.",
+                analytics_note,
             ],
         }
+        returns_preview = self._apply_composition_return_cost_breakdown(
+            returns_preview,
+            resolved_legs=resolved_legs,
+            maintenance_cost_summary=maintenance_cost_summary,
+            rebalance_events=rebalance_events,
+        )
 
         unique_leg_types = len({str(leg["leg_kind"]) for leg in resolved_legs})
         max_leg_weight_pct = max(_as_float(leg.get("weight_pct"), 0.0) for leg in resolved_legs)
@@ -4133,6 +6325,12 @@ class BacktestPlatformService:
                 "verdict": verdict,
                 "factors": factors,
             },
+            "return_quality_summary": dict(aligned_return_analysis.get("quality") or {}),
+            "rebalance_events": rebalance_events,
+            "source_integrity": self._composition_source_integrity(
+                resolved_legs=resolved_legs,
+                checked_at=iso_now(),
+            ),
             "warnings": warnings,
             "advisories": advisories,
         }
@@ -4179,10 +6377,18 @@ class BacktestPlatformService:
         source_evidence: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         preview = dict(preview_payload)
+        preview["normalized_legs"] = self._refresh_composition_leg_reference_summaries(
+            preview.get("normalized_legs", []),
+            minimum_reference_ids=[
+                str(item.get("freeze_ref_id") or "")
+                for item in (source_evidence or [])
+                if isinstance(item, Mapping)
+            ],
+        )
         weight_summary = dict(preview.get("weight_summary") or {})
         maintenance_cost_summary = dict(preview.get("maintenance_cost_summary") or {})
         composition_score = dict(preview.get("composition_score") or {})
-        annualized_return = round(
+        weighted_annualized_return = round(
             sum(
                 _as_float(item.get("weight_pct"), 0.0)
                 / 100.0
@@ -4191,7 +6397,7 @@ class BacktestPlatformService:
             ),
             4,
         )
-        max_drawdown = round(
+        weighted_max_drawdown = round(
             sum(
                 _as_float(item.get("weight_pct"), 0.0)
                 / 100.0
@@ -4199,6 +6405,65 @@ class BacktestPlatformService:
                 for item in preview.get("normalized_legs", [])
             ),
             4,
+        )
+        portfolio_period_returns = self._composition_period_returns(
+            preview.get("returns_preview", []),
+            "net_return_pct",
+        ) or self._composition_period_returns(
+            preview.get("returns_preview", []),
+            "portfolio_return_pct",
+        )
+        benchmark_period_returns = self._composition_period_returns(
+            preview.get("benchmark_series", []),
+            "benchmark_return_pct",
+        )
+        realized_annualized_return = self._annualized_return_from_period_returns(
+            portfolio_period_returns,
+            periods_per_year=12.0,
+        )
+        annualized_return = round(
+            (realized_annualized_return * 100.0)
+            if realized_annualized_return is not None
+            else weighted_annualized_return,
+            4,
+        )
+        realized_max_drawdown = self._max_drawdown_from_period_returns(portfolio_period_returns)
+        max_drawdown = round(
+            abs(realized_max_drawdown) * 100.0
+            if realized_max_drawdown is not None
+            else weighted_max_drawdown,
+            4,
+        )
+        annualized_volatility = self._annualized_volatility_from_period_returns(
+            portfolio_period_returns,
+            periods_per_year=12.0,
+        )
+        sharpe_ratio = self._annualized_sharpe_from_period_returns(
+            portfolio_period_returns,
+            periods_per_year=12.0,
+        )
+        sortino_ratio = self._annualized_sortino_from_period_returns(
+            portfolio_period_returns,
+            periods_per_year=12.0,
+        )
+        benchmark_sharpe = self._annualized_sharpe_from_period_returns(
+            benchmark_period_returns,
+            periods_per_year=12.0,
+        )
+        cash_weight = round(
+            sum(
+                _as_float(item.get("weight_pct"), 0.0)
+                for item in preview.get("normalized_legs", [])
+                if str(item.get("leg_kind") or "").lower() == "cash"
+            ),
+            2,
+        )
+        scenario_summary = self._build_composition_scenario_summary(
+            period_returns=portfolio_period_returns,
+            correlation_matrix=preview.get("correlation_matrix", []),
+            normalized_legs=preview.get("normalized_legs", []),
+            annualized_return_pct=annualized_return,
+            max_drawdown_pct=max_drawdown,
         )
         kpis = [
             {
@@ -4214,6 +6479,19 @@ class BacktestPlatformService:
                 "value": annualized_return,
                 "unit": "%",
                 "tone": "good" if annualized_return >= 0 else "risk",
+                "detail": (
+                    "Uses realized monthly compounding from the composition preview."
+                    if realized_annualized_return is not None
+                    else "Falls back to sleeve-weighted annualized return because realized history is incomplete."
+                ),
+            },
+            {
+                "key": "volatility",
+                "label": "Volatility",
+                "value": round((annualized_volatility or 0.0) * 100.0, 2),
+                "unit": "%",
+                "tone": "good" if (annualized_volatility or 0.0) <= 0.12 else "watch",
+                "detail": "Annualized from realized monthly return variance.",
             },
             {
                 "key": "max_drawdown",
@@ -4221,6 +6499,35 @@ class BacktestPlatformService:
                 "value": max_drawdown,
                 "unit": "%",
                 "tone": "watch",
+                "detail": "Measured from the realized cumulative return path.",
+            },
+            {
+                "key": "cash_weight",
+                "label": "Cash weight",
+                "value": cash_weight,
+                "unit": "%",
+                "tone": "good" if cash_weight > 0 else "watch",
+                "detail": "Shows how much of the composition can buffer stress without forced risk reallocation.",
+            },
+            {
+                "key": "sharpe",
+                "label": "Sharpe",
+                "value": round(sharpe_ratio or 0.0, 2),
+                "unit": None,
+                "tone": "good" if (sharpe_ratio or 0.0) >= 1.0 else "watch",
+                "detail": (
+                    f"Beats the benchmark by {(sharpe_ratio or 0.0) - (benchmark_sharpe or 0.0):.2f} on realized monthly returns."
+                    if sharpe_ratio is not None and benchmark_sharpe is not None
+                    else "Uses realized monthly return efficiency because a direct benchmark Sharpe was unavailable."
+                ),
+            },
+            {
+                "key": "sortino",
+                "label": "Sortino",
+                "value": round(sortino_ratio or 0.0, 2),
+                "unit": None,
+                "tone": "good" if (sortino_ratio or 0.0) >= 1.0 else "watch",
+                "detail": "Focuses on downside deviation instead of total volatility.",
             },
             {
                 "key": "leg_count",
@@ -4271,6 +6578,33 @@ class BacktestPlatformService:
                 )
             )
         ]
+        source_integrity = self._composition_source_integrity(
+            resolved_legs=list(preview.get("normalized_legs", [])),
+            source_evidence=source_evidence,
+            checked_at=updated_at,
+        )
+        integrity_by_ref = {
+            str(item.get("source_ref_id") or ""): dict(item)
+            for item in source_integrity
+        }
+        enriched_source_evidence: list[dict[str, Any]] = []
+        for raw_item in source_evidence or []:
+            item = dict(raw_item)
+            integrity = integrity_by_ref.get(str(item.get("freeze_ref_id") or ""), {})
+            item["signature_status"] = integrity.get("signature_status") or "verified"
+            item["drift_status"] = integrity.get("drift_status") or "current"
+            item["current_ref_id"] = integrity.get("current_ref_id") or item.get("freeze_ref_id")
+            item["alerts"] = list(integrity.get("alerts") or [])
+            enriched_source_evidence.append(item)
+        rebalance_events = [dict(item) for item in preview.get("rebalance_events", [])]
+        audit_trail = self._composition_audit_trail(
+            composition_id=composition_id,
+            created_at=created_at,
+            updated_at=updated_at,
+            status=status,
+            source_evidence=enriched_source_evidence,
+            rebalance_events=rebalance_events,
+        )
         return {
             "id": composition_id,
             "name": name,
@@ -4302,18 +6636,12 @@ class BacktestPlatformService:
             "correlation_matrix": list(preview.get("correlation_matrix", [])),
             "risk_contribution_preview": list(preview.get("risk_contribution_preview", [])),
             "maintenance_cost_summary": maintenance_cost_summary,
-            "scenario_summary": {
-                "base_case": {
-                    "annualized_return_pct": annualized_return,
-                    "max_drawdown_pct": max_drawdown,
-                },
-                "stress_case": {
-                    "drawdown_pct": round(max_drawdown * 1.25, 4),
-                    "return_drag_pct": round(max(annualized_return * 0.35, 0.0), 4),
-                },
-                "dispersion_note": "Scenario outputs are deterministic phase 1 approximations built from sleeve mix and cadence.",
-            },
-            "source_evidence": [dict(item) for item in (source_evidence or [])],
+            "return_quality_summary": dict(preview.get("return_quality_summary") or {}),
+            "rebalance_events": rebalance_events,
+            "scenario_summary": scenario_summary,
+            "source_evidence": enriched_source_evidence,
+            "source_integrity": source_integrity,
+            "audit_trail": audit_trail,
             "composition_score": composition_score,
             "latest_activity_label": self._latest_activity_label(updated_at),
             "deep_link_actions": [
@@ -4335,6 +6663,14 @@ class BacktestPlatformService:
                     _as_float(kpi.get("value"), 0.0)
                     for kpi in detail_payload.get("kpis", [])
                     if kpi.get("key") == "annualized_return"
+                ),
+                0.0,
+            ),
+            "sharpe": next(
+                (
+                    _as_float(kpi.get("value"), 0.0)
+                    for kpi in detail_payload.get("kpis", [])
+                    if kpi.get("key") == "sharpe"
                 ),
                 0.0,
             ),
@@ -4428,6 +6764,8 @@ class BacktestPlatformService:
     ) -> dict[str, Any]:
         normalized_legs = list(preview_payload.get("normalized_legs", []))
         current_record = self.storage.fetch_one("SELECT * FROM compositions WHERE id = ?", (composition_id,))
+        existing_audit_events = self._load_composition_audit_events(composition_id) if current_record else []
+        previous_freeze_rows = self._load_composition_freeze_rows(composition_id) if current_record else []
         previous_revision = _as_int((current_record or {}).get("revision"), 0)
         previous_generation = _as_int((current_record or {}).get("current_freeze_generation"), 0)
         revision = max(previous_revision + 1, 1)
@@ -4501,6 +6839,9 @@ class BacktestPlatformService:
             source_evidence=freeze_rows,
         )
         summary_payload = self._build_composition_summary_payload(detail_payload)
+        previous_hash = str((previous_freeze_rows[-1] if previous_freeze_rows else {}).get("freeze_hash") or "") or None
+        first_hash = str((freeze_rows[0] if freeze_rows else {}).get("freeze_hash") or "") or None
+        latest_hash = str((freeze_rows[-1] if freeze_rows else {}).get("freeze_hash") or "") or None
 
         with self.storage.connection() as conn:
             conn.execute(
@@ -4648,6 +6989,78 @@ class BacktestPlatformService:
                         row["captured_at"],
                     ),
                 )
+            audit_events: list[dict[str, Any]] = []
+            if current_record is None:
+                audit_events.append(
+                    self._insert_composition_audit_event(
+                        conn,
+                        composition_id=composition_id,
+                        revision=revision,
+                        action="created",
+                        occurred_at=created_at,
+                        summary="Composition record created with normalized legs and cost policy.",
+                        hash_before=None,
+                        hash_after=first_hash,
+                    )
+                )
+            else:
+                audit_events.append(
+                    self._insert_composition_audit_event(
+                        conn,
+                        composition_id=composition_id,
+                        revision=revision,
+                        action="structure_patch",
+                        occurred_at=updated_at,
+                        summary="Composition structure, weights, benchmark, or cost policy was patched and revalidated.",
+                        hash_before=previous_hash,
+                        hash_after=latest_hash,
+                    )
+                )
+            audit_events.append(
+                self._insert_composition_audit_event(
+                    conn,
+                    composition_id=composition_id,
+                    revision=revision,
+                    action="source_freeze",
+                    occurred_at=updated_at,
+                    summary=f"Captured {len(freeze_rows)} source freeze signatures.",
+                    hash_before=previous_hash or first_hash,
+                    hash_after=latest_hash,
+                )
+            )
+            audit_events.append(
+                self._insert_composition_audit_event(
+                    conn,
+                    composition_id=composition_id,
+                    revision=revision,
+                    action="rebalance_check",
+                    occurred_at=updated_at,
+                    summary=f"Simulated {len(detail_payload.get('rebalance_events') or [])} rebalance events without mutating frozen sources.",
+                    hash_before=latest_hash,
+                    hash_after=latest_hash,
+                )
+            )
+            audit_events.append(
+                self._insert_composition_audit_event(
+                    conn,
+                    composition_id=composition_id,
+                    revision=revision,
+                    action="status",
+                    occurred_at=updated_at,
+                    summary=f"Composition status is {status}; drift warnings remain advisory.",
+                    hash_before=latest_hash,
+                    hash_after=latest_hash,
+                )
+            )
+            detail_payload["audit_trail"] = existing_audit_events + audit_events
+            conn.execute(
+                """
+                UPDATE compositions
+                SET analysis_json = ?
+                WHERE id = ?
+                """,
+                (dumps(detail_payload), composition_id),
+            )
         return detail_payload
 
     def create_composition(self, request: Any) -> dict[str, Any]:
@@ -4688,12 +7101,24 @@ class BacktestPlatformService:
             SELECT *
             FROM compositions
             WHERE deleted_at IS NULL
+              AND UPPER(COALESCE(status, 'DRAFT')) != 'ARCHIVED'
             ORDER BY updated_at DESC, created_at DESC
             """
         )
         items: list[dict[str, Any]] = []
         for row in rows:
             summary = loads(row.get("summary_json"), {})
+            analysis = loads(row.get("analysis_json"), {})
+            sharpe = summary.get("sharpe")
+            if sharpe is None:
+                sharpe = next(
+                    (
+                        _as_float(kpi.get("value"), 0.0)
+                        for kpi in analysis.get("kpis", [])
+                        if isinstance(kpi, Mapping) and kpi.get("key") == "sharpe"
+                    ),
+                    0.0,
+                )
             items.append(
                 {
                     "id": str(row.get("id") or ""),
@@ -4704,6 +7129,7 @@ class BacktestPlatformService:
                     "rebalance_frequency": summary.get("rebalance_frequency") or row.get("rebalance_frequency"),
                     "benchmark_label": summary.get("benchmark_label"),
                     "annualized_return": round(_as_float(summary.get("annualized_return"), 0.0), 4),
+                    "sharpe": round(_as_float(sharpe, 0.0), 4),
                     "max_drawdown": round(_as_float(summary.get("max_drawdown"), 0.0), 4),
                     "updated_at": str(row.get("updated_at") or ""),
                     "latest_activity_label": str(
@@ -4731,7 +7157,69 @@ class BacktestPlatformService:
             }
             for item in freeze_rows
         ]
-        if not isinstance(detail_payload, dict) or not detail_payload:
+        kpi_keys = {
+            str(item.get("key") or "")
+            for item in (detail_payload.get("kpis") or [])
+            if isinstance(item, Mapping)
+        } if isinstance(detail_payload, Mapping) else set()
+        scenario_cases = (
+            detail_payload.get("scenario_summary", {}).get("cases")
+            if isinstance(detail_payload, Mapping)
+            and isinstance(detail_payload.get("scenario_summary"), Mapping)
+            else None
+        )
+        risk_preview = (
+            detail_payload.get("risk_contribution_preview")
+            if isinstance(detail_payload, Mapping)
+            else None
+        )
+        return_quality = (
+            detail_payload.get("return_quality_summary")
+            if isinstance(detail_payload, Mapping)
+            else None
+        )
+        returns_preview = (
+            detail_payload.get("returns_preview")
+            if isinstance(detail_payload, Mapping)
+            else None
+        )
+        quality_notes = " ".join(
+            str(item)
+            for item in (
+                return_quality.get("notes")
+                if isinstance(return_quality, Mapping)
+                and isinstance(return_quality.get("notes"), Sequence)
+                and not isinstance(return_quality.get("notes"), (str, bytes, bytearray))
+                else []
+            )
+        )
+        needs_return_refresh = (
+            not isinstance(return_quality, Mapping)
+            or (
+                _as_int(return_quality.get("missing_points"), 0) > 0
+                and not bool(return_quality.get("fallback_used"))
+            )
+            or "real leg streams" in quality_notes
+            or (
+                isinstance(returns_preview, Sequence)
+                and not isinstance(returns_preview, (str, bytes, bytearray))
+                and len(returns_preview) > COMPOSITION_RECENT_WINDOW_MONTHS
+            )
+        )
+        needs_detail_refresh = (
+            not isinstance(detail_payload, dict)
+            or not detail_payload
+            or "sharpe" not in kpi_keys
+            or "sortino" not in kpi_keys
+            or not isinstance(scenario_cases, list)
+            or len(scenario_cases) < 3
+            or any(
+                not isinstance(item, Mapping) or "return_contribution_pct" not in item
+                for item in (risk_preview or [])
+            )
+            or needs_return_refresh
+        )
+        if needs_detail_refresh:
             leg_rows = self._load_composition_leg_rows(composition_id)
             benchmark_definition = self._normalize_composition_benchmark_definition(
                 loads(row.get("benchmark_definition_json"), {})
@@ -4767,6 +7255,44 @@ class BacktestPlatformService:
                 "updated_at": str(row.get("updated_at") or detail_payload.get("updated_at") or ""),
                 "source_evidence": source_evidence,
             }
+            detail_payload["normalized_legs"] = self._refresh_composition_leg_reference_summaries(
+                detail_payload.get("normalized_legs") or [],
+                minimum_reference_ids=[
+                    str(item.get("freeze_ref_id") or "")
+                    for item in source_evidence
+                    if isinstance(item, Mapping)
+                ],
+            )
+            source_integrity = self._composition_source_integrity(
+                resolved_legs=list(detail_payload.get("normalized_legs") or []),
+                source_evidence=source_evidence,
+                checked_at=detail_payload["updated_at"],
+            )
+            integrity_by_ref = {
+                str(item.get("source_ref_id") or ""): dict(item)
+                for item in source_integrity
+            }
+            enriched_source_evidence: list[dict[str, Any]] = []
+            for raw_item in source_evidence:
+                item = dict(raw_item)
+                integrity = integrity_by_ref.get(str(item.get("freeze_ref_id") or ""), {})
+                item["signature_status"] = integrity.get("signature_status") or "verified"
+                item["drift_status"] = integrity.get("drift_status") or "current"
+                item["current_ref_id"] = integrity.get("current_ref_id") or item.get("freeze_ref_id")
+                item["alerts"] = list(integrity.get("alerts") or [])
+                enriched_source_evidence.append(item)
+            detail_payload["source_evidence"] = enriched_source_evidence
+            detail_payload["source_integrity"] = source_integrity
+            detail_payload.setdefault("return_quality_summary", {})
+            detail_payload.setdefault("rebalance_events", [])
+            detail_payload["audit_trail"] = self._composition_audit_trail(
+                composition_id=composition_id,
+                created_at=str(row.get("created_at") or detail_payload.get("created_at") or ""),
+                updated_at=detail_payload["updated_at"],
+                status=current_status,
+                source_evidence=enriched_source_evidence,
+                rebalance_events=list(detail_payload.get("rebalance_events") or []),
+            )
             hero_summary = dict(detail_payload.get("hero_summary") or {})
             if hero_summary:
                 hero_summary["status"] = current_status
@@ -4795,9 +7321,22 @@ class BacktestPlatformService:
             hero_summary["status_label"] = self._composition_status_label(status)
             hero_summary["updated_at"] = updated_at
             detail_payload["hero_summary"] = hero_summary
-            summary_payload = self._build_composition_summary_payload(detail_payload)
             revision = _as_int(row.get("revision"), 1) + 1
+            source_evidence = [dict(item) for item in (detail_payload.get("source_evidence") or []) if isinstance(item, Mapping)]
+            latest_hash = str((source_evidence[-1] if source_evidence else {}).get("freeze_hash") or "") or None
             with self.storage.connection() as conn:
+                audit_event = self._insert_composition_audit_event(
+                    conn,
+                    composition_id=composition_id,
+                    revision=revision,
+                    action="status",
+                    occurred_at=updated_at,
+                    summary=f"Composition status changed to {status}; frozen source evidence was not rewritten.",
+                    hash_before=latest_hash,
+                    hash_after=latest_hash,
+                )
+                detail_payload["audit_trail"] = list(detail_payload.get("audit_trail") or []) + [audit_event]
+                summary_payload = self._build_composition_summary_payload(detail_payload)
                 conn.execute(
                     """
                     UPDATE compositions
@@ -4893,10 +7432,124 @@ class BacktestPlatformService:
         last_refreshed_at = snapshot_overview.get("last_refreshed_at")
         curve_preview: list[dict[str, Any]] = []
         bond_rows = self._bond_snapshot_rows()
-        eligible_instruments = [self._bond_snapshot_instrument_payload(row) for row in bond_rows]
-        ready_bond_instruments = [
-            item for item in eligible_instruments if str(item.get("status") or "").upper() == "READY"
+        audit_context = self._bond_snapshot_audit_context(bond_rows)
+        all_instruments = [
+            self._bond_snapshot_instrument_payload(row, audit_context=audit_context) for row in bond_rows
         ]
+        eligible_instruments = list(all_instruments)
+        ready_bond_instruments = [
+            item for item in all_instruments if str(item.get("status") or "").upper() == "READY"
+        ]
+        curve_tenor_order = {"3M": 0, "2Y": 1, "10Y": 2, "30Y": 3}
+        ust_curve_instruments = [
+            item
+            for item in all_instruments
+            if str(item.get("audit_profile") or "").upper() in {"UST_BILL_3M", "UST_CMT_2Y", "UST_CMT_10Y", "UST_CMT_30Y"}
+            and self._bond_snapshot_optional_float(item.get("ytm_pct")) is not None
+        ]
+        two_year_yield = next(
+            (
+                self._bond_snapshot_optional_float(item.get("ytm_pct"))
+                for item in ust_curve_instruments
+                if str(item.get("tenor_label") or "").upper() == "2Y"
+            ),
+            None,
+        )
+        curve_preview = [
+            {
+                "tenor_label": str(item.get("tenor_label") or ""),
+                "yield_pct": float(self._bond_snapshot_optional_float(item.get("ytm_pct")) or 0.0),
+                "spread_bps": (
+                    round((float(self._bond_snapshot_optional_float(item.get("ytm_pct")) or 0.0) - two_year_yield) * 100.0, 4)
+                    if two_year_yield is not None
+                    else 0.0
+                ),
+            }
+            for item in sorted(
+                ust_curve_instruments,
+                key=lambda entry: curve_tenor_order.get(str(entry.get("tenor_label") or "").upper(), 99),
+            )
+        ]
+        ust_ready_count = len(
+            [
+                item
+                for item in all_instruments
+                if str(item.get("audit_profile") or "").upper() in {"UST_BILL_3M", "UST_CMT_2Y", "UST_CMT_10Y", "UST_CMT_30Y"}
+                and str(item.get("status") or "").upper() == "READY"
+            ]
+        )
+        tips_ready_count = len(
+            [
+                item
+                for item in all_instruments
+                if str(item.get("audit_profile") or "").upper().startswith("TIPS")
+                and str(item.get("status") or "").upper() == "READY"
+            ]
+        )
+        ig_sourced_count = len(
+            [
+                item
+                for item in all_instruments
+                if str(item.get("asset_type") or "").upper() == "BOND_ETF"
+                or str(item.get("symbol") or "").upper() == "LQD"
+            ]
+        )
+        ig_ready_count = len(
+            [
+                item
+                for item in all_instruments
+                if (
+                    str(item.get("asset_type") or "").upper() == "BOND_ETF"
+                    or str(item.get("symbol") or "").upper() == "LQD"
+                )
+                and str(item.get("status") or "").upper() == "READY"
+            ]
+        )
+        ten_year_yield = next(
+            (
+                self._bond_snapshot_optional_float(item.get("ytm_pct"))
+                for item in ust_curve_instruments
+                if str(item.get("tenor_label") or "").upper() == "10Y"
+            ),
+            None,
+        )
+        spread_10y_2y_bps = (
+            round((ten_year_yield - two_year_yield) * 100.0, 4)
+            if ten_year_yield is not None and two_year_yield is not None
+            else None
+        )
+        ten_year_tips = next(
+            (
+                item
+                for item in all_instruments
+                if str(item.get("audit_profile") or "").upper() == "TIPS_10Y"
+                or (
+                    str(item.get("tenor_label") or "").upper() == "10Y"
+                    and str(item.get("audit_profile") or "").upper().startswith("TIPS")
+                )
+            ),
+            None,
+        )
+        lqd_instrument = next(
+            (
+                item
+                for item in all_instruments
+                if str(item.get("asset_type") or "").upper() == "BOND_ETF"
+                or str(item.get("symbol") or "").upper() == "LQD"
+            ),
+            None,
+        )
+        tips_real_yield_pct = (
+            self._bond_snapshot_optional_float(ten_year_tips.get("real_yield_pct")) if ten_year_tips else None
+        )
+        tips_inflation_factor = (
+            self._bond_snapshot_optional_float(ten_year_tips.get("inflation_factor")) if ten_year_tips else None
+        )
+        tips_breakeven_bps = (
+            self._bond_snapshot_optional_float(ten_year_tips.get("breakeven_inflation_bps")) if ten_year_tips else None
+        )
+        tips_breakeven_pct = round(tips_breakeven_bps / 100.0, 4) if tips_breakeven_bps is not None else None
+        lqd_credit_quality = lqd_instrument.get("credit_quality") if lqd_instrument else None
         source_groups: dict[str, dict[str, Any]] = {}
         for row in bond_rows:
             source_key = str(row.get("source") or "manual")
@@ -4914,7 +7567,7 @@ class BacktestPlatformService:
                 },
             )
             source_group["instrument_types"].add(str(row.get("instrument_type") or "bond"))
-            if not self._bond_snapshot_is_eligible(row):
+            if not self._bond_snapshot_is_eligible(row, audit_context=audit_context):
                 source_group["status"] = "WATCH"
             if row.get("updated_at") and str(row.get("updated_at")) > str(source_group.get("updated_at") or ""):
                 source_group["updated_at"] = row.get("updated_at")
@@ -4961,8 +7614,164 @@ class BacktestPlatformService:
                 "id": "eligible_bond_sources",
                 "label": "Eligible bond sources",
                 "status": "READY" if ready_bond_instruments else "WATCH",
-                "value": f"{len(ready_bond_instruments)}/{len(eligible_instruments)} eligible",
+                "value": f"{len(ready_bond_instruments)}/{len(all_instruments)} eligible",
                 "detail": "Only READY runtime bond rows with complete or inferred fields can create asset legs.",
+            },
+            {
+                "id": "ust_curve_points",
+                "label": "UST curve points",
+                "status": "READY" if ust_ready_count == 4 else "WATCH",
+                "value": f"{ust_ready_count}/4 ready",
+                "detail": "UST curve requires 3M T-Bill plus 2Y, 10Y, and 30Y CMT proxies.",
+            },
+            {
+                "id": "ust_10y_2y_spread",
+                "label": "UST 10Y-2Y spread",
+                "status": (
+                    "READY"
+                    if spread_10y_2y_bps is not None and -100.0 < spread_10y_2y_bps < 300.0
+                    else "WATCH"
+                ),
+                "value": f"{spread_10y_2y_bps:g} bps" if spread_10y_2y_bps is not None else "pending",
+                "detail": "Audit band is -100 to 300 bps.",
+            },
+            {
+                "id": "tips_real_yield_points",
+                "label": "TIPS real yield points",
+                "status": "READY" if tips_ready_count == 2 else "WATCH",
+                "value": f"{tips_ready_count}/2 ready",
+                "detail": "TIPS rows require real yield and inflation factor.",
+            },
+            {
+                "id": "ig_credit_etf",
+                "label": "IG credit ETF",
+                "status": "READY" if ig_ready_count == 1 else "WATCH",
+                "value": f"{ig_ready_count}/1 ready, {ig_sourced_count} sourced",
+                "detail": "LQD remains WATCH until official tracking_error_bps is available.",
+            },
+        ]
+        quality_audit: list[dict[str, Any]] = []
+        daily_accrual_status: list[dict[str, Any]] = []
+        risk_budget_inputs: list[dict[str, Any]] = []
+        for item in all_instruments:
+            label = str(item.get("label") or item.get("symbol") or item.get("id") or "")
+            field_status = dict(item.get("field_status") or {})
+            missing_fields = [
+                str(field_name)
+                for field_name, status in field_status.items()
+                if str(status).upper() == "MISSING"
+            ]
+            inferred_fields = [
+                str(field_name)
+                for field_name, status in field_status.items()
+                if str(status).upper() in {"INFERRED", "ESTIMATED"}
+            ]
+            clean_price = self._bond_snapshot_optional_float(item.get("clean_price") or item.get("net_price"))
+            dirty_price = self._bond_snapshot_optional_float(item.get("dirty_price") or item.get("full_price"))
+            accrued_interest = self._bond_snapshot_optional_float(item.get("accrued_interest"))
+            price_consistency_status = "UNKNOWN"
+            price_delta = None
+            if clean_price is not None and dirty_price is not None and accrued_interest is not None:
+                price_delta = round(abs((clean_price + accrued_interest) - dirty_price), 6)
+                price_consistency_status = "PASS" if price_delta <= 0.05 else "WATCH"
+            elif clean_price is not None or dirty_price is not None:
+                price_consistency_status = "WATCH"
+            risk_fields = {
+                "ytm_pct": item.get("ytm_pct"),
+                "duration": item.get("duration") or item.get("effective_duration"),
+                "convexity": item.get("convexity"),
+            }
+            quality_audit.append(
+                {
+                    "id": str(item.get("id") or ""),
+                    "label": label,
+                    "status": "PASS" if not missing_fields and price_consistency_status in {"PASS", "UNKNOWN"} else "WATCH",
+                    "missing_fields": missing_fields,
+                    "inferred_fields": inferred_fields,
+                    "price_consistency_status": price_consistency_status,
+                    "price_consistency_delta": price_delta,
+                    "ytm_duration_convexity_status": (
+                        "FULL"
+                        if all(value not in (None, "") for value in risk_fields.values())
+                        else "PARTIAL"
+                    ),
+                    "alerts": list(item.get("audit_alerts") or []),
+                    "notes": list(item.get("audit_notes") or []),
+                }
+            )
+            daily_accrual_status.append(
+                {
+                    "id": str(item.get("id") or ""),
+                    "label": label,
+                    "status": (
+                        "READY"
+                        if str(field_status.get("accrued_interest") or "").upper() in {"READY", "WAIVED", "INFERRED"}
+                        or accrued_interest is not None
+                        else "REPAIR"
+                    ),
+                    "accrued_interest": accrued_interest,
+                    "daily_increment_estimate": (
+                        round(accrued_interest / 30.0, 6)
+                        if accrued_interest is not None
+                        else None
+                    ),
+                    "snapshot_date": item.get("snapshot_date"),
+                    "updated_at": item.get("updated_at"),
+                }
+            )
+            tracking_status = str(item.get("tracking_status") or "").upper()
+            item_status = str(item.get("status") or "").upper()
+            has_risk_inputs = any(value not in (None, "") for value in risk_fields.values())
+            readiness_status = (
+                "COMPOSABLE"
+                if item_status == "READY"
+                else "READ_ONLY_BUDGET"
+                if tracking_status == "WATCH" and has_risk_inputs
+                else "REPAIR_REQUIRED"
+            )
+            risk_budget_inputs.append(
+                {
+                    "id": str(item.get("id") or ""),
+                    "label": label,
+                    "status": readiness_status,
+                    "can_create_asset_leg": item_status == "READY",
+                    "can_enter_risk_budget": readiness_status in {"COMPOSABLE", "READ_ONLY_BUDGET"},
+                    "ytm_pct": risk_fields["ytm_pct"],
+                    "duration": risk_fields["duration"],
+                    "convexity": risk_fields["convexity"],
+                    "tracking_status": tracking_status or None,
+                    "notes": (
+                        ["Watch-only source can enter read-only risk budget precheck."]
+                        if readiness_status == "READ_ONLY_BUDGET"
+                        else []
+                    ),
+                }
+            )
+        repair_rules = [
+            {
+                "id": "bond_repair",
+                "target": "bond",
+                "mode": "repair",
+                "label": "Repair missing or inferred fixed-income fields",
+                "applies_to": [
+                    str(item.get("id") or "")
+                    for item in quality_audit
+                    if item.get("status") != "PASS"
+                ],
+            },
+            {
+                "id": "bond_full_refresh",
+                "target": "bond",
+                "mode": "full",
+                "label": "Full bond price, accrual, YTM, duration, and convexity refresh",
+                "applies_to": [str(item.get("id") or "") for item in all_instruments],
+            },
+            {
+                "id": "no_frozen_rewrite",
+                "target": "bond",
+                "mode": "repair",
+                "label": "Snapshot refresh checks saved compositions but never rewrites frozen source evidence",
+                "applies_to": [],
             },
         ]
         return {
@@ -5077,17 +7886,90 @@ class BacktestPlatformService:
                     "label": str(item.get("label") or ""),
                     "status": str(item.get("status") or ""),
                     "source": str(item.get("source") or ""),
+                    "asset_type": item.get("asset_type"),
+                    "tenor_label": item.get("tenor_label"),
+                    "audit_profile": item.get("audit_profile"),
+                    "discount_rate_pct": item.get("discount_rate_pct"),
+                    "real_yield_pct": item.get("real_yield_pct"),
+                    "inflation_factor": item.get("inflation_factor"),
+                    "breakeven_inflation_bps": item.get("breakeven_inflation_bps"),
+                    "effective_duration": item.get("effective_duration"),
+                    "sec_yield_30d_pct": item.get("sec_yield_30d_pct"),
+                    "credit_quality": item.get("credit_quality"),
+                    "tracking_error_bps": item.get("tracking_error_bps"),
+                    "audit_alerts": list(item.get("audit_alerts") or []),
+                    "audit_notes": list(item.get("audit_notes") or []),
+                    "tracking_status": item.get("tracking_status"),
                     "snapshot_ref": item.get("snapshot_ref"),
                     "updated_at": item.get("updated_at"),
                     "notes": [
-                        "Runtime bond_fixed_income_snapshots row.",
+                        "Runtime fixed-income snapshot row.",
                         "Eligible for asset-leg creation only when status is READY.",
                     ],
                 }
-                for item in eligible_instruments
+                for item in all_instruments
             ],
             "eligible_sources": eligible_sources,
             "eligible_instruments": eligible_instruments,
+            "group_counts": {
+                "ust": {"sourced": len(ust_curve_instruments), "ready": ust_ready_count},
+                "tips": {
+                    "sourced": len(
+                        [
+                            item
+                            for item in all_instruments
+                            if str(item.get("audit_profile") or "").upper().startswith("TIPS")
+                        ]
+                    ),
+                    "ready": tips_ready_count,
+                },
+                "ig": {"sourced": ig_sourced_count, "ready": ig_ready_count},
+            },
+            "ust_sourced_count": len(ust_curve_instruments),
+            "ust_ready_count": ust_ready_count,
+            "tips_sourced_count": len(
+                [
+                    item
+                    for item in all_instruments
+                    if str(item.get("audit_profile") or "").upper().startswith("TIPS")
+                ]
+            ),
+            "tips_ready_count": tips_ready_count,
+            "ig_sourced_count": ig_sourced_count,
+            "ig_ready_count": ig_ready_count,
+            "ust_10y_2y_spread_bps": spread_10y_2y_bps,
+            "top_ust_10y_2y_spread_bps": spread_10y_2y_bps,
+            "tips_metrics": {
+                "real_yield_pct": tips_real_yield_pct,
+                "inflation_factor": tips_inflation_factor,
+                "breakeven_pct": tips_breakeven_pct,
+                "breakeven_inflation_bps": tips_breakeven_bps,
+            },
+            "tips_real_yield_pct": tips_real_yield_pct,
+            "tips_inflation_factor": tips_inflation_factor,
+            "tips_breakeven_pct": tips_breakeven_pct,
+            "lqd_metrics": {
+                "effective_duration": self._bond_snapshot_optional_float(lqd_instrument.get("effective_duration"))
+                if lqd_instrument
+                else None,
+                "sec_yield_30d_pct": self._bond_snapshot_optional_float(lqd_instrument.get("sec_yield_30d_pct"))
+                if lqd_instrument
+                else None,
+                "credit_quality": lqd_credit_quality,
+                "tracking_status": lqd_instrument.get("tracking_status") if lqd_instrument else None,
+            },
+            "lqd_effective_duration": self._bond_snapshot_optional_float(lqd_instrument.get("effective_duration"))
+            if lqd_instrument
+            else None,
+            "lqd_sec_yield_30d_pct": self._bond_snapshot_optional_float(lqd_instrument.get("sec_yield_30d_pct"))
+            if lqd_instrument
+            else None,
+            "lqd_credit_quality": lqd_credit_quality,
+            "lqd_tracking_status": lqd_instrument.get("tracking_status") if lqd_instrument else None,
+            "quality_audit": quality_audit,
+            "repair_rules": repair_rules,
+            "daily_accrual_status": daily_accrual_status,
+            "risk_budget_inputs": risk_budget_inputs,
             "scheduler": {
                 "status": "READY" if latest_job else "WATCH",
                 "cadence_label": f"Shared snapshot cadence ({refresh_mode})",
@@ -5098,7 +7980,7 @@ class BacktestPlatformService:
                 "primary_source": str(ready_bond_instruments[0]["source"]) if ready_bond_instruments else "bond_fixed_income_snapshots",
                 "fallback_source": None,
                 "selection_reason": (
-                    "Runtime bond_fixed_income_snapshots rows are eligible for asset-leg creation."
+                    "Runtime fixed-income snapshot rows are eligible for asset-leg creation."
                     if ready_bond_instruments
                     else "No eligible runtime bond source is available yet."
                 ),
@@ -5110,7 +7992,7 @@ class BacktestPlatformService:
                 "memory": dict(read_runtime_memory_status() or {}),
                 "notes": [
                     "Bond governance is blocked whenever the shared snapshot overview is blocked.",
-                    "Only runtime bond_fixed_income_snapshots rows are eligible asset-leg sources.",
+                    "Only runtime fixed-income snapshot rows are eligible asset-leg sources.",
                 ],
             },
         }
@@ -7614,6 +10496,8 @@ class BacktestPlatformService:
             str(entry.get("key")): str(entry.get("label") or entry.get("key"))
             for entry in _confirmation_entries(blank_confirmation_fields(strategy_type))
         }
+        for key in ("contribution_anchor", "dynamic_investment_logic"):
+            label_map[key] = confirmation_field_label(key, key)
         for bucket_name in ("top_level", "parameters"):
             for entry in confirmation_fields.get(bucket_name, []):
                 key = str(entry.get("key") or "")

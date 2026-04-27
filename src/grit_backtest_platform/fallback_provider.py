@@ -18,6 +18,15 @@ PUBLIC_PROVIDER_NAMES = {
     "sp_global_official_constituent_change",
     "internet_archive_wikipedia_snapshot",
     "static_seed",
+    "us_treasury_xml",
+    "us_treasury_bill_proxy",
+    "us_treasury_cmt_proxy",
+    "us_treasury_tips_proxy",
+    "blackrock_ishares_official",
+    "ishares",
+    "openbb_yfinance",
+    "openbb_federal_reserve",
+    "openbb_bond_fixed_income",
 }
 
 FREE_ACCOUNT_PROVIDER_NAMES = {
@@ -25,6 +34,9 @@ FREE_ACCOUNT_PROVIDER_NAMES = {
     "sec_edgar",
     "tiingo",
     "tiingo_symbology",
+    "openbb_tiingo",
+    "openbb_alpha_vantage",
+    "openbb_fred",
 }
 
 PAID_OPTIONAL_PROVIDER_NAMES = {
@@ -34,6 +46,8 @@ PAID_OPTIONAL_PROVIDER_NAMES = {
     "longbridge_static_info",
     "futu",
     "futu_rehab",
+    "openbb_fmp",
+    "openbb_index_constituents",
 }
 
 

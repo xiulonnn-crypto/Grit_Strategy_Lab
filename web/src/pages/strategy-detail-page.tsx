@@ -42,6 +42,9 @@ const TEXT = {
   recentRunVersionFallback: '版本待补充',
 } as const;
 
+const DYNAMIC_BUY_AND_HOLD_RUNTIME_WARNING =
+  '当前回测引擎尚未接入动态定投所需的估值/基本面时间序列，dynamic_investment_logic 未执行；结果暂按固定金额定投计算。';
+
 const PARAMETER_LABELS: Record<string, string> = {
   strategy_name: '策略名称',
   strategy_description: '策略描述',
@@ -63,6 +66,8 @@ const PARAMETER_LABELS: Record<string, string> = {
   capital: '初始资金',
   contribution_amount: '每期投入',
   investment_frequency: '投入频次',
+  contribution_anchor: '定投执行锚点',
+  dynamic_investment_logic: '动态定投逻辑',
   lookback_months: '回看月数',
   skip_recent_months: '跳过最近月数',
   hold_rank_threshold: '保留排名阈值',
@@ -100,6 +105,8 @@ const PARAMETER_ORDER: Record<string, number> = {
   short_entry_size_pct: 100,
   contribution_amount: 110,
   investment_frequency: 120,
+  contribution_anchor: 125,
+  dynamic_investment_logic: 126,
   lookback_months: 130,
   skip_recent_months: 140,
   top_n: 150,
@@ -129,6 +136,9 @@ const HIDDEN_PARAMETER_KEYS = new Set([
   'mean_target',
   'risk_budget',
   'trading_logic',
+  'dynamic_investment_proxy_key',
+  'dynamic_investment_metric_key',
+  'dynamic_investment_rules',
 ]);
 
 const HIDDEN_HISTORY_PARAMETER_KEYS = new Set([
@@ -137,6 +147,9 @@ const HIDDEN_HISTORY_PARAMETER_KEYS = new Set([
   'mean_target',
   'risk_budget',
   'strategy_description',
+  'dynamic_investment_proxy_key',
+  'dynamic_investment_metric_key',
+  'dynamic_investment_rules',
 ]);
 
 const HISTORY_COMMENT_LABELS: Record<string, string> = {
@@ -444,12 +457,22 @@ function buildStrategySummary(strategy: ApiStrategyDetail): string {
   } else if (strategy.strategy_type === 'BUY_AND_HOLD') {
     const contributionAmount = readNumberParameter(parameters.contribution_amount);
     const investmentFrequency = readStringParameter(parameters.investment_frequency);
+    const contributionAnchor = readStringParameter(parameters.contribution_anchor);
+    const dynamicInvestmentLogic = readStringParameter(parameters.dynamic_investment_logic);
 
     parts.push('长期持有核心资产');
     if (contributionAmount !== null && investmentFrequency) {
       parts.push(
-        `${rebalanceLabel(investmentFrequency)}定投 ${contributionAmount.toLocaleString('zh-HK')} 美元`,
+        `${rebalanceLabel(investmentFrequency)}${dynamicInvestmentLogic ? '基准定投' : '定投'} ${contributionAmount.toLocaleString('zh-HK')} 美元`,
       );
+    } else if (contributionAmount !== null) {
+      parts.push(`${dynamicInvestmentLogic ? '基准投入' : '投入'} ${contributionAmount.toLocaleString('zh-HK')} 美元`);
+    }
+    if (contributionAnchor) {
+      parts.push(`按${contributionAnchor}执行`);
+    }
+    if (dynamicInvestmentLogic) {
+      parts.push('按估值区间动态调整投入倍率');
     }
   } else {
     parts.push(`执行${strategyTypeLabel(strategy.strategy_type)}策略`);
@@ -537,7 +560,6 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
   }
 
   const strategySummary = useMemo(() => (strategy ? buildStrategySummary(strategy) : ''), [strategy]);
-
   const tradingLogic = useMemo(() => {
     const value = strategy?.parameters?.trading_logic;
     return typeof value === 'string' && value.trim() ? value : null;

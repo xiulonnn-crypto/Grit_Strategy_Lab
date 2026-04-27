@@ -20,6 +20,7 @@ import type {
   ApiOptimizationSearchSpaceField,
   ApiStrategyDetail,
   ApiWorkspaceOverview,
+  BacktestRunDetailRequest,
   DemoApi,
 } from "./types";
 import {
@@ -2122,7 +2123,7 @@ describe("optimization module flow", () => {
     const rows = container.querySelectorAll(
       ".optimization-results-grid tbody tr",
     );
-    expect(rows.length).toBeGreaterThan(4);
+    expect(rows).toHaveLength(4);
     const baselineRow = rows[rows.length - 1] as HTMLTableRowElement;
     expect(baselineRow.textContent).toContain("当前组合");
     expect(baselineRow.children[1]?.querySelector("span")).toBeNull();
@@ -2499,6 +2500,20 @@ describe("optimization module flow", () => {
     const allCombinationApi = createOptimizationTestApi();
     const originalGetOptimizationJobDetail =
       allCombinationApi.getOptimizationJobDetail.bind(allCombinationApi);
+    const originalGetBacktestRunDetail =
+      allCombinationApi.getBacktestRunDetail.bind(allCombinationApi);
+    const requestedRunIds: string[] = [];
+
+    allCombinationApi.getBacktestRunDetail = async (
+      id: string,
+      request?: BacktestRunDetailRequest | AbortSignal,
+    ): Promise<ApiBacktestRunDetail> => {
+      requestedRunIds.push(id);
+      if (id === "run-missing") {
+        throw new Error("Run run-missing not found");
+      }
+      return originalGetBacktestRunDetail(id, request);
+    };
 
     allCombinationApi.getOptimizationJobDetail = async (
       jobId: string,
@@ -2508,6 +2523,8 @@ describe("optimization module flow", () => {
         return job;
       }
 
+      job.request.source_run_id = "run-missing";
+      job.summary.source_run_id = "run-missing";
       job.candidates = job.candidates.map((candidate, index) => {
         if (index === 0) {
           return {
@@ -2578,6 +2595,28 @@ describe("optimization module flow", () => {
             observation_timeframe: "monthly",
           },
         },
+        {
+          ...structuredClone(seedCandidate),
+          id: "all-match-4",
+          label: "筛出组合 4",
+          title: "筛出组合 4",
+          rank: 4,
+          parameter_snapshot: {
+            ...structuredClone(seedCandidate.parameter_snapshot ?? {}),
+            observation_timeframe: "quarterly",
+          },
+        },
+        {
+          ...structuredClone(seedCandidate),
+          id: "all-match-5",
+          label: "筛出组合 5",
+          title: "筛出组合 5",
+          rank: 5,
+          parameter_snapshot: {
+            ...structuredClone(seedCandidate.parameter_snapshot ?? {}),
+            observation_timeframe: "yearly",
+          },
+        },
       ]);
       job.summary.matching_combination_source = "all_trials";
       job.matching_combination_source = "all_trials";
@@ -2599,12 +2638,33 @@ describe("optimization module flow", () => {
     );
 
     expect(container.textContent).toContain(
-      "符合约束条件的组合共3个",
+      "符合约束条件的组合共5个",
     );
     expect(container.textContent).toContain("筛出组合 1");
     expect(container.textContent).toContain("筛出组合 2");
     expect(container.textContent).toContain("筛出组合 3");
+    expect(container.textContent).not.toContain("筛出组合 4");
+    expect(container.textContent).not.toContain("筛出组合 5");
+    expect(resultRows[resultRows.length - 1]?.textContent).toContain("当前组合");
     expect(resultRows).toHaveLength(4);
+    expect(requestedRunIds).toEqual(["run-missing", "bt-001"]);
+
+    const openButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("查看全部组合"),
+    ) as HTMLButtonElement | undefined;
+    expect(openButton).toBeTruthy();
+
+    fireEvent.click(openButton!);
+
+    const dialog = await waitFor(() => {
+      const element = container.querySelector(
+        ".optimization-all-combinations-dialog",
+      ) as HTMLElement | null;
+      expect(element).not.toBeNull();
+      return element!;
+    });
+    expect(dialog.textContent).toContain("筛出组合 4");
+    expect(dialog.textContent).toContain("筛出组合 5");
   });
 
   it("opens the all-combinations modal and sorts rows by the selected metric", async () => {
@@ -3497,6 +3557,109 @@ describe("optimization module flow", () => {
       expect(container.textContent).toContain(
         "已完成版本晋升，标普动量策略 当前版本已更新为 v2。",
       ),
+    );
+  });
+
+  it("promotes an older optimization job against the currently loaded strategy version", async () => {
+    const staleJobApi = createOptimizationTestApi();
+    const originalGetOptimizationJobDetail =
+      staleJobApi.getOptimizationJobDetail.bind(staleJobApi);
+    const originalGetStrategyDetail = staleJobApi.getStrategyDetail.bind(staleJobApi);
+    const originalPromoteOptimizationCandidate =
+      staleJobApi.promoteOptimizationCandidate.bind(staleJobApi);
+    const staleBaseParameterVersionId = "strat-001-v1";
+    const currentParameterVersionId = "strat-001-v2";
+    let requestedBaseParameterVersionId: string | null | undefined;
+
+    staleJobApi.getOptimizationJobDetail = async (
+      jobId: string,
+    ): Promise<ApiOptimizationJobDetail> => {
+      const job = await originalGetOptimizationJobDetail(jobId);
+      if (jobId !== "opt-001") {
+        return job;
+      }
+      job.request.base_parameter_version_id = staleBaseParameterVersionId;
+      job.summary.baseline_parameter_version_id = staleBaseParameterVersionId;
+      job.result.baseline_parameter_version_id = staleBaseParameterVersionId;
+      job.base_parameter_version_id = staleBaseParameterVersionId;
+      job.candidates = job.candidates.map((candidate) => ({
+        ...candidate,
+        base_parameter_version_id: staleBaseParameterVersionId,
+      }));
+      job.matching_combinations = job.matching_combinations?.map(
+        (candidate) => ({
+          ...candidate,
+          base_parameter_version_id: staleBaseParameterVersionId,
+        }),
+      );
+      return job;
+    };
+    staleJobApi.getStrategyDetail = async (
+      id: string,
+    ): Promise<ApiStrategyDetail> => {
+      const strategy = await originalGetStrategyDetail(id);
+      return {
+        ...strategy,
+        current_parameter_version: 2,
+        current_parameter_version_id: currentParameterVersionId,
+        parameter_history: [
+          {
+            version_number: 2,
+            parameter_version_id: currentParameterVersionId,
+            revision: 2,
+            created_at: nowIso(),
+            comment: "已存在的人工修订",
+            parameters: {
+              ...strategy.parameters,
+              top_n: 8,
+            },
+          },
+          ...(strategy.parameter_history ?? []),
+        ],
+      };
+    };
+    staleJobApi.promoteOptimizationCandidate = async (
+      jobId,
+      trialId,
+      mode,
+      idempotencyKey,
+      comment,
+      baseParameterVersionId,
+    ): Promise<ApiOptimizationJobDetail> => {
+      requestedBaseParameterVersionId = baseParameterVersionId;
+      if (baseParameterVersionId !== currentParameterVersionId) {
+        throw new Error("The strategy has moved to a newer parameter version.");
+      }
+      return originalPromoteOptimizationCandidate(
+        jobId,
+        trialId,
+        mode,
+        idempotencyKey,
+        comment,
+      );
+    };
+    currentApi = staleJobApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(
+        container.querySelector(".optimization-results-grid"),
+      ).not.toBeNull(),
+    );
+    const promoteButton = Array.from(
+      container.querySelectorAll(".optimization-hero-actions button"),
+    ).find((button) => button.textContent?.includes("晋升当前版本")) as
+      | HTMLButtonElement
+      | undefined;
+
+    fireEvent.click(promoteButton!);
+
+    await waitFor(() =>
+      expect(requestedBaseParameterVersionId).toBe(currentParameterVersionId),
+    );
+    expect(container.textContent).not.toContain(
+      "The strategy has moved to a newer parameter version.",
     );
   });
 

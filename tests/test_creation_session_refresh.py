@@ -305,6 +305,61 @@ def test_get_creation_session_refreshes_stale_partial_buy_and_hold_message_tags(
     }
 
 
+def test_get_creation_session_refreshes_dynamic_buy_and_hold_message_tags(tmp_path):
+    client, db_path = _client(tmp_path)
+
+    created = client.post('/strategy-creation-sessions', json={'strategy_type': 'BUY_AND_HOLD'})
+    assert created.status_code == 200
+    session_id = created.json()['id']
+
+    message = client.post(
+        f'/strategy-creation-sessions/{session_id}/messages',
+        json={
+            'content': (
+                'QQQ动态定投策略 每月固定第一个交易日买入QQQ1000USD*倍率 '
+                '读取QQQ 的滚动10年PE (TTM) '
+                '极度高估 ( > 90% )： 倍率 0.5x '
+                '温和高估 ( 70% - 90% )： 倍率 0.8x '
+                '合理区间 ( 30% - 70% )： 倍率 1.0x (基准) '
+                '低估区间 ( 10% - 30% )： 倍率 1.5x '
+                '极度低估 ( < 10% )： 倍率 2.0x'
+            )
+        },
+    )
+    assert message.status_code == 200
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            '''
+            UPDATE strategy_creation_messages
+            SET extracted_fields_json = ?
+            WHERE session_id = ?
+            ''',
+            (
+                json.dumps([
+                    {'key': 'universe_name', 'label': '股票池', 'value': 'QQQ', 'status': 'synced'},
+                ]),
+                session_id,
+            ),
+        )
+        conn.commit()
+
+    fetched = client.get(f'/strategy-creation-sessions/{session_id}')
+    assert fetched.status_code == 200
+    payload = fetched.json()
+    latest_tags = payload['messages'][-1]['extracted_tags']
+
+    assert {item['key'] for item in latest_tags} >= {
+        'strategy_name',
+        'strategy_description',
+        'benchmark_symbol',
+        'contribution_amount',
+        'investment_frequency',
+        'contribution_anchor',
+        'dynamic_investment_logic',
+    }
+
+
 def test_revision_session_prefills_full_strategy_snapshot_and_summarizes_description(tmp_path):
     client, db_path = create_test_client(tmp_path)
     original_description = (

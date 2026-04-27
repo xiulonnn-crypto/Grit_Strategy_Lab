@@ -91,8 +91,58 @@ def test_buy_and_hold_dca_executes_recurring_contributions_instead_of_single_nev
 
     assert [trade.date for trade in result.trades] == ["2024-01-02", "2024-02-01", "2024-03-01"]
     assert all(trade.reason == "buy_and_hold:monthly" for trade in result.trades)
+    assert [round(float(trade.quantity or 0.0), 6) for trade in result.trades] == [
+        10.0,
+        round(1000.0 / 106.0, 6),
+        round(1000.0 / 111.0, 6),
+    ]
+    assert [round(float(trade.net_amount or 0.0), 4) for trade in result.trades] == [1000.0, 1000.0, 1000.0]
     assert result.coverage_days == len(result.daily_performance)
     assert result.coverage_ratio == 1.0
+
+
+def test_buy_and_hold_dynamic_logic_uses_valuation_series_to_scale_contributions():
+    bars = [
+        {"date": "2024-01-02", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-03", "open": 101.0, "high": 102.0, "low": 100.0, "close": 101.0, "adj_close": 101.0},
+        {"date": "2024-02-01", "open": 106.0, "high": 107.0, "low": 105.0, "close": 106.0, "adj_close": 106.0},
+        {"date": "2024-03-01", "open": 111.0, "high": 112.0, "low": 110.0, "close": 111.0, "adj_close": 111.0},
+    ]
+
+    result = run_backtest(
+        {"QQQ": bars},
+        config=BacktestConfig(start_date="2024-01-02", end_date="2024-03-01", benchmark_symbol="QQQ"),
+        parameters={
+            "strategy_type": "BUY_AND_HOLD",
+            "template_key": "buy_and_hold",
+            "benchmark_symbol": "QQQ",
+            "contribution_amount": 1000,
+            "investment_frequency": "monthly",
+            "dynamic_investment_logic": "读取滚动10年PE(TTM)百分位倍率表",
+            "dynamic_investment_proxy_key": "nasdaq100",
+            "dynamic_investment_rules": [
+                {"min_percentile": 90, "max_percentile": 100, "multiplier": 0.5},
+                {"min_percentile": 70, "max_percentile": 90, "multiplier": 0.8},
+                {"min_percentile": 30, "max_percentile": 70, "multiplier": 1.0},
+                {"min_percentile": 10, "max_percentile": 30, "multiplier": 1.5},
+                {"min_percentile": 0, "max_percentile": 10, "multiplier": 2.0},
+            ],
+        },
+        benchmark_bars=bars,
+        valuation_series={
+            "nasdaq100": [
+                {"date": "2024-01-02", "pe_ttm": 30.0, "pe_ttm_percentile_10y": 95.0},
+                {"date": "2024-02-01", "pe_ttm": 27.0, "pe_ttm_percentile_10y": 75.0},
+                {"date": "2024-03-01", "pe_ttm": 24.0, "pe_ttm_percentile_10y": 50.0},
+            ]
+        },
+    )
+
+    assert result.warnings == []
+    assert [round(float(trade.net_amount or 0.0), 4) for trade in result.trades] == [500.0, 800.0, 1000.0]
+    assert [round(float(trade.contribution_multiplier or 0.0), 2) for trade in result.trades] == [0.5, 0.8, 1.0]
+    assert [round(float(trade.valuation_percentile_10y or 0.0), 1) for trade in result.trades] == [95.0, 75.0, 50.0]
+    assert [trade.valuation_bucket for trade in result.trades] == ["90-100", "70-90", "30-70"]
 
 
 def test_mean_reversion_strategy_uses_structured_signal_rules_instead_of_generic_single_rebalance_trade():

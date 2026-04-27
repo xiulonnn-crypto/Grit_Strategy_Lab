@@ -27,6 +27,7 @@ const compositions: ApiCompositionListItem[] = [
     rebalance_frequency: 'quarterly',
     benchmark_label: 'S&P 500',
     annualized_return: 0.118,
+    sharpe: 1.12,
     max_drawdown: -0.076,
     updated_at: '2026-04-20T02:30:00.000Z',
     latest_activity_label: '最近一次完成季度复核',
@@ -41,6 +42,7 @@ const compositions: ApiCompositionListItem[] = [
     rebalance_frequency: 'monthly',
     benchmark_label: 'NASDAQ 100',
     annualized_return: 0.153,
+    sharpe: 1.28,
     max_drawdown: -0.112,
     updated_at: '2026-04-19T04:15:00.000Z',
     latest_activity_label: '最近一次完成来源检查',
@@ -55,6 +57,7 @@ const compositions: ApiCompositionListItem[] = [
     rebalance_frequency: 'semiannual',
     benchmark_label: 'Bloomberg Agg',
     annualized_return: 0.064,
+    sharpe: 0.72,
     max_drawdown: -0.041,
     updated_at: '2026-04-18T09:45:00.000Z',
     latest_activity_label: '草稿仍待补齐现金腿说明',
@@ -69,9 +72,25 @@ const compositions: ApiCompositionListItem[] = [
     rebalance_frequency: 'quarterly',
     benchmark_label: null,
     annualized_return: 0.071,
+    sharpe: 0.88,
     max_drawdown: -0.052,
     updated_at: '2026-04-17T12:00:00.000Z',
     latest_activity_label: '资产腿来源补齐',
+    allowed_actions: ['open_composition_workbench'],
+  },
+  {
+    id: 'comp-archived',
+    name: 'Archived Hidden Composition',
+    status: 'ARCHIVED',
+    composition_score: 55.2,
+    leg_count: 2,
+    rebalance_frequency: 'monthly',
+    benchmark_label: 'MSCI World',
+    annualized_return: 0.031,
+    sharpe: 0.34,
+    max_drawdown: -0.094,
+    updated_at: '2026-04-16T08:00:00.000Z',
+    latest_activity_label: 'Archived entry',
     allowed_actions: ['open_composition_workbench'],
   },
 ];
@@ -107,11 +126,24 @@ describe('composition dashboard page', () => {
     expect(screen.getAllByText('平衡收益组合').length).toBeGreaterThan(0);
     expect(screen.getAllByText('成长增强组合').length).toBeGreaterThan(0);
     expect(screen.getAllByText('固定收益防守草稿').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Archived Hidden Composition')).toBeNull();
     expect(document.querySelectorAll('.composition-dashboard-card')).toHaveLength(2);
     expect(document.querySelectorAll('.composition-dashboard-task')).toHaveLength(3);
     expect(document.querySelectorAll('.composition-dashboard-activity')).toHaveLength(4);
     expect(screen.queryByText('策略工作台')).toBeNull();
     expect(screen.getByText('冻结来源覆盖')).toBeInTheDocument();
+
+    const observation = screen.getByRole('heading', { level: 2, name: '组合观察' }).closest('section');
+    expect(observation).not.toBeNull();
+    expect(within(observation as HTMLElement).getByText('最高年化')).toBeInTheDocument();
+    expect(within(observation as HTMLElement).getByText('+15.3%')).toBeInTheDocument();
+    expect(within(observation as HTMLElement).getAllByText('成长增强组合').length).toBeGreaterThan(0);
+    expect(within(observation as HTMLElement).getByText('平均评分')).toBeInTheDocument();
+    expect(within(observation as HTMLElement).queryByText('最近 90 日')).toBeNull();
+    expect(within(observation as HTMLElement).queryByText('正式组合收益流')).toBeNull();
+    expect(within(observation as HTMLElement).queryByText('基准虚线')).toBeNull();
+    expect(within(observation as HTMLElement).queryByText('ETF 腿相关性略升')).toBeNull();
+    expect(observation?.querySelector('.composition-dashboard-observation__chart')).toBeNull();
 
     const balancedCardTitle = screen.getAllByRole('heading', {
       level: 3,
@@ -119,6 +151,9 @@ describe('composition dashboard page', () => {
     })[0];
     const balancedCard = balancedCardTitle.closest('.composition-dashboard-card');
     expect(balancedCard).not.toBeNull();
+    expect(within(balancedCard as HTMLElement).queryByText('波动')).toBeNull();
+    expect(within(balancedCard as HTMLElement).getByText('夏普')).toBeInTheDocument();
+    expect(within(balancedCard as HTMLElement).getByText('1.12')).toBeInTheDocument();
     fireEvent.click(within(balancedCard as HTMLElement).getByRole('button', { name: '查看详情' }));
     await waitFor(() => expect(window.location.hash).toBe('#/compositions/comp-balanced'));
 
@@ -151,11 +186,33 @@ describe('composition dashboard page', () => {
     const balancedCard = document.querySelector('.composition-dashboard-card') as HTMLElement;
     expect(balancedCard).not.toBeNull();
 
-    fireEvent.click(within(balancedCard).getByRole('button', { name: 'Archive' }));
+    fireEvent.click(within(balancedCard).getByRole('button', { name: '归档' }));
+
+    const dialog = await screen.findByRole('dialog', { name: '确认归档组合' });
+    fireEvent.click(within(dialog).getByRole('button', { name: '确认归档' }));
 
     await waitFor(() =>
       expect(fakeApi.updateComposition).toHaveBeenCalledWith('comp-balanced', { status: 'ARCHIVED' }),
     );
     await waitFor(() => expect(fakeApi.listCompositions).toHaveBeenCalledTimes(2));
+  });
+
+  it('requires confirmation before archiving a composition', async () => {
+    await act(async () => {
+      render(<CompositionDashboardPage />);
+    });
+
+    const balancedCard = document.querySelector('.composition-dashboard-card') as HTMLElement;
+    expect(balancedCard).not.toBeNull();
+
+    fireEvent.click(within(balancedCard).getByRole('button', { name: '归档' }));
+
+    expect(fakeApi.updateComposition).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole('dialog', { name: '确认归档组合' });
+    expect(within(dialog).getByText('comp-balanced')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '确认归档组合' })).toBeNull());
+    expect(fakeApi.updateComposition).not.toHaveBeenCalled();
   });
 });

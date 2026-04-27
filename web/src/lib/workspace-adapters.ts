@@ -60,6 +60,8 @@ const PARAMETER_LABELS: Record<string, string> = {
   buy_step_pct: '买入步长(%)',
   capital: '初始资金(USD)',
   contribution_amount: '定投金额(USD)',
+  contribution_anchor: '定投执行锚点',
+  dynamic_investment_logic: '动态定投逻辑',
   grid_count: '网格数量',
   hold_rank_threshold: '保留排名阈值',
   investment_frequency: '定投频率',

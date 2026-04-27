@@ -299,6 +299,9 @@ const trades: ApiBacktestRunTradePage = {
       quantity: 8,
       price: 591,
       net_amount: 4728,
+      contribution_multiplier: 0.8,
+      valuation_percentile_10y: 78.4,
+      valuation_bucket: '70-90',
       pnl_contribution: 3.2,
       segment: 'IS',
     },
@@ -454,6 +457,17 @@ describe('RunDetailPage', () => {
     expect(screen.getAllByText('数据快照摘要').length).toBeGreaterThan(0);
     expect(screen.getAllByText('环境摘要').length).toBeGreaterThan(0);
     expect(screen.getAllByText('AAPL, AMZN, MSFT, NVDA, META, GOOGL, TSLA, AVGO, BRK-B, JPM ...').length).toBeGreaterThan(0);
+  });
+
+  it('renders valuation execution context on trade rows when present', async () => {
+    fakeApi.getBacktestRunDetail.mockResolvedValue(detail);
+    fakeApi.getBacktestRunTrades.mockResolvedValue(trades);
+
+    render(<RunDetailPage runId="bt-warning" />);
+
+    expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: '交易' }));
+    expect(await screen.findByText('Multiplier 0.80x | 10Y percentile 78.4 | Bucket 70-90')).toBeInTheDocument();
   });
 
   it('lazy-loads context only when evidence or properties needs it', async () => {

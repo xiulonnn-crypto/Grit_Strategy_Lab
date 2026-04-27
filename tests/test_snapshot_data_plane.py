@@ -255,6 +255,89 @@ def test_load_dataset_price_bars_can_skip_metadata_decode_for_hot_path(tmp_path,
     assert "metadata" not in rows["AAPL"][0]
 
 
+def test_index_valuation_snapshot_rows_round_trip_with_coverage_summary(tmp_path):
+    repository = MarketDataRepository(tmp_path / "market.sqlite3")
+
+    repository.replace_dataset_snapshot(
+        {
+            "id": "ds-index-valuations",
+            "name": "Index Valuations",
+            "status": "READY",
+            "as_of": "2026-04-01",
+            "freshness_label": "Monthly refresh",
+            "start_date": "2016-01-01",
+            "end_date": "2026-04-01",
+            "row_count": 3,
+            "source": "trendonify",
+            "fallback_source": "worldperatio",
+            "metadata": {
+                "proxy_keys": ["nasdaq100"],
+                "observation_frequency": "monthly",
+                "latest_pe_ttm": 29.4,
+                "latest_percentile_10y": 82.6,
+            },
+        },
+        index_valuations=[
+            {
+                "index_key": "nasdaq100",
+                "proxy_symbol": "QQQ",
+                "date": "2026-02-01",
+                "pe_ttm": 27.1,
+                "pe_ttm_percentile_10y": 68.2,
+                "source": "trendonify",
+                "fallback_source": "worldperatio",
+                "metadata": {"window_size": 120},
+            },
+            {
+                "index_key": "nasdaq100",
+                "proxy_symbol": "QQQ",
+                "date": "2026-03-01",
+                "pe_ttm": 28.3,
+                "pe_ttm_percentile_10y": 74.9,
+                "source": "trendonify",
+                "fallback_source": "worldperatio",
+                "metadata": {"window_size": 120},
+            },
+            {
+                "index_key": "nasdaq100",
+                "proxy_symbol": "QQQ",
+                "date": "2026-04-01",
+                "pe_ttm": 29.4,
+                "pe_ttm_percentile_10y": 82.6,
+                "source": "trendonify",
+                "fallback_source": "worldperatio",
+                "metadata": {"window_size": 120},
+            },
+        ],
+        index_valuation_coverage=[
+            {
+                "index_key": "nasdaq100",
+                "start_date": "2016-01-01",
+                "end_date": "2026-04-01",
+                "observation_count": 123,
+                "latest_date": "2026-04-01",
+                "latest_pe_ttm": 29.4,
+                "latest_percentile_10y": 82.6,
+                "metadata": {"max_gap_days": 31},
+            }
+        ],
+    )
+
+    counts = repository.snapshot_table_counts()
+    valuation_rows = repository.load_dataset_index_valuations("ds-index-valuations", ["nasdaq100"])
+    coverage_rows = repository.load_dataset_index_valuation_coverage("ds-index-valuations", ["nasdaq100"])
+    summary_rows = repository.summarize_dataset_index_valuations("ds-index-valuations")
+
+    assert counts["dataset_snapshots"] == 1
+    assert counts["dataset_index_valuations"] == 3
+    assert counts["dataset_index_valuation_coverage"] == 1
+    assert [row["date"] for row in valuation_rows["nasdaq100"]] == ["2026-02-01", "2026-03-01", "2026-04-01"]
+    assert coverage_rows[0]["latest_percentile_10y"] == 82.6
+    assert summary_rows[0]["index_key"] == "nasdaq100"
+    assert summary_rows[0]["latest_date"] == "2026-04-01"
+    assert summary_rows[0]["observation_count"] == 3
+
+
 def test_universe_history_generates_point_in_time_anchors_for_sp500_and_nasdaq100():
     providers = static_universe_history_providers()
     all_snapshots = []

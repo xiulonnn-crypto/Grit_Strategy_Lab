@@ -91,6 +91,15 @@ const overviewBase: Omit<ApiSnapshotOverview, 'bond_fixed_income'> = {
       metadata: {
         covered_symbol_count: 402,
         total_symbol_count: 487,
+        benchmark_etf_coverage: {
+          ready_count: 2,
+          total_count: 2,
+          missing_symbols: [],
+          symbols: [
+            { symbol: 'SPY', status: 'READY', start_date: '1996-01-02', end_date: '2026-04-01', trade_days: 7600 },
+            { symbol: 'QQQ', status: 'READY', start_date: '1999-03-10', end_date: '2026-04-01', trade_days: 6800 },
+          ],
+        },
         provider_summary: {
           providers: {
             yahoo: {
@@ -101,6 +110,26 @@ const overviewBase: Omit<ApiSnapshotOverview, 'bond_fixed_income'> = {
             },
           },
         },
+      },
+      blocker: null,
+    },
+    {
+      id: 'ds-index-valuations',
+      name: 'Index Valuations',
+      status: 'READY',
+      as_of: '2026-04-01T07:48:00Z',
+      freshness_label: '按月更新',
+      start_date: '2014-01-01',
+      end_date: '2026-04-01',
+      row_count: 145,
+      source: 'trendonify',
+      fallback_source: 'worldperatio',
+      metadata: {
+        proxy_keys: ['nasdaq100'],
+        observation_frequency: 'monthly',
+        latest_date: '2026-04-01',
+        latest_pe_ttm: 29.4,
+        latest_percentile_10y: 82.6,
       },
       blocker: null,
     },
@@ -188,6 +217,11 @@ const overviewBase: Omit<ApiSnapshotOverview, 'bond_fixed_income'> = {
               },
             },
           },
+          'ds-index-valuations': {
+            name: 'Index Valuations',
+            updated_symbol_count: 1,
+            updated_row_count: 145,
+          },
         },
         universes: {
           'un-sp500': {
@@ -215,6 +249,213 @@ const overview: ApiSnapshotOverview = {
   bond_fixed_income: normalizeBondFixedIncomeOverview(null, overviewBase),
 };
 
+function buildSevenBondRowsOverview(): ApiSnapshotOverview {
+  const refreshedAt = '2026-04-23T21:00:00Z';
+  const instruments = [
+    {
+      id: 'bond-ust-cmt-2y',
+      label: 'UST CMT 2Y',
+      instrument_type: 'bond',
+      asset_type: 'UST',
+      tenor_label: '2Y',
+      audit_profile: 'UST_CMT_2Y',
+      source: 'bond_fixed_income',
+      status: 'WATCH',
+      symbol: 'UST2Y',
+      currency: 'USD',
+      snapshot_date: '2026-04-23',
+      ytm_pct: 1.0,
+      duration: 1.9,
+      effective_duration: 1.9,
+      snapshot_ref: 'bond-ust-cmt-2y',
+      refresh_status: 'READY',
+      missing_fields: [],
+      inferred_fields: {},
+      field_status: { ytm_pct: 'READY' },
+      audit_alerts: ['UST_CMT_2Y/10Y spread 365 bps is outside the -100..300 bps audit band.'],
+      audit_notes: ['UST_CMT_2Y/10Y spread 365 bps; audit band -100..300 bps.'],
+      updated_at: refreshedAt,
+    },
+    {
+      id: 'bond-ust-cmt-10y',
+      label: 'UST CMT 10Y',
+      instrument_type: 'bond',
+      asset_type: 'UST',
+      tenor_label: '10Y',
+      audit_profile: 'UST_CMT_10Y',
+      source: 'bond_fixed_income',
+      status: 'WATCH',
+      symbol: 'UST10Y',
+      currency: 'USD',
+      snapshot_date: '2026-04-23',
+      ytm_pct: 4.65,
+      duration: 8.3,
+      effective_duration: 8.3,
+      snapshot_ref: 'bond-ust-cmt-10y',
+      refresh_status: 'READY',
+      missing_fields: [],
+      inferred_fields: {},
+      field_status: { ytm_pct: 'READY' },
+      audit_alerts: ['UST_CMT_2Y/10Y spread 365 bps is outside the -100..300 bps audit band.'],
+      audit_notes: ['UST_CMT_2Y/10Y spread 365 bps; audit band -100..300 bps.'],
+      updated_at: refreshedAt,
+    },
+    {
+      id: 'bond-ust-cmt-30y',
+      label: 'UST CMT 30Y',
+      instrument_type: 'bond',
+      asset_type: 'UST',
+      tenor_label: '30Y',
+      audit_profile: 'UST_CMT_30Y',
+      source: 'bond_fixed_income',
+      status: 'READY',
+      symbol: 'UST30Y',
+      currency: 'USD',
+      snapshot_date: '2026-04-23',
+      ytm_pct: 4.8,
+      duration: 17.8,
+      effective_duration: 17.8,
+      snapshot_ref: 'bond-ust-cmt-30y',
+      refresh_status: 'READY',
+      missing_fields: [],
+      inferred_fields: {},
+      field_status: { ytm_pct: 'READY' },
+      audit_alerts: [],
+      audit_notes: [],
+      updated_at: refreshedAt,
+    },
+    {
+      id: 'bond-ust-bill-13w',
+      label: 'UST T-Bill 13W',
+      instrument_type: 't_bill',
+      asset_type: 'T_BILL',
+      tenor_label: '13W',
+      audit_profile: 'UST_BILL_3M',
+      source: 'bond_fixed_income',
+      status: 'READY',
+      symbol: 'TBILL13W',
+      currency: 'USD',
+      snapshot_date: '2026-04-23',
+      maturity_date: '2026-07-23',
+      clean_price: 98.75,
+      net_price: 98.75,
+      dirty_price: 98.75,
+      full_price: 98.75,
+      accrued_interest: null,
+      discount_rate_pct: 5.18,
+      ytm_pct: 5.21,
+      duration: 0.24,
+      effective_duration: 0.24,
+      snapshot_ref: 'bond-ust-bill-13w',
+      refresh_status: 'READY',
+      missing_fields: ['accrued_interest'],
+      inferred_fields: {},
+      field_status: { accrued_interest: 'WAIVED', discount_rate_pct: 'READY' },
+      audit_alerts: [],
+      audit_notes: ['Accrued interest is waived for the UST_BILL_3M audit profile.'],
+      updated_at: refreshedAt,
+    },
+    {
+      id: 'bond-tips-5y',
+      label: 'TIPS 5Y',
+      instrument_type: 'tips',
+      asset_type: 'TIPS',
+      tenor_label: '5Y',
+      audit_profile: 'TIPS',
+      source: 'bond_fixed_income',
+      status: 'READY',
+      symbol: 'TIPS5Y',
+      currency: 'USD',
+      snapshot_date: '2026-04-23',
+      ytm_pct: 3.94,
+      real_yield_pct: 1.82,
+      inflation_factor: 1.0312,
+      breakeven_inflation_bps: 212,
+      duration: 4.7,
+      effective_duration: 4.7,
+      snapshot_ref: 'bond-tips-5y',
+      refresh_status: 'READY',
+      missing_fields: [],
+      inferred_fields: {},
+      field_status: { real_yield_pct: 'READY', breakeven_inflation_bps: 'READY' },
+      audit_alerts: [],
+      audit_notes: [],
+      updated_at: refreshedAt,
+    },
+    {
+      id: 'bond-tips-10y',
+      label: 'TIPS 10Y',
+      instrument_type: 'tips',
+      asset_type: 'TIPS',
+      tenor_label: '10Y',
+      audit_profile: 'TIPS',
+      source: 'bond_fixed_income',
+      status: 'READY',
+      symbol: 'TIPS10Y',
+      currency: 'USD',
+      snapshot_date: '2026-04-23',
+      ytm_pct: 4.05,
+      real_yield_pct: 2.03,
+      inflation_factor: 1.0425,
+      breakeven_inflation_bps: 262,
+      duration: 7.9,
+      effective_duration: 7.9,
+      snapshot_ref: 'bond-tips-10y',
+      refresh_status: 'READY',
+      missing_fields: [],
+      inferred_fields: {},
+      field_status: { real_yield_pct: 'READY', breakeven_inflation_bps: 'READY' },
+      audit_alerts: [],
+      audit_notes: [],
+      updated_at: refreshedAt,
+    },
+    {
+      id: 'bond-lqd-watch',
+      label: 'LQD Investment Grade ETF',
+      instrument_type: 'etf',
+      asset_type: 'BOND_ETF',
+      tenor_label: 'ETF',
+      audit_profile: 'LQD',
+      source: 'bond_fixed_income',
+      status: 'WATCH',
+      symbol: 'LQD',
+      currency: 'USD',
+      snapshot_date: '2026-04-23',
+      sec_yield_30d_pct: 4.73,
+      credit_quality: 'A-',
+      tracking_error_bps: null,
+      tracking_status: 'WATCH',
+      snapshot_ref: 'bond-lqd-watch',
+      refresh_status: 'READY',
+      missing_fields: ['tracking_error_bps'],
+      inferred_fields: {},
+      field_status: { tracking_error_bps: 'MISSING' },
+      audit_alerts: ['Official tracking_error_bps is required for BOND_ETF readiness.'],
+      audit_notes: ['Official tracking-error evidence pending.'],
+      updated_at: refreshedAt,
+    },
+  ];
+  return {
+    ...overview,
+    bond_fixed_income: normalizeBondFixedIncomeOverview(
+      {
+        ...overview.bond_fixed_income,
+        raw_registry: instruments.map((instrument) => ({
+          id: instrument.id,
+          label: instrument.label,
+          status: instrument.status,
+          source: instrument.source,
+          snapshot_ref: instrument.snapshot_ref,
+          updated_at: refreshedAt,
+          notes: instrument.audit_notes,
+        })),
+        eligible_instruments: instruments,
+      },
+      overviewBase,
+    ),
+  };
+}
+
 beforeEach(() => {
   fakeApi.getSnapshotOverview.mockReset();
   fakeApi.refreshSnapshots.mockReset();
@@ -233,12 +474,30 @@ describe('SnapshotsPage', () => {
       return snapshotsCss.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`, 's'))?.[1] ?? '';
     };
 
-    expect(readRule('.snapshots-header-card--equity')).toContain('min-height: 182px');
-    expect(readRule('.snapshots-equity-view > .panel:first-child')).toContain('min-height: 284px');
-    expect(readRule('.snapshots-equity-view .metric-card')).toContain('min-height: 154px');
-    expect(readRule('.snapshots-equity-view .bond-core-card')).toContain('min-height: 390px');
-    expect(readRule('.snapshots-equity-view .detail-rail .rail-panel:last-child')).toContain('min-height: 365px');
+    expect(readRule('.snapshots-page')).toContain('--snapshots-global-dashboard-min-height: 248px');
+    expect(readRule('.snapshots-page')).toContain(
+      'font-family: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif',
+    );
+    expect(readRule('.snapshots-page.snapshots-page--equity')).toContain('gap: 16px');
+    expect(readRule('.snapshots-header-card--standard')).toContain('min-height: auto');
+    expect(readRule('.snapshots-header-card--standard')).not.toMatch(/min-height:\s*(?:1[5-9]\d|[2-9]\d{2,})px/);
+    expect(readRule('.snapshots-header-card--standard .snapshots-tabs')).toContain('margin-top: 12px');
+    expect(readRule('.snapshots-header-card--standard .snapshots-header__body')).toContain('white-space: normal');
+    expect(readRule('.snapshots-workstation-header')).toContain('min-height: 64px');
+    expect(readRule('.snapshots-workstation-title-row')).toContain('display: flex');
+    expect(readRule('.snapshots-equity-view')).toContain('gap: 16px');
+    expect(readRule('.snapshots-equity-view > .panel:first-child')).not.toMatch(/min-height:\s*(?:2[4-9]\d|[3-9]\d{2,})px/);
+    expect(readRule('.snapshots-equity-view > .panel.snapshots-equity-overview')).toContain(
+      'min-height: var(--snapshots-global-dashboard-min-height)',
+    );
+    expect(readRule('.snapshots-equity-view .metric-card')).not.toMatch(/min-height:\s*(?:1[4-9]\d|[2-9]\d{2,})px/);
+    expect(readRule('.snapshots-equity-view .bond-core-card')).not.toMatch(/min-height:\s*(?:3[0-9]\d|[4-9]\d{2,})px/);
+    expect(readRule('.snapshots-equity-view .detail-rail .rail-panel:last-child')).not.toMatch(/min-height:\s*(?:3[0-9]\d|[4-9]\d{2,})px/);
+    expect(readRule('.snapshots-equity-view .snapshots-bond-source-stack')).toContain('gap: 8px');
+    expect(readRule('.snapshots-equity-view .snapshots-bond-evidence-card')).toContain('padding: 10px 11px');
     expect(readRule('.snapshots-equity-view .detail-grid')).toContain('align-items: start');
+    expect(readRule('.snapshots-equity-view .snapshots-equity-left-stack')).toContain('gap: 16px');
+    expect(readRule('.snapshots-equity-view .snapshots-equity-right-stack')).toContain('gap: 16px');
   });
 
   it('keeps the bond tab visually attached to the shared snapshots header density', () => {
@@ -248,23 +507,36 @@ describe('SnapshotsPage', () => {
       return snapshotsCss.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`, 's'))?.[1] ?? '';
     };
 
+    expect(readRule('.snapshots-page')).toContain('--snapshots-global-dashboard-min-height: 248px');
     expect(readRule('.snapshots-bond-view')).not.toMatch(/margin-top:\s*(?:[3-9]\d|[1-9]\d{2,})px/);
     expect(readRule('.snapshots-bond-view')).toContain('gap: 23px');
-    expect(readRule('.snapshots-header-card--bond .snapshots-tabs')).toContain('margin-top: 0');
-    expect(readRule('.snapshots-header-card--bond .snapshots-chip-row')).toContain('margin-top: 0');
-    expect(readRule('.snapshots-header-card--bond .status-chip')).toContain('min-height: 30px');
+    expect(readRule('.snapshots-page.snapshots-page--bond')).toContain('gap: 16px');
+    expect(readRule('.snapshots-header-card--standard .snapshots-tabs')).toContain('margin-top: 12px');
+    expect(readRule('.snapshots-bond-health-panel')).toContain(
+      'min-height: var(--snapshots-global-dashboard-min-height)',
+    );
+    expect(readRule('.snapshots-bond-health-panel')).toContain('padding: 14px 18px');
     expect(readRule('.snapshots-page .snapshots-bond-panel')).toContain('box-shadow: none');
     expect(readRule('.snapshots-bond-workstation-grid')).toContain('grid-template-columns: minmax(0, 1fr) 330px');
     expect(readRule('.snapshots-bond-audit-layout')).toContain('grid-template-columns: minmax(0, 1fr) 330px');
+    expect(readRule('.snapshots-bond-source-stack--scroll')).toContain('overflow-y: auto');
+    expect(readRule('.snapshots-bond-source-stack--scroll')).toMatch(/max-height:\s*\d+px/);
   });
 
   it('renders the approved equity snapshots layout with runtime overview rows', async () => {
-    fakeApi.getSnapshotOverview.mockResolvedValue(overview);
-    fakeApi.refreshSnapshots.mockResolvedValue({
+    const equityOverview: ApiSnapshotOverview = {
       ...overview,
+      dataset_snapshots: [
+        { ...overview.dataset_snapshots[0], source: 'mixed_sources' },
+        ...overview.dataset_snapshots.slice(1),
+      ],
+    };
+    fakeApi.getSnapshotOverview.mockResolvedValue(equityOverview);
+    fakeApi.refreshSnapshots.mockResolvedValue({
+      ...equityOverview,
       last_refreshed_at: '2026-04-01T10:00:00Z',
       latest_job: {
-        ...overview.latest_job,
+        ...equityOverview.latest_job,
         status: 'RUNNING',
         request: { mode: 'incremental' },
       },
@@ -278,24 +550,35 @@ describe('SnapshotsPage', () => {
     expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByRole('button', { name: '刷新股票快照' })).toBeInTheDocument();
     expect(screen.getByText('DATA SNAPSHOTS')).toBeInTheDocument();
-    expect(screen.getByText('全局视角')).toBeInTheDocument();
+    expect(screen.getByText('统一管理股票、指数与固定收益数据快照的覆盖率、刷新状态和入库资格，让研究员在建仓、回测和组合配置前先确认市场数据证据链。')).toBeInTheDocument();
+    expect(screen.getByText('健康仪表盘')).toBeInTheDocument();
     expect(screen.getByText('三位一体工作站')).toBeInTheDocument();
+    expect(screen.queryByText('股票 / 指数 / 篮子')).not.toBeInTheDocument();
     expect(screen.getByText('原始快照清单')).toBeInTheDocument();
     expect(screen.getByText('数据诊断报告')).toBeInTheDocument();
     expect(screen.getByText('就绪标准')).toBeInTheDocument();
+    expect(screen.getByText('787/974 就绪')).toBeInTheDocument();
     expect(screen.queryByText('Runtime 快照总览')).not.toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '股票/指数' })).toBeInTheDocument();
-    const globalView = screen.getByRole('heading', { name: '全局视角' }).closest('section');
+    const globalView = screen.getByRole('heading', { name: '健康仪表盘' }).closest('section');
     expect(globalView).not.toBeNull();
     expect(within(globalView as HTMLElement).getByText('股票快照')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('指数基准')).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('指数与基准')).toBeInTheDocument();
     expect(within(globalView as HTMLElement).getByText('权益篮子')).toBeInTheDocument();
     expect(within(globalView as HTMLElement).getByText('异常队列')).toBeInTheDocument();
     expect(within(globalView as HTMLElement).getByText('最新刷新（EST）')).toBeInTheDocument();
     expect(within(globalView as HTMLElement).getByText('03:48')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getAllByText('50% 就绪')).toHaveLength(2);
-    expect(within(globalView as HTMLElement).getByText('0% 可用')).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('80.8% 覆盖')).toBeInTheDocument();
+    expect(
+      within(globalView as HTMLElement).getByText('787/974 个 symbol 已覆盖，按公司行为数据与股票价格数据合并计算。'),
+    ).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('100% 就绪')).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('100% 可用')).toBeInTheDocument();
     expect(within(globalView as HTMLElement).getByText('2 项例外')).toBeInTheDocument();
+    expect(screen.queryByText(/runtime/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/overview/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/mixed_sources/i)).not.toBeInTheDocument();
+    expect(screen.getByText('来源 多来源汇总')).toBeInTheDocument();
     expect(within(globalView as HTMLElement).queryByText('覆盖率')).not.toBeInTheDocument();
     expect(screen.queryByText('Runtime 原始快照清单')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '全部' })).toHaveAttribute('aria-pressed', 'true');
@@ -303,7 +586,14 @@ describe('SnapshotsPage', () => {
     expect(screen.getByText('股票价格数据')).toBeInTheDocument();
     expect(screen.getByText('标普500')).toBeInTheDocument();
     expect(screen.getByText('纳指100')).toBeInTheDocument();
+    const workstation = screen.getByRole('heading', { name: '三位一体工作站' }).closest('section');
     const rawList = screen.getByRole('heading', { name: '原始快照清单' }).closest('section');
+    const leftStack = document.querySelector('.snapshots-equity-left-stack');
+    expect(workstation?.querySelector('.snapshots-workstation-header')).not.toBeNull();
+    expect(workstation?.querySelector('.snapshots-workstation-title-row')).not.toBeNull();
+    expect(leftStack).not.toBeNull();
+    expect(leftStack).toContainElement(workstation);
+    expect(leftStack).toContainElement(rawList);
     expect(rawList).not.toBeNull();
     expect(within(rawList as HTMLElement).getAllByText('字段').length).toBeGreaterThan(0);
     expect(within(rawList as HTMLElement).getAllByText('调度').length).toBeGreaterThan(0);
@@ -331,10 +621,182 @@ describe('SnapshotsPage', () => {
     await waitFor(() =>
       expect(fakeApi.refreshSnapshots).toHaveBeenCalledWith({
         mode: 'repair',
-        targets: ['price', 'corporate', 'universes'],
+        targets: ['price', 'corporate', 'valuations', 'universes'],
         reason: 'manual-refresh-latest-and-repair',
       }),
     );
+  });
+
+  it('counts the S&P 500 and Nasdaq constituent lists as equity basket readiness', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue({
+      ...overview,
+      dataset_snapshots: overview.dataset_snapshots.map((item) => ({
+        ...item,
+        status: item.id === 'ds-price' ? 'INCOMPLETE' : item.status,
+      })),
+      universe_snapshots: overview.universe_snapshots.map((item) => ({
+        ...item,
+        status: item.id === 'un-ndx100' ? 'INCOMPLETE' : item.status,
+        blocker:
+          item.id === 'un-ndx100'
+            ? {
+                code: 'UNIVERSE_HISTORY_INCOMPLETE',
+                message: 'Universe history is partially available, but more historical anchors still need to be repaired.',
+              }
+            : item.blocker,
+      })),
+    });
+
+    renderSnapshotsPage();
+
+    await screen.findByRole('button', { name: /刷新/ });
+    const basketMetric = screen
+      .getAllByText('权益篮子')
+      .map((node) => node.closest('.metric-card'))
+      .find((node): node is HTMLElement => node instanceof HTMLElement);
+    if (!basketMetric) {
+      throw new Error('权益篮子 metric card was not rendered');
+    }
+    expect(within(basketMetric).getByText('100% 可用')).toBeInTheDocument();
+    expect(within(basketMetric).getByText(/2\/2/)).toBeInTheDocument();
+
+    const basketCoreCard = Array.from(document.querySelectorAll('.bond-core-card')).find((node) =>
+      node.textContent?.includes('权益篮子'),
+    );
+    expect(basketCoreCard).toBeDefined();
+    expect(basketCoreCard?.textContent).toContain('2 就绪');
+    expect(basketCoreCard?.textContent).toContain('2 总数');
+    expect(basketCoreCard?.querySelector('.status-chip--success')).not.toBeNull();
+  });
+
+  it('uses latest refresh delta stats in the equity refresh card instead of totals', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue(overview);
+
+    renderSnapshotsPage();
+
+    await screen.findByRole('button', { name: /刷新/ });
+    const refreshMetric = screen
+      .getAllByText(/最新刷新/)
+      .map((node) => node.closest('.metric-card'))
+      .find((node): node is HTMLElement => node instanceof HTMLElement);
+    expect(refreshMetric).toBeDefined();
+    expect(refreshMetric?.textContent).toContain('本次新增');
+    expect(refreshMetric?.textContent).toContain('股票价格数据 49 行');
+    expect(refreshMetric?.textContent).toContain('公司行为数据 49 行');
+    expect(refreshMetric?.textContent).not.toContain('数据行');
+    expect(refreshMetric?.textContent).not.toContain('成分');
+  });
+
+  it('uses benchmark ETF price history coverage for index and benchmark readiness', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue({
+      ...overview,
+      dataset_snapshots: overview.dataset_snapshots.map((item) =>
+        item.id === 'ds-price'
+          ? {
+              ...item,
+              status: 'INCOMPLETE',
+              metadata: {
+                ...item.metadata,
+                benchmark_etf_coverage: {
+                  ready_count: 2,
+                  total_count: 2,
+                  symbols: [
+                    { symbol: 'SPY', status: 'READY', start_date: '1996-01-02', end_date: '2026-04-01', trade_days: 7600 },
+                    { symbol: 'QQQ', status: 'READY', start_date: '1999-03-10', end_date: '2026-04-01', trade_days: 6800 },
+                  ],
+                },
+              },
+            }
+          : item,
+      ),
+      universe_snapshots: overview.universe_snapshots.map((item) => ({
+        ...item,
+        status: 'INCOMPLETE',
+      })),
+    });
+
+    renderSnapshotsPage();
+
+    await screen.findByRole('button', { name: /刷新/ });
+    const benchmarkMetric = screen
+      .getAllByText('指数与基准')
+      .map((node) => node.closest('.metric-card'))
+      .find((node): node is HTMLElement => node instanceof HTMLElement);
+    if (!benchmarkMetric) {
+      throw new Error('指数与基准 metric card was not rendered');
+    }
+    expect(within(benchmarkMetric).getByText('100% 就绪')).toBeInTheDocument();
+    expect(within(benchmarkMetric).getByText(/2\/2 个基准ETF历史数据完备/)).toBeInTheDocument();
+
+    const benchmarkCoreCard = Array.from(document.querySelectorAll('.bond-core-card')).find((node) =>
+      node.textContent?.includes('指数与基准'),
+    );
+    expect(benchmarkCoreCard).toBeDefined();
+    expect(benchmarkCoreCard?.textContent).toContain('2 就绪');
+    expect(benchmarkCoreCard?.textContent).toContain('2 总数');
+    expect(benchmarkCoreCard?.querySelector('.status-chip--success')).not.toBeNull();
+  });
+
+  it('localizes OpenBB provider ids on the snapshot surface', async () => {
+    const openbbOverview: ApiSnapshotOverview = {
+      ...overview,
+      dataset_snapshots: [
+        {
+          ...overview.dataset_snapshots[1],
+          source: 'openbb_yfinance',
+          fallback_source: 'openbb_tiingo',
+          metadata: {
+            ...overview.dataset_snapshots[1].metadata,
+            provider_summary: {
+              providers: {
+                openbb_tiingo: {
+                  access_tier: 'free_account',
+                  quota_limited: true,
+                  next_retry_at: '2026-04-02T00:00:00Z',
+                },
+              },
+            },
+          },
+        },
+        ...overview.dataset_snapshots
+          .filter((item) => item.id !== 'ds-price')
+          .map((item) => (item.id === 'ds-corporate-actions' ? { ...item, source: 'openbb_tiingo' } : item)),
+      ],
+      universe_snapshots: [
+        {
+          ...overview.universe_snapshots[0],
+          source: 'openbb_index_constituents',
+          metadata: {
+            ...overview.universe_snapshots[0].metadata,
+            openbb_current_constituent_check: {
+              provider: 'openbb_index_constituents',
+              status: 'succeeded',
+              auxiliary_only: true,
+            },
+          },
+        },
+        ...overview.universe_snapshots.slice(1),
+      ],
+    };
+    fakeApi.getSnapshotOverview.mockResolvedValue(openbbOverview);
+
+    renderSnapshotsPage();
+
+    expect(await screen.findByText('来源 OpenBB Yahoo 行情')).toBeInTheDocument();
+    expect(screen.getByText('来源 OpenBB Tiingo 行情')).toBeInTheDocument();
+    expect(screen.getByText('来源 OpenBB 当前成分校验')).toBeInTheDocument();
+    expect(screen.queryByText(/openbb_yfinance/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/openbb_tiingo/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/openbb_index_constituents/i)).not.toBeInTheDocument();
+  });
+
+  it('renders the valuation dataset row inside the equity snapshots list', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue(overview);
+    fakeApi.refreshSnapshots.mockResolvedValue(overview);
+
+    renderSnapshotsPage();
+
+    expect(await screen.findByText('Index Valuations')).toBeInTheDocument();
   });
 
   it('restores the bond snapshots tab', async () => {
@@ -344,19 +806,34 @@ describe('SnapshotsPage', () => {
     renderSnapshotsPage('bond');
 
     expect(await screen.findByRole('heading', { level: 1, name: '数据快照' })).toBeInTheDocument();
+    expect(screen.getByText('统一管理股票、指数与固定收益数据快照的覆盖率、刷新状态和入库资格，让研究员在建仓、回测和组合配置前先确认市场数据证据链。')).toBeInTheDocument();
     const tabs = screen.getAllByRole('tab');
     expect(tabs[1]).toHaveAttribute('aria-selected', 'true');
     expect(tabs).toHaveLength(2);
     expect(screen.getByRole('button', { name: '刷新债券快照' })).toBeInTheDocument();
+    expect(screen.queryByText('资产腿合法来源')).not.toBeInTheDocument();
+    expect(screen.queryByText('日终刷新 (EOD)')).not.toBeInTheDocument();
+    expect(screen.queryByText('到期收益率（YTM） / 久期 / 凸性')).not.toBeInTheDocument();
+    expect(screen.queryByText('净价 / 全价 / 应计')).not.toBeInTheDocument();
+    expect(screen.getByText('健康仪表盘')).toBeInTheDocument();
     expect(screen.getByText('就绪 / 待补 / 阻塞')).toBeInTheDocument();
     expect(screen.getByText('影子字段覆盖率')).toBeInTheDocument();
-    expect(screen.getByText('入库链路与数据自愈')).toBeInTheDocument();
+    expect(screen.getByText('入库链路')).toBeInTheDocument();
+    expect(screen.queryByText('入库链路与数据自愈')).not.toBeInTheDocument();
+    expect(screen.queryByText('自愈进行中')).not.toBeInTheDocument();
+    expect(screen.queryByText('UST 4/4 就绪')).not.toBeInTheDocument();
+    expect(screen.queryByText('TIPS 2/2 就绪')).not.toBeInTheDocument();
+    expect(screen.queryByText('IG 0/1 就绪')).not.toBeInTheDocument();
     expect(screen.getAllByText('利率债（UST）').length).toBeGreaterThan(0);
     expect(screen.getByText('影子数据审计矩阵')).toBeInTheDocument();
     expect(screen.getByText('UST 术语说明')).toBeInTheDocument();
-    expect(screen.getByText('尚未写入真实 runtime 曲线点；这里保留批准稿位置，但不使用 proxy 或静态曲线兜底。')).toBeInTheDocument();
+    expect(screen.getByText('尚未写入真实运行时曲线点；这里保留批准稿位置，但不使用代理或静态曲线兜底。')).toBeInTheDocument();
     expect(document.querySelector('.snapshots-bond-runtime-panel .snapshots-bond-create-rail')).toBeNull();
     expect(document.querySelector('.snapshots-bond-workstation-grid > .snapshots-bond-detail-rail .snapshots-bond-create-rail')).not.toBeNull();
+    expect(document.querySelector('[data-ui="asset-leg-eligibility-rail"]')).not.toBeNull();
+    const workstation = screen.getByRole('heading', { name: '三位一体工作站' }).closest('section');
+    expect(workstation?.querySelector('.snapshots-workstation-header')).not.toBeNull();
+    expect(workstation?.querySelector('.snapshots-workstation-title-row')).not.toBeNull();
     expect(document.querySelector('.snapshots-bond-audit-grid')).not.toBeNull();
     expect(screen.getByText('快照 ID')).toBeInTheDocument();
     expect(screen.getByText('全价 (Dirty)')).toBeInTheDocument();
@@ -370,14 +847,79 @@ describe('SnapshotsPage', () => {
     expect(within(auditSection as HTMLElement).queryByText('系统诊断')).not.toBeInTheDocument();
     expect(document.querySelector('.snapshots-bond-audit-panel .snapshots-bond-diagnostic-rail')).toBeNull();
     expect(document.querySelector('.snapshots-bond-audit-layout > .snapshots-bond-detail-rail .snapshots-bond-diagnostic-rail')).not.toBeNull();
+    expect(document.querySelector('[data-ui="bond-quality-audit-matrix"]')).not.toBeNull();
+    expect(document.querySelector('[data-ui="bond-repair-rules"]')).not.toBeNull();
     expect(screen.getByRole('heading', { name: '原始快照与调度' })).toBeInTheDocument();
+    expect(document.querySelector('.snapshots-bond-curve-axis')).toBeNull();
     expect(screen.getByText('资产腿创建')).toBeInTheDocument();
     expect(screen.queryByText('Runtime eligible bond sources')).not.toBeInTheDocument();
     expect(screen.queryByText('No runtime eligible bond sources yet')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Runtime fixed-income snapshot row/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Only runtime fixed-income snapshot rows are eligible asset-leg sources/i)).not.toBeInTheDocument();
     expect(screen.queryByText('共享快照路由')).not.toBeInTheDocument();
     expect(screen.queryByText('不新增债券专属调度器')).not.toBeInTheDocument();
     expect(screen.queryByText('第一阶段曲线样本')).not.toBeInTheDocument();
     expect(screen.queryByText('?砍銵蛹?唳')).not.toBeInTheDocument();
+  });
+
+  it('normalizes the seven-row bond contract and blocks the LQD WATCH row', async () => {
+    const sevenRowOverview = buildSevenBondRowsOverview();
+    fakeApi.getSnapshotOverview.mockResolvedValue(sevenRowOverview);
+    fakeApi.refreshSnapshots.mockResolvedValue(sevenRowOverview);
+
+    const instruments = sevenRowOverview.bond_fixed_income.eligible_instruments;
+    expect(instruments).toHaveLength(7);
+    expect(instruments.find((item) => item.id === 'bond-ust-bill-13w')).toMatchObject({
+      asset_type: 'T_BILL',
+      tenor_label: '13W',
+      audit_profile: 'UST_BILL_3M',
+      discount_rate_pct: 5.18,
+      effective_duration: 0.24,
+      field_status: expect.objectContaining({ accrued_interest: 'WAIVED' }),
+    });
+    expect(instruments.find((item) => item.id === 'bond-tips-10y')).toMatchObject({
+      asset_type: 'TIPS',
+      real_yield_pct: 2.03,
+      inflation_factor: 1.0425,
+      breakeven_inflation_bps: 262,
+    });
+    expect(instruments.find((item) => item.id === 'bond-lqd-watch')).toMatchObject({
+      asset_type: 'BOND_ETF',
+      sec_yield_30d_pct: 4.73,
+      credit_quality: 'A-',
+      tracking_error_bps: null,
+      tracking_status: 'WATCH',
+      status: 'WATCH',
+    });
+
+    renderSnapshotsPage('bond');
+
+    expect((await screen.findAllByText('UST T-Bill 13W')).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('TIPS 10Y').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('LQD Investment Grade ETF').length).toBeGreaterThan(0);
+    const scrollStack = document.querySelector('.snapshots-bond-source-stack--scroll');
+    expect(scrollStack).not.toBeNull();
+    expect(scrollStack?.querySelectorAll('.snapshots-bond-source-choice')).toHaveLength(3);
+    const visibleLabels = Array.from(scrollStack?.querySelectorAll('.snapshots-bond-source-choice strong') ?? []).map(
+      (node) => node.textContent?.trim(),
+    );
+    expect(visibleLabels).toEqual(['UST T-Bill 13W', 'UST CMT 2Y', 'UST CMT 10Y']);
+    const progressInline = document.querySelector('.snapshots-bond-progress-inline');
+    expect(progressInline).not.toBeNull();
+    expect(progressInline).toHaveTextContent('已展示 3 / 4 张');
+    expect(progressInline?.querySelector('.snapshots-bond-progress-bar')).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /抗通胀债（TIPS）/ }));
+    expect(scrollStack?.querySelectorAll('.snapshots-bond-source-choice')).toHaveLength(2);
+    expect(screen.getAllByText('TIPS 10Y').length).toBeGreaterThan(0);
+    expect(document.querySelector('.snapshots-bond-progress-inline')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /投资级信用债（IG）/ }));
+    expect(scrollStack?.querySelectorAll('.snapshots-bond-source-choice')).toHaveLength(1);
+
+    const lqdButton = screen.getByRole('button', { name: /LQD Investment Grade ETF/ });
+    expect(lqdButton).toBeDisabled();
+    expect(fakeApi.createAssetLeg).not.toHaveBeenCalled();
   });
 
   it('creates an asset leg from a runtime eligible bond source', async () => {
@@ -485,7 +1027,9 @@ describe('SnapshotsPage', () => {
     expect(await screen.findByText('资产腿创建')).toBeInTheDocument();
     expect(screen.getAllByText('US Treasury 10Y Note').length).toBeGreaterThan(0);
     expect(screen.getAllByText('US Treasury 2Y Note').length).toBeGreaterThan(0);
-    expect(screen.getByText('入库演进：runtime 字段流')).toBeInTheDocument();
+    expect(document.querySelector('[data-ui="daily-accrual-status"]')).not.toBeNull();
+    expect(document.querySelector('[data-ui="risk-budget-precheck"]')).not.toBeNull();
+    expect(screen.getByText('入库演进：运行时字段流')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /US Treasury 2Y Note/ }));
 
@@ -537,7 +1081,7 @@ describe('SnapshotsPage', () => {
     await waitFor(() =>
       expect(fakeApi.refreshSnapshots).toHaveBeenCalledWith({
         mode: 'repair',
-        targets: ['price', 'corporate', 'universes'],
+        targets: ['price', 'corporate', 'valuations', 'universes'],
         reason: 'manual-refresh-latest-and-repair',
       }),
     );
@@ -575,7 +1119,7 @@ describe('SnapshotsPage', () => {
 
     renderSnapshotsPage();
 
-    expect(await screen.findByText('全局视角')).toBeInTheDocument();
+    expect(await screen.findByText('健康仪表盘')).toBeInTheDocument();
     expect(screen.getByText('原始快照清单')).toBeInTheDocument();
     expect(screen.getByText('标普500')).toBeInTheDocument();
   });
@@ -591,7 +1135,7 @@ describe('SnapshotsPage', () => {
 
     renderSnapshotsPage();
 
-    expect(await screen.findByText('全局视角')).toBeInTheDocument();
+    expect(await screen.findByText('健康仪表盘')).toBeInTheDocument();
     expect(
       screen.queryByText('当前本地后端还在返回旧版快照接口。重启后端服务后，再点“刷新快照”即可看到完整快照。'),
     ).not.toBeInTheDocument();
@@ -634,7 +1178,7 @@ describe('SnapshotsPage', () => {
 
     renderSnapshotsPage();
 
-    expect(await screen.findByText('全局视角')).toBeInTheDocument();
+    expect(await screen.findByText('健康仪表盘')).toBeInTheDocument();
     expect(screen.queryByText('最近刷新 4月1日 下午03:48 ·本次未新增数据。')).not.toBeInTheDocument();
   });
 
@@ -681,7 +1225,7 @@ describe('SnapshotsPage', () => {
 
     renderSnapshotsPage();
 
-    expect(await screen.findByText('全局视角')).toBeInTheDocument();
+    expect(await screen.findByText('健康仪表盘')).toBeInTheDocument();
     expect(
       screen.queryByText('最近刷新 4月1日 下午03:48 ·新增纳指100股票池9个历史锚点，进度23/61。'),
     ).not.toBeInTheDocument();

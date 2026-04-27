@@ -26,6 +26,8 @@ vi.mock('./lib/demoStoreContext', () => ({ useApiClient: () => fakeApi }));
 
 const GRID_PROMPT = '本金10000，初始买入QQQ20%仓位，每下跌5%买入10%，每上涨10%卖出10%';
 const GRID_DESCRIPTION = '本金10000，围绕QQQ执行网格交易，初始仓位20%，每下跌5%买入10%，每上涨10%卖出10%。';
+const DYNAMIC_DCA_LOGIC = '读取QQQ滚动10年PE(TTM)百分位：极度高估>90%乘0.5x；温和高估70%-90%乘0.8x；合理区间30%-70%乘1.0x；低估区间10%-30%乘1.5x；极度低估<10%乘2.0x';
+const DYNAMIC_DCA_DESCRIPTION = `围绕QQQ执行月度定投，每期基准买入1000USD，按每月第一个交易日执行，${DYNAMIC_DCA_LOGIC}。`;
 
 function buildGridSession({
   revision = 1,
@@ -171,7 +173,7 @@ function buildDcaSession(): ApiStrategyCreationSession {
         created_at: '2026-04-08 09:24',
         extracted_tags: [
           { key: 'strategy_name', label: '策略名称', value: 'QQQ 月度定投策略', status: 'synced' },
-          { key: 'strategy_description', label: '策略描述', value: '围绕QQQ执行月度定投，每期买入1000USD，按每期首个交易日执行。', status: 'synced' },
+          { key: 'strategy_description', label: '策略描述', value: '围绕QQQ执行月度定投，每期买入1000USD，按每月第一个交易日执行。', status: 'synced' },
           { key: 'universe_name', label: '股票池', value: 'QQQ', status: 'synced' },
           { key: 'contribution_amount', label: '定投金额(USD)', value: '1000', status: 'synced' },
           { key: 'investment_frequency', label: '定投频率', value: 'monthly', status: 'synced' },
@@ -188,10 +190,59 @@ function buildDcaSession(): ApiStrategyCreationSession {
       ],
       parameters: [
         { key: 'strategy_name', label: '策略名称', value: 'QQQ 月度定投策略', source: 'system_inference' },
-        { key: 'strategy_description', label: '策略描述', value: '围绕QQQ执行月度定投，每期买入1000USD，按每期首个交易日执行。', source: 'system_inference' },
+        { key: 'strategy_description', label: '策略描述', value: '围绕QQQ执行月度定投，每期买入1000USD，按每月第一个交易日执行。', source: 'system_inference' },
         { key: 'benchmark_symbol', label: '基准', value: 'QQQ', source: 'system_inference' },
         { key: 'contribution_amount', label: '定投金额(USD)', value: 1000, source: 'user_input' },
         { key: 'investment_frequency', label: '定投频率', value: 'monthly', source: 'user_input' },
+      ],
+    },
+  };
+}
+
+function buildDynamicDcaSession(): ApiStrategyCreationSession {
+  return {
+    id: 'cs-dca-dynamic',
+    status: 'READY_FOR_CONFIRMATION',
+    revision: 1,
+    top_level: {
+      strategy_type: 'BUY_AND_HOLD',
+      universe_name: 'QQQ',
+      rebalance_frequency: 'never',
+    },
+    messages: [
+      {
+        id: 'msg-dca-dynamic-001',
+        role: 'user',
+        content:
+          'QQQ动态定投策略 每月固定第一个交易日买入QQQ1000USD*倍率 读取QQQ 的滚动10年PE (TTM) 极度高估 ( > 90% )： 倍率 0.5x 温和高估 ( 70% - 90% )： 倍率 0.8x 合理区间 ( 30% - 70% )： 倍率 1.0x (基准) 低估区间 ( 10% - 30% )： 倍率 1.5x 极度低估 ( < 10% )： 倍率 2.0x',
+        created_at: '2026-04-24 18:12',
+        extracted_tags: [
+          { key: 'strategy_name', label: '策略名称', value: 'QQQ 动态定投策略', status: 'synced' },
+          { key: 'strategy_description', label: '策略描述', value: DYNAMIC_DCA_DESCRIPTION, status: 'synced' },
+          { key: 'universe_name', label: '股票池', value: 'QQQ', status: 'synced' },
+          { key: 'contribution_amount', label: '定投金额(USD)', value: '1000', status: 'synced' },
+          { key: 'investment_frequency', label: '定投频率', value: 'monthly', status: 'synced' },
+          { key: 'contribution_anchor', label: '定投执行锚点', value: '每月第一个交易日', status: 'synced' },
+          { key: 'dynamic_investment_logic', label: '动态定投逻辑', value: DYNAMIC_DCA_LOGIC, status: 'synced' },
+        ],
+      },
+    ],
+    pending_inputs: [],
+    manual_conflicts: [],
+    confirmation_fields: {
+      top_level: [
+        { key: 'strategy_type', label: '策略类型', value: 'BUY_AND_HOLD', source: 'user_input' },
+        { key: 'universe_name', label: '股票池', value: 'QQQ', source: 'user_input' },
+        { key: 'rebalance_frequency', label: '再平衡频次', value: 'never', source: 'system_default' },
+      ],
+      parameters: [
+        { key: 'strategy_name', label: '策略名称', value: 'QQQ 动态定投策略', source: 'system_inference' },
+        { key: 'strategy_description', label: '策略描述', value: DYNAMIC_DCA_DESCRIPTION, source: 'system_inference' },
+        { key: 'benchmark_symbol', label: '基准', value: 'QQQ', source: 'system_inference' },
+        { key: 'contribution_amount', label: '定投金额(USD)', value: 1000, source: 'user_input' },
+        { key: 'investment_frequency', label: '定投频率', value: 'monthly', source: 'user_input' },
+        { key: 'contribution_anchor', label: '定投执行锚点', value: '每月第一个交易日', source: 'user_input' },
+        { key: 'dynamic_investment_logic', label: '动态定投逻辑', value: DYNAMIC_DCA_LOGIC, source: 'system_inference' },
       ],
     },
   };
@@ -411,7 +462,7 @@ describe('creation flow', () => {
     expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent('QQQ 月度定投策略');
     expect(screen.getByLabelText('策略类型')).toHaveTextContent('定投');
     expect(screen.getByLabelText('策略名称')).toHaveValue('QQQ 月度定投策略');
-    expect(screen.getByLabelText('策略描述')).toHaveValue('围绕QQQ执行月度定投，每期买入1000USD，按每期首个交易日执行。');
+    expect(screen.getByLabelText('策略描述')).toHaveValue('围绕QQQ执行月度定投，每期买入1000USD，按每月第一个交易日执行。');
     expect(screen.getByLabelText('股票池')).toHaveValue('QQQ');
     expect(screen.getByRole('combobox', { name: '基准' })).toHaveValue('QQQ');
 
@@ -419,7 +470,25 @@ describe('creation flow', () => {
 
     expect(await screen.findByLabelText('定投金额(USD)')).toHaveValue('1000');
     expect(screen.getByRole('combobox', { name: '定投频率' })).toHaveValue('monthly');
+    expect(screen.queryByLabelText('定投执行锚点')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('动态定投逻辑')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('初始仓位(%)')).not.toBeInTheDocument();
+  });
+
+  it('renders extracted dynamic buy-and-hold logic only when the session carries those fields', async () => {
+    fakeApi.getCreationSession.mockResolvedValue(buildDynamicDcaSession());
+
+    render(<CreationSessionPage sessionId="cs-dca-dynamic" />);
+
+    expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent('QQQ 动态定投策略');
+    expect(screen.getByLabelText('策略描述')).toHaveValue(DYNAMIC_DCA_DESCRIPTION);
+
+    fireEvent.click(screen.getByText('选股规则').closest('button')!);
+
+    expect(await screen.findByLabelText('定投金额(USD)')).toHaveValue('1000');
+    expect(screen.getByRole('combobox', { name: '定投频率' })).toHaveValue('monthly');
+    expect(screen.getByLabelText('定投执行锚点')).toHaveValue('每月第一个交易日');
+    expect(screen.getByLabelText('动态定投逻辑')).toHaveValue(DYNAMIC_DCA_LOGIC);
   });
 
   it('renders mean-reversion sessions with the mean-reversion parameter groups', async () => {

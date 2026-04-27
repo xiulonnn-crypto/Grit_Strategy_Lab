@@ -120,7 +120,30 @@ export function formatBenchmarkLabel(value?: string | null): string {
   if (/60\/40/.test(text)) {
     return '60/40 参考组合';
   }
+  if (/cash\s*\/\s*bond\s*smoke/i.test(text)) {
+    return '现金 / 债券烟测基准';
+  }
   return text;
+}
+
+function formatRuntimeSmokeLabel(value?: string | null): string | null {
+  const text = cleanDisplayText(value);
+  if (!text || isPlaceholderText(text) || !/live smoke/i.test(text)) {
+    return null;
+  }
+  if (/^phase\s*1\.1\s+live\s+smoke\s+composition$/i.test(text)) {
+    return 'Phase 1.1 线上烟测组合';
+  }
+  if (/^phase\s*1\.1\s+live\s+smoke\s+bond\s+snapshot\s+asset$/i.test(text)) {
+    return 'Phase 1.1 线上烟测债券快照资产腿';
+  }
+  if (/^phase\s*1\.1\s+live\s+smoke\s+bond\s+leg$/i.test(text)) {
+    return 'Phase 1.1 线上烟测债券腿';
+  }
+  if (/^phase\s*1\.1\s+live\s+smoke\s+cash\s+leg$/i.test(text)) {
+    return 'Phase 1.1 线上烟测现金腿';
+  }
+  return text.replace(/live\s+smoke/gi, '线上烟测');
 }
 
 export function formatCompositionStatusLabel(
@@ -156,6 +179,10 @@ export function formatCompositionName(input: {
   benchmarkLabel?: string | null;
   status?: string | null;
 }): string {
+  const runtimeLabel = formatRuntimeSmokeLabel(input.name);
+  if (runtimeLabel) {
+    return runtimeLabel;
+  }
   const text = cleanDisplayText(input.name);
   if (text && !isPlaceholderText(text)) {
     return text;
@@ -196,6 +223,9 @@ export function formatCompositionDescription(value?: string | null): string | nu
   if (/compose review seeded/i.test(text)) {
     return '由策略腿、资产腿与现金腿共同构成的正式组合。';
   }
+  if (/created through the real runtime api to verify compose pages/i.test(text)) {
+    return '通过真实运行时接口创建，用于验证组合页面、来源冻结与维护节奏。';
+  }
   return text;
 }
 
@@ -227,6 +257,10 @@ type LegLike = {
 };
 
 export function formatLegDisplayName(leg: LegLike): string {
+  const runtimeLabel = formatRuntimeSmokeLabel(leg.display_name ?? leg.name);
+  if (runtimeLabel) {
+    return runtimeLabel;
+  }
   const displayName = cleanDisplayText(leg.display_name ?? leg.name);
   if (displayName && !isPlaceholderText(displayName)) {
     return displayName;
@@ -310,6 +344,15 @@ export function formatLegProofLabel(value?: string | null, leg?: LegLike): strin
     }
     if (/^updated\s+\d{4}-\d{2}-\d{2}$/i.test(text)) {
       return formatCompositionActivityLabel(text);
+    }
+    if (/^phase1[_\s-]+live[_\s-]+smoke[_\s-]+cash$/i.test(text)) {
+      return 'Phase 1 线上烟测现金';
+    }
+    if (/^phase1[_\s-]+live[_\s-]+smoke$/i.test(text)) {
+      return 'Phase 1 线上烟测';
+    }
+    if (/^ds-price$/i.test(text)) {
+      return '价格数据源';
     }
     if (leg?.leg_kind === 'asset' && /^ds-/.test(text)) {
       return `来源快照 ${text}`;

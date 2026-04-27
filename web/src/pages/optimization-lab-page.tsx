@@ -77,6 +77,7 @@ type OptimizationDiscreteFieldControlProps = {
   onChange: (values: string[]) => void;
 };
 
+const OPTIMIZATION_CANDIDATE_PANEL_LIMIT = 3;
 const OPTIMIZATION_DISCRETE_FIELD_OPTIONS: Record<
   string,
   OptimizationDiscreteOption[]
@@ -4258,17 +4259,22 @@ export function OptimizationResultsPage({
           jobPayload.strategy_id,
         );
         let baselineRunPayload: ApiBacktestRunDetail | null = null;
-        const baselineRunId =
-          (typeof jobPayload.request.source_run_id === "string" &&
-          jobPayload.request.source_run_id.trim()
-            ? jobPayload.request.source_run_id
-            : (strategyPayload.latest_completed_run_summary?.run_id ??
-              strategyPayload.latest_run_id)) ?? null;
-        if (baselineRunId) {
+        const baselineRunIds: string[] = [];
+        const addBaselineRunId = (value: string | null | undefined): void => {
+          const trimmed = typeof value === "string" ? value.trim() : "";
+          if (trimmed && !baselineRunIds.includes(trimmed)) {
+            baselineRunIds.push(trimmed);
+          }
+        };
+        addBaselineRunId(jobPayload.request.source_run_id);
+        addBaselineRunId(strategyPayload.latest_completed_run_summary?.run_id);
+        addBaselineRunId(strategyPayload.latest_run_id);
+        for (const baselineRunId of baselineRunIds) {
           try {
             baselineRunPayload = await api.getBacktestRunDetail(baselineRunId, {
               view: "initial",
             });
+            break;
           } catch {
             baselineRunPayload = null;
           }
@@ -4516,24 +4522,33 @@ export function OptimizationResultsPage({
             strategy,
             baselineRun,
             optimizationSearchSpace,
-            (job.candidates.length ?? 0) + 1,
+            Math.min(
+              displayedMatchingCandidates.length,
+              OPTIMIZATION_CANDIDATE_PANEL_LIMIT,
+            ) + 1,
             optimizationObjective,
           )
         : null,
     [
       baselineRun,
+      displayedMatchingCandidates.length,
       job?.candidates.length,
       optimizationObjective,
       optimizationSearchSpace,
       strategy,
     ],
   );
+  const candidatePanelRows = useMemo<OptimizationDisplayCandidate[]>(
+    () =>
+      displayedMatchingCandidates.slice(0, OPTIMIZATION_CANDIDATE_PANEL_LIMIT),
+    [displayedMatchingCandidates],
+  );
   const candidateRows = useMemo<OptimizationDisplayCandidate[]>(
     () => [
-      ...displayedMatchingCandidates,
+      ...candidatePanelRows,
       ...(baselineCandidate ? [baselineCandidate] : []),
     ],
-    [baselineCandidate, displayedMatchingCandidates],
+    [baselineCandidate, candidatePanelRows],
   );
   const baselineMatchesConstraints = useMemo(
     () =>
@@ -5097,6 +5112,19 @@ export function OptimizationResultsPage({
     if (!job || !selectedCandidate) {
       return;
     }
+    const promotionBaseParameterVersionId =
+      (typeof strategy?.current_parameter_version_id === "string" &&
+      strategy.current_parameter_version_id.trim()
+        ? strategy.current_parameter_version_id.trim()
+        : null) ??
+      (typeof job.base_parameter_version_id === "string" &&
+      job.base_parameter_version_id.trim()
+        ? job.base_parameter_version_id.trim()
+        : null) ??
+      (typeof job.request.base_parameter_version_id === "string" &&
+      job.request.base_parameter_version_id.trim()
+        ? job.request.base_parameter_version_id.trim()
+        : null);
     try {
       setSaving(true);
       setError(null);
@@ -5106,6 +5134,7 @@ export function OptimizationResultsPage({
         "set_current",
         `promote-${selectedCandidate.id}`,
         "从优化实验室晋升当前版本",
+        promotionBaseParameterVersionId,
       );
       const [refreshedStrategy, refreshedJob] = await Promise.all([
         api.getStrategyDetail(job.strategy_id),

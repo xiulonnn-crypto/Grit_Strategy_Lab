@@ -5,8 +5,17 @@ import {
   formatBenchmarkLabel,
   formatCompositionDescription,
   formatCompositionName,
+  formatCompositionStatusLabel,
 } from '../lib/compose-display';
 import { useApiClient } from '../lib/demoStoreContext';
+import {
+  buildCompositionReferenceCounts,
+  buildStrategyCandidateRows,
+  materializeSavedStrategyRows,
+  mergeInventoryWithSavedStrategies,
+  readSavedStrategyLegEdits,
+  readSavedStrategyLegIds,
+} from '../lib/saved-strategy-leg-inventory';
 import type {
   ApiCompositionDetail,
   ApiCompositionLegInput,
@@ -240,10 +249,51 @@ export function CompositionWorkbenchPage(): JSX.Element {
           setError(null);
         }
         const inventoryResponse = await api.getLegInventory();
+        let enrichedInventory = inventoryResponse;
+        const savedStrategyIds = readSavedStrategyLegIds();
+        if (savedStrategyIds.length > 0) {
+          try {
+            const compositionDetailsPromise =
+              api.listCompositions && api.getCompositionDetail
+                ? api
+                    .listCompositions()
+                    .then((items) =>
+                      Promise.all(
+                        items
+                          .filter((item) => String(item.status ?? '').toUpperCase() !== 'ARCHIVED')
+                          .map((item) => api.getCompositionDetail!(item.id)),
+                      ),
+                    )
+                    .catch(() => [])
+                : Promise.resolve([]);
+            const [strategies, runs, compositionDetails] = await Promise.all([
+              api.listStrategies(),
+              api.listBacktestRuns({ limit: 100 }),
+              compositionDetailsPromise,
+            ]);
+            enrichedInventory =
+              mergeInventoryWithSavedStrategies(
+                inventoryResponse,
+                materializeSavedStrategyRows(
+                  savedStrategyIds,
+                  buildStrategyCandidateRows(
+                    strategies,
+                    runs,
+                    buildCompositionReferenceCounts(compositionDetails),
+                  ),
+                  [],
+                  readSavedStrategyLegEdits(),
+                ),
+              ) ?? inventoryResponse;
+          } catch {
+            // Saved strategy legs are additive; the base inventory should still render if they cannot be rehydrated.
+            enrichedInventory = inventoryResponse;
+          }
+        }
         if (cancelled) {
           return;
         }
-        setInventory(inventoryResponse);
+        setInventory(enrichedInventory);
 
         if (routeCompositionId && api.getCompositionDetail) {
           const detail = await api.getCompositionDetail(routeCompositionId);
@@ -447,7 +497,7 @@ export function CompositionWorkbenchPage(): JSX.Element {
       error={error}
       inventory={inventory}
       loading={loading}
-      modeLabel={compositionId ? `编辑组合 ${compositionId}` : '新建组合'}
+      statusLabel={formatCompositionStatusLabel('DRAFT')}
       onAddLeg={handleAddLeg}
       onBenchmarkLabelChange={setBenchmarkLabel}
       onCompositionNameChange={setCompositionName}

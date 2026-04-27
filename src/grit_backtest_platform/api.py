@@ -19,11 +19,13 @@ from .fallback_provider import ProviderExecutionSignal, provider_access_tier
 from .models import (
     AssetLegCreateRequest,
     AssetLegResponseModel,
+    AssetLegUpdateRequest,
     BacktestRunCloneRequest,
     BacktestRunCreateRequest,
     BacktestRunPreviewRequest,
     CashLegCreateRequest,
     CashLegResponseModel,
+    CashLegUpdateRequest,
     CompositionCreateRequest,
     CompositionDetailResponseModel,
     CompositionListItemModel,
@@ -60,7 +62,19 @@ def _supports_corporate_action_probe(provider_or_name: Any) -> bool:
     if not isinstance(provider_or_name, str) and bool(getattr(provider_or_name, "supports_action_enrichment", False)):
         return True
     provider_name = str(provider_or_name if isinstance(provider_or_name, str) else _provider_name(provider_or_name))
-    return provider_name.strip().lower() in {"yahoo", "yfinance", "tiingo", "alpha_vantage"}
+    return provider_name.strip().lower() in {
+        "yahoo",
+        "yfinance",
+        "tiingo",
+        "alpha_vantage",
+        "openbb_yfinance",
+        "openbb_tiingo",
+        "openbb_fmp",
+    }
+
+
+def _openbb_provider_enabled() -> bool:
+    return str(os.getenv("GRIT_ENABLE_OPENBB_PROVIDER") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _load_provider(module_name: str, class_names: tuple[str, ...]) -> tuple[Any | None, str | None]:
@@ -148,7 +162,7 @@ class RuntimeMarketDataFetchError(RuntimeError):
 
 def _missing_provider_kind(provider_name: str) -> str:
     normalized = str(provider_name or "").strip().lower()
-    if normalized == "alpha_vantage":
+    if normalized in {"alpha_vantage", "openbb_alpha_vantage"}:
         return "earnings_availability"
     if normalized == "sec_edgar":
         return "filings_availability"
@@ -174,14 +188,14 @@ class RuntimeMarketDataProvider:
             provider
             for provider in self.providers
             if callable(getattr(provider, "fetch_history", None))
-            and _provider_name(provider) not in {"alpha_vantage", "sec_edgar"}
+            and _provider_name(provider) not in {"alpha_vantage", "openbb_alpha_vantage", "sec_edgar"}
         ]
         self.price_provider_names = {_provider_name(provider) for provider in self.price_providers}
         self.targeted_price_repair_providers = [
             provider
             for provider in self.providers
             if callable(getattr(provider, "fetch_history", None))
-            and _provider_name(provider) == "alpha_vantage"
+            and _provider_name(provider) in {"alpha_vantage", "openbb_alpha_vantage"}
             and bool(getattr(provider, "supports_targeted_price_repair", False))
         ]
         self.targeted_price_repair_provider_names = {
@@ -211,6 +225,13 @@ class RuntimeMarketDataProvider:
             if str(provider_name).strip()
         }
 
+    def _copy_auxiliary_provider_state(self, clone: "RuntimeMarketDataProvider") -> "RuntimeMarketDataProvider":
+        clone.universe_history_providers = list(self.universe_history_providers)
+        for attr_name in ("bond_fixed_income_provider", "current_universe_constituent_checker"):
+            if hasattr(self, attr_name):
+                setattr(clone, attr_name, getattr(self, attr_name))
+        return clone
+
     def scoped_copy(
         self,
         *,
@@ -229,8 +250,7 @@ class RuntimeMarketDataProvider:
                     else bool(allow_targeted_price_repair)
                 ),
             )
-            clone.universe_history_providers = list(self.universe_history_providers)
-            return clone
+            return self._copy_auxiliary_provider_state(clone)
         filtered = [
             provider
             for provider in self.providers
@@ -246,8 +266,7 @@ class RuntimeMarketDataProvider:
                 else bool(allow_targeted_price_repair)
             ),
         )
-        clone.universe_history_providers = list(self.universe_history_providers)
-        return clone
+        return self._copy_auxiliary_provider_state(clone)
 
     def resolve_identity(self, symbol: str) -> dict[str, Any] | None:
         for provider in self.identity_providers:
@@ -704,7 +723,8 @@ class RuntimeMarketDataProvider:
                 provider_name=provider_name,
                 kind=(
                     "targeted_price_repair_availability"
-                    if self.allow_targeted_price_repair and provider_name in self.targeted_price_repair_provider_names
+                    if self.allow_targeted_price_repair
+                    and provider_name in (self.targeted_price_repair_provider_names | {"openbb_alpha_vantage"})
                     else _missing_provider_kind(provider_name)
                 ),
                 status="unavailable",
@@ -722,7 +742,7 @@ class RuntimeMarketDataProvider:
                     _missing_provider_kind(provider_name) == "history_availability"
                     or (
                         self.allow_targeted_price_repair
-                        and provider_name in self.targeted_price_repair_provider_names
+                        and provider_name in (self.targeted_price_repair_provider_names | {"openbb_alpha_vantage"})
                     )
                 )
             ]
@@ -733,7 +753,7 @@ class RuntimeMarketDataProvider:
                     _missing_provider_kind(provider_name) == "history_availability"
                     or (
                         self.allow_targeted_price_repair
-                        and provider_name in self.targeted_price_repair_provider_names
+                        and provider_name in (self.targeted_price_repair_provider_names | {"openbb_alpha_vantage"})
                     )
                 )
             }
@@ -810,7 +830,7 @@ def build_runtime_market_data_provider() -> RuntimeMarketDataProvider:
     providers: list[Any] = [YahooMarketDataProvider()]
     missing_providers: list[str] = []
     missing_provider_reasons: dict[str, str] = {}
-    for provider_label, module_name, class_names in (
+    provider_specs = [
         ("yfinance", "yfinance_provider", ("YfinanceMarketDataProvider",)),
         ("tiingo", "tiingo_provider", ("TiingoMarketDataProvider", "TiingoProvider")),
         ("tiingo_symbology", "tiingo_symbology_provider", ("TiingoSymbologyProvider",)),
@@ -821,7 +841,18 @@ def build_runtime_market_data_provider() -> RuntimeMarketDataProvider:
         ("fmp", "fmp_identity_provider", ("FmpIdentityRepairProvider", "FmpMarketDataProvider", "FmpPriceRepairProvider")),
         ("alpha_vantage", "alpha_vantage_provider", ("AlphaVantageProvider", "AlphaVantageEventProvider", "AlphaVantageMarketDataProvider")),
         ("sec_edgar", "sec_edgar_provider", ("SecEdgarEventProvider", "SecEdgarProvider")),
-    ):
+    ]
+    openbb_enabled = _openbb_provider_enabled()
+    if openbb_enabled:
+        provider_specs.extend(
+            [
+                ("openbb_yfinance", "openbb_provider", ("OpenBBYfinanceMarketDataProvider",)),
+                ("openbb_tiingo", "openbb_provider", ("OpenBBTiingoMarketDataProvider",)),
+                ("openbb_fmp", "openbb_provider", ("OpenBBFmpMarketDataProvider",)),
+                ("openbb_alpha_vantage", "openbb_provider", ("OpenBBAlphaVantagePriceRepairProvider",)),
+            ]
+        )
+    for provider_label, module_name, class_names in provider_specs:
         provider, reason = _load_provider(module_name, class_names)
         if provider is not None:
             providers.append(provider)
@@ -829,11 +860,29 @@ def build_runtime_market_data_provider() -> RuntimeMarketDataProvider:
             missing_providers.append(provider_label)
             if reason:
                 missing_provider_reasons[provider_label] = str(reason)
-    return RuntimeMarketDataProvider(
+    runtime_provider = RuntimeMarketDataProvider(
         providers,
         missing_providers=missing_providers,
         missing_provider_reasons=missing_provider_reasons,
     )
+    if openbb_enabled:
+        try:
+            openbb_module = importlib.import_module(".openbb_provider", package=__package__)
+            runtime_provider.bond_fixed_income_provider = openbb_module.OpenBBBondFixedIncomeProvider()
+            runtime_provider.current_universe_constituent_checker = (
+                openbb_module.OpenBBCurrentUniverseConstituentCheckProvider()
+            )
+        except Exception as exc:
+            runtime_provider.missing_providers.extend(["openbb_bond_fixed_income", "openbb_index_constituents"])
+            missing_provider_reasons["openbb_bond_fixed_income"] = f"provider_init_failed: {exc}"
+            missing_provider_reasons["openbb_index_constituents"] = f"provider_init_failed: {exc}"
+            runtime_provider.missing_provider_reasons.update(
+                {
+                    "openbb_bond_fixed_income": missing_provider_reasons["openbb_bond_fixed_income"],
+                    "openbb_index_constituents": missing_provider_reasons["openbb_index_constituents"],
+                }
+            )
+    return runtime_provider
 
 
 def _default_db_path() -> Path:
@@ -1073,9 +1122,17 @@ def create_app(
     def create_asset_leg(payload: AssetLegCreateRequest):
         return invoke(service.create_asset_leg, payload)
 
+    @app.patch('/asset-legs/{leg_id}', response_model=AssetLegResponseModel)
+    def update_asset_leg(leg_id: str, payload: AssetLegUpdateRequest):
+        return invoke(service.update_asset_leg, leg_id, payload)
+
     @app.post('/cash-legs', response_model=CashLegResponseModel)
     def create_cash_leg(payload: CashLegCreateRequest):
         return invoke(service.create_cash_leg, payload)
+
+    @app.patch('/cash-legs/{leg_id}', response_model=CashLegResponseModel)
+    def update_cash_leg(leg_id: str, payload: CashLegUpdateRequest):
+        return invoke(service.update_cash_leg, leg_id, payload)
 
     @app.get('/compositions', response_model=list[CompositionListItemModel])
     def list_compositions():

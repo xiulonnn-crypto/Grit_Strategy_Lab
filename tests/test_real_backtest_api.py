@@ -11,10 +11,13 @@ from grit_backtest_platform.backtest_metrics import (
 
 from tests.api_test_support import (
     assert_ok,
+    buy_and_hold_confirmation_payload,
     create_buy_and_hold_strategy,
     create_grid_strategy,
     create_momentum_strategy,
     create_test_client,
+    draft_strategy_session,
+    materialize_session,
     preview_backtest,
     refresh_snapshots,
     submit_backtest,
@@ -680,11 +683,107 @@ def test_buy_and_hold_dca_preview_submit_generates_recurring_monthly_trades(tmp_
     assert detail["trades_count"] > 10
     assert trades["items"][0]["trade_date"] == START_DATE
     assert all(item["reason"] == "buy_and_hold:monthly" for item in trades["items"])
+    assert all(float(item["quantity"]) > 0 for item in trades["items"][:5])
+    assert all(float(item["net_amount"]) > 0 for item in trades["items"][:5])
     total_return_card = next(card for card in detail["analysis"]["kpi_cards"] if card["key"] == "total_return")
     sharpe_card = next(card for card in detail["analysis"]["kpi_cards"] if card["key"] == "sharpe")
     assert total_return_card["primary_text"] != total_return_card["compare_text"].split(" | ")[0].replace("基准: ", "")
     assert "| 差值: -0.0%" not in total_return_card["compare_text"]
     assert "| 差值: +0.00" not in sharpe_card["compare_text"]
+
+
+def test_dynamic_buy_and_hold_preview_and_detail_use_valuation_snapshot_context(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base_confirmation = buy_and_hold_confirmation_payload(revision=1)
+    session = draft_strategy_session(
+        client,
+        strategy_type="BUY_AND_HOLD",
+        message="创建 QQQ 动态定投策略",
+        confirmation_payload={
+            **base_confirmation,
+            "parameters": {
+                **base_confirmation["parameters"],
+                "strategy_name": "QQQ 动态定投策略",
+                "strategy_description": "按 QQQ 动态定投逻辑执行。",
+                "benchmark_symbol": "QQQ",
+                "contribution_amount": 1000,
+                "investment_frequency": "monthly",
+                "contribution_anchor": "每月第一个交易日",
+                "dynamic_investment_logic": "读取QQQ滚动10年PE(TTM)百分位倍率表",
+            },
+        },
+    )
+    strategy = assert_ok(
+        materialize_session(
+            client,
+            session["session_id"],
+            idempotency_key="materialize-dynamic-buy-and-hold-warning",
+        )
+    )
+    refresh_snapshots(client)
+
+    preview = preview_backtest(client, strategy["id"], start_date=START_DATE, end_date=END_DATE)
+    submitted = submit_backtest(
+        client,
+        strategy["id"],
+        start_date=START_DATE,
+        end_date=END_DATE,
+        idempotency_key="run-dynamic-buy-and-hold-warning",
+    )
+    detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail"))
+
+    assert preview["warnings"] == []
+    assert preview["snapshot_summary"]["valuation_dataset_snapshot_id"] == "ds-index-valuations"
+    assert preview["snapshot_summary"]["valuation_dataset_status"] == "READY"
+    assert preview["snapshot_summary"]["valuation_proxy_key"] == "nasdaq100"
+    assert preview["snapshot_summary"]["valuation_latest_observation_date"]
+    assert submitted["status"] == "COMPLETED"
+    assert detail["status"] == "COMPLETED"
+    assert detail["warnings"] == []
+    assert detail["trades"]
+    assert any(float(item.get("contribution_multiplier") or 0) != 1.0 for item in detail["trades"])
+    assert all(item.get("valuation_percentile_10y") is not None for item in detail["trades"])
+    assert all(item.get("valuation_bucket") for item in detail["trades"])
+
+
+def test_buy_and_hold_legacy_trade_rows_backfill_quantity_and_notional_from_contribution_amount(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_buy_and_hold_strategy(
+        client,
+        idempotency_key="materialize-buy-and-hold-legacy-trades",
+        benchmark_symbol="QQQ",
+        contribution_amount=1000,
+        investment_frequency="monthly",
+    )["strategy"]
+    refresh_snapshots(client)
+    submitted = submit_backtest(
+        client,
+        strategy["id"],
+        start_date=START_DATE,
+        end_date=END_DATE,
+        idempotency_key="run-buy-and-hold-legacy-trades",
+    )
+    service = client.app.state.service
+    stored_row = service.storage.fetch_one(
+        "SELECT trades_json FROM backtest_runs WHERE id = ?",
+        (submitted["id"],),
+    )
+    assert stored_row is not None
+    legacy_trades = json.loads(stored_row["trades_json"])
+    for item in legacy_trades:
+        item.pop("quantity", None)
+        item.pop("net_amount", None)
+    service.storage.execute(
+        "UPDATE backtest_runs SET trades_json = ? WHERE id = ?",
+        (json.dumps(legacy_trades), submitted["id"]),
+    )
+
+    trades = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/trades?page=1&page_size=100"))
+
+    assert all(float(item["quantity"]) > 0 for item in trades["items"][:5])
+    assert all(float(item["net_amount"]) > 0 for item in trades["items"][:5])
 
 
 def test_grid_materialize_uses_session_name_description_and_benchmark(tmp_path):

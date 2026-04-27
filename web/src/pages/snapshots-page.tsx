@@ -14,7 +14,9 @@ import type {
   ApiSnapshotJob,
   ApiSnapshotOverview,
   ApiSnapshotProviderSummary,
+  ApiSnapshotRefreshRequest,
   ApiUniverseSnapshot,
+  SnapshotRefreshTarget,
 } from '../types';
 import './run-detail-page.css';
 import './snapshots-page.css';
@@ -22,6 +24,10 @@ import './snapshots-page.css';
 const DATASET_COPY: Record<string, string> = {
   公司行为数据: '1996-01-01 至今的公司事件日期（拆股 / 合股 / 股息 / 财报等）。',
   股票价格数据: '1996-01-01 至今的日线 OHLC 数据。',
+};
+
+const DATASET_COPY_BY_ID: Record<string, string> = {
+  'ds-index-valuations': 'Nasdaq-100 估值时间序列按月落地，并作为 QQQ 动态定投的执行代理。',
 };
 
 const UNIVERSE_COPY: Record<string, string> = {
@@ -42,6 +48,14 @@ const SOURCE_LABELS: Record<string, string> = {
   Fmp: 'Financial Modeling Prep',
   fmp_historical_constituent: 'FMP 历史成分',
   FmpHistoricalConstituent: 'FMP 历史成分',
+  openbb_yfinance: 'OpenBB Yahoo 行情',
+  openbb_tiingo: 'OpenBB Tiingo 行情',
+  openbb_alpha_vantage: 'OpenBB Alpha Vantage 修复',
+  openbb_fmp: 'OpenBB FMP 行情',
+  openbb_federal_reserve: 'OpenBB 美联储曲线',
+  openbb_fred: 'OpenBB FRED 曲线',
+  openbb_bond_fixed_income: 'OpenBB 固收增强',
+  openbb_index_constituents: 'OpenBB 当前成分校验',
   longbridge: 'Longbridge',
   longbridge_static_info: 'Longbridge',
   akshare_us: 'AkShare',
@@ -347,6 +361,37 @@ function getQuotaProviderNotes(item: SnapshotItem): string[] {
 function getDatasetDetailLines(item: ApiDatasetSnapshot): string[] {
   const metadata = getSnapshotMetadata(item);
   const lines: string[] = [];
+  if (item.id === 'ds-index-valuations') {
+    const proxyKeys = getMetadataStringList(metadata, 'proxy_keys');
+    const frequency =
+      typeof metadata.observation_frequency === 'string' ? metadata.observation_frequency.trim() : '';
+    const latestDate = typeof metadata.latest_date === 'string' ? metadata.latest_date.trim() : '';
+    const latestPe =
+      typeof metadata.latest_pe_ttm === 'number' && Number.isFinite(metadata.latest_pe_ttm)
+        ? metadata.latest_pe_ttm
+        : null;
+    const latestPercentile =
+      typeof metadata.latest_percentile_10y === 'number' && Number.isFinite(metadata.latest_percentile_10y)
+        ? metadata.latest_percentile_10y
+        : null;
+
+    if (proxyKeys.length) {
+      lines.push(`Proxy keys: ${proxyKeys.join(', ')}`);
+    }
+    if (frequency) {
+      lines.push(`Observation frequency: ${frequency}`);
+    }
+    if (latestDate || latestPe !== null || latestPercentile !== null) {
+      const diagnostics = [
+        latestDate ? `Latest observation: ${latestDate}` : null,
+        latestPe !== null ? `Latest P/E (TTM): ${latestPe.toFixed(2)}` : null,
+        latestPercentile !== null ? `10Y percentile: ${latestPercentile.toFixed(1)}` : null,
+      ].filter((value): value is string => Boolean(value));
+      if (diagnostics.length) {
+        lines.push(diagnostics.join(' | '));
+      }
+    }
+  }
   if (item.id === 'ds-corporate-actions') {
     const formalEvents = getMetadataCount(metadata, 'formal_event_symbol_count');
     const noEvents = getMetadataCount(metadata, 'complete_no_events_symbol_count');
@@ -548,9 +593,18 @@ function getLastRefreshSummaryLabel(
   const refreshStats = getRefreshStats(overview);
   const corporateStat = getDatasetRefreshStat(refreshStats, 'ds-corporate-actions');
   const priceStat = getDatasetRefreshStat(refreshStats, 'ds-price');
+  const valuationStat = getDatasetRefreshStat(refreshStats, 'ds-index-valuations');
   const sp500Stat = getUniverseRefreshStat(refreshStats, 'un-sp500');
   const ndx100Stat = getUniverseRefreshStat(refreshStats, 'un-ndx100');
   const parts = [
+    (() => {
+      const proxies = getPositiveCount(valuationStat?.updated_symbol_count);
+      const rows = getPositiveCount(valuationStat?.updated_row_count);
+      if (!proxies && !rows) return null;
+      if (proxies && rows) return `估值快照 ${proxies.toLocaleString('zh-HK')} 个代理 / ${rows.toLocaleString('zh-HK')} 条观测`;
+      if (proxies) return `估值快照 ${proxies.toLocaleString('zh-HK')} 个代理`;
+      return `估值快照 ${rows?.toLocaleString('zh-HK')} 条观测`;
+    })(),
     (() => {
       const symbols = getPositiveCount(corporateStat?.updated_symbol_count);
       const rows = getPositiveCount(corporateStat?.updated_row_count);
@@ -692,7 +746,7 @@ function DatasetRow({ item }: { item: ApiDatasetSnapshot }): JSX.Element {
       <div className="snapshots-row-card__top">
         <div className="snapshots-row-card__title">
           <strong>{item.name}</strong>
-          <p>{DATASET_COPY[item.name] ?? '刷新后会显示这个数据集的覆盖范围与来源。'}</p>
+          <p>{DATASET_COPY_BY_ID[item.id] ?? DATASET_COPY[item.name] ?? '刷新后会显示这个数据集的覆盖范围与来源。'}</p>
         </div>
         {shouldRenderStatusChip(item.status, blocked) ? (
           <span className={getStatusChipClassName(item.status, blocked)}>
@@ -850,6 +904,18 @@ export function SnapshotsPage(): JSX.Element {
   async function handleRefresh(): Promise<void> {
     try {
       const requestedAt = new Date().toISOString();
+      const isBondRefresh = activeTab === 'bond';
+      const refreshTargets: SnapshotRefreshTarget[] = isBondRefresh
+        ? ['bond']
+        : ['price', 'corporate', 'valuations', 'universes'];
+      const refreshReason = isBondRefresh
+        ? 'manual-refresh-bond'
+        : 'manual-refresh-latest-and-repair';
+      const refreshPayload: ApiSnapshotRefreshRequest = {
+        mode: 'repair',
+        targets: refreshTargets,
+        reason: refreshReason,
+      };
       setRefreshing(true);
       setOptimisticRefreshing(true);
       setError(null);
@@ -865,9 +931,7 @@ export function SnapshotsPage(): JSX.Element {
           completed_at: null,
           request: {
             ...(current.latest_job?.request ?? {}),
-            mode: 'repair',
-            targets: ['price', 'corporate', 'universes'],
-            reason: 'manual-refresh-latest-and-repair',
+            ...refreshPayload,
           },
           summary: {
             current_stage: 'preflight',
@@ -883,11 +947,7 @@ export function SnapshotsPage(): JSX.Element {
           allowed_actions: [],
         };
       });
-      const response = await api.refreshSnapshots({
-        mode: 'repair',
-        targets: ['price', 'corporate', 'universes'],
-        reason: 'manual-refresh-latest-and-repair',
-      });
+      const response = await api.refreshSnapshots(refreshPayload);
       setOverview(normalizeSnapshotOverview(response));
       setOptimisticRefreshing(false);
     } catch (caught) {
@@ -912,10 +972,11 @@ export function SnapshotsPage(): JSX.Element {
       setCreatingBondAssetLegId(instrument.id);
       setBondCreateError(null);
       setBondCreateMessage(null);
+      const assetType = String(instrument.asset_type ?? '').toUpperCase();
       const created = await api.createAssetLeg({
         name: instrument.label,
         symbol: instrument.symbol ?? instrument.isin ?? instrument.cusip ?? instrument.id,
-        asset_kind: 'BOND',
+        asset_kind: assetType === 'BOND_ETF' ? 'BOND_ETF' : 'BOND',
         source_snapshot_id: snapshotRef,
         source_provider: instrument.source || 'bond_fixed_income',
         freeze_mode: 'snapshot_locked',
@@ -951,13 +1012,11 @@ export function SnapshotsPage(): JSX.Element {
   const isEquityTab = activeTab === 'equity';
   const usesApprovedSnapshotsHeader = isBondTab || isEquityTab;
   const pageTitle = '数据快照';
-  const headerEyebrow = isEquityTab ? 'DATA SNAPSHOTS' : '数据快照';
+  const headerEyebrow = 'DATA SNAPSHOTS';
   const headerBody =
-    isBondTab
-      ? '按股票/指数与债券/固定收益分栏治理数据来源；债券页签聚焦入库资格、曲线监控与影子字段审计。'
-      : isEquityTab
-        ? '把全局视角、局部待补和原始快照清单收进一个治理入口里。研究员进入页面第一眼先看数据计分板，再决定今天是继续建仓，还是先修补数据缺口。'
-        : getOverviewMessage(overview);
+    usesApprovedSnapshotsHeader
+      ? '统一管理股票、指数与固定收益数据快照的覆盖率、刷新状态和入库资格，让研究员在建仓、回测和组合配置前先确认市场数据证据链。'
+      : getOverviewMessage(overview);
   const refreshButtonLabel = isRefreshRunning
     ? '刷新中...'
     : isBondTab
@@ -968,11 +1027,7 @@ export function SnapshotsPage(): JSX.Element {
     <div className={`stack snapshots-page snapshots-page--${activeTab}`}>
       <section
         className={`page-heading hero-card snapshots-header-card ${
-          isBondTab
-            ? 'snapshots-header-card--bond'
-            : isEquityTab
-              ? 'snapshots-header-card--equity'
-              : ''
+          usesApprovedSnapshotsHeader ? 'snapshots-header-card--standard' : ''
         }`}
       >
         <div className="snapshots-header">
@@ -1016,14 +1071,6 @@ export function SnapshotsPage(): JSX.Element {
                 债券/固定收益
               </button>
             </div>
-            {isBondTab ? (
-              <div className="snapshots-chip-row">
-                <span className="status-chip status-chip--success">资产腿合法来源</span>
-                <span className="status-chip status-chip--soft">日终刷新 (EOD)</span>
-                <span className="status-chip status-chip--soft">到期收益率（YTM） / 久期 / 凸性</span>
-                <span className="status-chip status-chip--soft">净价 / 全价 / 应计</span>
-              </div>
-            ) : null}
           </div>
           {usesApprovedSnapshotsHeader ? null : (
             <div className="snapshots-header__actions">

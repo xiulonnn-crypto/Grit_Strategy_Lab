@@ -40,6 +40,19 @@ const SAVE_CONFIRM_DIALOG = {
   strategyLabel: '策略',
 } as const;
 
+function collectRunWarnings(detail: ApiBacktestRunDetail | null): string[] {
+  if (!detail) {
+    return [];
+  }
+  return Array.from(
+    new Set(
+      (detail.warnings ?? [])
+        .map((warning) => String(warning ?? '').trim())
+        .filter((warning) => warning.length > 0),
+    ),
+  );
+}
+
 function isBacktestRunInProgress(status: string | null | undefined): boolean {
   const normalized = String(status ?? '').toUpperCase();
   return normalized === 'QUEUED' || normalized === 'RUNNING';
@@ -85,6 +98,9 @@ type NormalizedTradeRow = {
   pnlAmount?: number;
   pnlContribution?: number;
   segment?: string;
+  contributionMultiplier?: number;
+  valuationPercentile10y?: number;
+  valuationBucket?: string;
 };
 
 type TradeIdentityShape = Partial<ApiBacktestTradeItem> & {
@@ -177,7 +193,11 @@ function buildTradePnlAmountMap(detail: ApiBacktestRunDetail): Map<string, numbe
     const tradedNotional =
       typeof weightDelta === 'number' && typeof estimatedEquity === 'number' ? estimatedEquity * weightDelta : undefined;
     const quantity =
-      typeof tradedNotional === 'number' && typeof price === 'number' && price > 0 ? tradedNotional / price : undefined;
+      typeof trade.quantity === 'number'
+        ? trade.quantity
+        : typeof tradedNotional === 'number' && typeof price === 'number' && price > 0
+          ? tradedNotional / price
+          : undefined;
     const symbol = String(trade.symbol ?? '').toUpperCase();
     const existing = openPositions.get(symbol) ?? { quantity: 0, avgPrice: 0 };
 
@@ -247,6 +267,11 @@ function normalizeTradeRow(
       typeof trade.pnl_amount === 'number' ? trade.pnl_amount : pnlAmountLedger.get(buildTradeIdentity(trade)),
     pnlContribution: typeof trade.pnl_contribution === 'number' ? trade.pnl_contribution : undefined,
     segment: trade.segment,
+    contributionMultiplier:
+      typeof trade.contribution_multiplier === 'number' ? trade.contribution_multiplier : undefined,
+    valuationPercentile10y:
+      typeof trade.valuation_percentile_10y === 'number' ? trade.valuation_percentile_10y : undefined,
+    valuationBucket: typeof trade.valuation_bucket === 'string' ? trade.valuation_bucket : undefined,
   };
 }
 
@@ -294,6 +319,31 @@ function formatTradeSegment(value: string | undefined): string {
     return '测试集';
   }
   return value && value.length ? value : '—';
+}
+
+function formatContributionMultiplier(value: number | undefined): string | null {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return null;
+  }
+  return `${value.toFixed(2)}x`;
+}
+
+function formatValuationPercentile(value: number | undefined): string | null {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return null;
+  }
+  return `${value.toFixed(1)}`;
+}
+
+function formatTradeValuationContext(trade: NormalizedTradeRow): string | null {
+  const multiplierLabel = formatContributionMultiplier(trade.contributionMultiplier);
+  const percentileLabel = formatValuationPercentile(trade.valuationPercentile10y);
+  const parts = [
+    multiplierLabel ? `Multiplier ${multiplierLabel}` : null,
+    percentileLabel ? `10Y percentile ${percentileLabel}` : null,
+    trade.valuationBucket ? `Bucket ${trade.valuationBucket}` : null,
+  ].filter((value): value is string => Boolean(value));
+  return parts.length ? parts.join(' | ') : null;
 }
 
 export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
@@ -629,6 +679,7 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
   const canRerun = Boolean(resolvedDetail.strategy_id) && !runInProgress;
   const canOptimize = Boolean(resolvedDetail.strategy_id) && !runInProgress;
   const detailContextReady = hasRunDetailContext(resolvedDetail);
+  const runWarnings = collectRunWarnings(resolvedDetail);
   const heroSubtitle =
     actionNotice ??
     (runInProgress
@@ -690,7 +741,14 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
                       <td>{formatTradeMoney(trade.netAmount)}</td>
                       <td>{formatSignedTradeMoney(trade.pnlAmount)}</td>
                       <td>{formatTradePercent(trade.pnlContribution)}</td>
-                      <td>{formatTradeSegment(trade.segment)}</td>
+                      <td>
+                        <div className="run-detail-trade-segment-cell">
+                          <span>{formatTradeSegment(trade.segment)}</span>
+                          {formatTradeValuationContext(trade) ? (
+                            <small>{formatTradeValuationContext(trade)}</small>
+                          ) : null}
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -796,6 +854,16 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
           </button>
         </div>
       </section>
+
+      {runWarnings.length ? (
+        <div className="run-detail-warning-stack" aria-live="polite" role="status">
+          {runWarnings.map((warning) => (
+            <p className="run-detail-warning-banner" key={warning}>
+              {warning}
+            </p>
+          ))}
+        </div>
+      ) : null}
 
       <RunDetailOverviewSection
         activeTab={activeTab}

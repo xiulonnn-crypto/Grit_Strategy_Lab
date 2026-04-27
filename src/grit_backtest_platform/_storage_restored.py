@@ -335,6 +335,22 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS composition_audit_events (
+        id TEXT PRIMARY KEY,
+        composition_id TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1,
+        action TEXT NOT NULL,
+        actor TEXT NOT NULL DEFAULT 'system',
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        hash_before TEXT,
+        hash_after TEXT,
+        source_ref_id TEXT,
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(composition_id) REFERENCES compositions(id) ON DELETE CASCADE
+    )
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_composition_legs_composition_id_ordering
     ON composition_legs(composition_id, ordering)
     """,
@@ -345,6 +361,10 @@ SCHEMA_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_composition_source_freezes_composition_leg
     ON composition_source_freezes(composition_id, leg_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_audit_events_composition
+    ON composition_audit_events(composition_id, occurred_at, id)
     """,
     """
     CREATE TABLE IF NOT EXISTS symbol_identity_cache (
@@ -422,6 +442,12 @@ MIGRATION_COLUMNS = {
 }
 
 
+PRE_MIGRATION_INDEX_STATEMENTS = [
+    "DROP INDEX IF EXISTS idx_asset_leg_definitions_active_unique",
+    "DROP INDEX IF EXISTS idx_cash_leg_definitions_active_unique",
+]
+
+
 POST_MIGRATION_INDEX_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_asset_leg_definitions_active_updated
@@ -432,8 +458,8 @@ POST_MIGRATION_INDEX_STATEMENTS = [
     ON asset_leg_definitions(source_snapshot_id, source_provider, status)
     """,
     """
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_leg_definitions_active_unique
-    ON asset_leg_definitions(symbol, asset_kind, source_snapshot_id, freeze_mode)
+    CREATE INDEX IF NOT EXISTS idx_asset_leg_definitions_active_semantic_lookup
+    ON asset_leg_definitions(symbol, asset_kind, source_snapshot_id, freeze_mode, status)
     WHERE deleted_at IS NULL
     """,
     """
@@ -449,8 +475,8 @@ POST_MIGRATION_INDEX_STATEMENTS = [
     ON cash_leg_definitions(yield_source, status)
     """,
     """
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_cash_leg_definitions_active_unique
-    ON cash_leg_definitions(name, cash_rule_kind, COALESCE(yield_source, ''), freeze_mode)
+    CREATE INDEX IF NOT EXISTS idx_cash_leg_definitions_active_semantic_lookup
+    ON cash_leg_definitions(cash_rule_kind, COALESCE(yield_source, ''), freeze_mode, status)
     WHERE deleted_at IS NULL
     """,
     """
@@ -490,6 +516,10 @@ POST_MIGRATION_INDEX_STATEMENTS = [
     CREATE INDEX IF NOT EXISTS idx_composition_source_freezes_active
     ON composition_source_freezes(status, deleted_at, created_at)
     """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_audit_events_action
+    ON composition_audit_events(action, occurred_at)
+    """,
 ]
 
 
@@ -520,6 +550,8 @@ def initialize_storage_schema(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
     for table_name, columns in MIGRATION_COLUMNS.items():
         _ensure_table_columns(conn, table_name, columns)
+    for statement in PRE_MIGRATION_INDEX_STATEMENTS:
+        conn.execute(statement)
     for statement in POST_MIGRATION_INDEX_STATEMENTS:
         conn.execute(statement)
     conn.commit()

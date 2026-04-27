@@ -10,6 +10,7 @@ from .storage import dumps, iso_now, loads
 
 DATASET_PRICE_SNAPSHOT_ID = "ds-price"
 DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID = "ds-corporate-actions"
+DATASET_INDEX_VALUATIONS_SNAPSHOT_ID = "ds-index-valuations"
 DEFAULT_UNIVERSE_ANCHOR_SCHEDULE = "01-01,07-01"
 
 
@@ -21,12 +22,27 @@ class CoverageSummary:
     trade_days: int
 
 
+@dataclass(slots=True)
+class IndexValuationCoverageSummary:
+    index_key: str
+    start_date: str | None
+    end_date: str | None
+    observation_count: int
+    latest_date: str | None = None
+    latest_pe_ttm: float | None = None
+    latest_percentile_10y: float | None = None
+
+
 def _row_factory(cursor: sqlite3.Cursor, row: tuple[Any, ...]) -> dict[str, Any]:
     return {description[0]: row[index] for index, description in enumerate(cursor.description)}
 
 
 def _normalize_symbol(value: str) -> str:
     return value.strip().upper()
+
+
+def _normalize_index_key(value: str) -> str:
+    return value.strip().lower()
 
 
 def _ensure_json_dict(value: Any) -> dict[str, Any]:
@@ -170,6 +186,42 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS dataset_index_valuations (
+            dataset_snapshot_id TEXT NOT NULL,
+            index_key TEXT NOT NULL,
+            date TEXT NOT NULL,
+            proxy_symbol TEXT NOT NULL DEFAULT '',
+            pe_ttm REAL,
+            pe_ttm_percentile_10y REAL,
+            source TEXT NOT NULL DEFAULT '',
+            fallback_source TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(dataset_snapshot_id, index_key, date),
+            FOREIGN KEY(dataset_snapshot_id) REFERENCES dataset_snapshots(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dataset_index_valuation_coverage (
+            dataset_snapshot_id TEXT NOT NULL,
+            index_key TEXT NOT NULL,
+            start_date TEXT,
+            end_date TEXT,
+            observation_count INTEGER NOT NULL DEFAULT 0,
+            latest_date TEXT,
+            latest_pe_ttm REAL,
+            latest_percentile_10y REAL,
+            source TEXT NOT NULL DEFAULT '',
+            fallback_source TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(dataset_snapshot_id, index_key),
+            FOREIGN KEY(dataset_snapshot_id) REFERENCES dataset_snapshots(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS bond_fixed_income_snapshots (
             id TEXT PRIMARY KEY,
             instrument_id TEXT NOT NULL,
@@ -252,6 +304,9 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_dataset_actions_symbol_date ON dataset_corporate_actions(symbol, event_date)"
     )
     conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dataset_index_valuations_key_date ON dataset_index_valuations(index_key, date)"
+    )
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_bond_fixed_income_instrument_date ON bond_fixed_income_snapshots(instrument_id, snapshot_date)"
     )
     conn.execute(
@@ -292,6 +347,9 @@ class MarketDataRepository:
 
     def _normalize_symbol(self, value: str) -> str:
         return _normalize_symbol(value)
+
+    def _normalize_index_key(self, value: str) -> str:
+        return _normalize_index_key(value)
 
     def _merge_action_entry(self, existing: dict[str, Any], incoming: Mapping[str, Any]) -> dict[str, Any]:
         merged = dict(existing)
@@ -460,6 +518,8 @@ class MarketDataRepository:
         price_bars: Iterable[Mapping[str, Any]] = (),
         corporate_actions: Iterable[Mapping[str, Any]] = (),
         symbol_coverage: Iterable[CoverageSummary | Mapping[str, Any]] = (),
+        index_valuations: Iterable[Mapping[str, Any]] = (),
+        index_valuation_coverage: Iterable[IndexValuationCoverageSummary | Mapping[str, Any]] = (),
     ) -> str:
         dataset_snapshot_id = str(snapshot["id"])
         with self.connect() as conn:
@@ -467,6 +527,8 @@ class MarketDataRepository:
             conn.execute("DELETE FROM dataset_price_bars WHERE dataset_snapshot_id = ?", (dataset_snapshot_id,))
             conn.execute("DELETE FROM dataset_corporate_actions WHERE dataset_snapshot_id = ?", (dataset_snapshot_id,))
             conn.execute("DELETE FROM dataset_symbol_coverage WHERE dataset_snapshot_id = ?", (dataset_snapshot_id,))
+            conn.execute("DELETE FROM dataset_index_valuations WHERE dataset_snapshot_id = ?", (dataset_snapshot_id,))
+            conn.execute("DELETE FROM dataset_index_valuation_coverage WHERE dataset_snapshot_id = ?", (dataset_snapshot_id,))
 
             price_rows = [
                 (
@@ -555,6 +617,69 @@ class MarketDataRepository:
                     """,
                     coverage_rows,
                 )
+
+            valuation_rows = [
+                (
+                    dataset_snapshot_id,
+                    self._normalize_index_key(str(item.get("index_key") or "")),
+                    str(item.get("date") or ""),
+                    self._normalize_symbol(str(item.get("proxy_symbol") or "")),
+                    item.get("pe_ttm"),
+                    item.get("pe_ttm_percentile_10y"),
+                    str(item.get("source") or snapshot.get("source") or ""),
+                    item.get("fallback_source", snapshot.get("fallback_source")),
+                    dumps(_ensure_json_dict(item.get("metadata"))),
+                )
+                for item in index_valuations
+                if str(item.get("index_key") or "").strip() and str(item.get("date") or "").strip()
+            ]
+            if valuation_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO dataset_index_valuations (
+                        dataset_snapshot_id, index_key, date, proxy_symbol, pe_ttm,
+                        pe_ttm_percentile_10y, source, fallback_source, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    valuation_rows,
+                )
+
+            valuation_coverage_rows = []
+            for coverage in index_valuation_coverage:
+                item = coverage if isinstance(coverage, Mapping) else {
+                    "index_key": coverage.index_key,
+                    "start_date": coverage.start_date,
+                    "end_date": coverage.end_date,
+                    "observation_count": coverage.observation_count,
+                    "latest_date": coverage.latest_date,
+                    "latest_pe_ttm": coverage.latest_pe_ttm,
+                    "latest_percentile_10y": coverage.latest_percentile_10y,
+                }
+                valuation_coverage_rows.append(
+                    (
+                        dataset_snapshot_id,
+                        self._normalize_index_key(str(item.get("index_key") or "")),
+                        item.get("start_date"),
+                        item.get("end_date"),
+                        int(item.get("observation_count") or 0),
+                        item.get("latest_date"),
+                        item.get("latest_pe_ttm"),
+                        item.get("latest_percentile_10y"),
+                        str(item.get("source") or snapshot.get("source") or ""),
+                        item.get("fallback_source", snapshot.get("fallback_source")),
+                        dumps(_ensure_json_dict(item.get("metadata"))),
+                    )
+                )
+            if valuation_coverage_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO dataset_index_valuation_coverage (
+                        dataset_snapshot_id, index_key, start_date, end_date, observation_count,
+                        latest_date, latest_pe_ttm, latest_percentile_10y, source, fallback_source, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    valuation_coverage_rows,
+                )
         return dataset_snapshot_id
 
     def merge_dataset_snapshot(
@@ -564,6 +689,8 @@ class MarketDataRepository:
         price_bars: Iterable[Mapping[str, Any]] = (),
         corporate_actions: Iterable[Mapping[str, Any]] = (),
         symbol_coverage: Iterable[CoverageSummary | Mapping[str, Any]] = (),
+        index_valuations: Iterable[Mapping[str, Any]] = (),
+        index_valuation_coverage: Iterable[IndexValuationCoverageSummary | Mapping[str, Any]] = (),
     ) -> str:
         dataset_snapshot_id = str(snapshot["id"])
         with self.connect() as conn:
@@ -655,6 +782,69 @@ class MarketDataRepository:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     coverage_rows,
+                )
+
+            valuation_rows = [
+                (
+                    dataset_snapshot_id,
+                    self._normalize_index_key(str(item.get("index_key") or "")),
+                    str(item.get("date") or ""),
+                    self._normalize_symbol(str(item.get("proxy_symbol") or "")),
+                    item.get("pe_ttm"),
+                    item.get("pe_ttm_percentile_10y"),
+                    str(item.get("source") or snapshot.get("source") or ""),
+                    item.get("fallback_source", snapshot.get("fallback_source")),
+                    dumps(_ensure_json_dict(item.get("metadata"))),
+                )
+                for item in index_valuations
+                if str(item.get("index_key") or "").strip() and str(item.get("date") or "").strip()
+            ]
+            if valuation_rows:
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO dataset_index_valuations (
+                        dataset_snapshot_id, index_key, date, proxy_symbol, pe_ttm,
+                        pe_ttm_percentile_10y, source, fallback_source, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    valuation_rows,
+                )
+
+            valuation_coverage_rows = []
+            for coverage in index_valuation_coverage:
+                item = coverage if isinstance(coverage, Mapping) else {
+                    "index_key": coverage.index_key,
+                    "start_date": coverage.start_date,
+                    "end_date": coverage.end_date,
+                    "observation_count": coverage.observation_count,
+                    "latest_date": coverage.latest_date,
+                    "latest_pe_ttm": coverage.latest_pe_ttm,
+                    "latest_percentile_10y": coverage.latest_percentile_10y,
+                }
+                valuation_coverage_rows.append(
+                    (
+                        dataset_snapshot_id,
+                        self._normalize_index_key(str(item.get("index_key") or "")),
+                        item.get("start_date"),
+                        item.get("end_date"),
+                        int(item.get("observation_count") or 0),
+                        item.get("latest_date"),
+                        item.get("latest_pe_ttm"),
+                        item.get("latest_percentile_10y"),
+                        str(item.get("source") or snapshot.get("source") or ""),
+                        item.get("fallback_source", snapshot.get("fallback_source")),
+                        dumps(_ensure_json_dict(item.get("metadata"))),
+                    )
+                )
+            if valuation_coverage_rows:
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO dataset_index_valuation_coverage (
+                        dataset_snapshot_id, index_key, start_date, end_date, observation_count,
+                        latest_date, latest_pe_ttm, latest_percentile_10y, source, fallback_source, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    valuation_coverage_rows,
                 )
         return dataset_snapshot_id
 
@@ -762,10 +952,26 @@ class MarketDataRepository:
                 "SELECT * FROM dataset_symbol_coverage WHERE dataset_snapshot_id = ? ORDER BY symbol",
                 (dataset_snapshot_id,),
             ).fetchall()
+            valuation_rows = conn.execute(
+                "SELECT * FROM dataset_index_valuations WHERE dataset_snapshot_id = ? ORDER BY index_key, date",
+                (dataset_snapshot_id,),
+            ).fetchall()
+            valuation_coverage_rows = conn.execute(
+                """
+                SELECT * FROM dataset_index_valuation_coverage
+                WHERE dataset_snapshot_id = ?
+                ORDER BY index_key
+                """,
+                (dataset_snapshot_id,),
+            ).fetchall()
         return {
             "price_bars": [self._decode_json_row(dict(row), "metadata_json") for row in price_rows],
             "corporate_actions": [self._decode_json_row(dict(row), "payload_json") for row in action_rows],
             "symbol_coverage": [self._decode_json_row(dict(row), "metadata_json") for row in coverage_rows],
+            "index_valuations": [self._decode_json_row(dict(row), "metadata_json") for row in valuation_rows],
+            "index_valuation_coverage": [
+                self._decode_json_row(dict(row), "metadata_json") for row in valuation_coverage_rows
+            ],
         }
 
     def load_dataset_symbol_coverage(self, dataset_snapshot_id: str) -> list[dict[str, Any]]:
@@ -790,46 +996,143 @@ class MarketDataRepository:
                 "SELECT COUNT(*) AS count FROM dataset_symbol_coverage WHERE dataset_snapshot_id = ?",
                 (dataset_snapshot_id,),
             ).fetchone()
+            valuation_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM dataset_index_valuations WHERE dataset_snapshot_id = ?",
+                (dataset_snapshot_id,),
+            ).fetchone()
+            valuation_coverage_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM dataset_index_valuation_coverage WHERE dataset_snapshot_id = ?",
+                (dataset_snapshot_id,),
+            ).fetchone()
         return {
             "price_bars": int((price_row or {}).get("count") or 0),
             "corporate_actions": int((action_row or {}).get("count") or 0),
             "symbol_coverage": int((coverage_row or {}).get("count") or 0),
+            "index_valuations": int((valuation_row or {}).get("count") or 0),
+            "index_valuation_coverage": int((valuation_coverage_row or {}).get("count") or 0),
         }
 
-    def summarize_dataset_symbols(self, dataset_snapshot_id: str) -> list[dict[str, Any]]:
+    def summarize_dataset_symbols(
+        self,
+        dataset_snapshot_id: str,
+        symbols: Iterable[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        normalized_symbols = [self._normalize_symbol(str(symbol)) for symbol in (symbols or []) if str(symbol).strip()]
         with self.connect() as conn:
+            symbol_filter = ""
+            params: list[Any] = [dataset_snapshot_id]
+            if normalized_symbols:
+                placeholders = ",".join("?" for _ in normalized_symbols)
+                symbol_filter = f" AND symbol IN ({placeholders})"
+                params.extend(normalized_symbols)
             price_rows = conn.execute(
-                """
+                f"""
                 SELECT
                     symbol,
                     MIN(date) AS start_date,
                     MAX(date) AS end_date,
                     COUNT(*) AS trade_days
                 FROM dataset_price_bars
-                WHERE dataset_snapshot_id = ?
+                WHERE dataset_snapshot_id = ?{symbol_filter}
                 GROUP BY symbol
                 ORDER BY symbol
                 """,
-                (dataset_snapshot_id,),
+                params,
             ).fetchall()
             if price_rows:
                 return [dict(row) for row in price_rows]
 
+            params = [dataset_snapshot_id]
+            if normalized_symbols:
+                params.extend(normalized_symbols)
             action_rows = conn.execute(
-                """
+                f"""
                 SELECT
                     symbol,
                     MIN(event_date) AS start_date,
                     MAX(event_date) AS end_date,
                     COUNT(*) AS trade_days
                 FROM dataset_corporate_actions
-                WHERE dataset_snapshot_id = ?
+                WHERE dataset_snapshot_id = ?{symbol_filter}
                 GROUP BY symbol
                 ORDER BY symbol
                 """,
-                (dataset_snapshot_id,),
+                params,
             ).fetchall()
         return [dict(row) for row in action_rows]
+
+    def load_dataset_index_valuations(
+        self,
+        dataset_snapshot_id: str,
+        index_keys: Iterable[str] | None = None,
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        sql = """
+            SELECT *
+            FROM dataset_index_valuations
+            WHERE dataset_snapshot_id = ?
+        """
+        params: list[Any] = [dataset_snapshot_id]
+        normalized_keys = [self._normalize_index_key(key) for key in (index_keys or []) if str(key).strip()]
+        if normalized_keys:
+            sql += f" AND index_key IN ({','.join('?' for _ in normalized_keys)})"
+            params.extend(normalized_keys)
+        if start_date:
+            sql += " AND date >= ?"
+            params.append(start_date)
+        if end_date:
+            sql += " AND date <= ?"
+            params.append(end_date)
+        sql += " ORDER BY index_key ASC, date ASC"
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            decoded = self._decode_json_row(dict(row), "metadata_json")
+            index_key = str(decoded.get("index_key") or "")
+            grouped.setdefault(index_key, []).append(decoded)
+        return grouped
+
+    def load_dataset_index_valuation_coverage(
+        self,
+        dataset_snapshot_id: str,
+        index_keys: Iterable[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        sql = """
+            SELECT *
+            FROM dataset_index_valuation_coverage
+            WHERE dataset_snapshot_id = ?
+        """
+        params: list[Any] = [dataset_snapshot_id]
+        normalized_keys = [self._normalize_index_key(key) for key in (index_keys or []) if str(key).strip()]
+        if normalized_keys:
+            sql += f" AND index_key IN ({','.join('?' for _ in normalized_keys)})"
+            params.extend(normalized_keys)
+        sql += " ORDER BY index_key ASC"
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [self._decode_json_row(dict(row), "metadata_json") for row in rows]
+
+    def summarize_dataset_index_valuations(self, dataset_snapshot_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    index_key,
+                    MIN(date) AS start_date,
+                    MAX(date) AS end_date,
+                    COUNT(*) AS observation_count,
+                    MAX(date) AS latest_date
+                FROM dataset_index_valuations
+                WHERE dataset_snapshot_id = ?
+                GROUP BY index_key
+                ORDER BY index_key
+                """,
+                (dataset_snapshot_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def load_dataset_price_bars(
         self,
@@ -919,6 +1222,8 @@ class MarketDataRepository:
             "dataset_price_bars",
             "dataset_corporate_actions",
             "dataset_symbol_coverage",
+            "dataset_index_valuations",
+            "dataset_index_valuation_coverage",
             "bond_fixed_income_snapshots",
             "universe_membership_snapshots",
         ]

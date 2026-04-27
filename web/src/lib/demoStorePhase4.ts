@@ -1,6 +1,7 @@
 import {
   ApiAssetLeg,
   type ApiAssetLegCreatePayload,
+  type ApiAssetLegUpdatePayload,
   ApiError,
   type ApiBacktestRunDeleteResult,
   type ApiBacktestRunDetail,
@@ -8,8 +9,10 @@ import {
   type ApiBacktestRunTradeAudit,
   type ApiBacktestRunTradePage,
   type ApiBacktestSubmissionPreview,
+  type ApiBondSnapshotEligibleInstrument,
   ApiCashLeg,
   type ApiCashLegCreatePayload,
+  type ApiCashLegUpdatePayload,
   type ApiConfirmationUpdateRequest,
   type ApiCompositionCreatePayload,
   type ApiCompositionDetail,
@@ -95,6 +98,9 @@ function strategyLegInventoryId(strategyId: string, parameterVersionId: string):
 function referenceCountForLeg(sourceRefId: string): number {
   return state.compositions.reduce(
     (count, composition) =>
+      String(composition.status ?? '').toUpperCase() === 'ARCHIVED'
+        ? count
+        :
       count +
       composition.normalized_legs.filter((leg) => leg.source_ref_id === sourceRefId).length,
     0,
@@ -109,6 +115,26 @@ function referenceSummary(count: number): string {
     return '1 个组合引用';
   }
   return `${count} 个组合引用`;
+}
+
+function readRunMetric(metrics: Record<string, number> | undefined, keys: string[]): number | null {
+  if (!metrics) {
+    return null;
+  }
+  for (const key of keys) {
+    const value = metrics[key];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function normalizeMetricPercentPoint(value: number | null): number {
+  if (value === null) {
+    return 0;
+  }
+  return Math.abs(value) <= 1 ? value * 100 : value;
 }
 
 function buildStrategyLegRows(): ApiLegInventoryRow[] {
@@ -151,7 +177,18 @@ function buildStrategyLegRows(): ApiLegInventoryRow[] {
         config: {
           strategy_id: strategy.id,
           parameter_version_id: versionId,
+          strategy_type: strategy.strategy_type,
           rebalance_frequency: strategy.rebalance_frequency,
+          latest_run_id: latestRun?.id ?? null,
+          run_id: latestRun?.id ?? null,
+          metrics: latestRun?.metrics ?? null,
+          annualized_return_pct: normalizeMetricPercentPoint(
+            readRunMetric(latestRun?.metrics, ['annualized_return', 'cagr', 'oos_annualized_return', 'total_return']),
+          ),
+          max_drawdown_pct: Math.abs(
+            normalizeMetricPercentPoint(readRunMetric(latestRun?.metrics, ['max_drawdown_pct', 'max_drawdown', 'oos_max_drawdown'])),
+          ),
+          oos_sharpe: readRunMetric(latestRun?.metrics, ['oos_sharpe', 'out_of_sample_sharpe', 'sharpe']) ?? 0,
         },
       } satisfies ApiLegInventoryRow;
     }),
@@ -159,7 +196,9 @@ function buildStrategyLegRows(): ApiLegInventoryRow[] {
 }
 
 function buildAssetLegRows(): ApiLegInventoryRow[] {
-  return state.assetLegs.map((leg) => {
+  return state.assetLegs
+    .filter((leg) => String(leg.status ?? '').toUpperCase() !== 'ARCHIVED')
+    .map((leg) => {
     const referenceCount = referenceCountForLeg(leg.id);
     return {
       id: leg.id,
@@ -186,11 +225,13 @@ function buildAssetLegRows(): ApiLegInventoryRow[] {
         summary: leg.summary ?? {},
       },
     } satisfies ApiLegInventoryRow;
-  });
+    });
 }
 
 function buildCashLegRows(): ApiLegInventoryRow[] {
-  return state.cashLegs.map((leg) => {
+  return state.cashLegs
+    .filter((leg) => String(leg.status ?? '').toUpperCase() !== 'ARCHIVED')
+    .map((leg) => {
     const referenceCount = referenceCountForLeg(leg.id);
     return {
       id: leg.id,
@@ -216,7 +257,7 @@ function buildCashLegRows(): ApiLegInventoryRow[] {
         summary: leg.summary ?? {},
       },
     } satisfies ApiLegInventoryRow;
-  });
+    });
 }
 
 function buildLegInventory(): ApiLegInventory {
@@ -500,13 +541,198 @@ function buildBondFixedIncomeOverview(
     'overall_status' | 'last_refreshed_at' | 'latest_job' | 'blocking_code' | 'blocking_target'
   >,
 ) {
+  const updatedAt = base.last_refreshed_at ?? null;
+  const bondRows: ApiBondSnapshotEligibleInstrument[] = [
+    {
+      id: 'bond-ust-cmt-2y',
+      label: 'UST CMT 2Y',
+      instrument_type: 'BOND',
+      asset_type: 'UST',
+      tenor_label: '2Y',
+      audit_profile: 'UST_CMT_2Y',
+      source: 'bond_fixed_income',
+      status: 'WATCH',
+      symbol: 'UST2Y',
+      currency: 'USD',
+      snapshot_date: '2026-04-23',
+      ytm_pct: 1.0,
+      duration: 1.9,
+      effective_duration: 1.9,
+      snapshot_ref: 'bond-ust-cmt-2y',
+      refresh_status: 'READY',
+      missing_fields: [],
+      inferred_fields: {},
+      field_status: { ytm_pct: 'READY' },
+      audit_alerts: ['UST_CMT_2Y/10Y spread 365 bps is outside the -100..300 bps audit band.'],
+      audit_notes: ['UST_CMT_2Y/10Y spread 365 bps; audit band -100..300 bps.'],
+      updated_at: updatedAt,
+    },
+    {
+      id: 'bond-ust-cmt-10y',
+      label: 'UST CMT 10Y',
+      instrument_type: 'BOND',
+      asset_type: 'UST',
+      tenor_label: '10Y',
+      audit_profile: 'UST_CMT_10Y',
+      source: 'bond_fixed_income',
+      status: 'WATCH',
+      symbol: 'UST10Y',
+      currency: 'USD',
+      snapshot_date: '2026-04-23',
+      ytm_pct: 4.65,
+      duration: 8.3,
+      effective_duration: 8.3,
+      snapshot_ref: 'bond-ust-cmt-10y',
+      refresh_status: 'READY',
+      missing_fields: [],
+      inferred_fields: {},
+      field_status: { ytm_pct: 'READY' },
+      audit_alerts: ['UST_CMT_2Y/10Y spread 365 bps is outside the -100..300 bps audit band.'],
+      audit_notes: ['UST_CMT_2Y/10Y spread 365 bps; audit band -100..300 bps.'],
+      updated_at: updatedAt,
+    },
+    {
+      id: 'bond-ust-cmt-30y',
+      label: 'UST CMT 30Y',
+      instrument_type: 'BOND',
+      asset_type: 'UST',
+      tenor_label: '30Y',
+      audit_profile: 'UST_CMT_30Y',
+      source: 'bond_fixed_income',
+      status: 'READY',
+      symbol: 'UST30Y',
+      currency: 'USD',
+      snapshot_date: '2026-04-23',
+      ytm_pct: 4.8,
+      duration: 17.8,
+      effective_duration: 17.8,
+      snapshot_ref: 'bond-ust-cmt-30y',
+      refresh_status: 'READY',
+      missing_fields: [],
+      inferred_fields: {},
+      field_status: { ytm_pct: 'READY' },
+      audit_alerts: [],
+      audit_notes: [],
+      updated_at: updatedAt,
+    },
+    {
+      id: 'bond-ust-bill-13w',
+      label: 'UST T-Bill 13W',
+      instrument_type: 'T_BILL',
+      asset_type: 'T_BILL',
+      tenor_label: '13W',
+      audit_profile: 'UST_BILL_3M',
+      source: 'bond_fixed_income',
+      status: 'READY',
+      symbol: 'TBILL13W',
+      currency: 'USD',
+      snapshot_date: '2026-04-23',
+      maturity_date: '2026-07-23',
+      clean_price: 98.75,
+      net_price: 98.75,
+      dirty_price: 98.75,
+      full_price: 98.75,
+      accrued_interest: null,
+      discount_rate_pct: 5.18,
+      ytm_pct: 5.21,
+      duration: 0.24,
+      effective_duration: 0.24,
+      snapshot_ref: 'bond-ust-bill-13w',
+      refresh_status: 'READY',
+      missing_fields: ['accrued_interest'],
+      inferred_fields: {},
+      field_status: { accrued_interest: 'WAIVED', discount_rate_pct: 'READY' },
+      audit_alerts: [],
+      audit_notes: ['Accrued interest is waived for the UST_BILL_3M audit profile.'],
+      updated_at: updatedAt,
+    },
+    {
+      id: 'bond-tips-5y',
+      label: 'TIPS 5Y',
+      instrument_type: 'TIPS',
+      asset_type: 'TIPS',
+      tenor_label: '5Y',
+      audit_profile: 'TIPS_5Y',
+      source: 'bond_fixed_income',
+      status: 'READY',
+      symbol: 'TIPS5Y',
+      currency: 'USD',
+      snapshot_date: '2026-04-23',
+      ytm_pct: 3.94,
+      real_yield_pct: 1.82,
+      inflation_factor: 1.0312,
+      breakeven_inflation_bps: 212,
+      duration: 4.7,
+      effective_duration: 4.7,
+      snapshot_ref: 'bond-tips-5y',
+      refresh_status: 'READY',
+      missing_fields: [],
+      inferred_fields: {},
+      field_status: { real_yield_pct: 'READY', breakeven_inflation_bps: 'READY' },
+      audit_alerts: [],
+      audit_notes: [],
+      updated_at: updatedAt,
+    },
+    {
+      id: 'bond-tips-10y',
+      label: 'TIPS 10Y',
+      instrument_type: 'TIPS',
+      asset_type: 'TIPS',
+      tenor_label: '10Y',
+      audit_profile: 'TIPS_10Y',
+      source: 'bond_fixed_income',
+      status: 'READY',
+      symbol: 'TIPS10Y',
+      currency: 'USD',
+      snapshot_date: '2026-04-23',
+      ytm_pct: 4.05,
+      real_yield_pct: 2.03,
+      inflation_factor: 1.0425,
+      breakeven_inflation_bps: 262,
+      duration: 7.9,
+      effective_duration: 7.9,
+      snapshot_ref: 'bond-tips-10y',
+      refresh_status: 'READY',
+      missing_fields: [],
+      inferred_fields: {},
+      field_status: { real_yield_pct: 'READY', breakeven_inflation_bps: 'READY' },
+      audit_alerts: [],
+      audit_notes: [],
+      updated_at: updatedAt,
+    },
+    {
+      id: 'bond-lqd-watch',
+      label: 'LQD Investment Grade ETF',
+      instrument_type: 'ETF',
+      asset_type: 'BOND_ETF',
+      tenor_label: 'ETF',
+      audit_profile: 'LQD',
+      source: 'bond_fixed_income',
+      status: 'WATCH',
+      symbol: 'LQD',
+      currency: 'USD',
+      snapshot_date: '2026-04-23',
+      sec_yield_30d_pct: 4.73,
+      credit_quality: 'A-',
+      tracking_error_bps: null,
+      tracking_status: 'WATCH',
+      snapshot_ref: 'bond-lqd-watch',
+      refresh_status: 'READY',
+      missing_fields: ['tracking_error_bps'],
+      inferred_fields: {},
+      field_status: { tracking_error_bps: 'MISSING' },
+      audit_alerts: ['Official tracking_error_bps is required for BOND_ETF readiness.'],
+      audit_notes: ['Official tracking-error evidence pending.'],
+      updated_at: updatedAt,
+    },
+  ];
   return {
     global_pulse: {
       status: base.overall_status === 'READY' ? 'READY' : 'PARTIAL',
       headline: '债券快照与影子字段已纳入统一快照治理视图。',
       updated_at: base.last_refreshed_at ?? null,
       cards: [
-        { id: 'health', label: '就绪比例', status: 'READY', value: '3/4', detail: 'Ready / Partial / Blocked 已拆分显示' },
+        { id: 'health', label: '就绪比例', status: 'WATCH', value: '4/7', detail: 'READY / WATCH 已拆分显示' },
         { id: 'coverage', label: '影子字段覆盖率', status: 'READY', value: '94%', detail: 'Dirty Price / Accrued / Duration / YTM' },
         { id: 'source', label: '来源健康度', status: 'READY', value: 'FMP / Polygon', detail: '主来源链路可用' },
       ],
@@ -552,56 +778,28 @@ function buildBondFixedIncomeOverview(
       { id: 'bond-ust-10y', label: 'Bond-UST10Y', owner: 'FMP', status: 'READY', cadence_label: 'EOD', evidence: '影子字段齐全' },
       { id: 'bond-ig-aa', label: 'Bond-IG-AA', owner: 'Polygon', status: 'PARTIAL', cadence_label: 'EOD', evidence: 'Accrued 缺失，可算法推演' },
     ],
-    raw_registry: [
-      { id: 'registry-ust10y', label: 'UST10Y 日终快照', status: 'READY', source: 'FMP', snapshot_ref: 'bond-ust-10y', updated_at: base.last_refreshed_at ?? null, notes: ['可镜像生成资产腿'] },
-      { id: 'registry-tips10y', label: '10Y TIPS 日终快照', status: 'READY', source: 'Polygon', snapshot_ref: 'bond-tips-10y', updated_at: base.last_refreshed_at ?? null, notes: ['Real Yield 已就绪'] },
-      { id: 'registry-ig-aa', label: 'IG AA Bucket', status: 'PARTIAL', source: 'Polygon', snapshot_ref: 'bond-ig-aa', updated_at: base.last_refreshed_at ?? null, notes: ['可批量修复应计利息'] },
-    ],
+    raw_registry: bondRows.map((row) => ({
+      id: `registry-${row.id}`,
+      label: row.label,
+      status: row.status,
+      source: row.source,
+      snapshot_ref: row.snapshot_ref,
+      updated_at: row.updated_at,
+      notes: row.audit_notes ?? [],
+    })),
     eligible_sources: [
       {
-        id: 'bond-source-fmp',
-        label: 'FMP Treasury EOD',
-        source: 'FMP',
-        status: 'READY',
+        id: 'bond-source-runtime',
+        label: 'Runtime bond fixed-income snapshots',
+        source: 'bond_fixed_income',
+        status: 'WATCH',
         access_tier: 'runtime',
-        instrument_types: ['BOND', 'TIPS'],
-        coverage_notes: ['clean/full price', 'accrued interest', 'YTM', 'duration', 'convexity'],
-        updated_at: base.last_refreshed_at ?? null,
+        instrument_types: ['BOND', 'T_BILL', 'TIPS', 'ETF'],
+        coverage_notes: ['7 runtime bond rows', 'LQD remains WATCH until official tracking_error_bps lands'],
+        updated_at: updatedAt,
       },
     ],
-    eligible_instruments: [
-      {
-        id: 'bond-ust-10y',
-        label: 'UST10Y 日终快照',
-        instrument_type: 'BOND',
-        source: 'FMP',
-        status: 'READY',
-        symbol: 'UST10Y',
-        currency: 'USD',
-        snapshot_date: '2026-04-23',
-        clean_price: 99.72,
-        net_price: 99.72,
-        dirty_price: 101.18,
-        full_price: 101.18,
-        accrued_interest: 1.46,
-        ytm_pct: 4.2,
-        duration: 8.4,
-        convexity: 0.76,
-        snapshot_ref: 'bond-ust-10y',
-        refresh_status: 'READY',
-        missing_fields: [],
-        inferred_fields: {},
-        field_status: {
-          clean_price: 'actual',
-          full_price: 'actual',
-          accrued_interest: 'actual',
-          ytm_pct: 'actual',
-          duration: 'actual',
-          convexity: 'actual',
-        },
-        updated_at: base.last_refreshed_at ?? null,
-      },
-    ],
+    eligible_instruments: bondRows,
     scheduler: {
       status: 'READY',
       cadence_label: '日终刷新',
@@ -936,7 +1134,7 @@ function buildSnapshotOverview(
       completed_at: refreshedAt,
       request: {
         mode,
-        targets: ['price', 'corporate', 'universes'],
+        targets: ['price', 'corporate', 'valuations', 'universes'],
       },
       summary: {
         dataset_snapshot_count: 2,
@@ -1326,6 +1524,42 @@ export const demoApi: DemoApi = {
     state.assetLegs.unshift(created);
     return clone(created);
   },
+  async updateAssetLeg(id: string, payload: ApiAssetLegUpdatePayload): Promise<ApiAssetLeg> {
+    const existing = state.assetLegs.find((leg) => leg.id === id);
+    if (!existing) {
+      throw new ApiError({ status: 404, code: 'not_found', message: `asset leg not found: ${id}` });
+    }
+    if ('status' in payload && payload.status === 'ARCHIVED') {
+      const archived: ApiAssetLeg = {
+        ...existing,
+        status: 'ARCHIVED',
+        updated_at: nowIso(),
+      };
+      state.assetLegs = state.assetLegs.filter((leg) => leg.id !== id);
+      return clone(archived);
+    }
+    const editablePayload = payload as ApiAssetLegCreatePayload;
+    const updated: ApiAssetLeg = {
+      ...existing,
+      name: editablePayload.name,
+      symbol: editablePayload.symbol.toUpperCase(),
+      asset_kind: editablePayload.asset_kind,
+      source_snapshot_id: editablePayload.source_snapshot_id,
+      source_provider: editablePayload.source_provider ?? null,
+      freeze_mode: editablePayload.freeze_mode,
+      notes: editablePayload.notes ?? null,
+      summary: clone(editablePayload.summary ?? {}),
+      eligibility_summary: {
+        ...existing.eligibility_summary,
+        snapshot_ref: editablePayload.source_snapshot_id,
+        freeze_mode: editablePayload.freeze_mode,
+      },
+      attribute_tags: ['asset', editablePayload.asset_kind.toLowerCase()],
+      updated_at: nowIso(),
+    };
+    Object.assign(existing, updated);
+    return clone(existing);
+  },
   async createCashLeg(payload: ApiCashLegCreatePayload): Promise<ApiCashLeg> {
     const now = nowIso();
     const created: ApiCashLeg = {
@@ -1346,9 +1580,41 @@ export const demoApi: DemoApi = {
     state.cashLegs.unshift(created);
     return clone(created);
   },
+  async updateCashLeg(id: string, payload: ApiCashLegUpdatePayload): Promise<ApiCashLeg> {
+    const existing = state.cashLegs.find((leg) => leg.id === id);
+    if (!existing) {
+      throw new ApiError({ status: 404, code: 'not_found', message: `cash leg not found: ${id}` });
+    }
+    if ('status' in payload && payload.status === 'ARCHIVED') {
+      const archived: ApiCashLeg = {
+        ...existing,
+        status: 'ARCHIVED',
+        updated_at: nowIso(),
+      };
+      state.cashLegs = state.cashLegs.filter((leg) => leg.id !== id);
+      return clone(archived);
+    }
+    const editablePayload = payload as ApiCashLegCreatePayload;
+    const updated: ApiCashLeg = {
+      ...existing,
+      name: editablePayload.name,
+      cash_rule_kind: editablePayload.cash_rule_kind,
+      buffer_bps: editablePayload.buffer_bps ?? 0,
+      yield_source: editablePayload.yield_source ?? null,
+      freeze_mode: editablePayload.freeze_mode,
+      notes: editablePayload.notes ?? null,
+      summary: clone(editablePayload.summary ?? {}),
+      attribute_tags: ['cash', editablePayload.cash_rule_kind.toLowerCase()],
+      updated_at: nowIso(),
+    };
+    Object.assign(existing, updated);
+    return clone(existing);
+  },
   async listCompositions(): Promise<ApiCompositionListItem[]> {
     return clone(
-      state.compositions.map((composition) => ({
+      state.compositions
+        .filter((composition) => String(composition.status ?? '').toUpperCase() !== 'ARCHIVED')
+        .map((composition) => ({
         id: composition.id,
         name: composition.name,
         status: composition.status,
@@ -1360,6 +1626,7 @@ export const demoApi: DemoApi = {
           composition.benchmark_definition?.symbol ??
           null,
         annualized_return: Number(composition.kpis.find((item) => item.key === 'annualized_return')?.value ?? 0),
+        sharpe: Number(composition.kpis.find((item) => item.key === 'sharpe')?.value ?? 0),
         max_drawdown: Number(composition.kpis.find((item) => item.key === 'max_drawdown')?.value ?? 0),
         updated_at: composition.updated_at,
         latest_activity_label: composition.latest_activity_label,

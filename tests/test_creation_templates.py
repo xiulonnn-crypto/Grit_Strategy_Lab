@@ -115,10 +115,60 @@ def test_build_confirmation_keeps_buy_and_hold_type_and_extracts_dca_fields():
     assert top_level['universe_name'] == 'QQQ'
     assert top_level['rebalance_frequency'] == 'never'
     assert parameter_values['strategy_name'] == 'QQQ 月度定投策略'
-    assert parameter_values['strategy_description'] == '围绕QQQ执行月度定投，每期买入1000USD，按每期首个交易日执行。'
+    assert parameter_values['strategy_description'] == '围绕QQQ执行月度定投，每期买入1000USD，按每月第一个交易日执行。'
     assert parameter_values['benchmark_symbol'] == 'QQQ'
     assert parameter_values['contribution_amount'] == 1000
     assert parameter_values['investment_frequency'] == 'monthly'
+    assert pending_keys == set()
+
+
+def test_build_confirmation_extracts_dynamic_dca_logic_from_prompt():
+    payload = build_confirmation(
+        _messages(
+            'QQQ动态定投策略 每月固定第一个交易日买入QQQ1000USD*倍率 '
+            '读取QQQ 的滚动10年PE (TTM) '
+            '极度高估 ( > 90% )： 倍率 0.5x '
+            '温和高估 ( 70% - 90% )： 倍率 0.8x '
+            '合理区间 ( 30% - 70% )： 倍率 1.0x (基准) '
+            '低估区间 ( 10% - 30% )： 倍率 1.5x '
+            '极度低估 ( < 10% )： 倍率 2.0x'
+        ),
+        forced_type='BUY_AND_HOLD',
+    )
+
+    top_level = payload['top_level']
+    parameter_values = {
+        item['key']: item.get('value')
+        for item in payload['confirmation_fields']['parameters']
+    }
+    pending_keys = {item['key'] for item in payload['pending_inputs']}
+
+    assert top_level['strategy_type'] == 'BUY_AND_HOLD'
+    assert top_level['universe_name'] == 'QQQ'
+    assert top_level['rebalance_frequency'] == 'never'
+    assert parameter_values['strategy_name'] == 'QQQ 动态定投策略'
+    assert parameter_values['strategy_description'] == (
+        '围绕QQQ执行月度定投，每期基准买入1000USD，按每月第一个交易日执行，'
+        '读取QQQ滚动10年PE(TTM)百分位：极度高估>90%乘0.5x；温和高估70%-90%乘0.8x；'
+        '合理区间30%-70%乘1.0x；低估区间10%-30%乘1.5x；极度低估<10%乘2.0x。'
+    )
+    assert parameter_values['benchmark_symbol'] == 'QQQ'
+    assert parameter_values['contribution_amount'] == 1000
+    assert parameter_values['investment_frequency'] == 'monthly'
+    assert parameter_values['contribution_anchor'] == '每月第一个交易日'
+    assert parameter_values['dynamic_investment_logic'] == (
+        '读取QQQ滚动10年PE(TTM)百分位：极度高估>90%乘0.5x；温和高估70%-90%乘0.8x；'
+        '合理区间30%-70%乘1.0x；低估区间10%-30%乘1.5x；极度低估<10%乘2.0x'
+    )
+    assert parameter_values['dynamic_investment_proxy_key'] == 'nasdaq100'
+    assert parameter_values['dynamic_investment_metric_key'] == 'pe_ttm_percentile_10y'
+    assert parameter_values['dynamic_investment_rules'] == [
+        {'min_percentile': 90.0, 'max_percentile': 100.0, 'multiplier': 0.5},
+        {'min_percentile': 70.0, 'max_percentile': 90.0, 'multiplier': 0.8},
+        {'min_percentile': 30.0, 'max_percentile': 70.0, 'multiplier': 1.0},
+        {'min_percentile': 10.0, 'max_percentile': 30.0, 'multiplier': 1.5},
+        {'min_percentile': 0.0, 'max_percentile': 10.0, 'multiplier': 2.0},
+    ]
     assert pending_keys == set()
 
 

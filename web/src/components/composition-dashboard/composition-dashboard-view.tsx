@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { formatDateTime, formatRatio } from '../../lib/format';
 import {
   formatComposePercent,
@@ -30,6 +31,13 @@ type DashboardTask = {
   actionPath: string;
 };
 
+type DashboardObservationCard = {
+  detail: string;
+  label: string;
+  tone?: 'positive' | 'negative';
+  value: string;
+};
+
 function getStatusTone(status: string): 'accent' | 'warning' | 'danger' | 'success' {
   const normalized = String(status || '').toUpperCase();
   if (normalized === 'ACTIVE') {
@@ -51,12 +59,12 @@ function getStatusLabel(status: string): string {
 function getStatusWriteAction(status: string): { label: string; nextStatus: ApiCompositionStatus } {
   const normalized = String(status || '').toUpperCase();
   if (normalized === 'ACTIVE') {
-    return { label: 'Archive', nextStatus: 'ARCHIVED' };
+    return { label: '归档', nextStatus: 'ARCHIVED' };
   }
   if (normalized === 'ARCHIVED') {
-    return { label: 'Restore draft', nextStatus: 'DRAFT' };
+    return { label: '恢复草稿', nextStatus: 'DRAFT' };
   }
-  return { label: 'Activate', nextStatus: 'ACTIVE' };
+  return { label: '激活', nextStatus: 'ACTIVE' };
 }
 
 function getRebalanceLabel(value?: string | null): string {
@@ -140,10 +148,57 @@ function estimateThirtyDayReturn(composition: ApiCompositionListItem): number {
   return normalizePercentLike(composition.annualized_return) / 3.5;
 }
 
-function estimateVolatility(composition: ApiCompositionListItem): number {
-  const annualizedReturn = Math.abs(normalizePercentLike(composition.annualized_return));
-  const drawdown = Math.abs(normalizePercentLike(composition.max_drawdown));
-  return Math.max(0.036, Math.min(0.092, annualizedReturn * 0.62 + drawdown * 0.02));
+function getCompositionSharpe(composition: ApiCompositionListItem): number {
+  const value = Number(composition.sharpe);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function average(values: number[]): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  return values.reduce((total, value) => total + value, 0) / values.length;
+}
+
+function buildObservationCards(compositions: ApiCompositionListItem[]): DashboardObservationCard[] {
+  if (compositions.length === 0) {
+    return [];
+  }
+  const topReturn = [...compositions].sort(
+    (left, right) => normalizePercentLike(right.annualized_return) - normalizePercentLike(left.annualized_return),
+  )[0];
+  const largestDrawdown = [...compositions].sort(
+    (left, right) => Math.abs(normalizePercentLike(right.max_drawdown)) - Math.abs(normalizePercentLike(left.max_drawdown)),
+  )[0];
+  const averageScore = average(compositions.map((composition) => composition.composition_score));
+
+  return [
+    {
+      detail: formatCompositionName({
+        benchmarkLabel: topReturn.benchmark_label,
+        name: topReturn.name,
+        status: topReturn.status,
+      }),
+      label: '最高年化',
+      tone: normalizePercentLike(topReturn.annualized_return) >= 0 ? 'positive' : 'negative',
+      value: formatComposePercent(topReturn.annualized_return),
+    },
+    {
+      detail: formatCompositionName({
+        benchmarkLabel: largestDrawdown.benchmark_label,
+        name: largestDrawdown.name,
+        status: largestDrawdown.status,
+      }),
+      label: '最大回撤',
+      tone: 'negative',
+      value: formatComposePercent(largestDrawdown.max_drawdown, { forceNegative: true }),
+    },
+    {
+      detail: `${compositions.length} 个运行时组合`,
+      label: '平均评分',
+      value: formatRatio(averageScore),
+    },
+  ];
 }
 
 function getCompositionNextStep(composition: ApiCompositionListItem): string {
@@ -185,23 +240,53 @@ export function CompositionDashboardView({
   writeError = null,
   onStatusChange,
 }: CompositionDashboardViewProps): JSX.Element {
-  const activeCompositions = compositions.filter(
+  const [pendingArchiveId, setPendingArchiveId] = useState<string | null>(null);
+  const liveCompositions = compositions.filter(
+    (composition) => String(composition.status || '').toUpperCase() !== 'ARCHIVED',
+  );
+  const activeCompositions = liveCompositions.filter(
     (composition) => String(composition.status || '').toUpperCase() === 'ACTIVE',
   );
-  const archivedCompositions = compositions.filter(
+  const archivedCompositions = liveCompositions.filter(
     (composition) => String(composition.status || '').toUpperCase() === 'ARCHIVED',
   );
-  const pendingTasks = buildTaskList(compositions);
-  const coveragePercent = compositions.length
-    ? Math.round((activeCompositions.length / compositions.length) * 100)
+  const pendingTasks = buildTaskList(liveCompositions);
+  const coveragePercent = liveCompositions.length
+    ? Math.round((activeCompositions.length / liveCompositions.length) * 100)
     : 0;
-  const updatedCompositions = [...compositions].sort((left, right) =>
+  const updatedCompositions = [...liveCompositions].sort((left, right) =>
     (right.updated_at || '').localeCompare(left.updated_at || ''),
   );
-  const dominantCadenceLabel = getDominantCadenceLabel(compositions);
+  const dominantCadenceLabel = getDominantCadenceLabel(liveCompositions);
   const visibleCompositions = updatedCompositions.slice(0, 2);
   const visibleTasks = pendingTasks.slice(0, 3);
   const visibleActivities = updatedCompositions.slice(0, 4);
+  const observationCards = buildObservationCards(liveCompositions);
+  const pendingArchiveComposition =
+    liveCompositions.find((composition) => composition.id === pendingArchiveId) ?? null;
+
+  function requestStatusChange(compositionId: string, status: ApiCompositionStatus): void {
+    if (status === 'ARCHIVED') {
+      setPendingArchiveId(compositionId);
+      return;
+    }
+    void onStatusChange?.(compositionId, status);
+  }
+
+  function closeArchiveDialog(): void {
+    if (pendingArchiveComposition && savingCompositionId === pendingArchiveComposition.id) {
+      return;
+    }
+    setPendingArchiveId(null);
+  }
+
+  async function confirmArchiveComposition(): Promise<void> {
+    if (!pendingArchiveComposition || !onStatusChange) {
+      return;
+    }
+    await onStatusChange(pendingArchiveComposition.id, 'ARCHIVED');
+    setPendingArchiveId(null);
+  }
 
   if (loading) {
     return (
@@ -289,7 +374,7 @@ export function CompositionDashboardView({
             <span>正式组合</span>
             <strong>{activeCompositions.length}</strong>
             <small>
-              共 {compositions.length} 个已保存组合，其中 {archivedCompositions.length}{' '}
+              共 {liveCompositions.length} 个已保存组合，其中 {archivedCompositions.length}{' '}
               个已转入归档视图。
             </small>
           </article>
@@ -306,7 +391,7 @@ export function CompositionDashboardView({
         </div>
       </section>
 
-      {compositions.length === 0 ? (
+      {liveCompositions.length === 0 ? (
         <section className="composition-dashboard-empty">
           <h2>还没有已保存组合</h2>
           <p>组合仪表板会在这里展示正式组合、待处理动作与近期维护活动。现在可以先进入工作台创建第一组组合结构。</p>
@@ -325,7 +410,7 @@ export function CompositionDashboardView({
               <div className="composition-dashboard-panel__header">
                 <div className="composition-dashboard-panel__copy">
                   <h2>我的组合</h2>
-                  <p>展示正式组合的收益表现、波动约束与维护状态，便于识别需要优先复核的组合。</p>
+                  <p>展示正式组合的收益表现、夏普质量与维护状态，便于识别需要优先复核的组合。</p>
                 </div>
                 <span className="composition-dashboard-chip composition-dashboard-chip--accent">
                   {activeCompositions.length} 个正式组合
@@ -381,8 +466,10 @@ export function CompositionDashboardView({
                           </strong>
                         </div>
                         <div className="composition-dashboard-card__metric">
-                          <span>波动</span>
-                          <strong>{formatComposePercent(estimateVolatility(composition))}</strong>
+                          <span>夏普</span>
+                          <strong className={getCompositionSharpe(composition) >= 0 ? 'is-positive' : 'is-negative'}>
+                            {formatRatio(getCompositionSharpe(composition))}
+                          </strong>
                         </div>
                         <div className="composition-dashboard-card__metric">
                           <span>最大回撤</span>
@@ -399,11 +486,11 @@ export function CompositionDashboardView({
                           className="ghost-button"
                           disabled={isSavingStatus || !onStatusChange}
                           onClick={() => {
-                            void onStatusChange?.(composition.id, statusAction.nextStatus);
+                            requestStatusChange(composition.id, statusAction.nextStatus);
                           }}
                           type="button"
                         >
-                          {isSavingStatus ? 'Saving...' : statusAction.label}
+                          {isSavingStatus ? '保存中...' : statusAction.label}
                         </button>
                         {normalizedStatus === 'DRAFT' ? (
                           <ActionButton
@@ -496,53 +583,73 @@ export function CompositionDashboardView({
                   <p>提供组合层面的轻量市场观察，用于首页快速筛查，不替代详情页分析。</p>
                 </div>
                 <span className="composition-dashboard-chip composition-dashboard-chip--accent">
-                  最近 90 日
+                  {liveCompositions.length} 个运行时组合
                 </span>
               </div>
 
-              <div className="composition-dashboard-observation__chart" aria-hidden="true">
-                <svg viewBox="0 0 620 208" preserveAspectRatio="none">
-                  <defs>
-                    <linearGradient id="composition-dashboard-fill" x1="0%" x2="0%" y1="0%" y2="100%">
-                      <stop offset="0%" stopColor="rgba(31, 135, 123, 0.18)" />
-                      <stop offset="100%" stopColor="rgba(31, 135, 123, 0)" />
-                    </linearGradient>
-                  </defs>
-                  <path
-                    d="M0 150 L88 146 L176 136 L264 120 L352 108 L440 84 L528 66 L620 46 L620 208 L0 208 Z"
-                    fill="url(#composition-dashboard-fill)"
-                  />
-                  <polyline
-                    fill="none"
-                    points="0,154 88,150 176,144 264,134 352,124 440,112 528,102 620,94"
-                    stroke="#4c78c7"
-                    strokeDasharray="8 7"
-                    strokeWidth="3"
-                  />
-                  <polyline
-                    fill="none"
-                    points="0,150 88,146 176,136 264,120 352,108 440,84 528,66 620,46"
-                    stroke="#1f877b"
-                    strokeWidth="4"
-                  />
-                </svg>
-              </div>
-
-              <div className="composition-dashboard-observation__chips">
-                <span className="composition-dashboard-chip composition-dashboard-chip--accent">
-                  正式组合收益流
-                </span>
-                <span className="composition-dashboard-chip">
-                  基准虚线
-                </span>
-                <span className="composition-dashboard-chip">
-                  ETF 腿相关性略升
-                </span>
+              <div className="composition-dashboard-observation__summary">
+                {observationCards.map((card) => (
+                  <article className="composition-dashboard-observation__summary-card" key={card.label}>
+                    <span>{card.label}</span>
+                    <strong className={card.tone === 'negative' ? 'is-negative' : card.tone === 'positive' ? 'is-positive' : undefined}>
+                      {card.value}
+                    </strong>
+                    <small>{card.detail}</small>
+                  </article>
+                ))}
               </div>
             </section>
           </div>
         </div>
       )}
+      {pendingArchiveComposition ? (
+        <div
+          aria-label="确认归档组合"
+          aria-modal="true"
+          className="modal-shell"
+          onClick={closeArchiveDialog}
+          role="dialog"
+        >
+          <div className="modal-card composition-dashboard-archive-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="composition-dashboard-archive-dialog__copy">
+              <p className="eyebrow">逻辑删除确认</p>
+              <h3>确认归档组合</h3>
+              <p>
+                归档后该组合会从组合仪表盘和后续配置入口隐藏，但底层记录仍会保留用于审计与历史追溯。
+              </p>
+            </div>
+            <dl className="composition-dashboard-archive-dialog__summary">
+              <div>
+                <dt>组合</dt>
+                <dd>
+                  {formatCompositionName({
+                    name: pendingArchiveComposition.name,
+                    benchmarkLabel: pendingArchiveComposition.benchmark_label,
+                    status: pendingArchiveComposition.status,
+                  })}
+                </dd>
+              </div>
+              <div>
+                <dt>ID</dt>
+                <dd>{pendingArchiveComposition.id}</dd>
+              </div>
+            </dl>
+            <div className="composition-dashboard-card__actions">
+              <button className="ghost-button" disabled={savingCompositionId === pendingArchiveComposition.id} onClick={closeArchiveDialog} type="button">
+                取消
+              </button>
+              <button
+                className="primary-button composition-dashboard-archive-dialog__confirm"
+                disabled={savingCompositionId === pendingArchiveComposition.id}
+                onClick={() => void confirmArchiveComposition()}
+                type="button"
+              >
+                {savingCompositionId === pendingArchiveComposition.id ? '归档中...' : '确认归档'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

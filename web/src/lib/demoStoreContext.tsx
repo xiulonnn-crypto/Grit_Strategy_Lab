@@ -234,10 +234,25 @@ function createHttpApiClient(): DemoApi {
         `/optimization-jobs/${encodeURIComponent(jobId)}/candidates`,
         withJsonBody(payload, { method: 'POST' }),
       ),
-    promoteOptimizationCandidate: (jobId, trialId, mode, idempotencyKey, comment) =>
+    promoteOptimizationCandidate: (
+      jobId,
+      trialId,
+      mode,
+      idempotencyKey,
+      comment,
+      baseParameterVersionId,
+    ) =>
       requestJson<ApiOptimizationJobDetail>(
         `/optimization-jobs/${encodeURIComponent(jobId)}/candidates/${encodeURIComponent(trialId)}/promote`,
-        withJsonBody({ idempotency_key: idempotencyKey, mode, comment }, { method: 'POST' }),
+        withJsonBody(
+          {
+            idempotency_key: idempotencyKey,
+            mode,
+            comment,
+            base_parameter_version_id: baseParameterVersionId,
+          },
+          { method: 'POST' },
+        ),
       ),
     deleteOptimizationCandidate: (jobId, trialId) =>
       requestJson<ApiOptimizationJobDetail>(
@@ -247,8 +262,12 @@ function createHttpApiClient(): DemoApi {
     getLegInventory: () => requestJson<ApiLegInventory>('/leg-inventory'),
     createAssetLeg: (payload) =>
       requestJson<ApiAssetLeg>('/asset-legs', withJsonBody(payload, { method: 'POST' })),
+    updateAssetLeg: (id, payload) =>
+      requestJson<ApiAssetLeg>(`/asset-legs/${encodeURIComponent(id)}`, withJsonBody(payload, { method: 'PATCH' })),
     createCashLeg: (payload) =>
       requestJson<ApiCashLeg>('/cash-legs', withJsonBody(payload, { method: 'POST' })),
+    updateCashLeg: (id, payload) =>
+      requestJson<ApiCashLeg>(`/cash-legs/${encodeURIComponent(id)}`, withJsonBody(payload, { method: 'PATCH' })),
     listCompositions: () => requestJson<ApiCompositionListItem[]>('/compositions'),
     getCompositionDetail: (id) =>
       requestJson<ApiCompositionDetail>(`/compositions/${encodeURIComponent(id)}`),

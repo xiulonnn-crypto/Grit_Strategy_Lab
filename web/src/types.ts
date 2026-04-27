@@ -19,8 +19,14 @@ export type OptimizationJobStatus =
   | "FAILED";
 export type PromoteMode = "set_current" | "create_copy";
 export type SnapshotRefreshMode = "incremental" | "repair" | "full";
-export type SnapshotRefreshTarget = "price" | "corporate" | "universes";
-export type ParameterValue = string | number | boolean | null;
+export type SnapshotRefreshTarget = "price" | "corporate" | "valuations" | "universes" | "bond";
+export type ParameterValue =
+  | string
+  | number
+  | boolean
+  | null
+  | Record<string, unknown>
+  | unknown[];
 export type ApiOptimizationConstraintPresetKey =
   | "balanced"
   | "defensive"
@@ -527,6 +533,9 @@ export type ApiBacktestTradeItem = {
   reason?: string;
   adjustment_factor_t1?: number;
   split_ratio_t1?: number;
+  contribution_multiplier?: number;
+  valuation_percentile_10y?: number;
+  valuation_bucket?: string;
 };
 
 export type ApiBacktestRunTradePage = {
@@ -647,14 +656,22 @@ export type ApiBacktestRunDetail = {
   chart_series?: ApiBacktestChartPoint[];
   monthly_returns?: ApiMonthlyReturn[];
   trades?: Array<{
-    trade_date: string;
+    trade_date?: string;
     symbol: string;
-    action: string;
-    price: number;
-    weight_before: number;
-    weight_after: number;
+    action?: string;
+    side?: string;
+    quantity?: number;
+    price?: number;
+    weight_before?: number;
+    weight_after?: number;
+    net_amount?: number;
+    pnl_amount?: number;
+    pnl_contribution?: number;
     reason?: string;
     segment?: string;
+    contribution_multiplier?: number;
+    valuation_percentile_10y?: number;
+    valuation_bucket?: string;
   }>;
   trade_details?: Array<{
     trade_date: string;
@@ -743,10 +760,27 @@ export type ApiDatasetSnapshotMetadata = Record<string, unknown> & {
   covered_symbol_count?: number;
   total_symbol_count?: number;
   missing_symbols?: string[];
+  benchmark_etf_coverage?: {
+    ready_count?: number;
+    total_count?: number;
+    missing_symbols?: string[];
+    symbols?: Array<{
+      symbol?: string;
+      status?: string;
+      start_date?: string | null;
+      end_date?: string | null;
+      trade_days?: number;
+    }>;
+  };
   probe_status_breakdown?: Record<string, number>;
   coverage_kind_breakdown?: Record<string, number>;
   complete_no_events_symbol_count?: number;
   formal_event_symbol_count?: number;
+  proxy_keys?: string[];
+  observation_frequency?: string;
+  latest_date?: string;
+  latest_pe_ttm?: number;
+  latest_percentile_10y?: number;
   provider_summary?: ApiSnapshotProviderSummary;
 };
 
@@ -833,6 +867,12 @@ export type ApiLegInventoryRow = {
   allowed_actions: string[];
   source_ref_id?: string | null;
   source_ref_type?: string | null;
+  source_integrity?: ApiCompositionSourceIntegrity | null;
+  freeze_hash?: string | null;
+  signature_status?: string | null;
+  drift_status?: string | null;
+  current_ref_id?: string | null;
+  alerts?: string[];
   config?: Record<string, unknown>;
 };
 
@@ -861,6 +901,12 @@ export type ApiAssetLegCreatePayload = {
   summary?: Record<string, unknown>;
 };
 
+export type ApiLegArchivePayload = {
+  status: "ARCHIVED";
+};
+
+export type ApiAssetLegUpdatePayload = ApiAssetLegCreatePayload | ApiLegArchivePayload;
+
 export type ApiAssetLeg = {
   id: string;
   name: string;
@@ -888,6 +934,8 @@ export type ApiCashLegCreatePayload = {
   notes?: string | null;
   summary?: Record<string, unknown>;
 };
+
+export type ApiCashLegUpdatePayload = ApiCashLegCreatePayload | ApiLegArchivePayload;
 
 export type ApiCashLeg = {
   id: string;
@@ -963,6 +1011,14 @@ export type ApiCompositionReturnPoint = {
   date?: string | null;
   portfolio_return_pct: number;
   cumulative_return_pct: number;
+  gross_return_pct?: number;
+  net_return_pct?: number;
+  maintenance_cost_drag_pct?: number;
+  slippage_drag_pct?: number;
+  rebalance_cost_drag_pct?: number;
+  cash_buffer_drag_pct?: number;
+  total_cost_drag_pct?: number;
+  cumulative_net_return_pct?: number;
 };
 
 export type ApiCompositionBenchmarkPoint = {
@@ -990,6 +1046,11 @@ export type ApiCompositionRiskContribution = {
   weight_pct: number;
   volatility_pct: number;
   contribution_pct: number;
+  return_contribution_pct?: number;
+  marginal_contribution_pct?: number;
+  budget_usage_pct?: number;
+  duration_contribution_years?: number | null;
+  convexity_contribution?: number | null;
 };
 
 export type ApiCompositionMaintenanceCostSummary = {
@@ -1021,6 +1082,52 @@ export type ApiCompositionScore = {
   factors: ApiCompositionScoreFactor[];
 };
 
+export type ApiCompositionReturnQualitySummary = {
+  status: string;
+  alignment_window_start?: string | null;
+  alignment_window_end?: string | null;
+  aligned_points: number;
+  missing_points: number;
+  coverage_pct: number;
+  fallback_used: boolean;
+  notes: string[];
+};
+
+export type ApiCompositionRebalanceEvent = {
+  label: string;
+  date?: string | null;
+  index: number;
+  turnover_pct: number;
+  estimated_cost_bps: number;
+  cost_drag_pct: number;
+  cash_buffer_pct: number;
+  weight_before: Record<string, number>;
+  weight_after: Record<string, number>;
+  notes: string[];
+};
+
+export type ApiCompositionSourceIntegrity = {
+  leg_id: string;
+  display_name: string;
+  source_ref_id?: string | null;
+  freeze_hash?: string | null;
+  signature_status: string;
+  drift_status: string;
+  current_ref_id?: string | null;
+  checked_at?: string | null;
+  alerts: string[];
+};
+
+export type ApiCompositionAuditTrailItem = {
+  id: string;
+  action: string;
+  actor: string;
+  at: string;
+  summary: string;
+  hash_before?: string | null;
+  hash_after?: string | null;
+};
+
 export type ApiCompositionPreviewPayload = {
   name?: string | null;
   description?: string | null;
@@ -1041,6 +1148,9 @@ export type ApiCompositionPreview = {
   maintenance_cost_summary: ApiCompositionMaintenanceCostSummary;
   rebalance_summary: ApiCompositionRebalanceSummary;
   composition_score: ApiCompositionScore;
+  return_quality_summary?: ApiCompositionReturnQualitySummary;
+  rebalance_events?: ApiCompositionRebalanceEvent[];
+  source_integrity?: ApiCompositionSourceIntegrity[];
   warnings: string[];
   advisories: string[];
 };
@@ -1068,6 +1178,7 @@ export type ApiCompositionListItem = {
   rebalance_frequency?: string | null;
   benchmark_label?: string | null;
   annualized_return: number;
+  sharpe: number;
   max_drawdown: number;
   updated_at: string;
   latest_activity_label: string;
@@ -1103,6 +1214,7 @@ export type ApiCompositionRebalanceMarker = {
 export type ApiCompositionScenarioSummary = {
   base_case: Record<string, unknown>;
   stress_case: Record<string, unknown>;
+  cases?: Array<Record<string, unknown>>;
   dispersion_note?: string | null;
 };
 
@@ -1115,6 +1227,10 @@ export type ApiCompositionSourceFreeze = {
   freeze_hash: string;
   captured_at: string;
   snapshot: Record<string, unknown>;
+  signature_status?: string | null;
+  drift_status?: string | null;
+  current_ref_id?: string | null;
+  alerts?: string[];
 };
 
 export type ApiCompositionDetail = {
@@ -1139,8 +1255,12 @@ export type ApiCompositionDetail = {
   correlation_matrix: ApiCompositionCorrelationCell[];
   risk_contribution_preview: ApiCompositionRiskContribution[];
   maintenance_cost_summary: ApiCompositionMaintenanceCostSummary;
+  return_quality_summary?: ApiCompositionReturnQualitySummary;
+  rebalance_events?: ApiCompositionRebalanceEvent[];
   scenario_summary: ApiCompositionScenarioSummary;
   source_evidence: ApiCompositionSourceFreeze[];
+  source_integrity?: ApiCompositionSourceIntegrity[];
+  audit_trail?: ApiCompositionAuditTrailItem[];
   composition_score: ApiCompositionScore;
   latest_activity_label: string;
   deep_link_actions: string[];
@@ -1186,6 +1306,21 @@ export type ApiBondSnapshotRegistryItem = {
   notes: string[];
 };
 
+export type ApiBondSnapshotSourcedReadyCount = {
+  sourced?: number | null;
+  ready?: number | null;
+  sourced_count?: number | null;
+  ready_count?: number | null;
+  total?: number | null;
+};
+
+export type ApiBondSnapshotGroupCounts = {
+  ust?: ApiBondSnapshotSourcedReadyCount | null;
+  tips?: ApiBondSnapshotSourcedReadyCount | null;
+  ig?: ApiBondSnapshotSourcedReadyCount | null;
+  [key: string]: ApiBondSnapshotSourcedReadyCount | null | undefined;
+};
+
 export type ApiBondSnapshotEligibleSource = {
   id: string;
   label: string;
@@ -1197,10 +1332,17 @@ export type ApiBondSnapshotEligibleSource = {
   updated_at?: string | null;
 };
 
+export type ApiBondCreditQuality = string | Record<string, unknown>;
+
 export type ApiBondSnapshotEligibleInstrument = {
   id: string;
   label: string;
   instrument_type: string;
+  asset_type?: string | null;
+  tenor_label?: string | null;
+  audit_profile?: string | null;
+  group?: string | null;
+  category?: string | null;
   source: string;
   status: string;
   symbol?: string | null;
@@ -1216,10 +1358,25 @@ export type ApiBondSnapshotEligibleInstrument = {
   full_price?: number | null;
   accrued_interest?: number | null;
   ytm_pct?: number | null;
+  discount_rate_pct?: number | null;
+  real_yield_pct?: number | null;
+  inflation_factor?: number | null;
+  breakeven_inflation_bps?: number | null;
+  breakeven_pct?: number | null;
   duration?: number | null;
+  effective_duration?: number | null;
+  sec_yield_30d_pct?: number | null;
+  thirty_day_sec_yield_pct?: number | null;
+  credit_quality?: ApiBondCreditQuality | null;
+  tracking_error_bps?: number | null;
+  audit_alerts?: string[];
+  audit_notes?: string[];
+  tracking_status?: string | null;
   convexity?: number | null;
   snapshot_ref?: string | null;
   refresh_status?: string | null;
+  creation_disabled_reason?: string | null;
+  asset_leg_disabled_reason?: string | null;
   missing_fields: string[];
   inferred_fields: Record<string, unknown>;
   field_status: Record<string, string>;
@@ -1263,6 +1420,32 @@ export type ApiBondFixedIncomeOverview = {
   scheduler: ApiBondSnapshotScheduler;
   selected_source_summary: ApiBondSnapshotSourceSummary;
   system_diagnostics: ApiBondSnapshotSystemDiagnostics;
+  group_counts?: ApiBondSnapshotGroupCounts;
+  sourced_ready_counts?: ApiBondSnapshotGroupCounts;
+  instrument_counts?: ApiBondSnapshotGroupCounts;
+  ust_metrics?: Record<string, unknown> | null;
+  tips_metrics?: Record<string, unknown> | null;
+  lqd_metrics?: Record<string, unknown> | null;
+  group_metrics?: Record<string, Record<string, unknown> | null> | null;
+  ust_sourced_count?: number | null;
+  ust_ready_count?: number | null;
+  tips_sourced_count?: number | null;
+  tips_ready_count?: number | null;
+  ig_sourced_count?: number | null;
+  ig_ready_count?: number | null;
+  ust_10y_2y_spread_bps?: number | null;
+  top_ust_10y_2y_spread_bps?: number | null;
+  tips_real_yield_pct?: number | null;
+  tips_inflation_factor?: number | null;
+  tips_breakeven_pct?: number | null;
+  lqd_effective_duration?: number | null;
+  lqd_sec_yield_30d_pct?: number | null;
+  lqd_credit_quality?: ApiBondCreditQuality | null;
+  lqd_tracking_status?: string | null;
+  quality_audit?: Array<Record<string, unknown>>;
+  repair_rules?: Array<Record<string, unknown>>;
+  daily_accrual_status?: Array<Record<string, unknown>>;
+  risk_budget_inputs?: Array<Record<string, unknown>>;
 };
 
 export type ApiSnapshotOverview = {
@@ -1392,6 +1575,7 @@ export type DemoApi = {
     mode: PromoteMode,
     idempotencyKey: string,
     comment?: string,
+    baseParameterVersionId?: string | null,
   ) => Promise<ApiOptimizationJobDetail>;
   deleteOptimizationCandidate: (
     jobId: string,
@@ -1399,7 +1583,9 @@ export type DemoApi = {
   ) => Promise<ApiOptimizationJobDetail>;
   getLegInventory?: () => Promise<ApiLegInventory>;
   createAssetLeg?: (payload: ApiAssetLegCreatePayload) => Promise<ApiAssetLeg>;
+  updateAssetLeg?: (id: string, payload: ApiAssetLegUpdatePayload) => Promise<ApiAssetLeg>;
   createCashLeg?: (payload: ApiCashLegCreatePayload) => Promise<ApiCashLeg>;
+  updateCashLeg?: (id: string, payload: ApiCashLegUpdatePayload) => Promise<ApiCashLeg>;
   listCompositions?: () => Promise<ApiCompositionListItem[]>;
   getCompositionDetail?: (id: string) => Promise<ApiCompositionDetail>;
   previewComposition?: (

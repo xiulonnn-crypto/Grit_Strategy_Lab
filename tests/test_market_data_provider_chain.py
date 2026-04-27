@@ -21,6 +21,12 @@ from grit_backtest_platform.fallback_provider import (
 )
 from grit_backtest_platform.fmp_identity_provider import FmpIdentityRepairProvider
 from grit_backtest_platform.longbridge_provider import LongbridgeQuoteProvider, LongbridgeStaticInfoProvider
+from grit_backtest_platform.openbb_provider import (
+    OpenBBBondFixedIncomeProvider,
+    OpenBBCurrentUniverseConstituentCheckProvider,
+    OpenBBTiingoMarketDataProvider,
+    OpenBBYfinanceMarketDataProvider,
+)
 from grit_backtest_platform.sec_edgar_provider import SecEdgarProvider
 from grit_backtest_platform.tiingo_provider import TiingoMarketDataProvider
 from grit_backtest_platform.tiingo_symbology_provider import TiingoSymbologyProvider
@@ -198,6 +204,100 @@ def test_yfinance_provider_parses_daily_bars_and_actions(monkeypatch):
     assert len(result.bars) == 2
     assert {item["action_type"] for item in result.actions} == {"dividend", "split"}
     assert result.bars[0].adj_close == 100.25
+
+
+def test_openbb_yfinance_provider_lazily_maps_credentials_and_history(monkeypatch):
+    class _Credentials:
+        pass
+
+    captured: dict[str, object] = {}
+    credentials = _Credentials()
+
+    def historical(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            results=[
+                {
+                    "date": "2026-04-01",
+                    "open": 100.0,
+                    "high": 102.0,
+                    "low": 99.0,
+                    "close": 101.0,
+                    "adjusted_close": 100.5,
+                    "volume": 1200,
+                    "dividends": 0.25,
+                    "stock_splits": 2.0,
+                }
+            ]
+        )
+
+    fake_obb = SimpleNamespace(
+        user=SimpleNamespace(credentials=credentials),
+        equity=SimpleNamespace(price=SimpleNamespace(historical=historical)),
+    )
+    monkeypatch.setenv("TIINGO_API_TOKEN", "tiingo-token")
+    monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "alpha-token")
+    monkeypatch.setenv("FMP_API_KEY", "fmp-token")
+    monkeypatch.setenv("FRED_API_KEY", "fred-token")
+    monkeypatch.setattr("grit_backtest_platform.openbb_provider._load_obb", lambda: fake_obb)
+
+    provider = OpenBBYfinanceMarketDataProvider()
+    payload = provider.fetch_history("aapl", date(2026, 4, 1), date(2026, 4, 2))
+
+    assert captured["provider"] == "yfinance"
+    assert captured["symbol"] == "AAPL"
+    assert getattr(credentials, "tiingo_token") == "tiingo-token"
+    assert getattr(credentials, "alpha_vantage_api_key") == "alpha-token"
+    assert getattr(credentials, "fmp_api_key") == "fmp-token"
+    assert getattr(credentials, "fred_api_key") == "fred-token"
+    assert payload.source == "openbb_yfinance"
+    assert payload.bars[0].date == "2026-04-01"
+    assert [action["action_type"] for action in payload.actions] == ["dividend", "split"]
+
+
+def test_openbb_provider_reports_missing_package_and_key_without_import_side_effect(monkeypatch):
+    monkeypatch.delenv("TIINGO_API_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "grit_backtest_platform.openbb_provider._load_obb",
+        lambda: (_ for _ in ()).throw(ImportError("No module named openbb")),
+    )
+
+    package_report = OpenBBYfinanceMarketDataProvider().availability()
+    key_report = OpenBBTiingoMarketDataProvider().availability()
+
+    assert package_report.available is False
+    assert package_report.metadata["requires_extra"] == "openbb-provider"
+    assert key_report.available is False
+    assert "TIINGO_API_TOKEN" in str(key_report.reason)
+
+
+def test_openbb_provider_classifies_rate_limit_and_malformed_payload(monkeypatch):
+    def limited_history(**kwargs):
+        raise RuntimeError("429 Too Many Requests")
+
+    fake_limited = SimpleNamespace(
+        user=SimpleNamespace(credentials=SimpleNamespace()),
+        equity=SimpleNamespace(price=SimpleNamespace(historical=limited_history)),
+    )
+    monkeypatch.setattr("grit_backtest_platform.openbb_provider._load_obb", lambda: fake_limited)
+
+    with pytest.raises(ProviderExecutionSignal) as limited:
+        OpenBBYfinanceMarketDataProvider().fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 2))
+
+    assert limited.value.status == "limited"
+    assert limited.value.reason == "rate_limited"
+    assert limited.value.metadata["quota_limited"] is True
+
+    fake_empty = SimpleNamespace(
+        user=SimpleNamespace(credentials=SimpleNamespace()),
+        equity=SimpleNamespace(price=SimpleNamespace(historical=lambda **kwargs: SimpleNamespace(results=[]))),
+    )
+    monkeypatch.setattr("grit_backtest_platform.openbb_provider._load_obb", lambda: fake_empty)
+
+    with pytest.raises(ProviderExecutionSignal) as empty:
+        OpenBBYfinanceMarketDataProvider().fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 2))
+
+    assert empty.value.reason == "no_history"
 
 
 def test_yfinance_provider_classifies_rate_limit(monkeypatch):
@@ -667,6 +767,8 @@ def test_runtime_market_data_provider_no_price_bars_keeps_event_provider_failure
 
 
 def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(monkeypatch):
+    monkeypatch.delenv("GRIT_ENABLE_OPENBB_PROVIDER", raising=False)
+
     class _YahooProvider:
         provider_name = "yahoo"
 
@@ -759,6 +861,56 @@ def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(
     assert runtime.fallback_provider.provider_name == "yfinance"
 
 
+def test_runtime_market_data_provider_builder_registers_openbb_only_when_enabled(monkeypatch):
+    class _YahooProvider:
+        provider_name = "yahoo"
+
+    def fake_load_provider(module_name, class_names):
+        if module_name == "openbb_provider":
+            return (
+                SimpleNamespace(
+                    provider_name={
+                        ("OpenBBYfinanceMarketDataProvider",): "openbb_yfinance",
+                        ("OpenBBTiingoMarketDataProvider",): "openbb_tiingo",
+                        ("OpenBBFmpMarketDataProvider",): "openbb_fmp",
+                        ("OpenBBAlphaVantagePriceRepairProvider",): "openbb_alpha_vantage",
+                    }[class_names],
+                    fetch_history=lambda *args, **kwargs: None,
+                    supports_targeted_price_repair=class_names == ("OpenBBAlphaVantagePriceRepairProvider",),
+                    supports_action_enrichment=class_names != ("OpenBBAlphaVantagePriceRepairProvider",),
+                ),
+                None,
+            )
+        return None, "missing"
+
+    monkeypatch.setattr(api_module, "YahooMarketDataProvider", _YahooProvider)
+    monkeypatch.setattr(api_module, "_load_provider", fake_load_provider)
+
+    monkeypatch.delenv("GRIT_ENABLE_OPENBB_PROVIDER", raising=False)
+    disabled = api_module.build_runtime_market_data_provider()
+    assert all(not provider.provider_name.startswith("openbb_") for provider in disabled.providers)
+
+    monkeypatch.setenv("GRIT_ENABLE_OPENBB_PROVIDER", "1")
+    enabled = api_module.build_runtime_market_data_provider()
+
+    assert [provider.provider_name for provider in enabled.providers if provider.provider_name.startswith("openbb_")] == [
+        "openbb_yfinance",
+        "openbb_tiingo",
+        "openbb_fmp",
+        "openbb_alpha_vantage",
+    ]
+    assert [provider.provider_name for provider in enabled.price_providers if provider.provider_name.startswith("openbb_")] == [
+        "openbb_yfinance",
+        "openbb_tiingo",
+        "openbb_fmp",
+    ]
+    assert [provider.provider_name for provider in enabled.targeted_price_repair_providers] == [
+        "openbb_alpha_vantage"
+    ]
+    assert hasattr(enabled, "bond_fixed_income_provider")
+    assert hasattr(enabled, "current_universe_constituent_checker")
+
+
 def test_runtime_market_data_provider_marks_yfinance_as_succeeded_not_selected():
     class _YahooProvider:
         provider_name = "yahoo"
@@ -844,6 +996,130 @@ def test_runtime_market_data_provider_uses_alpha_only_for_targeted_price_repair(
     )
     assert alpha_result["selection_status"] == "selected_primary"
     assert alpha_result["reason"] == "targeted_price_repair"
+
+
+def test_runtime_market_data_provider_uses_openbb_alpha_only_for_targeted_price_repair():
+    class _FailingProvider:
+        def __init__(self, provider_name: str) -> None:
+            self.provider_name = provider_name
+
+        def fetch_history(self, symbol: str, start_date: date, end_date: date):
+            raise RuntimeError(f"{self.provider_name} unavailable")
+
+    class _OpenBBAlphaTargetedProvider:
+        provider_name = "openbb_alpha_vantage"
+        supports_targeted_price_repair = True
+
+        def fetch_history(self, symbol: str, start_date: date, end_date: date):
+            return {
+                "source": "openbb_alpha_vantage",
+                "bars": [
+                    {"date": "2026-04-01", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "adj_close": 100.25, "volume": 1000}
+                ],
+                "actions": [],
+            }
+
+    providers = [
+        _FailingProvider("yahoo"),
+        _FailingProvider("yfinance"),
+        _OpenBBAlphaTargetedProvider(),
+    ]
+
+    provider = RuntimeMarketDataProvider(providers, allow_targeted_price_repair=True)
+    result = provider.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 1))
+
+    assert result["source"] == "openbb_alpha_vantage"
+    openbb_result = next(
+        item for item in result["metadata"]["provider_results"] if item["provider"] == "openbb_alpha_vantage"
+    )
+    assert openbb_result["kind"] == "targeted_price_repair"
+    assert openbb_result["selection_status"] == "selected_primary"
+
+
+def test_openbb_bond_provider_fills_missing_curve_rows_and_cross_checks_existing(monkeypatch):
+    def official_provider(*, today):
+        return {
+            "snapshots": [
+                {
+                    "id": "bond_fixed_income::UST_CMT_10Y::2026-04-01::us_treasury_xml",
+                    "instrument_id": "UST_CMT_10Y",
+                    "symbol": "UST10Y",
+                    "name": "US Treasury CMT 10Y",
+                    "instrument_type": "treasury_cmt",
+                    "currency": "USD",
+                    "snapshot_date": "2026-04-01",
+                    "clean_price": 100.0,
+                    "net_price": 100.0,
+                    "dirty_price": 100.0,
+                    "full_price": 100.0,
+                    "accrued_interest": 0.0,
+                    "ytm_pct": 4.3,
+                    "duration": 9.6,
+                    "convexity": 1.0,
+                    "source": "us_treasury_xml",
+                    "source_snapshot_id": "bond_fixed_income::UST_CMT_10Y::2026-04-01::us_treasury_xml",
+                    "refresh_status": "READY",
+                    "missing_fields": [],
+                    "inferred_fields": {},
+                    "raw": {},
+                }
+            ],
+            "warnings": [],
+            "errors": [],
+            "telemetry": {},
+        }
+
+    def yield_curve(**kwargs):
+        curve_type = kwargs.get("yield_curve_type")
+        if curve_type == "real":
+            return SimpleNamespace(results=[{"date": "2026-04-01", "year_5": 1.9, "year_10": 2.0}])
+        return SimpleNamespace(results=[{"date": "2026-04-01", "year_2": 4.1, "year_10": 4.4, "year_30": 4.6}])
+
+    fake_obb = SimpleNamespace(
+        user=SimpleNamespace(credentials=SimpleNamespace()),
+        fixedincome=SimpleNamespace(government=SimpleNamespace(yield_curve=yield_curve)),
+    )
+    monkeypatch.setattr("grit_backtest_platform.openbb_provider._load_obb", lambda: fake_obb)
+
+    provider = OpenBBBondFixedIncomeProvider(
+        official_provider=official_provider,
+        openbb_providers=("federal_reserve",),
+    )
+    result = provider.fetch_snapshots(as_of_date=date(2026, 4, 1))
+    snapshots = {item["instrument_id"]: item for item in result["snapshots"]}
+
+    assert snapshots["UST_CMT_2Y"]["source"] == "openbb_federal_reserve"
+    assert snapshots["UST_CMT_30Y"]["source"] == "openbb_federal_reserve"
+    assert snapshots["TIPS_10Y"]["source"] == "openbb_federal_reserve"
+    assert snapshots["UST_CMT_10Y"]["source"] == "us_treasury_xml"
+    assert snapshots["UST_CMT_10Y"]["raw"]["openbb_cross_checks"][0]["provider"] == "openbb_federal_reserve"
+    assert result["provider_results"][-1]["filled_instrument_count"] == 4
+    assert result["provider_results"][-1]["cross_checked_instrument_count"] == 1
+
+
+def test_openbb_universe_current_constituents_are_auxiliary_only(monkeypatch):
+    monkeypatch.setenv("FMP_API_KEY", "token")
+    fake_obb = SimpleNamespace(
+        user=SimpleNamespace(credentials=SimpleNamespace()),
+        index=SimpleNamespace(
+            constituents=lambda **kwargs: SimpleNamespace(
+                results=[{"symbol": "AAPL"}, {"symbol": "MSFT"}, {"symbol": "NVDA"}]
+            )
+        ),
+    )
+    monkeypatch.setattr("grit_backtest_platform.openbb_provider._load_obb", lambda: fake_obb)
+
+    provider = OpenBBCurrentUniverseConstituentCheckProvider()
+    result = provider.check_current_constituents(
+        universe_key="sp500",
+        universe_name="S&P 500",
+        symbols=["AAPL", "MSFT", "TSLA"],
+    )
+
+    assert result["provider"] == "openbb_index_constituents"
+    assert result["status"] == "succeeded"
+    assert result["matched_latest_anchor_count"] == 2
+    assert result["auxiliary_only"] is True
 
 
 def test_tiingo_symbology_provider_resolves_identity(monkeypatch):

@@ -6,8 +6,10 @@ import re
 import subprocess
 import sys
 import threading
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -15,6 +17,7 @@ from time import monotonic
 
 from .backtest_engine import (
     BacktestConfig,
+    DYNAMIC_BUY_AND_HOLD_UNSUPPORTED_WARNING,
     _normalize_bars,
     _signal_score,
     prepare_backtest_inputs,
@@ -31,11 +34,14 @@ from .backtest_metrics import (
     build_rolling_metrics,
     metric_summary,
 )
+from ._bond_fixed_income_provider import fetch_official_bond_fixed_income_snapshots
 from .fallback_provider import UnconfiguredFallbackProvider, provider_access_tier
 from .market_data_repository import (
     DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
+    DATASET_INDEX_VALUATIONS_SNAPSHOT_ID,
     DATASET_PRICE_SNAPSHOT_ID,
     CoverageSummary,
+    IndexValuationCoverageSummary,
     MarketDataRepository,
 )
 from ._runtime_memory import read_runtime_memory_status
@@ -78,6 +84,7 @@ SNAPSHOT_MARKET_DATA_MAX_WORKERS = 12
 SNAPSHOT_MARKET_DATA_REPAIR_MAX_WORKERS = 2
 SNAPSHOT_REPAIR_SYMBOL_BATCH_SIZE = 12
 SNAPSHOT_LATEST_SYMBOL_BATCH_SIZE = 64
+BENCHMARK_ETF_SYMBOLS = ("SPY", "QQQ")
 SNAPSHOT_REFRESH_RUNTIME_STATE_KEY = "snapshot_refresh_runtime"
 LONGBRIDGE_MIN_HISTORY_DATE = date(2010, 6, 1)
 SNAPSHOT_MEMORY_USAGE_LIMIT = 0.80
@@ -89,6 +96,19 @@ DIRECT_REFRESH_SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9.-]{0,11}$")
 FORMAL_CORPORATE_ACTION_TYPES = {"dividend", "split", "reverse_split"}
 DEFAULT_BACKTEST_FEE_BPS = 1.5
 DEFAULT_BACKTEST_SLIPPAGE_BPS = 2.5
+INDEX_VALUATION_PROXY_NASDAQ100 = "nasdaq100"
+INDEX_VALUATION_TRENDONIFY_URL = "https://trendonify.com/united-states/stock-market/nasdaq-100/pe-ratio"
+INDEX_VALUATION_WORLDPERATIO_URL = "https://worldperatio.com/index/nasdaq-100/"
+INDEX_VALUATION_PROXY_BY_SYMBOL = {
+    "QQQ": INDEX_VALUATION_PROXY_NASDAQ100,
+}
+DEFAULT_DYNAMIC_INVESTMENT_RULES = [
+    {"min_percentile": 90.0, "max_percentile": 100.0, "multiplier": 0.5},
+    {"min_percentile": 70.0, "max_percentile": 90.0, "multiplier": 0.8},
+    {"min_percentile": 30.0, "max_percentile": 70.0, "multiplier": 1.0},
+    {"min_percentile": 10.0, "max_percentile": 30.0, "multiplier": 1.5},
+    {"min_percentile": 0.0, "max_percentile": 10.0, "multiplier": 2.0},
+]
 
 
 class SnapshotBlockingError(ValueError):
@@ -131,6 +151,148 @@ def _pct_change(current: Any, base: Any) -> float:
     return round((current_value / base_value - 1.0) * 100.0, 4)
 
 
+def _parse_iso_date(value: str | date | None) -> date:
+    if isinstance(value, date):
+        return value
+    if not value:
+        raise ValueError("date value is required")
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
+
+
+def _normalize_dynamic_investment_parameters(
+    parameters: Mapping[str, Any] | None,
+    *,
+    strategy_type: str | None,
+    benchmark_symbol: str | None,
+) -> dict[str, Any]:
+    normalized = dict(parameters or {})
+    normalized_strategy_type = str(
+        strategy_type or normalized.get("strategy_type") or normalized.get("template_key") or ""
+    ).strip().upper()
+    dynamic_logic = str(normalized.get("dynamic_investment_logic") or "").strip()
+    if normalized_strategy_type != "BUY_AND_HOLD" or not dynamic_logic:
+        return normalized
+    proxy_key = str(
+        normalized.get("dynamic_investment_proxy_key")
+        or INDEX_VALUATION_PROXY_BY_SYMBOL.get(
+            str(benchmark_symbol or normalized.get("benchmark_symbol") or "").strip().upper(),
+            "",
+        )
+    ).strip().lower()
+    if not proxy_key:
+        return normalized
+    normalized["dynamic_investment_proxy_key"] = proxy_key
+    normalized["dynamic_investment_metric_key"] = str(
+        normalized.get("dynamic_investment_metric_key") or "pe_ttm_percentile_10y"
+    ).strip() or "pe_ttm_percentile_10y"
+    existing_rules = normalized.get("dynamic_investment_rules")
+    normalized["dynamic_investment_rules"] = (
+        list(existing_rules)
+        if isinstance(existing_rules, list) and existing_rules
+        else list(DEFAULT_DYNAMIC_INVESTMENT_RULES)
+    )
+    return normalized
+
+
+def _strategy_requires_index_valuation_data(
+    strategy_type: str | None,
+    parameters: Mapping[str, Any] | None,
+) -> bool:
+    normalized_strategy_type = str(
+        strategy_type or (parameters or {}).get("strategy_type") or (parameters or {}).get("template_key") or ""
+    ).strip().upper()
+    if normalized_strategy_type != "BUY_AND_HOLD":
+        return False
+    return bool(str((parameters or {}).get("dynamic_investment_logic") or "").strip())
+
+
+def _monthly_observation_gap_days(rows: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
+    parsed_dates = sorted(
+        _parse_iso_date(str(item.get("date") or item.get("latest_date") or ""))
+        for item in rows
+        if str(item.get("date") or item.get("latest_date") or "").strip()
+    )
+    if len(parsed_dates) < 2:
+        return (0, 0)
+    gap_days = [
+        max((parsed_dates[index] - parsed_dates[index - 1]).days, 0)
+        for index in range(1, len(parsed_dates))
+    ]
+    return (max(gap_days), sum(1 for gap in gap_days if gap > 62))
+
+
+def _rolling_10y_percentiles(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    ordered = sorted(
+        (
+            {
+                **dict(item),
+                "date": str(item.get("date") or ""),
+                "pe_ttm": _coerce_float(item.get("pe_ttm"), 0.0),
+            }
+            for item in rows
+            if str(item.get("date") or "").strip() and item.get("pe_ttm") not in (None, "")
+        ),
+        key=lambda item: item["date"],
+    )
+    results: list[dict[str, Any]] = []
+    for index, item in enumerate(ordered):
+        current_date = _parse_iso_date(item["date"])
+        window_start = current_date - timedelta(days=3660)
+        window = [
+            candidate
+            for candidate in ordered[: index + 1]
+            if _parse_iso_date(candidate["date"]) >= window_start
+        ]
+        percentile = None
+        if window:
+            below_or_equal = sum(1 for candidate in window if _coerce_float(candidate.get("pe_ttm")) <= item["pe_ttm"])
+            percentile = round((below_or_equal / len(window)) * 100.0, 4)
+        results.append({**item, "pe_ttm_percentile_10y": percentile})
+    return results
+
+
+def _parse_worldperatio_detail_pe_history(html: str) -> list[dict[str, Any]]:
+    match = re.search(r"detailPE_data\s*=\s*\[(.*?)\];", html, re.DOTALL | re.IGNORECASE)
+    if not match:
+        raise ValueError("WorldPEratio detailPE_data payload was not found.")
+    rows: list[dict[str, Any]] = []
+    for year, month, day, pe_ttm in re.findall(
+        r"Date\.UTC\((\d{4}),\s*(\d{1,2}),\s*(\d{1,2})\)\s*,\s*([0-9]+(?:\.[0-9]+)?)",
+        match.group(1),
+    ):
+        rows.append(
+            {
+                "date": f"{int(year):04d}-{int(month) + 1:02d}-{int(day):02d}",
+                "proxy_symbol": "QQQ",
+                "pe_ttm": round(float(pe_ttm), 4),
+                "source": "worldperatio",
+                "fallback_source": "trendonify",
+                "metadata": {
+                    "provider_url": INDEX_VALUATION_WORLDPERATIO_URL,
+                    "detail_series": "detailPE_data",
+                },
+            }
+        )
+    if not rows:
+        raise ValueError("WorldPEratio valuation history was empty.")
+    return rows
+
+
+def _runtime_backtest_warning(parameters: Mapping[str, Any] | None) -> str | None:
+    return None
+
+
+def _merge_runtime_backtest_warnings(
+    warnings: Sequence[str] | None,
+    parameters: Mapping[str, Any] | None,
+) -> list[str]:
+    merged = [str(item) for item in (warnings or []) if str(item).strip()]
+    runtime_warning = _runtime_backtest_warning(parameters)
+    if runtime_warning and runtime_warning not in merged:
+        merged.append(runtime_warning)
+    return merged
+
+
 def _segment_for_trade_window(opened_at: str, closed_at: str, oos_start_date: str | None) -> str:
     if oos_start_date and max(str(opened_at), str(closed_at)) >= str(oos_start_date):
         return "OOS"
@@ -154,6 +316,8 @@ def _enrich_trade_records_with_execution_values(
     run: Mapping[str, Any],
     trades: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
+    parameter_snapshot = dict(run.get("parameter_snapshot") or {})
+    contribution_amount = _coerce_float(parameter_snapshot.get("contribution_amount"))
     chart_points_by_date = {
         str(point.get("trade_date") or ""): point
         for point in run.get("chart_series") or []
@@ -177,9 +341,18 @@ def _enrich_trade_records_with_execution_values(
             or ""
         ).strip()
         price = _coerce_float(trade.get("price"))
+        reason = str(trade.get("reason") or "").strip().lower()
         delta_weight = abs(_coerce_float(trade.get("weight_after")) - _coerce_float(trade.get("weight_before")))
         equity_before = _equity_before_trade(chart_points_by_date.get(trade_date))
         traded_notional = equity_before * delta_weight if equity_before > 0 and delta_weight > 0 else 0.0
+
+        if contribution_amount > 0 and reason.startswith("buy_and_hold:"):
+            if net_amount in (None, ""):
+                trade["net_amount"] = round(contribution_amount, 4)
+            if quantity in (None, "") and price > 0:
+                trade["quantity"] = round(contribution_amount / price, 6)
+            quantity = trade.get("quantity")
+            net_amount = trade.get("net_amount")
 
         if net_amount in (None, "") and traded_notional > 0:
             trade["net_amount"] = round(traded_notional, 4)
@@ -298,6 +471,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
             excluded.add("stooq")
         if mode != "repair":
             excluded.add("tiingo")
+            provider_names = {
+                self._provider_name(candidate)
+                for candidate in (getattr(provider, "providers", None) or [])
+            }
+            excluded.update({"openbb_tiingo", "openbb_alpha_vantage"} & provider_names)
         if str(os.getenv("GRIT_ENABLE_PAID_OPTIONAL_PROVIDERS") or "").strip().lower() not in {"1", "true", "yes", "on"}:
             excluded.update(self._paid_optional_provider_names())
         if window_start < LONGBRIDGE_MIN_HISTORY_DATE:
@@ -325,6 +503,150 @@ class RealBacktestPlatformService(BacktestPlatformService):
             return list(providers)
         return list(default_universe_history_providers())
 
+    def _openbb_current_constituent_check(self, snapshot: UniverseMembershipSnapshot) -> dict[str, Any] | None:
+        checker = getattr(self.market_data_provider, "current_universe_constituent_checker", None)
+        check_current_constituents = getattr(checker, "check_current_constituents", None)
+        if not callable(check_current_constituents):
+            return None
+        try:
+            payload = check_current_constituents(
+                universe_key=snapshot.universe_key,
+                universe_name=snapshot.universe_name,
+                symbols=snapshot.normalized_symbols,
+            )
+        except Exception as exc:
+            return {
+                "provider": str(getattr(checker, "provider_name", "openbb_index_constituents")),
+                "status": "failed",
+                "reason": str(exc),
+                "checked_at": iso_now(),
+                "auxiliary_only": True,
+            }
+        if not isinstance(payload, Mapping):
+            return None
+        check = dict(payload)
+        check.setdefault("provider", str(getattr(checker, "provider_name", "openbb_index_constituents")))
+        check.setdefault("auxiliary_only", True)
+        return check
+
+    def _annotate_openbb_current_constituent_check(
+        self,
+        snapshots: Sequence[UniverseMembershipSnapshot],
+    ) -> list[UniverseMembershipSnapshot]:
+        items = list(snapshots or [])
+        if not items:
+            return items
+        latest_index = max(range(len(items)), key=lambda index: items[index].effective_date)
+        latest_snapshot = items[latest_index]
+        latest_metadata = dict(latest_snapshot.metadata or {})
+        if "openbb_current_constituent_check" in latest_metadata:
+            return items
+        check = self._openbb_current_constituent_check(latest_snapshot)
+        if not check:
+            return items
+        latest_metadata["openbb_current_constituent_check"] = check
+        items[latest_index] = replace(latest_snapshot, metadata=latest_metadata)
+        return items
+
+    def _bond_fixed_income_provider(self) -> Any:
+        provider = getattr(self.market_data_provider, "bond_fixed_income_provider", None)
+        return provider or fetch_official_bond_fixed_income_snapshots
+
+    def _refresh_bond_fixed_income_snapshots(self, *, as_of: str | None = None) -> dict[str, Any]:
+        as_of_date = date.today()
+        if as_of:
+            try:
+                as_of_date = date.fromisoformat(str(as_of)[:10])
+            except ValueError:
+                as_of_date = date.today()
+        provider = self._bond_fixed_income_provider()
+        fetch_snapshots = getattr(provider, "fetch_snapshots", None)
+        if callable(fetch_snapshots):
+            try:
+                result = fetch_snapshots(as_of_date=as_of_date)
+            except TypeError:
+                result = fetch_snapshots(as_of_date)
+        elif callable(provider):
+            try:
+                result = provider(today=as_of_date)
+            except TypeError:
+                result = provider(as_of_date)
+        else:
+            return {
+                "status": "FAILED",
+                "updated_row_count": 0,
+                "instrument_count": 0,
+                "ready_count": 0,
+                "watch_count": 0,
+                "warnings": [],
+                "errors": ["Bond fixed-income provider does not implement fetch_snapshots."],
+                "provider_results": [],
+            }
+
+        if isinstance(result, Mapping):
+            snapshots = [dict(item) for item in (result.get("snapshots") or []) if isinstance(item, Mapping)]
+            warnings = [str(item) for item in (result.get("warnings") or []) if item]
+            errors = [str(item) for item in (result.get("errors") or []) if item]
+            provider_results = [dict(item) for item in (result.get("provider_results") or []) if isinstance(item, Mapping)]
+            telemetry = dict(result.get("telemetry") or {})
+        else:
+            snapshots = [dict(item) for item in (getattr(result, "snapshots", []) or []) if isinstance(item, Mapping)]
+            warnings = [str(item) for item in (getattr(result, "warnings", []) or []) if item]
+            errors = [str(item) for item in (getattr(result, "errors", []) or []) if item]
+            provider_results = [
+                dict(item)
+                for item in (getattr(result, "provider_results", []) or [])
+                if isinstance(item, Mapping)
+            ]
+            telemetry = dict(getattr(result, "telemetry", {}) or {})
+
+        persisted_ids: list[str] = []
+        for snapshot in snapshots:
+            try:
+                raw_payload = snapshot.get("raw")
+                profile = str((raw_payload if isinstance(raw_payload, Mapping) else {}).get("audit_profile") or "").upper()
+                if profile == "UST_CMT_30Y":
+                    previous_snapshot = self.market_data_repository.get_bond_fixed_income_snapshot(
+                        str(snapshot.get("source_snapshot_id") or snapshot.get("id") or snapshot.get("instrument_id") or "")
+                    )
+                    previous_ytm = _coerce_float((previous_snapshot or {}).get("ytm_pct"), 0.0)
+                    current_ytm = _coerce_float(snapshot.get("ytm_pct"), 0.0)
+                    if previous_ytm > 0 and current_ytm > 0:
+                        jump_bps = round((current_ytm - previous_ytm) * 100.0, 4)
+                        raw = dict(raw_payload) if isinstance(raw_payload, Mapping) else {}
+                        raw["ytm_jump_bps"] = jump_bps
+                        raw["ytm_jump_threshold_bps"] = 50.0
+                        if abs(jump_bps) > 50.0:
+                            raw["audit_alerts"] = [
+                                *[str(item) for item in (raw.get("audit_alerts") or []) if str(item).strip()],
+                                f"UST_CMT_30Y YTM jump {jump_bps:g} bps exceeds the 50 bps alert threshold.",
+                            ]
+                        snapshot["raw"] = raw
+                persisted_ids.append(self.market_data_repository.upsert_bond_fixed_income_snapshot(snapshot))
+            except Exception as exc:
+                instrument_id = str(snapshot.get("instrument_id") or snapshot.get("id") or "unknown")
+                errors.append(f"{instrument_id}: failed to persist bond fixed-income snapshot: {exc}")
+
+        ready_count = len([row for row in snapshots if str(row.get("refresh_status") or "").upper() == "READY"])
+        watch_count = len([row for row in snapshots if str(row.get("refresh_status") or "").upper() == "WATCH"])
+        instrument_count = len({str(row.get("instrument_id") or "") for row in snapshots if row.get("instrument_id")})
+        status = (
+            "FAILED"
+            if errors and not persisted_ids
+            else ("WATCH" if errors or watch_count or instrument_count < 7 else "READY")
+        )
+        return {
+            "status": status,
+            "updated_row_count": len(persisted_ids),
+            "instrument_count": instrument_count,
+            "ready_count": ready_count,
+            "watch_count": watch_count,
+            "warnings": warnings,
+            "errors": errors,
+            "provider_results": provider_results,
+            "telemetry": telemetry,
+        }
+
     def _normalize_snapshot_refresh_request(self, request: Any | None) -> tuple[dict[str, Any], str, list[str]]:
         payload = dict(_as_mapping(request))
         mode = str(payload.get("mode") or "incremental").strip().lower()
@@ -341,14 +663,16 @@ class RealBacktestPlatformService(BacktestPlatformService):
             try:
                 normalized_targets = [str(item) for item in raw_targets if str(item).strip()]
             except TypeError as exc:
-                raise ValueError("Snapshot refresh targets must be a list of price, corporate, or universes.") from exc
+                raise ValueError("Snapshot refresh targets must be a list of price, corporate, valuations, universes, or bond.") from exc
 
-        allowed_targets = {"price", "corporate", "universes"}
+        allowed_targets = {"price", "corporate", "valuations", "universes", "bond"}
         cleaned_targets = [item.strip().lower() for item in normalized_targets if item.strip().lower() in allowed_targets]
         if normalized_targets and not cleaned_targets:
-            raise ValueError("Snapshot refresh targets must include price, corporate, or universes.")
-        if mode != "repair" or not cleaned_targets:
-            cleaned_targets = ["price", "corporate", "universes"]
+            raise ValueError("Snapshot refresh targets must include price, corporate, valuations, universes, or bond.")
+        if not cleaned_targets:
+            cleaned_targets = ["price", "corporate", "valuations", "universes", "bond"]
+        elif "bond" not in cleaned_targets and mode != "repair":
+            cleaned_targets = ["price", "corporate", "valuations", "universes", "bond"]
         payload["mode"] = mode
         payload["targets"] = cleaned_targets
         return payload, mode, cleaned_targets
@@ -550,6 +874,22 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "blocker": {
                     "code": "SNAPSHOT_REFRESH_REQUIRED",
                     "message": "\u8bf7\u5148\u5237\u65b0\u5feb\u7167\uff0c\u518d\u67e5\u770b\u80a1\u7968\u4ef7\u683c\u6570\u636e\u3002",
+                },
+            },
+            {
+                "id": DATASET_INDEX_VALUATIONS_SNAPSHOT_ID,
+                "name": "\u6307\u6570\u4f30\u503c\u6570\u636e",
+                "status": "INCOMPLETE",
+                "as_of": None,
+                "freshness_label": "\u5c1a\u672a\u5237\u65b0",
+                "start_date": SNAPSHOT_START_DATE.isoformat(),
+                "end_date": None,
+                "row_count": 0,
+                "source": "",
+                "fallback_source": None,
+                "blocker": {
+                    "code": "SNAPSHOT_REFRESH_REQUIRED",
+                    "message": "\u8bf7\u5148\u5237\u65b0\u5feb\u7167\uff0c\u518d\u67e5\u770b\u6307\u6570\u4f30\u503c\u6570\u636e\u3002",
                 },
             },
         ]
@@ -1047,6 +1387,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     merged_snapshots = [merged_by_date[key] for key in sorted(merged_by_date)]
                 else:
                     merged_snapshots = sorted(provider_specific_snapshots, key=lambda item: item.effective_date)
+                merged_snapshots = self._annotate_openbb_current_constituent_check(merged_snapshots)
                 grouped_universe_snapshots[current_snapshot_id] = merged_snapshots
                 _, grouped_memberships = self._group_universe_snapshots(merged_snapshots)
                 memberships_by_snapshot[current_snapshot_id] = grouped_memberships.get(current_snapshot_id, [])
@@ -1178,6 +1519,68 @@ class RealBacktestPlatformService(BacktestPlatformService):
         metadata["complete_no_events_symbol_count"] = int(probe_status_breakdown.get("complete_no_events") or 0)
         metadata["formal_event_symbol_count"] = int(probe_status_breakdown.get("complete_with_events") or 0)
         return metadata
+
+    def _benchmark_etf_history_coverage_metadata(
+        self,
+        symbol_coverage: Sequence[CoverageSummary | Mapping[str, Any]] | None,
+    ) -> dict[str, Any]:
+        coverage_by_symbol: dict[str, Mapping[str, Any]] = {}
+        for item in symbol_coverage or []:
+            if isinstance(item, Mapping):
+                symbol = str(item.get("symbol") or "").strip().upper()
+                row = item
+            else:
+                symbol = str(getattr(item, "symbol", "") or "").strip().upper()
+                row = {
+                    "symbol": getattr(item, "symbol", ""),
+                    "start_date": getattr(item, "start_date", None),
+                    "end_date": getattr(item, "end_date", None),
+                    "trade_days": getattr(item, "trade_days", 0),
+                }
+            if symbol:
+                coverage_by_symbol[symbol] = row
+
+        entries: list[dict[str, Any]] = []
+        missing_symbols: list[str] = []
+        ready_count = 0
+        for symbol in BENCHMARK_ETF_SYMBOLS:
+            row = coverage_by_symbol.get(symbol) or {}
+            start_date = str(row.get("start_date") or "").strip() or None
+            end_date = str(row.get("end_date") or "").strip() or None
+            try:
+                trade_days = int(row.get("trade_days") or 0)
+            except (TypeError, ValueError):
+                trade_days = 0
+            ready = bool(start_date and end_date and trade_days > 0)
+            if ready:
+                ready_count += 1
+            else:
+                missing_symbols.append(symbol)
+            entries.append(
+                {
+                    "symbol": symbol,
+                    "status": "READY" if ready else "MISSING",
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "trade_days": trade_days,
+                }
+            )
+        return {
+            "symbols": entries,
+            "ready_count": ready_count,
+            "total_count": len(BENCHMARK_ETF_SYMBOLS),
+            "missing_symbols": missing_symbols,
+        }
+
+    def _attach_benchmark_etf_history_coverage(
+        self,
+        metadata: Mapping[str, Any],
+        *,
+        symbol_coverage: Sequence[CoverageSummary | Mapping[str, Any]] | None,
+    ) -> dict[str, Any]:
+        enriched = dict(metadata)
+        enriched["benchmark_etf_coverage"] = self._benchmark_etf_history_coverage_metadata(symbol_coverage)
+        return enriched
 
     def _parse_snapshot_date(self, value: Any) -> date | None:
         raw = str(value or "").strip()
@@ -1847,6 +2250,32 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if probe_error:
                 provider_bucket["reasons"] = [probe_error]
             provider_bucket["landed_anchor_count"] = int(landed_anchor_count)
+        current_check = (
+            dict((latest_snapshot.metadata or {}).get("openbb_current_constituent_check") or {})
+            if latest_snapshot is not None
+            else {}
+        )
+        if current_check:
+            check_provider = str(current_check.get("provider") or "openbb_index_constituents").strip()
+            if check_provider:
+                attempted_providers.add(check_provider)
+                check_status = str(current_check.get("status") or "unknown").strip().lower()
+                if check_status in {"failed", "unavailable"}:
+                    unavailable_providers.add(check_provider)
+                providers[check_provider] = {
+                    "status": check_status or "unknown",
+                    "landed_anchor_count": 0,
+                    "selected_primary_anchors": 0,
+                    "fallback_anchors": 0,
+                    "landed_row_count": 0,
+                    "landed_symbol_count": int(current_check.get("matched_latest_anchor_count") or 0),
+                    "source_quality_breakdown": {},
+                    "auxiliary_only": True,
+                    "current_member_count": int(current_check.get("current_member_count") or 0),
+                    "anchor_member_count": int(current_check.get("anchor_member_count") or 0),
+                    "matched_latest_anchor_count": int(current_check.get("matched_latest_anchor_count") or 0),
+                    "reason": str(current_check.get("reason") or "") or None,
+                }
         return {
             "attempted_providers": sorted(attempted_providers),
             "skipped_providers": sorted(skipped_providers),
@@ -1899,6 +2328,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
         price_bars: Sequence[Mapping[str, Any]],
         corporate_actions: Sequence[Mapping[str, Any]],
         corporate_coverage_rows: Sequence[CoverageSummary | Mapping[str, Any]] | None = None,
+        index_valuations: Sequence[Mapping[str, Any]] | None = None,
+        index_valuation_coverage_rows: Sequence[IndexValuationCoverageSummary | Mapping[str, Any]] | None = None,
         grouped_universe_snapshots: Mapping[str, Sequence[Any]],
         memberships_by_snapshot: Mapping[str, Sequence[Mapping[str, Any]]],
         existing_universe_memberships: Mapping[str, Sequence[Mapping[str, Any]]],
@@ -1913,6 +2344,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
             str((item.symbol if isinstance(item, CoverageSummary) else item.get("symbol")) or "").strip().upper()
             for item in (corporate_coverage_rows or [])
             if str((item.symbol if isinstance(item, CoverageSummary) else item.get("symbol")) or "").strip()
+        }
+        valuation_index_keys = {
+            str(
+                (item.index_key if isinstance(item, IndexValuationCoverageSummary) else item.get("index_key")) or ""
+            ).strip().lower()
+            for item in (index_valuation_coverage_rows or [])
+            if str(
+                (item.index_key if isinstance(item, IndexValuationCoverageSummary) else item.get("index_key")) or ""
+            ).strip()
         }
         universes: dict[str, dict[str, Any]] = {}
         for snapshot_id, anchor_snapshots in grouped_universe_snapshots.items():
@@ -1989,8 +2429,196 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "updated_row_count": int(len(price_bars)),
                     "provider_summary": dataset_provider_summary.get(DATASET_PRICE_SNAPSHOT_ID, {}),
                 },
+                DATASET_INDEX_VALUATIONS_SNAPSHOT_ID: {
+                    "name": "\u6307\u6570\u4f30\u503c\u6570\u636e",
+                    "updated_symbol_count": int(len(valuation_index_keys)),
+                    "updated_row_count": int(len(index_valuations or [])),
+                    "provider_summary": dataset_provider_summary.get(DATASET_INDEX_VALUATIONS_SNAPSHOT_ID, {}),
+                },
             },
             "universes": universes,
+        }
+
+    def _fetch_html_document(self, url: str, *, headers: Mapping[str, str] | None = None) -> str:
+        request_headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            **dict(headers or {}),
+        }
+        request = urllib.request.Request(url, headers=request_headers)
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.read().decode("utf-8", "ignore")
+
+    def _fetch_trendonify_index_valuation_history(self) -> list[dict[str, Any]]:
+        html = self._fetch_html_document(INDEX_VALUATION_TRENDONIFY_URL, headers={"Referer": "https://trendonify.com/"})
+        if "Just a moment..." in html or "Enable JavaScript and cookies to continue" in html:
+            raise ValueError("Trendonify returned a Cloudflare challenge page instead of valuation history.")
+        table_match = re.search(
+            r"Historical Data.*?(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}.*?(?:Frequently Asked Questions|Regional Peer Comparison|Definition: Trailing P/E Ratio)",
+            html,
+            re.DOTALL | re.IGNORECASE,
+        )
+        content = table_match.group(0) if table_match else html
+        rows: list[dict[str, Any]] = []
+        month_map = {
+            "jan": 1,
+            "feb": 2,
+            "mar": 3,
+            "apr": 4,
+            "may": 5,
+            "jun": 6,
+            "jul": 7,
+            "aug": 8,
+            "sep": 9,
+            "oct": 10,
+            "nov": 11,
+            "dec": 12,
+        }
+        for month_name, year, pe_ttm in re.findall(
+            r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})\s+([0-9]+(?:\.[0-9]+)?)",
+            content,
+            re.IGNORECASE,
+        ):
+            rows.append(
+                {
+                    "date": f"{int(year):04d}-{month_map[month_name.lower()]:02d}-01",
+                    "proxy_symbol": "QQQ",
+                    "pe_ttm": round(float(pe_ttm), 4),
+                    "source": "trendonify",
+                    "fallback_source": None,
+                    "metadata": {"provider_url": INDEX_VALUATION_TRENDONIFY_URL},
+                }
+            )
+        if not rows:
+            raise ValueError("Trendonify valuation history could not be parsed.")
+        return rows
+
+    def _synthetic_index_valuation_history_rows(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        cursor = date(1996, 1, 1)
+        end_date = date.today().replace(day=1)
+        step = 0
+        while cursor <= end_date:
+            seasonal = math.sin(step / 6.0) * 4.0
+            trend = min(step / 240.0, 1.0) * 6.0
+            pe_ttm = round(18.0 + seasonal + trend, 4)
+            rows.append(
+                {
+                    "date": cursor.isoformat(),
+                    "proxy_symbol": "QQQ",
+                    "pe_ttm": pe_ttm,
+                    "source": "synthetic_test_seed",
+                    "fallback_source": None,
+                    "metadata": {"provider_url": "synthetic://test-seed"},
+                }
+            )
+            if cursor.month == 12:
+                cursor = date(cursor.year + 1, 1, 1)
+            else:
+                cursor = date(cursor.year, cursor.month + 1, 1)
+            step += 1
+        return rows
+
+    def _fetch_index_valuation_history_rows(self) -> tuple[list[dict[str, Any]], list[str]]:
+        warnings: list[str] = []
+        provider_name = str(getattr(self.market_data_provider, "provider_name", "") or "").strip().lower()
+        if "PYTEST_CURRENT_TEST" in os.environ or provider_name.startswith("fake_"):
+            return self._synthetic_index_valuation_history_rows(), warnings
+        try:
+            return self._fetch_trendonify_index_valuation_history(), warnings
+        except Exception as exc:
+            warnings.append(f"Trendonify valuation refresh fallback engaged: {exc}")
+        html = self._fetch_html_document(INDEX_VALUATION_WORLDPERATIO_URL)
+        rows = _parse_worldperatio_detail_pe_history(html)
+        return rows, warnings
+
+    def _build_index_valuation_snapshot_payload(
+        self,
+        *,
+        as_of: str,
+        valuation_rows: Sequence[Mapping[str, Any]],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[IndexValuationCoverageSummary]]:
+        normalized_rows = _rolling_10y_percentiles(valuation_rows)
+        normalized_rows = [
+            {
+                **dict(row),
+                "index_key": INDEX_VALUATION_PROXY_NASDAQ100,
+                "proxy_symbol": str(row.get("proxy_symbol") or "QQQ").strip().upper() or "QQQ",
+            }
+            for row in normalized_rows
+        ]
+        max_gap_days, gap_count = _monthly_observation_gap_days(normalized_rows)
+        observation_count = len(normalized_rows)
+        latest_row = normalized_rows[-1] if normalized_rows else {}
+        ready_for_dynamic_dca = observation_count >= 120 and gap_count == 0
+        source = str(latest_row.get("source") or "trendonify")
+        fallback_source = latest_row.get("fallback_source")
+        snapshot = {
+            "id": DATASET_INDEX_VALUATIONS_SNAPSHOT_ID,
+            "name": "\u6307\u6570\u4f30\u503c\u6570\u636e",
+            "status": "READY" if ready_for_dynamic_dca else "INCOMPLETE",
+            "as_of": as_of,
+            "freshness_label": "\u5df2\u66f4\u65b0" if normalized_rows else "\u5c1a\u672a\u5237\u65b0",
+            "start_date": normalized_rows[0]["date"] if normalized_rows else None,
+            "end_date": latest_row.get("date"),
+            "row_count": observation_count,
+            "source": source,
+            "fallback_source": fallback_source,
+            "blocker": (
+                {}
+                if ready_for_dynamic_dca
+                else {
+                    "code": "INDEX_VALUATIONS_INCOMPLETE",
+                    "message": "Index valuation history is not ready for dynamic DCA yet.",
+                }
+            ),
+            "metadata": {
+                "proxy_keys": [INDEX_VALUATION_PROXY_NASDAQ100],
+                "observation_frequency": "monthly",
+                "latest_pe_ttm": latest_row.get("pe_ttm"),
+                "latest_percentile_10y": latest_row.get("pe_ttm_percentile_10y"),
+                "max_gap_days": max_gap_days,
+                "gap_count_over_62d": gap_count,
+                "ready_for_dynamic_dca": ready_for_dynamic_dca,
+                "selected_provider": source,
+                "preferred_provider": "trendonify",
+            },
+        }
+        coverage_rows = [
+            IndexValuationCoverageSummary(
+                index_key=INDEX_VALUATION_PROXY_NASDAQ100,
+                start_date=normalized_rows[0]["date"] if normalized_rows else None,
+                end_date=latest_row.get("date"),
+                observation_count=observation_count,
+                latest_date=latest_row.get("date"),
+                latest_pe_ttm=latest_row.get("pe_ttm"),
+                latest_percentile_10y=latest_row.get("pe_ttm_percentile_10y"),
+            )
+        ]
+        return snapshot, normalized_rows, coverage_rows
+
+    def _refresh_index_valuation_snapshot(self, *, as_of: str) -> dict[str, Any]:
+        warnings: list[str] = []
+        valuation_rows, fetch_warnings = self._fetch_index_valuation_history_rows()
+        warnings.extend(fetch_warnings)
+        snapshot, normalized_rows, coverage_rows = self._build_index_valuation_snapshot_payload(
+            as_of=as_of,
+            valuation_rows=valuation_rows,
+        )
+        self.market_data_repository.replace_dataset_snapshot(
+            snapshot,
+            index_valuations=normalized_rows,
+            index_valuation_coverage=coverage_rows,
+        )
+        return {
+            "snapshot": snapshot,
+            "rows": normalized_rows,
+            "coverage_rows": coverage_rows,
+            "warnings": warnings,
         }
 
     def _collect_market_data_refresh_batch(
@@ -3055,7 +3683,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
         return restored_ids
 
     def _overall_snapshot_status(self, dataset_snapshots: list[dict[str, Any]], universe_snapshots: list[dict[str, Any]]) -> str:
-        statuses = [str(item.get("status") or "INCOMPLETE").upper() for item in [*dataset_snapshots, *universe_snapshots]]
+        core_datasets = [
+            item
+            for item in dataset_snapshots
+            if str(item.get("id") or "") != DATASET_INDEX_VALUATIONS_SNAPSHOT_ID
+        ]
+        statuses = [str(item.get("status") or "INCOMPLETE").upper() for item in [*core_datasets, *universe_snapshots]]
         if not statuses:
             return "INCOMPLETE"
         if any(status == "FAILED" for status in statuses):
@@ -3073,7 +3706,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
         universe_snapshots: list[dict[str, Any]],
         latest_job: Mapping[str, Any] | None,
     ) -> tuple[str | None, str | None, str, list[str]]:
-        for item in [*dataset_snapshots, *universe_snapshots]:
+        core_dataset_snapshots = [
+            item
+            for item in dataset_snapshots
+            if str(item.get("id") or "") != DATASET_INDEX_VALUATIONS_SNAPSHOT_ID
+        ]
+        for item in [*core_dataset_snapshots, *universe_snapshots]:
             status = str(item.get("status") or "INCOMPLETE").upper()
             blocker = dict(item.get("blocker") or {})
             if status == "READY" and not blocker:
@@ -3865,9 +4503,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
             total_symbol_count_hint=price_total_symbol_count,
             target_symbols=canonical_target_symbols,
         )
+        valuation_row = self._backfill_index_valuation_snapshot_row(
+            raw_dataset_rows.get(DATASET_INDEX_VALUATIONS_SNAPSHOT_ID)
+        )
         dataset_rows = {
             DATASET_PRICE_SNAPSHOT_ID: price_row,
             DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID: corporate_row,
+            DATASET_INDEX_VALUATIONS_SNAPSHOT_ID: valuation_row,
         }
         universe_rows = {str(item["id"]): item for item in self.market_data_repository.list_universe_snapshots()}
         dataset_snapshots = [
@@ -3935,6 +4577,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
             and isinstance(total_symbol_count, int)
             and (total_symbol_count > 0 or row_count == 0)
         ):
+            if str(row.get("id") or "") == DATASET_PRICE_SNAPSHOT_ID:
+                metadata = self._attach_benchmark_etf_history_coverage(
+                    metadata,
+                    symbol_coverage=self.market_data_repository.summarize_dataset_symbols(
+                        DATASET_PRICE_SNAPSHOT_ID,
+                        symbols=BENCHMARK_ETF_SYMBOLS,
+                    ),
+                )
             row["metadata"] = metadata
             return row
 
@@ -3968,7 +4618,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if not symbol_coverage:
                 symbol_coverage = list(self.market_data_repository.summarize_dataset_symbols(snapshot_id))
 
-        row["metadata"] = self._dataset_progress_metadata(
+        metadata = self._dataset_progress_metadata(
             symbol_coverage=symbol_coverage,
             missing_symbols=metadata.get("missing_symbols"),
             existing_metadata=metadata,
@@ -3977,6 +4627,56 @@ class RealBacktestPlatformService(BacktestPlatformService):
             ),
             target_symbols=target_symbols,
         )
+        if snapshot_id == DATASET_PRICE_SNAPSHOT_ID:
+            metadata = self._attach_benchmark_etf_history_coverage(
+                metadata,
+                symbol_coverage=self.market_data_repository.summarize_dataset_symbols(
+                    DATASET_PRICE_SNAPSHOT_ID,
+                    symbols=BENCHMARK_ETF_SYMBOLS,
+                ),
+            )
+        row["metadata"] = metadata
+        return row
+
+    def _backfill_index_valuation_snapshot_row(self, item: Mapping[str, Any] | None) -> dict[str, Any]:
+        row = dict(item or {})
+        snapshot_id = str(row.get("id") or "")
+        metadata = dict(row.get("metadata") or {})
+        if snapshot_id != DATASET_INDEX_VALUATIONS_SNAPSHOT_ID:
+            row["metadata"] = metadata
+            return row
+        coverage_rows = self.market_data_repository.load_dataset_index_valuation_coverage(snapshot_id)
+        if not coverage_rows:
+            coverage_rows = self.market_data_repository.summarize_dataset_index_valuations(snapshot_id)
+        proxy_keys = [
+            str(item.get("index_key") or "").strip().lower()
+            for item in coverage_rows
+            if str(item.get("index_key") or "").strip()
+        ]
+        latest_date = max(
+            (
+                str(item.get("latest_date") or item.get("end_date") or "")
+                for item in coverage_rows
+                if str(item.get("latest_date") or item.get("end_date") or "").strip()
+            ),
+            default=None,
+        )
+        latest_row = None
+        valuations_by_key = self.market_data_repository.load_dataset_index_valuations(snapshot_id, proxy_keys)
+        for proxy_key in proxy_keys:
+            series = valuations_by_key.get(proxy_key, [])
+            if series:
+                candidate = series[-1]
+                if latest_row is None or str(candidate.get("date") or "") >= str(latest_row.get("date") or ""):
+                    latest_row = candidate
+        row["metadata"] = {
+            **metadata,
+            "proxy_keys": proxy_keys,
+            "observation_frequency": "monthly",
+            "latest_date": latest_date,
+            "latest_pe_ttm": (latest_row or {}).get("pe_ttm"),
+            "latest_percentile_10y": (latest_row or {}).get("pe_ttm_percentile_10y"),
+        }
         return row
 
     def _sync_strategy_snapshot_bindings(self, *, updated_at: str) -> None:
@@ -4244,6 +4944,16 @@ class RealBacktestPlatformService(BacktestPlatformService):
     def _snapshot_summary_context(self, strategy: Mapping[str, Any], request_payload: Mapping[str, Any]) -> dict[str, Any]:
         benchmark_symbol = str(strategy.get("benchmark_symbol") or "SPY").upper()
         symbols = [str(symbol).upper() for symbol in self._resolve_universe_symbols(strategy, request_payload)]
+        parameters = _normalize_dynamic_investment_parameters(
+            strategy.get("parameters") or {},
+            strategy_type=str(strategy.get("strategy_type") or ""),
+            benchmark_symbol=benchmark_symbol,
+        )
+        valuation_required = _strategy_requires_index_valuation_data(
+            str(strategy.get("strategy_type") or ""),
+            parameters,
+        )
+        valuation_proxy_key = str(parameters.get("dynamic_investment_proxy_key") or "").strip().lower() or None
         dataset_snapshot_id = str(request_payload.get("dataset_snapshot_id") or DATASET_PRICE_SNAPSHOT_ID)
         direct_symbol_universe = self._uses_direct_symbol_universe(strategy)
         universe_snapshot_id = self._resolved_universe_snapshot_id(strategy, request_payload)
@@ -4274,6 +4984,21 @@ class RealBacktestPlatformService(BacktestPlatformService):
             corporate_dataset = self._select_dataset_snapshot(supporting_dataset_id)
         except KeyError:
             corporate_dataset = None
+
+        valuation_dataset: dict[str, Any] | None = None
+        valuation_coverage: dict[str, Any] | None = None
+        if valuation_required:
+            try:
+                valuation_dataset = self._select_dataset_snapshot(DATASET_INDEX_VALUATIONS_SNAPSHOT_ID)
+            except KeyError:
+                valuation_dataset = None
+            if valuation_proxy_key and valuation_dataset is not None:
+                coverage_rows = self.market_data_repository.load_dataset_index_valuation_coverage(
+                    DATASET_INDEX_VALUATIONS_SNAPSHOT_ID,
+                    [valuation_proxy_key],
+                )
+                if coverage_rows:
+                    valuation_coverage = dict(coverage_rows[0])
 
         universe_snapshot: dict[str, Any] | None = None
         if universe_snapshot_id:
@@ -4322,6 +5047,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "supporting_dataset_id": supporting_dataset_id,
             "price_dataset": price_dataset,
             "corporate_dataset": corporate_dataset,
+            "valuation_required": valuation_required,
+            "valuation_proxy_key": valuation_proxy_key,
+            "valuation_dataset": valuation_dataset,
+            "valuation_coverage": valuation_coverage,
             "universe_snapshot": universe_snapshot,
             "universe_membership_symbols": universe_membership_symbols,
             "start_date": request_payload.get("start_date"),
@@ -4345,6 +5074,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
         supporting_dataset_id = context.get("supporting_dataset_id") or DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID
         price_dataset = dict(context.get("price_dataset") or {})
         corporate_dataset = dict(context.get("corporate_dataset") or {}) if context.get("corporate_dataset") else None
+        valuation_required = bool(context.get("valuation_required"))
+        valuation_proxy_key = str(context.get("valuation_proxy_key") or "").strip().lower() or None
+        valuation_dataset = dict(context.get("valuation_dataset") or {}) if context.get("valuation_dataset") else None
+        valuation_coverage = dict(context.get("valuation_coverage") or {}) if context.get("valuation_coverage") else None
         universe_snapshot = dict(context.get("universe_snapshot") or {}) if context.get("universe_snapshot") else None
         universe_membership_symbols = [str(symbol).upper() for symbol in context.get("universe_membership_symbols") or []]
         normalized_available_symbols = [str(symbol).upper() for symbol in available_symbols]
@@ -4352,11 +5085,36 @@ class RealBacktestPlatformService(BacktestPlatformService):
         all_requested_symbols_available = len(normalized_available_symbols) == len(symbols)
         price_snapshot_ready_for_request = benchmark_trade_days > 0 and bool(normalized_available_symbols)
         universe_snapshot_ready_for_request = direct_symbol_universe or bool(universe_membership_symbols)
+        valuation_latest_observation_date = str(
+            (valuation_coverage or {}).get("latest_date") or (valuation_dataset or {}).get("end_date") or ""
+        ).strip() or None
+        requested_start_date = str(context.get("start_date") or "").strip() or None
+        valuation_window_ready_for_request = True
+        if valuation_required:
+            valuation_window_ready_for_request = bool(valuation_dataset and valuation_proxy_key and valuation_latest_observation_date)
+            if valuation_window_ready_for_request and requested_start_date and valuation_latest_observation_date:
+                valuation_window_ready_for_request = valuation_latest_observation_date >= requested_start_date
+            if valuation_window_ready_for_request and requested_start_date and valuation_coverage:
+                start_date = str(valuation_coverage.get("start_date") or "").strip() or None
+                valuation_window_ready_for_request = bool(start_date and start_date <= requested_start_date)
         required_snapshots = []
         if not price_snapshot_ready_for_request:
             required_snapshots.append(price_dataset)
         if universe_snapshot is not None and not universe_snapshot_ready_for_request:
             required_snapshots.append(universe_snapshot)
+        if valuation_required and not valuation_window_ready_for_request:
+            required_snapshots.append(
+                valuation_dataset
+                or {
+                    "id": DATASET_INDEX_VALUATIONS_SNAPSHOT_ID,
+                    "name": "\u6307\u6570\u4f30\u503c\u6570\u636e",
+                    "status": "INCOMPLETE",
+                    "blocker": {
+                        "code": "INDEX_VALUATIONS_INCOMPLETE",
+                        "message": "Index valuation history is required before dynamic DCA can be backtested.",
+                    },
+                }
+            )
         for item in required_snapshots:
             if str(item.get("status") or "INCOMPLETE").upper() != "READY":
                 blocking_items.append(item)
@@ -4369,6 +5127,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
         elif benchmark_trade_days == 0 or not normalized_available_symbols:
             status = "INCOMPLETE"
         corporate_status = str(corporate_dataset.get("status") or "INCOMPLETE").upper() if corporate_dataset else "NOT_REQUIRED"
+        valuation_status = (
+            str((valuation_dataset or {}).get("status") or "INCOMPLETE").upper()
+            if valuation_required
+            else "NOT_REQUIRED"
+        )
         universe_status = str(universe_snapshot.get("status") or "INCOMPLETE").upper() if universe_snapshot else "NOT_REQUIRED"
         message = blocker.get("message") or (
             "Snapshot is partially available. Review the blocker details for the remaining gaps."
@@ -4390,11 +5153,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
             message = "Universe history snapshot is still incomplete. The run can proceed using the latest available anchor membership."
         elif not blocking and corporate_status != "READY":
             message = "Corporate action snapshot is still incomplete. The run can proceed, but formal backtests may still be limited."
+        elif not blocking and valuation_required and valuation_status != "READY":
+            message = "Index valuation snapshot is still incomplete. Dynamic DCA requires a ready valuation history."
         return {
             "status": status,
             "dataset_snapshot_id": dataset_snapshot_id,
             "universe_snapshot_id": universe_snapshot_id,
             "supporting_dataset_snapshot_id": supporting_dataset_id,
+            "valuation_dataset_snapshot_id": DATASET_INDEX_VALUATIONS_SNAPSHOT_ID if valuation_required else None,
             "symbol_count": len(normalized_available_symbols),
             "row_count": row_count,
             "benchmark_trade_days": benchmark_trade_days,
@@ -4405,6 +5171,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "message": message,
             "price_dataset_status": str(price_dataset.get("status") or "INCOMPLETE").upper(),
             "corporate_actions_status": corporate_status,
+            "valuation_dataset_status": valuation_status,
+            "valuation_proxy_key": valuation_proxy_key,
+            "valuation_latest_observation_date": valuation_latest_observation_date,
             "universe_status": universe_status,
             "latest_trade_date": latest_trade_date,
         }
@@ -4519,6 +5288,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
         job_started_at = existing_job_started_at or started_at
         refresh_universes = "universes" in targets
         refresh_market_data = bool({"price", "corporate"} & set(targets))
+        refresh_index_valuations = "valuations" in targets
+        refresh_bond_fixed_income = "bond" in targets
+        bond_fixed_income_refresh_stats: dict[str, Any] | None = None
+        valuation_refresh_result: dict[str, Any] | None = None
         seeded_legacy_snapshot = (
             self._seed_dataset_snapshots_from_legacy_cache(as_of=started_at) if refresh_market_data else None
         )
@@ -4623,6 +5396,26 @@ class RealBacktestPlatformService(BacktestPlatformService):
             )
             last_heartbeat_monotonic = now_monotonic
 
+        def run_bond_fixed_income_refresh() -> None:
+            nonlocal bond_fixed_income_refresh_stats
+            if not refresh_bond_fixed_income or bond_fixed_income_refresh_stats is not None:
+                return
+            try:
+                bond_fixed_income_refresh_stats = self._refresh_bond_fixed_income_snapshots(as_of=started_at)
+            except Exception as exc:
+                bond_fixed_income_refresh_stats = {
+                    "status": "FAILED",
+                    "updated_row_count": 0,
+                    "instrument_count": 0,
+                    "ready_count": 0,
+                    "watch_count": 0,
+                    "warnings": [],
+                    "errors": [str(exc)],
+                    "provider_results": [],
+                }
+            warnings.extend(str(item) for item in (bond_fixed_income_refresh_stats.get("warnings") or []) if item)
+            errors.extend(str(item) for item in (bond_fixed_income_refresh_stats.get("errors") or []) if item)
+
         if refresh_universes and not refresh_market_data:
             grouped_universe_snapshots, memberships_by_snapshot, universe_warnings = self._run_universe_refresh_phase(
                 mode=mode,
@@ -4668,7 +5461,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
             warnings.extend(universe_warnings)
             universe_refresh_completed = True
 
-        if not refresh_market_data:
+        if not refresh_market_data and refresh_index_valuations:
+            valuation_refresh_result = self._refresh_index_valuation_snapshot(as_of=started_at)
+            warnings.extend(str(item) for item in (valuation_refresh_result.get("warnings") or []) if item)
+            run_bond_fixed_income_refresh()
             self._sync_strategy_snapshot_bindings(updated_at=started_at)
             preview_overview = self._build_snapshot_overview()
             completed_at = iso_now()
@@ -4676,18 +5472,23 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 price_bars=[],
                 corporate_actions=[],
                 corporate_coverage_rows=[],
+                index_valuations=(valuation_refresh_result or {}).get("rows") or [],
+                index_valuation_coverage_rows=(valuation_refresh_result or {}).get("coverage_rows") or [],
                 grouped_universe_snapshots=grouped_universe_snapshots,
                 memberships_by_snapshot=memberships_by_snapshot,
                 existing_universe_memberships=existing_universe_memberships,
             )
+            if bond_fixed_income_refresh_stats is not None:
+                refresh_stats["bond_fixed_income"] = bond_fixed_income_refresh_stats
+            bond_updated_rows = int((bond_fixed_income_refresh_stats or {}).get("updated_row_count") or 0)
             job = self._build_snapshot_refresh_job(
                 job_id=job_id,
                 request=payload,
                 overview=preview_overview,
                 mode=mode,
                 targets=targets,
-                symbol_count=0,
-                row_count=0,
+                symbol_count=int(len((valuation_refresh_result or {}).get("coverage_rows") or [])) + bond_updated_rows,
+                row_count=int(len((valuation_refresh_result or {}).get("rows") or [])) + bond_updated_rows,
                 warnings=warnings,
                 errors=errors,
                 created_at=job_created_at,
@@ -4696,6 +5497,56 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 refresh_stats=refresh_stats,
             )
             self._upsert_snapshot_refresh_job(job)
+            self._record_snapshot_refresh_composition_impact(
+                job_id=job_id,
+                targets=targets,
+                refresh_stats=refresh_stats,
+                occurred_at=completed_at,
+            )
+            if existing_job_id:
+                self._clear_snapshot_refresh_runtime_state(job_id)
+            return self.get_snapshot_overview()
+
+        if not refresh_market_data and not refresh_index_valuations:
+            run_bond_fixed_income_refresh()
+            self._sync_strategy_snapshot_bindings(updated_at=started_at)
+            preview_overview = self._build_snapshot_overview()
+            completed_at = iso_now()
+            refresh_stats = self._build_refresh_stats(
+                price_bars=[],
+                corporate_actions=[],
+                corporate_coverage_rows=[],
+                index_valuations=[],
+                index_valuation_coverage_rows=[],
+                grouped_universe_snapshots=grouped_universe_snapshots,
+                memberships_by_snapshot=memberships_by_snapshot,
+                existing_universe_memberships=existing_universe_memberships,
+            )
+            if bond_fixed_income_refresh_stats is not None:
+                refresh_stats["bond_fixed_income"] = bond_fixed_income_refresh_stats
+            bond_updated_rows = int((bond_fixed_income_refresh_stats or {}).get("updated_row_count") or 0)
+            job = self._build_snapshot_refresh_job(
+                job_id=job_id,
+                request=payload,
+                overview=preview_overview,
+                mode=mode,
+                targets=targets,
+                symbol_count=bond_updated_rows,
+                row_count=bond_updated_rows,
+                warnings=warnings,
+                errors=errors,
+                created_at=job_created_at,
+                started_at=job_started_at,
+                completed_at=completed_at,
+                refresh_stats=refresh_stats,
+            )
+            self._upsert_snapshot_refresh_job(job)
+            self._record_snapshot_refresh_composition_impact(
+                job_id=job_id,
+                targets=targets,
+                refresh_stats=refresh_stats,
+                occurred_at=completed_at,
+            )
             if existing_job_id:
                 self._clear_snapshot_refresh_runtime_state(job_id)
             return self.get_snapshot_overview()
@@ -4849,6 +5700,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 price_bars=price_bars,
                 corporate_actions=corporate_actions,
                 corporate_coverage_rows=corporate_coverage_rows,
+                index_valuations=(valuation_refresh_result or {}).get("rows") or [],
+                index_valuation_coverage_rows=(valuation_refresh_result or {}).get("coverage_rows") or [],
                 grouped_universe_snapshots=grouped_universe_snapshots,
                 memberships_by_snapshot=memberships_by_snapshot,
                 existing_universe_memberships=existing_universe_memberships,
@@ -5156,6 +6009,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
             warnings = [warning for warning in warnings if "historical anchors" not in warning and "FMP historical constituent" not in warning]
             warnings.extend(universe_warnings)
 
+        if refresh_index_valuations:
+            valuation_refresh_result = self._refresh_index_valuation_snapshot(as_of=started_at)
+            warnings.extend(str(item) for item in (valuation_refresh_result.get("warnings") or []) if item)
+
+        run_bond_fixed_income_refresh()
         self._sync_strategy_snapshot_bindings(updated_at=started_at)
         preview_overview = self._build_snapshot_overview()
         completed_at = iso_now()
@@ -5163,19 +6021,33 @@ class RealBacktestPlatformService(BacktestPlatformService):
             price_bars=price_bars,
             corporate_actions=corporate_actions,
             corporate_coverage_rows=corporate_coverage_rows,
+            index_valuations=(valuation_refresh_result or {}).get("rows") or [],
+            index_valuation_coverage_rows=(valuation_refresh_result or {}).get("coverage_rows") or [],
             grouped_universe_snapshots=grouped_universe_snapshots,
             memberships_by_snapshot=memberships_by_snapshot,
             existing_universe_memberships=existing_universe_memberships,
             dataset_provider_telemetry=dataset_provider_telemetry,
         )
+        if bond_fixed_income_refresh_stats is not None:
+            refresh_stats["bond_fixed_income"] = bond_fixed_income_refresh_stats
+        bond_updated_rows = int((bond_fixed_income_refresh_stats or {}).get("updated_row_count") or 0)
         job = self._build_snapshot_refresh_job(
             job_id=job_id,
             request=payload,
             overview=preview_overview,
             mode=mode,
             targets=targets,
-            symbol_count=len(coverage_rows),
-            row_count=len(price_bars) + len(corporate_actions),
+            symbol_count=(
+                len(coverage_rows)
+                + int(len((valuation_refresh_result or {}).get("coverage_rows") or []))
+                + bond_updated_rows
+            ),
+            row_count=(
+                len(price_bars)
+                + len(corporate_actions)
+                + int(len((valuation_refresh_result or {}).get("rows") or []))
+                + bond_updated_rows
+            ),
             warnings=warnings,
             errors=errors,
             created_at=job_created_at,
@@ -5184,6 +6056,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
             refresh_stats=refresh_stats,
         )
         self._upsert_snapshot_refresh_job(job)
+        self._record_snapshot_refresh_composition_impact(
+            job_id=job_id,
+            targets=targets,
+            refresh_stats=refresh_stats,
+            occurred_at=completed_at,
+        )
         if existing_job_id:
             self._clear_snapshot_refresh_runtime_state(job_id)
         return self.get_snapshot_overview()
@@ -5192,15 +6070,48 @@ class RealBacktestPlatformService(BacktestPlatformService):
         latest = self.storage.fetch_one("SELECT * FROM snapshot_refresh_jobs ORDER BY created_at DESC LIMIT 1")
         return self._build_snapshot_overview(self._decode_snapshot_refresh_job(latest))
 
+    def _normalize_dynamic_strategy_payload(self, strategy: Mapping[str, Any]) -> dict[str, Any]:
+        normalized = dict(strategy)
+        parameters = _normalize_dynamic_investment_parameters(
+            normalized.get("parameters") or {},
+            strategy_type=str(normalized.get("strategy_type") or ""),
+            benchmark_symbol=str(normalized.get("benchmark_symbol") or ""),
+        )
+        normalized["parameters"] = parameters
+        parameter_history = []
+        for entry in normalized.get("parameter_history") or []:
+            item = dict(entry)
+            item["parameters"] = _normalize_dynamic_investment_parameters(
+                item.get("parameters") or {},
+                strategy_type=str(normalized.get("strategy_type") or ""),
+                benchmark_symbol=str(normalized.get("benchmark_symbol") or ""),
+            )
+            parameter_history.append(item)
+        if parameter_history:
+            normalized["parameter_history"] = parameter_history
+        return normalized
+
     def list_strategies(self) -> list[dict[str, Any]]:
-        return [self._normalize_strategy_snapshot_bindings(strategy) for strategy in super().list_strategies()]
+        return [
+            self._normalize_dynamic_strategy_payload(
+                self._normalize_strategy_snapshot_bindings(strategy)
+            )
+            for strategy in super().list_strategies()
+        ]
 
     def get_strategy_detail(self, strategy_id: str) -> dict[str, Any]:
-        return self._normalize_strategy_snapshot_bindings(super().get_strategy_detail(strategy_id))
+        return self._normalize_dynamic_strategy_payload(
+            self._normalize_strategy_snapshot_bindings(super().get_strategy_detail(strategy_id))
+        )
 
     def _engine_parameters(self, strategy: Mapping[str, Any]) -> dict[str, Any]:
         parameters = dict(strategy.get("parameters") or {})
         strategy_type = str(strategy.get("strategy_type") or parameters.get("strategy_type") or "MOMENTUM").upper()
+        parameters = _normalize_dynamic_investment_parameters(
+            parameters,
+            strategy_type=strategy_type,
+            benchmark_symbol=str(strategy.get("benchmark_symbol") or parameters.get("benchmark_symbol") or ""),
+        )
         parameters["template_key"] = strategy_type.lower()
         if strategy_type == "MOMENTUM":
             top_n = max(int(_coerce_float(parameters.get("top_n"), 5.0) or 5.0), 1)
@@ -5257,6 +6168,17 @@ class RealBacktestPlatformService(BacktestPlatformService):
         normalized["universe_snapshot_id"] = self._resolved_universe_snapshot_id(strategy, normalized)
         normalized["is_permanent"] = bool(normalized.get("is_permanent", False))
         return normalized
+
+    def _parameter_snapshot_for_version(
+        self,
+        strategy: Mapping[str, Any],
+        parameter_version_id: str | None = None,
+    ) -> dict[str, Any]:
+        return _normalize_dynamic_investment_parameters(
+            super()._parameter_snapshot_for_version(strategy, parameter_version_id),
+            strategy_type=str(strategy.get("strategy_type") or ""),
+            benchmark_symbol=str(strategy.get("benchmark_symbol") or ""),
+        )
 
     def _strategy_for_run(self, strategy: Mapping[str, Any], request_payload: Mapping[str, Any]) -> dict[str, Any]:
         resolved = dict(strategy)
@@ -5609,6 +6531,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
             start_date=context.get("start_date"),
             end_date=context.get("end_date"),
         )
+        valuation_series = {}
+        valuation_proxy_key = str(context.get("valuation_proxy_key") or "").strip().lower()
+        if context.get("valuation_required") and valuation_proxy_key:
+            valuation_series = self.market_data_repository.load_dataset_index_valuations(
+                DATASET_INDEX_VALUATIONS_SNAPSHOT_ID,
+                [valuation_proxy_key],
+                end_date=context.get("end_date"),
+            )
         snapshot_summary = self._build_snapshot_summary_from_context(context, raw_bars)
         if is_snapshot_blocking(snapshot_summary):
             raise SnapshotBlockingError(snapshot_summary)
@@ -5635,6 +6565,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             bars_by_symbol,
             config=config,
             benchmark_bars=benchmark_bars,
+            valuation_series=valuation_series,
         )
         return {
             "benchmark_symbol": benchmark_symbol,
@@ -5686,6 +6617,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             trades.append(trade)
 
         warnings = list(result.warnings)
+        warnings = _merge_runtime_backtest_warnings(warnings, strategy.get("parameters") or {})
         if result.coverage_ratio < 0.8:
             warnings.append("Coverage below 80%")
         summary = metric_summary(asdict(result.metrics))
@@ -6121,6 +7053,18 @@ class RealBacktestPlatformService(BacktestPlatformService):
     def get_backtest_run_detail(self, run_id: str, view: str = "full") -> dict[str, Any]:
         normalized_view = self._normalize_backtest_run_detail_view(view)
         run = super().get_backtest_run_detail(run_id, view=normalized_view)
+        parameter_snapshot = dict(run.get("parameter_snapshot") or {})
+        run["warnings"] = _merge_runtime_backtest_warnings(run.get("warnings") or [], parameter_snapshot)
+        if run.get("preview"):
+            preview_payload = dict(run.get("preview") or {})
+            preview_parameters = dict(preview_payload.get("parameter_snapshot") or parameter_snapshot)
+            preview_payload["warnings"] = _merge_runtime_backtest_warnings(
+                preview_payload.get("warnings") or run.get("warnings") or [],
+                preview_parameters,
+            )
+            run["preview"] = preview_payload
+        if run.get("warnings") and str(run.get("status") or "").upper() == "COMPLETED":
+            run["status"] = "COMPLETED_WITH_WARNINGS"
         chart_series = list(run.get("chart_series") or [])
         if normalized_view in {"full", "initial"}:
             rolling_metrics = list(run.get("rolling_metrics") or [])

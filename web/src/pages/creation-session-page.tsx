@@ -158,6 +158,30 @@ const CONFIGURED_FIELDS: Partial<Record<StrategyType, FieldConfigMap>> = {
 const CONFIGURED_TOP_LEVEL_KEYS = new Set(['strategy_type', 'universe_name', 'rebalance_frequency']);
 const MEAN_REVERSION_LEGACY_KEYS = new Set(['deviation_threshold', 'window_size', 'mean_target', 'risk_budget']);
 const ETF_BENCHMARK_VALUES = new Set(['SPY', 'QQQ']);
+const OPTIONAL_FIELD_OVERRIDES: FieldConfigMap = {
+  contribution_anchor: {
+    key: 'contribution_anchor',
+    label: '定投执行锚点',
+    bucket: 'logic',
+    step: 'selection',
+    required: false,
+    control: 'text',
+    order: 75,
+    showKey: false,
+    placeholder: '例如 每月第一个交易日',
+  },
+  dynamic_investment_logic: {
+    key: 'dynamic_investment_logic',
+    label: '动态定投逻辑',
+    bucket: 'logic',
+    step: 'selection',
+    required: false,
+    control: 'textarea',
+    order: 76,
+    showKey: false,
+    placeholder: '例如 按滚动估值百分位动态调整定投倍率',
+  },
+};
 const normalizeFieldValue = (value: unknown): string => value === null || value === undefined ? '' : String(value);
 const normalizeSearchText = (value: string): string => value.replace(/\s+/g, '').toLowerCase();
 const isFilled = (value: string): boolean => value.trim().length > 0;
@@ -198,6 +222,16 @@ function resolveField(strategyType: StrategyType | null | undefined, key: string
     return {
       ...configured,
       options: key === 'benchmark_symbol' ? ETF_BENCHMARK_OPTIONS : configured.options,
+      source: '',
+      value: '',
+      isTopLevel,
+    };
+  }
+  const overridden = OPTIONAL_FIELD_OVERRIDES[key];
+  if (overridden) {
+    return {
+      ...overridden,
+      options: overridden.options,
       source: '',
       value: '',
       isTopLevel,

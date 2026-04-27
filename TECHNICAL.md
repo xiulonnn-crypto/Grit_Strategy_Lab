@@ -44,7 +44,9 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - focused frontend tests 是必要门禁，但不足以证明 UI 还原。
 - 已批准 UI 交付物实施必须同时提供截图、DOM 文案/状态扫描与关键交互证明。
 - 像素对齐不能只看外框坐标和高度；还必须检查模块内部的视觉密度、内容到容器边界的空白、强制 `min-height` / `height` 是否造成空洞。若用户反馈“空白多、模块太高、密度松”，优先移除非必要强制高度并用内容自适应、padding/gap/line-height 精调，而不是继续追求静态稿外框高度。
+- CSS 契约测试不能把过大的固定高度当作 UI 一致性本身；除非批准稿明确要求固定高度，否则应断言大 `min-height` / `height` 不存在，并用截图或 DOM geometry 证明模块间距和卡片内边距已经收敛。
 - live API 或 demo data 与静态设计稿不一致时，页面必须通过 view-model / formatter 统一前台展示，不能直接暴露 raw backend label、未翻译英文、乱码、占位符或实现说明语气。
+- 用户报告已批准 UI 在某个具体 live route 或对象 ID 上漂移时，验收必须抓取用户给出的精确 URL/ID；只抽样列表第一条、默认 demo 对象或旧截图不能作为该问题的完成证据。
 - worker 交付给 reviewer 前必须先跑交付前自测门，按 reviewer 拒收清单自查测试、Trace Matrix、截图、DOM 文案、交互证明、文档 delta 和剩余偏离，并明确回答 `Would reviewer refuse this?`；答案不是确定的 `No` 时不得交付。
 - 交付前自测不能替代正式 reviewer，它只是阻止明显不合格切片进入评审。
 - 临时截图、DOM dump、trace matrix 草稿和浏览器记录应放在 `.tmp/`、`artifacts/`、`tmp/grit-coder/` 或 `output/logs/grit-coder/`，不要散落在 repo 根目录。
@@ -203,12 +205,24 @@ Codex 在本仓库的默认阅读顺序固定如下：
 | 环境变量 | 作用 |
 | --- | --- |
 | `GRIT_BACKTEST_DB` | 覆盖默认 SQLite 主库路径 |
+| `GRIT_ENABLE_OPENBB_PROVIDER` | 设为 `1` / `true` / `yes` / `on` 时启用可选 OpenBB 快照增强层；默认关闭，缺 OpenBB 或缺 key 不应影响启动 |
+| `TIINGO_API_TOKEN` | OpenBB Tiingo 行情凭证，运行时映射到 `obb.user.credentials.tiingo_token`，不写入本地 OpenBB 设置文件 |
+| `ALPHAVANTAGE_API_KEY` | OpenBB Alpha Vantage targeted repair 凭证，运行时映射到 `alpha_vantage_api_key`，不写入本地 OpenBB 设置文件 |
+| `FMP_API_KEY` | OpenBB FMP 行情与当前成分辅助校验凭证，运行时映射到 `fmp_api_key`，不替代既有 FMP historical universe lane |
+| `FRED_API_KEY` | OpenBB FRED 固定收益曲线凭证，运行时映射到 `fred_api_key`，不写入本地 OpenBB 设置文件 |
 | `GRIT_PYTHON_RUNTIME_SOURCE` | 为 QuickStart 指定可复制的 Python runtime 来源 |
 | `GRIT_OPTIMIZATION_STEP_DELAY_SECONDS` | 覆盖优化 trial 之间的人工延迟；默认运行态为 `0`，测试态保持极小延迟以稳定观察进度刷新 |
 | `GRIT_SNAPSHOT_MEMORY_LIMIT_RATIO` | 控制 Windows 下 snapshot refresh 的内存护栏比例 |
 | `VITE_API_BASE_URL` | 覆盖前端请求 API base |
 | `LIVE_API_BASE` | live acceptance 时覆盖测试 API base |
 | `LIVE_FIXTURE_MANIFEST` | live acceptance 时显式指定 fixture manifest |
+
+OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收时，先安装并构建扩展：
+
+- `.\.venv\Scripts\python.exe -m pip install -e ".[openbb-provider]"`
+- `.\.venv\Scripts\openbb-build.exe`（若命令未在当前 shell 可见，重新打开 shell 或直接调用 venv Scripts 下的可执行文件）
+
+启用后再设置 `GRIT_ENABLE_OPENBB_PROVIDER=1` 与所需 key。凭证只从环境变量读入并在 lazy 初始化时写到内存中的 `obb.user.credentials.*`，不得写入或依赖 `~/.openbb_platform/user_settings.json`。
 
 ### 4.4 默认路径真相
 
@@ -230,6 +244,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 - `serve` 默认通过 `uvicorn` 启动 FastAPI app
 - `refresh-snapshots` 支持 `incremental`、`repair`、`full`
+- `refresh-snapshots --targets ...` 现在支持 `valuations`，用于刷新 `ds-index-valuations` 月频估值快照；默认股票/指数刷新链路应包含 `price,corporate,valuations,universes`
 - `refresh-snapshots` 在 Windows 下会使用基于 `GRIT_SNAPSHOT_MEMORY_LIMIT_RATIO` 的内存 job object 护栏
 - `backfill-backtest-costs` 会按默认 `fee_bps=1.5`、`slippage_bps=2.5` 重跑所有永久保存的历史回测，并覆盖原持久化结果；可通过 `--fee-bps` / `--slippage-bps` 改写本次回刷参数
 
@@ -277,7 +292,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `src/grit_backtest_platform/_storage_restored.py`
   - SQLite 存储实现
 - `src/grit_backtest_platform/_market_data_repository_restored.py`
-  - snapshot、公司行为与市场数据落库
+  - snapshot、公司行为、指数估值与市场数据落库
 
 ### 5.3 API 路由真相
 
@@ -319,14 +334,17 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `DELETE /optimization-jobs/{job_id}/candidates/{trial_id}`
 - `GET /data-snapshots/overview`
 - `POST /admin/snapshot-refresh-jobs`
+- `GET /data-snapshots/overview` 的 `dataset_snapshots[]` 现在包含 `ds-index-valuations`；其 metadata 暴露 `proxy_keys`、`observation_frequency`、`latest_pe_ttm`、`latest_percentile_10y`
 
 当前一期 Compose First 的补充真相：
 
 - `GET /leg-inventory` 是统一读模型入口：策略腿来自 `strategy + parameter version + latest eligible run` 的投影，不落独立真相表；资产腿与现金腿来自最小持久化定义表。
 - `POST /asset-legs` 与 `POST /cash-legs` 只负责最小定义落库，不建立版本树，也不改写策略主链路。
 - `GET /compositions`、`GET /compositions/{id}`、`POST /compositions/preview`、`POST /compositions`、`PATCH /compositions/{id}` 共同组成一期组合工作台与详情页的正式契约面。
-- `POST /compositions/preview` 返回权重摘要、收益流预演、相关性矩阵、风险贡献预览、维护成本与再平衡摘要，供工作台边调边判断。
-- `GET /data-snapshots/overview` 继续作为唯一快照总览入口；债券/固定收益治理页通过新增 `bond_fixed_income` 分段扩展现有契约，不另开第二套快照 API。
+- `POST /compositions/preview` 返回权重摘要、收益流预演、相关性矩阵、风险贡献预览、维护成本与再平衡摘要，供工作台边调边判断；Phase 1.2 同时返回 `return_quality_summary`、`rebalance_events`、`source_integrity`，并在风险贡献里补充边际贡献、预算占用、债券久期/凸性占用。
+- `GET /compositions/{id}` 继续读取冻结来源；Phase 1.2 详情额外返回 `audit_trail`，并扩展 `source_evidence` 的 `signature_status`、`drift_status`、`current_ref_id`、`alerts`。来源漂移只提示，不自动改写已保存组合。
+- `composition_audit_events` 是 Phase 1.2 后端 append-only 审计表；创建、结构 PATCH、状态切换、来源冻结、再平衡检查和债券快照刷新影响检查都应写入该表，详情 `audit_trail` 从持久化事件流读取，旧数据才允许回退到临时投影。
+- `GET /data-snapshots/overview` 继续作为唯一快照总览入口；债券/固定收益治理页通过新增 `bond_fixed_income` 分段扩展现有契约，不另开第二套快照 API。Phase 1.2 的债券质量字段包括 `quality_audit`、`repair_rules`、`daily_accrual_status`、`risk_budget_inputs`，修复/补齐仍走 `POST /admin/snapshot-refresh-jobs` 的 `bond` target。
 
 当前优化任务 detail 的补充真相：
 
@@ -549,6 +567,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 ### 12.1 契约与 runtime 边界补充
 
 - backend contract truth 固定以 `src/grit_backtest_platform/models.py` 为起点；frontend contract mirror 固定为 `web/src/types.ts`。
+- 动态定投策略的机器可执行字段 `dynamic_investment_proxy_key`、`dynamic_investment_metric_key` 与 `dynamic_investment_rules` 属于后端执行契约，前端详情/表单应隐藏这些字段，仅展示 `dynamic_investment_logic` 的用户口径。
 - frontend runtime truth 固定在：
   - `web/src/app-runtime-cn.tsx`
   - `web/src/lib/appRouteContext.tsx`
@@ -577,6 +596,8 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - Company-action snapshot completeness is now defined by formal `dividend/split/reverse_split` probe coverage, not by “every symbol must have at least one event row”.
 - When an action-capable provider successfully probes a symbol and finds no formal events, the pipeline writes a `dataset_symbol_coverage` row with `coverage_kind=corporate_probe` and `probe_status=complete_no_events`.
 - `earnings_report` and `report_filed` remain stored as supplementary action rows, but they do not satisfy formal company-action completeness on their own.
+- OpenBB provider 支持作为 `openbb-provider` extra 启用，价格层 provider id 为 `openbb_yfinance`、`openbb_tiingo`、`openbb_fmp` 与 targeted-only `openbb_alpha_vantage`；固定收益层通过 `openbb_federal_reserve` 与 `openbb_fred` 填补或交叉校验 UST/TIPS 曲线。Universe 只允许写入 `metadata.openbb_current_constituent_check` 辅助校验，不能改变 PIT readiness。
+- OpenBB 相关回归至少覆盖 `tests/test_market_data_provider_chain.py`、`tests/test_backend_api.py` 与 `web/src/snapshots.page.test.tsx`；真实 live 验收只有在安装 extra、执行 `openbb-build`、设置 key、重启 `8000/4173` 并使用 `?v=<timestamp>#/snapshots` 强制 reload 后才可声明。
 
 ## 2026-04-17 Optimization Objective / Constraint Alignment
 
@@ -621,13 +642,24 @@ Phase 1.1 的默认回归范围包含五个真实 runtime 页面：`#/compositio
 - `GET /compositions/{id}`、`PATCH /compositions/{id}`：组合详情读取冻结来源并支持状态写入；结构性修改跳转 workbench。
 - `GET /data-snapshots/overview`、`POST /admin/snapshot-refresh-jobs`、`POST /asset-legs`：债券 tab 读取 `bond_fixed_income`、触发刷新、从 eligible runtime bond snapshot 创建资产腿。
 
+Phase 1.2 的默认回归范围仍锁定这五个真实 runtime 页面，其中重点页面是 `#/compositions/workbench`、`#/compositions/:id`、`#/snapshots?tab=bond`、`#/legs`。实现必须先产出 UI Artifact Trace Matrix，再把设计稿模块映射到选择器、文案、状态与测试；当前 Phase 1.2 trace matrix 位于 `output/ui-artifact-trace/phase1-2-trust-matrix.md`，批准设计包位于 `C:\Users\TradeAdmin\.gstack\projects\grit-strategy-lab\designs\phase1-2-trust-2026-04-27\`。
+
+Phase 1.2 验证时至少覆盖：
+
+- Backend: `tests/test_composition_api.py` 中的 aligned returns、rebalance events、cost drag、source drift、audit trail、bond quality/repair/risk-budget cases。
+- Backend-only 实施不得改 React 页面、CSS、路由或设计 HTML；验收以后端固定切片、focused API tests 与文档/CHANGELOG 同步为准。
+- Frontend: `composition.workbench.test.tsx`、`composition.detail.test.tsx`、`leg.inventory.test.tsx`、`snapshots.page.test.tsx`，并在合同变更后执行 `powershell -ExecutionPolicy Bypass -File .\scripts\codex-test-frontend.ps1 -StrictGlobalTypes` 或等价 `tsc --noEmit`。
+- Live acceptance 仍受 `harness/fixtures/seed_workspace/` 缺失限制；不能把 fixture-backed reset 路径声称为通过。
+
+债券快照专项回归必须覆盖七条运行时行：UST 2Y、UST 10Y、UST 30Y、13W T-Bill、TIPS 5Y、TIPS 10Y、LQD。测试和 fixture 字段统一使用 `asset_type`、`tenor_label`、`audit_profile`、`discount_rate_pct`、`real_yield_pct`、`inflation_factor`、`breakeven_inflation_bps`、`effective_duration`、`sec_yield_30d_pct`、`credit_quality`、`tracking_error_bps`、`audit_alerts`、`audit_notes`、`tracking_status`。LQD `WATCH` 行不得创建资产腿；T-Bill 在 `discount_rate_pct` 存在时可豁免 `accrued_interest`；TIPS 需要 breakeven 证据；UST 利差异常应保留 `audit_alerts`。
+
 验证入口：
 
 - 后端固定切片：`powershell -ExecutionPolicy Bypass -File .\scripts\codex-test-backend.ps1`
 - 前端固定切片：`powershell -ExecutionPolicy Bypass -File .\scripts\codex-test-frontend.ps1`
 - 契约/类型变更后：`powershell -ExecutionPolicy Bypass -File .\scripts\codex-test-frontend.ps1 -StrictGlobalTypes`
 
-不要声明 fixture-backed live smoke 通过，除非 `harness/fixtures/seed_workspace/` 被恢复并重新跑过对应 live acceptance。
+当前 `harness/fixtures/seed_workspace/` 缺失；不要声明 fixture-backed live smoke 通过，除非该目录被恢复并重新跑过对应 live acceptance。
 
 ## 2026-04-23 QuickStart preview listener note
 

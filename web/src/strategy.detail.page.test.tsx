@@ -113,6 +113,9 @@ const recentRuns = [
   },
 ] as const;
 
+const DYNAMIC_DCA_LOGIC =
+  '读取QQQ滚动10年PE(TTM)百分位：极度高估>90%乘0.5x；温和高估70%-90%乘0.8x；合理区间30%-70%乘1.0x；低估区间10%-30%乘1.5x；极度低估<10%乘2.0x';
+
 beforeEach(() => {
   vi.resetModules();
   fakeApi.createCreationSession.mockReset();
@@ -202,5 +205,58 @@ describe('StrategyDetailPage', () => {
     await waitFor(() =>
       expect(window.location.hash).toBe('#/optimization-jobs/new/config?strategy_id=strat-001&entry_point=strategy_detail'),
     );
+  });
+
+  it('summarizes dynamic buy-and-hold strategies and renders the extracted logic cards', async () => {
+    ({ StrategyDetailPage } = await import('./pages/strategy-detail-page'));
+    fakeApi.getStrategyDetail.mockResolvedValue({
+      ...strategy,
+      name: 'QQQ 动态定投策略',
+      description: '',
+      strategy_type: 'BUY_AND_HOLD',
+      universe_name: 'QQQ',
+      benchmark_symbol: 'QQQ',
+      latest_optimization_job_id: null,
+      parameters: {
+        strategy_description: `围绕QQQ执行月度定投，每期基准买入1000USD，按每月第一个交易日执行，${DYNAMIC_DCA_LOGIC}。`,
+        benchmark_symbol: 'QQQ',
+        contribution_amount: 1000,
+        investment_frequency: 'monthly',
+        contribution_anchor: '每月第一个交易日',
+        dynamic_investment_logic: DYNAMIC_DCA_LOGIC,
+        dynamic_investment_proxy_key: 'nasdaq100',
+        dynamic_investment_metric_key: 'pe_ttm_percentile_10y',
+        dynamic_investment_rules: [{ min_percentile: 90, max_percentile: 100, multiplier: 0.5 }],
+      },
+      parameter_history: [
+        {
+          version_number: 1,
+          parameter_version_id: 'pv-dca-001',
+          revision: 1,
+          created_at: '2026-04-24T08:44:00Z',
+          parameters: {
+            contribution_amount: 1000,
+            investment_frequency: 'monthly',
+          },
+          comment: 'Initial import.',
+        },
+      ],
+    });
+
+    const { container } = render(<StrategyDetailPage strategyId="strat-001" />);
+
+    await waitFor(() => expect(container.querySelector('.strategy-detail-page')).not.toBeNull());
+    const summary = container.querySelector('.strategy-detail-hero__summary');
+    expect(summary?.textContent).toContain('QQQ');
+    expect(summary?.textContent).toContain('每月基准定投 1,000 美元');
+    expect(summary?.textContent).toContain('按每月第一个交易日执行');
+    expect(summary?.textContent).toContain('按估值区间动态调整投入倍率');
+    expect(screen.getByText('定投执行锚点')).toBeInTheDocument();
+    expect(screen.getByText('每月第一个交易日')).toBeInTheDocument();
+    expect(screen.getByText('动态定投逻辑')).toBeInTheDocument();
+    expect(screen.getByText(DYNAMIC_DCA_LOGIC)).toBeInTheDocument();
+    expect(screen.queryByText('dynamic_investment_proxy_key')).not.toBeInTheDocument();
+    expect(screen.queryByText('dynamic_investment_metric_key')).not.toBeInTheDocument();
+    expect(screen.queryByText('dynamic_investment_rules')).not.toBeInTheDocument();
   });
 });

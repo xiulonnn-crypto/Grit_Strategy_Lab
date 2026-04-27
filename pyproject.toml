@@ -15,6 +15,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+openbb-provider = [
+  "openbb",
+  "openbb-yfinance",
+  "openbb-tiingo",
+  "openbb-alpha-vantage",
+  "openbb-fmp",
+  "openbb-fred",
+  "openbb-federal-reserve",
+]
 test = [
   "pytest>=8.0",
   "httpx>=0.27",

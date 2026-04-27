@@ -7,6 +7,7 @@ import type {
   ApiBondSnapshotCurvePoint,
   ApiBondSnapshotEligibleInstrument,
   ApiBondSnapshotEligibleSource,
+  ApiBondSnapshotGroupCounts,
   ApiBondSnapshotPillarGroup,
   ApiBondSnapshotRegistryItem,
   ApiSnapshotOverview,
@@ -58,6 +59,20 @@ const BOND_OWNER_LABELS: Record<string, string> = {
 const BOND_SOURCE_LABELS: Record<string, string> = {
   shared_snapshot_overview: '共享快照总览',
   'api:/data-snapshots/overview': '/data-snapshots/overview',
+  bond_fixed_income: '债券快照源',
+  bond_fixed_income_snapshots: '债券快照表',
+  us_treasury_xml: '美国财政部官方曲线',
+  us_treasury_bill_proxy: '美国财政部 T-Bill',
+  us_treasury_cmt_proxy: '美国财政部 CMT',
+  us_treasury_tips_proxy: '美国财政部 TIPS',
+  blackrock_ishares_official: 'iShares 官方',
+  ishares: 'iShares 官方',
+  openbb_federal_reserve: 'OpenBB 美联储曲线',
+  openbb_fred: 'OpenBB FRED 曲线',
+  openbb_bond_fixed_income: 'OpenBB 固收增强',
+  FMP: 'FMP',
+  Polygon: 'Polygon',
+  none: '无',
 };
 
 const BOND_TEXT_TRANSLATIONS: Record<string, string> = {
@@ -82,12 +97,15 @@ const BOND_TEXT_TRANSLATIONS: Record<string, string> = {
   'Any shared snapshot blocker also blocks the bond governance tab.':
     '任何共享快照阻塞都会直接影响债券治理页签。',
   'Only READY runtime bond rows with complete or inferred fields can create asset legs.':
-    '只有 READY 且字段完整或已推断的 runtime 债券行可以创建资产腿。',
+    '只有就绪且字段完整或已推断的运行时债券行可以创建资产腿。',
   'Only runtime bond_fixed_income_snapshots rows are eligible asset-leg sources.':
-    '只有 runtime bond_fixed_income_snapshots 行可以作为资产腿来源。',
+    '只有运行时债券快照表行可以作为资产腿来源。',
   'Runtime bond_fixed_income_snapshots rows are eligible for asset-leg creation.':
-    'runtime bond_fixed_income_snapshots 行可用于创建资产腿。',
-  'No eligible runtime bond source is available yet.': '暂无可入库的 runtime 债券来源。',
+    '运行时债券快照表行可用于创建资产腿。',
+  'Runtime fixed-income snapshot row.': '运行时债券行',
+  'Runtime fixed-income snapshot rows are eligible for asset-leg creation.': '运行时债券行可创建资产腿',
+  'Only runtime fixed-income snapshot rows are eligible asset-leg sources.': '仅运行时债券行可创建资产腿',
+  'No eligible runtime bond source is available yet.': '暂无可入库的运行时债券来源。',
   '#/snapshots remains the only route for bond governance': '#/snapshots 继续作为唯一治理入口。',
   'This remains the single snapshot API surface.': '当前仍只有一套快照 API 入口。',
   'Bond governance is additive only.': '债券治理只做增量扩展，不新增第二套接口。',
@@ -156,6 +174,20 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function displayRecordValue(record: Record<string, unknown>, key: string, fallback = 'pending'): string {
+  const value = record[key];
+  if (value === null || value === undefined || value === '') {
+    return fallback;
+  }
+  if (Array.isArray(value)) {
+    return value.length ? value.map((item) => String(item)).join(', ') : fallback;
+  }
+  if (typeof value === 'object') {
+    return JSON.stringify(value);
+  }
+  return String(value);
+}
+
 function getBondStatusLabel(status?: string | null): string {
   return BOND_STATUS_LABELS[String(status ?? '').toUpperCase()] ?? '待刷新';
 }
@@ -214,6 +246,15 @@ function translateBondText(value?: string | null): string {
   if (memorySummaryMatch) {
     return `总物理内存：${memorySummaryMatch[1]}；可用物理内存：${memorySummaryMatch[2]}；进程工作集：${memorySummaryMatch[3]}`;
   }
+  if (/^Eligible for asset-leg creation only when status is READY\.?$/i.test(text)) {
+    return '仅当状态就绪时，可作为资产腿来源。';
+  }
+  if (/^Runtime row\.?$/i.test(text)) {
+    return '运行时快照行';
+  }
+  if (/^READY$/i.test(text)) {
+    return '就绪';
+  }
   return BOND_TEXT_TRANSLATIONS[text] ?? text;
 }
 
@@ -233,12 +274,50 @@ function translateBondSource(value?: string | null): string {
   return BOND_SOURCE_LABELS[text] ?? translateBondText(text);
 }
 
+function formatBondInstrumentKind(instrument: ApiBondSnapshotEligibleInstrument): string {
+  const profile = String(instrument.audit_profile ?? '').toUpperCase();
+  const assetType = String(instrument.asset_type ?? '').toUpperCase();
+  const instrumentType = String(instrument.instrument_type ?? '').toUpperCase();
+  if (profile.includes('BILL')) {
+    return '贴现国库券';
+  }
+  if (profile.startsWith('UST_CMT') || instrumentType.includes('TREASURY')) {
+    return '美国国债曲线';
+  }
+  if (profile.startsWith('TIPS')) {
+    return '通胀保值债';
+  }
+  if (assetType === 'BOND_ETF' || profile.includes('LQD')) {
+    return '投资级信用 ETF';
+  }
+  return translateBondText(instrument.instrument_type || instrument.asset_type || '债券快照');
+}
+
+function formatBondInstrumentSummary(instrument: ApiBondSnapshotEligibleInstrument): string {
+  return [
+    formatBondInstrumentKind(instrument),
+    translateBondSource(instrument.source),
+    instrument.snapshot_date ?? '暂无快照日期',
+  ].join(' · ');
+}
+
 function formatRegistryTimestamp(value?: string | null): string {
   return value ? formatDateTime(value) : '等待刷新';
 }
 
-function formatCurvePercent(value: number): string {
-  return `${value.toFixed(2)}%`;
+function formatRegistryNotes(notes: string[]): string {
+  if (!notes.length) {
+    return '等待字段补齐';
+  }
+  const translated = Array.from(
+    new Set(
+      notes
+        .map((note) => translateBondText(note).trim())
+        .filter((note) => note.length > 0)
+        .map((note) => note.replace(/[。.]$/, '')),
+    ),
+  );
+  return translated.length ? `${translated.join('；')}。` : '等待字段补齐';
 }
 
 function formatCurveBps(value: number): string {
@@ -397,7 +476,71 @@ function normalizeRegistryItem(
 }
 
 function finiteNumberOrNull(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function stringOrNull(value: unknown): string | null {
+  if (typeof value === 'string') {
+    return value;
+  }
+  return value === null ? null : null;
+}
+
+function creditQualityStringOrNull(value: unknown): string | null {
+  if (typeof value === 'string') {
+    return value.trim() || null;
+  }
+  const payload = asRecord(value);
+  if (!payload) {
+    return null;
+  }
+  const ordered = ['AAA', 'AA', 'A', 'BBB'];
+  const entries = ordered
+    .map((key) => {
+      const numericValue = finiteNumberOrNull(payload[key]);
+      return numericValue === null ? null : `${key} ${numericValue.toFixed(1)}%`;
+    })
+    .filter((entry): entry is string => Boolean(entry));
+  return entries.length ? entries.join(' / ') : null;
+}
+
+function stringList(value: unknown): string[] {
+  if (typeof value === 'string') {
+    return value.trim() ? [value] : [];
+  }
+  if (Array.isArray(value)) {
+    return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+  }
+  return [];
+}
+
+function normalizeSourcedReadyCounts(value: unknown): ApiBondSnapshotGroupCounts | undefined {
+  const payload = asRecord(value);
+  if (!payload) {
+    return undefined;
+  }
+  const normalized: ApiBondSnapshotGroupCounts = {};
+  Object.entries(payload).forEach(([key, rawEntry]) => {
+    const entry = asRecord(rawEntry);
+    if (!entry) {
+      return;
+    }
+    normalized[key] = {
+      sourced: finiteNumberOrNull(entry.sourced),
+      ready: finiteNumberOrNull(entry.ready),
+      sourced_count: finiteNumberOrNull(entry.sourced_count),
+      ready_count: finiteNumberOrNull(entry.ready_count),
+      total: finiteNumberOrNull(entry.total),
+    };
+  });
+  return Object.keys(normalized).length ? normalized : undefined;
 }
 
 function normalizeEligibleSource(item: unknown, index: number): ApiBondSnapshotEligibleSource {
@@ -431,6 +574,11 @@ function normalizeEligibleInstrument(item: unknown, index: number): ApiBondSnaps
     id: typeof payload?.id === 'string' ? payload.id : `bond-instrument-${index + 1}`,
     label: typeof payload?.label === 'string' ? payload.label : `Bond instrument ${index + 1}`,
     instrument_type: typeof payload?.instrument_type === 'string' ? payload.instrument_type : 'bond',
+    asset_type: stringOrNull(payload?.asset_type),
+    tenor_label: stringOrNull(payload?.tenor_label),
+    audit_profile: stringOrNull(payload?.audit_profile),
+    group: stringOrNull(payload?.group),
+    category: stringOrNull(payload?.category),
     source: typeof payload?.source === 'string' ? payload.source : 'unknown',
     status: typeof payload?.status === 'string' ? payload.status : 'WATCH',
     symbol: typeof payload?.symbol === 'string' || payload?.symbol === null ? (payload.symbol as string | null) : null,
@@ -455,7 +603,20 @@ function normalizeEligibleInstrument(item: unknown, index: number): ApiBondSnaps
     full_price: finiteNumberOrNull(payload?.full_price),
     accrued_interest: finiteNumberOrNull(payload?.accrued_interest),
     ytm_pct: finiteNumberOrNull(payload?.ytm_pct),
+    discount_rate_pct: finiteNumberOrNull(payload?.discount_rate_pct),
+    real_yield_pct: finiteNumberOrNull(payload?.real_yield_pct),
+    inflation_factor: finiteNumberOrNull(payload?.inflation_factor),
+    breakeven_inflation_bps: finiteNumberOrNull(payload?.breakeven_inflation_bps),
+    breakeven_pct: finiteNumberOrNull(payload?.breakeven_pct),
     duration: finiteNumberOrNull(payload?.duration),
+    effective_duration: finiteNumberOrNull(payload?.effective_duration),
+    sec_yield_30d_pct: finiteNumberOrNull(payload?.sec_yield_30d_pct),
+    thirty_day_sec_yield_pct: finiteNumberOrNull(payload?.thirty_day_sec_yield_pct),
+    credit_quality: creditQualityStringOrNull(payload?.credit_quality),
+    tracking_error_bps: finiteNumberOrNull(payload?.tracking_error_bps),
+    audit_alerts: stringList(payload?.audit_alerts),
+    audit_notes: stringList(payload?.audit_notes),
+    tracking_status: stringOrNull(payload?.tracking_status),
     convexity: finiteNumberOrNull(payload?.convexity),
     snapshot_ref:
       typeof payload?.snapshot_ref === 'string' || payload?.snapshot_ref === null
@@ -465,6 +626,8 @@ function normalizeEligibleInstrument(item: unknown, index: number): ApiBondSnaps
       typeof payload?.refresh_status === 'string' || payload?.refresh_status === null
         ? (payload.refresh_status as string | null)
         : null,
+    creation_disabled_reason: stringOrNull(payload?.creation_disabled_reason),
+    asset_leg_disabled_reason: stringOrNull(payload?.asset_leg_disabled_reason),
     missing_fields: Array.isArray(payload?.missing_fields)
       ? payload.missing_fields.filter((entry): entry is string => typeof entry === 'string')
       : [],
@@ -675,6 +838,17 @@ export function buildFallbackBondFixedIncomeOverview(
         'Only runtime bond_fixed_income_snapshots rows are eligible asset-leg sources.',
       ],
     },
+    quality_audit: [],
+    repair_rules: [
+      {
+        id: 'bond_repair',
+        target: 'bond',
+        mode: 'repair',
+        label: 'Repair missing fixed-income fields',
+      },
+    ],
+    daily_accrual_status: [],
+    risk_budget_inputs: [],
   };
 }
 
@@ -792,6 +966,40 @@ export function normalizeBondFixedIncomeOverview(
         ? systemDiagnostics.notes.filter((note): note is string => typeof note === 'string' && note.trim().length > 0)
         : fallback.system_diagnostics.notes,
     },
+    group_counts: normalizeSourcedReadyCounts(payload.group_counts),
+    sourced_ready_counts: normalizeSourcedReadyCounts(payload.sourced_ready_counts),
+    instrument_counts: normalizeSourcedReadyCounts(payload.instrument_counts),
+    ust_metrics: asRecord(payload.ust_metrics),
+    tips_metrics: asRecord(payload.tips_metrics),
+    lqd_metrics: asRecord(payload.lqd_metrics),
+    group_metrics: asRecord(payload.group_metrics) as Record<string, Record<string, unknown> | null> | null,
+    ust_sourced_count: finiteNumberOrNull(payload.ust_sourced_count),
+    ust_ready_count: finiteNumberOrNull(payload.ust_ready_count),
+    tips_sourced_count: finiteNumberOrNull(payload.tips_sourced_count),
+    tips_ready_count: finiteNumberOrNull(payload.tips_ready_count),
+    ig_sourced_count: finiteNumberOrNull(payload.ig_sourced_count),
+    ig_ready_count: finiteNumberOrNull(payload.ig_ready_count),
+    ust_10y_2y_spread_bps: finiteNumberOrNull(payload.ust_10y_2y_spread_bps),
+    top_ust_10y_2y_spread_bps: finiteNumberOrNull(payload.top_ust_10y_2y_spread_bps),
+    tips_real_yield_pct: finiteNumberOrNull(payload.tips_real_yield_pct),
+    tips_inflation_factor: finiteNumberOrNull(payload.tips_inflation_factor),
+    tips_breakeven_pct: finiteNumberOrNull(payload.tips_breakeven_pct),
+    lqd_effective_duration: finiteNumberOrNull(payload.lqd_effective_duration),
+    lqd_sec_yield_30d_pct: finiteNumberOrNull(payload.lqd_sec_yield_30d_pct),
+    lqd_credit_quality: creditQualityStringOrNull(payload.lqd_credit_quality),
+    lqd_tracking_status: stringOrNull(payload.lqd_tracking_status),
+    quality_audit: Array.isArray(payload.quality_audit)
+      ? payload.quality_audit.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
+      : fallback.quality_audit ?? [],
+    repair_rules: Array.isArray(payload.repair_rules)
+      ? payload.repair_rules.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
+      : fallback.repair_rules ?? [],
+    daily_accrual_status: Array.isArray(payload.daily_accrual_status)
+      ? payload.daily_accrual_status.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
+      : fallback.daily_accrual_status ?? [],
+    risk_budget_inputs: Array.isArray(payload.risk_budget_inputs)
+      ? payload.risk_budget_inputs.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
+      : fallback.risk_budget_inputs ?? [],
   };
 }
 
@@ -823,6 +1031,665 @@ function pickSelectedRegistryItem(overview: ApiBondFixedIncomeOverview): ApiBond
     overview.raw_registry[0] ??
     null
   );
+}
+
+type BondGroupKey = 'ust' | 'tips' | 'ig';
+
+type BondGroupCount = {
+  sourced: number;
+  ready: number;
+};
+
+const BOND_GROUP_ORDER: BondGroupKey[] = ['ust', 'tips', 'ig'];
+
+const BOND_GROUP_TITLES: Record<BondGroupKey, string> = {
+  ust: '利率债（UST）',
+  tips: '抗通胀债（TIPS）',
+  ig: '投资级信用债（IG）',
+};
+
+function isReadyBondStatus(status?: string | null): boolean {
+  return ['READY', 'COMPLETED'].includes(String(status ?? '').toUpperCase());
+}
+
+function getInstrumentSearchText(instrument: ApiBondSnapshotEligibleInstrument): string {
+  return [
+    instrument.asset_type,
+    instrument.group,
+    instrument.category,
+    instrument.instrument_type,
+    instrument.label,
+    instrument.symbol,
+    instrument.isin,
+    instrument.cusip,
+    instrument.id,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toUpperCase();
+}
+
+function getInstrumentBondGroup(instrument: ApiBondSnapshotEligibleInstrument): BondGroupKey | null {
+  const text = getInstrumentSearchText(instrument);
+  if (/\bTIPS?\b|INFLATION/.test(text)) {
+    return 'tips';
+  }
+  if (/\bLQD\b|\bIG\b|INVESTMENT|CORPORATE|CREDIT/.test(text)) {
+    return 'ig';
+  }
+  if (/\bUST\b|TREASURY|US TREAS|T(?:2|5|7|10|20|30)Y/.test(text)) {
+    return 'ust';
+  }
+  return null;
+}
+
+function getCountRecord(
+  overview: ApiBondFixedIncomeOverview,
+  group: BondGroupKey,
+): Record<string, unknown> | null {
+  const payload = overview as unknown as Record<string, unknown>;
+  const groupCounts = [overview.group_counts, overview.sourced_ready_counts, overview.instrument_counts]
+    .map((entry) => asRecord(entry))
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry));
+  for (const counts of groupCounts) {
+    const entry = asRecord(counts[group]) ?? asRecord(counts[group.toUpperCase()]);
+    if (entry) {
+      return entry;
+    }
+  }
+  return (
+    asRecord(payload[`${group}_counts`]) ??
+    asRecord(payload[`${group}_source_counts`]) ??
+    asRecord(payload[`${group}_readiness`])
+  );
+}
+
+function readNumberFromRecord(record: Record<string, unknown> | null, keys: string[]): number | null {
+  if (!record) {
+    return null;
+  }
+  for (const key of keys) {
+    const value = finiteNumberOrNull(record[key]);
+    if (value !== null) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function readStringFromRecord(record: Record<string, unknown> | null, keys: string[]): string | null {
+  if (!record) {
+    return null;
+  }
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function getBondGroupCount(overview: ApiBondFixedIncomeOverview, group: BondGroupKey): BondGroupCount {
+  const countRecord = getCountRecord(overview, group);
+  const payload = overview as unknown as Record<string, unknown>;
+  const explicitSourced =
+    readNumberFromRecord(countRecord, ['sourced', 'sourced_count', 'total', 'count']) ??
+    finiteNumberOrNull(payload[`${group}_sourced_count`]);
+  const explicitReady =
+    readNumberFromRecord(countRecord, ['ready', 'ready_count']) ??
+    finiteNumberOrNull(payload[`${group}_ready_count`]);
+  const groupInstruments = overview.eligible_instruments.filter(
+    (instrument) => getInstrumentBondGroup(instrument) === group,
+  );
+  const inferredSourced = groupInstruments.length;
+  const inferredReady = groupInstruments.filter((instrument) => isReadyBondStatus(instrument.status)).length;
+  return {
+    sourced: explicitSourced ?? inferredSourced,
+    ready: explicitReady ?? inferredReady,
+  };
+}
+
+function formatSourcedReadyCount(count: BondGroupCount): string {
+  return `${count.ready}/${count.sourced} 就绪`;
+}
+
+function findCurveYield(points: ApiBondSnapshotCurvePoint[], tenor: string): number | null {
+  const normalizedTenor = tenor.toUpperCase();
+  const point = points.find((entry) => entry.tenor_label.toUpperCase().replace(/\s+/g, '') === normalizedTenor);
+  return point ? point.yield_pct : null;
+}
+
+function findInstrumentYield(
+  instruments: ApiBondSnapshotEligibleInstrument[],
+  group: BondGroupKey,
+  tenor: string,
+): number | null {
+  const normalizedTenor = tenor.toUpperCase();
+  const instrument = instruments.find((entry) => {
+    if (getInstrumentBondGroup(entry) !== group) {
+      return false;
+    }
+    const text = getInstrumentSearchText(entry).replace(/\s+/g, '');
+    return text.includes(normalizedTenor);
+  });
+  return instrument?.ytm_pct ?? null;
+}
+
+function getUstTenTwoSpreadBps(overview: ApiBondFixedIncomeOverview): number | null {
+  const payload = overview as unknown as Record<string, unknown>;
+  const explicit =
+    overview.top_ust_10y_2y_spread_bps ??
+    overview.ust_10y_2y_spread_bps ??
+    finiteNumberOrNull(payload.ust_spread_10y_2y_bps);
+  if (explicit !== null) {
+    return explicit;
+  }
+  const curveTwoYear = findCurveYield(overview.curve_preview, '2Y');
+  const curveTenYear = findCurveYield(overview.curve_preview, '10Y');
+  if (curveTwoYear !== null && curveTenYear !== null) {
+    return (curveTenYear - curveTwoYear) * 100;
+  }
+  const instrumentTwoYear = findInstrumentYield(overview.eligible_instruments, 'ust', '2Y');
+  const instrumentTenYear = findInstrumentYield(overview.eligible_instruments, 'ust', '10Y');
+  if (instrumentTwoYear !== null && instrumentTenYear !== null) {
+    return (instrumentTenYear - instrumentTwoYear) * 100;
+  }
+  return null;
+}
+
+function formatBpsValue(value: number | null): string {
+  if (value === null) {
+    return '待补';
+  }
+  const rounded = Math.round(value);
+  return `${rounded > 0 ? '+' : ''}${rounded} bps`;
+}
+
+function getOverviewMetricRecords(
+  overview: ApiBondFixedIncomeOverview,
+  metricKeys: string[],
+): Array<Record<string, unknown>> {
+  const payload = overview as unknown as Record<string, unknown>;
+  const records: Array<Record<string, unknown>> = [];
+  metricKeys.forEach((key) => {
+    const direct = asRecord(payload[key]);
+    if (direct) {
+      records.push(direct);
+    }
+  });
+  const groupMetrics = asRecord(overview.group_metrics);
+  if (groupMetrics) {
+    metricKeys.forEach((key) => {
+      const nested = asRecord(groupMetrics[key]);
+      if (nested) {
+        records.push(nested);
+      }
+    });
+  }
+  return records;
+}
+
+function findInstrumentForMetrics(
+  overview: ApiBondFixedIncomeOverview,
+  group: BondGroupKey,
+  matcher?: (instrument: ApiBondSnapshotEligibleInstrument) => boolean,
+): ApiBondSnapshotEligibleInstrument | null {
+  const candidates = overview.eligible_instruments.filter((instrument) => {
+    if (getInstrumentBondGroup(instrument) !== group) {
+      return false;
+    }
+    return matcher ? matcher(instrument) : true;
+  });
+  return (
+    candidates.find((instrument) => isReadyBondStatus(instrument.status)) ??
+    candidates[0] ??
+    null
+  );
+}
+
+function readOverviewMetricNumber(
+  overview: ApiBondFixedIncomeOverview,
+  records: Array<Record<string, unknown>>,
+  keys: string[],
+  topLevelKeys: string[],
+): number | null {
+  for (const key of topLevelKeys) {
+    const value = finiteNumberOrNull((overview as unknown as Record<string, unknown>)[key]);
+    if (value !== null) {
+      return value;
+    }
+  }
+  for (const record of records) {
+    const value = readNumberFromRecord(record, keys);
+    if (value !== null) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function readOverviewMetricString(
+  overview: ApiBondFixedIncomeOverview,
+  records: Array<Record<string, unknown>>,
+  keys: string[],
+  topLevelKeys: string[],
+): string | null {
+  for (const key of topLevelKeys) {
+    const value = (overview as unknown as Record<string, unknown>)[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value;
+    }
+  }
+  for (const record of records) {
+    const value = readStringFromRecord(record, keys);
+    if (value) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function formatPercentMetric(value: number | null): string {
+  return value === null ? '待补' : `${value.toFixed(2)}%`;
+}
+
+function formatFactorMetric(value: number | null): string {
+  return value === null ? '待补' : value.toFixed(3);
+}
+
+function formatDurationMetric(value: number | null): string {
+  return value === null ? '待补' : `${value.toFixed(2)} 年`;
+}
+
+function getTipsMetricSummary(overview: ApiBondFixedIncomeOverview): {
+  realYieldPct: number | null;
+  inflationFactor: number | null;
+  breakevenPct: number | null;
+} {
+  const records = getOverviewMetricRecords(overview, ['tips', 'tips_metrics', 'tips_summary']);
+  const tipsInstrument = findInstrumentForMetrics(overview, 'tips');
+  const instrumentPayload = tipsInstrument as unknown as Record<string, unknown> | null;
+  return {
+    realYieldPct:
+      readOverviewMetricNumber(
+        overview,
+        records,
+        ['real_yield_pct', 'real_yield', 'tips_real_yield_pct'],
+        ['tips_real_yield_pct'],
+      ) ?? finiteNumberOrNull(instrumentPayload?.real_yield_pct),
+    inflationFactor:
+      readOverviewMetricNumber(
+        overview,
+        records,
+        ['inflation_factor', 'tips_inflation_factor'],
+        ['tips_inflation_factor'],
+      ) ?? finiteNumberOrNull(instrumentPayload?.inflation_factor),
+    breakevenPct:
+      readOverviewMetricNumber(
+        overview,
+        records,
+        ['breakeven_pct', 'breakeven', 'tips_breakeven_pct'],
+        ['tips_breakeven_pct'],
+      ) ?? finiteNumberOrNull(instrumentPayload?.breakeven_pct),
+  };
+}
+
+function getLqdMetricSummary(overview: ApiBondFixedIncomeOverview): {
+  effectiveDuration: number | null;
+  secYield30dPct: number | null;
+  creditQuality: string | null;
+  trackingStatus: string | null;
+} {
+  const records = getOverviewMetricRecords(overview, ['lqd', 'lqd_metrics', 'ig', 'ig_metrics']);
+  const lqdInstrument = findInstrumentForMetrics(overview, 'ig', (instrument) =>
+    getInstrumentSearchText(instrument).includes('LQD'),
+  );
+  const instrumentPayload = lqdInstrument as unknown as Record<string, unknown> | null;
+  return {
+    effectiveDuration:
+      readOverviewMetricNumber(
+        overview,
+        records,
+        ['effective_duration', 'effective_duration_years', 'duration'],
+        ['lqd_effective_duration'],
+      ) ??
+      finiteNumberOrNull(instrumentPayload?.effective_duration) ??
+      finiteNumberOrNull(instrumentPayload?.duration),
+    secYield30dPct:
+      readOverviewMetricNumber(
+        overview,
+        records,
+        ['sec_yield_30d_pct', 'thirty_day_sec_yield_pct', '30d_sec_yield_pct', 'sec_yield_pct'],
+        ['lqd_sec_yield_30d_pct'],
+      ) ??
+      finiteNumberOrNull(instrumentPayload?.sec_yield_30d_pct) ??
+      finiteNumberOrNull(instrumentPayload?.thirty_day_sec_yield_pct),
+    creditQuality:
+      readOverviewMetricString(
+        overview,
+        records,
+        ['credit_quality', 'quality'],
+        ['lqd_credit_quality'],
+      ) ?? creditQualityStringOrNull(instrumentPayload?.credit_quality),
+    trackingStatus:
+      readOverviewMetricString(
+        overview,
+        records,
+        ['tracking_status', 'tracking'],
+        ['lqd_tracking_status'],
+      ) ?? stringOrNull(instrumentPayload?.tracking_status),
+  };
+}
+
+function getAssetLegDisabledReason(instrument: ApiBondSnapshotEligibleInstrument): string | null {
+  if (isReadyBondStatus(instrument.status)) {
+    return null;
+  }
+  if (instrument.asset_leg_disabled_reason) {
+    return instrument.asset_leg_disabled_reason;
+  }
+  if (instrument.creation_disabled_reason) {
+    return instrument.creation_disabled_reason;
+  }
+  if (instrument.missing_fields.length) {
+    return `待补字段：${instrument.missing_fields.join('、')}`;
+  }
+  if (String(instrument.status ?? '').toUpperCase() === 'WATCH') {
+    return 'WATCH 行需补齐快照字段后才能创建资产腿';
+  }
+  return '仅 READY 行可创建资产腿';
+}
+
+function pickDefaultInstrumentId(instruments: ApiBondSnapshotEligibleInstrument[]): string | null {
+  const sortedInstruments = sortBondInstrumentsByDuration(instruments);
+  return (
+    sortedInstruments.find((instrument) => isReadyBondStatus(instrument.status)) ??
+    sortedInstruments[0] ??
+    null
+  )?.id ?? null;
+}
+
+function pickDefaultBondGroup(instruments: ApiBondSnapshotEligibleInstrument[]): BondGroupKey {
+  return (
+    BOND_GROUP_ORDER.find((group) =>
+      instruments.some((instrument) => getInstrumentBondGroup(instrument) === group),
+    ) ?? 'ust'
+  );
+}
+
+function pickGroupInstrumentId(
+  instruments: ApiBondSnapshotEligibleInstrument[],
+  group: BondGroupKey,
+): string | null {
+  const groupInstruments = sortBondInstrumentsByDuration(
+    instruments.filter((instrument) => getInstrumentBondGroup(instrument) === group),
+  );
+  return pickDefaultInstrumentId(groupInstruments) ?? pickDefaultInstrumentId(instruments);
+}
+
+function getBondGroupTitle(group: BondGroupKey): string {
+  return BOND_GROUP_TITLES[group];
+}
+
+function getBondGroupPillarDescription(group: BondGroupKey): string {
+  switch (group) {
+    case 'ust':
+      return '收益率曲线锚点。当前是最稳定、最适合直接生成资产腿的一组债券来源。';
+    case 'tips':
+      return '用于把实际利率视角引入配置。核心缺口不是价格，而是真实收益率映射的一致性。';
+    case 'ig':
+      return '收益增强与防御替代来源。当前主要风险是应计历史仍有缺口，不宜直接镜像入库。';
+  }
+}
+
+function getBondGroupMainDescription(group: BondGroupKey): string {
+  switch (group) {
+    case 'ust':
+      return '作为收益率曲线基准，UST 是正式组合里最常用的债券腿来源。当前优先展示 UST 的期限快照、利差状态与字段完备度。';
+    case 'tips':
+      return 'TIPS 用来把真实收益率与通胀补偿拆开审计。当前优先查看实际利率、通胀因子与 breakeven 的映射完整度。';
+    case 'ig':
+      return 'IG 用于观察信用收益增强来源。当前优先查看 30d SEC、有效久期与 tracking error 是否满足入库门槛。';
+  }
+}
+
+function getBondGroupSupportTitle(group: BondGroupKey): string {
+  switch (group) {
+    case 'ust':
+      return 'UST 术语说明';
+    case 'tips':
+      return 'TIPS 术语说明';
+    case 'ig':
+      return 'IG 术语说明';
+  }
+}
+
+function getBondGroupSupportCopy(group: BondGroupKey): string {
+  switch (group) {
+    case 'ust':
+      return 'UST 类别下必须同时具备全价、应计利息、久期与到期收益率（YTM）。长端应额外标出应计历史是否补齐，避免曲线尾部被误读为可直接入库。';
+    case 'tips':
+      return 'TIPS 需要同时保留名义到期收益率、实际收益率、通胀因子与 breakeven 证据链，避免把代理映射当作正式可入库来源。';
+    case 'ig':
+      return 'IG 必须同时具备价格、收益率、有效久期、信用质量与 tracking error 证据；只要任一项缺口存在，就只能作为待补观察对象。';
+  }
+}
+
+function getBondGroupCurveAnomaly(group: BondGroupKey): string {
+  switch (group) {
+    case 'ust':
+      return '曲线异常偏移：建议去审计矩阵复核长端应计与 10Y 估值点。';
+    case 'tips':
+      return '若 breakeven 或通胀因子异常，先回审计矩阵复核 TIPS 映射一致性。';
+    case 'ig':
+      return '若 tracking error 或应计历史缺失，先回审计矩阵确认 IG 仍不可直接入库。';
+  }
+}
+
+function getBondTenorPriority(label: string): number {
+  const normalized = label.trim().toUpperCase();
+  const order: Record<string, number> = {
+    '2Y': 0,
+    '5Y': 1,
+    '10Y': 2,
+    '30Y': 3,
+    '7Y': 4,
+    '20Y': 5,
+    '3M': 6,
+    '6M': 7,
+    '13W': 8,
+    ETF: 20,
+  };
+  return order[normalized] ?? 50;
+}
+
+function getBondInstrumentDurationValue(instrument: ApiBondSnapshotEligibleInstrument): number {
+  return (
+    finiteNumberOrNull(instrument.effective_duration) ??
+    finiteNumberOrNull(instrument.duration) ??
+    Number.POSITIVE_INFINITY
+  );
+}
+
+function sortBondInstrumentsByDuration(
+  instruments: ApiBondSnapshotEligibleInstrument[],
+): ApiBondSnapshotEligibleInstrument[] {
+  return [...instruments].sort((left, right) => {
+    const durationDelta = getBondInstrumentDurationValue(left) - getBondInstrumentDurationValue(right);
+    if (durationDelta !== 0) {
+      return durationDelta;
+    }
+    const leftLabel = stringOrNull(left.tenor_label) ?? stringOrNull(left.symbol) ?? left.label;
+    const rightLabel = stringOrNull(right.tenor_label) ?? stringOrNull(right.symbol) ?? right.label;
+    const tenorDelta = getBondTenorPriority(leftLabel) - getBondTenorPriority(rightLabel);
+    if (tenorDelta !== 0) {
+      return tenorDelta;
+    }
+    return left.label.localeCompare(right.label, 'zh-Hans-CN');
+  });
+}
+
+function getBondInstrumentChipLead(group: BondGroupKey, instruments: ApiBondSnapshotEligibleInstrument[]): string {
+  if (!instruments.length) {
+    return '暂无来源';
+  }
+  if (group === 'ig') {
+    const symbols = instruments
+      .map((instrument) => stringOrNull(instrument.symbol) ?? stringOrNull(instrument.tenor_label) ?? instrument.label)
+      .filter((value): value is string => Boolean(value));
+    if (symbols.length) {
+      return Array.from(new Set(symbols)).slice(0, 2).join(' / ');
+    }
+    const creditQualities = instruments
+      .map((instrument) => stringOrNull(instrument.credit_quality))
+      .filter((value): value is string => Boolean(value));
+    if (creditQualities.length) {
+      return Array.from(new Set(creditQualities)).slice(0, 2).join(' / ');
+    }
+  }
+  const labels = instruments
+    .map((instrument) => stringOrNull(instrument.tenor_label) ?? stringOrNull(instrument.symbol) ?? instrument.label)
+    .filter((value): value is string => Boolean(value));
+  return Array.from(new Set(labels))
+    .sort((left, right) => getBondTenorPriority(left) - getBondTenorPriority(right))
+    .slice(0, group === 'ust' ? 3 : 2)
+    .join(' / ');
+}
+
+function getBondGroupRollupStatus(count: BondGroupCount): string {
+  if (count.ready > 0) {
+    return 'READY';
+  }
+  if (count.sourced > 0) {
+    return 'WATCH';
+  }
+  return 'BLOCKED';
+}
+
+function getBondInstrumentStatusLabel(instrument: ApiBondSnapshotEligibleInstrument): string {
+  const fieldStatus = asRecord(instrument.field_status);
+  if (fieldStatus?.accrued_interest === 'WAIVED') {
+    return '免应计';
+  }
+  if (instrument.missing_fields.includes('accrued_interest')) {
+    return '缺应计';
+  }
+  return getBondStatusLabel(instrument.status);
+}
+
+function getBondInstrumentStatusTone(instrument: ApiBondSnapshotEligibleInstrument): BondAuditCellTone {
+  const normalizedStatus = String(instrument.status ?? '').toUpperCase();
+  const fieldStatus = asRecord(instrument.field_status);
+  if (fieldStatus?.accrued_interest === 'WAIVED' || isReadyBondStatus(instrument.status)) {
+    return 'ok';
+  }
+  if (instrument.missing_fields.length || normalizedStatus === 'WATCH') {
+    return 'warn';
+  }
+  if (['FAILED', 'BLOCKED', 'ACTION_REQUIRED'].includes(normalizedStatus)) {
+    return 'danger';
+  }
+  return 'warn';
+}
+
+function getBondInstrumentStatusDotClassName(instrument: ApiBondSnapshotEligibleInstrument): string {
+  const tone = getBondInstrumentStatusTone(instrument);
+  if (tone === 'danger') {
+    return 'snapshots-bond-pill-status__dot snapshots-bond-pill-status__dot--danger';
+  }
+  if (tone === 'warn' || tone === 'imputed') {
+    return 'snapshots-bond-pill-status__dot snapshots-bond-pill-status__dot--warn';
+  }
+  return 'snapshots-bond-pill-status__dot';
+}
+
+function getBondSpreadBps(
+  overview: ApiBondFixedIncomeOverview,
+  group: BondGroupKey,
+  longerTenor: string,
+  shorterTenor: string,
+): number | null {
+  const longer =
+    (group === 'ust' ? findCurveYield(overview.curve_preview, longerTenor) : null) ??
+    findInstrumentYield(overview.eligible_instruments, group, longerTenor);
+  const shorter =
+    (group === 'ust' ? findCurveYield(overview.curve_preview, shorterTenor) : null) ??
+    findInstrumentYield(overview.eligible_instruments, group, shorterTenor);
+  if (longer === null || shorter === null) {
+    return null;
+  }
+  return (longer - shorter) * 100;
+}
+
+type BondWorkbenchMetricCard = {
+  detail: string;
+  label: string;
+  tone?: 'warn';
+  value: string;
+};
+
+function getBondWorkbenchMetricCards({
+  group,
+  lqdMetricSummary,
+  overview,
+  selectedGroupCount,
+  tipsMetricSummary,
+  ustTenTwoSpreadBps,
+}: {
+  group: BondGroupKey;
+  lqdMetricSummary: ReturnType<typeof getLqdMetricSummary>;
+  overview: ApiBondFixedIncomeOverview;
+  selectedGroupCount: BondGroupCount;
+  tipsMetricSummary: ReturnType<typeof getTipsMetricSummary>;
+  ustTenTwoSpreadBps: number | null;
+}): BondWorkbenchMetricCard[] {
+  switch (group) {
+    case 'ust': {
+      const thirtyTenSpreadBps = getBondSpreadBps(overview, 'ust', '30Y', '10Y');
+      return [
+        {
+          label: '10Y-2Y 利差（Spread）',
+          value: formatBpsValue(ustTenTwoSpreadBps),
+          detail: `就绪 ${selectedGroupCount.ready}/${selectedGroupCount.sourced}，用于判断期限结构是否继续可用。`,
+        },
+        {
+          label: '30Y-10Y 利差（Spread）',
+          value: formatBpsValue(thirtyTenSpreadBps),
+          detail: selectedGroupCount.ready === selectedGroupCount.sourced ? '长端久期与应计字段已完成对齐。' : '长端字段仍需复核，应优先检查应计与估值点位。',
+          tone: selectedGroupCount.ready === selectedGroupCount.sourced ? undefined : 'warn',
+        },
+      ];
+    }
+    case 'tips':
+      return [
+        {
+          label: '实际利率（Real Yield）',
+          value: formatPercentMetric(tipsMetricSummary.realYieldPct),
+          detail: '用于将名义收益率与通胀补偿拆开审计。',
+        },
+        {
+          label: 'Breakeven / 通胀因子',
+          value: formatPercentMetric(tipsMetricSummary.breakevenPct),
+          detail: `通胀因子 ${formatFactorMetric(tipsMetricSummary.inflationFactor)}，缺口主要落在映射一致性。`,
+          tone: selectedGroupCount.ready === selectedGroupCount.sourced ? undefined : 'warn',
+        },
+      ];
+    case 'ig':
+      return [
+        {
+          label: '30d SEC 收益率',
+          value: formatPercentMetric(lqdMetricSummary.secYield30dPct),
+          detail: '用于评估 IG 收益增强来源是否具备正式引用价值。',
+        },
+        {
+          label: '有效久期 / 信用品质',
+          value: formatDurationMetric(lqdMetricSummary.effectiveDuration),
+          detail: `${lqdMetricSummary.creditQuality ?? '待补'} · ${lqdMetricSummary.trackingStatus ?? '待补'}`,
+          tone: selectedGroupCount.ready === selectedGroupCount.sourced ? undefined : 'warn',
+        },
+      ];
+  }
 }
 
 function getCreationChecks(overview: ApiBondFixedIncomeOverview): Array<{ label: string; status: string }> {
@@ -923,27 +1790,22 @@ function getRuleEntries(overview: ApiBondFixedIncomeOverview): Array<{
   ];
 }
 
-function renderCurveAxis(points: ApiBondSnapshotCurvePoint[]): JSX.Element[] {
-  return points.map((point) => (
-    <div className="snapshots-bond-curve-axis__item" key={point.tenor_label}>
-      <span>{point.tenor_label}</span>
-      <strong>{formatCurvePercent(point.yield_pct)}</strong>
-    </div>
-  ));
-}
-
-function BondCurveChart({ points }: { points: ApiBondSnapshotCurvePoint[] }): JSX.Element {
+function BondCurveChart({
+  anomaly,
+  points,
+  summaryChip,
+}: {
+  anomaly: string;
+  points: ApiBondSnapshotCurvePoint[];
+  summaryChip: string;
+}): JSX.Element {
   const width = 320;
   const height = 168;
   const path = buildCurvePath(points, width, height);
   return (
-    <div className="snapshots-bond-curve-card">
-      <div className="snapshots-bond-curve-card__header">
-        <div>
-          <strong>曲线预览</strong>
-          <span>展示当前期限结构与利差变化，用于识别异常跳变与期限错位。</span>
-        </div>
-      </div>
+    <article className="snapshots-bond-curve-preview-card snapshots-bond-curve-card">
+      <strong>曲线预览</strong>
+      <span>展示当日与昨日收益率曲线差异，用于识别异常跳变与期限结构扭曲。</span>
       <svg
         aria-hidden="true"
         className="snapshots-bond-curve-card__chart"
@@ -961,15 +1823,18 @@ function BondCurveChart({ points }: { points: ApiBondSnapshotCurvePoint[] }): JS
           return <circle cx={x} cy={y} key={point.tenor_label} r="4.5" />;
         })}
       </svg>
-      <div className="snapshots-bond-curve-axis">{renderCurveAxis(points)}</div>
       <div className="snapshots-bond-chip-row">
+        <span className="status-chip status-chip--success">今日曲线</span>
+        <span className="status-chip status-chip--soft">昨日基准线</span>
+        <span className="status-chip status-chip--soft">{summaryChip}</span>
         {points.slice(-2).map((point) => (
           <span className="chip" key={point.tenor_label}>
             {point.tenor_label} 利差 {formatCurveBps(point.spread_bps)}
           </span>
         ))}
       </div>
-    </div>
+      <span className="snapshots-bond-curve-anomaly">{anomaly}</span>
+    </article>
   );
 }
 
@@ -988,13 +1853,9 @@ function WorkstationCard({ card }: { card: ApiBondSnapshotCard }): JSX.Element {
 
 function BondCurvePlaceholder(): JSX.Element {
   return (
-    <div className="snapshots-bond-curve-card snapshots-bond-curve-card--empty">
-      <div className="snapshots-bond-curve-card__header">
-        <div>
-          <strong>曲线预览</strong>
-          <span>等待真实 runtime 曲线点入库；当前只保留批准稿画布与期限坐标。</span>
-        </div>
-      </div>
+    <article className="snapshots-bond-curve-preview-card snapshots-bond-curve-card snapshots-bond-curve-card--empty">
+      <strong>曲线预览</strong>
+      <span>尚未写入真实运行时曲线点；这里保留批准稿位置，但不使用代理或静态曲线兜底。</span>
       <svg
         aria-hidden="true"
         className="snapshots-bond-curve-card__chart"
@@ -1007,15 +1868,7 @@ function BondCurvePlaceholder(): JSX.Element {
         <circle cx="170" cy="118" r="4" />
         <circle cx="300" cy="96" r="4" />
       </svg>
-      <div className="snapshots-bond-curve-axis">
-        {['2Y', '10Y', '30Y'].map((label) => (
-          <div className="snapshots-bond-curve-axis__item" key={label}>
-            <span>{label}</span>
-            <strong>待曲线</strong>
-          </div>
-        ))}
-      </div>
-    </div>
+    </article>
   );
 }
 
@@ -1071,6 +1924,60 @@ function getFieldTone(instrument: ApiBondSnapshotEligibleInstrument, keys: strin
   return 'warn';
 }
 
+function getBondFieldChipClassName(tone: BondAuditCellTone): string {
+  if (tone === 'danger') {
+    return 'status-chip status-chip--danger';
+  }
+  if (tone === 'warn' || tone === 'imputed') {
+    return 'status-chip status-chip--warning';
+  }
+  return 'status-chip status-chip--soft';
+}
+
+function getBondFieldChipToneForValue(value: unknown): BondAuditCellTone {
+  if (typeof value === 'string' && value.trim()) {
+    return 'ok';
+  }
+  return 'warn';
+}
+
+function getBondWorkbenchFieldChips(
+  group: BondGroupKey,
+  instrument: ApiBondSnapshotEligibleInstrument | null,
+): Array<{ className: string; label: string }> {
+  if (!instrument) {
+    return [];
+  }
+  const chips =
+    group === 'tips'
+      ? [
+          { label: '实际利率', tone: getFieldTone(instrument, ['real_yield_pct']) },
+          { label: '通胀因子', tone: getFieldTone(instrument, ['inflation_factor']) },
+          { label: 'breakeven', tone: getFieldTone(instrument, ['breakeven_inflation_bps', 'breakeven_pct']) },
+          { label: '久期', tone: getFieldTone(instrument, ['duration']) },
+          { label: '收益率', tone: getFieldTone(instrument, ['ytm_pct']) },
+        ]
+      : group === 'ig'
+        ? [
+            { label: '全价', tone: getFieldTone(instrument, ['full_price', 'dirty_price']) },
+            { label: '30d SEC', tone: getFieldTone(instrument, ['sec_yield_30d_pct', 'thirty_day_sec_yield_pct']) },
+            { label: '久期', tone: getFieldTone(instrument, ['effective_duration', 'duration']) },
+            { label: '信用质量', tone: getBondFieldChipToneForValue(instrument.credit_quality) },
+            { label: 'Tracking', tone: getFieldTone(instrument, ['tracking_error_bps']) },
+          ]
+        : [
+            { label: '全价', tone: getFieldTone(instrument, ['full_price', 'dirty_price']) },
+            { label: '应计', tone: getFieldTone(instrument, ['accrued_interest']) },
+            { label: '久期', tone: getFieldTone(instrument, ['duration']) },
+            { label: '收益率', tone: getFieldTone(instrument, ['ytm_pct']) },
+            { label: '凸性', tone: getFieldTone(instrument, ['convexity']) },
+          ];
+  return chips.map((chip) => ({
+    className: getBondFieldChipClassName(chip.tone),
+    label: chip.label,
+  }));
+}
+
 function createFieldAuditCell(
   instrument: ApiBondSnapshotEligibleInstrument,
   keys: string[],
@@ -1122,7 +2029,7 @@ function buildInstrumentAuditRows(
     return {
       id: instrument.id,
       label: instrument.label,
-      subtitle: `${instrument.instrument_type} · ${instrument.snapshot_ref ?? instrument.id}`,
+      subtitle: formatBondInstrumentSummary(instrument),
       cells,
       action: createInstrumentAuditAction(instrument, cells, selectedInstrumentId),
     };
@@ -1145,7 +2052,7 @@ function buildEmptyAuditRows(overview: ApiBondFixedIncomeOverview): BondAuditMat
   return [
     {
       id: 'empty-bond-audit',
-      label: '等待 runtime 债券快照',
+      label: '等待运行时债券快照',
       subtitle: 'bond_fixed_income 写入字段齐备的快照后，这里显示逐字段矩阵。',
       cells: [
         { label: '待写入', tone },
@@ -1179,7 +2086,7 @@ function BondAuditMatrix({
         </div>
         <div className="snapshots-bond-chip-row">
           <span className="status-chip status-chip--soft">{rows.length} 条快照</span>
-          <span className="status-chip status-chip--soft">runtime 字段矩阵</span>
+          <span className="status-chip status-chip--soft">运行时字段矩阵</span>
         </div>
       </div>
       <div className="snapshots-bond-audit-grid">
@@ -1239,10 +2146,36 @@ export function BondFixedIncomeSnapshotsTab({
   createAssetLegMessage = null,
 }: BondFixedIncomeSnapshotsTabProps): JSX.Element {
   const eligibleInstruments = overview.eligible_instruments;
-  const [selectedInstrumentId, setSelectedInstrumentId] = useState<string | null>(eligibleInstruments[0]?.id ?? null);
+  const [selectedGroup, setSelectedGroup] = useState<BondGroupKey>(
+    pickDefaultBondGroup(eligibleInstruments),
+  );
+  const [selectedInstrumentId, setSelectedInstrumentId] = useState<string | null>(
+    pickGroupInstrumentId(eligibleInstruments, pickDefaultBondGroup(eligibleInstruments)),
+  );
   const readyInstrumentCount = eligibleInstruments.filter(
-    (instrument) => String(instrument.status || '').toUpperCase() === 'READY',
+    (instrument) => isReadyBondStatus(instrument.status),
   ).length;
+  const bondGroupCounts = {
+    ust: getBondGroupCount(overview, 'ust'),
+    tips: getBondGroupCount(overview, 'tips'),
+    ig: getBondGroupCount(overview, 'ig'),
+  };
+  const ustTenTwoSpreadBps = getUstTenTwoSpreadBps(overview);
+  const tipsMetricSummary = getTipsMetricSummary(overview);
+  const lqdMetricSummary = getLqdMetricSummary(overview);
+  const sourceHealthChips = overview.eligible_sources.length
+    ? overview.eligible_sources.slice(0, 3).map((source) => ({
+        id: source.id,
+        label: `${translateBondSource(source.source || source.label)} ${getBondStatusLabel(source.status)}`,
+        className: getBondStatusChipClassName(source.status),
+      }))
+    : [
+        {
+          id: 'bond-source-empty',
+          label: '债券来源待刷新',
+          className: 'status-chip status-chip--warning',
+        },
+      ];
   const visiblePulseCards = overview.global_pulse.cards.filter(
     (card) => !['shared_snapshot_route', 'scheduler'].includes(card.id),
   );
@@ -1254,30 +2187,81 @@ export function BondFixedIncomeSnapshotsTab({
   const blockedPulseCount = visiblePulseCards.filter((card) =>
     ['BLOCKED', 'FAILED'].includes(String(card.status || '').toUpperCase()),
   ).length;
+  const nextDefaultGroup = pickDefaultBondGroup(eligibleInstruments);
   useEffect(() => {
     if (!eligibleInstruments.length) {
+      setSelectedGroup('ust');
       setSelectedInstrumentId(null);
       return;
     }
-    if (!eligibleInstruments.some((instrument) => instrument.id === selectedInstrumentId)) {
-      setSelectedInstrumentId(eligibleInstruments[0].id);
+    const nextGroup = eligibleInstruments.some(
+      (instrument) => getInstrumentBondGroup(instrument) === selectedGroup,
+    )
+      ? selectedGroup
+      : nextDefaultGroup;
+    if (nextGroup !== selectedGroup) {
+      setSelectedGroup(nextGroup);
+      return;
     }
-  }, [eligibleInstruments, selectedInstrumentId]);
+    const groupInstruments = sortBondInstrumentsByDuration(
+      eligibleInstruments.filter((instrument) => getInstrumentBondGroup(instrument) === nextGroup),
+    ).slice(0, 3);
+    if (!groupInstruments.some((instrument) => instrument.id === selectedInstrumentId)) {
+      setSelectedInstrumentId(groupInstruments[0]?.id ?? pickGroupInstrumentId(eligibleInstruments, nextGroup));
+    }
+  }, [eligibleInstruments, nextDefaultGroup, selectedGroup, selectedInstrumentId]);
 
+  const selectedGroupInstruments = sortBondInstrumentsByDuration(
+    eligibleInstruments.filter((instrument) => getInstrumentBondGroup(instrument) === selectedGroup),
+  );
+  const visibleSelectedGroupInstruments = selectedGroupInstruments.slice(0, 3);
+  const hiddenSelectedGroupCount = Math.max(0, selectedGroupInstruments.length - visibleSelectedGroupInstruments.length);
+  const selectedGroupCount = bondGroupCounts[selectedGroup];
+  const selectedGroupStatus = getBondGroupRollupStatus(selectedGroupCount);
+  const selectedGroupMetricCards = getBondWorkbenchMetricCards({
+    group: selectedGroup,
+    lqdMetricSummary,
+    overview,
+    selectedGroupCount,
+    tipsMetricSummary,
+    ustTenTwoSpreadBps,
+  });
   const selectedInstrument =
-    eligibleInstruments.find((instrument) => instrument.id === selectedInstrumentId) ?? eligibleInstruments[0] ?? null;
-  const selectedInstrumentIsReady = String(selectedInstrument?.status || '').toUpperCase() === 'READY';
+    visibleSelectedGroupInstruments.find((instrument) => instrument.id === selectedInstrumentId) ??
+    visibleSelectedGroupInstruments[0] ??
+    selectedGroupInstruments[0] ??
+    eligibleInstruments.find((instrument) => instrument.id === selectedInstrumentId) ??
+    eligibleInstruments[0] ??
+    null;
+  const selectedInstrumentFieldChips = getBondWorkbenchFieldChips(selectedGroup, selectedInstrument);
+  const groupMetricChipLabels: Record<BondGroupKey, string> = {
+    ust: `10Y-2Y ${formatBpsValue(ustTenTwoSpreadBps)}`,
+    tips: `breakeven ${formatPercentMetric(tipsMetricSummary.breakevenPct)}`,
+    ig: `30d SEC ${formatPercentMetric(lqdMetricSummary.secYield30dPct)}`,
+  };
+  const supportChips =
+    selectedGroup === 'tips'
+      ? ['真实利率', '通胀补偿', '映射校验']
+      : selectedGroup === 'ig'
+        ? ['收益增强', '信用质量', 'Tracking']
+        : ['流动性锚点', '曲线基准', '风险预算底座'];
+  const selectedInstrumentIsReady = isReadyBondStatus(selectedInstrument?.status);
   const selectedInstrumentIsCreating = selectedInstrument ? creatingAssetLegId === selectedInstrument.id : false;
+  const selectedInstrumentDisabledReason = selectedInstrument ? getAssetLegDisabledReason(selectedInstrument) : null;
+  const qualityAuditRows = (overview.quality_audit ?? []).slice(0, 6);
+  const dailyAccrualRows = (overview.daily_accrual_status ?? []).slice(0, 4);
+  const repairRules = overview.repair_rules ?? [];
+  const riskBudgetRows = (overview.risk_budget_inputs ?? []).slice(0, 4);
   return (
     <div className="snapshots-bond-view">
-      <section className="panel snapshots-bond-panel snapshots-bond-health-panel">
+      <section className="panel snapshots-bond-panel snapshots-bond-health-panel snapshots-global-dashboard-panel">
         <div className="panel-header snapshots-bond-panel__header">
           <div>
             <div className="snapshots-bond-title-row">
-              <h3>全局健康仪表盘</h3>
+              <h3>健康仪表盘</h3>
               <span
                 className="snapshots-bond-inline-tooltip"
-                title="全局健康仪表盘：用少数关键指标判断债券快照库今天能否继续为资产腿提供合法来源。"
+                title="健康仪表盘：用少数关键指标判断债券快照库今天能否继续为资产腿提供合法来源。"
               >
                 ?
               </span>
@@ -1312,12 +2296,7 @@ export function BondFixedIncomeSnapshotsTab({
             </div>
           </article>
           <article className="snapshots-bond-pulse-card">
-            <div className="snapshots-bond-work-card__top">
-              <strong>影子字段覆盖率</strong>
-              <span className="status-chip status-chip--soft">
-                {readyInstrumentCount}/{eligibleInstruments.length} 可入库
-              </span>
-            </div>
+            <strong>影子字段覆盖率</strong>
             <div className="snapshots-bond-ring-inline">
               <svg className="snapshots-bond-ring-svg" viewBox="0 0 120 120" aria-hidden="true">
                 <circle cx="60" cy="60" fill="none" r="46" stroke="#e6edf0" strokeWidth="12" />
@@ -1334,22 +2313,23 @@ export function BondFixedIncomeSnapshotsTab({
                 />
                 <text x="60" y="67" textAnchor="middle">{fieldCoveragePercent}%</text>
               </svg>
-              <p>
+              <div className="snapshots-bond-ring-copy">
                 <strong>{fieldCoveragePercent}% 已覆盖</strong>
-                <br />
-                净价、全价、应计利息、YTM、久期与凸性字段来自 runtime 债券快照。
-              </p>
+                <span>净价、全价、应计利息、YTM、久期与凸性字段来自运行时债券快照。</span>
+              </div>
             </div>
           </article>
           <article className="snapshots-bond-pulse-card">
-            <strong>入库链路与数据自愈</strong>
+            <strong>入库链路</strong>
             <p>跟踪供应商路径、回补任务与异常修复进度，评估当日入库稳定性。</p>
             <div className="snapshots-bond-chip-row">
-              <span className="status-chip status-chip--success">FMP 正常</span>
-              <span className="status-chip status-chip--soft">Polygon 正常</span>
-              <span className="status-chip status-chip--soft">自愈进行中</span>
+              {sourceHealthChips.map((chip) => (
+                <span className={chip.className} key={chip.id}>
+                  {chip.label}
+                </span>
+              ))}
             </div>
-            <p>当前仅使用 runtime 来源；如果共享快照阻塞，会同步进入修复队列。</p>
+            <p>当前仅使用运行时来源；如果共享快照阻塞，会同步进入修复队列。</p>
           </article>
         </div>
 
@@ -1358,141 +2338,197 @@ export function BondFixedIncomeSnapshotsTab({
       <div className="snapshots-bond-detail-grid snapshots-bond-workstation-grid">
         <div className="snapshots-bond-detail-main">
           <section className="panel snapshots-bond-panel snapshots-bond-runtime-panel">
-            <div className="panel-header snapshots-bond-panel__header">
-              <div>
-                <div className="snapshots-bond-title-row">
+            <div className="panel-header snapshots-bond-panel__header snapshots-workstation-header">
+              <div className="snapshots-workstation-heading">
+                <div className="snapshots-bond-title-row snapshots-workstation-title-row">
                   <h3>三位一体工作站</h3>
-                  <span className="status-chip status-chip--soft">
-                    {readyInstrumentCount}/{eligibleInstruments.length} 可入库
+                  <span
+                    className="snapshots-bond-inline-tooltip"
+                    title="三位一体工作站：把利率债、抗通胀债、投资级信用债三类基石放进同一套治理工作区，用来观察曲线、利差与字段完备度。"
+                  >
+                    ?
                   </span>
                 </div>
-                <p className="snapshots-panel-copy">
-                  仅 runtime bond_fixed_income 快照表中字段齐备的债券可创建资产腿；代理曲线和兜底行保持只读。
+                <p className="snapshots-panel-copy snapshots-workstation-copy">
+                  以利率债、抗通胀债和投资级信用债三类基石观察曲线、利差与字段完备度。
                 </p>
               </div>
             </div>
             <div className="snapshots-bond-pillar-layout snapshots-bond-workbench-layout">
               <div className="snapshots-bond-pillar-tabs" aria-label="债券品类工作站">
-                <article className="snapshots-bond-pillar-tab snapshots-bond-pillar-tab--active">
-                  <strong>利率债（UST）</strong>
-                  <span>收益率曲线点、久期和凸性字段齐备后，可进入资产腿创建侧栏。</span>
-                  <div className="snapshots-bond-tab-strip">
-                    <span className="status-chip status-chip--soft">2Y / 10Y / 30Y</span>
-                    <span className={readyInstrumentCount ? 'status-chip status-chip--success' : 'status-chip status-chip--warning'}>
-                      {readyInstrumentCount} 条就绪
-                    </span>
-                  </div>
-                </article>
-                <article className="snapshots-bond-pillar-tab">
-                  <strong>通胀债（TIPS）</strong>
-                  <span>用于把实际利率与名义利率分开审计；没有 runtime 行时保持待补。</span>
-                  <div className="snapshots-bond-tab-strip">
-                    <span className="status-chip status-chip--soft">5Y / 10Y</span>
-                    <span className="status-chip status-chip--warning">待补</span>
-                  </div>
-                </article>
-                <article className="snapshots-bond-pillar-tab">
-                  <strong>投资级信用债（IG）</strong>
-                  <span>信用利差篮子必须有真实来源和字段审计，不能使用代理曲线入库。</span>
-                  <div className="snapshots-bond-tab-strip">
-                    <span className="status-chip status-chip--soft">AAA / AA</span>
-                    <span className="status-chip status-chip--warning">待补审计</span>
-                  </div>
-                </article>
+                {BOND_GROUP_ORDER.map((group) => {
+                  const groupCount = bondGroupCounts[group];
+                  const groupInstruments = eligibleInstruments.filter(
+                    (instrument) => getInstrumentBondGroup(instrument) === group,
+                  );
+                  return (
+                    <button
+                      aria-pressed={selectedGroup === group}
+                      className={`snapshots-bond-pillar-tab${selectedGroup === group ? ' snapshots-bond-pillar-tab--active' : ''}`}
+                      key={group}
+                      onClick={() => {
+                        setSelectedGroup(group);
+                        setSelectedInstrumentId(pickGroupInstrumentId(eligibleInstruments, group));
+                      }}
+                      type="button"
+                    >
+                      <strong>{getBondGroupTitle(group)}</strong>
+                      <span>{getBondGroupPillarDescription(group)}</span>
+                      <div className="snapshots-bond-tab-strip">
+                        <span className="status-chip status-chip--soft">
+                          {getBondInstrumentChipLead(group, groupInstruments)}
+                        </span>
+                        <span className={groupCount.ready ? 'status-chip status-chip--success' : 'status-chip status-chip--warning'}>
+                          {formatSourcedReadyCount(groupCount)}
+                        </span>
+                        <span className="status-chip status-chip--soft">{groupMetricChipLabels[group]}</span>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
 
               <div className="snapshots-bond-workbench-main">
-            <div className="snapshots-bond-snapshot-head">
-              <strong>利率债（UST）</strong>
-              <span className={readyInstrumentCount ? 'status-chip status-chip--success' : 'status-chip status-chip--soft'}>
-                {readyInstrumentCount ? '就绪' : '待补'}
-              </span>
-            </div>
-            {eligibleInstruments.length ? (
-              <div className="snapshots-bond-source-stack">
-                {eligibleInstruments.map((instrument) => (
-                  <button
-                    aria-pressed={instrument.id === selectedInstrument?.id}
-                    className={`snapshots-bond-source-choice${instrument.id === selectedInstrument?.id ? ' snapshots-bond-source-choice--active' : ''}`}
-                    key={instrument.id}
-                    onClick={() => setSelectedInstrumentId(instrument.id)}
-                    type="button"
-                  >
-                    <div className="snapshots-bond-source-choice__top">
-                      <div className="snapshots-bond-source-choice__copy">
-                        <strong>{instrument.label}</strong>
-                        <span>
-                          {instrument.snapshot_ref ?? instrument.id} · {instrument.source} ·{' '}
-                          {instrument.snapshot_date ?? '暂无快照日期'}
-                        </span>
-                      </div>
-                      <span className={getBondStatusChipClassName(instrument.status)}>
-                        {getBondStatusLabel(instrument.status)}
+                <div className="snapshots-bond-snapshot-head">
+                  <strong>{getBondGroupTitle(selectedGroup)}</strong>
+                  <span className={getBondStatusChipClassName(selectedGroupStatus)}>
+                    {getBondStatusLabel(selectedGroupStatus)}
+                  </span>
+                </div>
+                <span>{getBondGroupMainDescription(selectedGroup)}</span>
+                {selectedGroupInstruments.length ? (
+                  <div className="snapshots-bond-tab-strip snapshots-bond-group-pill-row">
+                    {selectedGroupInstruments.map((instrument) => (
+                      <span className="snapshots-bond-pill-status" key={`group-pill-${instrument.id}`}>
+                        <span className={getBondInstrumentStatusDotClassName(instrument)} />
+                        {`${stringOrNull(instrument.tenor_label) ?? stringOrNull(instrument.symbol) ?? instrument.label} ${getBondInstrumentStatusLabel(instrument)}`}
                       </span>
+                    ))}
+                  </div>
+                ) : null}
+                {selectedGroupMetricCards.length ? (
+                  <div className="snapshots-bond-spread-grid snapshots-bond-workbench-metrics">
+                    {selectedGroupMetricCards.map((card) => (
+                      <article
+                        className={`snapshots-bond-spread-card${card.tone === 'warn' ? ' snapshots-bond-spread-card--warn' : ''}`}
+                        key={card.label}
+                      >
+                        <span>{card.label}</span>
+                        <strong>{card.value}</strong>
+                        <small>{card.detail}</small>
+                      </article>
+                    ))}
+                  </div>
+                ) : null}
+                {selectedInstrumentFieldChips.length ? (
+                  <div className="snapshots-bond-chip-row">
+                    {selectedInstrumentFieldChips.map((chip) => (
+                      <span className={chip.className} key={`${selectedGroup}-${chip.label}`}>
+                        {chip.label}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                {visibleSelectedGroupInstruments.length ? (
+                  <div className="snapshots-bond-source-stack snapshots-bond-source-stack--scroll">
+                    {visibleSelectedGroupInstruments.map((instrument) => {
+                      const disabledReason = getAssetLegDisabledReason(instrument);
+                      return (
+                        <button
+                          aria-pressed={instrument.id === selectedInstrument?.id}
+                          className={`snapshots-bond-source-choice${instrument.id === selectedInstrument?.id ? ' snapshots-bond-source-choice--active' : ''}`}
+                          disabled={Boolean(disabledReason)}
+                          key={instrument.id}
+                          onClick={() => setSelectedInstrumentId(instrument.id)}
+                          type="button"
+                        >
+                          <div className="snapshots-bond-source-choice__top">
+                            <div className="snapshots-bond-source-choice__copy">
+                              <strong>{instrument.label}</strong>
+                              <span>{formatBondInstrumentSummary(instrument)}</span>
+                            </div>
+                            <span className={getBondStatusChipClassName(instrument.status)}>
+                              {getBondStatusLabel(instrument.status)}
+                            </span>
+                          </div>
+                          <div className="snapshots-bond-chip-row">
+                            <span className="status-chip status-chip--soft">
+                              全价 {instrument.full_price ?? instrument.dirty_price ?? '暂无'}
+                            </span>
+                            <span className="status-chip status-chip--soft">
+                              应计 {instrument.accrued_interest ?? '暂无'}
+                            </span>
+                            <span className="status-chip status-chip--soft">
+                              到期收益率 {instrument.ytm_pct ?? '暂无'}%
+                            </span>
+                            <span className="status-chip status-chip--soft">
+                              久期 {instrument.duration ?? instrument.effective_duration ?? '暂无'}
+                            </span>
+                            {disabledReason ? (
+                              <span className="status-chip status-chip--warning snapshots-bond-disabled-reason">
+                                {disabledReason}
+                              </span>
+                            ) : null}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+                {hiddenSelectedGroupCount > 0 ? (
+                  <div className="snapshots-bond-progress-inline">
+                    <div className="snapshots-bond-snapshot-head">
+                      <strong>{`已展示 ${visibleSelectedGroupInstruments.length} / ${selectedGroupInstruments.length} 张`}</strong>
+                      <span>{`剩余 ${hiddenSelectedGroupCount} 张按久期继续排队`}</span>
                     </div>
-                    <div className="snapshots-bond-chip-row">
-                      <span className="status-chip status-chip--soft">全价 {instrument.full_price ?? instrument.dirty_price ?? 'n/a'}</span>
-                      <span className="status-chip status-chip--soft">应计 {instrument.accrued_interest ?? 'n/a'}</span>
-                      <span className="status-chip status-chip--soft">到期收益率 {instrument.ytm_pct ?? 'n/a'}%</span>
-                        <span className="status-chip status-chip--soft">久期 {instrument.duration ?? 'n/a'}</span>
-                      </div>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <article className="snapshots-bond-evidence-card">
-                <strong>暂无可创建资产腿的债券来源</strong>
-                <span>请先运行快照刷新任务，或写入字段齐备的 bond_fixed_income 快照。</span>
-              </article>
-            )}
-            {selectedInstrument ? (
-              <div className="snapshots-bond-spread-grid snapshots-bond-workbench-metrics">
-                <article className="snapshots-bond-spread-card">
-                  <span>全价 / 净价</span>
-                  <strong>{selectedInstrument.full_price ?? selectedInstrument.dirty_price ?? '待补'}</strong>
-                  <small>净价 {selectedInstrument.clean_price ?? selectedInstrument.net_price ?? '待补'}</small>
-                </article>
-                <article className="snapshots-bond-spread-card">
-                  <span>应计 / 票息</span>
-                  <strong>{selectedInstrument.accrued_interest ?? '待补'}</strong>
-                  <small>票息 {selectedInstrument.coupon_rate_pct ?? '待补'}</small>
-                </article>
-                <article className="snapshots-bond-spread-card">
-                  <span>YTM / 久期</span>
-                  <strong>{selectedInstrument.ytm_pct ?? '待补'}%</strong>
-                  <small>久期 {selectedInstrument.duration ?? '待补'}</small>
-                </article>
-                <article className="snapshots-bond-spread-card">
-                  <span>到期 / 币种</span>
-                  <strong>{selectedInstrument.maturity_date ?? '待补'}</strong>
-                  <small>{selectedInstrument.currency ?? '待确认'}</small>
-                </article>
-              </div>
-            ) : null}
+                    <div className="snapshots-bond-progress-bar" aria-hidden="true">
+                      <span
+                        style={{
+                          width: `${(visibleSelectedGroupInstruments.length / selectedGroupInstruments.length) * 100}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  !visibleSelectedGroupInstruments.length ? (
+                    <article className="snapshots-bond-evidence-card">
+                      <strong>暂无可创建资产腿的债券来源</strong>
+                      <span>请先运行快照刷新任务，或写入字段齐备的 bond_fixed_income 快照。</span>
+                    </article>
+                  ) : null
+                )}
               </div>
               <div className="snapshots-bond-scheduler-stack">
-            <article className="snapshots-bond-curve-preview-card">
-              <strong>曲线预览</strong>
-              <span>
-                {overview.curve_preview.length
-                  ? '当前展示真实 runtime 曲线点。'
-                  : '尚未写入真实 runtime 曲线点；这里保留批准稿位置，但不使用 proxy 或静态曲线兜底。'}
-              </span>
-              {overview.curve_preview.length ? <BondCurveChart points={overview.curve_preview} /> : <BondCurvePlaceholder />}
-            </article>
-            <article className="snapshots-bond-evidence-card snapshots-bond-support-note">
-              <strong>UST 术语说明</strong>
-              <span>
-                全价、应计利息、久期与到期收益率必须来自 runtime 快照字段；曲线点缺失时保留审计提示，防止代理曲线被误读为可入库证据。
-              </span>
-            </article>
+                {overview.curve_preview.length ? (
+                  <BondCurveChart
+                    anomaly={getBondGroupCurveAnomaly(selectedGroup)}
+                    points={overview.curve_preview}
+                    summaryChip={groupMetricChipLabels[selectedGroup]}
+                  />
+                ) : (
+                  <BondCurvePlaceholder />
+                )}
+                <article className="snapshots-bond-evidence-card snapshots-bond-support-note">
+                  <strong>{getBondGroupSupportTitle(selectedGroup)}</strong>
+                  <span>{getBondGroupSupportCopy(selectedGroup)}</span>
+                  <div className="snapshots-bond-chip-row">
+                    {supportChips.map((chip) => (
+                      <span className="status-chip status-chip--soft" key={`${selectedGroup}-support-${chip}`}>
+                        {chip}
+                      </span>
+                    ))}
+                  </div>
+                </article>
               </div>
             </div>
           </section>
         </div>
 
           <aside className="snapshots-bond-detail-rail">
-            <section className="snapshots-bond-task-rail snapshots-bond-create-rail">
+            <section
+              className="snapshots-bond-task-rail snapshots-bond-create-rail"
+              data-ui="asset-leg-eligibility-rail"
+            >
               <div className="snapshots-bond-task-rail__section">
                 <div className="snapshots-bond-task-rail__header">
                   <div className="snapshots-bond-task-rail__heading">
@@ -1520,27 +2556,76 @@ export function BondFixedIncomeSnapshotsTab({
                       </span>
                     </div>
                     <span>
-                      供应商：{selectedInstrument.source} · 更新：{selectedInstrument.snapshot_date ?? '暂无日期'} · 角色：
+                      供应商：{translateBondSource(selectedInstrument.source)} · 更新：{selectedInstrument.snapshot_date ?? '暂无日期'} · 角色：
                       收益率曲线锚点。
                     </span>
                     <div className="snapshots-bond-chip-row">
-                      <span className="status-chip status-chip--success">合规字段齐备</span>
+                      <span className={selectedInstrumentIsReady ? 'status-chip status-chip--success' : 'status-chip status-chip--warning'}>
+                        {selectedInstrumentIsReady ? '合规字段齐备' : '暂不可入库'}
+                      </span>
                       <span className="status-chip status-chip--soft">可回溯快照</span>
                     </div>
                     </article>
-                    <article className="snapshots-bond-evidence-card">
-                    <strong>入库演进：runtime 字段流</strong>
+                    {selectedInstrumentDisabledReason ? (
+                      <article className="snapshots-bond-evidence-card snapshots-bond-evidence-card--warning">
+                        <strong>暂不可创建资产腿</strong>
+                        <span>{selectedInstrumentDisabledReason}</span>
+                      </article>
+                    ) : null}
+                    <article
+                      className="snapshots-bond-evidence-card snapshots-bond-daily-accrual-status"
+                      data-ui="daily-accrual-status"
+                    >
+                      <strong>日频应计利息</strong>
+                      <span>
+                        {displayRecordValue(
+                          dailyAccrualRows.find((row) => displayRecordValue(row, 'id') === selectedInstrument.id) ?? {},
+                          'status',
+                          'READY',
+                        )}
+                        {' · '}
+                        应计 {displayRecordValue(
+                          dailyAccrualRows.find((row) => displayRecordValue(row, 'id') === selectedInstrument.id) ?? {},
+                          'accrued_interest',
+                        )}
+                      </span>
+                    </article>
+                    <article
+                      className="snapshots-bond-evidence-card snapshots-bond-risk-budget-inputs"
+                      data-ui="risk-budget-precheck"
+                    >
+                      <strong>风险预算预检</strong>
+                      <span>
+                        {displayRecordValue(
+                          riskBudgetRows.find((row) => displayRecordValue(row, 'id') === selectedInstrument.id) ?? {},
+                          'status',
+                          'COMPOSABLE',
+                        )}
+                        {' · '}
+                        久期 {displayRecordValue(
+                          riskBudgetRows.find((row) => displayRecordValue(row, 'id') === selectedInstrument.id) ?? {},
+                          'duration',
+                        )}
+                        {' · '}
+                        凸性 {displayRecordValue(
+                          riskBudgetRows.find((row) => displayRecordValue(row, 'id') === selectedInstrument.id) ?? {},
+                          'convexity',
+                        )}
+                      </span>
+                    </article>
+                  <article className="snapshots-bond-evidence-card">
+                    <strong>入库演进：运行时字段流</strong>
                     <span>
-                      快照 {selectedInstrument.snapshot_ref ?? selectedInstrument.id} 绑定当前选中债券；缺失字段 {selectedInstrument.missing_fields.length}
+                      {formatBondInstrumentKind(selectedInstrument)}快照绑定当前选中债券；缺失字段 {selectedInstrument.missing_fields.length}
                       项，推算字段 {Object.keys(selectedInstrument.inferred_fields).length} 项。
                     </span>
-                    </article>
+                  </article>
                     <div className="snapshots-bond-action-checklist">
                     <ul>
                       <li>影子字段完整，可冻结为资产腿来源。</li>
                       <li>历史快照可回溯，入库按钮绑定当前选中行。</li>
                       <li className={overview.curve_preview.length ? '' : 'is-warn'}>
-                        {overview.curve_preview.length ? '收益率曲线已有 runtime 点位。' : '收益率曲线尚未入库，继续作为审计提醒。'}
+                        {overview.curve_preview.length ? '收益率曲线已有运行时点位。' : '收益率曲线尚未入库，继续作为审计提醒。'}
                       </li>
                     </ul>
                     </div>
@@ -1560,7 +2645,7 @@ export function BondFixedIncomeSnapshotsTab({
                 ) : (
                   <article className="snapshots-bond-evidence-card">
                     <strong>暂无选中债券</strong>
-                    <span>runtime 中没有 READY 债券快照，暂不能创建资产腿。</span>
+                    <span>运行时中没有就绪债券快照，暂不能创建资产腿。</span>
                   </article>
                 )}
               </div>
@@ -1581,7 +2666,7 @@ export function BondFixedIncomeSnapshotsTab({
                     </span>
                   </div>
                   <p className="snapshots-panel-copy">
-                    这里展示实时 bond_fixed_income overview payload 中的字段、门禁和审计证据；空态代表尚未写入可审计债券快照。
+                    这里展示实时债券快照总览中的字段、门禁和审计证据；空态代表尚未写入可审计债券快照。
                   </p>
                 </div>
                 <div className="button-row">
@@ -1592,6 +2677,50 @@ export function BondFixedIncomeSnapshotsTab({
               </div>
 
               <BondAuditMatrix overview={overview} selectedInstrumentId={selectedInstrument?.id ?? null} />
+
+              <section
+                className="snapshots-bond-quality-audit"
+                aria-label="债券质量审计"
+                data-ui="bond-quality-audit-matrix"
+              >
+                <div className="snapshots-bond-quality-header">
+                  <strong>质量审计</strong>
+                  <span className="status-chip status-chip--soft">{qualityAuditRows.length} 条记录</span>
+                </div>
+                <div className="snapshots-bond-quality-grid">
+                  {qualityAuditRows.map((row) => (
+                    <article className="snapshots-bond-evidence-card" key={displayRecordValue(row, 'id', displayRecordValue(row, 'label'))}>
+                      <div className="snapshots-bond-snapshot-head">
+                        <strong>{displayRecordValue(row, 'label')}</strong>
+                        <span className={getBondStatusChipClassName(displayRecordValue(row, 'status', 'WATCH'))}>
+                          {displayRecordValue(row, 'status', 'WATCH')}
+                        </span>
+                      </div>
+                      <span>价格一致性 {displayRecordValue(row, 'price_consistency_status')} · 风险字段 {displayRecordValue(row, 'ytm_duration_convexity_status')}</span>
+                      <span>缺失 {displayRecordValue(row, 'missing_fields', 'none')} · 推断 {displayRecordValue(row, 'inferred_fields', 'none')}</span>
+                    </article>
+                  ))}
+                </div>
+              </section>
+
+              <section
+                className="snapshots-bond-quality-audit snapshots-bond-repair-rules"
+                aria-label="债券修复规则"
+                data-ui="bond-repair-rules"
+              >
+                <div className="snapshots-bond-quality-header">
+                  <strong>一键修复规则</strong>
+                  <span className="status-chip status-chip--soft">修复目标 bond</span>
+                </div>
+                <div className="snapshots-bond-quality-grid snapshots-bond-quality-grid--compact">
+                  {repairRules.map((row) => (
+                    <article className="snapshots-bond-evidence-card" key={displayRecordValue(row, 'id', displayRecordValue(row, 'mode'))}>
+                      <strong>{displayRecordValue(row, 'mode')} · {displayRecordValue(row, 'target')}</strong>
+                      <span>{displayRecordValue(row, 'label')}</span>
+                    </article>
+                  ))}
+                </div>
+              </section>
             </section>
           </div>
 
@@ -1625,14 +2754,14 @@ export function BondFixedIncomeSnapshotsTab({
             <div>
               <div className="snapshots-bond-title-row">
                 <h3>原始快照与调度</h3>
-                <span className="status-chip status-chip--soft">{overview.raw_registry.length} 条 runtime 行</span>
+                <span className="status-chip status-chip--soft">{overview.raw_registry.length} 条运行时行</span>
               </div>
               <p className="snapshots-panel-copy">
-                只展示真实 bond_fixed_income 快照与共享调度规则，让审计矩阵和调度治理像批准稿一样分层。
+                只保留真实债券快照行和共享调度，方便直接定位异常与下一步规则。
               </p>
             </div>
             <button className="ghost-button snapshots-bond-registry-refresh-button" type="button">
-              批量重刷 2 个异常快照
+              重刷 2 个异常行
             </button>
           </div>
 
@@ -1649,28 +2778,26 @@ export function BondFixedIncomeSnapshotsTab({
                     />
                     <div>
                       <strong>{item.label}</strong>
-                      <span>{item.snapshot_ref ?? item.id}</span>
+                      <span>{translateBondSource(item.source)}</span>
                     </div>
                     <div>
                       <strong>字段</strong>
-                      <span>{item.notes.length ? item.notes.join(' / ') : 'runtime 字段待补齐'}</span>
+                      <span>{formatRegistryNotes(item.notes)}</span>
                     </div>
                     <div>
                       <strong>调度</strong>
-                      <span>
-                        {translateBondSource(item.source)} · {formatRegistryTimestamp(item.updated_at)}
-                      </span>
+                      <span>{translateBondSource(item.source)} · {formatRegistryTimestamp(item.updated_at)}</span>
                     </div>
                     <div>
                       <strong>{getBondStatusLabel(item.status)}</strong>
-                      <span>{item.status}</span>
+                      <span>{getBondStatusLabel(item.status)}状态</span>
                     </div>
                   </article>
                 ))
               ) : (
                 <article className="snapshots-bond-evidence-card">
                   <strong>暂无原始债券快照行</strong>
-                  <span>只有已存储的 bond_fixed_income 快照会出现在这里。</span>
+                  <span>只有已存储的债券快照会出现在这里。</span>
                 </article>
               )}
             </div>
@@ -1680,7 +2807,7 @@ export function BondFixedIncomeSnapshotsTab({
                 <div className="snapshots-bond-task-rail__section">
                   <div className="snapshots-bond-task-rail__header">
                     <div className="snapshots-bond-task-rail__heading">
-                      <strong>批量修复规则</strong>
+                      <strong>修复规则</strong>
                       <span>{getRuleEntries(overview).length} 条规则</span>
                     </div>
                   </div>

@@ -166,7 +166,11 @@ def test_snapshot_overview_contract_is_exact_on_fresh_database(tmp_path):
 
     assert_snapshot_overview_contract(overview)
     assert overview["overall_status"] == "INCOMPLETE"
-    assert [item["id"] for item in overview["dataset_snapshots"]] == ["ds-corporate-actions", "ds-price"]
+    assert [item["id"] for item in overview["dataset_snapshots"]] == [
+        "ds-corporate-actions",
+        "ds-price",
+        "ds-index-valuations",
+    ]
     assert [item["id"] for item in overview["universe_snapshots"]] == ["un-sp500", "un-ndx100"]
     assert overview["latest_job"] is None
     assert overview["blocking_code"] == "SNAPSHOT_REFRESH_REQUIRED"
@@ -179,7 +183,7 @@ def test_snapshot_overview_includes_bond_fixed_income_extension(tmp_path):
     overview = assert_ok(client.get("/data-snapshots/overview"))
     bond = overview["bond_fixed_income"]
 
-    assert set(bond.keys()) == {
+    assert {
         "global_pulse",
         "pillar_groups",
         "curve_preview",
@@ -190,7 +194,15 @@ def test_snapshot_overview_includes_bond_fixed_income_extension(tmp_path):
         "scheduler",
         "selected_source_summary",
         "system_diagnostics",
+    }.issubset(set(bond.keys()))
+    assert bond["group_counts"] == {
+        "ust": {"sourced": 0, "ready": 0},
+        "tips": {"sourced": 0, "ready": 0},
+        "ig": {"sourced": 0, "ready": 0},
     }
+    assert bond["ust_10y_2y_spread_bps"] is None
+    assert bond["tips_breakeven_pct"] is None
+    assert bond["lqd_tracking_status"] is None
     assert bond["global_pulse"]["headline"]
     assert bond["curve_preview"] == []
     assert bond["raw_registry"] == []
@@ -198,6 +210,212 @@ def test_snapshot_overview_includes_bond_fixed_income_extension(tmp_path):
     assert bond["eligible_instruments"] == []
     assert bond["selected_source_summary"]["primary_source"] == "bond_fixed_income_snapshots"
     assert bond["selected_source_summary"]["fallback_source"] is None
+
+
+def _seed_bond_contract_snapshot(client, **overrides: Any) -> str:
+    base: dict[str, Any] = {
+        "id": "bond-contract-base",
+        "instrument_id": "BOND-CONTRACT-BASE",
+        "symbol": "BOND",
+        "name": "Bond contract fixture",
+        "instrument_type": "bond",
+        "currency": "USD",
+        "snapshot_date": "2026-04-23",
+        "maturity_date": "2031-04-23",
+        "coupon_rate_pct": 4.0,
+        "clean_price": 100.0,
+        "net_price": 100.0,
+        "dirty_price": 100.2,
+        "full_price": 100.2,
+        "accrued_interest": 0.2,
+        "ytm_pct": 4.0,
+        "duration": 5.0,
+        "convexity": 0.5,
+        "source": "bond_fixed_income",
+        "refresh_status": "READY",
+        "missing_fields": [],
+        "inferred_fields": {},
+        "raw": {},
+    }
+    base.update(overrides)
+    return client.app.state.service.market_data_repository.upsert_bond_fixed_income_snapshot(base)
+
+
+def _seed_seven_bond_contract_snapshots(client) -> dict[str, str]:
+    rows = [
+        {
+            "id": "bond-ust-cmt-2y",
+            "instrument_id": "UST_CMT_2Y",
+            "symbol": "UST2Y",
+            "name": "UST CMT 2Y",
+            "ytm_pct": 1.0,
+            "raw": {
+                "asset_type": "UST",
+                "tenor_label": "2Y",
+                "audit_profile": "UST_CMT_2Y",
+                "effective_duration": 1.9,
+            },
+        },
+        {
+            "id": "bond-ust-cmt-10y",
+            "instrument_id": "UST_CMT_10Y",
+            "symbol": "UST10Y",
+            "name": "UST CMT 10Y",
+            "ytm_pct": 4.65,
+            "duration": 8.3,
+            "raw": {
+                "asset_type": "UST",
+                "tenor_label": "10Y",
+                "audit_profile": "UST_CMT_10Y",
+                "effective_duration": 8.3,
+            },
+        },
+        {
+            "id": "bond-ust-cmt-30y",
+            "instrument_id": "UST_CMT_30Y",
+            "symbol": "UST30Y",
+            "name": "UST CMT 30Y",
+            "ytm_pct": 4.8,
+            "duration": 17.8,
+            "raw": {
+                "asset_type": "UST",
+                "tenor_label": "30Y",
+                "audit_profile": "UST_CMT_30Y",
+                "effective_duration": 17.8,
+            },
+        },
+        {
+            "id": "bond-ust-bill-13w",
+            "instrument_id": "UST_BILL_3M",
+            "symbol": "TBILL13W",
+            "name": "UST T-Bill 13W",
+            "instrument_type": "t_bill",
+            "maturity_date": "2026-07-23",
+            "coupon_rate_pct": 0.0,
+            "accrued_interest": None,
+            "ytm_pct": 5.21,
+            "duration": 0.24,
+            "missing_fields": ["accrued_interest"],
+            "raw": {
+                "asset_type": "T_BILL",
+                "tenor_label": "13W",
+                "audit_profile": "UST_BILL_3M",
+                "discount_rate_pct": 5.18,
+                "effective_duration": 0.24,
+            },
+        },
+        {
+            "id": "bond-tips-5y",
+            "instrument_id": "TIPS_5Y",
+            "symbol": "TIPS5Y",
+            "name": "TIPS 5Y",
+            "instrument_type": "tips",
+            "ytm_pct": 3.94,
+            "duration": 4.7,
+            "raw": {
+                "asset_type": "TIPS",
+                "tenor_label": "5Y",
+                "audit_profile": "TIPS",
+                "real_yield_pct": 1.82,
+                "inflation_factor": 1.0312,
+                "breakeven_inflation_bps": 212.0,
+                "effective_duration": 4.7,
+            },
+        },
+        {
+            "id": "bond-tips-10y",
+            "instrument_id": "TIPS_10Y",
+            "symbol": "TIPS10Y",
+            "name": "TIPS 10Y",
+            "instrument_type": "tips",
+            "ytm_pct": 4.05,
+            "duration": 7.9,
+            "raw": {
+                "asset_type": "TIPS",
+                "tenor_label": "10Y",
+                "audit_profile": "TIPS",
+                "real_yield_pct": 2.03,
+                "inflation_factor": 1.0425,
+                "breakeven_inflation_bps": 262.0,
+                "effective_duration": 7.9,
+            },
+        },
+        {
+            "id": "bond-lqd-watch",
+            "instrument_id": "LQD",
+            "symbol": "LQD",
+            "name": "iShares iBoxx Investment Grade Corporate Bond ETF",
+            "instrument_type": "etf",
+            "refresh_status": "READY",
+            "missing_fields": [],
+            "raw": {
+                "asset_type": "BOND_ETF",
+                "tenor_label": "ETF",
+                "audit_profile": "LQD",
+                "sec_yield_30d_pct": 4.73,
+                "credit_quality": "A-",
+                "tracking_error_bps": 7.5,
+                "audit_notes": ["Official tracking-error evidence pending."],
+            },
+        },
+    ]
+    return {row["id"]: _seed_bond_contract_snapshot(client, **row) for row in rows}
+
+
+def test_bond_snapshot_overview_publishes_seven_row_contract_and_audit_cases(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    snapshot_refs = _seed_seven_bond_contract_snapshots(client)
+
+    overview = assert_ok(client.get("/data-snapshots/overview"))
+    bond = overview["bond_fixed_income"]
+    instruments = {item["id"]: item for item in bond["eligible_instruments"]}
+
+    assert len(bond["raw_registry"]) == 7
+    assert len(instruments) == 7
+    assert set(instruments) == set(snapshot_refs)
+    assert bond["group_counts"]["ust"]["sourced"] == 4
+    assert bond["group_counts"]["tips"]["sourced"] == 2
+    assert bond["group_counts"]["ig"]["sourced"] == 1
+    assert bond["ust_10y_2y_spread_bps"] == 365.0
+    assert bond["tips_real_yield_pct"] == 2.03
+    assert bond["tips_inflation_factor"] == 1.0425
+    assert bond["tips_breakeven_pct"] == 2.62
+    assert bond["lqd_sec_yield_30d_pct"] == 4.73
+    assert bond["lqd_credit_quality"] == "A-"
+    assert bond["lqd_tracking_status"] == "WATCH"
+
+    bill = instruments["bond-ust-bill-13w"]
+    assert bill["asset_type"] == "T_BILL"
+    assert bill["tenor_label"] == "13W"
+    assert bill["audit_profile"] == "UST_BILL_3M"
+    assert bill["discount_rate_pct"] == 5.18
+    assert bill["accrued_interest"] is None
+    assert bill["field_status"]["accrued_interest"] == "WAIVED"
+    assert bill["status"] == "READY"
+
+    tips = instruments["bond-tips-10y"]
+    assert tips["asset_type"] == "TIPS"
+    assert tips["tenor_label"] == "10Y"
+    assert tips["real_yield_pct"] == 2.03
+    assert tips["inflation_factor"] == 1.0425
+    assert tips["breakeven_inflation_bps"] == 262.0
+    assert tips["effective_duration"] == 7.9
+
+    ust_10y = instruments["bond-ust-cmt-10y"]
+    assert ust_10y["asset_type"] == "UST"
+    assert ust_10y["tenor_label"] == "10Y"
+    assert ust_10y["tracking_status"] is None
+    assert ust_10y["status"] == "WATCH"
+    assert any("UST_CMT_2Y/10Y spread 365 bps" in alert for alert in ust_10y["audit_alerts"])
+
+    lqd = instruments["bond-lqd-watch"]
+    assert lqd["asset_type"] == "BOND_ETF"
+    assert lqd["sec_yield_30d_pct"] == 4.73
+    assert lqd["credit_quality"] == "A-"
+    assert lqd["tracking_error_bps"] == 7.5
+    assert lqd["field_status"]["tracking_error_bps"] == "MISSING"
+    assert lqd["tracking_status"] == "WATCH"
+    assert lqd["status"] == "WATCH"
 
 
 def test_refresh_target_pool_filters_non_ticker_labels_from_missing_symbols_and_strategies(tmp_path):
@@ -294,6 +512,58 @@ def test_scoped_market_data_provider_excludes_longbridge_for_full_history(tmp_pa
 
     assert runtime_provider.captured == [{"longbridge", "longbridge_static_info", "futu", "futu_rehab", "tiingo"}]
     assert [provider.provider_name for provider in scoped.providers] == ["yahoo", "akshare_us"]
+
+
+def test_scoped_market_data_provider_excludes_openbb_quota_sources_outside_repair(tmp_path, monkeypatch):
+    monkeypatch.delenv("GRIT_ENABLE_PAID_OPTIONAL_PROVIDERS", raising=False)
+
+    class _NamedProvider:
+        def __init__(self, provider_name: str) -> None:
+            self.provider_name = provider_name
+
+    class _FakeRuntimeProvider:
+        provider_name = "runtime"
+
+        def __init__(self, providers: list[_NamedProvider], captured: list[set[str]] | None = None) -> None:
+            self.providers = list(providers)
+            self.missing_providers: list[str] = []
+            self.universe_history_providers: list[object] = []
+            self.captured = captured if captured is not None else []
+
+        def scoped_copy(self, *, exclude_provider_names=None):
+            excluded = {str(item) for item in (exclude_provider_names or [])}
+            self.captured.append(excluded)
+            return _FakeRuntimeProvider(
+                [provider for provider in self.providers if provider.provider_name not in excluded],
+                captured=self.captured,
+            )
+
+    runtime_provider = _FakeRuntimeProvider(
+        [
+            _NamedProvider("yahoo"),
+            _NamedProvider("openbb_yfinance"),
+            _NamedProvider("openbb_tiingo"),
+            _NamedProvider("openbb_alpha_vantage"),
+            _NamedProvider("openbb_fmp"),
+        ]
+    )
+    service = RealBacktestPlatformService(tmp_path / "scoped-openbb.db", market_data_provider=runtime_provider)
+
+    scoped = service._scoped_market_data_provider(mode="full", window_start=date(1996, 1, 1))
+
+    assert runtime_provider.captured == [
+        {
+            "longbridge",
+            "longbridge_static_info",
+            "futu",
+            "futu_rehab",
+            "tiingo",
+            "openbb_tiingo",
+            "openbb_alpha_vantage",
+            "openbb_fmp",
+        }
+    ]
+    assert [provider.provider_name for provider in scoped.providers] == ["yahoo", "openbb_yfinance"]
 
 
 def test_scoped_market_data_provider_keeps_longbridge_for_recent_incremental_window(tmp_path):
@@ -631,6 +901,75 @@ def test_snapshot_refresh_persists_provider_summary_for_each_snapshot_pool(tmp_p
     assert sp500_summary["providers"]["wikipedia_revision_history"]["landed_anchor_count"] == 1
     assert "fmp" in sp500_summary["skipped_providers"]
     assert sp500_summary["providers"]["fmp"]["reasons"] == ["FMP_API_KEY is not configured."]
+
+
+def test_openbb_current_constituent_check_does_not_flip_universe_readiness(tmp_path):
+    class _CurrentUniverseChecker:
+        provider_name = "openbb_index_constituents"
+
+        def check_current_constituents(self, *, universe_key, universe_name, symbols):
+            return {
+                "provider": self.provider_name,
+                "status": "succeeded",
+                "current_member_count": len(symbols),
+                "anchor_member_count": len(symbols),
+                "matched_latest_anchor_count": len(symbols),
+                "auxiliary_only": True,
+            }
+
+    class _RuntimeProvider:
+        provider_name = "runtime"
+
+        def __init__(self) -> None:
+            self.universe_history_providers = [_UniverseProvider()]
+            self.current_universe_constituent_checker = _CurrentUniverseChecker()
+
+    class _UniverseProvider:
+        provider_name = "wikipedia_revision_history"
+
+        def load_snapshots(self, start_date: date, end_date: date):
+            return [
+                UniverseMembershipSnapshot(
+                    universe_key=SP500_UNIVERSE_KEY,
+                    universe_name=SP500_UNIVERSE_NAME,
+                    effective_date=date(2026, 1, 1),
+                    normalized_symbols=["AAPL", "MSFT"],
+                    raw_symbols=["AAPL", "MSFT"],
+                    unmapped_symbols=[],
+                    source="wikipedia_current_page",
+                    fallback_source="wikipedia_revision_history",
+                    anchor_schedule=ANCHOR_SCHEDULE,
+                    source_revision_id="current-sp500-2026-01-01",
+                    source_page_title=SP500_SOURCE_PAGE_TITLE,
+                    metadata={"source_quality": "current_page_fallback"},
+                ),
+                UniverseMembershipSnapshot(
+                    universe_key=NASDAQ100_UNIVERSE_KEY,
+                    universe_name=NASDAQ100_UNIVERSE_NAME,
+                    effective_date=date(2026, 1, 1),
+                    normalized_symbols=["AAPL", "MSFT"],
+                    raw_symbols=["AAPL", "MSFT"],
+                    unmapped_symbols=[],
+                    source="wikipedia_current_page",
+                    fallback_source="wikipedia_revision_history",
+                    anchor_schedule=ANCHOR_SCHEDULE,
+                    source_revision_id="current-ndx100-2026-01-01",
+                    source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
+                    metadata={"source_quality": "current_page_fallback"},
+                ),
+            ]
+
+    service = RealBacktestPlatformService(tmp_path / "openbb-universe-auxiliary.db", market_data_provider=_RuntimeProvider())
+
+    overview = service.refresh_snapshots({"mode": "repair", "targets": ["universes"]})
+    sp500_snapshot = next(item for item in overview["universe_snapshots"] if item["id"] == SP500_UNIVERSE_SNAPSHOT_ID)
+    sp500_summary = overview["latest_job"]["summary"]["refresh_stats"]["universes"][SP500_UNIVERSE_SNAPSHOT_ID]["provider_summary"]
+
+    assert sp500_snapshot["status"] == "INCOMPLETE"
+    assert sp500_snapshot["metadata"]["historical_anchor_count"] == 0
+    assert sp500_snapshot["metadata"]["openbb_current_constituent_check"]["auxiliary_only"] is True
+    assert sp500_summary["providers"]["openbb_index_constituents"]["auxiliary_only"] is True
+    assert sp500_summary["providers"]["openbb_index_constituents"]["landed_anchor_count"] == 0
 
 
 def test_snapshot_refresh_marks_zero_event_action_probe_as_corporate_covered(tmp_path):
@@ -1176,9 +1515,13 @@ def test_snapshot_refresh_returns_refreshed_overview_with_embedded_latest_job(tm
     assert "refresh_stats" in refreshed["latest_job"]["summary"]
     assert "datasets" in refreshed["latest_job"]["summary"]["refresh_stats"]
     assert "universes" in refreshed["latest_job"]["summary"]["refresh_stats"]
-    assert [item["status"] for item in refreshed["dataset_snapshots"]] == ["READY", "READY"]
+    assert [(item["id"], item["status"]) for item in refreshed["dataset_snapshots"]] == [
+        ("ds-corporate-actions", "READY"),
+        ("ds-price", "READY"),
+        ("ds-index-valuations", "INCOMPLETE"),
+    ]
     assert [item["status"] for item in refreshed["universe_snapshots"]] == ["READY", "READY"]
-    assert refreshed["allowed_actions"] == ["refresh_snapshots", "start_backtest"]
+    assert refreshed["allowed_actions"] == ["refresh_snapshots"]
 
 
 def test_snapshot_overview_seeds_legacy_local_cache_when_snapshot_tables_are_empty(tmp_path):
@@ -1692,6 +2035,104 @@ def test_snapshot_overview_uses_independent_company_action_progress(tmp_path):
     assert price_snapshot["metadata"]["total_symbol_count"] == 2
     assert actions_snapshot["metadata"]["covered_symbol_count"] == 2
     assert actions_snapshot["metadata"]["total_symbol_count"] == 2
+
+
+def test_snapshot_overview_publishes_benchmark_etf_price_history_coverage(tmp_path):
+    service = RealBacktestPlatformService(tmp_path / "benchmark-etf-coverage.db", market_data_provider=None)
+    repository = service.market_data_repository
+    repository.replace_dataset_snapshot(
+        {
+            "id": "ds-price",
+            "name": "股票价格数据",
+            "status": "INCOMPLETE",
+            "as_of": "2026-04-02T01:00:00Z",
+            "freshness_label": "已刷新",
+            "start_date": "1996-01-02",
+            "end_date": "2026-04-01",
+            "row_count": 5,
+            "source": "legacy_local_cache",
+            "fallback_source": None,
+            "blocker": {"code": "PRICE_SNAPSHOT_INCOMPLETE", "message": "waiting"},
+            "metadata": {"covered_symbol_count": 1, "total_symbol_count": 3},
+        },
+        price_bars=[
+            {
+                "symbol": "SPY",
+                "date": "1996-01-02",
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.5,
+                "adj_close": 100.5,
+                "volume": 1000,
+                "source": "legacy_local_cache",
+                "fallback_source": None,
+            },
+            {
+                "symbol": "SPY",
+                "date": "2026-04-01",
+                "open": 500.0,
+                "high": 501.0,
+                "low": 499.0,
+                "close": 500.5,
+                "adj_close": 500.5,
+                "volume": 1000,
+                "source": "legacy_local_cache",
+                "fallback_source": None,
+            },
+            {
+                "symbol": "QQQ",
+                "date": "1999-03-10",
+                "open": 50.0,
+                "high": 51.0,
+                "low": 49.0,
+                "close": 50.5,
+                "adj_close": 50.5,
+                "volume": 1000,
+                "source": "legacy_local_cache",
+                "fallback_source": None,
+            },
+            {
+                "symbol": "QQQ",
+                "date": "2026-04-01",
+                "open": 400.0,
+                "high": 401.0,
+                "low": 399.0,
+                "close": 400.5,
+                "adj_close": 400.5,
+                "volume": 1000,
+                "source": "legacy_local_cache",
+                "fallback_source": None,
+            },
+            {
+                "symbol": "AAPL",
+                "date": "2026-04-01",
+                "open": 210.0,
+                "high": 211.0,
+                "low": 209.0,
+                "close": 210.5,
+                "adj_close": 210.5,
+                "volume": 1000,
+                "source": "legacy_local_cache",
+                "fallback_source": None,
+            },
+        ],
+        symbol_coverage=[CoverageSummary(symbol="AAPL", start_date="2026-04-01", end_date="2026-04-01", trade_days=1)],
+    )
+
+    overview = service.get_snapshot_overview()
+    price_snapshot = next(item for item in overview["dataset_snapshots"] if item["id"] == "ds-price")
+    coverage = price_snapshot["metadata"]["benchmark_etf_coverage"]
+
+    assert coverage["ready_count"] == 2
+    assert coverage["total_count"] == 2
+    assert coverage["missing_symbols"] == []
+    by_symbol = {item["symbol"]: item for item in coverage["symbols"]}
+    assert by_symbol["SPY"]["status"] == "READY"
+    assert by_symbol["SPY"]["start_date"] == "1996-01-02"
+    assert by_symbol["SPY"]["end_date"] == "2026-04-01"
+    assert by_symbol["QQQ"]["status"] == "READY"
+    assert by_symbol["QQQ"]["start_date"] == "1999-03-10"
 
 
 def test_repair_refresh_batches_missing_symbols_without_dropping_unattempted_gaps(tmp_path, monkeypatch):

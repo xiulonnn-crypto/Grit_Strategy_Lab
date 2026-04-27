@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from statistics import mean, pstdev
 from typing import Any, Iterable, Mapping
 
@@ -19,6 +19,12 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+DYNAMIC_BUY_AND_HOLD_UNSUPPORTED_WARNING = (
+    "当前回测引擎尚未接入动态定投所需的估值/基本面时间序列，"
+    "dynamic_investment_logic 未执行；结果暂按固定金额定投计算。"
+)
 
 
 @dataclass(slots=True)
@@ -51,6 +57,11 @@ class TradeRecord:
     weight_before: float
     weight_after: float
     reason: str
+    quantity: float | None = None
+    net_amount: float | None = None
+    contribution_multiplier: float | None = None
+    valuation_percentile_10y: float | None = None
+    valuation_bucket: str | None = None
 
 
 @dataclass(slots=True)
@@ -107,6 +118,18 @@ class PreparedBacktestInputs:
     symbol_series: dict[str, list[MarketBar]]
     benchmark_series: list[MarketBar]
     master_dates: list[str]
+    valuation_series: dict[str, list["IndexValuationPoint"]] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class IndexValuationPoint:
+    date: str
+    proxy_symbol: str
+    pe_ttm: float | None
+    pe_ttm_percentile_10y: float | None
+    source: str = ""
+    fallback_source: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _normalize_bars(bars: Iterable[Mapping[str, Any]]) -> list[MarketBar]:
@@ -125,6 +148,73 @@ def _normalize_bars(bars: Iterable[Mapping[str, Any]]) -> list[MarketBar]:
     ]
     normalized.sort(key=lambda item: item.date)
     return normalized
+
+
+def _normalize_valuation_series(
+    valuations_by_index: Mapping[str, Iterable[Mapping[str, Any]]] | None,
+) -> dict[str, list[IndexValuationPoint]]:
+    normalized: dict[str, list[IndexValuationPoint]] = {}
+    for index_key, rows in (valuations_by_index or {}).items():
+        items = [
+            IndexValuationPoint(
+                date=str(item.get("date") or ""),
+                proxy_symbol=str(item.get("proxy_symbol") or ""),
+                pe_ttm=(
+                    float(item.get("pe_ttm"))
+                    if item.get("pe_ttm") not in (None, "")
+                    else None
+                ),
+                pe_ttm_percentile_10y=(
+                    float(item.get("pe_ttm_percentile_10y"))
+                    if item.get("pe_ttm_percentile_10y") not in (None, "")
+                    else None
+                ),
+                source=str(item.get("source") or ""),
+                fallback_source=str(item.get("fallback_source")) if item.get("fallback_source") else None,
+                metadata=dict(item.get("metadata") or {}),
+            )
+            for item in rows
+            if str(item.get("date") or "").strip()
+        ]
+        items.sort(key=lambda item: item.date)
+        normalized[str(index_key).strip().lower()] = items
+    return normalized
+
+
+def _parse_dynamic_investment_rules(value: Any) -> list[tuple[float, float, float]]:
+    if not isinstance(value, list):
+        return []
+    parsed: list[tuple[float, float, float]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        min_percentile = _to_float(item.get("min_percentile"), math.nan)
+        max_percentile = _to_float(item.get("max_percentile"), math.nan)
+        multiplier = _to_float(item.get("multiplier"), math.nan)
+        if not math.isfinite(min_percentile) or not math.isfinite(max_percentile) or not math.isfinite(multiplier):
+            continue
+        parsed.append((min_percentile, max_percentile, multiplier))
+    parsed.sort(key=lambda item: (item[0], item[1]))
+    return parsed
+
+
+def _valuation_bucket(percentile: float, rules: list[tuple[float, float, float]]) -> str | None:
+    for min_percentile, max_percentile, _ in rules:
+        if min_percentile <= percentile <= max_percentile:
+            return f"{int(min_percentile)}-{int(max_percentile)}"
+    return None
+
+
+def _resolve_contribution_multiplier(
+    percentile: float | None,
+    rules: list[tuple[float, float, float]],
+) -> tuple[float, str | None]:
+    if percentile is None:
+        return 1.0, None
+    for min_percentile, max_percentile, multiplier in rules:
+        if min_percentile <= percentile <= max_percentile:
+            return multiplier, f"{int(min_percentile)}-{int(max_percentile)}"
+    return 1.0, None
 
 
 def _parse_rebalance_anchor_dates(value: Any) -> list[tuple[int, int]]:
@@ -740,6 +830,7 @@ def _run_buy_and_hold_backtest(
     parameters: Mapping[str, Any],
     benchmark_series: list[MarketBar],
     master_dates: list[str],
+    valuation_series: Mapping[str, list[IndexValuationPoint]] | None = None,
 ) -> BacktestResult:
     primary_symbol = config.benchmark_symbol if config.benchmark_symbol in symbol_series else next(iter(symbol_series.keys()))
     primary_series = symbol_series.get(primary_symbol, [])
@@ -752,6 +843,9 @@ def _run_buy_and_hold_backtest(
 
     contribution_amount = _to_float(parameters.get("contribution_amount"), 0.0)
     frequency = str(parameters.get("investment_frequency") or parameters.get("rebalance_frequency") or "never").lower()
+    dynamic_investment_logic = str(parameters.get("dynamic_investment_logic") or "").strip()
+    dynamic_investment_proxy_key = str(parameters.get("dynamic_investment_proxy_key") or "").strip().lower()
+    dynamic_investment_rules = _parse_dynamic_investment_rules(parameters.get("dynamic_investment_rules"))
     if contribution_amount <= 0:
         contribution_amount = config.initial_equity
         frequency = "never"
@@ -774,6 +868,9 @@ def _run_buy_and_hold_backtest(
     coverage_days = 0
     effective_date: str | None = None
     warnings: list[str] = []
+    valuation_points = list((valuation_series or {}).get(dynamic_investment_proxy_key) or [])
+    valuation_cursor = 0
+    latest_valuation_point: IndexValuationPoint | None = None
 
     for master_index, trade_date in enumerate(master_dates):
         position_index = primary_index.get(trade_date)
@@ -784,19 +881,45 @@ def _run_buy_and_hold_backtest(
         execution_price = bar.adj_close if bar.adj_close > 0 else _tradeable_open(bar)
         trade_flow = 0.0
         if master_index in contribution_set:
-            trade_flow = contribution_amount
+            multiplier = 1.0
+            valuation_percentile_10y: float | None = None
+            valuation_bucket: str | None = None
+            if dynamic_investment_logic:
+                while valuation_cursor < len(valuation_points) and valuation_points[valuation_cursor].date <= trade_date:
+                    latest_valuation_point = valuation_points[valuation_cursor]
+                    valuation_cursor += 1
+                if latest_valuation_point is None:
+                    warnings.append(
+                        f"Dynamic DCA skipped valuation multiplier on {trade_date} because no valuation observation was available on or before the contribution date."
+                    )
+                else:
+                    valuation_age = _parse_date(trade_date) - _parse_date(latest_valuation_point.date)
+                    valuation_percentile_10y = latest_valuation_point.pe_ttm_percentile_10y
+                    if valuation_age > timedelta(days=45):
+                        warnings.append(
+                            f"Dynamic DCA used the base 1.0x contribution on {trade_date} because the latest valuation observation ({latest_valuation_point.date}) was older than 45 days."
+                        )
+                    else:
+                        multiplier, valuation_bucket = _resolve_contribution_multiplier(
+                            valuation_percentile_10y,
+                            dynamic_investment_rules,
+                        )
+                        if valuation_bucket is None and valuation_percentile_10y is not None:
+                            valuation_bucket = _valuation_bucket(valuation_percentile_10y, dynamic_investment_rules)
+            trade_flow = contribution_amount * multiplier
             market_value_before = shares * execution_price
             total_equity_before = cash + market_value_before
             weight_before = market_value_before / total_equity_before if total_equity_before > 0 else 0.0
-            cash += contribution_amount
-            total_contributed += contribution_amount
+            cash += trade_flow
+            total_contributed += trade_flow
 
             if execution_price > 0:
                 fee = cash * (config.transaction_cost_bps / 10000.0)
                 deployable_cash = max(cash - fee, 0.0)
                 purchased_shares = deployable_cash / execution_price if deployable_cash > 0 else 0.0
+                trade_notional = purchased_shares * execution_price if purchased_shares > 0 else 0.0
                 shares += purchased_shares
-                cash -= purchased_shares * execution_price + fee
+                cash -= trade_notional + fee
                 total_equity_after = cash + shares * execution_price
                 weight_after = (shares * execution_price) / total_equity_after if total_equity_after > 0 else 0.0
                 trades.append(
@@ -808,6 +931,11 @@ def _run_buy_and_hold_backtest(
                         weight_before=weight_before,
                         weight_after=weight_after,
                         reason=f"buy_and_hold:{frequency}",
+                        quantity=purchased_shares if purchased_shares > 0 else None,
+                        net_amount=trade_notional if trade_notional > 0 else None,
+                        contribution_multiplier=multiplier if dynamic_investment_logic else None,
+                        valuation_percentile_10y=valuation_percentile_10y,
+                        valuation_bucket=valuation_bucket,
                     )
                 )
                 total_turnover += 1.0
@@ -889,12 +1017,14 @@ def run_backtest(
     config: BacktestConfig | None = None,
     parameters: Mapping[str, Any] | None = None,
     benchmark_bars: Iterable[Mapping[str, Any]] | None = None,
+    valuation_series: Mapping[str, Iterable[Mapping[str, Any]]] | None = None,
 ) -> BacktestResult:
     config = config or BacktestConfig()
     prepared = prepare_backtest_inputs(
         bars_by_symbol,
         config=config,
         benchmark_bars=benchmark_bars,
+        valuation_series=valuation_series,
     )
     return run_backtest_prepared(
         prepared,
@@ -908,6 +1038,7 @@ def prepare_backtest_inputs(
     *,
     config: BacktestConfig | None = None,
     benchmark_bars: Iterable[Mapping[str, Any]] | None = None,
+    valuation_series: Mapping[str, Iterable[Mapping[str, Any]]] | None = None,
 ) -> PreparedBacktestInputs:
     config = config or BacktestConfig()
     symbol_series = {symbol: _normalize_bars(bars) for symbol, bars in bars_by_symbol.items()}
@@ -923,6 +1054,7 @@ def prepare_backtest_inputs(
         symbol_series=symbol_series,
         benchmark_series=benchmark_series,
         master_dates=master_dates,
+        valuation_series=_normalize_valuation_series(valuation_series),
     )
 
 
@@ -952,6 +1084,7 @@ def run_backtest_prepared(
     symbol_series = prepared.symbol_series
     benchmark_series = prepared.benchmark_series
     master_dates = list(prepared.master_dates)
+    valuation_series = prepared.valuation_series
     if not symbol_series:
         empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         return BacktestResult(metrics=empty_metrics, warnings=["No market bars available"])
@@ -978,6 +1111,7 @@ def run_backtest_prepared(
             parameters=parameters,
             benchmark_series=benchmark_series,
             master_dates=master_dates,
+            valuation_series=valuation_series,
         )
     minimum_history = lookback_days + skip_recent_days
     if len(master_dates) < minimum_history + 2:
