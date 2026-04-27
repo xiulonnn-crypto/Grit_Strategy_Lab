@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [0.1.1-009] - 2026-04-27 - 新增OpenBB 快照增强层、组合审计事件表，并调整组合详情指标收口、快照数据源门禁等
+
 ### 新增 (Added)
 
 - **OpenBB 快照增强层**: 新增可选 `openbb-provider` extra 与 lazy adapter，在 `GRIT_ENABLE_OPENBB_PROVIDER=1` 时可接入 OpenBB 价格、固定收益曲线和当前成分辅助校验；默认安装与启动仍保持 OpenBB-free，缺包或缺 key 不会阻断本地服务。
