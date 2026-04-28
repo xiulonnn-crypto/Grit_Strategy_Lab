@@ -1,7 +1,29 @@
 import { useEffect, useState } from 'react';
 import { CompositionDashboardView } from '../components/composition-dashboard/composition-dashboard-view';
 import { useApiClient } from '../lib/demoStoreContext';
-import type { ApiCompositionListItem, ApiCompositionStatus } from '../types';
+import type { ApiCompositionListItem, ApiCompositionSourceIntegrity, ApiCompositionStatus } from '../types';
+
+function sourceIntegrityHasNewVersion(item: ApiCompositionSourceIntegrity): boolean {
+  const sourceRefId = String(item.source_ref_id ?? '');
+  const driftStatus = String(item.drift_status ?? '').toLowerCase();
+  const signatureStatus = String(item.signature_status ?? '').toLowerCase();
+  const alerts = (item.alerts ?? []).map((alert) => String(alert).toLowerCase());
+  return (
+    sourceRefId.startsWith('strategy_leg::') &&
+    (
+      ['drifted', 'version_drift', 'stale'].includes(driftStatus) ||
+      signatureStatus === 'stale' ||
+      alerts.some((alert) => alert.includes('newer') || alert.includes('新版本'))
+    )
+  );
+}
+
+function compositionHasNewVersion(
+  composition: ApiCompositionListItem,
+  sourceIntegrity: ApiCompositionSourceIntegrity[],
+): boolean {
+  return Boolean(composition.has_new_version) || sourceIntegrity.some(sourceIntegrityHasNewVersion);
+}
 
 export function CompositionDashboardPage(): JSX.Element {
   const api = useApiClient();
@@ -29,8 +51,26 @@ export function CompositionDashboardPage(): JSX.Element {
           setError(null);
         }
         const response = await api.listCompositions();
+        const enrichedResponse =
+          api.getCompositionDetail
+            ? await Promise.all(
+                response.map(async (composition) => {
+                  try {
+                    const detail = await api.getCompositionDetail!(composition.id);
+                    const sourceIntegrity = detail.source_integrity ?? [];
+                    return {
+                      ...composition,
+                      source_integrity: sourceIntegrity,
+                      has_new_version: compositionHasNewVersion(composition, sourceIntegrity),
+                    };
+                  } catch {
+                    return composition;
+                  }
+                }),
+              )
+            : response;
         if (!cancelled) {
-          setCompositions(response);
+          setCompositions(enrichedResponse);
           setWriteError(null);
         }
       } catch (caught) {
@@ -60,7 +100,26 @@ export function CompositionDashboardPage(): JSX.Element {
       setWriteError(null);
       await api.updateComposition(id, { status });
       const response = await api.listCompositions();
-      setCompositions(response);
+      if (api.getCompositionDetail) {
+        const enrichedResponse = await Promise.all(
+          response.map(async (composition) => {
+            try {
+              const detail = await api.getCompositionDetail!(composition.id);
+              const sourceIntegrity = detail.source_integrity ?? [];
+              return {
+                ...composition,
+                source_integrity: sourceIntegrity,
+                has_new_version: compositionHasNewVersion(composition, sourceIntegrity),
+              };
+            } catch {
+              return composition;
+            }
+          }),
+        );
+        setCompositions(enrichedResponse);
+      } else {
+        setCompositions(response);
+      }
     } catch (caught) {
       setWriteError(`Composition status save failed: ${(caught as Error).message}`);
     } finally {

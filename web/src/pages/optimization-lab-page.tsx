@@ -2349,6 +2349,15 @@ type OptimizationParameterEntry = {
   value: string;
 };
 
+type PromotionParameterDeltaEntry = {
+  key: string;
+  label: string;
+  currentValue: string;
+  candidateValue: string;
+  deltaValue: string | null;
+  changed: boolean;
+};
+
 function getOptimizationSearchSpace(
   job: ApiOptimizationJobDetail | null | undefined,
 ): ApiOptimizationSearchSpaceField[] {
@@ -2448,6 +2457,59 @@ function buildRangeParameterEntries(
       snapshot?.[field.key] ?? field.value ?? field.current,
     ),
   }));
+}
+
+function parameterValuesMatch(
+  left: ParameterValue | undefined,
+  right: ParameterValue | undefined,
+): boolean {
+  return formatParameterValue(left) === formatParameterValue(right);
+}
+
+function buildPromotionParameterDeltaEntries(
+  candidate: OptimizationDisplayCandidate | null,
+  fields: ApiOptimizationSearchSpaceField[],
+  baselineSnapshot: Record<string, ParameterValue> | undefined,
+): PromotionParameterDeltaEntry[] {
+  if (!candidate) {
+    return [];
+  }
+
+  const candidateSnapshot = candidate.parameter_snapshot ?? {};
+  const deltaSnapshot = candidate.parameter_delta ?? {};
+  const variableFields = fields.filter((field) => field.mode !== "fixed");
+  const fieldKeys = variableFields.map((field) => field.key);
+  const fallbackKeys = Object.keys({
+    ...baselineSnapshot,
+    ...candidateSnapshot,
+    ...deltaSnapshot,
+  }).slice(0, 6);
+  const keys = fieldKeys.length ? fieldKeys : fallbackKeys;
+
+  return keys
+    .map((key) => {
+      const field = fields.find((entry) => entry.key === key);
+      const currentValue =
+        baselineSnapshot?.[key] ?? field?.current ?? field?.value;
+      const candidateValue =
+        candidateSnapshot[key] ?? field?.value ?? field?.current;
+      const deltaValue = deltaSnapshot[key];
+      return {
+        key,
+        label: field ? getSearchFieldDisplayLabel(field) : humanizeKey(key),
+        currentValue: formatParameterValue(currentValue),
+        candidateValue: formatParameterValue(candidateValue),
+        deltaValue:
+          deltaValue === undefined || deltaValue === null
+            ? null
+            : formatParameterValue(deltaValue),
+        changed:
+          !parameterValuesMatch(currentValue, candidateValue) ||
+          (deltaValue !== undefined && deltaValue !== null),
+      };
+    })
+    .sort((left, right) => Number(right.changed) - Number(left.changed))
+    .slice(0, 6);
 }
 
 function readProgressText(
@@ -4190,6 +4252,8 @@ export function OptimizationResultsPage({
   const [constraintLiveMessage, setConstraintLiveMessage] = useState("");
   const [allCombinationsOpen, setAllCombinationsOpen] = useState(false);
   const [allCombinationsPage, setAllCombinationsPage] = useState(1);
+  const [promotionConfirmOpen, setPromotionConfirmOpen] = useState(false);
+  const [promotionDecisionNote, setPromotionDecisionNote] = useState("");
   const [allCombinationsSortKey, setAllCombinationsSortKey] =
     useState<OptimizationAllCombinationSortKey>(
       getOptimizationAllCombinationsDefaultSortKey(
@@ -4244,6 +4308,29 @@ export function OptimizationResultsPage({
       document.documentElement.style.overflow = previousDocumentOverflow;
     };
   }, [allCombinationsOpen]);
+
+  useEffect(() => {
+    if (!promotionConfirmOpen) {
+      return undefined;
+    }
+
+    function handleEscape(event: KeyboardEvent): void {
+      if (event.key === "Escape" && !saving) {
+        setPromotionConfirmOpen(false);
+      }
+    }
+
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousDocumentOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+      document.documentElement.style.overflow = previousDocumentOverflow;
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [promotionConfirmOpen, saving]);
 
   useEffect(() => {
     let cancelled = false;
@@ -4657,6 +4744,48 @@ export function OptimizationResultsPage({
       ),
     [optimizationSearchSpace, selectedCandidate],
   );
+  const promotionParameterDeltas = useMemo(
+    () =>
+      buildPromotionParameterDeltaEntries(
+        selectedCandidate,
+        optimizationSearchSpace,
+        baselineCandidate?.parameter_snapshot ??
+          baselineRun?.parameter_snapshot ??
+          strategy?.parameters,
+      ),
+    [
+      baselineCandidate?.parameter_snapshot,
+      baselineRun?.parameter_snapshot,
+      optimizationSearchSpace,
+      selectedCandidate,
+      strategy?.parameters,
+    ],
+  );
+  const promotionAlternativeCandidates = useMemo(
+    () =>
+      displayedMatchingCandidates
+        .filter(
+          (candidate) =>
+            candidate.id !== selectedCandidate?.id &&
+            candidate.display_kind !== "baseline",
+        )
+        .slice(0, 3),
+    [displayedMatchingCandidates, selectedCandidate?.id],
+  );
+  const promotionBaseParameterVersionId =
+    (typeof strategy?.current_parameter_version_id === "string" &&
+    strategy.current_parameter_version_id.trim()
+      ? strategy.current_parameter_version_id.trim()
+      : null) ??
+    (typeof job?.base_parameter_version_id === "string" &&
+    job.base_parameter_version_id.trim()
+      ? job.base_parameter_version_id.trim()
+      : null) ??
+    (typeof job?.request.base_parameter_version_id === "string" &&
+    job.request.base_parameter_version_id.trim()
+      ? job.request.base_parameter_version_id.trim()
+      : null);
+  const promotionDecisionNoteReady = promotionDecisionNote.trim().length > 0;
   const noCandidateConstraintMatch = Boolean(
     !optimizationProgressState &&
       totalCandidateCount > 0 &&
@@ -5108,32 +5237,42 @@ export function OptimizationResultsPage({
     );
   }
 
-  async function handlePromote(): Promise<void> {
+  function openPromotionConfirm(): void {
+    if (!job || !selectedCandidate || selectedCandidate.display_kind === "baseline") {
+      return;
+    }
+    setPromotionDecisionNote("");
+    setPromotionConfirmOpen(true);
+    setError(null);
+  }
+
+  function closePromotionConfirm(): void {
+    if (saving) {
+      return;
+    }
+    setPromotionConfirmOpen(false);
+    setPromotionDecisionNote("");
+  }
+
+  async function handleConfirmPromote(): Promise<void> {
     if (!job || !selectedCandidate) {
       return;
     }
-    const promotionBaseParameterVersionId =
-      (typeof strategy?.current_parameter_version_id === "string" &&
-      strategy.current_parameter_version_id.trim()
-        ? strategy.current_parameter_version_id.trim()
-        : null) ??
-      (typeof job.base_parameter_version_id === "string" &&
-      job.base_parameter_version_id.trim()
-        ? job.base_parameter_version_id.trim()
-        : null) ??
-      (typeof job.request.base_parameter_version_id === "string" &&
-      job.request.base_parameter_version_id.trim()
-        ? job.request.base_parameter_version_id.trim()
-        : null);
+    const decisionNote = promotionDecisionNote.trim();
+    if (!decisionNote) {
+      setError("请先填写本次晋升的决策备注。");
+      return;
+    }
     try {
       setSaving(true);
       setError(null);
+      setNotice(null);
       await api.promoteOptimizationCandidate(
         job.id,
         selectedCandidate.id,
         "set_current",
-        `promote-${selectedCandidate.id}`,
-        "从优化实验室晋升当前版本",
+        `promote-${job.id}-${selectedCandidate.id}`,
+        decisionNote,
         promotionBaseParameterVersionId,
       );
       const [refreshedStrategy, refreshedJob] = await Promise.all([
@@ -5152,6 +5291,8 @@ export function OptimizationResultsPage({
           formatStrategyVersionTag(refreshedStrategy.current_parameter_version_id) ?? '最新版本'
         }。`,
       );
+      setPromotionConfirmOpen(false);
+      setPromotionDecisionNote("");
     } catch (caught) {
       setError((caught as Error).message);
     } finally {
@@ -5318,7 +5459,7 @@ export function OptimizationResultsPage({
               <button
                 className="primary-button"
                 disabled={saving || !canPromoteSelectedCandidate}
-                onClick={() => void handlePromote()}
+                onClick={openPromotionConfirm}
                 style={HERO_ACTION_BUTTON_STYLE}
                 type="button"
               >
@@ -5370,6 +5511,255 @@ export function OptimizationResultsPage({
                 type="button"
               >
                 {saving ? RERUN_DIALOG_SUBMITTING : RERUN_DIALOG_CONFIRM}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {promotionConfirmOpen && selectedCandidate ? (
+        <div
+          aria-label="确认晋升当前版本"
+          aria-modal="true"
+          className="modal-shell"
+          onClick={closePromotionConfirm}
+          role="dialog"
+        >
+          <div
+            className="modal-card optimization-promotion-dialog"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">版本晋升确认</p>
+                <h3>确认晋升当前版本</h3>
+                <p className="optimization-panel-subtitle">
+                  候选摘要、参数差异、来源任务和备选候选均来自当前已加载结果。
+                </p>
+              </div>
+            </div>
+
+            <section className="optimization-evaluation-panel">
+              <div className="optimization-parameter-panel__title">
+                候选摘要
+              </div>
+              <div className="optimization-evaluation-panel__headline">
+                <strong>
+                  {getCandidateVersionDisplayText(selectedCandidate)}
+                </strong>
+                <span>{getCandidateStatusText(selectedCandidate)}</span>
+              </div>
+              <p>
+                {translateOptimizationText(
+                  selectedCandidate.analysis?.stability_summary,
+                ) ??
+                  translateOptimizationText(selectedCandidate.analysis?.thesis) ??
+                  translateOptimizationText(selectedCandidate.summary) ??
+                  describeCandidateEvaluation(selectedCandidate)}
+              </p>
+              <div className="optimization-metric-row">
+                <article className="optimization-metric-tile">
+                  <span>年化收益率</span>
+                  <strong>
+                    {formatReturnRate(
+                      getCandidateMetric(selectedCandidate, "annualized_return") ??
+                        getCandidateMetric(selectedCandidate, "cagr"),
+                    )}
+                  </strong>
+                </article>
+                <article className="optimization-metric-tile">
+                  <span>收益夏普</span>
+                  <strong>
+                    {formatMetric(
+                      getCandidateMetric(selectedCandidate, "return_sharpe") ??
+                        getCandidateMetric(selectedCandidate, "sharpe"),
+                    )}
+                  </strong>
+                </article>
+                <article className="optimization-metric-tile">
+                  <span>样本外夏普</span>
+                  <strong>
+                    {formatMetric(
+                      getCandidateMetric(selectedCandidate, "out_of_sample_sharpe"),
+                    )}
+                  </strong>
+                </article>
+                <article className="optimization-metric-tile">
+                  <span>综合得分</span>
+                  <strong>{formatMetric(selectedCandidate.score, 3)}</strong>
+                </article>
+              </div>
+              <p className="optimization-results-summary">
+                参数摘要：
+                {getCandidateSummaryText(selectedCandidate, optimizationSearchSpace)}
+              </p>
+            </section>
+
+            <section className="optimization-parameter-panel">
+              <div className="optimization-parameter-panel__title">
+                参数差异
+              </div>
+              {promotionParameterDeltas.length ? (
+                <div className="optimization-parameter-chip-list">
+                  {promotionParameterDeltas.map((entry) => (
+                    <article
+                      className="optimization-parameter-chip"
+                      key={`promotion-delta-${entry.key}`}
+                    >
+                      <span>{entry.label}</span>
+                      <strong>
+                        {entry.currentValue} → {entry.candidateValue}
+                      </strong>
+                      <small>
+                        {entry.deltaValue
+                          ? `差异 ${entry.deltaValue}`
+                          : entry.changed
+                            ? "已变化"
+                            : "无变化"}
+                      </small>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="optimization-panel-subtitle">
+                  当前候选未提供可展示的参数差异。
+                </p>
+              )}
+            </section>
+
+            <section className="optimization-parameter-panel">
+              <div className="optimization-parameter-panel__title">
+                来源任务与回测
+              </div>
+              <div className="optimization-parameter-chip-list">
+                <article className="optimization-parameter-chip">
+                  <span>优化任务</span>
+                  <strong>{job?.id ?? "-"}</strong>
+                </article>
+                <article className="optimization-parameter-chip">
+                  <span>来源回测</span>
+                  <strong>
+                    {job?.request.source_run_id ??
+                      job?.summary.source_run_id ??
+                      baselineRun?.id ??
+                      "-"}
+                  </strong>
+                </article>
+                <article className="optimization-parameter-chip">
+                  <span>任务基线</span>
+                  <strong>
+                    {formatStrategyVersionTag(
+                      job?.base_parameter_version_id ??
+                        job?.request.base_parameter_version_id ??
+                        null,
+                    ) ?? "-"}
+                  </strong>
+                </article>
+                <article className="optimization-parameter-chip">
+                  <span>提交基线</span>
+                  <strong>
+                    {formatStrategyVersionTag(promotionBaseParameterVersionId) ??
+                      "-"}
+                  </strong>
+                </article>
+                <article className="optimization-parameter-chip">
+                  <span>入口</span>
+                  <strong>{formatEntryPoint(job?.request.entry_point)}</strong>
+                </article>
+                <article className="optimization-parameter-chip">
+                  <span>验证方式</span>
+                  <strong>{formatValidationMode(job?.request.validation_mode)}</strong>
+                </article>
+                <article className="optimization-parameter-chip">
+                  <span>完成时间</span>
+                  <strong>{formatUpdatedAt(job?.completed_at ?? job?.updated_at)}</strong>
+                </article>
+              </div>
+            </section>
+
+            <section className="optimization-parameter-panel">
+              <div className="optimization-parameter-panel__title">
+                备选候选
+              </div>
+              {promotionAlternativeCandidates.length ? (
+                <div className="optimization-parameter-chip-list">
+                  {promotionAlternativeCandidates.map((candidate) => (
+                    <article
+                      className="optimization-parameter-chip"
+                      key={`promotion-alternative-${candidate.id}`}
+                    >
+                      <span>{getCandidateVersionDisplayText(candidate)}</span>
+                      <strong>
+                        夏普{" "}
+                        {formatMetric(
+                          getCandidateMetric(candidate, "return_sharpe") ??
+                            getCandidateMetric(candidate, "sharpe"),
+                        )}
+                      </strong>
+                      <small>
+                        年化{" "}
+                        {formatReturnRate(
+                          getCandidateMetric(candidate, "annualized_return") ??
+                            getCandidateMetric(candidate, "cagr"),
+                        )}
+                      </small>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="optimization-panel-subtitle">
+                  当前过滤结果中没有其它可对照候选。
+                </p>
+              )}
+            </section>
+
+            <label
+              className="optimization-parameter-panel"
+              htmlFor="promotion-decision-note"
+            >
+              <span className="optimization-parameter-panel__title">
+                决策备注
+              </span>
+              <textarea
+                id="promotion-decision-note"
+                onChange={(event) =>
+                  setPromotionDecisionNote(event.currentTarget.value)
+                }
+                placeholder="记录本次晋升的判断依据，例如样本外表现、回撤约束或人工复核结论。"
+                rows={4}
+                style={{
+                  border: "1px solid var(--gsl-color-border)",
+                  borderRadius: "8px",
+                  boxSizing: "border-box",
+                  font: "inherit",
+                  lineHeight: 1.6,
+                  minHeight: "112px",
+                  padding: "12px 14px",
+                  resize: "vertical",
+                  width: "100%",
+                }}
+                value={promotionDecisionNote}
+              />
+            </label>
+
+            {error ? <div className="error-banner">{error}</div> : null}
+
+            <div className="modal-card__footer">
+              <button
+                className="ghost-button"
+                disabled={saving}
+                onClick={closePromotionConfirm}
+                type="button"
+              >
+                {TEXT.cancel}
+              </button>
+              <button
+                className="primary-button optimization-promotion-dialog__confirm"
+                disabled={saving || !promotionDecisionNoteReady}
+                onClick={() => void handleConfirmPromote()}
+                type="button"
+              >
+                {saving ? "晋升中..." : "确认晋升"}
               </button>
             </div>
           </div>

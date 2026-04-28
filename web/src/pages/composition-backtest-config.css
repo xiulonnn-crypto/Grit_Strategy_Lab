@@ -1,0 +1,209 @@
+.composition-backtest-config-page {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.composition-backtest-config-hero,
+.composition-backtest-config-panel {
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: var(--shadow);
+}
+
+.composition-backtest-config-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 20px;
+  padding: 24px 28px;
+}
+
+.composition-backtest-config-hero h1,
+.composition-backtest-config-panel h2 {
+  margin: 0;
+  color: var(--gsl-text-title);
+}
+
+.composition-backtest-config-hero p {
+  max-width: 72ch;
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+
+.composition-backtest-config-hero__chips,
+.composition-backtest-config-hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.composition-backtest-config-hero__chips {
+  margin-top: 16px;
+}
+
+.composition-backtest-config-hero__actions {
+  justify-content: flex-end;
+  min-width: max-content;
+}
+
+.composition-backtest-config-alert {
+  border: 1px solid rgba(196, 92, 79, 0.16);
+  border-radius: 16px;
+  padding: 14px 16px;
+  background: var(--gsl-color-danger-soft, #fff8f7);
+  color: var(--gsl-color-danger, #c45c4f);
+  font-weight: 700;
+}
+
+.composition-backtest-config-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.composition-backtest-config-bottom {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 16px;
+  align-items: start;
+}
+
+.composition-backtest-config-panel {
+  padding: 20px;
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.composition-backtest-config-periods {
+  display: grid;
+  gap: 10px;
+}
+
+.composition-backtest-config-choice {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  min-height: 72px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff;
+  color: var(--gsl-text-main);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+
+.composition-backtest-config-choice:hover {
+  transform: translateY(-1px);
+  border-color: rgba(31, 135, 123, 0.28);
+}
+
+.composition-backtest-config-choice--active {
+  border-color: rgba(31, 135, 123, 0.32);
+  background: var(--gsl-color-primary-soft, #e6f4f1);
+}
+
+.composition-backtest-config-choice strong {
+  font-size: 0.95rem;
+}
+
+.composition-backtest-config-choice span,
+.composition-backtest-config-fields label span,
+.composition-backtest-config-leg span,
+.composition-backtest-config-precheck__grid span,
+.composition-backtest-config-empty {
+  color: var(--muted);
+}
+
+.composition-backtest-config-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.composition-backtest-config-fields label {
+  display: grid;
+  gap: 6px;
+  font-weight: 700;
+}
+
+.composition-backtest-config-fields input,
+.composition-backtest-config-fields select {
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0 12px;
+  background: #fff;
+  color: var(--gsl-text-main);
+  font: inherit;
+}
+
+.composition-backtest-config-leg-list {
+  display: grid;
+  gap: 10px;
+}
+
+.composition-backtest-config-leg {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fbfcfd;
+}
+
+.composition-backtest-config-leg div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.composition-backtest-config-leg b {
+  color: var(--accent-strong);
+}
+
+.composition-backtest-config-precheck {
+  position: sticky;
+  top: 96px;
+}
+
+.composition-backtest-config-precheck__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+@media (max-width: 1180px) {
+  .composition-backtest-config-grid,
+  .composition-backtest-config-bottom,
+  .composition-backtest-config-hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .composition-backtest-config-hero__actions {
+    justify-content: flex-start;
+  }
+
+  .composition-backtest-config-precheck {
+    position: static;
+  }
+}
+
+@media (max-width: 760px) {
+  .composition-backtest-config-hero,
+  .composition-backtest-config-panel {
+    padding: 18px;
+  }
+
+  .composition-backtest-config-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

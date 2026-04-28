@@ -128,6 +128,10 @@ SCHEMA_STATEMENTS = [
         version_number INTEGER NOT NULL,
         revision INTEGER NOT NULL DEFAULT 1,
         comment TEXT,
+        change_summary TEXT,
+        decision_note TEXT,
+        source_json TEXT NOT NULL DEFAULT '{}',
+        alternative_versions_json TEXT NOT NULL DEFAULT '[]',
         parameters_json TEXT NOT NULL DEFAULT '{}',
         created_at TEXT NOT NULL,
         FOREIGN KEY(strategy_id) REFERENCES strategies(id) ON DELETE CASCADE
@@ -351,6 +355,38 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS composition_backtest_runs (
+        id TEXT PRIMARY KEY,
+        composition_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        request_json TEXT NOT NULL DEFAULT '{}',
+        result_json TEXT NOT NULL DEFAULT '{}',
+        orders_json TEXT NOT NULL DEFAULT '[]',
+        evidence_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT,
+        deleted_at TEXT,
+        deleted_reason TEXT,
+        FOREIGN KEY(composition_id) REFERENCES compositions(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS composition_allocation_jobs (
+        id TEXT PRIMARY KEY,
+        composition_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        request_json TEXT NOT NULL DEFAULT '{}',
+        result_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT,
+        deleted_at TEXT,
+        deleted_reason TEXT,
+        FOREIGN KEY(composition_id) REFERENCES compositions(id) ON DELETE CASCADE
+    )
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_composition_legs_composition_id_ordering
     ON composition_legs(composition_id, ordering)
     """,
@@ -365,6 +401,14 @@ SCHEMA_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_composition_audit_events_composition
     ON composition_audit_events(composition_id, occurred_at, id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_backtest_runs_composition
+    ON composition_backtest_runs(composition_id, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_allocation_jobs_composition
+    ON composition_allocation_jobs(composition_id, created_at)
     """,
     """
     CREATE TABLE IF NOT EXISTS symbol_identity_cache (
@@ -386,6 +430,12 @@ SCHEMA_STATEMENTS = [
 MIGRATION_COLUMNS = {
     "strategy_creation_messages": [
         ("extracted_fields_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ],
+    "strategy_parameter_versions": [
+        ("change_summary", "TEXT"),
+        ("decision_note", "TEXT"),
+        ("source_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("alternative_versions_json", "TEXT NOT NULL DEFAULT '[]'"),
     ],
     "backtest_runs": [
         ("is_permanent", "INTEGER NOT NULL DEFAULT 0"),

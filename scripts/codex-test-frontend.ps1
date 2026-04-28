@@ -24,6 +24,8 @@ $focusedTests = @(
     'leg.inventory.test.tsx'
     'composition.workbench.test.tsx'
     'composition.detail.test.tsx'
+    'composition.backtest.result.test.tsx'
+    'composition.allocation.test.tsx'
     'creation.flow.test.tsx'
     'backtest.submit.test.tsx'
     'run-detail.page.test.tsx'

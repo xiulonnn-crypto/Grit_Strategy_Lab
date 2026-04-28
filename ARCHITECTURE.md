@@ -88,6 +88,7 @@
 - `compositions` 保存组合级身份、状态、基准、再平衡频次、成本口径与汇总投影。
 - `composition_legs` 保存组合内腿的排序、权重、锁定状态与来源引用。
 - `composition_source_freezes` 保存组合落库时的来源冻结证据，用于详情页审计与后续回看。
+- `composition_backtest_runs` 与 `composition_allocation_jobs` 是 Sleeve OS v1 的组合层运行记录预留表面。当前服务优先从已保存组合详情投影生成可审计运行结果，并镜像到运行态 artifact state；后续若沉淀完整历史，可在不改变前端契约的前提下迁入专表。
 
 ## 4. 参数版本真相
 
@@ -95,10 +96,12 @@
 
 - `strategy_parameter_versions` 是版本化策略参数的事实来源。
 - `strategy.parameter_history` 是给 UI 与 API 消费方使用的真相投影。
-- 每条历史记录都可以带 `comment`，当候选版本带着修订说明被提升时会写入该字段。
+- 每个版本记录保存参数快照，并携带系统生成的变更摘要、用户决策备注、来源优化任务 / 回测运行 / 候选 / 基线版本元数据、可对照的替代版本，以及面向 UI 的可回滚状态。
+- 每条历史记录都可以带 `comment` 或决策备注，当候选版本带着修订说明被提升时会写入对应说明字段。
 - 创建会话既可以以 `CREATE` 模式开始，也可以以 `REVISION` 模式开始，并且会在会话契约中保留 `base_strategy_id` 与 `base_parameter_version_id`。
 - 提升与物化路径会强制校验基线版本；如果基线已经移动，就返回 `409 stale_base_parameter_version`。
 - 优化结果页可以有意把旧优化任务的候选晋升到当前策略版本：点击“晋升当前版本”时，前端必须把已经加载的 `strategy.current_parameter_version_id` 作为 `base_parameter_version_id` 提交。这样后端仍会校验用户看到的当前版本是否新鲜，但不会因为任务最初的 `job.base_parameter_version_id` 落后于策略当前版本而误拒绝。
+- “回滚至该版本”不是改写历史记录，而是把某个历史版本的参数复制成一个新的当前版本；旧版本、来源关系和审计说明都必须继续保留。
 
 关键规则是：UI 永远不自己发明版本。它只反映已经持久化的版本历史，包括解释“为什么出现这个新版本”的说明。
 
@@ -152,6 +155,8 @@
 - `/backtest-runs/*` 覆盖预览、提交、克隆、详情、交易列表与单笔交易审计。
 - `GET /backtest-runs/{id}/detail` 明确针对页面加载做了优化。它可以包含 `trade_audit_items`，但不能物化完整的 `trade_audit` 记录；完整审计只属于 `GET /backtest-runs/{run_id}/trades/{trade_id}/audit`。
 - `/compositions`、`/compositions/{id}`、`/compositions/preview` 与 `/compositions/{id}` 的 patch 面共同构成一期组合工作台和组合详情页契约。预演接口负责返回收益流预览、相关性矩阵、风险贡献、维护成本与再平衡摘要，而不直接改写持久化状态。
+- `/compositions/{id}/backtest-runs/*` 是组合层回测契约，服务“测稳定性”而不是策略参数搜索。结果分为诊断、订单和证据三组：诊断说明稳定性、跨周期指标、归因、动态风险暴露、压力窗口和集中度；订单暴露事件聚合、全量流水、过滤、CSV 导出与内部对冲下钻；证据保留冻结配置、数据足迹、代理映射、算法 spec 和审计轨迹。
+- `/compositions/{id}/allocation-jobs/*` 是组合层资产配置契约，服务“定义分配政策并选择可晋升方案”。配置以意图导航、风险边界、换手约束、资产微调和相关性矩阵为主；结果保留 Current / Benchmark、有效前沿、候选权重、风险贡献、ENB、扣费后夏普、约束违反和迁移成本拆解。
 - `/optimization-jobs` 返回按 `updated_at DESC` 排序的优化任务列表，并投影任务状态、策略关联、预算进度、`progress_pct`、`current_stage`、`latest_update`、`estimated_remaining_minutes`、`estimated_completed_at` 以及带类型的 `best_metrics_summary`，供优化实验室索引页与工作台混合时间线使用。
 - `POST /strategies/{strategy_id}/optimization-jobs` 现在接收 `base_parameter_version_id`、`source_run_id`、`entry_point`、`validation_mode`、`budget_combinations` 与 `search_space`；只有参数配置页显式发起优化时才会创建任务。
 - `POST /optimization-jobs/{id}/resume` 接收 `idempotency_key`，并且只会从 `next_trial_index` 继续 `INTERRUPTED` 任务；对同一 key 的重复调用必须保持幂等。
@@ -194,7 +199,11 @@
 - `#/legs`
 - `#/compositions/workbench`
 - `#/compositions/:id`
-- `#/creation/new`
+- `#/compositions/:id/backtest-runs/new`
+- `#/compositions/:id/backtest-runs/:runId`
+- `#/compositions/:id/allocation-lab`
+- `#/compositions/:id/allocation-jobs/:jobId`
+- `#/strategies`
 - `#/creation/sessions/:id`
 - `#/strategies/:id`
 - `#/strategies/:id/backtest-runs/new`
@@ -212,6 +221,9 @@
 - `#/legs` 是资产库，负责管理策略腿投影、资产腿定义与现金腿定义。
 - `#/compositions/workbench` 必须先于 `#/compositions/:id` 被 route parser 匹配，避免工作台被详情路由误吞。
 - `#/compositions/workbench` 与 `#/compositions/:id` 都通过现有 shell/runtime 边界接入，不允许另起第二套路由层。
+- Sleeve OS v1 只实现 Split 方案：组合回测配置页进入组合回测结果页，组合优化配置页进入组合优化结果页；历史 Stepper 设计稿不进入正式路由。
+- 组合回测结果页使用 Diagnosis / Orders / Evidence 三个 tab。诊断页回答结果是否稳健，订单页回答如何调仓与省下多少外部成交，证据页回答数据、代理和算法是否可信。
+- 组合优化页面不复用策略优化语义。配置页以“波动最小 / 风险平价 / 收益最大 / 专家模式”意图导航为入口，结果页用有效前沿和候选卡说明哪个方案最符合目标。
 - 左侧导航当前分为 `组合` 与 `策略` 两组；组合组包含 `组合仪表板` 与 `资产库`，策略组保留既有主链路，并把 `workspace` 对外标签统一为 `策略工作台`。
 
 优化生命周期真相固定为：

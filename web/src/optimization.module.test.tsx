@@ -3537,6 +3537,41 @@ describe("optimization module flow", () => {
 
     fireEvent.click(promoteButton!);
 
+    let promotionDialog: HTMLElement | null = null;
+    await waitFor(() => {
+      promotionDialog = container.querySelector(
+        '[role="dialog"][aria-label="确认晋升当前版本"]',
+      ) as HTMLElement | null;
+      expect(promotionDialog).not.toBeNull();
+    });
+    expect(promotionDialog!.textContent).toContain("候选摘要");
+    expect(promotionDialog!.textContent).toContain("参数差异");
+    expect(promotionDialog!.textContent).toContain("来源任务与回测");
+    expect(promotionDialog!.textContent).toContain("来源回测");
+    expect(promotionDialog!.textContent).toContain("bt-001");
+    expect(promotionDialog!.textContent).toContain("备选候选");
+    expect(container.textContent).not.toContain(
+      "已完成版本晋升，标普动量策略 当前版本已更新为 v2。",
+    );
+
+    const confirmButton = Array.from(
+      promotionDialog!.querySelectorAll("button"),
+    ).find((button) => button.textContent?.includes("确认晋升")) as
+      | HTMLButtonElement
+      | undefined;
+    const noteInput = promotionDialog!.querySelector(
+      "#promotion-decision-note",
+    ) as HTMLTextAreaElement | null;
+    expect(confirmButton).toBeTruthy();
+    expect(confirmButton!.disabled).toBe(true);
+    expect(noteInput).toBeTruthy();
+
+    fireEvent.change(noteInput!, {
+      target: { value: "样本外窗口稳定，回撤仍在晋升护栏内。" },
+    });
+    await waitFor(() => expect(confirmButton!.disabled).toBe(false));
+    fireEvent.click(confirmButton!);
+
     await waitFor(() =>
       expect(
         (
@@ -3570,6 +3605,9 @@ describe("optimization module flow", () => {
     const staleBaseParameterVersionId = "strat-001-v1";
     const currentParameterVersionId = "strat-001-v2";
     let requestedBaseParameterVersionId: string | null | undefined;
+    let requestedMode: string | undefined;
+    let requestedIdempotencyKey: string | undefined;
+    let requestedComment: string | undefined;
 
     staleJobApi.getOptimizationJobDetail = async (
       jobId: string,
@@ -3626,6 +3664,9 @@ describe("optimization module flow", () => {
       comment,
       baseParameterVersionId,
     ): Promise<ApiOptimizationJobDetail> => {
+      requestedMode = mode;
+      requestedIdempotencyKey = idempotencyKey;
+      requestedComment = comment;
       requestedBaseParameterVersionId = baseParameterVersionId;
       if (baseParameterVersionId !== currentParameterVersionId) {
         throw new Error("The strategy has moved to a newer parameter version.");
@@ -3655,9 +3696,40 @@ describe("optimization module flow", () => {
 
     fireEvent.click(promoteButton!);
 
+    let promotionDialog: HTMLElement | null = null;
+    await waitFor(() => {
+      promotionDialog = container.querySelector(
+        '[role="dialog"][aria-label="确认晋升当前版本"]',
+      ) as HTMLElement | null;
+      expect(promotionDialog).not.toBeNull();
+    });
+    expect(requestedBaseParameterVersionId).toBeUndefined();
+    expect(promotionDialog!.textContent).toContain("提交基线");
+    expect(promotionDialog!.textContent).toContain("v2");
+
+    const noteInput = promotionDialog!.querySelector(
+      "#promotion-decision-note",
+    ) as HTMLTextAreaElement | null;
+    const confirmButton = Array.from(
+      promotionDialog!.querySelectorAll("button"),
+    ).find((button) => button.textContent?.includes("确认晋升")) as
+      | HTMLButtonElement
+      | undefined;
+    expect(noteInput).toBeTruthy();
+    expect(confirmButton).toBeTruthy();
+
+    fireEvent.change(noteInput!, {
+      target: { value: "沿用当前版本基线，晋升样本外更稳的候选。" },
+    });
+    await waitFor(() => expect(confirmButton!.disabled).toBe(false));
+    fireEvent.click(confirmButton!);
+
     await waitFor(() =>
       expect(requestedBaseParameterVersionId).toBe(currentParameterVersionId),
     );
+    expect(requestedMode).toBe("set_current");
+    expect(requestedIdempotencyKey).toContain("promote-opt-001-");
+    expect(requestedComment).toBe("沿用当前版本基线，晋升样本外更稳的候选。");
     expect(container.textContent).not.toContain(
       "The strategy has moved to a newer parameter version.",
     );

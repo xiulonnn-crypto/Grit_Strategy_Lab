@@ -19,6 +19,7 @@ type FakeApi = {
   createComposition?: ReturnType<typeof vi.fn>;
   updateComposition?: ReturnType<typeof vi.fn>;
   getCompositionDetail?: ReturnType<typeof vi.fn>;
+  listCompositions?: ReturnType<typeof vi.fn>;
   listStrategies?: ReturnType<typeof vi.fn>;
   listBacktestRuns?: ReturnType<typeof vi.fn>;
 };
@@ -51,6 +52,7 @@ const fakeApi = vi.hoisted<FakeApi>(() => ({
   createComposition: vi.fn(),
   updateComposition: vi.fn(),
   getCompositionDetail: vi.fn(),
+  listCompositions: vi.fn(),
   listStrategies: vi.fn(),
   listBacktestRuns: vi.fn(),
 }));
@@ -352,6 +354,7 @@ beforeEach(() => {
   });
   fakeApi.updateComposition = vi.fn().mockResolvedValue(existingComposition);
   fakeApi.getCompositionDetail = vi.fn().mockResolvedValue(existingComposition);
+  fakeApi.listCompositions = vi.fn().mockResolvedValue([]);
   fakeApi.listStrategies = vi.fn().mockResolvedValue([]);
   fakeApi.listBacktestRuns = vi.fn().mockResolvedValue([]);
   window.localStorage.clear();
@@ -880,6 +883,156 @@ describe('composition workbench page', () => {
         }),
       ),
     );
+  });
+
+  it('offers one-click strategy version upgrade only when the latest saved strategy leg is also in the source library', async () => {
+    const staleRef = 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-v2';
+    const latestRef = 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-v4';
+    const staleComposition: ApiCompositionDetail = {
+      ...existingComposition,
+      id: 'composition_630718a64821',
+      normalized_legs: [
+        {
+          id: staleRef,
+          leg_kind: 'strategy',
+          source_ref_id: staleRef,
+          source_ref_type: 'strategy_projection',
+          display_name: 'QQQ Grid-v2',
+          weight_pct: 50,
+          weight_locked: false,
+          ordering: 0,
+          version_label: 'v2',
+          proof_label: 'run_32b4cce6719a',
+          status: 'READY',
+          status_label: 'Ready',
+          attribute_tags: ['strategy', 'newer_version_available'],
+          reference_summary: 'Used in 1 saved composition',
+          config: {
+            strategy_id: 'strat_53315d3dd88b',
+            parameter_version_id: 'strat_53315d3dd88b-v2',
+          },
+          allowed_actions: ['open_strategy_detail'],
+        },
+        {
+          ...existingComposition.normalized_legs[1],
+          weight_pct: 50,
+          ordering: 1,
+        },
+      ],
+      source_integrity: [
+        {
+          leg_id: staleRef,
+          display_name: 'QQQ Grid-v2',
+          source_ref_id: staleRef,
+          freeze_hash: 'hash-v2',
+          signature_status: 'stale',
+          drift_status: 'drifted',
+          current_ref_id: latestRef,
+          checked_at: '2026-04-28T04:00:00.000Z',
+          alerts: ['A newer parameter version exists; saved compositions keep the frozen version.'],
+        },
+      ],
+    };
+    window.location.hash = '#/compositions/workbench?composition_id=composition_630718a64821';
+    fakeApi.getLegInventory = vi.fn().mockResolvedValue({
+      counts: { all: 2, strategy: 0, asset: 1, cash: 1 },
+      filters: {
+        statuses: [{ value: 'ACTIVE', label: 'Active', count: 2 }],
+        attribute_tags: [],
+      },
+      rows: inventory.rows.filter((row) => row.leg_type !== 'strategy'),
+    });
+    window.localStorage.setItem(
+      SAVED_STRATEGY_LEG_STORAGE_KEY,
+      JSON.stringify([staleRef, latestRef]),
+    );
+    fakeApi.getCompositionDetail = vi.fn().mockResolvedValue(staleComposition);
+    fakeApi.updateComposition = vi.fn().mockResolvedValue({
+      ...staleComposition,
+      id: 'composition_630718a64821',
+    });
+    fakeApi.listStrategies = vi.fn().mockResolvedValue([
+      {
+        id: 'strat_53315d3dd88b',
+        name: 'QQQ Grid',
+        strategy_type: 'GRID',
+        universe_name: 'QQQ',
+        rebalance_frequency: 'never',
+        current_parameter_version: 4,
+        current_parameter_version_id: 'strat_53315d3dd88b-v4',
+        benchmark_symbol: 'QQQ',
+      },
+    ]);
+    fakeApi.listBacktestRuns = vi.fn().mockResolvedValue([
+      {
+        id: 'run_95db6d1d4ba9',
+        strategy_id: 'strat_53315d3dd88b',
+        strategy_name: 'QQQ Grid',
+        status: 'COMPLETED',
+        parameter_version_id: 'strat_53315d3dd88b-v4',
+        completed_at: '2026-04-28T02:00:00.000Z',
+        metrics: {
+          annualized_return: 0.24,
+          max_drawdown: -0.13,
+          oos_sharpe: 1.8,
+        },
+      },
+      {
+        id: 'run_32b4cce6719a',
+        strategy_id: 'strat_53315d3dd88b',
+        strategy_name: 'QQQ Grid',
+        status: 'COMPLETED',
+        parameter_version_id: 'strat_53315d3dd88b-v2',
+        completed_at: '2026-04-27T02:00:00.000Z',
+        metrics: {
+          annualized_return: 0.18,
+          max_drawdown: -0.1,
+          oos_sharpe: 1.2,
+        },
+      },
+    ]);
+
+    render(
+      <AppRouteProvider
+        navigate={(path) => {
+          window.location.hash = path;
+        }}
+        route={{ kind: 'composition-workbench', compositionId: 'composition_630718a64821' }}
+      >
+        <CompositionWorkbenchPage />
+      </AppRouteProvider>,
+    );
+
+    const staleCardTitle = (await screen.findAllByText('QQQ Grid-v2')).find((node) =>
+      node.closest('.composition-workbench-source-card'),
+    );
+    expect(staleCardTitle).toBeDefined();
+    const staleCard = staleCardTitle?.closest('.composition-workbench-source-card');
+    expect(staleCard).not.toBeNull();
+    expect(within(staleCard as HTMLElement).getByText('有新版本')).toBeInTheDocument();
+    expect(screen.getAllByText('QQQ Grid-v4').length).toBeGreaterThan(0);
+    const upgradeButtons = await screen.findAllByRole('button', { name: '一键升级版本' });
+    expect(upgradeButtons.length).toBeGreaterThan(0);
+
+    fireEvent.click(upgradeButtons[0]);
+
+    await waitFor(() => expect(fakeApi.updateComposition).toHaveBeenCalledTimes(1));
+    const [, payload] = fakeApi.updateComposition.mock.calls[0];
+    expect(payload).toEqual(
+      expect.objectContaining({
+        status: 'ACTIVE',
+        legs: expect.arrayContaining([
+          expect.objectContaining({
+            leg_kind: 'strategy',
+            source_ref_id: latestRef,
+            weight_pct: 50,
+          }),
+        ]),
+      }),
+    );
+    expect(
+      (payload.legs as Array<{ source_ref_id: string }>).some((leg) => leg.source_ref_id === staleRef),
+    ).toBe(false);
   });
 
   it('does not render fabricated score breakdown values before legs are selected', async () => {

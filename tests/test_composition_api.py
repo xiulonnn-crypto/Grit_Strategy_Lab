@@ -268,6 +268,55 @@ def _create_composition_with_seed_legs(client, asset_leg, cash_leg) -> dict:
     )
 
 
+def _create_sleeve_os_composition(client) -> dict:
+    _seed_composition_preview_price_history(client)
+    asset_leg, cash_leg = _create_seed_legs(client)
+    created = create_momentum_strategy(client, idempotency_key=f"sleeve-os-{uuid4().hex}")
+    strategy = created["strategy"]
+    _seed_completed_run(client, strategy["id"], strategy["current_parameter_version_id"])
+    strategy_leg_ref = f"strategy_leg::{strategy['id']}::{strategy['current_parameter_version_id']}"
+    return assert_ok(
+        client.post(
+            "/compositions",
+            json={
+                "name": "Sleeve OS Overlay",
+                "description": "Composition-layer run fixture",
+                "benchmark_definition": {"label": "S&P 500", "symbol": "SPY"},
+                "rebalance_frequency": "monthly",
+                "cost_policy": {
+                    "expense_ratio_bps": 12,
+                    "turnover_budget_bps": 30,
+                    "trade_cost_bps": 6,
+                },
+                "legs": [
+                    {
+                        "leg_kind": "strategy",
+                        "source_ref_id": strategy_leg_ref,
+                        "weight_pct": 50,
+                        "weight_locked": False,
+                        "ordering": 1,
+                    },
+                    {
+                        "leg_kind": "asset",
+                        "source_ref_id": asset_leg["id"],
+                        "weight_pct": 30,
+                        "weight_locked": False,
+                        "ordering": 2,
+                    },
+                    {
+                        "leg_kind": "cash",
+                        "source_ref_id": cash_leg["id"],
+                        "weight_pct": 20,
+                        "weight_locked": True,
+                        "ordering": 3,
+                    },
+                ],
+                "status": "ACTIVE",
+            },
+        )
+    )
+
+
 def test_leg_inventory_defaults_to_manual_asset_and_cash_rows_only(tmp_path):
     client, _ = create_test_client(tmp_path)
     created = create_momentum_strategy(client, idempotency_key="composition-inventory-strategy")
@@ -790,6 +839,188 @@ def test_composition_preview_create_update_and_list_flow(tmp_path):
 
     refreshed_inventory = assert_ok(client.get("/leg-inventory"))
     assert all(row["id"] != strategy_leg_ref for row in refreshed_inventory["rows"])
+
+
+def test_composition_backtest_run_orders_netting_and_exports(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    composition = _create_sleeve_os_composition(client)
+
+    created_run = assert_ok(
+        client.post(
+            f"/compositions/{composition['id']}/backtest-runs",
+            json={"idempotency_key": "sleeve-run-001", "horizon_years": 10},
+        )
+    )
+    run_id = created_run["run_id"]
+
+    assert created_run["composition_id"] == composition["id"]
+    assert created_run["status"] in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
+    assert created_run["returns_preview"] == composition["returns_preview"]
+    assert created_run["benchmark_series"] == composition["benchmark_series"]
+    assert created_run["summary"]["order_count"] > 0
+    assert created_run["summary"]["quality_label"].endswith("composition_detail_preview")
+    assert "not real broker execution history" in created_run["summary"]["evidence_label"]
+    assert created_run["evidence"]["data_footprint"]["returns_preview_points"] == len(composition["returns_preview"])
+
+    fetched_run = assert_ok(client.get(f"/compositions/{composition['id']}/backtest-runs/{run_id}"))
+    assert fetched_run["id"] == run_id
+    assert fetched_run["audit_trail"]
+    assert fetched_run["source_integrity"]
+
+    orders = assert_ok(client.get(f"/compositions/{composition['id']}/backtest-runs/{run_id}/orders"))
+    assert orders["total"] == created_run["summary"]["order_count"]
+    assert orders["generated_from"] == "composition_detail_preview"
+    assert all(item["execution_kind"] == "simulated_rebalance_instruction" for item in orders["items"])
+    assert all(item["price"] is None for item in orders["items"])
+
+    filtered = assert_ok(
+        client.get(f"/compositions/{composition['id']}/backtest-runs/{run_id}/orders?symbol=IEF")
+    )
+    assert filtered["symbol_filter"] == "IEF"
+    assert filtered["total"] > 0
+    assert {item["symbol"] for item in filtered["items"]} == {"IEF"}
+
+    order = filtered["items"][0]
+    netting = assert_ok(
+        client.get(
+            f"/compositions/{composition['id']}/backtest-runs/{run_id}/orders/{order['id']}/netting"
+        )
+    )
+    assert netting["order_id"] == order["id"]
+    assert netting["symbol"] == "IEF"
+    assert netting["before_netting"]["requested_quantity"] == pytest.approx(order["quantity"])
+    assert (
+        netting["after_netting"]["internal_net_quantity"]
+        + netting["after_netting"]["external_quantity"]
+    ) == pytest.approx(order["quantity"])
+    assert netting["generated_from"] == "composition_rebalance_events"
+
+    csv_response = client.get(
+        f"/compositions/{composition['id']}/backtest-runs/{run_id}/orders/export?format=csv&symbol=IEF"
+    )
+    assert csv_response.status_code == 200, csv_response.text
+    assert csv_response.headers["content-type"].startswith("text/csv")
+    assert "标的" in csv_response.text
+    assert "IEF" in csv_response.text
+
+    xlsx_response = client.get(
+        f"/compositions/{composition['id']}/backtest-runs/{run_id}/orders/export?format=xlsx"
+    )
+    assert xlsx_response.status_code == 200, xlsx_response.text
+    assert xlsx_response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert xlsx_response.headers["content-disposition"].endswith('.xlsx"')
+    assert xlsx_response.content.startswith(b"PK")
+
+
+def test_composition_allocation_job_status_and_shape(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    composition = _create_sleeve_os_composition(client)
+
+    created_job = assert_ok(
+        client.post(
+            f"/compositions/{composition['id']}/allocation-jobs",
+            json={
+                "idempotency_key": "allocation-001",
+                "intent": "risk_parity",
+                "target_volatility_pct": 8,
+                "lookback_window": "10y",
+            },
+        )
+    )
+
+    assert created_job["composition_id"] == composition["id"]
+    assert created_job["status"] == "COMPLETED"
+    assert created_job["summary"]["intent"] == "risk_parity"
+    assert created_job["summary"]["candidate_count"] >= 3
+    assert created_job["summary"]["quality_label"] == "heuristic_from_composition_detail_preview"
+    assert created_job["residual_budget"]["optimizable_weight_pct"] == pytest.approx(80.0)
+    assert {item["id"] for item in created_job["candidates"]} >= {"current", "risk_parity", "min_vol", "max_sharpe"}
+    assert created_job["frontier_points"]
+    assert created_job["covariance_preview"] == composition["correlation_matrix"]
+    assert created_job["evidence"]["not_real_optimizer"] is True
+
+    fetched_job = assert_ok(
+        client.get(f"/compositions/{composition['id']}/allocation-jobs/{created_job['job_id']}")
+    )
+    assert fetched_job["job_id"] == created_job["job_id"]
+    assert fetched_job["candidates"] == created_job["candidates"]
+
+
+def test_composition_detail_and_list_flag_saved_strategy_leg_new_version(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    asset_leg, cash_leg = _create_seed_legs(client)
+    created = create_momentum_strategy(client, idempotency_key="composition-version-drift-base")
+    strategy = created["strategy"]
+    base_parameter_version_id = strategy["current_parameter_version_id"]
+    _seed_completed_run(client, strategy["id"], base_parameter_version_id)
+    stale_strategy_leg_ref = f"strategy_leg::{strategy['id']}::{base_parameter_version_id}"
+
+    composition = assert_ok(
+        client.post(
+            "/compositions",
+            json={
+                "name": "Version Drift Overlay",
+                "description": "Composition keeps a frozen strategy leg while a newer parameter version exists.",
+                "benchmark_definition": {"label": "S&P 500", "symbol": "SPY"},
+                "rebalance_frequency": "quarterly",
+                "legs": [
+                    {
+                        "leg_kind": "strategy",
+                        "source_ref_id": stale_strategy_leg_ref,
+                        "weight_pct": 50,
+                        "weight_locked": False,
+                        "ordering": 1,
+                    },
+                    {
+                        "leg_kind": "asset",
+                        "source_ref_id": asset_leg["id"],
+                        "weight_pct": 30,
+                        "weight_locked": False,
+                        "ordering": 2,
+                    },
+                    {
+                        "leg_kind": "cash",
+                        "source_ref_id": cash_leg["id"],
+                        "weight_pct": 20,
+                        "weight_locked": False,
+                        "ordering": 3,
+                    },
+                ],
+                "status": "ACTIVE",
+            },
+        )
+    )
+
+    revised = create_momentum_strategy(
+        client,
+        mode="REVISION",
+        base_strategy_id=strategy["id"],
+        base_parameter_version_id=base_parameter_version_id,
+        top_n=2,
+        idempotency_key="composition-version-drift-current",
+    )["strategy"]
+    current_parameter_version_id = revised["current_parameter_version_id"]
+    assert current_parameter_version_id != base_parameter_version_id
+    _seed_completed_run(client, strategy["id"], current_parameter_version_id)
+
+    detail = assert_ok(client.get(f"/compositions/{composition['id']}"))
+    strategy_integrity = next(
+        item for item in detail["source_integrity"] if item["source_ref_id"] == stale_strategy_leg_ref
+    )
+    assert strategy_integrity["drift_status"] == "drifted"
+    assert strategy_integrity["signature_status"] == "stale"
+    assert (
+        strategy_integrity["current_ref_id"]
+        == f"strategy_leg::{strategy['id']}::{current_parameter_version_id}"
+    )
+    assert any("newer parameter version exists" in alert for alert in strategy_integrity["alerts"])
+
+    listed = assert_ok(client.get("/compositions"))
+    list_item = next(item for item in listed if item["id"] == composition["id"])
+    assert list_item["has_new_version"] is True
+    assert any(item["source_ref_id"] == stale_strategy_leg_ref for item in list_item["source_integrity"])
 
 
 def test_composition_detail_defaults_to_recent_ten_year_window_and_fills_missing_leg_streams(tmp_path):

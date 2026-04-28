@@ -1,15 +1,18 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CompositionDashboardPage } from './pages/composition-dashboard-page';
 import type { ApiCompositionListItem } from './types';
 
 type FakeApi = {
   listCompositions?: ReturnType<typeof vi.fn>;
+  getCompositionDetail?: ReturnType<typeof vi.fn>;
   updateComposition?: ReturnType<typeof vi.fn>;
 };
 
 const fakeApi = vi.hoisted<FakeApi>(() => ({
   listCompositions: vi.fn(),
+  getCompositionDetail: vi.fn(),
   updateComposition: vi.fn(),
 }));
 
@@ -43,7 +46,7 @@ const compositions: ApiCompositionListItem[] = [
     benchmark_label: 'NASDAQ 100',
     annualized_return: 0.153,
     sharpe: 1.28,
-    max_drawdown: -0.112,
+    max_drawdown: -0.129,
     updated_at: '2026-04-19T04:15:00.000Z',
     latest_activity_label: '最近一次完成来源检查',
     allowed_actions: ['open_composition_workbench'],
@@ -97,6 +100,12 @@ const compositions: ApiCompositionListItem[] = [
 
 beforeEach(() => {
   fakeApi.listCompositions = vi.fn().mockResolvedValue(compositions);
+  fakeApi.getCompositionDetail = vi.fn().mockImplementation((id: string) =>
+    Promise.resolve({
+      id,
+      source_integrity: [],
+    }),
+  );
   fakeApi.updateComposition = vi.fn().mockResolvedValue({ ...compositions[0], status: 'ARCHIVED' });
   window.location.hash = '';
 });
@@ -108,6 +117,14 @@ afterEach(() => {
 });
 
 describe('composition dashboard page', () => {
+  it('keeps composition card metrics in a stable non-overflow grid', () => {
+    const css = readFileSync('src/components/composition-dashboard/composition-dashboard.css', 'utf8');
+
+    expect(css).toContain('grid-template-columns: repeat(2, minmax(112px, 1fr));');
+    expect(css).toContain('overflow-wrap: anywhere;');
+    expect(css).not.toContain('.composition-dashboard-card__metrics,\n  .composition-dashboard-observation__summary');
+  });
+
   it('renders the approved dashboard structure and exposes stable route selectors', async () => {
     await act(async () => {
       render(<CompositionDashboardPage />);
@@ -130,6 +147,7 @@ describe('composition dashboard page', () => {
     expect(document.querySelectorAll('.composition-dashboard-card')).toHaveLength(2);
     expect(document.querySelectorAll('.composition-dashboard-task')).toHaveLength(3);
     expect(document.querySelectorAll('.composition-dashboard-activity')).toHaveLength(4);
+    expect(screen.queryByText(/当前最大回撤达到 -12\.9%/)).toBeNull();
     expect(screen.queryByText('策略工作台')).toBeNull();
     expect(screen.getByText('冻结来源覆盖')).toBeInTheDocument();
 
@@ -195,6 +213,77 @@ describe('composition dashboard page', () => {
       expect(fakeApi.updateComposition).toHaveBeenCalledWith('comp-balanced', { status: 'ARCHIVED' }),
     );
     await waitFor(() => expect(fakeApi.listCompositions).toHaveBeenCalledTimes(2));
+  });
+
+  it('shows a new-version badge on active composition cards when source strategy legs drift', async () => {
+    fakeApi.listCompositions = vi.fn().mockResolvedValue([
+      {
+        id: 'composition_630718a64821',
+        name: 'QQQ Grid Combo',
+        status: 'ACTIVE',
+        composition_score: 84.2,
+        leg_count: 3,
+        rebalance_frequency: 'quarterly',
+        benchmark_label: 'QQQ',
+        annualized_return: 0.16,
+        sharpe: 1.26,
+        max_drawdown: -0.09,
+        updated_at: '2026-04-28T04:00:00.000Z',
+        latest_activity_label: 'updated 2026-04-28',
+        allowed_actions: ['open_composition_workbench'],
+      },
+      ...compositions,
+    ]);
+    fakeApi.getCompositionDetail = vi.fn().mockImplementation((id: string) =>
+      Promise.resolve({
+        id,
+        source_integrity:
+          id === 'composition_630718a64821'
+            ? [
+                {
+                  leg_id: 'strategy-leg-stale',
+                  display_name: 'QQQ Grid-v2',
+                  source_ref_id: 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-v2',
+                  freeze_hash: 'hash-v2',
+                  signature_status: 'stale',
+                  drift_status: 'drifted',
+                  current_ref_id: 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-v4',
+                  checked_at: '2026-04-28T04:00:00.000Z',
+                  alerts: ['A newer parameter version exists; saved compositions keep the frozen version.'],
+                },
+                {
+                  leg_id: 'strategy-leg-second-stale',
+                  display_name: 'QQQ Hedge-v1',
+                  source_ref_id: 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-hedge-v1',
+                  freeze_hash: 'hash-hedge-v1',
+                  signature_status: 'stale',
+                  drift_status: 'version_drift',
+                  current_ref_id: 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-hedge-v2',
+                  checked_at: '2026-04-28T04:00:00.000Z',
+                  alerts: ['检测到新版本策略腿。'],
+                },
+              ]
+            : [],
+      }),
+    );
+
+    await act(async () => {
+      render(<CompositionDashboardPage />);
+    });
+
+    const title = await screen.findByRole('heading', { level: 3, name: 'QQQ Grid Combo' });
+    const card = title.closest('.composition-dashboard-card');
+    expect(card).not.toBeNull();
+    expect(within(card as HTMLElement).getByText('有新版本')).toBeInTheDocument();
+    expect(within(card as HTMLElement).queryByText('运行稳定')).toBeNull();
+
+    const task = screen.getByRole('button', { name: /腿版本更新/ });
+    expect(within(task).getByText('“QQQ Grid Combo”底层有 2 条策略腿存在更新版本。')).toBeInTheDocument();
+
+    fireEvent.click(task);
+    await waitFor(() =>
+      expect(window.location.hash).toBe('#/compositions/workbench?composition_id=composition_630718a64821'),
+    );
   });
 
   it('requires confirmation before archiving a composition', async () => {

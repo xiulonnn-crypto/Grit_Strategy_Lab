@@ -1,6 +1,7 @@
 import type {
   ApiBacktestRunListItem,
   ApiCompositionDetail,
+  ApiCompositionLegInput,
   ApiLegInventory,
   ApiLegInventoryRow,
   ApiStrategyListItem,
@@ -196,6 +197,20 @@ function getStrategyVersionLabel(
   return match ? `v${match[1]}` : parameterVersionId;
 }
 
+function getStrategyVersionNumber(
+  strategy: ApiStrategyListItem | undefined,
+  parameterVersionId: string,
+): number | null {
+  if (strategy?.current_parameter_version_id === parameterVersionId) {
+    const currentVersion = strategy.current_parameter_version;
+    if (typeof currentVersion === 'number' && Number.isFinite(currentVersion)) {
+      return currentVersion;
+    }
+  }
+  const match = parameterVersionId.match(/(?:^|-)v(\d+)$/i);
+  return match ? Number(match[1]) : null;
+}
+
 export function buildStrategyLegDefaultName(row: ApiLegInventoryRow): string {
   const versionLabel = String(row.version_label ?? '').trim();
   if (!versionLabel || row.name.endsWith(`-${versionLabel}`)) {
@@ -210,23 +225,30 @@ export function buildStrategyCandidateRows(
   referenceCounts?: StrategyLegReferenceCounts,
 ): ApiLegInventoryRow[] {
   const strategyById = new Map(strategies.map((strategy) => [strategy.id, strategy]));
-  const latestRunByStrategy = new Map<string, ApiBacktestRunListItem>();
+  const latestRunByStrategyVersion = new Map<string, ApiBacktestRunListItem>();
 
   runs
     .filter((run) => ELIGIBLE_STRATEGY_RUN_STATUSES.has(String(run.status ?? '').toUpperCase()))
     .filter((run) => Boolean(run.strategy_id && run.parameter_version_id))
     .sort((left, right) => getRunSortTime(right) - getRunSortTime(left))
     .forEach((run) => {
-      if (!latestRunByStrategy.has(run.strategy_id)) {
-        latestRunByStrategy.set(run.strategy_id, run);
+      const key = `${run.strategy_id}::${run.parameter_version_id}`;
+      if (!latestRunByStrategyVersion.has(key)) {
+        latestRunByStrategyVersion.set(key, run);
       }
     });
 
-  return Array.from(latestRunByStrategy.values()).map((run): ApiLegInventoryRow => {
+  return Array.from(latestRunByStrategyVersion.values()).map((run): ApiLegInventoryRow => {
     const strategy = strategyById.get(run.strategy_id);
     const parameterVersionId = run.parameter_version_id as string;
     const rowId = `strategy_leg::${run.strategy_id}::${parameterVersionId}`;
     const referenceCount = getReferenceCount(referenceCounts, rowId);
+    const hasNewVersion =
+      Boolean(strategy?.current_parameter_version_id) &&
+      strategy?.current_parameter_version_id !== parameterVersionId;
+    const currentRefId = strategy?.current_parameter_version_id
+      ? `strategy_leg::${run.strategy_id}::${strategy.current_parameter_version_id}`
+      : rowId;
     const annualizedReturnPct = toPercentMetric(
       readMetricNumber(run.metrics, 'annualized_return', 'cagr', 'oos_annualized_return'),
     );
@@ -238,7 +260,22 @@ export function buildStrategyCandidateRows(
       strategy?.strategy_type?.toLowerCase(),
       strategy?.universe_name ? `universe:${strategy.universe_name}` : null,
       strategy?.benchmark_symbol ? `benchmark:${strategy.benchmark_symbol}` : null,
+      `version:${getStrategyVersionLabel(strategy, parameterVersionId)}`,
+      hasNewVersion ? 'newer_version_available' : null,
     ].filter((tag): tag is string => Boolean(tag));
+    const sourceIntegrity = {
+      leg_id: rowId,
+      display_name: strategy?.name ?? run.strategy_name ?? run.strategy_id,
+      source_ref_id: rowId,
+      freeze_hash: null,
+      signature_status: hasNewVersion ? 'stale' : 'verified',
+      drift_status: hasNewVersion ? 'drifted' : 'current',
+      current_ref_id: currentRefId,
+      checked_at: run.completed_at ?? run.updated_at ?? run.created_at ?? null,
+      alerts: hasNewVersion
+        ? ['A newer parameter version exists; saved compositions keep the frozen version.']
+        : [],
+    };
 
     return {
       id: rowId,
@@ -248,19 +285,31 @@ export function buildStrategyCandidateRows(
       proof_label: run.id,
       reference_count: referenceCount,
       reference_summary: buildReferenceSummary(referenceCount),
-      status: 'ACTIVE',
-      status_label: run.status === 'COMPLETED_WITH_WARNINGS' ? '已完成，有警告' : '已完成回测',
-      has_new_version:
-        Boolean(strategy?.current_parameter_version_id) &&
-        strategy?.current_parameter_version_id !== parameterVersionId,
+      status: hasNewVersion ? 'STALE' : 'READY',
+      status_label: hasNewVersion
+        ? 'Newer version available'
+        : run.status === 'COMPLETED_WITH_WARNINGS'
+          ? 'Completed with warnings'
+          : 'Ready',
+      has_new_version: hasNewVersion,
       is_orphan: false,
       attribute_tags: tags,
-      allowed_actions: ['open_strategy_detail', 'open_composition_workbench'],
+      allowed_actions: [
+        'open_strategy_detail',
+        'open_composition_workbench',
+        ...(hasNewVersion ? ['copy_new_version'] : []),
+      ],
       source_ref_id: rowId,
       source_ref_type: 'strategy_projection',
+      source_integrity: sourceIntegrity,
+      signature_status: sourceIntegrity.signature_status,
+      drift_status: sourceIntegrity.drift_status,
+      current_ref_id: sourceIntegrity.current_ref_id,
+      alerts: sourceIntegrity.alerts,
       config: {
         strategy_id: run.strategy_id,
         parameter_version_id: parameterVersionId,
+        parameter_version: getStrategyVersionNumber(strategy, parameterVersionId),
         latest_run_id: run.id,
         run_id: run.id,
         metrics: run.metrics ?? null,
@@ -271,6 +320,7 @@ export function buildStrategyCandidateRows(
         end_date: run.end_date ?? null,
         trades_count: run.trades_count ?? null,
         rebalance_frequency: strategy?.rebalance_frequency ?? null,
+        source_integrity: sourceIntegrity,
       },
     };
   });
@@ -286,6 +336,116 @@ export function materializeSavedStrategyRows(
   return ids.flatMap((id) => {
     const row = byId.get(id);
     return row ? [applyStrategyLegEdit({ ...row, name: buildStrategyLegDefaultName(row) }, edits[id])] : [];
+  });
+}
+
+function parseStrategySourceRefId(sourceRefId: string): { strategyId: string; parameterVersionId: string } | null {
+  const match = sourceRefId.match(/^strategy_leg::(.+)::(.+)$/);
+  if (!match) {
+    return null;
+  }
+  return {
+    strategyId: match[1],
+    parameterVersionId: match[2],
+  };
+}
+
+function getStrategyIdFromLeg(leg: ApiCompositionLegInput): string | null {
+  const config = asRecord(leg.config);
+  const strategyId = config.strategy_id;
+  if (typeof strategyId === 'string' && strategyId.trim()) {
+    return strategyId.trim();
+  }
+  return parseStrategySourceRefId(String(leg.source_ref_id ?? ''))?.strategyId ?? null;
+}
+
+function getStrategyIdFromRow(row: ApiLegInventoryRow): string | null {
+  const config = asRecord(row.config);
+  const strategyId = config.strategy_id;
+  if (typeof strategyId === 'string' && strategyId.trim()) {
+    return strategyId.trim();
+  }
+  return parseStrategySourceRefId(String(row.source_ref_id ?? row.id))?.strategyId ?? null;
+}
+
+function getInventorySourceRefId(row: ApiLegInventoryRow): string {
+  return String(row.source_ref_id ?? row.id);
+}
+
+function findInventoryRowForLeg(
+  leg: ApiCompositionLegInput,
+  inventoryRows: ApiLegInventoryRow[],
+): ApiLegInventoryRow | null {
+  const sourceRefId = String(leg.source_ref_id ?? '');
+  return inventoryRows.find((row) => row.id === sourceRefId || row.source_ref_id === sourceRefId) ?? null;
+}
+
+function findLatestStrategyRowForLeg(
+  leg: ApiCompositionLegInput,
+  inventoryRows: ApiLegInventoryRow[],
+): ApiLegInventoryRow | null {
+  const strategyId = getStrategyIdFromLeg(leg);
+  if (!strategyId) {
+    return null;
+  }
+  return (
+    inventoryRows.find((row) => {
+      if (row.leg_type !== 'strategy' || row.has_new_version) {
+        return false;
+      }
+      if (row.status === 'NEEDS_RUN' || row.attribute_tags.includes('needs_run')) {
+        return false;
+      }
+      return getStrategyIdFromRow(row) === strategyId;
+    }) ?? null
+  );
+}
+
+export function canUpgradeStrategyLegVersions(
+  legs: ApiCompositionLegInput[],
+  inventoryRows: ApiLegInventoryRow[],
+): boolean {
+  const staleStrategyLegs = legs.filter((leg) => {
+    if (leg.leg_kind !== 'strategy') {
+      return false;
+    }
+    return Boolean(findInventoryRowForLeg(leg, inventoryRows)?.has_new_version);
+  });
+  if (staleStrategyLegs.length === 0) {
+    return false;
+  }
+  return staleStrategyLegs.every((leg) => {
+    const latestRow = findLatestStrategyRowForLeg(leg, inventoryRows);
+    return Boolean(latestRow && getInventorySourceRefId(latestRow) !== String(leg.source_ref_id ?? ''));
+  });
+}
+
+export function upgradeStrategyLegVersions(
+  legs: ApiCompositionLegInput[],
+  inventoryRows: ApiLegInventoryRow[],
+): ApiCompositionLegInput[] {
+  if (!canUpgradeStrategyLegVersions(legs, inventoryRows)) {
+    return legs;
+  }
+  return legs.map((leg) => {
+    if (leg.leg_kind !== 'strategy') {
+      return leg;
+    }
+    const currentRow = findInventoryRowForLeg(leg, inventoryRows);
+    if (!currentRow?.has_new_version) {
+      return leg;
+    }
+    const latestRow = findLatestStrategyRowForLeg(leg, inventoryRows);
+    if (!latestRow) {
+      return leg;
+    }
+    return {
+      ...leg,
+      source_ref_id: getInventorySourceRefId(latestRow),
+      source_ref_type: latestRow.source_ref_type ?? leg.source_ref_type,
+      display_name: buildStrategyLegDefaultName(latestRow),
+      config: latestRow.config,
+    };
   });
 }
 

@@ -32,15 +32,21 @@ describe('App runtime routes', () => {
   });
 
   it('creates a session route from the template page and shows the page-owned strategy header', async () => {
-    await renderApp('#/creation/new');
+    await renderApp('#/strategies');
 
     expect(document.querySelector('.creation-template-page')).not.toBeNull();
-    const createButton = document.querySelector('.creation-template-page .primary-button') as HTMLButtonElement | null;
-    expect(createButton).toBeTruthy();
-    fireEvent.click(createButton!);
+    fireEvent.click(await screen.findByRole('button', { name: '新建策略' }));
+    fireEvent.click(await screen.findByRole('button', { name: '创建动量策略' }));
 
     await waitFor(() => expect(window.location.hash).toMatch(/^#\/creation\/sessions\/cs-/));
     await waitFor(() => expect(document.querySelector('.creation-session-page')).not.toBeNull());
+  });
+
+  it('keeps the retired strategy-library alias readable', async () => {
+    await renderApp('#/creation/new');
+
+    expect(document.querySelector('.creation-template-page')).not.toBeNull();
+    expect(await screen.findByRole('heading', { level: 1, name: '策略库' })).toBeInTheDocument();
   });
 
   it('renders the strategy detail page on the formal route', async () => {
@@ -83,6 +89,35 @@ describe('App runtime routes', () => {
 
     expect(document.querySelector('.composition-detail-page')).not.toBeNull();
     expect(await screen.findByRole('heading', { level: 1, name: '全天候研究组合' })).toBeInTheDocument();
+  });
+
+  it('renders the composition backtest config route inside the unified shell', async () => {
+    await renderApp('#/compositions/comp-001/backtest-runs/new');
+
+    expect(document.querySelector('.composition-backtest-config-page')).not.toBeNull();
+    expect(await screen.findByRole('heading', { level: 1, name: '稳定性配置' })).toBeInTheDocument();
+  });
+
+  it('renders the composition backtest result route with the production tabs', async () => {
+    await renderApp('#/compositions/comp-001/backtest-runs/comp-run-001?tab=orders');
+
+    expect(document.querySelector('.composition-backtest-result-page')).not.toBeNull();
+    expect(await screen.findByRole('tab', { name: /订单/, selected: true })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '重跑回测' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '启动优化' })).toBeInTheDocument();
+  });
+
+  it('renders the composition allocation split routes inside the unified shell', async () => {
+    await renderApp('#/compositions/comp-001/allocation-lab');
+
+    expect(document.querySelector('[data-page-root="composition-allocation-config"]')).not.toBeNull();
+    expect(await screen.findByRole('heading', { level: 1, name: '组合优化实验室' })).toBeInTheDocument();
+
+    cleanup();
+    await renderApp('#/compositions/comp-001/allocation-jobs/alloc-001');
+
+    expect(document.querySelector('[data-page-root="composition-allocation-result"]')).not.toBeNull();
+    expect((await screen.findAllByText(/最符合你的目标/)).length).toBeGreaterThan(0);
   });
 
   it('submits from backtest into the run detail route', async () => {

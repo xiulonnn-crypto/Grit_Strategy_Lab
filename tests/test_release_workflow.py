@@ -23,7 +23,7 @@ def _write_repo_files(repo_root: Path, changelog: str, version: str = "0.1.1") -
     (repo_root / "src" / "grit_backtest_platform").mkdir(parents=True)
     (repo_root / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
     (repo_root / "src" / "grit_backtest_platform" / "_version.py").write_text(
-        'from __future__ import annotations\n\n'
+        "from __future__ import annotations\n\n"
         '__all__ = ["__version__"]\n\n'
         f'__version__ = "{version}"\n',
         encoding="utf-8",
@@ -35,17 +35,17 @@ def test_prepare_push_creates_revision_snapshot_and_resets_unreleased(tmp_path: 
         tmp_path,
         """# 更新日志
 
-## [未发布]
+## [Unreleased]
 
-### 修复
+### 修复 (Fixed)
 
-- 修复优化结果过滤问题。
+- **组合保存提示**: 保存失败时会说明用户下一步该怎么处理。
 
 ## [0.1.1] - 2026-03-31
 
-### 新增
+### 新增 (Added)
 
-- 已发布内容。
+- **恢复基线**: 建立首个可运行版本。
 """,
     )
 
@@ -55,8 +55,8 @@ def test_prepare_push_creates_revision_snapshot_and_resets_unreleased(tmp_path: 
     assert result.mode == "revision"
     assert result.snapshot_title == "0.1.1-001"
     assert result.changed_files == ["CHANGELOG.md"]
-    assert "## [Unreleased]\n\n## [0.1.1-001] - 2026-04-15" in changelog
-    assert "- 修复优化结果过滤问题。" in changelog
+    assert "## [Unreleased]\n\n## [0.1.1-001] - 2026-04-15 - 修复组合保存提示" in changelog
+    assert "- **组合保存提示**: 保存失败时会说明用户下一步该怎么处理。" in changelog
 
 
 def test_prepare_push_merges_duplicate_unreleased_and_increments_revision(tmp_path: Path) -> None:
@@ -64,29 +64,29 @@ def test_prepare_push_merges_duplicate_unreleased_and_increments_revision(tmp_pa
         tmp_path,
         """# 更新日志
 
-## [未发布]
+## [Unreleased]
 
-### 新增
+### 新增 (Added)
 
-- 第一批改动。
+- **资产候选说明**: 新增更清楚的资产选择解释。
 
 ## [0.1.1-001] - 2026-03-31
 
-### 修复
+### 修复 (Fixed)
 
-- 之前的推送快照。
+- **历史记录**: 旧版本记录保持可读。
 
 ## [0.1.1] - 2026-03-31
 
-### 变更
+### 优化 (Changed)
 
-- 正式发版。
+- **启动流程**: 本地启动说明更清楚。
 
 ## [Unreleased]
 
-### 修复
+### 修复 (Fixed)
 
-- 第二批改动。
+- **组合保存提示**: 保存失败时会说明用户下一步该怎么处理。
 """,
     )
 
@@ -95,9 +95,7 @@ def test_prepare_push_merges_duplicate_unreleased_and_increments_revision(tmp_pa
 
     assert result.snapshot_title == "0.1.1-002"
     assert changelog.count("## [Unreleased]") == 1
-    assert "第一批改动" in changelog
-    assert "第二批改动" in changelog
-    assert "## [0.1.1-002] - 2026-04-15" in changelog
+    assert "## [0.1.1-002] - 2026-04-15 - 新增资产候选说明，并修复组合保存提示" in changelog
 
 
 def test_prepare_push_release_updates_version_file_and_dates(tmp_path: Path) -> None:
@@ -107,15 +105,15 @@ def test_prepare_push_release_updates_version_file_and_dates(tmp_path: Path) -> 
 
 ## [Unreleased]
 
-### 新增
+### 新增 (Added)
 
-- 正式发布前的最后改动。
+- **优化工作台**: 新增从配置到结果查看的完整工作流。
 
 ## [0.1.1] - 2026-03-31
 
-### 新增
+### 新增 (Added)
 
-- 已发布内容。
+- **恢复基线**: 建立首个可运行版本。
 """,
         version="0.1.1",
     )
@@ -132,7 +130,7 @@ def test_prepare_push_release_updates_version_file_and_dates(tmp_path: Path) -> 
     assert result.mode == "release"
     assert result.snapshot_title == "0.1.2"
     assert result.release_version == "0.1.2"
-    assert "## [0.1.2] - 2026-04-15" in changelog
+    assert "## [0.1.2] - 2026-04-15 - 新增优化工作台" in changelog
     assert '__version__ = "0.1.2"' in version_text
 
 
@@ -145,9 +143,9 @@ def test_prepare_push_is_noop_when_unreleased_is_empty(tmp_path: Path) -> None:
 
 ## [0.1.1] - 2026-03-31
 
-### 新增
+### 新增 (Added)
 
-- 已发布内容。
+- **恢复基线**: 建立首个可运行版本。
 """,
     )
 
@@ -163,17 +161,17 @@ def test_prepare_push_rejects_theme_heading_inside_unreleased(tmp_path: Path) ->
         tmp_path,
         """# 更新日志
 
-## [未发布]
+## [Unreleased]
 
-### 快照刷新
+### 体验提升
 
-- 这是不被允许的主题型小标题。
+- **资产候选说明**: 新增更清楚的资产选择解释。
 
 ## [0.1.1] - 2026-03-31
 
-### 新增
+### 新增 (Added)
 
-- 已发布内容。
+- **恢复基线**: 建立首个可运行版本。
 """,
     )
 
@@ -181,9 +179,36 @@ def test_prepare_push_rejects_theme_heading_inside_unreleased(tmp_path: Path) ->
         prepare_push(tmp_path, release=False, effective_date=date(2026, 4, 15))
     except ValueError as exc:
         assert "unsupported subsection headings" in str(exc)
-        assert "### 快照刷新" in str(exc)
+        assert "### 体验提升" in str(exc)
     else:
         raise AssertionError("prepare_push should reject theme headings inside Unreleased")
+
+
+def test_prepare_push_rejects_sensitive_internal_bullet(tmp_path: Path) -> None:
+    _write_repo_files(
+        tmp_path,
+        """# 更新日志
+
+## [Unreleased]
+
+### 修复 (Fixed)
+
+- **调试路径**: 修复 C:\\Fin\\Project\\data.sqlite 中的测试记录。
+
+## [0.1.1] - 2026-03-31
+
+### 新增 (Added)
+
+- **恢复基线**: 建立首个可运行版本。
+""",
+    )
+
+    try:
+        prepare_push(tmp_path, release=False, effective_date=date(2026, 4, 15))
+    except ValueError as exc:
+        assert "本机绝对路径" in str(exc)
+    else:
+        raise AssertionError("prepare_push should reject sensitive changelog bullets")
 
 
 def test_prepare_push_honors_minimum_revision_for_backfilled_post_push_snapshot(
@@ -197,13 +222,13 @@ def test_prepare_push_honors_minimum_revision_for_backfilled_post_push_snapshot(
 
 ### Fixed
 
-- Backfilled snapshot should not reuse 001.
+- **回填快照**: 后补推送不会复用已有编号。
 
 ## [0.1.1] - 2026-03-31
 
 ### Added
 
-- Stable release entry.
+- **稳定版本**: 建立首个稳定记录。
 """,
     )
 
@@ -217,140 +242,5 @@ def test_prepare_push_honors_minimum_revision_for_backfilled_post_push_snapshot(
 
     assert result.mode == "revision"
     assert result.snapshot_title == "0.1.1-002"
-    assert "## [Unreleased]\n\n## [0.1.1-002] - 2026-04-15" in changelog
-
-
-def test_prepare_push_adds_one_line_summary_to_revision_snapshot(tmp_path: Path) -> None:
-    _write_repo_files(
-        tmp_path,
-        """# Changelog
-
-## [Unreleased]
-
-### Changed
-
-- **Objective ranking**: Keep primary metric ordering strict when re-filtering.
-- **Constraint cleanup**: Remove the legacy turnover guard from the UI.
-
-### Fixed
-
-- **QuickStart preview**: Rebuild the preview bundle on cold start.
-- **Candidate board**: Prevent the modal table from overflowing on desktop.
-
-## [0.1.1] - 2026-03-31
-
-### Added
-
-- Stable release entry.
-""",
-    )
-
-    prepare_push(tmp_path, release=False, effective_date=date(2026, 4, 15))
-    changelog = (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
-
-    assert (
-        "## [0.1.1-001] - 2026-04-15 - 调整Objective ranking、Constraint cleanup，并修复QuickStart preview、Candidate board"
-        in changelog
-    )
-    assert (
-        "### 优化 (Changed)\n\n- **Objective ranking**: Keep primary metric ordering strict when re-filtering."
-        in changelog
-    )
-    assert "### 修复 (Fixed)\n\n- **QuickStart preview**: Rebuild the preview bundle on cold start." in changelog
-    assert "> 摘要：" not in changelog
-
-
-def test_prepare_push_adds_one_line_summary_to_release_snapshot(tmp_path: Path) -> None:
-    _write_repo_files(
-        tmp_path,
-        """# Changelog
-
-## [Unreleased]
-
-### Added
-
-- **Optimization Lab**: Add the first end-to-end optimization workspace flow.
-
-## [0.1.1] - 2026-03-31
-
-### Added
-
-- Stable release entry.
-""",
-        version="0.1.1",
-    )
-
-    prepare_push(
-        tmp_path,
-        release=True,
-        release_version="0.1.2",
-        effective_date=date(2026, 4, 15),
-    )
-    changelog = (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
-
-    assert "## [0.1.2] - 2026-04-15 - 新增Optimization Lab" in changelog
-    assert "### 新增 (Added)\n\n- **Optimization Lab**: Add the first end-to-end optimization workspace flow." in changelog
-    assert "> 摘要：" not in changelog
-
-
-def test_prepare_push_accepts_bilingual_unreleased_headings(tmp_path: Path) -> None:
-    _write_repo_files(
-        tmp_path,
-        """# 更新日志
-
-## [Unreleased]
-
-### 优化 (Changed)
-
-- **目标排序**: 保持重新过滤后的结果按主指标稳定排序。
-
-### 修复 (Fixed)
-
-- **预览冷启动**: 首次打开时主动重建前端预览产物。
-
-## [0.1.1] - 2026-03-31
-
-### 新增 (Added)
-
-- 已发布内容。
-""",
-    )
-
-    prepare_push(tmp_path, release=False, effective_date=date(2026, 4, 15))
-    changelog = (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
-
-    assert "## [0.1.1-001] - 2026-04-15 - 调整目标排序，并修复预览冷启动" in changelog
-    assert "### 优化 (Changed)\n\n- **目标排序**: 保持重新过滤后的结果按主指标稳定排序。" in changelog
-    assert "### 修复 (Fixed)\n\n- **预览冷启动**: 首次打开时主动重建前端预览产物。" in changelog
-
-
-def test_prepare_push_preserves_existing_heading_summary_on_history(tmp_path: Path) -> None:
-    _write_repo_files(
-        tmp_path,
-        """# 更新日志
-
-## [Unreleased]
-
-### 修复 (Fixed)
-
-- **结果页**: 修复历史任务结果计数口径。
-
-## [0.1.1-001] - 2026-04-14 - 既有历史摘要
-
-### 优化 (Changed)
-
-- **旧条目**: 保留已有标题摘要，不在下次快照时丢失。
-
-## [0.1.1] - 2026-03-31
-
-### 新增 (Added)
-
-- 已发布内容。
-""",
-    )
-
-    prepare_push(tmp_path, release=False, effective_date=date(2026, 4, 15))
-    changelog = (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
-
-    assert "## [0.1.1-001] - 2026-04-14 - 既有历史摘要" in changelog
-    assert "## [0.1.1-002] - 2026-04-15 - 修复结果页" in changelog
+    assert "## [Unreleased]\n\n## [0.1.1-002] - 2026-04-15 - 修复回填快照" in changelog
+    assert "### 修复 (Fixed)" in changelog

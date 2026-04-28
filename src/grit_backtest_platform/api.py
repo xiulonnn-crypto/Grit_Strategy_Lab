@@ -12,7 +12,7 @@ from typing import Any, Mapping
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from ._version import __version__
 from .fallback_provider import ProviderExecutionSignal, provider_access_tier
@@ -27,6 +27,12 @@ from .models import (
     CashLegResponseModel,
     CashLegUpdateRequest,
     CompositionCreateRequest,
+    CompositionAllocationJobCreateRequest,
+    CompositionAllocationJobResponseModel,
+    CompositionBacktestOrderNettingModel,
+    CompositionBacktestOrderPageModel,
+    CompositionBacktestRunCreateRequest,
+    CompositionBacktestRunResponseModel,
     CompositionDetailResponseModel,
     CompositionListItemModel,
     CompositionPreviewRequest,
@@ -40,6 +46,7 @@ from .models import (
     OptimizationCandidateCreateRequest,
     OptimizationJobConstraintUpdateRequest,
     OptimizationJobCreateRequest,
+    ParameterVersionRestoreRequest,
     ResumeOptimizationJobRequest,
     PromoteTrialRequest,
     PrepareConfirmationRequest,
@@ -1053,6 +1060,14 @@ def create_app(
     def patch_strategy(strategy_id: str, payload: StrategyUpdateRequest):
         return invoke(service.update_strategy, strategy_id, payload)
 
+    @app.post('/strategies/{strategy_id}/parameter-versions/{parameter_version_id}/restore')
+    def restore_strategy_parameter_version(
+        strategy_id: str,
+        parameter_version_id: str,
+        payload: ParameterVersionRestoreRequest,
+    ):
+        return invoke(service.restore_strategy_parameter_version, strategy_id, parameter_version_id, payload)
+
     @app.post('/strategy-creation-sessions')
     def create_creation_session(payload: CreateCreationSessionRequest | None = None):
         return invoke(service.create_creation_session, payload or CreateCreationSessionRequest())
@@ -1153,6 +1168,69 @@ def create_app(
     @app.patch('/compositions/{composition_id}', response_model=CompositionDetailResponseModel)
     def update_composition(composition_id: str, payload: CompositionUpdateRequest):
         return invoke(service.update_composition, composition_id, payload)
+
+    @app.post('/compositions/{composition_id}/backtest-runs', response_model=CompositionBacktestRunResponseModel)
+    def create_composition_backtest_run(composition_id: str, payload: CompositionBacktestRunCreateRequest):
+        return invoke(service.create_composition_backtest_run, composition_id, payload)
+
+    @app.get('/compositions/{composition_id}/backtest-runs/{run_id}', response_model=CompositionBacktestRunResponseModel)
+    def composition_backtest_run_detail(composition_id: str, run_id: str):
+        return invoke(service.get_composition_backtest_run, composition_id, run_id)
+
+    @app.get('/compositions/{composition_id}/backtest-runs/{run_id}/orders', response_model=CompositionBacktestOrderPageModel)
+    def composition_backtest_orders(
+        composition_id: str,
+        run_id: str,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=100, ge=1, le=500),
+        symbol: str | None = Query(default=None),
+    ):
+        return invoke(
+            service.get_composition_backtest_orders,
+            composition_id,
+            run_id,
+            page=page,
+            page_size=page_size,
+            symbol=symbol,
+        )
+
+    @app.get('/compositions/{composition_id}/backtest-runs/{run_id}/orders/{order_id}/netting', response_model=CompositionBacktestOrderNettingModel)
+    def composition_backtest_order_netting(composition_id: str, run_id: str, order_id: str):
+        return invoke(service.get_composition_backtest_order_netting, composition_id, run_id, order_id)
+
+    @app.get('/compositions/{composition_id}/backtest-runs/{run_id}/orders/export')
+    def composition_backtest_orders_export(
+        composition_id: str,
+        run_id: str,
+        format: str = Query(default='csv', pattern='^(csv|xlsx)$'),
+        symbol: str | None = Query(default=None),
+    ):
+        payload = invoke(
+            service.export_composition_backtest_orders,
+            composition_id,
+            run_id,
+            export_format=format,
+            symbol=symbol,
+        )
+        if isinstance(payload, Mapping) and payload.get("status") == "not_supported":
+            return JSONResponse(status_code=501, content=dict(payload))
+        raw_content = payload.get("content", "") if isinstance(payload, Mapping) else payload
+        content = raw_content if isinstance(raw_content, (bytes, bytearray)) else str(raw_content)
+        filename = str(payload.get("filename", f"{run_id}-orders.csv")) if isinstance(payload, Mapping) else f"{run_id}-orders.csv"
+        media_type = str(payload.get("media_type", "text/csv; charset=utf-8")) if isinstance(payload, Mapping) else "text/csv; charset=utf-8"
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.post('/compositions/{composition_id}/allocation-jobs', response_model=CompositionAllocationJobResponseModel)
+    def create_composition_allocation_job(composition_id: str, payload: CompositionAllocationJobCreateRequest):
+        return invoke(service.create_composition_allocation_job, composition_id, payload)
+
+    @app.get('/compositions/{composition_id}/allocation-jobs/{job_id}', response_model=CompositionAllocationJobResponseModel)
+    def composition_allocation_job_detail(composition_id: str, job_id: str):
+        return invoke(service.get_composition_allocation_job, composition_id, job_id)
 
     @app.get('/optimization-jobs')
     def list_optimization_jobs():

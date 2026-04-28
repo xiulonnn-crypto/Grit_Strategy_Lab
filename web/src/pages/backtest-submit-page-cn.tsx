@@ -52,7 +52,6 @@ const TEXT = {
   singleSymbolDirect: '不适用（单标的）',
 } as const;
 
-const DEFAULT_START_DATE = '2016-03-24';
 const DEFAULT_END_DATE = '2026-03-24';
 
 function formatDate(date: Date): string {
@@ -60,6 +59,14 @@ function formatDate(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+function getPresetRange(years: number | null | undefined): { startDate: string; endDate: string } {
+  const safeYears = [10, 20, 30].includes(Number(years)) ? Number(years) : 10;
+  const end = new Date(DEFAULT_END_DATE);
+  const start = new Date(end);
+  start.setFullYear(end.getFullYear() - safeYears);
+  return { startDate: formatDate(start), endDate: DEFAULT_END_DATE };
 }
 
 function readString(value: unknown): string | null {
@@ -124,9 +131,11 @@ function KeyValue({ label, value }: { label: string; value: string }): JSX.Eleme
 }
 
 export function BacktestSubmitPageCn({
+  periodYears,
   strategyId,
   sourceRunId,
 }: {
+  periodYears?: number | null;
   strategyId: string;
   sourceRunId?: string | null;
 }): JSX.Element {
@@ -137,8 +146,9 @@ export function BacktestSubmitPageCn({
   const [sourceRunError, setSourceRunError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [startDate, setStartDate] = useState(DEFAULT_START_DATE);
-  const [endDate, setEndDate] = useState(DEFAULT_END_DATE);
+  const initialRange = getPresetRange(periodYears);
+  const [startDate, setStartDate] = useState(initialRange.startDate);
+  const [endDate, setEndDate] = useState(initialRange.endDate);
 
   useEffect(() => {
     let cancelled = false;
@@ -167,6 +177,15 @@ export function BacktestSubmitPageCn({
       cancelled = true;
     };
   }, [api, strategyId]);
+
+  useEffect(() => {
+    if (sourceRunId) {
+      return;
+    }
+    const range = getPresetRange(periodYears);
+    setStartDate(range.startDate);
+    setEndDate(range.endDate);
+  }, [periodYears, sourceRunId]);
 
   useEffect(() => {
     if (!sourceRunId) {
@@ -220,11 +239,9 @@ export function BacktestSubmitPageCn({
     : TEXT.waitingConfirm;
 
   function applyPreset(years: number): void {
-    const end = new Date(DEFAULT_END_DATE);
-    const start = new Date(end);
-    start.setFullYear(end.getFullYear() - years);
-    setStartDate(formatDate(start));
-    setEndDate(DEFAULT_END_DATE);
+    const range = getPresetRange(years);
+    setStartDate(range.startDate);
+    setEndDate(range.endDate);
   }
 
   function validateDates(): boolean {

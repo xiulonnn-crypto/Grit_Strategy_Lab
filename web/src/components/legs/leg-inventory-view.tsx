@@ -40,6 +40,11 @@ type LegInventoryViewProps = {
 type InventoryTypeFilter = 'all' | 'strategy' | 'asset' | 'cash';
 type LegStatusFilter = 'all' | 'latest_version' | 'pending_update' | 'referenced' | 'unreferenced' | 'orphan';
 
+type PendingStrategyVersionCopy = {
+  source: ApiLegInventoryRow;
+  target: ApiLegInventoryRow;
+};
+
 type RowMetricPreview = {
   primary: string;
   secondary: string;
@@ -102,7 +107,7 @@ function getLegTypeLabel(value: string): string {
 
 function getVersionStatusBadge(row: ApiLegInventoryRow): { label: string; className: string } {
   if (row.has_new_version) {
-    return { label: '待更新', className: 'leg-inventory-status leg-inventory-status--warning' };
+    return { label: '有新版本', className: 'leg-inventory-status leg-inventory-status--warning' };
   }
   return { label: '最新版本', className: 'leg-inventory-status leg-inventory-status--success' };
 }
@@ -121,18 +126,24 @@ function getReferenceSummary(row: ApiLegInventoryRow): string {
   return formatLegReferenceSummary(row.reference_summary, row.reference_count);
 }
 
+function simplifyParameterVersionLabel(strategyId: string, parameterVersionId: string): string {
+  const prefixPattern = new RegExp(`^${strategyId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-`, 'i');
+  const shortened = parameterVersionId.replace(prefixPattern, '');
+  return shortened || parameterVersionId;
+}
+
 function getDisplayLegId(row: ApiLegInventoryRow): string {
   const rawId = row.source_ref_id || row.id;
   const strategyMatch = rawId.match(/^strategy_leg::([^:]+)::(.+)$/);
   if (strategyMatch) {
-    return `${strategyMatch[1]}::${strategyMatch[2]}`;
+    return `${strategyMatch[1]} · ${simplifyParameterVersionLabel(strategyMatch[1], strategyMatch[2])}`;
   }
   if (row.leg_type === 'strategy') {
     const strategyId = typeof row.config?.strategy_id === 'string' ? row.config.strategy_id : null;
     const parameterVersionId =
       typeof row.config?.parameter_version_id === 'string' ? row.config.parameter_version_id : row.version_label;
     if (strategyId && parameterVersionId) {
-      return `${strategyId}::${parameterVersionId}`;
+      return `${strategyId} · ${simplifyParameterVersionLabel(strategyId, parameterVersionId)}`;
     }
   }
   return row.id;
@@ -253,6 +264,73 @@ function canCopyLeg(row: ApiLegInventoryRow): boolean {
   return (row.leg_type === 'asset' || row.leg_type === 'cash') && !canEditLeg(row);
 }
 
+function getRowSourceKey(row: ApiLegInventoryRow): string {
+  return String(row.source_ref_id || row.id);
+}
+
+function parseStrategyProjectionId(value: string): { strategyId: string; parameterVersionId: string } | null {
+  const match = value.match(/^strategy_leg::([^:]+)::(.+)$/);
+  if (!match) {
+    return null;
+  }
+  return {
+    strategyId: match[1],
+    parameterVersionId: match[2],
+  };
+}
+
+function getStrategyId(row: ApiLegInventoryRow): string | null {
+  const configStrategyId = row.config?.strategy_id;
+  if (typeof configStrategyId === 'string' && configStrategyId.trim()) {
+    return configStrategyId.trim();
+  }
+  return parseStrategyProjectionId(getRowSourceKey(row))?.strategyId ?? null;
+}
+
+function isSameRowReference(left: ApiLegInventoryRow, right: ApiLegInventoryRow): boolean {
+  const leftSource = getRowSourceKey(left);
+  const rightSource = getRowSourceKey(right);
+  return left.id === right.id || left.id === rightSource || leftSource === right.id || leftSource === rightSource;
+}
+
+function findStrategyVersionCopyTarget(
+  row: ApiLegInventoryRow,
+  strategyRows: ApiLegInventoryRow[] = [],
+  inventoryRows: ApiLegInventoryRow[] = [],
+): ApiLegInventoryRow | null {
+  if (row.leg_type !== 'strategy' || !row.has_new_version) {
+    return null;
+  }
+  const currentRefId = getSourceIntegrityValue(row, 'current_ref_id', '');
+  const strategyId = getStrategyId(row);
+  const candidates = strategyRows.filter((candidate) => candidate.leg_type === 'strategy');
+  const target =
+    candidates.find((candidate) => currentRefId && (candidate.id === currentRefId || candidate.source_ref_id === currentRefId)) ??
+    candidates.find((candidate) => {
+      return Boolean(strategyId && getStrategyId(candidate) === strategyId && !candidate.has_new_version);
+    }) ??
+    null;
+  if (!target || isSameRowReference(row, target)) {
+    return null;
+  }
+  return inventoryRows.some((candidate) => isSameRowReference(candidate, target)) ? null : target;
+}
+
+function getStrategyVersionCopyLabel(row: ApiLegInventoryRow): string {
+  const explicitLabel = String(row.version_label ?? '').trim();
+  if (explicitLabel) {
+    return explicitLabel;
+  }
+  const strategyId = getStrategyId(row);
+  const parameterVersionId =
+    typeof row.config?.parameter_version_id === 'string'
+      ? row.config.parameter_version_id
+      : parseStrategyProjectionId(getRowSourceKey(row))?.parameterVersionId ?? '';
+  return strategyId && parameterVersionId
+    ? simplifyParameterVersionLabel(strategyId, parameterVersionId)
+    : '新版本';
+}
+
 function getMetricRecords(row: ApiLegInventoryRow): Record<string, unknown>[] {
   const config = getConfig(row);
   const summary = getSummary(row);
@@ -280,6 +358,19 @@ function formatPctPoint(value: number | null, digits = 2): string {
 
 function formatSignedFraction(value: number | null): string {
   return formatPercent(normalizePercentFraction(value));
+}
+
+function formatStrategyCoreParameters(
+  annualized: number | null,
+  drawdown: number | null,
+  sharpe: number | null,
+): string {
+  const drawdownFraction = drawdown === null ? null : -Math.abs(normalizePercentFraction(drawdown) ?? 0);
+  return [
+    `年化 ${formatSignedFraction(annualized)}`,
+    `回撤 ${formatSignedFraction(drawdownFraction)}`,
+    sharpe === null ? '夏普 n/a' : `夏普 ${sharpe.toFixed(2)}`,
+  ].join(' | ');
 }
 
 function formatSourceValue(value?: string | null): string | null {
@@ -381,13 +472,12 @@ function getPitSnapshotPreview(row: ApiLegInventoryRow): PitSnapshotPreview {
 function getMetricPreview(row: ApiLegInventoryRow): RowMetricPreview {
   const records = getMetricRecords(row);
   if (row.leg_type === 'strategy') {
-    const annualized = readNumber(records, ['annualized_return', 'cagr', 'annualized_return_pct']);
-    const drawdown = readNumber(records, ['max_drawdown', 'max_drawdown_pct']);
-    const sharpe = readNumber(records, ['sharpe', 'oos_sharpe']);
-    const drawdownFraction = drawdown === null ? null : -Math.abs(normalizePercentFraction(drawdown) ?? 0);
+    const annualized = readNumber(records, ['annualized_return', 'cagr', 'oos_annualized_return', 'annualized_return_pct']);
+    const drawdown = readNumber(records, ['max_drawdown', 'oos_max_drawdown', 'max_drawdown_pct']);
+    const sharpe = readNumber(records, ['sharpe', 'oos_sharpe', 'out_of_sample_sharpe']);
     return {
-      primary: `年化 ${formatSignedFraction(annualized)} | 回撤 ${formatSignedFraction(drawdownFraction)}`,
-      secondary: sharpe === null ? 'Sharpe n/a' : `Sharpe ${sharpe.toFixed(2)}`,
+      primary: formatStrategyCoreParameters(annualized, drawdown, sharpe),
+      secondary: '核心参数',
       anchor: readString(records, ['latest_run_id', 'run_id']) ?? row.proof_label ?? '回测锚点待补',
     };
   }
@@ -477,16 +567,20 @@ function buildSparklinePoints(row: ApiLegInventoryRow): string {
 }
 
 function LegDetailDrawer({
+  copyVersionTarget,
   onArchiveCandidate,
   onClose,
   onCopyCandidate,
   onNavigateToSource,
+  onRequestCopyNewVersion,
   row,
 }: {
+  copyVersionTarget?: ApiLegInventoryRow | null;
   onArchiveCandidate: (row: ApiLegInventoryRow) => Promise<void>;
   onClose: () => void;
   onCopyCandidate: (row: ApiLegInventoryRow) => void;
   onNavigateToSource: (row: ApiLegInventoryRow) => void;
+  onRequestCopyNewVersion: (source: ApiLegInventoryRow, target: ApiLegInventoryRow) => void;
   row: ApiLegInventoryRow;
 }): JSX.Element {
   const displayName = formatLegDisplayName({
@@ -605,6 +699,11 @@ function LegDetailDrawer({
           {canCopyLeg(row) ? (
             <button className="ghost-button" onClick={() => onCopyCandidate(row)} type="button">
               复制
+            </button>
+          ) : null}
+          {copyVersionTarget ? (
+            <button className="ghost-button" onClick={() => onRequestCopyNewVersion(row, copyVersionTarget)} type="button">
+              复制新版本
             </button>
           ) : null}
           {row.reference_count <= 0 ? (
@@ -997,6 +1096,7 @@ export function LegInventoryView({
   const [detailRowId, setDetailRowId] = useState<string | null>(null);
   const [editRowId, setEditRowId] = useState<string | null>(null);
   const [pendingArchiveRow, setPendingArchiveRow] = useState<ApiLegInventoryRow | null>(null);
+  const [pendingStrategyVersionCopy, setPendingStrategyVersionCopy] = useState<PendingStrategyVersionCopy | null>(null);
   const [archivingRowId, setArchivingRowId] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const deferredSearch = useDeferredValue(search.trim().toLowerCase());
@@ -1008,9 +1108,12 @@ export function LegInventoryView({
   const orphanCount = rows.filter((row) => row.is_orphan).length;
   const detailRow = detailRowId ? rows.find((row) => row.id === detailRowId) ?? null : null;
   const editRow = editRowId ? rows.find((row) => row.id === editRowId) ?? null : null;
+  const detailCopyVersionTarget = detailRow
+    ? findStrategyVersionCopyTarget(detailRow, strategyRows ?? [], rows)
+    : null;
   const statusFilters: Array<{ value: LegStatusFilter; label: string }> = [
     { value: 'latest_version', label: '最新版本' },
-    { value: 'pending_update', label: '待更新' },
+    { value: 'pending_update', label: '有新版本' },
     { value: 'referenced', label: '已被引用' },
     { value: 'unreferenced', label: '未引用' },
     { value: 'orphan', label: '孤儿腿' },
@@ -1104,6 +1207,21 @@ export function LegInventoryView({
 
   async function archiveCandidate(row: ApiLegInventoryRow): Promise<void> {
     setPendingArchiveRow(row);
+  }
+
+  function requestCopyNewVersion(source: ApiLegInventoryRow, target: ApiLegInventoryRow): void {
+    setPendingStrategyVersionCopy({ source, target });
+  }
+
+  function confirmCopyNewVersion(): void {
+    const pending = pendingStrategyVersionCopy;
+    if (!pending) {
+      return;
+    }
+    onSaveStrategy(pending.target);
+    setPendingStrategyVersionCopy(null);
+    setDetailRowId((current) => (current === pending.source.id ? null : current));
+    setToastMessage(`${pending.target.name} ${getStrategyVersionCopyLabel(pending.target)} 已生成新的策略腿映射。`);
   }
 
   async function confirmArchiveCandidate(): Promise<void> {
@@ -1346,6 +1464,7 @@ export function LegInventoryView({
                   });
                   const pit = getPitSnapshotPreview(row);
                   const metrics = getMetricPreview(row);
+                  const copyVersionTarget = findStrategyVersionCopyTarget(row, strategyRows ?? [], rows);
                   return (
                     <tr
                       className="leg-inventory-row"
@@ -1434,6 +1553,18 @@ export function LegInventoryView({
                               type="button"
                             >
                               复制
+                            </button>
+                          ) : null}
+                          {copyVersionTarget ? (
+                            <button
+                              className="ghost-button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                requestCopyNewVersion(row, copyVersionTarget);
+                              }}
+                              type="button"
+                            >
+                              复制新版本
                             </button>
                           ) : null}
                           {row.leg_type === 'asset' && assetSourcePath ? (
@@ -1532,10 +1663,12 @@ export function LegInventoryView({
       />
       {detailRow ? (
         <LegDetailDrawer
+          copyVersionTarget={detailCopyVersionTarget}
           onArchiveCandidate={archiveCandidate}
           onClose={() => setDetailRowId(null)}
           onCopyCandidate={openCopyDrawer}
           onNavigateToSource={navigateToSource}
+          onRequestCopyNewVersion={requestCopyNewVersion}
           row={detailRow}
         />
       ) : null}
@@ -1547,6 +1680,39 @@ export function LegInventoryView({
           onUpdateStrategy={saveStrategyEdit}
           row={editRow}
         />
+      ) : null}
+      {pendingStrategyVersionCopy ? (
+        <div className="leg-inventory-confirm-shell" role="presentation">
+          <div aria-label="确认复制新版本" className="leg-inventory-confirm" role="dialog">
+            <div className="leg-inventory-confirm__copy">
+              <p className="page-heading__eyebrow">版本映射确认</p>
+              <h2>复制新版本</h2>
+              <p>
+                检测到底层策略已更新至 {getStrategyVersionCopyLabel(pendingStrategyVersionCopy.target)}，是否为此策略腿生成新的版本映射？
+              </p>
+            </div>
+            <div className="leg-inventory-confirm__summary">
+              <span>{getDisplayLegId(pendingStrategyVersionCopy.source)}</span>
+              <strong>{pendingStrategyVersionCopy.target.name} · {getStrategyVersionCopyLabel(pendingStrategyVersionCopy.target)}</strong>
+            </div>
+            <div className="leg-inventory-confirm__actions">
+              <button
+                className="ghost-button"
+                onClick={() => setPendingStrategyVersionCopy(null)}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                className="primary-button"
+                onClick={confirmCopyNewVersion}
+                type="button"
+              >
+                确认生成
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
       {pendingArchiveRow ? (
         <div className="leg-inventory-confirm-shell" role="presentation">

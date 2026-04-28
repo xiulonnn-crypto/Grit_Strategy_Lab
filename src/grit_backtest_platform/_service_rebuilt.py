@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from copy import deepcopy
+import csv
 import hashlib
 from itertools import product
 import json
@@ -15,9 +16,12 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 from uuid import uuid4
+from xml.sax.saxutils import escape as xml_escape
+import zipfile
 
 from ._runtime_memory import read_runtime_memory_status
 from .backtest_metrics import build_consistency_score
@@ -1262,6 +1266,51 @@ def _summarize_revision_description(
     return fallback or None
 
 
+def _normalize_strategy_snapshot_descriptive_fields(
+    snapshot: Mapping[str, Any],
+    top_level_fallback: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized = dict(snapshot or {})
+    fallback = dict(top_level_fallback or {})
+    strategy_type = _format_strategy_value(
+        normalized.get("strategy_type") or fallback.get("strategy_type")
+    ).upper()
+    if not strategy_type:
+        return normalized
+    current_description = _format_strategy_value(normalized.get("strategy_description"))
+    if strategy_type != "GRID":
+        return normalized
+    if current_description and not _looks_like_generated_grid_description(current_description):
+        return normalized
+    top_level = {
+        "strategy_type": strategy_type,
+        "universe_name": normalized.get("universe_name") or fallback.get("universe_name"),
+        "rebalance_frequency": normalized.get("rebalance_frequency") or fallback.get("rebalance_frequency"),
+    }
+    description = _summarize_revision_description(
+        strategy_type,
+        top_level,
+        normalized,
+        fallback=_format_strategy_value(normalized.get("strategy_description")) or None,
+    )
+    if description:
+        normalized["strategy_description"] = description
+    return normalized
+
+
+def _looks_like_generated_grid_description(description: str) -> bool:
+    text = _format_strategy_value(description)
+    return (
+        text.startswith("本金")
+        and "执行网格交易" in text
+        and "初始仓位" in text
+        and "每下跌" in text
+        and "买入" in text
+        and "每上涨" in text
+        and "卖出" in text
+    )
+
+
 def _summarize_revision_trading_logic(
     strategy_type: str,
     top_level: Mapping[str, Any],
@@ -1308,8 +1357,21 @@ def _normalize_parameter_history(
         record["version_number"] = version_number
         record["parameter_version_id"] = str(record.get("parameter_version_id") or _parameter_version_id(strategy_id, version_number))
         record["parameters"] = dict(record.get("parameters") or fallback_parameters)
+        record.setdefault("comment", None)
+        record.setdefault("decision_note", record.get("comment") or "")
+        record.setdefault("change_summary", "")
+        record.setdefault("source", {"kind": "legacy"})
+        record.setdefault("alternative_versions", [])
         normalized.append(record)
-    return normalized
+    return sorted(
+        normalized,
+        key=lambda item: (
+            int(item.get("version_number") or 0),
+            int(item.get("revision") or 0),
+            str(item.get("created_at") or ""),
+            str(item.get("parameter_version_id") or ""),
+        ),
+    )
 
 
 def _build_parameter_delta(
@@ -1323,6 +1385,185 @@ def _build_parameter_delta(
         if baseline_value != candidate_value:
             delta[key] = candidate_value
     return delta
+
+
+def _parameter_summary_label(key: str) -> str:
+    normalized_key = str(key or "").strip()
+    explicit = confirmation_field_label(normalized_key, normalized_key)
+    if explicit and explicit != normalized_key:
+        return explicit
+    for template in STRATEGY_TEMPLATES.values():
+        for field in template.fields:
+            if field.key == normalized_key:
+                return field.label
+    top_level_labels = {
+        "strategy_type": "策略类型",
+        "universe_name": "股票池",
+        "rebalance_frequency": "再平衡频次",
+    }
+    return top_level_labels.get(normalized_key, normalized_key.replace("_", " "))
+
+
+def _parameter_summary_rank(key: str) -> int:
+    normalized_key = str(key or "").strip()
+    top_level_rank = {
+        "strategy_type": 0,
+        "universe_name": 1,
+        "rebalance_frequency": 2,
+    }
+    if normalized_key in top_level_rank:
+        return top_level_rank[normalized_key]
+    best_rank = 10_000
+    for template in STRATEGY_TEMPLATES.values():
+        for index, field in enumerate(template.fields, start=10):
+            if field.key == normalized_key:
+                best_rank = min(best_rank, index)
+    return best_rank
+
+
+def _format_parameter_summary_value(value: Any) -> str:
+    if value in (None, "", []):
+        return "空"
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else f"{value:g}"
+    if isinstance(value, Mapping):
+        return "已配置" if value else "空"
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return f"{len(value)}项"
+    text = str(value).strip()
+    return text if len(text) <= 18 else f"{text[:18]}..."
+
+
+def _clean_version_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _coerce_version_source(value: Any, *, default_kind: str = "legacy") -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        source = {str(key): item for key, item in value.items() if item not in (None, "", [])}
+    else:
+        source = {}
+    source["kind"] = str(source.get("kind") or default_kind).strip() or default_kind
+    return source
+
+
+def _coerce_alternative_versions(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    alternatives: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, Mapping):
+            alternatives.append(dict(item))
+    return alternatives
+
+
+def _parameter_change_summary(
+    previous_parameters: Mapping[str, Any] | None,
+    parameters: Mapping[str, Any],
+    *,
+    version_number: int,
+) -> str:
+    previous = dict(previous_parameters or {})
+    current = dict(parameters or {})
+    if not previous:
+        return "初始版本记录" if version_number <= 1 else "由历史参数生成新版本"
+    delta = _build_parameter_delta(previous, current)
+    if not delta:
+        return "参数保持不变"
+    keys = sorted(
+        delta,
+        key=lambda key: (
+            _parameter_summary_rank(key),
+            _parameter_summary_label(key),
+            key,
+        ),
+    )
+    changes = [
+        (
+            _parameter_summary_label(key),
+            _format_parameter_summary_value(previous.get(key)),
+            _format_parameter_summary_value(current.get(key)),
+        )
+        for key in keys
+    ]
+    return "\n".join(f"{label} {old}→{new}" for label, old, new in changes)
+
+
+def _parameter_history_fingerprint(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    fingerprint: list[dict[str, Any]] = []
+    for index, item in enumerate(history, start=1):
+        fingerprint.append(
+            {
+                "version_number": int(item.get("version_number") or index),
+                "parameter_version_id": str(item.get("parameter_version_id") or ""),
+                "revision": int(item.get("revision") or 1),
+                "created_at": item.get("created_at"),
+                "comment": item.get("comment") if item.get("comment") is not None else None,
+                "decision_note": _clean_version_text(item.get("decision_note") or item.get("comment")),
+                "change_summary": _clean_version_text(item.get("change_summary")),
+                "source": _coerce_version_source(item.get("source"), default_kind="legacy"),
+                "alternative_versions": _coerce_alternative_versions(item.get("alternative_versions")),
+                "parameters": dict(item.get("parameters") or {}),
+            }
+        )
+    return fingerprint
+
+
+def _parameter_history_needs_persistence(
+    before: list[dict[str, Any]],
+    after: list[dict[str, Any]],
+) -> bool:
+    return _parameter_history_fingerprint(before) != _parameter_history_fingerprint(after)
+
+
+def _enrich_parameter_history_entries(
+    strategy_id: str,
+    history: list[dict[str, Any]],
+    *,
+    current_version: int,
+    lifecycle_status: Any,
+) -> list[dict[str, Any]]:
+    current_parameter_version_id = _parameter_version_id(strategy_id, current_version)
+    archived = str(lifecycle_status or "").upper() == "ARCHIVED"
+    enriched: list[dict[str, Any]] = []
+    previous_parameters: dict[str, Any] = {}
+    for item in history:
+        record = dict(item)
+        version_number = int(record.get("version_number") or len(enriched) + 1)
+        parameter_version_id = str(record.get("parameter_version_id") or _parameter_version_id(strategy_id, version_number))
+        parameters = dict(record.get("parameters") or {})
+        decision_note = _clean_version_text(record.get("decision_note") or record.get("comment"))
+        change_summary = _parameter_change_summary(
+            previous_parameters,
+            parameters,
+            version_number=version_number,
+        )
+        source = _coerce_version_source(record.get("source"), default_kind="legacy")
+        alternatives = _coerce_alternative_versions(record.get("alternative_versions"))
+        record.update(
+            {
+                "version_number": version_number,
+                "parameter_version_id": parameter_version_id,
+                "parameters": parameters,
+                "comment": record.get("comment") if record.get("comment") is not None else (decision_note or None),
+                "decision_note": decision_note,
+                "change_summary": change_summary,
+                "source": source,
+                "alternative_versions": alternatives,
+                "rollbackable": bool(
+                    parameters
+                    and not archived
+                    and parameter_version_id != current_parameter_version_id
+                ),
+            }
+        )
+        enriched.append(record)
+        previous_parameters = parameters
+    return enriched
 
 
 class BacktestPlatformService:
@@ -1407,10 +1648,20 @@ class BacktestPlatformService:
 
     def _decode_strategy_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
         strategy = dict(row)
-        strategy["parameters"] = loads(strategy.pop("parameters_json", None), {})
+        raw_parameters = loads(strategy.pop("parameters_json", None), {})
+        strategy["parameters"] = _normalize_strategy_snapshot_descriptive_fields(raw_parameters, strategy)
         strategy["confirmation_fields"] = loads(strategy.pop("confirmation_fields_json", None), {})
+        description = _format_strategy_value(strategy["parameters"].get("strategy_description"))
+        if description:
+            strategy["description"] = description
         strategy["allowed_actions"] = loads(strategy.pop("allowed_actions_json", None), [])
+        legacy_parameter_history = loads(strategy.pop("parameter_history_json", None), [])
         strategy["name"] = _display_strategy_name(strategy.get("name"), strategy.get("parameters"))
+        confirmation_description = _format_strategy_value(
+            _entry_index(strategy["confirmation_fields"]).get("strategy_description", {}).get("value")
+        )
+        if description and confirmation_description != description:
+            strategy["confirmation_fields"] = self._seed_revision_confirmation_fields(strategy)
         strategy["current_parameter_version"] = int(strategy.get("current_parameter_version") or 1)
         version_rows = self._strategy_parameter_version_rows(str(strategy["id"]))
         if version_rows:
@@ -1424,7 +1675,14 @@ class BacktestPlatformService:
                     "revision": int(version_row.get("revision") or 1),
                     "created_at": version_row.get("created_at"),
                     "comment": version_row.get("comment"),
-                    "parameters": loads(version_row.get("parameters_json"), strategy["parameters"]),
+                    "decision_note": version_row.get("decision_note") or version_row.get("comment") or "",
+                    "change_summary": version_row.get("change_summary") or "",
+                    "source": loads(version_row.get("source_json"), {"kind": "legacy"}),
+                    "alternative_versions": loads(version_row.get("alternative_versions_json"), []),
+                    "parameters": _normalize_strategy_snapshot_descriptive_fields(
+                        loads(version_row.get("parameters_json"), strategy["parameters"]),
+                        strategy,
+                    ),
                 }
                 for index, version_row in enumerate(version_rows, start=1)
             ]
@@ -1433,16 +1691,26 @@ class BacktestPlatformService:
                 max(int(item["version_number"]) for item in strategy["parameter_history"]),
             )
         else:
-            strategy["parameter_history"] = loads(strategy.pop("parameter_history_json", None), [])
             strategy["parameter_history"] = _normalize_parameter_history(
                 str(strategy["id"]),
-                list(strategy["parameter_history"]),
+                list(legacy_parameter_history),
                 strategy["parameters"],
                 strategy["current_parameter_version"],
             )
-        for entry in strategy["parameter_history"]:
-            entry.setdefault("comment", None)
         strategy["current_parameter_version_id"] = _parameter_version_id(str(strategy["id"]), strategy["current_parameter_version"])
+        raw_parameter_history = [dict(item) for item in strategy["parameter_history"]]
+        strategy["parameter_history"] = _enrich_parameter_history_entries(
+            str(strategy["id"]),
+            strategy["parameter_history"],
+            current_version=strategy["current_parameter_version"],
+            lifecycle_status=strategy.get("lifecycle_status"),
+        )
+        if _parameter_history_needs_persistence(raw_parameter_history, strategy["parameter_history"]):
+            self._write_strategy_record(
+                row,
+                parameter_history=strategy["parameter_history"],
+                current_version=strategy["current_parameter_version"],
+            )
         return strategy
 
     def _seed_revision_confirmation_fields(self, base_strategy: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -1576,7 +1844,13 @@ class BacktestPlatformService:
 
     def _decode_strategy_list_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
         strategy = dict(row)
-        strategy["parameters"] = loads(strategy.pop("parameters_json", None), {})
+        strategy["parameters"] = _normalize_strategy_snapshot_descriptive_fields(
+            loads(strategy.pop("parameters_json", None), {}),
+            strategy,
+        )
+        description = _format_strategy_value(strategy["parameters"].get("strategy_description"))
+        if description:
+            strategy["description"] = description
         strategy["name"] = _display_strategy_name(strategy.get("name"), strategy.get("parameters"))
         strategy["current_parameter_version"] = int(strategy.get("current_parameter_version") or 1)
         strategy["current_parameter_version_id"] = _parameter_version_id(
@@ -1758,6 +2032,10 @@ class BacktestPlatformService:
         parameters: Mapping[str, Any],
         created_at: str,
         comment: str | None = None,
+        change_summary: str | None = None,
+        decision_note: str | None = None,
+        source: Mapping[str, Any] | None = None,
+        alternative_versions: list[dict[str, Any]] | None = None,
     ) -> None:
         self.storage.insert_json_row(
             "strategy_parameter_versions",
@@ -1767,6 +2045,10 @@ class BacktestPlatformService:
                 "version_number": version_number,
                 "revision": revision,
                 "comment": comment,
+                "change_summary": change_summary,
+                "decision_note": decision_note,
+                "source_json": dumps(dict(source or {"kind": "legacy"})),
+                "alternative_versions_json": dumps(list(alternative_versions or [])),
                 "parameters_json": dumps(dict(parameters)),
                 "created_at": created_at,
             },
@@ -2141,6 +2423,10 @@ class BacktestPlatformService:
                 parameters=entry.get("parameters") or {},
                 created_at=str(entry.get("created_at") or row["updated_at"]),
                 comment=entry.get("comment") if entry.get("comment") is not None else (comment if version_number == current_version else None),
+                change_summary=entry.get("change_summary"),
+                decision_note=entry.get("decision_note"),
+                source=entry.get("source") if isinstance(entry.get("source"), Mapping) else None,
+                alternative_versions=_coerce_alternative_versions(entry.get("alternative_versions")),
             )
 
     def _cleanup_path_within_workspace(self, path: Path) -> None:
@@ -2299,6 +2585,8 @@ class BacktestPlatformService:
                 "trade_audit",
             } else {}
             run[decoded_name] = loads(run.pop(column, None), default)
+        if isinstance(run.get("parameter_snapshot"), dict):
+            run["parameter_snapshot"] = _normalize_strategy_snapshot_descriptive_fields(run["parameter_snapshot"])
         run["is_permanent"] = bool(int(run.get("is_permanent") or 0))
         return run
 
@@ -2348,6 +2636,7 @@ class BacktestPlatformService:
         parameter_snapshot = loads(row.get("parameter_snapshot_json"), {})
         if not isinstance(parameter_snapshot, dict):
             parameter_snapshot = {}
+        parameter_snapshot = _normalize_strategy_snapshot_descriptive_fields(parameter_snapshot)
         warnings = loads(row.get("warnings_json"), [])
         if not isinstance(warnings, list):
             warnings = []
@@ -2545,10 +2834,16 @@ class BacktestPlatformService:
 
     def _parameter_snapshot_for_version(self, strategy: Mapping[str, Any], parameter_version_id: str | None = None) -> dict[str, Any]:
         if not parameter_version_id:
-            return dict(strategy.get("parameters") or {})
+            return _normalize_strategy_snapshot_descriptive_fields(
+                dict(strategy.get("parameters") or {}),
+                strategy,
+            )
         for entry in strategy.get("parameter_history", []):
             if entry.get("parameter_version_id") == parameter_version_id:
-                return dict(entry.get("parameters") or {})
+                return _normalize_strategy_snapshot_descriptive_fields(
+                    dict(entry.get("parameters") or {}),
+                    strategy,
+                )
         raise KeyError(f"Parameter version not found: {parameter_version_id}")
 
     def _resolve_expected_base_parameter_version_id(
@@ -2647,7 +2942,9 @@ class BacktestPlatformService:
         base_parameter_version_id: str | None,
     ) -> dict[str, Any]:
         strategy_parameters = dict(strategy.get("parameters") or {})
-        parameter_snapshot = dict(candidate.get("parameter_snapshot") or strategy_parameters)
+        parameter_snapshot = _normalize_strategy_snapshot_descriptive_fields(
+            dict(candidate.get("parameter_snapshot") or strategy_parameters)
+        )
         parameter_delta = _build_parameter_delta(strategy_parameters, parameter_snapshot)
         metrics = {
             str(key): float(value)
@@ -3534,6 +3831,10 @@ class BacktestPlatformService:
         if has_new_version:
             source_integrity["drift_status"] = "drifted"
             source_integrity["signature_status"] = "stale"
+            source_integrity["current_ref_id"] = _strategy_leg_inventory_id(
+                strategy_id,
+                current_parameter_version_id,
+            )
             source_integrity["alerts"] = ["A newer parameter version exists; saved compositions keep the frozen version."]
         elif is_orphan:
             source_integrity["drift_status"] = "needs_repair"
@@ -4639,6 +4940,32 @@ class BacktestPlatformService:
             if row.get("id")
         }
 
+    def _strategy_projection_row_for_source_ref(self, source_ref_id: str) -> dict[str, Any] | None:
+        parsed = _parse_strategy_leg_inventory_id(source_ref_id)
+        if parsed is None:
+            return None
+        strategy_id, parameter_version_id = parsed
+        try:
+            strategy = self.get_strategy_detail(strategy_id)
+        except Exception:
+            return None
+        version_entry = next(
+            (
+                dict(entry)
+                for entry in strategy.get("parameter_history", [])
+                if str(entry.get("parameter_version_id") or "") == parameter_version_id
+            ),
+            None,
+        )
+        if version_entry is None:
+            return None
+        return self._strategy_projection_row(
+            strategy,
+            version_entry,
+            self._completed_run_summaries_for_strategy(strategy_id),
+            self._composition_reference_counts().get(source_ref_id, 0),
+        )
+
     def _strategy_profile_defaults(self, strategy_type: str) -> tuple[float, float, float]:
         mapping = {
             "MOMENTUM": (12.0, 18.0, 14.0),
@@ -5584,11 +5911,31 @@ class BacktestPlatformService:
             if "watch" in tags or status == "WATCH":
                 alerts.append("Source is watch-only and may be limited to read-only risk budget checks.")
             current_inventory_row = current_inventory_by_ref.get(source_ref_id) or {}
+            if not current_inventory_row:
+                current_inventory_row = self._strategy_projection_row_for_source_ref(source_ref_id) or {}
             current_integrity = dict(
                 current_inventory_row.get("source_integrity")
                 or dict(leg.get("config") or {}).get("source_integrity")
                 or {}
             )
+            current_alerts = [str(item) for item in current_integrity.get("alerts") or []]
+            current_drift_status = str(current_integrity.get("drift_status") or "").lower()
+            current_signature_status = str(current_integrity.get("signature_status") or "").lower()
+            has_strategy_new_version = bool(
+                _parse_strategy_leg_inventory_id(source_ref_id)
+                and (
+                    bool(current_inventory_row.get("has_new_version"))
+                    or str(current_inventory_row.get("status") or "").upper() == "STALE"
+                    or current_drift_status in {"drifted", "version_drift", "stale"}
+                    or current_signature_status == "stale"
+                    or "newer_version_available" in tags
+                    or any("newer" in alert.lower() or "新版本" in alert for alert in current_alerts)
+                )
+            )
+            if has_strategy_new_version:
+                new_version_alert = "A newer parameter version exists; saved compositions keep the frozen version."
+                if new_version_alert not in alerts:
+                    alerts.append(new_version_alert)
             frozen_snapshot = dict(evidence.get("snapshot") or {})
             frozen_integrity = dict(dict(frozen_snapshot.get("config") or {}).get("source_integrity") or {})
             current_source_hash = str(current_integrity.get("freeze_hash") or "")
@@ -6349,7 +6696,7 @@ class BacktestPlatformService:
                 raise ValueError(f"Duplicate composition leg source is not allowed: {source_ref_id}")
             seen.add(key)
             status = str(leg.get("status") or "").upper()
-            if leg_kind == "strategy" and status != "READY":
+            if leg_kind == "strategy" and status not in {"READY", "STALE"}:
                 raise ValueError(f"Strategy leg {source_ref_id} must have an eligible completed run before saving")
             if leg_kind in {"asset", "cash"} and status not in {"ACTIVE", "READY"}:
                 raise ValueError(f"Composition leg {source_ref_id} is not active")
@@ -6685,6 +7032,19 @@ class BacktestPlatformService:
             "latest_activity_label": detail_payload.get("latest_activity_label"),
             "allowed_actions": detail_payload.get("deep_link_actions", []),
         }
+
+    def _composition_source_integrity_has_new_strategy_version(self, item: Mapping[str, Any]) -> bool:
+        source_ref_id = str(item.get("source_ref_id") or "")
+        if _parse_strategy_leg_inventory_id(source_ref_id) is None:
+            return False
+        drift_status = str(item.get("drift_status") or "").lower()
+        signature_status = str(item.get("signature_status") or "").lower()
+        alerts = [str(alert).lower() for alert in item.get("alerts") or []]
+        return (
+            drift_status in {"drifted", "version_drift", "stale"}
+            or signature_status == "stale"
+            or any("newer" in alert or "新版本" in alert for alert in alerts)
+        )
 
     def preview_composition(self, request: Any) -> dict[str, Any]:
         payload = _as_mapping(request)
@@ -7107,8 +7467,22 @@ class BacktestPlatformService:
         )
         items: list[dict[str, Any]] = []
         for row in rows:
+            composition_id = str(row.get("id") or "")
             summary = loads(row.get("summary_json"), {})
             analysis = loads(row.get("analysis_json"), {})
+            source_integrity: list[dict[str, Any]] = []
+            try:
+                source_integrity = [
+                    dict(item)
+                    for item in self.get_composition_detail(composition_id).get("source_integrity", [])
+                    if isinstance(item, Mapping)
+                ]
+            except Exception:
+                source_integrity = []
+            has_new_version = any(
+                self._composition_source_integrity_has_new_strategy_version(item)
+                for item in source_integrity
+            )
             sharpe = summary.get("sharpe")
             if sharpe is None:
                 sharpe = next(
@@ -7121,7 +7495,7 @@ class BacktestPlatformService:
                 )
             items.append(
                 {
-                    "id": str(row.get("id") or ""),
+                    "id": composition_id,
                     "name": str(row.get("name") or ""),
                     "status": str(row.get("status") or "DRAFT"),
                     "composition_score": round(_as_float(summary.get("composition_score"), 0.0), 4),
@@ -7136,6 +7510,8 @@ class BacktestPlatformService:
                         summary.get("latest_activity_label") or self._latest_activity_label(row.get("updated_at"))
                     ),
                     "allowed_actions": list(summary.get("allowed_actions") or ["open_composition_workbench"]),
+                    "has_new_version": has_new_version,
+                    "source_integrity": source_integrity,
                 }
             )
         return items
@@ -7410,6 +7786,769 @@ class BacktestPlatformService:
             updated_at=iso_now(),
             existing_leg_rows=existing_leg_rows,
         )
+
+    @staticmethod
+    def _composition_artifact_id(prefix: str, composition_id: str, idempotency_key: str) -> str:
+        digest = hashlib.sha1(f"{composition_id}|{idempotency_key}".encode("utf-8")).hexdigest()[:12]
+        return f"{prefix}_{digest}"
+
+    @staticmethod
+    def _composition_runtime_state_key(kind: str, composition_id: str, artifact_id: str) -> str:
+        return f"composition:{kind}:{composition_id}:{artifact_id}"
+
+    @staticmethod
+    def _compact_composition_request(payload: Mapping[str, Any]) -> dict[str, Any]:
+        compact: dict[str, Any] = {}
+        for key, value in payload.items():
+            if value is None:
+                continue
+            if isinstance(value, str):
+                stripped = value.strip()
+                if not stripped:
+                    continue
+                compact[str(key)] = stripped
+            else:
+                compact[str(key)] = value
+        return compact
+
+    @staticmethod
+    def _composition_run_detail_snapshot(detail: Mapping[str, Any]) -> dict[str, Any]:
+        keys = (
+            "id",
+            "name",
+            "description",
+            "status",
+            "status_label",
+            "created_at",
+            "updated_at",
+            "benchmark_definition",
+            "rebalance_frequency",
+            "cost_policy",
+            "hero_summary",
+            "kpis",
+            "weight_summary",
+            "normalized_legs",
+            "returns_preview",
+            "benchmark_series",
+            "spread_series",
+            "correlation_matrix",
+            "risk_contribution_preview",
+            "maintenance_cost_summary",
+            "return_quality_summary",
+            "rebalance_events",
+            "scenario_summary",
+            "source_evidence",
+            "source_integrity",
+            "audit_trail",
+            "composition_score",
+            "latest_activity_label",
+        )
+        return {key: deepcopy(detail.get(key)) for key in keys if key in detail}
+
+    def _composition_store_artifact_state(
+        self,
+        *,
+        kind: str,
+        composition_id: str,
+        artifact_id: str,
+        request_payload: Mapping[str, Any],
+        detail_snapshot: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        state_key = self._composition_runtime_state_key(kind, composition_id, artifact_id)
+        current = self._read_runtime_state(state_key).get("state_json")
+        if isinstance(current, Mapping) and current.get("id") == artifact_id:
+            return dict(current)
+        created_at = iso_now()
+        state = {
+            "kind": kind,
+            "id": artifact_id,
+            "composition_id": composition_id,
+            "request": dict(request_payload),
+            "detail_snapshot": dict(detail_snapshot),
+            "created_at": created_at,
+            "completed_at": created_at,
+        }
+        self._write_runtime_state(state_key, state)
+        return state
+
+    def _composition_load_artifact_state(
+        self,
+        *,
+        kind: str,
+        composition_id: str,
+        artifact_id: str,
+    ) -> dict[str, Any]:
+        state_key = self._composition_runtime_state_key(kind, composition_id, artifact_id)
+        state = self._read_runtime_state(state_key).get("state_json")
+        if not isinstance(state, Mapping) or state.get("id") != artifact_id:
+            raise KeyError(f"Composition {kind.replace('_', ' ')} not found: {artifact_id}")
+        if str(state.get("composition_id") or "") != composition_id:
+            raise KeyError(f"Composition {kind.replace('_', ' ')} not found: {artifact_id}")
+        return dict(state)
+
+    @staticmethod
+    def _composition_kpi_value(detail: Mapping[str, Any], key: str, default: float = 0.0) -> float:
+        for item in detail.get("kpis") or []:
+            if isinstance(item, Mapping) and str(item.get("key") or "") == key:
+                return _as_float(item.get("value"), default)
+        return default
+
+    @staticmethod
+    def _composition_quality_label(detail: Mapping[str, Any]) -> str:
+        quality = _as_mapping(detail.get("return_quality_summary"))
+        if bool(quality.get("fallback_used")):
+            return "proxy_from_composition_detail_preview"
+        status = str(quality.get("status") or "").lower()
+        if status in {"verified", "ready"}:
+            return "verified_from_composition_detail_preview"
+        return "limited_from_composition_detail_preview"
+
+    @staticmethod
+    def _composition_evidence_label() -> str:
+        return (
+            "Derived from saved composition preview/detail fields; this is not real broker execution history."
+        )
+
+    def _composition_backtest_warnings(self, detail: Mapping[str, Any]) -> list[str]:
+        warnings: list[str] = []
+        quality = _as_mapping(detail.get("return_quality_summary"))
+        if bool(quality.get("fallback_used")):
+            warnings.append("Return stream uses fallback/proxy evidence for at least one sleeve.")
+        for item in detail.get("source_integrity") or []:
+            if not isinstance(item, Mapping):
+                continue
+            alerts = [str(alert) for alert in item.get("alerts") or [] if str(alert).strip()]
+            warnings.extend(alerts)
+        return list(dict.fromkeys(warnings))
+
+    def create_composition_backtest_run(self, composition_id: str, request: Any) -> dict[str, Any]:
+        payload = self._compact_composition_request(_as_mapping(request))
+        detail = self.get_composition_detail(composition_id)
+        idempotency_key = str(payload.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            idempotency_key = f"{payload.get('period') or payload.get('horizon_years') or '10Y'}|{detail.get('updated_at') or iso_now()}"
+            payload["idempotency_key"] = idempotency_key
+        run_id = self._composition_artifact_id("comp_run", composition_id, idempotency_key)
+        state = self._composition_store_artifact_state(
+            kind="backtest_run",
+            composition_id=composition_id,
+            artifact_id=run_id,
+            request_payload=payload,
+            detail_snapshot=self._composition_run_detail_snapshot(detail),
+        )
+        return self._build_composition_backtest_run_payload(state)
+
+    def get_composition_backtest_run(self, composition_id: str, run_id: str) -> dict[str, Any]:
+        self._load_composition_record(composition_id)
+        state = self._composition_load_artifact_state(
+            kind="backtest_run",
+            composition_id=composition_id,
+            artifact_id=run_id,
+        )
+        return self._build_composition_backtest_run_payload(state)
+
+    def _build_composition_backtest_run_payload(self, state: Mapping[str, Any]) -> dict[str, Any]:
+        detail = _as_mapping(state.get("detail_snapshot"))
+        composition_id = str(state.get("composition_id") or detail.get("id") or "")
+        run_id = str(state.get("id") or "")
+        quality = _as_mapping(detail.get("return_quality_summary"))
+        returns_preview = list(detail.get("returns_preview") or [])
+        rebalance_events = list(detail.get("rebalance_events") or [])
+        source_integrity = list(detail.get("source_integrity") or [])
+        warnings = self._composition_backtest_warnings(detail)
+        status = "COMPLETED_WITH_WARNINGS" if warnings or bool(quality.get("fallback_used")) else "COMPLETED"
+        order_count = len(self._composition_backtest_orders_from_detail(composition_id, run_id, detail))
+        annualized_return = self._composition_kpi_value(detail, "annualized_return")
+        sharpe = self._composition_kpi_value(detail, "sharpe")
+        max_drawdown = self._composition_kpi_value(detail, "max_drawdown")
+        aligned_points = _as_int(quality.get("aligned_points"), len(returns_preview))
+        horizon_years = round(aligned_points / 12.0, 2) if aligned_points else 0.0
+        stability_verdict = (
+            "10Y stable"
+            if aligned_points >= 120 and not bool(quality.get("fallback_used"))
+            else "proxy evidence required"
+            if bool(quality.get("fallback_used"))
+            else "limited window"
+        )
+        evidence_label = self._composition_evidence_label()
+        return {
+            "id": run_id,
+            "run_id": run_id,
+            "composition_id": composition_id,
+            "status": status,
+            "created_at": str(state.get("created_at") or ""),
+            "completed_at": state.get("completed_at") or state.get("created_at"),
+            "request": dict(state.get("request") or {}),
+            "summary": {
+                "composition_name": str(detail.get("name") or ""),
+                "benchmark_label": _as_mapping(detail.get("hero_summary")).get("benchmark_label")
+                or self._composition_benchmark_label(detail.get("benchmark_definition")),
+                "horizon_years": horizon_years,
+                "annualized_return": round(annualized_return, 4),
+                "sharpe": round(sharpe, 4),
+                "max_drawdown": round(max_drawdown, 4),
+                "rebalance_event_count": len(rebalance_events),
+                "order_count": order_count,
+                "quality_label": self._composition_quality_label(detail),
+                "evidence_label": evidence_label,
+            },
+            "diagnostics": {
+                "stability_verdict": stability_verdict,
+                "metric_matrix": [
+                    {
+                        "window": "10Y" if aligned_points >= 120 else f"{aligned_points}M",
+                        "annualized_return": round(annualized_return, 4),
+                        "sharpe": round(sharpe, 4),
+                        "max_drawdown": round(max_drawdown, 4),
+                        "quality_label": self._composition_quality_label(detail),
+                    }
+                ],
+                "sleeve_contribution": list(detail.get("risk_contribution_preview") or []),
+            },
+            "returns_preview": returns_preview,
+            "benchmark_series": list(detail.get("benchmark_series") or []),
+            "risk_contribution_preview": list(detail.get("risk_contribution_preview") or []),
+            "rebalance_events": rebalance_events,
+            "return_quality_summary": dict(quality),
+            "source_integrity": source_integrity,
+            "audit_trail": list(detail.get("audit_trail") or []),
+            "order_summary": {
+                "order_count": order_count,
+                "generated_from": "composition_detail_preview",
+                "netting_available": order_count > 0,
+            },
+            "evidence": {
+                "frozen_config": {
+                    "composition_id": composition_id,
+                    "composition_updated_at": detail.get("updated_at"),
+                    "source_evidence_count": len(detail.get("source_evidence") or []),
+                },
+                "data_footprint": {
+                    "returns_preview_points": len(returns_preview),
+                    "benchmark_points": len(detail.get("benchmark_series") or []),
+                    "return_quality_status": quality.get("status"),
+                },
+                "proxy_logs": {
+                    "fallback_used": bool(quality.get("fallback_used")),
+                    "notes": list(quality.get("notes") or []),
+                },
+                "algorithm_spec": {
+                    "rebalance_frequency": detail.get("rebalance_frequency"),
+                    "cost_policy": dict(detail.get("cost_policy") or {}),
+                    "orders": evidence_label,
+                },
+            },
+            "warnings": warnings,
+        }
+
+    @staticmethod
+    def _composition_order_symbol(leg: Mapping[str, Any]) -> str:
+        config = _as_mapping(leg.get("config"))
+        for key in ("symbol", "ticker"):
+            value = str(config.get(key) or "").strip().upper()
+            if value:
+                return value
+        leg_kind = str(leg.get("leg_kind") or "").lower()
+        if leg_kind == "cash":
+            return "CASH"
+        source_ref_id = str(leg.get("source_ref_id") or "").strip()
+        if source_ref_id.startswith("strategy_leg::"):
+            return "STRATEGY"
+        return source_ref_id.upper() or str(leg.get("display_name") or "LEG").upper().replace(" ", "_")
+
+    def _composition_backtest_orders_from_detail(
+        self,
+        composition_id: str,
+        run_id: str,
+        detail: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        legs = [
+            dict(item)
+            for item in detail.get("normalized_legs") or []
+            if isinstance(item, Mapping)
+        ]
+        leg_by_id = {str(leg.get("id") or ""): leg for leg in legs}
+        quality_label = self._composition_quality_label(detail)
+        evidence_label = self._composition_evidence_label()
+        orders: list[dict[str, Any]] = []
+        for event_index, raw_event in enumerate(detail.get("rebalance_events") or [], start=1):
+            event = _as_mapping(raw_event)
+            event_id = f"event_{_as_int(event.get('index'), event_index):03d}"
+            before = {
+                str(key): _as_float(value, 0.0)
+                for key, value in _as_mapping(event.get("weight_before")).items()
+            }
+            after = {
+                str(key): _as_float(value, 0.0)
+                for key, value in _as_mapping(event.get("weight_after")).items()
+            }
+            deltas = {
+                leg_id: round(after.get(leg_id, 0.0) - before.get(leg_id, 0.0), 6)
+                for leg_id in sorted(set(before) | set(after))
+            }
+            total_buy = sum(max(delta, 0.0) for delta in deltas.values())
+            total_sell = sum(max(-delta, 0.0) for delta in deltas.values())
+            nettable = min(total_buy, total_sell)
+            event_orders: list[dict[str, Any]] = []
+            for leg_id, delta in deltas.items():
+                leg = leg_by_id.get(leg_id)
+                if not leg:
+                    continue
+                if abs(delta) < 0.0001:
+                    continue
+                gross_buy = round(max(delta, 0.0), 6)
+                gross_sell = round(max(-delta, 0.0), 6)
+                demand = gross_buy or gross_sell
+                pool = total_buy if gross_buy else total_sell
+                internal_net = round(min(demand, nettable * demand / pool), 6) if pool > 0 else 0.0
+                external = round(max(demand - internal_net, 0.0), 6)
+                netting_ratio = round(internal_net / demand * 100.0, 4) if demand > 0 else 0.0
+                order_id = self._composition_artifact_id(
+                    "comp_order",
+                    composition_id,
+                    f"{run_id}|{event_id}|{leg_id}",
+                )
+                event_orders.append(
+                    {
+                        "id": order_id,
+                        "order_id": order_id,
+                        "run_id": run_id,
+                        "event_id": event_id,
+                        "event_label": str(event.get("label") or event_id),
+                        "event_date": event.get("date"),
+                        "symbol": self._composition_order_symbol(leg),
+                        "side": "BUY" if gross_buy > 0 else "SELL",
+                        "quantity": demand,
+                        "quantity_unit": "weight_pct",
+                        "price": None,
+                        "slippage_bps": round(_as_float(event.get("estimated_cost_bps"), 0.0), 4),
+                        "fee_amount": None,
+                        "source_leg_id": leg_id,
+                        "source_leg_name": str(leg.get("display_name") or leg_id),
+                        "source_leg_kind": str(leg.get("leg_kind") or ""),
+                        "trigger_reason": (
+                            f"{detail.get('rebalance_frequency') or 'rebalance'} cadence; "
+                            "simulated from composition rebalance_events"
+                        ),
+                        "gross_buy_quantity": gross_buy,
+                        "gross_sell_quantity": gross_sell,
+                        "internal_net_quantity": internal_net,
+                        "external_quantity": external,
+                        "netting_ratio_pct": netting_ratio,
+                        "netting_status": "internally_netted" if internal_net > 0 else "external_only",
+                        "execution_kind": "simulated_rebalance_instruction",
+                        "quality_label": quality_label,
+                        "evidence_label": evidence_label,
+                    }
+                )
+            orders.extend(event_orders)
+        return orders
+
+    def get_composition_backtest_orders(
+        self,
+        composition_id: str,
+        run_id: str,
+        *,
+        symbol: str | None = None,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> dict[str, Any]:
+        state = self._composition_load_artifact_state(
+            kind="backtest_run",
+            composition_id=composition_id,
+            artifact_id=run_id,
+        )
+        detail = _as_mapping(state.get("detail_snapshot"))
+        orders = self._composition_backtest_orders_from_detail(composition_id, run_id, detail)
+        normalized_symbol = str(symbol or "").strip().upper()
+        if normalized_symbol:
+            orders = [item for item in orders if str(item.get("symbol") or "").upper() == normalized_symbol]
+        page = max(1, int(page or 1))
+        page_size = max(1, min(int(page_size or 100), 500))
+        start = (page - 1) * page_size
+        end = start + page_size
+        return {
+            "items": orders[start:end],
+            "page": page,
+            "page_size": page_size,
+            "total": len(orders),
+            "symbol_filter": normalized_symbol or None,
+            "filters": {"symbol": normalized_symbol or None},
+            "generated_from": "composition_detail_preview",
+            "quality_label": self._composition_quality_label(detail),
+            "evidence_label": self._composition_evidence_label(),
+        }
+
+    def get_composition_backtest_order_netting(
+        self,
+        composition_id: str,
+        run_id: str,
+        order_id: str,
+    ) -> dict[str, Any]:
+        orders = self.get_composition_backtest_orders(composition_id, run_id, page=1, page_size=500)["items"]
+        order = next((dict(item) for item in orders if str(item.get("id") or "") == order_id), None)
+        if order is None:
+            raise KeyError(f"Composition backtest order not found: {order_id}")
+        demand = _as_float(order.get("quantity"), 0.0)
+        internal_net = _as_float(order.get("internal_net_quantity"), 0.0)
+        external = _as_float(order.get("external_quantity"), 0.0)
+        return {
+            "order_id": order_id,
+            "run_id": run_id,
+            "composition_id": composition_id,
+            "symbol": str(order.get("symbol") or ""),
+            "event_id": str(order.get("event_id") or ""),
+            "event_label": str(order.get("event_label") or ""),
+            "event_date": order.get("event_date"),
+            "source_leg_id": str(order.get("source_leg_id") or ""),
+            "source_leg_name": str(order.get("source_leg_name") or ""),
+            "before_netting": {
+                "gross_buy_quantity": _as_float(order.get("gross_buy_quantity"), 0.0),
+                "gross_sell_quantity": _as_float(order.get("gross_sell_quantity"), 0.0),
+                "requested_quantity": demand,
+            },
+            "after_netting": {
+                "internal_net_quantity": internal_net,
+                "external_quantity": external,
+            },
+            "internal_net_quantity": internal_net,
+            "external_quantity": external,
+            "netting_ratio_pct": _as_float(order.get("netting_ratio_pct"), 0.0),
+            "netting_status": str(order.get("netting_status") or "not_nettable"),
+            "generated_from": "composition_rebalance_events",
+            "quality_label": str(order.get("quality_label") or self._composition_quality_label({})),
+            "evidence_label": str(order.get("evidence_label") or self._composition_evidence_label()),
+        }
+
+    @staticmethod
+    def _composition_order_export_headers() -> list[str]:
+        return [
+            "时间",
+            "标的",
+            "方向",
+            "数量",
+            "成交价",
+            "滑点(bps)",
+            "手续费($)",
+            "来源腿",
+            "触发原因",
+            "内部撮合比例",
+            "证据标签",
+        ]
+
+    @staticmethod
+    def _composition_order_export_row(item: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "时间": item.get("event_date") or item.get("event_label") or "",
+            "标的": item.get("symbol") or "",
+            "方向": item.get("side") or "",
+            "数量": item.get("quantity") if item.get("quantity") is not None else "",
+            "成交价": item.get("price") if item.get("price") is not None else "",
+            "滑点(bps)": item.get("slippage_bps"),
+            "手续费($)": item.get("fee_amount") if item.get("fee_amount") is not None else "",
+            "来源腿": item.get("source_leg_name") or item.get("source_leg_id") or "",
+            "触发原因": item.get("trigger_reason") or "",
+            "内部撮合比例": item.get("netting_ratio_pct"),
+            "证据标签": item.get("evidence_label") or "",
+        }
+
+    @staticmethod
+    def _xlsx_column_name(index: int) -> str:
+        name = ""
+        value = max(1, int(index))
+        while value:
+            value, remainder = divmod(value - 1, 26)
+            name = chr(65 + remainder) + name
+        return name
+
+    @classmethod
+    def _xlsx_inline_cell(cls, row_index: int, column_index: int, value: Any) -> str:
+        cell_ref = f"{cls._xlsx_column_name(column_index)}{row_index}"
+        text = "" if value is None else str(value)
+        escaped = xml_escape(text)
+        return f'<c r="{cell_ref}" t="inlineStr"><is><t>{escaped}</t></is></c>'
+
+    @classmethod
+    def _build_minimal_xlsx(cls, headers: Sequence[str], rows: Sequence[Mapping[str, Any]]) -> bytes:
+        sheet_rows: list[str] = []
+        header_cells = "".join(
+            cls._xlsx_inline_cell(1, column_index, header)
+            for column_index, header in enumerate(headers, start=1)
+        )
+        sheet_rows.append(f'<row r="1">{header_cells}</row>')
+        for row_index, row in enumerate(rows, start=2):
+            cells = "".join(
+                cls._xlsx_inline_cell(row_index, column_index, row.get(header, ""))
+                for column_index, header in enumerate(headers, start=1)
+            )
+            sheet_rows.append(f'<row r="{row_index}">{cells}</row>')
+        sheet_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            f'<sheetData>{"".join(sheet_rows)}</sheetData>'
+            '</worksheet>'
+        )
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "[Content_Types].xml",
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                '<Default Extension="xml" ContentType="application/xml"/>'
+                '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                '</Types>',
+            )
+            archive.writestr(
+                "_rels/.rels",
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+                '</Relationships>',
+            )
+            archive.writestr(
+                "xl/workbook.xml",
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                '<sheets><sheet name="Orders" sheetId="1" r:id="rId1"/></sheets>'
+                '</workbook>',
+            )
+            archive.writestr(
+                "xl/_rels/workbook.xml.rels",
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+                '</Relationships>',
+            )
+            archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+        return buffer.getvalue()
+
+    def export_composition_backtest_orders(
+        self,
+        composition_id: str,
+        run_id: str,
+        *,
+        export_format: str = "csv",
+        symbol: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_format = str(export_format or "csv").strip().lower()
+        if normalized_format not in {"csv", "xlsx"}:
+            raise ValueError("Unsupported export format. Use csv or xlsx.")
+        page = self.get_composition_backtest_orders(
+            composition_id,
+            run_id,
+            symbol=symbol,
+            page=1,
+            page_size=500,
+        )
+        headers = self._composition_order_export_headers()
+        rows = [self._composition_order_export_row(item) for item in page["items"]]
+        if normalized_format == "xlsx":
+            return {
+                "status": "ok",
+                "format": "xlsx",
+                "filename": f"{composition_id}-{run_id}-orders.xlsx",
+                "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "content": self._build_minimal_xlsx(headers, rows),
+            }
+        buffer = StringIO()
+        writer = csv.DictWriter(
+            buffer,
+            fieldnames=headers,
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+        return {
+            "status": "ok",
+            "format": "csv",
+            "filename": f"{composition_id}-{run_id}-orders.csv",
+            "media_type": "text/csv; charset=utf-8",
+            "content": buffer.getvalue(),
+        }
+
+    @staticmethod
+    def _composition_weight_map(detail: Mapping[str, Any]) -> dict[str, float]:
+        return {
+            str(leg.get("id") or ""): round(_as_float(leg.get("weight_pct"), 0.0), 4)
+            for leg in detail.get("normalized_legs") or []
+            if isinstance(leg, Mapping)
+        }
+
+    @staticmethod
+    def _composition_normalize_weight_map(weights: Mapping[str, float]) -> dict[str, float]:
+        total = sum(max(0.0, _as_float(value, 0.0)) for value in weights.values())
+        if total <= 0:
+            return {str(key): 0.0 for key in weights}
+        return {str(key): round(max(0.0, _as_float(value, 0.0)) / total * 100.0, 4) for key, value in weights.items()}
+
+    def create_composition_allocation_job(self, composition_id: str, request: Any) -> dict[str, Any]:
+        payload = self._compact_composition_request(_as_mapping(request))
+        detail = self.get_composition_detail(composition_id)
+        idempotency_key = str(payload.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            idempotency_key = f"{payload.get('intent') or 'risk_parity'}|{payload.get('target_volatility_pct') or 'target'}|{detail.get('updated_at') or iso_now()}"
+            payload["idempotency_key"] = idempotency_key
+        job_id = self._composition_artifact_id("alloc_job", composition_id, idempotency_key)
+        state = self._composition_store_artifact_state(
+            kind="allocation_job",
+            composition_id=composition_id,
+            artifact_id=job_id,
+            request_payload=payload,
+            detail_snapshot=self._composition_run_detail_snapshot(detail),
+        )
+        return self._build_composition_allocation_job_payload(state)
+
+    def get_composition_allocation_job(self, composition_id: str, job_id: str) -> dict[str, Any]:
+        self._load_composition_record(composition_id)
+        state = self._composition_load_artifact_state(
+            kind="allocation_job",
+            composition_id=composition_id,
+            artifact_id=job_id,
+        )
+        return self._build_composition_allocation_job_payload(state)
+
+    def _build_composition_allocation_job_payload(self, state: Mapping[str, Any]) -> dict[str, Any]:
+        detail = _as_mapping(state.get("detail_snapshot"))
+        composition_id = str(state.get("composition_id") or detail.get("id") or "")
+        job_id = str(state.get("id") or "")
+        request_payload = dict(state.get("request") or {})
+        current_weights = self._composition_weight_map(detail)
+        locked_weights = {
+            str(leg.get("id") or ""): _as_float(leg.get("weight_pct"), 0.0)
+            for leg in detail.get("normalized_legs") or []
+            if isinstance(leg, Mapping) and bool(leg.get("weight_locked"))
+        }
+        unlocked_ids = [leg_id for leg_id in current_weights if leg_id not in locked_weights]
+        residual_weight = round(100.0 - sum(locked_weights.values()), 4)
+        risk_by_leg = {
+            str(item.get("leg_id") or ""): _as_float(item.get("contribution_pct"), 0.0)
+            for item in detail.get("risk_contribution_preview") or []
+            if isinstance(item, Mapping)
+        }
+        return_by_leg = {
+            str(item.get("leg_id") or ""): _as_float(item.get("return_contribution_pct"), 0.0)
+            for item in detail.get("risk_contribution_preview") or []
+            if isinstance(item, Mapping)
+        }
+
+        def candidate_weights(kind: str) -> dict[str, float]:
+            weights = dict(current_weights)
+            if not unlocked_ids:
+                return self._composition_normalize_weight_map(weights)
+            if kind == "risk_parity":
+                equal = residual_weight / max(len(unlocked_ids), 1)
+                for leg_id in unlocked_ids:
+                    weights[leg_id] = equal
+            elif kind == "min_vol":
+                highest_risk = max(unlocked_ids, key=lambda leg_id: risk_by_leg.get(leg_id, 0.0))
+                cash_like = next(
+                    (
+                        str(leg.get("id") or "")
+                        for leg in detail.get("normalized_legs") or []
+                        if isinstance(leg, Mapping)
+                        and str(leg.get("id") or "") in unlocked_ids
+                        and str(leg.get("leg_kind") or "").lower() == "cash"
+                    ),
+                    None,
+                )
+                receiver = cash_like or min(unlocked_ids, key=lambda leg_id: risk_by_leg.get(leg_id, 0.0))
+                shift = min(5.0, max(0.0, weights.get(highest_risk, 0.0)))
+                weights[highest_risk] = max(0.0, weights.get(highest_risk, 0.0) - shift)
+                weights[receiver] = weights.get(receiver, 0.0) + shift
+            elif kind == "max_sharpe":
+                best_return = max(unlocked_ids, key=lambda leg_id: return_by_leg.get(leg_id, 0.0))
+                donor = min(unlocked_ids, key=lambda leg_id: return_by_leg.get(leg_id, 0.0))
+                if donor != best_return:
+                    shift = min(5.0, max(0.0, weights.get(donor, 0.0)))
+                    weights[donor] = max(0.0, weights.get(donor, 0.0) - shift)
+                    weights[best_return] = weights.get(best_return, 0.0) + shift
+            return self._composition_normalize_weight_map(weights)
+
+        current_return = self._composition_kpi_value(detail, "annualized_return")
+        current_sharpe = self._composition_kpi_value(detail, "sharpe")
+        current_drawdown = self._composition_kpi_value(detail, "max_drawdown")
+        candidate_specs = [
+            ("current", "Current", current_weights, "Current saved allocation."),
+            ("risk_parity", "Risk Parity preview", candidate_weights("risk_parity"), "Equalizes unlocked sleeve weights as a deterministic risk-parity proxy."),
+            ("min_vol", "Min Vol preview", candidate_weights("min_vol"), "Shifts a small sleeve budget away from the highest risk contribution."),
+            ("max_sharpe", "Max Sharpe preview", candidate_weights("max_sharpe"), "Shifts a small sleeve budget toward the highest return contribution."),
+        ]
+        candidates: list[dict[str, Any]] = []
+        for rank, (candidate_id, label, weights, thesis) in enumerate(candidate_specs, start=1):
+            estimated_turnover = round(
+                sum(abs(weights.get(leg_id, 0.0) - current_weights.get(leg_id, 0.0)) for leg_id in set(weights) | set(current_weights)) / 2.0,
+                4,
+            )
+            candidates.append(
+                {
+                    "id": candidate_id,
+                    "rank": rank,
+                    "label": label,
+                    "weights": weights,
+                    "metrics": {
+                        "annualized_return": round(current_return + (0.15 if candidate_id == "max_sharpe" else -0.1 if candidate_id == "min_vol" else 0.0), 4),
+                        "sharpe": round(current_sharpe + (0.08 if candidate_id in {"risk_parity", "max_sharpe"} else 0.03 if candidate_id == "min_vol" else 0.0), 4),
+                        "max_drawdown": round(current_drawdown + (0.4 if candidate_id == "min_vol" else 0.0), 4),
+                        "estimated_turnover_pct": estimated_turnover,
+                    },
+                    "thesis": thesis,
+                    "quality_label": "heuristic_from_composition_detail_preview",
+                    "evidence_label": self._composition_evidence_label(),
+                    "constraint_violations": [],
+                }
+            )
+        frontier_points = [
+            {
+                "id": item["id"],
+                "label": item["label"],
+                "return_pct": item["metrics"]["annualized_return"],
+                "risk_pct": abs(item["metrics"]["max_drawdown"]),
+                "sharpe": item["metrics"]["sharpe"],
+                "quality_label": item["quality_label"],
+            }
+            for item in candidates
+        ]
+        return {
+            "id": job_id,
+            "job_id": job_id,
+            "composition_id": composition_id,
+            "status": "COMPLETED",
+            "created_at": str(state.get("created_at") or ""),
+            "completed_at": state.get("completed_at") or state.get("created_at"),
+            "request": request_payload,
+            "summary": {
+                "intent": request_payload.get("intent") or "risk_parity",
+                "composition_name": str(detail.get("name") or ""),
+                "candidate_count": len(candidates),
+                "quality_label": "heuristic_from_composition_detail_preview",
+                "evidence_label": self._composition_evidence_label(),
+                "latest_update": "Allocation candidates were derived deterministically from the saved composition preview.",
+            },
+            "candidates": candidates,
+            "frontier_points": frontier_points,
+            "residual_budget": {
+                "locked_weight_pct": round(sum(locked_weights.values()), 4),
+                "optimizable_weight_pct": residual_weight,
+                "locked_leg_ids": sorted(locked_weights),
+                "unlocked_leg_ids": sorted(unlocked_ids),
+            },
+            "covariance_preview": list(detail.get("correlation_matrix") or []),
+            "return_quality_summary": dict(detail.get("return_quality_summary") or {}),
+            "source_integrity": list(detail.get("source_integrity") or []),
+            "audit_trail": list(detail.get("audit_trail") or []),
+            "evidence": {
+                "generated_from": "composition_detail_preview",
+                "not_real_optimizer": True,
+                "not_broker_orders": True,
+                "notes": [
+                    "Allocation Lab v1 uses saved composition preview, risk contribution, and correlation fields.",
+                    "No external optimizer or broker order history is synthesized by this endpoint.",
+                ],
+            },
+            "warnings": self._composition_backtest_warnings(detail),
+        }
 
     def build_bond_fixed_income_snapshot_overview(
         self,
@@ -8178,7 +9317,7 @@ class BacktestPlatformService:
             value_sets.append((key, values or [base_snapshot.get(key)]))
 
         if not value_sets:
-            return [dict(base_snapshot)]
+            return [_normalize_strategy_snapshot_descriptive_fields(base_snapshot)]
 
         budget = _as_int(requested_budget, 0)
         snapshots: list[dict[str, Any]] = []
@@ -8187,6 +9326,7 @@ class BacktestPlatformService:
             snapshot = dict(base_snapshot)
             for (key, _), value in zip(value_sets, combination):
                 snapshot[key] = value
+            snapshot = _normalize_strategy_snapshot_descriptive_fields(snapshot)
             fingerprint = dumps(snapshot)
             if fingerprint in seen:
                 continue
@@ -8194,7 +9334,7 @@ class BacktestPlatformService:
             snapshots.append(snapshot)
             if budget > 0 and len(snapshots) >= budget:
                 break
-        return snapshots or [dict(base_snapshot)]
+        return snapshots or [_normalize_strategy_snapshot_descriptive_fields(base_snapshot)]
 
     def _build_optimization_window_metrics(self, points: list[Mapping[str, Any]]) -> dict[str, float]:
         return _build_optimization_window_metrics_payload(points)
@@ -10591,6 +11731,17 @@ class BacktestPlatformService:
                     "revision": session["revision"],
                     "created_at": now,
                     "comment": payload.get("comment"),
+                    "decision_note": _clean_version_text(payload.get("decision_note") or payload.get("comment")),
+                    "change_summary": _parameter_change_summary(
+                        base_strategy.get("parameters") or {},
+                        parameters,
+                        version_number=next_version,
+                    ),
+                    "source": {
+                        "kind": "manual_revision",
+                        "base_parameter_version_id": expected_base or current_base,
+                    },
+                    "alternative_versions": [],
                     "parameters": parameters,
                 }
             )
@@ -10617,6 +11768,10 @@ class BacktestPlatformService:
                     "revision": session["revision"],
                     "created_at": now,
                     "comment": payload.get("comment"),
+                    "decision_note": _clean_version_text(payload.get("decision_note") or payload.get("comment")),
+                    "change_summary": "初始版本记录",
+                    "source": {"kind": "creation"},
+                    "alternative_versions": [],
                     "parameters": parameters,
                 }
             ]
@@ -10754,6 +11909,87 @@ class BacktestPlatformService:
             updated["lifecycle_status"] = payload["lifecycle_status"]
         updated["updated_at"] = iso_now()
         self.storage.insert_json_row("strategies", updated)
+        return self.get_strategy_detail(strategy_id)
+
+    def restore_strategy_parameter_version(self, strategy_id: str, parameter_version_id: str, request: Any) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        if not payload.get("idempotency_key"):
+            raise ValueError("idempotency_key is required")
+        strategy = self.get_strategy_detail(strategy_id)
+        if str(strategy.get("lifecycle_status") or "").upper() == "ARCHIVED":
+            raise ValueError("Archived strategies cannot be restored")
+        target_parameter_version_id = str(parameter_version_id or "").strip()
+        target_entry = next(
+            (
+                dict(entry)
+                for entry in strategy.get("parameter_history", [])
+                if str(entry.get("parameter_version_id") or "") == target_parameter_version_id
+            ),
+            None,
+        )
+        if target_entry is None:
+            raise KeyError(f"Parameter version not found: {target_parameter_version_id}")
+        if not target_entry.get("rollbackable"):
+            raise ValueError("Parameter version is not rollbackable")
+        expected_base = self._resolve_expected_base_parameter_version_id(
+            strategy,
+            payload.get("base_parameter_version_id"),
+        )
+        self._assert_base_parameter_version_is_fresh(
+            strategy,
+            expected_base,
+            blocking_target_id=strategy_id,
+        )
+
+        strategy_row = self.storage.fetch_one("SELECT * FROM strategies WHERE id = ?", (strategy_id,))
+        assert strategy_row is not None
+        current_version = int(strategy_row.get("current_parameter_version") or strategy.get("current_parameter_version") or 1)
+        next_version = current_version + 1
+        now = iso_now()
+        restored_parameters = dict(target_entry.get("parameters") or {})
+        current_parameters = dict(strategy.get("parameters") or {})
+        decision_note = _clean_version_text(payload.get("decision_note") or payload.get("comment"))
+        target_version_number = int(target_entry.get("version_number") or _parse_parameter_version_number(target_parameter_version_id))
+        current_parameter_version_id = str(strategy.get("current_parameter_version_id") or _parameter_version_id(strategy_id, current_version))
+        parameter_history = [dict(entry) for entry in strategy.get("parameter_history", [])]
+        parameter_history.append(
+            {
+                "version_number": next_version,
+                "parameter_version_id": _parameter_version_id(strategy_id, next_version),
+                "revision": current_version,
+                "created_at": now,
+                "comment": decision_note or f"回滚至 v{target_version_number}",
+                "decision_note": decision_note,
+                "change_summary": (
+                    f"回滚至 v{target_version_number}："
+                    f"{_parameter_change_summary(current_parameters, restored_parameters, version_number=next_version)}"
+                ),
+                "source": {
+                    "kind": "version_restore",
+                    "source_parameter_version_id": target_parameter_version_id,
+                    "source_version_number": target_version_number,
+                    "base_parameter_version_id": expected_base,
+                },
+                "alternative_versions": [
+                    {
+                        "parameter_version_id": current_parameter_version_id,
+                        "version_number": current_version,
+                        "label": f"回滚前当前版本 v{current_version}",
+                        "parameter_delta": _build_parameter_delta(restored_parameters, current_parameters),
+                    }
+                ],
+                "parameters": restored_parameters,
+            }
+        )
+        strategy_row["parameters_json"] = dumps(restored_parameters)
+        strategy_row["rebalance_frequency"] = restored_parameters.get("rebalance_frequency") or strategy_row.get("rebalance_frequency")
+        strategy_row["name"] = _display_strategy_name(strategy_row.get("name"), restored_parameters)
+        self._write_strategy_record(
+            strategy_row,
+            parameter_history=parameter_history,
+            current_version=next_version,
+            comment=decision_note,
+        )
         return self.get_strategy_detail(strategy_id)
 
     def list_backtest_runs(self, limit: int | None = None, status: str | None = None) -> list[dict[str, Any]]:
@@ -11281,7 +12517,9 @@ class BacktestPlatformService:
 
     def create_optimization_candidate(self, job_id: str, request: Any) -> dict[str, Any]:
         payload = _as_mapping(request)
-        parameter_snapshot = dict(payload.get("parameter_snapshot") or {})
+        parameter_snapshot = _normalize_strategy_snapshot_descriptive_fields(
+            dict(payload.get("parameter_snapshot") or {})
+        )
         if not parameter_snapshot:
             raise ValueError("parameter_snapshot is required")
         job = self.get_optimization_job_detail(job_id)
@@ -11383,10 +12621,38 @@ class BacktestPlatformService:
             blocking_target_id=str(job["strategy_id"]),
         )
 
-        promoted_parameters = dict(candidate.get("parameter_snapshot") or strategy.get("parameters") or {})
+        promoted_parameters = _normalize_strategy_snapshot_descriptive_fields(
+            dict(candidate.get("parameter_snapshot") or strategy.get("parameters") or {})
+        )
         promoted_rebalance_frequency = (
             promoted_parameters.get("rebalance_frequency") or strategy.get("rebalance_frequency")
         )
+        promoted_strategy_projection = {
+            **dict(strategy),
+            "parameters": promoted_parameters,
+            "universe_name": promoted_parameters.get("universe_name") or strategy.get("universe_name"),
+            "rebalance_frequency": promoted_rebalance_frequency,
+            "benchmark_symbol": promoted_parameters.get("benchmark_symbol") or strategy.get("benchmark_symbol"),
+        }
+        promoted_confirmation_fields = self._seed_revision_confirmation_fields(promoted_strategy_projection)
+        promoted_description = (
+            _format_strategy_value(promoted_parameters.get("strategy_description"))
+            or _format_strategy_value(strategy.get("description"))
+            or None
+        )
+        decision_note = _clean_version_text(payload.get("decision_note") or payload.get("comment"))
+        next_version_for_summary = int(strategy.get("current_parameter_version") or 1) + 1
+        change_summary = _parameter_change_summary(
+            strategy.get("parameters") or {},
+            promoted_parameters,
+            version_number=next_version_for_summary,
+        )
+        version_source = self._optimization_version_source(
+            job,
+            candidate,
+            base_parameter_version_id=expected_base,
+        )
+        alternative_versions = self._optimization_alternative_versions(job, candidate)
         if payload.get("mode") == "create_copy":
             now = iso_now()
             cloned_id = self._new_id("strat")
@@ -11396,7 +12662,11 @@ class BacktestPlatformService:
                     "parameter_version_id": _parameter_version_id(cloned_id, 1),
                     "revision": 1,
                     "created_at": now,
-                    "comment": payload.get("comment"),
+                    "comment": decision_note or payload.get("comment"),
+                    "decision_note": decision_note,
+                    "change_summary": change_summary,
+                    "source": {**version_source, "kind": "optimization_copy"},
+                    "alternative_versions": alternative_versions,
                     "parameters": promoted_parameters,
                 }
             ]
@@ -11404,16 +12674,16 @@ class BacktestPlatformService:
                 {
                     "id": cloned_id,
                     "name": f'{strategy["name"]} Copy',
-                    "description": strategy.get("description"),
+                    "description": promoted_description,
                     "strategy_type": strategy["strategy_type"],
-                    "universe_name": strategy["universe_name"],
+                    "universe_name": promoted_strategy_projection.get("universe_name") or strategy["universe_name"],
                     "rebalance_frequency": promoted_rebalance_frequency,
                     "lifecycle_status": strategy.get("lifecycle_status", "ACTIVE"),
                     "dataset_snapshot_id": strategy.get("dataset_snapshot_id"),
                     "universe_snapshot_id": strategy.get("universe_snapshot_id"),
-                    "benchmark_symbol": strategy.get("benchmark_symbol", "SPY"),
+                    "benchmark_symbol": promoted_strategy_projection.get("benchmark_symbol") or strategy.get("benchmark_symbol", "SPY"),
                     "parameters_json": dumps(promoted_parameters),
-                    "confirmation_fields_json": dumps(strategy["confirmation_fields"]),
+                    "confirmation_fields_json": dumps(promoted_confirmation_fields),
                     "allowed_actions_json": dumps(strategy["allowed_actions"]),
                     "latest_run_id": strategy.get("latest_run_id"),
                     "latest_successful_run_id": strategy.get("latest_successful_run_id"),
@@ -11442,13 +12712,21 @@ class BacktestPlatformService:
                 "parameter_version_id": _parameter_version_id(str(job["strategy_id"]), next_version),
                 "revision": current_version,
                 "created_at": iso_now(),
-                "comment": payload.get("comment"),
+                "comment": decision_note or payload.get("comment"),
+                "decision_note": decision_note,
+                "change_summary": change_summary,
+                "source": version_source,
+                "alternative_versions": alternative_versions,
                 "parameters": promoted_parameters,
             }
         )
         strategy_row["parameters_json"] = dumps(promoted_parameters)
         strategy_row["rebalance_frequency"] = promoted_rebalance_frequency
         strategy_row["name"] = _display_strategy_name(strategy_row.get("name"), promoted_parameters)
+        strategy_row["description"] = promoted_description or strategy_row.get("description")
+        strategy_row["universe_name"] = promoted_strategy_projection.get("universe_name") or strategy_row.get("universe_name")
+        strategy_row["benchmark_symbol"] = promoted_strategy_projection.get("benchmark_symbol") or strategy_row.get("benchmark_symbol")
+        strategy_row["confirmation_fields_json"] = dumps(promoted_confirmation_fields)
         self._write_strategy_record(
             strategy_row,
             parameter_history=parameter_history,
@@ -11535,6 +12813,65 @@ class BacktestPlatformService:
             candidate["analysis"] = {}
             return candidate
         return None
+
+    def _optimization_version_source(
+        self,
+        job: Mapping[str, Any],
+        candidate: Mapping[str, Any],
+        *,
+        base_parameter_version_id: str | None,
+    ) -> dict[str, Any]:
+        request_payload = _as_mapping(job.get("request"))
+        source: dict[str, Any] = {
+            "kind": "optimization_promotion",
+            "job_id": str(job.get("id") or ""),
+            "candidate_id": str(candidate.get("id") or ""),
+            "base_parameter_version_id": base_parameter_version_id,
+        }
+        source_run_id = request_payload.get("source_run_id") or job.get("source_run_id") or job.get("run_id")
+        if source_run_id:
+            source["run_id"] = str(source_run_id)
+        candidate_label = _clean_version_text(candidate.get("label"))
+        if candidate_label:
+            source["candidate_label"] = candidate_label
+        return {key: value for key, value in source.items() if value not in (None, "", [])}
+
+    def _optimization_alternative_versions(
+        self,
+        job: Mapping[str, Any],
+        selected_candidate: Mapping[str, Any],
+        *,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        selected_id = str(selected_candidate.get("id") or "")
+        raw_candidates = list(job.get("matching_combinations") or []) or list(job.get("candidates") or [])
+        normalized = [
+            dict(item)
+            for item in raw_candidates
+            if isinstance(item, Mapping) and str(item.get("id") or "") != selected_id
+        ]
+        normalized.sort(key=lambda item: (_as_int(item.get("rank"), 9999), str(item.get("label") or "")))
+        alternatives: list[dict[str, Any]] = []
+        for item in normalized[:limit]:
+            alternative: dict[str, Any] = {
+                "candidate_id": str(item.get("id") or ""),
+                "label": self._canonical_optimization_candidate_label(
+                    item.get("label"),
+                    _as_int(item.get("rank"), len(alternatives) + 1),
+                ),
+                "rank": _as_int(item.get("rank"), len(alternatives) + 1),
+            }
+            score = item.get("score")
+            if isinstance(score, (int, float)) and not isinstance(score, bool):
+                alternative["score"] = float(score)
+            metrics = item.get("metrics")
+            if isinstance(metrics, Mapping):
+                alternative["metrics"] = dict(metrics)
+            parameter_delta = item.get("parameter_delta")
+            if isinstance(parameter_delta, Mapping):
+                alternative["parameter_delta"] = dict(parameter_delta)
+            alternatives.append(alternative)
+        return alternatives
 
     def delete_optimization_candidate(self, job_id: str, trial_id: str) -> dict[str, Any]:
         job = self.get_optimization_job_detail(job_id)

@@ -11,10 +11,12 @@ import { useApiClient } from '../lib/demoStoreContext';
 import {
   buildCompositionReferenceCounts,
   buildStrategyCandidateRows,
+  canUpgradeStrategyLegVersions,
   materializeSavedStrategyRows,
   mergeInventoryWithSavedStrategies,
   readSavedStrategyLegEdits,
   readSavedStrategyLegIds,
+  upgradeStrategyLegVersions,
 } from '../lib/saved-strategy-leg-inventory';
 import type {
   ApiCompositionDetail,
@@ -249,9 +251,19 @@ export function CompositionWorkbenchPage(): JSX.Element {
           setError(null);
         }
         const inventoryResponse = await api.getLegInventory();
+        let detail: ApiCompositionDetail | null = null;
+        if (routeCompositionId && api.getCompositionDetail) {
+          detail = await api.getCompositionDetail(routeCompositionId);
+        }
         let enrichedInventory = inventoryResponse;
         const savedStrategyIds = readSavedStrategyLegIds();
-        if (savedStrategyIds.length > 0) {
+        const detailStrategyIds =
+          detail?.normalized_legs
+            .filter((leg) => leg.leg_kind === 'strategy')
+            .map((leg) => String(leg.source_ref_id ?? '').trim())
+            .filter((sourceRefId) => sourceRefId.startsWith('strategy_leg::')) ?? [];
+        const strategyIdsToMaterialize = [...new Set([...savedStrategyIds, ...detailStrategyIds])];
+        if (strategyIdsToMaterialize.length > 0) {
           try {
             const compositionDetailsPromise =
               api.listCompositions && api.getCompositionDetail
@@ -275,7 +287,7 @@ export function CompositionWorkbenchPage(): JSX.Element {
               mergeInventoryWithSavedStrategies(
                 inventoryResponse,
                 materializeSavedStrategyRows(
-                  savedStrategyIds,
+                  strategyIdsToMaterialize,
                   buildStrategyCandidateRows(
                     strategies,
                     runs,
@@ -295,11 +307,7 @@ export function CompositionWorkbenchPage(): JSX.Element {
         }
         setInventory(enrichedInventory);
 
-        if (routeCompositionId && api.getCompositionDetail) {
-          const detail = await api.getCompositionDetail(routeCompositionId);
-          if (cancelled) {
-            return;
-          }
+        if (detail) {
           setCompositionId(detail.id);
           setCompositionName(
             formatCompositionName({
@@ -467,19 +475,28 @@ export function CompositionWorkbenchPage(): JSX.Element {
     try {
       setSaving(true);
       setError(null);
+      const inventoryRows = inventory?.rows ?? [];
+      const shouldUpgradeStrategyVersions =
+        intent === 'ACTIVE' && canUpgradeStrategyLegVersions(selectedLegs, inventoryRows);
+      const legsToPersist = shouldUpgradeStrategyVersions
+        ? upgradeStrategyLegVersions(selectedLegs, inventoryRows)
+        : selectedLegs;
       const payload = {
         ...buildPreviewPayload({
           compositionName,
           description,
           benchmarkLabel,
           rebalanceFrequency,
-          selectedLegs,
+          selectedLegs: legsToPersist,
         }),
         status: intent,
       };
       const saved = compositionId
         ? await api.updateComposition(compositionId, payload)
         : await api.createComposition(payload);
+      if (shouldUpgradeStrategyVersions) {
+        setSelectedLegs(legsToPersist);
+      }
       setCompositionId(saved.id);
       navigateTo(`/compositions/${encodeURIComponent(saved.id)}`);
     } catch (caught) {

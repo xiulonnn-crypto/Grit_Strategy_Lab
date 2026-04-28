@@ -47,6 +47,7 @@ const detail: ApiCompositionDetail = {
     { key: 'annualized_return', label: '年化收益', value: '9.8%', tone: 'positive', detail: '较基准高 2.1 个百分点' },
     { key: 'max_drawdown', label: '最大回撤', value: '-8.6%', tone: 'warning', detail: '控制在目标阈值内' },
     { key: 'volatility', label: '波动率', value: '11.4%', tone: 'neutral', detail: '符合组合风险预算' },
+    { key: 'beta_exposure', label: 'Beta 暴露', value: '0.74', tone: 'neutral', detail: '相对基准降低 0.18' },
     { key: 'sharpe', label: 'Sharpe', value: '1.42', tone: 'positive', detail: '风险调整后回报良好' },
     { key: 'sortino', label: 'Sortino', value: '1.78', tone: 'positive', detail: '下行风险收益比稳定' },
   ],
@@ -258,7 +259,12 @@ const detail: ApiCompositionDetail = {
       freeze_ref_id: 'strategy_leg::strat-001::pv-003',
       freeze_hash: 'hash-strategy-001',
       captured_at: '2026-04-22T00:00:00.000Z',
-      snapshot: { current_ref_id: 'strategy_leg::strat-001::pv-004' },
+      snapshot: {
+        current_ref_id: 'strategy_leg::strat-001::pv-004',
+        run_id: 'run-101',
+        version_label: 'v1.2',
+        period_years: 10,
+      },
       signature_status: 'verified',
       drift_status: 'drifted',
       current_ref_id: 'strategy_leg::strat-001::pv-004',
@@ -350,20 +356,22 @@ describe('CompositionDetailPage', () => {
       document.querySelector('.composition-detail-page[data-route-root="compositions"][data-page-root="composition-detail"]'),
     ).not.toBeNull();
 
-    expect(screen.getByRole('heading', { level: 2, name: '累计收益流' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '收益流、版本节点与当前裁决' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '风险与归因' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '相关性矩阵' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: '情景分析' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '版本演化史' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'Exposure Drilldown' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '来源签名' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '组合回测 / 执行历史' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '再平衡与成本' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '深入分析入口' })).toBeInTheDocument();
     expect(document.querySelectorAll('.composition-detail-kpi-card')).toHaveLength(7);
     expect(document.querySelectorAll('.composition-detail-kpi-card__compare')).toHaveLength(7);
     expect(
       Array.from(document.querySelectorAll('.composition-detail-kpi-card__head span')).map((node) => node.textContent),
-    ).toEqual(['总收益', '年化', '预估净年化', '波动', '最大回撤', '夏普比率', '索提诺比率']);
+    ).toEqual(['Alpha 贡献', 'Beta 暴露', '风险贡献偏离', '相关性压力', '净收益', '最大回撤', '收益质量']);
     expect(screen.getAllByText('基准').length).toBeGreaterThan(0);
-    expect(screen.getByText('超额 +1.4%')).toBeInTheDocument();
+    expect(screen.getByText('相对基准 +1.4%')).toBeInTheDocument();
     expect(screen.getByText('总损耗')).toBeInTheDocument();
     expect(screen.getByText('恢复时长')).toBeInTheDocument();
     expect(screen.queryByText('现金占比')).not.toBeInTheDocument();
@@ -377,14 +385,19 @@ describe('CompositionDetailPage', () => {
     const sourceRail = document.querySelector('[data-ui="source-signature-rail"]');
     expect(sourceRail?.textContent).toContain('动量策略腿');
     expect(sourceRail?.textContent).toContain('策略腿');
-    expect(sourceRail?.textContent).toContain('版本漂移');
+    expect(sourceRail?.textContent).toContain('有新版本，待更新');
     expect(sourceRail?.textContent).not.toContain('签名有效');
+    expect(sourceRail?.textContent).not.toContain('版本一致');
+    const executionHistory = document.querySelector('[data-ui="composition-execution-history"]');
+    expect(executionHistory?.textContent).toContain('10Y / 年化 9.8% / 夏普 1.42');
+    expect(executionHistory?.querySelector('a[href="#/compositions/comp-001/backtest-runs/run-101"]')).not.toBeNull();
+    expect(executionHistory?.querySelector('a[href="#/compositions/comp-001/backtest-runs/run-101?tab=orders"]')).not.toBeNull();
 
     fireEvent.click(document.querySelectorAll<HTMLButtonElement>('.composition-detail-evidence-card')[0]);
     await waitFor(() => expect(document.querySelector('.composition-detail-drawer')).not.toBeNull());
   });
 
-  it('keeps total return copy compact and renders chart overlays without a separate excess-return mini chart', async () => {
+  it('renders the command-center chart overlays without a separate excess-return mini chart', async () => {
     fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({
       ...detail,
       returns_preview: detail.returns_preview.map((point, index) =>
@@ -396,11 +409,14 @@ describe('CompositionDetailPage', () => {
       render(<CompositionDetailPage compositionId="comp-001" />);
     });
 
-    expect(await screen.findByText('含再平衡路径。')).toBeInTheDocument();
+    expect(await screen.findByText('组合净值')).toBeInTheDocument();
     expect(screen.queryByText('基于当前收益流预览，含再平衡后的组合路径。')).not.toBeInTheDocument();
     expect(screen.queryByText('基准：60/40 基准')).not.toBeInTheDocument();
     expect(screen.queryByText('累计收益与超额收益共用同一套时间轴')).not.toBeInTheDocument();
     expect(document.querySelector('.composition-detail-approved-mini-chart')).toBeNull();
+    expect(document.querySelector('[data-ui="composition-portfolio-line"]')).not.toBeNull();
+    expect(document.querySelector('[data-ui="composition-benchmark-line"]')).not.toBeNull();
+    expect(document.querySelector('[data-ui="composition-cost-drag-line"]')).not.toBeNull();
     const drawdownArea = document.querySelector('.composition-detail-drawdown-area');
     expect(drawdownArea).not.toBeNull();
     const drawdownYValues = Array.from(drawdownArea?.getAttribute('d')?.matchAll(/(?:M|L) [\d.]+ ([\d.]+)/g) ?? []).map(
@@ -408,37 +424,30 @@ describe('CompositionDetailPage', () => {
     );
     const drawdownBaselineY = drawdownYValues[0];
     expect(Math.max(...drawdownYValues.slice(1, -1))).toBeGreaterThan(drawdownBaselineY);
-    expect(document.querySelectorAll('[data-ui="composition-rebalance-marker"]').length).toBeGreaterThan(0);
+    expect(document.querySelectorAll('[data-ui="composition-version-marker"]').length).toBeGreaterThan(0);
   });
 
-  it('shows benchmark deltas beside each primary KPI and moves net annualized cost copy into tooltips', async () => {
+  it('shows approved command center KPIs and keeps net return cost copy in tooltips', async () => {
     await act(async () => {
       render(<CompositionDetailPage compositionId="comp-001" />);
     });
 
     await screen.findByRole('heading', { level: 1, name: /全天候组合样例/ });
-    const totalReturnCard = document.querySelector<HTMLElement>('[data-kpi-key="total_return"]');
-    expect(totalReturnCard).not.toBeNull();
-    expect(totalReturnCard?.querySelector('.composition-detail-kpi-card__core')?.textContent).toContain('+3.5%');
-    expect(totalReturnCard?.querySelector('.composition-detail-kpi-card__core')?.textContent).toContain('超额 +1.4%');
-    expect(totalReturnCard?.querySelectorAll('.composition-detail-kpi-card__compare-item').length).toBe(1);
-    expect(totalReturnCard?.querySelector('.composition-detail-kpi-card__compare')?.textContent).toContain('基准');
-    expect(totalReturnCard?.querySelector('.composition-detail-kpi-card__compare')?.textContent).not.toContain('超额');
+    const alphaCard = document.querySelector<HTMLElement>('[data-kpi-key="alpha_contribution"]');
+    expect(alphaCard?.querySelector('.composition-detail-kpi-card__core')?.textContent).toContain('+1.4%');
+    expect(alphaCard?.querySelector('.composition-detail-kpi-card__core')?.textContent).toContain('相对基准 +1.4%');
+    expect(document.querySelector<HTMLElement>('[data-kpi-key="beta_exposure"]')?.textContent).toContain('0.74');
+    expect(document.querySelector<HTMLElement>('[data-kpi-key="risk_contribution_deviation"]')?.textContent).toContain('风险贡献偏离');
+    expect(document.querySelector<HTMLElement>('[data-kpi-key="correlation_stress"]')?.textContent).toContain('相关性压力');
+    expect(document.querySelector<HTMLElement>('[data-kpi-key="return_quality"]')?.textContent).toContain('100%');
 
-    ['annualized_return', 'net_annualized_return', 'volatility', 'max_drawdown', 'sharpe', 'sortino'].forEach((key) => {
-      const card = document.querySelector<HTMLElement>(`[data-kpi-key="${key}"]`);
-      expect(card?.querySelector('.composition-detail-kpi-card__trend')?.textContent).toContain('较基准');
-    });
-
-    const netAnnualizedCard = document.querySelector<HTMLElement>('[data-kpi-key="net_annualized_return"]');
-    expect(netAnnualizedCard?.textContent).not.toContain('毛年化扣除滑点、现金缓冲、维护成本和调仓损耗。');
-    expect(screen.getByLabelText('预估净年化指标说明')).toHaveAttribute(
+    const netReturnCard = document.querySelector<HTMLElement>('[data-kpi-key="net_return"]');
+    expect(netReturnCard?.textContent).not.toContain('净收益优先读取累计净收益；缺失时回退为预估净年化。');
+    expect(screen.getByLabelText('净收益指标说明')).toHaveAttribute(
       'data-tooltip',
-      '毛年化扣除滑点、现金缓冲、维护成本和调仓损耗。',
+      '净收益优先读取累计净收益；缺失时回退为预估净年化。',
     );
-    expect(screen.getByLabelText('波动指标说明')).toHaveAttribute('data-tooltip', expect.stringContaining('年化波动'));
-    expect(screen.getByLabelText('夏普比率指标说明')).toHaveAttribute('data-tooltip', expect.stringContaining('风险调整'));
-    expect(screen.getByLabelText('索提诺比率指标说明')).toHaveAttribute('data-tooltip', expect.stringContaining('下行波动'));
+    expect(screen.getByLabelText('收益质量指标说明')).toHaveAttribute('data-tooltip', expect.stringContaining('收益质量'));
   });
 
   it('sorts source signatures and risk attribution by weight, then labels the correlation matrix axes without pair choices', async () => {
@@ -572,6 +581,7 @@ describe('CompositionDetailPage', () => {
     expect(tooltip?.textContent).toContain('P2');
     expect(tooltip?.textContent).toContain('2.00%');
     expect(tooltip?.textContent).toContain('1.40%');
+    expect(tooltip?.textContent).toContain('1.93%');
 
     fireEvent.pointerLeave(chart!);
     await waitFor(() => expect(document.querySelector('[data-ui="composition-return-tooltip"]')).toBeNull());

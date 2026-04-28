@@ -2760,8 +2760,13 @@ export function BondFixedIncomeSnapshotsTab({
                 只保留真实债券快照行和共享调度，方便直接定位异常与下一步规则。
               </p>
             </div>
-            <button className="ghost-button snapshots-bond-registry-refresh-button" type="button">
-              重刷 2 个异常行
+            <button
+              className="ghost-button snapshots-bond-registry-refresh-button"
+              disabled={refreshDisabled || !onRefresh}
+              onClick={onRefresh}
+              type="button"
+            >
+              {refreshDisabled ? refreshLabel : '重刷 2 个异常行'}
             </button>
           </div>
 

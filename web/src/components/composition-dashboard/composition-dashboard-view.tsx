@@ -9,7 +9,11 @@ import {
   normalizePercentLike,
 } from '../../lib/compose-display';
 import { navigateTo } from '../../lib/appRouteContext';
-import type { ApiCompositionListItem, ApiCompositionStatus } from '../../types';
+import type {
+  ApiCompositionListItem,
+  ApiCompositionSourceIntegrity,
+  ApiCompositionStatus,
+} from '../../types';
 import './composition-dashboard.css';
 
 type CompositionDashboardViewProps = {
@@ -56,6 +60,38 @@ function getStatusLabel(status: string): string {
   return formatCompositionStatusLabel(status);
 }
 
+function sourceIntegrityHasNewVersion(item: ApiCompositionSourceIntegrity): boolean {
+  const sourceRefId = String(item.source_ref_id ?? '');
+  const driftStatus = String(item.drift_status ?? '').toLowerCase();
+  const signatureStatus = String(item.signature_status ?? '').toLowerCase();
+  const alerts = (item.alerts ?? []).map((alert) => String(alert).toLowerCase());
+  return (
+    sourceRefId.startsWith('strategy_leg::') &&
+    (
+      ['drifted', 'version_drift', 'stale'].includes(driftStatus) ||
+      signatureStatus === 'stale' ||
+      alerts.some((alert) => alert.includes('newer') || alert.includes('新版本'))
+    )
+  );
+}
+
+function getNewVersionLegCount(composition: ApiCompositionListItem): number {
+  const updatedLegIds = new Set<string>();
+  (composition.source_integrity ?? []).forEach((item, index) => {
+    if (sourceIntegrityHasNewVersion(item)) {
+      updatedLegIds.add(item.leg_id || item.source_ref_id || `${composition.id}-${index}`);
+    }
+  });
+  if (updatedLegIds.size > 0) {
+    return updatedLegIds.size;
+  }
+  return composition.has_new_version ? 1 : 0;
+}
+
+function compositionHasNewVersion(composition: ApiCompositionListItem): boolean {
+  return getNewVersionLegCount(composition) > 0;
+}
+
 function getStatusWriteAction(status: string): { label: string; nextStatus: ApiCompositionStatus } {
   const normalized = String(status || '').toUpperCase();
   if (normalized === 'ACTIVE') {
@@ -91,6 +127,22 @@ function buildTaskList(compositions: ApiCompositionListItem[]): DashboardTask[] 
 
   const tasks: DashboardTask[] = sorted.map((composition): DashboardTask => {
     const normalizedStatus = String(composition.status || '').toUpperCase();
+    const newVersionLegCount = getNewVersionLegCount(composition);
+    if (newVersionLegCount > 0) {
+      return {
+        id: `${composition.id}-leg-version`,
+        title: '腿版本更新',
+        description: `“${formatCompositionName({
+          name: composition.name,
+          benchmarkLabel: composition.benchmark_label,
+          status: composition.status,
+        })}”底层有 ${newVersionLegCount} 条策略腿存在更新版本。`,
+        tone: 'warning',
+        label: '需确认',
+        actionLabel: '进入工作台',
+        actionPath: `/compositions/workbench?composition_id=${encodeURIComponent(composition.id)}`,
+      };
+    }
     if (normalizedStatus === 'DRAFT') {
       return {
         id: `${composition.id}-draft`,
@@ -100,19 +152,6 @@ function buildTaskList(compositions: ApiCompositionListItem[]): DashboardTask[] 
         label: '高优先',
         actionLabel: '进入工作台',
         actionPath: `/compositions/workbench?composition_id=${encodeURIComponent(composition.id)}`,
-      };
-    }
-    if (-Math.abs(normalizePercentLike(composition.max_drawdown)) <= -0.12) {
-      return {
-        id: `${composition.id}-drawdown`,
-        title: '组合管理',
-        description: `当前最大回撤达到 ${formatComposePercent(composition.max_drawdown, {
-          forceNegative: true,
-        })}，建议回看来源配置与维护成本。`,
-        tone: 'danger',
-        label: '处理中',
-        actionLabel: '查看详情',
-        actionPath: `/compositions/${encodeURIComponent(composition.id)}`,
       };
     }
     if (composition.composition_score < 70) {
@@ -419,7 +458,9 @@ export function CompositionDashboardView({
 
               <div className="composition-dashboard-card-grid">
                 {visibleCompositions.map((composition) => {
-                  const tone = getStatusTone(composition.status);
+                  const hasNewVersion = compositionHasNewVersion(composition);
+                  const tone = hasNewVersion ? 'warning' : getStatusTone(composition.status);
+                  const statusLabel = hasNewVersion ? '有新版本' : getStatusLabel(composition.status);
                   const normalizedStatus = String(composition.status || '').toUpperCase();
                   const statusAction = getStatusWriteAction(composition.status);
                   const isSavingStatus = savingCompositionId === composition.id;
@@ -444,7 +485,7 @@ export function CompositionDashboardView({
                           </div>
                         </div>
                         <span className={`composition-dashboard-chip composition-dashboard-chip--${tone}`}>
-                          {getStatusLabel(composition.status)}
+                          {statusLabel}
                         </span>
                       </div>
 
@@ -534,7 +575,13 @@ export function CompositionDashboardView({
 
               <div className="composition-dashboard-task-grid">
                 {visibleTasks.map((task) => (
-                  <article className="composition-dashboard-task" key={task.id}>
+                  <button
+                    aria-label={`${task.title}: ${task.description}`}
+                    className="composition-dashboard-task"
+                    key={task.id}
+                    onClick={() => navigateTo(task.actionPath)}
+                    type="button"
+                  >
                     <div className="composition-dashboard-task__header">
                       <strong>{task.title}</strong>
                       <span className={`composition-dashboard-chip composition-dashboard-chip--${task.tone}`}>
@@ -542,7 +589,8 @@ export function CompositionDashboardView({
                       </span>
                     </div>
                     <p className="composition-dashboard-task__meta">{task.description}</p>
-                  </article>
+                    <span className="composition-dashboard-task__action">{task.actionLabel}</span>
+                  </button>
                 ))}
               </div>
             </section>

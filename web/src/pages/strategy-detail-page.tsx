@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
 import { formatDateTime, formatPercent, formatRatio, formatShortDate } from '../lib/format';
 import { buildOptimizationConfigPath } from '../lib/optimization-routes';
 import { formatParameterLabel as formatSharedParameterLabel, formatParameterValue as formatSharedParameterValue } from '../lib/adapters';
 import { formatStrategyVersionTag, getStrategyDisplayName } from '../lib/strategy-version';
-import type { ApiBacktestRunListItem, ApiStrategyDetail, ParameterValue } from '../types';
+import type { ApiBacktestRunListItem, ApiStrategyDetail, ParameterValue, ParameterVersionRestorePayload } from '../types';
 import './creation-backtest.css';
 import '../page-sections/workspace-recent-runs-lane-b.css';
 import './strategy-detail-page.css';
@@ -26,6 +26,31 @@ const TEXT = {
   historyDetailTitle: '版本参数明细',
   historyDetailClose: '关闭',
   historyDetailEmpty: '该版本没有可展示的参数。',
+  historyDetailChangeSummary: '变更摘要',
+  historyDetailDecisionNote: '决策说明',
+  historyDetailSource: '来源信息',
+  historyDetailAlternatives: '替代版本',
+  historyDetailParameters: '参数',
+  historyDetailNoSource: '来源信息待补充。',
+  historyDetailNoAlternatives: '没有替代版本记录。',
+  historyChangeSummaryFallback: '暂无变更摘要。',
+  historyDecisionNoteFallback: '-',
+  historySourceFallback: '来源待补充',
+  historyRollbackCurrent: '当前版本',
+  historyRollbackable: '可回滚',
+  historyNotRollbackable: '不可回滚',
+  historyRollbackUnknown: '未标记',
+  historyRestore: '回滚',
+  restoreTitle: '确认回滚参数版本',
+  restoreCopy: '回滚会基于当前版本创建恢复请求，并保留完整参数历史。',
+  restoreDecisionNoteLabel: '决策说明',
+  restoreDecisionNotePlaceholder: '说明为什么恢复到这个版本，例如风险回撤更稳定或当前版本不适合继续使用。',
+  restoreCancel: '取消',
+  restoreConfirm: '确认回滚',
+  restoreInFlight: '正在回滚...',
+  restoreNoteRequired: '请填写决策说明后再确认回滚。',
+  restoreApiMissing: '当前 API client 尚未接入版本回滚，请稍后重试。',
+  restoreError: '回滚失败，请稍后重试。',
   recentRunTitle: '最近回测',
   recentRunCopy: '按时间轴查看最近回测记录，并同步展示每次回测对应的策略参数版本。',
   emptyParameters: '当前没有可展示的参数。',
@@ -157,10 +182,36 @@ const HISTORY_COMMENT_LABELS: Record<string, string> = {
   'Promoted after tuning the current settings.': '调优当前设置后晋升为正式版本。',
 };
 
+const HISTORY_DECISION_NOTE_PLACEHOLDERS = new Set(['未记录决策说明。']);
+
 type ParameterCardItem = {
   key: string;
   label: string;
   value: string;
+};
+
+type BaseParameterHistoryEntry = ApiStrategyDetail['parameter_history'][number];
+type HistorySourceValue = string | Record<string, unknown> | null | undefined;
+type HistoryAlternativeVersionValue = string | Record<string, unknown>;
+
+type EnrichedParameterHistoryEntry = Omit<BaseParameterHistoryEntry, 'source' | 'alternative_versions'> & {
+  change_summary?: string | null;
+  decision_note?: string | null;
+  source?: HistorySourceValue;
+  alternative_versions?: HistoryAlternativeVersionValue[] | null;
+  rollbackable?: boolean | null;
+};
+
+type HistorySourceDisplay = {
+  label: string;
+  fields: Array<{ key: string; label: string; value: string }>;
+};
+
+type AlternativeVersionDisplay = {
+  key: string;
+  label: string;
+  id: string | null;
+  summary: string | null;
 };
 
 function strategyTypeLabel(value: string): string {
@@ -234,6 +285,278 @@ function historyCommentLabel(value: string | null | undefined): string {
     return TEXT.historyFallbackComment;
   }
   return HISTORY_COMMENT_LABELS[normalized] ?? normalized;
+}
+
+function readDisplayText(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed.length ? trimmed : null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+  if (typeof value === 'boolean') {
+    return value ? '是' : '否';
+  }
+  return null;
+}
+
+function truncateText(value: string, maxLength = 68): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= maxLength) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, maxLength).trimEnd()}...`;
+}
+
+function historyChangeSummary(entry: EnrichedParameterHistoryEntry): string {
+  const summary = readDisplayText(entry.change_summary);
+  if (summary) {
+    return summary;
+  }
+  const comment = readDisplayText(entry.comment);
+  return comment ? historyCommentLabel(comment) : TEXT.historyChangeSummaryFallback;
+}
+
+function historyDecisionNote(entry: EnrichedParameterHistoryEntry): string {
+  const decisionNote = readDisplayText(entry.decision_note);
+  if (!decisionNote || HISTORY_DECISION_NOTE_PLACEHOLDERS.has(decisionNote) || /^[?？]+$/.test(decisionNote)) {
+    return TEXT.historyDecisionNoteFallback;
+  }
+  return decisionNote;
+}
+
+function historyDecisionNoteSummary(entry: EnrichedParameterHistoryEntry): string {
+  return truncateText(historyDecisionNote(entry));
+}
+
+function parameterVersionDisplayLabel(value: string | null | undefined): string | null {
+  const raw = readDisplayText(value);
+  if (!raw) {
+    return null;
+  }
+  return formatStrategyVersionTag(raw) ?? raw;
+}
+
+function historyVersionLabel(entry: EnrichedParameterHistoryEntry | null | undefined): string {
+  if (typeof entry?.version_number === 'number') {
+    return `v${entry.version_number}`;
+  }
+  return parameterVersionDisplayLabel(entry?.parameter_version_id) ?? TEXT.recentRunVersionFallback;
+}
+
+function currentHistoryVersionLabel(strategy: ApiStrategyDetail, rows: EnrichedParameterHistoryEntry[]): string {
+  const currentEntry = rows.find((entry) => isCurrentHistoryEntry(entry, strategy));
+  if (currentEntry) {
+    return historyVersionLabel(currentEntry);
+  }
+  if (typeof strategy.current_parameter_version === 'number') {
+    return `v${strategy.current_parameter_version}`;
+  }
+  return parameterVersionDisplayLabel(strategy.current_parameter_version_id) ?? '-';
+}
+
+function renderMultilineText(value: string) {
+  const lines = value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length <= 1) {
+    return value;
+  }
+  return (
+    <span className="strategy-detail-multiline-text">
+      {lines.map((line, index) => (
+        <span className="strategy-detail-multiline-text__line" key={`${line}-${index}`}>
+          {line}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function sourceTypeLabel(value: string | null | undefined): string {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  const map: Record<string, string> = {
+    initial: '初始版本',
+    import: '初始导入',
+    manual: '人工修订',
+    revision: '人工修订',
+    restore: '版本回滚',
+    rollback: '版本回滚',
+    backtest: '回测结果',
+    run: '回测结果',
+    optimization: '优化候选',
+    optimization_job: '优化作业',
+    optimization_candidate: '优化候选',
+    candidate: '优化候选',
+    parameter_version: '参数版本',
+  };
+  return map[normalized] ?? (value ? String(value) : TEXT.historySourceFallback);
+}
+
+function sourceFieldLabel(key: string): string {
+  const map: Record<string, string> = {
+    type: '来源类型',
+    source_type: '来源类型',
+    kind: '来源类型',
+    job_id: '优化作业',
+    optimization_job_id: '优化作业',
+    run_id: '回测',
+    backtest_run_id: '回测',
+    candidate_id: '候选',
+    optimization_candidate_id: '候选',
+    version_id: '来源版本',
+    parameter_version_id: '参数版本',
+    source_parameter_version_id: '来源参数版本',
+    base_parameter_version_id: '基准参数版本',
+  };
+  return map[key] ?? key.replace(/_/g, ' ');
+}
+
+function sourceFieldRank(key: string): number {
+  const order: Record<string, number> = {
+    type: 10,
+    source_type: 10,
+    kind: 10,
+    optimization_job_id: 20,
+    job_id: 20,
+    candidate_id: 30,
+    optimization_candidate_id: 30,
+    run_id: 40,
+    backtest_run_id: 40,
+    parameter_version_id: 50,
+    source_parameter_version_id: 50,
+    version_id: 60,
+    base_parameter_version_id: 70,
+  };
+  return order[key] ?? 999;
+}
+
+function normalizeHistorySource(source: HistorySourceValue): HistorySourceDisplay {
+  if (typeof source === 'string') {
+    const label = sourceTypeLabel(source);
+    return { label, fields: [{ key: 'source_type', label: '来源类型', value: label }] };
+  }
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    return { label: TEXT.historySourceFallback, fields: [] };
+  }
+
+  const label =
+    readDisplayText(source.label) ??
+    readDisplayText(source.source_label) ??
+    sourceTypeLabel(readDisplayText(source.source_type) ?? readDisplayText(source.type) ?? readDisplayText(source.kind));
+
+  const fields = Object.entries(source)
+    .filter(([key]) => !['label', 'source_label'].includes(key))
+    .map(([key, value]) => {
+      const rawValue = readDisplayText(value);
+      if (!rawValue) {
+        return null;
+      }
+      const displayValue = ['type', 'source_type', 'kind'].includes(key)
+        ? sourceTypeLabel(rawValue)
+        : key.includes('parameter_version_id')
+          ? parameterVersionDisplayLabel(rawValue) ?? rawValue
+          : rawValue;
+      return { key, label: sourceFieldLabel(key), value: displayValue };
+    })
+    .filter((field): field is { key: string; label: string; value: string } => Boolean(field))
+    .sort((left, right) => sourceFieldRank(left.key) - sourceFieldRank(right.key));
+
+  return { label, fields };
+}
+
+function normalizeAlternativeVersions(
+  versions: HistoryAlternativeVersionValue[] | null | undefined,
+): AlternativeVersionDisplay[] {
+  if (!Array.isArray(versions)) {
+    return [];
+  }
+  return versions.map((item, index) => {
+    if (typeof item === 'string') {
+      const trimmed = item.trim();
+      return {
+        key: trimmed || `alternative-${index}`,
+        label: (formatStrategyVersionTag(trimmed) ?? trimmed) || `替代版本 ${index + 1}`,
+        id: parameterVersionDisplayLabel(trimmed),
+        summary: null,
+      };
+    }
+
+    const record = item as Record<string, unknown>;
+    const id =
+      readDisplayText(record.parameter_version_id) ??
+      readDisplayText(record.version_id) ??
+      readDisplayText(record.id);
+    const versionNumber = readDisplayText(record.version_number);
+    const label =
+      readDisplayText(record.label) ??
+      readDisplayText(record.name) ??
+      (id ? formatStrategyVersionTag(id) ?? id : null) ??
+      (versionNumber ? `v${versionNumber}` : `替代版本 ${index + 1}`);
+    const summary =
+      readDisplayText(record.reason) ??
+      readDisplayText(record.summary) ??
+      readDisplayText(record.change_summary) ??
+      readDisplayText(record.decision_note);
+
+    return {
+      key: id ?? label ?? `alternative-${index}`,
+      label,
+      id: parameterVersionDisplayLabel(id),
+      summary,
+    };
+  });
+}
+
+function isCurrentHistoryEntry(entry: EnrichedParameterHistoryEntry, strategy: ApiStrategyDetail): boolean {
+  if (entry.parameter_version_id && strategy.current_parameter_version_id) {
+    return entry.parameter_version_id === strategy.current_parameter_version_id;
+  }
+  return (
+    typeof entry.version_number === 'number' &&
+    typeof strategy.current_parameter_version === 'number' &&
+    entry.version_number === strategy.current_parameter_version
+  );
+}
+
+function canRestoreHistoryEntry(entry: EnrichedParameterHistoryEntry, strategy: ApiStrategyDetail): boolean {
+  return entry.rollbackable === true && !isCurrentHistoryEntry(entry, strategy);
+}
+
+function rollbackStateLabel(entry: EnrichedParameterHistoryEntry, strategy: ApiStrategyDetail): string {
+  if (isCurrentHistoryEntry(entry, strategy)) {
+    return TEXT.historyRollbackCurrent;
+  }
+  if (entry.rollbackable === true) {
+    return TEXT.historyRollbackable;
+  }
+  if (entry.rollbackable === false) {
+    return TEXT.historyNotRollbackable;
+  }
+  return TEXT.historyRollbackUnknown;
+}
+
+function rollbackStateTone(entry: EnrichedParameterHistoryEntry, strategy: ApiStrategyDetail): string {
+  if (isCurrentHistoryEntry(entry, strategy)) {
+    return 'current';
+  }
+  if (entry.rollbackable === true) {
+    return 'enabled';
+  }
+  if (entry.rollbackable === false) {
+    return 'disabled';
+  }
+  return 'unknown';
+}
+
+function makeRestoreIdempotencyKey(strategyId: string, parameterVersionId: string): string {
+  const randomPart =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `restore-${strategyId}-${parameterVersionId}-${randomPart}`;
 }
 
 function hasParameterValue(value: ParameterValue | undefined): boolean {
@@ -517,6 +840,10 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
   const [openingRevision, setOpeningRevision] = useState(false);
   const [recentRunsLoading, setRecentRunsLoading] = useState(true);
   const [recentRunsError, setRecentRunsError] = useState<string | null>(null);
+  const [restoreTargetId, setRestoreTargetId] = useState<string | null>(null);
+  const [restoreDecisionNote, setRestoreDecisionNote] = useState('');
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [restoringVersion, setRestoringVersion] = useState(false);
 
   const canOpenOptimization = Boolean(strategy);
   const canEditStrategy = strategy ? (strategy.allowed_actions?.includes('edit_parameters') ?? true) : false;
@@ -559,6 +886,59 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
     }
   }
 
+  function handleOpenRestore(entry: EnrichedParameterHistoryEntry): void {
+    setRestoreTargetId(entry.parameter_version_id);
+    setRestoreDecisionNote('');
+    setRestoreError(null);
+  }
+
+  function handleCloseRestore(): void {
+    if (restoringVersion) {
+      return;
+    }
+    setRestoreTargetId(null);
+    setRestoreDecisionNote('');
+    setRestoreError(null);
+  }
+
+  async function handleConfirmRestore(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!strategy || !restoreTargetEntry || restoringVersion) {
+      return;
+    }
+
+    const decisionNote = restoreDecisionNote.trim();
+    if (!decisionNote) {
+      setRestoreError(TEXT.restoreNoteRequired);
+      return;
+    }
+
+    const restoreStrategyParameterVersion = api.restoreStrategyParameterVersion;
+    if (typeof restoreStrategyParameterVersion !== 'function') {
+      setRestoreError(TEXT.restoreApiMissing);
+      return;
+    }
+
+    try {
+      setRestoringVersion(true);
+      setRestoreError(null);
+      const payload: ParameterVersionRestorePayload = {
+        idempotency_key: makeRestoreIdempotencyKey(strategy.id, restoreTargetEntry.parameter_version_id),
+        base_parameter_version_id: strategy.current_parameter_version_id ?? null,
+        decision_note: decisionNote,
+      };
+      const restored = await restoreStrategyParameterVersion(strategy.id, restoreTargetEntry.parameter_version_id, payload);
+      setStrategy(restored);
+      setSelectedHistoryId(null);
+      setRestoreTargetId(null);
+      setRestoreDecisionNote('');
+    } catch (caught) {
+      setRestoreError(caught instanceof Error ? caught.message : TEXT.restoreError);
+    } finally {
+      setRestoringVersion(false);
+    }
+  }
+
   const strategySummary = useMemo(() => (strategy ? buildStrategySummary(strategy) : ''), [strategy]);
   const tradingLogic = useMemo(() => {
     const value = strategy?.parameters?.trading_logic;
@@ -577,11 +957,34 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
       }));
   }, [strategy]);
 
-  const parameterHistoryRows = useMemo(() => strategy?.parameter_history ?? [], [strategy]);
+  const parameterHistoryRows = useMemo<EnrichedParameterHistoryEntry[]>(
+    () => (strategy?.parameter_history ?? []) as EnrichedParameterHistoryEntry[],
+    [strategy],
+  );
 
   const selectedHistoryEntry = useMemo(
     () => parameterHistoryRows.find((entry) => entry.parameter_version_id === selectedHistoryId) ?? null,
     [parameterHistoryRows, selectedHistoryId],
+  );
+
+  const restoreTargetEntry = useMemo(
+    () => parameterHistoryRows.find((entry) => entry.parameter_version_id === restoreTargetId) ?? null,
+    [parameterHistoryRows, restoreTargetId],
+  );
+
+  const currentHistoryLabel = useMemo(
+    () => (strategy ? currentHistoryVersionLabel(strategy, parameterHistoryRows) : '-'),
+    [parameterHistoryRows, strategy],
+  );
+
+  const selectedHistorySource = useMemo(
+    () => normalizeHistorySource(selectedHistoryEntry?.source),
+    [selectedHistoryEntry],
+  );
+
+  const selectedAlternativeVersions = useMemo(
+    () => normalizeAlternativeVersions(selectedHistoryEntry?.alternative_versions),
+    [selectedHistoryEntry],
   );
 
   const selectedHistoryLogic = useMemo(() => {
@@ -767,30 +1170,43 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
                   <thead>
                     <tr>
                       <th>版本</th>
-                      <th>参数版本编号</th>
-                      <th>更新时间</th>
-                      <th>备注</th>
-                      <th>字段数</th>
-                      <th>操作</th>
+                      <th>变更摘要</th>
+                      <th>决策说明</th>
+                      <th>操作（查看参数、回滚）</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {parameterHistoryRows.map((entry) => (
-                      <tr key={entry.parameter_version_id}>
-                        <td>
-                          <strong>v{entry.version_number}</strong>
-                        </td>
-                        <td>{entry.parameter_version_id}</td>
-                        <td>{entry.created_at ? formatDateTime(entry.created_at) : '-'}</td>
-                        <td className="strategy-detail-history-table__comment">{historyCommentLabel(entry.comment)}</td>
-                        <td>{Object.keys(entry.parameters ?? {}).length}</td>
-                        <td>
-                          <button className="text-button" onClick={() => setSelectedHistoryId(entry.parameter_version_id)} type="button">
-                            {TEXT.historyOpenDetail}
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                    {parameterHistoryRows.map((entry) => {
+                      const canRestore = canRestoreHistoryEntry(entry, strategy);
+                      return (
+                        <tr key={entry.parameter_version_id}>
+                          <td className="strategy-detail-history-table__version">
+                            <div className="strategy-detail-history-table__version-stack">
+                              <strong>{historyVersionLabel(entry)}</strong>
+                              <span>{entry.created_at ? formatDateTime(entry.created_at) : '-'}</span>
+                            </div>
+                          </td>
+                          <td className="strategy-detail-history-table__summary">{renderMultilineText(historyChangeSummary(entry))}</td>
+                          <td className="strategy-detail-history-table__decision">{historyDecisionNoteSummary(entry)}</td>
+                          <td>
+                            <div className="strategy-detail-history-table__actions">
+                              <button className="text-button" onClick={() => setSelectedHistoryId(entry.parameter_version_id)} type="button">
+                                {TEXT.historyOpenDetail}
+                              </button>
+                              {canRestore ? (
+                                <button
+                                  className="text-button strategy-detail-history-table__restore-button"
+                                  onClick={() => handleOpenRestore(entry)}
+                                  type="button"
+                                >
+                                  {TEXT.historyRestore}
+                                </button>
+                              ) : null}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -886,7 +1302,7 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
             <div className="panel-header">
               <div>
                 <p className="eyebrow">{TEXT.historyDetailTitle}</p>
-                <h3>{selectedHistoryEntry.parameter_version_id}</h3>
+                <h3>{historyVersionLabel(selectedHistoryEntry)}</h3>
                 <p className="creation-panel-copy">
                   创建时间: {selectedHistoryEntry.created_at ? formatDateTime(selectedHistoryEntry.created_at) : '-'}，字段数:{' '}
                   {Object.keys(selectedHistoryEntry.parameters ?? {}).length}
@@ -895,31 +1311,132 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
             </div>
             <div className="strategy-detail-history-modal__meta">
               <span className="status-chip status-chip--soft">修订 {selectedHistoryEntry.revision}</span>
+              <span className="status-chip status-chip--soft">{selectedHistorySource.label}</span>
+              <span
+                className={`strategy-detail-history-table__state strategy-detail-history-table__state--${rollbackStateTone(
+                  selectedHistoryEntry,
+                  strategy,
+                )}`}
+              >
+                {rollbackStateLabel(selectedHistoryEntry, strategy)}
+              </span>
             </div>
-            {selectedHistoryLogic || selectedHistoryCards.length ? (
-              <div className="strategy-detail-parameter-grid strategy-detail-parameter-grid--history">
-                {selectedHistoryLogic ? (
-                  <article className="strategy-detail-parameter-card strategy-detail-parameter-card--logic">
-                    <span>{parameterLabel('trading_logic')}</span>
-                    <strong>{selectedHistoryLogic}</strong>
-                  </article>
-                ) : null}
-                {selectedHistoryCards.map((parameter) => (
-                  <article className="strategy-detail-parameter-card" key={`${selectedHistoryEntry.parameter_version_id}-${parameter.key}`}>
-                    <span>{parameter.label}</span>
-                    <strong>{parameter.value}</strong>
-                  </article>
-                ))}
-              </div>
-            ) : (
-              <p className="empty-state">{TEXT.historyDetailEmpty}</p>
-            )}
+            <section className="strategy-detail-history-modal__section">
+              <h4>{TEXT.historyDetailChangeSummary}</h4>
+              <p>{renderMultilineText(historyChangeSummary(selectedHistoryEntry))}</p>
+            </section>
+            <section className="strategy-detail-history-modal__section">
+              <h4>{TEXT.historyDetailDecisionNote}</h4>
+              <p>{historyDecisionNote(selectedHistoryEntry)}</p>
+            </section>
+            <section className="strategy-detail-history-modal__section">
+              <h4>{TEXT.historyDetailSource}</h4>
+              {selectedHistorySource.fields.length ? (
+                <div className="strategy-detail-history-modal__source-grid">
+                  {selectedHistorySource.fields.map((field) => (
+                    <article className="strategy-detail-history-modal__source-card" key={`${selectedHistoryEntry.parameter_version_id}-${field.key}`}>
+                      <span>{field.label}</span>
+                      <strong>{field.value}</strong>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty-state">{TEXT.historyDetailNoSource}</p>
+              )}
+            </section>
+            <section className="strategy-detail-history-modal__section">
+              <h4>{TEXT.historyDetailAlternatives}</h4>
+              {selectedAlternativeVersions.length ? (
+                <div className="strategy-detail-history-modal__alternative-list">
+                  {selectedAlternativeVersions.map((version) => (
+                    <article className="strategy-detail-history-modal__alternative-card" key={version.key}>
+                      <strong>{version.label}</strong>
+                      {version.id ? <span>{version.id}</span> : null}
+                      {version.summary ? <p>{version.summary}</p> : null}
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty-state">{TEXT.historyDetailNoAlternatives}</p>
+              )}
+            </section>
+            <section className="strategy-detail-history-modal__section strategy-detail-history-modal__section--parameters">
+              <h4>{TEXT.historyDetailParameters}</h4>
+              {selectedHistoryLogic || selectedHistoryCards.length ? (
+                <div className="strategy-detail-parameter-grid strategy-detail-parameter-grid--history">
+                  {selectedHistoryLogic ? (
+                    <article className="strategy-detail-parameter-card strategy-detail-parameter-card--logic">
+                      <span>{parameterLabel('trading_logic')}</span>
+                      <strong>{selectedHistoryLogic}</strong>
+                    </article>
+                  ) : null}
+                  {selectedHistoryCards.map((parameter) => (
+                    <article className="strategy-detail-parameter-card" key={`${selectedHistoryEntry.parameter_version_id}-${parameter.key}`}>
+                      <span>{parameter.label}</span>
+                      <strong>{parameter.value}</strong>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty-state">{TEXT.historyDetailEmpty}</p>
+              )}
+            </section>
             <div className="modal-card__footer">
               <button className="ghost-button" onClick={() => setSelectedHistoryId(null)} type="button">
                 {TEXT.historyDetailClose}
               </button>
             </div>
           </div>
+        </div>
+      ) : null}
+      {restoreTargetEntry ? (
+        <div
+          aria-label={TEXT.restoreTitle}
+          aria-modal="true"
+          className="modal-shell"
+          onClick={handleCloseRestore}
+          role="dialog"
+        >
+          <form
+            className="modal-card strategy-detail-restore-modal"
+            onClick={(event) => event.stopPropagation()}
+            onSubmit={(event) => void handleConfirmRestore(event)}
+          >
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">{TEXT.restoreTitle}</p>
+                <h3>{TEXT.restoreTitle}</h3>
+                <p className="creation-panel-copy">{TEXT.restoreCopy}</p>
+              </div>
+            </div>
+            <div className="strategy-detail-restore-modal__target">
+              <span>目标版本</span>
+              <strong>{historyVersionLabel(restoreTargetEntry)}</strong>
+              <span>当前基准</span>
+              <strong>{currentHistoryLabel}</strong>
+            </div>
+            <p className="strategy-detail-restore-modal__summary">{renderMultilineText(historyChangeSummary(restoreTargetEntry))}</p>
+            <label className="strategy-detail-restore-modal__field">
+              <span>{TEXT.restoreDecisionNoteLabel}</span>
+              <textarea
+                disabled={restoringVersion}
+                onChange={(event) => setRestoreDecisionNote(event.currentTarget.value)}
+                placeholder={TEXT.restoreDecisionNotePlaceholder}
+                required
+                rows={5}
+                value={restoreDecisionNote}
+              />
+            </label>
+            {restoreError ? <div className="error-banner">{restoreError}</div> : null}
+            <div className="modal-card__footer">
+              <button className="ghost-button" disabled={restoringVersion} onClick={handleCloseRestore} type="button">
+                {TEXT.restoreCancel}
+              </button>
+              <button className="primary-button" disabled={restoringVersion || !restoreDecisionNote.trim()} type="submit">
+                {restoringVersion ? TEXT.restoreInFlight : TEXT.restoreConfirm}
+              </button>
+            </div>
+          </form>
         </div>
       ) : null}
     </div>

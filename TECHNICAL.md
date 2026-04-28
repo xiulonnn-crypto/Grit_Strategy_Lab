@@ -45,6 +45,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - 已批准 UI 交付物实施必须同时提供截图、DOM 文案/状态扫描与关键交互证明。
 - 像素对齐不能只看外框坐标和高度；还必须检查模块内部的视觉密度、内容到容器边界的空白、强制 `min-height` / `height` 是否造成空洞。若用户反馈“空白多、模块太高、密度松”，优先移除非必要强制高度并用内容自适应、padding/gap/line-height 精调，而不是继续追求静态稿外框高度。
 - CSS 契约测试不能把过大的固定高度当作 UI 一致性本身；除非批准稿明确要求固定高度，否则应断言大 `min-height` / `height` 不存在，并用截图或 DOM geometry 证明模块间距和卡片内边距已经收敛。
+- 表格单元格需要保持浏览器原生 `table-cell` 布局，不要把 `td` / `th` 本身改成 `display: grid`、`display: flex` 等。若单元格内部需要栅格或弹性排版，必须新增内部 wrapper；多行内容验收要比较该单元格高度与整行高度，确认分隔线不会提前断开。
 - live API 或 demo data 与静态设计稿不一致时，页面必须通过 view-model / formatter 统一前台展示，不能直接暴露 raw backend label、未翻译英文、乱码、占位符或实现说明语气。
 - 用户报告已批准 UI 在某个具体 live route 或对象 ID 上漂移时，验收必须抓取用户给出的精确 URL/ID；只抽样列表第一条、默认 demo 对象或旧截图不能作为该问题的完成证据。
 - worker 交付给 reviewer 前必须先跑交付前自测门，按 reviewer 拒收清单自查测试、Trace Matrix、截图、DOM 文案、交互证明、文档 delta 和剩余偏离，并明确回答 `Would reviewer refuse this?`；答案不是确定的 `No` 时不得交付。
@@ -154,6 +155,8 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `leg.inventory.test.tsx`
 - `composition.workbench.test.tsx`
 - `composition.detail.test.tsx`
+- `composition.backtest.result.test.tsx`
+- `composition.allocation.test.tsx`
 - `creation.flow.test.tsx`
 - `backtest.submit.test.tsx`
 - `run-detail.page.test.tsx`
@@ -325,6 +328,13 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - `POST /compositions/preview`
 - `POST /compositions`
 - `PATCH /compositions/{composition_id}`
+- `POST /compositions/{composition_id}/backtest-runs`
+- `GET /compositions/{composition_id}/backtest-runs/{run_id}`
+- `GET /compositions/{composition_id}/backtest-runs/{run_id}/orders`
+- `GET /compositions/{composition_id}/backtest-runs/{run_id}/orders/{order_id}/netting`
+- `GET /compositions/{composition_id}/backtest-runs/{run_id}/orders/export`
+- `POST /compositions/{composition_id}/allocation-jobs`
+- `GET /compositions/{composition_id}/allocation-jobs/{job_id}`
 - `GET /optimization-jobs`
 - `GET /optimization-jobs/{job_id}/detail`
 - `POST /strategies/{strategy_id}/optimization-jobs`
@@ -343,6 +353,7 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - `GET /compositions`、`GET /compositions/{id}`、`POST /compositions/preview`、`POST /compositions`、`PATCH /compositions/{id}` 共同组成一期组合工作台与详情页的正式契约面。
 - `POST /compositions/preview` 返回权重摘要、收益流预演、相关性矩阵、风险贡献预览、维护成本与再平衡摘要，供工作台边调边判断；Phase 1.2 同时返回 `return_quality_summary`、`rebalance_events`、`source_integrity`，并在风险贡献里补充边际贡献、预算占用、债券久期/凸性占用。
 - `GET /compositions/{id}` 继续读取冻结来源；Phase 1.2 详情额外返回 `audit_trail`，并扩展 `source_evidence` 的 `signature_status`、`drift_status`、`current_ref_id`、`alerts`。来源漂移只提示，不自动改写已保存组合。
+- Sleeve OS v1 新增组合层回测与资产配置契约。组合回测运行用于稳定性复核、订单穿透和证据留痕，订单导出支持 CSV 与最小 XLSX 工作簿；组合资产配置任务用于意图导航、约束预检、有效前沿候选和迁移成本评估。若真实长周期、真实成交或底层持仓数据不足，接口与页面必须显式展示代理、质量或不可用状态。
 - `composition_audit_events` 是 Phase 1.2 后端 append-only 审计表；创建、结构 PATCH、状态切换、来源冻结、再平衡检查和债券快照刷新影响检查都应写入该表，详情 `audit_trail` 从持久化事件流读取，旧数据才允许回退到临时投影。
 - `GET /data-snapshots/overview` 继续作为唯一快照总览入口；债券/固定收益治理页通过新增 `bond_fixed_income` 分段扩展现有契约，不另开第二套快照 API。Phase 1.2 的债券质量字段包括 `quality_audit`、`repair_rules`、`daily_accrual_status`、`risk_budget_inputs`，修复/补齐仍走 `POST /admin/snapshot-refresh-jobs` 的 `bond` target。
 
@@ -383,7 +394,11 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - `#/legs`
 - `#/compositions/workbench`
 - `#/compositions/:id`
-- `#/creation/new`
+- `#/compositions/:compositionId/backtest-runs/new`
+- `#/compositions/:compositionId/backtest-runs/:runId`
+- `#/compositions/:compositionId/allocation-lab`
+- `#/compositions/:compositionId/allocation-jobs/:jobId`
+- `#/strategies`
 - `#/creation/sessions/:id`
 - `#/strategies/:id`
 - `#/strategies/:id/backtest-runs/new`
@@ -643,6 +658,8 @@ Phase 1.1 的默认回归范围包含五个真实 runtime 页面：`#/compositio
 - `GET /data-snapshots/overview`、`POST /admin/snapshot-refresh-jobs`、`POST /asset-legs`：债券 tab 读取 `bond_fixed_income`、触发刷新、从 eligible runtime bond snapshot 创建资产腿。
 
 Phase 1.2 的默认回归范围仍锁定这五个真实 runtime 页面，其中重点页面是 `#/compositions/workbench`、`#/compositions/:id`、`#/snapshots?tab=bond`、`#/legs`。实现必须先产出 UI Artifact Trace Matrix，再把设计稿模块映射到选择器、文案、状态与测试；当前 Phase 1.2 trace matrix 位于 `output/ui-artifact-trace/phase1-2-trust-matrix.md`，批准设计包位于 `C:\Users\TradeAdmin\.gstack\projects\grit-strategy-lab\designs\phase1-2-trust-2026-04-27\`。
+
+Sleeve OS 组合中心 v1 采用 Split-only 实施：组合详情页、组合回测配置 / 结果页、组合优化配置 / 结果页进入正式路由；Stepper 设计稿只作为历史对照，不进入运行时。当前 trace matrix 位于 `output/ui-artifact-trace/sleeve-os-v1-trace-matrix.md`，批准设计包位于 `C:\Users\TradeAdmin\.gstack\projects\grit-strategy-lab\designs\sleeve-os-v1-2026-04-28\`。
 
 Phase 1.2 验证时至少覆盖：
 

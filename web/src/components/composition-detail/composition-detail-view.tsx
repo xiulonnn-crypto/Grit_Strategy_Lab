@@ -28,7 +28,6 @@ import type {
 } from '../../types';
 import './composition-detail.css';
 
-type PerformanceMode = 'cumulative' | 'spread' | 'drawdown';
 type CorrelationMode = 'current' | 'stress';
 
 type CompositionDetailViewProps = {
@@ -60,6 +59,32 @@ type AnnualizedCostBreakdown = {
   cashBuffer: number;
   rebalance: number;
   total: number;
+};
+
+type ExecutionHistoryRow = {
+  key: string;
+  runId: string;
+  dateLabel: string;
+  versionLabel: string;
+  periodLabel: string;
+  annualizedLabel: string;
+  sharpeLabel: string;
+  statusLabel: string;
+};
+
+type VersionEvolutionRow = {
+  key: string;
+  title: string;
+  detail: string;
+  meta: string;
+};
+
+type ExposureDrilldownRow = {
+  key: string;
+  source: string;
+  layer: string;
+  detail: string;
+  tone: 'good' | 'info' | 'warn';
 };
 
 function getToneClassName(tone?: string | null): string {
@@ -446,6 +471,91 @@ function getKpiDetailText(detail: ApiCompositionDetail, key: string, fallback: s
   return /[\u3400-\u9fff]/.test(text) ? text : fallback;
 }
 
+function findFirstKpiText(detail: ApiCompositionDetail, keys: string[]): string | null {
+  for (const key of keys) {
+    const text = findKpiText(detail, key);
+    if (text) {
+      return text;
+    }
+  }
+  return null;
+}
+
+function findFirstKpiNumber(detail: ApiCompositionDetail, keys: string[]): number | null {
+  for (const key of keys) {
+    const value = findKpiNumber(detail, key);
+    if (value !== null) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function formatRatioValue(value: number | null): string {
+  return value === null ? '待补' : value.toFixed(2);
+}
+
+function getLargestRiskDeviation(detail: ApiCompositionDetail): {
+  value: number | null;
+  label: string;
+  tone: 'better' | 'worse' | 'neutral';
+} {
+  const rows = detail.risk_contribution_preview
+    .map((item) => ({
+      value: item.contribution_pct - item.weight_pct,
+      label: item.label,
+    }))
+    .filter((item) => Number.isFinite(item.value));
+  if (!rows.length) {
+    return { value: null, label: '风险预算待补', tone: 'neutral' };
+  }
+  const largest = rows.reduce((current, item) =>
+    Math.abs(item.value) > Math.abs(current.value) ? item : current,
+  );
+  return {
+    value: largest.value,
+    label: `${getDisplayText(largest.label)} ${largest.value >= 0 ? '高于权重' : '低于权重'}`,
+    tone: Math.abs(largest.value) >= 8 ? 'worse' : 'better',
+  };
+}
+
+function getMaxStressCorrelation(detail: ApiCompositionDetail): number | null {
+  const values = detail.correlation_matrix
+    .filter((cell) => cell.x_key !== cell.y_key)
+    .map((cell) => getStressCorrelation(cell.correlation))
+    .filter((value) => Number.isFinite(value));
+  return values.length ? Math.max(...values) : null;
+}
+
+function getMaxCurrentCorrelation(detail: ApiCompositionDetail): number | null {
+  const values = detail.correlation_matrix
+    .filter((cell) => cell.x_key !== cell.y_key)
+    .map((cell) => cell.correlation)
+    .filter((value) => Number.isFinite(value));
+  return values.length ? Math.max(...values) : null;
+}
+
+function correlationRiskText(value: number | null): string {
+  if (value === null) {
+    return '压力窗待补';
+  }
+  if (value >= 0.7) {
+    return '压力上升';
+  }
+  return '压力可控';
+}
+
+function getReturnQualityDetail(detail: ApiCompositionDetail): string {
+  const quality = detail.return_quality_summary;
+  if (!quality) {
+    return '收益质量等待运行态补齐。';
+  }
+  if (quality.fallback_used) {
+    return `代理或回退 ${quality.missing_points} 点。`;
+  }
+  return `对齐 ${quality.aligned_points} 点。`;
+}
+
 function buildDetailKpiCards(detail: ApiCompositionDetail): DetailKpiCard[] {
   const returnYears = getReturnWindowYears(detail);
   const benchmarkReturns = getBenchmarkMonthlyReturns(detail);
@@ -463,8 +573,6 @@ function buildDetailKpiCards(detail: ApiCompositionDetail): DetailKpiCard[] {
   const benchmarkAnnualized = annualizeCumulativePercent(benchmarkTotalReturn, returnYears);
   const benchmarkVolatility = calculateAnnualizedVolatility(benchmarkReturns);
   const benchmarkDrawdown = calculateBenchmarkDrawdown(detail);
-  const benchmarkSharpe = calculateAnnualizedSharpe(benchmarkReturns);
-  const benchmarkSortino = calculateAnnualizedSortino(benchmarkReturns);
   const netAnnualized = getEstimatedNetAnnualized(detail, portfolioAnnualized, returnYears);
   const recoveryDays = getMaxDrawdownRecoveryDays(detail);
   const portfolioVolatility = getKpiPercentDecimal(detail, 'volatility', getPortfolioVolatilityPct(detail));
@@ -472,75 +580,97 @@ function buildDetailKpiCards(detail: ApiCompositionDetail): DetailKpiCard[] {
   const portfolioDrawdown = portfolioDrawdownRaw === null ? null : -Math.abs(portfolioDrawdownRaw);
   const portfolioSharpe = getKpiNumberValue(detail, 'sharpe');
   const portfolioSortino = getKpiNumberValue(detail, 'sortino');
-  const annualizedTrend = getBenchmarkPercentTrend('annualized_return', portfolioAnnualized, benchmarkAnnualized);
-  const netAnnualizedTrend = getBenchmarkPercentTrend('net_annualized_return', netAnnualized.value, benchmarkAnnualized);
-  const volatilityTrend = getBenchmarkPercentTrend('volatility', portfolioVolatility, benchmarkVolatility);
   const drawdownTrend = getBenchmarkPercentTrend('max_drawdown', portfolioDrawdown, benchmarkDrawdown);
-  const sharpeTrend = getBenchmarkRatioTrend('sharpe', portfolioSharpe, benchmarkSharpe);
-  const sortinoTrend = getBenchmarkRatioTrend('sortino', portfolioSortino, benchmarkSortino);
+  const betaNumber = findFirstKpiNumber(detail, ['beta_exposure', 'beta', 'portfolio_beta']);
+  const betaText = findFirstKpiText(detail, ['beta_exposure', 'beta', 'portfolio_beta']);
+  const riskDeviation = getLargestRiskDeviation(detail);
+  const stressCorrelation = getMaxStressCorrelation(detail);
+  const currentCorrelation = getMaxCurrentCorrelation(detail);
+  const quality = detail.return_quality_summary;
+  const netCumulativeReturn = detail.returns_preview[detail.returns_preview.length - 1]?.cumulative_net_return_pct;
+  const netReturnValue =
+    typeof netCumulativeReturn === 'number' && Number.isFinite(netCumulativeReturn)
+      ? netCumulativeReturn
+      : netAnnualized.value;
+  const alphaContributor = [...detail.risk_contribution_preview].sort(
+    (left, right) => (right.return_contribution_pct ?? 0) - (left.return_contribution_pct ?? 0),
+  )[0];
 
   return [
     {
-      key: 'total_return',
-      label: '总收益',
-      value: formatPercentCardValue(getLatestCumulativeReturn(detail), { signed: true }),
-      detail: '含再平衡路径。',
-      trendText: totalExcessReturn === null ? '基准待补' : `超额 ${formatSignedPercentDelta(totalExcessReturn)}`,
+      key: 'alpha_contribution',
+      label: 'Alpha 贡献',
+      value: totalExcessReturn === null ? '待补' : formatPercentCardValue(totalExcessReturn, { signed: true }),
+      detail: alphaContributor ? `${getDisplayText(alphaContributor.label)} 贡献 ${formatFixedPercent(alphaContributor.return_contribution_pct ?? 0)}` : '等待归因样本补齐。',
+      trendText: totalExcessReturn === null ? '基准待补' : `相对基准 ${formatSignedPercentDelta(totalExcessReturn)}`,
       trendTone: resolveBenchmarkTrendTone(
         'total_return',
         portfolioTotalReturn === null ? null : normalizePercentLike(portfolioTotalReturn),
         benchmarkTotalReturn === null ? null : normalizePercentLike(benchmarkTotalReturn),
       ),
       compareItems: [
-        { label: '基准', value: formatPercentCardValue(benchmarkTotalReturn) },
+        { label: '组合', value: formatPercentCardValue(portfolioTotalReturn, { signed: true }) },
+        { label: '基准', value: formatPercentCardValue(benchmarkTotalReturn, { signed: true }) },
       ],
       tone: 'positive',
       accent: true,
     },
     {
-      key: 'annualized_return',
-      label: '年化',
-      value: formatKpiPercentCardValue(detail, 'annualized_return'),
-      detail: getKpiDetailText(detail, 'annualized_return', '月度复利口径。'),
-      trendText: annualizedTrend.trendText,
-      trendTone: annualizedTrend.trendTone,
+      key: 'beta_exposure',
+      label: 'Beta 暴露',
+      value: betaText ?? formatRatioValue(betaNumber),
+      detail: betaNumber === null && !betaText ? '等待运行态 Beta 指标。' : '相对基准的方向性暴露。',
+      trendText: benchmarkVolatility === null || portfolioVolatility === null ? '波动待补' : `波动比 ${formatRatioValue(portfolioVolatility / benchmarkVolatility)}`,
+      trendTone: betaNumber !== null && betaNumber <= 0.85 ? 'better' : 'neutral',
       compareItems: [
-        { label: '基准', value: formatPercentCardValue(benchmarkAnnualized) },
+        { label: '组合波动', value: formatPercentCardValue(portfolioVolatility) },
+        { label: '基准波动', value: formatPercentCardValue(benchmarkVolatility) },
       ],
-      tone: findKpi(detail, 'annualized_return')?.tone ?? 'positive',
+      tone: 'blue',
     },
     {
-      key: 'net_annualized_return',
-      label: '预估净年化',
-      value: formatPercentCardValue(netAnnualized.value),
-      detail: '',
-      tooltip: '毛年化扣除滑点、现金缓冲、维护成本和调仓损耗。',
-      trendText: netAnnualizedTrend.trendText,
-      trendTone: netAnnualizedTrend.trendTone,
+      key: 'risk_contribution_deviation',
+      label: '风险贡献偏离',
+      value: riskDeviation.value === null ? '待补' : formatPercentCardValue(riskDeviation.value, { signed: true }),
+      detail: riskDeviation.label,
+      trendText: '按腿权重校验',
+      trendTone: riskDeviation.tone,
       compareItems: [
-        { label: '毛年化', value: formatPercentCardValue(netAnnualized.grossAnnualized) },
+        { label: '最大风险腿', value: riskDeviation.label },
+      ],
+      tone: riskDeviation.tone === 'worse' ? 'warning' : 'positive',
+    },
+    {
+      key: 'correlation_stress',
+      label: '相关性压力',
+      value: stressCorrelation === null ? '待补' : stressCorrelation.toFixed(2),
+      detail: stressCorrelation !== null && stressCorrelation >= 0.7 ? '压力窗同涨同跌上升。' : '压力相关性仍可控。',
+      trendText: correlationRiskText(stressCorrelation),
+      trendTone: stressCorrelation !== null && stressCorrelation >= 0.7 ? 'worse' : 'better',
+      compareItems: [
+        { label: '常态最高', value: formatRatioValue(currentCorrelation) },
+      ],
+      tone: stressCorrelation !== null && stressCorrelation >= 0.7 ? 'warning' : 'blue',
+    },
+    {
+      key: 'net_return',
+      label: '净收益',
+      value: formatPercentCardValue(netReturnValue, { signed: true }),
+      detail: '扣除成本与现金拖累。',
+      tooltip: '净收益优先读取累计净收益；缺失时回退为预估净年化。',
+      trendText: benchmarkAnnualized === null ? '基准待补' : `年化 ${formatPercentCardValue(portfolioAnnualized)}`,
+      trendTone: netReturnValue !== null && netReturnValue >= 0 ? 'better' : 'worse',
+      compareItems: [
         { label: '总损耗', value: formatPercentCardValue(netAnnualized.totalLoss) },
+        { label: '毛年化', value: formatPercentCardValue(netAnnualized.grossAnnualized) },
       ],
-      tone: netAnnualized.value !== null && netAnnualized.value >= 0 ? 'positive' : 'warning',
-    },
-    {
-      key: 'volatility',
-      label: '波动',
-      value: formatKpiPercentCardValue(detail, 'volatility', getPortfolioVolatilityPct(detail)),
-      detail: getKpiDetailText(detail, 'volatility', '低于纯风险资产。'),
-      tooltip: '年化波动衡量组合收益围绕均值上下摆动的幅度，数值越低代表路径越平稳。',
-      trendText: volatilityTrend.trendText,
-      trendTone: volatilityTrend.trendTone,
-      compareItems: [
-        { label: '基准', value: formatPercentCardValue(benchmarkVolatility) },
-      ],
-      tone: findKpi(detail, 'volatility')?.tone ?? 'neutral',
+      tone: netReturnValue !== null && netReturnValue >= 0 ? 'positive' : 'warning',
     },
     {
       key: 'max_drawdown',
       label: '最大回撤',
       value: formatKpiPercentCardValue(detail, 'max_drawdown', null, { forceNegative: true }),
-      detail: getKpiDetailText(detail, 'max_drawdown', '修复压力复核。'),
+      detail: getKpiDetailText(detail, 'max_drawdown', '低于基准回撤即为防守有效。'),
       trendText: drawdownTrend.trendText,
       trendTone: drawdownTrend.trendTone,
       compareItems: [
@@ -550,30 +680,18 @@ function buildDetailKpiCards(detail: ApiCompositionDetail): DetailKpiCard[] {
       tone: findKpi(detail, 'max_drawdown')?.tone ?? 'warning',
     },
     {
-      key: 'sharpe',
-      label: '夏普比率',
-      value: formatRatioCardValue(detail, 'sharpe'),
-      detail: getKpiDetailText(detail, 'sharpe', '收益效率复核。'),
-      tooltip: '夏普比率衡量每承受一单位总波动换来的超额收益，越高说明风险调整后收益越好。',
-      trendText: sharpeTrend.trendText,
-      trendTone: sharpeTrend.trendTone,
+      key: 'return_quality',
+      label: '收益质量',
+      value: quality ? `${Math.round(quality.coverage_pct)}%` : '待补',
+      detail: getReturnQualityDetail(detail),
+      tooltip: '收益质量来自组合收益、基准与腿收益流的对齐覆盖率；使用代理或回退时会提示。',
+      trendText: quality?.fallback_used ? '存在代理' : '证据对齐',
+      trendTone: quality?.fallback_used ? 'worse' : 'better',
       compareItems: [
-        { label: '基准', value: benchmarkSharpe === null ? '暂无' : benchmarkSharpe.toFixed(2) },
+        { label: '夏普', value: portfolioSharpe === null ? '待补' : portfolioSharpe.toFixed(2) },
+        { label: '索提诺', value: portfolioSortino === null ? '待补' : portfolioSortino.toFixed(2) },
       ],
-      tone: findKpi(detail, 'sharpe')?.tone ?? 'positive',
-    },
-    {
-      key: 'sortino',
-      label: '索提诺比率',
-      value: formatRatioCardValue(detail, 'sortino'),
-      detail: getKpiDetailText(detail, 'sortino', '下行保护复核。'),
-      tooltip: '索提诺比率只惩罚下行波动，用来观察组合对亏损路径的保护效率。',
-      trendText: sortinoTrend.trendText,
-      trendTone: sortinoTrend.trendTone,
-      compareItems: [
-        { label: '基准', value: benchmarkSortino === null ? '暂无' : benchmarkSortino.toFixed(2) },
-      ],
-      tone: findKpi(detail, 'sortino')?.tone ?? 'positive',
+      tone: quality?.fallback_used ? 'warning' : 'positive',
     },
   ];
 }
@@ -672,6 +790,207 @@ function getRebalanceChartMarkers(detail: ApiCompositionDetail): Array<{ index: 
     }));
 }
 
+function getCostDragSeries(detail: ApiCompositionDetail): number[] {
+  let cumulativeDrag = 0;
+  return detail.returns_preview.map((point) => {
+    if (typeof point.cumulative_net_return_pct === 'number' && Number.isFinite(point.cumulative_net_return_pct)) {
+      return point.cumulative_net_return_pct;
+    }
+    const drag = typeof point.total_cost_drag_pct === 'number' && Number.isFinite(point.total_cost_drag_pct)
+      ? point.total_cost_drag_pct
+      : 0;
+    cumulativeDrag += Math.max(0, drag);
+    return point.cumulative_return_pct - cumulativeDrag;
+  });
+}
+
+function formatShortDate(value?: string | null): string {
+  const text = getDisplayText(value, '');
+  if (!text) {
+    return '日期待补';
+  }
+  const date = new Date(text);
+  if (Number.isFinite(date.getTime())) {
+    return date.toISOString().slice(0, 10);
+  }
+  return text.slice(0, 10);
+}
+
+function getRecordString(source: Record<string, unknown> | undefined, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = source?.[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+  return null;
+}
+
+function getRecordNumber(source: Record<string, unknown> | undefined, keys: string[]): number | null {
+  for (const key of keys) {
+    const value = source?.[key];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === 'string') {
+      const parsed = Number(value.replace(/[^\d.-]/g, ''));
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+  return null;
+}
+
+function looksLikeRunId(value?: string | null): boolean {
+  const text = getDisplayText(value, '');
+  return /(?:^|[_:-])(run|bt|backtest)[_:-]?/i.test(text) || /^(run|bt|backtest)[-_]/i.test(text);
+}
+
+function getCompositionVersionLabel(detail: ApiCompositionDetail): string {
+  const heroVersion = getRecordString(detail.hero_summary as unknown as Record<string, unknown>, [
+    'version_label',
+    'current_version_label',
+    'composition_version_label',
+  ]);
+  if (heroVersion) {
+    return heroVersion;
+  }
+  const sourceVersion = detail.source_evidence
+    .map((item) => getRecordString(item.snapshot, ['composition_version_label', 'composition_version', 'version_label']))
+    .find(Boolean);
+  if (sourceVersion) {
+    return sourceVersion;
+  }
+  return '当前版本';
+}
+
+function getCurrentRulingLabel(detail: ApiCompositionDetail, driftCount: number): string {
+  const verdict = getDisplayText(detail.composition_score.verdict, '');
+  const normalized = verdict.toLowerCase();
+  if (driftCount > 0) {
+    return '保持并观察';
+  }
+  if (/(strong|good|stable|良好|稳定|通过|可继续)/i.test(normalized)) {
+    return '可继续持有';
+  }
+  if (/(watch|warning|复核|观察|漂移)/i.test(normalized)) {
+    return '保持并观察';
+  }
+  if (/(blocked|failed|risk|阻断|失败|风险)/i.test(normalized)) {
+    return '暂停并复核';
+  }
+  return verdict || '等待裁决';
+}
+
+function getExecutionHistoryRows(detail: ApiCompositionDetail): ExecutionHistoryRow[] {
+  const rows: ExecutionHistoryRow[] = [];
+  const annualizedLabel =
+    findFirstKpiText(detail, ['annualized_return', 'net_annualized_return'])
+    ?? formatPercentCardValue(annualizeCumulativePercent(getLatestCumulativeReturn(detail), getReturnWindowYears(detail)));
+  const sharpeLabel = formatRatioCardValue(detail, 'sharpe');
+  const fallbackPeriod = `${Math.max(1, Math.round(getReturnWindowYears(detail)))}Y`;
+  detail.source_evidence.forEach((evidence) => {
+    const runId =
+      getRecordString(evidence.snapshot, ['composition_run_id', 'backtest_run_id', 'source_run_id', 'run_id'])
+      ?? (looksLikeRunId(evidence.freeze_ref_id) ? evidence.freeze_ref_id : null)
+      ?? (looksLikeRunId(getRecordString(evidence.snapshot, ['proof_label'])) ? getRecordString(evidence.snapshot, ['proof_label']) : null);
+    if (!runId || rows.some((row) => row.runId === runId)) {
+      return;
+    }
+    const periodYears = getRecordNumber(evidence.snapshot, ['period_years', 'window_years', 'backtest_years']);
+    rows.push({
+      key: `${evidence.id}-${runId}`,
+      runId,
+      dateLabel: formatShortDate(evidence.captured_at),
+      versionLabel:
+        getRecordString(evidence.snapshot, ['composition_version_label', 'composition_version', 'version_label'])
+        ?? getCompositionVersionLabel(detail),
+      periodLabel: periodYears ? `${periodYears}Y` : fallbackPeriod,
+      annualizedLabel,
+      sharpeLabel,
+      statusLabel: getIntegrityStatusLabel(evidence.drift_status ?? evidence.signature_status),
+    });
+  });
+  detail.normalized_legs.forEach((leg) => {
+    const snapshot = leg.config as Record<string, unknown> | undefined;
+    const runId =
+      getRecordString(snapshot, ['composition_run_id', 'backtest_run_id', 'source_run_id', 'run_id'])
+      ?? (looksLikeRunId(leg.proof_label) ? leg.proof_label : null);
+    if (!runId || rows.some((row) => row.runId === runId)) {
+      return;
+    }
+    rows.push({
+      key: `${leg.id}-${runId}`,
+      runId,
+      dateLabel: formatShortDate(detail.updated_at),
+      versionLabel: leg.version_label ?? getCompositionVersionLabel(detail),
+      periodLabel: fallbackPeriod,
+      annualizedLabel,
+      sharpeLabel,
+      statusLabel: getLegTypeLabel(leg.leg_kind),
+    });
+  });
+  return rows.slice(0, 3);
+}
+
+function getCompositionRunHashPath(compositionId: string, runId: string, tab?: 'orders'): string {
+  const base = `/compositions/${encodeURIComponent(compositionId)}/backtest-runs/${encodeURIComponent(runId)}`;
+  return tab ? `#${base}?tab=${tab}` : `#${base}`;
+}
+
+function getVersionEvolutionRows(detail: ApiCompositionDetail): VersionEvolutionRow[] {
+  const auditRows = (detail.audit_trail ?? []).slice(0, 3).map((item) => ({
+    key: item.id,
+    title: getAuditActionLabel(item.action),
+    detail: getAuditSummaryText(item.summary),
+    meta: `${formatShortDate(item.at)} · ${item.hash_after ? `冻结哈希 ${getEvidenceHashLabel(item.hash_after)}` : getAuditActorLabel(item.actor)}`,
+  }));
+  if (auditRows.length) {
+    return auditRows;
+  }
+  return detail.source_evidence.slice(0, 3).map((item) => ({
+    key: item.id,
+    title: getRecordString(item.snapshot, ['version_label', 'composition_version_label']) ?? '来源冻结',
+    detail: getEvidenceDetail(item),
+    meta: `${formatShortDate(item.captured_at)} · 冻结哈希 ${getEvidenceHashLabel(item.freeze_hash)}`,
+  }));
+}
+
+function getExposureDrilldownRows(detail: ApiCompositionDetail): ExposureDrilldownRow[] {
+  return detail.normalized_legs.slice(0, 4).map((leg) => {
+    const kind = String(leg.leg_kind ?? '').toLowerCase();
+    if (kind === 'strategy') {
+      return {
+        key: leg.id,
+        source: formatLegDisplayName(leg),
+        layer: '代理暴露',
+        detail: getDisplayText(leg.reference_summary, '按策略回测持仓或基准映射穿透。'),
+        tone: 'info',
+      };
+    }
+    if (kind === 'cash') {
+      return {
+        key: leg.id,
+        source: formatLegDisplayName(leg),
+        layer: '现金规则',
+        detail: getDisplayText(leg.reference_summary, '现金缓冲与成本吸收规则。'),
+        tone: 'good',
+      };
+    }
+    return {
+      key: leg.id,
+      source: formatLegDisplayName(leg),
+      layer: leg.attribute_tags?.some((tag) => /bond|fixed/i.test(tag)) ? '真实来源' : '真实持仓',
+      detail: getDisplayText(leg.reference_summary, '运行态资产来源已冻结。'),
+      tone: 'good',
+    };
+  });
+}
+
 function buildMatrixKey(left: string, right: string): string {
   return [left, right].sort().join('::');
 }
@@ -746,9 +1065,9 @@ function getIntegrityStatusLabel(value?: string | null): string {
       return '版本一致';
     case 'drifted':
     case 'version_drift':
-      return '版本漂移';
+      return '有新版本，待更新';
     case 'stale':
-      return '来源失效';
+      return '有新版本，待更新';
     case 'missing':
       return '证据缺失';
     default:
@@ -1745,7 +2064,6 @@ export function CompositionDetailView({
   writeError = null,
   onStatusChange,
 }: CompositionDetailViewProps): JSX.Element {
-  const [performanceMode, setPerformanceMode] = useState<PerformanceMode>('cumulative');
   const [correlationMode, setCorrelationMode] = useState<CorrelationMode>('current');
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null);
   const [hoveredReturnIndex, setHoveredReturnIndex] = useState<number | null>(null);
@@ -1762,6 +2080,7 @@ export function CompositionDetailView({
   const cumulativeSeries = detail ? detail.returns_preview.map((item) => item.cumulative_return_pct) : [];
   const benchmarkSeries = detail ? detail.benchmark_series.map((item) => item.cumulative_return_pct) : [];
   const spreadSeries = detail ? detail.spread_series.map((item) => item.spread_pct) : [];
+  const costDragSeries = detail ? getCostDragSeries(detail) : [];
   const drawdownSeries = useMemo(() => {
     let peak = Number.NEGATIVE_INFINITY;
     return cumulativeSeries.map((value) => {
@@ -1769,11 +2088,8 @@ export function CompositionDetailView({
       return value - peak;
     });
   }, [cumulativeSeries]);
-  const cumulativeMin = Math.min(...[0, ...cumulativeSeries, ...benchmarkSeries]);
-  const cumulativeMax = Math.max(...[0, ...cumulativeSeries, ...benchmarkSeries, 0.01]);
-  const spreadMin = Math.min(...[0, ...spreadSeries, -0.01]);
-  const spreadMax = Math.max(...[0, ...spreadSeries, 0.01]);
-  const drawdownMin = Math.min(...drawdownSeries, -0.01);
+  const cumulativeMin = Math.min(...[0, ...cumulativeSeries, ...benchmarkSeries, ...costDragSeries]);
+  const cumulativeMax = Math.max(...[0, ...cumulativeSeries, ...benchmarkSeries, ...costDragSeries, 0.01]);
   const cumulativePath = buildLinePath(
     cumulativeSeries,
     approvedChartWidth,
@@ -1788,64 +2104,25 @@ export function CompositionDetailView({
     cumulativeMin,
     cumulativeMax,
   );
-  const spreadPath = buildLinePath(
-    spreadSeries,
+  const costDragPath = buildLinePath(
+    costDragSeries,
     approvedChartWidth,
     approvedChartHeight,
-    spreadMin,
-    spreadMax,
-  );
-  const spreadArea = buildAreaPath(
-    spreadSeries,
-    approvedChartWidth,
-    approvedChartHeight,
-    0,
-    spreadMin,
-    spreadMax,
-  );
-  const drawdownPath = buildLinePath(
-    drawdownSeries,
-    approvedChartWidth,
-    approvedChartHeight,
-    drawdownMin,
-    0,
+    cumulativeMin,
+    cumulativeMax,
   );
   const drawdownArea = buildDrawdownBandArea(drawdownSeries, approvedChartWidth, approvedChartHeight);
-  const performancePath =
-    performanceMode === 'drawdown'
-      ? drawdownPath
-      : performanceMode === 'spread'
-        ? spreadPath
-        : cumulativePath;
   const drawdownBandArea = drawdownArea;
-  const activeReturnSeries =
-    performanceMode === 'drawdown'
-      ? drawdownSeries
-      : performanceMode === 'spread'
-        ? spreadSeries
-        : cumulativeSeries;
-  const activeReturnMin =
-    performanceMode === 'drawdown'
-      ? drawdownMin
-      : performanceMode === 'spread'
-        ? spreadMin
-        : cumulativeMin;
-  const activeReturnMax =
-    performanceMode === 'drawdown'
-      ? 0
-      : performanceMode === 'spread'
-        ? spreadMax
-        : cumulativeMax;
-  const rebalanceChartMarkers =
+  const versionChartMarkers =
     detail
       ? getRebalanceChartMarkers(detail).map((marker) => {
-          const markerValue = activeReturnSeries[marker.index] ?? 0;
+          const markerValue = cumulativeSeries[marker.index] ?? 0;
           const point = getPoint(
             marker.index,
-            activeReturnSeries.length,
+            cumulativeSeries.length,
             markerValue,
-            activeReturnMin,
-            activeReturnMax,
+            cumulativeMin,
+            cumulativeMax,
             approvedChartWidth,
             approvedChartHeight,
           );
@@ -1853,17 +2130,17 @@ export function CompositionDetailView({
         })
       : [];
   const safeHoveredReturnIndex =
-    hoveredReturnIndex !== null && hoveredReturnIndex >= 0 && hoveredReturnIndex < activeReturnSeries.length
+    hoveredReturnIndex !== null && hoveredReturnIndex >= 0 && hoveredReturnIndex < cumulativeSeries.length
       ? hoveredReturnIndex
       : null;
   const hoveredChartPoint =
     safeHoveredReturnIndex !== null
       ? getPoint(
           safeHoveredReturnIndex,
-          activeReturnSeries.length,
-          activeReturnSeries[safeHoveredReturnIndex],
-          activeReturnMin,
-          activeReturnMax,
+          cumulativeSeries.length,
+          cumulativeSeries[safeHoveredReturnIndex],
+          cumulativeMin,
+          cumulativeMax,
           approvedChartWidth,
           approvedChartHeight,
         )
@@ -1874,8 +2151,9 @@ export function CompositionDetailView({
     detail && safeHoveredReturnIndex !== null ? detail.benchmark_series[safeHoveredReturnIndex] : null;
   const hoveredSpreadPoint =
     detail && safeHoveredReturnIndex !== null ? detail.spread_series[safeHoveredReturnIndex] : null;
+  const hoveredCostDragValue = safeHoveredReturnIndex !== null ? costDragSeries[safeHoveredReturnIndex] : null;
   const tooltipWidth = 180;
-  const tooltipHeight = 78;
+  const tooltipHeight = 96;
   const tooltipX = hoveredChartPoint
     ? Math.min(approvedChartWidth - tooltipWidth - 16, Math.max(16, hoveredChartPoint.x + 14))
     : 0;
@@ -1885,7 +2163,7 @@ export function CompositionDetailView({
   const handleReturnChartPointerMove = (
     event: ReactMouseEvent<SVGSVGElement> | ReactPointerEvent<SVGSVGElement>,
   ): void => {
-    if (!activeReturnSeries.length) {
+    if (!cumulativeSeries.length) {
       setHoveredReturnIndex(null);
       return;
     }
@@ -1893,7 +2171,7 @@ export function CompositionDetailView({
     const width = bounds.width || approvedChartWidth;
     const clientX = Number.isFinite(event.clientX) ? event.clientX : bounds.left + width / 2;
     const relativeX = Math.min(width, Math.max(0, clientX - bounds.left));
-    const nextIndex = Math.round((relativeX / Math.max(width, 1)) * Math.max(activeReturnSeries.length - 1, 0));
+    const nextIndex = Math.round((relativeX / Math.max(width, 1)) * Math.max(cumulativeSeries.length - 1, 0));
     setHoveredReturnIndex(nextIndex);
   };
 
@@ -1905,8 +2183,6 @@ export function CompositionDetailView({
     () => (detail ? getHighCorrelationPairs(detail, correlationMode) : []),
     [detail, correlationMode],
   );
-  const detailScenarioCases = detail ? getScenarioCases(detail) : [];
-
   const elapsedDays = detail ? getDaysSince(detail.updated_at) : 0;
   const cadenceDays = getIntervalDays(detail?.rebalance_frequency);
   const rebalanceProgress = Math.min(100, Math.round((elapsedDays / cadenceDays) * 100));
@@ -1944,16 +2220,6 @@ export function CompositionDetailView({
     );
   }
 
-  const volatilityValues = detail.risk_contribution_preview.map((item) => item.volatility_pct);
-  const contributionValues = detail.risk_contribution_preview.map((item) => item.contribution_pct);
-  const volatilityRange = {
-    min: Math.min(...volatilityValues, 0),
-    max: Math.max(...volatilityValues, 1),
-  };
-  const contributionRange = {
-    min: Math.min(...contributionValues, 0),
-    max: Math.max(...contributionValues, 1),
-  };
   const legDisplayNameById = new Map(
     detail.normalized_legs.map((leg) => [
       leg.id,
@@ -1995,6 +2261,11 @@ export function CompositionDetailView({
     rebalanceFrequency: detail.rebalance_frequency,
   });
   const detailKpis = buildDetailKpiCards(detail);
+  const compositionVersionLabel = getCompositionVersionLabel(detail);
+  const currentRulingLabel = getCurrentRulingLabel(detail, driftCount);
+  const executionHistoryRows = getExecutionHistoryRows(detail);
+  const versionEvolutionRows = getVersionEvolutionRows(detail);
+  const exposureDrilldownRows = getExposureDrilldownRows(detail);
   const benchmarkLabel = formatBenchmarkLabel(
     detail.benchmark_definition?.label ?? detail.hero_summary.benchmark_label,
   );
@@ -2009,9 +2280,18 @@ export function CompositionDetailView({
           <h1>{heroTitle}</h1>
           <p>{heroCopy}</p>
           <div className="composition-detail-hero__chips">
+            <span className="status-chip status-chip--soft">{compositionVersionLabel}</span>
             <span className="status-chip status-chip--success">{formatCompositionStatusLabel(detail.status, detail.status_label)}</span>
+            <span className="status-chip status-chip--soft">当前裁决：{currentRulingLabel}</span>
             <span className="status-chip status-chip--soft">{benchmarkLabel}</span>
             <span className="status-chip status-chip--soft">来源 {stableSourceCount} / {detail.hero_summary.leg_count} 稳定</span>
+            <button
+              className="composition-detail-version-switch"
+              onClick={() => navigateTo(`/compositions/workbench?composition_id=${encodeURIComponent(detail.id)}&intent=version-switch`)}
+              type="button"
+            >
+              切换版本
+            </button>
           </div>
         </div>
         <div className="composition-detail-hero__actions">
@@ -2020,21 +2300,21 @@ export function CompositionDetailView({
             onClick={() => navigateTo(`/compositions/workbench?copy_from=${encodeURIComponent(detail.id)}`)}
             type="button"
           >
-            复制组合
+            另存为新版本
           </button>
           <button
             className="ghost-button"
             onClick={() => navigateTo(`/compositions/workbench?composition_id=${encodeURIComponent(detail.id)}&intent=rebalance`)}
             type="button"
           >
-            重新平衡
+            运行再平衡
           </button>
           <button
             className="primary-button"
-            onClick={() => navigateTo(`/compositions/workbench?composition_id=${encodeURIComponent(detail.id)}`)}
+            onClick={() => navigateTo(`/compositions/${encodeURIComponent(detail.id)}/allocation-lab`)}
             type="button"
           >
-            编辑组合
+            配置实验室
           </button>
         </div>
       </section>
@@ -2092,33 +2372,13 @@ export function CompositionDetailView({
           <section className="panel composition-detail-panel composition-detail-approved-performance">
             <div className="panel-header composition-detail-panel__header composition-detail-approved-performance-header">
               <div>
-                <h2>累计收益流</h2>
+                <h2>收益流、版本节点与当前裁决</h2>
                 <p className="composition-detail-panel__copy">
-                  在同一视图核对组合收益、基准偏离、回撤区间与再平衡影响，评估组合表现的稳定性。
+                  在同一视图核对组合净值、基准、成本拖累、回撤带和版本节点，避免首屏只看到单条浅色曲线。
                 </p>
               </div>
               <div className="composition-detail-approved-panel-actions">
-                <span className="chip chip--accent">最近 10 年</span>
-              </div>
-            </div>
-            <div className="composition-detail-approved-detail-toolbar">
-              <div className="composition-detail-approved-chip-row" role="tablist" aria-label="收益流视图">
-                {([
-                  ['cumulative', '累计收益'],
-                  ['spread', '超额收益'],
-                  ['drawdown', '回撤阴影'],
-                ] as Array<[PerformanceMode, string]>).map(([item, label]) => (
-                  <button
-                    aria-selected={performanceMode === item}
-                    className={performanceMode === item ? 'chip chip--accent' : 'chip'}
-                    key={item}
-                    onClick={() => setPerformanceMode(item)}
-                    role="tab"
-                    type="button"
-                  >
-                    {label}
-                  </button>
-                ))}
+                <span className="chip chip--accent">{currentRulingLabel}</span>
               </div>
             </div>
             <div className="composition-detail-chart-frame composition-detail-approved-chart-frame">
@@ -2137,11 +2397,15 @@ export function CompositionDetailView({
                 {drawdownBandArea ? (
                   <path className="composition-detail-drawdown-area" d={drawdownBandArea} data-ui="composition-drawdown-band" />
                 ) : null}
-                {benchmarkPath && performanceMode === 'cumulative' ? <path className="composition-detail-benchmark-path" d={benchmarkPath} /> : null}
-                {spreadArea && performanceMode === 'spread' ? <path className="composition-detail-spread-area" d={spreadArea} /> : null}
-                {performancePath ? <path className="composition-detail-performance-path" d={performancePath} /> : null}
-                {rebalanceChartMarkers.map((marker) => (
-                  <g className="composition-detail-rebalance-marker" data-ui="composition-rebalance-marker" key={marker.key}>
+                {benchmarkPath ? <path className="composition-detail-benchmark-path" d={benchmarkPath} data-ui="composition-benchmark-line" /> : null}
+                {costDragPath ? <path className="composition-detail-cost-drag-path" d={costDragPath} data-ui="composition-cost-drag-line" /> : null}
+                {cumulativePath ? <path className="composition-detail-performance-path" d={cumulativePath} data-ui="composition-portfolio-line" /> : null}
+                {versionChartMarkers.map((marker) => (
+                  <g
+                    className="composition-detail-rebalance-marker composition-detail-version-marker"
+                    data-ui="composition-version-marker"
+                    key={marker.key}
+                  >
                     <title>{marker.label}</title>
                     <line
                       className="composition-detail-rebalance-marker__line"
@@ -2156,6 +2420,9 @@ export function CompositionDetailView({
                       cy={marker.point.y}
                       r="5"
                     />
+                    <text className="composition-detail-version-marker__label" x={marker.point.x + 8} y={Math.max(42, marker.point.y - 10)}>
+                      {marker.label}
+                    </text>
                   </g>
                 ))}
                 {hoveredChartPoint && hoveredReturnPoint ? (
@@ -2173,21 +2440,23 @@ export function CompositionDetailView({
                       <text x="12" y="21">{hoveredReturnPoint.label || hoveredReturnPoint.date || '收益点'}</text>
                       <text x="12" y="40">组合 {formatChartPercentValue(hoveredReturnPoint.cumulative_return_pct)}</text>
                       <text x="12" y="56">基准 {formatChartPercentValue(hoveredBenchmarkPoint?.cumulative_return_pct)}</text>
-                      <text x="12" y="72">超额 {formatChartPercentValue(hoveredSpreadPoint?.spread_pct)}</text>
+                      <text x="12" y="72">成本后 {formatChartPercentValue(hoveredCostDragValue)}</text>
+                      <text x="12" y="88">超额 {formatChartPercentValue(hoveredSpreadPoint?.spread_pct)}</text>
                     </g>
                   </g>
                 ) : null}
               </svg>
             </div>
             <div className="composition-detail-approved-bottom-tabs">
-              <span className="chip chip--accent">组合实线</span>
+              <span className="chip chip--accent">组合净值</span>
               <span className="chip chip--asset">{benchmarkLabel} 虚线</span>
-              <span className="chip">再平衡点</span>
+              <span className="chip chip--warning">成本拖累</span>
+              <span className="chip">版本节点</span>
               <span className="chip chip--danger">回撤阴影</span>
             </div>
             <article className="composition-detail-approved-rebalance-card">
-              <strong>再平衡点</strong>
-              <span>点位信息用于复核当次调仓损耗、现金缓冲吸收比例与仓位变化。</span>
+              <strong>当前裁决：{currentRulingLabel}</strong>
+              <span>点位信息用于复核版本变化、当次调仓损耗、现金缓冲吸收比例与仓位变化。</span>
             </article>
           </section>
 
@@ -2282,24 +2551,44 @@ export function CompositionDetailView({
             </section>
           </div>
 
-          <section className="panel composition-detail-panel composition-detail-approved-scenario-panel">
-            <div className="panel-header composition-detail-panel__header">
-              <div>
-                <h2>情景分析</h2>
-                <p className="composition-detail-panel__copy">通过极端历史片段回看组合在系统性冲击下的跌幅、修复时间与失效来源。</p>
+          <section className="composition-detail-approved-maintenance-grid" data-ui="composition-maintenance-grid">
+            <article className="panel composition-detail-panel composition-detail-version-evolution" data-ui="composition-version-evolution">
+              <div className="panel-header composition-detail-panel__header">
+                <div>
+                  <h2>版本演化史</h2>
+                  <p className="composition-detail-panel__copy">每次结构变化都写清楚来自手动微调、实验室晋升还是来源复核。</p>
+                </div>
               </div>
-            </div>
-            <div className="composition-detail-scenario-grid composition-detail-approved-scenario-grid">
-              {detailScenarioCases.map((item) => (
-                <article className="composition-detail-scenario-card composition-detail-approved-scenario-card" key={item.key}>
-                  <strong>{item.label}</strong>
-                  <span>{item.body}</span>
-                  <div className="composition-detail-approved-chip-row">
-                    <span className={getApprovedChipClassName(item.tone)}>{item.tag}</span>
-                  </div>
-                </article>
-              ))}
-            </div>
+              <div className="composition-detail-compact-timeline">
+                {versionEvolutionRows.map((item) => (
+                  <article className="composition-detail-compact-timeline__item" key={item.key}>
+                    <strong>{item.title}</strong>
+                    <span>{item.detail}</span>
+                    <small>{item.meta}</small>
+                  </article>
+                ))}
+              </div>
+            </article>
+
+            <article className="panel composition-detail-panel composition-detail-exposure-drilldown" data-ui="composition-exposure-drilldown">
+              <div className="panel-header composition-detail-panel__header">
+                <div>
+                  <h2>Exposure Drilldown</h2>
+                  <p className="composition-detail-panel__copy">不伪造穿透；真实持仓、代理暴露和现金规则分层展示。</p>
+                </div>
+              </div>
+              <div className="composition-detail-exposure-list">
+                {exposureDrilldownRows.map((item) => (
+                  <article className="composition-detail-exposure-row" key={item.key}>
+                    <strong>{item.source}</strong>
+                    <span className={`status-chip status-chip--${item.tone === 'warn' ? 'warning' : item.tone === 'good' ? 'success' : 'soft'}`}>
+                      {item.layer}
+                    </span>
+                    <p>{item.detail}</p>
+                  </article>
+                ))}
+              </div>
+            </article>
           </section>
         </div>
 
@@ -2347,6 +2636,43 @@ export function CompositionDetailView({
                   </button>
                 );
               })}
+            </div>
+          </section>
+
+          <section
+            className="panel composition-detail-panel composition-detail-rail-panel composition-detail-execution-history"
+            aria-label="组合回测与执行历史"
+            data-ui="composition-execution-history"
+          >
+            <div className="panel-header composition-detail-panel__header">
+              <div>
+                <h2>组合回测 / 执行历史</h2>
+                <p className="composition-detail-panel__copy">记录组合版本、周期、年化和夏普；动作分别进入回测记录页和订单 tab。</p>
+              </div>
+            </div>
+            <div className="composition-detail-execution-list">
+              {executionHistoryRows.length ? (
+                executionHistoryRows.map((row) => (
+                  <article className="composition-detail-execution-row" key={row.key}>
+                    <div>
+                      <strong>{row.dateLabel} · {row.versionLabel}</strong>
+                      <span>{`${row.periodLabel} / 年化 ${row.annualizedLabel} / 夏普 ${row.sharpeLabel}`}</span>
+                    </div>
+                    <span className="status-chip status-chip--soft">{row.statusLabel}</span>
+                    <div className="composition-detail-execution-actions">
+                      <a href={getCompositionRunHashPath(detail.id, row.runId)}>回测记录</a>
+                      <a href={getCompositionRunHashPath(detail.id, row.runId, 'orders')}>订单日志</a>
+                    </div>
+                  </article>
+                ))
+              ) : (
+                <article className="composition-detail-execution-row composition-detail-execution-row--empty">
+                  <div>
+                    <strong>尚未绑定组合回测记录</strong>
+                    <span>保存后的组合回测会在这里显示 `10Y / 年化 / 夏普` 摘要。</span>
+                  </div>
+                </article>
+              )}
             </div>
           </section>
 

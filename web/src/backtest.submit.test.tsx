@@ -106,6 +106,43 @@ describe('回测提交页', () => {
     expect(fakeApi.submitBacktestRun).not.toHaveBeenCalled();
   });
 
+  it('会按策略库一键生成入口预填对应回测周期', async () => {
+    fakeApi.getStrategyDetail.mockResolvedValue({
+      id: 'strat-001',
+      name: 'QQQ 均值回归策略',
+      strategy_type: 'MEAN_REVERSION',
+      universe_name: 'QQQ',
+      current_parameter_version: 'v2',
+      current_parameter_version_id: 'pv-002',
+      dataset_snapshot_id: 'ds-001',
+      universe_snapshot_id: 'un-001',
+      allowed_actions: ['backtest'],
+      parameter_history: [],
+    });
+    fakeApi.submitBacktestRun.mockResolvedValue({ id: 'bt-020' });
+
+    await act(async () => {
+      render(<BacktestSubmitPage strategyId="strat-001" periodYears={20} />);
+    });
+
+    expect(await screen.findByDisplayValue('2006-03-24')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('2026-03-24')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '提交回测' }));
+
+    await waitFor(() =>
+      expect(fakeApi.submitBacktestRun).toHaveBeenCalledWith('strat-001', {
+        idempotency_key: 'run-strat-001',
+        start_date: '2006-03-24',
+        end_date: '2026-03-24',
+        parameter_version_id: 'pv-002',
+        dataset_snapshot_id: 'ds-001',
+        is_permanent: false,
+      }),
+    );
+    expect(window.location.hash).toBe('#/runs/bt-020');
+  });
+
   it('会把后端的阻塞提交错误展示出来', async () => {
     fakeApi.getStrategyDetail.mockResolvedValue({
       id: 'strat-001',

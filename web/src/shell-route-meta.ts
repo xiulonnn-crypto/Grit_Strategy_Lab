@@ -1,6 +1,6 @@
 import type { AppRoute } from './lib/appRouteContext';
 
-export type ShellNavKey = 'workspace' | 'creation' | 'runs' | 'optimization' | 'snapshots';
+export type ShellNavKey = 'workspace' | 'creation' | 'runs' | 'optimization' | 'snapshots' | 'composition';
 
 export type ShellNavItem = {
   key: ShellNavKey;
@@ -17,8 +17,9 @@ export type AppRouteMeta = {
 };
 
 export const SHELL_NAV_ITEMS: ShellNavItem[] = [
+  { key: 'composition', href: '#/compositions', label: '组合' },
   { key: 'workspace', href: '#/workspace', label: '工作台' },
-  { key: 'creation', href: '#/creation/new', label: '新建策略' },
+  { key: 'creation', href: '#/strategies', label: '策略库' },
   { key: 'runs', href: '#/runs', label: '回测列表' },
   { key: 'optimization', href: '#/optimization-jobs', label: '优化实验室' },
   { key: 'snapshots', href: '#/snapshots', label: '数据快照' },
@@ -26,6 +27,21 @@ export const SHELL_NAV_ITEMS: ShellNavItem[] = [
 
 export function getRouteMeta(route: AppRoute): AppRouteMeta {
   switch (route.kind) {
+    case 'composition-dashboard':
+    case 'leg-inventory':
+    case 'composition-workbench':
+    case 'composition-detail':
+    case 'composition-backtest-new':
+    case 'composition-backtest-result':
+    case 'composition-allocation-config':
+    case 'composition-allocation-result':
+      return {
+        navKey: 'composition',
+        eyebrow: '组合',
+        title: '组合中心',
+        description: '查看组合结构、回测稳定性和资产配置候选。',
+        showPageHeading: false,
+      };
     case 'workspace':
       return {
         navKey: 'workspace',
@@ -37,9 +53,10 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
     case 'creation-template':
       return {
         navKey: 'creation',
-        eyebrow: '策略创建',
-        title: '选择模板',
-        description: '先选择策略类型，再进入对话和动态表单协同编辑。',
+        eyebrow: '策略管理',
+        title: '策略库',
+        description: '集中管理已创建策略、参数版本、长期回测表现与后续研究动作。',
+        showPageHeading: false,
       };
     case 'creation-session':
       return {

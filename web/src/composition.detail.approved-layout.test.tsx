@@ -200,7 +200,7 @@ const detail: ApiCompositionDetail = {
       freeze_ref_id: 'strategy-leg',
       freeze_hash: 'c0a1f8',
       captured_at: '2026-04-22T00:00:00.000Z',
-      snapshot: { run_id: 'run-101' },
+      snapshot: { run_id: 'run-101', version_label: 'v1.2', period_years: 10 },
     },
   ],
   composition_score: {
@@ -245,6 +245,7 @@ describe('composition detail approved runtime layout', () => {
     const approvedHero = getCssBlock(css, '.composition-detail-approved .composition-detail-hero');
     const approvedKpiGrid = getCssBlock(css, '.composition-detail-approved .composition-detail-kpi-grid');
     const approvedKpiCard = getCssBlock(css, '.composition-detail-approved .composition-detail-kpi-card');
+    const maintenanceGrid = getCssBlock(css, '.composition-detail-approved-maintenance-grid');
 
     expect(approvedLayout).toContain('display: grid;');
     expect(approvedLayout).toContain('grid-template-columns: minmax(0, 1.78fr) 330px;');
@@ -256,7 +257,10 @@ describe('composition detail approved runtime layout', () => {
     expect(approvedHero).not.toContain('background: transparent;');
     expect(approvedKpiGrid).toContain('grid-template-columns: repeat(7, minmax(0, 1fr));');
     expect(approvedKpiCard).toContain('border-radius: 16px;');
+    expect(maintenanceGrid).toContain('display: grid;');
+    expect(maintenanceGrid).toContain('grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);');
     expect(css).toContain('.composition-detail-approved-bottom-tabs {\n  justify-content: flex-start;');
+    expect(css).toContain('.composition-detail-cost-drag-path');
   });
 
   it('keeps source-signature rail text wrapped within the approved right column', () => {
@@ -284,9 +288,15 @@ describe('composition detail approved runtime layout', () => {
     expect(document.querySelectorAll('.composition-detail-approved-analysis-grid > .composition-detail-panel')).toHaveLength(2);
     expect(document.querySelectorAll('.composition-detail-approved-snapshot-card')).toHaveLength(3);
     expect(document.querySelector('.composition-detail-approved-heatmap')).not.toBeNull();
-    expect(document.querySelectorAll('.composition-detail-approved-scenario-card')).toHaveLength(3);
+    expect(document.querySelector('[data-ui="composition-version-evolution"]')).not.toBeNull();
+    expect(document.querySelector('[data-ui="composition-exposure-drilldown"]')).not.toBeNull();
+    expect(document.querySelector('[data-ui="composition-execution-history"]')).not.toBeNull();
+    expect(document.querySelector('[data-ui="composition-cost-drag-line"]')).not.toBeNull();
+    expect(document.querySelector('[data-ui="composition-version-marker"]')).not.toBeNull();
     expect(screen.getByRole('heading', { level: 2, name: '来源签名' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '组合回测 / 执行历史' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '再平衡与成本' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '深入分析入口' })).toBeInTheDocument();
+    expect(screen.getByText('10Y / 年化 9.8% / 夏普 1.42')).toBeInTheDocument();
   });
 });

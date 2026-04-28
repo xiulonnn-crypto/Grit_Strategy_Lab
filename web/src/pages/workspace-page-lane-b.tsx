@@ -524,7 +524,7 @@ export function WorkspacePage(): JSX.Element {
           </div>
 
           <div className="workspace-health__actions">
-            <button className="primary-button gsl-btn-primary" onClick={() => navigateTo('/creation/new')} type="button">
+            <button className="primary-button gsl-btn-primary" onClick={() => navigateTo('/strategies')} type="button">
               {TEXT.createStrategy}
             </button>
             <button className="ghost-button" onClick={() => navigateTo('/snapshots')} type="button">
@@ -551,7 +551,7 @@ export function WorkspacePage(): JSX.Element {
             <section className="workspace-empty-state panel gsl-card">
               <h3 className="blank-state-title">{TEXT.noStrategyTitle}</h3>
               <p className="blank-state-copy">{TEXT.noStrategyCopy}</p>
-              <button className="primary-button gsl-btn-primary" onClick={() => navigateTo('/creation/new')} type="button">
+              <button className="primary-button gsl-btn-primary" onClick={() => navigateTo('/strategies')} type="button">
                 {TEXT.noStrategyAction}
               </button>
             </section>

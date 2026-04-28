@@ -1203,6 +1203,59 @@ export const demoApi: DemoApi = {
   async getStrategyDetail(id: string): Promise<ApiStrategyDetail> {
     return clone(findStrategy(id));
   },
+  async restoreStrategyParameterVersion(strategyId, parameterVersionId, payload): Promise<ApiStrategyDetail> {
+    const strategy = findStrategy(strategyId);
+    const target = strategy.parameter_history.find((entry) => entry.parameter_version_id === parameterVersionId);
+    if (!target || !target.parameters || parameterVersionId === strategy.current_parameter_version_id) {
+      throw new ApiError({ status: 400, code: 'parameter_version_not_restorable', message: 'Parameter version is not restorable.' });
+    }
+    const expectedBase = payload.base_parameter_version_id ?? strategy.current_parameter_version_id;
+    if (expectedBase && expectedBase !== strategy.current_parameter_version_id) {
+      throw new ApiError({
+        status: 409,
+        code: 'stale_base_parameter_version',
+        message: 'The strategy has moved to a newer parameter version.',
+        blocking_code: 'stale_base_parameter_version',
+        blocking_target: { type: 'strategy', id: strategy.id },
+        next_action: 'refresh_strategy_detail',
+      });
+    }
+    const previousVersion = strategy.current_parameter_version ?? 1;
+    strategy.current_parameter_version = previousVersion + 1;
+    strategy.current_parameter_version_id = `${strategy.id}-v${strategy.current_parameter_version}`;
+    strategy.parameters = clone(target.parameters);
+    strategy.parameter_history = [
+      {
+        version_number: strategy.current_parameter_version,
+        parameter_version_id: strategy.current_parameter_version_id,
+        revision: previousVersion,
+        created_at: nowIso(),
+        comment: payload.decision_note ?? `回滚至 v${target.version_number}`,
+        decision_note: payload.decision_note ?? '',
+        change_summary: `回滚至 v${target.version_number}`,
+        source: {
+          kind: 'version_restore',
+          source_parameter_version_id: target.parameter_version_id,
+          source_version_number: target.version_number,
+          base_parameter_version_id: expectedBase,
+        },
+        alternative_versions: [
+          {
+            parameter_version_id: expectedBase,
+            version_number: previousVersion,
+            label: `回滚前当前版本 v${previousVersion}`,
+          },
+        ],
+        rollbackable: false,
+        parameters: clone(target.parameters),
+      },
+      ...strategy.parameter_history.map((entry) => ({
+        ...entry,
+        rollbackable: entry.parameter_version_id !== strategy.current_parameter_version_id,
+      })),
+    ];
+    return clone(strategy);
+  },
   async getCreationSession(id: string): Promise<ApiStrategyCreationSession> {
     const existing = state.sessions.find((session) => session.id === id);
     if (!existing) {

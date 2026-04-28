@@ -144,7 +144,41 @@ export type ApiParameterHistoryEntry = {
   revision: number;
   created_at: string | null;
   comment?: string | null;
+  decision_note?: string | null;
+  change_summary?: string | null;
+  source?: ApiParameterVersionSource | null;
+  alternative_versions?: ApiParameterVersionAlternative[];
+  rollbackable?: boolean;
   parameters: Record<string, ParameterValue>;
+};
+
+export type ApiParameterVersionSource = {
+  kind: string;
+  job_id?: string | null;
+  run_id?: string | null;
+  candidate_id?: string | null;
+  candidate_label?: string | null;
+  base_parameter_version_id?: string | null;
+  source_parameter_version_id?: string | null;
+  source_version_number?: number | null;
+  [key: string]: unknown;
+};
+
+export type ApiParameterVersionAlternative = {
+  candidate_id?: string | null;
+  parameter_version_id?: string | null;
+  label?: string | null;
+  rank?: number | null;
+  score?: number | null;
+  version_number?: number | null;
+  metrics?: Record<string, number>;
+  parameter_delta?: Record<string, ParameterValue>;
+};
+
+export type ParameterVersionRestorePayload = {
+  idempotency_key: string;
+  base_parameter_version_id?: string | null;
+  decision_note?: string | null;
 };
 
 export type ApiConfirmationFieldEntry = {
@@ -1183,6 +1217,8 @@ export type ApiCompositionListItem = {
   updated_at: string;
   latest_activity_label: string;
   allowed_actions: string[];
+  has_new_version?: boolean;
+  source_integrity?: ApiCompositionSourceIntegrity[];
 };
 
 export type ApiCompositionKpi = {
@@ -1264,6 +1300,148 @@ export type ApiCompositionDetail = {
   composition_score: ApiCompositionScore;
   latest_activity_label: string;
   deep_link_actions: string[];
+};
+
+export type ApiCompositionBacktestRunPayload = {
+  idempotency_key: string;
+  composition_version?: string | null;
+  period?: string | null;
+  horizon_years?: number | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  rebalance_frequency?: string | null;
+  drift_threshold_pct?: number | null;
+  fee_bps?: number | null;
+  slippage_bps?: number | null;
+  missing_data_rule?: string | null;
+  notes?: string | null;
+};
+
+export type ApiCompositionBacktestRun = {
+  id: string;
+  run_id: string;
+  composition_id: string;
+  status: string;
+  created_at: string;
+  completed_at?: string | null;
+  request: Record<string, unknown>;
+  summary: Record<string, unknown>;
+  diagnostics: Record<string, unknown>;
+  returns_preview: ApiCompositionReturnPoint[];
+  benchmark_series: ApiCompositionBenchmarkPoint[];
+  risk_contribution_preview: ApiCompositionRiskContribution[];
+  rebalance_events: ApiCompositionRebalanceEvent[];
+  return_quality_summary: ApiCompositionReturnQualitySummary;
+  source_integrity: ApiCompositionSourceIntegrity[];
+  audit_trail: ApiCompositionAuditTrailItem[];
+  order_summary: Record<string, unknown>;
+  evidence: Record<string, unknown>;
+  warnings: string[];
+};
+
+export type ApiCompositionBacktestOrder = {
+  id: string;
+  order_id: string;
+  run_id: string;
+  event_id: string;
+  event_label: string;
+  event_date?: string | null;
+  symbol: string;
+  side: string;
+  quantity?: number | null;
+  quantity_unit: string;
+  price?: number | null;
+  slippage_bps: number;
+  fee_amount?: number | null;
+  source_leg_id: string;
+  source_leg_name: string;
+  source_leg_kind: string;
+  trigger_reason: string;
+  gross_buy_quantity: number;
+  gross_sell_quantity: number;
+  internal_net_quantity: number;
+  external_quantity: number;
+  netting_ratio_pct: number;
+  netting_status: string;
+  execution_kind: string;
+  quality_label: string;
+  evidence_label: string;
+};
+
+export type ApiCompositionBacktestOrderPage = {
+  items: ApiCompositionBacktestOrder[];
+  page: number;
+  page_size: number;
+  total: number;
+  symbol_filter?: string | null;
+  filters: Record<string, unknown>;
+  generated_from: string;
+  quality_label: string;
+  evidence_label: string;
+};
+
+export type ApiCompositionBacktestOrderNetting = {
+  order_id: string;
+  run_id: string;
+  composition_id: string;
+  symbol: string;
+  event_id: string;
+  event_label: string;
+  event_date?: string | null;
+  source_leg_id: string;
+  source_leg_name: string;
+  before_netting: Record<string, number>;
+  after_netting: Record<string, number>;
+  internal_net_quantity: number;
+  external_quantity: number;
+  netting_ratio_pct: number;
+  netting_status: string;
+  generated_from: string;
+  quality_label: string;
+  evidence_label: string;
+};
+
+export type ApiCompositionBacktestOrdersQuery = {
+  symbol?: string | null;
+  page?: number;
+  page_size?: number;
+};
+
+export type ApiCompositionOrderExportFormat = "csv" | "xlsx";
+
+export type ApiCompositionAllocationJobPayload = {
+  idempotency_key: string;
+  intent?: string | null;
+  target_volatility_pct?: number | null;
+  volatility_band_pct?: number | null;
+  lookback_window?: string | null;
+  history_window_years?: number | null;
+  max_turnover_bucket?: string | null;
+  max_turnover_pct?: number | null;
+  covariance_model?: string | null;
+  return_source?: string | null;
+  constraints?: Record<string, unknown>;
+  notes?: string | null;
+};
+
+export type ApiCompositionAllocationJob = {
+  id: string;
+  job_id: string;
+  composition_id: string;
+  status: string;
+  created_at: string;
+  completed_at?: string | null;
+  request: Record<string, unknown>;
+  summary: Record<string, unknown>;
+  candidates: Array<Record<string, unknown>>;
+  frontier_points: Array<Record<string, unknown>>;
+  residual_budget: Record<string, unknown>;
+  covariance_preview: Array<Record<string, unknown>>;
+  return_quality_summary: ApiCompositionReturnQualitySummary;
+  source_integrity: ApiCompositionSourceIntegrity[];
+  audit_trail: ApiCompositionAuditTrailItem[];
+  evidence: Record<string, unknown>;
+  warnings: string[];
 };
 
 export type ApiBondSnapshotCard = {
@@ -1499,6 +1677,11 @@ export type DemoApi = {
   ) => Promise<ApiWorkspaceOverview>;
   listStrategies: (signal?: AbortSignal) => Promise<ApiStrategyListItem[]>;
   getStrategyDetail: (id: string) => Promise<ApiStrategyDetail>;
+  restoreStrategyParameterVersion?: (
+    strategyId: string,
+    parameterVersionId: string,
+    payload: ParameterVersionRestorePayload,
+  ) => Promise<ApiStrategyDetail>;
   getCreationSession: (id: string) => Promise<ApiStrategyCreationSession>;
   createCreationSession: (
     payload?: CreateCreationSessionPayload,
@@ -1598,6 +1781,38 @@ export type DemoApi = {
     id: string,
     payload: ApiCompositionUpdatePayload,
   ) => Promise<ApiCompositionDetail>;
+  createCompositionBacktestRun?: (
+    id: string,
+    payload: ApiCompositionBacktestRunPayload,
+  ) => Promise<ApiCompositionBacktestRun>;
+  getCompositionBacktestRun?: (
+    id: string,
+    runId: string,
+  ) => Promise<ApiCompositionBacktestRun>;
+  getCompositionBacktestOrders?: (
+    id: string,
+    runId: string,
+    params?: ApiCompositionBacktestOrdersQuery,
+  ) => Promise<ApiCompositionBacktestOrderPage>;
+  getCompositionBacktestOrderNetting?: (
+    id: string,
+    runId: string,
+    orderId: string,
+  ) => Promise<ApiCompositionBacktestOrderNetting>;
+  exportCompositionBacktestOrders?: (
+    id: string,
+    runId: string,
+    format?: ApiCompositionOrderExportFormat,
+    params?: { symbol?: string | null },
+  ) => Promise<string>;
+  createCompositionAllocationJob?: (
+    id: string,
+    payload: ApiCompositionAllocationJobPayload,
+  ) => Promise<ApiCompositionAllocationJob>;
+  getCompositionAllocationJob?: (
+    id: string,
+    jobId: string,
+  ) => Promise<ApiCompositionAllocationJob>;
   getSnapshotOverview: () => Promise<ApiSnapshotOverview>;
   refreshSnapshots: (
     payload?: ApiSnapshotRefreshRequest,

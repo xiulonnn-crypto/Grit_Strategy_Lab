@@ -231,6 +231,8 @@
 .composition-dashboard-card {
   display: grid;
   gap: 12px;
+  min-width: 0;
+  overflow: hidden;
   padding: 17px 18px;
   border-radius: 18px;
   border: 1px solid #e5e7eb;
@@ -249,15 +251,16 @@
 
 .composition-dashboard-card__metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(2, minmax(112px, 1fr));
+  gap: 8px;
 }
 
 .composition-dashboard-card__metric {
   display: grid;
   gap: 6px;
-  min-height: 75px;
-  padding: 11px 12px;
+  min-width: 0;
+  min-height: 68px;
+  padding: 10px 12px;
   border-radius: 14px;
   border: 1px solid #e5e7eb;
   background: linear-gradient(180deg, #ffffff 0%, #fafcfd 100%);
@@ -271,8 +274,9 @@
 
 .composition-dashboard-card__metric strong {
   color: #111827;
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
 .composition-dashboard-card__metric strong.is-positive {
@@ -320,12 +324,29 @@
 }
 
 .composition-dashboard-task {
+  appearance: none;
   display: grid;
   gap: 9px;
+  width: 100%;
   padding: 9px 15px;
   border-radius: 16px;
   border: 1px solid #e5e7eb;
   background: linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.composition-dashboard-task:hover,
+.composition-dashboard-task:focus-visible {
+  border-color: #d7e1e5;
+  background: linear-gradient(180deg, #ffffff 0%, #f5fbf8 100%);
+}
+
+.composition-dashboard-task:focus-visible {
+  outline: 2px solid rgba(31, 135, 123, 0.28);
+  outline-offset: 2px;
 }
 
 .composition-dashboard-task__header strong,
@@ -497,7 +518,6 @@
 
 @media (max-width: 899px) {
   .composition-dashboard-metric-grid,
-  .composition-dashboard-card__metrics,
   .composition-dashboard-observation__summary {
     grid-template-columns: 1fr;
   }

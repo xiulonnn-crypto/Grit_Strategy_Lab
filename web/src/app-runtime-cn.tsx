@@ -7,6 +7,9 @@ import {
   type AppRoute,
 } from './lib/appRouteContext';
 import { BacktestSubmitPage } from './pages/backtest-submit-page-cn';
+import { CompositionAllocationConfigPage, CompositionAllocationResultPage } from './pages/composition-allocation-page';
+import { CompositionBacktestConfigPage } from './pages/composition-backtest-config-page';
+import { CompositionBacktestResultPage } from './pages/composition-backtest-result-page';
 import { CompositionDashboardPage } from './pages/composition-dashboard-page';
 import { CompositionDetailPage } from './pages/composition-detail-page';
 import { CompositionWorkbenchPage } from './pages/composition-workbench-page';
@@ -61,11 +64,33 @@ function AppShell(): JSX.Element {
         {route.kind === 'composition-detail' ? (
           <CompositionDetailPage compositionId={route.compositionId} />
         ) : null}
+        {route.kind === 'composition-backtest-new' ? (
+          <CompositionBacktestConfigPage compositionId={route.compositionId} />
+        ) : null}
+        {route.kind === 'composition-backtest-result' ? (
+          <CompositionBacktestResultPage
+            compositionId={route.compositionId}
+            highlightedEventId={route.eventId}
+            highlightedOrderId={route.orderId}
+            initialTab={route.tab}
+            runId={route.runId}
+          />
+        ) : null}
+        {route.kind === 'composition-allocation-config' ? (
+          <CompositionAllocationConfigPage compositionId={route.compositionId} />
+        ) : null}
+        {route.kind === 'composition-allocation-result' ? (
+          <CompositionAllocationResultPage compositionId={route.compositionId} jobId={route.jobId} />
+        ) : null}
         {route.kind === 'creation-template' ? <CreationTemplatePage /> : null}
         {route.kind === 'creation-session' ? <CreationSessionPage sessionId={route.sessionId} /> : null}
         {route.kind === 'strategy-detail' ? <StrategyDetailPage strategyId={route.strategyId} /> : null}
         {route.kind === 'backtest' ? (
-          <BacktestSubmitPage strategyId={route.strategyId} sourceRunId={route.sourceRunId} />
+          <BacktestSubmitPage
+            periodYears={route.periodYears}
+            sourceRunId={route.sourceRunId}
+            strategyId={route.strategyId}
+          />
         ) : null}
         {route.kind === 'runs-index' ? <RunsIndexPage /> : null}
         {route.kind === 'run' ? <RunDetailPage runId={route.runId} /> : null}

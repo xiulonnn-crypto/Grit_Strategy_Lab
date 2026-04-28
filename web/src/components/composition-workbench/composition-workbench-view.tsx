@@ -1,5 +1,6 @@
 import { useDeferredValue, useMemo, useState, type CSSProperties } from 'react';
 import { navigateTo } from '../../lib/appRouteContext';
+import { canUpgradeStrategyLegVersions } from '../../lib/saved-strategy-leg-inventory';
 import { formatRatio } from '../../lib/format';
 import {
   cleanDisplayText,
@@ -274,7 +275,7 @@ function getInventoryRowFeatureChips(
       isActiveBuffer ? '维护缓冲中' : '维护缓冲候选',
     ];
   }
-  return [getLegTypeLabel(row.leg_type), getRowStatusLabel(row.status)];
+  return [getLegTypeLabel(row.leg_type), row.has_new_version ? '有新版本' : getRowStatusLabel(row.status)];
 }
 
 function getInventoryRowDescription(
@@ -819,6 +820,7 @@ export function CompositionWorkbenchView({
   const deferredSearch = useDeferredValue(searchValue.trim().toLowerCase());
 
   const rows = inventory?.rows ?? [];
+  const canUpgradeVersions = canUpgradeStrategyLegVersions(selectedLegs, rows);
   const addedSourceIds = new Set(selectedLegs.map((leg) => leg.source_ref_id));
   const filteredRows = rows.filter((row) => {
     if (activeType !== 'all' && row.leg_type !== activeType) {
@@ -1003,7 +1005,7 @@ export function CompositionWorkbenchView({
             }}
             type="button"
           >
-            {saving ? '保存中…' : '保存组合'}
+            {saving ? '保存中…' : canUpgradeVersions ? '一键升级版本' : '保存组合'}
           </button>
         </div>
         <div className="composition-workbench-hero__chips">
@@ -1633,7 +1635,7 @@ export function CompositionWorkbenchView({
                 }}
                 type="button"
               >
-                {saving ? '保存中…' : '保存组合'}
+                {saving ? '保存中…' : canUpgradeVersions ? '一键升级版本' : '保存组合'}
               </button>
             </div>
           </div>

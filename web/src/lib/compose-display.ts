@@ -159,6 +159,8 @@ export function formatCompositionStatusLabel(
       return '已归档';
     case 'READY':
       return '稳定';
+    case 'STALE':
+      return '有新版本';
     case 'NEEDS_RUN':
       return '待验证';
     case 'WARNING':

@@ -53,11 +53,17 @@ const TEXT = {
   compositionDetailTitle: '组合详情',
   compositionDetailDesc:
     '聚合收益流、风险归因、相关性矩阵与来源冻结证据。',
-  creation: '新建策略',
-  creationEyebrow: '策略创建',
-  creationTemplateTitle: '选择模板',
+  compositionBacktestTitle: '组合回测',
+  compositionBacktestDesc:
+    '验证组合在不同周期、再平衡规则和数据质量门禁下的稳定性。',
+  compositionAllocationTitle: '组合实验室',
+  compositionAllocationDesc:
+    '围绕资产配置意图生成候选权重，并用有效前沿和迁移成本复核晋升价值。',
+  creation: '策略库',
+  creationEyebrow: '策略管理',
+  creationTemplateTitle: '策略库',
   creationTemplateDesc:
-    '先选择策略类型，再进入对话和动态表单协同编辑。',
+    '集中管理已创建策略、参数版本、长期回测表现与后续研究动作。',
   creationSessionTitle: '创建会话',
   creationSessionDesc:
     '由对话驱动确认稿，再进入策略落地与回测提交。',
@@ -111,7 +117,7 @@ export const SHELL_NAV_GROUPS: ShellNavGroup[] = [
     label: TEXT.strategy,
     items: [
       { key: 'workspace', href: '#/workspace', label: TEXT.workspace, groupKey: 'strategy' },
-      { key: 'creation', href: '#/creation/new', label: TEXT.creation, groupKey: 'strategy' },
+      { key: 'creation', href: '#/strategies', label: TEXT.creation, groupKey: 'strategy' },
       { key: 'runs', href: '#/runs', label: TEXT.runs, groupKey: 'strategy' },
       {
         key: 'optimization',
@@ -168,12 +174,31 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         description: TEXT.compositionDetailDesc,
         showPageHeading: false,
       };
+    case 'composition-backtest-new':
+    case 'composition-backtest-result':
+      return {
+        navKey: 'composition-dashboard',
+        eyebrow: TEXT.compose,
+        title: TEXT.compositionBacktestTitle,
+        description: TEXT.compositionBacktestDesc,
+        showPageHeading: false,
+      };
+    case 'composition-allocation-config':
+    case 'composition-allocation-result':
+      return {
+        navKey: 'composition-dashboard',
+        eyebrow: TEXT.compose,
+        title: TEXT.compositionAllocationTitle,
+        description: TEXT.compositionAllocationDesc,
+        showPageHeading: false,
+      };
     case 'creation-template':
       return {
         navKey: 'creation',
         eyebrow: TEXT.creationEyebrow,
         title: TEXT.creationTemplateTitle,
         description: TEXT.creationTemplateDesc,
+        showPageHeading: false,
       };
     case 'creation-session':
       return {

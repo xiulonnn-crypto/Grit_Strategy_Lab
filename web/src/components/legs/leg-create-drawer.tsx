@@ -883,7 +883,7 @@ export function StrategyLegDrawer({
               <div className="leg-inventory-drawer__kpi">
                 <span>最大回撤</span>
                 <strong>{formatPercent(metrics.maxDrawdown)}</strong>
-                <small>{selectedRow?.has_new_version ? '待更新' : '最新版本'}</small>
+                <small>{selectedRow?.has_new_version ? '有新版本' : '最新版本'}</small>
               </div>
             </div>
           </section>

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LegInventoryPage } from './pages/leg-inventory-page';
@@ -33,6 +34,8 @@ const fakeApi = vi.hoisted<FakeApi>(() => ({
 vi.mock('./lib/demoStoreContext', () => ({
   useApiClient: () => fakeApi,
 }));
+
+const legInventoryCss = readFileSync('./src/components/legs/leg-inventory.css', 'utf8');
 
 const inventory: ApiLegInventory = {
   counts: {
@@ -236,6 +239,35 @@ describe('leg inventory page', () => {
     expect(screen.queryByText(/strategy_leg::/)).not.toBeInTheDocument();
   });
 
+  it('keeps the inventory table inside the available panel width', async () => {
+    await act(async () => {
+      render(<LegInventoryPage />);
+    });
+
+    const tableShell = await waitFor(() =>
+      document.querySelector('[data-ui="leg-source-trust-table"]'),
+    );
+    const table = tableShell?.querySelector('.leg-inventory-table');
+
+    expect(tableShell).not.toBeNull();
+    expect(table).not.toBeNull();
+    expect(legInventoryCss).toMatch(
+      /\.leg-inventory-table-shell\s*\{[^}]*overflow:\s*hidden;/s,
+    );
+    expect(legInventoryCss).toMatch(
+      /\.leg-inventory-table\s*\{[^}]*width:\s*100%;[^}]*min-width:\s*0;[^}]*table-layout:\s*fixed;/s,
+    );
+    expect(legInventoryCss).toMatch(
+      /\.leg-inventory-table\s+thead\s+th\s*\{[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/s,
+    );
+    expect(legInventoryCss).toMatch(
+      /\.leg-inventory-table\s+tbody\s+td\s*\{[^}]*min-width:\s*0;[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/s,
+    );
+    expect(legInventoryCss).not.toMatch(
+      /\.leg-inventory-table\s*\{[^}]*min-width:\s*1[0-9]{3}px/s,
+    );
+  });
+
   it('hydrates saved strategy leg reference counts from active compositions', async () => {
     const rowId = 'strategy_leg::strat-tested-001::strat-tested-001-v2';
     window.localStorage.setItem(SAVED_STRATEGY_LEG_STORAGE_KEY, JSON.stringify([rowId]));
@@ -282,11 +314,134 @@ describe('leg inventory page', () => {
       render(<LegInventoryPage />);
     });
 
-    const strategyRow = (await screen.findByText('strat-tested-001::strat-tested-001-v2')).closest('tr');
+    const strategyRow = (await screen.findByText('strat-tested-001 · v2')).closest('tr');
     expect(strategyRow).not.toBeNull();
     const cells = within(strategyRow as HTMLTableRowElement).getAllByRole('cell');
     expect(within(cells[4]).getByText('1')).toBeInTheDocument();
     expect(within(strategyRow as HTMLTableRowElement).queryByText('敶﹝')).toBeNull();
+  });
+
+  it('keeps saved strategy legs for older parameter versions and marks them as having a new version', async () => {
+    const staleRowId = 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-v2';
+    window.localStorage.setItem(SAVED_STRATEGY_LEG_STORAGE_KEY, JSON.stringify([staleRowId]));
+    fakeApi.listStrategies = vi.fn().mockResolvedValue([
+      {
+        id: 'strat_53315d3dd88b',
+        name: 'QQQ Grid',
+        strategy_type: 'GRID',
+        universe_name: 'QQQ',
+        current_parameter_version: 4,
+        current_parameter_version_id: 'strat_53315d3dd88b-v4',
+        benchmark_symbol: 'QQQ',
+      },
+    ]);
+    fakeApi.listBacktestRuns = vi.fn().mockResolvedValue([
+      {
+        id: 'run_95db6d1d4ba9',
+        strategy_id: 'strat_53315d3dd88b',
+        strategy_name: 'QQQ Grid',
+        status: 'COMPLETED',
+        completed_at: '2026-04-28T02:00:00Z',
+        parameter_version_id: 'strat_53315d3dd88b-v4',
+        metrics: {
+          annualized_return: 0.24,
+          max_drawdown: -0.13,
+          oos_sharpe: 1.8,
+        },
+      },
+      {
+        id: 'run_32b4cce6719a',
+        strategy_id: 'strat_53315d3dd88b',
+        strategy_name: 'QQQ Grid',
+        status: 'COMPLETED',
+        completed_at: '2026-04-27T02:00:00Z',
+        parameter_version_id: 'strat_53315d3dd88b-v2',
+        metrics: {
+          annualized_return: 0.168,
+          max_drawdown: -0.224,
+          oos_sharpe: 1.02,
+        },
+      },
+    ]);
+
+    await act(async () => {
+      render(<LegInventoryPage />);
+    });
+
+    const strategyRow = (
+      await screen.findByText('strat_53315d3dd88b · v2')
+    ).closest('tr');
+    expect(strategyRow).not.toBeNull();
+    expect(within(strategyRow as HTMLTableRowElement).getByText('QQQ Grid-v2')).toBeInTheDocument();
+    expect(within(strategyRow as HTMLTableRowElement).queryByText('strat_53315d3dd88b::strat_53315d3dd88b-v2')).toBeNull();
+    expect(within(strategyRow as HTMLTableRowElement).getByText('年化 +16.8% | 回撤 -22.4% | 夏普 1.02')).toBeInTheDocument();
+    expect(within(strategyRow as HTMLTableRowElement).getByText('有新版本')).toBeInTheDocument();
+  });
+
+  it('copies a stale saved strategy leg to the latest version after confirmation', async () => {
+    const staleRowId = 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-v2';
+    const latestRowId = 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-v4';
+    window.localStorage.setItem(SAVED_STRATEGY_LEG_STORAGE_KEY, JSON.stringify([staleRowId]));
+    fakeApi.listStrategies = vi.fn().mockResolvedValue([
+      {
+        id: 'strat_53315d3dd88b',
+        name: 'QQQ Grid',
+        strategy_type: 'GRID',
+        universe_name: 'QQQ',
+        current_parameter_version: 4,
+        current_parameter_version_id: 'strat_53315d3dd88b-v4',
+        benchmark_symbol: 'QQQ',
+      },
+    ]);
+    fakeApi.listBacktestRuns = vi.fn().mockResolvedValue([
+      {
+        id: 'run_95db6d1d4ba9',
+        strategy_id: 'strat_53315d3dd88b',
+        strategy_name: 'QQQ Grid',
+        status: 'COMPLETED',
+        completed_at: '2026-04-28T02:00:00Z',
+        parameter_version_id: 'strat_53315d3dd88b-v4',
+        metrics: {
+          annualized_return: 0.24,
+          max_drawdown: -0.13,
+          oos_sharpe: 1.8,
+        },
+      },
+      {
+        id: 'run_32b4cce6719a',
+        strategy_id: 'strat_53315d3dd88b',
+        strategy_name: 'QQQ Grid',
+        status: 'COMPLETED',
+        completed_at: '2026-04-27T02:00:00Z',
+        parameter_version_id: 'strat_53315d3dd88b-v2',
+        metrics: {
+          annualized_return: 0.168,
+          max_drawdown: -0.224,
+          oos_sharpe: 1.02,
+        },
+      },
+    ]);
+
+    await act(async () => {
+      render(<LegInventoryPage />);
+    });
+
+    const staleRow = (await screen.findByText('strat_53315d3dd88b · v2')).closest('tr');
+    expect(staleRow).not.toBeNull();
+    fireEvent.click(within(staleRow as HTMLTableRowElement).getByRole('button', { name: '复制新版本' }));
+
+    const dialog = await screen.findByRole('dialog', { name: '确认复制新版本' });
+    expect(
+      within(dialog).getByText('检测到底层策略已更新至 v4，是否为此策略腿生成新的版本映射？'),
+    ).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '确认生成' }));
+
+    await waitFor(() => expect(screen.getByText('strat_53315d3dd88b · v4')).toBeInTheDocument());
+    expect(JSON.parse(window.localStorage.getItem(SAVED_STRATEGY_LEG_STORAGE_KEY) ?? '[]')).toEqual(
+      expect.arrayContaining([staleRowId, latestRowId]),
+    );
+    expect(screen.queryByRole('button', { name: '复制新版本' })).toBeNull();
   });
 
   it('opens detail drawer content inside the scrollable detail body', async () => {

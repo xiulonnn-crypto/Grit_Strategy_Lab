@@ -16,18 +16,11 @@ _SECTION_HEADING_RE = re.compile(
 _STABLE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _REVISION_VERSION_RE = re.compile(r"^(?P<base>\d+\.\d+\.\d+)-(?P<revision>\d{3})$")
 _UNRELEASED_TITLES = {"unreleased", "未发布"}
+
 _CATEGORY_DEFINITIONS = (
     ("added", "### 新增 (Added)", ("### 新增 (Added)", "### Added", "### 新增")),
-    (
-        "changed",
-        "### 优化 (Changed)",
-        ("### 优化 (Changed)", "### Changed", "### 变更", "### 变更 (Changed)", "### 优化"),
-    ),
-    (
-        "deprecated",
-        "### 已弃用 (Deprecated)",
-        ("### 已弃用 (Deprecated)", "### Deprecated", "### 已弃用"),
-    ),
+    ("changed", "### 优化 (Changed)", ("### 优化 (Changed)", "### Changed", "### 优化", "### 变更")),
+    ("deprecated", "### 废弃 (Deprecated)", ("### 废弃 (Deprecated)", "### Deprecated", "### 废弃")),
     ("removed", "### 移除 (Removed)", ("### 移除 (Removed)", "### Removed", "### 移除")),
     ("fixed", "### 修复 (Fixed)", ("### 修复 (Fixed)", "### Fixed", "### 修复")),
     ("security", "### 安全 (Security)", ("### 安全 (Security)", "### Security", "### 安全")),
@@ -37,7 +30,6 @@ _ALLOWED_UNRELEASED_SUBHEADINGS = {
     for _kind, _canonical_heading, variants in _CATEGORY_DEFINITIONS
     for heading in variants
 }
-_SUMMARY_PREFIX = "> 摘要："
 _SUMMARY_HEADING_TO_KIND = {
     heading: kind
     for kind, _canonical_heading, variants in _CATEGORY_DEFINITIONS
@@ -50,13 +42,25 @@ _SUMMARY_HEADING_TO_CANONICAL = {
 }
 _SUMMARY_KIND_TO_VERB = {
     "added": "新增",
-    "changed": "调整",
-    "deprecated": "标记弃用",
+    "changed": "优化",
+    "deprecated": "标记废弃",
     "removed": "移除",
     "fixed": "修复",
-    "security": "加固",
-    "other": "同步",
+    "security": "提升安全",
+    "other": "更新",
 }
+_PUBLIC_CHANGELOG_FORBIDDEN_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"[A-Za-z]:[\\/]"), "本机绝对路径"),
+    (re.compile(r"(?i)\b(api[_-]?key|secret|password|token)\b"), "密钥、令牌或凭证字样"),
+    (re.compile(r"(?i)\bGRITDEMO\d+\b"), "具体账号或环境编号"),
+    (re.compile(r"#/"), "前端内部 hash 路由"),
+    (re.compile(r"(?i)\b(localhost|127\.0\.0\.1)\b"), "本地地址"),
+    (re.compile(r"(?i)\b(\.sqlite|\.db|\.jsonl)\b"), "本地存储或日志文件细节"),
+    (re.compile(r"\[(?:src|tests|scripts|harness|docs|web|config|data)/[^\]]+\]"), "源码或测试文件引用"),
+    (re.compile(r"\b(?:src|tests|scripts|harness|web|config|data)/[\w./-]+"), "内部路径"),
+)
+_CHANGELOG_BULLET_RE = re.compile(r"^- \*\*[^*]{2,40}\*\*: .+")
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
 
 @dataclass(frozen=True)
@@ -94,51 +98,36 @@ def _body_has_meaningful_content(body: str) -> bool:
         line = raw_line.strip()
         if not line:
             continue
-        if line.startswith(_SUMMARY_PREFIX):
-            continue
         if line.startswith("### "):
             continue
         return True
     return False
 
 
-def _strip_generated_summary(body: str) -> str:
-    filtered_lines = [
-        raw_line
-        for raw_line in body.splitlines()
-        if not raw_line.strip().startswith(_SUMMARY_PREFIX)
-    ]
-    return _normalize_body("\n".join(filtered_lines))
-
-
 def _normalize_heading_summary(summary: str | None) -> str | None:
     if not summary:
         return None
-    cleaned = summary.strip()
-    if not cleaned:
-        return None
-    if cleaned.startswith(_SUMMARY_PREFIX):
-        cleaned = cleaned[len(_SUMMARY_PREFIX) :].strip()
-    if cleaned.startswith("本次快照"):
-        cleaned = cleaned[len("本次快照") :].strip()
-    cleaned = cleaned.rstrip("。.")
+    cleaned = summary.strip().strip("。")
     return cleaned or None
 
 
-def _clean_summary_topic(text: str) -> str:
-    cleaned = text.strip()
-    if not cleaned:
-        return ""
-    cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+def _strip_markup(text: str) -> str:
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
     cleaned = re.sub(r"`([^`]*)`", r"\1", cleaned)
     cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
-    cleaned = cleaned.strip(" -*\t")
+    return cleaned.strip()
+
+
+def _clean_summary_topic(text: str) -> str:
+    cleaned = _strip_markup(text).strip(" -*\t")
+    if not cleaned:
+        return ""
     for delimiter in ("：", ":"):
         if delimiter in cleaned:
             cleaned = cleaned.split(delimiter, 1)[0].strip()
             break
     cleaned = re.split(r"[。；;，,]", cleaned, maxsplit=1)[0].strip()
-    return cleaned.strip(" .。:：;；,，")
+    return cleaned.strip(" .。")
 
 
 def _extract_summary_topic(line: str) -> str | None:
@@ -163,11 +152,10 @@ def _format_summary_topics(topics: Sequence[str], *, limit: int = 2) -> str:
 
 
 def _build_heading_summary(body: str) -> str | None:
-    cleaned_body = _strip_generated_summary(body)
     topics_by_kind: dict[str, list[str]] = {}
     current_kind = "other"
 
-    for raw_line in cleaned_body.splitlines():
+    for raw_line in body.splitlines():
         line = raw_line.strip()
         if not line:
             continue
@@ -184,9 +172,8 @@ def _build_heading_summary(body: str) -> str | None:
         if not topics:
             continue
         rendered_topics = _format_summary_topics(topics)
-        if not rendered_topics:
-            continue
-        clauses.append(f"{_SUMMARY_KIND_TO_VERB[kind]}{rendered_topics}")
+        if rendered_topics:
+            clauses.append(f"{_SUMMARY_KIND_TO_VERB[kind]}{rendered_topics}")
         if len(clauses) == 2:
             break
 
@@ -198,9 +185,8 @@ def _build_heading_summary(body: str) -> str | None:
 
 
 def _normalize_snapshot_body(body: str) -> str:
-    cleaned_body = _strip_generated_summary(body)
     normalized_lines: list[str] = []
-    for raw_line in cleaned_body.splitlines():
+    for raw_line in body.splitlines():
         line = raw_line.strip()
         if line in _SUMMARY_HEADING_TO_CANONICAL:
             normalized_lines.append(_SUMMARY_HEADING_TO_CANONICAL[line])
@@ -209,8 +195,27 @@ def _normalize_snapshot_body(body: str) -> str:
     return _normalize_body("\n".join(normalized_lines))
 
 
+def _validate_public_changelog_body(body: str) -> None:
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("### "):
+            continue
+        if not line.startswith("- "):
+            raise ValueError("CHANGELOG entries must be bullets under standard Keep a Changelog categories.")
+        if not _CHANGELOG_BULLET_RE.match(line):
+            raise ValueError("CHANGELOG bullets must use '- **主题**: 面向用户的通俗说明'.")
+        if len(line) > 220:
+            raise ValueError("CHANGELOG bullets must stay concise; split long implementation notes into smaller public outcomes.")
+        if not _CJK_RE.search(line):
+            raise ValueError("CHANGELOG bullets must be written in readable Chinese.")
+        for pattern, reason in _PUBLIC_CHANGELOG_FORBIDDEN_PATTERNS:
+            if pattern.search(line):
+                raise ValueError(f"CHANGELOG bullet exposes {reason}: {line}")
+
+
 def _build_snapshot_section(title: str, entry_date: str, body: str) -> ChangelogSection:
     normalized_body = _normalize_snapshot_body(body)
+    _validate_public_changelog_body(normalized_body)
     return ChangelogSection(
         title=title,
         entry_date=entry_date,
@@ -278,7 +283,7 @@ def _validate_unreleased_subheadings(sections: Sequence[ChangelogSection]) -> No
         invalid_list = ", ".join(dict.fromkeys(invalid_headings))
         raise ValueError(
             "Unreleased contains unsupported subsection headings: "
-            f"{invalid_list}. Use standard Keep a Changelog categories only."
+            f"{invalid_list}. Use 新增/优化/废弃/移除/修复/安全 only."
         )
 
 
@@ -321,7 +326,7 @@ def _read_version(version_path: Path) -> str | None:
 
 def _render_version_file(version: str) -> str:
     return (
-        'from __future__ import annotations\n\n'
+        "from __future__ import annotations\n\n"
         '__all__ = ["__version__"]\n\n'
         f'__version__ = "{version}"\n'
     )

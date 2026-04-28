@@ -922,6 +922,25 @@ describe('SnapshotsPage', () => {
     expect(fakeApi.createAssetLeg).not.toHaveBeenCalled();
   });
 
+  it('wires the bond registry anomaly refresh button to the bond repair job', async () => {
+    const sevenRowOverview = buildSevenBondRowsOverview();
+    fakeApi.getSnapshotOverview.mockResolvedValue(sevenRowOverview);
+    fakeApi.refreshSnapshots.mockResolvedValue(sevenRowOverview);
+
+    renderSnapshotsPage('bond');
+
+    const refreshButton = await screen.findByRole('button', { name: '重刷 2 个异常行' });
+    fireEvent.click(refreshButton);
+
+    await waitFor(() =>
+      expect(fakeApi.refreshSnapshots).toHaveBeenCalledWith({
+        mode: 'repair',
+        targets: ['bond'],
+        reason: 'manual-refresh-bond',
+      }),
+    );
+  });
+
   it('creates an asset leg from a runtime eligible bond source', async () => {
     const runtimeBondOverview = normalizeBondFixedIncomeOverview(
       {

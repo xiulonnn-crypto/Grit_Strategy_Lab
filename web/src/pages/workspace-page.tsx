@@ -155,7 +155,7 @@ export function WorkspacePage(): JSX.Element {
           <p className="hero-copy">{overview?.subtitle ?? TEXT.loadingCopy}</p>
         </div>
         <div className="hero-actions">
-          <button className="primary-button" onClick={() => navigateTo('/creation/new')} type="button">
+          <button className="primary-button" onClick={() => navigateTo('/strategies')} type="button">
             {TEXT.openCreation}
           </button>
           {overview?.latest_optimization_job_id ? (
@@ -206,7 +206,7 @@ export function WorkspacePage(): JSX.Element {
             <p className="eyebrow">{TEXT.warningLabel}</p>
             <h3 className="blank-state-title">{TEXT.noStrategyTitle}</h3>
             <p className="blank-state-copy">{TEXT.noStrategyCopy}</p>
-            <button className="primary-button" onClick={() => navigateTo('/creation/new')} type="button">
+            <button className="primary-button" onClick={() => navigateTo('/strategies')} type="button">
               {TEXT.noStrategyAction}
             </button>
           </section>

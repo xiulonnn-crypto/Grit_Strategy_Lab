@@ -367,7 +367,7 @@
 }
 
 .leg-inventory-table-shell {
-  overflow: auto;
+  overflow: hidden;
   border-radius: 18px;
   border: 1px solid #e5e7eb;
   background: #ffffff;
@@ -393,9 +393,9 @@
 
 .leg-inventory-table {
   width: 100%;
-  min-width: 1380px;
+  min-width: 0;
   border-collapse: collapse;
-  table-layout: auto;
+  table-layout: fixed;
 }
 
 .leg-inventory-table thead th {
@@ -406,10 +406,12 @@
   font-size: 12px;
   font-weight: 800;
   text-align: left;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .leg-inventory-table tbody td {
+  min-width: 0;
   padding: 14px 12px;
   border-bottom: 1px solid #eef2f4;
   vertical-align: top;
@@ -417,6 +419,8 @@
   font-size: 13px;
   line-height: 1.55;
   overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .leg-inventory-table tbody tr:last-child td {
@@ -450,44 +454,44 @@
 
 .leg-inventory-table th:nth-child(1),
 .leg-inventory-table td:nth-child(1) {
-  width: auto;
-  min-width: 260px;
+  width: 25%;
+  min-width: 0;
 }
 
 .leg-inventory-table th:nth-child(2),
 .leg-inventory-table td:nth-child(2) {
-  width: auto;
-  min-width: 108px;
+  width: 8%;
+  min-width: 0;
 }
 
 .leg-inventory-table th:nth-child(3),
 .leg-inventory-table td:nth-child(3) {
-  width: auto;
-  min-width: 168px;
+  width: 14%;
+  min-width: 0;
 }
 
 .leg-inventory-table th:nth-child(4),
 .leg-inventory-table td:nth-child(4) {
-  width: auto;
-  min-width: 280px;
+  width: 18%;
+  min-width: 0;
 }
 
 .leg-inventory-table th:nth-child(5),
 .leg-inventory-table td:nth-child(5) {
-  width: auto;
-  min-width: 184px;
+  width: 8%;
+  min-width: 0;
 }
 
 .leg-inventory-table th:nth-child(6),
 .leg-inventory-table td:nth-child(6) {
-  width: auto;
-  min-width: 240px;
+  width: 13%;
+  min-width: 0;
 }
 
 .leg-inventory-table th:nth-child(7),
 .leg-inventory-table td:nth-child(7) {
-  width: auto;
-  min-width: 228px;
+  width: 14%;
+  min-width: 0;
 }
 
 .leg-inventory-row__identity {
@@ -553,17 +557,21 @@
 
 .leg-inventory-row__actions {
   display: grid;
-  grid-template-columns: repeat(2, 88px);
+  width: 100%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: flex-start;
   justify-content: start;
   gap: 6px;
 }
 
 .leg-inventory-row__actions .ghost-button {
-  width: 88px;
+  width: 100%;
+  min-width: 0;
   min-height: 36px;
   justify-content: center;
-  padding-inline: 0;
+  padding-inline: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

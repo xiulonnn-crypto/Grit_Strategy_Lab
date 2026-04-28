@@ -57,6 +57,18 @@ export function installMockApiServer() {
       }
       if (method === 'GET' && url.pathname === '/strategies') return json(await demoApi.listStrategies());
       if (method === 'GET' && segments[0] === 'strategies' && segments[2] === 'detail') return json(await demoApi.getStrategyDetail(segments[1]));
+      if (method === 'POST' && segments[0] === 'strategies' && segments[2] === 'parameter-versions' && segments[4] === 'restore') {
+        if (!demoApi.restoreStrategyParameterVersion) {
+          return new Response(JSON.stringify({ message: 'restoreStrategyParameterVersion is not implemented' }), { status: 501 });
+        }
+        return json(
+          await demoApi.restoreStrategyParameterVersion(
+            segments[1],
+            segments[3],
+            body as import('./types').ParameterVersionRestorePayload,
+          ),
+        );
+      }
       if (method === 'POST' && url.pathname === '/strategy-creation-sessions') {
         return json(
           await demoApi.createCreationSession(

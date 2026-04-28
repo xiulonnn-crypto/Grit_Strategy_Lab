@@ -98,6 +98,11 @@ def main(argv: list[str] | None = None) -> int:
         )
     except Exception as exc:
         print(f"pre-push: failed to prepare changelog metadata: {exc}", file=sys.stderr)
+        print(
+            "pre-push: CHANGELOG entries must be concise UTF-8 Chinese release notes and must not expose "
+            "local paths, accounts, secrets, internal routes, raw payloads, stack traces, or source/test file lists.",
+            file=sys.stderr,
+        )
         return 1
 
     if result.changed or _managed_files_dirty(repo_root):

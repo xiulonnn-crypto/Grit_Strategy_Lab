@@ -12,6 +12,14 @@ import type {
   ApiCashLeg,
   ApiCashLegCreatePayload,
   ApiConfirmationUpdateRequest,
+  ApiCompositionAllocationJob,
+  ApiCompositionAllocationJobPayload,
+  ApiCompositionBacktestOrderNetting,
+  ApiCompositionBacktestOrderPage,
+  ApiCompositionBacktestOrdersQuery,
+  ApiCompositionBacktestRun,
+  ApiCompositionBacktestRunPayload,
+  ApiCompositionOrderExportFormat,
   ApiCompositionCreatePayload,
   ApiCompositionDetail,
   ApiCompositionListItem,
@@ -94,6 +102,22 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+async function requestText(path: string, init?: RequestInit): Promise<string> {
+  const headers = new Headers(init?.headers ?? {});
+  headers.set('Accept', 'text/csv,text/plain,*/*');
+  if (init?.body) {
+    headers.set('Content-Type', 'application/json');
+  }
+  const response = await fetch(joinUrl(apiBaseUrl(), path), {
+    ...init,
+    headers,
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.text();
+}
+
 function withJsonBody(body: unknown, init?: RequestInit): RequestInit {
   return {
     ...init,
@@ -123,6 +147,11 @@ function createHttpApiClient(): DemoApi {
       ),
     listStrategies: (signal) => requestJson<ApiStrategyListItem[]>('/strategies', { signal }),
     getStrategyDetail: (id) => requestJson<ApiStrategyDetail>(`/strategies/${encodeURIComponent(id)}/detail`),
+    restoreStrategyParameterVersion: (strategyId, parameterVersionId, payload) =>
+      requestJson<ApiStrategyDetail>(
+        `/strategies/${encodeURIComponent(strategyId)}/parameter-versions/${encodeURIComponent(parameterVersionId)}/restore`,
+        withJsonBody(payload, { method: 'POST' }),
+      ),
     getCreationSession: (id) => requestJson<ApiStrategyCreationSession>(`/strategy-creation-sessions/${encodeURIComponent(id)}`),
     createCreationSession: (payload) =>
       requestJson<ApiStrategyCreationSession>(
@@ -285,6 +314,51 @@ function createHttpApiClient(): DemoApi {
       requestJson<ApiCompositionDetail>(
         `/compositions/${encodeURIComponent(id)}`,
         withJsonBody(payload, { method: 'PATCH' }),
+      ),
+    createCompositionBacktestRun: (id, payload: ApiCompositionBacktestRunPayload) =>
+      requestJson<ApiCompositionBacktestRun>(
+        `/compositions/${encodeURIComponent(id)}/backtest-runs`,
+        withJsonBody(payload, { method: 'POST' }),
+      ),
+    getCompositionBacktestRun: (id, runId) =>
+      requestJson<ApiCompositionBacktestRun>(
+        `/compositions/${encodeURIComponent(id)}/backtest-runs/${encodeURIComponent(runId)}`,
+      ),
+    getCompositionBacktestOrders: (id, runId, params?: ApiCompositionBacktestOrdersQuery) => {
+      const query = new URLSearchParams();
+      if (params?.symbol) query.set('symbol', params.symbol);
+      if (params?.page !== undefined) query.set('page', String(params.page));
+      if (params?.page_size !== undefined) query.set('page_size', String(params.page_size));
+      const suffix = query.toString();
+      return requestJson<ApiCompositionBacktestOrderPage>(
+        `/compositions/${encodeURIComponent(id)}/backtest-runs/${encodeURIComponent(runId)}/orders${suffix ? `?${suffix}` : ''}`,
+      );
+    },
+    getCompositionBacktestOrderNetting: (id, runId, orderId) =>
+      requestJson<ApiCompositionBacktestOrderNetting>(
+        `/compositions/${encodeURIComponent(id)}/backtest-runs/${encodeURIComponent(runId)}/orders/${encodeURIComponent(orderId)}/netting`,
+      ),
+    exportCompositionBacktestOrders: (
+      id,
+      runId,
+      format: ApiCompositionOrderExportFormat = 'csv',
+      params?: { symbol?: string | null },
+    ) => {
+      const query = new URLSearchParams();
+      query.set('format', format);
+      if (params?.symbol) query.set('symbol', params.symbol);
+      return requestText(
+        `/compositions/${encodeURIComponent(id)}/backtest-runs/${encodeURIComponent(runId)}/orders/export?${query.toString()}`,
+      );
+    },
+    createCompositionAllocationJob: (id, payload: ApiCompositionAllocationJobPayload) =>
+      requestJson<ApiCompositionAllocationJob>(
+        `/compositions/${encodeURIComponent(id)}/allocation-jobs`,
+        withJsonBody(payload, { method: 'POST' }),
+      ),
+    getCompositionAllocationJob: (id, jobId) =>
+      requestJson<ApiCompositionAllocationJob>(
+        `/compositions/${encodeURIComponent(id)}/allocation-jobs/${encodeURIComponent(jobId)}`,
       ),
     getSnapshotOverview: () => requestJson<ApiSnapshotOverview>('/data-snapshots/overview'),
     refreshSnapshots: (payload) =>

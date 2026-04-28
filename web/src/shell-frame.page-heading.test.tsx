@@ -13,6 +13,13 @@ describe('shell frame page heading hooks', () => {
     expect(container.querySelector('.page-heading')).toBeNull();
 
     rerender(
+      <ShellFrameCn route={{ kind: 'creation-template' }}>
+        <div>strategy library</div>
+      </ShellFrameCn>,
+    );
+    expect(container.querySelector('.page-heading')).toBeNull();
+
+    rerender(
       <ShellFrameCn route={{ kind: 'strategy-detail', strategyId: 'strat-001' }}>
         <div>strategy detail</div>
       </ShellFrameCn>,

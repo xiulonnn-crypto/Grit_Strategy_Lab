@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiStrategyDetail } from './types';
@@ -6,6 +7,9 @@ let StrategyDetailPage: typeof import('./pages/strategy-detail-page').StrategyDe
 
 const HISTORY_OPEN_LABEL = '\u67e5\u770b\u53c2\u6570';
 const HISTORY_DETAIL_TITLE = '\u7248\u672c\u53c2\u6570\u660e\u7ec6';
+const HISTORY_RESTORE_LABEL = '\u56de\u6eda';
+const RESTORE_DIALOG_TITLE = '\u786e\u8ba4\u56de\u6eda\u53c2\u6570\u7248\u672c';
+const DECISION_NOTE_LABEL = '\u51b3\u7b56\u8bf4\u660e';
 const CLOSE_LABEL = '\u5173\u95ed';
 
 const fakeApi = vi.hoisted(() => ({
@@ -13,11 +17,13 @@ const fakeApi = vi.hoisted(() => ({
   listBacktestRuns: vi.fn(),
   getStrategyDetail: vi.fn(),
   getBacktestRunDetail: vi.fn(),
+  restoreStrategyParameterVersion: vi.fn(),
 })) as {
   createCreationSession: ReturnType<typeof vi.fn>;
   listBacktestRuns: ReturnType<typeof vi.fn>;
   getStrategyDetail: ReturnType<typeof vi.fn>;
   getBacktestRunDetail: ReturnType<typeof vi.fn>;
+  restoreStrategyParameterVersion: ReturnType<typeof vi.fn>;
 };
 
 vi.mock('./lib/demoStoreContext', () => ({
@@ -66,14 +72,41 @@ const strategy: ApiStrategyDetail = {
       created_at: '2026-03-23T08:44:00Z',
       parameters: { bollinger_period: 20, rsi_period: 6 },
       comment: 'Promoted after tuning the current settings.',
+      change_summary: 'RSI 周期 8→6\n布林周期 18→20',
+      decision_note: '保留更短 RSI 周期，因为最近两次样本外窗口回撤更低。',
+      source: {
+        kind: 'optimization',
+        job_id: 'opt-001',
+        candidate_id: 'cand-002',
+        run_id: 'run-001',
+        source_parameter_version_id: 'pv-002',
+      },
+      alternative_versions: [
+        { parameter_version_id: 'pv-001', label: '保守基线' },
+      ],
+      rollbackable: true,
     },
     {
       version_number: 1,
       parameter_version_id: 'pv-001',
       revision: 1,
       created_at: '2026-03-20T08:44:00Z',
-      parameters: { observation_timeframe: 'daily' },
+      parameters: { observation_timeframe: 'daily', rsi_period: 8 },
       comment: 'Initial import.',
+      change_summary: '初始导入参数。',
+      decision_note: '作为人工确认的原始基线，适合在新版本异常时恢复。',
+      source: {
+        kind: 'optimization_candidate',
+        job_id: 'opt-000',
+        run_id: 'run-000',
+        candidate_id: 'cand-007',
+        source_parameter_version_id: 'pv-000',
+      },
+      alternative_versions: [
+        { parameter_version_id: 'pv-000', label: '导入前版本' },
+        { parameter_version_id: 'pv-002', label: 'pv-002' },
+      ],
+      rollbackable: true,
     },
   ],
   confirmation_fields: { top_level: [], parameters: [] },
@@ -122,10 +155,12 @@ beforeEach(() => {
   fakeApi.listBacktestRuns.mockReset();
   fakeApi.getStrategyDetail.mockReset();
   fakeApi.getBacktestRunDetail.mockReset();
+  fakeApi.restoreStrategyParameterVersion.mockReset();
   fakeApi.createCreationSession.mockResolvedValue({ id: 'cs-revision-001' });
   fakeApi.listBacktestRuns.mockResolvedValue(recentRuns);
   fakeApi.getStrategyDetail.mockResolvedValue(strategy);
   fakeApi.getBacktestRunDetail.mockResolvedValue(recentRuns[0]);
+  fakeApi.restoreStrategyParameterVersion.mockResolvedValue(strategy);
   window.location.hash = '';
 });
 
@@ -156,19 +191,43 @@ describe('StrategyDetailPage', () => {
     expect(screen.getByText('120')).toBeInTheDocument();
     expect(screen.queryByText('120%')).not.toBeInTheDocument();
     expect(screen.getByText('调仓锚点')).toBeInTheDocument();
-    expect(screen.getByText('调优当前设置后晋升为正式版本。')).toBeInTheDocument();
-    expect(screen.getByText('初始导入。')).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '版本' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '变更摘要' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '决策说明' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '操作（查看参数、回滚）' })).toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: '参数版本编号' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: '更新时间' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: '来源' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: '回滚状态' })).not.toBeInTheDocument();
+    expect(screen.getByText('RSI 周期 8→6')).toBeInTheDocument();
+    expect(screen.getByText('布林周期 18→20')).toBeInTheDocument();
+    expect(screen.getByText('初始导入参数。')).toBeInTheDocument();
+    expect(screen.queryByText('当前版本')).not.toBeInTheDocument();
+    expect(screen.queryByText('可回滚')).not.toBeInTheDocument();
     expect(screen.queryByRole('columnheader', { name: '修订' })).not.toBeInTheDocument();
-    expect(screen.getAllByText('pv-002').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('pv-001').length).toBeGreaterThan(0);
+    expect(screen.getByText('v2')).toBeInTheDocument();
+    expect(screen.getByText('v1')).toBeInTheDocument();
+    expect(screen.queryByText('pv-002')).not.toBeInTheDocument();
+    expect(screen.queryByText('pv-001')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '返回工作台' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: HISTORY_RESTORE_LABEL })).toHaveLength(1);
 
     const historyButtons = await screen.findAllByRole('button', { name: HISTORY_OPEN_LABEL });
     fireEvent.click(historyButtons[1]);
 
     const dialog = await screen.findByRole('dialog', { name: HISTORY_DETAIL_TITLE });
-    expect(dialog.textContent).toContain('pv-001');
-    expect(dialog.textContent).not.toContain('pv-002');
+    expect(dialog.textContent).not.toContain('pv-001');
+    expect(within(dialog).getByRole('heading', { name: 'v1' })).toBeInTheDocument();
+    expect(dialog.textContent).not.toContain('RSI 周期 8→6');
+    expect(dialog.textContent).toContain('作为人工确认的原始基线，适合在新版本异常时恢复。');
+    expect(dialog.textContent).toContain('优化作业');
+    expect(dialog.textContent).toContain('opt-000');
+    expect(dialog.textContent).toContain('run-000');
+    expect(dialog.textContent).toContain('cand-007');
+    expect(dialog.textContent).toContain('pv-000');
+    expect(dialog.textContent).toContain('替代版本');
+    expect(dialog.textContent).toContain('导入前版本');
+    expect(dialog.textContent).toContain('日线');
 
     fireEvent.click(within(dialog).getByRole('button', { name: CLOSE_LABEL }));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: HISTORY_DETAIL_TITLE })).toBeNull());
@@ -189,6 +248,121 @@ describe('StrategyDetailPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '打开优化' }));
     await waitFor(() => expect(window.location.hash).toBe('#/optimization-jobs/opt-001'));
+  });
+
+  it('restores a rollbackable historical parameter version after decision-note confirmation', async () => {
+    ({ StrategyDetailPage } = await import('./pages/strategy-detail-page'));
+    const restoredStrategy: ApiStrategyDetail = {
+      ...strategy,
+      current_parameter_version: 3,
+      current_parameter_version_id: 'pv-003',
+      parameter_history: [
+        {
+          version_number: 3,
+          parameter_version_id: 'pv-003',
+          revision: 3,
+          created_at: '2026-03-28T08:44:00Z',
+          parameters: { observation_timeframe: 'daily', rsi_period: 8 },
+          comment: 'Restored from pv-001.',
+          change_summary: '已恢复到初始基线。',
+          decision_note: '恢复初始基线，等待新优化重跑。',
+          source: {
+            kind: 'restore',
+            source_parameter_version_id: 'pv-001',
+            base_parameter_version_id: 'pv-002',
+          },
+          alternative_versions: [{ parameter_version_id: 'pv-002', label: '回滚前版本' }],
+          rollbackable: false,
+        },
+        ...strategy.parameter_history,
+      ],
+    };
+    fakeApi.restoreStrategyParameterVersion.mockResolvedValueOnce(restoredStrategy);
+
+    render(<StrategyDetailPage strategyId="strat-001" />);
+    await waitFor(() => expect(fakeApi.getStrategyDetail).toHaveBeenCalledWith('strat-001'));
+
+    fireEvent.click(screen.getByRole('button', { name: HISTORY_RESTORE_LABEL }));
+    const dialog = await screen.findByRole('dialog', { name: RESTORE_DIALOG_TITLE });
+    expect(dialog.textContent).toContain('目标版本');
+    expect(dialog.textContent).toContain('v1');
+    expect(dialog.textContent).toContain('当前基准');
+    expect(dialog.textContent).toContain('v2');
+    expect(dialog.textContent).not.toContain('pv-001');
+    expect(dialog.textContent).not.toContain('pv-002');
+    expect(dialog.textContent).not.toContain('候选摘要');
+
+    fireEvent.change(within(dialog).getByLabelText(DECISION_NOTE_LABEL), {
+      target: { value: '恢复初始基线，等待新优化重跑。' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: '确认回滚' }));
+
+    await waitFor(() => expect(fakeApi.restoreStrategyParameterVersion).toHaveBeenCalledTimes(1));
+    expect(fakeApi.restoreStrategyParameterVersion).toHaveBeenCalledWith(
+      'strat-001',
+      'pv-001',
+      expect.objectContaining({
+        base_parameter_version_id: 'pv-002',
+        decision_note: '恢复初始基线，等待新优化重跑。',
+      }),
+    );
+    expect(fakeApi.restoreStrategyParameterVersion.mock.calls[0][2].idempotency_key).toMatch(/^restore-strat-001-pv-001-/);
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: RESTORE_DIALOG_TITLE })).toBeNull());
+    expect(screen.getByText('已恢复到初始基线。')).toBeInTheDocument();
+  });
+
+  it('renders missing or garbled parameter-history decision notes as dashes', async () => {
+    ({ StrategyDetailPage } = await import('./pages/strategy-detail-page'));
+    fakeApi.getStrategyDetail.mockResolvedValue({
+      ...strategy,
+      parameter_history: [
+        {
+          ...strategy.parameter_history[0],
+          decision_note: '????????????',
+        },
+        {
+          ...strategy.parameter_history[1],
+          decision_note: '未记录决策说明。',
+        },
+      ],
+    });
+
+    const { container } = render(<StrategyDetailPage strategyId="strat-001" />);
+    await waitFor(() => expect(fakeApi.getStrategyDetail).toHaveBeenCalledWith('strat-001'));
+
+    const decisionCells = Array.from(container.querySelectorAll('.strategy-detail-history-table__decision')).map((cell) => cell.textContent);
+    expect(decisionCells).toEqual(['-', '-']);
+    expect(container.textContent).not.toContain('????????????');
+    expect(container.textContent).not.toContain('未记录决策说明。');
+
+    const historyButtons = await screen.findAllByRole('button', { name: HISTORY_OPEN_LABEL });
+    fireEvent.click(historyButtons[0]);
+
+    const dialog = await screen.findByRole('dialog', { name: HISTORY_DETAIL_TITLE });
+    expect(within(dialog).getByText('-')).toBeInTheDocument();
+    expect(dialog.textContent).not.toContain('????????????');
+    expect(dialog.textContent).not.toContain('未记录决策说明。');
+  });
+
+  it('keeps the parameter history summary column readable inside the two-column strategy layout', () => {
+    const css = readFileSync('src/pages/strategy-detail-page.css', 'utf8');
+
+    expect(css).toMatch(
+      /\.strategy-detail-history-table th:nth-child\(1\),\s*\.strategy-detail-history-table td:nth-child\(1\)\s*\{[^}]*width:\s*92px;/s,
+    );
+    expect(css).toMatch(
+      /\.strategy-detail-history-table th:nth-child\(2\),\s*\.strategy-detail-history-table td:nth-child\(2\)\s*\{[^}]*width:\s*238px;/s,
+    );
+    expect(css).toMatch(
+      /\.strategy-detail-history-table th:nth-child\(3\),\s*\.strategy-detail-history-table td:nth-child\(3\)\s*\{[^}]*width:\s*120px;/s,
+    );
+    expect(css).toMatch(
+      /\.strategy-detail-history-table th:nth-child\(4\),\s*\.strategy-detail-history-table td:nth-child\(4\)\s*\{[^}]*width:\s*108px;/s,
+    );
+    expect(css).not.toMatch(/\.strategy-detail-history-table__version\s*\{[^}]*display:\s*grid;/s);
+    expect(css).toMatch(/\.strategy-detail-history-table__version-stack\s*\{[^}]*display:\s*grid;[^}]*gap:\s*4px;/s);
+    expect(css).toMatch(/\.strategy-detail-history-table__summary\s*\{[^}]*font-size:\s*0\.92rem;[^}]*line-height:\s*1\.5;/s);
+    expect(css).toMatch(/\.strategy-detail-multiline-text\s*\{[^}]*gap:\s*3px;/s);
   });
 
   it('opens the config step when no latest optimization job exists', async () => {

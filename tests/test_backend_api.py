@@ -4,6 +4,7 @@ from tests.api_test_support import (
     assert_ok,
     assert_snapshot_overview_contract,
     assert_workspace_overview_contract,
+    create_grid_strategy,
     create_momentum_strategy,
     create_optimization_candidate,
     create_optimization_job,
@@ -2499,6 +2500,172 @@ def test_creation_session_workflow_materializes_and_lists_strategy(tmp_path):
     assert overview["latest_strategy_id"] == strategy_id
 
 
+def _assert_parameter_history_metadata_defaults(entry: dict[str, Any], *, rollbackable: bool) -> None:
+    assert isinstance(entry["change_summary"], str)
+    assert entry["change_summary"].strip()
+    assert entry["decision_note"] in (None, "")
+    assert isinstance(entry["source"], dict)
+    assert str(entry["source"].get("kind") or "").strip()
+    assert entry["source"]["kind"] not in {"optimization_promotion", "version_restore"}
+    assert entry["alternative_versions"] == []
+    assert entry["rollbackable"] is rollbackable
+
+
+def test_parameter_history_metadata_defaults_for_basic_and_legacy_strategies(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    materialized = create_momentum_strategy(client, idempotency_key="parameter-metadata-basic")["strategy"]
+    detail = assert_ok(client.get(f"/strategies/{materialized['id']}/detail"))
+    current_entry = detail["parameter_history"][-1]
+
+    assert current_entry["parameter_version_id"] == detail["current_parameter_version_id"]
+    _assert_parameter_history_metadata_defaults(current_entry, rollbackable=False)
+
+    service = client.app.state.service
+    now = "2026-04-28T10:00:00Z"
+    legacy_strategy_id = "strat_legacy_parameter_metadata"
+    legacy_parameters = {
+        "strategy_name": "Legacy SPY Momentum",
+        "strategy_description": "Restored from an older strategy row.",
+        "benchmark_symbol": "SPY",
+        "lookback_months": 6,
+        "skip_recent_months": 1,
+        "top_n": 2,
+        "hold_rank_threshold": 3,
+    }
+    legacy_parameter_version_id = f"{legacy_strategy_id}-v1"
+    service.storage.insert_json_row(
+        "strategies",
+        {
+            "id": legacy_strategy_id,
+            "name": legacy_parameters["strategy_name"],
+            "description": legacy_parameters["strategy_description"],
+            "strategy_type": "MOMENTUM",
+            "universe_name": "SPY",
+            "rebalance_frequency": "monthly",
+            "lifecycle_status": "ACTIVE",
+            "dataset_snapshot_id": "ds-price",
+            "universe_snapshot_id": "un-sp500",
+            "benchmark_symbol": "SPY",
+            "current_parameter_version": 1,
+            "parameters_json": json.dumps(legacy_parameters),
+            "confirmation_fields_json": "{}",
+            "parameter_history_json": json.dumps(
+                [
+                    {
+                        "version_number": 1,
+                        "parameter_version_id": legacy_parameter_version_id,
+                        "revision": 1,
+                        "created_at": now,
+                        "parameters": legacy_parameters,
+                    }
+                ]
+            ),
+            "allowed_actions_json": "[]",
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+
+    legacy_detail = assert_ok(client.get(f"/strategies/{legacy_strategy_id}/detail"))
+    legacy_entry = legacy_detail["parameter_history"][0]
+
+    assert legacy_detail["current_parameter_version_id"] == legacy_parameter_version_id
+    assert legacy_entry["parameters"] == legacy_parameters
+    _assert_parameter_history_metadata_defaults(legacy_entry, rollbackable=False)
+
+
+def test_parameter_history_summaries_rebuild_from_adjacent_versions_and_persist(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    service = client.app.state.service
+    strategy_id = "strat_parameter_summary_backfill"
+    now = "2026-04-28T10:00:00Z"
+    base_parameters = {
+        "strategy_name": "Backfill Momentum",
+        "strategy_description": "Backfill parameter history summaries.",
+        "benchmark_symbol": "SPY",
+        "lookback_months": 6,
+        "skip_recent_months": 1,
+        "top_n": 2,
+        "hold_rank_threshold": 3,
+        "strategy_type": "MOMENTUM",
+        "universe_name": "SPY",
+        "rebalance_frequency": "monthly",
+    }
+    history = [
+        {
+            "version_number": 1,
+            "parameter_version_id": f"{strategy_id}-v1",
+            "revision": 1,
+            "created_at": now,
+            "parameters": base_parameters,
+            "change_summary": "stale imported copy",
+        },
+        {
+            "version_number": 2,
+            "parameter_version_id": f"{strategy_id}-v2",
+            "revision": 2,
+            "created_at": now,
+            "parameters": {**base_parameters, "top_n": 5},
+            "change_summary": "",
+            "comment": "manual revision",
+        },
+        {
+            "version_number": 3,
+            "parameter_version_id": f"{strategy_id}-v3",
+            "revision": 3,
+            "created_at": now,
+            "parameters": {**base_parameters, "lookback_months": 12, "top_n": 8, "hold_rank_threshold": 12},
+        },
+    ]
+    service.storage.insert_json_row(
+        "strategies",
+        {
+            "id": strategy_id,
+            "name": base_parameters["strategy_name"],
+            "description": base_parameters["strategy_description"],
+            "strategy_type": "MOMENTUM",
+            "universe_name": "SPY",
+            "rebalance_frequency": "monthly",
+            "lifecycle_status": "ACTIVE",
+            "dataset_snapshot_id": "ds-price",
+            "universe_snapshot_id": "un-sp500",
+            "benchmark_symbol": "SPY",
+            "current_parameter_version": 3,
+            "parameters_json": json.dumps(history[-1]["parameters"]),
+            "confirmation_fields_json": "{}",
+            "parameter_history_json": json.dumps(history),
+            "allowed_actions_json": "[]",
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+
+    detail = assert_ok(client.get(f"/strategies/{strategy_id}/detail"))
+    summaries = [entry["change_summary"] for entry in detail["parameter_history"]]
+
+    assert summaries == [
+        "初始版本记录",
+        "买入排名阈值 2→5",
+        "回看(月) 6→12\n买入排名阈值 5→8\n保留排名阈值 3→12",
+    ]
+    assert detail["parameter_history"][1]["decision_note"] == "manual revision"
+    assert detail["parameter_history"][1]["source"] == {"kind": "legacy"}
+    assert detail["parameter_history"][1]["rollbackable"] is True
+    assert detail["parameter_history"][2]["rollbackable"] is False
+
+    version_rows = service._strategy_parameter_version_rows(strategy_id)
+    assert [row["change_summary"] for row in version_rows] == summaries
+    persisted_strategy = service.storage.fetch_one(
+        "SELECT parameter_history_json FROM strategies WHERE id = ?",
+        (strategy_id,),
+    )
+    assert persisted_strategy is not None
+    persisted_history = json.loads(persisted_strategy["parameter_history_json"])
+    assert [entry["change_summary"] for entry in persisted_history] == summaries
+
+
 def test_revision_materialize_appends_parameter_version_without_creating_new_strategy(tmp_path):
     client, _ = create_test_client(tmp_path)
 
@@ -2576,6 +2743,91 @@ def test_revision_materialize_rejects_stale_base_parameter_version(tmp_path):
     assert payload["code"] == "stale_base_parameter_version"
     assert payload["expected_base_parameter_version_id"] == stale_base_parameter_version_id
     assert payload["current_parameter_version_id"] == fresh_revision["strategy"]["current_parameter_version_id"]
+
+
+def test_restore_parameter_version_creates_current_version_with_metadata(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="restore-version-base", top_n=2)
+    strategy = base["strategy"]
+    base_parameter_version_id = strategy["current_parameter_version_id"]
+    revised = create_momentum_strategy(
+        client,
+        mode="REVISION",
+        base_strategy_id=strategy["id"],
+        base_parameter_version_id=base_parameter_version_id,
+        top_n=5,
+        idempotency_key="restore-version-revision",
+    )["strategy"]
+    before_restore = assert_ok(client.get(f"/strategies/{strategy['id']}/detail"))
+    source_entry = before_restore["parameter_history"][0]
+    revised_entry = before_restore["parameter_history"][-1]
+    decision_note = "Restore the original top_n after review."
+
+    restored = assert_ok(
+        client.post(
+            f"/strategies/{strategy['id']}/parameter-versions/{source_entry['parameter_version_id']}/restore",
+            json={
+                "idempotency_key": "restore-version-current-1",
+                "base_parameter_version_id": revised["current_parameter_version_id"],
+                "decision_note": decision_note,
+            },
+        )
+    )
+
+    restored_history = restored["parameter_history"]
+    restored_entry = restored_history[-1]
+    restored_history_ids = {entry["parameter_version_id"] for entry in restored_history}
+
+    assert restored["current_parameter_version"] == revised["current_parameter_version"] + 1
+    assert restored["current_parameter_version_id"] == restored_entry["parameter_version_id"]
+    assert restored["current_parameter_version_id"] not in {
+        source_entry["parameter_version_id"],
+        revised_entry["parameter_version_id"],
+    }
+    assert restored["parameters"] == source_entry["parameters"]
+    assert source_entry["parameter_version_id"] in restored_history_ids
+    assert revised_entry["parameter_version_id"] in restored_history_ids
+    assert len(restored_history) == len(before_restore["parameter_history"]) + 1
+    assert restored_entry["parameters"] == source_entry["parameters"]
+    assert restored_entry["decision_note"] == decision_note
+    assert isinstance(restored_entry["change_summary"], str)
+    assert restored_entry["change_summary"].strip()
+    assert restored_entry["change_summary"] != decision_note
+    assert restored_entry["source"]["kind"] == "version_restore"
+    assert restored_entry["source"]["source_parameter_version_id"] == source_entry["parameter_version_id"]
+    assert restored_entry["rollbackable"] is False
+
+
+def test_restore_parameter_version_rejects_stale_base_parameter_version(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="restore-version-stale-base", top_n=2)
+    strategy = base["strategy"]
+    stale_base_parameter_version_id = strategy["current_parameter_version_id"]
+    revised = create_momentum_strategy(
+        client,
+        mode="REVISION",
+        base_strategy_id=strategy["id"],
+        base_parameter_version_id=stale_base_parameter_version_id,
+        top_n=6,
+        idempotency_key="restore-version-stale-revision",
+    )["strategy"]
+
+    response = client.post(
+        f"/strategies/{strategy['id']}/parameter-versions/{stale_base_parameter_version_id}/restore",
+        json={
+            "idempotency_key": "restore-version-stale-1",
+            "base_parameter_version_id": stale_base_parameter_version_id,
+            "decision_note": "Attempt restore from a stale detail view.",
+        },
+    )
+
+    assert response.status_code == 409
+    payload = response.json()
+    assert payload["code"] == "stale_base_parameter_version"
+    assert payload["expected_base_parameter_version_id"] == stale_base_parameter_version_id
+    assert payload["current_parameter_version_id"] == revised["current_parameter_version_id"]
 
 
 def test_promote_trial_rejects_stale_base_parameter_version(tmp_path):
@@ -5797,6 +6049,50 @@ def test_promote_trial_set_current_keeps_base_strategy_name_when_base_matches(tm
     assert promoted["parameter_history"][-1]["parameter_version_id"] == promoted["current_parameter_version_id"]
 
 
+def test_promote_trial_records_parameter_version_metadata_contract(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="materialize-base-promote-metadata")
+    strategy = base["strategy"]
+    base_parameter_version_id = strategy["current_parameter_version_id"]
+    job = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=base_parameter_version_id,
+    )
+    candidate = job["candidates"][0]
+    decision_note = "Promote optimization candidate after committee review."
+
+    promoted = assert_ok(
+        client.post(
+            f"/optimization-jobs/{job['id']}/candidates/{candidate['id']}/promote",
+            json={
+                "idempotency_key": "promote-metadata-1",
+                "mode": "set_current",
+                "base_parameter_version_id": base_parameter_version_id,
+                "comment": decision_note,
+            },
+        )
+    )
+
+    promoted_entry = promoted["parameter_history"][-1]
+    source = promoted_entry["source"]
+
+    assert promoted_entry["parameter_version_id"] == promoted["current_parameter_version_id"]
+    assert promoted_entry["parameters"] == candidate["parameter_snapshot"]
+    assert promoted_entry["comment"] == decision_note
+    assert promoted_entry["decision_note"] == decision_note
+    assert isinstance(promoted_entry["change_summary"], str)
+    assert promoted_entry["change_summary"].strip()
+    assert source["kind"] == "optimization_promotion"
+    assert source["job_id"] == job["id"]
+    assert source["candidate_id"] == candidate["id"]
+    assert source["base_parameter_version_id"] == base_parameter_version_id
+    assert isinstance(promoted_entry["alternative_versions"], list)
+    assert promoted_entry["alternative_versions"]
+    assert promoted_entry["rollbackable"] is False
+
+
 def test_promote_trial_accepts_matching_combination_trial_id(tmp_path):
     client, _ = create_test_client(tmp_path)
 
@@ -5871,6 +6167,210 @@ def test_promote_trial_create_copy_syncs_top_level_rebalance_frequency(tmp_path)
     assert copied["id"] != strategy["id"]
     assert copied["rebalance_frequency"] == "yearly"
     assert copied["parameters"]["rebalance_frequency"] == "yearly"
+
+
+def test_promote_grid_candidate_refreshes_descriptive_parameter_fields(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_grid_strategy(
+        client,
+        idempotency_key="materialize-grid-promote-description",
+        strategy_description="本金10000，围绕QQQ执行网格交易，初始仓位20%，每下跌5%买入10%，每上涨10%卖出10%。",
+        benchmark_symbol="QQQ",
+        initial_position=20,
+        grid_interval=5,
+        buy_size_pct=10,
+        sell_step_pct=10,
+        sell_size_pct=10,
+        max_stop_loss_pct=-50,
+        capital=10000,
+    )
+    strategy = base["strategy"]
+    base_parameter_version_id = strategy["current_parameter_version_id"]
+    job = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=base_parameter_version_id,
+    )
+    updated_job = create_optimization_candidate(
+        client,
+        job["id"],
+        label="Aggressive grid candidate",
+        parameter_snapshot={
+            **strategy["parameters"],
+            "initial_position": 80,
+            "grid_interval": 8,
+            "buy_size_pct": 20,
+            "sell_step_pct": 20,
+            "sell_size_pct": 20,
+        },
+        base_parameter_version_id=base_parameter_version_id,
+    )
+    candidate = next(
+        candidate
+        for candidate in updated_job["candidates"]
+        if candidate["label"] == "Aggressive grid candidate"
+    )
+
+    promoted = assert_ok(
+        client.post(
+            f"/optimization-jobs/{job['id']}/candidates/{candidate['id']}/promote",
+            json={
+                "idempotency_key": "promote-grid-description-1",
+                "mode": "set_current",
+                "base_parameter_version_id": base_parameter_version_id,
+            },
+        )
+    )
+
+    expected_description = "本金10000，围绕QQQ执行网格交易，初始仓位80%，每下跌8%买入20%，每上涨20%卖出20%。"
+    confirmation_values = {
+        entry["key"]: entry["value"]
+        for entry in promoted["confirmation_fields"]["parameters"]
+    }
+
+    assert candidate["parameter_snapshot"]["strategy_description"] == expected_description
+    assert promoted["parameters"]["strategy_description"] == expected_description
+    assert promoted["description"] == expected_description
+    assert promoted["parameter_history"][-1]["parameters"]["strategy_description"] == expected_description
+    assert confirmation_values["initial_position"] == 80
+    assert confirmation_values["grid_interval"] == 8
+    assert confirmation_values["buy_size_pct"] == 20
+    assert confirmation_values["sell_step_pct"] == 20
+    assert confirmation_values["sell_size_pct"] == 20
+    assert confirmation_values["strategy_description"] == expected_description
+
+
+def test_grid_optimization_generated_candidates_refresh_descriptions(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    strategy = create_grid_strategy(
+        client,
+        idempotency_key="materialize-grid-generated-candidate-description",
+        strategy_description="本金10000，围绕QQQ执行网格交易，初始仓位20%，每下跌5%买入10%，每上涨10%卖出10%。",
+        benchmark_symbol="QQQ",
+        initial_position=20,
+        grid_interval=5,
+        buy_size_pct=10,
+        sell_step_pct=10,
+        sell_size_pct=10,
+        max_stop_loss_pct=-50,
+        capital=10000,
+    )["strategy"]
+
+    job = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=strategy["current_parameter_version_id"],
+        budget_combinations=1,
+        search_space=[
+            {"key": "initial_position", "mode": "fixed", "value": 80},
+            {"key": "grid_interval", "mode": "fixed", "value": 8},
+            {"key": "buy_size_pct", "mode": "fixed", "value": 20},
+            {"key": "sell_step_pct", "mode": "fixed", "value": 20},
+            {"key": "sell_size_pct", "mode": "fixed", "value": 20},
+        ],
+    )
+
+    expected_description = "本金10000，围绕QQQ执行网格交易，初始仓位80%，每下跌8%买入20%，每上涨20%卖出20%。"
+
+    assert job["candidates"][0]["parameter_snapshot"]["strategy_description"] == expected_description
+    assert job["matching_combinations"][0]["parameter_snapshot"]["strategy_description"] == expected_description
+
+
+def test_legacy_grid_run_and_strategy_detail_normalize_stale_parameter_descriptions(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    old_description = "本金10000，围绕QQQ执行网格交易，初始仓位20%，每下跌5%买入10%，每上涨10%卖出10%。"
+
+    strategy = create_grid_strategy(
+        client,
+        idempotency_key="materialize-grid-legacy-stale-description",
+        strategy_description=old_description,
+        benchmark_symbol="QQQ",
+        initial_position=20,
+        grid_interval=5,
+        buy_size_pct=10,
+        sell_step_pct=10,
+        sell_size_pct=10,
+        max_stop_loss_pct=-50,
+        capital=10000,
+    )["strategy"]
+    stale_snapshot = {
+        **strategy["parameters"],
+        "initial_position": 80,
+        "grid_interval": 8,
+        "buy_size_pct": 20,
+        "sell_step_pct": 20,
+        "sell_size_pct": 20,
+        "strategy_description": old_description,
+    }
+    service = client.app.state.service
+    service.storage.execute(
+        """
+        UPDATE strategies
+        SET parameters_json = ?,
+            description = ?,
+            confirmation_fields_json = ?
+        WHERE id = ?
+        """,
+        (
+            json.dumps(stale_snapshot, ensure_ascii=False),
+            old_description,
+            json.dumps(strategy["confirmation_fields"], ensure_ascii=False),
+            strategy["id"],
+        ),
+    )
+    service.storage.execute(
+        """
+        UPDATE strategy_parameter_versions
+        SET parameters_json = ?
+        WHERE strategy_id = ? AND parameter_version_id = ?
+        """,
+        (
+            json.dumps(stale_snapshot, ensure_ascii=False),
+            strategy["id"],
+            strategy["current_parameter_version_id"],
+        ),
+    )
+
+    run_id = "run_legacy_grid_stale_description"
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    _insert_backtest_run(
+        client,
+        run_id=run_id,
+        strategy_id=strategy["id"],
+        created_at=created_at,
+        is_permanent=0,
+        artifact_paths=[],
+    )
+    service.storage.execute(
+        """
+        UPDATE backtest_runs
+        SET parameter_snapshot_json = ?
+        WHERE id = ?
+        """,
+        (json.dumps(stale_snapshot, ensure_ascii=False), run_id),
+    )
+
+    expected_description = "本金10000，围绕QQQ执行网格交易，初始仓位80%，每下跌8%买入20%，每上涨20%卖出20%。"
+
+    detail = assert_ok(client.get(f"/strategies/{strategy['id']}/detail"))
+    run_detail = assert_ok(client.get(f"/backtest-runs/{run_id}/detail"))
+    confirmation_values = {
+        entry["key"]: entry["value"]
+        for entry in detail["confirmation_fields"]["parameters"]
+    }
+
+    assert detail["parameters"]["strategy_description"] == expected_description
+    assert detail["description"] == expected_description
+    assert detail["parameter_history"][-1]["parameters"]["strategy_description"] == expected_description
+    assert confirmation_values["initial_position"] == 80
+    assert confirmation_values["grid_interval"] == 8
+    assert confirmation_values["buy_size_pct"] == 20
+    assert confirmation_values["sell_step_pct"] == 20
+    assert confirmation_values["sell_size_pct"] == 20
+    assert confirmation_values["strategy_description"] == expected_description
+    assert run_detail["parameter_snapshot"]["strategy_description"] == expected_description
 
 
 def test_historical_backtest_run_and_strategy_views_keep_base_name_when_current_row_is_versioned(tmp_path):
