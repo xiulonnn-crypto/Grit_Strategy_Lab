@@ -772,12 +772,22 @@ describe('composition workbench page', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: '保存草稿' }));
 
+    expect(await screen.findByRole('dialog', { name: '确认升级组合版本' })).toBeInTheDocument();
+    const confirmDraftUpgrade = screen.getByRole('button', { name: '确认升级版本' });
+    expect(confirmDraftUpgrade).toBeDisabled();
+    fireEvent.change(screen.getByRole('textbox', { name: '升级理由' }), {
+      target: { value: '更新组合说明以记录研究背景。' },
+    });
+    fireEvent.click(confirmDraftUpgrade);
+
     await waitFor(() => expect(fakeApi.updateComposition).toHaveBeenCalledTimes(1));
     expect(fakeApi.updateComposition).toHaveBeenCalledWith(
       'comp-001',
       expect.objectContaining({
         description: '更新后的说明',
         status: 'DRAFT',
+        version_reason: '更新组合说明以记录研究背景。',
+        version_source: 'manual_save',
       }),
     );
   });
@@ -1016,11 +1026,19 @@ describe('composition workbench page', () => {
 
     fireEvent.click(upgradeButtons[0]);
 
+    expect(await screen.findByRole('dialog', { name: '确认升级组合版本' })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox', { name: '升级理由' }), {
+      target: { value: '采用最新已保存策略腿版本。' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '确认升级版本' }));
+
     await waitFor(() => expect(fakeApi.updateComposition).toHaveBeenCalledTimes(1));
     const [, payload] = fakeApi.updateComposition.mock.calls[0];
     expect(payload).toEqual(
       expect.objectContaining({
         status: 'ACTIVE',
+        version_reason: '采用最新已保存策略腿版本。',
+        version_source: 'manual_save',
         legs: expect.arrayContaining([
           expect.objectContaining({
             leg_kind: 'strategy',

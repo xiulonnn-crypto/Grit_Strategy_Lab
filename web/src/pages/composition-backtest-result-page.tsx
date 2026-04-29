@@ -32,11 +32,35 @@ type PerformanceMetric = {
   proxyNote?: string;
 };
 
+type PerformanceComparison = {
+  key: string;
+  label: string;
+  status: string;
+  tone: Tone;
+  rows: Array<{
+    key: string;
+    label: string;
+    value: string;
+    conclusion: string;
+    proxyNote?: string;
+    weak: boolean;
+  }>;
+};
+
+type HeroMetric = {
+  key: string;
+  label: string;
+  value: string;
+  detail: string;
+  tone: Tone;
+};
+
 type SleeveContribution = {
   key: string;
   name: string;
   primary: string;
   detail: string;
+  efficiency: string;
   tone: Tone;
   valuePct: number;
 };
@@ -49,6 +73,7 @@ type ExposureRow = {
   billPct: number;
   cashPct: number;
   label: string;
+  note?: string;
 };
 
 type StressZoom = {
@@ -152,6 +177,7 @@ type CompositionBacktestResult = {
   stabilityRuling: string;
   stabilityDetail: string;
   proxyCoverageNote: string;
+  exposureAuditNote: string;
   performanceMatrix: PerformanceMetric[];
   sleeveContributions: SleeveContribution[];
   exposureRows: ExposureRow[];
@@ -175,6 +201,7 @@ const DEFAULT_RESULT: CompositionBacktestResult = {
   stabilityRuling: '稳定性裁决：10Y 稳定，20Y 需复核',
   stabilityDetail: '净收益 11.8%，最大回撤 -9.4%，成本拖累 18 bps；30Y 数据不足，不纳入正式裁决。',
   proxyCoverageNote: '20Y 指标含 SPY 代理覆盖说明：2006-2011 Alpha Core 缺失，相关度 0.98，仅用于方向复核。',
+  exposureAuditNote: '敞口热力图按组合再平衡事件生成；保存组合保留冻结来源证据，模拟不会改写组合腿。',
   performanceMatrix: [
     {
       key: 'annualized_return',
@@ -187,7 +214,7 @@ const DEFAULT_RESULT: CompositionBacktestResult = {
     },
     {
       key: 'sharpe_sortino',
-      label: 'Sharpe / Sortino',
+      label: '夏普 / 索提诺',
       tenYear: '1.21 / 1.68',
       twentyYear: '0.94 / 1.22',
       thirtyYear: '不足',
@@ -196,7 +223,7 @@ const DEFAULT_RESULT: CompositionBacktestResult = {
     },
     {
       key: 'drawdown_recovery',
-      label: 'MDD / 修复天数',
+      label: '最大回撤 / 修复天数',
       tenYear: '-9.4% / 96d',
       twentyYear: '-15.2% / 184d',
       thirtyYear: '不足',
@@ -225,6 +252,7 @@ const DEFAULT_RESULT: CompositionBacktestResult = {
       name: 'Alpha Core',
       primary: '主收益',
       detail: '收益 +12.4%，Alpha +3.8%，回撤贡献 38%。',
+      efficiency: '0.33x',
       tone: 'good',
       valuePct: 68,
     },
@@ -233,6 +261,7 @@ const DEFAULT_RESULT: CompositionBacktestResult = {
       name: 'QQQ Grid',
       primary: '水下偏高',
       detail: '收益 +4.1%，Beta 0.52，水下贡献 44%。',
+      efficiency: '0.09x',
       tone: 'warning',
       valuePct: 44,
     },
@@ -241,18 +270,19 @@ const DEFAULT_RESULT: CompositionBacktestResult = {
       name: 'T-Bill + Cash',
       primary: '避震腿',
       detail: '回撤缓冲 +6.6pt，2022 Q1 权重升至 46%。',
+      efficiency: '防守',
       tone: 'info',
       valuePct: 31,
     },
   ],
   exposureRows: [
-    { key: '2016', period: '2016', alphaPct: 44, qqqPct: 28, billPct: 18, cashPct: 10, label: '进攻' },
-    { key: '2020', period: '2020', alphaPct: 35, qqqPct: 20, billPct: 33, cashPct: 12, label: '避震' },
-    { key: '2022', period: '2022', alphaPct: 28, qqqPct: 14, billPct: 46, cashPct: 12, label: 'T-Bill 加仓' },
-    { key: '2024', period: '2024', alphaPct: 38, qqqPct: 22, billPct: 30, cashPct: 10, label: '恢复' },
+    { key: '2016', period: '2016', alphaPct: 44, qqqPct: 28, billPct: 18, cashPct: 10, label: '定期平衡' },
+    { key: '2020', period: '2020', alphaPct: 35, qqqPct: 20, billPct: 33, cashPct: 12, label: '回撤触发' },
+    { key: '2022', period: '2022', alphaPct: 28, qqqPct: 14, billPct: 46, cashPct: 12, label: '回撤触发' },
+    { key: '2024', period: '2024', alphaPct: 38, qqqPct: 22, billPct: 30, cashPct: 10, label: '定期平衡' },
   ],
   stressZoom: {
-    label: 'Stress Period Zoom · 2020 疫情',
+    label: '压力窗口 · 2020 疫情',
     portfolioDrawdown: '-5.8%',
     benchmarkLabel: 'QQQ',
     benchmarkDrawdown: '-15.6%',
@@ -315,7 +345,7 @@ const DEFAULT_RESULT: CompositionBacktestResult = {
           slippageBps: '3.1',
           fee: '18.40',
           sleeve: 'QQQ Grid',
-          triggerReason: '季度再平衡 / Netting 后',
+          triggerReason: '季度再平衡 / 内部对冲后',
           nettingLabel: '内部对冲 42%',
           tone: 'good',
           netting: {
@@ -417,7 +447,7 @@ const DEFAULT_RESULT: CompositionBacktestResult = {
       slippageBps: '3.1',
       fee: '18.40',
       sleeve: 'QQQ Grid',
-      triggerReason: '季度再平衡 / Netting 后',
+      triggerReason: '季度再平衡 / 内部对冲后',
       nettingLabel: '内部对冲 42%',
       tone: 'good',
     },
@@ -524,26 +554,26 @@ const DEFAULT_RESULT: CompositionBacktestResult = {
   evidenceCards: [
     {
       id: 'frozen-config',
-      title: 'Frozen Config',
+      title: '配置冻结',
       body: '组合 v1.2；Alpha Core v5；QQQ Grid v4；T-Bill Snapshot 2026-03。',
       tone: 'good',
     },
     {
       id: 'data-footprint',
-      title: 'Data Footprint',
+      title: '数据足迹',
       body: '价格序列来自正式行情源；现金曲线锁定 UST 3M。',
       tone: 'info',
     },
     {
       id: 'proxy-logs',
-      title: 'Proxy Logs',
+      title: '代理日志',
       body: '2006-2011 Alpha Core 缺失，使用 SPY 代理，相关度 0.98。',
       tone: 'warning',
     },
     {
       id: 'algorithm-spec',
-      title: 'Algorithm Spec',
-      body: '季度再平衡；5% 偏离阈值；成本 6 / 8 bps；缺失数据 strict + proxy map。',
+      title: '算法规则',
+      body: '季度再平衡；5% 偏离阈值；成本 6 / 8 bps；缺失数据采用严格门禁与代理映射。',
       tone: 'neutral',
     },
   ],
@@ -633,13 +663,149 @@ function toTone(value: unknown, fallback: Tone): Tone {
     : fallback;
 }
 
+function humanizeRuntimeLabel(value: unknown, fallback: string): string {
+  const text = toText(value, fallback);
+  if (/^proxy evidence required$/i.test(text)) {
+    return '需要代理证据复核';
+  }
+  if (/^composition[_\s-]*detail[_\s-]*preview$/i.test(text)) {
+    return '组合详情预演';
+  }
+  if (/^Derived from saved composition preview\/detail fields; this is not real broker execution history\.?$/i.test(text)) {
+    return '来自组合预演/详情字段推导，并非真实券商成交历史。';
+  }
+  if (/^Derived from full-window composition rebalance events and source return streams; these are model instructions, not broker fills\.?$/i.test(text)) {
+    return '来自全窗口组合调仓事件与来源收益流；这是模型指令，不是券商成交回报。';
+  }
+  if (/^proxy_from_composition_detail_preview$/i.test(text)) {
+    return '组合详情代理投影';
+  }
+  if (/^verified_from_composition_detail_preview$/i.test(text)) {
+    return '组合详情已验证';
+  }
+  if (/^limited_from_composition_detail_preview$/i.test(text)) {
+    return '组合详情有限覆盖';
+  }
+  if (/^quarterly$/i.test(text)) {
+    return '季度';
+  }
+  if (/^monthly$/i.test(text)) {
+    return '每月';
+  }
+  if (/^semiannual$/i.test(text)) {
+    return '半年';
+  }
+  if (/^completed_with_warnings$/i.test(text)) {
+    return '完成但需复核';
+  }
+  if (/^completed$/i.test(text)) {
+    return '已完成';
+  }
+  if (/^10Y stable$/i.test(text)) {
+    return '10Y 样本稳定';
+  }
+  if (/^limited window$/i.test(text)) {
+    return '样本窗口有限';
+  }
+  const simulatedAlignedMatch = text.match(/^Simulated from ([a-z_ -]+) cadence using aligned leg return streams\.?$/i);
+  if (simulatedAlignedMatch?.[1]) {
+    return `按${humanizeRuntimeLabel(simulatedAlignedMatch[1], '定期')}节奏和已对齐的腿收益流模拟。`;
+  }
+  const simulatedLimitedMatch = text.match(/^Simulated from ([a-z_ -]+) cadence with limited drift evidence\.?$/i);
+  if (simulatedLimitedMatch?.[1]) {
+    return `按${humanizeRuntimeLabel(simulatedLimitedMatch[1], '定期')}节奏模拟，漂移证据有限。`;
+  }
+  if (/^Simulated from quarterly cadence using aligned leg return streams\.?$/i.test(text)) {
+    return '按季度节奏和已对齐的腿收益流模拟。';
+  }
+  if (/^Saved compositions keep frozen source evidence; rebalance simulation does not mutate legs\.?$/i.test(text)) {
+    return '保存组合保留冻结来源证据；调仓模拟不改写组合腿。';
+  }
+  if (/^Composition record created with normalized legs and cost policy\.?$/i.test(text)) {
+    return '组合记录已创建，组合腿与成本规则已标准化。';
+  }
+  if (/^Composition structure, weights, benchmark, or cost policy was patched and revalidated\.?$/i.test(text)) {
+    return '组合结构、权重、基准或成本规则已更新并重新校验。';
+  }
+  const sourceFreezeMatch = text.match(/^Captured\s+(\d+)\s+source freeze signatures\.?$/i);
+  if (sourceFreezeMatch?.[1]) {
+    return `已记录 ${sourceFreezeMatch[1]} 条来源冻结签名。`;
+  }
+  const rebalanceSummaryMatch = text.match(/^Simulated\s+(\d+)\s+rebalance events without mutating frozen sources\.?$/i);
+  if (rebalanceSummaryMatch?.[1]) {
+    return `已模拟 ${rebalanceSummaryMatch[1]} 次调仓事件，未改写冻结来源。`;
+  }
+  const statusSummaryMatch = text.match(/^Composition status is ([A-Z_ -]+); drift warnings remain advisory\.?$/i);
+  if (statusSummaryMatch?.[1]) {
+    return `组合状态为${humanizeRuntimeLabel(statusSummaryMatch[1], statusSummaryMatch[1])}；漂移预警保持为建议项。`;
+  }
+  const cadenceModeledMatch = text.match(/^Cadence modeled as ([a-z_ -]+)\.?$/i);
+  if (cadenceModeledMatch?.[1]) {
+    return `调仓频率按${humanizeRuntimeLabel(cadenceModeledMatch[1], cadenceModeledMatch[1])}建模。`;
+  }
+  if (/^created$/i.test(text)) {
+    return '创建记录';
+  }
+  if (/^structure_patch$/i.test(text)) {
+    return '结构更新';
+  }
+  if (/^source_freeze$/i.test(text)) {
+    return '来源冻结';
+  }
+  if (/^rebalance_check$/i.test(text)) {
+    return '调仓校验';
+  }
+  if (/^status$/i.test(text)) {
+    return '状态记录';
+  }
+  if (/quarterly cadence;\s*simulated from composition rebalance_events/i.test(text)) {
+    return '定期平衡；由组合再平衡事件模拟。';
+  }
+  const normalizedText = text.replace(/；/g, ';');
+  const alignedMatch = normalizedText.match(
+    /^Aligned\s+(\d+)\s+periods across\s+(\d+)\s+leg streams\.?;\s*(\d+)\s+missing leg periods used profile fallback streams\.?$/i,
+  );
+  if (alignedMatch) {
+    return `已对齐 ${alignedMatch[1]} 个周期 / ${alignedMatch[2]} 条腿；${alignedMatch[3]} 个缺失腿周期使用画像 fallback 收益。`;
+  }
+  const alignedOnlyMatch = normalizedText.match(/^Aligned\s+(\d+)\s+periods across\s+(\d+)\s+leg streams\.?$/i);
+  if (alignedOnlyMatch) {
+    return `已对齐 ${alignedOnlyMatch[1]} 个周期 / ${alignedOnlyMatch[2]} 条腿。`;
+  }
+  return text;
+}
+
+function humanizeEvidenceTitle(value: unknown, fallback: string): string {
+  const text = toText(value, fallback);
+  const normalized = text.trim().toLowerCase();
+  if (normalized === 'frozen config') {
+    return '配置冻结';
+  }
+  if (normalized === 'data footprint') {
+    return '数据足迹';
+  }
+  if (normalized === 'proxy logs') {
+    return '代理日志';
+  }
+  if (normalized === 'algorithm spec') {
+    return '算法规则';
+  }
+  if (normalized === 'audit trail') {
+    return '审计轨迹';
+  }
+  return text;
+}
+
 function normalizeArray<T>(
   value: unknown,
   fallback: T[],
   normalize: (record: Record<string, unknown>, fallbackItem: T, index: number) => T,
 ): T[] {
-  if (!Array.isArray(value) || value.length === 0) {
+  if (!Array.isArray(value)) {
     return fallback;
+  }
+  if (value.length === 0) {
+    return [];
   }
   return value.map((item, index) => normalize(asRecord(item) ?? {}, fallback[Math.min(index, fallback.length - 1)], index));
 }
@@ -651,8 +817,8 @@ function normalizePerformanceMetric(value: Record<string, unknown>, fallback: Pe
     tenYear: toText(getValue(value, ['tenYear', 'ten_year', '10y', 'ten_year_value']), fallback.tenYear),
     twentyYear: toText(getValue(value, ['twentyYear', 'twenty_year', '20y', 'twenty_year_value']), fallback.twentyYear),
     thirtyYear: toText(getValue(value, ['thirtyYear', 'thirty_year', '30y', 'thirty_year_value']), fallback.thirtyYear),
-    conclusion: toText(getValue(value, ['conclusion', 'verdict', 'note']), fallback.conclusion),
-    proxyNote: toText(getValue(value, ['proxyNote', 'proxy_note', 'tooltip']), fallback.proxyNote ?? ''),
+    conclusion: humanizeRuntimeLabel(getValue(value, ['conclusion', 'verdict', 'note']), fallback.conclusion),
+    proxyNote: humanizeRuntimeLabel(getValue(value, ['proxyNote', 'proxy_note', 'tooltip']), fallback.proxyNote ?? ''),
   };
 }
 
@@ -662,12 +828,15 @@ function normalizeSleeveContribution(value: Record<string, unknown>, fallback: S
     name: toText(getValue(value, ['name', 'label', 'sleeve']), fallback.name),
     primary: toText(getValue(value, ['primary', 'tag', 'role']), fallback.primary),
     detail: toText(getValue(value, ['detail', 'body', 'summary']), fallback.detail),
+    efficiency: toText(getValue(value, ['efficiency', 'efficiency_label', 'return_risk_efficiency']), fallback.efficiency),
     tone: toTone(getValue(value, ['tone', 'status']), fallback.tone),
     valuePct: toNumber(getValue(value, ['valuePct', 'value_pct', 'contribution_pct']), fallback.valuePct),
   };
 }
 
 function normalizeExposure(value: Record<string, unknown>, fallback: ExposureRow, index: number): ExposureRow {
+  const note = toText(getValue(value, ['note', 'tooltip', 'evidence', 'detail']), fallback.note ?? '');
+  const rawLabel = getValue(value, ['label', 'state', 'regime']);
   return {
     key: toText(getValue(value, ['key', 'id']), fallback.key || `exposure-${index}`),
     period: toText(getValue(value, ['period', 'label', 'year']), fallback.period),
@@ -675,7 +844,8 @@ function normalizeExposure(value: Record<string, unknown>, fallback: ExposureRow
     qqqPct: toNumber(getValue(value, ['qqqPct', 'qqq_pct', 'qqq']), fallback.qqqPct),
     billPct: toNumber(getValue(value, ['billPct', 'bill_pct', 'tbill_pct', 't_bill']), fallback.billPct),
     cashPct: toNumber(getValue(value, ['cashPct', 'cash_pct', 'cash']), fallback.cashPct),
-    label: toText(getValue(value, ['label', 'state', 'regime']), fallback.label),
+    label: rawLabel === undefined ? summarizeExposureLabel(note, fallback.label) : toText(rawLabel, fallback.label),
+    note,
   };
 }
 
@@ -725,7 +895,7 @@ function normalizeOrder(value: Record<string, unknown>, fallback: CompositionOrd
     slippageBps: toText(getValue(value, ['slippageBps', 'slippage_bps']), fallback.slippageBps),
     fee: toText(getValue(value, ['fee', 'fee_usd', 'commission']), fallback.fee),
     sleeve: toText(getValue(value, ['sleeve', 'sourceSleeve', 'source_sleeve', 'source_leg']), fallback.sleeve),
-    triggerReason: toText(getValue(value, ['triggerReason', 'trigger_reason', 'reason']), fallback.triggerReason),
+    triggerReason: humanizeRuntimeLabel(getValue(value, ['triggerReason', 'trigger_reason', 'reason']), fallback.triggerReason),
     nettingLabel: toText(getValue(value, ['nettingLabel', 'netting_label', 'netting']), fallback.nettingLabel),
     tone: toTone(getValue(value, ['tone', 'status']), fallback.tone),
     netting: sourceNetting,
@@ -739,7 +909,7 @@ function normalizeEvent(value: Record<string, unknown>, fallback: RebalanceEvent
     title: toText(getValue(value, ['title', 'label', 'date']), fallback.title),
     totalAmount: toText(getValue(value, ['totalAmount', 'total_amount', 'notional']), fallback.totalAmount),
     frictionCost: toText(getValue(value, ['frictionCost', 'friction_cost', 'cost']), fallback.frictionCost),
-    triggerReason: toText(getValue(value, ['triggerReason', 'trigger_reason', 'reason']), fallback.triggerReason),
+    triggerReason: humanizeRuntimeLabel(getValue(value, ['triggerReason', 'trigger_reason', 'reason']), fallback.triggerReason),
     effectiveness: toText(getValue(value, ['effectiveness', 'effect', 'contribution']), fallback.effectiveness),
     orders: normalizeArray(rawOrders, fallback.orders, normalizeOrder),
   };
@@ -749,7 +919,7 @@ function normalizeEfficiency(value: Record<string, unknown>, fallback: Efficienc
   return {
     id: toText(getValue(value, ['id', 'key']), fallback.id || `efficiency-${index}`),
     event: toText(getValue(value, ['event', 'label']), fallback.event),
-    trigger: toText(getValue(value, ['trigger', 'trigger_reason']), fallback.trigger),
+    trigger: humanizeRuntimeLabel(getValue(value, ['trigger', 'trigger_reason']), fallback.trigger),
     contribution: toText(getValue(value, ['contribution', 'effectiveness']), fallback.contribution),
     slippage: toText(getValue(value, ['slippage', 'slippage_bps']), fallback.slippage),
     fee: toText(getValue(value, ['fee', 'fee_bps', 'commission']), fallback.fee),
@@ -760,7 +930,7 @@ function normalizeEfficiency(value: Record<string, unknown>, fallback: Efficienc
 function normalizeEvidenceCard(value: Record<string, unknown>, fallback: EvidenceCard, index: number): EvidenceCard {
   return {
     id: toText(getValue(value, ['id', 'key']), fallback.id || `evidence-${index}`),
-    title: toText(getValue(value, ['title', 'label']), fallback.title),
+    title: humanizeEvidenceTitle(getValue(value, ['title', 'label']), fallback.title),
     body: toText(getValue(value, ['body', 'summary', 'detail']), fallback.body),
     tone: toTone(getValue(value, ['tone', 'status']), fallback.tone),
   };
@@ -770,18 +940,18 @@ function normalizeProxyLog(value: Record<string, unknown>, fallback: ProxyLog, i
   return {
     id: toText(getValue(value, ['id', 'key']), fallback.id || `proxy-${index}`),
     period: toText(getValue(value, ['period', 'window']), fallback.period),
-    missingSleeve: toText(getValue(value, ['missingSleeve', 'missing_sleeve', 'source']), fallback.missingSleeve),
-    proxy: toText(getValue(value, ['proxy', 'proxy_source']), fallback.proxy),
+    missingSleeve: humanizeRuntimeLabel(getValue(value, ['missingSleeve', 'missing_sleeve', 'source']), fallback.missingSleeve),
+    proxy: humanizeRuntimeLabel(getValue(value, ['proxy', 'proxy_source', 'confidence']), fallback.proxy),
     correlation: toText(getValue(value, ['correlation', 'corr']), fallback.correlation),
-    usage: toText(getValue(value, ['usage', 'purpose']), fallback.usage),
+    usage: humanizeRuntimeLabel(getValue(value, ['usage', 'purpose']), fallback.usage),
   };
 }
 
 function normalizeAuditEntry(value: Record<string, unknown>, fallback: AuditEntry, index: number): AuditEntry {
   return {
     id: toText(getValue(value, ['id', 'key']), fallback.id || `audit-${index}`),
-    title: toText(getValue(value, ['title', 'action', 'label']), fallback.title),
-    body: toText(getValue(value, ['body', 'summary', 'detail']), fallback.body),
+    title: humanizeRuntimeLabel(getValue(value, ['title', 'action', 'label']), fallback.title),
+    body: humanizeRuntimeLabel(getValue(value, ['body', 'summary', 'detail']), fallback.body),
     at: toText(getValue(value, ['at', 'time', 'created_at']), fallback.at ?? ''),
   };
 }
@@ -807,6 +977,17 @@ export function normalizeCompositionBacktestResult(
   const evidence = getRecord(root, ['evidence', 'proof']);
   const fallback = DEFAULT_RESULT;
   const events = normalizeArray(getValue(orders, ['events', 'rebalance_events']), fallback.events, normalizeEvent);
+  const exposureRows = normalizeArray(
+    getValue(diagnosis, ['exposureRows', 'exposure_rows', 'exposure_heatmap']),
+    fallback.exposureRows,
+    normalizeExposure,
+  );
+  const rawConcentration = getValue(diagnosis, ['concentrationTop5', 'concentration_top5', 'top_holdings']);
+  const concentrationTop5 = Array.isArray(rawConcentration)
+    ? rawConcentration.map((item, index) =>
+      normalizeConcentration(asRecord(item) ?? {}, fallback.concentrationTop5[Math.min(index, fallback.concentrationTop5.length - 1)]),
+    )
+    : normalizeArray(rawConcentration, fallback.concentrationTop5, normalizeConcentration);
   const ledgerFallback = fallback.ledgerRows.length
     ? fallback.ledgerRows
     : events.flatMap((event) => event.orders);
@@ -819,9 +1000,10 @@ export function normalizeCompositionBacktestResult(
     statusChips: normalizeArray(getValue(root, ['statusChips', 'status_chips']), fallback.statusChips, (value, item) =>
       toText(getValue(value, ['label', 'value', 'text']), item),
     ),
-    stabilityRuling: toText(getValue(diagnosis, ['stabilityRuling', 'stability_ruling', 'verdict']), fallback.stabilityRuling),
-    stabilityDetail: toText(getValue(diagnosis, ['stabilityDetail', 'stability_detail', 'detail']), fallback.stabilityDetail),
-    proxyCoverageNote: toText(getValue(diagnosis, ['proxyCoverageNote', 'proxy_coverage_note']), fallback.proxyCoverageNote),
+    stabilityRuling: humanizeRuntimeLabel(getValue(diagnosis, ['stabilityRuling', 'stability_ruling', 'verdict']), fallback.stabilityRuling),
+    stabilityDetail: humanizeRuntimeLabel(getValue(diagnosis, ['stabilityDetail', 'stability_detail', 'detail']), fallback.stabilityDetail),
+    proxyCoverageNote: humanizeRuntimeLabel(getValue(diagnosis, ['proxyCoverageNote', 'proxy_coverage_note']), fallback.proxyCoverageNote),
+    exposureAuditNote: buildExposureAuditNote(exposureRows),
     performanceMatrix: normalizeArray(
       getValue(diagnosis, ['performanceMatrix', 'performance_matrix', 'metrics']),
       fallback.performanceMatrix,
@@ -832,17 +1014,9 @@ export function normalizeCompositionBacktestResult(
       fallback.sleeveContributions,
       normalizeSleeveContribution,
     ),
-    exposureRows: normalizeArray(
-      getValue(diagnosis, ['exposureRows', 'exposure_rows', 'exposure_heatmap']),
-      fallback.exposureRows,
-      normalizeExposure,
-    ),
+    exposureRows,
     stressZoom: normalizeStressZoom(getRecord(diagnosis, ['stressZoom', 'stress_zoom']), fallback.stressZoom),
-    concentrationTop5: normalizeArray(
-      getValue(diagnosis, ['concentrationTop5', 'concentration_top5', 'top_holdings']),
-      fallback.concentrationTop5,
-      normalizeConcentration,
-    ),
+    concentrationTop5,
     diagnosisJumps: normalizeArray(
       getValue(diagnosis, ['diagnosisJumps', 'diagnosis_jumps', 'insights']),
       fallback.diagnosisJumps,
@@ -869,8 +1043,184 @@ function getToneClassName(prefix: string, tone: Tone): string {
   return `${prefix} ${prefix}--${tone}`;
 }
 
+function getMetricText(metric: PerformanceMetric): string {
+  return `${metric.label} ${metric.tenYear} ${metric.twentyYear} ${metric.thirtyYear} ${metric.conclusion}`;
+}
+
+function findPerformanceMetric(
+  result: CompositionBacktestResult,
+  predicate: (metric: PerformanceMetric) => boolean,
+): PerformanceMetric | undefined {
+  return result.performanceMatrix.find(predicate);
+}
+
+function extractFirstPercent(value: string): string {
+  const match = value.match(/[-+]?\d+(?:\.\d+)?%/);
+  return match?.[0] ?? value.split('/')[0]?.trim() ?? '暂无';
+}
+
+function extractSharpeValue(value: string): string {
+  const sharpeMatch = value.match(/(?:Sharpe|夏普)\s*([-+]?\d+(?:\.\d+)?)/i);
+  if (sharpeMatch?.[1]) {
+    return sharpeMatch[1];
+  }
+  const firstNumber = value.match(/[-+]?\d+(?:\.\d+)?/);
+  return firstNumber?.[0] ?? '暂无';
+}
+
+function deriveHeroMetrics(result: CompositionBacktestResult): HeroMetric[] {
+  const annualizedMetric =
+    findPerformanceMetric(result, (metric) => /年化/.test(metric.label)) ??
+    findPerformanceMetric(result, (metric) => /收益质量|Sharpe|夏普/i.test(getMetricText(metric)));
+  const sharpeMetric =
+    findPerformanceMetric(result, (metric) => /Sharpe|夏普/i.test(getMetricText(metric))) ??
+    annualizedMetric;
+  const drawdownMetric =
+    findPerformanceMetric(result, (metric) => /MDD|回撤|尾部风险/i.test(getMetricText(metric))) ??
+    findPerformanceMetric(result, (metric) => /风险/.test(metric.label));
+  const coverageMetric =
+    findPerformanceMetric(result, (metric) => /覆盖|代理|不足|长历史/i.test(getMetricText(metric)));
+
+  const annualizedValue = extractFirstPercent(annualizedMetric?.tenYear ?? '暂无');
+  const sharpeValue = extractSharpeValue(sharpeMetric?.tenYear ?? annualizedMetric?.tenYear ?? '暂无');
+  const drawdownValue = extractFirstPercent(drawdownMetric?.tenYear ?? '暂无').replace(/^MDD\s*/i, '');
+  const coverageText = coverageMetric?.thirtyYear ?? result.proxyCoverageNote;
+  const coverageValue = /覆盖\s*[-+]?\d/.test(coverageText)
+    ? coverageText.replace(/^覆盖\s*/, '')
+    : /不足|需|代理|fallback/i.test(coverageText)
+      ? '需复核'
+      : '已记录';
+
+  return [
+    {
+      key: 'annualized',
+      label: '年化收益',
+      value: annualizedValue,
+      detail: annualizedMetric?.conclusion ?? result.stabilityRuling,
+      tone: 'good',
+    },
+    {
+      key: 'sharpe',
+      label: '夏普比率',
+      value: sharpeValue,
+      detail: sharpeMetric?.conclusion ?? '收益质量待复核',
+      tone: sharpeValue === '暂无' ? 'neutral' : 'good',
+    },
+    {
+      key: 'drawdown',
+      label: '最大回撤',
+      value: drawdownValue,
+      detail: drawdownMetric?.conclusion ?? '压力窗口下钻',
+      tone: /暂无|不足/.test(drawdownValue) ? 'warning' : 'danger',
+    },
+    {
+      key: 'coverage',
+      label: '样本覆盖',
+      value: coverageValue,
+      detail: coverageValue === '需复核' ? '代理覆盖见指标矩阵与证据页。' : '覆盖状态已记录。',
+      tone: coverageValue === '需复核' ? 'warning' : 'info',
+    },
+    deriveDataConfidence(result),
+  ];
+}
+
+function isWeakMetricValue(value: string): boolean {
+  return /不足|暂无|需|代理|fallback/i.test(value);
+}
+
+function buildExposureAuditNote(rows: ExposureRow[]): string {
+  const notes = Array.from(
+    new Set(rows.map((row) => humanizeRuntimeLabel(row.note, '')).filter((note) => note.trim())),
+  );
+  return notes.length
+    ? notes.join('；')
+    : '敞口热力图按组合再平衡事件生成；保存组合保留冻结来源证据，模拟不会改写组合腿。';
+}
+
+function buildPerformanceComparisons(metrics: PerformanceMetric[]): PerformanceComparison[] {
+  const horizons: Array<{ key: keyof Pick<PerformanceMetric, 'tenYear' | 'twentyYear' | 'thirtyYear'>; label: string }> = [
+    { key: 'tenYear', label: '10Y' },
+    { key: 'twentyYear', label: '20Y' },
+    { key: 'thirtyYear', label: '30Y' },
+  ];
+  return horizons.map((horizon) => {
+    const rows = metrics.map((metric) => {
+      const value = metric[horizon.key];
+      return {
+        key: metric.key,
+        label: metric.label,
+        value,
+        conclusion: metric.conclusion,
+        proxyNote: metric.proxyNote,
+        weak: isWeakMetricValue(value),
+      };
+    });
+    const weakCount = rows.filter((row) => row.weak).length;
+    const allWeak = rows.length > 0 && weakCount === rows.length;
+    return {
+      key: String(horizon.key),
+      label: horizon.label,
+      status: allWeak ? '数据不足' : weakCount > 0 ? '需复核' : '可用',
+      tone: allWeak ? 'warning' : weakCount > 0 ? 'info' : 'good',
+      rows,
+    };
+  });
+}
+
+function extractPercentNumber(value: string): number | null {
+  const match = value.match(/([-+]?\d+(?:\.\d+)?)%/);
+  if (!match?.[1]) {
+    return null;
+  }
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function deriveDataConfidence(result: CompositionBacktestResult): HeroMetric {
+  const coverageMetric = findPerformanceMetric(result, (metric) => /覆盖|代理|不足|长历史/i.test(getMetricText(metric)));
+  const coverageFromMetric =
+    extractPercentNumber(coverageMetric?.thirtyYear ?? '') ??
+    extractPercentNumber(result.proxyCoverageNote);
+  const fallbackPenalty = /代理|fallback|需复核|缺失/i.test(result.proxyCoverageNote) ? 18 : 0;
+  const score = coverageFromMetric === null
+    ? (/需复核|不足|代理|fallback/i.test(result.proxyCoverageNote) ? 62 : 86)
+    : Math.max(0, Math.min(100, Math.round(coverageFromMetric - fallbackPenalty)));
+  return {
+    key: 'data_confidence',
+    label: '数据置信度',
+    value: `${score}`,
+    detail: score >= 80 ? '可作为主裁决样本。' : score >= 55 ? '代理占比偏高，建议复核证据页。' : '代理或缺失较多，仅作方向判断。',
+    tone: score >= 80 ? 'good' : score >= 55 ? 'warning' : 'danger',
+  };
+}
+
+function deriveHeroFingerprint(result: CompositionBacktestResult): string {
+  const sharpeMetric =
+    findPerformanceMetric(result, (metric) => /Sharpe|夏普/i.test(getMetricText(metric))) ??
+    findPerformanceMetric(result, (metric) => /收益质量/i.test(metric.label));
+  const sharpe = extractSharpeValue(sharpeMetric?.tenYear ?? result.subtitle);
+  return `10Y 夏普 ${sharpe}`;
+}
+
+function formatSleeveEfficiency(returnPct: unknown, riskPct: unknown): string {
+  const returnValue = typeof returnPct === 'number' ? returnPct : Number(returnPct);
+  const riskValue = typeof riskPct === 'number' ? riskPct : Number(riskPct);
+  if (!Number.isFinite(returnValue) || !Number.isFinite(riskValue)) {
+    return '待评估';
+  }
+  if (Math.abs(riskValue) < 0.01) {
+    return returnValue > 0 ? '防守' : '低风险';
+  }
+  return `${(returnValue / riskValue).toFixed(2)}x`;
+}
+
 function uniqueSymbols(rows: CompositionOrder[]): string[] {
   const values = rows.map((row) => row.symbol).filter(Boolean);
+  return Array.from(new Set(values));
+}
+
+function uniqueSourceLegs(rows: CompositionOrder[]): string[] {
+  const values = rows.map((row) => row.sleeve).filter(Boolean);
   return Array.from(new Set(values));
 }
 
@@ -888,6 +1238,26 @@ function formatMetric(value: unknown, suffix = ''): string {
     return '暂无';
   }
   return `${numeric.toFixed(Math.abs(numeric) >= 10 ? 1 : 2)}${suffix}`;
+}
+
+function summarizeExposureLabel(note: unknown, fallback: string): string {
+  const text = toText(note, '');
+  if (!text) {
+    return fallback;
+  }
+  if (/drawdown|回撤|stress/i.test(text)) {
+    return '回撤触发';
+  }
+  if (/threshold|drift|偏离|阈/i.test(text)) {
+    return '偏离触发';
+  }
+  if (/simulated/i.test(text) && /quarterly|cadence|aligned leg return streams/i.test(text)) {
+    return '定期平衡';
+  }
+  if (/simulated/i.test(text)) {
+    return '模拟调仓';
+  }
+  return text.length > 18 ? `${text.slice(0, 18)}...` : text;
 }
 
 function formatOrderQuantity(value: unknown): string {
@@ -911,7 +1281,7 @@ function apiOrderToView(order: ApiCompositionBacktestOrder): Record<string, unkn
     slippage_bps: `${formatMetric(order.slippage_bps)} bps`,
     fee: order.fee_amount === null || order.fee_amount === undefined ? '未形成外部成交' : `$${formatMetric(order.fee_amount)}`,
     source_sleeve: order.source_leg_name,
-    trigger_reason: order.trigger_reason,
+    trigger_reason: humanizeRuntimeLabel(order.trigger_reason, order.trigger_reason),
     netting_label: nettingRatio > 0 ? `内部对冲 ${nettingRatio.toFixed(0)}%` : '外部成交',
     tone: order.side === 'BUY' ? 'good' : 'warning',
     netting_detail: {
@@ -930,6 +1300,10 @@ function buildApiBacktestViewData(
   orders: ApiCompositionBacktestOrder[],
 ): Record<string, unknown> {
   const metric = (run.diagnostics?.metric_matrix as Array<Record<string, unknown>> | undefined)?.[0] ?? {};
+  const topHoldings = Array.isArray(run.diagnostics?.top_holdings)
+    ? (run.diagnostics.top_holdings as Array<Record<string, unknown>>)
+    : [];
+  const algorithmSpec = asRecord(run.evidence?.algorithm_spec) ?? {};
   const orderRows = orders.map(apiOrderToView);
   const ordersByEvent = new Map<string, Record<string, unknown>[]>();
   orderRows.forEach((order) => {
@@ -945,8 +1319,8 @@ function buildApiBacktestViewData(
     title: `${String(run.summary?.composition_name ?? '组合')} · 回测诊断`,
     subtitle: `${String(run.summary?.horizon_years ?? '10')}Y / 年化 ${formatMetric(run.summary?.annualized_return, '%')} / 夏普 ${formatMetric(run.summary?.sharpe)}`,
     status_chips: [
-      run.status,
-      String(run.summary?.quality_label ?? 'composition_detail_preview'),
+      humanizeRuntimeLabel(run.status, run.status),
+      humanizeRuntimeLabel(run.summary?.quality_label, '组合详情预演'),
       `订单 ${String(run.summary?.order_count ?? orders.length)}`,
     ],
     diagnostics: {
@@ -956,7 +1330,7 @@ function buildApiBacktestViewData(
       performance_matrix: [
         {
           label: '收益质量',
-          tenYear: `${formatMetric(metric.annualized_return ?? run.summary?.annualized_return, '%')} / Sharpe ${formatMetric(metric.sharpe ?? run.summary?.sharpe)}`,
+          tenYear: `${formatMetric(metric.annualized_return ?? run.summary?.annualized_return, '%')} / 夏普 ${formatMetric(metric.sharpe ?? run.summary?.sharpe)}`,
           twentyYear: run.return_quality_summary?.fallback_used ? '代理覆盖需复核' : '覆盖良好',
           thirtyYear: run.return_quality_summary?.coverage_pct ? `覆盖 ${formatMetric(run.return_quality_summary.coverage_pct, '%')}` : '数据不足',
           conclusion: String(run.diagnostics?.stability_verdict ?? '待复核'),
@@ -964,7 +1338,7 @@ function buildApiBacktestViewData(
         },
         {
           label: '尾部风险',
-          tenYear: `MDD ${formatMetric(metric.max_drawdown ?? run.summary?.max_drawdown, '%')}`,
+          tenYear: `最大回撤 ${formatMetric(metric.max_drawdown ?? run.summary?.max_drawdown, '%')}`,
           twentyYear: '压力窗口下钻',
           thirtyYear: '需真实长历史',
           conclusion: '用压力窗口和订单事件复核',
@@ -975,6 +1349,7 @@ function buildApiBacktestViewData(
         name: item.label,
         primary: `收益贡献 ${formatMetric(item.return_contribution_pct, '%')}`,
         detail: `风险贡献 ${formatMetric(item.contribution_pct, '%')} / 权重 ${formatMetric(item.weight_pct, '%')}`,
+        efficiency: formatSleeveEfficiency(item.return_contribution_pct, item.contribution_pct),
         tone: Number(item.contribution_pct) > Number(item.weight_pct) * 1.4 ? 'warning' : 'good',
         valuePct: item.contribution_pct,
       })),
@@ -985,14 +1360,10 @@ function buildApiBacktestViewData(
         qqqPct: Number(Object.values(event.weight_after ?? {})[1] ?? 0),
         billPct: Number(Object.values(event.weight_after ?? {})[2] ?? 0),
         cashPct: Number(Object.values(event.weight_after ?? {})[3] ?? 0),
-        label: event.notes?.[0] ?? '再平衡后权重',
+        label: summarizeExposureLabel(event.notes?.[0], '定期平衡'),
+        note: event.notes?.[0] ?? '',
       })),
-      top_holdings: run.risk_contribution_preview.slice(0, 5).map((item) => ({
-        symbol: item.label,
-        detail: '组合腿级穿透，真实底层持仓待来源系统接入',
-        weight_pct: item.weight_pct,
-        tone: Number(item.weight_pct) > 15 ? 'warning' : 'neutral',
-      })),
+      top_holdings: topHoldings,
       insights: [
         {
           id: 'orders-jump',
@@ -1011,7 +1382,7 @@ function buildApiBacktestViewData(
           label: event.label,
           total_amount: `${formatMetric(event.turnover_pct, '%')} 换手`,
           friction_cost: `${formatMetric(event.estimated_cost_bps)} bps`,
-          trigger_reason: event.notes?.[0] ?? '再平衡触发',
+          trigger_reason: humanizeRuntimeLabel(event.notes?.[0], '定期平衡'),
           effectiveness: `成本拖累 ${formatMetric(event.cost_drag_pct, '%')}`,
           orders: ordersByEvent.get(eventId) ?? [],
         };
@@ -1020,7 +1391,7 @@ function buildApiBacktestViewData(
       rebalance_efficiency: run.rebalance_events.map((event, index) => ({
         id: `eff-${index}`,
         event: event.label,
-        trigger: event.notes?.[0] ?? '再平衡触发',
+        trigger: humanizeRuntimeLabel(event.notes?.[0], '定期平衡'),
         contribution: `现金缓冲 ${formatMetric(event.cash_buffer_pct, '%')}`,
         slippage_bps: `${formatMetric(event.estimated_cost_bps)} bps`,
         fee: '见全量流水',
@@ -1031,20 +1402,20 @@ function buildApiBacktestViewData(
       cards: [
         {
           id: 'frozen-config',
-          label: 'Frozen Config',
-          body: `组合 ${run.composition_id} / run ${run.run_id}`,
+          label: '配置冻结',
+          body: `组合 ${run.composition_id} / 运行 ${run.run_id}`,
           tone: 'good',
         },
         {
           id: 'data-footprint',
-          label: 'Data Footprint',
+          label: '数据足迹',
           body: `${run.returns_preview.length} 个收益点，${run.benchmark_series.length} 个基准点`,
           tone: 'info',
         },
         {
           id: 'algorithm-spec',
-          label: 'Algorithm Spec',
-          body: String(run.evidence?.algorithm_spec ? JSON.stringify(run.evidence.algorithm_spec) : '再平衡规则已锁定'),
+          label: '算法规则',
+          body: `调仓频率：${humanizeRuntimeLabel(algorithmSpec.rebalance_frequency, '已锁定')}；订单口径：${humanizeRuntimeLabel(algorithmSpec.orders, '已记录')}`,
           tone: 'neutral',
         },
       ],
@@ -1060,6 +1431,34 @@ function buildApiBacktestViewData(
         action: item.action,
         detail: item.summary,
       })),
+    },
+  };
+}
+
+function buildEmptyRuntimeBacktestViewData(ids: { compositionId: string; runId: string }): Record<string, unknown> {
+  return {
+    title: '组合回测结果',
+    subtitle: `${ids.compositionId} / ${ids.runId}`,
+    status_chips: ['加载中'],
+    diagnostics: {
+      stability_ruling: '等待运行时数据',
+      stability_detail: '页面正在读取本地 API；未使用示例订单或静态数据。',
+      proxy_coverage_note: '',
+      performance_matrix: [],
+      sleeve_contributions: [],
+      exposure_heatmap: [],
+      top_holdings: [],
+      insights: [],
+    },
+    orders: {
+      events: [],
+      full_ledger: [],
+      rebalance_efficiency: [],
+    },
+    evidence: {
+      cards: [],
+      proxy_logs: [],
+      audit_trail: [],
     },
   };
 }
@@ -1125,25 +1524,71 @@ export function CompositionBacktestResultPage({
   }, [api, compositionId, data, runId]);
 
   const result = useMemo(
-    () => normalizeCompositionBacktestResult(data ?? remoteData, { compositionId, runId }),
-    [compositionId, data, remoteData, runId],
+    () => normalizeCompositionBacktestResult(
+      data ?? remoteData ?? (api?.getCompositionBacktestRun ? buildEmptyRuntimeBacktestViewData({ compositionId, runId }) : undefined),
+      { compositionId, runId },
+    ),
+    [api, compositionId, data, remoteData, runId],
   );
-  const symbols = useMemo(() => uniqueSymbols(result.ledgerRows), [result.ledgerRows]);
-  const defaultSymbol = symbols.includes('QQQ') ? 'QQQ' : '全部';
+  const heroMetrics = useMemo(() => deriveHeroMetrics(result), [result]);
+  const performanceComparisons = useMemo(() => buildPerformanceComparisons(result.performanceMatrix), [result.performanceMatrix]);
+  const heroFingerprint = useMemo(() => deriveHeroFingerprint(result), [result]);
+  const stressOrderJump = useMemo<DiagnosisJump>(() => {
+    const stressEvent = result.events.find((event) => /2020|压力|回撤/i.test(`${event.id} ${event.title} ${event.triggerReason}`)) ?? result.events[0];
+    return {
+      id: 'stress-2020-orders',
+      title: '2020 压力窗口订单',
+      body: '点击净值图压力点后定位到对应订单明细。',
+      eventId: stressEvent?.id,
+      orderId: stressEvent?.orders[0]?.id,
+    };
+  }, [result.events]);
+  const concentrationAlert = useMemo(() => {
+    const highlighted = result.concentrationTop5.reduce<ConcentrationHolding | undefined>(
+      (best, holding) => (!best || holding.weightPct > best.weightPct ? holding : best),
+      undefined,
+    );
+    return highlighted ? `${highlighted.symbol} ${highlighted.weightPct.toFixed(1)}%` : '集中度复核';
+  }, [result.concentrationTop5]);
+  const sourceLegs = useMemo(() => uniqueSourceLegs(result.ledgerRows), [result.ledgerRows]);
   const [activeTab, setActiveTab] = useState<ResultTab>(getInitialTab(initialTab));
   const [orderMode, setOrderMode] = useState<OrderMode>(getInitialOrderMode(initialOrderMode));
   const [selectedEventId, setSelectedEventId] = useState(highlightedEventId ?? result.events[0]?.id ?? '');
   const [selectedOrderId, setSelectedOrderId] = useState(highlightedOrderId ?? '');
-  const [symbolFilter, setSymbolFilter] = useState(defaultSymbol);
+  const [sourceLegFilter, setSourceLegFilter] = useState('全部');
+  const [symbolFilter, setSymbolFilter] = useState('全部');
   const [selectedNetting, setSelectedNetting] = useState<NettingDetail | null>(null);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
 
   const selectedEvent = result.events.find((event) => event.id === selectedEventId) ?? result.events[0];
-  const visibleLedgerRows = symbolFilter === '全部'
-    ? result.ledgerRows
-    : result.ledgerRows.filter((row) => row.symbol === symbolFilter);
+  const sourceFilteredLedgerRows = useMemo(
+    () => sourceLegFilter === '全部'
+      ? result.ledgerRows
+      : result.ledgerRows.filter((row) => row.sleeve === sourceLegFilter),
+    [result.ledgerRows, sourceLegFilter],
+  );
+  const symbols = useMemo(() => uniqueSymbols(sourceFilteredLedgerRows), [sourceFilteredLedgerRows]);
+  const visibleLedgerRows = useMemo(
+    () => symbolFilter === '全部'
+      ? sourceFilteredLedgerRows
+      : sourceFilteredLedgerRows.filter((row) => row.symbol === symbolFilter),
+    [sourceFilteredLedgerRows, symbolFilter],
+  );
   const selectedOrder = selectedEvent?.orders.find((order) => order.id === selectedOrderId);
+
+  useEffect(() => {
+    if (sourceLegFilter !== '全部' && !sourceLegs.includes(sourceLegFilter)) {
+      setSourceLegFilter('全部');
+      setSymbolFilter('全部');
+    }
+  }, [sourceLegFilter, sourceLegs]);
+
+  useEffect(() => {
+    if (symbolFilter !== '全部' && !symbols.includes(symbolFilter)) {
+      setSymbolFilter('全部');
+    }
+  }, [symbolFilter, symbols]);
 
   function jumpToOrders(jump: DiagnosisJump): void {
     setActiveTab('orders');
@@ -1166,6 +1611,7 @@ export function CompositionBacktestResultPage({
       const exportFormat = format === 'excel' ? 'xlsx' : 'csv';
       const content = await api.exportCompositionBacktestOrders(result.compositionId, result.runId, exportFormat, {
         symbol: symbolFilter === '全部' ? null : symbolFilter,
+        source_leg: sourceLegFilter === '全部' ? null : sourceLegFilter,
       });
       const blob = new Blob([content], {
         type: exportFormat === 'csv' ? 'text/csv;charset=utf-8' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -1190,14 +1636,16 @@ export function CompositionBacktestResultPage({
     >
       <section className="panel composition-backtest-result-hero">
         <div className="composition-backtest-result-hero__copy">
-          <p className="page-heading__eyebrow">COMPOSITION BACKTEST</p>
-          <h1>{result.title}</h1>
-          <p>{result.subtitle}</p>
+          <p className="page-heading__eyebrow">组合回测</p>
+          <div className="composition-backtest-result-hero__title-row">
+            <h1>{result.title}</h1>
+            <span className="composition-backtest-fingerprint">{heroFingerprint}</span>
+          </div>
           <div className="composition-backtest-chip-row" aria-label="回测状态">
             {result.statusChips.map((chip) => (
               <span className="status-chip status-chip--soft" key={chip}>{chip}</span>
             ))}
-            <span className="status-chip status-chip--soft">当前路径 #/compositions/{result.compositionId}/backtest-runs/{result.runId}</span>
+            <span className="composition-backtest-muted-run-id">运行 {result.runId}</span>
           </div>
         </div>
         <div className="composition-backtest-result-hero__actions">
@@ -1248,6 +1696,8 @@ export function CompositionBacktestResultPage({
                   <line className="composition-backtest-grid-line" x1="42" x2="940" y1="104" y2="104" />
                   <line className="composition-backtest-grid-line" x1="42" x2="940" y1="154" y2="154" />
                   <line className="composition-backtest-grid-line" x1="42" x2="940" y1="204" y2="204" />
+                  <rect className="composition-backtest-stress-band" x="270" y="42" width="122" height="184" rx="14" />
+                  <rect className="composition-backtest-stress-band composition-backtest-stress-band--rate" x="682" y="42" width="128" height="184" rx="14" />
                   <path className="composition-backtest-drawdown-area" d="M42 190 C170 168 260 214 366 178 C500 134 610 198 730 160 C830 138 900 166 940 150 L940 228 L42 228 Z" />
                   <path className="composition-backtest-benchmark-line" d="M58 172 C190 128 315 112 446 104 C600 94 746 98 918 118" />
                   <path className="composition-backtest-cost-line" d="M58 188 C188 146 320 134 448 126 C604 116 750 122 918 144" />
@@ -1255,15 +1705,23 @@ export function CompositionBacktestResultPage({
                   <circle className="composition-backtest-chart-node" cx="352" cy="110" r="8" />
                   <circle className="composition-backtest-chart-node" cx="742" cy="96" r="8" />
                   <text className="composition-backtest-chart-label" x="52" y="32">净收益 +11.8%</text>
-                  <text className="composition-backtest-chart-label" x="278" y="94">2020 疫情</text>
-                  <text className="composition-backtest-chart-label" x="688" y="80">2022 加息</text>
+                  <text className="composition-backtest-stress-label" x="294" y="70">2020 疫情</text>
+                  <text className="composition-backtest-stress-label" x="704" y="70">2022 加息</text>
                 </svg>
+                <button
+                  aria-label="查看 2020 压力窗口订单明细"
+                  className="composition-backtest-chart-callout composition-backtest-chart-callout--stress"
+                  onClick={() => jumpToOrders(stressOrderJump)}
+                  type="button"
+                >
+                  2020 订单
+                </button>
               </div>
               <div className="composition-backtest-chart-legend">
-                <span>组合净值</span>
-                <span>基准</span>
-                <span>成本后</span>
-                <span>回撤带</span>
+                <span className="composition-backtest-legend-item composition-backtest-legend-item--portfolio">组合净值</span>
+                <span className="composition-backtest-legend-item composition-backtest-legend-item--benchmark">基准</span>
+                <span className="composition-backtest-legend-item composition-backtest-legend-item--cost">成本后</span>
+                <span className="composition-backtest-legend-item composition-backtest-legend-item--drawdown">回撤带</span>
               </div>
               <article className="composition-backtest-stress-card">
                 <div>
@@ -1273,17 +1731,26 @@ export function CompositionBacktestResultPage({
                 <div className="composition-backtest-stress-metrics">
                   <span>组合 {result.stressZoom.portfolioDrawdown}</span>
                   <span>{result.stressZoom.benchmarkLabel} {result.stressZoom.benchmarkDrawdown}</span>
-                  <span>Time to Recovery：{result.stressZoom.timeToRecovery}</span>
+                  <span>修复时间：{result.stressZoom.timeToRecovery}</span>
                 </div>
               </article>
             </article>
 
-            <aside className="panel composition-backtest-result-panel">
+            <aside className="panel composition-backtest-result-panel composition-backtest-kpi-rail">
               <div className="composition-backtest-panel-header">
                 <div>
-                  <h2>结论跳转</h2>
-                  <p>从诊断直接定位到订单事件。</p>
+                  <h2>核心指标</h2>
+                  <p>先读结论，再下钻订单与证据。</p>
                 </div>
+              </div>
+              <div className="composition-backtest-hero-metrics" aria-label="核心回测指标">
+                {heroMetrics.map((metric) => (
+                  <article className={getToneClassName('composition-backtest-hero-metric', metric.tone)} key={metric.key}>
+                    <span>{metric.label}</span>
+                    <strong>{metric.value}</strong>
+                    <p>{metric.detail}</p>
+                  </article>
+                ))}
               </div>
               <div className="composition-backtest-insight-list">
                 {result.diagnosisJumps.map((jump) => (
@@ -1303,46 +1770,34 @@ export function CompositionBacktestResultPage({
             <div className="composition-backtest-panel-header">
               <div>
                 <h2>绩效指标矩阵</h2>
-                <p>收益、风险、相对表现按 10Y / 20Y / 30Y 对比。</p>
+                <p>按周期纵向对比收益、风险和裁决，长周期缺口不再挤在表格右侧。</p>
               </div>
               <span className="status-chip status-chip--warning">30Y 不足</span>
             </div>
-            <div className="composition-backtest-table-shell">
-              <table className="composition-backtest-table">
-                <thead>
-                  <tr>
-                    <th>指标</th>
-                    <th>10Y</th>
-                    <th>20Y</th>
-                    <th>30Y</th>
-                    <th>结论</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.performanceMatrix.map((metric) => (
-                    <tr key={metric.key}>
-                      <td>{metric.label}</td>
-                      <td><strong>{metric.tenYear}</strong></td>
-                      <td>
-                        <strong>{metric.twentyYear}</strong>
-                        {metric.proxyNote ? (
-                          <span className="composition-backtest-info-dot" title={metric.proxyNote} aria-label={`${metric.label}代理说明`}>
-                            i
-                          </span>
-                        ) : null}
-                      </td>
-                      <td>{metric.thirtyYear === '不足' ? <span className="status-chip status-chip--warning">不足</span> : metric.thirtyYear}</td>
-                      <td>{metric.conclusion}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="composition-backtest-performance-cards">
+              {performanceComparisons.map((group) => (
+                <article className={getToneClassName('composition-backtest-performance-card', group.tone)} key={group.key}>
+                  <div className="composition-backtest-performance-card__head">
+                    <strong>{group.label}</strong>
+                    <span>{group.status}</span>
+                  </div>
+                  <div className="composition-backtest-performance-card__rows">
+                    {group.rows.map((row) => (
+                      <div className={row.weak ? 'composition-backtest-performance-row is-weak' : 'composition-backtest-performance-row'} key={row.key}>
+                        <span>{row.label}</span>
+                        <strong>{row.value}</strong>
+                        <small>{row.conclusion}</small>
+                      </div>
+                    ))}
+                  </div>
+                </article>
+              ))}
             </div>
             <p className="composition-backtest-proxy-note">{result.proxyCoverageNote}</p>
           </section>
 
           <section className="composition-backtest-two-column">
-            <article className="panel composition-backtest-result-panel">
+            <article className="panel composition-backtest-result-panel composition-backtest-attribution-panel">
               <div className="composition-backtest-panel-header">
                 <div>
                   <h2>Sleeve 贡献归因</h2>
@@ -1352,64 +1807,81 @@ export function CompositionBacktestResultPage({
               <div className="composition-backtest-attribution-list">
                 {result.sleeveContributions.map((item) => (
                   <article className="composition-backtest-attribution-card" key={item.key}>
-                    <div>
-                      <strong>{item.name}</strong>
-                      <p>{item.detail}</p>
+                      <div>
+                        <strong>{item.name}</strong>
+                        <p>{item.detail}</p>
+                      </div>
+                    <div className="composition-backtest-attribution-badges">
+                      <span className={getToneClassName('composition-backtest-mini-status', item.tone)}>{item.primary}</span>
+                      <span className="composition-backtest-mini-status">效率 {item.efficiency}</span>
                     </div>
-                    <span className={getToneClassName('composition-backtest-mini-status', item.tone)}>{item.primary}</span>
                     <div className={`composition-backtest-progress composition-backtest-progress--${item.tone}`}>
                       <span style={{ width: `${Math.min(Math.max(item.valuePct, 4), 100)}%` }} />
                     </div>
                   </article>
                 ))}
               </div>
+              <div className="composition-backtest-linked-risk">
+                <div className="composition-backtest-panel-header composition-backtest-panel-header--compact">
+                  <div>
+                    <h2>Top 5 穿透风险</h2>
+                    <p>与上方 Sleeve 贡献同屏复核，避免只看策略层收益。</p>
+                  </div>
+                  <span className="status-chip status-chip--warning">{concentrationAlert}</span>
+                </div>
+                <div className="composition-backtest-concentration-grid composition-backtest-concentration-grid--compact">
+                  {result.concentrationTop5.map((holding) => (
+                    <article className={getToneClassName('composition-backtest-holding-card', holding.tone)} key={holding.symbol}>
+                      <div>
+                        <strong>{holding.symbol}</strong>
+                        <span>{holding.detail}</span>
+                      </div>
+                      <strong>{holding.weightPct.toFixed(1)}%</strong>
+                    </article>
+                  ))}
+                </div>
+              </div>
             </article>
 
-            <article className="panel composition-backtest-result-panel">
-              <div className="composition-backtest-panel-header">
-                <div>
-                  <h2>Exposure Heatmap</h2>
-                  <p>随时间变化的权重结构，2022 加息窗口显示 T-Bill 转防守。</p>
+            <article className="panel composition-backtest-result-panel composition-backtest-exposure-panel">
+                <div className="composition-backtest-panel-header">
+                  <div>
+                  <h2>敞口热力图</h2>
+                  <p>权重结构按调仓期展开，长说明已收进提示。</p>
                 </div>
-                <span className="status-chip status-chip--success">2022 防守</span>
+                <span
+                  aria-label="敞口热力图审计说明"
+                  className="composition-backtest-info-dot"
+                  title={result.exposureAuditNote}
+                >
+                  i
+                </span>
+              </div>
+              <div className="composition-backtest-exposure-legend" aria-label="敞口颜色图例">
+                <span className="composition-backtest-legend-item composition-backtest-legend-item--portfolio">动量腿</span>
+                <span className="composition-backtest-legend-item composition-backtest-legend-item--benchmark">QQQ</span>
+                <span className="composition-backtest-legend-item composition-backtest-legend-item--cost">短债</span>
+                <span className="composition-backtest-legend-item composition-backtest-legend-item--cash">现金</span>
               </div>
               <div className="composition-backtest-exposure-list">
                 {result.exposureRows.map((row) => (
                   <article className="composition-backtest-exposure-row" key={row.key}>
                     <span>{row.period}</span>
                     <div className="composition-backtest-exposure-track">
-                      <span className="composition-backtest-stack-alpha" style={{ width: `${row.alphaPct}%` }} title={`Alpha ${row.alphaPct}%`} />
+                      <span className="composition-backtest-stack-alpha" style={{ width: `${row.alphaPct}%` }} title={`动量腿 ${row.alphaPct}%`} />
                       <span className="composition-backtest-stack-qqq" style={{ width: `${row.qqqPct}%` }} title={`QQQ ${row.qqqPct}%`} />
-                      <span className="composition-backtest-stack-bill" style={{ width: `${row.billPct}%` }} title={`T-Bill ${row.billPct}%`} />
-                      <span className="composition-backtest-stack-cash" style={{ width: `${row.cashPct}%` }} title={`Cash ${row.cashPct}%`} />
+                      <span className="composition-backtest-stack-bill" style={{ width: `${row.billPct}%` }} title={`短债 ${row.billPct}%`} />
+                      <span className="composition-backtest-stack-cash" style={{ width: `${row.cashPct}%` }} title={`现金 ${row.cashPct}%`} />
                     </div>
-                    <strong>{row.label}</strong>
+                    <span className="composition-backtest-exposure-note">
+                      <strong>{row.label}</strong>
+                    </span>
                   </article>
                 ))}
               </div>
             </article>
           </section>
 
-          <section className="panel composition-backtest-result-panel">
-            <div className="composition-backtest-panel-header">
-              <div>
-                <h2>Top 5 穿透风险</h2>
-                <p>策略叠加后的单一标的集中度。</p>
-              </div>
-              <span className="status-chip status-chip--warning">NVDA 超 15%</span>
-            </div>
-            <div className="composition-backtest-concentration-grid">
-              {result.concentrationTop5.map((holding) => (
-                <article className={getToneClassName('composition-backtest-holding-card', holding.tone)} key={holding.symbol}>
-                  <div>
-                    <strong>{holding.symbol}</strong>
-                    <span>{holding.detail}</span>
-                  </div>
-                  <strong>{holding.weightPct.toFixed(1)}%</strong>
-                </article>
-              ))}
-            </div>
-          </section>
         </div>
       ) : null}
 
@@ -1419,7 +1891,7 @@ export function CompositionBacktestResultPage({
             <div className="composition-backtest-orders-toolbar">
               <div>
                 <h2>订单</h2>
-                <p>再平衡事件、全量流水与 Internal Netting 穿透。</p>
+                <p>再平衡事件、全量流水与内部对冲穿透。</p>
               </div>
               <div className="composition-backtest-orders-actions">
                 <div className="composition-backtest-mode-switch" aria-label="订单视图切换" role="group">
@@ -1452,10 +1924,10 @@ export function CompositionBacktestResultPage({
                 <article className="panel composition-backtest-result-panel">
                   <div className="composition-backtest-panel-header">
                     <div>
-                      <h2>Rebalance Events</h2>
+                      <h2>调仓事件</h2>
                       <p>按时间点聚合总额、摩擦成本、触发原因和后续有效性。</p>
                     </div>
-                    <span className="status-chip status-chip--soft">Event View</span>
+                    <span className="status-chip status-chip--soft">事件视图</span>
                   </div>
                   <div className="composition-backtest-event-list">
                     {result.events.map((event) => (
@@ -1481,10 +1953,10 @@ export function CompositionBacktestResultPage({
                 <article className="panel composition-backtest-result-panel">
                   <div className="composition-backtest-panel-header">
                     <div>
-                      <h2>Look-through Orders</h2>
+                      <h2>穿透订单</h2>
                       <p>当前选中 {selectedEvent?.title ?? '暂无事件'}。</p>
                     </div>
-                    <span className="status-chip status-chip--success">Internal Netting</span>
+                    <span className="status-chip status-chip--success">内部对冲</span>
                   </div>
                   <div className="composition-backtest-table-shell">
                     <table className="composition-backtest-table">
@@ -1494,7 +1966,7 @@ export function CompositionBacktestResultPage({
                           <th>方向</th>
                           <th>成交价</th>
                           <th>来源策略腿</th>
-                          <th>Internal Netting</th>
+                          <th>内部对冲</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1538,7 +2010,7 @@ export function CompositionBacktestResultPage({
               <section className="panel composition-backtest-result-panel">
                 <div className="composition-backtest-panel-header">
                   <div>
-                    <h2>Rebalance Efficiency</h2>
+                    <h2>调仓效率</h2>
                     <p>每次调仓的滑点、手续费、后续贡献与订单明细定位。</p>
                   </div>
                 </div>
@@ -1574,23 +2046,41 @@ export function CompositionBacktestResultPage({
             <section className="panel composition-backtest-result-panel">
               <div className="composition-backtest-panel-header">
                 <div>
-                  <h2>Full Ledger</h2>
+                  <h2>全量流水</h2>
                   <p>全量交易清单，展示回测区间内所有成交。</p>
                 </div>
                 <span className="status-chip status-chip--soft">全量交易清单</span>
               </div>
-              <div className="composition-backtest-filter-bar" aria-label="流水过滤">
-                <span>标的</span>
-                {['全部', ...symbols].map((symbol) => (
-                  <button
-                    className={symbolFilter === symbol ? 'is-active' : ''}
-                    key={symbol}
-                    onClick={() => setSymbolFilter(symbol)}
-                    type="button"
-                  >
-                    {symbol}
-                  </button>
-                ))}
+              <div className="composition-backtest-filter-stack" aria-label="流水过滤">
+                <div className="composition-backtest-filter-bar" role="group" aria-label="来源腿过滤">
+                  <span>来源腿</span>
+                  {['全部', ...sourceLegs].map((sourceLeg) => (
+                    <button
+                      className={sourceLegFilter === sourceLeg ? 'is-active' : ''}
+                      key={sourceLeg}
+                      onClick={() => {
+                        setSourceLegFilter(sourceLeg);
+                        setSymbolFilter('全部');
+                      }}
+                      type="button"
+                    >
+                      {sourceLeg}
+                    </button>
+                  ))}
+                </div>
+                <div className="composition-backtest-filter-bar" role="group" aria-label="标的过滤">
+                  <span>标的</span>
+                  {['全部', ...symbols].map((symbol) => (
+                    <button
+                      className={symbolFilter === symbol ? 'is-active' : ''}
+                      key={symbol}
+                      onClick={() => setSymbolFilter(symbol)}
+                      type="button"
+                    >
+                      {symbol}
+                    </button>
+                  ))}
+                </div>
               </div>
               <div className="composition-backtest-table-shell">
                 <table className="composition-backtest-table composition-backtest-ledger-table">
@@ -1637,7 +2127,7 @@ export function CompositionBacktestResultPage({
                 <h2>证据</h2>
                 <p>配置快照、数据足迹、代理日志、算法规则与审计轨迹。</p>
               </div>
-              <span className="status-chip status-chip--success">Evidence</span>
+              <span className="status-chip status-chip--success">证据已留痕</span>
             </div>
             <div className="composition-backtest-evidence-grid">
               {result.evidenceCards.map((card) => (
@@ -1652,7 +2142,7 @@ export function CompositionBacktestResultPage({
           <section className="panel composition-backtest-result-panel">
             <div className="composition-backtest-panel-header">
               <div>
-                <h2>Proxy Logs</h2>
+                <h2>代理日志</h2>
                 <p>代理映射清单记录缺失时段、代理源、相关度和用途。</p>
               </div>
             </div>
@@ -1685,7 +2175,7 @@ export function CompositionBacktestResultPage({
           <section className="panel composition-backtest-result-panel">
             <div className="composition-backtest-panel-header">
               <div>
-                <h2>Audit Trail</h2>
+                <h2>审计轨迹</h2>
                 <p>run id、配置指纹、数据门禁和算法锁定事件。</p>
               </div>
             </div>
@@ -1705,7 +2195,7 @@ export function CompositionBacktestResultPage({
       {selectedNetting ? (
         <div className="composition-backtest-dialog-shell" onClick={() => setSelectedNetting(null)} role="presentation">
           <div
-            aria-label="Internal Netting 明细"
+            aria-label="内部对冲明细"
             aria-modal="true"
             className="composition-backtest-dialog"
             onClick={(event) => event.stopPropagation()}
@@ -1713,7 +2203,7 @@ export function CompositionBacktestResultPage({
           >
             <div className="composition-backtest-panel-header">
               <div>
-                <p className="page-heading__eyebrow">Internal Netting</p>
+                <p className="page-heading__eyebrow">内部对冲</p>
                 <h2>{selectedNetting.title}</h2>
                 <p>{selectedNetting.explanation}</p>
               </div>

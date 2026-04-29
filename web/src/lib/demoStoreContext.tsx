@@ -327,6 +327,7 @@ function createHttpApiClient(): DemoApi {
     getCompositionBacktestOrders: (id, runId, params?: ApiCompositionBacktestOrdersQuery) => {
       const query = new URLSearchParams();
       if (params?.symbol) query.set('symbol', params.symbol);
+      if (params?.source_leg) query.set('source_leg', params.source_leg);
       if (params?.page !== undefined) query.set('page', String(params.page));
       if (params?.page_size !== undefined) query.set('page_size', String(params.page_size));
       const suffix = query.toString();
@@ -342,11 +343,12 @@ function createHttpApiClient(): DemoApi {
       id,
       runId,
       format: ApiCompositionOrderExportFormat = 'csv',
-      params?: { symbol?: string | null },
+      params?: { symbol?: string | null; source_leg?: string | null },
     ) => {
       const query = new URLSearchParams();
       query.set('format', format);
       if (params?.symbol) query.set('symbol', params.symbol);
+      if (params?.source_leg) query.set('source_leg', params.source_leg);
       return requestText(
         `/compositions/${encodeURIComponent(id)}/backtest-runs/${encodeURIComponent(runId)}/orders/export?${query.toString()}`,
       );

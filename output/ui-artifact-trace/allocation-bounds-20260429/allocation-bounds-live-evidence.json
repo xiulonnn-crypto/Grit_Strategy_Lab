@@ -1,0 +1,163 @@
+{
+  "url": "http://127.0.0.1:4173/?v=1777454616795#/compositions/composition_630718a64821/allocation-lab",
+  "headingVisible": true,
+  "boundSliders": 8,
+  "boundInputs": 8,
+  "lockButtons": 4,
+  "popoverCount": 0,
+  "rowsBefore": [
+    {
+      "text": "标普动量策略-v3策略腿30%当前组合权重权重下限权重上限锁定14% - 41%",
+      "sliders": [
+        {
+          "label": "标普动量策略-v3 权重下限滑块",
+          "value": "14",
+          "disabled": false
+        },
+        {
+          "label": "标普动量策略-v3 权重上限滑块",
+          "value": "41",
+          "disabled": false
+        }
+      ],
+      "numbers": [
+        {
+          "label": "标普动量策略-v3 权重下限输入",
+          "value": "14",
+          "disabled": false
+        },
+        {
+          "label": "标普动量策略-v3 权重上限输入",
+          "value": "41",
+          "disabled": false
+        }
+      ],
+      "lockLabel": "锁定 标普动量策略-v3",
+      "lockPressed": "false"
+    },
+    {
+      "text": "QQQ 网格交易策略-v4策略腿40%当前组合权重权重下限权重上限锁定18% - 54%",
+      "sliders": [
+        {
+          "label": "QQQ 网格交易策略-v4 权重下限滑块",
+          "value": "18",
+          "disabled": false
+        },
+        {
+          "label": "QQQ 网格交易策略-v4 权重上限滑块",
+          "value": "54",
+          "disabled": false
+        }
+      ],
+      "numbers": [
+        {
+          "label": "QQQ 网格交易策略-v4 权重下限输入",
+          "value": "18",
+          "disabled": false
+        },
+        {
+          "label": "QQQ 网格交易策略-v4 权重上限输入",
+          "value": "54",
+          "disabled": false
+        }
+      ],
+      "lockLabel": "锁定 QQQ 网格交易策略-v4",
+      "lockPressed": "false"
+    },
+    {
+      "text": "美国3个月短期国债资产腿25%当前组合权重权重下限权重上限解锁固定 25%",
+      "sliders": [
+        {
+          "label": "美国3个月短期国债 权重下限滑块",
+          "value": "25",
+          "disabled": true
+        },
+        {
+          "label": "美国3个月短期国债 权重上限滑块",
+          "value": "25",
+          "disabled": true
+        }
+      ],
+      "numbers": [
+        {
+          "label": "美国3个月短期国债 权重下限输入",
+          "value": "25",
+          "disabled": true
+        },
+        {
+          "label": "美国3个月短期国债 权重上限输入",
+          "value": "25",
+          "disabled": true
+        }
+      ],
+      "lockLabel": "解锁 美国3个月短期国债",
+      "lockPressed": "true"
+    },
+    {
+      "text": "现金安全垫现金腿5%当前组合权重权重下限权重上限锁定2% - 13%",
+      "sliders": [
+        {
+          "label": "现金安全垫 权重下限滑块",
+          "value": "2",
+          "disabled": false
+        },
+        {
+          "label": "现金安全垫 权重上限滑块",
+          "value": "13",
+          "disabled": false
+        }
+      ],
+      "numbers": [
+        {
+          "label": "现金安全垫 权重下限输入",
+          "value": "2",
+          "disabled": false
+        },
+        {
+          "label": "现金安全垫 权重上限输入",
+          "value": "13",
+          "disabled": false
+        }
+      ],
+      "lockLabel": "锁定 现金安全垫",
+      "lockPressed": "false"
+    }
+  ],
+  "unlockProof": {
+    "clicked": "解锁 美国3个月短期国债",
+    "enabledNumberInputs": 8
+  },
+  "numericEditProof": {
+    "label": "标普动量策略-v3 权重下限输入",
+    "value": "19",
+    "rowAfter": {
+      "text": "标普动量策略-v3策略腿30%当前组合权重权重下限权重上限锁定19% - 41%",
+      "numbers": [
+        {
+          "label": "标普动量策略-v3 权重下限输入",
+          "value": "19",
+          "disabled": false
+        },
+        {
+          "label": "标普动量策略-v3 权重上限输入",
+          "value": "41",
+          "disabled": false
+        }
+      ],
+      "sliders": [
+        {
+          "label": "标普动量策略-v3 权重下限滑块",
+          "value": "19",
+          "disabled": false
+        },
+        {
+          "label": "标普动量策略-v3 权重上限滑块",
+          "value": "41",
+          "disabled": false
+        }
+      ]
+    }
+  },
+  "consoleMessages": [],
+  "screenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\allocation-bounds-20260429\\allocation-bounds-live.png"
+}

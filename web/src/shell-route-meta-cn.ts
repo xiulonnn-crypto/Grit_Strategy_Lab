@@ -230,6 +230,7 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         eyebrow: TEXT.runsEyebrow,
         title: TEXT.runsTitle,
         description: TEXT.runsDesc,
+        showPageHeading: false,
       };
     case 'run':
       return {

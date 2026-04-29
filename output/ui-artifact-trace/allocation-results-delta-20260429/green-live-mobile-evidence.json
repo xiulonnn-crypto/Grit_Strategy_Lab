@@ -1,0 +1,86 @@
+{
+  "url": "http://127.0.0.1:4173/?v=green-mobile-1777451845936#/compositions/composition_630718a64821/allocation-jobs/alloc_job_36ea571e148f",
+  "data": {
+    "viewportWidth": 390,
+    "target": false,
+    "delta": false,
+    "order": [
+      {
+        "dataUi": null,
+        "className": "composition-allocation-hero",
+        "rect": {
+          "top": 38,
+          "height": 238,
+          "width": 314
+        }
+      },
+      {
+        "dataUi": "allocation-candidate-selector",
+        "className": "composition-allocation-panel composition-allocation-panel--span-2",
+        "rect": {
+          "top": 298,
+          "height": 832,
+          "width": 314
+        }
+      },
+      {
+        "dataUi": null,
+        "className": "composition-allocation-results-grid",
+        "rect": {
+          "top": 1152,
+          "height": 1935,
+          "width": 314
+        }
+      },
+      {
+        "dataUi": "allocation-stress-test",
+        "className": "composition-allocation-panel composition-allocation-stress-panel",
+        "rect": {
+          "top": 3109,
+          "height": 785,
+          "width": 314
+        }
+      },
+      {
+        "dataUi": "allocation-audit",
+        "className": "composition-allocation-panel composition-allocation-audit",
+        "rect": {
+          "top": 3916,
+          "height": 411,
+          "width": 314
+        }
+      },
+      {
+        "dataUi": null,
+        "className": "composition-allocation-footnote",
+        "rect": {
+          "top": 4349,
+          "height": 98,
+          "width": 314
+        }
+      }
+    ],
+    "selector": {
+      "top": 298,
+      "left": 38,
+      "width": 314,
+      "height": 832
+    },
+    "decision": {
+      "top": 2470,
+      "left": 38,
+      "width": 314,
+      "height": 617
+    },
+    "stress": {
+      "top": 3109,
+      "left": 38,
+      "width": 314,
+      "height": 785
+    },
+    "auditButton": "查看完整审计日志",
+    "horizontalOverflow": false,
+    "scrollWidth": 390,
+    "clientWidth": 390
+  }
+}

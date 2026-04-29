@@ -317,6 +317,22 @@ def _create_sleeve_os_composition(client) -> dict:
     )
 
 
+def _composition_update_legs(detail: dict) -> list[dict]:
+    return [
+        {
+            "leg_kind": leg["leg_kind"],
+            "source_ref_id": leg["source_ref_id"],
+            "source_ref_type": leg.get("source_ref_type"),
+            "display_name": leg.get("display_name"),
+            "weight_pct": leg["weight_pct"],
+            "weight_locked": leg["weight_locked"],
+            "ordering": leg["ordering"],
+            "config": leg.get("config") or {},
+        }
+        for leg in detail["normalized_legs"]
+    ]
+
+
 def test_leg_inventory_defaults_to_manual_asset_and_cash_rows_only(tmp_path):
     client, _ = create_test_client(tmp_path)
     created = create_momentum_strategy(client, idempotency_key="composition-inventory-strategy")
@@ -748,8 +764,10 @@ def test_composition_preview_create_update_and_list_flow(tmp_path):
     assert created_composition["hero_summary"]["benchmark_label"] == "S&P 500"
     assert created_composition["kpis"][0]["key"] == "composition_score"
     kpi_keys = {item["key"] for item in created_composition["kpis"]}
-    assert {"sharpe", "sortino", "volatility", "cash_weight"}.issubset(kpi_keys)
+    assert {"sharpe", "sortino", "volatility", "cash_weight", "beta_exposure"}.issubset(kpi_keys)
     created_sharpe = next(item["value"] for item in created_composition["kpis"] if item["key"] == "sharpe")
+    created_beta = next(item["value"] for item in created_composition["kpis"] if item["key"] == "beta_exposure")
+    assert created_beta == pytest.approx(0.3607, abs=0.001)
     assert created_composition["scenario_summary"]["base_case"]["label"]
     assert created_composition["scenario_summary"]["base_case"]["expected_drawdown_pct"] < 0
     assert created_composition["scenario_summary"]["stress_case"]["label"]
@@ -795,6 +813,8 @@ def test_composition_preview_create_update_and_list_flow(tmp_path):
             json={
                 "name": "Balanced Overlay v2",
                 "status": "ACTIVE",
+                "version_reason": "Rebalance sleeve weights during composition workflow regression.",
+                "version_change_summary": "Strategy sleeve -5pt; asset ballast +5pt.",
                 "legs": [
                     {
                         "leg_kind": "strategy",
@@ -841,9 +861,101 @@ def test_composition_preview_create_update_and_list_flow(tmp_path):
     assert all(row["id"] != strategy_leg_ref for row in refreshed_inventory["rows"])
 
 
+def test_composition_detail_refreshes_saved_analysis_missing_beta_kpi(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    created = create_momentum_strategy(client, idempotency_key="composition-beta-refresh-strategy")
+    strategy = created["strategy"]
+    _seed_completed_run(client, strategy["id"], strategy["current_parameter_version_id"])
+    _seed_composition_preview_price_history(client)
+    asset_leg, cash_leg = _create_seed_legs(client)
+    strategy_leg_ref = f"strategy_leg::{strategy['id']}::{strategy['current_parameter_version_id']}"
+    payload = {
+        "name": "Beta Refresh Overlay",
+        "benchmark_definition": {"label": "S&P 500", "symbol": "SPY"},
+        "rebalance_frequency": "quarterly",
+        "cost_policy": {
+            "expense_ratio_bps": 11,
+            "turnover_budget_bps": 42,
+            "trade_cost_bps": 5,
+        },
+        "legs": [
+            {
+                "leg_kind": "strategy",
+                "source_ref_id": strategy_leg_ref,
+                "weight_pct": 50,
+                "weight_locked": True,
+                "ordering": 1,
+            },
+            {
+                "leg_kind": "asset",
+                "source_ref_id": asset_leg["id"],
+                "weight_pct": 30,
+                "weight_locked": False,
+                "ordering": 2,
+            },
+            {
+                "leg_kind": "cash",
+                "source_ref_id": cash_leg["id"],
+                "weight_pct": 20,
+                "weight_locked": False,
+                "ordering": 3,
+            },
+        ],
+    }
+    created_composition = assert_ok(client.post("/compositions", json={**payload, "status": "ACTIVE"}))
+    created_beta = next(item["value"] for item in created_composition["kpis"] if item["key"] == "beta_exposure")
+
+    stale_payload = dict(created_composition)
+    stale_payload["kpis"] = [
+        dict(item)
+        for item in created_composition["kpis"]
+        if item.get("key") != "beta_exposure"
+    ]
+    client.app.state.service.storage.execute(
+        "UPDATE compositions SET analysis_json = ? WHERE id = ?",
+        (json.dumps(stale_payload), created_composition["id"]),
+    )
+
+    fetched = assert_ok(client.get(f"/compositions/{created_composition['id']}"))
+    fetched_beta = next(item["value"] for item in fetched["kpis"] if item["key"] == "beta_exposure")
+    assert fetched_beta == pytest.approx(created_beta, abs=0.0001)
+
+
 def test_composition_backtest_run_orders_netting_and_exports(tmp_path):
     client, _ = create_test_client(tmp_path)
     composition = _create_sleeve_os_composition(client)
+    composition_detail = assert_ok(client.get(f"/compositions/{composition['id']}"))
+    strategy_run_id = next(
+        leg["config"]["latest_run_id"]
+        for leg in composition_detail["normalized_legs"]
+        if leg["leg_kind"] == "strategy"
+    )
+    client.app.state.service.storage.execute(
+        "UPDATE backtest_runs SET trades_json = ? WHERE id = ?",
+        (
+            json.dumps(
+                [
+                    {
+                        "trade_date": "2026-02-28",
+                        "symbol": "QQQ",
+                        "side": "BUY",
+                        "weight_after": 0.6,
+                        "price": 405.25,
+                        "reason": "momentum:rank",
+                    },
+                    {
+                        "trade_date": "2026-02-28",
+                        "symbol": "MSFT",
+                        "side": "BUY",
+                        "weight_after": 0.4,
+                        "price": 318.5,
+                        "reason": "momentum:rank",
+                    },
+                ]
+            ),
+            strategy_run_id,
+        ),
+    )
 
     created_run = assert_ok(
         client.post(
@@ -859,19 +971,54 @@ def test_composition_backtest_run_orders_netting_and_exports(tmp_path):
     assert created_run["benchmark_series"] == composition["benchmark_series"]
     assert created_run["summary"]["order_count"] > 0
     assert created_run["summary"]["quality_label"].endswith("composition_detail_preview")
-    assert "not real broker execution history" in created_run["summary"]["evidence_label"]
+    assert "full-window composition rebalance events" in created_run["summary"]["evidence_label"]
     assert created_run["evidence"]["data_footprint"]["returns_preview_points"] == len(composition["returns_preview"])
 
     fetched_run = assert_ok(client.get(f"/compositions/{composition['id']}/backtest-runs/{run_id}"))
     assert fetched_run["id"] == run_id
     assert fetched_run["audit_trail"]
     assert fetched_run["source_integrity"]
+    assert fetched_run["diagnostics"]["top_holdings"]
+    assert any(item["symbol"] == "IEF" for item in fetched_run["diagnostics"]["top_holdings"])
+    assert all(item["symbol"] != "STRATEGY" for item in fetched_run["diagnostics"]["top_holdings"])
 
     orders = assert_ok(client.get(f"/compositions/{composition['id']}/backtest-runs/{run_id}/orders"))
     assert orders["total"] == created_run["summary"]["order_count"]
-    assert orders["generated_from"] == "composition_detail_preview"
-    assert all(item["execution_kind"] == "simulated_rebalance_instruction" for item in orders["items"])
-    assert all(item["price"] is None for item in orders["items"])
+    assert orders["generated_from"] == "composition_rebalance_events"
+    first_event_id = orders["items"][0]["event_id"]
+    first_event_orders = [item for item in orders["items"] if item["event_id"] == first_event_id]
+    assert first_event_orders
+    assert {item["side"] for item in first_event_orders} == {"BUY"}
+    assert all(item["execution_kind"] == "simulated_initial_allocation" for item in first_event_orders)
+    assert {"QQQ", "MSFT"}.issubset({item["symbol"] for item in first_event_orders})
+    assert all(item["price"] is not None for item in orders["items"])
+    assert all(item["fee_amount"] is not None for item in orders["items"])
+    assert any("组合建仓" in item["trigger_reason"] for item in first_event_orders)
+    assert any("策略内逻辑" in item["trigger_reason"] for item in orders["items"])
+    assert any("组合再平衡" in item["trigger_reason"] for item in orders["items"])
+    assert "STRATEGY" not in {item["symbol"] for item in orders["items"]}
+    assert {"QQQ", "MSFT"}.issubset({item["symbol"] for item in orders["items"]})
+
+    strategy_filtered = assert_ok(
+        client.get(f"/compositions/{composition['id']}/backtest-runs/{run_id}/orders?symbol=QQQ")
+    )
+    assert strategy_filtered["symbol_filter"] == "QQQ"
+    assert strategy_filtered["total"] > 0
+    assert {item["symbol"] for item in strategy_filtered["items"]} == {"QQQ"}
+
+    source_leg_name = next(
+        item["source_leg_name"]
+        for item in first_event_orders
+        if item["symbol"] == "MSFT"
+    )
+    source_filtered = assert_ok(
+        client.get(
+            f"/compositions/{composition['id']}/backtest-runs/{run_id}/orders?source_leg={source_leg_name}"
+        )
+    )
+    assert source_filtered["filters"]["source_leg"] == source_leg_name
+    assert source_filtered["total"] > 0
+    assert {item["source_leg_name"] for item in source_filtered["items"]} == {source_leg_name}
 
     filtered = assert_ok(
         client.get(f"/compositions/{composition['id']}/backtest-runs/{run_id}/orders?symbol=IEF")
@@ -902,6 +1049,8 @@ def test_composition_backtest_run_orders_netting_and_exports(tmp_path):
     assert csv_response.headers["content-type"].startswith("text/csv")
     assert "标的" in csv_response.text
     assert "IEF" in csv_response.text
+    assert "组合" in csv_response.text
+    assert "99." in csv_response.text
 
     xlsx_response = client.get(
         f"/compositions/{composition['id']}/backtest-runs/{run_id}/orders/export?format=xlsx"
@@ -912,6 +1061,32 @@ def test_composition_backtest_run_orders_netting_and_exports(tmp_path):
     )
     assert xlsx_response.headers["content-disposition"].endswith('.xlsx"')
     assert xlsx_response.content.startswith(b"PK")
+
+
+def test_composition_backtest_run_accepts_frozen_source_run_deep_link(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    composition = _create_sleeve_os_composition(client)
+    detail = assert_ok(client.get(f"/compositions/{composition['id']}"))
+    source_run_id = next(
+        leg["config"]["latest_run_id"]
+        for leg in detail["normalized_legs"]
+        if leg["leg_kind"] == "strategy"
+    )
+
+    fetched_run = assert_ok(
+        client.get(f"/compositions/{composition['id']}/backtest-runs/{source_run_id}")
+    )
+
+    assert fetched_run["id"] == source_run_id
+    assert fetched_run["composition_id"] == composition["id"]
+    assert fetched_run["summary"]["order_count"] > 0
+    assert fetched_run["summary"]["quality_label"].endswith("composition_detail_preview")
+
+    orders = assert_ok(
+        client.get(f"/compositions/{composition['id']}/backtest-runs/{source_run_id}/orders")
+    )
+    assert orders["total"] == fetched_run["summary"]["order_count"]
+    assert orders["generated_from"] == "composition_rebalance_events"
 
 
 def test_composition_allocation_job_status_and_shape(tmp_path):
@@ -936,7 +1111,33 @@ def test_composition_allocation_job_status_and_shape(tmp_path):
     assert created_job["summary"]["candidate_count"] >= 3
     assert created_job["summary"]["quality_label"] == "heuristic_from_composition_detail_preview"
     assert created_job["residual_budget"]["optimizable_weight_pct"] == pytest.approx(80.0)
-    assert {item["id"] for item in created_job["candidates"]} >= {"current", "risk_parity", "min_vol", "max_sharpe"}
+    assert {item["id"] for item in created_job["candidates"]} >= {"current", "benchmark", "risk_parity", "min_vol", "max_sharpe"}
+    assert created_job["summary"]["candidate_count"] == 3
+    assert created_job["summary"]["reference_count"] == 2
+    current_candidate = next(item for item in created_job["candidates"] if item["id"] == "current")
+    benchmark_candidate = next(item for item in created_job["candidates"] if item["id"] == "benchmark")
+    risk_parity_candidate = next(item for item in created_job["candidates"] if item["id"] == "risk_parity")
+    min_vol_candidate = next(item for item in created_job["candidates"] if item["id"] == "min_vol")
+    assert current_candidate["allowed_actions"] == []
+    assert benchmark_candidate["allowed_actions"] == []
+    assert min_vol_candidate["allowed_actions"] == ["promote_candidate"]
+    assert "volatility" in current_candidate["metrics"]
+    assert min_vol_candidate["metrics"]["max_drawdown"] < current_candidate["metrics"]["max_drawdown"]
+    locked_cash_leg = next(leg for leg in composition["normalized_legs"] if leg["leg_kind"] == "cash")
+    unlocked_leg_ids = [
+        str(leg["id"])
+        for leg in composition["normalized_legs"]
+        if not leg["weight_locked"]
+    ]
+    risk_parity_weights = risk_parity_candidate["weights"]
+    assert risk_parity_weights[locked_cash_leg["id"]] == pytest.approx(locked_cash_leg["weight_pct"])
+    assert risk_parity_weights[unlocked_leg_ids[0]] < risk_parity_weights[unlocked_leg_ids[1]]
+    assert risk_parity_weights[unlocked_leg_ids[0]] != pytest.approx(
+        risk_parity_weights[unlocked_leg_ids[1]],
+        abs=0.01,
+    )
+    assert "inverse realized volatility" in risk_parity_candidate["thesis"]
+    assert {item["id"] for item in created_job["frontier_points"]} >= {"current", "benchmark", "risk_parity", "min_vol", "max_sharpe"}
     assert created_job["frontier_points"]
     assert created_job["covariance_preview"] == composition["correlation_matrix"]
     assert created_job["evidence"]["not_real_optimizer"] is True
@@ -946,6 +1147,70 @@ def test_composition_allocation_job_status_and_shape(tmp_path):
     )
     assert fetched_job["job_id"] == created_job["job_id"]
     assert fetched_job["candidates"] == created_job["candidates"]
+
+
+def test_composition_update_skips_noop_versions_and_requires_upgrade_reason(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    composition = _create_sleeve_os_composition(client)
+    composition_id = composition["id"]
+    before_detail = assert_ok(client.get(f"/compositions/{composition_id}"))
+    before_freeze_count = _table_count(client, "composition_source_freezes")
+    before_audit_count = _table_count(client, "composition_audit_events")
+    before_revision = before_detail["source_evidence"][0]["snapshot"]["revision"]
+
+    unchanged_payload = {
+        "name": before_detail["name"],
+        "description": before_detail["description"],
+        "status": before_detail["status"],
+        "benchmark_definition": before_detail["benchmark_definition"],
+        "rebalance_frequency": before_detail["rebalance_frequency"],
+        "cost_policy": before_detail["cost_policy"],
+        "legs": _composition_update_legs(before_detail),
+    }
+    unchanged = assert_ok(client.patch(f"/compositions/{composition_id}", json=unchanged_payload))
+
+    assert unchanged["updated_at"] == before_detail["updated_at"]
+    assert unchanged["source_evidence"][0]["snapshot"]["revision"] == before_revision
+    assert _table_count(client, "composition_source_freezes") == before_freeze_count
+    assert _table_count(client, "composition_audit_events") == before_audit_count
+
+    changed_legs = _composition_update_legs(before_detail)
+    changed_legs[0]["weight_pct"] = changed_legs[0]["weight_pct"] - 5
+    changed_legs[1]["weight_pct"] = changed_legs[1]["weight_pct"] + 5
+    missing_reason = client.patch(
+        f"/compositions/{composition_id}",
+        json={**unchanged_payload, "legs": changed_legs},
+    )
+
+    assert missing_reason.status_code == 400
+    assert missing_reason.json()["code"] == "bad_request"
+    assert "version_reason" in missing_reason.json()["message"]
+    assert _table_count(client, "composition_source_freezes") == before_freeze_count
+    assert _table_count(client, "composition_audit_events") == before_audit_count
+
+    updated = assert_ok(
+        client.patch(
+            f"/compositions/{composition_id}",
+            json={
+                **unchanged_payload,
+                "legs": changed_legs,
+                "version_reason": "Reduce strategy sleeve concentration after allocation review.",
+                "version_change_summary": "Strategy sleeve -5pt; asset ballast +5pt.",
+                "version_source": "manual_save",
+            },
+        )
+    )
+
+    assert updated["source_evidence"][0]["snapshot"]["revision"] == before_revision + 1
+    assert _table_count(client, "composition_source_freezes") == before_freeze_count + len(changed_legs)
+    assert _table_count(client, "composition_audit_events") == before_audit_count + 4
+    structure_event = updated["audit_trail"][-4]
+    assert structure_event["action"] == "structure_patch"
+    assert structure_event["reason"] == "Reduce strategy sleeve concentration after allocation review."
+    assert structure_event["change_summary"] == "Strategy sleeve -5pt; asset ballast +5pt."
+    assert structure_event["version_source"] == "manual_save"
+    assert structure_event["version_before"] == before_revision
+    assert structure_event["version_after"] == before_revision + 1
 
 
 def test_composition_detail_and_list_flag_saved_strategy_leg_new_version(tmp_path):
@@ -1023,6 +1288,34 @@ def test_composition_detail_and_list_flag_saved_strategy_leg_new_version(tmp_pat
     assert any(item["source_ref_id"] == stale_strategy_leg_ref for item in list_item["source_integrity"])
 
 
+def test_list_compositions_uses_lightweight_summary_without_detail_fanout(tmp_path, monkeypatch):
+    client, _ = create_test_client(tmp_path)
+    composition = _create_sleeve_os_composition(client)
+    service = client.app.state.service
+    detail_calls: list[str] = []
+    projection_fallback_calls: list[str] = []
+    original_get_detail = service.get_composition_detail
+    original_strategy_projection = service._strategy_projection_row_for_source_ref
+
+    def counted_get_detail(composition_id: str):
+        detail_calls.append(composition_id)
+        return original_get_detail(composition_id)
+
+    def counted_strategy_projection(source_ref_id: str):
+        projection_fallback_calls.append(source_ref_id)
+        return original_strategy_projection(source_ref_id)
+
+    monkeypatch.setattr(service, "get_composition_detail", counted_get_detail)
+    monkeypatch.setattr(service, "_strategy_projection_row_for_source_ref", counted_strategy_projection)
+
+    listed = assert_ok(client.get("/compositions"))
+    list_item = next(item for item in listed if item["id"] == composition["id"])
+
+    assert list_item["source_integrity"]
+    assert detail_calls == []
+    assert projection_fallback_calls == []
+
+
 def test_composition_detail_defaults_to_recent_ten_year_window_and_fills_missing_leg_streams(tmp_path):
     client, _ = create_test_client(tmp_path)
     created = create_momentum_strategy(client, idempotency_key="composition-ten-year-window")
@@ -1073,9 +1366,27 @@ def test_composition_detail_defaults_to_recent_ten_year_window_and_fills_missing
     assert preview["return_quality_summary"]["aligned_points"] == 120
     assert preview["return_quality_summary"]["fallback_used"] is True
     assert preview["return_quality_summary"]["missing_points"] >= 240
-    assert len(preview["rebalance_events"]) == 8
+    assert len(preview["rebalance_events"]) == 41
+    assert preview["rebalance_events"][0]["label"] == "2015-07"
+    assert preview["rebalance_events"][-1]["label"] == "2025-06"
 
     created_composition = assert_ok(client.post("/compositions", json={**payload, "status": "ACTIVE"}))
+    created_run = assert_ok(
+        client.post(
+            f"/compositions/{created_composition['id']}/backtest-runs",
+            json={"idempotency_key": "ten-year-overlay-regression", "horizon_years": 10},
+        )
+    )
+    assert created_run["summary"]["rebalance_event_count"] == 41
+    assert created_run["summary"]["order_count"] >= 120
+    orders = assert_ok(
+        client.get(
+            f"/compositions/{created_composition['id']}/backtest-runs/{created_run['run_id']}/orders?page_size=500"
+        )
+    )
+    assert orders["total"] == created_run["summary"]["order_count"]
+    assert orders["items"][0]["event_label"] == "2015-07"
+    assert orders["items"][-1]["event_label"] == "2025-06"
     initial_annualized_return = next(
         item["value"] for item in created_composition["kpis"] if item["key"] == "annualized_return"
     )
@@ -1086,6 +1397,8 @@ def test_composition_detail_defaults_to_recent_ten_year_window_and_fills_missing
                 **payload,
                 "status": "ACTIVE",
                 "rebalance_frequency": "monthly",
+                "version_reason": "Rebalance cash buffer weight for return-window regression.",
+                "version_change_summary": "Strategy sleeve +20pt; cash buffer reduced to 5pt.",
                 "legs": [
                     {**payload["legs"][0], "weight_pct": 70},
                     {**payload["legs"][1], "weight_pct": 25},
@@ -1102,7 +1415,7 @@ def test_composition_detail_defaults_to_recent_ten_year_window_and_fills_missing
     assert len(updated["returns_preview"]) == 120
     assert updated["rebalance_frequency"] == "monthly"
     assert updated["rebalance_events"][0]["cash_buffer_pct"] == 5.0
-    assert len(updated["rebalance_events"]) == 8
+    assert len(updated["rebalance_events"]) == 120
 
     stale_payload = dict(updated)
     stale_payload["kpis"] = [

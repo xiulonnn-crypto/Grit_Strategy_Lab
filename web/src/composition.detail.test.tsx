@@ -346,7 +346,80 @@ describe('CompositionDetailPage', () => {
     expect(fakeApi.getCompositionDetail).toHaveBeenCalledWith('comp-001');
   });
 
-  it('renders Compose First detail modules and opens the frozen evidence drawer', async () => {
+  it('renders the approved hero actions and routes them to edit, backtest, and allocation surfaces', async () => {
+    await act(async () => {
+      render(<CompositionDetailPage compositionId="comp-001" />);
+    });
+
+    expect(await screen.findByRole('heading', { level: 1, name: /全天候组合样例/ })).toBeInTheDocument();
+    const editButton = screen.getByRole('button', { name: '修改组合' });
+    const backtestButton = screen.getByRole('button', { name: '查看回测' });
+    const allocationButton = screen.getByRole('button', { name: '配置实验室' });
+
+    expect(editButton).toHaveClass('primary-button');
+    expect(backtestButton).toHaveClass('ghost-button');
+    expect(allocationButton).toHaveClass('ghost-button');
+    expect(screen.queryByRole('button', { name: '另存为新版本' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '运行再平衡' })).not.toBeInTheDocument();
+
+    fireEvent.click(editButton);
+    expect(window.location.hash).toBe('#/compositions/workbench?composition_id=comp-001&intent=rebalance');
+
+    fireEvent.click(backtestButton);
+    expect(window.location.hash).toBe('#/compositions/comp-001/backtest-runs/run-101');
+
+    fireEvent.click(allocationButton);
+    expect(window.location.hash).toBe('#/compositions/comp-001/allocation-lab');
+  });
+
+  it('uses the highest-weight strategy evidence for the hero backtest shortcut on the live composition route', async () => {
+    fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({
+      ...detail,
+      id: 'composition_630718a64821',
+      normalized_legs: [
+        {
+          ...detail.normalized_legs[0],
+          id: 'strategy-leg-spy',
+          display_name: '标普动量策略腿',
+          weight_pct: 30,
+          ordering: 0,
+          proof_label: 'Latest eligible run run_fb0ed9c25479',
+          config: { latest_run_id: 'run_fb0ed9c25479' },
+        },
+        {
+          ...detail.normalized_legs[0],
+          id: 'strategy-leg-qqq',
+          display_name: 'QQQ 网格策略腿',
+          weight_pct: 40,
+          ordering: 1,
+          proof_label: 'Latest eligible run run_95db6d1d4ba9',
+          config: { latest_run_id: 'run_95db6d1d4ba9' },
+        },
+        ...detail.normalized_legs.slice(1).map((leg, index) => ({
+          ...leg,
+          ordering: index + 2,
+        })),
+      ],
+    });
+
+    await act(async () => {
+      render(<CompositionDetailPage compositionId="composition_630718a64821" />);
+    });
+
+    expect(await screen.findByRole('heading', { level: 1, name: /全天候组合样例/ })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '修改组合' }));
+    expect(window.location.hash).toBe(
+      '#/compositions/workbench?composition_id=composition_630718a64821&intent=rebalance',
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '查看回测' }));
+    expect(window.location.hash).toBe(
+      '#/compositions/composition_630718a64821/backtest-runs/run_95db6d1d4ba9',
+    );
+  });
+
+  it('renders Compose First detail modules and opens the leg detail drawer from source fingerprints', async () => {
     await act(async () => {
       render(<CompositionDetailPage compositionId="comp-001" />);
     });
@@ -356,20 +429,23 @@ describe('CompositionDetailPage', () => {
       document.querySelector('.composition-detail-page[data-route-root="compositions"][data-page-root="composition-detail"]'),
     ).not.toBeNull();
 
-    expect(screen.getByRole('heading', { level: 2, name: '收益流、版本节点与当前裁决' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: '风险与归因' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '权益曲线' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '敞口穿透分析' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '风险归因' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '配置版本记录' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '相关性矩阵' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: '版本演化史' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: 'Exposure Drilldown' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: '来源签名' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: '组合回测 / 执行历史' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '配置指纹' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '组合回测历史' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '再平衡与成本' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: '深入分析入口' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { level: 2, name: '深入分析入口' })).not.toBeInTheDocument();
+    expect(
+      Array.from(document.querySelectorAll('.composition-detail-main-stack h2')).map((node) => node.textContent),
+    ).toEqual(['权益曲线', '敞口穿透分析', '风险归因', '配置版本记录', '相关性矩阵']);
     expect(document.querySelectorAll('.composition-detail-kpi-card')).toHaveLength(7);
     expect(document.querySelectorAll('.composition-detail-kpi-card__compare')).toHaveLength(7);
     expect(
       Array.from(document.querySelectorAll('.composition-detail-kpi-card__head span')).map((node) => node.textContent),
-    ).toEqual(['Alpha 贡献', 'Beta 暴露', '风险贡献偏离', '相关性压力', '净收益', '最大回撤', '收益质量']);
+    ).toEqual(['α贡献', 'β暴露', '风险贡献偏离', '相关性压力', '净收益', '最大回撤', '收益质量']);
     expect(screen.getAllByText('基准').length).toBeGreaterThan(0);
     expect(screen.getByText('相对基准 +1.4%')).toBeInTheDocument();
     expect(screen.getByText('总损耗')).toBeInTheDocument();
@@ -386,15 +462,25 @@ describe('CompositionDetailPage', () => {
     expect(sourceRail?.textContent).toContain('动量策略腿');
     expect(sourceRail?.textContent).toContain('策略腿');
     expect(sourceRail?.textContent).toContain('有新版本，待更新');
+    expect(sourceRail?.textContent).toContain('当前版本偏离冻结指纹。');
+    expect(sourceRail?.textContent).not.toContain('Current source version');
+    expect(sourceRail?.textContent).not.toContain('来源签名');
     expect(sourceRail?.textContent).not.toContain('签名有效');
     expect(sourceRail?.textContent).not.toContain('版本一致');
     const executionHistory = document.querySelector('[data-ui="composition-execution-history"]');
+    expect(executionHistory?.textContent).toContain('组合回测历史');
+    expect(executionHistory?.textContent).not.toContain('版本一致');
     expect(executionHistory?.textContent).toContain('10Y / 年化 9.8% / 夏普 1.42');
     expect(executionHistory?.querySelector('a[href="#/compositions/comp-001/backtest-runs/run-101"]')).not.toBeNull();
     expect(executionHistory?.querySelector('a[href="#/compositions/comp-001/backtest-runs/run-101?tab=orders"]')).not.toBeNull();
+    expect(document.body.textContent).toContain('维护判断保持并观察');
+    expect(document.body.textContent).not.toContain('维护判断strong');
 
-    fireEvent.click(document.querySelectorAll<HTMLButtonElement>('.composition-detail-evidence-card')[0]);
-    await waitFor(() => expect(document.querySelector('.composition-detail-drawer')).not.toBeNull());
+    fireEvent.click(document.querySelectorAll<HTMLButtonElement>('.composition-detail-approved-source-card')[0]);
+    const drawer = await screen.findByRole('dialog', { name: '腿部详情' });
+    expect(drawer).toHaveClass('leg-inventory-drawer--detail');
+    expect(drawer.querySelector('.leg-inventory-detail-grid')).not.toBeNull();
+    expect(drawer.querySelector('[data-ui="leg-source-evidence-drawer"]')).not.toBeNull();
   });
 
   it('renders the command-center chart overlays without a separate excess-return mini chart', async () => {
@@ -413,6 +499,7 @@ describe('CompositionDetailPage', () => {
     expect(screen.queryByText('基于当前收益流预览，含再平衡后的组合路径。')).not.toBeInTheDocument();
     expect(screen.queryByText('基准：60/40 基准')).not.toBeInTheDocument();
     expect(screen.queryByText('累计收益与超额收益共用同一套时间轴')).not.toBeInTheDocument();
+    expect(screen.queryByText(/避免首屏只看到单条浅色曲线/)).not.toBeInTheDocument();
     expect(document.querySelector('.composition-detail-approved-mini-chart')).toBeNull();
     expect(document.querySelector('[data-ui="composition-portfolio-line"]')).not.toBeNull();
     expect(document.querySelector('[data-ui="composition-benchmark-line"]')).not.toBeNull();
@@ -423,8 +510,13 @@ describe('CompositionDetailPage', () => {
       (match) => Number(match[1]),
     );
     const drawdownBaselineY = drawdownYValues[0];
+    expect(drawdownBaselineY).toBeGreaterThanOrEqual(280);
     expect(Math.max(...drawdownYValues.slice(1, -1))).toBeGreaterThan(drawdownBaselineY);
     expect(document.querySelectorAll('[data-ui="composition-version-marker"]').length).toBeGreaterThan(0);
+    const chartText = document.querySelector<SVGSVGElement>('[data-ui="composition-return-chart"]')?.textContent ?? '';
+    expect(chartText).not.toContain('2026-03-31');
+    expect(chartText).not.toContain('Q1');
+    expect(chartText).not.toContain('Q1 rebalance');
   });
 
   it('shows approved command center KPIs and keeps net return cost copy in tooltips', async () => {
@@ -434,9 +526,14 @@ describe('CompositionDetailPage', () => {
 
     await screen.findByRole('heading', { level: 1, name: /全天候组合样例/ });
     const alphaCard = document.querySelector<HTMLElement>('[data-kpi-key="alpha_contribution"]');
+    expect(alphaCard?.textContent).toContain('α贡献');
+    expect(alphaCard?.textContent).not.toContain('阿尔法');
     expect(alphaCard?.querySelector('.composition-detail-kpi-card__core')?.textContent).toContain('+1.4%');
     expect(alphaCard?.querySelector('.composition-detail-kpi-card__core')?.textContent).toContain('相对基准 +1.4%');
-    expect(document.querySelector<HTMLElement>('[data-kpi-key="beta_exposure"]')?.textContent).toContain('0.74');
+    const betaCard = document.querySelector<HTMLElement>('[data-kpi-key="beta_exposure"]');
+    expect(betaCard?.textContent).toContain('β暴露');
+    expect(betaCard?.textContent).not.toContain('贝塔');
+    expect(betaCard?.textContent).toContain('0.74');
     expect(document.querySelector<HTMLElement>('[data-kpi-key="risk_contribution_deviation"]')?.textContent).toContain('风险贡献偏离');
     expect(document.querySelector<HTMLElement>('[data-kpi-key="correlation_stress"]')?.textContent).toContain('相关性压力');
     expect(document.querySelector<HTMLElement>('[data-kpi-key="return_quality"]')?.textContent).toContain('100%');
@@ -450,7 +547,7 @@ describe('CompositionDetailPage', () => {
     expect(screen.getByLabelText('收益质量指标说明')).toHaveAttribute('data-tooltip', expect.stringContaining('收益质量'));
   });
 
-  it('sorts source signatures and risk attribution by weight, then labels the correlation matrix axes without pair choices', async () => {
+  it('sorts source signatures by weight while aligning exposure and risk attribution card order', async () => {
     fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({
       ...detail,
       source_evidence: [
@@ -528,14 +625,19 @@ describe('CompositionDetailPage', () => {
     const riskCards = Array.from(
       document.querySelectorAll<HTMLElement>('[data-ui="risk-contribution-explanation"] .composition-detail-approved-snapshot-card'),
     );
-    expect(riskCards.map((node) => node.querySelector('strong')?.textContent)).toEqual([
-      '美债 ETF 腿',
+    const exposureCards = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-ui="composition-exposure-drilldown"] .composition-detail-exposure-row'),
+    );
+    const exposureNames = exposureCards.map((node) => node.querySelector('strong')?.textContent);
+    expect(exposureNames).toEqual([
       '动量策略腿',
+      '美债 ETF 腿',
       '现金缓冲腿',
     ]);
-    expect(riskCards[0].textContent).toContain('权重 44%');
-    expect(riskCards[0].textContent).toContain('收益占比 25.0%');
-    expect(riskCards[0].textContent).toContain('风险占比 34.0%');
+    expect(riskCards.map((node) => node.querySelector('strong')?.textContent)).toEqual(exposureNames);
+    expect(riskCards[0].textContent).toContain('权重 32%');
+    expect(riskCards[0].textContent).toContain('收益占比 58.0%');
+    expect(riskCards[0].textContent).toContain('风险占比 46.0%');
     expect(riskCards[0].textContent).not.toContain('收益贡献');
     expect(riskCards[0].textContent).not.toContain('波动');
 
@@ -578,13 +680,182 @@ describe('CompositionDetailPage', () => {
 
     const tooltip = await waitFor(() => document.querySelector('[data-ui="composition-return-tooltip"]'));
     expect(tooltip).not.toBeNull();
-    expect(tooltip?.textContent).toContain('P2');
+    expect(tooltip?.textContent).toContain('收益节点 2');
+    expect(tooltip?.textContent).not.toContain('P2');
+    expect(tooltip?.textContent).not.toContain('2026-02-28');
     expect(tooltip?.textContent).toContain('2.00%');
     expect(tooltip?.textContent).toContain('1.40%');
     expect(tooltip?.textContent).toContain('1.93%');
 
     fireEvent.pointerLeave(chart!);
     await waitFor(() => expect(document.querySelector('[data-ui="composition-return-tooltip"]')).toBeNull());
+  });
+
+  it('localizes live English reference summaries and keeps version records scoped to version transitions', async () => {
+    fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({
+      ...detail,
+      normalized_legs: detail.normalized_legs.map((leg, index) => ({
+        ...leg,
+        reference_summary:
+          index === 0
+            ? 'Used in 2 saved compositions'
+            : index === 1
+              ? 'Used in 1 saved composition'
+              : 'Not used in saved compositions yet',
+      })),
+      audit_trail: [
+        {
+          id: 'audit-live-structure',
+          action: 'updated',
+          actor: 'system',
+          at: '2026-04-22T00:00:00.000Z',
+          summary: 'Composition structure, weights, benchmark, or cost policy was patched and revalidated.',
+          hash_after: 'hash-structure',
+          version_before: 1,
+          version_after: 2,
+        },
+      ],
+    });
+
+    await act(async () => {
+      render(<CompositionDetailPage compositionId="comp-001" />);
+    });
+
+    await screen.findByRole('heading', { level: 1, name: /全天候组合样例/ });
+    const exposure = document.querySelector('[data-ui="composition-exposure-drilldown"]');
+    expect(exposure?.textContent).toContain('已被 2 个已保存组合引用');
+    expect(exposure?.textContent).toContain('已被 1 个已保存组合引用');
+    expect(exposure?.textContent).toContain('尚未进入已保存组合');
+    expect(exposure?.textContent).not.toContain('Used in');
+    expect(exposure?.textContent).not.toContain('Not used');
+
+    const versionHistory = document.querySelector('[data-ui="composition-version-evolution"]');
+    expect(versionHistory?.textContent).toContain('v1 -> v2');
+    expect(versionHistory?.textContent).toContain('权重变化：');
+    expect(versionHistory?.textContent).toContain('再平衡频次：季度再平衡');
+    expect(versionHistory?.textContent).toContain('成本规则：38 bps');
+    expect(versionHistory?.textContent).not.toContain('Composition structure');
+    expect(versionHistory?.textContent).not.toContain('配置、权重、基准与成本规则已复核。');
+  });
+
+  it('sorts configuration version records by the post-change version descending', async () => {
+    fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({
+      ...detail,
+      audit_trail: [
+        {
+          id: 'audit-v2',
+          action: 'structure_patch',
+          actor: 'system',
+          at: '2026-04-20T00:00:00.000Z',
+          change_summary: '权重变化：现金缓冲 5%',
+          summary: 'Composition structure, weights, benchmark, or cost policy was patched and revalidated.',
+          hash_after: 'hash-legacy-91402',
+          reason: '建立初始版本记录。',
+          version_before: 1,
+          version_after: 2,
+        },
+        {
+          id: 'audit-v4',
+          action: 'structure_patch',
+          actor: 'system',
+          at: '2026-04-22T00:00:00.000Z',
+          change_summary: '权重变化：策略腿提高 5%',
+          summary: 'Composition structure, weights, benchmark, or cost policy was patched and revalidated.',
+          hash_after: 'hash-legacy-14012',
+          reason: '采用配置实验室建议。',
+          version_before: 3,
+          version_after: 4,
+        },
+        {
+          id: 'audit-v3',
+          action: 'structure_patch',
+          actor: 'system',
+          at: '2026-04-21T00:00:00.000Z',
+          change_summary: '再平衡频次更新',
+          summary: 'Composition structure, weights, benchmark, or cost policy was patched and revalidated.',
+          hash_after: 'hash-legacy-30383',
+          reason: '切换组合维护节奏。',
+          version_before: 2,
+          version_after: 3,
+        },
+      ],
+    });
+
+    await act(async () => {
+      render(<CompositionDetailPage compositionId="comp-001" />);
+    });
+
+    await screen.findByRole('heading', { level: 1, name: /全天候组合样例/ });
+    const versionCards = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-ui="composition-version-evolution"] .composition-detail-compact-timeline__item'),
+    );
+    expect(versionCards.map((node) => node.dataset.versionAfter)).toEqual(['4', '3', '2']);
+    expect(versionCards[0].textContent).toContain('v3 -> v4');
+    expect(versionCards[0].textContent).toContain('权重变化：');
+    expect(versionCards[0].textContent).toContain('升级理由：采用配置实验室建议。');
+  });
+
+  it('clears legacy invalid structure patches from version records and falls back to v1', async () => {
+    fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({
+      ...detail,
+      audit_trail: [
+        {
+          id: 'composition_audit_c01e19b523ae',
+          action: 'structure_patch',
+          actor: 'system',
+          at: '2026-04-28T07:03:39.000Z',
+          summary: 'Composition structure, weights, benchmark, or cost policy was patched and revalidated.',
+          hash_before: 'f5cb859bfed45c61',
+          hash_after: 'a02c2380e1e14012',
+        },
+        {
+          id: 'composition_audit_af5fe42165b3',
+          action: 'structure_patch',
+          actor: 'system',
+          at: '2026-04-27T10:53:02.000Z',
+          summary: 'Composition structure, weights, benchmark, or cost policy was patched and revalidated.',
+          hash_before: 'c298c76bbd030383',
+          hash_after: '60e114956c84f464',
+        },
+        {
+          id: 'composition_audit_2c562c3fb7d1',
+          action: 'source_freeze',
+          actor: 'system',
+          at: '2026-04-27T10:53:02.000Z',
+          summary: 'Captured 4 source freeze signatures.',
+          hash_after: '60e114956c84f464',
+        },
+      ],
+      source_evidence: detail.source_evidence.map((item) => ({
+        ...item,
+        snapshot: {
+          ...(item.snapshot ?? {}),
+          version_label: 'v4',
+          freeze_generation: 14012,
+          revision: 14012,
+        },
+      })),
+    });
+
+    await act(async () => {
+      render(<CompositionDetailPage compositionId="comp-001" />);
+    });
+
+    await screen.findByRole('heading', { level: 1, name: /全天候组合样例/ });
+    const heroChips = Array.from(document.querySelectorAll<HTMLElement>('.composition-detail-hero__chips .status-chip'))
+      .map((node) => node.textContent?.trim())
+      .filter(Boolean);
+    expect(heroChips[0]).toBe('当前配置版本 v1');
+    expect(heroChips.join(' ')).not.toContain('v4');
+
+    const versionCards = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-ui="composition-version-evolution"] .composition-detail-compact-timeline__item'),
+    );
+    expect(versionCards).toHaveLength(1);
+    expect(versionCards[0].dataset.versionAfter).toBe('1');
+    expect(versionCards[0].textContent).toContain('当前配置版本 v1');
+    expect(versionCards[0].textContent).toContain('暂无新的参数变化记录');
+    expect(versionCards[0].textContent).not.toMatch(/v61|v14012|v30383|v464|v95|v96|v2 -> v3/);
   });
 
   it('localizes audit trail actions, actors, and summaries for live composition events', async () => {
@@ -623,6 +894,8 @@ describe('CompositionDetailPage', () => {
     });
 
     const audit = await waitFor(() => document.querySelector('[data-ui="composition-audit-trail"]'));
+    expect(audit?.textContent).toContain('操作日志');
+    expect(audit?.textContent).not.toContain('审计轨迹');
     expect(audit?.textContent).toContain('创建组合');
     expect(audit?.textContent).toContain('再平衡检查');
     expect(audit?.textContent).toContain('状态检查');
@@ -636,20 +909,17 @@ describe('CompositionDetailPage', () => {
     expect(audit?.textContent).not.toContain('Composition status is ACTIVE');
   });
 
-  it('keeps the deep analysis entry as clear direct actions', async () => {
+  it('removes the deep analysis entry from the detail rail', async () => {
     await act(async () => {
       render(<CompositionDetailPage compositionId="comp-001" />);
     });
 
-    const heading = await screen.findByRole('heading', { level: 2, name: '深入分析入口' });
-    const panel = heading.closest('section');
-    expect(panel?.textContent).toContain('用下面入口继续追查组合来源、回测、优化与数据快照。');
-    expect(panel?.textContent).toContain('查策略来源');
-    expect(panel?.textContent).toContain('查回测记录');
-    expect(panel?.textContent).toContain('查优化记录');
-    expect(panel?.textContent).toContain('查数据快照');
-    expect(panel?.textContent).not.toContain('侧边宽抽屉');
-    expect(panel?.textContent).not.toContain('收益流 / 回撤 / 样本外（OOS）');
+    await screen.findByRole('heading', { level: 1, name: /全天候组合样例/ });
+    expect(screen.queryByRole('heading', { level: 2, name: '深入分析入口' })).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain('用下面入口继续追查组合来源、回测、优化与数据快照。');
+    expect(document.body.textContent).not.toContain('查策略来源');
+    expect(document.body.textContent).not.toContain('查优化记录');
+    expect(document.body.textContent).not.toContain('查数据快照');
   });
 
   it('shows API errors without falling back to approved preview', async () => {

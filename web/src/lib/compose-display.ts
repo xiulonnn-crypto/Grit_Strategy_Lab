@@ -7,6 +7,7 @@ const KPI_LABELS: Record<string, string> = {
   annualized_return: '年化收益',
   max_drawdown: '最大回撤',
   volatility: '波动率',
+  beta_exposure: 'β暴露',
   leg_count: '腿数',
   locked_weight: '锁定权重',
   residual_weight: '残余权重',
@@ -116,6 +117,9 @@ export function formatBenchmarkLabel(value?: string | null): string {
   }
   if (/^s&p\s*500$/i.test(text)) {
     return 'S&P 500';
+  }
+  if (/70\s*\/\s*30/i.test(text)) {
+    return '基准组合(70/30)';
   }
   if (/60\/40/.test(text)) {
     return '60/40 参考组合';

@@ -512,6 +512,7 @@ export type ApiBacktestSubmissionPreview = {
   coverage_ratio?: number;
   coverage_days?: number;
   data_segment_type?: string;
+  execution_policy?: string | null;
   snapshot_summary?: Record<string, unknown>;
   metrics?: ApiBacktestMetricSummary;
   parameter_snapshot?: Record<string, ParameterValue>;
@@ -1160,6 +1161,13 @@ export type ApiCompositionAuditTrailItem = {
   summary: string;
   hash_before?: string | null;
   hash_after?: string | null;
+  reason?: string | null;
+  change_summary?: string | null;
+  version_before?: number | null;
+  version_after?: number | null;
+  version_source?: string | null;
+  version_candidate_id?: string | null;
+  version_candidate_label?: string | null;
 };
 
 export type ApiCompositionPreviewPayload = {
@@ -1201,6 +1209,11 @@ export type ApiCompositionUpdatePayload = {
   rebalance_frequency?: string | null;
   cost_policy?: ApiCompositionCostPolicy | null;
   legs?: ApiCompositionLegInput[] | null;
+  version_reason?: string | null;
+  version_change_summary?: string | null;
+  version_source?: string | null;
+  version_candidate_id?: string | null;
+  version_candidate_label?: string | null;
 };
 
 export type ApiCompositionListItem = {
@@ -1374,6 +1387,7 @@ export type ApiCompositionBacktestOrderPage = {
   page_size: number;
   total: number;
   symbol_filter?: string | null;
+  source_leg_filter?: string | null;
   filters: Record<string, unknown>;
   generated_from: string;
   quality_label: string;
@@ -1403,6 +1417,7 @@ export type ApiCompositionBacktestOrderNetting = {
 
 export type ApiCompositionBacktestOrdersQuery = {
   symbol?: string | null;
+  source_leg?: string | null;
   page?: number;
   page_size?: number;
 };
@@ -1803,7 +1818,7 @@ export type DemoApi = {
     id: string,
     runId: string,
     format?: ApiCompositionOrderExportFormat,
-    params?: { symbol?: string | null },
+    params?: { symbol?: string | null; source_leg?: string | null },
   ) => Promise<string>;
   createCompositionAllocationJob?: (
     id: string,

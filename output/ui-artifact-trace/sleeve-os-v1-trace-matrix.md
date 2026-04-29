@@ -20,6 +20,7 @@
 | 组合回测 / 执行历史 | Detail right rail execution history | Composition backtest run summaries | `composition.detail.test.tsx`, route deep link scan |
 | Backtest config | `CompositionBacktestConfigPage` | Composition detail + backtest create contract | `app.routes.foundation.test.tsx` |
 | Diagnosis tab | `CompositionBacktestResultPage` diagnosis tab | `diagnosis`, metrics matrix, exposure timeline | `composition.backtest.result.test.tsx` |
+| Diagnosis layout refinement | `CompositionBacktestResultPage` diagnosis first screen, comparison cards, attribution / heatmap band and chart callout | `performance_matrix`, `risk_contribution_preview`, `rebalance_events`, `return_quality_summary`, `top_holdings` | `artifacts/composition-backtest-layout-20260429/desktop.png`, `narrow.png`, `dom-scan.json` |
 | Orders tab | `CompositionBacktestResultPage` orders tab | order events, full ledger, netting detail | `composition.backtest.result.test.tsx` |
 | Evidence tab | `CompositionBacktestResultPage` evidence tab | frozen config, proxy logs, algorithm spec, audit trail | `composition.backtest.result.test.tsx` |
 | Allocation intent config | `CompositionAllocationConfigPage` | Allocation request/default policy | `composition.allocation.test.tsx` |
@@ -36,6 +37,7 @@
 | Narrow screenshot | `artifacts/sleeve-os-v1-2026-04-28/*-narrow.png` | Captured for detail, backtest config/result, allocation config/result |
 | DOM copy/state scan | `artifacts/sleeve-os-v1-2026-04-28/dom-scan.json` | Passed; no design-artifact terms or console errors in captured pages |
 | Interaction proof | tabs, order switch, filter, netting, frontier click | Covered by focused Vitest and live DOM capture on orders/allocation routes |
+| Backtest layout proof | `artifacts/composition-backtest-layout-20260429/desktop.png`, `narrow.png`, `dom-scan.json` | Passed; no old route chip, old `10Y / 年化` subtitle, visible simulated-English audit text, or repeated heatmap explanation; chart callout switches to orders and Top 5 uses bottom symbols |
 
 ## Allowed Deviations
 

@@ -1,0 +1,307 @@
+{
+  "url": "http://127.0.0.1:4173/?v=20260429-1538#/compositions/composition_630718a64821/allocation-lab",
+  "headingVisible": true,
+  "rowCount": 4,
+  "firstName": "QQQ 网格交易策略-v4",
+  "rowsInitial": [
+    {
+      "name": "QQQ 网格交易策略-v4",
+      "currentWeight": 40,
+      "numbers": [
+        {
+          "label": "QQQ 网格交易策略-v4 权重下限输入",
+          "value": 18,
+          "disabled": false
+        },
+        {
+          "label": "QQQ 网格交易策略-v4 权重上限输入",
+          "value": 54,
+          "disabled": false
+        }
+      ],
+      "sliders": [
+        {
+          "label": "QQQ 网格交易策略-v4 权重下限滑块",
+          "min": "0",
+          "max": "100",
+          "value": 18,
+          "disabled": false
+        },
+        {
+          "label": "QQQ 网格交易策略-v4 权重上限滑块",
+          "min": "0",
+          "max": "100",
+          "value": 54,
+          "disabled": false
+        }
+      ],
+      "lockLabel": "锁定 QQQ 网格交易策略-v4",
+      "lockPressed": "false"
+    },
+    {
+      "name": "标普动量策略-v3",
+      "currentWeight": 30,
+      "numbers": [
+        {
+          "label": "标普动量策略-v3 权重下限输入",
+          "value": 14,
+          "disabled": false
+        },
+        {
+          "label": "标普动量策略-v3 权重上限输入",
+          "value": 41,
+          "disabled": false
+        }
+      ],
+      "sliders": [
+        {
+          "label": "标普动量策略-v3 权重下限滑块",
+          "min": "0",
+          "max": "100",
+          "value": 14,
+          "disabled": false
+        },
+        {
+          "label": "标普动量策略-v3 权重上限滑块",
+          "min": "0",
+          "max": "100",
+          "value": 41,
+          "disabled": false
+        }
+      ],
+      "lockLabel": "锁定 标普动量策略-v3",
+      "lockPressed": "false"
+    },
+    {
+      "name": "美国10年国债",
+      "currentWeight": 25,
+      "numbers": [
+        {
+          "label": "美国10年国债 权重下限输入",
+          "value": 11,
+          "disabled": false
+        },
+        {
+          "label": "美国10年国债 权重上限输入",
+          "value": 34,
+          "disabled": false
+        }
+      ],
+      "sliders": [
+        {
+          "label": "美国10年国债 权重下限滑块",
+          "min": "0",
+          "max": "100",
+          "value": 11,
+          "disabled": false
+        },
+        {
+          "label": "美国10年国债 权重上限滑块",
+          "min": "0",
+          "max": "100",
+          "value": 34,
+          "disabled": false
+        }
+      ],
+      "lockLabel": "锁定 美国10年国债",
+      "lockPressed": "false"
+    },
+    {
+      "name": "现金安全垫",
+      "currentWeight": 5,
+      "numbers": [
+        {
+          "label": "现金安全垫 权重下限输入",
+          "value": 2,
+          "disabled": false
+        },
+        {
+          "label": "现金安全垫 权重上限输入",
+          "value": 13,
+          "disabled": false
+        }
+      ],
+      "sliders": [
+        {
+          "label": "现金安全垫 权重下限滑块",
+          "min": "0",
+          "max": "100",
+          "value": 2,
+          "disabled": false
+        },
+        {
+          "label": "现金安全垫 权重上限滑块",
+          "min": "0",
+          "max": "100",
+          "value": 13,
+          "disabled": false
+        }
+      ],
+      "lockLabel": "锁定 现金安全垫",
+      "lockPressed": "false"
+    }
+  ],
+  "sortedDescending": true,
+  "crossBeforeBlur": {
+    "min": 64,
+    "max": 54
+  },
+  "crossAfterBlur": {
+    "min": 64,
+    "max": 64
+  },
+  "equalLockProof": {
+    "requested": 33,
+    "min": 33,
+    "max": 33,
+    "minDisabled": true,
+    "maxDisabled": true,
+    "lockPressed": "true"
+  },
+  "unequalLockProof": {
+    "currentWeight": 40,
+    "min": 40,
+    "max": 40,
+    "lockPressed": "true"
+  },
+  "rowsFinal": [
+    {
+      "name": "QQQ 网格交易策略-v4",
+      "currentWeight": 40,
+      "numbers": [
+        {
+          "label": "QQQ 网格交易策略-v4 权重下限输入",
+          "value": 40,
+          "disabled": true
+        },
+        {
+          "label": "QQQ 网格交易策略-v4 权重上限输入",
+          "value": 40,
+          "disabled": true
+        }
+      ],
+      "sliders": [
+        {
+          "label": "QQQ 网格交易策略-v4 权重下限滑块",
+          "min": "0",
+          "max": "100",
+          "value": 40,
+          "disabled": true
+        },
+        {
+          "label": "QQQ 网格交易策略-v4 权重上限滑块",
+          "min": "0",
+          "max": "100",
+          "value": 40,
+          "disabled": true
+        }
+      ],
+      "lockLabel": "解锁 QQQ 网格交易策略-v4",
+      "lockPressed": "true"
+    },
+    {
+      "name": "标普动量策略-v3",
+      "currentWeight": 30,
+      "numbers": [
+        {
+          "label": "标普动量策略-v3 权重下限输入",
+          "value": 14,
+          "disabled": false
+        },
+        {
+          "label": "标普动量策略-v3 权重上限输入",
+          "value": 41,
+          "disabled": false
+        }
+      ],
+      "sliders": [
+        {
+          "label": "标普动量策略-v3 权重下限滑块",
+          "min": "0",
+          "max": "100",
+          "value": 14,
+          "disabled": false
+        },
+        {
+          "label": "标普动量策略-v3 权重上限滑块",
+          "min": "0",
+          "max": "100",
+          "value": 41,
+          "disabled": false
+        }
+      ],
+      "lockLabel": "锁定 标普动量策略-v3",
+      "lockPressed": "false"
+    },
+    {
+      "name": "美国10年国债",
+      "currentWeight": 25,
+      "numbers": [
+        {
+          "label": "美国10年国债 权重下限输入",
+          "value": 11,
+          "disabled": false
+        },
+        {
+          "label": "美国10年国债 权重上限输入",
+          "value": 34,
+          "disabled": false
+        }
+      ],
+      "sliders": [
+        {
+          "label": "美国10年国债 权重下限滑块",
+          "min": "0",
+          "max": "100",
+          "value": 11,
+          "disabled": false
+        },
+        {
+          "label": "美国10年国债 权重上限滑块",
+          "min": "0",
+          "max": "100",
+          "value": 34,
+          "disabled": false
+        }
+      ],
+      "lockLabel": "锁定 美国10年国债",
+      "lockPressed": "false"
+    },
+    {
+      "name": "现金安全垫",
+      "currentWeight": 5,
+      "numbers": [
+        {
+          "label": "现金安全垫 权重下限输入",
+          "value": 2,
+          "disabled": false
+        },
+        {
+          "label": "现金安全垫 权重上限输入",
+          "value": 13,
+          "disabled": false
+        }
+      ],
+      "sliders": [
+        {
+          "label": "现金安全垫 权重下限滑块",
+          "min": "0",
+          "max": "100",
+          "value": 2,
+          "disabled": false
+        },
+        {
+          "label": "现金安全垫 权重上限滑块",
+          "min": "0",
+          "max": "100",
+          "value": 13,
+          "disabled": false
+        }
+      ],
+      "lockLabel": "锁定 现金安全垫",
+      "lockPressed": "false"
+    }
+  ],
+  "consoleMessages": [],
+  "screenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\allocation-bounds-20260429\\allocation-bounds-v2-live.png"
+}

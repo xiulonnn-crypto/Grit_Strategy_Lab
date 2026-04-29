@@ -566,8 +566,9 @@ function buildSparklinePoints(row: ApiLegInventoryRow): string {
   }).join(' ');
 }
 
-function LegDetailDrawer({
+export function LegDetailDrawer({
   copyVersionTarget,
+  hideMutatingActions = false,
   onArchiveCandidate,
   onClose,
   onCopyCandidate,
@@ -576,6 +577,7 @@ function LegDetailDrawer({
   row,
 }: {
   copyVersionTarget?: ApiLegInventoryRow | null;
+  hideMutatingActions?: boolean;
   onArchiveCandidate: (row: ApiLegInventoryRow) => Promise<void>;
   onClose: () => void;
   onCopyCandidate: (row: ApiLegInventoryRow) => void;
@@ -696,17 +698,17 @@ function LegDetailDrawer({
               查看来源
             </button>
           ) : null}
-          {canCopyLeg(row) ? (
+          {!hideMutatingActions && canCopyLeg(row) ? (
             <button className="ghost-button" onClick={() => onCopyCandidate(row)} type="button">
               复制
             </button>
           ) : null}
-          {copyVersionTarget ? (
+          {!hideMutatingActions && copyVersionTarget ? (
             <button className="ghost-button" onClick={() => onRequestCopyNewVersion(row, copyVersionTarget)} type="button">
               复制新版本
             </button>
           ) : null}
-          {row.reference_count <= 0 ? (
+          {!hideMutatingActions && row.reference_count <= 0 ? (
             <button className="ghost-button" onClick={() => void onArchiveCandidate(row)} type="button">
               归档
             </button>

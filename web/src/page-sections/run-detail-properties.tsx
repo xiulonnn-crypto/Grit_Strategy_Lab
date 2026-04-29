@@ -40,10 +40,44 @@ function PropertiesCard({
   );
 }
 
+function normalizeDate(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalized = value.trim().slice(0, 10);
+  return normalized.length ? normalized : null;
+}
+
+function firstOrderDate(detail: ApiBacktestRunDetail): string | null {
+  const tradeDates = (detail.trades ?? [])
+    .map((trade) => normalizeDate(trade.trade_date))
+    .filter((value): value is string => Boolean(value));
+  const auditDates = (detail.trade_audit_items ?? [])
+    .map((item) => normalizeDate(item.opened_at))
+    .filter((value): value is string => Boolean(value));
+  return [...tradeDates, ...auditDates].sort()[0] ?? null;
+}
+
+function buildExecutionWindow(detail: ApiBacktestRunDetail): Record<string, unknown> {
+  return {
+    requested_start_date: detail.request?.start_date ?? detail.start_date ?? null,
+    signal_effective_date: detail.effective_date ?? detail.preview?.effective_date ?? null,
+    first_order_date: firstOrderDate(detail),
+    oos_start_date: detail.oos_start_date ?? detail.preview?.oos_start_date ?? null,
+    requested_end_date: detail.request?.end_date ?? detail.end_date ?? null,
+    execution_policy: detail.request?.execution_policy ?? detail.preview?.execution_policy ?? null,
+  };
+}
+
 export function RunDetailPropertiesPanel({ detail }: RunDetailPropertiesProps): JSX.Element {
   return (
     <div className="run-detail-tab-panel">
       <div className="run-detail-properties-grid">
+        <PropertiesCard
+          description="区分请求样本起点、预热后的信号起点与真实成交起点。"
+          title="执行窗口"
+          value={buildExecutionWindow(detail)}
+        />
         <PropertiesCard
           description="当前回测请求的原始提交参数。"
           title="回测请求"

@@ -1,0 +1,62 @@
+{
+  "url": "http://127.0.0.1:4173/?v=20260429-riskparity-final#/compositions/composition_630718a64821/allocation-jobs/alloc_job_568a94036733",
+  "points": [
+    {
+      "ariaLabel": "当前组合前沿点",
+      "className": "composition-allocation-frontier__point composition-allocation-frontier__point--current",
+      "borderColor": "rgb(23, 107, 97)",
+      "backgroundColor": "rgb(255, 255, 255)",
+      "opacity": "1",
+      "text": "★"
+    },
+    {
+      "ariaLabel": "基准组合前沿点",
+      "className": "composition-allocation-frontier__point composition-allocation-frontier__point--benchmark",
+      "borderColor": "rgb(196, 92, 79)",
+      "backgroundColor": "rgb(255, 248, 247)",
+      "opacity": "1",
+      "text": ""
+    },
+    {
+      "ariaLabel": "风险平价预览前沿点",
+      "className": "composition-allocation-frontier__point composition-allocation-frontier__point--risk-parity is-selected is-current-hover",
+      "borderColor": "rgb(23, 107, 97)",
+      "backgroundColor": "rgb(31, 135, 123)",
+      "opacity": "1",
+      "text": ""
+    },
+    {
+      "ariaLabel": "最小波动预览前沿点",
+      "className": "composition-allocation-frontier__point composition-allocation-frontier__point--min-vol is-dimmed",
+      "borderColor": "rgb(100, 116, 139)",
+      "backgroundColor": "rgb(255, 255, 255)",
+      "opacity": "0.28",
+      "text": ""
+    },
+    {
+      "ariaLabel": "最大夏普预览前沿点",
+      "className": "composition-allocation-frontier__point composition-allocation-frontier__point--max-sharpe is-dimmed",
+      "borderColor": "rgb(100, 116, 139)",
+      "backgroundColor": "rgb(255, 255, 255)",
+      "opacity": "0.28",
+      "text": ""
+    }
+  ],
+  "redHollowPoints": [
+    {
+      "ariaLabel": "基准组合前沿点",
+      "className": "composition-allocation-frontier__point composition-allocation-frontier__point--benchmark",
+      "borderColor": "rgb(196, 92, 79)",
+      "backgroundColor": "rgb(255, 248, 247)",
+      "opacity": "1",
+      "text": ""
+    }
+  ],
+  "snapshotText": "前沿点权重快照风险平价预览 · 13.5% 波动 / 24.7% 收益标普动量策略-v323.5%QQQ 网格交易策略-v430.7%现金安全垫13.0%美国10年国债32.9%权重快照用于核对迁移方向，不作为晋升入口。",
+  "snapshotRows": [
+    "标普动量策略-v323.5%",
+    "QQQ 网格交易策略-v430.7%",
+    "现金安全垫13.0%",
+    "美国10年国债32.9%"
+  ]
+}

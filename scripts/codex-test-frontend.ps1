@@ -20,6 +20,7 @@ $uvicornOutLog = Join-Path $uvicornLogDir 'uvicorn-8010.out.log'
 $uvicornErrLog = Join-Path $uvicornLogDir 'uvicorn-8010.err.log'
 $focusedTests = @(
     'app.routes.foundation.test.tsx'
+    'runs.index.page.test.tsx'
     'composition.dashboard.test.tsx'
     'leg.inventory.test.tsx'
     'composition.workbench.test.tsx'

@@ -396,6 +396,25 @@ def _momentum_target_weights(
     return {symbol: equal_weight for _, symbol in selected}
 
 
+def _window_master_dates(master_dates: list[str], config: BacktestConfig) -> list[str]:
+    windowed = list(master_dates)
+    if config.start_date:
+        windowed = [value for value in windowed if value >= str(config.start_date)]
+    if config.end_date:
+        windowed = [value for value in windowed if value <= str(config.end_date)]
+    return windowed
+
+
+def _first_date_index_on_or_after(master_dates: list[str], start_date: str | None) -> int:
+    if not start_date:
+        return 0
+    start_value = str(start_date)
+    for index, value in enumerate(master_dates):
+        if value >= start_value:
+            return index
+    return len(master_dates)
+
+
 def _bollinger_bands(series: list[MarketBar], index: int, period: int, width: float = 2.0) -> tuple[float, float] | None:
     if period <= 1 or index + 1 < period:
         return None
@@ -1046,8 +1065,6 @@ def prepare_backtest_inputs(
     benchmark_series = _normalize_bars(benchmark_bars or [])
     reference_series = benchmark_series or (next(iter(symbol_series.values())) if symbol_series else [])
     master_dates = [bar.date for bar in reference_series]
-    if config.start_date:
-        master_dates = [value for value in master_dates if value >= str(config.start_date)]
     if config.end_date:
         master_dates = [value for value in master_dates if value <= str(config.end_date)]
     return PreparedBacktestInputs(
@@ -1088,13 +1105,14 @@ def run_backtest_prepared(
     if not symbol_series:
         empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         return BacktestResult(metrics=empty_metrics, warnings=["No market bars available"])
+    requested_window_dates = _window_master_dates(master_dates, config)
     if str(template_key).lower() == "grid":
         return _run_grid_backtest(
             symbol_series,
             config=config,
             parameters=parameters,
             benchmark_series=benchmark_series,
-            master_dates=master_dates,
+            master_dates=requested_window_dates,
         )
     if str(template_key).lower() in {"mean_reversion", "reversion"}:
         return _run_mean_reversion_backtest(
@@ -1102,7 +1120,7 @@ def run_backtest_prepared(
             config=config,
             parameters=parameters,
             benchmark_series=benchmark_series,
-            master_dates=master_dates,
+            master_dates=requested_window_dates,
         )
     if str(template_key).lower() in {"buy_and_hold", "dca"}:
         return _run_buy_and_hold_backtest(
@@ -1110,38 +1128,62 @@ def run_backtest_prepared(
             config=config,
             parameters=parameters,
             benchmark_series=benchmark_series,
-            master_dates=master_dates,
+            master_dates=requested_window_dates,
             valuation_series=valuation_series,
         )
     minimum_history = lookback_days + skip_recent_days
     if len(master_dates) < minimum_history + 2:
         empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         return BacktestResult(metrics=empty_metrics, warnings=["Not enough benchmark dates for requested lookback"])
+    first_execution_index = _first_date_index_on_or_after(master_dates, str(config.start_date) if config.start_date else None)
+    if first_execution_index >= len(master_dates):
+        empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        return BacktestResult(metrics=empty_metrics, warnings=["Not enough benchmark dates for requested range"])
+    first_signal_index = max(minimum_history, first_execution_index - 1)
+    if first_signal_index >= len(master_dates) - 1:
+        empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        return BacktestResult(metrics=empty_metrics, warnings=["Not enough benchmark dates for requested lookback"])
+    live_execution_dates = [
+        master_dates[index + 1]
+        for index in range(first_signal_index, len(master_dates) - 1)
+        if not config.start_date or master_dates[index + 1] >= str(config.start_date)
+    ]
+    if not live_execution_dates:
+        empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        return BacktestResult(metrics=empty_metrics, warnings=["Not enough benchmark dates for requested range"])
     index_by_symbol = {
         symbol: {bar.date: idx for idx, bar in enumerate(series)}
         for symbol, series in symbol_series.items()
     }
-    rebalance_indexes = [
-        idx
-        for idx in _rebalance_keys(master_dates, frequency, anchor_dates)
-        if idx >= minimum_history and idx < len(master_dates) - 1
-    ]
-    if not rebalance_indexes:
-        rebalance_indexes = [min(max(minimum_history, 0), len(master_dates) - 2)]
+    rebalance_indexes = sorted(
+        {
+            first_signal_index,
+            *[
+                idx
+                for idx in _rebalance_keys(master_dates, frequency, anchor_dates)
+                if idx >= first_signal_index
+                and idx < len(master_dates) - 1
+                and (not config.start_date or master_dates[idx + 1] >= str(config.start_date))
+            ],
+        }
+    )
     target_weights: dict[str, float] = {}
     equity = config.initial_equity
     equity_curve = [equity]
     returns: list[float] = []
-    oos_cut = max(int(len(master_dates) * (1.0 - config.oos_fraction)), 1)
+    oos_cut = max(int(len(live_execution_dates) * (1.0 - config.oos_fraction)), 1)
     daily_points: list[DailyPerformancePoint] = []
     trades: list[TradeRecord] = []
     benchmark_index = {bar.date: idx for idx, bar in enumerate(benchmark_series)}
     total_turnover = 0.0
     latest_rebalance_turnover = 0.0
     rebalances = set(rebalance_indexes)
-    for master_index in range(minimum_history, len(master_dates) - 1):
+    live_point_index = 0
+    for master_index in range(first_signal_index, len(master_dates) - 1):
         as_of_date = master_dates[master_index]
         execution_date = master_dates[master_index + 1]
+        if config.start_date and execution_date < str(config.start_date):
+            continue
         if master_index in rebalances:
             rebalance_turnover = 0.0
             scored: list[tuple[float, str]] = []
@@ -1243,9 +1285,10 @@ def run_backtest_prepared(
                 drawdown=drawdown,
                 exposure=sum(target_weights.values()),
                 universe_size=len(target_weights),
-                in_sample=master_index < oos_cut,
+                in_sample=live_point_index < oos_cut,
             )
         )
+        live_point_index += 1
     total_return, cagr, volatility, sharpe, max_drawdown = _curve_metrics(equity_curve, returns)
     winning_days = sum(1 for value in returns if value > 0)
     oos_returns = [point.strategy_return for point in daily_points if not point.in_sample]
@@ -1271,8 +1314,8 @@ def run_backtest_prepared(
         daily_performance=daily_points,
         trades=trades,
         warnings=[],
-        effective_date=master_dates[minimum_history],
-        oos_start_date=master_dates[oos_cut] if master_dates else None,
+        effective_date=daily_points[0].date if daily_points else None,
+        oos_start_date=daily_points[oos_cut].date if len(daily_points) > oos_cut else None,
         coverage_ratio=coverage_ratio,
         coverage_days=coverage_days,
     )

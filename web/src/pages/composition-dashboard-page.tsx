@@ -25,6 +25,15 @@ function compositionHasNewVersion(
   return Boolean(composition.has_new_version) || sourceIntegrity.some(sourceIntegrityHasNewVersion);
 }
 
+function normalizeCompositionListItem(composition: ApiCompositionListItem): ApiCompositionListItem {
+  const sourceIntegrity = composition.source_integrity ?? [];
+  return {
+    ...composition,
+    source_integrity: sourceIntegrity,
+    has_new_version: compositionHasNewVersion(composition, sourceIntegrity),
+  };
+}
+
 export function CompositionDashboardPage(): JSX.Element {
   const api = useApiClient();
   const [compositions, setCompositions] = useState<ApiCompositionListItem[]>([]);
@@ -51,24 +60,7 @@ export function CompositionDashboardPage(): JSX.Element {
           setError(null);
         }
         const response = await api.listCompositions();
-        const enrichedResponse =
-          api.getCompositionDetail
-            ? await Promise.all(
-                response.map(async (composition) => {
-                  try {
-                    const detail = await api.getCompositionDetail!(composition.id);
-                    const sourceIntegrity = detail.source_integrity ?? [];
-                    return {
-                      ...composition,
-                      source_integrity: sourceIntegrity,
-                      has_new_version: compositionHasNewVersion(composition, sourceIntegrity),
-                    };
-                  } catch {
-                    return composition;
-                  }
-                }),
-              )
-            : response;
+        const enrichedResponse = response.map(normalizeCompositionListItem);
         if (!cancelled) {
           setCompositions(enrichedResponse);
           setWriteError(null);
@@ -100,26 +92,7 @@ export function CompositionDashboardPage(): JSX.Element {
       setWriteError(null);
       await api.updateComposition(id, { status });
       const response = await api.listCompositions();
-      if (api.getCompositionDetail) {
-        const enrichedResponse = await Promise.all(
-          response.map(async (composition) => {
-            try {
-              const detail = await api.getCompositionDetail!(composition.id);
-              const sourceIntegrity = detail.source_integrity ?? [];
-              return {
-                ...composition,
-                source_integrity: sourceIntegrity,
-                has_new_version: compositionHasNewVersion(composition, sourceIntegrity),
-              };
-            } catch {
-              return composition;
-            }
-          }),
-        );
-        setCompositions(enrichedResponse);
-      } else {
-        setCompositions(response);
-      }
+      setCompositions(response.map(normalizeCompositionListItem));
     } catch (caught) {
       setWriteError(`Composition status save failed: ${(caught as Error).message}`);
     } finally {

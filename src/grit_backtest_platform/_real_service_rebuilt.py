@@ -6146,6 +6146,28 @@ class RealBacktestPlatformService(BacktestPlatformService):
         parameters.setdefault("benchmark_symbol", str(strategy.get("benchmark_symbol") or "SPY"))
         return parameters
 
+    def _market_data_start_date_for_backtest(
+        self,
+        strategy: Mapping[str, Any],
+        request_payload: Mapping[str, Any],
+    ) -> str | None:
+        requested_start = str(request_payload.get("start_date") or "").strip()
+        if not requested_start:
+            return None
+        parameters = self._engine_parameters(strategy)
+        if str(parameters.get("template_key") or parameters.get("strategy_type") or "").lower() != "momentum":
+            return requested_start
+        try:
+            start_date = _parse_iso_date(requested_start)
+        except ValueError:
+            return requested_start
+        minimum_history = max(int(_coerce_float(parameters.get("lookback_days"), 0.0)), 0) + max(
+            int(_coerce_float(parameters.get("skip_recent_days"), 0.0)),
+            0,
+        )
+        calendar_padding_days = max(int(math.ceil((minimum_history + 2) * 7 / 5)) + 30, minimum_history + 10)
+        return (start_date - timedelta(days=calendar_padding_days)).isoformat()
+
     def _normalize_run_request(self, strategy: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
         normalized = dict(payload)
         normalized["fee_bps"] = _coerce_float(normalized.get("fee_bps"), DEFAULT_BACKTEST_FEE_BPS)
@@ -6525,10 +6547,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
         symbols = [str(symbol).upper() for symbol in context.get("symbols") or self._resolve_universe_symbols(strategy, request_payload)]
         dataset_snapshot_id = str(context.get("dataset_snapshot_id") or request_payload.get("dataset_snapshot_id") or DATASET_PRICE_SNAPSHOT_ID)
         requested_symbols = list(dict.fromkeys([*symbols, benchmark_symbol]))
+        market_data_start_date = self._market_data_start_date_for_backtest(strategy, request_payload)
         raw_bars = self._load_snapshot_price_bars(
             dataset_snapshot_id,
             requested_symbols,
-            start_date=context.get("start_date"),
+            start_date=market_data_start_date,
             end_date=context.get("end_date"),
         )
         valuation_series = {}
@@ -6539,7 +6562,18 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 [valuation_proxy_key],
                 end_date=context.get("end_date"),
             )
-        snapshot_summary = self._build_snapshot_summary_from_context(context, raw_bars)
+        requested_start_date = str(context.get("start_date") or "").strip()
+        requested_end_date = str(context.get("end_date") or "").strip()
+        summary_bars = {
+            symbol: [
+                dict(row)
+                for row in series
+                if (not requested_start_date or str(row.get("date") or "") >= requested_start_date)
+                and (not requested_end_date or str(row.get("date") or "") <= requested_end_date)
+            ]
+            for symbol, series in raw_bars.items()
+        }
+        snapshot_summary = self._build_snapshot_summary_from_context(context, summary_bars)
         if is_snapshot_blocking(snapshot_summary):
             raise SnapshotBlockingError(snapshot_summary)
         bars_by_symbol = {

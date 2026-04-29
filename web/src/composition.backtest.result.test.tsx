@@ -38,11 +38,16 @@ describe('CompositionBacktestResultPage', () => {
     expect(screen.getByRole('tab', { name: /订单/ })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /证据/ })).toBeInTheDocument();
     expect(screen.getByText('稳定性裁决：10Y 稳定，20Y 需复核')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '核心指标' })).toBeInTheDocument();
+    expect(screen.getByLabelText('核心回测指标')).toHaveTextContent('年化收益');
+    expect(screen.getByLabelText('核心回测指标')).toHaveTextContent('最大回撤');
     expect(screen.getByRole('heading', { level: 2, name: '绩效指标矩阵' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: 'Sleeve 贡献归因' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: 'Exposure Heatmap' })).toBeInTheDocument();
-    expect(screen.getByText(/Stress Period Zoom/)).toBeInTheDocument();
-    expect(screen.getByText(/Time to Recovery/)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '敞口热力图' })).toBeInTheDocument();
+    expect(screen.getAllByText(/压力窗口/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/修复时间/).length).toBeGreaterThan(0);
+    expect(screen.getByText('数据置信度')).toBeInTheDocument();
+    expect(screen.getAllByText(/效率/).length).toBeGreaterThan(0);
     expect(screen.getByRole('heading', { level: 2, name: 'Top 5 穿透风险' })).toBeInTheDocument();
     expect(screen.getAllByText(/NVDA/).length).toBeGreaterThan(0);
     expect(screen.getByText(/20Y 指标含 SPY 代理覆盖说明/)).toBeInTheDocument();
@@ -50,6 +55,40 @@ describe('CompositionBacktestResultPage', () => {
     expect(document.body.textContent).not.toContain('静态设计稿');
     expect(document.body.textContent).not.toContain('不直接连接运行时');
     expect(document.body.textContent).not.toContain('Route Intent');
+    expect(document.body.textContent).not.toContain('当前路径');
+    expect(document.body.textContent).not.toContain('10Y / 年化');
+  });
+
+  it('compresses long exposure evidence into a semantic heatmap tooltip', () => {
+    render(
+      <CompositionBacktestResultPage
+        compositionId="comp-sleeve"
+        data={{
+          diagnosis: {
+            exposure_heatmap: [
+              {
+                key: 'exposure-live',
+                period: '2022-Q1',
+                alpha_pct: 28,
+                qqq_pct: 14,
+                tbill_pct: 46,
+                cash_pct: 12,
+                detail: 'Simulated from quarterly cadence using aligned leg return streams.',
+              },
+            ],
+          },
+        }}
+        runId="run-a3"
+      />,
+    );
+
+    expect(screen.getByText('定期平衡')).toBeInTheDocument();
+    expect(screen.getByLabelText('敞口热力图审计说明')).toHaveAttribute(
+      'title',
+      '按季度节奏和已对齐的腿收益流模拟。',
+    );
+    expect(document.body.textContent).not.toContain('季度再平衡 (模拟)');
+    expect(document.body.textContent).not.toContain('Simulated from quarterly cadence using aligned leg return streams.');
   });
 
   it('jumps from diagnosis to orders, supports event view, netting dialog, export, and ledger filters', () => {
@@ -64,13 +103,13 @@ describe('CompositionBacktestResultPage', () => {
 
     fireEvent.click(screen.getAllByRole('button', { name: '查看订单明细' })[1]);
     expect(screen.getByRole('tab', { name: /订单/, selected: true })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: 'Rebalance Events' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: 'Look-through Orders' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: 'Rebalance Efficiency' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '调仓事件' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '穿透订单' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '调仓效率' })).toBeInTheDocument();
     expect(container.querySelector('tr.is-highlighted')?.textContent).toContain('QQQ');
 
     fireEvent.click(screen.getByRole('button', { name: '内部对冲 42%' }));
-    const dialog = screen.getByRole('dialog', { name: 'Internal Netting 明细' });
+    const dialog = screen.getByRole('dialog', { name: '内部对冲明细' });
     expect(within(dialog).getByText('原始卖出需求')).toBeInTheDocument();
     expect(within(dialog).getByText('原始买入需求')).toBeInTheDocument();
     expect(within(dialog).getByText('内部撮合数量')).toBeInTheDocument();
@@ -83,7 +122,7 @@ describe('CompositionBacktestResultPage', () => {
     expect(exportLedger.mock.calls[0][0]).toBe('excel');
 
     fireEvent.click(screen.getByRole('button', { name: '查看全量流水' }));
-    expect(screen.getByRole('heading', { level: 2, name: 'Full Ledger' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '全量流水' })).toBeInTheDocument();
     const ledgerTable = container.querySelector('.composition-backtest-ledger-table') as HTMLTableElement;
     expect(ledgerTable).toBeTruthy();
     expect(within(ledgerTable).getByText('时间')).toBeInTheDocument();
@@ -96,13 +135,27 @@ describe('CompositionBacktestResultPage', () => {
     expect(within(ledgerTable).getByText('来源腿')).toBeInTheDocument();
     expect(within(ledgerTable).getByText('触发原因')).toBeInTheDocument();
 
+    const sourceFilterGroup = screen.getByRole('group', { name: '来源腿过滤' });
+    const symbolFilterGroup = screen.getByRole('group', { name: '标的过滤' });
+    expect(
+      sourceFilterGroup.compareDocumentPosition(symbolFilterGroup) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
     const ledgerBody = ledgerTable.querySelector('tbody') as HTMLTableSectionElement;
     expect(within(ledgerBody).getAllByText('QQQ').length).toBeGreaterThan(0);
-    expect(within(ledgerBody).queryByText('NVDA')).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'NVDA' }));
     expect(within(ledgerBody).getByText('NVDA')).toBeInTheDocument();
+
+    fireEvent.click(within(sourceFilterGroup).getByRole('button', { name: 'Alpha Core' }));
+    expect(within(symbolFilterGroup).getByRole('button', { name: 'NVDA' })).toBeInTheDocument();
+    expect(within(symbolFilterGroup).getByRole('button', { name: 'MSFT' })).toBeInTheDocument();
+    expect(within(symbolFilterGroup).queryByRole('button', { name: 'QQQ' })).not.toBeInTheDocument();
+    expect(within(ledgerBody).getByText('NVDA')).toBeInTheDocument();
+    expect(within(ledgerBody).getByText('MSFT')).toBeInTheDocument();
     expect(within(ledgerBody).queryByText('QQQ')).not.toBeInTheDocument();
+
+    fireEvent.click(within(symbolFilterGroup).getByRole('button', { name: 'NVDA' }));
+    expect(within(ledgerBody).getByText('NVDA')).toBeInTheDocument();
+    expect(within(ledgerBody).queryByText('MSFT')).not.toBeInTheDocument();
   });
 
   it('renders evidence sections and accepts a broad local data shape without central types', () => {
@@ -161,11 +214,45 @@ describe('CompositionBacktestResultPage', () => {
 
     expect(screen.getByRole('tab', { name: /证据/, selected: true })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 1, name: '机构组合回测' })).toBeInTheDocument();
-    expect(screen.getByText('Frozen Config')).toBeInTheDocument();
-    expect(screen.getByText('Data Footprint')).toBeInTheDocument();
-    expect(screen.getAllByText('Proxy Logs').length).toBeGreaterThan(0);
-    expect(screen.getByText('Algorithm Spec')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: 'Audit Trail' })).toBeInTheDocument();
+    expect(screen.getByText('配置冻结')).toBeInTheDocument();
+    expect(screen.getByText('数据足迹')).toBeInTheDocument();
+    expect(screen.getAllByText('代理日志').length).toBeGreaterThan(0);
+    expect(screen.getByText('算法规则')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '审计轨迹' })).toBeInTheDocument();
     expect(screen.getByText('算法锁定')).toBeInTheDocument();
+  });
+
+  it('does not refill explicit runtime empty arrays with example order data', () => {
+    const normalized = normalizeCompositionBacktestResult(
+      {
+        title: '真实组合回测',
+        diagnosis: {
+          stability_ruling: '真实数据待补齐',
+          performance_matrix: [],
+          sleeve_contributions: [],
+          exposure_heatmap: [],
+          top_holdings: [],
+          insights: [],
+        },
+        orders: {
+          events: [],
+          full_ledger: [],
+          rebalance_efficiency: [],
+        },
+        evidence: {
+          cards: [],
+          proxy_logs: [],
+          audit_trail: [],
+        },
+      },
+      { compositionId: 'comp-empty', runId: 'run-empty' },
+    );
+
+    expect(normalized.events).toEqual([]);
+    expect(normalized.ledgerRows).toEqual([]);
+    expect(normalized.efficiencyRows).toEqual([]);
+    expect(normalized.concentrationTop5).toEqual([]);
+    expect(JSON.stringify(normalized)).not.toContain('NVDA');
+    expect(JSON.stringify(normalized)).not.toContain('order-2024-qqq');
   });
 });

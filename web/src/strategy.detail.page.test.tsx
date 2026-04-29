@@ -125,6 +125,7 @@ const recentRuns = [
     parameter_version_id: 'pv-002',
     metrics: {
       total_return: 0.126,
+      annualized_return: 0.094,
       sharpe: 1.14,
       max_drawdown: -0.082,
     },
@@ -140,6 +141,7 @@ const recentRuns = [
     parameter_version_id: 'pv-001',
     metrics: {
       total_return: -0.031,
+      annualized_return: -0.021,
       sharpe: 0.44,
       max_drawdown: -0.11,
     },
@@ -209,6 +211,12 @@ describe('StrategyDetailPage', () => {
     expect(screen.getByText('v1')).toBeInTheDocument();
     expect(screen.queryByText('pv-002')).not.toBeInTheDocument();
     expect(screen.queryByText('pv-001')).not.toBeInTheDocument();
+    expect(screen.getByText('2025/01/01 - 2026/03/27')).toBeInTheDocument();
+    expect(screen.getByText('2026/03/27')).toBeInTheDocument();
+    expect(screen.getByText('年化 +9.4%')).toBeInTheDocument();
+    expect(screen.getByText('夏普 1.14')).toBeInTheDocument();
+    expect(screen.getByText('回撤 -8.2%')).toBeInTheDocument();
+    expect(screen.queryByText('总收益 +12.6%')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '返回工作台' })).not.toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: HISTORY_RESTORE_LABEL })).toHaveLength(1);
 

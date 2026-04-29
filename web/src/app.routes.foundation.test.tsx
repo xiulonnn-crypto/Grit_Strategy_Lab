@@ -117,7 +117,10 @@ describe('App runtime routes', () => {
     await renderApp('#/compositions/comp-001/allocation-jobs/alloc-001');
 
     expect(document.querySelector('[data-page-root="composition-allocation-result"]')).not.toBeNull();
-    expect((await screen.findAllByText(/最符合你的目标/)).length).toBeGreaterThan(0);
+    expect(await screen.findByRole('heading', { level: 2, name: '候选选择器 · 多维度选拔赛' })).toBeInTheDocument();
+    expect(document.querySelector('[data-ui="allocation-candidate-selector"]')).not.toBeNull();
+    expect(document.querySelector('[data-ui="allocation-delta-summary"]')).toBeNull();
+    expect(screen.queryByText('目标对齐')).not.toBeInTheDocument();
   });
 
   it('submits from backtest into the run detail route', async () => {
@@ -168,8 +171,10 @@ describe('App runtime routes', () => {
   it('renders the runs index page on the formal route', async () => {
     await renderApp('#/runs');
 
-    expect(document.querySelector('.runs-index-page')).not.toBeNull();
-    expect(await screen.findByRole('table')).toBeInTheDocument();
+    expect(document.querySelector('[data-page-root="runs-index"], .runs-index-page')).not.toBeNull();
+    const strategyLibraryTab = await screen.findByRole('tab', { name: /策略库视图/ });
+    expect(strategyLibraryTab).toHaveClass('is-active');
+    expect(document.querySelector('.runs-evidence-shell .runs-evidence-board')).not.toBeNull();
   });
 
   it('renders the snapshots page on the formal route', async () => {

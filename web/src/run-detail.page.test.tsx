@@ -33,6 +33,9 @@ const detail: ApiBacktestRunDetail = {
   request: {
     benchmark_id: 'SPY',
     rebalance: 'monthly',
+    start_date: '2016-03-24',
+    end_date: '2026-03-24',
+    execution_policy: 'T_CLOSE_TO_T1_OPEN',
   },
   configuration: {
     hold_rank_threshold: 20,
@@ -73,6 +76,9 @@ const detail: ApiBacktestRunDetail = {
   data_segment_type: 'FULL',
   parameter_version_id: 'v2',
   oos_start_date: '2024-03-21',
+  start_date: '2016-03-24',
+  end_date: '2026-03-24',
+  effective_date: '2017-06-23',
   is_permanent: true,
   trades_count: 222,
   analysis: {
@@ -445,6 +451,16 @@ describe('RunDetailPage', () => {
     expect(screen.queryByText('配置与环境快照')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('tab', { name: '配置' }));
+    const executionWindowCard = await screen.findByText('执行窗口');
+    const executionWindow = executionWindowCard.closest('.run-detail-property-card');
+    expect(executionWindow).not.toBeNull();
+    expect(within(executionWindow as HTMLElement).getByText('请求开始')).toBeInTheDocument();
+    expect(within(executionWindow as HTMLElement).getByText('2016-03-24')).toBeInTheDocument();
+    expect(within(executionWindow as HTMLElement).getByText('信号生效起点')).toBeInTheDocument();
+    expect(within(executionWindow as HTMLElement).getByText('2017-06-23')).toBeInTheDocument();
+    expect(within(executionWindow as HTMLElement).getByText('首笔订单')).toBeInTheDocument();
+    expect(within(executionWindow as HTMLElement).getByText('2026-03-22')).toBeInTheDocument();
+    expect(within(executionWindow as HTMLElement).getByText('T日收盘信号，T+1开盘成交')).toBeInTheDocument();
     expect(await screen.findByText('基准标的')).toBeInTheDocument();
     expect(screen.getByText('SPY')).toBeInTheDocument();
     expect(screen.getByText('再平衡')).toBeInTheDocument();

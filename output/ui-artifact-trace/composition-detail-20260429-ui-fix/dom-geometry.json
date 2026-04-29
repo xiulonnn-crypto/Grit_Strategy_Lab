@@ -1,0 +1,111 @@
+{
+  "url": "http://127.0.0.1:4173/?v=20260429-verify-composition-detail-after-strong#/compositions/composition_630718a64821",
+  "mainHeadings": [
+    "权益曲线",
+    "敞口穿透分析",
+    "风险归因",
+    "配置版本记录",
+    "相关性矩阵"
+  ],
+  "railHeadings": [
+    "配置指纹",
+    "组合回测历史",
+    "再平衡与成本",
+    "操作日志"
+  ],
+  "versionRecord": true,
+  "operationLog": true,
+  "noDeepAnalysis": true,
+  "noAuditTrail": true,
+  "noVersionAudit": true,
+  "noExecutionVersionConsistent": true,
+  "noRawStrongVerdict": true,
+  "exposurePanel": {
+    "top": 1048.53125,
+    "left": 268,
+    "width": 390,
+    "height": 556.828125,
+    "text": "敞口穿透分析物理持仓、代理暴露与现金规则分层展示。标普动量策略-v3代理暴露已被 2 个已保存组合引用QQQ 网格交易策略-v4代理暴露已被 1 个已保存组合引用现金安全垫现金规则已被 2 个已保存组合引用美国10年国债物理持仓已被 1 个已保存组合引用"
+  },
+  "riskPanel": {
+    "top": 1048.53125,
+    "left": 672,
+    "width": 390,
+    "height": 556.828125,
+    "text": "风险归因用收益贡献、协方差和久期暴露解释风险预算。标普动量策略-v3策略腿权重 30%收益占比 17.9%风险占比 71.2%QQQ 网格交易策略-v4策略腿权重 40%收益占比 6.3%风险占比 28.8%现金安全垫现金腿权重 5%收益占比 0.1%风险占比 0.0%美国10年国债资产腿权重 25%收益占比 1.0%风险占比 0.1%"
+  },
+  "rowDeltas": [
+    {
+      "index": 0,
+      "topDelta": 0,
+      "heightDelta": 0,
+      "exposure": "标普动量策略-v3代理暴露已被 2 个已保存组合引用",
+      "risk": "标普动量策略-v3策略腿权重 30%收益占比 17.9%风险占比 71.2%"
+    },
+    {
+      "index": 1,
+      "topDelta": 0,
+      "heightDelta": 0,
+      "exposure": "QQQ 网格交易策略-v4代理暴露已被 1 个已保存组合引用",
+      "risk": "QQQ 网格交易策略-v4策略腿权重 40%收益占比 6.3%风险占比 28.8%"
+    },
+    {
+      "index": 2,
+      "topDelta": 0,
+      "heightDelta": 0,
+      "exposure": "现金安全垫现金规则已被 2 个已保存组合引用",
+      "risk": "现金安全垫现金腿权重 5%收益占比 0.1%风险占比 0.0%"
+    },
+    {
+      "index": 3,
+      "topDelta": 0,
+      "heightDelta": 0,
+      "exposure": "美国10年国债物理持仓已被 1 个已保存组合引用",
+      "risk": "美国10年国债资产腿权重 25%收益占比 1.0%风险占比 0.1%"
+    }
+  ],
+  "executionLinks": [
+    {
+      "top": 1421.96875,
+      "left": 1110,
+      "width": 131,
+      "height": 30,
+      "text": "回测记录"
+    },
+    {
+      "top": 1421.96875,
+      "left": 1245,
+      "width": 131,
+      "height": 30,
+      "text": "订单日志"
+    },
+    {
+      "top": 1537.109375,
+      "left": 1110,
+      "width": 131,
+      "height": 30,
+      "text": "回测记录"
+    },
+    {
+      "top": 1537.109375,
+      "left": 1245,
+      "width": 131,
+      "height": 30,
+      "text": "订单日志"
+    },
+    {
+      "top": 1652.25,
+      "left": 1110,
+      "width": 131,
+      "height": 30,
+      "text": "回测记录"
+    },
+    {
+      "top": 1652.25,
+      "left": 1245,
+      "width": 131,
+      "height": 30,
+      "text": "订单日志"
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+{
+  "libraryScan": {
+    "selectors": {
+      "pageHeading": true,
+      "toolbar": true,
+      "tabs": 2,
+      "libraryPanel": true,
+      "treeRows": 12,
+      "railPanel": true,
+      "taskCards": 19
+    },
+    "header": [
+      "策略 / 版本 / 运行",
+      "年化收益",
+      "夏普",
+      "最大回撤",
+      "周期完整度",
+      "证据热力"
+    ],
+    "layoutColumns": "824px 300px",
+    "columnLeftDeltas": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "columnWidthDeltas": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "maxColumnLeftDelta": 0,
+    "maxColumnWidthDelta": 0,
+    "railWidth": 300,
+    "textSample": "GSL\nGrit Strategy Lab\n策略研究与回测平台\n\n组合\n\n组合仪表板\n资产库\n\n策略\n\n策略工作台\n策略库\n回测列表\n优化实验室\n数据快照\n\n回测数据\n\n回测历史\n\n按策略与参数版本归档回测证据，集中呈现收益、回撤、夏普与长周期覆盖。\n\n策略组\n6\n永久回测\n14\n待补长周期\n19\n策略库视图\n最近运行\n仅永久回测\n显示临时\n\nStrategy Library\n\n策略-版本证据树\n\n策略版本、周期覆盖与运行质量统一归档，支持审阅、下钻与证据补齐。\n\n只读证据库\n策略 / 版本 / 运行\n年化收益\n夏"
+  },
+  "recentScan": {
+    "selectors": {
+      "recentPanel": true,
+      "recentTable": true,
+      "rows": 16,
+      "deleteButtons": 16
+    },
+    "headers": [
+      "回测号",
+      "策略",
+      "类型",
+      "状态",
+      "夏普",
+      "完成时间",
+      "操作"
+    ],
+    "opRightInsets": [
+      1,
+      1,
+      1
+    ],
+    "textSample": "Recent Runs\n\n最近运行时间线\n\n按完成时间记录最新回测，保留审计与复核入口。\n\n回测号\n策略\n类型\n状态\n夏普\n完成时间\n操作\nrun_184aad9541bd\nQQQ 网格交易策略 · strat_53315d3dd88b-v4\n临时回测\n已完成\n-0.04\n28/04/2026\n删除\nrun_56baf91c2414\nQQQ 网格交易策略 · strat_53315d3dd88b-v4\n临时回测\n已完成\n-0.04\n28/04/2026\n删除\nrun_9b7d"
+  }
+}

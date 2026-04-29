@@ -1,0 +1,47 @@
+{
+  "url": "http://127.0.0.1:4173/?v=1777450247617#/compositions/composition_630718a64821/allocation-jobs/alloc_job_678f7b154ff3",
+  "maxWidthCheck": {
+    "viewport": 1920,
+    "pageRootWidth": 1600,
+    "expectedMaxWidth": 1600
+  },
+  "mobileWidthCheck": {
+    "viewport": 390,
+    "pageRootWidth": 314
+  },
+  "bannedMatched": false,
+  "matchedTerms": [],
+  "firstRowText": "年化收益率\t10.9%\t\n10.8%\n\t\n10.5%\n\t\n10.2%",
+  "initialViewPlanButtons": 3,
+  "selectedAfterClick": "执行决策 |  | 风险平价 · 排名 3 |  | 可晋升 | 现金缓冲平价 | 已符合风险平价意图 | 有效资产数 3.4",
+  "dialogText": "确认晋升版本 |  | 现金缓冲平价 · 来源：现金下限约束、风险平价候选盘。 |  | 预估摩擦 | 11 个基点 | 流动性压力 | 5.8%",
+  "patchPayloadCount": 1,
+  "patchPayloadPreview": [
+    {
+      "leg_kind": "strategy",
+      "source_ref_id": "strategy_leg::strat_7df2b7091ef4::strat_7df2b7091ef4-v3",
+      "display_name": "标普动量策略-v3",
+      "weight_pct": 28.8
+    },
+    {
+      "leg_kind": "strategy",
+      "source_ref_id": "strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-v4",
+      "display_name": "QQQ 网格交易策略-v4",
+      "weight_pct": 38.5
+    },
+    {
+      "leg_kind": "asset",
+      "source_ref_id": "asset_leg_ef565888b063",
+      "display_name": "美国3个月短期国债",
+      "weight_pct": 26
+    },
+    {
+      "leg_kind": "cash",
+      "source_ref_id": "cash_leg_10d55592c72c",
+      "display_name": "现金安全垫",
+      "weight_pct": 6.7
+    }
+  ],
+  "desktopScreenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\allocation-results-delta-v5-desktop.png",
+  "mobileScreenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\allocation-results-delta-v5-mobile.png"
+}

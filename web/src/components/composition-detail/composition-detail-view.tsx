@@ -15,18 +15,23 @@ import {
   formatCompositionName,
   formatLegProofLabel,
   formatLegDisplayName,
+  formatLegReferenceSummary,
   normalizePercentLike,
 } from '../../lib/compose-display';
+import { LegDetailDrawer } from '../legs/leg-inventory-view';
 import type {
   ApiCompositionCorrelationCell,
   ApiCompositionDetail,
   ApiCompositionKpi,
+  ApiCompositionPreviewLeg,
   ApiCompositionRiskContribution,
   ApiCompositionSourceIntegrity,
   ApiCompositionSourceFreeze,
   ApiCompositionStatus,
+  ApiLegInventoryRow,
 } from '../../types';
 import './composition-detail.css';
+import '../legs/leg-inventory.css';
 
 type CorrelationMode = 'current' | 'stress';
 
@@ -69,7 +74,6 @@ type ExecutionHistoryRow = {
   periodLabel: string;
   annualizedLabel: string;
   sharpeLabel: string;
-  statusLabel: string;
 };
 
 type VersionEvolutionRow = {
@@ -77,6 +81,7 @@ type VersionEvolutionRow = {
   title: string;
   detail: string;
   meta: string;
+  versionAfter: number;
 };
 
 type ExposureDrilldownRow = {
@@ -599,7 +604,7 @@ function buildDetailKpiCards(detail: ApiCompositionDetail): DetailKpiCard[] {
   return [
     {
       key: 'alpha_contribution',
-      label: 'Alpha 贡献',
+      label: 'α贡献',
       value: totalExcessReturn === null ? '待补' : formatPercentCardValue(totalExcessReturn, { signed: true }),
       detail: alphaContributor ? `${getDisplayText(alphaContributor.label)} 贡献 ${formatFixedPercent(alphaContributor.return_contribution_pct ?? 0)}` : '等待归因样本补齐。',
       trendText: totalExcessReturn === null ? '基准待补' : `相对基准 ${formatSignedPercentDelta(totalExcessReturn)}`,
@@ -617,9 +622,9 @@ function buildDetailKpiCards(detail: ApiCompositionDetail): DetailKpiCard[] {
     },
     {
       key: 'beta_exposure',
-      label: 'Beta 暴露',
+      label: 'β暴露',
       value: betaText ?? formatRatioValue(betaNumber),
-      detail: betaNumber === null && !betaText ? '等待运行态 Beta 指标。' : '相对基准的方向性暴露。',
+      detail: betaNumber === null && !betaText ? '等待运行态β指标。' : '相对基准的方向性暴露。',
       trendText: benchmarkVolatility === null || portfolioVolatility === null ? '波动待补' : `波动比 ${formatRatioValue(portfolioVolatility / benchmarkVolatility)}`,
       trendTone: betaNumber !== null && betaNumber <= 0.85 ? 'better' : 'neutral',
       compareItems: [
@@ -727,13 +732,13 @@ function buildAreaPath(values: number[], width: number, height: number, baseline
   return `M ${start.x.toFixed(2)} ${start.y.toFixed(2)} ${line.slice(1)} L ${end.x.toFixed(2)} ${end.y.toFixed(2)} Z`;
 }
 
-function buildDrawdownBandArea(values: number[], width: number, height: number): string {
+function buildDrawdownBandArea(values: number[], width: number, height: number, zeroAxisY: number): string {
   if (!values.length) {
     return '';
   }
   const padding = 18;
-  const baselineY = height - 88;
-  const bandHeight = 58;
+  const baselineY = Math.min(height - 40, Math.max(56, zeroAxisY));
+  const bandHeight = Math.max(18, height - padding - baselineY);
   const maxDepth = Math.max(...values.map((value) => Math.abs(Math.min(value, 0))), 0.01);
   const points = values.map((value, index) => {
     const x = padding + (index / Math.max(values.length - 1, 1)) * (width - padding * 2);
@@ -850,22 +855,52 @@ function looksLikeRunId(value?: string | null): boolean {
   return /(?:^|[_:-])(run|bt|backtest)[_:-]?/i.test(text) || /^(run|bt|backtest)[-_]/i.test(text);
 }
 
+function extractRunId(value?: string | null): string | null {
+  const text = getDisplayText(value, '');
+  if (!text) {
+    return null;
+  }
+  const match = text.match(/\b(?:run|bt|backtest)[_-][A-Za-z0-9][A-Za-z0-9_-]*/i);
+  if (match) {
+    return match[0];
+  }
+  return looksLikeRunId(text) ? text : null;
+}
+
+function getBacktestRunIdFromRecord(source: Record<string, unknown> | undefined): string | null {
+  return (
+    getRecordString(source, ['composition_run_id', 'backtest_run_id', 'source_run_id', 'latest_run_id', 'run_id'])
+    ?? extractRunId(getRecordString(source, ['proof_label', 'source_label', 'evidence_label']))
+  );
+}
+
 function getCompositionVersionLabel(detail: ApiCompositionDetail): string {
-  const heroVersion = getRecordString(detail.hero_summary as unknown as Record<string, unknown>, [
-    'version_label',
-    'current_version_label',
+  const detailVersion = getRecordString(detail as unknown as Record<string, unknown>, [
     'composition_version_label',
+    'current_composition_version_label',
+    'current_version_label',
+  ]);
+  if (detailVersion) {
+    return detailVersion;
+  }
+  const heroVersion = getRecordString(detail.hero_summary as unknown as Record<string, unknown>, [
+    'composition_version_label',
+    'current_composition_version_label',
+    'current_version_label',
+    'version_label',
   ]);
   if (heroVersion) {
     return heroVersion;
   }
-  const sourceVersion = detail.source_evidence
-    .map((item) => getRecordString(item.snapshot, ['composition_version_label', 'composition_version', 'version_label']))
-    .find(Boolean);
-  if (sourceVersion) {
-    return sourceVersion;
-  }
-  return '当前版本';
+  const latestVersion = (detail.audit_trail ?? [])
+    .filter((item) => /^(updated|patched|structure_patch)$/i.test(item.action))
+    .map((item) => {
+      const itemRecord = item as unknown as Record<string, unknown>;
+      return getAuditVersionNumberOrNull(item.version_after ?? itemRecord.versionAfter);
+    })
+    .filter((value): value is number => value !== null)
+    .reduce((maxVersion, value) => Math.max(maxVersion, value), 1);
+  return `当前配置版本 v${latestVersion}`;
 }
 
 function getCurrentRulingLabel(detail: ApiCompositionDetail, driftCount: number): string {
@@ -895,9 +930,9 @@ function getExecutionHistoryRows(detail: ApiCompositionDetail): ExecutionHistory
   const fallbackPeriod = `${Math.max(1, Math.round(getReturnWindowYears(detail)))}Y`;
   detail.source_evidence.forEach((evidence) => {
     const runId =
-      getRecordString(evidence.snapshot, ['composition_run_id', 'backtest_run_id', 'source_run_id', 'run_id'])
+      getBacktestRunIdFromRecord(evidence.snapshot)
       ?? (looksLikeRunId(evidence.freeze_ref_id) ? evidence.freeze_ref_id : null)
-      ?? (looksLikeRunId(getRecordString(evidence.snapshot, ['proof_label'])) ? getRecordString(evidence.snapshot, ['proof_label']) : null);
+      ?? extractRunId(getRecordString(evidence.snapshot, ['proof_label']));
     if (!runId || rows.some((row) => row.runId === runId)) {
       return;
     }
@@ -912,14 +947,13 @@ function getExecutionHistoryRows(detail: ApiCompositionDetail): ExecutionHistory
       periodLabel: periodYears ? `${periodYears}Y` : fallbackPeriod,
       annualizedLabel,
       sharpeLabel,
-      statusLabel: getIntegrityStatusLabel(evidence.drift_status ?? evidence.signature_status),
     });
   });
   detail.normalized_legs.forEach((leg) => {
     const snapshot = leg.config as Record<string, unknown> | undefined;
     const runId =
-      getRecordString(snapshot, ['composition_run_id', 'backtest_run_id', 'source_run_id', 'run_id'])
-      ?? (looksLikeRunId(leg.proof_label) ? leg.proof_label : null);
+      getBacktestRunIdFromRecord(snapshot)
+      ?? extractRunId(leg.proof_label);
     if (!runId || rows.some((row) => row.runId === runId)) {
       return;
     }
@@ -931,7 +965,6 @@ function getExecutionHistoryRows(detail: ApiCompositionDetail): ExecutionHistory
       periodLabel: fallbackPeriod,
       annualizedLabel,
       sharpeLabel,
-      statusLabel: getLegTypeLabel(leg.leg_kind),
     });
   });
   return rows.slice(0, 3);
@@ -942,22 +975,312 @@ function getCompositionRunHashPath(compositionId: string, runId: string, tab?: '
   return tab ? `#${base}?tab=${tab}` : `#${base}`;
 }
 
-function getVersionEvolutionRows(detail: ApiCompositionDetail): VersionEvolutionRow[] {
-  const auditRows = (detail.audit_trail ?? []).slice(0, 3).map((item) => ({
-    key: item.id,
-    title: getAuditActionLabel(item.action),
-    detail: getAuditSummaryText(item.summary),
-    meta: `${formatShortDate(item.at)} · ${item.hash_after ? `冻结哈希 ${getEvidenceHashLabel(item.hash_after)}` : getAuditActorLabel(item.actor)}`,
-  }));
-  if (auditRows.length) {
-    return auditRows;
+function getPrimaryBacktestRunId(detail: ApiCompositionDetail, executionHistoryRows: ExecutionHistoryRow[]): string | null {
+  const strategyLegRuns = detail.normalized_legs
+    .filter((leg) => String(leg.leg_kind ?? '').toLowerCase() === 'strategy')
+    .map((leg) => ({
+      ordering: Number.isFinite(Number(leg.ordering)) ? Number(leg.ordering) : 0,
+      runId: getBacktestRunIdFromRecord(leg.config as Record<string, unknown> | undefined),
+      weightPct: Number.isFinite(Number(leg.weight_pct)) ? Number(leg.weight_pct) : 0,
+    }))
+    .filter((item): item is { ordering: number; runId: string; weightPct: number } => Boolean(item.runId))
+    .sort((left, right) => right.weightPct - left.weightPct || left.ordering - right.ordering);
+
+  return strategyLegRuns[0]?.runId ?? executionHistoryRows[0]?.runId ?? null;
+}
+
+function getCompositionRevisionNumber(detail: ApiCompositionDetail): number {
+  const revisionCandidates = detail.source_evidence
+    .flatMap((item) => [
+      getRecordNumber(item.snapshot, ['revision', 'composition_revision', 'version_revision']),
+      getRecordNumber(item.snapshot, ['freeze_generation']),
+    ])
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  return Math.max(1, Math.round(Math.max(...revisionCandidates, 1)));
+}
+
+function getWeightChangeSummary(detail: ApiCompositionDetail): string {
+  return detail.normalized_legs
+    .slice()
+    .sort((left, right) => right.weight_pct - left.weight_pct || left.ordering - right.ordering)
+    .map((leg) => `${formatLegDisplayName(leg)} ${formatCompactPercent(leg.weight_pct, 0)}`)
+    .join(' / ');
+}
+
+function getVersionChangeSummary(
+  detail: ApiCompositionDetail,
+  item?: NonNullable<ApiCompositionDetail['audit_trail']>[number],
+): string {
+  const explicitSummary = cleanDisplayText(item?.change_summary);
+  const reason = cleanDisplayText(item?.reason);
+  if (explicitSummary || reason) {
+    return [
+      explicitSummary ? `参数变化：${explicitSummary}` : null,
+      reason ? `升级理由：${reason}` : null,
+    ].filter(Boolean).join('；');
   }
-  return detail.source_evidence.slice(0, 3).map((item) => ({
-    key: item.id,
-    title: getRecordString(item.snapshot, ['version_label', 'composition_version_label']) ?? '来源冻结',
-    detail: getEvidenceDetail(item),
-    meta: `${formatShortDate(item.captured_at)} · 冻结哈希 ${getEvidenceHashLabel(item.freeze_hash)}`,
-  }));
+  const action = String(item?.action ?? '').toLowerCase();
+  const weightSummary = getWeightChangeSummary(detail);
+  const rebalanceLabel = getCadenceLabel(detail.rebalance_frequency);
+  const costLabel = `${detail.maintenance_cost_summary.total_estimated_bps.toFixed(0)} bps`;
+  if (action === 'created') {
+    return `初始配置：${weightSummary}；再平衡频次：${rebalanceLabel}；成本规则：${costLabel}`;
+  }
+  if (/^(updated|patched|structure_patch)$/i.test(action)) {
+    return `权重变化：${weightSummary}；再平衡频次：${rebalanceLabel}；成本规则：${costLabel}`;
+  }
+  return `配置复核：${weightSummary}；再平衡频次：${rebalanceLabel}；维护成本：${costLabel}`;
+}
+
+function getAuditVersionNumber(value: unknown, fallback: number): number {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.max(1, Math.round(value));
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return Math.max(1, Math.round(parsed));
+    }
+  }
+  return fallback;
+}
+
+function getAuditVersionNumberOrNull(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.max(1, Math.round(value));
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.max(1, Math.round(parsed)) : null;
+  }
+  return null;
+}
+
+function getVersionEvolutionRows(detail: ApiCompositionDetail): VersionEvolutionRow[] {
+  const versionEvents = (detail.audit_trail ?? [])
+    .filter((item) => /^(updated|patched|structure_patch)$/i.test(item.action))
+    .map((item) => {
+      const itemRecord = item as unknown as Record<string, unknown>;
+      const toVersion = getAuditVersionNumberOrNull(item.version_after ?? itemRecord.versionAfter);
+      const fromVersion = getAuditVersionNumberOrNull(item.version_before ?? itemRecord.versionBefore);
+      return toVersion !== null && fromVersion !== null ? { fromVersion, item, toVersion } : null;
+    })
+    .filter((item): item is {
+      fromVersion: number;
+      item: NonNullable<ApiCompositionDetail['audit_trail']>[number];
+      toVersion: number;
+    } => item !== null)
+    .sort((left, right) => new Date(left.item.at).getTime() - new Date(right.item.at).getTime())
+    .slice(-4);
+
+  if (versionEvents.length) {
+    return versionEvents
+      .map(({ fromVersion, item, toVersion }) => {
+        return {
+          key: item.id,
+          title: `v${fromVersion} -> v${toVersion}`,
+          detail: getVersionChangeSummary(detail, item),
+          meta: `变更后 v${toVersion} · ${formatShortDate(item.at)}`,
+          versionAfter: toVersion,
+        };
+      })
+      .sort((left, right) => right.versionAfter - left.versionAfter);
+  }
+
+  const capturedAt = detail.source_evidence[0]?.captured_at ?? detail.updated_at;
+  return [
+    {
+      key: `${detail.id}-current-version`,
+      title: '当前配置版本 v1',
+      detail: '暂无新的参数变化记录；只有保存时配置发生变化并填写升级理由，才会写入版本记录。',
+      meta: `变更后 v1 · ${formatShortDate(capturedAt)}`,
+      versionAfter: 1,
+    },
+  ];
+}
+
+function getRecordObject(source: unknown): Record<string, unknown> {
+  return source && typeof source === 'object' && !Array.isArray(source) ? (source as Record<string, unknown>) : {};
+}
+
+function getStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : [];
+}
+
+function getReferenceCountFromSummary(value?: string | null): number {
+  const text = cleanDisplayText(value) ?? '';
+  if (/not used|尚未/i.test(text)) {
+    return 0;
+  }
+  const match = text.match(/(\d+)/);
+  return match ? Number(match[1]) : 1;
+}
+
+function getSourceIntegrityForLeg(
+  detail: ApiCompositionDetail,
+  leg: ApiCompositionPreviewLeg,
+  evidence?: ApiCompositionSourceFreeze | null,
+): ApiCompositionSourceIntegrity {
+  const config = getRecordObject(leg.config);
+  const configIntegrity = getRecordObject(config.source_integrity);
+  const topLevel = detail.source_integrity?.find((item) => item.leg_id === leg.id);
+  return {
+    leg_id: leg.id,
+    display_name:
+      topLevel?.display_name
+      ?? getRecordString(configIntegrity, ['display_name'])
+      ?? getDisplayText(leg.display_name),
+    source_ref_id:
+      topLevel?.source_ref_id
+      ?? getRecordString(configIntegrity, ['source_ref_id'])
+      ?? evidence?.freeze_ref_id
+      ?? leg.source_ref_id,
+    freeze_hash:
+      topLevel?.freeze_hash
+      ?? getRecordString(configIntegrity, ['freeze_hash'])
+      ?? evidence?.freeze_hash
+      ?? null,
+    signature_status:
+      topLevel?.signature_status
+      ?? getRecordString(configIntegrity, ['signature_status'])
+      ?? evidence?.signature_status
+      ?? 'verified',
+    drift_status:
+      topLevel?.drift_status
+      ?? getRecordString(configIntegrity, ['drift_status'])
+      ?? evidence?.drift_status
+      ?? 'current',
+    current_ref_id:
+      topLevel?.current_ref_id
+      ?? getRecordString(configIntegrity, ['current_ref_id'])
+      ?? evidence?.current_ref_id
+      ?? leg.source_ref_id,
+    checked_at:
+      topLevel?.checked_at
+      ?? getRecordString(configIntegrity, ['checked_at'])
+      ?? evidence?.captured_at
+      ?? null,
+    alerts:
+      topLevel?.alerts?.length
+        ? topLevel.alerts
+        : getStringArray(configIntegrity.alerts).length
+          ? getStringArray(configIntegrity.alerts)
+          : evidence?.alerts ?? [],
+  };
+}
+
+function buildLegInventoryRowFromComposition(
+  detail: ApiCompositionDetail,
+  leg: ApiCompositionPreviewLeg,
+): ApiLegInventoryRow {
+  const config = getRecordObject(leg.config);
+  const summary = getRecordObject(config.summary);
+  const metrics = getRecordObject(config.metrics);
+  const evidence = detail.source_evidence.find((item) => item.leg_id === leg.id) ?? null;
+  const evidenceSnapshot = getRecordObject(evidence?.snapshot);
+  const risk = detail.risk_contribution_preview.find((item) => item.leg_id === leg.id);
+  const sourceIntegrity = getSourceIntegrityForLeg(detail, leg, evidence);
+  const assetKind =
+    getRecordString(config, ['asset_kind'])
+    ?? (leg.attribute_tags.some((tag) => /bond|fixed/i.test(tag)) ? 'bond_fixed_income' : leg.leg_kind);
+  const drawerConfig = {
+    ...config,
+    asset_kind: assetKind,
+    source_snapshot_id:
+      getRecordString(config, ['source_snapshot_id', 'snapshot_ref'])
+      ?? getRecordString(evidenceSnapshot, ['source_snapshot_id', 'snapshot_ref', 'id'])
+      ?? undefined,
+    source_integrity: sourceIntegrity,
+    metrics: {
+      ...metrics,
+      annualized_return:
+        getRecordNumber(metrics, ['annualized_return', 'cagr', 'annualized_return_pct'])
+        ?? getRecordNumber(config, ['annualized_return', 'cagr', 'annualized_return_pct']),
+      max_drawdown:
+        getRecordNumber(metrics, ['max_drawdown', 'max_drawdown_pct'])
+        ?? getRecordNumber(config, ['max_drawdown', 'max_drawdown_pct']),
+      sharpe:
+        getRecordNumber(metrics, ['sharpe', 'oos_sharpe', 'out_of_sample_sharpe'])
+        ?? getRecordNumber(config, ['sharpe', 'oos_sharpe', 'out_of_sample_sharpe']),
+      volatility_pct: risk?.volatility_pct,
+      annualized_volatility_pct: risk?.volatility_pct,
+      weight_pct: leg.weight_pct,
+    },
+    summary: {
+      ...summary,
+      ...evidenceSnapshot,
+      notes: getNarrativeText(leg.reference_summary, '该腿随组合配置冻结，用于复核来源、权重和版本口径。'),
+      weight_pct: leg.weight_pct,
+      target_weight_pct: leg.weight_pct,
+      rebalance_frequency: detail.rebalance_frequency,
+      version_label: leg.version_label,
+      updated_at: detail.updated_at,
+    },
+  };
+  const hasNewVersion = !['current', 'verified'].includes(String(sourceIntegrity.drift_status ?? '').toLowerCase());
+  return {
+    id: leg.id,
+    leg_type: leg.leg_kind,
+    name: formatLegDisplayName(leg),
+    version_label: leg.version_label,
+    proof_label: leg.proof_label,
+    reference_count: getReferenceCountFromSummary(leg.reference_summary),
+    reference_summary: formatLegReferenceSummary(leg.reference_summary),
+    status: leg.status,
+    status_label: leg.status_label,
+    has_new_version: hasNewVersion,
+    is_orphan: false,
+    attribute_tags: leg.attribute_tags,
+    allowed_actions: [],
+    source_ref_id: leg.source_ref_id,
+    source_ref_type: leg.source_ref_type,
+    source_integrity: sourceIntegrity,
+    freeze_hash: sourceIntegrity.freeze_hash,
+    signature_status: sourceIntegrity.signature_status,
+    drift_status: sourceIntegrity.drift_status,
+    current_ref_id: sourceIntegrity.current_ref_id,
+    alerts: sourceIntegrity.alerts,
+    config: drawerConfig,
+  };
+}
+
+function isMatchingLegSelection(row: ApiLegInventoryRow, selectedLegId: string, detail: ApiCompositionDetail): boolean {
+  if (row.id === selectedLegId || row.source_ref_id === selectedLegId || row.current_ref_id === selectedLegId) {
+    return true;
+  }
+  const evidence = detail.source_evidence.find((item) => (
+    item.leg_id === selectedLegId
+    || item.freeze_ref_id === selectedLegId
+    || item.current_ref_id === selectedLegId
+  ));
+  if (!evidence) {
+    return false;
+  }
+  return [evidence.leg_id, evidence.freeze_ref_id, evidence.current_ref_id].some(
+    (value) => Boolean(value && (value === row.id || value === row.source_ref_id || value === row.current_ref_id)),
+  );
+}
+
+function navigateToCompositionLegSource(row: ApiLegInventoryRow): void {
+  const config = getRecordObject(row.config);
+  const snapshotId = getRecordString(config, ['source_snapshot_id', 'snapshot_ref', 'id']);
+  if (!snapshotId) {
+    return;
+  }
+  const tab = String(config.asset_kind ?? '').toLowerCase().includes('bond') ? 'tab=bond&' : '';
+  navigateTo(`/snapshots?${tab}source_snapshot_id=${encodeURIComponent(snapshotId)}`);
+}
+
+async function ignoreCompositionLegArchive(_row?: ApiLegInventoryRow): Promise<void> {
+  return undefined;
+}
+
+function ignoreCompositionLegMutation(_row?: ApiLegInventoryRow): void {
+  return undefined;
+}
+
+function ignoreCompositionLegVersionCopy(_source?: ApiLegInventoryRow, _target?: ApiLegInventoryRow): void {
+  return undefined;
 }
 
 function getExposureDrilldownRows(detail: ApiCompositionDetail): ExposureDrilldownRow[] {
@@ -968,7 +1291,7 @@ function getExposureDrilldownRows(detail: ApiCompositionDetail): ExposureDrilldo
         key: leg.id,
         source: formatLegDisplayName(leg),
         layer: '代理暴露',
-        detail: getDisplayText(leg.reference_summary, '按策略回测持仓或基准映射穿透。'),
+        detail: formatLegReferenceSummary(leg.reference_summary) || '按策略回测持仓或基准映射穿透。',
         tone: 'info',
       };
     }
@@ -977,18 +1300,27 @@ function getExposureDrilldownRows(detail: ApiCompositionDetail): ExposureDrilldo
         key: leg.id,
         source: formatLegDisplayName(leg),
         layer: '现金规则',
-        detail: getDisplayText(leg.reference_summary, '现金缓冲与成本吸收规则。'),
+        detail: formatLegReferenceSummary(leg.reference_summary) || '现金缓冲与成本吸收规则。',
         tone: 'good',
       };
     }
     return {
       key: leg.id,
       source: formatLegDisplayName(leg),
-      layer: leg.attribute_tags?.some((tag) => /bond|fixed/i.test(tag)) ? '真实来源' : '真实持仓',
-      detail: getDisplayText(leg.reference_summary, '运行态资产来源已冻结。'),
+      layer: '物理持仓',
+      detail: formatLegReferenceSummary(leg.reference_summary) || '运行态资产来源已冻结。',
       tone: 'good',
     };
   });
+}
+
+function getRiskContributionsInLegOrder(detail: ApiCompositionDetail): ApiCompositionRiskContribution[] {
+  const byLegId = new Map(detail.risk_contribution_preview.map((item) => [item.leg_id, item]));
+  const ordered = detail.normalized_legs
+    .map((leg) => byLegId.get(leg.id))
+    .filter((item): item is ApiCompositionRiskContribution => Boolean(item));
+  const remaining = detail.risk_contribution_preview.filter((item) => !ordered.includes(item));
+  return [...ordered, ...remaining].slice(0, 4);
 }
 
 function buildMatrixKey(left: string, right: string): string {
@@ -1060,7 +1392,7 @@ function getIntegrityStatusLabel(value?: string | null): string {
     case 'verified':
     case 'valid':
     case 'signed':
-      return '签名有效';
+      return '指纹有效';
     case 'current':
       return '版本一致';
     case 'drifted':
@@ -1121,7 +1453,7 @@ function getAuditSummaryText(value?: string | null): string {
   }
   const sourceFreezeMatch = text.match(/^Captured\s+(\d+)\s+source freeze signatures\.?$/i);
   if (sourceFreezeMatch) {
-    return `已捕获 ${sourceFreezeMatch[1]} 个来源冻结签名。`;
+    return `已捕获 ${sourceFreezeMatch[1]} 个配置指纹。`;
   }
   const rebalanceMatch = text.match(/^Simulated\s+(\d+)\s+rebalance events without mutating frozen sources\.?$/i);
   if (rebalanceMatch) {
@@ -1130,8 +1462,31 @@ function getAuditSummaryText(value?: string | null): string {
   if (/^Composition record created with normalized legs and cost policy\.?$/i.test(text)) {
     return '组合记录已创建，腿结构与成本规则已归一化。';
   }
+  if (/^Composition structure, weights, benchmark, or cost policy was patched and revalidated\.?$/i.test(text)) {
+    return '配置、权重、基准与成本规则已复核。';
+  }
   if (/^Composition status is ACTIVE; drift warnings remain advisory\.?$/i.test(text)) {
     return '组合状态为运行中；漂移提示仅作提醒。';
+  }
+  const snapshotRefreshMatch = text.match(
+    /^Checked bond snapshot refresh job\s+(.+?)\s+against frozen source signatures;\s+no saved composition source evidence was rewritten\.?$/i,
+  );
+  if (snapshotRefreshMatch) {
+    return `已复核债券快照刷新任务 ${snapshotRefreshMatch[1]}，冻结证据未改写。`;
+  }
+  return text;
+}
+
+function getSourceAlertText(value?: string | null): string {
+  const text = cleanDisplayText(value);
+  if (!text) {
+    return '冻结口径已验证。';
+  }
+  if (/^Current source version differs from the frozen source signature\.?$/i.test(text)) {
+    return '当前版本偏离冻结指纹。';
+  }
+  if (/来源版本已漂移，?建议重新检查。?/i.test(text)) {
+    return '当前版本偏离冻结指纹。';
   }
   return text;
 }
@@ -1424,7 +1779,7 @@ function getScenarioCases(detail: ApiCompositionDetail): Array<{
         expectedDrawdownPct,
         body: getNarrativeText(
           typeof (record as { body?: unknown }).body === 'string' ? (record as { body: string }).body : null,
-          '基于当前组合收益流、相关性与现金缓冲生成的压力复核。',
+          '基于当前权益曲线、相关性与现金缓冲生成的压力复核。',
         ),
         tag: getDisplayText(
           typeof (record as { tag?: unknown }).tag === 'string' ? (record as { tag: string }).tag : null,
@@ -1701,7 +2056,7 @@ function ApprovedCompositionDetailPreview(): JSX.Element {
           <section className="panel composition-detail-panel composition-detail-approved-performance">
             <div className="panel-header composition-detail-panel__header composition-detail-approved-performance-header">
               <div>
-                <h2>累计收益流</h2>
+                <h2>权益曲线</h2>
                 <p className="composition-detail-panel__copy">
                   在同一视图核对组合收益、基准偏离、回撤区间与再平衡影响，评估组合表现的稳定性。
                 </p>
@@ -1765,7 +2120,7 @@ function ApprovedCompositionDetailPreview(): JSX.Element {
             <article className="composition-detail-approved-mini-chart">
               <div className="composition-detail-approved-mini-chart-meta">
                 <strong>超额收益</strong>
-                <span>组合 - 60/40 基准。正区间越稳，说明这套腿结构在该阶段贡献了真实超额收益（Alpha）。</span>
+                <span>组合 - 60/40 基准。正区间越稳，说明这套腿结构在该阶段贡献了真实超额收益（α）。</span>
               </div>
               <svg viewBox="0 0 1000 60" preserveAspectRatio="xMidYMid meet">
                 <line x1="0" y1="30" x2="1000" y2="30" stroke="rgba(148, 163, 184, 0.42)" strokeDasharray="4 6" />
@@ -1967,7 +2322,7 @@ function ApprovedCompositionDetailPreview(): JSX.Element {
                   </div>
                   <div className="composition-detail-approved-source-line">
                     <span>{source.ref}</span>
-                    <span className="composition-detail-shield">盾牌哈希 {source.hash}</span>
+                    <span className="composition-detail-shield">配置指纹 {source.hash}</span>
                   </div>
                   <span className="composition-detail-approved-source-detail">{source.detail}</span>
                 </button>
@@ -1999,25 +2354,6 @@ function ApprovedCompositionDetailPreview(): JSX.Element {
             </article>
           </section>
 
-          <section className="panel composition-detail-panel composition-detail-rail-panel">
-            <div className="panel-header composition-detail-panel__header">
-              <div>
-                <h2>深入分析入口</h2>
-              </div>
-            </div>
-            <div className="composition-detail-action-list">
-              <button className="ghost-button" type="button">策略子视图</button>
-              <button className="ghost-button" type="button">运行子视图</button>
-              <button className="ghost-button" type="button">优化子视图</button>
-              <button
-                className="primary-button"
-                onClick={() => navigateTo('/compositions/workbench?composition_id=detail')}
-                type="button"
-              >
-                编辑组合
-              </button>
-            </div>
-          </section>
         </aside>
       </div>
 
@@ -2043,7 +2379,7 @@ function ApprovedCompositionDetailPreview(): JSX.Element {
               </button>
             </div>
             <div className="composition-detail-drawer__summary">
-              <span className="composition-detail-shield">盾牌哈希 {selectedSource.hash}</span>
+              <span className="composition-detail-shield">配置指纹 {selectedSource.hash}</span>
               <span>{selectedSource.status}</span>
               <span>{selectedSource.id}</span>
             </div>
@@ -2066,6 +2402,7 @@ export function CompositionDetailView({
 }: CompositionDetailViewProps): JSX.Element {
   const [correlationMode, setCorrelationMode] = useState<CorrelationMode>('current');
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null);
+  const [selectedLegId, setSelectedLegId] = useState<string | null>(null);
   const [hoveredReturnIndex, setHoveredReturnIndex] = useState<number | null>(null);
 
   if (approvedPreview) {
@@ -2074,6 +2411,10 @@ export function CompositionDetailView({
 
   const selectedEvidence = detail
     ? detail.source_evidence.find((item) => item.id === selectedEvidenceId) ?? null
+    : null;
+  const legDetailRows = detail ? detail.normalized_legs.map((leg) => buildLegInventoryRowFromComposition(detail, leg)) : [];
+  const selectedLegRow = selectedLegId
+    ? legDetailRows.find((row) => detail && isMatchingLegSelection(row, selectedLegId, detail)) ?? null
     : null;
   const approvedChartWidth = 1000;
   const approvedChartHeight = 320;
@@ -2090,6 +2431,21 @@ export function CompositionDetailView({
   }, [cumulativeSeries]);
   const cumulativeMin = Math.min(...[0, ...cumulativeSeries, ...benchmarkSeries, ...costDragSeries]);
   const cumulativeMax = Math.max(...[0, ...cumulativeSeries, ...benchmarkSeries, ...costDragSeries, 0.01]);
+  const chartZeroAxisY = Math.min(
+    approvedChartHeight - 40,
+    Math.max(
+      40,
+      getPoint(
+        0,
+        Math.max(cumulativeSeries.length, 1),
+        0,
+        cumulativeMin,
+        cumulativeMax,
+        approvedChartWidth,
+        approvedChartHeight,
+      ).y,
+    ),
+  );
   const cumulativePath = buildLinePath(
     cumulativeSeries,
     approvedChartWidth,
@@ -2111,7 +2467,7 @@ export function CompositionDetailView({
     cumulativeMin,
     cumulativeMax,
   );
-  const drawdownArea = buildDrawdownBandArea(drawdownSeries, approvedChartWidth, approvedChartHeight);
+  const drawdownArea = buildDrawdownBandArea(drawdownSeries, approvedChartWidth, approvedChartHeight, chartZeroAxisY);
   const drawdownBandArea = drawdownArea;
   const versionChartMarkers =
     detail
@@ -2152,6 +2508,7 @@ export function CompositionDetailView({
   const hoveredSpreadPoint =
     detail && safeHoveredReturnIndex !== null ? detail.spread_series[safeHoveredReturnIndex] : null;
   const hoveredCostDragValue = safeHoveredReturnIndex !== null ? costDragSeries[safeHoveredReturnIndex] : null;
+  const hoveredReturnLabel = safeHoveredReturnIndex !== null ? `收益节点 ${safeHoveredReturnIndex + 1}` : '收益节点';
   const tooltipWidth = 180;
   const tooltipHeight = 96;
   const tooltipX = hoveredChartPoint
@@ -2187,19 +2544,13 @@ export function CompositionDetailView({
   const cadenceDays = getIntervalDays(detail?.rebalance_frequency);
   const rebalanceProgress = Math.min(100, Math.round((elapsedDays / cadenceDays) * 100));
   const rebalanceRemaining = Math.max(0, cadenceDays - elapsedDays);
-  const snapshotPath = detail?.source_evidence.some((item) =>
-    String(item.freeze_ref_id ?? '').toLowerCase().includes('bond'),
-  )
-    ? '/snapshots?tab=bond'
-    : '/snapshots';
-
   if (loading) {
     return (
       <div className="composition-detail-page stack" data-page-root="composition-detail" data-route-root="compositions">
         <section className="page-heading">
           <p className="page-heading__eyebrow">组合详情</p>
           <h1>加载组合详情中…</h1>
-          <p>正在拉取收益流、风险归因与来源冻结证据。</p>
+          <p>正在拉取权益曲线、风险归因与来源冻结证据。</p>
         </section>
       </div>
     );
@@ -2233,10 +2584,7 @@ export function CompositionDetailView({
   );
   const legWeightById = new Map(detail.normalized_legs.map((leg) => [leg.id, leg.weight_pct]));
   const legTypeLabelById = new Map(detail.normalized_legs.map((leg) => [leg.id, getLegTypeLabel(leg.leg_kind)]));
-  const sortedRiskContributions = sortByWeightDesc(
-    detail.risk_contribution_preview,
-    (item) => item.weight_pct,
-  );
+  const alignedRiskContributions = getRiskContributionsInLegOrder(detail);
   const sortedSourceEvidence = sortByWeightDesc(
     detail.source_evidence,
     (item) => getEvidenceWeightPct(item, legWeightById),
@@ -2264,6 +2612,10 @@ export function CompositionDetailView({
   const compositionVersionLabel = getCompositionVersionLabel(detail);
   const currentRulingLabel = getCurrentRulingLabel(detail, driftCount);
   const executionHistoryRows = getExecutionHistoryRows(detail);
+  const primaryBacktestRunId = getPrimaryBacktestRunId(detail, executionHistoryRows);
+  const primaryBacktestPath = primaryBacktestRunId
+    ? `/compositions/${encodeURIComponent(detail.id)}/backtest-runs/${encodeURIComponent(primaryBacktestRunId)}`
+    : `/compositions/${encodeURIComponent(detail.id)}/backtest-runs/new`;
   const versionEvolutionRows = getVersionEvolutionRows(detail);
   const exposureDrilldownRows = getExposureDrilldownRows(detail);
   const benchmarkLabel = formatBenchmarkLabel(
@@ -2296,21 +2648,21 @@ export function CompositionDetailView({
         </div>
         <div className="composition-detail-hero__actions">
           <button
-            className="ghost-button"
-            onClick={() => navigateTo(`/compositions/workbench?copy_from=${encodeURIComponent(detail.id)}`)}
-            type="button"
-          >
-            另存为新版本
-          </button>
-          <button
-            className="ghost-button"
+            className="primary-button"
             onClick={() => navigateTo(`/compositions/workbench?composition_id=${encodeURIComponent(detail.id)}&intent=rebalance`)}
             type="button"
           >
-            运行再平衡
+            修改组合
           </button>
           <button
-            className="primary-button"
+            className="ghost-button"
+            onClick={() => navigateTo(primaryBacktestPath)}
+            type="button"
+          >
+            查看回测
+          </button>
+          <button
+            className="ghost-button"
             onClick={() => navigateTo(`/compositions/${encodeURIComponent(detail.id)}/allocation-lab`)}
             type="button"
           >
@@ -2372,9 +2724,9 @@ export function CompositionDetailView({
           <section className="panel composition-detail-panel composition-detail-approved-performance">
             <div className="panel-header composition-detail-panel__header composition-detail-approved-performance-header">
               <div>
-                <h2>收益流、版本节点与当前裁决</h2>
+                <h2>权益曲线</h2>
                 <p className="composition-detail-panel__copy">
-                  在同一视图核对组合净值、基准、成本拖累、回撤带和版本节点，避免首屏只看到单条浅色曲线。
+                  净值、基准、成本拖累与回撤带同屏校验，用于判断当前持有结论。
                 </p>
               </div>
               <div className="composition-detail-approved-panel-actions">
@@ -2383,7 +2735,7 @@ export function CompositionDetailView({
             </div>
             <div className="composition-detail-chart-frame composition-detail-approved-chart-frame">
               <svg
-                aria-label="组合收益流"
+                aria-label="权益曲线"
                 className="composition-detail-approved-chart"
                 data-ui="composition-return-chart"
                 onMouseLeave={() => setHoveredReturnIndex(null)}
@@ -2393,7 +2745,7 @@ export function CompositionDetailView({
                 preserveAspectRatio="xMidYMid meet"
                 viewBox="0 0 1000 320"
               >
-                <line className="composition-detail-grid-line" x1="24" x2="976" y1="280" y2="280" />
+                <line className="composition-detail-grid-line" x1="24" x2="976" y1={chartZeroAxisY} y2={chartZeroAxisY} />
                 {drawdownBandArea ? (
                   <path className="composition-detail-drawdown-area" d={drawdownBandArea} data-ui="composition-drawdown-band" />
                 ) : null}
@@ -2406,13 +2758,13 @@ export function CompositionDetailView({
                     data-ui="composition-version-marker"
                     key={marker.key}
                   >
-                    <title>{marker.label}</title>
+                    <title>再平衡节点</title>
                     <line
                       className="composition-detail-rebalance-marker__line"
                       x1={marker.point.x}
                       x2={marker.point.x}
                       y1="34"
-                      y2="280"
+                      y2={chartZeroAxisY}
                     />
                     <circle
                       className="composition-detail-rebalance-marker__dot"
@@ -2420,9 +2772,6 @@ export function CompositionDetailView({
                       cy={marker.point.y}
                       r="5"
                     />
-                    <text className="composition-detail-version-marker__label" x={marker.point.x + 8} y={Math.max(42, marker.point.y - 10)}>
-                      {marker.label}
-                    </text>
                   </g>
                 ))}
                 {hoveredChartPoint && hoveredReturnPoint ? (
@@ -2432,12 +2781,12 @@ export function CompositionDetailView({
                       x1={hoveredChartPoint.x}
                       x2={hoveredChartPoint.x}
                       y1="24"
-                      y2="280"
+                      y2={chartZeroAxisY}
                     />
                     <circle className="composition-detail-hover-dot" cx={hoveredChartPoint.x} cy={hoveredChartPoint.y} r="5" />
                     <g transform={`translate(${tooltipX.toFixed(2)} ${tooltipY.toFixed(2)})`}>
                       <rect width={tooltipWidth} height={tooltipHeight} rx="12" />
-                      <text x="12" y="21">{hoveredReturnPoint.label || hoveredReturnPoint.date || '收益点'}</text>
+                      <text x="12" y="21">{hoveredReturnLabel}</text>
                       <text x="12" y="40">组合 {formatChartPercentValue(hoveredReturnPoint.cumulative_return_pct)}</text>
                       <text x="12" y="56">基准 {formatChartPercentValue(hoveredBenchmarkPoint?.cumulative_return_pct)}</text>
                       <text x="12" y="72">成本后 {formatChartPercentValue(hoveredCostDragValue)}</text>
@@ -2456,20 +2805,40 @@ export function CompositionDetailView({
             </div>
             <article className="composition-detail-approved-rebalance-card">
               <strong>当前裁决：{currentRulingLabel}</strong>
-              <span>点位信息用于复核版本变化、当次调仓损耗、现金缓冲吸收比例与仓位变化。</span>
+              <span>节点信息用于复核版本变化、调仓损耗、现金缓冲吸收比例与仓位变化。</span>
             </article>
           </section>
 
           <div className="composition-detail-approved-analysis-grid">
+            <article className="panel composition-detail-panel composition-detail-exposure-drilldown" data-ui="composition-exposure-drilldown">
+              <div className="panel-header composition-detail-panel__header">
+                <div>
+                  <h2>敞口穿透分析</h2>
+                  <p className="composition-detail-panel__copy">物理持仓、代理暴露与现金规则分层展示。</p>
+                </div>
+              </div>
+              <div className="composition-detail-exposure-list">
+                {exposureDrilldownRows.map((item) => (
+                  <article className="composition-detail-exposure-row" key={item.key}>
+                    <strong>{item.source}</strong>
+                    <span className={`status-chip status-chip--${item.tone === 'warn' ? 'warning' : item.tone === 'good' ? 'success' : 'soft'}`}>
+                      {item.layer}
+                    </span>
+                    <p>{item.detail}</p>
+                  </article>
+                ))}
+              </div>
+            </article>
+
             <section className="panel composition-detail-panel" data-ui="risk-contribution-explanation">
               <div className="panel-header composition-detail-panel__header">
                 <div>
-                  <h2>风险与归因</h2>
-                  <p className="composition-detail-panel__copy">基于对齐收益流、协方差和债券久期/凸性预留字段解释风险预算。</p>
+                  <h2>风险归因</h2>
+                  <p className="composition-detail-panel__copy">用收益贡献、协方差和久期暴露解释风险预算。</p>
                 </div>
               </div>
               <div className="composition-detail-approved-snapshot-list">
-                {sortedRiskContributions.map((item) => (
+                {alignedRiskContributions.map((item) => (
                   <article className="composition-detail-approved-snapshot-card" key={item.leg_id}>
                     <div className="composition-detail-approved-snapshot-head">
                       <strong>{legDisplayNameById.get(item.leg_id) ?? getDisplayText(item.label)}</strong>
@@ -2487,12 +2856,36 @@ export function CompositionDetailView({
                 ))}
               </div>
             </section>
+          </div>
+
+          <section className="composition-detail-approved-maintenance-grid" data-ui="composition-maintenance-grid">
+            <article className="panel composition-detail-panel composition-detail-version-evolution" data-ui="composition-version-evolution">
+              <div className="panel-header composition-detail-panel__header">
+                <div>
+                  <h2>配置版本记录</h2>
+                  <p className="composition-detail-panel__copy">按变更后版本倒序展示，卡片内保留权重、频次与成本口径。</p>
+                </div>
+              </div>
+              <div className="composition-detail-compact-timeline">
+                {versionEvolutionRows.map((item) => (
+                  <article
+                    className="composition-detail-compact-timeline__item"
+                    data-version-after={item.versionAfter}
+                    key={item.key}
+                  >
+                    <strong>{item.title}</strong>
+                    <span>{item.detail}</span>
+                    <small>{item.meta}</small>
+                  </article>
+                ))}
+              </div>
+            </article>
 
             <section className="panel composition-detail-panel">
               <div className="panel-header composition-detail-panel__header">
                 <div>
                   <h2>相关性矩阵</h2>
-                  <p className="composition-detail-panel__copy">常态相关性用于识别日常分散度，压力相关性用于观察极端阶段的同步风险。</p>
+                  <p className="composition-detail-panel__copy">常态相关性看分散度，压力相关性看同步风险。</p>
                 </div>
               </div>
               <div className="composition-detail-correlation-toolbar">
@@ -2549,59 +2942,19 @@ export function CompositionDetailView({
                 ])}
               </div>
             </section>
-          </div>
-
-          <section className="composition-detail-approved-maintenance-grid" data-ui="composition-maintenance-grid">
-            <article className="panel composition-detail-panel composition-detail-version-evolution" data-ui="composition-version-evolution">
-              <div className="panel-header composition-detail-panel__header">
-                <div>
-                  <h2>版本演化史</h2>
-                  <p className="composition-detail-panel__copy">每次结构变化都写清楚来自手动微调、实验室晋升还是来源复核。</p>
-                </div>
-              </div>
-              <div className="composition-detail-compact-timeline">
-                {versionEvolutionRows.map((item) => (
-                  <article className="composition-detail-compact-timeline__item" key={item.key}>
-                    <strong>{item.title}</strong>
-                    <span>{item.detail}</span>
-                    <small>{item.meta}</small>
-                  </article>
-                ))}
-              </div>
-            </article>
-
-            <article className="panel composition-detail-panel composition-detail-exposure-drilldown" data-ui="composition-exposure-drilldown">
-              <div className="panel-header composition-detail-panel__header">
-                <div>
-                  <h2>Exposure Drilldown</h2>
-                  <p className="composition-detail-panel__copy">不伪造穿透；真实持仓、代理暴露和现金规则分层展示。</p>
-                </div>
-              </div>
-              <div className="composition-detail-exposure-list">
-                {exposureDrilldownRows.map((item) => (
-                  <article className="composition-detail-exposure-row" key={item.key}>
-                    <strong>{item.source}</strong>
-                    <span className={`status-chip status-chip--${item.tone === 'warn' ? 'warning' : item.tone === 'good' ? 'success' : 'soft'}`}>
-                      {item.layer}
-                    </span>
-                    <p>{item.detail}</p>
-                  </article>
-                ))}
-              </div>
-            </article>
           </section>
         </div>
 
         <aside className="composition-detail-rail">
           <section
             className="panel composition-detail-panel composition-detail-rail-panel composition-detail-source-signature"
-            aria-label="来源签名"
+            aria-label="配置指纹"
             data-ui="source-signature-rail"
           >
             <div className="panel-header composition-detail-panel__header">
               <div>
-                <h2>来源签名</h2>
-                <p className="composition-detail-panel__copy">冻结哈希、来源版本与漂移状态分开展示；提示漂移，但不改写已保存组合。</p>
+                <h2>配置指纹</h2>
+                <p className="composition-detail-panel__copy">冻结证据与当前版本对照，仅提示漂移。</p>
               </div>
               <span className={driftCount ? 'status-chip status-chip--warning' : 'status-chip status-chip--success'}>
                 {driftCount ? `${driftCount} 个漂移` : '已冻结'}
@@ -2609,8 +2962,8 @@ export function CompositionDetailView({
             </div>
             {driftCount ? (
               <article className="composition-detail-alert-card composition-detail-source-drift-alert" data-ui="source-drift-alert">
-                <strong>发现来源版本漂移</strong>
-                <span>详情仍按冻结证据读取；如需采用当前版本，请回到工作台复制或重新平衡组合。</span>
+                <strong>发现配置漂移</strong>
+                <span>详情仍按冻结证据读取；采用当前版本需重新生成配置。</span>
               </article>
             ) : null}
             <div className="composition-detail-evidence-list">
@@ -2618,21 +2971,24 @@ export function CompositionDetailView({
                 const integrity = sourceIntegrityByLegId.get(evidence.leg_id);
                 return (
                   <button
-                    className="composition-detail-evidence-card composition-detail-approved-source-card"
+                    className={`composition-detail-evidence-card composition-detail-approved-source-card${selectedLegId === evidence.leg_id ? ' is-active' : ''}`}
                     key={evidence.id}
-                    onClick={() => setSelectedEvidenceId(evidence.id)}
+                    onClick={() => {
+                      setSelectedEvidenceId(null);
+                      setSelectedLegId(evidence.leg_id);
+                    }}
                     type="button"
                   >
                     <div className="composition-detail-approved-snapshot-head">
                       <strong>{legDisplayNameById.get(evidence.leg_id) ?? formatLegDisplayName({ display_name: evidence.display_name })}</strong>
                       <span className="status-chip status-chip--soft">{legTypeLabelById.get(evidence.leg_id) ?? getLegTypeLabel(getEvidenceLegKind(evidence))}</span>
                     </div>
-                    <span className="composition-detail-shield">冻结哈希 {getEvidenceHashLabel(evidence.freeze_hash)}</span>
+                    <span className="composition-detail-shield">配置指纹 {getEvidenceHashLabel(evidence.freeze_hash)}</span>
                     <div className="composition-detail-approved-source-line">
                       <span>{getIntegrityStatusLabel(integrity?.drift_status ?? evidence.drift_status)}</span>
                       <span>{getEvidenceCurrentLabel(evidence, integrity)}</span>
                     </div>
-                    <small>{(integrity?.alerts ?? evidence.alerts ?? [])[0] ?? '冻结口径已验证。'}</small>
+                    <small>{getSourceAlertText((integrity?.alerts ?? evidence.alerts ?? [])[0])}</small>
                   </button>
                 );
               })}
@@ -2641,13 +2997,13 @@ export function CompositionDetailView({
 
           <section
             className="panel composition-detail-panel composition-detail-rail-panel composition-detail-execution-history"
-            aria-label="组合回测与执行历史"
+            aria-label="组合回测历史"
             data-ui="composition-execution-history"
           >
             <div className="panel-header composition-detail-panel__header">
               <div>
-                <h2>组合回测 / 执行历史</h2>
-                <p className="composition-detail-panel__copy">记录组合版本、周期、年化和夏普；动作分别进入回测记录页和订单 tab。</p>
+                <h2>组合回测历史</h2>
+                <p className="composition-detail-panel__copy">记录版本、周期、年化与夏普，并直达回测和订单。</p>
               </div>
             </div>
             <div className="composition-detail-execution-list">
@@ -2658,7 +3014,6 @@ export function CompositionDetailView({
                       <strong>{row.dateLabel} · {row.versionLabel}</strong>
                       <span>{`${row.periodLabel} / 年化 ${row.annualizedLabel} / 夏普 ${row.sharpeLabel}`}</span>
                     </div>
-                    <span className="status-chip status-chip--soft">{row.statusLabel}</span>
                     <div className="composition-detail-execution-actions">
                       <a href={getCompositionRunHashPath(detail.id, row.runId)}>回测记录</a>
                       <a href={getCompositionRunHashPath(detail.id, row.runId, 'orders')}>订单日志</a>
@@ -2680,11 +3035,11 @@ export function CompositionDetailView({
             <div className="panel-header composition-detail-panel__header">
               <div>
                 <h2>再平衡与成本</h2>
-                <p className="composition-detail-panel__copy">展示再平衡窗口、换手成本与现金缓冲效果，判断当前结构的维护压力。</p>
+                <p className="composition-detail-panel__copy">合并窗口、成本与维护判断，保留一屏内可扫读。</p>
               </div>
             </div>
-            <div className="composition-detail-evidence-list">
-              <article className="composition-detail-cost-card">
+            <div className="composition-detail-cost-compact" data-ui="composition-rebalance-cost-compact">
+              <article className="composition-detail-cost-card composition-detail-cost-card--compact">
                 <div className="composition-detail-cost-list">
                   <strong>距离下一个再平衡窗口</strong>
                   <span>{rebalanceRemaining} 天</span>
@@ -2692,29 +3047,37 @@ export function CompositionDetailView({
                 <div className="composition-detail-progress">
                   <span style={{ width: `${rebalanceProgress}%` }} />
                 </div>
-                <p>当前再平衡节奏为 {getCadenceLabel(detail.rebalance_frequency)}；现金腿缓冲用于吸收窗口前后的换手冲击。</p>
-              </article>
-              <article className="composition-detail-evidence-card">
-                <strong>预计成本</strong>
-                <span>{detail.maintenance_cost_summary.total_estimated_bps.toFixed(0)} bps</span>
-                <p>{getNarrativeText(detail.maintenance_cost_summary.notes[0], '费用、换手与交易成本预算共同纳入维护判断。')}</p>
-              </article>
-              <article className="composition-detail-evidence-card">
-                <strong>维护判断</strong>
-                <span>{detail.composition_score.verdict}</span>
-                <p>{highCorrelationPairs.length ? '存在高相关腿组合，进入窗口前应先复核压力相关性。' : '当前结构未触发高相关阻塞，可按既定窗口继续观察。'}</p>
+                <div className="composition-detail-cost-mini-grid">
+                  <span>
+                    <small>预计成本</small>
+                    <strong>{detail.maintenance_cost_summary.total_estimated_bps.toFixed(0)} bps</strong>
+                  </span>
+                  <span>
+                    <small>频次</small>
+                    <strong>{getCadenceLabel(detail.rebalance_frequency)}</strong>
+                  </span>
+                  <span className="composition-detail-cost-mini-grid__wide">
+                    <small>维护判断</small>
+                    <strong>{currentRulingLabel}</strong>
+                  </span>
+                </div>
+                <p>
+                  {highCorrelationPairs.length
+                    ? '存在高相关腿组合，窗口前先复核压力相关性与换手预算。'
+                    : getNarrativeText(detail.maintenance_cost_summary.notes[0], '现金缓冲吸收窗口前后的换手冲击，当前结构可继续观察。')}
+                </p>
               </article>
             </div>
           </section>
 
           <section
             className="panel composition-detail-panel composition-detail-rail-panel composition-detail-audit-trail"
-            aria-label="审计轨迹"
+            aria-label="操作日志"
             data-ui="composition-audit-trail"
           >
             <div className="panel-header composition-detail-panel__header">
               <div>
-                <h2>审计轨迹</h2>
+                <h2>操作日志</h2>
                 <p className="composition-detail-panel__copy">记录创建、结构调整、状态切换与来源检查，便于机构用户回看责任链。</p>
               </div>
             </div>
@@ -2725,38 +3088,15 @@ export function CompositionDetailView({
                     <strong>{getAuditActionLabel(item.action)}</strong>
                     <span>{formatDateTime(item.at)} · {getAuditActorLabel(item.actor)}</span>
                     <p>{getAuditSummaryText(item.summary)}</p>
-                    {item.hash_after ? <small>冻结哈希 {getEvidenceHashLabel(item.hash_after)}</small> : null}
+                    {item.hash_after ? <small>配置指纹 {getEvidenceHashLabel(item.hash_after)}</small> : null}
                   </article>
                 ))
               ) : (
                 <article className="composition-detail-audit-card">
-                  <strong>暂无审计记录</strong>
-                  <span>保存或检查来源后会自动写入审计轨迹。</span>
+                  <strong>暂无操作记录</strong>
+                  <span>保存或检查来源后会自动写入操作日志。</span>
                 </article>
               )}
-            </div>
-          </section>
-
-          <section className="panel composition-detail-panel composition-detail-rail-panel" aria-label="深入分析入口">
-            <div className="panel-header composition-detail-panel__header">
-              <div>
-                <h2>深入分析入口</h2>
-                <p className="composition-detail-panel__copy">用下面入口继续追查组合来源、回测、优化与数据快照。</p>
-              </div>
-            </div>
-            <div className="composition-detail-action-list composition-detail-action-list--compact">
-              <button className="ghost-button" onClick={() => navigateTo('/legs')} type="button">
-                查策略来源
-              </button>
-              <button className="ghost-button" onClick={() => navigateTo('/runs')} type="button">
-                查回测记录
-              </button>
-              <button className="ghost-button" onClick={() => navigateTo('/optimization-jobs')} type="button">
-                查优化记录
-              </button>
-              <button className="ghost-button" onClick={() => navigateTo(snapshotPath)} type="button">
-                查数据快照
-              </button>
             </div>
           </section>
         </aside>
@@ -2779,7 +3119,7 @@ export function CompositionDetailView({
               <button className="ghost-button" onClick={() => setSelectedEvidenceId(null)} type="button">关闭</button>
             </div>
             <div className="composition-detail-drawer__summary">
-              <span className="composition-detail-shield">盾牌哈希 {getEvidenceHashLabel(selectedEvidence.freeze_hash)}</span>
+              <span className="composition-detail-shield">配置指纹 {getEvidenceHashLabel(selectedEvidence.freeze_hash)}</span>
               <span>{formatDateTime(selectedEvidence.captured_at)}</span>
               <span>{getEvidenceStatusLabel(selectedEvidence)}</span>
               {selectedEvidence.current_ref_id ? <span>当前来源 {selectedEvidence.current_ref_id}</span> : null}
@@ -2794,6 +3134,17 @@ export function CompositionDetailView({
             </div>
           </aside>
         </div>
+      ) : null}
+      {selectedLegRow ? (
+        <LegDetailDrawer
+          hideMutatingActions
+          onArchiveCandidate={ignoreCompositionLegArchive}
+          onClose={() => setSelectedLegId(null)}
+          onCopyCandidate={ignoreCompositionLegMutation}
+          onNavigateToSource={navigateToCompositionLegSource}
+          onRequestCopyNewVersion={ignoreCompositionLegVersionCopy}
+          row={selectedLegRow}
+        />
       ) : null}
     </div>
   );

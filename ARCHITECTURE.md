@@ -89,6 +89,7 @@
 - `composition_legs` 保存组合内腿的排序、权重、锁定状态与来源引用。
 - `composition_source_freezes` 保存组合落库时的来源冻结证据，用于详情页审计与后续回看。
 - `composition_backtest_runs` 与 `composition_allocation_jobs` 是 Sleeve OS v1 的组合层运行记录预留表面。当前服务优先从已保存组合详情投影生成可审计运行结果，并镜像到运行态 artifact state；后续若沉淀完整历史，可在不改变前端契约的前提下迁入专表。
+- 组合回测详情接口还兼容组合冻结来源中引用的策略回测 run id：当该 run id 属于当前组合的来源证据或标准化腿配置时，服务会用当前组合详情快照生成只读组合回测诊断、订单与证据投影，避免旧深链把策略来源 run 误判为缺失的组合 run。订单投影必须覆盖完整收益窗口内的全部调仓事件，不能再截断为详情页摘要用的少量示例事件；首个订单事件必须按组合建仓买入生成，后续事件按组合再平衡生成；策略腿订单的可见 `symbol` 必须按事件日期穿透到当时有效的底层成交标的，如果首个建仓日早于该策略源运行的首笔成交，则只在首个建仓事件使用首个可用策略持仓作为初始建仓穿透，并优先使用建仓日行情价格；来源腿只保留在 `source_leg_*` 字段中用于追溯，订单查询与导出支持先按 `source_leg` 再按 `symbol` 收窄；全量流水必须输出模拟成交价、美元手续费，并在触发原因中区分策略内逻辑与组合再平衡。
 
 ## 4. 参数版本真相
 
@@ -154,9 +155,9 @@
 - `/strategy-creation-sessions/*` 负责创建与修订工作流。
 - `/backtest-runs/*` 覆盖预览、提交、克隆、详情、交易列表与单笔交易审计。
 - `GET /backtest-runs/{id}/detail` 明确针对页面加载做了优化。它可以包含 `trade_audit_items`，但不能物化完整的 `trade_audit` 记录；完整审计只属于 `GET /backtest-runs/{run_id}/trades/{trade_id}/audit`。
-- `/compositions`、`/compositions/{id}`、`/compositions/preview` 与 `/compositions/{id}` 的 patch 面共同构成一期组合工作台和组合详情页契约。预演接口负责返回收益流预览、相关性矩阵、风险贡献、维护成本与再平衡摘要，而不直接改写持久化状态。
-- `/compositions/{id}/backtest-runs/*` 是组合层回测契约，服务“测稳定性”而不是策略参数搜索。结果分为诊断、订单和证据三组：诊断说明稳定性、跨周期指标、归因、动态风险暴露、压力窗口和集中度；订单暴露事件聚合、全量流水、过滤、CSV 导出与内部对冲下钻；证据保留冻结配置、数据足迹、代理映射、算法 spec 和审计轨迹。
-- `/compositions/{id}/allocation-jobs/*` 是组合层资产配置契约，服务“定义分配政策并选择可晋升方案”。配置以意图导航、风险边界、换手约束、资产微调和相关性矩阵为主；结果保留 Current / Benchmark、有效前沿、候选权重、风险贡献、ENB、扣费后夏普、约束违反和迁移成本拆解。
+- `/compositions`、`/compositions/{id}`、`/compositions/preview` 与 `/compositions/{id}` 的 patch 面共同构成一期组合工作台和组合详情页契约。预演接口负责返回收益流预览、相关性矩阵、风险贡献、维护成本与再平衡摘要，而不直接改写持久化状态。组合列表契约同时负责仪表板所需的来源复核摘要与新版本提示，列表热路径不得物化完整详情或要求前端逐条详情补水。
+- `/compositions/{id}/backtest-runs/*` 是组合层回测契约，服务“测稳定性”而不是策略参数搜索。结果分为诊断、订单和证据三组：诊断说明稳定性、跨周期指标、归因、动态风险暴露、压力窗口和底层标的集中度；订单暴露完整收益窗口的事件聚合、全量流水、过滤、CSV 导出与内部对冲下钻，并且策略腿订单必须显示穿透后的底层成交标的而不是 `STRATEGY` 汇总占位；证据保留冻结配置、数据足迹、代理映射、算法 spec 和审计轨迹。
+- `/compositions/{id}/allocation-jobs/*` 是组合层资产配置契约，服务“定义分配政策并选择可晋升方案”。配置以意图导航、风险边界、换手约束、资产微调和相关性矩阵为主；结果保留当前组合候选、参考组合、有效前沿、候选权重、风险贡献、ENB、扣费后夏普、约束违反和迁移成本拆解。`current` candidate 是优化结果页当前组合指标的事实来源，前端不得用静态 Current / Benchmark 指标替代运行时任务返回值。
 - `/optimization-jobs` 返回按 `updated_at DESC` 排序的优化任务列表，并投影任务状态、策略关联、预算进度、`progress_pct`、`current_stage`、`latest_update`、`estimated_remaining_minutes`、`estimated_completed_at` 以及带类型的 `best_metrics_summary`，供优化实验室索引页与工作台混合时间线使用。
 - `POST /strategies/{strategy_id}/optimization-jobs` 现在接收 `base_parameter_version_id`、`source_run_id`、`entry_point`、`validation_mode`、`budget_combinations` 与 `search_space`；只有参数配置页显式发起优化时才会创建任务。
 - `POST /optimization-jobs/{id}/resume` 接收 `idempotency_key`，并且只会从 `next_trial_index` 继续 `INTERRUPTED` 任务；对同一 key 的重复调用必须保持幂等。
@@ -222,7 +223,7 @@
 - `#/compositions/workbench` 必须先于 `#/compositions/:id` 被 route parser 匹配，避免工作台被详情路由误吞。
 - `#/compositions/workbench` 与 `#/compositions/:id` 都通过现有 shell/runtime 边界接入，不允许另起第二套路由层。
 - Sleeve OS v1 只实现 Split 方案：组合回测配置页进入组合回测结果页，组合优化配置页进入组合优化结果页；历史 Stepper 设计稿不进入正式路由。
-- 组合回测结果页使用 Diagnosis / Orders / Evidence 三个 tab。诊断页回答结果是否稳健，订单页回答如何调仓与省下多少外部成交，证据页回答数据、代理和算法是否可信。
+- 组合回测结果页使用 Diagnosis / Orders / Evidence 三个 tab。诊断页回答结果是否稳健，订单页回答完整历史窗口内如何调仓与省下多少外部成交，证据页回答数据、代理和算法是否可信；真实 API 返回空数组时页面必须保持空态，不能用内置示例订单补位。
 - 组合优化页面不复用策略优化语义。配置页以“波动最小 / 风险平价 / 收益最大 / 专家模式”意图导航为入口，结果页用有效前沿和候选卡说明哪个方案最符合目标。
 - 左侧导航当前分为 `组合` 与 `策略` 两组；组合组包含 `组合仪表板` 与 `资产库`，策略组保留既有主链路，并把 `workspace` 对外标签统一为 `策略工作台`。
 
@@ -321,7 +322,7 @@ Save semantics:
 Phase 1.2 extends the Phase 1.1 persistence model without adding a second composition, leg, or snapshot system:
 
 - `POST /compositions/preview` and `GET /compositions/{id}` now publish Phase 1.2 trust fields beside the Phase 1.0/1.1 fields: `return_quality_summary`, `rebalance_events`, `source_integrity`, and expanded `risk_contribution_preview`. Older UI consumers must continue to work from `returns_preview`, `correlation_matrix`, and the original risk fields.
-- Return, correlation, and risk previews prefer aligned leg return streams from strategy backtest `chart_series`, bond/asset price history, and cash-rule streams. Saved composition detail and preview responses default to the latest 120 monthly labels for metrics and `returns_preview`/`benchmark_series`/`spread_series`. If a cash or asset leg has no aligned return stream, the compute path must still include that leg with profile-based fallback returns, mark the gap in `return_quality_summary.fallback_used`, and let weight/rebalance edits change KPIs instead of silently reducing the portfolio to the remaining real stream.
+- Return, correlation, and risk previews prefer aligned leg return streams from strategy backtest `chart_series`, bond/asset price history, and cash-rule streams. Saved composition detail and preview responses default to the latest 120 monthly labels for metrics and `returns_preview`/`benchmark_series`/`spread_series`; the detail KPI contract derives `beta_exposure` from realized composition-versus-benchmark return covariance whenever both streams have variance. If a cash or asset leg has no aligned return stream, the compute path must still include that leg with profile-based fallback returns, mark the gap in `return_quality_summary.fallback_used`, and let weight/rebalance edits change KPIs instead of silently reducing the portfolio to the remaining real stream.
 - Rebalance frequency is treated as simulated events, not a label. The payload exposes event date/index, turnover, cost drag, cash-buffer impact, and before/after weights while keeping preview zero-write.
 - Saved composition details still read frozen evidence from `composition_source_freezes`. `source_integrity` and extended `source_evidence` compare frozen hashes/refs against current refs and surface drift or invalidation as advisory evidence only; they do not mutate saved legs or frozen snapshots.
 - `composition_audit_events` is the append-only backend audit table for composition creation, structural writes, source freeze, rebalance checks, status changes, and snapshot-refresh impact checks. `audit_trail` in detail responses is read from this persisted stream, with a legacy projection fallback only for older rows that predate the table.

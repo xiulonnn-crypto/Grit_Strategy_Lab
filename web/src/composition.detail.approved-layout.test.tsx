@@ -252,15 +252,21 @@ describe('composition detail approved runtime layout', () => {
     expect(approvedLayout).toContain('gap: 16px;');
     expect(approvedLayout).toContain('align-items: start;');
     expect(mainStack).toContain('display: grid;');
+    expect(mainStack).toContain('grid-template-areas: "performance" "analysis" "maintenance";');
     expect(mainStack).toContain('gap: 16px;');
     expect(approvedHero).toContain('border-radius: 24px;');
     expect(approvedHero).not.toContain('background: transparent;');
     expect(approvedKpiGrid).toContain('grid-template-columns: repeat(7, minmax(0, 1fr));');
     expect(approvedKpiCard).toContain('border-radius: 16px;');
+    expect(getCssBlock(css, '.composition-detail-approved-analysis-grid')).toContain('grid-template-columns: repeat(2, minmax(0, 1fr));');
+    expect(getCssBlock(css, '.composition-detail-approved-analysis-grid')).toContain('align-items: stretch;');
     expect(maintenanceGrid).toContain('display: grid;');
     expect(maintenanceGrid).toContain('grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);');
     expect(css).toContain('.composition-detail-approved-bottom-tabs {\n  justify-content: flex-start;');
     expect(css).toContain('.composition-detail-cost-drag-path');
+    expect(getCssBlock(css, '.composition-detail-approved-performance')).toContain('grid-area: performance;');
+    expect(getCssBlock(css, '.composition-detail-approved-analysis-grid')).toContain('grid-area: analysis;');
+    expect(maintenanceGrid).toContain('grid-area: maintenance;');
   });
 
   it('keeps source-signature rail text wrapped within the approved right column', () => {
@@ -291,12 +297,18 @@ describe('composition detail approved runtime layout', () => {
     expect(document.querySelector('[data-ui="composition-version-evolution"]')).not.toBeNull();
     expect(document.querySelector('[data-ui="composition-exposure-drilldown"]')).not.toBeNull();
     expect(document.querySelector('[data-ui="composition-execution-history"]')).not.toBeNull();
+    expect(document.querySelector('[data-ui="composition-rebalance-cost-compact"]')).not.toBeNull();
     expect(document.querySelector('[data-ui="composition-cost-drag-line"]')).not.toBeNull();
     expect(document.querySelector('[data-ui="composition-version-marker"]')).not.toBeNull();
-    expect(screen.getByRole('heading', { level: 2, name: '来源签名' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: '组合回测 / 执行历史' })).toBeInTheDocument();
+    expect(
+      Array.from(document.querySelectorAll('.composition-detail-main-stack h2')).map((node) => node.textContent),
+    ).toEqual(['权益曲线', '敞口穿透分析', '风险归因', '配置版本记录', '相关性矩阵']);
+    expect(screen.getByRole('heading', { level: 2, name: '配置指纹' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '组合回测历史' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '再平衡与成本' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: '深入分析入口' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { level: 2, name: '深入分析入口' })).not.toBeInTheDocument();
     expect(screen.getByText('10Y / 年化 9.8% / 夏普 1.42')).toBeInTheDocument();
+    expect(screen.getByText('基准组合(70/30)')).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain('70/30 参考组合');
   });
 });

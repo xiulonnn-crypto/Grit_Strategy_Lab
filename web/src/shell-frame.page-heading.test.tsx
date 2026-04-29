@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { ShellFrameCn } from './shell-frame-cn';
 
 describe('shell frame page heading hooks', () => {
-  it('hides the shell heading on page-owned routes and keeps it on list routes', () => {
+  it('hides the shell heading on page-owned routes including runs aggregation', () => {
     const { container, rerender } = render(
       <ShellFrameCn route={{ kind: 'creation-session', sessionId: 'cs-001' }}>
         <div>creation session</div>
@@ -95,8 +95,8 @@ describe('shell frame page heading hooks', () => {
         <div>runs</div>
       </ShellFrameCn>,
     );
-    expect(screen.getByRole('heading', { level: 1 })).toBeInTheDocument();
-    expect(container.querySelector('.page-heading--runs-index')).not.toBeNull();
+    expect(container.querySelector('.page-heading')).toBeNull();
+    expect(screen.queryByRole('heading', { level: 1 })).toBeNull();
 
     rerender(
       <ShellFrameCn route={{ kind: 'run', runId: 'bt-001' }}>

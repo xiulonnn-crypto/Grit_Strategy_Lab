@@ -153,7 +153,7 @@
 | `#/compositions/workbench` | hero + `0.88fr / 1.18fr / 0.74fr` 三栏工作台 + 下方预览双栏 | 左来源库，中组合结构与权重，右成立性评分、信任摘要和保存 dock |
 | `#/compositions/:id` | hero + 7 KPI + `1.78fr / 330px` 主区 + rail | 主区展示收益流 / 归因 / 相关性 / 情景，右 rail 展示来源签名、成本、审计与深入入口 |
 | `#/compositions/:id/backtest-runs/new` | heading card + 配置摘要 + 规则面板 | 回答“怎么测稳定性”，包含版本、周期、再平衡、成本、缺失数据和预检摘要 |
-| `#/compositions/:id/backtest-runs/:runId` | 裁决 hero + Diagnosis / Orders / Evidence tabs | 结果页拆分诊断、执行订单和证据存证，右上主动作是重跑回测与启动优化 |
+| `#/compositions/:id/backtest-runs/:runId` | 裁决 hero + Diagnosis / Orders / Evidence tabs + 诊断 3:1 图表 / 指标 rail | 结果页拆分诊断、执行订单和证据存证，诊断首屏左侧保留大面积曲线，右侧集中年化、夏普、回撤和覆盖核心指标 |
 | `#/compositions/:id/allocation-lab` | heading card + 意图导航 + 风险边界 + 资产微调 | 回答“我要怎样分配风险预算”，默认用意图选择代替算法填表 |
 | `#/compositions/:id/allocation-jobs/:jobId` | 结果 hero + 有效前沿 + 候选卡 | 展示 Current / Benchmark、候选高亮、ENB、扣费后夏普和迁移成本 |
 | `#/strategies` | 策略库 hero + 摘要指标 + 策略表格 + 新建策略弹层 | 入口可见名称为“策略库”；表格展示策略名、版本、类型、10Y/20Y/30Y 年化收益/夏普、状态与查看/回测/优化动作；缺失长期回测以“一键生成”文字链进入对应周期回测创建页；创建类型选择只在弹层内出现 |
@@ -296,9 +296,9 @@ Compose First 已经进入正式运行页族，设计上服务“从策略结果
 | `#/compositions/workbench` | 三栏组合装配工作台，下方收益流 / 相关性预览 | 预演是零写入；保存 dock 持续可见；成立性评分、收益质量、来源签名和调仓事件必须同屏可判断 |
 | `#/compositions/:id` | 已保存组合的审计详情页，主分析区 + 330px 信任 rail | 详情按冻结证据回看；来源漂移、审计轨迹和成本维护是页面核心，不是可省略的次要信息 |
 | `#/compositions/:id/backtest-runs/new` | 组合回测 Split 配置页 | 页面负责配置稳定性复核，不做策略参数搜索；预检必须显示覆盖率、阻塞态和代理口径 |
-| `#/compositions/:id/backtest-runs/:runId` | 组合回测 Split 结果页 | Diagnosis 看结论，Orders 看执行流水与内部对冲，Evidence 看冻结配置、代理和算法证据 |
+| `#/compositions/:id/backtest-runs/:runId` | 组合回测 Split 结果页 | Diagnosis 看结论，Orders 看执行流水与内部对冲，Evidence 看冻结配置、代理和算法证据；诊断页二层模块要保持 Sleeve 归因与 Exposure Heatmap 等高，Top 5 穿透风险归入 Sleeve 贡献组 |
 | `#/compositions/:id/allocation-lab` | 组合优化 Split 配置页 | 以意图导航、风险偏好、换手约束和资产微调为主，专家参数渐进披露 |
-| `#/compositions/:id/allocation-jobs/:jobId` | 组合优化 Split 结果页 | 有效前沿必须标注 Current 与 Benchmark，候选卡必须解释风险贡献、分散度和迁移成本 |
+| `#/compositions/:id/allocation-jobs/:jobId` | 组合优化 Split 结果页 | 有效前沿必须标注 Current、Benchmark 与上方不可达到区域；候选卡必须解释风险贡献、分散度和迁移成本；回撤、波动、修复周期或防御溢价变差时使用警示色而不是正向绿色 |
 | `#/snapshots?tab=bond` | 固定收益来源治理页，也是债券资产腿入口 | 只能读取 `bond_fixed_income` runtime 分段；fallback/proxy 曲线不能成为可创建资产腿来源 |
 
 Compose 页面当前的交互原则：

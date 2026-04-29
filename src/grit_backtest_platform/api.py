@@ -1184,6 +1184,7 @@ def create_app(
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=100, ge=1, le=500),
         symbol: str | None = Query(default=None),
+        source_leg: str | None = Query(default=None),
     ):
         return invoke(
             service.get_composition_backtest_orders,
@@ -1192,6 +1193,7 @@ def create_app(
             page=page,
             page_size=page_size,
             symbol=symbol,
+            source_leg=source_leg,
         )
 
     @app.get('/compositions/{composition_id}/backtest-runs/{run_id}/orders/{order_id}/netting', response_model=CompositionBacktestOrderNettingModel)
@@ -1204,6 +1206,7 @@ def create_app(
         run_id: str,
         format: str = Query(default='csv', pattern='^(csv|xlsx)$'),
         symbol: str | None = Query(default=None),
+        source_leg: str | None = Query(default=None),
     ):
         payload = invoke(
             service.export_composition_backtest_orders,
@@ -1211,6 +1214,7 @@ def create_app(
             run_id,
             export_format=format,
             symbol=symbol,
+            source_leg=source_leg,
         )
         if isinstance(payload, Mapping) and payload.get("status") == "not_supported":
             return JSONResponse(status_code=501, content=dict(payload))

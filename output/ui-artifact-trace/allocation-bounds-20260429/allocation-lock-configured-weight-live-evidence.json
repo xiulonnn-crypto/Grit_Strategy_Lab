@@ -1,0 +1,42 @@
+{
+  "url": "http://127.0.0.1:4173/?v=20260429-1743#/compositions/composition_630718a64821/allocation-lab",
+  "httpStatus": 200,
+  "initialText": "现金安全垫现金腿5%当前组合权重权重下限权重上限锁定2% - 13%",
+  "proof": {
+    "rowText": "现金安全垫现金腿2%当前组合权重权重下限权重上限解锁固定 2%",
+    "lockButtonText": "解锁",
+    "lockPressed": "true",
+    "inputs": [
+      {
+        "ariaLabel": "现金安全垫 权重下限输入",
+        "disabled": true,
+        "value": "2"
+      },
+      {
+        "ariaLabel": "现金安全垫 权重上限输入",
+        "disabled": true,
+        "value": "2"
+      }
+    ]
+  },
+  "cashChip": "现金 2% · 点击修改",
+  "apiStatus": [
+    {
+      "url": "/compositions",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "url": "/leg-inventory",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "url": "/data-snapshots/overview",
+      "status": 200,
+      "ok": true
+    }
+  ],
+  "consoleMessages": [],
+  "screenshotPath": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\allocation-bounds-20260429\\allocation-lock-configured-weight-live.png"
+}

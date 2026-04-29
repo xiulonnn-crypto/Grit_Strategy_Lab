@@ -391,6 +391,57 @@
   padding: 16px;
 }
 
+.composition-detail-cost-compact {
+  display: grid;
+}
+
+.composition-detail-cost-card--compact {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+}
+
+.composition-detail-cost-card--compact p {
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.composition-detail-cost-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.composition-detail-cost-mini-grid > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid rgba(229, 231, 235, 0.9);
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.composition-detail-cost-mini-grid__wide {
+  grid-column: 1 / -1;
+}
+
+.composition-detail-cost-mini-grid small {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.composition-detail-cost-mini-grid strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #111827;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
 .composition-detail-risk-card__head,
 .composition-detail-evidence-card__head,
 .composition-detail-alert-card {
@@ -986,6 +1037,10 @@
 
 .composition-detail-main-stack {
   display: grid;
+  grid-template-areas:
+    "performance"
+    "analysis"
+    "maintenance";
   gap: 16px;
   min-width: 0;
 }
@@ -1121,7 +1176,7 @@
 }
 
 .composition-detail-approved-performance {
-  order: 1;
+  grid-area: performance;
 }
 
 .composition-detail-approved .composition-detail-approved-performance-header > div:first-child {
@@ -1276,15 +1331,21 @@
 }
 
 .composition-detail-approved-analysis-grid {
-  order: 2;
+  grid-area: analysis;
   display: grid;
-  grid-template-columns: minmax(0, 1.04fr) minmax(0, 0.96fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .composition-detail-approved-analysis-grid .composition-detail-panel__header {
   margin-bottom: 14px;
+}
+
+.composition-detail-approved-analysis-grid > .composition-detail-panel {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 100%;
 }
 
 .composition-detail-approved-scenario-panel .composition-detail-panel__header {
@@ -1292,7 +1353,7 @@
 }
 
 .composition-detail-approved-analysis-grid > .composition-detail-panel:nth-child(2) {
-  min-height: 572px;
+  min-height: 100%;
 }
 
 .composition-detail-approved-scatter-meta {
@@ -1327,6 +1388,12 @@
   display: grid;
   gap: 10px;
   margin-top: 14px;
+}
+
+.composition-detail-approved-analysis-grid .composition-detail-approved-snapshot-list,
+.composition-detail-approved-analysis-grid .composition-detail-exposure-list {
+  grid-auto-rows: 1fr;
+  margin-top: 0;
 }
 
 .composition-detail-approved-risk-block {
@@ -1657,6 +1724,7 @@
 }
 
 .composition-detail-approved-maintenance-grid {
+  grid-area: maintenance;
   display: grid;
   grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
   gap: 14px;
@@ -1707,7 +1775,13 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
+  align-content: start;
   gap: 8px 10px;
+}
+
+.composition-detail-approved-analysis-grid .composition-detail-exposure-row,
+.composition-detail-approved-analysis-grid .composition-detail-approved-snapshot-card {
+  min-height: 104px;
 }
 
 .composition-detail-exposure-row p {
@@ -1724,8 +1798,8 @@
 }
 
 .composition-detail-execution-actions {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -1738,9 +1812,11 @@
   color: var(--gsl-color-primary-strong);
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   text-decoration: none;
   font-size: 12px;
   font-weight: 700;
+  text-align: center;
 }
 
 .composition-detail-execution-actions a:hover {

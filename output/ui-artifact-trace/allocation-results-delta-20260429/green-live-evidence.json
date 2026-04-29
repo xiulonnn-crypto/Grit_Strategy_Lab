@@ -1,0 +1,186 @@
+{
+  "url": "http://127.0.0.1:4173/?v=green-1777451812122#/compositions/composition_630718a64821/allocation-jobs/alloc_job_36ea571e148f",
+  "before": {
+    "bodyHasTarget": false,
+    "deltaExists": false,
+    "order": [
+      {
+        "dataUi": null,
+        "className": "composition-allocation-hero",
+        "text": "组合资产配置组合优化结果先判断候选是否匹配目标，再核对有效前沿、压力表现、扣费后夏普和迁移成本。资产配置QQQ网格&标普动量平衡基准：基准组合(70/30)",
+        "rect": {
+          "top": 28,
+          "left": 268,
+          "width": 1140,
+          "height": 188,
+          "viewportTop": 28,
+          "viewportBottom": 216
+        }
+      },
+      {
+        "dataUi": "allocation-candidate-selector",
+        "className": "composition-allocation-panel composition-allocation-panel--span-2",
+        "text": "候选选择器 · 多维度选拔赛9 候选池 · 当前展示：最小波动前三名。配置展示方案最小波动✓风险平价3最大夏普3已选：最小波动维度当前组合第 1 名最小波动一号",
+        "rect": {
+          "top": 238,
+          "left": 268,
+          "width": 1140,
+          "height": 734,
+          "viewportTop": 238,
+          "viewportBottom": 971
+        }
+      },
+      {
+        "dataUi": null,
+        "className": "composition-allocation-results-grid",
+        "text": "有效前沿 · 迁移向量左上迁移：风险降低的同时收益提升。当前目标：最小波动预期收益年化波动左上迁移：降波动 / 提收益★★ 当前组合红圈 基准组合绿色有效前沿当",
+        "rect": {
+          "top": 993,
+          "left": 268,
+          "width": 1140,
+          "height": 1064,
+          "viewportTop": 993,
+          "viewportBottom": 2057
+        }
+      },
+      {
+        "dataUi": "allocation-stress-test",
+        "className": "composition-allocation-panel composition-allocation-stress-panel",
+        "text": "极端行情压力测试最大回撤、修复周期与防御溢价。3 场景2008 金融危机 (系统性崩盘)2008-09 至 2009-06当前-18.6%最小波动一号-15.1",
+        "rect": {
+          "top": 2079,
+          "left": 268,
+          "width": 1140,
+          "height": 313,
+          "viewportTop": 2079,
+          "viewportBottom": 2392
+        }
+      },
+      {
+        "dataUi": "allocation-audit",
+        "className": "composition-allocation-panel composition-allocation-audit",
+        "text": "审计结论：证据有限，已显式提示替代数据、来源签名、调仓摩擦可追溯。查看完整审计日志来源换手影响成本归因判断最小波动一号22.0%15 个基点波动约束最稳，调仓摩",
+        "rect": {
+          "top": 2414,
+          "left": 268,
+          "width": 1140,
+          "height": 304,
+          "viewportTop": 2414,
+          "viewportBottom": 2718
+        }
+      },
+      {
+        "dataUi": null,
+        "className": "composition-allocation-footnote",
+        "text": "版本晋升唯一入口位于执行决策卡，确认后写入当前组合腿权重。",
+        "rect": {
+          "top": 2740,
+          "left": 268,
+          "width": 1140,
+          "height": 77,
+          "viewportTop": 2740,
+          "viewportBottom": 2817
+        }
+      }
+    ],
+    "resultsChildren": [
+      {
+        "dataUi": null,
+        "className": "composition-allocation-evidence-stack",
+        "rect": {
+          "top": 993,
+          "left": 268,
+          "width": 843,
+          "height": 1064,
+          "viewportTop": 993,
+          "viewportBottom": 2057
+        }
+      },
+      {
+        "dataUi": "allocation-decision-card",
+        "className": "composition-allocation-panel composition-allocation-decision-card",
+        "rect": {
+          "top": 993,
+          "left": 1127,
+          "width": 281,
+          "height": 535,
+          "viewportTop": 993,
+          "viewportBottom": 1528
+        }
+      }
+    ],
+    "rects": {
+      "selector": {
+        "top": 238,
+        "left": 268,
+        "width": 1140,
+        "height": 734,
+        "viewportTop": 238,
+        "viewportBottom": 971
+      },
+      "grid": {
+        "top": 993,
+        "left": 268,
+        "width": 1140,
+        "height": 1064,
+        "viewportTop": 993,
+        "viewportBottom": 2057
+      },
+      "decision": {
+        "top": 993,
+        "left": 1127,
+        "width": 281,
+        "height": 535,
+        "viewportTop": 993,
+        "viewportBottom": 1528
+      },
+      "stress": {
+        "top": 2079,
+        "left": 268,
+        "width": 1140,
+        "height": 313,
+        "viewportTop": 2079,
+        "viewportBottom": 2392
+      },
+      "audit": {
+        "top": 2414,
+        "left": 268,
+        "width": 1140,
+        "height": 304,
+        "viewportTop": 2414,
+        "viewportBottom": 2718
+      }
+    },
+    "stressCards": [
+      "2008 金融危机 (系统性崩盘)2008-09 至 2009-06当前-18.6%最小波动一号-15.1%修复周期148d -> 96d防御溢价+2.4pt",
+      "2020 疫情冲击 (极端波动)2020-02 至 2020-05当前-4.4%最小波动一号-3.1%修复周期41d -> 22d防御溢价+1.8pt",
+      "2022 紧缩熊市 (估值/利率杀)2022-01 至 2022-10当前-11.8%最小波动一号-9.4%修复周期122d -> 84d防御溢价+2.1pt"
+    ],
+    "auditHiddenBefore": true,
+    "auditButtonText": "查看完整审计日志"
+  },
+  "auditAfter": {
+    "hidden": false,
+    "expanded": "true",
+    "text": "审计结论：证据有限，已显式提示替代数据、来源签名、调仓摩擦可追溯。收起完整审计日志来源换手影响成本归因判断最小波动一号22.0%15 个基点波动约束最稳，调仓摩擦可接受。流动性压力7.6%执行窗口可控接受压力窗口2020 疫情冲击回撤 -3.1% · 修复 34 天防御溢价 +2.1pt保留为晋升证据收益质量来源：有效前沿左上迁移点、2020 压力窗口、腿级权重审计。来源签名冻结来源为决策基准；漂移仅作提示项。允许替换候选、指标、成本绑定实时接口。"
+  },
+  "scrollCheck": {
+    "decision": {
+      "top": -127,
+      "bottom": 408,
+      "left": 1127,
+      "right": 1408,
+      "width": 281,
+      "height": 535
+    },
+    "stress": {
+      "top": 430,
+      "bottom": 743,
+      "left": 268,
+      "right": 1408,
+      "width": 1140,
+      "height": 313
+    },
+    "overlap": false
+  }
+}

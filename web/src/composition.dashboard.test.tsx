@@ -231,41 +231,34 @@ describe('composition dashboard page', () => {
         updated_at: '2026-04-28T04:00:00.000Z',
         latest_activity_label: 'updated 2026-04-28',
         allowed_actions: ['open_composition_workbench'],
+        source_integrity: [
+          {
+            leg_id: 'strategy-leg-stale',
+            display_name: 'QQQ Grid-v2',
+            source_ref_id: 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-v2',
+            freeze_hash: 'hash-v2',
+            signature_status: 'stale',
+            drift_status: 'drifted',
+            current_ref_id: 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-v4',
+            checked_at: '2026-04-28T04:00:00.000Z',
+            alerts: ['A newer parameter version exists; saved compositions keep the frozen version.'],
+          },
+          {
+            leg_id: 'strategy-leg-second-stale',
+            display_name: 'QQQ Hedge-v1',
+            source_ref_id: 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-hedge-v1',
+            freeze_hash: 'hash-hedge-v1',
+            signature_status: 'stale',
+            drift_status: 'version_drift',
+            current_ref_id: 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-hedge-v2',
+            checked_at: '2026-04-28T04:00:00.000Z',
+            alerts: ['检测到新版本策略腿。'],
+          },
+        ],
       },
       ...compositions,
     ]);
-    fakeApi.getCompositionDetail = vi.fn().mockImplementation((id: string) =>
-      Promise.resolve({
-        id,
-        source_integrity:
-          id === 'composition_630718a64821'
-            ? [
-                {
-                  leg_id: 'strategy-leg-stale',
-                  display_name: 'QQQ Grid-v2',
-                  source_ref_id: 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-v2',
-                  freeze_hash: 'hash-v2',
-                  signature_status: 'stale',
-                  drift_status: 'drifted',
-                  current_ref_id: 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-v4',
-                  checked_at: '2026-04-28T04:00:00.000Z',
-                  alerts: ['A newer parameter version exists; saved compositions keep the frozen version.'],
-                },
-                {
-                  leg_id: 'strategy-leg-second-stale',
-                  display_name: 'QQQ Hedge-v1',
-                  source_ref_id: 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-hedge-v1',
-                  freeze_hash: 'hash-hedge-v1',
-                  signature_status: 'stale',
-                  drift_status: 'version_drift',
-                  current_ref_id: 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-hedge-v2',
-                  checked_at: '2026-04-28T04:00:00.000Z',
-                  alerts: ['检测到新版本策略腿。'],
-                },
-              ]
-            : [],
-      }),
-    );
+    fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({ source_integrity: [] });
 
     await act(async () => {
       render(<CompositionDashboardPage />);
@@ -276,6 +269,7 @@ describe('composition dashboard page', () => {
     expect(card).not.toBeNull();
     expect(within(card as HTMLElement).getByText('有新版本')).toBeInTheDocument();
     expect(within(card as HTMLElement).queryByText('运行稳定')).toBeNull();
+    expect(fakeApi.getCompositionDetail).not.toHaveBeenCalled();
 
     const task = screen.getByRole('button', { name: /腿版本更新/ });
     expect(within(task).getByText('“QQQ Grid Combo”底层有 2 条策略腿存在更新版本。')).toBeInTheDocument();

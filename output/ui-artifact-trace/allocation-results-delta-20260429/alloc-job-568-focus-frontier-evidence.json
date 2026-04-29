@@ -1,0 +1,21 @@
+{
+  "initial": {
+    "scrollY": 0,
+    "activeTag": "MAIN",
+    "mainFocused": true,
+    "outlineStyle": "none",
+    "outlineWidth": "3px"
+  },
+  "afterSelect": {
+    "actionRowText": "决策动作查看方案查看方案查看方案",
+    "hasRemovedActionCopy": true,
+    "legendText": "★ 当前组合红色空心点 基准组合实心高亮 所选方案绿色有效前沿",
+    "benchmarkPointClass": "composition-allocation-frontier__point composition-allocation-frontier__point--benchmark",
+    "maxSharpePointClass": "composition-allocation-frontier__point composition-allocation-frontier__point--max-sharpe is-selected is-current-hover",
+    "selectedPointLabel": "最大夏普预览前沿点",
+    "selectedPointBackground": "rgb(31, 135, 123)",
+    "selectedPointBorderColor": "rgb(23, 107, 97)",
+    "snapshotText": "前沿点权重快照最大夏普预览 · 14.0% 波动 / 24.9% 收益标普动量策略-v335.0%QQQ 网格交易策略-v440.0%现金安全垫0.0%美国10年国债25.0%权重快照用于核对迁移方向，不作为晋升入口。",
+    "snapshotMatchesSelected": true
+  }
+}

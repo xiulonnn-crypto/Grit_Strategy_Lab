@@ -19,10 +19,12 @@ import {
   upgradeStrategyLegVersions,
 } from '../lib/saved-strategy-leg-inventory';
 import type {
+  ApiCompositionCreatePayload,
   ApiCompositionDetail,
   ApiCompositionLegInput,
   ApiCompositionPreview,
   ApiCompositionPreviewPayload,
+  ApiCompositionUpdatePayload,
   ApiLegInventory,
   ApiLegInventoryRow,
 } from '../types';
@@ -211,6 +213,76 @@ function buildDraftLegsFromDetail(detail: ApiCompositionDetail): ApiCompositionL
   }));
 }
 
+type PendingVersionSave = {
+  intent: 'DRAFT' | 'ACTIVE';
+  payload: ApiCompositionCreatePayload;
+  changes: string[];
+  upgradedLegs: ApiCompositionLegInput[];
+};
+
+function normalizeVersionText(value?: string | null): string {
+  return String(value ?? '').trim();
+}
+
+function getLegDiffKey(leg: ApiCompositionLegInput): string {
+  return `${leg.leg_kind}|${leg.source_ref_id}`;
+}
+
+function buildVersionChangeList(
+  baseDetail: ApiCompositionDetail | null,
+  payload: ApiCompositionPreviewPayload,
+): string[] {
+  if (!baseDetail) {
+    return ['当前组合配置将写入新的保存版本。'];
+  }
+  const changes: string[] = [];
+  if (normalizeVersionText(baseDetail.name) !== normalizeVersionText(payload.name)) {
+    changes.push(`名称：${baseDetail.name || '-'} -> ${payload.name || '-'}`);
+  }
+  if (normalizeVersionText(baseDetail.description) !== normalizeVersionText(payload.description)) {
+    changes.push('描述已更新');
+  }
+  const baseBenchmark = normalizeVersionText(baseDetail.benchmark_definition?.label ?? baseDetail.benchmark_definition?.symbol);
+  const nextBenchmark = normalizeVersionText(payload.benchmark_definition?.label ?? payload.benchmark_definition?.symbol);
+  if (baseBenchmark !== nextBenchmark) {
+    changes.push(`基准：${baseBenchmark || '-'} -> ${nextBenchmark || '-'}`);
+  }
+  if (normalizeVersionText(baseDetail.rebalance_frequency) !== normalizeVersionText(payload.rebalance_frequency)) {
+    changes.push(`再平衡频次：${baseDetail.rebalance_frequency || '-'} -> ${payload.rebalance_frequency || '-'}`);
+  }
+  const baseCosts = baseDetail.cost_policy;
+  const nextCosts = payload.cost_policy;
+  if (nextCosts && (
+    baseCosts.expense_ratio_bps !== nextCosts?.expense_ratio_bps ||
+    baseCosts.turnover_budget_bps !== nextCosts?.turnover_budget_bps ||
+    baseCosts.trade_cost_bps !== nextCosts?.trade_cost_bps
+  )) {
+    changes.push('成本规则已更新');
+  }
+  const baseLegs = new Map(buildDraftLegsFromDetail(baseDetail).map((leg) => [getLegDiffKey(leg), leg]));
+  const nextLegs = new Map(payload.legs.map((leg) => [getLegDiffKey(leg), leg]));
+  payload.legs.forEach((leg) => {
+    const key = getLegDiffKey(leg);
+    const previous = baseLegs.get(key);
+    if (!previous) {
+      changes.push(`新增腿：${leg.display_name || leg.source_ref_id}`);
+      return;
+    }
+    if (Math.abs(previous.weight_pct - leg.weight_pct) >= 0.05) {
+      changes.push(`${leg.display_name || leg.source_ref_id} 权重：${previous.weight_pct.toFixed(1)}% -> ${leg.weight_pct.toFixed(1)}%`);
+    }
+    if (Boolean(previous.weight_locked) !== Boolean(leg.weight_locked)) {
+      changes.push(`${leg.display_name || leg.source_ref_id} 锁定状态已更新`);
+    }
+  });
+  baseLegs.forEach((leg, key) => {
+    if (!nextLegs.has(key)) {
+      changes.push(`移除腿：${leg.display_name || leg.source_ref_id}`);
+    }
+  });
+  return changes;
+}
+
 export function CompositionWorkbenchPage(): JSX.Element {
   const api = useApiClient();
   const { route } = useAppRoute();
@@ -228,6 +300,9 @@ export function CompositionWorkbenchPage(): JSX.Element {
   const [benchmarkLabel, setBenchmarkLabel] = useState(DEFAULT_BENCHMARK);
   const [rebalanceFrequency, setRebalanceFrequency] = useState('quarterly');
   const [selectedLegs, setSelectedLegs] = useState<ApiCompositionLegInput[]>([]);
+  const [loadedDetail, setLoadedDetail] = useState<ApiCompositionDetail | null>(null);
+  const [pendingVersionSave, setPendingVersionSave] = useState<PendingVersionSave | null>(null);
+  const [versionReason, setVersionReason] = useState('');
   const [loading, setLoading] = useState(true);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -306,6 +381,7 @@ export function CompositionWorkbenchPage(): JSX.Element {
           return;
         }
         setInventory(enrichedInventory);
+        setLoadedDetail(detail);
 
         if (detail) {
           setCompositionId(detail.id);
@@ -472,32 +548,72 @@ export function CompositionWorkbenchPage(): JSX.Element {
       setError('当前运行时尚未接入组合保存接口。');
       return;
     }
+    const inventoryRows = inventory?.rows ?? [];
+    const shouldUpgradeStrategyVersions =
+      intent === 'ACTIVE' && canUpgradeStrategyLegVersions(selectedLegs, inventoryRows);
+    const legsToPersist = shouldUpgradeStrategyVersions
+      ? upgradeStrategyLegVersions(selectedLegs, inventoryRows)
+      : selectedLegs;
+    const payload = {
+      ...buildPreviewPayload({
+        compositionName,
+        description,
+        benchmarkLabel,
+        rebalanceFrequency,
+        selectedLegs: legsToPersist,
+      }),
+      status: intent,
+    };
+    if (compositionId) {
+      const changes = buildVersionChangeList(loadedDetail, payload);
+      const statusChanged = loadedDetail ? loadedDetail.status !== intent : false;
+      if (!changes.length) {
+        if (statusChanged) {
+          await commitPersist({ intent, payload, changes, upgradedLegs: legsToPersist });
+        } else {
+          setError('当前组合参数没有变化，未生成新的配置版本。');
+        }
+        return;
+      }
+      setVersionReason('');
+      setPendingVersionSave({ intent, payload, changes, upgradedLegs: legsToPersist });
+      return;
+    }
+    await commitPersist({ intent, payload, changes: [], upgradedLegs: legsToPersist });
+    return;
+  }
+
+  async function commitPersist(save: PendingVersionSave): Promise<void> {
+    if (!api.createComposition || !api.updateComposition) {
+      setError('当前运行时尚未接入组合保存接口。');
+      return;
+    }
+    const reason = versionReason.trim();
+    if (compositionId && save.changes.length && !reason) {
+      setError('请填写升级理由后再确认版本。');
+      return;
+    }
     try {
       setSaving(true);
       setError(null);
-      const inventoryRows = inventory?.rows ?? [];
-      const shouldUpgradeStrategyVersions =
-        intent === 'ACTIVE' && canUpgradeStrategyLegVersions(selectedLegs, inventoryRows);
-      const legsToPersist = shouldUpgradeStrategyVersions
-        ? upgradeStrategyLegVersions(selectedLegs, inventoryRows)
-        : selectedLegs;
-      const payload = {
-        ...buildPreviewPayload({
-          compositionName,
-          description,
-          benchmarkLabel,
-          rebalanceFrequency,
-          selectedLegs: legsToPersist,
-        }),
-        status: intent,
-      };
+      const updatePayload = compositionId && save.changes.length
+        ? {
+            ...save.payload,
+            version_reason: reason,
+            version_change_summary: save.changes.join('；'),
+            version_source: 'manual_save',
+          }
+        : save.payload;
       const saved = compositionId
-        ? await api.updateComposition(compositionId, payload)
-        : await api.createComposition(payload);
-      if (shouldUpgradeStrategyVersions) {
-        setSelectedLegs(legsToPersist);
+        ? await api.updateComposition(compositionId, updatePayload)
+        : await api.createComposition(save.payload);
+      if (save.upgradedLegs !== selectedLegs) {
+        setSelectedLegs(save.upgradedLegs);
       }
       setCompositionId(saved.id);
+      setLoadedDetail(saved);
+      setPendingVersionSave(null);
+      setVersionReason('');
       navigateTo(`/compositions/${encodeURIComponent(saved.id)}`);
     } catch (caught) {
       setError(`保存组合失败：${(caught as Error).message}`);
@@ -507,28 +623,84 @@ export function CompositionWorkbenchPage(): JSX.Element {
   }
 
   return (
-    <CompositionWorkbenchView
-      benchmarkLabel={benchmarkLabel}
-      compositionName={compositionName}
-      description={description}
-      error={error}
-      inventory={inventory}
-      loading={loading}
-      statusLabel={formatCompositionStatusLabel('DRAFT')}
-      onAddLeg={handleAddLeg}
-      onBenchmarkLabelChange={setBenchmarkLabel}
-      onCompositionNameChange={setCompositionName}
-      onDescriptionChange={setDescription}
-      onPersist={handlePersist}
-      onRebalanceFrequencyChange={setRebalanceFrequency}
-      onRemoveLeg={handleRemoveLeg}
-      onToggleLock={handleToggleLock}
-      onWeightChange={handleWeightChange}
-      preview={preview}
-      previewLoading={previewLoading}
-      rebalanceFrequency={rebalanceFrequency}
-      saving={saving}
-      selectedLegs={selectedLegs}
-    />
+    <>
+      <CompositionWorkbenchView
+        benchmarkLabel={benchmarkLabel}
+        compositionName={compositionName}
+        description={description}
+        error={error}
+        inventory={inventory}
+        loading={loading}
+        statusLabel={formatCompositionStatusLabel('DRAFT')}
+        onAddLeg={handleAddLeg}
+        onBenchmarkLabelChange={setBenchmarkLabel}
+        onCompositionNameChange={setCompositionName}
+        onDescriptionChange={setDescription}
+        onPersist={handlePersist}
+        onRebalanceFrequencyChange={setRebalanceFrequency}
+        onRemoveLeg={handleRemoveLeg}
+        onToggleLock={handleToggleLock}
+        onWeightChange={handleWeightChange}
+        preview={preview}
+        previewLoading={previewLoading}
+        rebalanceFrequency={rebalanceFrequency}
+        saving={saving}
+        selectedLegs={selectedLegs}
+      />
+      {pendingVersionSave ? (
+        <div className="composition-workbench-version-dialog-backdrop" role="presentation">
+          <section
+            aria-labelledby="composition-version-dialog-title"
+            aria-modal="true"
+            className="composition-workbench-version-dialog"
+            role="dialog"
+          >
+            <div className="composition-workbench-version-dialog__header">
+              <div>
+                <p className="eyebrow">配置升级确认</p>
+                <h2 id="composition-version-dialog-title">确认升级组合版本</h2>
+                <p>保存会生成新的配置版本，请核对参数变化并填写升级理由。</p>
+              </div>
+            </div>
+            <div className="composition-workbench-version-dialog__changes">
+              {pendingVersionSave.changes.map((change) => (
+                <span key={change}>{change}</span>
+              ))}
+            </div>
+            <label className="composition-workbench-version-dialog__reason">
+              <span>升级理由</span>
+              <textarea
+                aria-label="升级理由"
+                onChange={(event) => setVersionReason(event.target.value)}
+                placeholder="例如：降低策略腿集中度，采用配置实验室建议。"
+                value={versionReason}
+              />
+            </label>
+            <div className="composition-workbench-version-dialog__actions">
+              <button
+                className="ghost-button"
+                onClick={() => {
+                  setPendingVersionSave(null);
+                  setVersionReason('');
+                }}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                className="primary-button"
+                disabled={!versionReason.trim() || saving}
+                onClick={() => {
+                  void commitPersist(pendingVersionSave);
+                }}
+                type="button"
+              >
+                {saving ? '保存中…' : '确认升级版本'}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+    </>
   );
 }

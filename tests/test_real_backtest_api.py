@@ -80,6 +80,40 @@ def test_submit_backtest_returns_immediately_and_finishes_in_background(tmp_path
     assert latest["chart_series"]
 
 
+def test_momentum_backtest_loads_warmup_before_start_and_executes_first_order_on_start(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    start_date = "2024-03-01"
+    end_date = "2024-04-30"
+
+    strategy = create_momentum_strategy(
+        client,
+        idempotency_key="materialize-momentum-warmup-start",
+        universe_name="SPY",
+        rebalance_frequency="daily",
+        lookback_months=1,
+        skip_recent_months=0,
+        top_n=1,
+    )["strategy"]
+    refresh_snapshots(client)
+
+    preview = preview_backtest(client, strategy["id"], start_date=start_date, end_date=end_date)
+    submitted = submit_backtest(
+        client,
+        strategy["id"],
+        start_date=start_date,
+        end_date=end_date,
+        idempotency_key="run-momentum-warmup-start",
+    )
+    detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail"))
+    trades = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/trades?page=1&page_size=20"))
+
+    assert preview["effective_date"] == start_date
+    assert detail["effective_date"] == start_date
+    assert detail["chart_series"][0]["trade_date"] == start_date
+    assert trades["items"][0]["trade_date"] == start_date
+    assert all(point["trade_date"] >= start_date for point in detail["chart_series"])
+
+
 def test_preview_submit_detail_and_trades_preserve_parameter_snapshot_and_default_segment(tmp_path):
     client, _ = create_test_client(tmp_path)
 

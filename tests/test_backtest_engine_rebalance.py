@@ -251,6 +251,64 @@ def test_momentum_skip_recent_window_changes_selected_symbol():
     assert without_skip.metrics.total_return != with_skip.metrics.total_return
 
 
+def test_momentum_warmup_uses_pre_start_bars_and_executes_on_requested_start():
+    dates = [
+        "2023-12-29",
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+        "2024-01-05",
+        "2024-01-08",
+        "2024-01-09",
+        "2024-01-10",
+        "2024-01-11",
+    ]
+    bars_a = [
+        {
+            "date": trade_date,
+            "open": price,
+            "high": price + 1.0,
+            "low": price - 1.0,
+            "close": price,
+            "adj_close": price,
+        }
+        for trade_date, price in zip(dates, [100.0, 105.0, 110.0, 115.0, 120.0, 125.0, 130.0, 131.0, 132.0])
+    ]
+    bars_b = [
+        {
+            "date": trade_date,
+            "open": price,
+            "high": price + 1.0,
+            "low": price - 1.0,
+            "close": price,
+            "adj_close": price,
+        }
+        for trade_date, price in zip(dates, [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 120.0, 121.0, 122.0])
+    ]
+
+    result = run_backtest(
+        {"AAA": bars_a, "BBB": bars_b},
+        config=BacktestConfig(start_date="2024-01-10", end_date="2024-01-11", benchmark_symbol="AAA"),
+        parameters={
+            "strategy_type": "MOMENTUM",
+            "template_key": "momentum",
+            "top_n": 1,
+            "holding_count": 1,
+            "lookback_days": 5,
+            "skip_recent_days": 1,
+            "rebalance_frequency": "daily",
+            "weighting_method": "equal_weight",
+        },
+        benchmark_bars=bars_a,
+    )
+
+    assert result.warnings == []
+    assert result.effective_date == "2024-01-10"
+    assert [point.date for point in result.daily_performance] == ["2024-01-10", "2024-01-11"]
+    assert result.trades[0].date == "2024-01-10"
+    assert result.trades[0].symbol == "AAA"
+
+
 def test_momentum_hold_rank_threshold_retains_existing_holdings_before_replacement():
     bars_a = [
         {"date": "2024-01-02", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},

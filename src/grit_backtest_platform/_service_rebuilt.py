@@ -4966,6 +4966,154 @@ class BacktestPlatformService:
             self._composition_reference_counts().get(source_ref_id, 0),
         )
 
+    def _lightweight_strategy_projection_row_for_source_ref(
+        self,
+        source_ref_id: str,
+        reference_count: int = 0,
+    ) -> dict[str, Any] | None:
+        parsed = _parse_strategy_leg_inventory_id(source_ref_id)
+        if parsed is None:
+            return None
+        strategy_id, parameter_version_id = parsed
+        strategy = self.storage.fetch_one(
+            """
+            SELECT
+                id,
+                name,
+                strategy_type,
+                universe_name,
+                rebalance_frequency,
+                lifecycle_status,
+                current_parameter_version,
+                benchmark_symbol,
+                updated_at
+            FROM strategies
+            WHERE id = ?
+            """,
+            (strategy_id,),
+        )
+        if not strategy:
+            return None
+        version_entry = self.storage.fetch_one(
+            """
+            SELECT parameter_version_id, version_number
+            FROM strategy_parameter_versions
+            WHERE strategy_id = ?
+              AND parameter_version_id = ?
+            """,
+            (strategy_id, parameter_version_id),
+        )
+        if not version_entry:
+            return None
+        version_number = _as_int(
+            version_entry.get("version_number"),
+            _parse_parameter_version_number(parameter_version_id),
+        )
+        current_parameter_version_id = _parameter_version_id(
+            strategy_id,
+            _as_int(strategy.get("current_parameter_version"), version_number),
+        )
+        has_new_version = bool(
+            current_parameter_version_id
+            and current_parameter_version_id != parameter_version_id
+        )
+        run_row = self.storage.fetch_one(
+            """
+            SELECT id
+            FROM backtest_runs
+            WHERE strategy_id = ?
+              AND deleted_at IS NULL
+              AND UPPER(COALESCE(status, '')) IN ('COMPLETED', 'COMPLETED_WITH_WARNINGS')
+              AND (
+                  json_extract(preview_json, '$.parameter_version_id') = ?
+                  OR json_extract(request_json, '$.parameter_version_id') = ?
+              )
+            ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (strategy_id, parameter_version_id, parameter_version_id),
+        )
+        lifecycle_status = str(strategy.get("lifecycle_status") or "ACTIVE").upper()
+        is_orphan = run_row is None
+        status = "READY"
+        if lifecycle_status == "ARCHIVED":
+            status = "ARCHIVED"
+        elif is_orphan:
+            status = "NEEDS_RUN"
+        elif has_new_version:
+            status = "STALE"
+        strategy_type = str(strategy.get("strategy_type") or "GENERAL").upper()
+        rebalance_frequency = str(strategy.get("rebalance_frequency") or "").strip() or None
+        attribute_tags = [
+            "strategy",
+            strategy_type.lower(),
+            f"version:v{version_number}",
+        ]
+        if rebalance_frequency:
+            attribute_tags.append(f"rebalance:{rebalance_frequency.lower()}")
+        if has_new_version:
+            attribute_tags.append("newer_version_available")
+        if is_orphan:
+            attribute_tags.append("needs_run")
+        config = {
+            "strategy_id": strategy_id,
+            "parameter_version_id": parameter_version_id,
+            "parameter_version": version_number,
+            "latest_run_id": run_row.get("id") if run_row else None,
+            "strategy_type": strategy_type,
+            "universe_name": strategy.get("universe_name"),
+            "rebalance_frequency": rebalance_frequency,
+            "lifecycle_status": lifecycle_status,
+            "benchmark_symbol": strategy.get("benchmark_symbol"),
+        }
+        source_integrity = self._leg_source_integrity_summary(
+            source_ref_id=source_ref_id,
+            source_ref_type="strategy_projection",
+            display_name=str(strategy.get("name") or strategy_id),
+            status=status,
+            updated_at=str(strategy.get("updated_at") or iso_now()),
+            payload=config,
+        )
+        if has_new_version:
+            source_integrity["drift_status"] = "drifted"
+            source_integrity["signature_status"] = "stale"
+            source_integrity["current_ref_id"] = _strategy_leg_inventory_id(
+                strategy_id,
+                current_parameter_version_id,
+            )
+            source_integrity["alerts"] = ["A newer parameter version exists; saved compositions keep the frozen version."]
+        elif is_orphan:
+            source_integrity["drift_status"] = "needs_repair"
+            source_integrity["signature_status"] = "unverified"
+            source_integrity["alerts"] = ["No eligible completed run exists for this strategy version."]
+        return {
+            "id": source_ref_id,
+            "leg_type": "strategy",
+            "name": str(strategy.get("name") or strategy_id),
+            "version_label": f"v{version_number}",
+            "proof_label": f"Latest eligible run {run_row['id']}" if run_row else "No eligible completed run yet",
+            "reference_count": reference_count,
+            "reference_summary": self._reference_summary(reference_count),
+            "status": status,
+            "status_label": self._leg_inventory_status_label(status),
+            "has_new_version": has_new_version,
+            "is_orphan": is_orphan,
+            "attribute_tags": attribute_tags,
+            "allowed_actions": ["open_strategy_detail", "open_composition_workbench"],
+            "source_ref_id": source_ref_id,
+            "source_ref_type": "strategy_projection",
+            "source_integrity": source_integrity,
+            "freeze_hash": source_integrity["freeze_hash"],
+            "signature_status": source_integrity["signature_status"],
+            "drift_status": source_integrity["drift_status"],
+            "current_ref_id": source_integrity["current_ref_id"],
+            "alerts": list(source_integrity["alerts"]),
+            "config": {
+                **config,
+                "source_integrity": source_integrity,
+            },
+        }
+
     def _strategy_profile_defaults(self, strategy_type: str) -> tuple[float, float, float]:
         mapping = {
             "MOMENTUM": (12.0, 18.0, 14.0),
@@ -5704,6 +5852,26 @@ class BacktestPlatformService:
         y_mean = sum(y_values) / len(y_values)
         return sum((x - x_mean) * (y - y_mean) for x, y in zip(x_values, y_values)) / (len(x_values) - 1)
 
+    def _composition_beta_exposure(
+        self,
+        portfolio_returns: Sequence[float],
+        benchmark_returns: Sequence[float],
+    ) -> float | None:
+        paired_returns = [
+            (portfolio_return, benchmark_return)
+            for portfolio_return, benchmark_return in zip(portfolio_returns, benchmark_returns)
+            if math.isfinite(portfolio_return) and math.isfinite(benchmark_return)
+        ]
+        if len(paired_returns) < 2:
+            return None
+        portfolio_values = [portfolio_return for portfolio_return, _benchmark_return in paired_returns]
+        benchmark_values = [benchmark_return for _portfolio_return, benchmark_return in paired_returns]
+        covariance = self._sample_covariance(portfolio_values, benchmark_values)
+        benchmark_variance = self._sample_covariance(benchmark_values, benchmark_values)
+        if covariance is None or benchmark_variance is None or abs(benchmark_variance) <= 1e-12:
+            return None
+        return covariance / benchmark_variance
+
     def _composition_covariance_risk_contributions(
         self,
         resolved_legs: Sequence[Mapping[str, Any]],
@@ -5833,7 +6001,30 @@ class BacktestPlatformService:
                 }
             )
             current_weights = dict(target_weights)
-        return events[:8]
+        return events
+
+    def _composition_expected_rebalance_event_count(
+        self,
+        returns_preview: Sequence[Mapping[str, Any]] | Sequence[dict[str, Any]] | None,
+        rebalance_frequency: Any,
+    ) -> int:
+        rows = list(returns_preview or [])
+        if not rows:
+            return 0
+        checks_per_year = self._rebalance_checks_per_year(rebalance_frequency)
+        if checks_per_year >= 12:
+            interval = 1
+        elif checks_per_year >= 4:
+            interval = 3
+        elif checks_per_year == 2:
+            interval = 6
+        else:
+            interval = 12
+        return sum(
+            1
+            for index in range(1, len(rows) + 1)
+            if index == 1 or index % interval == 0 or index == len(rows)
+        )
 
     def _apply_composition_return_cost_breakdown(
         self,
@@ -5891,12 +6082,19 @@ class BacktestPlatformService:
         resolved_legs: Sequence[Mapping[str, Any]],
         source_evidence: Sequence[Mapping[str, Any]] | None = None,
         checked_at: str | None = None,
+        current_inventory_by_ref: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         evidence_by_ref = {
             str(item.get("freeze_ref_id") or ""): dict(item)
             for item in (source_evidence or [])
         }
-        current_inventory_by_ref = self._inventory_row_map() if source_evidence else {}
+        inventory_lookup: Mapping[str, Mapping[str, Any]] = {}
+        if source_evidence:
+            inventory_lookup = (
+                current_inventory_by_ref
+                if current_inventory_by_ref is not None
+                else self._inventory_row_map()
+            )
         rows: list[dict[str, Any]] = []
         now_label = checked_at or iso_now()
         for leg in resolved_legs:
@@ -5910,7 +6108,7 @@ class BacktestPlatformService:
                 alerts.append("Source is not currently eligible for a saved composition.")
             if "watch" in tags or status == "WATCH":
                 alerts.append("Source is watch-only and may be limited to read-only risk budget checks.")
-            current_inventory_row = current_inventory_by_ref.get(source_ref_id) or {}
+            current_inventory_row = dict(inventory_lookup.get(source_ref_id) or {})
             if not current_inventory_row:
                 current_inventory_row = self._strategy_projection_row_for_source_ref(source_ref_id) or {}
             current_integrity = dict(
@@ -5964,7 +6162,7 @@ class BacktestPlatformService:
 
     def _decode_composition_audit_event(self, row: Mapping[str, Any]) -> dict[str, Any]:
         summary_payload = loads(row.get("summary_json"), {})
-        return {
+        decoded = {
             "id": str(row.get("id") or ""),
             "action": str(row.get("action") or ""),
             "actor": str(row.get("actor") or "system"),
@@ -5973,6 +6171,21 @@ class BacktestPlatformService:
             "hash_before": row.get("hash_before"),
             "hash_after": row.get("hash_after"),
         }
+        for key in (
+            "reason",
+            "change_summary",
+            "version_source",
+            "version_candidate_id",
+            "version_candidate_label",
+        ):
+            value = summary_payload.get(key)
+            if value is not None:
+                decoded[key] = str(value)
+        for key in ("version_before", "version_after"):
+            value = summary_payload.get(key)
+            if value is not None:
+                decoded[key] = _as_int(value, 0)
+        return decoded
 
     def _load_composition_audit_events(self, composition_id: str) -> list[dict[str, Any]]:
         rows = self.storage.fetch_all(
@@ -5999,8 +6212,26 @@ class BacktestPlatformService:
         hash_before: str | None = None,
         hash_after: str | None = None,
         source_ref_id: str | None = None,
+        reason: str | None = None,
+        change_summary: str | None = None,
+        version_before: int | None = None,
+        version_after: int | None = None,
+        version_source: str | None = None,
+        version_candidate_id: str | None = None,
+        version_candidate_label: str | None = None,
     ) -> dict[str, Any]:
         event_id = self._new_id("composition_audit")
+        summary_payload: dict[str, Any] = {"summary": summary}
+        optional_payload = {
+            "reason": reason,
+            "change_summary": change_summary,
+            "version_before": version_before,
+            "version_after": version_after,
+            "version_source": version_source,
+            "version_candidate_id": version_candidate_id,
+            "version_candidate_label": version_candidate_label,
+        }
+        summary_payload.update({key: value for key, value in optional_payload.items() if value is not None})
         conn.execute(
             """
             INSERT INTO composition_audit_events (
@@ -6023,7 +6254,7 @@ class BacktestPlatformService:
                 revision,
                 action,
                 actor,
-                dumps({"summary": summary}),
+                dumps(summary_payload),
                 hash_before,
                 hash_after,
                 source_ref_id,
@@ -6031,7 +6262,7 @@ class BacktestPlatformService:
                 occurred_at,
             ),
         )
-        return {
+        event = {
             "id": event_id,
             "action": action,
             "actor": actor,
@@ -6040,6 +6271,10 @@ class BacktestPlatformService:
             "hash_before": hash_before,
             "hash_after": hash_after,
         }
+        for key, value in optional_payload.items():
+            if value is not None:
+                event[key] = value
+        return event
 
     def _composition_audit_trail(
         self,
@@ -6797,6 +7032,7 @@ class BacktestPlatformService:
             benchmark_period_returns,
             periods_per_year=12.0,
         )
+        portfolio_beta = self._composition_beta_exposure(portfolio_period_returns, benchmark_period_returns)
         cash_weight = round(
             sum(
                 _as_float(item.get("weight_pct"), 0.0)
@@ -6840,6 +7076,20 @@ class BacktestPlatformService:
                 "tone": "good" if (annualized_volatility or 0.0) <= 0.12 else "watch",
                 "detail": "Annualized from realized monthly return variance.",
             },
+            *(
+                [
+                    {
+                        "key": "beta_exposure",
+                        "label": "Beta exposure",
+                        "value": round(portfolio_beta, 4),
+                        "unit": None,
+                        "tone": "good" if portfolio_beta <= 0.85 else "watch" if portfolio_beta <= 1.15 else "risk",
+                        "detail": "Covariance of realized composition returns versus the benchmark return stream.",
+                    }
+                ]
+                if portfolio_beta is not None
+                else []
+            ),
             {
                 "key": "max_drawdown",
                 "label": "Max drawdown",
@@ -7065,6 +7315,113 @@ class BacktestPlatformService:
             for index, row in enumerate(rows, start=1)
         ]
 
+    def _composition_canonical_value(self, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                str(key): self._composition_canonical_value(value[key])
+                for key in sorted(value.keys(), key=str)
+            }
+        if isinstance(value, list):
+            return [self._composition_canonical_value(item) for item in value]
+        if isinstance(value, tuple):
+            return [self._composition_canonical_value(item) for item in value]
+        if isinstance(value, bool) or value is None:
+            return value
+        if isinstance(value, (int, float)):
+            return round(float(value), 6)
+        return str(value).strip()
+
+    def _composition_structural_signature(
+        self,
+        *,
+        name: str | None,
+        description: str | None,
+        benchmark_definition: Mapping[str, Any],
+        rebalance_frequency: str | None,
+        cost_policy: Mapping[str, Any],
+        legs: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        leg_signature = []
+        for index, leg in enumerate(legs, start=1):
+            leg_signature.append(
+                {
+                    "leg_kind": str(leg.get("leg_kind") or ""),
+                    "source_ref_id": str(leg.get("source_ref_id") or ""),
+                    "source_ref_type": str(leg.get("source_ref_type") or ""),
+                    "display_name": str(leg.get("display_name") or ""),
+                    "weight_pct": round(_as_float(leg.get("weight_pct"), 0.0), 4),
+                    "weight_locked": bool(leg.get("weight_locked")),
+                    "ordering": int(leg.get("ordering") or index),
+                    "config": self._composition_canonical_value(leg.get("config") or {}),
+                }
+            )
+        leg_signature.sort(
+            key=lambda item: (
+                _as_int(item.get("ordering"), 0),
+                str(item.get("leg_kind") or ""),
+                str(item.get("source_ref_id") or ""),
+            )
+        )
+        return {
+            "name": str(name or "").strip(),
+            "description": str(description or "").strip(),
+            "benchmark_definition": self._composition_canonical_value(dict(benchmark_definition or {})),
+            "rebalance_frequency": str(rebalance_frequency or "").strip().lower(),
+            "cost_policy": self._composition_canonical_value(dict(cost_policy or {})),
+            "legs": leg_signature,
+        }
+
+    def _composition_structural_change_summary(
+        self,
+        previous: Mapping[str, Any],
+        current: Mapping[str, Any],
+    ) -> str:
+        changes: list[str] = []
+        if previous.get("name") != current.get("name"):
+            changes.append("name changed")
+        if previous.get("description") != current.get("description"):
+            changes.append("description changed")
+        if previous.get("rebalance_frequency") != current.get("rebalance_frequency"):
+            changes.append(
+                f"rebalance cadence {previous.get('rebalance_frequency') or '-'} -> {current.get('rebalance_frequency') or '-'}"
+            )
+        if previous.get("benchmark_definition") != current.get("benchmark_definition"):
+            changes.append("benchmark definition changed")
+        if previous.get("cost_policy") != current.get("cost_policy"):
+            changes.append("cost policy changed")
+
+        previous_legs = {
+            f"{item.get('leg_kind')}|{item.get('source_ref_id')}": item
+            for item in previous.get("legs") or []
+            if isinstance(item, Mapping)
+        }
+        current_legs = {
+            f"{item.get('leg_kind')}|{item.get('source_ref_id')}": item
+            for item in current.get("legs") or []
+            if isinstance(item, Mapping)
+        }
+        added = [key for key in current_legs if key not in previous_legs]
+        removed = [key for key in previous_legs if key not in current_legs]
+        if added:
+            changes.append(f"added {len(added)} leg(s)")
+        if removed:
+            changes.append(f"removed {len(removed)} leg(s)")
+        for key in sorted(set(previous_legs) & set(current_legs)):
+            before = previous_legs[key]
+            after = current_legs[key]
+            before_weight = _as_float(before.get("weight_pct"), 0.0)
+            after_weight = _as_float(after.get("weight_pct"), 0.0)
+            if abs(before_weight - after_weight) > 0.0001:
+                label = str(after.get("display_name") or after.get("source_ref_id") or key)
+                changes.append(f"{label} weight {before_weight:g}% -> {after_weight:g}%")
+            if bool(before.get("weight_locked")) != bool(after.get("weight_locked")):
+                label = str(after.get("display_name") or after.get("source_ref_id") or key)
+                changes.append(f"{label} lock flag changed")
+            if before.get("config") != after.get("config"):
+                label = str(after.get("display_name") or after.get("source_ref_id") or key)
+                changes.append(f"{label} source config changed")
+        return "; ".join(changes[:8]) or "composition configuration changed"
+
     def _load_composition_record(self, composition_id: str) -> dict[str, Any]:
         row = self.storage.fetch_one(
             "SELECT * FROM compositions WHERE id = ? AND deleted_at IS NULL",
@@ -7107,6 +7464,85 @@ class BacktestPlatformService:
             (composition_id,),
         )
 
+    def _load_composition_freeze_rows_by_composition(
+        self,
+        composition_ids: Sequence[str],
+    ) -> dict[str, list[dict[str, Any]]]:
+        ids = [str(item) for item in composition_ids if str(item or "").strip()]
+        if not ids:
+            return {}
+        placeholders = ", ".join("?" for _ in ids)
+        rows = self.storage.fetch_all(
+            f"""
+            SELECT freezes.*, legs.display_name
+            FROM composition_source_freezes AS freezes
+            LEFT JOIN composition_legs AS legs ON legs.id = freezes.leg_id
+            WHERE freezes.composition_id IN ({placeholders})
+              AND freezes.deleted_at IS NULL
+              AND freezes.is_current = 1
+              AND freezes.status = 'ACTIVE'
+            ORDER BY freezes.composition_id ASC, freezes.created_at ASC, freezes.id ASC
+            """,
+            tuple(ids),
+        )
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            grouped.setdefault(str(row.get("composition_id") or ""), []).append(row)
+        return grouped
+
+    @staticmethod
+    def _composition_source_evidence_from_freeze_rows(
+        freeze_rows: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": str(item.get("id") or ""),
+                "leg_id": str(item.get("leg_id") or ""),
+                "display_name": str(item.get("display_name") or ""),
+                "freeze_ref_type": str(item.get("freeze_ref_type") or ""),
+                "freeze_ref_id": str(item.get("freeze_ref_id") or ""),
+                "freeze_hash": str(item.get("freeze_hash") or ""),
+                "captured_at": str(item.get("created_at") or ""),
+                "snapshot": loads(item.get("snapshot_json"), {}),
+            }
+            for item in freeze_rows
+        ]
+
+    def _composition_list_source_integrity(
+        self,
+        *,
+        analysis: Mapping[str, Any],
+        source_evidence: Sequence[Mapping[str, Any]],
+        checked_at: str,
+        current_inventory_by_ref: Mapping[str, Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        normalized_legs = analysis.get("normalized_legs") if isinstance(analysis, Mapping) else []
+        if not isinstance(normalized_legs, Sequence) or isinstance(normalized_legs, (str, bytes, bytearray)):
+            normalized_legs = []
+        resolved_legs = [
+            dict(item)
+            for item in normalized_legs
+            if isinstance(item, Mapping)
+        ]
+        if resolved_legs and source_evidence:
+            return self._composition_source_integrity(
+                resolved_legs=resolved_legs,
+                source_evidence=source_evidence,
+                checked_at=checked_at,
+                current_inventory_by_ref=current_inventory_by_ref,
+            )
+        persisted_source_integrity = analysis.get("source_integrity") if isinstance(analysis, Mapping) else []
+        if not isinstance(persisted_source_integrity, Sequence) or isinstance(
+            persisted_source_integrity,
+            (str, bytes, bytearray),
+        ):
+            return []
+        return [
+            dict(item)
+            for item in persisted_source_integrity
+            if isinstance(item, Mapping)
+        ]
+
     def _persist_composition(
         self,
         *,
@@ -7121,6 +7557,11 @@ class BacktestPlatformService:
         created_at: str,
         updated_at: str,
         existing_leg_rows: Sequence[Mapping[str, Any]] | None = None,
+        version_reason: str | None = None,
+        version_change_summary: str | None = None,
+        version_source: str | None = None,
+        version_candidate_id: str | None = None,
+        version_candidate_label: str | None = None,
     ) -> dict[str, Any]:
         normalized_legs = list(preview_payload.get("normalized_legs", []))
         current_record = self.storage.fetch_one("SELECT * FROM compositions WHERE id = ?", (composition_id,))
@@ -7364,6 +7805,11 @@ class BacktestPlatformService:
                     )
                 )
             else:
+                version_summary = (
+                    str(version_change_summary).strip()
+                    if version_change_summary and str(version_change_summary).strip()
+                    else "Composition structure, weights, benchmark, or cost policy was patched and revalidated."
+                )
                 audit_events.append(
                     self._insert_composition_audit_event(
                         conn,
@@ -7371,9 +7817,16 @@ class BacktestPlatformService:
                         revision=revision,
                         action="structure_patch",
                         occurred_at=updated_at,
-                        summary="Composition structure, weights, benchmark, or cost policy was patched and revalidated.",
+                        summary=version_summary,
                         hash_before=previous_hash,
                         hash_after=latest_hash,
+                        reason=str(version_reason).strip() if version_reason else None,
+                        change_summary=version_summary,
+                        version_before=previous_generation,
+                        version_after=freeze_generation,
+                        version_source=version_source,
+                        version_candidate_id=version_candidate_id,
+                        version_candidate_label=version_candidate_label,
                     )
                 )
             audit_events.append(
@@ -7465,20 +7918,56 @@ class BacktestPlatformService:
             ORDER BY updated_at DESC, created_at DESC
             """
         )
+        composition_ids = [
+            str(row.get("id") or "")
+            for row in rows
+            if str(row.get("id") or "").strip()
+        ]
+        freeze_rows_by_composition = self._load_composition_freeze_rows_by_composition(composition_ids)
+        inventory_by_ref = self._inventory_row_map() if composition_ids else {}
+        analysis_by_composition: dict[str, Mapping[str, Any]] = {}
+        strategy_source_refs: set[str] = set()
+        for row in rows:
+            composition_id = str(row.get("id") or "")
+            analysis = loads(row.get("analysis_json"), {})
+            analysis_by_composition[composition_id] = analysis if isinstance(analysis, Mapping) else {}
+            normalized_legs = analysis.get("normalized_legs") if isinstance(analysis, Mapping) else []
+            if not isinstance(normalized_legs, Sequence) or isinstance(
+                normalized_legs,
+                (str, bytes, bytearray),
+            ):
+                continue
+            for leg in normalized_legs:
+                if not isinstance(leg, Mapping):
+                    continue
+                source_ref_id = str(leg.get("source_ref_id") or "").strip()
+                if source_ref_id and _parse_strategy_leg_inventory_id(source_ref_id) is not None:
+                    strategy_source_refs.add(source_ref_id)
+        if strategy_source_refs:
+            reference_counts = self._composition_reference_counts()
+            for source_ref_id in sorted(strategy_source_refs):
+                if source_ref_id in inventory_by_ref:
+                    continue
+                row = self._lightweight_strategy_projection_row_for_source_ref(
+                    source_ref_id,
+                    reference_counts.get(source_ref_id, 0),
+                )
+                if row is not None:
+                    inventory_by_ref[source_ref_id] = row
         items: list[dict[str, Any]] = []
         for row in rows:
             composition_id = str(row.get("id") or "")
             summary = loads(row.get("summary_json"), {})
-            analysis = loads(row.get("analysis_json"), {})
-            source_integrity: list[dict[str, Any]] = []
-            try:
-                source_integrity = [
-                    dict(item)
-                    for item in self.get_composition_detail(composition_id).get("source_integrity", [])
-                    if isinstance(item, Mapping)
-                ]
-            except Exception:
-                source_integrity = []
+            analysis = analysis_by_composition.get(composition_id, {})
+            source_evidence = self._composition_source_evidence_from_freeze_rows(
+                freeze_rows_by_composition.get(composition_id, [])
+            )
+            source_integrity = self._composition_list_source_integrity(
+                analysis=analysis,
+                source_evidence=source_evidence,
+                checked_at=str(row.get("updated_at") or ""),
+                current_inventory_by_ref=inventory_by_ref,
+            )
             has_new_version = any(
                 self._composition_source_integrity_has_new_strategy_version(item)
                 for item in source_integrity
@@ -7520,19 +8009,7 @@ class BacktestPlatformService:
         row = self._load_composition_record(composition_id)
         detail_payload = loads(row.get("analysis_json"), {})
         freeze_rows = self._load_composition_freeze_rows(composition_id)
-        source_evidence = [
-            {
-                "id": str(item.get("id") or ""),
-                "leg_id": str(item.get("leg_id") or ""),
-                "display_name": str(item.get("display_name") or ""),
-                "freeze_ref_type": str(item.get("freeze_ref_type") or ""),
-                "freeze_ref_id": str(item.get("freeze_ref_id") or ""),
-                "freeze_hash": str(item.get("freeze_hash") or ""),
-                "captured_at": str(item.get("created_at") or ""),
-                "snapshot": loads(item.get("snapshot_json"), {}),
-            }
-            for item in freeze_rows
-        ]
+        source_evidence = self._composition_source_evidence_from_freeze_rows(freeze_rows)
         kpi_keys = {
             str(item.get("key") or "")
             for item in (detail_payload.get("kpis") or [])
@@ -7559,6 +8036,21 @@ class BacktestPlatformService:
             if isinstance(detail_payload, Mapping)
             else None
         )
+        rebalance_events = (
+            detail_payload.get("rebalance_events")
+            if isinstance(detail_payload, Mapping)
+            else None
+        )
+        expected_rebalance_event_count = self._composition_expected_rebalance_event_count(
+            returns_preview if isinstance(returns_preview, Sequence) else [],
+            row.get("rebalance_frequency") if row else None,
+        )
+        current_rebalance_event_count = (
+            len(rebalance_events)
+            if isinstance(rebalance_events, Sequence)
+            and not isinstance(rebalance_events, (str, bytes, bytearray))
+            else 0
+        )
         quality_notes = " ".join(
             str(item)
             for item in (
@@ -7582,11 +8074,16 @@ class BacktestPlatformService:
                 and len(returns_preview) > COMPOSITION_RECENT_WINDOW_MONTHS
             )
         )
+        needs_rebalance_refresh = (
+            expected_rebalance_event_count > 0
+            and current_rebalance_event_count < expected_rebalance_event_count
+        )
         needs_detail_refresh = (
             not isinstance(detail_payload, dict)
             or not detail_payload
             or "sharpe" not in kpi_keys
             or "sortino" not in kpi_keys
+            or "beta_exposure" not in kpi_keys
             or not isinstance(scenario_cases, list)
             or len(scenario_cases) < 3
             or any(
@@ -7594,6 +8091,7 @@ class BacktestPlatformService:
                 for item in (risk_preview or [])
             )
             or needs_return_refresh
+            or needs_rebalance_refresh
         )
         if needs_detail_refresh:
             leg_rows = self._load_composition_leg_rows(composition_id)
@@ -7680,7 +8178,18 @@ class BacktestPlatformService:
     def update_composition(self, composition_id: str, request: Any) -> dict[str, Any]:
         row = self._load_composition_record(composition_id)
         payload = _as_mapping(request)
-        payload_keys = {str(key) for key, value in payload.items() if value is not None}
+        version_metadata_keys = {
+            "version_reason",
+            "version_change_summary",
+            "version_source",
+            "version_candidate_id",
+            "version_candidate_label",
+        }
+        payload_keys = {
+            str(key)
+            for key, value in payload.items()
+            if value is not None and str(key) not in version_metadata_keys
+        }
         if payload_keys and payload_keys <= {"status"}:
             status = self._normalize_composition_status(payload.get("status") or row.get("status"), default="DRAFT")
             updated_at = iso_now()
@@ -7773,6 +8282,34 @@ class BacktestPlatformService:
             }
         )
         self._validate_composition_save_payload(preview_payload)
+        current_signature = self._composition_structural_signature(
+            name=str(row.get("name") or ""),
+            description=str(row.get("description") or "").strip() or None,
+            benchmark_definition=self._normalize_composition_benchmark_definition(loads(row.get("benchmark_definition_json"), {})),
+            rebalance_frequency=str(row.get("rebalance_frequency") or "quarterly").strip().lower() or "quarterly",
+            cost_policy=self._normalize_composition_cost_policy(loads(row.get("cost_policy_json"), {})),
+            legs=self._composition_leg_rows_as_inputs(existing_leg_rows),
+        )
+        next_signature = self._composition_structural_signature(
+            name=name,
+            description=description,
+            benchmark_definition=benchmark_definition,
+            rebalance_frequency=rebalance_frequency,
+            cost_policy=cost_policy,
+            legs=[item for item in (preview_payload.get("normalized_legs") or []) if isinstance(item, Mapping)],
+        )
+        structural_changed = current_signature != next_signature
+        if not structural_changed:
+            if status == self._normalize_composition_status(row.get("status"), default="DRAFT"):
+                return self.get_composition_detail(composition_id)
+            return self.update_composition(composition_id, {"status": status})
+
+        version_reason = str(payload.get("version_reason") or "").strip()
+        if not version_reason:
+            raise ValueError("version_reason is required when updating a saved composition version")
+        version_change_summary = str(payload.get("version_change_summary") or "").strip()
+        if not version_change_summary:
+            version_change_summary = self._composition_structural_change_summary(current_signature, next_signature)
         return self._persist_composition(
             composition_id=composition_id,
             name=name,
@@ -7785,6 +8322,11 @@ class BacktestPlatformService:
             created_at=str(row.get("created_at") or iso_now()),
             updated_at=iso_now(),
             existing_leg_rows=existing_leg_rows,
+            version_reason=version_reason,
+            version_change_summary=version_change_summary,
+            version_source=str(payload.get("version_source") or "manual_save").strip() or "manual_save",
+            version_candidate_id=str(payload.get("version_candidate_id") or "").strip() or None,
+            version_candidate_label=str(payload.get("version_candidate_label") or "").strip() or None,
         )
 
     @staticmethod
@@ -7795,6 +8337,63 @@ class BacktestPlatformService:
     @staticmethod
     def _composition_runtime_state_key(kind: str, composition_id: str, artifact_id: str) -> str:
         return f"composition:{kind}:{composition_id}:{artifact_id}"
+
+    @staticmethod
+    def _composition_referenced_source_run_ids(detail: Mapping[str, Any]) -> set[str]:
+        run_ids: set[str] = set()
+        source_keys = (
+            "composition_run_id",
+            "backtest_run_id",
+            "source_run_id",
+            "run_id",
+            "latest_run_id",
+        )
+
+        def add_from_mapping(value: Any) -> None:
+            if not isinstance(value, Mapping):
+                return
+            for key in source_keys:
+                text = str(value.get(key) or "").strip()
+                if text:
+                    run_ids.add(text)
+            nested_config = value.get("config")
+            if isinstance(nested_config, Mapping):
+                add_from_mapping(nested_config)
+
+        for evidence in detail.get("source_evidence") or []:
+            if not isinstance(evidence, Mapping):
+                continue
+            add_from_mapping(evidence.get("snapshot"))
+
+        for leg in detail.get("normalized_legs") or []:
+            if not isinstance(leg, Mapping):
+                continue
+            add_from_mapping(leg)
+            add_from_mapping(leg.get("config"))
+
+        return run_ids
+
+    def _composition_backtest_state_from_source_run(
+        self,
+        composition_id: str,
+        run_id: str,
+    ) -> dict[str, Any] | None:
+        detail = self.get_composition_detail(composition_id)
+        if run_id not in self._composition_referenced_source_run_ids(detail):
+            return None
+        now = iso_now()
+        return {
+            "kind": "backtest_run",
+            "id": run_id,
+            "composition_id": composition_id,
+            "request": {
+                "source_run_id": run_id,
+                "generated_from": "frozen_source_run_deep_link",
+            },
+            "detail_snapshot": self._composition_run_detail_snapshot(detail),
+            "created_at": str(detail.get("updated_at") or now),
+            "completed_at": now,
+        }
 
     @staticmethod
     def _compact_composition_request(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -7881,6 +8480,13 @@ class BacktestPlatformService:
         state_key = self._composition_runtime_state_key(kind, composition_id, artifact_id)
         state = self._read_runtime_state(state_key).get("state_json")
         if not isinstance(state, Mapping) or state.get("id") != artifact_id:
+            if kind == "backtest_run":
+                source_run_state = self._composition_backtest_state_from_source_run(
+                    composition_id,
+                    artifact_id,
+                )
+                if source_run_state is not None:
+                    return source_run_state
             raise KeyError(f"Composition {kind.replace('_', ' ')} not found: {artifact_id}")
         if str(state.get("composition_id") or "") != composition_id:
             raise KeyError(f"Composition {kind.replace('_', ' ')} not found: {artifact_id}")
@@ -7906,7 +8512,7 @@ class BacktestPlatformService:
     @staticmethod
     def _composition_evidence_label() -> str:
         return (
-            "Derived from saved composition preview/detail fields; this is not real broker execution history."
+            "Derived from full-window composition rebalance events and source return streams; these are model instructions, not broker fills."
         )
 
     def _composition_backtest_warnings(self, detail: Mapping[str, Any]) -> list[str]:
@@ -7957,7 +8563,15 @@ class BacktestPlatformService:
         source_integrity = list(detail.get("source_integrity") or [])
         warnings = self._composition_backtest_warnings(detail)
         status = "COMPLETED_WITH_WARNINGS" if warnings or bool(quality.get("fallback_used")) else "COMPLETED"
-        order_count = len(self._composition_backtest_orders_from_detail(composition_id, run_id, detail))
+        request_payload = _as_mapping(state.get("request"))
+        order_count = len(
+            self._composition_backtest_orders_from_detail(
+                composition_id,
+                run_id,
+                detail,
+                request_payload,
+            )
+        )
         annualized_return = self._composition_kpi_value(detail, "annualized_return")
         sharpe = self._composition_kpi_value(detail, "sharpe")
         max_drawdown = self._composition_kpi_value(detail, "max_drawdown")
@@ -8004,6 +8618,7 @@ class BacktestPlatformService:
                     }
                 ],
                 "sleeve_contribution": list(detail.get("risk_contribution_preview") or []),
+                "top_holdings": self._composition_lookthrough_top_holdings(detail),
             },
             "returns_preview": returns_preview,
             "benchmark_series": list(detail.get("benchmark_series") or []),
@@ -8014,7 +8629,7 @@ class BacktestPlatformService:
             "audit_trail": list(detail.get("audit_trail") or []),
             "order_summary": {
                 "order_count": order_count,
-                "generated_from": "composition_detail_preview",
+                "generated_from": "composition_rebalance_events",
                 "netting_available": order_count > 0,
             },
             "evidence": {
@@ -8041,6 +8656,321 @@ class BacktestPlatformService:
             "warnings": warnings,
         }
 
+    def _load_strategy_run_trades(self, run_id: str) -> list[dict[str, Any]]:
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return []
+        row = self.storage.fetch_one(
+            "SELECT trades_json FROM backtest_runs WHERE id = ? AND deleted_at IS NULL",
+            (normalized_run_id,),
+        )
+        trades = loads((row or {}).get("trades_json"), [])
+        if not isinstance(trades, list):
+            return []
+        return [dict(item) for item in trades if isinstance(item, Mapping)]
+
+    @staticmethod
+    def _composition_order_notional_base(
+        detail: Mapping[str, Any],
+        request: Mapping[str, Any],
+    ) -> float:
+        for source in (request, _as_mapping(detail.get("request")), _as_mapping(detail.get("hero_summary"))):
+            for key in ("initial_capital", "capital", "notional_base", "portfolio_value"):
+                value = _as_float(source.get(key), 0.0)
+                if value > 0:
+                    return value
+        return 100000.0
+
+    @staticmethod
+    def _composition_order_fee_bps(
+        detail: Mapping[str, Any],
+        request: Mapping[str, Any],
+    ) -> float:
+        sources = (
+            request,
+            _as_mapping(detail.get("maintenance_cost_summary")),
+            _as_mapping(detail.get("cost_policy")),
+        )
+        for source in sources:
+            for key in ("fee_bps", "trade_cost_bps", "commission_bps"):
+                value = _as_float(source.get(key), 0.0)
+                if value > 0:
+                    return value
+        return 0.0
+
+    @staticmethod
+    def _composition_trade_date(trade: Mapping[str, Any]) -> str:
+        return str(trade.get("trade_date") or trade.get("date") or trade.get("timestamp") or "").strip()
+
+    @staticmethod
+    def _composition_trade_price(trade: Mapping[str, Any]) -> float:
+        for key in ("price", "fill_price_raw", "fill_price_adj", "close", "adj_close"):
+            value = _as_float(trade.get(key), 0.0)
+            if value > 0:
+                return value
+        return 0.0
+
+    @staticmethod
+    def _composition_normalize_trade_weight(value: Any) -> float:
+        raw_weight = _as_float(value, 0.0)
+        if raw_weight > 1.5:
+            raw_weight = raw_weight / 100.0
+        return max(raw_weight, 0.0)
+
+    @staticmethod
+    def _composition_strategy_reason_label(reason: Any) -> str:
+        text = str(reason or "").strip()
+        normalized = text.lower()
+        labels = {
+            "grid:init": "网格策略初始化建仓",
+            "grid:buy": "网格策略下沿买入",
+            "grid:sell": "网格策略上沿卖出",
+            "buy_and_hold:monthly": "定投策略月度买入",
+            "momentum:semiannual": "动量策略半年度换仓",
+            "momentum:rank": "动量策略排名入选",
+        }
+        return labels.get(normalized, text)
+
+    @staticmethod
+    def _composition_rebalance_cadence_label(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        labels = {
+            "daily": "日度",
+            "weekly": "周度",
+            "monthly": "月度",
+            "quarterly": "季度",
+            "semiannual": "半年度",
+            "yearly": "年度",
+            "annual": "年度",
+            "never": "不定期",
+        }
+        return labels.get(text, text or "定期")
+
+    @staticmethod
+    def _composition_strategy_symbol_context(
+        trades: Sequence[Mapping[str, Any]],
+        *,
+        as_of_date: str | None = None,
+        first_available_after: bool = False,
+    ) -> dict[str, dict[str, Any]]:
+        dated_trades = [
+            (BacktestPlatformService._composition_trade_date(trade), index, _as_mapping(trade))
+            for index, trade in enumerate(trades)
+            if isinstance(trade, Mapping)
+        ]
+        dated_trades.sort(key=lambda item: (item[0] or "9999-99-99", item[1]))
+
+        def build_context(limit_date: str | None, *, prefer_market_price: bool = False) -> dict[str, dict[str, Any]]:
+            context: dict[str, dict[str, Any]] = {}
+            for trade_date, _index, trade in dated_trades:
+                if limit_date and trade_date and trade_date > limit_date:
+                    continue
+                symbol = str(trade.get("symbol") or "").strip().upper()
+                if not symbol:
+                    continue
+                previous = context.get(symbol, {})
+                if "weight_after" in trade:
+                    weight = BacktestPlatformService._composition_normalize_trade_weight(trade.get("weight_after"))
+                else:
+                    side = str(trade.get("side") or trade.get("action") or "").strip().upper()
+                    if side == "SELL":
+                        weight = 0.0
+                    elif side == "BUY":
+                        weight = max(_as_float(previous.get("weight"), 0.0), 1.0)
+                    else:
+                        continue
+                price = BacktestPlatformService._composition_trade_price(trade) or _as_float(previous.get("price"), 0.0)
+                reason = str(trade.get("reason") or trade.get("trigger_reason") or previous.get("reason") or "").strip()
+                if weight <= 0.0001:
+                    context.pop(symbol, None)
+                    continue
+                context[symbol] = {
+                    "weight": weight,
+                    "price": price,
+                    "reason": reason,
+                    "trade_date": trade_date,
+                }
+            if prefer_market_price:
+                for item in context.values():
+                    item["prefer_market_price"] = True
+                    item["source_context"] = "first_available_strategy_holding"
+            return context
+
+        context = build_context(as_of_date)
+        if context or not first_available_after or not as_of_date:
+            return context
+        future_trade_dates = sorted(
+            {
+                trade_date
+                for trade_date, _index, _trade in dated_trades
+                if trade_date and trade_date > as_of_date
+            }
+        )
+        for trade_date in future_trade_dates:
+            future_context = build_context(trade_date, prefer_market_price=True)
+            if future_context:
+                return future_context
+        return context
+
+    @staticmethod
+    def _composition_strategy_trade_weights(trades: Sequence[Mapping[str, Any]]) -> dict[str, float]:
+        return {
+            symbol: _as_float(item.get("weight"), 0.0)
+            for symbol, item in BacktestPlatformService._composition_strategy_symbol_context(trades).items()
+            if _as_float(item.get("weight"), 0.0) > 0.0001
+        }
+
+    def _composition_leg_symbol_context(
+        self,
+        leg: Mapping[str, Any],
+        *,
+        as_of_date: str | None = None,
+        fallback_to_first_available: bool = False,
+    ) -> dict[str, dict[str, Any]]:
+        leg_kind = str(leg.get("leg_kind") or "").lower()
+        config = _as_mapping(leg.get("config"))
+        if leg_kind == "strategy":
+            run_id = str(config.get("run_id") or config.get("latest_run_id") or "").strip()
+            symbol_context = self._composition_strategy_symbol_context(
+                self._load_strategy_run_trades(run_id),
+                as_of_date=as_of_date,
+                first_available_after=fallback_to_first_available,
+            )
+            if symbol_context:
+                return symbol_context
+            for key in ("symbol", "ticker", "benchmark_symbol", "universe_name"):
+                fallback_symbol = str(config.get(key) or "").strip().upper()
+                if fallback_symbol and fallback_symbol.isascii() and fallback_symbol != "STRATEGY":
+                    return {
+                        fallback_symbol: {
+                            "weight": 1.0,
+                            "price": self._composition_order_price_for_symbol(
+                                fallback_symbol,
+                                as_of_date=as_of_date,
+                                leg=leg,
+                            ),
+                            "reason": str(config.get("strategy_type") or ""),
+                        }
+                    }
+            return {}
+        symbol = self._composition_order_symbol(leg)
+        if symbol and symbol != "STRATEGY":
+            return {
+                symbol: {
+                    "weight": 1.0,
+                    "price": self._composition_order_price_for_symbol(
+                        symbol,
+                        as_of_date=as_of_date,
+                        leg=leg,
+                    ),
+                    "reason": "",
+                }
+            }
+        return {}
+
+    def _composition_leg_symbol_weights(self, leg: Mapping[str, Any]) -> dict[str, float]:
+        return {
+            symbol: _as_float(context.get("weight"), 0.0)
+            for symbol, context in self._composition_leg_symbol_context(leg).items()
+            if _as_float(context.get("weight"), 0.0) > 0.0001
+        }
+
+    def _composition_order_price_for_symbol(
+        self,
+        symbol: str,
+        *,
+        as_of_date: str | None,
+        leg: Mapping[str, Any],
+        context: Mapping[str, Any] | None = None,
+    ) -> float | None:
+        context_map = _as_mapping(context)
+        context_price = _as_float(context_map.get("price"), 0.0)
+        prefer_market_price = bool(context_map.get("prefer_market_price"))
+        if context_price > 0 and not prefer_market_price:
+            return round(context_price, 4)
+        normalized_symbol = str(symbol or "").strip().upper()
+        leg_kind = str(leg.get("leg_kind") or "").lower()
+        if normalized_symbol == "CASH" or leg_kind == "cash":
+            return 1.0
+        config = _as_mapping(leg.get("config"))
+        summary = _as_mapping(config.get("summary"))
+        bond_snapshot = _as_mapping(summary.get("bond_snapshot") or config.get("bond_snapshot"))
+        for key in ("full_price", "net_price", "dirty_price", "clean_price"):
+            value = _as_float(bond_snapshot.get(key), 0.0)
+            if value > 0:
+                return round(value, 4)
+        dataset_ids = [
+            str(config.get("source_snapshot_id") or "").strip(),
+            "ds-price",
+        ]
+        rows = self._load_price_rows_for_symbol(
+            normalized_symbol,
+            dataset_snapshot_ids=[item for item in dataset_ids if item],
+        )
+        if not rows:
+            return round(context_price, 4) if context_price > 0 else None
+        candidates = [row for row in rows if not as_of_date or str(row.get("date") or "") <= as_of_date]
+        chosen = candidates[-1] if candidates else rows[0]
+        for key in ("adj_close", "close", "price", "open"):
+            value = _as_float(chosen.get(key), 0.0)
+            if value > 0:
+                return round(value, 4)
+        if context_price > 0:
+            return round(context_price, 4)
+        return None
+
+    def _composition_order_trigger_reason(
+        self,
+        *,
+        detail: Mapping[str, Any],
+        leg: Mapping[str, Any],
+        context: Mapping[str, Any],
+        is_initial_event: bool,
+    ) -> str:
+        cadence = self._composition_rebalance_cadence_label(detail.get("rebalance_frequency"))
+        composition_reason = (
+            "组合建仓：按目标权重建立初始持仓"
+            if is_initial_event
+            else f"组合再平衡：{cadence}权重回归"
+        )
+        if str(leg.get("leg_kind") or "").lower() != "strategy":
+            return composition_reason
+        strategy_reason = self._composition_strategy_reason_label(context.get("reason"))
+        if not strategy_reason:
+            strategy_reason = f"{leg.get('display_name') or '策略腿'}持仓穿透"
+        return f"策略内逻辑：{strategy_reason}；{composition_reason}"
+
+    def _composition_lookthrough_top_holdings(self, detail: Mapping[str, Any]) -> list[dict[str, Any]]:
+        lookthrough: dict[str, dict[str, Any]] = {}
+        legs = [dict(item) for item in detail.get("normalized_legs") or [] if isinstance(item, Mapping)]
+        for leg in legs:
+            leg_weight_pct = _as_float(leg.get("weight_pct"), 0.0)
+            if leg_weight_pct <= 0:
+                continue
+            leg_name = str(leg.get("display_name") or leg.get("id") or "来源腿")
+            symbol_weights = self._composition_leg_symbol_weights(leg)
+
+            for symbol, source_weight in symbol_weights.items():
+                if not symbol or symbol == "STRATEGY":
+                    continue
+                weight_pct = round(leg_weight_pct * max(source_weight, 0.0), 4)
+                if weight_pct <= 0:
+                    continue
+                bucket = lookthrough.setdefault(symbol, {"symbol": symbol, "weight_pct": 0.0, "sources": []})
+                bucket["weight_pct"] = round(_as_float(bucket.get("weight_pct"), 0.0) + weight_pct, 4)
+                bucket["sources"].append(f"{leg_name} {weight_pct:.1f}%")
+
+        rows = sorted(lookthrough.values(), key=lambda item: _as_float(item.get("weight_pct"), 0.0), reverse=True)
+        return [
+            {
+                "symbol": str(item.get("symbol") or ""),
+                "detail": " + ".join(list(item.get("sources") or [])[:3]),
+                "weight_pct": round(_as_float(item.get("weight_pct"), 0.0), 4),
+                "tone": "warning" if _as_float(item.get("weight_pct"), 0.0) >= 15.0 else "neutral",
+            }
+            for item in rows[:5]
+        ]
+
     @staticmethod
     def _composition_order_symbol(leg: Mapping[str, Any]) -> str:
         config = _as_mapping(leg.get("config"))
@@ -8061,6 +8991,7 @@ class BacktestPlatformService:
         composition_id: str,
         run_id: str,
         detail: Mapping[str, Any],
+        request: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         legs = [
             dict(item)
@@ -8070,18 +9001,26 @@ class BacktestPlatformService:
         leg_by_id = {str(leg.get("id") or ""): leg for leg in legs}
         quality_label = self._composition_quality_label(detail)
         evidence_label = self._composition_evidence_label()
+        request_payload = _as_mapping(request)
+        notional_base = self._composition_order_notional_base(detail, request_payload)
+        fee_bps = self._composition_order_fee_bps(detail, request_payload)
+        request_slippage_bps = _as_float(request_payload.get("slippage_bps"), 0.0)
         orders: list[dict[str, Any]] = []
         for event_index, raw_event in enumerate(detail.get("rebalance_events") or [], start=1):
             event = _as_mapping(raw_event)
             event_id = f"event_{_as_int(event.get('index'), event_index):03d}"
-            before = {
-                str(key): _as_float(value, 0.0)
-                for key, value in _as_mapping(event.get("weight_before")).items()
-            }
+            is_initial_event = event_index == 1
             after = {
                 str(key): _as_float(value, 0.0)
                 for key, value in _as_mapping(event.get("weight_after")).items()
             }
+            if is_initial_event:
+                before = {leg_id: 0.0 for leg_id in after}
+            else:
+                before = {
+                    str(key): _as_float(value, 0.0)
+                    for key, value in _as_mapping(event.get("weight_before")).items()
+                }
             deltas = {
                 leg_id: round(after.get(leg_id, 0.0) - before.get(leg_id, 0.0), 6)
                 for leg_id in sorted(set(before) | set(after))
@@ -8090,7 +9029,11 @@ class BacktestPlatformService:
             total_sell = sum(max(-delta, 0.0) for delta in deltas.values())
             nettable = min(total_buy, total_sell)
             event_orders: list[dict[str, Any]] = []
-            for leg_id, delta in deltas.items():
+            ordered_leg_ids = [str(leg.get("id") or "") for leg in legs if str(leg.get("id") or "") in deltas]
+            ordered_leg_ids.extend(leg_id for leg_id in sorted(deltas) if leg_id not in ordered_leg_ids)
+            event_date = str(event.get("date") or "").strip() or None
+            for leg_id in ordered_leg_ids:
+                delta = deltas.get(leg_id, 0.0)
                 leg = leg_by_id.get(leg_id)
                 if not leg:
                     continue
@@ -8103,44 +9046,82 @@ class BacktestPlatformService:
                 internal_net = round(min(demand, nettable * demand / pool), 6) if pool > 0 else 0.0
                 external = round(max(demand - internal_net, 0.0), 6)
                 netting_ratio = round(internal_net / demand * 100.0, 4) if demand > 0 else 0.0
-                order_id = self._composition_artifact_id(
-                    "comp_order",
-                    composition_id,
-                    f"{run_id}|{event_id}|{leg_id}",
+                symbol_context = self._composition_leg_symbol_context(
+                    leg,
+                    as_of_date=event_date,
+                    fallback_to_first_available=is_initial_event,
                 )
-                event_orders.append(
-                    {
-                        "id": order_id,
-                        "order_id": order_id,
-                        "run_id": run_id,
-                        "event_id": event_id,
-                        "event_label": str(event.get("label") or event_id),
-                        "event_date": event.get("date"),
-                        "symbol": self._composition_order_symbol(leg),
-                        "side": "BUY" if gross_buy > 0 else "SELL",
-                        "quantity": demand,
-                        "quantity_unit": "weight_pct",
-                        "price": None,
-                        "slippage_bps": round(_as_float(event.get("estimated_cost_bps"), 0.0), 4),
-                        "fee_amount": None,
-                        "source_leg_id": leg_id,
-                        "source_leg_name": str(leg.get("display_name") or leg_id),
-                        "source_leg_kind": str(leg.get("leg_kind") or ""),
-                        "trigger_reason": (
-                            f"{detail.get('rebalance_frequency') or 'rebalance'} cadence; "
-                            "simulated from composition rebalance_events"
-                        ),
-                        "gross_buy_quantity": gross_buy,
-                        "gross_sell_quantity": gross_sell,
-                        "internal_net_quantity": internal_net,
-                        "external_quantity": external,
-                        "netting_ratio_pct": netting_ratio,
-                        "netting_status": "internally_netted" if internal_net > 0 else "external_only",
-                        "execution_kind": "simulated_rebalance_instruction",
-                        "quality_label": quality_label,
-                        "evidence_label": evidence_label,
-                    }
+                symbol_weight_total = sum(
+                    max(_as_float(context.get("weight"), 0.0), 0.0)
+                    for context in symbol_context.values()
                 )
+                if symbol_weight_total <= 0:
+                    continue
+                for symbol, context in sorted(symbol_context.items()):
+                    source_weight = _as_float(context.get("weight"), 0.0)
+                    symbol_share = max(source_weight, 0.0) / symbol_weight_total
+                    if symbol_share <= 0:
+                        continue
+                    symbol_gross_buy = round(gross_buy * symbol_share, 6)
+                    symbol_gross_sell = round(gross_sell * symbol_share, 6)
+                    symbol_demand = round(demand * symbol_share, 6)
+                    if symbol_demand <= 0:
+                        continue
+                    symbol_internal_net = round(internal_net * symbol_share, 6)
+                    symbol_external = round(max(external * symbol_share, 0.0), 6)
+                    order_id = self._composition_artifact_id(
+                        "comp_order",
+                        composition_id,
+                        f"{run_id}|{event_id}|{leg_id}|{symbol}",
+                    )
+                    simulated_price = self._composition_order_price_for_symbol(
+                        symbol,
+                        as_of_date=event_date,
+                        leg=leg,
+                        context=context,
+                    )
+                    external_notional = notional_base * symbol_external / 100.0
+                    fee_amount = round(max(external_notional, 0.0) * max(fee_bps, 0.0) / 10000.0, 4)
+                    slippage_bps = _as_float(event.get("estimated_cost_bps"), request_slippage_bps)
+                    event_orders.append(
+                        {
+                            "id": order_id,
+                            "order_id": order_id,
+                            "run_id": run_id,
+                            "event_id": event_id,
+                            "event_label": str(event.get("label") or event_id),
+                            "event_date": event_date,
+                            "symbol": symbol,
+                            "side": "BUY" if gross_buy > 0 else "SELL",
+                            "quantity": symbol_demand,
+                            "quantity_unit": "weight_pct",
+                            "price": simulated_price,
+                            "slippage_bps": round(slippage_bps, 4),
+                            "fee_amount": fee_amount,
+                            "source_leg_id": leg_id,
+                            "source_leg_name": str(leg.get("display_name") or leg_id),
+                            "source_leg_kind": str(leg.get("leg_kind") or ""),
+                            "trigger_reason": self._composition_order_trigger_reason(
+                                detail=detail,
+                                leg=leg,
+                                context=context,
+                                is_initial_event=is_initial_event,
+                            ),
+                            "gross_buy_quantity": symbol_gross_buy,
+                            "gross_sell_quantity": symbol_gross_sell,
+                            "internal_net_quantity": symbol_internal_net,
+                            "external_quantity": symbol_external,
+                            "netting_ratio_pct": netting_ratio,
+                            "netting_status": "internally_netted" if symbol_internal_net > 0 else "external_only",
+                            "execution_kind": (
+                                "simulated_initial_allocation"
+                                if is_initial_event
+                                else "simulated_rebalance_instruction"
+                            ),
+                            "quality_label": quality_label,
+                            "evidence_label": evidence_label,
+                        }
+                    )
             orders.extend(event_orders)
         return orders
 
@@ -8150,6 +9131,7 @@ class BacktestPlatformService:
         run_id: str,
         *,
         symbol: str | None = None,
+        source_leg: str | None = None,
         page: int = 1,
         page_size: int = 100,
     ) -> dict[str, Any]:
@@ -8159,10 +9141,23 @@ class BacktestPlatformService:
             artifact_id=run_id,
         )
         detail = _as_mapping(state.get("detail_snapshot"))
-        orders = self._composition_backtest_orders_from_detail(composition_id, run_id, detail)
+        orders = self._composition_backtest_orders_from_detail(
+            composition_id,
+            run_id,
+            detail,
+            _as_mapping(state.get("request")),
+        )
         normalized_symbol = str(symbol or "").strip().upper()
         if normalized_symbol:
             orders = [item for item in orders if str(item.get("symbol") or "").upper() == normalized_symbol]
+        normalized_source_leg = str(source_leg or "").strip()
+        if normalized_source_leg:
+            source_key = normalized_source_leg.lower()
+            orders = [
+                item for item in orders
+                if str(item.get("source_leg_id") or "").lower() == source_key
+                or str(item.get("source_leg_name") or "").lower() == source_key
+            ]
         page = max(1, int(page or 1))
         page_size = max(1, min(int(page_size or 100), 500))
         start = (page - 1) * page_size
@@ -8173,8 +9168,12 @@ class BacktestPlatformService:
             "page_size": page_size,
             "total": len(orders),
             "symbol_filter": normalized_symbol or None,
-            "filters": {"symbol": normalized_symbol or None},
-            "generated_from": "composition_detail_preview",
+            "source_leg_filter": normalized_source_leg or None,
+            "filters": {
+                "symbol": normalized_symbol or None,
+                "source_leg": normalized_source_leg or None,
+            },
+            "generated_from": "composition_rebalance_events",
             "quality_label": self._composition_quality_label(detail),
             "evidence_label": self._composition_evidence_label(),
         }
@@ -8332,6 +9331,7 @@ class BacktestPlatformService:
         *,
         export_format: str = "csv",
         symbol: str | None = None,
+        source_leg: str | None = None,
     ) -> dict[str, Any]:
         normalized_format = str(export_format or "csv").strip().lower()
         if normalized_format not in {"csv", "xlsx"}:
@@ -8340,6 +9340,7 @@ class BacktestPlatformService:
             composition_id,
             run_id,
             symbol=symbol,
+            source_leg=source_leg,
             page=1,
             page_size=500,
         )
@@ -8415,15 +9416,51 @@ class BacktestPlatformService:
         job_id = str(state.get("id") or "")
         request_payload = dict(state.get("request") or {})
         current_weights = self._composition_weight_map(detail)
-        locked_weights = {
-            str(leg.get("id") or ""): _as_float(leg.get("weight_pct"), 0.0)
+        legs_by_id = {
+            str(leg.get("id") or ""): leg
             for leg in detail.get("normalized_legs") or []
-            if isinstance(leg, Mapping) and bool(leg.get("weight_locked"))
+            if isinstance(leg, Mapping) and str(leg.get("id") or "")
         }
+        constraints_payload = _as_mapping(request_payload.get("constraints"))
+        raw_leg_constraints = constraints_payload.get("legs")
+        leg_constraints: dict[str, Mapping[str, Any]] = {}
+        if isinstance(raw_leg_constraints, list):
+            for raw_constraint in raw_leg_constraints:
+                if not isinstance(raw_constraint, Mapping):
+                    continue
+                leg_id = str(raw_constraint.get("id") or "").strip()
+                if leg_id:
+                    leg_constraints[leg_id] = raw_constraint
+
+        def requested_lock_weight(leg_id: str) -> float:
+            current_weight = current_weights.get(leg_id, 0.0)
+            constraint = leg_constraints.get(leg_id)
+            if constraint:
+                min_weight = _as_float(constraint.get("min_weight_pct"), current_weight)
+                max_weight = _as_float(constraint.get("max_weight_pct"), min_weight)
+                if abs(min_weight - max_weight) <= 0.0001:
+                    return round(min_weight, 4)
+                return round(_as_float(constraint.get("current_weight_pct"), current_weight), 4)
+            return round(current_weight, 4)
+
+        locked_weights: dict[str, float] = {}
+        for leg_id in current_weights:
+            constraint = leg_constraints.get(leg_id)
+            if constraint is not None:
+                is_locked = bool(constraint.get("locked"))
+            else:
+                is_locked = bool(_as_mapping(legs_by_id.get(leg_id)).get("weight_locked"))
+            if is_locked:
+                locked_weights[leg_id] = requested_lock_weight(leg_id)
         unlocked_ids = [leg_id for leg_id in current_weights if leg_id not in locked_weights]
-        residual_weight = round(100.0 - sum(locked_weights.values()), 4)
+        residual_weight = round(max(0.0, 100.0 - sum(locked_weights.values())), 4)
         risk_by_leg = {
             str(item.get("leg_id") or ""): _as_float(item.get("contribution_pct"), 0.0)
+            for item in detail.get("risk_contribution_preview") or []
+            if isinstance(item, Mapping)
+        }
+        volatility_by_leg = {
+            str(item.get("leg_id") or ""): _as_float(item.get("volatility_pct"), 0.0)
             for item in detail.get("risk_contribution_preview") or []
             if isinstance(item, Mapping)
         }
@@ -8433,14 +9470,112 @@ class BacktestPlatformService:
             if isinstance(item, Mapping)
         }
 
+        def leg_weight_bounds(leg_id: str) -> tuple[float, float]:
+            if leg_id in locked_weights:
+                locked_weight = max(0.0, min(100.0, locked_weights[leg_id]))
+                return locked_weight, locked_weight
+            constraint = leg_constraints.get(leg_id)
+            if not constraint:
+                return 0.0, 100.0
+            min_weight = max(0.0, min(100.0, _as_float(constraint.get("min_weight_pct"), 0.0)))
+            max_weight = max(0.0, min(100.0, _as_float(constraint.get("max_weight_pct"), 100.0)))
+            if min_weight > max_weight:
+                min_weight, max_weight = max_weight, min_weight
+            return min_weight, max_weight
+
+        def constrained_weight_map(target_weights: Mapping[str, float]) -> dict[str, float]:
+            adjusted: dict[str, float] = {}
+            bounds = {leg_id: leg_weight_bounds(leg_id) for leg_id in current_weights}
+            for leg_id in current_weights:
+                min_weight, max_weight = bounds[leg_id]
+                target_weight = locked_weights.get(
+                    leg_id,
+                    _as_float(target_weights.get(leg_id), current_weights.get(leg_id, 0.0)),
+                )
+                adjusted[leg_id] = max(min_weight, min(max_weight, target_weight))
+
+            for _ in range(16):
+                total_weight = sum(adjusted.values())
+                diff = 100.0 - total_weight
+                if abs(diff) <= 0.0001:
+                    break
+                if diff > 0:
+                    eligible = [
+                        leg_id
+                        for leg_id in unlocked_ids
+                        if adjusted.get(leg_id, 0.0) < bounds[leg_id][1] - 0.0001
+                    ]
+                    capacity = sum(bounds[leg_id][1] - adjusted.get(leg_id, 0.0) for leg_id in eligible)
+                    if capacity <= 0.0001:
+                        break
+                    for leg_id in eligible:
+                        headroom = bounds[leg_id][1] - adjusted.get(leg_id, 0.0)
+                        adjusted[leg_id] = min(bounds[leg_id][1], adjusted[leg_id] + diff * (headroom / capacity))
+                else:
+                    eligible = [
+                        leg_id
+                        for leg_id in unlocked_ids
+                        if adjusted.get(leg_id, 0.0) > bounds[leg_id][0] + 0.0001
+                    ]
+                    capacity = sum(adjusted.get(leg_id, 0.0) - bounds[leg_id][0] for leg_id in eligible)
+                    if capacity <= 0.0001:
+                        break
+                    for leg_id in eligible:
+                        room = adjusted.get(leg_id, 0.0) - bounds[leg_id][0]
+                        adjusted[leg_id] = max(bounds[leg_id][0], adjusted[leg_id] + diff * (room / capacity))
+
+            rounded = {leg_id: round(max(0.0, adjusted.get(leg_id, 0.0)), 4) for leg_id in current_weights}
+            final_diff = round(100.0 - sum(rounded.values()), 4)
+            if abs(final_diff) > 0.0:
+                if final_diff > 0:
+                    eligible = sorted(
+                        (leg_id for leg_id in unlocked_ids if rounded.get(leg_id, 0.0) < bounds[leg_id][1]),
+                        key=lambda item: bounds[item][1] - rounded.get(item, 0.0),
+                        reverse=True,
+                    )
+                else:
+                    eligible = sorted(
+                        (leg_id for leg_id in unlocked_ids if rounded.get(leg_id, 0.0) > bounds[leg_id][0]),
+                        key=lambda item: rounded.get(item, 0.0) - bounds[item][0],
+                        reverse=True,
+                    )
+                if eligible:
+                    leg_id = eligible[0]
+                    min_weight, max_weight = bounds[leg_id]
+                    rounded[leg_id] = round(max(min_weight, min(max_weight, rounded[leg_id] + final_diff)), 4)
+            return rounded
+
+        def risk_parity_weight_map() -> dict[str, float]:
+            positive_volatilities = sorted(
+                volatility_by_leg.get(leg_id, 0.0)
+                for leg_id in unlocked_ids
+                if volatility_by_leg.get(leg_id, 0.0) > 0
+            )
+            if not positive_volatilities:
+                return constrained_weight_map(current_weights)
+            fallback_volatility = positive_volatilities[len(positive_volatilities) // 2]
+            volatility_floor = max(0.25, positive_volatilities[0] * 0.5)
+            inverse_vol_scores = {
+                leg_id: 1.0 / max(
+                    volatility_floor,
+                    volatility_by_leg.get(leg_id, fallback_volatility) or fallback_volatility,
+                )
+                for leg_id in unlocked_ids
+            }
+            score_total = sum(inverse_vol_scores.values())
+            if score_total <= 0:
+                return constrained_weight_map(current_weights)
+            weights = dict(current_weights)
+            for leg_id, score in inverse_vol_scores.items():
+                weights[leg_id] = residual_weight * score / score_total
+            return constrained_weight_map(weights)
+
         def candidate_weights(kind: str) -> dict[str, float]:
             weights = dict(current_weights)
             if not unlocked_ids:
-                return self._composition_normalize_weight_map(weights)
+                return constrained_weight_map(weights)
             if kind == "risk_parity":
-                equal = residual_weight / max(len(unlocked_ids), 1)
-                for leg_id in unlocked_ids:
-                    weights[leg_id] = equal
+                return risk_parity_weight_map()
             elif kind == "min_vol":
                 highest_risk = max(unlocked_ids, key=lambda leg_id: risk_by_leg.get(leg_id, 0.0))
                 cash_like = next(
@@ -8464,14 +9599,36 @@ class BacktestPlatformService:
                     shift = min(5.0, max(0.0, weights.get(donor, 0.0)))
                     weights[donor] = max(0.0, weights.get(donor, 0.0) - shift)
                     weights[best_return] = weights.get(best_return, 0.0) + shift
-            return self._composition_normalize_weight_map(weights)
+            return constrained_weight_map(weights)
 
         current_return = self._composition_kpi_value(detail, "annualized_return")
+        current_volatility = self._composition_kpi_value(detail, "volatility")
         current_sharpe = self._composition_kpi_value(detail, "sharpe")
         current_drawdown = self._composition_kpi_value(detail, "max_drawdown")
+        benchmark_returns = [
+            _as_float(point.get("benchmark_return_pct"), 0.0) / 100.0
+            for point in detail.get("benchmark_series") or []
+            if isinstance(point, Mapping)
+        ]
+        benchmark_return = self._annualized_return_from_period_returns(benchmark_returns)
+        benchmark_volatility = self._annualized_volatility_from_period_returns(benchmark_returns)
+        benchmark_sharpe = self._annualized_sharpe_from_period_returns(benchmark_returns)
+        benchmark_drawdown = self._max_drawdown_from_period_returns(benchmark_returns)
+        benchmark_definition = _as_mapping(detail.get("benchmark_definition"))
+        benchmark_label = str(
+            benchmark_definition.get("label")
+            or _as_mapping(detail.get("hero_summary")).get("benchmark_label")
+            or "Benchmark"
+        )
         candidate_specs = [
             ("current", "Current", current_weights, "Current saved allocation."),
-            ("risk_parity", "Risk Parity preview", candidate_weights("risk_parity"), "Equalizes unlocked sleeve weights as a deterministic risk-parity proxy."),
+            ("benchmark", benchmark_label, current_weights, "Benchmark reference portfolio for comparison only."),
+            (
+                "risk_parity",
+                "Risk Parity preview",
+                candidate_weights("risk_parity"),
+                "Approximates equal risk contribution from inverse realized volatility while honoring allocation constraints.",
+            ),
             ("min_vol", "Min Vol preview", candidate_weights("min_vol"), "Shifts a small sleeve budget away from the highest risk contribution."),
             ("max_sharpe", "Max Sharpe preview", candidate_weights("max_sharpe"), "Shifts a small sleeve budget toward the highest return contribution."),
         ]
@@ -8481,6 +9638,26 @@ class BacktestPlatformService:
                 sum(abs(weights.get(leg_id, 0.0) - current_weights.get(leg_id, 0.0)) for leg_id in set(weights) | set(current_weights)) / 2.0,
                 4,
             )
+            is_reference = candidate_id in {"current", "benchmark"}
+            if candidate_id == "benchmark":
+                annualized_return = round((benchmark_return or 0.0) * 100.0, 4)
+                volatility = round((benchmark_volatility or 0.0) * 100.0, 4)
+                sharpe = round(benchmark_sharpe or 0.0, 4)
+                max_drawdown = round(abs(benchmark_drawdown or 0.0) * 100.0, 4)
+            else:
+                annualized_return = round(
+                    current_return + (0.15 if candidate_id == "max_sharpe" else -0.1 if candidate_id == "min_vol" else 0.0),
+                    4,
+                )
+                volatility = round(
+                    max(0.0, current_volatility + (0.35 if candidate_id == "max_sharpe" else -0.35 if candidate_id == "min_vol" else -0.15 if candidate_id == "risk_parity" else 0.0)),
+                    4,
+                )
+                sharpe = round(current_sharpe + (0.08 if candidate_id in {"risk_parity", "max_sharpe"} else 0.03 if candidate_id == "min_vol" else 0.0), 4)
+                max_drawdown = round(
+                    max(0.0, current_drawdown + (0.55 if candidate_id == "max_sharpe" else -0.4 if candidate_id == "min_vol" else -0.15 if candidate_id == "risk_parity" else 0.0)),
+                    4,
+                )
             candidates.append(
                 {
                     "id": candidate_id,
@@ -8488,15 +9665,17 @@ class BacktestPlatformService:
                     "label": label,
                     "weights": weights,
                     "metrics": {
-                        "annualized_return": round(current_return + (0.15 if candidate_id == "max_sharpe" else -0.1 if candidate_id == "min_vol" else 0.0), 4),
-                        "sharpe": round(current_sharpe + (0.08 if candidate_id in {"risk_parity", "max_sharpe"} else 0.03 if candidate_id == "min_vol" else 0.0), 4),
-                        "max_drawdown": round(current_drawdown + (0.4 if candidate_id == "min_vol" else 0.0), 4),
+                        "annualized_return": annualized_return,
+                        "volatility": volatility,
+                        "sharpe": sharpe,
+                        "max_drawdown": max_drawdown,
                         "estimated_turnover_pct": estimated_turnover,
                     },
                     "thesis": thesis,
                     "quality_label": "heuristic_from_composition_detail_preview",
                     "evidence_label": self._composition_evidence_label(),
                     "constraint_violations": [],
+                    "allowed_actions": [] if is_reference else ["promote_candidate"],
                 }
             )
         frontier_points = [
@@ -8504,7 +9683,7 @@ class BacktestPlatformService:
                 "id": item["id"],
                 "label": item["label"],
                 "return_pct": item["metrics"]["annualized_return"],
-                "risk_pct": abs(item["metrics"]["max_drawdown"]),
+                "risk_pct": item["metrics"]["volatility"],
                 "sharpe": item["metrics"]["sharpe"],
                 "quality_label": item["quality_label"],
             }
@@ -8521,7 +9700,8 @@ class BacktestPlatformService:
             "summary": {
                 "intent": request_payload.get("intent") or "risk_parity",
                 "composition_name": str(detail.get("name") or ""),
-                "candidate_count": len(candidates),
+                "candidate_count": len([item for item in candidates if item["id"] not in {"current", "benchmark"}]),
+                "reference_count": len([item for item in candidates if item["id"] in {"current", "benchmark"}]),
                 "quality_label": "heuristic_from_composition_detail_preview",
                 "evidence_label": self._composition_evidence_label(),
                 "latest_update": "Allocation candidates were derived deterministically from the saved composition preview.",

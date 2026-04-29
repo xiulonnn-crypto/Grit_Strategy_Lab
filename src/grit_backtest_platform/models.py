@@ -321,6 +321,11 @@ class CompositionUpdateRequest(BaseModel):
     rebalance_frequency: str | None = None
     cost_policy: CompositionCostPolicyModel | None = None
     legs: list[CompositionLegInputModel] | None = None
+    version_reason: str | None = None
+    version_change_summary: str | None = None
+    version_source: str | None = None
+    version_candidate_id: str | None = None
+    version_candidate_label: str | None = None
 
 
 class CompositionBacktestRunCreateRequest(BaseModel):
@@ -578,6 +583,13 @@ class CompositionAuditTrailItemModel(BaseModel):
     summary: str
     hash_before: str | None = None
     hash_after: str | None = None
+    reason: str | None = None
+    change_summary: str | None = None
+    version_before: int | None = None
+    version_after: int | None = None
+    version_source: str | None = None
+    version_candidate_id: str | None = None
+    version_candidate_label: str | None = None
 
 
 class CompositionPreviewResponseModel(BaseModel):
@@ -732,6 +744,7 @@ class CompositionBacktestOrderPageModel(BaseModel):
     page_size: int = 100
     total: int = 0
     symbol_filter: str | None = None
+    source_leg_filter: str | None = None
     filters: dict[str, Any] = Field(default_factory=dict)
     generated_from: str = 'composition_detail_preview'
     quality_label: str

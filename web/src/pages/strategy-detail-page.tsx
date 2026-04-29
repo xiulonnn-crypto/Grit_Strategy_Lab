@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
-import { formatDateTime, formatPercent, formatRatio, formatShortDate } from '../lib/format';
+import { formatDateTime, formatPercent, formatRatio } from '../lib/format';
 import { buildOptimizationConfigPath } from '../lib/optimization-routes';
 import { formatParameterLabel as formatSharedParameterLabel, formatParameterValue as formatSharedParameterValue } from '../lib/adapters';
 import { formatStrategyVersionTag, getStrategyDisplayName } from '../lib/strategy-version';
@@ -57,9 +57,9 @@ const TEXT = {
   emptyHistory: '暂时没有参数历史。',
   emptyRun: '暂无最近回测',
   latestRunStatus: '运行状态',
-  totalReturn: '总收益',
+  annualizedReturn: '年化',
   sharpe: '夏普',
-  maxDrawdown: '最大回撤',
+  drawdown: '回撤',
   tradeCount: '交易笔数',
   historyFallbackComment: '该版本没有额外备注。',
   editError: '打开策略修改页失败，请稍后重试。',
@@ -595,6 +595,20 @@ function formatRunMetric(key: string, value: unknown): string {
   return value.toLocaleString('en-US');
 }
 
+function formatRunCardDate(value: string | null | undefined): string {
+  if (!value) return '-';
+  const isoDateMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoDateMatch) {
+    return `${isoDateMatch[1]}/${isoDateMatch[2]}/${isoDateMatch[3]}`;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}/${month}/${day}`;
+}
+
 function runStatusTone(status: string): 'positive' | 'warning' | 'negative' {
   const lowered = String(status ?? '').toLowerCase();
   if (lowered.includes('fail') || lowered.includes('error')) return 'negative';
@@ -608,7 +622,7 @@ function runVersionTag(value: string | null | undefined): string {
 
 function runRangeLabel(run: ApiBacktestRunListItem): string {
   if (run.start_date && run.end_date) {
-    return `${formatShortDate(run.start_date)} - ${formatShortDate(run.end_date)}`;
+    return `${formatRunCardDate(run.start_date)} - ${formatRunCardDate(run.end_date)}`;
   }
   return TEXT.recentRunRangeFallback;
 }
@@ -1263,17 +1277,20 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
                           <div className="workspace-recent-runs__badges">
                             <span
                               className={`workspace-recent-runs__badge workspace-recent-runs__badge--${
-                                Number(run.metrics?.total_return ?? 0) >= 0 ? 'positive' : 'negative'
+                                Number(run.metrics?.annualized_return ?? 0) >= 0 ? 'positive' : 'negative'
                               }`}
                             >
-                              {TEXT.totalReturn} {formatRunMetric('total_return', run.metrics?.total_return)}
+                              {TEXT.annualizedReturn} {formatRunMetric('annualized_return', run.metrics?.annualized_return)}
                             </span>
                             <span className="workspace-recent-runs__badge workspace-recent-runs__badge--neutral">
                               {TEXT.sharpe} {formatRunMetric('sharpe', run.metrics?.sharpe)}
                             </span>
+                            <span className="workspace-recent-runs__badge workspace-recent-runs__badge--negative">
+                              {TEXT.drawdown} {formatRunMetric('max_drawdown', run.metrics?.max_drawdown)}
+                            </span>
                           </div>
                           <span className="workspace-recent-runs__completed">
-                            {run.completed_at ? formatDateTime(run.completed_at) : '-'}
+                            {formatRunCardDate(run.completed_at)}
                           </span>
                         </div>
                       </button>
