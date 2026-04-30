@@ -3,6 +3,7 @@ import { formatParameterLabel, formatParameterValue } from './adapters';
 const SYMBOL_PREVIEW_LIMIT = 10;
 
 const RUN_DETAIL_KV_LABELS: Record<string, string> = {
+  allocation_assets: '配置标的',
   benchmark_id: '基准标的',
   benchmark_symbol: '基准',
   benchmark_trade_days: '基准交易日数',
@@ -18,9 +19,12 @@ const RUN_DETAIL_KV_LABELS: Record<string, string> = {
   effective_date: '生效起点',
   end_date: '结束日期',
   execution_policy: '执行策略',
+  cost_model_enabled: '成本模拟开关',
+  expense_ratio_bps: '管理费率(BPS)',
   fee_bps: '手续费(BPS)',
   hold_rank_threshold: '保留排名阈值',
   idempotency_key: '幂等键',
+  investment_mode: '投资方式',
   is_permanent: '永久回测',
   latest_trade_date: '最新交易日',
   lookback_days: '回看天数',
@@ -35,6 +39,9 @@ const RUN_DETAIL_KV_LABELS: Record<string, string> = {
   parameter_version_id: '参数版本',
   price_dataset_status: '价格数据状态',
   rebalance: '再平衡',
+  rebalance_enabled: '再平衡开关',
+  rebalance_frequency: '调仓频率',
+  rebalance_threshold_pct: '偏离阈值(%)',
   reason: '触发原因',
   request_kind: '请求类型',
   requested_end_date: '请求结束',
@@ -60,25 +67,45 @@ const RUN_DETAIL_KV_LABELS: Record<string, string> = {
   universe_size: '股票池规模',
   universe_snapshot_id: '股票池快照',
   universe_status: '股票池状态',
+  valuation_dataset_snapshot_id: '估值数据快照',
+  valuation_dataset_status: '估值数据状态',
+  valuation_latest_observation_date: '最新估值观察日',
+  valuation_proxy_key: '估值代理',
 };
 
 const RUN_DETAIL_VALUE_LABELS: Record<string, string> = {
+  ASSET_ALLOCATION: '资产配置',
   COMPLETED: '已完成',
   FAILED: '失败',
   FULL: '全量',
   INCOMPLETE: '不完整',
+  NOT_REQUIRED: '无需',
   OOS: '测试集',
   READY: '已就绪',
   RUNNING: '运行中',
   STALE: '过期',
   T_CLOSE_TO_T1_OPEN: 'T日收盘信号，T+1开盘成交',
+  all_in: '一次性建仓',
+  asset_allocation: '资产配置',
+  dca: '定投建仓',
   momentum: '动量',
   'momentum:semiannual': '动量：每半年调仓',
+  monthly: '每月',
   official: '正式回测',
+  quarterly: '每季度',
   local: '本地',
   preview: '预览',
   sandbox: '沙盒',
+  semiannual: '每半年',
+  yearly: '每年',
   production: '生产',
+};
+
+const ASSET_CLASS_LABELS: Record<string, string> = {
+  Commodity: '商品',
+  Equity: '权益',
+  'Growth Equity': '成长权益',
+  Treasury: '美国国债',
 };
 
 const RUN_DETAIL_MESSAGE_LABELS: Record<string, string> = {
@@ -116,6 +143,36 @@ function isSymbolsKey(key: string): boolean {
   return normalized === 'symbols' || normalized.endsWith('_symbols');
 }
 
+function allocationWeightSymbol(key: string): string | null {
+  const match = key.match(/^allocation_weight__(.+)_pct$/);
+  return match?.[1]?.trim().toUpperCase() || null;
+}
+
+function formatAssetClass(value: unknown): string {
+  const normalized = String(value ?? '').trim();
+  return ASSET_CLASS_LABELS[normalized] ?? normalized;
+}
+
+function formatAllocationAssets(value: unknown): string | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const rendered = value
+    .map((item) => {
+      if (!item || typeof item !== 'object') {
+        return String(item ?? '').trim();
+      }
+      const record = item as Record<string, unknown>;
+      const symbol = String(record.symbol ?? '').trim().toUpperCase();
+      const displayName = String(record.display_name ?? record.displayName ?? record.name ?? '').trim();
+      const assetClass = formatAssetClass(record.asset_class ?? record.assetClass);
+      const descriptors = [displayName, assetClass].filter((part) => part.length > 0);
+      return symbol ? `${symbol}${descriptors.length ? `（${descriptors.join('，')}）` : ''}` : descriptors.join('，');
+    })
+    .filter((item) => item.length > 0);
+  return rendered.length ? rendered.join(', ') : '—';
+}
+
 function formatStringValue(key: string, value: string): string {
   const normalized = value.trim();
   if (!normalized) {
@@ -138,6 +195,10 @@ function formatStringValue(key: string, value: string): string {
 }
 
 export function formatRunDetailKvLabel(key: string): string {
+  const allocationSymbol = allocationWeightSymbol(key);
+  if (allocationSymbol) {
+    return `${allocationSymbol} 目标权重(%)`;
+  }
   return RUN_DETAIL_KV_LABELS[key] ?? formatParameterLabel(key);
 }
 
@@ -174,6 +235,13 @@ export function formatRunDetailKvValue(key: string, value: unknown): string {
     const symbolsPreview = formatSymbolsPreview(value);
     if (symbolsPreview) {
       return symbolsPreview;
+    }
+  }
+
+  if (key === 'allocation_assets') {
+    const allocationAssets = formatAllocationAssets(value);
+    if (allocationAssets) {
+      return allocationAssets;
     }
   }
 

@@ -502,6 +502,24 @@ def test_list_compositions_excludes_archived_entries(tmp_path):
     assert listed == []
 
 
+def test_list_compositions_uses_freeze_generation_for_version_label_without_formal_version(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    composition = _create_sleeve_os_composition(client)
+    service = client.app.state.service
+
+    service.storage.execute(
+        "UPDATE compositions SET revision = ?, current_freeze_generation = ? WHERE id = ?",
+        (7, 5, composition["id"]),
+    )
+    service.storage.execute("DELETE FROM composition_versions WHERE composition_id = ?", (composition["id"],))
+
+    listed = assert_ok(client.get("/compositions"))
+    list_item = next(item for item in listed if item["id"] == composition["id"])
+    assert list_item["version_label"] == "v5"
+    assert "：" in list_item["primary_diagnosis"]["diagnosis_label"]
+    assert all(item["issue_type"] != "审计门禁硬阻断" for item in list_item["diagnoses"])
+
+
 def test_leg_inventory_reference_counts_ignore_archived_compositions(tmp_path):
     client, _ = create_test_client(tmp_path)
     asset_leg, cash_leg = _create_seed_legs(client)
@@ -801,11 +819,29 @@ def test_composition_preview_create_update_and_list_flow(tmp_path):
     assert any("differs from the frozen source signature" in alert for alert in frozen_asset["alerts"])
     assert frozen_detail["audit_trail"][0]["action"] == "created"
 
+    coverage_run = assert_ok(
+        client.post(
+            f"/compositions/{composition_id}/backtest-runs",
+            json={"idempotency_key": "coverage-10y", "horizon_years": 10},
+        )
+    )
     listed = assert_ok(client.get("/compositions"))
     list_item = next(item for item in listed if item["id"] == composition_id)
     assert list_item["leg_count"] == 3
     assert list_item["benchmark_label"] == "S&P 500"
     assert list_item["sharpe"] == pytest.approx(created_sharpe)
+    assert list_item["backtest_period_coverage"] == [
+        {
+            "period": "10Y",
+            "status": "covered",
+            "run_id": coverage_run["run_id"],
+            "label": "10Y 已覆盖",
+            "detail": "完成（需复核）",
+            "completed_at": coverage_run["completed_at"],
+        },
+        {"period": "20Y", "status": "missing", "label": "20Y 待补齐"},
+        {"period": "30Y", "status": "missing", "label": "30Y 待补齐"},
+    ]
 
     updated = assert_ok(
         client.patch(
@@ -852,6 +888,8 @@ def test_composition_preview_create_update_and_list_flow(tmp_path):
     assert fetched["id"] == composition_id
     assert fetched["name"] == "Balanced Overlay v2"
     assert fetched["status"] == "ACTIVE"
+    assert fetched["current_composition_version_number"] == 2
+    assert fetched["current_composition_version_label"] == "当前配置版本 v2"
     assert len(fetched["source_evidence"]) == 3
     assert fetched["audit_trail"]
     assert fetched["rebalance_events"]
@@ -936,19 +974,38 @@ def test_composition_backtest_run_orders_netting_and_exports(tmp_path):
             json.dumps(
                 [
                     {
-                        "trade_date": "2026-02-28",
+                        "trade_date": "2026-01-31",
                         "symbol": "QQQ",
-                        "side": "BUY",
                         "weight_after": 0.6,
                         "price": 405.25,
                         "reason": "momentum:rank",
                     },
                     {
-                        "trade_date": "2026-02-28",
+                        "trade_date": "2026-01-31",
                         "symbol": "MSFT",
-                        "side": "BUY",
                         "weight_after": 0.4,
                         "price": 318.5,
+                        "reason": "momentum:rank",
+                    },
+                    {
+                        "trade_date": "2026-02-28",
+                        "symbol": "QQQ",
+                        "weight_after": 0.25,
+                        "price": 410.5,
+                        "reason": "momentum:semiannual",
+                    },
+                    {
+                        "trade_date": "2026-02-28",
+                        "symbol": "MSFT",
+                        "weight_after": 0.0,
+                        "price": 320.0,
+                        "reason": "momentum:semiannual",
+                    },
+                    {
+                        "trade_date": "2026-02-28",
+                        "symbol": "NVDA",
+                        "weight_after": 0.75,
+                        "price": 790.0,
                         "reason": "momentum:rank",
                     },
                 ]
@@ -973,6 +1030,15 @@ def test_composition_backtest_run_orders_netting_and_exports(tmp_path):
     assert created_run["summary"]["quality_label"].endswith("composition_detail_preview")
     assert "full-window composition rebalance events" in created_run["summary"]["evidence_label"]
     assert created_run["evidence"]["data_footprint"]["returns_preview_points"] == len(composition["returns_preview"])
+    assert created_run["evidence_grade"] in {"A", "B", "C"}
+    assert created_run["scenario_anchors"]
+    assert created_run["risk_budget_timeline"]
+    assert created_run["promotion_readiness"]["required_steps"] == [
+        "diff_review",
+        "constraint_check",
+        "migration_cost_review",
+        "evidence_gate",
+    ]
 
     fetched_run = assert_ok(client.get(f"/compositions/{composition['id']}/backtest-runs/{run_id}"))
     assert fetched_run["id"] == run_id
@@ -984,7 +1050,7 @@ def test_composition_backtest_run_orders_netting_and_exports(tmp_path):
 
     orders = assert_ok(client.get(f"/compositions/{composition['id']}/backtest-runs/{run_id}/orders"))
     assert orders["total"] == created_run["summary"]["order_count"]
-    assert orders["generated_from"] == "composition_rebalance_events"
+    assert orders["generated_from"] == "composition_rebalance_events_and_strategy_trades"
     first_event_id = orders["items"][0]["event_id"]
     first_event_orders = [item for item in orders["items"] if item["event_id"] == first_event_id]
     assert first_event_orders
@@ -994,8 +1060,34 @@ def test_composition_backtest_run_orders_netting_and_exports(tmp_path):
     assert all(item["price"] is not None for item in orders["items"])
     assert all(item["fee_amount"] is not None for item in orders["items"])
     assert any("组合建仓" in item["trigger_reason"] for item in first_event_orders)
-    assert any("策略内逻辑" in item["trigger_reason"] for item in orders["items"])
+    assert any("穿透来源" in item["trigger_reason"] for item in orders["items"])
     assert any("组合再平衡" in item["trigger_reason"] for item in orders["items"])
+    strategy_rebalance_orders = [
+        item
+        for item in orders["items"]
+        if item["execution_kind"] == "simulated_rebalance_instruction"
+        and item["source_leg_kind"] == "strategy"
+    ]
+    assert strategy_rebalance_orders
+    assert all("策略内逻辑" not in item["trigger_reason"] for item in strategy_rebalance_orders)
+    assert all("组合再平衡" in item["trigger_reason"] for item in strategy_rebalance_orders)
+    assert all("穿透来源" in item["trigger_reason"] for item in strategy_rebalance_orders)
+    strategy_internal_orders = [
+        item
+        for item in orders["items"]
+        if item["execution_kind"] == "simulated_strategy_internal_order"
+        and item["source_leg_kind"] == "strategy"
+    ]
+    assert strategy_internal_orders
+    assert {"QQQ", "MSFT", "NVDA"}.issubset({item["symbol"] for item in strategy_internal_orders})
+    assert any(
+        item["symbol"] == "NVDA"
+        and item["side"] == "BUY"
+        and item["event_date"] == "2026-02-28"
+        and "策略内逻辑" in item["trigger_reason"]
+        and "组合再平衡" not in item["trigger_reason"]
+        for item in strategy_internal_orders
+    )
     assert "STRATEGY" not in {item["symbol"] for item in orders["items"]}
     assert {"QQQ", "MSFT"}.issubset({item["symbol"] for item in orders["items"]})
 
@@ -1027,6 +1119,16 @@ def test_composition_backtest_run_orders_netting_and_exports(tmp_path):
     assert filtered["total"] > 0
     assert {item["symbol"] for item in filtered["items"]} == {"IEF"}
 
+    scenario_filtered = assert_ok(
+        client.get(
+            f"/compositions/{composition['id']}/backtest-runs/{run_id}/orders?scenario={created_run['scenario_anchors'][0]['id']}"
+        )
+    )
+    assert scenario_filtered["filters"]["scenario"] == created_run["scenario_anchors"][0]["id"]
+
+    global_runs = assert_ok(client.get("/compositions/backtest-runs"))
+    assert any(item["run_id"] == run_id for item in global_runs["items"])
+
     order = filtered["items"][0]
     netting = assert_ok(
         client.get(
@@ -1040,7 +1142,7 @@ def test_composition_backtest_run_orders_netting_and_exports(tmp_path):
         netting["after_netting"]["internal_net_quantity"]
         + netting["after_netting"]["external_quantity"]
     ) == pytest.approx(order["quantity"])
-    assert netting["generated_from"] == "composition_rebalance_events"
+    assert netting["generated_from"] == "composition_rebalance_events_and_strategy_trades"
 
     csv_response = client.get(
         f"/compositions/{composition['id']}/backtest-runs/{run_id}/orders/export?format=csv&symbol=IEF"
@@ -1086,7 +1188,7 @@ def test_composition_backtest_run_accepts_frozen_source_run_deep_link(tmp_path):
         client.get(f"/compositions/{composition['id']}/backtest-runs/{source_run_id}/orders")
     )
     assert orders["total"] == fetched_run["summary"]["order_count"]
-    assert orders["generated_from"] == "composition_rebalance_events"
+    assert orders["generated_from"] == "composition_rebalance_events_and_strategy_trades"
 
 
 def test_composition_allocation_job_status_and_shape(tmp_path):
@@ -1141,12 +1243,146 @@ def test_composition_allocation_job_status_and_shape(tmp_path):
     assert created_job["frontier_points"]
     assert created_job["covariance_preview"] == composition["correlation_matrix"]
     assert created_job["evidence"]["not_real_optimizer"] is True
+    assert created_job["evidence_grade"] in {"A", "B", "C"}
+    assert created_job["scenario_anchors"]
+    assert created_job["risk_budget_timeline"]
+    assert min_vol_candidate["promotion_readiness"]["required_steps"] == [
+        "diff_review",
+        "constraint_check",
+        "migration_cost_review",
+        "evidence_gate",
+    ]
 
     fetched_job = assert_ok(
         client.get(f"/compositions/{composition['id']}/allocation-jobs/{created_job['job_id']}")
     )
     assert fetched_job["job_id"] == created_job["job_id"]
     assert fetched_job["candidates"] == created_job["candidates"]
+
+    global_jobs = assert_ok(client.get("/compositions/allocation-jobs"))
+    assert any(item["job_id"] == created_job["job_id"] for item in global_jobs["items"])
+
+
+def test_composition_allocation_job_hides_promote_action_when_readiness_blocked(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    composition = _create_sleeve_os_composition(client)
+    created_job = assert_ok(
+        client.post(
+            f"/compositions/{composition['id']}/allocation-jobs",
+            json={"idempotency_key": "blocked-evidence-allocation", "intent": "min_vol"},
+        )
+    )
+    blocked_payload = dict(created_job)
+    blocked_payload["candidates"] = [
+        {
+            **candidate,
+            "allowed_actions": ["promote_candidate"],
+            "promotion_readiness": {
+                "status": "blocked",
+                "evidence_grade": "C",
+                "migration_cost_bps": 1.0,
+                "policy_violations": [],
+                "blockers": ["evidence_grade_c"],
+                "required_steps": ["diff_review", "constraint_check", "migration_cost_review", "evidence_gate"],
+            },
+        }
+        if candidate["id"] == "min_vol"
+        else candidate
+        for candidate in created_job["candidates"]
+    ]
+    client.app.state.service.storage.execute(
+        "UPDATE composition_allocation_jobs SET result_json = ? WHERE id = ?",
+        (json.dumps(blocked_payload), created_job["job_id"]),
+    )
+
+    fetched_job = assert_ok(
+        client.get(f"/compositions/{composition['id']}/allocation-jobs/{created_job['job_id']}")
+    )
+    min_vol_candidate = next(item for item in fetched_job["candidates"] if item["id"] == "min_vol")
+    assert min_vol_candidate["promotion_readiness"]["status"] == "blocked"
+    assert "promote_candidate" not in min_vol_candidate["allowed_actions"]
+
+
+def test_composition_v2_versions_promotion_and_decision_packet_are_snapshots(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    composition = _create_sleeve_os_composition(client)
+
+    created_run = assert_ok(
+        client.post(
+            f"/compositions/{composition['id']}/backtest-runs",
+            json={"idempotency_key": "v2-run", "horizon_years": 10},
+        )
+    )
+    created_job = assert_ok(
+        client.post(
+            f"/compositions/{composition['id']}/allocation-jobs",
+            json={"idempotency_key": "v2-allocation", "intent": "risk_parity"},
+        )
+    )
+
+    versions_before = assert_ok(client.get(f"/compositions/{composition['id']}/versions"))
+    assert any(item["status"] == "ACTIVE" for item in versions_before["items"])
+
+    candidate = next(item for item in created_job["candidates"] if item["id"] == "risk_parity")
+    draft = assert_ok(
+        client.post(
+            f"/compositions/{composition['id']}/allocation-jobs/{created_job['job_id']}/candidates/{candidate['id']}/promote-draft",
+            json={"decision_note": "Review candidate as draft only."},
+        )
+    )
+    assert draft["status"] == "DRAFT"
+    assert draft["source_kind"] == "allocation_candidate"
+    assert draft["diff"]["weight_changes"]
+    assert draft["evidence"]["required_steps"] == [
+        "diff_review",
+        "constraint_check",
+        "migration_cost_review",
+        "evidence_gate",
+    ]
+
+    blocked = client.post(
+        f"/compositions/{composition['id']}/allocation-jobs/{created_job['job_id']}/candidates/current/promote-draft",
+        json={"decision_note": "Reference rows cannot promote."},
+    )
+    assert blocked.status_code == 400
+
+    packet = assert_ok(
+        client.post(
+            f"/compositions/{composition['id']}/decision-packets",
+            json={
+                "version_id": draft["id"],
+                "backtest_run_id": created_run["run_id"],
+                "allocation_job_id": created_job["job_id"],
+                "candidate_id": candidate["id"],
+                "recommendation": "committee_review",
+                "notes": "Snapshot should not drift after current composition changes.",
+            },
+        )
+    )
+    assert packet["version_id"] == draft["id"]
+    assert packet["source_refs"]["candidate_id"] == candidate["id"]
+    assert packet["packet"]["snapshot"]["version"]["id"] == draft["id"]
+    original_packet_snapshot = packet["packet"]
+
+    assert_ok(client.patch(f"/compositions/{composition['id']}", json={"status": "DRAFT"}))
+    fetched_packet = assert_ok(
+        client.get(f"/compositions/{composition['id']}/decision-packets/{packet['id']}")
+    )
+    assert fetched_packet["packet"] == original_packet_snapshot
+
+    markdown_response = client.get(
+        f"/compositions/{composition['id']}/decision-packets/{packet['id']}/export?format=markdown"
+    )
+    assert markdown_response.status_code == 200, markdown_response.text
+    assert markdown_response.headers["content-type"].startswith("text/markdown")
+    assert draft["id"] in markdown_response.text
+
+    html_response = client.get(
+        f"/compositions/{composition['id']}/decision-packets/{packet['id']}/export?format=html"
+    )
+    assert html_response.status_code == 200, html_response.text
+    assert html_response.headers["content-type"].startswith("text/html")
+    assert "<!doctype html>" in html_response.text.lower()
 
 
 def test_composition_update_skips_noop_versions_and_requires_upgrade_reason(tmp_path):
@@ -1288,6 +1524,38 @@ def test_composition_detail_and_list_flag_saved_strategy_leg_new_version(tmp_pat
     assert any(item["source_ref_id"] == stale_strategy_leg_ref for item in list_item["source_integrity"])
 
 
+def test_source_signature_stale_does_not_flag_strategy_version_update(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    source_ref_id = "strategy_leg::strat_123::strat_123-v2"
+
+    assert (
+        service._composition_source_integrity_has_new_strategy_version(
+            {
+                "source_ref_id": source_ref_id,
+                "current_ref_id": source_ref_id,
+                "signature_status": "stale",
+                "drift_status": "drifted",
+                "alerts": ["Current source version differs from the frozen source signature."],
+            }
+        )
+        is False
+    )
+
+    assert (
+        service._composition_source_integrity_has_new_strategy_version(
+            {
+                "source_ref_id": source_ref_id,
+                "current_ref_id": "strategy_leg::strat_123::strat_123-v3",
+                "signature_status": "stale",
+                "drift_status": "version_drift",
+                "alerts": ["A newer parameter version exists for this strategy leg."],
+            }
+        )
+        is True
+    )
+
+
 def test_list_compositions_uses_lightweight_summary_without_detail_fanout(tmp_path, monkeypatch):
     client, _ = create_test_client(tmp_path)
     composition = _create_sleeve_os_composition(client)
@@ -1366,11 +1634,14 @@ def test_composition_detail_defaults_to_recent_ten_year_window_and_fills_missing
     assert preview["return_quality_summary"]["aligned_points"] == 120
     assert preview["return_quality_summary"]["fallback_used"] is True
     assert preview["return_quality_summary"]["missing_points"] >= 240
+    assert preview["primary_diagnosis"]["diagnosis_label"] == "待校准：代理覆盖待确认"
+    assert preview["primary_diagnosis"]["proxy_context"][0]["proxy_source"] == "unconfirmed"
     assert len(preview["rebalance_events"]) == 41
     assert preview["rebalance_events"][0]["label"] == "2015-07"
     assert preview["rebalance_events"][-1]["label"] == "2025-06"
 
     created_composition = assert_ok(client.post("/compositions", json={**payload, "status": "ACTIVE"}))
+    assert created_composition["primary_diagnosis"]["diagnosis_label"] == "待校准：代理覆盖待确认"
     created_run = assert_ok(
         client.post(
             f"/compositions/{created_composition['id']}/backtest-runs",
@@ -1387,6 +1658,28 @@ def test_composition_detail_defaults_to_recent_ten_year_window_and_fills_missing
     assert orders["total"] == created_run["summary"]["order_count"]
     assert orders["items"][0]["event_label"] == "2015-07"
     assert orders["items"][-1]["event_label"] == "2025-06"
+    proxy_context = created_composition["primary_diagnosis"]["proxy_context"][0]
+    confirmed = assert_ok(
+        client.post(
+            f"/compositions/{created_composition['id']}/proxy-confirmations",
+            json={
+                "leg_id": proxy_context["leg_id"],
+                "target_symbol": proxy_context["target_symbol"],
+                "proxy_symbol": proxy_context["proxy_symbol"],
+                "horizon_label": proxy_context["horizon_label"],
+                "proxy_signature": proxy_context["proxy_signature"],
+                "coverage_window": proxy_context["coverage_window"],
+                "reason": "Regression confirms planned proxy coverage.",
+            },
+        )
+    )
+    assert confirmed["primary_diagnosis"]["diagnosis_label"] == "稳健：人工确认代理覆盖"
+    refreshed = assert_ok(client.post(f"/compositions/{created_composition['id']}/diagnostics/refresh"))
+    assert refreshed["primary_diagnosis"]["diagnosis_label"] == "稳健：人工确认代理覆盖"
+    listed = assert_ok(client.get("/compositions"))
+    list_item = next(item for item in listed if item["id"] == created_composition["id"])
+    assert any(item["diagnosis_label"] == "稳健：人工确认代理覆盖" for item in list_item["diagnoses"])
+    assert all(item["diagnosis_label"] != "待校准：代理覆盖待确认" for item in list_item["diagnoses"])
     initial_annualized_return = next(
         item["value"] for item in created_composition["kpis"] if item["key"] == "annualized_return"
     )
@@ -1477,6 +1770,8 @@ def test_composition_preview_does_not_synthesize_correlation_without_aligned_ret
     )
 
     assert preview["return_quality_summary"]["status"] == "fallback"
+    assert preview["primary_diagnosis"]["diagnosis_label"] == "失效：底层收益序列真空"
+    assert preview["primary_diagnosis"]["system_disposition"] == "存在未关闭的失效问题，晋升门禁已暂停。"
     off_diagonal = [
         cell["correlation"]
         for cell in preview["correlation_matrix"]

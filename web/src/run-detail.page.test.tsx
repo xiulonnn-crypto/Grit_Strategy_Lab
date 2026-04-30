@@ -486,6 +486,78 @@ describe('RunDetailPage', () => {
     expect(await screen.findByText('Multiplier 0.80x | 10Y percentile 78.4 | Bucket 70-90')).toBeInTheDocument();
   });
 
+  it('localizes asset allocation properties and suppresses routine normalization warnings', async () => {
+    fakeApi.getBacktestRunDetail.mockResolvedValue({
+      ...detail,
+      status: 'COMPLETED_WITH_WARNINGS',
+      warnings: ['Allocation weights were normalized to 100%.'],
+      parameter_snapshot: {
+        strategy_name: '美股标普纳指平衡策略',
+        strategy_description: '多资产风险预算、目标权重、再平衡与成本',
+        strategy_type: 'ASSET_ALLOCATION',
+        benchmark_symbol: 'SPY',
+        capital: 100000,
+        allocation_assets: [
+          { symbol: 'SPY', display_name: 'S&P 500 ETF', asset_class: 'Equity' },
+          { symbol: 'QQQ', display_name: 'Nasdaq 100 ETF', asset_class: 'Growth Equity' },
+        ],
+        allocation_weight__SPY_pct: 35,
+        allocation_weight__QQQ_pct: 25,
+        investment_mode: 'all_in',
+        rebalance_enabled: true,
+        rebalance_frequency: 'quarterly',
+        rebalance_threshold_pct: 5,
+        cost_model_enabled: true,
+        fee_bps: 1.5,
+        slippage_bps: 2.5,
+        expense_ratio_bps: 8,
+      },
+      snapshot_summary: {
+        status: 'READY',
+        dataset_snapshot_id: 'ds-price',
+        supporting_dataset_snapshot_id: 'ds-corporate-actions',
+        valuation_dataset_snapshot_id: null,
+        symbol_count: 2,
+        row_count: 5028,
+        benchmark_trade_days: 2514,
+        coverage_days: 2514,
+        blocking: false,
+        message: 'Price snapshot is still incomplete. The run can proceed using the currently available symbols.',
+        price_dataset_status: 'INCOMPLETE',
+        corporate_actions_status: 'INCOMPLETE',
+        valuation_dataset_status: 'NOT_REQUIRED',
+        universe_status: 'NOT_REQUIRED',
+        latest_trade_date: '2026-03-24',
+      },
+    } satisfies ApiBacktestRunDetail);
+
+    render(<RunDetailPage runId="bt-asset-allocation-properties" />);
+
+    expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
+    expect(screen.queryByText('Allocation weights were normalized to 100%.')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: '配置' }));
+
+    expect(await screen.findByText('配置标的')).toBeInTheDocument();
+    expect(screen.getByText('SPY（S&P 500 ETF，权益）, QQQ（Nasdaq 100 ETF，成长权益）')).toBeInTheDocument();
+    expect(screen.getByText('SPY 目标权重(%)')).toBeInTheDocument();
+    expect(screen.getByText('投资方式')).toBeInTheDocument();
+    expect(screen.getByText('一次性建仓')).toBeInTheDocument();
+    expect(screen.getByText('再平衡开关')).toBeInTheDocument();
+    expect(screen.getByText('成本模拟开关')).toBeInTheDocument();
+    expect(screen.getByText('估值数据状态')).toBeInTheDocument();
+    expect(screen.getAllByText('无需').length).toBeGreaterThan(0);
+    expect(screen.getByText('价格快照仍未完整，但可基于当前可用标的继续运行回测。')).toBeInTheDocument();
+
+    const bodyText = document.body.textContent ?? '';
+    expect(bodyText).not.toContain('allocation_weight__SPY_pct');
+    expect(bodyText).not.toContain('"display_name"');
+    expect(bodyText).not.toContain('investment_mode');
+    expect(bodyText).not.toContain('price_dataset_status');
+    expect(bodyText).not.toContain('valuation_dataset_status');
+    expect(bodyText).not.toContain('NOT_REQUIRED');
+  });
+
   it('lazy-loads context only when evidence or properties needs it', async () => {
     const initialDetail = structuredClone(detail) as ApiBacktestRunDetail & Record<string, unknown>;
     delete initialDetail.request;

@@ -49,6 +49,7 @@ STRATEGY_TYPE_TITLES = {
     "MOMENTUM": "动量 / 趋势跟随策略",
     "MEAN_REVERSION": "均值回归策略",
     "BUY_AND_HOLD": "定投策略",
+    "ASSET_ALLOCATION": "资产配置型",
 }
 
 
@@ -60,6 +61,51 @@ STRATEGY_TEMPLATES: dict[str, StrategyTemplate] = {
         prompt_hints=("策略",),
         top_level_defaults={"strategy_type": "GENERAL", "universe_name": "", "rebalance_frequency": None},
         parameter_defaults={},
+    ),
+    "ASSET_ALLOCATION": StrategyTemplate(
+        key="ASSET_ALLOCATION",
+        name="Global Allocation",
+        description="Multi-asset target weight, rebalance, and cost simulation strategy.",
+        prompt_hints=("asset allocation", "risk parity", "global allocation", "资产配置", "风险平价"),
+        top_level_defaults={
+            "strategy_type": "ASSET_ALLOCATION",
+            "universe_name": "Global Allocation",
+            "rebalance_frequency": "quarterly",
+        },
+        parameter_defaults={
+            "strategy_name": "全球资产配置策略",
+            "strategy_description": "多资产风险预算、目标权重、再平衡与成本假设。",
+            "benchmark_symbol": "SPY",
+            "capital": 100000,
+            "allocation_assets": [],
+            "investment_mode": "all_in",
+            "contribution_amount": 1000,
+            "investment_frequency": "monthly",
+            "rebalance_enabled": True,
+            "rebalance_frequency": "quarterly",
+            "rebalance_threshold_pct": 5,
+            "cost_model_enabled": True,
+            "fee_bps": 1.5,
+            "slippage_bps": 2.5,
+            "expense_ratio_bps": 8,
+        },
+        fields=[
+            TemplateField("strategy_name", "策略名称", "string"),
+            TemplateField("strategy_description", "策略说明", "string"),
+            TemplateField("benchmark_symbol", "基准", "enum", "SPY"),
+            TemplateField("capital", "初始资金(USD)", "number"),
+            TemplateField("allocation_assets", "资产清单", "json"),
+            TemplateField("investment_mode", "配置类型", "enum", "all_in"),
+            TemplateField("contribution_amount", "定投金额(USD)", "number"),
+            TemplateField("investment_frequency", "定投频率", "enum", "monthly"),
+            TemplateField("rebalance_enabled", "再平衡开关", "boolean", True),
+            TemplateField("rebalance_frequency", "再平衡频率", "enum", "quarterly"),
+            TemplateField("rebalance_threshold_pct", "偏离阈值(%)", "number"),
+            TemplateField("cost_model_enabled", "成本模拟", "boolean", True),
+            TemplateField("fee_bps", "交易费(bps)", "number"),
+            TemplateField("slippage_bps", "滑点(bps)", "number"),
+            TemplateField("expense_ratio_bps", "持有成本(bps)", "number"),
+        ],
     ),
     "GRID": StrategyTemplate(
         key="GRID",
@@ -322,6 +368,8 @@ def _detect_strategy_type(text: str, forced_type: str | None = None) -> str:
         return "GRID"
     if "动量" in text or "momentum" in lowered:
         return "MOMENTUM"
+    if "资产配置" in text or "风险平价" in text or "asset allocation" in lowered or "risk parity" in lowered:
+        return "ASSET_ALLOCATION"
     return forced_type.upper() if forced_type else "GENERAL"
 
 
@@ -792,6 +840,8 @@ def _detect_strategy_type(text: str, forced_type: str | None = None) -> str:
         return "MEAN_REVERSION"
     if "动量" in text or "momentum" in lowered:
         return "MOMENTUM"
+    if "资产配置" in text or "风险平价" in text or "asset allocation" in lowered or "risk parity" in lowered:
+        return "ASSET_ALLOCATION"
     if "定投" in text or "buy and hold" in lowered or "dca" in lowered:
         return "BUY_AND_HOLD"
     if re.search(r"每(月|周|日|天|季|年).*(买入)", text):

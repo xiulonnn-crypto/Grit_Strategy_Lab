@@ -12,6 +12,7 @@ type FakeApi = {
   listStrategies: ReturnType<typeof vi.fn>;
   materializeStrategy: ReturnType<typeof vi.fn>;
   prepareConfirmation: ReturnType<typeof vi.fn>;
+  submitBacktestRun: ReturnType<typeof vi.fn>;
   updateConfirmation: ReturnType<typeof vi.fn>;
 };
 
@@ -23,6 +24,7 @@ const fakeApi = vi.hoisted<FakeApi>(() => ({
   listStrategies: vi.fn(),
   materializeStrategy: vi.fn(),
   prepareConfirmation: vi.fn(),
+  submitBacktestRun: vi.fn(),
   updateConfirmation: vi.fn(),
 }));
 
@@ -384,9 +386,16 @@ beforeEach(() => {
   fakeApi.listStrategies.mockReset();
   fakeApi.materializeStrategy.mockReset();
   fakeApi.prepareConfirmation.mockReset();
+  fakeApi.submitBacktestRun.mockReset();
   fakeApi.updateConfirmation.mockReset();
   fakeApi.listBacktestRuns.mockResolvedValue([]);
   fakeApi.listStrategies.mockResolvedValue([]);
+  fakeApi.submitBacktestRun.mockResolvedValue({
+    id: 'bt-submitted',
+    strategy_id: 'strat-submitted',
+    status: 'QUEUED',
+    metrics: {},
+  });
   window.location.hash = '';
 });
 
@@ -407,6 +416,22 @@ describe('creation flow', () => {
       expect(fakeApi.createCreationSession).toHaveBeenCalledWith({ strategy_type: 'MOMENTUM' }),
     );
     expect(window.location.hash).toBe('#/creation/sessions/cs-001');
+  });
+
+  it('routes asset allocation from the template modal and keeps general strategy last', async () => {
+    render(<CreationTemplatePage />);
+    expect(await screen.findByRole('heading', { level: 1, name: '策略库' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '新建策略' }));
+
+    const templateNames = screen
+      .getAllByRole('heading', { level: 3 })
+      .map((heading) => heading.textContent);
+    expect(templateNames.slice(-2)).toEqual(['资产配置型', '通用策略']);
+
+    fireEvent.click(screen.getByRole('button', { name: '创建资产配置策略' }));
+
+    expect(fakeApi.createCreationSession).not.toHaveBeenCalled();
+    expect(window.location.hash).toBe('#/creation/asset-allocation/new');
   });
 
   it('renders the strategy library table and links horizon returns to run detail', async () => {
@@ -458,12 +483,176 @@ describe('creation flow', () => {
     expect(screen.getByText('+10.1% / 1.18')).toBeInTheDocument();
     expect(screen.getAllByText('一键生成')).toHaveLength(2);
 
-    fireEvent.click(screen.getByRole('button', { name: '为 QQQ 网格交易策略 一键生成 20Y 回测' }));
-    expect(window.location.hash).toBe('#/strategies/strat-grid/backtest-runs/new?period_years=20');
-
     fireEvent.click(screen.getByRole('button', { name: /查看 QQQ 网格交易策略 10Y 回测/ }));
 
     expect(window.location.hash).toBe('#/runs/bt-grid-10y');
+  });
+
+  it('does not reuse older parameter-version returns for the current strategy library row', async () => {
+    fakeApi.listStrategies.mockResolvedValue([
+      {
+        id: 'strat-balanced',
+        name: '美股标普纳指平衡策略',
+        strategy_type: 'ASSET_ALLOCATION',
+        universe_name: 'Global Allocation',
+        current_parameter_version: 2,
+        current_parameter_version_id: 'strat-balanced-v2',
+        updated_at: '2026-04-30T08:55:26Z',
+      },
+    ]);
+    fakeApi.listBacktestRuns.mockResolvedValue([
+      {
+        id: 'bt-balanced-v1-10y',
+        strategy_id: 'strat-balanced',
+        strategy_name: '美股标普纳指平衡策略',
+        status: 'COMPLETED',
+        start_date: '2016-03-24',
+        end_date: '2026-03-24',
+        completed_at: '2026-04-30T06:09:35Z',
+        parameter_version_id: 'strat-balanced-v1',
+        metrics: { total_return: 1.54, annualized_return: 0.149, sharpe: 0.82, max_drawdown: -0.12 },
+      },
+      {
+        id: 'bt-balanced-v1-20y',
+        strategy_id: 'strat-balanced',
+        strategy_name: '美股标普纳指平衡策略',
+        status: 'COMPLETED_WITH_WARNINGS',
+        start_date: '2006-03-24',
+        end_date: '2026-03-24',
+        completed_at: '2026-04-30T06:08:38Z',
+        parameter_version_id: 'strat-balanced-v1',
+        metrics: { total_return: 2.1, annualized_return: 0.108, sharpe: 0.61, max_drawdown: -0.18 },
+      },
+      {
+        id: 'bt-balanced-v1-30y',
+        strategy_id: 'strat-balanced',
+        strategy_name: '美股标普纳指平衡策略',
+        status: 'COMPLETED_WITH_WARNINGS',
+        start_date: '1996-03-24',
+        end_date: '2026-03-24',
+        completed_at: '2026-04-30T06:08:37Z',
+        parameter_version_id: 'strat-balanced-v1',
+        metrics: { total_return: 3.5, annualized_return: 0.085, sharpe: 0.5, max_drawdown: -0.22 },
+      },
+    ]);
+
+    render(<CreationTemplatePage />);
+
+    const strategyName = await screen.findByText('美股标普纳指平衡策略');
+    const strategyRow = strategyName.closest('tr');
+
+    expect(strategyName).toBeInTheDocument();
+    expect(screen.getByText('v2')).toBeInTheDocument();
+    expect(strategyRow?.querySelector('.strategy-library-status')?.textContent).toBe('待回测');
+    expect(screen.queryByText('+14.9% / 0.82')).not.toBeInTheDocument();
+    expect(screen.queryByText('+10.8% / 0.61')).not.toBeInTheDocument();
+    expect(screen.queryByText('+8.5% / 0.50')).not.toBeInTheDocument();
+    expect(screen.getAllByText('一键生成')).toHaveLength(3);
+  });
+
+  it('从策略库一键生成会同时提交当前版本 10Y/20Y/30Y 回测并局部刷新', async () => {
+    fakeApi.listStrategies.mockResolvedValue([
+      {
+        id: 'strat-balanced',
+        name: '美股标普纳指平衡策略',
+        strategy_type: 'ASSET_ALLOCATION',
+        universe_name: 'Global Allocation',
+        current_parameter_version: 2,
+        current_parameter_version_id: 'strat-balanced-v2',
+        dataset_snapshot_id: 'ds-price',
+        universe_snapshot_id: null,
+        updated_at: '2026-04-30T08:55:26Z',
+      },
+    ]);
+    fakeApi.listBacktestRuns
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: 'bt-balanced-v2-10y',
+          strategy_id: 'strat-balanced',
+          status: 'QUEUED',
+          start_date: '2016-03-24',
+          end_date: '2026-03-24',
+          parameter_version_id: 'strat-balanced-v2',
+        },
+        {
+          id: 'bt-balanced-v2-20y',
+          strategy_id: 'strat-balanced',
+          status: 'QUEUED',
+          start_date: '2006-03-24',
+          end_date: '2026-03-24',
+          parameter_version_id: 'strat-balanced-v2',
+        },
+        {
+          id: 'bt-balanced-v2-30y',
+          strategy_id: 'strat-balanced',
+          status: 'QUEUED',
+          start_date: '1996-03-24',
+          end_date: '2026-03-24',
+          parameter_version_id: 'strat-balanced-v2',
+        },
+      ]);
+    const resolveSubmissions: Array<() => void> = [];
+    fakeApi.submitBacktestRun.mockImplementation((strategyId: string, payload: Record<string, unknown>) =>
+      new Promise((resolve) => {
+        resolveSubmissions.push(() =>
+          resolve({
+            id: `bt-${String(payload.start_date)}`,
+            strategy_id: strategyId,
+            status: 'QUEUED',
+            metrics: {},
+            start_date: payload.start_date,
+            end_date: payload.end_date,
+            parameter_version_id: payload.parameter_version_id,
+          }),
+        );
+      }),
+    );
+
+    render(<CreationTemplatePage />);
+
+    const generateButton = await screen.findByRole('button', {
+      name: '为 美股标普纳指平衡策略 从 10Y 入口一键生成 10Y、20Y、30Y 回测',
+    });
+    fireEvent.click(generateButton);
+
+    await waitFor(() => expect(fakeApi.submitBacktestRun).toHaveBeenCalledTimes(3));
+    expect(screen.getByRole('status')).toHaveTextContent('已提交长期回测生成任务');
+
+    const runningButtons = screen
+      .getAllByRole('button')
+      .filter((button) => button.className.includes('strategy-library-return--running'));
+    expect(runningButtons).toHaveLength(3);
+    runningButtons.forEach((button) => expect(button).toBeDisabled());
+    expect(screen.getAllByText('生成中').length).toBeGreaterThanOrEqual(3);
+
+    expect(fakeApi.submitBacktestRun).toHaveBeenNthCalledWith(
+      1,
+      'strat-balanced',
+      expect.objectContaining({
+        start_date: '2016-03-24',
+        end_date: '2026-03-24',
+        parameter_version_id: 'strat-balanced-v2',
+        dataset_snapshot_id: 'ds-price',
+        is_permanent: false,
+      }),
+    );
+    expect(fakeApi.submitBacktestRun).toHaveBeenNthCalledWith(
+      2,
+      'strat-balanced',
+      expect.objectContaining({ start_date: '2006-03-24', end_date: '2026-03-24' }),
+    );
+    expect(fakeApi.submitBacktestRun).toHaveBeenNthCalledWith(
+      3,
+      'strat-balanced',
+      expect.objectContaining({ start_date: '1996-03-24', end_date: '2026-03-24' }),
+    );
+
+    resolveSubmissions.forEach((resolve) => resolve());
+
+    await waitFor(() => expect(fakeApi.listBacktestRuns).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole('status')).toHaveTextContent('长期回测记录已生成，策略列表已刷新。');
+    expect(screen.getAllByText('生成中').length).toBeGreaterThanOrEqual(3);
   });
 
   it('默认按最近编辑倒序，并支持按收益列排序', async () => {

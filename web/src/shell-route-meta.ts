@@ -28,6 +28,9 @@ export const SHELL_NAV_ITEMS: ShellNavItem[] = [
 export function getRouteMeta(route: AppRoute): AppRouteMeta {
   switch (route.kind) {
     case 'composition-dashboard':
+    case 'composition-list':
+    case 'composition-backtest-runs':
+    case 'composition-lab':
     case 'leg-inventory':
     case 'composition-workbench':
     case 'composition-detail':
@@ -47,7 +50,7 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         navKey: 'workspace',
         eyebrow: '工作台',
         title: '工作台健康度',
-        description: '查看策略看板、最近回测和可直接进入主链路的恢复入口。',
+        description: '总览策略规模、活跃回测与优化进度，直达最新任务。',
         showPageHeading: false,
       };
     case 'creation-template':
@@ -64,6 +67,14 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         eyebrow: '策略创建',
         title: '创建会话',
         description: '由对话驱动确认稿，再进入策略落地与回测提交。',
+        showPageHeading: false,
+      };
+    case 'asset-allocation-config':
+      return {
+        navKey: 'creation',
+        eyebrow: '策略管理',
+        title: '资产配置策略配置',
+        description: '标的、权重、再平衡与成本参数配置。',
         showPageHeading: false,
       };
     case 'strategy-detail':

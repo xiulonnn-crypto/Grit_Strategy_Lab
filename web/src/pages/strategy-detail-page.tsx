@@ -93,6 +93,14 @@ const PARAMETER_LABELS: Record<string, string> = {
   investment_frequency: '投入频次',
   contribution_anchor: '定投执行锚点',
   dynamic_investment_logic: '动态定投逻辑',
+  allocation_assets: '配置标的',
+  investment_mode: '配置类型',
+  rebalance_enabled: '再平衡开关',
+  rebalance_threshold_pct: '偏离阈值',
+  cost_model_enabled: '成本模拟',
+  fee_bps: '交易费',
+  slippage_bps: '滑点',
+  expense_ratio_bps: '持有成本',
   lookback_months: '回看月数',
   skip_recent_months: '跳过最近月数',
   hold_rank_threshold: '保留排名阈值',
@@ -132,6 +140,14 @@ const PARAMETER_ORDER: Record<string, number> = {
   investment_frequency: 120,
   contribution_anchor: 125,
   dynamic_investment_logic: 126,
+  allocation_assets: 127,
+  investment_mode: 128,
+  rebalance_enabled: 129,
+  rebalance_threshold_pct: 130,
+  cost_model_enabled: 131,
+  fee_bps: 132,
+  slippage_bps: 133,
+  expense_ratio_bps: 134,
   lookback_months: 130,
   skip_recent_months: 140,
   top_n: 150,
@@ -220,6 +236,7 @@ function strategyTypeLabel(value: string): string {
     GRID: '网格交易',
     MEAN_REVERSION: '均值回归',
     BUY_AND_HOLD: '定投 / 持有',
+    ASSET_ALLOCATION: '资产配置型',
     GENERAL: '通用策略',
   };
   return map[value] ?? value;
@@ -585,6 +602,16 @@ function formatParameterValue(key: string, value: ParameterValue): string {
   if (typeof value === 'string') {
     return formatSharedParameterValue(value, key);
   }
+  if (Array.isArray(value) && key === 'allocation_assets') {
+    const symbols = value
+      .map((item) => {
+        if (!item || typeof item !== 'object') return '';
+        const symbol = (item as Record<string, unknown>).symbol;
+        return typeof symbol === 'string' ? symbol.trim().toUpperCase() : '';
+      })
+      .filter(Boolean);
+    return symbols.length ? symbols.join(' / ') : '-';
+  }
   return String(value);
 }
 
@@ -810,6 +837,27 @@ function buildStrategySummary(strategy: ApiStrategyDetail): string {
     }
     if (dynamicInvestmentLogic) {
       parts.push('按估值区间动态调整投入倍率');
+    }
+  } else if (strategy.strategy_type === 'ASSET_ALLOCATION') {
+    const allocationAssets = Array.isArray(parameters.allocation_assets)
+      ? parameters.allocation_assets
+          .map((item) => {
+            if (!item || typeof item !== 'object') return '';
+            const symbol = (item as Record<string, unknown>).symbol;
+            return typeof symbol === 'string' ? symbol.trim().toUpperCase() : '';
+          })
+          .filter(Boolean)
+      : [];
+    const mode = readStringParameter(parameters.investment_mode);
+    const costEnabled = parameters.cost_model_enabled === true;
+    parts.push(
+      allocationAssets.length
+        ? `${allocationAssets.join('/')} 目标权重配置`
+        : '多资产目标权重配置',
+    );
+    parts.push(mode === 'dca' ? '定投执行' : 'All-in 建仓');
+    if (costEnabled) {
+      parts.push('纳入成本模拟');
     }
   } else {
     parts.push(`执行${strategyTypeLabel(strategy.strategy_type)}策略`);

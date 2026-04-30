@@ -18,6 +18,10 @@ import {
   formatLegReferenceSummary,
   normalizePercentLike,
 } from '../../lib/compose-display';
+import {
+  diagnosisTone,
+  primaryCompositionDiagnosis,
+} from '../../lib/composition-diagnostics';
 import { LegDetailDrawer } from '../legs/leg-inventory-view';
 import type {
   ApiCompositionCorrelationCell,
@@ -556,9 +560,23 @@ function getReturnQualityDetail(detail: ApiCompositionDetail): string {
     return '收益质量等待运行态补齐。';
   }
   if (quality.fallback_used) {
-    return `代理或回退 ${quality.missing_points} 点。`;
+    return `存在代理覆盖或临时补值，状态标签会说明是否需要处理。`;
   }
   return `对齐 ${quality.aligned_points} 点。`;
+}
+
+function getDiagnosisChipClassName(detail: ApiCompositionDetail): string {
+  const tone = diagnosisTone(primaryCompositionDiagnosis(detail));
+  if (tone === 'danger') {
+    return 'status-chip status-chip--danger';
+  }
+  if (tone === 'warning') {
+    return 'status-chip status-chip--warning';
+  }
+  if (tone === 'good') {
+    return 'status-chip status-chip--success';
+  }
+  return 'status-chip status-chip--soft';
 }
 
 function buildDetailKpiCards(detail: ApiCompositionDetail): DetailKpiCard[] {
@@ -689,8 +707,8 @@ function buildDetailKpiCards(detail: ApiCompositionDetail): DetailKpiCard[] {
       label: '收益质量',
       value: quality ? `${Math.round(quality.coverage_pct)}%` : '待补',
       detail: getReturnQualityDetail(detail),
-      tooltip: '收益质量来自组合收益、基准与腿收益流的对齐覆盖率；使用代理或回退时会提示。',
-      trendText: quality?.fallback_used ? '存在代理' : '证据对齐',
+      tooltip: '收益质量来自组合收益、基准与腿收益流的对齐覆盖率；如使用代理或补值，以状态标签判定是否需要处理。',
+      trendText: quality?.fallback_used ? '状态标签判定' : '收益对齐',
       trendTone: quality?.fallback_used ? 'worse' : 'better',
       compareItems: [
         { label: '夏普', value: portfolioSharpe === null ? '待补' : portfolioSharpe.toFixed(2) },
@@ -876,17 +894,17 @@ function getBacktestRunIdFromRecord(source: Record<string, unknown> | undefined)
 
 function getCompositionVersionLabel(detail: ApiCompositionDetail): string {
   const detailVersion = getRecordString(detail as unknown as Record<string, unknown>, [
-    'composition_version_label',
     'current_composition_version_label',
     'current_version_label',
+    'composition_version_label',
   ]);
   if (detailVersion) {
     return detailVersion;
   }
   const heroVersion = getRecordString(detail.hero_summary as unknown as Record<string, unknown>, [
-    'composition_version_label',
     'current_composition_version_label',
     'current_version_label',
+    'composition_version_label',
     'version_label',
   ]);
   if (heroVersion) {
@@ -1088,6 +1106,21 @@ function getVersionEvolutionRows(detail: ApiCompositionDetail): VersionEvolution
   }
 
   const capturedAt = detail.source_evidence[0]?.captured_at ?? detail.updated_at;
+  const currentVersionNumber = getAuditVersionNumberOrNull(
+    getRecordObject(detail).current_composition_version_number,
+  );
+  const currentVersionLabel = getCompositionVersionLabel(detail);
+  if (currentVersionNumber !== null && currentVersionNumber > 1) {
+    return [
+      {
+        key: `${detail.id}-current-version`,
+        title: currentVersionLabel,
+        detail: '当前保存配置已生成版本记录；配置变化仍按保存时的权重、频次与成本口径复核。',
+        meta: `变更后 v${currentVersionNumber} · ${formatShortDate(capturedAt)}`,
+        versionAfter: currentVersionNumber,
+      },
+    ];
+  }
   return [
     {
       key: `${detail.id}-current-version`,
@@ -2609,6 +2642,7 @@ export function CompositionDetailView({
     rebalanceFrequency: detail.rebalance_frequency,
   });
   const detailKpis = buildDetailKpiCards(detail);
+  const primaryDiagnosis = primaryCompositionDiagnosis(detail);
   const compositionVersionLabel = getCompositionVersionLabel(detail);
   const currentRulingLabel = getCurrentRulingLabel(detail, driftCount);
   const executionHistoryRows = getExecutionHistoryRows(detail);
@@ -2634,6 +2668,7 @@ export function CompositionDetailView({
           <div className="composition-detail-hero__chips">
             <span className="status-chip status-chip--soft">{compositionVersionLabel}</span>
             <span className="status-chip status-chip--success">{formatCompositionStatusLabel(detail.status, detail.status_label)}</span>
+            <span className={getDiagnosisChipClassName(detail)}>状态标签：{primaryDiagnosis.diagnosis_label}</span>
             <span className="status-chip status-chip--soft">当前裁决：{currentRulingLabel}</span>
             <span className="status-chip status-chip--soft">{benchmarkLabel}</span>
             <span className="status-chip status-chip--soft">来源 {stableSourceCount} / {detail.hero_summary.leg_count} 稳定</span>

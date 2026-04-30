@@ -17,7 +17,7 @@ import './workspace-page-lane-b.css';
 
 const TEXT = {
   healthTitle: '工作台健康度',
-  healthCopy: '集中查看策略数量、活跃回测与优化进度，快速进入最近有动作的任务。',
+  healthCopy: '总览策略规模、活跃回测与优化进度，直达最新任务。',
   createStrategy: '创建策略',
   openSnapshots: '数据快照',
   noStrategyTitle: '创建第一个策略',
@@ -29,6 +29,8 @@ const TEXT = {
   latestRunLabel: '最新回测',
   latestRunFallback: '暂无',
 } as const;
+
+const STRATEGY_BOARD_LIMIT = 6;
 
 function isAbortError(caught: unknown): boolean {
   return caught instanceof DOMException
@@ -73,6 +75,26 @@ function formatDisplayDate(value?: string | null): string | null {
   }
 
   return `${parsed.getFullYear()}.${pad(parsed.getMonth() + 1)}.${pad(parsed.getDate())}`;
+}
+
+function getStrategyEditedTime(strategy: ApiStrategyListItem): number {
+  const value = strategy.updated_at ?? strategy.created_at;
+  if (!value) {
+    return 0;
+  }
+
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function compareStrategiesByRecentEdit(left: ApiStrategyListItem, right: ApiStrategyListItem): number {
+  const timeDiff = getStrategyEditedTime(right) - getStrategyEditedTime(left);
+  if (timeDiff !== 0) {
+    return timeDiff;
+  }
+
+  const nameDiff = left.name.localeCompare(right.name, 'zh-Hans');
+  return nameDiff || left.id.localeCompare(right.id);
 }
 
 function formatDateRange(start?: string | null, end?: string | null): string {
@@ -493,7 +515,12 @@ export function WorkspacePage(): JSX.Element {
   }, [api]);
 
   const cards = useMemo(
-    () => buildWorkspaceStrategyCards(strategies, strategyDetails, strategyLatestRuns),
+    () =>
+      buildWorkspaceStrategyCards(
+        [...strategies].sort(compareStrategiesByRecentEdit).slice(0, STRATEGY_BOARD_LIMIT),
+        strategyDetails,
+        strategyLatestRuns,
+      ),
     [strategies, strategyDetails, strategyLatestRuns],
   );
   const latestStrategyId = overview?.latest_strategy_id ?? cards[0]?.id ?? null;

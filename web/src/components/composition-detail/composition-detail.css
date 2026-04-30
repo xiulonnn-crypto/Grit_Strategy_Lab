@@ -1166,6 +1166,18 @@
   color: var(--gsl-color-success);
 }
 
+.composition-detail-approved .status-chip--warning {
+  border-color: rgba(184, 104, 19, 0.28);
+  background: #fff7e8;
+  color: #a45a0a;
+}
+
+.composition-detail-approved .status-chip--danger {
+  border-color: rgba(196, 92, 79, 0.28);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 .composition-detail-approved .composition-detail-approved-performance-header {
   display: flex;
   flex-wrap: wrap;

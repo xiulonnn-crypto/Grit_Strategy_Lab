@@ -292,6 +292,9 @@ describe('workspace dashboard', () => {
     expect(container!.querySelectorAll('.workspace-card-grid .workspace-strategy-card')).toHaveLength(2);
     expect(container!.querySelector('.workspace-recent-runs__timeline')).not.toBeNull();
     expect(screen.getByText('最近回测优化')).toBeInTheDocument();
+    expect(screen.getByText('总览策略规模、活跃回测与优化进度，直达最新任务。')).toBeInTheDocument();
+    expect(screen.getByText('按当前参数版本呈现收益走势与策略对比。')).toBeInTheDocument();
+    expect(screen.getByText('汇总近 8 条回测与优化记录，按最新进展排序。')).toBeInTheDocument();
 
     expect((await screen.findAllByText('\u7b56\u7565 Alpha')).length).toBeGreaterThan(0);
     expect((await screen.findAllByText('\u7b56\u7565 Beta')).length).toBeGreaterThan(0);
@@ -319,5 +322,53 @@ describe('workspace dashboard', () => {
     const recentIds = Array.from(container!.querySelectorAll('.workspace-recent-runs__run-id')).map((node) => node.textContent?.trim());
     expect(recentIds[0]).toBe('opt-201');
     expect(fakeApi.getBacktestRunDetail).not.toHaveBeenCalled();
+  });
+
+  it('limits the strategy board to the six most recently edited strategies', async () => {
+    const editedStrategies: ApiStrategyListItem[] = Array.from({ length: 8 }, (_, index) => {
+      const ordinal = index + 1;
+      const day = String(ordinal).padStart(2, '0');
+      return {
+        ...strategies[0],
+        id: `str-board-${ordinal}`,
+        name: `策略 ${ordinal}`,
+        latest_successful_run_id: null,
+        latest_run_id: null,
+        latest_optimization_job_id: null,
+        current_parameter_version: ordinal,
+        current_parameter_version_id: `str-board-${ordinal}-v${ordinal}`,
+        created_at: `2026-03-${day}T00:00:00.000Z`,
+        updated_at: `2026-03-${day}T0${Math.min(ordinal, 9)}:00:00.000Z`,
+        parameters: { lookback_days: 100 + ordinal, top_n: 10 + ordinal },
+        latest_completed_run_summary: null,
+      };
+    });
+
+    fakeApi.getWorkspaceOverview.mockResolvedValue({
+      ...overview,
+      strategy_count: editedStrategies.length,
+      latest_strategy_id: null,
+      latest_backtest_run_id: null,
+      latest_optimization_job_id: null,
+    });
+    fakeApi.listStrategies.mockResolvedValue(editedStrategies);
+    fakeApi.listBacktestRuns.mockResolvedValue([]);
+    fakeApi.listOptimizationJobs.mockResolvedValue([]);
+
+    let container: HTMLElement | null = null;
+    await act(async () => {
+      ({ container } = render(
+        <ShellFrameCn route={{ kind: 'workspace' }}>
+          <WorkspacePage />
+        </ShellFrameCn>,
+      ));
+    });
+
+    const cardTitles = Array.from(
+      container!.querySelectorAll('.workspace-card-grid .workspace-strategy-card h4'),
+    ).map((node) => node.textContent?.trim());
+    expect(cardTitles).toEqual(['策略 8', '策略 7', '策略 6', '策略 5', '策略 4', '策略 3']);
+    expect(container!.textContent).not.toContain('策略 2');
+    expect(container!.textContent).not.toContain('策略 1');
   });
 });

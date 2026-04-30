@@ -30,7 +30,7 @@ AllowedAction = Literal[
 CreationSessionMode = Literal['CREATE', 'REVISION']
 CreationSessionStatus = Literal['DRAFTING', 'READY_FOR_CONFIRMATION', 'NEEDS_INPUT', 'LOCKED']
 StrategyStatus = Literal['DRAFT', 'ACTIVE', 'PAUSED', 'ARCHIVED']
-StrategyType = Literal['GENERAL', 'GRID', 'MOMENTUM', 'MEAN_REVERSION', 'BUY_AND_HOLD']
+StrategyType = Literal['GENERAL', 'GRID', 'MOMENTUM', 'MEAN_REVERSION', 'BUY_AND_HOLD', 'ASSET_ALLOCATION']
 FieldSource = Literal['user_input', 'system_inference', 'system_default', 'manual_override']
 BacktestRunStatus = Literal['QUEUED', 'RUNNING', 'COMPLETED', 'COMPLETED_WITH_WARNINGS', 'FAILED']
 BacktestExecutionStage = Literal['DATA_FETCHING', 'SIMULATING', 'METRIC_CALCULATING']
@@ -79,6 +79,34 @@ class MaterializeRequest(BaseModel):
     idempotency_key: str = Field(min_length=1)
     confirmed_revision: int | None = Field(default=None, ge=1)
     base_parameter_version_id: str | None = None
+
+
+class AssetAllocationRecommendationAsset(BaseModel):
+    symbol: str = Field(min_length=1)
+    display_name: str | None = None
+    asset_class: str | None = None
+    target_weight_pct: float | None = Field(default=None, ge=0)
+
+
+class AssetAllocationRecommendationRequest(BaseModel):
+    assets: list[AssetAllocationRecommendationAsset] = Field(default_factory=list)
+    lookback_days: int = Field(default=252, ge=21)
+
+
+class AssetAllocationRecommendedWeight(BaseModel):
+    symbol: str
+    display_name: str | None = None
+    asset_class: str | None = None
+    target_weight_pct: float
+    risk_contribution_pct: float
+    data_status: str
+
+
+class AssetAllocationRecommendationResponse(BaseModel):
+    method: str
+    weights: list[AssetAllocationRecommendedWeight] = Field(default_factory=list)
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class StrategyUpdateRequest(BaseModel):
@@ -141,6 +169,10 @@ class OptimizationJobConstraintUpdateRequest(BaseModel):
     constraint_preset_key: OptimizationConstraintPresetKey | None = None
     constraint_label: str | None = None
     constraints: list[OptimizationConstraint] = Field(default_factory=list)
+
+
+class OptimizationJobFilteredResultCreateRequest(OptimizationJobConstraintUpdateRequest):
+    pass
 
 
 class ResumeOptimizationJobRequest(BaseModel):
@@ -355,6 +387,20 @@ class CompositionAllocationJobCreateRequest(BaseModel):
     covariance_model: str | None = "ledoit_wolf"
     return_source: str | None = "historical"
     constraints: dict[str, Any] = Field(default_factory=dict)
+    notes: str | None = None
+
+
+class CompositionPromotionDraftRequest(BaseModel):
+    base_version_id: str | None = None
+    decision_note: str | None = None
+
+
+class CompositionDecisionPacketCreateRequest(BaseModel):
+    version_id: str | None = None
+    backtest_run_id: str | None = None
+    allocation_job_id: str | None = None
+    candidate_id: str | None = None
+    recommendation: str | None = None
     notes: str | None = None
 
 
@@ -575,6 +621,50 @@ class CompositionSourceIntegrityModel(BaseModel):
     alerts: list[str] = Field(default_factory=list)
 
 
+class CompositionStatusActionModel(BaseModel):
+    label: str
+    action_key: str
+    action_kind: str = 'open_new_tab'
+    route: str | None = None
+    enabled: bool = True
+
+
+class CompositionProxyContextModel(BaseModel):
+    leg_id: str | None = None
+    target_symbol: str | None = None
+    proxy_symbol: str | None = None
+    horizon_label: str | None = None
+    proxy_signature: str
+    proxy_source: str = 'unknown'
+    coverage_window: dict[str, Any] = Field(default_factory=dict)
+    explanation: str | None = None
+
+
+class CompositionStatusDiagnosisModel(BaseModel):
+    status: str
+    issue_type: str
+    diagnosis_type: str
+    diagnosis_label: str
+    frontend_explanation: str
+    action: str
+    resolution_criteria: str
+    actions: list[CompositionStatusActionModel] = Field(default_factory=list)
+    proxy_context: list[CompositionProxyContextModel] = Field(default_factory=list)
+    system_disposition: str | None = None
+    debug_facts: dict[str, Any] = Field(default_factory=dict)
+
+
+class CompositionProxyConfirmationRequest(BaseModel):
+    leg_id: str | None = None
+    target_symbol: str | None = None
+    proxy_symbol: str | None = None
+    horizon_label: str | None = None
+    proxy_signature: str | None = None
+    coverage_window: dict[str, Any] = Field(default_factory=dict)
+    reason: str | None = None
+    confirmed_by: str | None = None
+
+
 class CompositionAuditTrailItemModel(BaseModel):
     id: str
     action: str
@@ -606,6 +696,8 @@ class CompositionPreviewResponseModel(BaseModel):
     return_quality_summary: CompositionReturnQualitySummaryModel = Field(default_factory=CompositionReturnQualitySummaryModel)
     rebalance_events: list[CompositionRebalanceEventModel] = Field(default_factory=list)
     source_integrity: list[CompositionSourceIntegrityModel] = Field(default_factory=list)
+    primary_diagnosis: CompositionStatusDiagnosisModel | None = None
+    diagnoses: list[CompositionStatusDiagnosisModel] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     advisories: list[str] = Field(default_factory=list)
 
@@ -614,6 +706,9 @@ class CompositionListItemModel(BaseModel):
     id: str
     name: str
     status: str
+    version_label: str | None = None
+    version_status: str | None = None
+    evidence_grade: str | None = None
     composition_score: float = 0.0
     leg_count: int = 0
     rebalance_frequency: str | None = None
@@ -626,6 +721,13 @@ class CompositionListItemModel(BaseModel):
     allowed_actions: list[AllowedAction | str] = Field(default_factory=list)
     has_new_version: bool = False
     source_integrity: list[CompositionSourceIntegrityModel] = Field(default_factory=list)
+    latest_backtest_summary: dict[str, Any] = Field(default_factory=dict)
+    backtest_period_coverage: list[dict[str, Any]] = Field(default_factory=list)
+    lab_summary: dict[str, Any] = Field(default_factory=dict)
+    pending_decision_count: int = 0
+    promotion_readiness: dict[str, Any] = Field(default_factory=dict)
+    primary_diagnosis: CompositionStatusDiagnosisModel | None = None
+    diagnoses: list[CompositionStatusDiagnosisModel] = Field(default_factory=list)
 
 
 class CompositionKpiModel(BaseModel):
@@ -682,6 +784,8 @@ class CompositionDetailResponseModel(BaseModel):
     description: str | None = None
     status: str
     status_label: str
+    current_composition_version_label: str | None = None
+    current_composition_version_number: int | None = None
     created_at: str
     updated_at: str
     benchmark_definition: CompositionBenchmarkDefinitionModel | None = None
@@ -704,6 +808,8 @@ class CompositionDetailResponseModel(BaseModel):
     source_evidence: list[CompositionSourceFreezeModel] = Field(default_factory=list)
     source_integrity: list[CompositionSourceIntegrityModel] = Field(default_factory=list)
     audit_trail: list[CompositionAuditTrailItemModel] = Field(default_factory=list)
+    primary_diagnosis: CompositionStatusDiagnosisModel | None = None
+    diagnoses: list[CompositionStatusDiagnosisModel] = Field(default_factory=list)
     composition_score: CompositionScoreModel = Field(default_factory=CompositionScoreModel)
     latest_activity_label: str
     deep_link_actions: list[AllowedAction | str] = Field(default_factory=list)
@@ -746,7 +852,7 @@ class CompositionBacktestOrderPageModel(BaseModel):
     symbol_filter: str | None = None
     source_leg_filter: str | None = None
     filters: dict[str, Any] = Field(default_factory=dict)
-    generated_from: str = 'composition_detail_preview'
+    generated_from: str = 'composition_rebalance_events_and_strategy_trades'
     quality_label: str
     evidence_label: str
 
@@ -767,7 +873,7 @@ class CompositionBacktestOrderNettingModel(BaseModel):
     external_quantity: float = 0.0
     netting_ratio_pct: float = 0.0
     netting_status: str
-    generated_from: str = 'composition_rebalance_events'
+    generated_from: str = 'composition_rebalance_events_and_strategy_trades'
     quality_label: str
     evidence_label: str
 
@@ -791,6 +897,12 @@ class CompositionBacktestRunResponseModel(BaseModel):
     audit_trail: list[CompositionAuditTrailItemModel] = Field(default_factory=list)
     order_summary: dict[str, Any] = Field(default_factory=dict)
     evidence: dict[str, Any] = Field(default_factory=dict)
+    evidence_grade: str | None = None
+    scenario_anchors: list[dict[str, Any]] = Field(default_factory=list)
+    risk_budget_timeline: list[dict[str, Any]] = Field(default_factory=list)
+    promotion_readiness: dict[str, Any] = Field(default_factory=dict)
+    primary_diagnosis: CompositionStatusDiagnosisModel | None = None
+    diagnoses: list[CompositionStatusDiagnosisModel] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -811,7 +923,58 @@ class CompositionAllocationJobResponseModel(BaseModel):
     source_integrity: list[CompositionSourceIntegrityModel] = Field(default_factory=list)
     audit_trail: list[CompositionAuditTrailItemModel] = Field(default_factory=list)
     evidence: dict[str, Any] = Field(default_factory=dict)
+    evidence_grade: str | None = None
+    scenario_anchors: list[dict[str, Any]] = Field(default_factory=list)
+    risk_budget_timeline: list[dict[str, Any]] = Field(default_factory=list)
+    promotion_readiness: dict[str, Any] = Field(default_factory=dict)
+    primary_diagnosis: CompositionStatusDiagnosisModel | None = None
+    diagnoses: list[CompositionStatusDiagnosisModel] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class CompositionVersionSummaryModel(BaseModel):
+    id: str
+    composition_id: str
+    version_number: int
+    status: str
+    source_kind: str
+    source_ref_id: str | None = None
+    created_at: str
+    diff_summary: dict[str, Any] = Field(default_factory=dict)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class CompositionVersionDetailModel(CompositionVersionSummaryModel):
+    snapshot: dict[str, Any] = Field(default_factory=dict)
+    diff: dict[str, Any] = Field(default_factory=dict)
+
+
+class CompositionVersionListResponseModel(BaseModel):
+    composition_id: str
+    items: list[CompositionVersionSummaryModel] = Field(default_factory=list)
+
+
+class CompositionGlobalBacktestRunListResponseModel(BaseModel):
+    items: list[CompositionBacktestRunResponseModel] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    decision_queue: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CompositionGlobalAllocationJobListResponseModel(BaseModel):
+    items: list[CompositionAllocationJobResponseModel] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    decision_queue: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CompositionDecisionPacketModel(BaseModel):
+    id: str
+    composition_id: str
+    version_id: str | None = None
+    source_refs: dict[str, Any] = Field(default_factory=dict)
+    packet: dict[str, Any] = Field(default_factory=dict)
+    export_markdown: str = ""
+    export_html: str = ""
+    created_at: str
 
 
 class SnapshotBlockerModel(BaseModel):

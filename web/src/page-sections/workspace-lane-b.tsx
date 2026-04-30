@@ -11,7 +11,7 @@ type WorkspaceStrategySectionProps = {
 
 const TEXT = {
   title: '策略看板',
-  copy: '卡片严格绑定当前参数版本，并配备轻量 SVG 趋势图与策略对比能力。',
+  copy: '按当前参数版本呈现收益走势与策略对比。',
   openLatest: '打开最新策略',
   compareReady: '已选择 {count} 个策略，可进入对比。',
   openCompare: '打开对比',
@@ -51,6 +51,8 @@ function getStrategyTypeLabel(strategyType: string): string {
       return '均值回归';
     case 'BUY_AND_HOLD':
       return '买入持有';
+    case 'ASSET_ALLOCATION':
+      return '资产配置';
     default:
       return '通用';
   }

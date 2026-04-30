@@ -1,8 +1,18 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { ShellFrameCn } from './shell-frame-cn';
+import { getRouteMeta as getRouteMetaCn } from './shell-route-meta-cn';
+import { getRouteMeta as getRouteMetaLegacy } from './shell-route-meta';
+
+const WORKSPACE_HEALTH_COPY =
+  '总览策略规模、活跃回测与优化进度，直达最新任务。';
 
 describe('shell frame page heading hooks', () => {
+  it('keeps workspace route metadata aligned with the page health copy', () => {
+    expect(getRouteMetaCn({ kind: 'workspace' }).description).toBe(WORKSPACE_HEALTH_COPY);
+    expect(getRouteMetaLegacy({ kind: 'workspace' }).description).toBe(WORKSPACE_HEALTH_COPY);
+  });
+
   it('hides the shell heading on page-owned routes including runs aggregation', () => {
     const { container, rerender } = render(
       <ShellFrameCn route={{ kind: 'creation-session', sessionId: 'cs-001' }}>
@@ -46,6 +56,7 @@ describe('shell frame page heading hooks', () => {
       </ShellFrameCn>,
     );
     expect(container.querySelector('.page-heading')).toBeNull();
+    expect(container.querySelector('.sidebar-nav__link--active')?.getAttribute('href')).toBe('#/compositions/list');
 
     rerender(
       <ShellFrameCn route={{ kind: 'composition-detail', compositionId: 'comp-001' }}>

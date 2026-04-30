@@ -1,6 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
+import { navigateTo } from '../lib/appRouteContext';
+import {
+  buildCompositionStressScenarios,
+  stressToneFromDelta,
+  type CompositionStressScenario,
+} from '../lib/composition-stress-scenarios';
 import { useApiClient } from '../lib/demoStoreContext';
-import type { ApiCompositionBacktestOrder, ApiCompositionBacktestRun } from '../types';
+import { primaryCompositionDiagnosis } from '../lib/composition-diagnostics';
+import type {
+  ApiCompositionBacktestOrder,
+  ApiCompositionBacktestRun,
+  ApiCompositionBacktestRunPayload,
+  DemoApi,
+} from '../types';
 import './composition-backtest-result.css';
 
 type ResultTab = 'diagnosis' | 'orders' | 'evidence';
@@ -8,6 +20,12 @@ type OrderMode = 'events' | 'ledger';
 type ExportFormat = 'csv' | 'excel';
 
 type Tone = 'good' | 'warning' | 'danger' | 'info' | 'neutral';
+type RerunStatus = 'idle' | 'running' | 'completed' | 'failed';
+type ActionToast = {
+  detail: string;
+  title: string;
+  tone: 'info' | 'success' | 'warning';
+};
 
 type CompositionBacktestResultPageProps = {
   compositionId: string;
@@ -83,6 +101,14 @@ type StressZoom = {
   benchmarkDrawdown: string;
   timeToRecovery: string;
   note: string;
+};
+
+type ScenarioAnchor = {
+  id: string;
+  label: string;
+  status: string;
+  start?: string | null;
+  end?: string | null;
 };
 
 type ConcentrationHolding = {
@@ -182,6 +208,8 @@ type CompositionBacktestResult = {
   sleeveContributions: SleeveContribution[];
   exposureRows: ExposureRow[];
   stressZoom: StressZoom;
+  stressScenarios: CompositionStressScenario[];
+  scenarioAnchors: ScenarioAnchor[];
   concentrationTop5: ConcentrationHolding[];
   diagnosisJumps: DiagnosisJump[];
   events: RebalanceEvent[];
@@ -289,6 +317,51 @@ const DEFAULT_RESULT: CompositionBacktestResult = {
     timeToRecovery: '组合 42 天，QQQ 93 天',
     note: '压力窗口用于缩放复核组合与 QQQ 的跌幅、修复时间和失效来源。',
   },
+  stressScenarios: [
+    {
+      id: 'worst-3m',
+      title: '历史最差三个月',
+      period: '运行时窗口',
+      portfolioDrawdown: -9.4,
+      benchmarkLabel: 'QQQ',
+      benchmarkDrawdown: -18.2,
+      recoveryDays: 78,
+      benchmarkRecoveryDays: 136,
+      defensiveDelta: 8.8,
+      source: '来自组合收益序列的滚动三个月最差窗口。',
+      status: '实际窗口',
+      tone: 'good',
+    },
+    {
+      id: 'covid-2020',
+      title: '2020 疫情冲击',
+      period: '2020-02 至 2020-05',
+      portfolioDrawdown: -5.8,
+      benchmarkLabel: 'QQQ',
+      benchmarkDrawdown: -15.6,
+      recoveryDays: 42,
+      benchmarkRecoveryDays: 93,
+      defensiveDelta: 9.8,
+      source: '来自组合与基准的月度收益窗口。',
+      status: '实际窗口',
+      tone: 'good',
+    },
+    {
+      id: 'rate-shock-2022',
+      title: '2022 紧缩熊市',
+      period: '2022-01 至 2022-10',
+      portfolioDrawdown: -8.7,
+      benchmarkLabel: 'QQQ',
+      benchmarkDrawdown: -23.4,
+      recoveryDays: 96,
+      benchmarkRecoveryDays: null,
+      defensiveDelta: 14.7,
+      source: '来自组合与基准的月度收益窗口。',
+      status: '实际窗口',
+      tone: 'good',
+    },
+  ],
+  scenarioAnchors: [],
   concentrationTop5: [
     { symbol: 'NVDA', detail: 'Alpha Core 8.4% + QQQ Grid 7.2%', weightPct: 15.6, tone: 'warning' },
     { symbol: 'MSFT', detail: 'Alpha Core 6.1% + QQQ Grid 4.4%', weightPct: 10.5, tone: 'neutral' },
@@ -666,7 +739,7 @@ function toTone(value: unknown, fallback: Tone): Tone {
 function humanizeRuntimeLabel(value: unknown, fallback: string): string {
   const text = toText(value, fallback);
   if (/^proxy evidence required$/i.test(text)) {
-    return '需要代理证据复核';
+    return '代理覆盖待确认';
   }
   if (/^composition[_\s-]*detail[_\s-]*preview$/i.test(text)) {
     return '组合详情预演';
@@ -696,7 +769,7 @@ function humanizeRuntimeLabel(value: unknown, fallback: string): string {
     return '半年';
   }
   if (/^completed_with_warnings$/i.test(text)) {
-    return '完成但需复核';
+    return '完成但待校准';
   }
   if (/^completed$/i.test(text)) {
     return '已完成';
@@ -967,6 +1040,64 @@ function normalizeStressZoom(value: Record<string, unknown> | null, fallback: St
   };
 }
 
+function toNullableNumber(value: unknown, fallback: number | null): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value.replace('%', '').trim());
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+  return fallback;
+}
+
+function normalizeStressScenario(
+  value: Record<string, unknown>,
+  fallback: CompositionStressScenario,
+  index: number,
+): CompositionStressScenario {
+  const defensiveDelta = toNullableNumber(
+    getValue(value, ['defensiveDelta', 'defensive_delta', 'defensive_premium']),
+    fallback.defensiveDelta,
+  );
+  return {
+    id: toText(getValue(value, ['id', 'key']), fallback.id || `stress-${index}`),
+    title: toText(getValue(value, ['title', 'label', 'name']), fallback.title),
+    period: toText(getValue(value, ['period', 'window']), fallback.period),
+    portfolioDrawdown: toNumber(
+      getValue(value, ['portfolioDrawdown', 'portfolio_drawdown', 'currentDrawdown', 'current_drawdown']),
+      fallback.portfolioDrawdown,
+    ),
+    benchmarkLabel: toText(getValue(value, ['benchmarkLabel', 'benchmark_label']), fallback.benchmarkLabel),
+    benchmarkDrawdown: toNullableNumber(
+      getValue(value, ['benchmarkDrawdown', 'benchmark_drawdown']),
+      fallback.benchmarkDrawdown,
+    ),
+    recoveryDays: toNullableNumber(getValue(value, ['recoveryDays', 'recovery_days']), fallback.recoveryDays),
+    benchmarkRecoveryDays: toNullableNumber(
+      getValue(value, ['benchmarkRecoveryDays', 'benchmark_recovery_days']),
+      fallback.benchmarkRecoveryDays,
+    ),
+    defensiveDelta,
+    source: humanizeRuntimeLabel(getValue(value, ['source', 'evidence', 'note']), fallback.source),
+    status: toText(getValue(value, ['status', 'verdict']), fallback.status),
+    tone: toTone(getValue(value, ['tone']), stressToneFromDelta(defensiveDelta)),
+    start: toText(getValue(value, ['start', 'start_date']), fallback.start ?? ''),
+    end: toText(getValue(value, ['end', 'end_date']), fallback.end ?? ''),
+  };
+}
+
+function normalizeScenarioAnchor(value: Record<string, unknown>, _fallback: ScenarioAnchor, index: number): ScenarioAnchor {
+  const id = toText(getValue(value, ['id', 'key']), `scenario-${index + 1}`);
+  return {
+    id,
+    label: toText(getValue(value, ['label', 'title', 'name']), id),
+    status: toText(getValue(value, ['status', 'verdict']), '可定位'),
+    start: toText(getValue(value, ['start', 'start_date']), ''),
+    end: toText(getValue(value, ['end', 'end_date']), ''),
+  };
+}
+
 export function normalizeCompositionBacktestResult(
   data: unknown,
   ids: { compositionId: string; runId: string },
@@ -991,6 +1122,7 @@ export function normalizeCompositionBacktestResult(
   const ledgerFallback = fallback.ledgerRows.length
     ? fallback.ledgerRows
     : events.flatMap((event) => event.orders);
+  const rawStressScenarios = getValue(diagnosis, ['stressScenarios', 'stress_scenarios', 'stress_tests']);
 
   return {
     compositionId: ids.compositionId,
@@ -1016,6 +1148,12 @@ export function normalizeCompositionBacktestResult(
     ),
     exposureRows,
     stressZoom: normalizeStressZoom(getRecord(diagnosis, ['stressZoom', 'stress_zoom']), fallback.stressZoom),
+    stressScenarios: Array.isArray(rawStressScenarios)
+      ? normalizeArray(rawStressScenarios, fallback.stressScenarios, normalizeStressScenario)
+      : root
+      ? []
+      : fallback.stressScenarios,
+    scenarioAnchors: normalizeArray(getValue(root, ['scenarioAnchors', 'scenario_anchors']), fallback.scenarioAnchors, normalizeScenarioAnchor),
     concentrationTop5,
     diagnosisJumps: normalizeArray(
       getValue(diagnosis, ['diagnosisJumps', 'diagnosis_jumps', 'insights']),
@@ -1088,7 +1226,7 @@ function deriveHeroMetrics(result: CompositionBacktestResult): HeroMetric[] {
   const coverageValue = /覆盖\s*[-+]?\d/.test(coverageText)
     ? coverageText.replace(/^覆盖\s*/, '')
     : /不足|需|代理|fallback/i.test(coverageText)
-      ? '需复核'
+      ? '待校准'
       : '已记录';
 
   return [
@@ -1117,8 +1255,8 @@ function deriveHeroMetrics(result: CompositionBacktestResult): HeroMetric[] {
       key: 'coverage',
       label: '样本覆盖',
       value: coverageValue,
-      detail: coverageValue === '需复核' ? '代理覆盖见指标矩阵与证据页。' : '覆盖状态已记录。',
-      tone: coverageValue === '需复核' ? 'warning' : 'info',
+      detail: coverageValue === '待校准' ? '代理覆盖见指标矩阵与状态标签。' : '覆盖状态已记录。',
+      tone: coverageValue === '待校准' ? 'warning' : 'info',
     },
     deriveDataConfidence(result),
   ];
@@ -1181,15 +1319,15 @@ function deriveDataConfidence(result: CompositionBacktestResult): HeroMetric {
   const coverageFromMetric =
     extractPercentNumber(coverageMetric?.thirtyYear ?? '') ??
     extractPercentNumber(result.proxyCoverageNote);
-  const fallbackPenalty = /代理|fallback|需复核|缺失/i.test(result.proxyCoverageNote) ? 18 : 0;
+  const fallbackPenalty = /代理|fallback|待校准|需复核|缺失/i.test(result.proxyCoverageNote) ? 18 : 0;
   const score = coverageFromMetric === null
-    ? (/需复核|不足|代理|fallback/i.test(result.proxyCoverageNote) ? 62 : 86)
+    ? (/待校准|需复核|不足|代理|fallback/i.test(result.proxyCoverageNote) ? 62 : 86)
     : Math.max(0, Math.min(100, Math.round(coverageFromMetric - fallbackPenalty)));
   return {
     key: 'data_confidence',
     label: '数据置信度',
     value: `${score}`,
-    detail: score >= 80 ? '可作为主裁决样本。' : score >= 55 ? '代理占比偏高，建议复核证据页。' : '代理或缺失较多，仅作方向判断。',
+    detail: score >= 80 ? '可作为主裁决样本。' : score >= 55 ? '代理占比偏高，建议查看状态标签。' : '代理或缺失较多，仅作方向判断。',
     tone: score >= 80 ? 'good' : score >= 55 ? 'warning' : 'danger',
   };
 }
@@ -1224,6 +1362,23 @@ function uniqueSourceLegs(rows: CompositionOrder[]): string[] {
   return Array.from(new Set(values));
 }
 
+function orderInScenario(row: CompositionOrder, anchor: ScenarioAnchor | null): boolean {
+  if (!anchor || (!anchor.start && !anchor.end)) {
+    return true;
+  }
+  const date = row.time.slice(0, 10);
+  if (!date || date === '待记录') {
+    return false;
+  }
+  if (anchor.start && date < anchor.start) {
+    return false;
+  }
+  if (anchor.end && date > anchor.end) {
+    return false;
+  }
+  return true;
+}
+
 function getInitialTab(tab?: ResultTab): ResultTab {
   return tab === 'orders' || tab === 'evidence' || tab === 'diagnosis' ? tab : 'diagnosis';
 }
@@ -1238,6 +1393,92 @@ function formatMetric(value: unknown, suffix = ''): string {
     return '暂无';
   }
   return `${numeric.toFixed(Math.abs(numeric) >= 10 ? 1 : 2)}${suffix}`;
+}
+
+function formatStressPct(value: number | null): string {
+  return value === null ? '暂无' : `${value.toFixed(2)}%`;
+}
+
+function formatRecoveryDays(value: number | null): string {
+  return value === null ? '未修复' : `${value}d`;
+}
+
+function formatSignedPoints(value: number | null): string {
+  if (value === null) {
+    return '暂无';
+  }
+  return `${value > 0 ? '+' : ''}${value.toFixed(1)}pt`;
+}
+
+function StressScenarioPanel({ scenarios }: { scenarios: CompositionStressScenario[] }): JSX.Element | null {
+  if (scenarios.length === 0) {
+    return null;
+  }
+  const maxDrawdown = Math.max(
+    1,
+    ...scenarios.flatMap((scenario) => [
+      Math.abs(scenario.portfolioDrawdown),
+      Math.abs(scenario.benchmarkDrawdown ?? 0),
+    ]),
+  );
+  const barWidth = (value: number | null): string => {
+    if (value === null) {
+      return '0%';
+    }
+    return `${Math.max(16, Math.min(92, (Math.abs(value) / maxDrawdown) * 88))}%`;
+  };
+
+  return (
+    <section className="composition-backtest-stress-panel" data-ui="backtest-stress-test" aria-label="压力窗口极端行情压力测试">
+      <div className="composition-backtest-panel-header composition-backtest-stress-panel__header">
+        <div>
+          <h2>压力窗口 · 极端行情压力测试</h2>
+          <p>按本次回测收益序列复核组合在三类极端行情中的回撤、修复周期与相对抗跌。</p>
+        </div>
+        <span className="composition-backtest-mini-status composition-backtest-mini-status--info">3 场景</span>
+      </div>
+      <div className="composition-backtest-stress-grid">
+        {scenarios.map((scenario) => (
+          <article className={`composition-backtest-stress-card composition-backtest-stress-card--${scenario.tone}`} key={scenario.id}>
+            <div className="composition-backtest-stress-card__top">
+              <div>
+                <h3>{scenario.title}</h3>
+                <span>{scenario.period}</span>
+              </div>
+              <span className={`composition-backtest-mini-status composition-backtest-mini-status--${scenario.tone}`}>{scenario.status}</span>
+            </div>
+            <div className="composition-backtest-stress-bars" aria-label={`${scenario.title} 压测回撤对比`}>
+              <div className="composition-backtest-stress-bar-row">
+                <span>组合</span>
+                <div className="composition-backtest-stress-track">
+                  <i className="composition-backtest-stress-track__portfolio" style={{ width: barWidth(scenario.portfolioDrawdown) }} />
+                </div>
+                <strong>{formatStressPct(scenario.portfolioDrawdown)}</strong>
+              </div>
+              <div className="composition-backtest-stress-bar-row">
+                <span>{scenario.benchmarkLabel}</span>
+                <div className="composition-backtest-stress-track">
+                  <i className="composition-backtest-stress-track__benchmark" style={{ width: barWidth(scenario.benchmarkDrawdown) }} />
+                </div>
+                <strong>{formatStressPct(scenario.benchmarkDrawdown)}</strong>
+              </div>
+            </div>
+            <div className="composition-backtest-stress-kpis">
+              <div>
+                <span>修复周期</span>
+                <strong>组合 {formatRecoveryDays(scenario.recoveryDays)} / 基准 {formatRecoveryDays(scenario.benchmarkRecoveryDays)}</strong>
+              </div>
+              <div className={`composition-backtest-stress-kpi--${scenario.tone}`}>
+                <span>相对抗跌</span>
+                <strong>{formatSignedPoints(scenario.defensiveDelta)}</strong>
+              </div>
+            </div>
+            <p>{scenario.source}</p>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 function summarizeExposureLabel(note: unknown, fallback: string): string {
@@ -1273,6 +1514,7 @@ function apiOrderToView(order: ApiCompositionBacktestOrder): Record<string, unkn
   return {
     id: order.id,
     order_id: order.order_id,
+    event_id: order.event_id,
     time: order.event_date ?? order.event_label,
     symbol: order.symbol,
     side: order.side === 'BUY' ? '买入' : '卖出',
@@ -1304,6 +1546,7 @@ function buildApiBacktestViewData(
     ? (run.diagnostics.top_holdings as Array<Record<string, unknown>>)
     : [];
   const algorithmSpec = asRecord(run.evidence?.algorithm_spec) ?? {};
+  const diagnosis = primaryCompositionDiagnosis(run);
   const orderRows = orders.map(apiOrderToView);
   const ordersByEvent = new Map<string, Record<string, unknown>[]>();
   orderRows.forEach((order) => {
@@ -1314,26 +1557,47 @@ function buildApiBacktestViewData(
     rows.push(order);
     ordersByEvent.set(key, rows);
   });
+  const stressScenarios = buildCompositionStressScenarios({
+    benchmarkLabel: toText(run.summary?.benchmark_label, '基准'),
+    benchmarkSeries: run.benchmark_series,
+    returnsPreview: run.returns_preview,
+  });
+  const primaryStress = stressScenarios.find((scenario) => scenario.id === 'covid-2020') ?? stressScenarios[0] ?? null;
 
   return {
-    title: `${String(run.summary?.composition_name ?? '组合')} · 回测诊断`,
+    title: `${String(run.summary?.composition_name ?? '组合')} · 回测详情`,
     subtitle: `${String(run.summary?.horizon_years ?? '10')}Y / 年化 ${formatMetric(run.summary?.annualized_return, '%')} / 夏普 ${formatMetric(run.summary?.sharpe)}`,
+    scenario_anchors: run.scenario_anchors ?? [],
     status_chips: [
       humanizeRuntimeLabel(run.status, run.status),
       humanizeRuntimeLabel(run.summary?.quality_label, '组合详情预演'),
+      `状态标签：${diagnosis.diagnosis_label}`,
       `订单 ${String(run.summary?.order_count ?? orders.length)}`,
     ],
     diagnostics: {
-      stability_ruling: String(run.diagnostics?.stability_verdict ?? '稳定性待复核'),
-      stability_detail: String(run.summary?.evidence_label ?? '本次结果来自组合详情收益流、再平衡事件和来源冻结证据。'),
-      proxy_coverage_note: (run.return_quality_summary?.notes ?? []).join('；') || '代理覆盖已在证据页列出。',
+      stability_ruling: String(run.diagnostics?.stability_verdict ?? diagnosis.diagnosis_label),
+      stability_detail: String(run.summary?.evidence_label ?? '本次结果来自组合详情收益流、再平衡事件和来源冻结记录。'),
+      proxy_coverage_note: (run.return_quality_summary?.notes ?? []).join('；') || diagnosis.frontend_explanation,
+      stress_scenarios: stressScenarios,
+      stress_zoom: primaryStress
+        ? {
+            label: primaryStress.title,
+            portfolio_drawdown: `${primaryStress.portfolioDrawdown.toFixed(2)}%`,
+            benchmark_label: primaryStress.benchmarkLabel,
+            benchmark_drawdown: primaryStress.benchmarkDrawdown === null ? '暂无' : `${primaryStress.benchmarkDrawdown.toFixed(2)}%`,
+            time_to_recovery: `组合 ${primaryStress.recoveryDays === null ? '未修复' : `${primaryStress.recoveryDays} 天`}，${primaryStress.benchmarkLabel} ${
+              primaryStress.benchmarkRecoveryDays === null ? '未修复' : `${primaryStress.benchmarkRecoveryDays} 天`
+            }`,
+            note: primaryStress.source,
+          }
+        : undefined,
       performance_matrix: [
         {
           label: '收益质量',
           tenYear: `${formatMetric(metric.annualized_return ?? run.summary?.annualized_return, '%')} / 夏普 ${formatMetric(metric.sharpe ?? run.summary?.sharpe)}`,
-          twentyYear: run.return_quality_summary?.fallback_used ? '代理覆盖需复核' : '覆盖良好',
+          twentyYear: run.return_quality_summary?.fallback_used ? diagnosis.diagnosis_label : '覆盖良好',
           thirtyYear: run.return_quality_summary?.coverage_pct ? `覆盖 ${formatMetric(run.return_quality_summary.coverage_pct, '%')}` : '数据不足',
-          conclusion: String(run.diagnostics?.stability_verdict ?? '待复核'),
+          conclusion: String(run.diagnostics?.stability_verdict ?? diagnosis.diagnosis_label),
           proxy_note: (run.return_quality_summary?.notes ?? [])[0],
         },
         {
@@ -1401,6 +1665,12 @@ function buildApiBacktestViewData(
     evidence: {
       cards: [
         {
+          id: 'status-diagnosis',
+          label: '状态标签',
+          body: `${diagnosis.diagnosis_label}；${diagnosis.frontend_explanation}`,
+          tone: diagnosis.status === '失效' ? 'danger' : diagnosis.status === '待校准' ? 'warning' : 'good',
+        },
+        {
           id: 'frozen-config',
           label: '配置冻结',
           body: `组合 ${run.composition_id} / 运行 ${run.run_id}`,
@@ -1423,7 +1693,7 @@ function buildApiBacktestViewData(
         id: `proxy-${index}`,
         period: '代理覆盖',
         source: note,
-        confidence: run.return_quality_summary?.fallback_used ? '需复核' : '已记录',
+        confidence: run.return_quality_summary?.fallback_used ? '待校准' : '已记录',
       })),
       audit_trail: run.audit_trail.map((item) => ({
         id: item.id,
@@ -1447,6 +1717,7 @@ function buildEmptyRuntimeBacktestViewData(ids: { compositionId: string; runId: 
       performance_matrix: [],
       sleeve_contributions: [],
       exposure_heatmap: [],
+      stress_scenarios: [],
       top_holdings: [],
       insights: [],
     },
@@ -1461,6 +1732,81 @@ function buildEmptyRuntimeBacktestViewData(ids: { compositionId: string; runId: 
       audit_trail: [],
     },
   };
+}
+
+async function hydrateApiBacktestViewData(
+  apiClient: DemoApi,
+  compositionId: string,
+  run: ApiCompositionBacktestRun,
+  scenario?: string | null,
+): Promise<{ run: ApiCompositionBacktestRun; viewData: Record<string, unknown> }> {
+  const orderPage = apiClient.getCompositionBacktestOrders
+    ? await apiClient.getCompositionBacktestOrders(compositionId, run.run_id || run.id, { page: 1, page_size: 1000, scenario })
+    : { items: [] };
+  return {
+    run,
+    viewData: buildApiBacktestViewData(run, orderPage.items),
+  };
+}
+
+async function loadApiBacktestViewData(
+  apiClient: DemoApi,
+  compositionId: string,
+  runId: string,
+  scenario?: string | null,
+): Promise<{ run: ApiCompositionBacktestRun; viewData: Record<string, unknown> }> {
+  if (!apiClient.getCompositionBacktestRun) {
+    throw new Error('组合回测详情接口尚未接入');
+  }
+  const run = await apiClient.getCompositionBacktestRun(compositionId, runId);
+  return hydrateApiBacktestViewData(apiClient, compositionId, run, scenario);
+}
+
+function payloadText(source: Record<string, unknown>, key: string): string | undefined {
+  const value = source[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function payloadNumber(source: Record<string, unknown>, key: string): number | undefined {
+  const value = source[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function buildRerunBacktestPayload(
+  currentRun: ApiCompositionBacktestRun | null,
+  result: CompositionBacktestResult,
+): ApiCompositionBacktestRunPayload {
+  const request = asRecord(currentRun?.request ?? null) ?? {};
+  const payload: ApiCompositionBacktestRunPayload = {
+    idempotency_key: [
+      'composition-backtest-rerun',
+      result.compositionId,
+      result.runId,
+      Date.now(),
+    ].join(':'),
+    notes: 'rerun_from_composition_backtest_detail',
+  };
+  const compositionVersion = payloadText(request, 'composition_version');
+  const endDate = payloadText(request, 'end_date');
+  const missingDataRule = payloadText(request, 'missing_data_rule');
+  const period = payloadText(request, 'period');
+  const rebalanceFrequency = payloadText(request, 'rebalance_frequency');
+  const startDate = payloadText(request, 'start_date');
+  const driftThresholdPct = payloadNumber(request, 'drift_threshold_pct');
+  const feeBps = payloadNumber(request, 'fee_bps');
+  const horizonYears = payloadNumber(request, 'horizon_years');
+  const slippageBps = payloadNumber(request, 'slippage_bps');
+  if (compositionVersion !== undefined) payload.composition_version = compositionVersion;
+  if (endDate !== undefined) payload.end_date = endDate;
+  if (missingDataRule !== undefined) payload.missing_data_rule = missingDataRule;
+  if (period !== undefined) payload.period = period;
+  if (rebalanceFrequency !== undefined) payload.rebalance_frequency = rebalanceFrequency;
+  if (startDate !== undefined) payload.start_date = startDate;
+  if (driftThresholdPct !== undefined) payload.drift_threshold_pct = driftThresholdPct;
+  if (feeBps !== undefined) payload.fee_bps = feeBps;
+  if (horizonYears !== undefined) payload.horizon_years = horizonYears;
+  if (slippageBps !== undefined) payload.slippage_bps = slippageBps;
+  return payload;
 }
 
 export function CompositionBacktestResultPage({
@@ -1482,12 +1828,17 @@ export function CompositionBacktestResultPage({
     api = null;
   }
   const [remoteData, setRemoteData] = useState<unknown | null>(null);
+  const [currentRun, setCurrentRun] = useState<ApiCompositionBacktestRun | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(!data);
+  const [rerunStatus, setRerunStatus] = useState<RerunStatus>('idle');
+  const [actionToast, setActionToast] = useState<ActionToast | null>(null);
+  const [selectedScenarioId, setSelectedScenarioId] = useState('all');
 
   useEffect(() => {
     let cancelled = false;
     if (data || !api?.getCompositionBacktestRun) {
+      setCurrentRun(null);
       setLoading(false);
       return () => {
         cancelled = true;
@@ -1499,12 +1850,15 @@ export function CompositionBacktestResultPage({
       try {
         setLoading(true);
         setLoadError(null);
-        const run = await apiClient.getCompositionBacktestRun!(compositionId, runId);
-        const orderPage = apiClient.getCompositionBacktestOrders
-          ? await apiClient.getCompositionBacktestOrders(compositionId, runId, { page: 1, page_size: 500 })
-          : { items: [] };
+        const { run, viewData } = await loadApiBacktestViewData(
+          apiClient,
+          compositionId,
+          runId,
+          selectedScenarioId === 'all' ? null : selectedScenarioId,
+        );
         if (!cancelled) {
-          setRemoteData(buildApiBacktestViewData(run, orderPage.items));
+          setCurrentRun(run);
+          setRemoteData(viewData);
         }
       } catch (caught) {
         if (!cancelled) {
@@ -1521,7 +1875,7 @@ export function CompositionBacktestResultPage({
     return () => {
       cancelled = true;
     };
-  }, [api, compositionId, data, runId]);
+  }, [api, compositionId, data, runId, selectedScenarioId]);
 
   const result = useMemo(
     () => normalizeCompositionBacktestResult(
@@ -1550,7 +1904,37 @@ export function CompositionBacktestResultPage({
     );
     return highlighted ? `${highlighted.symbol} ${highlighted.weightPct.toFixed(1)}%` : '集中度复核';
   }, [result.concentrationTop5]);
-  const sourceLegs = useMemo(() => uniqueSourceLegs(result.ledgerRows), [result.ledgerRows]);
+  const selectedScenario = useMemo(
+    () => result.scenarioAnchors.find((item) => item.id === selectedScenarioId) ?? null,
+    [result.scenarioAnchors, selectedScenarioId],
+  );
+  const scenarioFilteredLedgerRows = useMemo(
+    () => result.ledgerRows.filter((row) => orderInScenario(row, selectedScenario)),
+    [result.ledgerRows, selectedScenario],
+  );
+  const scenarioFilteredEvents = useMemo(
+    () => result.events
+      .map((event) => ({
+        ...event,
+        orders: event.orders.filter((order) => orderInScenario(order, selectedScenario)),
+      }))
+      .filter((event) => !selectedScenario || event.orders.length > 0 || orderInScenario({
+        id: event.id,
+        time: event.title.slice(0, 10),
+        symbol: '',
+        side: '',
+        quantity: '',
+        price: '',
+        slippageBps: '',
+        fee: '',
+        sleeve: '',
+        triggerReason: '',
+        nettingLabel: '',
+        tone: 'neutral',
+      }, selectedScenario)),
+    [result.events, selectedScenario],
+  );
+  const sourceLegs = useMemo(() => uniqueSourceLegs(scenarioFilteredLedgerRows), [scenarioFilteredLedgerRows]);
   const [activeTab, setActiveTab] = useState<ResultTab>(getInitialTab(initialTab));
   const [orderMode, setOrderMode] = useState<OrderMode>(getInitialOrderMode(initialOrderMode));
   const [selectedEventId, setSelectedEventId] = useState(highlightedEventId ?? result.events[0]?.id ?? '');
@@ -1561,12 +1945,12 @@ export function CompositionBacktestResultPage({
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
 
-  const selectedEvent = result.events.find((event) => event.id === selectedEventId) ?? result.events[0];
+  const selectedEvent = scenarioFilteredEvents.find((event) => event.id === selectedEventId) ?? scenarioFilteredEvents[0];
   const sourceFilteredLedgerRows = useMemo(
     () => sourceLegFilter === '全部'
-      ? result.ledgerRows
-      : result.ledgerRows.filter((row) => row.sleeve === sourceLegFilter),
-    [result.ledgerRows, sourceLegFilter],
+      ? scenarioFilteredLedgerRows
+      : scenarioFilteredLedgerRows.filter((row) => row.sleeve === sourceLegFilter),
+    [scenarioFilteredLedgerRows, sourceLegFilter],
   );
   const symbols = useMemo(() => uniqueSymbols(sourceFilteredLedgerRows), [sourceFilteredLedgerRows]);
   const visibleLedgerRows = useMemo(
@@ -1576,6 +1960,19 @@ export function CompositionBacktestResultPage({
     [sourceFilteredLedgerRows, symbolFilter],
   );
   const selectedOrder = selectedEvent?.orders.find((order) => order.id === selectedOrderId);
+
+  useEffect(() => {
+    if (selectedScenarioId !== 'all' && !result.scenarioAnchors.some((item) => item.id === selectedScenarioId)) {
+      setSelectedScenarioId('all');
+    }
+  }, [result.scenarioAnchors, selectedScenarioId]);
+
+  useEffect(() => {
+    if (selectedEventId && !scenarioFilteredEvents.some((event) => event.id === selectedEventId)) {
+      setSelectedEventId(scenarioFilteredEvents[0]?.id ?? '');
+      setSelectedOrderId('');
+    }
+  }, [scenarioFilteredEvents, selectedEventId]);
 
   useEffect(() => {
     if (sourceLegFilter !== '全部' && !sourceLegs.includes(sourceLegFilter)) {
@@ -1593,6 +1990,10 @@ export function CompositionBacktestResultPage({
   function jumpToOrders(jump: DiagnosisJump): void {
     setActiveTab('orders');
     setOrderMode('events');
+    const stressAnchor = result.scenarioAnchors.find((anchor) => /2020|压力|疫情/.test(`${anchor.id} ${anchor.label}`));
+    if (stressAnchor) {
+      setSelectedScenarioId(stressAnchor.id);
+    }
     setSelectedEventId(jump.eventId || result.events[0]?.id || '');
     setSelectedOrderId(jump.orderId || '');
   }
@@ -1612,6 +2013,7 @@ export function CompositionBacktestResultPage({
       const content = await api.exportCompositionBacktestOrders(result.compositionId, result.runId, exportFormat, {
         symbol: symbolFilter === '全部' ? null : symbolFilter,
         source_leg: sourceLegFilter === '全部' ? null : sourceLegFilter,
+        scenario: selectedScenarioId === 'all' ? null : selectedScenarioId,
       });
       const blob = new Blob([content], {
         type: exportFormat === 'csv' ? 'text/csv;charset=utf-8' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -1628,6 +2030,72 @@ export function CompositionBacktestResultPage({
     }
   }
 
+  async function handleRerunBacktest(): Promise<void> {
+    if (onRerunBacktest) {
+      onRerunBacktest(result.compositionId, result.runId);
+      return;
+    }
+    if (rerunStatus === 'running') {
+      return;
+    }
+    if (!api?.createCompositionBacktestRun) {
+      setRerunStatus('failed');
+      setActionToast({
+        detail: '当前运行时没有暴露组合回测创建接口，无法发起重跑。',
+        title: '重跑回测失败',
+        tone: 'warning',
+      });
+      return;
+    }
+
+    try {
+      setRerunStatus('running');
+      setActionToast({
+        detail: '正在基于当前组合冻结证据重新生成组合回测。',
+        title: '回测中',
+        tone: 'info',
+      });
+      const createdRun = await api.createCompositionBacktestRun(
+        result.compositionId,
+        buildRerunBacktestPayload(currentRun, result),
+      );
+      const { run, viewData } = await hydrateApiBacktestViewData(api, result.compositionId, createdRun);
+      const nextRunId = run.run_id || run.id;
+      setCurrentRun(run);
+      setRemoteData(viewData);
+      setLoadError(null);
+      setRerunStatus('completed');
+      setActionToast({
+        detail: `已生成并载入运行 ${nextRunId}。`,
+        title: '回测结束',
+        tone: 'success',
+      });
+      if (nextRunId && nextRunId !== result.runId) {
+        navigateTo(`/compositions/${encodeURIComponent(result.compositionId)}/backtest-runs/${encodeURIComponent(nextRunId)}`);
+      }
+    } catch (caught) {
+      setRerunStatus('failed');
+      setActionToast({
+        detail: (caught as Error).message,
+        title: '重跑回测失败',
+        tone: 'warning',
+      });
+    }
+  }
+
+  function handleStartOptimization(): void {
+    if (onStartOptimization) {
+      onStartOptimization(result.compositionId, result.runId);
+      return;
+    }
+    setActionToast({
+      detail: '正在进入组合优化配置页。',
+      title: '打开组合优化',
+      tone: 'info',
+    });
+    navigateTo(`/compositions/${encodeURIComponent(result.compositionId)}/allocation-lab`);
+  }
+
   return (
     <div
       className="composition-backtest-result-page stack"
@@ -1642,21 +2110,41 @@ export function CompositionBacktestResultPage({
             <span className="composition-backtest-fingerprint">{heroFingerprint}</span>
           </div>
           <div className="composition-backtest-chip-row" aria-label="回测状态">
-            {result.statusChips.map((chip) => (
-              <span className="status-chip status-chip--soft" key={chip}>{chip}</span>
+            {result.statusChips.map((chip, index) => (
+              <span className="status-chip status-chip--soft" key={`${chip}-${index}`}>{chip}</span>
             ))}
             <span className="composition-backtest-muted-run-id">运行 {result.runId}</span>
+            {rerunStatus === 'running' ? <span className="status-chip status-chip--warning">回测中</span> : null}
+            {rerunStatus === 'completed' ? <span className="status-chip status-chip--success">回测结束</span> : null}
           </div>
         </div>
         <div className="composition-backtest-result-hero__actions">
-          <button className="ghost-button" onClick={() => onRerunBacktest?.(result.compositionId, result.runId)} type="button">
-            重跑回测
+          <button
+            aria-busy={rerunStatus === 'running'}
+            className="ghost-button"
+            disabled={rerunStatus === 'running'}
+            onClick={() => {
+              void handleRerunBacktest();
+            }}
+            type="button"
+          >
+            {rerunStatus === 'running' ? '回测中' : '重跑回测'}
           </button>
-          <button className="primary-button" onClick={() => onStartOptimization?.(result.compositionId, result.runId)} type="button">
+          <button className="primary-button" onClick={handleStartOptimization} type="button">
             启动优化
           </button>
         </div>
       </section>
+      {actionToast ? (
+        <div
+          className={`composition-backtest-toast composition-backtest-toast--${actionToast.tone}`}
+          role="status"
+          aria-live="polite"
+        >
+          <strong>{actionToast.title}</strong>
+          <span>{actionToast.detail}</span>
+        </div>
+      ) : null}
       {loading ? <div className="composition-backtest-runtime-note">正在加载组合回测结果。</div> : null}
       {loadError ? <div className="composition-backtest-runtime-note composition-backtest-runtime-note--warning">{loadError}</div> : null}
 
@@ -1723,17 +2211,29 @@ export function CompositionBacktestResultPage({
                 <span className="composition-backtest-legend-item composition-backtest-legend-item--cost">成本后</span>
                 <span className="composition-backtest-legend-item composition-backtest-legend-item--drawdown">回撤带</span>
               </div>
-              <article className="composition-backtest-stress-card">
-                <div>
-                  <strong>{result.stressZoom.label}</strong>
-                  <span>{result.stressZoom.note}</span>
+              {result.scenarioAnchors.length > 0 ? (
+                <div className="composition-backtest-filter-bar" data-ui="scenario-anchor-controls" role="group" aria-label="场景复盘窗口">
+                  <span>场景复盘</span>
+                  <button
+                    className={selectedScenarioId === 'all' ? 'is-active' : ''}
+                    onClick={() => setSelectedScenarioId('all')}
+                    type="button"
+                  >
+                    全部
+                  </button>
+                  {result.scenarioAnchors.map((anchor) => (
+                    <button
+                      className={selectedScenarioId === anchor.id ? 'is-active' : ''}
+                      key={anchor.id}
+                      onClick={() => setSelectedScenarioId(anchor.id)}
+                      type="button"
+                    >
+                      {anchor.label}
+                    </button>
+                  ))}
                 </div>
-                <div className="composition-backtest-stress-metrics">
-                  <span>组合 {result.stressZoom.portfolioDrawdown}</span>
-                  <span>{result.stressZoom.benchmarkLabel} {result.stressZoom.benchmarkDrawdown}</span>
-                  <span>修复时间：{result.stressZoom.timeToRecovery}</span>
-                </div>
-              </article>
+              ) : null}
+              <StressScenarioPanel scenarios={result.stressScenarios} />
             </article>
 
             <aside className="panel composition-backtest-result-panel composition-backtest-kpi-rail">
@@ -1930,7 +2430,7 @@ export function CompositionBacktestResultPage({
                     <span className="status-chip status-chip--soft">事件视图</span>
                   </div>
                   <div className="composition-backtest-event-list">
-                    {result.events.map((event) => (
+                    {scenarioFilteredEvents.map((event) => (
                       <button
                         className={event.id === selectedEvent?.id ? 'composition-backtest-event-card is-active' : 'composition-backtest-event-card'}
                         key={event.id}
@@ -2052,6 +2552,28 @@ export function CompositionBacktestResultPage({
                 <span className="status-chip status-chip--soft">全量交易清单</span>
               </div>
               <div className="composition-backtest-filter-stack" aria-label="流水过滤">
+                {result.scenarioAnchors.length > 0 ? (
+                  <div className="composition-backtest-filter-bar" role="group" aria-label="场景过滤">
+                    <span>场景</span>
+                    <button
+                      className={selectedScenarioId === 'all' ? 'is-active' : ''}
+                      onClick={() => setSelectedScenarioId('all')}
+                      type="button"
+                    >
+                      全部
+                    </button>
+                    {result.scenarioAnchors.map((anchor) => (
+                      <button
+                        className={selectedScenarioId === anchor.id ? 'is-active' : ''}
+                        key={anchor.id}
+                        onClick={() => setSelectedScenarioId(anchor.id)}
+                        type="button"
+                      >
+                        {anchor.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="composition-backtest-filter-bar" role="group" aria-label="来源腿过滤">
                   <span>来源腿</span>
                   {['全部', ...sourceLegs].map((sourceLeg) => (

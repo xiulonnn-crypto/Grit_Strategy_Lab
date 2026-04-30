@@ -154,9 +154,11 @@
 | `#/compositions/:id` | hero + 7 KPI + `1.78fr / 330px` 主区 + rail | 主区展示收益流 / 归因 / 相关性 / 情景，右 rail 展示来源签名、成本、审计与深入入口 |
 | `#/compositions/:id/backtest-runs/new` | heading card + 配置摘要 + 规则面板 | 回答“怎么测稳定性”，包含版本、周期、再平衡、成本、缺失数据和预检摘要 |
 | `#/compositions/:id/backtest-runs/:runId` | 裁决 hero + Diagnosis / Orders / Evidence tabs + 诊断 3:1 图表 / 指标 rail | 结果页拆分诊断、执行订单和证据存证，诊断首屏左侧保留大面积曲线，右侧集中年化、夏普、回撤和覆盖核心指标 |
+| `#/compositions/backtest-runs` | hero + 4 指标卡 + 筛选表格 + 330px 压力场景 rail | 表格列固定为组合名、时间周期、状态标签、压力窗口、年化收益、夏普、回撤和查看；筛选与压力场景点击必须联动列表、URL 与右侧当前窗口 |
 | `#/compositions/:id/allocation-lab` | heading card + 意图导航 + 风险边界 + 资产微调 | 回答“我要怎样分配风险预算”，默认用意图选择代替算法填表 |
 | `#/compositions/:id/allocation-jobs/:jobId` | 结果 hero + 有效前沿 + 候选卡 | 展示 Current / Benchmark、候选高亮、ENB、扣费后夏普和迁移成本 |
-| `#/strategies` | 策略库 hero + 摘要指标 + 策略表格 + 新建策略弹层 | 入口可见名称为“策略库”；表格展示策略名、版本、类型、10Y/20Y/30Y 年化收益/夏普、状态与查看/回测/优化动作；缺失长期回测以“一键生成”文字链进入对应周期回测创建页；创建类型选择只在弹层内出现 |
+| `#/strategies` | 策略库 hero + 摘要指标 + 策略表格 + 新建策略弹层 | 入口可见名称为“策略库”；表格展示策略名、版本、类型、10Y/20Y/30Y 年化收益/夏普、状态与查看/回测/优化动作；收益列与状态只按当前参数版本的回测证据计算，历史版本回测不能回填当前版本；缺失长期回测以“一键生成”文字链进入对应周期回测创建页；创建类型选择只在弹层内出现 |
+| `#/creation/asset-allocation/new` | heading card + `minmax(0, 1.42fr) / 362px` 配置工作台 | 单页完成资产配置型策略参数；左侧标的、权重、推荐权重，右侧执行方式、再平衡与成本模拟；标的与基准从数据快照选择；不使用步骤条 |
 | `#/creation/sessions/:id` | 标题卡 + `1.05fr / 0.95fr` 双栏 | 左对话，右 sticky 步骤/字段编辑 |
 | `#/strategies/:id` | heading card + action hero + 两层双栏 | 上层摘要/版本，下层最近回测/下一步 |
 | `#/strategies/:id/backtest-runs/new` | hero + 单大 panel + 3 列子卡 | 当前不是左右双栏，而是三段确认区 |
@@ -198,8 +200,9 @@
 
 ### 6.4 创建链路组件家族
 
-- **策略库入口**：`#/strategies` 对外呈现为策略库，使用页面自有 hero、摘要指标、dense table、状态筛选和表头排序；不得再把五类模板卡直接铺在页面主体。`#/creation/new` 仅作为旧链接兼容入口。
-- **创建类型弹层**：点击“新建策略”后展示五类策略类型卡，卡片按钮全宽，弹层用于进入创建会话。
+- **策略库入口**：`#/strategies` 对外呈现为策略库，使用页面自有 hero、摘要指标、dense table、状态筛选和表头排序；长期收益列、摘要计数与行状态必须绑定当前参数版本的回测证据，不能用旧版本回测填充当前版本。`#/creation/new` 仅作为旧链接兼容入口。
+- **创建类型弹层**：点击“新建策略”后展示策略类型卡，卡片按钮全宽；资产配置型进入独立配置页，通用策略保持最后。
+- **资产配置配置页**：页面单屏完成标的、权重、执行模式、再平衡和成本参数配置；初始标的为空，Ticker 使用数据快照模糊搜索单选，基准使用“指数与基准”下拉单选。解释文案使用简洁金融表达，明确“回测、运行详情和优化配置不创建第二套资产配置报告。”
 - **创建标题卡**：`28px` 圆角，允许轻渐变顶色。
 - **消息卡**：系统消息偏浅蓝白，用户消息偏浅青绿。
 - **步骤 chip**：胶囊结构，带状态点；warning 用暖橙，success 用绿。
@@ -242,6 +245,7 @@
 - **组合导航**：左侧导航新增 `组合` 分组，常驻 `组合仪表板` 与 `资产库`；工作台和详情页仍归属组合仪表板的上下文，不新增第二套路由壳。
 - **组合仪表板**：顶部是轻渐变 hero、chip row 和 3 张指标卡；主体用双栏承载“我的组合 / 待处理动作”和“最近活动 / 组合观察”，不是 workspace 换皮，也不是静态市场评论页。
 - **组合卡**：组合名、再平衡节奏、腿数、状态 / 版本漂移、近 30 日、年化、夏普、最大回撤与下一步建议必须同时出现；归档动作必须进入二次确认 modal。
+- **组合状态标签**：组合列表、详情、回测列表和 Allocation 相关门禁统一使用“状态标签”作为标题、列名、筛选名和卡片标题；主标签固定为 `稳健/待校准/失效：问题类型`。弹层只展示“前台判定说明 / 动作 / 解决判定”三段，底层字段只允许作为折叠审计事实出现。
 - **资产库**：hero 下接 4 张全局统计卡、紧凑过滤工具栏和 dense table；表格列必须表达来源身份、类型、PIT Date、核心参数 / 来源锚点、引用组合数、状态和操作。
 - **腿部 drawer**：策略腿、资产腿、现金腿都在右侧 drawer 中创建或编辑；债券资产腿来源只能来自 runtime eligible bond snapshot，现金腿强调缓冲和成本吸收，策略腿强调回测锚点与参数版本。
 - **组合工作台**：三栏是硬结构，左侧来源库用于选腿，中栏用于组合命名、权重、锁定和结构摘要，右侧用于成立性评分、再平衡频次、收益质量、净收益拆解、来源签名和保存 dock。
@@ -338,7 +342,7 @@ Compose 页面当前的交互原则：
 | composition detail | `web/src/pages/composition-detail-page.tsx`, `web/src/components/composition-detail/composition-detail-view.tsx`, `web/src/components/composition-detail/composition-detail.css` |
 | composition backtest | `web/src/pages/composition-backtest-config-page.tsx`, `web/src/pages/composition-backtest-result-page.tsx`, `web/src/pages/composition-backtest-config.css`, `web/src/pages/composition-backtest-result.css` |
 | composition allocation | `web/src/pages/composition-allocation-page.tsx`, `web/src/pages/composition-allocation-page.css` |
-| creation | `web/src/pages/creation-backtest.css`, `web/src/pages/creation-template-page.tsx`, `web/src/pages/creation-session-page.tsx` |
+| creation | `web/src/pages/creation-backtest.css`, `web/src/pages/creation-template-page.tsx`, `web/src/pages/creation-session-page.tsx`, `web/src/pages/asset-allocation-config-page.tsx`, `web/src/pages/asset-allocation-config-page.css` |
 | strategy detail | `web/src/pages/strategy-detail-page.css`, `web/src/pages/strategy-detail-page.tsx` |
 | backtest submit | `web/src/pages/backtest-submit-page-cn.tsx`, `web/src/pages/creation-backtest.css` |
 | runs index | `web/src/pages/runs-index-page.css`, `web/src/pages/runs-index-page.tsx` |

@@ -2,6 +2,9 @@ import type { AppRoute } from './lib/appRouteContext';
 
 export type ShellNavKey =
   | 'composition-dashboard'
+  | 'composition-list'
+  | 'composition-backtest-runs'
+  | 'composition-lab'
   | 'leg-inventory'
   | 'workspace'
   | 'creation'
@@ -38,6 +41,18 @@ const TEXT = {
   composeDashboardTitle: '组合仪表板',
   composeDashboardDesc:
     '以正式组合、最近维护与待处理动作作为首页叙事，用于组合层的当日决策。',
+  compositionList: '组合列表',
+  compositionListTitle: '组合列表',
+  compositionListDesc:
+    '集中复核组合状态、证据质量与待处理事项。',
+  compositionBacktestRuns: '组合回测',
+  compositionBacktestRunsTitle: '组合回测列表',
+  compositionBacktestRunsDesc:
+    '跨组合追踪稳定性裁决、压力窗口和订单证据。',
+  compositionLab: '组合实验室',
+  compositionLabTitle: '组合实验室',
+  compositionLabDesc:
+    '集中查看配置实验作业、候选方案和晋升审查。',
   legInventory: '资产库',
   legInventoryTitle: '策略资产库',
   legInventoryDesc:
@@ -46,7 +61,7 @@ const TEXT = {
   workspace: '策略工作台',
   workspaceTitle: '策略工作台',
   workspaceDesc:
-    '查看策略看板、最近回测和可直接进入主链路的恢复入口。',
+    '总览策略规模、活跃回测与优化进度，直达最新任务。',
   compositionWorkbenchTitle: '组合工作台',
   compositionWorkbenchDesc:
     '在三栏结构中完成来源装配、权重复核与组合成立性判断。',
@@ -64,6 +79,8 @@ const TEXT = {
   creationTemplateTitle: '策略库',
   creationTemplateDesc:
     '集中管理已创建策略、参数版本、长期回测表现与后续研究动作。',
+  assetAllocationTitle: '资产配置策略配置',
+  assetAllocationDesc: '标的、权重、再平衡与成本参数配置。',
   creationSessionTitle: '创建会话',
   creationSessionDesc:
     '由对话驱动确认稿，再进入策略落地与回测提交。',
@@ -102,6 +119,24 @@ export const SHELL_NAV_GROUPS: ShellNavGroup[] = [
         key: 'composition-dashboard',
         href: '#/compositions',
         label: TEXT.composeDashboard,
+        groupKey: 'compose',
+      },
+      {
+        key: 'composition-list',
+        href: '#/compositions/list',
+        label: TEXT.compositionList,
+        groupKey: 'compose',
+      },
+      {
+        key: 'composition-backtest-runs',
+        href: '#/compositions/backtest-runs',
+        label: TEXT.compositionBacktestRuns,
+        groupKey: 'compose',
+      },
+      {
+        key: 'composition-lab',
+        href: '#/compositions/lab',
+        label: TEXT.compositionLab,
         groupKey: 'compose',
       },
       {
@@ -150,6 +185,30 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         description: TEXT.composeDashboardDesc,
         showPageHeading: false,
       };
+    case 'composition-list':
+      return {
+        navKey: 'composition-list',
+        eyebrow: TEXT.compose,
+        title: TEXT.compositionListTitle,
+        description: TEXT.compositionListDesc,
+        showPageHeading: false,
+      };
+    case 'composition-backtest-runs':
+      return {
+        navKey: 'composition-backtest-runs',
+        eyebrow: TEXT.compose,
+        title: TEXT.compositionBacktestRunsTitle,
+        description: TEXT.compositionBacktestRunsDesc,
+        showPageHeading: false,
+      };
+    case 'composition-lab':
+      return {
+        navKey: 'composition-lab',
+        eyebrow: TEXT.compose,
+        title: TEXT.compositionLabTitle,
+        description: TEXT.compositionLabDesc,
+        showPageHeading: false,
+      };
     case 'leg-inventory':
       return {
         navKey: 'leg-inventory',
@@ -160,7 +219,7 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
       };
     case 'composition-workbench':
       return {
-        navKey: 'composition-dashboard',
+        navKey: 'composition-list',
         eyebrow: TEXT.compose,
         title: TEXT.compositionWorkbenchTitle,
         description: TEXT.compositionWorkbenchDesc,
@@ -206,6 +265,14 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         eyebrow: TEXT.creationEyebrow,
         title: TEXT.creationSessionTitle,
         description: TEXT.creationSessionDesc,
+        showPageHeading: false,
+      };
+    case 'asset-allocation-config':
+      return {
+        navKey: 'creation',
+        eyebrow: TEXT.creationEyebrow,
+        title: TEXT.assetAllocationTitle,
+        description: TEXT.assetAllocationDesc,
         showPageHeading: false,
       };
     case 'strategy-detail':

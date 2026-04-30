@@ -19,6 +19,7 @@ import type {
   ApiOptimizationConstraint,
   ApiOptimizationConstraintPresetKey,
   ApiOptimizationCandidate,
+  ApiOptimizationFilteredResultCreatePayload,
   ApiOptimizationHeatmap,
   ApiOptimizationJobCreatePayload,
   ApiOptimizationJobDetail,
@@ -78,6 +79,8 @@ type OptimizationDiscreteFieldControlProps = {
 };
 
 const OPTIMIZATION_CANDIDATE_PANEL_LIMIT = 3;
+const OPTIMIZATION_WEIGHT_SUM_CONSTRAINT_GROUP = "allocation_weight_sum_100";
+const OPTIMIZATION_WEIGHT_SUM_TARGET = 100;
 const OPTIMIZATION_DISCRETE_FIELD_OPTIONS: Record<
   string,
   OptimizationDiscreteOption[]
@@ -2824,6 +2827,22 @@ function cloneSearchSpace(
   return fields.map(({ tag: _tag, ...field }) => ({ ...field, tag: null }));
 }
 
+function isAllocationWeightSearchKey(key: string): boolean {
+  return key.startsWith("allocation_weight__") && key.endsWith("_pct");
+}
+
+function getDefaultParameterConstraintMetadata(
+  key: string,
+): Pick<ApiOptimizationSearchSpaceField, "constraint_group" | "constraint_target"> {
+  if (!isAllocationWeightSearchKey(key)) {
+    return {};
+  }
+  return {
+    constraint_group: OPTIMIZATION_WEIGHT_SUM_CONSTRAINT_GROUP,
+    constraint_target: OPTIMIZATION_WEIGHT_SUM_TARGET,
+  };
+}
+
 function asFiniteNumber(value: ParameterValue | undefined): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -2891,18 +2910,24 @@ function normalizeSearchField(
 function countSearchFieldCombinations(
   field: ApiOptimizationSearchSpaceField,
 ): number {
+  return Math.max(getSearchFieldCombinationValues(field).length, 1);
+}
+
+function getSearchFieldCombinationValues(
+  field: ApiOptimizationSearchSpaceField,
+): ParameterValue[] {
   if (field.mode === "discrete") {
-    return Math.max(getDiscreteFieldValues(field).length, 1);
+    return getDiscreteFieldValues(field);
   }
   if (field.mode === "fixed") {
-    return 1;
+    return [getLockedFieldValue(field)];
   }
 
   const start = asFiniteNumber(field.start);
   const end = asFiniteNumber(field.end);
   const step = asFiniteNumber(field.step);
   if (start === null || end === null || step === null || step === 0) {
-    return 1;
+    return [field.value ?? getLockedFieldValue(field)];
   }
 
   const min = Math.min(start, end);
@@ -2916,10 +2941,84 @@ function countSearchFieldCombinations(
   const scaledRange = Math.round((max - min) * scale);
   const scaledStride = Math.round(stride * scale);
   if (scaledStride <= 0) {
-    return 1;
+    return [min];
   }
 
-  return Math.max(Math.floor(scaledRange / scaledStride) + 1, 1);
+  const values: number[] = [];
+  const count = Math.max(Math.floor(scaledRange / scaledStride) + 1, 1);
+  for (let index = 0; index < count; index += 1) {
+    values.push((Math.round(min * scale) + scaledStride * index) / scale);
+  }
+  return values;
+}
+
+function getDecimalPlaces(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  const text = value.toString().toLowerCase();
+  if (text.includes("e-")) {
+    const [, exponent] = text.split("e-");
+    return Number.parseInt(exponent ?? "0", 10) || 0;
+  }
+  return text.split(".")[1]?.length ?? 0;
+}
+
+function getWeightSumConstrainedFields(
+  fields: ApiOptimizationSearchSpaceField[],
+): ApiOptimizationSearchSpaceField[] {
+  return fields.filter(
+    (field) =>
+      field.constraint_group === OPTIMIZATION_WEIGHT_SUM_CONSTRAINT_GROUP ||
+      isAllocationWeightSearchKey(field.key),
+  );
+}
+
+function countWeightSumCombinations(
+  fields: ApiOptimizationSearchSpaceField[],
+): number | null {
+  const weightFields = getWeightSumConstrainedFields(fields);
+  if (weightFields.length < 2) {
+    return null;
+  }
+
+  const numericValueSets = weightFields.map((field) =>
+    getSearchFieldCombinationValues(field)
+      .map((value) => asFiniteNumber(value))
+      .filter((value): value is number => value !== null),
+  );
+  if (
+    numericValueSets.some(
+      (values, index) =>
+        values.length !== getSearchFieldCombinationValues(weightFields[index]).length,
+    )
+  ) {
+    return null;
+  }
+
+  const maxDecimalPlaces = numericValueSets
+    .flat()
+    .reduce(
+      (maxDigits, value) => Math.max(maxDigits, getDecimalPlaces(value)),
+      getDecimalPlaces(OPTIMIZATION_WEIGHT_SUM_TARGET),
+    );
+  const scale = 10 ** maxDecimalPlaces;
+  const target = Math.round(OPTIMIZATION_WEIGHT_SUM_TARGET * scale);
+  let counts = new Map<number, number>([[0, 1]]);
+
+  numericValueSets.forEach((values) => {
+    const nextCounts = new Map<number, number>();
+    Array.from(new Set(values)).forEach((value) => {
+      const scaledValue = Math.round(value * scale);
+      counts.forEach((count, partialSum) => {
+        const nextSum = partialSum + scaledValue;
+        nextCounts.set(nextSum, (nextCounts.get(nextSum) ?? 0) + count);
+      });
+    });
+    counts = nextCounts;
+  });
+
+  return counts.get(target) ?? 0;
 }
 
 function calculateBudgetCombinations(
@@ -2927,6 +3026,18 @@ function calculateBudgetCombinations(
 ): number {
   if (!fields.length) {
     return 0;
+  }
+  const weightSumCombinationCount = countWeightSumCombinations(fields);
+  if (weightSumCombinationCount !== null) {
+    const nonWeightCombinationCount = fields
+      .filter(
+        (field) =>
+          !getWeightSumConstrainedFields(fields).some(
+            (weightField) => weightField.key === field.key,
+          ),
+      )
+      .reduce((total, field) => total * countSearchFieldCombinations(field), 1);
+    return weightSumCombinationCount * nonWeightCombinationCount;
   }
   return fields.reduce(
     (total, field) => total * countSearchFieldCombinations(field),
@@ -2952,6 +3063,7 @@ function buildConfiguredSearchField(
       value: field.value,
       values: selectedValues.length ? selectedValues : configuredValues.slice(0, 1),
       tag: "选股规则",
+      ...getDefaultParameterConstraintMetadata(field.key),
     });
   }
 
@@ -2967,6 +3079,7 @@ function buildConfiguredSearchField(
       end: field.value,
       step: 1,
       tag: "选股规则",
+      ...getDefaultParameterConstraintMetadata(field.key),
     });
   }
 
@@ -2980,6 +3093,7 @@ function buildConfiguredSearchField(
     end: numericValue + (index + 2) * step,
     step,
     tag: "选股规则",
+    ...getDefaultParameterConstraintMetadata(field.key),
   });
 }
 
@@ -3641,6 +3755,13 @@ export function OptimizationConfigPage({
     () => calculateBudgetCombinations(searchSpace),
     [searchSpace],
   );
+  const hasWeightSumDefaultConstraint = useMemo(
+    () => getWeightSumConstrainedFields(searchSpace).length > 1,
+    [searchSpace],
+  );
+  const combinationCountLabel = hasWeightSumDefaultConstraint
+    ? "有效组合"
+    : "预计组合";
   const rangeFieldCount = useMemo(
     () => searchSpace.filter((field) => field.mode === "range").length,
     [searchSpace],
@@ -3820,8 +3941,13 @@ export function OptimizationConfigPage({
                 当前版本：{formatStrategyVersionTag(strategy.current_parameter_version_id) ?? "-"}
               </span>
               <span className="status-chip status-chip--soft">
-                预计组合：{budgetCombinations} 组
+                {combinationCountLabel}：{budgetCombinations} 组
               </span>
+              {hasWeightSumDefaultConstraint ? (
+                <span className="status-chip status-chip--soft">
+                  默认约束：权重合计 100%
+                </span>
+              ) : null}
               {sourceRun ? (
                 <span className="status-chip status-chip--soft">
                   来源回测：{sourceRun.id}
@@ -3857,7 +3983,7 @@ export function OptimizationConfigPage({
           </button>
           <button
             className="primary-button"
-            disabled={saving || loading}
+            disabled={saving || loading || budgetCombinations <= 0}
             onClick={() => void handleStartOptimization()}
             style={HERO_ACTION_BUTTON_STYLE}
             type="button"
@@ -4003,7 +4129,7 @@ export function OptimizationConfigPage({
                 <strong>{fixedFieldCount}</strong>
               </article>
               <article className="optimization-config-summary-card">
-                <span>预计组合</span>
+                <span>{combinationCountLabel}</span>
                 <strong>{budgetCombinations}</strong>
               </article>
               <article className="optimization-config-summary-card">
@@ -4174,7 +4300,9 @@ export function OptimizationConfigPage({
                 </div>
                 <div className="optimization-constraint-stats">
                   <span>
-                    目标排序 {getOptimizationObjectiveLabel(objective)}
+                    {hasWeightSumDefaultConstraint
+                      ? "默认约束 权重合计 100%"
+                      : `目标排序 ${getOptimizationObjectiveLabel(objective)}`}
                   </span>
                   <strong>{budgetCombinations} 组</strong>
                 </div>
@@ -4192,6 +4320,11 @@ export function OptimizationConfigPage({
                 <span className="status-chip status-chip--soft">
                   {constraintLabel}
                 </span>
+                {hasWeightSumDefaultConstraint ? (
+                  <span className="status-chip status-chip--soft">
+                    权重合计 100%
+                  </span>
+                ) : null}
                 {currentConstraintVerdicts.map((entry) => (
                   <span
                     className={`status-chip status-chip--soft optimization-constraint-card__verdict optimization-constraint-card__verdict--${entry.verdict}`}
@@ -4249,6 +4382,8 @@ export function OptimizationResultsPage({
   const [appliedConstraints, setAppliedConstraints] = useState<
     OptimizationConstraint[]
   >([]);
+  const [filteredResultDraft, setFilteredResultDraft] =
+    useState<ApiOptimizationFilteredResultCreatePayload | null>(null);
   const [constraintLiveMessage, setConstraintLiveMessage] = useState("");
   const [allCombinationsOpen, setAllCombinationsOpen] = useState(false);
   const [allCombinationsPage, setAllCombinationsPage] = useState(1);
@@ -4368,6 +4503,7 @@ export function OptimizationResultsPage({
         }
         if (!cancelled) {
           setJob(jobPayload);
+          setFilteredResultDraft(null);
           setStrategy(strategyPayload);
           setBaselineRun(baselineRunPayload);
           setSelectedCandidateId(
@@ -5138,6 +5274,7 @@ export function OptimizationResultsPage({
           : constraint,
     );
     syncResultConstraintDraft(nextConstraints);
+    setFilteredResultDraft(null);
     setConstraintToast(null);
     setConstraintLiveMessage("已修改约束条件，点击“重新过滤”后应用。");
   }
@@ -5159,6 +5296,7 @@ export function OptimizationResultsPage({
       nextMatchSummary.candidateCount === 0 &&
       !nextMatchSummary.baselineMatches
     ) {
+      setFilteredResultDraft(null);
       setConstraintToast("无符合条件的组合，请放宽约束条件再试。");
       return;
     }
@@ -5167,18 +5305,24 @@ export function OptimizationResultsPage({
       setError(null);
       setNotice(null);
       setConstraintToast(null);
+      const filteredPayload: ApiOptimizationFilteredResultCreatePayload = {
+        objective: nextObjective,
+        constraint_preset_key: constraintPresetKey,
+        constraint_label: nextConstraintLabel,
+        constraints: cloneOptimizationConstraints(
+          nextConstraints,
+          constraintPresetKey,
+        ),
+      };
       const updated = ensureOptimizationJobHasMatchingCombinationCount(
-        await api.updateOptimizationJobConstraints(job.id, {
-          objective: nextObjective,
-          constraint_preset_key: constraintPresetKey,
-          constraint_label: nextConstraintLabel,
-          constraints: nextConstraints,
-        }),
+        await api.updateOptimizationJobConstraints(job.id, filteredPayload),
       );
       setJob(updated);
+      setFilteredResultDraft(filteredPayload);
       applyResultConstraintState(nextObjective, nextConstraints);
       setConstraintLiveMessage(
-        messages?.success ?? "已按最新约束条件重新过滤并重排。",
+        messages?.success ??
+          "已按最新约束条件重新过滤并重排。原任务快照未改写，可保存为新结果。",
       );
     } catch (caught) {
       const message =
@@ -5189,13 +5333,14 @@ export function OptimizationResultsPage({
         setConstraintLiveMessage("");
         return;
       }
+      setFilteredResultDraft(null);
       applyResultConstraintState(nextObjective, nextConstraints);
       setNotice(
-        `已按当前页面约束条件重新过滤，后端未保存本次约束设置：${message}`,
+        `已按当前页面约束条件重新过滤，后端未返回本次过滤快照：${message}`,
       );
       setConstraintLiveMessage(
         messages?.localOnly ??
-          "已在当前页面应用最新约束条件与排序，但未保存到任务。",
+          "已在当前页面应用最新约束条件与排序，但没有可保存的新结果。",
       );
     } finally {
       setSaving(false);
@@ -5232,9 +5377,36 @@ export function OptimizationResultsPage({
       draft.constraintLabel,
       {
         success: `已按 ${candidateLabel} 回填建议约束并重新过滤。`,
-        localOnly: `已按 ${candidateLabel} 回填建议约束并在当前页面重新过滤，但未保存到任务。`,
+        localOnly: `已按 ${candidateLabel} 回填建议约束并在当前页面重新过滤，但没有可保存的新结果。`,
       },
     );
+  }
+
+  async function handleSaveFilteredResult(): Promise<void> {
+    if (!job || !filteredResultDraft) {
+      return;
+    }
+    try {
+      setSaving(true);
+      setError(null);
+      setNotice(null);
+      setConstraintToast(null);
+      const saved = await api.saveOptimizationFilteredResult(job.id, {
+        ...filteredResultDraft,
+        constraints: cloneOptimizationConstraints(
+          filteredResultDraft.constraints ?? [],
+          constraintPresetKey,
+        ),
+      });
+      setFilteredResultDraft(null);
+      navigateTo(`/optimization-jobs/${saved.id}`);
+    } catch (caught) {
+      const message =
+        caught instanceof Error ? caught.message : String(caught ?? "未知错误");
+      setConstraintToast(`保存新结果失败：${message}`);
+    } finally {
+      setSaving(false);
+    }
   }
 
   function openPromotionConfirm(): void {
@@ -6150,6 +6322,16 @@ export function OptimizationResultsPage({
                   >
                     {saving ? "重新过滤中..." : "重新过滤"}
                   </button>
+                  {filteredResultDraft ? (
+                    <button
+                      className="primary-button optimization-results-constraint-bar__action"
+                      disabled={saving}
+                      onClick={() => void handleSaveFilteredResult()}
+                      type="button"
+                    >
+                      {saving ? "保存中..." : "保存新结果"}
+                    </button>
+                  ) : null}
                 </div>
               </div>
               <form
@@ -6169,11 +6351,12 @@ export function OptimizationResultsPage({
                     aria-label="目标排序"
                     className="optimization-results-constraint-pill__select"
                     id="optimization-results-objective"
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      setFilteredResultDraft(null);
                       setObjectiveDraft(
                         normalizeOptimizationObjective(event.target.value),
-                      )
-                    }
+                      );
+                    }}
                     value={objectiveDraft}
                   >
                     {OPTIMIZATION_OBJECTIVE_OPTIONS.map((option) => (

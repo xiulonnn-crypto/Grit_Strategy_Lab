@@ -11,6 +11,7 @@ type FakeApi = {
   createCompositionAllocationJob?: ReturnType<typeof vi.fn>;
   getCompositionDetail?: ReturnType<typeof vi.fn>;
   getCompositionAllocationJob?: ReturnType<typeof vi.fn>;
+  promoteCompositionAllocationCandidateToDraft?: ReturnType<typeof vi.fn>;
   updateComposition?: ReturnType<typeof vi.fn>;
 };
 
@@ -18,6 +19,7 @@ const fakeApi = vi.hoisted<FakeApi>(() => ({
   createCompositionAllocationJob: vi.fn(),
   getCompositionDetail: vi.fn(),
   getCompositionAllocationJob: vi.fn(),
+  promoteCompositionAllocationCandidateToDraft: vi.fn(),
   updateComposition: vi.fn(),
 }));
 
@@ -190,6 +192,27 @@ const allocationJob = {
   warnings: [],
 };
 
+const blockedEvidenceAllocationJob = {
+  ...allocationJob,
+  evidence_grade: 'C',
+  candidates: allocationJob.candidates.map((candidate) => {
+    if (!candidate.allowed_actions.includes('promote_candidate')) {
+      return candidate;
+    }
+    return {
+      ...candidate,
+      promotion_readiness: {
+        status: 'blocked',
+        evidence_grade: 'C',
+        migration_cost_bps: 1,
+        policy_violations: [],
+        blockers: ['evidence_grade_c'],
+        required_steps: ['diff_review', 'constraint_check', 'migration_cost_review', 'evidence_gate'],
+      },
+    };
+  }),
+};
+
 describe('Composition allocation split UI', () => {
   beforeEach(() => {
     fakeApi.createCompositionAllocationJob = vi.fn().mockResolvedValue({
@@ -212,6 +235,15 @@ describe('Composition allocation split UI', () => {
     });
     fakeApi.getCompositionDetail = vi.fn().mockResolvedValue(detail);
     fakeApi.getCompositionAllocationJob = vi.fn().mockResolvedValue(allocationJob);
+    fakeApi.promoteCompositionAllocationCandidateToDraft = vi.fn().mockResolvedValue({
+      id: 'ver-draft-007',
+      composition_id: 'comp-001',
+      version_number: 7,
+      status: 'DRAFT',
+      source_kind: 'allocation_candidate',
+      source_ref_id: 'alloc-001:max_sharpe',
+      created_at: '2026-04-28T00:00:00.000Z',
+    });
     fakeApi.updateComposition = vi.fn().mockResolvedValue({ id: 'comp-001' });
   });
 
@@ -537,37 +569,45 @@ describe('Composition allocation split UI', () => {
       /Min Vol|Current|Risk Parity|Max Sharpe|Benchmark|查看详情|另存为实验|一键晋升 v1\.3/,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: '一键晋升版本' }));
-    expect(screen.getByRole('dialog', { name: '确认晋升版本' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '确认晋升' }));
+    fireEvent.click(screen.getByRole('button', { name: '生成草稿版本' }));
+    expect(screen.getByRole('dialog', { name: '确认生成草稿版本' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认生成草稿' }));
 
-    expect(screen.getByRole('button', { name: '确认晋升' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '确认生成草稿' })).toBeDisabled();
     fireEvent.change(screen.getByRole('textbox', { name: '升级理由' }), {
       target: { value: '采用配置实验室候选，降低组合风险暴露。' },
     });
-    fireEvent.click(screen.getByRole('button', { name: '确认晋升' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认生成草稿' }));
 
     await waitFor(() => {
-      expect(fakeApi.updateComposition).toHaveBeenCalledWith(
+      expect(fakeApi.promoteCompositionAllocationCandidateToDraft).toHaveBeenCalledWith(
         'comp-001',
+        'alloc-001',
+        'max_sharpe',
         expect.objectContaining({
-          legs: expect.arrayContaining([
-            expect.objectContaining({
-              display_name: '阿尔法核心策略',
-              leg_kind: 'strategy',
-              source_ref_id: 'alpha-core',
-              weight_pct: expect.any(Number),
-            }),
-          ]),
-          version_reason: '采用配置实验室候选，降低组合风险暴露。',
-          version_source: 'allocation_promotion',
-          version_candidate_id: expect.any(String),
-          version_candidate_label: expect.any(String),
+          decision_note: '采用配置实验室候选，降低组合风险暴露。',
         }),
       );
     });
-    expect(await screen.findByText(/已提交版本晋升：最大夏普预览/)).toBeInTheDocument();
+    expect(await screen.findByText(/已生成草稿版本 v7：最大夏普预览/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '查看详情' })).not.toBeInTheDocument();
+  });
+
+  it('blocks draft creation on the result page when a candidate has an unresolved failed status label', async () => {
+    fakeApi.getCompositionAllocationJob = vi.fn().mockResolvedValue(blockedEvidenceAllocationJob);
+
+    await act(async () => {
+      render(<CompositionAllocationResultPage compositionId="comp-001" jobId="alloc-001" />);
+    });
+
+    expect(await screen.findByRole('heading', { level: 1, name: '组合优化结果' })).toBeInTheDocument();
+    const promoteButton = screen.getByRole('button', { name: '生成草稿版本' });
+    expect(promoteButton).toBeDisabled();
+    expect(screen.getByText('存在未关闭的失效问题，晋升门禁已暂停。')).toBeInTheDocument();
+
+    fireEvent.click(promoteButton);
+    expect(screen.queryByRole('dialog', { name: '确认生成草稿版本' })).not.toBeInTheDocument();
+    expect(fakeApi.promoteCompositionAllocationCandidateToDraft).not.toHaveBeenCalled();
   });
 
   it('keeps the benchmark as the only red hollow point on the frontier', () => {

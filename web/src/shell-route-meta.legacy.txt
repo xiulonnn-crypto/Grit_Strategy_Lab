@@ -30,7 +30,7 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         navKey: 'workspace',
         eyebrow: '工作台',
         title: '工作台健康度',
-        description: '查看策略看板、最近回测和可直接进入主链路的恢复入口。',
+        description: '总览策略规模、活跃回测与优化进度，直达最新任务。',
       };
     case 'creation-template':
       return {

@@ -787,6 +787,18 @@ class RealBacktestPlatformService(BacktestPlatformService):
             ordered.append(normalized)
         return ordered
 
+    def _asset_allocation_symbols_from_parameters(self, parameters: Mapping[str, Any] | None) -> list[str]:
+        raw_assets = _as_mapping(parameters).get("allocation_assets")
+        if not isinstance(raw_assets, Sequence) or isinstance(raw_assets, (str, bytes)):
+            return []
+        symbols: list[str] = []
+        for asset in raw_assets:
+            raw_symbol = asset.get("symbol") if isinstance(asset, Mapping) else asset
+            symbol = self._normalize_refresh_symbol(raw_symbol)
+            if symbol and symbol not in symbols:
+                symbols.append(symbol)
+        return symbols
+
     def _looks_like_direct_symbol(self, value: str) -> bool:
         return self._normalize_refresh_symbol(value) is not None
 
@@ -816,6 +828,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
         strategy: Mapping[str, Any],
         request_payload: Mapping[str, Any] | None = None,
     ) -> str | None:
+        if str(strategy.get("strategy_type") or "").upper() == "ASSET_ALLOCATION":
+            return None
         if self._uses_direct_symbol_universe(strategy):
             return None
         snapshot_id = (
@@ -4904,6 +4918,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
         strategy: Mapping[str, Any],
         request_payload: Mapping[str, Any] | None = None,
     ) -> list[str]:
+        allocation_symbols = self._asset_allocation_symbols_from_parameters(strategy.get("parameters") or {})
+        if allocation_symbols:
+            return allocation_symbols
+
         direct_symbol = self._direct_symbol_universe_symbol(strategy)
         if direct_symbol:
             return [direct_symbol]
@@ -6113,7 +6131,18 @@ class RealBacktestPlatformService(BacktestPlatformService):
             benchmark_symbol=str(strategy.get("benchmark_symbol") or parameters.get("benchmark_symbol") or ""),
         )
         parameters["template_key"] = strategy_type.lower()
-        if strategy_type == "MOMENTUM":
+        parameters["strategy_type"] = strategy_type
+        if strategy_type == "ASSET_ALLOCATION":
+            parameters["template_key"] = "asset_allocation"
+            parameters.setdefault("investment_mode", "all_in")
+            parameters.setdefault("rebalance_enabled", True)
+            parameters.setdefault("rebalance_frequency", "quarterly")
+            parameters.setdefault("rebalance_threshold_pct", 5.0)
+            parameters.setdefault("cost_model_enabled", True)
+            parameters.setdefault("fee_bps", 1.5)
+            parameters.setdefault("slippage_bps", 2.5)
+            parameters.setdefault("expense_ratio_bps", 8.0)
+        elif strategy_type == "MOMENTUM":
             top_n = max(int(_coerce_float(parameters.get("top_n"), 5.0) or 5.0), 1)
             holding_count = max(int(_coerce_float(parameters.get("holding_count"), float(top_n)) or float(top_n)), 1)
             lookback_months = max(int(_coerce_float(parameters.get("lookback_months"), 12.0) or 12.0), 1)
@@ -6145,6 +6174,108 @@ class RealBacktestPlatformService(BacktestPlatformService):
             parameters.setdefault("rebalance_frequency", "never")
         parameters.setdefault("benchmark_symbol", str(strategy.get("benchmark_symbol") or "SPY"))
         return parameters
+
+    def recommend_asset_allocation(self, session_id: str, request: Any | None = None) -> dict[str, Any]:
+        self.get_creation_session(session_id)
+        payload = _as_mapping(request)
+        raw_assets = payload.get("assets") or []
+        if not isinstance(raw_assets, Sequence) or isinstance(raw_assets, (str, bytes)):
+            raw_assets = []
+
+        assets: list[dict[str, Any]] = []
+        seen_symbols: set[str] = set()
+        for raw_asset in raw_assets:
+            asset = _as_mapping(raw_asset)
+            symbol = self._normalize_refresh_symbol(asset.get("symbol"))
+            if not symbol or symbol in seen_symbols:
+                continue
+            seen_symbols.add(symbol)
+            assets.append(
+                {
+                    "symbol": symbol,
+                    "display_name": asset.get("display_name"),
+                    "asset_class": asset.get("asset_class"),
+                }
+            )
+        if not assets:
+            raise ValueError("At least one allocation asset is required")
+
+        lookback_days = max(int(_coerce_float(payload.get("lookback_days"), 252.0) or 252.0), 21)
+        calendar_days = max(int(math.ceil(lookback_days * 1.8)), lookback_days + 30)
+        start_date = (date.today() - timedelta(days=calendar_days)).isoformat()
+        symbols = [asset["symbol"] for asset in assets]
+        raw_bars = self._load_snapshot_price_bars(
+            DATASET_PRICE_SNAPSHOT_ID,
+            symbols,
+            start_date=start_date,
+            end_date=date.today().isoformat(),
+        )
+
+        vol_by_symbol: dict[str, float] = {}
+        data_status: dict[str, str] = {}
+        diagnostics: dict[str, Any] = {"lookback_days": lookback_days, "observations": {}}
+        warnings: list[str] = []
+        for symbol in symbols:
+            bars = _normalize_bars(raw_bars.get(symbol) or [])
+            closes = [
+                float(bar.adj_close or bar.close or bar.open)
+                for bar in bars[-(lookback_days + 1):]
+                if float(bar.adj_close or bar.close or bar.open) > 0
+            ]
+            returns = [
+                closes[index] / closes[index - 1] - 1.0
+                for index in range(1, len(closes))
+                if closes[index - 1] > 0
+            ]
+            diagnostics["observations"][symbol] = len(returns)
+            if len(returns) < 20:
+                data_status[symbol] = "fallback_equal_weight"
+                continue
+            average_return = sum(returns) / len(returns)
+            variance = sum((value - average_return) ** 2 for value in returns) / len(returns)
+            volatility = math.sqrt(max(variance, 0.0))
+            if volatility <= 0 or not math.isfinite(volatility):
+                data_status[symbol] = "fallback_equal_weight"
+                continue
+            vol_by_symbol[symbol] = volatility
+            data_status[symbol] = "price_history"
+
+        missing_history = [symbol for symbol in symbols if symbol not in vol_by_symbol]
+        if missing_history:
+            joined = ", ".join(missing_history)
+            raise ValueError(f"Risk parity recommendation requires price history for all selected assets: {joined}")
+
+        inverse_vol = {symbol: 1.0 / volatility for symbol, volatility in vol_by_symbol.items()}
+        denominator = sum(inverse_vol.values())
+        weights = {symbol: value / denominator * 100.0 for symbol, value in inverse_vol.items()} if denominator else {}
+        method = "risk_parity_inverse_volatility"
+
+        rounded_weights: list[dict[str, Any]] = []
+        running_total = 0.0
+        for index, asset in enumerate(assets):
+            symbol = asset["symbol"]
+            if index == len(assets) - 1:
+                target_weight_pct = round(100.0 - running_total, 4)
+            else:
+                target_weight_pct = round(weights.get(symbol, 0.0), 4)
+                running_total += target_weight_pct
+            rounded_weights.append(
+                {
+                    "symbol": symbol,
+                    "display_name": asset.get("display_name"),
+                    "asset_class": asset.get("asset_class"),
+                    "target_weight_pct": target_weight_pct,
+                    "risk_contribution_pct": round(100.0 / len(assets), 4),
+                    "data_status": data_status.get(symbol, "fallback_equal_weight"),
+                }
+            )
+
+        return {
+            "method": method,
+            "weights": rounded_weights,
+            "diagnostics": diagnostics,
+            "warnings": warnings,
+        }
 
     def _market_data_start_date_for_backtest(
         self,
@@ -6585,15 +6716,24 @@ class RealBacktestPlatformService(BacktestPlatformService):
             _as_mapping(strategy.get("parameters")).get("capital"),
             100000.0,
         )
+        engine_parameters = self._engine_parameters(strategy)
+        request_fee_bps = _coerce_float(request_payload.get("fee_bps"))
+        request_slippage_bps = _coerce_float(request_payload.get("slippage_bps"))
+        parameter_cost_bps = 0.0
+        if bool(engine_parameters.get("cost_model_enabled", False)):
+            parameter_cost_bps = (
+                _coerce_float(engine_parameters.get("fee_bps"))
+                + _coerce_float(engine_parameters.get("slippage_bps"))
+            )
+        transaction_cost_bps = request_fee_bps + request_slippage_bps
+        if transaction_cost_bps <= 0 and parameter_cost_bps > 0:
+            transaction_cost_bps = parameter_cost_bps
         config = BacktestConfig(
             start_date=request_payload.get("start_date"),
             end_date=request_payload.get("end_date"),
             benchmark_symbol=benchmark_symbol,
             initial_equity=capital if capital > 0 else 100000.0,
-            transaction_cost_bps=(
-                _coerce_float(request_payload.get("fee_bps"))
-                + _coerce_float(request_payload.get("slippage_bps"))
-            ),
+            transaction_cost_bps=transaction_cost_bps,
         )
         prepared_inputs = prepare_backtest_inputs(
             bars_by_symbol,

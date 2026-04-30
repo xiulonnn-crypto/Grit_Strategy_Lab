@@ -3,6 +3,9 @@ import { createContext, useContext, type ReactNode } from 'react';
 export type AppRoute =
   | { kind: 'workspace' }
   | { kind: 'composition-dashboard' }
+  | { kind: 'composition-list'; status?: string; decision?: string; evidenceGrade?: string }
+  | { kind: 'composition-backtest-runs'; scenario?: string; evidenceGrade?: string }
+  | { kind: 'composition-lab'; status?: string; compositionId?: string; method?: string; gate?: string }
   | { kind: 'leg-inventory' }
   | { kind: 'composition-workbench'; compositionId?: string; addLeg?: string }
   | { kind: 'composition-detail'; compositionId: string }
@@ -18,6 +21,7 @@ export type AppRoute =
   | { kind: 'composition-allocation-config'; compositionId: string }
   | { kind: 'composition-allocation-result'; compositionId: string; jobId: string }
   | { kind: 'creation-template' }
+  | { kind: 'asset-allocation-config'; sessionId?: string }
   | { kind: 'creation-session'; sessionId: string }
   | { kind: 'strategy-detail'; strategyId: string }
   | { kind: 'backtest'; strategyId: string; sourceRunId?: string; periodYears?: number }
@@ -54,6 +58,39 @@ export function parseAppHash(hash: string): AppRoute {
   }
   if (path === '/compositions') {
     return { kind: 'composition-dashboard' };
+  }
+  if (path === '/compositions/list') {
+    const status = searchParams.get('status');
+    const decision = searchParams.get('decision');
+    const evidenceGrade = searchParams.get('grade') ?? searchParams.get('evidence_grade');
+    return {
+      kind: 'composition-list',
+      status: status ? decodeURIComponent(status) : undefined,
+      decision: decision ? decodeURIComponent(decision) : undefined,
+      evidenceGrade: evidenceGrade ? decodeURIComponent(evidenceGrade) : undefined,
+    };
+  }
+  if (path === '/compositions/backtest-runs') {
+    const scenario = searchParams.get('scenario');
+    const evidenceGrade = searchParams.get('grade') ?? searchParams.get('evidence_grade');
+    return {
+      kind: 'composition-backtest-runs',
+      scenario: scenario ? decodeURIComponent(scenario) : undefined,
+      evidenceGrade: evidenceGrade ? decodeURIComponent(evidenceGrade) : undefined,
+    };
+  }
+  if (path === '/compositions/lab') {
+    const status = searchParams.get('status');
+    const compositionId = searchParams.get('composition_id');
+    const method = searchParams.get('method');
+    const gate = searchParams.get('gate');
+    return {
+      kind: 'composition-lab',
+      status: status ? decodeURIComponent(status) : undefined,
+      compositionId: compositionId ? decodeURIComponent(compositionId) : undefined,
+      method: method ? decodeURIComponent(method) : undefined,
+      gate: gate ? decodeURIComponent(gate) : undefined,
+    };
   }
   if (path === '/legs') {
     return { kind: 'leg-inventory' };
@@ -111,6 +148,13 @@ export function parseAppHash(hash: string): AppRoute {
   }
   if (path === '/strategies' || path === '/creation/new') {
     return { kind: 'creation-template' };
+  }
+  if (path === '/creation/asset-allocation/new') {
+    const sessionId = searchParams.get('session_id');
+    return {
+      kind: 'asset-allocation-config',
+      sessionId: sessionId ? decodeURIComponent(sessionId) : undefined,
+    };
   }
   const creationSessionMatch = path.match(/^\/creation\/sessions\/([^/]+)$/);
   if (creationSessionMatch) {

@@ -1,5 +1,25 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+type FakeApi = {
+  createCompositionBacktestRun?: ReturnType<typeof vi.fn>;
+  getCompositionBacktestOrders?: ReturnType<typeof vi.fn>;
+  getCompositionBacktestRun?: ReturnType<typeof vi.fn>;
+};
+
+const fakeApi = vi.hoisted<FakeApi>(() => ({}));
+const { navigateToMock } = vi.hoisted(() => ({
+  navigateToMock: vi.fn(),
+}));
+
+vi.mock('./lib/demoStoreContext', () => ({
+  useApiClient: () => fakeApi,
+}));
+
+vi.mock('./lib/appRouteContext', () => ({
+  navigateTo: navigateToMock,
+}));
+
 import {
   CompositionBacktestResultPage,
   normalizeCompositionBacktestResult,
@@ -9,10 +29,138 @@ import {
 
 afterEach(() => {
   cleanup();
+  fakeApi.createCompositionBacktestRun = undefined;
+  fakeApi.getCompositionBacktestOrders = undefined;
+  fakeApi.getCompositionBacktestRun = undefined;
+  navigateToMock.mockReset();
   vi.clearAllMocks();
 });
 
+function makeRuntimeBacktestRun(runId: string) {
+  return {
+    id: runId,
+    run_id: runId,
+    composition_id: 'comp-001',
+    status: 'COMPLETED_WITH_WARNINGS',
+    created_at: '2026-04-30T00:00:00.000Z',
+    completed_at: '2026-04-30T00:00:01.000Z',
+    request: {
+      horizon_years: 10,
+      period: '10Y',
+      rebalance_frequency: 'quarterly',
+    },
+    summary: {
+      annualized_return: 12.4,
+      composition_name: 'QQQ网格&标普动量平衡',
+      horizon_years: 10,
+      max_drawdown: -8.2,
+      order_count: 0,
+      quality_label: 'verified_from_composition_detail_preview',
+      sharpe: 1.32,
+    },
+    diagnostics: {
+      metric_matrix: [{ annualized_return: 12.4, max_drawdown: -8.2, sharpe: 1.32 }],
+      stability_verdict: '10Y stable',
+      top_holdings: [],
+    },
+    returns_preview: makeStressReturnPreview(),
+    benchmark_series: makeStressBenchmarkSeries(),
+    risk_contribution_preview: [],
+    rebalance_events: [],
+    return_quality_summary: { fallback_used: false, notes: [] },
+    source_integrity: [],
+    audit_trail: [],
+    order_summary: {},
+    evidence: { algorithm_spec: {} },
+    warnings: [],
+  };
+}
+
+const emptyOrderPage = {
+  evidence_label: '',
+  filters: {},
+  generated_from: 'composition_rebalance_events',
+  items: [],
+  page: 1,
+  page_size: 500,
+  quality_label: 'verified',
+  total: 0,
+};
+
+function makeStressReturnPreview() {
+  return [
+    { label: '2020-02', date: '2020-02-28', portfolio_return_pct: -2, net_return_pct: -2, cumulative_return_pct: -2 },
+    { label: '2020-03', date: '2020-03-31', portfolio_return_pct: -5, net_return_pct: -5, cumulative_return_pct: -6.9 },
+    { label: '2020-04', date: '2020-04-30', portfolio_return_pct: 4, net_return_pct: 4, cumulative_return_pct: -3.18 },
+    { label: '2020-05', date: '2020-05-31', portfolio_return_pct: 6, net_return_pct: 6, cumulative_return_pct: 2.63 },
+    { label: '2022-01', date: '2022-01-31', portfolio_return_pct: -3, net_return_pct: -3, cumulative_return_pct: -0.45 },
+    { label: '2022-02', date: '2022-02-28', portfolio_return_pct: -4, net_return_pct: -4, cumulative_return_pct: -4.43 },
+    { label: '2022-03', date: '2022-03-31', portfolio_return_pct: 2, net_return_pct: 2, cumulative_return_pct: -2.52 },
+    { label: '2025-01', date: '2025-01-31', portfolio_return_pct: -4, net_return_pct: -4, cumulative_return_pct: 7.6 },
+    { label: '2025-02', date: '2025-02-28', portfolio_return_pct: -5, net_return_pct: -5, cumulative_return_pct: 2.22 },
+    { label: '2025-03', date: '2025-03-31', portfolio_return_pct: -6, net_return_pct: -6, cumulative_return_pct: -3.91 },
+  ];
+}
+
+function makeStressBenchmarkSeries() {
+  return [
+    { label: '2020-02', date: '2020-02-28', benchmark_return_pct: -6, cumulative_return_pct: -6 },
+    { label: '2020-03', date: '2020-03-31', benchmark_return_pct: -12, cumulative_return_pct: -17.28 },
+    { label: '2020-04', date: '2020-04-30', benchmark_return_pct: 7, cumulative_return_pct: -11.49 },
+    { label: '2020-05', date: '2020-05-31', benchmark_return_pct: 10, cumulative_return_pct: -2.34 },
+    { label: '2022-01', date: '2022-01-31', benchmark_return_pct: -7, cumulative_return_pct: -9.18 },
+    { label: '2022-02', date: '2022-02-28', benchmark_return_pct: -8, cumulative_return_pct: -16.44 },
+    { label: '2022-03', date: '2022-03-31', benchmark_return_pct: 3, cumulative_return_pct: -13.93 },
+    { label: '2025-01', date: '2025-01-31', benchmark_return_pct: -8, cumulative_return_pct: 4.2 },
+    { label: '2025-02', date: '2025-02-28', benchmark_return_pct: -7, cumulative_return_pct: -3.09 },
+    { label: '2025-03', date: '2025-03-31', benchmark_return_pct: -6, cumulative_return_pct: -8.9 },
+  ];
+}
+
 describe('CompositionBacktestResultPage', () => {
+  it('uses the live detail title, reruns with toast state, and opens composition allocation config by default', async () => {
+    let resolveRerun!: (value: ReturnType<typeof makeRuntimeBacktestRun>) => void;
+    const rerunPromise = new Promise<ReturnType<typeof makeRuntimeBacktestRun>>((resolve) => {
+      resolveRerun = resolve;
+    });
+    fakeApi.getCompositionBacktestRun = vi.fn().mockResolvedValue(makeRuntimeBacktestRun('run-live'));
+    fakeApi.getCompositionBacktestOrders = vi.fn().mockResolvedValue(emptyOrderPage);
+    fakeApi.createCompositionBacktestRun = vi.fn().mockReturnValue(rerunPromise);
+
+    render(<CompositionBacktestResultPage compositionId="comp-001" runId="run-live" />);
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'QQQ网格&标普动量平衡 · 回测详情' }),
+    ).toBeInTheDocument();
+    const stressPanel = document.querySelector<HTMLElement>('[data-ui="backtest-stress-test"]');
+    expect(stressPanel).not.toBeNull();
+    expect(within(stressPanel!).getByRole('heading', { level: 2, name: '压力窗口 · 极端行情压力测试' })).toBeInTheDocument();
+    expect(within(stressPanel!).getByText('历史最差三个月')).toBeInTheDocument();
+    expect(within(stressPanel!).getByText('2020 疫情冲击')).toBeInTheDocument();
+    expect(within(stressPanel!).getByText('2022 紧缩熊市')).toBeInTheDocument();
+    expect(within(stressPanel!).getByText('-14.27%')).toBeInTheDocument();
+    expect(within(stressPanel!).getAllByText('相对抗跌')).toHaveLength(3);
+
+    fireEvent.click(screen.getByRole('button', { name: '启动优化' }));
+    expect(navigateToMock).toHaveBeenCalledWith('/compositions/comp-001/allocation-lab');
+
+    fireEvent.click(screen.getByRole('button', { name: '重跑回测' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('回测中');
+    expect(screen.getByRole('button', { name: '回测中' })).toBeDisabled();
+    expect(fakeApi.createCompositionBacktestRun).toHaveBeenCalledWith(
+      'comp-001',
+      expect.objectContaining({
+        horizon_years: 10,
+        idempotency_key: expect.stringContaining('composition-backtest-rerun:comp-001:run-live:'),
+        period: '10Y',
+      }),
+    );
+
+    resolveRerun(makeRuntimeBacktestRun('run-rerun'));
+    expect(await screen.findByRole('status')).toHaveTextContent('回测结束');
+    expect(navigateToMock).toHaveBeenCalledWith('/compositions/comp-001/backtest-runs/run-rerun');
+  });
+
   it('renders the A3 diagnosis surface with top actions and production copy', () => {
     const rerun = vi.fn();
     const optimize = vi.fn();
@@ -45,7 +193,7 @@ describe('CompositionBacktestResultPage', () => {
     expect(screen.getByRole('heading', { level: 2, name: 'Sleeve 贡献归因' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '敞口热力图' })).toBeInTheDocument();
     expect(screen.getAllByText(/压力窗口/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/修复时间/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/修复周期/).length).toBeGreaterThan(0);
     expect(screen.getByText('数据置信度')).toBeInTheDocument();
     expect(screen.getAllByText(/效率/).length).toBeGreaterThan(0);
     expect(screen.getByRole('heading', { level: 2, name: 'Top 5 穿透风险' })).toBeInTheDocument();
@@ -231,6 +379,7 @@ describe('CompositionBacktestResultPage', () => {
           performance_matrix: [],
           sleeve_contributions: [],
           exposure_heatmap: [],
+          stress_scenarios: [],
           top_holdings: [],
           insights: [],
         },
@@ -252,6 +401,7 @@ describe('CompositionBacktestResultPage', () => {
     expect(normalized.ledgerRows).toEqual([]);
     expect(normalized.efficiencyRows).toEqual([]);
     expect(normalized.concentrationTop5).toEqual([]);
+    expect(normalized.stressScenarios).toEqual([]);
     expect(JSON.stringify(normalized)).not.toContain('NVDA');
     expect(JSON.stringify(normalized)).not.toContain('order-2024-qqq');
   });

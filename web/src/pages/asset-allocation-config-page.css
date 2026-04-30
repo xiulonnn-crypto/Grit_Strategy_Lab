@@ -1,0 +1,415 @@
+.asset-allocation-page {
+  display: grid;
+  gap: 18px;
+  width: 100%;
+  max-width: 1600px;
+  margin-inline: auto;
+  min-width: 0;
+}
+
+.asset-allocation-page h1,
+.asset-allocation-page h2,
+.asset-allocation-page h3,
+.asset-allocation-page p {
+  margin: 0;
+}
+
+.asset-allocation-hero,
+.asset-allocation-panel,
+.asset-allocation-alert {
+  border: 1px solid var(--gsl-card-border, #e5e7eb);
+  background: var(--gsl-bg-surface, #ffffff);
+  box-shadow: var(--gsl-card-shadow, 0 1px 3px rgba(17, 24, 39, 0.06));
+}
+
+.asset-allocation-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+  padding: 24px 28px;
+  border-radius: 24px;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
+}
+
+.asset-allocation-eyebrow,
+.asset-allocation-section-head span,
+.asset-allocation-switch-row span,
+.asset-allocation-preflight span {
+  color: var(--gsl-color-primary-strong, #176b61);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.asset-allocation-hero h1 {
+  margin-top: 8px;
+  color: var(--gsl-text-title, #111827);
+  font-size: 28px;
+  line-height: 1.16;
+}
+
+.asset-allocation-hero p,
+.asset-allocation-panel p,
+.asset-allocation-recommendation-row small,
+.asset-allocation-muted {
+  color: var(--gsl-text-sub, #64748b);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.asset-allocation-alert {
+  padding: 12px 14px;
+  border-radius: 14px;
+  color: #8a3418;
+  background: #fff7ed;
+}
+
+.asset-allocation-alert--success {
+  color: #176b61;
+  background: #f0fdfa;
+}
+
+.asset-allocation-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.42fr) 362px;
+  gap: 18px;
+  align-items: start;
+  min-width: 0;
+}
+
+.asset-allocation-stack,
+.asset-allocation-rail {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.asset-allocation-panel {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  border-radius: 22px;
+}
+
+.asset-allocation-section-head,
+.asset-allocation-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.asset-allocation-section-head h2,
+.asset-allocation-switch-row h2,
+.asset-allocation-preflight h2 {
+  margin-top: 5px;
+  color: var(--gsl-text-title, #111827);
+  font-size: 17px;
+  line-height: 1.25;
+}
+
+.asset-allocation-table-wrap {
+  width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.asset-allocation-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+}
+
+.asset-allocation-table th {
+  padding: 0 12px 10px;
+  color: var(--gsl-text-sub, #64748b);
+  font-size: 12px;
+  font-weight: 800;
+  text-align: left;
+}
+
+.asset-allocation-table td {
+  padding: 10px 12px;
+  border-top: 1px solid #edf2f7;
+  vertical-align: middle;
+}
+
+.asset-allocation-table strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--gsl-text-title, #111827);
+}
+
+.asset-allocation-symbol-label {
+  display: block;
+  color: var(--gsl-text-sub, #64748b);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.asset-allocation-empty-cell {
+  color: var(--gsl-text-sub, #64748b);
+  font-size: 13px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.asset-allocation-page input,
+.asset-allocation-page textarea,
+.asset-allocation-page select {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid #d9e2ea;
+  border-radius: 10px;
+  background: #ffffff;
+  color: var(--gsl-text-title, #111827);
+  font: inherit;
+  line-height: 1.35;
+  padding: 8px 10px;
+}
+
+.asset-allocation-page textarea {
+  resize: vertical;
+}
+
+.asset-allocation-page input:disabled,
+.asset-allocation-page select:disabled {
+  background: #f3f6f8;
+  color: #94a3b8;
+}
+
+.asset-allocation-page label {
+  display: grid;
+  gap: 7px;
+  color: var(--gsl-text-sub, #64748b);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.asset-allocation-page button {
+  min-height: 40px;
+  border: 1px solid #1f8f83;
+  border-radius: 10px;
+  background: #1f8f83;
+  color: #ffffff;
+  font: inherit;
+  font-weight: 800;
+  padding: 0 14px;
+  cursor: pointer;
+}
+
+.asset-allocation-page button:disabled {
+  border-color: #cbd5e1;
+  background: #e2e8f0;
+  color: #94a3b8;
+  cursor: default;
+}
+
+.asset-allocation-secondary {
+  border-color: #cbd5e1 !important;
+  background: #ffffff !important;
+  color: #334155 !important;
+}
+
+.asset-allocation-ghost {
+  min-height: 34px !important;
+  border-color: #e2e8f0 !important;
+  background: #ffffff !important;
+  color: #64748b !important;
+}
+
+.asset-allocation-add-row,
+.asset-allocation-actions,
+.asset-allocation-submit-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.asset-allocation-add-row input {
+  flex: 1 1 150px;
+}
+
+.asset-allocation-combobox {
+  position: relative;
+  flex: 1 1 240px;
+  min-width: 220px;
+}
+
+.asset-allocation-combobox__list {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  display: grid;
+  gap: 4px;
+  max-height: 240px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid #d9e2ea;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 18px 36px rgba(15, 23, 42, 0.14);
+}
+
+.asset-allocation-combobox__list button {
+  display: grid;
+  gap: 2px;
+  min-height: 48px;
+  border-color: transparent;
+  background: #ffffff;
+  color: var(--gsl-text-title, #111827);
+  text-align: left;
+}
+
+.asset-allocation-combobox__list button:hover,
+.asset-allocation-combobox__list button:focus-visible {
+  border-color: rgba(31, 135, 123, 0.22);
+  background: #f0fdfa;
+}
+
+.asset-allocation-combobox__list span {
+  color: var(--gsl-text-sub, #64748b);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.asset-allocation-split-panel {
+  grid-template-columns: minmax(0, 0.9fr) minmax(260px, 1fr);
+  align-items: start;
+}
+
+.asset-allocation-recommendation-list {
+  display: grid;
+  gap: 8px;
+}
+
+.asset-allocation-recommendation-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid #edf2f7;
+  border-radius: 10px;
+  background: #fbfcfd;
+}
+
+.asset-allocation-recommendation-row span,
+.asset-allocation-recommendation-row strong {
+  color: var(--gsl-text-title, #111827);
+  font-weight: 800;
+}
+
+.asset-allocation-snapshot-grid {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.6fr) minmax(0, 1fr);
+  gap: 10px 16px;
+  align-items: center;
+}
+
+.asset-allocation-snapshot-grid span {
+  color: var(--gsl-text-sub, #64748b);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.asset-allocation-snapshot-grid strong {
+  color: var(--gsl-text-title, #111827);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.asset-allocation-segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 4px;
+  border: 1px solid #d9e2ea;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.asset-allocation-segmented button {
+  min-height: 34px;
+  border-color: transparent;
+  background: transparent;
+  color: #64748b;
+}
+
+.asset-allocation-segmented button[aria-pressed='true'] {
+  background: #1f8f83;
+  color: #ffffff;
+}
+
+.asset-allocation-switch-row input[type='checkbox'] {
+  width: 42px;
+  min-height: 24px;
+  accent-color: #1f8f83;
+}
+
+.asset-allocation-preflight ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.asset-allocation-preflight li {
+  min-height: 32px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: #f8fafc;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.asset-allocation-good {
+  color: #0f766e;
+}
+
+.asset-allocation-warn {
+  color: #b45309;
+}
+
+.asset-allocation-submit-row button {
+  flex: 1 1 140px;
+}
+
+@media (max-width: 1120px) {
+  .asset-allocation-layout,
+  .asset-allocation-hero,
+  .asset-allocation-split-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .asset-allocation-rail {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .asset-allocation-hero,
+  .asset-allocation-panel {
+    border-radius: 16px;
+    padding: 16px;
+  }
+
+  .asset-allocation-rail {
+    grid-template-columns: 1fr;
+  }
+
+  .asset-allocation-submit-row,
+  .asset-allocation-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+}

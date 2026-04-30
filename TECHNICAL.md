@@ -156,6 +156,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `leg.inventory.test.tsx`
 - `composition.workbench.test.tsx`
 - `composition.detail.test.tsx`
+- `composition.global-index.test.tsx`
 - `composition.backtest.result.test.tsx`
 - `composition.allocation.test.tsx`
 - `creation.flow.test.tsx`
@@ -355,6 +356,8 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - `POST /compositions/preview` 返回权重摘要、收益流预演、相关性矩阵、风险贡献预览、维护成本与再平衡摘要，供工作台边调边判断；Phase 1.2 同时返回 `return_quality_summary`、`rebalance_events`、`source_integrity`，并在风险贡献里补充边际贡献、预算占用、债券久期/凸性占用。
 - `GET /compositions/{id}` 继续读取冻结来源；Phase 1.2 详情额外返回 `audit_trail`，并扩展 `source_evidence` 的 `signature_status`、`drift_status`、`current_ref_id`、`alerts`。来源漂移只提示，不自动改写已保存组合。
 - Sleeve OS v1 新增组合层回测与资产配置契约。组合回测运行用于稳定性复核、订单穿透和证据留痕，订单导出支持 CSV 与最小 XLSX 工作簿；组合资产配置任务用于意图导航、约束预检、有效前沿候选和迁移成本评估。若真实长周期、真实成交或底层持仓数据不足，接口与页面必须显式展示代理、质量或不可用状态。
+- Sleeve OS v2 已接入“全局索引 + 持久记录 + 晋升版本 + 决策包”闭环。新增 `#/compositions/list`、`#/compositions/backtest-runs`、`#/compositions/lab` 三个全局路由；`GET /compositions/backtest-runs`、`GET /compositions/allocation-jobs`、组合版本查询、allocation 候选晋升 draft version、decision packet 创建 / 读取 / Markdown/HTML 导出是正式 additive 契约。源码切片必须保持 `models.py`、`api.py` 与 `web/src/types.ts` 同步。
+- 组合订单 Gate 6 防逃逸（project-local）：凡是用户报告组合订单、订单明细、订单穿透、缺单或订单归因异常，排查必须同时检查组合层 `rebalance_events` 和每个策略腿冻结/来源回测的 `trades_json`。不能只看组合层再平衡订单，也不能只以 `/orders` 的当前列表数量下结论；需要核对 `generated_from`、`execution_kind`、`trigger_reason`、策略腿 `latest_run_id/source_run_id` 与源策略首个/后续交易日期，确认 `composition_rebalance_events` 与源策略内逻辑订单都进入证据链。
 - `composition_audit_events` 是 Phase 1.2 后端 append-only 审计表；创建、结构 PATCH、状态切换、来源冻结、再平衡检查和债券快照刷新影响检查都应写入该表，详情 `audit_trail` 从持久化事件流读取，旧数据才允许回退到临时投影。
 - `GET /data-snapshots/overview` 继续作为唯一快照总览入口；债券/固定收益治理页通过新增 `bond_fixed_income` 分段扩展现有契约，不另开第二套快照 API。Phase 1.2 的债券质量字段包括 `quality_audit`、`repair_rules`、`daily_accrual_status`、`risk_budget_inputs`，修复/补齐仍走 `POST /admin/snapshot-refresh-jobs` 的 `bond` target。
 
@@ -522,6 +525,7 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - live acceptance 默认不跑，只在明确需要时通过 `-IncludeLiveAcceptance` 开启。
 - 若改动涉及优化结果页运行态、ETA 或轮询节流，除固定入口外，应额外手工运行 `npx vitest run src/optimization.module.test.tsx src/optimization.results-progress.test.tsx src/optimization.polling.test.tsx`。
 - 若改动涉及 Compose First 一期页面或债券快照页签，固定前端入口已经覆盖 `composition.dashboard / leg.inventory / composition.workbench / composition.detail / snapshots.page / shell-frame.page-heading / App.phase3`；不需要再手工补跑这些页面级测试，除非正在做更细的 focused 调试。
+- 若改动涉及 Sleeve OS v2 全局索引、持久 run/job、候选晋升或决策包，必须补充 `tests/test_composition_api.py` 的 run/job 重载、版本列表、draft promotion、decision packet immutable、scenario/evidence fields 覆盖；前端至少覆盖 `app.routes.foundation.test.tsx` 的静态路由优先级、composition 全局索引页面测试、`composition.backtest.result.test.tsx` 的场景复盘 / 订单场景过滤 / Evidence grade、`composition.allocation.test.tsx` 的晋升审查 / 门禁阻断 / 迁移成本。
 
 ### 8.3 当前文档统一口径
 
@@ -571,6 +575,7 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 
 - `#/optimization-jobs/new/config` 当前固定为“参数范围 + 约束条件”双栏布局；顶部步骤条与主标题卡片沿用线上既有样式，不单独重设计。
 - 参数范围表固定字段为 `参数 / 当前值 / 模式 / 起点 / 终点 / 步长`，不再展示角色或标签概念。
+- 资产配置策略中的 `allocation_weight__*_pct` 权重参数会自动携带默认参数约束：同一组权重合计必须为 `100%`。配置页的组合数显示为过滤后的有效组合数，后端 trial 规划也必须跳过权重合计不等于 `100%` 的参数快照。
 - `weighting_method=equal_weight` 在所有配置页、结果页和参数摘要展示层统一翻译为 `等权`，不应直接向用户暴露英文枚举值。
 - 约束条件 contract 已进入 optimization job 的 request、summary、result 三层 JSON，字段固定为 `constraint_preset_key`、`constraint_label`、`constraints[]`。
 - `constraint_preset_key` 当前只允许 `balanced / defensive / offensive`，前端展示文案固定映射为 `平衡型 / 稳健型 / 进攻型`。
@@ -661,6 +666,16 @@ Phase 1.1 的默认回归范围包含五个真实 runtime 页面：`#/compositio
 Phase 1.2 的默认回归范围仍锁定这五个真实 runtime 页面，其中重点页面是 `#/compositions/workbench`、`#/compositions/:id`、`#/snapshots?tab=bond`、`#/legs`。实现必须先产出 UI Artifact Trace Matrix，再把设计稿模块映射到选择器、文案、状态与测试；当前 Phase 1.2 trace matrix 位于 `output/ui-artifact-trace/phase1-2-trust-matrix.md`，批准设计包位于 `C:\Users\TradeAdmin\.gstack\projects\grit-strategy-lab\designs\phase1-2-trust-2026-04-27\`。
 
 Sleeve OS 组合中心 v1 采用 Split-only 实施：组合详情页、组合回测配置 / 结果页、组合优化配置 / 结果页进入正式路由；Stepper 设计稿只作为历史对照，不进入运行时。当前 trace matrix 位于 `output/ui-artifact-trace/sleeve-os-v1-trace-matrix.md`，批准设计包位于 `C:\Users\TradeAdmin\.gstack\projects\grit-strategy-lab\designs\sleeve-os-v1-2026-04-28\`。
+
+Sleeve OS 组合中心 v2 已新增全局组合列表、组合回测列表、组合实验室三个页面入口，用于跨组合查看版本、证据质量、回测运行、allocation 作业、候选晋升和待决策事项。当前 trace matrix 位于 `output/ui-artifact-trace/sleeve-os-v2-trace-matrix.md`；批准 UI artifact 位于 `output/ui-artifact-trace/sleeve-os-v2-global-pages/`，核心基线包括 `sleeve-os-v2-global-pages-design-spec.md`、`composition-list-desktop.png`、`composition-backtests-desktop.png`、`composition-lab-desktop.png` 以及对应 mobile 截图。三页必须保持 1920 桌面下相同的 hero / metric / list 模块节奏，且不得恢复 topbar 状态条或 Stepper。
+
+Sleeve OS v2 的存储和契约真相：
+
+- `composition_backtest_runs` 与 `composition_allocation_jobs` 从 v1 预留 / artifact mirror 升级为可重载持久记录，保存请求配置、组合版本、结果摘要、证据快照、运行状态和审计指纹；legacy artifact state 只允许作为旧数据 fallback。
+- 新增 `composition_versions`，保存 `DRAFT / ACTIVE / ARCHIVED` 组合版本快照、来源 job/candidate、版本 diff 和 evidence snapshot；allocation 候选只能通过晋升审查生成 draft version，不直接改写 active version。
+- 新增 `composition_decision_packets`，保存 readonly packet 快照与 Markdown / HTML 导出内容；packet 创建后不能随当前组合、run 或 job 改动漂移。
+- backtest/allocation 结果对象需要 additive 增加 `evidence_grade`、`scenario_anchors`、`risk_budget_timeline`、`promotion_readiness`；orders 查询在保留 `source_leg`、`symbol`、export、netting v1 行为的同时增加 `scenario` 过滤。
+- allocation candidate 的 `allowed_actions` 必须由 `promotion_readiness` 决定；`evidence_grade_c`、约束违反或其它 blocked readiness 不能继续暴露 `promote_candidate`，结果页必须提前禁用“生成草稿版本”并展示中文门禁原因。
 
 Phase 1.2 验证时至少覆盖：
 

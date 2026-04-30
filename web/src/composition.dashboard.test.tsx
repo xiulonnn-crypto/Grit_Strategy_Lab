@@ -122,6 +122,9 @@ describe('composition dashboard page', () => {
 
     expect(css).toContain('grid-template-columns: repeat(2, minmax(112px, 1fr));');
     expect(css).toContain('overflow-wrap: anywhere;');
+    expect(css).toMatch(/\.composition-dashboard-layout\s*\{[^}]*align-items:\s*start;/s);
+    expect(css).toMatch(/\.composition-dashboard-column\s*\{[^}]*align-content:\s*start;/s);
+    expect(css).toMatch(/\.composition-dashboard-panel,\s*\n\.composition-dashboard-observation\s*\{[^}]*align-content:\s*start;/s);
     expect(css).not.toContain('.composition-dashboard-card__metrics,\n  .composition-dashboard-observation__summary');
   });
 
@@ -278,6 +281,51 @@ describe('composition dashboard page', () => {
     await waitFor(() =>
       expect(window.location.hash).toBe('#/compositions/workbench?composition_id=composition_630718a64821'),
     );
+  });
+
+  it('does not treat a stale source signature as a strategy-leg new version when the current ref is unchanged', async () => {
+    fakeApi.listCompositions = vi.fn().mockResolvedValue([
+      {
+        id: 'composition-signature-stale',
+        name: '签名复核组合',
+        status: 'ACTIVE',
+        composition_score: 88.6,
+        leg_count: 2,
+        rebalance_frequency: 'quarterly',
+        benchmark_label: 'S&P 500',
+        annualized_return: 0.12,
+        sharpe: 1.04,
+        max_drawdown: -0.08,
+        updated_at: '2026-04-29T04:00:00.000Z',
+        latest_activity_label: 'updated 2026-04-29',
+        allowed_actions: ['open_composition_workbench'],
+        has_new_version: false,
+        source_integrity: [
+          {
+            leg_id: 'strategy-leg-signature-stale',
+            display_name: 'S&P Momentum-v3',
+            source_ref_id: 'strategy_leg::strat_7df2b7091ef4::strat_7df2b7091ef4-v3',
+            freeze_hash: 'hash-v3-old',
+            signature_status: 'stale',
+            drift_status: 'drifted',
+            current_ref_id: 'strategy_leg::strat_7df2b7091ef4::strat_7df2b7091ef4-v3',
+            checked_at: '2026-04-29T04:00:00.000Z',
+            alerts: ['Current source version differs from the frozen source signature.'],
+          },
+        ],
+      },
+    ]);
+
+    await act(async () => {
+      render(<CompositionDashboardPage />);
+    });
+
+    const title = await screen.findByRole('heading', { level: 3, name: '签名复核组合' });
+    const card = title.closest('.composition-dashboard-card');
+    expect(card).not.toBeNull();
+    expect(within(card as HTMLElement).queryByText('有新版本')).toBeNull();
+    expect(screen.queryByRole('button', { name: /腿版本更新/ })).toBeNull();
+    expect(screen.getByRole('button', { name: /再平衡复核/ })).toBeInTheDocument();
   });
 
   it('requires confirmation before archiving a composition', async () => {

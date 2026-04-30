@@ -3,7 +3,8 @@ export type StrategyType =
   | "GRID"
   | "MOMENTUM"
   | "MEAN_REVERSION"
-  | "BUY_AND_HOLD";
+  | "BUY_AND_HOLD"
+  | "ASSET_ALLOCATION";
 export type BacktestRunStatus =
   | "QUEUED"
   | "RUNNING"
@@ -272,6 +273,8 @@ export type ApiOptimizationSearchSpaceField = {
   value?: ParameterValue;
   values?: ParameterValue[];
   tag?: string | null;
+  constraint_group?: string | null;
+  constraint_target?: number | null;
 };
 
 export type ApiOptimizationTrialSummary = {
@@ -342,6 +345,9 @@ export type ApiOptimizationJobConstraintUpdatePayload = {
   constraint_label?: string | null;
   constraints?: ApiOptimizationConstraint[];
 };
+
+export type ApiOptimizationFilteredResultCreatePayload =
+  ApiOptimizationJobConstraintUpdatePayload;
 
 export type ApiOptimizationJobDetail = {
   id: string;
@@ -462,6 +468,34 @@ export type ApiConfirmationUpdateRequest = {
   core?: Record<string, ParameterValue>;
   logic?: Record<string, ParameterValue>;
   parameters?: Record<string, ParameterValue>;
+};
+
+export type AssetAllocationRecommendationAsset = {
+  symbol: string;
+  display_name?: string | null;
+  asset_class?: string | null;
+  target_weight_pct?: number | null;
+};
+
+export type AssetAllocationRecommendationRequest = {
+  assets: AssetAllocationRecommendationAsset[];
+  lookback_days?: number;
+};
+
+export type AssetAllocationRecommendedWeight = {
+  symbol: string;
+  display_name?: string | null;
+  asset_class?: string | null;
+  target_weight_pct: number;
+  risk_contribution_pct: number;
+  data_status: string;
+};
+
+export type AssetAllocationRecommendationResponse = {
+  method: string;
+  weights: AssetAllocationRecommendedWeight[];
+  diagnostics?: Record<string, unknown>;
+  warnings?: string[];
 };
 
 export type ApiBacktestMetricSummary = Record<string, number>;
@@ -795,6 +829,9 @@ export type ApiDatasetSnapshotMetadata = Record<string, unknown> & {
   covered_symbol_count?: number;
   total_symbol_count?: number;
   missing_symbols?: string[];
+  selected_latest_symbols?: string[];
+  selected_symbols?: string[];
+  covered_symbols?: string[];
   benchmark_etf_coverage?: {
     ready_count?: number;
     total_count?: number;
@@ -1153,6 +1190,50 @@ export type ApiCompositionSourceIntegrity = {
   alerts: string[];
 };
 
+export type ApiCompositionStatusAction = {
+  label: string;
+  action_key: string;
+  action_kind: 'open_new_tab' | 'execute' | 'inspect' | string;
+  route?: string | null;
+  enabled?: boolean;
+};
+
+export type ApiCompositionProxyContext = {
+  leg_id?: string | null;
+  target_symbol?: string | null;
+  proxy_symbol?: string | null;
+  horizon_label?: string | null;
+  proxy_signature: string;
+  proxy_source: 'system' | 'user' | 'unconfirmed' | string;
+  coverage_window?: Record<string, unknown>;
+  explanation?: string | null;
+};
+
+export type ApiCompositionStatusDiagnosis = {
+  status: '稳健' | '待校准' | '失效' | string;
+  issue_type: string;
+  diagnosis_type: string;
+  diagnosis_label: string;
+  frontend_explanation: string;
+  action: string;
+  resolution_criteria: string;
+  actions: ApiCompositionStatusAction[];
+  proxy_context?: ApiCompositionProxyContext[];
+  system_disposition?: string | null;
+  debug_facts?: Record<string, unknown>;
+};
+
+export type ApiCompositionProxyConfirmationPayload = {
+  leg_id?: string | null;
+  target_symbol?: string | null;
+  proxy_symbol?: string | null;
+  horizon_label?: string | null;
+  proxy_signature?: string | null;
+  coverage_window?: Record<string, unknown>;
+  reason?: string | null;
+  confirmed_by?: string | null;
+};
+
 export type ApiCompositionAuditTrailItem = {
   id: string;
   action: string;
@@ -1193,6 +1274,8 @@ export type ApiCompositionPreview = {
   return_quality_summary?: ApiCompositionReturnQualitySummary;
   rebalance_events?: ApiCompositionRebalanceEvent[];
   source_integrity?: ApiCompositionSourceIntegrity[];
+  primary_diagnosis?: ApiCompositionStatusDiagnosis | null;
+  diagnoses?: ApiCompositionStatusDiagnosis[];
   warnings: string[];
   advisories: string[];
 };
@@ -1224,6 +1307,21 @@ export type ApiCompositionListItem = {
   leg_count: number;
   rebalance_frequency?: string | null;
   benchmark_label?: string | null;
+  version_label?: string | null;
+  version_status?: string | null;
+  version_status_label?: string | null;
+  evidence_grade?: string | null;
+  evidence_label?: string | null;
+  latest_backtest_label?: string | null;
+  latest_backtest_detail?: string | null;
+  latest_backtest_summary?: Record<string, unknown>;
+  backtest_period_coverage?: ApiCompositionBacktestPeriodCoverage[];
+  allocation_lab_label?: string | null;
+  allocation_lab_detail?: string | null;
+  lab_summary?: Record<string, unknown>;
+  pending_decision_count?: number | null;
+  promotion_candidate_count?: number | null;
+  promotion_readiness?: Record<string, unknown>;
   annualized_return: number;
   sharpe: number;
   max_drawdown: number;
@@ -1232,6 +1330,80 @@ export type ApiCompositionListItem = {
   allowed_actions: string[];
   has_new_version?: boolean;
   source_integrity?: ApiCompositionSourceIntegrity[];
+  primary_diagnosis?: ApiCompositionStatusDiagnosis | null;
+  diagnoses?: ApiCompositionStatusDiagnosis[];
+};
+
+export type ApiCompositionBacktestPeriodCoverage = {
+  period: '10Y' | '20Y' | '30Y' | string;
+  status: 'covered' | 'missing' | 'warning' | string;
+  run_id?: string | null;
+  label?: string | null;
+  detail?: string | null;
+  completed_at?: string | null;
+};
+
+export type ApiCompositionGlobalBacktestRunListItem = {
+  id: string;
+  run_id?: string | null;
+  composition_id: string;
+  composition_name?: string | null;
+  composition_version_label?: string | null;
+  status: string;
+  time_period_label?: string | null;
+  verdict_label?: string | null;
+  verdict_detail?: string | null;
+  annualized_return?: number | null;
+  sharpe?: number | null;
+  max_drawdown?: number | null;
+  scenario_id?: string | null;
+  scenario_label?: string | null;
+  scenario_detail?: string | null;
+  scenario_status_label?: string | null;
+  scenario_drawdown?: number | null;
+  scenario_benchmark_drawdown?: number | null;
+  scenario_recovery_days?: number | null;
+  scenario_benchmark_recovery_days?: number | null;
+  scenario_defensive_delta?: number | null;
+  scenario_source?: string | null;
+  order_count?: number | null;
+  order_evidence_label?: string | null;
+  risk_budget_label?: string | null;
+  evidence_grade?: string | null;
+  evidence_label?: string | null;
+  primary_diagnosis?: ApiCompositionStatusDiagnosis | null;
+  diagnoses?: ApiCompositionStatusDiagnosis[];
+  created_at?: string | null;
+  completed_at?: string | null;
+};
+
+export type ApiCompositionGlobalAllocationJobListItem = {
+  id: string;
+  job_id?: string | null;
+  composition_id: string;
+  composition_name?: string | null;
+  composition_version_label?: string | null;
+  status: string;
+  method_key?: string | null;
+  method_label?: string | null;
+  method_detail?: string | null;
+  best_candidate_label?: string | null;
+  candidate_count?: number | null;
+  promotion_ready_count?: number | null;
+  promotion_gate_label?: string | null;
+  gate_status?: string | null;
+  migration_cost_bps?: number | null;
+  annualized_return_delta?: number | null;
+  sharpe_delta?: number | null;
+  max_drawdown_delta?: number | null;
+  enb?: number | null;
+  evidence_grade?: string | null;
+  evidence_label?: string | null;
+  primary_diagnosis?: ApiCompositionStatusDiagnosis | null;
+  diagnoses?: ApiCompositionStatusDiagnosis[];
+  policy_violation_count?: number | null;
+  created_at?: string | null;
+  completed_at?: string | null;
 };
 
 export type ApiCompositionKpi = {
@@ -1288,6 +1460,8 @@ export type ApiCompositionDetail = {
   description?: string | null;
   status: string;
   status_label: string;
+  current_composition_version_label?: string | null;
+  current_composition_version_number?: number | null;
   created_at: string;
   updated_at: string;
   benchmark_definition?: ApiCompositionBenchmarkDefinition | null;
@@ -1310,6 +1484,8 @@ export type ApiCompositionDetail = {
   source_evidence: ApiCompositionSourceFreeze[];
   source_integrity?: ApiCompositionSourceIntegrity[];
   audit_trail?: ApiCompositionAuditTrailItem[];
+  primary_diagnosis?: ApiCompositionStatusDiagnosis | null;
+  diagnoses?: ApiCompositionStatusDiagnosis[];
   composition_score: ApiCompositionScore;
   latest_activity_label: string;
   deep_link_actions: string[];
@@ -1349,6 +1525,12 @@ export type ApiCompositionBacktestRun = {
   audit_trail: ApiCompositionAuditTrailItem[];
   order_summary: Record<string, unknown>;
   evidence: Record<string, unknown>;
+  evidence_grade?: string | null;
+  scenario_anchors?: Array<Record<string, unknown>>;
+  risk_budget_timeline?: Array<Record<string, unknown>>;
+  promotion_readiness?: Record<string, unknown>;
+  primary_diagnosis?: ApiCompositionStatusDiagnosis | null;
+  diagnoses?: ApiCompositionStatusDiagnosis[];
   warnings: string[];
 };
 
@@ -1418,6 +1600,7 @@ export type ApiCompositionBacktestOrderNetting = {
 export type ApiCompositionBacktestOrdersQuery = {
   symbol?: string | null;
   source_leg?: string | null;
+  scenario?: string | null;
   page?: number;
   page_size?: number;
 };
@@ -1456,7 +1639,38 @@ export type ApiCompositionAllocationJob = {
   source_integrity: ApiCompositionSourceIntegrity[];
   audit_trail: ApiCompositionAuditTrailItem[];
   evidence: Record<string, unknown>;
+  evidence_grade?: string | null;
+  scenario_anchors?: Array<Record<string, unknown>>;
+  risk_budget_timeline?: Array<Record<string, unknown>>;
+  promotion_readiness?: Record<string, unknown>;
+  primary_diagnosis?: ApiCompositionStatusDiagnosis | null;
+  diagnoses?: ApiCompositionStatusDiagnosis[];
   warnings: string[];
+};
+
+export type ApiCompositionVersion = {
+  id: string;
+  composition_id: string;
+  version_number: number;
+  status: string;
+  source_kind: string;
+  source_ref_id?: string | null;
+  created_at: string;
+  diff_summary?: Record<string, unknown>;
+  evidence?: Record<string, unknown>;
+  snapshot?: Record<string, unknown>;
+  diff?: Record<string, unknown>;
+};
+
+export type ApiCompositionDecisionPacket = {
+  id: string;
+  composition_id: string;
+  version_id?: string | null;
+  source_refs: Record<string, unknown>;
+  packet: Record<string, unknown>;
+  export_markdown: string;
+  export_html: string;
+  created_at: string;
 };
 
 export type ApiBondSnapshotCard = {
@@ -1711,6 +1925,10 @@ export type DemoApi = {
     id: string,
     payload: ApiConfirmationUpdateRequest,
   ) => Promise<ApiStrategyCreationSession>;
+  recommendAssetAllocationWeights?: (
+    id: string,
+    payload: AssetAllocationRecommendationRequest,
+  ) => Promise<AssetAllocationRecommendationResponse>;
   materializeStrategy: (
     id: string,
     idempotencyKey: string,
@@ -1752,6 +1970,10 @@ export type DemoApi = {
     jobId: string,
     payload: ApiOptimizationJobConstraintUpdatePayload,
   ) => Promise<ApiOptimizationJobDetail>;
+  saveOptimizationFilteredResult: (
+    jobId: string,
+    payload: ApiOptimizationFilteredResultCreatePayload,
+  ) => Promise<ApiOptimizationJobDetail>;
   deleteOptimizationJob: (
     id: string,
   ) => Promise<ApiOptimizationJobDeleteResult>;
@@ -1785,6 +2007,8 @@ export type DemoApi = {
   createCashLeg?: (payload: ApiCashLegCreatePayload) => Promise<ApiCashLeg>;
   updateCashLeg?: (id: string, payload: ApiCashLegUpdatePayload) => Promise<ApiCashLeg>;
   listCompositions?: () => Promise<ApiCompositionListItem[]>;
+  listCompositionBacktestRuns?: () => Promise<ApiCompositionGlobalBacktestRunListItem[]>;
+  listCompositionAllocationJobs?: () => Promise<ApiCompositionGlobalAllocationJobListItem[]>;
   getCompositionDetail?: (id: string) => Promise<ApiCompositionDetail>;
   previewComposition?: (
     payload: ApiCompositionPreviewPayload,
@@ -1795,6 +2019,11 @@ export type DemoApi = {
   updateComposition?: (
     id: string,
     payload: ApiCompositionUpdatePayload,
+  ) => Promise<ApiCompositionDetail>;
+  refreshCompositionDiagnostics?: (id: string) => Promise<ApiCompositionDetail>;
+  confirmCompositionProxy?: (
+    id: string,
+    payload: ApiCompositionProxyConfirmationPayload,
   ) => Promise<ApiCompositionDetail>;
   createCompositionBacktestRun?: (
     id: string,
@@ -1818,7 +2047,7 @@ export type DemoApi = {
     id: string,
     runId: string,
     format?: ApiCompositionOrderExportFormat,
-    params?: { symbol?: string | null; source_leg?: string | null },
+    params?: { symbol?: string | null; source_leg?: string | null; scenario?: string | null },
   ) => Promise<string>;
   createCompositionAllocationJob?: (
     id: string,
@@ -1828,6 +2057,25 @@ export type DemoApi = {
     id: string,
     jobId: string,
   ) => Promise<ApiCompositionAllocationJob>;
+  promoteCompositionAllocationCandidateToDraft?: (
+    id: string,
+    jobId: string,
+    candidateId: string,
+    payload?: { decision_note?: string | null; base_version_id?: string | null },
+  ) => Promise<ApiCompositionVersion>;
+  createCompositionDecisionPacket?: (
+    id: string,
+    payload: Record<string, unknown>,
+  ) => Promise<ApiCompositionDecisionPacket>;
+  getCompositionDecisionPacket?: (
+    id: string,
+    packetId: string,
+  ) => Promise<ApiCompositionDecisionPacket>;
+  exportCompositionDecisionPacket?: (
+    id: string,
+    packetId: string,
+    format?: 'markdown' | 'html',
+  ) => Promise<string>;
   getSnapshotOverview: () => Promise<ApiSnapshotOverview>;
   refreshSnapshots: (
     payload?: ApiSnapshotRefreshRequest,

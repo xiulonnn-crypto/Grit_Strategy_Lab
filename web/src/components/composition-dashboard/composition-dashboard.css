@@ -190,11 +190,13 @@
 .composition-dashboard-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.06fr) minmax(0, 0.94fr);
+  align-items: start;
   gap: 18px;
 }
 
 .composition-dashboard-column {
   display: grid;
+  align-content: start;
   gap: 16px;
   min-width: 0;
 }
@@ -202,6 +204,7 @@
 .composition-dashboard-panel,
 .composition-dashboard-observation {
   display: grid;
+  align-content: start;
   gap: 15px;
   padding: 18px 20px;
   border-radius: 18px;

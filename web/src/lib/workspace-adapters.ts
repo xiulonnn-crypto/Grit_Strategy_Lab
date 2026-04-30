@@ -46,11 +46,13 @@ const STRATEGY_TYPE_LABELS: Record<string, string> = {
   GRID: '网格',
   MEAN_REVERSION: '均值回归',
   BUY_AND_HOLD: '买入持有',
+  ASSET_ALLOCATION: '资产配置',
   GENERAL: '通用',
   momentum: '动量',
   grid: '网格',
   mean_reversion: '均值回归',
   buy_and_hold: '买入持有',
+  asset_allocation: '资产配置',
   general: '通用',
   quality_momentum: '质量动量',
 };

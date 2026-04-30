@@ -12,7 +12,13 @@ import { CompositionBacktestConfigPage } from './pages/composition-backtest-conf
 import { CompositionBacktestResultPage } from './pages/composition-backtest-result-page';
 import { CompositionDashboardPage } from './pages/composition-dashboard-page';
 import { CompositionDetailPage } from './pages/composition-detail-page';
+import {
+  CompositionBacktestRunsIndexPage,
+  CompositionLabIndexPage,
+  CompositionListIndexPage,
+} from './pages/composition-global-index-page';
 import { CompositionWorkbenchPage } from './pages/composition-workbench-page';
+import { AssetAllocationConfigPage } from './pages/asset-allocation-config-page';
 import { CreationSessionPage } from './pages/creation-session-page';
 import { CreationTemplatePage } from './pages/creation-template-page';
 import { LegInventoryPage } from './pages/leg-inventory-page';
@@ -59,6 +65,9 @@ function AppShell(): JSX.Element {
       <ShellFrameCn route={route}>
         {route.kind === 'workspace' ? <WorkspacePage /> : null}
         {route.kind === 'composition-dashboard' ? <CompositionDashboardPage /> : null}
+        {route.kind === 'composition-list' ? <CompositionListIndexPage /> : null}
+        {route.kind === 'composition-backtest-runs' ? <CompositionBacktestRunsIndexPage /> : null}
+        {route.kind === 'composition-lab' ? <CompositionLabIndexPage /> : null}
         {route.kind === 'leg-inventory' ? <LegInventoryPage /> : null}
         {route.kind === 'composition-workbench' ? <CompositionWorkbenchPage /> : null}
         {route.kind === 'composition-detail' ? (
@@ -83,6 +92,9 @@ function AppShell(): JSX.Element {
           <CompositionAllocationResultPage compositionId={route.compositionId} jobId={route.jobId} />
         ) : null}
         {route.kind === 'creation-template' ? <CreationTemplatePage /> : null}
+        {route.kind === 'asset-allocation-config' ? (
+          <AssetAllocationConfigPage sessionId={route.sessionId} />
+        ) : null}
         {route.kind === 'creation-session' ? <CreationSessionPage sessionId={route.sessionId} /> : null}
         {route.kind === 'strategy-detail' ? <StrategyDetailPage strategyId={route.strategyId} /> : null}
         {route.kind === 'backtest' ? (

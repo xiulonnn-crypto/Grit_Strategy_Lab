@@ -741,6 +741,8 @@ describe('CompositionDetailPage', () => {
   it('sorts configuration version records by the post-change version descending', async () => {
     fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({
       ...detail,
+      current_composition_version_label: '当前配置版本 v5',
+      current_composition_version_number: 5,
       audit_trail: [
         {
           id: 'audit-v2',
@@ -795,9 +797,11 @@ describe('CompositionDetailPage', () => {
     expect(versionCards[0].textContent).toContain('升级理由：采用配置实验室建议。');
   });
 
-  it('clears legacy invalid structure patches from version records and falls back to v1', async () => {
+  it('uses the API current composition version when legacy structure patches do not carry version numbers', async () => {
     fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({
       ...detail,
+      current_composition_version_label: '当前配置版本 v5',
+      current_composition_version_number: 5,
       audit_trail: [
         {
           id: 'composition_audit_c01e19b523ae',
@@ -845,16 +849,17 @@ describe('CompositionDetailPage', () => {
     const heroChips = Array.from(document.querySelectorAll<HTMLElement>('.composition-detail-hero__chips .status-chip'))
       .map((node) => node.textContent?.trim())
       .filter(Boolean);
-    expect(heroChips[0]).toBe('当前配置版本 v1');
+    expect(heroChips[0]).toBe('当前配置版本 v5');
     expect(heroChips.join(' ')).not.toContain('v4');
+    expect(heroChips.join(' ')).not.toContain('正式版本');
 
     const versionCards = Array.from(
       document.querySelectorAll<HTMLElement>('[data-ui="composition-version-evolution"] .composition-detail-compact-timeline__item'),
     );
     expect(versionCards).toHaveLength(1);
-    expect(versionCards[0].dataset.versionAfter).toBe('1');
-    expect(versionCards[0].textContent).toContain('当前配置版本 v1');
-    expect(versionCards[0].textContent).toContain('暂无新的参数变化记录');
+    expect(versionCards[0].dataset.versionAfter).toBe('5');
+    expect(versionCards[0].textContent).toContain('当前配置版本 v5');
+    expect(versionCards[0].textContent).toContain('当前保存配置已生成版本记录');
     expect(versionCards[0].textContent).not.toMatch(/v61|v14012|v30383|v464|v95|v96|v2 -> v3/);
   });
 

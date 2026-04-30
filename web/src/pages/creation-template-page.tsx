@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
 import { formatStrategyVersionTag, getStrategyDisplayName } from '../lib/strategy-version';
-import type { ApiBacktestRunListItem, ApiStrategyListItem, StrategyType } from '../types';
+import type { ApiBacktestRunDetail, ApiBacktestRunListItem, ApiStrategyListItem, StrategyType } from '../types';
 import './creation-backtest.css';
 
 type TemplateCard = {
@@ -35,10 +35,14 @@ type StrategyLibraryRow = {
   name: string;
   universeName: string;
   currentVersionLabel: string;
+  currentParameterVersionId: string | null;
+  datasetSnapshotId?: string | null;
+  universeSnapshotId?: string | null;
   strategyTypeLabel: string;
   returns: Record<HorizonKey, StrategyReturnLink | null>;
-  statusLabel: '已验证' | '待回测';
-  statusTone: 'ready' | 'pending';
+  inflightReturns: Record<HorizonKey, boolean>;
+  statusLabel: '已验证' | '待回测' | '生成中';
+  statusTone: 'ready' | 'pending' | 'running';
   updatedAtLabel: string;
   updatedAtTime: number;
   latestOptimizationJobId?: string | null;
@@ -66,6 +70,10 @@ const TEXT = {
   empty: '暂无策略记录。请通过新建策略建立研究对象。',
   filteredEmpty: '没有符合条件的策略记录。',
   generateReturn: '一键生成',
+  generatingReturn: '生成中',
+  generationToastInfo: '已提交长期回测生成任务，正在写入 10Y / 20Y / 30Y 记录。',
+  generationToastSuccess: '长期回测记录已生成，策略列表已刷新。',
+  generationToastErrorPrefix: '一键生成失败：',
   actions: '操作',
   view: '查看',
   backtest: '回测',
@@ -104,6 +112,12 @@ const templates: TemplateCard[] = [
     actionLabel: '创建定投策略',
   },
   {
+    strategyType: 'ASSET_ALLOCATION',
+    label: '资产配置型',
+    description: '用于多资产风险预算、目标权重、再平衡与成本假设配置。',
+    actionLabel: '创建资产配置策略',
+  },
+  {
     strategyType: 'GENERAL',
     label: '通用策略',
     description: '用于定义非模板化交易逻辑，适合需要自定义规则的研究场景。',
@@ -116,6 +130,7 @@ const STRATEGY_TYPE_LABELS: Record<StrategyType, string> = {
   GRID: '网格交易',
   MEAN_REVERSION: '均值回归',
   BUY_AND_HOLD: '指数 / 定投',
+  ASSET_ALLOCATION: '资产配置型',
   GENERAL: '通用策略',
 };
 
@@ -124,6 +139,8 @@ const HORIZONS: Array<{ key: HorizonKey; label: '10Y' | '20Y' | '30Y'; headerLab
   { key: 'twentyYear', label: '20Y', headerLabel: '20Y年化收益/夏普', years: 20 },
   { key: 'thirtyYear', label: '30Y', headerLabel: '30Y年化收益/夏普', years: 30 },
 ];
+
+const DEFAULT_BACKTEST_END_DATE = '2026-03-24';
 
 function isAbortError(caught: unknown): boolean {
   return caught instanceof DOMException
@@ -136,6 +153,10 @@ function isAbortError(caught: unknown): boolean {
 
 function isCompletedRun(run: ApiBacktestRunListItem): boolean {
   return run.status === 'COMPLETED' || run.status === 'COMPLETED_WITH_WARNINGS';
+}
+
+function isInflightRun(run: ApiBacktestRunListItem): boolean {
+  return run.status === 'QUEUED' || run.status === 'RUNNING';
 }
 
 function toValidDate(value: string | null | undefined): Date | null {
@@ -161,6 +182,20 @@ function formatDateTime(value: string | null | undefined): string {
   }).formatToParts(date);
   const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${lookup.year}-${lookup.month}-${lookup.day} ${lookup.hour}:${lookup.minute}`;
+}
+
+function formatDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getPresetRange(years: number): { startDate: string; endDate: string } {
+  const end = new Date(DEFAULT_BACKTEST_END_DATE);
+  const start = new Date(end);
+  start.setFullYear(end.getFullYear() - years);
+  return { startDate: formatDate(start), endDate: DEFAULT_BACKTEST_END_DATE };
 }
 
 function formatReturn(value: number | undefined): string | null {
@@ -227,6 +262,30 @@ function getRunTimeValue(run: ApiBacktestRunListItem): number {
   return date ? date.getTime() : 0;
 }
 
+function getCurrentParameterVersionId(strategy: ApiStrategyListItem): string | null {
+  const explicitVersionId = strategy.current_parameter_version_id?.trim();
+  if (explicitVersionId) {
+    return explicitVersionId;
+  }
+  if (typeof strategy.current_parameter_version === 'number' && Number.isFinite(strategy.current_parameter_version)) {
+    return `${strategy.id}-v${strategy.current_parameter_version}`;
+  }
+  return null;
+}
+
+function getRunParameterVersionId(run: ApiBacktestRunListItem): string | null {
+  return (run.parameter_version_id ?? run.preview?.parameter_version_id ?? '').trim() || null;
+}
+
+function matchesCurrentParameterVersion(strategy: ApiStrategyListItem, run: ApiBacktestRunListItem): boolean {
+  const runVersionId = getRunParameterVersionId(run);
+  if (!runVersionId) {
+    return true;
+  }
+  const currentVersionId = getCurrentParameterVersionId(strategy);
+  return !currentVersionId || runVersionId === currentVersionId;
+}
+
 function buildReturnLink(run: ApiBacktestRunListItem, horizonKey: HorizonKey): StrategyReturnLink | null {
   const horizon = HORIZONS.find((item) => item.key === horizonKey);
   const annualizedReturn = readMetric(run.metrics, [
@@ -253,11 +312,6 @@ function getHorizonByKey(horizonKey: HorizonKey): (typeof HORIZONS)[number] {
   return HORIZONS.find((item) => item.key === horizonKey) ?? HORIZONS[0];
 }
 
-function buildBacktestCreatePath(strategyId: string, horizonKey: HorizonKey): string {
-  const horizon = getHorizonByKey(horizonKey);
-  return `/strategies/${encodeURIComponent(strategyId)}/backtest-runs/new?period_years=${horizon.years}`;
-}
-
 function getVersionLabel(strategy: ApiStrategyListItem): string {
   if (typeof strategy.current_parameter_version === 'number') {
     return `v${strategy.current_parameter_version}`;
@@ -269,18 +323,26 @@ function buildRows(
   strategies: ApiStrategyListItem[],
   runs: ApiBacktestRunListItem[],
 ): StrategyLibraryRow[] {
-  const completedRuns = runs
-    .filter(isCompletedRun)
+  const currentRuns = runs
     .slice()
     .sort((left, right) => getRunTimeValue(right) - getRunTimeValue(left));
 
   return strategies
     .map((strategy) => {
-      const strategyRuns = completedRuns.filter((run) => run.strategy_id === strategy.id);
+      const currentStrategyRuns = currentRuns.filter(
+        (run) => run.strategy_id === strategy.id && matchesCurrentParameterVersion(strategy, run),
+      );
+      const strategyRuns = currentStrategyRuns.filter(isCompletedRun);
+      const inflightRuns = currentStrategyRuns.filter(isInflightRun);
       const returns: Record<HorizonKey, StrategyReturnLink | null> = {
         tenYear: null,
         twentyYear: null,
         thirtyYear: null,
+      };
+      const inflightReturns: Record<HorizonKey, boolean> = {
+        tenYear: false,
+        twentyYear: false,
+        thirtyYear: false,
       };
 
       strategyRuns.forEach((run) => {
@@ -290,17 +352,28 @@ function buildRows(
         }
         returns[horizonKey] = buildReturnLink(run, horizonKey);
       });
+      inflightRuns.forEach((run) => {
+        const horizonKey = getRunHorizon(run);
+        if (horizonKey && !returns[horizonKey]) {
+          inflightReturns[horizonKey] = true;
+        }
+      });
 
       const hasLongTermRun = Object.values(returns).some(Boolean);
+      const hasInflightRun = Object.values(inflightReturns).some(Boolean);
       return {
         id: strategy.id,
         name: getStrategyDisplayName(strategy.name, strategy.id),
         universeName: strategy.universe_name || '未记录',
         currentVersionLabel: getVersionLabel(strategy),
+        currentParameterVersionId: getCurrentParameterVersionId(strategy),
+        datasetSnapshotId: strategy.dataset_snapshot_id,
+        universeSnapshotId: strategy.universe_snapshot_id,
         strategyTypeLabel: STRATEGY_TYPE_LABELS[strategy.strategy_type] ?? strategy.strategy_type,
         returns,
-        statusLabel: hasLongTermRun ? '已验证' : '待回测',
-        statusTone: hasLongTermRun ? 'ready' : 'pending',
+        inflightReturns,
+        statusLabel: hasInflightRun ? '生成中' : hasLongTermRun ? '已验证' : '待回测',
+        statusTone: hasInflightRun ? 'running' : hasLongTermRun ? 'ready' : 'pending',
         updatedAtLabel: formatDateTime(strategy.updated_at ?? strategy.created_at),
         updatedAtTime: toValidDate(strategy.updated_at ?? strategy.created_at)?.getTime() ?? 0,
         latestOptimizationJobId: strategy.latest_optimization_job_id,
@@ -326,6 +399,9 @@ function matchesSearch(row: StrategyLibraryRow, search: string): boolean {
 function matchesStatus(row: StrategyLibraryRow, statusFilter: StatusFilter): boolean {
   if (statusFilter === 'all') {
     return true;
+  }
+  if (statusFilter === 'pending') {
+    return row.statusTone === 'pending' || row.statusTone === 'running';
   }
   return row.statusTone === statusFilter;
 }
@@ -361,27 +437,85 @@ function sortRows(rows: StrategyLibraryRow[], sortState: SortState): StrategyLib
   });
 }
 
+function getMissingHorizons(row: StrategyLibraryRow): typeof HORIZONS {
+  return HORIZONS.filter((horizon) => !row.returns[horizon.key] && !row.inflightReturns[horizon.key]);
+}
+
+function buildSubmissionPayload(
+  row: StrategyLibraryRow,
+  horizon: (typeof HORIZONS)[number],
+): Record<string, unknown> {
+  const range = getPresetRange(horizon.years);
+  const versionKey = row.currentParameterVersionId ?? row.currentVersionLabel;
+  return {
+    idempotency_key: `strategy-library-${row.id}-${versionKey}-${horizon.years}-${Date.now()}`,
+    start_date: range.startDate,
+    end_date: range.endDate,
+    parameter_version_id: row.currentParameterVersionId ?? undefined,
+    dataset_snapshot_id: row.datasetSnapshotId ?? undefined,
+    universe_snapshot_id: row.universeSnapshotId ?? undefined,
+    is_permanent: false,
+  };
+}
+
+function submittedDetailToListItem(
+  detail: ApiBacktestRunDetail,
+  row: StrategyLibraryRow,
+  payload: Record<string, unknown>,
+): ApiBacktestRunListItem {
+  return {
+    ...detail,
+    strategy_id: detail.strategy_id ?? row.id,
+    strategy_name: detail.strategy_name ?? row.name,
+    start_date: detail.start_date ?? (typeof payload.start_date === 'string' ? payload.start_date : null),
+    end_date: detail.end_date ?? (typeof payload.end_date === 'string' ? payload.end_date : null),
+    parameter_version_id:
+      detail.parameter_version_id ??
+      (typeof payload.parameter_version_id === 'string' ? payload.parameter_version_id : row.currentParameterVersionId),
+    is_permanent: detail.is_permanent ?? false,
+  };
+}
+
+function mergeRuns(incoming: ApiBacktestRunListItem[], existing: ApiBacktestRunListItem[]): ApiBacktestRunListItem[] {
+  const merged = new Map<string, ApiBacktestRunListItem>();
+  [...incoming, ...existing].forEach((run) => {
+    if (!merged.has(run.id)) {
+      merged.set(run.id, run);
+    }
+  });
+  return Array.from(merged.values());
+}
+
 function ReturnCell({
+  disabled,
+  generating,
   horizonKey,
   link,
   name,
-  strategyId,
+  onGenerate,
 }: {
+  disabled: boolean;
+  generating: boolean;
   horizonKey: HorizonKey;
   link: StrategyReturnLink | null;
   name: string;
-  strategyId: string;
+  onGenerate: () => void;
 }): JSX.Element {
   if (!link) {
     const horizon = getHorizonByKey(horizonKey);
     return (
       <button
-        aria-label={`为 ${name} 一键生成 ${horizon.label} 回测`}
-        className="strategy-library-return strategy-library-return--generate"
-        onClick={() => navigateTo(buildBacktestCreatePath(strategyId, horizonKey))}
+        aria-label={
+          generating
+            ? `正在为 ${name} 生成 ${horizon.label} 回测`
+            : `为 ${name} 从 ${horizon.label} 入口一键生成 10Y、20Y、30Y 回测`
+        }
+        className={`strategy-library-return strategy-library-return--${generating ? 'running' : 'generate'}`}
+        disabled={disabled || generating}
+        onClick={onGenerate}
         type="button"
       >
-        {TEXT.generateReturn}
+        {generating ? TEXT.generatingReturn : TEXT.generateReturn}
       </button>
     );
   }
@@ -409,39 +543,49 @@ export function CreationTemplatePage(): JSX.Element {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [busyStrategyType, setBusyStrategyType] = useState<StrategyType | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [generatingStrategyId, setGeneratingStrategyId] = useState<string | null>(null);
+  const [generationToast, setGenerationToast] = useState<{ tone: 'info' | 'success' | 'error'; message: string } | null>(
+    null,
+  );
 
-  useEffect(() => {
-    let cancelled = false;
-    const controller = new AbortController();
-
-    async function load(): Promise<void> {
-      try {
+  async function loadLibrary(
+    signal?: AbortSignal,
+    options: { showLoading?: boolean } = {},
+  ): Promise<void> {
+    try {
+      if (options.showLoading) {
         setLoading(true);
-        setLoadError(null);
-        const [strategyItems, runItems] = await Promise.all([
-          api.listStrategies(controller.signal),
-          api.listBacktestRuns({ limit: 100 }, controller.signal),
-        ]);
-        if (cancelled) {
-          return;
-        }
-        setStrategies(strategyItems);
-        setRuns(runItems);
+      }
+      setLoadError(null);
+      const [strategyItems, runItems] = await Promise.all([
+        api.listStrategies(signal),
+        api.listBacktestRuns({ limit: 100 }, signal),
+      ]);
+      if (signal?.aborted) {
+        return;
+      }
+      setStrategies(strategyItems);
+      setRuns(runItems);
+      if (options.showLoading) {
         setLoading(false);
-      } catch (caught) {
-        if (isAbortError(caught)) {
-          return;
-        }
-        if (!cancelled) {
-          setLoadError((caught as Error).message);
+      }
+    } catch (caught) {
+      if (isAbortError(caught)) {
+        return;
+      }
+      if (!signal?.aborted) {
+        setLoadError((caught as Error).message);
+        if (options.showLoading) {
           setLoading(false);
         }
       }
     }
+  }
 
-    void load();
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadLibrary(controller.signal, { showLoading: true });
     return () => {
-      cancelled = true;
       controller.abort();
     };
   }, [api]);
@@ -472,12 +616,44 @@ export function CreationTemplatePage(): JSX.Element {
     try {
       setBusyStrategyType(strategyType);
       setCreateError(null);
+      if (strategyType === 'ASSET_ALLOCATION') {
+        navigateTo('/creation/asset-allocation/new');
+        return;
+      }
       const session = await api.createCreationSession({ strategy_type: strategyType });
       navigateTo(`/creation/sessions/${session.id}`);
     } catch (caught) {
       setCreateError((caught as Error).message);
     } finally {
       setBusyStrategyType(null);
+    }
+  }
+
+  async function handleGenerateLongTermRuns(row: StrategyLibraryRow): Promise<void> {
+    const targetHorizons = getMissingHorizons(row);
+    if (targetHorizons.length === 0 || generatingStrategyId !== null) {
+      return;
+    }
+    try {
+      setGeneratingStrategyId(row.id);
+      setGenerationToast({ tone: 'info', message: TEXT.generationToastInfo });
+      const submittedRuns = await Promise.all(
+        targetHorizons.map(async (horizon) => {
+          const payload = buildSubmissionPayload(row, horizon);
+          const submitted = await api.submitBacktestRun(row.id, payload);
+          return submittedDetailToListItem(submitted, row, payload);
+        }),
+      );
+      setRuns((current) => mergeRuns(submittedRuns, current));
+      await loadLibrary(undefined, { showLoading: false });
+      setGenerationToast({ tone: 'success', message: TEXT.generationToastSuccess });
+    } catch (caught) {
+      setGenerationToast({
+        tone: 'error',
+        message: `${TEXT.generationToastErrorPrefix}${(caught as Error).message}`,
+      });
+    } finally {
+      setGeneratingStrategyId(null);
     }
   }
 
@@ -542,6 +718,15 @@ export function CreationTemplatePage(): JSX.Element {
           </button>
         </div>
       </section>
+
+      {generationToast ? (
+        <div
+          className={`strategy-library-toast strategy-library-toast--${generationToast.tone}`}
+          role={generationToast.tone === 'error' ? 'alert' : 'status'}
+        >
+          {generationToast.message}
+        </div>
+      ) : null}
 
       <section className="strategy-library-panel" aria-label={TEXT.listTitle}>
         <div className="strategy-library-panel__header">
@@ -624,17 +809,42 @@ export function CreationTemplatePage(): JSX.Element {
                       <span className="strategy-library-type">{row.strategyTypeLabel}</span>
                     </td>
                     <td>
-                      <ReturnCell horizonKey="tenYear" link={row.returns.tenYear} name={row.name} strategyId={row.id} />
+                      <ReturnCell
+                        disabled={generatingStrategyId !== null}
+                        generating={generatingStrategyId === row.id || row.inflightReturns.tenYear}
+                        horizonKey="tenYear"
+                        link={row.returns.tenYear}
+                        name={row.name}
+                        onGenerate={() => void handleGenerateLongTermRuns(row)}
+                      />
                     </td>
                     <td>
-                      <ReturnCell horizonKey="twentyYear" link={row.returns.twentyYear} name={row.name} strategyId={row.id} />
+                      <ReturnCell
+                        disabled={generatingStrategyId !== null}
+                        generating={generatingStrategyId === row.id || row.inflightReturns.twentyYear}
+                        horizonKey="twentyYear"
+                        link={row.returns.twentyYear}
+                        name={row.name}
+                        onGenerate={() => void handleGenerateLongTermRuns(row)}
+                      />
                     </td>
                     <td>
-                      <ReturnCell horizonKey="thirtyYear" link={row.returns.thirtyYear} name={row.name} strategyId={row.id} />
+                      <ReturnCell
+                        disabled={generatingStrategyId !== null}
+                        generating={generatingStrategyId === row.id || row.inflightReturns.thirtyYear}
+                        horizonKey="thirtyYear"
+                        link={row.returns.thirtyYear}
+                        name={row.name}
+                        onGenerate={() => void handleGenerateLongTermRuns(row)}
+                      />
                     </td>
                     <td>
-                      <span className={`strategy-library-status strategy-library-status--${row.statusTone}`}>
-                        {row.statusLabel}
+                      <span
+                        className={`strategy-library-status strategy-library-status--${
+                          generatingStrategyId === row.id ? 'running' : row.statusTone
+                        }`}
+                      >
+                        {generatingStrategyId === row.id ? '生成中' : row.statusLabel}
                       </span>
                     </td>
                     <td>{row.updatedAtLabel}</td>

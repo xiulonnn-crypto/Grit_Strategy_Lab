@@ -3129,7 +3129,7 @@ def _test_patch_optimization_job_constraints_persists_updated_filters_without_lo
     assert refreshed["candidates"] == updated["candidates"]
 
 
-def test_patch_optimization_job_constraints_persists_updated_filters_without_losing_existing_results(tmp_path):
+def _test_patch_optimization_job_constraints_persists_updated_filters_without_losing_existing_results(tmp_path):
     client, _ = create_test_client(tmp_path)
     service = client.app.state.service
 
@@ -3472,7 +3472,7 @@ def test_patch_optimization_job_constraints_persists_updated_filters_without_los
     assert refreshed["summary"]["objective"] == "annualized_return"
 
 
-def test_patch_optimization_job_constraints_persists_updated_filters_without_losing_existing_results(tmp_path):
+def test_patch_optimization_job_constraints_previews_filtered_result_without_mutating_source(tmp_path):
     client, _ = create_test_client(tmp_path)
     service = client.app.state.service
 
@@ -3721,6 +3721,9 @@ def test_patch_optimization_job_constraints_persists_updated_filters_without_los
         },
     ]
 
+    assert_ok(client.get(f"/optimization-jobs/{job_id}/detail"))
+    original = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail"))
+
     updated = assert_ok(
         client.patch(
             f"/optimization-jobs/{job_id}",
@@ -3766,11 +3769,76 @@ def test_patch_optimization_job_constraints_persists_updated_filters_without_los
     )
 
     refreshed = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail"))
-    assert refreshed["summary"]["constraints"] == updated_constraints
-    assert refreshed["result"]["constraints"] == updated_constraints
-    assert refreshed["candidates"] == updated["candidates"]
-    assert refreshed["request"]["objective"] == "annualized_return"
-    assert refreshed["summary"]["objective"] == "annualized_return"
+    assert refreshed["request"]["constraints"] == original["request"]["constraints"]
+    assert refreshed["summary"]["constraints"] == original["summary"]["constraints"]
+    assert refreshed["result"]["constraints"] == original["result"]["constraints"]
+    assert refreshed["request"]["objective"] == original["request"]["objective"]
+    assert refreshed["summary"]["objective"] == original["summary"]["objective"]
+    assert refreshed["updated_at"] == original["updated_at"]
+
+
+def test_save_filtered_optimization_result_creates_new_job_without_mutating_source(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    base = create_momentum_strategy(client, idempotency_key="optimization-save-filtered-result")
+    strategy = base["strategy"]
+    source_job = create_optimization_job(
+        client,
+        strategy["id"],
+        base_parameter_version_id=strategy["current_parameter_version_id"],
+        budget_combinations=4,
+    )
+    source_detail = assert_ok(client.get(f"/optimization-jobs/{source_job['id']}/detail"))
+    original_constraints = source_detail["summary"]["constraints"]
+    original_updated_at = source_detail["updated_at"]
+    updated_constraints = [
+        {
+            "key": "max_drawdown_pct",
+            "label": "最大回撤",
+            "category": "risk",
+            "operator": "<=",
+            "value": 25,
+            "unit": "%",
+        },
+        {
+            "key": "return_sharpe",
+            "label": "收益夏普",
+            "category": "return",
+            "operator": ">=",
+            "value": 0.1,
+            "unit": "",
+        },
+    ]
+
+    saved = assert_ok(
+        client.post(
+            f"/optimization-jobs/{source_job['id']}/filtered-results",
+            json={
+                "objective": "annualized_return",
+                "constraint_preset_key": "defensive",
+                "constraint_label": "另存过滤结果",
+                "constraints": updated_constraints,
+            },
+        )
+    )
+
+    assert saved["id"] != source_job["id"]
+    assert saved["strategy_id"] == strategy["id"]
+    assert saved["status"] == "COMPLETED"
+    assert saved["request"]["source_optimization_job_id"] == source_job["id"]
+    assert saved["request"]["entry_point"] == "saved_refilter_result"
+    assert saved["request"]["objective"] == "annualized_return"
+    assert saved["summary"]["constraint_label"] == "另存过滤结果"
+    assert saved["summary"]["constraints"] == updated_constraints
+    assert saved["result"]["constraints"] == updated_constraints
+    assert saved["matching_combination_count"] is not None
+
+    refreshed_source = assert_ok(client.get(f"/optimization-jobs/{source_job['id']}/detail"))
+    assert refreshed_source["summary"]["constraints"] == original_constraints
+    assert refreshed_source["updated_at"] == original_updated_at
+
+    refreshed_saved = assert_ok(client.get(f"/optimization-jobs/{saved['id']}/detail"))
+    assert refreshed_saved["summary"]["constraints"] == updated_constraints
 
 
 def test_optimization_job_detail_rebuilds_stale_candidates_even_when_matching_combinations_exist(tmp_path):
@@ -5689,6 +5757,86 @@ def test_optimization_search_space_supports_momentum_rebalance_frequency_enum_va
         {"rebalance_frequency": "semiannual"},
         {"rebalance_frequency": "yearly"},
     ]
+
+
+def test_optimization_search_space_filters_asset_allocation_weight_sum(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    normalized = service._normalize_optimization_search_space(
+        {
+            "strategy_type": "ASSET_ALLOCATION",
+            "parameters": {
+                "allocation_weight__SPY_pct": 50,
+                "allocation_weight__TLT_pct": 50,
+                "rebalance_frequency": "quarterly",
+            },
+        },
+        {
+            "search_space": [
+                {
+                    "key": "allocation_weight__SPY_pct",
+                    "label": "SPY权重(%)",
+                    "mode": "range",
+                    "start": 50,
+                    "end": 60,
+                    "step": 10,
+                    "current": 50,
+                },
+                {
+                    "key": "allocation_weight__TLT_pct",
+                    "label": "TLT权重(%)",
+                    "mode": "range",
+                    "start": 40,
+                    "end": 50,
+                    "step": 10,
+                    "current": 50,
+                },
+                {
+                    "key": "rebalance_frequency",
+                    "label": "再平衡频率",
+                    "mode": "discrete",
+                    "current": "quarterly",
+                    "value": "quarterly",
+                    "values": ["monthly", "quarterly"],
+                },
+            ],
+        },
+    )
+
+    weight_fields = [item for item in normalized if item["key"].startswith("allocation_weight__")]
+    assert len(weight_fields) == 2
+    assert all(item["constraint_group"] == "allocation_weight_sum_100" for item in weight_fields)
+    assert all(item["constraint_target"] == 100.0 for item in weight_fields)
+
+    snapshots = service._plan_optimization_search_snapshots(
+        {
+            "allocation_weight__SPY_pct": 50,
+            "allocation_weight__TLT_pct": 50,
+            "rebalance_frequency": "quarterly",
+        },
+        normalized,
+        100,
+    )
+
+    assert len(snapshots) == 4
+    assert {
+        (
+            item["allocation_weight__SPY_pct"],
+            item["allocation_weight__TLT_pct"],
+            item["rebalance_frequency"],
+        )
+        for item in snapshots
+    } == {
+        (50, 50, "monthly"),
+        (50, 50, "quarterly"),
+        (60, 40, "monthly"),
+        (60, 40, "quarterly"),
+    }
+    assert all(
+        item["allocation_weight__SPY_pct"] + item["allocation_weight__TLT_pct"] == 100
+        for item in snapshots
+    )
 
 
 def test_completed_optimization_job_detail_uses_trial_rows_as_progress_truth(tmp_path):

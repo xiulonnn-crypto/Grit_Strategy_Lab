@@ -61,16 +61,19 @@ function getStatusLabel(status: string): string {
 }
 
 function sourceIntegrityHasNewVersion(item: ApiCompositionSourceIntegrity): boolean {
-  const sourceRefId = String(item.source_ref_id ?? '');
-  const driftStatus = String(item.drift_status ?? '').toLowerCase();
-  const signatureStatus = String(item.signature_status ?? '').toLowerCase();
+  const sourceRefId = String(item.source_ref_id ?? '').trim();
+  const currentRefId = String(item.current_ref_id ?? '').trim();
   const alerts = (item.alerts ?? []).map((alert) => String(alert).toLowerCase());
   return (
     sourceRefId.startsWith('strategy_leg::') &&
     (
-      ['drifted', 'version_drift', 'stale'].includes(driftStatus) ||
-      signatureStatus === 'stale' ||
-      alerts.some((alert) => alert.includes('newer') || alert.includes('新版本'))
+      (Boolean(currentRefId) && currentRefId !== sourceRefId) ||
+      alerts.some(
+        (alert) =>
+          alert.includes('newer parameter version') ||
+          alert.includes('newer version') ||
+          alert.includes('新版本'),
+      )
     )
   );
 }

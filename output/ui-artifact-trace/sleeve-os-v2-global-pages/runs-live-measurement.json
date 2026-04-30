@@ -1,0 +1,30 @@
+{
+  "viewport": {
+    "width": 1920,
+    "height": 1039
+  },
+  "body": {
+    "width": 1920,
+    "height": 1528
+  },
+  "app": {
+    "x": 0,
+    "y": 0,
+    "width": 1920,
+    "height": 1528
+  },
+  "shell": {
+    "x": 0,
+    "y": 0,
+    "width": 1920,
+    "height": 1528
+  },
+  "pageRoot": {
+    "x": 268,
+    "y": 28,
+    "width": 1620,
+    "height": 1468
+  },
+  "hash": "#/runs",
+  "title": "Grit Backtest Platform V1"
+}

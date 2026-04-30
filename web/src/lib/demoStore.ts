@@ -683,8 +683,56 @@ export const demoApi: DemoApi = {
       findStrategy(job.strategy_id),
       nowIso(),
     );
-    state.optimizationJobs = state.optimizationJobs.map((item) => (item.id === jobId ? updated : item));
     return clone(updated);
+  },
+
+  async saveOptimizationFilteredResult(jobId, payload): Promise<ApiOptimizationJobDetail> {
+    const job = findJob(jobId);
+    if (!['COMPLETED', 'PARTIALLY_FAILED', 'FAILED'].includes(String(job.status).toUpperCase())) {
+      throw new ApiError({
+        status: 409,
+        code: 'optimization_job_not_terminal',
+        message: 'Only completed optimization jobs can be saved as a filtered result.',
+      });
+    }
+    const strategy = findStrategy(job.strategy_id);
+    const savedAt = nowIso();
+    const filtered = applyOptimizationJobConstraintUpdate(
+      job,
+      payload,
+      strategy,
+      savedAt,
+    );
+    const saved: ApiOptimizationJobDetail = {
+      ...filtered,
+      id: nextId('opt'),
+      status: 'COMPLETED',
+      request: {
+        ...filtered.request,
+        source_optimization_job_id: jobId,
+        entry_point: 'saved_refilter_result',
+      },
+      summary: {
+        ...filtered.summary,
+        status: 'COMPLETED',
+        progress_pct: 100,
+        current_stage: 'Result ready',
+        latest_update: '已另存过滤结果。',
+      },
+      result: {
+        ...filtered.result,
+        status: 'COMPLETED',
+        progress_pct: 100,
+        current_stage: 'Result ready',
+        latest_update: '已另存过滤结果。',
+      },
+      created_at: savedAt,
+      updated_at: savedAt,
+      completed_at: savedAt,
+    };
+    state.optimizationJobs.unshift(saved);
+    strategy.latest_optimization_job_id = saved.id;
+    return clone(saved);
   },
 
   async listOptimizationJobs(): Promise<ApiOptimizationJobListItem[]> {

@@ -49,6 +49,17 @@ describe('App runtime routes', () => {
     expect(await screen.findByRole('heading', { level: 1, name: '策略库' })).toBeInTheDocument();
   });
 
+  it('renders the asset allocation strategy config route inside the unified shell', async () => {
+    await renderApp('#/creation/asset-allocation/new');
+
+    await waitFor(() =>
+      expect(document.querySelector('.asset-allocation-page')).not.toBeNull(),
+    );
+    await waitFor(() => expect(window.location.hash).toMatch(/^#\/creation\/asset-allocation\/new\?session_id=cs-/));
+    expect(screen.getByRole('heading', { level: 1, name: '资产配置策略配置' })).toBeInTheDocument();
+    expect(document.querySelector('.optimization-steps')).toBeNull();
+  });
+
   it('renders the strategy detail page on the formal route', async () => {
     await renderApp('#/strategies/strat-001');
 
@@ -61,6 +72,28 @@ describe('App runtime routes', () => {
 
     expect(document.querySelector('.composition-dashboard-page')).not.toBeNull();
     expect(await screen.findByRole('heading', { level: 1, name: '组合仪表板' })).toBeInTheDocument();
+  });
+
+  it('renders composition v2 global routes before the dynamic detail route', async () => {
+    await renderApp('#/compositions/list');
+
+    expect(document.querySelector('[data-page-root="composition-global-list"]')).not.toBeNull();
+    expect(document.querySelector('.composition-detail-page')).toBeNull();
+    expect(await screen.findByRole('heading', { level: 1, name: '组合列表' })).toBeInTheDocument();
+
+    cleanup();
+    await renderApp('#/compositions/backtest-runs?scenario=2022');
+
+    expect(document.querySelector('[data-page-root="composition-global-backtest-runs"]')).not.toBeNull();
+    expect(document.querySelector('.composition-detail-page')).toBeNull();
+    expect(await screen.findByRole('heading', { level: 1, name: '组合回测列表' })).toBeInTheDocument();
+
+    cleanup();
+    await renderApp('#/compositions/lab?status=promotion_ready');
+
+    expect(document.querySelector('[data-page-root="composition-global-lab"]')).not.toBeNull();
+    expect(document.querySelector('.composition-detail-page')).toBeNull();
+    expect(await screen.findByRole('heading', { level: 1, name: '组合实验室' })).toBeInTheDocument();
   });
 
   it('keeps the retired composition detail preview alias out of production routing', async () => {

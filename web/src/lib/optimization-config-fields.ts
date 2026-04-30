@@ -35,6 +35,13 @@ export const MOMENTUM_REBALANCE_FREQUENCY_OPTIONS: OptimizationFieldOption[] = [
   { value: "yearly", label: "每年" },
 ];
 
+export const ALLOCATION_REBALANCE_FREQUENCY_OPTIONS: OptimizationFieldOption[] = [
+  { value: "monthly", label: "月度" },
+  { value: "quarterly", label: "季度" },
+  { value: "semiannual", label: "半年" },
+  { value: "yearly", label: "年度" },
+];
+
 const OPTIMIZATION_SELECTION_FIELDS: Partial<
   Record<StrategyType, OptimizationFieldDefinition[]>
 > = {
@@ -76,6 +83,17 @@ const OPTIMIZATION_SELECTION_FIELDS: Partial<
     { key: "long_entry_size_pct", label: "买入仓位(%)", control: "text" },
     { key: "short_entry_size_pct", label: "卖出仓位(%)", control: "text" },
   ],
+  ASSET_ALLOCATION: [
+    {
+      key: "rebalance_frequency",
+      label: "再平衡频率",
+      control: "multiselect",
+      options: ALLOCATION_REBALANCE_FREQUENCY_OPTIONS,
+    },
+    { key: "rebalance_threshold_pct", label: "偏离阈值(%)", control: "text" },
+    { key: "fee_bps", label: "交易费(bps)", control: "text" },
+    { key: "slippage_bps", label: "滑点(bps)", control: "text" },
+  ],
 };
 
 function hasParameterValue(value: ParameterValue | undefined): boolean {
@@ -107,12 +125,38 @@ function readStrategyFieldValue(
   return readParameterValue((strategy as Record<string, unknown>)[key]);
 }
 
+function readAllocationAssets(
+  strategy: ApiStrategyDetail,
+  parameterSnapshot?: Record<string, ParameterValue> | null,
+): Array<{ symbol: string; displayName?: string | null }> {
+  const rawAssets = parameterSnapshot?.allocation_assets ?? strategy.parameters?.allocation_assets;
+  if (!Array.isArray(rawAssets)) {
+    return [];
+  }
+  return rawAssets
+    .map((asset) => {
+      if (!asset || typeof asset !== "object") {
+        return null;
+      }
+      const record = asset as Record<string, unknown>;
+      const symbol = typeof record.symbol === "string" ? record.symbol.trim().toUpperCase() : "";
+      if (!symbol) {
+        return null;
+      }
+      return {
+        symbol,
+        displayName: typeof record.display_name === "string" ? record.display_name : null,
+      };
+    })
+    .filter((asset): asset is { symbol: string; displayName: string | null } => asset !== null);
+}
+
 export function collectOptimizationParameterSeeds(
   strategy: ApiStrategyDetail,
   parameterSnapshot?: Record<string, ParameterValue> | null,
 ): OptimizationParameterSeed[] {
   const configuredFields = OPTIMIZATION_SELECTION_FIELDS[strategy.strategy_type] ?? [];
-  if (!configuredFields.length) {
+  if (!configuredFields.length && strategy.strategy_type !== "ASSET_ALLOCATION") {
     return [];
   }
 
@@ -129,7 +173,7 @@ export function collectOptimizationParameterSeeds(
     ] as const),
   );
 
-  return configuredFields
+  const configuredSeeds = configuredFields
     .map((field) => {
       const parameterEntry = parameterEntries.get(field.key);
       const topLevelEntry = topLevelEntries.get(field.key);
@@ -155,4 +199,23 @@ export function collectOptimizationParameterSeeds(
       } satisfies OptimizationParameterSeed;
     })
     .filter((field) => hasParameterValue(field.value));
+
+  if (strategy.strategy_type !== "ASSET_ALLOCATION") {
+    return configuredSeeds;
+  }
+
+  const allocationSeeds = readAllocationAssets(strategy, parameterSnapshot)
+    .map((asset) => {
+      const key = `allocation_weight__${asset.symbol}_pct`;
+      const value = parameterSnapshot?.[key] ?? strategy.parameters?.[key] ?? null;
+      return {
+        key,
+        label: `${asset.symbol} 权重(%)`,
+        control: "text" as const,
+        value,
+      } satisfies OptimizationParameterSeed;
+    })
+    .filter((field) => hasParameterValue(field.value));
+
+  return [...allocationSeeds, ...configuredSeeds];
 }

@@ -355,6 +355,27 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS composition_proxy_confirmations (
+        id TEXT PRIMARY KEY,
+        composition_id TEXT NOT NULL,
+        leg_id TEXT,
+        target_symbol TEXT,
+        proxy_symbol TEXT,
+        horizon_label TEXT,
+        proxy_signature TEXT NOT NULL,
+        confirmation_scope_json TEXT NOT NULL DEFAULT '{}',
+        reason TEXT,
+        confirmed_by TEXT NOT NULL DEFAULT 'operator',
+        confirmed_at TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'ACTIVE',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT,
+        deleted_reason TEXT,
+        FOREIGN KEY(composition_id) REFERENCES compositions(id) ON DELETE CASCADE
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS composition_backtest_runs (
         id TEXT PRIMARY KEY,
         composition_id TEXT NOT NULL,
@@ -387,6 +408,39 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS composition_versions (
+        id TEXT PRIMARY KEY,
+        composition_id TEXT NOT NULL,
+        version_number INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'DRAFT',
+        source_kind TEXT NOT NULL DEFAULT 'manual',
+        source_ref_id TEXT,
+        snapshot_json TEXT NOT NULL DEFAULT '{}',
+        diff_json TEXT NOT NULL DEFAULT '{}',
+        evidence_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        deleted_at TEXT,
+        deleted_reason TEXT,
+        FOREIGN KEY(composition_id) REFERENCES compositions(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS composition_decision_packets (
+        id TEXT PRIMARY KEY,
+        composition_id TEXT NOT NULL,
+        version_id TEXT,
+        source_refs_json TEXT NOT NULL DEFAULT '{}',
+        packet_json TEXT NOT NULL DEFAULT '{}',
+        export_markdown TEXT NOT NULL DEFAULT '',
+        export_html TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        deleted_at TEXT,
+        deleted_reason TEXT,
+        FOREIGN KEY(composition_id) REFERENCES compositions(id) ON DELETE CASCADE,
+        FOREIGN KEY(version_id) REFERENCES composition_versions(id) ON DELETE SET NULL
+    )
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_composition_legs_composition_id_ordering
     ON composition_legs(composition_id, ordering)
     """,
@@ -403,12 +457,24 @@ SCHEMA_STATEMENTS = [
     ON composition_audit_events(composition_id, occurred_at, id)
     """,
     """
+    CREATE INDEX IF NOT EXISTS idx_composition_proxy_confirmations_composition_signature
+    ON composition_proxy_confirmations(composition_id, proxy_signature, status, deleted_at)
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_composition_backtest_runs_composition
     ON composition_backtest_runs(composition_id, created_at)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_composition_allocation_jobs_composition
     ON composition_allocation_jobs(composition_id, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_versions_composition
+    ON composition_versions(composition_id, version_number, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_decision_packets_composition
+    ON composition_decision_packets(composition_id, created_at)
     """,
     """
     CREATE TABLE IF NOT EXISTS symbol_identity_cache (

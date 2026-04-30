@@ -297,6 +297,29 @@ const momentumSourceRunDetail: ApiBacktestRunDetail = {
   },
 };
 
+const assetAllocationStrategyDetail: ApiStrategyDetail = {
+  id: "strat-asset-001",
+  name: "美股标普纳指平衡策略",
+  description: "多资产风险预算、目标权重、再平衡与成本",
+  strategy_type: "ASSET_ALLOCATION",
+  universe_name: "Global Allocation",
+  benchmark_symbol: "SPY",
+  rebalance_frequency: "quarterly",
+  lifecycle_status: "ACTIVE",
+  current_parameter_version_id: "strat-asset-001-v1",
+  parameter_history: [],
+  parameters: {
+    allocation_assets: [
+      { symbol: "SPY", display_name: "S&P 500 ETF", asset_class: "Equity" },
+      { symbol: "TLT", display_name: "20Y Treasury ETF", asset_class: "Treasury" },
+    ],
+    allocation_weight__SPY_pct: 60,
+    allocation_weight__TLT_pct: 40,
+    rebalance_frequency: "quarterly",
+  } as unknown as ApiStrategyDetail["parameters"],
+  allowed_actions: ["open_optimization"],
+};
+
 const staleGridStrategyDetail: ApiStrategyDetail = {
   id: "strat-grid-001",
   name: "SPY网格交易策略",
@@ -651,6 +674,50 @@ describe("OptimizationConfigPage", () => {
     expect(payload.constraints?.some((item) => item.key === "turnover")).toBe(
       false,
     );
+  });
+
+  it("applies the default 100 percent sum constraint to asset allocation weights", async () => {
+    fakeApi.getStrategyDetail.mockResolvedValue(assetAllocationStrategyDetail);
+
+    render(
+      <OptimizationConfigPage
+        strategyId="strat-asset-001"
+        entryPoint="strategy_detail"
+      />,
+    );
+
+    await screen.findByRole("heading", {
+      level: 1,
+      name: "美股标普纳指平衡策略",
+    });
+
+    expect(screen.getByText("有效组合：5 组")).toBeInTheDocument();
+    expect(screen.getByText("默认约束：权重合计 100%")).toBeInTheDocument();
+    expect(screen.getByText("权重合计 100%")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "启动优化" }));
+
+    await waitFor(() =>
+      expect(fakeApi.createOptimizationJob).toHaveBeenCalledTimes(1),
+    );
+    const payload = fakeApi.createOptimizationJob.mock
+      .calls[0]?.[1] as ApiOptimizationJobCreatePayload;
+    const weightFields = (payload.search_space ?? []).filter((field) =>
+      field.key.startsWith("allocation_weight__"),
+    );
+
+    expect(payload.budget_combinations).toBe(5);
+    expect(weightFields).toHaveLength(2);
+    expect(weightFields.every((field) => field.mode === "range")).toBe(true);
+    expect(
+      weightFields.every(
+        (field) => field.constraint_group === "allocation_weight_sum_100",
+      ),
+    ).toBe(true);
+    expect(weightFields.map((field) => field.constraint_target)).toEqual([
+      100,
+      100,
+    ]);
   });
 
   it("renders the Sharpe constraint cards in the corrected order", async () => {

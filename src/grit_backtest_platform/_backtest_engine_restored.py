@@ -1030,6 +1030,227 @@ def _run_buy_and_hold_backtest(
     )
 
 
+def _asset_allocation_symbols(parameters: Mapping[str, Any], symbol_series: Mapping[str, list[MarketBar]]) -> list[str]:
+    raw_assets = parameters.get("allocation_assets")
+    symbols: list[str] = []
+    if isinstance(raw_assets, list):
+        for asset in raw_assets:
+            raw_symbol = asset.get("symbol") if isinstance(asset, Mapping) else asset
+            symbol = str(raw_symbol or "").strip().upper()
+            if symbol and symbol in symbol_series and symbol not in symbols:
+                symbols.append(symbol)
+    for key in parameters:
+        text = str(key)
+        if text.startswith("allocation_weight__") and text.endswith("_pct"):
+            symbol = text.removeprefix("allocation_weight__").removesuffix("_pct").strip().upper()
+            if symbol and symbol in symbol_series and symbol not in symbols:
+                symbols.append(symbol)
+    return symbols or list(symbol_series.keys())
+
+
+def _asset_allocation_target_weights(
+    parameters: Mapping[str, Any],
+    symbol_series: Mapping[str, list[MarketBar]],
+) -> tuple[dict[str, float], list[str]]:
+    symbols = _asset_allocation_symbols(parameters, symbol_series)
+    raw_weights: dict[str, float] = {}
+    warnings: list[str] = []
+    for symbol in symbols:
+        raw_weight = _to_float(parameters.get(f"allocation_weight__{symbol}_pct"), math.nan)
+        if math.isfinite(raw_weight) and raw_weight > 0:
+            raw_weights[symbol] = raw_weight / 100.0
+    if not raw_weights:
+        equal_weight = 1.0 / len(symbols) if symbols else 0.0
+        raw_weights = {symbol: equal_weight for symbol in symbols}
+        warnings.append("Allocation weights were empty; equal weights were used.")
+    weight_sum = sum(value for value in raw_weights.values() if value > 0)
+    if weight_sum <= 0:
+        equal_weight = 1.0 / len(symbols) if symbols else 0.0
+        return {symbol: equal_weight for symbol in symbols}, ["Allocation weights were invalid; equal weights were used."]
+    target_weights = {
+        symbol: _clamp_weight(value / weight_sum)
+        for symbol, value in raw_weights.items()
+        if value > 0
+    }
+    return target_weights, warnings
+
+
+def _run_asset_allocation_backtest(
+    symbol_series: Mapping[str, list[MarketBar]],
+    *,
+    config: BacktestConfig,
+    parameters: Mapping[str, Any],
+    benchmark_series: list[MarketBar],
+    master_dates: list[str],
+) -> BacktestResult:
+    if len(master_dates) < 2 or not symbol_series:
+        empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        return BacktestResult(metrics=empty_metrics, warnings=["Not enough benchmark dates for requested range"])
+
+    target_weights, warnings = _asset_allocation_target_weights(parameters, symbol_series)
+    if not target_weights:
+        empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        return BacktestResult(metrics=empty_metrics, warnings=["No allocation assets with market bars were available"])
+
+    index_by_symbol = {
+        symbol: {bar.date: idx for idx, bar in enumerate(series)}
+        for symbol, series in symbol_series.items()
+    }
+    benchmark_index = {bar.date: idx for idx, bar in enumerate(benchmark_series)}
+    rebalance_enabled = bool(parameters.get("rebalance_enabled", True))
+    frequency = str(parameters.get("rebalance_frequency") or "quarterly").lower()
+    if not rebalance_enabled:
+        frequency = "never"
+    rebalance_indexes = set(_rebalance_keys(master_dates, frequency))
+    rebalance_indexes.add(0)
+    threshold = max(_to_float(parameters.get("rebalance_threshold_pct"), 0.0), 0.0) / 100.0
+    expense_ratio_daily = 0.0
+    if bool(parameters.get("cost_model_enabled", False)):
+        expense_ratio_daily = max(_to_float(parameters.get("expense_ratio_bps"), 0.0), 0.0) / 10000.0 / 252.0
+
+    current_weights: dict[str, float] = {}
+    equity = config.initial_equity
+    equity_curve = [equity]
+    returns: list[float] = []
+    oos_cut = max(int((len(master_dates) - 1) * (1.0 - config.oos_fraction)), 1)
+    daily_points: list[DailyPerformancePoint] = []
+    trades: list[TradeRecord] = []
+    total_turnover = 0.0
+    coverage_days = 0
+
+    for index in range(1, len(master_dates)):
+        previous_date = master_dates[index - 1]
+        trade_date = master_dates[index]
+        rebalance_turnover = 0.0
+        scheduled_rebalance = not current_weights or (rebalance_enabled and (index - 1) in rebalance_indexes)
+        threshold_rebalance = False
+        if rebalance_enabled and current_weights and threshold > 0:
+            max_deviation = max(
+                abs(target_weights.get(symbol, 0.0) - current_weights.get(symbol, 0.0))
+                for symbol in set(target_weights) | set(current_weights)
+            )
+            threshold_rebalance = max_deviation >= threshold
+        should_rebalance = scheduled_rebalance or threshold_rebalance
+        rebalance_reason = (
+            f"asset_allocation:{frequency}"
+            if scheduled_rebalance
+            else "asset_allocation:threshold"
+        )
+        if should_rebalance:
+            for symbol in sorted(set(target_weights) | set(current_weights)):
+                previous_weight = current_weights.get(symbol, 0.0)
+                next_weight = target_weights.get(symbol, 0.0)
+                if abs(previous_weight - next_weight) <= 1e-9:
+                    continue
+                price = 0.0
+                series = symbol_series.get(symbol, [])
+                position_index = index_by_symbol.get(symbol, {}).get(trade_date)
+                if position_index is not None:
+                    price = _tradeable_open(series[position_index])
+                trades.append(
+                    TradeRecord(
+                        date=trade_date,
+                        symbol=symbol,
+                        action="buy" if next_weight > previous_weight else "sell",
+                        price=price,
+                        weight_before=previous_weight,
+                        weight_after=next_weight,
+                        reason=rebalance_reason,
+                    )
+                )
+                rebalance_turnover += abs(previous_weight - next_weight)
+            if rebalance_turnover > 0:
+                current_weights = dict(target_weights)
+                total_turnover += rebalance_turnover
+
+        symbol_growth: dict[str, float] = {}
+        portfolio_growth = 0.0
+        coverage_hits = 0
+        for symbol, weight in current_weights.items():
+            position_index = index_by_symbol.get(symbol, {}).get(trade_date)
+            previous_index = index_by_symbol.get(symbol, {}).get(previous_date)
+            if position_index is None or previous_index is None:
+                symbol_growth[symbol] = weight
+                portfolio_growth += weight
+                continue
+            current_close = _tradeable_close(symbol_series[symbol][position_index])
+            previous_close = _tradeable_close(symbol_series[symbol][previous_index])
+            symbol_return = current_close / previous_close - 1.0 if previous_close > 0 else 0.0
+            grown_weight = weight * (1.0 + symbol_return)
+            symbol_growth[symbol] = grown_weight
+            portfolio_growth += grown_weight
+            coverage_hits += 1
+
+        strategy_return = portfolio_growth - sum(current_weights.values())
+        if rebalance_turnover > 0:
+            strategy_return -= (config.transaction_cost_bps / 10000.0) * rebalance_turnover
+        strategy_return -= expense_ratio_daily
+        if portfolio_growth > 0:
+            current_weights = {
+                symbol: grown_weight / portfolio_growth
+                for symbol, grown_weight in symbol_growth.items()
+                if grown_weight > 0
+            }
+
+        benchmark_return = 0.0
+        benchmark_pos = benchmark_index.get(trade_date)
+        if benchmark_pos is not None and benchmark_pos > 0:
+            current = _tradeable_close(benchmark_series[benchmark_pos])
+            prior = _tradeable_close(benchmark_series[benchmark_pos - 1])
+            if prior > 0:
+                benchmark_return = current / prior - 1.0
+
+        equity *= 1.0 + strategy_return
+        returns.append(strategy_return)
+        equity_curve.append(equity)
+        peak = max(equity_curve)
+        drawdown = equity / peak - 1.0 if peak else 0.0
+        if coverage_hits:
+            coverage_days += 1
+        daily_points.append(
+            DailyPerformancePoint(
+                date=trade_date,
+                equity=equity,
+                strategy_return=strategy_return,
+                benchmark_return=benchmark_return,
+                drawdown=drawdown,
+                exposure=sum(current_weights.values()),
+                universe_size=len(target_weights),
+                in_sample=(index - 1) < oos_cut,
+            )
+        )
+
+    total_return, cagr, volatility, sharpe, max_drawdown = _curve_metrics(equity_curve, returns)
+    winning_days = sum(1 for value in returns if value > 0)
+    oos_returns = [point.strategy_return for point in daily_points if not point.in_sample]
+    oos_curve = [1.0]
+    for value in oos_returns:
+        oos_curve.append(oos_curve[-1] * (1.0 + value))
+    _, oos_cagr, _, oos_sharpe, _ = _curve_metrics(oos_curve, oos_returns)
+    metrics = BacktestMetrics(
+        total_return=total_return,
+        cagr=cagr,
+        annualized_volatility=volatility,
+        sharpe=sharpe,
+        max_drawdown=max_drawdown,
+        turnover=total_turnover / max(len(daily_points), 1),
+        win_rate=winning_days / max(len(returns), 1),
+        oos_cagr=oos_cagr,
+        oos_sharpe=oos_sharpe,
+    )
+    coverage_ratio = coverage_days / len(daily_points) if daily_points else 0.0
+    return BacktestResult(
+        metrics=metrics,
+        daily_performance=daily_points,
+        trades=trades,
+        warnings=warnings,
+        effective_date=daily_points[0].date if daily_points else None,
+        oos_start_date=daily_points[oos_cut].date if len(daily_points) > oos_cut else None,
+        coverage_ratio=coverage_ratio,
+        coverage_days=coverage_days,
+    )
+
+
 def run_backtest(
     bars_by_symbol: Mapping[str, Iterable[Mapping[str, Any]]],
     *,
@@ -1130,6 +1351,14 @@ def run_backtest_prepared(
             benchmark_series=benchmark_series,
             master_dates=requested_window_dates,
             valuation_series=valuation_series,
+        )
+    if str(template_key).lower() in {"asset_allocation", "allocation", "global_allocation"}:
+        return _run_asset_allocation_backtest(
+            symbol_series,
+            config=config,
+            parameters=parameters,
+            benchmark_series=benchmark_series,
+            master_dates=requested_window_dates,
         )
     minimum_history = lookback_days + skip_recent_days
     if len(master_dates) < minimum_history + 2:

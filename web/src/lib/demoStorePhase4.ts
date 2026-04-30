@@ -1089,6 +1089,18 @@ function buildSnapshotOverview(
         source: 'yahoo',
         fallback_source: 'sec_edgar',
         blocker: null,
+        metadata: {
+          selected_latest_symbols: ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'META', 'GOOGL', 'AMD', 'AVGO'],
+          benchmark_etf_coverage: {
+            ready_count: 2,
+            total_count: 2,
+            missing_symbols: [],
+            symbols: [
+              { symbol: 'SPY', status: 'READY', start_date: '1996-01-02', end_date: '2026-04-01', trade_days: 7610 },
+              { symbol: 'QQQ', status: 'READY', start_date: '1999-03-10', end_date: '2026-04-01', trade_days: 6806 },
+            ],
+          },
+        },
       },
     ],
     universe_snapshots: [
@@ -1411,9 +1423,58 @@ export const demoApi: DemoApi = {
       nowIso(),
       getOptimizationSourceRun(job),
     );
-    state.optimizationJobs = state.optimizationJobs.map((item) => (item.id === jobId ? updated : item));
-    sortOptimizationJobs();
     return clone(updated);
+  },
+  async saveOptimizationFilteredResult(jobId, payload): Promise<ApiOptimizationJobDetail> {
+    const job = findJob(jobId);
+    if (!['COMPLETED', 'PARTIALLY_FAILED', 'FAILED'].includes(String(job.status).toUpperCase())) {
+      throw new ApiError({
+        status: 409,
+        code: 'optimization_job_not_terminal',
+        message: 'Only completed optimization jobs can be saved as a filtered result.',
+      });
+    }
+    const strategy = findStrategy(job.strategy_id);
+    const savedAt = nowIso();
+    const filtered = applyOptimizationJobConstraintUpdate(
+      job,
+      payload,
+      strategy,
+      savedAt,
+      getOptimizationSourceRun(job),
+    );
+    const saved: ApiOptimizationJobDetail = {
+      ...filtered,
+      id: nextId('opt'),
+      status: 'COMPLETED',
+      request: {
+        ...filtered.request,
+        source_optimization_job_id: jobId,
+        entry_point: 'saved_refilter_result',
+      },
+      summary: {
+        ...filtered.summary,
+        status: 'COMPLETED',
+        progress_pct: 100,
+        current_stage: 'Result ready',
+        latest_update: '已另存过滤结果。',
+      },
+      result: {
+        ...filtered.result,
+        status: 'COMPLETED',
+        progress_pct: 100,
+        current_stage: 'Result ready',
+        latest_update: '已另存过滤结果。',
+      },
+      created_at: savedAt,
+      updated_at: savedAt,
+      completed_at: savedAt,
+    };
+    state.optimizationJobs.unshift(saved);
+    strategy.latest_optimization_job_id = saved.id;
+    const normalized = syncOptimizationJob(saved);
+    sortOptimizationJobs();
+    return clone(normalized);
   },
   async deleteOptimizationJob(id: string) {
     const job = findJob(id);

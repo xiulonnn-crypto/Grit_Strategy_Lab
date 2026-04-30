@@ -92,9 +92,18 @@ type AllocationCandidate = {
   stress: string;
   verdict: string;
   sourceEvidence: string;
+  canPromote?: boolean;
   executionLimited?: boolean;
+  promotionReadiness?: AllocationPromotionReadiness | null;
   violation?: string;
   weights: Array<{ legId: string; weight: number; risk: number }>;
+};
+
+type AllocationPromotionReadiness = {
+  status: string;
+  evidenceGrade: string | null;
+  blockers: string[];
+  policyViolationCount: number;
 };
 
 type FrontierPoint = {
@@ -296,6 +305,38 @@ function asNumber(value: unknown, fallback: number): number {
 
 function asString(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+function normalizePromotionReadiness(value: unknown): AllocationPromotionReadiness | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const rawBlockers = Array.isArray(value.blockers) ? value.blockers : [];
+  const rawPolicyViolations = Array.isArray(value.policy_violations) ? value.policy_violations : [];
+  return {
+    status: asString(value.status, ''),
+    evidenceGrade: typeof value.evidence_grade === 'string' ? value.evidence_grade.trim().toUpperCase() : null,
+    blockers: rawBlockers.map((item) => String(item)).filter(Boolean),
+    policyViolationCount: rawPolicyViolations.length,
+  };
+}
+
+function promotionReadinessBlockedReason(readiness: AllocationPromotionReadiness | null | undefined): string | null {
+  if (!readiness) {
+    return null;
+  }
+  const blockers = new Set(readiness.blockers);
+  const blocked = readiness.status === 'blocked' || blockers.size > 0;
+  if (!blocked) {
+    return null;
+  }
+  if (blockers.has('evidence_grade_c') || readiness.evidenceGrade === 'C') {
+    return '存在未关闭的失效问题，晋升门禁已暂停。';
+  }
+  if (blockers.has('constraint_violations') || readiness.policyViolationCount > 0) {
+    return '存在约束违反，请先调整候选约束。';
+  }
+  return '晋升门禁未通过，暂不能生成草稿版本。';
 }
 
 function formatPct(value: number, digits = 0): string {
@@ -1103,6 +1144,10 @@ function buildCandidatesFromJob(job: ApiCompositionAllocationJob | null, model: 
       const migrationCostBps = Math.round(asNumber(metrics.migration_cost_bps, turnover * 0.75));
       const maxDrawdown = normalizeDrawdownMetric(metrics.max_drawdown, currentMetrics.maxDrawdown);
       const label = displayCandidateLabel(id, rawLabel, objective);
+      const constraintViolations = Array.isArray(candidate.constraint_violations) ? candidate.constraint_violations : [];
+      const allowedActions = Array.isArray(candidate.allowed_actions) ? candidate.allowed_actions.map((item) => String(item)) : [];
+      const readiness = normalizePromotionReadiness(candidate.promotion_readiness);
+      const readinessBlockedReason = promotionReadinessBlockedReason(readiness);
       return {
         id,
         label,
@@ -1124,9 +1169,13 @@ function buildCandidatesFromJob(job: ApiCompositionAllocationJob | null, model: 
         stress: `压力窗口回撤 ${formatPct(maxDrawdown, 1)}`,
         verdict: '运行时优化任务返回的候选，指标已绑定当前组合真值。',
         sourceEvidence: '来源：allocation job 当前候选、有效前沿点和组合明细 KPI。',
-        executionLimited: Array.isArray(candidate.constraint_violations) && candidate.constraint_violations.length > 0,
-        violation: Array.isArray(candidate.constraint_violations) && candidate.constraint_violations.length > 0
+        canPromote: allowedActions.length > 0 ? allowedActions.includes('promote_candidate') : undefined,
+        executionLimited: constraintViolations.length > 0 || Boolean(readinessBlockedReason),
+        promotionReadiness: readiness,
+        violation: constraintViolations.length > 0
           ? '存在约束提示，请复核后晋升。'
+          : readinessBlockedReason
+            ? readinessBlockedReason
           : undefined,
         weights: jobWeightsForCandidate(candidate.weights, model.legs),
       };
@@ -2803,6 +2852,7 @@ function ExecutionDecisionPanel({
   onOpenPromotion: () => void;
   promotionSuccess: string | null;
 }): JSX.Element {
+  const statusLabel = disabledReason ? '门禁阻断' : candidate.executionLimited ? '执行受限' : '可晋升';
   return (
     <aside className="composition-allocation-panel composition-allocation-decision-card" data-ui="allocation-decision-card">
       <div className="composition-allocation-panel__header">
@@ -2811,7 +2861,7 @@ function ExecutionDecisionPanel({
           <p>{objectiveLabel(candidate.objectiveKey)} · 排名 {candidate.rank}</p>
         </div>
         <span className={candidate.executionLimited ? 'composition-allocation-status composition-allocation-status--warning' : 'composition-allocation-status composition-allocation-status--good'}>
-          {candidate.executionLimited ? '执行受限' : '可晋升'}
+          {statusLabel}
         </span>
       </div>
       <article className="composition-allocation-candidate composition-allocation-candidate--best">
@@ -2831,7 +2881,7 @@ function ExecutionDecisionPanel({
           <span>流动性压力 {candidate.liquidityPressurePct.toFixed(1)}%</span>
         </div>
         <p className={candidate.executionLimited ? 'composition-allocation-warning-copy' : ''}>{candidate.verdict}</p>
-        {candidate.violation ? <div className="composition-allocation-violation">{candidate.violation}</div> : null}
+        {candidate.violation && candidate.violation !== disabledReason ? <div className="composition-allocation-violation">{candidate.violation}</div> : null}
         {disabledReason ? <div className="composition-allocation-violation">{disabledReason}</div> : null}
         {promotionSuccess ? <div className="composition-allocation-action-state" role="status">{promotionSuccess}</div> : null}
         <button
@@ -2840,7 +2890,7 @@ function ExecutionDecisionPanel({
           onClick={onOpenPromotion}
           type="button"
         >
-          一键晋升版本
+          生成草稿版本
         </button>
       </article>
     </aside>
@@ -2940,7 +2990,7 @@ function PromotionDialog({
       >
         <div className="composition-allocation-panel__header">
           <div>
-            <h2 id="allocation-promotion-dialog-title">确认晋升版本</h2>
+            <h2 id="allocation-promotion-dialog-title">确认生成草稿版本</h2>
             <p>{candidate.label} · {candidate.sourceEvidence}</p>
           </div>
         </div>
@@ -2970,7 +3020,7 @@ function PromotionDialog({
             取消
           </button>
           <button className="composition-allocation-primary-button" disabled={submitting || !reason.trim()} onClick={onConfirm} type="button">
-            {submitting ? '提交中' : '确认晋升'}
+            {submitting ? '提交中' : '确认生成草稿'}
           </button>
         </div>
       </section>
@@ -3039,11 +3089,16 @@ export function CompositionAllocationResultPage({
     ?? buildCandidates(DEFAULT_MODEL.legs)[0]!;
   const selectedPointId = selectedCandidate?.id ?? selectedObjective;
   const selectedPoint = frontierPoints.find((point) => point.id === selectedPointId) ?? frontierPoints[0];
-  const promotionDisabledReason = !api.updateComposition
-    ? '组合更新接口未接入，暂不能晋升版本。'
-    : selectedCandidate?.executionLimited
-      ? '该候选触发执行受限，请先完成交易台流动性复核。'
-      : null;
+  const promotionReadinessReason = promotionReadinessBlockedReason(selectedCandidate?.promotionReadiness);
+  const promotionDisabledReason = !api.promoteCompositionAllocationCandidateToDraft
+    ? '候选晋升接口未接入，暂不能生成草稿版本。'
+    : selectedCandidate?.canPromote === false
+      ? '该候选不是可晋升方案。'
+      : promotionReadinessReason
+        ? promotionReadinessReason
+        : selectedCandidate?.executionLimited
+          ? '该候选触发执行受限，请先完成交易台流动性复核。'
+          : null;
 
   useEffect(() => {
     if (selectedPoint) {
@@ -3070,26 +3125,20 @@ export function CompositionAllocationResultPage({
   }
 
   async function handleConfirmPromotion(): Promise<void> {
-    if (!selectedCandidate || !api.updateComposition) {
+    if (!selectedCandidate || !api.promoteCompositionAllocationCandidateToDraft) {
       return;
     }
     try {
       setPromotionSubmitting(true);
       setPromotionError(null);
-      const changes = buildPromotionChangeRows(model.legs, selectedCandidate);
-      await api.updateComposition(compositionId, {
-        ...buildPromotionPayload(model.legs, selectedCandidate),
-        version_reason: promotionReason.trim(),
-        version_change_summary: changes.join('；'),
-        version_source: 'allocation_promotion',
-        version_candidate_id: selectedCandidate.id,
-        version_candidate_label: selectedCandidate.label,
+      const draftVersion = await api.promoteCompositionAllocationCandidateToDraft(compositionId, jobId, selectedCandidate.id, {
+        decision_note: promotionReason.trim(),
       });
       setPromotionDialogOpen(false);
       setPromotionReason('');
-      setPromotionSuccess(`已提交版本晋升：${selectedCandidate.label}`);
+      setPromotionSuccess(`已生成草稿版本 v${draftVersion.version_number}：${selectedCandidate.label}`);
     } catch (caught) {
-      setPromotionError(`晋升版本失败：${(caught as Error).message}`);
+      setPromotionError(`生成草稿版本失败：${(caught as Error).message}`);
     } finally {
       setPromotionSubmitting(false);
     }

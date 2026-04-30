@@ -1128,8 +1128,36 @@ function createOptimizationTestApi(): DemoApi {
       if (String(state.job.status).toUpperCase() !== "COMPLETED") {
         throw new Error("Only completed optimization jobs can be re-filtered.");
       }
-      state.job = applyConstraintUpdateToJob(state.job, payload);
-      return cloneJob(state.job);
+      return cloneJob(applyConstraintUpdateToJob(state.job, payload));
+    },
+    async saveOptimizationFilteredResult(
+      jobId: string,
+      payload,
+    ): Promise<ApiOptimizationJobDetail> {
+      const state = findJob(jobId);
+      if (String(state.job.status).toUpperCase() !== "COMPLETED") {
+        throw new Error("Only completed optimization jobs can be saved as a filtered result.");
+      }
+      createdJobCounter += 1;
+      const savedJobId = `opt-saved-${createdJobCounter}`;
+      const savedJob = {
+        ...applyConstraintUpdateToJob(state.job, payload),
+        id: savedJobId,
+        created_at: nowIso(),
+        updated_at: nowIso(),
+        completed_at: nowIso(),
+      };
+      savedJob.request = {
+        ...savedJob.request,
+        source_optimization_job_id: jobId,
+        entry_point: "saved_refilter_result",
+      };
+      jobs.set(savedJobId, {
+        job: savedJob,
+        phase: 0,
+      });
+      syncLatestOptimizationJob();
+      return cloneJob(savedJob);
     },
     async deleteOptimizationJob(jobId: string) {
       findJob(jobId);
@@ -1277,8 +1305,7 @@ function createZeroPassConstraintApi(): DemoApi {
     payload,
   ): Promise<ApiOptimizationJobDetail> => {
     const job = await ensureJob(jobId);
-    currentJob = applyConstraintUpdateToJob(job, payload);
-    return structuredClone(currentJob);
+    return structuredClone(applyConstraintUpdateToJob(job, payload));
   };
 
   return api;
@@ -1437,8 +1464,7 @@ function createBaselineOnlyPassApi(): OptimizationTestApi {
     payload,
   ): Promise<ApiOptimizationJobDetail> => {
     const job = await ensureJob(jobId);
-    currentJob = applyConstraintUpdateToJob(job, payload);
-    return structuredClone(currentJob);
+    return structuredClone(applyConstraintUpdateToJob(job, payload));
   };
 
   return Object.assign(api, {
@@ -1543,10 +1569,10 @@ function createFullMatchingCombinationRefilterApi(): DemoApi {
     payload,
   ): Promise<ApiOptimizationJobDetail> => {
     const job = await ensureJob(jobId);
-    currentJob = applyConstraintUpdateToJob(job, payload);
-    currentJob.summary.matching_combination_source = "all_trials";
-    currentJob.matching_combination_source = "all_trials";
-    return structuredClone(currentJob);
+    const preview = applyConstraintUpdateToJob(job, payload);
+    preview.summary.matching_combination_source = "all_trials";
+    preview.matching_combination_source = "all_trials";
+    return structuredClone(preview);
   };
 
   return api;
@@ -1665,9 +1691,9 @@ function createObjectiveSortingApi(): DemoApi {
     payload,
   ): Promise<ApiOptimizationJobDetail> => {
     const job = await ensureJob(jobId);
-    currentJob = applyConstraintUpdateToJob(job, payload);
-    currentJob = keepPassingObjectiveCandidates(currentJob);
-    return structuredClone(currentJob);
+    return structuredClone(
+      keepPassingObjectiveCandidates(applyConstraintUpdateToJob(job, payload)),
+    );
   };
 
   return api;
@@ -2382,6 +2408,78 @@ describe("optimization module flow", () => {
         "符合约束条件的组合共3个，以下按 年化收益率 Max 输出当前候选版本排序。",
       );
     });
+  });
+
+  it("keeps the source snapshot unchanged until saving the re-filtered result as a new job", async () => {
+    const saveApi = createObjectiveSortingApi();
+    const sourceBefore = await saveApi.getOptimizationJobDetail("opt-001");
+    const originalSaveFilteredResult =
+      saveApi.saveOptimizationFilteredResult.bind(saveApi);
+    let savedSourceJobId: string | null = null;
+    const savedPayloadRef: {
+      current: OptimizationConstraintUpdatePayloadForTest | null;
+    } = { current: null };
+
+    saveApi.saveOptimizationFilteredResult = async (jobId, payload) => {
+      savedSourceJobId = jobId;
+      savedPayloadRef.current = structuredClone(payload);
+      return originalSaveFilteredResult(jobId, payload);
+    };
+    currentApi = saveApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.querySelector(".optimization-results-grid")).not.toBeNull(),
+    );
+
+    const objectiveSelect = container.querySelector(
+      "#optimization-results-objective",
+    ) as HTMLSelectElement | null;
+    const refilterButton = Array.from(
+      container.querySelectorAll("button"),
+    ).find((button) => button.textContent?.includes("重新过滤")) as
+      | HTMLButtonElement
+      | undefined;
+    const firstCandidateLabel = () =>
+      (
+        container.querySelector(
+          ".optimization-results-grid tbody tr:first-child",
+        ) as HTMLTableRowElement | null
+      )?.textContent ?? "";
+
+    expect(container.textContent).not.toContain("保存新结果");
+
+    fireEvent.change(objectiveSelect!, {
+      target: { value: "annualized_return" },
+    });
+    fireEvent.click(refilterButton!);
+
+    await waitFor(() => {
+      expect(firstCandidateLabel()).toContain("收益第一");
+      expect(container.textContent).toContain("保存新结果");
+    });
+
+    const sourceAfterPreview = await saveApi.getOptimizationJobDetail("opt-001");
+    expect(sourceAfterPreview.request.objective).toBe(
+      sourceBefore.request.objective,
+    );
+    expect(sourceAfterPreview.summary.objective).toBe(
+      sourceBefore.summary.objective,
+    );
+
+    const saveButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("保存新结果"),
+    ) as HTMLButtonElement | undefined;
+    expect(saveButton).toBeTruthy();
+    fireEvent.click(saveButton!);
+
+    await waitFor(() => expect(savedSourceJobId).toBe("opt-001"));
+    expect(savedPayloadRef.current?.objective).toBe("annualized_return");
+    await waitFor(() =>
+      expect(window.location.hash).toMatch(/^#\/optimization-jobs\/opt-saved-/),
+    );
+    expect(window.location.hash).not.toBe("#/optimization-jobs/opt-001");
   });
 
   it("keeps the candidate list stable until re-filtering returns", async () => {
@@ -3319,7 +3417,7 @@ describe("optimization module flow", () => {
     ).toBe("72");
   });
 
-  it("applies quick filters locally even when saving the thresholds fails", async () => {
+  it("applies quick filters locally even when previewing the thresholds fails", async () => {
     const flakyApi = createZeroPassConstraintApi();
     flakyApi.updateOptimizationJobConstraints = async () => {
       throw new Error("405 Method Not Allowed");
@@ -3358,9 +3456,10 @@ describe("optimization module flow", () => {
     );
     await waitFor(() =>
       expect(container.textContent).toContain(
-        "后端未保存本次约束设置：405 Method Not Allowed",
+        "后端未返回本次过滤快照：405 Method Not Allowed",
       ),
     );
+    expect(container.textContent).not.toContain("保存新结果");
   });
 
   it("shows a fatal error when a terminal optimization detail response omits matching_combination_count", async () => {

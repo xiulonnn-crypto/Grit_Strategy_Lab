@@ -39,6 +39,9 @@ const SAVE_CONFIRM_DIALOG = {
   runIdLabel: '回测号',
   strategyLabel: '策略',
 } as const;
+const HIDDEN_RUN_WARNINGS = new Set([
+  'Allocation weights were normalized to 100%.',
+]);
 
 function collectRunWarnings(detail: ApiBacktestRunDetail | null): string[] {
   if (!detail) {
@@ -48,7 +51,7 @@ function collectRunWarnings(detail: ApiBacktestRunDetail | null): string[] {
     new Set(
       (detail.warnings ?? [])
         .map((warning) => String(warning ?? '').trim())
-        .filter((warning) => warning.length > 0),
+        .filter((warning) => warning.length > 0 && !HIDDEN_RUN_WARNINGS.has(warning)),
     ),
   );
 }

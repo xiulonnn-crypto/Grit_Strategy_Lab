@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, Response
 from ._version import __version__
 from .fallback_provider import ProviderExecutionSignal, provider_access_tier
 from .models import (
+    AssetAllocationRecommendationRequest,
     AssetLegCreateRequest,
     AssetLegResponseModel,
     AssetLegUpdateRequest,
@@ -34,10 +35,18 @@ from .models import (
     CompositionBacktestRunCreateRequest,
     CompositionBacktestRunResponseModel,
     CompositionDetailResponseModel,
+    CompositionDecisionPacketCreateRequest,
+    CompositionDecisionPacketModel,
+    CompositionGlobalAllocationJobListResponseModel,
+    CompositionGlobalBacktestRunListResponseModel,
     CompositionListItemModel,
+    CompositionPromotionDraftRequest,
+    CompositionProxyConfirmationRequest,
     CompositionPreviewRequest,
     CompositionPreviewResponseModel,
     CompositionUpdateRequest,
+    CompositionVersionDetailModel,
+    CompositionVersionListResponseModel,
     ConfirmationUpdateRequest,
     CreateCreationSessionRequest,
     CreationMessageCreate,
@@ -46,6 +55,7 @@ from .models import (
     OptimizationCandidateCreateRequest,
     OptimizationJobConstraintUpdateRequest,
     OptimizationJobCreateRequest,
+    OptimizationJobFilteredResultCreateRequest,
     ParameterVersionRestoreRequest,
     ResumeOptimizationJobRequest,
     PromoteTrialRequest,
@@ -1093,6 +1103,11 @@ def create_app(
     def materialize_strategy(session_id: str, payload: MaterializeRequest):
         return invoke(service.materialize_strategy, session_id, payload)
 
+    @app.post('/strategy-creation-sessions/{session_id}/asset-allocation/recommendation')
+    def recommend_asset_allocation(session_id: str, payload: AssetAllocationRecommendationRequest):
+        recommender = getattr(service, 'recommend_asset_allocation')
+        return invoke(recommender, session_id, payload)
+
     @app.get('/backtest-runs')
     def list_backtest_runs(limit: int | None = Query(default=None, ge=1), status: str | None = None):
         return invoke(service.list_backtest_runs, limit=limit, status=status)
@@ -1153,6 +1168,14 @@ def create_app(
     def list_compositions():
         return invoke(service.list_compositions)
 
+    @app.get('/compositions/backtest-runs', response_model=CompositionGlobalBacktestRunListResponseModel)
+    def list_composition_backtest_runs():
+        return invoke(service.list_composition_backtest_runs)
+
+    @app.get('/compositions/allocation-jobs', response_model=CompositionGlobalAllocationJobListResponseModel)
+    def list_composition_allocation_jobs():
+        return invoke(service.list_composition_allocation_jobs)
+
     @app.get('/compositions/{composition_id}', response_model=CompositionDetailResponseModel)
     def composition_detail(composition_id: str):
         return invoke(service.get_composition_detail, composition_id)
@@ -1169,6 +1192,14 @@ def create_app(
     def update_composition(composition_id: str, payload: CompositionUpdateRequest):
         return invoke(service.update_composition, composition_id, payload)
 
+    @app.post('/compositions/{composition_id}/diagnostics/refresh', response_model=CompositionDetailResponseModel)
+    def refresh_composition_diagnostics(composition_id: str):
+        return invoke(service.refresh_composition_diagnostics, composition_id)
+
+    @app.post('/compositions/{composition_id}/proxy-confirmations', response_model=CompositionDetailResponseModel)
+    def confirm_composition_proxy(composition_id: str, payload: CompositionProxyConfirmationRequest):
+        return invoke(service.confirm_composition_proxy, composition_id, payload)
+
     @app.post('/compositions/{composition_id}/backtest-runs', response_model=CompositionBacktestRunResponseModel)
     def create_composition_backtest_run(composition_id: str, payload: CompositionBacktestRunCreateRequest):
         return invoke(service.create_composition_backtest_run, composition_id, payload)
@@ -1182,9 +1213,10 @@ def create_app(
         composition_id: str,
         run_id: str,
         page: int = Query(default=1, ge=1),
-        page_size: int = Query(default=100, ge=1, le=500),
+        page_size: int = Query(default=100, ge=1, le=1000),
         symbol: str | None = Query(default=None),
         source_leg: str | None = Query(default=None),
+        scenario: str | None = Query(default=None),
     ):
         return invoke(
             service.get_composition_backtest_orders,
@@ -1194,6 +1226,7 @@ def create_app(
             page_size=page_size,
             symbol=symbol,
             source_leg=source_leg,
+            scenario=scenario,
         )
 
     @app.get('/compositions/{composition_id}/backtest-runs/{run_id}/orders/{order_id}/netting', response_model=CompositionBacktestOrderNettingModel)
@@ -1207,6 +1240,7 @@ def create_app(
         format: str = Query(default='csv', pattern='^(csv|xlsx)$'),
         symbol: str | None = Query(default=None),
         source_leg: str | None = Query(default=None),
+        scenario: str | None = Query(default=None),
     ):
         payload = invoke(
             service.export_composition_backtest_orders,
@@ -1215,6 +1249,7 @@ def create_app(
             export_format=format,
             symbol=symbol,
             source_leg=source_leg,
+            scenario=scenario,
         )
         if isinstance(payload, Mapping) and payload.get("status") == "not_supported":
             return JSONResponse(status_code=501, content=dict(payload))
@@ -1235,6 +1270,58 @@ def create_app(
     @app.get('/compositions/{composition_id}/allocation-jobs/{job_id}', response_model=CompositionAllocationJobResponseModel)
     def composition_allocation_job_detail(composition_id: str, job_id: str):
         return invoke(service.get_composition_allocation_job, composition_id, job_id)
+
+    @app.get('/compositions/{composition_id}/versions', response_model=CompositionVersionListResponseModel)
+    def composition_versions(composition_id: str):
+        return invoke(service.list_composition_versions, composition_id)
+
+    @app.get('/compositions/{composition_id}/versions/{version_id}', response_model=CompositionVersionDetailModel)
+    def composition_version_detail(composition_id: str, version_id: str):
+        return invoke(service.get_composition_version, composition_id, version_id)
+
+    @app.post('/compositions/{composition_id}/allocation-jobs/{job_id}/candidates/{candidate_id}/promote-draft', response_model=CompositionVersionDetailModel)
+    def promote_composition_candidate_to_draft(
+        composition_id: str,
+        job_id: str,
+        candidate_id: str,
+        payload: CompositionPromotionDraftRequest | None = None,
+    ):
+        return invoke(
+            service.promote_composition_allocation_candidate_to_draft,
+            composition_id,
+            job_id,
+            candidate_id,
+            payload or CompositionPromotionDraftRequest(),
+        )
+
+    @app.post('/compositions/{composition_id}/decision-packets', response_model=CompositionDecisionPacketModel)
+    def create_composition_decision_packet(composition_id: str, payload: CompositionDecisionPacketCreateRequest):
+        return invoke(service.create_composition_decision_packet, composition_id, payload)
+
+    @app.get('/compositions/{composition_id}/decision-packets/{packet_id}', response_model=CompositionDecisionPacketModel)
+    def composition_decision_packet(composition_id: str, packet_id: str):
+        return invoke(service.get_composition_decision_packet, composition_id, packet_id)
+
+    @app.get('/compositions/{composition_id}/decision-packets/{packet_id}/export')
+    def composition_decision_packet_export(
+        composition_id: str,
+        packet_id: str,
+        format: str = Query(default='markdown', pattern='^(markdown|html)$'),
+    ):
+        payload = invoke(
+            service.export_composition_decision_packet,
+            composition_id,
+            packet_id,
+            export_format=format,
+        )
+        content = str(payload.get("content") or "") if isinstance(payload, Mapping) else str(payload)
+        filename = str(payload.get("filename", f"{packet_id}.md")) if isinstance(payload, Mapping) else f"{packet_id}.md"
+        media_type = str(payload.get("media_type", "text/markdown; charset=utf-8")) if isinstance(payload, Mapping) else "text/markdown; charset=utf-8"
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     @app.get('/optimization-jobs')
     def list_optimization_jobs():
@@ -1270,6 +1357,10 @@ def create_app(
     @app.patch('/optimization-jobs/{job_id}')
     def update_optimization_job(job_id: str, payload: OptimizationJobConstraintUpdateRequest):
         return invoke(service.update_optimization_job_constraints, job_id, payload)
+
+    @app.post('/optimization-jobs/{job_id}/filtered-results')
+    def save_optimization_filtered_result(job_id: str, payload: OptimizationJobFilteredResultCreateRequest):
+        return invoke(service.save_optimization_filtered_result, job_id, payload)
 
     @app.delete('/optimization-jobs/{job_id}')
     def delete_optimization_job(job_id: str):

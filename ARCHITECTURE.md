@@ -88,8 +88,10 @@
 - `compositions` 保存组合级身份、状态、基准、再平衡频次、成本口径与汇总投影。
 - `composition_legs` 保存组合内腿的排序、权重、锁定状态与来源引用。
 - `composition_source_freezes` 保存组合落库时的来源冻结证据，用于详情页审计与后续回看。
-- `composition_backtest_runs` 与 `composition_allocation_jobs` 是 Sleeve OS v1 的组合层运行记录预留表面。当前服务优先从已保存组合详情投影生成可审计运行结果，并镜像到运行态 artifact state；后续若沉淀完整历史，可在不改变前端契约的前提下迁入专表。
-- 组合回测详情接口还兼容组合冻结来源中引用的策略回测 run id：当该 run id 属于当前组合的来源证据或标准化腿配置时，服务会用当前组合详情快照生成只读组合回测诊断、订单与证据投影，避免旧深链把策略来源 run 误判为缺失的组合 run。订单投影必须覆盖完整收益窗口内的全部调仓事件，不能再截断为详情页摘要用的少量示例事件；首个订单事件必须按组合建仓买入生成，后续事件按组合再平衡生成；策略腿订单的可见 `symbol` 必须按事件日期穿透到当时有效的底层成交标的，如果首个建仓日早于该策略源运行的首笔成交，则只在首个建仓事件使用首个可用策略持仓作为初始建仓穿透，并优先使用建仓日行情价格；来源腿只保留在 `source_leg_*` 字段中用于追溯，订单查询与导出支持先按 `source_leg` 再按 `symbol` 收窄；全量流水必须输出模拟成交价、美元手续费，并在触发原因中区分策略内逻辑与组合再平衡。
+- `composition_backtest_runs` 与 `composition_allocation_jobs` 是 Sleeve OS 组合层运行记录表面。v2 已把新建 run/job 从只写运行态 artifact state 升级为持久记录：记录保存请求配置、结果摘要、订单或候选投影、证据快照、运行状态和时间戳；旧 artifact state 只作为历史兼容 fallback，命中 fallback 后会回写专表。
+- Sleeve OS v2 新增 `composition_versions` 表，保存组合版本快照：`id`、`composition_id`、`version_number`、`status`、`source_kind`、`source_ref_id`、`snapshot_json`、`diff_json`、`evidence_json`、`created_at`。allocation 候选晋升只能生成 `DRAFT` 版本，不能直接覆盖 `ACTIVE` 版本。
+- Sleeve OS v2 新增 `composition_decision_packets` 表，保存 readonly 决策包：`id`、`composition_id`、`version_id`、`source_refs_json`、`packet_json`、`export_markdown`、`export_html`、`created_at`。决策包是创建时不可变快照，读取和导出不得重新拼接当前运行态。
+- 组合回测详情接口还兼容组合冻结来源中引用的策略回测 run id：当该 run id 属于当前组合的来源证据或标准化腿配置时，服务会用当前组合详情快照生成只读组合回测诊断、订单与证据投影，避免旧深链把策略来源 run 误判为缺失的组合 run。订单投影必须覆盖完整收益窗口内的全部调仓事件，不能再截断为详情页摘要用的少量示例事件；首个订单事件必须按组合建仓买入生成，后续事件按组合再平衡生成；策略腿订单的可见 `symbol` 必须按事件日期穿透到当时有效的底层成交标的，如果首个建仓日早于该策略源运行的首笔成交，则只在首个建仓事件使用首个可用策略持仓作为初始建仓穿透，并优先使用建仓日行情价格；来源腿只保留在 `source_leg_*` 字段中用于追溯，订单查询与导出支持先按 `source_leg` 再按 `symbol` 收窄；全量流水必须输出模拟成交价、美元手续费；触发原因只表达组合层建仓或再平衡动作，策略腿信息以持仓穿透来源呈现，不能把策略内逻辑和组合再平衡拼成同日双触发。
 
 ## 4. 参数版本真相
 
@@ -134,6 +136,13 @@
 
 这样一来，运行详情页可以真正服务人工复盘，而不是假装一张平铺交易表就足够解释交易为何发生。
 
+### 5.1 资产配置回测执行语义
+
+资产配置型回测的再平衡由引擎生成交易审计与订单流水：
+
+- 固定频率再平衡（月度、季度、半年、年度）表示在调仓点后的下一个可交易日执行目标权重校准。
+- 偏离阈值只作为额外漂移触发，不取消固定频率触发。
+
 ## 6. 指标基线
 
 恢复后的数学层刻意保持保守。
@@ -152,16 +161,18 @@
 - `/workspace/overview` 负责保持顶层工作台契约稳定。
 - `/leg-inventory` 负责输出一期统一腿部读模型。它把策略腿视为投影，把资产腿/现金腿视为最小持久化定义。
 - `/asset-legs` 与 `/cash-legs` 负责写入最小定义能力，不承担策略版本化职责。
-- `/strategy-creation-sessions/*` 负责创建与修订工作流。
+- `/strategy-creation-sessions/*` 负责创建与修订工作流。策略级 `ASSET_ALLOCATION` 使用独立 `#/creation/asset-allocation/new` 配置页完成标的、权重、执行模式、再平衡与成本参数录入；标的与基准选项来自 `/data-snapshots/overview` 的价格快照和“指数与基准”覆盖对象。`POST /strategy-creation-sessions/{session_id}/asset-allocation/recommendation` 只提供风险预算/风险平价导向的推荐权重，并且要求所有所选标的具备足够价格历史，不能用等权静默替代风险平价；最终产物仍通过同一策略物化、详情、回测与优化契约流转。
 - `/backtest-runs/*` 覆盖预览、提交、克隆、详情、交易列表与单笔交易审计。
 - `GET /backtest-runs/{id}/detail` 明确针对页面加载做了优化。它可以包含 `trade_audit_items`，但不能物化完整的 `trade_audit` 记录；完整审计只属于 `GET /backtest-runs/{run_id}/trades/{trade_id}/audit`。
-- `/compositions`、`/compositions/{id}`、`/compositions/preview` 与 `/compositions/{id}` 的 patch 面共同构成一期组合工作台和组合详情页契约。预演接口负责返回收益流预览、相关性矩阵、风险贡献、维护成本与再平衡摘要，而不直接改写持久化状态。组合列表契约同时负责仪表板所需的来源复核摘要与新版本提示，列表热路径不得物化完整详情或要求前端逐条详情补水。
+- `/compositions`、`/compositions/{id}`、`/compositions/preview` 与 `/compositions/{id}` 的 patch 面共同构成一期组合工作台和组合详情页契约。预演接口负责返回收益流预览、相关性矩阵、风险贡献、维护成本与再平衡摘要，而不直接改写持久化状态。组合列表契约同时负责仪表板所需的证据质量、当前配置版本、周期完整度与新版本提示，列表热路径不得物化完整详情或要求前端逐条详情补水。
 - `/compositions/{id}/backtest-runs/*` 是组合层回测契约，服务“测稳定性”而不是策略参数搜索。结果分为诊断、订单和证据三组：诊断说明稳定性、跨周期指标、归因、动态风险暴露、压力窗口和底层标的集中度；订单暴露完整收益窗口的事件聚合、全量流水、过滤、CSV 导出与内部对冲下钻，并且策略腿订单必须显示穿透后的底层成交标的而不是 `STRATEGY` 汇总占位；证据保留冻结配置、数据足迹、代理映射、算法 spec 和审计轨迹。
-- `/compositions/{id}/allocation-jobs/*` 是组合层资产配置契约，服务“定义分配政策并选择可晋升方案”。配置以意图导航、风险边界、换手约束、资产微调和相关性矩阵为主；结果保留当前组合候选、参考组合、有效前沿、候选权重、风险贡献、ENB、扣费后夏普、约束违反和迁移成本拆解。`current` candidate 是优化结果页当前组合指标的事实来源，前端不得用静态 Current / Benchmark 指标替代运行时任务返回值。
+- `/compositions/{id}/allocation-jobs/*` 是组合层资产配置契约，服务“定义分配政策并选择可晋升方案”。配置以意图导航、风险边界、换手约束、资产微调和相关性矩阵为主；结果保留当前组合候选、参考组合、有效前沿、候选权重、风险贡献、ENB、扣费后夏普、约束违反和迁移成本拆解。`current` candidate 是优化结果页当前组合指标的事实来源，前端不得用静态 Current / Benchmark 指标替代运行时任务返回值。候选的 `allowed_actions` 必须与 `promotion_readiness.status` 对齐：只有 readiness 为 `ready` 的候选才能暴露 `promote_candidate`，证据 C 或约束阻断只能在结果页显示为禁用门禁，后端提交口仍保留防御性拒绝。
+- Sleeve OS v2 全局索引和闭环契约包括：`GET /compositions/backtest-runs`、`GET /compositions/allocation-jobs`、`GET /compositions/{id}/versions`、`GET /compositions/{id}/versions/{versionId}`、`POST /compositions/{id}/allocation-jobs/{jobId}/candidates/{candidateId}/promote-draft`、`POST /compositions/{id}/decision-packets`、`GET /compositions/{id}/decision-packets/{packetId}`、`GET /compositions/{id}/decision-packets/{packetId}/export?format=markdown|html`。这些接口保持 additive，不破坏 v1 Split 页面；version、promotion、decision packet 的读写都要走后端 contract，不允许前端凭静态样例生成“已通过”或“已晋升”状态。
 - `/optimization-jobs` 返回按 `updated_at DESC` 排序的优化任务列表，并投影任务状态、策略关联、预算进度、`progress_pct`、`current_stage`、`latest_update`、`estimated_remaining_minutes`、`estimated_completed_at` 以及带类型的 `best_metrics_summary`，供优化实验室索引页与工作台混合时间线使用。
 - `POST /strategies/{strategy_id}/optimization-jobs` 现在接收 `base_parameter_version_id`、`source_run_id`、`entry_point`、`validation_mode`、`budget_combinations` 与 `search_space`；只有参数配置页显式发起优化时才会创建任务。
 - `POST /optimization-jobs/{id}/resume` 接收 `idempotency_key`，并且只会从 `next_trial_index` 继续 `INTERRUPTED` 任务；对同一 key 的重复调用必须保持幂等。
 - `/optimization-jobs/*` 覆盖任务详情、候选创建、候选删除、恢复执行以及带说明的提升。
+- `PATCH /optimization-jobs/{id}` 只用于结果页约束重新过滤预览，不改写已完成任务的永久快照。需要持久化过滤结果时，必须调用 `POST /optimization-jobs/{id}/filtered-results` 创建新的 `COMPLETED` 优化任务，并保留 `source_optimization_job_id` 指向原任务。
 - `GET /optimization-jobs/{id}` 返回已补水的 `request`、`summary` 与 `result` 三段。`summary.best_metrics_summary` 不再是松散的指标袋，而是持久化的 trial-summary 结构：`trial_index`、`label`、`status`、`parameter_snapshot`、`metrics`、`score`、`error_message`、`started_at`、`completed_at`。`QUEUED`、`RUNNING` 与 `INTERRUPTED` 响应刻意保持轻量：只暴露进度、ETA、当前最佳指标与恢复元数据，而不物化完整候选网格。终态才会根据持久化的 trial 记录物化完整结果中心，其中包含验证窗口的 `annualized_return`，但只会为排名 top-K 的候选加载完整曲线。
 - 体量较大的优化任务仍然保留了一套 Windows 安全的 `spawn` 进程分发实现，并隐藏在服务边界之后。它不是 API 层用户可配置的能力，会根据运行时内存压力自动下调 worker 目标，也能在不改变持久化任务契约的前提下回退到单 worker 模式；不过当前 synthetic evaluator 默认关闭这条路径，直到出现真正需要它的重型 evaluator。
 - 当前优化 evaluator 路径刻意脱离 `_prepare_backtest_run_context()`。活跃的 `_service_rebuilt.py` evaluator 是 synthetic 且以摘要驱动的，因此优化执行期间不会预加载准备好的 snapshot bars。
@@ -193,18 +204,22 @@
 - `web/src/pages/optimization-lab-page.tsx` 把优化详情视为三态页面：进度态（`QUEUED/RUNNING`）、中断态（`INTERRUPTED`）与终态（完整结果中心）。
 - 优化结果页会用单飞轮询循环读取运行中任务详情，并采用自适应节奏：前台标签页更快，后台标签页自动降频，临时请求错误则走有界退避。
 
-正式的前端路由表固定为：
+正式的前端路由表固定为。Sleeve OS v2 全局路由已接入同一套 shell/runtime，不新建第二套路由层：
 
 - `#/workspace`
 - `#/compositions`
 - `#/legs`
 - `#/compositions/workbench`
+- `#/compositions/list`
+- `#/compositions/backtest-runs`
+- `#/compositions/lab`
 - `#/compositions/:id`
 - `#/compositions/:id/backtest-runs/new`
 - `#/compositions/:id/backtest-runs/:runId`
 - `#/compositions/:id/allocation-lab`
 - `#/compositions/:id/allocation-jobs/:jobId`
 - `#/strategies`
+- `#/creation/asset-allocation/new`
 - `#/creation/sessions/:id`
 - `#/strategies/:id`
 - `#/strategies/:id/backtest-runs/new`
@@ -221,8 +236,10 @@
 - `#/compositions` 是组合仪表板，不复用旧 workspace 页面换皮。
 - `#/legs` 是资产库，负责管理策略腿投影、资产腿定义与现金腿定义。
 - `#/compositions/workbench` 必须先于 `#/compositions/:id` 被 route parser 匹配，避免工作台被详情路由误吞。
+- Sleeve OS v2 的 `#/compositions/list`、`#/compositions/backtest-runs`、`#/compositions/lab` 也必须先于 `#/compositions/:id` 匹配；这些是组合域全局索引页，不是组合 id。
 - `#/compositions/workbench` 与 `#/compositions/:id` 都通过现有 shell/runtime 边界接入，不允许另起第二套路由层。
 - Sleeve OS v1 只实现 Split 方案：组合回测配置页进入组合回测结果页，组合优化配置页进入组合优化结果页；历史 Stepper 设计稿不进入正式路由。
+- Sleeve OS v2 在 v1 Split-only 之上增加全局组合列表、组合回测列表和组合实验室列表；三页共用批准 UI artifact 的紧凑 hero、四张指标卡、dense table 和 330px decision rail 节奏。全局实验室只列配置实验作业和晋升审查队列，有效前沿仍属于单个 allocation job 结果页；它的组合、优化方法、候选状态和晋升门禁筛选必须是 URL/query-backed 真控件，作业表固定为任务、优化方法、预期绩效、晋升门禁、迁移成本和操作六列，晋升审查 rail 必须本地化运行态标签并在 330px 窄栏内无横向溢出。
 - 组合回测结果页使用 Diagnosis / Orders / Evidence 三个 tab。诊断页回答结果是否稳健，订单页回答完整历史窗口内如何调仓与省下多少外部成交，证据页回答数据、代理和算法是否可信；真实 API 返回空数组时页面必须保持空态，不能用内置示例订单补位。
 - 组合优化页面不复用策略优化语义。配置页以“波动最小 / 风险平价 / 收益最大 / 专家模式”意图导航为入口，结果页用有效前沿和候选卡说明哪个方案最符合目标。
 - 左侧导航当前分为 `组合` 与 `策略` 两组；组合组包含 `组合仪表板` 与 `资产库`，策略组保留既有主链路，并把 `workspace` 对外标签统一为 `策略工作台`。
@@ -242,7 +259,9 @@
 
 - `web/src/types.ts` 现在把快照建模成两个显式数组：`dataset_snapshots[]` 与 `universe_snapshots[]`。
 - `web/src/pages/snapshots-page.tsx` 只消费正式 overview 契约；股票/指数 tab 必须保留 Compose First 批准稿的全局视角、三位一体工作站、原始快照清单、数据诊断报告与就绪标准结构，同时只从 `dataset_snapshots[]` 与 `universe_snapshots[]` 映射真实 runtime 行。
+- `web/src/pages/asset-allocation-config-page.tsx` 是策略级资产配置创建页，不属于组合层 Allocation Lab。页面单屏完成配置，不使用创建会话步骤条；保存后仍物化为普通策略记录，并沿用 `strategy-detail`、`backtest submit` 与 `optimization` 页面。
 - `web/src/pages/strategy-detail-page.tsx` 与回测预览/详情页面不能再把 `dynamic_investment_logic` 当成“天然不支持”的文案警告；真实 warning 只允许来自估值时间序列缺口或过期 observation 的逐笔回退。
+- `#/runs/:id` 的配置 tab 负责把参数快照、数据快照摘要和运行态字段本地化；`allocation_assets` 等结构化字段要渲染为中文摘要，不能把 raw key 或 JSON 作为主要说明暴露给操作者。权重归一属于内部执行口径，不作为警告条暴露；缺失行情、可用标的和覆盖范围由数据快照摘要表达。
 - `#/snapshots` 的股票/指数 tab 不能使用批准稿静态行作为生产兜底；如果 runtime 表为空，页面显示 0 或待补，不显示 `99.8%`、`Universe-US-Equity-*` 这类设计稿数字。
 - `#/snapshots?tab=bond` 同样保留批准稿的中文信息架构，但所有来源、可创建资产腿、审计和 raw registry 内容都必须来自 `bond_fixed_income` runtime 分段；后端英文运行标签进入 UI 前需要本地化，不能用 mock 债券、deterministic 曲线或 phase1 proxy 填充。
 - 当刷新任务处于 `RUNNING` 时，只要部分 `refresh_stats` 已经被持久化，快照页就可以提前显示增量“新增...”摘要；如果还没有部分统计，则回退为简单的“最近刷新 ...”时间戳。
@@ -290,7 +309,7 @@
 - When `matching_combination_source` is `all_trials`, the Optimization Results page must use the full `detail.matching_combinations` collection as the source for counts, filtering, sorting, and the “查看全部组合” modal. The compact “参数候选盘” and “快速切换候选版本” surfaces intentionally show only the top 3 ranked matching combinations plus the “当前组合” baseline, so a completed job can preserve the full eligible set without flooding the primary decision surface.
 - The persisted detail payload is the stable source for all-trials matching rows. A filtered candidate subset may be useful for saved-candidate fallback paths, but it must not hide eligible completed combinations from the all-combinations dialog.
 - The “当前组合” baseline should be fetched from `request.source_run_id` first; if that run is missing, the UI falls back to `strategy.latest_completed_run_summary.run_id` and then `strategy.latest_run_id` so historical optimization tasks still render a comparison baseline.
-- Constraint refiltering must wait for `updateOptimizationJobConstraints` to resolve before re-ranking or replacing candidate rows. Only fall back to a local constraint application when saving constraints fails.
+- Constraint refiltering must wait for `updateOptimizationJobConstraints` to resolve before re-ranking or replacing candidate rows. That API is preview-only; after it resolves the page may expose “保存新结果”, and only `saveOptimizationFilteredResult` may persist the filtered result as a new optimization job. If previewing fails, the UI may apply the filter locally for continuity but must not expose a save-new-result action.
 - Candidate display should prefer version-style candidate labels over raw `Trial` ids when rendering full matching combinations. Trial-like labels such as `Trial 2402` should fall back to `候选 N` by rank.
 - Mixed English summary tokens such as `daily`, `weekly`, `monthly`, `sharpe`, `oos`, and `max drawdown` should be localized before they reach shelf or row copy.
 - Regression coverage for these rules lives in `web/src/optimization.module.test.tsx`, including tests for full matching combinations, stable refilter behavior, Chinese candidate labels, and localized shelf copy.
@@ -325,6 +344,8 @@ Phase 1.2 extends the Phase 1.1 persistence model without adding a second compos
 - Return, correlation, and risk previews prefer aligned leg return streams from strategy backtest `chart_series`, bond/asset price history, and cash-rule streams. Saved composition detail and preview responses default to the latest 120 monthly labels for metrics and `returns_preview`/`benchmark_series`/`spread_series`; the detail KPI contract derives `beta_exposure` from realized composition-versus-benchmark return covariance whenever both streams have variance. If a cash or asset leg has no aligned return stream, the compute path must still include that leg with profile-based fallback returns, mark the gap in `return_quality_summary.fallback_used`, and let weight/rebalance edits change KPIs instead of silently reducing the portfolio to the remaining real stream.
 - Rebalance frequency is treated as simulated events, not a label. The payload exposes event date/index, turnover, cost drag, cash-buffer impact, and before/after weights while keeping preview zero-write.
 - Saved composition details still read frozen evidence from `composition_source_freezes`. `source_integrity` and extended `source_evidence` compare frozen hashes/refs against current refs and surface drift or invalidation as advisory evidence only; they do not mutate saved legs or frozen snapshots.
+- Composition trust is exposed to operators through `primary_diagnosis` and `diagnoses`, whose user-facing label is always `状态标签` in the form `稳健/待校准/失效：问题类型`. Raw facts such as `return_quality_summary.fallback_used`, `missing_points`, and `source_integrity` remain audit/debug inputs, not primary UI headings. `审计门禁硬阻断` is no longer a standalone diagnosis; failed diagnoses carry the system disposition `存在未关闭的失效问题，晋升门禁已暂停。`.
+- Planned proxy coverage is resolved before creating pending work. System infrastructure proxies are read from dataset snapshot/proxy registry metadata, including `QQQ -> NASDAQ100` and `BOXX -> BIL`, and become `稳健：系统代理覆盖`. User confirmations are persisted in `composition_proxy_confirmations` by composition, leg, horizon, coverage window, and proxy signature; the same confirmed proxy signature becomes `稳健：人工确认代理覆盖` and must not re-enter the pending queue. Unregistered and unconfirmed proxies remain `待校准：代理覆盖待确认`; empty return streams, discontinuities, and abnormal fallback estimates cannot be closed by confirmation.
 - `composition_audit_events` is the append-only backend audit table for composition creation, structural writes, source freeze, rebalance checks, status changes, and snapshot-refresh impact checks. `audit_trail` in detail responses is read from this persisted stream, with a legacy projection fallback only for older rows that predate the table.
 - Bond risk contribution fields reserve `duration_contribution_years` and `convexity_contribution` so fixed-income legs can feed risk-budget prechecks without changing the Phase 1.1 leg storage model.
 - `GET /data-snapshots/overview` remains the only snapshot overview endpoint. Its `bond_fixed_income` segment adds `quality_audit`, `repair_rules`, `daily_accrual_status`, and `risk_budget_inputs`; refresh/repair actions still use `POST /admin/snapshot-refresh-jobs` with target `bond` and mode `repair` or `full`.

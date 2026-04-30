@@ -77,6 +77,8 @@ OPTIMIZATION_CONSTRAINT_PRESET_LABELS: dict[str, str] = {
     "offensive": "进攻型",
 }
 OPTIMIZATION_DEFAULT_OBJECTIVE = "return_sharpe"
+OPTIMIZATION_WEIGHT_SUM_CONSTRAINT_GROUP = "allocation_weight_sum_100"
+OPTIMIZATION_WEIGHT_SUM_TARGET = 100.0
 COMPOSITION_RECENT_WINDOW_MONTHS = 120
 OPTIMIZATION_OBJECTIVE_ALIASES: dict[str, str] = {
     "sharpe": "return_sharpe",
@@ -775,6 +777,20 @@ def _stringify_tag_value(value: Any) -> str:
     if isinstance(value, float):
         return str(int(value)) if value.is_integer() else str(value)
     return str(value).strip()
+
+
+def _is_optimization_allocation_weight_key(key: Any) -> bool:
+    text = str(key or "").strip()
+    return text.startswith("allocation_weight__") and text.endswith("_pct")
+
+
+def _optimization_default_parameter_constraint_metadata(key: Any) -> dict[str, Any]:
+    if not _is_optimization_allocation_weight_key(key):
+        return {}
+    return {
+        "constraint_group": OPTIMIZATION_WEIGHT_SUM_CONSTRAINT_GROUP,
+        "constraint_target": OPTIMIZATION_WEIGHT_SUM_TARGET,
+    }
 
 
 def _normalize_optimization_objective(objective: Any) -> str:
@@ -3001,20 +3017,26 @@ class BacktestPlatformService:
                     if isinstance(values, list)
                     else None
                 )
-                normalized_entries.append(
-                    {
-                        "key": key,
-                        "label": str(entry.get("label") or key),
-                        "mode": normalized_mode,
-                        "current": entry.get("current"),
-                        "start": entry.get("start", entry.get("value")),
-                        "end": entry.get("end", entry.get("value")),
-                        "step": entry.get("step"),
-                        "value": entry.get("value", entry.get("current")),
-                        "values": normalized_values,
-                        "tag": entry.get("tag"),
-                    }
-                )
+                constraint_metadata = _optimization_default_parameter_constraint_metadata(key)
+                constraint_group = entry.get("constraint_group") or constraint_metadata.get("constraint_group")
+                constraint_target = entry.get("constraint_target", constraint_metadata.get("constraint_target"))
+                normalized_entry = {
+                    "key": key,
+                    "label": str(entry.get("label") or key),
+                    "mode": normalized_mode,
+                    "current": entry.get("current"),
+                    "start": entry.get("start", entry.get("value")),
+                    "end": entry.get("end", entry.get("value")),
+                    "step": entry.get("step"),
+                    "value": entry.get("value", entry.get("current")),
+                    "values": normalized_values,
+                    "tag": entry.get("tag"),
+                }
+                if constraint_group:
+                    normalized_entry["constraint_group"] = constraint_group
+                if constraint_target is not None:
+                    normalized_entry["constraint_target"] = constraint_target
+                normalized_entries.append(normalized_entry)
             if normalized_entries:
                 return normalized_entries
 
@@ -3064,6 +3086,7 @@ class BacktestPlatformService:
                     "step": step,
                     "value": value,
                     "tag": "????" if index == 0 else "????",
+                    **_optimization_default_parameter_constraint_metadata(key),
                 }
             )
 
@@ -3082,6 +3105,7 @@ class BacktestPlatformService:
                         "step": 1,
                         "value": value,
                         "tag": "????桀????????",
+                        **_optimization_default_parameter_constraint_metadata(key),
                     }
                 )
 
@@ -3101,6 +3125,7 @@ class BacktestPlatformService:
                     "step": 1,
                     "value": value,
                     "tag": "????桀????????",
+                    **_optimization_default_parameter_constraint_metadata(key),
                 }
             )
             if len(search_space) >= 4:
@@ -7284,21 +7309,71 @@ class BacktestPlatformService:
         }
 
     def _composition_source_integrity_has_new_strategy_version(self, item: Mapping[str, Any]) -> bool:
-        source_ref_id = str(item.get("source_ref_id") or "")
+        source_ref_id = str(item.get("source_ref_id") or "").strip()
         if _parse_strategy_leg_inventory_id(source_ref_id) is None:
             return False
-        drift_status = str(item.get("drift_status") or "").lower()
-        signature_status = str(item.get("signature_status") or "").lower()
+        current_ref_id = str(item.get("current_ref_id") or "").strip()
         alerts = [str(alert).lower() for alert in item.get("alerts") or []]
         return (
-            drift_status in {"drifted", "version_drift", "stale"}
-            or signature_status == "stale"
-            or any("newer" in alert or "新版本" in alert for alert in alerts)
+            (bool(current_ref_id) and current_ref_id != source_ref_id)
+            or any("newer parameter version" in alert or "newer version" in alert or "新版本" in alert for alert in alerts)
         )
+
+    @staticmethod
+    def _composition_backtest_period_from_payload(payload: Mapping[str, Any]) -> str | None:
+        request = _as_mapping(payload.get("request"))
+        summary = _as_mapping(payload.get("summary"))
+        for raw_value in (
+            request.get("period"),
+            request.get("time_period_label"),
+            payload.get("time_period_label"),
+        ):
+            normalized = str(raw_value or "").strip().upper().replace(" ", "")
+            if normalized in {"10Y", "20Y", "30Y"}:
+                return normalized
+        horizon_years = _as_float(request.get("horizon_years"), 0.0)
+        if horizon_years <= 0:
+            horizon_years = _as_float(summary.get("horizon_years"), 0.0)
+        if horizon_years >= 29.5:
+            return "30Y"
+        if horizon_years >= 19.5:
+            return "20Y"
+        if horizon_years >= 9.5:
+            return "10Y"
+        return None
+
+    def _composition_backtest_period_coverage(self, run_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        coverage = {
+            period: {
+                "period": period,
+                "status": "missing",
+                "label": f"{period} 待补齐",
+            }
+            for period in ("10Y", "20Y", "30Y")
+        }
+        for row in run_rows:
+            payload = loads(row.get("result_json"), {})
+            if not isinstance(payload, Mapping):
+                payload = {}
+            period = self._composition_backtest_period_from_payload(payload)
+            if period not in coverage or coverage[period].get("status") == "covered":
+                continue
+            status = str(row.get("status") or payload.get("status") or "").upper()
+            if not status.startswith("COMPLETED"):
+                continue
+            coverage[period] = {
+                "period": period,
+                "status": "covered",
+                "run_id": str(row.get("id") or payload.get("run_id") or payload.get("id") or ""),
+                "label": f"{period} 已覆盖",
+                "detail": "完成（需复核）" if status.endswith("WARNINGS") else "完成",
+                "completed_at": row.get("completed_at") or payload.get("completed_at") or row.get("created_at"),
+            }
+        return [coverage[period] for period in ("10Y", "20Y", "30Y")]
 
     def preview_composition(self, request: Any) -> dict[str, Any]:
         payload = _as_mapping(request)
-        return self._build_composition_preview_payload(payload)
+        return self._composition_attach_diagnoses(self._build_composition_preview_payload(payload))
 
     def _composition_leg_rows_as_inputs(self, rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         return [
@@ -7866,6 +7941,10 @@ class BacktestPlatformService:
                 )
             )
             detail_payload["audit_trail"] = existing_audit_events + audit_events
+            detail_payload = self._composition_attach_diagnoses(
+                detail_payload,
+                composition_id=composition_id,
+            )
             conn.execute(
                 """
                 UPDATE compositions
@@ -7968,6 +8047,14 @@ class BacktestPlatformService:
                 checked_at=str(row.get("updated_at") or ""),
                 current_inventory_by_ref=inventory_by_ref,
             )
+            analysis_with_integrity = dict(analysis)
+            analysis_with_integrity["id"] = composition_id
+            analysis_with_integrity["source_integrity"] = source_integrity
+            diagnoses = self._composition_status_diagnoses(
+                analysis_with_integrity,
+                composition_id=composition_id,
+            )
+            primary_diagnosis = diagnoses[0] if diagnoses else None
             has_new_version = any(
                 self._composition_source_integrity_has_new_strategy_version(item)
                 for item in source_integrity
@@ -7982,11 +8069,67 @@ class BacktestPlatformService:
                     ),
                     0.0,
                 )
+            run_rows = self.storage.fetch_all(
+                """
+                SELECT id, status, result_json, created_at, completed_at
+                FROM composition_backtest_runs
+                WHERE composition_id = ?
+                  AND deleted_at IS NULL
+                ORDER BY created_at DESC, id DESC
+                """,
+                (composition_id,),
+            )
+            latest_run_row = run_rows[0] if run_rows else None
+            latest_run_payload = (
+                loads((latest_run_row or {}).get("result_json"), {})
+                if latest_run_row
+                else {}
+            )
+            backtest_period_coverage = self._composition_backtest_period_coverage(run_rows)
+            latest_job_row = self.storage.fetch_one(
+                """
+                SELECT id, status, result_json, created_at
+                FROM composition_allocation_jobs
+                WHERE composition_id = ?
+                  AND deleted_at IS NULL
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (composition_id,),
+            )
+            latest_job_payload = (
+                loads((latest_job_row or {}).get("result_json"), {})
+                if latest_job_row
+                else {}
+            )
+            draft_count_row = self.storage.fetch_one(
+                """
+                SELECT COUNT(*) AS count
+                FROM composition_versions
+                WHERE composition_id = ?
+                  AND status = 'DRAFT'
+                  AND deleted_at IS NULL
+                """,
+                (composition_id,),
+            )
+            evidence_grade = self._composition_evidence_grade_from_detail(analysis_with_integrity)
+            pending_decision_count = _as_int((draft_count_row or {}).get("count"), 0)
+            if primary_diagnosis and primary_diagnosis.get("status") in {"待校准", "失效"}:
+                pending_decision_count += 1
+            latest_version_number = self._latest_composition_version_number(composition_id)
+            version_number = (
+                latest_version_number
+                or _as_int(row.get("current_freeze_generation"), 0)
+                or _as_int(row.get("revision"), 1)
+            )
             items.append(
                 {
                     "id": composition_id,
                     "name": str(row.get("name") or ""),
                     "status": str(row.get("status") or "DRAFT"),
+                    "version_label": f"v{version_number}",
+                    "version_status": "ACTIVE",
+                    "evidence_grade": evidence_grade,
                     "composition_score": round(_as_float(summary.get("composition_score"), 0.0), 4),
                     "leg_count": _as_int(summary.get("leg_count"), 0),
                     "rebalance_frequency": summary.get("rebalance_frequency") or row.get("rebalance_frequency"),
@@ -8001,6 +8144,23 @@ class BacktestPlatformService:
                     "allowed_actions": list(summary.get("allowed_actions") or ["open_composition_workbench"]),
                     "has_new_version": has_new_version,
                     "source_integrity": source_integrity,
+                    "latest_backtest_summary": {
+                        "run_id": (latest_run_row or {}).get("id"),
+                        "status": (latest_run_row or {}).get("status"),
+                        "created_at": (latest_run_row or {}).get("created_at"),
+                        "summary": _as_mapping(latest_run_payload.get("summary")) if isinstance(latest_run_payload, Mapping) else {},
+                    },
+                    "backtest_period_coverage": backtest_period_coverage,
+                    "lab_summary": {
+                        "job_id": (latest_job_row or {}).get("id"),
+                        "status": (latest_job_row or {}).get("status"),
+                        "created_at": (latest_job_row or {}).get("created_at"),
+                        "summary": _as_mapping(latest_job_payload.get("summary")) if isinstance(latest_job_payload, Mapping) else {},
+                    },
+                    "pending_decision_count": pending_decision_count,
+                    "promotion_readiness": self._composition_promotion_readiness_from_detail(analysis_with_integrity),
+                    "primary_diagnosis": primary_diagnosis,
+                    "diagnoses": diagnoses,
                 }
             )
         return items
@@ -8008,6 +8168,13 @@ class BacktestPlatformService:
     def get_composition_detail(self, composition_id: str) -> dict[str, Any]:
         row = self._load_composition_record(composition_id)
         detail_payload = loads(row.get("analysis_json"), {})
+        latest_version_number = self._latest_composition_version_number(composition_id)
+        version_number = (
+            latest_version_number
+            or _as_int(row.get("current_freeze_generation"), 0)
+            or _as_int(row.get("revision"), 1)
+        )
+        current_version_label = f"当前配置版本 v{version_number}"
         freeze_rows = self._load_composition_freeze_rows(composition_id)
         source_evidence = self._composition_source_evidence_from_freeze_rows(freeze_rows)
         kpi_keys = {
@@ -8173,7 +8340,166 @@ class BacktestPlatformService:
                 hero_summary["status_label"] = self._composition_status_label(current_status)
                 hero_summary["updated_at"] = detail_payload["updated_at"]
                 detail_payload["hero_summary"] = hero_summary
+        detail_payload["current_composition_version_number"] = version_number
+        detail_payload["current_composition_version_label"] = current_version_label
+        hero_summary = dict(detail_payload.get("hero_summary") or {})
+        if hero_summary:
+            hero_summary["current_composition_version_label"] = current_version_label
+            detail_payload["hero_summary"] = hero_summary
+        detail_payload = self._composition_attach_diagnoses(
+            detail_payload,
+            composition_id=composition_id,
+        )
         return detail_payload
+
+    def refresh_composition_diagnostics(self, composition_id: str) -> dict[str, Any]:
+        row = self._load_composition_record(composition_id)
+        detail_payload = self.get_composition_detail(composition_id)
+        detail_payload = self._composition_attach_diagnoses(
+            detail_payload,
+            composition_id=composition_id,
+        )
+        updated_at = iso_now()
+        revision = _as_int(row.get("revision"), 1) + 1
+        detail_payload["updated_at"] = updated_at
+        detail_payload["latest_activity_label"] = self._latest_activity_label(updated_at)
+        hero_summary = dict(detail_payload.get("hero_summary") or {})
+        if hero_summary:
+            hero_summary["updated_at"] = updated_at
+            detail_payload["hero_summary"] = hero_summary
+        with self.storage.connection() as conn:
+            audit_event = self._insert_composition_audit_event(
+                conn,
+                composition_id=composition_id,
+                revision=revision,
+                action="diagnostics_refresh",
+                occurred_at=updated_at,
+                summary="Composition status label diagnostics were recalculated.",
+            )
+            detail_payload["audit_trail"] = list(detail_payload.get("audit_trail") or []) + [audit_event]
+            conn.execute(
+                """
+                UPDATE compositions
+                SET analysis_json = ?,
+                    revision = ?,
+                    updated_at = ?
+                WHERE id = ?
+                  AND deleted_at IS NULL
+                """,
+                (dumps(detail_payload), revision, updated_at, composition_id),
+            )
+        return detail_payload
+
+    def confirm_composition_proxy(self, composition_id: str, request: Any) -> dict[str, Any]:
+        self._load_composition_record(composition_id)
+        payload = _as_mapping(request)
+        detail = self.get_composition_detail(composition_id)
+        requested_signature = str(payload.get("proxy_signature") or "").strip()
+        selected_context: dict[str, Any] | None = None
+        for diagnosis in detail.get("diagnoses") or []:
+            if not isinstance(diagnosis, Mapping):
+                continue
+            for context in diagnosis.get("proxy_context") or []:
+                if not isinstance(context, Mapping):
+                    continue
+                signature = str(context.get("proxy_signature") or "").strip()
+                if requested_signature and signature != requested_signature:
+                    continue
+                selected_context = dict(context)
+                break
+            if selected_context:
+                break
+        if selected_context is None:
+            selected_context = {
+                "leg_id": payload.get("leg_id"),
+                "target_symbol": payload.get("target_symbol"),
+                "proxy_symbol": payload.get("proxy_symbol"),
+                "horizon_label": payload.get("horizon_label"),
+                "coverage_window": _as_mapping(payload.get("coverage_window")),
+            }
+            selected_context["proxy_signature"] = requested_signature or self._composition_proxy_signature_from_parts(
+                composition_id=composition_id,
+                leg_id=str(selected_context.get("leg_id") or ""),
+                target_symbol=str(selected_context.get("target_symbol") or ""),
+                proxy_symbol=str(selected_context.get("proxy_symbol") or "user_proxy"),
+                horizon_label=str(selected_context.get("horizon_label") or ""),
+                coverage_window=_as_mapping(selected_context.get("coverage_window")),
+            )
+        signature = str(selected_context.get("proxy_signature") or "").strip()
+        if not signature:
+            raise ValueError("Proxy signature is required for confirmation.")
+        now = iso_now()
+        confirmation_id = self._composition_artifact_id("proxy_confirm", composition_id, signature)
+        reason = str(payload.get("reason") or selected_context.get("explanation") or "用户确认当前代理覆盖方案。").strip()
+        confirmed_by = str(payload.get("confirmed_by") or "operator").strip() or "operator"
+        with self.storage.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO composition_proxy_confirmations (
+                    id,
+                    composition_id,
+                    leg_id,
+                    target_symbol,
+                    proxy_symbol,
+                    horizon_label,
+                    proxy_signature,
+                    confirmation_scope_json,
+                    reason,
+                    confirmed_by,
+                    confirmed_at,
+                    status,
+                    created_at,
+                    updated_at,
+                    deleted_at,
+                    deleted_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, NULL, NULL)
+                ON CONFLICT(id) DO UPDATE SET
+                    leg_id = excluded.leg_id,
+                    target_symbol = excluded.target_symbol,
+                    proxy_symbol = excluded.proxy_symbol,
+                    horizon_label = excluded.horizon_label,
+                    confirmation_scope_json = excluded.confirmation_scope_json,
+                    reason = excluded.reason,
+                    confirmed_by = excluded.confirmed_by,
+                    confirmed_at = excluded.confirmed_at,
+                    status = 'ACTIVE',
+                    updated_at = excluded.updated_at,
+                    deleted_at = NULL,
+                    deleted_reason = NULL
+                """,
+                (
+                    confirmation_id,
+                    composition_id,
+                    selected_context.get("leg_id"),
+                    selected_context.get("target_symbol"),
+                    selected_context.get("proxy_symbol"),
+                    selected_context.get("horizon_label"),
+                    signature,
+                    dumps(
+                        {
+                            "coverage_window": _as_mapping(selected_context.get("coverage_window")),
+                            "proxy_source": selected_context.get("proxy_source") or "user",
+                        }
+                    ),
+                    reason,
+                    confirmed_by,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            self._insert_composition_audit_event(
+                conn,
+                composition_id=composition_id,
+                revision=_as_int(detail.get("current_composition_version_number"), 1),
+                action="proxy_confirmation",
+                occurred_at=now,
+                actor=confirmed_by,
+                summary="User confirmed composition proxy coverage.",
+                source_ref_id=str(selected_context.get("leg_id") or "") or None,
+                reason=reason,
+            )
+        return self.refresh_composition_diagnostics(composition_id)
 
     def update_composition(self, composition_id: str, request: Any) -> dict[str, Any]:
         row = self._load_composition_record(composition_id)
@@ -8221,6 +8547,10 @@ class BacktestPlatformService:
                     hash_after=latest_hash,
                 )
                 detail_payload["audit_trail"] = list(detail_payload.get("audit_trail") or []) + [audit_event]
+                detail_payload = self._composition_attach_diagnoses(
+                    detail_payload,
+                    composition_id=composition_id,
+                )
                 summary_payload = self._build_composition_summary_payload(detail_payload)
                 conn.execute(
                     """
@@ -8439,6 +8769,8 @@ class BacktestPlatformService:
             "source_evidence",
             "source_integrity",
             "audit_trail",
+            "primary_diagnosis",
+            "diagnoses",
             "composition_score",
             "latest_activity_label",
         )
@@ -8515,10 +8847,815 @@ class BacktestPlatformService:
             "Derived from full-window composition rebalance events and source return streams; these are model instructions, not broker fills."
         )
 
+    @staticmethod
+    def _composition_proxy_token(value: Any) -> str:
+        return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+
+    @classmethod
+    def _composition_proxy_signature_from_parts(
+        cls,
+        *,
+        composition_id: str | None = None,
+        leg_id: str | None = None,
+        target_symbol: str | None = None,
+        proxy_symbol: str | None = None,
+        horizon_label: str | None = None,
+        coverage_window: Mapping[str, Any] | None = None,
+    ) -> str:
+        payload = {
+            "composition_id": str(composition_id or ""),
+            "leg_id": str(leg_id or ""),
+            "target_symbol": cls._composition_proxy_token(target_symbol),
+            "proxy_symbol": cls._composition_proxy_token(proxy_symbol),
+            "horizon_label": str(horizon_label or ""),
+            "coverage_window": dict(coverage_window or {}),
+        }
+        digest = hashlib.sha1(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+        return f"proxy::{payload['target_symbol'] or 'UNKNOWN'}::{payload['proxy_symbol'] or 'UNKNOWN'}::{digest}"
+
+    def _composition_system_proxy_registry(self) -> list[dict[str, Any]]:
+        registry = [
+            {
+                "target_symbol": "QQQ",
+                "proxy_symbol": "NASDAQ100",
+                "horizon_label": "historical_monthly",
+                "aliases": ["QQQ", "NASDAQ100", "NASDAQ-100", "NASDAQ 100", "NDX", "nasdaq100"],
+                "explanation": "平台基建已登记用纳斯达克 100 指数历史补足 QQQ 早期区间。",
+                "source": "system_registry",
+            },
+            {
+                "target_symbol": "BOXX",
+                "proxy_symbol": "BIL",
+                "horizon_label": "historical_monthly",
+                "aliases": ["BOXX", "BIL"],
+                "explanation": "平台基建已登记用 BIL 历史补足 BOXX 早期区间。",
+                "source": "system_registry",
+            },
+        ]
+        repository = getattr(self, "market_data_repository", None)
+        list_snapshots = getattr(repository, "list_dataset_snapshots", None)
+        if callable(list_snapshots):
+            try:
+                for snapshot in list_snapshots():
+                    metadata = _as_mapping(snapshot.get("metadata"))
+                    for proxy_key in metadata.get("proxy_keys") or []:
+                        normalized = self._composition_proxy_token(proxy_key)
+                        if normalized == "NASDAQ100":
+                            registry.append(
+                                {
+                                    "target_symbol": "QQQ",
+                                    "proxy_symbol": "NASDAQ100",
+                                    "horizon_label": "historical_monthly",
+                                    "aliases": ["QQQ", "NASDAQ100", "NASDAQ-100", "NASDAQ 100", "NDX"],
+                                    "explanation": "数据快照已登记 QQQ 与纳斯达克 100 指数代理覆盖关系。",
+                                    "source": str(snapshot.get("id") or "dataset_snapshot"),
+                                }
+                            )
+            except Exception:
+                pass
+        unique: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for item in registry:
+            key = (
+                self._composition_proxy_token(item.get("target_symbol")),
+                self._composition_proxy_token(item.get("proxy_symbol")),
+                str(item.get("horizon_label") or ""),
+            )
+            unique.setdefault(key, item)
+        return list(unique.values())
+
+    def _load_composition_proxy_confirmations(self, composition_id: str | None) -> list[dict[str, Any]]:
+        normalized_id = str(composition_id or "").strip()
+        if not normalized_id:
+            return []
+        rows = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM composition_proxy_confirmations
+            WHERE composition_id = ?
+              AND UPPER(COALESCE(status, 'ACTIVE')) = 'ACTIVE'
+              AND deleted_at IS NULL
+            ORDER BY confirmed_at DESC, id DESC
+            """,
+            (normalized_id,),
+        )
+        decoded: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["confirmation_scope"] = loads(item.get("confirmation_scope_json"), {})
+            decoded.append(item)
+        return decoded
+
+    def _composition_proxy_haystack(self, detail: Mapping[str, Any]) -> str:
+        parts: list[str] = []
+        quality = _as_mapping(detail.get("return_quality_summary"))
+        parts.extend(str(note) for note in quality.get("notes") or [])
+        for leg in detail.get("normalized_legs") or []:
+            if not isinstance(leg, Mapping):
+                continue
+            parts.extend(
+                [
+                    str(leg.get("id") or ""),
+                    str(leg.get("display_name") or ""),
+                    str(leg.get("source_ref_id") or ""),
+                    str(leg.get("source_ref_type") or ""),
+                    json.dumps(leg.get("config") or {}, sort_keys=True, ensure_ascii=False, default=str),
+                ]
+            )
+        for item in detail.get("source_integrity") or []:
+            if not isinstance(item, Mapping):
+                continue
+            parts.extend([str(item.get("display_name") or ""), str(item.get("source_ref_id") or "")])
+            parts.extend(str(alert) for alert in item.get("alerts") or [])
+        return " ".join(parts)
+
+    def _composition_first_proxy_leg(self, detail: Mapping[str, Any]) -> Mapping[str, Any]:
+        for leg in detail.get("normalized_legs") or []:
+            if isinstance(leg, Mapping) and str(leg.get("leg_kind") or "").lower() != "cash":
+                return leg
+        for leg in detail.get("normalized_legs") or []:
+            if isinstance(leg, Mapping):
+                return leg
+        return {}
+
+    def _composition_proxy_contexts(
+        self,
+        detail: Mapping[str, Any],
+        *,
+        composition_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        quality = _as_mapping(detail.get("return_quality_summary"))
+        if not bool(quality.get("fallback_used")):
+            return []
+        horizon_label = (
+            str(quality.get("alignment_window_start") or "")
+            + ":"
+            + str(quality.get("alignment_window_end") or "")
+        ).strip(":") or None
+        coverage_window = {
+            "start": quality.get("alignment_window_start"),
+            "end": quality.get("alignment_window_end"),
+            "aligned_points": _as_int(quality.get("aligned_points"), 0),
+            "missing_points": _as_int(quality.get("missing_points"), 0),
+        }
+        haystack = self._composition_proxy_haystack(detail)
+        haystack_token = self._composition_proxy_token(haystack)
+        contexts: list[dict[str, Any]] = []
+        first_leg = self._composition_first_proxy_leg(detail)
+        first_leg_id = str(first_leg.get("id") or "") or None
+        for relation in self._composition_system_proxy_registry():
+            aliases = [relation.get("target_symbol"), relation.get("proxy_symbol"), *(relation.get("aliases") or [])]
+            alias_tokens = {self._composition_proxy_token(alias) for alias in aliases if str(alias or "").strip()}
+            if not any(alias and alias in haystack_token for alias in alias_tokens):
+                continue
+            target_symbol = str(relation.get("target_symbol") or "").upper()
+            proxy_symbol = str(relation.get("proxy_symbol") or "").upper()
+            signature = self._composition_proxy_signature_from_parts(
+                leg_id=first_leg_id,
+                target_symbol=target_symbol,
+                proxy_symbol=proxy_symbol,
+                horizon_label=relation.get("horizon_label") or horizon_label,
+                coverage_window=coverage_window,
+            )
+            contexts.append(
+                {
+                    "leg_id": first_leg_id,
+                    "target_symbol": target_symbol,
+                    "proxy_symbol": proxy_symbol,
+                    "horizon_label": relation.get("horizon_label") or horizon_label,
+                    "proxy_signature": signature,
+                    "proxy_source": "system",
+                    "coverage_window": coverage_window,
+                    "explanation": relation.get("explanation") or "平台基建已登记该代理关系。",
+                }
+            )
+        confirmations = self._load_composition_proxy_confirmations(composition_id)
+        for row in confirmations:
+            signature = str(row.get("proxy_signature") or "").strip()
+            if not signature:
+                continue
+            contexts.append(
+                {
+                    "leg_id": row.get("leg_id"),
+                    "target_symbol": row.get("target_symbol"),
+                    "proxy_symbol": row.get("proxy_symbol"),
+                    "horizon_label": row.get("horizon_label") or horizon_label,
+                    "proxy_signature": signature,
+                    "proxy_source": "user",
+                    "coverage_window": _as_mapping(row.get("confirmation_scope")).get("coverage_window") or coverage_window,
+                    "explanation": row.get("reason") or "该代理关系已由用户确认，且方案签名未变化。",
+                }
+            )
+        if contexts:
+            unique_contexts: dict[str, dict[str, Any]] = {}
+            for context in contexts:
+                unique_contexts.setdefault(str(context.get("proxy_signature") or ""), context)
+            return list(unique_contexts.values())
+        notes = " ".join(str(item) for item in quality.get("notes") or []).lower()
+        if "proxy" not in notes and "fallback" not in notes and "filled" not in notes and "代理" not in notes:
+            return []
+        target_symbol = str(first_leg.get("display_name") or first_leg.get("source_ref_id") or "未登记来源").strip()
+        signature = self._composition_proxy_signature_from_parts(
+            composition_id=composition_id,
+            leg_id=first_leg_id,
+            target_symbol=target_symbol,
+            proxy_symbol="unregistered_proxy",
+            horizon_label=horizon_label,
+            coverage_window=coverage_window,
+        )
+        return [
+            {
+                "leg_id": first_leg_id,
+                "target_symbol": target_symbol,
+                "proxy_symbol": "未登记代理",
+                "horizon_label": horizon_label,
+                "proxy_signature": signature,
+                "proxy_source": "unconfirmed",
+                "coverage_window": coverage_window,
+                "explanation": "当前使用了代理历史，但没有找到系统登记或本组合确认记录。",
+            }
+        ]
+
+    @staticmethod
+    def _composition_status_action(
+        label: str,
+        action_key: str,
+        *,
+        action_kind: str = "open_new_tab",
+        route: str | None = None,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        return {
+            "label": label,
+            "action_key": action_key,
+            "action_kind": action_kind,
+            "route": route,
+            "enabled": enabled,
+        }
+
+    def _composition_status_diagnosis(
+        self,
+        *,
+        status: str,
+        issue_type: str,
+        diagnosis_type: str,
+        frontend_explanation: str,
+        action: str,
+        resolution_criteria: str,
+        actions: Sequence[Mapping[str, Any]] | None = None,
+        proxy_context: Sequence[Mapping[str, Any]] | None = None,
+        system_disposition: str | None = None,
+        debug_facts: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "status": status,
+            "issue_type": issue_type,
+            "diagnosis_type": diagnosis_type,
+            "diagnosis_label": f"{status}：{issue_type}",
+            "frontend_explanation": frontend_explanation,
+            "action": action,
+            "resolution_criteria": resolution_criteria,
+            "actions": [dict(item) for item in actions or []],
+            "proxy_context": [dict(item) for item in proxy_context or []],
+            "system_disposition": system_disposition,
+            "debug_facts": dict(debug_facts or {}),
+        }
+
+    def _composition_status_diagnoses(
+        self,
+        detail: Mapping[str, Any],
+        *,
+        composition_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        quality = _as_mapping(detail.get("return_quality_summary"))
+        source_integrity = [
+            item
+            for item in detail.get("source_integrity") or []
+            if isinstance(item, Mapping)
+        ]
+        aligned_points = _as_int(quality.get("aligned_points"), 0)
+        missing_points = _as_int(quality.get("missing_points"), 0)
+        fallback_used = bool(quality.get("fallback_used"))
+        quality_status = str(quality.get("status") or "").strip().lower()
+        proxy_contexts = self._composition_proxy_contexts(detail, composition_id=composition_id)
+        resolved_system_proxy = [item for item in proxy_contexts if item.get("proxy_source") == "system"]
+        resolved_user_proxy = [item for item in proxy_contexts if item.get("proxy_source") == "user"]
+        unconfirmed_proxy = [item for item in proxy_contexts if item.get("proxy_source") == "unconfirmed"]
+        debug_facts = {
+            "quality_status": quality_status,
+            "aligned_points": aligned_points,
+            "missing_points": missing_points,
+            "fallback_used": fallback_used,
+            "source_integrity_count": len(source_integrity),
+        }
+
+        diagnoses: list[dict[str, Any]] = []
+        if fallback_used and aligned_points <= 0:
+            diagnoses.append(
+                self._composition_status_diagnosis(
+                    status="失效",
+                    issue_type="底层收益序列真空",
+                    diagnosis_type="return_series_empty",
+                    frontend_explanation="组合成分没有可用历史收益，无法计算相关性和风险贡献。",
+                    action="补策略回测、资产行情或快照，再重算。",
+                    resolution_criteria="至少生成可用月度收益流。",
+                    actions=[
+                        self._composition_status_action("打开策略回测", "open_backtest_config", route="/creation/new"),
+                        self._composition_status_action("刷新信度摘要", "refresh_return_quality", action_kind="execute"),
+                    ],
+                    debug_facts=debug_facts,
+                )
+            )
+        elif fallback_used:
+            if resolved_system_proxy:
+                diagnoses.append(
+                    self._composition_status_diagnosis(
+                        status="稳健",
+                        issue_type="系统代理覆盖",
+                        diagnosis_type="system_proxy_coverage",
+                        frontend_explanation="当前使用的是平台已登记的代理关系，例如用指数历史补足 ETF 早期数据。",
+                        action="查看代理来源和覆盖区间。",
+                        resolution_criteria="系统代理关系有效，不触发待办。",
+                        actions=[self._composition_status_action("查看代理来源", "inspect_proxy_coverage", action_kind="inspect")],
+                        proxy_context=resolved_system_proxy,
+                        debug_facts=debug_facts,
+                    )
+                )
+            elif resolved_user_proxy:
+                diagnoses.append(
+                    self._composition_status_diagnosis(
+                        status="稳健",
+                        issue_type="人工确认代理覆盖",
+                        diagnosis_type="user_proxy_coverage",
+                        frontend_explanation="当前代理关系已由用户确认，且代理方案未变化。",
+                        action="查看确认记录。",
+                        resolution_criteria="同一代理方案不再提醒。",
+                        actions=[self._composition_status_action("查看确认记录", "inspect_proxy_confirmation", action_kind="inspect")],
+                        proxy_context=resolved_user_proxy,
+                        debug_facts=debug_facts,
+                    )
+                )
+            elif unconfirmed_proxy:
+                diagnoses.append(
+                    self._composition_status_diagnosis(
+                        status="待校准",
+                        issue_type="代理覆盖待确认",
+                        diagnosis_type="proxy_confirmation_required",
+                        frontend_explanation="当前使用了代理历史，但系统没有找到已登记代理关系，也没有本组合确认记录。",
+                        action="确认代理关系，或替换来源。",
+                        resolution_criteria="保存确认后，同一代理方案不再提醒。",
+                        actions=[
+                            self._composition_status_action("确认代理关系", "confirm_proxy_coverage", action_kind="execute"),
+                            self._composition_status_action("替换来源", "open_composition_workbench", route=f"/compositions/workbench?composition_id={composition_id or ''}"),
+                        ],
+                        proxy_context=unconfirmed_proxy,
+                        debug_facts=debug_facts,
+                    )
+                )
+            elif missing_points > 0:
+                diagnoses.append(
+                    self._composition_status_diagnosis(
+                        status="失效",
+                        issue_type="收益序列不连续",
+                        diagnosis_type="return_series_gap",
+                        frontend_explanation="历史收益中间断档，系统只能用估算值补齐。",
+                        action="定位断点并补齐策略运行或行情快照。",
+                        resolution_criteria="缺失区间清零，不再使用估算补值。",
+                        actions=[
+                            self._composition_status_action("打开来源修复页", "open_source_repair", route=f"/compositions/{composition_id or ''}"),
+                            self._composition_status_action("刷新信度摘要", "refresh_return_quality", action_kind="execute"),
+                        ],
+                        debug_facts=debug_facts,
+                    )
+                )
+            else:
+                diagnoses.append(
+                    self._composition_status_diagnosis(
+                        status="失效",
+                        issue_type="异常降级补值",
+                        diagnosis_type="abnormal_fallback",
+                        frontend_explanation="当前不是计划内代理，而是临时估算或异常补值。",
+                        action="修复数据来源或更换成分。",
+                        resolution_criteria="不再依赖异常估算。",
+                        actions=[self._composition_status_action("打开组合工作台", "open_composition_workbench", route=f"/compositions/workbench?composition_id={composition_id or ''}")],
+                        debug_facts=debug_facts,
+                    )
+                )
+        if aligned_points > 0 and aligned_points < 120:
+            diagnoses.append(
+                self._composition_status_diagnosis(
+                    status="待校准",
+                    issue_type="样本久期不足",
+                    diagnosis_type="sample_duration_short",
+                    frontend_explanation="可用历史样本不足 10 年，统计结论稳定性有限。",
+                    action="打开回测配置，补足或选择合适周期。",
+                    resolution_criteria="历史样本达到 120 个月以上。",
+                    actions=[self._composition_status_action("打开回测配置", "open_backtest_config", route=f"/compositions/{composition_id or ''}")],
+                    debug_facts=debug_facts,
+                )
+            )
+        if missing_points > 0 and not fallback_used:
+            diagnoses.append(
+                self._composition_status_diagnosis(
+                    status="待校准",
+                    issue_type="信度摘要同步失效",
+                    diagnosis_type="return_quality_summary_stale",
+                    frontend_explanation="页面质量摘要和底层数据状态不一致。",
+                    action="重新计算信度摘要。",
+                    resolution_criteria="摘要、覆盖率和降级状态一致。",
+                    actions=[self._composition_status_action("重新计算信度摘要", "refresh_return_quality", action_kind="execute")],
+                    debug_facts=debug_facts,
+                )
+            )
+        if not quality and not source_integrity:
+            diagnoses.append(
+                self._composition_status_diagnosis(
+                    status="待校准",
+                    issue_type="审计元数据真空",
+                    diagnosis_type="audit_metadata_missing",
+                    frontend_explanation="系统缺少足够质量指标，暂时无法判断组合是否可靠。",
+                    action="执行完整性校验或信度刷新。",
+                    resolution_criteria="重新生成明确状态标签。",
+                    actions=[self._composition_status_action("执行完整性校验", "refresh_diagnostics", action_kind="execute")],
+                    debug_facts=debug_facts,
+                )
+            )
+        for item in source_integrity:
+            alerts_text = " ".join(str(alert) for alert in item.get("alerts") or []).lower()
+            signature_status = str(item.get("signature_status") or "").lower()
+            drift_status = str(item.get("drift_status") or "").lower()
+            source_ref_id = str(item.get("source_ref_id") or "")
+            current_ref_id = str(item.get("current_ref_id") or "")
+            if "watch-only" in alerts_text or "watch" in alerts_text:
+                diagnoses.append(
+                    self._composition_status_diagnosis(
+                        status="待校准",
+                        issue_type="观察仓限制",
+                        diagnosis_type="watch_source_limited",
+                        frontend_explanation="当前来源只是观察用途，不能作为正式配置依据。",
+                        action="晋升来源，或替换为正式来源。",
+                        resolution_criteria="来源变为正式可用，或已替换。",
+                        actions=[self._composition_status_action("打开资产库", "open_leg_inventory", route="/legs")],
+                        debug_facts={**debug_facts, "source_ref_id": source_ref_id},
+                    )
+                )
+            elif "not currently eligible" in alerts_text or "needs_run" in alerts_text or "missing" in alerts_text or "repair" in alerts_text:
+                diagnoses.append(
+                    self._composition_status_diagnosis(
+                        status="待校准",
+                        issue_type="底层状态违规",
+                        diagnosis_type="source_state_invalid",
+                        frontend_explanation="组合引用的成分还没准备好，或处于缺失、待运行、待修复状态。",
+                        action="打开资产库或策略运行入口。",
+                        resolution_criteria="相关成分恢复为可用状态。",
+                        actions=[self._composition_status_action("打开资产库", "open_leg_inventory", route="/legs")],
+                        debug_facts={**debug_facts, "source_ref_id": source_ref_id},
+                    )
+                )
+            elif "newer parameter version" in alerts_text or "newer version" in alerts_text:
+                diagnoses.append(
+                    self._composition_status_diagnosis(
+                        status="待校准",
+                        issue_type="参数指纹过期",
+                        diagnosis_type="parameter_fingerprint_stale",
+                        frontend_explanation="组合保存时使用的是旧参数版本，上游已有新版本。",
+                        action="比较版本，选择保留旧版或同步新版。",
+                        resolution_criteria="写入版本决策记录。",
+                        actions=[self._composition_status_action("打开组合工作台", "open_composition_workbench", route=f"/compositions/workbench?composition_id={composition_id or ''}")],
+                        debug_facts={**debug_facts, "source_ref_id": source_ref_id},
+                    )
+                )
+            elif current_ref_id and source_ref_id and current_ref_id != source_ref_id:
+                diagnoses.append(
+                    self._composition_status_diagnosis(
+                        status="待校准",
+                        issue_type="版本同步待处理",
+                        diagnosis_type="version_sync_pending",
+                        frontend_explanation="上游成分发布了新版本，当前组合还未确认是否同步。",
+                        action="打开工作台处理版本。",
+                        resolution_criteria="已完成同步或保留决策。",
+                        actions=[self._composition_status_action("打开工作台", "open_composition_workbench", route=f"/compositions/workbench?composition_id={composition_id or ''}")],
+                        debug_facts={**debug_facts, "source_ref_id": source_ref_id, "current_ref_id": current_ref_id},
+                    )
+                )
+            elif "current source version differs" in alerts_text or drift_status in {"drifted", "version_drift"}:
+                diagnoses.append(
+                    self._composition_status_diagnosis(
+                        status="待校准",
+                        issue_type="逻辑一致性漂移",
+                        diagnosis_type="source_logic_drift",
+                        frontend_explanation="当前来源内容和保存时冻结记录不一致。",
+                        action="审计漂移来源，重新冻结或回滚。",
+                        resolution_criteria="漂移已确认并处理。",
+                        actions=[self._composition_status_action("查看来源证据", "inspect_source_evidence", action_kind="inspect")],
+                        debug_facts={**debug_facts, "source_ref_id": source_ref_id},
+                    )
+                )
+            elif signature_status in {"preview", "unverified", "missing"} or not item.get("freeze_hash"):
+                diagnoses.append(
+                    self._composition_status_diagnosis(
+                        status="待校准",
+                        issue_type="审计签名缺失",
+                        diagnosis_type="audit_signature_missing",
+                        frontend_explanation="组合缺少正式冻结记录，无法证明保存时的数据版本。",
+                        action="返回工作台重新保存。",
+                        resolution_criteria="所有来源都有正式冻结签名。",
+                        actions=[self._composition_status_action("返回工作台重新保存", "open_composition_workbench", route=f"/compositions/workbench?composition_id={composition_id or ''}")],
+                        debug_facts={**debug_facts, "source_ref_id": source_ref_id},
+                    )
+                )
+        if not diagnoses:
+            diagnoses.append(
+                self._composition_status_diagnosis(
+                    status="稳健",
+                    issue_type="证据链完整",
+                    diagnosis_type="evidence_chain_complete",
+                    frontend_explanation="当前组合的收益、来源和冻结记录都可以追溯。",
+                    action="查看详情或继续回测/配置实验。",
+                    resolution_criteria="无需处理。",
+                    actions=[self._composition_status_action("查看详情", "open_composition_detail", route=f"/compositions/{composition_id or ''}")],
+                    debug_facts=debug_facts,
+                )
+            )
+        failed_open = any(item.get("status") == "失效" for item in diagnoses)
+        if failed_open:
+            for item in diagnoses:
+                if item.get("status") == "失效":
+                    item["system_disposition"] = "存在未关闭的失效问题，晋升门禁已暂停。"
+        rank = {"失效": 0, "待校准": 1, "稳健": 2}
+        issue_rank = {
+            "底层收益序列真空": 0,
+            "收益序列不连续": 1,
+            "异常降级补值": 2,
+            "代理覆盖待确认": 3,
+            "样本久期不足": 4,
+        }
+        deduped: dict[tuple[str, str], dict[str, Any]] = {}
+        for item in sorted(diagnoses, key=lambda value: (rank.get(str(value.get("status")), 9), issue_rank.get(str(value.get("issue_type")), 50))):
+            deduped.setdefault((str(item.get("status")), str(item.get("issue_type"))), item)
+        return list(deduped.values())
+
+    def _composition_attach_diagnoses(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        composition_id: str | None = None,
+    ) -> dict[str, Any]:
+        enriched = dict(payload)
+        diagnoses = self._composition_status_diagnoses(enriched, composition_id=composition_id or str(enriched.get("id") or ""))
+        enriched["diagnoses"] = diagnoses
+        enriched["primary_diagnosis"] = diagnoses[0] if diagnoses else None
+        return enriched
+
+    def _composition_has_resolved_proxy(
+        self,
+        detail: Mapping[str, Any],
+        *,
+        composition_id: str | None = None,
+    ) -> bool:
+        contexts = self._composition_proxy_contexts(detail, composition_id=composition_id)
+        return any(item.get("proxy_source") in {"system", "user"} for item in contexts)
+
+    def _composition_evidence_grade_from_detail(self, detail: Mapping[str, Any]) -> str:
+        diagnoses = self._composition_status_diagnoses(detail, composition_id=str(detail.get("id") or "") or None)
+        primary = diagnoses[0] if diagnoses else {}
+        status = str(primary.get("status") or "")
+        if status == "失效":
+            return "C"
+        if status == "稳健":
+            return "A"
+        if status == "待校准":
+            return "B"
+        quality = _as_mapping(detail.get("return_quality_summary"))
+        source_integrity = [
+            item
+            for item in detail.get("source_integrity") or []
+            if isinstance(item, Mapping)
+        ]
+        has_alerts = any(item.get("alerts") for item in source_integrity)
+        fallback_used = bool(quality.get("fallback_used"))
+        missing_points = _as_int(quality.get("missing_points"), 0)
+        status = str(quality.get("status") or "").strip().lower()
+        if fallback_used or missing_points > 0 or has_alerts:
+            return "C" if fallback_used and missing_points > 0 else "B"
+        if status in {"verified", "ready", "complete"}:
+            return "A"
+        return "B"
+
+    @staticmethod
+    def _composition_scenario_anchor_id(raw: Mapping[str, Any], fallback_index: int) -> str:
+        label = str(raw.get("label") or raw.get("name") or raw.get("window") or "").strip()
+        for token in ("2008", "2020", "2022"):
+            if token in label:
+                return token
+        return str(raw.get("id") or raw.get("key") or f"scenario_{fallback_index}").strip()
+
+    def _composition_scenario_anchors(self, detail: Mapping[str, Any]) -> list[dict[str, Any]]:
+        scenario_summary = _as_mapping(detail.get("scenario_summary"))
+        raw_cases = scenario_summary.get("cases")
+        cases = raw_cases if isinstance(raw_cases, Sequence) and not isinstance(raw_cases, (str, bytes, bytearray)) else []
+        anchors: list[dict[str, Any]] = []
+        for index, raw_case in enumerate(cases, start=1):
+            if not isinstance(raw_case, Mapping):
+                continue
+            anchor_id = self._composition_scenario_anchor_id(raw_case, index)
+            anchors.append(
+                {
+                    "id": anchor_id,
+                    "label": str(raw_case.get("label") or raw_case.get("name") or anchor_id),
+                    "start": raw_case.get("start") or raw_case.get("start_date"),
+                    "end": raw_case.get("end") or raw_case.get("end_date"),
+                    "status": str(raw_case.get("status") or raw_case.get("verdict") or "review"),
+                    "drawdown_pct": _as_float(raw_case.get("max_drawdown") or raw_case.get("drawdown_pct"), 0.0),
+                }
+            )
+        if anchors:
+            return anchors
+        return [
+            {"id": "2008", "label": "2008 信用危机", "start": "2008-09-01", "end": "2009-03-31", "status": "reference", "drawdown_pct": 0.0},
+            {"id": "2020", "label": "2020 流动性冲击", "start": "2020-02-01", "end": "2020-04-30", "status": "reference", "drawdown_pct": 0.0},
+            {"id": "2022", "label": "2022 利率冲击", "start": "2022-01-01", "end": "2022-12-31", "status": "reference", "drawdown_pct": 0.0},
+        ]
+
+    def _composition_risk_budget_timeline(self, detail: Mapping[str, Any]) -> list[dict[str, Any]]:
+        risk_preview = [
+            dict(item)
+            for item in detail.get("risk_contribution_preview") or []
+            if isinstance(item, Mapping)
+        ]
+        timeline: list[dict[str, Any]] = []
+        for event in detail.get("rebalance_events") or []:
+            if not isinstance(event, Mapping):
+                continue
+            timeline.append(
+                {
+                    "date": event.get("date") or event.get("event_date"),
+                    "event_id": event.get("id") or event.get("event_id"),
+                    "event_label": event.get("label") or event.get("event_label"),
+                    "turnover_pct": _as_float(event.get("turnover_pct"), 0.0),
+                    "risk_contribution": risk_preview,
+                }
+            )
+            if len(timeline) >= 12:
+                break
+        if timeline:
+            return timeline
+        return [
+            {
+                "date": None,
+                "event_id": "current",
+                "event_label": "Current risk budget",
+                "turnover_pct": 0.0,
+                "risk_contribution": risk_preview,
+            }
+        ]
+
+    def _composition_promotion_readiness_from_detail(
+        self,
+        detail: Mapping[str, Any],
+        *,
+        candidate: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        evidence_grade = self._composition_evidence_grade_from_detail(detail)
+        diagnoses = self._composition_status_diagnoses(detail, composition_id=str(detail.get("id") or "") or None)
+        failed_diagnoses = [item for item in diagnoses if item.get("status") == "失效"]
+        violations = [
+            dict(item)
+            for item in _as_mapping(candidate or {}).get("constraint_violations") or []
+            if isinstance(item, Mapping)
+        ]
+        metrics = _as_mapping(_as_mapping(candidate or {}).get("metrics"))
+        migration_cost_bps = round(_as_float(metrics.get("estimated_turnover_pct"), 0.0) * 0.1, 4)
+        blockers: list[str] = []
+        if failed_diagnoses:
+            blockers.append("unresolved_failed_status")
+        if violations:
+            blockers.append("constraint_violations")
+        status = "blocked" if blockers else "ready"
+        return {
+            "status": status,
+            "evidence_grade": evidence_grade,
+            "primary_diagnosis": diagnoses[0] if diagnoses else None,
+            "diagnoses": diagnoses,
+            "system_disposition": "存在未关闭的失效问题，晋升门禁已暂停。" if failed_diagnoses else None,
+            "migration_cost_bps": migration_cost_bps,
+            "policy_violations": violations,
+            "blockers": blockers,
+            "required_steps": ["diff_review", "constraint_check", "migration_cost_review", "evidence_gate"],
+        }
+
+    @staticmethod
+    def _composition_decode_run_row(row: Mapping[str, Any]) -> dict[str, Any]:
+        payload = loads(row.get("result_json"), {})
+        if not isinstance(payload, Mapping):
+            payload = {}
+        decoded = dict(payload)
+        decoded.setdefault("id", str(row.get("id") or ""))
+        decoded.setdefault("run_id", str(row.get("id") or ""))
+        decoded.setdefault("composition_id", str(row.get("composition_id") or ""))
+        decoded.setdefault("status", str(row.get("status") or ""))
+        decoded.setdefault("created_at", str(row.get("created_at") or ""))
+        decoded.setdefault("completed_at", row.get("completed_at"))
+        return decoded
+
+    @staticmethod
+    def _normalize_composition_allocation_candidate_actions(candidate: Any) -> dict[str, Any]:
+        if not isinstance(candidate, Mapping):
+            return {}
+        normalized = dict(candidate)
+        readiness = _as_mapping(normalized.get("promotion_readiness"))
+        actions = [str(action) for action in normalized.get("allowed_actions") or [] if str(action).strip()]
+        if readiness.get("status") == "blocked":
+            actions = [action for action in actions if action != "promote_candidate"]
+        normalized["allowed_actions"] = actions
+        return normalized
+
+    @staticmethod
+    def _composition_decode_allocation_job_row(row: Mapping[str, Any]) -> dict[str, Any]:
+        payload = loads(row.get("result_json"), {})
+        if not isinstance(payload, Mapping):
+            payload = {}
+        decoded = dict(payload)
+        decoded["candidates"] = [
+            BacktestPlatformService._normalize_composition_allocation_candidate_actions(candidate)
+            for candidate in decoded.get("candidates") or []
+            if isinstance(candidate, Mapping)
+        ]
+        decoded.setdefault("id", str(row.get("id") or ""))
+        decoded.setdefault("job_id", str(row.get("id") or ""))
+        decoded.setdefault("composition_id", str(row.get("composition_id") or ""))
+        decoded.setdefault("status", str(row.get("status") or ""))
+        decoded.setdefault("created_at", str(row.get("created_at") or ""))
+        decoded.setdefault("completed_at", row.get("completed_at"))
+        return decoded
+
+    def _persist_composition_backtest_run(
+        self,
+        payload: Mapping[str, Any],
+        state: Mapping[str, Any],
+    ) -> None:
+        detail = _as_mapping(state.get("detail_snapshot"))
+        run_id = str(payload.get("run_id") or payload.get("id") or state.get("id") or "")
+        composition_id = str(payload.get("composition_id") or state.get("composition_id") or "")
+        orders = self._composition_backtest_orders_from_detail(
+            composition_id,
+            run_id,
+            detail,
+            _as_mapping(state.get("request")),
+        )
+        now = iso_now()
+        self.storage.insert_json_row(
+            "composition_backtest_runs",
+            {
+                "id": run_id,
+                "composition_id": composition_id,
+                "status": str(payload.get("status") or "COMPLETED"),
+                "request_json": dumps(payload.get("request") or state.get("request") or {}),
+                "result_json": dumps(dict(payload)),
+                "orders_json": dumps(orders),
+                "evidence_json": dumps(payload.get("evidence") or {}),
+                "created_at": str(payload.get("created_at") or state.get("created_at") or now),
+                "updated_at": now,
+                "completed_at": payload.get("completed_at") or state.get("completed_at") or now,
+                "deleted_at": None,
+                "deleted_reason": None,
+            },
+        )
+
+    def _persist_composition_allocation_job(
+        self,
+        payload: Mapping[str, Any],
+        state: Mapping[str, Any],
+    ) -> None:
+        job_id = str(payload.get("job_id") or payload.get("id") or state.get("id") or "")
+        composition_id = str(payload.get("composition_id") or state.get("composition_id") or "")
+        now = iso_now()
+        self.storage.insert_json_row(
+            "composition_allocation_jobs",
+            {
+                "id": job_id,
+                "composition_id": composition_id,
+                "status": str(payload.get("status") or "COMPLETED"),
+                "request_json": dumps(payload.get("request") or state.get("request") or {}),
+                "result_json": dumps(dict(payload)),
+                "created_at": str(payload.get("created_at") or state.get("created_at") or now),
+                "updated_at": now,
+                "completed_at": payload.get("completed_at") or state.get("completed_at") or now,
+                "deleted_at": None,
+                "deleted_reason": None,
+            },
+        )
+
+    @staticmethod
+    def _composition_orders_generated_from() -> str:
+        return "composition_rebalance_events_and_strategy_trades"
+
     def _composition_backtest_warnings(self, detail: Mapping[str, Any]) -> list[str]:
         warnings: list[str] = []
         quality = _as_mapping(detail.get("return_quality_summary"))
-        if bool(quality.get("fallback_used")):
+        if bool(quality.get("fallback_used")) and not self._composition_has_resolved_proxy(
+            detail,
+            composition_id=str(detail.get("id") or "") or None,
+        ):
             warnings.append("Return stream uses fallback/proxy evidence for at least one sleeve.")
         for item in detail.get("source_integrity") or []:
             if not isinstance(item, Mapping):
@@ -8542,19 +9679,38 @@ class BacktestPlatformService:
             request_payload=payload,
             detail_snapshot=self._composition_run_detail_snapshot(detail),
         )
-        return self._build_composition_backtest_run_payload(state)
+        run_payload = self._build_composition_backtest_run_payload(state)
+        self._persist_composition_backtest_run(run_payload, state)
+        return run_payload
 
     def get_composition_backtest_run(self, composition_id: str, run_id: str) -> dict[str, Any]:
         self._load_composition_record(composition_id)
+        row = self.storage.fetch_one(
+            """
+            SELECT *
+            FROM composition_backtest_runs
+            WHERE id = ?
+              AND composition_id = ?
+              AND deleted_at IS NULL
+            """,
+            (run_id, composition_id),
+        )
+        if row:
+            return self._composition_decode_run_row(row)
         state = self._composition_load_artifact_state(
             kind="backtest_run",
             composition_id=composition_id,
             artifact_id=run_id,
         )
-        return self._build_composition_backtest_run_payload(state)
+        run_payload = self._build_composition_backtest_run_payload(state)
+        self._persist_composition_backtest_run(run_payload, state)
+        return run_payload
 
     def _build_composition_backtest_run_payload(self, state: Mapping[str, Any]) -> dict[str, Any]:
-        detail = _as_mapping(state.get("detail_snapshot"))
+        detail = self._composition_attach_diagnoses(
+            _as_mapping(state.get("detail_snapshot")),
+            composition_id=str(state.get("composition_id") or ""),
+        )
         composition_id = str(state.get("composition_id") or detail.get("id") or "")
         run_id = str(state.get("id") or "")
         quality = _as_mapping(detail.get("return_quality_summary"))
@@ -8562,7 +9718,8 @@ class BacktestPlatformService:
         rebalance_events = list(detail.get("rebalance_events") or [])
         source_integrity = list(detail.get("source_integrity") or [])
         warnings = self._composition_backtest_warnings(detail)
-        status = "COMPLETED_WITH_WARNINGS" if warnings or bool(quality.get("fallback_used")) else "COMPLETED"
+        planned_proxy = self._composition_has_resolved_proxy(detail, composition_id=composition_id)
+        status = "COMPLETED_WITH_WARNINGS" if warnings or (bool(quality.get("fallback_used")) and not planned_proxy) else "COMPLETED"
         request_payload = _as_mapping(state.get("request"))
         order_count = len(
             self._composition_backtest_orders_from_detail(
@@ -8585,6 +9742,12 @@ class BacktestPlatformService:
             else "limited window"
         )
         evidence_label = self._composition_evidence_label()
+        evidence_grade = self._composition_evidence_grade_from_detail(detail)
+        scenario_anchors = self._composition_scenario_anchors(detail)
+        risk_budget_timeline = self._composition_risk_budget_timeline(detail)
+        promotion_readiness = self._composition_promotion_readiness_from_detail(detail)
+        diagnoses = list(detail.get("diagnoses") or [])
+        primary_diagnosis = detail.get("primary_diagnosis") or (diagnoses[0] if diagnoses else None)
         return {
             "id": run_id,
             "run_id": run_id,
@@ -8629,7 +9792,7 @@ class BacktestPlatformService:
             "audit_trail": list(detail.get("audit_trail") or []),
             "order_summary": {
                 "order_count": order_count,
-                "generated_from": "composition_rebalance_events",
+                "generated_from": self._composition_orders_generated_from(),
                 "netting_available": order_count > 0,
             },
             "evidence": {
@@ -8653,6 +9816,12 @@ class BacktestPlatformService:
                     "orders": evidence_label,
                 },
             },
+            "evidence_grade": evidence_grade,
+            "scenario_anchors": scenario_anchors,
+            "risk_budget_timeline": risk_budget_timeline,
+            "promotion_readiness": promotion_readiness,
+            "primary_diagnosis": primary_diagnosis,
+            "diagnoses": diagnoses,
             "warnings": warnings,
         }
 
@@ -8812,6 +9981,146 @@ class BacktestPlatformService:
                 return future_context
         return context
 
+    def _composition_strategy_internal_orders_from_leg(
+        self,
+        *,
+        composition_id: str,
+        run_id: str,
+        leg: Mapping[str, Any],
+        leg_index: int,
+        first_event_date: str | None,
+        last_event_date: str | None,
+        notional_base: float,
+        fee_bps: float,
+        slippage_bps: float,
+        quality_label: str,
+        evidence_label: str,
+    ) -> list[dict[str, Any]]:
+        if str(leg.get("leg_kind") or "").lower() != "strategy":
+            return []
+        config = _as_mapping(leg.get("config"))
+        source_run_id = str(config.get("run_id") or config.get("latest_run_id") or "").strip()
+        if not source_run_id:
+            return []
+        trades = self._load_strategy_run_trades(source_run_id)
+        if not trades:
+            return []
+        leg_weight_pct = _as_float(leg.get("weight_pct"), 0.0)
+        if leg_weight_pct <= 0:
+            return []
+        dated_trades = [
+            (self._composition_trade_date(trade), index, _as_mapping(trade))
+            for index, trade in enumerate(trades)
+            if isinstance(trade, Mapping)
+        ]
+        dated_trades.sort(key=lambda item: (item[0] or "9999-99-99", item[1]))
+        initial_context = self._composition_strategy_symbol_context(
+            trades,
+            as_of_date=first_event_date,
+            first_available_after=False,
+        )
+        first_future_date: str | None = None
+        if first_event_date and not initial_context:
+            first_future_date = next(
+                (
+                    trade_date
+                    for trade_date, _index, _trade in dated_trades
+                    if trade_date and trade_date > first_event_date
+                ),
+                None,
+            )
+
+        source_leg_name = str(leg.get("display_name") or leg.get("id") or "策略腿").strip()
+        holdings: dict[str, float] = {}
+        orders: list[dict[str, Any]] = []
+        for trade_date, trade_index, trade in dated_trades:
+            symbol = str(trade.get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            previous_weight = _as_float(holdings.get(symbol), 0.0)
+            if "weight_after" in trade:
+                target_weight = self._composition_normalize_trade_weight(trade.get("weight_after"))
+            else:
+                side_hint = str(trade.get("side") or trade.get("action") or "").strip().upper()
+                if side_hint == "SELL":
+                    target_weight = 0.0
+                elif side_hint == "BUY":
+                    target_weight = max(previous_weight, 1.0)
+                else:
+                    continue
+            delta = round(target_weight - previous_weight, 6)
+            if target_weight <= 0.0001:
+                holdings.pop(symbol, None)
+            else:
+                holdings[symbol] = target_weight
+
+            if not trade_date:
+                continue
+            if first_event_date and trade_date <= first_event_date:
+                continue
+            if first_future_date and trade_date == first_future_date:
+                continue
+            if last_event_date and trade_date > last_event_date:
+                continue
+            if abs(delta) < 0.0001:
+                continue
+            quantity = round(leg_weight_pct * abs(delta), 6)
+            if quantity <= 0:
+                continue
+            side = "BUY" if delta > 0 else "SELL"
+            price = self._composition_trade_price(trade) or self._composition_order_price_for_symbol(
+                symbol,
+                as_of_date=trade_date,
+                leg=leg,
+                context=trade,
+            )
+            external_notional = notional_base * quantity / 100.0
+            fee_amount = round(max(external_notional, 0.0) * max(fee_bps, 0.0) / 10000.0, 4)
+            reason_label = self._composition_strategy_reason_label(
+                trade.get("reason") or trade.get("trigger_reason") or trade.get("signal")
+            )
+            order_id = self._composition_artifact_id(
+                "comp_order",
+                composition_id,
+                f"{run_id}|strategy|{leg_index}|{source_run_id}|{trade_date}|{trade_index}|{symbol}",
+            )
+            event_index = len(orders) + 1
+            orders.append(
+                {
+                    "id": order_id,
+                    "order_id": order_id,
+                    "run_id": run_id,
+                    "event_id": f"strategy_{leg_index:02d}_{event_index:03d}",
+                    "event_label": f"{trade_date} 策略内",
+                    "event_date": trade_date,
+                    "symbol": symbol,
+                    "side": side,
+                    "quantity": quantity,
+                    "quantity_unit": "weight_pct",
+                    "price": round(price, 4) if price else None,
+                    "slippage_bps": round(slippage_bps, 4),
+                    "fee_amount": fee_amount,
+                    "source_leg_id": str(leg.get("id") or ""),
+                    "source_leg_name": source_leg_name,
+                    "source_leg_kind": "strategy",
+                    "trigger_reason": (
+                        f"策略内逻辑：{source_leg_name} {reason_label or '信号换仓'}；"
+                        f"穿透源 run {source_run_id} 于 {trade_date} 生成；"
+                        f"组合按 {leg_weight_pct:.2f}% 目标权重换算。"
+                    ),
+                    "gross_buy_quantity": quantity if side == "BUY" else 0.0,
+                    "gross_sell_quantity": quantity if side == "SELL" else 0.0,
+                    "internal_net_quantity": 0.0,
+                    "external_quantity": quantity,
+                    "netting_ratio_pct": 0.0,
+                    "netting_status": "strategy_internal",
+                    "execution_kind": "simulated_strategy_internal_order",
+                    "quality_label": quality_label,
+                    "evidence_label": evidence_label,
+                }
+            )
+        return orders
+
     @staticmethod
     def _composition_strategy_trade_weights(trades: Sequence[Mapping[str, Any]]) -> dict[str, float]:
         return {
@@ -8935,10 +10244,13 @@ class BacktestPlatformService:
         )
         if str(leg.get("leg_kind") or "").lower() != "strategy":
             return composition_reason
-        strategy_reason = self._composition_strategy_reason_label(context.get("reason"))
-        if not strategy_reason:
-            strategy_reason = f"{leg.get('display_name') or '策略腿'}持仓穿透"
-        return f"策略内逻辑：{strategy_reason}；{composition_reason}"
+        source_leg_name = str(leg.get("display_name") or leg.get("id") or "策略腿").strip()
+        source_trade_date = str(context.get("trade_date") or "").strip()
+        if source_trade_date:
+            source_note = f"穿透来源：{source_leg_name}截至{source_trade_date}的持仓"
+        else:
+            source_note = f"穿透来源：{source_leg_name}当前持仓"
+        return f"{composition_reason}；{source_note}"
 
     def _composition_lookthrough_top_holdings(self, detail: Mapping[str, Any]) -> list[dict[str, Any]]:
         lookthrough: dict[str, dict[str, Any]] = {}
@@ -9005,9 +10317,12 @@ class BacktestPlatformService:
         notional_base = self._composition_order_notional_base(detail, request_payload)
         fee_bps = self._composition_order_fee_bps(detail, request_payload)
         request_slippage_bps = _as_float(request_payload.get("slippage_bps"), 0.0)
+        rebalance_events = [_as_mapping(item) for item in detail.get("rebalance_events") or []]
+        event_dates = [str(event.get("date") or "").strip() for event in rebalance_events if str(event.get("date") or "").strip()]
+        first_event_date = event_dates[0] if event_dates else None
+        last_event_date = event_dates[-1] if event_dates else None
         orders: list[dict[str, Any]] = []
-        for event_index, raw_event in enumerate(detail.get("rebalance_events") or [], start=1):
-            event = _as_mapping(raw_event)
+        for event_index, event in enumerate(rebalance_events, start=1):
             event_id = f"event_{_as_int(event.get('index'), event_index):03d}"
             is_initial_event = event_index == 1
             after = {
@@ -9123,6 +10438,30 @@ class BacktestPlatformService:
                         }
                     )
             orders.extend(event_orders)
+        for leg_index, leg in enumerate(legs, start=1):
+            orders.extend(
+                self._composition_strategy_internal_orders_from_leg(
+                    composition_id=composition_id,
+                    run_id=run_id,
+                    leg=leg,
+                    leg_index=leg_index,
+                    first_event_date=first_event_date,
+                    last_event_date=last_event_date,
+                    notional_base=notional_base,
+                    fee_bps=fee_bps,
+                    slippage_bps=request_slippage_bps,
+                    quality_label=quality_label,
+                    evidence_label=evidence_label,
+                )
+            )
+        orders.sort(
+            key=lambda item: (
+                str(item.get("event_date") or "9999-99-99"),
+                0 if str(item.get("execution_kind") or "") == "simulated_initial_allocation" else 1,
+                str(item.get("event_id") or ""),
+                str(item.get("symbol") or ""),
+            )
+        )
         return orders
 
     def get_composition_backtest_orders(
@@ -9132,21 +10471,40 @@ class BacktestPlatformService:
         *,
         symbol: str | None = None,
         source_leg: str | None = None,
+        scenario: str | None = None,
         page: int = 1,
         page_size: int = 100,
     ) -> dict[str, Any]:
-        state = self._composition_load_artifact_state(
-            kind="backtest_run",
-            composition_id=composition_id,
-            artifact_id=run_id,
+        row = self.storage.fetch_one(
+            """
+            SELECT *
+            FROM composition_backtest_runs
+            WHERE id = ?
+              AND composition_id = ?
+              AND deleted_at IS NULL
+            """,
+            (run_id, composition_id),
         )
-        detail = _as_mapping(state.get("detail_snapshot"))
-        orders = self._composition_backtest_orders_from_detail(
-            composition_id,
-            run_id,
-            detail,
-            _as_mapping(state.get("request")),
-        )
+        try:
+            state = self._composition_load_artifact_state(
+                kind="backtest_run",
+                composition_id=composition_id,
+                artifact_id=run_id,
+            )
+            detail = _as_mapping(state.get("detail_snapshot"))
+            orders = self._composition_backtest_orders_from_detail(
+                composition_id,
+                run_id,
+                detail,
+                _as_mapping(state.get("request")),
+            )
+        except KeyError:
+            if not row:
+                raise
+            result_payload = loads(row.get("result_json"), {})
+            detail = result_payload if isinstance(result_payload, Mapping) else {}
+            persisted_orders = loads(row.get("orders_json"), [])
+            orders = [dict(item) for item in persisted_orders if isinstance(item, Mapping)]
         normalized_symbol = str(symbol or "").strip().upper()
         if normalized_symbol:
             orders = [item for item in orders if str(item.get("symbol") or "").upper() == normalized_symbol]
@@ -9158,8 +10516,27 @@ class BacktestPlatformService:
                 if str(item.get("source_leg_id") or "").lower() == source_key
                 or str(item.get("source_leg_name") or "").lower() == source_key
             ]
+        normalized_scenario = str(scenario or "").strip()
+        scenario_anchor: dict[str, Any] | None = None
+        if normalized_scenario:
+            scenario_key = normalized_scenario.lower()
+            for anchor in self._composition_scenario_anchors(detail):
+                anchor_id = str(anchor.get("id") or "").strip().lower()
+                anchor_label = str(anchor.get("label") or "").strip().lower()
+                if scenario_key in {anchor_id, anchor_label} or scenario_key in anchor_label:
+                    scenario_anchor = dict(anchor)
+                    break
+            if scenario_anchor:
+                start_date = str(scenario_anchor.get("start") or "")
+                end_date = str(scenario_anchor.get("end") or "")
+                if start_date and end_date:
+                    orders = [
+                        item
+                        for item in orders
+                        if start_date <= str(item.get("event_date") or "") <= end_date
+                    ]
         page = max(1, int(page or 1))
-        page_size = max(1, min(int(page_size or 100), 500))
+        page_size = max(1, min(int(page_size or 100), 1000))
         start = (page - 1) * page_size
         end = start + page_size
         return {
@@ -9172,8 +10549,10 @@ class BacktestPlatformService:
             "filters": {
                 "symbol": normalized_symbol or None,
                 "source_leg": normalized_source_leg or None,
+                "scenario": normalized_scenario or None,
+                "scenario_anchor": scenario_anchor,
             },
-            "generated_from": "composition_rebalance_events",
+            "generated_from": self._composition_orders_generated_from(),
             "quality_label": self._composition_quality_label(detail),
             "evidence_label": self._composition_evidence_label(),
         }
@@ -9184,7 +10563,7 @@ class BacktestPlatformService:
         run_id: str,
         order_id: str,
     ) -> dict[str, Any]:
-        orders = self.get_composition_backtest_orders(composition_id, run_id, page=1, page_size=500)["items"]
+        orders = self.get_composition_backtest_orders(composition_id, run_id, page=1, page_size=1000)["items"]
         order = next((dict(item) for item in orders if str(item.get("id") or "") == order_id), None)
         if order is None:
             raise KeyError(f"Composition backtest order not found: {order_id}")
@@ -9214,7 +10593,7 @@ class BacktestPlatformService:
             "external_quantity": external,
             "netting_ratio_pct": _as_float(order.get("netting_ratio_pct"), 0.0),
             "netting_status": str(order.get("netting_status") or "not_nettable"),
-            "generated_from": "composition_rebalance_events",
+            "generated_from": self._composition_orders_generated_from(),
             "quality_label": str(order.get("quality_label") or self._composition_quality_label({})),
             "evidence_label": str(order.get("evidence_label") or self._composition_evidence_label()),
         }
@@ -9332,6 +10711,7 @@ class BacktestPlatformService:
         export_format: str = "csv",
         symbol: str | None = None,
         source_leg: str | None = None,
+        scenario: str | None = None,
     ) -> dict[str, Any]:
         normalized_format = str(export_format or "csv").strip().lower()
         if normalized_format not in {"csv", "xlsx"}:
@@ -9341,8 +10721,9 @@ class BacktestPlatformService:
             run_id,
             symbol=symbol,
             source_leg=source_leg,
+            scenario=scenario,
             page=1,
-            page_size=500,
+            page_size=1000,
         )
         headers = self._composition_order_export_headers()
         rows = [self._composition_order_export_row(item) for item in page["items"]]
@@ -9399,19 +10780,38 @@ class BacktestPlatformService:
             request_payload=payload,
             detail_snapshot=self._composition_run_detail_snapshot(detail),
         )
-        return self._build_composition_allocation_job_payload(state)
+        job_payload = self._build_composition_allocation_job_payload(state)
+        self._persist_composition_allocation_job(job_payload, state)
+        return job_payload
 
     def get_composition_allocation_job(self, composition_id: str, job_id: str) -> dict[str, Any]:
         self._load_composition_record(composition_id)
+        row = self.storage.fetch_one(
+            """
+            SELECT *
+            FROM composition_allocation_jobs
+            WHERE id = ?
+              AND composition_id = ?
+              AND deleted_at IS NULL
+            """,
+            (job_id, composition_id),
+        )
+        if row:
+            return self._composition_decode_allocation_job_row(row)
         state = self._composition_load_artifact_state(
             kind="allocation_job",
             composition_id=composition_id,
             artifact_id=job_id,
         )
-        return self._build_composition_allocation_job_payload(state)
+        job_payload = self._build_composition_allocation_job_payload(state)
+        self._persist_composition_allocation_job(job_payload, state)
+        return job_payload
 
     def _build_composition_allocation_job_payload(self, state: Mapping[str, Any]) -> dict[str, Any]:
-        detail = _as_mapping(state.get("detail_snapshot"))
+        detail = self._composition_attach_diagnoses(
+            _as_mapping(state.get("detail_snapshot")),
+            composition_id=str(state.get("composition_id") or ""),
+        )
         composition_id = str(state.get("composition_id") or detail.get("id") or "")
         job_id = str(state.get("id") or "")
         request_payload = dict(state.get("request") or {})
@@ -9678,6 +11078,27 @@ class BacktestPlatformService:
                     "allowed_actions": [] if is_reference else ["promote_candidate"],
                 }
             )
+        diagnoses = list(detail.get("diagnoses") or [])
+        primary_diagnosis = detail.get("primary_diagnosis") or (diagnoses[0] if diagnoses else None)
+        for candidate in candidates:
+            if candidate["id"] not in {"current", "benchmark"}:
+                readiness = self._composition_promotion_readiness_from_detail(
+                    detail,
+                    candidate=candidate,
+                )
+                candidate["promotion_readiness"] = readiness
+                candidate["allowed_actions"] = ["promote_candidate"] if readiness.get("status") == "ready" else []
+            else:
+                candidate["promotion_readiness"] = {
+                    "status": "reference",
+                    "evidence_grade": self._composition_evidence_grade_from_detail(detail),
+                    "primary_diagnosis": primary_diagnosis,
+                    "diagnoses": diagnoses,
+                    "migration_cost_bps": 0.0,
+                    "policy_violations": [],
+                    "blockers": ["reference_candidate"],
+                    "required_steps": [],
+                }
         frontier_points = [
             {
                 "id": item["id"],
@@ -9727,7 +11148,488 @@ class BacktestPlatformService:
                     "No external optimizer or broker order history is synthesized by this endpoint.",
                 ],
             },
+            "evidence_grade": self._composition_evidence_grade_from_detail(detail),
+            "scenario_anchors": self._composition_scenario_anchors(detail),
+            "risk_budget_timeline": self._composition_risk_budget_timeline(detail),
+            "promotion_readiness": self._composition_promotion_readiness_from_detail(detail),
+            "primary_diagnosis": primary_diagnosis,
+            "diagnoses": diagnoses,
             "warnings": self._composition_backtest_warnings(detail),
+        }
+
+    def list_composition_backtest_runs(self) -> dict[str, Any]:
+        rows = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM composition_backtest_runs
+            WHERE deleted_at IS NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT 200
+            """
+        )
+        items = [self._composition_decode_run_row(row) for row in rows]
+        decision_queue = [
+            {
+                "kind": "backtest_run",
+                "id": item.get("run_id") or item.get("id"),
+                "composition_id": item.get("composition_id"),
+                "label": _as_mapping(item.get("summary")).get("composition_name") or item.get("run_id"),
+                "evidence_grade": item.get("evidence_grade"),
+                "status": item.get("status"),
+            }
+            for item in items
+            if item.get("evidence_grade") in {"B", "C"}
+            or str(item.get("status") or "").upper().endswith("WARNINGS")
+        ]
+        return {
+            "items": items,
+            "summary": {
+                "total": len(items),
+                "completed": len([item for item in items if str(item.get("status") or "").upper().startswith("COMPLETED")]),
+                "needs_evidence_review": len(decision_queue),
+            },
+            "decision_queue": decision_queue,
+        }
+
+    def list_composition_allocation_jobs(self) -> dict[str, Any]:
+        rows = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM composition_allocation_jobs
+            WHERE deleted_at IS NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT 200
+            """
+        )
+        items = [self._composition_decode_allocation_job_row(row) for row in rows]
+        decision_queue: list[dict[str, Any]] = []
+        for item in items:
+            for candidate in item.get("candidates") or []:
+                if not isinstance(candidate, Mapping):
+                    continue
+                readiness = _as_mapping(candidate.get("promotion_readiness"))
+                if readiness.get("status") == "ready" and "promote_candidate" in set(candidate.get("allowed_actions") or []):
+                    decision_queue.append(
+                        {
+                            "kind": "allocation_candidate",
+                            "job_id": item.get("job_id") or item.get("id"),
+                            "candidate_id": candidate.get("id"),
+                            "composition_id": item.get("composition_id"),
+                            "label": candidate.get("label"),
+                            "evidence_grade": readiness.get("evidence_grade"),
+                            "migration_cost_bps": readiness.get("migration_cost_bps"),
+                        }
+                    )
+        return {
+            "items": items,
+            "summary": {
+                "total": len(items),
+                "completed": len([item for item in items if str(item.get("status") or "").upper().startswith("COMPLETED")]),
+                "promotable_candidates": len(decision_queue),
+            },
+            "decision_queue": decision_queue,
+        }
+
+    @staticmethod
+    def _decode_composition_version_row(row: Mapping[str, Any]) -> dict[str, Any]:
+        diff = loads(row.get("diff_json"), {})
+        evidence = loads(row.get("evidence_json"), {})
+        snapshot = loads(row.get("snapshot_json"), {})
+        if not isinstance(diff, Mapping):
+            diff = {}
+        if not isinstance(evidence, Mapping):
+            evidence = {}
+        if not isinstance(snapshot, Mapping):
+            snapshot = {}
+        return {
+            "id": str(row.get("id") or ""),
+            "composition_id": str(row.get("composition_id") or ""),
+            "version_number": _as_int(row.get("version_number"), 0),
+            "status": str(row.get("status") or "DRAFT"),
+            "source_kind": str(row.get("source_kind") or "manual"),
+            "source_ref_id": row.get("source_ref_id"),
+            "created_at": str(row.get("created_at") or ""),
+            "diff_summary": {
+                "changed_legs": len(diff.get("weight_changes") or []) if isinstance(diff, Mapping) else 0,
+                "migration_cost_bps": _as_mapping(evidence).get("migration_cost_bps"),
+            },
+            "evidence": dict(evidence),
+            "snapshot": dict(snapshot),
+            "diff": dict(diff),
+        }
+
+    def _latest_composition_version_number(self, composition_id: str) -> int:
+        row = self.storage.fetch_one(
+            """
+            SELECT MAX(version_number) AS max_version
+            FROM composition_versions
+            WHERE composition_id = ?
+              AND deleted_at IS NULL
+            """,
+            (composition_id,),
+        )
+        return _as_int((row or {}).get("max_version"), 0)
+
+    def _ensure_current_composition_version(self, composition_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one(
+            """
+            SELECT *
+            FROM composition_versions
+            WHERE composition_id = ?
+              AND status = 'ACTIVE'
+              AND source_kind = 'composition_current'
+              AND deleted_at IS NULL
+            ORDER BY version_number DESC, created_at DESC
+            LIMIT 1
+            """,
+            (composition_id,),
+        )
+        if row:
+            return self._decode_composition_version_row(row)
+        record = self._load_composition_record(composition_id)
+        detail = self.get_composition_detail(composition_id)
+        version_number = max(1, _as_int(record.get("revision"), 1))
+        version_id = self._new_id("composition_version")
+        now = iso_now()
+        evidence = {
+            "evidence_grade": self._composition_evidence_grade_from_detail(detail),
+            "source_kind": "composition_current",
+            "immutable_snapshot": True,
+        }
+        self.storage.insert_json_row(
+            "composition_versions",
+            {
+                "id": version_id,
+                "composition_id": composition_id,
+                "version_number": version_number,
+                "status": "ACTIVE",
+                "source_kind": "composition_current",
+                "source_ref_id": composition_id,
+                "snapshot_json": dumps(self._composition_run_detail_snapshot(detail)),
+                "diff_json": dumps({}),
+                "evidence_json": dumps(evidence),
+                "created_at": now,
+                "deleted_at": None,
+                "deleted_reason": None,
+            },
+        )
+        created = self.storage.fetch_one("SELECT * FROM composition_versions WHERE id = ?", (version_id,))
+        return self._decode_composition_version_row(created or {})
+
+    def list_composition_versions(self, composition_id: str) -> dict[str, Any]:
+        self._load_composition_record(composition_id)
+        self._ensure_current_composition_version(composition_id)
+        rows = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM composition_versions
+            WHERE composition_id = ?
+              AND deleted_at IS NULL
+            ORDER BY version_number DESC, created_at DESC
+            """,
+            (composition_id,),
+        )
+        items = [self._decode_composition_version_row(row) for row in rows]
+        summaries = [
+            {key: value for key, value in item.items() if key not in {"snapshot", "diff"}}
+            for item in items
+        ]
+        return {"composition_id": composition_id, "items": summaries}
+
+    def get_composition_version(self, composition_id: str, version_id: str) -> dict[str, Any]:
+        self._load_composition_record(composition_id)
+        self._ensure_current_composition_version(composition_id)
+        row = self.storage.fetch_one(
+            """
+            SELECT *
+            FROM composition_versions
+            WHERE id = ?
+              AND composition_id = ?
+              AND deleted_at IS NULL
+            """,
+            (version_id, composition_id),
+        )
+        if not row:
+            raise KeyError(f"Composition version not found: {version_id}")
+        return self._decode_composition_version_row(row)
+
+    @staticmethod
+    def _find_composition_allocation_candidate(job: Mapping[str, Any], candidate_id: str) -> dict[str, Any]:
+        normalized = str(candidate_id or "").strip()
+        for raw_candidate in job.get("candidates") or []:
+            if not isinstance(raw_candidate, Mapping):
+                continue
+            ids = {
+                str(raw_candidate.get("id") or "").strip(),
+                str(raw_candidate.get("key") or "").strip(),
+                str(raw_candidate.get("label") or "").strip(),
+            }
+            if normalized in ids:
+                return dict(raw_candidate)
+        raise KeyError(f"Allocation candidate not found: {candidate_id}")
+
+    def _composition_candidate_diff(
+        self,
+        detail: Mapping[str, Any],
+        candidate: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        current_weights = self._composition_weight_map(detail)
+        candidate_weights = {
+            str(key): round(_as_float(value), 4)
+            for key, value in _as_mapping(candidate.get("weights")).items()
+        }
+        legs_by_id = {
+            str(leg.get("id") or ""): _as_mapping(leg)
+            for leg in detail.get("normalized_legs") or []
+            if isinstance(leg, Mapping)
+        }
+        changes: list[dict[str, Any]] = []
+        for leg_id in sorted(set(current_weights) | set(candidate_weights)):
+            before = round(_as_float(current_weights.get(leg_id), 0.0), 4)
+            after = round(_as_float(candidate_weights.get(leg_id), 0.0), 4)
+            if abs(before - after) <= 0.0001:
+                continue
+            changes.append(
+                {
+                    "leg_id": leg_id,
+                    "display_name": str(legs_by_id.get(leg_id, {}).get("display_name") or leg_id),
+                    "before_weight_pct": before,
+                    "after_weight_pct": after,
+                    "delta_pct": round(after - before, 4),
+                }
+            )
+        estimated_turnover = sum(abs(item["delta_pct"]) for item in changes) / 2.0
+        return {
+            "weight_changes": changes,
+            "estimated_turnover_pct": round(estimated_turnover, 4),
+        }
+
+    def promote_composition_allocation_candidate_to_draft(
+        self,
+        composition_id: str,
+        job_id: str,
+        candidate_id: str,
+        request: Any | None = None,
+    ) -> dict[str, Any]:
+        detail = self.get_composition_detail(composition_id)
+        job = self.get_composition_allocation_job(composition_id, job_id)
+        candidate = self._find_composition_allocation_candidate(job, candidate_id)
+        if "promote_candidate" not in set(candidate.get("allowed_actions") or []):
+            raise ValueError("Candidate is a reference row and cannot be promoted.")
+        readiness = self._composition_promotion_readiness_from_detail(detail, candidate=candidate)
+        if readiness.get("status") == "blocked":
+            raise ValueError(f"Candidate failed promotion gate: {', '.join(readiness.get('blockers') or [])}")
+        diff = self._composition_candidate_diff(detail, candidate)
+        version_number = self._latest_composition_version_number(composition_id) + 1
+        if version_number <= 1:
+            self._ensure_current_composition_version(composition_id)
+            version_number = self._latest_composition_version_number(composition_id) + 1
+        version_id = self._new_id("composition_version")
+        now = iso_now()
+        snapshot = {
+            **self._composition_run_detail_snapshot(detail),
+            "draft_candidate": candidate,
+            "draft_weights": dict(_as_mapping(candidate.get("weights"))),
+            "draft_source": {
+                "kind": "allocation_candidate",
+                "job_id": job_id,
+                "candidate_id": candidate_id,
+            },
+        }
+        request_payload = _as_mapping(request)
+        evidence = {
+            **readiness,
+            "decision_note": request_payload.get("decision_note"),
+            "base_version_id": request_payload.get("base_version_id"),
+            "candidate_label": candidate.get("label"),
+            "immutable_snapshot": True,
+        }
+        with self.storage.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO composition_versions (
+                    id,
+                    composition_id,
+                    version_number,
+                    status,
+                    source_kind,
+                    source_ref_id,
+                    snapshot_json,
+                    diff_json,
+                    evidence_json,
+                    created_at,
+                    deleted_at,
+                    deleted_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                """,
+                (
+                    version_id,
+                    composition_id,
+                    version_number,
+                    "DRAFT",
+                    "allocation_candidate",
+                    f"{job_id}:{candidate_id}",
+                    dumps(snapshot),
+                    dumps(diff),
+                    dumps(evidence),
+                    now,
+                ),
+            )
+            self._insert_composition_audit_event(
+                conn,
+                composition_id=composition_id,
+                revision=version_number,
+                action="draft_version_created",
+                summary="Allocation candidate promoted to draft composition version.",
+                occurred_at=now,
+                source_ref_id=f"{job_id}:{candidate_id}",
+                version_source="allocation_candidate",
+                version_candidate_id=candidate_id,
+                version_candidate_label=str(candidate.get("label") or candidate_id),
+            )
+        return self.get_composition_version(composition_id, version_id)
+
+    @staticmethod
+    def _composition_packet_markdown(packet: Mapping[str, Any]) -> str:
+        lines = [
+            f"# {packet.get('title') or 'Composition Decision Packet'}",
+            "",
+            f"- Composition: {packet.get('composition_name') or packet.get('composition_id')}",
+            f"- Version: {packet.get('version_label') or packet.get('version_id') or 'current'}",
+            f"- Recommendation: {packet.get('recommendation') or 'review'}",
+            f"- Evidence grade: {packet.get('evidence_grade') or 'B'}",
+            "",
+            "## Sources",
+        ]
+        source_refs = _as_mapping(packet.get("source_refs"))
+        for key, value in source_refs.items():
+            lines.append(f"- {key}: {value}")
+        lines.extend(["", "## Decision Snapshot", ""])
+        lines.append(json.dumps(packet.get("snapshot") or {}, ensure_ascii=False, indent=2, default=str))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _composition_packet_html(packet: Mapping[str, Any]) -> str:
+        title = xml_escape(str(packet.get("title") or "Composition Decision Packet"))
+        markdown = xml_escape(BacktestPlatformService._composition_packet_markdown(packet))
+        return f"<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title></head><body><pre>{markdown}</pre></body></html>"
+
+    def create_composition_decision_packet(self, composition_id: str, request: Any) -> dict[str, Any]:
+        detail = self.get_composition_detail(composition_id)
+        payload = _as_mapping(request)
+        version_id = str(payload.get("version_id") or "").strip()
+        if version_id:
+            version = self.get_composition_version(composition_id, version_id)
+        else:
+            version = self._ensure_current_composition_version(composition_id)
+            version_id = str(version.get("id") or "")
+        backtest_run_id = str(payload.get("backtest_run_id") or "").strip()
+        allocation_job_id = str(payload.get("allocation_job_id") or "").strip()
+        candidate_id = str(payload.get("candidate_id") or "").strip()
+        backtest = self.get_composition_backtest_run(composition_id, backtest_run_id) if backtest_run_id else None
+        allocation_job = self.get_composition_allocation_job(composition_id, allocation_job_id) if allocation_job_id else None
+        candidate = (
+            self._find_composition_allocation_candidate(allocation_job, candidate_id)
+            if allocation_job and candidate_id
+            else None
+        )
+        source_refs = {
+            "version_id": version_id,
+            "backtest_run_id": backtest_run_id or None,
+            "allocation_job_id": allocation_job_id or None,
+            "candidate_id": candidate_id or None,
+        }
+        packet = {
+            "title": f"{detail.get('name') or composition_id} decision packet",
+            "composition_id": composition_id,
+            "composition_name": detail.get("name"),
+            "version_id": version_id,
+            "version_label": f"v{version.get('version_number')}",
+            "source_refs": source_refs,
+            "recommendation": payload.get("recommendation") or "review",
+            "notes": payload.get("notes"),
+            "evidence_grade": _as_mapping(version.get("evidence")).get("evidence_grade")
+            or self._composition_evidence_grade_from_detail(detail),
+            "snapshot": {
+                "version": version,
+                "backtest": backtest,
+                "allocation_job": allocation_job,
+                "candidate": candidate,
+                "risk_budget": detail.get("risk_contribution_preview"),
+                "orders": _as_mapping(backtest or {}).get("order_summary"),
+                "proxy_notes": _as_mapping(detail.get("return_quality_summary")).get("notes"),
+            },
+        }
+        packet_id = self._new_id("composition_packet")
+        now = iso_now()
+        markdown = self._composition_packet_markdown(packet)
+        html = self._composition_packet_html(packet)
+        self.storage.insert_json_row(
+            "composition_decision_packets",
+            {
+                "id": packet_id,
+                "composition_id": composition_id,
+                "version_id": version_id or None,
+                "source_refs_json": dumps(source_refs),
+                "packet_json": dumps(packet),
+                "export_markdown": markdown,
+                "export_html": html,
+                "created_at": now,
+                "deleted_at": None,
+                "deleted_reason": None,
+            },
+        )
+        return self.get_composition_decision_packet(composition_id, packet_id)
+
+    def get_composition_decision_packet(self, composition_id: str, packet_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one(
+            """
+            SELECT *
+            FROM composition_decision_packets
+            WHERE id = ?
+              AND composition_id = ?
+              AND deleted_at IS NULL
+            """,
+            (packet_id, composition_id),
+        )
+        if not row:
+            raise KeyError(f"Composition decision packet not found: {packet_id}")
+        packet = loads(row.get("packet_json"), {})
+        source_refs = loads(row.get("source_refs_json"), {})
+        return {
+            "id": str(row.get("id") or ""),
+            "composition_id": str(row.get("composition_id") or ""),
+            "version_id": row.get("version_id"),
+            "source_refs": source_refs if isinstance(source_refs, Mapping) else {},
+            "packet": packet if isinstance(packet, Mapping) else {},
+            "export_markdown": str(row.get("export_markdown") or ""),
+            "export_html": str(row.get("export_html") or ""),
+            "created_at": str(row.get("created_at") or ""),
+        }
+
+    def export_composition_decision_packet(
+        self,
+        composition_id: str,
+        packet_id: str,
+        *,
+        export_format: str = "markdown",
+    ) -> dict[str, Any]:
+        packet = self.get_composition_decision_packet(composition_id, packet_id)
+        normalized = str(export_format or "markdown").strip().lower()
+        if normalized not in {"markdown", "html"}:
+            raise ValueError("Unsupported export format. Use markdown or html.")
+        if normalized == "html":
+            return {
+                "format": "html",
+                "filename": f"{packet_id}.html",
+                "media_type": "text/html; charset=utf-8",
+                "content": packet.get("export_html") or "",
+            }
+        return {
+            "format": "markdown",
+            "filename": f"{packet_id}.md",
+            "media_type": "text/markdown; charset=utf-8",
+            "content": packet.get("export_markdown") or "",
         }
 
     def build_bond_fixed_income_snapshot_overview(
@@ -10482,6 +12384,47 @@ class BacktestPlatformService:
 
         return sorted(values, key=lambda item: (abs(float(item) - float(anchor)), float(item)))
 
+    @staticmethod
+    def _optimization_parameter_sum_constraints(
+        search_space: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        groups: dict[str, dict[str, Any]] = {}
+        for entry in list(search_space or []):
+            payload = _as_mapping(entry)
+            key = str(payload.get("key") or "").strip()
+            if not key:
+                continue
+            group = str(payload.get("constraint_group") or "").strip()
+            if not group and _is_optimization_allocation_weight_key(key):
+                group = OPTIMIZATION_WEIGHT_SUM_CONSTRAINT_GROUP
+            if group != OPTIMIZATION_WEIGHT_SUM_CONSTRAINT_GROUP:
+                continue
+            target = _as_float(payload.get("constraint_target"), OPTIMIZATION_WEIGHT_SUM_TARGET)
+            record = groups.setdefault(group, {"group": group, "target": target, "keys": []})
+            record["keys"].append(key)
+        return [
+            record
+            for record in groups.values()
+            if len(record.get("keys") or []) >= 2
+        ]
+
+    @staticmethod
+    def _optimization_snapshot_satisfies_parameter_sum_constraints(
+        snapshot: Mapping[str, Any],
+        constraints: Sequence[Mapping[str, Any]],
+    ) -> bool:
+        for constraint in list(constraints or []):
+            keys = [str(key) for key in list(constraint.get("keys") or []) if str(key)]
+            if len(keys) < 2:
+                continue
+            values = [_as_float(snapshot.get(key), math.nan) for key in keys]
+            if any(not math.isfinite(value) for value in values):
+                return False
+            target = _as_float(constraint.get("target"), OPTIMIZATION_WEIGHT_SUM_TARGET)
+            if abs(sum(values) - target) > 1e-6:
+                return False
+        return True
+
     def _plan_optimization_search_snapshots(
         self,
         base_snapshot: Mapping[str, Any],
@@ -10500,6 +12443,7 @@ class BacktestPlatformService:
             return [_normalize_strategy_snapshot_descriptive_fields(base_snapshot)]
 
         budget = _as_int(requested_budget, 0)
+        parameter_sum_constraints = self._optimization_parameter_sum_constraints(search_space)
         snapshots: list[dict[str, Any]] = []
         seen: set[str] = set()
         for combination in product(*(values for _, values in value_sets)):
@@ -10507,6 +12451,11 @@ class BacktestPlatformService:
             for (key, _), value in zip(value_sets, combination):
                 snapshot[key] = value
             snapshot = _normalize_strategy_snapshot_descriptive_fields(snapshot)
+            if not self._optimization_snapshot_satisfies_parameter_sum_constraints(
+                snapshot,
+                parameter_sum_constraints,
+            ):
+                continue
             fingerprint = dumps(snapshot)
             if fingerprint in seen:
                 continue
@@ -10514,7 +12463,15 @@ class BacktestPlatformService:
             snapshots.append(snapshot)
             if budget > 0 and len(snapshots) >= budget:
                 break
-        return snapshots or [_normalize_strategy_snapshot_descriptive_fields(base_snapshot)]
+        if snapshots:
+            return snapshots
+        normalized_base_snapshot = _normalize_strategy_snapshot_descriptive_fields(base_snapshot)
+        if parameter_sum_constraints and not self._optimization_snapshot_satisfies_parameter_sum_constraints(
+            normalized_base_snapshot,
+            parameter_sum_constraints,
+        ):
+            return []
+        return [normalized_base_snapshot]
 
     def _build_optimization_window_metrics(self, points: list[Mapping[str, Any]]) -> dict[str, float]:
         return _build_optimization_window_metrics_payload(points)
@@ -12387,6 +14344,10 @@ class BacktestPlatformService:
                 list(normalized_payload.get("search_space") or []),
                 normalized_payload.get("budget_combinations"),
             )
+            if not planned_snapshots and self._optimization_parameter_sum_constraints(
+                list(normalized_payload.get("search_space") or [])
+            ):
+                raise ValueError("No optimization combinations satisfy the default weight-sum constraint")
             budget_combinations = max(1, len(planned_snapshots))
             normalized_payload["budget_combinations"] = budget_combinations
             resume_completed = 0
@@ -13586,6 +15547,168 @@ class BacktestPlatformService:
             "matching_combination_source": summary.get("matching_combination_source"),
         }
 
+    def _build_optimization_job_detail_snapshot(
+        self,
+        *,
+        job_id: str,
+        strategy_id: str,
+        payload: Mapping[str, Any],
+        candidates: Sequence[Mapping[str, Any]],
+        created_at: str,
+        updated_at: str,
+        completed_at: str | None,
+        deleted_at: str | None = None,
+        deleted_reason: str | None = None,
+    ) -> dict[str, Any]:
+        status = str(payload.get("status") or "COMPLETED").upper()
+        baseline_parameter_version_id = str(
+            payload.get("base_parameter_version_id") or ""
+        ).strip() or None
+        normalized_candidates = sorted(
+            [dict(candidate) for candidate in list(candidates or [])],
+            key=lambda item: int(item.get("rank") or 0) or 0,
+        )
+        persisted_payload = {
+            key: value
+            for key, value in {
+                **dict(payload),
+                "base_parameter_version_id": baseline_parameter_version_id,
+            }.items()
+            if not str(key).startswith("__optimization_")
+        }
+        persisted_payload.update(
+            _normalize_optimization_constraints_payload(persisted_payload),
+        )
+        summary = self._build_optimization_job_summary(
+            persisted_payload,
+            normalized_candidates,
+        )
+        result = self._build_optimization_job_result(
+            persisted_payload,
+            normalized_candidates,
+        )
+        strategy_name = None
+        try:
+            strategy = self.get_strategy_detail(strategy_id)
+            strategy_name = _display_strategy_name(
+                strategy.get("name"),
+                strategy.get("parameters"),
+            )
+        except Exception:
+            strategy_name = None
+        return {
+            "id": job_id,
+            "strategy_id": strategy_id,
+            "strategy_name": strategy_name,
+            "status": status,
+            "request": persisted_payload,
+            "summary": summary,
+            "result": result,
+            "candidates": normalized_candidates,
+            "base_parameter_version_id": baseline_parameter_version_id,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "completed_at": completed_at,
+            "deleted_at": deleted_at,
+            "deleted_reason": deleted_reason,
+            "progress_pct": summary.get("progress_pct"),
+            "current_stage": summary.get("current_stage"),
+            "latest_update": summary.get("latest_update"),
+            "estimated_remaining_minutes": summary.get("estimated_remaining_minutes"),
+            "estimated_completed_at": summary.get("estimated_completed_at"),
+            "resume_ready": summary.get("resume_ready"),
+            "persisted_trial_count": summary.get("persisted_trial_count"),
+            "next_trial_index": summary.get("next_trial_index"),
+            "interrupted_reason": summary.get("interrupted_reason"),
+            "best_metrics_summary": summary.get("best_metrics_summary"),
+            "matching_combination_count": summary.get("matching_combination_count"),
+            "matching_combination_source": summary.get("matching_combination_source"),
+            "matching_combinations": list(summary.get("matching_combinations") or []),
+            "constraint_preset_key": summary.get("constraint_preset_key")
+            or persisted_payload.get("constraint_preset_key"),
+            "constraint_label": summary.get("constraint_label")
+            or persisted_payload.get("constraint_label"),
+            "constraints": summary.get("constraints")
+            or persisted_payload.get("constraints"),
+        }
+
+    def _build_optimization_refilter_snapshot(
+        self,
+        job: Mapping[str, Any],
+        request: Any,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        payload = _as_mapping(request)
+        persisted_payload = self._build_optimization_job_persist_payload(job)
+        next_objective = _normalize_optimization_objective(
+            payload.get("objective")
+            or _as_mapping(job.get("summary")).get("objective")
+            or _as_mapping(job.get("request")).get("objective")
+        )
+        next_preset_key = (
+            payload.get("constraint_preset_key")
+            or _as_mapping(job.get("summary")).get("constraint_preset_key")
+            or _as_mapping(job.get("request")).get("constraint_preset_key")
+        )
+        next_constraints = payload.get("constraints")
+        if next_constraints is None:
+            next_constraints = (
+                _as_mapping(job.get("summary")).get("constraints")
+                or _as_mapping(job.get("request")).get("constraints")
+            )
+        next_constraint_payload = _normalize_optimization_constraints_payload(
+            {
+                "constraint_preset_key": next_preset_key,
+                "constraint_label": payload.get("constraint_label"),
+                "constraints": next_constraints,
+            }
+        )
+        refilter_payload = {
+            **persisted_payload,
+            **next_constraint_payload,
+            "objective": next_objective,
+            "status": "COMPLETED",
+        }
+        strategy = self.get_strategy_detail(str(job["strategy_id"]))
+        matching_trials = self._load_optimization_trials(
+            str(job["id"]),
+            include_chart_series=False,
+            include_metrics_json=True,
+        )
+        if matching_trials:
+            refiltered_candidates, _ = self._build_optimization_candidates_from_trial_pool(
+                job_id=str(job["id"]),
+                strategy=strategy,
+                payload=refilter_payload,
+                trials=matching_trials,
+                existing_candidates=list(job.get("candidates") or []),
+            )
+            matching_combinations = self._build_optimization_matching_combination_candidates(
+                strategy=strategy,
+                payload=refilter_payload,
+                trials=matching_trials,
+            )
+            matching_combination_source = "all_trials"
+        else:
+            refiltered_candidates = self._rerank_optimization_candidate_records(
+                job.get("candidates", []),
+                next_objective,
+            )
+            matching_combinations = [
+                dict(candidate)
+                for candidate in refiltered_candidates
+                if self._optimization_trial_passes_constraints(
+                    candidate,
+                    next_constraint_payload.get("constraints") or [],
+                )
+            ]
+            matching_combination_source = "persisted_candidates"
+        refilter_payload["best_metrics_summary"] = None
+        refilter_payload["latest_candidate_label"] = None
+        refilter_payload["matching_combination_count"] = len(matching_combinations)
+        refilter_payload["matching_combinations"] = matching_combinations
+        refilter_payload["matching_combination_source"] = matching_combination_source
+        return refilter_payload, refiltered_candidates
+
     def update_optimization_job_constraints(
         self,
         job_id: str,
@@ -13595,82 +15718,129 @@ class BacktestPlatformService:
         status = str(job.get("status") or "").upper()
         if status in {"QUEUED", "RUNNING", "INTERRUPTED"}:
             raise ValueError("Only completed optimization jobs can be re-filtered.")
-        payload = _as_mapping(request)
-        persisted_payload = self._build_optimization_job_persist_payload(job)
-        next_objective = _normalize_optimization_objective(
-            payload.get("objective")
-            or job["summary"].get("objective")
-            or job["request"].get("objective")
+        persisted_payload, refiltered_candidates = self._build_optimization_refilter_snapshot(
+            job,
+            request,
         )
-        next_preset_key = payload.get("constraint_preset_key") or job["summary"].get(
-            "constraint_preset_key"
-        ) or job["request"].get("constraint_preset_key")
-        next_constraints = payload.get("constraints")
-        if next_constraints is None:
-            next_constraints = job["summary"].get("constraints") or job["request"].get("constraints")
-        next_constraint_payload = _normalize_optimization_constraints_payload(
+        return self._build_optimization_job_detail_snapshot(
+            job_id=job_id,
+            strategy_id=str(job["strategy_id"]),
+            payload=persisted_payload,
+            candidates=refiltered_candidates,
+            created_at=str(job["created_at"]),
+            updated_at=str(job.get("updated_at") or job.get("created_at")),
+            completed_at=str(job.get("completed_at") or "").strip() or None,
+            deleted_at=str(job.get("deleted_at") or "").strip() or None,
+            deleted_reason=str(job.get("deleted_reason") or "").strip() or None,
+        )
+
+    def _copy_optimization_trials_to_saved_job(
+        self,
+        source_job_id: str,
+        target_job_id: str,
+    ) -> None:
+        rows = self.storage.fetch_all(
+            """
+            SELECT
+                trial_index,
+                status,
+                parameter_snapshot_json,
+                metrics_json,
+                chart_series_json,
+                score,
+                return_sharpe,
+                oos_sharpe,
+                total_return_pct,
+                stability,
+                error_message,
+                started_at,
+                completed_at
+            FROM optimization_job_trials
+            WHERE job_id = ?
+            ORDER BY trial_index ASC
+            """,
+            (source_job_id,),
+        )
+        if not rows:
+            return
+        self.storage.executemany(
+            """
+            INSERT OR REPLACE INTO optimization_job_trials (
+                job_id,
+                trial_index,
+                status,
+                parameter_snapshot_json,
+                metrics_json,
+                chart_series_json,
+                score,
+                return_sharpe,
+                oos_sharpe,
+                total_return_pct,
+                stability,
+                error_message,
+                started_at,
+                completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    target_job_id,
+                    row.get("trial_index"),
+                    row.get("status"),
+                    row.get("parameter_snapshot_json"),
+                    row.get("metrics_json"),
+                    row.get("chart_series_json"),
+                    row.get("score"),
+                    row.get("return_sharpe"),
+                    row.get("oos_sharpe"),
+                    row.get("total_return_pct"),
+                    row.get("stability"),
+                    row.get("error_message"),
+                    row.get("started_at"),
+                    row.get("completed_at"),
+                )
+                for row in rows
+            ],
+        )
+
+    def save_optimization_filtered_result(
+        self,
+        job_id: str,
+        request: Any,
+    ) -> dict[str, Any]:
+        job = self.get_optimization_job_detail(job_id)
+        status = str(job.get("status") or "").upper()
+        if status in {"QUEUED", "RUNNING", "INTERRUPTED"}:
+            raise ValueError("Only completed optimization jobs can be saved as a filtered result.")
+        persisted_payload, refiltered_candidates = self._build_optimization_refilter_snapshot(
+            job,
+            request,
+        )
+        now = iso_now()
+        new_job_id = self._new_id("opt")
+        persisted_payload.update(
             {
-                "constraint_preset_key": next_preset_key,
-                "constraint_label": payload.get("constraint_label"),
-                "constraints": next_constraints,
+                "source_optimization_job_id": job_id,
+                "entry_point": "saved_refilter_result",
+                "status": "COMPLETED",
+                "progress_pct": 100,
+                "current_stage": "Result ready",
+                "latest_update": f"已从优化任务 {job_id} 另存过滤结果。",
+                "estimated_remaining_minutes": 0,
+                "estimated_completed_at": now,
             }
         )
-        reranked_candidates = self._rerank_optimization_candidate_records(
-            job.get("candidates", []),
-            next_objective,
-        )
-        strategy = self.get_strategy_detail(str(job["strategy_id"]))
-        matching_trials = self._load_optimization_trials(
-            job_id,
-            include_chart_series=False,
-            include_metrics_json=True,
-        )
-        if matching_trials:
-            matching_combinations = self._build_optimization_matching_combination_candidates(
-                strategy=strategy,
-                payload={
-                    **persisted_payload,
-                    **next_constraint_payload,
-                    "objective": next_objective,
-                },
-                trials=matching_trials,
-            )
-            matching_combination_source = "all_trials"
-        else:
-            matching_combinations = [
-                dict(candidate)
-                for candidate in reranked_candidates
-                if self._optimization_trial_passes_constraints(
-                    candidate,
-                    next_constraint_payload.get("constraints") or [],
-                )
-            ]
-            matching_combination_source = "persisted_candidates"
-        persisted_payload.update(next_constraint_payload)
-        persisted_payload["objective"] = next_objective
-        persisted_payload["best_metrics_summary"] = None
-        persisted_payload["latest_candidate_label"] = None
-        persisted_payload["matching_combination_count"] = len(
-            matching_combinations,
-        )
-        persisted_payload["matching_combinations"] = matching_combinations
-        persisted_payload["matching_combination_source"] = (
-            matching_combination_source
-        )
         self._persist_optimization_job(
-            job_id,
+            new_job_id,
             str(job["strategy_id"]),
             persisted_payload,
-            reranked_candidates,
-            created_at=str(job["created_at"]),
-            updated_at=iso_now(),
-            completed_at=(
-                str(job.get("completed_at") or "").strip()
-                or str(job.get("updated_at") or "").strip()
-                or None
-            ),
+            refiltered_candidates,
+            created_at=now,
+            updated_at=now,
+            completed_at=now,
         )
-        return self.get_optimization_job_detail(job_id)
+        self._copy_optimization_trials_to_saved_job(job_id, new_job_id)
+        return self.get_optimization_job_detail(new_job_id)
 
     def delete_optimization_job(self, job_id: str) -> dict[str, Any]:
         row = self.storage.fetch_one(
@@ -16097,6 +18267,8 @@ class BacktestPlatformService:
             budget_combinations = requested_budget if requested_budget > 0 else max(1, len(search_space) or 1)
             planned_snapshots = self._plan_optimization_search_snapshots(base_snapshot, search_space, budget_combinations)
             if not planned_snapshots:
+                if self._optimization_parameter_sum_constraints(search_space):
+                    raise ValueError("No optimization combinations satisfy the default weight-sum constraint")
                 planned_snapshots = [dict(base_snapshot)]
             budget_combinations = min(max(1, budget_combinations), len(planned_snapshots))
             planned_snapshots = planned_snapshots[:budget_combinations]

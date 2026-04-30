@@ -101,6 +101,123 @@ def test_buy_and_hold_dca_executes_recurring_contributions_instead_of_single_nev
     assert result.coverage_ratio == 1.0
 
 
+def test_asset_allocation_reconstructs_weights_and_rebalances_without_second_report_path():
+    dates = ["2024-01-02", "2024-01-03", "2024-04-01", "2024-04-02", "2024-07-01"]
+    spy_bars = [
+        {"date": date, "open": price, "high": price, "low": price, "close": price, "adj_close": price}
+        for date, price in zip(dates, [100.0, 101.0, 110.0, 111.0, 120.0], strict=True)
+    ]
+    tlt_bars = [
+        {"date": date, "open": price, "high": price, "low": price, "close": price, "adj_close": price}
+        for date, price in zip(dates, [100.0, 100.5, 99.0, 100.0, 102.0], strict=True)
+    ]
+
+    result = run_backtest(
+        {"SPY": spy_bars, "TLT": tlt_bars},
+        config=BacktestConfig(
+            start_date="2024-01-02",
+            end_date="2024-07-01",
+            benchmark_symbol="SPY",
+            transaction_cost_bps=2.0,
+        ),
+        parameters={
+            "strategy_type": "ASSET_ALLOCATION",
+            "template_key": "asset_allocation",
+            "allocation_assets": [
+                {"symbol": "SPY", "display_name": "S&P 500 ETF", "asset_class": "Equity"},
+                {"symbol": "TLT", "display_name": "20Y Treasury ETF", "asset_class": "Treasury"},
+            ],
+            "allocation_weight__SPY_pct": 60,
+            "allocation_weight__TLT_pct": 40,
+            "rebalance_enabled": True,
+            "rebalance_frequency": "quarterly",
+            "rebalance_threshold_pct": 0,
+            "cost_model_enabled": True,
+            "expense_ratio_bps": 5,
+        },
+        benchmark_bars=spy_bars,
+    )
+
+    assert result.effective_date == "2024-01-03"
+    assert {trade.symbol for trade in result.trades[:2]} == {"SPY", "TLT"}
+    assert all(trade.reason == "asset_allocation:quarterly" for trade in result.trades)
+    assert result.coverage_days == len(result.daily_performance)
+    assert result.coverage_ratio == 1.0
+    assert result.metrics.turnover > 0
+
+
+def test_asset_allocation_quarterly_schedule_rebalances_even_below_drift_threshold():
+    dates = ["2024-01-02", "2024-01-03", "2024-04-01", "2024-04-02", "2024-07-01", "2024-07-02"]
+    spy_bars = [
+        {"date": date, "open": price, "high": price, "low": price, "close": price, "adj_close": price}
+        for date, price in zip(dates, [100.0, 100.1, 101.0, 101.1, 102.0, 102.1], strict=True)
+    ]
+    tlt_bars = [
+        {"date": date, "open": price, "high": price, "low": price, "close": price, "adj_close": price}
+        for date, price in zip(dates, [100.0, 99.9, 99.0, 98.9, 98.0, 97.9], strict=True)
+    ]
+
+    result = run_backtest(
+        {"SPY": spy_bars, "TLT": tlt_bars},
+        config=BacktestConfig(
+            start_date="2024-01-02",
+            end_date="2024-07-02",
+            benchmark_symbol="SPY",
+        ),
+        parameters={
+            "strategy_type": "ASSET_ALLOCATION",
+            "template_key": "asset_allocation",
+            "allocation_assets": [
+                {"symbol": "SPY", "display_name": "S&P 500 ETF", "asset_class": "Equity"},
+                {"symbol": "TLT", "display_name": "20Y Treasury ETF", "asset_class": "Treasury"},
+            ],
+            "allocation_weight__SPY_pct": 50,
+            "allocation_weight__TLT_pct": 50,
+            "rebalance_enabled": True,
+            "rebalance_frequency": "quarterly",
+            "rebalance_threshold_pct": 5,
+        },
+        benchmark_bars=spy_bars,
+    )
+
+    trade_dates = [trade.date for trade in result.trades]
+
+    assert trade_dates.count("2024-01-03") == 2
+    assert trade_dates.count("2024-04-02") == 2
+    assert trade_dates.count("2024-07-02") == 2
+    assert all(trade.reason == "asset_allocation:quarterly" for trade in result.trades)
+
+
+def test_asset_allocation_available_weights_normalize_without_operator_warning():
+    dates = ["2024-01-02", "2024-01-03"]
+    spy_bars = [
+        {"date": date, "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "adj_close": 100.0}
+        for date in dates
+    ]
+
+    result = run_backtest(
+        {"SPY": spy_bars},
+        config=BacktestConfig(start_date="2024-01-02", end_date="2024-01-03", benchmark_symbol="SPY"),
+        parameters={
+            "strategy_type": "ASSET_ALLOCATION",
+            "template_key": "asset_allocation",
+            "allocation_assets": [
+                {"symbol": "SPY", "display_name": "S&P 500 ETF", "asset_class": "Equity"},
+                {"symbol": "QQQ", "display_name": "Nasdaq 100 ETF", "asset_class": "Growth Equity"},
+            ],
+            "allocation_weight__SPY_pct": 35,
+            "allocation_weight__QQQ_pct": 25,
+            "rebalance_enabled": True,
+            "rebalance_frequency": "quarterly",
+        },
+        benchmark_bars=spy_bars,
+    )
+
+    assert result.warnings == []
+    assert result.trades[0].symbol == "SPY"
+    assert result.trades[0].weight_after == 1.0
+
+
 def test_buy_and_hold_dynamic_logic_uses_valuation_series_to_scale_contributions():
     bars = [
         {"date": "2024-01-02", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},

@@ -32,7 +32,7 @@ type WorkspaceRecentRunsSectionProps = {
 
 const TEXT = {
   title: '最近回测优化',
-  copy: '展示最近 8 条回测与优化活动，按最新进展混合排序。',
+  copy: '汇总近 8 条回测与优化记录，按最新进展排序。',
   empty: '暂无最近回测或优化任务。',
   error: '最近回测优化加载失败。',
   retry: '重试',

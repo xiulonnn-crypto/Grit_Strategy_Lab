@@ -1,0 +1,1674 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sleeve OS 组合中心 v2 全局页面</title>
+    <style>
+      :root {
+        --gsl-bg-main: #f0f2f5;
+        --gsl-bg-surface: #ffffff;
+        --gsl-bg-surface-soft: #fbfcfd;
+        --gsl-bg-subtle: #f9fafb;
+        --gsl-bg-accent-soft: #f5fbf8;
+        --gsl-color-primary: #1f877b;
+        --gsl-color-primary-strong: #176b61;
+        --gsl-color-primary-soft: #e6f4f1;
+        --gsl-color-benchmark: #4c78c7;
+        --gsl-color-success: #2b8a3e;
+        --gsl-color-success-soft: #ecfdf3;
+        --gsl-color-warning: #b86813;
+        --gsl-color-warning-soft: #fff7e8;
+        --gsl-color-danger: #c45c4f;
+        --gsl-color-danger-soft: #fff8f7;
+        --gsl-color-border: #e5e7eb;
+        --gsl-color-border-soft: #eef2f4;
+        --gsl-color-border-strong: #d7e1e5;
+        --gsl-text-title: #111827;
+        --gsl-text-main: #1f2937;
+        --gsl-text-sub: #64748b;
+        --gsl-text-muted: #94a3b8;
+        --gsl-shadow-card: 0 1px 3px rgba(17, 24, 39, 0.06), 0 1px 2px rgba(17, 24, 39, 0.04);
+        --gsl-font-ui: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif;
+        --gsl-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        overflow-x: hidden;
+        background: var(--gsl-bg-main);
+        color: var(--gsl-text-main);
+        font-family: var(--gsl-font-ui);
+        letter-spacing: 0;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+
+      button {
+        font: inherit;
+      }
+
+      .screen-stack {
+        display: block;
+        padding: 0;
+      }
+
+      .mockup {
+        width: 100vw;
+        min-height: 100vh;
+        overflow: visible;
+        border-radius: 0;
+        background: var(--gsl-bg-main);
+        box-shadow: none;
+      }
+
+      .mockup[hidden] {
+        display: none;
+      }
+
+      .app-shell {
+        display: grid;
+        grid-template-columns: 236px minmax(0, 1fr);
+        min-height: 100vh;
+      }
+
+      .sidebar {
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        gap: 22px;
+        padding: 22px 18px;
+        border-right: 1px solid var(--gsl-color-border);
+        background: var(--gsl-bg-surface);
+      }
+
+      .brand {
+        display: grid;
+        gap: 7px;
+      }
+
+      .brand strong {
+        color: var(--gsl-text-title);
+        font-size: 18px;
+        line-height: 1.25;
+      }
+
+      .brand span,
+      .side-group span,
+      .side-footer {
+        color: var(--gsl-text-sub);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .side-nav {
+        display: grid;
+        align-content: start;
+        gap: 22px;
+      }
+
+      .side-group {
+        display: grid;
+        gap: 8px;
+      }
+
+      .nav-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 38px;
+        padding: 0 12px;
+        border-radius: 12px;
+        color: var(--gsl-text-main);
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .nav-item::before {
+        width: 8px;
+        height: 8px;
+        border-radius: 99px;
+        background: var(--gsl-color-border-strong);
+        content: "";
+      }
+
+      .nav-item.is-active {
+        background: var(--gsl-color-primary-soft);
+        color: var(--gsl-color-primary-strong);
+      }
+
+      .nav-item.is-active::before {
+        background: var(--gsl-color-primary);
+      }
+
+      .main {
+        display: grid;
+        grid-template-rows: 80px minmax(0, 1fr);
+        min-width: 0;
+      }
+
+      .main--no-topbar {
+        grid-template-rows: minmax(0, 1fr);
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+        padding: 0 32px;
+        border-bottom: 1px solid var(--gsl-color-border);
+        background: var(--gsl-bg-surface);
+      }
+
+      .topbar--status-only {
+        justify-content: flex-end;
+      }
+
+      .topbar strong {
+        color: var(--gsl-text-title);
+        font-size: 15px;
+      }
+
+      .topbar small {
+        color: var(--gsl-text-muted);
+        font-size: 12px;
+      }
+
+      .topbar-status {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--gsl-text-sub);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--gsl-color-success);
+        box-shadow: 0 0 0 4px rgba(43, 138, 62, 0.12);
+      }
+
+      .page {
+        display: grid;
+        align-content: start;
+        gap: 22px;
+        width: 100%;
+        padding: 32px;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 400px;
+        gap: 20px;
+        height: 172px;
+        min-height: 0;
+        overflow: hidden;
+        padding: 18px 28px;
+        border: 1px solid var(--gsl-color-border);
+        border-radius: 24px;
+        background:
+          radial-gradient(circle at top right, rgba(31, 135, 123, 0.08), transparent 30%),
+          linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
+        box-shadow: var(--gsl-shadow-card);
+      }
+
+      .hero--full {
+        grid-template-columns: 1fr;
+      }
+
+      .hero-copy {
+        display: grid;
+        gap: 8px;
+        align-content: start;
+        max-width: 1120px;
+        min-width: 0;
+      }
+
+      .eyebrow {
+        color: var(--gsl-color-primary-strong);
+        font-size: 11px;
+        font-weight: 800;
+        line-height: 16px;
+      }
+
+      .hero h1 {
+        color: var(--gsl-text-title);
+        font-size: 26px;
+        line-height: 31px;
+      }
+
+      .hero p,
+      .panel p,
+      .muted {
+        color: var(--gsl-text-sub);
+        font-size: 14px;
+        line-height: 1.58;
+      }
+
+      .hero p {
+        line-height: 20px;
+      }
+
+      .hero-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-content: start;
+        justify-content: flex-end;
+      }
+
+      .hero-panel {
+        display: grid;
+        align-self: stretch;
+        align-content: start;
+        gap: 14px;
+        padding: 16px;
+        border: 1px solid rgba(215, 225, 229, 0.9);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.72);
+      }
+
+      .hero-panel header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .hero-panel header span,
+      .hero-panel small {
+        color: var(--gsl-text-sub);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .hero-panel header strong {
+        color: var(--gsl-text-title);
+        font-size: 15px;
+        line-height: 1.35;
+      }
+
+      .hero-panel .hero-actions {
+        justify-content: flex-start;
+      }
+
+      .hero-panel-metrics {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .hero-panel-metric {
+        display: grid;
+        gap: 3px;
+        min-height: 58px;
+        padding: 9px;
+        border-radius: 12px;
+        background: var(--gsl-bg-subtle);
+      }
+
+      .hero-panel-metric span {
+        color: var(--gsl-text-muted);
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .hero-panel-metric strong {
+        color: var(--gsl-text-title);
+        font-size: 14px;
+      }
+
+      .primary,
+      .ghost,
+      .text-action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 40px;
+        padding: 0 14px;
+        border-radius: 8px;
+        font-size: 13px;
+        font-weight: 800;
+      }
+
+      .primary {
+        border: 1px solid var(--gsl-color-primary);
+        background: var(--gsl-color-primary);
+        color: #ffffff;
+      }
+
+      .ghost {
+        border: 1px solid #d8dde4;
+        background: #ffffff;
+        color: var(--gsl-text-main);
+      }
+
+      .text-action {
+        min-height: 34px;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: var(--gsl-color-primary-strong);
+        white-space: nowrap;
+      }
+
+      .chip-row,
+      .filters,
+      .actions,
+      .segmented {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .chip,
+      .status,
+      .grade,
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 30px;
+        padding: 0 11px;
+        border: 1px solid var(--gsl-color-border);
+        border-radius: 999px;
+        background: #ffffff;
+        color: var(--gsl-text-sub);
+        font-size: 12px;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+
+      .chip--accent,
+      .status--good,
+      .grade--a {
+        border-color: rgba(31, 135, 123, 0.18);
+        background: var(--gsl-color-primary-soft);
+        color: var(--gsl-color-primary-strong);
+      }
+
+      .chip--blue,
+      .status--info {
+        border-color: rgba(76, 120, 199, 0.18);
+        background: #eef5ff;
+        color: #315fba;
+      }
+
+      .chip--warning,
+      .status--warning,
+      .grade--b {
+        border-color: rgba(184, 104, 19, 0.28);
+        background: var(--gsl-color-warning-soft);
+        color: #a45a0a;
+      }
+
+      .chip--danger,
+      .status--danger,
+      .grade--c {
+        border-color: rgba(196, 92, 79, 0.28);
+        background: var(--gsl-color-danger-soft);
+        color: var(--gsl-color-danger);
+      }
+
+      .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-auto-rows: 104px;
+        gap: 12px;
+      }
+
+      .metric {
+        display: grid;
+        grid-template-rows: 16px 28px 18px;
+        align-content: start;
+        gap: 7px;
+        height: 104px;
+        min-height: 96px;
+        padding: 14px 16px;
+        border: 1px solid var(--gsl-color-border);
+        border-radius: 18px;
+        background: linear-gradient(180deg, #fcfeff 0%, #ffffff 100%);
+        box-shadow: var(--gsl-shadow-card);
+      }
+
+      .metric span {
+        color: var(--gsl-text-sub);
+        font-size: 12px;
+        font-weight: 800;
+        line-height: 16px;
+      }
+
+      .metric strong {
+        color: var(--gsl-text-title);
+        font-size: 26px;
+        line-height: 28px;
+      }
+
+      .metric small {
+        color: var(--gsl-text-sub);
+        font-size: 12px;
+        line-height: 18px;
+      }
+
+      .metric--accent strong {
+        color: var(--gsl-color-primary);
+      }
+
+      .layout-with-rail {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 330px;
+        gap: 18px;
+        align-items: start;
+      }
+
+      .panel,
+      .rail-card {
+        min-width: 0;
+        border: 1px solid var(--gsl-color-border);
+        border-radius: 18px;
+        background: linear-gradient(180deg, #ffffff 0%, #fcfdfe 100%);
+        box-shadow: var(--gsl-shadow-card);
+      }
+
+      .panel {
+        padding: 18px 20px;
+      }
+
+      .rail-card {
+        display: grid;
+        gap: 14px;
+        padding: 18px;
+      }
+
+      .panel-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 14px;
+        margin-bottom: 14px;
+      }
+
+      .panel h2,
+      .rail-card h2 {
+        color: var(--gsl-text-title);
+        font-size: 18px;
+        line-height: 1.3;
+      }
+
+      .rail-card > header p {
+        color: var(--gsl-text-sub);
+        font-size: 14px;
+        font-weight: 400;
+        line-height: 1.5;
+      }
+
+      .toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 12px;
+        border: 1px solid var(--gsl-color-border-soft);
+        border-radius: 16px;
+        background: var(--gsl-bg-subtle);
+      }
+
+      .filter {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 34px;
+        padding: 0 11px;
+        border: 1px solid var(--gsl-color-border);
+        border-radius: 999px;
+        background: #ffffff;
+        color: var(--gsl-text-main);
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .filter span {
+        color: var(--gsl-text-muted);
+        font-weight: 700;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      .compact-run-table th,
+      .compact-run-table td {
+        padding-left: 8px;
+        padding-right: 8px;
+      }
+
+      .compact-run-table .name-cell {
+        min-width: 170px;
+      }
+
+      .compact-run-table td:nth-child(3),
+      .compact-run-table td:nth-child(4),
+      .compact-run-table td:nth-child(5),
+      .compact-run-table td:nth-child(7) {
+        white-space: nowrap;
+      }
+
+      .compact-run-table .spark {
+        width: 90px;
+      }
+
+      th,
+      td {
+        padding: 13px 10px;
+        border-bottom: 1px solid var(--gsl-color-border-soft);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        background: var(--gsl-bg-subtle);
+        color: var(--gsl-text-sub);
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      td {
+        color: var(--gsl-text-main);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .name-cell {
+        display: grid;
+        gap: 5px;
+        min-width: 200px;
+      }
+
+      .name-cell strong,
+      .queue-item strong,
+      .job-card strong {
+        color: var(--gsl-text-title);
+        font-size: 14px;
+      }
+
+      .name-cell span,
+      .subtle,
+      .mono {
+        color: var(--gsl-text-muted);
+        font-size: 12px;
+      }
+
+      .mono {
+        font-family: var(--gsl-font-mono);
+      }
+
+      .value-stack {
+        display: grid;
+        gap: 5px;
+      }
+
+      .value-stack strong,
+      .value-stack span {
+        overflow-wrap: normal;
+      }
+
+      .value-stack strong {
+        color: var(--gsl-text-title);
+        font-size: 14px;
+      }
+
+      .nowrap {
+        white-space: nowrap;
+      }
+
+      .number-good {
+        color: var(--gsl-color-primary-strong);
+        font-weight: 800;
+      }
+
+      .number-danger {
+        color: var(--gsl-color-danger);
+        font-weight: 800;
+      }
+
+      .rail-list,
+      .queue-list,
+      .job-list,
+      .scenario-list,
+      .candidate-list {
+        display: grid;
+        gap: 10px;
+      }
+
+      .queue-item,
+      .scenario-card,
+      .job-card,
+      .candidate-card {
+        display: grid;
+        gap: 8px;
+        padding: 12px;
+        border: 1px solid var(--gsl-color-border-soft);
+        border-radius: 14px;
+        background: #ffffff;
+      }
+
+      .queue-item header,
+      .scenario-card header,
+      .job-card header,
+      .candidate-card header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 10px;
+      }
+
+      .mini-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .mini-kpi {
+        display: grid;
+        gap: 3px;
+        padding: 9px;
+        border-radius: 12px;
+        background: var(--gsl-bg-subtle);
+      }
+
+      .mini-kpi span {
+        color: var(--gsl-text-muted);
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .mini-kpi strong {
+        color: var(--gsl-text-title);
+        font-size: 13px;
+      }
+
+      .spark {
+        width: 118px;
+        height: 36px;
+      }
+
+      .scenario-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .timeline {
+        display: grid;
+        gap: 10px;
+      }
+
+      .timeline-row {
+        display: grid;
+        grid-template-columns: 86px minmax(0, 1fr) 80px;
+        gap: 12px;
+        align-items: center;
+      }
+
+      .bar {
+        position: relative;
+        height: 10px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: #edf1f4;
+      }
+
+      .bar span {
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: var(--value);
+        border-radius: inherit;
+        background: var(--gsl-color-primary);
+      }
+
+      .bar--warning span {
+        background: var(--gsl-color-warning);
+      }
+
+      .bar--danger span {
+        background: var(--gsl-color-danger);
+      }
+
+      .frontier {
+        position: relative;
+        height: 300px;
+        border: 1px solid var(--gsl-color-border-soft);
+        border-radius: 18px;
+        background:
+          linear-gradient(180deg, rgba(76, 120, 199, 0.06), transparent 42%),
+          linear-gradient(90deg, #f7fafb 1px, transparent 1px),
+          linear-gradient(180deg, #f7fafb 1px, transparent 1px),
+          #ffffff;
+        background-size: auto, 72px 72px, 72px 72px, auto;
+      }
+
+      .frontier-curve {
+        position: absolute;
+        inset: 54px 72px 78px 76px;
+        border-top: 3px solid rgba(31, 135, 123, 0.55);
+        border-radius: 58% 42% 0 0;
+        transform: rotate(-8deg);
+      }
+
+      .point {
+        position: absolute;
+        left: var(--x);
+        top: var(--y);
+        display: grid;
+        place-items: center;
+        width: 16px;
+        height: 16px;
+        border: 3px solid #ffffff;
+        border-radius: 99px;
+        background: var(--gsl-color-primary);
+        box-shadow: 0 6px 18px rgba(17, 24, 39, 0.14);
+      }
+
+      .point--benchmark {
+        border-color: var(--gsl-color-danger);
+        background: #ffffff;
+      }
+
+      .point--candidate {
+        background: var(--gsl-color-benchmark);
+      }
+
+      .frontier-label {
+        position: absolute;
+        left: 18px;
+        bottom: 16px;
+        color: var(--gsl-text-sub);
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .review-card {
+        display: grid;
+        gap: 12px;
+        padding: 16px;
+        border: 1px solid rgba(31, 135, 123, 0.18);
+        border-radius: 18px;
+        background: var(--gsl-bg-accent-soft);
+      }
+
+      .diff-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .diff-item {
+        display: grid;
+        gap: 5px;
+        padding: 10px;
+        border-radius: 12px;
+        background: #ffffff;
+      }
+
+      .diff-item span {
+        color: var(--gsl-text-muted);
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .diff-item strong {
+        color: var(--gsl-text-title);
+        font-size: 15px;
+      }
+
+      .mobile-cards {
+        display: none;
+      }
+
+      @media (max-width: 760px) {
+        .screen-stack {
+          padding: 0;
+          gap: 0;
+        }
+
+        .mockup {
+          width: 100%;
+          min-height: auto;
+          border-radius: 0;
+          box-shadow: none;
+        }
+
+        .app-shell {
+          grid-template-columns: 1fr;
+          min-height: 100vh;
+        }
+
+        .sidebar {
+          grid-template-rows: auto auto;
+          gap: 12px;
+          padding: 16px 18px;
+          border-right: 0;
+          border-bottom: 1px solid var(--gsl-color-border);
+        }
+
+        .side-nav {
+          display: flex;
+          gap: 8px;
+          overflow-x: auto;
+        }
+
+        .side-group {
+          display: contents;
+        }
+
+        .side-group span,
+        .side-footer,
+        .nav-item::before {
+          display: none;
+        }
+
+        .nav-item {
+          flex: 0 0 auto;
+          min-height: 34px;
+          padding-inline: 11px;
+          border: 1px solid var(--gsl-color-border);
+          border-radius: 999px;
+          background: #ffffff;
+          font-size: 12px;
+        }
+
+        .main {
+          grid-template-rows: auto minmax(0, 1fr);
+        }
+
+        .topbar {
+          padding: 14px 20px;
+          align-items: flex-start;
+        }
+
+        .topbar-status {
+          display: none;
+        }
+
+        .page {
+          gap: 18px;
+          padding: 20px;
+        }
+
+        .hero,
+        .layout-with-rail {
+          grid-template-columns: 1fr;
+        }
+
+        .hero {
+          padding: 20px;
+          border-radius: 20px;
+        }
+
+        .hero-actions {
+          justify-content: flex-start;
+        }
+
+        .metric-grid,
+        .scenario-grid,
+        .diff-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .toolbar {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .panel-header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .desktop-table {
+          display: none;
+        }
+
+        .mobile-cards {
+          display: grid;
+          gap: 10px;
+        }
+
+        .panel,
+        .rail-card {
+          padding: 16px;
+          border-radius: 16px;
+        }
+
+        .frontier {
+          height: 240px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="screen-stack">
+      <section class="mockup" id="composition-list" data-page-key="composition-list">
+        <div class="app-shell">
+          <aside class="sidebar">
+            <div class="brand">
+              <strong>Grit Strategy Lab</strong>
+              <span>Sleeve OS · 本地研究工作台</span>
+            </div>
+            <nav class="side-nav" aria-label="主导航">
+              <div class="side-group">
+                <span>组合</span>
+                <div class="nav-item">组合仪表板</div>
+                <div class="nav-item is-active">组合列表</div>
+                <div class="nav-item">组合回测</div>
+                <div class="nav-item">组合实验室</div>
+                <div class="nav-item">资产库</div>
+              </div>
+              <div class="side-group">
+                <span>策略</span>
+                <div class="nav-item">策略工作台</div>
+                <div class="nav-item">策略库</div>
+                <div class="nav-item">回测历史</div>
+              </div>
+            </nav>
+            <div class="side-footer">运行库已连接 · 证据快照 09:42</div>
+          </aside>
+          <main class="main main--no-topbar">
+            <div class="page">
+              <section class="hero">
+                <div class="hero-copy">
+                  <span class="eyebrow">组合中心</span>
+                  <h1>组合列表</h1>
+                  <p>跨组合查看正式版本、来源签名、证据质量和待晋升候选，把组合运营从卡片摘要推进到可审计的工作清单。</p>
+                  <div class="chip-row">
+                    <span class="chip chip--accent">正式组合 18 个</span>
+                    <span class="chip chip--warning">待决策 7 项</span>
+                    <span class="chip chip--blue">新版本草稿 3 个</span>
+                    <span class="chip">证据覆盖 92%</span>
+                  </div>
+                </div>
+                <div class="hero-actions" aria-label="组合列表操作区">
+                  <button class="primary">新建组合</button>
+                </div>
+              </section>
+
+              <section class="metric-grid" aria-label="组合列表概览">
+                <article class="metric metric--accent">
+                  <span>可运行组合</span>
+                  <strong>14</strong>
+                  <small>已通过来源冻结与权重合计检查。</small>
+                </article>
+                <article class="metric">
+                  <span>高质量证据</span>
+                  <strong>15</strong>
+                  <small>证据完整或仅需轻度复核的组合。</small>
+                </article>
+                <article class="metric">
+                  <span>待晋升候选</span>
+                  <strong>4</strong>
+                  <small>来自已完成配置作业。</small>
+                </article>
+                <article class="metric">
+                  <span>版本漂移</span>
+                  <strong>3</strong>
+                  <small>策略腿已有更新参数版本。</small>
+                </article>
+              </section>
+
+              <div class="layout-with-rail">
+                <section class="panel">
+                  <div class="panel-header">
+                    <div>
+                      <h2>全部组合</h2>
+                      <p>列表热路径只读取组合摘要，详情证据进入组合详情页复核。</p>
+                    </div>
+                    <span class="chip chip--accent">18 条记录</span>
+                  </div>
+                  <div class="toolbar">
+                    <div class="filters">
+                      <span class="filter"><span>状态</span>全部</span>
+                      <span class="filter"><span>证据</span>高质量</span>
+                      <span class="filter"><span>版本</span>含草稿</span>
+                      <span class="filter"><span>待办</span>仅待决策</span>
+                    </div>
+                    <button class="ghost">保存视图</button>
+                  </div>
+                  <table class="desktop-table" aria-label="组合列表">
+                    <thead>
+                      <tr>
+                        <th>组合</th>
+                        <th>版本</th>
+                        <th>证据质量</th>
+                        <th>最新回测</th>
+                        <th>实验室</th>
+                        <th>待决策</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>
+                          <div class="name-cell">
+                            <strong>全天候研究组合</strong>
+                            <span class="mono">cmp_7a29 · 4 条腿 · 季度再平衡</span>
+                          </div>
+                        </td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>v6</strong>
+                            <span>冻结版本</span>
+                          </div>
+                        </td>
+                        <td><span class="grade grade--a">证据完整</span></td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>10Y 稳定</strong>
+                            <span>最大回撤 -9.4%</span>
+                          </div>
+                        </td>
+                        <td>
+                          <div class="value-stack">
+                            <strong class="nowrap">Risk Parity</strong>
+                            <span>候选可晋升</span>
+                          </div>
+                        </td>
+                        <td><span class="chip chip--warning">1 项</span></td>
+                        <td><button class="text-action">查看详情</button></td>
+                      </tr>
+                      <tr>
+                        <td>
+                          <div class="name-cell">
+                            <strong>纳指防守增强</strong>
+                            <span class="mono">cmp_91c4 · 3 条腿 · 月度再平衡</span>
+                          </div>
+                        </td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>v3</strong>
+                            <span>草稿版本</span>
+                          </div>
+                        </td>
+                        <td><span class="grade grade--b">需复核</span></td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>2022 需复盘</strong>
+                            <span>代理覆盖 81%</span>
+                          </div>
+                        </td>
+                        <td>
+                          <div class="value-stack">
+                            <strong class="nowrap">MVO</strong>
+                            <span>迁移成本 22 bps</span>
+                          </div>
+                        </td>
+                        <td><span class="chip chip--warning">2 项</span></td>
+                        <td><button class="text-action">继续编辑</button></td>
+                      </tr>
+                      <tr>
+                        <td>
+                          <div class="name-cell">
+                            <strong>现金缓冲核心</strong>
+                            <span class="mono">cmp_34f1 · 5 条腿 · 月度再平衡</span>
+                          </div>
+                        </td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>v4</strong>
+                            <span>冻结版本</span>
+                          </div>
+                        </td>
+                        <td><span class="grade grade--a">证据完整</span></td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>30Y 可裁决</strong>
+                            <span>订单 362 笔</span>
+                          </div>
+                        </td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>低波动</strong>
+                            <span>ENB 3.8</span>
+                          </div>
+                        </td>
+                        <td><span class="chip">无</span></td>
+                        <td><button class="text-action">发起回测</button></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <div class="mobile-cards">
+                    <article class="queue-item">
+                      <header><strong>全天候研究组合</strong><span class="grade grade--a">证据完整</span></header>
+                      <p class="muted">v6 冻结版本 · Risk Parity 候选可晋升</p>
+                      <button class="text-action">查看详情</button>
+                    </article>
+                    <article class="queue-item">
+                      <header><strong>纳指防守增强</strong><span class="grade grade--b">需复核</span></header>
+                      <p class="muted">v3 草稿版本 · 2022 压力窗口需复盘</p>
+                      <button class="text-action">继续编辑</button>
+                    </article>
+                  </div>
+                </section>
+
+                <aside class="rail-card">
+                  <header>
+                    <h2>待决策事项</h2>
+                    <p>从版本漂移、失败证据和候选晋升自动汇总。</p>
+                  </header>
+                  <div class="rail-list">
+                    <article class="queue-item">
+                      <header><strong>Risk Parity 候选</strong><span class="status status--warning">待晋升</span></header>
+                      <p class="muted">全天候研究组合 · 扣费后 Sharpe +0.08 · 迁移成本 14 bps</p>
+                      <button class="text-action">进入晋升审查</button>
+                    </article>
+                    <article class="queue-item">
+                      <header><strong>策略腿版本漂移</strong><span class="status status--info">需复核</span></header>
+                      <p class="muted">纳指防守增强 · QQQ 网格策略已有 v9 参数版本</p>
+                      <button class="text-action">查看来源签名</button>
+                    </article>
+                    <article class="queue-item">
+                      <header><strong>2022 压力回撤</strong><span class="status status--danger">需裁决</span></header>
+                      <p class="muted">现金缓冲核心 · 利率冲击窗口跑输基准 2.1pt</p>
+                      <button class="text-action">打开回测复盘</button>
+                    </article>
+                  </div>
+                </aside>
+              </div>
+            </div>
+          </main>
+        </div>
+      </section>
+
+      <section class="mockup" id="composition-backtests" data-page-key="composition-backtest-runs">
+        <div class="app-shell">
+          <aside class="sidebar">
+            <div class="brand">
+              <strong>Grit Strategy Lab</strong>
+              <span>Sleeve OS · 本地研究工作台</span>
+            </div>
+            <nav class="side-nav" aria-label="主导航">
+              <div class="side-group">
+                <span>组合</span>
+                <div class="nav-item">组合仪表板</div>
+                <div class="nav-item">组合列表</div>
+                <div class="nav-item is-active">组合回测</div>
+                <div class="nav-item">组合实验室</div>
+                <div class="nav-item">资产库</div>
+              </div>
+              <div class="side-group">
+                <span>策略</span>
+                <div class="nav-item">策略工作台</div>
+                <div class="nav-item">策略库</div>
+                <div class="nav-item">回测历史</div>
+              </div>
+            </nav>
+            <div class="side-footer">运行库已连接 · 证据快照 09:42</div>
+          </aside>
+          <main class="main main--no-topbar">
+            <div class="page">
+              <section class="hero hero--full">
+                <div class="hero-copy">
+                  <span class="eyebrow">组合回测</span>
+                  <h1>组合回测列表</h1>
+                  <p>把组合层运行历史从详情页下钻提升为全局复核台，按压力场景、证据等级、订单完整性和版本快照定位问题。</p>
+                  <div class="chip-row">
+                    <span class="chip chip--accent">已完成 27 次</span>
+                    <span class="chip chip--warning">需复盘 5 次</span>
+                    <span class="chip chip--blue">订单可导出 24 次</span>
+                    <span class="chip">模拟订单已标记</span>
+                  </div>
+                </div>
+              </section>
+
+              <section class="metric-grid" aria-label="组合回测概览">
+                <article class="metric metric--accent">
+                  <span>稳定裁决</span>
+                  <strong>19</strong>
+                  <small>10Y 或更长窗口通过核心门禁。</small>
+                </article>
+                <article class="metric">
+                  <span>压力窗口</span>
+                  <strong>3</strong>
+                  <small>2008、2020、2022 可联动复盘。</small>
+                </article>
+                <article class="metric">
+                  <span>订单证据</span>
+                  <strong>8.4k</strong>
+                  <small>组合建仓、再平衡与内部对冲。</small>
+                </article>
+                <article class="metric">
+                  <span>证据不足</span>
+                  <strong>4</strong>
+                  <small>替代收益流或样本窗口不足。</small>
+                </article>
+              </section>
+
+              <div class="layout-with-rail">
+                <section class="panel">
+                  <div class="panel-header">
+                    <div>
+                      <h2>回测运行</h2>
+                      <p>按组合版本快照重载，不依赖当前页面投影。</p>
+                    </div>
+                    <span class="chip chip--accent">27 条记录</span>
+                  </div>
+                  <div class="toolbar">
+                    <div class="filters">
+                      <span class="filter"><span>组合</span>全部</span>
+                      <span class="filter"><span>状态</span>完成 / 警告</span>
+                      <span class="filter"><span>压力窗口</span>2022</span>
+                      <span class="filter"><span>证据</span>完整 / 复核 / 缺口</span>
+                    </div>
+                    <button class="ghost">重置筛选</button>
+                  </div>
+                  <table class="desktop-table compact-run-table" aria-label="组合回测列表">
+                    <thead>
+                      <tr>
+                        <th>Run</th>
+                        <th>组合版本</th>
+                        <th>裁决</th>
+                        <th>压力窗口</th>
+                        <th>订单</th>
+                        <th>预算</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>
+                          <div class="name-cell">
+                            <strong>全天候研究组合</strong>
+                            <span class="mono">comp_run_81f2 · 04-30</span>
+                          </div>
+                        </td>
+                        <td><span class="status status--good">v6 frozen</span></td>
+                        <td>
+                          <div class="value-stack">
+                            <strong class="number-good nowrap">10Y 稳定</strong>
+                            <span>Sharpe 1.21 · 回撤 -9.4%</span>
+                          </div>
+                        </td>
+                        <td><span class="chip chip--accent">2020 通过</span></td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>362 笔</strong>
+                            <span>CSV/XLSX</span>
+                          </div>
+                        </td>
+                        <td>
+                          <svg class="spark" viewBox="0 0 118 36" role="img" aria-label="风险预算走势">
+                            <path d="M2 28 C22 20 30 23 44 15 C61 5 72 16 86 9 C99 3 107 9 116 6" fill="none" stroke="#1f877b" stroke-width="3" />
+                            <path d="M2 30 H116" stroke="#e5e7eb" />
+                          </svg>
+                        </td>
+                        <td><button class="text-action">复盘</button></td>
+                      </tr>
+                      <tr>
+                        <td>
+                          <div class="name-cell">
+                            <strong>纳指防守增强</strong>
+                            <span class="mono">comp_run_a734 · 04-29</span>
+                          </div>
+                        </td>
+                        <td><span class="status status--warning">v3 草稿</span></td>
+                        <td>
+                          <div class="value-stack">
+                            <strong class="number-danger nowrap">2022 复核</strong>
+                            <span>回撤 -16.8% · 修复 184d</span>
+                          </div>
+                        </td>
+                        <td><span class="chip chip--danger">2022 未通过</span></td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>248 笔</strong>
+                            <span>含模拟声明</span>
+                          </div>
+                        </td>
+                        <td>
+                          <svg class="spark" viewBox="0 0 118 36" role="img" aria-label="风险预算走势">
+                            <path d="M2 12 C22 10 31 8 42 18 C54 30 71 27 84 22 C100 17 108 24 116 28" fill="none" stroke="#c45c4f" stroke-width="3" />
+                            <path d="M2 30 H116" stroke="#e5e7eb" />
+                          </svg>
+                        </td>
+                        <td><button class="text-action">订单</button></td>
+                      </tr>
+                      <tr>
+                        <td>
+                          <div class="name-cell">
+                            <strong>现金缓冲核心</strong>
+                            <span class="mono">comp_run_c188 · 04-28</span>
+                          </div>
+                        </td>
+                        <td><span class="status status--good">v4 frozen</span></td>
+                        <td>
+                          <div class="value-stack">
+                            <strong class="number-good nowrap">30Y 可裁决</strong>
+                            <span>代理 0 · 样本完整</span>
+                          </div>
+                        </td>
+                        <td><span class="chip chip--blue">2008 已定位</span></td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>611 笔</strong>
+                            <span>对冲 18%</span>
+                          </div>
+                        </td>
+                        <td>
+                          <svg class="spark" viewBox="0 0 118 36" role="img" aria-label="风险预算走势">
+                            <path d="M2 24 C20 18 32 17 47 18 C64 20 75 14 88 13 C101 12 110 10 116 8" fill="none" stroke="#4c78c7" stroke-width="3" />
+                            <path d="M2 30 H116" stroke="#e5e7eb" />
+                          </svg>
+                        </td>
+                        <td><button class="text-action">决策包</button></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <div class="mobile-cards">
+                    <article class="queue-item">
+                      <header><strong>全天候研究组合</strong><span class="status status--good">10Y 稳定</span></header>
+                      <p class="muted">comp_run_81f2 · 362 笔订单 · 2020 压力窗口通过</p>
+                      <button class="text-action">打开复盘</button>
+                    </article>
+                    <article class="queue-item">
+                      <header><strong>纳指防守增强</strong><span class="status status--danger">2022 未通过</span></header>
+                      <p class="muted">comp_run_a734 · 回撤 -16.8% · 含代理订单声明</p>
+                      <button class="text-action">查看订单</button>
+                    </article>
+                  </div>
+                </section>
+
+                <aside class="rail-card">
+                  <header>
+                    <h2>压力场景队列</h2>
+                    <p>点击场景后，回测列表、订单和证据筛选共享同一窗口。</p>
+                  </header>
+                  <div class="scenario-list">
+                    <article class="scenario-card">
+                      <header><strong>2022 紧缩熊市</strong><span class="status status--danger">5 次复核</span></header>
+                      <div class="mini-grid">
+                        <div class="mini-kpi"><span>平均回撤</span><strong>-13.6%</strong></div>
+                        <div class="mini-kpi"><span>最长修复</span><strong>184d</strong></div>
+                        <div class="mini-kpi"><span>证据缺口</span><strong>2</strong></div>
+                      </div>
+                    </article>
+                    <article class="scenario-card">
+                      <header><strong>2020 流动性冲击</strong><span class="status status--good">通过</span></header>
+                      <div class="timeline">
+                        <div class="timeline-row"><span class="subtle">现金缓冲</span><div class="bar" style="--value: 72%"><span></span></div><strong>72%</strong></div>
+                        <div class="timeline-row"><span class="subtle">权益腿</span><div class="bar bar--warning" style="--value: 46%"><span></span></div><strong>46%</strong></div>
+                      </div>
+                    </article>
+                    <article class="scenario-card">
+                      <header><strong>2008 信用压力</strong><span class="status status--info">可定位</span></header>
+                      <p class="muted">仅显示窗口内建仓、再平衡和穿透订单。</p>
+                    </article>
+                  </div>
+                </aside>
+              </div>
+            </div>
+          </main>
+        </div>
+      </section>
+
+      <section class="mockup" id="composition-lab" data-page-key="composition-lab">
+        <div class="app-shell">
+          <aside class="sidebar">
+            <div class="brand">
+              <strong>Grit Strategy Lab</strong>
+              <span>Sleeve OS · 本地研究工作台</span>
+            </div>
+            <nav class="side-nav" aria-label="主导航">
+              <div class="side-group">
+                <span>组合</span>
+                <div class="nav-item">组合仪表板</div>
+                <div class="nav-item">组合列表</div>
+                <div class="nav-item">组合回测</div>
+                <div class="nav-item is-active">组合实验室</div>
+                <div class="nav-item">资产库</div>
+              </div>
+              <div class="side-group">
+                <span>策略</span>
+                <div class="nav-item">策略工作台</div>
+                <div class="nav-item">策略库</div>
+                <div class="nav-item">回测历史</div>
+              </div>
+            </nav>
+            <div class="side-footer">运行库已连接 · 证据快照 09:42</div>
+          </aside>
+          <main class="main main--no-topbar">
+            <div class="page">
+              <section class="hero hero--full">
+                <div class="hero-copy">
+                  <span class="eyebrow">Allocation Lab</span>
+                  <h1>组合实验室</h1>
+                  <p>跨组合追踪资产配置实验，把有效前沿、候选权重、迁移成本和证据门禁收口到同一个晋升审查工作台。</p>
+                  <div class="chip-row">
+                    <span class="chip chip--accent">已完成作业 12 个</span>
+                    <span class="chip chip--warning">待晋升候选 4 个</span>
+                    <span class="chip chip--danger">政策违反 2 项</span>
+                    <span class="chip chip--blue">草稿版本 3 个</span>
+                  </div>
+                </div>
+              </section>
+
+              <section class="metric-grid" aria-label="组合实验室概览">
+                <article class="metric metric--accent">
+                  <span>可晋升候选</span>
+                  <strong>4</strong>
+                  <small>通过约束、证据和迁移成本预检。</small>
+                </article>
+                <article class="metric">
+                  <span>扣费后 Sharpe 改善</span>
+                  <strong>+0.11</strong>
+                  <small>按候选中位数计算。</small>
+                </article>
+                <article class="metric">
+                  <span>平均 ENB</span>
+                  <strong>3.6</strong>
+                  <small>高于当前组合 0.4。</small>
+                </article>
+                <article class="metric">
+                  <span>待修复门禁</span>
+                  <strong>2</strong>
+                  <small>现金下限与证据 C 阻断。</small>
+                </article>
+              </section>
+
+              <div class="layout-with-rail">
+                <section class="panel">
+                  <div class="panel-header">
+                    <div>
+                      <h2>实验作业列表</h2>
+                      <p>按组合、方法、候选状态和晋升门禁集中查看配置实验。</p>
+                    </div>
+                    <span class="chip chip--accent">12 条作业</span>
+                  </div>
+                  <div class="toolbar">
+                    <div class="filters">
+                      <span class="filter"><span>组合</span>全部</span>
+                      <span class="filter"><span>方法</span>Risk Parity / MVO</span>
+                      <span class="filter"><span>状态</span>待晋升</span>
+                      <span class="filter"><span>门禁</span>可通过</span>
+                    </div>
+                    <button class="ghost">保存视图</button>
+                  </div>
+                  <table class="desktop-table" aria-label="组合实验室作业列表">
+                    <thead>
+                      <tr>
+                        <th>作业</th>
+                        <th>组合版本</th>
+                        <th>方法</th>
+                        <th>候选</th>
+                        <th>晋升门禁</th>
+                        <th>迁移成本</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>
+                          <div class="name-cell">
+                            <strong>全天候研究组合</strong>
+                            <span class="mono">alloc_job_54b2 · 2026-04-30</span>
+                          </div>
+                        </td>
+                        <td><span class="status status--good">v6 frozen</span></td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>Risk Parity</strong>
+                            <span>风险预算均衡</span>
+                          </div>
+                        </td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>4 个</strong>
+                            <span>1 个可晋升</span>
+                          </div>
+                        </td>
+                        <td><span class="status status--good">可通过</span></td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>14 bps</strong>
+                            <span>Sharpe +0.08</span>
+                          </div>
+                        </td>
+                        <td><button class="text-action">进入审查</button></td>
+                      </tr>
+                      <tr>
+                        <td>
+                          <div class="name-cell">
+                            <strong>纳指防守增强</strong>
+                            <span class="mono">alloc_job_9f21 · 2026-04-29</span>
+                          </div>
+                        </td>
+                        <td><span class="status status--warning">v3 草稿</span></td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>MVO</strong>
+                            <span>收益优先</span>
+                          </div>
+                        </td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>3 个</strong>
+                            <span>2 个需复核</span>
+                          </div>
+                        </td>
+                        <td><span class="status status--danger">门禁阻断</span></td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>31 bps</strong>
+                            <span>现金下限不足</span>
+                          </div>
+                        </td>
+                        <td><button class="text-action">查看阻断</button></td>
+                      </tr>
+                      <tr>
+                        <td>
+                          <div class="name-cell">
+                            <strong>现金缓冲核心</strong>
+                            <span class="mono">alloc_job_72ad · 2026-04-28</span>
+                          </div>
+                        </td>
+                        <td><span class="status status--good">v4 frozen</span></td>
+                        <td>
+                          <div class="value-stack">
+                            <strong class="nowrap">Black-Litterman</strong>
+                            <span>观点约束</span>
+                          </div>
+                        </td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>4 个</strong>
+                            <span>等待证据复核</span>
+                          </div>
+                        </td>
+                        <td><span class="status status--warning">需复核</span></td>
+                        <td>
+                          <div class="value-stack">
+                            <strong>18 bps</strong>
+                            <span>ENB 3.8</span>
+                          </div>
+                        </td>
+                        <td><button class="text-action">打开作业</button></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <div class="mobile-cards">
+                    <article class="queue-item">
+                      <header><strong>全天候研究组合</strong><span class="status status--good">可通过</span></header>
+                      <p class="muted">Risk Parity · 4 个候选 · 迁移成本 14 bps</p>
+                      <button class="text-action">进入审查</button>
+                    </article>
+                    <article class="queue-item">
+                      <header><strong>纳指防守增强</strong><span class="status status--danger">门禁阻断</span></header>
+                      <p class="muted">MVO · 现金下限低于政策边界</p>
+                      <button class="text-action">查看阻断</button>
+                    </article>
+                  </div>
+                </section>
+
+                <aside class="rail-card">
+                  <header>
+                    <h2>晋升审查</h2>
+                    <p>候选不能直接保存为正式版本，必须先生成草稿版本。</p>
+                  </header>
+                  <article class="review-card">
+                    <header>
+                      <strong>Risk Parity 候选</strong>
+                      <span class="grade grade--a">证据完整</span>
+                    </header>
+                    <div class="mini-grid">
+                      <div class="mini-kpi"><span>Sharpe</span><strong>+0.08</strong></div>
+                      <div class="mini-kpi"><span>迁移成本</span><strong>14 bps</strong></div>
+                      <div class="mini-kpi"><span>约束违反</span><strong>0</strong></div>
+                    </div>
+                    <button class="primary">生成草稿版本</button>
+                    <button class="ghost">创建决策包</button>
+                  </article>
+                  <div class="job-list">
+                    <article class="job-card">
+                      <header><strong>Black-Litterman</strong><span class="status status--info">运行完成</span></header>
+                      <p class="muted">现金缓冲核心 · 4 个候选 · 等待证据复核</p>
+                    </article>
+                    <article class="job-card">
+                      <header><strong>MVO</strong><span class="status status--danger">门禁阻断</span></header>
+                      <p class="muted">纳指防守增强 · 现金下限低于政策边界</p>
+                    </article>
+                  </div>
+                </aside>
+              </div>
+            </div>
+          </main>
+        </div>
+      </section>
+    </div>
+    <script>
+      (() => {
+        const pages = Array.from(document.querySelectorAll(".mockup[id]"));
+        const showCurrentPage = () => {
+          const requested = window.location.hash.replace("#", "") || "composition-list";
+          const activeId = pages.some((page) => page.id === requested) ? requested : "composition-list";
+          for (const page of pages) {
+            page.hidden = page.id !== activeId;
+          }
+        };
+        window.addEventListener("hashchange", showCurrentPage);
+        showCurrentPage();
+      })();
+    </script>
+  </body>
+</html>

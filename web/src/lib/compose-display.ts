@@ -30,6 +30,7 @@ const STRATEGY_TYPE_LABELS: Record<string, string> = {
   MEAN_REVERSION: '均值回归',
   MOMENTUM: '动量',
   BUY_AND_HOLD: '长持',
+  ASSET_ALLOCATION: '资产配置',
   GENERAL: '研究',
 };
 

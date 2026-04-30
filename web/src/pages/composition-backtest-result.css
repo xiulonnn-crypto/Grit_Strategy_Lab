@@ -18,6 +18,50 @@
   color: var(--gsl-color-danger, #c45c4f);
 }
 
+.composition-backtest-toast {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid rgba(31, 135, 123, 0.18);
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: var(--gsl-color-primary-soft, #e6f4f1);
+  color: var(--gsl-color-primary-strong, #176b61);
+  box-shadow: var(--shadow-card, 0 1px 3px rgba(15, 23, 42, 0.08));
+}
+
+.composition-backtest-toast strong {
+  color: inherit;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.composition-backtest-toast span {
+  color: var(--gsl-text-main);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.composition-backtest-toast--info {
+  border-color: rgba(76, 120, 199, 0.2);
+  background: #eef5ff;
+  color: var(--gsl-color-benchmark, #4c78c7);
+}
+
+.composition-backtest-toast--success {
+  border-color: rgba(43, 138, 62, 0.18);
+  background: var(--gsl-color-success-soft, #ecfdf3);
+  color: var(--gsl-color-success, #2b8a3e);
+}
+
+.composition-backtest-toast--warning {
+  border-color: rgba(184, 104, 19, 0.2);
+  background: var(--gsl-color-warning-soft, #fff7e8);
+  color: var(--gsl-color-warning, #b86813);
+}
+
 .composition-backtest-result-hero,
 .composition-backtest-result-tabs-panel,
 .composition-backtest-result-panel {
@@ -393,6 +437,141 @@
   background: linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
 }
 
+.composition-backtest-stress-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.composition-backtest-stress-panel__header {
+  margin-bottom: 0;
+}
+
+.composition-backtest-stress-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.composition-backtest-stress-card--good {
+  border-color: rgba(31, 135, 123, 0.2);
+  background: linear-gradient(180deg, rgba(230, 244, 241, 0.62), #ffffff 84%);
+}
+
+.composition-backtest-stress-card--warning {
+  border-color: rgba(184, 104, 19, 0.22);
+  background: linear-gradient(180deg, rgba(255, 247, 232, 0.92), #ffffff 84%);
+}
+
+.composition-backtest-stress-card--danger {
+  border-color: rgba(196, 92, 79, 0.2);
+  background: linear-gradient(180deg, rgba(255, 248, 247, 0.96), #ffffff 84%);
+}
+
+.composition-backtest-stress-card--info,
+.composition-backtest-stress-card--neutral {
+  border-color: rgba(76, 120, 199, 0.18);
+  background: linear-gradient(180deg, rgba(236, 242, 253, 0.72), #ffffff 84%);
+}
+
+.composition-backtest-stress-card__top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.composition-backtest-stress-card h3 {
+  margin: 0 0 4px;
+  color: var(--gsl-text-title);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.composition-backtest-stress-bars {
+  display: grid;
+  gap: 8px;
+}
+
+.composition-backtest-stress-bar-row {
+  display: grid;
+  grid-template-columns: minmax(58px, 0.7fr) minmax(86px, 1fr) minmax(58px, auto);
+  align-items: center;
+  gap: 8px;
+}
+
+.composition-backtest-stress-bar-row > span,
+.composition-backtest-stress-kpis span {
+  color: var(--gsl-text-sub);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.composition-backtest-stress-bar-row strong,
+.composition-backtest-stress-kpis strong {
+  color: var(--gsl-text-title);
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: right;
+}
+
+.composition-backtest-stress-track {
+  height: 9px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.18);
+  overflow: hidden;
+}
+
+.composition-backtest-stress-track i {
+  display: block;
+  height: 100%;
+  min-width: 3px;
+  border-radius: inherit;
+}
+
+.composition-backtest-stress-track__portfolio {
+  background: linear-gradient(90deg, #176b61, #1f877b);
+}
+
+.composition-backtest-stress-track__benchmark {
+  background: linear-gradient(90deg, #4c78c7, #7da1df);
+}
+
+.composition-backtest-stress-kpis {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+  gap: 8px;
+}
+
+.composition-backtest-stress-kpis > div {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(229, 231, 235, 0.84);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+  display: grid;
+  gap: 3px;
+}
+
+.composition-backtest-stress-kpi--good strong {
+  color: var(--gsl-color-success, #2b8a3e);
+}
+
+.composition-backtest-stress-kpi--warning strong {
+  color: var(--gsl-color-warning, #b86813);
+}
+
+.composition-backtest-stress-kpi--danger strong {
+  color: var(--gsl-color-danger, #c45c4f);
+}
+
+.composition-backtest-stress-card p {
+  margin: 0;
+  color: var(--gsl-text-sub);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .composition-backtest-stress-card strong,
 .composition-backtest-netting-card strong,
 .composition-backtest-insight-card strong,
@@ -415,6 +594,18 @@
   color: var(--gsl-text-sub);
   font-size: 12px;
   line-height: 1.6;
+}
+
+.composition-backtest-stress-card .composition-backtest-stress-kpi--good strong {
+  color: var(--gsl-color-success, #2b8a3e);
+}
+
+.composition-backtest-stress-card .composition-backtest-stress-kpi--warning strong {
+  color: var(--gsl-color-warning, #b86813);
+}
+
+.composition-backtest-stress-card .composition-backtest-stress-kpi--danger strong {
+  color: var(--gsl-color-danger, #c45c4f);
 }
 
 .composition-backtest-insight-card {
@@ -1102,6 +1293,7 @@
   .composition-backtest-result-hero,
   .composition-backtest-diagnosis-grid,
   .composition-backtest-two-column,
+  .composition-backtest-stress-grid,
   .composition-backtest-concentration-grid,
   .composition-backtest-evidence-grid,
   .composition-backtest-audit-list {
@@ -1133,7 +1325,8 @@
 
   .composition-backtest-result-tabs,
   .composition-backtest-netting-grid,
-  .composition-backtest-hero-metrics {
+  .composition-backtest-hero-metrics,
+  .composition-backtest-stress-kpis {
     grid-template-columns: 1fr;
   }
 
