@@ -37,6 +37,7 @@ class FmpIdentityRepairProvider:
     def __init__(self, api_key: str | None = None, timeout: int = 20) -> None:
         self.api_key = str(api_key or os.getenv("FMP_API_KEY") or "").strip()
         self.timeout = timeout
+        self._delisted_companies_cache: list[dict[str, Any]] | None = None
 
     def availability(self) -> ProviderAvailability:
         return ProviderAvailability(
@@ -60,6 +61,8 @@ class FmpIdentityRepairProvider:
             raise RuntimeError(f"FMP request failed: {exc}") from exc
 
     def fetch_delisted_companies(self) -> list[dict[str, Any]]:
+        if self._delisted_companies_cache is not None:
+            return list(self._delisted_companies_cache)
         payload = self._request_json(FMP_DELISTED_COMPANIES_ENDPOINT)
         rows: list[dict[str, Any]] = []
         if isinstance(payload, list):
@@ -88,7 +91,8 @@ class FmpIdentityRepairProvider:
                     "valid_to": None,
                 }
             )
-        return rows
+        self._delisted_companies_cache = rows
+        return list(rows)
 
     def resolve_identity(self, symbol: str) -> dict[str, Any] | None:
         normalized = symbol.upper()
@@ -96,6 +100,21 @@ class FmpIdentityRepairProvider:
             if row["symbol"] == normalized:
                 return row
         return None
+
+    def resolve_identities(self, symbols: list[str] | tuple[str, ...] | set[str]) -> dict[str, dict[str, Any]]:
+        requested = {
+            str(symbol).strip().upper()
+            for symbol in symbols
+            if str(symbol).strip()
+        }
+        if not requested:
+            return {}
+        rows_by_symbol = {row["symbol"]: row for row in self.fetch_delisted_companies()}
+        return {
+            symbol: dict(rows_by_symbol[symbol])
+            for symbol in sorted(requested)
+            if symbol in rows_by_symbol
+        }
 
     def fetch_history(self, symbol: str, start_date: date, end_date: date) -> SymbolMarketData:
         payload = self._request_json(

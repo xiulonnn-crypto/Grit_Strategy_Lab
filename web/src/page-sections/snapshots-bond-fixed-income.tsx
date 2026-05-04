@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { type CSSProperties, useEffect, useRef, useState } from 'react';
 import { formatDateTime } from '../lib/format';
 import type {
   ApiBondFixedIncomeOverview,
@@ -11,6 +11,7 @@ import type {
   ApiBondSnapshotPillarGroup,
   ApiBondSnapshotRegistryItem,
   ApiSnapshotOverview,
+  ApiSnapshotRefreshRequest,
 } from '../types';
 
 const BOND_STATUS_LABELS: Record<string, string> = {
@@ -75,6 +76,84 @@ const BOND_SOURCE_LABELS: Record<string, string> = {
   none: '无',
 };
 
+const BOND_COMPLETE_REFRESH_REQUEST: ApiSnapshotRefreshRequest = {
+  mode: 'full',
+  targets: ['price', 'corporate', 'valuations', 'universes', 'bond'],
+  reason: 'manual-refresh-bond-complete',
+};
+
+const SNAPSHOT_BLOCKER_LABELS: Record<string, string> = {
+  CORPORATE_ACTIONS_INCOMPLETE: '公司行为数据部分可用',
+  CORPORATE_ACTIONS_PENDING: '公司行为数据待刷新',
+  CORPORATE_ACTIONS_FAILED: '公司行为数据刷新失败',
+  PRICE_SNAPSHOT_INCOMPLETE: '价格数据部分可用',
+  PRICE_SNAPSHOT_FAILED: '价格数据刷新失败',
+  UNIVERSE_HISTORY_INCOMPLETE: '股票池历史数据部分可用',
+  UNIVERSE_HISTORY_FAILED: '股票池历史数据刷新失败',
+  LIVE_REFRESH_PENDING: '后台更新中',
+  SNAPSHOT_REFRESH_REQUIRED: '还没有生成快照',
+  SNAPSHOT_API_NEEDS_RESTART: '本地后端需要重启',
+};
+
+const SNAPSHOT_BLOCKER_MESSAGES: Record<string, string> = {
+  CORPORATE_ACTIONS_INCOMPLETE: '公司行为数据已部分可用，仍有少量公司事件待继续补齐。',
+  CORPORATE_ACTIONS_PENDING: '公司行为数据还在准备，刷新完成后会显示完整结果。',
+  CORPORATE_ACTIONS_FAILED: '公司行为数据刷新失败，请稍后重试。',
+  PRICE_SNAPSHOT_INCOMPLETE: '股票价格数据已部分可用，仍有少量股票待继续补齐。',
+  PRICE_SNAPSHOT_FAILED: '股票价格数据刷新失败，请稍后重试。',
+  UNIVERSE_HISTORY_INCOMPLETE: '股票池历史成分已部分可用，仍有部分历史锚点待继续补齐。',
+  UNIVERSE_HISTORY_FAILED: '股票池历史数据刷新失败，请稍后重试。',
+  LIVE_REFRESH_PENDING: '后台正在刷新快照，页面会在完成后自动更新。',
+  SNAPSHOT_REFRESH_REQUIRED: '还没有生成快照，点击刷新后会显示结果。',
+  SNAPSHOT_API_NEEDS_RESTART: '当前本地后端仍在返回旧版快照接口，重启后端后再刷新即可。',
+};
+
+const BOND_FIELD_LABELS: Record<string, string> = {
+  clean_price: '净价',
+  net_price: '净价',
+  dirty_price: '全价',
+  full_price: '全价',
+  accrued_interest: '应计利息',
+  ytm_pct: '到期收益率',
+  discount_rate_pct: '贴现率',
+  real_yield_pct: '实际利率',
+  inflation_factor: '通胀因子',
+  breakeven_inflation_bps: 'Breakeven',
+  breakeven_pct: 'Breakeven',
+  duration: '久期',
+  effective_duration: '有效久期',
+  convexity: '凸性',
+  sec_yield_30d_pct: '30d SEC 收益率',
+  thirty_day_sec_yield_pct: '30d SEC 收益率',
+  credit_quality: '信用质量',
+  tracking_error_bps: 'Tracking error',
+};
+
+const BOND_QUALITY_STATUS_LABELS: Record<string, string> = {
+  PASS: '通过',
+  FULL: '完整',
+  PARTIAL: '部分',
+  UNKNOWN: '无需比较',
+  WATCH: '待复核',
+  READY: '就绪',
+  REPAIR: '需修复',
+  COMPOSABLE: '可进入组合',
+  READ_ONLY_BUDGET: '仅预检',
+  REPAIR_REQUIRED: '需修复',
+  INFERRED: '已推断',
+  WAIVED: '已豁免',
+  MISSING: '缺失',
+};
+
+const BOND_REPAIR_LABELS: Record<string, string> = {
+  'Repair missing or inferred fixed-income fields': '修复缺失或推断的固定收益字段',
+  'Full bond price, accrual, YTM, duration, and convexity refresh':
+    '全量刷新债券价格、应计、到期收益率、久期和凸性',
+  'Snapshot refresh checks saved compositions but never rewrites frozen source evidence':
+    '检查已保存组合的快照影响，但不重写冻结来源证据',
+  'Repair missing fixed-income fields': '修复缺失的固定收益字段',
+};
+
 const BOND_TEXT_TRANSLATIONS: Record<string, string> = {
   'Bond and fixed-income governance is staged on the shared snapshot route for phase 1.':
     '第一阶段继续在共享快照页治理债券与固定收益来源。',
@@ -82,12 +161,16 @@ const BOND_TEXT_TRANSLATIONS: Record<string, string> = {
     '债券治理继续挂在现有快照总览，不新增第二套页面入口。',
   'Uses the shared dataset snapshot status as the fixed-income data gate.':
     '复用共享数据集快照状态，作为固定收益来源能否入库的第一道门禁。',
+  'Uses the current seven-row bond runtime contract as the fixed-income data gate.':
+    '使用当前七条债券运行时契约作为固定收益数据门禁。',
   'Universe snapshots remain the membership and selection evidence lane.':
     '股票/指数快照继续承担成员范围与选择证据，不为债券页另起一套快照证明。',
   'Reuses the existing snapshot refresh job and cadence instead of a bond-only scheduler.':
     '继续复用现有快照刷新任务与节奏，不新增债券专属调度器。',
   'Bond visuals reuse shared price snapshot readiness instead of creating a second pipeline.':
     '债券治理视图复用共享价格快照就绪度，不引入第二条数据管线。',
+  'Bond visuals use current runtime bond rows instead of creating a second pipeline.':
+    '债券治理视图使用当前运行时债券行，不引入第二条数据管线。',
   'Phase 1 stores bond oversight as an extension of the existing overview contract.':
     '第一阶段把债券治理作为现有快照总览 contract 的增量扩展。',
   'Latest refresh job is the authoritative job trail for bond oversight in phase 1.':
@@ -95,7 +178,11 @@ const BOND_TEXT_TRANSLATIONS: Record<string, string> = {
   'No bond-only scheduler is introduced; this remains bound to the shared refresh job.':
     '不引入债券专属调度器，仍绑定共享快照刷新任务。',
   'Any shared snapshot blocker also blocks the bond governance tab.':
-    '任何共享快照阻塞都会直接影响债券治理页签。',
+    '共享快照阻塞保留为诊断提醒；当前债券运行时契约才是资产腿入库门禁。',
+  'Shared snapshot blockers are retained as diagnostics when the bond runtime contract is READY.':
+    '当债券运行时契约已经就绪时，共享快照阻塞仅保留为诊断提醒。',
+  'Shared snapshot blockers stay visible as diagnostics, but the current bond runtime contract is the asset-leg gate.':
+    '共享快照阻塞保留为诊断提醒；当前债券运行时契约才是资产腿入库门禁。',
   'Only READY runtime bond rows with complete or inferred fields can create asset legs.':
     '只有就绪且字段完整或已推断的运行时债券行可以创建资产腿。',
   'Only runtime bond_fixed_income_snapshots rows are eligible asset-leg sources.':
@@ -106,6 +193,19 @@ const BOND_TEXT_TRANSLATIONS: Record<string, string> = {
   'Runtime fixed-income snapshot rows are eligible for asset-leg creation.': '运行时债券行可创建资产腿',
   'Only runtime fixed-income snapshot rows are eligible asset-leg sources.': '仅运行时债券行可创建资产腿',
   'No eligible runtime bond source is available yet.': '暂无可入库的运行时债券来源。',
+  'Official tracking-error evidence pending.': '官方 tracking error 证据待补。',
+  'Published tracking_error_bps is required for BOND_ETF readiness.':
+    'LQD 需要公开 tracking error 证据后才能就绪。',
+  'Tracking error sourced from a published market-data page.':
+    'Tracking error 来自已发布的市场数据页面。',
+  'T-Bill accrued interest audit waived; accrued is fixed at 0.':
+    'T-Bill 应计利息审计已豁免，应计固定为 0。',
+  'Accrued interest is waived for the UST_BILL_3M audit profile.':
+    'UST 3M T-Bill 的应计利息审计已豁免。',
+  'ETF accrued-interest gap audit is waived; tracking error gates Ready.':
+    'ETF 应计缺口审计已豁免；tracking error 决定就绪门禁。',
+  'Tracking error is sourced from Markets Insider 1Y metric.':
+    'Tracking error 来自 Markets Insider 1Y 指标。',
   '#/snapshots remains the only route for bond governance': '#/snapshots 继续作为唯一治理入口。',
   'This remains the single snapshot API surface.': '当前仍只有一套快照 API 入口。',
   'Bond governance is additive only.': '债券治理只做增量扩展，不新增第二套接口。',
@@ -252,6 +352,24 @@ function translateBondText(value?: string | null): string {
   if (/^Runtime row\.?$/i.test(text)) {
     return '运行时快照行';
   }
+  const ustSpreadOutsideMatch = text.match(
+    /^(UST_CMT_2Y\/10Y spread) ([+-]?\d+(?:\.\d+)?) bps is outside the (-?\d+)\.\.(\d+) bps audit band\.?$/i,
+  );
+  if (ustSpreadOutsideMatch) {
+    return `UST 2Y/10Y 利差 ${ustSpreadOutsideMatch[2]} bps 超出审计区间 ${ustSpreadOutsideMatch[3]}..${ustSpreadOutsideMatch[4]} bps。`;
+  }
+  const ustSpreadSummaryMatch = text.match(
+    /^(UST_CMT_2Y\/10Y spread) ([+-]?\d+(?:\.\d+)?) bps; audit band (-?\d+)\.\.(\d+) bps\.?$/i,
+  );
+  if (ustSpreadSummaryMatch) {
+    return `UST 2Y/10Y 利差 ${ustSpreadSummaryMatch[2]} bps；审计区间 ${ustSpreadSummaryMatch[3]}..${ustSpreadSummaryMatch[4]} bps。`;
+  }
+  const ytmJumpMatch = text.match(
+    /^(UST_CMT_30Y) YTM jump ([+-]?\d+(?:\.\d+)?) bps is within the ([+-]?\d+(?:\.\d+)?) bps threshold\.?$/i,
+  );
+  if (ytmJumpMatch) {
+    return `UST 30Y 到期收益率跳变 ${ytmJumpMatch[2]} bps，位于 ${ytmJumpMatch[3]} bps 阈值内。`;
+  }
   if (/^READY$/i.test(text)) {
     return '就绪';
   }
@@ -361,6 +479,113 @@ function formatMemoryValue(value: unknown): string {
     return value ? '是' : '否';
   }
   return String(value ?? '待确认');
+}
+
+function formatBondFieldName(value: string): string {
+  return BOND_FIELD_LABELS[value] ?? value.replace(/_/g, ' ');
+}
+
+function formatBondFieldList(value: unknown, fallback = '无'): string {
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === 'string' && value.trim() && value.trim().toLowerCase() !== 'none'
+      ? [value]
+      : [];
+  const labels = Array.from(
+    new Set(
+      values
+        .map((entry) => String(entry).trim())
+        .filter(Boolean)
+        .map(formatBondFieldName),
+    ),
+  );
+  return labels.length ? labels.join('、') : fallback;
+}
+
+function translateBondQualityStatus(value: unknown, fallback = '待确认'): string {
+  const text = String(value ?? '').trim();
+  if (!text || text.toLowerCase() === 'none') {
+    return fallback;
+  }
+  return BOND_QUALITY_STATUS_LABELS[text.toUpperCase()] ?? translateBondText(text);
+}
+
+function getBondQualityStatusChipClassName(value: unknown): string {
+  const normalizedStatus = String(value ?? '').toUpperCase();
+  if (['FAILED', 'BLOCKED', 'ACTION_REQUIRED', 'MISSING'].includes(normalizedStatus)) {
+    return 'status-chip status-chip--danger';
+  }
+  if (['WATCH', 'PARTIAL', 'REPAIR', 'REPAIR_REQUIRED', 'READ_ONLY_BUDGET', 'INFERRED'].includes(normalizedStatus)) {
+    return 'status-chip status-chip--warning';
+  }
+  if (['PASS', 'FULL', 'READY', 'COMPOSABLE', 'WAIVED'].includes(normalizedStatus)) {
+    return 'status-chip status-chip--success snapshots-status-chip--ready';
+  }
+  return 'status-chip status-chip--soft';
+}
+
+function translateSnapshotBlockerLabel(code?: string | null): string {
+  const normalizedCode = String(code ?? '').trim().toUpperCase();
+  if (!normalizedCode || normalizedCode === 'NONE') {
+    return '暂无全局异常';
+  }
+  return SNAPSHOT_BLOCKER_LABELS[normalizedCode] ?? normalizedCode.replace(/_/g, ' ');
+}
+
+function translateSnapshotBlockerMessage(code?: string | null, message?: string | null): string {
+  const normalizedCode = String(code ?? '').trim().toUpperCase();
+  if (normalizedCode && SNAPSHOT_BLOCKER_MESSAGES[normalizedCode]) {
+    return SNAPSHOT_BLOCKER_MESSAGES[normalizedCode];
+  }
+  return translateBondText(message ?? normalizedCode);
+}
+
+type BondDiagnosticEntry = {
+  id: string;
+  title: string;
+  status: string;
+  body: string;
+};
+
+function translateRepairRuleLabel(value: unknown): string {
+  const text = String(value ?? '').trim();
+  return BOND_REPAIR_LABELS[text] ?? translateBondText(text);
+}
+
+function translateRepairRuleTarget(value: unknown): string {
+  const target = String(value ?? '').trim().toLowerCase();
+  if (target === 'bond') return '债券与固定收益';
+  if (target === 'price') return '股票价格';
+  if (target === 'corporate') return '公司行为';
+  if (target === 'valuations') return '指数估值';
+  if (target === 'universes') return '股票池历史';
+  return target ? translateBondText(target) : '全部数据';
+}
+
+function translateRepairRuleMode(value: unknown): string {
+  const mode = String(value ?? '').trim().toLowerCase();
+  if (mode === 'full') return '全量刷新';
+  if (mode === 'repair') return '修复刷新';
+  if (mode === 'incremental') return '增量刷新';
+  return mode ? translateBondText(mode) : '刷新';
+}
+
+function buildRepairRuleRequest(row: Record<string, unknown>): ApiSnapshotRefreshRequest {
+  const mode = String(row.mode ?? 'repair').toLowerCase() === 'full' ? 'full' : 'repair';
+  const rawTarget = String(row.target ?? 'bond').trim().toLowerCase();
+  const targets = rawTarget === 'bond' ? ['bond'] : BOND_COMPLETE_REFRESH_REQUEST.targets;
+  return {
+    mode,
+    targets: targets as ApiSnapshotRefreshRequest['targets'],
+    reason: `bond-rule-${String(row.id ?? mode).trim() || mode}`,
+  };
+}
+
+function formatRepairRuleAppliesTo(value: unknown): string {
+  if (!Array.isArray(value) || !value.length) {
+    return '当前无异常对象';
+  }
+  return `${value.length} 条快照`;
 }
 
 function normalizeCard(card: unknown, fallback: ApiBondSnapshotCard): ApiBondSnapshotCard {
@@ -614,6 +839,7 @@ function normalizeEligibleInstrument(item: unknown, index: number): ApiBondSnaps
     thirty_day_sec_yield_pct: finiteNumberOrNull(payload?.thirty_day_sec_yield_pct),
     credit_quality: creditQualityStringOrNull(payload?.credit_quality),
     tracking_error_bps: finiteNumberOrNull(payload?.tracking_error_bps),
+    tracking_error_source: stringOrNull(payload?.tracking_error_source),
     audit_alerts: stringList(payload?.audit_alerts),
     audit_notes: stringList(payload?.audit_notes),
     tracking_status: stringOrNull(payload?.tracking_status),
@@ -1476,14 +1702,25 @@ function getBondGroupSupportCopy(group: BondGroupKey): string {
   }
 }
 
-function getBondGroupCurveAnomaly(group: BondGroupKey): string {
+function getBondGroupCurveDiagnosis(
+  group: BondGroupKey,
+  instruments: ApiBondSnapshotEligibleInstrument[],
+  ustTenTwoSpreadBps: number | null,
+): string {
+  const firstAuditAlert = instruments.flatMap((instrument) => instrument.audit_alerts ?? []).find((alert) => alert.trim());
+  if (firstAuditAlert) {
+    return `系统诊断：${translateBondText(firstAuditAlert).replace(/[。.]$/, '')}；相关债券已进入系统诊断与异常快照队列。`;
+  }
   switch (group) {
     case 'ust':
-      return '曲线异常偏移：建议去审计矩阵复核长端应计与 10Y 估值点。';
+      if (ustTenTwoSpreadBps !== null && (ustTenTwoSpreadBps <= -100 || ustTenTwoSpreadBps >= 300)) {
+        return `系统诊断：UST 10Y-2Y 利差为 ${formatBpsValue(ustTenTwoSpreadBps)}，已进入债券异常队列并等待刷新规则复核。`;
+      }
+      return '曲线校验通过：系统已核对 10Y-2Y 利差与长端应计，当前无需人工复核。';
     case 'tips':
-      return '若 breakeven 或通胀因子异常，先回审计矩阵复核 TIPS 映射一致性。';
+      return 'TIPS 曲线校验通过：系统已核对实际利率、通胀因子与 breakeven 映射，当前无需人工复核。';
     case 'ig':
-      return '若 tracking error 或应计历史缺失，先回审计矩阵确认 IG 仍不可直接入库。';
+      return 'IG 曲线校验通过：系统已核对 SEC 收益率、久期和 tracking evidence，当前无需人工复核。';
   }
 }
 
@@ -1713,51 +1950,160 @@ function getCreationChecks(overview: ApiBondFixedIncomeOverview): Array<{ label:
   ];
 }
 
-function getDiagnosticEntries(overview: ApiBondFixedIncomeOverview): Array<{
-  title: string;
-  status: string;
-  body: string;
-}> {
-  const entries: Array<{ title: string; status: string; body: string }> = [];
+function isBondSpecificDiagnosticTarget(target: unknown, code?: unknown): boolean {
+  const normalizedTarget = String(target ?? '').trim().toLowerCase();
+  const normalizedCode = String(code ?? '').trim().toUpperCase();
+  return (
+    normalizedTarget.includes('bond') ||
+    normalizedTarget.includes('fixed_income') ||
+    normalizedTarget.includes('fixed-income') ||
+    normalizedCode.includes('BOND') ||
+    normalizedCode.includes('FIXED_INCOME')
+  );
+}
+
+function formatQualityAuditIssueBody(row: Record<string, unknown>): string {
+  const missingFields = Array.isArray(row.missing_fields) ? row.missing_fields : [];
+  const fragments = [
+    missingFields.length ? `缺失字段：${formatBondFieldList(missingFields)}` : null,
+    `价格一致性：${translateBondQualityStatus(row.price_consistency_status, '待确认')}`,
+    `风险字段：${translateBondQualityStatus(row.ytm_duration_convexity_status, '待确认')}`,
+  ].filter((fragment): fragment is string => Boolean(fragment));
+  return `${fragments.join('；')}。`;
+}
+
+function getDiagnosticEntries(
+  overview: ApiBondFixedIncomeOverview,
+  registryAnomalyRows: BondRegistryAnomalyRow[],
+  qualityAuditRows: Record<string, unknown>[],
+  repairRules: Record<string, unknown>[],
+): BondDiagnosticEntry[] {
+  const entries: BondDiagnosticEntry[] = [];
+  const append = (entry: BondDiagnosticEntry): void => {
+    if (!entries.some((item) => item.id === entry.id)) {
+      entries.push(entry);
+    }
+  };
+  const registryIds = new Set(registryAnomalyRows.map((row) => row.id));
   const blockingCode = String(overview.system_diagnostics.blocking_code ?? '').trim();
-  entries.push({
-    title: blockingCode ? '共享快照阻塞' : '共享快照阻塞',
-    status: blockingCode ? 'ACTION_REQUIRED' : 'READY',
-    body: blockingCode
-      ? `当前阻塞代码为 ${blockingCode}，债券治理需要跟随共享快照一起复核。`
-      : '当前没有额外阻塞代码，债券页签可以继续沿用共享快照的治理节奏。',
-  });
 
-  entries.push({
-    title: '刷新任务状态',
-    status: overview.system_diagnostics.refresh_job_status ?? 'WATCH',
-    body: `最近一次共享刷新任务状态为 ${getBondStatusLabel(
-      overview.system_diagnostics.refresh_job_status,
-    )}。`,
-  });
-
-  const memoryEntries = Object.entries(overview.system_diagnostics.memory ?? {});
-  if (memoryEntries.length) {
-    const memorySummary = memoryEntries
-      .slice(0, 3)
-      .map(([key, value]) => `${formatMemoryLabel(key)}：${formatMemoryValue(value)}`)
-      .join('；');
-    entries.push({
-      title: '运行时内存护栏',
-      status: 'WATCH',
-      body: memorySummary,
+  if (
+    blockingCode &&
+    isBondSpecificDiagnosticTarget(overview.system_diagnostics.blocking_target, blockingCode)
+  ) {
+    append({
+      id: `bond-blocking-${blockingCode}`,
+      title: translateSnapshotBlockerLabel(blockingCode),
+      status: 'ACTION_REQUIRED',
+      body: translateSnapshotBlockerMessage(blockingCode),
     });
   }
 
-  overview.system_diagnostics.notes.forEach((note, index) => {
-    entries.push({
-      title: `专家建议 ${index + 1}`,
-      status: 'WATCH',
-      body: translateBondText(note),
+  registryAnomalyRows.forEach((row) => {
+    append({
+      id: `registry-${row.id}`,
+      title: row.label,
+      status: row.status,
+      body: row.issue,
     });
   });
 
+  qualityAuditRows.forEach((row) => {
+    const rowId = String(row.id ?? row.label ?? '').trim();
+    if (!rowId || registryIds.has(rowId) || !hasQualityAuditIssue(row)) {
+      return;
+    }
+    append({
+      id: `quality-${rowId}`,
+      title: String(row.label ?? rowId),
+      status: String(row.status ?? 'WATCH'),
+      body: formatQualityAuditIssueBody(row),
+    });
+  });
+
+  repairRules.filter(hasActionableRepairRuleIssue).forEach((row) => {
+    const ruleId = String(row.id ?? row.label ?? 'bond-repair').trim();
+    const appliesToCount = getRepairRuleAppliesToCount(row);
+    append({
+      id: `repair-${ruleId}`,
+      title: translateRepairRuleLabel(row.label),
+      status: 'ACTION_REQUIRED',
+      body: `修复规则覆盖 ${appliesToCount} 条债券快照；目标 ${translateRepairRuleTarget(row.target)}，模式 ${translateRepairRuleMode(row.mode)}。`,
+    });
+  });
+
+  const memoryIssue = getRuntimeMemoryIssue(overview.system_diagnostics.memory ?? {});
+  if (memoryIssue) {
+    append({
+      id: 'bond-runtime-memory',
+      ...memoryIssue,
+    });
+  }
+
   return entries;
+}
+
+function getRuntimeMemoryIssue(memory: Record<string, unknown>): { title: string; status: string; body: string } | null {
+  const systemMemoryRatio = numericRecordValue(memory, 'system_memory_ratio');
+  const processMemoryRatio = numericRecordValue(memory, 'process_memory_ratio');
+  const availablePhysicalBytes = numericRecordValue(memory, 'available_physical_bytes');
+  const totalPhysicalBytes = numericRecordValue(memory, 'total_physical_bytes');
+  const processWorkingSetBytes = numericRecordValue(memory, 'process_working_set_bytes');
+  const lowAvailable = availablePhysicalBytes !== null && availablePhysicalBytes < 2 * 1024 * 1024 * 1024;
+  const highSystemUsage = systemMemoryRatio !== null && systemMemoryRatio >= 0.85;
+  const highProcessUsage = processMemoryRatio !== null && processMemoryRatio >= 0.65;
+
+  if (!lowAvailable && !highSystemUsage && !highProcessUsage) {
+    return null;
+  }
+
+  const status = lowAvailable || (systemMemoryRatio !== null && systemMemoryRatio >= 0.92) ? 'ACTION_REQUIRED' : 'WATCH';
+  const title = highProcessUsage && !lowAvailable && !highSystemUsage ? '进程内存占用偏高' : '系统内存余量偏低';
+  const fragments: string[] = [];
+  if (systemMemoryRatio !== null) {
+    fragments.push(`系统内存使用率 ${(systemMemoryRatio * 100).toFixed(0)}%`);
+  }
+  if (availablePhysicalBytes !== null) {
+    fragments.push(`可用内存 ${formatByteValue(availablePhysicalBytes)}`);
+  }
+  if (totalPhysicalBytes !== null) {
+    fragments.push(`总内存 ${formatByteValue(totalPhysicalBytes)}`);
+  }
+  if (processMemoryRatio !== null) {
+    fragments.push(`进程占比 ${(processMemoryRatio * 100).toFixed(0)}%`);
+  }
+  if (processWorkingSetBytes !== null && processWorkingSetBytes > 0) {
+    fragments.push(`进程工作集 ${formatByteValue(processWorkingSetBytes)}`);
+  }
+
+  return {
+    title,
+    status,
+    body: `${fragments.join('；')}。内存余量不足时，快照刷新可能降速或回退到单 worker。`,
+  };
+}
+
+function numericRecordValue(record: Record<string, unknown>, key: string): number | null {
+  const value = record[key];
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function formatByteValue(value: number): string {
+  const absoluteValue = Math.abs(value);
+  if (absoluteValue >= 1024 ** 3) {
+    return `${(value / 1024 ** 3).toFixed(1)} GB`;
+  }
+  if (absoluteValue >= 1024 ** 2) {
+    return `${(value / 1024 ** 2).toFixed(1)} MB`;
+  }
+  return `${value.toLocaleString('zh-HK')} bytes`;
 }
 
 function getRuleEntries(overview: ApiBondFixedIncomeOverview): Array<{
@@ -1790,6 +2136,14 @@ function getRuleEntries(overview: ApiBondFixedIncomeOverview): Array<{
   ];
 }
 
+function getPulseSegmentStyle(count: number, total: number): CSSProperties {
+  const width = total > 0 ? (count / total) * 100 : 0;
+  return {
+    flexBasis: `${width}%`,
+    width: `${width}%`,
+  };
+}
+
 function BondCurveChart({
   anomaly,
   points,
@@ -1802,6 +2156,9 @@ function BondCurveChart({
   const width = 320;
   const height = 168;
   const path = buildCurvePath(points, width, height);
+  const diagnosisClassName = anomaly.includes('校验通过')
+    ? 'snapshots-bond-curve-anomaly snapshots-bond-curve-anomaly--neutral'
+    : 'snapshots-bond-curve-anomaly';
   return (
     <article className="snapshots-bond-curve-preview-card snapshots-bond-curve-card">
       <strong>曲线预览</strong>
@@ -1833,7 +2190,7 @@ function BondCurveChart({
           </span>
         ))}
       </div>
-      <span className="snapshots-bond-curve-anomaly">{anomaly}</span>
+      <span className={diagnosisClassName}>{anomaly}</span>
     </article>
   );
 }
@@ -1887,6 +2244,13 @@ type BondAuditMatrixRow = {
   action: BondAuditCell;
 };
 
+const BOND_AUDIT_FIELD_GROUPS = [
+  ['full_price', 'dirty_price'],
+  ['accrued_interest'],
+  ['duration'],
+  ['ytm_pct'],
+] as const;
+
 function getFieldValue(instrument: ApiBondSnapshotEligibleInstrument, keys: string[]): unknown {
   const payload = instrument as unknown as Record<string, unknown>;
   for (const key of keys) {
@@ -1907,16 +2271,17 @@ function getFieldTone(instrument: ApiBondSnapshotEligibleInstrument, keys: strin
   const hasMissingMarker = keys.some((key) => instrument.missing_fields.includes(key));
   const hasDangerStatus = statusValues.some((status) => ['MISSING', 'FAILED', 'BLOCKED'].includes(status));
   const hasInferredStatus = statusValues.includes('INFERRED');
+  const hasWaivedStatus = statusValues.includes('WAIVED');
   const hasWatchStatus = statusValues.some((status) => ['WATCH', 'PENDING', 'STALE', 'INCOMPLETE'].includes(status));
 
-  if ((hasMissingMarker || hasDangerStatus) && !hasValue) {
+  if ((hasMissingMarker || hasDangerStatus) && !hasValue && !hasWaivedStatus) {
     return 'danger';
+  }
+  if (hasValue || statusValues.includes('READY') || hasInferredStatus || hasWaivedStatus) {
+    return 'ok';
   }
   if (hasInferredMarker || hasInferredStatus) {
     return 'imputed';
-  }
-  if (hasValue || statusValues.includes('READY')) {
-    return 'ok';
   }
   if (hasWatchStatus) {
     return 'warn';
@@ -1984,15 +2349,130 @@ function createFieldAuditCell(
 ): BondAuditCell {
   const tone = getFieldTone(instrument, keys);
   if (tone === 'ok') {
-    return { label: '✓', tone };
+    return { label: '√', tone };
   }
   if (tone === 'imputed') {
-    return { label: '推算', tone };
+    return { label: '推算待写入', tone };
   }
   if (tone === 'danger') {
     return { label: '缺失', tone };
   }
   return { label: '待补', tone };
+}
+
+type BondRegistryAnomalyRow = {
+  id: string;
+  label: string;
+  source: string;
+  status: string;
+  updated_at: string | null | undefined;
+  issue: string;
+  fieldSummary: string;
+};
+
+function getInstrumentBlockingFields(instrument: ApiBondSnapshotEligibleInstrument): string[] {
+  return instrument.missing_fields.filter((fieldName) => {
+    const fieldStatus = String(instrument.field_status?.[fieldName] ?? '').toUpperCase();
+    return !['READY', 'INFERRED', 'WAIVED'].includes(fieldStatus);
+  });
+}
+
+function buildFallbackQualityAuditRows(instruments: ApiBondSnapshotEligibleInstrument[]): Record<string, unknown>[] {
+  const priceFields = new Set(['last_price', 'clean_price', 'full_price', 'dirty_price', 'price', 'market_price']);
+  const riskFields = new Set(['ytm_pct', 'yield_to_maturity', 'duration', 'effective_duration', 'convexity']);
+
+  return instruments.map((instrument) => {
+    const blockingFields = getInstrumentBlockingFields(instrument);
+    const inferredFields = Object.keys(instrument.inferred_fields ?? {});
+    const hasMissingPriceField = blockingFields.some((fieldName) => priceFields.has(fieldName));
+    const hasMissingRiskField = blockingFields.some((fieldName) => riskFields.has(fieldName));
+
+    return {
+      id: instrument.id,
+      label: instrument.label,
+      status: isReadyBondStatus(instrument.status) && !blockingFields.length ? 'PASS' : 'WATCH',
+      price_consistency_status: hasMissingPriceField ? 'WATCH' : 'PASS',
+      ytm_duration_convexity_status: hasMissingRiskField ? 'INCOMPLETE' : 'FULL',
+      missing_fields: blockingFields,
+      inferred_fields: inferredFields,
+    };
+  });
+}
+
+function isQualityAuditStatusClear(value: unknown, allowUnknown = false): boolean {
+  const normalizedStatus = String(value ?? '').trim().toUpperCase();
+  if (!normalizedStatus || normalizedStatus === 'NONE') {
+    return allowUnknown;
+  }
+  if (allowUnknown && normalizedStatus === 'UNKNOWN') {
+    return true;
+  }
+  return ['PASS', 'FULL', 'READY', 'COMPLETED', 'COMPOSABLE', 'WAIVED'].includes(normalizedStatus);
+}
+
+function hasQualityAuditIssue(row: Record<string, unknown>): boolean {
+  const missingFields = Array.isArray(row.missing_fields) ? row.missing_fields.filter(Boolean) : [];
+  return (
+    missingFields.length > 0 ||
+    !isQualityAuditStatusClear(row.status) ||
+    !isQualityAuditStatusClear(row.price_consistency_status, true) ||
+    !isQualityAuditStatusClear(row.ytm_duration_convexity_status)
+  );
+}
+
+function getRepairRuleAppliesToCount(row: Record<string, unknown>): number {
+  return Array.isArray(row.applies_to) ? row.applies_to.length : 0;
+}
+
+function hasActionableRepairRuleIssue(row: Record<string, unknown>): boolean {
+  const mode = String(row.mode ?? '').trim().toLowerCase();
+  const id = String(row.id ?? '').trim().toLowerCase();
+  if (mode === 'full' || id === 'bond_full_refresh') {
+    return false;
+  }
+  return getRepairRuleAppliesToCount(row) > 0;
+}
+
+function buildBondRegistryAnomalyRows(overview: ApiBondFixedIncomeOverview): BondRegistryAnomalyRow[] {
+  return overview.eligible_instruments
+    .map((instrument) => {
+      const registryItem = overview.raw_registry.find(
+        (item) =>
+          item.id === instrument.id ||
+          item.snapshot_ref === instrument.snapshot_ref ||
+          item.snapshot_ref === instrument.id,
+      );
+      const issues: string[] = [];
+      if (!isReadyBondStatus(instrument.status)) {
+        issues.push(`状态：${getBondStatusLabel(instrument.status)}`);
+      }
+      const blockingFields = getInstrumentBlockingFields(instrument);
+      if (blockingFields.length) {
+        issues.push(`缺失：${formatBondFieldList(blockingFields)}`);
+      }
+      const firstAlert = instrument.audit_alerts?.find((alert) => alert.trim());
+      if (firstAlert) {
+        issues.push(translateBondText(firstAlert));
+      }
+      if (!issues.length) {
+        return null;
+      }
+      return {
+        id: instrument.id,
+        label: instrument.label,
+        source: registryItem?.source ?? instrument.source,
+        status: instrument.status,
+        updated_at: registryItem?.updated_at ?? instrument.updated_at,
+        issue: issues.join('；'),
+        fieldSummary: [
+          instrument.missing_fields.length ? `待补 ${formatBondFieldList(instrument.missing_fields)}` : '无缺失字段',
+          instrument.inferred_fields && Object.keys(instrument.inferred_fields).length
+            ? `推断 ${formatBondFieldList(Object.keys(instrument.inferred_fields))}`
+            : '无推断字段',
+        ].join(' · '),
+      };
+    })
+    .filter((row): row is BondRegistryAnomalyRow => Boolean(row));
 }
 
 function createInstrumentAuditAction(
@@ -2015,16 +2495,36 @@ function createInstrumentAuditAction(
   };
 }
 
+function getAuditFieldAvailabilitySummary(
+  instruments: ApiBondSnapshotEligibleInstrument[],
+): { available: number; percent: number; total: number } {
+  const total = instruments.length * BOND_AUDIT_FIELD_GROUPS.length;
+  if (!total) {
+    return { available: 0, percent: 0, total: 0 };
+  }
+  const available = instruments.reduce(
+    (sum, instrument) =>
+      sum +
+      BOND_AUDIT_FIELD_GROUPS.filter((keys) => getFieldTone(instrument, [...keys]) === 'ok').length,
+    0,
+  );
+  return {
+    available,
+    percent: Math.round((available / total) * 100),
+    total,
+  };
+}
+
 function buildInstrumentAuditRows(
   instruments: ApiBondSnapshotEligibleInstrument[],
   selectedInstrumentId: string | null,
 ): BondAuditMatrixRow[] {
   return instruments.map((instrument) => {
     const cells: BondAuditMatrixRow['cells'] = [
-      createFieldAuditCell(instrument, ['full_price', 'dirty_price']),
-      createFieldAuditCell(instrument, ['accrued_interest']),
-      createFieldAuditCell(instrument, ['duration']),
-      createFieldAuditCell(instrument, ['ytm_pct']),
+      createFieldAuditCell(instrument, [...BOND_AUDIT_FIELD_GROUPS[0]]),
+      createFieldAuditCell(instrument, [...BOND_AUDIT_FIELD_GROUPS[1]]),
+      createFieldAuditCell(instrument, [...BOND_AUDIT_FIELD_GROUPS[2]]),
+      createFieldAuditCell(instrument, [...BOND_AUDIT_FIELD_GROUPS[3]]),
     ];
     return {
       id: instrument.id,
@@ -2080,9 +2580,9 @@ function BondAuditMatrix({
     <article className="snapshots-bond-audit-card">
       <div className="snapshots-bond-audit-toolbar">
         <div className="snapshots-bond-chip-row">
-          <span className="status-chip status-chip--success">绿格 = 字段可用</span>
-          <span className="status-chip status-chip--soft">蓝格 = 推算字段</span>
+          <span className="status-chip status-chip--success">绿格 = 字段可用（含推算/豁免）</span>
           <span className="status-chip status-chip--warning">黄格 = 待复核</span>
+          <span className="status-chip status-chip--danger">红格 = 缺失</span>
         </div>
         <div className="snapshots-bond-chip-row">
           <span className="status-chip status-chip--soft">{rows.length} 条快照</span>
@@ -2126,7 +2626,8 @@ function BondAuditMatrix({
 
 type BondFixedIncomeSnapshotsTabProps = {
   overview: ApiBondFixedIncomeOverview;
-  onRefresh?: () => void;
+  snapshotOverview?: ApiSnapshotOverview | null;
+  onRefresh?: (request?: ApiSnapshotRefreshRequest) => void;
   refreshDisabled?: boolean;
   refreshLabel?: string;
   onCreateAssetLeg?: (instrument: ApiBondSnapshotEligibleInstrument) => void;
@@ -2137,6 +2638,7 @@ type BondFixedIncomeSnapshotsTabProps = {
 
 export function BondFixedIncomeSnapshotsTab({
   overview,
+  snapshotOverview = null,
   onRefresh,
   refreshDisabled = false,
   refreshLabel = '刷新债券快照',
@@ -2146,6 +2648,7 @@ export function BondFixedIncomeSnapshotsTab({
   createAssetLegMessage = null,
 }: BondFixedIncomeSnapshotsTabProps): JSX.Element {
   const eligibleInstruments = overview.eligible_instruments;
+  const diagnosticPanelRef = useRef<HTMLElement | null>(null);
   const [selectedGroup, setSelectedGroup] = useState<BondGroupKey>(
     pickDefaultBondGroup(eligibleInstruments),
   );
@@ -2179,14 +2682,26 @@ export function BondFixedIncomeSnapshotsTab({
   const visiblePulseCards = overview.global_pulse.cards.filter(
     (card) => !['shared_snapshot_route', 'scheduler'].includes(card.id),
   );
-  const fieldCoveragePercent =
-    eligibleInstruments.length > 0 ? Math.round((readyInstrumentCount / eligibleInstruments.length) * 100) : 0;
-  const pendingPulseCount = visiblePulseCards.filter(
-    (card) => !['READY', 'COMPLETED'].includes(String(card.status || '').toUpperCase()),
+  const blockedInstrumentCount = eligibleInstruments.filter((instrument) =>
+    ['BLOCKED', 'FAILED', 'ACTION_REQUIRED'].includes(String(instrument.status || '').toUpperCase()),
   ).length;
-  const blockedPulseCount = visiblePulseCards.filter((card) =>
-    ['BLOCKED', 'FAILED'].includes(String(card.status || '').toUpperCase()),
+  const pendingInstrumentCount = eligibleInstruments.filter((instrument) => {
+    const status = String(instrument.status || '').toUpperCase();
+    return !['READY', 'COMPLETED', 'BLOCKED', 'FAILED', 'ACTION_REQUIRED'].includes(status);
+  }).length;
+  const cardReadyCount = visiblePulseCards.filter((card) =>
+    ['READY', 'COMPLETED'].includes(String(card.status || '').toUpperCase()),
   ).length;
+  const cardBlockedCount = visiblePulseCards.filter((card) =>
+    ['BLOCKED', 'FAILED', 'ACTION_REQUIRED'].includes(String(card.status || '').toUpperCase()),
+  ).length;
+  const cardPendingCount = visiblePulseCards.length - cardReadyCount - cardBlockedCount;
+  const pulseReadyCount = eligibleInstruments.length ? readyInstrumentCount : cardReadyCount;
+  const pulsePendingCount = eligibleInstruments.length ? pendingInstrumentCount : cardPendingCount;
+  const pulseBlockedCount = eligibleInstruments.length ? blockedInstrumentCount : cardBlockedCount;
+  const pulseTotal = pulseReadyCount + pulsePendingCount + pulseBlockedCount;
+  const fieldAvailability = getAuditFieldAvailabilitySummary(eligibleInstruments);
+  const fieldCoveragePercent = fieldAvailability.percent;
   const nextDefaultGroup = pickDefaultBondGroup(eligibleInstruments);
   useEffect(() => {
     if (!eligibleInstruments.length) {
@@ -2205,7 +2720,7 @@ export function BondFixedIncomeSnapshotsTab({
     }
     const groupInstruments = sortBondInstrumentsByDuration(
       eligibleInstruments.filter((instrument) => getInstrumentBondGroup(instrument) === nextGroup),
-    ).slice(0, 3);
+    );
     if (!groupInstruments.some((instrument) => instrument.id === selectedInstrumentId)) {
       setSelectedInstrumentId(groupInstruments[0]?.id ?? pickGroupInstrumentId(eligibleInstruments, nextGroup));
     }
@@ -2214,8 +2729,7 @@ export function BondFixedIncomeSnapshotsTab({
   const selectedGroupInstruments = sortBondInstrumentsByDuration(
     eligibleInstruments.filter((instrument) => getInstrumentBondGroup(instrument) === selectedGroup),
   );
-  const visibleSelectedGroupInstruments = selectedGroupInstruments.slice(0, 3);
-  const hiddenSelectedGroupCount = Math.max(0, selectedGroupInstruments.length - visibleSelectedGroupInstruments.length);
+  const visibleSelectedGroupInstruments = selectedGroupInstruments;
   const selectedGroupCount = bondGroupCounts[selectedGroup];
   const selectedGroupStatus = getBondGroupRollupStatus(selectedGroupCount);
   const selectedGroupMetricCards = getBondWorkbenchMetricCards({
@@ -2248,10 +2762,49 @@ export function BondFixedIncomeSnapshotsTab({
   const selectedInstrumentIsReady = isReadyBondStatus(selectedInstrument?.status);
   const selectedInstrumentIsCreating = selectedInstrument ? creatingAssetLegId === selectedInstrument.id : false;
   const selectedInstrumentDisabledReason = selectedInstrument ? getAssetLegDisabledReason(selectedInstrument) : null;
-  const qualityAuditRows = (overview.quality_audit ?? []).slice(0, 6);
+  const qualityAuditSource = overview.quality_audit?.length
+    ? overview.quality_audit
+    : buildFallbackQualityAuditRows(eligibleInstruments);
+  const qualityAuditRows = qualityAuditSource.slice(0, 6);
   const dailyAccrualRows = (overview.daily_accrual_status ?? []).slice(0, 4);
   const repairRules = overview.repair_rules ?? [];
   const riskBudgetRows = (overview.risk_budget_inputs ?? []).slice(0, 4);
+  const selectedDailyAccrualRow = selectedInstrument
+    ? dailyAccrualRows.find((row) => displayRecordValue(row, 'id') === selectedInstrument.id)
+    : undefined;
+  const selectedRiskBudgetRow = selectedInstrument
+    ? riskBudgetRows.find((row) => displayRecordValue(row, 'id') === selectedInstrument.id)
+    : undefined;
+  const registryAnomalyRows = buildBondRegistryAnomalyRows(overview);
+  const hasQualityAuditIssues = qualityAuditRows.some(hasQualityAuditIssue);
+  const hasRepairRuleIssues = repairRules.some(hasActionableRepairRuleIssue);
+  const hasRegistryIssues = registryAnomalyRows.length > 0;
+  const diagnosticEntries = getDiagnosticEntries(overview, registryAnomalyRows, qualityAuditRows, repairRules);
+  const handleScrollToBondDiagnostics = (): void => {
+    const node = diagnosticPanelRef.current ?? document.getElementById('bond-system-diagnostics');
+    node?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  };
+  const [qualityAuditExpanded, setQualityAuditExpanded] = useState(hasQualityAuditIssues);
+  const [repairRulesExpanded, setRepairRulesExpanded] = useState(hasRepairRuleIssues);
+  const [registryExpanded, setRegistryExpanded] = useState(hasRegistryIssues);
+  useEffect(() => {
+    if (hasQualityAuditIssues) {
+      setQualityAuditExpanded(true);
+    }
+  }, [hasQualityAuditIssues]);
+  useEffect(() => {
+    if (hasRepairRuleIssues) {
+      setRepairRulesExpanded(true);
+    }
+  }, [hasRepairRuleIssues]);
+  useEffect(() => {
+    if (hasRegistryIssues) {
+      setRegistryExpanded(true);
+    }
+  }, [hasRegistryIssues]);
+  const registryRefreshLabel = registryAnomalyRows.length
+    ? `重刷 ${registryAnomalyRows.length} 个异常行`
+    : '重新扫描异常行';
   return (
     <div className="snapshots-bond-view">
       <section className="panel snapshots-bond-panel snapshots-bond-health-panel snapshots-global-dashboard-panel">
@@ -2273,7 +2826,9 @@ export function BondFixedIncomeSnapshotsTab({
           <button
             className="primary-button snapshots-bond-refresh-button"
             disabled={refreshDisabled}
-            onClick={onRefresh}
+            onClick={() => {
+              onRefresh?.(BOND_COMPLETE_REFRESH_REQUEST);
+            }}
             type="button"
           >
             {refreshLabel}
@@ -2285,14 +2840,14 @@ export function BondFixedIncomeSnapshotsTab({
             <strong>就绪 / 待补 / 阻塞</strong>
             <p>按状态汇总当日债券快照的可用性，用于快速判断来源底座是否完整。</p>
             <div className="snapshots-bond-pulse-bar" aria-hidden="true">
-              <span />
-              <span />
-              <span />
+              <span style={getPulseSegmentStyle(pulseReadyCount, pulseTotal)} />
+              <span style={getPulseSegmentStyle(pulsePendingCount, pulseTotal)} />
+              <span style={getPulseSegmentStyle(pulseBlockedCount, pulseTotal)} />
             </div>
             <div className="snapshots-bond-chip-row">
-              <span className="status-chip status-chip--success">就绪 {readyInstrumentCount}</span>
-              <span className="status-chip status-chip--warning">待补 {pendingPulseCount}</span>
-              <span className="status-chip status-chip--danger">阻塞 {blockedPulseCount}</span>
+              <span className="status-chip status-chip--success">就绪 {pulseReadyCount}</span>
+              <span className="status-chip status-chip--warning">待补 {pulsePendingCount}</span>
+              <span className="status-chip status-chip--danger">阻塞 {pulseBlockedCount}</span>
             </div>
           </article>
           <article className="snapshots-bond-pulse-card">
@@ -2315,7 +2870,8 @@ export function BondFixedIncomeSnapshotsTab({
               </svg>
               <div className="snapshots-bond-ring-copy">
                 <strong>{fieldCoveragePercent}% 已覆盖</strong>
-                <span>净价、全价、应计利息、YTM、久期与凸性字段来自运行时债券快照。</span>
+                <span>{fieldAvailability.available}/{fieldAvailability.total} 关键字段可用</span>
+                <span>推算/豁免字段计入可用；只有缺失或待复核才影响资产腿和组合。</span>
               </div>
             </div>
           </article>
@@ -2330,6 +2886,29 @@ export function BondFixedIncomeSnapshotsTab({
               ))}
             </div>
             <p>当前仅使用运行时来源；如果共享快照阻塞，会同步进入修复队列。</p>
+          </article>
+          <article className="snapshots-bond-pulse-card snapshots-bond-pulse-card--global-anomaly">
+            <strong>全局异常队列</strong>
+            <p>仅汇总当前债券 tab 的字段缺口、曲线阈值、来源登记状态与修复规则异常，股票/指数门禁保留在对应页签。</p>
+            <div className="snapshots-bond-chip-row">
+              {diagnosticEntries.length ? (
+                <button
+                  aria-controls="bond-system-diagnostics"
+                  className="status-chip status-chip--warning snapshots-bond-anomaly-jump"
+                  onClick={handleScrollToBondDiagnostics}
+                  type="button"
+                >
+                  {diagnosticEntries.length} 项待处理
+                </button>
+              ) : (
+                <span className="status-chip status-chip--success">无债券异常</span>
+              )}
+            </div>
+            {diagnosticEntries.slice(0, 2).map((entry) => (
+              <span key={entry.id}>
+                {entry.title}
+              </span>
+            ))}
           </article>
         </div>
 
@@ -2475,33 +3054,21 @@ export function BondFixedIncomeSnapshotsTab({
                     })}
                   </div>
                 ) : null}
-                {hiddenSelectedGroupCount > 0 ? (
-                  <div className="snapshots-bond-progress-inline">
-                    <div className="snapshots-bond-snapshot-head">
-                      <strong>{`已展示 ${visibleSelectedGroupInstruments.length} / ${selectedGroupInstruments.length} 张`}</strong>
-                      <span>{`剩余 ${hiddenSelectedGroupCount} 张按久期继续排队`}</span>
-                    </div>
-                    <div className="snapshots-bond-progress-bar" aria-hidden="true">
-                      <span
-                        style={{
-                          width: `${(visibleSelectedGroupInstruments.length / selectedGroupInstruments.length) * 100}%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-                ) : (
-                  !visibleSelectedGroupInstruments.length ? (
-                    <article className="snapshots-bond-evidence-card">
-                      <strong>暂无可创建资产腿的债券来源</strong>
-                      <span>请先运行快照刷新任务，或写入字段齐备的 bond_fixed_income 快照。</span>
-                    </article>
-                  ) : null
-                )}
+                {!visibleSelectedGroupInstruments.length ? (
+                  <article className="snapshots-bond-evidence-card">
+                    <strong>暂无可创建资产腿的债券来源</strong>
+                    <span>请先运行快照刷新任务，或写入字段齐备的 bond_fixed_income 快照。</span>
+                  </article>
+                ) : null}
               </div>
               <div className="snapshots-bond-scheduler-stack">
                 {overview.curve_preview.length ? (
                   <BondCurveChart
-                    anomaly={getBondGroupCurveAnomaly(selectedGroup)}
+                    anomaly={getBondGroupCurveDiagnosis(
+                      selectedGroup,
+                      selectedGroupInstruments,
+                      ustTenTwoSpreadBps,
+                    )}
                     points={overview.curve_preview}
                     summaryChip={groupMetricChipLabels[selectedGroup]}
                   />
@@ -2578,14 +3145,10 @@ export function BondFixedIncomeSnapshotsTab({
                     >
                       <strong>日频应计利息</strong>
                       <span>
-                        {displayRecordValue(
-                          dailyAccrualRows.find((row) => displayRecordValue(row, 'id') === selectedInstrument.id) ?? {},
-                          'status',
-                          'READY',
-                        )}
+                        {translateBondQualityStatus(displayRecordValue(selectedDailyAccrualRow ?? {}, 'status', 'READY'))}
                         {' · '}
                         应计 {displayRecordValue(
-                          dailyAccrualRows.find((row) => displayRecordValue(row, 'id') === selectedInstrument.id) ?? {},
+                          selectedDailyAccrualRow ?? {},
                           'accrued_interest',
                         )}
                       </span>
@@ -2596,19 +3159,15 @@ export function BondFixedIncomeSnapshotsTab({
                     >
                       <strong>风险预算预检</strong>
                       <span>
-                        {displayRecordValue(
-                          riskBudgetRows.find((row) => displayRecordValue(row, 'id') === selectedInstrument.id) ?? {},
-                          'status',
-                          'COMPOSABLE',
-                        )}
+                        {translateBondQualityStatus(displayRecordValue(selectedRiskBudgetRow ?? {}, 'status', 'COMPOSABLE'))}
                         {' · '}
                         久期 {displayRecordValue(
-                          riskBudgetRows.find((row) => displayRecordValue(row, 'id') === selectedInstrument.id) ?? {},
+                          selectedRiskBudgetRow ?? {},
                           'duration',
                         )}
                         {' · '}
                         凸性 {displayRecordValue(
-                          riskBudgetRows.find((row) => displayRecordValue(row, 'id') === selectedInstrument.id) ?? {},
+                          selectedRiskBudgetRow ?? {},
                           'convexity',
                         )}
                       </span>
@@ -2654,7 +3213,40 @@ export function BondFixedIncomeSnapshotsTab({
       </div>
 
       <div className="snapshots-bond-detail-stack">
-        <div className="snapshots-bond-detail-grid snapshots-bond-audit-layout">
+        {diagnosticEntries.length ? (
+          <section
+            className="panel snapshots-bond-panel snapshots-bond-diagnostic-panel"
+            id="bond-system-diagnostics"
+            ref={diagnosticPanelRef}
+          >
+            <div className="panel-header snapshots-bond-panel__header">
+              <div>
+                <div className="snapshots-bond-title-row">
+                  <h3>系统诊断</h3>
+                  <span className="status-chip status-chip--warning">{diagnosticEntries.length} 项问题</span>
+                </div>
+                <p className="snapshots-panel-copy">
+                  系统诊断仅汇总当前债券页的可处置异常，包括字段缺口、曲线阈值、来源登记状态与刷新风险；健康项不进入运营队列。
+                </p>
+              </div>
+            </div>
+            <div className="snapshots-bond-diagnostic-list">
+              {diagnosticEntries.map((entry) => (
+                <article className="snapshots-bond-evidence-card" key={entry.id}>
+                  <div className="snapshots-bond-snapshot-head">
+                    <strong>{entry.title}</strong>
+                    <span className={getBondStatusChipClassName(entry.status)}>
+                      {getBondStatusLabel(entry.status)}
+                    </span>
+                  </div>
+                  <span>{entry.body}</span>
+                </article>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        <div className="snapshots-bond-detail-grid snapshots-bond-audit-layout snapshots-bond-audit-layout--single">
           <div className="snapshots-bond-detail-main">
             <section className="panel snapshots-bond-panel snapshots-bond-audit-panel">
               <div className="panel-header snapshots-bond-panel__header">
@@ -2670,7 +3262,14 @@ export function BondFixedIncomeSnapshotsTab({
                   </p>
                 </div>
                 <div className="button-row">
-                  <button className="ghost-button snapshots-bond-audit-repair-button" type="button">
+                  <button
+                    className="ghost-button snapshots-bond-audit-repair-button"
+                    disabled={refreshDisabled || !onRefresh}
+                    onClick={() => {
+                      onRefresh?.(BOND_COMPLETE_REFRESH_REQUEST);
+                    }}
+                    type="button"
+                  >
                     批量修复规则
                   </button>
                 </div>
@@ -2679,115 +3278,166 @@ export function BondFixedIncomeSnapshotsTab({
               <BondAuditMatrix overview={overview} selectedInstrumentId={selectedInstrument?.id ?? null} />
 
               <section
-                className="snapshots-bond-quality-audit"
+                className="snapshots-bond-quality-audit snapshots-bond-collapsible-section"
                 aria-label="债券质量审计"
+                data-collapsed={qualityAuditExpanded ? 'false' : 'true'}
                 data-ui="bond-quality-audit-matrix"
               >
                 <div className="snapshots-bond-quality-header">
-                  <strong>质量审计</strong>
-                  <span className="status-chip status-chip--soft">{qualityAuditRows.length} 条记录</span>
+                  <div className="snapshots-bond-collapsible-section__title">
+                    <strong>质量审计</strong>
+                    <span className={hasQualityAuditIssues ? 'status-chip status-chip--warning' : 'status-chip status-chip--success'}>
+                      {hasQualityAuditIssues ? '存在待复核项' : '无异常，已收起'}
+                    </span>
+                    <span className="status-chip status-chip--soft">{qualityAuditRows.length} 条记录</span>
+                  </div>
+                  <button
+                    className="ghost-button"
+                    aria-expanded={qualityAuditExpanded}
+                    onClick={() => setQualityAuditExpanded((expanded) => !expanded)}
+                    type="button"
+                  >
+                    {qualityAuditExpanded ? '收起质量审计' : '展开质量审计'}
+                  </button>
                 </div>
-                <div className="snapshots-bond-quality-grid">
-                  {qualityAuditRows.map((row) => (
-                    <article className="snapshots-bond-evidence-card" key={displayRecordValue(row, 'id', displayRecordValue(row, 'label'))}>
-                      <div className="snapshots-bond-snapshot-head">
-                        <strong>{displayRecordValue(row, 'label')}</strong>
-                        <span className={getBondStatusChipClassName(displayRecordValue(row, 'status', 'WATCH'))}>
-                          {displayRecordValue(row, 'status', 'WATCH')}
+                {qualityAuditExpanded ? (
+                  <div className="snapshots-bond-quality-grid">
+                    {qualityAuditRows.map((row) => (
+                      <article className="snapshots-bond-evidence-card" key={displayRecordValue(row, 'id', displayRecordValue(row, 'label'))}>
+                        <div className="snapshots-bond-snapshot-head">
+                          <strong>{displayRecordValue(row, 'label')}</strong>
+                          <span className={getBondQualityStatusChipClassName(displayRecordValue(row, 'status', 'WATCH'))}>
+                            {translateBondQualityStatus(displayRecordValue(row, 'status', 'WATCH'))}
+                          </span>
+                        </div>
+                        <span>
+                          价格一致性 {translateBondQualityStatus(displayRecordValue(row, 'price_consistency_status'))} · 风险字段{' '}
+                          {translateBondQualityStatus(displayRecordValue(row, 'ytm_duration_convexity_status'))}
                         </span>
-                      </div>
-                      <span>价格一致性 {displayRecordValue(row, 'price_consistency_status')} · 风险字段 {displayRecordValue(row, 'ytm_duration_convexity_status')}</span>
-                      <span>缺失 {displayRecordValue(row, 'missing_fields', 'none')} · 推断 {displayRecordValue(row, 'inferred_fields', 'none')}</span>
-                    </article>
-                  ))}
-                </div>
+                        <span>缺失 {formatBondFieldList(row.missing_fields)} · 推断 {formatBondFieldList(row.inferred_fields)}</span>
+                      </article>
+                    ))}
+                  </div>
+                ) : null}
               </section>
 
               <section
-                className="snapshots-bond-quality-audit snapshots-bond-repair-rules"
+                className="snapshots-bond-quality-audit snapshots-bond-repair-rules snapshots-bond-collapsible-section"
                 aria-label="债券修复规则"
+                data-collapsed={repairRulesExpanded ? 'false' : 'true'}
                 data-ui="bond-repair-rules"
               >
                 <div className="snapshots-bond-quality-header">
-                  <strong>一键修复规则</strong>
-                  <span className="status-chip status-chip--soft">修复目标 bond</span>
+                  <div className="snapshots-bond-collapsible-section__title">
+                    <strong>一键修复规则</strong>
+                    <span className={hasRepairRuleIssues ? 'status-chip status-chip--warning' : 'status-chip status-chip--success'}>
+                      {hasRepairRuleIssues ? '存在待执行规则' : '无异常，已收起'}
+                    </span>
+                  </div>
+                  <div className="button-row">
+                    <button
+                      className="ghost-button"
+                      disabled={refreshDisabled || !onRefresh}
+                      onClick={() => {
+                        onRefresh?.(BOND_COMPLETE_REFRESH_REQUEST);
+                      }}
+                      type="button"
+                    >
+                      一键修复全部问题
+                    </button>
+                    <button
+                      className="ghost-button"
+                      aria-expanded={repairRulesExpanded}
+                      onClick={() => setRepairRulesExpanded((expanded) => !expanded)}
+                      type="button"
+                    >
+                      {repairRulesExpanded ? '收起一键修复规则' : '展开一键修复规则'}
+                    </button>
+                  </div>
                 </div>
-                <div className="snapshots-bond-quality-grid snapshots-bond-quality-grid--compact">
-                  {repairRules.map((row) => (
-                    <article className="snapshots-bond-evidence-card" key={displayRecordValue(row, 'id', displayRecordValue(row, 'mode'))}>
-                      <strong>{displayRecordValue(row, 'mode')} · {displayRecordValue(row, 'target')}</strong>
-                      <span>{displayRecordValue(row, 'label')}</span>
-                    </article>
-                  ))}
-                </div>
+                {repairRulesExpanded ? (
+                  <div className="snapshots-bond-quality-grid snapshots-bond-quality-grid--compact">
+                    {repairRules.map((row) => (
+                      <article className="snapshots-bond-evidence-card" key={displayRecordValue(row, 'id', displayRecordValue(row, 'mode'))}>
+                        <div className="snapshots-bond-snapshot-head">
+                          <strong>
+                            {translateRepairRuleMode(row.mode)} · {translateRepairRuleTarget(row.target)}
+                          </strong>
+                          <span className="status-chip status-chip--soft">
+                            适用：{formatRepairRuleAppliesTo(row.applies_to)}
+                          </span>
+                        </div>
+                        <span>{translateRepairRuleLabel(row.label)}</span>
+                        <button
+                          className="ghost-button"
+                          disabled={refreshDisabled || !onRefresh}
+                          onClick={() => {
+                            onRefresh?.(buildRepairRuleRequest(row));
+                          }}
+                          type="button"
+                        >
+                          执行规则
+                        </button>
+                      </article>
+                    ))}
+                  </div>
+                ) : null}
               </section>
             </section>
           </div>
-
-          <aside className="snapshots-bond-detail-rail">
-            <section className="snapshots-bond-task-rail snapshots-bond-diagnostic-rail">
-              <div className="snapshots-bond-task-rail__section">
-                <div className="snapshots-bond-task-rail__header">
-                  <div className="snapshots-bond-task-rail__heading">
-                    <strong>系统诊断</strong>
-                    <span>{getDiagnosticEntries(overview).length} 条备注</span>
-                  </div>
-                </div>
-                {getDiagnosticEntries(overview).map((entry) => (
-                  <article className="snapshots-bond-evidence-card" key={`${entry.title}-${entry.body}`}>
-                    <div className="snapshots-bond-snapshot-head">
-                      <strong>{entry.title}</strong>
-                      <span className={getBondStatusChipClassName(entry.status)}>
-                        {getBondStatusLabel(entry.status)}
-                      </span>
-                    </div>
-                    <span>{entry.body}</span>
-                  </article>
-                ))}
-              </div>
-            </section>
-          </aside>
         </div>
 
-        <section className="panel snapshots-bond-panel snapshots-bond-registry-panel">
+        <section
+          className="panel snapshots-bond-panel snapshots-bond-registry-panel snapshots-bond-collapsible-section"
+          data-collapsed={registryExpanded ? 'false' : 'true'}
+          data-ui="bond-raw-registry"
+        >
           <div className="panel-header snapshots-bond-panel__header">
             <div>
               <div className="snapshots-bond-title-row">
                 <h3>原始快照与调度</h3>
-                <span className="status-chip status-chip--soft">{overview.raw_registry.length} 条运行时行</span>
+                <span className={registryAnomalyRows.length ? 'status-chip status-chip--warning' : 'status-chip status-chip--success'}>
+                  {registryAnomalyRows.length ? `${registryAnomalyRows.length} 条异常行` : '无异常行'}
+                </span>
               </div>
               <p className="snapshots-panel-copy">
-                只保留真实债券快照行和共享调度，方便直接定位异常与下一步规则。
+                异常清单聚焦需处置的固定收益快照；符合 READY 门槛的行保留在工作站与审计矩阵中，确保来源筛选与治理视图各司其职。
               </p>
             </div>
             <button
               className="ghost-button snapshots-bond-registry-refresh-button"
               disabled={refreshDisabled || !onRefresh}
-              onClick={onRefresh}
+              onClick={() => {
+                onRefresh?.(BOND_COMPLETE_REFRESH_REQUEST);
+              }}
               type="button"
             >
-              {refreshDisabled ? refreshLabel : '重刷 2 个异常行'}
+              {refreshDisabled ? refreshLabel : registryRefreshLabel}
+            </button>
+            <button
+              className="ghost-button"
+              aria-expanded={registryExpanded}
+              onClick={() => setRegistryExpanded((expanded) => !expanded)}
+              type="button"
+            >
+              {registryExpanded ? '收起原始快照与调度' : '展开原始快照与调度'}
             </button>
           </div>
 
+          {registryExpanded ? (
           <div className="snapshots-bond-registry-layout">
             <div className="snapshots-bond-registry-stack">
-              {overview.raw_registry.length ? (
-                overview.raw_registry.map((item) => (
+              {registryAnomalyRows.length ? (
+                registryAnomalyRows.map((item) => (
                   <article className="snapshots-bond-registry-row" key={item.id}>
-                    <input
-                      aria-label={`选择 ${item.label}`}
-                      checked={item.id === selectedInstrument?.id || item.snapshot_ref === selectedInstrument?.snapshot_ref}
-                      readOnly
-                      type="radio"
-                    />
+                    <span className="snapshots-bond-registry-row__flag">异常</span>
                     <div>
                       <strong>{item.label}</strong>
                       <span>{translateBondSource(item.source)}</span>
                     </div>
                     <div>
-                      <strong>字段</strong>
-                      <span>{formatRegistryNotes(item.notes)}</span>
+                      <strong>异常</strong>
+                      <span>{item.issue}</span>
                     </div>
                     <div>
                       <strong>调度</strong>
@@ -2795,14 +3445,14 @@ export function BondFixedIncomeSnapshotsTab({
                     </div>
                     <div>
                       <strong>{getBondStatusLabel(item.status)}</strong>
-                      <span>{getBondStatusLabel(item.status)}状态</span>
+                      <span>{item.fieldSummary}</span>
                     </div>
                   </article>
                 ))
               ) : (
                 <article className="snapshots-bond-evidence-card">
-                  <strong>暂无原始债券快照行</strong>
-                  <span>只有已存储的债券快照会出现在这里。</span>
+                  <strong>当前没有异常债券行</strong>
+                  <span>7 条契约行全部就绪时，这里不再展示单选框列表；需要复核的行会自动进入异常队列。</span>
                 </article>
               )}
             </div>
@@ -2826,11 +3476,12 @@ export function BondFixedIncomeSnapshotsTab({
                       </div>
                       <span>{entry.body}</span>
                     </article>
-                  ))}
-                </div>
-              </section>
-            </aside>
+                ))}
+              </div>
+            </section>
+          </aside>
           </div>
+          ) : null}
         </section>
       </div>
 

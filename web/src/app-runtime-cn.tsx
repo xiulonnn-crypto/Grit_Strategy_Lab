@@ -21,6 +21,13 @@ import { CompositionWorkbenchPage } from './pages/composition-workbench-page';
 import { AssetAllocationConfigPage } from './pages/asset-allocation-config-page';
 import { CreationSessionPage } from './pages/creation-session-page';
 import { CreationTemplatePage } from './pages/creation-template-page';
+import {
+  FactorDetailPage,
+  FactorEditorPage,
+  FactorLibraryPage,
+  FactorPlaceholderPage,
+  PitCleaningCenterPage,
+} from './pages/factors-page';
 import { LegInventoryPage } from './pages/leg-inventory-page';
 import {
   OptimizationConfigPage,
@@ -107,6 +114,14 @@ function AppShell(): JSX.Element {
         {route.kind === 'runs-index' ? <RunsIndexPage /> : null}
         {route.kind === 'run' ? <RunDetailPage runId={route.runId} /> : null}
         {route.kind === 'snapshots' ? <SnapshotsPage /> : null}
+        {route.kind === 'pit-data' ? <PitCleaningCenterPage highlightedSection={route.section} /> : null}
+        {route.kind === 'factor-library' ? (
+          <FactorLibraryPage initialSource={route.source} initialStatus={route.status} initialTag={route.tag} />
+        ) : null}
+        {route.kind === 'factor-detail' ? <FactorDetailPage factorId={route.factorId} /> : null}
+        {route.kind === 'factor-editor' ? <FactorEditorPage factorId={route.factorId} /> : null}
+        {route.kind === 'factor-sandbox' ? <FactorPlaceholderPage title="挖掘沙盒" /> : null}
+        {route.kind === 'factor-quarantine' ? <FactorPlaceholderPage title="隔离检疫区" /> : null}
         {route.kind === 'optimization-index' ? <OptimizationJobsIndexPage /> : null}
         {route.kind === 'optimization-select' ? (
           <OptimizationStrategySelectPage

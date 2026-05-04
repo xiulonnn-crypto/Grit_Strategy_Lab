@@ -20,6 +20,7 @@ import type {
   ApiCompositionLegInput,
   ApiCompositionPreview,
   ApiCompositionPreviewLeg,
+  ApiCompositionReturnQualityLeg,
   ApiLegInventory,
   ApiLegInventoryRow,
   ApiLegType,
@@ -174,6 +175,71 @@ function getReturnQualityStatusLabel(value?: string | null): string {
     default:
       return '待确认';
   }
+}
+
+function getReturnQualityIssueTypes(quality?: ApiCompositionReturnQualityLeg | null): string[] {
+  return Array.isArray(quality?.issue_types)
+    ? quality.issue_types.filter((issue): issue is string => typeof issue === 'string' && issue.trim().length > 0)
+    : [];
+}
+
+function getReturnQualityBadge(
+  quality?: ApiCompositionReturnQualityLeg | null,
+): { label: string; detail: string; className: string } | null {
+  const issueTypes = getReturnQualityIssueTypes(quality);
+  if (!quality || !issueTypes.length) {
+    return null;
+  }
+  const samplePoints = Number.isFinite(quality.sample_points) ? quality.sample_points : 0;
+  const missingPoints = Number.isFinite(quality.missing_points) ? quality.missing_points : 0;
+  const className = issueTypes.includes('收益样本缺失')
+    ? 'composition-workbench-chip composition-workbench-chip--danger'
+    : 'composition-workbench-chip composition-workbench-chip--warning';
+  return {
+    label: issueTypes.join('、'),
+    detail: `样本 ${samplePoints} 月 / 缺口 ${missingPoints}`,
+    className,
+  };
+}
+
+function buildReturnQualityLookup(
+  legQuality?: ApiCompositionReturnQualityLeg[] | null,
+): Map<string, ApiCompositionReturnQualityLeg> {
+  const lookup = new Map<string, ApiCompositionReturnQualityLeg>();
+  (legQuality ?? []).forEach((quality) => {
+    [quality.leg_id, quality.source_ref_id ?? '', quality.display_name]
+      .map((key) => String(key ?? '').trim())
+      .filter(Boolean)
+      .forEach((key) => lookup.set(key, quality));
+  });
+  return lookup;
+}
+
+function getRowReturnQuality(
+  row: ApiLegInventoryRow,
+  lookup: Map<string, ApiCompositionReturnQualityLeg>,
+): ApiCompositionReturnQualityLeg | null {
+  return (
+    lookup.get(row.source_ref_id ?? '') ??
+    lookup.get(row.id) ??
+    lookup.get(row.name) ??
+    row.return_quality ??
+    null
+  );
+}
+
+function getDraftReturnQuality(
+  draft: ApiCompositionLegInput,
+  previewLeg: ApiCompositionPreviewLeg | null,
+  lookup: Map<string, ApiCompositionReturnQualityLeg>,
+): ApiCompositionReturnQualityLeg | null {
+  return (
+    lookup.get(draft.source_ref_id) ??
+    lookup.get(previewLeg?.source_ref_id ?? '') ??
+    lookup.get(previewLeg?.id ?? '') ??
+    lookup.get(previewLeg?.display_name ?? '') ??
+    null
+  );
 }
 
 const WORKBENCH_TERM_HELP = {
@@ -896,6 +962,10 @@ export function CompositionWorkbenchView({
   const previewAdvisories = preview ? preview.advisories : [];
   const previewNormalizedLegs = preview ? preview.normalized_legs : [];
   const returnQualitySummary = preview?.return_quality_summary ?? null;
+  const returnQualityLookup = useMemo(
+    () => buildReturnQualityLookup(returnQualitySummary?.leg_quality),
+    [returnQualitySummary?.leg_quality],
+  );
   const rebalanceEvents = preview?.rebalance_events ?? [];
   const sourceIntegrity = preview?.source_integrity ?? [];
   const latestReturnPoint = preview?.returns_preview[preview.returns_preview.length - 1] ?? null;
@@ -1089,6 +1159,7 @@ export function CompositionWorkbenchView({
                   const rowFeatureChips = getInventoryRowFeatureChips(row, added, rebalanceFrequency);
                   const rowDescription = getInventoryRowDescription(row, added, rebalanceFrequency, selectedLegs);
                   const rowTagLabels = getInventoryRowMetricTagLabels(row);
+                  const returnQualityBadge = getReturnQualityBadge(getRowReturnQuality(row, returnQualityLookup));
                   return (
                     <article className={added ? 'composition-workbench-source-card is-added' : 'composition-workbench-source-card'} key={row.id}>
                       <div className="composition-workbench-source-card__top">
@@ -1108,8 +1179,17 @@ export function CompositionWorkbenchView({
                             {chip}
                           </span>
                         ))}
+                        {returnQualityBadge ? (
+                          <span className={returnQualityBadge.className}>{returnQualityBadge.label}</span>
+                        ) : null}
                       </div>
                       <p className="composition-workbench-source-card__intro">{rowDescription}</p>
+                      {returnQualityBadge ? (
+                        <div className="composition-workbench-source-quality" data-ui="workbench-source-return-quality">
+                          <strong>问题腿预检</strong>
+                          <span>{returnQualityBadge.detail}</span>
+                        </div>
+                      ) : null}
                       <div className="composition-workbench-source-card__tags">
                         {rowTagLabels.map((tag) => (
                           <span className="composition-workbench-chip" key={tag}>
@@ -1226,6 +1306,9 @@ export function CompositionWorkbenchView({
               selectedPreviewLegs.map(({ draft, preview: previewLeg }) => {
                 const previewLegName = getPreviewLegDisplayName(previewLeg, draft);
                 const previewLegProof = getPreviewLegProofText(previewLeg, draft);
+                const returnQualityBadge = getReturnQualityBadge(
+                  getDraftReturnQuality(draft, previewLeg, returnQualityLookup),
+                );
                 const riskContribution =
                   riskContributionMap.get(previewLeg?.id ?? '') ??
                   riskContributionMap.get(previewLegName) ??
@@ -1261,12 +1344,20 @@ export function CompositionWorkbenchView({
                               {formatCompositionStatusLabel(previewLeg.status, previewLeg.status_label)}
                             </span>
                           ) : null}
+                          {returnQualityBadge ? (
+                            <span className={returnQualityBadge.className}>{returnQualityBadge.label}</span>
+                          ) : null}
                         </div>
                         <strong>{previewLegName}</strong>
                         <p>
                           {previewLegProof || '等待收益流预演'}
                           {correlationAlert ? ` · ${getCorrelationPairLabel(correlationAlert.correlation)}` : ''}
                         </p>
+                        {returnQualityBadge ? (
+                          <small className="composition-workbench-leg-quality" data-ui="workbench-selected-return-quality">
+                            {returnQualityBadge.detail}
+                          </small>
+                        ) : null}
                       </div>
                       <div className="composition-workbench-leg-card__actions">
                         <button

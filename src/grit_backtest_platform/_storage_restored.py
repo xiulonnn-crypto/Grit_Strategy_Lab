@@ -193,6 +193,55 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS factor_definitions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        market TEXT NOT NULL DEFAULT 'US',
+        universe TEXT NOT NULL DEFAULT 'SP500',
+        source TEXT NOT NULL DEFAULT 'MANUAL',
+        lifecycle_status TEXT NOT NULL DEFAULT 'DRAFT',
+        diagnostic_status TEXT NOT NULL DEFAULT 'BLOCKED_PIT',
+        direction TEXT NOT NULL DEFAULT 'HIGH_IS_BETTER',
+        frequency TEXT NOT NULL DEFAULT 'DAILY',
+        expression TEXT NOT NULL,
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        data_requirements_json TEXT NOT NULL DEFAULT '[]',
+        institutional_note TEXT,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS factor_versions (
+        id TEXT PRIMARY KEY,
+        factor_id TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        expression TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'ACTIVE',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (factor_id) REFERENCES factor_definitions(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS factor_diagnostic_runs (
+        id TEXT PRIMARY KEY,
+        factor_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        dataset_snapshot_id TEXT NOT NULL,
+        universe_snapshot_id TEXT NOT NULL,
+        request_json TEXT NOT NULL DEFAULT '{}',
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        artifact_refs_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        completed_at TEXT,
+        error_message TEXT,
+        FOREIGN KEY (factor_id) REFERENCES factor_definitions(id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS app_runtime_state (
         state_key TEXT PRIMARY KEY,
         state_json TEXT NOT NULL DEFAULT '{}',
@@ -565,6 +614,38 @@ PRE_MIGRATION_INDEX_STATEMENTS = [
 
 
 POST_MIGRATION_INDEX_STATEMENTS = [
+    """
+    CREATE INDEX IF NOT EXISTS idx_backtest_runs_strategy_recent
+    ON backtest_runs(strategy_id, deleted_at, completed_at, created_at, id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_backtest_runs_recent
+    ON backtest_runs(deleted_at, completed_at, created_at, id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_backtest_runs_status_recent
+    ON backtest_runs(status, deleted_at, completed_at, created_at, id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_optimization_jobs_strategy_recent
+    ON optimization_jobs(strategy_id, deleted_at, created_at, id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_optimization_jobs_recent
+    ON optimization_jobs(deleted_at, updated_at, created_at, id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_backtest_runs_recent
+    ON composition_backtest_runs(deleted_at, created_at, id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_allocation_jobs_recent
+    ON composition_allocation_jobs(deleted_at, created_at, id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_composition_versions_status
+    ON composition_versions(composition_id, status, deleted_at, created_at)
+    """,
     """
     CREATE INDEX IF NOT EXISTS idx_asset_leg_definitions_active_updated
     ON asset_leg_definitions(status, deleted_at, updated_at)

@@ -33,6 +33,16 @@ type PageStatus = {
   error: string | null;
 };
 
+type CompositionDiagnosisTarget = {
+  id?: string | null;
+  composition_id?: string | null;
+  name?: string | null;
+  composition_name?: string | null;
+  primary_diagnosis?: ApiCompositionStatusDiagnosis | null;
+  diagnoses?: ApiCompositionStatusDiagnosis[];
+  evidence_grade?: string | null;
+};
+
 type CompositionListFilterState = {
   status: 'all' | 'ACTIVE' | 'DRAFT';
   evidenceGrade: 'all' | 'A' | 'B' | 'C';
@@ -99,15 +109,22 @@ function goTo(path: string): void {
   window.location.hash = path;
 }
 
-function openRouteInNewTab(route?: string | null): void {
+function openActionRoute(route?: string | null): 'current_page' | 'new_tab' | 'none' {
   const normalized = String(route ?? '').trim();
   if (!normalized) {
-    return;
+    return 'none';
   }
-  const url = /^https?:\/\//i.test(normalized)
-    ? normalized
-    : `${window.location.origin}${window.location.pathname}#${normalized.startsWith('/') ? normalized : `/${normalized}`}`;
+  if (!/^https?:\/\//i.test(normalized)) {
+    goTo(normalized.startsWith('/') ? normalized : `/${normalized}`);
+    return 'current_page';
+  }
+  const url = normalized;
   window.open(url, '_blank', 'noopener,noreferrer');
+  return 'new_tab';
+}
+
+function compositionIdFromDiagnosisTarget(item: CompositionDiagnosisTarget): string {
+  return String(item.composition_id ?? item.id ?? '').trim();
 }
 
 function formatDate(value?: string | null): string {
@@ -840,17 +857,24 @@ function CompositionDiagnosisDialog({
   onClose,
   onCompleted,
 }: {
-  item: ApiCompositionListItem;
+  item: CompositionDiagnosisTarget;
   onClose: () => void;
   onCompleted: () => void;
 }): JSX.Element {
   const api = useApiClient();
-  const diagnosis = primaryCompositionDiagnosis(item);
+  const [dialogItem, setDialogItem] = useState<CompositionDiagnosisTarget>(item);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [actionStatus, setActionStatus] = useState<string | null>(null);
+  const compositionId = compositionIdFromDiagnosisTarget(dialogItem);
+  const diagnosis = primaryCompositionDiagnosis(dialogItem);
   const actions = normalizedDiagnosisActions(diagnosis);
   const proxyContexts = diagnosis.proxy_context ?? [];
   const primaryProxyContext = proxyContexts.find((context) => context.proxy_source === 'unconfirmed') ?? proxyContexts[0];
-  const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [actionStatus, setActionStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDialogItem(item);
+    setActionStatus(null);
+  }, [item]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -867,12 +891,23 @@ function CompositionDiagnosisDialog({
       return;
     }
     if (action.action_kind === 'open_new_tab') {
-      openRouteInNewTab(action.route ?? `/compositions/${encodeURIComponent(item.id)}`);
-      setActionStatus('已在新标签页打开处理入口。');
+      const openResult = openActionRoute(action.route ?? `/compositions/${encodeURIComponent(compositionId)}`);
+      if (openResult === 'new_tab') {
+        setActionStatus('已在新标签页打开处理入口。');
+      }
       return;
     }
     if (action.action_kind === 'inspect') {
-      setActionStatus('代理来源、覆盖区间和审计事实已在当前弹层展示。');
+      if (action.route) {
+        const openResult = openActionRoute(action.route);
+        if (openResult === 'new_tab') {
+          setActionStatus('已在新标签页打开处理入口。');
+        }
+      } else if (action.action_key === 'inspect_source_evidence') {
+        openActionRoute(`/compositions/workbench?composition_id=${encodeURIComponent(compositionId)}`);
+      } else {
+        setActionStatus('代理来源、覆盖区间和审计事实已在当前弹层展示。');
+      }
       return;
     }
     setBusyAction(action.action_key);
@@ -884,7 +919,8 @@ function CompositionDiagnosisDialog({
           setActionStatus('当前没有可保存的代理确认记录。');
           return;
         }
-        await api.confirmCompositionProxy(item.id, payload);
+        const updated = await api.confirmCompositionProxy(compositionId, payload);
+        setDialogItem(updated);
         setActionStatus('代理覆盖已确认；同一代理方案不再提醒。');
         onCompleted();
         return;
@@ -894,8 +930,23 @@ function CompositionDiagnosisDialog({
           setActionStatus('当前运行环境不支持在线刷新诊断。');
           return;
         }
-        await api.refreshCompositionDiagnostics(item.id);
+        const updated = await api.refreshCompositionDiagnostics(compositionId);
+        setDialogItem(updated);
         setActionStatus('状态标签已重新计算。');
+        onCompleted();
+        return;
+      }
+      if (action.action_key === 'refresh_source_freezes') {
+        if (!api.refreshCompositionSourceFreezes) {
+          setActionStatus('当前运行环境不支持在线重新冻结来源指纹。');
+          return;
+        }
+        const updated = await api.refreshCompositionSourceFreezes(compositionId, {
+          reason: diagnosis.action,
+          confirmed_by: 'operator',
+        });
+        setDialogItem(updated);
+        setActionStatus('来源指纹已重新冻结；状态标签已重新计算。');
         onCompleted();
         return;
       }
@@ -1212,10 +1263,12 @@ function CompositionListTable({
 
 function BacktestRunTable({
   loading,
+  onDiagnosisOpen,
   onScenarioSelect,
   rows,
 }: {
   loading: boolean;
+  onDiagnosisOpen: (item: ApiCompositionGlobalBacktestRunListItem) => void;
   onScenarioSelect: (scenario: string, rowId?: string) => void;
   rows: ApiCompositionGlobalBacktestRunListItem[];
 }): JSX.Element {
@@ -1257,7 +1310,13 @@ function BacktestRunTable({
                   </td>
                   <td>
                     <div className="composition-global-index__value-stack">
-                      <StatusPill tone={diagnosisTone(diagnosis) as Tone}>{diagnosis.diagnosis_label}</StatusPill>
+                      <button
+                        className="composition-global-index__status-button"
+                        onClick={() => onDiagnosisOpen(row)}
+                        type="button"
+                      >
+                        <StatusPill tone={diagnosisTone(diagnosis) as Tone}>{diagnosis.diagnosis_label}</StatusPill>
+                      </button>
                       <span>{backtestVerdictLabel(row.verdict_label, row.status)} · {backtestEvidenceLabel(row.verdict_detail ?? row.evidence_label, row.evidence_grade)}</span>
                     </div>
                   </td>
@@ -1303,9 +1362,11 @@ function BacktestRunTable({
 
 function AllocationJobTable({
   loading,
+  onDiagnosisOpen,
   rows,
 }: {
   loading: boolean;
+  onDiagnosisOpen: (item: ApiCompositionGlobalAllocationJobListItem) => void;
   rows: ApiCompositionGlobalAllocationJobListItem[];
 }): JSX.Element {
   return (
@@ -1371,9 +1432,15 @@ function AllocationJobTable({
                   </td>
                   <td>
                     <div className="composition-global-index__value-stack">
-                      <StatusPill tone={blocked ? 'danger' : diagnosisTone(diagnosis) as Tone}>
-                        {diagnosis.diagnosis_label}
-                      </StatusPill>
+                      <button
+                        className="composition-global-index__status-button"
+                        onClick={() => onDiagnosisOpen(row)}
+                        type="button"
+                      >
+                        <StatusPill tone={blocked ? 'danger' : diagnosisTone(diagnosis) as Tone}>
+                          {diagnosis.diagnosis_label}
+                        </StatusPill>
+                      </button>
                       <span>{row.promotion_gate_label ?? (gateStatus === 'pass' ? '可通过' : '待审查')}</span>
                     </div>
                   </td>
@@ -1563,6 +1630,9 @@ function ScenarioRail({
 
 function PromotionRail({ rows }: { rows: ApiCompositionGlobalAllocationJobListItem[] }): JSX.Element {
   const reviewCandidate = rows.find((row) => (row.promotion_ready_count ?? 0) > 0) ?? rows[0];
+  const reviewRoute = reviewCandidate
+    ? `/compositions/${encodeURIComponent(reviewCandidate.composition_id)}/allocation-jobs/${encodeURIComponent(reviewCandidate.job_id ?? reviewCandidate.id)}`
+    : null;
   return (
     <aside className="composition-global-index__rail-card">
       <header>
@@ -1594,11 +1664,24 @@ function PromotionRail({ rows }: { rows: ApiCompositionGlobalAllocationJobListIt
           <button
             className="composition-global-index__primary-button"
             disabled={(reviewCandidate.policy_violation_count ?? 0) > 0}
+            onClick={() => {
+              if (reviewRoute) {
+                goTo(reviewRoute);
+              }
+            }}
             type="button"
           >
             生成草稿版本
           </button>
-          <button className="composition-global-index__ghost-button" type="button">
+          <button
+            className="composition-global-index__ghost-button"
+            onClick={() => {
+              if (reviewRoute) {
+                goTo(`${reviewRoute}?intent=decision-packet`);
+              }
+            }}
+            type="button"
+          >
             创建决策包
           </button>
         </article>
@@ -1650,10 +1733,11 @@ function useCompositions(): PageStatus & { reload: () => void; rows: ApiComposit
   return { ...status, reload: () => setReloadKey((value) => value + 1), rows };
 }
 
-function useBacktestRuns(): PageStatus & { rows: ApiCompositionGlobalBacktestRunListItem[] } {
+function useBacktestRuns(): PageStatus & { reload: () => void; rows: ApiCompositionGlobalBacktestRunListItem[] } {
   const api = useApiClient();
   const [rows, setRows] = useState<ApiCompositionGlobalBacktestRunListItem[]>([]);
   const [status, setStatus] = useState<PageStatus>({ loading: true, error: null });
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -1680,15 +1764,16 @@ function useBacktestRuns(): PageStatus & { rows: ApiCompositionGlobalBacktestRun
     return () => {
       cancelled = true;
     };
-  }, [api]);
+  }, [api, reloadKey]);
 
-  return { ...status, rows };
+  return { ...status, reload: () => setReloadKey((value) => value + 1), rows };
 }
 
-function useAllocationJobs(): PageStatus & { rows: ApiCompositionGlobalAllocationJobListItem[] } {
+function useAllocationJobs(): PageStatus & { reload: () => void; rows: ApiCompositionGlobalAllocationJobListItem[] } {
   const api = useApiClient();
   const [rows, setRows] = useState<ApiCompositionGlobalAllocationJobListItem[]>([]);
   const [status, setStatus] = useState<PageStatus>({ loading: true, error: null });
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -1715,9 +1800,9 @@ function useAllocationJobs(): PageStatus & { rows: ApiCompositionGlobalAllocatio
     return () => {
       cancelled = true;
     };
-  }, [api]);
+  }, [api, reloadKey]);
 
-  return { ...status, rows };
+  return { ...status, reload: () => setReloadKey((value) => value + 1), rows };
 }
 
 export function CompositionListIndexPage(): JSX.Element {
@@ -1823,9 +1908,10 @@ export function CompositionListIndexPage(): JSX.Element {
 }
 
 export function CompositionBacktestRunsIndexPage(): JSX.Element {
-  const { error, loading, rows } = useBacktestRuns();
+  const { error, loading, reload, rows } = useBacktestRuns();
   const [filters, setFilters] = useState<BacktestRunFilterState>(() => readBacktestRunFiltersFromHash());
   const [selectedScenarioRunId, setSelectedScenarioRunId] = useState<string | null>(null);
+  const [diagnosisItem, setDiagnosisItem] = useState<CompositionDiagnosisTarget | null>(null);
   const filteredRows = useMemo(() => filterBacktestRuns(rows, filters), [filters, rows]);
   const completedRows = rows.filter((row) => ['COMPLETED', 'COMPLETED_WITH_WARNINGS'].includes(String(row.status).toUpperCase()));
   const scenarioCount = new Set(rows.filter((row) => row.scenario_label || row.scenario_id).map(backtestScenarioValue)).size;
@@ -1903,7 +1989,12 @@ export function CompositionBacktestRunsIndexPage(): JSX.Element {
               },
             ]}
           />
-          <BacktestRunTable loading={loading} onScenarioSelect={selectScenario} rows={filteredRows} />
+          <BacktestRunTable
+            loading={loading}
+            onDiagnosisOpen={setDiagnosisItem}
+            onScenarioSelect={selectScenario}
+            rows={filteredRows}
+          />
         </PanelShell>
         <ScenarioRail
           onScenarioSelect={selectScenario}
@@ -1912,17 +2003,21 @@ export function CompositionBacktestRunsIndexPage(): JSX.Element {
           selectedScenario={filters.scenario}
         />
       </div>
+      {diagnosisItem ? (
+        <CompositionDiagnosisDialog item={diagnosisItem} onClose={() => setDiagnosisItem(null)} onCompleted={reload} />
+      ) : null}
     </div>
   );
 }
 
 export function CompositionLabIndexPage(): JSX.Element {
-  const { error, loading, rows } = useAllocationJobs();
+  const { error, loading, reload, rows } = useAllocationJobs();
   const [filters, setFilters] = useState<AllocationLabFilterState>(() => {
     const parsed = readAllocationLabFiltersFromHash();
     return parsed.hasQuery ? parsed.filters : readSavedAllocationLabFilters() ?? parsed.filters;
   });
   const [viewSaveStatus, setViewSaveStatus] = useState<string | null>(null);
+  const [diagnosisItem, setDiagnosisItem] = useState<CompositionDiagnosisTarget | null>(null);
   const filteredRows = useMemo(() => filterAllocationJobs(rows, filters), [filters, rows]);
   const readyRows = rows.filter((row) => (row.promotion_ready_count ?? 0) > 0 && (row.policy_violation_count ?? 0) === 0);
   const sharpeValues = rows.map((row) => row.sharpe_delta).filter((value): value is number => typeof value === 'number');
@@ -2008,10 +2103,13 @@ export function CompositionLabIndexPage(): JSX.Element {
             onSecondaryAction={() => updateFilters(DEFAULT_ALLOCATION_LAB_FILTERS)}
             secondaryActionLabel="重置筛选"
           />
-          <AllocationJobTable loading={loading} rows={filteredRows} />
+          <AllocationJobTable loading={loading} onDiagnosisOpen={setDiagnosisItem} rows={filteredRows} />
         </PanelShell>
         <PromotionRail rows={filteredRows.length > 0 ? filteredRows : rows} />
       </div>
+      {diagnosisItem ? (
+        <CompositionDiagnosisDialog item={diagnosisItem} onClose={() => setDiagnosisItem(null)} onCompleted={reload} />
+      ) : null}
     </div>
   );
 }

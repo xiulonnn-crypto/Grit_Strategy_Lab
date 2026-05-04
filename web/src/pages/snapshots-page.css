@@ -180,6 +180,11 @@
   background: #ffffff;
 }
 
+.snapshots-row-card--highlight {
+  border-color: var(--primary, #1f877b);
+  box-shadow: 0 0 0 3px rgba(31, 135, 123, 0.12);
+}
+
 .snapshots-row-card__top {
   display: flex;
   align-items: flex-start;
@@ -1046,7 +1051,7 @@
 }
 
 .snapshots-bond-pulse-grid {
-  grid-template-columns: minmax(0, 1.12fr) minmax(0, 0.9fr) minmax(0, 0.88fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .snapshots-bond-health-panel .snapshots-bond-pulse-grid {
@@ -1159,6 +1164,16 @@
   font-size: 11px;
 }
 
+.snapshots-bond-anomaly-jump {
+  border: 0;
+  cursor: pointer;
+}
+
+.snapshots-bond-anomaly-jump:focus-visible {
+  outline: 2px solid rgba(31, 135, 123, 0.32);
+  outline-offset: 2px;
+}
+
 .snapshots-bond-pulse-bar span:nth-child(1) {
   width: 68%;
   background: #1f877b;
@@ -1265,6 +1280,10 @@
 
 .snapshots-bond-audit-layout {
   grid-template-columns: minmax(0, 1fr) 330px;
+}
+
+.snapshots-bond-audit-layout--single {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .snapshots-bond-detail-main,
@@ -1432,7 +1451,7 @@
 }
 
 .snapshots-bond-source-stack--scroll {
-  max-height: 564px;
+  max-height: 430px;
   overflow-y: auto;
   padding-right: 6px;
   scrollbar-gutter: stable;
@@ -1535,6 +1554,12 @@
   font-weight: 700;
 }
 
+.snapshots-bond-curve-anomaly--neutral {
+  border-color: rgba(203, 213, 225, 0.9);
+  background: #f8fafc;
+  color: var(--gsl-text-sub) !important;
+}
+
 .snapshots-bond-task-rail {
   border-radius: 18px;
   border: 1px solid rgba(229, 231, 235, 0.94);
@@ -1585,6 +1610,22 @@
   color: var(--gsl-text-sub);
   font-size: 12px;
   line-height: 1.6;
+}
+
+.snapshots-bond-diagnostic-panel .snapshots-bond-diagnostic-list {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.snapshots-bond-collapsible-section[data-collapsed="true"] {
+  gap: 0;
+}
+
+.snapshots-bond-collapsible-section__title {
+  min-width: min(100%, 320px);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .snapshots-bond-mini-spark {
@@ -1735,13 +1776,25 @@
 .snapshots-bond-registry-row {
   padding: 14px 15px;
   display: grid;
-  grid-template-columns: 22px minmax(0, 1.08fr) minmax(0, 0.88fr) minmax(0, 0.8fr) minmax(84px, 0.6fr);
+  grid-template-columns: minmax(72px, 0.36fr) minmax(0, 1.08fr) minmax(0, 0.88fr) minmax(0, 0.8fr) minmax(84px, 0.6fr);
   gap: 12px;
   align-items: start;
 }
 
-.snapshots-bond-registry-row input {
-  margin-top: 4px;
+.snapshots-bond-registry-row__flag {
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(184, 104, 19, 0.28);
+  background: rgba(255, 243, 221, 0.96);
+  color: #a25409 !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px !important;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .snapshots-bond-registry-row--active {

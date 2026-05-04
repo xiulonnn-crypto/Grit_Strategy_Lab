@@ -17,6 +17,7 @@ type FakeApi = {
   listCompositionBacktestRuns?: ReturnType<typeof vi.fn>;
   listCompositionAllocationJobs?: ReturnType<typeof vi.fn>;
   refreshCompositionDiagnostics?: ReturnType<typeof vi.fn>;
+  refreshCompositionSourceFreezes?: ReturnType<typeof vi.fn>;
   confirmCompositionProxy?: ReturnType<typeof vi.fn>;
 };
 
@@ -25,6 +26,7 @@ const fakeApi = vi.hoisted<FakeApi>(() => ({
   listCompositionBacktestRuns: vi.fn(),
   listCompositionAllocationJobs: vi.fn(),
   refreshCompositionDiagnostics: vi.fn(),
+  refreshCompositionSourceFreezes: vi.fn(),
   confirmCompositionProxy: vi.fn(),
 }));
 
@@ -69,6 +71,30 @@ const proxyDiagnosis: ApiCompositionStatusDiagnosis = {
   ],
 };
 
+const sampleDurationDiagnosis: ApiCompositionStatusDiagnosis = {
+  status: '待校准',
+  issue_type: '收益样本窗口不足',
+  diagnosis_type: 'return_sample_window_short',
+  diagnosis_label: '待校准：收益样本窗口不足',
+  frontend_explanation: '当前组合可对齐的月度收益样本只有 72 个月（约 6 年），低于 10 年验证门槛 120 个月。',
+  action: '回组合工作台替换或补齐更长历史来源；短窗口回测只用于复核，不是补足样本。',
+  resolution_criteria: '组合月度收益样本达到 120 个月以上；短窗口回测只能作为待校准复核，不会关闭该状态。',
+  actions: [
+    {
+      label: '调整来源样本',
+      action_key: 'open_composition_workbench',
+      action_kind: 'open_new_tab',
+      route: '/compositions/workbench?composition_id=cmp-short',
+    },
+    {
+      label: '按短样本配置回测',
+      action_key: 'open_backtest_config',
+      action_kind: 'open_new_tab',
+      route: '/compositions/cmp-short/backtest-runs/new',
+    },
+  ],
+};
+
 const failedDiagnosis: ApiCompositionStatusDiagnosis = {
   status: '失效',
   issue_type: '异常降级补值',
@@ -79,6 +105,31 @@ const failedDiagnosis: ApiCompositionStatusDiagnosis = {
   resolution_criteria: '不再依赖异常估算。',
   actions: [{ label: '刷新诊断', action_key: 'refresh_diagnostics', action_kind: 'execute' }],
   system_disposition: '存在未关闭的失效问题，晋升门禁已暂停。',
+};
+
+const sourceLogicDriftDiagnosis: ApiCompositionStatusDiagnosis = {
+  status: '待校准',
+  issue_type: '逻辑一致性漂移',
+  diagnosis_type: 'source_logic_drift',
+  diagnosis_label: '待校准：逻辑一致性漂移',
+  frontend_explanation: '当前来源内容和保存时冻结记录不一致。',
+  action: '先查看来源证据；确认当前来源正确后重新冻结，否则回工作台回滚或替换来源。',
+  resolution_criteria: '当前来源指纹已重新冻结，或组合已回滚到冻结记录。',
+  actions: [
+    { label: '确认并重新冻结来源指纹', action_key: 'refresh_source_freezes', action_kind: 'execute' },
+    {
+      label: '查看来源证据',
+      action_key: 'inspect_source_evidence',
+      action_kind: 'open_new_tab',
+      route: '/compositions/composition_630718a64821',
+    },
+    {
+      label: '打开组合工作台',
+      action_key: 'open_composition_workbench',
+      action_kind: 'open_new_tab',
+      route: '/compositions/workbench?composition_id=composition_630718a64821',
+    },
+  ],
 };
 
 const compositions: ApiCompositionListItem[] = [
@@ -314,6 +365,7 @@ beforeEach(() => {
   fakeApi.listCompositionBacktestRuns = vi.fn().mockResolvedValue(backtestRuns);
   fakeApi.listCompositionAllocationJobs = vi.fn().mockResolvedValue(allocationJobs);
   fakeApi.refreshCompositionDiagnostics = vi.fn().mockResolvedValue(compositions[0]);
+  fakeApi.refreshCompositionSourceFreezes = vi.fn().mockResolvedValue(compositions[0]);
   fakeApi.confirmCompositionProxy = vi.fn().mockResolvedValue(compositions[1]);
   window.location.hash = '';
   window.localStorage.clear();
@@ -390,6 +442,84 @@ describe('composition v2 global index pages', () => {
     ));
   });
 
+  it('explains the short return-sample diagnosis and opens actions in the current page', async () => {
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+    try {
+      fakeApi.listCompositions = vi.fn().mockResolvedValue([
+        {
+          ...compositions[0],
+          id: 'cmp-short',
+          name: '标普动量均衡组合',
+          primary_diagnosis: sampleDurationDiagnosis,
+          diagnoses: [sampleDurationDiagnosis],
+        },
+      ]);
+
+      await act(async () => {
+        render(<CompositionListIndexPage />);
+      });
+
+      const table = screen.getByRole('table', { name: '组合列表' });
+      const row = within(table).getByText('标普动量均衡组合').closest('tr')!;
+      fireEvent.click(within(row).getByRole('button', { name: '待校准：收益样本窗口不足' }));
+
+      expect(screen.getByRole('dialog', { name: '收益样本窗口不足状态标签' })).toBeInTheDocument();
+      expect(screen.getByText(/月度收益样本只有 72 个月/)).toBeInTheDocument();
+      expect(screen.getByText(/短窗口回测只能作为待校准复核/)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '调整来源样本' })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: '按短样本配置回测' }));
+
+      expect(window.location.hash).toBe('#/compositions/cmp-short/backtest-runs/new');
+      expect(openSpy).not.toHaveBeenCalled();
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it('executes source fingerprint re-freeze from the status label dialog', async () => {
+    const driftedComposition = {
+      ...compositions[0],
+      id: 'composition_630718a64821',
+      name: 'QQQ网格&标普动量平衡',
+      primary_diagnosis: sourceLogicDriftDiagnosis,
+      diagnoses: [sourceLogicDriftDiagnosis],
+    };
+    const refrozenComposition = {
+      ...driftedComposition,
+      primary_diagnosis: stableDiagnosis,
+      diagnoses: [stableDiagnosis],
+    };
+    fakeApi.listCompositions = vi.fn()
+      .mockResolvedValueOnce([driftedComposition])
+      .mockResolvedValue([refrozenComposition]);
+    fakeApi.refreshCompositionSourceFreezes = vi.fn().mockResolvedValue(refrozenComposition);
+
+    await act(async () => {
+      render(<CompositionListIndexPage />);
+    });
+
+    const table = screen.getByRole('table', { name: '组合列表' });
+    const row = within(table).getByText('QQQ网格&标普动量平衡').closest('tr')!;
+    fireEvent.click(within(row).getByRole('button', { name: '待校准：逻辑一致性漂移' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认并重新冻结来源指纹' }));
+
+    await waitFor(() => expect(fakeApi.refreshCompositionSourceFreezes).toHaveBeenCalledWith(
+      'composition_630718a64821',
+      expect.objectContaining({
+        reason: '先查看来源证据；确认当前来源正确后重新冻结，否则回工作台回滚或替换来源。',
+      }),
+    ));
+    expect(screen.getByText('来源指纹已重新冻结；状态标签已重新计算。')).toBeInTheDocument();
+    let dialog: HTMLElement | null = null;
+    await waitFor(() => {
+      dialog = screen.getByRole('dialog', { name: '证据链完整状态标签' });
+      expect(dialog).toBeInTheDocument();
+    });
+    expect(within(dialog!).getByText('稳健：证据链完整')).toBeInTheDocument();
+    expect(within(dialog!).getByText('当前无需处理。')).toBeInTheDocument();
+    expect(within(dialog!).queryByRole('button', { name: '确认并重新冻结来源指纹' })).toBeNull();
+  });
+
   it('filters composition rows and saves the selected list view', async () => {
     await act(async () => {
       render(<CompositionListIndexPage />);
@@ -425,6 +555,25 @@ describe('composition v2 global index pages', () => {
     const table = screen.getByRole('table', { name: '组合回测列表' });
     fireEvent.click(within(table).getAllByRole('button', { name: '查看' })[0]);
     expect(window.location.hash).toBe('#/compositions/cmp-001/backtest-runs/comp_run_81f2');
+  });
+
+  it('opens status label actions from global backtest rows', async () => {
+    await act(async () => {
+      render(<CompositionBacktestRunsIndexPage />);
+    });
+
+    const table = screen.getByRole('table', { name: '组合回测列表' });
+    const qqqRow = within(table).getByText('QQQ网格&标普动量平衡').closest('tr')!;
+    fireEvent.click(within(qqqRow).getByRole('button', { name: '待校准：代理覆盖待确认' }));
+
+    expect(screen.getByRole('dialog', { name: '代理覆盖待确认状态标签' })).toBeInTheDocument();
+    expect(screen.getByText('确认代理关系，或替换来源。')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认代理关系' }));
+
+    await waitFor(() => expect(fakeApi.confirmCompositionProxy).toHaveBeenCalledWith(
+      'cmp-002',
+      expect.objectContaining({ proxy_signature: 'proxy::QQQ::UNREGISTERED::test' }),
+    ));
   });
 
   it('filters global backtest rows, localizes headers, and updates the pressure scenario rail', async () => {
@@ -501,6 +650,10 @@ describe('composition v2 global index pages', () => {
     expect(firstRow!).toHaveTextContent('最佳 风险平价');
     expect(screen.getByRole('heading', { level: 2, name: '晋升审查' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '生成草稿版本' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: '生成草稿版本' }));
+    expect(window.location.hash).toBe('#/compositions/cmp-001/allocation-jobs/alloc_job_54b2');
+    fireEvent.click(screen.getByRole('button', { name: '创建决策包' }));
+    expect(window.location.hash).toBe('#/compositions/cmp-001/allocation-jobs/alloc_job_54b2?intent=decision-packet');
     expect(screen.queryByText('保存为正式版本')).toBeNull();
     expect(screen.queryByText('heuristic_from_composition_detail_preview')).toBeNull();
     expect(screen.queryByText(/Allocation candidates were derived/i)).toBeNull();
@@ -531,5 +684,21 @@ describe('composition v2 global index pages', () => {
     expect(within(table).getByText('全天候研究组合')).toBeInTheDocument();
     expect(within(table).getByText('QQQ网格&标普动量平衡')).toBeInTheDocument();
     expect(window.location.hash).toBe('#/compositions/lab');
+  });
+
+  it('opens status label actions from allocation lab rows', async () => {
+    await act(async () => {
+      render(<CompositionLabIndexPage />);
+    });
+
+    const table = screen.getByRole('table', { name: '组合实验室作业列表' });
+    const qqqRow = within(table).getByText('QQQ网格&标普动量平衡').closest('tr')!;
+    fireEvent.click(within(qqqRow).getByRole('button', { name: '失效：异常降级补值' }));
+
+    expect(screen.getByRole('dialog', { name: '异常降级补值状态标签' })).toBeInTheDocument();
+    expect(screen.getByText('修复数据来源或更换成分。')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '刷新诊断' }));
+
+    await waitFor(() => expect(fakeApi.refreshCompositionDiagnostics).toHaveBeenCalledWith('cmp-002'));
   });
 });

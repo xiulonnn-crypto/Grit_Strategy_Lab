@@ -7,9 +7,21 @@ import {
   type ApiBacktestRunTradePage,
   type ApiBacktestSubmissionPreview,
   type ApiConfirmationUpdateRequest,
+  type ApiFactorCreatePayload,
+  type ApiFactorDetail,
+  type ApiFactorDiagnosticPayload,
+  type ApiFactorDiagnosticPreview,
+  type ApiFactorDiagnosticPreviewPayload,
+  type ApiFactorDiagnosticRunResponse,
+  type ApiFactorListItem,
+  type ApiFactorListResponse,
   type ApiOptimizationCandidate,
   type ApiOptimizationJobDetail,
   type ApiOptimizationJobListItem,
+  type ApiPitDataOverview,
+  type ApiPitIdentityOverridePayload,
+  type ApiPitIdentityScraperRestartResponse,
+  type ApiPitResearchWaiverPayload,
   type ApiSnapshotOverview,
   type ApiStrategyCreationSession,
   type ApiStrategyDetail,
@@ -452,6 +464,317 @@ function createSnapshotOverview(refreshedAt = '2026-04-01T07:48:00Z'): ApiSnapsh
   };
 }
 
+function createPitDataOverview(): ApiPitDataOverview {
+  return {
+    dataset_snapshot_id: 'ds-price',
+    fundamental_snapshot_id: 'ds-fundamentals',
+    universe_snapshot_id: 'un-sp500',
+    as_of_date: '2026-04-01',
+    cleaning_version: 'snapshot-derived-v1',
+    overall_status: 'READY',
+    adjusted_price_status: 'READY',
+    universe_status: 'READY',
+    outlier_cleaning_status: 'READY',
+    corporate_action_status: 'INCOMPLETE',
+    fundamental_status: 'READY',
+    coverage: {
+      covered_symbol_count: 458,
+      total_symbol_count: 502,
+      coverage_pct: 91.24,
+      price_bar_rows: 4320,
+      universe_member_rows: 30622,
+    },
+    fundamental_coverage: {
+      covered_symbol_count: 458,
+      total_symbol_count: 502,
+      coverage_pct: 91.24,
+      fundamental_point_rows: 5496,
+      coverage_rows: 458,
+      available_fields: ['capex', 'enterprise_value', 'ltm_earnings', 'market_cap', 'operating_cash_flow', 'total_shares'],
+      missing_fields: [],
+      source_snapshot_status: 'READY',
+    },
+    blocking_items: [],
+    sample_securities: ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'META'],
+    quality_events: [
+      {
+        id: 'pit-q-001',
+        severity: 'INFO',
+        event_type: 'ADJUSTED_PRICE_CHECK',
+        title: '复权轨迹已校验',
+        message: '样例证券除权除息日前后价格轨迹一致。',
+        target_date: '2026-04-01',
+      },
+    ],
+    factor_diagnostics_enabled: true,
+    verified_diagnostics_enabled: true,
+    sandbox_diagnostics_enabled: true,
+    diagnostic_windows: {
+      sandbox: {
+        mode: 'SANDBOX',
+        enabled: true,
+        start_date: '2023-04-01',
+        end_date: '2026-04-01',
+        label: 'Sandbox 近 3 年预览',
+      },
+      verified: {
+        mode: 'VERIFIED',
+        enabled: true,
+        start_date: '2016-04-01',
+        end_date: '2026-04-01',
+        label: 'Verified 10 年 PIT 门禁',
+        missing_windows: [],
+      },
+    },
+    gate_fix_target: '#/pit-data',
+    source: { derived_from_snapshot: true },
+  };
+}
+
+function createFactorDiagnosticSummary(factorId: string): ApiFactorListItem['latest_diagnostic_summary'] {
+  return {
+    run_id: `fdiag-${factorId}`,
+    factor_id: factorId,
+    status: 'COMPLETED',
+    dataset_snapshot_id: 'ds-price',
+    fundamental_snapshot_id: 'ds-fundamentals',
+    universe_snapshot_id: 'un-sp500',
+    cleaning_version: 'snapshot-derived-v1',
+    ic: 0.041,
+    rank_ic: 0.063,
+    ir: 0.88,
+    coverage: 91.4,
+    group_returns: [
+      { group: '第1组', mean_return: 0.041, sample_count: 101 },
+      { group: '第2组', mean_return: 0.025, sample_count: 100 },
+      { group: '第3组', mean_return: 0.012, sample_count: 100 },
+      { group: '第4组', mean_return: -0.004, sample_count: 100 },
+      { group: '第5组', mean_return: -0.018, sample_count: 101 },
+    ],
+    ic_series: Array.from({ length: 12 }, (_, index) => ({
+      date: `2025-${String(index + 1).padStart(2, '0')}-28`,
+      rank_ic: Number((0.04 + Math.sin(index / 2) * 0.035).toFixed(4)),
+      ic: Number((0.03 + Math.cos(index / 3) * 0.025).toFixed(4)),
+      symbol_count: 430,
+    })),
+    evidence_heatmap: [
+      { window: '10年', bucket: '样本内', value: 0.071, state: '通过' },
+      { window: '10年', bucket: '样本外', value: 0.054, state: '通过' },
+      { window: '20年', bucket: '样本内', value: 0.052, state: '通过' },
+      { window: '20年', bucket: '压力', value: -0.024, state: '缺口' },
+    ],
+    turnover_decay: {
+      half_life_days: 126,
+      annual_turnover_pct: 185,
+      impact_cost_bps: 18,
+      financing_cost_bps: 32,
+    },
+    stress_scenarios: [
+      { name: '2008 金融危机代理补测', data_kind: '代理数据', status: '需要复核', rank_ic: -0.08 },
+      { name: '2020 成长股牛市', data_kind: '真实 PIT 样本', status: '观察', rank_ic: 0.02 },
+    ],
+    risk_flags: ['市场风格切换时需关注动量崩溃。'],
+    compliance_trail: {
+      factor_logic: 'Close(t-21) / Close(t-252) - 1',
+      dataset_snapshot_id: 'ds-price',
+      fundamental_snapshot_id: 'ds-fundamentals',
+      universe_snapshot_id: 'un-sp500',
+      cleaning_version: 'snapshot-derived-v1',
+      diagnosed_at: '2026-04-30T10:20:00Z',
+    },
+  };
+}
+
+const demoFactorUpdatedAt: Record<string, string> = {
+  s_vol_252d_rank: '2026-05-04T09:40:00Z',
+  s_mom_12m1m_rank: '2026-05-03T16:15:00Z',
+  s_val_ep_ltm_raw: '2026-05-02T11:30:00Z',
+  s_qlty_fcfy_ttm_raw: '2026-05-01T15:05:00Z',
+  s_size_cur_log: '2026-04-30T10:20:00Z',
+};
+
+function createFactorListItems(): ApiFactorListItem[] {
+  const factors: Array<Omit<ApiFactorListItem, 'ic_sparkline' | 'ic_sparkline_window' | 'readiness_blockers' | 'gate_fix_target'>> = [
+    {
+      id: 's_mom_12m1m_rank',
+      name: '12-1月截面动量排名',
+      market: 'US',
+      universe: 'SP500',
+      source: 'SYSTEM_SEED',
+      lifecycle_status: 'VERIFIED',
+      diagnostic_status: 'READY_TO_DIAGNOSE',
+      direction: 'HIGH_IS_BETTER',
+      frequency: 'DAILY',
+      expression: 'Close(t-21) / Close(t-252) - 1',
+      descriptor: { source_prefix: 's', category: 'mom', metric: '', window: '12m1m', operator: 'rank', schema_version: 'factor_descriptor_v1', canonical_id: 's_mom_12m1m_rank' },
+      tags: ['默认因子', '动量', '价格可诊断'],
+      data_requirements: ['adj_close', 'price_history', 'returns'],
+      institutional_note: '趋势延续因子在单边市中较强，市场拐点需要监控动量崩溃。',
+      latest_diagnostic_summary: createFactorDiagnosticSummary('s_mom_12m1m_rank'),
+      last_diagnostic_run_id: 'fdiag-s_mom_12m1m_rank',
+    },
+    {
+      id: 's_val_ep_ltm_raw',
+      name: '滚动市盈率倒数 (LTM)',
+      market: 'US',
+      universe: 'SP500',
+      source: 'SYSTEM_SEED',
+      lifecycle_status: 'VERIFIED',
+      diagnostic_status: 'READY_TO_DIAGNOSE',
+      direction: 'HIGH_IS_BETTER',
+      frequency: 'DAILY',
+      expression: 'LtmEarnings / MarketCap',
+      descriptor: { source_prefix: 's', category: 'val', metric: 'ep', window: 'ltm', operator: 'raw', schema_version: 'factor_descriptor_v1', canonical_id: 's_val_ep_ltm_raw' },
+      tags: ['默认因子', '估值', '基础面可诊断'],
+      data_requirements: ['ltm_earnings', 'market_cap'],
+      institutional_note: '估值因子长周期稳健，但成长股牛市中可能经历较长回撤。',
+      latest_diagnostic_summary: createFactorDiagnosticSummary('s_val_ep_ltm_raw'),
+      last_diagnostic_run_id: 'fdiag-s_val_ep_ltm_raw',
+    },
+    {
+      id: 's_vol_252d_rank',
+      name: '252日年化波动率排名',
+      market: 'US',
+      universe: 'SP500',
+      source: 'SYSTEM_SEED',
+      lifecycle_status: 'VERIFIED',
+      diagnostic_status: 'READY_TO_DIAGNOSE',
+      direction: 'LOW_IS_BETTER',
+      frequency: 'DAILY',
+      expression: 'Std(Return(Close, 1), 252)',
+      descriptor: { source_prefix: 's', category: 'vol', metric: '', window: '252d', operator: 'rank', schema_version: 'factor_descriptor_v1', canonical_id: 's_vol_252d_rank' },
+      tags: ['默认因子', '低波动', '价格可诊断'],
+      data_requirements: ['adj_close', 'price_history', 'returns'],
+      institutional_note: '低波动策略适合强调风险调整收益和回撤控制的资金。',
+      latest_diagnostic_summary: createFactorDiagnosticSummary('s_vol_252d_rank'),
+      last_diagnostic_run_id: 'fdiag-s_vol_252d_rank',
+    },
+    {
+      id: 's_size_cur_log',
+      name: '即时对数总市值',
+      market: 'US',
+      universe: 'SP500',
+      source: 'SYSTEM_SEED',
+      lifecycle_status: 'VERIFIED',
+      diagnostic_status: 'READY_TO_DIAGNOSE',
+      direction: 'LOW_IS_BETTER',
+      frequency: 'DAILY',
+      expression: 'Log(MarketCap)',
+      descriptor: { source_prefix: 's', category: 'size', metric: '', window: 'cur', operator: 'log', schema_version: 'factor_descriptor_v1', canonical_id: 's_size_cur_log' },
+      tags: ['默认因子', '规模', '基础面可诊断'],
+      data_requirements: ['market_cap', 'total_shares'],
+      institutional_note: '小市值溢价需要同时关注流动性枯竭和成交容量风险。',
+      latest_diagnostic_summary: createFactorDiagnosticSummary('s_size_cur_log'),
+      last_diagnostic_run_id: 'fdiag-s_size_cur_log',
+    },
+    {
+      id: 's_qlty_fcfy_ttm_raw',
+      name: '自由现金流收益率 (TTM)',
+      market: 'US',
+      universe: 'SP500',
+      source: 'SYSTEM_SEED',
+      lifecycle_status: 'VERIFIED',
+      diagnostic_status: 'READY_TO_DIAGNOSE',
+      direction: 'HIGH_IS_BETTER',
+      frequency: 'DAILY',
+      expression: '(OperatingCashFlow - Capex) / EnterpriseValue',
+      descriptor: { source_prefix: 's', category: 'qlty', metric: 'fcfy', window: 'ttm', operator: 'raw', schema_version: 'factor_descriptor_v1', canonical_id: 's_qlty_fcfy_ttm_raw' },
+      tags: ['默认因子', '质量', '基础面可诊断'],
+      data_requirements: ['operating_cash_flow', 'capex', 'enterprise_value'],
+      institutional_note: '质量因子偏防守，在震荡或下跌市场通常提供下行保护。',
+      latest_diagnostic_summary: createFactorDiagnosticSummary('s_qlty_fcfy_ttm_raw'),
+      last_diagnostic_run_id: 'fdiag-s_qlty_fcfy_ttm_raw',
+    },
+  ];
+  return factors.map((factor, index) => {
+    const blocked = factor.diagnostic_status === 'BLOCKED_DATA';
+    const sparkline = factor.latest_diagnostic_summary?.ic_series?.length
+      ? factor.latest_diagnostic_summary.ic_series.map((point) => ({
+          date: point.date,
+          value: Number(point.rank_ic ?? point.ic ?? 0),
+        }))
+      : Array.from({ length: 12 }, (_, cursor) => ({
+          date: `T-${12 - cursor}`,
+          value: Number((0.01 + Math.sin((cursor + index) / 2) * 0.025).toFixed(4)),
+        }));
+    const diagnosticGapSummary = blocked
+      ? {
+          rank_ic: `Rank IC: 基础字段缺失 (${factor.data_requirements.join(', ')})`,
+          coverage: `覆盖: ${factor.data_requirements.join(', ')} 待补`,
+          next_action: '去 PIT 清洗中心补基础字段',
+        }
+      : factor.latest_diagnostic_summary
+        ? {}
+        : {
+            rank_ic: 'Rank IC: 尚未提交诊断',
+            coverage: '覆盖: 等待首次诊断',
+            next_action: '提交 Verified 诊断',
+          };
+    return {
+      ...factor,
+      created_at: '2026-04-30T10:00:00Z',
+      updated_at: demoFactorUpdatedAt[factor.id] ?? '2026-04-30T10:00:00Z',
+      readiness_blockers: blocked
+        ? [
+            {
+              code: 'FACTOR_DATA_REQUIREMENT_MISSING',
+              message: '一期尚未接入该因子所需的个股基本面 PIT 字段。',
+              missing_fields: factor.data_requirements,
+              fix_hash: '#/pit-data?section=fundamental-requirements',
+            },
+          ]
+        : [],
+      ic_sparkline: sparkline,
+      ic_sparkline_window: '最近12期',
+      gate_fix_target: blocked ? '#/pit-data?section=fundamental-requirements' : '#/pit-data',
+      diagnostic_gap_summary: diagnosticGapSummary,
+    };
+  });
+}
+
+function createFactorDetail(id: string): ApiFactorDetail {
+  const aliases: Record<string, string> = {
+    momentum_12m_1m: 's_mom_12m1m_rank',
+    value_ep_ltm: 's_val_ep_ltm_raw',
+    lowvol_realized_252d: 's_vol_252d_rank',
+    size_log_market_cap: 's_size_cur_log',
+    quality_fcf_yield: 's_qlty_fcfy_ttm_raw',
+  };
+  const factors = createFactorListItems();
+  const factor = factors.find((item) => item.id === (aliases[id] ?? id));
+  if (!factor) {
+    throw new ApiError({ status: 404, code: 'factor_not_found', message: `因子 ${id} 不存在。` });
+  }
+  return {
+    ...factor,
+    versions: [
+      {
+        id: `${factor.id}-v1`,
+        version: 1,
+        expression: factor.expression,
+        status: 'ACTIVE',
+        metadata: { source: factor.source },
+        created_at: '2026-04-30T10:00:00Z',
+      },
+    ],
+    correlation_cluster: {
+      anchor_factor_id: factor.id,
+      top_n: 4,
+      method: '最近诊断 Rank IC 序列相关；无诊断时使用公式族先验占位。',
+      nodes: factors
+        .filter((item) => item.id !== factor.id)
+        .slice(0, 4)
+        .map((item, index) => ({
+          factor_id: item.id,
+          name: item.name,
+          source: item.source,
+          correlation: Number((0.72 - index * 0.11).toFixed(2)),
+          risk_label: item.diagnostic_status === 'BLOCKED_DATA' ? '基础数据待补' : '可复核',
+        })),
+    },
+  };
+}
+
 let state = createInitialState();
 
 function findStrategy(id: string): ApiStrategyDetail {
@@ -664,7 +987,10 @@ export const demoApi: DemoApi = {
     return clone(state.runs[0]);
   },
 
-  async getOptimizationJobDetail(id: string): Promise<ApiOptimizationJobDetail> {
+  async getOptimizationJobDetail(
+    id: string,
+    _params?: { matchingLimit?: number },
+  ): Promise<ApiOptimizationJobDetail> {
     return clone(findJob(id));
   },
 
@@ -896,5 +1222,192 @@ export const demoApi: DemoApi = {
 
   async refreshSnapshots(): Promise<ApiSnapshotOverview> {
     return createSnapshotOverview('2026-04-01T10:00:00Z');
+  },
+
+  async getPitDataOverview(): Promise<ApiPitDataOverview> {
+    return clone(createPitDataOverview());
+  },
+
+  async createPitResearchWaiver(_payload?: ApiPitResearchWaiverPayload): Promise<ApiPitDataOverview> {
+    return clone({
+      ...createPitDataOverview(),
+      overall_status: 'LIMITED_READY',
+      factor_diagnostics_enabled: true,
+      verified_diagnostics_enabled: false,
+      limited_diagnostics_enabled: true,
+      research_waiver: {
+        id: 'pitw-demo',
+        status: 'ACTIVE',
+        dataset_snapshot_id: 'ds-price',
+        universe_snapshot_id: 'un-sp500',
+        ignored_symbols: ['ATVI', 'SIVB', 'TWTR'],
+        ignored_symbol_count: 3,
+        reason: '研究阶段临时忽略非核心缺失标的，晋升仍要求 Full Ready。',
+        created_at: nowIso(),
+        created_by: 'researcher',
+        promotion_eligible: false,
+        mode: 'LIMITED_READY',
+      },
+    });
+  },
+
+  async revokePitResearchWaiver(_id: string): Promise<ApiPitDataOverview> {
+    return clone(createPitDataOverview());
+  },
+
+  async applyPitIdentityOverride(_payload: ApiPitIdentityOverridePayload): Promise<ApiPitDataOverview> {
+    return clone(createPitDataOverview());
+  },
+
+  async restartPitIdentityScraper(): Promise<ApiPitIdentityScraperRestartResponse> {
+    const pitData = clone(createPitDataOverview());
+    return {
+      job_id: `demo_identity_${Date.now()}`,
+      status: 'COMPLETED',
+      message: 'Identity Scraper 已执行：解析成功 0 项，未解析 0 项。',
+      started_at: nowIso(),
+      completed_at: nowIso(),
+      attempted_count: 0,
+      resolved_count: 0,
+      failed_count: 0,
+      pending_before: pitData.ops_guidance?.identity_pending_count ?? 0,
+      pending_after: pitData.ops_guidance?.identity_pending_count ?? 0,
+      resolved_symbols: [],
+      failed_symbols: [],
+      pit_data: pitData,
+    };
+  },
+
+  async listFactors(params): Promise<ApiFactorListResponse> {
+    let items = createFactorListItems();
+    if (params?.source) {
+      items = items.filter((item) => item.source === params.source);
+    }
+    if (params?.tag) {
+      items = items.filter((item) => item.tags.includes(params.tag ?? ''));
+    }
+    if (params?.market) {
+      items = items.filter((item) => item.market === params.market);
+    }
+    if (params?.status) {
+      items = items.filter(
+        (item) => item.lifecycle_status === params.status || item.diagnostic_status === params.status,
+      );
+    }
+    return clone({
+      items,
+      summary: {
+        total: items.length,
+        system_seed_count: items.filter((item) => item.source === 'SYSTEM_SEED').length,
+        ready_to_diagnose_count: items.filter((item) => item.diagnostic_status === 'READY_TO_DIAGNOSE').length,
+        sandbox_ready_count: items.filter((item) => item.diagnostic_status === 'SANDBOX_READY').length,
+        blocked_data_count: items.filter((item) => item.diagnostic_status === 'BLOCKED_DATA').length,
+        pit_status: 'READY',
+      },
+    });
+  },
+
+  async createFactor(payload: ApiFactorCreatePayload): Promise<ApiFactorDetail> {
+    const descriptorMetric = payload.descriptor.metric ?? '';
+    const id = [
+      payload.descriptor.source_prefix,
+      payload.descriptor.category,
+      descriptorMetric,
+      payload.descriptor.window,
+      payload.descriptor.operator,
+    ].filter(Boolean).join('_');
+    const base = createFactorDetail('s_mom_12m1m_rank');
+    const createdAt = nowIso();
+    return clone({
+      ...base,
+      id,
+      name: payload.name,
+      created_at: createdAt,
+      updated_at: createdAt,
+      source: 'MANUAL',
+      lifecycle_status: 'DRAFT',
+      diagnostic_status: 'READY_TO_DIAGNOSE',
+      direction: payload.direction,
+      frequency: payload.frequency,
+      expression: payload.expression,
+      descriptor: { ...payload.descriptor, metric: descriptorMetric, schema_version: 'factor_descriptor_v1', canonical_id: id },
+      tags: payload.tags,
+      data_requirements: ['adj_close', 'price_history', 'returns'],
+      institutional_note: '人工因子需要通过 PIT 诊断后才能进入已验证状态。',
+      latest_diagnostic_summary: null,
+      diagnostic_gap_summary: {
+        rank_ic: 'Rank IC: 尚未提交诊断',
+        coverage: '覆盖: 等待首次诊断',
+        next_action: '提交 Verified 诊断',
+      },
+      last_diagnostic_run_id: null,
+      versions: [
+        {
+          id: `${id}-v1`,
+          version: 1,
+          expression: payload.expression,
+          status: 'ACTIVE',
+          metadata: { source: 'MANUAL' },
+          created_at: createdAt,
+        },
+      ],
+    });
+  },
+
+  async getFactor(id: string): Promise<ApiFactorDetail> {
+    return clone(createFactorDetail(id));
+  },
+
+  async runFactorDiagnostics(
+    id: string,
+    payload: ApiFactorDiagnosticPayload,
+  ): Promise<ApiFactorDiagnosticRunResponse> {
+    const factor = createFactorDetail(id);
+    if (factor.diagnostic_status === 'BLOCKED_DATA') {
+      throw new ApiError({
+        status: 400,
+        code: 'factor_data_blocked',
+        message: '因子基础数据待补，不能触发正式诊断。',
+      });
+    }
+    const runId = nextId('fdiag-demo');
+    return clone({
+      run_id: runId,
+      summary: {
+        ...(factor.latest_diagnostic_summary ?? createFactorDiagnosticSummary(id)),
+        run_id: runId,
+        factor_id: id,
+        dataset_snapshot_id: payload.dataset_snapshot_id,
+        fundamental_snapshot_id: 'ds-fundamentals',
+        universe_snapshot_id: payload.universe_snapshot_id,
+        diagnostic_mode: payload.diagnostic_mode ?? 'VERIFIED',
+        status: 'COMPLETED',
+        admission: {
+          mode: payload.diagnostic_mode ?? 'VERIFIED',
+          label: payload.diagnostic_mode === 'SANDBOX' ? 'Sandbox 预览' : 'Verified 正式诊断',
+        },
+      },
+    });
+  },
+
+  async previewFactorDiagnostics(
+    payload: ApiFactorDiagnosticPreviewPayload,
+  ): Promise<ApiFactorDiagnosticPreview> {
+    return clone({
+      status: 'PREVIEW',
+      lookback_years: payload.lookback_years ?? 5,
+      expression: payload.expression,
+      rank_ic_preview: Array.from({ length: 12 }, (_, index) => ({
+        date: `2025-${String(index + 1).padStart(2, '0')}-28`,
+        rank_ic: Number((0.032 + Math.sin(index / 2) * 0.021).toFixed(4)),
+      })),
+      distribution: {
+        skew: 0.18,
+        kurtosis: 2.7,
+        normality_label: '接近正态',
+      },
+      risk_flags: [],
+      message: '5 年样本内 IC 预览只用于缩短试错，不替代正式 PIT 诊断。',
+    });
   },
 };

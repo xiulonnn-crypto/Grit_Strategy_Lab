@@ -945,6 +945,7 @@ export type ApiLegInventoryRow = {
   drift_status?: string | null;
   current_ref_id?: string | null;
   alerts?: string[];
+  return_quality?: ApiCompositionReturnQualityLeg | null;
   config?: Record<string, unknown>;
 };
 
@@ -960,6 +961,7 @@ export type ApiLegInventory = {
     attribute_tags: ApiLegInventoryFilterItem[];
   };
   rows: ApiLegInventoryRow[];
+  strategy_reference_counts?: Record<string, number>;
 };
 
 export type ApiAssetLegCreatePayload = {
@@ -1163,6 +1165,21 @@ export type ApiCompositionReturnQualitySummary = {
   coverage_pct: number;
   fallback_used: boolean;
   notes: string[];
+  leg_quality?: ApiCompositionReturnQualityLeg[];
+};
+
+export type ApiCompositionReturnQualityLeg = {
+  leg_id: string;
+  display_name: string;
+  leg_kind?: string | null;
+  source_ref_id?: string | null;
+  sample_points: number;
+  aligned_points: number;
+  missing_points: number;
+  coverage_pct: number;
+  window_start?: string | null;
+  window_end?: string | null;
+  issue_types?: string[];
 };
 
 export type ApiCompositionRebalanceEvent = {
@@ -1297,6 +1314,11 @@ export type ApiCompositionUpdatePayload = {
   version_source?: string | null;
   version_candidate_id?: string | null;
   version_candidate_label?: string | null;
+};
+
+export type ApiCompositionSourceFreezeRefreshPayload = {
+  reason?: string | null;
+  confirmed_by?: string | null;
 };
 
 export type ApiCompositionListItem = {
@@ -1454,6 +1476,20 @@ export type ApiCompositionSourceFreeze = {
   alerts?: string[];
 };
 
+export type ApiCompositionBacktestHistoryItem = {
+  run_id: string;
+  created_at: string;
+  completed_at?: string | null;
+  composition_version_label?: string | null;
+  composition_version_number?: number | null;
+  strategy_version_label?: string | null;
+  strategy_versions?: Array<Record<string, unknown>>;
+  period_label?: string | null;
+  horizon_years?: number | null;
+  annualized_return?: number | null;
+  sharpe?: number | null;
+};
+
 export type ApiCompositionDetail = {
   id: string;
   name: string;
@@ -1483,6 +1519,7 @@ export type ApiCompositionDetail = {
   scenario_summary: ApiCompositionScenarioSummary;
   source_evidence: ApiCompositionSourceFreeze[];
   source_integrity?: ApiCompositionSourceIntegrity[];
+  backtest_history?: ApiCompositionBacktestHistoryItem[];
   audit_trail?: ApiCompositionAuditTrailItem[];
   primary_diagnosis?: ApiCompositionStatusDiagnosis | null;
   diagnoses?: ApiCompositionStatusDiagnosis[];
@@ -1510,6 +1547,8 @@ export type ApiCompositionBacktestRun = {
   id: string;
   run_id: string;
   composition_id: string;
+  current_composition_version_label?: string | null;
+  current_composition_version_number?: number | null;
   status: string;
   created_at: string;
   completed_at?: string | null;
@@ -1776,6 +1815,7 @@ export type ApiBondSnapshotEligibleInstrument = {
   thirty_day_sec_yield_pct?: number | null;
   credit_quality?: ApiBondCreditQuality | null;
   tracking_error_bps?: number | null;
+  tracking_error_source?: string | null;
   audit_alerts?: string[];
   audit_notes?: string[];
   tracking_status?: string | null;
@@ -1874,6 +1914,418 @@ export type ApiSnapshotRefreshRequest = {
   targets?: SnapshotRefreshTarget[];
 };
 
+export type ApiPitDataOverview = {
+  dataset_snapshot_id: string;
+  fundamental_snapshot_id?: string;
+  universe_snapshot_id: string;
+  as_of_date: string;
+  cleaning_version: string;
+  overall_status: string;
+  adjusted_price_status: string;
+  universe_status: string;
+  outlier_cleaning_status: string;
+  corporate_action_status?: string | null;
+  fundamental_status?: string;
+  coverage: {
+    covered_symbol_count: number;
+    total_symbol_count: number;
+    coverage_pct: number;
+    price_bar_rows: number;
+    universe_member_rows: number;
+    raw_universe_member_rows?: number;
+  };
+  fundamental_coverage?: {
+    covered_symbol_count: number;
+    total_symbol_count: number;
+    coverage_pct: number;
+    fundamental_point_rows: number;
+    coverage_rows: number;
+    available_fields: string[];
+    missing_fields: string[];
+    source_snapshot_status?: string;
+  };
+  blocking_items: Array<{
+    code: string;
+    message: string;
+    target?: string | null;
+    fix_hash?: string | null;
+    [key: string]: unknown;
+  }>;
+  status_reasons?: Record<string, {
+    status: string;
+    cause: string;
+    description: string;
+  }>;
+  ops_guidance?: {
+    headline: string;
+    severity: string;
+    live_ready_risk?: string;
+    identity_pending_count?: number;
+    current_core_missing_count?: number;
+    historical_lifecycle_missing_count?: number;
+    actions?: Array<{
+      label: string;
+      target: string;
+      priority?: string;
+    }>;
+  };
+  sample_securities: string[];
+  quality_events: Array<{
+    id?: string;
+    severity: string;
+    event_type: string;
+    title: string;
+    message: string;
+    target_date?: string | null;
+    target_symbol?: string | null;
+    metadata?: Record<string, unknown>;
+  }>;
+  coverage_gap?: {
+    missing_symbol_count: number;
+    missing_share_pct: number;
+    covered_symbol_count: number;
+    total_symbol_count: number;
+    default_ignored_symbols: string[];
+    default_ignored_count: number;
+    evidence_source: string;
+    recommendation: string;
+    identity_resolved_count?: number;
+    buckets: Array<{
+      id: string;
+      label: string;
+      count: number;
+      share_pct: number;
+      mcap_weight_pct?: number;
+      symbols?: string[];
+      sample_symbols: string[];
+      temporal_distribution?: Array<{
+        date: string;
+        missing_count: number;
+        member_count: number;
+        share_pct: number;
+        is_recent_window?: boolean;
+      }>;
+      symbol_details?: Array<{
+        symbol: string;
+        identity_status: string;
+        canonical_symbol?: string;
+        company_name?: string;
+        mcap_weight_pct?: number;
+        ticker_path: Array<{
+          date?: string;
+          symbol: string;
+          canonical_symbol?: string;
+          source?: string;
+          label?: string;
+        }>;
+        mapping_action?: {
+          label: string;
+          endpoint: string;
+          method: string;
+        };
+      }>;
+      evidence: string;
+      recommendation: string;
+      action_label?: string;
+      action_target?: string;
+    }>;
+  };
+  cleaning_rule_previews?: Array<{
+    id: string;
+    method: string;
+    label: string;
+    description: string;
+    status: string;
+    excluded_count: number;
+    excluded_pct: number;
+    sample_size: number;
+    threshold_label: string;
+    sample_points: Array<{
+      symbol: string;
+      date: string;
+      value: number | null;
+    }>;
+  }>;
+  universe_history_series?: Array<{
+    date: string;
+    member_count: number;
+    is_latest?: boolean;
+  }>;
+  adjustment_trace?: {
+    symbol: string;
+    points: Array<{
+      date: string;
+      close?: number | null;
+      adjusted_close?: number | null;
+      adjustment_factor?: number | null;
+    }>;
+    events: Array<Record<string, unknown>>;
+    factor_min?: number | null;
+    factor_max?: number | null;
+  };
+  research_waiver?: {
+    id: string;
+    status: string;
+    dataset_snapshot_id: string;
+    universe_snapshot_id: string;
+    ignored_symbols: string[];
+    ignored_symbol_count: number;
+    reason: string;
+    created_at?: string | null;
+    created_by?: string | null;
+    promotion_eligible: false;
+    mode: string;
+    impact_estimate?: {
+      ignored_symbol_count: number;
+      ignored_missing_share_pct: number;
+      mcap_weight_pct: number;
+      estimated_ic_delta_abs: number;
+      risk_level: string;
+      affected_buckets?: string[];
+      method?: string;
+      note?: string;
+    };
+  } | null;
+  factor_diagnostics_enabled: boolean;
+  verified_diagnostics_enabled?: boolean;
+  limited_diagnostics_enabled?: boolean;
+  sandbox_diagnostics_enabled?: boolean;
+  diagnostic_windows?: {
+    sandbox?: {
+      mode: "SANDBOX";
+      enabled: boolean;
+      start_date: string;
+      end_date: string;
+      label: string;
+    };
+    verified?: {
+      mode: "VERIFIED";
+      enabled: boolean;
+      start_date: string;
+      end_date: string;
+      label: string;
+      missing_windows?: Array<{
+        kind?: string;
+        label: string;
+        start_date?: string;
+        end_date?: string;
+      }>;
+    };
+  };
+  gate_fix_target: string;
+  source?: Record<string, unknown>;
+};
+
+export type ApiPitResearchWaiverPayload = {
+  dataset_snapshot_id?: string | null;
+  universe_snapshot_id?: string | null;
+  ignored_symbols?: string[];
+  reason?: string | null;
+  created_by?: string | null;
+};
+
+export type ApiPitIdentityOverridePayload = {
+  symbol: string;
+  canonical_symbol: string;
+  company_name?: string | null;
+  cik?: string | null;
+  exchange?: string | null;
+  ipo_date?: string | null;
+  delisting_date?: string | null;
+  valid_from?: string | null;
+  valid_to?: string | null;
+  reason?: string | null;
+  created_by?: string | null;
+};
+
+export type ApiPitIdentityScraperRestartPayload = {
+  symbols?: string[];
+  max_symbols?: number | null;
+  reason?: string | null;
+  created_by?: string | null;
+};
+
+export type ApiPitIdentityScraperRestartResponse = {
+  job_id: string;
+  status: string;
+  message: string;
+  started_at: string;
+  completed_at: string;
+  attempted_count: number;
+  resolved_count: number;
+  failed_count: number;
+  external_resolved_count?: number;
+  external_resolved_symbols?: string[];
+  local_fallback_count?: number;
+  local_fallback_symbols?: string[];
+  pending_before: number;
+  pending_after: number;
+  resolved_symbols: string[];
+  failed_symbols: string[];
+  pit_data: ApiPitDataOverview;
+};
+
+export type ApiFactorLifecycleStatus = "DRAFT" | "VERIFIED" | "PRODUCTION" | "DECAYED";
+export type ApiFactorDiagnosticStatus =
+  | "READY_TO_DIAGNOSE"
+  | "SANDBOX_READY"
+  | "BLOCKED_PIT"
+  | "BLOCKED_DATA"
+  | "RUNNING"
+  | "COMPLETED"
+  | "FAILED";
+export type ApiFactorSource = "MANUAL" | "SYSTEM_SEED" | "AUTO_MINED";
+export type ApiFactorDirection = "HIGH_IS_BETTER" | "LOW_IS_BETTER" | "NEUTRAL";
+export type ApiFactorFrequency = "DAILY" | "WEEKLY" | "MONTHLY";
+
+export type ApiFactorDescriptor = {
+  source_prefix: "s" | "m" | "a" | string;
+  category: string;
+  metric: string;
+  window: string;
+  operator: string;
+  schema_version: string;
+  canonical_id: string;
+};
+
+export type ApiFactorDiagnosticSummary = {
+  run_id?: string;
+  factor_id?: string;
+  status?: string;
+  diagnostic_mode?: "VERIFIED" | "SANDBOX";
+  descriptor?: ApiFactorDescriptor;
+  dataset_snapshot_id?: string;
+  fundamental_snapshot_id?: string;
+  universe_snapshot_id?: string;
+  cleaning_version?: string;
+  ic?: number | null;
+  rank_ic?: number | null;
+  ir?: number | null;
+  coverage?: number | null;
+  group_returns?: Array<{ group: string; mean_return: number | null; sample_count: number }>;
+  ic_series?: Array<{ date: string; ic?: number | null; rank_ic?: number | null; symbol_count?: number }>;
+  evidence_heatmap?: Array<{ window: string; bucket: string; value?: number | null; state: string }>;
+  turnover_decay?: Record<string, unknown>;
+  stress_scenarios?: Array<Record<string, unknown>>;
+  risk_flags?: string[];
+  admission?: Record<string, unknown>;
+  compliance_trail?: Record<string, unknown>;
+  artifact_refs?: Record<string, string>;
+  [key: string]: unknown;
+};
+
+export type ApiFactorListItem = {
+  id: string;
+  name: string;
+  market: string;
+  universe: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+  source: ApiFactorSource;
+  lifecycle_status: ApiFactorLifecycleStatus;
+  diagnostic_status: ApiFactorDiagnosticStatus;
+  direction: ApiFactorDirection;
+  frequency: ApiFactorFrequency;
+  expression: string;
+  descriptor?: ApiFactorDescriptor;
+  tags: string[];
+  data_requirements: string[];
+  institutional_note?: string | null;
+  latest_diagnostic_summary?: ApiFactorDiagnosticSummary | null;
+  last_diagnostic_run_id?: string | null;
+  readiness_blockers: Array<Record<string, unknown>>;
+  diagnostic_gap_summary?: {
+    rank_ic?: string;
+    coverage?: string;
+    next_action?: string;
+    [key: string]: unknown;
+  };
+  ic_sparkline: Array<{ date: string; value: number }>;
+  ic_sparkline_window: string;
+  gate_fix_target: string;
+};
+
+export type ApiFactorDetail = ApiFactorListItem & {
+  versions: Array<{
+    id: string;
+    version: number;
+    expression: string;
+    status: string;
+    metadata?: Record<string, unknown>;
+    created_at: string;
+  }>;
+  correlation_cluster: {
+    anchor_factor_id: string;
+    top_n: number;
+    method: string;
+    nodes: Array<{
+      factor_id: string;
+      name: string;
+      source: string;
+      correlation: number;
+      risk_label: string;
+    }>;
+  };
+};
+
+export type ApiFactorListResponse = {
+  items: ApiFactorListItem[];
+  summary: Record<string, unknown>;
+};
+
+export type ApiFactorCreatePayload = {
+  name: string;
+  market: string;
+  universe: string;
+  expression: string;
+  frequency: ApiFactorFrequency;
+  direction: ApiFactorDirection;
+  tags: string[];
+  descriptor: {
+    source_prefix: "m";
+    category: string;
+    metric?: string;
+    window: string;
+    operator: string;
+  };
+};
+
+export type ApiFactorDiagnosticPayload = {
+  start_date: string;
+  end_date: string;
+  universe?: string | null;
+  dataset_snapshot_id: string;
+  universe_snapshot_id: string;
+  return_window_days: number;
+  group_count: number;
+  diagnostic_mode?: "VERIFIED" | "SANDBOX";
+};
+
+export type ApiFactorDiagnosticRunResponse = {
+  run_id: string;
+  summary: ApiFactorDiagnosticSummary;
+};
+
+export type ApiFactorDiagnosticPreviewPayload = {
+  expression: string;
+  market?: string;
+  universe?: string;
+  dataset_snapshot_id?: string | null;
+  universe_snapshot_id?: string | null;
+  lookback_years?: number;
+  return_window_days?: number;
+};
+
+export type ApiFactorDiagnosticPreview = {
+  status: string;
+  lookback_years: number;
+  expression: string;
+  rank_ic_preview: Array<{ date: string; rank_ic: number }>;
+  distribution: Record<string, unknown>;
+  risk_flags: string[];
+  message: string;
+};
+
 export type BacktestRunListQuery = {
   limit?: number;
   status?: BacktestRunStatus;
@@ -1965,7 +2417,10 @@ export type DemoApi = {
     idempotencyKey: string,
   ) => Promise<ApiBacktestRunDetail>;
   listOptimizationJobs: () => Promise<ApiOptimizationJobListItem[]>;
-  getOptimizationJobDetail: (id: string) => Promise<ApiOptimizationJobDetail>;
+  getOptimizationJobDetail: (
+    id: string,
+    params?: { matchingLimit?: number },
+  ) => Promise<ApiOptimizationJobDetail>;
   updateOptimizationJobConstraints: (
     jobId: string,
     payload: ApiOptimizationJobConstraintUpdatePayload,
@@ -2021,6 +2476,10 @@ export type DemoApi = {
     payload: ApiCompositionUpdatePayload,
   ) => Promise<ApiCompositionDetail>;
   refreshCompositionDiagnostics?: (id: string) => Promise<ApiCompositionDetail>;
+  refreshCompositionSourceFreezes?: (
+    id: string,
+    payload?: ApiCompositionSourceFreezeRefreshPayload,
+  ) => Promise<ApiCompositionDetail>;
   confirmCompositionProxy?: (
     id: string,
     payload: ApiCompositionProxyConfirmationPayload,
@@ -2080,6 +2539,32 @@ export type DemoApi = {
   refreshSnapshots: (
     payload?: ApiSnapshotRefreshRequest,
   ) => Promise<ApiSnapshotOverview>;
+  getPitDataOverview: () => Promise<ApiPitDataOverview>;
+  createPitResearchWaiver: (
+    payload?: ApiPitResearchWaiverPayload,
+  ) => Promise<ApiPitDataOverview>;
+  revokePitResearchWaiver: (id: string) => Promise<ApiPitDataOverview>;
+  applyPitIdentityOverride: (
+    payload: ApiPitIdentityOverridePayload,
+  ) => Promise<ApiPitDataOverview>;
+  restartPitIdentityScraper: (
+    payload?: ApiPitIdentityScraperRestartPayload,
+  ) => Promise<ApiPitIdentityScraperRestartResponse>;
+  listFactors: (params?: {
+    source?: string;
+    tag?: string;
+    market?: string;
+    status?: string;
+  }) => Promise<ApiFactorListResponse>;
+  createFactor: (payload: ApiFactorCreatePayload) => Promise<ApiFactorDetail>;
+  getFactor: (id: string) => Promise<ApiFactorDetail>;
+  runFactorDiagnostics: (
+    id: string,
+    payload: ApiFactorDiagnosticPayload,
+  ) => Promise<ApiFactorDiagnosticRunResponse>;
+  previewFactorDiagnostics: (
+    payload: ApiFactorDiagnosticPreviewPayload,
+  ) => Promise<ApiFactorDiagnosticPreview>;
 };
 
 export type StrategyCompareCard = {

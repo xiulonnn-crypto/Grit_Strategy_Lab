@@ -430,7 +430,7 @@ function buildSevenBondRowsOverview(): ApiSnapshotOverview {
       missing_fields: ['tracking_error_bps'],
       inferred_fields: {},
       field_status: { tracking_error_bps: 'MISSING' },
-      audit_alerts: ['Official tracking_error_bps is required for BOND_ETF readiness.'],
+      audit_alerts: ['Published tracking_error_bps is required for BOND_ETF readiness.'],
       audit_notes: ['Official tracking-error evidence pending.'],
       updated_at: refreshedAt,
     },
@@ -453,6 +453,71 @@ function buildSevenBondRowsOverview(): ApiSnapshotOverview {
       },
       overviewBase,
     ),
+  };
+}
+
+function buildReadySevenBondRowsOverview(): ApiSnapshotOverview {
+  const snapshot = buildSevenBondRowsOverview();
+  const nextBond = normalizeBondFixedIncomeOverview(
+    {
+      ...snapshot.bond_fixed_income,
+      global_pulse: {
+        ...snapshot.bond_fixed_income.global_pulse,
+        status: 'READY',
+        cards: snapshot.bond_fixed_income.global_pulse.cards.map((card) => ({
+          ...card,
+          status: 'READY',
+          value:
+            card.id === 'dataset_coverage'
+              ? '7/7 ready'
+              : card.id === 'eligible_bond_sources'
+                ? '7/7 eligible'
+                : card.value,
+        })),
+      },
+      eligible_instruments: snapshot.bond_fixed_income.eligible_instruments.map((instrument) => ({
+        ...instrument,
+        status: 'READY',
+        clean_price: instrument.clean_price ?? 100,
+        net_price: instrument.net_price ?? 100,
+        dirty_price: instrument.dirty_price ?? 100,
+        full_price: instrument.full_price ?? 100,
+        accrued_interest: instrument.accrued_interest ?? 0,
+        ytm_pct: instrument.ytm_pct ?? instrument.sec_yield_30d_pct ?? 5.1,
+        duration: instrument.duration ?? instrument.effective_duration ?? 1,
+        effective_duration: instrument.effective_duration ?? instrument.duration ?? 1,
+        convexity: instrument.convexity ?? 0,
+        tracking_error_bps: instrument.symbol === 'LQD' ? 164 : instrument.tracking_error_bps,
+        tracking_error_source: instrument.symbol === 'LQD' ? 'MARKETS_INSIDER' : instrument.tracking_error_source,
+        tracking_status: instrument.symbol === 'LQD' ? 'READY' : instrument.tracking_status,
+        missing_fields: [],
+        inferred_fields: {
+          ...instrument.inferred_fields,
+          full_price: instrument.full_price == null ? 'runtime_proxy' : undefined,
+          accrued_interest: instrument.accrued_interest == null ? 'runtime_proxy' : undefined,
+          duration: instrument.duration == null ? 'curve_proxy' : instrument.inferred_fields.duration,
+        },
+        field_status: {
+          ...instrument.field_status,
+          full_price: instrument.full_price == null ? 'INFERRED' : instrument.field_status.full_price,
+          accrued_interest:
+            instrument.field_status.accrued_interest === 'WAIVED'
+              ? 'WAIVED'
+              : instrument.accrued_interest == null
+                ? 'INFERRED'
+                : instrument.field_status.accrued_interest,
+          duration: instrument.duration == null ? 'INFERRED' : instrument.field_status.duration,
+          ytm_pct: instrument.ytm_pct == null ? 'INFERRED' : (instrument.field_status.ytm_pct ?? 'READY'),
+        },
+        audit_alerts: [],
+        audit_notes: [],
+      })),
+    },
+    overviewBase,
+  );
+  return {
+    ...snapshot,
+    bond_fixed_income: nextBond,
   };
 }
 
@@ -846,7 +911,8 @@ describe('SnapshotsPage', () => {
     expect(within(auditSection as HTMLElement).queryByText('曲线预览')).not.toBeInTheDocument();
     expect(within(auditSection as HTMLElement).queryByText('系统诊断')).not.toBeInTheDocument();
     expect(document.querySelector('.snapshots-bond-audit-panel .snapshots-bond-diagnostic-rail')).toBeNull();
-    expect(document.querySelector('.snapshots-bond-audit-layout > .snapshots-bond-detail-rail .snapshots-bond-diagnostic-rail')).not.toBeNull();
+    expect(document.querySelector('.snapshots-bond-detail-stack > .snapshots-bond-diagnostic-panel')).toBeNull();
+    expect(document.querySelector('.snapshots-bond-audit-layout > .snapshots-bond-detail-rail .snapshots-bond-diagnostic-rail')).toBeNull();
     expect(document.querySelector('[data-ui="bond-quality-audit-matrix"]')).not.toBeNull();
     expect(document.querySelector('[data-ui="bond-repair-rules"]')).not.toBeNull();
     expect(screen.getByRole('heading', { name: '原始快照与调度' })).toBeInTheDocument();
@@ -860,6 +926,117 @@ describe('SnapshotsPage', () => {
     expect(screen.queryByText('不新增债券专属调度器')).not.toBeInTheDocument();
     expect(screen.queryByText('第一阶段曲线样本')).not.toBeInTheDocument();
     expect(screen.queryByText('?砍銵蛹?唳')).not.toBeInTheDocument();
+  });
+
+  it('aligns the bond health bar and field coverage with ready runtime fields', async () => {
+    const readyOverview = buildReadySevenBondRowsOverview();
+    fakeApi.getSnapshotOverview.mockResolvedValue(readyOverview);
+    fakeApi.refreshSnapshots.mockResolvedValue(readyOverview);
+
+    renderSnapshotsPage('bond');
+
+    expect(await screen.findByText('就绪 7')).toBeInTheDocument();
+    expect(screen.getByText('待补 0')).toBeInTheDocument();
+    expect(screen.getByText('阻塞 0')).toBeInTheDocument();
+    expect(screen.getByText('100% 已覆盖')).toBeInTheDocument();
+    expect(screen.getByText('28/28 关键字段可用')).toBeInTheDocument();
+    expect(screen.getByText('推算/豁免字段计入可用；只有缺失或待复核才影响资产腿和组合。')).toBeInTheDocument();
+    expect(screen.getByText('全局异常队列')).toBeInTheDocument();
+    expect(screen.getByText('无债券异常')).toBeInTheDocument();
+    const globalAnomalyCard = screen.getByText('全局异常队列').closest('article');
+    expect(globalAnomalyCard).not.toBeNull();
+    expect(within(globalAnomalyCard as HTMLElement).queryByText('公司行为数据部分可用')).not.toBeInTheDocument();
+    expect(within(globalAnomalyCard as HTMLElement).queryByText('股票池历史数据部分可用')).not.toBeInTheDocument();
+
+    const pulseSegments = Array.from(document.querySelectorAll('.snapshots-bond-pulse-bar span')) as HTMLElement[];
+    expect(pulseSegments).toHaveLength(3);
+    expect(pulseSegments[0].style.width).toBe('100%');
+    expect(pulseSegments[1].style.width).toBe('0%');
+    expect(pulseSegments[2].style.width).toBe('0%');
+
+    const auditSection = screen.getByRole('heading', { name: '影子数据审计矩阵' }).closest('section');
+    expect(auditSection).not.toBeNull();
+    expect(within(auditSection as HTMLElement).queryByText('推算')).not.toBeInTheDocument();
+    expect(within(auditSection as HTMLElement).queryByText('已推算')).not.toBeInTheDocument();
+    expect(within(auditSection as HTMLElement).queryByText('可用')).not.toBeInTheDocument();
+    expect(within(auditSection as HTMLElement).getAllByText('√')).toHaveLength(28);
+    fireEvent.click(within(auditSection as HTMLElement).getByRole('button', { name: '展开质量审计' }));
+    expect(within(auditSection as HTMLElement).getAllByText('通过').length).toBeGreaterThan(0);
+    expect(within(auditSection as HTMLElement).getAllByText('价格一致性 通过 · 风险字段 完整').length).toBeGreaterThan(0);
+    expect(within(auditSection as HTMLElement).queryByText('PASS')).not.toBeInTheDocument();
+    expect(within(auditSection as HTMLElement).queryByText('Repair missing or inferred fixed-income fields')).not.toBeInTheDocument();
+    expect(within(auditSection as HTMLElement).queryByText('修复目标 bond')).not.toBeInTheDocument();
+
+    fireEvent.click(within(auditSection as HTMLElement).getByRole('button', { name: '一键修复全部问题' }));
+    await waitFor(() =>
+      expect(fakeApi.refreshSnapshots).toHaveBeenCalledWith({
+        mode: 'full',
+        targets: ['price', 'corporate', 'valuations', 'universes', 'bond'],
+        reason: 'manual-refresh-bond-complete',
+      }),
+    );
+  });
+
+  it('collapses healthy bond detail modules and only shows actionable diagnostics at the top', async () => {
+    const readyOverview = buildReadySevenBondRowsOverview();
+    const overviewWithHealthyMemory: ApiSnapshotOverview = {
+      ...readyOverview,
+      bond_fixed_income: normalizeBondFixedIncomeOverview(
+        {
+          ...readyOverview.bond_fixed_income,
+          system_diagnostics: {
+            ...readyOverview.bond_fixed_income.system_diagnostics,
+            memory: {
+              total_physical_bytes: 34_000_000_000,
+              available_physical_bytes: 19_000_000_000,
+              system_memory_ratio: 0.41,
+              process_working_set_bytes: 0,
+            },
+            notes: [
+              'Shared snapshot blockers stay visible as diagnostics, but the current bond runtime contract is the asset-leg gate.',
+              'Only runtime fixed-income snapshot rows are eligible asset-leg sources.',
+            ],
+          },
+        },
+        overviewBase,
+      ),
+    };
+    fakeApi.getSnapshotOverview.mockResolvedValue(overviewWithHealthyMemory);
+    fakeApi.refreshSnapshots.mockResolvedValue(overviewWithHealthyMemory);
+
+    renderSnapshotsPage('bond');
+
+    await screen.findByText('健康仪表盘');
+    const detailStack = document.querySelector('.snapshots-bond-detail-stack');
+    const auditLayout = document.querySelector('.snapshots-bond-audit-layout');
+    expect(detailStack).not.toBeNull();
+    expect(auditLayout).not.toBeNull();
+    expect(screen.queryByText('系统诊断')).not.toBeInTheDocument();
+    expect(screen.queryByText('运行时内存护栏')).not.toBeInTheDocument();
+    expect(screen.queryByText(/专家建议/)).not.toBeInTheDocument();
+    expect(screen.queryByText('公司行为数据部分可用')).not.toBeInTheDocument();
+
+    const qualitySection = document.querySelector('[data-ui="bond-quality-audit-matrix"]');
+    const repairSection = document.querySelector('[data-ui="bond-repair-rules"]');
+    const registrySection = document.querySelector('[data-ui="bond-raw-registry"]');
+    expect(qualitySection).toHaveAttribute('data-collapsed', 'true');
+    expect(repairSection).toHaveAttribute('data-collapsed', 'true');
+    expect(registrySection).toHaveAttribute('data-collapsed', 'true');
+    expect(screen.queryByText('价格一致性 通过 · 风险字段 完整')).not.toBeInTheDocument();
+    expect(screen.queryByText('执行规则')).not.toBeInTheDocument();
+    expect(screen.queryByText('当前没有异常债券行')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '展开质量审计' }));
+    expect(qualitySection).toHaveAttribute('data-collapsed', 'false');
+    expect(screen.getAllByText('价格一致性 通过 · 风险字段 完整').length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole('button', { name: '展开一键修复规则' }));
+    expect(repairSection).toHaveAttribute('data-collapsed', 'false');
+    expect(screen.getAllByText('执行规则').length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole('button', { name: '展开原始快照与调度' }));
+    expect(registrySection).toHaveAttribute('data-collapsed', 'false');
+    expect(screen.getByText('当前没有异常债券行')).toBeInTheDocument();
   });
 
   it('normalizes the seven-row bond contract and blocks the LQD WATCH row', async () => {
@@ -899,15 +1076,21 @@ describe('SnapshotsPage', () => {
     expect(screen.getAllByText('LQD Investment Grade ETF').length).toBeGreaterThan(0);
     const scrollStack = document.querySelector('.snapshots-bond-source-stack--scroll');
     expect(scrollStack).not.toBeNull();
-    expect(scrollStack?.querySelectorAll('.snapshots-bond-source-choice')).toHaveLength(3);
+    expect(scrollStack?.querySelectorAll('.snapshots-bond-source-choice')).toHaveLength(4);
     const visibleLabels = Array.from(scrollStack?.querySelectorAll('.snapshots-bond-source-choice strong') ?? []).map(
       (node) => node.textContent?.trim(),
     );
-    expect(visibleLabels).toEqual(['UST T-Bill 13W', 'UST CMT 2Y', 'UST CMT 10Y']);
-    const progressInline = document.querySelector('.snapshots-bond-progress-inline');
-    expect(progressInline).not.toBeNull();
-    expect(progressInline).toHaveTextContent('已展示 3 / 4 张');
-    expect(progressInline?.querySelector('.snapshots-bond-progress-bar')).not.toBeNull();
+    expect(visibleLabels).toEqual(['UST T-Bill 13W', 'UST CMT 2Y', 'UST CMT 10Y', 'UST CMT 30Y']);
+    expect(document.querySelector('.snapshots-bond-progress-inline')).toBeNull();
+    const anomalyButton = screen.getByRole('button', { name: /3 项待处理/ });
+    expect(anomalyButton).toHaveAttribute('aria-controls', 'bond-system-diagnostics');
+    fireEvent.click(anomalyButton);
+    const diagnosticPanel = screen.getByRole('heading', { name: '系统诊断' }).closest('section');
+    expect(diagnosticPanel).not.toBeNull();
+    expect(within(diagnosticPanel as HTMLElement).getByText('UST CMT 2Y')).toBeInTheDocument();
+    expect(within(diagnosticPanel as HTMLElement).getByText('UST CMT 10Y')).toBeInTheDocument();
+    expect(within(diagnosticPanel as HTMLElement).getByText('LQD Investment Grade ETF')).toBeInTheDocument();
+    expect(within(diagnosticPanel as HTMLElement).queryByText('公司行为数据部分可用')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /抗通胀债（TIPS）/ }));
     expect(scrollStack?.querySelectorAll('.snapshots-bond-source-choice')).toHaveLength(2);
@@ -922,21 +1105,58 @@ describe('SnapshotsPage', () => {
     expect(fakeApi.createAssetLeg).not.toHaveBeenCalled();
   });
 
-  it('wires the bond registry anomaly refresh button to the bond repair job', async () => {
+  it('uses system curve diagnosis copy instead of manual audit handoff', async () => {
+    const readyOverview = buildReadySevenBondRowsOverview();
+    const overviewWithCurve: ApiSnapshotOverview = {
+      ...readyOverview,
+      bond_fixed_income: normalizeBondFixedIncomeOverview(
+        {
+          ...readyOverview.bond_fixed_income,
+          curve_preview: [
+            { tenor_label: '3M', yield_pct: 5.2, spread_bps: 0 },
+            { tenor_label: '2Y', yield_pct: 4.4, spread_bps: -80 },
+            { tenor_label: '10Y', yield_pct: 4.5, spread_bps: -70 },
+            { tenor_label: '30Y', yield_pct: 4.7, spread_bps: -50 },
+          ],
+        },
+        overviewBase,
+      ),
+    };
+    fakeApi.getSnapshotOverview.mockResolvedValue(overviewWithCurve);
+
+    renderSnapshotsPage('bond');
+
+    expect(await screen.findByText('曲线预览')).toBeInTheDocument();
+    expect(screen.queryByText('曲线异常偏移：建议去审计矩阵复核长端应计与 10Y 估值点。')).not.toBeInTheDocument();
+    const diagnosis = screen.getByText('曲线校验通过：系统已核对 10Y-2Y 利差与长端应计，当前无需人工复核。');
+    expect(diagnosis).toBeInTheDocument();
+    expect(diagnosis).toHaveClass('snapshots-bond-curve-anomaly--neutral');
+  });
+
+  it('shows only anomalous bond registry rows and wires refresh to the complete repair job', async () => {
     const sevenRowOverview = buildSevenBondRowsOverview();
     fakeApi.getSnapshotOverview.mockResolvedValue(sevenRowOverview);
     fakeApi.refreshSnapshots.mockResolvedValue(sevenRowOverview);
 
     renderSnapshotsPage('bond');
 
-    const refreshButton = await screen.findByRole('button', { name: '重刷 2 个异常行' });
+    const registrySection = (await screen.findByRole('heading', { name: '原始快照与调度' })).closest('section');
+    expect(registrySection).not.toBeNull();
+    expect(within(registrySection as HTMLElement).queryAllByRole('radio')).toHaveLength(0);
+    expect(within(registrySection as HTMLElement).getByText('3 条异常行')).toBeInTheDocument();
+    expect(within(registrySection as HTMLElement).getByText('UST CMT 2Y')).toBeInTheDocument();
+    expect(within(registrySection as HTMLElement).getByText('UST CMT 10Y')).toBeInTheDocument();
+    expect(within(registrySection as HTMLElement).getByText('LQD Investment Grade ETF')).toBeInTheDocument();
+    expect(within(registrySection as HTMLElement).queryByText('UST CMT 30Y')).not.toBeInTheDocument();
+
+    const refreshButton = within(registrySection as HTMLElement).getByRole('button', { name: '重刷 3 个异常行' });
     fireEvent.click(refreshButton);
 
     await waitFor(() =>
       expect(fakeApi.refreshSnapshots).toHaveBeenCalledWith({
-        mode: 'repair',
-        targets: ['bond'],
-        reason: 'manual-refresh-bond',
+        mode: 'full',
+        targets: ['price', 'corporate', 'valuations', 'universes', 'bond'],
+        reason: 'manual-refresh-bond-complete',
       }),
     );
   });

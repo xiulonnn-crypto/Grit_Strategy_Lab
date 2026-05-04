@@ -6,7 +6,11 @@ import {
   type CompositionStressScenario,
 } from '../lib/composition-stress-scenarios';
 import { useApiClient } from '../lib/demoStoreContext';
-import { primaryCompositionDiagnosis } from '../lib/composition-diagnostics';
+import {
+  diagnosisNeedsAction,
+  normalizedDiagnosisActions,
+  primaryCompositionDiagnosis,
+} from '../lib/composition-diagnostics';
 import type {
   ApiCompositionBacktestOrder,
   ApiCompositionBacktestRun,
@@ -1960,6 +1964,8 @@ export function CompositionBacktestResultPage({
     [sourceFilteredLedgerRows, symbolFilter],
   );
   const selectedOrder = selectedEvent?.orders.find((order) => order.id === selectedOrderId);
+  const currentDiagnosis = currentRun ? primaryCompositionDiagnosis(currentRun) : null;
+  const currentDiagnosisActions = normalizedDiagnosisActions(currentDiagnosis);
 
   useEffect(() => {
     if (selectedScenarioId !== 'all' && !result.scenarioAnchors.some((item) => item.id === selectedScenarioId)) {
@@ -2096,6 +2102,38 @@ export function CompositionBacktestResultPage({
     navigateTo(`/compositions/${encodeURIComponent(result.compositionId)}/allocation-lab`);
   }
 
+  async function handleOpenStatusAction(): Promise<void> {
+    const action = currentDiagnosisActions.find((item) => item.route) ?? currentDiagnosisActions[0];
+    if (
+      action?.action_kind === 'execute'
+      && ['refresh_return_quality', 'refresh_diagnostics'].includes(action.action_key)
+      && api?.refreshCompositionDiagnostics
+    ) {
+      try {
+        await api.refreshCompositionDiagnostics(result.compositionId);
+        setActionToast({
+          detail: '状态标签已重新计算，请返回列表确认最新状态。',
+          title: '诊断已刷新',
+          tone: 'success',
+        });
+      } catch (caught) {
+        setActionToast({
+          detail: (caught as Error).message,
+          title: '诊断刷新失败',
+          tone: 'warning',
+        });
+      }
+      return;
+    }
+    const route = action?.route ?? `/compositions/workbench?composition_id=${encodeURIComponent(result.compositionId)}`;
+    setActionToast({
+      detail: '正在打开状态标签处理入口。',
+      title: '处理状态标签',
+      tone: 'info',
+    });
+    navigateTo(route);
+  }
+
   return (
     <div
       className="composition-backtest-result-page stack"
@@ -2133,6 +2171,17 @@ export function CompositionBacktestResultPage({
           <button className="primary-button" onClick={handleStartOptimization} type="button">
             启动优化
           </button>
+          {diagnosisNeedsAction(currentDiagnosis) ? (
+            <button
+              className="ghost-button"
+              onClick={() => {
+                void handleOpenStatusAction();
+              }}
+              type="button"
+            >
+              处理状态标签
+            </button>
+          ) : null}
         </div>
       </section>
       {actionToast ? (

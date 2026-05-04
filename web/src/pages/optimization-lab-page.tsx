@@ -368,6 +368,7 @@ const OPTIMIZATION_OBJECTIVE_OPTIONS: Array<{
   { key: "composite_score", label: "综合得分 Max" },
 ];
 const ALL_COMBINATIONS_PAGE_SIZE = 100;
+const OPTIMIZATION_DETAIL_ROUTE_MATCHING_LIMIT = 250;
 const OPTIMIZATION_CONSTRAINT_PRESETS: OptimizationConstraintPreset[] = [
   {
     key: "balanced",
@@ -4386,6 +4387,8 @@ export function OptimizationResultsPage({
     useState<ApiOptimizationFilteredResultCreatePayload | null>(null);
   const [constraintLiveMessage, setConstraintLiveMessage] = useState("");
   const [allCombinationsOpen, setAllCombinationsOpen] = useState(false);
+  const [allCombinationsLoadingFull, setAllCombinationsLoadingFull] =
+    useState(false);
   const [allCombinationsPage, setAllCombinationsPage] = useState(1);
   const [promotionConfirmOpen, setPromotionConfirmOpen] = useState(false);
   const [promotionDecisionNote, setPromotionDecisionNote] = useState("");
@@ -4475,7 +4478,9 @@ export function OptimizationResultsPage({
         setLoading(true);
         setError(null);
         const jobPayload = ensureOptimizationJobHasMatchingCombinationCount(
-          await api.getOptimizationJobDetail(jobId),
+          await api.getOptimizationJobDetail(jobId, {
+            matchingLimit: OPTIMIZATION_DETAIL_ROUTE_MATCHING_LIMIT,
+          }),
         );
         const strategyPayload = await api.getStrategyDetail(
           jobPayload.strategy_id,
@@ -4566,7 +4571,9 @@ export function OptimizationResultsPage({
       inFlight = true;
       try {
         const jobPayload = ensureOptimizationJobHasMatchingCombinationCount(
-          await api.getOptimizationJobDetail(jobId),
+          await api.getOptimizationJobDetail(jobId, {
+            matchingLimit: OPTIMIZATION_DETAIL_ROUTE_MATCHING_LIMIT,
+          }),
         );
         if (cancelled) {
           return;
@@ -4606,13 +4613,13 @@ export function OptimizationResultsPage({
       }
     };
 
-    window.addEventListener("visibilitychange", handleVisibilityChange);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     void refresh();
 
     return () => {
       cancelled = true;
       clearPollingTimer();
-      window.removeEventListener("visibilitychange", handleVisibilityChange);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [api, jobId, job?.status]);
 
@@ -4813,6 +4820,9 @@ export function OptimizationResultsPage({
     job && !optimizationProgressState
       ? Math.max(0, getOptimizationMatchingCombinationCount(job))
       : 0;
+  const matchingCombinationsLoadedCount = Array.isArray(job?.matching_combinations)
+    ? job.matching_combinations.length
+    : 0;
   const plannedCombinationCount =
     typeof job?.summary.budget_combinations === "number"
       ? job.summary.budget_combinations
@@ -4836,6 +4846,8 @@ export function OptimizationResultsPage({
     : "全部符合约束条件的组合";
   const allCombinationsDialogCopy = matchingCombinationCountIsPartial
     ? `当前仅有 ${matchingCombinationCount} 组已保存候选可供查看；该历史任务缺少全量 trial 明细，因此不能代表${plannedCombinationCount ? `全部 ${plannedCombinationCount} 组` : "全量"}组合。`
+    : allCombinationsLoadingFull
+      ? `正在载入全部 ${matchingCombinationCount} 组候选，首屏先展示 ${matchingCombinationsLoadedCount} 组预览。`
     : `共 ${matchingCombinationCount} 组，按当前约束条件过滤后展示；每页 ${ALL_COMBINATIONS_PAGE_SIZE} 条，可点击表头切换排序。`;
   const sortedAllMatchingCombinationCandidates = useMemo(
     () =>
@@ -5139,6 +5151,24 @@ export function OptimizationResultsPage({
     setAllCombinationsSortDirection("desc");
     setAllCombinationsPage(1);
     setAllCombinationsOpen(true);
+    if (
+      job &&
+      !matchingCombinationCountIsPartial &&
+      matchingCombinationCount > matchingCombinationsLoadedCount
+    ) {
+      setAllCombinationsLoadingFull(true);
+      void api
+        .getOptimizationJobDetail(job.id)
+        .then((payload) => {
+          setJob(ensureOptimizationJobHasMatchingCombinationCount(payload));
+        })
+        .catch((caught) => {
+          setError((caught as Error).message);
+        })
+        .finally(() => {
+          setAllCombinationsLoadingFull(false);
+        });
+    }
   }
 
   function closeAllCombinationsModal(): void {
@@ -5449,7 +5479,11 @@ export function OptimizationResultsPage({
       );
       const [refreshedStrategy, refreshedJob] = await Promise.all([
         api.getStrategyDetail(job.strategy_id),
-        api.getOptimizationJobDetail(job.id).catch(() => job),
+        api
+          .getOptimizationJobDetail(job.id, {
+            matchingLimit: OPTIMIZATION_DETAIL_ROUTE_MATCHING_LIMIT,
+          })
+          .catch(() => job),
       ]);
       setStrategy(refreshedStrategy);
       setJob(refreshedJob);

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { formatDateTime } from '../lib/format';
 import type {
   ApiDatasetSnapshot,
@@ -12,6 +12,7 @@ type EquitySnapshotsTabProps = {
   onRefresh: () => void;
   refreshDisabled: boolean;
   refreshLabel: string;
+  highlightTarget?: string;
 };
 
 type EquityFilter = 'all' | 'pending' | 'dataset' | 'universe';
@@ -394,6 +395,7 @@ export function EquitySnapshotsTab({
   onRefresh,
   refreshDisabled,
   refreshLabel,
+  highlightTarget,
 }: EquitySnapshotsTabProps): JSX.Element {
   const [activeFilter, setActiveFilter] = useState<EquityFilter>('all');
   const datasetSnapshots = overview?.dataset_snapshots ?? [];
@@ -406,6 +408,17 @@ export function EquitySnapshotsTab({
     [datasetSnapshots, universeSnapshots],
   );
   const visibleRows = rows.filter((row) => shouldShowRow(row, activeFilter));
+  useEffect(() => {
+    if (!highlightTarget) return;
+    const matched = rows.find((row) => row.id === highlightTarget);
+    if (matched) {
+      setActiveFilter(matched.filter);
+    }
+    window.requestAnimationFrame(() => {
+      const target = document.getElementById('equity-runtime-snapshot-list');
+      target?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    });
+  }, [highlightTarget, rows]);
   const readyDatasetCount = datasetSnapshots.filter((item) => isReadyStatus(item.status)).length;
   const readyUniverseCount = universeSnapshots.filter((item) => isReadyStatus(item.status)).length;
   const pendingCount = rows.filter((row) => isPendingStatus(row.status)).length;
@@ -639,7 +652,13 @@ export function EquitySnapshotsTab({
         {visibleRows.length ? (
           <div className="bond-snapshot-table">
             {visibleRows.map((row) => (
-              <article className="bond-snapshot-row snapshots-row-card" key={`${row.filter}-${row.id}`}>
+              <article
+                className={`bond-snapshot-row snapshots-row-card ${
+                  row.id === highlightTarget ? 'snapshots-row-card--highlight' : ''
+                }`}
+                data-snapshot-id={row.id}
+                key={`${row.filter}-${row.id}`}
+              >
                 <div className="bond-snapshot-row__cell">
                   <strong>{row.title}</strong>
                   <span>{row.summary}</span>

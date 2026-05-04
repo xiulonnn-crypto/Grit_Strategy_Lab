@@ -443,6 +443,51 @@ describe('composition workbench page', () => {
     expect(await screen.findByText('来源 3 / 3 可用')).toBeInTheDocument();
   });
 
+  it('preflights return sample problems inside the workbench source library', async () => {
+    window.location.hash = '#/compositions/workbench';
+    fakeApi.previewComposition = vi.fn().mockResolvedValue({
+      ...preview,
+      return_quality_summary: {
+        ...preview.return_quality_summary,
+        status: 'limited',
+        missing_points: 118,
+        coverage_pct: 33.3,
+        fallback_used: true,
+        leg_quality: [
+          {
+            leg_id: 'asset-leg-001',
+            display_name: '美国国债 10Y',
+            leg_kind: 'asset',
+            source_ref_id: 'asset-leg-001',
+            sample_points: 2,
+            aligned_points: 2,
+            missing_points: 118,
+            coverage_pct: 1.67,
+            window_start: '2026-04',
+            window_end: '2026-05',
+            issue_types: ['收益样本不足', '对齐缺口'],
+          },
+        ],
+      },
+    });
+
+    render(
+      <AppRouteProvider
+        navigate={(path) => {
+          window.location.hash = path;
+        }}
+        route={{ kind: 'composition-workbench' }}
+      >
+        <CompositionWorkbenchPage />
+      </AppRouteProvider>,
+    );
+
+    await waitFor(() => expect(fakeApi.previewComposition).toHaveBeenCalledTimes(1));
+    expect(await screen.findAllByText('收益样本不足、对齐缺口')).not.toHaveLength(0);
+    expect(screen.getAllByText('样本 2 月 / 缺口 118')).not.toHaveLength(0);
+    expect(document.querySelector('[data-ui="workbench-source-return-quality"]')).not.toBeNull();
+  });
+
   it('renders the approved score radar and return preview drawdown affordances', async () => {
     window.location.hash = '#/compositions/workbench';
     fakeApi.previewComposition = vi.fn().mockResolvedValue({

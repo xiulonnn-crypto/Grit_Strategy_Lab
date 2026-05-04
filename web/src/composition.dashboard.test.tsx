@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CompositionDashboardPage } from './pages/composition-dashboard-page';
-import type { ApiCompositionListItem } from './types';
+import type { ApiCompositionListItem, ApiCompositionStatusDiagnosis } from './types';
 
 type FakeApi = {
   listCompositions?: ReturnType<typeof vi.fn>;
@@ -97,6 +97,24 @@ const compositions: ApiCompositionListItem[] = [
     allowed_actions: ['open_composition_workbench'],
   },
 ];
+
+const driftDiagnosis: ApiCompositionStatusDiagnosis = {
+  status: '待校准',
+  issue_type: '逻辑一致性漂移',
+  diagnosis_type: 'source_logic_drift',
+  diagnosis_label: '待校准：逻辑一致性漂移',
+  frontend_explanation: '当前来源内容和保存时冻结记录不一致。',
+  action: '审计漂移来源，重新冻结或回滚。',
+  resolution_criteria: '漂移已确认并处理。',
+  actions: [
+    {
+      label: '打开组合工作台',
+      action_key: 'open_composition_workbench',
+      action_kind: 'open_new_tab',
+      route: '/compositions/workbench?composition_id=composition-drift',
+    },
+  ],
+};
 
 beforeEach(() => {
   fakeApi.listCompositions = vi.fn().mockResolvedValue(compositions);
@@ -281,6 +299,43 @@ describe('composition dashboard page', () => {
     await waitFor(() =>
       expect(window.location.hash).toBe('#/compositions/workbench?composition_id=composition_630718a64821'),
     );
+  });
+
+  it('uses status label diagnosis on dashboard composition cards instead of active status copy', async () => {
+    fakeApi.listCompositions = vi.fn().mockResolvedValue([
+      {
+        id: 'composition-drift',
+        name: 'QQQ网格&标普动量平衡',
+        status: 'ACTIVE',
+        composition_score: 84.2,
+        leg_count: 3,
+        rebalance_frequency: 'monthly',
+        benchmark_label: 'QQQ',
+        annualized_return: 0.16,
+        sharpe: 1.26,
+        max_drawdown: -0.09,
+        updated_at: '2026-04-30T04:00:00.000Z',
+        latest_activity_label: '状态标签待处理',
+        allowed_actions: ['open_composition_workbench'],
+        primary_diagnosis: driftDiagnosis,
+        diagnoses: [driftDiagnosis],
+      },
+    ]);
+
+    await act(async () => {
+      render(<CompositionDashboardPage />);
+    });
+
+    const title = await screen.findByRole('heading', { level: 3, name: 'QQQ网格&标普动量平衡' });
+    const card = title.closest('.composition-dashboard-card');
+    expect(card).not.toBeNull();
+    expect(within(card as HTMLElement).getByText('待校准：逻辑一致性漂移')).toBeInTheDocument();
+    expect(within(card as HTMLElement).queryByText('运行稳定')).toBeNull();
+
+    const task = screen.getByRole('button', { name: /逻辑一致性漂移/ });
+    expect(within(task).getByText('当前来源内容和保存时冻结记录不一致。')).toBeInTheDocument();
+    fireEvent.click(task);
+    expect(window.location.hash).toBe('#/compositions/workbench?composition_id=composition-drift');
   });
 
   it('does not treat a stale source signature as a strategy-leg new version when the current ref is unchanged', async () => {

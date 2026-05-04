@@ -24,6 +24,10 @@ ISHARES_LQD_HOLDINGS_URL = (
     "https://www.ishares.com/us/products/239566/ishares-iboxx-investment-grade-corporate-bond-etf/"
     "1467271812596.ajax?fileType=csv&fileName=LQD_holdings&dataType=fund"
 )
+MARKETS_INSIDER_LQD_URL = (
+    "https://markets.businessinsider.com/etfs/"
+    "ishares-iboxx-investment-grade-corporate-bond-etf-us4642872422"
+)
 
 
 @dataclass
@@ -31,6 +35,7 @@ class BondFixedIncomeProviderResult:
     snapshots: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    provider_results: list[dict[str, Any]] = field(default_factory=list)
     telemetry: dict[str, Any] = field(default_factory=dict)
 
 
@@ -363,8 +368,14 @@ def _extract_percent_after(label: str, html: str) -> float | None:
 
 def _extract_number_after(label: str, html: str) -> float | None:
     text = re.sub(r"<[^>]+>", " ", html)
-    pattern = re.compile(re.escape(label) + r"\s+as of\s+[^<]{1,80}?\s+(-?\d+(?:\.\d+)?)", re.IGNORECASE)
-    match = pattern.search(text)
+    patterns = (
+        re.compile(
+            re.escape(label) + r"\s+as of\s+[A-Za-z]{3,9}\s+\d{1,2},\s+\d{4}\s+(-?\d+(?:\.\d+)?)",
+            re.IGNORECASE,
+        ),
+        re.compile(re.escape(label) + r"\s+as of\s+[^<]{1,80}?\s+(-?\d+(?:\.\d+)?)", re.IGNORECASE),
+    )
+    match = next((candidate for pattern in patterns if (candidate := pattern.search(text))), None)
     return _float_or_none(match.group(1)) if match else None
 
 
@@ -427,10 +438,66 @@ def _parse_lqd_holdings(csv_text: str) -> dict[str, Any]:
     }
 
 
+def _normalize_tracking_period(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip().lower())
+    replacements = {
+        "1 year": "1Y",
+        "3 years": "3Y",
+        "5 years": "5Y",
+        "10 years": "10Y",
+        "15 years": "15Y",
+        "20 years": "20Y",
+        "since inception": "since_inception",
+    }
+    return replacements.get(text, text.replace(" ", "_"))
+
+
+def _parse_tracking_error_metrics(html: str) -> dict[str, Any]:
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
+    pattern = re.compile(
+        r"Tracking\s+Error\s+((?:\d{1,2}\s+Years?)|Since\s+Inception)\s+(-?\d+(?:\.\d+)?)",
+        re.IGNORECASE,
+    )
+    metrics: dict[str, float] = {}
+    for period, value in pattern.findall(text):
+        numeric_value = _float_or_none(value)
+        if numeric_value is None:
+            continue
+        metrics[_normalize_tracking_period(period)] = numeric_value
+    for preferred_period in ("1Y", "3Y", "5Y", "10Y", "15Y", "20Y", "since_inception"):
+        if preferred_period in metrics:
+            tracking_error_pct = metrics[preferred_period]
+            return {
+                "tracking_error_bps": round(tracking_error_pct * 100.0, 4),
+                "tracking_error_pct": tracking_error_pct,
+                "tracking_error_period": preferred_period,
+                "tracking_error_curve": metrics,
+            }
+    return {}
+
+
+def _fetch_lqd_tracking_error_metrics(*, timeout: float) -> tuple[dict[str, Any], dict[str, Any]]:
+    html = _fetch_text(MARKETS_INSIDER_LQD_URL, timeout=timeout)
+    metrics = _parse_tracking_error_metrics(html)
+    telemetry = {
+        "endpoint": MARKETS_INSIDER_LQD_URL,
+        "row_count": len(metrics.get("tracking_error_curve") or {}),
+        "selected_period": metrics.get("tracking_error_period"),
+    }
+    return metrics, telemetry
+
+
 def _lqd_snapshot(*, fetched_at: str, timeout: float) -> dict[str, Any] | None:
     product_html = _fetch_text(ISHARES_LQD_PRODUCT_URL, timeout=timeout)
     holdings_csv = _fetch_text(ISHARES_LQD_HOLDINGS_URL, timeout=timeout)
     holdings_summary = _parse_lqd_holdings(holdings_csv)
+    tracking_metrics: dict[str, Any] = {}
+    tracking_telemetry: dict[str, Any] | None = None
+    tracking_warning: str | None = None
+    try:
+        tracking_metrics, tracking_telemetry = _fetch_lqd_tracking_error_metrics(timeout=timeout)
+    except Exception as exc:
+        tracking_warning = f"Markets Insider LQD tracking-error source failed: {exc}"
     sec_yield = _extract_percent_after("30 Day SEC Yield", product_html)
     effective_duration = _extract_number_after("Effective Duration", product_html)
     avg_ytm = _extract_percent_after("Average Yield to Maturity", product_html)
@@ -447,16 +514,29 @@ def _lqd_snapshot(*, fetched_at: str, timeout: float) -> dict[str, Any] | None:
     effective_duration = effective_duration or holdings_summary.get("weighted_duration")
     avg_ytm = avg_ytm or holdings_summary.get("weighted_ytm")
     clean_price = holdings_summary.get("weighted_price")
+    tracking_error_bps = _float_or_none(tracking_metrics.get("tracking_error_bps"))
+    tracking_error_source = "MARKETS_INSIDER" if tracking_error_bps is not None else None
+    tracking_status = "READY" if tracking_error_bps is not None else "WATCH"
     missing_fields = [
         field_name
         for field_name, value in {
             "effective_duration": effective_duration,
             "sec_yield_30d_pct": sec_yield,
             "credit_quality": credit_quality or None,
-            "tracking_error_bps": None,
+            "tracking_error_bps": tracking_error_bps,
         }.items()
         if value in (None, {})
     ]
+    audit_alerts = []
+    if tracking_error_bps is None:
+        audit_alerts.append("Published tracking_error_bps was not found; LQD remains WATCH.")
+    audit_notes = ["ETF accrued-interest gap audit is waived; tracking error gates Ready."]
+    if tracking_error_bps is not None:
+        audit_notes.append(
+            f"Tracking error is sourced from Markets Insider {tracking_metrics.get('tracking_error_period') or 'published'} metric."
+        )
+    if tracking_warning:
+        audit_notes.append(tracking_warning)
     raw = _common_raw(
         provider="ishares",
         endpoint=ISHARES_LQD_PRODUCT_URL,
@@ -468,6 +548,7 @@ def _lqd_snapshot(*, fetched_at: str, timeout: float) -> dict[str, Any] | None:
             "average_yield_to_maturity_pct": avg_ytm,
             "credit_quality": credit_quality,
             "holdings_summary": holdings_summary,
+            "tracking_error_metrics": tracking_metrics,
         },
         proxy_kind="ETF_OFFICIAL",
         yield_basis="sec_yield",
@@ -480,11 +561,17 @@ def _lqd_snapshot(*, fetched_at: str, timeout: float) -> dict[str, Any] | None:
             "effective_duration": effective_duration,
             "sec_yield_30d_pct": sec_yield,
             "credit_quality": credit_quality,
-            "tracking_error_bps": None,
-            "tracking_status": "WATCH",
-            "audit_alerts": ["Official free tracking_error_bps was not found; LQD remains WATCH."],
-            "audit_notes": ["ETF accrued-interest gap audit is waived; tracking error gates Ready."],
+            "tracking_error_bps": tracking_error_bps,
+            "tracking_error_source": tracking_error_source,
+            "tracking_error_period": tracking_metrics.get("tracking_error_period"),
+            "tracking_error_pct": tracking_metrics.get("tracking_error_pct"),
+            "tracking_source_endpoint": MARKETS_INSIDER_LQD_URL if tracking_error_bps is not None else None,
+            "tracking_status": tracking_status,
+            "audit_alerts": audit_alerts,
+            "audit_notes": audit_notes,
             "holdings_endpoint": ISHARES_LQD_HOLDINGS_URL,
+            "tracking_endpoint": MARKETS_INSIDER_LQD_URL,
+            "tracking_telemetry": tracking_telemetry,
         },
     )
     return {
@@ -506,7 +593,7 @@ def _lqd_snapshot(*, fetched_at: str, timeout: float) -> dict[str, Any] | None:
         "convexity": None,
         "source": "ishares",
         "source_snapshot_id": snapshot_id,
-        "refresh_status": "WATCH",
+        "refresh_status": "READY" if tracking_error_bps is not None else "WATCH",
         "missing_fields": missing_fields,
         "inferred_fields": {"accrued_interest": "bond_etf_not_applicable"},
         "raw": raw,
@@ -628,10 +715,56 @@ def fetch_official_bond_fixed_income_snapshots(
             "rows": 1 if lqd else 0,
         }
         if lqd:
+            raw_payload = lqd.get("raw") if isinstance(lqd.get("raw"), Mapping) else {}
+            tracking_error_bps = _float_or_none((raw_payload or {}).get("tracking_error_bps"))
+            tracking_telemetry = dict((raw_payload or {}).get("tracking_telemetry") or {})
+            result.telemetry["sources"]["markets_insider_lqd_tracking"] = tracking_telemetry
+            result.provider_results.extend(
+                [
+                    {
+                        "provider": "ishares",
+                        "status": "succeeded",
+                        "instrument_count": 1,
+                    },
+                    {
+                        "provider": "markets_insider_lqd_tracking",
+                        "status": "succeeded" if tracking_error_bps is not None else "unavailable",
+                        "instrument_count": 1 if tracking_error_bps is not None else 0,
+                        "selected_period": (raw_payload or {}).get("tracking_error_period"),
+                        "reason": None
+                        if tracking_error_bps is not None
+                        else "No published tracking-error metric was parsed for LQD.",
+                    },
+                ]
+            )
             result.snapshots.append(lqd)
         else:
+            result.provider_results.append(
+                {
+                    "provider": "ishares",
+                    "status": "failed",
+                    "instrument_count": 0,
+                    "reason": "iShares LQD source returned no usable official ETF row.",
+                }
+            )
             result.warnings.append("iShares LQD source returned no usable official ETF row.")
     except Exception as exc:
+        result.provider_results.extend(
+            [
+                {
+                    "provider": "ishares",
+                    "status": "failed",
+                    "instrument_count": 0,
+                    "reason": str(exc),
+                },
+                {
+                    "provider": "markets_insider_lqd_tracking",
+                    "status": "failed",
+                    "instrument_count": 0,
+                    "reason": str(exc),
+                },
+            ]
+        )
         result.errors.append(f"iShares LQD source failed: {exc}")
 
     result.telemetry["snapshot_count"] = len(result.snapshots)

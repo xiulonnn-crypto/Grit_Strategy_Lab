@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { navigateTo } from '../lib/appRouteContext';
 import { formatBenchmarkLabel } from '../lib/compose-display';
 import { useApiClient } from '../lib/demoStoreContext';
-import type { ApiCompositionAllocationJob } from '../types';
+import type { ApiCompositionAllocationJob, ApiCompositionStatusDiagnosis } from '../types';
 import './composition-allocation-page.css';
 
 type AllocationIntentKey = 'min-vol' | 'risk-parity' | 'max-sharpe' | 'expert';
@@ -95,6 +95,8 @@ type AllocationCandidate = {
   canPromote?: boolean;
   executionLimited?: boolean;
   promotionReadiness?: AllocationPromotionReadiness | null;
+  statusActionLabel?: string | null;
+  statusActionPath?: string | null;
   violation?: string;
   weights: Array<{ legId: string; weight: number; risk: number }>;
 };
@@ -104,6 +106,7 @@ type AllocationPromotionReadiness = {
   evidenceGrade: string | null;
   blockers: string[];
   policyViolationCount: number;
+  primaryDiagnosis?: ApiCompositionStatusDiagnosis | null;
 };
 
 type FrontierPoint = {
@@ -313,11 +316,18 @@ function normalizePromotionReadiness(value: unknown): AllocationPromotionReadine
   }
   const rawBlockers = Array.isArray(value.blockers) ? value.blockers : [];
   const rawPolicyViolations = Array.isArray(value.policy_violations) ? value.policy_violations : [];
+  const rawDiagnoses = Array.isArray(value.diagnoses) ? value.diagnoses : [];
+  const primaryDiagnosis = isRecord(value.primary_diagnosis)
+    ? value.primary_diagnosis as ApiCompositionStatusDiagnosis
+    : isRecord(rawDiagnoses[0])
+      ? rawDiagnoses[0] as ApiCompositionStatusDiagnosis
+      : null;
   return {
     status: asString(value.status, ''),
     evidenceGrade: typeof value.evidence_grade === 'string' ? value.evidence_grade.trim().toUpperCase() : null,
     blockers: rawBlockers.map((item) => String(item)).filter(Boolean),
     policyViolationCount: rawPolicyViolations.length,
+    primaryDiagnosis,
   };
 }
 
@@ -337,6 +347,23 @@ function promotionReadinessBlockedReason(readiness: AllocationPromotionReadiness
     return '存在约束违反，请先调整候选约束。';
   }
   return '晋升门禁未通过，暂不能生成草稿版本。';
+}
+
+function statusActionFromReadiness(
+  readiness: AllocationPromotionReadiness | null | undefined,
+  compositionId?: string | null,
+): { label: string; path: string } | null {
+  const diagnosis = readiness?.primaryDiagnosis;
+  if (!diagnosis || !['待校准', '失效'].includes(String(diagnosis.status))) {
+    return null;
+  }
+  const action = (diagnosis.actions ?? []).find((item) => item.route) ?? diagnosis.actions?.[0];
+  const path = String(action?.route ?? '').trim()
+    || `/compositions/workbench?composition_id=${encodeURIComponent(String(compositionId ?? ''))}`;
+  return {
+    label: action?.label || '处理状态标签',
+    path,
+  };
 }
 
 function formatPct(value: number, digits = 0): string {
@@ -1148,6 +1175,7 @@ function buildCandidatesFromJob(job: ApiCompositionAllocationJob | null, model: 
       const allowedActions = Array.isArray(candidate.allowed_actions) ? candidate.allowed_actions.map((item) => String(item)) : [];
       const readiness = normalizePromotionReadiness(candidate.promotion_readiness);
       const readinessBlockedReason = promotionReadinessBlockedReason(readiness);
+      const statusAction = statusActionFromReadiness(readiness, job?.composition_id);
       return {
         id,
         label,
@@ -1172,6 +1200,8 @@ function buildCandidatesFromJob(job: ApiCompositionAllocationJob | null, model: 
         canPromote: allowedActions.length > 0 ? allowedActions.includes('promote_candidate') : undefined,
         executionLimited: constraintViolations.length > 0 || Boolean(readinessBlockedReason),
         promotionReadiness: readiness,
+        statusActionLabel: statusAction?.label ?? null,
+        statusActionPath: statusAction?.path ?? null,
         violation: constraintViolations.length > 0
           ? '存在约束提示，请复核后晋升。'
           : readinessBlockedReason
@@ -2892,6 +2922,15 @@ function ExecutionDecisionPanel({
         >
           生成草稿版本
         </button>
+        {disabledReason && candidate.statusActionPath ? (
+          <button
+            className="composition-allocation-ghost-button"
+            onClick={() => navigateTo(candidate.statusActionPath ?? '')}
+            type="button"
+          >
+            {candidate.statusActionLabel ?? '处理状态标签'}
+          </button>
+        ) : null}
       </article>
     </aside>
   );

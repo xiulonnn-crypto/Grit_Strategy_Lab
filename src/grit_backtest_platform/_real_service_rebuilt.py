@@ -9,11 +9,13 @@ import threading
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from time import monotonic
+from uuid import uuid4
 
 from .backtest_engine import (
     BacktestConfig,
@@ -36,6 +38,7 @@ from .backtest_metrics import (
 )
 from ._bond_fixed_income_provider import fetch_official_bond_fixed_income_snapshots
 from .fallback_provider import UnconfiguredFallbackProvider, provider_access_tier
+from .factor_research import FactorResearchService, build_pit_data_overview
 from .market_data_repository import (
     DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
     DATASET_INDEX_VALUATIONS_SNAPSHOT_ID,
@@ -404,6 +407,296 @@ class RealBacktestPlatformService(BacktestPlatformService):
         self._snapshot_refresh_process: subprocess.Popen[str] | None = None
         self._backtest_run_lock = threading.Lock()
         self._backtest_run_threads: dict[str, threading.Thread] = {}
+        self._factor_research_service_instance: FactorResearchService | None = None
+        self._factor_research_service_lock = threading.Lock()
+        try:
+            pit_cache_ttl = float(os.environ.get("GRIT_PIT_DATA_OVERVIEW_CACHE_SECONDS", "300").strip())
+        except (TypeError, ValueError):
+            pit_cache_ttl = 300.0
+        self._pit_data_overview_cache_seconds = max(0.0, pit_cache_ttl)
+        self._pit_data_overview_cache: tuple[float, str, dict[str, Any]] | None = None
+        self._pit_data_overview_cache_lock = threading.Lock()
+        try:
+            snapshot_cache_ttl = float(os.environ.get("GRIT_SNAPSHOT_OVERVIEW_CACHE_SECONDS", "300").strip())
+        except (TypeError, ValueError):
+            snapshot_cache_ttl = 300.0
+        self._snapshot_overview_cache_seconds = max(0.0, snapshot_cache_ttl)
+        self._snapshot_overview_cache: tuple[float, str, dict[str, Any]] | None = None
+        self._snapshot_overview_cache_lock = threading.Lock()
+        self._prewarm_read_model_caches()
+
+    def _prewarm_read_model_caches(self) -> None:
+        for builder in (self.get_snapshot_overview, self.get_pit_data_overview):
+            try:
+                builder()
+            except Exception:
+                continue
+
+    def _factor_research_service(self) -> FactorResearchService:
+        with self._factor_research_service_lock:
+            if self._factor_research_service_instance is None:
+                self._factor_research_service_instance = FactorResearchService(
+                    self.storage,
+                    self.market_data_repository,
+                    pit_overview_builder=self.get_pit_data_overview,
+                )
+            return self._factor_research_service_instance
+
+    def _invalidate_pit_data_overview_cache(self) -> None:
+        with self._pit_data_overview_cache_lock:
+            self._pit_data_overview_cache = None
+
+    def _invalidate_snapshot_overview_cache(self) -> None:
+        with self._snapshot_overview_cache_lock:
+            self._snapshot_overview_cache = None
+
+    def _market_data_snapshot_cache_signature(self) -> str:
+        tables = (
+            ("dataset_snapshots", "updated_at", ("row_count", "metadata_json", "blocker_json", "as_of", "source", "fallback_source")),
+            ("universe_snapshots", "updated_at", ("member_count", "metadata_json", "blocker_json", "as_of", "source", "fallback_source")),
+            ("dataset_symbol_coverage", None, ("symbol", "start_date", "end_date", "trade_days")),
+            ("dataset_fundamental_coverage", None, ("symbol", "start_date", "end_date", "observation_count")),
+            ("universe_memberships", None, ("effective_date", "symbol", "source", "fallback_source", "metadata_json")),
+            ("market_coverages", None, ("symbol", "start_date", "end_date", "trade_days")),
+            ("market_bars", None, ("symbol", "date")),
+            ("pit_cleaning_runs", None, ("id", "dataset_snapshot_id", "universe_snapshot_id", "status", "completed_at")),
+            ("pit_quality_events", None, ("id", "dataset_snapshot_id", "universe_snapshot_id", "event_time", "severity", "metadata_json")),
+            ("pit_research_waivers", None, ("id", "dataset_snapshot_id", "universe_snapshot_id", "ignored_symbols_json", "revoked_at")),
+            ("symbol_identity_cache", None, ("symbol", "canonical_symbol", "source", "valid_from", "valid_to")),
+            ("bond_fixed_income_snapshots", "updated_at", ("snapshot_date", "instrument_id", "refresh_status", "metadata_json", "raw_json")),
+        )
+        parts: list[str] = []
+        try:
+            with self.market_data_repository.connect() as conn:
+                for table, updated_column, columns in tables:
+                    try:
+                        column_exprs = ["COUNT(*) AS row_count"]
+                        if updated_column:
+                            column_exprs.append(f"COALESCE(MAX({updated_column}), '') AS max_updated")
+                        for index, column in enumerate(columns):
+                            column_exprs.append(
+                                f"COALESCE(SUM(LENGTH(COALESCE(CAST({column} AS TEXT), ''))), 0) AS c{index}"
+                            )
+                        row = conn.execute(f"SELECT {', '.join(column_exprs)} FROM {table}").fetchone()
+                    except Exception:
+                        continue
+                    values = [table]
+                    if row is not None:
+                        row_values = dict(row)
+                        values.extend(str(row_values.get(key, "")) for key in row_values)
+                    parts.append(":".join(values))
+        except Exception:
+            return ""
+        return "|".join(parts)
+
+    def get_pit_data_overview(self) -> dict[str, Any]:
+        signature = self._market_data_snapshot_cache_signature()
+        now = monotonic()
+        with self._pit_data_overview_cache_lock:
+            cached = self._pit_data_overview_cache
+            if (
+                cached is not None
+                and cached[1] == signature
+                and self._pit_data_overview_cache_seconds > 0
+                and now - cached[0] <= self._pit_data_overview_cache_seconds
+            ):
+                return deepcopy(cached[2])
+            overview = build_pit_data_overview(self.market_data_repository)
+            self._pit_data_overview_cache = (now, signature, deepcopy(overview))
+            return overview
+
+    def create_pit_research_waiver(self, request: Any) -> dict[str, Any]:
+        self._invalidate_pit_data_overview_cache()
+        self._factor_research_service().create_research_waiver(request)
+        self._invalidate_pit_data_overview_cache()
+        return self.get_pit_data_overview()
+
+    def revoke_pit_research_waiver(self, waiver_id: str) -> dict[str, Any]:
+        self._invalidate_pit_data_overview_cache()
+        self._factor_research_service().revoke_research_waiver(waiver_id)
+        self._invalidate_pit_data_overview_cache()
+        return self.get_pit_data_overview()
+
+    def apply_pit_identity_override(self, request: Any) -> dict[str, Any]:
+        self._invalidate_pit_data_overview_cache()
+        result = self._factor_research_service().apply_identity_override(request)
+        self._invalidate_pit_data_overview_cache()
+        return result
+
+    def restart_pit_identity_scraper(self, request: Any | None = None) -> dict[str, Any]:
+        self._invalidate_pit_data_overview_cache()
+        payload = dict(_as_mapping(request))
+        started_at = iso_now()
+        overview = self.get_pit_data_overview()
+        coverage_gap = overview.get("coverage_gap") if isinstance(overview.get("coverage_gap"), Mapping) else {}
+        buckets = coverage_gap.get("buckets") if isinstance(coverage_gap, Mapping) else []
+        pending_symbols: list[str] = []
+        if isinstance(buckets, Sequence) and not isinstance(buckets, (str, bytes)):
+            for bucket in buckets:
+                if not isinstance(bucket, Mapping) or bucket.get("id") != "identity_unresolved":
+                    continue
+                raw_symbols = bucket.get("symbols") or bucket.get("sample_symbols") or []
+                pending_symbols = [
+                    str(symbol).strip().upper()
+                    for symbol in raw_symbols
+                    if str(symbol).strip()
+                ]
+                break
+
+        requested_symbols = payload.get("symbols")
+        if isinstance(requested_symbols, Sequence) and not isinstance(requested_symbols, (str, bytes)):
+            requested = {
+                str(symbol).strip().upper()
+                for symbol in requested_symbols
+                if str(symbol).strip()
+            }
+            if requested:
+                pending_symbols = [symbol for symbol in pending_symbols if symbol in requested]
+
+        max_symbols = payload.get("max_symbols")
+        try:
+            limit = int(max_symbols) if max_symbols is not None else len(pending_symbols)
+        except (TypeError, ValueError):
+            raise ValueError("Identity scraper max_symbols must be a positive integer.")
+        if limit <= 0:
+            raise ValueError("Identity scraper max_symbols must be a positive integer.")
+        symbols = pending_symbols[:limit]
+
+        def normalize_identity(symbol: str, identity: Mapping[str, Any]) -> dict[str, Any] | None:
+            normalized_identity = dict(identity)
+            normalized_identity["symbol"] = str(normalized_identity.get("symbol") or symbol).strip().upper()
+            if not normalized_identity["symbol"]:
+                return None
+            normalized_identity["canonical_symbol"] = str(
+                normalized_identity.get("canonical_symbol") or normalized_identity["symbol"]
+            ).strip().upper()
+            normalized_identity.setdefault("source", "identity_scraper_restart")
+            return normalized_identity
+
+        resolved_by_symbol: dict[str, dict[str, Any]] = {}
+        bulk_resolver = getattr(self.market_data_provider, "resolve_identities", None)
+        if callable(bulk_resolver) and symbols:
+            try:
+                try:
+                    bulk_result = bulk_resolver(symbols, include_per_symbol=False)
+                except TypeError:
+                    bulk_result = bulk_resolver(symbols)
+            except Exception:
+                bulk_result = {}
+            if isinstance(bulk_result, Mapping):
+                for raw_symbol, identity in bulk_result.items():
+                    symbol = str(raw_symbol or "").strip().upper()
+                    if not symbol or symbol not in symbols or not isinstance(identity, Mapping):
+                        continue
+                    normalized_identity = normalize_identity(symbol, identity)
+                    if normalized_identity:
+                        resolved_by_symbol[symbol] = normalized_identity
+
+        resolver = getattr(self.market_data_provider, "resolve_identity", None)
+        if not callable(bulk_resolver) and callable(resolver):
+            for symbol in symbols:
+                if symbol in resolved_by_symbol:
+                    continue
+                try:
+                    identity = resolver(symbol)
+                except Exception:
+                    continue
+                if not isinstance(identity, Mapping) or not (identity.get("symbol") or identity.get("canonical_symbol")):
+                    continue
+                normalized_identity = normalize_identity(symbol, identity)
+                if normalized_identity:
+                    resolved_by_symbol[symbol] = normalized_identity
+
+        external_resolved_symbols = sorted(resolved_by_symbol)
+        for symbol in external_resolved_symbols:
+            self.market_data_repository.upsert_symbol_identity(resolved_by_symbol[symbol])
+
+        allow_local_fallback = bool(payload.get("allow_local_fallback", True))
+        unresolved_symbols = [symbol for symbol in symbols if symbol not in resolved_by_symbol]
+        local_fallback_symbols: list[str] = []
+        if allow_local_fallback:
+            for symbol in unresolved_symbols:
+                self.market_data_repository.upsert_symbol_identity(
+                    {
+                        "symbol": symbol,
+                        "canonical_symbol": symbol,
+                        "company_name": "",
+                        "cik": "",
+                        "exchange": "",
+                        "ipo_date": None,
+                        "delisting_date": None,
+                        "valid_from": None,
+                        "valid_to": None,
+                        "source": "pit_identity_local_fallback",
+                    }
+                )
+                local_fallback_symbols.append(symbol)
+        failed_symbols = [] if allow_local_fallback else unresolved_symbols
+        resolved_symbols = sorted([*external_resolved_symbols, *local_fallback_symbols])
+
+        self._invalidate_pit_data_overview_cache()
+        refreshed = self.get_pit_data_overview()
+        refreshed_gap = refreshed.get("coverage_gap") if isinstance(refreshed.get("coverage_gap"), Mapping) else {}
+        refreshed_buckets = refreshed_gap.get("buckets") if isinstance(refreshed_gap, Mapping) else []
+        pending_after = 0
+        if isinstance(refreshed_buckets, Sequence) and not isinstance(refreshed_buckets, (str, bytes)):
+            for bucket in refreshed_buckets:
+                if isinstance(bucket, Mapping) and bucket.get("id") == "identity_unresolved":
+                    pending_after = int(bucket.get("count") or 0)
+                    break
+        status = "COMPLETED" if resolved_symbols and not failed_symbols else ("NOOP" if not symbols else "PARTIAL")
+        return {
+            "job_id": f"pit_identity_{uuid4().hex[:12]}",
+            "status": status,
+            "message": (
+                f"Identity Scraper 已执行：外部解析 {len(external_resolved_symbols)} 项，"
+                f"本地 PIT 锚点兜底 {len(local_fallback_symbols)} 项，剩余 {len(failed_symbols)} 项。"
+            ),
+            "started_at": started_at,
+            "completed_at": iso_now(),
+            "attempted_count": len(symbols),
+            "resolved_count": len(resolved_symbols),
+            "failed_count": len(failed_symbols),
+            "external_resolved_count": len(external_resolved_symbols),
+            "external_resolved_symbols": external_resolved_symbols,
+            "local_fallback_count": len(local_fallback_symbols),
+            "local_fallback_symbols": local_fallback_symbols,
+            "pending_before": len(pending_symbols),
+            "pending_after": pending_after,
+            "resolved_symbols": resolved_symbols,
+            "failed_symbols": failed_symbols,
+            "pit_data": refreshed,
+        }
+
+    def list_factors(
+        self,
+        *,
+        source: str | None = None,
+        tag: str | None = None,
+        market: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        return self._factor_research_service().list_factors(
+            source=source,
+            tag=tag,
+            market=market,
+            status=status,
+        )
+
+    def create_factor(self, request: Any) -> dict[str, Any]:
+        return self._factor_research_service().create_factor(request)
+
+    def get_factor(self, factor_id: str) -> dict[str, Any]:
+        return self._factor_research_service().get_factor(factor_id)
+
+    def run_factor_diagnostics(self, factor_id: str, request: Any) -> dict[str, Any]:
+        return self._factor_research_service().run_diagnostics(factor_id, request)
+
+    def preview_factor_diagnostics(self, request: Any) -> dict[str, Any]:
+        return self._factor_research_service().preview_diagnostics(request)
+
+    def export_factor_diagnostic_report(self, factor_id: str, run_id: str) -> dict[str, Any]:
+        return self._factor_research_service().export_factor_diagnostic_report(factor_id, run_id)
 
     def _primary_market_data_provider(self) -> Any:
         return self.market_data_provider or YahooMarketDataProvider()
@@ -6086,7 +6379,28 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
     def get_snapshot_overview(self) -> dict[str, Any]:
         latest = self.storage.fetch_one("SELECT * FROM snapshot_refresh_jobs ORDER BY created_at DESC LIMIT 1")
-        return self._build_snapshot_overview(self._decode_snapshot_refresh_job(latest))
+        signature = "|".join(
+            [
+                str((latest or {}).get("id") or ""),
+                str((latest or {}).get("status") or ""),
+                str((latest or {}).get("updated_at") or ""),
+                str((latest or {}).get("completed_at") or ""),
+                self._market_data_snapshot_cache_signature(),
+            ]
+        )
+        now = monotonic()
+        with self._snapshot_overview_cache_lock:
+            cached = self._snapshot_overview_cache
+            if (
+                cached is not None
+                and cached[1] == signature
+                and self._snapshot_overview_cache_seconds > 0
+                and now - cached[0] <= self._snapshot_overview_cache_seconds
+            ):
+                return deepcopy(cached[2])
+            overview = self._build_snapshot_overview(self._decode_snapshot_refresh_job(latest))
+            self._snapshot_overview_cache = (now, signature, deepcopy(overview))
+            return overview
 
     def _normalize_dynamic_strategy_payload(self, strategy: Mapping[str, Any]) -> dict[str, Any]:
         normalized = dict(strategy)
@@ -6110,12 +6424,19 @@ class RealBacktestPlatformService(BacktestPlatformService):
         return normalized
 
     def list_strategies(self) -> list[dict[str, Any]]:
-        return [
+        cache_key = "real:strategies:list"
+        cache_signature = self._strategy_list_cache_signature()
+        cached = self._read_model_cache_get(cache_key, cache_signature)
+        if cached is not None:
+            return cached
+        strategies = [
             self._normalize_dynamic_strategy_payload(
                 self._normalize_strategy_snapshot_bindings(strategy)
             )
             for strategy in super().list_strategies()
         ]
+        self._read_model_cache_set(cache_key, cache_signature, strategies)
+        return strategies
 
     def get_strategy_detail(self, strategy_id: str) -> dict[str, Any]:
         return self._normalize_dynamic_strategy_payload(

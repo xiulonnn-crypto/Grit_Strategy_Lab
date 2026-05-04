@@ -21,6 +21,7 @@ describe('shell frame page heading hooks', () => {
     );
 
     expect(container.querySelector('.page-heading')).toBeNull();
+    expect(screen.getByRole('link', { name: '数据快照' })).toHaveAttribute('href', '#/snapshots');
 
     rerender(
       <ShellFrameCn route={{ kind: 'creation-template' }}>
@@ -119,6 +120,20 @@ describe('shell frame page heading hooks', () => {
     rerender(
       <ShellFrameCn route={{ kind: 'backtest', strategyId: 'strat-001' }}>
         <div>backtest submit</div>
+      </ShellFrameCn>,
+    );
+    expect(container.querySelector('.page-heading')).toBeNull();
+
+    rerender(
+      <ShellFrameCn route={{ kind: 'factor-library' }}>
+        <div>factor library</div>
+      </ShellFrameCn>,
+    );
+    expect(container.querySelector('.page-heading')).toBeNull();
+
+    rerender(
+      <ShellFrameCn route={{ kind: 'pit-data' }}>
+        <div>pit data</div>
       </ShellFrameCn>,
     );
     expect(container.querySelector('.page-heading')).toBeNull();

@@ -309,6 +309,7 @@ describe('composition detail approved runtime layout', () => {
     expect(screen.queryByRole('heading', { level: 2, name: '深入分析入口' })).not.toBeInTheDocument();
     expect(screen.getByText('10Y / 年化 9.8% / 夏普 1.42')).toBeInTheDocument();
     expect(screen.getByText('基准组合(70/30)')).toBeInTheDocument();
+    expect(screen.getByText('基准组合(70/30)：70% 权益 / 30% 债券 虚线')).toBeInTheDocument();
     expect(document.body.textContent).not.toContain('70/30 参考组合');
   });
 });

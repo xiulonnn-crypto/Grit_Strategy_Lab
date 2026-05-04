@@ -128,6 +128,21 @@ class SecEdgarProvider:
     def resolve_identity(self, symbol: str) -> dict[str, Any] | None:
         return self._load_ticker_index().get(symbol.upper())
 
+    def resolve_identities(self, symbols: list[str] | tuple[str, ...] | set[str]) -> dict[str, dict[str, Any]]:
+        requested = {
+            str(symbol).strip().upper()
+            for symbol in symbols
+            if str(symbol).strip()
+        }
+        if not requested:
+            return {}
+        ticker_index = self._load_ticker_index()
+        return {
+            symbol: dict(ticker_index[symbol])
+            for symbol in sorted(requested)
+            if symbol in ticker_index
+        }
+
     def fetch_report_filings(self, symbol: str, start_date: date, end_date: date) -> list[dict[str, Any]]:
         identity = self.resolve_identity(symbol)
         if not identity or not identity.get("cik"):

@@ -80,6 +80,8 @@ OPTIMIZATION_DEFAULT_OBJECTIVE = "return_sharpe"
 OPTIMIZATION_WEIGHT_SUM_CONSTRAINT_GROUP = "allocation_weight_sum_100"
 OPTIMIZATION_WEIGHT_SUM_TARGET = 100.0
 COMPOSITION_RECENT_WINDOW_MONTHS = 120
+OPTIMIZATION_MATCHING_COMBINATION_INLINE_LIMIT = 250
+OPTIMIZATION_JOB_JSON_COMPACTION_THRESHOLD_BYTES = 1_000_000
 OPTIMIZATION_OBJECTIVE_ALIASES: dict[str, str] = {
     "sharpe": "return_sharpe",
     "return_sharpe": "return_sharpe",
@@ -1607,7 +1609,177 @@ class BacktestPlatformService:
             "snapshot_cache_hit_count": 0,
             "snapshot_cache_miss_count": 0,
         }
+        self._composition_detail_cache_seconds = max(
+            0.0,
+            _as_float(os.getenv("GRIT_COMPOSITION_DETAIL_CACHE_SECONDS"), 15.0),
+        )
+        self._composition_detail_cache: dict[str, tuple[float, str, dict[str, Any]]] = {}
+        self._composition_detail_cache_lock = threading.Lock()
+        self._read_model_cache_seconds = max(
+            0.0,
+            _as_float(os.getenv("GRIT_READ_MODEL_CACHE_SECONDS"), 300.0),
+        )
+        self._read_model_cache_fast_seconds = max(
+            0.0,
+            _as_float(os.getenv("GRIT_READ_MODEL_FAST_CACHE_SECONDS"), 15.0),
+        )
+        self._read_model_cache: dict[str, tuple[float, str, Any]] = {}
+        self._read_model_cache_lock = threading.Lock()
+        self._optimization_job_json_compaction_done = False
         self._normalize_existing_backtest_runs_to_temporary_once()
+        self._compact_existing_optimization_job_json_once()
+
+    def _read_model_cache_get(self, key: str, signature: str) -> Any | None:
+        if self._read_model_cache_seconds <= 0:
+            return None
+        now = time.monotonic()
+        with self._read_model_cache_lock:
+            cached = self._read_model_cache.get(key)
+            if (
+                cached is not None
+                and cached[1] == signature
+                and now - cached[0] <= self._read_model_cache_seconds
+            ):
+                return deepcopy(cached[2])
+        return None
+
+    def _read_model_cache_get_fresh(self, key: str) -> Any | None:
+        if self._read_model_cache_fast_seconds <= 0:
+            return None
+        now = time.monotonic()
+        with self._read_model_cache_lock:
+            cached = self._read_model_cache.get(key)
+            if cached is not None and now - cached[0] <= self._read_model_cache_fast_seconds:
+                return deepcopy(cached[2])
+        return None
+
+    def _read_model_cache_set(self, key: str, signature: str, value: Any) -> None:
+        if self._read_model_cache_seconds <= 0:
+            return
+        with self._read_model_cache_lock:
+            self._read_model_cache[key] = (time.monotonic(), signature, deepcopy(value))
+
+    def _strategy_list_cache_signature(self) -> str:
+        row = self.storage.fetch_one(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM strategies) AS strategy_count,
+                (SELECT COALESCE(MAX(updated_at), '') FROM strategies) AS strategy_updated_at,
+                (SELECT COUNT(*) FROM backtest_runs WHERE deleted_at IS NULL) AS run_count,
+                (SELECT COALESCE(MAX(updated_at), '') FROM backtest_runs WHERE deleted_at IS NULL) AS run_updated_at,
+                (SELECT COUNT(*) FROM optimization_jobs WHERE deleted_at IS NULL) AS optimization_count,
+                (SELECT COALESCE(MAX(updated_at), '') FROM optimization_jobs WHERE deleted_at IS NULL) AS optimization_updated_at
+            """
+        ) or {}
+        return "|".join(
+            str(row.get(key) or "")
+            for key in (
+                "strategy_count",
+                "strategy_updated_at",
+                "run_count",
+                "run_updated_at",
+                "optimization_count",
+                "optimization_updated_at",
+            )
+        )
+
+    def _backtest_run_list_cache_signature(self, status: str | None = None) -> str:
+        sql = """
+            SELECT
+                COUNT(*) AS run_count,
+                COALESCE(MAX(updated_at), '') AS updated_at,
+                COALESCE(MAX(completed_at), '') AS completed_at
+            FROM backtest_runs
+            WHERE deleted_at IS NULL
+        """
+        params: list[Any] = []
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        row = self.storage.fetch_one(sql, params) or {}
+        return "|".join(
+            [
+                str(status or ""),
+                str(row.get("run_count") or ""),
+                str(row.get("updated_at") or ""),
+                str(row.get("completed_at") or ""),
+            ]
+        )
+
+    @staticmethod
+    def _compact_optimization_matching_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+        compacted = dict(payload)
+        matching_combinations = compacted.get("matching_combinations")
+        if (
+            isinstance(matching_combinations, Sequence)
+            and not isinstance(matching_combinations, (str, bytes, bytearray))
+            and len(matching_combinations) > OPTIMIZATION_MATCHING_COMBINATION_INLINE_LIMIT
+        ):
+            matching_source = str(compacted.get("matching_combination_source") or "").strip()
+            if matching_source != "all_trials" and _as_int(compacted.get("persisted_trial_count"), 0) <= 0:
+                return compacted
+            compacted["matching_combinations"] = []
+            compacted.setdefault("matching_combination_count", len(matching_combinations))
+            compacted.setdefault(
+                "matching_combination_source",
+                matching_source or "all_trials",
+            )
+        return compacted
+
+    def _compact_existing_optimization_job_json_once(self) -> None:
+        if self._optimization_job_json_compaction_done:
+            return
+        self._optimization_job_json_compaction_done = True
+        try:
+            rows = self.storage.fetch_all(
+                """
+                SELECT id, request_json, summary_json
+                FROM optimization_jobs
+                WHERE deleted_at IS NULL
+                  AND (
+                    LENGTH(COALESCE(request_json, '')) > ?
+                    OR LENGTH(COALESCE(summary_json, '')) > ?
+                  )
+                """,
+                (
+                    OPTIMIZATION_JOB_JSON_COMPACTION_THRESHOLD_BYTES,
+                    OPTIMIZATION_JOB_JSON_COMPACTION_THRESHOLD_BYTES,
+                ),
+            )
+        except Exception:
+            return
+        for row in rows:
+            job_id = str(row.get("id") or "").strip()
+            if not job_id:
+                continue
+            try:
+                trial_count_row = self.storage.fetch_one(
+                    "SELECT COUNT(*) AS count FROM optimization_job_trials WHERE job_id = ?",
+                    (job_id,),
+                )
+            except Exception:
+                trial_count_row = None
+            if _as_int((trial_count_row or {}).get("count"), 0) <= 0:
+                continue
+            request_payload = loads(row.get("request_json"), {})
+            summary_payload = loads(row.get("summary_json"), {})
+            compact_request = self._compact_optimization_matching_payload(
+                request_payload if isinstance(request_payload, Mapping) else {}
+            )
+            compact_summary = self._compact_optimization_matching_payload(
+                summary_payload if isinstance(summary_payload, Mapping) else {}
+            )
+            if compact_request == request_payload and compact_summary == summary_payload:
+                continue
+            self.storage.execute(
+                """
+                UPDATE optimization_jobs
+                SET request_json = ?,
+                    summary_json = ?
+                WHERE id = ?
+                """,
+                (dumps(compact_request), dumps(compact_summary), job_id),
+            )
 
     def _new_id(self, prefix: str) -> str:
         return f"{prefix}_{uuid4().hex[:12]}"
@@ -3934,6 +4106,40 @@ class BacktestPlatformService:
             return []
         return [dict(row) for row in loader()]
 
+    def _bond_snapshot_contract_key(self, row: Mapping[str, Any]) -> str | None:
+        identifier_blob = " ".join(
+            str(row.get(key) or "")
+            for key in ("instrument_id", "symbol", "name", "id", "source_snapshot_id")
+        ).upper()
+        for contract_key in ("UST_BILL_3M", "UST_CMT_2Y", "UST_CMT_10Y", "UST_CMT_30Y", "TIPS_5Y", "TIPS_10Y"):
+            if contract_key in identifier_blob:
+                return contract_key
+        if "TIPS5Y" in identifier_blob:
+            return "TIPS_5Y"
+        if "TIPS10Y" in identifier_blob:
+            return "TIPS_10Y"
+        if "LQD" in identifier_blob:
+            return "LQD"
+        profile = self._bond_snapshot_profile(row)
+        if profile in {"UST_BILL_3M", "UST_CMT_2Y", "UST_CMT_10Y", "UST_CMT_30Y", "TIPS_5Y", "TIPS_10Y"}:
+            return profile
+        if profile in {"LQD", "LQD_BOND_ETF"} or str(row.get("symbol") or "").upper() == "LQD":
+            return "LQD"
+        return None
+
+    def _bond_snapshot_current_contract_rows(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        selected: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            contract_key = self._bond_snapshot_contract_key(row)
+            if not contract_key or contract_key in selected:
+                continue
+            selected[contract_key] = dict(row)
+        order = ("UST_BILL_3M", "UST_CMT_2Y", "UST_CMT_10Y", "UST_CMT_30Y", "TIPS_5Y", "TIPS_10Y", "LQD")
+        return [selected[key] for key in order if key in selected]
+
     def _bond_snapshot_record_by_ref(self, snapshot_ref: str | None) -> dict[str, Any] | None:
         ref = str(snapshot_ref or "").strip()
         if not ref:
@@ -4123,7 +4329,7 @@ class BacktestPlatformService:
         )
         return tracking_status.upper() if tracking_status else None
 
-    def _bond_snapshot_has_official_tracking_error(self, row: Mapping[str, Any]) -> bool:
+    def _bond_snapshot_has_verified_tracking_error(self, row: Mapping[str, Any]) -> bool:
         raw_status = self._bond_snapshot_raw_tracking_status(row)
         if raw_status in {"WATCH", "MISSING", "UNOFFICIAL", "ESTIMATED", "INFERRED", "PROXY"}:
             return False
@@ -4146,6 +4352,11 @@ class BacktestPlatformService:
             "BLACKROCK",
             "BLACKROCK_OFFICIAL",
             "BLACKROCK_PRODUCT_PAGE",
+            "BUSINESS_INSIDER",
+            "MARKETS_INSIDER",
+            "MARKETS_INSIDER_LQD_TRACKING",
+            "FINANZEN",
+            "FINANZEN_NET",
         }
 
     def _bond_snapshot_tracking_status(self, row: Mapping[str, Any]) -> str | None:
@@ -4153,7 +4364,7 @@ class BacktestPlatformService:
         if raw_status:
             return raw_status
         if self._bond_snapshot_asset_type(row) == "BOND_ETF":
-            return "READY" if self._bond_snapshot_has_official_tracking_error(row) else "WATCH"
+            return "READY" if self._bond_snapshot_has_verified_tracking_error(row) else "WATCH"
         return None
 
     def _bond_snapshot_required_fields(self, row: Mapping[str, Any]) -> tuple[str, ...]:
@@ -4195,7 +4406,7 @@ class BacktestPlatformService:
         if field_name == "discount_rate_pct":
             return self._bond_snapshot_value(row, "discount_rate_pct", "discountRatePct", "discount_rate")
         if field_name == "effective_duration":
-            return self._bond_snapshot_value(row, "effective_duration", "effectiveDuration")
+            return self._bond_snapshot_value(row, "effective_duration", "effectiveDuration", "duration")
         if field_name == "sec_yield_30d_pct":
             return self._bond_snapshot_value(row, "sec_yield_30d_pct", "secYield30dPct", "sec_yield_30d")
         if field_name == "credit_quality":
@@ -4250,8 +4461,8 @@ class BacktestPlatformService:
         asset_type = self._bond_snapshot_asset_type(row)
         if profile == "UST_BILL_3M":
             notes.append("Accrued interest is waived for the UST_BILL_3M audit profile.")
-        if asset_type == "BOND_ETF" and not self._bond_snapshot_has_official_tracking_error(row):
-            alerts.append("Official tracking_error_bps is required for BOND_ETF readiness.")
+        if asset_type == "BOND_ETF" and not self._bond_snapshot_has_verified_tracking_error(row):
+            alerts.append("Published tracking_error_bps is required for BOND_ETF readiness.")
         if profile == "UST_CMT_30Y":
             jump_bps = self._bond_snapshot_optional_float(
                 self._bond_snapshot_value(
@@ -4299,7 +4510,7 @@ class BacktestPlatformService:
             value = self._bond_snapshot_field_value(row, field_name)
             if field_name == "accrued_interest" and self._bond_snapshot_profile(row) == "UST_BILL_3M":
                 field_status[field_name] = "WAIVED"
-            elif field_name == "tracking_error_bps" and not self._bond_snapshot_has_official_tracking_error(row):
+            elif field_name == "tracking_error_bps" and not self._bond_snapshot_has_verified_tracking_error(row):
                 field_status[field_name] = "MISSING"
             elif field_name in missing_fields or value is None or value == "":
                 field_status[field_name] = "MISSING"
@@ -4401,6 +4612,7 @@ class BacktestPlatformService:
                 else self._bond_snapshot_field_value(row, "credit_quality")
             ),
             "tracking_error_bps": self._bond_snapshot_tracking_error_bps(row),
+            "tracking_error_source": self._bond_snapshot_tracking_error_source(row),
             "audit_alerts": self._bond_snapshot_unique_texts(raw_alerts, generated_alerts),
             "audit_notes": self._bond_snapshot_unique_texts(raw_notes, generated_notes),
             "tracking_status": self._bond_snapshot_tracking_status(row),
@@ -4520,6 +4732,56 @@ class BacktestPlatformService:
             "current_ref_id": source_ref_id,
             "checked_at": updated_at or iso_now(),
             "alerts": alerts,
+        }
+
+    def _leg_inventory_return_quality_summary(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        leg_kind = str(row.get("leg_type") or "").lower()
+        source_ref_id = str(row.get("source_ref_id") or row.get("id") or "").strip()
+        leg = {
+            "id": str(row.get("id") or source_ref_id),
+            "leg_kind": leg_kind,
+            "source_ref_id": source_ref_id,
+            "source_ref_type": row.get("source_ref_type"),
+            "display_name": row.get("name"),
+            "config": dict(row.get("config") or {}),
+        }
+        try:
+            analysis = self._aligned_leg_return_analysis([leg])
+        except Exception:
+            return {
+                "leg_id": leg["id"],
+                "display_name": str(row.get("name") or source_ref_id or leg["id"]),
+                "leg_kind": leg_kind,
+                "source_ref_id": source_ref_id,
+                "sample_points": 0,
+                "aligned_points": 0,
+                "missing_points": 1 if leg_kind != "cash" else 0,
+                "coverage_pct": 0.0 if leg_kind != "cash" else 100.0,
+                "window_start": None,
+                "window_end": None,
+                "issue_types": [] if leg_kind == "cash" else ["收益样本缺失", "对齐缺口"],
+            }
+        quality = _as_mapping(analysis.get("quality"))
+        for item in quality.get("leg_quality") or []:
+            candidate = _as_mapping(item)
+            if not candidate:
+                continue
+            candidate_ref = str(candidate.get("source_ref_id") or "").strip()
+            candidate_id = str(candidate.get("leg_id") or "").strip()
+            if candidate_ref == source_ref_id or candidate_id == leg["id"]:
+                return dict(candidate)
+        return {
+            "leg_id": leg["id"],
+            "display_name": str(row.get("name") or source_ref_id or leg["id"]),
+            "leg_kind": leg_kind,
+            "source_ref_id": source_ref_id,
+            "sample_points": 0,
+            "aligned_points": 0,
+            "missing_points": 0 if leg_kind == "cash" else 1,
+            "coverage_pct": 100.0 if leg_kind == "cash" else 0.0,
+            "window_start": None,
+            "window_end": None,
+            "issue_types": [] if leg_kind == "cash" else ["收益样本缺失", "对齐缺口"],
         }
 
     def list_leg_inventory(self) -> dict[str, Any]:
@@ -4642,6 +4904,9 @@ class BacktestPlatformService:
                 }
             )
 
+        for row in rows:
+            row["return_quality"] = self._leg_inventory_return_quality_summary(row)
+
         counts = {
             "all": len(rows),
             "strategy": len([row for row in rows if row["leg_type"] == "strategy"]),
@@ -4672,6 +4937,11 @@ class BacktestPlatformService:
                 ],
             },
             "rows": rows,
+            "strategy_reference_counts": {
+                source_ref_id: count
+                for source_ref_id, count in reference_counts.items()
+                if _parse_strategy_leg_inventory_id(source_ref_id) is not None
+            },
         }
 
     def create_asset_leg(self, request: Any) -> dict[str, Any]:
@@ -5044,7 +5314,15 @@ class BacktestPlatformService:
         )
         run_row = self.storage.fetch_one(
             """
-            SELECT id
+            SELECT
+                id,
+                status,
+                preview_json,
+                metrics_json,
+                warnings_json,
+                request_json,
+                chart_series_json,
+                completed_at
             FROM backtest_runs
             WHERE strategy_id = ?
               AND deleted_at IS NULL
@@ -5058,8 +5336,9 @@ class BacktestPlatformService:
             """,
             (strategy_id, parameter_version_id, parameter_version_id),
         )
+        run_summary = self._build_strategy_latest_completed_run_summary(run_row) if run_row else None
         lifecycle_status = str(strategy.get("lifecycle_status") or "ACTIVE").upper()
-        is_orphan = run_row is None
+        is_orphan = run_summary is None
         status = "READY"
         if lifecycle_status == "ARCHIVED":
             status = "ARCHIVED"
@@ -5084,12 +5363,14 @@ class BacktestPlatformService:
             "strategy_id": strategy_id,
             "parameter_version_id": parameter_version_id,
             "parameter_version": version_number,
-            "latest_run_id": run_row.get("id") if run_row else None,
+            "latest_run_id": run_summary.get("run_id") if run_summary else None,
             "strategy_type": strategy_type,
             "universe_name": strategy.get("universe_name"),
             "rebalance_frequency": rebalance_frequency,
             "lifecycle_status": lifecycle_status,
-            "benchmark_symbol": strategy.get("benchmark_symbol"),
+            "annualized_return_pct": _pct_from_fraction(run_summary.get("annualized_return"), 0.0) if run_summary else 0.0,
+            "max_drawdown_pct": abs(_pct_from_fraction(run_summary.get("max_drawdown"), 0.0)) if run_summary else 0.0,
+            "oos_sharpe": _as_float(run_summary.get("oos_sharpe"), 0.0) if run_summary else 0.0,
         }
         source_integrity = self._leg_source_integrity_summary(
             source_ref_id=source_ref_id,
@@ -5116,7 +5397,7 @@ class BacktestPlatformService:
             "leg_type": "strategy",
             "name": str(strategy.get("name") or strategy_id),
             "version_label": f"v{version_number}",
-            "proof_label": f"Latest eligible run {run_row['id']}" if run_row else "No eligible completed run yet",
+            "proof_label": f"Latest eligible run {run_summary['run_id']}" if run_summary else "No eligible completed run yet",
             "reference_count": reference_count,
             "reference_summary": self._reference_summary(reference_count),
             "status": status,
@@ -5382,6 +5663,40 @@ class BacktestPlatformService:
             )
         return self._monthly_returns_from_value_rows(value_rows, "dirty_value")
 
+    def _bond_snapshot_row_uses_inferred_price_proxy(self, row: Mapping[str, Any]) -> bool:
+        inferred_fields = _as_mapping(row.get("inferred_fields"))
+        price_markers = [
+            str(inferred_fields.get(field_name) or "").strip().lower()
+            for field_name in ("clean_price", "net_price", "dirty_price", "full_price")
+        ]
+        if any("par_proxy" in marker or "cmt_proxy" in marker for marker in price_markers):
+            return True
+        raw_payload = self._bond_snapshot_raw_payload(row)
+        proxy_kind = str(raw_payload.get("proxy_kind") or "").strip().upper()
+        return proxy_kind in {
+            "UST_CMT_PROXY",
+            "TIPS_REAL_CMT_PROXY",
+            "OPENBB_UST_CMT_PROXY",
+            "OPENBB_TIPS_REAL_CMT_PROXY",
+        }
+
+    def _bond_snapshot_rows_support_return_history(
+        self,
+        rows: Sequence[Mapping[str, Any]] | Sequence[dict[str, Any]],
+    ) -> bool:
+        month_labels: set[str] = set()
+        real_price_row_count = 0
+        for raw_row in rows:
+            row = _as_mapping(raw_row)
+            label = self._series_month_label(
+                row.get("snapshot_date") or row.get("refreshed_at") or row.get("updated_at")
+            )
+            if label:
+                month_labels.add(label)
+            if not self._bond_snapshot_row_uses_inferred_price_proxy(row):
+                real_price_row_count += 1
+        return len(month_labels) >= 12 and real_price_row_count > 0
+
     def _bond_snapshot_return_rows_for_leg(self, leg: Mapping[str, Any]) -> list[dict[str, Any]]:
         config = dict(leg.get("config") or {})
         snapshot_ref = str(config.get("source_snapshot_id") or "").strip()
@@ -5397,6 +5712,25 @@ class BacktestPlatformService:
             elif symbol and str(row.get("symbol") or "").strip().upper() == symbol:
                 rows.append(row)
         return sorted(rows, key=lambda item: str(item.get("snapshot_date") or item.get("updated_at") or ""))
+
+    def _leg_uses_fixed_income_managed_return_profile(self, leg: Mapping[str, Any]) -> bool:
+        if str(leg.get("leg_kind") or "").lower() != "asset":
+            return False
+        config = dict(leg.get("config") or {})
+        if not self._payload_requires_bond_snapshot_validation(config):
+            return False
+        snapshot_ref = str(config.get("source_snapshot_id") or "").strip()
+        if not self._bond_snapshot_record_by_ref(snapshot_ref):
+            return False
+        price_rows = self._load_price_rows_for_symbol(
+            str(config.get("symbol") or "").strip(),
+            dataset_snapshot_ids=[snapshot_ref],
+        )
+        if self._monthly_returns_from_value_rows(price_rows, "adj_close", "close"):
+            return False
+        return not self._bond_snapshot_rows_support_return_history(
+            self._bond_snapshot_return_rows_for_leg(leg)
+        )
 
     def _monthly_returns_from_return_rows(
         self,
@@ -5522,17 +5856,21 @@ class BacktestPlatformService:
                 benchmark_returns = self._monthly_returns_from_return_rows(chart_series, "benchmark_return")
             return portfolio_returns, benchmark_returns
         if leg_kind == "asset":
-            if self._payload_requires_bond_snapshot_validation(config):
-                bond_period_returns = self._monthly_returns_from_bond_snapshot_rows(
-                    self._bond_snapshot_return_rows_for_leg(leg)
-                )
-                if bond_period_returns:
-                    return bond_period_returns, {}
             price_rows = self._load_price_rows_for_symbol(
                 str(config.get("symbol") or "").strip(),
                 dataset_snapshot_ids=[str(config.get("source_snapshot_id") or "").strip()],
             )
-            return self._monthly_returns_from_value_rows(price_rows, "adj_close", "close"), {}
+            price_returns = self._monthly_returns_from_value_rows(price_rows, "adj_close", "close")
+            if price_returns:
+                return price_returns, {}
+            if self._payload_requires_bond_snapshot_validation(config):
+                bond_rows = self._bond_snapshot_return_rows_for_leg(leg)
+                if self._bond_snapshot_rows_support_return_history(bond_rows):
+                    bond_period_returns = self._monthly_returns_from_bond_snapshot_rows(bond_rows)
+                    if bond_period_returns:
+                        return bond_period_returns, {}
+                return {}, {}
+            return price_returns, {}
         if leg_kind == "cash":
             price_rows = self._load_price_rows_for_symbol(str(config.get("yield_source") or "").strip())
             return self._monthly_returns_from_value_rows(price_rows, "adj_close", "close"), {}
@@ -5614,6 +5952,14 @@ class BacktestPlatformService:
         benchmark_definition: Mapping[str, Any] | None,
         profiles_by_leg_id: Mapping[str, Mapping[str, float]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
+        def uses_managed_profile_stream(leg: Mapping[str, Any], period_map: Mapping[str, Any] | None = None) -> bool:
+            leg_kind = str(leg.get("leg_kind") or "").lower()
+            if leg_kind == "cash":
+                return True
+            if period_map:
+                return False
+            return self._leg_uses_fixed_income_managed_return_profile(leg)
+
         leg_period_maps: list[tuple[Mapping[str, Any], dict[str, dict[str, Any]]]] = []
         strategy_benchmark_maps: list[dict[str, dict[str, Any]]] = []
         dataset_snapshot_ids: list[str] = []
@@ -5649,6 +5995,7 @@ class BacktestPlatformService:
 
         real_leg_ids = {str(leg.get("id") or "") for leg, _period_map in leg_period_maps}
         fallback_point_count = 0
+        managed_profile_point_count = 0
         completed_leg_period_maps: list[tuple[Mapping[str, Any], dict[str, dict[str, Any]]]] = []
         for leg, period_map in leg_period_maps:
             synthetic_map = self._synthetic_leg_period_return_map(
@@ -5656,13 +6003,17 @@ class BacktestPlatformService:
                 ordered_labels,
                 profiles_by_leg_id.get(str(leg.get("id") or ""), {}),
             )
+            managed_profile_stream = uses_managed_profile_stream(leg, period_map)
             completed_map: dict[str, dict[str, Any]] = {}
             for label in ordered_labels:
                 if label in period_map:
                     completed_map[label] = dict(period_map[label])
                 else:
                     completed_map[label] = dict(synthetic_map[label])
-                    fallback_point_count += 1
+                    if managed_profile_stream:
+                        managed_profile_point_count += 1
+                    else:
+                        fallback_point_count += 1
             completed_leg_period_maps.append((leg, completed_map))
         for leg in resolved_legs:
             leg_id = str(leg.get("id") or "")
@@ -5674,7 +6025,10 @@ class BacktestPlatformService:
                 profiles_by_leg_id.get(leg_id, {}),
             )
             completed_leg_period_maps.append((leg, synthetic_map))
-            fallback_point_count += len(ordered_labels)
+            if uses_managed_profile_stream(leg):
+                managed_profile_point_count += len(ordered_labels)
+            else:
+                fallback_point_count += len(ordered_labels)
         leg_period_maps = completed_leg_period_maps
 
         benchmark_symbol = str((benchmark_definition or {}).get("symbol") or "").strip()
@@ -5760,6 +6114,13 @@ class BacktestPlatformService:
                 "Composition preview uses real leg return series where available and profile fallback streams "
                 f"for {fallback_point_count} missing leg periods."
             )
+            if managed_profile_point_count:
+                analytics_note += " Cash and fixed-income snapshot legs use managed return-profile streams."
+        elif managed_profile_point_count:
+            analytics_note = (
+                "Composition preview combines real leg return series with managed return-profile streams "
+                "for cash or fixed-income snapshot legs."
+            )
         elif benchmark_period_map:
             analytics_note = "Composition preview is aggregated from the latest real leg return series."
         else:
@@ -5794,6 +6155,16 @@ class BacktestPlatformService:
         self,
         resolved_legs: Sequence[Mapping[str, Any]],
     ) -> dict[str, Any]:
+        def is_system_cash_leg(leg: Mapping[str, Any]) -> bool:
+            return str(leg.get("leg_kind") or "").lower() == "cash"
+
+        def uses_managed_profile_stream(leg: Mapping[str, Any], period_map: Mapping[str, Any] | None = None) -> bool:
+            if is_system_cash_leg(leg):
+                return True
+            if period_map:
+                return False
+            return self._leg_uses_fixed_income_managed_return_profile(leg)
+
         leg_maps_by_id: dict[str, tuple[Mapping[str, Any], dict[str, dict[str, Any]]]] = {}
         all_labels: set[str] = set()
         for leg in resolved_legs:
@@ -5802,37 +6173,116 @@ class BacktestPlatformService:
                 leg_maps_by_id[str(leg.get("id") or "")] = (leg, period_map)
                 all_labels.update(str(label) for label in period_map)
         if not leg_maps_by_id or not all_labels:
+            fallback_leg_quality: list[dict[str, Any]] = []
+            missing_leg_count = 0
+            managed_profile_leg_count = 0
+            for leg in resolved_legs:
+                managed_profile_stream = uses_managed_profile_stream(leg)
+                if managed_profile_stream:
+                    managed_profile_leg_count += 1
+                leg_missing_points = 0 if managed_profile_stream else 1
+                if leg_missing_points:
+                    missing_leg_count += leg_missing_points
+                covered_sample_points = COMPOSITION_RECENT_WINDOW_MONTHS if managed_profile_stream else 0
+                fallback_leg_quality.append(
+                    {
+                        "leg_id": str(leg.get("id") or ""),
+                        "display_name": str(leg.get("display_name") or leg.get("source_ref_id") or leg.get("id") or "Unnamed leg"),
+                        "leg_kind": str(leg.get("leg_kind") or ""),
+                        "source_ref_id": str(leg.get("source_ref_id") or ""),
+                        "sample_points": covered_sample_points,
+                        "aligned_points": covered_sample_points,
+                        "missing_points": leg_missing_points,
+                        "coverage_pct": 100.0 if managed_profile_stream else 0.0,
+                        "window_start": None,
+                        "window_end": None,
+                        "issue_types": [] if managed_profile_stream else ["收益样本缺失", "对齐缺口"],
+                    }
+                )
+            if missing_leg_count == 0 and managed_profile_leg_count:
+                notes = [
+                    "Managed return-profile legs use deterministic cash or fixed-income snapshot streams; no external sample repair is required."
+                ]
+            elif missing_leg_count == 0:
+                notes = ["System cash legs use deterministic cash-rule returns; no external sample repair is required."]
+            else:
+                notes = ["No aligned leg return stream was available; preview used fallback analytics."]
             return {
                 "labels": [],
                 "vectors": {},
                 "quality": {
-                    "status": "fallback",
+                    "status": "verified" if missing_leg_count == 0 else "fallback",
                     "alignment_window_start": None,
                     "alignment_window_end": None,
                     "aligned_points": 0,
-                    "missing_points": len(resolved_legs),
-                    "coverage_pct": 0.0,
-                    "fallback_used": True,
-                    "notes": ["No aligned leg return stream was available; preview used fallback analytics."],
+                    "missing_points": missing_leg_count,
+                    "coverage_pct": 100.0 if missing_leg_count == 0 else 0.0,
+                    "fallback_used": missing_leg_count > 0,
+                    "notes": notes,
+                    "leg_quality": fallback_leg_quality,
                 },
             }
 
         common_labels = sorted(set.intersection(*(set(period_map) for _leg, period_map in leg_maps_by_id.values())))
         ordered_labels = self._recent_composition_labels(common_labels or all_labels)
         vectors: dict[str, list[float]] = {}
+        leg_quality: list[dict[str, Any]] = []
         missing_points = 0
+        managed_profile_leg_count = 0
         for leg in resolved_legs:
             leg_id = str(leg.get("id") or "")
             period_map = dict((leg_maps_by_id.get(leg_id) or (leg, {}))[1])
             synthetic_map = self._synthetic_leg_period_return_map(leg, ordered_labels)
+            managed_profile_stream = uses_managed_profile_stream(leg, period_map)
+            if managed_profile_stream:
+                managed_profile_leg_count += 1
             values: list[float] = []
+            leg_missing_points = 0
+            leg_aligned_points = 0
             for label in ordered_labels:
                 if label not in period_map:
-                    missing_points += 1
+                    if managed_profile_stream:
+                        leg_aligned_points += 1
+                    else:
+                        leg_missing_points += 1
                     values.append(_as_float(synthetic_map.get(label, {}).get("return"), 0.0))
                 else:
+                    leg_aligned_points += 1
                     values.append(_as_float(period_map[label].get("return"), 0.0))
             vectors[leg_id] = values
+            missing_points += leg_missing_points
+            real_labels = sorted(str(label) for label in period_map)
+            sample_points = len(real_labels)
+            window_start = real_labels[0] if real_labels else None
+            window_end = real_labels[-1] if real_labels else None
+            if managed_profile_stream and ordered_labels:
+                sample_points = len(ordered_labels)
+                window_start = real_labels[0] if real_labels else ordered_labels[0]
+                window_end = real_labels[-1] if real_labels else ordered_labels[-1]
+            issue_types: list[str] = []
+            if not managed_profile_stream:
+                if len(real_labels) <= 0:
+                    issue_types.append("收益样本缺失")
+                elif len(real_labels) < 120:
+                    issue_types.append("收益样本不足")
+                if leg_missing_points > 0:
+                    issue_types.append("对齐缺口")
+            possible_leg_points = max(len(ordered_labels), 1)
+            leg_quality.append(
+                {
+                    "leg_id": leg_id,
+                    "display_name": str(leg.get("display_name") or leg.get("source_ref_id") or leg_id or "Unnamed leg"),
+                    "leg_kind": str(leg.get("leg_kind") or ""),
+                    "source_ref_id": str(leg.get("source_ref_id") or ""),
+                    "sample_points": sample_points,
+                    "aligned_points": leg_aligned_points,
+                    "missing_points": leg_missing_points,
+                    "coverage_pct": round(100.0 * leg_aligned_points / possible_leg_points, 2),
+                    "window_start": window_start,
+                    "window_end": window_end,
+                    "issue_types": issue_types,
+                }
+            )
 
         possible_points = max(len(ordered_labels) * max(len(resolved_legs), 1), 1)
         coverage_pct = round(max(0.0, 100.0 * (possible_points - missing_points) / possible_points), 2)
@@ -5842,6 +6292,10 @@ class BacktestPlatformService:
         ]
         if missing_points:
             notes.append(f"{missing_points} missing leg periods used profile fallback streams.")
+        if managed_profile_leg_count:
+            notes.append(
+                "Managed return-profile streams covered cash or fixed-income snapshot legs without external sample repair."
+            )
         return {
             "labels": ordered_labels,
             "vectors": vectors,
@@ -5854,6 +6308,7 @@ class BacktestPlatformService:
                 "coverage_pct": coverage_pct,
                 "fallback_used": missing_points > 0,
                 "notes": notes,
+                "leg_quality": leg_quality,
             },
         }
 
@@ -6244,6 +6699,7 @@ class BacktestPlatformService:
         version_source: str | None = None,
         version_candidate_id: str | None = None,
         version_candidate_label: str | None = None,
+        audit_action: str | None = None,
     ) -> dict[str, Any]:
         event_id = self._new_id("composition_audit")
         summary_payload: dict[str, Any] = {"summary": summary}
@@ -7637,6 +8093,7 @@ class BacktestPlatformService:
         version_source: str | None = None,
         version_candidate_id: str | None = None,
         version_candidate_label: str | None = None,
+        audit_action: str | None = None,
     ) -> dict[str, Any]:
         normalized_legs = list(preview_payload.get("normalized_legs", []))
         current_record = self.storage.fetch_one("SELECT * FROM compositions WHERE id = ?", (composition_id,))
@@ -7890,7 +8347,7 @@ class BacktestPlatformService:
                         conn,
                         composition_id=composition_id,
                         revision=revision,
-                        action="structure_patch",
+                        action=audit_action or "structure_patch",
                         occurred_at=updated_at,
                         summary=version_summary,
                         hash_before=previous_hash,
@@ -8050,6 +8507,9 @@ class BacktestPlatformService:
             analysis_with_integrity = dict(analysis)
             analysis_with_integrity["id"] = composition_id
             analysis_with_integrity["source_integrity"] = source_integrity
+            analysis_with_integrity = self._composition_refresh_return_quality_summary(
+                analysis_with_integrity
+            )
             diagnoses = self._composition_status_diagnoses(
                 analysis_with_integrity,
                 composition_id=composition_id,
@@ -8165,8 +8625,61 @@ class BacktestPlatformService:
             )
         return items
 
+    def _composition_refresh_return_quality_summary(
+        self,
+        detail_payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        refreshed = dict(detail_payload)
+        current_quality = _as_mapping(refreshed.get("return_quality_summary"))
+        has_leg_quality = bool(current_quality.get("leg_quality"))
+        quality_is_current = (
+            has_leg_quality
+            and _as_int(current_quality.get("missing_points"), 0) <= 0
+            and not bool(current_quality.get("fallback_used"))
+        )
+        if quality_is_current:
+            return refreshed
+        normalized_legs = [
+            item
+            for item in refreshed.get("normalized_legs") or []
+            if isinstance(item, Mapping)
+        ]
+        if not normalized_legs:
+            return refreshed
+        try:
+            aligned_analysis = self._aligned_leg_return_analysis(normalized_legs)
+            next_quality = _as_mapping(aligned_analysis.get("quality"))
+        except Exception:
+            return refreshed
+        if not next_quality:
+            return refreshed
+        refreshed["return_quality_summary"] = {
+            **current_quality,
+            **next_quality,
+        }
+        return refreshed
+
     def get_composition_detail(self, composition_id: str) -> dict[str, Any]:
         row = self._load_composition_record(composition_id)
+        cache_signature = "|".join(
+            [
+                str(row.get("updated_at") or ""),
+                str(row.get("revision") or ""),
+                str(row.get("current_freeze_generation") or ""),
+                str(row.get("status") or ""),
+            ]
+        )
+        cache_key = str(composition_id)
+        if self._composition_detail_cache_seconds > 0:
+            now_monotonic = time.monotonic()
+            with self._composition_detail_cache_lock:
+                cached = self._composition_detail_cache.get(cache_key)
+                if (
+                    cached is not None
+                    and cached[1] == cache_signature
+                    and now_monotonic - cached[0] <= self._composition_detail_cache_seconds
+                ):
+                    return deepcopy(cached[2])
         detail_payload = loads(row.get("analysis_json"), {})
         latest_version_number = self._latest_composition_version_number(composition_id)
         version_number = (
@@ -8342,14 +8855,82 @@ class BacktestPlatformService:
                 detail_payload["hero_summary"] = hero_summary
         detail_payload["current_composition_version_number"] = version_number
         detail_payload["current_composition_version_label"] = current_version_label
+        detail_payload["backtest_history"] = self._composition_backtest_history_for_detail(composition_id)
         hero_summary = dict(detail_payload.get("hero_summary") or {})
         if hero_summary:
             hero_summary["current_composition_version_label"] = current_version_label
             detail_payload["hero_summary"] = hero_summary
+        quality = _as_mapping(detail_payload.get("return_quality_summary"))
+        if not quality.get("leg_quality"):
+            try:
+                aligned_analysis = self._aligned_leg_return_analysis(detail_payload.get("normalized_legs") or [])
+                refreshed_quality = _as_mapping(aligned_analysis.get("quality"))
+                leg_quality = [
+                    dict(item)
+                    for item in refreshed_quality.get("leg_quality") or []
+                    if isinstance(item, Mapping)
+                ]
+            except Exception:
+                leg_quality = []
+            if leg_quality:
+                detail_payload["return_quality_summary"] = {
+                    **quality,
+                    "leg_quality": leg_quality,
+                }
+        detail_payload = self._composition_refresh_return_quality_summary(detail_payload)
         detail_payload = self._composition_attach_diagnoses(
             detail_payload,
             composition_id=composition_id,
         )
+        current_list_status = self._composition_current_list_status(composition_id)
+        if isinstance(current_list_status, Mapping):
+            list_diagnoses = [
+                dict(item)
+                for item in current_list_status.get("diagnoses") or []
+                if isinstance(item, Mapping)
+            ]
+            list_primary = current_list_status.get("primary_diagnosis") or (list_diagnoses[0] if list_diagnoses else None)
+            if isinstance(list_primary, Mapping):
+                primary = dict(list_primary)
+                list_debug_facts = _as_mapping(primary.get("debug_facts"))
+                quality = dict(detail_payload.get("return_quality_summary") or {})
+                list_leg_quality = [
+                    dict(item)
+                    for item in (list_debug_facts.get("leg_quality") or [])
+                    if isinstance(item, Mapping)
+                ]
+                if list_leg_quality and not quality.get("leg_quality"):
+                    quality["leg_quality"] = list_leg_quality
+                    detail_payload["return_quality_summary"] = quality
+                if list_leg_quality:
+                    debug_facts = {**list_debug_facts, "leg_quality": list_leg_quality}
+                    debug_facts.setdefault(
+                        "sample_short_legs",
+                        [
+                            str(item.get("display_name") or item.get("leg_id") or "")
+                            for item in list_leg_quality
+                            if "收益样本不足" in (item.get("issue_types") or [])
+                            or "收益样本缺失" in (item.get("issue_types") or [])
+                        ],
+                    )
+                    debug_facts.setdefault(
+                        "alignment_gap_legs",
+                        [
+                            str(item.get("display_name") or item.get("leg_id") or "")
+                            for item in list_leg_quality
+                            if "对齐缺口" in (item.get("issue_types") or [])
+                        ],
+                    )
+                    primary["debug_facts"] = debug_facts
+                detail_payload["primary_diagnosis"] = primary
+                detail_payload["diagnoses"] = list_diagnoses or [primary]
+        if self._composition_detail_cache_seconds > 0:
+            with self._composition_detail_cache_lock:
+                self._composition_detail_cache[cache_key] = (
+                    time.monotonic(),
+                    cache_signature,
+                    deepcopy(detail_payload),
+                )
         return detail_payload
 
     def refresh_composition_diagnostics(self, composition_id: str) -> dict[str, Any]:
@@ -8389,6 +8970,58 @@ class BacktestPlatformService:
                 (dumps(detail_payload), revision, updated_at, composition_id),
             )
         return detail_payload
+
+    def refresh_composition_source_freezes(self, composition_id: str, request: Any) -> dict[str, Any]:
+        row = self._load_composition_record(composition_id)
+        payload = _as_mapping(request)
+        existing_leg_rows = self._load_composition_leg_rows(composition_id)
+        benchmark_definition = self._normalize_composition_benchmark_definition(
+            loads(row.get("benchmark_definition_json"), {})
+        )
+        cost_policy = self._normalize_composition_cost_policy(loads(row.get("cost_policy_json"), {}))
+        rebalance_frequency = str(row.get("rebalance_frequency") or "quarterly").strip().lower() or "quarterly"
+        preview_payload = self._build_composition_preview_payload(
+            {
+                "name": str(row.get("name") or ""),
+                "description": str(row.get("description") or "").strip() or None,
+                "benchmark_definition": benchmark_definition,
+                "rebalance_frequency": rebalance_frequency,
+                "cost_policy": cost_policy,
+                "legs": [
+                    {
+                        "leg_kind": str(leg_row.get("leg_kind") or ""),
+                        "source_ref_id": str(leg_row.get("source_ref_id") or ""),
+                        "source_ref_type": str(leg_row.get("source_ref_type") or ""),
+                        "weight_pct": round(_as_float(leg_row.get("weight_pct"), 0.0), 4),
+                        "weight_locked": bool(int(leg_row.get("weight_locked") or 0)),
+                        "ordering": int(leg_row.get("ordering") or index),
+                    }
+                    for index, leg_row in enumerate(existing_leg_rows, start=1)
+                ],
+            }
+        )
+        self._validate_composition_save_payload(preview_payload)
+        reason = str(payload.get("reason") or "").strip()
+        if not reason:
+            reason = "Operator reviewed the current source fingerprints and accepted them as the new frozen evidence."
+        confirmed_by = str(payload.get("confirmed_by") or "operator").strip() or "operator"
+        return self._persist_composition(
+            composition_id=composition_id,
+            name=str(row.get("name") or ""),
+            description=str(row.get("description") or "").strip() or None,
+            status=self._normalize_composition_status(row.get("status"), default="DRAFT"),
+            benchmark_definition=benchmark_definition,
+            rebalance_frequency=rebalance_frequency,
+            cost_policy=cost_policy,
+            preview_payload=preview_payload,
+            created_at=str(row.get("created_at") or iso_now()),
+            updated_at=iso_now(),
+            existing_leg_rows=existing_leg_rows,
+            version_reason=reason,
+            version_change_summary=f"{confirmed_by} reviewed current source fingerprints and refreshed frozen source evidence without changing composition weights.",
+            version_source="source_freeze_refresh",
+            audit_action="source_refreeze",
+        )
 
     def confirm_composition_proxy(self, composition_id: str, request: Any) -> dict[str, Any]:
         self._load_composition_record(composition_id)
@@ -8748,6 +9381,8 @@ class BacktestPlatformService:
             "description",
             "status",
             "status_label",
+            "current_composition_version_label",
+            "current_composition_version_number",
             "created_at",
             "updated_at",
             "benchmark_definition",
@@ -8984,8 +9619,7 @@ class BacktestPlatformService:
         composition_id: str | None = None,
     ) -> list[dict[str, Any]]:
         quality = _as_mapping(detail.get("return_quality_summary"))
-        if not bool(quality.get("fallback_used")):
-            return []
+        fallback_used = bool(quality.get("fallback_used"))
         horizon_label = (
             str(quality.get("alignment_window_start") or "")
             + ":"
@@ -9050,6 +9684,8 @@ class BacktestPlatformService:
             for context in contexts:
                 unique_contexts.setdefault(str(context.get("proxy_signature") or ""), context)
             return list(unique_contexts.values())
+        if not fallback_used:
+            return []
         notes = " ".join(str(item) for item in quality.get("notes") or []).lower()
         if "proxy" not in notes and "fallback" not in notes and "filled" not in notes and "代理" not in notes:
             return []
@@ -9147,6 +9783,24 @@ class BacktestPlatformService:
             "fallback_used": fallback_used,
             "source_integrity_count": len(source_integrity),
         }
+        leg_quality = [
+            dict(item)
+            for item in quality.get("leg_quality") or []
+            if isinstance(item, Mapping)
+        ]
+        if leg_quality:
+            debug_facts["leg_quality"] = leg_quality
+            debug_facts["sample_short_legs"] = [
+                str(item.get("display_name") or item.get("leg_id") or "")
+                for item in leg_quality
+                if "收益样本不足" in (item.get("issue_types") or [])
+                or "收益样本缺失" in (item.get("issue_types") or [])
+            ]
+            debug_facts["alignment_gap_legs"] = [
+                str(item.get("display_name") or item.get("leg_id") or "")
+                for item in leg_quality
+                if "对齐缺口" in (item.get("issue_types") or [])
+            ]
 
         diagnoses: list[dict[str, Any]] = []
         if fallback_used and aligned_points <= 0:
@@ -9240,16 +9894,70 @@ class BacktestPlatformService:
                         debug_facts=debug_facts,
                     )
                 )
+        elif resolved_system_proxy:
+            diagnoses.append(
+                self._composition_status_diagnosis(
+                    status="稳健",
+                    issue_type="系统代理覆盖",
+                    diagnosis_type="system_proxy_coverage",
+                    frontend_explanation="当前使用的是平台已登记的代理关系，例如用指数历史补足 ETF 早期数据。",
+                    action="查看代理来源和覆盖区间。",
+                    resolution_criteria="系统代理关系有效，不触发待办。",
+                    actions=[self._composition_status_action("查看代理来源", "inspect_proxy_coverage", action_kind="inspect")],
+                    proxy_context=resolved_system_proxy,
+                    debug_facts=debug_facts,
+                )
+            )
+        elif resolved_user_proxy:
+            diagnoses.append(
+                self._composition_status_diagnosis(
+                    status="稳健",
+                    issue_type="人工确认代理覆盖",
+                    diagnosis_type="user_proxy_coverage",
+                    frontend_explanation="当前代理关系已由用户确认，且代理方案未变化。",
+                    action="查看确认记录。",
+                    resolution_criteria="同一代理方案不再提醒。",
+                    actions=[self._composition_status_action("查看确认记录", "inspect_proxy_confirmation", action_kind="inspect")],
+                    proxy_context=resolved_user_proxy,
+                    debug_facts=debug_facts,
+                )
+            )
         if aligned_points > 0 and aligned_points < 120:
+            backtest_config_route = (
+                f"/compositions/{composition_id}/backtest-runs/new"
+                if composition_id
+                else "/compositions/list"
+            )
+            workbench_route = f"/compositions/workbench?composition_id={composition_id or ''}"
+            aligned_years = round(aligned_points / 12.0, 1)
+            gap_phrase = (
+                f"，另有 {missing_points} 个对齐缺口需要通过来源修复、代理确认或缺失规则处理"
+                if missing_points > 0
+                else ""
+            )
             diagnoses.append(
                 self._composition_status_diagnosis(
                     status="待校准",
-                    issue_type="样本久期不足",
-                    diagnosis_type="sample_duration_short",
-                    frontend_explanation="可用历史样本不足 10 年，统计结论稳定性有限。",
-                    action="打开回测配置，补足或选择合适周期。",
-                    resolution_criteria="历史样本达到 120 个月以上。",
-                    actions=[self._composition_status_action("打开回测配置", "open_backtest_config", route=f"/compositions/{composition_id or ''}")],
+                    issue_type="收益样本窗口不足",
+                    diagnosis_type="return_sample_window_short",
+                    frontend_explanation=(
+                        f"当前组合可对齐的月度收益样本只有 {aligned_points} 个月"
+                        f"（约 {aligned_years:g} 年），低于 10 年验证门槛 120 个月{gap_phrase}。"
+                    ),
+                    action="回组合工作台替换或补齐更长历史来源；短窗口回测只用于复核，不是补足样本。",
+                    resolution_criteria="组合月度收益样本达到 120 个月以上；短窗口回测只能作为待校准复核，不会关闭该状态。",
+                    actions=[
+                        self._composition_status_action(
+                            "调整来源样本",
+                            "open_composition_workbench",
+                            route=workbench_route,
+                        ),
+                        self._composition_status_action(
+                            "按短样本配置回测",
+                            "open_backtest_config",
+                            route=backtest_config_route,
+                        )
+                    ],
                     debug_facts=debug_facts,
                 )
             )
@@ -9344,9 +10052,25 @@ class BacktestPlatformService:
                         issue_type="逻辑一致性漂移",
                         diagnosis_type="source_logic_drift",
                         frontend_explanation="当前来源内容和保存时冻结记录不一致。",
-                        action="审计漂移来源，重新冻结或回滚。",
-                        resolution_criteria="漂移已确认并处理。",
-                        actions=[self._composition_status_action("查看来源证据", "inspect_source_evidence", action_kind="inspect")],
+                        action="先查看来源证据；确认当前来源正确后重新冻结，否则回工作台回滚或替换来源。",
+                        resolution_criteria="当前来源指纹已重新冻结，或组合已回滚到冻结记录。",
+                        actions=[
+                            self._composition_status_action(
+                                "确认并重新冻结来源指纹",
+                                "refresh_source_freezes",
+                                action_kind="execute",
+                            ),
+                            self._composition_status_action(
+                                "查看来源证据",
+                                "inspect_source_evidence",
+                                route=f"/compositions/{composition_id or ''}",
+                            ),
+                            self._composition_status_action(
+                                "打开组合工作台",
+                                "open_composition_workbench",
+                                route=f"/compositions/workbench?composition_id={composition_id or ''}",
+                            ),
+                        ],
                         debug_facts={**debug_facts, "source_ref_id": source_ref_id},
                     )
                 )
@@ -9387,7 +10111,7 @@ class BacktestPlatformService:
             "收益序列不连续": 1,
             "异常降级补值": 2,
             "代理覆盖待确认": 3,
-            "样本久期不足": 4,
+            "收益样本窗口不足": 4,
         }
         deduped: dict[tuple[str, str], dict[str, Any]] = {}
         for item in sorted(diagnoses, key=lambda value: (rank.get(str(value.get("status")), 9), issue_rank.get(str(value.get("issue_type")), 50))):
@@ -9543,6 +10267,47 @@ class BacktestPlatformService:
             "required_steps": ["diff_review", "constraint_check", "migration_cost_review", "evidence_gate"],
         }
 
+    def _composition_promotion_readiness_from_status(
+        self,
+        diagnoses: Sequence[Mapping[str, Any]],
+        *,
+        evidence_grade: str | None = None,
+        candidate: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        failed_diagnoses = [item for item in diagnoses if item.get("status") == "失效"]
+        violations = [
+            dict(item)
+            for item in _as_mapping(candidate or {}).get("constraint_violations") or []
+            if isinstance(item, Mapping)
+        ]
+        metrics = _as_mapping(_as_mapping(candidate or {}).get("metrics"))
+        migration_cost_bps = round(_as_float(metrics.get("estimated_turnover_pct"), 0.0) * 0.1, 4)
+        blockers: list[str] = []
+        if failed_diagnoses:
+            blockers.append("unresolved_failed_status")
+        if violations:
+            blockers.append("constraint_violations")
+        return {
+            "status": "blocked" if blockers else "ready",
+            "evidence_grade": evidence_grade or ("C" if failed_diagnoses else "B"),
+            "primary_diagnosis": dict(diagnoses[0]) if diagnoses else None,
+            "diagnoses": [dict(item) for item in diagnoses],
+            "system_disposition": "存在未关闭的失效问题，晋升门禁已暂停。" if failed_diagnoses else None,
+            "migration_cost_bps": migration_cost_bps,
+            "policy_violations": violations,
+            "blockers": blockers,
+            "required_steps": ["diff_review", "constraint_check", "migration_cost_review", "evidence_gate"],
+        }
+
+    def _composition_current_list_status(self, composition_id: str) -> dict[str, Any] | None:
+        try:
+            for item in self.list_compositions():
+                if str(item.get("id") or "") == composition_id:
+                    return item
+        except Exception:
+            return None
+        return None
+
     @staticmethod
     def _composition_decode_run_row(row: Mapping[str, Any]) -> dict[str, Any]:
         payload = loads(row.get("result_json"), {})
@@ -9556,6 +10321,351 @@ class BacktestPlatformService:
         decoded.setdefault("created_at", str(row.get("created_at") or ""))
         decoded.setdefault("completed_at", row.get("completed_at"))
         return decoded
+
+    @staticmethod
+    def _composition_version_label_from_run(payload: Mapping[str, Any]) -> str | None:
+        sources = (
+            payload,
+            _as_mapping(payload.get("request")),
+            _as_mapping(payload.get("summary")),
+            _as_mapping(payload.get("evidence")).get("frozen_config"),
+        )
+        for source in sources:
+            if not isinstance(source, Mapping):
+                continue
+            for key in ("composition_version_label", "current_composition_version_label", "composition_version"):
+                text = str(source.get(key) or "").strip()
+                if text:
+                    return text
+            number = _as_int(
+                source.get("composition_version_number")
+                or source.get("current_composition_version_number"),
+                0,
+            )
+            if number > 0:
+                return f"组合配置 v{number}"
+        return None
+
+    @staticmethod
+    def _composition_version_number_from_run(payload: Mapping[str, Any]) -> int | None:
+        sources = (
+            payload,
+            _as_mapping(payload.get("request")),
+            _as_mapping(payload.get("summary")),
+            _as_mapping(payload.get("evidence")).get("frozen_config"),
+        )
+        for source in sources:
+            if not isinstance(source, Mapping):
+                continue
+            number = _as_int(
+                source.get("composition_version_number")
+                or source.get("current_composition_version_number"),
+                0,
+            )
+            if number > 0:
+                return number
+        return None
+
+    @staticmethod
+    def _composition_version_timestamp(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    def _composition_freeze_generation_from_run_sources(
+        self,
+        composition_id: str,
+        payload: Mapping[str, Any],
+        run_created_at: datetime | None,
+    ) -> int | None:
+        freeze_hashes: list[str] = []
+        for collection in (
+            payload.get("source_integrity"),
+            payload.get("source_evidence"),
+        ):
+            if not isinstance(collection, Sequence) or isinstance(collection, (str, bytes, bytearray)):
+                continue
+            for item in collection:
+                if not isinstance(item, Mapping):
+                    continue
+                freeze_hash = str(item.get("freeze_hash") or "").strip()
+                if freeze_hash and freeze_hash not in freeze_hashes:
+                    freeze_hashes.append(freeze_hash)
+        if not freeze_hashes:
+            return None
+        placeholders = ", ".join("?" for _ in freeze_hashes)
+        rows = self.storage.fetch_all(
+            f"""
+            SELECT freeze_generation, freeze_hash, created_at
+            FROM composition_source_freezes
+            WHERE composition_id = ?
+              AND freeze_hash IN ({placeholders})
+            ORDER BY freeze_generation DESC, created_at DESC
+            """,
+            (composition_id, *freeze_hashes),
+        )
+        matched_by_generation: dict[int, set[str]] = {}
+        for row in rows:
+            row_created_at = self._composition_version_timestamp(row.get("created_at"))
+            if run_created_at is not None and row_created_at is not None and row_created_at > run_created_at:
+                continue
+            generation = _as_int(row.get("freeze_generation"), 0)
+            freeze_hash = str(row.get("freeze_hash") or "").strip()
+            if generation > 0 and freeze_hash:
+                matched_by_generation.setdefault(generation, set()).add(freeze_hash)
+        if not matched_by_generation:
+            return None
+        return max(
+            matched_by_generation,
+            key=lambda generation: (len(matched_by_generation[generation]), generation),
+        )
+
+    @staticmethod
+    def _composition_version_number_from_run_audit(payload: Mapping[str, Any]) -> int | None:
+        source_freeze_count = 0
+        explicit_version = 0
+        for item in payload.get("audit_trail") or []:
+            if not isinstance(item, Mapping):
+                continue
+            action = str(item.get("action") or "").strip().lower()
+            if action == "source_freeze":
+                source_freeze_count += 1
+            summary = item.get("summary") if isinstance(item.get("summary"), Mapping) else {}
+            explicit_version = max(
+                explicit_version,
+                _as_int(item.get("version_after"), 0),
+                _as_int(summary.get("version_after"), 0),
+            )
+        version_number = explicit_version or source_freeze_count
+        return version_number if version_number > 0 else None
+
+    def _composition_version_at_run(
+        self,
+        composition_id: str,
+        payload: Mapping[str, Any],
+        row: Mapping[str, Any],
+    ) -> tuple[str | None, int | None]:
+        label = self._composition_version_label_from_run(payload)
+        number = self._composition_version_number_from_run(payload)
+        if label:
+            return label, number
+        frozen_config = _as_mapping(_as_mapping(payload.get("evidence")).get("frozen_config"))
+        run_created_at = (
+            self._composition_version_timestamp(frozen_config.get("composition_updated_at"))
+            or self._composition_version_timestamp(payload.get("created_at"))
+            or self._composition_version_timestamp(row.get("created_at"))
+        )
+        freeze_generation = self._composition_freeze_generation_from_run_sources(
+            composition_id,
+            payload,
+            run_created_at,
+        )
+        if freeze_generation:
+            return f"当前配置版本 v{freeze_generation}", freeze_generation
+        audit_version = self._composition_version_number_from_run_audit(payload)
+        if audit_version:
+            return f"当前配置版本 v{audit_version}", audit_version
+        if run_created_at is None:
+            return None, number
+
+        version_rows = self.storage.fetch_all(
+            """
+            SELECT version_number, created_at
+            FROM composition_versions
+            WHERE composition_id = ?
+              AND deleted_at IS NULL
+            ORDER BY version_number DESC, created_at DESC
+            """,
+            (composition_id,),
+        )
+        for version_row in version_rows:
+            version_created_at = self._composition_version_timestamp(version_row.get("created_at"))
+            version_number = _as_int(version_row.get("version_number"), 0)
+            if version_created_at is not None and version_created_at <= run_created_at and version_number > 0:
+                return f"当前配置版本 v{version_number}", version_number
+
+        freeze_rows = self.storage.fetch_all(
+            """
+            SELECT freeze_generation, created_at
+            FROM composition_source_freezes
+            WHERE composition_id = ?
+            ORDER BY freeze_generation DESC, created_at DESC
+            """,
+            (composition_id,),
+        )
+        for freeze_row in freeze_rows:
+            freeze_created_at = self._composition_version_timestamp(freeze_row.get("created_at"))
+            freeze_generation = _as_int(freeze_row.get("freeze_generation"), 0)
+            if freeze_created_at is not None and freeze_created_at <= run_created_at and freeze_generation > 0:
+                return f"当前配置版本 v{freeze_generation}", freeze_generation
+        return None, number
+
+    @staticmethod
+    def _strategy_version_label_from_parameter_id(parameter_version_id: Any) -> str | None:
+        text = str(parameter_version_id or "").strip()
+        if not text:
+            return None
+        tail = text.rsplit("-", 1)[-1].strip()
+        if tail.lower().startswith("v") and tail[1:].isdigit():
+            return f"v{tail[1:]}"
+        return text
+
+    @staticmethod
+    def _composition_strategy_versions_from_run(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+        versions: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in payload.get("source_integrity") or []:
+            if not isinstance(item, Mapping):
+                continue
+            source_ref_id = str(item.get("source_ref_id") or item.get("leg_id") or "").strip()
+            parsed = _parse_strategy_leg_inventory_id(source_ref_id)
+            if parsed is None or source_ref_id in seen:
+                continue
+            strategy_id, parameter_version_id = parsed
+            version_label = (
+                str(item.get("version_label") or "").strip()
+                or BacktestPlatformService._strategy_version_label_from_parameter_id(parameter_version_id)
+            )
+            display_name = _strip_strategy_version_suffix(item.get("display_name")) or strategy_id
+            versions.append(
+                {
+                    "strategy_id": strategy_id,
+                    "parameter_version_id": parameter_version_id,
+                    "version_label": version_label,
+                    "display_name": display_name,
+                    "source_ref_id": source_ref_id,
+                }
+            )
+            seen.add(source_ref_id)
+        return versions
+
+    def _composition_backtest_history_for_detail(self, composition_id: str, limit: int = 3) -> list[dict[str, Any]]:
+        rows = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM composition_backtest_runs
+            WHERE composition_id = ?
+              AND deleted_at IS NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (composition_id, limit),
+        )
+        history: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._composition_decode_run_row(row)
+            summary = _as_mapping(payload.get("summary"))
+            request = _as_mapping(payload.get("request"))
+            composition_version_label, composition_version_number = self._composition_version_at_run(
+                composition_id,
+                payload,
+                row,
+            )
+            strategy_versions = self._composition_strategy_versions_from_run(payload)
+            strategy_version_label = " / ".join(
+                f"{item.get('display_name')} {item.get('version_label')}".strip()
+                for item in strategy_versions
+                if item.get("version_label")
+            )
+            horizon_years = _as_float(
+                summary.get("horizon_years")
+                or request.get("horizon_years")
+                or payload.get("horizon_years"),
+                0.0,
+            )
+            period_label = str(request.get("period") or "").strip()
+            if not period_label and horizon_years > 0:
+                period_label = f"{int(round(horizon_years))}Y"
+            history.append(
+                {
+                    "run_id": str(payload.get("run_id") or payload.get("id") or row.get("id") or ""),
+                    "created_at": str(payload.get("created_at") or row.get("created_at") or ""),
+                    "completed_at": payload.get("completed_at") or row.get("completed_at"),
+                    "composition_version_label": composition_version_label,
+                    "composition_version_number": composition_version_number,
+                    "strategy_version_label": strategy_version_label or None,
+                    "strategy_versions": strategy_versions,
+                    "period_label": period_label or None,
+                    "horizon_years": horizon_years or None,
+                    "annualized_return": summary.get("annualized_return"),
+                    "sharpe": summary.get("sharpe"),
+                }
+            )
+        return history
+
+    def _composition_overlay_current_status(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        refresh_candidates: bool = False,
+    ) -> dict[str, Any]:
+        enriched = dict(payload)
+        composition_id = str(enriched.get("composition_id") or "").strip()
+        if not composition_id:
+            return enriched
+        try:
+            detail = self.get_composition_detail(composition_id)
+        except Exception:
+            return enriched
+        diagnoses = list(
+            detail.get("diagnoses")
+            or []
+        )
+        primary_diagnosis = (
+            detail.get("primary_diagnosis")
+            or (diagnoses[0] if diagnoses else None)
+        )
+        if not enriched.get("return_quality_summary"):
+            enriched["return_quality_summary"] = dict(detail.get("return_quality_summary") or {})
+        if not enriched.get("source_integrity"):
+            enriched["source_integrity"] = list(detail.get("source_integrity") or [])
+        enriched["audit_trail"] = list(detail.get("audit_trail") or enriched.get("audit_trail") or [])
+        enriched["evidence_grade"] = self._composition_evidence_grade_from_detail(detail)
+        enriched["promotion_readiness"] = self._composition_promotion_readiness_from_status(
+            diagnoses,
+            evidence_grade=enriched.get("evidence_grade"),
+        )
+        enriched["primary_diagnosis"] = primary_diagnosis
+        enriched["diagnoses"] = diagnoses
+        if "summary" in enriched and isinstance(enriched.get("summary"), Mapping):
+            summary = dict(enriched.get("summary") or {})
+            summary["composition_name"] = str(detail.get("name") or summary.get("composition_name") or "")
+            enriched["summary"] = summary
+        if not refresh_candidates:
+            return enriched
+        candidates: list[dict[str, Any]] = []
+        for raw_candidate in enriched.get("candidates") or []:
+            if not isinstance(raw_candidate, Mapping):
+                continue
+            candidate = self._normalize_composition_allocation_candidate_actions(raw_candidate)
+            candidate_id = str(candidate.get("id") or "")
+            if candidate_id in {"current", "benchmark"}:
+                candidate["promotion_readiness"] = {
+                    "status": "reference",
+                    "evidence_grade": enriched.get("evidence_grade"),
+                    "primary_diagnosis": primary_diagnosis,
+                    "diagnoses": diagnoses,
+                    "migration_cost_bps": 0.0,
+                    "policy_violations": [],
+                    "blockers": ["reference_candidate"],
+                    "required_steps": [],
+                }
+                candidate["allowed_actions"] = []
+            else:
+                readiness = self._composition_promotion_readiness_from_status(
+                    diagnoses,
+                    evidence_grade=enriched.get("evidence_grade"),
+                    candidate=candidate,
+                )
+                candidate["promotion_readiness"] = readiness
+                candidate["allowed_actions"] = ["promote_candidate"] if readiness.get("status") == "ready" else []
+            candidates.append(candidate)
+        enriched["candidates"] = candidates
+        return enriched
 
     @staticmethod
     def _normalize_composition_allocation_candidate_actions(candidate: Any) -> dict[str, Any]:
@@ -9696,7 +10806,7 @@ class BacktestPlatformService:
             (run_id, composition_id),
         )
         if row:
-            return self._composition_decode_run_row(row)
+            return self._composition_overlay_current_status(self._composition_decode_run_row(row))
         state = self._composition_load_artifact_state(
             kind="backtest_run",
             composition_id=composition_id,
@@ -9752,12 +10862,16 @@ class BacktestPlatformService:
             "id": run_id,
             "run_id": run_id,
             "composition_id": composition_id,
+            "current_composition_version_label": detail.get("current_composition_version_label"),
+            "current_composition_version_number": detail.get("current_composition_version_number"),
             "status": status,
             "created_at": str(state.get("created_at") or ""),
             "completed_at": state.get("completed_at") or state.get("created_at"),
             "request": dict(state.get("request") or {}),
             "summary": {
                 "composition_name": str(detail.get("name") or ""),
+                "composition_version_label": detail.get("current_composition_version_label"),
+                "composition_version_number": detail.get("current_composition_version_number"),
                 "benchmark_label": _as_mapping(detail.get("hero_summary")).get("benchmark_label")
                 or self._composition_benchmark_label(detail.get("benchmark_definition")),
                 "horizon_years": horizon_years,
@@ -10485,26 +11599,30 @@ class BacktestPlatformService:
             """,
             (run_id, composition_id),
         )
-        try:
-            state = self._composition_load_artifact_state(
-                kind="backtest_run",
-                composition_id=composition_id,
-                artifact_id=run_id,
-            )
-            detail = _as_mapping(state.get("detail_snapshot"))
-            orders = self._composition_backtest_orders_from_detail(
-                composition_id,
-                run_id,
-                detail,
-                _as_mapping(state.get("request")),
-            )
-        except KeyError:
-            if not row:
-                raise
+        detail: Mapping[str, Any] = {}
+        orders: list[dict[str, Any]] = []
+        if row:
             result_payload = loads(row.get("result_json"), {})
             detail = result_payload if isinstance(result_payload, Mapping) else {}
             persisted_orders = loads(row.get("orders_json"), [])
             orders = [dict(item) for item in persisted_orders if isinstance(item, Mapping)]
+        if not orders:
+            try:
+                state = self._composition_load_artifact_state(
+                    kind="backtest_run",
+                    composition_id=composition_id,
+                    artifact_id=run_id,
+                )
+                detail = _as_mapping(state.get("detail_snapshot"))
+                orders = self._composition_backtest_orders_from_detail(
+                    composition_id,
+                    run_id,
+                    detail,
+                    _as_mapping(state.get("request")),
+                )
+            except KeyError:
+                if not row:
+                    raise
         normalized_symbol = str(symbol or "").strip().upper()
         if normalized_symbol:
             orders = [item for item in orders if str(item.get("symbol") or "").upper() == normalized_symbol]
@@ -10797,7 +11915,10 @@ class BacktestPlatformService:
             (job_id, composition_id),
         )
         if row:
-            return self._composition_decode_allocation_job_row(row)
+            return self._composition_overlay_current_status(
+                self._composition_decode_allocation_job_row(row),
+                refresh_candidates=True,
+            )
         state = self._composition_load_artifact_state(
             kind="allocation_job",
             composition_id=composition_id,
@@ -11167,7 +12288,10 @@ class BacktestPlatformService:
             LIMIT 200
             """
         )
-        items = [self._composition_decode_run_row(row) for row in rows]
+        items = [
+            self._composition_overlay_current_status(self._composition_decode_run_row(row))
+            for row in rows
+        ]
         decision_queue = [
             {
                 "kind": "backtest_run",
@@ -11201,7 +12325,13 @@ class BacktestPlatformService:
             LIMIT 200
             """
         )
-        items = [self._composition_decode_allocation_job_row(row) for row in rows]
+        items = [
+            self._composition_overlay_current_status(
+                self._composition_decode_allocation_job_row(row),
+                refresh_candidates=True,
+            )
+            for row in rows
+        ]
         decision_queue: list[dict[str, Any]] = []
         for item in items:
             for candidate in item.get("candidates") or []:
@@ -11652,7 +12782,9 @@ class BacktestPlatformService:
         )
         last_refreshed_at = snapshot_overview.get("last_refreshed_at")
         curve_preview: list[dict[str, Any]] = []
-        bond_rows = self._bond_snapshot_rows()
+        stored_bond_rows = self._bond_snapshot_rows()
+        contract_bond_rows = self._bond_snapshot_current_contract_rows(stored_bond_rows)
+        bond_rows = contract_bond_rows or stored_bond_rows
         audit_context = self._bond_snapshot_audit_context(bond_rows)
         all_instruments = [
             self._bond_snapshot_instrument_payload(row, audit_context=audit_context) for row in bond_rows
@@ -11661,6 +12793,8 @@ class BacktestPlatformService:
         ready_bond_instruments = [
             item for item in all_instruments if str(item.get("status") or "").upper() == "READY"
         ]
+        expected_bond_contract_count = 7
+        ready_bond_count = len(ready_bond_instruments)
         curve_tenor_order = {"3M": 0, "2Y": 1, "10Y": 2, "30Y": 3}
         ust_curve_instruments = [
             item
@@ -11771,6 +12905,21 @@ class BacktestPlatformService:
         )
         tips_breakeven_pct = round(tips_breakeven_bps / 100.0, 4) if tips_breakeven_bps is not None else None
         lqd_credit_quality = lqd_instrument.get("credit_quality") if lqd_instrument else None
+        bond_contract_ready = (
+            len(all_instruments) >= expected_bond_contract_count
+            and ready_bond_count == len(all_instruments)
+            and ust_ready_count == 4
+            and tips_ready_count == 2
+            and ig_ready_count == 1
+        )
+        bond_pulse_status = (
+            "READY"
+            if bond_contract_ready
+            else "WATCH"
+            if all_instruments
+            else pulse_status
+        )
+        bond_contract_value = f"{ready_bond_count}/{max(len(all_instruments), expected_bond_contract_count)} ready"
         source_groups: dict[str, dict[str, Any]] = {}
         for row in bond_rows:
             source_key = str(row.get("source") or "manual")
@@ -11806,16 +12955,16 @@ class BacktestPlatformService:
             {
                 "id": "shared_snapshot_route",
                 "label": "Shared snapshot route",
-                "status": pulse_status,
+                "status": bond_pulse_status,
                 "value": "#/snapshots",
                 "detail": "Bond governance stays on the existing snapshot overview surface.",
             },
             {
                 "id": "dataset_coverage",
                 "label": "Dataset coverage",
-                "status": "READY" if ready_datasets == len(dataset_snapshots) and dataset_snapshots else "WATCH",
-                "value": f"{ready_datasets}/{len(dataset_snapshots)} ready",
-                "detail": "Uses the shared dataset snapshot status as the fixed-income data gate.",
+                "status": "READY" if bond_contract_ready else "WATCH",
+                "value": bond_contract_value,
+                "detail": "Uses the current seven-row bond runtime contract as the fixed-income data gate.",
             },
             {
                 "id": "universe_coverage",
@@ -11834,7 +12983,7 @@ class BacktestPlatformService:
             {
                 "id": "eligible_bond_sources",
                 "label": "Eligible bond sources",
-                "status": "READY" if ready_bond_instruments else "WATCH",
+                "status": "READY" if bond_contract_ready else "WATCH",
                 "value": f"{len(ready_bond_instruments)}/{len(all_instruments)} eligible",
                 "detail": "Only READY runtime bond rows with complete or inferred fields can create asset legs.",
             },
@@ -11868,7 +13017,7 @@ class BacktestPlatformService:
                 "label": "IG credit ETF",
                 "status": "READY" if ig_ready_count == 1 else "WATCH",
                 "value": f"{ig_ready_count}/1 ready, {ig_sourced_count} sourced",
-                "detail": "LQD remains WATCH until official tracking_error_bps is available.",
+                "detail": "LQD becomes READY when a published tracking_error_bps source is available.",
             },
         ]
         quality_audit: list[dict[str, Any]] = []
@@ -11997,7 +13146,7 @@ class BacktestPlatformService:
         ]
         return {
             "global_pulse": {
-                "status": pulse_status,
+                "status": bond_pulse_status,
                 "headline": "Bond and fixed-income governance is staged on the shared snapshot route for phase 1.",
                 "updated_at": last_refreshed_at,
                 "cards": cards,
@@ -12006,14 +13155,14 @@ class BacktestPlatformService:
                 {
                     "id": "coverage",
                     "label": "Coverage",
-                    "status": "READY" if ready_datasets == len(dataset_snapshots) and dataset_snapshots else "WATCH",
+                    "status": "READY" if bond_contract_ready else "WATCH",
                     "items": [
                         {
                             "id": "price_dataset",
                             "label": "Price dataset readiness",
-                            "status": "READY" if any(str(item.get("id") or "") == "ds-price" and str(item.get("status") or "").upper() == "READY" for item in dataset_snapshots) else "WATCH",
-                            "value": "Shared dataset gate",
-                            "detail": "Bond visuals reuse shared price snapshot readiness instead of creating a second pipeline.",
+                            "status": "READY" if bond_contract_ready else "WATCH",
+                            "value": bond_contract_value,
+                            "detail": "Bond visuals use current runtime bond rows instead of creating a second pipeline.",
                         },
                         {
                             "id": "universe_dataset",
@@ -12062,14 +13211,14 @@ class BacktestPlatformService:
                 {
                     "id": "diagnostics",
                     "label": "Diagnostics",
-                    "status": pulse_status,
+                    "status": bond_pulse_status,
                     "items": [
                         {
                             "id": "blocking_code",
                             "label": "Blocking code",
-                            "status": pulse_status,
+                            "status": bond_pulse_status,
                             "value": str(snapshot_overview.get("blocking_code") or "none"),
-                            "detail": "Any shared snapshot blocker also blocks the bond governance tab.",
+                            "detail": "Shared snapshot blockers are retained as diagnostics when the bond runtime contract is READY.",
                         },
                     ],
                 },
@@ -12080,7 +13229,7 @@ class BacktestPlatformService:
                     "id": "shared_route",
                     "label": "Shared route ownership",
                     "owner": "snapshot overview",
-                    "status": pulse_status,
+                    "status": bond_pulse_status,
                     "cadence_label": "continuous",
                     "evidence": "#/snapshots remains the only route for bond governance",
                 },
@@ -12096,9 +13245,9 @@ class BacktestPlatformService:
                     "id": "dataset_gate",
                     "label": "Dataset gate",
                     "owner": "dataset_snapshots",
-                    "status": "READY" if ready_datasets == len(dataset_snapshots) and dataset_snapshots else "WATCH",
+                    "status": "READY" if bond_contract_ready else "WATCH",
                     "cadence_label": "shared",
-                    "evidence": f"{ready_datasets}/{len(dataset_snapshots)} dataset snapshots ready",
+                    "evidence": bond_contract_value,
                 },
             ],
             "raw_registry": [
@@ -12118,6 +13267,7 @@ class BacktestPlatformService:
                     "sec_yield_30d_pct": item.get("sec_yield_30d_pct"),
                     "credit_quality": item.get("credit_quality"),
                     "tracking_error_bps": item.get("tracking_error_bps"),
+                    "tracking_error_source": item.get("tracking_error_source"),
                     "audit_alerts": list(item.get("audit_alerts") or []),
                     "audit_notes": list(item.get("audit_notes") or []),
                     "tracking_status": item.get("tracking_status"),
@@ -12212,7 +13362,7 @@ class BacktestPlatformService:
                 "refresh_job_status": latest_job.get("status"),
                 "memory": dict(read_runtime_memory_status() or {}),
                 "notes": [
-                    "Bond governance is blocked whenever the shared snapshot overview is blocked.",
+                    "Shared snapshot blockers stay visible as diagnostics, but the current bond runtime contract is the asset-leg gate.",
                     "Only runtime fixed-income snapshot rows are eligible asset-leg sources.",
                 ],
             },
@@ -13729,7 +14879,12 @@ class BacktestPlatformService:
             "estimated_completed_at": payload.get("estimated_completed_at"),
         }
 
-    def _hydrate_optimization_job(self, row: Mapping[str, Any]) -> dict[str, Any]:
+    def _hydrate_optimization_job(
+        self,
+        row: Mapping[str, Any],
+        *,
+        matching_limit: int | None = None,
+    ) -> dict[str, Any]:
         job = dict(row)
         job["request"] = loads(job.pop("request_json", None), {})
         job["summary"] = loads(job.pop("summary_json", None), {})
@@ -13760,6 +14915,11 @@ class BacktestPlatformService:
         raw_request = dict(job["request"])
         raw_summary = dict(job["summary"])
         raw_result = dict(job["result"])
+        matching_preview_limit = (
+            max(0, _as_int(matching_limit, 0))
+            if matching_limit is not None
+            else None
+        )
         summary_status = str(
             job["summary"].get("status")
             or job.get("status")
@@ -14963,6 +16123,10 @@ class BacktestPlatformService:
         return self.get_strategy_detail(strategy_id)
 
     def list_strategies(self) -> list[dict[str, Any]]:
+        cache_signature = self._strategy_list_cache_signature()
+        cached = self._read_model_cache_get("strategies:list", cache_signature)
+        if cached is not None:
+            return cached
         rows = self.storage.fetch_all(
             """
             SELECT
@@ -15027,6 +16191,7 @@ class BacktestPlatformService:
                 if latest_successful_run_id
                 else None
             )
+        self._read_model_cache_set("strategies:list", cache_signature, strategies)
         return strategies
 
     def get_strategy_detail(self, strategy_id: str) -> dict[str, Any]:
@@ -15134,6 +16299,11 @@ class BacktestPlatformService:
         return self.get_strategy_detail(strategy_id)
 
     def list_backtest_runs(self, limit: int | None = None, status: str | None = None) -> list[dict[str, Any]]:
+        cache_key = f"backtest_runs:list:{status or ''}"
+        cache_signature = self._backtest_run_list_cache_signature(status)
+        cached = self._read_model_cache_get(cache_key, cache_signature)
+        if cached is not None:
+            return cached[:limit] if limit else cached
         sql = """
             SELECT
                 backtest_runs.id,
@@ -15164,11 +16334,10 @@ class BacktestPlatformService:
             sql += " AND backtest_runs.status = ?"
             params.append(status)
         sql += " ORDER BY COALESCE(backtest_runs.completed_at, backtest_runs.created_at) DESC"
-        if limit:
-            sql += " LIMIT ?"
-            params.append(limit)
         rows = self.storage.fetch_all(sql, params)
-        return [self._decode_run_list_row(row) for row in rows]
+        decoded = [self._decode_run_list_row(row) for row in rows]
+        self._read_model_cache_set(cache_key, cache_signature, decoded)
+        return decoded[:limit] if limit else decoded
 
     def get_backtest_run(
         self,
@@ -15442,7 +16611,12 @@ class BacktestPlatformService:
         )
         return self.get_optimization_job_detail(job_id)
 
-    def get_optimization_job_detail(self, job_id: str) -> dict[str, Any]:
+    def get_optimization_job_detail(
+        self,
+        job_id: str,
+        *,
+        matching_limit: int | None = None,
+    ) -> dict[str, Any]:
         start_time = time.perf_counter()
         row = self.storage.fetch_one(
             "SELECT * FROM optimization_jobs WHERE id = ? AND deleted_at IS NULL",
@@ -15454,7 +16628,7 @@ class BacktestPlatformService:
                 self._optimization_job_detail_metrics["request_count"] += 1
                 self._optimization_job_detail_metrics["total_duration_ms"] += duration_ms
             raise KeyError(f"Optimization job not found: {job_id}")
-        job = self._hydrate_optimization_job(row)
+        job = self._hydrate_optimization_job(row, matching_limit=matching_limit)
         duration_ms = (time.perf_counter() - start_time) * 1000.0
         with self._optimization_job_detail_metrics_lock:
             self._optimization_job_detail_metrics["request_count"] += 1
@@ -17141,6 +18315,7 @@ class BacktestPlatformService:
             }.items()
             if not str(key).startswith("__optimization_")
         }
+        persisted_payload = self._compact_optimization_matching_payload(persisted_payload)
         persisted_payload.update(_normalize_optimization_constraints_payload(persisted_payload))
         summary = self._build_optimization_job_summary(persisted_payload, normalized_candidates)
         result = self._build_optimization_job_result(persisted_payload, normalized_candidates)
@@ -17185,13 +18360,16 @@ class BacktestPlatformService:
             for item in list(payload.get("matching_combinations") or [])
             if isinstance(item, Mapping)
         ]
+        matching_combination_count = _as_int(
+            payload.get("matching_combination_count"),
+            len(matching_combinations),
+        )
+        if len(matching_combinations) > OPTIMIZATION_MATCHING_COMBINATION_INLINE_LIMIT:
+            matching_combinations = []
         summary = {
             "objective": _normalize_optimization_objective(payload.get("objective")),
             "candidate_count": len(candidates),
-            "matching_combination_count": _as_int(
-                payload.get("matching_combination_count"),
-                len(matching_combinations),
-            ),
+            "matching_combination_count": matching_combination_count,
             "matching_combinations": matching_combinations,
             "baseline_parameter_version_id": baseline_parameter_version_id,
             "entry_point": payload.get("entry_point") or "lab_menu",
@@ -17335,7 +18513,12 @@ class BacktestPlatformService:
             **constraint_payload,
         }
 
-    def _hydrate_optimization_job(self, row: Mapping[str, Any]) -> dict[str, Any]:
+    def _hydrate_optimization_job(
+        self,
+        row: Mapping[str, Any],
+        *,
+        matching_limit: int | None = None,
+    ) -> dict[str, Any]:
         job = dict(row)
         job["request"] = loads(job.pop("request_json", None), {})
         job["summary"] = loads(job.pop("summary_json", None), {})
@@ -17366,6 +18549,11 @@ class BacktestPlatformService:
         raw_request = dict(job["request"])
         raw_summary = dict(job["summary"])
         raw_result = dict(job["result"])
+        matching_preview_limit = (
+            max(0, _as_int(matching_limit, 0))
+            if matching_limit is not None
+            else None
+        )
         summary_status = str(
             job["summary"].get("status")
             or job.get("status")
@@ -17567,9 +18755,18 @@ class BacktestPlatformService:
         if normalized_search_space:
             job["request"]["search_space"] = normalized_search_space
             job["summary"]["search_space"] = normalized_search_space
-        job["matching_combinations"] = list(job["summary"].get("matching_combinations") or [])
-        if job["matching_combinations"]:
-            job["summary"]["matching_combination_count"] = len(job["matching_combinations"])
+        full_summary_matching_combinations = list(job["summary"].get("matching_combinations") or [])
+        if full_summary_matching_combinations:
+            job["summary"]["matching_combination_count"] = max(
+                _as_int(job["summary"].get("matching_combination_count"), 0),
+                len(full_summary_matching_combinations),
+            )
+        job["matching_combinations"] = (
+            full_summary_matching_combinations[:matching_preview_limit]
+            if matching_preview_limit is not None
+            else full_summary_matching_combinations
+        )
+        job["summary"]["matching_combinations"] = list(job["matching_combinations"])
         if not matching_combination_source and job["matching_combinations"]:
             matching_combination_source = (
                 "all_trials" if has_persisted_trials else "persisted_candidates"
@@ -17634,7 +18831,7 @@ class BacktestPlatformService:
             # longer matches the all-trial winner under the current objective.
             should_repair_candidates = (
                 candidate_metrics_need_repair
-                or not job["matching_combinations"]
+                or (matching_preview_limit is None and not job["matching_combinations"])
                 or candidate_selection_mismatch
             )
             if should_repair_candidates:
@@ -17683,14 +18880,19 @@ class BacktestPlatformService:
                 job["matching_combinations"] = build_matching_combinations_from_candidate_records(
                     raw_candidates,
                 )
+                if matching_preview_limit is not None:
+                    job["matching_combinations"] = job["matching_combinations"][:matching_preview_limit]
                 matching_combination_source = "persisted_candidates"
                 expected_matching_count = _as_int(
                     job["summary"].get("matching_combination_count"),
                     len(job["matching_combinations"]),
                 )
                 if (
+                    matching_preview_limit is None
+                    and (
                     expected_matching_count > len(job["matching_combinations"])
                     or (not job["matching_combinations"] and not raw_candidates)
+                    )
                 ):
                     trial_records = self._load_optimization_trials(
                         str(job["id"]),
@@ -17709,8 +18911,9 @@ class BacktestPlatformService:
                 job["summary"]["matching_combinations"] = list(
                     job["matching_combinations"],
                 )
-                job["summary"]["matching_combination_count"] = len(
-                    job["matching_combinations"],
+                job["summary"]["matching_combination_count"] = max(
+                    expected_matching_count,
+                    len(job["matching_combinations"]),
                 )
                 job["summary"]["matching_combination_source"] = (
                     matching_combination_source
@@ -18095,7 +19298,7 @@ class BacktestPlatformService:
             "estimated_remaining_minutes": job["summary"].get("estimated_remaining_minutes"),
             "estimated_completed_at": job["summary"].get("estimated_completed_at"),
         }
-        if not job["matching_combinations"]:
+        if not job["matching_combinations"] and matching_preview_limit is None:
             detailed_trials = self._optimization_with_full_metrics(
                 str(job["id"]),
                 trials,
@@ -18114,6 +19317,10 @@ class BacktestPlatformService:
                 job["matching_combinations"],
             )
             job["summary"]["matching_combination_source"] = "all_trials"
+        elif not job["matching_combinations"]:
+            job["summary"]["matching_combinations"] = []
+            job["summary"].setdefault("matching_combination_count", len(trials))
+            job["summary"].setdefault("matching_combination_source", "all_trials")
         job["progress_pct"] = job["summary"].get("progress_pct", 0)
         job["current_stage"] = job["summary"].get("current_stage")
         job["latest_update"] = job["summary"].get("latest_update")

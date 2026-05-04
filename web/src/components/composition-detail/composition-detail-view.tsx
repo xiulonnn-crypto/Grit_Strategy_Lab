@@ -19,7 +19,9 @@ import {
   normalizePercentLike,
 } from '../../lib/compose-display';
 import {
+  diagnosisNeedsAction,
   diagnosisTone,
+  normalizedDiagnosisActions,
   primaryCompositionDiagnosis,
 } from '../../lib/composition-diagnostics';
 import { LegDetailDrawer } from '../legs/leg-inventory-view';
@@ -29,6 +31,8 @@ import type {
   ApiCompositionKpi,
   ApiCompositionPreviewLeg,
   ApiCompositionRiskContribution,
+  ApiCompositionStatusAction,
+  ApiCompositionStatusDiagnosis,
   ApiCompositionSourceIntegrity,
   ApiCompositionSourceFreeze,
   ApiCompositionStatus,
@@ -47,6 +51,10 @@ type CompositionDetailViewProps = {
   savingStatus?: boolean;
   writeError?: string | null;
   onStatusChange?: (status: ApiCompositionStatus) => Promise<void> | void;
+  onDiagnosisAction?: (
+    action: ApiCompositionStatusAction,
+    diagnosis: ApiCompositionStatusDiagnosis,
+  ) => Promise<ApiCompositionDetail | void> | ApiCompositionDetail | void;
 };
 
 type DetailKpiCard = {
@@ -135,6 +143,13 @@ function formatChartPercentValue(value?: number | null): string {
   }
   const prefix = value > 0 ? '+' : '';
   return `${prefix}${value.toFixed(2)}%`;
+}
+
+function formatHistoryPercentValue(value?: number | null): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '暂无';
+  }
+  return `${(normalizePercentLike(value) * 100).toFixed(1)}%`;
 }
 
 function parseMetricNumber(value?: string | number | null): number | null {
@@ -579,6 +594,342 @@ function getDiagnosisChipClassName(detail: ApiCompositionDetail): string {
   return 'status-chip status-chip--soft';
 }
 
+function getDiagnosisPanelClassName(diagnosis: ReturnType<typeof primaryCompositionDiagnosis>): string {
+  const tone = diagnosisTone(diagnosis);
+  if (tone === 'danger') {
+    return 'composition-detail-status-diagnosis composition-detail-status-diagnosis--danger';
+  }
+  if (tone === 'warning') {
+    return 'composition-detail-status-diagnosis composition-detail-status-diagnosis--warning';
+  }
+  if (tone === 'good') {
+    return 'composition-detail-status-diagnosis composition-detail-status-diagnosis--good';
+  }
+  return 'composition-detail-status-diagnosis';
+}
+
+function shouldShowPrimaryDiagnosisPanel(diagnosis: ReturnType<typeof primaryCompositionDiagnosis>): boolean {
+  if (diagnosis.status === '稳健') {
+    return hasExecutableDiagnosisAction(diagnosis);
+  }
+  return diagnosisNeedsAction(diagnosis);
+}
+
+function getDiagnosisFactNumber(source: Record<string, unknown> | undefined, key: string): number | null {
+  const value = source?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function formatDiagnosisCoverage(value: number | null): string | null {
+  if (value === null) {
+    return null;
+  }
+  const normalized = value > 1 ? value : value * 100;
+  return `${Math.round(normalized)}%`;
+}
+
+function buildDiagnosisFactRows(
+  detail: ApiCompositionDetail,
+  diagnosis: ReturnType<typeof primaryCompositionDiagnosis>,
+): Array<{ label: string; value: string }> {
+  const debugFacts = diagnosis.debug_facts;
+  const quality = detail.return_quality_summary;
+  const alignedPoints = getDiagnosisFactNumber(debugFacts, 'aligned_points') ?? quality?.aligned_points ?? null;
+  const missingPoints = getDiagnosisFactNumber(debugFacts, 'missing_points') ?? quality?.missing_points ?? null;
+  const coveragePct = getDiagnosisFactNumber(debugFacts, 'coverage_pct') ?? quality?.coverage_pct ?? null;
+  const sourceCount = getDiagnosisFactNumber(debugFacts, 'source_integrity_count') ?? (detail.source_integrity ?? []).length;
+  const rows: Array<{ label: string; value: string }> = [];
+  if (alignedPoints !== null) {
+    rows.push({ label: '收益样本', value: `${alignedPoints} 个月` });
+  }
+  if (missingPoints !== null && missingPoints > 0) {
+    rows.push({ label: '对齐缺口', value: `${missingPoints} 个` });
+  }
+  const coverage = formatDiagnosisCoverage(coveragePct);
+  if (coverage) {
+    rows.push({ label: '覆盖率', value: coverage });
+  }
+  if (sourceCount > 0) {
+    rows.push({ label: '来源数', value: `${sourceCount} 个` });
+  }
+  return rows;
+}
+
+type DiagnosisLegIssueRow = {
+  key: string;
+  name: string;
+  issueText: string;
+  metricText: string;
+  windowText: string | null;
+  repairLabel: string;
+  repairRoute: string | null;
+};
+
+function getLegQualitySourceRows(
+  detail: ApiCompositionDetail,
+  diagnosis: ApiCompositionStatusDiagnosis,
+): Record<string, unknown>[] {
+  const rows = new Map<string, Record<string, unknown>>();
+  const addRows = (value: unknown): void => {
+    if (!Array.isArray(value)) {
+      return;
+    }
+    value.forEach((item, index) => {
+      const row = getRecordObject(item);
+      if (!Object.keys(row).length) {
+        return;
+      }
+      const rowKey =
+        getRecordString(row, ['leg_id']) ??
+        getRecordString(row, ['source_ref_id']) ??
+        getRecordString(row, ['display_name']) ??
+        `leg-quality-${index}`;
+      rows.set(rowKey, { ...(rows.get(rowKey) ?? {}), ...row });
+    });
+  };
+  addRows(detail.return_quality_summary?.leg_quality);
+  addRows(diagnosis.debug_facts?.leg_quality);
+  return Array.from(rows.values());
+}
+
+function getLegQualityDisplayName(detail: ApiCompositionDetail, row: Record<string, unknown>): string {
+  const legId = getRecordString(row, ['leg_id']);
+  const sourceRefId = getRecordString(row, ['source_ref_id']);
+  const matchedLeg = (detail.normalized_legs ?? []).find(
+    (leg) =>
+      (legId && leg.id === legId) ||
+      (sourceRefId && leg.source_ref_id === sourceRefId),
+  );
+  return (
+    getRecordString(row, ['display_name']) ??
+    matchedLeg?.display_name ??
+    sourceRefId ??
+    legId ??
+    '未命名组合腿'
+  );
+}
+
+function buildDiagnosisLegRepairAction(
+  detail: ApiCompositionDetail,
+  row: Record<string, unknown>,
+): { label: string; route: string | null } {
+  const legKind = String(getRecordString(row, ['leg_kind']) ?? '').toLowerCase();
+  const sourceRefId = getRecordString(row, ['source_ref_id']);
+  if (legKind === 'strategy' && sourceRefId?.startsWith('strategy_leg::')) {
+    const [, strategyId] = sourceRefId.split('::');
+    if (strategyId) {
+      return {
+        label: '补齐策略回测',
+        route: `/strategies/${encodeURIComponent(strategyId)}/backtest-runs/new`,
+      };
+    }
+  }
+  const focusRef = sourceRefId ?? getRecordString(row, ['leg_id']);
+  const focusQuery = focusRef ? `&focus_source_ref_id=${encodeURIComponent(focusRef)}` : '';
+  return {
+    label: legKind === 'asset' ? '替换资产来源' : '调整来源腿',
+    route: `/compositions/workbench?composition_id=${encodeURIComponent(detail.id)}${focusQuery}`,
+  };
+}
+
+function buildDiagnosisLegIssueRows(
+  detail: ApiCompositionDetail,
+  diagnosis: ReturnType<typeof primaryCompositionDiagnosis>,
+): DiagnosisLegIssueRow[] {
+  return getLegQualitySourceRows(detail, diagnosis)
+    .map((row): DiagnosisLegIssueRow | null => {
+      const samplePoints = getRecordNumber(row, ['sample_points']);
+      const alignedPoints = getRecordNumber(row, ['aligned_points']);
+      const missingPoints = getRecordNumber(row, ['missing_points']);
+      const rawIssueTypes = getStringArray(row.issue_types);
+      const issueTypes = new Set(rawIssueTypes);
+      if (samplePoints !== null && samplePoints <= 0) {
+        issueTypes.add('收益样本缺失');
+      } else if (samplePoints !== null && samplePoints < 120) {
+        issueTypes.add('收益样本不足');
+      }
+      if (missingPoints !== null && missingPoints > 0) {
+        issueTypes.add('对齐缺口');
+      }
+      const visibleIssueTypes = Array.from(issueTypes).filter((issue) =>
+        ['收益样本不足', '收益样本缺失', '对齐缺口'].includes(issue),
+      );
+      if (!visibleIssueTypes.length) {
+        return null;
+      }
+      const legId = getRecordString(row, ['leg_id']) ?? getRecordString(row, ['source_ref_id']) ?? getLegQualityDisplayName(detail, row);
+      const metricParts = [
+        samplePoints !== null ? `收益样本 ${samplePoints} 个月` : null,
+        alignedPoints !== null ? `可对齐 ${alignedPoints} 个月` : null,
+        missingPoints !== null ? `对齐缺口 ${missingPoints} 个` : null,
+      ].filter((item): item is string => Boolean(item));
+      const windowStart = getRecordString(row, ['window_start']);
+      const windowEnd = getRecordString(row, ['window_end']);
+      const repairAction = buildDiagnosisLegRepairAction(detail, row);
+      return {
+        key: legId,
+        name: getLegQualityDisplayName(detail, row),
+        issueText: visibleIssueTypes.join('、'),
+        metricText: metricParts.join(' · '),
+        windowText: windowStart && windowEnd ? `窗口 ${windowStart} - ${windowEnd}` : null,
+        repairLabel: repairAction.label,
+        repairRoute: repairAction.route,
+      };
+    })
+    .filter((row): row is DiagnosisLegIssueRow => Boolean(row));
+}
+
+function focusSourceEvidenceRail(): void {
+  const sourceRail = document.querySelector<HTMLElement>('[data-ui="source-signature-rail"]');
+  if (!sourceRail) {
+    return;
+  }
+  sourceRail.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  sourceRail.focus({ preventScroll: true });
+  sourceRail.classList.add('composition-detail-source-signature--focused');
+  window.setTimeout(() => {
+    sourceRail.classList.remove('composition-detail-source-signature--focused');
+  }, 1400);
+}
+
+function openDiagnosisAction(action: ApiCompositionStatusAction): void {
+  if (action.action_key === 'inspect_source_evidence') {
+    focusSourceEvidenceRail();
+    return;
+  }
+  const route = String(action.route ?? '').trim();
+  if (!route) {
+    return;
+  }
+  if (/^https?:\/\//i.test(route)) {
+    window.open(route, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  navigateTo(route);
+}
+
+function isExecutableDiagnosisAction(action: ApiCompositionStatusAction): boolean {
+  return String(action.action_kind ?? '').toLowerCase() === 'execute';
+}
+
+function hasExecutableDiagnosisAction(diagnosis?: ApiCompositionStatusDiagnosis | null): boolean {
+  return normalizedDiagnosisActions(diagnosis).some(isExecutableDiagnosisAction);
+}
+
+function isSourceLogicDriftDiagnosis(diagnosis?: ApiCompositionStatusDiagnosis | null): boolean {
+  if (!diagnosis) {
+    return false;
+  }
+  return (
+    diagnosis.diagnosis_type === 'source_logic_drift' ||
+    diagnosis.issue_type.includes('逻辑一致性漂移') ||
+    diagnosis.diagnosis_label.includes('逻辑一致性漂移')
+  );
+}
+
+function getDiagnosisActionSuccess(action: ApiCompositionStatusAction): string {
+  if (action.action_key === 'refresh_source_freezes') {
+    return '来源指纹已重新冻结，状态标签会随最新诊断同步更新。';
+  }
+  if (action.action_key === 'refresh_return_quality' || action.action_key === 'refresh_diagnostics') {
+    return '状态标签已重新计算。';
+  }
+  return '处理动作已提交。';
+}
+
+function CompositionDetailDiagnosisDialog({
+  diagnosis,
+  onAction,
+  onClose,
+}: {
+  diagnosis: ApiCompositionStatusDiagnosis;
+  onAction?: (
+    action: ApiCompositionStatusAction,
+    diagnosis: ApiCompositionStatusDiagnosis,
+  ) => Promise<ApiCompositionDetail | void> | ApiCompositionDetail | void;
+  onClose: () => void;
+}): JSX.Element {
+  const [busyActionKey, setBusyActionKey] = useState<string | null>(null);
+  const [actionStatus, setActionStatus] = useState<string | null>(null);
+  const actions = normalizedDiagnosisActions(diagnosis);
+
+  async function handleActionClick(action: ApiCompositionStatusAction): Promise<void> {
+    if (!isExecutableDiagnosisAction(action)) {
+      openDiagnosisAction(action);
+      return;
+    }
+    if (!onAction) {
+      setActionStatus('当前页面尚未接入该处理动作。');
+      return;
+    }
+    try {
+      setBusyActionKey(action.action_key);
+      setActionStatus(null);
+      await onAction(action, diagnosis);
+      setActionStatus(getDiagnosisActionSuccess(action));
+    } catch (caught) {
+      setActionStatus(`处理失败：${(caught as Error).message}`);
+    } finally {
+      setBusyActionKey(null);
+    }
+  }
+
+  return (
+    <div className="composition-detail-diagnosis-dialog__backdrop" role="presentation">
+      <section
+        aria-label={`${diagnosis.issue_type}状态标签`}
+        aria-modal="true"
+        className="composition-detail-diagnosis-dialog"
+        role="dialog"
+      >
+        <div className="composition-detail-diagnosis-dialog__header">
+          <div>
+            <span className={`chip chip--${diagnosisTone(diagnosis)}`}>{diagnosis.diagnosis_label}</span>
+            <h2>{diagnosis.issue_type}状态标签</h2>
+          </div>
+          <button className="ghost-button" onClick={onClose} type="button">关闭</button>
+        </div>
+        <div className="composition-detail-diagnosis-dialog__body">
+          <article>
+            <strong>前台判定说明</strong>
+            <p>{diagnosis.frontend_explanation}</p>
+          </article>
+          <article>
+            <strong>动作</strong>
+            <p>{diagnosis.action}</p>
+          </article>
+          <article>
+            <strong>解决判定</strong>
+            <p>{diagnosis.resolution_criteria}</p>
+          </article>
+        </div>
+        {actions.length ? (
+          <div className="composition-detail-diagnosis-dialog__actions">
+            {actions.map((action, index) => (
+              <button
+                className={
+                  index === 0 || isExecutableDiagnosisAction(action)
+                    ? 'primary-button'
+                    : 'ghost-button'
+                }
+                disabled={Boolean(busyActionKey)}
+                key={`${action.action_key}-${action.label}`}
+                onClick={() => {
+                  void handleActionClick(action);
+                }}
+                type="button"
+              >
+                {busyActionKey === action.action_key ? '处理中…' : action.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {actionStatus ? <p className="composition-detail-diagnosis-dialog__status" role="status">{actionStatus}</p> : null}
+      </section>
+    </div>
+  );
+}
+
 function buildDetailKpiCards(detail: ApiCompositionDetail): DetailKpiCard[] {
   const returnYears = getReturnWindowYears(detail);
   const benchmarkReturns = getBenchmarkMonthlyReturns(detail);
@@ -620,6 +971,33 @@ function buildDetailKpiCards(detail: ApiCompositionDetail): DetailKpiCard[] {
   )[0];
 
   return [
+    {
+      key: 'net_return',
+      label: '净收益',
+      value: formatPercentCardValue(netReturnValue, { signed: true }),
+      detail: '扣除成本与现金拖累。',
+      tooltip: '净收益优先读取累计净收益；缺失时回退为预估净年化。',
+      trendText: benchmarkAnnualized === null ? '基准待补' : `年化 ${formatPercentCardValue(portfolioAnnualized)}`,
+      trendTone: netReturnValue !== null && netReturnValue >= 0 ? 'better' : 'worse',
+      compareItems: [
+        { label: '总损耗', value: formatPercentCardValue(netAnnualized.totalLoss) },
+        { label: '毛年化', value: formatPercentCardValue(netAnnualized.grossAnnualized) },
+      ],
+      tone: netReturnValue !== null && netReturnValue >= 0 ? 'positive' : 'warning',
+    },
+    {
+      key: 'max_drawdown',
+      label: '最大回撤',
+      value: formatKpiPercentCardValue(detail, 'max_drawdown', null, { forceNegative: true }),
+      detail: getKpiDetailText(detail, 'max_drawdown', '低于基准回撤即为防守有效。'),
+      trendText: drawdownTrend.trendText,
+      trendTone: drawdownTrend.trendTone,
+      compareItems: [
+        { label: '基准', value: formatPercentCardValue(benchmarkDrawdown) },
+        { label: '恢复时长', value: recoveryDays === null ? '待补' : `${recoveryDays} 天` },
+      ],
+      tone: findKpi(detail, 'max_drawdown')?.tone ?? 'warning',
+    },
     {
       key: 'alpha_contribution',
       label: 'α贡献',
@@ -676,33 +1054,6 @@ function buildDetailKpiCards(detail: ApiCompositionDetail): DetailKpiCard[] {
       tone: stressCorrelation !== null && stressCorrelation >= 0.7 ? 'warning' : 'blue',
     },
     {
-      key: 'net_return',
-      label: '净收益',
-      value: formatPercentCardValue(netReturnValue, { signed: true }),
-      detail: '扣除成本与现金拖累。',
-      tooltip: '净收益优先读取累计净收益；缺失时回退为预估净年化。',
-      trendText: benchmarkAnnualized === null ? '基准待补' : `年化 ${formatPercentCardValue(portfolioAnnualized)}`,
-      trendTone: netReturnValue !== null && netReturnValue >= 0 ? 'better' : 'worse',
-      compareItems: [
-        { label: '总损耗', value: formatPercentCardValue(netAnnualized.totalLoss) },
-        { label: '毛年化', value: formatPercentCardValue(netAnnualized.grossAnnualized) },
-      ],
-      tone: netReturnValue !== null && netReturnValue >= 0 ? 'positive' : 'warning',
-    },
-    {
-      key: 'max_drawdown',
-      label: '最大回撤',
-      value: formatKpiPercentCardValue(detail, 'max_drawdown', null, { forceNegative: true }),
-      detail: getKpiDetailText(detail, 'max_drawdown', '低于基准回撤即为防守有效。'),
-      trendText: drawdownTrend.trendText,
-      trendTone: drawdownTrend.trendTone,
-      compareItems: [
-        { label: '基准', value: formatPercentCardValue(benchmarkDrawdown) },
-        { label: '恢复时长', value: recoveryDays === null ? '待补' : `${recoveryDays} 天` },
-      ],
-      tone: findKpi(detail, 'max_drawdown')?.tone ?? 'warning',
-    },
-    {
       key: 'return_quality',
       label: '收益质量',
       value: quality ? `${Math.round(quality.coverage_pct)}%` : '待补',
@@ -717,6 +1068,23 @@ function buildDetailKpiCards(detail: ApiCompositionDetail): DetailKpiCard[] {
       tone: quality?.fallback_used ? 'warning' : 'positive',
     },
   ];
+}
+
+function getBenchmarkLegendLabel(detail: ApiCompositionDetail): string {
+  const benchmark = detail.benchmark_definition ?? {};
+  const label = formatBenchmarkLabel(benchmark.label ?? detail.hero_summary.benchmark_label);
+  const notes = cleanDisplayText(benchmark.notes);
+  if (notes) {
+    return `${label}：${notes}`;
+  }
+  const rawLabel = cleanDisplayText(benchmark.label ?? benchmark.symbol ?? detail.hero_summary.benchmark_label) ?? label;
+  if (/70\s*\/\s*30/i.test(rawLabel)) {
+    return `${label}：70% 权益 / 30% 债券`;
+  }
+  if (/60\s*\/\s*40/i.test(rawLabel)) {
+    return `${label}：60% 权益 / 40% 债券`;
+  }
+  return label;
 }
 
 function getPoint(index: number, total: number, value: number, min: number, max: number, width: number, height: number, padding = 18): { x: number; y: number } {
@@ -941,6 +1309,35 @@ function getCurrentRulingLabel(detail: ApiCompositionDetail, driftCount: number)
 
 function getExecutionHistoryRows(detail: ApiCompositionDetail): ExecutionHistoryRow[] {
   const rows: ExecutionHistoryRow[] = [];
+  (detail.backtest_history ?? []).forEach((item) => {
+    const runId = getDisplayText(item.run_id, '');
+    if (!runId || rows.some((row) => row.runId === runId)) {
+      return;
+    }
+    const compositionVersionLabel = getDisplayText(item.composition_version_label, '');
+    rows.push({
+      key: `${detail.id}-${runId}`,
+      runId,
+      dateLabel: formatShortDate(item.created_at ?? item.completed_at),
+      versionLabel: compositionVersionLabel || getCompositionVersionLabel(detail),
+      periodLabel:
+        getDisplayText(item.period_label, '') ||
+        (typeof item.horizon_years === 'number' && Number.isFinite(item.horizon_years)
+          ? `${Math.round(item.horizon_years)}Y`
+          : `${Math.max(1, Math.round(getReturnWindowYears(detail)))}Y`),
+      annualizedLabel:
+        typeof item.annualized_return === 'number' && Number.isFinite(item.annualized_return)
+          ? formatHistoryPercentValue(item.annualized_return)
+          : '暂无',
+      sharpeLabel:
+        typeof item.sharpe === 'number' && Number.isFinite(item.sharpe)
+          ? item.sharpe.toFixed(2)
+          : '暂无',
+    });
+  });
+  if (rows.length) {
+    return rows.slice(0, 3);
+  }
   const annualizedLabel =
     findFirstKpiText(detail, ['annualized_return', 'net_annualized_return'])
     ?? formatPercentCardValue(annualizeCumulativePercent(getLatestCumulativeReturn(detail), getReturnWindowYears(detail)));
@@ -991,20 +1388,6 @@ function getExecutionHistoryRows(detail: ApiCompositionDetail): ExecutionHistory
 function getCompositionRunHashPath(compositionId: string, runId: string, tab?: 'orders'): string {
   const base = `/compositions/${encodeURIComponent(compositionId)}/backtest-runs/${encodeURIComponent(runId)}`;
   return tab ? `#${base}?tab=${tab}` : `#${base}`;
-}
-
-function getPrimaryBacktestRunId(detail: ApiCompositionDetail, executionHistoryRows: ExecutionHistoryRow[]): string | null {
-  const strategyLegRuns = detail.normalized_legs
-    .filter((leg) => String(leg.leg_kind ?? '').toLowerCase() === 'strategy')
-    .map((leg) => ({
-      ordering: Number.isFinite(Number(leg.ordering)) ? Number(leg.ordering) : 0,
-      runId: getBacktestRunIdFromRecord(leg.config as Record<string, unknown> | undefined),
-      weightPct: Number.isFinite(Number(leg.weight_pct)) ? Number(leg.weight_pct) : 0,
-    }))
-    .filter((item): item is { ordering: number; runId: string; weightPct: number } => Boolean(item.runId))
-    .sort((left, right) => right.weightPct - left.weightPct || left.ordering - right.ordering);
-
-  return strategyLegRuns[0]?.runId ?? executionHistoryRows[0]?.runId ?? null;
 }
 
 function getCompositionRevisionNumber(detail: ApiCompositionDetail): number {
@@ -1250,7 +1633,7 @@ function buildLegInventoryRowFromComposition(
       updated_at: detail.updated_at,
     },
   };
-  const hasNewVersion = !['current', 'verified'].includes(String(sourceIntegrity.drift_status ?? '').toLowerCase());
+  const hasNewVersion = sourceIntegrityRepresentsNewVersion(sourceIntegrity, evidence);
   return {
     id: leg.id,
     leg_type: leg.leg_kind,
@@ -1420,7 +1803,35 @@ function getLegTypeLabel(value?: string | null): string {
   }
 }
 
-function getIntegrityStatusLabel(value?: string | null): string {
+function sourceIntegrityRepresentsNewVersion(
+  integrity?: ApiCompositionSourceIntegrity | null,
+  evidence?: ApiCompositionSourceFreeze | null,
+): boolean {
+  const sourceRefId = String(integrity?.source_ref_id ?? evidence?.freeze_ref_id ?? '').trim();
+  if (!sourceRefId.startsWith('strategy_leg::')) {
+    return false;
+  }
+  const currentRefId = String(integrity?.current_ref_id ?? evidence?.current_ref_id ?? '').trim();
+  const alerts = [
+    ...(integrity?.alerts ?? []),
+    ...(evidence?.alerts ?? []),
+  ].map((alert) => String(alert).toLowerCase());
+  return (
+    (Boolean(currentRefId) && currentRefId !== sourceRefId)
+    || alerts.some(
+      (alert) =>
+        alert.includes('newer parameter version') ||
+        alert.includes('newer version') ||
+        alert.includes('新版本'),
+    )
+  );
+}
+
+function getIntegrityStatusLabel(
+  value?: string | null,
+  integrity?: ApiCompositionSourceIntegrity | null,
+  evidence?: ApiCompositionSourceFreeze | null,
+): string {
   switch (String(value ?? '').toLowerCase()) {
     case 'verified':
     case 'valid':
@@ -1430,9 +1841,8 @@ function getIntegrityStatusLabel(value?: string | null): string {
       return '版本一致';
     case 'drifted':
     case 'version_drift':
-      return '有新版本，待更新';
     case 'stale':
-      return '有新版本，待更新';
+      return sourceIntegrityRepresentsNewVersion(integrity, evidence) ? '有新版本，待更新' : '指纹待复核';
     case 'missing':
       return '证据缺失';
     default:
@@ -1516,10 +1926,10 @@ function getSourceAlertText(value?: string | null): string {
     return '冻结口径已验证。';
   }
   if (/^Current source version differs from the frozen source signature\.?$/i.test(text)) {
-    return '当前版本偏离冻结指纹。';
+    return '当前来源指纹偏离冻结记录。';
   }
   if (/来源版本已漂移，?建议重新检查。?/i.test(text)) {
-    return '当前版本偏离冻结指纹。';
+    return '当前来源指纹偏离冻结记录。';
   }
   return text;
 }
@@ -2432,11 +2842,13 @@ export function CompositionDetailView({
   savingStatus = false,
   writeError = null,
   onStatusChange,
+  onDiagnosisAction,
 }: CompositionDetailViewProps): JSX.Element {
   const [correlationMode, setCorrelationMode] = useState<CorrelationMode>('current');
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null);
   const [selectedLegId, setSelectedLegId] = useState<string | null>(null);
   const [hoveredReturnIndex, setHoveredReturnIndex] = useState<number | null>(null);
+  const [dialogDiagnosis, setDialogDiagnosis] = useState<ApiCompositionStatusDiagnosis | null>(null);
 
   if (approvedPreview) {
     return <ApprovedCompositionDetailPreview />;
@@ -2627,6 +3039,13 @@ export function CompositionDetailView({
   ).length;
   const sourceIntegrity = detail.source_integrity ?? [];
   const sourceIntegrityByLegId = new Map(sourceIntegrity.map((item) => [item.leg_id, item]));
+  const sourceIntegrityByRefId = new Map(
+    sourceIntegrity.flatMap((item) =>
+      [item.source_ref_id, item.current_ref_id]
+        .filter((value): value is string => Boolean(value))
+        .map((value) => [value, item] as const),
+    ),
+  );
   const auditTrail = detail.audit_trail ?? [];
   const driftCount = sourceIntegrity.filter((item) =>
     !['current', 'verified'].includes(String(item.drift_status ?? '').toLowerCase()),
@@ -2643,18 +3062,26 @@ export function CompositionDetailView({
   });
   const detailKpis = buildDetailKpiCards(detail);
   const primaryDiagnosis = primaryCompositionDiagnosis(detail);
+  const diagnosisFactRows = buildDiagnosisFactRows(detail, primaryDiagnosis);
+  const diagnosisLegIssueRows = buildDiagnosisLegIssueRows(detail, primaryDiagnosis);
+  const diagnosisList = detail.diagnoses?.length ? detail.diagnoses : [primaryDiagnosis];
+  const sourceLogicDriftDiagnosis =
+    diagnosisList.find(isSourceLogicDriftDiagnosis) ??
+    (isSourceLogicDriftDiagnosis(primaryDiagnosis) ? primaryDiagnosis : null);
+  const diagnosisActions = normalizedDiagnosisActions(primaryDiagnosis);
+  const routedDiagnosisActions = diagnosisActions.filter((action) => Boolean(action.route));
+  const canOpenPrimaryDiagnosisDialog = hasExecutableDiagnosisAction(primaryDiagnosis);
   const compositionVersionLabel = getCompositionVersionLabel(detail);
   const currentRulingLabel = getCurrentRulingLabel(detail, driftCount);
   const executionHistoryRows = getExecutionHistoryRows(detail);
-  const primaryBacktestRunId = getPrimaryBacktestRunId(detail, executionHistoryRows);
-  const primaryBacktestPath = primaryBacktestRunId
-    ? `/compositions/${encodeURIComponent(detail.id)}/backtest-runs/${encodeURIComponent(primaryBacktestRunId)}`
-    : `/compositions/${encodeURIComponent(detail.id)}/backtest-runs/new`;
+  const primaryBacktestPath = `/compositions/${encodeURIComponent(detail.id)}/backtest-runs/new`;
+  const showPrimaryDiagnosisPanel = shouldShowPrimaryDiagnosisPanel(primaryDiagnosis);
   const versionEvolutionRows = getVersionEvolutionRows(detail);
   const exposureDrilldownRows = getExposureDrilldownRows(detail);
   const benchmarkLabel = formatBenchmarkLabel(
     detail.benchmark_definition?.label ?? detail.hero_summary.benchmark_label,
   );
+  const benchmarkLegendLabel = getBenchmarkLegendLabel(detail);
   return (
     <div
       className="composition-detail-page composition-detail-approved stack"
@@ -2694,7 +3121,7 @@ export function CompositionDetailView({
             onClick={() => navigateTo(primaryBacktestPath)}
             type="button"
           >
-            查看回测
+            运行回测
           </button>
           <button
             className="ghost-button"
@@ -2833,7 +3260,7 @@ export function CompositionDetailView({
             </div>
             <div className="composition-detail-approved-bottom-tabs">
               <span className="chip chip--accent">组合净值</span>
-              <span className="chip chip--asset">{benchmarkLabel} 虚线</span>
+              <span className="chip chip--asset">{benchmarkLegendLabel} 虚线</span>
               <span className="chip chip--warning">成本拖累</span>
               <span className="chip">版本节点</span>
               <span className="chip chip--danger">回撤阴影</span>
@@ -2981,10 +3408,109 @@ export function CompositionDetailView({
         </div>
 
         <aside className="composition-detail-rail">
+          {showPrimaryDiagnosisPanel ? (
+            <section
+              className={`panel composition-detail-panel composition-detail-rail-panel ${getDiagnosisPanelClassName(primaryDiagnosis)}`}
+              aria-label="状态标签判定"
+              data-ui="composition-status-diagnosis"
+            >
+              <div className="panel-header composition-detail-panel__header">
+                <div>
+                  <h2>状态标签判定</h2>
+                  <p className="composition-detail-panel__copy">展示当前状态标签的判定原因、样本事实和下一步动作。</p>
+                </div>
+                <span className={getDiagnosisChipClassName(detail)}>{primaryDiagnosis.diagnosis_label}</span>
+              </div>
+              <div className="composition-detail-status-diagnosis__body">
+                <div>
+                  <strong>前台判定说明</strong>
+                  <p>{primaryDiagnosis.frontend_explanation}</p>
+                </div>
+                <div>
+                  <strong>动作</strong>
+                  <p>{primaryDiagnosis.action}</p>
+                </div>
+                <div>
+                  <strong>解决判定</strong>
+                  <p>{primaryDiagnosis.resolution_criteria}</p>
+                </div>
+              </div>
+              {diagnosisFactRows.length ? (
+                <div className="composition-detail-status-diagnosis__facts">
+                  {diagnosisFactRows.map((item) => (
+                    <span key={item.label}>
+                      <small>{item.label}</small>
+                      {' '}
+                      <strong>{item.value}</strong>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              {diagnosisLegIssueRows.length ? (
+                <div className="composition-detail-status-diagnosis__leg-issues">
+                  <strong>问题腿定位</strong>
+                  <div className="composition-detail-status-diagnosis__leg-list">
+                    {diagnosisLegIssueRows.map((row) => (
+                      <article className="composition-detail-status-diagnosis__leg-card" key={row.key}>
+                        <div className="composition-detail-status-diagnosis__leg-card-head">
+                          <span>{row.name}</span>
+                          <small>{row.issueText}</small>
+                        </div>
+                        {row.metricText ? <p>{row.metricText}</p> : null}
+                        {row.windowText ? <small>{row.windowText}</small> : null}
+                        {row.repairRoute ? (
+                          <button
+                            className="ghost-button composition-detail-status-diagnosis__leg-action"
+                            onClick={() => navigateTo(row.repairRoute!)}
+                            type="button"
+                          >
+                            {row.repairLabel}
+                          </button>
+                        ) : null}
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {routedDiagnosisActions.length || canOpenPrimaryDiagnosisDialog ? (
+                <div className="composition-detail-status-diagnosis__actions">
+                  {routedDiagnosisActions.map((action, index) => (
+                    <button
+                      className={
+                        index === 0
+                          ? 'primary-button composition-detail-status-diagnosis__action-button'
+                          : 'ghost-button composition-detail-status-diagnosis__action-button'
+                      }
+                      key={`${action.action_key}-${action.label}`}
+                      onClick={() => openDiagnosisAction(action)}
+                      type="button"
+                    >
+                      {action.label}
+                    </button>
+                  ))}
+                  {canOpenPrimaryDiagnosisDialog ? (
+                    <button
+                      className={
+                        routedDiagnosisActions.length
+                          ? 'ghost-button composition-detail-status-diagnosis__action-button'
+                          : 'primary-button composition-detail-status-diagnosis__action-button'
+                      }
+                      onClick={() => setDialogDiagnosis(primaryDiagnosis)}
+                      type="button"
+                    >
+                      处理状态标签
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </section>
+          ) : null}
+
           <section
             className="panel composition-detail-panel composition-detail-rail-panel composition-detail-source-signature"
             aria-label="配置指纹"
             data-ui="source-signature-rail"
+            tabIndex={-1}
           >
             <div className="panel-header composition-detail-panel__header">
               <div>
@@ -2998,12 +3524,23 @@ export function CompositionDetailView({
             {driftCount ? (
               <article className="composition-detail-alert-card composition-detail-source-drift-alert" data-ui="source-drift-alert">
                 <strong>发现配置漂移</strong>
-                <span>详情仍按冻结证据读取；采用当前版本需重新生成配置。</span>
+                <span>详情仍按冻结证据读取；点击下方来源卡复核指纹，确认无误后可在状态标签弹层重新冻结。</span>
+                {sourceLogicDriftDiagnosis ? (
+                  <button
+                    className="ghost-button composition-detail-source-drift-alert__action"
+                    onClick={() => setDialogDiagnosis(sourceLogicDriftDiagnosis)}
+                    type="button"
+                  >
+                    处理配置漂移
+                  </button>
+                ) : null}
               </article>
             ) : null}
             <div className="composition-detail-evidence-list">
               {sortedSourceEvidence.map((evidence) => {
-                const integrity = sourceIntegrityByLegId.get(evidence.leg_id);
+                const integrity = sourceIntegrityByLegId.get(evidence.leg_id)
+                  ?? sourceIntegrityByRefId.get(evidence.freeze_ref_id)
+                  ?? sourceIntegrityByRefId.get(evidence.current_ref_id ?? '');
                 return (
                   <button
                     className={`composition-detail-evidence-card composition-detail-approved-source-card${selectedLegId === evidence.leg_id ? ' is-active' : ''}`}
@@ -3020,7 +3557,7 @@ export function CompositionDetailView({
                     </div>
                     <span className="composition-detail-shield">配置指纹 {getEvidenceHashLabel(evidence.freeze_hash)}</span>
                     <div className="composition-detail-approved-source-line">
-                      <span>{getIntegrityStatusLabel(integrity?.drift_status ?? evidence.drift_status)}</span>
+                      <span>{getIntegrityStatusLabel(integrity?.drift_status ?? evidence.drift_status, integrity, evidence)}</span>
                       <span>{getEvidenceCurrentLabel(evidence, integrity)}</span>
                     </div>
                     <small>{getSourceAlertText((integrity?.alerts ?? evidence.alerts ?? [])[0])}</small>
@@ -3179,6 +3716,13 @@ export function CompositionDetailView({
           onNavigateToSource={navigateToCompositionLegSource}
           onRequestCopyNewVersion={ignoreCompositionLegVersionCopy}
           row={selectedLegRow}
+        />
+      ) : null}
+      {dialogDiagnosis ? (
+        <CompositionDetailDiagnosisDialog
+          diagnosis={dialogDiagnosis}
+          onAction={onDiagnosisAction}
+          onClose={() => setDialogDiagnosis(null)}
         />
       ) : null}
     </div>

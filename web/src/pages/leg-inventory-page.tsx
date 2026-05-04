@@ -3,7 +3,6 @@ import { LegInventoryView } from '../components/legs/leg-inventory-view';
 import { useApiClient } from '../lib/demoStoreContext';
 import {
   applyStrategyLegEdit,
-  buildCompositionReferenceCounts,
   buildStrategyCandidateRows,
   buildStrategyLegDefaultName,
   materializeSavedStrategyRows,
@@ -49,33 +48,19 @@ export function LegInventoryPage(): JSX.Element {
       setError(null);
       const response = await api.getLegInventory();
       setInventory(response);
-      const compositionDetailsPromise =
-        api.listCompositions && api.getCompositionDetail
-          ? api
-              .listCompositions()
-              .then((items) =>
-                Promise.all(
-                  items
-                    .filter((item) => String(item.status ?? '').toUpperCase() !== 'ARCHIVED')
-                    .map((item) => api.getCompositionDetail!(item.id)),
-                ),
-              )
-              .catch(() => [])
-          : Promise.resolve([]);
       const snapshotOverviewPromise = api.getSnapshotOverview
         ? api.getSnapshotOverview().catch(() => null)
         : Promise.resolve(null);
-      const [strategies, runs, compositionDetails, snapshotOverview] = await Promise.all([
+      const [strategies, runs, snapshotOverview] = await Promise.all([
         api.listStrategies(),
         api.listBacktestRuns({ limit: 100 }),
-        compositionDetailsPromise,
         snapshotOverviewPromise,
       ]);
       setBondSourceInstruments(snapshotOverview?.bond_fixed_income?.eligible_instruments ?? []);
       const candidateRows = buildStrategyCandidateRows(
         strategies,
         runs,
-        buildCompositionReferenceCounts(compositionDetails),
+        response.strategy_reference_counts,
       );
       setStrategyCandidates(candidateRows);
       const savedIds = readSavedStrategyLegIds();

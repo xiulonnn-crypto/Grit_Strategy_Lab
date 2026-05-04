@@ -1,15 +1,17 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CompositionDetailPage } from './pages/composition-detail-page';
 import type { ApiCompositionDetail } from './types';
 
 type FakeApi = {
   getCompositionDetail?: ReturnType<typeof vi.fn>;
+  refreshCompositionSourceFreezes?: ReturnType<typeof vi.fn>;
   updateComposition?: ReturnType<typeof vi.fn>;
 };
 
 const fakeApi = vi.hoisted<FakeApi>(() => ({
   getCompositionDetail: vi.fn(),
+  refreshCompositionSourceFreezes: vi.fn(),
   updateComposition: vi.fn(),
 }));
 
@@ -329,6 +331,7 @@ const detail: ApiCompositionDetail = {
 describe('CompositionDetailPage', () => {
   beforeEach(() => {
     fakeApi.getCompositionDetail = vi.fn().mockResolvedValue(detail);
+    fakeApi.refreshCompositionSourceFreezes = vi.fn().mockResolvedValue(detail);
     fakeApi.updateComposition = vi.fn().mockResolvedValue({ ...detail, status: 'ARCHIVED', status_label: '已归档' });
   });
 
@@ -346,14 +349,14 @@ describe('CompositionDetailPage', () => {
     expect(fakeApi.getCompositionDetail).toHaveBeenCalledWith('comp-001');
   });
 
-  it('renders the approved hero actions and routes them to edit, backtest, and allocation surfaces', async () => {
+  it('renders the approved hero actions and routes them to edit, backtest config, and allocation surfaces', async () => {
     await act(async () => {
       render(<CompositionDetailPage compositionId="comp-001" />);
     });
 
     expect(await screen.findByRole('heading', { level: 1, name: /全天候组合样例/ })).toBeInTheDocument();
     const editButton = screen.getByRole('button', { name: '修改组合' });
-    const backtestButton = screen.getByRole('button', { name: '查看回测' });
+    const backtestButton = screen.getByRole('button', { name: '运行回测' });
     const allocationButton = screen.getByRole('button', { name: '配置实验室' });
 
     expect(editButton).toHaveClass('primary-button');
@@ -366,13 +369,319 @@ describe('CompositionDetailPage', () => {
     expect(window.location.hash).toBe('#/compositions/workbench?composition_id=comp-001&intent=rebalance');
 
     fireEvent.click(backtestButton);
-    expect(window.location.hash).toBe('#/compositions/comp-001/backtest-runs/run-101');
+    expect(window.location.hash).toBe('#/compositions/comp-001/backtest-runs/new');
 
     fireEvent.click(allocationButton);
     expect(window.location.hash).toBe('#/compositions/comp-001/allocation-lab');
   });
 
-  it('uses the highest-weight strategy evidence for the hero backtest shortcut on the live composition route', async () => {
+  it('hides the status diagnosis panel when the current label is robust evidence-chain complete', async () => {
+    fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({
+      ...detail,
+      primary_diagnosis: {
+        status: '稳健',
+        issue_type: '证据链完整',
+        diagnosis_type: 'evidence_chain_complete',
+        diagnosis_label: '稳健：证据链完整',
+        frontend_explanation: '当前组合的收益、来源和冻结记录都可以追溯。',
+        action: '查看详情或继续回测/配置实验。',
+        resolution_criteria: '无需处理。',
+        actions: [],
+      },
+      diagnoses: [],
+      source_integrity: detail.source_integrity?.map((item) => ({
+        ...item,
+        drift_status: 'current',
+        alerts: [],
+      })),
+    });
+
+    await act(async () => {
+      render(<CompositionDetailPage compositionId="comp-001" />);
+    });
+
+    expect(await screen.findByRole('heading', { level: 1, name: /全天候组合样例/ })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '状态标签判定' })).not.toBeInTheDocument();
+    expect(document.querySelector('[data-ui="source-signature-rail"]')).not.toBeNull();
+  });
+
+  it('hides the status diagnosis panel when the current label is robust system proxy coverage', async () => {
+    const proxyDiagnosis = {
+      status: '稳健',
+      issue_type: '系统代理覆盖',
+      diagnosis_type: 'system_proxy_coverage',
+      diagnosis_label: '稳健：系统代理覆盖',
+      frontend_explanation: '当前使用的是平台已登记的代理关系，例如用指数历史补足 ETF 早期数据。',
+      action: '查看代理来源和覆盖区间。',
+      resolution_criteria: '系统代理关系有效，不触发待办。',
+      actions: [
+        {
+          label: '查看代理来源',
+          action_key: 'inspect_proxy_coverage',
+          action_kind: 'inspect',
+        },
+      ],
+      debug_facts: {
+        aligned_points: 120,
+        missing_points: 0,
+        fallback_used: false,
+        source_integrity_count: 3,
+        leg_quality: [],
+      },
+    };
+    fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({
+      ...detail,
+      primary_diagnosis: proxyDiagnosis,
+      diagnoses: [proxyDiagnosis],
+    });
+
+    await act(async () => {
+      render(<CompositionDetailPage compositionId="comp-001" />);
+    });
+
+    expect(await screen.findByRole('heading', { level: 1, name: /全天候组合样例/ })).toBeInTheDocument();
+    expect(screen.getByText('状态标签：稳健：系统代理覆盖')).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '状态标签判定' })).not.toBeInTheDocument();
+    expect(document.querySelector('[data-ui="source-signature-rail"]')).not.toBeNull();
+  });
+
+  it('surfaces the status diagnosis explanation and actionable sample-window facts on the detail rail', async () => {
+    window.location.hash = '';
+    fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({
+      ...detail,
+      id: 'composition_e40eb6b29475',
+      name: '标普动量均衡组合',
+      return_quality_summary: {
+        ...detail.return_quality_summary,
+        status: 'limited',
+        aligned_points: 106,
+        missing_points: 212,
+        coverage_pct: 33.3,
+        fallback_used: true,
+        leg_quality: [
+          {
+            leg_id: 'strategy-leg-spy',
+            display_name: '标普动量策略腿',
+            leg_kind: 'strategy',
+            source_ref_id: 'strategy_leg::spy::v1',
+            sample_points: 106,
+            aligned_points: 106,
+            missing_points: 0,
+            coverage_pct: 100,
+            window_start: '2017-03',
+            window_end: '2025-12',
+            issue_types: ['收益样本不足'],
+          },
+          {
+            leg_id: 'strategy-leg-gap',
+            display_name: 'QQQ 网格策略腿',
+            leg_kind: 'strategy',
+            source_ref_id: 'strategy_leg::qqq::v2',
+            sample_points: 318,
+            aligned_points: 106,
+            missing_points: 212,
+            coverage_pct: 33.3,
+            window_start: '1999-07',
+            window_end: '2025-12',
+            issue_types: ['对齐缺口'],
+          },
+        ],
+      },
+      primary_diagnosis: {
+        status: '待校准',
+        issue_type: '收益样本窗口不足',
+        diagnosis_type: 'return_sample_window_short',
+        diagnosis_label: '待校准：收益样本窗口不足',
+        frontend_explanation: '当前组合可对齐的月度收益样本只有 106 个月（约 8.8 年），低于 10 年验证门槛 120 个月，另有 212 个对齐缺口需要通过来源修复、代理确认或缺失规则处理。',
+        action: '回组合工作台替换或补齐更长历史来源；短窗口回测只用于复核，不是补足样本。',
+        resolution_criteria: '组合月度收益样本达到 120 个月以上；短窗口回测只能作为待校准复核，不会关闭该状态。',
+        actions: [
+          {
+            label: '调整来源样本',
+            action_key: 'open_composition_workbench',
+            action_kind: 'open_new_tab',
+            route: '/compositions/workbench?composition_id=composition_e40eb6b29475',
+          },
+          {
+            label: '查看来源证据',
+            action_key: 'inspect_source_evidence',
+            action_kind: 'open_new_tab',
+            route: '/compositions/composition_e40eb6b29475',
+          },
+          {
+            label: '按短样本配置回测',
+            action_key: 'open_backtest_config',
+            action_kind: 'open_new_tab',
+            route: '/compositions/composition_e40eb6b29475/backtest-runs/new',
+          },
+        ],
+        debug_facts: {
+          aligned_points: 106,
+          missing_points: 212,
+          coverage_pct: 33.3,
+          fallback_used: true,
+          leg_quality: [
+            {
+              leg_id: 'strategy-leg-spy',
+              display_name: '标普动量策略腿',
+              sample_points: 106,
+              aligned_points: 106,
+              missing_points: 0,
+              coverage_pct: 100,
+              window_start: '2017-03',
+              window_end: '2025-12',
+              issue_types: ['收益样本不足'],
+            },
+            {
+              leg_id: 'strategy-leg-gap',
+              display_name: 'QQQ 网格策略腿',
+              sample_points: 318,
+              aligned_points: 106,
+              missing_points: 212,
+              coverage_pct: 33.3,
+              window_start: '1999-07',
+              window_end: '2025-12',
+              issue_types: ['对齐缺口'],
+            },
+          ],
+        },
+      },
+      diagnoses: [],
+    });
+
+    await act(async () => {
+      render(<CompositionDetailPage compositionId="composition_e40eb6b29475" />);
+    });
+
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    expect(await screen.findByRole('heading', { level: 1, name: /全天候组合样例/ })).toBeInTheDocument();
+    const statusPanel = screen.getByRole('region', { name: '状态标签判定' });
+    expect(statusPanel).toHaveTextContent('当前组合可对齐的月度收益样本只有 106 个月（约 8.8 年）');
+    expect(statusPanel).toHaveTextContent('另有 212 个对齐缺口');
+    expect(statusPanel).toHaveTextContent('短窗口回测只用于复核，不是补足样本');
+    expect(statusPanel).toHaveTextContent('组合月度收益样本达到 120 个月以上');
+    expect(statusPanel).toHaveTextContent('收益样本 106 个月');
+    expect(statusPanel).toHaveTextContent('对齐缺口 212 个');
+    expect(statusPanel).toHaveTextContent('覆盖率 33%');
+    expect(statusPanel).toHaveTextContent('问题腿定位');
+    expect(statusPanel).toHaveTextContent('标普动量策略腿');
+    expect(statusPanel).toHaveTextContent('收益样本不足');
+    expect(statusPanel).toHaveTextContent('收益样本 106 个月 · 可对齐 106 个月 · 对齐缺口 0 个');
+    expect(statusPanel).toHaveTextContent('QQQ 网格策略腿');
+    expect(statusPanel).toHaveTextContent('对齐缺口');
+    expect(statusPanel).toHaveTextContent('收益样本 318 个月 · 可对齐 106 个月 · 对齐缺口 212 个');
+    expect(screen.getByRole('button', { name: '调整来源样本' })).toHaveClass('primary-button');
+    expect(screen.getByRole('button', { name: '查看来源证据' })).toHaveClass('ghost-button');
+    expect(screen.getByRole('button', { name: '按短样本配置回测' })).toHaveClass('ghost-button');
+
+    fireEvent.click(screen.getByRole('button', { name: '查看来源证据' }));
+    expect(scrollIntoView).toHaveBeenCalled();
+    expect(window.location.hash).toBe('');
+
+    fireEvent.click(screen.getByRole('button', { name: '按短样本配置回测' }));
+    expect(window.location.hash).toBe('#/compositions/composition_e40eb6b29475/backtest-runs/new');
+  });
+
+  it('opens an actionable dialog for secondary source-logic drift on the detail page', async () => {
+    window.location.hash = '';
+    const sampleDiagnosis = {
+      status: '待校准',
+      issue_type: '收益样本窗口不足',
+      diagnosis_type: 'return_sample_window_short',
+      diagnosis_label: '待校准：收益样本窗口不足',
+      frontend_explanation: '当前组合可对齐的月度收益样本只有 106 个月（约 8.8 年）。',
+      action: '回组合工作台替换或补齐更长历史来源。',
+      resolution_criteria: '组合月度收益样本达到 120 个月以上。',
+      actions: [
+        {
+          label: '调整来源样本',
+          action_key: 'open_composition_workbench',
+          action_kind: 'open_new_tab',
+          route: '/compositions/workbench?composition_id=composition_e40eb6b29475',
+        },
+      ],
+      debug_facts: { aligned_points: 106, missing_points: 212, fallback_used: true },
+    };
+    const driftDiagnosis = {
+      status: '待校准',
+      issue_type: '逻辑一致性漂移',
+      diagnosis_type: 'source_logic_drift',
+      diagnosis_label: '待校准：逻辑一致性漂移',
+      frontend_explanation: '当前来源内容和保存时冻结记录不一致。',
+      action: '先查看来源证据；确认当前来源正确后重新冻结，否则回工作台回滚或替换来源。',
+      resolution_criteria: '当前来源指纹已重新冻结，或组合已回滚到冻结记录。',
+      actions: [
+        {
+          label: '确认并重新冻结来源指纹',
+          action_key: 'refresh_source_freezes',
+          action_kind: 'execute',
+        },
+        {
+          label: '查看来源证据',
+          action_key: 'inspect_source_evidence',
+          action_kind: 'open_new_tab',
+          route: '/compositions/composition_e40eb6b29475',
+        },
+      ],
+      debug_facts: { source_ref_id: 'strategy_leg::strat-001::pv-003' },
+    };
+    const sourceIntegrity = detail.source_integrity ?? [];
+    const firstSourceIntegrity = sourceIntegrity[0]!;
+    const refreshedDetail = {
+      ...detail,
+      id: 'composition_e40eb6b29475',
+      primary_diagnosis: sampleDiagnosis,
+      diagnoses: [sampleDiagnosis],
+      source_integrity: sourceIntegrity.map((item) => ({ ...item, drift_status: 'current', alerts: [] })),
+    };
+    fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({
+      ...detail,
+      id: 'composition_e40eb6b29475',
+      name: '标普动量均衡组合',
+      primary_diagnosis: sampleDiagnosis,
+      diagnoses: [sampleDiagnosis, driftDiagnosis],
+      source_integrity: [
+        {
+          ...firstSourceIntegrity,
+          drift_status: 'drifted',
+          current_ref_id: firstSourceIntegrity.source_ref_id,
+          alerts: ['Current source version differs from the frozen source signature.'],
+        },
+        ...sourceIntegrity.slice(1),
+      ],
+    });
+    fakeApi.refreshCompositionSourceFreezes = vi.fn().mockResolvedValue(refreshedDetail);
+
+    await act(async () => {
+      render(<CompositionDetailPage compositionId="composition_e40eb6b29475" />);
+    });
+
+    const statusPanel = await screen.findByRole('region', { name: '状态标签判定' });
+    expect(statusPanel).toHaveTextContent('待校准：收益样本窗口不足');
+
+    fireEvent.click(screen.getByRole('button', { name: '处理配置漂移' }));
+    const dialog = screen.getByRole('dialog', { name: '逻辑一致性漂移状态标签' });
+    expect(within(dialog).getByText('当前来源内容和保存时冻结记录不一致。')).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: '确认并重新冻结来源指纹' })).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '确认并重新冻结来源指纹' }));
+    await waitFor(() => {
+      expect(fakeApi.refreshCompositionSourceFreezes).toHaveBeenCalledWith(
+        'composition_e40eb6b29475',
+        expect.objectContaining({
+          confirmed_by: 'operator',
+          reason: driftDiagnosis.action,
+        }),
+      );
+    });
+  });
+
+  it('opens the composition backtest config from the hero backtest action on the live composition route', async () => {
     fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({
       ...detail,
       id: 'composition_630718a64821',
@@ -413,9 +722,9 @@ describe('CompositionDetailPage', () => {
       '#/compositions/workbench?composition_id=composition_630718a64821&intent=rebalance',
     );
 
-    fireEvent.click(screen.getByRole('button', { name: '查看回测' }));
+    fireEvent.click(screen.getByRole('button', { name: '运行回测' }));
     expect(window.location.hash).toBe(
-      '#/compositions/composition_630718a64821/backtest-runs/run_95db6d1d4ba9',
+      '#/compositions/composition_630718a64821/backtest-runs/new',
     );
   });
 
@@ -445,7 +754,7 @@ describe('CompositionDetailPage', () => {
     expect(document.querySelectorAll('.composition-detail-kpi-card__compare')).toHaveLength(7);
     expect(
       Array.from(document.querySelectorAll('.composition-detail-kpi-card__head span')).map((node) => node.textContent),
-    ).toEqual(['α贡献', 'β暴露', '风险贡献偏离', '相关性压力', '净收益', '最大回撤', '收益质量']);
+    ).toEqual(['净收益', '最大回撤', 'α贡献', 'β暴露', '风险贡献偏离', '相关性压力', '收益质量']);
     expect(screen.getAllByText('基准').length).toBeGreaterThan(0);
     expect(screen.getByText('相对基准 +1.4%')).toBeInTheDocument();
     expect(screen.getByText('总损耗')).toBeInTheDocument();
@@ -462,7 +771,7 @@ describe('CompositionDetailPage', () => {
     expect(sourceRail?.textContent).toContain('动量策略腿');
     expect(sourceRail?.textContent).toContain('策略腿');
     expect(sourceRail?.textContent).toContain('有新版本，待更新');
-    expect(sourceRail?.textContent).toContain('当前版本偏离冻结指纹。');
+    expect(sourceRail?.textContent).toContain('当前来源指纹偏离冻结记录。');
     expect(sourceRail?.textContent).not.toContain('Current source version');
     expect(sourceRail?.textContent).not.toContain('来源签名');
     expect(sourceRail?.textContent).not.toContain('签名有效');
@@ -481,6 +790,95 @@ describe('CompositionDetailPage', () => {
     expect(drawer).toHaveClass('leg-inventory-drawer--detail');
     expect(drawer.querySelector('.leg-inventory-detail-grid')).not.toBeNull();
     expect(drawer.querySelector('[data-ui="leg-source-evidence-drawer"]')).not.toBeNull();
+  });
+
+  it('keeps same-ref strategy signature drift separate from new-version prompts', async () => {
+    const sourceRefId = 'strategy_leg::strat-spy::strat-spy-v3';
+    fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({
+      ...detail,
+      source_evidence: [
+        {
+          ...detail.source_evidence[0],
+          id: 'freeze-spy-signature',
+          leg_id: 'composition-leg-spy',
+          display_name: '标普动量策略-v3',
+          freeze_ref_id: sourceRefId,
+          current_ref_id: sourceRefId,
+          drift_status: 'drifted',
+          alerts: ['Current source version differs from the frozen source signature.'],
+          snapshot: {
+            display_name: '标普动量策略-v3',
+            leg_kind: 'strategy',
+            source_ref_id: sourceRefId,
+            version_label: 'v3',
+            weight_pct: 30,
+            config: {
+              source_integrity: {
+                leg_id: sourceRefId,
+                source_ref_id: sourceRefId,
+                current_ref_id: sourceRefId,
+                signature_status: 'verified',
+                drift_status: 'current',
+                alerts: [],
+              },
+            },
+          },
+        },
+        ...detail.source_evidence.slice(1),
+      ],
+      source_integrity: [
+        {
+          leg_id: sourceRefId,
+          display_name: '标普动量策略-v3',
+          source_ref_id: sourceRefId,
+          freeze_hash: 'hash-spy-freeze',
+          signature_status: 'stale',
+          drift_status: 'drifted',
+          current_ref_id: sourceRefId,
+          checked_at: '2026-04-29T11:10:08Z',
+          alerts: ['Current source version differs from the frozen source signature.'],
+        },
+        ...(detail.source_integrity ?? []).slice(1),
+      ],
+      normalized_legs: [
+        {
+          ...detail.normalized_legs[0],
+          id: sourceRefId,
+          source_ref_id: sourceRefId,
+          display_name: '标普动量策略-v3',
+          version_label: 'v3',
+          config: {
+            source_integrity: {
+              leg_id: sourceRefId,
+              source_ref_id: sourceRefId,
+              current_ref_id: sourceRefId,
+              signature_status: 'verified',
+              drift_status: 'current',
+              alerts: [],
+            },
+          },
+        },
+        ...detail.normalized_legs.slice(1),
+      ],
+    });
+
+    await act(async () => {
+      render(<CompositionDetailPage compositionId="composition_630718a64821" />);
+    });
+
+    expect(await screen.findByRole('heading', { level: 1, name: /全天候组合样例/ })).toBeInTheDocument();
+    const sourceRail = document.querySelector('[data-ui="source-signature-rail"]');
+    expect(sourceRail?.textContent).toContain('标普动量策略-v3');
+    expect(sourceRail?.textContent).toContain('指纹待复核');
+    expect(sourceRail?.textContent).toContain('当前来源指纹偏离冻结记录。');
+    expect(sourceRail?.textContent).not.toContain('有新版本，待更新');
+
+    fireEvent.click(document.querySelectorAll<HTMLButtonElement>('.composition-detail-approved-source-card')[0]);
+    const drawer = await screen.findByRole('dialog', { name: '腿部详情' });
+    expect(drawer.textContent).toContain('最新版本');
+    expect(drawer.textContent).toContain('指纹待复核');
+    expect(drawer.textContent).not.toContain('有新版本');
+    expect(drawer.querySelector('[data-ui="leg-drift-status"]')?.textContent).not.toBe('版本漂移');
   });
 
   it('renders the command-center chart overlays without a separate excess-return mini chart', async () => {
@@ -861,6 +1259,50 @@ describe('CompositionDetailPage', () => {
     expect(versionCards[0].textContent).toContain('当前配置版本 v5');
     expect(versionCards[0].textContent).toContain('当前保存配置已生成版本记录');
     expect(versionCards[0].textContent).not.toMatch(/v61|v14012|v30383|v464|v95|v96|v2 -> v3/);
+  });
+
+  it('renders execution history from the frozen composition version instead of strategy source versions', async () => {
+    fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({
+      ...detail,
+      current_composition_version_label: '当前配置版本 v7',
+      current_composition_version_number: 7,
+      normalized_legs: detail.normalized_legs.map((leg) => ({
+        ...leg,
+        version_label: 'v7',
+        config: { ...(leg.config ?? {}), latest_run_id: 'run-current-latest' },
+      })),
+      source_evidence: detail.source_evidence.map((item) => ({
+        ...item,
+        snapshot: { ...(item.snapshot ?? {}), version_label: 'v7', run_id: 'run-current-latest' },
+      })),
+      backtest_history: [
+        {
+          run_id: 'comp_run_frozen_v2',
+          created_at: '2026-04-29T11:10:08.000Z',
+          completed_at: '2026-05-04T11:12:08.000Z',
+          composition_version_label: '组合配置 v2',
+          strategy_version_label: '动量 v3 / 网格 v4',
+          period_label: '10Y',
+          annualized_return: 24.7483,
+          sharpe: 1.7,
+        },
+      ],
+    });
+
+    await act(async () => {
+      render(<CompositionDetailPage compositionId="comp-001" />);
+    });
+
+    await screen.findByRole('heading', { level: 1, name: /全天候组合样例/ });
+    const executionHistory = document.querySelector('[data-ui="composition-execution-history"]');
+    expect(executionHistory?.textContent).toContain('2026-04-29 · 组合配置 v2');
+    expect(executionHistory?.textContent).not.toContain('2026-05-04 · 组合配置 v2');
+    expect(executionHistory?.textContent).toContain('组合配置 v2');
+    expect(executionHistory?.textContent).not.toContain('动量 v3 / 网格 v4');
+    expect(executionHistory?.textContent).toContain('10Y / 年化 24.7% / 夏普 1.70');
+    expect(executionHistory?.textContent).not.toContain('当前配置版本 v7');
+    expect(executionHistory?.textContent).not.toContain('run-current-latest');
+    expect(executionHistory?.querySelector('a[href="#/compositions/comp-001/backtest-runs/comp_run_frozen_v2"]')).not.toBeNull();
   });
 
   it('localizes audit trail actions, actors, and summaries for live composition events', async () => {

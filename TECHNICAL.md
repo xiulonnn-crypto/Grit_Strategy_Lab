@@ -28,13 +28,14 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 ### 1.3 已批准 UI 交付物实施门禁
 
-当任务存在已批准的 HTML 与代码级设计规格 Markdown 时，不能只把它们当作参考图。它们是 UI 实施硬基线。
+所有 UI 实现页面（新增、改造、修复、重构）只要存在 `DESIGN.md`、批准 HTML/SPEC、截图、设计稿或用户给出的目标页面，就必须把这些材料作为 UI 实施硬基线，不能只把它们当作参考图。
 
 实施前必须先形成 `UI Artifact Trace Matrix`，记录：
 
 - 批准 HTML/SPEC 的页面 key、URL/query、模块区块与最终截图基准。
 - 每个模块对应的 React 文件、组件、CSS 或 view-model/formatter。
 - 必须还原的中文前台文案、状态标签、数值格式、颜色语义和允许的 live-data 替代。
+- 操作区按钮必须作为独立验收项记录按钮数量、文案、顺序、主次层级、尺寸、圆角、位置和禁用态；不能只验证按钮可点击或后端动作可触发。
 - 必须验证的交互状态，包括 tab、filter、drawer、sticky、disabled/joined、save/refresh、loading、empty、error 与 responsive。
 - 验收证据路径，包括 focused test 命令、桌面截图、DOM 文案/状态扫描和交互证明。
 - 与批准稿不同的剩余偏离项；没有明确批准的偏离视为设计漂移。
@@ -43,6 +44,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 - focused frontend tests 是必要门禁，但不足以证明 UI 还原。
 - 已批准 UI 交付物实施必须同时提供截图、DOM 文案/状态扫描与关键交互证明。
+- UI 页面完成定义必须绑定精确 route、query、对象 ID 或用户报告 URL。Hash SPA 验收要使用 cache-busting document reload，例如 `http://127.0.0.1:4173/?v=<timestamp>#/...`；只验证默认对象、列表第一条、标题文案、关键词存在或 mock fixture，不能证明目标页面已经按设计稿还原。
 - 像素对齐不能只看外框坐标和高度；还必须检查模块内部的视觉密度、内容到容器边界的空白、强制 `min-height` / `height` 是否造成空洞。若用户反馈“空白多、模块太高、密度松”，优先移除非必要强制高度并用内容自适应、padding/gap/line-height 精调，而不是继续追求静态稿外框高度。
 - CSS 契约测试不能把过大的固定高度当作 UI 一致性本身；除非批准稿明确要求固定高度，否则应断言大 `min-height` / `height` 不存在，并用截图或 DOM geometry 证明模块间距和卡片内边距已经收敛。
 - 对有指定上下顺序的 grid / flex 复合模块，不能只断言 DOM heading 顺序；必须同时用 CSS 契约中的 `grid-template-areas`、`grid-area` / `order` 或真实浏览器 geometry 证明视觉顺序，避免源码顺序正确但页面视觉顺序漂移。
@@ -326,10 +328,15 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - `POST /strategies/{strategy_id}/backtest-runs/preview`
 - `POST /backtest-runs/{run_id}/clone`
 - `GET /compositions`
+- `GET /compositions/backtest-runs`
+- `GET /compositions/allocation-jobs`
 - `GET /compositions/{composition_id}`
 - `POST /compositions/preview`
 - `POST /compositions`
 - `PATCH /compositions/{composition_id}`
+- `POST /compositions/{composition_id}/diagnostics/refresh`
+- `POST /compositions/{composition_id}/source-freezes/refresh`
+- `POST /compositions/{composition_id}/proxy-confirmations`
 - `POST /compositions/{composition_id}/backtest-runs`
 - `GET /compositions/{composition_id}/backtest-runs/{run_id}`
 - `GET /compositions/{composition_id}/backtest-runs/{run_id}/orders`
@@ -337,8 +344,28 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - `GET /compositions/{composition_id}/backtest-runs/{run_id}/orders/export`
 - `POST /compositions/{composition_id}/allocation-jobs`
 - `GET /compositions/{composition_id}/allocation-jobs/{job_id}`
+- `GET /compositions/{composition_id}/versions`
+- `GET /compositions/{composition_id}/versions/{version_id}`
+- `POST /compositions/{composition_id}/allocation-jobs/{job_id}/candidates/{candidate_id}/promote-draft`
+- `POST /compositions/{composition_id}/decision-packets`
+- `GET /compositions/{composition_id}/decision-packets/{packet_id}`
+- `GET /compositions/{composition_id}/decision-packets/{packet_id}/export`
+- `GET /pit-data`
+- `POST /pit-data/research-waiver`
+- `DELETE /pit-data/research-waiver/{waiver_id}`
+- `POST /pit-data/identity-overrides`
+- `POST /pit-data/identity-scraper/restart`
+- `GET /factors`
+- `POST /factors`
+- `POST /factors/diagnostics/preview`
+- `GET /factors/{factor_id}`
+- `POST /factors/{factor_id}/diagnostics`
+- `GET /factors/{factor_id}/diagnostics/{run_id}/report`
 - `GET /optimization-jobs`
 - `GET /optimization-jobs/{job_id}/detail`
+- `PATCH /optimization-jobs/{job_id}`
+- `POST /optimization-jobs/{job_id}/filtered-results`
+- `DELETE /optimization-jobs/{job_id}`
 - `POST /strategies/{strategy_id}/optimization-jobs`
 - `POST /optimization-jobs/{job_id}/resume`
 - `POST /optimization-jobs/{job_id}/candidates`
@@ -350,7 +377,8 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 
 当前一期 Compose First 的补充真相：
 
-- `GET /leg-inventory` 是统一读模型入口：策略腿来自 `strategy + parameter version + latest eligible run` 的投影，不落独立真相表；资产腿与现金腿来自最小持久化定义表。
+- `GET /leg-inventory` 是统一读模型入口：策略腿来自 `strategy + parameter version + latest eligible run` 的投影，不落独立真相表；资产腿与现金腿来自最小持久化定义表；`strategy_reference_counts` 是资产库首屏引用数的正式投影，前端不得为了引用计数逐个拉取组合详情。
+- `GET /strategies` 与 `GET /backtest-runs` 属于工作台和资产库共享热路径；服务端可以用更新时间签名和短突发窗口复用列表投影，但窗口外必须重新校验策略、回测和优化任务更新时间，避免长期展示旧列表。
 - `POST /asset-legs` 与 `POST /cash-legs` 只负责最小定义落库，不建立版本树，也不改写策略主链路。
 - `GET /compositions`、`GET /compositions/{id}`、`POST /compositions/preview`、`POST /compositions`、`PATCH /compositions/{id}` 共同组成一期组合工作台与详情页的正式契约面。
 - `POST /compositions/preview` 返回权重摘要、收益流预演、相关性矩阵、风险贡献预览、维护成本与再平衡摘要，供工作台边调边判断；Phase 1.2 同时返回 `return_quality_summary`、`rebalance_events`、`source_integrity`，并在风险贡献里补充边际贡献、预算占用、债券久期/凸性占用。
@@ -361,11 +389,27 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - `composition_audit_events` 是 Phase 1.2 后端 append-only 审计表；创建、结构 PATCH、状态切换、来源冻结、再平衡检查和债券快照刷新影响检查都应写入该表，详情 `audit_trail` 从持久化事件流读取，旧数据才允许回退到临时投影。
 - `GET /data-snapshots/overview` 继续作为唯一快照总览入口；债券/固定收益治理页通过新增 `bond_fixed_income` 分段扩展现有契约，不另开第二套快照 API。Phase 1.2 的债券质量字段包括 `quality_audit`、`repair_rules`、`daily_accrual_status`、`risk_budget_inputs`，修复/补齐仍走 `POST /admin/snapshot-refresh-jobs` 的 `bond` target。
 
+当前多因子一期的补充真相：
+
+- 一期正式可操作交付面包括 `PIT 清洗中心`、`因子库`、`因子详情/诊断` 与 `因子编辑器`；`挖掘沙盒` 与 `隔离检疫区` 当前只是导航和路线占位，不把数据快照页改造成因子页面，也不调整 `#/snapshots` 现有结构。
+- 左侧导航的 `因子` 组当前包含 `因子库`、`挖掘沙盒` 与 `隔离检疫区`；后两者只渲染后续里程碑说明，不能在本期文档或验收中被写成已接通自动挖掘/检疫流程。`数据` 组必须同时保留 `PIT 清洗中心` 与 `数据快照`；`数据快照` 是既有快照入口，本期只保留导航可达，不做页面结构改造。
+- `GET /pit-data` 只负责点时价格、样本池、异常清洗与未来函数门禁摘要，供因子诊断判断数据可用性。
+- `POST /pit-data/research-waiver`、`DELETE /pit-data/research-waiver/{waiver_id}`、`POST /pit-data/identity-overrides` 与 `POST /pit-data/identity-scraper/restart` 是 PIT 清洗中心当前写入面：分别负责研究态豁免、撤销豁免、人工身份映射和身份修复任务重启。它们只改变 PIT 诊断治理状态，不绕过 Full Ready、正式晋升或组合入库门禁。
+- `GET /pit-data` 属于全路由首屏性能敏感 API：服务可以对读取结果使用短时缓存，但 PIT 写入接口必须主动失效缓存，避免豁免、身份覆盖或身份修复任务重启后的页面继续显示旧治理状态。
+- `GET /factors`、`POST /factors`、`GET /factors/{factor_id}`、`POST /factors/{factor_id}/diagnostics`、`POST /factors/diagnostics/preview` 与 `GET /factors/{factor_id}/diagnostics/{run_id}/report` 是多因子一期的固定 API 切片。若请求或响应字段变化，`src/grit_backtest_platform/models.py` 与 `web/src/types.ts` 必须同任务同步。
+- 因子详情页交付不得只用路由可达、标题/文案存在或 mock 单测作为通过标准。涉及批准稿的 `#/factors/:factorId` 必须用实际 canonical route（例如 `#/factors/s_mom_12m1m_rank`）建立 UI trace matrix，逐项核对紧凑标题区、十格证据热力图、换手率与衰减、分层收益、极端场景、风险提示、合规足迹和 PDF 报告入口，并保留截图或 DOM 结构证据；未完成这些证据时不能宣布页面与设计稿一致。
+- 默认五类常用因子固定使用分层描述符 canonical ID：`s_mom_12m1m_rank`、`s_val_ep_ltm_raw`、`s_vol_252d_rank`、`s_size_cur_log` 与 `s_qlty_fcfy_ttm_raw`。旧默认 ID 只作为 alias 兼容读取，不能出现在 `GET /factors` 列表展示中。`POST /factors` 必须携带 `source_category_metric_window_operator` 描述符，人工因子 ID 由 `m_<category>_<metric>_<window>_<operator>` 生成，重复 descriptor 返回 409。
+- 基础面 PIT 数据平面由 `ds-fundamentals`、`dataset_fundamental_points` 与 `dataset_fundamental_coverage` 承载；本地启动会幂等生成 repo-controlled 种子快照，覆盖 `ltm_earnings`、`market_cap`、`operating_cash_flow`、`capex`、`enterprise_value` 与 `total_shares`。因此默认估值、质量和规模因子不再默认显示 `基础数据待补`；若 `ds-fundamentals` 缺失或字段不全，应显示明确的 `基础面 PIT 缺口` 并阻止诊断。
+- 前台文案全部中文；因子入口命名为 `因子库`，不得使用广场类命名。
+- `#/factors` 的研判区属于前端性能敏感面：相关性热力图按 descriptor category 聚类排序，提供 `仅显示高相关对` 筛选，超过可视阈值时使用虚拟矩阵窗口；同类高相关和跨类别高相关必须有不同强度提示。表格 IC sparkline 使用带 0 位虚线的双色区域图；操作列最多勾选两个因子并切换到因子指纹比对。`SANDBOX_READY` 因子的数据门禁旁必须提供 `缺口速报` 浮层和跳转 PIT 覆盖率缺口清单的闭环动作。
+
 当前优化任务 detail 的补充真相：
 
 - `GET /optimization-jobs/{job_id}/detail` 在 `QUEUED`、`RUNNING`、`INTERRUPTED` 三种运行态必须保持零扫描优先：先直接信任 `optimization_jobs.summary_json/result_json` 里的 progress、ETA、heartbeat、resume 元数据，不在热路径扫描 `optimization_job_trials`；只有旧记录缺字段时才回退读取 trial checkpoint。
 - 运行态 ETA 依赖 persisted trial 的 `started_at/completed_at` 时间戳推导，不能假设秒级精度足够。
 - 终态结果中心同样优先走零 trial 快路径：当 `optimization_jobs.candidates_json/result_json` 已经持久化完成候选区时，detail 不再重新扫描 `optimization_job_trials`；只有旧记录缺失候选投影时才回退读取 trial checkpoint。
+- 终态首屏读取应使用 `matching_limit` 请求参数获取候选预览。响应必须保留完整 `matching_combination_count` 与来源标记；完整 `matching_combinations` 只在“查看全部组合”等用户动作后读取。
+- 大型优化任务不得把完整 `all_trials` 候选集合继续内联进 `optimization_jobs.request_json` 或 `summary_json`。当 trial checkpoint 已存在时，任务行只保存轻量候选投影，完整候选由 `optimization_job_trials` 按需重建。
 - `optimization_job_trials.chart_series_json` 仍维持分层存储：大多数 trial 只持久化轻量 `[]`，仅终态 top-K 候选回补完整曲线。
 - 优化执行期默认只持久化 trial 级 `parameter_snapshot`、`metrics`、`score` 与时间戳；完整曲线只在终态 top-K 回补并持久化。
 - `optimization_job_trials` 额外下沉了热路径排序列：`return_sharpe`、`oos_sharpe`、`total_return_pct`、`stability`，用于运行态和终态减少 `metrics_json` 解码。
@@ -375,6 +419,15 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - 运行中优化任务的摘要写入由唯一写入者节流：最多每秒一次，或者每完成五个 trial 写一次；每次心跳都会持久化 `completed_combinations`、`next_trial_index`、`best_metrics_summary`、`estimated_remaining_minutes`、`estimated_completed_at` 与 `heartbeat_at`，而终态状态切换仍然立即持久化。
 - 执行期会增量维护 top-K 与 heatmap winner cells；终态优先复用增量摘要并只为终态 top-K 回补完整 metrics，避免全量 successful trials 再次排序和候选分析重算。
 - 优化任务首组启动现在必须遵守两个热路径约束：`_ensure_optimization_snapshots_ready()` 在无 `start_date/end_date` 的优化预检里只允许读取 `dataset_symbol_coverage` 来判断 snapshot readiness，不能再次全量扫描 `dataset_price_bars`；`python -m grit_backtest_platform.main run-optimization` 也必须保持 lazy bootstrap，禁止在 worker 冷启动阶段无条件创建 FastAPI app 或 runtime market-data provider。
+
+当前全路由首屏性能契约：
+
+- 新页面开发和旧页面改造默认以真实 `4173` cache-busting document reload 首屏 1 秒内为目标；最终验收要记录 pass/slow/error 数量和最慢路由，不能只凭测试通过判断性能达标。
+- 路由首屏 API 必须是轻量读模型：列表、摘要、overview、inventory 和结果页初载只能返回预览、聚合计数、最新摘要或显式分页窗口，不得携带完整候选盘、完整 trial ledger、完整订单流水、完整诊断轨迹或逐对象详情。
+- 大集合的正式存储边界是 checkpoint/detail 表、导出接口、查看全部弹层或 drilldown 页面。若 UI 需要完整集合，先渲染首屏预览，再由用户动作触发完整读取，并为预览态与完整读取态分别补回归覆盖。
+- 热路径读模型允许服务级短缓存、更新时间签名和突发窗口复用；对应写入接口必须主动失效或刷新缓存，尤其是 PIT 豁免、身份覆盖、快照刷新、组合状态、腿部定义、优化结果候选和策略/回测状态变更。
+- 跨对象引用计数和首屏 KPI 必须由列表契约直接返回，例如 `GET /leg-inventory.strategy_reference_counts`、策略最新运行摘要、组合列表摘要和快照 readiness 摘要；前端不得为了 badge、引用数或首屏指标逐个拉取详情端点。
+- 如果新增或修改这些性能契约字段，同一任务必须同步 `src/grit_backtest_platform/models.py`、`web/src/types.ts`、demo store / API mock 和对应后端或前端回归测试。
 
 ### 5.4 frontend 关键入口
 
@@ -397,18 +450,28 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - `#/compositions`
 - `#/legs`
 - `#/compositions/workbench`
+- `#/compositions/list`
+- `#/compositions/backtest-runs`
+- `#/compositions/lab`
 - `#/compositions/:id`
 - `#/compositions/:compositionId/backtest-runs/new`
 - `#/compositions/:compositionId/backtest-runs/:runId`
 - `#/compositions/:compositionId/allocation-lab`
 - `#/compositions/:compositionId/allocation-jobs/:jobId`
 - `#/strategies`
+- `#/creation/asset-allocation/new`
 - `#/creation/sessions/:id`
 - `#/strategies/:id`
 - `#/strategies/:id/backtest-runs/new`
 - `#/runs`
 - `#/runs/:id`
 - `#/snapshots`
+- `#/pit-data`
+- `#/factors`
+- `#/factors/new`
+- `#/factors/sandbox`
+- `#/factors/quarantine`
+- `#/factors/:factorId`
 - `#/optimization-jobs`
 - `#/optimization-jobs/new`
 - `#/optimization-jobs/new/config?strategy_id=...`
@@ -428,6 +491,8 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 | `BacktestExecutionStage` | `DATA_FETCHING`、`SIMULATING`、`METRIC_CALCULATING` |
 | `OptimizationJobStatus` | `QUEUED`、`RUNNING`、`INTERRUPTED`、`COMPLETED`、`PARTIALLY_FAILED`、`FAILED` |
 | `SnapshotStatus` | `READY`、`STALE`、`INCOMPLETE`、`FAILED` |
+| `FactorLifecycleStatus` | `DRAFT`、`VERIFIED`、`PRODUCTION`、`DECAYED` |
+| `FactorDiagnosticStatus` | `READY_TO_DIAGNOSE`、`SANDBOX_READY`、`BLOCKED_PIT`、`BLOCKED_DATA`、`RUNNING`、`COMPLETED`、`FAILED` |
 | `TrialStatus` | `SUCCEEDED`、`FAILED`、`PENDING` |
 | `DataSegmentType` | `FULL`、`TRAIN`、`TEST`、`VALIDATION` |
 
@@ -684,7 +749,7 @@ Phase 1.2 验证时至少覆盖：
 - Frontend: `composition.workbench.test.tsx`、`composition.detail.test.tsx`、`leg.inventory.test.tsx`、`snapshots.page.test.tsx`，并在合同变更后执行 `powershell -ExecutionPolicy Bypass -File .\scripts\codex-test-frontend.ps1 -StrictGlobalTypes` 或等价 `tsc --noEmit`。
 - Live acceptance 仍受 `harness/fixtures/seed_workspace/` 缺失限制；不能把 fixture-backed reset 路径声称为通过。
 
-债券快照专项回归必须覆盖七条运行时行：UST 2Y、UST 10Y、UST 30Y、13W T-Bill、TIPS 5Y、TIPS 10Y、LQD。测试和 fixture 字段统一使用 `asset_type`、`tenor_label`、`audit_profile`、`discount_rate_pct`、`real_yield_pct`、`inflation_factor`、`breakeven_inflation_bps`、`effective_duration`、`sec_yield_30d_pct`、`credit_quality`、`tracking_error_bps`、`audit_alerts`、`audit_notes`、`tracking_status`。LQD `WATCH` 行不得创建资产腿；T-Bill 在 `discount_rate_pct` 存在时可豁免 `accrued_interest`；TIPS 需要 breakeven 证据；UST 利差异常应保留 `audit_alerts`。
+债券快照专项回归必须覆盖七条运行时行：UST 2Y、UST 10Y、UST 30Y、13W T-Bill、TIPS 5Y、TIPS 10Y、LQD。债券页发布当前最新七行契约，历史旧行和手工 smoke 行可以保留在库里，但不能拉低当前覆盖率；债券页顶部就绪度和资产腿入库门禁以这七行契约为准，已就绪时共享快照阻塞仅保留为诊断提醒。健康仪表盘状态条、关键字段可用率和审计矩阵必须都从同一批 `eligible_instruments` 推导；有数值或被正式 `WAIVED` 的 `INFERRED` 字段计入“可用”，只有 `MISSING`、无值的推算待写入、`WATCH` 或阻塞状态才影响资产腿和后续组合可用性。测试和 fixture 字段统一使用 `asset_type`、`tenor_label`、`audit_profile`、`discount_rate_pct`、`real_yield_pct`、`inflation_factor`、`breakeven_inflation_bps`、`effective_duration`、`sec_yield_30d_pct`、`credit_quality`、`tracking_error_bps`、`tracking_error_source`、`audit_alerts`、`audit_notes`、`tracking_status`。LQD `WATCH` 行不得创建资产腿；当 LQD 有已发布且可审计的 tracking error 来源时可进入 `READY`；T-Bill 在 `discount_rate_pct` 存在时可豁免 `accrued_interest`；TIPS 需要 breakeven 证据；UST 利差异常应保留 `audit_alerts`。
 
 验证入口：
 

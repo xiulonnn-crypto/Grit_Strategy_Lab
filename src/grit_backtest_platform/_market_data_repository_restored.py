@@ -11,6 +11,7 @@ from .storage import dumps, iso_now, loads
 DATASET_PRICE_SNAPSHOT_ID = "ds-price"
 DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID = "ds-corporate-actions"
 DATASET_INDEX_VALUATIONS_SNAPSHOT_ID = "ds-index-valuations"
+DATASET_FUNDAMENTALS_SNAPSHOT_ID = "ds-fundamentals"
 DEFAULT_UNIVERSE_ANCHOR_SCHEDULE = "01-01,07-01"
 
 
@@ -222,6 +223,43 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS dataset_fundamental_points (
+            dataset_snapshot_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            date TEXT NOT NULL,
+            ltm_earnings REAL,
+            market_cap REAL,
+            operating_cash_flow REAL,
+            capex REAL,
+            enterprise_value REAL,
+            total_shares REAL,
+            source TEXT NOT NULL DEFAULT '',
+            fallback_source TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(dataset_snapshot_id, symbol, date),
+            FOREIGN KEY(dataset_snapshot_id) REFERENCES dataset_snapshots(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dataset_fundamental_coverage (
+            dataset_snapshot_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            start_date TEXT,
+            end_date TEXT,
+            observation_count INTEGER NOT NULL DEFAULT 0,
+            fields_json TEXT NOT NULL DEFAULT '[]',
+            source TEXT NOT NULL DEFAULT '',
+            fallback_source TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(dataset_snapshot_id, symbol),
+            FOREIGN KEY(dataset_snapshot_id) REFERENCES dataset_snapshots(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS bond_fixed_income_snapshots (
             id TEXT PRIMARY KEY,
             instrument_id TEXT NOT NULL,
@@ -274,6 +312,58 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS pit_cleaning_runs (
+            id TEXT PRIMARY KEY,
+            dataset_snapshot_id TEXT NOT NULL,
+            universe_snapshot_id TEXT NOT NULL,
+            as_of_date TEXT NOT NULL,
+            cleaning_version TEXT NOT NULL,
+            status TEXT NOT NULL,
+            adjusted_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+            universe_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+            outlier_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+            coverage_pct REAL NOT NULL DEFAULT 0,
+            blocker_json TEXT NOT NULL DEFAULT '{}',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pit_quality_events (
+            id TEXT PRIMARY KEY,
+            pit_cleaning_run_id TEXT,
+            dataset_snapshot_id TEXT,
+            universe_snapshot_id TEXT,
+            event_time TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            message TEXT NOT NULL,
+            target_date TEXT,
+            target_symbol TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pit_research_waivers (
+            id TEXT PRIMARY KEY,
+            dataset_snapshot_id TEXT NOT NULL,
+            universe_snapshot_id TEXT NOT NULL,
+            ignored_symbols_json TEXT NOT NULL DEFAULT '[]',
+            reason TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT 'researcher',
+            created_at TEXT NOT NULL,
+            revoked_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS run_artifacts (
             run_id TEXT PRIMARY KEY,
             daily_performance_json TEXT NOT NULL DEFAULT '[]',
@@ -305,6 +395,9 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_dataset_index_valuations_key_date ON dataset_index_valuations(index_key, date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dataset_fundamental_points_symbol_date ON dataset_fundamental_points(symbol, date)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_bond_fixed_income_instrument_date ON bond_fixed_income_snapshots(instrument_id, snapshot_date)"
@@ -340,9 +433,16 @@ class MarketDataRepository:
             initialize_market_data_schema(conn)
 
     def connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30.0)
         conn.row_factory = _row_factory
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
+        except sqlite3.OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
         return conn
 
     def _normalize_symbol(self, value: str) -> str:
@@ -529,6 +629,8 @@ class MarketDataRepository:
             conn.execute("DELETE FROM dataset_symbol_coverage WHERE dataset_snapshot_id = ?", (dataset_snapshot_id,))
             conn.execute("DELETE FROM dataset_index_valuations WHERE dataset_snapshot_id = ?", (dataset_snapshot_id,))
             conn.execute("DELETE FROM dataset_index_valuation_coverage WHERE dataset_snapshot_id = ?", (dataset_snapshot_id,))
+            conn.execute("DELETE FROM dataset_fundamental_points WHERE dataset_snapshot_id = ?", (dataset_snapshot_id,))
+            conn.execute("DELETE FROM dataset_fundamental_coverage WHERE dataset_snapshot_id = ?", (dataset_snapshot_id,))
 
             price_rows = [
                 (
@@ -679,6 +781,76 @@ class MarketDataRepository:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     valuation_coverage_rows,
+                )
+        return dataset_snapshot_id
+
+    def replace_fundamental_snapshot(
+        self,
+        snapshot: Mapping[str, Any],
+        *,
+        fundamental_points: Iterable[Mapping[str, Any]] = (),
+        fundamental_coverage: Iterable[Mapping[str, Any]] = (),
+    ) -> str:
+        dataset_snapshot_id = str(snapshot["id"])
+        with self.connect() as conn:
+            self._upsert_dataset_snapshot(conn, snapshot)
+            conn.execute("DELETE FROM dataset_fundamental_points WHERE dataset_snapshot_id = ?", (dataset_snapshot_id,))
+            conn.execute("DELETE FROM dataset_fundamental_coverage WHERE dataset_snapshot_id = ?", (dataset_snapshot_id,))
+
+            point_rows = [
+                (
+                    dataset_snapshot_id,
+                    self._normalize_symbol(str(item["symbol"])),
+                    str(item["date"]),
+                    item.get("ltm_earnings"),
+                    item.get("market_cap"),
+                    item.get("operating_cash_flow"),
+                    item.get("capex"),
+                    item.get("enterprise_value"),
+                    item.get("total_shares"),
+                    str(item.get("source") or snapshot.get("source") or ""),
+                    item.get("fallback_source", snapshot.get("fallback_source")),
+                    dumps(_ensure_json_dict(item.get("metadata"))),
+                )
+                for item in fundamental_points
+                if str(item.get("symbol") or "").strip() and str(item.get("date") or "").strip()
+            ]
+            if point_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO dataset_fundamental_points (
+                        dataset_snapshot_id, symbol, date, ltm_earnings, market_cap,
+                        operating_cash_flow, capex, enterprise_value, total_shares,
+                        source, fallback_source, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    point_rows,
+                )
+
+            coverage_rows = [
+                (
+                    dataset_snapshot_id,
+                    self._normalize_symbol(str(item["symbol"])),
+                    item.get("start_date"),
+                    item.get("end_date"),
+                    int(item.get("observation_count") or 0),
+                    dumps([str(field) for field in (item.get("fields") or []) if str(field).strip()]),
+                    str(item.get("source") or snapshot.get("source") or ""),
+                    item.get("fallback_source", snapshot.get("fallback_source")),
+                    dumps(_ensure_json_dict(item.get("metadata"))),
+                )
+                for item in fundamental_coverage
+                if str(item.get("symbol") or "").strip()
+            ]
+            if coverage_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO dataset_fundamental_coverage (
+                        dataset_snapshot_id, symbol, start_date, end_date, observation_count,
+                        fields_json, source, fallback_source, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    coverage_rows,
                 )
         return dataset_snapshot_id
 
@@ -1004,12 +1176,22 @@ class MarketDataRepository:
                 "SELECT COUNT(*) AS count FROM dataset_index_valuation_coverage WHERE dataset_snapshot_id = ?",
                 (dataset_snapshot_id,),
             ).fetchone()
+            fundamental_point_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM dataset_fundamental_points WHERE dataset_snapshot_id = ?",
+                (dataset_snapshot_id,),
+            ).fetchone()
+            fundamental_coverage_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM dataset_fundamental_coverage WHERE dataset_snapshot_id = ?",
+                (dataset_snapshot_id,),
+            ).fetchone()
         return {
             "price_bars": int((price_row or {}).get("count") or 0),
             "corporate_actions": int((action_row or {}).get("count") or 0),
             "symbol_coverage": int((coverage_row or {}).get("count") or 0),
             "index_valuations": int((valuation_row or {}).get("count") or 0),
             "index_valuation_coverage": int((valuation_coverage_row or {}).get("count") or 0),
+            "fundamental_points": int((fundamental_point_row or {}).get("count") or 0),
+            "fundamental_coverage": int((fundamental_coverage_row or {}).get("count") or 0),
         }
 
     def summarize_dataset_symbols(
@@ -1185,6 +1367,65 @@ class MarketDataRepository:
             )
         return grouped
 
+    def load_dataset_fundamental_points(
+        self,
+        dataset_snapshot_id: str,
+        symbols: Iterable[str] | None = None,
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        sql = """
+            SELECT *
+            FROM dataset_fundamental_points
+            WHERE dataset_snapshot_id = ?
+        """
+        params: list[Any] = [dataset_snapshot_id]
+        normalized_symbols = [self._normalize_symbol(symbol) for symbol in (symbols or []) if symbol]
+        if normalized_symbols:
+            sql += f" AND symbol IN ({','.join('?' for _ in normalized_symbols)})"
+            params.extend(normalized_symbols)
+        if start_date:
+            sql += " AND date >= ?"
+            params.append(start_date)
+        if end_date:
+            sql += " AND date <= ?"
+            params.append(end_date)
+        sql += " ORDER BY symbol ASC, date ASC"
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            decoded = self._decode_json_row(dict(row), "metadata_json")
+            symbol = str(decoded["symbol"])
+            grouped.setdefault(symbol, []).append(decoded)
+        return grouped
+
+    def load_dataset_fundamental_coverage(
+        self,
+        dataset_snapshot_id: str,
+        symbols: Iterable[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        sql = """
+            SELECT *
+            FROM dataset_fundamental_coverage
+            WHERE dataset_snapshot_id = ?
+        """
+        params: list[Any] = [dataset_snapshot_id]
+        normalized_symbols = [self._normalize_symbol(symbol) for symbol in (symbols or []) if symbol]
+        if normalized_symbols:
+            sql += f" AND symbol IN ({','.join('?' for _ in normalized_symbols)})"
+            params.extend(normalized_symbols)
+        sql += " ORDER BY symbol ASC"
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        decoded_rows = []
+        for row in rows:
+            item = self._decode_json_row(dict(row), "metadata_json")
+            item["fields"] = [str(field) for field in loads(item.pop("fields_json", "[]"), [])]
+            decoded_rows.append(item)
+        return decoded_rows
+
     def load_universe_memberships(
         self,
         *,
@@ -1226,12 +1467,175 @@ class MarketDataRepository:
             "dataset_index_valuation_coverage",
             "bond_fixed_income_snapshots",
             "universe_membership_snapshots",
+            "pit_cleaning_runs",
+            "pit_quality_events",
+            "pit_research_waivers",
         ]
         with self.connect() as conn:
             return {
                 table_name: int(conn.execute(f"SELECT COUNT(*) AS count FROM {table_name}").fetchone()["count"])
                 for table_name in table_names
             }
+
+    def list_pit_cleaning_runs(self, *, limit: int = 10) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM pit_cleaning_runs
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        decoded: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["blocker"] = loads(item.pop("blocker_json", None), {})
+            item["summary"] = loads(item.pop("summary_json", None), {})
+            decoded.append(item)
+        return decoded
+
+    def list_pit_quality_events(
+        self,
+        *,
+        dataset_snapshot_id: str | None = None,
+        universe_snapshot_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM pit_quality_events"
+        filters: list[str] = []
+        params: list[Any] = []
+        if dataset_snapshot_id:
+            filters.append("dataset_snapshot_id = ?")
+            params.append(dataset_snapshot_id)
+        if universe_snapshot_id:
+            filters.append("universe_snapshot_id = ?")
+            params.append(universe_snapshot_id)
+        if filters:
+            sql += " WHERE " + " AND ".join(filters)
+        sql += " ORDER BY event_time DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["metadata"] = loads(item.pop("metadata_json", None), {})
+            events.append(item)
+        return events
+
+    def get_active_pit_research_waiver(
+        self,
+        *,
+        dataset_snapshot_id: str,
+        universe_snapshot_id: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM pit_research_waivers
+                WHERE dataset_snapshot_id = ?
+                  AND universe_snapshot_id = ?
+                  AND revoked_at IS NULL
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (dataset_snapshot_id, universe_snapshot_id),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["ignored_symbols"] = loads(item.pop("ignored_symbols_json", None), [])
+        return item
+
+    def upsert_pit_research_waiver(
+        self,
+        *,
+        waiver_id: str,
+        dataset_snapshot_id: str,
+        universe_snapshot_id: str,
+        ignored_symbols: Iterable[str],
+        reason: str,
+        created_by: str = "researcher",
+    ) -> dict[str, Any]:
+        now = iso_now()
+        normalized_symbols = sorted(
+            {
+                self._normalize_symbol(str(symbol))
+                for symbol in ignored_symbols
+                if str(symbol or "").strip()
+            }
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE pit_research_waivers
+                SET revoked_at = ?
+                WHERE dataset_snapshot_id = ?
+                  AND universe_snapshot_id = ?
+                  AND revoked_at IS NULL
+                """,
+                (now, dataset_snapshot_id, universe_snapshot_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO pit_research_waivers (
+                    id, dataset_snapshot_id, universe_snapshot_id, ignored_symbols_json,
+                    reason, created_by, created_at, revoked_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    waiver_id,
+                    dataset_snapshot_id,
+                    universe_snapshot_id,
+                    dumps(normalized_symbols),
+                    reason,
+                    created_by,
+                    now,
+                ),
+            )
+        return {
+            "id": waiver_id,
+            "dataset_snapshot_id": dataset_snapshot_id,
+            "universe_snapshot_id": universe_snapshot_id,
+            "ignored_symbols": normalized_symbols,
+            "reason": reason,
+            "created_by": created_by,
+            "created_at": now,
+            "revoked_at": None,
+        }
+
+    def revoke_pit_research_waiver(self, waiver_id: str) -> bool:
+        now = iso_now()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE pit_research_waivers
+                SET revoked_at = ?
+                WHERE id = ? AND revoked_at IS NULL
+                """,
+                (now, waiver_id),
+            )
+        return cursor.rowcount > 0
+
+    def load_symbol_identity_rows(self, symbols: Iterable[str]) -> list[dict[str, Any]]:
+        normalized_symbols = [self._normalize_symbol(str(symbol)) for symbol in symbols if str(symbol or "").strip()]
+        if not normalized_symbols:
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM symbol_identity_cache
+                WHERE symbol IN ({','.join('?' for _ in normalized_symbols)})
+                ORDER BY symbol
+                """,
+                normalized_symbols,
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def _decode_json_row(self, row: dict[str, Any], json_column: str) -> dict[str, Any]:
         payload = loads(row.pop(json_column, None), {})

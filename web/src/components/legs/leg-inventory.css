@@ -152,6 +152,15 @@
   color: #c45c4f;
 }
 
+.leg-inventory-chip--sample {
+  min-height: 26px;
+  padding: 0 9px;
+  border-color: rgba(100, 116, 139, 0.18);
+  background: #f8fafc;
+  color: #475569;
+  font-size: 11px;
+}
+
 .leg-inventory-type-badge--asset {
   border-color: rgba(76, 120, 199, 0.18);
   background: rgba(236, 242, 253, 0.98);

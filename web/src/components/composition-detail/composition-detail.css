@@ -408,6 +408,182 @@
   line-height: 1.45;
 }
 
+.composition-detail-status-diagnosis {
+  border-color: rgba(184, 104, 19, 0.24);
+  background: linear-gradient(180deg, #ffffff 0%, #fffaf0 100%);
+}
+
+.composition-detail-status-diagnosis--danger {
+  border-color: rgba(196, 92, 79, 0.28);
+  background: linear-gradient(180deg, #ffffff 0%, #fff8f7 100%);
+}
+
+.composition-detail-status-diagnosis--good {
+  border-color: rgba(31, 135, 123, 0.2);
+  background: linear-gradient(180deg, #ffffff 0%, #f5fbf8 100%);
+}
+
+.composition-detail-status-diagnosis__body {
+  display: grid;
+  gap: 10px;
+}
+
+.composition-detail-status-diagnosis__body > div {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid rgba(229, 231, 235, 0.88);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.composition-detail-status-diagnosis__body strong,
+.composition-detail-status-diagnosis__facts strong {
+  color: #111827;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.composition-detail-status-diagnosis__body p {
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.composition-detail-status-diagnosis__facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.composition-detail-status-diagnosis__facts span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid rgba(229, 231, 235, 0.9);
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.composition-detail-status-diagnosis__facts small {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.composition-detail-status-diagnosis__leg-issues {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(229, 231, 235, 0.9);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.composition-detail-status-diagnosis__leg-issues > strong {
+  color: #111827;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.composition-detail-status-diagnosis__leg-list {
+  display: grid;
+  gap: 8px;
+}
+
+.composition-detail-status-diagnosis__leg-card {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 8px 9px;
+  border: 1px solid rgba(226, 232, 240, 0.95);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.composition-detail-status-diagnosis__leg-card-head {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.composition-detail-status-diagnosis__leg-card-head span {
+  min-width: 0;
+  color: #111827;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.composition-detail-status-diagnosis__leg-card-head small {
+  flex: 0 1 auto;
+  max-width: 45%;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(184, 104, 19, 0.1);
+  color: #9a5414;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.composition-detail-status-diagnosis__leg-card p {
+  margin: 0;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.composition-detail-status-diagnosis__leg-card > small {
+  color: #64748b;
+  font-size: 10px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.composition-detail-status-diagnosis__leg-action {
+  justify-self: start;
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.composition-detail-status-diagnosis__actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.composition-detail-status-diagnosis__action-button {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  justify-content: center;
+  padding: 0 14px;
+  text-align: center;
+  line-height: 1.2;
+}
+
+.composition-detail-status-diagnosis__actions .primary-button {
+  box-shadow: 0 10px 18px rgba(31, 135, 123, 0.16);
+}
+
+.composition-detail-status-diagnosis__actions .ghost-button {
+  border-color: rgba(31, 135, 123, 0.28);
+  background: #ffffff;
+  color: var(--gsl-color-primary-strong);
+}
+
 .composition-detail-cost-mini-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1865,6 +2041,11 @@
   gap: 12px;
 }
 
+.composition-detail-source-signature--focused {
+  outline: 2px solid rgba(31, 135, 123, 0.35);
+  outline-offset: 3px;
+}
+
 .composition-detail-approved .composition-detail-source-signature {
   gap: 8px;
   padding: 14px 16px 12px;
@@ -1914,6 +2095,86 @@
   color: #9f352b;
   font-size: 12px;
   line-height: 1.55;
+}
+
+.composition-detail-source-drift-alert__action {
+  justify-self: start;
+  min-height: 32px;
+  padding: 0 12px;
+  border-color: rgba(196, 92, 79, 0.3);
+  color: #8d2c23;
+}
+
+.composition-detail-diagnosis-dialog__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.composition-detail-diagnosis-dialog {
+  width: min(560px, 100%);
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 52px rgba(15, 23, 42, 0.22);
+}
+
+.composition-detail-diagnosis-dialog__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.composition-detail-diagnosis-dialog__header h2 {
+  margin: 8px 0 0;
+  color: #111827;
+  font-size: 20px;
+  line-height: 1.25;
+}
+
+.composition-detail-diagnosis-dialog__body {
+  display: grid;
+  gap: 10px;
+}
+
+.composition-detail-diagnosis-dialog__body article {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.composition-detail-diagnosis-dialog__body strong {
+  color: #111827;
+  font-size: 13px;
+}
+
+.composition-detail-diagnosis-dialog__body p,
+.composition-detail-diagnosis-dialog__status {
+  margin: 0;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.composition-detail-diagnosis-dialog__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.composition-detail-diagnosis-dialog__actions button {
+  min-height: 38px;
 }
 
 .composition-detail-signature-list,

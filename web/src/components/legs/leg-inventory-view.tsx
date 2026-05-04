@@ -228,7 +228,26 @@ function getSourceTrustStatusLabel(value?: string | null): string {
     case 'version_drift':
       return '版本漂移';
     case 'stale':
-      return '来源失效';
+      return '签名待复核';
+    case 'missing':
+      return '证据缺失';
+    default:
+      return '待确认';
+  }
+}
+
+function getSourceDriftStatusLabel(row: ApiLegInventoryRow): string {
+  const status = String(getSourceIntegrityValue(row, 'drift_status', 'current') ?? '').toLowerCase();
+  switch (status) {
+    case 'verified':
+    case 'valid':
+    case 'signed':
+    case 'current':
+      return '版本一致';
+    case 'drifted':
+    case 'version_drift':
+    case 'stale':
+      return row.has_new_version ? '版本漂移' : '指纹待复核';
     case 'missing':
       return '证据缺失';
     default:
@@ -519,6 +538,26 @@ function getStatusBadges(row: ApiLegInventoryRow): Array<{ label: string; classN
   return [getVersionStatusBadge(row), getReferenceStatusBadge(row)];
 }
 
+function getReturnQualityIssueTypes(row: ApiLegInventoryRow): string[] {
+  return Array.isArray(row.return_quality?.issue_types)
+    ? row.return_quality.issue_types.filter((issue): issue is string => typeof issue === 'string' && issue.trim().length > 0)
+    : [];
+}
+
+function getReturnQualityBadge(row: ApiLegInventoryRow): { label: string; detail: string; className: string } | null {
+  const issueTypes = getReturnQualityIssueTypes(row);
+  if (!issueTypes.length || !row.return_quality) {
+    return null;
+  }
+  const samplePoints = Number.isFinite(row.return_quality.sample_points) ? row.return_quality.sample_points : 0;
+  const missingPoints = Number.isFinite(row.return_quality.missing_points) ? row.return_quality.missing_points : 0;
+  return {
+    label: issueTypes.join('、'),
+    detail: `样本 ${samplePoints} 月 / 缺口 ${missingPoints}`,
+    className: issueTypes.includes('收益样本缺失') ? 'leg-inventory-chip leg-inventory-chip--danger' : 'leg-inventory-chip leg-inventory-chip--warning',
+  };
+}
+
 function matchesLegStatusFilter(row: ApiLegInventoryRow, filter: LegStatusFilter): boolean {
   switch (filter) {
     case 'latest_version':
@@ -595,6 +634,7 @@ export function LegDetailDrawer({
   const pit = getPitSnapshotPreview(row);
   const sourcePath = getAssetSourcePath(row);
   const updatedAt = readString(getMetricRecords(row), ['updated_at', 'refreshed_at']);
+  const returnQualityBadge = getReturnQualityBadge(row);
 
   return (
     <div className="leg-inventory-drawer-layer">
@@ -638,6 +678,13 @@ export function LegDetailDrawer({
             <strong>{metrics.primary}</strong>
             <small>{metrics.secondary}</small>
           </article>
+          {returnQualityBadge ? (
+            <article className="leg-inventory-detail-card leg-inventory-detail-card--quality" data-ui="leg-return-quality">
+              <span>收益样本质量</span>
+              <strong>{returnQualityBadge.label}</strong>
+              <small>{returnQualityBadge.detail}</small>
+            </article>
+          ) : null}
           <article className="leg-inventory-detail-card">
             <span>来源锚点</span>
             <strong>{metrics.anchor}</strong>
@@ -656,7 +703,7 @@ export function LegDetailDrawer({
         >
           <div className="leg-inventory-drawer__copy">
             <strong>来源签名</strong>
-            <p>冻结证据用于组合追责；版本漂移只提示，不自动改写已保存组合。</p>
+            <p>冻结证据用于组合追责；漂移提示只提醒，不自动改写已保存组合。</p>
           </div>
           <div className="leg-inventory-drawer__field-grid">
             <div className="leg-inventory-drawer__field">
@@ -668,8 +715,8 @@ export function LegDetailDrawer({
               <strong>{getSourceTrustStatusLabel(getSourceIntegrityValue(row, 'signature_status', 'verified'))}</strong>
             </div>
             <div className="leg-inventory-drawer__field">
-              <span>版本漂移</span>
-              <strong data-ui="leg-drift-status">{getSourceTrustStatusLabel(getSourceIntegrityValue(row, 'drift_status', 'current'))}</strong>
+              <span>漂移状态</span>
+              <strong data-ui="leg-drift-status">{getSourceDriftStatusLabel(row)}</strong>
             </div>
             <div className="leg-inventory-drawer__field">
               <span>当前来源</span>
@@ -1467,6 +1514,7 @@ export function LegInventoryView({
                   const pit = getPitSnapshotPreview(row);
                   const metrics = getMetricPreview(row);
                   const copyVersionTarget = findStrategyVersionCopyTarget(row, strategyRows ?? [], rows);
+                  const returnQualityBadge = getReturnQualityBadge(row);
                   return (
                     <tr
                       className="leg-inventory-row"
@@ -1519,6 +1567,12 @@ export function LegInventoryView({
                               {badge.label}
                             </span>
                           ))}
+                          {returnQualityBadge ? (
+                            <>
+                              <span className={returnQualityBadge.className}>{returnQualityBadge.label}</span>
+                              <span className="leg-inventory-chip leg-inventory-chip--sample">{returnQualityBadge.detail}</span>
+                            </>
+                          ) : null}
                         </div>
                       </td>
                       <td>

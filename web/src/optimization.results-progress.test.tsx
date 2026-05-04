@@ -523,10 +523,11 @@ describe("optimization results progress state", () => {
     expect(callAfterSchedule).toBeGreaterThan(initialCallCount);
 
     const restoreHidden = setDocumentVisibilityState(false);
-    act(() => {
+    await act(async () => {
       fireEvent(document, new Event("visibilitychange"));
+      await Promise.resolve();
+      await Promise.resolve();
     });
-    await Promise.resolve();
     const callAfterHidden = getOptimizationJobDetail.mock.calls.length;
 
     await act(async () => {

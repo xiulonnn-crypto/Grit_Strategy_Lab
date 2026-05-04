@@ -27,7 +27,13 @@ export type AppRoute =
   | { kind: 'backtest'; strategyId: string; sourceRunId?: string; periodYears?: number }
   | { kind: 'runs-index' }
   | { kind: 'run'; runId: string }
-  | { kind: 'snapshots'; tab?: 'equity' | 'bond' }
+  | { kind: 'snapshots'; tab?: 'equity' | 'bond'; target?: string }
+  | { kind: 'pit-data'; section?: string }
+  | { kind: 'factor-library'; source?: string; tag?: string; status?: string }
+  | { kind: 'factor-detail'; factorId: string }
+  | { kind: 'factor-editor'; factorId?: string }
+  | { kind: 'factor-sandbox' }
+  | { kind: 'factor-quarantine' }
   | { kind: 'optimization-index' }
   | { kind: 'optimization-select'; strategyId?: string; sourceRunId?: string; entryPoint?: string }
   | { kind: 'optimization-config'; strategyId: string; sourceRunId?: string; entryPoint?: string }
@@ -184,7 +190,37 @@ export function parseAppHash(hash: string): AppRoute {
   }
   if (path === '/snapshots') {
     const tab = searchParams.get('tab');
-    return { kind: 'snapshots', tab: tab === 'bond' ? 'bond' : 'equity' };
+    const target = searchParams.get('target');
+    return {
+      kind: 'snapshots',
+      tab: tab === 'bond' ? 'bond' : 'equity',
+      target: target ? decodeURIComponent(target) : undefined,
+    };
+  }
+  if (path === '/pit-data') {
+    const section = searchParams.get('section');
+    return { kind: 'pit-data', section: section ? decodeURIComponent(section) : undefined };
+  }
+  if (path === '/factors') {
+    return {
+      kind: 'factor-library',
+      source: searchParams.get('source') ? decodeURIComponent(searchParams.get('source') ?? '') : undefined,
+      tag: searchParams.get('tag') ? decodeURIComponent(searchParams.get('tag') ?? '') : undefined,
+      status: searchParams.get('status') ? decodeURIComponent(searchParams.get('status') ?? '') : undefined,
+    };
+  }
+  if (path === '/factors/new') {
+    return { kind: 'factor-editor' };
+  }
+  if (path === '/factors/sandbox') {
+    return { kind: 'factor-sandbox' };
+  }
+  if (path === '/factors/quarantine') {
+    return { kind: 'factor-quarantine' };
+  }
+  const factorDetailMatch = path.match(/^\/factors\/([^/]+)$/);
+  if (factorDetailMatch) {
+    return { kind: 'factor-detail', factorId: decodeURIComponent(factorDetailMatch[1]) };
   }
   if (path === '/optimization-jobs') {
     return { kind: 'optimization-index' };

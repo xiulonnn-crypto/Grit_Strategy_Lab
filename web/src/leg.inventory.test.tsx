@@ -75,6 +75,19 @@ const inventory: ApiLegInventory = {
       drift_status: 'current',
       current_ref_id: 'asset-leg-001',
       alerts: [],
+      return_quality: {
+        leg_id: 'asset-leg-001',
+        display_name: '10Y 国债久期腿',
+        leg_kind: 'asset',
+        source_ref_id: 'asset-leg-001',
+        sample_points: 2,
+        aligned_points: 2,
+        missing_points: 118,
+        coverage_pct: 1.67,
+        window_start: '2026-04',
+        window_end: '2026-05',
+        issue_types: ['收益样本不足', '对齐缺口'],
+      },
       config: {
         symbol: 'UST10Y',
         source_snapshot_id: 'bond-fixed-income',
@@ -111,6 +124,19 @@ const inventory: ApiLegInventory = {
       drift_status: 'current',
       current_ref_id: 'cash-leg-001',
       alerts: [],
+      return_quality: {
+        leg_id: 'cash-leg-001',
+        display_name: '现金缓冲腿',
+        leg_kind: 'cash',
+        source_ref_id: 'cash-leg-001',
+        sample_points: 0,
+        aligned_points: 0,
+        missing_points: 0,
+        coverage_pct: 100,
+        window_start: null,
+        window_end: null,
+        issue_types: [],
+      },
       config: {
         cash_rule_kind: 'PURE_CASH',
         buffer_bps: 12,
@@ -229,6 +255,8 @@ describe('leg inventory page', () => {
     });
 
     expect(await screen.findByText('asset-leg-001')).toBeInTheDocument();
+    expect(fakeApi.listCompositions).not.toHaveBeenCalled();
+    expect(fakeApi.getCompositionDetail).not.toHaveBeenCalled();
     expect(screen.getByText('cash-leg-001')).toBeInTheDocument();
     expect(document.querySelector('[data-ui="leg-source-trust-table"]')).not.toBeNull();
     expect(screen.queryByText(/冻结哈希/)).not.toBeInTheDocument();
@@ -237,6 +265,17 @@ describe('leg inventory page', () => {
     expect(document.querySelectorAll('[data-ui="leg-freeze-hash"]').length).toBe(0);
     expect(document.querySelectorAll('[data-ui="leg-drift-status"]').length).toBe(0);
     expect(screen.queryByText(/strategy_leg::/)).not.toBeInTheDocument();
+  });
+
+  it('surfaces return sample problems in the source inventory before composition assembly', async () => {
+    await act(async () => {
+      render(<LegInventoryPage />);
+    });
+
+    expect(await screen.findByText('asset-leg-001')).toBeInTheDocument();
+    expect(screen.getByText('收益样本不足、对齐缺口')).toBeInTheDocument();
+    expect(screen.getByText('样本 2 月 / 缺口 118')).toBeInTheDocument();
+    expect(screen.queryByText('现金规则覆盖')).not.toBeInTheDocument();
   });
 
   it('keeps the inventory table inside the available panel width', async () => {
@@ -268,9 +307,15 @@ describe('leg inventory page', () => {
     );
   });
 
-  it('hydrates saved strategy leg reference counts from active compositions', async () => {
+  it('hydrates saved strategy leg reference counts from the inventory contract', async () => {
     const rowId = 'strategy_leg::strat-tested-001::strat-tested-001-v2';
     window.localStorage.setItem(SAVED_STRATEGY_LEG_STORAGE_KEY, JSON.stringify([rowId]));
+    fakeApi.getLegInventory = vi.fn().mockResolvedValue({
+      ...inventory,
+      strategy_reference_counts: {
+        [rowId]: 1,
+      },
+    });
     fakeApi.listStrategies = vi.fn().mockResolvedValue([
       {
         id: 'strat-tested-001',
@@ -296,19 +341,8 @@ describe('leg inventory page', () => {
         },
       },
     ]);
-    fakeApi.listCompositions = vi.fn().mockResolvedValue([
-      { id: 'composition-tested-001', status: 'ACTIVE' },
-    ]);
-    fakeApi.getCompositionDetail = vi.fn().mockResolvedValue({
-      id: 'composition-tested-001',
-      status: 'ACTIVE',
-      normalized_legs: [
-        {
-          leg_kind: 'strategy',
-          source_ref_id: rowId,
-        },
-      ],
-    });
+    fakeApi.listCompositions = vi.fn();
+    fakeApi.getCompositionDetail = vi.fn();
 
     await act(async () => {
       render(<LegInventoryPage />);
@@ -316,6 +350,8 @@ describe('leg inventory page', () => {
 
     const strategyRow = (await screen.findByText('strat-tested-001 · v2')).closest('tr');
     expect(strategyRow).not.toBeNull();
+    expect(fakeApi.listCompositions).not.toHaveBeenCalled();
+    expect(fakeApi.getCompositionDetail).not.toHaveBeenCalled();
     const cells = within(strategyRow as HTMLTableRowElement).getAllByRole('cell');
     expect(within(cells[4]).getByText('1')).toBeInTheDocument();
     expect(within(strategyRow as HTMLTableRowElement).queryByText('敶﹝')).toBeNull();

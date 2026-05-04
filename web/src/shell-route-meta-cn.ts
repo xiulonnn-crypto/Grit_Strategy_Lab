@@ -10,9 +10,13 @@ export type ShellNavKey =
   | 'creation'
   | 'runs'
   | 'optimization'
+  | 'factor-library'
+  | 'factor-sandbox'
+  | 'factor-quarantine'
+  | 'pit-data'
   | 'snapshots';
 
-export type ShellNavGroupKey = 'compose' | 'strategy';
+export type ShellNavGroupKey = 'compose' | 'strategy' | 'factor' | 'data';
 
 export type ShellNavItem = {
   key: ShellNavKey;
@@ -104,6 +108,24 @@ const TEXT = {
   snapshotsTitle: '数据快照',
   snapshotsDesc:
     '集中查看数据集与股票池快照状态，并提供刷新与修复入口。',
+  factor: '因子',
+  factorLibrary: '因子库',
+  factorLibraryTitle: '因子库',
+  factorLibraryDesc:
+    '集中检索机构 Alpha 资产、默认常用因子、最近诊断和 PIT 门禁状态。',
+  factorDetailTitle: '因子诊断',
+  factorDetailDesc:
+    '查看因子逻辑、IC/IR 诊断、换手衰减、极端场景与合规足迹。',
+  factorEditorTitle: '因子编辑器',
+  factorEditorDesc:
+    '用白名单 DSL 编写公式，并在正式诊断前完成 5 年样本内 IC 预览。',
+  factorSandbox: '挖掘沙盒',
+  factorQuarantine: '隔离检疫区',
+  data: '数据',
+  pitData: 'PIT 清洗中心',
+  pitDataTitle: 'PIT 清洗中心',
+  pitDataDesc:
+    '检查复权价格、点时样本池和异常清洗门禁，确保因子诊断不引入未来函数。',
   optimizationEyebrow: '优化实验',
   optimizationTitle: '优化实验室',
   optimizationDesc:
@@ -160,7 +182,23 @@ export const SHELL_NAV_GROUPS: ShellNavGroup[] = [
         label: TEXT.optimizationTitle,
         groupKey: 'strategy',
       },
-      { key: 'snapshots', href: '#/snapshots', label: TEXT.snapshots, groupKey: 'strategy' },
+    ],
+  },
+  {
+    key: 'factor',
+    label: TEXT.factor,
+    items: [
+      { key: 'factor-library', href: '#/factors', label: TEXT.factorLibrary, groupKey: 'factor' },
+      { key: 'factor-sandbox', href: '#/factors/sandbox', label: TEXT.factorSandbox, groupKey: 'factor' },
+      { key: 'factor-quarantine', href: '#/factors/quarantine', label: TEXT.factorQuarantine, groupKey: 'factor' },
+    ],
+  },
+  {
+    key: 'data',
+    label: TEXT.data,
+    items: [
+      { key: 'pit-data', href: '#/pit-data', label: TEXT.pitData, groupKey: 'data' },
+      { key: 'snapshots', href: '#/snapshots', label: TEXT.snapshots, groupKey: 'data' },
     ],
   },
 ];
@@ -305,6 +343,54 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         eyebrow: TEXT.runEyebrow,
         title: TEXT.runTitle,
         description: TEXT.runDesc,
+        showPageHeading: false,
+      };
+    case 'factor-library':
+      return {
+        navKey: 'factor-library',
+        eyebrow: TEXT.factor,
+        title: TEXT.factorLibraryTitle,
+        description: TEXT.factorLibraryDesc,
+        showPageHeading: false,
+      };
+    case 'factor-detail':
+      return {
+        navKey: 'factor-library',
+        eyebrow: TEXT.factor,
+        title: TEXT.factorDetailTitle,
+        description: TEXT.factorDetailDesc,
+        showPageHeading: false,
+      };
+    case 'factor-editor':
+      return {
+        navKey: 'factor-library',
+        eyebrow: TEXT.factor,
+        title: TEXT.factorEditorTitle,
+        description: TEXT.factorEditorDesc,
+        showPageHeading: false,
+      };
+    case 'factor-sandbox':
+      return {
+        navKey: 'factor-sandbox',
+        eyebrow: TEXT.factor,
+        title: TEXT.factorSandbox,
+        description: '自动挖掘能力将在第二期接入，本期先保留导航入口。',
+        showPageHeading: false,
+      };
+    case 'factor-quarantine':
+      return {
+        navKey: 'factor-quarantine',
+        eyebrow: TEXT.factor,
+        title: TEXT.factorQuarantine,
+        description: '自动挖掘因子的去重、样本外和相关性门禁将在第三期接入。',
+        showPageHeading: false,
+      };
+    case 'pit-data':
+      return {
+        navKey: 'pit-data',
+        eyebrow: TEXT.data,
+        title: TEXT.pitDataTitle,
+        description: TEXT.pitDataDesc,
         showPageHeading: false,
       };
     case 'snapshots':

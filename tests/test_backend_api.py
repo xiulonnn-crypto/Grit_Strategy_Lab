@@ -54,6 +54,19 @@ def test_workspace_overview_contract_is_exact_on_fresh_database(tmp_path):
     assert overview["latest_optimization_job_id"] is None
 
 
+def test_market_data_repository_uses_wal_and_busy_timeout(tmp_path):
+    repository = MarketDataRepository(tmp_path / "market-data-locking.db")
+
+    with repository.connect() as conn:
+        busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()["timeout"]
+        journal_mode = str(conn.execute("PRAGMA journal_mode").fetchone()["journal_mode"]).lower()
+        synchronous = int(conn.execute("PRAGMA synchronous").fetchone()["synchronous"])
+
+    assert busy_timeout >= 30000
+    assert journal_mode == "wal"
+    assert synchronous == 1
+
+
 def test_workspace_overview_can_include_cleanup_audit_without_changing_default_contract(tmp_path):
     client, _ = create_test_client(tmp_path)
 
@@ -417,6 +430,94 @@ def test_bond_snapshot_overview_publishes_seven_row_contract_and_audit_cases(tmp
     assert lqd["field_status"]["tracking_error_bps"] == "MISSING"
     assert lqd["tracking_status"] == "WATCH"
     assert lqd["status"] == "WATCH"
+
+
+def test_bond_snapshot_overview_reaches_full_ready_when_lqd_tracking_source_is_published(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    _seed_seven_bond_contract_snapshots(client)
+    _seed_bond_contract_snapshot(
+        client,
+        id="bond-ust-cmt-2y",
+        instrument_id="UST_CMT_2Y",
+        symbol="UST2Y",
+        name="UST CMT 2Y",
+        ytm_pct=4.4,
+        raw={
+            "asset_type": "UST",
+            "tenor_label": "2Y",
+            "audit_profile": "UST_CMT_2Y",
+            "effective_duration": 1.9,
+        },
+    )
+    _seed_bond_contract_snapshot(
+        client,
+        id="bond-lqd-watch",
+        instrument_id="LQD",
+        symbol="LQD",
+        name="iShares iBoxx Investment Grade Corporate Bond ETF",
+        instrument_type="etf",
+        refresh_status="READY",
+        missing_fields=[],
+        raw={
+            "asset_type": "BOND_ETF",
+            "tenor_label": "ETF",
+            "audit_profile": "LQD",
+            "sec_yield_30d_pct": 4.73,
+            "credit_quality": "A-",
+            "tracking_error_bps": 164.0,
+            "tracking_error_source": "MARKETS_INSIDER",
+            "tracking_error_period": "1Y",
+            "audit_notes": ["Tracking error sourced from a published market-data page."],
+        },
+    )
+    _seed_bond_contract_snapshot(
+        client,
+        id="bond-lqd-old-watch",
+        instrument_id="LQD",
+        symbol="LQD",
+        name="Old LQD watch row",
+        instrument_type="etf",
+        snapshot_date="2026-04-01",
+        refresh_status="WATCH",
+        missing_fields=["tracking_error_bps"],
+        raw={
+            "asset_type": "BOND_ETF",
+            "tenor_label": "ETF",
+            "audit_profile": "LQD",
+            "sec_yield_30d_pct": 4.6,
+            "credit_quality": "A-",
+        },
+    )
+    _seed_bond_contract_snapshot(
+        client,
+        id="bond-extra-smoke-row",
+        instrument_id="US91282CGK18",
+        symbol="T10Y",
+        name="Extra manually loaded note",
+        snapshot_date="2026-04-24",
+        refresh_status="READY",
+        raw={"asset_type": "INDIVIDUAL_BOND"},
+    )
+
+    overview = assert_ok(client.get("/data-snapshots/overview"))
+    bond = overview["bond_fixed_income"]
+    instruments = {item["id"]: item for item in bond["eligible_instruments"]}
+
+    assert len(bond["raw_registry"]) == 7
+    assert bond["group_counts"] == {
+        "ust": {"sourced": 4, "ready": 4},
+        "tips": {"sourced": 2, "ready": 2},
+        "ig": {"sourced": 1, "ready": 1},
+    }
+    assert bond["global_pulse"]["status"] == "READY"
+    assert bond["global_pulse"]["cards"][1]["status"] == "READY"
+    assert bond["global_pulse"]["cards"][1]["value"] == "7/7 ready"
+    assert bond["global_pulse"]["cards"][4]["value"] == "7/7 eligible"
+    assert bond["global_pulse"]["cards"][8]["status"] == "READY"
+    assert bond["lqd_tracking_status"] == "READY"
+    assert instruments["bond-lqd-watch"]["field_status"]["tracking_error_bps"] == "READY"
+    assert instruments["bond-lqd-watch"]["tracking_error_source"] == "MARKETS_INSIDER"
+    assert instruments["bond-lqd-watch"]["status"] == "READY"
 
 
 def test_refresh_target_pool_filters_non_ticker_labels_from_missing_symbols_and_strategies(tmp_path):
@@ -4659,6 +4760,140 @@ def test_list_optimization_jobs_uses_lightweight_projection_without_detail_queri
     assert completed_item["strategy_name"] == strategy["name"]
     assert completed_item["best_candidate_id"] is not None
     assert completed_item["best_candidate_label"] is not None
+
+
+def test_large_optimization_job_json_is_compacted_and_detail_can_stream_preview(tmp_path, monkeypatch):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    base = create_momentum_strategy(client, idempotency_key="optimization-large-json-preview")
+    strategy = base["strategy"]
+    job_id = "opt_large_matching_payload"
+    created_at = "2026-04-18T09:00:00Z"
+    matching_combinations = [
+        {
+            "id": f"trial_{index}",
+            "rank": index,
+            "label": f"Candidate {index}",
+            "status": "SUCCEEDED",
+            "parameter_snapshot": {
+                "lookback_months": 6 + (index % 4),
+                "top_n": 5 + (index % 3),
+            },
+            "metrics": {
+                "annualized_return": 0.05 + index / 10000,
+                "return_sharpe": 0.8 + index / 1000,
+                "out_of_sample_sharpe": 0.9,
+                "max_drawdown_pct": -12.0,
+                "stability": 70.0,
+            },
+            "score": 0.8 + index / 1000,
+            "trace_payload": "x" * 5000,
+        }
+        for index in range(1, 261)
+    ]
+    candidates = [dict(item) for item in matching_combinations[:5]]
+    request_payload = {
+        "objective": "return_sharpe",
+        "base_parameter_version_id": strategy["current_parameter_version_id"],
+        "source_run_id": strategy["latest_successful_run_id"],
+        "entry_point": "lab_menu",
+        "validation_mode": "walk_forward",
+        "budget_combinations": len(matching_combinations),
+        "completed_combinations": len(matching_combinations),
+        "persisted_trial_count": len(matching_combinations),
+        "next_trial_index": len(matching_combinations) + 1,
+        "status": "COMPLETED",
+        "progress_pct": 100,
+        "current_stage": "Result ready",
+        "latest_update": "Optimization completed.",
+        "constraint_preset_key": "custom",
+        "constraint_label": "Preview-safe",
+        "constraints": [
+            {
+                "key": "return_sharpe",
+                "label": "Sharpe",
+                "category": "return",
+                "operator": ">=",
+                "value": 0,
+                "unit": "",
+            }
+        ],
+        "matching_combination_count": len(matching_combinations),
+        "matching_combinations": matching_combinations,
+        "matching_combination_source": "all_trials",
+    }
+    summary_payload = {
+        **request_payload,
+        "candidate_count": len(candidates),
+        "best_metrics_summary": {
+            "trial_index": 1,
+            "label": "Candidate 1",
+            "status": "SUCCEEDED",
+            "parameter_snapshot": matching_combinations[0]["parameter_snapshot"],
+            "metrics": matching_combinations[0]["metrics"],
+            "score": matching_combinations[0]["score"],
+        },
+    }
+    result_payload = {
+        "best_candidate_id": "trial_1",
+        "best_candidate_label": "Candidate 1",
+        "headline": "Result ready",
+        "summary": "Optimization completed.",
+        "status": "COMPLETED",
+        "progress_pct": 100,
+    }
+    service.storage.insert_json_row(
+        "optimization_jobs",
+        {
+            "id": job_id,
+            "strategy_id": strategy["id"],
+            "status": "COMPLETED",
+            "request_json": json.dumps(request_payload),
+            "summary_json": json.dumps(summary_payload),
+            "result_json": json.dumps(result_payload),
+            "candidates_json": json.dumps(candidates),
+            "created_at": created_at,
+            "updated_at": created_at,
+            "completed_at": created_at,
+        },
+    )
+    for trial in matching_combinations:
+        service._persist_optimization_trial(
+            job_id,
+            int(trial["rank"]),
+            status="SUCCEEDED",
+            parameter_snapshot=trial["parameter_snapshot"],
+            metrics=trial["metrics"],
+            chart_series=[],
+            score=trial["score"],
+            error_message=None,
+            started_at=created_at,
+            completed_at=created_at,
+        )
+
+    service._optimization_job_json_compaction_done = False
+    service._compact_existing_optimization_job_json_once()
+    compacted_row = service.storage.fetch_one(
+        "SELECT request_json, summary_json FROM optimization_jobs WHERE id = ?",
+        (job_id,),
+    )
+    assert compacted_row is not None
+    compacted_request = json.loads(compacted_row["request_json"])
+    compacted_summary = json.loads(compacted_row["summary_json"])
+    assert compacted_request["matching_combinations"] == []
+    assert compacted_summary["matching_combinations"] == []
+    assert compacted_summary["matching_combination_count"] == len(matching_combinations)
+
+    def fail_trial_loader(*args, **kwargs):
+        raise AssertionError("preview detail should not load the full optimization trial table")
+
+    monkeypatch.setattr(service, "_load_optimization_trials", fail_trial_loader)
+    detail = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail?matching_limit=2"))
+
+    assert detail["summary"]["matching_combination_count"] == len(matching_combinations)
+    assert detail["matching_combination_count"] == len(matching_combinations)
+    assert len(detail["matching_combinations"]) == 2
 
 
 def test_queued_and_interrupted_optimization_jobs_hide_stale_eta_projection(tmp_path):

@@ -14,6 +14,7 @@ import grit_backtest_platform.api as api_module
 from grit_backtest_platform.alpha_vantage_provider import AlphaVantageProvider
 from grit_backtest_platform.api import RuntimeMarketDataProvider
 from grit_backtest_platform.akshare_us_provider import AkshareUsPriceProvider
+from grit_backtest_platform._bond_fixed_income_provider import _lqd_snapshot
 from grit_backtest_platform.fallback_provider import (
     ProviderAvailability,
     ProviderExecutionSignal,
@@ -1095,6 +1096,38 @@ def test_openbb_bond_provider_fills_missing_curve_rows_and_cross_checks_existing
     assert snapshots["UST_CMT_10Y"]["raw"]["openbb_cross_checks"][0]["provider"] == "openbb_federal_reserve"
     assert result["provider_results"][-1]["filled_instrument_count"] == 4
     assert result["provider_results"][-1]["cross_checked_instrument_count"] == 1
+
+
+def test_lqd_snapshot_uses_markets_insider_tracking_error(monkeypatch):
+    def fake_fetch_text(url: str, *, timeout: float = 20.0) -> str:
+        if "markets.businessinsider.com" in url:
+            return "Tracking Error 1 Year 1.64 Tracking Error 3 Years 2.70"
+        if "dataType=fund" in url:
+            return "\n".join(
+                [
+                    "Name,Sector,Asset Class,Market Value,Weight (%),Notional Value,Par Value,CUSIP,ISIN,SEDOL,Price,Location,Exchange,Currency,Duration,YTM (%)",
+                    "Sample Bond,Corporate,Bond,100,100,100,100,123456789,US1234567890,SEDOL,98.25,US,,USD,8.1,5.4",
+                ]
+            )
+        return """
+        30 Day SEC Yield as of Apr 30, 2026  5.15%
+        Effective Duration as of May 01, 2026  8.00
+        Average Yield to Maturity as of May 01, 2026  5.27%
+        var tabsRatingDataTable = [{"name":"AAA","value":1.1},{"name":"AA ","value":7.2},{"name":"A ","value":42.3},{"name":"BBB","value":48.4}];
+        """
+
+    monkeypatch.setattr("grit_backtest_platform._bond_fixed_income_provider._fetch_text", fake_fetch_text)
+
+    snapshot = _lqd_snapshot(fetched_at="2026-05-04T00:00:00Z", timeout=1.0)
+
+    assert snapshot is not None
+    assert snapshot["refresh_status"] == "READY"
+    assert snapshot["missing_fields"] == []
+    assert snapshot["duration"] == 8.0
+    assert snapshot["raw"]["tracking_error_bps"] == 164.0
+    assert snapshot["raw"]["tracking_error_source"] == "MARKETS_INSIDER"
+    assert snapshot["raw"]["tracking_status"] == "READY"
+    assert snapshot["raw"]["tracking_error_period"] == "1Y"
 
 
 def test_openbb_universe_current_constituents_are_auxiliary_only(monkeypatch):

@@ -87,6 +87,24 @@ const emptyOrderPage = {
   total: 0,
 };
 
+const failedStatusDiagnosis = {
+  status: '失效',
+  issue_type: '异常降级补值',
+  diagnosis_type: 'abnormal_fallback',
+  diagnosis_label: '失效：异常降级补值',
+  frontend_explanation: '当前不是计划内代理，而是临时估算或异常补值。',
+  action: '修复数据来源或更换成分。',
+  resolution_criteria: '不再依赖异常估算。',
+  actions: [
+    {
+      label: '打开组合工作台',
+      action_key: 'open_composition_workbench',
+      action_kind: 'open_new_tab',
+      route: '/compositions/workbench?composition_id=comp-001',
+    },
+  ],
+};
+
 function makeStressReturnPreview() {
   return [
     { label: '2020-02', date: '2020-02-28', portfolio_return_pct: -2, net_return_pct: -2, cumulative_return_pct: -2 },
@@ -159,6 +177,23 @@ describe('CompositionBacktestResultPage', () => {
     resolveRerun(makeRuntimeBacktestRun('run-rerun'));
     expect(await screen.findByRole('status')).toHaveTextContent('回测结束');
     expect(navigateToMock).toHaveBeenCalledWith('/compositions/comp-001/backtest-runs/run-rerun');
+  });
+
+  it('offers a status label repair entry on warning backtest details', async () => {
+    fakeApi.getCompositionBacktestRun = vi.fn().mockResolvedValue({
+      ...makeRuntimeBacktestRun('run-status'),
+      primary_diagnosis: failedStatusDiagnosis,
+      diagnoses: [failedStatusDiagnosis],
+    });
+    fakeApi.getCompositionBacktestOrders = vi.fn().mockResolvedValue(emptyOrderPage);
+
+    render(<CompositionBacktestResultPage compositionId="comp-001" runId="run-status" />);
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'QQQ网格&标普动量平衡 · 回测详情' }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '处理状态标签' }));
+    expect(navigateToMock).toHaveBeenCalledWith('/compositions/workbench?composition_id=comp-001');
   });
 
   it('renders the A3 diagnosis surface with top actions and production copy', () => {

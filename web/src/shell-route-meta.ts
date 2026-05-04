@@ -1,6 +1,14 @@
 import type { AppRoute } from './lib/appRouteContext';
 
-export type ShellNavKey = 'workspace' | 'creation' | 'runs' | 'optimization' | 'snapshots' | 'composition';
+export type ShellNavKey =
+  | 'workspace'
+  | 'creation'
+  | 'runs'
+  | 'optimization'
+  | 'snapshots'
+  | 'composition'
+  | 'factor'
+  | 'data';
 
 export type ShellNavItem = {
   key: ShellNavKey;
@@ -23,6 +31,8 @@ export const SHELL_NAV_ITEMS: ShellNavItem[] = [
   { key: 'runs', href: '#/runs', label: '回测列表' },
   { key: 'optimization', href: '#/optimization-jobs', label: '优化实验室' },
   { key: 'snapshots', href: '#/snapshots', label: '数据快照' },
+  { key: 'factor', href: '#/factors', label: '因子库' },
+  { key: 'data', href: '#/pit-data', label: 'PIT 清洗中心' },
 ];
 
 export function getRouteMeta(route: AppRoute): AppRouteMeta {
@@ -116,6 +126,54 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         description: '集中查看数据集与股票池快照状态，并提供刷新与修复入口。',
         showPageHeading: false,
       };
+    case 'pit-data':
+      return {
+        navKey: 'data',
+        eyebrow: '数据基座',
+        title: 'PIT 清洗中心',
+        description: '复核复权价格、历史样本池和异常清洗状态，确保因子诊断不引入未来函数。',
+        showPageHeading: false,
+      };
+    case 'factor-library':
+      return {
+        navKey: 'factor',
+        eyebrow: '因子',
+        title: '因子库',
+        description: '集中管理默认因子、人工因子、最近诊断和 PIT 数据门禁。',
+        showPageHeading: false,
+      };
+    case 'factor-detail':
+      return {
+        navKey: 'factor',
+        eyebrow: '因子',
+        title: '因子诊断',
+        description: '查看因子逻辑、PIT 诊断和投研治理证据。',
+        showPageHeading: false,
+      };
+    case 'factor-editor':
+      return {
+        navKey: 'factor',
+        eyebrow: '因子',
+        title: '因子编辑器',
+        description: '用白名单公式编写人工因子，并在正式诊断前预览 IC。',
+        showPageHeading: false,
+      };
+    case 'factor-sandbox':
+      return {
+        navKey: 'factor',
+        eyebrow: '因子',
+        title: '挖掘沙盒',
+        description: '自动挖掘能力将在后续里程碑接入，本期保留导航入口。',
+        showPageHeading: false,
+      };
+    case 'factor-quarantine':
+      return {
+        navKey: 'factor',
+        eyebrow: '因子',
+        title: '隔离检疫区',
+        description: '自动挖掘因子的去重、样本外和相关性门禁将在后续里程碑接入。',
+        showPageHeading: false,
+      };
     case 'optimization-index':
     case 'optimization-select':
     case 'optimization-config':
@@ -128,4 +186,11 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         showPageHeading: false,
       };
   }
+  return {
+    navKey: 'workspace',
+    eyebrow: '工作台',
+    title: '工作台健康度',
+    description: '总览策略规模、活跃回测与优化进度，直达最新任务。',
+    showPageHeading: false,
+  };
 }

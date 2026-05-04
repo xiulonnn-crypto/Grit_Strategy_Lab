@@ -1,7 +1,12 @@
 import { useEffect, useState } from 'react';
 import { CompositionDetailView } from '../components/composition-detail/composition-detail-view';
 import { useApiClient } from '../lib/demoStoreContext';
-import type { ApiCompositionDetail, ApiCompositionStatus } from '../types';
+import type {
+  ApiCompositionDetail,
+  ApiCompositionStatus,
+  ApiCompositionStatusAction,
+  ApiCompositionStatusDiagnosis,
+} from '../types';
 
 export function CompositionDetailPage({
   compositionId,
@@ -81,6 +86,33 @@ export function CompositionDetailPage({
     }
   }
 
+  async function handleDiagnosisAction(
+    action: ApiCompositionStatusAction,
+    diagnosis: ApiCompositionStatusDiagnosis,
+  ): Promise<ApiCompositionDetail> {
+    setWriteError(null);
+    if (action.action_key === 'refresh_source_freezes') {
+      if (!api.refreshCompositionSourceFreezes) {
+        throw new Error('当前运行环境不支持在线重新冻结来源指纹。');
+      }
+      const response = await api.refreshCompositionSourceFreezes(compositionId, {
+        confirmed_by: 'operator',
+        reason: diagnosis.action,
+      });
+      setDetail(response);
+      return response;
+    }
+    if (action.action_key === 'refresh_return_quality' || action.action_key === 'refresh_diagnostics') {
+      if (!api.refreshCompositionDiagnostics) {
+        throw new Error('当前运行环境不支持在线刷新诊断。');
+      }
+      const response = await api.refreshCompositionDiagnostics(compositionId);
+      setDetail(response);
+      return response;
+    }
+    throw new Error('该动作需要在对应页面完成。');
+  }
+
   if (isApprovedPreviewRoute) {
     return <CompositionDetailView detail={null} approvedPreview error={null} loading={false} />;
   }
@@ -90,6 +122,7 @@ export function CompositionDetailPage({
       detail={detail}
       error={error}
       loading={loading}
+      onDiagnosisAction={handleDiagnosisAction}
       onStatusChange={handleStatusChange}
       savingStatus={savingStatus}
       writeError={writeError}

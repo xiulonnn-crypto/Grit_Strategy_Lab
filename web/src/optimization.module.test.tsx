@@ -1230,6 +1230,36 @@ function createOptimizationTestApi(): DemoApi {
     async refreshSnapshots(): Promise<never> {
       throw new Error("not implemented");
     },
+    async getPitDataOverview(): Promise<never> {
+      throw new Error("因子测试接口未接入。");
+    },
+    async createPitResearchWaiver(): Promise<never> {
+      throw new Error("因子测试接口未接入。");
+    },
+    async revokePitResearchWaiver(): Promise<never> {
+      throw new Error("因子测试接口未接入。");
+    },
+    async applyPitIdentityOverride(): Promise<never> {
+      throw new Error("因子测试接口未接入。");
+    },
+    async restartPitIdentityScraper(): Promise<never> {
+      throw new Error("因子测试接口未接入。");
+    },
+    async listFactors(): Promise<never> {
+      throw new Error("因子测试接口未接入。");
+    },
+    async createFactor(): Promise<never> {
+      throw new Error("因子测试接口未接入。");
+    },
+    async getFactor(): Promise<never> {
+      throw new Error("因子测试接口未接入。");
+    },
+    async runFactorDiagnostics(): Promise<never> {
+      throw new Error("因子测试接口未接入。");
+    },
+    async previewFactorDiagnostics(): Promise<never> {
+      throw new Error("因子测试接口未接入。");
+    },
   };
 }
 

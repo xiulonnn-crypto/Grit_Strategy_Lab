@@ -220,7 +220,15 @@ export function installMockApiServer() {
         ));
       }
       if (method === 'GET' && url.pathname === '/optimization-jobs') return json(await demoApi.listOptimizationJobs());
-      if (method === 'GET' && segments[0] === 'optimization-jobs' && segments[2] === 'detail') return json(await demoApi.getOptimizationJobDetail(segments[1]));
+      if (method === 'GET' && segments[0] === 'optimization-jobs' && segments[2] === 'detail') {
+        const rawLimit = url.searchParams.get('matching_limit');
+        const matchingLimit = rawLimit === null ? undefined : Number(rawLimit);
+        return json(await demoApi.getOptimizationJobDetail(segments[1], {
+          matchingLimit: typeof matchingLimit === 'number' && Number.isFinite(matchingLimit)
+            ? matchingLimit
+            : undefined,
+        }));
+      }
       if (method === 'POST' && segments[0] === 'strategies' && segments[2] === 'optimization-jobs') {
         return json(await demoApi.createOptimizationJob(segments[1], {
           objective: typeof body?.objective === 'string' ? body.objective : undefined,
@@ -264,6 +272,43 @@ export function installMockApiServer() {
         if (method === 'POST' && url.pathname === '/admin/snapshot-refresh-jobs') {
           return json(await demoApi.refreshSnapshots(body as import('./types').ApiSnapshotRefreshRequest | undefined));
         }
+      if (method === 'GET' && url.pathname === '/pit-data') return json(await demoApi.getPitDataOverview());
+      if (method === 'POST' && url.pathname === '/pit-data/research-waiver') {
+        return json(await demoApi.createPitResearchWaiver(body as import('./types').ApiPitResearchWaiverPayload));
+      }
+      if (method === 'DELETE' && url.pathname.startsWith('/pit-data/research-waiver/')) {
+        const waiverId = decodeURIComponent(url.pathname.split('/').pop() ?? '');
+        return json(await demoApi.revokePitResearchWaiver(waiverId));
+      }
+      if (method === 'POST' && url.pathname === '/pit-data/identity-overrides') {
+        return json(await demoApi.applyPitIdentityOverride(body as import('./types').ApiPitIdentityOverridePayload));
+      }
+      if (method === 'POST' && url.pathname === '/pit-data/identity-scraper/restart') {
+        return json(await demoApi.restartPitIdentityScraper(body as import('./types').ApiPitIdentityScraperRestartPayload));
+      }
+      if (method === 'GET' && url.pathname === '/factors') {
+        return json(await demoApi.listFactors({
+          source: url.searchParams.get('source') ?? undefined,
+          tag: url.searchParams.get('tag') ?? undefined,
+          market: url.searchParams.get('market') ?? undefined,
+          status: url.searchParams.get('status') ?? undefined,
+        }));
+      }
+      if (method === 'POST' && url.pathname === '/factors') {
+        return json(await demoApi.createFactor(body as import('./types').ApiFactorCreatePayload));
+      }
+      if (method === 'POST' && url.pathname === '/factors/diagnostics/preview') {
+        return json(await demoApi.previewFactorDiagnostics(body as import('./types').ApiFactorDiagnosticPreviewPayload));
+      }
+      if (method === 'GET' && segments[0] === 'factors' && segments.length === 2) {
+        return json(await demoApi.getFactor(segments[1]));
+      }
+      if (method === 'POST' && segments[0] === 'factors' && segments[2] === 'diagnostics') {
+        return json(await demoApi.runFactorDiagnostics(
+          segments[1],
+          body as import('./types').ApiFactorDiagnosticPayload,
+        ));
+      }
 
       return json({ status: 404, code: 'not_found', message: `No mock handler for ${method} ${url.pathname}` }, 404);
     } catch (error) {

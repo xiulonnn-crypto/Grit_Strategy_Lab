@@ -36,6 +36,18 @@ import type {
   ApiCompositionProxyConfirmationPayload,
   ApiCompositionUpdatePayload,
   ApiCompositionVersion,
+  ApiFactorCreatePayload,
+  ApiFactorDetail,
+  ApiFactorDiagnosticPayload,
+  ApiFactorDiagnosticPreview,
+  ApiFactorDiagnosticPreviewPayload,
+  ApiFactorDiagnosticRunResponse,
+  ApiFactorListResponse,
+  ApiPitIdentityOverridePayload,
+  ApiPitIdentityScraperRestartPayload,
+  ApiPitIdentityScraperRestartResponse,
+  ApiPitDataOverview,
+  ApiPitResearchWaiverPayload,
   ApiLegInventory,
   ApiOptimizationJobCreatePayload,
   ApiOptimizationJobDeleteResult,
@@ -523,7 +535,16 @@ function createHttpApiClient(): DemoApi {
         withJsonBody({ idempotency_key: idempotencyKey }, { method: 'POST' }),
       ),
     listOptimizationJobs: () => requestJson<ApiOptimizationJobListItem[]>('/optimization-jobs'),
-    getOptimizationJobDetail: (id) => requestJson<ApiOptimizationJobDetail>(`/optimization-jobs/${encodeURIComponent(id)}/detail`),
+    getOptimizationJobDetail: (id, params) => {
+      const query = new URLSearchParams();
+      if (typeof params?.matchingLimit === 'number' && Number.isFinite(params.matchingLimit)) {
+        query.set('matching_limit', String(Math.max(0, Math.trunc(params.matchingLimit))));
+      }
+      const suffix = query.toString();
+      return requestJson<ApiOptimizationJobDetail>(
+        `/optimization-jobs/${encodeURIComponent(id)}/detail${suffix ? `?${suffix}` : ''}`,
+      );
+    },
     updateOptimizationJobConstraints: (jobId, payload) =>
       requestJson<ApiOptimizationJobDetail>(
         `/optimization-jobs/${encodeURIComponent(jobId)}`,
@@ -613,6 +634,11 @@ function createHttpApiClient(): DemoApi {
         `/compositions/${encodeURIComponent(id)}/diagnostics/refresh`,
         withJsonBody({}, { method: 'POST' }),
       ),
+    refreshCompositionSourceFreezes: (id, payload = {}) =>
+      requestJson<ApiCompositionDetail>(
+        `/compositions/${encodeURIComponent(id)}/source-freezes/refresh`,
+        withJsonBody(payload, { method: 'POST' }),
+      ),
     confirmCompositionProxy: (id, payload: ApiCompositionProxyConfirmationPayload) =>
       requestJson<ApiCompositionDetail>(
         `/compositions/${encodeURIComponent(id)}/proxy-confirmations`,
@@ -698,6 +724,48 @@ function createHttpApiClient(): DemoApi {
       requestJson<ApiSnapshotOverview>(
         '/admin/snapshot-refresh-jobs',
         withJsonBody(payload ?? {}, { method: 'POST' }),
+      ),
+    getPitDataOverview: () => requestJson<ApiPitDataOverview>('/pit-data'),
+    createPitResearchWaiver: (payload?: ApiPitResearchWaiverPayload) =>
+      requestJson<ApiPitDataOverview>(
+        '/pit-data/research-waiver',
+        withJsonBody(payload ?? {}, { method: 'POST' }),
+      ),
+    revokePitResearchWaiver: (id: string) =>
+      requestJson<ApiPitDataOverview>(`/pit-data/research-waiver/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      }),
+    applyPitIdentityOverride: (payload: ApiPitIdentityOverridePayload) =>
+      requestJson<ApiPitDataOverview>(
+        '/pit-data/identity-overrides',
+        withJsonBody(payload, { method: 'POST' }),
+      ),
+    restartPitIdentityScraper: (payload?: ApiPitIdentityScraperRestartPayload) =>
+      requestJson<ApiPitIdentityScraperRestartResponse>(
+        '/pit-data/identity-scraper/restart',
+        withJsonBody(payload ?? {}, { method: 'POST' }),
+      ),
+    listFactors: (params) => {
+      const search = new URLSearchParams();
+      if (params?.source) search.set('source', params.source);
+      if (params?.tag) search.set('tag', params.tag);
+      if (params?.market) search.set('market', params.market);
+      if (params?.status) search.set('status', params.status);
+      const suffix = search.toString();
+      return requestJson<ApiFactorListResponse>(`/factors${suffix ? `?${suffix}` : ''}`);
+    },
+    createFactor: (payload: ApiFactorCreatePayload) =>
+      requestJson<ApiFactorDetail>('/factors', withJsonBody(payload, { method: 'POST' })),
+    getFactor: (id: string) => requestJson<ApiFactorDetail>(`/factors/${encodeURIComponent(id)}`),
+    runFactorDiagnostics: (id: string, payload: ApiFactorDiagnosticPayload) =>
+      requestJson<ApiFactorDiagnosticRunResponse>(
+        `/factors/${encodeURIComponent(id)}/diagnostics`,
+        withJsonBody(payload, { method: 'POST' }),
+      ),
+    previewFactorDiagnostics: (payload: ApiFactorDiagnosticPreviewPayload) =>
+      requestJson<ApiFactorDiagnosticPreview>(
+        '/factors/diagnostics/preview',
+        withJsonBody(payload, { method: 'POST' }),
       ),
   };
 }

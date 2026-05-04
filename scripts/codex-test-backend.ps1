@@ -32,6 +32,7 @@ $defaultTests = @(
     'tests\test_composition_api.py'
     'tests\test_creation_session_refresh.py'
     'tests\test_real_backtest_api.py'
+    'tests\test_factor_research_api.py'
     'tests\test_optimization_execution_resume.py'
     'tests\test_optimization_resume_api.py'
     'tests\test_strategies_smoke.py'

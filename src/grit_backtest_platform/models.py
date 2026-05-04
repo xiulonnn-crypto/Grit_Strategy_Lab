@@ -48,6 +48,89 @@ SnapshotProviderAccessTier = Literal['public', 'free_account', 'paid_optional']
 OfficialSeedStatus = Literal['complete', 'partial', 'missing']
 LegType = Literal['strategy', 'asset', 'cash']
 CompositionStatus = Literal['DRAFT', 'ACTIVE', 'ARCHIVED']
+FactorSource = Literal['MANUAL', 'SYSTEM_SEED', 'AUTO_MINED']
+FactorLifecycleStatus = Literal['DRAFT', 'VERIFIED', 'PRODUCTION', 'DECAYED']
+FactorDiagnosticStatus = Literal[
+    'READY_TO_DIAGNOSE',
+    'SANDBOX_READY',
+    'BLOCKED_PIT',
+    'BLOCKED_DATA',
+    'RUNNING',
+    'COMPLETED',
+    'FAILED',
+]
+FactorDiagnosticMode = Literal['VERIFIED', 'SANDBOX']
+FactorDirection = Literal['HIGH_IS_BETTER', 'LOW_IS_BETTER', 'NEUTRAL']
+FactorFrequency = Literal['DAILY', 'WEEKLY', 'MONTHLY']
+
+
+class FactorDescriptorRequest(BaseModel):
+    source_prefix: str = Field(default='m', min_length=1)
+    category: str = Field(min_length=1)
+    metric: str = ''
+    window: str = Field(min_length=1)
+    operator: str = Field(min_length=1)
+
+
+class FactorCreateRequest(BaseModel):
+    name: str = Field(min_length=1)
+    market: str = Field(default='US', min_length=1)
+    universe: str = Field(default='SP500', min_length=1)
+    expression: str = Field(min_length=1)
+    frequency: FactorFrequency = 'DAILY'
+    direction: FactorDirection = 'HIGH_IS_BETTER'
+    tags: list[str] = Field(default_factory=list)
+    descriptor: FactorDescriptorRequest
+
+
+class FactorDiagnosticRequest(BaseModel):
+    start_date: str
+    end_date: str
+    universe: str | None = None
+    dataset_snapshot_id: str = Field(min_length=1)
+    universe_snapshot_id: str = Field(min_length=1)
+    return_window_days: int = Field(default=21, ge=1, le=252)
+    group_count: int = Field(default=5, ge=2, le=10)
+    diagnostic_mode: FactorDiagnosticMode = 'VERIFIED'
+
+
+class FactorDiagnosticPreviewRequest(BaseModel):
+    expression: str = Field(min_length=1)
+    market: str = Field(default='US', min_length=1)
+    universe: str = Field(default='SP500', min_length=1)
+    dataset_snapshot_id: str | None = None
+    universe_snapshot_id: str | None = None
+    lookback_years: int = Field(default=5, ge=1, le=10)
+    return_window_days: int = Field(default=21, ge=1, le=126)
+
+
+class PitResearchWaiverRequest(BaseModel):
+    dataset_snapshot_id: str | None = None
+    universe_snapshot_id: str | None = None
+    ignored_symbols: list[str] = Field(default_factory=list)
+    reason: str | None = None
+    created_by: str | None = None
+
+
+class PitIdentityOverrideRequest(BaseModel):
+    symbol: str = Field(min_length=1)
+    canonical_symbol: str = Field(min_length=1)
+    company_name: str | None = None
+    cik: str | None = None
+    exchange: str | None = None
+    ipo_date: str | None = None
+    delisting_date: str | None = None
+    valid_from: str | None = None
+    valid_to: str | None = None
+    reason: str | None = None
+    created_by: str | None = None
+
+
+class PitIdentityScraperRestartRequest(BaseModel):
+    symbols: list[str] = Field(default_factory=list)
+    max_symbols: int | None = Field(default=None, ge=1, le=1000)
+    reason: str | None = None
+    created_by: str | None = None
 
 
 class CreationMessageCreate(BaseModel):
@@ -360,6 +443,11 @@ class CompositionUpdateRequest(BaseModel):
     version_candidate_label: str | None = None
 
 
+class CompositionSourceFreezeRefreshRequest(BaseModel):
+    reason: str | None = None
+    confirmed_by: str | None = None
+
+
 class CompositionBacktestRunCreateRequest(BaseModel):
     idempotency_key: str | None = None
     composition_version: str | None = None
@@ -438,6 +526,13 @@ class LegInventoryRowModel(BaseModel):
     allowed_actions: list[AllowedAction | str] = Field(default_factory=list)
     source_ref_id: str | None = None
     source_ref_type: str | None = None
+    source_integrity: dict[str, Any] | None = None
+    freeze_hash: str | None = None
+    signature_status: str | None = None
+    drift_status: str | None = None
+    current_ref_id: str | None = None
+    alerts: list[str] = Field(default_factory=list)
+    return_quality: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -445,6 +540,7 @@ class LegInventoryResponseModel(BaseModel):
     counts: LegInventoryCountModel = Field(default_factory=LegInventoryCountModel)
     filters: LegInventoryFiltersModel = Field(default_factory=LegInventoryFiltersModel)
     rows: list[LegInventoryRowModel] = Field(default_factory=list)
+    strategy_reference_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class AssetLegResponseModel(BaseModel):
@@ -594,6 +690,7 @@ class CompositionReturnQualitySummaryModel(BaseModel):
     coverage_pct: float = 0.0
     fallback_used: bool = False
     notes: list[str] = Field(default_factory=list)
+    leg_quality: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CompositionRebalanceEventModel(BaseModel):
@@ -778,6 +875,20 @@ class CompositionSourceFreezeModel(BaseModel):
     alerts: list[str] = Field(default_factory=list)
 
 
+class CompositionBacktestHistoryItemModel(BaseModel):
+    run_id: str
+    created_at: str
+    completed_at: str | None = None
+    composition_version_label: str | None = None
+    composition_version_number: int | None = None
+    strategy_version_label: str | None = None
+    strategy_versions: list[dict[str, Any]] = Field(default_factory=list)
+    period_label: str | None = None
+    horizon_years: float | None = None
+    annualized_return: float | None = None
+    sharpe: float | None = None
+
+
 class CompositionDetailResponseModel(BaseModel):
     id: str
     name: str
@@ -807,6 +918,7 @@ class CompositionDetailResponseModel(BaseModel):
     scenario_summary: CompositionScenarioSummaryModel = Field(default_factory=CompositionScenarioSummaryModel)
     source_evidence: list[CompositionSourceFreezeModel] = Field(default_factory=list)
     source_integrity: list[CompositionSourceIntegrityModel] = Field(default_factory=list)
+    backtest_history: list[CompositionBacktestHistoryItemModel] = Field(default_factory=list)
     audit_trail: list[CompositionAuditTrailItemModel] = Field(default_factory=list)
     primary_diagnosis: CompositionStatusDiagnosisModel | None = None
     diagnoses: list[CompositionStatusDiagnosisModel] = Field(default_factory=list)
@@ -882,6 +994,8 @@ class CompositionBacktestRunResponseModel(BaseModel):
     id: str
     run_id: str
     composition_id: str
+    current_composition_version_label: str | None = None
+    current_composition_version_number: int | None = None
     status: str
     created_at: str
     completed_at: str | None = None
@@ -1079,6 +1193,7 @@ class BondSnapshotRegistryItemModel(BaseModel):
     sec_yield_30d_pct: float | None = None
     credit_quality: dict[str, Any] | str | None = None
     tracking_error_bps: float | None = None
+    tracking_error_source: str | None = None
     audit_alerts: list[str] = Field(default_factory=list)
     audit_notes: list[str] = Field(default_factory=list)
     tracking_status: str | None = None
@@ -1130,6 +1245,7 @@ class BondSnapshotEligibleInstrumentModel(BaseModel):
     sec_yield_30d_pct: float | None = None
     credit_quality: dict[str, Any] | str | None = None
     tracking_error_bps: float | None = None
+    tracking_error_source: str | None = None
     audit_alerts: list[str] = Field(default_factory=list)
     audit_notes: list[str] = Field(default_factory=list)
     tracking_status: str | None = None

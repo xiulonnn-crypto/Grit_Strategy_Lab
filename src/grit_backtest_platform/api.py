@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, Response
 
 from ._version import __version__
 from .fallback_provider import ProviderExecutionSignal, provider_access_tier
+from .factor_research import FactorDescriptorConflict
 from .models import (
     AssetAllocationRecommendationRequest,
     AssetLegCreateRequest,
@@ -44,12 +45,16 @@ from .models import (
     CompositionProxyConfirmationRequest,
     CompositionPreviewRequest,
     CompositionPreviewResponseModel,
+    CompositionSourceFreezeRefreshRequest,
     CompositionUpdateRequest,
     CompositionVersionDetailModel,
     CompositionVersionListResponseModel,
     ConfirmationUpdateRequest,
     CreateCreationSessionRequest,
     CreationMessageCreate,
+    FactorCreateRequest,
+    FactorDiagnosticPreviewRequest,
+    FactorDiagnosticRequest,
     LegInventoryResponseModel,
     MaterializeRequest,
     OptimizationCandidateCreateRequest,
@@ -57,6 +62,9 @@ from .models import (
     OptimizationJobCreateRequest,
     OptimizationJobFilteredResultCreateRequest,
     ParameterVersionRestoreRequest,
+    PitIdentityOverrideRequest,
+    PitIdentityScraperRestartRequest,
+    PitResearchWaiverRequest,
     ResumeOptimizationJobRequest,
     PromoteTrialRequest,
     PrepareConfirmationRequest,
@@ -297,6 +305,62 @@ class RuntimeMarketDataProvider:
             if isinstance(identity, dict) and identity.get("symbol"):
                 return identity
         return None
+
+    def resolve_identities(
+        self,
+        symbols: list[str] | tuple[str, ...] | set[str],
+        *,
+        include_per_symbol: bool = True,
+    ) -> dict[str, dict[str, Any]]:
+        remaining = {
+            str(symbol).strip().upper()
+            for symbol in symbols
+            if str(symbol).strip()
+        }
+        resolved: dict[str, dict[str, Any]] = {}
+        if not remaining:
+            return resolved
+
+        for provider in self.identity_providers:
+            bulk_resolver = getattr(provider, "resolve_identities", None)
+            if not callable(bulk_resolver):
+                continue
+            try:
+                provider_result = bulk_resolver(sorted(remaining))
+            except Exception:
+                continue
+            if not isinstance(provider_result, dict):
+                continue
+            for raw_symbol, identity in provider_result.items():
+                symbol = str(raw_symbol or "").strip().upper()
+                if not symbol or symbol not in remaining or not isinstance(identity, dict):
+                    continue
+                if not (identity.get("symbol") or identity.get("canonical_symbol")):
+                    continue
+                normalized_identity = dict(identity)
+                normalized_identity["symbol"] = str(normalized_identity.get("symbol") or symbol).strip().upper()
+                normalized_identity["canonical_symbol"] = str(
+                    normalized_identity.get("canonical_symbol") or normalized_identity["symbol"]
+                ).strip().upper()
+                resolved[symbol] = normalized_identity
+            remaining -= set(resolved)
+            if not remaining:
+                return resolved
+
+        if not include_per_symbol:
+            return resolved
+
+        for symbol in sorted(remaining):
+            identity = self.resolve_identity(symbol)
+            if not isinstance(identity, dict) or not (identity.get("symbol") or identity.get("canonical_symbol")):
+                continue
+            normalized_identity = dict(identity)
+            normalized_identity["symbol"] = str(normalized_identity.get("symbol") or symbol).strip().upper()
+            normalized_identity["canonical_symbol"] = str(
+                normalized_identity.get("canonical_symbol") or normalized_identity["symbol"]
+            ).strip().upper()
+            resolved[symbol] = normalized_identity
+        return resolved
 
     def _normalize_history_payload(self, provider_name: str, result: Any) -> dict[str, Any]:
         if isinstance(result, dict):
@@ -961,6 +1025,8 @@ def create_app(
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         except ContractConflictError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        except FactorDescriptorConflict as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail={'status': 404, 'code': 'not_found', 'message': str(exc)}) from exc
         except ValueError as exc:
@@ -1196,6 +1262,10 @@ def create_app(
     def refresh_composition_diagnostics(composition_id: str):
         return invoke(service.refresh_composition_diagnostics, composition_id)
 
+    @app.post('/compositions/{composition_id}/source-freezes/refresh', response_model=CompositionDetailResponseModel)
+    def refresh_composition_source_freezes(composition_id: str, payload: CompositionSourceFreezeRefreshRequest):
+        return invoke(service.refresh_composition_source_freezes, composition_id, payload)
+
     @app.post('/compositions/{composition_id}/proxy-confirmations', response_model=CompositionDetailResponseModel)
     def confirm_composition_proxy(composition_id: str, payload: CompositionProxyConfirmationRequest):
         return invoke(service.confirm_composition_proxy, composition_id, payload)
@@ -1328,9 +1398,12 @@ def create_app(
         return invoke(service.list_optimization_jobs)
 
     @app.get('/optimization-jobs/{job_id}/detail')
-    def optimization_job_detail(job_id: str):
+    def optimization_job_detail(
+        job_id: str,
+        matching_limit: int | None = Query(default=None, ge=0, le=1000),
+    ):
         start_time = time.perf_counter()
-        response = invoke(service.get_optimization_job_detail, job_id)
+        response = invoke(service.get_optimization_job_detail, job_id, matching_limit=matching_limit)
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
         metrics = {}
         if hasattr(service, "get_optimization_job_detail_metrics"):
@@ -1385,6 +1458,64 @@ def create_app(
     @app.delete('/optimization-jobs/{job_id}/candidates/{trial_id}')
     def delete_candidate(job_id: str, trial_id: str):
         return invoke(service.delete_optimization_candidate, job_id, trial_id)
+
+    @app.get('/pit-data')
+    def pit_data_overview():
+        return invoke(service.get_pit_data_overview)
+
+    @app.post('/pit-data/research-waiver')
+    def create_pit_research_waiver(payload: PitResearchWaiverRequest):
+        return invoke(service.create_pit_research_waiver, payload)
+
+    @app.delete('/pit-data/research-waiver/{waiver_id}')
+    def revoke_pit_research_waiver(waiver_id: str):
+        return invoke(service.revoke_pit_research_waiver, waiver_id)
+
+    @app.post('/pit-data/identity-overrides')
+    def apply_pit_identity_override(payload: PitIdentityOverrideRequest):
+        return invoke(service.apply_pit_identity_override, payload)
+
+    @app.post('/pit-data/identity-scraper/restart')
+    def restart_pit_identity_scraper(payload: PitIdentityScraperRestartRequest):
+        return invoke(service.restart_pit_identity_scraper, payload)
+
+    @app.get('/factors')
+    def list_factors(
+        source: str | None = Query(default=None),
+        tag: str | None = Query(default=None),
+        market: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+    ):
+        return invoke(service.list_factors, source=source, tag=tag, market=market, status=status)
+
+    @app.post('/factors')
+    def create_factor(payload: FactorCreateRequest):
+        return invoke(service.create_factor, payload)
+
+    @app.post('/factors/diagnostics/preview')
+    def preview_factor_diagnostics(payload: FactorDiagnosticPreviewRequest):
+        return invoke(service.preview_factor_diagnostics, payload)
+
+    @app.get('/factors/{factor_id}')
+    def factor_detail(factor_id: str):
+        return invoke(service.get_factor, factor_id)
+
+    @app.post('/factors/{factor_id}/diagnostics')
+    def run_factor_diagnostics(factor_id: str, payload: FactorDiagnosticRequest):
+        return invoke(service.run_factor_diagnostics, factor_id, payload)
+
+    @app.get('/factors/{factor_id}/diagnostics/{run_id}/report')
+    def factor_diagnostic_report(factor_id: str, run_id: str):
+        payload = invoke(service.export_factor_diagnostic_report, factor_id, run_id)
+        raw_content = payload.get("content", b"") if isinstance(payload, Mapping) else b""
+        content = raw_content if isinstance(raw_content, (bytes, bytearray)) else str(raw_content).encode("utf-8")
+        filename = str(payload.get("filename", f"{factor_id}-{run_id}.pdf")) if isinstance(payload, Mapping) else f"{factor_id}-{run_id}.pdf"
+        media_type = str(payload.get("media_type", "application/pdf")) if isinstance(payload, Mapping) else "application/pdf"
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     @app.get('/data-snapshots/overview')
     def snapshot_overview():

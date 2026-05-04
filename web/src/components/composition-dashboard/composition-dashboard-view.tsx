@@ -8,9 +8,13 @@ import {
   formatRebalanceCadence,
   normalizePercentLike,
 } from '../../lib/compose-display';
+import {
+  diagnosisNeedsAction,
+} from '../../lib/composition-diagnostics';
 import { navigateTo } from '../../lib/appRouteContext';
 import type {
   ApiCompositionListItem,
+  ApiCompositionStatusAction,
   ApiCompositionSourceIntegrity,
   ApiCompositionStatus,
 } from '../../types';
@@ -58,6 +62,37 @@ function getStatusTone(status: string): 'accent' | 'warning' | 'danger' | 'succe
 
 function getStatusLabel(status: string): string {
   return formatCompositionStatusLabel(status);
+}
+
+function explicitCompositionDiagnosis(composition: ApiCompositionListItem) {
+  return composition.primary_diagnosis ?? composition.diagnoses?.[0] ?? null;
+}
+
+function getDiagnosisToneClass(composition: ApiCompositionListItem): 'accent' | 'warning' | 'danger' | 'success' {
+  const diagnosis = explicitCompositionDiagnosis(composition);
+  if (diagnosis?.status === '失效') return 'danger';
+  if (diagnosis?.status === '待校准') return 'warning';
+  if (diagnosis?.status === '稳健') return 'success';
+  return 'accent';
+}
+
+function getStatusLabelForComposition(composition: ApiCompositionListItem): string {
+  const diagnosis = explicitCompositionDiagnosis(composition);
+  if (diagnosis?.diagnosis_label) {
+    return diagnosis.diagnosis_label;
+  }
+  if (compositionHasNewVersion(composition)) {
+    return '有新版本';
+  }
+  return getStatusLabel(composition.status);
+}
+
+function actionPathFromDiagnosisAction(action: ApiCompositionStatusAction | undefined, compositionId: string): string {
+  const route = String(action?.route ?? '').trim();
+  if (route) {
+    return route;
+  }
+  return `/compositions/workbench?composition_id=${encodeURIComponent(compositionId)}`;
 }
 
 function sourceIntegrityHasNewVersion(item: ApiCompositionSourceIntegrity): boolean {
@@ -130,6 +165,18 @@ function buildTaskList(compositions: ApiCompositionListItem[]): DashboardTask[] 
 
   const tasks: DashboardTask[] = sorted.map((composition): DashboardTask => {
     const normalizedStatus = String(composition.status || '').toUpperCase();
+    const diagnosis = explicitCompositionDiagnosis(composition);
+    if (diagnosis && diagnosisNeedsAction(diagnosis)) {
+      return {
+        id: `${composition.id}-${diagnosis.diagnosis_type || 'status-label'}`,
+        title: diagnosis.issue_type || '状态标签待处理',
+        description: diagnosis.frontend_explanation,
+        tone: diagnosis.status === '失效' ? 'danger' : 'warning',
+        label: diagnosis.status,
+        actionLabel: '处理状态标签',
+        actionPath: actionPathFromDiagnosisAction(diagnosis.actions?.[0], composition.id),
+      };
+    }
     const newVersionLegCount = getNewVersionLegCount(composition);
     if (newVersionLegCount > 0) {
       return {
@@ -462,8 +509,13 @@ export function CompositionDashboardView({
               <div className="composition-dashboard-card-grid">
                 {visibleCompositions.map((composition) => {
                   const hasNewVersion = compositionHasNewVersion(composition);
-                  const tone = hasNewVersion ? 'warning' : getStatusTone(composition.status);
-                  const statusLabel = hasNewVersion ? '有新版本' : getStatusLabel(composition.status);
+                  const diagnosis = explicitCompositionDiagnosis(composition);
+                  const tone = diagnosis?.diagnosis_label
+                    ? getDiagnosisToneClass(composition)
+                    : hasNewVersion
+                      ? 'warning'
+                      : getStatusTone(composition.status);
+                  const statusLabel = getStatusLabelForComposition(composition);
                   const normalizedStatus = String(composition.status || '').toUpperCase();
                   const statusAction = getStatusWriteAction(composition.status);
                   const isSavingStatus = savingCompositionId === composition.id;

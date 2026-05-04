@@ -40,6 +40,7 @@ class AlphaVantageProvider:
     def __init__(self, api_key: str | None = None, timeout: int = 20) -> None:
         self.api_key = str(api_key or os.getenv("ALPHAVANTAGE_API_KEY") or "").strip()
         self.timeout = timeout
+        self._listing_status_cache: dict[tuple[str | None, str | None], list[dict[str, Any]]] = {}
 
     def availability(self) -> ProviderAvailability:
         return ProviderAvailability(
@@ -271,6 +272,9 @@ class AlphaVantageProvider:
         date: date | None = None,
         state: str | None = None,
     ) -> list[dict[str, Any]]:
+        cache_key = (date.isoformat() if date is not None else None, str(state or "") or None)
+        if cache_key in self._listing_status_cache:
+            return list(self._listing_status_cache[cache_key])
         params: dict[str, Any] = {"function": "LISTING_STATUS"}
         if date is not None:
             params["date"] = date.isoformat()
@@ -301,7 +305,8 @@ class AlphaVantageProvider:
             }
             if normalized["symbol"]:
                 rows.append(normalized)
-        return rows
+        self._listing_status_cache[cache_key] = rows
+        return list(rows)
 
     def resolve_identity(self, symbol: str) -> dict[str, Any] | None:
         normalized = symbol.upper()
@@ -322,6 +327,39 @@ class AlphaVantageProvider:
                         "valid_to": None,
                     }
         return None
+
+    def resolve_identities(self, symbols: list[str] | tuple[str, ...] | set[str]) -> dict[str, dict[str, Any]]:
+        requested = {
+            str(symbol).strip().upper()
+            for symbol in symbols
+            if str(symbol).strip()
+        }
+        if not requested:
+            return {}
+        rows_by_symbol: dict[str, dict[str, Any]] = {}
+        for state in ("active", "delisted"):
+            for row in self.fetch_listing_status(state=state):
+                symbol = str(row.get("symbol") or "").strip().upper()
+                if symbol and symbol not in rows_by_symbol:
+                    rows_by_symbol[symbol] = row
+        resolved: dict[str, dict[str, Any]] = {}
+        for symbol in sorted(requested):
+            row = rows_by_symbol.get(symbol)
+            if not row:
+                continue
+            resolved[symbol] = {
+                "symbol": symbol,
+                "canonical_symbol": symbol,
+                "company_name": row.get("company_name") or "",
+                "cik": "",
+                "exchange": row.get("exchange") or "",
+                "ipo_date": row.get("ipo_date"),
+                "delisting_date": row.get("delisting_date"),
+                "source": self.provider_name,
+                "valid_from": None,
+                "valid_to": None,
+            }
+        return resolved
 
     def fetch_corporate_actions(
         self,

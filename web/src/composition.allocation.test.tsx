@@ -192,6 +192,25 @@ const allocationJob = {
   warnings: [],
 };
 
+const failedStatusDiagnosis = {
+  status: '失效',
+  issue_type: '异常降级补值',
+  diagnosis_type: 'abnormal_fallback',
+  diagnosis_label: '失效：异常降级补值',
+  frontend_explanation: '当前不是计划内代理，而是临时估算或异常补值。',
+  action: '修复数据来源或更换成分。',
+  resolution_criteria: '不再依赖异常估算。',
+  actions: [
+    {
+      label: '打开组合工作台',
+      action_key: 'open_composition_workbench',
+      action_kind: 'open_new_tab',
+      route: '/compositions/workbench?composition_id=comp-001',
+    },
+  ],
+  system_disposition: '存在未关闭的失效问题，晋升门禁已暂停。',
+};
+
 const blockedEvidenceAllocationJob = {
   ...allocationJob,
   evidence_grade: 'C',
@@ -204,6 +223,8 @@ const blockedEvidenceAllocationJob = {
       promotion_readiness: {
         status: 'blocked',
         evidence_grade: 'C',
+        primary_diagnosis: failedStatusDiagnosis,
+        diagnoses: [failedStatusDiagnosis],
         migration_cost_bps: 1,
         policy_violations: [],
         blockers: ['evidence_grade_c'],
@@ -604,6 +625,9 @@ describe('Composition allocation split UI', () => {
     const promoteButton = screen.getByRole('button', { name: '生成草稿版本' });
     expect(promoteButton).toBeDisabled();
     expect(screen.getByText('存在未关闭的失效问题，晋升门禁已暂停。')).toBeInTheDocument();
+    const statusAction = screen.getByRole('button', { name: '打开组合工作台' });
+    fireEvent.click(statusAction);
+    expect(navigateToMock).toHaveBeenCalledWith('/compositions/workbench?composition_id=comp-001');
 
     fireEvent.click(promoteButton);
     expect(screen.queryByRole('dialog', { name: '确认生成草稿版本' })).not.toBeInTheDocument();

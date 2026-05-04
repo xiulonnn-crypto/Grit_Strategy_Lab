@@ -115,6 +115,14 @@ const OVERVIEW_MESSAGE_TRANSLATIONS: Record<string, string> = {
   'Please refresh snapshots before using this view.': '请先刷新快照，再查看当前快照结果。',
 };
 
+const ALL_SNAPSHOT_REFRESH_TARGETS: SnapshotRefreshTarget[] = [
+  'price',
+  'corporate',
+  'valuations',
+  'universes',
+  'bond',
+];
+
 function isInternalAvailabilityReason(raw?: string | null): boolean {
   const text = String(raw ?? '').trim().toLowerCase();
   if (!text) {
@@ -853,6 +861,7 @@ export function SnapshotsPage(): JSX.Element {
   const [bondCreateError, setBondCreateError] = useState<string | null>(null);
   const [bondCreateMessage, setBondCreateMessage] = useState<string | null>(null);
   const activeTab = route.kind === 'snapshots' ? route.tab ?? 'equity' : 'equity';
+  const highlightTarget = route.kind === 'snapshots' ? route.target : undefined;
 
   useEffect(() => {
     let cancelled = false;
@@ -901,20 +910,21 @@ export function SnapshotsPage(): JSX.Element {
     };
   }, [api, overview]);
 
-  async function handleRefresh(): Promise<void> {
+  async function handleRefresh(requestOverride?: ApiSnapshotRefreshRequest): Promise<void> {
     try {
       const requestedAt = new Date().toISOString();
       const isBondRefresh = activeTab === 'bond';
       const refreshTargets: SnapshotRefreshTarget[] = isBondRefresh
-        ? ['bond']
+        ? ALL_SNAPSHOT_REFRESH_TARGETS
         : ['price', 'corporate', 'valuations', 'universes'];
       const refreshReason = isBondRefresh
-        ? 'manual-refresh-bond'
+        ? 'manual-refresh-bond-complete'
         : 'manual-refresh-latest-and-repair';
       const refreshPayload: ApiSnapshotRefreshRequest = {
-        mode: 'repair',
+        mode: isBondRefresh ? 'full' : 'repair',
         targets: refreshTargets,
         reason: refreshReason,
+        ...requestOverride,
       };
       setRefreshing(true);
       setOptimisticRefreshing(true);
@@ -1099,6 +1109,7 @@ export function SnapshotsPage(): JSX.Element {
 
       {!loading && activeTab === 'equity' ? (
         <EquitySnapshotsTab
+          highlightTarget={highlightTarget}
           overview={overview}
           onRefresh={() => {
             void handleRefresh();
@@ -1111,14 +1122,15 @@ export function SnapshotsPage(): JSX.Element {
       {!loading && activeTab === 'bond' ? (
         <BondFixedIncomeSnapshotsTab
           overview={bondFixedIncomeOverview}
+          snapshotOverview={overview}
           createAssetLegError={bondCreateError}
           createAssetLegMessage={bondCreateMessage}
           creatingAssetLegId={creatingBondAssetLegId}
           onCreateAssetLeg={(instrument) => {
             void handleCreateBondAssetLeg(instrument);
           }}
-          onRefresh={() => {
-            void handleRefresh();
+          onRefresh={(payload) => {
+            void handleRefresh(payload);
           }}
           refreshDisabled={isRefreshDisabled}
           refreshLabel={refreshButtonLabel}
