@@ -5,9 +5,13 @@ import { useRef } from "react";
 import { useApiClient } from "../lib/demoStoreContext";
 import {
   collectOptimizationParameterSeeds,
+  MULTI_FACTOR_NEUTRALIZATION_ENABLED_OPTIONS,
+  MULTI_FACTOR_NEUTRALIZATION_METHOD_OPTIONS,
+  MULTI_FACTOR_SCORING_METHOD_OPTIONS,
   MOMENTUM_REBALANCE_FREQUENCY_OPTIONS,
   OBSERVATION_TIMEFRAME_OPTIONS,
 } from "../lib/optimization-config-fields";
+import { formatFactorWeightLabel } from "../lib/factor-display";
 import {
   buildOptimizationConfigPath,
   buildOptimizationJobsPath,
@@ -87,6 +91,9 @@ const OPTIMIZATION_DISCRETE_FIELD_OPTIONS: Record<
 > = {
   observation_timeframe: OBSERVATION_TIMEFRAME_OPTIONS,
   rebalance_frequency: MOMENTUM_REBALANCE_FREQUENCY_OPTIONS,
+  scoring_method: MULTI_FACTOR_SCORING_METHOD_OPTIONS,
+  neutralization_enabled: MULTI_FACTOR_NEUTRALIZATION_ENABLED_OPTIONS,
+  neutralization_method: MULTI_FACTOR_NEUTRALIZATION_METHOD_OPTIONS,
 };
 
 function normalizeDiscreteSelectionOrder(
@@ -602,7 +609,15 @@ function humanizeKey(key: string): string {
     weighting_method: "加权方式",
     hold_rank_threshold: "保留排名阈值",
     grid_interval: "网格间距(%)",
+    scoring_method: "打分方法",
+    rebalance_frequency: "再平衡频率",
+    neutralization_enabled: "是否启用行业中性化",
+    neutralization_method: "中性化方法",
   };
+  const factorWeightLabel = formatFactorWeightLabel(key);
+  if (factorWeightLabel) {
+    return `${factorWeightLabel}(%)`;
+  }
   return labels[key] ?? key.replace(/_/g, " ");
 }
 
@@ -792,6 +807,10 @@ function isMostlyAsciiLabel(value: string): boolean {
 function getSearchFieldDisplayLabel(
   field: Pick<ApiOptimizationSearchSpaceField, "key" | "label">,
 ): string {
+  const factorWeightLabel = formatFactorWeightLabel(field.key);
+  if (factorWeightLabel) {
+    return factorWeightLabel;
+  }
   const translatedLabel = translateOptimizationText(field.label);
   if (
     !translatedLabel ||
@@ -1667,12 +1686,30 @@ function isDiscreteSearchField(
   return field.mode === "discrete";
 }
 
-function formatParameterValue(value: ParameterValue | undefined): string {
+function formatParameterValue(value: ParameterValue | undefined, key?: string): string {
   if (value === null || value === undefined || value === "") {
     return "-";
   }
   if (typeof value === "boolean") {
     return value ? "是" : "否";
+  }
+  if (key?.startsWith("factor_weight__") && typeof value === "number") {
+    return `${Number.isInteger(value) ? value : Number(value.toFixed(2))}%`;
+  }
+  if (value === "zscore_weighted") {
+    return "Z-Score 加权";
+  }
+  if (value === "rank_weighted") {
+    return "Rank 加权";
+  }
+  if (value === "industry") {
+    return "行业中性";
+  }
+  if (value === "true") {
+    return "是";
+  }
+  if (value === "false") {
+    return "否";
   }
   if (value === "equal_weight") {
     return "等权";
@@ -1694,6 +1731,12 @@ function formatParameterValue(value: ParameterValue | undefined): string {
   }
   if (value === "yearly") {
     return "每年";
+  }
+  if (Array.isArray(value)) {
+    return value.length ? `${value.length} 项配置` : "-";
+  }
+  if (typeof value === "object") {
+    return "已配置";
   }
   return String(value);
 }
@@ -2387,7 +2430,15 @@ function getOptimizationRangeLabel(
     hold_rank_threshold: "保留排名阈值",
     max_position_pct: "单票仓位(%)",
     grid_interval: "网格间距(%)",
+    scoring_method: "打分方法",
+    rebalance_frequency: "再平衡",
+    neutralization_enabled: "行业中性化",
+    neutralization_method: "中性化方法",
   };
+  const factorWeightLabel = formatFactorWeightLabel(field.key);
+  if (factorWeightLabel) {
+    return factorWeightLabel.replace(/^因子权重 · /, '');
+  }
   return compactLabels[field.key] ?? getSearchFieldDisplayLabel(field);
 }
 
@@ -2405,7 +2456,7 @@ function buildOptimizationRangeSummary(
       (field) => {
         if (field.mode === "discrete") {
           const values = getDiscreteFieldValues(field).map((value) =>
-            formatParameterValue(value),
+            formatParameterValue(value, field.key),
           );
           return `${getOptimizationRangeLabel(field)}${values.join("/")}`;
         }
@@ -2425,7 +2476,7 @@ function buildCandidateParameterEntries(
       .map(([key, value]) => ({
         key,
         label: humanizeKey(key),
-        value: formatParameterValue(value),
+        value: formatParameterValue(value, key),
       }));
   }
   return fields.map((field) => ({
@@ -2433,6 +2484,7 @@ function buildCandidateParameterEntries(
     label: getSearchFieldDisplayLabel(field),
     value: formatParameterValue(
       snapshot?.[field.key] ?? field.value ?? field.current,
+      field.key,
     ),
   }));
 }
@@ -2459,6 +2511,7 @@ function buildRangeParameterEntries(
     label: getSearchFieldDisplayLabel(field),
     value: formatParameterValue(
       snapshot?.[field.key] ?? field.value ?? field.current,
+      field.key,
     ),
   }));
 }
@@ -2501,12 +2554,12 @@ function buildPromotionParameterDeltaEntries(
       return {
         key,
         label: field ? getSearchFieldDisplayLabel(field) : humanizeKey(key),
-        currentValue: formatParameterValue(currentValue),
-        candidateValue: formatParameterValue(candidateValue),
+        currentValue: formatParameterValue(currentValue, key),
+        candidateValue: formatParameterValue(candidateValue, key),
         deltaValue:
           deltaValue === undefined || deltaValue === null
             ? null
-            : formatParameterValue(deltaValue),
+            : formatParameterValue(deltaValue, key),
         changed:
           !parameterValuesMatch(currentValue, candidateValue) ||
           (deltaValue !== undefined && deltaValue !== null),
@@ -2832,10 +2885,18 @@ function isAllocationWeightSearchKey(key: string): boolean {
   return key.startsWith("allocation_weight__") && key.endsWith("_pct");
 }
 
+function isFactorWeightSearchKey(key: string): boolean {
+  return key.startsWith("factor_weight__") && key.endsWith("_pct");
+}
+
+function isWeightSumSearchKey(key: string): boolean {
+  return isAllocationWeightSearchKey(key) || isFactorWeightSearchKey(key);
+}
+
 function getDefaultParameterConstraintMetadata(
   key: string,
 ): Pick<ApiOptimizationSearchSpaceField, "constraint_group" | "constraint_target"> {
-  if (!isAllocationWeightSearchKey(key)) {
+  if (!isWeightSumSearchKey(key)) {
     return {};
   }
   return {
@@ -2971,7 +3032,7 @@ function getWeightSumConstrainedFields(
   return fields.filter(
     (field) =>
       field.constraint_group === OPTIMIZATION_WEIGHT_SUM_CONSTRAINT_GROUP ||
-      isAllocationWeightSearchKey(field.key),
+      isWeightSumSearchKey(field.key),
   );
 }
 
@@ -4028,7 +4089,7 @@ export function OptimizationConfigPage({
                     return (
                       <tr key={field.key}>
                         <td>{displayLabel}</td>
-                        <td>{formatParameterValue(field.current)}</td>
+                        <td>{formatParameterValue(field.current, field.key)}</td>
                         {isDiscreteSearchField(field) ? (
                           <>
                             <td>

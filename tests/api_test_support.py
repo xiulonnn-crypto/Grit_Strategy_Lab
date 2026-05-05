@@ -48,6 +48,7 @@ EXPECTED_SNAPSHOT_OVERVIEW_KEYS = {
     "blocking_target",
     "message",
     "allowed_actions",
+    "provider_readiness_summary",
     "bond_fixed_income",
 }
 

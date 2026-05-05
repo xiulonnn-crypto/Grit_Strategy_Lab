@@ -3,7 +3,7 @@ import { formatCompactDate } from '../lib/format';
 import type { ApiBacktestRunDetail, ApiBacktestChartPoint } from '../types';
 
 type ViewWindow = 'all' | '1y' | '3y';
-type RunDetailTab = 'diagnostics' | 'trades' | 'evidence' | 'properties';
+type RunDetailTab = 'diagnostics' | 'trades' | 'evidence' | 'factor-attribution' | 'properties';
 type TrendDirection = 'up' | 'down' | 'flat';
 type InsightTone = 'teal' | 'blue' | 'warm' | 'gray' | 'positive' | 'warning' | 'neutral' | 'critical';
 type KpiTrendTone = 'better' | 'worse' | 'neutral';
@@ -820,6 +820,7 @@ export function RunDetailOverviewSection({
     { key: 'diagnostics', label: '诊断' },
     { key: 'trades', label: '交易' },
     { key: 'evidence', label: '证据' },
+    ...(detail.multi_factor_attribution ? [{ key: 'factor-attribution' as const, label: '因子归因' }] : []),
     { key: 'properties', label: '配置' },
   ];
 
@@ -1090,7 +1091,7 @@ export function RunDetailOverviewSection({
             </div>
           </div>
           <div className="run-detail-decision-list">
-            {(decisionRail.items ?? []).slice(0, 3).map((item, index) => (
+            {(decisionRail.items ?? []).slice(0, 5).map((item, index) => (
               <article
                 className={`run-detail-decision-item run-detail-decision-item--${item.tone ?? (index === 0 ? 'green' : index === 2 ? 'orange' : 'blue')}`}
                 key={`${item.title ?? item.label ?? 'item'}-${index}`}

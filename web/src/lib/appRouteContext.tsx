@@ -33,6 +33,7 @@ export type AppRoute =
   | { kind: 'factor-detail'; factorId: string }
   | { kind: 'factor-editor'; factorId?: string }
   | { kind: 'factor-sandbox' }
+  | { kind: 'factor-model-builder' }
   | { kind: 'factor-quarantine' }
   | { kind: 'optimization-index' }
   | { kind: 'optimization-select'; strategyId?: string; sourceRunId?: string; entryPoint?: string }
@@ -214,6 +215,9 @@ export function parseAppHash(hash: string): AppRoute {
   }
   if (path === '/factors/sandbox') {
     return { kind: 'factor-sandbox' };
+  }
+  if (path === '/factor-models/new') {
+    return { kind: 'factor-model-builder' };
   }
   if (path === '/factors/quarantine') {
     return { kind: 'factor-quarantine' };

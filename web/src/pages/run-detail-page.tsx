@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { navigateTo } from '../lib/appRouteContext';
+import { formatFactorDisplayName } from '../lib/factor-display';
 import { formatCompactDate, formatCurrency } from '../lib/format';
 import { buildOptimizationConfigPath } from '../lib/optimization-routes';
 import {
@@ -54,6 +55,57 @@ function collectRunWarnings(detail: ApiBacktestRunDetail | null): string[] {
         .filter((warning) => warning.length > 0 && !HIDDEN_RUN_WARNINGS.has(warning)),
     ),
   );
+}
+
+function readAttributionNumber(record: Record<string, unknown>, keys: string[]): number | null {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function formatAttributionPercent(value: number | null): string {
+  if (value === null) {
+    return '—';
+  }
+  return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
+}
+
+function formatAttributionDirection(value: unknown): string {
+  const normalized = String(value ?? '').trim().toUpperCase();
+  if (normalized === 'HIGH_IS_BETTER') {
+    return '数值越高越好';
+  }
+  if (normalized === 'LOW_IS_BETTER') {
+    return '数值越低越好';
+  }
+  if (normalized === 'NEUTRAL') {
+    return '中性';
+  }
+  return normalized || '—';
+}
+
+function formatAttributionSource(value: unknown): string {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (!normalized) {
+    return '估算归因';
+  }
+  if (normalized === 'estimated' || normalized === 'estimate') {
+    return '估算归因';
+  }
+  if (normalized === 'full' || normalized === 'actual' || normalized === 'complete') {
+    return '完整归因';
+  }
+  if (normalized === 'model') {
+    return '模型归因';
+  }
+  if (normalized === 'pit') {
+    return 'PIT 归因';
+  }
+  return String(value);
 }
 
 function isBacktestRunInProgress(status: string | null | undefined): boolean {
@@ -803,6 +855,107 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
     );
   }
 
+  function renderFactorAttributionTab(): JSX.Element {
+    const attribution = resolvedDetail.multi_factor_attribution;
+    if (!attribution) {
+      return <p className="empty-state">该回测暂无因子归因数据。</p>;
+    }
+    const contributions = attribution.factor_contributions ?? [];
+    const exposures = attribution.industry_exposures ?? [];
+    const neutralization = attribution.neutralization_status ?? {};
+    const coverage = attribution.coverage ?? {};
+    const sourceLabel = formatAttributionSource(attribution.attribution_source);
+    const maxContributionMagnitude = Math.max(
+      1,
+      ...contributions.map((item) => Math.abs(readAttributionNumber(item, ['contribution_pct']) ?? 0)),
+    );
+
+    return (
+      <div className="run-detail-factor-attribution">
+        <div className="run-detail-factor-attribution__summary">
+          <div>
+            <span>归因来源</span>
+            <strong>{sourceLabel}</strong>
+          </div>
+          <div>
+            <span>PIT 覆盖</span>
+            <strong>{formatAttributionPercent(readAttributionNumber(coverage, ['coverage_pct']))}</strong>
+          </div>
+          <div>
+            <span>中性化执行</span>
+            <strong>{String(neutralization.execution_status ?? neutralization.status ?? 'DISABLED')}</strong>
+          </div>
+        </div>
+
+        <section className="run-detail-factor-attribution__grid">
+          <article className="run-detail-factor-attribution__card">
+            <h3>因子贡献</h3>
+            <div className="run-detail-factor-attribution__bars">
+              {contributions.length ? contributions.map((item, index) => {
+                const contribution = readAttributionNumber(item, ['contribution_pct']);
+                const width = Math.min(
+                  100,
+                  Math.max(4, (Math.abs(contribution ?? 0) / maxContributionMagnitude) * 100),
+                );
+                return (
+                  <div className="run-detail-factor-attribution__bar-row" key={`${String(item.factor_id ?? 'factor')}-${index}`}>
+                    <div>
+                      <strong>{formatFactorDisplayName(item.factor_id, typeof item.name === 'string' ? item.name : `因子 ${index + 1}`)}</strong>
+                      <span>{formatAttributionDirection(item.direction)}</span>
+                    </div>
+                    <div className="run-detail-factor-attribution__bar-track">
+                      <span style={{ width: `${width}%` }} />
+                    </div>
+                    <b>{formatAttributionPercent(contribution)}</b>
+                  </div>
+                );
+              }) : <p className="empty-state">暂无因子贡献。</p>}
+            </div>
+          </article>
+
+          <article className="run-detail-factor-attribution__card">
+            <h3>行业暴露</h3>
+            <div className="run-detail-factor-attribution__table-shell">
+              <table className="run-detail-factor-attribution__table">
+                <thead>
+                  <tr>
+                    <th>行业</th>
+                    <th>暴露</th>
+                    <th>来源</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {exposures.length ? exposures.map((item, index) => (
+                    <tr key={`${String(item.industry ?? 'industry')}-${index}`}>
+                      <td>{String(item.industry ?? '—')}</td>
+                      <td>{formatAttributionPercent(readAttributionNumber(item, ['exposure_pct']))}</td>
+                      <td>{formatAttributionSource(item.source ?? attribution.attribution_source ?? 'estimated')}</td>
+                    </tr>
+                  )) : (
+                    <tr>
+                      <td colSpan={3}>暂无行业暴露。</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+
+        {neutralization.blocker_reason ? (
+          <p className="run-detail-warning-banner">{String(neutralization.blocker_reason)}</p>
+        ) : null}
+        {attribution.warnings?.length ? (
+          <div className="run-detail-factor-attribution__warnings">
+            {attribution.warnings.map((warning) => (
+              <p key={warning}>{warning}</p>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
     <div className="stack run-detail-page">
       <section className="panel run-detail-hero">
@@ -895,6 +1048,7 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
                 ? <div className="error-banner">{contextError}</div>
                 : <p className="empty-state">证据上下文暂时不可用。</p>
           : null}
+        {activeTab === 'factor-attribution' ? renderFactorAttributionTab() : null}
         {activeTab === 'properties'
           ? detailContextReady
             ? <RunDetailPropertiesPanel detail={detail} />

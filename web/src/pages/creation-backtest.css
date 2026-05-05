@@ -1215,6 +1215,10 @@ button.strategy-library-return:disabled:hover {
   background: linear-gradient(180deg, #fbfcfd 0%, #f8fafc 100%);
 }
 
+.backtest-submit-section--multi-factor-precheck {
+  grid-column: 1 / -1;
+}
+
 .backtest-submit-page .creation-date-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -1900,6 +1900,97 @@
   min-width: 0;
 }
 
+.run-detail-factor-attribution {
+  display: grid;
+  gap: 16px;
+}
+
+.run-detail-factor-attribution__summary {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.run-detail-factor-attribution__summary > div,
+.run-detail-factor-attribution__card {
+  background: var(--surface-muted, #f7f8f6);
+  border: 1px solid var(--line-soft, #d9ded7);
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.run-detail-factor-attribution__summary span,
+.run-detail-factor-attribution__bar-row span {
+  color: var(--text-muted, #66736b);
+  font-size: 12px;
+}
+
+.run-detail-factor-attribution__summary strong {
+  display: block;
+  margin-top: 4px;
+}
+
+.run-detail-factor-attribution__grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+}
+
+.run-detail-factor-attribution__card h3 {
+  margin: 0 0 12px;
+}
+
+.run-detail-factor-attribution__bars {
+  display: grid;
+  gap: 12px;
+}
+
+.run-detail-factor-attribution__bar-row {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(160px, 1fr) minmax(120px, 2fr) 64px;
+}
+
+.run-detail-factor-attribution__bar-row strong,
+.run-detail-factor-attribution__bar-row span {
+  display: block;
+}
+
+.run-detail-factor-attribution__bar-track {
+  background: #e3e9e5;
+  border-radius: 999px;
+  height: 10px;
+  overflow: hidden;
+}
+
+.run-detail-factor-attribution__bar-track span {
+  background: #1f877b;
+  display: block;
+  height: 100%;
+}
+
+.run-detail-factor-attribution__table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.run-detail-factor-attribution__table th,
+.run-detail-factor-attribution__table td {
+  border-bottom: 1px solid var(--line-soft, #d9ded7);
+  padding: 10px 8px;
+  text-align: left;
+}
+
+.run-detail-factor-attribution__warnings {
+  display: grid;
+  gap: 8px;
+}
+
+.run-detail-factor-attribution__warnings p {
+  margin: 0;
+}
+
 @media (max-width: 1279px) {
   .run-detail-page .run-detail-kpi-grid--five {
     display: grid;
@@ -1909,6 +2000,11 @@
 
 @media (max-width: 1024px) {
   .run-detail-page .run-detail-main-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .run-detail-factor-attribution__grid,
+  .run-detail-factor-attribution__summary {
     grid-template-columns: 1fr;
   }
 

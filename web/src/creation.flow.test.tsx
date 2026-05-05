@@ -418,7 +418,7 @@ describe('creation flow', () => {
     expect(window.location.hash).toBe('#/creation/sessions/cs-001');
   });
 
-  it('routes asset allocation from the template modal and keeps general strategy last', async () => {
+  it('routes special templates from the modal and keeps general strategy last', async () => {
     render(<CreationTemplatePage />);
     expect(await screen.findByRole('heading', { level: 1, name: '策略库' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '新建策略' }));
@@ -426,12 +426,22 @@ describe('creation flow', () => {
     const templateNames = screen
       .getAllByRole('heading', { level: 3 })
       .map((heading) => heading.textContent);
-    expect(templateNames.slice(-2)).toEqual(['资产配置型', '通用策略']);
+    expect(templateNames.slice(-3)).toEqual(['资产配置型', '多因子策略', '通用策略']);
 
     fireEvent.click(screen.getByRole('button', { name: '创建资产配置策略' }));
 
     expect(fakeApi.createCreationSession).not.toHaveBeenCalled();
     expect(window.location.hash).toBe('#/creation/asset-allocation/new');
+  });
+
+  it('routes the multi-factor template to the factor model builder without creation session', async () => {
+    render(<CreationTemplatePage />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建策略' }));
+
+    fireEvent.click(screen.getByRole('button', { name: '创建多因子策略' }));
+
+    expect(fakeApi.createCreationSession).not.toHaveBeenCalled();
+    expect(window.location.hash).toBe('#/factor-models/new');
   });
 
   it('renders the strategy library table and links horizon returns to run detail', async () => {

@@ -6,6 +6,7 @@ import type {
   ApiStrategyListItem,
   ParameterValue,
 } from '../types';
+import { formatFactorDisplayName, formatFactorList, formatFactorWeightLabel } from './factor-display';
 
 export type WorkspaceStrategyCardVM = {
   id: string;
@@ -48,12 +49,14 @@ const STRATEGY_TYPE_LABELS: Record<string, string> = {
   BUY_AND_HOLD: '买入持有',
   ASSET_ALLOCATION: '资产配置',
   GENERAL: '通用',
+  MULTI_FACTOR: '多因子',
   momentum: '动量',
   grid: '网格',
   mean_reversion: '均值回归',
   buy_and_hold: '买入持有',
   asset_allocation: '资产配置',
   general: '通用',
+  multi_factor: '多因子',
   quality_momentum: '质量动量',
 };
 
@@ -64,6 +67,13 @@ const PARAMETER_LABELS: Record<string, string> = {
   contribution_amount: '定投金额(USD)',
   contribution_anchor: '定投执行锚点',
   dynamic_investment_logic: '动态定投逻辑',
+  directions: '方向设置',
+  factor_ids: '因子篮子',
+  neutralization: '行业中性化',
+  neutralization_enabled: '是否启用行业中性化',
+  neutralization_method: '中性化方法',
+  pit_snapshot_refs: 'PIT 快照',
+  scoring_method: '打分方法',
   grid_count: '网格数量',
   hold_rank_threshold: '保留排名阈值',
   investment_frequency: '定投频率',
@@ -91,20 +101,29 @@ const PARAMETER_VALUE_LABELS: Record<string, string> = {
   GRID: '网格',
   MEAN_REVERSION: '均值回归',
   MOMENTUM: '动量',
+  MULTI_FACTOR: '多因子',
+  HIGH_IS_BETTER: '数值越高越好',
+  LOW_IS_BETTER: '数值越低越好',
+  NEUTRAL: '中性',
   buy_and_hold: '买入持有',
   daily: '每天',
   equal_weight: '等权',
+  false: '否',
+  industry: '行业中性',
   mean_reversion: '均值回归',
   monthly: '每月',
   never: '从不',
   quarterly: '每季度',
   quality_momentum: '质量动量',
+  rank_weighted: 'Rank 加权',
   risk_parity: '风险平价',
   score_weighted: '按动量分数加权',
   semiannual: '每半年',
+  true: '是',
   volatility_adjusted: '波动率调整',
   weekly: '每周',
   yearly: '每年',
+  zscore_weighted: 'Z-Score 加权',
 };
 
 function getStrategyTypeLabel(strategyType: string): string {
@@ -326,7 +345,53 @@ export function buildRecentRunScore(run?: ApiBacktestRunDetail): {
 }
 
 export function formatParameterLabel(key: string): string {
+  const factorWeightLabel = formatFactorWeightLabel(key);
+  if (factorWeightLabel) {
+    return `${factorWeightLabel}(%)`;
+  }
   return PARAMETER_LABELS[key] ?? key;
+}
+
+function formatRecordSummary(value: Record<string, unknown>, fallback: string): string {
+  const entries = Object.entries(value).filter(([, item]) => item !== undefined && item !== null && item !== '');
+  if (!entries.length) {
+    return fallback;
+  }
+  return entries
+    .slice(0, 4)
+    .map(([key, item]) => `${formatParameterLabel(key)} ${formatParameterValue(item as ParameterValue, key)}`)
+    .join('；');
+}
+
+function formatFactorWeightRecord(value: Record<string, unknown>, fallback: string): string {
+  const entries = Object.entries(value)
+    .map(([factorId, rawWeight]) => {
+      const numeric = typeof rawWeight === 'number' ? rawWeight : Number(rawWeight);
+      return Number.isFinite(numeric) ? { factorId, numeric } : null;
+    })
+    .filter((item): item is { factorId: string; numeric: number } => Boolean(item));
+  if (!entries.length) {
+    return fallback;
+  }
+  const totalAbsWeight = entries.reduce((total, entry) => total + Math.abs(entry.numeric), 0);
+  const decimalScale = totalAbsWeight > 0 && totalAbsWeight <= 1.000001;
+  return entries
+    .map(({ factorId, numeric }) => {
+      const pctValue = decimalScale ? numeric * 100 : numeric;
+      return `${formatFactorDisplayName(factorId)} ${Number(pctValue.toFixed(2))}%`;
+    })
+    .join('；');
+}
+
+function formatFactorDirectionRecord(value: Record<string, unknown>, fallback: string): string {
+  const entries = Object.entries(value)
+    .map(([factorId, direction]) => {
+      const directionLabel =
+        PARAMETER_VALUE_LABELS[String(direction ?? '')] ?? String(direction ?? '').trim();
+      return directionLabel ? `${formatFactorDisplayName(factorId)} ${directionLabel}` : '';
+    })
+    .filter(Boolean);
+  return entries.length ? entries.join('；') : fallback;
 }
 
 export function formatParameterValue(value: ParameterValue | undefined, key?: string): string {
@@ -348,6 +413,37 @@ export function formatParameterValue(value: ParameterValue | undefined, key?: st
       return STRATEGY_TYPE_LABELS[normalized] ?? STRATEGY_TYPE_LABELS[normalized.toUpperCase()] ?? normalized;
     }
     return PARAMETER_VALUE_LABELS[normalized] ?? normalized;
+  }
+  if (typeof value === 'number') {
+    if (key?.startsWith('factor_weight__') || key?.endsWith('_pct')) {
+      return `${Number.isInteger(value) ? value : Number(value.toFixed(2))}%`;
+    }
+    return Number.isInteger(value) ? value.toLocaleString('zh-HK') : String(Number(value.toFixed(4)));
+  }
+  if (Array.isArray(value)) {
+    if (key === 'factor_ids') {
+      return value.length ? `因子篮子 ${formatFactorList(value)}` : '未配置因子';
+    }
+    return value.length ? `${value.length} 项配置` : '空列表';
+  }
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    if (key === 'weights') {
+      return formatFactorWeightRecord(record, '未配置权重');
+    }
+    if (key === 'directions') {
+      return formatFactorDirectionRecord(record, '未配置方向');
+    }
+    if (key === 'neutralization') {
+      const enabled = Boolean(record.enabled);
+      const method = PARAMETER_VALUE_LABELS[String(record.method ?? 'industry')] ?? String(record.method ?? 'industry');
+      const status = String(record.execution_status ?? record.status ?? '').trim();
+      return `${enabled ? '启用' : '未启用'} · ${method}${status ? ` · ${status}` : ''}`;
+    }
+    if (key === 'pit_snapshot_refs') {
+      return formatRecordSummary(record, 'PIT 快照待补充');
+    }
+    return formatRecordSummary(record, '已配置');
   }
   return String(value);
 }

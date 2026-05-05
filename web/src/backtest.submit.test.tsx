@@ -80,6 +80,58 @@ describe('回测提交页', () => {
     expect(window.location.hash).toBe('#/runs/bt-001');
   });
 
+  it('多因子预检阻塞时禁用提交并展示门禁原因', async () => {
+    fakeApi.getStrategyDetail.mockResolvedValue({
+      id: 'strat-mf-001',
+      name: '多因子策略',
+      strategy_type: 'MULTI_FACTOR',
+      universe_name: 'SP500',
+      rebalance_frequency: 'monthly',
+      current_parameter_version_id: 'pv-mf-001',
+      dataset_snapshot_id: 'ds-001',
+      universe_snapshot_id: 'un-001',
+      allowed_actions: ['backtest'],
+      parameter_history: [],
+      parameters: {
+        strategy_type: 'MULTI_FACTOR',
+        factor_ids: ['s_mom_12m1m_rank'],
+      },
+    });
+    fakeApi.previewBacktestRun.mockResolvedValue({
+      multi_factor_precheck: {
+        status: 'BLOCKED',
+        factor_count: 1,
+        coverage_pct: 72.5,
+        blocked_factors: [{ factor_id: 's_mom_12m1m_rank', name: 's_mom_12m1m_rank' }],
+        neutralization_status: {
+          enabled: true,
+          method: 'industry',
+          blocker_reason: '缺少 PIT 行业字段，行业中性化未执行。',
+        },
+        estimated_turnover_pct: 19.5,
+        warnings: ['行业中性化需要 PIT 行业字段。'],
+      },
+    });
+
+    let container!: HTMLElement;
+    await act(async () => {
+      ({ container } = render(<BacktestSubmitPage strategyId="strat-mf-001" />));
+    });
+
+    expect(await screen.findByRole('heading', { name: '多因子预检' })).toBeInTheDocument();
+    const sectionHeadings = Array.from(container.querySelectorAll('.backtest-submit-section h4')).map(
+      (heading) => heading.textContent?.trim(),
+    );
+    expect(sectionHeadings.indexOf('多因子预检')).toBeGreaterThan(sectionHeadings.indexOf('确认快照状态'));
+    expect(sectionHeadings.at(-1)).toBe('多因子预检');
+    const precheckSection = screen.getByRole('heading', { name: '多因子预检' }).closest('section');
+    expect(precheckSection).toHaveClass('backtest-submit-section--multi-factor-precheck');
+    expect(screen.getByText('12-1月截面动量排名')).toBeInTheDocument();
+    expect(screen.getByText('缺少 PIT 行业字段，行业中性化未执行。')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '提交回测' })).toBeDisabled();
+    expect(fakeApi.submitBacktestRun).not.toHaveBeenCalled();
+  });
+
   it('会拦住非法日期范围', async () => {
     fakeApi.getStrategyDetail.mockResolvedValue({
       id: 'strat-001',

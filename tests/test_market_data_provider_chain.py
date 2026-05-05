@@ -1098,6 +1098,52 @@ def test_openbb_bond_provider_fills_missing_curve_rows_and_cross_checks_existing
     assert result["provider_results"][-1]["cross_checked_instrument_count"] == 1
 
 
+def test_openbb_bond_provider_falls_back_when_generated_fixedincome_route_mismatches(monkeypatch):
+    def official_provider(*, today):
+        return {"snapshots": [], "warnings": [], "errors": [], "telemetry": {}}
+
+    class _BrokenFixedIncomeObb:
+        user = SimpleNamespace(credentials=SimpleNamespace())
+
+        @property
+        def fixedincome(self):
+            raise ImportError(
+                "cannot import name 'OBBject_BondIndices' from "
+                "'openbb_core.app.provider_interface'"
+            )
+
+    calls: list[tuple[str, bool]] = []
+
+    def fake_direct_records(*, openbb_provider, as_of_date, real):
+        calls.append((openbb_provider, real))
+        if real:
+            return [{"date": "2026-04-01", "maturity": "year_10", "rate": 0.02}]
+        return [
+            {"date": "2026-04-01", "maturity": "year_2", "rate": 0.041},
+            {"date": "2026-04-01", "maturity": "year_10", "rate": 0.044},
+        ]
+
+    monkeypatch.setattr("grit_backtest_platform.openbb_provider._load_obb", lambda: _BrokenFixedIncomeObb())
+    monkeypatch.setattr(
+        "grit_backtest_platform.openbb_provider._fetch_openbb_yield_curve_records_direct",
+        fake_direct_records,
+    )
+
+    provider = OpenBBBondFixedIncomeProvider(
+        official_provider=official_provider,
+        openbb_providers=("federal_reserve",),
+    )
+    result = provider.fetch_snapshots(as_of_date=date(2026, 4, 1))
+    snapshots = {item["instrument_id"]: item for item in result["snapshots"]}
+
+    assert calls == [("federal_reserve", False), ("federal_reserve", True)]
+    assert snapshots["UST_CMT_2Y"]["ytm_pct"] == pytest.approx(4.1)
+    assert snapshots["UST_CMT_10Y"]["ytm_pct"] == pytest.approx(4.4)
+    assert snapshots["TIPS_10Y"]["ytm_pct"] == pytest.approx(2.0)
+    assert result["provider_results"][-1]["status"] == "succeeded"
+    assert result["provider_results"][-1]["filled_instrument_count"] == 3
+
+
 def test_lqd_snapshot_uses_markets_insider_tracking_error(monkeypatch):
     def fake_fetch_text(url: str, *, timeout: float = 20.0) -> str:
         if "markets.businessinsider.com" in url:

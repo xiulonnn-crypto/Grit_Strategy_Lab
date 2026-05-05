@@ -37,12 +37,28 @@ type BenchmarkEtfCoverageSummary = {
   missingSymbols: string[];
 };
 
+type CoverageChangeRow = {
+  id: string;
+  label: string;
+  status: string;
+  currentCoverage: string;
+  change: string;
+  remaining: string;
+  source: string;
+};
+
 const EQUITY_FILTERS: Array<{ id: EquityFilter; label: string }> = [
   { id: 'all', label: '全部' },
   { id: 'pending', label: '仅看待补' },
   { id: 'dataset', label: '数据集快照' },
   { id: 'universe', label: '股票池快照' },
 ];
+
+const COVERAGE_CHANGE_DATASET_LABELS: Record<string, string> = {
+  'ds-price': '股票价格数据',
+  'ds-corporate-actions': '公司行为数据',
+  'ds-index-valuations': '指数估值数据',
+};
 
 function normalizeStatus(status?: string | null): string {
   return String(status ?? 'PENDING').toUpperCase();
@@ -272,6 +288,173 @@ function formatDatasetRefreshDelta(
   return `${label} ${symbols?.toLocaleString('zh-HK')} 标的`;
 }
 
+function formatRefreshChange(stat: Record<string, unknown> | null): string {
+  const rows = getPositiveCount(stat?.updated_row_count);
+  const symbols = getPositiveCount(stat?.updated_symbol_count);
+  if (!rows && !symbols) {
+    return '本次未新增';
+  }
+  if (rows && symbols) {
+    return `${rows.toLocaleString('zh-HK')} 行 / ${symbols.toLocaleString('zh-HK')} 标的`;
+  }
+  if (rows) {
+    return `${rows.toLocaleString('zh-HK')} 行`;
+  }
+  return `${symbols?.toLocaleString('zh-HK')} 标的`;
+}
+
+function summarizeTopProviders(providerSummary: unknown, fallbackSource?: string | null): string {
+  const summary = providerSummary && typeof providerSummary === 'object'
+    ? (providerSummary as Record<string, unknown>)
+    : null;
+  const providers = summary?.providers && typeof summary.providers === 'object'
+    ? (summary.providers as Record<string, Record<string, unknown>>)
+    : null;
+  const landed = Object.entries(providers ?? {})
+    .map(([providerId, item]) => ({
+      providerId,
+      rows: getPositiveCount(item?.landed_row_count) ?? 0,
+      symbols: getPositiveCount(item?.landed_symbol_count) ?? 0,
+      quotaLimited: Boolean(item?.quota_limited),
+    }))
+    .filter((item) => item.rows > 0 || item.symbols > 0)
+    .sort((left, right) => right.rows - left.rows || right.symbols - left.symbols)
+    .slice(0, 2);
+
+  if (landed.length) {
+    return landed
+      .map((item) => {
+        const detail = item.rows > 0
+          ? `${item.rows.toLocaleString('zh-HK')} 行`
+          : `${item.symbols.toLocaleString('zh-HK')} 标的`;
+        return `${formatEquitySourceLabel(item.providerId)} ${detail}${item.quotaLimited ? '，配额受限' : ''}`;
+      })
+      .join('；');
+  }
+  return fallbackSource ? formatEquitySourceLabel(fallbackSource) : '暂无新增入库来源';
+}
+
+function formatDatasetCoverage(item: ApiDatasetSnapshot): string {
+  const counts = getCoverageCounts(item);
+  if (counts) {
+    return `${formatCount(counts.covered)} / ${formatCount(counts.total)} 标的`;
+  }
+  const metadata = getMetadata(item);
+  const proxyKeys = getStringList(metadata, 'proxy_keys');
+  if (proxyKeys.length) {
+    return `${formatCount(proxyKeys.length)} 个代理 / ${formatCount(item.row_count ?? 0)} 条观测`;
+  }
+  return `${formatCount(item.row_count ?? 0)} 行`;
+}
+
+function formatDatasetRemaining(item: ApiDatasetSnapshot): string {
+  const counts = getCoverageCounts(item);
+  if (!counts) {
+    return item.status === 'READY' ? '无待补' : '等待刷新';
+  }
+  const missing = Math.max(0, counts.total - counts.covered);
+  if (!missing) {
+    return '无待补';
+  }
+  if (item.id === 'ds-corporate-actions') {
+    const metadata = getMetadata(item);
+    const formalEvents = getNumber(metadata, 'formal_event_symbol_count');
+    const noEvents = getNumber(metadata, 'complete_no_events_symbol_count');
+    const parts = [
+      formalEvents !== null ? `正式事件 ${formatCount(formalEvents)}` : null,
+      noEvents !== null ? `无事件确认 ${formatCount(noEvents)}` : null,
+    ].filter(Boolean);
+    return `${formatCount(missing)} 标的待补${parts.length ? `；${parts.join(' / ')}` : ''}`;
+  }
+  return `${formatCount(missing)} 标的待补`;
+}
+
+function formatUniverseCoverage(item: ApiUniverseSnapshot): string {
+  const metadata = getMetadata(item);
+  const historical = getNumber(metadata, 'historical_anchor_count');
+  const anchors = getNumber(metadata, 'anchor_count');
+  if (historical !== null && anchors !== null && anchors > 0) {
+    return `${formatCount(historical)} / ${formatCount(anchors)} 历史锚点`;
+  }
+  return `${formatCount(item.member_count ?? 0)} 成分`;
+}
+
+function formatUniverseChange(stat: Record<string, unknown> | null): string {
+  const anchorDelta = getPositiveCount(stat?.historical_anchor_delta);
+  const rows = getPositiveCount(stat?.updated_row_count);
+  if (anchorDelta && rows) {
+    return `${anchorDelta.toLocaleString('zh-HK')} 个锚点 / ${rows.toLocaleString('zh-HK')} 行`;
+  }
+  if (anchorDelta) {
+    return `${anchorDelta.toLocaleString('zh-HK')} 个锚点`;
+  }
+  if (rows) {
+    return `${rows.toLocaleString('zh-HK')} 行`;
+  }
+  return '本次未新增';
+}
+
+function formatUniverseRemaining(item: ApiUniverseSnapshot): string {
+  const metadata = getMetadata(item);
+  const historical = getNumber(metadata, 'historical_anchor_count');
+  const anchors = getNumber(metadata, 'anchor_count');
+  if (historical !== null && anchors !== null && anchors > 0) {
+    const missing = Math.max(0, anchors - historical);
+    return missing ? `${formatCount(missing)} 个历史锚点待补` : '无待补';
+  }
+  return item.status === 'READY' ? '无待补' : '等待刷新';
+}
+
+function buildCoverageChangeRows(overview: ApiSnapshotOverview | null): CoverageChangeRow[] {
+  const refreshStats = getRefreshStats(overview);
+  const datasetOrder = ['ds-price', 'ds-corporate-actions', 'ds-index-valuations'];
+  const universeOrder = ['un-sp500', 'un-ndx100'];
+  const datasetRows = datasetOrder
+    .map((snapshotId) => {
+      const item = overview?.dataset_snapshots.find((candidate) => candidate.id === snapshotId);
+      if (!item) return null;
+      const stat = getDatasetRefreshStat(refreshStats, snapshotId);
+      return {
+        id: item.id,
+        label: COVERAGE_CHANGE_DATASET_LABELS[item.id] ?? item.name ?? item.id,
+        status: getStatusLabel(item.status),
+        currentCoverage: formatDatasetCoverage(item),
+        change: formatRefreshChange(stat),
+        remaining: formatDatasetRemaining(item),
+        source: summarizeTopProviders(
+          stat?.provider_summary ?? item.metadata?.provider_summary,
+          item.source || item.fallback_source,
+        ),
+      };
+    })
+    .filter((item): item is CoverageChangeRow => Boolean(item));
+
+  const universes = getNestedRecord(refreshStats, 'universes');
+  const universeRows = universeOrder
+    .map((snapshotId) => {
+      const item = overview?.universe_snapshots.find((candidate) => candidate.id === snapshotId);
+      if (!item) return null;
+      const stat = universes?.[snapshotId] && typeof universes[snapshotId] === 'object'
+        ? (universes[snapshotId] as Record<string, unknown>)
+        : null;
+      return {
+        id: item.id,
+        label: `${item.name || item.id}股票池`,
+        status: getStatusLabel(item.status),
+        currentCoverage: formatUniverseCoverage(item),
+        change: formatUniverseChange(stat),
+        remaining: formatUniverseRemaining(item),
+        source: summarizeTopProviders(
+          stat?.provider_summary ?? item.metadata?.provider_summary,
+          item.source || item.fallback_source,
+        ),
+      };
+    })
+    .filter((item): item is CoverageChangeRow => Boolean(item));
+
+  return [...datasetRows, ...universeRows];
+}
+
 function formatLatestRefreshDelta(overview: ApiSnapshotOverview | null): string {
   const refreshStats = getRefreshStats(overview);
   const parts = [
@@ -398,6 +581,7 @@ export function EquitySnapshotsTab({
   highlightTarget,
 }: EquitySnapshotsTabProps): JSX.Element {
   const [activeFilter, setActiveFilter] = useState<EquityFilter>('all');
+  const [isCoverageModalOpen, setIsCoverageModalOpen] = useState(false);
   const datasetSnapshots = overview?.dataset_snapshots ?? [];
   const universeSnapshots = overview?.universe_snapshots ?? [];
   const rows = useMemo(
@@ -453,6 +637,7 @@ export function EquitySnapshotsTab({
   const stockBaseReadyCount = datasetCoverage.total > 0 ? datasetCoverage.covered : readyDatasetCount;
   const stockBaseTotalCount = datasetCoverage.total > 0 ? datasetCoverage.total : datasetSnapshots.length;
   const refreshDeltaLabel = formatLatestRefreshDelta(overview);
+  const coverageChangeRows = useMemo(() => buildCoverageChangeRows(overview), [overview]);
   const lastRefresh =
     overview?.last_refreshed_at ??
     overview?.latest_job?.completed_at ??
@@ -530,10 +715,87 @@ export function EquitySnapshotsTab({
             <strong>{formatMarketRefreshTime(lastRefresh)}</strong>
             <small>
               {refreshDeltaLabel}
+              <button
+                className="audit-link snapshots-coverage-detail-link"
+                onClick={() => {
+                  setIsCoverageModalOpen(true);
+                }}
+                type="button"
+              >
+                查看明细
+              </button>
             </small>
           </div>
         </div>
       </section>
+
+      {isCoverageModalOpen ? (
+        <div
+          className="snapshots-coverage-modal-backdrop"
+          onClick={() => {
+            setIsCoverageModalOpen(false);
+          }}
+        >
+          <section
+            aria-labelledby="snapshots-coverage-modal-title"
+            aria-modal="true"
+            className="snapshots-coverage-modal"
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+            role="dialog"
+          >
+            <div className="snapshots-coverage-modal__header">
+              <div>
+                <p className="eyebrow">覆盖变化</p>
+                <h2 id="snapshots-coverage-modal-title">覆盖变化明细</h2>
+                <p>
+                  按最新刷新任务的入库统计和当前快照覆盖率展示；覆盖口径不把重复尝试视作额外收益。
+                </p>
+              </div>
+              <button
+                className="ghost-button snapshots-coverage-modal__close"
+                onClick={() => {
+                  setIsCoverageModalOpen(false);
+                }}
+                type="button"
+              >
+                关闭
+              </button>
+            </div>
+            {coverageChangeRows.length ? (
+              <div className="snapshots-coverage-table-wrap">
+                <table className="snapshots-coverage-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">项目</th>
+                      <th scope="col">状态</th>
+                      <th scope="col">当前覆盖</th>
+                      <th scope="col">本次变化</th>
+                      <th scope="col">仍待补</th>
+                      <th scope="col">主要来源 / 说明</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {coverageChangeRows.map((row) => (
+                      <tr key={row.id}>
+                        <td>{row.label}</td>
+                        <td>{row.status}</td>
+                        <td>{row.currentCoverage}</td>
+                        <td>{row.change}</td>
+                        <td>{row.remaining}</td>
+                        <td>{row.source}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="drawer-callout">暂无可展示的覆盖变化。请先刷新快照后再查看明细。</div>
+            )}
+          </section>
+        </div>
+      ) : null}
 
       <div className="detail-grid snapshots-equity-main-layout">
         <div className="detail-main snapshots-equity-left-stack">

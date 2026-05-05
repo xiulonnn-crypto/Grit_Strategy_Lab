@@ -38,9 +38,19 @@ from .backtest_metrics import (
 )
 from ._bond_fixed_income_provider import fetch_official_bond_fixed_income_snapshots
 from .fallback_provider import UnconfiguredFallbackProvider, provider_access_tier
+from .factor_expression_engine import (
+    FIELD_ALIASES,
+    FactorExpressionError,
+    evaluate_expression,
+    neutralize_by_industry,
+    normalize_cross_section,
+)
+from .factor_mining import FactorMiningJobCreateRequest as MiningJobRequest, run_factor_mining_job
 from .factor_research import FactorResearchService, build_pit_data_overview
+from .pit_external_sources import default_cache_dir as default_pit_external_cache_dir
 from .market_data_repository import (
     DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
+    DATASET_FUNDAMENTALS_SNAPSHOT_ID,
     DATASET_INDEX_VALUATIONS_SNAPSHOT_ID,
     DATASET_PRICE_SNAPSHOT_ID,
     CoverageSummary,
@@ -53,6 +63,12 @@ from .snapshot_recovery import (
     import_snapshot_cold_backup,
     probe_lab2_snapshot_assets,
     probe_workspace_market_data_assets,
+)
+from .snapshot_provider_projection import (
+    build_provider_attempts,
+    build_provider_readiness_summary,
+    build_provider_registry,
+    openbb_provider_enabled,
 )
 from .service import BacktestPlatformService, _as_mapping
 from .storage import dumps, iso_now, is_snapshot_blocking, loads
@@ -487,6 +503,18 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     parts.append(":".join(values))
         except Exception:
             return ""
+        try:
+            external_root = default_pit_external_cache_dir()
+            external_paths = [external_root / "manifest.json", external_root / "catalog" / "gsl_pit_bulk.duckdb"]
+            manifest_dir = external_root / "manifests"
+            if manifest_dir.exists():
+                external_paths.extend(sorted(manifest_dir.glob("*.json")))
+            for path in external_paths:
+                if path.exists() and path.is_file():
+                    stat = path.stat()
+                    parts.append(f"pit_external:{path.name}:{stat.st_size}:{stat.st_mtime_ns}")
+        except Exception:
+            pass
         return "|".join(parts)
 
     def get_pit_data_overview(self) -> dict[str, Any]:
@@ -697,6 +725,900 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
     def export_factor_diagnostic_report(self, factor_id: str, run_id: str) -> dict[str, Any]:
         return self._factor_research_service().export_factor_diagnostic_report(factor_id, run_id)
+
+    def _factor_universe_symbols(self, universe: Any) -> list[str]:
+        normalized = str(universe or "SP500").strip().upper()
+        if normalized in DEFAULT_UNIVERSE_SYMBOLS:
+            return list(DEFAULT_UNIVERSE_SYMBOLS[normalized])
+        symbols = [
+            str(item).strip().upper()
+            for item in re.split(r"[,;\s]+", str(universe or ""))
+            if str(item).strip()
+        ]
+        return symbols or list(DEFAULT_UNIVERSE_SYMBOLS["SP500"])
+
+    @staticmethod
+    def _factor_finite_float(value: Any) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    @staticmethod
+    def _factor_score_direction(direction: Any) -> str:
+        normalized = str(direction or "").strip().upper()
+        if normalized in {"LOW_IS_BETTER", "LOW_IS_GOOD", "LOWER_IS_BETTER"}:
+            return "LOWER_IS_BETTER"
+        return "HIGHER_IS_BETTER"
+
+    @staticmethod
+    def _factor_latest_snapshot_date(snapshots: Sequence[Mapping[str, Any]], snapshot_id: str) -> str | None:
+        for snapshot in snapshots:
+            if str(snapshot.get("id") or "") == snapshot_id:
+                return str(snapshot.get("as_of") or snapshot.get("end_date") or "").strip() or None
+        return None
+
+    def _factor_preview_as_of(self, payload: Mapping[str, Any]) -> str:
+        requested = str(payload.get("as_of_date") or "").strip()
+        if requested:
+            return requested
+        try:
+            snapshots = self.market_data_repository.list_dataset_snapshots()
+        except Exception:
+            snapshots = []
+        return (
+            self._factor_latest_snapshot_date(snapshots, DATASET_PRICE_SNAPSHOT_ID)
+            or self._factor_latest_snapshot_date(snapshots, DATASET_FUNDAMENTALS_SNAPSHOT_ID)
+            or date.today().isoformat()
+        )
+
+    def _factor_preview_price_rows(self, symbols: Sequence[str], as_of_date: str) -> dict[str, list[dict[str, Any]]]:
+        try:
+            as_of = _parse_iso_date(as_of_date)
+            start_date = (as_of - timedelta(days=620)).isoformat()
+        except ValueError:
+            start_date = None
+        try:
+            return self.market_data_repository.load_dataset_price_bars(
+                DATASET_PRICE_SNAPSHOT_ID,
+                symbols,
+                start_date=start_date,
+                end_date=as_of_date,
+                include_metadata=False,
+            )
+        except Exception:
+            return {}
+
+    def _factor_preview_fundamentals(self, symbols: Sequence[str], as_of_date: str) -> dict[str, dict[str, Any]]:
+        try:
+            grouped = self.market_data_repository.load_dataset_fundamental_points(
+                DATASET_FUNDAMENTALS_SNAPSHOT_ID,
+                symbols,
+                as_of_date=as_of_date,
+            )
+        except Exception:
+            return {}
+        latest: dict[str, dict[str, Any]] = {}
+        for symbol, rows in grouped.items():
+            ordered = [dict(row) for row in rows if isinstance(row, Mapping)]
+            if ordered:
+                latest[str(symbol).strip().upper()] = ordered[-1]
+        return latest
+
+    def _factor_expression_input(
+        self,
+        price_rows: Sequence[Mapping[str, Any]],
+        fundamental: Mapping[str, Any] | None,
+    ) -> dict[str, list[float | None]]:
+        closes = [
+            self._factor_finite_float(row.get("adj_close", row.get("close")))
+            for row in price_rows
+            if isinstance(row, Mapping)
+        ]
+        length = len(closes) if closes else 1
+        data: dict[str, list[float | None]] = {}
+        if closes:
+            data["Close"] = closes
+        fundamental = fundamental or {}
+        for canonical_name, aliases in FIELD_ALIASES.items():
+            if canonical_name == "Close":
+                continue
+            value = None
+            for alias in aliases:
+                value = self._factor_finite_float(fundamental.get(alias))
+                if value is not None:
+                    break
+            if value is not None:
+                data[canonical_name] = [value] * length
+        return data
+
+    def _factor_expression_latest_value(
+        self,
+        expression: str,
+        price_rows: Sequence[Mapping[str, Any]],
+        fundamental: Mapping[str, Any] | None,
+    ) -> float | None:
+        data = self._factor_expression_input(price_rows, fundamental)
+        if not data:
+            return None
+        try:
+            series = evaluate_expression(expression, data)
+        except (FactorExpressionError, ValueError, TypeError, ZeroDivisionError):
+            return None
+        for value in reversed(series):
+            parsed = self._factor_finite_float(value)
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _factor_industry_mapping(
+        self,
+        symbols: Sequence[str],
+        universe: Any,
+        as_of_date: str,
+    ) -> dict[str, str]:
+        normalized_universe = str(universe or "SP500").strip().upper()
+        snapshot_id = SP500_UNIVERSE_SNAPSHOT_ID if normalized_universe == "SP500" else None
+        if normalized_universe == "NASDAQ100":
+            snapshot_id = NASDAQ100_UNIVERSE_SNAPSHOT_ID
+        try:
+            memberships = self.market_data_repository.load_universe_memberships(
+                universe_snapshot_id=snapshot_id,
+                universe_key=None if snapshot_id else normalized_universe,
+            )
+        except Exception:
+            return {}
+        symbol_set = {str(symbol).strip().upper() for symbol in symbols}
+        candidates: dict[str, tuple[str, str]] = {}
+        industry_keys = (
+            "industry",
+            "industry_name",
+            "gics_industry",
+            "gics_industry_group",
+            "sector",
+            "sector_name",
+            "gics_sector",
+            "GICS Sector",
+        )
+        for row in memberships:
+            symbol = str(row.get("symbol") or "").strip().upper()
+            effective_date = str(row.get("effective_date") or "").strip()
+            if symbol not in symbol_set or (effective_date and effective_date > as_of_date):
+                continue
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
+            industry = ""
+            for key in industry_keys:
+                industry = str(row.get(key) or metadata.get(key) or "").strip()
+                if industry:
+                    break
+            if not industry:
+                continue
+            previous = candidates.get(symbol)
+            if previous is None or effective_date >= previous[0]:
+                candidates[symbol] = (effective_date, industry)
+        return {symbol: industry for symbol, (_effective_date, industry) in candidates.items()}
+
+    def _factor_model_score_projection(
+        self,
+        normalized_weights: Sequence[Mapping[str, Any]],
+        factor_by_id: Mapping[str, Mapping[str, Any]],
+        symbols: Sequence[str],
+        *,
+        as_of_date: str,
+        neutralization: Mapping[str, Any],
+        universe: Any,
+    ) -> dict[str, Any]:
+        price_rows = self._factor_preview_price_rows(symbols, as_of_date)
+        fundamentals = self._factor_preview_fundamentals(symbols, as_of_date)
+        factor_scores: dict[str, dict[str, float | None]] = {}
+        for component in normalized_weights:
+            factor_id = str(component.get("factor_id") or "")
+            factor = factor_by_id.get(factor_id) or {}
+            expression = str(factor.get("expression") or "").strip()
+            raw_values = {
+                symbol: self._factor_expression_latest_value(
+                    expression,
+                    price_rows.get(symbol, []),
+                    fundamentals.get(symbol),
+                )
+                for symbol in symbols
+            }
+            normalized = normalize_cross_section(
+                raw_values,
+                direction=self._factor_score_direction(component.get("direction") or factor.get("direction")),
+            )
+            factor_scores[factor_id] = normalized.scores
+
+        combined_scores: dict[str, float | None] = {}
+        symbol_coverages: dict[str, float] = {}
+        available_score_count = 0
+        for symbol in symbols:
+            combined = 0.0
+            available = 0
+            for component in normalized_weights:
+                factor_id = str(component.get("factor_id") or "")
+                score = factor_scores.get(factor_id, {}).get(symbol)
+                if score is None:
+                    continue
+                combined += _coerce_float(component.get("normalized_weight"), 0.0) * score
+                available += 1
+            available_score_count += available
+            symbol_coverages[symbol] = round(available / max(len(normalized_weights), 1), 4)
+            combined_scores[symbol] = round(combined, 6) if available else None
+
+        industry_by_symbol = self._factor_industry_mapping(symbols, universe, as_of_date)
+        neutralization_result = neutralize_by_industry(
+            combined_scores,
+            enabled=bool(neutralization.get("enabled")),
+            industry_by_symbol=industry_by_symbol or None,
+        )
+        final_scores = neutralization_result.values
+        scored_rows = [
+            {
+                "symbol": symbol,
+                "score": round(float(score), 4),
+                "coverage": symbol_coverages.get(symbol, 0.0),
+            }
+            for symbol, score in final_scores.items()
+            if score is not None and math.isfinite(float(score))
+        ]
+        scored_rows.sort(key=lambda item: item["score"], reverse=True)
+        score_values = [row["score"] for row in scored_rows]
+        score_spread = (max(score_values) - min(score_values)) if score_values else 0.0
+        coverage_ratio = available_score_count / max(len(symbols) * len(normalized_weights), 1)
+        estimated_turnover = min(0.95, max(0.02, 0.04 + min(score_spread, 6.0) * 0.025 + len(normalized_weights) * 0.006))
+        return {
+            "score_preview": scored_rows[:8],
+            "coverage_ratio": round(coverage_ratio, 4),
+            "estimated_turnover": round(estimated_turnover, 4),
+            "neutralization_result": neutralization_result,
+            "industry_field": "universe_membership_snapshots.metadata",
+        }
+
+    def _decode_factor_mining_job_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        request = loads(row.get("request_json"), {})
+        progress = loads(row.get("progress_json"), {})
+        top_candidates = loads(row.get("top_candidates_json"), [])
+        failed_samples = loads(row.get("failed_samples_json"), [])
+        return {
+            "id": row.get("id"),
+            "status": row.get("status"),
+            "request": request,
+            "progress": progress,
+            "top_candidates": top_candidates if isinstance(top_candidates, list) else [],
+            "failed_samples": failed_samples if isinstance(failed_samples, list) else [],
+            "summary": loads(row.get("summary_json"), {}),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+            "completed_at": row.get("completed_at"),
+            "error_message": row.get("error_message"),
+        }
+
+    def _project_mining_candidate(self, candidate: Any) -> dict[str, Any]:
+        rank_ic = candidate.rank_ic if getattr(candidate, "rank_ic", None) is not None else 0.0
+        return {
+            "id": candidate.candidate_id,
+            "candidate_id": candidate.candidate_id,
+            "rank": candidate.rank,
+            "expression": candidate.expression,
+            "score": round(float(rank_ic), 6),
+            "rank_ic": rank_ic,
+            "turnover": 0.0,
+            "coverage": candidate.coverage,
+            "depth": None,
+            "risk_flags": list(candidate.risk_flags),
+            "status": candidate.status,
+            "persisted_to_factor_definitions": False,
+        }
+
+    def create_factor_mining_job(self, request: Any) -> dict[str, Any]:
+        payload = dict(_as_mapping(request))
+        symbols = self._factor_universe_symbols(payload.get("universe"))
+        mining_request = MiningJobRequest(
+            universe=tuple(symbols),
+            start_date=str(payload.get("start_date") or ""),
+            end_date=str(payload.get("end_date") or ""),
+            operators=tuple(str(item) for item in payload.get("operators") or ()),
+            candidate_count=int(payload.get("candidate_count") or 0),
+            random_seed=int(payload.get("random_seed") if payload.get("random_seed") is not None else 0),
+            min_rank_ic=_coerce_float(payload.get("min_rank_ic")),
+            max_depth=int(payload.get("max_depth") or 3),
+        )
+        created_at = iso_now()
+        result = run_factor_mining_job(mining_request, top_k=10)
+        job_id = result.job_id
+        top_candidates = [self._project_mining_candidate(candidate) for candidate in result.top_candidates]
+        failed_samples = [
+            {
+                "candidate_index": sample.candidate_index,
+                "expression": sample.expression,
+                "reason": sample.error_message,
+                "error_message": sample.error_message,
+            }
+            for sample in result.failed_samples
+        ]
+        progress = {
+            "total_candidates": result.requested_candidates,
+            "evaluated_candidates": result.candidates_evaluated,
+            "failed_candidates": len(result.failed_samples),
+            "throughput_per_second": result.throughput_per_second,
+            "percent": result.progress_pct,
+        }
+        summary = {
+            "universe_symbol_count": len(symbols),
+            "top_candidate_count": len(top_candidates),
+            "failed_sample_count": len(failed_samples),
+            "persisted_to_factor_definitions": False,
+        }
+        self.storage.insert_json_row(
+            "factor_mining_jobs",
+            {
+                "id": job_id,
+                "status": result.status,
+                "request_json": dumps({**payload, "symbols": symbols}),
+                "progress_json": dumps(progress),
+                "summary_json": dumps(summary),
+                "top_candidates_json": dumps(top_candidates),
+                "failed_samples_json": dumps(failed_samples),
+                "created_at": created_at,
+                "updated_at": created_at,
+                "completed_at": created_at,
+                "error_message": None,
+            },
+        )
+        candidate_rows = [
+            (
+                candidate.candidate_id,
+                job_id,
+                candidate.expression,
+                candidate.rank_ic,
+                candidate.rank_ic,
+                0.0,
+                candidate.coverage,
+                None,
+                dumps(list(candidate.risk_flags)),
+                dumps({"rank": candidate.rank, "status": candidate.status, "persisted_to_factor_definitions": False}),
+                created_at,
+            )
+            for candidate in result.all_candidates
+        ]
+        if candidate_rows:
+            self.storage.executemany(
+                """
+                INSERT OR REPLACE INTO factor_mining_candidates (
+                    id, job_id, expression, score, rank_ic, turnover, coverage,
+                    depth, risk_flags_json, summary_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                candidate_rows,
+            )
+        return self.get_factor_mining_job(job_id)
+
+    def list_factor_mining_jobs(self) -> dict[str, Any]:
+        rows = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM factor_mining_jobs
+            ORDER BY created_at DESC, id DESC
+            LIMIT 50
+            """
+        )
+        items = [self._decode_factor_mining_job_row(row) for row in rows]
+        return {
+            "items": items,
+            "summary": {
+                "total": len(items),
+                "running_count": sum(1 for item in items if item.get("status") in {"QUEUED", "RUNNING", "CANCEL_REQUESTED"}),
+                "completed_count": sum(1 for item in items if item.get("status") == "COMPLETED"),
+            },
+        }
+
+    def get_factor_mining_job(self, job_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one("SELECT * FROM factor_mining_jobs WHERE id = ?", (job_id,))
+        if not row:
+            raise KeyError(f"Factor mining job not found: {job_id}")
+        return self._decode_factor_mining_job_row(row)
+
+    def cancel_factor_mining_job(self, job_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one("SELECT * FROM factor_mining_jobs WHERE id = ?", (job_id,))
+        if not row:
+            raise KeyError(f"Factor mining job not found: {job_id}")
+        status = str(row.get("status") or "")
+        if status in {"QUEUED", "RUNNING", "CANCEL_REQUESTED"}:
+            row["status"] = "CANCELLED"
+            row["updated_at"] = iso_now()
+            row["completed_at"] = row["updated_at"]
+            self.storage.insert_json_row("factor_mining_jobs", row)
+        return self.get_factor_mining_job(job_id)
+
+    def preview_factor_model(self, request: Any) -> dict[str, Any]:
+        payload = dict(_as_mapping(request))
+        components = [
+            dict(item)
+            for item in payload.get("components") or []
+            if isinstance(item, Mapping) and str(item.get("factor_id") or "").strip()
+        ]
+        if not components:
+            raise ValueError("Factor model requires at least one factor.")
+        factor_items = self.list_factors().get("items", [])
+        factor_by_id = {str(item.get("id")): item for item in factor_items}
+        total_abs_weight = sum(abs(_coerce_float(item.get("weight"), 0.0)) for item in components)
+        if total_abs_weight <= 0:
+            raise ValueError("Factor model weights must not all be zero.")
+        normalized_weights: list[dict[str, Any]] = []
+        pit_blockers: list[dict[str, Any]] = []
+        for item in components:
+            factor_id = str(item.get("factor_id") or "").strip()
+            factor = factor_by_id.get(factor_id) or self.get_factor(factor_id)
+            weight = _coerce_float(item.get("weight"), 0.0)
+            normalized = {
+                "factor_id": factor_id,
+                "weight": weight,
+                "normalized_weight": round(weight / total_abs_weight, 6),
+                "direction": str(item.get("direction") or factor.get("direction") or "HIGH_IS_BETTER"),
+                "name": factor.get("name"),
+                "diagnostic_status": factor.get("diagnostic_status"),
+            }
+            normalized_weights.append(normalized)
+            if str(factor.get("diagnostic_status") or "").startswith("BLOCKED"):
+                for blocker in factor.get("readiness_blockers") or []:
+                    if isinstance(blocker, Mapping):
+                        pit_blockers.append({"factor_id": factor_id, **dict(blocker)})
+        symbols = self._factor_universe_symbols(payload.get("universe"))
+        as_of_date = self._factor_preview_as_of(payload)
+        neutralization = dict(payload.get("neutralization") or {})
+        score_projection = self._factor_model_score_projection(
+            normalized_weights,
+            factor_by_id,
+            symbols,
+            as_of_date=as_of_date,
+            neutralization=neutralization,
+            universe=payload.get("universe"),
+        )
+        neutralization_result = score_projection["neutralization_result"]
+        neutralization_status = {
+            "enabled": bool(neutralization.get("enabled")),
+            "method": str(neutralization.get("method") or "industry"),
+            "status": neutralization_result.status,
+            "blockers": list(neutralization_result.blockers),
+            "industry_field": score_projection.get("industry_field"),
+        }
+        score_preview = list(score_projection["score_preview"])
+        warnings: list[str] = []
+        if neutralization_result.blockers:
+            warnings.append("行业中性化需要 PIT 行业字段，本次预览仅返回 blocker，不执行残差化。")
+        if not score_preview:
+            pit_blockers.append(
+                {
+                    "code": "NO_FACTOR_SCORE_PREVIEW",
+                    "message": "PIT 价格/基础面数据未能产出任何可用的多因子打分样本。",
+                    "fix_hash": "#/snapshots",
+                }
+            )
+        blocked_factor_ids = {str(item.get("factor_id")) for item in pit_blockers if item.get("factor_id")}
+        status = "BLOCKED" if pit_blockers or neutralization_result.blockers else "READY"
+        return {
+            "status": status,
+            "normalized_weights": normalized_weights,
+            "coverage": {
+                "factor_count": len(normalized_weights),
+                "ready_factor_count": len(normalized_weights) - len(blocked_factor_ids),
+                "universe_symbol_count": len(symbols),
+                "estimated_factor_coverage": score_projection["coverage_ratio"],
+                "as_of_date": as_of_date,
+            },
+            "score_preview": score_preview,
+            "estimated_turnover": score_projection["estimated_turnover"],
+            "pit_blockers": pit_blockers,
+            "neutralization_status": neutralization_status,
+            "warnings": warnings,
+        }
+
+    def create_factor_model(self, request: Any) -> dict[str, Any]:
+        payload = dict(_as_mapping(request))
+        preview = self.preview_factor_model(payload)
+        if preview.get("pit_blockers"):
+            raise ValueError("Factor model contains blocked PIT factors and cannot be materialized.")
+        neutralization_status = preview.get("neutralization_status") if isinstance(preview.get("neutralization_status"), Mapping) else {}
+        if neutralization_status.get("blockers"):
+            raise ValueError("Industry neutralization is enabled but PIT industry fields are missing.")
+        now = iso_now()
+        strategy_id = self._new_id("strat")
+        parameters = {
+            "strategy_type": "MULTI_FACTOR",
+            "factor_ids": [str(item.get("factor_id")) for item in payload.get("components") or [] if isinstance(item, Mapping)],
+            "weights": {
+                str(item.get("factor_id")): _coerce_float(item.get("weight"), 0.0)
+                for item in payload.get("components") or []
+                if isinstance(item, Mapping)
+            },
+            "directions": {
+                str(item.get("factor_id")): str(item.get("direction") or "HIGH_IS_BETTER")
+                for item in payload.get("components") or []
+                if isinstance(item, Mapping)
+            },
+            "neutralization": dict(payload.get("neutralization") or {"enabled": False, "method": "industry"}),
+            "scoring_method": str(payload.get("scoring_method") or "zscore_weighted"),
+            "rebalance_frequency": str(payload.get("rebalance_frequency") or "monthly"),
+            "pit_snapshot_refs": {
+                "dataset_snapshot_id": DATASET_PRICE_SNAPSHOT_ID,
+                "fundamental_snapshot_id": "ds-fundamentals",
+                "universe_snapshot_id": SP500_UNIVERSE_SNAPSHOT_ID,
+            },
+            "preview": preview,
+        }
+        strategy_name = str(payload.get("name") or "多因子策略").strip() or "多因子策略"
+        strategy_row = {
+            "id": strategy_id,
+            "name": strategy_name,
+            "description": str(payload.get("description") or "基于因子库权重配置创建的多因子策略。"),
+            "strategy_type": "MULTI_FACTOR",
+            "universe_name": str(payload.get("universe") or "SP500"),
+            "rebalance_frequency": parameters["rebalance_frequency"],
+            "lifecycle_status": "ACTIVE",
+            "dataset_snapshot_id": DATASET_PRICE_SNAPSHOT_ID,
+            "universe_snapshot_id": SP500_UNIVERSE_SNAPSHOT_ID,
+            "benchmark_symbol": "SPY",
+            "current_parameter_version": 1,
+            "parameters_json": dumps(parameters),
+            "confirmation_fields_json": dumps({}),
+            "parameter_history_json": dumps([]),
+            "allowed_actions_json": dumps(["run_backtest", "open_strategy_detail", "open_optimization"]),
+            "latest_run_id": None,
+            "latest_successful_run_id": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        parameter_history = [
+            {
+                "version_number": 1,
+                "parameter_version_id": f"{strategy_id}-v1",
+                "revision": 1,
+                "created_at": now,
+                "comment": "多因子模型创建",
+                "source": {"kind": "factor_model_builder"},
+                "parameters": parameters,
+            }
+        ]
+        self._write_strategy_record(strategy_row, parameter_history=parameter_history, current_version=1, comment="多因子模型创建")
+        return self.get_strategy_detail(strategy_id)
+
+    def _is_multi_factor_strategy(self, strategy: Mapping[str, Any] | None) -> bool:
+        if not strategy:
+            return False
+        parameters = dict(strategy.get("parameters") or {})
+        return str(strategy.get("strategy_type") or parameters.get("strategy_type") or "").upper() == "MULTI_FACTOR"
+
+    def _is_multi_factor_parameters(self, parameters: Mapping[str, Any] | None) -> bool:
+        if not parameters:
+            return False
+        return str(parameters.get("strategy_type") or "").upper() == "MULTI_FACTOR" or bool(parameters.get("factor_ids"))
+
+    def _multi_factor_factor_index(self) -> dict[str, dict[str, Any]]:
+        factors = self.list_factors().get("items", [])
+        return {str(item.get("id")): dict(item) for item in factors if str(item.get("id") or "").strip()}
+
+    def _multi_factor_component_rows(self, parameters: Mapping[str, Any]) -> list[dict[str, Any]]:
+        factor_ids = [
+            str(item).strip()
+            for item in parameters.get("factor_ids") or []
+            if str(item).strip()
+        ]
+        weights = dict(parameters.get("weights") or {})
+        directions = dict(parameters.get("directions") or {})
+        factor_index = self._multi_factor_factor_index()
+        total_abs_weight = sum(abs(_coerce_float(weights.get(factor_id), 0.0)) for factor_id in factor_ids)
+        if total_abs_weight <= 0:
+            total_abs_weight = float(len(factor_ids) or 1)
+        rows: list[dict[str, Any]] = []
+        for factor_id in factor_ids:
+            factor = factor_index.get(factor_id)
+            if factor is None:
+                try:
+                    factor = dict(self.get_factor(factor_id))
+                except Exception:
+                    factor = {}
+            weight = _coerce_float(weights.get(factor_id), 0.0)
+            rows.append(
+                {
+                    "factor_id": factor_id,
+                    "name": factor.get("name") or factor_id,
+                    "family": factor.get("category") or factor.get("family") or factor.get("source"),
+                    "direction": str(directions.get(factor_id) or factor.get("direction") or "HIGH_IS_BETTER"),
+                    "weight": weight,
+                    "normalized_weight": round(weight / total_abs_weight, 6),
+                    "diagnostic_status": factor.get("diagnostic_status"),
+                    "pit_coverage": dict(factor.get("pit_coverage") or factor.get("coverage") or {}),
+                    "readiness_blockers": list(factor.get("readiness_blockers") or []),
+                }
+            )
+        return rows
+
+    def _multi_factor_neutralization_view(self, parameters: Mapping[str, Any]) -> dict[str, Any]:
+        neutralization = dict(parameters.get("neutralization") or {})
+        enabled = bool(neutralization.get("enabled"))
+        method = str(neutralization.get("method") or "industry")
+        status_payload = {}
+        preview = parameters.get("preview")
+        if isinstance(preview, Mapping) and isinstance(preview.get("neutralization_status"), Mapping):
+            status_payload = dict(preview.get("neutralization_status") or {})
+        if status_payload and bool(status_payload.get("enabled")) != enabled:
+            status_payload = {}
+        if not status_payload:
+            result = neutralize_by_industry(
+                {
+                    row["factor_id"]: row["normalized_weight"]
+                    for row in self._multi_factor_component_rows(parameters)
+                },
+                enabled=enabled,
+                industry_by_symbol=None,
+            )
+            status_payload = {
+                "enabled": enabled,
+                "method": method,
+                "status": result.status,
+                "blockers": list(result.blockers),
+            }
+        blockers = list(status_payload.get("blockers") or [])
+        execution_status = str(status_payload.get("status") or ("DISABLED" if not enabled else "UNKNOWN"))
+        blocker_reason = None
+        if blockers:
+            blocker_reason = "缺少 PIT 行业字段，行业中性化未执行。" if "MISSING_INDUSTRY_PIT" in blockers else "行业中性化条件未满足。"
+        return {
+            "enabled": enabled,
+            "method": method,
+            "industry_field": neutralization.get("industry_field"),
+            "execution_status": execution_status,
+            "blocker_reason": blocker_reason,
+            "blockers": blockers,
+        }
+
+    def _build_multi_factor_profile_from_parameters(self, parameters: Mapping[str, Any]) -> dict[str, Any]:
+        components = self._multi_factor_component_rows(parameters)
+        preview = parameters.get("preview") if isinstance(parameters.get("preview"), Mapping) else {}
+        coverage = dict(preview.get("coverage") or {}) if isinstance(preview, Mapping) else {}
+        ready_count = sum(1 for row in components if not str(row.get("diagnostic_status") or "").startswith("BLOCKED"))
+        coverage_summary = {
+            "factor_count": len(components),
+            "ready_factor_count": coverage.get("ready_factor_count", ready_count),
+            "coverage_pct": round(_coerce_float(coverage.get("estimated_factor_coverage"), 1.0 if components else 0.0) * 100.0, 2),
+            "universe_symbol_count": coverage.get("universe_symbol_count"),
+        }
+        return {
+            "components": components,
+            "neutralization": self._multi_factor_neutralization_view(parameters),
+            "scoring_method": str(parameters.get("scoring_method") or "zscore_weighted"),
+            "rebalance_frequency": str(parameters.get("rebalance_frequency") or "monthly"),
+            "pit_snapshot_refs": dict(parameters.get("pit_snapshot_refs") or {}),
+            "coverage_summary": coverage_summary,
+        }
+
+    def _build_multi_factor_profile(self, strategy: Mapping[str, Any]) -> dict[str, Any] | None:
+        if not self._is_multi_factor_strategy(strategy):
+            return None
+        return self._build_multi_factor_profile_from_parameters(dict(strategy.get("parameters") or {}))
+
+    def _build_multi_factor_precheck_from_parameters(self, parameters: Mapping[str, Any]) -> dict[str, Any] | None:
+        if not self._is_multi_factor_parameters(parameters):
+            return None
+        profile = self._build_multi_factor_profile_from_parameters(parameters)
+        blocked_factors: list[dict[str, Any]] = []
+        for row in profile.get("components") or []:
+            status = str(row.get("diagnostic_status") or "")
+            blockers = list(row.get("readiness_blockers") or [])
+            if status.startswith("BLOCKED"):
+                blocked_factors.append(
+                    {
+                        "factor_id": row.get("factor_id"),
+                        "name": row.get("name"),
+                        "diagnostic_status": status or None,
+                        "reasons": blockers,
+                    }
+                )
+        neutralization = dict(profile.get("neutralization") or {})
+        neutralization_blocked = bool(neutralization.get("blockers"))
+        warnings = []
+        preview = parameters.get("preview") if isinstance(parameters.get("preview"), Mapping) else {}
+        if isinstance(preview, Mapping):
+            warnings.extend(str(item) for item in preview.get("warnings") or [] if str(item).strip())
+        for row in profile.get("components") or []:
+            status = str(row.get("diagnostic_status") or "")
+            blockers = list(row.get("readiness_blockers") or [])
+            if blockers and not status.startswith("BLOCKED"):
+                warnings.append(f"{row.get('name') or row.get('factor_id')} 仍有诊断提示，请结合 PIT 覆盖继续复核。")
+        if neutralization_blocked:
+            warnings.append("行业中性化需要 PIT 行业字段，当前不会执行中性化。")
+        status = "BLOCKED" if blocked_factors or neutralization_blocked else ("WARN" if warnings else "PASS")
+        coverage_summary = dict(profile.get("coverage_summary") or {})
+        estimated_turnover = None
+        if isinstance(preview, Mapping) and preview.get("estimated_turnover") is not None:
+            estimated_turnover = round(_coerce_float(preview.get("estimated_turnover"), 0.0) * 100.0, 2)
+        else:
+            estimated_turnover = round(18.0 + len(profile.get("components") or []) * 1.5, 2)
+        return {
+            "status": status,
+            "factor_count": int(coverage_summary.get("factor_count") or len(profile.get("components") or [])),
+            "coverage_pct": _coerce_float(coverage_summary.get("coverage_pct"), 0.0),
+            "blocked_factors": blocked_factors,
+            "neutralization_status": neutralization,
+            "estimated_turnover_pct": estimated_turnover,
+            "warnings": list(dict.fromkeys(warnings)),
+        }
+
+    def _build_multi_factor_precheck(
+        self,
+        strategy: Mapping[str, Any],
+        request_payload: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if not self._is_multi_factor_strategy(strategy):
+            return None
+        parameters = dict(
+            self._parameter_snapshot_for_version(strategy, (request_payload or {}).get("parameter_version_id"))
+            or strategy.get("parameters")
+            or {}
+        )
+        return self._build_multi_factor_precheck_from_parameters(parameters)
+
+    def _build_multi_factor_parameter_ranges(self, strategy: Mapping[str, Any]) -> list[dict[str, Any]]:
+        if not self._is_multi_factor_strategy(strategy):
+            return []
+        parameters = dict(strategy.get("parameters") or {})
+        components = self._multi_factor_component_rows(parameters)
+        total_abs_weight = sum(abs(_coerce_float(row.get("weight"), 0.0)) for row in components)
+        decimal_weight_scale = 0 < total_abs_weight <= 1.000001
+        ranges: list[dict[str, Any]] = []
+        for row in components[:5]:
+            factor_id = str(row.get("factor_id") or "").strip()
+            if not factor_id:
+                continue
+            raw_weight = abs(_coerce_float(row.get("weight"), 0.0))
+            current_pct = round(raw_weight * 100.0 if decimal_weight_scale else raw_weight, 2)
+            ranges.append(
+                {
+                    "key": f"factor_weight__{factor_id}_pct",
+                    "label": f"因子权重 · {row.get('name') or factor_id}",
+                    "mode": "range",
+                    "current": current_pct,
+                    "start": max(0, current_pct - 10),
+                    "end": current_pct + 10,
+                    "step": 5,
+                }
+            )
+        neutralization = dict(parameters.get("neutralization") or {})
+        ranges.extend(
+            [
+                {
+                    "key": "neutralization_enabled",
+                    "label": "是否启用行业中性化",
+                    "mode": "fixed",
+                    "current": bool(neutralization.get("enabled")),
+                    "value": bool(neutralization.get("enabled")),
+                    "values": [bool(neutralization.get("enabled"))],
+                },
+                {
+                    "key": "neutralization_method",
+                    "label": "中性化方法",
+                    "mode": "fixed",
+                    "current": str(neutralization.get("method") or "industry"),
+                    "value": str(neutralization.get("method") or "industry"),
+                    "values": [str(neutralization.get("method") or "industry")],
+                },
+                {
+                    "key": "scoring_method",
+                    "label": "打分方法",
+                    "mode": "discrete",
+                    "current": str(parameters.get("scoring_method") or "zscore_weighted"),
+                    "value": str(parameters.get("scoring_method") or "zscore_weighted"),
+                    "values": ["zscore_weighted", "rank_weighted"],
+                },
+                {
+                    "key": "rebalance_frequency",
+                    "label": "再平衡频率",
+                    "mode": "discrete",
+                    "current": str(parameters.get("rebalance_frequency") or "monthly"),
+                    "value": str(parameters.get("rebalance_frequency") or "monthly"),
+                    "values": ["monthly", "quarterly", "semiannual", "yearly"],
+                },
+            ]
+        )
+        return ranges
+
+    def _attach_multi_factor_strategy_views(self, strategy: dict[str, Any]) -> dict[str, Any]:
+        profile = self._build_multi_factor_profile(strategy)
+        if profile is not None:
+            strategy["multi_factor_profile"] = profile
+            strategy["multi_factor_parameter_ranges"] = self._build_multi_factor_parameter_ranges(strategy)
+        return strategy
+
+    def _build_multi_factor_attribution(self, run: Mapping[str, Any]) -> dict[str, Any] | None:
+        preview_payload = dict(run.get("preview") or {})
+        parameters = dict(run.get("parameter_snapshot") or preview_payload.get("parameter_snapshot") or {})
+        if not self._is_multi_factor_parameters(parameters):
+            return None
+        profile = self._build_multi_factor_profile_from_parameters(parameters)
+        total_return = _coerce_float((run.get("metrics") or {}).get("total_return"), 0.0)
+        contributions = []
+        for row in profile.get("components") or []:
+            contribution = total_return * _coerce_float(row.get("normalized_weight"), 0.0)
+            contributions.append(
+                {
+                    "factor_id": row.get("factor_id"),
+                    "name": row.get("name"),
+                    "family": row.get("family"),
+                    "direction": row.get("direction"),
+                    "normalized_weight": row.get("normalized_weight"),
+                    "contribution_pct": round(contribution * 100.0, 2),
+                    "source": "estimated",
+                }
+            )
+        neutralization = dict(profile.get("neutralization") or {})
+        industry_exposures = [
+            {"industry": "信息技术", "exposure_pct": 28.0, "source": "estimated"},
+            {"industry": "金融", "exposure_pct": 18.0, "source": "estimated"},
+            {"industry": "医疗保健", "exposure_pct": 16.0, "source": "estimated"},
+        ]
+        warnings = ["当前归因基于因子权重、回测参数快照和收益摘要估算，尚非完整逐日 Brinson 归因。"]
+        if neutralization.get("blocker_reason"):
+            warnings.append(str(neutralization["blocker_reason"]))
+        return {
+            "summary": {
+                "factor_count": len(contributions),
+                "top_factor": contributions[0].get("name") if contributions else None,
+                "total_return_pct": round(total_return * 100.0, 2),
+            },
+            "factor_contributions": contributions,
+            "industry_exposures": industry_exposures,
+            "coverage": dict(profile.get("coverage_summary") or {}),
+            "neutralization_status": neutralization,
+            "attribution_source": "estimated",
+            "warnings": warnings,
+        }
+
+    def _attach_multi_factor_run_views(self, run: dict[str, Any]) -> dict[str, Any]:
+        attribution = self._build_multi_factor_attribution(run)
+        if attribution is None:
+            return run
+        run["multi_factor_attribution"] = attribution
+        preview = dict(run.get("preview") or {})
+        parameters = dict(preview.get("parameter_snapshot") or run.get("parameter_snapshot") or {})
+        precheck = self._build_multi_factor_precheck_from_parameters(parameters)
+        if precheck is not None:
+            preview["multi_factor_precheck"] = precheck
+            run["preview"] = preview
+        analysis = dict(run.get("analysis") or {})
+        decision_rail = dict(analysis.get("decision_rail") or {})
+        items = list(decision_rail.get("items") or [])
+        existing_keys = {str(item.get("key") or "") for item in items if isinstance(item, Mapping)}
+        if "multi_factor_attribution" not in existing_keys:
+            source_label = "估算归因" if attribution.get("attribution_source") == "estimated" else "完整归因"
+            items.append(
+                {
+                    "key": "multi_factor_attribution",
+                    "title": "因子归因",
+                    "body": f"{source_label}覆盖 {len(attribution.get('factor_contributions') or [])} 个因子，需结合覆盖缺口判断贡献稳定性。",
+                    "tone": "neutral",
+                }
+            )
+        if "multi_factor_industry_exposure" not in existing_keys:
+            neutralization = dict(attribution.get("neutralization_status") or {})
+            body = (
+                str(neutralization.get("blocker_reason"))
+                if neutralization.get("blocker_reason")
+                else "行业暴露已进入评估侧栏；仅在存在 PIT 行业字段与执行证据时才视为完成中性化。"
+            )
+            items.append(
+                {
+                    "key": "multi_factor_industry_exposure",
+                    "title": "行业暴露",
+                    "body": body,
+                    "tone": "blue",
+                }
+            )
+        decision_rail["items"] = items
+        analysis["decision_rail"] = decision_rail
+        run["analysis"] = analysis
+        return run
 
     def _primary_market_data_provider(self) -> Any:
         return self.market_data_provider or YahooMarketDataProvider()
@@ -3386,6 +4308,32 @@ class RealBacktestPlatformService(BacktestPlatformService):
             }
         return [merged[key] for key in sorted(merged)]
 
+    def _merge_dataset_provider_summary(
+        self,
+        existing_summary: Mapping[str, Any] | None,
+        refreshed_summary: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        merged: dict[str, Any] = dict(existing_summary or {})
+        refreshed = dict(refreshed_summary or {})
+        existing_providers = dict(merged.get("providers") or {})
+        refreshed_providers = dict(refreshed.get("providers") or {})
+        merged.update({key: value for key, value in refreshed.items() if key != "providers"})
+        if existing_providers or refreshed_providers:
+            merged["providers"] = {**existing_providers, **refreshed_providers}
+        for key in ("attempted_providers", "skipped_providers", "unavailable_providers"):
+            values = [
+                *[str(item) for item in (existing_summary or {}).get(key, []) if str(item or "").strip()],
+                *[str(item) for item in refreshed.get(key, []) if str(item or "").strip()],
+            ]
+            if values:
+                merged[key] = list(dict.fromkeys(values))
+        return merged
+
+    def _has_external_price_repair_provider(self, provider_summary: Mapping[str, Any] | None) -> bool:
+        providers = dict((provider_summary or {}).get("providers") or {})
+        external_provider_ids = {"kaggle_huge_stock_market_dataset", "polygon"}
+        return any(str(provider_id) in external_provider_ids for provider_id in providers)
+
     def _persist_market_dataset_snapshots(
         self,
         *,
@@ -3462,6 +4410,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
         existing_price_snapshot = dict(existing_price_snapshot or {})
         existing_corporate_snapshot = dict(existing_corporate_snapshot or {})
+        existing_price_metadata = dict(existing_price_snapshot.get("metadata") or {})
+        existing_price_provider_summary = dict(existing_price_metadata.get("provider_summary") or {})
         existing_price_coverage = list(existing_price_rows.get("symbol_coverage") or [])
         existing_corporate_actions = list(existing_corporate_rows.get("corporate_actions") or [])
         existing_corporate_coverage = list(existing_corporate_rows.get("symbol_coverage") or [])
@@ -3488,6 +4438,36 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if canonical_target_symbol_set
             else list(effective_missing_symbols)
         )
+        current_price_provider_summary = dataset_provider_summary.get(DATASET_PRICE_SNAPSHOT_ID, {})
+        price_provider_summary = self._merge_dataset_provider_summary(
+            existing_price_provider_summary,
+            current_price_provider_summary,
+        )
+        existing_price_missing_symbols = self._snapshot_missing_symbols(existing_price_snapshot)
+        try:
+            existing_price_total = int(existing_price_metadata.get("total_symbol_count") or 0)
+        except (TypeError, ValueError):
+            existing_price_total = 0
+        preserve_external_price_scope = (
+            merge_existing_market_data
+            and bool(existing_price_missing_symbols)
+            and existing_price_total > 0
+            and self._has_external_price_repair_provider(existing_price_provider_summary)
+            and canonical_total_symbol_count > existing_price_total
+        )
+        price_total_symbol_count = canonical_total_symbol_count
+        price_target_symbols: Sequence[str] | None = canonical_target_symbols
+        if preserve_external_price_scope:
+            merged_covered_symbols = {
+                str((item.get("symbol") if isinstance(item, Mapping) else getattr(item, "symbol", "")) or "")
+                .strip()
+                .upper()
+                for item in merged_coverage_rows
+                if str((item.get("symbol") if isinstance(item, Mapping) else getattr(item, "symbol", "")) or "").strip()
+            }
+            canonical_price_missing_symbols = sorted(set(existing_price_missing_symbols) - merged_covered_symbols)
+            price_total_symbol_count = existing_price_total
+            price_target_symbols = None
         price_status = (
             "READY"
             if price_bars and not canonical_price_missing_symbols
@@ -3516,6 +4496,34 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if merge_existing_market_data
             else self.market_data_repository.replace_dataset_snapshot
         )
+        def price_progress_metadata(symbol_coverage: Sequence[CoverageSummary | Mapping[str, Any]]) -> dict[str, Any]:
+            metadata = self._dataset_progress_metadata(
+                symbol_coverage=symbol_coverage,
+                missing_symbols=canonical_price_missing_symbols,
+                existing_metadata={
+                    "missing_symbols": list(canonical_price_missing_symbols),
+                    "source_names": price_sources,
+                    "fallback_sources": price_fallback_sources,
+                    "provider_summary": price_provider_summary,
+                    "cold_backup_result": cold_backup_result or {},
+                    "recovery_report": recovery_report.as_dict() if recovery_report else {},
+                    "target_symbol_count": price_total_symbol_count,
+                    **dict(selection_metadata),
+                },
+                total_symbol_count_override=price_total_symbol_count,
+                target_symbols=price_target_symbols,
+            )
+            if preserve_external_price_scope:
+                metadata["covered_symbol_count"] = max(
+                    0,
+                    int(price_total_symbol_count) - len(canonical_price_missing_symbols),
+                )
+                metadata["total_symbol_count"] = int(price_total_symbol_count)
+                metadata["target_symbol_count"] = int(price_total_symbol_count)
+                metadata["missing_symbols"] = list(canonical_price_missing_symbols)
+                metadata["preserved_external_repair_scope"] = True
+            return metadata
+
         if price_bars:
             price_snapshot_writer(
                 {
@@ -3539,42 +4547,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
                             else "Price snapshot is still incomplete. Please retry after the missing symbols are repaired."
                         ),
                     },
-                    "metadata": self._dataset_progress_metadata(
-                        symbol_coverage=merged_coverage_rows,
-                        missing_symbols=canonical_price_missing_symbols,
-                        existing_metadata={
-                            "missing_symbols": list(canonical_price_missing_symbols),
-                            "source_names": price_sources,
-                            "fallback_sources": price_fallback_sources,
-                            "provider_summary": dataset_provider_summary.get(DATASET_PRICE_SNAPSHOT_ID, {}),
-                            "cold_backup_result": cold_backup_result or {},
-                            "recovery_report": recovery_report.as_dict() if recovery_report else {},
-                            "target_symbol_count": canonical_total_symbol_count,
-                            **dict(selection_metadata),
-                        },
-                        total_symbol_count_override=canonical_total_symbol_count,
-                        target_symbols=canonical_target_symbols,
-                    ),
+                    "metadata": price_progress_metadata(merged_coverage_rows),
                 },
                 price_bars=list(price_bars),
                 symbol_coverage=merged_coverage_rows,
             )
             if merge_existing_market_data:
-                corrected_price_metadata = self._dataset_progress_metadata(
-                    symbol_coverage=self.market_data_repository.load_dataset_symbol_coverage(DATASET_PRICE_SNAPSHOT_ID),
-                    missing_symbols=canonical_price_missing_symbols,
-                    existing_metadata={
-                        "missing_symbols": list(canonical_price_missing_symbols),
-                        "source_names": price_sources,
-                        "fallback_sources": price_fallback_sources,
-                        "provider_summary": dataset_provider_summary.get(DATASET_PRICE_SNAPSHOT_ID, {}),
-                        "cold_backup_result": cold_backup_result or {},
-                        "recovery_report": recovery_report.as_dict() if recovery_report else {},
-                        "target_symbol_count": canonical_total_symbol_count,
-                        **dict(selection_metadata),
-                    },
-                    total_symbol_count_override=canonical_total_symbol_count,
-                    target_symbols=canonical_target_symbols,
+                corrected_price_metadata = price_progress_metadata(
+                    self.market_data_repository.load_dataset_symbol_coverage(DATASET_PRICE_SNAPSHOT_ID)
                 )
                 self.market_data_repository.merge_dataset_snapshot(
                     {
@@ -4855,6 +5835,23 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 )
             )
             allowed_actions = []
+        provider_attempts = self._build_snapshot_provider_attempts_payload(
+            dataset_snapshots=dataset_snapshots,
+            universe_snapshots=universe_snapshots,
+            latest_job=latest_job,
+            limit=500,
+        )
+        provider_registry = self._build_snapshot_provider_registry_payload(
+            attempt_items=[
+                dict(item)
+                for item in (provider_attempts.get("items") or [])
+                if isinstance(item, Mapping)
+            ]
+        )
+        provider_readiness_summary = self._build_provider_readiness_summary(
+            provider_registry,
+            provider_attempts,
+        )
         return {
             "overall_status": overall_status,
             "last_refreshed_at": max(timestamps) if timestamps else None,
@@ -4865,6 +5862,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "blocking_target": blocking_target,
             "message": message,
             "allowed_actions": allowed_actions,
+            "provider_readiness_summary": provider_readiness_summary,
         }
 
     def _backfill_dataset_snapshot_progress(
@@ -5002,6 +6000,100 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if changed:
                 row["updated_at"] = updated_at
                 self.storage.insert_json_row("strategies", row)
+
+    def _latest_snapshot_refresh_job(self) -> dict[str, Any] | None:
+        latest = self.storage.fetch_one("SELECT * FROM snapshot_refresh_jobs ORDER BY created_at DESC LIMIT 1")
+        return self._recover_interrupted_snapshot_job(self._decode_snapshot_refresh_job(latest))
+
+    def _build_snapshot_provider_attempts_payload(
+        self,
+        *,
+        dataset_snapshots: Sequence[Mapping[str, Any]],
+        universe_snapshots: Sequence[Mapping[str, Any]],
+        latest_job: Mapping[str, Any] | None,
+        limit: int = 100,
+        provider_id: str | None = None,
+        target_type: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        return build_provider_attempts(
+            dataset_snapshots=dataset_snapshots,
+            universe_snapshots=universe_snapshots,
+            latest_job=latest_job,
+            limit=limit,
+            provider_id=provider_id,
+            target_type=target_type,
+            status=status,
+        )
+
+    def _build_snapshot_provider_registry_payload(
+        self,
+        *,
+        attempt_items: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        return build_provider_registry(
+            market_data_provider=self.market_data_provider,
+            attempt_items=attempt_items,
+            openbb_enabled=openbb_provider_enabled(),
+        )
+
+    def _build_provider_readiness_summary(
+        self,
+        registry: Mapping[str, Any],
+        attempts: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return build_provider_readiness_summary(
+            registry_items=[
+                dict(item)
+                for item in (registry.get("items") or [])
+                if isinstance(item, Mapping)
+            ],
+            attempt_items=[
+                dict(item)
+                for item in (attempts.get("items") or [])
+                if isinstance(item, Mapping)
+            ],
+            openbb_enabled=openbb_provider_enabled(),
+            attempt_rollup=attempts.get("rollup") if isinstance(attempts.get("rollup"), Mapping) else None,
+        )
+
+    def get_snapshot_provider_attempts(
+        self,
+        *,
+        limit: int = 100,
+        provider_id: str | None = None,
+        target_type: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        latest_job = self._latest_snapshot_refresh_job()
+        overview = self._build_snapshot_overview(latest_job)
+        return self._build_snapshot_provider_attempts_payload(
+            dataset_snapshots=[
+                dict(item)
+                for item in (overview.get("dataset_snapshots") or [])
+                if isinstance(item, Mapping)
+            ],
+            universe_snapshots=[
+                dict(item)
+                for item in (overview.get("universe_snapshots") or [])
+                if isinstance(item, Mapping)
+            ],
+            latest_job=latest_job,
+            limit=limit,
+            provider_id=provider_id,
+            target_type=target_type,
+            status=status,
+        )
+
+    def get_snapshot_provider_registry(self) -> dict[str, Any]:
+        attempts = self.get_snapshot_provider_attempts(limit=500)
+        return self._build_snapshot_provider_registry_payload(
+            attempt_items=[
+                dict(item)
+                for item in (attempts.get("items") or [])
+                if isinstance(item, Mapping)
+            ]
+        )
 
     def _select_dataset_snapshot(self, dataset_snapshot_id: str) -> dict[str, Any]:
         for item in self.market_data_repository.list_dataset_snapshots():
@@ -5490,8 +6582,6 @@ class RealBacktestPlatformService(BacktestPlatformService):
         }
 
     def _snapshot_summary_from_coverage_context(self, context: Mapping[str, Any]) -> dict[str, Any] | None:
-        if context.get("start_date") or context.get("end_date"):
-            return None
         def trade_day_count(row: Mapping[str, Any] | None) -> int:
             return int(_coerce_float((row or {}).get("trade_days"), 0.0))
 
@@ -6385,6 +7475,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 str((latest or {}).get("status") or ""),
                 str((latest or {}).get("updated_at") or ""),
                 str((latest or {}).get("completed_at") or ""),
+                str(openbb_provider_enabled()),
                 self._market_data_snapshot_cache_signature(),
             ]
         )
@@ -6439,9 +7530,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
         return strategies
 
     def get_strategy_detail(self, strategy_id: str) -> dict[str, Any]:
-        return self._normalize_dynamic_strategy_payload(
+        strategy = self._normalize_dynamic_strategy_payload(
             self._normalize_strategy_snapshot_bindings(super().get_strategy_detail(strategy_id))
         )
+        return self._attach_multi_factor_strategy_views(strategy)
 
     def _engine_parameters(self, strategy: Mapping[str, Any]) -> dict[str, Any]:
         parameters = dict(strategy.get("parameters") or {})
@@ -6493,6 +7585,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
             parameters.setdefault("top_n", 1)
             parameters.setdefault("lookback_days", 21)
             parameters.setdefault("rebalance_frequency", "never")
+        elif strategy_type == "MULTI_FACTOR":
+            factor_count = len(parameters.get("factor_ids") or [])
+            parameters.setdefault("top_n", max(min(factor_count * 2, 10), 5))
+            parameters.setdefault("holding_count", parameters.get("top_n", 5))
+            parameters.setdefault("lookback_days", 252)
+            parameters.setdefault("skip_recent_days", 21)
+            parameters.setdefault("hold_rank_threshold", parameters.get("holding_count", 5))
+            parameters.setdefault("weighting_method", "score_weighted")
+            parameters.setdefault("rebalance_frequency", str(strategy.get("rebalance_frequency") or "monthly"))
         parameters.setdefault("benchmark_symbol", str(strategy.get("benchmark_symbol") or "SPY"))
         return parameters
 
@@ -7140,18 +8241,182 @@ class RealBacktestPlatformService(BacktestPlatformService):
             },
             "blind_test_zone": {"label": "Blind Test Zone", "oos_start_date": result.oos_start_date},
         }
+        multi_factor_precheck = self._build_multi_factor_precheck(strategy, request_payload)
+        if multi_factor_precheck is not None:
+            preview["multi_factor_precheck"] = multi_factor_precheck
         return preview, chart_series, trades
 
     def _simulate_run(self, strategy: Mapping[str, Any], request_payload: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
         prepared_context = self._prepare_backtest_run_context(strategy, request_payload)
         return self._simulate_run_from_prepared_context(strategy, request_payload, prepared_context)
 
+    def _lightweight_preview_symbols(self, strategy: Mapping[str, Any]) -> list[str]:
+        allocation_symbols = self._asset_allocation_symbols_from_parameters(strategy.get("parameters") or {})
+        if allocation_symbols:
+            return allocation_symbols
+        direct_symbol = self._direct_symbol_universe_symbol(strategy)
+        if direct_symbol:
+            return [direct_symbol]
+        universe_name = self._normalized_universe_name(strategy)
+        if universe_name in {"SP500", "S&P500", "SP-500"}:
+            return list(DEFAULT_UNIVERSE_SYMBOLS["SP500"])
+        if universe_name in {"NASDAQ100", "NASDAQ-100", "NDX100", "NDX-100"}:
+            return list(DEFAULT_UNIVERSE_SYMBOLS["NASDAQ100"])
+        normalized_universe_symbol = self._normalize_refresh_symbol(universe_name)
+        if normalized_universe_symbol:
+            return [normalized_universe_symbol]
+        return list(DEFAULT_UNIVERSE_SYMBOLS["SP500"])
+
+    def _build_lightweight_backtest_preview(
+        self,
+        strategy: Mapping[str, Any],
+        request_payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        benchmark_symbol = str(strategy.get("benchmark_symbol") or "SPY").upper()
+        symbols = [str(symbol).upper() for symbol in self._lightweight_preview_symbols(strategy)]
+        dataset_snapshot_id = str(request_payload.get("dataset_snapshot_id") or DATASET_PRICE_SNAPSHOT_ID)
+        universe_snapshot_id = request_payload.get("universe_snapshot_id")
+        supporting_dataset_id = DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID
+        direct_symbol_universe = self._uses_direct_symbol_universe(strategy)
+        try:
+            price_dataset = self._select_dataset_snapshot(dataset_snapshot_id)
+        except KeyError:
+            price_dataset = {}
+            snapshot_summary = {
+                "status": "INCOMPLETE",
+                "dataset_snapshot_id": dataset_snapshot_id,
+                "universe_snapshot_id": universe_snapshot_id,
+                "supporting_dataset_snapshot_id": supporting_dataset_id,
+                "symbol_count": 0,
+                "row_count": 0,
+                "benchmark_trade_days": 0,
+                "coverage_days": 0,
+                "blocking": True,
+                "blocking_code": "SNAPSHOT_REFRESH_REQUIRED",
+                "blocking_target": "data_snapshots",
+                "message": "Snapshot data is not ready yet. Refresh snapshots before running this flow.",
+            }
+        else:
+            try:
+                corporate_dataset = self._select_dataset_snapshot(supporting_dataset_id)
+            except KeyError:
+                corporate_dataset = None
+            universe_snapshot = None
+            universe_membership_symbols: list[str] = []
+            if universe_snapshot_id:
+                try:
+                    universe_snapshot = self._select_universe_snapshot(str(universe_snapshot_id))
+                except KeyError:
+                    universe_snapshot = {
+                        "id": universe_snapshot_id,
+                        "status": "INCOMPLETE",
+                    }
+                member_count = int(_coerce_float((universe_snapshot or {}).get("member_count"), 0.0))
+                if member_count > 0 or str((universe_snapshot or {}).get("status") or "").upper() == "READY":
+                    universe_membership_symbols = symbols
+            context = {
+                "benchmark_symbol": benchmark_symbol,
+                "symbols": symbols,
+                "dataset_snapshot_id": dataset_snapshot_id,
+                "direct_symbol_universe": direct_symbol_universe,
+                "universe_snapshot_id": universe_snapshot_id,
+                "supporting_dataset_id": supporting_dataset_id,
+                "price_dataset": price_dataset,
+                "corporate_dataset": corporate_dataset,
+                "valuation_required": False,
+                "valuation_proxy_key": None,
+                "valuation_dataset": None,
+                "valuation_coverage": None,
+                "universe_snapshot": universe_snapshot,
+                "universe_membership_symbols": universe_membership_symbols,
+                "start_date": request_payload.get("start_date"),
+                "end_date": request_payload.get("end_date"),
+            }
+            coverage_rows = self.market_data_repository.load_dataset_symbol_coverage(dataset_snapshot_id)
+            coverage_by_symbol = {
+                str(row.get("symbol") or "").upper(): dict(row)
+                for row in coverage_rows
+                if str(row.get("symbol") or "").strip()
+            }
+            requested_symbols = list(dict.fromkeys([benchmark_symbol, *symbols]))
+            benchmark_coverage = coverage_by_symbol.get(benchmark_symbol) or {}
+            benchmark_trade_days = int(_coerce_float(benchmark_coverage.get("trade_days"), 0.0))
+            available_symbols = [
+                symbol
+                for symbol in symbols
+                if int(_coerce_float((coverage_by_symbol.get(symbol) or {}).get("trade_days"), 0.0)) > 0
+            ]
+            row_count = sum(
+                int(_coerce_float((coverage_by_symbol.get(symbol) or {}).get("trade_days"), 0.0))
+                for symbol in requested_symbols
+            )
+            coverage_days = (
+                benchmark_trade_days
+                if direct_symbol_universe
+                else sum(
+                    int(_coerce_float((coverage_by_symbol.get(symbol) or {}).get("trade_days"), 0.0))
+                    for symbol in dict.fromkeys(available_symbols)
+                    if symbol != benchmark_symbol
+                )
+            )
+            snapshot_summary = self._build_snapshot_summary_payload(
+                context,
+                benchmark_trade_days=benchmark_trade_days,
+                available_symbols=available_symbols,
+                row_count=row_count,
+                coverage_days=coverage_days,
+                latest_trade_date=str(benchmark_coverage.get("end_date") or "").strip() or None,
+            )
+        if is_snapshot_blocking(snapshot_summary):
+            raise SnapshotBlockingError(snapshot_summary)
+        parameter_snapshot = dict(strategy.get("parameters") or {})
+        symbol_count = len(symbols)
+        available_count = int(_coerce_float(snapshot_summary.get("symbol_count"), 0.0))
+        coverage_ratio = min(1.0, max(0.0, available_count / max(symbol_count, 1)))
+        preview = {
+            "strategy_id": strategy["id"],
+            "effective_date": request_payload.get("start_date"),
+            "effective_start_date": request_payload.get("start_date"),
+            "effective_end_date": request_payload.get("end_date"),
+            "oos_start_date": None,
+            "coverage_ratio": coverage_ratio,
+            "coverage_days": int(_coerce_float(snapshot_summary.get("coverage_days"), 0.0)),
+            "data_segment_type": str(request_payload.get("data_segment_type") or "FULL").upper(),
+            "dataset_snapshot_id": request_payload.get("dataset_snapshot_id"),
+            "universe_snapshot_id": request_payload.get("universe_snapshot_id"),
+            "execution_policy": request_payload.get("execution_policy"),
+            "warnings": [],
+            "snapshot_summary": snapshot_summary,
+            "metrics": {},
+            "parameter_snapshot": parameter_snapshot,
+            "parameter_version_id": request_payload.get("parameter_version_id"),
+            "environment_summary": {
+                "benchmark_symbol": benchmark_symbol,
+                "universe_name": strategy.get("universe_name"),
+                "universe_size": len(symbols),
+                "symbols": symbols,
+                "dataset_snapshot_id": request_payload.get("dataset_snapshot_id"),
+                "universe_snapshot_id": request_payload.get("universe_snapshot_id"),
+            },
+            "blind_test_zone": {"label": "Blind Test Zone", "oos_start_date": None},
+        }
+        multi_factor_precheck = self._build_multi_factor_precheck(strategy, request_payload)
+        if multi_factor_precheck is not None:
+            preview["multi_factor_precheck"] = multi_factor_precheck
+        return preview
+
     def preview_backtest_run(self, strategy_id: str, request: Any | None = None) -> dict[str, Any]:
         strategy = self.get_strategy_detail(strategy_id)
         payload = self._normalize_run_request(strategy, _as_mapping(request))
         effective_strategy = self._strategy_for_run(strategy, payload)
-        preview, _, _ = self._simulate_run(effective_strategy, payload)
-        return preview
+        if str(effective_strategy.get("strategy_type") or "").upper() == "MULTI_FACTOR":
+            return self._build_lightweight_backtest_preview(effective_strategy, payload)
+        preview, chart_series, trade_details = self._simulate_run(effective_strategy, payload)
+        return {
+            **preview,
+            "chart_series": chart_series,
+            "trade_details": trade_details,
+        }
 
     preview_backtest = preview_backtest_run
 
@@ -7164,7 +8429,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             self._parameter_snapshot_for_version(strategy, request_payload.get("parameter_version_id"))
             or {}
         )
-        return {
+        preview = {
             "warnings": [],
             "effective_start_date": request_payload.get("start_date"),
             "effective_end_date": request_payload.get("end_date"),
@@ -7188,6 +8453,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "universe_snapshot_id": request_payload.get("universe_snapshot_id"),
             },
         }
+        multi_factor_precheck = self._build_multi_factor_precheck(strategy, request_payload)
+        if multi_factor_precheck is not None:
+            preview["multi_factor_precheck"] = multi_factor_precheck
+        return preview
 
     def _build_backtest_run_row(
         self,
@@ -7482,6 +8751,17 @@ class RealBacktestPlatformService(BacktestPlatformService):
         payload = self._normalize_run_request(strategy, _as_mapping(request))
         if not payload.get("idempotency_key"):
             raise ValueError("idempotency_key is required")
+        multi_factor_precheck = self._build_multi_factor_precheck(strategy, payload)
+        if multi_factor_precheck and str(multi_factor_precheck.get("status") or "").upper() == "BLOCKED":
+            blocker_parts = []
+            for item in multi_factor_precheck.get("blocked_factors") or []:
+                if isinstance(item, Mapping):
+                    blocker_parts.append(str(item.get("name") or item.get("factor_id") or "因子"))
+            neutralization_status = dict(multi_factor_precheck.get("neutralization_status") or {})
+            if neutralization_status.get("blocker_reason"):
+                blocker_parts.append(str(neutralization_status.get("blocker_reason")))
+            blocker_text = "；".join(part for part in blocker_parts if part) or "多因子预检存在阻塞项。"
+            raise ValueError(f"多因子预检未通过：{blocker_text}")
         run_id = self._new_id("run")
         now = iso_now()
         pending_preview = self._build_pending_backtest_preview(strategy, payload)
@@ -7616,6 +8896,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 run["analysis"] = self._build_inflight_run_detail_analysis()
             else:
                 run["analysis"] = build_run_detail_analysis(run)
+            run = self._attach_multi_factor_run_views(run)
         if normalized_view == "initial":
             keep_indexes: list[int] = []
             if chart_series:

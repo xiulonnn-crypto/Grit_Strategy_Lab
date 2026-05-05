@@ -475,6 +475,104 @@ describe('RunDetailPage', () => {
     expect(screen.getAllByText('AAPL, AMZN, MSFT, NVDA, META, GOOGL, TSLA, AVGO, BRK-B, JPM ...').length).toBeGreaterThan(0);
   });
 
+  it('renders the multi-factor attribution tab and decision rail items when attribution is present', async () => {
+    const multiFactorDetail: ApiBacktestRunDetail = {
+      ...detail,
+      parameter_snapshot: {
+        strategy_type: 'MULTI_FACTOR',
+        factor_ids: ['s_mom_12m1m_rank', 's_val_ep_ltm_raw'],
+      },
+      multi_factor_attribution: {
+        summary: {
+          attribution_source: 'estimated',
+          factor_count: 2,
+          top_factor: 's_mom_12m1m_rank',
+          coverage_pct: 93.4,
+        },
+        factor_contributions: [
+          {
+            factor_id: 's_mom_12m1m_rank',
+            name: 's_mom_12m1m_rank',
+            family: 'momentum',
+            direction: 'HIGH_IS_BETTER',
+            normalized_weight: 0.6,
+            contribution_pct: 18.2,
+            source: 'estimated',
+          },
+          {
+            factor_id: 's_val_ep_ltm_raw',
+            name: 's_val_ep_ltm_raw',
+            family: 'value',
+            direction: 'HIGH_IS_BETTER',
+            normalized_weight: 0.4,
+            contribution_pct: 8.4,
+            source: 'estimated',
+          },
+        ],
+        industry_exposures: [
+          { industry: '信息技术', exposure_pct: 28, source: 'estimated' },
+          { industry: '金融', exposure_pct: 12, source: 'estimated' },
+        ],
+        coverage: {
+          coverage_pct: 93.4,
+          factor_count: 2,
+          ready_factor_count: 2,
+        },
+        neutralization_status: {
+          enabled: false,
+          method: 'industry',
+          execution_status: 'DISABLED',
+        },
+        attribution_source: 'estimated',
+        warnings: ['当前归因基于因子权重估算。'],
+      },
+      analysis: {
+        subtitle: detail.analysis!.subtitle,
+        kpi_cards: detail.analysis!.kpi_cards,
+        decision_rail: {
+          ...detail.analysis!.decision_rail,
+          items: [
+            ...(detail.analysis!.decision_rail?.items ?? []),
+            {
+              key: 'factor_attribution',
+              title: '因子归因',
+              body: '动量因子贡献最高。',
+              tone: 'positive',
+            },
+            {
+              key: 'industry_exposure',
+              title: '行业暴露',
+              body: '行业暴露处于估算观察状态。',
+              tone: 'neutral',
+            },
+          ],
+        },
+      },
+    };
+    fakeApi.getBacktestRunDetail.mockResolvedValue(multiFactorDetail);
+
+    render(<RunDetailPage runId="bt-mf-001" />);
+
+    expect(await screen.findByRole('tab', { name: '因子归因' })).toBeInTheDocument();
+    expect(screen.getByText('动量因子贡献最高。')).toBeInTheDocument();
+    expect(screen.getByText('行业暴露处于估算观察状态。')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: '因子归因' }));
+
+    expect(screen.getByText('归因来源')).toBeInTheDocument();
+    expect(screen.getAllByText('估算归因').length).toBeGreaterThan(0);
+    expect(screen.queryByText('estimated')).not.toBeInTheDocument();
+    const barWidths = Array.from(
+      document.querySelectorAll<HTMLElement>('.run-detail-factor-attribution__bar-track span'),
+    ).map((bar) => bar.style.width);
+    expect(new Set(barWidths).size).toBeGreaterThan(1);
+    expect(screen.getByText('12-1月截面动量排名')).toBeInTheDocument();
+    expect(screen.getByText('滚动市盈率倒数 (LTM)')).toBeInTheDocument();
+    expect(screen.queryByText('s_mom_12m1m_rank')).not.toBeInTheDocument();
+    expect(screen.getByText('信息技术')).toBeInTheDocument();
+    expect(screen.getByText('当前归因基于因子权重估算。')).toBeInTheDocument();
+  });
+
   it('renders valuation execution context on trade rows when present', async () => {
     fakeApi.getBacktestRunDetail.mockResolvedValue(detail);
     fakeApi.getBacktestRunTrades.mockResolvedValue(trades);

@@ -40,4 +40,117 @@ describe("collectOptimizationParameterSeeds", () => {
       "yearly",
     ]);
   });
+
+  it("expands multi-factor weights and governance knobs without raw objects", () => {
+    const strategy: ApiStrategyDetail = {
+      id: "strat-mf-001",
+      name: "Multi Factor",
+      strategy_type: "MULTI_FACTOR",
+      universe_name: "SP500",
+      rebalance_frequency: "monthly",
+      benchmark_symbol: "SPY",
+      parameter_history: [],
+      parameters: {
+        strategy_type: "MULTI_FACTOR",
+        factor_ids: ["s_mom_12m1m_rank", "s_val_ep_ltm_raw"],
+        weights: {
+          s_mom_12m1m_rank: 0.6,
+          s_val_ep_ltm_raw: 0.4,
+        },
+        neutralization: { enabled: false, method: "industry" },
+        scoring_method: "zscore_weighted",
+        rebalance_frequency: "monthly",
+      },
+      multi_factor_profile: {
+        components: [
+          {
+            factor_id: "s_mom_12m1m_rank",
+            name: "s_mom_12m1m_rank",
+            weight: 0.6,
+            normalized_weight: 0.6,
+          },
+          {
+            factor_id: "s_val_ep_ltm_raw",
+            name: "s_val_ep_ltm_raw",
+            weight: 0.4,
+            normalized_weight: 0.4,
+          },
+        ],
+        neutralization: {
+          enabled: false,
+          method: "industry",
+          execution_status: "DISABLED",
+        },
+        scoring_method: "zscore_weighted",
+        rebalance_frequency: "monthly",
+      },
+    };
+
+    const seeds = collectOptimizationParameterSeeds(strategy);
+
+    expect(seeds.map((seed) => seed.key)).toEqual([
+      "factor_weight__s_mom_12m1m_rank_pct",
+      "factor_weight__s_val_ep_ltm_raw_pct",
+      "scoring_method",
+      "rebalance_frequency",
+      "neutralization_enabled",
+      "neutralization_method",
+    ]);
+    expect(seeds.find((seed) => seed.key === "factor_weight__s_mom_12m1m_rank_pct")?.label).toBe("因子权重 · 12-1月截面动量排名");
+    expect(seeds.find((seed) => seed.key === "factor_weight__s_val_ep_ltm_raw_pct")?.label).toBe("因子权重 · 滚动市盈率倒数 (LTM)");
+    expect(seeds.find((seed) => seed.key === "factor_weight__s_mom_12m1m_rank_pct")?.value).toBe(60);
+    expect(seeds.find((seed) => seed.key === "neutralization_enabled")?.value).toBe("false");
+    expect(seeds.find((seed) => seed.key === "scoring_method")?.options?.map((option) => option.value)).toContain("zscore_weighted");
+  });
+
+  it("keeps multi-factor percent weights from live strategy parameters", () => {
+    const strategy: ApiStrategyDetail = {
+      id: "strat-mf-002",
+      name: "Multi Factor Percent",
+      strategy_type: "MULTI_FACTOR",
+      universe_name: "SP500",
+      rebalance_frequency: "monthly",
+      benchmark_symbol: "SPY",
+      parameter_history: [],
+      parameters: {
+        strategy_type: "MULTI_FACTOR",
+        factor_ids: ["s_mom_12m1m_rank", "s_val_ep_ltm_raw"],
+        weights: {
+          s_mom_12m1m_rank: 60,
+          s_val_ep_ltm_raw: 40,
+        },
+        neutralization: { enabled: false, method: "industry" },
+        scoring_method: "zscore_weighted",
+        rebalance_frequency: "monthly",
+      },
+      multi_factor_profile: {
+        components: [
+          {
+            factor_id: "s_mom_12m1m_rank",
+            name: "12-1 动量",
+            weight: 60,
+            normalized_weight: 0.6,
+          },
+          {
+            factor_id: "s_val_ep_ltm_raw",
+            name: "EP 估值",
+            weight: 40,
+            normalized_weight: 0.4,
+          },
+        ],
+        neutralization: {
+          enabled: false,
+          method: "industry",
+          execution_status: "DISABLED",
+        },
+        scoring_method: "zscore_weighted",
+        rebalance_frequency: "monthly",
+      },
+    };
+
+    const seeds = collectOptimizationParameterSeeds(strategy);
+
+    expect(seeds.find((seed) => seed.key === "factor_weight__s_mom_12m1m_rank_pct")?.value).toBe(60);
+    expect(seeds.find((seed) => seed.key === "factor_weight__s_val_ep_ltm_raw_pct")?.value).toBe(40);
+  });
 });

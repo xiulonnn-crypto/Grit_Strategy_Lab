@@ -118,6 +118,12 @@ const templates: TemplateCard[] = [
     actionLabel: '创建资产配置策略',
   },
   {
+    strategyType: 'MULTI_FACTOR',
+    label: '多因子策略',
+    description: '从因子库选择系统或验证因子，配置权重、方向与行业中性化后创建可回测策略。',
+    actionLabel: '创建多因子策略',
+  },
+  {
     strategyType: 'GENERAL',
     label: '通用策略',
     description: '用于定义非模板化交易逻辑，适合需要自定义规则的研究场景。',
@@ -131,6 +137,7 @@ const STRATEGY_TYPE_LABELS: Record<StrategyType, string> = {
   MEAN_REVERSION: '均值回归',
   BUY_AND_HOLD: '指数 / 定投',
   ASSET_ALLOCATION: '资产配置型',
+  MULTI_FACTOR: '多因子策略',
   GENERAL: '通用策略',
 };
 
@@ -618,6 +625,10 @@ export function CreationTemplatePage(): JSX.Element {
       setCreateError(null);
       if (strategyType === 'ASSET_ALLOCATION') {
         navigateTo('/creation/asset-allocation/new');
+        return;
+      }
+      if (strategyType === 'MULTI_FACTOR') {
+        navigateTo('/factor-models/new');
         return;
       }
       const session = await api.createCreationSession({ strategy_type: strategyType });

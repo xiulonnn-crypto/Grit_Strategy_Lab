@@ -300,6 +300,24 @@ export function installMockApiServer() {
       if (method === 'POST' && url.pathname === '/factors/diagnostics/preview') {
         return json(await demoApi.previewFactorDiagnostics(body as import('./types').ApiFactorDiagnosticPreviewPayload));
       }
+      if (method === 'GET' && url.pathname === '/factor-mining/jobs') {
+        return json(await demoApi.listFactorMiningJobs());
+      }
+      if (method === 'POST' && url.pathname === '/factor-mining/jobs') {
+        return json(await demoApi.createFactorMiningJob(body as import('./types').ApiFactorMiningJobCreatePayload));
+      }
+      if (method === 'GET' && segments[0] === 'factor-mining' && segments[1] === 'jobs' && segments.length === 3) {
+        return json(await demoApi.getFactorMiningJob(segments[2]));
+      }
+      if (method === 'POST' && segments[0] === 'factor-mining' && segments[1] === 'jobs' && segments[3] === 'cancel') {
+        return json(await demoApi.cancelFactorMiningJob(segments[2]));
+      }
+      if (method === 'POST' && url.pathname === '/factor-models/preview') {
+        return json(await demoApi.previewFactorModel(body as import('./types').ApiFactorModelPreviewPayload));
+      }
+      if (method === 'POST' && url.pathname === '/factor-models') {
+        return json(await demoApi.createFactorModel(body as import('./types').ApiFactorModelCreatePayload));
+      }
       if (method === 'GET' && segments[0] === 'factors' && segments.length === 2) {
         return json(await demoApi.getFactor(segments[1]));
       }

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 AllowedAction = Literal[
     'start_backtest',
@@ -30,7 +30,16 @@ AllowedAction = Literal[
 CreationSessionMode = Literal['CREATE', 'REVISION']
 CreationSessionStatus = Literal['DRAFTING', 'READY_FOR_CONFIRMATION', 'NEEDS_INPUT', 'LOCKED']
 StrategyStatus = Literal['DRAFT', 'ACTIVE', 'PAUSED', 'ARCHIVED']
-StrategyType = Literal['GENERAL', 'GRID', 'MOMENTUM', 'MEAN_REVERSION', 'BUY_AND_HOLD', 'ASSET_ALLOCATION']
+CreationSessionStrategyType = Literal['GENERAL', 'GRID', 'MOMENTUM', 'MEAN_REVERSION', 'BUY_AND_HOLD', 'ASSET_ALLOCATION']
+StrategyType = Literal[
+    'GENERAL',
+    'GRID',
+    'MOMENTUM',
+    'MEAN_REVERSION',
+    'BUY_AND_HOLD',
+    'ASSET_ALLOCATION',
+    'MULTI_FACTOR',
+]
 FieldSource = Literal['user_input', 'system_inference', 'system_default', 'manual_override']
 BacktestRunStatus = Literal['QUEUED', 'RUNNING', 'COMPLETED', 'COMPLETED_WITH_WARNINGS', 'FAILED']
 BacktestExecutionStage = Literal['DATA_FETCHING', 'SIMULATING', 'METRIC_CALCULATING']
@@ -62,6 +71,7 @@ FactorDiagnosticStatus = Literal[
 FactorDiagnosticMode = Literal['VERIFIED', 'SANDBOX']
 FactorDirection = Literal['HIGH_IS_BETTER', 'LOW_IS_BETTER', 'NEUTRAL']
 FactorFrequency = Literal['DAILY', 'WEEKLY', 'MONTHLY']
+FactorMiningJobStatus = Literal['QUEUED', 'RUNNING', 'CANCEL_REQUESTED', 'CANCELLED', 'COMPLETED', 'PARTIALLY_FAILED', 'FAILED']
 
 
 class FactorDescriptorRequest(BaseModel):
@@ -104,6 +114,109 @@ class FactorDiagnosticPreviewRequest(BaseModel):
     return_window_days: int = Field(default=21, ge=1, le=126)
 
 
+class FactorMiningJobCreateRequest(BaseModel):
+    universe: str = Field(default='SP500', min_length=1)
+    start_date: str = Field(default='2018-01-01', min_length=1)
+    end_date: str = Field(default='2024-12-31', min_length=1)
+    operators: list[str] = Field(default_factory=lambda: ['Rank', 'ZScore', 'Winsorize'])
+    candidate_count: int = Field(default=1000, ge=1, le=10000)
+    random_seed: int | None = None
+    min_rank_ic: float = Field(default=0.03, ge=-1.0, le=1.0)
+    max_depth: int = Field(default=4, ge=1, le=8)
+
+    @field_validator('operators')
+    @classmethod
+    def _require_operators(cls, value: list[str]) -> list[str]:
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        if not cleaned:
+            raise ValueError('operators must not be empty')
+        return cleaned
+
+
+class FactorModelComponentRequest(BaseModel):
+    factor_id: str = Field(min_length=1)
+    weight: float = Field(default=1.0)
+    direction: FactorDirection = 'HIGH_IS_BETTER'
+
+
+class FactorModelNeutralizationRequest(BaseModel):
+    enabled: bool = False
+    method: str = Field(default='industry')
+
+
+class FactorModelPreviewRequest(BaseModel):
+    name: str | None = None
+    universe: str = Field(default='SP500', min_length=1)
+    rebalance_frequency: str = Field(default='monthly', min_length=1)
+    scoring_method: str = Field(default='zscore_weighted', min_length=1)
+    components: list[FactorModelComponentRequest] = Field(default_factory=list, min_length=1)
+    neutralization: FactorModelNeutralizationRequest = Field(default_factory=FactorModelNeutralizationRequest)
+
+
+class FactorModelCreateRequest(FactorModelPreviewRequest):
+    idempotency_key: str | None = None
+    description: str | None = None
+
+
+class ApiMultiFactorComponent(BaseModel):
+    factor_id: str
+    name: str | None = None
+    family: str | None = None
+    direction: FactorDirection | str = 'HIGH_IS_BETTER'
+    weight: float = 0.0
+    normalized_weight: float = 0.0
+    diagnostic_status: str | None = None
+    pit_coverage: dict[str, Any] = Field(default_factory=dict)
+
+
+class ApiMultiFactorNeutralization(BaseModel):
+    enabled: bool = False
+    method: str = 'industry'
+    industry_field: str | None = None
+    execution_status: str = 'DISABLED'
+    blocker_reason: str | None = None
+
+
+class ApiMultiFactorProfile(BaseModel):
+    components: list[ApiMultiFactorComponent] = Field(default_factory=list)
+    neutralization: ApiMultiFactorNeutralization = Field(default_factory=ApiMultiFactorNeutralization)
+    scoring_method: str = 'zscore_weighted'
+    rebalance_frequency: str = 'monthly'
+    pit_snapshot_refs: dict[str, Any] = Field(default_factory=dict)
+    coverage_summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class ApiMultiFactorPrecheck(BaseModel):
+    status: Literal['PASS', 'WARN', 'BLOCKED'] = 'PASS'
+    factor_count: int = 0
+    coverage_pct: float = 0.0
+    blocked_factors: list[dict[str, Any]] = Field(default_factory=list)
+    neutralization_status: dict[str, Any] = Field(default_factory=dict)
+    estimated_turnover_pct: float | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ApiMultiFactorAttribution(BaseModel):
+    summary: dict[str, Any] = Field(default_factory=dict)
+    factor_contributions: list[dict[str, Any]] = Field(default_factory=list)
+    industry_exposures: list[dict[str, Any]] = Field(default_factory=list)
+    coverage: dict[str, Any] = Field(default_factory=dict)
+    neutralization_status: dict[str, Any] = Field(default_factory=dict)
+    attribution_source: str = 'estimated'
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ApiMultiFactorParameterRange(BaseModel):
+    key: str
+    label: str
+    mode: Literal['range', 'fixed', 'discrete'] = 'fixed'
+    current: Any | None = None
+    start: Any | None = None
+    end: Any | None = None
+    step: Any | None = None
+    values: list[Any] | None = None
+
+
 class PitResearchWaiverRequest(BaseModel):
     dataset_snapshot_id: str | None = None
     universe_snapshot_id: str | None = None
@@ -139,7 +252,7 @@ class CreationMessageCreate(BaseModel):
 
 
 class CreateCreationSessionRequest(BaseModel):
-    strategy_type: StrategyType | None = None
+    strategy_type: CreationSessionStrategyType | None = None
     mode: CreationSessionMode = 'CREATE'
     base_strategy_id: str | None = None
     base_parameter_version_id: str | None = None
@@ -152,7 +265,7 @@ class PrepareConfirmationRequest(BaseModel):
 
 class ConfirmationUpdateRequest(BaseModel):
     revision: int = Field(ge=1)
-    strategy_type: StrategyType | None = None
+    strategy_type: CreationSessionStrategyType | None = None
     core: dict[str, Any] = Field(default_factory=dict)
     logic: dict[str, Any] = Field(default_factory=dict)
     parameters: dict[str, Any] = Field(default_factory=dict)
@@ -316,6 +429,83 @@ class SnapshotProviderSummary(BaseModel):
     skipped_providers: list[str] = Field(default_factory=list)
     unavailable_providers: list[str] = Field(default_factory=list)
     providers: dict[str, SnapshotProviderSummaryItem] = Field(default_factory=dict)
+
+
+class SnapshotProviderReadinessSummaryModel(BaseModel):
+    provider_count: int = 0
+    registered_provider_count: int = 0
+    enabled_provider_count: int = 0
+    credential_ready_provider_count: int = 0
+    usable_provider_count: int = 0
+    attempted_provider_count: int = 0
+    attempt_event_count: int = 0
+    unique_attempted_provider_count: int = 0
+    latest_job_attempt_event_count: int = 0
+    latest_job_attempted_provider_count: int = 0
+    attempt_rollup_policy: str = "unique_provider_latest_job_priority"
+    quota_limited_provider_count: int = 0
+    cooldown_provider_count: int = 0
+    missing_credential_provider_count: int = 0
+    failed_provider_count: int = 0
+    auxiliary_only_provider_count: int = 0
+    target_type_counts: dict[str, int] = Field(default_factory=dict)
+    top_blockers: list[dict[str, Any]] = Field(default_factory=list)
+    last_attempt_at: str | None = None
+    openbb: dict[str, Any] = Field(default_factory=dict)
+
+
+class SnapshotProviderRegistryItemModel(BaseModel):
+    provider_id: str
+    source_name: str
+    access_tier: SnapshotProviderAccessTier | str
+    credential_requirements: dict[str, Any] = Field(default_factory=dict)
+    target_types: list[str] = Field(default_factory=list)
+    fallback_order: dict[str, int] = Field(default_factory=dict)
+    latest_attempt: dict[str, Any] | None = None
+    quota_cooldown: dict[str, Any] = Field(default_factory=dict)
+    error_summary: dict[str, Any] = Field(default_factory=dict)
+    pit_permission: dict[str, Any] = Field(default_factory=dict)
+    source_governance: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = False
+    credential_ready: bool = True
+    usable: bool = False
+    readiness_status: str = "disabled"
+    optional_layer: str | None = None
+
+
+class SnapshotProviderRegistryResponseModel(BaseModel):
+    generated_at: str
+    openbb_enabled: bool = False
+    items: list[SnapshotProviderRegistryItemModel] = Field(default_factory=list)
+
+
+class SnapshotProviderAttemptItemModel(BaseModel):
+    attempt_id: str
+    provider_id: str
+    target_type: str
+    snapshot_kind: str
+    snapshot_id: str
+    job_id: str | None = None
+    status: str
+    selection_status: str | None = None
+    access_tier: SnapshotProviderAccessTier | str = 'public'
+    attempted_at: str | None = None
+    next_retry_at: str | None = None
+    quota_limited: bool = False
+    cooldown_active: bool = False
+    reason: str | None = None
+    error: str | None = None
+    landed_row_count: int = 0
+    landed_symbol_count: int = 0
+    auxiliary_only: bool = False
+    pit_effect: dict[str, Any] = Field(default_factory=dict)
+
+
+class SnapshotProviderAttemptListResponseModel(BaseModel):
+    generated_at: str
+    latest_job_id: str | None = None
+    items: list[SnapshotProviderAttemptItemModel] = Field(default_factory=list)
+    rollup: dict[str, Any] = Field(default_factory=dict)
 
 
 class DatasetSnapshotMetadataModel(BaseModel):
@@ -1327,4 +1517,7 @@ class SnapshotOverviewResponseModel(BaseModel):
     blocking_target: Any | None = None
     message: str | None = None
     allowed_actions: list[AllowedAction | str] = Field(default_factory=list)
+    provider_readiness_summary: SnapshotProviderReadinessSummaryModel = Field(
+        default_factory=SnapshotProviderReadinessSummaryModel
+    )
     bond_fixed_income: BondFixedIncomeOverviewModel

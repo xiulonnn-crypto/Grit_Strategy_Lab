@@ -43,6 +43,12 @@ import type {
   ApiFactorDiagnosticPreviewPayload,
   ApiFactorDiagnosticRunResponse,
   ApiFactorListResponse,
+  ApiFactorMiningJob,
+  ApiFactorMiningJobCreatePayload,
+  ApiFactorMiningJobListResponse,
+  ApiFactorModelCreatePayload,
+  ApiFactorModelPreviewPayload,
+  ApiFactorModelPreviewResponse,
   ApiPitIdentityOverridePayload,
   ApiPitIdentityScraperRestartPayload,
   ApiPitIdentityScraperRestartResponse,
@@ -54,6 +60,8 @@ import type {
   ApiOptimizationJobDetail,
   ApiOptimizationJobListItem,
   ApiSnapshotOverview,
+  ApiSnapshotProviderAttempts,
+  ApiSnapshotProviderRegistry,
   ApiStrategyCreationSession,
   ApiStrategyDetail,
   ApiStrategyListItem,
@@ -720,6 +728,18 @@ function createHttpApiClient(): DemoApi {
         `/compositions/${encodeURIComponent(id)}/decision-packets/${encodeURIComponent(packetId)}/export?format=${encodeURIComponent(format)}`,
       ),
     getSnapshotOverview: () => requestJson<ApiSnapshotOverview>('/data-snapshots/overview'),
+    getSnapshotProviderRegistry: () => requestJson<ApiSnapshotProviderRegistry>('/data-snapshots/provider-registry'),
+    getSnapshotProviderAttempts: (params) => {
+      const query = new URLSearchParams();
+      if (params?.limit != null) query.set('limit', String(params.limit));
+      if (params?.provider_id) query.set('provider_id', params.provider_id);
+      if (params?.target_type) query.set('target_type', params.target_type);
+      if (params?.status) query.set('status', params.status);
+      const suffix = query.toString();
+      return requestJson<ApiSnapshotProviderAttempts>(
+        `/data-snapshots/provider-attempts${suffix ? `?${suffix}` : ''}`,
+      );
+    },
     refreshSnapshots: (payload) =>
       requestJson<ApiSnapshotOverview>(
         '/admin/snapshot-refresh-jobs',
@@ -767,6 +787,20 @@ function createHttpApiClient(): DemoApi {
         '/factors/diagnostics/preview',
         withJsonBody(payload, { method: 'POST' }),
       ),
+    listFactorMiningJobs: () => requestJson<ApiFactorMiningJobListResponse>('/factor-mining/jobs'),
+    createFactorMiningJob: (payload: ApiFactorMiningJobCreatePayload) =>
+      requestJson<ApiFactorMiningJob>('/factor-mining/jobs', withJsonBody(payload, { method: 'POST' })),
+    getFactorMiningJob: (id: string) =>
+      requestJson<ApiFactorMiningJob>(`/factor-mining/jobs/${encodeURIComponent(id)}`),
+    cancelFactorMiningJob: (id: string) =>
+      requestJson<ApiFactorMiningJob>(`/factor-mining/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+    previewFactorModel: (payload: ApiFactorModelPreviewPayload) =>
+      requestJson<ApiFactorModelPreviewResponse>(
+        '/factor-models/preview',
+        withJsonBody(payload, { method: 'POST' }),
+      ),
+    createFactorModel: (payload: ApiFactorModelCreatePayload) =>
+      requestJson<ApiStrategyDetail>('/factor-models', withJsonBody(payload, { method: 'POST' })),
   };
 }
 

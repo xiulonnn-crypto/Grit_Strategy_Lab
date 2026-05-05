@@ -1,4 +1,5 @@
 import { formatParameterLabel, formatParameterValue } from './adapters';
+import { formatFactorDisplayName, formatFactorList, formatFactorWeightLabel } from './factor-display';
 
 const SYMBOL_PREVIEW_LIMIT = 10;
 
@@ -19,6 +20,12 @@ const RUN_DETAIL_KV_LABELS: Record<string, string> = {
   effective_date: '生效起点',
   end_date: '结束日期',
   execution_policy: '执行策略',
+  factor_ids: '因子篮子',
+  weights: '权重方案',
+  directions: '方向设置',
+  neutralization: '行业中性化',
+  pit_snapshot_refs: 'PIT 快照',
+  scoring_method: '打分方法',
   cost_model_enabled: '成本模拟开关',
   expense_ratio_bps: '管理费率(BPS)',
   fee_bps: '手续费(BPS)',
@@ -80,6 +87,10 @@ const RUN_DETAIL_VALUE_LABELS: Record<string, string> = {
   FULL: '全量',
   INCOMPLETE: '不完整',
   NOT_REQUIRED: '无需',
+  MULTI_FACTOR: '多因子',
+  HIGH_IS_BETTER: '数值越高越好',
+  LOW_IS_BETTER: '数值越低越好',
+  NEUTRAL: '中性',
   OOS: '测试集',
   READY: '已就绪',
   RUNNING: '运行中',
@@ -91,6 +102,9 @@ const RUN_DETAIL_VALUE_LABELS: Record<string, string> = {
   momentum: '动量',
   'momentum:semiannual': '动量：每半年调仓',
   monthly: '每月',
+  zscore_weighted: 'Z-Score 加权',
+  rank_weighted: 'Rank 加权',
+  industry: '行业中性',
   official: '正式回测',
   quarterly: '每季度',
   local: '本地',
@@ -195,6 +209,10 @@ function formatStringValue(key: string, value: string): string {
 }
 
 export function formatRunDetailKvLabel(key: string): string {
+  const factorWeightLabel = formatFactorWeightLabel(key);
+  if (factorWeightLabel) {
+    return `${factorWeightLabel}(%)`;
+  }
   const allocationSymbol = allocationWeightSymbol(key);
   if (allocationSymbol) {
     return `${allocationSymbol} 目标权重(%)`;
@@ -226,6 +244,25 @@ function formatSymbolsPreview(value: unknown): string | null {
   return symbols.length > SYMBOL_PREVIEW_LIMIT ? `${preview} ...` : preview;
 }
 
+function formatWeightRecord(record: Record<string, unknown>): string {
+  const entries = Object.entries(record)
+    .map(([factorId, weight]) => {
+      const numeric = typeof weight === 'number' ? weight : Number(weight);
+      return Number.isFinite(numeric) ? { factorId, numeric } : null;
+    })
+    .filter((item): item is { factorId: string; numeric: number } => Boolean(item));
+  const totalAbsWeight = entries.reduce((total, entry) => total + Math.abs(entry.numeric), 0);
+  const decimalScale = totalAbsWeight > 0 && totalAbsWeight <= 1.000001;
+  return entries.length
+    ? entries
+        .map(({ factorId, numeric }) => {
+          const pctValue = decimalScale ? numeric * 100 : numeric;
+          return `${formatFactorDisplayName(factorId)} ${Number(pctValue.toFixed(2))}%`;
+        })
+        .join('；')
+    : '—';
+}
+
 export function formatRunDetailKvValue(key: string, value: unknown): string {
   if (value === null || typeof value === 'undefined') {
     return '—';
@@ -246,6 +283,9 @@ export function formatRunDetailKvValue(key: string, value: unknown): string {
   }
 
   if (Array.isArray(value)) {
+    if (key === 'factor_ids') {
+      return value.length ? formatFactorList(value) : '—';
+    }
     const isPrimitiveArray = value.every(
       (item) => item === null || ['string', 'number', 'boolean'].includes(typeof item),
     );
@@ -267,7 +307,29 @@ export function formatRunDetailKvValue(key: string, value: unknown): string {
   }
 
   if (typeof value === 'object') {
-    return JSON.stringify(value);
+    const record = value as Record<string, unknown>;
+    if (key === 'weights') {
+      return formatWeightRecord(record);
+    }
+    if (key === 'directions') {
+      const entries = Object.entries(record)
+        .map(([factorId, direction]) => `${formatFactorDisplayName(factorId)} ${formatStringValue('direction', String(direction ?? ''))}`)
+        .filter((item) => item.trim().length > 0);
+      return entries.length ? entries.join('；') : '—';
+    }
+    if (key === 'neutralization') {
+      const enabled = Boolean(record.enabled);
+      const method = formatStringValue('neutralization_method', String(record.method ?? 'industry'));
+      const status = String(record.execution_status ?? record.status ?? '').trim();
+      return `${enabled ? '启用' : '未启用'} · ${method}${status ? ` · ${status}` : ''}`;
+    }
+    if (key === 'pit_snapshot_refs') {
+      const entries = Object.entries(record)
+        .map(([snapshotKey, snapshotValue]) => `${formatRunDetailKvLabel(snapshotKey)} ${String(snapshotValue ?? '—')}`)
+        .filter((item) => item.trim().length > 0);
+      return entries.length ? entries.join('；') : '—';
+    }
+    return '已配置';
   }
 
   return formatStringValue(key, String(value));

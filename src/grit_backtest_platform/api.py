@@ -55,6 +55,9 @@ from .models import (
     FactorCreateRequest,
     FactorDiagnosticPreviewRequest,
     FactorDiagnosticRequest,
+    FactorMiningJobCreateRequest,
+    FactorModelCreateRequest,
+    FactorModelPreviewRequest,
     LegInventoryResponseModel,
     MaterializeRequest,
     OptimizationCandidateCreateRequest,
@@ -68,6 +71,8 @@ from .models import (
     ResumeOptimizationJobRequest,
     PromoteTrialRequest,
     PrepareConfirmationRequest,
+    SnapshotProviderAttemptListResponseModel,
+    SnapshotProviderRegistryResponseModel,
     SnapshotRefreshRequest,
     StrategyUpdateRequest,
 )
@@ -92,6 +97,7 @@ def _supports_corporate_action_probe(provider_or_name: Any) -> bool:
         "yfinance",
         "tiingo",
         "alpha_vantage",
+        "polygon",
         "openbb_yfinance",
         "openbb_tiingo",
         "openbb_fmp",
@@ -922,6 +928,7 @@ def build_runtime_market_data_provider() -> RuntimeMarketDataProvider:
         ("fmp", "fmp_identity_provider", ("FmpIdentityRepairProvider", "FmpMarketDataProvider", "FmpPriceRepairProvider")),
         ("alpha_vantage", "alpha_vantage_provider", ("AlphaVantageProvider", "AlphaVantageEventProvider", "AlphaVantageMarketDataProvider")),
         ("sec_edgar", "sec_edgar_provider", ("SecEdgarEventProvider", "SecEdgarProvider")),
+        ("polygon", "polygon_provider", ("PolygonMarketDataProvider",)),
     ]
     openbb_enabled = _openbb_provider_enabled()
     if openbb_enabled:
@@ -1496,6 +1503,30 @@ def create_app(
     def preview_factor_diagnostics(payload: FactorDiagnosticPreviewRequest):
         return invoke(service.preview_factor_diagnostics, payload)
 
+    @app.post('/factor-mining/jobs')
+    def create_factor_mining_job(payload: FactorMiningJobCreateRequest):
+        return invoke(service.create_factor_mining_job, payload)
+
+    @app.get('/factor-mining/jobs')
+    def list_factor_mining_jobs():
+        return invoke(service.list_factor_mining_jobs)
+
+    @app.get('/factor-mining/jobs/{job_id}')
+    def factor_mining_job_detail(job_id: str):
+        return invoke(service.get_factor_mining_job, job_id)
+
+    @app.post('/factor-mining/jobs/{job_id}/cancel')
+    def cancel_factor_mining_job(job_id: str):
+        return invoke(service.cancel_factor_mining_job, job_id)
+
+    @app.post('/factor-models/preview')
+    def preview_factor_model(payload: FactorModelPreviewRequest):
+        return invoke(service.preview_factor_model, payload)
+
+    @app.post('/factor-models')
+    def create_factor_model(payload: FactorModelCreateRequest):
+        return invoke(service.create_factor_model, payload)
+
     @app.get('/factors/{factor_id}')
     def factor_detail(factor_id: str):
         return invoke(service.get_factor, factor_id)
@@ -1520,6 +1551,25 @@ def create_app(
     @app.get('/data-snapshots/overview')
     def snapshot_overview():
         return with_bond_snapshot_extension(invoke(service.get_snapshot_overview))
+
+    @app.get('/data-snapshots/provider-registry', response_model=SnapshotProviderRegistryResponseModel)
+    def snapshot_provider_registry():
+        return invoke(service.get_snapshot_provider_registry)
+
+    @app.get('/data-snapshots/provider-attempts', response_model=SnapshotProviderAttemptListResponseModel)
+    def snapshot_provider_attempts(
+        limit: int = Query(default=100, ge=1, le=500),
+        provider_id: str | None = Query(default=None),
+        target_type: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+    ):
+        return invoke(
+            service.get_snapshot_provider_attempts,
+            limit=limit,
+            provider_id=provider_id,
+            target_type=target_type,
+            status=status,
+        )
 
     @app.post('/admin/snapshot-refresh-jobs')
     def refresh_snapshots(payload: SnapshotRefreshRequest | None = None):

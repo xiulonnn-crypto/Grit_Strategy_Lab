@@ -38,6 +38,23 @@ const STATUS_LABELS: Record<string, string> = {
   FAILED: '失败',
 };
 
+const FULL_READY_REPAIR_STATUS_LABELS: Record<string, string> = {
+  READY: 'Full Ready 可验收',
+  NEEDS_REPAIR: '继续修复',
+  WAITING_ON_PROVIDER_COOLDOWN: '等待免费源冷却',
+  NEEDS_FREE_SOURCE_REPAIR: '等待免费源补齐',
+  NEEDS_IDENTITY_ALIAS: '先补历史身份',
+};
+
+const FULL_READY_BUCKET_LABELS: Record<string, string> = {
+  current_core_missing: '当前核心成员',
+  historical_core_missing: '历史生命周期',
+  historical_lifecycle_missing: '历史生命周期',
+  corporate_action_alignment: '公司行为对齐',
+  identity_unresolved: '身份映射',
+  non_core_missing: '非核心缺口',
+};
+
 const SOURCE_LABELS: Record<string, string> = {
   SYSTEM_SEED: '系统默认',
   MANUAL: '人工',
@@ -439,6 +456,12 @@ function sandboxGapBrief(factor: ApiFactorListItem): string {
   return gapText ?? '完整 PIT 窗口尚未通过，当前只能在 Sandbox 环境先跑研究态诊断。';
 }
 
+function factorDisplayStatus(factor: ApiFactorListItem): string {
+  const latestStatus = String(factor.latest_diagnostic_summary?.status ?? '').toUpperCase();
+  if (latestStatus === 'COMPLETED' || latestStatus === 'FAILED') return latestStatus;
+  return factor.diagnostic_status;
+}
+
 function DiagnosticCell({ factor }: { factor: ApiFactorListItem }): JSX.Element {
   const summary = factor.latest_diagnostic_summary;
   const gap = factor.diagnostic_gap_summary ?? {};
@@ -453,9 +476,11 @@ function DiagnosticCell({ factor }: { factor: ApiFactorListItem }): JSX.Element 
     : String(gap.coverage ?? '覆盖: 等待首次诊断');
   return (
     <div className="factor-diagnostic-cell">
-      <span>{rankText}</span>
-      <span>{irText}</span>
-      <span>{coverageText}</span>
+      <div className="factor-diagnostic-cell__metrics">
+        <span className="factor-diagnostic-cell__metric" title={rankText}>{rankText}</span>
+        <span className="factor-diagnostic-cell__metric" title={irText}>{irText}</span>
+        <span className="factor-diagnostic-cell__metric" title={coverageText}>{coverageText}</span>
+      </div>
       <Sparkline points={factor.ic_sparkline} />
     </div>
   );
@@ -1011,6 +1036,7 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
       : pit?.sandbox_diagnostics_enabled
         ? 'SANDBOX_READY'
         : 'BLOCKED';
+  const fullReadyPlan = pit?.full_ready_repair_plan;
   const cards = [
     {
       label: '复权行情',
@@ -1118,6 +1144,130 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
                       {action.label}
                   </button>
                 ))}
+              </div>
+            </section>
+          ) : null}
+          {fullReadyPlan ? (
+            <section className="factor-panel factor-full-ready-plan" data-section="full-ready-repair-plan">
+              <div className="factor-section-title">
+                <span>Full Ready 免费源修复队列</span>
+                <StatusPill status={fullReadyPlan.status === 'READY' ? 'READY' : 'BLOCKED_DATA'} />
+              </div>
+              <p className="factor-muted">{fullReadyPlan.recommendation}</p>
+              <dl className="factor-kv-grid factor-kv-grid--compact">
+                <div>
+                  <dt>目标状态</dt>
+                  <dd>{fullReadyPlan.target_status}</dd>
+                </div>
+                <div>
+                  <dt>剩余 symbol</dt>
+                  <dd>{fullReadyPlan.remaining_symbol_count}</dd>
+                </div>
+                <div>
+                  <dt>队列规模</dt>
+                  <dd>{fullReadyPlan.queue_total_count}</dd>
+                </div>
+                <div>
+                  <dt>免费源冷却</dt>
+                  <dd>
+                    {fullReadyPlan.provider_cooldown_count}
+                    {fullReadyPlan.next_retry_at ? ` · ${formatDateTime(fullReadyPlan.next_retry_at)}` : ''}
+                  </dd>
+                </div>
+              </dl>
+              <div className="factor-chip-row factor-chip-row--muted">
+                {Object.entries(fullReadyPlan.bucket_counts).map(([bucket, count]) => (
+                  <span key={bucket}>{FULL_READY_BUCKET_LABELS[bucket] ?? bucket} {count}</span>
+                ))}
+              </div>
+              {fullReadyPlan.provider_cooldowns.length ? (
+                <div className="factor-repair-cooldowns">
+                  {fullReadyPlan.provider_cooldowns.slice(0, 4).map((item) => (
+                    <span key={`${item.provider}-${item.target}-${item.next_retry_at || 'quota'}`}>
+                      {item.provider} · {item.target} · {item.next_retry_at ? formatDateTime(item.next_retry_at) : 'quota'}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              {fullReadyPlan.queue_sample.length ? (
+                <div className="factor-repair-queue">
+                  {fullReadyPlan.queue_sample.slice(0, 8).map((item) => (
+                    <article className="factor-repair-item" key={`${item.symbol}-${item.bucket}`}>
+                      <div>
+                        <strong>{item.symbol}</strong>
+                        <span>{FULL_READY_BUCKET_LABELS[item.bucket] ?? item.bucket}</span>
+                      </div>
+                      <p>{FULL_READY_REPAIR_STATUS_LABELS[item.status] ?? item.status}</p>
+                      <small>{item.repair_targets.join(' / ')} · alias {item.alias_candidates.slice(0, 3).join(', ')}</small>
+                    </article>
+                  ))}
+                </div>
+              ) : null}
+              <div className="factor-repair-policy">
+                <strong>拒绝伪 Ready 规则</strong>
+                <ul>
+                  {fullReadyPlan.rejection_criteria.slice(0, 3).map((item) => <li key={item}>{item}</li>)}
+                </ul>
+              </div>
+            </section>
+          ) : null}
+          {pit.external_source_readiness ? (
+            <section className="factor-panel factor-full-ready-plan" data-section="external-source-readiness">
+              <div className="factor-section-title">
+                <span>外部补源就绪度</span>
+                <span className="factor-muted">Matrix / Kaggle / Polygon</span>
+              </div>
+              <p className="factor-muted">
+                Kaggle 只作为本地批量价格缓存；Matrix 只确认历史成员骨架；Polygon 只在 key 存在时补关键价格和公司行动证据。
+              </p>
+              <dl className="factor-kv-grid factor-kv-grid--compact">
+                <div>
+                  <dt>Kaggle 凭据</dt>
+                  <dd>{String(pit.external_source_readiness.kaggle_auth_status.credential_status ?? 'missing')}</dd>
+                </div>
+                <div>
+                  <dt>Kaggle cache</dt>
+                  <dd>
+                    {pit.external_source_readiness.kaggle_cache_manifest.status}
+                    {' · '}
+                    {pit.external_source_readiness.kaggle_cache_manifest.manifest_count} manifest
+                  </dd>
+                </div>
+                <div>
+                  <dt>Matrix 骨架</dt>
+                  <dd>
+                    {pit.external_source_readiness.matrix_coverage_status.status}
+                    {' · '}
+                    {pit.external_source_readiness.matrix_coverage_status.member_event_count} events
+                  </dd>
+                </div>
+                <div>
+                  <dt>DuckDB / Parquet</dt>
+                  <dd>
+                    {pit.external_source_readiness.parquet_catalog_status.status}
+                    {' · '}
+                    {pit.external_source_readiness.parquet_catalog_status.parquet_file_count} parquet
+                  </dd>
+                </div>
+                <div>
+                  <dt>Polygon key</dt>
+                  <dd>{String(pit.external_source_readiness.polygon_status.credential_status ?? 'missing')}</dd>
+                </div>
+                <div>
+                  <dt>精修候选</dt>
+                  <dd>{pit.external_source_readiness.critical_polygon_candidates.length} / 50</dd>
+                </div>
+              </dl>
+              <div className="factor-chip-row factor-chip-row--muted">
+                {pit.external_source_readiness.critical_polygon_candidates.slice(0, 10).map((item) => (
+                  <span key={`${item.symbol}-${item.bucket}`}>{item.symbol} · {FULL_READY_BUCKET_LABELS[item.bucket] ?? item.bucket}</span>
+                ))}
+              </div>
+              <div className="factor-repair-policy">
+                <strong>推荐搜索词</strong>
+                <ul>
+                  {pit.external_source_readiness.kaggle_cache_manifest.search_terms.slice(0, 4).map((item) => <li key={item}>{item}</li>)}
+                </ul>
               </div>
             </section>
           ) : null}
@@ -1489,6 +1639,24 @@ export function FactorLibraryPage({
       return next.slice(-2);
     });
   };
+  const librarySummary = useMemo(() => {
+    const allFactors = payload?.items ?? [];
+    const summaryRecord = payload?.summary;
+    const systemSeedCount = recordNumber(summaryRecord, 'system_seed_count') ??
+      allFactors.filter((factor) => factor.source === 'SYSTEM_SEED' || factor.descriptor?.source_prefix === 's').length;
+    const diagnosableCount = allFactors.filter((factor) => (
+      factor.diagnostic_status === 'READY_TO_DIAGNOSE' ||
+      factor.diagnostic_status === 'COMPLETED' ||
+      Boolean(factor.latest_diagnostic_summary?.run_id)
+    )).length;
+    const sandboxReadyCount = allFactors.filter((factor) => factor.diagnostic_status === 'SANDBOX_READY').length;
+    return {
+      systemSeedCount,
+      diagnosableCount,
+      sandboxReadyCount,
+      highCorrelationCount: highCorrelationIds.size,
+    };
+  }, [highCorrelationIds, payload?.items, payload?.summary]);
   return (
     <div className="factor-page" data-page-root="factor-library">
       <PageHero
@@ -1503,6 +1671,28 @@ export function FactorLibraryPage({
           </>
         }
       />
+      <section className="factor-card-grid factor-card-grid--metrics factor-library-summary" aria-label="因子库摘要指标">
+        <article className="factor-mini-card">
+          <span>系统默认因子</span>
+          <strong>{librarySummary.systemSeedCount}</strong>
+          <p>五大因子族七个 seed 作为 SYSTEM_SEED 管理。</p>
+        </article>
+        <article className="factor-mini-card">
+          <span>可诊断</span>
+          <strong>{librarySummary.diagnosableCount}</strong>
+          <p>已通过价格或基本面 PIT 门禁的因子。</p>
+        </article>
+        <article className="factor-mini-card">
+          <span>Sandbox 可跑</span>
+          <strong>{librarySummary.sandboxReadyCount}</strong>
+          <p>可在研究沙盒运行，尚未进入正式验证。</p>
+        </article>
+        <article className="factor-mini-card">
+          <span>高相关提示</span>
+          <strong>{librarySummary.highCorrelationCount}</strong>
+          <p>基于当前相关性视图，仅提示不自动剔除。</p>
+        </article>
+      </section>
       <section className="factor-panel">
         <div className="factor-toolbar">
           <div className="factor-segmented">
@@ -1517,24 +1707,26 @@ export function FactorLibraryPage({
               </button>
             ))}
           </div>
-          <select aria-label="来源前缀" value={sourcePrefix} onChange={(event) => setSourcePrefix(event.target.value)}>
-            <option value="">全部来源</option>
-            <option value="s">s 系统</option>
-            <option value="m">m 人工</option>
-            <option value="a">a 自动</option>
-          </select>
-          <select aria-label="因子类别" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
-            <option value="">全部类别</option>
-            {Object.entries(DESCRIPTOR_CATEGORY_LABELS).map(([value, label]) => (
-              <option key={value} value={value}>{label}</option>
-            ))}
-          </select>
-          <select aria-label="处理算子" value={operatorFilter} onChange={(event) => setOperatorFilter(event.target.value)}>
-            <option value="">全部算子</option>
-            {Object.entries(DESCRIPTOR_OPERATOR_LABELS).map(([value, label]) => (
-              <option key={value} value={value}>{label}</option>
-            ))}
-          </select>
+          <div className="factor-toolbar__filters" aria-label="因子表格筛选项">
+            <select aria-label="来源前缀" value={sourcePrefix} onChange={(event) => setSourcePrefix(event.target.value)}>
+              <option value="">全部来源</option>
+              <option value="s">系统默认</option>
+              <option value="m">人工</option>
+              <option value="a">自动挖掘</option>
+            </select>
+            <select aria-label="因子类别" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
+              <option value="">全部类别</option>
+              {Object.entries(DESCRIPTOR_CATEGORY_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+            <select aria-label="处理算子" value={operatorFilter} onChange={(event) => setOperatorFilter(event.target.value)}>
+              <option value="">全部算子</option>
+              {Object.entries(DESCRIPTOR_OPERATOR_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </div>
           <span className="factor-muted">系统默认 {String(payload?.summary.system_seed_count ?? '0')} 个</span>
         </div>
         {error ? <div className="factor-panel factor-panel--danger">{error}</div> : null}
@@ -1576,7 +1768,7 @@ export function FactorLibraryPage({
                     <code className="factor-id">{factor.descriptor?.canonical_id ?? factor.id}</code>
                   </td>
                   <td>{SOURCE_LABELS[factor.source] ?? factor.source}</td>
-                  <td><StatusPill status={factor.diagnostic_status} /></td>
+                  <td><StatusPill status={factorDisplayStatus(factor)} /></td>
                   <td>
                     <DiagnosticCell factor={factor} />
                   </td>

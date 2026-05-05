@@ -231,11 +231,15 @@ describe('App runtime routes', () => {
   it('renders the PIT cleaning center and factor library routes', async () => {
     await renderApp('#/pit-data');
 
+    expect(await screen.findByText('survivorship bias free')).toBeInTheDocument();
     expect(document.querySelector('[data-page-root="pit-cleaning-center"]')).not.toBeNull();
     expect(await screen.findByRole('heading', { level: 1, name: 'PIT 清洗中心' })).toBeInTheDocument();
     expect(screen.getByText('点时样本池')).toBeInTheDocument();
     expect(screen.getByText(/缺失 416 个 symbol/)).toBeInTheDocument();
     expect(screen.getByText('数据运维指令 (Ops Guidance)')).toBeInTheDocument();
+    expect(screen.getByText('Full Ready 免费源修复队列')).toBeInTheDocument();
+    expect(screen.getByText('拒绝伪 Ready 规则')).toBeInTheDocument();
+    expect(screen.getByText(/免费源对 symbol 全部返回/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '重启 Identity Scraper' }));
     expect(screen.getByRole('dialog', { name: 'Identity Scraper 运维指令' })).toBeInTheDocument();
     expect(screen.getByText('ops://identity-scraper/restart')).toBeInTheDocument();
@@ -278,6 +282,11 @@ describe('App runtime routes', () => {
     expect(screen.getAllByText('s_mom_12m1m_rank').length).toBeGreaterThan(0);
     expect(screen.getAllByText('s_val_ep_ltm_raw').length).toBeGreaterThan(0);
     expect(screen.getAllByText('门禁通过').length).toBeGreaterThanOrEqual(5);
+    const toolbarFilters = document.querySelector('.factor-toolbar__filters');
+    expect(toolbarFilters).not.toBeNull();
+    expect(toolbarFilters?.querySelectorAll('select')).toHaveLength(3);
+    expect(document.querySelector('.factor-diagnostic-cell__metrics')).not.toBeNull();
+    expect(document.querySelector('tbody tr:first-child .factor-pill')?.textContent).toContain('已完成');
     expect(screen.getByRole('button', { name: '最近更新排序' })).toHaveClass('is-active');
     expect(document.querySelector('tbody tr:first-child .factor-link')?.textContent).toContain('252日年化波动率排名');
     expect(screen.getByLabelText('最近诊断指标解释')).toBeInTheDocument();

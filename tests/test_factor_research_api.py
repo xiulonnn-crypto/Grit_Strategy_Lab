@@ -149,13 +149,20 @@ def replace_default_universe_with_current_membership(client, *, as_of: str) -> N
     )
 
 
-def mark_price_snapshot_incomplete(client, *, missing_symbols: list[str]) -> None:
+def mark_price_snapshot_incomplete(
+    client,
+    *,
+    missing_symbols: list[str],
+    provider_summary: dict | None = None,
+) -> None:
     repository = client.app.state.service.market_data_repository
     metadata = {
         "covered_symbol_count": 4,
         "total_symbol_count": 4 + len(missing_symbols),
         "missing_symbols": missing_symbols,
     }
+    if provider_summary is not None:
+        metadata["provider_summary"] = provider_summary
     with repository.connect() as conn:
         conn.execute(
             """
@@ -270,6 +277,8 @@ def test_pit_data_overview_requires_dataset_and_universe_snapshots(tmp_path):
     assert ready_payload["fundamental_snapshot_id"] == "ds-fundamentals"
     assert ready_payload["fundamental_status"] == "READY"
     assert ready_payload["fundamental_coverage"]["missing_fields"] == []
+    assert ready_payload["full_ready_repair_plan"]["status"] == "READY"
+    assert ready_payload["full_ready_repair_plan"]["queue_total_count"] == 0
 
 
 def test_pit_data_overview_exposes_gap_preview_history_and_action_targets(tmp_path):
@@ -301,6 +310,19 @@ def test_pit_data_overview_exposes_gap_preview_history_and_action_targets(tmp_pa
     assert payload["adjustment_trace"]["symbol"] in {"AAPL", "AMZN", "MSFT", "NVDA"}
     assert payload["blocking_items"][0]["code"] == "PRICE_SNAPSHOT_NOT_READY"
     assert payload["blocking_items"][0]["fix_hash"] == "#/snapshots?tab=equity&target=ds-price"
+    repair_plan = payload["full_ready_repair_plan"]
+    assert repair_plan["status"] == "NEEDS_REPAIR"
+    assert repair_plan["target_status"] == "FULL_READY"
+    assert repair_plan["remaining_symbol_count"] == 2
+    assert repair_plan["queue_symbols"] == ["AAPL", "ZZZZ"]
+    assert repair_plan["queue_price_symbols"] == ["AAPL", "ZZZZ"]
+    assert repair_plan["queue_corporate_action_symbols"] == []
+    repair_by_symbol = {item["symbol"]: item for item in repair_plan["queue_sample"]}
+    assert repair_by_symbol["AAPL"]["bucket"] == "current_core_missing"
+    assert repair_by_symbol["AAPL"]["priority"] == 10
+    assert repair_by_symbol["ZZZZ"]["bucket"] == "non_core_missing"
+    assert "yahoo" in repair_by_symbol["ZZZZ"]["price_providers"]
+    assert repair_plan["rejection_criteria"]
 
     mapped_payload = assert_ok(
         client.post(
@@ -318,6 +340,81 @@ def test_pit_data_overview_exposes_gap_preview_history_and_action_targets(tmp_pa
     mapped_buckets = {item["id"]: item for item in mapped_payload["coverage_gap"]["buckets"]}
     assert "ZZZZ" not in mapped_buckets["identity_unresolved"]["sample_symbols"]
     assert mapped_payload["coverage_gap"]["identity_resolved_count"] >= 1
+
+
+def test_pit_full_ready_repair_plan_surfaces_provider_cooldown(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    mark_price_snapshot_incomplete(
+        client,
+        missing_symbols=["ZZZZ"],
+        provider_summary={
+            "providers": {
+                "alpha_vantage": {
+                    "quota_limited": True,
+                    "next_retry_at": "2999-05-05T00:00:00Z",
+                    "reasons": ["free-tier quota or pacing limit exceeded"],
+                }
+            }
+        },
+    )
+
+    payload = assert_ok(client.get("/pit-data"))
+    repair_plan = payload["full_ready_repair_plan"]
+
+    assert repair_plan["status"] == "NEEDS_REPAIR"
+    assert repair_plan["provider_cooldown_count"] == 1
+    assert repair_plan["next_retry_at"] == "2999-05-05T00:00:00Z"
+    assert repair_plan["queue_sample"][0]["status"] == "WAITING_ON_PROVIDER_COOLDOWN"
+    assert repair_plan["waiver_blocks_full_ready"] is False
+
+
+def test_pit_full_ready_repair_plan_ignores_expired_provider_cooldown(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    mark_price_snapshot_incomplete(
+        client,
+        missing_symbols=["ZZZZ"],
+        provider_summary={
+            "providers": {
+                "alpha_vantage": {
+                    "quota_limited": True,
+                    "next_retry_at": "2000-01-01T00:00:00Z",
+                    "reasons": ["expired pacing limit"],
+                }
+            }
+        },
+    )
+
+    payload = assert_ok(client.get("/pit-data"))
+    repair_plan = payload["full_ready_repair_plan"]
+
+    assert repair_plan["provider_cooldown_count"] == 0
+    assert repair_plan["next_retry_at"] is None
+    assert repair_plan["queue_sample"][0]["status"] == "NEEDS_FREE_SOURCE_REPAIR"
+
+
+def test_pit_external_source_readiness_tracks_cache_and_optional_credentials(tmp_path, monkeypatch):
+    monkeypatch.setenv("GRIT_PIT_BULK_CACHE_DIR", str(tmp_path / "pit-bulk-cache"))
+    monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
+    monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
+    monkeypatch.delenv("KAGGLE_KEY", raising=False)
+    monkeypatch.delenv("POLYGON_API_KEY", raising=False)
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    mark_price_snapshot_incomplete(client, missing_symbols=["AAPL", "ZZZZ"])
+
+    payload = assert_ok(client.get("/pit-data"))
+    external = payload["external_source_readiness"]
+
+    assert external["kaggle_auth_status"]["credential_status"] == "missing"
+    assert external["kaggle_cache_manifest"]["status"] == "MISSING"
+    assert external["matrix_coverage_status"]["status"] == "MISSING"
+    assert external["parquet_catalog_status"]["status"] == "MISSING"
+    assert external["polygon_status"]["credential_status"] == "missing"
+    assert "survivorship bias free" in external["source_recommendations"]["search_terms"]
+    assert {item["symbol"] for item in external["critical_polygon_candidates"]} >= {"AAPL"}
+    assert external["remaining_blockers_by_source"]["kaggle_bulk"]["blocked_targets"]["price"] >= 1
 
 
 def test_pit_identity_scraper_restart_resolves_pending_identity_symbols(tmp_path):
@@ -504,14 +601,18 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
     canonical_ids = {
         "s_mom_12m1m_rank",
         "s_val_ep_ltm_raw",
+        "s_val_bp_latest_raw",
         "s_vol_252d_rank",
         "s_size_cur_log",
+        "s_qlty_roe_ltm_raw",
         "s_qlty_fcfy_ttm_raw",
     }
     legacy_ids = {
         "momentum_12m_1m",
         "lowvol_realized_252d",
         "value_ep_ltm",
+        "value_bp_latest",
+        "quality_roe_ltm",
         "quality_fcf_yield",
         "size_log_market_cap",
     }
@@ -523,6 +624,9 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
     for factor_id in canonical_ids:
         assert by_id[factor_id]["diagnostic_status"] == "READY_TO_DIAGNOSE"
         assert by_id[factor_id]["descriptor"]["canonical_id"] == factor_id
+        assert by_id[factor_id]["factor_family"]
+        assert by_id[factor_id]["formula_version"]
+        assert by_id[factor_id]["pit_coverage"]["available_at_gate"] is True
         assert by_id[factor_id]["created_at"]
         assert by_id[factor_id]["updated_at"]
     first_updated_at = by_id["s_mom_12m1m_rank"]["updated_at"]
@@ -542,6 +646,8 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
     legacy_detail = assert_ok(client.get("/factors/value_ep_ltm"))
     assert legacy_detail["id"] == "s_val_ep_ltm_raw"
     assert legacy_detail["name"] == "滚动市盈率倒数 (LTM)"
+    assert assert_ok(client.get("/factors/value_bp_latest"))["id"] == "s_val_bp_latest_raw"
+    assert assert_ok(client.get("/factors/quality_roe_ltm"))["id"] == "s_qlty_roe_ltm_raw"
 
 
 def test_manual_factor_validation_and_pit_bound_diagnostics(tmp_path):
@@ -651,8 +757,10 @@ def test_factor_sandbox_diagnostic_runs_with_limited_pit_without_verifying(tmp_p
     for factor_id in {
         "s_mom_12m1m_rank",
         "s_val_ep_ltm_raw",
+        "s_val_bp_latest_raw",
         "s_vol_252d_rank",
         "s_size_cur_log",
+        "s_qlty_roe_ltm_raw",
         "s_qlty_fcfy_ttm_raw",
     }:
         assert by_id[factor_id]["diagnostic_status"] == "SANDBOX_READY"
@@ -737,6 +845,95 @@ def test_manual_fundamental_factor_uses_seeded_pit_snapshot(tmp_path):
     assert result["summary"]["factor_id"] == "m_val_ep_ltm_raw"
     assert result["summary"]["fundamental_snapshot_id"] == "ds-fundamentals"
     assert result["summary"]["descriptor"]["canonical_id"] == "m_val_ep_ltm_raw"
+
+
+def test_fundamental_pit_loader_filters_on_available_at_not_period_end(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    repository = client.app.state.service.market_data_repository
+    repository.replace_fundamental_snapshot(
+        {
+            "id": "ds-fundamentals",
+            "name": "基础面 PIT 可得日测试",
+            "status": "READY",
+            "as_of": "2021-12-31",
+            "freshness_label": "单元测试 available_at",
+            "row_count": 2,
+            "source": "unit_test",
+            "fallback_source": "none",
+            "metadata": {
+                "covered_symbol_count": 1,
+                "total_symbol_count": 1,
+                "available_fields": [
+                    "ltm_earnings",
+                    "book_value_equity",
+                    "shares_outstanding",
+                    "market_cap",
+                    "enterprise_value",
+                    "operating_cash_flow_ltm",
+                    "capex_ltm",
+                ],
+            },
+        },
+        fundamental_points=[
+            {
+                "symbol": "AAPL",
+                "date": "2020-12-31",
+                "period_end_date": "2020-12-31",
+                "available_at": "2021-03-01",
+                "ltm_earnings": 10.0,
+                "book_value_equity": 50.0,
+                "shares_outstanding": 1_000_000.0,
+                "market_cap": 2_000_000.0,
+                "enterprise_value": 2_200_000.0,
+                "operating_cash_flow_ltm": 12.0,
+                "capex_ltm": 2.0,
+            },
+            {
+                "symbol": "AAPL",
+                "date": "2020-12-31",
+                "period_end_date": "2020-12-31",
+                "available_at": "2021-06-01",
+                "ltm_earnings": 999.0,
+                "book_value_equity": 999.0,
+                "shares_outstanding": 1_000_000.0,
+                "market_cap": 2_000_000.0,
+                "enterprise_value": 2_200_000.0,
+                "operating_cash_flow_ltm": 999.0,
+                "capex_ltm": 2.0,
+            },
+        ],
+        fundamental_coverage=[
+            {
+                "symbol": "AAPL",
+                "start_date": "2021-03-01",
+                "end_date": "2021-12-31",
+                "observation_count": 2,
+                "source": "unit_test",
+                "fallback_source": "none",
+                "metadata": {"available_at_gate": True},
+            }
+        ],
+    )
+
+    april_rows = repository.load_dataset_fundamental_points(
+        "ds-fundamentals",
+        ["AAPL"],
+        start_date="2020-01-01",
+        end_date="2021-04-01",
+        as_of_date="2021-04-01",
+    )
+    july_rows = repository.load_dataset_fundamental_points(
+        "ds-fundamentals",
+        ["AAPL"],
+        start_date="2020-01-01",
+        end_date="2021-07-01",
+        as_of_date="2021-07-01",
+    )
+
+    assert [row["ltm_earnings"] for row in april_rows["AAPL"]] == [10.0]
+    assert [row["available_at"] for row in april_rows["AAPL"]] == ["2021-03-01"]
+    assert [row["ltm_earnings"] for row in july_rows["AAPL"]] == [10.0, 999.0]
 
 
 def test_factor_diagnostics_reject_current_universe_snapshot_binding(tmp_path):

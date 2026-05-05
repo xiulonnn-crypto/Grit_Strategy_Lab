@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import asyncio
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 
@@ -156,11 +157,12 @@ def _records_from_tabular(candidate: Any) -> list[dict[str, Any]]:
 def _extract_obb_records(payload: Any) -> list[dict[str, Any]]:
     if payload is None:
         return []
-    results = getattr(payload, "results", None)
-    if results is not None:
-        records = _records_from_tabular(results)
-        if records:
-            return records
+    for result_attr in ("results", "result"):
+        results = getattr(payload, result_attr, None)
+        if results is not None:
+            records = _records_from_tabular(results)
+            if records:
+                return records
     to_df = getattr(payload, "to_df", None)
     if callable(to_df):
         try:
@@ -479,24 +481,39 @@ REAL_WIDE_FIELDS = {
 
 
 def _normalize_tenor(value: Any) -> str:
-    text = str(value or "").strip().upper().replace(" ", "")
+    text = str(value or "").strip().upper().replace(" ", "").replace("_", "").replace("-", "")
     if not text:
         return ""
     replacements = {
+        "YEAR2": "2Y",
         "2YEAR": "2Y",
         "2YEARS": "2Y",
         "2YR": "2Y",
+        "YEAR5": "5Y",
         "5YEAR": "5Y",
         "5YEARS": "5Y",
         "5YR": "5Y",
+        "YEAR10": "10Y",
         "10YEAR": "10Y",
         "10YEARS": "10Y",
         "10YR": "10Y",
+        "YEAR30": "30Y",
         "30YEAR": "30Y",
         "30YEARS": "30Y",
         "30YR": "30Y",
     }
     return replacements.get(text, text)
+
+
+def _coerce_curve_yield_pct(value: Any) -> float | None:
+    rate = _coerce_float(value, None)
+    if rate is None:
+        return None
+    # OpenBB standard yield-curve models return decimal rates (0.044),
+    # while older provider payloads and our tests use percentage points (4.4).
+    if 0 < abs(rate) < 1:
+        return rate * 100.0
+    return rate
 
 
 def _curve_points_from_records(records: Sequence[Mapping[str, Any]], *, real: bool) -> dict[str, dict[str, Any]]:
@@ -505,12 +522,12 @@ def _curve_points_from_records(records: Sequence[Mapping[str, Any]], *, real: bo
     for row in records:
         snapshot_date = _coerce_date(_pick_value(row, "date", "Date", "time", "timestamp")) or date.today().isoformat()
         for instrument_id, field_names in fields.items():
-            ytm = _coerce_float(_pick_value(row, *field_names), None)
+            ytm = _coerce_curve_yield_pct(_pick_value(row, *field_names))
             if ytm is None:
                 continue
             points[instrument_id] = {"snapshot_date": snapshot_date, "ytm_pct": ytm, "raw_fields": dict(row)}
         tenor = _normalize_tenor(_pick_value(row, "tenor", "maturity", "maturity_label", "name"))
-        ytm = _coerce_float(_pick_value(row, "rate", "value", "yield", "yield_rate", "close"), None)
+        ytm = _coerce_curve_yield_pct(_pick_value(row, "rate", "value", "yield", "yield_rate", "close"))
         if not tenor or ytm is None:
             continue
         instrument_map = REAL_TENOR_TO_INSTRUMENT if real else TENOR_TO_INSTRUMENT
@@ -520,6 +537,49 @@ def _curve_points_from_records(records: Sequence[Mapping[str, Any]], *, real: bo
         instrument_id = mapped[0]
         points[instrument_id] = {"snapshot_date": snapshot_date, "ytm_pct": ytm, "raw_fields": dict(row)}
     return points
+
+
+def _is_openbb_fixedincome_generated_route_mismatch(exc: ImportError) -> bool:
+    message = str(exc or "")
+    return "openbb_core.app.provider_interface" in message and (
+        "OBBject_BondIndices" in message or "OBBject_MortgageIndices" in message
+    )
+
+
+def _run_openbb_fetcher(fetcher: Any, *, params: Mapping[str, Any], credentials: Mapping[str, str] | None) -> Any:
+    return asyncio.run(fetcher.fetch_data(params=dict(params), credentials=dict(credentials or {})))
+
+
+def _fetch_openbb_yield_curve_records_direct(
+    *,
+    openbb_provider: str,
+    as_of_date: date,
+    real: bool,
+) -> list[dict[str, Any]]:
+    if openbb_provider == "federal_reserve":
+        if real:
+            return []
+        from openbb_federal_reserve.models.yield_curve import FederalReserveYieldCurveFetcher
+
+        payload = _run_openbb_fetcher(
+            FederalReserveYieldCurveFetcher,
+            params={"date": as_of_date.isoformat()},
+            credentials=None,
+        )
+        return _extract_obb_records(payload)
+    if openbb_provider == "fred":
+        from openbb_fred.models.yield_curve import FREDYieldCurveFetcher
+
+        payload = _run_openbb_fetcher(
+            FREDYieldCurveFetcher,
+            params={
+                "date": as_of_date.isoformat(),
+                "yield_curve_type": "real" if real else "nominal",
+            },
+            credentials={"fred_api_key": str(os.getenv("FRED_API_KEY") or "")},
+        )
+        return _extract_obb_records(payload)
+    raise ImportError(f"OpenBB direct yield-curve fallback is not available for provider {openbb_provider}.")
 
 
 def _provider_source(openbb_provider: str) -> str:
@@ -633,21 +693,31 @@ class OpenBBBondFixedIncomeProvider(OpenBBProviderBase):
         )
 
     def _fetch_curve_points(self, *, openbb_provider: str, as_of_date: date, real: bool) -> dict[str, dict[str, Any]]:
-        obb = self._obb()
-        yield_curve = obb.fixedincome.government.yield_curve
-        kwargs = {
-            "date": as_of_date.isoformat(),
-            "provider": openbb_provider,
-            "yield_curve_type": "real" if real else "nominal",
-        }
         try:
-            payload = yield_curve(**kwargs)
-        except TypeError:
+            obb = self._obb()
+            yield_curve = obb.fixedincome.government.yield_curve
+            kwargs = {
+                "date": as_of_date.isoformat(),
+                "provider": openbb_provider,
+                "yield_curve_type": "real" if real else "nominal",
+            }
             try:
-                payload = yield_curve(provider=openbb_provider, yield_curve_type="real" if real else "nominal")
+                payload = yield_curve(**kwargs)
             except TypeError:
-                payload = yield_curve(provider=openbb_provider)
-        return _curve_points_from_records(_extract_obb_records(payload), real=real)
+                try:
+                    payload = yield_curve(provider=openbb_provider, yield_curve_type="real" if real else "nominal")
+                except TypeError:
+                    payload = yield_curve(provider=openbb_provider)
+            records = _extract_obb_records(payload)
+        except ImportError as exc:
+            if not _is_openbb_fixedincome_generated_route_mismatch(exc):
+                raise
+            records = _fetch_openbb_yield_curve_records_direct(
+                openbb_provider=openbb_provider,
+                as_of_date=as_of_date,
+                real=real,
+            )
+        return _curve_points_from_records(records, real=real)
 
     def fetch_snapshots(self, *, as_of_date: date | None = None) -> dict[str, Any]:
         as_of = as_of_date or date.today()

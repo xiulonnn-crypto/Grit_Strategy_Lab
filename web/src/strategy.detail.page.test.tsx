@@ -172,6 +172,37 @@ afterEach(() => {
 });
 
 describe('StrategyDetailPage', () => {
+  it('renders multi-factor current parameters with canonical Chinese factor names', async () => {
+    fakeApi.getStrategyDetail.mockResolvedValue({
+      ...strategy,
+      id: 'strat-mf-001',
+      name: '多因子策略',
+      strategy_type: 'MULTI_FACTOR',
+      parameters: {
+        strategy_type: 'MULTI_FACTOR',
+        factor_ids: ['s_mom_12m1m_rank', 's_val_ep_ltm_raw'],
+        weights: {
+          s_mom_12m1m_rank: 0.6,
+          s_val_ep_ltm_raw: 0.4,
+        },
+        directions: {
+          s_mom_12m1m_rank: 'HIGH_IS_BETTER',
+          s_val_ep_ltm_raw: 'HIGH_IS_BETTER',
+        },
+        scoring_method: 'zscore_weighted',
+      },
+    } satisfies ApiStrategyDetail);
+    ({ StrategyDetailPage } = await import('./pages/strategy-detail-page'));
+
+    render(<StrategyDetailPage strategyId="strat-mf-001" />);
+
+    expect(await screen.findByText('多因子策略')).toBeInTheDocument();
+    expect(screen.getAllByText(/12-1月截面动量排名/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/滚动市盈率倒数 \(LTM\)/).length).toBeGreaterThan(0);
+    expect(document.body.textContent).not.toContain('s_mom_12m1m_rank 60%');
+    expect(document.body.textContent).not.toContain('s_val_ep_ltm_raw 40%');
+  });
+
   it('renders the detail layout, opens a revision session, shows recent runs on a timeline, and opens the latest optimization result', async () => {
     ({ StrategyDetailPage } = await import('./pages/strategy-detail-page'));
     const { container } = render(<StrategyDetailPage strategyId="strat-001" />);

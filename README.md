@@ -62,4 +62,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\codex-smoke.ps1
 - [scripts/run-recovery-tests.ps1](./scripts/run-recovery-tests.ps1)：前端测试恢复路径
 - [scripts/bootstrap-python-runtime.ps1](./scripts/bootstrap-python-runtime.ps1)：修复仓库本地 Python 运行时
 - [scripts/validate-quickstart-runtime.ps1](./scripts/validate-quickstart-runtime.ps1)：检查 QuickStart 运行环境
+- [scripts/codex-pit-external-preflight.ps1](./scripts/codex-pit-external-preflight.ps1)：PIT 外部补源预检，只输出凭据 present/missing 状态
+- [scripts/codex-pit-kaggle-search.ps1](./scripts/codex-pit-kaggle-search.ps1)：按固定关键词搜索 Kaggle 候选数据集
+- [scripts/codex-pit-kaggle-download.ps1](./scripts/codex-pit-kaggle-download.ps1)：下载并登记 Kaggle 批量行情 manifest
+- [scripts/codex-pit-bulk-normalize.ps1](./scripts/codex-pit-bulk-normalize.ps1)：用 DuckDB 流式归一化 CSV/TXT 到本地 catalog/Parquet
+- [scripts/codex-pit-diff-repair.ps1](./scripts/codex-pit-diff-repair.ps1)：只按 PIT repair queue 做差异导入与复权冲突检查
 - [scripts/push-to-github.ps1](./scripts/push-to-github.ps1)：GitHub 推送辅助脚本

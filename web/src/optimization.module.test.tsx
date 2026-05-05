@@ -1260,6 +1260,24 @@ function createOptimizationTestApi(): DemoApi {
     async previewFactorDiagnostics(): Promise<never> {
       throw new Error("因子测试接口未接入。");
     },
+    async listFactorMiningJobs(): Promise<never> {
+      throw new Error("因子测试接口未接入。");
+    },
+    async createFactorMiningJob(): Promise<never> {
+      throw new Error("因子测试接口未接入。");
+    },
+    async getFactorMiningJob(): Promise<never> {
+      throw new Error("因子测试接口未接入。");
+    },
+    async cancelFactorMiningJob(): Promise<never> {
+      throw new Error("因子测试接口未接入。");
+    },
+    async previewFactorModel(): Promise<never> {
+      throw new Error("因子测试接口未接入。");
+    },
+    async createFactorModel(): Promise<never> {
+      throw new Error("因子测试接口未接入。");
+    },
   };
 }
 
@@ -4139,6 +4157,78 @@ describe("optimization module flow", () => {
       expect(stepInput.disabled).toBe(true);
     });
     expect(Number(budgetValue!.textContent)).toBeLessThan(expandedBudget);
+  });
+
+  it("applies the default 100% sum constraint to multi-factor weights", async () => {
+    const api = createOptimizationTestApi();
+    const multiFactorStrategy: ApiStrategyDetail = {
+      ...createStrategyFixture(),
+      id: "strat-mf-001",
+      name: "多因子策略",
+      strategy_type: "MULTI_FACTOR",
+      universe_name: "SP500",
+      rebalance_frequency: "monthly",
+      parameters: {
+        strategy_type: "MULTI_FACTOR",
+        factor_ids: ["s_mom_12m1m_rank", "s_val_ep_ltm_raw"],
+        weights: {
+          s_mom_12m1m_rank: 0.6,
+          s_val_ep_ltm_raw: 0.4,
+        },
+        neutralization: { enabled: false, method: "industry" },
+        scoring_method: "zscore_weighted",
+        rebalance_frequency: "monthly",
+      },
+      multi_factor_profile: {
+        components: [
+          {
+            factor_id: "s_mom_12m1m_rank",
+            name: "s_mom_12m1m_rank",
+            weight: 0.6,
+            normalized_weight: 0.6,
+          },
+          {
+            factor_id: "s_val_ep_ltm_raw",
+            name: "s_val_ep_ltm_raw",
+            weight: 0.4,
+            normalized_weight: 0.4,
+          },
+        ],
+        neutralization: {
+          enabled: false,
+          method: "industry",
+          execution_status: "DISABLED",
+        },
+        scoring_method: "zscore_weighted",
+        rebalance_frequency: "monthly",
+      },
+    };
+    api.listStrategies = async () => [structuredClone(multiFactorStrategy)];
+    api.getStrategyDetail = async (id: string) => {
+      if (id !== multiFactorStrategy.id) {
+        throw new Error(`Strategy ${id} not found`);
+      }
+      return structuredClone(multiFactorStrategy);
+    };
+    currentApi = api;
+
+    const container = await renderApp(
+      "#/optimization-jobs/new/config?strategy_id=strat-mf-001",
+    );
+
+    await waitFor(() =>
+      expect(container.querySelector(".optimization-config-grid")).not.toBeNull(),
+    );
+    expect(container.textContent).toContain("因子权重 · 12-1月截面动量排名");
+    expect(container.textContent).toContain("因子权重 · 滚动市盈率倒数 (LTM)");
+    expect(container.textContent).toContain("默认约束：权重合计 100%");
+
+    const budgetCard = Array.from(
+      container.querySelectorAll(".optimization-config-summary-card"),
+    ).find((card) => card.textContent?.includes("有效组合")) as
+      | HTMLElement
+      | undefined;
+    expect(budgetCard?.querySelector("strong")?.textContent).toBe("5");
   });
 
   it("keeps search range inputs editable while the user clears or types a minus sign", async () => {

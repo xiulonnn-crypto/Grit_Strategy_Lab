@@ -15,6 +15,12 @@ import {
   type ApiFactorDiagnosticRunResponse,
   type ApiFactorListItem,
   type ApiFactorListResponse,
+  type ApiFactorMiningJob,
+  type ApiFactorMiningJobCreatePayload,
+  type ApiFactorMiningJobListResponse,
+  type ApiFactorModelCreatePayload,
+  type ApiFactorModelPreviewPayload,
+  type ApiFactorModelPreviewResponse,
   type ApiOptimizationCandidate,
   type ApiOptimizationJobDetail,
   type ApiOptimizationJobListItem,
@@ -588,9 +594,19 @@ function createFactorDiagnosticSummary(factorId: string): ApiFactorListItem['lat
 const demoFactorUpdatedAt: Record<string, string> = {
   s_vol_252d_rank: '2026-05-04T09:40:00Z',
   s_mom_12m1m_rank: '2026-05-03T16:15:00Z',
+  s_val_bp_latest_raw: '2026-05-03T09:05:00Z',
   s_val_ep_ltm_raw: '2026-05-02T11:30:00Z',
+  s_qlty_roe_ltm_raw: '2026-05-02T08:35:00Z',
   s_qlty_fcfy_ttm_raw: '2026-05-01T15:05:00Z',
   s_size_cur_log: '2026-04-30T10:20:00Z',
+};
+
+const factorFamilyLabels: Record<string, string> = {
+  val: '估值',
+  mom: '动量',
+  qlty: '质量',
+  vol: '低波',
+  size: '规模',
 };
 
 function createFactorListItems(): ApiFactorListItem[] {
@@ -632,6 +648,24 @@ function createFactorListItems(): ApiFactorListItem[] {
       last_diagnostic_run_id: 'fdiag-s_val_ep_ltm_raw',
     },
     {
+      id: 's_val_bp_latest_raw',
+      name: '最新账面市值比',
+      market: 'US',
+      universe: 'SP500',
+      source: 'SYSTEM_SEED',
+      lifecycle_status: 'VERIFIED',
+      diagnostic_status: 'READY_TO_DIAGNOSE',
+      direction: 'HIGH_IS_BETTER',
+      frequency: 'DAILY',
+      expression: 'BookValueEquity / MarketCap',
+      descriptor: { source_prefix: 's', category: 'val', metric: 'bp', window: 'latest', operator: 'raw', schema_version: 'factor_descriptor_v1', canonical_id: 's_val_bp_latest_raw' },
+      tags: ['默认因子', '估值', '基础面可诊断'],
+      data_requirements: ['book_value_equity', 'market_cap', 'shares_outstanding'],
+      institutional_note: '账面市值比适合补充盈利口径，需结合行业资产结构观察。',
+      latest_diagnostic_summary: createFactorDiagnosticSummary('s_val_bp_latest_raw'),
+      last_diagnostic_run_id: 'fdiag-s_val_bp_latest_raw',
+    },
+    {
       id: 's_vol_252d_rank',
       name: '252日年化波动率排名',
       market: 'US',
@@ -650,6 +684,24 @@ function createFactorListItems(): ApiFactorListItem[] {
       last_diagnostic_run_id: 'fdiag-s_vol_252d_rank',
     },
     {
+      id: 's_qlty_roe_ltm_raw',
+      name: 'LTM 净资产收益率',
+      market: 'US',
+      universe: 'SP500',
+      source: 'SYSTEM_SEED',
+      lifecycle_status: 'VERIFIED',
+      diagnostic_status: 'READY_TO_DIAGNOSE',
+      direction: 'HIGH_IS_BETTER',
+      frequency: 'DAILY',
+      expression: 'LtmEarnings / BookValueEquity',
+      descriptor: { source_prefix: 's', category: 'qlty', metric: 'roe', window: 'ltm', operator: 'raw', schema_version: 'factor_descriptor_v1', canonical_id: 's_qlty_roe_ltm_raw' },
+      tags: ['默认因子', '质量', '基础面可诊断'],
+      data_requirements: ['ltm_earnings', 'book_value_equity'],
+      institutional_note: 'ROE 用于衡量资本效率，需避免未来财报或当前快照穿越。',
+      latest_diagnostic_summary: createFactorDiagnosticSummary('s_qlty_roe_ltm_raw'),
+      last_diagnostic_run_id: 'fdiag-s_qlty_roe_ltm_raw',
+    },
+    {
       id: 's_size_cur_log',
       name: '即时对数总市值',
       market: 'US',
@@ -662,7 +714,7 @@ function createFactorListItems(): ApiFactorListItem[] {
       expression: 'Log(MarketCap)',
       descriptor: { source_prefix: 's', category: 'size', metric: '', window: 'cur', operator: 'log', schema_version: 'factor_descriptor_v1', canonical_id: 's_size_cur_log' },
       tags: ['默认因子', '规模', '基础面可诊断'],
-      data_requirements: ['market_cap', 'total_shares'],
+      data_requirements: ['market_cap', 'shares_outstanding'],
       institutional_note: '小市值溢价需要同时关注流动性枯竭和成交容量风险。',
       latest_diagnostic_summary: createFactorDiagnosticSummary('s_size_cur_log'),
       last_diagnostic_run_id: 'fdiag-s_size_cur_log',
@@ -677,10 +729,10 @@ function createFactorListItems(): ApiFactorListItem[] {
       diagnostic_status: 'READY_TO_DIAGNOSE',
       direction: 'HIGH_IS_BETTER',
       frequency: 'DAILY',
-      expression: '(OperatingCashFlow - Capex) / EnterpriseValue',
+      expression: '(OperatingCashFlowLTM - CapexLTM) / EnterpriseValue',
       descriptor: { source_prefix: 's', category: 'qlty', metric: 'fcfy', window: 'ttm', operator: 'raw', schema_version: 'factor_descriptor_v1', canonical_id: 's_qlty_fcfy_ttm_raw' },
       tags: ['默认因子', '质量', '基础面可诊断'],
-      data_requirements: ['operating_cash_flow', 'capex', 'enterprise_value'],
+      data_requirements: ['operating_cash_flow_ltm', 'capex_ltm', 'enterprise_value'],
       institutional_note: '质量因子偏防守，在震荡或下跌市场通常提供下行保护。',
       latest_diagnostic_summary: createFactorDiagnosticSummary('s_qlty_fcfy_ttm_raw'),
       last_diagnostic_run_id: 'fdiag-s_qlty_fcfy_ttm_raw',
@@ -712,6 +764,14 @@ function createFactorListItems(): ApiFactorListItem[] {
           };
     return {
       ...factor,
+      factor_family: factorFamilyLabels[factor.descriptor?.category ?? ''] ?? '自定义',
+      formula_version: 'seed-v2',
+      pit_coverage: {
+        required_fields: factor.data_requirements,
+        missing_fields: [],
+        available_at_gate: true,
+      },
+      coverage_loss: 0,
       created_at: '2026-04-30T10:00:00Z',
       updated_at: demoFactorUpdatedAt[factor.id] ?? '2026-04-30T10:00:00Z',
       readiness_blockers: blocked
@@ -736,6 +796,8 @@ function createFactorDetail(id: string): ApiFactorDetail {
   const aliases: Record<string, string> = {
     momentum_12m_1m: 's_mom_12m1m_rank',
     value_ep_ltm: 's_val_ep_ltm_raw',
+    value_bp_latest: 's_val_bp_latest_raw',
+    quality_roe_ltm: 's_qlty_roe_ltm_raw',
     lowvol_realized_252d: 's_vol_252d_rank',
     size_log_market_cap: 's_size_cur_log',
     quality_fcf_yield: 's_qlty_fcfy_ttm_raw',
@@ -773,6 +835,155 @@ function createFactorDetail(id: string): ApiFactorDetail {
         })),
     },
   };
+}
+
+function createDemoMiningJob(
+  payload: ApiFactorMiningJobCreatePayload,
+  status: ApiFactorMiningJob['status'] = 'COMPLETED',
+): ApiFactorMiningJob {
+  const evaluated = status === 'CANCELLED' ? Math.min(240, payload.candidate_count) : payload.candidate_count;
+  const failed = status === 'CANCELLED' ? 2 : Math.max(1, Math.floor(payload.candidate_count * 0.01));
+  return {
+    id: status === 'CANCELLED' ? 'fm-demo-cancelled' : 'fm-demo-1000',
+    status,
+    request: payload,
+    progress: {
+      total_candidates: payload.candidate_count,
+      evaluated_candidates: evaluated,
+      failed_candidates: failed,
+      throughput_per_second: 48.5,
+      percent: payload.candidate_count > 0 ? Number(((evaluated / payload.candidate_count) * 100).toFixed(1)) : 0,
+    },
+    top_candidates: [
+      {
+        id: 'cand-demo-rank-001',
+        expression: 'ZScore(Winsorize(Return(Close, 21)))',
+        score: 0.061,
+        rank_ic: 0.061,
+        turnover: 0.32,
+        coverage: 0.96,
+        depth: 3,
+        risk_flags: ['候选不会直接进入正式因子库'],
+      },
+      {
+        id: 'cand-demo-rank-002',
+        expression: 'Rank(Log(MarketCap)) * -1',
+        score: 0.048,
+        rank_ic: 0.048,
+        turnover: 0.21,
+        coverage: 0.91,
+        depth: 2,
+        risk_flags: ['规模因子需复核容量约束'],
+      },
+      {
+        id: 'cand-demo-rank-003',
+        expression: 'ZScore(Std(Return(Close, 1), 63)) * -1',
+        score: 0.039,
+        rank_ic: 0.039,
+        turnover: 0.28,
+        coverage: 0.98,
+        depth: 4,
+        risk_flags: [],
+      },
+    ],
+    failed_samples: [
+      { expression: 'Return(Close, -5)', reason: '拒绝未来引用 t+N。' },
+      { expression: 'eval(Close)', reason: '拒绝未授权执行算子。' },
+    ],
+    created_at: nowIso(),
+    updated_at: nowIso(),
+    completed_at: status === 'COMPLETED' || status === 'CANCELLED' ? nowIso() : null,
+  };
+}
+
+function createDemoFactorModelPreview(payload: ApiFactorModelPreviewPayload): ApiFactorModelPreviewResponse {
+  const totalWeight = payload.components.reduce((total, item) => total + Math.abs(Number(item.weight ?? 0)), 0) || 1;
+  const neutralizationBlocked = payload.neutralization.enabled;
+  return {
+    status: neutralizationBlocked ? 'BLOCKED' : 'READY',
+    normalized_weights: payload.components.map((component) => ({
+      ...component,
+      normalized_weight: Number((Math.abs(component.weight) / totalWeight).toFixed(4)),
+    })),
+    coverage: {
+      estimated_factor_coverage: 0.914,
+      min_factor_coverage: 0.846,
+      pit_snapshot_refs: {
+        dataset_snapshot_id: 'ds-price',
+        fundamental_snapshot_id: 'ds-fundamentals',
+        universe_snapshot_id: 'un-sp500',
+      },
+    },
+    score_preview: [
+      { symbol: 'MSFT', score: 1.42, rank: 1 },
+      { symbol: 'AAPL', score: 1.16, rank: 2 },
+      { symbol: 'NVDA', score: 0.94, rank: 3 },
+      { symbol: 'JNJ', score: -0.62, rank: 497 },
+    ],
+    estimated_turnover: 0.36,
+    pit_blockers: [],
+    neutralization_status: neutralizationBlocked
+      ? {
+          enabled: true,
+          method: payload.neutralization.method,
+          status: 'NOT_EXECUTED_MISSING_INDUSTRY_PIT',
+          blockers: ['MISSING_INDUSTRY_PIT'],
+        }
+      : {
+          enabled: false,
+          method: payload.neutralization.method,
+          status: 'DISABLED',
+          blockers: [],
+        },
+    warnings: neutralizationBlocked ? ['行业 PIT 覆盖缺失，第一步只返回 blocker，不展示已执行。'] : [],
+  };
+}
+
+function createDemoFactorModelStrategy(payload: ApiFactorModelCreatePayload): ApiStrategyDetail {
+  const preview = createDemoFactorModelPreview(payload);
+  if (preview.status === 'BLOCKED') {
+    throw new ApiError({
+      status: 400,
+      code: 'factor_model_blocked',
+      message: '多因子模型存在 PIT 或行业中性化 blocker，不能物化为策略。',
+    });
+  }
+  const id = nextId('strat-mf');
+  const parameterVersionId = `${id}-v1`;
+  const parameters: Record<string, ParameterValue> = {
+    factor_ids: payload.components.map((component) => component.factor_id),
+    weights: Object.fromEntries(payload.components.map((component) => [component.factor_id, component.weight])),
+    directions: Object.fromEntries(payload.components.map((component) => [component.factor_id, component.direction])),
+    neutralization: payload.neutralization,
+    scoring_method: payload.scoring_method,
+    rebalance_frequency: payload.rebalance_frequency,
+    pit_snapshot_refs: preview.coverage,
+  };
+  const strategy = createStrategy({
+    id,
+    name: payload.name ?? '多因子核心模型',
+    description: payload.description ?? '由因子库多因子构建器创建的可回测策略。',
+    strategy_type: 'MULTI_FACTOR',
+    universe_name: payload.universe,
+    rebalance_frequency: payload.rebalance_frequency,
+    latest_run_id: null,
+    latest_optimization_job_id: null,
+    current_parameter_version: 1,
+    current_parameter_version_id: parameterVersionId,
+    parameters,
+    parameter_history: [
+      {
+        version_number: 1,
+        parameter_version_id: parameterVersionId,
+        revision: 1,
+        created_at: nowIso(),
+        comment: '多因子模型创建。',
+        parameters,
+      },
+    ],
+  });
+  state.strategies.unshift(strategy);
+  return strategy;
 }
 
 let state = createInitialState();
@@ -1409,5 +1620,72 @@ export const demoApi: DemoApi = {
       risk_flags: [],
       message: '5 年样本内 IC 预览只用于缩短试错，不替代正式 PIT 诊断。',
     });
+  },
+
+  async listFactorMiningJobs(): Promise<ApiFactorMiningJobListResponse> {
+    const job = createDemoMiningJob({
+      universe: 'SP500',
+      start_date: '2020-01-01',
+      end_date: '2025-12-31',
+      operators: ['Return', 'Std', 'Rank', 'ZScore', 'Winsorize'],
+      candidate_count: 1000,
+      random_seed: 42,
+      min_rank_ic: 0.02,
+      max_depth: 4,
+    });
+    return clone({
+      items: [job],
+      summary: {
+        total: 1,
+        completed_count: 1,
+        running_count: 0,
+        total_candidates: job.progress.total_candidates,
+      },
+    });
+  },
+
+  async createFactorMiningJob(payload: ApiFactorMiningJobCreatePayload): Promise<ApiFactorMiningJob> {
+    return clone(createDemoMiningJob(payload));
+  },
+
+  async getFactorMiningJob(id: string): Promise<ApiFactorMiningJob> {
+    const payload: ApiFactorMiningJobCreatePayload = {
+      universe: 'SP500',
+      start_date: '2020-01-01',
+      end_date: '2025-12-31',
+      operators: ['Return', 'Std', 'Rank', 'ZScore', 'Winsorize'],
+      candidate_count: 1000,
+      random_seed: 42,
+      min_rank_ic: 0.02,
+      max_depth: 4,
+    };
+    return clone({ ...createDemoMiningJob(payload), id });
+  },
+
+  async cancelFactorMiningJob(id: string): Promise<ApiFactorMiningJob> {
+    return clone({
+      ...createDemoMiningJob(
+        {
+          universe: 'SP500',
+          start_date: '2020-01-01',
+          end_date: '2025-12-31',
+          operators: ['Return', 'Std', 'Rank'],
+          candidate_count: 1000,
+          random_seed: 42,
+          min_rank_ic: 0.02,
+          max_depth: 4,
+        },
+        'CANCELLED',
+      ),
+      id,
+    });
+  },
+
+  async previewFactorModel(payload: ApiFactorModelPreviewPayload): Promise<ApiFactorModelPreviewResponse> {
+    return clone(createDemoFactorModelPreview(payload));
+  },
+
+  async createFactorModel(payload: ApiFactorModelCreatePayload): Promise<ApiStrategyDetail> {
+    return clone(createDemoFactorModelStrategy(payload));
   },
 };

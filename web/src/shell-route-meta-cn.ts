@@ -374,7 +374,15 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         navKey: 'factor-sandbox',
         eyebrow: TEXT.factor,
         title: TEXT.factorSandbox,
-        description: '自动挖掘能力将在第二期接入，本期先保留导航入口。',
+        description: '批量生成候选表达式，观察进度、失败样本与候选风险。',
+        showPageHeading: false,
+      };
+    case 'factor-model-builder':
+      return {
+        navKey: 'workspace',
+        eyebrow: '多因子策略',
+        title: '创建多因子策略',
+        description: '从因子库选择因子，配置权重、方向与行业中性化后创建可回测策略。',
         showPageHeading: false,
       };
     case 'factor-quarantine':

@@ -18,6 +18,7 @@ from tests.api_test_support import (
     wait_for_optimization_job,
 )
 from datetime import date, datetime, timedelta, timezone
+from fastapi.testclient import TestClient
 import os
 from pathlib import Path
 import json
@@ -25,6 +26,8 @@ import threading
 import time
 from typing import Any
 
+from grit_backtest_platform import api as api_module
+from grit_backtest_platform.api import create_app
 from grit_backtest_platform._real_service_rebuilt import RealBacktestPlatformService
 from grit_backtest_platform import _real_service_rebuilt as real_service_module
 from grit_backtest_platform.market_data_repository import CoverageSummary, MarketDataRepository
@@ -189,6 +192,85 @@ def test_snapshot_overview_contract_is_exact_on_fresh_database(tmp_path):
     assert overview["latest_job"] is None
     assert overview["blocking_code"] == "SNAPSHOT_REFRESH_REQUIRED"
     assert overview["allowed_actions"] == ["refresh_snapshots"]
+    provider_summary = overview["provider_readiness_summary"]
+    assert provider_summary["provider_count"] >= 1
+    assert provider_summary["openbb"]["enabled"] is False
+    assert provider_summary["openbb"]["credential_ready_provider_count"] == 0
+    assert provider_summary["openbb"]["usable_provider_count"] == 0
+    assert provider_summary["openbb"]["attempt_event_count"] == 0
+
+
+def test_snapshot_provider_registry_and_attempts_are_available_on_fresh_database(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    registry = assert_ok(client.get("/data-snapshots/provider-registry"))
+    attempts = assert_ok(client.get("/data-snapshots/provider-attempts"))
+
+    assert registry["openbb_enabled"] is False
+    assert {item["provider_id"] for item in registry["items"]} >= {
+        "fake_yahoo",
+        "openbb_index_constituents",
+        "github_sp500_historical_components",
+        "kaggle_huge_stock_market_dataset",
+        "polygon",
+    }
+    openbb_index = next(item for item in registry["items"] if item["provider_id"] == "openbb_index_constituents")
+    assert openbb_index["enabled"] is False
+    assert openbb_index["credential_ready"] is False
+    assert openbb_index["usable"] is False
+    assert openbb_index["readiness_status"] == "disabled"
+    assert openbb_index["pit_permission"]["mode"] == "metadata_only"
+    assert openbb_index["pit_permission"]["can_upgrade_pit_readiness"] is False
+    assert openbb_index["credential_requirements"]["required_env_vars"] == ["FMP_API_KEY"]
+    kaggle_bulk = next(item for item in registry["items"] if item["provider_id"] == "kaggle_huge_stock_market_dataset")
+    assert kaggle_bulk["source_governance"]["source_manifest_required"] is True
+    assert kaggle_bulk["pit_permission"]["mode"] == "price_only"
+    polygon = next(item for item in registry["items"] if item["provider_id"] == "polygon")
+    assert polygon["credential_requirements"]["required_env_vars"] == ["POLYGON_API_KEY"]
+    assert polygon["source_governance"]["license"] == "account_terms"
+    assert attempts["latest_job_id"] is None
+    assert attempts["items"] == []
+    assert attempts["rollup"]["policy"] == "unique_provider_latest_job_priority"
+    assert attempts["rollup"]["event_count"] == 0
+    assert attempts["rollup"]["unique_provider_count"] == 0
+
+
+def test_snapshot_provider_registry_does_not_import_openbb_when_disabled(tmp_path, monkeypatch):
+    monkeypatch.delenv("GRIT_ENABLE_OPENBB_PROVIDER", raising=False)
+    real_import = api_module.importlib.import_module
+    imported_openbb_modules: list[str] = []
+
+    def guarded_import(name, *args, **kwargs):
+        if str(name).endswith(".openbb_provider"):
+            imported_openbb_modules.append(str(name))
+            raise AssertionError("OpenBB provider must not be imported while disabled")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(api_module.importlib, "import_module", guarded_import)
+    client = TestClient(create_app(tmp_path / "openbb-disabled.db"))
+
+    registry = assert_ok(client.get("/data-snapshots/provider-registry"))
+
+    assert imported_openbb_modules == []
+    assert registry["openbb_enabled"] is False
+    assert all(not item["enabled"] for item in registry["items"] if item["provider_id"].startswith("openbb_"))
+
+
+def test_snapshot_provider_registry_masks_openbb_environment_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("GRIT_ENABLE_OPENBB_PROVIDER", "1")
+    monkeypatch.setenv("FMP_API_KEY", "super-secret-fmp-key")
+    monkeypatch.setenv("TIINGO_API_TOKEN", "super-secret-tiingo-token")
+    client = TestClient(create_app(tmp_path / "openbb-enabled.db"))
+
+    response = client.get("/data-snapshots/provider-registry")
+    registry = assert_ok(response)
+
+    assert registry["openbb_enabled"] is True
+    assert "super-secret" not in response.text
+    openbb_index = next(item for item in registry["items"] if item["provider_id"] == "openbb_index_constituents")
+    assert openbb_index["credential_requirements"]["configured"] is True
+    assert openbb_index["credential_requirements"]["configured_env_vars"] == ["FMP_API_KEY"]
+    assert openbb_index["pit_permission"]["can_upgrade_pit_readiness"] is False
 
 
 def test_snapshot_overview_includes_bond_fixed_income_extension(tmp_path):
@@ -892,6 +974,20 @@ def test_snapshot_refresh_persists_provider_summary_for_each_snapshot_pool(tmp_p
                                 "access_tier": "public",
                             },
                             {
+                                "provider": "longbridge",
+                                "kind": "history",
+                                "status": "limited",
+                                "source": "longbridge",
+                                "bar_count": 0,
+                                "action_count": 0,
+                                "partial": False,
+                                "reason": "provider quota cooldown",
+                                "actions_supported": False,
+                                "access_tier": "paid_optional",
+                                "quota_limited": True,
+                                "next_retry_at": "2026-04-10T12:00:00Z",
+                            },
+                            {
                                 "provider": "alpha_vantage",
                                 "kind": "earnings",
                                 "status": "succeeded",
@@ -990,6 +1086,8 @@ def test_snapshot_refresh_persists_provider_summary_for_each_snapshot_pool(tmp_p
     assert price_summary["providers"]["yahoo"]["next_retry_at"] is None
     assert price_summary["providers"]["tiingo"]["succeeded_not_selected_symbols"] >= 1
     assert price_summary["providers"]["tiingo"]["access_tier"] == "free_account"
+    assert price_summary["providers"]["longbridge"]["quota_limited"] is True
+    assert price_summary["providers"]["longbridge"]["next_retry_at"] == "2026-04-10T12:00:00Z"
     assert "akshare_us" in price_summary["skipped_providers"]
     assert "sec_edgar" not in price_summary["providers"]
     assert "sec_edgar" in corporate_summary["unavailable_providers"]
@@ -1003,6 +1101,54 @@ def test_snapshot_refresh_persists_provider_summary_for_each_snapshot_pool(tmp_p
     assert sp500_summary["providers"]["wikipedia_revision_history"]["landed_anchor_count"] == 1
     assert "fmp" in sp500_summary["skipped_providers"]
     assert sp500_summary["providers"]["fmp"]["reasons"] == ["FMP_API_KEY is not configured."]
+
+    readiness_summary = overview["provider_readiness_summary"]
+    assert readiness_summary["registered_provider_count"] == readiness_summary["provider_count"]
+    assert readiness_summary["credential_ready_provider_count"] >= 1
+    assert readiness_summary["usable_provider_count"] >= 1
+    assert readiness_summary["attempt_event_count"] >= readiness_summary["unique_attempted_provider_count"]
+    assert readiness_summary["latest_job_attempt_event_count"] >= readiness_summary["latest_job_attempted_provider_count"]
+    assert readiness_summary["attempt_rollup_policy"] == "unique_provider_latest_job_priority"
+    assert "credential_ready_provider_count" in readiness_summary["openbb"]
+    assert "usable_provider_count" in readiness_summary["openbb"]
+    assert "latest_job_attempt_event_count" in readiness_summary["openbb"]
+    assert readiness_summary["quota_limited_provider_count"] >= 1
+    assert readiness_summary["cooldown_provider_count"] >= 1
+    assert readiness_summary["target_type_counts"]["price_history"] >= 1
+
+    all_attempts = service.get_snapshot_provider_attempts()
+    assert all_attempts["rollup"]["policy"] == "unique_provider_latest_job_priority"
+    assert all_attempts["rollup"]["event_count"] == len(all_attempts["items"])
+    assert all_attempts["rollup"]["unique_provider_count"] <= all_attempts["rollup"]["event_count"]
+    assert all_attempts["rollup"]["latest_job_event_count"] >= all_attempts["rollup"]["latest_job_unique_provider_count"]
+    assert any(
+        provider["selected_from"] == "latest_job"
+        for provider in all_attempts["rollup"]["providers"]
+        if provider["latest_job_event_count"]
+    )
+
+    attempts = service.get_snapshot_provider_attempts(provider_id="longbridge")
+    assert attempts["latest_job_id"] == overview["latest_job"]["id"]
+    assert attempts["rollup"]["unique_provider_count"] == 1
+    assert attempts["rollup"]["providers"][0]["selected_from"] == "latest_job"
+    longbridge_attempt = attempts["items"][0]
+    assert longbridge_attempt["provider_id"] == "longbridge"
+    assert longbridge_attempt["target_type"] == "price_history"
+    assert longbridge_attempt["status"] == "limited"
+    assert longbridge_attempt["quota_limited"] is True
+    assert longbridge_attempt["cooldown_active"] is True
+    assert longbridge_attempt["pit_effect"]["can_upgrade_pit_readiness"] is True
+
+    registry = service.get_snapshot_provider_registry()
+    longbridge_registry = next(item for item in registry["items"] if item["provider_id"] == "longbridge")
+    assert longbridge_registry["latest_attempt"]["status"] == "limited"
+    assert longbridge_registry["quota_cooldown"]["next_retry_at"] == "2026-04-10T12:00:00Z"
+    assert longbridge_registry["credential_ready"] is True
+    assert longbridge_registry["usable"] is False
+    if longbridge_registry["enabled"]:
+        assert longbridge_registry["readiness_status"] == "cooldown"
+    else:
+        assert longbridge_registry["readiness_status"] == "disabled"
 
 
 def test_openbb_current_constituent_check_does_not_flip_universe_readiness(tmp_path):
@@ -1072,6 +1218,16 @@ def test_openbb_current_constituent_check_does_not_flip_universe_readiness(tmp_p
     assert sp500_snapshot["metadata"]["openbb_current_constituent_check"]["auxiliary_only"] is True
     assert sp500_summary["providers"]["openbb_index_constituents"]["auxiliary_only"] is True
     assert sp500_summary["providers"]["openbb_index_constituents"]["landed_anchor_count"] == 0
+
+    attempts = service.get_snapshot_provider_attempts(provider_id="openbb_index_constituents")
+    assert attempts["items"]
+    assert attempts["items"][0]["auxiliary_only"] is True
+    assert attempts["items"][0]["pit_effect"]["mode"] == "metadata_only"
+    assert attempts["items"][0]["pit_effect"]["can_upgrade_pit_readiness"] is False
+    registry = service.get_snapshot_provider_registry()
+    openbb_index = next(item for item in registry["items"] if item["provider_id"] == "openbb_index_constituents")
+    assert openbb_index["pit_permission"]["mode"] == "metadata_only"
+    assert openbb_index["pit_permission"]["can_upgrade_pit_readiness"] is False
 
 
 def test_snapshot_refresh_marks_zero_event_action_probe_as_corporate_covered(tmp_path):
@@ -1452,6 +1608,135 @@ def test_running_refresh_persists_partial_dataset_snapshots_before_completion(tm
     assert corporate_snapshot["metadata"]["covered_symbol_count"] == 1
     assert corporate_snapshot["metadata"]["total_symbol_count"] == 2
     assert corporate_snapshot["metadata"]["missing_symbols"] == ["MSFT"]
+
+
+def test_repair_preserves_external_price_scope_when_later_provider_widens_symbol_pool(tmp_path):
+    service = RealBacktestPlatformService(tmp_path / "snapshot-external-price-scope.db", market_data_provider=None)
+    repository = service.market_data_repository
+    repository.replace_dataset_snapshot(
+        {
+            "id": "ds-price",
+            "name": "股票价格数据",
+            "status": "INCOMPLETE",
+            "as_of": "2026-05-05T09:00:00Z",
+            "freshness_label": "外部补源后",
+            "start_date": "2000-01-03",
+            "end_date": "2017-11-10",
+            "row_count": 2,
+            "source": "kaggle_bulk_cache",
+            "fallback_source": None,
+            "blocker": {"code": "PRICE_SNAPSHOT_INCOMPLETE"},
+            "metadata": {
+                "total_symbol_count": 4,
+                "target_symbol_count": 4,
+                "covered_symbol_count": 2,
+                "missing_symbols": ["BFB", "NWS-A"],
+                "provider_summary": {
+                    "attempted_providers": ["kaggle_huge_stock_market_dataset"],
+                    "providers": {
+                        "kaggle_huge_stock_market_dataset": {
+                            "status": "succeeded",
+                            "landed_row_count": 2,
+                            "landed_symbol_count": 2,
+                            "pit_mode": "price_only",
+                        }
+                    },
+                },
+                "last_external_repair_at": "2026-05-05T09:10:00Z",
+            },
+        },
+        price_bars=[
+            {
+                "symbol": "AAPL",
+                "date": "2017-11-10",
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "adj_close": 1.0,
+                "volume": 100,
+                "source": "kaggle_bulk_cache",
+            },
+            {
+                "symbol": "MSFT",
+                "date": "2017-11-10",
+                "open": 2.0,
+                "high": 2.0,
+                "low": 2.0,
+                "close": 2.0,
+                "adj_close": 2.0,
+                "volume": 200,
+                "source": "kaggle_bulk_cache",
+            },
+        ],
+        symbol_coverage=[
+            {"symbol": "AAPL", "start_date": "2000-01-03", "end_date": "2017-11-10", "trade_days": 1, "source": "kaggle_bulk_cache"},
+            {"symbol": "MSFT", "start_date": "2000-01-03", "end_date": "2017-11-10", "trade_days": 1, "source": "kaggle_bulk_cache"},
+        ],
+    )
+    existing_price_snapshot = next(item for item in repository.list_dataset_snapshots() if item["id"] == "ds-price")
+    existing_price_rows = repository.load_dataset_snapshot_rows("ds-price")
+
+    service._persist_market_dataset_snapshots(
+        as_of="2026-05-05T10:00:00Z",
+        mode="repair",
+        snapshot_window_start=date(2000, 1, 3),
+        window_end=date(2026, 5, 5),
+        selection_metadata={"selection_mode": "repair_missing_symbols_batch"},
+        existing_price_snapshot=existing_price_snapshot,
+        existing_corporate_snapshot=None,
+        existing_price_rows=existing_price_rows,
+        existing_corporate_rows={"corporate_actions": [], "symbol_coverage": []},
+        price_bars=[
+            {
+                "symbol": "BFB",
+                "date": "2017-11-10",
+                "open": 3.0,
+                "high": 3.0,
+                "low": 3.0,
+                "close": 3.0,
+                "adj_close": 3.0,
+                "volume": 300,
+                "source": "yahoo",
+            },
+            {
+                "symbol": "GPS",
+                "date": "2026-05-05",
+                "open": 4.0,
+                "high": 4.0,
+                "low": 4.0,
+                "close": 4.0,
+                "adj_close": 4.0,
+                "volume": 400,
+                "source": "yahoo",
+            },
+        ],
+        corporate_actions=[],
+        coverage_rows=[
+            {"symbol": "BFB", "start_date": "2017-11-10", "end_date": "2017-11-10", "trade_days": 1, "source": "yahoo"},
+            {"symbol": "GPS", "start_date": "2026-05-05", "end_date": "2026-05-05", "trade_days": 1, "source": "yahoo"},
+        ],
+        corporate_coverage_rows=[],
+        effective_missing_symbols=["NWS-A"],
+        effective_corporate_missing_symbols=[],
+        action_partial=False,
+        canonical_target_symbols=["AAPL", "MSFT", "BFB", "NWS-A", "GMCR", "GPS"],
+        canonical_total_symbol_count=6,
+        default_source_name="yahoo",
+        default_fallback_name=None,
+    )
+
+    price_snapshot = next(item for item in repository.list_dataset_snapshots() if item["id"] == "ds-price")
+    metadata = price_snapshot["metadata"]
+
+    assert metadata["preserved_external_repair_scope"] is True
+    assert metadata["total_symbol_count"] == 4
+    assert metadata["target_symbol_count"] == 4
+    assert metadata["covered_symbol_count"] == 3
+    assert metadata["missing_symbols"] == ["NWS-A"]
+    providers = metadata["provider_summary"]["providers"]
+    assert "kaggle_huge_stock_market_dataset" in providers
+    assert providers["yahoo"]["landed_symbol_count"] == 2
 
 
 def test_snapshot_refresh_counts_fmp_history_anchors_as_ready(tmp_path):

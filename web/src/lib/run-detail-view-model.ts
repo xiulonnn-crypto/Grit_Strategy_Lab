@@ -4,7 +4,7 @@ import { formatStrategyVersionTag, getStrategyDisplayName } from './strategy-ver
 
 export type ViewWindow = 'all' | '1y' | '3y';
 export type TradeSegment = 'all' | 'IS' | 'OOS';
-export type RunDetailTab = 'diagnostics' | 'trades' | 'evidence' | 'properties';
+export type RunDetailTab = 'diagnostics' | 'trades' | 'evidence' | 'factor-attribution' | 'properties';
 export type TradeAuditSort = 'time_asc' | 'time_desc' | 'pnl_asc' | 'pnl_desc';
 
 export type RunDetailPropertyEntry = {
@@ -26,6 +26,7 @@ export const RUN_DETAIL_TAB_OPTIONS: Array<{ value: RunDetailTab; label: string 
   { value: 'diagnostics', label: '诊断' },
   { value: 'trades', label: '交易' },
   { value: 'evidence', label: '证据' },
+  { value: 'factor-attribution', label: '因子归因' },
   { value: 'properties', label: '配置' },
 ];
 

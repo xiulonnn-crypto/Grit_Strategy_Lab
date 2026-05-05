@@ -12,6 +12,7 @@ from .market_data_repository import (
     DATASET_FUNDAMENTALS_SNAPSHOT_ID,
     DATASET_PRICE_SNAPSHOT_ID,
 )
+from .pit_external_sources import build_external_source_readiness
 from .storage import SQLiteStorage, dumps, iso_now, loads
 from .universe_history import SP500_UNIVERSE_SNAPSHOT_ID
 
@@ -24,18 +25,28 @@ PRICE_REQUIREMENTS = set(PRICE_DATA_REQUIREMENTS)
 FUNDAMENTAL_REQUIREMENTS = {
     "ltm_earnings",
     "market_cap",
+    "book_value_equity",
     "operating_cash_flow",
     "capex",
     "enterprise_value",
     "total_shares",
+    "shares_outstanding",
+    "total_debt",
+    "cash_and_equivalents",
 }
 FUNDAMENTAL_FIELD_REQUIREMENTS = {
     "LtmEarnings": "ltm_earnings",
     "MarketCap": "market_cap",
+    "BookValueEquity": "book_value_equity",
     "OperatingCashFlow": "operating_cash_flow",
+    "OperatingCashFlowLTM": "operating_cash_flow",
     "Capex": "capex",
+    "CapexLTM": "capex",
     "EnterpriseValue": "enterprise_value",
     "TotalShares": "total_shares",
+    "SharesOutstanding": "shares_outstanding",
+    "TotalDebt": "total_debt",
+    "CashAndEquivalents": "cash_and_equivalents",
 }
 FUNDAMENTAL_FIELD_REQUIREMENTS_BY_TOKEN = {
     token.lower(): requirement
@@ -47,10 +58,14 @@ DATA_REQUIREMENT_ORDER = (
     "returns",
     "ltm_earnings",
     "market_cap",
+    "book_value_equity",
     "operating_cash_flow",
     "capex",
     "enterprise_value",
     "total_shares",
+    "shares_outstanding",
+    "total_debt",
+    "cash_and_equivalents",
 )
 HISTORICAL_MEMBERSHIP_MARKERS = (
     "historical",
@@ -98,12 +113,21 @@ ALLOWED_DESCRIPTOR_OPERATORS = {"rank", "z", "raw", "log"}
 OLD_DEFAULT_FACTOR_ALIASES = {
     "momentum_12m_1m": "s_mom_12m1m_rank",
     "value_ep_ltm": "s_val_ep_ltm_raw",
+    "value_bp_latest": "s_val_bp_latest_raw",
     "lowvol_realized_252d": "s_vol_252d_rank",
     "size_log_market_cap": "s_size_cur_log",
+    "quality_roe_ltm": "s_qlty_roe_ltm_raw",
     "quality_fcf_yield": "s_qlty_fcfy_ttm_raw",
 }
 DEFAULT_FACTOR_ALIAS_BY_CANONICAL = {
     canonical: legacy for legacy, canonical in OLD_DEFAULT_FACTOR_ALIASES.items()
+}
+FACTOR_FAMILY_LABELS = {
+    "val": "估值",
+    "mom": "动量",
+    "qlty": "质量",
+    "vol": "低波动",
+    "size": "规模",
 }
 
 
@@ -196,10 +220,32 @@ DEFAULT_SEED_FACTORS: tuple[SeedFactor, ...] = (
         diagnostic_status="READY_TO_DIAGNOSE",
     ),
     SeedFactor(
+        id="s_val_bp_latest_raw",
+        name="最新账面市值比",
+        descriptor=FactorDescriptor("s", "val", "bp", "latest", "raw"),
+        expression="BookValueEquity / MarketCap",
+        direction="HIGH_IS_BETTER",
+        tags=("默认因子", "估值", "基础面可诊断"),
+        data_requirements=("book_value_equity", "market_cap"),
+        institutional_note="账面市值比用于补充盈利收益率无法覆盖的资产价值维度，必须使用 available_at 已可得的账面权益。",
+        diagnostic_status="READY_TO_DIAGNOSE",
+    ),
+    SeedFactor(
+        id="s_qlty_roe_ltm_raw",
+        name="滚动净资产收益率 (LTM)",
+        descriptor=FactorDescriptor("s", "qlty", "roe", "ltm", "raw"),
+        expression="LtmEarnings / BookValueEquity",
+        direction="HIGH_IS_BETTER",
+        tags=("默认因子", "质量", "基础面可诊断"),
+        data_requirements=("ltm_earnings", "book_value_equity"),
+        institutional_note="ROE 衡量净资产创造盈利的效率，盈利和账面权益均需满足 PIT 可得日门禁。",
+        diagnostic_status="READY_TO_DIAGNOSE",
+    ),
+    SeedFactor(
         id="s_qlty_fcfy_ttm_raw",
         name="自由现金流收益率 (TTM)",
         descriptor=FactorDescriptor("s", "qlty", "fcfy", "ttm", "raw"),
-        expression="(OperatingCashFlow - Capex) / EnterpriseValue",
+        expression="(OperatingCashFlowLTM - CapexLTM) / EnterpriseValue",
         direction="HIGH_IS_BETTER",
         tags=("默认因子", "质量", "基础面可诊断"),
         data_requirements=("operating_cash_flow", "capex", "enterprise_value"),
@@ -213,7 +259,7 @@ DEFAULT_SEED_FACTORS: tuple[SeedFactor, ...] = (
         expression="Log(MarketCap)",
         direction="LOW_IS_BETTER",
         tags=("默认因子", "规模", "基础面可诊断"),
-        data_requirements=("market_cap", "total_shares"),
+        data_requirements=("market_cap", "shares_outstanding"),
         institutional_note="小市值溢价需要同时关注流动性枯竭和成交容量风险。",
         diagnostic_status="READY_TO_DIAGNOSE",
     ),
@@ -464,6 +510,21 @@ def _parse_date(value: Any) -> date | None:
             return None
 
 
+def _parse_datetime_utc(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _years_before(anchor: date, years: int) -> date:
     try:
         return anchor.replace(year=anchor.year - years)
@@ -526,7 +587,18 @@ def ensure_default_fundamental_snapshot(market_data_repository: Any) -> None:
     except Exception:
         existing = None
     if existing is not None:
-        return
+        metadata = existing.get("metadata") if isinstance(existing.get("metadata"), Mapping) else {}
+        available_fields = {
+            str(item)
+            for item in (metadata.get("available_fields") or [])
+            if str(item).strip()
+        }
+        is_local_seed = (
+            str(existing.get("source") or "") == "local_seed_fundamentals"
+            or str(metadata.get("seeded_by") or "") == "FactorResearchService"
+        )
+        if not is_local_seed or FUNDAMENTAL_REQUIREMENTS <= available_fields:
+            return
 
     now = iso_now()
     dataset_snapshots = list(market_data_repository.list_dataset_snapshots())
@@ -588,23 +660,42 @@ def ensure_default_fundamental_snapshot(market_data_repository: Any) -> None:
             growth = 1.0 + date_index * 0.012 + (symbol_index % 5) * 0.004
             market_cap = base_cap * growth
             total_shares = 850_000_000 + symbol_index * 4_000_000
+            book_value_equity = market_cap * (0.32 + (symbol_index % 8) * 0.018)
             ltm_earnings = market_cap * base_margin
             operating_cash_flow = ltm_earnings * (1.12 + (symbol_index % 3) * 0.04)
             capex = ltm_earnings * (0.18 + (symbol_index % 4) * 0.015)
-            enterprise_value = market_cap * (1.04 + (symbol_index % 6) * 0.01)
+            total_debt = market_cap * (0.10 + (symbol_index % 5) * 0.012)
+            cash_and_equivalents = market_cap * (0.055 + (symbol_index % 4) * 0.006)
+            enterprise_value = market_cap + total_debt - cash_and_equivalents
+            available_at = min(current_date + timedelta(days=45), anchor_end)
             points.append(
                 {
                     "symbol": symbol,
                     "date": current_date.isoformat(),
+                    "period_end_date": current_date.isoformat(),
+                    "available_at": available_at.isoformat(),
                     "ltm_earnings": round(ltm_earnings, 4),
                     "market_cap": round(market_cap, 4),
+                    "book_value_equity": round(book_value_equity, 4),
                     "operating_cash_flow": round(operating_cash_flow, 4),
                     "capex": round(capex, 4),
                     "enterprise_value": round(enterprise_value, 4),
                     "total_shares": round(total_shares, 4),
+                    "shares_outstanding": round(total_shares, 4),
+                    "total_debt": round(total_debt, 4),
+                    "cash_and_equivalents": round(cash_and_equivalents, 4),
+                    "provider_market_cap": round(market_cap * 1.0004, 4),
+                    "provider_enterprise_value": round(enterprise_value, 4),
+                    "market_cap_source": "price_x_shares",
+                    "enterprise_value_source": "provider",
                     "source": "local_seed_fundamentals",
                     "fallback_source": "repo_seed",
-                    "metadata": {"point_in_time": True, "seed_version": "v1"},
+                    "metadata": {
+                        "point_in_time": True,
+                        "seed_version": "v2",
+                        "market_cap_formula": "adjusted_close * shares_outstanding",
+                        "provider_market_cap_diff_pct": 0.04,
+                    },
                 }
             )
         coverage.append(
@@ -1387,6 +1478,240 @@ def _build_status_reasons(
     }
 
 
+FREE_FULL_READY_PRICE_PROVIDERS = [
+    "yahoo",
+    "stooq",
+    "alpha_vantage",
+    "tiingo",
+    "fmp",
+    "openbb_yfinance",
+    "openbb_tiingo",
+    "openbb_alpha_vantage",
+    "openbb_fmp",
+]
+FREE_FULL_READY_ACTION_PROVIDERS = [
+    "yahoo",
+    "tiingo",
+    "alpha_vantage",
+    "fmp",
+    "sec_edgar",
+    "openbb_yfinance",
+    "openbb_tiingo",
+    "openbb_fmp",
+]
+
+
+def _provider_summary_for(snapshot: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    metadata = _metadata_for_row(snapshot or {})
+    provider_summary = metadata.get("provider_summary")
+    return provider_summary if isinstance(provider_summary, Mapping) else {}
+
+
+def _build_provider_cooldowns(
+    *,
+    price_snapshot: Mapping[str, Any] | None,
+    corporate_snapshot: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    cooldowns: list[dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
+    for target, snapshot in (
+        ("price", price_snapshot),
+        ("corporate_actions", corporate_snapshot),
+    ):
+        providers = _provider_summary_for(snapshot).get("providers")
+        if not isinstance(providers, Mapping):
+            continue
+        for provider_name, provider_payload in providers.items():
+            if not isinstance(provider_payload, Mapping):
+                continue
+            next_retry_at = provider_payload.get("next_retry_at")
+            next_retry_text = str(next_retry_at or "").strip()
+            parsed_retry_at = _parse_datetime_utc(next_retry_text) if next_retry_text else None
+            quota_limited = bool(provider_payload.get("quota_limited"))
+            if parsed_retry_at is not None and parsed_retry_at <= now:
+                continue
+            if not next_retry_text and not quota_limited:
+                continue
+            reasons = [
+                str(reason)
+                for reason in (provider_payload.get("reasons") or [])
+                if str(reason).strip()
+            ][:3]
+            cooldowns.append(
+                {
+                    "provider": str(provider_name),
+                    "target": target,
+                    "next_retry_at": next_retry_text,
+                    "quota_limited": quota_limited,
+                    "reason": "; ".join(reasons) if reasons else "provider cooldown",
+                }
+            )
+    return sorted(cooldowns, key=lambda item: (str(item.get("next_retry_at") or "9999"), str(item.get("provider") or "")))
+
+
+def _alias_candidates_for_symbol(symbol: str, identity: Mapping[str, Any] | None = None) -> list[str]:
+    normalized = str(symbol or "").strip().upper()
+    candidates = [normalized]
+    canonical = str((identity or {}).get("canonical_symbol") or "").strip().upper()
+    if canonical and canonical not in candidates:
+        candidates.append(canonical)
+    for value in list(candidates):
+        if "." in value:
+            candidates.append(value.replace(".", "-"))
+        if "-" in value:
+            candidates.append(value.replace("-", "."))
+    return [candidate for index, candidate in enumerate(candidates) if candidate and candidate not in candidates[:index]]
+
+
+def _bucket_symbol_map(coverage_gap: Mapping[str, Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    priority = [
+        "current_core_missing",
+        "historical_lifecycle_missing",
+        "non_core_missing",
+        "identity_unresolved",
+        "corporate_action_alignment",
+    ]
+    for bucket_id in priority:
+        bucket = next(
+            (
+                item
+                for item in (coverage_gap.get("buckets") or [])
+                if isinstance(item, Mapping) and item.get("id") == bucket_id
+            ),
+            None,
+        )
+        if not bucket:
+            continue
+        for symbol in bucket.get("symbols") or bucket.get("sample_symbols") or []:
+            normalized = str(symbol).strip().upper()
+            if normalized and normalized not in result:
+                result[normalized] = bucket_id
+    return result
+
+
+def _build_full_ready_repair_plan(
+    *,
+    price_snapshot: Mapping[str, Any] | None,
+    corporate_snapshot: Mapping[str, Any] | None,
+    coverage_gap: Mapping[str, Any],
+    blocking_items: Sequence[Mapping[str, Any]],
+    identity_rows: Sequence[Mapping[str, Any]],
+    active_waiver: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    price_metadata = _metadata_for_row(price_snapshot or {})
+    corporate_metadata = _metadata_for_row(corporate_snapshot or {})
+    price_missing = {
+        str(symbol).strip().upper()
+        for symbol in (price_metadata.get("missing_symbols") or [])
+        if str(symbol).strip()
+    }
+    corporate_missing = {
+        str(symbol).strip().upper()
+        for symbol in (corporate_metadata.get("missing_symbols") or [])
+        if str(symbol).strip()
+    }
+    identity_by_symbol = {
+        str(row.get("symbol") or "").strip().upper(): row
+        for row in identity_rows
+        if str(row.get("symbol") or "").strip()
+    }
+    identity_unresolved = {
+        str(symbol).strip().upper()
+        for bucket in (coverage_gap.get("buckets") or [])
+        if isinstance(bucket, Mapping) and bucket.get("id") == "identity_unresolved"
+        for symbol in (bucket.get("symbols") or bucket.get("sample_symbols") or [])
+        if str(symbol).strip()
+    }
+    bucket_by_symbol = _bucket_symbol_map(coverage_gap)
+    cooldowns = _build_provider_cooldowns(
+        price_snapshot=price_snapshot,
+        corporate_snapshot=corporate_snapshot,
+    )
+    provider_cooldown_active = any(item.get("next_retry_at") or item.get("quota_limited") for item in cooldowns)
+    all_symbols = sorted(price_missing | corporate_missing | identity_unresolved)
+    priority_by_bucket = {
+        "current_core_missing": 10,
+        "historical_lifecycle_missing": 30,
+        "corporate_action_alignment": 40,
+        "identity_unresolved": 50,
+        "non_core_missing": 70,
+    }
+    queue: list[dict[str, Any]] = []
+    for symbol in all_symbols:
+        bucket = bucket_by_symbol.get(symbol) or ("corporate_action_alignment" if symbol in corporate_missing else "non_core_missing")
+        targets = []
+        if symbol in price_missing:
+            targets.append("price")
+        if symbol in corporate_missing:
+            targets.append("corporate_actions")
+        if symbol in identity_unresolved:
+            targets.append("identity")
+        if symbol in identity_unresolved and bucket in {"current_core_missing", "historical_lifecycle_missing"}:
+            status = "NEEDS_IDENTITY_ALIAS"
+        elif provider_cooldown_active:
+            status = "WAITING_ON_PROVIDER_COOLDOWN"
+        else:
+            status = "NEEDS_FREE_SOURCE_REPAIR"
+        queue.append(
+            {
+                "symbol": symbol,
+                "bucket": bucket,
+                "priority": priority_by_bucket.get(bucket, 90),
+                "status": status,
+                "repair_targets": targets,
+                "alias_candidates": _alias_candidates_for_symbol(symbol, identity_by_symbol.get(symbol)),
+                "price_providers": FREE_FULL_READY_PRICE_PROVIDERS if "price" in targets else [],
+                "corporate_action_providers": FREE_FULL_READY_ACTION_PROVIDERS if "corporate_actions" in targets else [],
+                "evidence": "Full Ready requires auditable price rows and corporate-action proof; waiver and synthetic rows do not count.",
+            }
+        )
+    queue.sort(key=lambda item: (int(item.get("priority") or 99), str(item.get("symbol") or "")))
+    missing_count = len(all_symbols)
+    status = "READY" if not blocking_items and missing_count == 0 and not active_waiver else "NEEDS_REPAIR"
+    bucket_counts: dict[str, int] = {}
+    for item in queue:
+        bucket = str(item.get("bucket") or "unknown")
+        bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+    rejection_criteria = [
+        "免费源对 symbol 全部返回 404/empty 且没有历史身份或公司行为证据时，必须保留阻塞。",
+        "只有明确的 zero-event certificate 才能把公司行为缺失计为已覆盖，抓取失败不能当作无事件。",
+        "研究态 waiver、synthetic_seed 或当前成分股兜底不能让 Full Ready 变绿。",
+    ]
+    return {
+        "status": status,
+        "target_status": "FULL_READY",
+        "remaining_symbol_count": missing_count,
+        "queue_total_count": len(queue),
+        "queue_sample": queue[:50],
+        "queue_symbols": [str(item.get("symbol") or "").strip().upper() for item in queue if str(item.get("symbol") or "").strip()],
+        "queue_price_symbols": [
+            str(item.get("symbol") or "").strip().upper()
+            for item in queue
+            if str(item.get("symbol") or "").strip() and "price" in (item.get("repair_targets") or [])
+        ],
+        "queue_corporate_action_symbols": [
+            str(item.get("symbol") or "").strip().upper()
+            for item in queue
+            if str(item.get("symbol") or "").strip() and "corporate_actions" in (item.get("repair_targets") or [])
+        ],
+        "bucket_counts": bucket_counts,
+        "provider_cooldowns": cooldowns,
+        "provider_cooldown_count": len(cooldowns),
+        "next_retry_at": next((str(item.get("next_retry_at")) for item in cooldowns if item.get("next_retry_at")), None),
+        "zero_event_certificates": [],
+        "zero_event_certificate_count": 0,
+        "waiver_blocks_full_ready": bool(active_waiver),
+        "free_source_policy": "Yahoo/Stooq/Alpha Vantage/Tiingo/FMP/OpenBB/SEC EDGAR may repair evidence, but cannot synthesize or waive Full Ready.",
+        "recommendation": (
+            "继续按优先级运行免费源修复队列；若队列最终落入不可恢复缺口，应输出 rejection report，而不是把 PIT 伪装为 READY。"
+            if missing_count
+            else "缺口为 0；确认清洗运行与研究态豁免撤销后可以进入 Full Ready 验收。"
+        ),
+        "rejection_criteria": rejection_criteria,
+    }
+
+
 def _build_waiver_impact_estimate(
     ignored_symbols: Sequence[str],
     coverage_gap: Mapping[str, Any],
@@ -1722,6 +2047,17 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "mode": "LIMITED_READY",
             "impact_estimate": impact_estimate,
         }
+    full_ready_repair_plan = _build_full_ready_repair_plan(
+        price_snapshot=price_snapshot,
+        corporate_snapshot=corporate_snapshot,
+        coverage_gap=coverage_gap,
+        blocking_items=blocker_items,
+        identity_rows=_load_symbol_identity_rows(market_data_repository, missing_symbols),
+        active_waiver=active_waiver,
+    )
+    external_source_readiness = build_external_source_readiness(
+        repair_plan=full_ready_repair_plan,
+    )
     return {
         "dataset_snapshot_id": dataset_snapshot_id,
         "fundamental_snapshot_id": fundamental_snapshot_id,
@@ -1762,6 +2098,8 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
         "universe_history_series": universe_history_series,
         "adjustment_trace": adjustment_trace,
         "research_waiver": research_waiver,
+        "full_ready_repair_plan": full_ready_repair_plan,
+        "external_source_readiness": external_source_readiness,
         "factor_diagnostics_enabled": verified_enabled or limited_diagnostics_enabled,
         "verified_diagnostics_enabled": verified_enabled,
         "limited_diagnostics_enabled": limited_diagnostics_enabled,
@@ -2068,6 +2406,11 @@ class FactorResearchService:
             str(factor.get("id") or ""),
             str(factor.get("source") or ""),
         )
+        descriptor_category = str(factor["descriptor"].get("category") or "")
+        factor["factor_family"] = FACTOR_FAMILY_LABELS.get(descriptor_category, descriptor_category or "自定义")
+        factor["formula_version"] = (
+            "system_seed_v2" if str(factor.get("source") or "") == "SYSTEM_SEED" else factor["descriptor"].get("schema_version")
+        )
         factor["latest_diagnostic_summary"] = None
         factor_id_candidates = _factor_id_candidates(str(factor["id"]))
         placeholders = ",".join("?" for _ in factor_id_candidates)
@@ -2092,6 +2435,22 @@ class FactorResearchService:
             factor["readiness_blockers"] = blockers
         else:
             factor["readiness_blockers"] = []
+        fundamental_coverage = pit_overview.get("fundamental_coverage")
+        available_fundamental_fields = (
+            set(str(item) for item in fundamental_coverage.get("available_fields", []) if str(item).strip())
+            if isinstance(fundamental_coverage, Mapping)
+            else set()
+        )
+        required_fundamental_fields = sorted(set(factor["data_requirements"]) & FUNDAMENTAL_REQUIREMENTS)
+        missing_fundamental_fields = sorted(set(required_fundamental_fields).difference(available_fundamental_fields))
+        factor["pit_coverage"] = {
+            "status": "READY" if not missing_fundamental_fields and str(pit_overview.get("fundamental_status") or "").upper() == "READY" else factor["diagnostic_status"],
+            "required_fields": required_fundamental_fields,
+            "available_fields": sorted(available_fundamental_fields),
+            "missing_fields": missing_fundamental_fields,
+            "available_at_gate": True,
+        }
+        factor["coverage_loss"] = len(missing_fundamental_fields)
         factor["diagnostic_gap_summary"] = self._diagnostic_gap_summary(factor, factor["readiness_blockers"])
         factor["ic_sparkline"] = self._sparkline_for_factor(factor)
         factor["ic_sparkline_window"] = "最近12期"
@@ -2414,13 +2773,41 @@ class FactorResearchService:
             return _std(returns)
         if fundamental:
             ltm_earnings = _coerce_float(fundamental.get("ltm_earnings"))
-            market_cap = _coerce_float(fundamental.get("market_cap"))
+            provider_market_cap = _coerce_float(
+                fundamental.get("provider_market_cap"),
+                _coerce_float(fundamental.get("market_cap")),
+            )
+            shares_outstanding = _coerce_float(
+                fundamental.get("shares_outstanding"),
+                _coerce_float(fundamental.get("total_shares")),
+            )
+            computed_market_cap = prices[index] * shares_outstanding if prices[index] > 0 and shares_outstanding > 0 else 0.0
+            market_cap = computed_market_cap if computed_market_cap > 0 else provider_market_cap
+            book_value_equity = _coerce_float(fundamental.get("book_value_equity"))
             operating_cash_flow = _coerce_float(fundamental.get("operating_cash_flow"))
             capex = _coerce_float(fundamental.get("capex"))
-            enterprise_value = _coerce_float(fundamental.get("enterprise_value"))
+            provider_enterprise_value = _coerce_float(fundamental.get("provider_enterprise_value"))
+            stored_enterprise_value = _coerce_float(fundamental.get("enterprise_value"))
+            total_debt = _coerce_float(fundamental.get("total_debt"))
+            cash_and_equivalents = _coerce_float(fundamental.get("cash_and_equivalents"))
+            enterprise_value = (
+                provider_enterprise_value
+                if provider_enterprise_value > 0
+                else stored_enterprise_value
+                if stored_enterprise_value > 0
+                else market_cap + total_debt - cash_and_equivalents
+            )
             if factor_id == "s_val_ep_ltm_raw" or "LtmEarnings/MarketCap" in normalized:
                 return ltm_earnings / market_cap if market_cap > 0 else None
-            if factor_id == "s_qlty_fcfy_ttm_raw" or "(OperatingCashFlow-Capex)/EnterpriseValue" in normalized:
+            if factor_id == "s_val_bp_latest_raw" or "BookValueEquity/MarketCap" in normalized:
+                return book_value_equity / market_cap if market_cap > 0 else None
+            if factor_id == "s_qlty_roe_ltm_raw" or "LtmEarnings/BookValueEquity" in normalized:
+                return ltm_earnings / book_value_equity if book_value_equity > 0 else None
+            if (
+                factor_id == "s_qlty_fcfy_ttm_raw"
+                or "(OperatingCashFlow-Capex)/EnterpriseValue" in normalized
+                or "(OperatingCashFlowLTM-CapexLTM)/EnterpriseValue" in normalized
+            ):
                 return (operating_cash_flow - capex) / enterprise_value if enterprise_value > 0 else None
             if factor_id == "s_size_cur_log" or "Log(MarketCap)" in normalized:
                 return math.log(market_cap) if market_cap > 0 else None
@@ -2476,6 +2863,7 @@ class FactorResearchService:
                 symbols,
                 start_date=(datetime.fromisoformat(start_date) - timedelta(days=420)).date().isoformat(),
                 end_date=end_date,
+                as_of_date=end_date,
             )
         series_by_symbol: dict[str, list[dict[str, Any]]] = {
             symbol: sorted(rows, key=lambda item: item["date"])
@@ -2483,7 +2871,7 @@ class FactorResearchService:
             if len(rows) >= return_window_days + 6
         }
         sorted_fundamentals = {
-            symbol: sorted(rows, key=lambda item: str(item.get("date") or ""))
+            symbol: sorted(rows, key=lambda item: (str(item.get("available_at") or item.get("date") or ""), str(item.get("date") or "")))
             for symbol, rows in fundamental_by_symbol.items()
         }
         fundamental_cursor_by_symbol = {symbol: 0 for symbol in sorted_fundamentals}
@@ -2498,10 +2886,14 @@ class FactorResearchService:
                 fundamental = None
                 if symbol_fundamentals:
                     cursor = fundamental_cursor_by_symbol.get(symbol, 0)
-                    while cursor + 1 < len(symbol_fundamentals) and str(symbol_fundamentals[cursor + 1].get("date") or "") <= observation_date:
+                    while (
+                        cursor + 1 < len(symbol_fundamentals)
+                        and str(symbol_fundamentals[cursor + 1].get("available_at") or symbol_fundamentals[cursor + 1].get("date") or "")
+                        <= observation_date
+                    ):
                         cursor += 1
                     fundamental_cursor_by_symbol[symbol] = cursor
-                    if str(symbol_fundamentals[cursor].get("date") or "") <= observation_date:
+                    if str(symbol_fundamentals[cursor].get("available_at") or symbol_fundamentals[cursor].get("date") or "") <= observation_date:
                         fundamental = symbol_fundamentals[cursor]
                 value = self._factor_value(factor_id, expression, prices, index, fundamental)
                 if value is None:

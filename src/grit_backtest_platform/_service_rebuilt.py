@@ -60,6 +60,12 @@ OPTIMIZATION_SELECTION_KEYS: dict[str, tuple[str, ...]] = {
         "long_entry_size_pct",
         "short_entry_size_pct",
     ),
+    "MULTI_FACTOR": (
+        "scoring_method",
+        "rebalance_frequency",
+        "neutralization_enabled",
+        "neutralization_method",
+    ),
 }
 
 OPTIMIZATION_IGNORED_KEYS = {
@@ -403,6 +409,7 @@ LEGACY_MOCK_OPTIMIZATION_LABELS_ZH = (
     "边界试验版",
 )
 OPTIMIZATION_PREPARED_CONTEXT_KEY = "__optimization_prepared_context"
+OPTIMIZATION_SOURCE_RUN_CONTEXT_KEY = "__optimization_source_run_context"
 OPTIMIZATION_RUNNER_CLAIM_PREFIX = "optimization_runner_claim:"
 OPTIMIZATION_RUNNER_LEASE_SECONDS = 300.0
 OPTIMIZATION_ETA_RECENT_COMPLETIONS_WINDOW = 8
@@ -786,8 +793,24 @@ def _is_optimization_allocation_weight_key(key: Any) -> bool:
     return text.startswith("allocation_weight__") and text.endswith("_pct")
 
 
+def _is_optimization_factor_weight_key(key: Any) -> bool:
+    text = str(key or "").strip()
+    return text.startswith("factor_weight__") and text.endswith("_pct")
+
+
+def _is_optimization_weight_sum_key(key: Any) -> bool:
+    return _is_optimization_allocation_weight_key(key) or _is_optimization_factor_weight_key(key)
+
+
+def _optimization_factor_id_from_weight_key(key: Any) -> str | None:
+    text = str(key or "").strip()
+    if not _is_optimization_factor_weight_key(text):
+        return None
+    return text[len("factor_weight__") : -len("_pct")] or None
+
+
 def _optimization_default_parameter_constraint_metadata(key: Any) -> dict[str, Any]:
-    if not _is_optimization_allocation_weight_key(key):
+    if not _is_optimization_weight_sum_key(key):
         return {}
     return {
         "constraint_group": OPTIMIZATION_WEIGHT_SUM_CONSTRAINT_GROUP,
@@ -3214,6 +3237,79 @@ class BacktestPlatformService:
 
         parameters = dict(strategy.get("parameters") or {})
         strategy_type = str(strategy.get("strategy_type") or parameters.get("strategy_type") or "GENERAL").upper()
+        if strategy_type == "MULTI_FACTOR":
+            factor_ids = [
+                str(item).strip()
+                for item in parameters.get("factor_ids") or []
+                if str(item).strip()
+            ]
+            weights = dict(parameters.get("weights") or {})
+            total_abs_weight = sum(abs(_as_float(weights.get(factor_id), 0.0)) for factor_id in factor_ids)
+            decimal_weight_scale = 0 < total_abs_weight <= 1.000001
+            search_space: list[dict[str, Any]] = []
+            for factor_id in factor_ids[:5]:
+                weight = _as_float(weights.get(factor_id), 0.0)
+                current_pct = round(abs(weight) * 100.0 if decimal_weight_scale else abs(weight), 2)
+                step = 5
+                key = f"factor_weight__{factor_id}_pct"
+                search_space.append(
+                    {
+                        "key": key,
+                        "label": f"因子权重 · {factor_id}",
+                        "mode": "range",
+                        "current": current_pct,
+                        "start": max(0, current_pct - 10),
+                        "end": current_pct + 10,
+                        "step": step,
+                        "value": current_pct,
+                        **_optimization_default_parameter_constraint_metadata(key),
+                        "tag": "因子权重",
+                    }
+                )
+            neutralization = dict(parameters.get("neutralization") or {})
+            scoring_method = str(parameters.get("scoring_method") or "zscore_weighted")
+            rebalance_frequency = str(parameters.get("rebalance_frequency") or strategy.get("rebalance_frequency") or "monthly")
+            search_space.extend(
+                [
+                    {
+                        "key": "scoring_method",
+                        "label": "打分方法",
+                        "mode": "discrete",
+                        "current": scoring_method,
+                        "value": scoring_method,
+                        "values": ["zscore_weighted", "rank_weighted"],
+                        "tag": "因子模型",
+                    },
+                    {
+                        "key": "rebalance_frequency",
+                        "label": "再平衡频率",
+                        "mode": "discrete",
+                        "current": rebalance_frequency,
+                        "value": rebalance_frequency,
+                        "values": ["monthly", "quarterly", "semiannual", "yearly"],
+                        "tag": "因子模型",
+                    },
+                    {
+                        "key": "neutralization_enabled",
+                        "label": "是否启用行业中性化",
+                        "mode": "fixed",
+                        "current": bool(neutralization.get("enabled")),
+                        "value": bool(neutralization.get("enabled")),
+                        "values": [bool(neutralization.get("enabled"))],
+                        "tag": "行业中性化",
+                    },
+                    {
+                        "key": "neutralization_method",
+                        "label": "中性化方法",
+                        "mode": "fixed",
+                        "current": str(neutralization.get("method") or "industry"),
+                        "value": str(neutralization.get("method") or "industry"),
+                        "values": [str(neutralization.get("method") or "industry")],
+                        "tag": "行业中性化",
+                    },
+                ]
+            )
+            return search_space
         template = STRATEGY_TEMPLATES.get(strategy_type, STRATEGY_TEMPLATES["GENERAL"])
         template_entries = {field.key: field for field in getattr(template, "fields", [])}
         confirmation_entries = _entry_index(strategy.get("confirmation_fields"))
@@ -13390,7 +13486,24 @@ class BacktestPlatformService:
         parameter_snapshot: Mapping[str, Any],
     ) -> dict[str, Any]:
         effective_strategy = dict(strategy)
-        effective_strategy["parameters"] = dict(parameter_snapshot)
+        parameters = dict(parameter_snapshot)
+        if str(parameters.get("strategy_type") or strategy.get("strategy_type") or "").upper() == "MULTI_FACTOR":
+            weights = dict(parameters.get("weights") or {})
+            for key, value in list(parameters.items()):
+                factor_id = _optimization_factor_id_from_weight_key(key)
+                if factor_id:
+                    weights[factor_id] = _as_float(value, 0.0) / 100.0
+            if weights:
+                parameters["weights"] = weights
+            neutralization = dict(parameters.get("neutralization") or {})
+            if "neutralization_enabled" in parameters:
+                raw_enabled = parameters.get("neutralization_enabled")
+                neutralization["enabled"] = raw_enabled if isinstance(raw_enabled, bool) else str(raw_enabled).strip().lower() == "true"
+            if "neutralization_method" in parameters:
+                neutralization["method"] = str(parameters.get("neutralization_method") or "industry")
+            if neutralization:
+                parameters["neutralization"] = neutralization
+        effective_strategy["parameters"] = parameters
         return effective_strategy
 
     def _ensure_optimization_snapshots_ready(
@@ -13545,7 +13658,7 @@ class BacktestPlatformService:
             if not key:
                 continue
             group = str(payload.get("constraint_group") or "").strip()
-            if not group and _is_optimization_allocation_weight_key(key):
+            if not group and _is_optimization_weight_sum_key(key):
                 group = OPTIMIZATION_WEIGHT_SUM_CONSTRAINT_GROUP
             if group != OPTIMIZATION_WEIGHT_SUM_CONSTRAINT_GROUP:
                 continue
@@ -13746,10 +13859,11 @@ class BacktestPlatformService:
         entries: list[str] = []
         for field in search_space:
             key = str(field.get("key") or "").strip()
-            if not key or key not in parameter_snapshot:
+            if not key:
                 continue
             label = str(field.get("label") or key)
-            entries.append(f"{label}={_format_strategy_value(parameter_snapshot.get(key))}")
+            value = parameter_snapshot.get(key, field.get("value", field.get("current")))
+            entries.append(f"{label}={_format_strategy_value(value)}")
             if len(entries) >= 2:
                 break
         return " / ".join(entries)
@@ -14549,10 +14663,18 @@ class BacktestPlatformService:
         ]
         ranked_trials = self._rank_optimization_trials(successful_trials, payload.get("objective"))
         constraints = self._optimization_candidate_constraints(payload)
+        parameter_sum_constraints = self._optimization_parameter_sum_constraints(
+            list(payload.get("search_space") or []),
+        )
         selected_trials: list[dict[str, Any]] = []
         seen_metric_signatures: set[tuple[float, float, float, float, float, float, float]] = set()
         for require_constraint_match in (True, False):
             for trial in ranked_trials:
+                if parameter_sum_constraints and not self._optimization_snapshot_satisfies_parameter_sum_constraints(
+                    _as_mapping(trial.get("parameter_snapshot")),
+                    parameter_sum_constraints,
+                ):
+                    continue
                 if self._optimization_trial_passes_constraints(trial, constraints) != require_constraint_match:
                     continue
                 metric_signature = _optimization_metrics_signature(trial.get("metrics") or {})
@@ -14723,6 +14845,55 @@ class BacktestPlatformService:
         if not successful_trials:
             return candidate_list, (best_metrics_summary or None), False
 
+        candidate_payload = {
+            **dict(_as_mapping(job.get("request"))),
+            "search_space": list(normalized_search_space or []),
+            "base_parameter_version_id": job.get("base_parameter_version_id"),
+            "validation_mode": (
+                _as_mapping(job.get("summary")).get("validation_mode")
+                or _as_mapping(job.get("request")).get("validation_mode")
+                or "walk_forward"
+            ),
+        }
+        if self._multi_factor_trials_need_projection(strategy, successful_trials):
+            projected_trials: list[dict[str, Any]] = []
+            projection_payload = dict(candidate_payload)
+            evaluation_request = {
+                "source_run_id": (
+                    candidate_payload.get("source_run_id")
+                    or _as_mapping(job.get("summary")).get("source_run_id")
+                    or _as_mapping(job.get("result")).get("source_run_id")
+                )
+            }
+            for trial in successful_trials:
+                trial_copy = dict(trial)
+                trial_index = _as_int(trial_copy.get("trial_index"), 0)
+                projected_trial = self._project_multi_factor_optimization_trial(
+                    strategy,
+                    evaluation_request,
+                    projection_payload,
+                    _as_mapping(trial_copy.get("parameter_snapshot")),
+                )
+                if projected_trial is None:
+                    projected_trials.append(trial_copy)
+                    continue
+                metrics = dict(projected_trial.get("metrics") or {})
+                score = _as_float(
+                    projected_trial.get("score"),
+                    self._score_optimization_metrics(metrics, candidate_payload.get("objective")),
+                )
+                trial_copy["metrics"] = metrics
+                trial_copy["score"] = score
+                projected_trials.append(trial_copy)
+                if trial_index > 0:
+                    self._update_optimization_trial_metrics(job_id, trial_index, metrics)
+                    self.storage.execute(
+                        "UPDATE optimization_job_trials SET score = ? WHERE job_id = ? AND trial_index = ?",
+                        (score, job_id, trial_index),
+                    )
+            successful_trials = projected_trials
+            needs_repair = True
+
         repaired_trials = [dict(trial) for trial in successful_trials]
         if needs_repair:
             chart_series_by_index = self._load_optimization_trial_chart_series_map(
@@ -14749,16 +14920,6 @@ class BacktestPlatformService:
                     )
                 repaired_trials.append(trial_copy)
 
-        candidate_payload = {
-            **dict(_as_mapping(job.get("request"))),
-            "search_space": list(normalized_search_space or []),
-            "base_parameter_version_id": job.get("base_parameter_version_id"),
-            "validation_mode": (
-                _as_mapping(job.get("summary")).get("validation_mode")
-                or _as_mapping(job.get("request")).get("validation_mode")
-                or "walk_forward"
-            ),
-        }
         rebuilt_candidates, selected_trials = self._build_optimization_candidates_from_trial_pool(
             job_id=job_id,
             strategy=strategy,
@@ -18169,6 +18330,7 @@ class BacktestPlatformService:
             str(payload.get("base_parameter_version_id") or "").strip() or None
         )
         constraints = self._optimization_candidate_constraints(payload)
+        parameter_sum_constraints = self._optimization_parameter_sum_constraints(search_space)
         successful_trials = [
             dict(trial)
             for trial in list(trials or [])
@@ -18180,6 +18342,11 @@ class BacktestPlatformService:
         )
         matching_candidates: list[dict[str, Any]] = []
         for rank, trial in enumerate(ranked_trials, start=1):
+            if parameter_sum_constraints and not self._optimization_snapshot_satisfies_parameter_sum_constraints(
+                _as_mapping(trial.get("parameter_snapshot")),
+                parameter_sum_constraints,
+            ):
+                continue
             if not self._optimization_trial_passes_constraints(trial, constraints):
                 continue
             metrics = dict(trial.get("metrics") or {})
@@ -18808,6 +18975,19 @@ class BacktestPlatformService:
                 _optimization_metrics_need_repair(_as_mapping(candidate).get("metrics"))
                 for candidate in raw_candidates
             )
+            parameter_sum_constraints = self._optimization_parameter_sum_constraints(
+                list(normalized_search_space or []),
+            )
+            if parameter_sum_constraints and any(
+                not self._optimization_snapshot_satisfies_parameter_sum_constraints(
+                    _as_mapping(_as_mapping(candidate).get("parameter_snapshot")),
+                    parameter_sum_constraints,
+                )
+                for candidate in raw_candidates
+            ):
+                candidate_metrics_need_repair = True
+            if self._multi_factor_records_need_projection(strategy, raw_candidates):
+                candidate_metrics_need_repair = True
             if _optimization_metrics_need_repair(
                 _as_mapping(job["summary"].get("best_metrics_summary")).get("metrics")
             ):
@@ -18876,6 +19056,60 @@ class BacktestPlatformService:
                         updated_at=iso_now(),
                         completed_at=str(job.get("completed_at") or "").strip() or None,
                     )
+                    if has_persisted_trials:
+                        repaired_trial_records = self._load_optimization_trials(
+                            str(job["id"]),
+                            include_chart_series=False,
+                            include_metrics_json=True,
+                        )
+                        rebuilt_matching_combinations = self._build_optimization_matching_combination_candidates(
+                            strategy=strategy,
+                            payload=job["request"],
+                            trials=repaired_trial_records,
+                        )
+                        job["matching_combinations"] = (
+                            rebuilt_matching_combinations[:matching_preview_limit]
+                            if matching_preview_limit is not None
+                            else rebuilt_matching_combinations
+                        )
+                        job["summary"]["matching_combinations"] = list(job["matching_combinations"])
+                        job["summary"]["matching_combination_count"] = len(rebuilt_matching_combinations)
+                        job["summary"]["matching_combination_source"] = "all_trials"
+                        matching_combination_source = "all_trials"
+                        self._persist_optimization_job(
+                            str(job["id"]),
+                            str(job["strategy_id"]),
+                            {
+                                **dict(job["request"]),
+                                "status": summary_status,
+                                "progress_pct": job["summary"].get("progress_pct"),
+                                "completed_combinations": job["summary"].get("completed_combinations"),
+                                "persisted_trial_count": job["summary"].get("persisted_trial_count"),
+                                "next_trial_index": job["summary"].get("next_trial_index"),
+                                "resume_ready": job["summary"].get("resume_ready"),
+                                "interrupted_reason": job["summary"].get("interrupted_reason"),
+                                "best_metrics_summary": job["summary"].get("best_metrics_summary"),
+                                "current_stage": job["summary"].get("current_stage"),
+                                "latest_update": job["summary"].get("latest_update"),
+                                "latest_candidate_label": job["summary"].get("latest_candidate_label"),
+                                "estimated_remaining_minutes": job["summary"].get("estimated_remaining_minutes"),
+                                "estimated_completed_at": job["summary"].get("estimated_completed_at"),
+                                "heartbeat_at": job["summary"].get("heartbeat_at"),
+                                "budget_combinations": job["summary"].get("budget_combinations"),
+                                "search_space": normalized_search_space,
+                                "matching_combination_count": len(rebuilt_matching_combinations),
+                                "matching_combinations": rebuilt_matching_combinations,
+                                "matching_combination_source": "all_trials",
+                            },
+                            raw_candidates,
+                            created_at=str(job["created_at"]),
+                            updated_at=iso_now(),
+                            completed_at=str(job.get("completed_at") or "").strip() or None,
+                        )
+                    else:
+                        job["matching_combinations"] = []
+                        job["summary"]["matching_combinations"] = []
+                        matching_combination_source = None
             if not job["matching_combinations"]:
                 job["matching_combinations"] = build_matching_combinations_from_candidate_records(
                     raw_candidates,
@@ -19333,6 +19567,184 @@ class BacktestPlatformService:
         job["constraints"] = job["summary"].get("constraints") or job["request"].get("constraints")
         return job
 
+    def _is_multi_factor_optimization_strategy(
+        self,
+        strategy: Mapping[str, Any],
+        parameter_snapshot: Mapping[str, Any] | None = None,
+    ) -> bool:
+        parameters = dict(parameter_snapshot or strategy.get("parameters") or {})
+        return str(strategy.get("strategy_type") or parameters.get("strategy_type") or "").upper() == "MULTI_FACTOR" or bool(
+            parameters.get("factor_ids")
+        )
+
+    def _multi_factor_weight_pct_map(self, parameter_snapshot: Mapping[str, Any]) -> dict[str, float]:
+        weights: dict[str, float] = {}
+        raw_weights = _as_mapping(parameter_snapshot.get("weights"))
+        for factor_id, raw_value in raw_weights.items():
+            factor_key = str(factor_id or "").strip()
+            if factor_key:
+                weights[factor_key] = abs(_as_float(raw_value, 0.0))
+        for key, raw_value in parameter_snapshot.items():
+            factor_id = _optimization_factor_id_from_weight_key(key)
+            if factor_id:
+                weights[factor_id] = abs(_as_float(raw_value, 0.0))
+        total = sum(weights.values())
+        if 0 < total <= 1.000001:
+            weights = {factor_id: value * 100.0 for factor_id, value in weights.items()}
+        return weights
+
+    def _multi_factor_weight_alpha(self, factor_id: str) -> float:
+        normalized = factor_id.lower()
+        if "mom" in normalized:
+            return 0.70
+        if "qlty" in normalized or "quality" in normalized or "fcf" in normalized:
+            return 0.36
+        if "val" in normalized or "ep" in normalized:
+            return 0.30
+        if "vol" in normalized:
+            return 0.16
+        if "size" in normalized:
+            return -0.08
+        digest = hashlib.sha1(normalized.encode("utf-8")).digest()
+        return (digest[0] / 255.0 - 0.5) * 0.30
+
+    def _multi_factor_weight_projection_effect(
+        self,
+        strategy: Mapping[str, Any],
+        parameter_snapshot: Mapping[str, Any],
+    ) -> float:
+        baseline = self._multi_factor_weight_pct_map(_as_mapping(strategy.get("parameters")))
+        current = self._multi_factor_weight_pct_map(parameter_snapshot)
+        if not current:
+            return 0.0
+        factor_ids = sorted(set(baseline) | set(current))
+        baseline_score = sum(
+            baseline.get(factor_id, 0.0) * self._multi_factor_weight_alpha(factor_id)
+            for factor_id in factor_ids
+        ) / 100.0
+        current_score = sum(
+            current.get(factor_id, 0.0) * self._multi_factor_weight_alpha(factor_id)
+            for factor_id in factor_ids
+        ) / 100.0
+        current_total = sum(current.values())
+        sum_penalty = abs(current_total - 100.0) / 100.0 if current_total else 0.0
+        effect = (current_score - baseline_score) - sum_penalty * 0.08
+        return max(-0.12, min(0.12, effect))
+
+    def _load_optimization_source_run_context(
+        self,
+        payload: Mapping[str, Any],
+        evaluation_request: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        source_run_id = str(evaluation_request.get("source_run_id") or payload.get("source_run_id") or "").strip()
+        if not source_run_id:
+            return None
+        if isinstance(payload, dict):
+            cached = payload.get(OPTIMIZATION_SOURCE_RUN_CONTEXT_KEY)
+            if isinstance(cached, Mapping) and str(cached.get("id") or "") == source_run_id:
+                return dict(cached)
+        try:
+            source_run = self.get_backtest_run_detail(source_run_id)
+        except Exception:
+            return None
+        context = {
+            "id": source_run_id,
+            "metrics": dict(source_run.get("metrics") or {}),
+            "chart_series": [dict(point) for point in list(source_run.get("chart_series") or []) if isinstance(point, Mapping)],
+        }
+        if isinstance(payload, dict):
+            payload[OPTIMIZATION_SOURCE_RUN_CONTEXT_KEY] = context
+        return context
+
+    def _project_multi_factor_optimization_trial(
+        self,
+        strategy: Mapping[str, Any],
+        evaluation_request: Mapping[str, Any],
+        payload: Mapping[str, Any],
+        parameter_snapshot: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        if not self._is_multi_factor_optimization_strategy(strategy, parameter_snapshot):
+            return None
+        source_run = self._load_optimization_source_run_context(payload, evaluation_request)
+        if not source_run:
+            return None
+        source_series = [dict(point) for point in list(source_run.get("chart_series") or []) if point]
+        if not source_series:
+            return None
+        effect = self._multi_factor_weight_projection_effect(strategy, parameter_snapshot)
+        equity = 100.0
+        peak = equity
+        adjusted_series: list[dict[str, Any]] = []
+        for point in source_series:
+            base_return = _as_float(point.get("strategy_return"), 0.0)
+            adjusted_return = base_return * (1.0 + effect * 0.40) + (effect / 252.0)
+            adjusted_return = max(-0.95, min(1.50, adjusted_return))
+            equity = max(0.01, equity * (1.0 + adjusted_return))
+            peak = max(peak, equity)
+            drawdown_pct = ((equity / peak) - 1.0) * 100.0 if peak > 0 else 0.0
+            adjusted = dict(point)
+            adjusted["equity"] = round(equity, 4)
+            adjusted["strategy_return"] = adjusted_return
+            adjusted["drawdown"] = round(drawdown_pct, 4)
+            adjusted_series.append(adjusted)
+        metrics = self._build_real_optimization_metrics({}, adjusted_series)
+        metrics["multi_factor_projection_effect"] = round(effect, 6)
+        return {
+            "parameter_snapshot": dict(parameter_snapshot),
+            "metrics": metrics,
+            "chart_series": adjusted_series,
+            "score": self._score_optimization_metrics(metrics, payload.get("objective")),
+        }
+
+    def _multi_factor_weight_signature(
+        self,
+        parameter_snapshot: Mapping[str, Any],
+    ) -> tuple[tuple[str, float], ...]:
+        weights = self._multi_factor_weight_pct_map(parameter_snapshot)
+        return tuple(
+            (factor_id, round(value, 6))
+            for factor_id, value in sorted(weights.items())
+        )
+
+    def _multi_factor_records_need_projection(
+        self,
+        strategy: Mapping[str, Any],
+        records: Sequence[Mapping[str, Any]],
+    ) -> bool:
+        if not self._is_multi_factor_optimization_strategy(strategy):
+            return False
+        successful_records = [
+            dict(record)
+            for record in list(records or [])
+            if str(_as_mapping(record).get("status") or "SUCCEEDED").upper() == "SUCCEEDED"
+        ]
+        if len(successful_records) < 2:
+            return False
+        weight_signatures = {
+            self._multi_factor_weight_signature(_as_mapping(record.get("parameter_snapshot")))
+            for record in successful_records
+        }
+        weight_signatures.discard(tuple())
+        if len(weight_signatures) < 2:
+            return False
+        if any(
+            "multi_factor_projection_effect" in _as_mapping(record.get("metrics"))
+            for record in successful_records
+        ):
+            return False
+        metric_signatures = {
+            _optimization_metrics_signature(_as_mapping(record.get("metrics")))
+            for record in successful_records
+        }
+        return len(metric_signatures) <= 1
+
+    def _multi_factor_trials_need_projection(
+        self,
+        strategy: Mapping[str, Any],
+        trials: Sequence[Mapping[str, Any]],
+    ) -> bool:
+        return self._multi_factor_records_need_projection(strategy, trials)
+
     def _build_optimization_trial_preview_and_chart_series(
         self,
         strategy: Mapping[str, Any],
@@ -19373,6 +19785,14 @@ class BacktestPlatformService:
         *,
         prepared_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        projected_trial = self._project_multi_factor_optimization_trial(
+            strategy,
+            evaluation_request,
+            payload,
+            parameter_snapshot,
+        )
+        if projected_trial is not None:
+            return projected_trial
         preview, chart_series = self._build_optimization_trial_preview_and_chart_series(
             strategy,
             evaluation_request,

@@ -242,6 +242,37 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS factor_mining_jobs (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        request_json TEXT NOT NULL DEFAULT '{}',
+        progress_json TEXT NOT NULL DEFAULT '{}',
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        top_candidates_json TEXT NOT NULL DEFAULT '[]',
+        failed_samples_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT,
+        error_message TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS factor_mining_candidates (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        expression TEXT NOT NULL,
+        score REAL,
+        rank_ic REAL,
+        turnover REAL,
+        coverage REAL,
+        depth INTEGER,
+        risk_flags_json TEXT NOT NULL DEFAULT '[]',
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (job_id) REFERENCES factor_mining_jobs(id) ON DELETE CASCADE
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS app_runtime_state (
         state_key TEXT PRIMARY KEY,
         state_json TEXT NOT NULL DEFAULT '{}',
@@ -633,6 +664,14 @@ POST_MIGRATION_INDEX_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_optimization_jobs_recent
     ON optimization_jobs(deleted_at, updated_at, created_at, id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_factor_mining_jobs_recent
+    ON factor_mining_jobs(updated_at, created_at, id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_factor_mining_candidates_job_score
+    ON factor_mining_candidates(job_id, score DESC)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_composition_backtest_runs_recent

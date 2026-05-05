@@ -4,7 +4,9 @@ export type StrategyType =
   | "MOMENTUM"
   | "MEAN_REVERSION"
   | "BUY_AND_HOLD"
-  | "ASSET_ALLOCATION";
+  | "ASSET_ALLOCATION"
+  | "MULTI_FACTOR";
+export type CreationSessionStrategyType = Exclude<StrategyType, "MULTI_FACTOR">;
 export type BacktestRunStatus =
   | "QUEUED"
   | "RUNNING"
@@ -194,10 +196,71 @@ export type ApiConfirmationFields = {
   parameters: ApiConfirmationFieldEntry[];
 };
 
+export type ApiMultiFactorComponent = {
+  factor_id: string;
+  name?: string | null;
+  family?: string | null;
+  direction?: string | null;
+  weight: number;
+  normalized_weight: number;
+  diagnostic_status?: string | null;
+  pit_coverage?: Record<string, unknown>;
+};
+
+export type ApiMultiFactorNeutralization = {
+  enabled: boolean;
+  method: string;
+  industry_field?: string | null;
+  execution_status: string;
+  blocker_reason?: string | null;
+};
+
+export type ApiMultiFactorProfile = {
+  components: ApiMultiFactorComponent[];
+  neutralization: ApiMultiFactorNeutralization;
+  scoring_method: string;
+  rebalance_frequency: string;
+  pit_snapshot_refs?: Record<string, unknown>;
+  coverage_summary?: Record<string, unknown>;
+};
+
+export type ApiMultiFactorPrecheck = {
+  status: "PASS" | "WARN" | "BLOCKED";
+  factor_count: number;
+  coverage_pct: number;
+  blocked_factors: Array<Record<string, unknown>>;
+  neutralization_status: Record<string, unknown>;
+  estimated_turnover_pct?: number | null;
+  warnings: string[];
+};
+
+export type ApiMultiFactorAttribution = {
+  summary: Record<string, unknown>;
+  factor_contributions: Array<Record<string, unknown>>;
+  industry_exposures: Array<Record<string, unknown>>;
+  coverage: Record<string, unknown>;
+  neutralization_status: Record<string, unknown>;
+  attribution_source: string;
+  warnings: string[];
+};
+
+export type ApiMultiFactorParameterRange = {
+  key: string;
+  label: string;
+  mode: "range" | "fixed" | "discrete";
+  current?: ParameterValue;
+  start?: ParameterValue;
+  end?: ParameterValue;
+  step?: ParameterValue;
+  values?: ParameterValue[];
+};
+
 export type ApiStrategyDetail = ApiStrategyListItem & {
   confirmation_fields?: ApiConfirmationFields;
   parameter_history: ApiParameterHistoryEntry[];
   allowed_actions?: string[];
+  multi_factor_profile?: ApiMultiFactorProfile | null;
+  multi_factor_parameter_ranges?: ApiMultiFactorParameterRange[] | null;
 };
 
 export type ApiOptimizationCandidate = {
@@ -456,7 +519,7 @@ export type ApiStrategyCreationSession = {
 };
 
 export type CreateCreationSessionPayload = {
-  strategy_type?: StrategyType;
+  strategy_type?: CreationSessionStrategyType;
   mode?: "CREATE" | "REVISION";
   base_strategy_id?: string | null;
   base_parameter_version_id?: string | null;
@@ -553,6 +616,7 @@ export type ApiBacktestSubmissionPreview = {
   parameter_version_id?: string | null;
   environment_summary?: Record<string, unknown>;
   blind_test_zone?: Record<string, unknown>;
+  multi_factor_precheck?: ApiMultiFactorPrecheck | null;
 };
 
 export type ApiBacktestRunListItem = {
@@ -781,6 +845,7 @@ export type ApiBacktestRunDetail = {
   trade_audit_items?: ApiBacktestTradeAuditItem[];
   trade_audit?: ApiBacktestTradeAudit[];
   analysis?: ApiBacktestRunDetailAnalysis;
+  multi_factor_attribution?: ApiMultiFactorAttribution | null;
 };
 
 export type ApiSnapshotBlocker = {
@@ -823,6 +888,141 @@ export type ApiSnapshotProviderSummary = {
   unavailable_providers?: string[];
   providers?: Record<string, ApiSnapshotProviderSummaryItem>;
   [key: string]: unknown;
+};
+
+export type ApiSnapshotProviderOpenBBReadinessSummary = {
+  enabled: boolean;
+  provider_count: number;
+  enabled_provider_count: number;
+  credential_ready_provider_count?: number;
+  usable_provider_count?: number;
+  attempted_provider_count: number;
+  attempt_event_count?: number;
+  latest_job_attempt_event_count?: number;
+  latest_job_attempted_provider_count?: number;
+  missing_credential_provider_count: number;
+  [key: string]: unknown;
+};
+
+export type ApiSnapshotProviderReadinessSummary = {
+  provider_count: number;
+  registered_provider_count?: number;
+  enabled_provider_count: number;
+  credential_ready_provider_count?: number;
+  usable_provider_count?: number;
+  attempted_provider_count: number;
+  attempt_event_count?: number;
+  unique_attempted_provider_count?: number;
+  latest_job_attempt_event_count?: number;
+  latest_job_attempted_provider_count?: number;
+  attempt_rollup_policy?: string;
+  quota_limited_provider_count: number;
+  cooldown_provider_count: number;
+  missing_credential_provider_count: number;
+  failed_provider_count: number;
+  auxiliary_only_provider_count: number;
+  target_type_counts: Record<string, number>;
+  top_blockers: Array<Record<string, unknown>>;
+  last_attempt_at?: string | null;
+  openbb: ApiSnapshotProviderOpenBBReadinessSummary;
+};
+
+export type ApiSnapshotProviderRegistryItem = {
+  provider_id: string;
+  source_name: string;
+  access_tier: ApiSnapshotProviderAccessTier | string;
+  credential_requirements: {
+    required_env_vars?: string[];
+    configured?: boolean;
+    configured_env_vars?: string[];
+    missing_env_vars?: string[];
+    secret_persistence?: string;
+    notes?: string[];
+    [key: string]: unknown;
+  };
+  target_types: string[];
+  fallback_order: Record<string, number>;
+  latest_attempt?: Record<string, unknown> | null;
+  quota_cooldown: Record<string, unknown>;
+  error_summary: Record<string, unknown>;
+  pit_permission: {
+    mode?: string;
+    can_upgrade_pit_readiness?: boolean;
+    notes?: string[];
+    [key: string]: unknown;
+  };
+  source_governance?: {
+    source_url?: string;
+    license?: string;
+    source_manifest_required?: boolean;
+    secret_persistence?: string;
+    [key: string]: unknown;
+  };
+  enabled: boolean;
+  credential_ready?: boolean;
+  usable?: boolean;
+  readiness_status?: string;
+  optional_layer?: string | null;
+};
+
+export type ApiSnapshotProviderRegistry = {
+  generated_at: string;
+  openbb_enabled: boolean;
+  items: ApiSnapshotProviderRegistryItem[];
+};
+
+export type ApiSnapshotProviderAttemptItem = {
+  attempt_id: string;
+  provider_id: string;
+  target_type: string;
+  snapshot_kind: string;
+  snapshot_id: string;
+  job_id?: string | null;
+  status: string;
+  selection_status?: string | null;
+  access_tier: ApiSnapshotProviderAccessTier | string;
+  attempted_at?: string | null;
+  next_retry_at?: string | null;
+  quota_limited: boolean;
+  cooldown_active: boolean;
+  reason?: string | null;
+  error?: string | null;
+  landed_row_count: number;
+  landed_symbol_count: number;
+  auxiliary_only: boolean;
+  pit_effect: Record<string, unknown>;
+};
+
+export type ApiSnapshotProviderAttempts = {
+  generated_at: string;
+  latest_job_id?: string | null;
+  items: ApiSnapshotProviderAttemptItem[];
+  rollup?: {
+    policy?: string;
+    latest_job_id?: string | null;
+    event_count?: number;
+    unique_provider_count?: number;
+    latest_job_event_count?: number;
+    latest_job_unique_provider_count?: number;
+    providers?: Array<{
+      provider_id: string;
+      selected_from?: string;
+      selection_reason?: string;
+      event_count?: number;
+      selected_event_count?: number;
+      latest_job_event_count?: number;
+      target_types?: string[];
+      status_counts?: Record<string, number>;
+      status?: string | null;
+      attempted_at?: string | null;
+      job_id?: string | null;
+      quota_limited?: boolean;
+      cooldown_active?: boolean;
+      auxiliary_only?: boolean;
+      landed_row_count?: number;
+      landed_symbol_count?: number;
+    }>;
+  };
 };
 
 export type ApiDatasetSnapshotMetadata = Record<string, unknown> & {
@@ -1905,6 +2105,7 @@ export type ApiSnapshotOverview = {
   blocking_target?: unknown;
   message?: string | null;
   allowed_actions?: string[];
+  provider_readiness_summary?: ApiSnapshotProviderReadinessSummary;
   bond_fixed_income: ApiBondFixedIncomeOverview;
 };
 
@@ -2086,6 +2287,86 @@ export type ApiPitDataOverview = {
       note?: string;
     };
   } | null;
+  full_ready_repair_plan?: {
+    status: string;
+    target_status: string;
+    remaining_symbol_count: number;
+    queue_total_count: number;
+    queue_symbols?: string[];
+    queue_price_symbols?: string[];
+    queue_corporate_action_symbols?: string[];
+    queue_sample: Array<{
+      symbol: string;
+      bucket: string;
+      priority: number;
+      status: string;
+      repair_targets: string[];
+      alias_candidates: string[];
+      price_providers: string[];
+      corporate_action_providers: string[];
+      evidence?: string;
+    }>;
+    bucket_counts: Record<string, number>;
+    provider_cooldowns: Array<{
+      provider: string;
+      target: string;
+      next_retry_at?: string | null;
+      quota_limited?: boolean;
+      reason?: string;
+    }>;
+    provider_cooldown_count: number;
+    next_retry_at?: string | null;
+    zero_event_certificates: Array<Record<string, unknown>>;
+    zero_event_certificate_count: number;
+    waiver_blocks_full_ready: boolean;
+    free_source_policy: string;
+    recommendation: string;
+    rejection_criteria: string[];
+  };
+  external_source_readiness?: {
+    generated_at: string;
+    cache_dir: string;
+    security_policy: Record<string, unknown>;
+    kaggle_auth_status: Record<string, unknown>;
+    kaggle_cache_manifest: {
+      cache_dir: string;
+      status: string;
+      manifest_count: number;
+      datasets: Array<Record<string, unknown>>;
+      recommendations: Array<Record<string, unknown>>;
+      search_terms: string[];
+    };
+    matrix_coverage_status: {
+      status: string;
+      source_count: number;
+      latest_source_url?: string | null;
+      latest_revision_id?: string | null;
+      effective_start?: string | null;
+      effective_end?: string | null;
+      member_event_count: number;
+      recommendations: Array<Record<string, unknown>>;
+      requirement: string;
+    };
+    parquet_catalog_status: {
+      status: string;
+      duckdb_catalog: string;
+      catalog_exists: boolean;
+      normalized_dir: string;
+      parquet_file_count: number;
+      manifest_catalog_count: number;
+      partitioning: string;
+    };
+    polygon_status: Record<string, unknown>;
+    critical_polygon_candidates: Array<{
+      symbol: string;
+      bucket: string;
+      repair_targets: string[];
+      priority: number;
+      reason: string;
+    }>;
+    remaining_blockers_by_source: Record<string, unknown>;
+    source_recommendations: Record<string, unknown>;
+  };
   factor_diagnostics_enabled: boolean;
   verified_diagnostics_enabled?: boolean;
   limited_diagnostics_enabled?: boolean;
@@ -2228,6 +2509,10 @@ export type ApiFactorListItem = {
   frequency: ApiFactorFrequency;
   expression: string;
   descriptor?: ApiFactorDescriptor;
+  factor_family?: string;
+  formula_version?: string;
+  pit_coverage?: Record<string, unknown>;
+  coverage_loss?: number;
   tags: string[];
   data_requirements: string[];
   institutional_note?: string | null;
@@ -2324,6 +2609,100 @@ export type ApiFactorDiagnosticPreview = {
   distribution: Record<string, unknown>;
   risk_flags: string[];
   message: string;
+};
+
+export type ApiFactorMiningJobStatus =
+  | "QUEUED"
+  | "RUNNING"
+  | "CANCEL_REQUESTED"
+  | "CANCELLED"
+  | "COMPLETED"
+  | "PARTIALLY_FAILED"
+  | "FAILED";
+
+export type ApiFactorMiningJobCreatePayload = {
+  universe: string;
+  start_date: string;
+  end_date: string;
+  operators: string[];
+  candidate_count: number;
+  random_seed?: number | null;
+  min_rank_ic: number;
+  max_depth?: number;
+};
+
+export type ApiFactorMiningCandidate = {
+  id: string;
+  expression: string;
+  score: number;
+  rank_ic: number;
+  turnover: number;
+  coverage: number;
+  depth?: number;
+  risk_flags?: string[];
+};
+
+export type ApiFactorMiningJob = {
+  id: string;
+  status: ApiFactorMiningJobStatus;
+  request: ApiFactorMiningJobCreatePayload;
+  progress: {
+    total_candidates: number;
+    evaluated_candidates: number;
+    failed_candidates: number;
+    throughput_per_second: number;
+    percent: number;
+  };
+  top_candidates: ApiFactorMiningCandidate[];
+  failed_samples: Array<{ expression: string; reason: string }>;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+};
+
+export type ApiFactorMiningJobListResponse = {
+  items: ApiFactorMiningJob[];
+  summary: Record<string, unknown>;
+};
+
+export type ApiFactorModelComponentPayload = {
+  factor_id: string;
+  weight: number;
+  direction: ApiFactorDirection;
+};
+
+export type ApiFactorModelNeutralizationPayload = {
+  enabled: boolean;
+  method: string;
+};
+
+export type ApiFactorModelPreviewPayload = {
+  name?: string | null;
+  universe: string;
+  rebalance_frequency: string;
+  scoring_method: string;
+  components: ApiFactorModelComponentPayload[];
+  neutralization: ApiFactorModelNeutralizationPayload;
+};
+
+export type ApiFactorModelPreviewResponse = {
+  status: "READY" | "BLOCKED";
+  normalized_weights: Array<ApiFactorModelComponentPayload & {
+    normalized_weight: number;
+    name?: string | null;
+    diagnostic_status?: string | null;
+  }>;
+  coverage: Record<string, unknown>;
+  score_preview: Array<Record<string, unknown>>;
+  estimated_turnover: number;
+  pit_blockers: Array<Record<string, unknown>>;
+  neutralization_status: Record<string, unknown>;
+  warnings: string[];
+};
+
+export type ApiFactorModelCreatePayload = ApiFactorModelPreviewPayload & {
+  idempotency_key?: string | null;
+  description?: string | null;
 };
 
 export type BacktestRunListQuery = {
@@ -2536,6 +2915,13 @@ export type DemoApi = {
     format?: 'markdown' | 'html',
   ) => Promise<string>;
   getSnapshotOverview: () => Promise<ApiSnapshotOverview>;
+  getSnapshotProviderRegistry?: () => Promise<ApiSnapshotProviderRegistry>;
+  getSnapshotProviderAttempts?: (params?: {
+    limit?: number;
+    provider_id?: string | null;
+    target_type?: string | null;
+    status?: string | null;
+  }) => Promise<ApiSnapshotProviderAttempts>;
   refreshSnapshots: (
     payload?: ApiSnapshotRefreshRequest,
   ) => Promise<ApiSnapshotOverview>;
@@ -2565,6 +2951,12 @@ export type DemoApi = {
   previewFactorDiagnostics: (
     payload: ApiFactorDiagnosticPreviewPayload,
   ) => Promise<ApiFactorDiagnosticPreview>;
+  listFactorMiningJobs: () => Promise<ApiFactorMiningJobListResponse>;
+  createFactorMiningJob: (payload: ApiFactorMiningJobCreatePayload) => Promise<ApiFactorMiningJob>;
+  getFactorMiningJob: (id: string) => Promise<ApiFactorMiningJob>;
+  cancelFactorMiningJob: (id: string) => Promise<ApiFactorMiningJob>;
+  previewFactorModel: (payload: ApiFactorModelPreviewPayload) => Promise<ApiFactorModelPreviewResponse>;
+  createFactorModel: (payload: ApiFactorModelCreatePayload) => Promise<ApiStrategyDetail>;
 };
 
 export type StrategyCompareCard = {

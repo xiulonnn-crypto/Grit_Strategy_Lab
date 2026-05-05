@@ -33,6 +33,9 @@ $defaultTests = @(
     'tests\test_creation_session_refresh.py'
     'tests\test_real_backtest_api.py'
     'tests\test_factor_research_api.py'
+    'tests\test_factor_expression_engine.py'
+    'tests\test_factor_mining_api.py'
+    'tests\test_multi_factor_strategy_api.py'
     'tests\test_optimization_execution_resume.py'
     'tests\test_optimization_resume_api.py'
     'tests\test_strategies_smoke.py'
@@ -40,13 +43,15 @@ $defaultTests = @(
 
 Set-Location -LiteralPath $repoRoot
 
-$output = & $pythonExe -m pytest @defaultTests @PytestArgs 2>&1
+$baseTemp = Join-Path $repoRoot ("pytesttmp-codex-backend-{0}" -f (Get-Date -Format 'yyyyMMddHHmmssfff'))
+$pytestArgsWithTemp = @('--basetemp', $baseTemp) + $PytestArgs
+$output = & $pythonExe -m pytest @defaultTests @pytestArgsWithTemp 2>&1
 $exitCode = $LASTEXITCODE
 
 @(
     '# Codex Backend'
     "started_at = $(Get-Date -Format o)"
-    "command = $pythonExe -m pytest $($defaultTests -join ' ') $($PytestArgs -join ' ')"
+    "command = $pythonExe -m pytest $($defaultTests -join ' ') $($pytestArgsWithTemp -join ' ')"
     ''
 ) + $output | Set-Content -LiteralPath $reportPath -Encoding utf8
 

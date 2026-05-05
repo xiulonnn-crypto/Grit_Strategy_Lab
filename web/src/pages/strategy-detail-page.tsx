@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
 import { formatDateTime, formatPercent, formatRatio } from '../lib/format';
+import { formatFactorDisplayName, formatFactorList } from '../lib/factor-display';
 import { buildOptimizationConfigPath } from '../lib/optimization-routes';
 import { formatParameterLabel as formatSharedParameterLabel, formatParameterValue as formatSharedParameterValue } from '../lib/adapters';
 import { formatStrategyVersionTag, getStrategyDisplayName } from '../lib/strategy-version';
@@ -93,6 +94,16 @@ const PARAMETER_LABELS: Record<string, string> = {
   investment_frequency: '投入频次',
   contribution_anchor: '定投执行锚点',
   dynamic_investment_logic: '动态定投逻辑',
+  factor_ids: '因子篮子',
+  weights: '权重方案',
+  directions: '方向设置',
+  neutralization: '行业中性化',
+  pit_snapshot_refs: 'PIT 快照',
+  dataset_snapshot_id: '数据集快照',
+  fundamental_snapshot_id: '基本面快照',
+  universe_snapshot_id: '股票池快照',
+  preview: '多因子预检',
+  scoring_method: '打分方法',
   allocation_assets: '配置标的',
   investment_mode: '配置类型',
   rebalance_enabled: '再平衡开关',
@@ -155,6 +166,12 @@ const PARAMETER_ORDER: Record<string, number> = {
   lookback_days: 170,
   signal_lookback_days: 180,
   weighting_method: 190,
+  factor_ids: 191,
+  weights: 192,
+  directions: 193,
+  neutralization: 194,
+  pit_snapshot_refs: 195,
+  scoring_method: 196,
   max_position_pct: 200,
   initial_position: 210,
   grid_interval: 220,
@@ -180,6 +197,7 @@ const HIDDEN_PARAMETER_KEYS = new Set([
   'dynamic_investment_proxy_key',
   'dynamic_investment_metric_key',
   'dynamic_investment_rules',
+  'preview',
 ]);
 
 const HIDDEN_HISTORY_PARAMETER_KEYS = new Set([
@@ -237,6 +255,7 @@ function strategyTypeLabel(value: string): string {
     MEAN_REVERSION: '均值回归',
     BUY_AND_HOLD: '定投 / 持有',
     ASSET_ALLOCATION: '资产配置型',
+    MULTI_FACTOR: '多因子',
     GENERAL: '通用策略',
   };
   return map[value] ?? value;
@@ -582,6 +601,25 @@ function hasParameterValue(value: ParameterValue | undefined): boolean {
   return true;
 }
 
+function formatWeightRecord(record: Record<string, unknown>): string {
+  const entries = Object.entries(record)
+    .map(([factorId, weight]) => {
+      const numeric = typeof weight === 'number' ? weight : Number(weight);
+      return Number.isFinite(numeric) ? { factorId, numeric } : null;
+    })
+    .filter((item): item is { factorId: string; numeric: number } => Boolean(item));
+  const totalAbsWeight = entries.reduce((total, entry) => total + Math.abs(entry.numeric), 0);
+  const decimalScale = totalAbsWeight > 0 && totalAbsWeight <= 1.000001;
+  return entries.length
+    ? entries
+        .map(({ factorId, numeric }) => {
+          const pctValue = decimalScale ? numeric * 100 : numeric;
+          return `${formatFactorDisplayName(factorId)} ${Number(pctValue.toFixed(2))}%`;
+        })
+        .join('；')
+    : '-';
+}
+
 function formatParameterValue(key: string, value: ParameterValue): string {
   if (value === null || value === undefined || value === '') return '-';
   if (key === 'strategy_type') return strategyTypeLabel(String(value));
@@ -612,7 +650,38 @@ function formatParameterValue(key: string, value: ParameterValue): string {
       .filter(Boolean);
     return symbols.length ? symbols.join(' / ') : '-';
   }
-  return String(value);
+  if (Array.isArray(value)) {
+    if (key === 'factor_ids') {
+      return value.length ? formatFactorList(value) : '-';
+    }
+    return value.length ? `${value.length} 项配置` : '-';
+  }
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    if (key === 'weights') {
+      return formatWeightRecord(record);
+    }
+    if (key === 'directions') {
+      const entries = Object.entries(record)
+        .map(([factorId, direction]) => `${formatFactorDisplayName(factorId)} ${formatSharedParameterValue(String(direction ?? ''), 'direction')}`)
+        .filter((item) => item.trim().length > 0);
+      return entries.length ? entries.join('；') : '-';
+    }
+    if (key === 'neutralization') {
+      const enabled = Boolean(record.enabled);
+      const method = formatSharedParameterValue(String(record.method ?? 'industry'), 'neutralization_method');
+      const status = typeof record.execution_status === 'string' ? record.execution_status : null;
+      return `${enabled ? '启用' : '未启用'} · ${method}${status ? ` · ${status}` : ''}`;
+    }
+    if (key === 'pit_snapshot_refs') {
+      const entries = Object.entries(record)
+        .map(([snapshotKey, snapshotValue]) => `${parameterLabel(snapshotKey)} ${String(snapshotValue ?? '-')}`)
+        .filter((item) => item.trim().length > 0);
+      return entries.length ? entries.join('；') : '-';
+    }
+    return formatSharedParameterValue(value, key);
+  }
+  return formatSharedParameterValue(value, key);
 }
 
 function formatRunMetric(key: string, value: unknown): string {
@@ -859,6 +928,23 @@ function buildStrategySummary(strategy: ApiStrategyDetail): string {
     if (costEnabled) {
       parts.push('纳入成本模拟');
     }
+  } else if (strategy.strategy_type === 'MULTI_FACTOR') {
+    const factorCount = strategy.multi_factor_profile?.components.length ?? (Array.isArray(parameters.factor_ids) ? parameters.factor_ids.length : 0);
+    const scoringMethod = readStringParameter(parameters.scoring_method);
+    const neutralization =
+      strategy.multi_factor_profile?.neutralization ??
+      (parameters.neutralization && typeof parameters.neutralization === 'object' && !Array.isArray(parameters.neutralization)
+        ? parameters.neutralization as Record<string, unknown>
+        : null);
+    parts.push(factorCount ? `组合 ${factorCount} 个因子形成综合评分` : '按因子篮子形成综合评分');
+    if (scoringMethod) {
+      parts.push(`使用${formatSharedParameterValue(scoringMethod, 'scoring_method')}打分`);
+    }
+    if (neutralization) {
+      const enabled = Boolean(neutralization.enabled);
+      const blocker = typeof neutralization.blocker_reason === 'string' ? neutralization.blocker_reason : null;
+      parts.push(enabled && !blocker ? '启用行业中性化门禁' : blocker ? '行业中性化等待 PIT 行业字段' : '未启用行业中性化');
+    }
   } else {
     parts.push(`执行${strategyTypeLabel(strategy.strategy_type)}策略`);
   }
@@ -934,6 +1020,10 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
     try {
       setOpeningRevision(true);
       setActionError(null);
+      if (strategy.strategy_type === 'MULTI_FACTOR') {
+        navigateTo('/factor-models/new');
+        return;
+      }
       const session = await api.createCreationSession({
         strategy_type: strategy.strategy_type,
         mode: 'REVISION',

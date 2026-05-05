@@ -145,6 +145,10 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `tests/test_composition_api.py`
 - `tests/test_creation_session_refresh.py`
 - `tests/test_real_backtest_api.py`
+- `tests/test_factor_research_api.py`
+- `tests/test_factor_expression_engine.py`
+- `tests/test_factor_mining_api.py`
+- `tests/test_multi_factor_strategy_api.py`
 - `tests/test_optimization_execution_resume.py`
 - `tests/test_optimization_resume_api.py`
 - `tests/test_strategies_smoke.py`
@@ -154,6 +158,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 `scripts/codex-test-frontend.ps1` 当前固定跑以下 focused Vitest 切片：
 
 - `app.routes.foundation.test.tsx`
+- `creation-template.route.test.tsx`
 - `composition.dashboard.test.tsx`
 - `leg.inventory.test.tsx`
 - `composition.workbench.test.tsx`
@@ -162,6 +167,8 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `composition.backtest.result.test.tsx`
 - `composition.allocation.test.tsx`
 - `creation.flow.test.tsx`
+- `factor.sandbox.test.tsx`
+- `factor.model-builder.test.tsx`
 - `backtest.submit.test.tsx`
 - `run-detail.page.test.tsx`
 - `workspace.dashboard.test.tsx`
@@ -229,7 +236,7 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - `.\.venv\Scripts\python.exe -m pip install -e ".[openbb-provider]"`
 - `.\.venv\Scripts\openbb-build.exe`（若命令未在当前 shell 可见，重新打开 shell 或直接调用 venv Scripts 下的可执行文件）
 
-启用后再设置 `GRIT_ENABLE_OPENBB_PROVIDER=1` 与所需 key。凭证只从环境变量读入并在 lazy 初始化时写到内存中的 `obb.user.credentials.*`，不得写入或依赖 `~/.openbb_platform/user_settings.json`。
+启用后再设置 `GRIT_ENABLE_OPENBB_PROVIDER=1` 与所需 key。凭证只从环境变量读入并在 lazy 初始化时写到内存中的 `obb.user.credentials.*`，不得写入或依赖 `~/.openbb_platform/user_settings.json`。只读 provider registry / attempts 响应也只能展示环境变量名称与 configured/missing 状态，不能包含密钥值。
 
 ### 4.4 默认路径真相
 
@@ -389,19 +396,34 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - `composition_audit_events` 是 Phase 1.2 后端 append-only 审计表；创建、结构 PATCH、状态切换、来源冻结、再平衡检查和债券快照刷新影响检查都应写入该表，详情 `audit_trail` 从持久化事件流读取，旧数据才允许回退到临时投影。
 - `GET /data-snapshots/overview` 继续作为唯一快照总览入口；债券/固定收益治理页通过新增 `bond_fixed_income` 分段扩展现有契约，不另开第二套快照 API。Phase 1.2 的债券质量字段包括 `quality_audit`、`repair_rules`、`daily_accrual_status`、`risk_budget_inputs`，修复/补齐仍走 `POST /admin/snapshot-refresh-jobs` 的 `bond` target。
 
-当前多因子一期的补充真相：
+当前多因子第二期第一步的补充真相：
 
-- 一期正式可操作交付面包括 `PIT 清洗中心`、`因子库`、`因子详情/诊断` 与 `因子编辑器`；`挖掘沙盒` 与 `隔离检疫区` 当前只是导航和路线占位，不把数据快照页改造成因子页面，也不调整 `#/snapshots` 现有结构。
-- 左侧导航的 `因子` 组当前包含 `因子库`、`挖掘沙盒` 与 `隔离检疫区`；后两者只渲染后续里程碑说明，不能在本期文档或验收中被写成已接通自动挖掘/检疫流程。`数据` 组必须同时保留 `PIT 清洗中心` 与 `数据快照`；`数据快照` 是既有快照入口，本期只保留导航可达，不做页面结构改造。
+- 正式可操作交付面包括 `PIT 清洗中心`、`因子库`、`因子详情/诊断`、`因子编辑器`、`挖掘沙盒` 与 `多因子策略创建`；`隔离检疫区` 仍是后续里程碑占位。第二期第一步不改策略详情、回测详情、回测配置、优化配置或优化结果页模块。
+- 左侧导航的 `因子` 组当前包含 `因子库`、`挖掘沙盒` 与 `隔离检疫区`；`挖掘沙盒` 已接通本地公式挖掘任务，候选只保存表达式和摘要指标，不进入正式因子库。`数据` 组必须同时保留 `PIT 清洗中心` 与 `数据快照`；`数据快照` 是既有快照入口，本期只保留导航可达，不做页面结构改造。
 - `GET /pit-data` 只负责点时价格、样本池、异常清洗与未来函数门禁摘要，供因子诊断判断数据可用性。
 - `POST /pit-data/research-waiver`、`DELETE /pit-data/research-waiver/{waiver_id}`、`POST /pit-data/identity-overrides` 与 `POST /pit-data/identity-scraper/restart` 是 PIT 清洗中心当前写入面：分别负责研究态豁免、撤销豁免、人工身份映射和身份修复任务重启。它们只改变 PIT 诊断治理状态，不绕过 Full Ready、正式晋升或组合入库门禁。
 - `GET /pit-data` 属于全路由首屏性能敏感 API：服务可以对读取结果使用短时缓存，但 PIT 写入接口必须主动失效缓存，避免豁免、身份覆盖或身份修复任务重启后的页面继续显示旧治理状态。
-- `GET /factors`、`POST /factors`、`GET /factors/{factor_id}`、`POST /factors/{factor_id}/diagnostics`、`POST /factors/diagnostics/preview` 与 `GET /factors/{factor_id}/diagnostics/{run_id}/report` 是多因子一期的固定 API 切片。若请求或响应字段变化，`src/grit_backtest_platform/models.py` 与 `web/src/types.ts` 必须同任务同步。
+- `GET /factors`、`POST /factors`、`GET /factors/{factor_id}`、`POST /factors/{factor_id}/diagnostics`、`POST /factors/diagnostics/preview` 与 `GET /factors/{factor_id}/diagnostics/{run_id}/report` 是因子库固定 API 切片；`POST/GET /factor-mining/jobs`、`GET /factor-mining/jobs/{job_id}`、`POST /factor-mining/jobs/{job_id}/cancel` 是挖掘沙盒固定 API 切片；`POST /factor-models/preview` 与 `POST /factor-models` 是多因子策略创建固定 API 切片。若请求或响应字段变化，`src/grit_backtest_platform/models.py` 与 `web/src/types.ts` 必须同任务同步。
 - 因子详情页交付不得只用路由可达、标题/文案存在或 mock 单测作为通过标准。涉及批准稿的 `#/factors/:factorId` 必须用实际 canonical route（例如 `#/factors/s_mom_12m1m_rank`）建立 UI trace matrix，逐项核对紧凑标题区、十格证据热力图、换手率与衰减、分层收益、极端场景、风险提示、合规足迹和 PDF 报告入口，并保留截图或 DOM 结构证据；未完成这些证据时不能宣布页面与设计稿一致。
-- 默认五类常用因子固定使用分层描述符 canonical ID：`s_mom_12m1m_rank`、`s_val_ep_ltm_raw`、`s_vol_252d_rank`、`s_size_cur_log` 与 `s_qlty_fcfy_ttm_raw`。旧默认 ID 只作为 alias 兼容读取，不能出现在 `GET /factors` 列表展示中。`POST /factors` 必须携带 `source_category_metric_window_operator` 描述符，人工因子 ID 由 `m_<category>_<metric>_<window>_<operator>` 生成，重复 descriptor 返回 409。
-- 基础面 PIT 数据平面由 `ds-fundamentals`、`dataset_fundamental_points` 与 `dataset_fundamental_coverage` 承载；本地启动会幂等生成 repo-controlled 种子快照，覆盖 `ltm_earnings`、`market_cap`、`operating_cash_flow`、`capex`、`enterprise_value` 与 `total_shares`。因此默认估值、质量和规模因子不再默认显示 `基础数据待补`；若 `ds-fundamentals` 缺失或字段不全，应显示明确的 `基础面 PIT 缺口` 并阻止诊断。
+- 默认五类常用因子固定使用 7 个分层描述符 canonical ID：`s_val_ep_ltm_raw`、`s_val_bp_latest_raw`、`s_mom_12m1m_rank`、`s_qlty_roe_ltm_raw`、`s_qlty_fcfy_ttm_raw`、`s_vol_252d_rank` 与 `s_size_cur_log`。旧默认 ID 只作为 alias 兼容读取，不能出现在 `GET /factors` 列表展示中。`POST /factors` 必须携带 `source_category_metric_window_operator` 描述符，人工因子 ID 由 `m_<category>_<metric>_<window>_<operator>` 生成，重复 descriptor 返回 409。
+- 基础面 PIT 数据平面由 `ds-fundamentals`、`dataset_fundamental_points` 与 `dataset_fundamental_coverage` 承载；基本面点位必须有 `available_at`，诊断只能读取 `available_at <= observation_date/as_of_date` 的观测，不能用财报期末日替代可得日。市值默认由复权收盘价乘 `shares_outstanding` 推导，供应商市值只保留差异；企业价值优先使用供应商 EV，缺失时回退为 `MarketCap + TotalDebt - CashAndEquivalents`。若 `ds-fundamentals` 缺失或字段不全，应显示明确的 `基础面 PIT 缺口` 并阻止诊断。
+- 表达式引擎统一供诊断、挖掘和多因子打分使用，白名单只允许价格字段、基础四则、`Lag`、`Return`、`Std`、`Log`、`Rank`、`Winsorize`、`ZScore` 等安全算子；必须拒绝 `import`、`eval`、`__`、分号、未知字段、未知算子、过深 AST 与 `t+N` 未来引用。行业中性化在缺少 PIT 行业字段时只能返回未执行 blocker，不能展示已执行。
+- `POST /factor-models` 必须复用现有 `strategies` 与 `strategy_parameter_versions`，写入 `strategy_type=MULTI_FACTOR` 和参数快照；创建前必须重新跑 preview，存在 blocked factor 或启用行业中性化但缺 PIT 行业字段时拒绝物化。`#/strategies` 新建策略弹层中的“创建多因子策略”只跳转 `#/factor-models/new`，不得调用旧 creation session。
+- 批准 UI 稿里的多因子权重、覆盖率、得分样本、中性化状态和策略门禁只能作为视觉结构示例，运行时必须读取 `GET /factors`、`POST /factor-models/preview` 与 `POST /factor-models` 的真实结果；接口未返回建议权重时只可从当前已选因子等权初始化，不能把设计稿示例权重、指标或成功态复制为运行时真相。
 - 前台文案全部中文；因子入口命名为 `因子库`，不得使用广场类命名。
 - `#/factors` 的研判区属于前端性能敏感面：相关性热力图按 descriptor category 聚类排序，提供 `仅显示高相关对` 筛选，超过可视阈值时使用虚拟矩阵窗口；同类高相关和跨类别高相关必须有不同强度提示。表格 IC sparkline 使用带 0 位虚线的双色区域图；操作列最多勾选两个因子并切换到因子指纹比对。`SANDBOX_READY` 因子的数据门禁旁必须提供 `缺口速报` 浮层和跳转 PIT 覆盖率缺口清单的闭环动作。
+
+当前多因子第二期第二步的补充真相：
+
+- 第二步只把 `strategy_type=MULTI_FACTOR` 接入既有“策略详情 -> 回测配置 -> 回测详情 -> 优化配置 -> 优化结果”链路，采用 type-aware 增强；不得新建多因子专属策略、回测或优化页面，不得新增独立存储系统。
+- 合同保持 additive：策略详情、回测预览、回测详情和优化配置 payload 可选返回 `multi_factor_profile`、`multi_factor_precheck`、`multi_factor_attribution` 与 `multi_factor_parameter_ranges`。非 `MULTI_FACTOR` 策略必须继续返回旧形状或 `null`，不能破坏旧策略。
+- 策略详情仅优化“当前参数”的多因子键值展示；回测配置页仅新增“多因子预检”模块；回测详情页仅新增“因子归因”tab，并在现有决策侧栏追加“因子归因”和“行业暴露”评估；优化配置页仅让“参数范围”支持因子权重、打分方法、再平衡频率和中性化字段；优化结果页不得新增多因子模块，只能复用参数 formatter 防止 raw JSON 外泄。
+- 多因子预检必须同时在 preview 和 submit 前执行。存在 blocked factor，或启用行业中性化但缺 PIT 行业字段时，submit 必须拒绝并返回中文 blocker。行业中性化缺证据时只能展示“未执行/阻塞”，不能显示为已执行。
+- 回测详情的 `multi_factor_attribution.attribution_source` 必须区分估算与完整归因；若数据不足只能展示 estimated/source gap，不能伪装成完整归因。
+- `MULTI_FACTOR` 回测 preview 属于轻量预检路径，只返回预检、快照覆盖和可行动 blocker；不得为了展示预检而执行完整回测模拟或展开全量 universe 成员。非多因子策略继续保留既有 preview 指标与图表行为。
+- 多因子优化配置中的 `factor_weight__*_pct` 必须自动进入“权重合计 100%”默认约束组。优化结果读取旧任务时，应按该约束过滤无效组合，并用来源回测上下文投影不同权重组合的指标，不能把同一组指标复制给多个不同参数候选。
+- 第二步固定 UI Trace Matrix 路由：`#/strategies/strat_4c86521704e2`、`#/strategies/strat_4c86521704e2/backtest-runs/new`、`#/runs/run_83b71f8f2458`、`#/optimization-jobs/new/config?strategy_id=strat_4c86521704e2&entry_point=lab_menu`、`#/optimization-jobs/opt_69682940f4ad`。验收要记录模块增减、中文参数格式化、阻塞态禁用、决策侧栏补项和优化结果页无新增模块。
+- 第二步固定验证仍使用 `powershell -ExecutionPolicy Bypass -File .\scripts\codex-test-backend.ps1`、`powershell -ExecutionPolicy Bypass -File .\scripts\codex-test-frontend.ps1`、`powershell -ExecutionPolicy Bypass -File .\scripts\codex-test-frontend.ps1 -StrictGlobalTypes`。除非 `harness/fixtures/seed_workspace/` 已恢复，不得把 `codex-smoke.ps1` 声明为通过。
 
 当前优化任务 detail 的补充真相：
 
@@ -472,6 +494,7 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - `#/factors/sandbox`
 - `#/factors/quarantine`
 - `#/factors/:factorId`
+- `#/factor-models/new`
 - `#/optimization-jobs`
 - `#/optimization-jobs/new`
 - `#/optimization-jobs/new/config?strategy_id=...`
@@ -682,8 +705,27 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - Company-action snapshot completeness is now defined by formal `dividend/split/reverse_split` probe coverage, not by “every symbol must have at least one event row”.
 - When an action-capable provider successfully probes a symbol and finds no formal events, the pipeline writes a `dataset_symbol_coverage` row with `coverage_kind=corporate_probe` and `probe_status=complete_no_events`.
 - `earnings_report` and `report_filed` remain stored as supplementary action rows, but they do not satisfy formal company-action completeness on their own.
-- OpenBB provider 支持作为 `openbb-provider` extra 启用，价格层 provider id 为 `openbb_yfinance`、`openbb_tiingo`、`openbb_fmp` 与 targeted-only `openbb_alpha_vantage`；固定收益层通过 `openbb_federal_reserve` 与 `openbb_fred` 填补或交叉校验 UST/TIPS 曲线。Universe 只允许写入 `metadata.openbb_current_constituent_check` 辅助校验，不能改变 PIT readiness。
-- OpenBB 相关回归至少覆盖 `tests/test_market_data_provider_chain.py`、`tests/test_backend_api.py` 与 `web/src/snapshots.page.test.tsx`；真实 live 验收只有在安装 extra、执行 `openbb-build`、设置 key、重启 `8000/4173` 并使用 `?v=<timestamp>#/snapshots` 强制 reload 后才可声明。
+- OpenBB provider 支持作为 `openbb-provider` extra 启用，价格层 provider id 为 `openbb_yfinance`、`openbb_tiingo`、`openbb_fmp` 与 targeted-only `openbb_alpha_vantage`；固定收益层通过 `openbb_federal_reserve` 与 `openbb_fred` 填补或交叉校验 UST/TIPS 曲线。若当前 OpenBB 生成路由与 provider interface 版本不匹配，固定收益 adapter 会降级到 provider fetcher 读取曲线数据，并统一把 OpenBB decimal rate 转为本项目的 `ytm_pct` 百分点口径。Universe 只允许写入 `metadata.openbb_current_constituent_check` 辅助校验，不能改变 PIT readiness。
+- 数据源治理新增只读 `GET /data-snapshots/provider-registry` 与 `GET /data-snapshots/provider-attempts`。它们只归一化运行时 provider 链、快照 `metadata.provider_summary`、最近 `snapshot_refresh_jobs.summary_json.refresh_stats` 与债券 refresh stats，不新增表、不触发外部请求；`/data-snapshots/overview` 只 additive 增加 `provider_readiness_summary`。
+- `provider_readiness_summary` 的收益口径必须区分 `registered_provider_count`、`enabled_provider_count`、`credential_ready_provider_count` 与 `usable_provider_count`：registered 只表示已登记或运行时可见，enabled 表示当前链路启用，credential-ready 表示所需只读环境变量齐备，usable 还要求当前没有 quota/cooldown。`openbb` 子摘要也必须暴露 credential-ready、usable 与 latest-job attempt 计数；运营复盘不能把 registered 或 enabled 直接写成“新增数据源已产生补数收益”。
+- `provider-attempts` 默认 `limit=100`，最大 `500`，可按 `provider_id`、`target_type`、`status` 过滤；结果必须按最近 job / snapshot 更新时间倒序，并保留 quota/cooldown、missing credentials、错误摘要和 PIT effect。原始 `items[]` 保留事件明细，`rollup.policy=unique_provider_latest_job_priority` 作为收益口径：每个 provider 先取最新 refresh job 内的代表尝试，若最新 job 没有该 provider 才回退到快照 metadata，避免 job 与 metadata 双重投影放大尝试数。
+- `GRIT_ENABLE_OPENBB_PROVIDER` 未开启时不得 import 或实例化 `openbb_provider`。Registry 可以列出 OpenBB 静态定义但必须显示 `enabled=false`；OpenBB current constituents 固定为 `universe_current_constituents_auxiliary`，只能作为 metadata/attempt 辅助记录，`can_upgrade_pit_readiness=false`。
+- OpenBB 相关回归至少覆盖 `tests/test_market_data_provider_chain.py`、`tests/test_backend_api.py` 与 `web/src/snapshots.page.test.tsx`；真实 live 验收只有在安装 extra、执行 `openbb-build`、设置 key、重启 `8000/4173` 并使用 `?v=<timestamp>#/snapshots` 强制 reload 后才可声明。数据覆盖收益评估必须等待 refresh job 终态，再对比 `READY/INCOMPLETE`、`landed_row_count`、`landed_symbol_count`、symbol coverage 缺口和 `provider-attempts.rollup`，不能用 OpenBB registered/enabled 数量代替补数收益。
+- Provider registry 后端切片的固定验证入口是 `powershell -ExecutionPolicy Bypass -File .\scripts\codex-test-backend.ps1`；若只同步 `web/src/types.ts` 契约镜像而不改页面，应补跑 `powershell -ExecutionPolicy Bypass -File .\scripts\codex-test-frontend.ps1 -StrictGlobalTypes`。
+
+## 2026-05-05 PIT External Source Repair
+
+- `/pit-data` additive exposes `external_source_readiness` for the PIT external-source path. It summarizes Kaggle credential presence, Kaggle cache manifests, S&P 500 historical component Matrix coverage, DuckDB/Parquet catalog readiness, Polygon credential presence, source-specific blockers, and the top critical Polygon repair candidates.
+- Credential handling is status-only. `KAGGLE_API_TOKEN`, `KAGGLE_USERNAME`/`KAGGLE_KEY`, `~/.kaggle/access_token`, `~/.kaggle/kaggle.json`, and `POLYGON_API_KEY` may be detected as present/missing/invalid, but secret values must never be written to repo files, logs, SQLite payloads, manifests, screenshots, or docs. Any token pasted in chat or logs must be revoked before use.
+- The fixed PIT bulk cache directory is `C:\tmp\grit-pit-bulk-cache` unless `GRIT_PIT_BULK_CACHE_DIR` is explicitly set. Large Kaggle ZIP/CSV files, DuckDB catalogs, manifests, and partitioned Parquet output stay outside the repo.
+- Local operator entry points are `scripts/codex-pit-external-preflight.ps1`, `scripts/codex-pit-kaggle-search.ps1`, `scripts/codex-pit-kaggle-download.ps1`, `scripts/codex-pit-bulk-normalize.ps1`, and `scripts/codex-pit-diff-repair.ps1`.
+- Kaggle search terms are fixed to `survivorship bias free`, `delisted`, `US stock market historical data delisted`, and `EOD historical data stocks`. The first preferred bulk source is `borismarjanovic/price-volume-data-for-all-us-stocks-etfs`; delisted archives must record license, schema, coverage years, hash, row count, and source URL before import.
+- S&P 500 historical component Matrix data is normalized to `effective_date / symbol / raw_symbol / membership_status / source_revision_id`. Matrix decides historical membership only; Kaggle price data and Polygon action evidence must be attached separately.
+- Bulk normalization must use DuckDB streaming over CSV/TXT files and partition output by `symbol_prefix + year`. Pandas all-file reads are not allowed for 20GB-class datasets.
+- Diff repair reads the live `/pit-data.full_ready_repair_plan` price queue at execution time, falling back to `coverage_gap` price buckets when an older running API has not exposed `queue_price_symbols` yet. Do not hard-code prior observed counts. Only price-gap symbols may be imported into the main PIT price snapshot, share-class / historical ticker aliases such as hyphen, dot, underscore, and compact class suffixes must be resolved against the local catalog, and price conflicts over the configured threshold must be marked `price_conflict` instead of overwriting existing `ds-price` rows.
+- When an existing `ds-price` snapshot already contains external price repair evidence such as `kaggle_huge_stock_market_dataset`, later repair runs must preserve that target universe and provider summary. Corporate-action-only or precision repair batches may add rows and remove newly covered symbols from the price missing list, but they must not widen the price denominator or erase the external-source provider record.
+- Kaggle adjusted OHLCV may clear price blockers only. Without split/dividend evidence or an explicit zero-event certificate, it cannot clear corporate-action blockers. Polygon precision repair may use aggregates, inactive ticker/reference, splits, and dividends when `POLYGON_API_KEY` is present.
+- Validation must include Matrix parser coverage, Kaggle manifest/schema/catalog behavior, diff repair queue scoping, adjusted-price conflict blocking, Polygon rate-limit/404 mocks, and live `/pit-data` evidence. Full Ready may only be declared when missing price rows are zero, corporate-action evidence is complete, and PIT cleaning rules are confirmed.
 
 ## 2026-04-17 Optimization Objective / Constraint Alignment
 

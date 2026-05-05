@@ -52,6 +52,89 @@ def _ensure_json_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def _ensure_table_columns(conn: sqlite3.Connection, table_name: str, columns: list[tuple[str, str]]) -> None:
+    existing = _table_columns(conn, table_name)
+    if not existing:
+        return
+    for column_name, column_ddl in columns:
+        if column_name not in existing:
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_ddl}")
+
+
+def _fundamental_points_primary_key(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute("PRAGMA table_info(dataset_fundamental_points)").fetchall()
+    keyed = [
+        (int(row["pk"] or 0), str(row["name"]))
+        for row in rows
+        if int(row["pk"] or 0) > 0
+    ]
+    return [name for _order, name in sorted(keyed)]
+
+
+def _rebuild_fundamental_points_available_at_pk(conn: sqlite3.Connection) -> None:
+    if _fundamental_points_primary_key(conn) == ["dataset_snapshot_id", "symbol", "date", "available_at"]:
+        return
+    conn.execute("ALTER TABLE dataset_fundamental_points RENAME TO dataset_fundamental_points_legacy_pk")
+    conn.execute(
+        """
+        CREATE TABLE dataset_fundamental_points (
+            dataset_snapshot_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            date TEXT NOT NULL,
+            period_end_date TEXT,
+            available_at TEXT NOT NULL,
+            ltm_earnings REAL,
+            market_cap REAL,
+            book_value_equity REAL,
+            operating_cash_flow REAL,
+            capex REAL,
+            enterprise_value REAL,
+            total_shares REAL,
+            shares_outstanding REAL,
+            total_debt REAL,
+            cash_and_equivalents REAL,
+            provider_market_cap REAL,
+            provider_enterprise_value REAL,
+            market_cap_source TEXT,
+            enterprise_value_source TEXT,
+            source TEXT NOT NULL DEFAULT '',
+            fallback_source TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(dataset_snapshot_id, symbol, date, available_at),
+            FOREIGN KEY(dataset_snapshot_id) REFERENCES dataset_snapshots(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO dataset_fundamental_points (
+            dataset_snapshot_id, symbol, date, period_end_date, available_at,
+            ltm_earnings, market_cap, book_value_equity,
+            operating_cash_flow, capex, enterprise_value, total_shares,
+            shares_outstanding, total_debt, cash_and_equivalents,
+            provider_market_cap, provider_enterprise_value,
+            market_cap_source, enterprise_value_source,
+            source, fallback_source, metadata_json
+        )
+        SELECT
+            dataset_snapshot_id, symbol, date, COALESCE(period_end_date, date),
+            COALESCE(available_at, date),
+            ltm_earnings, market_cap, book_value_equity,
+            operating_cash_flow, capex, enterprise_value, total_shares,
+            COALESCE(shares_outstanding, total_shares), total_debt, cash_and_equivalents,
+            provider_market_cap, provider_enterprise_value,
+            market_cap_source, enterprise_value_source,
+            source, fallback_source, metadata_json
+        FROM dataset_fundamental_points_legacy_pk
+        """
+    )
+    conn.execute("DROP TABLE dataset_fundamental_points_legacy_pk")
+
+
 def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute(
@@ -227,16 +310,26 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
             dataset_snapshot_id TEXT NOT NULL,
             symbol TEXT NOT NULL,
             date TEXT NOT NULL,
+            period_end_date TEXT,
+            available_at TEXT,
             ltm_earnings REAL,
             market_cap REAL,
+            book_value_equity REAL,
             operating_cash_flow REAL,
             capex REAL,
             enterprise_value REAL,
             total_shares REAL,
+            shares_outstanding REAL,
+            total_debt REAL,
+            cash_and_equivalents REAL,
+            provider_market_cap REAL,
+            provider_enterprise_value REAL,
+            market_cap_source TEXT,
+            enterprise_value_source TEXT,
             source TEXT NOT NULL DEFAULT '',
             fallback_source TEXT,
             metadata_json TEXT NOT NULL DEFAULT '{}',
-            PRIMARY KEY(dataset_snapshot_id, symbol, date),
+            PRIMARY KEY(dataset_snapshot_id, symbol, date, available_at),
             FOREIGN KEY(dataset_snapshot_id) REFERENCES dataset_snapshots(id) ON DELETE CASCADE
         )
         """
@@ -398,6 +491,29 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_dataset_fundamental_points_symbol_date ON dataset_fundamental_points(symbol, date)"
+    )
+    _ensure_table_columns(
+        conn,
+        "dataset_fundamental_points",
+        [
+            ("period_end_date", "TEXT"),
+            ("available_at", "TEXT"),
+            ("book_value_equity", "REAL"),
+            ("shares_outstanding", "REAL"),
+            ("total_debt", "REAL"),
+            ("cash_and_equivalents", "REAL"),
+            ("provider_market_cap", "REAL"),
+            ("provider_enterprise_value", "REAL"),
+            ("market_cap_source", "TEXT"),
+            ("enterprise_value_source", "TEXT"),
+        ],
+    )
+    _rebuild_fundamental_points_available_at_pk(conn)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dataset_fundamental_points_symbol_date ON dataset_fundamental_points(symbol, date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dataset_fundamental_points_symbol_available_at ON dataset_fundamental_points(symbol, available_at)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_bond_fixed_income_instrument_date ON bond_fixed_income_snapshots(instrument_id, snapshot_date)"
@@ -802,12 +918,22 @@ class MarketDataRepository:
                     dataset_snapshot_id,
                     self._normalize_symbol(str(item["symbol"])),
                     str(item["date"]),
+                    item.get("period_end_date") or item.get("date"),
+                    item.get("available_at") or item.get("date"),
                     item.get("ltm_earnings"),
                     item.get("market_cap"),
+                    item.get("book_value_equity"),
                     item.get("operating_cash_flow"),
                     item.get("capex"),
                     item.get("enterprise_value"),
                     item.get("total_shares"),
+                    item.get("shares_outstanding") or item.get("total_shares"),
+                    item.get("total_debt"),
+                    item.get("cash_and_equivalents"),
+                    item.get("provider_market_cap"),
+                    item.get("provider_enterprise_value"),
+                    item.get("market_cap_source"),
+                    item.get("enterprise_value_source"),
                     str(item.get("source") or snapshot.get("source") or ""),
                     item.get("fallback_source", snapshot.get("fallback_source")),
                     dumps(_ensure_json_dict(item.get("metadata"))),
@@ -819,10 +945,14 @@ class MarketDataRepository:
                 conn.executemany(
                     """
                     INSERT INTO dataset_fundamental_points (
-                        dataset_snapshot_id, symbol, date, ltm_earnings, market_cap,
+                        dataset_snapshot_id, symbol, date, period_end_date, available_at,
+                        ltm_earnings, market_cap, book_value_equity,
                         operating_cash_flow, capex, enterprise_value, total_shares,
+                        shares_outstanding, total_debt, cash_and_equivalents,
+                        provider_market_cap, provider_enterprise_value,
+                        market_cap_source, enterprise_value_source,
                         source, fallback_source, metadata_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     point_rows,
                 )
@@ -1374,6 +1504,7 @@ class MarketDataRepository:
         *,
         start_date: str | None = None,
         end_date: str | None = None,
+        as_of_date: str | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         sql = """
             SELECT *
@@ -1386,12 +1517,15 @@ class MarketDataRepository:
             sql += f" AND symbol IN ({','.join('?' for _ in normalized_symbols)})"
             params.extend(normalized_symbols)
         if start_date:
-            sql += " AND date >= ?"
+            sql += " AND COALESCE(available_at, date) >= ?"
             params.append(start_date)
         if end_date:
-            sql += " AND date <= ?"
+            sql += " AND COALESCE(available_at, date) <= ?"
             params.append(end_date)
-        sql += " ORDER BY symbol ASC, date ASC"
+        if as_of_date:
+            sql += " AND COALESCE(available_at, date) <= ?"
+            params.append(as_of_date)
+        sql += " ORDER BY symbol ASC, COALESCE(available_at, date) ASC, date ASC"
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         grouped: dict[str, list[dict[str, Any]]] = {}

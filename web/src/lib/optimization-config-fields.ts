@@ -1,4 +1,5 @@
 import type { ApiStrategyDetail, ParameterValue, StrategyType } from "../types";
+import { formatFactorDisplayName } from "./factor-display";
 
 type OptimizationFieldControl = "text" | "select" | "multiselect";
 
@@ -40,6 +41,20 @@ export const ALLOCATION_REBALANCE_FREQUENCY_OPTIONS: OptimizationFieldOption[] =
   { value: "quarterly", label: "季度" },
   { value: "semiannual", label: "半年" },
   { value: "yearly", label: "年度" },
+];
+
+export const MULTI_FACTOR_SCORING_METHOD_OPTIONS: OptimizationFieldOption[] = [
+  { value: "zscore_weighted", label: "Z-Score 加权" },
+  { value: "rank_weighted", label: "Rank 加权" },
+];
+
+export const MULTI_FACTOR_NEUTRALIZATION_ENABLED_OPTIONS: OptimizationFieldOption[] = [
+  { value: "false", label: "不启用" },
+  { value: "true", label: "启用行业中性化" },
+];
+
+export const MULTI_FACTOR_NEUTRALIZATION_METHOD_OPTIONS: OptimizationFieldOption[] = [
+  { value: "industry", label: "行业中性" },
 ];
 
 const OPTIMIZATION_SELECTION_FIELDS: Partial<
@@ -93,6 +108,32 @@ const OPTIMIZATION_SELECTION_FIELDS: Partial<
     { key: "rebalance_threshold_pct", label: "偏离阈值(%)", control: "text" },
     { key: "fee_bps", label: "交易费(bps)", control: "text" },
     { key: "slippage_bps", label: "滑点(bps)", control: "text" },
+  ],
+  MULTI_FACTOR: [
+    {
+      key: "scoring_method",
+      label: "打分方法",
+      control: "multiselect",
+      options: MULTI_FACTOR_SCORING_METHOD_OPTIONS,
+    },
+    {
+      key: "rebalance_frequency",
+      label: "再平衡频率",
+      control: "multiselect",
+      options: ALLOCATION_REBALANCE_FREQUENCY_OPTIONS,
+    },
+    {
+      key: "neutralization_enabled",
+      label: "是否启用行业中性化",
+      control: "multiselect",
+      options: MULTI_FACTOR_NEUTRALIZATION_ENABLED_OPTIONS,
+    },
+    {
+      key: "neutralization_method",
+      label: "中性化方法",
+      control: "multiselect",
+      options: MULTI_FACTOR_NEUTRALIZATION_METHOD_OPTIONS,
+    },
   ],
 };
 
@@ -151,6 +192,64 @@ function readAllocationAssets(
     .filter((asset): asset is { symbol: string; displayName: string | null } => asset !== null);
 }
 
+function readFactorWeightSeeds(
+  strategy: ApiStrategyDetail,
+  parameterSnapshot?: Record<string, ParameterValue> | null,
+): OptimizationParameterSeed[] {
+  const weights = strategy.parameters?.weights;
+  if (!weights || typeof weights !== "object" || Array.isArray(weights)) {
+    return [];
+  }
+  const numericEntries = Object.entries(weights as Record<string, unknown>)
+    .map(([factorId, rawWeight]) => {
+      const numeric = typeof rawWeight === "number" ? rawWeight : Number(rawWeight);
+      return Number.isFinite(numeric) ? { factorId, numeric } : null;
+    })
+    .filter((entry): entry is { factorId: string; numeric: number } => entry !== null);
+  const totalAbsWeight = numericEntries.reduce((total, entry) => total + Math.abs(entry.numeric), 0);
+  const decimalScale = totalAbsWeight > 0 && totalAbsWeight <= 1.000001;
+  const components = strategy.multi_factor_profile?.components ?? [];
+  const componentNames = new Map(
+    components.map((component) => [component.factor_id, component.name ?? component.factor_id] as const),
+  );
+  return numericEntries
+    .map(({ factorId, numeric }) => {
+      const key = `factor_weight__${factorId}_pct`;
+      const snapshotValue = parameterSnapshot?.[key];
+      const currentPct = decimalScale ? Math.abs(numeric) * 100 : Math.abs(numeric);
+      const seed: OptimizationParameterSeed = {
+        key,
+        label: `因子权重 · ${formatFactorDisplayName(factorId, componentNames.get(factorId))}`,
+        control: "text" as const,
+        value: typeof snapshotValue === "number" ? snapshotValue : Number(currentPct.toFixed(2)),
+      };
+      return seed;
+    })
+    .filter((field): field is OptimizationParameterSeed => field !== null && hasParameterValue(field.value));
+}
+
+function readMultiFactorConfiguredValue(
+  strategy: ApiStrategyDetail,
+  key: string,
+  parameterSnapshot?: Record<string, ParameterValue> | null,
+): ParameterValue | undefined {
+  if (parameterSnapshot?.[key] !== undefined) {
+    return parameterSnapshot[key];
+  }
+  const neutralization = strategy.parameters?.neutralization;
+  const neutralizationRecord =
+    neutralization && typeof neutralization === "object" && !Array.isArray(neutralization)
+      ? (neutralization as Record<string, unknown>)
+      : {};
+  if (key === "neutralization_enabled") {
+    return String(Boolean(neutralizationRecord.enabled));
+  }
+  if (key === "neutralization_method") {
+    return typeof neutralizationRecord.method === "string" ? neutralizationRecord.method : "industry";
+  }
+  return readParameterValue(strategy.parameters?.[key]);
+}
+
 export function collectOptimizationParameterSeeds(
   strategy: ApiStrategyDetail,
   parameterSnapshot?: Record<string, ParameterValue> | null,
@@ -177,7 +276,10 @@ export function collectOptimizationParameterSeeds(
     .map((field) => {
       const parameterEntry = parameterEntries.get(field.key);
       const topLevelEntry = topLevelEntries.get(field.key);
-      const currentStrategyValue = readParameterValue(strategy.parameters?.[field.key]);
+      const currentStrategyValue =
+        strategy.strategy_type === "MULTI_FACTOR"
+          ? readMultiFactorConfiguredValue(strategy, field.key, parameterSnapshot)
+          : readParameterValue(strategy.parameters?.[field.key]);
       const value =
         parameterSnapshot?.[field.key] ??
         currentStrategyValue ??
@@ -199,6 +301,10 @@ export function collectOptimizationParameterSeeds(
       } satisfies OptimizationParameterSeed;
     })
     .filter((field) => hasParameterValue(field.value));
+
+  if (strategy.strategy_type === "MULTI_FACTOR") {
+    return [...readFactorWeightSeeds(strategy, parameterSnapshot), ...configuredSeeds];
+  }
 
   if (strategy.strategy_type !== "ASSET_ALLOCATION") {
     return configuredSeeds;

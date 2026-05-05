@@ -10,6 +10,7 @@ PUBLIC_PROVIDER_NAMES = {
     "yfinance",
     "akshare_us",
     "stooq",
+    "github_sp500_historical_components",
     "wikipedia_revision_history",
     "wikipedia_sp500_changes_table",
     "wikipedia_nasdaq100_changes_table",
@@ -37,6 +38,8 @@ FREE_ACCOUNT_PROVIDER_NAMES = {
     "openbb_tiingo",
     "openbb_alpha_vantage",
     "openbb_fred",
+    "kaggle_huge_stock_market_dataset",
+    "kaggle_delisted_bulk_archive",
 }
 
 PAID_OPTIONAL_PROVIDER_NAMES = {
@@ -48,6 +51,7 @@ PAID_OPTIONAL_PROVIDER_NAMES = {
     "futu_rehab",
     "openbb_fmp",
     "openbb_index_constituents",
+    "polygon",
 }
 
 

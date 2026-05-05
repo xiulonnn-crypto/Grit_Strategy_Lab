@@ -20,6 +20,7 @@ $uvicornOutLog = Join-Path $uvicornLogDir 'uvicorn-8010.out.log'
 $uvicornErrLog = Join-Path $uvicornLogDir 'uvicorn-8010.err.log'
 $focusedTests = @(
     'app.routes.foundation.test.tsx'
+    'creation-template.route.test.tsx'
     'runs.index.page.test.tsx'
     'composition.dashboard.test.tsx'
     'leg.inventory.test.tsx'
@@ -29,6 +30,8 @@ $focusedTests = @(
     'composition.backtest.result.test.tsx'
     'composition.allocation.test.tsx'
     'creation.flow.test.tsx'
+    'factor.sandbox.test.tsx'
+    'factor.model-builder.test.tsx'
     'backtest.submit.test.tsx'
     'run-detail.page.test.tsx'
     'workspace.dashboard.test.tsx'
@@ -102,9 +105,13 @@ function Invoke-LoggedNodeCommand {
     $startInfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8
     $startInfo.StandardErrorEncoding = [System.Text.Encoding]::UTF8
     $startInfo.CreateNoWindow = $true
-    $startInfo.Environment.Clear()
+    $processEnvironment = $startInfo.Environment
+    if ($null -eq $processEnvironment) {
+        $processEnvironment = $startInfo.EnvironmentVariables
+    }
+    $processEnvironment.Clear()
     foreach ($key in $environment.Keys) {
-        $startInfo.Environment[$key] = $environment[$key]
+        $processEnvironment[$key] = $environment[$key]
     }
 
     $process = New-Object System.Diagnostics.Process

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
-import { ApiError, type ApiBacktestRunDetail, type ApiStrategyDetail } from '../types';
+import { formatFactorDisplayName } from '../lib/factor-display';
+import { ApiError, type ApiBacktestRunDetail, type ApiBacktestSubmissionPreview, type ApiStrategyDetail } from '../types';
 import './creation-backtest.css';
 
 type RunPrefill = {
@@ -50,6 +51,17 @@ const TEXT = {
   waitingConfirm: '待确认',
   refreshNeeded: '待刷新',
   singleSymbolDirect: '不适用（单标的）',
+  multiFactorPrecheckEyebrow: '多因子预检',
+  multiFactorPrecheckTitle: '多因子预检',
+  multiFactorPrecheckCopy: '提交前确认因子覆盖、PIT 状态、行业中性化门禁与预估换手。',
+  factorCount: '因子数量',
+  factorCoverage: '覆盖率',
+  blockedFactors: '阻塞因子',
+  neutralizationStatus: '行业中性化',
+  estimatedTurnover: '预估换手',
+  pitWarnings: 'PIT 警示',
+  precheckLoading: '正在预检',
+  precheckUnavailable: '预检暂不可用',
 } as const;
 
 const DEFAULT_END_DATE = '2026-03-24';
@@ -130,6 +142,44 @@ function KeyValue({ label, value }: { label: string; value: string }): JSX.Eleme
   );
 }
 
+function formatPercentValue(value: unknown): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '-';
+  }
+  const normalized = Math.abs(value) > 1 ? value : value * 100;
+  return `${normalized.toFixed(1)}%`;
+}
+
+function formatNeutralizationStatus(value: unknown): string {
+  if (!value || typeof value !== 'object') {
+    return '-';
+  }
+  const record = value as Record<string, unknown>;
+  const enabled = Boolean(record.enabled);
+  const status = typeof record.execution_status === 'string' ? record.execution_status : typeof record.status === 'string' ? record.status : '';
+  const blocker = typeof record.blocker_reason === 'string' ? record.blocker_reason : '';
+  if (blocker) {
+    return blocker;
+  }
+  return `${enabled ? '启用' : '未启用'}${status ? ` · ${status}` : ''}`;
+}
+
+function formatBlockedFactors(value: unknown): string {
+  if (!Array.isArray(value) || !value.length) {
+    return '无阻塞';
+  }
+  return value
+    .map((item) => {
+      if (!item || typeof item !== 'object') {
+        return String(item ?? '').trim();
+      }
+      const record = item as Record<string, unknown>;
+      return formatFactorDisplayName(record.factor_id, typeof record.name === 'string' ? record.name : null);
+    })
+    .filter(Boolean)
+    .join(' / ');
+}
+
 export function BacktestSubmitPageCn({
   periodYears,
   strategyId,
@@ -144,6 +194,9 @@ export function BacktestSubmitPageCn({
   const [sourceRunDetail, setSourceRunDetail] = useState<ApiBacktestRunDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [sourceRunError, setSourceRunError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<ApiBacktestSubmissionPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const initialRange = getPresetRange(periodYears);
@@ -237,6 +290,61 @@ export function BacktestSubmitPageCn({
   const submitState = strategy?.allowed_actions?.includes('backtest')
     ? TEXT.readyToSubmit
     : TEXT.waitingConfirm;
+  const multiFactorPrecheck = preview?.multi_factor_precheck ?? null;
+  const multiFactorBlocked = strategy?.strategy_type === 'MULTI_FACTOR' && multiFactorPrecheck?.status === 'BLOCKED';
+
+  useEffect(() => {
+    if (!strategy || strategy.strategy_type !== 'MULTI_FACTOR') {
+      setPreview(null);
+      setPreviewLoading(false);
+      setPreviewError(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadPreview(): Promise<void> {
+      try {
+        setPreviewLoading(true);
+        setPreviewError(null);
+        const payload = await api.previewBacktestRun(strategyId, {
+          start_date: startDate,
+          end_date: endDate,
+          parameter_version_id: effectiveParameterVersionId ?? undefined,
+          dataset_snapshot_id: effectiveDatasetSnapshotId ?? undefined,
+          universe_snapshot_id: effectiveUniverseSnapshotId ?? undefined,
+          ...(sourceRunId ? { source_run_id: sourceRunId } : {}),
+        });
+        if (!cancelled) {
+          setPreview(payload);
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setPreview(null);
+          setPreviewError((caught as Error).message);
+        }
+      } finally {
+        if (!cancelled) {
+          setPreviewLoading(false);
+        }
+      }
+    }
+
+    void loadPreview();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    api,
+    effectiveDatasetSnapshotId,
+    effectiveParameterVersionId,
+    effectiveUniverseSnapshotId,
+    endDate,
+    sourceRunId,
+    startDate,
+    strategy,
+    strategyId,
+  ]);
 
   function applyPreset(years: number): void {
     const range = getPresetRange(years);
@@ -258,6 +366,10 @@ export function BacktestSubmitPageCn({
 
   async function submit(): Promise<void> {
     if (!validateDates()) {
+      return;
+    }
+    if (multiFactorBlocked) {
+      setError('多因子预检未通过，请先处理阻塞因子或行业中性化 PIT 字段。');
       return;
     }
 
@@ -308,7 +420,7 @@ export function BacktestSubmitPageCn({
           <button className="ghost-button" onClick={() => navigateTo(`/strategies/${strategyId}`)} type="button">
             {TEXT.backToStrategy}
           </button>
-          <button className="primary-button" disabled={busy} onClick={() => void submit()} type="button">
+          <button className="primary-button" disabled={busy || multiFactorBlocked} onClick={() => void submit()} type="button">
             {TEXT.submit}
           </button>
         </div>
@@ -399,6 +511,27 @@ export function BacktestSubmitPageCn({
               <KeyValue label={TEXT.submitState} value={submitState} />
             </div>
           </section>
+
+          {strategy?.strategy_type === 'MULTI_FACTOR' ? (
+            <section className="creation-subpanel backtest-submit-section backtest-submit-section--multi-factor-precheck">
+              <div className="field-group__header">
+                <div>
+                  <p className="eyebrow">{TEXT.multiFactorPrecheckEyebrow}</p>
+                  <h4>{TEXT.multiFactorPrecheckTitle}</h4>
+                </div>
+              </div>
+              <p className="creation-step-card__copy">{TEXT.multiFactorPrecheckCopy}</p>
+              {previewError ? <div className="error-banner">{TEXT.precheckUnavailable}：{previewError}</div> : null}
+              <div className="kv-grid backtest-submit-kv-grid">
+                <KeyValue label={TEXT.factorCount} value={previewLoading ? TEXT.precheckLoading : String(multiFactorPrecheck?.factor_count ?? '-')} />
+                <KeyValue label={TEXT.factorCoverage} value={formatPercentValue(multiFactorPrecheck?.coverage_pct)} />
+                <KeyValue label={TEXT.blockedFactors} value={formatBlockedFactors(multiFactorPrecheck?.blocked_factors)} />
+                <KeyValue label={TEXT.neutralizationStatus} value={formatNeutralizationStatus(multiFactorPrecheck?.neutralization_status)} />
+                <KeyValue label={TEXT.estimatedTurnover} value={formatPercentValue(multiFactorPrecheck?.estimated_turnover_pct)} />
+                <KeyValue label={TEXT.pitWarnings} value={multiFactorPrecheck?.warnings?.length ? multiFactorPrecheck.warnings.join('；') : '无警示'} />
+              </div>
+            </section>
+          ) : null}
         </div>
       </section>
     </div>

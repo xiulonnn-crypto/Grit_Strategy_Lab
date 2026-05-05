@@ -752,6 +752,33 @@ describe('SnapshotsPage', () => {
     expect(refreshMetric?.textContent).not.toContain('成分');
   });
 
+  it('opens a localized coverage change table from the latest refresh card', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue(overview);
+
+    renderSnapshotsPage();
+
+    await screen.findByRole('button', { name: /刷新/ });
+    const refreshMetric = screen
+      .getAllByText(/最新刷新/)
+      .map((node) => node.closest('.metric-card'))
+      .find((node): node is HTMLElement => node instanceof HTMLElement);
+    if (!refreshMetric) {
+      throw new Error('最新刷新 metric card was not rendered');
+    }
+
+    fireEvent.click(within(refreshMetric).getByRole('button', { name: '查看明细' }));
+
+    const dialog = screen.getByRole('dialog', { name: '覆盖变化明细' });
+    expect(within(dialog).getByText('项目')).toBeInTheDocument();
+    expect(within(dialog).getByText('当前覆盖')).toBeInTheDocument();
+    expect(within(dialog).getByText('本次变化')).toBeInTheDocument();
+    expect(within(dialog).getByText('股票价格数据')).toBeInTheDocument();
+    expect(within(dialog).getByText('402 / 487 标的')).toBeInTheDocument();
+    expect(within(dialog).getAllByText('49 行 / 7 标的')).toHaveLength(2);
+    expect(within(dialog).getByText('公司行为数据')).toBeInTheDocument();
+    expect(within(dialog).getByText(/102 标的待补/)).toBeInTheDocument();
+  });
+
   it('uses benchmark ETF price history coverage for index and benchmark readiness', async () => {
     fakeApi.getSnapshotOverview.mockResolvedValue({
       ...overview,

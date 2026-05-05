@@ -52,7 +52,7 @@ const STEP_META: Record<StepKey, { title: string; description: string }> = {
   other: { title: TEXT.stepOther, description: TEXT.stepOtherCopy },
 };
 const STRATEGY_LABELS: Record<StrategyType, string> = {
-  GENERAL: '通用', GRID: '网格', MOMENTUM: '动量 / 趋势跟随', MEAN_REVERSION: '均值回归', BUY_AND_HOLD: '定投', ASSET_ALLOCATION: '资产配置',
+  GENERAL: '通用', GRID: '网格', MOMENTUM: '动量 / 趋势跟随', MEAN_REVERSION: '均值回归', BUY_AND_HOLD: '定投', ASSET_ALLOCATION: '资产配置', MULTI_FACTOR: '多因子',
 };
 const BENCHMARK_OPTIONS: FieldOption[] = [
   { value: 'SPY', label: '标普500指数' }, { value: 'QQQ', label: '纳斯达克100指数' },
