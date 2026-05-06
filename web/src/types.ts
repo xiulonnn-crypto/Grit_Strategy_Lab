@@ -211,8 +211,13 @@ export type ApiMultiFactorNeutralization = {
   enabled: boolean;
   method: string;
   industry_field?: string | null;
+  taxonomy?: string | null;
+  covered_symbol_count?: number | null;
+  missing_symbol_count?: number | null;
+  source_names?: string[];
   execution_status: string;
   blocker_reason?: string | null;
+  blockers?: string[];
 };
 
 export type ApiMultiFactorProfile = {
@@ -927,6 +932,54 @@ export type ApiSnapshotProviderReadinessSummary = {
   openbb: ApiSnapshotProviderOpenBBReadinessSummary;
 };
 
+export type ApiSnapshotProviderTrustProfile = {
+  trust_tier?: string;
+  evidence_scope?: string[];
+  can_upgrade_full_ready?: boolean;
+  can_upgrade_pit_readiness?: boolean;
+  pit_role?: string;
+  limitations?: string[];
+  operator_action?: string;
+  credential_status?: string;
+  missing_env_vars?: string[];
+  readiness_status?: string;
+  secret_persistence?: string;
+  [key: string]: unknown;
+};
+
+export type ApiDataTrustLayer = {
+  id: string;
+  label: string;
+  role?: string;
+  status: string;
+  provider_ids?: string[];
+  registered_provider_ids?: string[];
+  enabled_provider_ids?: string[];
+  usable_provider_ids?: string[];
+  missing_env_vars?: string[];
+  preferred_provider?: string | null;
+  evidence_scope?: string[];
+  limitations?: string[];
+  full_ready_gate?: string | null;
+  operator_action?: string | null;
+  provider_count?: number;
+  usable_provider_count?: number;
+  [key: string]: unknown;
+};
+
+export type ApiDataTrustSummary = {
+  generated_at?: string;
+  status?: string;
+  summary_label?: string;
+  layers: ApiDataTrustLayer[];
+  layer_count?: number;
+  usable_layer_count?: number;
+  missing_credential_layer_count?: number;
+  attempt_status_counts?: Record<string, number>;
+  full_ready_rules?: string[];
+  [key: string]: unknown;
+};
+
 export type ApiSnapshotProviderRegistryItem = {
   provider_id: string;
   source_name: string;
@@ -958,6 +1011,7 @@ export type ApiSnapshotProviderRegistryItem = {
     secret_persistence?: string;
     [key: string]: unknown;
   };
+  trust_profile?: ApiSnapshotProviderTrustProfile;
   enabled: boolean;
   credential_ready?: boolean;
   usable?: boolean;
@@ -2106,6 +2160,7 @@ export type ApiSnapshotOverview = {
   message?: string | null;
   allowed_actions?: string[];
   provider_readiness_summary?: ApiSnapshotProviderReadinessSummary;
+  data_trust_summary?: ApiDataTrustSummary;
   bond_fixed_income: ApiBondFixedIncomeOverview;
 };
 
@@ -2134,6 +2189,8 @@ export type ApiPitDataOverview = {
     price_bar_rows: number;
     universe_member_rows: number;
     raw_universe_member_rows?: number;
+    universe_history_anchor_count?: number;
+    universe_history_annual_anchor_count?: number;
   };
   fundamental_coverage?: {
     covered_symbol_count: number;
@@ -2304,6 +2361,12 @@ export type ApiPitDataOverview = {
       alias_candidates: string[];
       price_providers: string[];
       corporate_action_providers: string[];
+      identity_providers?: string[];
+      membership_providers?: string[];
+      provider_priority?: string[];
+      next_provider?: string | null;
+      required_evidence?: string[];
+      trust_blocker?: string;
       evidence?: string;
     }>;
     bucket_counts: Record<string, number>;
@@ -2367,6 +2430,7 @@ export type ApiPitDataOverview = {
     remaining_blockers_by_source: Record<string, unknown>;
     source_recommendations: Record<string, unknown>;
   };
+  data_trust_summary?: ApiDataTrustSummary;
   factor_diagnostics_enabled: boolean;
   verified_diagnostics_enabled?: boolean;
   limited_diagnostics_enabled?: boolean;
@@ -2458,6 +2522,7 @@ export type ApiFactorDiagnosticStatus =
 export type ApiFactorSource = "MANUAL" | "SYSTEM_SEED" | "AUTO_MINED";
 export type ApiFactorDirection = "HIGH_IS_BETTER" | "LOW_IS_BETTER" | "NEUTRAL";
 export type ApiFactorFrequency = "DAILY" | "WEEKLY" | "MONTHLY";
+export type ApiFactorUiState = "robust" | "needs_calibration" | "decayed" | "sandbox";
 
 export type ApiFactorDescriptor = {
   source_prefix: "s" | "m" | "a" | string;
@@ -2495,6 +2560,58 @@ export type ApiFactorDiagnosticSummary = {
   [key: string]: unknown;
 };
 
+export type ApiFactorCreationRiskItem = {
+  factor_id?: string;
+  code: string;
+  severity: "warning" | "blocker" | string;
+  message: string;
+  label?: string;
+  category?: string;
+  fix_hash?: string;
+  [key: string]: unknown;
+};
+
+export type ApiFactorStrategyCreationRisk = {
+  can_create: boolean;
+  warning_count: number;
+  blocked_count: number;
+  warnings: ApiFactorCreationRiskItem[];
+  hard_blockers: ApiFactorCreationRiskItem[];
+  summary_label?: string;
+  summary?: string;
+  [key: string]: unknown;
+};
+
+export type ApiFactorBlockerReasonSummary = {
+  status: "clear" | "warning" | "blocked" | string;
+  label: string;
+  reasons: ApiFactorCreationRiskItem[];
+  warning_count?: number;
+  blocked_count?: number;
+  [key: string]: unknown;
+};
+
+export type ApiFactorCorrelationClusterSummary = {
+  cluster_id?: string;
+  high_correlation_count: number;
+  top_pairs?: Array<Record<string, unknown>>;
+  max_correlation?: number | null;
+  summary_label?: string;
+  [key: string]: unknown;
+};
+
+export type ApiFactorBatchDiagnosticSummary = {
+  latest_run_id?: string | null;
+  latest_diagnostic_at?: string | null;
+  rank_ic?: number | null;
+  ir?: number | null;
+  coverage?: number | null;
+  turnover_decay?: Record<string, unknown>;
+  warning_count?: number;
+  blocked_count?: number;
+  [key: string]: unknown;
+};
+
 export type ApiFactorListItem = {
   id: string;
   name: string;
@@ -2505,6 +2622,8 @@ export type ApiFactorListItem = {
   source: ApiFactorSource;
   lifecycle_status: ApiFactorLifecycleStatus;
   diagnostic_status: ApiFactorDiagnosticStatus;
+  ui_state?: ApiFactorUiState;
+  ui_state_label?: "稳健" | "待校准" | "失效" | "沙箱" | string;
   direction: ApiFactorDirection;
   frequency: ApiFactorFrequency;
   expression: string;
@@ -2528,6 +2647,10 @@ export type ApiFactorListItem = {
   ic_sparkline: Array<{ date: string; value: number }>;
   ic_sparkline_window: string;
   gate_fix_target: string;
+  batch_diagnostic_summary?: ApiFactorBatchDiagnosticSummary;
+  correlation_cluster_summary?: ApiFactorCorrelationClusterSummary;
+  blocker_reason_summary?: ApiFactorBlockerReasonSummary;
+  strategy_creation_risk?: ApiFactorStrategyCreationRisk;
 };
 
 export type ApiFactorDetail = ApiFactorListItem & {
@@ -2592,23 +2715,39 @@ export type ApiFactorDiagnosticRunResponse = {
 };
 
 export type ApiFactorDiagnosticPreviewPayload = {
-  expression: string;
+  expression?: string;
   market?: string;
   universe?: string;
   dataset_snapshot_id?: string | null;
   universe_snapshot_id?: string | null;
   lookback_years?: number;
   return_window_days?: number;
+  batch?: boolean;
+  factor_ids?: string[];
+  diagnostic_mode?: "VERIFIED" | "SANDBOX";
+  include?: string[];
 };
 
 export type ApiFactorDiagnosticPreview = {
-  status: string;
-  lookback_years: number;
-  expression: string;
-  rank_ic_preview: Array<{ date: string; rank_ic: number }>;
-  distribution: Record<string, unknown>;
-  risk_flags: string[];
-  message: string;
+  mode?: "SINGLE" | "BATCH" | string;
+  status?: string;
+  lookback_years?: number;
+  expression?: string;
+  rank_ic_preview?: Array<{ date: string; rank_ic: number }>;
+  distribution?: Record<string, unknown>;
+  risk_flags?: string[];
+  message?: string;
+  items?: Array<Record<string, unknown>>;
+  batch_summary?: {
+    factor_count: number;
+    robust_count: number;
+    needs_calibration_count: number;
+    decayed_count: number;
+    sandbox_count: number;
+    warning_count: number;
+    blocked_count: number;
+    [key: string]: unknown;
+  };
 };
 
 export type ApiFactorMiningJobStatus =
@@ -2698,6 +2837,7 @@ export type ApiFactorModelPreviewResponse = {
   pit_blockers: Array<Record<string, unknown>>;
   neutralization_status: Record<string, unknown>;
   warnings: string[];
+  strategy_creation_risk?: ApiFactorStrategyCreationRisk;
 };
 
 export type ApiFactorModelCreatePayload = ApiFactorModelPreviewPayload & {

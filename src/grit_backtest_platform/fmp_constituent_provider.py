@@ -221,11 +221,13 @@ class FmpHistoricalConstituentUniverseHistoryProvider:
         *,
         definition: Any,
         fallback_provider: Any,
+        symbol_metadata_provider: Any | None = None,
         api_key: str | None = None,
         timeout: int = 20,
     ) -> None:
         self.definition = definition
         self.fallback_provider = fallback_provider
+        self.symbol_metadata_provider = symbol_metadata_provider
         self.api_key = str(api_key or os.getenv("FMP_API_KEY") or "").strip()
         self.timeout = timeout
         self._interval_provider = FmpHistoricalConstituentProvider(
@@ -356,6 +358,13 @@ class FmpHistoricalConstituentUniverseHistoryProvider:
     ) -> Any:
         from .universe_history import _snapshot_from_symbol_list
 
+        symbol_metadata = None
+        load_symbol_metadata = getattr(self.symbol_metadata_provider, "_load_symbol_metadata", None)
+        if callable(load_symbol_metadata):
+            try:
+                symbol_metadata = load_symbol_metadata()
+            except Exception:
+                symbol_metadata = None
         metadata = {
             "historical_constituent_provider": "fmp",
             "historical_constituent_probe_status": "available",
@@ -375,6 +384,7 @@ class FmpHistoricalConstituentUniverseHistoryProvider:
             extra_metadata=metadata,
             source_revision_id=f"{self.provider_name}-{anchor.isoformat()}",
             source_page_title=self.definition.source_page_title,
+            symbol_metadata=symbol_metadata,
         )
 
     def _load_interval_snapshots(self, anchors: list[date]) -> list[Any]:

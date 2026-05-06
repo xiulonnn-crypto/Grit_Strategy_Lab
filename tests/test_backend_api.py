@@ -45,6 +45,12 @@ from grit_backtest_platform.universe_history import (
 )
 
 
+def _manual_tmp_db_path(name: str) -> Path:
+    root = Path(".tmp") / "backend-api-unit-dbs"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / f"{name}-{os.getpid()}-{time.time_ns()}.db"
+
+
 def test_workspace_overview_contract_is_exact_on_fresh_database(tmp_path):
     client, _ = create_test_client(tmp_path)
 
@@ -68,6 +74,19 @@ def test_market_data_repository_uses_wal_and_busy_timeout(tmp_path):
     assert busy_timeout >= 30000
     assert journal_mode == "wal"
     assert synchronous == 1
+
+
+def test_service_initialization_defers_read_model_cache_prewarm(tmp_path, monkeypatch):
+    prewarm_calls: list[str] = []
+
+    def record_prewarm(_service):
+        prewarm_calls.append("prewarm")
+
+    monkeypatch.setattr(RealBacktestPlatformService, "_prewarm_read_model_caches", record_prewarm)
+
+    RealBacktestPlatformService(tmp_path / "startup-prewarm.db", market_data_provider=None)
+
+    assert prewarm_calls == []
 
 
 def test_workspace_overview_can_include_cleanup_audit_without_changing_default_contract(tmp_path):
@@ -198,9 +217,23 @@ def test_snapshot_overview_contract_is_exact_on_fresh_database(tmp_path):
     assert provider_summary["openbb"]["credential_ready_provider_count"] == 0
     assert provider_summary["openbb"]["usable_provider_count"] == 0
     assert provider_summary["openbb"]["attempt_event_count"] == 0
+    trust_summary = overview["data_trust_summary"]
+    assert trust_summary["summary_label"] == "数据可信层"
+    assert {item["id"] for item in trust_summary["layers"]} >= {
+        "price_primary_chain",
+        "membership_history",
+        "delisted_identity",
+        "long_history_patch",
+        "precision_repair",
+    }
+    price_layer = next(item for item in trust_summary["layers"] if item["id"] == "price_primary_chain")
+    assert price_layer["preferred_provider"] == "tiingo"
 
 
-def test_snapshot_provider_registry_and_attempts_are_available_on_fresh_database(tmp_path):
+def test_snapshot_provider_registry_and_attempts_are_available_on_fresh_database(tmp_path, monkeypatch):
+    for env_name in ("TIINGO_API_TOKEN", "FMP_API_KEY", "SEC_USER_AGENT", "POLYGON_API_KEY"):
+        monkeypatch.delenv(env_name, raising=False)
+
     client, _ = create_test_client(tmp_path)
 
     registry = assert_ok(client.get("/data-snapshots/provider-registry"))
@@ -225,6 +258,18 @@ def test_snapshot_provider_registry_and_attempts_are_available_on_fresh_database
     kaggle_bulk = next(item for item in registry["items"] if item["provider_id"] == "kaggle_huge_stock_market_dataset")
     assert kaggle_bulk["source_governance"]["source_manifest_required"] is True
     assert kaggle_bulk["pit_permission"]["mode"] == "price_only"
+    assert kaggle_bulk["trust_profile"]["can_upgrade_full_ready"] is False
+    tiingo = next(item for item in registry["items"] if item["provider_id"] == "tiingo")
+    assert tiingo["trust_profile"]["trust_tier"] == "primary_eod_action"
+    assert tiingo["trust_profile"]["missing_env_vars"] == ["TIINGO_API_TOKEN"]
+    fmp_constituent = next(item for item in registry["items"] if item["provider_id"] == "fmp_historical_constituent")
+    assert fmp_constituent["access_tier"] == "free_account"
+    assert fmp_constituent["trust_profile"]["can_upgrade_full_ready"] is False
+    stooq = next(item for item in registry["items"] if item["provider_id"] == "stooq")
+    assert stooq["trust_profile"]["trust_tier"] == "long_history_price_patch"
+    sec = next(item for item in registry["items"] if item["provider_id"] == "sec_edgar")
+    assert sec["credential_requirements"]["required_env_vars"] == ["SEC_USER_AGENT"]
+    assert sec["trust_profile"]["trust_tier"] == "identity_lifecycle_authority"
     polygon = next(item for item in registry["items"] if item["provider_id"] == "polygon")
     assert polygon["credential_requirements"]["required_env_vars"] == ["POLYGON_API_KEY"]
     assert polygon["source_governance"]["license"] == "account_terms"
@@ -233,6 +278,71 @@ def test_snapshot_provider_registry_and_attempts_are_available_on_fresh_database
     assert attempts["rollup"]["policy"] == "unique_provider_latest_job_priority"
     assert attempts["rollup"]["event_count"] == 0
     assert attempts["rollup"]["unique_provider_count"] == 0
+
+
+def test_snapshot_provider_registry_reuses_snapshot_overview_cache(tmp_path, monkeypatch):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    original_builder = service._build_snapshot_overview
+    build_calls = 0
+
+    def counted_builder(*args, **kwargs):
+        nonlocal build_calls
+        build_calls += 1
+        return original_builder(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_build_snapshot_overview", counted_builder)
+
+    assert_ok(client.get("/data-snapshots/overview"))
+    assert build_calls == 1
+
+    registry = assert_ok(client.get("/data-snapshots/provider-registry"))
+    attempts = assert_ok(client.get("/data-snapshots/provider-attempts"))
+
+    assert registry["items"]
+    assert attempts["rollup"]["policy"] == "unique_provider_latest_job_priority"
+    assert build_calls == 1
+
+
+def test_snapshot_overview_cache_signature_tracks_provider_env_status(tmp_path, monkeypatch):
+    monkeypatch.delenv("TIINGO_API_TOKEN", raising=False)
+    client, _ = create_test_client(tmp_path)
+
+    missing_overview = assert_ok(client.get("/data-snapshots/overview"))
+    missing_price_layer = next(
+        item for item in missing_overview["data_trust_summary"]["layers"] if item["id"] == "price_primary_chain"
+    )
+    assert "TIINGO_API_TOKEN" in missing_price_layer["missing_env_vars"]
+
+    monkeypatch.setenv("TIINGO_API_TOKEN", "local-test-token")
+    configured_overview = assert_ok(client.get("/data-snapshots/overview"))
+    configured_price_layer = next(
+        item for item in configured_overview["data_trust_summary"]["layers"] if item["id"] == "price_primary_chain"
+    )
+
+    assert "TIINGO_API_TOKEN" not in configured_price_layer["missing_env_vars"]
+
+
+def test_snapshot_progress_targets_use_distinct_symbol_projection(tmp_path, monkeypatch):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    monkeypatch.setattr(service.market_data_repository, "list_universe_membership_symbols", lambda: ["aapl", "MSFT"])
+
+    def fail_full_membership_load(*args, **kwargs):
+        raise AssertionError("overview progress must not load full universe membership rows")
+
+    monkeypatch.setattr(service.market_data_repository, "load_universe_memberships", fail_full_membership_load)
+
+    symbols = service._canonical_progress_target_symbols(
+        progress_target_symbols=[],
+        existing_price_coverage=[],
+        existing_corporate_coverage=[],
+        existing_price_missing=[],
+        existing_corporate_missing=[],
+    )
+
+    assert {"AAPL", "MSFT"}.issubset(set(symbols))
 
 
 def test_snapshot_provider_registry_does_not_import_openbb_when_disabled(tmp_path, monkeypatch):
@@ -1539,6 +1649,108 @@ def test_refresh_stats_reports_universe_anchor_progress_even_when_latest_members
     assert universe_stat["official_seed_status"] == "complete"
     assert universe_stat["official_seed_source_count"] == 0
     assert universe_stat["official_seed_missing_anchors"] == []
+
+
+def test_universe_anchor_progress_ignores_off_schedule_legacy_member_dates():
+    service = RealBacktestPlatformService(
+        _manual_tmp_db_path("snapshot-off-schedule-universe-progress"),
+        market_data_provider=None,
+    )
+    snapshots = [
+        UniverseMembershipSnapshot(
+            universe_key=SP500_UNIVERSE_KEY,
+            universe_name=SP500_UNIVERSE_NAME,
+            effective_date=date(2026, 1, 1),
+            normalized_symbols=["AAPL", "MSFT"],
+            raw_symbols=["AAPL", "MSFT"],
+            unmapped_symbols=[],
+            source="fmp_historical_constituent",
+            fallback_source=None,
+            anchor_schedule=ANCHOR_SCHEDULE,
+            source_revision_id=None,
+            source_page_title=SP500_SOURCE_PAGE_TITLE,
+            metadata={"coverage_mode": "point_in_time_anchor", "source_quality": "historical_dataset"},
+        ),
+        UniverseMembershipSnapshot(
+            universe_key=SP500_UNIVERSE_KEY,
+            universe_name=SP500_UNIVERSE_NAME,
+            effective_date=date(2026, 7, 1),
+            normalized_symbols=["AAPL", "MSFT"],
+            raw_symbols=["AAPL", "MSFT"],
+            unmapped_symbols=[],
+            source="fmp_historical_constituent",
+            fallback_source=None,
+            anchor_schedule=ANCHOR_SCHEDULE,
+            source_revision_id=None,
+            source_page_title=SP500_SOURCE_PAGE_TITLE,
+            metadata={"coverage_mode": "point_in_time_anchor", "source_quality": "historical_dataset"},
+        ),
+        UniverseMembershipSnapshot(
+            universe_key=SP500_UNIVERSE_KEY,
+            universe_name=SP500_UNIVERSE_NAME,
+            effective_date=date(2026, 1, 14),
+            normalized_symbols=["AAPL", "MSFT"],
+            raw_symbols=["AAPL", "MSFT"],
+            unmapped_symbols=[],
+            source="github_sp500_historical_components",
+            fallback_source=None,
+            anchor_schedule=ANCHOR_SCHEDULE,
+            source_revision_id="github-current-2026-01-14",
+            source_page_title=SP500_SOURCE_PAGE_TITLE,
+            metadata={},
+        ),
+    ]
+
+    progress = service._summarize_universe_anchor_progress(anchor_snapshots=snapshots)
+
+    assert progress["anchor_count"] == 2
+    assert progress["historical_anchor_count"] == 2
+    assert progress["fallback_anchor_count"] == 0
+    assert progress["ignored_off_schedule_anchor_count"] == 1
+
+
+def test_snapshot_overview_normalizes_stale_universe_denominator_from_membership_rows():
+    service = RealBacktestPlatformService(
+        _manual_tmp_db_path("snapshot-stale-universe-denominator"),
+        market_data_provider=None,
+    )
+    defaults = next(item for item in service._universe_snapshot_defaults() if item["id"] == SP500_UNIVERSE_SNAPSHOT_ID)
+
+    formatted = service._format_universe_snapshot(
+        {
+            "id": SP500_UNIVERSE_SNAPSHOT_ID,
+            "name": SP500_UNIVERSE_NAME,
+            "status": "INCOMPLETE",
+            "as_of": "2026-05-06T06:32:22Z",
+            "freshness_label": "Historical anchors are still being repaired (61/2753)",
+            "window_start": "1996-01-01",
+            "window_end": "2026-05-06",
+            "anchor_schedule": ANCHOR_SCHEDULE,
+            "member_count": 503,
+            "source": "mixed_sources",
+            "fallback_source": None,
+            "blocker": {
+                "code": "UNIVERSE_HISTORY_INCOMPLETE",
+                "message": "Universe history is partially available, but some historical anchors are still missing.",
+            },
+            "metadata": {
+                "anchor_count": 2753,
+                "historical_anchor_count": 61,
+                "fallback_anchor_count": 2692,
+                "source_quality_breakdown": {"historical_dataset": 61, "unknown": 2692},
+            },
+        },
+        defaults,
+    )
+
+    assert formatted["status"] == "READY"
+    assert formatted["blocker"] == {}
+    assert formatted["freshness_label"] == "Historical anchors are complete"
+    assert formatted["metadata"]["anchor_count"] == 61
+    assert formatted["metadata"]["historical_anchor_count"] == 61
+    assert formatted["metadata"]["fallback_anchor_count"] == 0
+    assert formatted["metadata"]["raw_anchor_count"] == 2753
+    assert formatted["metadata"]["ignored_off_schedule_anchor_count"] == 2692
 
 
 def test_running_refresh_persists_partial_dataset_snapshots_before_completion(tmp_path):

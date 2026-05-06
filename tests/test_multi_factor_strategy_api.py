@@ -34,9 +34,21 @@ def _model_payload(*, neutralization_enabled: bool = False, universe: str = "SP5
 def _seed_direct_price_history(client) -> None:
     bars = []
     coverage = []
-    start = date(2024, 1, 2)
-    end = date(2024, 6, 28)
-    for symbol, offset in (("AAPL", 0.0), ("MSFT", 3.0), ("NVDA", 6.0), ("AMZN", 9.0), ("SPY", 12.0)):
+    start = date(2023, 1, 3)
+    end = date(2025, 6, 30)
+    for symbol, offset in (
+        ("AAPL", 0.0),
+        ("MSFT", 3.0),
+        ("NVDA", 6.0),
+        ("AMZN", 9.0),
+        ("META", 12.0),
+        ("GOOGL", 15.0),
+        ("TSLA", 18.0),
+        ("AMD", 21.0),
+        ("AVGO", 24.0),
+        ("COST", 27.0),
+        ("SPY", 30.0),
+    ):
         trade_days = 0
         cursor = start
         price = 100.0 + offset
@@ -83,6 +95,81 @@ def _seed_direct_price_history(client) -> None:
     )
 
 
+def _seed_sp500_industry_pit_metadata(client) -> None:
+    repository = client.app.state.service.market_data_repository
+    price_snapshot = next(
+        (snapshot for snapshot in repository.list_dataset_snapshots() if snapshot.get("id") == "ds-price"),
+        {},
+    )
+    as_of = str(price_snapshot.get("as_of") or price_snapshot.get("end_date") or date.today().isoformat())
+    sectors = {
+        "AAPL": ("Information Technology", "Technology Hardware"),
+        "MSFT": ("Information Technology", "Systems Software"),
+        "NVDA": ("Information Technology", "Semiconductors"),
+        "AMZN": ("Consumer Discretionary", "Broadline Retail"),
+        "META": ("Communication Services", "Interactive Media"),
+        "GOOGL": ("Communication Services", "Interactive Media"),
+        "TSLA": ("Consumer Discretionary", "Automobile Manufacturers"),
+        "AMD": ("Information Technology", "Semiconductors"),
+        "AVGO": ("Information Technology", "Semiconductors"),
+        "COST": ("Consumer Staples", "Consumer Staples Merchandise Retail"),
+    }
+    repository.replace_universe_snapshot(
+        {
+            "id": "un-sp500",
+            "universe_key": "SP500",
+            "name": "S&P 500",
+            "status": "READY",
+            "as_of": as_of,
+            "freshness_label": "unit industry PIT",
+            "window_start": "2014-01-02",
+            "window_end": as_of,
+            "anchor_schedule": "01-01 / 07-01",
+            "member_count": len(sectors),
+            "source": "unit_test_revision",
+            "fallback_source": "none",
+            "metadata": {"coverage_mode": "point_in_time_anchor"},
+        },
+        memberships=[
+            {
+                "effective_date": "2014-01-02",
+                "symbol": symbol,
+                "source": "unit_test_gics_revision",
+                "fallback_source": "none",
+                "metadata": {
+                    "source_quality": "historical_revision_snapshot",
+                    "gics_sector": sector,
+                    "sector": sector,
+                    "gics_sub_industry": sub_industry,
+                    "industry_name": sub_industry,
+                    "industry_taxonomy": "GICS",
+                    "industry_classification_source": "unit_test_gics_revision",
+                    "industry_classification_effective_date": "2014-01-02",
+                },
+            }
+            for symbol, (sector, sub_industry) in sectors.items()
+        ],
+    )
+
+
+def _patch_factor_strategy_risks(client, monkeypatch, risks_by_factor: dict[str, dict]) -> None:
+    service = client.app.state.service
+    original_list_factors = service.list_factors
+
+    def patched_list_factors(*args, **kwargs):
+        result = original_list_factors(*args, **kwargs)
+        items = []
+        for item in result.get("items") or []:
+            row = dict(item)
+            factor_id = str(row.get("id") or "")
+            if factor_id in risks_by_factor:
+                row["strategy_creation_risk"] = dict(risks_by_factor[factor_id])
+            items.append(row)
+        return {**result, "items": items}
+
+    monkeypatch.setattr(service, "list_factors", patched_list_factors)
+
+
 def test_factor_model_preview_returns_gate_status_and_weight_projection(tmp_path) -> None:
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
@@ -101,10 +188,181 @@ def test_factor_model_preview_returns_gate_status_and_weight_projection(tmp_path
     assert len({item["score"] for item in ready["score_preview"]}) > 1
     assert ready["pit_blockers"] == []
     assert ready["neutralization_status"]["status"] == "DISABLED"
+    assert ready["strategy_creation_risk"]["can_create"] is True
+    assert ready["strategy_creation_risk"]["warning_count"] >= 1
+    assert ready["strategy_creation_risk"]["blocked_count"] == 0
+    assert any(
+        item["code"] in {"COVERAGE_EDGE", "HIGH_CORRELATION"}
+        for item in ready["strategy_creation_risk"]["warnings"]
+    )
+    assert "可创建策略" in ready["strategy_creation_risk"]["summary"]
 
     neutralized = assert_ok(client.post("/factor-models/preview", json=_model_payload(neutralization_enabled=True)))
     assert neutralized["status"] == "BLOCKED"
     assert "MISSING_INDUSTRY_PIT" in neutralized["neutralization_status"]["blockers"]
+    assert neutralized["strategy_creation_risk"]["can_create"] is False
+    assert neutralized["strategy_creation_risk"]["blocked_count"] == 1
+    assert any(
+        item["code"] == "MISSING_INDUSTRY_PIT"
+        for item in neutralized["strategy_creation_risk"]["hard_blockers"]
+    )
+
+
+def test_factor_model_industry_neutralization_uses_seeded_sp500_gics_pit(tmp_path) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    _seed_sp500_industry_pit_metadata(client)
+
+    preview = assert_ok(client.post("/factor-models/preview", json=_model_payload(neutralization_enabled=True)))
+    neutralization_status = preview["neutralization_status"]
+    assert preview["status"] == "READY"
+    assert neutralization_status["status"] == "EXECUTED"
+    assert neutralization_status["blockers"] == []
+    assert neutralization_status["taxonomy"] == "GICS"
+    assert neutralization_status["covered_symbol_count"] == 10
+    assert neutralization_status["missing_symbol_count"] == 0
+    assert neutralization_status["industry_field"] == "universe_membership_snapshots.metadata.gics_sector"
+    assert "unit_test_gics_revision" in neutralization_status["source_names"]
+
+    created = assert_ok(client.post("/factor-models", json=_model_payload(neutralization_enabled=True)))
+    strategy_id = created["id"]
+    assert created["parameters"]["neutralization"]["execution_status"] == "EXECUTED"
+    assert created["multi_factor_profile"]["neutralization"]["execution_status"] == "EXECUTED"
+    assert created["multi_factor_profile"]["neutralization"]["covered_symbol_count"] == 10
+
+    refresh_snapshots(client, mode="repair", targets=["corporate"])
+    _seed_direct_price_history(client)
+    precheck = preview_backtest(
+        client,
+        strategy_id,
+        start_date="2024-01-02",
+        end_date="2025-06-30",
+    )["multi_factor_precheck"]
+    assert precheck["status"] in {"PASS", "WARN"}
+    assert precheck["neutralization_status"]["execution_status"] == "EXECUTED"
+    assert precheck["neutralization_status"]["blockers"] == []
+
+    run = submit_backtest(
+        client,
+        strategy_id,
+        start_date="2024-01-02",
+        end_date="2025-06-30",
+    )
+    assert run["chart_series"]
+    assert run["metrics"]
+    assert run["multi_factor_attribution"]["factor_contributions"]
+    assert run["multi_factor_attribution"]["neutralization_status"]["execution_status"] == "EXECUTED"
+
+
+def test_factor_model_preview_filters_industry_pit_memberships(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    _seed_sp500_industry_pit_metadata(client)
+    repository = client.app.state.service.market_data_repository
+    original_load_universe_memberships = repository.load_universe_memberships
+    calls: list[dict] = []
+
+    def tracked_load_universe_memberships(**kwargs):
+        calls.append(dict(kwargs))
+        if kwargs.get("universe_snapshot_id") == "un-sp500":
+            assert kwargs.get("effective_date_lte")
+            assert kwargs.get("active_only") is True
+            assert set(kwargs.get("symbols") or []) == {
+                "AAPL",
+                "MSFT",
+                "NVDA",
+                "AMZN",
+                "META",
+                "GOOGL",
+                "TSLA",
+                "AMD",
+                "AVGO",
+                "COST",
+            }
+        return original_load_universe_memberships(**kwargs)
+
+    monkeypatch.setattr(repository, "load_universe_memberships", tracked_load_universe_memberships)
+
+    preview = assert_ok(client.post("/factor-models/preview", json=_model_payload(neutralization_enabled=True)))
+
+    assert preview["neutralization_status"]["status"] == "EXECUTED"
+    assert any(call.get("universe_snapshot_id") == "un-sp500" for call in calls)
+
+
+def test_factor_model_strategy_creation_risk_warnings_do_not_block_create(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    _patch_factor_strategy_risks(
+        client,
+        monkeypatch,
+        {
+            "s_mom_12m1m_rank": {
+                "warning_count": 1,
+                "blocked_count": 0,
+                "can_create": True,
+                "warnings": [
+                    {
+                        "code": "HIGH_CORRELATION",
+                        "message": "与同族动量因子高相关，仅提示组合拥挤风险。",
+                        "related_factor_ids": ["s_mom_6m_rank"],
+                    }
+                ],
+                "hard_blockers": [],
+            }
+        },
+    )
+
+    preview = assert_ok(client.post("/factor-models/preview", json=_model_payload()))
+
+    assert preview["status"] == "READY"
+    assert preview["pit_blockers"] == []
+    risk = preview["strategy_creation_risk"]
+    assert risk["can_create"] is True
+    assert risk["warning_count"] >= 1
+    assert risk["blocked_count"] == 0
+    assert any(item["code"] == "HIGH_CORRELATION" for item in risk["warnings"])
+    assert "只提示，不阻断创建" in risk["summary"]
+
+    created = assert_ok(client.post("/factor-models", json=_model_payload()))
+    assert created["parameters"]["preview"]["strategy_creation_risk"]["warning_count"] >= 1
+    assert created["parameters"]["strategy_creation_risk"]["can_create"] is True
+
+
+def test_factor_model_strategy_creation_risk_hard_blocker_blocks_create(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    _patch_factor_strategy_risks(
+        client,
+        monkeypatch,
+        {
+            "s_val_ep_ltm_raw": {
+                "warning_count": 0,
+                "blocked_count": 1,
+                "can_create": False,
+                "warnings": [],
+                "hard_blockers": [
+                    {
+                        "code": "UNSAFE_EXPRESSION",
+                        "message": "表达式包含 unsafe expression，不能进入正式可回放策略。",
+                    }
+                ],
+            }
+        },
+    )
+
+    preview = assert_ok(client.post("/factor-models/preview", json=_model_payload()))
+
+    assert preview["status"] == "BLOCKED"
+    risk = preview["strategy_creation_risk"]
+    assert risk["can_create"] is False
+    assert risk["warning_count"] >= 0
+    assert risk["blocked_count"] == 1
+    assert any(item["code"] == "UNSAFE_EXPRESSION" for item in risk["hard_blockers"])
+    assert any(item["code"] == "UNSAFE_EXPRESSION" for item in preview["pit_blockers"])
+
+    rejected = client.post("/factor-models", json=_model_payload())
+    assert rejected.status_code == 400
+    assert "strategy creation risk" in rejected.json()["message"]
 
 
 def test_factor_model_create_materializes_existing_strategy_and_rejects_missing_industry_pit(tmp_path, monkeypatch) -> None:
@@ -128,6 +386,8 @@ def test_factor_model_create_materializes_existing_strategy_and_rejects_missing_
         "s_size_cur_log",
     ]
     assert created["parameters"]["neutralization"] == {"enabled": False, "method": "industry"}
+    assert created["parameters"]["preview"]["strategy_creation_risk"]["can_create"] is True
+    assert created["parameters"]["strategy_creation_risk"]["blocked_count"] == 0
     assert created["parameter_history"][0]["source"]["kind"] == "factor_model_builder"
     assert created["multi_factor_profile"]["components"][0]["factor_id"] == "s_mom_12m1m_rank"
     assert created["multi_factor_profile"]["neutralization"]["execution_status"] == "DISABLED"

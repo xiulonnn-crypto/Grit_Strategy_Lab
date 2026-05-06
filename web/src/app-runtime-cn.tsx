@@ -29,6 +29,7 @@ import {
   PitCleaningCenterPage,
 } from './pages/factors-page';
 import FactorSandboxPage, {
+  type FactorMiningCandidate,
   type FactorMiningCreatePayload,
   type FactorMiningJob,
 } from './pages/factor-sandbox-page';
@@ -51,11 +52,36 @@ import { SnapshotsPage } from './pages/snapshots-page';
 import { StrategyDetailPage } from './pages/strategy-detail-page';
 import { WorkspacePage } from './pages/workspace-page-lane-b';
 import { ShellFrameCn } from './shell-frame-cn';
-import type { ApiFactorDirection, ApiFactorListItem } from './types';
+import type {
+  ApiFactorDirection,
+  ApiFactorListItem,
+  ApiFactorMiningCandidate as RuntimeMiningCandidate,
+  ApiFactorMiningJob as RuntimeMiningJob,
+} from './types';
 
 type ApiClient = ReturnType<typeof useApiClient>;
 
-function mapApiMiningJob(job: Awaited<ReturnType<ApiClient['createFactorMiningJob']>>): FactorMiningJob {
+function miningCandidateFamily(candidate: RuntimeMiningCandidate, index: number): string {
+  const expression = String(candidate.expression ?? '');
+  if (/Std|Vol/i.test(expression)) return `低波候选 #${index + 1}`;
+  if (/Return|Momentum|Lag/i.test(expression)) return `动量候选 #${index + 1}`;
+  if (/Log|Rank|ZScore|Winsorize/i.test(expression)) return `转换候选 #${index + 1}`;
+  return `候选 #${index + 1}`;
+}
+
+function mapApiMiningCandidate(candidate: RuntimeMiningCandidate, index: number): FactorMiningCandidate {
+  return {
+    id: String(candidate.id ?? `candidate-${index + 1}`),
+    expression: String(candidate.expression ?? ''),
+    family: miningCandidateFamily(candidate, index),
+    rankIc: Number(candidate.rank_ic ?? candidate.score ?? 0),
+    coveragePct: Number(candidate.coverage ?? 0) * 100,
+    turnoverPct: Number(candidate.turnover ?? 0) * 100,
+    riskFlags: Array.isArray(candidate.risk_flags) ? candidate.risk_flags.map(String) : [],
+  };
+}
+
+function mapApiMiningJob(job: RuntimeMiningJob): FactorMiningJob {
   const request = job.request ?? {};
   const progress = job.progress ?? {};
   const topCandidates = job.top_candidates ?? [];
@@ -65,14 +91,20 @@ function mapApiMiningJob(job: Awaited<ReturnType<ApiClient['createFactorMiningJo
     name: `${String(request.universe ?? 'SP500')} 因子挖掘`,
     status: job.status,
     universe: String(request.universe ?? 'SP500'),
-    dateRange: `${String(request.start_date ?? '')} - ${String(request.end_date ?? '')}`,
+    dateRange: `${String(request.start_date ?? '')} 至 ${String(request.end_date ?? '')}`,
     operators: Array.isArray(request.operators) ? request.operators.map(String) : [],
     candidateCount: Number(progress.total_candidates ?? request.candidate_count ?? 0),
+    startDate: String(request.start_date ?? ''),
+    endDate: String(request.end_date ?? ''),
     progressPct: Number(progress.percent ?? 0),
     throughputPerMinute: Number(progress.throughput_per_second ?? 0) * 60,
     failedSampleCount: Number(progress.failed_candidates ?? job.failed_samples?.length ?? 0),
     topRankIc,
     createdAt: job.created_at,
+    randomSeed: request.random_seed ?? null,
+    minRankIc: Number(request.min_rank_ic ?? 0),
+    maxDepth: Number(request.max_depth ?? 0),
+    topCandidates: topCandidates.map(mapApiMiningCandidate),
   };
 }
 
@@ -149,6 +181,9 @@ function mapModelPreview(response: Awaited<ReturnType<ApiClient['previewFactorMo
   const spread = scores.length ? Math.max(...scores) - Math.min(...scores) : 0;
   const neutralization = response.neutralization_status ?? {};
   const neutralizationBlockers = Array.isArray(neutralization.blockers) ? neutralization.blockers.map(String) : [];
+  const neutralizationSourceNames = Array.isArray(neutralization.source_names)
+    ? neutralization.source_names.map(String).filter(Boolean)
+    : [];
   const estimatedTurnover = Number(response.estimated_turnover ?? 0);
   return {
     status: String(response.status ?? 'UNKNOWN'),
@@ -166,6 +201,15 @@ function mapModelPreview(response: Awaited<ReturnType<ApiClient['previewFactorMo
       method: String(neutralization.method ?? 'industry'),
       status: String(neutralization.status ?? 'UNKNOWN'),
       blockers: neutralizationBlockers,
+      industryField: typeof neutralization.industry_field === 'string' ? neutralization.industry_field : null,
+      taxonomy: typeof neutralization.taxonomy === 'string' ? neutralization.taxonomy : null,
+      coveredSymbolCount: Number.isFinite(Number(neutralization.covered_symbol_count))
+        ? Number(neutralization.covered_symbol_count)
+        : null,
+      missingSymbolCount: Number.isFinite(Number(neutralization.missing_symbol_count))
+        ? Number(neutralization.missing_symbol_count)
+        : null,
+      sourceNames: neutralizationSourceNames,
     },
     warnings: Array.isArray(response.warnings) ? response.warnings.map(String) : [],
   };
@@ -176,6 +220,10 @@ function FactorSandboxRoutePage(): JSX.Element {
   return (
     <FactorSandboxPage
       api={{
+        listFactorMiningJobs: async () => {
+          const payload = await api.listFactorMiningJobs();
+          return payload.items.map(mapApiMiningJob);
+        },
         createFactorMiningJob: async (payload: FactorMiningCreatePayload) =>
           mapApiMiningJob(
             await api.createFactorMiningJob({

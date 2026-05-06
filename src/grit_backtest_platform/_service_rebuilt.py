@@ -16335,6 +16335,7 @@ class BacktestPlatformService:
                 updated_at,
                 parameters_json
             FROM strategies
+            WHERE UPPER(COALESCE(lifecycle_status, 'ACTIVE')) != 'ARCHIVED'
             ORDER BY updated_at DESC, created_at DESC
             """
         )
@@ -17578,13 +17579,22 @@ class BacktestPlatformService:
         return self.get_optimization_job_detail(job_id)
 
     def get_workspace_overview(self, include_cleanup_audit: bool = False) -> dict[str, Any]:
-        strategy_count_row = self.storage.fetch_one("SELECT COUNT(*) AS count FROM strategies")
+        active_strategy_filter = "UPPER(COALESCE(lifecycle_status, 'ACTIVE')) != 'ARCHIVED'"
+        strategy_count_row = self.storage.fetch_one(
+            f"SELECT COUNT(*) AS count FROM strategies WHERE {active_strategy_filter}"
+        )
         active_run_count_row = self.storage.fetch_one(
             "SELECT COUNT(*) AS count FROM backtest_runs WHERE deleted_at IS NULL AND status = ?",
             ("RUNNING",),
         )
         latest_strategy = self.storage.fetch_one(
-            "SELECT id FROM strategies ORDER BY updated_at DESC, created_at DESC LIMIT 1"
+            f"""
+            SELECT id
+            FROM strategies
+            WHERE {active_strategy_filter}
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT 1
+            """
         )
         latest_run = self.storage.fetch_one(
             """

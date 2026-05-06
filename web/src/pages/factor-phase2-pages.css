@@ -161,12 +161,36 @@
   padding: 14px 16px 16px;
 }
 
+.factor-phase2-empty {
+  padding: 14px;
+  border: 1px dashed #cbd6de;
+  border-radius: 8px;
+  background: #fbfcfd;
+  color: #52616d;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.factor-phase2-empty--danger {
+  border-color: #f1b8b8;
+  background: #fff8f7;
+  color: #9a3434;
+}
+
 .factor-phase2-list {
   display: grid;
   gap: 10px;
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.factor-sandbox-page .factor-phase2-list--scroll {
+  max-height: calc((164px * 3) + 20px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
 }
 
 .factor-phase2-row {
@@ -630,6 +654,7 @@
 }
 
 .factor-model-builder-page .factor-pick,
+.factor-model-builder-page .factor-model-weight-row,
 .factor-model-builder-page .score-card,
 .factor-model-builder-page .audit-row {
   border: 1px solid #dfe6eb;
@@ -642,7 +667,7 @@
   grid-template-columns: auto minmax(0, 1fr);
   gap: 10px;
   align-items: start;
-  min-height: 132px;
+  min-height: 96px;
   padding: 12px;
 }
 
@@ -788,38 +813,51 @@
   line-height: 1.2;
 }
 
-.factor-model-builder-page .bar-chart {
-  display: grid;
-  gap: 8px;
-}
-
-.factor-model-builder-page .bar {
-  display: grid;
-  grid-template-columns: 76px minmax(0, 1fr) 52px;
-  gap: 10px;
-  align-items: center;
-  color: #415877;
-  font-size: 12px;
-  line-height: 1.35;
-}
-
-.factor-model-builder-page .bar b {
-  color: #0f2742;
-  text-align: right;
-}
-
-.factor-model-builder-page .bar-track {
-  height: 10px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: #e9eef2;
-}
-
-.factor-model-builder-page .bar-track i {
+.factor-model-builder-page .score-card small {
   display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: #16897b;
+  margin-top: 8px;
+  color: #5a6d82;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.factor-model-builder-page .factor-model-weight-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.factor-model-builder-page .factor-model-weight-row {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(260px, 1.1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  background: #fbfcfd;
+}
+
+.factor-model-builder-page .factor-model-weight-row__meta {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.factor-model-builder-page .factor-model-weight-row__meta strong {
+  color: #071423;
+  font-size: 14px;
+  font-weight: 850;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.factor-model-builder-page .factor-model-weight-row__meta > span:not(.factor-phase2-chip) {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.factor-model-builder-page .factor-weight-control--preview {
+  margin-top: 0;
 }
 
 .factor-model-builder-page .neutral-block {
@@ -940,6 +978,72 @@
   color: #b86b13;
 }
 
+.factor-model-builder-page .strategy-risk-module {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 14px;
+  border: 1px solid #dfe6eb;
+  border-radius: 14px;
+  background: #ffffff;
+}
+
+.factor-model-builder-page .strategy-risk-module--warn {
+  border-color: rgba(184, 107, 19, 0.24);
+  background: #fffdf8;
+}
+
+.factor-model-builder-page .strategy-risk-module--bad {
+  border-color: rgba(201, 88, 79, 0.24);
+  background: #fffafa;
+}
+
+.factor-model-builder-page .strategy-risk-summary {
+  display: grid;
+  gap: 8px;
+}
+
+.factor-model-builder-page .strategy-risk-summary p {
+  margin: 0;
+  color: #415877;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.6;
+}
+
+.factor-model-builder-page .strategy-risk-list {
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+  border: 1px solid #dfe6eb;
+  border-radius: 12px;
+  background: #f8fafb;
+}
+
+.factor-model-builder-page .strategy-risk-list strong {
+  color: #071423;
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.factor-model-builder-page .strategy-risk-list span {
+  color: #415877;
+  font-size: 12px;
+  font-weight: 760;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.factor-model-builder-page .strategy-risk-list--warning {
+  border-color: rgba(184, 107, 19, 0.2);
+  background: #fff7e8;
+}
+
+.factor-model-builder-page .strategy-risk-list--clear {
+  border-color: rgba(22, 137, 123, 0.2);
+  background: #e8f7f4;
+}
+
 .factor-model-builder-page .factor-model-submit {
   width: 100%;
 }
@@ -975,7 +1079,8 @@
   .factor-phase2-metrics,
   .factor-phase2-field-group,
   .factor-phase2-stat-grid,
-  .factor-model-factor {
+  .factor-model-factor,
+  .factor-model-builder-page .factor-model-weight-row {
     grid-template-columns: minmax(0, 1fr);
   }
 

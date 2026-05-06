@@ -14,6 +14,36 @@ from .pit_external_sources import kaggle_credential_status, polygon_credential_s
 OPENBB_ENABLE_VALUES = {"1", "true", "yes", "on"}
 ATTEMPT_ROLLUP_POLICY = "unique_provider_latest_job_priority"
 SOURCE_GOVERNANCE: dict[str, dict[str, Any]] = {
+    "tiingo": {
+        "source_url": "https://www.tiingo.com/documentation/end-of-day",
+        "license": "account_terms",
+        "source_manifest_required": False,
+    },
+    "tiingo_symbology": {
+        "source_url": "https://www.tiingo.com/documentation/general/overview",
+        "license": "account_terms",
+        "source_manifest_required": False,
+    },
+    "fmp": {
+        "source_url": "https://site.financialmodelingprep.com/developer/docs/stable",
+        "license": "account_terms",
+        "source_manifest_required": False,
+    },
+    "fmp_historical_constituent": {
+        "source_url": "https://site.financialmodelingprep.com/developer/docs/stable/historical-sp-500",
+        "license": "account_terms",
+        "source_manifest_required": False,
+    },
+    "stooq": {
+        "source_url": "https://stooq.com/q/d/l/",
+        "license": "public_download_terms",
+        "source_manifest_required": True,
+    },
+    "sec_edgar": {
+        "source_url": "https://www.sec.gov/edgar/sec-api-documentation",
+        "license": "public_sec_data",
+        "source_manifest_required": False,
+    },
     "github_sp500_historical_components": {
         "source_url": "https://github.com/fja05680/sp500",
         "license": "upstream_repository",
@@ -194,7 +224,7 @@ PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
         _definition(
             "fmp",
             "Financial Modeling Prep",
-            "paid_optional",
+            "free_account",
             ("price_history", "identity"),
             fallback_order={"price_history": 7, "identity": 3},
             required_env_vars=("FMP_API_KEY",),
@@ -202,7 +232,7 @@ PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
         _definition(
             "fmp_historical_constituent",
             "FMP Historical Constituents",
-            "paid_optional",
+            "free_account",
             ("universe_history",),
             fallback_order={"universe_history": 1},
             required_env_vars=("FMP_API_KEY",),
@@ -219,8 +249,12 @@ PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
             "sec_edgar",
             "SEC EDGAR",
             "free_account",
-            ("corporate_actions",),
-            fallback_order={"corporate_actions": 5},
+            ("identity", "lifecycle_filings", "corporate_actions"),
+            fallback_order={"identity": 5, "corporate_actions": 5},
+            required_env_vars=("SEC_USER_AGENT",),
+            pit_mode="identity_only",
+            can_upgrade_pit_readiness=True,
+            pit_notes=("CIK and filing history provide identity/lifecycle evidence; SEC EDGAR does not provide OHLCV price bars.",),
         ),
         _definition(
             "wikipedia_revision_history",
@@ -344,6 +378,180 @@ PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
         ),
     )
 }
+
+
+DEFAULT_TRUST_PROFILE = {
+    "trust_tier": "supporting",
+    "evidence_scope": ["provider availability"],
+    "can_upgrade_full_ready": True,
+    "pit_role": "辅助数据源",
+    "limitations": ["需要结合价格、成员历史、公司行动和身份映射四类证据判断 Full Ready。"],
+    "operator_action": "查看最近尝试和缺失凭据后再决定是否纳入修复队列。",
+}
+
+TRUST_PROFILE_OVERRIDES: dict[str, dict[str, Any]] = {
+    "yahoo": {
+        "trust_tier": "baseline_public",
+        "evidence_scope": ["EOD OHLCV", "standard corporate actions"],
+        "can_upgrade_full_ready": True,
+        "pit_role": "公开价格与公司行动基线",
+        "limitations": ["公开源适合日常刷新，但旧退市 ticker 和历史成员变更仍需交叉确权。"],
+        "operator_action": "保留为默认公开基线；关键历史缺口继续进入 Tiingo/FMP/SEC 修复链。",
+    },
+    "yfinance": {
+        "trust_tier": "baseline_public",
+        "evidence_scope": ["EOD OHLCV", "standard corporate actions"],
+        "can_upgrade_full_ready": True,
+        "pit_role": "Yahoo 适配层",
+        "limitations": ["不能单独证明历史指数成员 in/out 日期或 CIK 生命周期。"],
+        "operator_action": "用于公开行情基线；缺口进入正式修复队列。",
+    },
+    "tiingo": {
+        "trust_tier": "primary_eod_action",
+        "evidence_scope": ["EOD OHLCV", "dividend/split actions", "delisted-aware daily data"],
+        "can_upgrade_full_ready": True,
+        "pit_role": "PIT 修复队列第一主力",
+        "limitations": ["需要 TIINGO_API_TOKEN；不能单独证明指数成员 in/out 日期。"],
+        "operator_action": "配置 TIINGO_API_TOKEN 后优先重跑 repair 队列。",
+    },
+    "tiingo_symbology": {
+        "trust_tier": "identity_mapping",
+        "evidence_scope": ["ticker identity", "canonical symbol", "CIK hint", "delisting metadata"],
+        "can_upgrade_full_ready": False,
+        "pit_role": "身份映射辅助",
+        "limitations": ["只提供身份线索，不能补 OHLCV 或公司行动事件。"],
+        "operator_action": "配置 TIINGO_API_TOKEN 后用于 identity scraper 和 alias 候选。",
+    },
+    "fmp": {
+        "trust_tier": "free_account_identity_price_patch",
+        "evidence_scope": ["delisted identity", "price patch", "company metadata"],
+        "can_upgrade_full_ready": True,
+        "pit_role": "退市身份与可用价格补丁",
+        "limitations": ["免费层有日请求额度；价格补丁仍需公司行动或 zero-event 证据配合。"],
+        "operator_action": "配置 FMP_API_KEY 后用于退市身份和价格缺口补丁。",
+    },
+    "fmp_historical_constituent": {
+        "trust_tier": "membership_history",
+        "evidence_scope": ["S&P 500 historical constituents", "in/out dates"],
+        "can_upgrade_full_ready": False,
+        "pit_role": "成分股历史专家",
+        "limitations": ["只证明成员历史，不能补价格或公司行动。"],
+        "operator_action": "配置 FMP_API_KEY 后用于 historical universe lane 和 zero-event 上下文。",
+    },
+    "github_sp500_historical_components": {
+        "trust_tier": "membership_matrix",
+        "evidence_scope": ["S&P 500 historical membership matrix"],
+        "can_upgrade_full_ready": False,
+        "pit_role": "历史成员骨架",
+        "limitations": ["membership-only；不能补价格、公司行动或身份。"],
+        "operator_action": "保留 manifest 与来源版本，用于 PIT 成员历史证据。",
+    },
+    "stooq": {
+        "trust_tier": "long_history_price_patch",
+        "evidence_scope": ["long-horizon EOD OHLCV", "single-symbol online CSV when enabled"],
+        "can_upgrade_full_ready": False,
+        "pit_role": "长周期价格补丁",
+        "limitations": ["price-only；不能证明分红/拆股事件、成员历史或 CIK 身份。"],
+        "operator_action": "优先使用 offline ZIP；需要在线补丁时显式设置 GRIT_ENABLE_STOOQ_ONLINE=1。",
+    },
+    "kaggle_huge_stock_market_dataset": {
+        "trust_tier": "bulk_price_cache",
+        "evidence_scope": ["bulk adjusted OHLCV", "delisted price candidates"],
+        "can_upgrade_full_ready": False,
+        "pit_role": "批量价格缓存",
+        "limitations": ["price-only；必须保留 dataset manifest，不能单独升级公司行动或身份门禁。"],
+        "operator_action": "下载前记录 license、manifest 和覆盖区间，只导入本地缓存。",
+    },
+    "kaggle_delisted_bulk_archive": {
+        "trust_tier": "bulk_price_cache",
+        "evidence_scope": ["delisted adjusted OHLCV candidates"],
+        "can_upgrade_full_ready": False,
+        "pit_role": "退市价格缓存候选",
+        "limitations": ["price-only；dataset license 和字段覆盖必须人工确认。"],
+        "operator_action": "作为 Stooq/Tiingo/FMP 之后的批量价格补丁候选。",
+    },
+    "sec_edgar": {
+        "trust_tier": "identity_lifecycle_authority",
+        "evidence_scope": ["CIK", "SEC submissions", "last filing evidence"],
+        "can_upgrade_full_ready": False,
+        "pit_role": "身份与生命周期确权",
+        "limitations": ["identity-only；SEC EDGAR 不提供价格，也不能把停止申报直接写成破产结论。"],
+        "operator_action": "配置含联系邮箱的 SEC_USER_AGENT，用 CIK 证明身份和生命周期上下文。",
+    },
+    "alpha_vantage": {
+        "trust_tier": "targeted_action_identity",
+        "evidence_scope": ["corporate actions", "listing status", "targeted repair"],
+        "can_upgrade_full_ready": True,
+        "pit_role": "公司行动与 targeted repair 辅助",
+        "limitations": ["免费层频率低，容易进入 cooldown。"],
+        "operator_action": "只在 targeted repair 或公司行动补证时使用，注意免费层冷却窗口。",
+    },
+    "polygon": {
+        "trust_tier": "paid_precision_lane",
+        "evidence_scope": ["precision OHLCV", "corporate actions", "identity"],
+        "can_upgrade_full_ready": True,
+        "pit_role": "付费精修来源",
+        "limitations": ["需要 POLYGON_API_KEY；仅用于关键缺口，不作为默认免费链。"],
+        "operator_action": "有 key 时用于关键 delisted、生命周期或公司行动精修候选。",
+    },
+}
+
+DATA_TRUST_LAYER_DEFINITIONS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "price_primary_chain",
+        "label": "价格主链",
+        "role": "可审计 EOD OHLCV",
+        "provider_ids": ("tiingo", "yahoo", "yfinance", "fmp", "openbb_tiingo", "openbb_yfinance", "openbb_fmp"),
+        "preferred_provider": "tiingo",
+        "evidence_scope": ["EOD OHLCV", "adjusted close", "repair queue price evidence"],
+        "full_ready_gate": "价格缺口必须由可审计 provider 入库，price-only 源不能替代公司行动或身份门禁。",
+    },
+    {
+        "id": "membership_history",
+        "label": "成分股历史",
+        "role": "PIT 成员 in/out 日期",
+        "provider_ids": ("fmp_historical_constituent", "github_sp500_historical_components", "wikipedia_revision_history", "official_announcement"),
+        "preferred_provider": "fmp_historical_constituent",
+        "evidence_scope": ["historical constituents", "membership in/out dates", "point-in-time universe anchors"],
+        "full_ready_gate": "membership-only 源只能通过样本池历史门禁，不能单独升级 Full Ready。",
+    },
+    {
+        "id": "delisted_identity",
+        "label": "退市 / 身份",
+        "role": "ticker 生命周期和 CIK",
+        "provider_ids": ("sec_edgar", "tiingo_symbology", "fmp", "alpha_vantage"),
+        "preferred_provider": "sec_edgar",
+        "evidence_scope": ["CIK", "delisting metadata", "canonical symbol", "filing lifecycle"],
+        "full_ready_gate": "identity-only 源不能补 OHLCV；用于证明标的身份和不可恢复缺口上下文。",
+    },
+    {
+        "id": "corporate_actions_zero_event",
+        "label": "公司行动 / 零事件",
+        "role": "dividend/split 或 zero-event certificate",
+        "provider_ids": ("tiingo", "yahoo", "alpha_vantage", "fmp", "sec_edgar", "polygon"),
+        "preferred_provider": "tiingo",
+        "evidence_scope": ["dividend events", "split events", "zero-event certificate context"],
+        "full_ready_gate": "公司行动缺口必须由事件 provider 或 zero-event certificate 关闭。",
+    },
+    {
+        "id": "long_history_patch",
+        "label": "长周期补丁",
+        "role": "70/80/90 年代价格补丁",
+        "provider_ids": ("stooq", "kaggle_huge_stock_market_dataset", "kaggle_delisted_bulk_archive"),
+        "preferred_provider": "stooq",
+        "evidence_scope": ["long-horizon OHLCV", "delisted price rows"],
+        "full_ready_gate": "price-only，只能修复价格缺口，不能单独通过公司行动或身份门禁。",
+    },
+    {
+        "id": "precision_repair",
+        "label": "精修来源",
+        "role": "关键缺口付费精修",
+        "provider_ids": ("polygon",),
+        "preferred_provider": "polygon",
+        "evidence_scope": ["precision price repair", "corporate actions", "identity"],
+        "full_ready_gate": "用于免费链无法闭合的关键缺口，仍不暴露密钥值。",
+    },
+)
 
 
 def openbb_provider_enabled() -> bool:
@@ -609,6 +817,153 @@ def _source_governance(provider_id: str) -> dict[str, Any]:
         return {}
     payload.setdefault("secret_persistence", "disabled")
     return payload
+
+
+def _trust_profile(
+    *,
+    provider_id: str,
+    definition: ProviderDefinition | None,
+    credential_requirements: Mapping[str, Any],
+    pit_permission: Mapping[str, Any],
+    readiness_status: str,
+) -> dict[str, Any]:
+    override = TRUST_PROFILE_OVERRIDES.get(provider_id, {})
+    profile = {**DEFAULT_TRUST_PROFILE, **override}
+    if not override and definition:
+        profile["pit_role"] = definition.source_name
+        profile["evidence_scope"] = list(definition.target_types)
+        profile["can_upgrade_full_ready"] = bool(definition.can_upgrade_pit_readiness)
+    profile["evidence_scope"] = [
+        str(item)
+        for item in (profile.get("evidence_scope") or [])
+        if str(item).strip()
+    ]
+    profile["limitations"] = [
+        str(item)
+        for item in (profile.get("limitations") or [])
+        if str(item).strip()
+    ]
+    missing_env_vars = [
+        str(item)
+        for item in (credential_requirements.get("missing_env_vars") or [])
+        if str(item).strip()
+    ]
+    configured_env_vars = [
+        str(item)
+        for item in (credential_requirements.get("configured_env_vars") or [])
+        if str(item).strip()
+    ]
+    profile["can_upgrade_pit_readiness"] = bool(pit_permission.get("can_upgrade_pit_readiness", True))
+    profile["credential_status"] = "missing" if missing_env_vars else ("configured" if configured_env_vars else "not_required")
+    profile["missing_env_vars"] = missing_env_vars
+    profile["readiness_status"] = readiness_status
+    profile["secret_persistence"] = "disabled"
+    profile.setdefault("operator_action", DEFAULT_TRUST_PROFILE["operator_action"])
+    return profile
+
+
+def _trust_layer_status(provider_rows: Sequence[Mapping[str, Any]]) -> str:
+    if not provider_rows:
+        return "missing"
+    if any(item.get("usable") for item in provider_rows):
+        return "usable"
+    if any(item.get("enabled") and item.get("credential_ready") for item in provider_rows):
+        return "enabled"
+    if any((item.get("credential_requirements") or {}).get("missing_env_vars") for item in provider_rows):
+        return "missing_credentials"
+    if any(item.get("enabled") for item in provider_rows):
+        return "blocked"
+    return "registered"
+
+
+def _trust_layer_operator_action(layer: Mapping[str, Any], provider_rows: Sequence[Mapping[str, Any]]) -> str:
+    preferred_provider = str(layer.get("preferred_provider") or "")
+    preferred = next((item for item in provider_rows if str(item.get("provider_id") or "") == preferred_provider), None)
+    if preferred:
+        profile = preferred.get("trust_profile") if isinstance(preferred.get("trust_profile"), Mapping) else {}
+        action = str((profile or {}).get("operator_action") or "").strip()
+        if action:
+            return action
+    missing_env = [
+        str(env)
+        for item in provider_rows
+        for env in ((item.get("credential_requirements") or {}).get("missing_env_vars") or [])
+        if str(env).strip()
+    ]
+    if missing_env:
+        return f"补齐 {', '.join(dict.fromkeys(missing_env))} 后重新检查。"
+    return "查看 registry 最近尝试与限制说明，再决定是否进入修复队列。"
+
+
+def build_data_trust_summary(
+    *,
+    registry_items: Sequence[Mapping[str, Any]],
+    attempt_items: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    by_provider = {
+        str(item.get("provider_id") or "").strip(): dict(item)
+        for item in registry_items
+        if str(item.get("provider_id") or "").strip()
+    }
+    layers: list[dict[str, Any]] = []
+    for layer in DATA_TRUST_LAYER_DEFINITIONS:
+        provider_ids = [str(item) for item in layer.get("provider_ids") or [] if str(item).strip()]
+        provider_rows = [by_provider[provider_id] for provider_id in provider_ids if provider_id in by_provider]
+        missing_env = [
+            str(env)
+            for item in provider_rows
+            for env in ((item.get("credential_requirements") or {}).get("missing_env_vars") or [])
+            if str(env).strip()
+        ]
+        usable_provider_ids = [
+            str(item.get("provider_id"))
+            for item in provider_rows
+            if item.get("usable")
+        ]
+        enabled_provider_ids = [
+            str(item.get("provider_id"))
+            for item in provider_rows
+            if item.get("enabled")
+        ]
+        layers.append(
+            {
+                "id": layer["id"],
+                "label": layer["label"],
+                "role": layer["role"],
+                "status": _trust_layer_status(provider_rows),
+                "provider_ids": provider_ids,
+                "registered_provider_ids": [str(item.get("provider_id")) for item in provider_rows],
+                "enabled_provider_ids": enabled_provider_ids,
+                "usable_provider_ids": usable_provider_ids,
+                "missing_env_vars": list(dict.fromkeys(missing_env)),
+                "preferred_provider": layer.get("preferred_provider"),
+                "evidence_scope": list(layer.get("evidence_scope") or []),
+                "full_ready_gate": layer.get("full_ready_gate"),
+                "operator_action": _trust_layer_operator_action(layer, provider_rows),
+                "provider_count": len(provider_rows),
+                "usable_provider_count": len(usable_provider_ids),
+            }
+        )
+    attempt_status_counts: dict[str, int] = {}
+    for attempt in attempt_items:
+        status = str(attempt.get("status") or "").strip().lower()
+        if status:
+            attempt_status_counts[status] = attempt_status_counts.get(status, 0) + 1
+    return {
+        "generated_at": _utc_now(),
+        "status": "usable" if any(layer.get("status") == "usable" for layer in layers) else "needs_configuration",
+        "summary_label": "数据可信层",
+        "layers": layers,
+        "layer_count": len(layers),
+        "usable_layer_count": sum(1 for layer in layers if layer.get("status") == "usable"),
+        "missing_credential_layer_count": sum(1 for layer in layers if layer.get("status") == "missing_credentials"),
+        "attempt_status_counts": dict(sorted(attempt_status_counts.items())),
+        "full_ready_rules": [
+            "FULL_READY 必须同时具备可审计价格、PIT 成员历史、公司行动或 zero-event certificate、稳定身份映射。",
+            "PRICE_ONLY 来源只能修复价格缺口，不能单独升级公司行动或身份门禁。",
+            "IDENTITY_ONLY 来源只能证明身份和生命周期，不能补 OHLCV。",
+        ],
+    }
 
 
 def _stable_attempt_id(parts: Sequence[Any]) -> str:
@@ -992,6 +1347,13 @@ def build_provider_registry(
             and not bool(quota_cooldown.get("quota_limited"))
             and not bool(quota_cooldown.get("cooldown_active"))
         )
+        pit_permission = _pit_effect(provider_id, bool((latest_attempt or {}).get("auxiliary_only")))
+        readiness_status = _provider_readiness_status(
+            enabled=enabled,
+            credential_ready=credential_ready,
+            quota_limited=bool(quota_cooldown.get("quota_limited")),
+            cooldown_active=bool(quota_cooldown.get("cooldown_active")),
+        )
         items.append(
             {
                 "provider_id": provider_id,
@@ -1013,17 +1375,19 @@ def build_provider_registry(
                 ),
                 "quota_cooldown": quota_cooldown,
                 "error_summary": error_summary,
-                "pit_permission": _pit_effect(provider_id, bool((latest_attempt or {}).get("auxiliary_only"))),
+                "pit_permission": pit_permission,
                 "source_governance": _source_governance(provider_id),
+                "trust_profile": _trust_profile(
+                    provider_id=provider_id,
+                    definition=definition,
+                    credential_requirements=credential_requirements,
+                    pit_permission=pit_permission,
+                    readiness_status=readiness_status,
+                ),
                 "enabled": enabled,
                 "credential_ready": credential_ready,
                 "usable": usable,
-                "readiness_status": _provider_readiness_status(
-                    enabled=enabled,
-                    credential_ready=credential_ready,
-                    quota_limited=bool(quota_cooldown.get("quota_limited")),
-                    cooldown_active=bool(quota_cooldown.get("cooldown_active")),
-                ),
+                "readiness_status": readiness_status,
                 "optional_layer": optional_layer,
             }
         )

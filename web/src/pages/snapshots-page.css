@@ -781,6 +781,156 @@
   gap: 10px;
 }
 
+.snapshots-equity-view .factor-panel {
+  border: 1px solid var(--gsl-color-border, #e5e7eb);
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow: var(--shadow-card, 0 1px 3px rgba(0, 0, 0, 0.05));
+  padding: 20px;
+}
+
+.snapshots-equity-view .factor-muted {
+  color: var(--gsl-text-sub, #64748b);
+}
+
+.snapshots-equity-view .factor-section-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.snapshots-equity-view .factor-section-title span:first-child {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--gsl-text-title, #111827);
+}
+
+.snapshots-equity-view .factor-full-ready-plan {
+  display: grid;
+  gap: 14px;
+  border-color: #d7e1e5;
+}
+
+.snapshots-equity-view .factor-trust-layer-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.snapshots-equity-view .factor-trust-layer-card {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  border: 1px solid var(--gsl-color-border-soft, #eef2f4);
+  border-radius: 12px;
+  background: #ffffff;
+  padding: 12px;
+}
+
+.snapshots-equity-view .factor-trust-layer-card > div {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.snapshots-equity-view .factor-trust-layer-card strong,
+.snapshots-equity-view .factor-trust-layer-card p,
+.snapshots-equity-view .factor-trust-layer-card small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.snapshots-equity-view .factor-trust-layer-card p,
+.snapshots-equity-view .factor-trust-layer-card small {
+  margin: 0;
+  color: var(--gsl-text-sub, #64748b);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.snapshots-equity-view .snapshots-trust-credential-panel {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--gsl-color-border-soft, #eef2f4);
+  padding-top: 12px;
+}
+
+.snapshots-equity-view .snapshots-trust-credential-title {
+  margin-bottom: 0;
+}
+
+.snapshots-equity-view .snapshots-trust-restart-note {
+  border-radius: 10px;
+  background: #fff7e8;
+  color: #9a5a12;
+  padding: 8px 10px;
+  font-weight: 800;
+}
+
+.snapshots-equity-view .snapshots-trust-credential-form {
+  display: grid;
+  gap: 8px;
+  max-width: 520px;
+}
+
+.snapshots-equity-view .snapshots-trust-input {
+  display: grid;
+  gap: 6px;
+}
+
+.snapshots-equity-view .snapshots-trust-input label {
+  color: var(--gsl-text-title, #111827);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.snapshots-equity-view .snapshots-trust-credential-form > label {
+  color: var(--gsl-text-title, #111827);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.snapshots-equity-view .snapshots-trust-input__row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.snapshots-equity-view .snapshots-trust-credential-form select,
+.snapshots-equity-view .snapshots-trust-input input {
+  min-width: 0;
+  height: 36px;
+  border: 1px solid var(--gsl-color-border, #e5e7eb);
+  border-radius: 10px;
+  background: var(--gsl-bg-subtle, #f9fafb);
+  color: var(--gsl-text-main, #1f2937);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 10px;
+}
+
+.snapshots-equity-view .snapshots-trust-credential-form select:focus,
+.snapshots-equity-view .snapshots-trust-input input:focus {
+  outline: 2px solid rgba(31, 135, 123, 0.18);
+  border-color: var(--gsl-color-primary, #1f877b);
+  background: #ffffff;
+}
+
+.snapshots-equity-view .snapshots-trust-copy-button {
+  min-height: 36px;
+  height: auto;
+  padding: 0 10px;
+  white-space: normal;
+  width: 100%;
+}
+
 .snapshots-equity-view .bond-core-card {
   display: grid;
   align-content: start;
@@ -989,10 +1139,12 @@
 @media (max-width: 720px) {
   .snapshots-equity-view .metric-grid,
   .snapshots-equity-view .bond-core-grid,
+  .snapshots-equity-view .factor-trust-layer-grid,
   .snapshots-equity-view .bond-snapshot-row {
     grid-template-columns: 1fr;
   }
 
+  .snapshots-equity-view .factor-section-title,
   .snapshots-equity-view .panel-header,
   .snapshots-equity-view .source-head,
   .snapshots-equity-view .progress-meta {

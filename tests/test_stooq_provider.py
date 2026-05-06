@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import zipfile
 from datetime import date
+from io import BytesIO
+import json
 
 from grit_backtest_platform import stooq_provider as stooq_provider_module
+from grit_backtest_platform.fallback_provider import ProviderExecutionSignal
 from grit_backtest_platform.stooq_provider import StooqZipPriceProvider
 
 
@@ -70,3 +73,96 @@ def test_stooq_provider_prefers_project_archive_when_present(monkeypatch, tmp_pa
     provider = StooqZipPriceProvider()
 
     assert provider.archive_path == project_archive_path
+
+
+def test_stooq_online_fallback_is_disabled_by_default(monkeypatch, tmp_path):
+    missing_archive = tmp_path / "missing.zip"
+    monkeypatch.setenv("GRIT_STOOQ_US_DAILY_ZIP", str(missing_archive))
+    monkeypatch.delenv("GRIT_ENABLE_STOOQ_ONLINE", raising=False)
+
+    provider = StooqZipPriceProvider()
+
+    assert provider.availability().available is False
+    try:
+        provider.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 2))
+    except ProviderExecutionSignal as exc:
+        assert exc.reason == "offline_archive_unavailable"
+    else:
+        raise AssertionError("Expected offline_archive_unavailable when online fallback is disabled.")
+
+
+def test_stooq_online_fallback_fetches_csv_and_writes_manifest(monkeypatch, tmp_path):
+    missing_archive = tmp_path / "missing.zip"
+    cache_dir = tmp_path / "stooq-cache"
+    requested_urls: list[str] = []
+
+    class _Response(BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(url, timeout=20):
+        requested_urls.append(str(url))
+        return _Response(
+            "\n".join(
+                [
+                    "Date,Open,High,Low,Close,Volume",
+                    "2026-04-01,100,101,99,100.5,1000",
+                    "2026-04-02,101,102,100,101.5,1200",
+                ]
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setenv("GRIT_STOOQ_US_DAILY_ZIP", str(missing_archive))
+    monkeypatch.setenv("GRIT_ENABLE_STOOQ_ONLINE", "1")
+    monkeypatch.setenv("GRIT_STOOQ_ONLINE_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(stooq_provider_module.urllib.request, "urlopen", fake_urlopen)
+
+    provider = StooqZipPriceProvider()
+    result = provider.fetch_history("AAPL", date(2026, 4, 1), date(2026, 4, 2))
+
+    assert provider.availability().available is True
+    assert requested_urls == ["https://stooq.com/q/d/l/?s=AAPL.US&i=d"]
+    assert result.source == "stooq"
+    assert result.metadata["mode"] == "online_csv"
+    assert result.metadata["provider_symbol"] == "AAPL.US"
+    assert len(result.bars) == 2
+    manifest = json.loads((cache_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["entries"]["AAPL"]["status"] == "READY"
+    assert manifest["entries"]["AAPL"]["row_count"] == 2
+    assert (cache_dir / "AAPL.csv").is_file()
+
+
+def test_stooq_online_fallback_classifies_empty_csv(monkeypatch, tmp_path):
+    missing_archive = tmp_path / "missing.zip"
+    cache_dir = tmp_path / "stooq-cache"
+
+    class _Response(BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setenv("GRIT_STOOQ_US_DAILY_ZIP", str(missing_archive))
+    monkeypatch.setenv("GRIT_ENABLE_STOOQ_ONLINE", "1")
+    monkeypatch.setenv("GRIT_STOOQ_ONLINE_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(
+        stooq_provider_module.urllib.request,
+        "urlopen",
+        lambda url, timeout=20: _Response(b"Date,Open,High,Low,Close,Volume\n"),
+    )
+
+    provider = StooqZipPriceProvider()
+
+    try:
+        provider.fetch_history("BRK.B", date(2026, 4, 1), date(2026, 4, 2))
+    except ProviderExecutionSignal as exc:
+        assert exc.reason == "empty_response"
+    else:
+        raise AssertionError("Expected empty_response for empty Stooq CSV.")
+    manifest = json.loads((cache_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["entries"]["BRK.B"]["provider_symbol"] == "BRK-B.US"
+    assert manifest["entries"]["BRK.B"]["status"] == "NO_ROWS"

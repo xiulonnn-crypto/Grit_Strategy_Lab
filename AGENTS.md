@@ -48,6 +48,8 @@ This repository is a local-first strategy research and backtest workbench. Treat
 - For frontend iteration, prefer the dev server or the QuickStart flow over production preview/build loops unless the task explicitly needs build verification.
 - Do not rename restored or rebuilt module files just to normalize naming. The indirection is intentional and part of the recovery architecture.
 - Project docs are the first-stop memory surface. Use this file for promoted agent behavior and `ARCHITECTURE.md` for promoted system facts, data flows, troubleshooting steps, regression test locations, and validation commands without using external memory lookup.
+- Temporary pytest bases, debug databases, browser dumps, and scratch outputs must be written under `.tmp/` or `artifacts/`; repo pytest startup now rejects project-external pytest basetemp/cache paths and in-repo temp paths outside `.tmp/`, and agents must not leave root-level `pytesttmp-*`, `pytest-cache-files-*`, `tmp_dbg_*`, `tmp-promote-*`, or `tmp/` directories.
+- Recovery evidence belongs under `docs/recovery/`, recovery helper scripts under `scripts/recovery/`, archived Git/database backups under `artifacts/recovery/`, and Codex/runtime logs under `output/logs/grit-coder/` or `artifacts/`; do not create new `.codex-logs/` or root-level recovery files.
 
 ## Testing instructions
 

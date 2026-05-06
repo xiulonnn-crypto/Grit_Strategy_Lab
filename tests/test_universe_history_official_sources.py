@@ -9,6 +9,7 @@ from grit_backtest_platform.universe_history import (
     ANCHOR_SCHEDULE,
     ArchivedNasdaqOfficialActivityUniverseHistoryProvider,
     ArchivedNasdaq100UniverseHistoryProvider,
+    CurrentIndustryMetadataUniverseEnricher,
     CuratedNasdaq100UniverseHistoryProvider,
     GithubSp500CurrentValidationProvider,
     LocalNasdaq100SeedUniverseHistoryProvider,
@@ -104,6 +105,68 @@ def _current_page_snapshot(
             "source_quality": SOURCE_QUALITY_CURRENT_PAGE_FALLBACK,
         },
     )
+
+
+def test_sp500_wikipedia_table_extracts_per_symbol_gics_metadata():
+    html = """
+        <table class="wikitable">
+          <tr>
+            <th>Security</th><th>Symbol</th><th>GICS Sector</th><th>GICS Sub-Industry</th>
+          </tr>
+          <tr>
+            <td>Apple Inc.</td><td>AAPL</td><td>Information Technology</td><td>Technology Hardware</td>
+          </tr>
+          <tr>
+            <td>Amazon.com Inc.</td><td>AMZN</td><td>Consumer Discretionary</td><td>Broadline Retail</td>
+          </tr>
+        </table>
+    """
+
+    extracted = extract_symbols_from_html(html, minimum_member_count=2)
+
+    assert extracted.normalized_symbols == ["AAPL", "AMZN"]
+    assert extracted.symbol_metadata["AAPL"]["security_name"] == "Apple Inc."
+    assert extracted.symbol_metadata["AAPL"]["gics_sector"] == "Information Technology"
+    assert extracted.symbol_metadata["AAPL"]["gics_sub_industry"] == "Technology Hardware"
+    assert extracted.symbol_metadata["AMZN"]["sector"] == "Consumer Discretionary"
+
+
+def test_current_industry_metadata_enricher_adds_gics_to_historical_skeleton():
+    class MetadataProvider:
+        provider_name = "github_sp500_current_dataset"
+
+        def _load_symbol_metadata(self):
+            return {
+                "AAPL": {
+                    "gics_sector": "Information Technology",
+                    "gics_sub_industry": "Technology Hardware",
+                },
+                "AMZN": {
+                    "gics_sector": "Consumer Discretionary",
+                    "gics_sub_industry": "Broadline Retail",
+                },
+            }
+
+    definition = UniverseDefinition(
+        universe_key=SP500_UNIVERSE_KEY,
+        display_name=SP500_UNIVERSE_NAME,
+        snapshot_id=SP500_UNIVERSE_SNAPSHOT_ID,
+        source_page_title=SP500_SOURCE_PAGE_TITLE,
+        minimum_member_count=2,
+    )
+    snapshot = _baseline_snapshot(
+        definition=definition,
+        effective_date=date(2026, 1, 1),
+        symbols=["AAPL", "AMZN"],
+        source="github_sp500_historical_components",
+    )
+
+    enriched = CurrentIndustryMetadataUniverseEnricher(metadata_provider=MetadataProvider()).enrich_snapshots([snapshot])
+
+    assert enriched[0].symbol_metadata["AAPL"]["gics_sector"] == "Information Technology"
+    assert enriched[0].symbol_metadata["AMZN"]["gics_sub_industry"] == "Broadline Retail"
+    assert enriched[0].symbol_metadata["AAPL"]["industry_classification_effective_date"] == "2026-01-01"
+    assert enriched[0].metadata["industry_metadata_enrichment_source"] == "github_sp500_current_dataset"
 
 
 def test_nasdaq_official_annual_changes_apply_delta_after_revision_history(monkeypatch):

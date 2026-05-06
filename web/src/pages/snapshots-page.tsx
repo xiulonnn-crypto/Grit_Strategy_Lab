@@ -174,6 +174,14 @@ function normalizeSnapshotOverview(raw: unknown): ApiSnapshotOverview {
         allowed_actions: Array.isArray(payload.allowed_actions)
           ? (payload.allowed_actions as string[])
           : ['refresh_snapshots'],
+        provider_readiness_summary:
+          payload.provider_readiness_summary && typeof payload.provider_readiness_summary === 'object'
+            ? payload.provider_readiness_summary
+            : undefined,
+        data_trust_summary:
+          payload.data_trust_summary && typeof payload.data_trust_summary === 'object'
+            ? payload.data_trust_summary
+            : undefined,
       };
       return {
         ...normalizedOverview,
@@ -192,6 +200,8 @@ function normalizeSnapshotOverview(raw: unknown): ApiSnapshotOverview {
       message:
         '当前本地后端还在返回旧版快照接口。重启后端服务后，再点“刷新快照”即可看到完整快照。',
       allowed_actions: ['refresh_snapshots'],
+      provider_readiness_summary: undefined,
+      data_trust_summary: undefined,
     };
     return {
       ...legacyOverview,
@@ -209,6 +219,8 @@ function normalizeSnapshotOverview(raw: unknown): ApiSnapshotOverview {
     blocking_target: 'data_snapshots',
     message: '还没有生成快照，点右上角“刷新快照”后会显示。',
     allowed_actions: ['refresh_snapshots'],
+    provider_readiness_summary: undefined,
+    data_trust_summary: undefined,
   };
   return {
     ...emptyOverview,

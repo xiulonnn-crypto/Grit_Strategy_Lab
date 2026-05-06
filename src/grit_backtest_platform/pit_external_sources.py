@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-DEFAULT_PIT_BULK_CACHE_DIR = Path(os.getenv("GRIT_PIT_BULK_CACHE_DIR") or r"C:\tmp\grit-pit-bulk-cache")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_PIT_BULK_CACHE_DIR = PROJECT_ROOT / ".tmp" / "pit-bulk-cache"
 PIT_EXTERNAL_SOURCE_MANIFEST_VERSION = "pit_external_sources_v1"
 POLYGON_CRITICAL_CANDIDATE_LIMIT = 50
+NESTED_CACHE_DIR_CANDIDATES = ("grit-pit-bulk-cache",)
 
 KAGGLE_SEARCH_TERMS = [
     "survivorship bias free",
@@ -60,6 +62,29 @@ def utc_now() -> str:
 
 def default_cache_dir() -> Path:
     return Path(os.getenv("GRIT_PIT_BULK_CACHE_DIR") or DEFAULT_PIT_BULK_CACHE_DIR)
+
+
+def _cache_dir_has_artifacts(path: Path) -> bool:
+    if (path / "manifest.json").is_file():
+        return True
+    if (path / "catalog" / "gsl_pit_bulk.duckdb").is_file():
+        return True
+    manifest_dir = path / "manifests"
+    if manifest_dir.exists() and any(manifest_dir.glob("*.json")):
+        return True
+    normalized_dir = path / "normalized"
+    return normalized_dir.exists() and any(normalized_dir.rglob("*.parquet"))
+
+
+def resolve_cache_dir(cache_dir: str | Path | None = None) -> Path:
+    root = Path(cache_dir) if cache_dir else default_cache_dir()
+    if _cache_dir_has_artifacts(root):
+        return root
+    for dirname in NESTED_CACHE_DIR_CANDIDATES:
+        candidate = root / dirname
+        if _cache_dir_has_artifacts(candidate):
+            return candidate
+    return root
 
 
 def _existing_kaggle_paths() -> list[str]:
@@ -151,7 +176,7 @@ def _safe_read_json(path: Path) -> dict[str, Any] | None:
 
 
 def load_external_source_manifests(cache_dir: str | Path | None = None) -> list[dict[str, Any]]:
-    root = Path(cache_dir) if cache_dir else default_cache_dir()
+    root = resolve_cache_dir(cache_dir)
     manifest_paths: list[Path] = []
     if (root / "manifest.json").exists():
         manifest_paths.append(root / "manifest.json")
@@ -349,7 +374,7 @@ def build_external_source_readiness(
     repair_plan: Mapping[str, Any] | None = None,
     cache_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    root = Path(cache_dir) if cache_dir else default_cache_dir()
+    root = resolve_cache_dir(cache_dir)
     manifests = load_external_source_manifests(root)
     kaggle_auth = kaggle_credential_status()
     polygon_auth = polygon_credential_status()
@@ -392,7 +417,7 @@ def build_external_source_readiness(
 
 
 def preflight_report(cache_dir: str | Path | None = None) -> dict[str, Any]:
-    root = Path(cache_dir) if cache_dir else default_cache_dir()
+    root = resolve_cache_dir(cache_dir)
     root_exists = root.exists()
     parent = root if root_exists else root.parent
     try:

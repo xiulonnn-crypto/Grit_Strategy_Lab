@@ -242,6 +242,97 @@ const overviewBase: Omit<ApiSnapshotOverview, 'bond_fixed_income'> = {
   blocking_target: 'ds-corporate-actions',
   message: 'Corporate action data is partially available, but the snapshot is not complete yet.',
   allowed_actions: ['refresh_snapshots'],
+  data_trust_summary: {
+    summary_label: '数据可信层',
+    source_policy:
+      'Full Ready 必须同时具备可审计价格、PIT 成员历史、公司行动或 zero-event certificate、稳定身份映射。',
+    full_ready_rules: [
+      'PRICE_ONLY 来源只能修复价格缺口，不能单独升级身份或公司行动门禁。',
+      'IDENTITY_ONLY 来源只能证明身份和生命周期，不能补 OHLCV。',
+    ],
+    layers: [
+      {
+        id: 'price_primary_chain',
+        label: '价格主链',
+        role: 'OHLCV 与复权价格',
+        preferred_provider: 'tiingo',
+        provider_ids: ['tiingo', 'fmp', 'stooq'],
+        status: 'missing_credentials',
+        usable_provider_count: 0,
+        credential_ready_provider_count: 0,
+        latest_attempt_status: 'MISSING_CREDENTIAL',
+        missing_env_vars: ['TIINGO_API_TOKEN', 'ALPHAVANTAGE_API_KEY'],
+        evidence_scope: ['EOD OHLCV', 'dividend/split action'],
+        can_upgrade_full_ready: true,
+        limitations: ['缺少凭据时只能使用缓存或公开补丁。'],
+        operator_action: '配置 TIINGO_API_TOKEN 后用于 PIT 第一修复队列。',
+      },
+      {
+        id: 'membership_history',
+        label: '成分股历史',
+        role: 'PIT membership',
+        preferred_provider: 'fmp_historical_constituent',
+        provider_ids: ['fmp_historical_constituent', 'github_sp500_historical_components'],
+        status: 'usable',
+        usable_provider_count: 1,
+        credential_ready_provider_count: 1,
+        latest_attempt_status: 'READY',
+        missing_env_vars: ['KAGGLE_API_TOKEN'],
+        evidence_scope: ['S&P 500 / Nasdaq historical constituents'],
+        can_upgrade_full_ready: true,
+        limitations: ['只能证明成员进出，不能补 OHLCV。'],
+        operator_action: '用于确认历史成员 in/out 日期。',
+      },
+      {
+        id: 'delisted_identity',
+        label: '退市与身份',
+        role: 'CIK lifecycle',
+        preferred_provider: 'sec_edgar',
+        provider_ids: ['sec_edgar', 'fmp'],
+        status: 'missing_credentials',
+        usable_provider_count: 0,
+        credential_ready_provider_count: 0,
+        latest_attempt_status: 'MISSING_CREDENTIAL',
+        missing_env_vars: ['SEC_USER_AGENT'],
+        evidence_scope: ['CIK identity', 'filing lifecycle'],
+        can_upgrade_full_ready: false,
+        limitations: ['SEC 不提供价格，停止申报不能直接等同破产结论。'],
+        operator_action: '配置含联系邮箱的 SEC_USER_AGENT 后生成身份生命周期证据。',
+      },
+      {
+        id: 'long_history_patch',
+        label: '长周期补丁',
+        role: 'Price-only backfill',
+        preferred_provider: 'stooq',
+        provider_ids: ['stooq', 'kaggle_huge_stock_market_dataset'],
+        status: 'registered',
+        usable_provider_count: 0,
+        credential_ready_provider_count: 0,
+        latest_attempt_status: 'REGISTERED',
+        missing_env_vars: [],
+        evidence_scope: ['公开 CSV/ZIP price-only'],
+        can_upgrade_full_ready: false,
+        limitations: ['Price-only 来源不能单独升级 Full Ready。'],
+        operator_action: '开启 Stooq 在线补丁或导入 Kaggle 缓存后修复老旧价格缺口。',
+      },
+      {
+        id: 'precision_repair',
+        label: '精修来源',
+        role: 'Polygon keyed repair',
+        preferred_provider: 'polygon',
+        provider_ids: ['polygon'],
+        status: 'missing_credentials',
+        usable_provider_count: 0,
+        credential_ready_provider_count: 0,
+        latest_attempt_status: 'MISSING_CREDENTIAL',
+        missing_env_vars: ['POLYGON_API_KEY'],
+        evidence_scope: ['keyed price/action repair'],
+        can_upgrade_full_ready: true,
+        limitations: ['仅在密钥存在时用于关键标的精修。'],
+        operator_action: '配置 Polygon key 后用于关键缺口补证。',
+      },
+    ],
+  },
 };
 
 const overview: ApiSnapshotOverview = {
@@ -525,10 +616,12 @@ beforeEach(() => {
   fakeApi.getSnapshotOverview.mockReset();
   fakeApi.refreshSnapshots.mockReset();
   fakeApi.createAssetLeg.mockReset();
+  window.sessionStorage.clear();
 });
 
 afterEach(() => {
   cleanup();
+  window.sessionStorage.clear();
 });
 
 describe('SnapshotsPage', () => {
@@ -617,6 +710,60 @@ describe('SnapshotsPage', () => {
     expect(screen.getByText('DATA SNAPSHOTS')).toBeInTheDocument();
     expect(screen.getByText('统一管理股票、指数与固定收益数据快照的覆盖率、刷新状态和入库资格，让研究员在建仓、回测和组合配置前先确认市场数据证据链。')).toBeInTheDocument();
     expect(screen.getByText('健康仪表盘')).toBeInTheDocument();
+    const dataTrustSection = screen.getByText('补源优先级与证据层').closest('section');
+    const mainLayoutBeforeTrust = document.querySelector('.snapshots-equity-main-layout');
+    expect(dataTrustSection).not.toBeNull();
+    expect(mainLayoutBeforeTrust).not.toBeNull();
+    expect(
+      (mainLayoutBeforeTrust as HTMLElement).compareDocumentPosition(dataTrustSection as HTMLElement) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(dataTrustSection).toHaveClass('factor-panel', 'factor-full-ready-plan');
+    expect(dataTrustSection?.querySelector('.factor-section-title')).not.toBeNull();
+    expect(dataTrustSection?.querySelector('.factor-trust-layer-grid')).not.toBeNull();
+    expect(dataTrustSection?.querySelector('.factor-trust-layer-card')).not.toBeNull();
+    expect(
+      within(dataTrustSection as HTMLElement).getByText('价格主链 → 成分历史 → 长周期补价 → 身份确权 → 关键精修'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('价格主链')).toBeInTheDocument();
+    expect(screen.getByText(/待配置：TIINGO_API_TOKEN/)).toBeInTheDocument();
+    expect(screen.getByText('证据：开高低收量、复权收盘、缺口补价')).toBeInTheDocument();
+    expect(screen.getByText('边界：不能替代成员历史、公司行动或身份确权。')).toBeInTheDocument();
+    const missingKeySelect = screen.getByLabelText('选择缺少的 API_KEY');
+    expect(missingKeySelect).toHaveValue('TIINGO_API_TOKEN');
+    const tiingoInput = screen.getByLabelText('TIINGO_API_TOKEN 输入');
+    expect(tiingoInput).toHaveAttribute('type', 'password');
+    fireEvent.change(tiingoInput, { target: { value: 'local-test-token' } });
+    expect(screen.getByText('已暂存到当前浏览器标签页；刷新不会清空，关闭标签页或清空暂存即删除。')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(window.sessionStorage.getItem('gsl.snapshots.trustCredentialDrafts.v1')).toContain('local-test-token'),
+    );
+    expect(screen.getByRole('button', { name: '清空本标签页暂存' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '复制 TIINGO_API_TOKEN 设置命令' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('SEC_USER_AGENT 输入')).not.toBeInTheDocument();
+    fireEvent.change(missingKeySelect, { target: { value: 'ALPHAVANTAGE_API_KEY' } });
+    await waitFor(() => expect(screen.getByLabelText('ALPHAVANTAGE_API_KEY 输入')).toHaveAttribute('type', 'password'));
+    expect(
+      screen.getByText(
+        '刷新页面会保留本标签页草稿。真正的 provider 状态仍以后端启动时读到的环境变量为准；请把复制出的命令粘贴到将启动 QuickStart 的同一个 PowerShell。',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '复制 ALPHAVANTAGE_API_KEY 设置命令' })).toBeInTheDocument();
+    fireEvent.change(missingKeySelect, { target: { value: 'KAGGLE_API_TOKEN' } });
+    expect(screen.getByLabelText('KAGGLE_API_TOKEN 输入')).toHaveAttribute('type', 'password');
+    expect(screen.getByRole('button', { name: '复制 KAGGLE_API_TOKEN 设置命令' })).toBeInTheDocument();
+    fireEvent.change(missingKeySelect, { target: { value: 'POLYGON_API_KEY' } });
+    expect(screen.getByLabelText('POLYGON_API_KEY 输入')).toHaveAttribute('type', 'password');
+    expect(screen.getByRole('button', { name: '复制 POLYGON_API_KEY 设置命令' })).toBeInTheDocument();
+    fireEvent.change(missingKeySelect, { target: { value: 'SEC_USER_AGENT' } });
+    expect(screen.getByLabelText('SEC_USER_AGENT 输入')).toHaveAttribute('type', 'text');
+    expect(screen.getByRole('button', { name: '复制 SEC_USER_AGENT 设置命令' })).toBeInTheDocument();
+    expect(screen.getByText('成分股历史')).toBeInTheDocument();
+    expect(screen.getByText(/主源：Stooq 长周期价格/)).toBeInTheDocument();
+    expect(screen.getByText('边界：仅修复价格缺口，不能单独通过正式就绪门禁。')).toBeInTheDocument();
+    expect(screen.getByText('Ticker 生命周期与 CIK 确权')).toBeInTheDocument();
+    expect(screen.getByText('边界：不提供价格，也不能把停止申报直接等同破产。')).toBeInTheDocument();
+    expect(within(dataTrustSection as HTMLElement).queryByText(/Price-only|Full Ready|provider availability/)).toBeNull();
     expect(screen.getByText('三位一体工作站')).toBeInTheDocument();
     expect(screen.queryByText('股票 / 指数 / 篮子')).not.toBeInTheDocument();
     expect(screen.getByText('原始快照清单')).toBeInTheDocument();
@@ -690,6 +837,52 @@ describe('SnapshotsPage', () => {
         reason: 'manual-refresh-latest-and-repair',
       }),
     );
+  });
+
+  it('keeps missing provider key drafts across a document refresh in the current tab', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue(overview);
+
+    renderSnapshotsPage();
+
+    expect(await screen.findByRole('heading', { level: 1, name: '数据快照' })).toBeInTheDocument();
+    const tiingoInput = screen.getByLabelText('TIINGO_API_TOKEN 输入');
+    fireEvent.change(tiingoInput, { target: { value: 'local-test-token' } });
+
+    await waitFor(() =>
+      expect(window.sessionStorage.getItem('gsl.snapshots.trustCredentialDrafts.v1')).toContain('local-test-token'),
+    );
+
+    cleanup();
+    renderSnapshotsPage();
+
+    expect(await screen.findByRole('heading', { level: 1, name: '数据快照' })).toBeInTheDocument();
+    expect(screen.getByLabelText('TIINGO_API_TOKEN 输入')).toHaveValue('local-test-token');
+    fireEvent.click(screen.getByRole('button', { name: '清空本标签页暂存' }));
+    expect(screen.getByLabelText('TIINGO_API_TOKEN 输入')).toHaveValue('');
+    await waitFor(() =>
+      expect(window.sessionStorage.getItem('gsl.snapshots.trustCredentialDrafts.v1')).toBeNull(),
+    );
+  });
+
+  it('copies a same-shell QuickStart restart command for snapshot provider keys', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    fakeApi.getSnapshotOverview.mockResolvedValue(overview);
+
+    renderSnapshotsPage();
+
+    const missingKeySelect = await screen.findByLabelText('选择缺少的 API_KEY');
+    fireEvent.change(missingKeySelect, { target: { value: 'POLYGON_API_KEY' } });
+    fireEvent.change(screen.getByLabelText('POLYGON_API_KEY 输入'), { target: { value: 'polygon-token' } });
+    fireEvent.click(screen.getByRole('button', { name: '复制 POLYGON_API_KEY 设置命令' }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    expect(writeText.mock.calls[0]?.[0]).toContain("$env:POLYGON_API_KEY='polygon-token'");
+    expect(writeText.mock.calls[0]?.[0]).toContain("powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1");
+    expect(screen.getByText('已复制设置+重启命令；请粘贴到将启动 QuickStart 的同一个 PowerShell。')).toBeInTheDocument();
   });
 
   it('counts the S&P 500 and Nasdaq constituent lists as equity basket readiness', async () => {

@@ -35,6 +35,8 @@ FREE_ACCOUNT_PROVIDER_NAMES = {
     "sec_edgar",
     "tiingo",
     "tiingo_symbology",
+    "fmp",
+    "fmp_historical_constituent",
     "openbb_tiingo",
     "openbb_alpha_vantage",
     "openbb_fred",
@@ -43,8 +45,6 @@ FREE_ACCOUNT_PROVIDER_NAMES = {
 }
 
 PAID_OPTIONAL_PROVIDER_NAMES = {
-    "fmp",
-    "fmp_historical_constituent",
     "longbridge",
     "longbridge_static_info",
     "futu",

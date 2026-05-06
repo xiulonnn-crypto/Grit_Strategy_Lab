@@ -1,5 +1,5 @@
 param(
-  [string]$CacheDir = "C:\tmp\grit-pit-bulk-cache",
+  [string]$CacheDir = "",
   [string[]]$Terms = @(
     "survivorship bias free",
     "delisted",
@@ -11,6 +11,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+if (-not $CacheDir) {
+  $CacheDir = Join-Path $RepoRoot ".tmp\pit-bulk-cache"
+}
 $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $Python)) {
   $Python = "python"

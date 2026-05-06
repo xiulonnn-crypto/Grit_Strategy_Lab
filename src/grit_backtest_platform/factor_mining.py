@@ -166,6 +166,15 @@ class FactorMiningRunner:
 
         elapsed = max(time.perf_counter() - start, 0.000001)
         evaluated = len(candidates) + len(failures)
+        sorted_candidates = sorted(
+            candidates,
+            key=lambda candidate: (
+                candidate.rank_ic is not None,
+                candidate.rank_ic if candidate.rank_ic is not None else -math.inf,
+            ),
+            reverse=True,
+        )
+        unique_ranked_source = _unique_candidates_by_expression(sorted_candidates)
         ranked_candidates = tuple(
             FactorMiningCandidateSummary(
                 candidate_id=candidate.candidate_id,
@@ -179,14 +188,7 @@ class FactorMiningRunner:
                 persisted_to_factor_definitions=False,
             )
             for rank, candidate in enumerate(
-                sorted(
-                    candidates,
-                    key=lambda candidate: (
-                        candidate.rank_ic is not None,
-                        candidate.rank_ic if candidate.rank_ic is not None else -math.inf,
-                    ),
-                    reverse=True,
-                ),
+                unique_ranked_source,
                 start=1,
             )
         )
@@ -287,6 +289,10 @@ def run_factor_mining_job(
     )
 
 
+def factor_mining_job_id_for_request(request: FactorMiningJobCreateRequest) -> str:
+    return _job_id_for_request(request)
+
+
 def create_synthetic_market_data(
     universe: Sequence[str],
     *,
@@ -317,6 +323,8 @@ def _job_id_for_request(request: FactorMiningJobCreateRequest) -> str:
                 ",".join(request.operators),
                 str(request.candidate_count),
                 str(request.random_seed),
+                f"{request.min_rank_ic:.12g}",
+                str(request.max_depth),
             )
         ).encode("utf-8")
     ).hexdigest()[:12]
@@ -326,6 +334,20 @@ def _job_id_for_request(request: FactorMiningJobCreateRequest) -> str:
 def _candidate_id(expression: str, index: int) -> str:
     digest = hashlib.sha1(f"{index}:{expression}".encode("utf-8")).hexdigest()[:12]
     return f"cand_{digest}"
+
+
+def _unique_candidates_by_expression(
+    candidates: Sequence[FactorMiningCandidateSummary],
+) -> tuple[FactorMiningCandidateSummary, ...]:
+    seen: set[str] = set()
+    unique_candidates: list[FactorMiningCandidateSummary] = []
+    for candidate in candidates:
+        signature = " ".join(candidate.expression.split()).lower()
+        if not signature or signature in seen:
+            continue
+        seen.add(signature)
+        unique_candidates.append(candidate)
+    return tuple(unique_candidates)
 
 
 def _job_status(*, cancelled: bool, completed: int, failed: int) -> str:

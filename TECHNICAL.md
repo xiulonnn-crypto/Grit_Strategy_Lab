@@ -53,7 +53,9 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - 用户报告已批准 UI 在某个具体 live route 或对象 ID 上漂移时，验收必须抓取用户给出的精确 URL/ID；只抽样列表第一条、默认 demo 对象或旧截图不能作为该问题的完成证据。
 - worker 交付给 reviewer 前必须先跑交付前自测门，按 reviewer 拒收清单自查测试、Trace Matrix、截图、DOM 文案、交互证明、文档 delta 和剩余偏离，并明确回答 `Would reviewer refuse this?`；答案不是确定的 `No` 时不得交付。
 - 交付前自测不能替代正式 reviewer，它只是阻止明显不合格切片进入评审。
-- 临时截图、DOM dump、trace matrix 草稿和浏览器记录应放在 `.tmp/`、`artifacts/`、`tmp/grit-coder/` 或 `output/logs/grit-coder/`，不要散落在 repo 根目录。
+- 临时截图、DOM dump、trace matrix 草稿和浏览器记录应放在 `.tmp/`、`artifacts/` 或 `output/logs/grit-coder/`，不要散落在 repo 根目录。
+- 恢复证据 Markdown 进入 `docs/recovery/`，恢复辅助脚本进入 `scripts/recovery/`，历史 Git 备份和旧数据库备份进入 `artifacts/recovery/`；`.codex-logs/` 只视为历史兼容位置，新日志和浏览器证据应写入 `output/logs/grit-coder/` 或 `artifacts/`。
+- pytest `--basetemp`、pytest `cache_dir`、`tempfile`/`TMPDIR`、临时调试库和一次性 debug 输出必须指向 `.tmp/` 下的任务目录。固定 backend 脚本使用 `.tmp/pytest-runtime/`；repo 级 pytest 门禁会拒绝位于项目外，或位于仓库内但不在 `.tmp/` 下的显式 `--basetemp` 与 `cache_dir`，并拒绝仓库内错误位置的 `TEMP`、`TMP`、`TMPDIR` 和 `PYTEST_DEBUG_TEMPROOT`；固定脚本不得把 `pytesttmp-*`、`pytest-cache-files-*`、`tmp_dbg_*`、`tmp-promote-*` 或 `tmp/` 直接写到 repo 根目录，也不得把项目 pytest 临时根切到 `C:\tmp`。
 
 ### 1.4 文档优先级
 
@@ -124,7 +126,8 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - 优先使用 `harness/tasks/_template.md` 新建或更新任务书。
 - 任务书必须只保留 6 个字段：`Goal`、`In Scope`、`Out Of Scope`、`Files Likely Touched`、`Acceptance Checks`、`Rollback Notes`。
 - 若任务依赖 fixture，先检查 `harness/fixtures/seed_workspace/` 是否真实存在，再决定是否走 `codex-reset-fixture.ps1`。
-- 原始日志、截图、临时输出进入 `.tmp/` 或 `artifacts/`，摘要与 smoke 结果进入 `harness/reports/smoke/`。
+- 原始日志、截图、临时输出进入 `.tmp/`、`artifacts/` 或 `output/logs/grit-coder/`，摘要与 smoke 结果进入 `harness/reports/smoke/`。
+- 固定测试脚本拥有自己的 pytest 临时目录配置；repo 级 pytest 门禁会拦截 root-level `--basetemp`。不要在调用 `scripts/codex-test-backend.ps1`、`scripts/codex-smoke.ps1` 或任务手工命令时额外传入 root-level `--basetemp`。
 
 ## 3. 固定 Codex 入口与当前可用性
 
@@ -208,7 +211,9 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 - 启动 backend 到 `http://127.0.0.1:8000`
 - 启动 frontend 到 `http://127.0.0.1:4173/#/workspace`
-- frontend 预览通过 `web/preview-server.mjs --watch --rebuild-on-start` 启动，默认 `4173` 入口需要在启动时自触发一次静态构建，避免冷启动只返回 `Frontend build not ready yet.`
+- backend 健康等待默认最多 `75` 秒；若首次等待窗口刚好错过慢启动完成，会先执行离线 import/storage probe，再复查一次真实 `/healthz`，避免把 `BACKEND_PROBE_OK` 误读成 HTTP 服务已经失败。
+- backend 的 snapshot / PIT read-model cache 预热不阻塞 `/healthz`；默认在 FastAPI startup 后用后台线程执行，可用 `GRIT_STARTUP_READ_MODEL_PREWARM=skip` 关闭。
+- QuickStart 会在启动 preview 前显式执行一次前端 production build，然后通过 `web/preview-server.mjs --watch` 服务 `4173`；不要再给该 QuickStart preview 追加 `--rebuild-on-start`，否则会在启动时重复构建。独立运行 `npm run preview:auto` 时仍使用 preview-server 自带的 startup rebuild。
 - 优先使用 repo 内 `.python-runtime/`
 - 优先 Python 3.14，回退到 3.13
 - 维护 `.venv/` 为派生环境
@@ -220,9 +225,12 @@ Codex 在本仓库的默认阅读顺序固定如下：
 | --- | --- |
 | `GRIT_BACKTEST_DB` | 覆盖默认 SQLite 主库路径 |
 | `GRIT_ENABLE_OPENBB_PROVIDER` | 设为 `1` / `true` / `yes` / `on` 时启用可选 OpenBB 快照增强层；默认关闭，缺 OpenBB 或缺 key 不应影响启动 |
-| `TIINGO_API_TOKEN` | OpenBB Tiingo 行情凭证，运行时映射到 `obb.user.credentials.tiingo_token`，不写入本地 OpenBB 设置文件 |
+| `TIINGO_API_TOKEN` | Tiingo EOD / 公司行动修复凭证；OpenBB 启用时也会运行时映射到 `obb.user.credentials.tiingo_token`，不写入本地 OpenBB 设置文件 |
 | `ALPHAVANTAGE_API_KEY` | OpenBB Alpha Vantage targeted repair 凭证，运行时映射到 `alpha_vantage_api_key`，不写入本地 OpenBB 设置文件 |
-| `FMP_API_KEY` | OpenBB FMP 行情与当前成分辅助校验凭证，运行时映射到 `fmp_api_key`，不替代既有 FMP historical universe lane |
+| `FMP_API_KEY` | FMP free-account 凭证，用于 historical constituent、退市身份与可选价格补丁；OpenBB 启用时运行时映射到 `fmp_api_key` |
+| `SEC_USER_AGENT` | SEC EDGAR 身份/生命周期确权 user agent，必须包含可联系邮箱；只读环境变量，不落库 |
+| `GRIT_ENABLE_STOOQ_ONLINE` | 设为 `1` / `true` / `yes` / `on` 后，Stooq offline ZIP 不可用时允许按单标的在线 CSV 补丁 |
+| `GRIT_STOOQ_ONLINE_CACHE_DIR` | 覆盖 Stooq 在线 CSV manifest/cache 目录；默认 `.tmp/pit-bulk-cache/stooq` |
 | `FRED_API_KEY` | OpenBB FRED 固定收益曲线凭证，运行时映射到 `fred_api_key`，不写入本地 OpenBB 设置文件 |
 | `GRIT_PYTHON_RUNTIME_SOURCE` | 为 QuickStart 指定可复制的 Python runtime 来源 |
 | `GRIT_OPTIMIZATION_STEP_DELAY_SECONDS` | 覆盖优化 trial 之间的人工延迟；默认运行态为 `0`，测试态保持极小延迟以稳定观察进度刷新 |
@@ -230,6 +238,8 @@ Codex 在本仓库的默认阅读顺序固定如下：
 | `VITE_API_BASE_URL` | 覆盖前端请求 API base |
 | `LIVE_API_BASE` | live acceptance 时覆盖测试 API base |
 | `LIVE_FIXTURE_MANIFEST` | live acceptance 时显式指定 fixture manifest |
+
+第三方补源凭证只在 backend 进程启动时从环境变量读取。若已经启动了 QuickStart/backend，再在任意 PowerShell 里执行 `$env:ALPHAVANTAGE_API_KEY=...`、`$env:TIINGO_API_TOKEN=...`、`$env:POLYGON_API_KEY=...`、`$env:KAGGLE_API_TOKEN=...` 等命令，刷新浏览器页面不会让运行中的后端读取新值；必须在启动 backend 的同一个 PowerShell 中先设置环境变量，再重启 QuickStart/backend，随后用快照页重新检查 provider 状态。`#/snapshots` 底部输入框只在当前浏览器标签页用 `sessionStorage` 暂存密钥草稿，刷新页面会保留，关闭标签页或点击清空会删除；它不会提交后端、不会落库，也不会改变 provider 状态。复制出的命令应粘贴到将启动 QuickStart 的同一个 PowerShell 中执行。若复制多个 key，先把所有缺失项输入完，再用复制命令一次性启动，避免第二次重启只继承最后一个窗口的环境。
 
 OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收时，先安装并构建扩展：
 
@@ -399,19 +409,22 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 当前多因子第二期第一步的补充真相：
 
 - 正式可操作交付面包括 `PIT 清洗中心`、`因子库`、`因子详情/诊断`、`因子编辑器`、`挖掘沙盒` 与 `多因子策略创建`；`隔离检疫区` 仍是后续里程碑占位。第二期第一步不改策略详情、回测详情、回测配置、优化配置或优化结果页模块。
-- 左侧导航的 `因子` 组当前包含 `因子库`、`挖掘沙盒` 与 `隔离检疫区`；`挖掘沙盒` 已接通本地公式挖掘任务，候选只保存表达式和摘要指标，不进入正式因子库。`数据` 组必须同时保留 `PIT 清洗中心` 与 `数据快照`；`数据快照` 是既有快照入口，本期只保留导航可达，不做页面结构改造。
+- 左侧导航的 `因子` 组当前包含 `因子库`、`挖掘沙盒` 与 `隔离检疫区`；`挖掘沙盒` 已接通本地公式挖掘任务，首屏任务队列和候选摘要必须读取 `GET /factor-mining/jobs` 的运行时结果，不得用本地默认任务、静态候选或设计稿样例补位；候选只保存表达式和摘要指标，不进入正式因子库。`数据` 组必须同时保留 `PIT 清洗中心` 与 `数据快照`；`数据快照` 是既有快照入口，本期只保留导航可达，不做页面结构改造。
 - `GET /pit-data` 只负责点时价格、样本池、异常清洗与未来函数门禁摘要，供因子诊断判断数据可用性。
 - `POST /pit-data/research-waiver`、`DELETE /pit-data/research-waiver/{waiver_id}`、`POST /pit-data/identity-overrides` 与 `POST /pit-data/identity-scraper/restart` 是 PIT 清洗中心当前写入面：分别负责研究态豁免、撤销豁免、人工身份映射和身份修复任务重启。它们只改变 PIT 诊断治理状态，不绕过 Full Ready、正式晋升或组合入库门禁。
 - `GET /pit-data` 属于全路由首屏性能敏感 API：服务可以对读取结果使用短时缓存，但 PIT 写入接口必须主动失效缓存，避免豁免、身份覆盖或身份修复任务重启后的页面继续显示旧治理状态。
-- `GET /factors`、`POST /factors`、`GET /factors/{factor_id}`、`POST /factors/{factor_id}/diagnostics`、`POST /factors/diagnostics/preview` 与 `GET /factors/{factor_id}/diagnostics/{run_id}/report` 是因子库固定 API 切片；`POST/GET /factor-mining/jobs`、`GET /factor-mining/jobs/{job_id}`、`POST /factor-mining/jobs/{job_id}/cancel` 是挖掘沙盒固定 API 切片；`POST /factor-models/preview` 与 `POST /factor-models` 是多因子策略创建固定 API 切片。若请求或响应字段变化，`src/grit_backtest_platform/models.py` 与 `web/src/types.ts` 必须同任务同步。
+- `GET /factors`、`POST /factors`、`GET /factors/{factor_id}`、`POST /factors/{factor_id}/diagnostics`、`POST /factors/diagnostics/preview` 与 `GET /factors/{factor_id}/diagnostics/{run_id}/report` 是因子库固定 API 切片；`POST/GET /factor-mining/jobs`、`GET /factor-mining/jobs/{job_id}`、`POST /factor-mining/jobs/{job_id}/cancel` 是挖掘沙盒固定 API 切片，创建任务必须读取 `ds-price` 运行时价格快照并在摘要中暴露 `market_data_source=dataset_price_bars`、`synthetic_market_data=false` 与价格标的覆盖数量，缺少可用价格快照时返回中文阻断；`POST /factor-models/preview` 与 `POST /factor-models` 是多因子策略创建固定 API 切片。若请求或响应字段变化，`src/grit_backtest_platform/models.py` 与 `web/src/types.ts` 必须同任务同步。本期因子治理合同保持 additive：`GET /factors` 追加前台诊断状态、批量诊断摘要、相关性簇摘要、阻断原因摘要和策略创建风险；`POST /factors/diagnostics/preview` 在单因子 preview 外支持 `{batch: true, factor_ids, diagnostic_mode, include}` 只读批量投影，不落库、不新增批量 UI。
 - 因子详情页交付不得只用路由可达、标题/文案存在或 mock 单测作为通过标准。涉及批准稿的 `#/factors/:factorId` 必须用实际 canonical route（例如 `#/factors/s_mom_12m1m_rank`）建立 UI trace matrix，逐项核对紧凑标题区、十格证据热力图、换手率与衰减、分层收益、极端场景、风险提示、合规足迹和 PDF 报告入口，并保留截图或 DOM 结构证据；未完成这些证据时不能宣布页面与设计稿一致。
-- 默认五类常用因子固定使用 7 个分层描述符 canonical ID：`s_val_ep_ltm_raw`、`s_val_bp_latest_raw`、`s_mom_12m1m_rank`、`s_qlty_roe_ltm_raw`、`s_qlty_fcfy_ttm_raw`、`s_vol_252d_rank` 与 `s_size_cur_log`。旧默认 ID 只作为 alias 兼容读取，不能出现在 `GET /factors` 列表展示中。`POST /factors` 必须携带 `source_category_metric_window_operator` 描述符，人工因子 ID 由 `m_<category>_<metric>_<window>_<operator>` 生成，重复 descriptor 返回 409。
+- 默认五类常用因子固定使用 7 个 baseline 分层描述符 canonical ID：`s_val_ep_ltm_raw`、`s_val_bp_latest_raw`、`s_mom_12m1m_rank`、`s_qlty_roe_ltm_raw`、`s_qlty_fcfy_ttm_raw`、`s_vol_252d_rank` 与 `s_size_cur_log`。Factor Zoo 种子层可继续 additive 扩展 beta、投资、流动性、alpha blend 等自研描述符，但必须仍走本项目白名单表达式引擎，不能引入外部 factor 包或第三方 factor 代码。旧默认 ID 只作为 alias 兼容读取，不能出现在 `GET /factors` 列表展示中。`POST /factors` 必须携带 `source_category_metric_window_operator` 描述符，人工因子 ID 由 `m_<category>_<metric>_<window>_<operator>` 生成，重复 descriptor 返回 409。
 - 基础面 PIT 数据平面由 `ds-fundamentals`、`dataset_fundamental_points` 与 `dataset_fundamental_coverage` 承载；基本面点位必须有 `available_at`，诊断只能读取 `available_at <= observation_date/as_of_date` 的观测，不能用财报期末日替代可得日。市值默认由复权收盘价乘 `shares_outstanding` 推导，供应商市值只保留差异；企业价值优先使用供应商 EV，缺失时回退为 `MarketCap + TotalDebt - CashAndEquivalents`。若 `ds-fundamentals` 缺失或字段不全，应显示明确的 `基础面 PIT 缺口` 并阻止诊断。
 - 表达式引擎统一供诊断、挖掘和多因子打分使用，白名单只允许价格字段、基础四则、`Lag`、`Return`、`Std`、`Log`、`Rank`、`Winsorize`、`ZScore` 等安全算子；必须拒绝 `import`、`eval`、`__`、分号、未知字段、未知算子、过深 AST 与 `t+N` 未来引用。行业中性化在缺少 PIT 行业字段时只能返回未执行 blocker，不能展示已执行。
-- `POST /factor-models` 必须复用现有 `strategies` 与 `strategy_parameter_versions`，写入 `strategy_type=MULTI_FACTOR` 和参数快照；创建前必须重新跑 preview，存在 blocked factor 或启用行业中性化但缺 PIT 行业字段时拒绝物化。`#/strategies` 新建策略弹层中的“创建多因子策略”只跳转 `#/factor-models/new`，不得调用旧 creation session。
+- 前台因子状态统一使用四类：`robust/稳健`、`needs_calibration/待校准`、`decayed/失效`、`sandbox/沙箱`。`#/factors` 表格只把原状态列改为 `诊断状态`、原数据门禁列改为 `阻断 / 风险` 并提供 tooltip 和点击诊断摘要；其余线上页面结构保持不变。高相关、同族重叠、IC/IR 不稳定、换手衰减、coverage 边缘和诊断过期是 warning；PIT 缺口、未来函数、不可回放/current-only 字段、unsafe expression、缺失 `available_at`、启用中性化但缺行业 PIT 是 hard blocker。
+- `POST /factor-models` 必须复用现有 `strategies` 与 `strategy_parameter_versions`，写入 `strategy_type=MULTI_FACTOR` 和参数快照；创建前必须重新跑 preview，并消费 `strategy_creation_risk`。只有 hard blocker 或启用行业中性化但缺 PIT 行业字段时拒绝物化；高相关和同族重叠只提示风险，不能阻断创建。`#/factor-models/new` 本期只新增/替换右侧策略创建风险模块，选择因子、权重预览、中性化控制和创建按钮结构不得跟随设计稿扩展重做。`#/strategies` 新建策略弹层中的“创建多因子策略”只跳转 `#/factor-models/new`，不得调用旧 creation session。
 - 批准 UI 稿里的多因子权重、覆盖率、得分样本、中性化状态和策略门禁只能作为视觉结构示例，运行时必须读取 `GET /factors`、`POST /factor-models/preview` 与 `POST /factor-models` 的真实结果；接口未返回建议权重时只可从当前已选因子等权初始化，不能把设计稿示例权重、指标或成功态复制为运行时真相。
+- `SP500` 行业中性化的当前真实数据源挂在 `universe_membership_snapshots.metadata_json` 的 per-symbol GICS metadata，优先字段为 `gics_sector` / `GICS Sector` / `sector`，读取必须满足 `effective_date <= as_of_date` 且成员状态可用。`POST /factor-models/preview` 必须在 SQL 层按当前候选 symbol、as-of 日期和 active membership 切片读取，不能为一个预览全量拉取 universe membership 历史。策略详情 profile、回测 precheck 和回测归因都应 additive 暴露 `taxonomy=GICS`、`industry_field`、`covered_symbol_count`、`missing_symbol_count` 与 `source_names`；缺字段时保留 blocker，不写静态行业兜底。
 - 前台文案全部中文；因子入口命名为 `因子库`，不得使用广场类命名。
 - `#/factors` 的研判区属于前端性能敏感面：相关性热力图按 descriptor category 聚类排序，提供 `仅显示高相关对` 筛选，超过可视阈值时使用虚拟矩阵窗口；同类高相关和跨类别高相关必须有不同强度提示。表格 IC sparkline 使用带 0 位虚线的双色区域图；操作列最多勾选两个因子并切换到因子指纹比对。`SANDBOX_READY` 因子的数据门禁旁必须提供 `缺口速报` 浮层和跳转 PIT 覆盖率缺口清单的闭环动作。
+- `#/factors` 列表首屏不得等待完整 `GET /pit-data` 或扫描完整 universe/price 明细；后端应通过轻量 PIT 门禁投影直接随 `GET /factors.summary` 返回列表可用状态，前端只消费该摘要渲染 hero 和表格，完整 PIT 概览留给 `#/pit-data` 或显式诊断入口。
 
 当前多因子第二期第二步的补充真相：
 
@@ -424,6 +437,7 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - 多因子优化配置中的 `factor_weight__*_pct` 必须自动进入“权重合计 100%”默认约束组。优化结果读取旧任务时，应按该约束过滤无效组合，并用来源回测上下文投影不同权重组合的指标，不能把同一组指标复制给多个不同参数候选。
 - 第二步固定 UI Trace Matrix 路由：`#/strategies/strat_4c86521704e2`、`#/strategies/strat_4c86521704e2/backtest-runs/new`、`#/runs/run_83b71f8f2458`、`#/optimization-jobs/new/config?strategy_id=strat_4c86521704e2&entry_point=lab_menu`、`#/optimization-jobs/opt_69682940f4ad`。验收要记录模块增减、中文参数格式化、阻塞态禁用、决策侧栏补项和优化结果页无新增模块。
 - 第二步固定验证仍使用 `powershell -ExecutionPolicy Bypass -File .\scripts\codex-test-backend.ps1`、`powershell -ExecutionPolicy Bypass -File .\scripts\codex-test-frontend.ps1`、`powershell -ExecutionPolicy Bypass -File .\scripts\codex-test-frontend.ps1 -StrictGlobalTypes`。除非 `harness/fixtures/seed_workspace/` 已恢复，不得把 `codex-smoke.ps1` 声明为通过。
+- 多因子行业 PIT 专项的最小聚焦验证包括：`pytest tests/test_multi_factor_strategy_api.py::test_factor_model_industry_neutralization_uses_seeded_sp500_gics_pit tests/test_universe_history_official_sources.py::test_sp500_wikipedia_table_extracts_per_symbol_gics_metadata`，以及 `npm.cmd --prefix web test -- factor.model-builder.test.tsx`。通过条件是启用行业中性化后 preview/create/precheck/submit/attribution 都显示真实 `EXECUTED` 证据，且无 `MISSING_INDUSTRY_PIT` blocker。
 
 当前优化任务 detail 的补充真相：
 
@@ -586,10 +600,11 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 
 ### 7.3 产物收口规则
 
-- `.tmp/`：临时运行态、临时数据库、临时日志
+- `.tmp/`：临时运行态、临时数据库、临时日志、pytest basetemp、Python `TEMP`/`TMPDIR`
 - `artifacts/`：较重的原始证据、截图、诊断输出
 - `harness/reports/smoke/`：轻量 smoke 摘要与报告
-- repo 根目录：不应新增临时图片、临时日志、临时数据库
+- repo 根目录：不应新增临时图片、临时日志、临时数据库、pytest basetemp、`tmp_dbg_*`、`tmp-promote-*` 或 `tmp/` 目录
+- 若历史根目录临时目录因 Windows ACL 只能复制、不能移动或重命名，不要用 `takeown`/`icacls` 硬改权限作为常规清理手段；先保留证据，修正产生路径，并在交付说明中列出被系统权限阻挡的空目录。
 
 ## 8. 验证规则
 
@@ -701,12 +716,14 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 
 - `Stooq` is now supported as an offline price-only cold-start source. Runtime lookup order for price repair is effectively `Yahoo -> yfinance -> Tiingo -> Longbridge -> AkShare -> Stooq -> FMP`, while `Alpha Vantage` remains outside the default price chain.
 - `Stooq` reads `GRIT_STOOQ_US_DAILY_ZIP` first, then prefers the repo-local archive at `data/vendor/stooq/d_us_txt.zip`, and only falls back to `~/Downloads/d_us_txt.zip`. The provider reads the ZIP archive in place and does not require manual extraction.
+- `Stooq` online CSV fallback is opt-in only. It is enabled by `GRIT_ENABLE_STOOQ_ONLINE=1` when the offline ZIP is unavailable, fetches one symbol at a time using the `.US` suffix, writes a manifest/cache under `.tmp/pit-bulk-cache/stooq` by default, and remains price-only.
 - `Stooq` must not be counted as a company-action source. It emits daily price bars only, stores `adj_close` as a close proxy, and is excluded from `incremental` current-window refreshes.
 - Company-action snapshot completeness is now defined by formal `dividend/split/reverse_split` probe coverage, not by “every symbol must have at least one event row”.
 - When an action-capable provider successfully probes a symbol and finds no formal events, the pipeline writes a `dataset_symbol_coverage` row with `coverage_kind=corporate_probe` and `probe_status=complete_no_events`.
 - `earnings_report` and `report_filed` remain stored as supplementary action rows, but they do not satisfy formal company-action completeness on their own.
 - OpenBB provider 支持作为 `openbb-provider` extra 启用，价格层 provider id 为 `openbb_yfinance`、`openbb_tiingo`、`openbb_fmp` 与 targeted-only `openbb_alpha_vantage`；固定收益层通过 `openbb_federal_reserve` 与 `openbb_fred` 填补或交叉校验 UST/TIPS 曲线。若当前 OpenBB 生成路由与 provider interface 版本不匹配，固定收益 adapter 会降级到 provider fetcher 读取曲线数据，并统一把 OpenBB decimal rate 转为本项目的 `ytm_pct` 百分点口径。Universe 只允许写入 `metadata.openbb_current_constituent_check` 辅助校验，不能改变 PIT readiness。
-- 数据源治理新增只读 `GET /data-snapshots/provider-registry` 与 `GET /data-snapshots/provider-attempts`。它们只归一化运行时 provider 链、快照 `metadata.provider_summary`、最近 `snapshot_refresh_jobs.summary_json.refresh_stats` 与债券 refresh stats，不新增表、不触发外部请求；`/data-snapshots/overview` 只 additive 增加 `provider_readiness_summary`。
+- 数据源治理新增只读 `GET /data-snapshots/provider-registry` 与 `GET /data-snapshots/provider-attempts`。它们只归一化运行时 provider 链、快照 `metadata.provider_summary`、最近 `snapshot_refresh_jobs.summary_json.refresh_stats` 与债券 refresh stats，不新增表、不触发外部请求；`/data-snapshots/overview` 只 additive 增加 `provider_readiness_summary`。这两个治理端点必须复用 snapshot overview 的短缓存和更新时间签名，避免数据快照页或底部可信层查看 provider 状态时重复重建完整快照读模型。
+- 数据可信层继续复用 provider registry、provider attempts、snapshot metadata 与 PIT overview，不新增主表。`provider-registry.items[]` additive 增加 `trust_profile`，`/data-snapshots/overview` 与 `/pit-data` additive 增加 `data_trust_summary`，前端先展示可信层摘要，再保留 raw registry，避免把 provider 表误解成“所有 key 都必须配置”。
 - `provider_readiness_summary` 的收益口径必须区分 `registered_provider_count`、`enabled_provider_count`、`credential_ready_provider_count` 与 `usable_provider_count`：registered 只表示已登记或运行时可见，enabled 表示当前链路启用，credential-ready 表示所需只读环境变量齐备，usable 还要求当前没有 quota/cooldown。`openbb` 子摘要也必须暴露 credential-ready、usable 与 latest-job attempt 计数；运营复盘不能把 registered 或 enabled 直接写成“新增数据源已产生补数收益”。
 - `provider-attempts` 默认 `limit=100`，最大 `500`，可按 `provider_id`、`target_type`、`status` 过滤；结果必须按最近 job / snapshot 更新时间倒序，并保留 quota/cooldown、missing credentials、错误摘要和 PIT effect。原始 `items[]` 保留事件明细，`rollup.policy=unique_provider_latest_job_priority` 作为收益口径：每个 provider 先取最新 refresh job 内的代表尝试，若最新 job 没有该 provider 才回退到快照 metadata，避免 job 与 metadata 双重投影放大尝试数。
 - `GRIT_ENABLE_OPENBB_PROVIDER` 未开启时不得 import 或实例化 `openbb_provider`。Registry 可以列出 OpenBB 静态定义但必须显示 `enabled=false`；OpenBB current constituents 固定为 `universe_current_constituents_auxiliary`，只能作为 metadata/attempt 辅助记录，`can_upgrade_pit_readiness=false`。
@@ -716,8 +733,10 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 ## 2026-05-05 PIT External Source Repair
 
 - `/pit-data` additive exposes `external_source_readiness` for the PIT external-source path. It summarizes Kaggle credential presence, Kaggle cache manifests, S&P 500 historical component Matrix coverage, DuckDB/Parquet catalog readiness, Polygon credential presence, source-specific blockers, and the top critical Polygon repair candidates.
+- PIT 修复队列统一按 `Tiingo -> FMP -> Stooq/Kaggle -> SEC/CIK -> Polygon` 展示下一步动作。`queue_sample[]` 可选返回 `next_provider`、`provider_priority`、`required_evidence` 与 `trust_blocker`；Stooq/Kaggle 是 price-only，SEC/CIK 是 identity-only，二者都不能单独升级 Full Ready。
+- `zero_event_certificates[]` 是真实投影而不是空数组占位：候选应包含 symbol、CIK、成员退出日期、last filing evidence、price/action negative result、结论和不可恢复原因。它只说明“可进入证书确认流程”，不能把抓取失败或 SEC 停止申报直接写成破产/无事件结论。
 - Credential handling is status-only. `KAGGLE_API_TOKEN`, `KAGGLE_USERNAME`/`KAGGLE_KEY`, `~/.kaggle/access_token`, `~/.kaggle/kaggle.json`, and `POLYGON_API_KEY` may be detected as present/missing/invalid, but secret values must never be written to repo files, logs, SQLite payloads, manifests, screenshots, or docs. Any token pasted in chat or logs must be revoked before use.
-- The fixed PIT bulk cache directory is `C:\tmp\grit-pit-bulk-cache` unless `GRIT_PIT_BULK_CACHE_DIR` is explicitly set. Large Kaggle ZIP/CSV files, DuckDB catalogs, manifests, and partitioned Parquet output stay outside the repo.
+- The fixed PIT bulk cache directory is `.tmp/pit-bulk-cache` unless `GRIT_PIT_BULK_CACHE_DIR` is explicitly set. If a recovered or copied cache package sits under `.tmp/pit-bulk-cache/grit-pit-bulk-cache`, PIT readiness resolves that child as the active cache when the outer root has no direct artifacts, and the PIT overview cache signature watches the same resolved directory. Large Kaggle ZIP/CSV files, DuckDB catalogs, manifests, and partitioned Parquet output stay inside the project temp area rather than `C:\tmp`.
 - Local operator entry points are `scripts/codex-pit-external-preflight.ps1`, `scripts/codex-pit-kaggle-search.ps1`, `scripts/codex-pit-kaggle-download.ps1`, `scripts/codex-pit-bulk-normalize.ps1`, and `scripts/codex-pit-diff-repair.ps1`.
 - Kaggle search terms are fixed to `survivorship bias free`, `delisted`, `US stock market historical data delisted`, and `EOD historical data stocks`. The first preferred bulk source is `borismarjanovic/price-volume-data-for-all-us-stocks-etfs`; delisted archives must record license, schema, coverage years, hash, row count, and source URL before import.
 - S&P 500 historical component Matrix data is normalized to `effective_date / symbol / raw_symbol / membership_status / source_revision_id`. Matrix decides historical membership only; Kaggle price data and Polygon action evidence must be attached separately.
@@ -804,7 +823,7 @@ Phase 1.2 验证时至少覆盖：
 ## 2026-04-23 QuickStart preview listener note
 
 - QuickStart 清理 `4173` 旧监听时，绝对 `web/preview-server.mjs` 命令和 `node ./preview-server.mjs --watch --rebuild-on-start` 相对命令都属于 repo-local preview，可作为 stale listener 重启目标，不应被判为 `non-repo frontend process`。
-- `web/src/quickstart.preview.test.ts` 已纳入 `scripts/codex-test-frontend.ps1` 固定前端切片，用来守住 preview listener 识别和 `--rebuild-on-start` 启动参数。
+- `web/src/quickstart.preview.test.ts` 已纳入 `scripts/codex-test-frontend.ps1` 固定前端切片，用来守住 preview listener 识别、QuickStart 显式 build 后不重复 startup rebuild、以及 backend readiness 复核逻辑。
 
 ### Localhost delivery gate
 
@@ -812,6 +831,7 @@ Phase 1.2 验证时至少覆盖：
 
 - 确认 `8000` 的 `uvicorn` 和 `4173` 的 preview 进程是在最终代码之后启动的；如果不是，先停止 repo-local 旧监听并重启。
 - 重新执行 `npm run build`，避免 `preview-server.mjs` 因 dist promotion 失败继续服务旧 bundle。
+- 若前端构建或预览曾临时指定 `VITE_API_BASE_URL`，最终交付前必须恢复并验证 `http://127.0.0.1:8000`。`#/factors` 等页面出现 `Failed to fetch`、列表计数归零或空表时，先检查 `8000` 后端监听和构建包 API 指向，再判断页面代码问题。
 - 核对 `GRIT_BACKTEST_DB` 指向的主库以及同名 `_market_data.sqlite3` companion 不是新建空库；`/workspace/overview` 应先用 API 证明策略/回测历史仍在，再打开页面。
 - 重新验证 hash SPA 页面时必须强制 document reload，例如 `http://127.0.0.1:4173/?v=<timestamp>#/snapshots`；只从 `#/workspace` 跳到 `#/snapshots` 可能继续运行旧 bundle。
 - 对用户提到的页面跑一次真实浏览器或等价 live check，并记录 `GET /compositions`、`GET /leg-inventory`、`GET /data-snapshots/overview` 的 HTTP 结果。

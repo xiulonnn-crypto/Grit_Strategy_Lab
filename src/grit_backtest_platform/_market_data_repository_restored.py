@@ -537,6 +537,9 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_universe_membership_effective ON universe_membership_snapshots(effective_date, symbol)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_universe_membership_snapshot_symbol_effective ON universe_membership_snapshots(universe_snapshot_id, symbol, effective_date)"
+    )
     conn.commit()
 
 
@@ -1566,12 +1569,13 @@ class MarketDataRepository:
         universe_snapshot_id: str | None = None,
         universe_key: str | None = None,
         effective_date: str | None = None,
+        effective_date_lte: str | None = None,
+        symbols: Iterable[str] | None = None,
+        active_only: bool = False,
     ) -> list[dict[str, Any]]:
-        sql = """
-            SELECT ums.*
-            FROM universe_membership_snapshots ums
-            JOIN universe_snapshots us ON us.id = ums.universe_snapshot_id
-        """
+        sql = "SELECT ums.* FROM universe_membership_snapshots ums"
+        if universe_key:
+            sql += " JOIN universe_snapshots us ON us.id = ums.universe_snapshot_id"
         filters: list[str] = []
         params: list[Any] = []
         if universe_snapshot_id:
@@ -1583,12 +1587,51 @@ class MarketDataRepository:
         if effective_date:
             filters.append("ums.effective_date = ?")
             params.append(effective_date)
+        if effective_date_lte:
+            filters.append("ums.effective_date <= ?")
+            params.append(effective_date_lte)
+        normalized_symbols: list[str] = []
+        seen_symbols: set[str] = set()
+        for symbol in symbols or []:
+            normalized_symbol = self._normalize_symbol(str(symbol))
+            if normalized_symbol and normalized_symbol not in seen_symbols:
+                normalized_symbols.append(normalized_symbol)
+                seen_symbols.add(normalized_symbol)
+        if normalized_symbols:
+            filters.append(f"ums.symbol IN ({','.join('?' for _ in normalized_symbols)})")
+            params.extend(normalized_symbols)
+        if active_only:
+            inactive_statuses = ("REMOVED", "DELETED", "INACTIVE", "OUT", "EXCLUDED")
+            filters.append(
+                "UPPER(COALESCE(NULLIF(ums.membership_status, ''), 'ACTIVE')) "
+                f"NOT IN ({','.join('?' for _ in inactive_statuses)})"
+            )
+            params.extend(inactive_statuses)
         if filters:
             sql += " WHERE " + " AND ".join(filters)
         sql += " ORDER BY ums.effective_date ASC, ums.symbol ASC"
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [self._decode_json_row(dict(row), "metadata_json") for row in rows]
+
+    def list_universe_membership_symbols(self) -> list[str]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT symbol
+                FROM universe_membership_snapshots
+                WHERE COALESCE(symbol, '') <> ''
+                ORDER BY symbol ASC
+                """
+            ).fetchall()
+        symbols: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            symbol = self._normalize_symbol(str(row["symbol"]))
+            if symbol and symbol not in seen:
+                symbols.append(symbol)
+                seen.add(symbol)
+        return symbols
 
     def snapshot_table_counts(self) -> dict[str, int]:
         table_names = [

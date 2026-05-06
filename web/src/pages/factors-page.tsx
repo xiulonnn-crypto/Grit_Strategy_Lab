@@ -38,21 +38,18 @@ const STATUS_LABELS: Record<string, string> = {
   FAILED: '失败',
 };
 
-const FULL_READY_REPAIR_STATUS_LABELS: Record<string, string> = {
-  READY: 'Full Ready 可验收',
-  NEEDS_REPAIR: '继续修复',
-  WAITING_ON_PROVIDER_COOLDOWN: '等待免费源冷却',
-  NEEDS_FREE_SOURCE_REPAIR: '等待免费源补齐',
-  NEEDS_IDENTITY_ALIAS: '先补历史身份',
-};
-
-const FULL_READY_BUCKET_LABELS: Record<string, string> = {
-  current_core_missing: '当前核心成员',
-  historical_core_missing: '历史生命周期',
-  historical_lifecycle_missing: '历史生命周期',
-  corporate_action_alignment: '公司行为对齐',
-  identity_unresolved: '身份映射',
-  non_core_missing: '非核心缺口',
+const PIT_STATUS_LABELS: Record<string, string> = {
+  READY: '正式就绪',
+  LIMITED_READY: '研究就绪',
+  BLOCKED: '阻塞',
+  READY_TO_DIAGNOSE: '可诊断',
+  SANDBOX_READY: '研究可跑',
+  BLOCKED_PIT: 'PIT 阻塞',
+  BLOCKED_DATA: '数据待补',
+  INCOMPLETE: '待补',
+  UNAVAILABLE: '不可用',
+  COMPLETED: '完成',
+  FAILED: '失败',
 };
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -97,6 +94,47 @@ const DIAGNOSTIC_TOOLTIP_LINES = [
   'Rank IC: 因子排序与未来收益排序的相关性，越高说明截面排序越有效。',
   'IR: Rank IC 均值除以波动，衡量诊断稳定性。',
   '覆盖率: 本次诊断中有可用 PIT 样本的证券占比。',
+];
+type FactorUiState = 'robust' | 'needs_calibration' | 'decayed' | 'sandbox';
+type FactorGateTone = 'good' | 'warn' | 'bad';
+
+const UI_STATE_LABELS: Record<FactorUiState, string> = {
+  robust: '稳健',
+  needs_calibration: '待校准',
+  decayed: '失效',
+  sandbox: '沙箱',
+};
+const FACTOR_WARNING_GATE_CODES = new Set([
+  'COVERAGE_EDGE',
+  'DIAGNOSTIC_STALE',
+  'HIGH_CORRELATION',
+  'IC_UNSTABLE',
+  'TURNOVER_DECAY',
+  'VERIFIED_PIT_WINDOW_INCOMPLETE',
+]);
+const FACTOR_HARD_GATE_CODES = new Set([
+  'CURRENT_ONLY_DATA',
+  'FUNDAMENTAL_PIT_NOT_READY',
+  'FUTURE_FUNCTION',
+  'INDUSTRY_PIT_NOT_READY',
+  'MISSING_AVAILABLE_AT',
+  'NON_REPLAYABLE_FIELD',
+  'PIT_GATE_BLOCKED',
+  'PRICE_SNAPSHOT_NOT_READY',
+  'UNSAFE_EXPRESSION',
+  'UNIVERSE_HISTORY_BLOCKED',
+]);
+
+const UI_STATE_TOOLTIP_LINES = [
+  '稳健：已完成诊断，IC/IR、coverage、分组收益达标，无硬阻断。',
+  '待校准：IC 偏弱、coverage 不足、高相关、换手衰减或诊断过期，但仍可研究提示使用。',
+  '失效：IC 衰减、IR 失真、分组收益倒挂或生命周期为 DECAYED。',
+  '沙箱：Sandbox/Limited readiness，只适合研究预览，不能作为正式 PIT 可回放因子。',
+];
+
+const BLOCKER_RISK_TOOLTIP_LINES = [
+  '风险提示：高相关、同族重叠、IC 不稳定、换手衰减、coverage 边缘或诊断过期，不阻断策略创建。',
+  '硬阻断：PIT 缺口、未来函数、不可回放字段、current-only 数据、unsafe expression、缺 available_at 或行业中性化缺行业 PIT。',
 ];
 
 function pct(value: unknown, digits = 1): string {
@@ -167,6 +205,13 @@ function FormulaWithTooltips({ expression }: { expression: string }): JSX.Elemen
 
 function Sparkline({ points }: { points: Array<{ value: number }> }): JSX.Element {
   const values = points.map((point) => point.value).filter((value) => Number.isFinite(value));
+  if (!values.length) {
+    return (
+      <div className="factor-sparkline-empty" role="note" aria-label="暂无 IC 数据">
+        暂无 IC
+      </div>
+    );
+  }
   const safeValues = values.length ? values : [0];
   const min = Math.min(...safeValues, 0);
   const max = Math.max(...safeValues, 0);
@@ -243,6 +288,44 @@ function StatusPill({ status }: { status: string }): JSX.Element {
       {STATUS_LABELS[normalized] ?? status}
     </span>
   );
+}
+
+function PitStatusPill({ status }: { status: string }): JSX.Element {
+  const normalized = status.toUpperCase();
+  return (
+    <span className={`factor-pill factor-pill--${normalized.toLowerCase().replaceAll('_', '-')}`}>
+      {PIT_STATUS_LABELS[normalized] ?? status}
+    </span>
+  );
+}
+
+function pitStatusLabel(value: unknown): string {
+  const normalized = String(value ?? '').toUpperCase();
+  return PIT_STATUS_LABELS[normalized] ?? String(value ?? '待确认');
+}
+
+function pitCopy(value: unknown): string {
+  return String(value ?? '')
+    .replaceAll('Full Ready', '完整门禁')
+    .replaceAll('Limited Ready', '研究就绪')
+    .replaceAll('Sandbox', '研究')
+    .replaceAll('Verified', '正式')
+    .replaceAll('Identity Scraper', '身份修复任务')
+    .replaceAll('重启 身份修复任务', '重启身份修复任务')
+    .replaceAll('身份修复任务 已执行', '身份修复任务已执行')
+    .replaceAll('个 symbol', '个标的')
+    .replaceAll('symbol', '标的')
+    .replaceAll('waiver', '研究豁免');
+}
+
+function pitPriorityLabel(value?: string | null): string {
+  const normalized = String(value ?? '').toUpperCase();
+  const labels: Record<string, string> = {
+    HIGH: '高',
+    MEDIUM: '中',
+    LOW: '低',
+  };
+  return labels[normalized] ?? '中';
 }
 
 function isNumber(value: unknown): value is number {
@@ -354,6 +437,16 @@ function factorRankIc(factor: ApiFactorListItem): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+function referenceDiagnosticLabel(summary: ApiFactorDiagnosticSummary | null | undefined): string | null {
+  if (!summary || String(summary.status ?? '').toUpperCase() !== 'REFERENCE_ONLY') return null;
+  const lineage = summary.data_lineage as Record<string, unknown> | undefined;
+  const lineageLabel = typeof lineage?.label === 'string' ? lineage.label : null;
+  if (lineageLabel) return lineageLabel.replace(/^参考口径：?/, '');
+  const sourceName = typeof summary.source_factor_name === 'string' ? summary.source_factor_name : null;
+  const sourceId = typeof summary.source_factor_id === 'string' ? summary.source_factor_id : null;
+  return sourceName ?? sourceId ?? '默认因子';
+}
+
 function factorUpdatedAt(factor: ApiFactorListItem): string | null {
   const compliance = factor.latest_diagnostic_summary?.compliance_trail as Record<string, unknown> | undefined;
   return factor.updated_at ?? recordString(compliance, 'diagnosed_at') ?? factor.created_at ?? null;
@@ -462,9 +555,204 @@ function factorDisplayStatus(factor: ApiFactorListItem): string {
   return factor.diagnostic_status;
 }
 
+function factorUiState(factor: ApiFactorListItem): { state: FactorUiState; label: string } {
+  const explicitState = String(factor.ui_state ?? '').toLowerCase();
+  if (explicitState === 'robust' || explicitState === 'needs_calibration' || explicitState === 'decayed' || explicitState === 'sandbox') {
+    return {
+      state: explicitState,
+      label: factor.ui_state_label || UI_STATE_LABELS[explicitState],
+    };
+  }
+  const lifecycle = String(factor.lifecycle_status ?? '').toUpperCase();
+  const diagnostic = factorDisplayStatus(factor).toUpperCase();
+  if (lifecycle === 'DECAYED' || diagnostic === 'FAILED') {
+    return { state: 'decayed', label: UI_STATE_LABELS.decayed };
+  }
+  if (diagnostic === 'SANDBOX_READY' || diagnostic === 'BLOCKED_PIT' || diagnostic === 'BLOCKED_DATA') {
+    return { state: 'sandbox', label: UI_STATE_LABELS.sandbox };
+  }
+  const summary = factor.latest_diagnostic_summary;
+  const rankIc = summary?.rank_ic;
+  const ir = summary?.ir;
+  const coverage = summary?.coverage;
+  const hasHealthyMetrics =
+    typeof rankIc === 'number' &&
+    typeof ir === 'number' &&
+    typeof coverage === 'number' &&
+    rankIc >= 0.03 &&
+    ir >= 0.25 &&
+    coverage >= 80 &&
+    factor.readiness_blockers.length === 0;
+  if (diagnostic === 'COMPLETED' && hasHealthyMetrics) {
+    return { state: 'robust', label: UI_STATE_LABELS.robust };
+  }
+  if (diagnostic === 'COMPLETED' || diagnostic === 'READY_TO_DIAGNOSE') {
+    return { state: 'needs_calibration', label: UI_STATE_LABELS.needs_calibration };
+  }
+  return { state: 'sandbox', label: UI_STATE_LABELS.sandbox };
+}
+
+function creationRiskReasons(factor: ApiFactorListItem, severity: 'warning' | 'blocker'): string[] {
+  const risk = factor.strategy_creation_risk;
+  const items = severity === 'warning' ? risk?.warnings : risk?.hard_blockers;
+  return (items ?? [])
+    .map((item) => item.label || item.message || item.code)
+    .filter((value): value is string => Boolean(value));
+}
+
+function blockerSummaryReasons(factor: ApiFactorListItem, severity: 'warning' | 'blocker'): string[] {
+  const summary = factor.blocker_reason_summary;
+  return (summary?.reasons ?? [])
+    .filter((reason) => String(reason.severity ?? '').toLowerCase() === severity)
+    .map((reason) => reason.label || reason.message || reason.code)
+    .filter((value): value is string => Boolean(value));
+}
+
+function readinessBlockerSeverity(blocker: Record<string, unknown>): 'warning' | 'blocker' {
+  const code = String(blocker.code ?? '').toUpperCase();
+  if (FACTOR_WARNING_GATE_CODES.has(code)) return 'warning';
+  if (FACTOR_HARD_GATE_CODES.has(code) || code.includes('PIT')) return 'blocker';
+  return 'blocker';
+}
+
+function readinessBlockerReasons(factor: ApiFactorListItem, severity: 'warning' | 'blocker'): string[] {
+  return factor.readiness_blockers
+    .filter((blocker) => readinessBlockerSeverity(blocker) === severity)
+    .map((blocker) => String(blocker.message ?? blocker.code ?? STATUS_LABELS[factor.diagnostic_status] ?? '数据门禁阻断'))
+    .filter(Boolean);
+}
+
+function factorGateProjection(
+  factor: ApiFactorListItem,
+  isHighCorrelation: boolean,
+): { label: string; tone: FactorGateTone; reasons: string[]; fixTarget?: string | null } {
+  const hardReasons = [
+    ...creationRiskReasons(factor, 'blocker'),
+    ...blockerSummaryReasons(factor, 'blocker'),
+    ...readinessBlockerReasons(factor, 'blocker'),
+  ].filter(Boolean);
+  if (hardReasons.length || factor.blocker_reason_summary?.status === 'blocked') {
+    return {
+      label: '硬阻断',
+      tone: 'bad',
+      reasons: hardReasons.length ? hardReasons : [factor.blocker_reason_summary?.label ?? STATUS_LABELS[factor.diagnostic_status] ?? '数据门禁阻断'],
+      fixTarget: factor.gate_fix_target,
+    };
+  }
+  const warningReasons = [
+    ...creationRiskReasons(factor, 'warning'),
+    ...blockerSummaryReasons(factor, 'warning'),
+    ...readinessBlockerReasons(factor, 'warning'),
+    ...(isHighCorrelation ? ['高相关提示'] : []),
+  ].filter(Boolean);
+  if (warningReasons.length || factor.blocker_reason_summary?.status === 'warning') {
+    return {
+      label: '风险提示',
+      tone: 'warn',
+      reasons: warningReasons.length ? warningReasons : [factor.blocker_reason_summary?.label ?? '需在策略创建时提示风险'],
+      fixTarget: factor.gate_fix_target,
+    };
+  }
+  return { label: '无阻断', tone: 'good', reasons: ['可进入策略创建；相关性仅作为风险提示。'] };
+}
+
+function DiagnosticSummaryPopover({
+  factor,
+  onClose,
+}: {
+  factor: ApiFactorListItem;
+  onClose: () => void;
+}): JSX.Element {
+  const summary = factor.latest_diagnostic_summary;
+  const batch = factor.batch_diagnostic_summary;
+  const runId = summary?.run_id ?? batch?.latest_run_id ?? factor.last_diagnostic_run_id ?? '待生成';
+  const rankIc = summary?.rank_ic ?? batch?.rank_ic;
+  const ir = summary?.ir ?? batch?.ir;
+  const coverage = summary?.coverage ?? batch?.coverage;
+  const diagnosedAt = recordString(summary?.compliance_trail, 'diagnosed_at') ?? batch?.latest_diagnostic_at ?? factorUpdatedAt(factor) ?? '待生成';
+  const state = factorUiState(factor);
+  const warnings = creationRiskReasons(factor, 'warning');
+  const blockers = creationRiskReasons(factor, 'blocker');
+  return (
+    <div className="factor-diagnostic-popover" role="dialog" aria-label={`${factor.name} 最近诊断摘要`}>
+      <div className="factor-diagnostic-popover__header">
+        <div>
+          <strong>最近诊断摘要</strong>
+          <span>{state.label} · {runId}</span>
+        </div>
+        <button type="button" onClick={onClose} aria-label="关闭诊断摘要">×</button>
+      </div>
+      <dl className="factor-diagnostic-popover__grid">
+        <div><dt>Rank IC</dt><dd>{num(rankIc)}</dd></div>
+        <div><dt>IR</dt><dd>{num(ir, 2)}</dd></div>
+        <div><dt>覆盖率</dt><dd>{pct(coverage)}</dd></div>
+        <div><dt>诊断时间</dt><dd>{diagnosedAt === '待生成' ? diagnosedAt : formatDateTime(diagnosedAt)}</dd></div>
+      </dl>
+      <p>
+        {blockers.length
+          ? `硬阻断：${blockers.slice(0, 2).join('、')}`
+          : warnings.length
+            ? `风险提示：${warnings.slice(0, 2).join('、')}`
+            : '无硬阻断；若存在高相关，仅在策略创建时提示。'}
+      </p>
+    </div>
+  );
+}
+
+function DiagnosticStateCell({
+  factor,
+  open,
+  onToggle,
+  onClose,
+}: {
+  factor: ApiFactorListItem;
+  open: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+}): JSX.Element {
+  const state = factorUiState(factor);
+  return (
+    <div className="factor-diagnostic-state">
+      <button
+        aria-expanded={open}
+        aria-label={`查看${factor.name}诊断摘要`}
+        className={`factor-pill factor-diagnostic-state__button factor-pill--ui-${state.state}`}
+        onClick={onToggle}
+        type="button"
+      >
+        {state.label}
+      </button>
+      {open ? <DiagnosticSummaryPopover factor={factor} onClose={onClose} /> : null}
+    </div>
+  );
+}
+
+function GateRiskCell({
+  factor,
+  isHighCorrelation,
+}: {
+  factor: ApiFactorListItem;
+  isHighCorrelation: boolean;
+}): JSX.Element {
+  const projection = factorGateProjection(factor, isHighCorrelation);
+  const primaryReason = projection.reasons[0];
+  return (
+    <div className="factor-gate-cell">
+      <span className={`factor-gate-pill factor-gate-pill--${projection.tone}`}>{projection.label}</span>
+      {primaryReason ? <small className="factor-gate-reason" title={primaryReason}>{primaryReason}</small> : null}
+      {projection.tone === 'bad' && projection.fixTarget ? (
+        <button className="factor-repair-link" onClick={() => navigateTo(String(projection.fixTarget).replace(/^#/, ''))} type="button">
+          查看修复
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function DiagnosticCell({ factor }: { factor: ApiFactorListItem }): JSX.Element {
   const summary = factor.latest_diagnostic_summary;
   const gap = factor.diagnostic_gap_summary ?? {};
+  const referenceLabel = referenceDiagnosticLabel(summary);
   const rankText = typeof summary?.rank_ic === 'number'
     ? `Rank IC ${num(summary.rank_ic)}`
     : String(gap.rank_ic ?? 'Rank IC: 尚未提交诊断');
@@ -481,6 +769,12 @@ function DiagnosticCell({ factor }: { factor: ApiFactorListItem }): JSX.Element 
         <span className="factor-diagnostic-cell__metric" title={irText}>{irText}</span>
         <span className="factor-diagnostic-cell__metric" title={coverageText}>{coverageText}</span>
       </div>
+      {referenceLabel ? (
+        <span className="factor-diagnostic-cell__reference" title={`参考口径：${referenceLabel}`}>
+          <strong>参考口径</strong>
+          <small>{referenceLabel}</small>
+        </span>
+      ) : null}
       <Sparkline points={factor.ic_sparkline} />
     </div>
   );
@@ -856,11 +1150,11 @@ function CoverageGapBucketCard({
         <span>{bucket.count} 个 · {pct(bucket.share_pct)}</span>
       </div>
       <div className="factor-gap-weight">
-        <span>市值权重占比 (MCap Weight %)</span>
+        <span>市值权重占比</span>
         <strong>{pct(bucket.mcap_weight_pct ?? 0, 2)}</strong>
       </div>
-      <p>{bucket.evidence}</p>
-      <small>{bucket.recommendation}</small>
+      <p>{pitCopy(bucket.evidence)}</p>
+      <small>{pitCopy(bucket.recommendation)}</small>
       {temporal.length ? (
         <>
           <div className="factor-gap-timeline-head">
@@ -947,7 +1241,7 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
   const openMapping = (detail: CoverageGapSymbolDetail): void => {
     setSelectedMapping(detail);
     setMappingCanonical(detail.canonical_symbol || detail.symbol);
-    setMappingReason(`手动覆盖 ${detail.symbol} 的历史 ticker 生命周期映射`);
+    setMappingReason(`手动覆盖 ${detail.symbol} 的历史代码生命周期映射`);
     setMappingError(null);
   };
   const runOpsAction = (action: PitOpsGuidanceAction): void => {
@@ -966,13 +1260,13 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
     try {
       const result = await api.restartPitIdentityScraper({
         max_symbols: Math.max(1, pit.ops_guidance.identity_pending_count ?? 1),
-        reason: 'PIT 数据运维指令触发 Identity Scraper 重启任务',
+        reason: 'PIT 数据运维指令触发身份修复任务',
         created_by: 'operator',
       });
       setOpsResult(result);
       reload();
     } catch (err) {
-      setOpsError(err instanceof Error ? err.message : 'Identity Scraper 重启任务执行失败。');
+      setOpsError(err instanceof Error ? err.message : '身份修复任务执行失败。');
     } finally {
       setOpsBusy(false);
     }
@@ -1002,7 +1296,7 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
     setWaiverError(null);
     try {
       await api.createPitResearchWaiver({
-        reason: '研究阶段临时忽略非核心缺失标的，晋升仍要求 Full Ready。',
+        reason: '研究阶段临时忽略非核心缺失标的；正式晋升仍要求完整门禁。',
       });
       setGapOpen(true);
       reload();
@@ -1036,7 +1330,13 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
       : pit?.sandbox_diagnostics_enabled
         ? 'SANDBOX_READY'
         : 'BLOCKED';
-  const fullReadyPlan = pit?.full_ready_repair_plan;
+  const gateStatus = pit?.verified_diagnostics_enabled
+    ? 'READY_TO_DIAGNOSE'
+    : pit?.limited_diagnostics_enabled
+      ? 'LIMITED_READY'
+      : pit?.sandbox_diagnostics_enabled
+        ? 'SANDBOX_READY'
+        : 'BLOCKED_PIT';
   const cards = [
     {
       label: '复权行情',
@@ -1048,7 +1348,7 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
       label: '点时样本池',
       status: pit?.universe_status ?? '加载中',
       reason: reasonText('universe', '历史成员缺失时直接阻塞，不使用当前成分股补位。'),
-      detail: '历史 Universe 锚点证明成分股加入与剔除已被处理。',
+      detail: '历史样本池锚点证明成分股加入与剔除已被处理。',
     },
     {
       label: '异常清洗',
@@ -1060,7 +1360,7 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
       label: '因子准入',
       status: factorAdmissionStatus,
       reason: reasonText('factor_admission', '价格或样本池不足时仍阻塞诊断。'),
-      detail: '研究态可预览，晋升仍要求 Full Ready。',
+      detail: '研究预览可继续，正式使用须通过完整门禁。',
     },
   ];
   return (
@@ -1068,21 +1368,20 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
       <PageHero
         eyebrow="数据基座"
         title="PIT 清洗中心"
-        description="复核复权价格、历史样本池和异常清洗状态，确保因子诊断不引入未来函数。"
-        status={pit ? STATUS_LABELS[pit.overall_status] ?? pit.overall_status : undefined}
+        description="核验点时价格、历史样本池和清洗规则，防止未来函数与幸存者偏差进入因子诊断。"
+        status={pit ? pitStatusLabel(pit.overall_status) : undefined}
         actions={<button className="factor-btn factor-btn--primary" onClick={reload}>重新检查</button>}
       />
-      {loading ? <div className="factor-panel">正在读取 PIT 门禁。</div> : null}
+      {loading ? <div className="factor-panel">正在读取点时数据门禁。</div> : null}
       {error ? <div className="factor-panel factor-panel--danger">{error}</div> : null}
       {pit ? (
         <>
           {pit.research_waiver ? (
             <section className="factor-panel factor-waiver-banner">
               <div>
-                <strong>Limited Ready 研究态豁免已启用</strong>
+                <strong>研究豁免已启用</strong>
                 <p>
-                  已忽略 {pit.research_waiver.ignored_symbol_count} 个缺失 symbol；诊断摘要会记录 waiver，
-                  promotion_eligible=false。
+                  已临时排除 {pit.research_waiver.ignored_symbol_count} 个非核心缺口；仅允许研究诊断，不能晋升。
                 </p>
                 {pit.research_waiver.impact_estimate ? (
                   <p>
@@ -1108,7 +1407,7 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
                 <span>{pit.research_waiver.id}</span>
               </div>
               <p>
-                撤销后 PIT 会回到价格快照门禁阻塞状态；历史记录不会物理删除，只停止当前研究态忽略。
+                撤销后 PIT 会回到价格快照门禁状态；历史记录不会物理删除，只停止当前研究排除。
               </p>
               <div className="factor-action-row">
                 <button className="factor-btn" disabled={waiverBusy} onClick={() => setConfirmRevoke(false)} type="button">保留</button>
@@ -1121,8 +1420,8 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
             {cards.map((card) => (
               <article className="factor-mini-card" key={card.label}>
                 <span>{card.label}</span>
-                <strong>{STATUS_LABELS[String(card.status).toUpperCase()] ?? card.status}</strong>
-                <small className="factor-mini-card__reason">{card.reason}</small>
+                <strong>{pitStatusLabel(card.status)}</strong>
+                <small className="factor-mini-card__reason">{pitCopy(card.reason)}</small>
                 <p>{card.detail}</p>
               </article>
             ))}
@@ -1130,8 +1429,8 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
           {pit.ops_guidance ? (
             <section className="factor-panel factor-ops-guidance">
               <div>
-                <span>数据运维指令 (Ops Guidance)</span>
-                <strong>{pit.ops_guidance.headline}</strong>
+                <span>数据运维指令</span>
+                <strong>{pitCopy(pit.ops_guidance.headline)}</strong>
               </div>
               <div className="factor-action-row">
                 {(pit.ops_guidance.actions ?? []).map((action) => (
@@ -1141,162 +1440,38 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
                     onClick={() => runOpsAction(action)}
                     type="button"
                   >
-                      {action.label}
+                      {pitCopy(action.label)}
                   </button>
                 ))}
               </div>
             </section>
           ) : null}
-          {fullReadyPlan ? (
-            <section className="factor-panel factor-full-ready-plan" data-section="full-ready-repair-plan">
-              <div className="factor-section-title">
-                <span>Full Ready 免费源修复队列</span>
-                <StatusPill status={fullReadyPlan.status === 'READY' ? 'READY' : 'BLOCKED_DATA'} />
-              </div>
-              <p className="factor-muted">{fullReadyPlan.recommendation}</p>
-              <dl className="factor-kv-grid factor-kv-grid--compact">
-                <div>
-                  <dt>目标状态</dt>
-                  <dd>{fullReadyPlan.target_status}</dd>
-                </div>
-                <div>
-                  <dt>剩余 symbol</dt>
-                  <dd>{fullReadyPlan.remaining_symbol_count}</dd>
-                </div>
-                <div>
-                  <dt>队列规模</dt>
-                  <dd>{fullReadyPlan.queue_total_count}</dd>
-                </div>
-                <div>
-                  <dt>免费源冷却</dt>
-                  <dd>
-                    {fullReadyPlan.provider_cooldown_count}
-                    {fullReadyPlan.next_retry_at ? ` · ${formatDateTime(fullReadyPlan.next_retry_at)}` : ''}
-                  </dd>
-                </div>
-              </dl>
-              <div className="factor-chip-row factor-chip-row--muted">
-                {Object.entries(fullReadyPlan.bucket_counts).map(([bucket, count]) => (
-                  <span key={bucket}>{FULL_READY_BUCKET_LABELS[bucket] ?? bucket} {count}</span>
-                ))}
-              </div>
-              {fullReadyPlan.provider_cooldowns.length ? (
-                <div className="factor-repair-cooldowns">
-                  {fullReadyPlan.provider_cooldowns.slice(0, 4).map((item) => (
-                    <span key={`${item.provider}-${item.target}-${item.next_retry_at || 'quota'}`}>
-                      {item.provider} · {item.target} · {item.next_retry_at ? formatDateTime(item.next_retry_at) : 'quota'}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
-              {fullReadyPlan.queue_sample.length ? (
-                <div className="factor-repair-queue">
-                  {fullReadyPlan.queue_sample.slice(0, 8).map((item) => (
-                    <article className="factor-repair-item" key={`${item.symbol}-${item.bucket}`}>
-                      <div>
-                        <strong>{item.symbol}</strong>
-                        <span>{FULL_READY_BUCKET_LABELS[item.bucket] ?? item.bucket}</span>
-                      </div>
-                      <p>{FULL_READY_REPAIR_STATUS_LABELS[item.status] ?? item.status}</p>
-                      <small>{item.repair_targets.join(' / ')} · alias {item.alias_candidates.slice(0, 3).join(', ')}</small>
-                    </article>
-                  ))}
-                </div>
-              ) : null}
-              <div className="factor-repair-policy">
-                <strong>拒绝伪 Ready 规则</strong>
-                <ul>
-                  {fullReadyPlan.rejection_criteria.slice(0, 3).map((item) => <li key={item}>{item}</li>)}
-                </ul>
-              </div>
-            </section>
-          ) : null}
-          {pit.external_source_readiness ? (
-            <section className="factor-panel factor-full-ready-plan" data-section="external-source-readiness">
-              <div className="factor-section-title">
-                <span>外部补源就绪度</span>
-                <span className="factor-muted">Matrix / Kaggle / Polygon</span>
-              </div>
-              <p className="factor-muted">
-                Kaggle 只作为本地批量价格缓存；Matrix 只确认历史成员骨架；Polygon 只在 key 存在时补关键价格和公司行动证据。
-              </p>
-              <dl className="factor-kv-grid factor-kv-grid--compact">
-                <div>
-                  <dt>Kaggle 凭据</dt>
-                  <dd>{String(pit.external_source_readiness.kaggle_auth_status.credential_status ?? 'missing')}</dd>
-                </div>
-                <div>
-                  <dt>Kaggle cache</dt>
-                  <dd>
-                    {pit.external_source_readiness.kaggle_cache_manifest.status}
-                    {' · '}
-                    {pit.external_source_readiness.kaggle_cache_manifest.manifest_count} manifest
-                  </dd>
-                </div>
-                <div>
-                  <dt>Matrix 骨架</dt>
-                  <dd>
-                    {pit.external_source_readiness.matrix_coverage_status.status}
-                    {' · '}
-                    {pit.external_source_readiness.matrix_coverage_status.member_event_count} events
-                  </dd>
-                </div>
-                <div>
-                  <dt>DuckDB / Parquet</dt>
-                  <dd>
-                    {pit.external_source_readiness.parquet_catalog_status.status}
-                    {' · '}
-                    {pit.external_source_readiness.parquet_catalog_status.parquet_file_count} parquet
-                  </dd>
-                </div>
-                <div>
-                  <dt>Polygon key</dt>
-                  <dd>{String(pit.external_source_readiness.polygon_status.credential_status ?? 'missing')}</dd>
-                </div>
-                <div>
-                  <dt>精修候选</dt>
-                  <dd>{pit.external_source_readiness.critical_polygon_candidates.length} / 50</dd>
-                </div>
-              </dl>
-              <div className="factor-chip-row factor-chip-row--muted">
-                {pit.external_source_readiness.critical_polygon_candidates.slice(0, 10).map((item) => (
-                  <span key={`${item.symbol}-${item.bucket}`}>{item.symbol} · {FULL_READY_BUCKET_LABELS[item.bucket] ?? item.bucket}</span>
-                ))}
-              </div>
-              <div className="factor-repair-policy">
-                <strong>推荐搜索词</strong>
-                <ul>
-                  {pit.external_source_readiness.kaggle_cache_manifest.search_terms.slice(0, 4).map((item) => <li key={item}>{item}</li>)}
-                </ul>
-              </div>
-            </section>
-          ) : null}
           {selectedOpsAction ? (
-            <section className="factor-panel factor-ops-runbook" role="dialog" aria-label="Identity Scraper 运维指令">
+            <section className="factor-panel factor-ops-runbook" role="dialog" aria-label="身份修复任务">
               <div className="factor-section-title">
-                <span>Identity Scraper 运维指令</span>
-                <button className="factor-link" onClick={() => setSelectedOpsAction(null)} type="button">关闭运维指令</button>
+                <span>身份修复任务</span>
+                <button className="factor-link" onClick={() => setSelectedOpsAction(null)} type="button">关闭任务面板</button>
               </div>
               <p>
-                点击“执行重启任务”会立即调用后端 Identity Scraper，重新解析当前挂起的 symbol 并写回身份映射缓存；Full Ready 仍以重检后的 PIT 门禁为准。
+                点击“执行重启任务”会重新解析当前挂起标的并写回身份映射缓存；正式门禁以重检结果为准。
               </p>
               <dl className="factor-kv-grid factor-kv-grid--compact">
                 <div>
-                  <dt>动作目标</dt>
-                  <dd>{selectedOpsAction.target}</dd>
+                  <dt>任务动作</dt>
+                  <dd>{pitCopy(selectedOpsAction.label)}</dd>
                 </div>
                 <div>
-                  <dt>待解析 symbol</dt>
+                  <dt>待解析标的</dt>
                   <dd>{pit?.ops_guidance?.identity_pending_count ?? 0} 项</dd>
                 </div>
                 <div>
                   <dt>建议优先级</dt>
-                  <dd>{selectedOpsAction.priority ?? 'MEDIUM'}</dd>
+                  <dd>{pitPriorityLabel(selectedOpsAction.priority)}</dd>
                 </div>
               </dl>
               {opsResult ? (
                 <div className="factor-ops-result" role="status">
-                  <strong>{opsResult.message}</strong>
+                  <strong>{pitCopy(opsResult.message)}</strong>
                   <span>
                     尝试 {opsResult.attempted_count} 项 · 成功 {opsResult.resolved_count} 项 · 剩余 {opsResult.pending_after} 项
                   </span>
@@ -1325,17 +1500,7 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
             <article className="factor-panel">
               <div className="factor-section-title">
                 <span>门禁摘要</span>
-                <StatusPill
-                  status={
-                    pit.verified_diagnostics_enabled
-                      ? 'READY_TO_DIAGNOSE'
-                      : pit.limited_diagnostics_enabled
-                        ? 'LIMITED_READY'
-                        : pit.sandbox_diagnostics_enabled
-                        ? 'SANDBOX_READY'
-                        : 'BLOCKED_PIT'
-                  }
-                />
+                <PitStatusPill status={gateStatus} />
               </div>
               <dl className="factor-kv-grid">
                 <div><dt>数据快照</dt><dd>{pit.dataset_snapshot_id}</dd></div>
@@ -1352,8 +1517,8 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
                     ) : null}
                   </dd>
                 </div>
-                <div><dt>Sandbox 窗口</dt><dd>{pit.diagnostic_windows?.sandbox?.start_date ?? '待确认'} 至 {pit.diagnostic_windows?.sandbox?.end_date ?? pit.as_of_date}</dd></div>
-                <div><dt>Verified 窗口</dt><dd>{pit.diagnostic_windows?.verified?.start_date ?? '待确认'} 至 {pit.diagnostic_windows?.verified?.end_date ?? pit.as_of_date}</dd></div>
+                <div><dt>研究窗口</dt><dd>{pit.diagnostic_windows?.sandbox?.start_date ?? '待确认'} 至 {pit.diagnostic_windows?.sandbox?.end_date ?? pit.as_of_date}</dd></div>
+                <div><dt>正式窗口</dt><dd>{pit.diagnostic_windows?.verified?.start_date ?? '待确认'} 至 {pit.diagnostic_windows?.verified?.end_date ?? pit.as_of_date}</dd></div>
               </dl>
               <div className="factor-chip-row">
                 {pit.sample_securities.map((symbol) => <span key={symbol}>{symbol}</span>)}
@@ -1362,7 +1527,7 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
             <article className={`factor-panel ${highlightedSection ? 'factor-panel--highlight' : ''}`}>
               <div className="factor-section-title">
                 <span>清洗规则工作台</span>
-                <span className="factor-muted">What-if Preview</span>
+                <span className="factor-muted">阈值预演</span>
               </div>
               <div className="factor-rule-grid">
                 {rulePreviews.map((rule) => (
@@ -1386,10 +1551,10 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
                   </div>
                   <div>
                     <span>阈值</span>
-                    <strong>{STATUS_LABELS[activeRule.status] ?? activeRule.status}</strong>
+                    <strong>{pitStatusLabel(activeRule.status)}</strong>
                     <small>{activeRule.threshold_label}</small>
                   </div>
-                  <p>{activeRule.description}</p>
+                  <p>{pitCopy(activeRule.description)}</p>
                   <div className="factor-outlier-samples">
                     {activeRule.sample_points.length ? activeRule.sample_points.map((point) => (
                       <span key={`${point.symbol}-${point.date}`}>
@@ -1409,7 +1574,7 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
                 <span>覆盖率缺口清单</span>
                 <span>{pit.coverage_gap.missing_symbol_count} 缺失 / {pct(pit.coverage_gap.missing_share_pct)}</span>
               </div>
-              <p className="factor-muted">{pit.coverage_gap.recommendation}</p>
+              <p className="factor-muted">{pitCopy(pit.coverage_gap.recommendation)}</p>
               <div className="factor-gap-grid">
                 {pit.coverage_gap.buckets.map((bucket) => (
                   <CoverageGapBucketCard
@@ -1429,7 +1594,7 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
                   一键忽略非核心标的
                 </button>
                 <span className="factor-muted">
-                  默认预选 {pit.coverage_gap.default_ignored_count} 个非核心 symbol；历史核心缺口仍保持阻塞证据。
+                  默认预选 {pit.coverage_gap.default_ignored_count} 个非核心标的；历史核心缺口仍保持阻塞证据。
                 </span>
               </div>
             </section>
@@ -1437,26 +1602,27 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
           {selectedMapping ? (
             <section className="factor-panel factor-mapping-dialog" role="dialog" aria-label={`${selectedMapping.symbol} 身份映射覆盖`}>
               <div className="factor-section-title">
-                <span>Mapping Overwrite · {selectedMapping.symbol}</span>
+                <span>身份映射覆盖 · {selectedMapping.symbol}</span>
                 <button className="factor-link" onClick={() => setSelectedMapping(null)} type="button">关闭</button>
               </div>
               <div className="factor-mapping-layout">
                 <div>
-                  <strong>历史 Ticker 路径</strong>
+                  <strong>历史代码路径</strong>
                   <ol className="factor-path-list">
                     {selectedMapping.ticker_path.map((step, index) => (
                       <li key={`${step.symbol}-${step.date}-${index}`}>
                         <span>{step.date || '未知日期'}</span>
                         <strong>{step.symbol}{step.canonical_symbol ? ` → ${step.canonical_symbol}` : ''}</strong>
-                        <small>{step.label || step.source || 'identity evidence'}</small>
+                        <small>{step.label || step.source || '身份来源'}</small>
                       </li>
                     ))}
                   </ol>
                 </div>
                 <div className="factor-mapping-form">
                   <label>
-                    Canonical Symbol
+                    <span>标准代码</span>
                     <input
+                      aria-label="标准代码"
                       value={mappingCanonical}
                       onChange={(event) => setMappingCanonical(event.target.value)}
                       placeholder="例如 LHM"
@@ -1477,7 +1643,7 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
                     onClick={() => void submitMapping()}
                     type="button"
                   >
-                    建立 Mapping Overwrite
+                    建立映射覆盖
                   </button>
                 </div>
               </div>
@@ -1487,7 +1653,7 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
             <article className="factor-panel">
               <div className="factor-section-title">
                 <span>复权校验轨迹</span>
-                <span>{trace?.symbol || '代表性 symbol'}</span>
+                <span>{trace?.symbol || '代表性标的'}</span>
               </div>
               <div className="factor-adjust-chart factor-adjust-chart--trace" aria-label="原始价与前复权价轨迹">
                 {tracePoints.length ? tracePoints.map((point) => (
@@ -1507,9 +1673,15 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
               </div>
             </article>
             <article className="factor-panel">
-              <div className="factor-section-title"><span>点时样本池历史锚点</span></div>
+              <div className="factor-section-title"><span>点时样本池年度锚点</span></div>
               {universeSeries.length ? (
-                <div className="factor-universe-chart" aria-label="Universe 历史成员数量变化图">
+                <div
+                  className="factor-universe-chart"
+                  aria-label="样本池历史成员数量变化图"
+                  data-visible-row-limit="3"
+                  role="region"
+                  tabIndex={0}
+                >
                   {universeSeries.map((point) => (
                     <div className={point.is_latest ? 'is-latest' : ''} key={point.date}>
                       <span style={{ height: `${Math.max(10, (point.member_count / maxUniverseMembers) * 100).toFixed(1)}%` }} />
@@ -1533,7 +1705,7 @@ export function PitCleaningCenterPage({ highlightedSection }: { highlightedSecti
                       <button className="factor-repair-link" onClick={() => goToHashTarget(item.fix_hash)} type="button">
                         {item.code}
                       </button>
-                      <span>{item.message}</span>
+                      <span>{pitCopy(item.message)}</span>
                     </li>
                   ))}
                 </ul>
@@ -1559,7 +1731,6 @@ export function FactorLibraryPage({
 }): JSX.Element {
   const api = useApiClient();
   const [payload, setPayload] = useState<ApiFactorListResponse | null>(null);
-  const [pit, setPit] = useState<ApiPitDataOverview | null>(null);
   const [status, setStatus] = useState(initialStatus ?? '');
   const [sourcePrefix, setSourcePrefix] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
@@ -1568,18 +1739,16 @@ export function FactorLibraryPage({
   const [highCorrelationOnly, setHighCorrelationOnly] = useState(false);
   const [comparisonFactorIds, setComparisonFactorIds] = useState<string[]>([]);
   const [gapPopoverFactorId, setGapPopoverFactorId] = useState<string | null>(null);
+  const [diagnosticPopoverFactorId, setDiagnosticPopoverFactorId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sort, setSort] = useState<FactorSortState>({ key: 'updated_at', direction: 'desc' });
   useEffect(() => {
     let alive = true;
-    Promise.all([
-      api.listFactors({ source: initialSource, status: status || undefined, tag: initialTag }),
-      api.getPitDataOverview(),
-    ])
-      .then(([factorPayload, pitPayload]) => {
+    api
+      .listFactors({ source: initialSource, status: status || undefined, tag: initialTag })
+      .then((factorPayload) => {
         if (!alive) return;
         setPayload(factorPayload);
-        setPit(pitPayload);
       })
       .catch((err: Error) => {
         if (alive) setError(err.message || '因子库加载失败。');
@@ -1614,7 +1783,10 @@ export function FactorLibraryPage({
     if (gapPopoverFactorId && !visibleIds.has(gapPopoverFactorId)) {
       setGapPopoverFactorId(null);
     }
-  }, [factors, gapPopoverFactorId, selectedCorrelationFactorId]);
+    if (diagnosticPopoverFactorId && !visibleIds.has(diagnosticPopoverFactorId)) {
+      setDiagnosticPopoverFactorId(null);
+    }
+  }, [diagnosticPopoverFactorId, factors, gapPopoverFactorId, selectedCorrelationFactorId]);
   const selectedCorrelationFactor = useMemo(
     () => factors.find((factor) => factor.id === selectedCorrelationFactorId) ?? factors[0],
     [factors, selectedCorrelationFactorId],
@@ -1657,13 +1829,14 @@ export function FactorLibraryPage({
       highCorrelationCount: highCorrelationIds.size,
     };
   }, [highCorrelationIds, payload?.items, payload?.summary]);
+  const pitStatus = recordString(payload?.summary, 'pit_status');
   return (
     <div className="factor-page" data-page-root="factor-library">
       <PageHero
         eyebrow="Alpha 资产"
         title="因子库"
         description="集中管理默认因子、人工因子、最近诊断和 PIT 数据门禁。"
-        status={pit ? `PIT ${STATUS_LABELS[pit.overall_status] ?? pit.overall_status}` : undefined}
+        status={pitStatus ? `PIT ${STATUS_LABELS[pitStatus] ?? pitStatus}` : undefined}
         actions={
           <>
             <button className="factor-btn" onClick={() => navigateTo('/pit-data')}>查看 PIT 门禁</button>
@@ -1675,7 +1848,7 @@ export function FactorLibraryPage({
         <article className="factor-mini-card">
           <span>系统默认因子</span>
           <strong>{librarySummary.systemSeedCount}</strong>
-          <p>五大因子族七个 seed 作为 SYSTEM_SEED 管理。</p>
+          <p>覆盖五类核心风格因子，统一按系统种子治理与诊断。</p>
         </article>
         <article className="factor-mini-card">
           <span>可诊断</span>
@@ -1736,7 +1909,12 @@ export function FactorLibraryPage({
               <tr>
                 <th>因子</th>
                 <th>来源</th>
-                <th>状态</th>
+                <th>
+                  <div className="factor-th-content">
+                    <span>诊断状态</span>
+                    <HelpTooltip label="诊断状态含义" lines={UI_STATE_TOOLTIP_LINES} />
+                  </div>
+                </th>
                 <th aria-sort={ariaSortFor('rank_ic', sort)}>
                   <SortableHeader
                     label="最近诊断"
@@ -1746,7 +1924,12 @@ export function FactorLibraryPage({
                     tooltip={<HelpTooltip label="最近诊断指标解释" lines={DIAGNOSTIC_TOOLTIP_LINES} />}
                   />
                 </th>
-                <th>数据门禁</th>
+                <th>
+                  <div className="factor-th-content">
+                    <span>阻断 / 风险</span>
+                    <HelpTooltip label="阻断与风险含义" lines={BLOCKER_RISK_TOOLTIP_LINES} />
+                  </div>
+                </th>
                 <th aria-sort={ariaSortFor('updated_at', sort)}>
                   <SortableHeader label="最近更新" sortKey="updated_at" sort={sort} onSort={updateSort} />
                 </th>
@@ -1768,19 +1951,20 @@ export function FactorLibraryPage({
                     <code className="factor-id">{factor.descriptor?.canonical_id ?? factor.id}</code>
                   </td>
                   <td>{SOURCE_LABELS[factor.source] ?? factor.source}</td>
-                  <td><StatusPill status={factorDisplayStatus(factor)} /></td>
+                  <td>
+                    <DiagnosticStateCell
+                      factor={factor}
+                      open={diagnosticPopoverFactorId === factor.id}
+                      onToggle={() => setDiagnosticPopoverFactorId((current) => (current === factor.id ? null : factor.id))}
+                      onClose={() => setDiagnosticPopoverFactorId(null)}
+                    />
+                  </td>
                   <td>
                     <DiagnosticCell factor={factor} />
                   </td>
                   <td>
-                    <div className="factor-gate-cell">
-                      {factor.readiness_blockers.length ? (
-                        <button className="factor-repair-link" onClick={() => navigateTo(String(factor.gate_fix_target).replace(/^#/, ''))}>
-                          {STATUS_LABELS[factor.diagnostic_status]}
-                        </button>
-                      ) : (
-                        <span className="factor-ok">门禁通过</span>
-                      )}
+                    <div className="factor-gate-cell factor-gate-cell--stacked">
+                      <GateRiskCell factor={factor} isHighCorrelation={highCorrelationIds.has(factor.id)} />
                       {factor.diagnostic_status === 'SANDBOX_READY' ? (
                         <button
                           aria-label={`${factor.name} 缺口速报`}
@@ -1824,32 +2008,22 @@ export function FactorLibraryPage({
           </table>
         </div>
       </section>
-      <section className="factor-two-col">
-        <article className="factor-panel">
-          <div className="factor-section-title">
-            <span>{comparisonFactors.length === 2 ? '因子表现对比图' : '相关性热力图'}</span>
-            <span className="factor-muted">{comparisonFactors.length === 2 ? '双因子指纹比对' : '按类别聚类，点击因子高亮 > 0.7'}</span>
-          </div>
-          {comparisonFactors.length === 2 ? (
-            <FactorComparisonPanel factors={comparisonFactors} onClear={() => setComparisonFactorIds([])} />
-          ) : (
-            <FactorCorrelationMatrix
-              factors={factors}
-              selectedFactorId={selectedCorrelationFactor?.id}
-              onSelect={setSelectedCorrelationFactorId}
-              highOnly={highCorrelationOnly}
-              onHighOnlyChange={setHighCorrelationOnly}
-            />
-          )}
-        </article>
-        <article className="factor-panel">
-          <div className="factor-section-title"><span>资源队列</span></div>
-          <div className="factor-queue">
-            <div><strong>预计耗时</strong><span>6 分钟</span></div>
-            <div><strong>计算配额</strong><span>中等</span></div>
-            <div><strong>排队状态</strong><span>可提交 2 个诊断</span></div>
-          </div>
-        </article>
+      <section className="factor-panel factor-correlation-panel">
+        <div className="factor-section-title">
+          <span>{comparisonFactors.length === 2 ? '因子表现对比图' : '相关性热力图'}</span>
+          <span className="factor-muted">{comparisonFactors.length === 2 ? '双因子指纹比对' : '按类别聚类，点击因子高亮 > 0.7'}</span>
+        </div>
+        {comparisonFactors.length === 2 ? (
+          <FactorComparisonPanel factors={comparisonFactors} onClear={() => setComparisonFactorIds([])} />
+        ) : (
+          <FactorCorrelationMatrix
+            factors={factors}
+            selectedFactorId={selectedCorrelationFactor?.id}
+            onSelect={setSelectedCorrelationFactorId}
+            highOnly={highCorrelationOnly}
+            onHighOnlyChange={setHighCorrelationOnly}
+          />
+        )}
       </section>
     </div>
   );
@@ -1861,17 +2035,31 @@ export function FactorDetailPage({ factorId }: { factorId: string }): JSX.Elemen
   const [pit, setPit] = useState<ApiPitDataOverview | null>(null);
   const [summary, setSummary] = useState<ApiFactorDiagnosticSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pitError, setPitError] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
-    Promise.all([api.getFactor(factorId), api.getPitDataOverview()])
-      .then(([factorPayload, pitPayload]) => {
+    setFactor(null);
+    setPit(null);
+    setSummary(null);
+    setError(null);
+    setPitError(null);
+    api
+      .getFactor(factorId)
+      .then((factorPayload) => {
         if (!alive) return;
         setFactor(factorPayload);
-        setPit(pitPayload);
         setSummary(factorPayload.latest_diagnostic_summary ?? null);
       })
       .catch((err: Error) => {
         if (alive) setError(err.message || '因子详情加载失败。');
+      });
+    api
+      .getPitDataOverview()
+      .then((pitPayload) => {
+        if (alive) setPit(pitPayload);
+      })
+      .catch((err: Error) => {
+        if (alive) setPitError(err.message || 'PIT 版本信息加载失败，诊断提交暂不可用。');
       });
     return () => {
       alive = false;
@@ -1884,11 +2072,16 @@ export function FactorDetailPage({ factorId }: { factorId: string }): JSX.Elemen
     ? 'SANDBOX'
     : 'VERIFIED';
   const primaryActionLabel = diagnosticMode === 'SANDBOX' ? '提交 Sandbox 诊断' : '保存为已验证';
-  const canRun = factor?.diagnostic_status === 'READY_TO_DIAGNOSE' ||
+  const canRun = Boolean(pit) && (
+    factor?.diagnostic_status === 'READY_TO_DIAGNOSE' ||
     factor?.diagnostic_status === 'SANDBOX_READY' ||
-    factor?.diagnostic_status === 'COMPLETED';
+    factor?.diagnostic_status === 'COMPLETED'
+  );
   const runDiagnostic = () => {
-    if (!factor || !pit) return;
+    if (!factor || !pit) {
+      setPitError('PIT 版本信息仍在加载，暂不能提交诊断。');
+      return;
+    }
     const windowConfig = diagnosticMode === 'SANDBOX' ? pit.diagnostic_windows?.sandbox : pit.diagnostic_windows?.verified;
     api
       .runFactorDiagnostics(factor.id, {
@@ -1955,6 +2148,7 @@ export function FactorDetailPage({ factorId }: { factorId: string }): JSX.Elemen
         </div>
       </section>
       {error ? <div className="factor-panel factor-panel--danger">{error}</div> : null}
+      {pitError ? <div className="factor-panel factor-panel--danger">{pitError}</div> : null}
       {factor ? (
         <>
           <section className="factor-card-grid factor-card-grid--metrics factor-detail-metrics">

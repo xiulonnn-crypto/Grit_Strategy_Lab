@@ -43,19 +43,43 @@ $defaultTests = @(
 
 Set-Location -LiteralPath $repoRoot
 
-$baseTemp = Join-Path $repoRoot ("pytesttmp-codex-backend-{0}" -f (Get-Date -Format 'yyyyMMddHHmmssfff'))
-$pytestArgsWithTemp = @('--basetemp', $baseTemp) + $PytestArgs
-$output = & $pythonExe -m pytest @defaultTests @pytestArgsWithTemp 2>&1
-$exitCode = $LASTEXITCODE
+if ($PytestArgs | Where-Object { $_ -eq '--basetemp' -or $_ -like '--basetemp=*' }) {
+    throw 'scripts/codex-test-backend.ps1 owns pytest --basetemp. Use the default .tmp\pytest location instead of passing a root-level temp path.'
+}
 
-@(
-    '# Codex Backend'
-    "started_at = $(Get-Date -Format o)"
-    "command = $pythonExe -m pytest $($defaultTests -join ' ') $($pytestArgsWithTemp -join ' ')"
-    ''
-) + $output | Set-Content -LiteralPath $reportPath -Encoding utf8
+$pytestTempRoot = Join-Path $repoRoot '.tmp\pytest-runtime'
+$pythonTemp = Join-Path $pytestTempRoot 'python-temp'
+$baseTemp = Join-Path $pytestTempRoot ("codex-backend-{0}" -f (Get-Date -Format 'yyyyMMddHHmmssfff'))
+New-Item -ItemType Directory -Path $pythonTemp -Force | Out-Null
+New-Item -ItemType Directory -Path $baseTemp -Force | Out-Null
 
-$output | ForEach-Object { Write-Host $_ }
+$originalTemp = $env:TEMP
+$originalTmp = $env:TMP
+$originalTmpDir = $env:TMPDIR
+$exitCode = 1
+
+try {
+    $env:TEMP = $pythonTemp
+    $env:TMP = $pythonTemp
+    $env:TMPDIR = $pythonTemp
+
+    $pytestArgsWithTemp = @('--basetemp', $baseTemp) + $PytestArgs
+    $output = & $pythonExe -m pytest @defaultTests @pytestArgsWithTemp 2>&1
+    $exitCode = $LASTEXITCODE
+
+    @(
+        '# Codex Backend'
+        "started_at = $(Get-Date -Format o)"
+        "command = $pythonExe -m pytest $($defaultTests -join ' ') $($pytestArgsWithTemp -join ' ')"
+        ''
+    ) + $output | Set-Content -LiteralPath $reportPath -Encoding utf8
+
+    $output | ForEach-Object { Write-Host $_ }
+} finally {
+    if ($null -ne $originalTemp) { $env:TEMP = $originalTemp } else { Remove-Item Env:TEMP -ErrorAction SilentlyContinue }
+    if ($null -ne $originalTmp) { $env:TMP = $originalTmp } else { Remove-Item Env:TMP -ErrorAction SilentlyContinue }
+    if ($null -ne $originalTmpDir) { $env:TMPDIR = $originalTmpDir } else { Remove-Item Env:TMPDIR -ErrorAction SilentlyContinue }
+}
 
 if ($exitCode -ne 0) {
     throw "Backend codex test failed. See $reportPath"

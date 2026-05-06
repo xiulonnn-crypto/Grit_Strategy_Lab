@@ -49,6 +49,7 @@ EXPECTED_SNAPSHOT_OVERVIEW_KEYS = {
     "message",
     "allowed_actions",
     "provider_readiness_summary",
+    "data_trust_summary",
     "bond_fixed_income",
 }
 
@@ -63,6 +64,16 @@ class FakeMarketDataProvider:
                 universe_key=SP500_UNIVERSE_KEY,
                 universe_name=SP500_UNIVERSE_NAME,
                 symbols=["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "AVGO", "COST"],
+                symbol_metadata_by_symbol={
+                    "AAPL": {"gics_sector": "Information Technology", "gics_sub_industry": "Technology Hardware", "industry_taxonomy": "GICS"},
+                    "MSFT": {"gics_sector": "Information Technology", "gics_sub_industry": "Systems Software", "industry_taxonomy": "GICS"},
+                    "NVDA": {"gics_sector": "Information Technology", "gics_sub_industry": "Semiconductors", "industry_taxonomy": "GICS"},
+                    "AMZN": {"gics_sector": "Consumer Discretionary", "gics_sub_industry": "Broadline Retail", "industry_taxonomy": "GICS"},
+                    "META": {"gics_sector": "Communication Services", "gics_sub_industry": "Interactive Media", "industry_taxonomy": "GICS"},
+                    "GOOGL": {"gics_sector": "Communication Services", "gics_sub_industry": "Interactive Media", "industry_taxonomy": "GICS"},
+                    "AVGO": {"gics_sector": "Information Technology", "gics_sub_industry": "Semiconductors", "industry_taxonomy": "GICS"},
+                    "COST": {"gics_sector": "Consumer Staples", "gics_sub_industry": "Consumer Staples Merchandise Retail", "industry_taxonomy": "GICS"},
+                },
             ),
             FakeUniverseHistoryProvider(
                 universe_key=NASDAQ100_UNIVERSE_KEY,
@@ -117,10 +128,21 @@ class FakeMarketDataProvider:
 class FakeUniverseHistoryProvider:
     provider_name = "test_revision_history"
 
-    def __init__(self, *, universe_key: str, universe_name: str, symbols: list[str]) -> None:
+    def __init__(
+        self,
+        *,
+        universe_key: str,
+        universe_name: str,
+        symbols: list[str],
+        symbol_metadata_by_symbol: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         self.universe_key = universe_key
         self.universe_name = universe_name
         self.symbols = list(symbols)
+        self.symbol_metadata_by_symbol = {
+            symbol: dict(metadata)
+            for symbol, metadata in (symbol_metadata_by_symbol or {}).items()
+        }
 
     def load_snapshots(self, start_date: date, end_date: date) -> list[UniverseMembershipSnapshot]:
         snapshots: list[UniverseMembershipSnapshot] = []
@@ -142,6 +164,11 @@ class FakeUniverseHistoryProvider:
                         "coverage_mode": "point_in_time_anchor",
                         "source_quality": "historical_revision_snapshot",
                         "anchor_mode": "test_complete_history",
+                    },
+                    symbol_metadata={
+                        symbol: dict(self.symbol_metadata_by_symbol.get(symbol, {}))
+                        for symbol in self.symbols
+                        if self.symbol_metadata_by_symbol.get(symbol)
                     },
                 )
             )

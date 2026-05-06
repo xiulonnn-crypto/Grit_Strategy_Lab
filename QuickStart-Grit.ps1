@@ -4,7 +4,7 @@ param(
     [switch]$DryRun,
     [switch]$ValidatePythonOnly,
     [switch]$RepairPython,
-    [int]$BackendStartupTimeoutSeconds = 30,
+    [int]$BackendStartupTimeoutSeconds = 75,
     [int]$FrontendStartupTimeoutSeconds = 45
 )
 
@@ -760,10 +760,19 @@ Stop-UnhealthyBackendListeners -Port 8000
 Ensure-BackendProbeReady -PythonExe $effectiveState.Python.PythonExe
 Write-Host 'Starting backend...' -ForegroundColor Yellow
 Start-BackendWindow -PythonExe $effectiveState.Python.PythonExe
-if (-not (Wait-HttpReady -Name 'Backend' -Url $backendHealthUrl -TimeoutSeconds $BackendStartupTimeoutSeconds -ProbeTimeoutSec 10 -ExpectedStatusCodes @(200))) {
+if (-not (Wait-HttpReady -Name 'Backend' -Url $backendHealthUrl -TimeoutSeconds $BackendStartupTimeoutSeconds -ProbeTimeoutSec 5 -ExpectedStatusCodes @(200))) {
     $probe = Invoke-BackendProbe -PythonExe $effectiveState.Python.PythonExe
-    $probeSummary = if ([string]::IsNullOrWhiteSpace($probe.Summary)) { 'No backend probe output was captured after startup.' } else { $probe.Summary }
-    throw "Backend failed to become ready at $backendHealthUrl within $BackendStartupTimeoutSeconds seconds.`n$probeSummary"
+    if (Test-HttpReady -Url $backendHealthUrl -TimeoutSec 10 -ExpectedStatusCodes @(200)) {
+        Write-Host "Backend became ready after the startup probe at $backendHealthUrl" -ForegroundColor Green
+    } else {
+        $probeStatus = if ($probe.Succeeded) {
+            'Backend import/storage probe succeeded, but HTTP health was still unavailable.'
+        } else {
+            'Backend import/storage probe failed after startup.'
+        }
+        $probeSummary = if ([string]::IsNullOrWhiteSpace($probe.Summary)) { 'No backend probe output was captured after startup.' } else { $probe.Summary }
+        throw "Backend failed to become ready at $backendHealthUrl within $BackendStartupTimeoutSeconds seconds.`n$probeStatus`n$probeSummary"
+    }
 }
 
 if (-not (Test-Path -LiteralPath $frontendDir)) {
@@ -809,7 +818,7 @@ try {
 }
 
 $nodeExe = (Get-Command node -ErrorAction Stop).Source
-$previewArgs = @($frontendPreviewScript, '--host', '127.0.0.1', '--port', '4173', '--watch', '--rebuild-on-start')
+$previewArgs = @($frontendPreviewScript, '--host', '127.0.0.1', '--port', '4173', '--watch')
 if (-not $NoBrowser) {
     $previewArgs += @('--open-url', $workspaceUrl)
 }

@@ -231,41 +231,46 @@ describe('App runtime routes', () => {
   it('renders the PIT cleaning center and factor library routes', async () => {
     await renderApp('#/pit-data');
 
-    expect(await screen.findByText('survivorship bias free')).toBeInTheDocument();
     expect(document.querySelector('[data-page-root="pit-cleaning-center"]')).not.toBeNull();
     expect(await screen.findByRole('heading', { level: 1, name: 'PIT 清洗中心' })).toBeInTheDocument();
     expect(screen.getByText('点时样本池')).toBeInTheDocument();
-    expect(screen.getByText(/缺失 416 个 symbol/)).toBeInTheDocument();
-    expect(screen.getByText('数据运维指令 (Ops Guidance)')).toBeInTheDocument();
-    expect(screen.getByText('Full Ready 免费源修复队列')).toBeInTheDocument();
-    expect(screen.getByText('拒绝伪 Ready 规则')).toBeInTheDocument();
-    expect(screen.getByText(/免费源对 symbol 全部返回/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '重启 Identity Scraper' }));
-    expect(screen.getByRole('dialog', { name: 'Identity Scraper 运维指令' })).toBeInTheDocument();
-    expect(screen.getByText('ops://identity-scraper/restart')).toBeInTheDocument();
+    expect(screen.getByText(/缺失 416 个标的/)).toBeInTheDocument();
+    expect(screen.getByText('数据运维指令')).toBeInTheDocument();
+    expect(screen.queryByText('Full Ready 免费源修复队列')).not.toBeInTheDocument();
+    expect(screen.queryByText('补源优先级与证据层')).not.toBeInTheDocument();
+    expect(screen.queryByText('外部缓存与精修就绪度')).not.toBeInTheDocument();
+    expect(screen.queryByText('Zero-event 候选')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Price-only 来源不能单独升级 Full Ready/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '重启身份修复任务' }));
+    expect(screen.getByRole('dialog', { name: '身份修复任务' })).toBeInTheDocument();
+    expect(screen.getByText('任务动作')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '执行重启任务' }));
-    expect(await screen.findByText(/Identity Scraper 已执行/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '关闭运维指令' }));
+    expect(await screen.findByText(/身份修复任务已执行/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '关闭任务面板' }));
     expect(screen.getByRole('button', { name: '下钻分析' })).toBeInTheDocument();
     expect(screen.getByText('MAD 中位数偏差')).toBeInTheDocument();
     expect(screen.getByText('3σ 标准差')).toBeInTheDocument();
-    expect(screen.getByText('点时样本池历史锚点')).toBeInTheDocument();
+    expect(screen.getByText('阈值预演')).toBeInTheDocument();
+    expect(screen.getByText('点时样本池年度锚点')).toBeInTheDocument();
+    expect(screen.getByLabelText('样本池历史成员数量变化图')).toHaveAttribute('data-visible-row-limit', '3');
     expect(screen.getAllByText(/复权因子/).length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: 'PRICE_SNAPSHOT_NOT_READY' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '下钻分析' }));
     expect(screen.getByText('覆盖率缺口清单')).toBeInTheDocument();
-    expect(screen.getAllByText('市值权重占比 (MCap Weight %)').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('市值权重占比').length).toBeGreaterThan(0);
     expect(screen.getByLabelText(/身份未解析 时间轴分布图/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'ABGX' }));
     expect(screen.getByRole('dialog', { name: /ABGX 身份映射覆盖/ })).toBeInTheDocument();
-    expect(screen.getByText('历史 Ticker 路径')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '建立 Mapping Overwrite' })).toBeInTheDocument();
+    expect(screen.getByText('历史代码路径')).toBeInTheDocument();
+    expect(screen.getByText(/身份映射覆盖 · ABGX/)).toBeInTheDocument();
+    expect(screen.getByLabelText('标准代码')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '建立映射覆盖' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '关闭' }));
     expect(screen.getByText('历史核心缺口仍保持阻塞证据。', { exact: false })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '一键忽略非核心标的' }));
-    expect(await screen.findByText('Limited Ready 研究态豁免已启用')).toBeInTheDocument();
+    expect(await screen.findByText('研究豁免已启用')).toBeInTheDocument();
     expect(screen.getByText(/潜在 IC 扰动/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '撤销豁免' }));
     expect(screen.getByText('确认撤销研究态豁免')).toBeInTheDocument();
@@ -281,12 +286,14 @@ describe('App runtime routes', () => {
     expect(screen.getAllByText('12-1月截面动量排名').length).toBeGreaterThan(0);
     expect(screen.getAllByText('s_mom_12m1m_rank').length).toBeGreaterThan(0);
     expect(screen.getAllByText('s_val_ep_ltm_raw').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('门禁通过').length).toBeGreaterThanOrEqual(5);
+    expect(screen.getByText('诊断状态')).toBeInTheDocument();
+    expect(screen.getByText('阻断 / 风险')).toBeInTheDocument();
+    expect(screen.getAllByText(/无阻断|风险提示/).length).toBeGreaterThanOrEqual(5);
     const toolbarFilters = document.querySelector('.factor-toolbar__filters');
     expect(toolbarFilters).not.toBeNull();
     expect(toolbarFilters?.querySelectorAll('select')).toHaveLength(3);
     expect(document.querySelector('.factor-diagnostic-cell__metrics')).not.toBeNull();
-    expect(document.querySelector('tbody tr:first-child .factor-pill')?.textContent).toContain('已完成');
+    expect(document.querySelector('tbody tr:first-child .factor-diagnostic-state__button')?.textContent).toMatch(/稳健|待校准|失效|沙箱/);
     expect(screen.getByRole('button', { name: '最近更新排序' })).toHaveClass('is-active');
     expect(document.querySelector('tbody tr:first-child .factor-link')?.textContent).toContain('252日年化波动率排名');
     expect(screen.getByLabelText('最近诊断指标解释')).toBeInTheDocument();
@@ -345,5 +352,15 @@ describe('App runtime routes', () => {
     expect(css).toMatch(
       /\.factor-table tr\.is-correlation-highlight td:first-child\s*\{[^}]*box-shadow:\s*inset 3px 0 0 var\(--gsl-color-primary, #1f877b\);[^}]*\}/s,
     );
+  });
+
+  it('limits the PIT universe history anchors to three visible rows with vertical scrolling', () => {
+    const css = readFileSync('src/pages/factors-page.css', 'utf8');
+
+    expect(css).toMatch(/\.factor-universe-chart\s*\{[^}]*grid-auto-rows:\s*180px;[^}]*\}/s);
+    expect(css).toMatch(
+      /\.factor-universe-chart\s*\{[^}]*max-height:\s*calc\(180px \* 3 \+ 12px \* 2 \+ 32px\);[^}]*\}/s,
+    );
+    expect(css).toMatch(/\.factor-universe-chart\s*\{[^}]*overflow-y:\s*auto;[^}]*\}/s);
   });
 });

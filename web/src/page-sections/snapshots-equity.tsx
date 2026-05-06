@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { formatDateTime } from '../lib/format';
 import type {
+  ApiDataTrustLayer,
   ApiDatasetSnapshot,
   ApiDatasetSnapshotMetadata,
   ApiSnapshotOverview,
@@ -54,6 +55,8 @@ const EQUITY_FILTERS: Array<{ id: EquityFilter; label: string }> = [
   { id: 'universe', label: '股票池快照' },
 ];
 
+const TRUST_CREDENTIAL_DRAFT_STORAGE_KEY = 'gsl.snapshots.trustCredentialDrafts.v1';
+
 const COVERAGE_CHANGE_DATASET_LABELS: Record<string, string> = {
   'ds-price': '股票价格数据',
   'ds-corporate-actions': '公司行为数据',
@@ -88,6 +91,198 @@ function getStatusLabel(status?: string | null): string {
       return '阻塞';
     default:
       return '待刷新';
+  }
+}
+
+function getTrustStatusLabel(status?: string | null): string {
+  switch (String(status ?? '').toLowerCase()) {
+    case 'usable':
+      return '可用';
+    case 'enabled':
+      return '已启用';
+    case 'missing_credentials':
+      return '缺凭据';
+    case 'blocked':
+      return '阻塞';
+    case 'registered':
+      return '已登记';
+    default:
+      return '待配置';
+  }
+}
+
+function trustStatusChipClassName(status?: string | null): string {
+  const normalized = String(status ?? '').toLowerCase();
+  if (normalized === 'usable' || normalized === 'enabled') {
+    return 'status-chip status-chip--success';
+  }
+  if (normalized === 'missing_credentials' || normalized === 'blocked') {
+    return 'status-chip status-chip--warning';
+  }
+  return 'status-chip status-chip--soft';
+}
+
+type TrustLayerDisplayCopy = {
+  label: string;
+  role: string;
+  scope: string;
+  boundary: string;
+  actionFallback: string;
+};
+
+const TRUST_LAYER_DISPLAY_COPY: Record<string, TrustLayerDisplayCopy> = {
+  price_primary_chain: {
+    label: '价格主链',
+    role: '复权日线与价格缺口修复',
+    scope: '开高低收量、复权收盘、缺口补价',
+    boundary: '不能替代成员历史、公司行动或身份确权。',
+    actionFallback: '优先补齐 Tiingo；用于价格缺口第一轮修复。',
+  },
+  membership_history: {
+    label: '成分股历史',
+    role: '指数成员进出日期',
+    scope: '历史成分、生效日、退出日',
+    boundary: '只证明样本池，不能补价格或公司行动。',
+    actionFallback: '优先补齐 FMP 历史成分；用于点时样本池门禁。',
+  },
+  delisted_identity: {
+    label: '退市与身份',
+    role: 'Ticker 生命周期与 CIK 确权',
+    scope: 'CIK、退市身份、标准代码映射',
+    boundary: '不提供价格，也不能把停止申报直接等同破产。',
+    actionFallback: '补齐 SEC User-Agent 或身份源后生成生命周期证据。',
+  },
+  corporate_actions_zero_event: {
+    label: '公司行动',
+    role: '分红拆股与零事件证书',
+    scope: '分红、拆股、无事件证明上下文',
+    boundary: '公司行动缺口必须由事件源或零事件证书关闭。',
+    actionFallback: '优先使用 Tiingo/Alpha Vantage；必要时用身份与价格结果交叉确证。',
+  },
+  long_history_patch: {
+    label: '长周期补价',
+    role: '老旧与退市价格补丁',
+    scope: '长周期日线、退市价格候选、本地缓存',
+    boundary: '仅修复价格缺口，不能单独通过正式就绪门禁。',
+    actionFallback: '优先离线缓存；需要在线 Stooq 时显式开启本机开关。',
+  },
+  precision_repair: {
+    label: '关键精修',
+    role: '付费源关键缺口补证',
+    scope: '高精度价格、公司行动、身份交叉验证',
+    boundary: '只用于免费链无法闭合的关键标的。',
+    actionFallback: '配置 Polygon 后用于关键缺口精修，不作为默认免费链。',
+  },
+};
+
+function trustLayerDisplayCopy(layer: ApiDataTrustLayer): TrustLayerDisplayCopy {
+  return (
+    TRUST_LAYER_DISPLAY_COPY[String(layer.id ?? '')] ?? {
+      label: layer.label || '证据层',
+      role: layer.role || '数据源可用性与证据边界',
+      scope: '覆盖范围、最近尝试、凭据状态',
+      boundary: '需结合价格、成员历史、公司行动和身份映射判断。',
+      actionFallback: '查看最近尝试与缺失凭据后再决定修复动作。',
+    }
+  );
+}
+
+function trustLayerProviderLine(layer: ApiDataTrustLayer, usableCount: number, providerCount: number): string {
+  const preferredProvider = formatEquitySourceLabel(layer.preferred_provider || layer.provider_ids?.[0]);
+  return `主源：${preferredProvider} · 可用 ${usableCount}/${providerCount}`;
+}
+
+function trustLayerActionLine(layer: ApiDataTrustLayer, missingEnv: string[], display: TrustLayerDisplayCopy): string {
+  if (missingEnv.length) {
+    return `待配置：${missingEnv.join('、')}`;
+  }
+  return display.actionFallback;
+}
+
+function readCredentialDraftsFromSession(): Record<string, string> {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+  try {
+    const raw = window.sessionStorage.getItem(TRUST_CREDENTIAL_DRAFT_STORAGE_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(([envName, value]) => envName && typeof value === 'string')
+        .map(([envName, value]) => [envName, value as string]),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeCredentialDraftsToSession(drafts: Record<string, string>): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const cleaned = Object.fromEntries(
+    Object.entries(drafts)
+      .map(([envName, value]) => [envName, String(value ?? '').trim()] as const)
+      .filter(([envName, value]) => envName && value),
+  );
+  try {
+    if (Object.keys(cleaned).length) {
+      window.sessionStorage.setItem(TRUST_CREDENTIAL_DRAFT_STORAGE_KEY, JSON.stringify(cleaned));
+    } else {
+      window.sessionStorage.removeItem(TRUST_CREDENTIAL_DRAFT_STORAGE_KEY);
+    }
+  } catch {
+    // Browser storage can be disabled; keep the in-memory draft for the current render.
+  }
+}
+
+function credentialInputType(envName: string): 'password' | 'text' {
+  return envName === 'SEC_USER_AGENT' ? 'text' : 'password';
+}
+
+function credentialPlaceholder(envName: string): string {
+  if (envName === 'SEC_USER_AGENT') {
+    return '例如 GSL local ops contact@example.com';
+  }
+  if (envName === 'GRIT_ENABLE_STOOQ_ONLINE') {
+    return '1';
+  }
+  return `输入 ${envName}`;
+}
+
+function quotePowerShellEnvValue(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+async function writeTextToClipboard(text: string): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Restricted local browsers can reject navigator.clipboard even after a user click.
+    }
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  textarea.style.top = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    return document.execCommand?.('copy') === true;
+  } catch {
+    return false;
+  } finally {
+    document.body.removeChild(textarea);
   }
 }
 
@@ -154,7 +349,7 @@ function formatEquitySourceLabel(value?: string | null): string {
     case 'nasdaq_official_annual_changes':
       return '纳斯达克年度成分记录';
     case 'sec_edgar':
-      return 'SEC EDGAR';
+      return 'SEC EDGAR / CIK';
     case 'alpha_vantage':
       return 'Alpha Vantage';
     case 'tiingo':
@@ -163,6 +358,16 @@ function formatEquitySourceLabel(value?: string | null): string {
       return 'Financial Modeling Prep';
     case 'fmp_historical_constituent':
       return 'FMP 历史成分';
+    case 'stooq':
+      return 'Stooq 长周期价格';
+    case 'kaggle_huge_stock_market_dataset':
+      return 'Kaggle 批量价格';
+    case 'kaggle_delisted_bulk_archive':
+      return 'Kaggle 退市价格';
+    case 'polygon':
+      return 'Polygon 精修';
+    case 'tiingo_symbology':
+      return 'Tiingo 身份映射';
     case 'openbb_yfinance':
       return 'OpenBB Yahoo 行情';
     case 'openbb_tiingo':
@@ -573,6 +778,193 @@ function isEquityBasketRow(row: EquityRuntimeRow): boolean {
   return searchable.includes('basket') || searchable.includes('theme') || searchable.includes('etf') || searchable.includes('篮子');
 }
 
+function DataTrustLayerPanel({ layers }: { layers: ApiDataTrustLayer[] }): JSX.Element | null {
+  const [credentialDrafts, setCredentialDrafts] = useState<Record<string, string>>(() =>
+    readCredentialDraftsFromSession(),
+  );
+  const [credentialNotices, setCredentialNotices] = useState<Record<string, string>>({});
+  const missingCredentialOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const ordered: string[] = [];
+    layers.forEach((layer) => {
+      (layer.missing_env_vars ?? []).forEach((envName) => {
+        if (!seen.has(envName)) {
+          seen.add(envName);
+          ordered.push(envName);
+        }
+      });
+    });
+    return ordered;
+  }, [layers]);
+  const [selectedCredential, setSelectedCredential] = useState('');
+  const missingCredentialKey = missingCredentialOptions.join('\u0000');
+  useEffect(() => {
+    setCredentialDrafts((current) => {
+      const allowed = new Set(missingCredentialOptions);
+      const filtered = Object.fromEntries(Object.entries(current).filter(([envName]) => allowed.has(envName)));
+      const currentKeys = Object.keys(current).sort().join('\u0000');
+      const filteredKeys = Object.keys(filtered).sort().join('\u0000');
+      return currentKeys === filteredKeys ? current : filtered;
+    });
+  }, [missingCredentialKey, missingCredentialOptions]);
+  useEffect(() => {
+    writeCredentialDraftsToSession(credentialDrafts);
+  }, [credentialDrafts]);
+  useEffect(() => {
+    if (!missingCredentialOptions.length) {
+      if (selectedCredential) {
+        setSelectedCredential('');
+      }
+      return;
+    }
+    if (!selectedCredential || !missingCredentialOptions.includes(selectedCredential)) {
+      setSelectedCredential(missingCredentialOptions[0]);
+    }
+  }, [missingCredentialKey, missingCredentialOptions, selectedCredential]);
+  if (!layers.length) {
+    return null;
+  }
+  const visibleLayers = layers.slice(0, 6);
+  const activeCredential = missingCredentialOptions.includes(selectedCredential)
+    ? selectedCredential
+    : missingCredentialOptions[0] ?? '';
+  const updateCredentialDraft = (envName: string, value: string): void => {
+    setCredentialDrafts((current) => ({ ...current, [envName]: value }));
+    setCredentialNotices((current) => ({
+      ...current,
+      [envName]: '已暂存到当前浏览器标签页；刷新不会清空，关闭标签页或清空暂存即删除。',
+    }));
+  };
+  const clearCredentialDrafts = (): void => {
+    setCredentialDrafts({});
+    setCredentialNotices(
+      Object.fromEntries(missingCredentialOptions.map((envName) => [envName, '已清空本标签页暂存草稿。'])),
+    );
+  };
+  const buildQuickStartCredentialCommand = (activeEnvName: string): string => {
+    const envCommands = missingCredentialOptions
+      .map((envName) => [envName, String(credentialDrafts[envName] ?? '').trim()] as const)
+      .filter(([, value]) => value)
+      .map(([envName, value]) => `$env:${envName}=${quotePowerShellEnvValue(value)}`);
+    if (!envCommands.some((command) => command.startsWith(`$env:${activeEnvName}=`))) {
+      const activeValue = String(credentialDrafts[activeEnvName] ?? '').trim();
+      if (activeValue) {
+        envCommands.push(`$env:${activeEnvName}=${quotePowerShellEnvValue(activeValue)}`);
+      }
+    }
+    return [...envCommands, 'powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1'].join('\n');
+  };
+  const copyCredentialCommand = async (envName: string): Promise<void> => {
+    const value = String(credentialDrafts[envName] ?? '').trim();
+    if (!value) {
+      setCredentialNotices((current) => ({ ...current, [envName]: '请先输入本机配置值，再复制启动命令。' }));
+      return;
+    }
+    const command = buildQuickStartCredentialCommand(envName);
+    if (await writeTextToClipboard(command)) {
+      setCredentialNotices((current) => ({
+        ...current,
+        [envName]: '已复制设置+重启命令；请粘贴到将启动 QuickStart 的同一个 PowerShell。',
+      }));
+      return;
+    }
+    setCredentialNotices((current) => ({
+      ...current,
+      [envName]: '复制失败；请在将启动 QuickStart 的同一个 PowerShell 中手动设置并重启。',
+    }));
+  };
+  return (
+      <section className="factor-panel factor-full-ready-plan snapshots-data-trust-layer" data-section="data-trust-summary">
+        <div className="factor-section-title">
+          <span>补源优先级与证据层</span>
+          <span className="factor-muted">价格主链 → 成分历史 → 长周期补价 → 身份确权 → 关键精修</span>
+        </div>
+        <p className="factor-muted">
+          按证据用途分层展示补源顺序、可证明范围和门禁边界；缺 key 只影响对应补源，不代表全部数据不可用。
+        </p>
+        <div className="factor-trust-layer-grid">
+          {visibleLayers.map((layer) => {
+            const usableCount = layer.usable_provider_count ?? layer.usable_provider_ids?.length ?? 0;
+            const providerCount = layer.provider_count ?? layer.registered_provider_ids?.length ?? layer.provider_ids?.length ?? 0;
+            const missingEnv = layer.missing_env_vars ?? [];
+            const display = trustLayerDisplayCopy(layer);
+            return (
+              <article className="factor-trust-layer-card" key={layer.id}>
+                <div>
+                  <strong>{display.label}</strong>
+                  <span className={trustStatusChipClassName(layer.status)}>{getTrustStatusLabel(layer.status)}</span>
+                </div>
+                <p>{display.role}</p>
+                <small>{trustLayerProviderLine(layer, usableCount, providerCount)}</small>
+                <small>证据：{display.scope}</small>
+                <small>边界：{display.boundary}</small>
+                <small>{trustLayerActionLine(layer, missingEnv, display)}</small>
+              </article>
+            );
+          })}
+        </div>
+      {missingCredentialOptions.length ? (
+        <div className="snapshots-trust-credential-panel">
+          <div className="factor-section-title snapshots-trust-credential-title">
+            <span>当前缺少的 API_KEY</span>
+            <span className="factor-muted">{missingCredentialOptions.length} 项待配置</span>
+          </div>
+          <p className="factor-muted">
+            先选择需要补齐的本机配置，再输入值并复制 PowerShell 设置+重启命令；输入值仅保存在当前浏览器标签页，不提交后端、不落库。
+          </p>
+          <p className="factor-muted snapshots-trust-restart-note">
+            刷新页面会保留本标签页草稿。真正的 provider 状态仍以后端启动时读到的环境变量为准；请把复制出的命令粘贴到将启动 QuickStart 的同一个 PowerShell。
+          </p>
+          <div className="snapshots-trust-credential-form">
+            <label htmlFor="snapshots-missing-api-key-select">选择缺少的 API_KEY</label>
+            <select
+              aria-label="选择缺少的 API_KEY"
+              id="snapshots-missing-api-key-select"
+              onChange={(event) => setSelectedCredential(event.target.value)}
+              value={activeCredential}
+            >
+              {missingCredentialOptions.map((envName) => (
+                <option key={envName} value={envName}>
+                  {envName}
+                </option>
+              ))}
+            </select>
+            {activeCredential ? (
+              <div className="snapshots-trust-input">
+                <label htmlFor={`snapshots-trust-selected-${activeCredential}`}>{activeCredential}</label>
+                <div className="snapshots-trust-input__row">
+                  <input
+                    aria-label={`${activeCredential} 输入`}
+                    autoComplete="off"
+                    id={`snapshots-trust-selected-${activeCredential}`}
+                    onChange={(event) => updateCredentialDraft(activeCredential, event.target.value)}
+                    placeholder={credentialPlaceholder(activeCredential)}
+                    type={credentialInputType(activeCredential)}
+                    value={credentialDrafts[activeCredential] ?? ''}
+                  />
+                  <button
+                    className="ghost-button snapshots-trust-copy-button"
+                    onClick={() => void copyCredentialCommand(activeCredential)}
+                    type="button"
+                  >
+                    复制 {activeCredential} 设置命令
+                  </button>
+                </div>
+                <small>
+                  {credentialNotices[activeCredential] || '复制命令会带上当前已输入的全部 key，并在同一个 PowerShell 启动 QuickStart。'}
+                </small>
+              </div>
+            ) : null}
+            <button className="ghost-button snapshots-trust-copy-button" onClick={clearCredentialDrafts} type="button">
+              清空本标签页暂存
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 export function EquitySnapshotsTab({
   overview,
   onRefresh,
@@ -643,6 +1035,7 @@ export function EquitySnapshotsTab({
     overview?.latest_job?.completed_at ??
     overview?.latest_job?.updated_at ??
     null;
+  const dataTrustLayers = overview?.data_trust_summary?.layers ?? [];
 
   function jumpToIssues(filter: EquityFilter = 'pending'): void {
     setActiveFilter(filter);
@@ -1001,6 +1394,7 @@ export function EquitySnapshotsTab({
       </section>
         </aside>
       </div>
+      <DataTrustLayerPanel layers={dataTrustLayers} />
     </div>
   );
 }

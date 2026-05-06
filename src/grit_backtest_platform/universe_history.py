@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from .official_index_announcements import (
     OfficialAnnouncementChange,
@@ -157,6 +157,7 @@ class UniverseMembershipSnapshot:
     source_revision_id: str | None = None
     source_page_title: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    symbol_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -166,6 +167,7 @@ class ExtractedUniverseTable:
     normalized_symbols: list[str]
     unmapped_symbols: list[str]
     table_index: int
+    symbol_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -309,6 +311,75 @@ def _normalize_header(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", cleaned).strip()
 
 
+def _clean_metadata_value(value: Any) -> str:
+    return " ".join(str(value or "").replace("\u00A0", " ").split()).strip()
+
+
+def _table_row_symbol_metadata(headers: Sequence[str], row: Sequence[str]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for index, header in enumerate(headers):
+        if index >= len(row):
+            continue
+        value = _clean_metadata_value(row[index])
+        if not value:
+            continue
+        normalized_header = _normalize_header(header)
+        if normalized_header in {"security", "company", "company name", "constituent", "name"}:
+            metadata["security_name"] = value
+        elif normalized_header in {"gics sector", "sector"}:
+            metadata["gics_sector"] = value
+            metadata["sector"] = value
+        elif normalized_header in {"gics sub industry", "sub industry", "gics subindustry"}:
+            metadata["gics_sub_industry"] = value
+            metadata["industry_name"] = value
+        elif normalized_header in {"gics industry", "industry"}:
+            metadata["gics_industry"] = value
+            metadata["industry_name"] = value
+        elif normalized_header in {"date first added", "date added"}:
+            metadata["date_first_added"] = value
+    if any(key in metadata for key in ("gics_sector", "sector", "gics_sub_industry", "gics_industry", "industry_name")):
+        metadata.setdefault("industry_taxonomy", "GICS")
+    return metadata
+
+
+def _has_industry_metadata(metadata: Mapping[str, Any]) -> bool:
+    industry_keys = (
+        "gics_sector",
+        "sector",
+        "GICS Sector",
+        "gics_industry",
+        "gics_sub_industry",
+        "industry",
+        "industry_name",
+    )
+    return any(_clean_metadata_value(metadata.get(key)) for key in industry_keys)
+
+
+def _enrich_symbol_metadata(
+    symbol_metadata: Mapping[str, Mapping[str, Any]] | None,
+    *,
+    source: str,
+    source_revision_id: str | None,
+    anchor: date,
+) -> dict[str, dict[str, Any]]:
+    enriched: dict[str, dict[str, Any]] = {}
+    for raw_symbol, raw_metadata in (symbol_metadata or {}).items():
+        symbol = normalize_wikipedia_ticker(str(raw_symbol))
+        if not symbol or not isinstance(raw_metadata, Mapping):
+            continue
+        metadata = {str(key): value for key, value in raw_metadata.items() if _clean_metadata_value(value)}
+        if not metadata:
+            continue
+        if _has_industry_metadata(metadata):
+            metadata.setdefault("industry_taxonomy", "GICS")
+            metadata.setdefault("industry_classification_source", source)
+            metadata.setdefault("industry_classification_effective_date", anchor.isoformat())
+            if source_revision_id:
+                metadata.setdefault("industry_classification_source_revision_id", source_revision_id)
+        enriched[symbol] = metadata
+    return enriched
+
+
 def _strip_html_tags(value: str) -> str:
     without_tags = re.sub(r"<[^>]+>", " ", value or "")
     return " ".join(without_tags.replace("\u00A0", " ").split()).strip()
@@ -376,11 +447,19 @@ def extract_symbols_from_html(
         )
         if symbol_column is None:
             continue
-        raw_symbols = [
-            row[symbol_column]
-            for row in table_rows[1:]
-            if len(row) > symbol_column and row[symbol_column]
-        ]
+        raw_symbols: list[str] = []
+        symbol_metadata: dict[str, dict[str, Any]] = {}
+        for row in table_rows[1:]:
+            if len(row) <= symbol_column or not row[symbol_column]:
+                continue
+            raw_symbol = row[symbol_column]
+            raw_symbols.append(raw_symbol)
+            normalized_symbol = normalize_wikipedia_ticker(raw_symbol)
+            if not normalized_symbol:
+                continue
+            metadata = _table_row_symbol_metadata(headers, row)
+            if metadata:
+                symbol_metadata[normalized_symbol] = metadata
         normalized_symbols, unmapped_symbols = _normalize_static_members(raw_symbols)
         if not normalized_symbols:
             continue
@@ -391,6 +470,7 @@ def extract_symbols_from_html(
                 normalized_symbols=list(normalized_symbols),
                 unmapped_symbols=list(unmapped_symbols),
                 table_index=table_index,
+                symbol_metadata=symbol_metadata,
             )
         )
     if not candidates:
@@ -475,6 +555,7 @@ def _snapshot_from_symbol_list(
     fallback_source: str | None = None,
     source_quality: str,
     extra_metadata: dict[str, Any] | None = None,
+    symbol_metadata: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> UniverseMembershipSnapshot:
     normalized = []
     unmapped: list[str] = []
@@ -504,6 +585,12 @@ def _snapshot_from_symbol_list(
             "source_quality": source_quality,
             **dict(extra_metadata or {}),
         },
+        symbol_metadata=_enrich_symbol_metadata(
+            symbol_metadata,
+            source=source,
+            source_revision_id=source_revision_id,
+            anchor=anchor,
+        ),
     )
 
 
@@ -819,6 +906,12 @@ class WikipediaRevisionUniverseHistoryProvider:
                 "raw_symbol_count": len(extracted.raw_symbols),
                 **dict(extra_metadata),
             },
+            symbol_metadata=_enrich_symbol_metadata(
+                extracted.symbol_metadata,
+                source=source,
+                source_revision_id=source_revision_id,
+                anchor=anchor,
+            ),
         )
 
     def _load_historical_snapshot(self, anchor: date) -> UniverseMembershipSnapshot:
@@ -925,6 +1018,7 @@ class WikipediaRevisionUniverseHistoryProvider:
             source_revision_id=fallback_snapshot.source_revision_id,
             source_page_title=fallback_snapshot.source_page_title,
             metadata=metadata,
+            symbol_metadata=dict(fallback_snapshot.symbol_metadata),
         )
 
 
@@ -944,6 +1038,7 @@ class GithubSp500CurrentValidationProvider:
         self.retries = retries
         self.timeout = timeout
         self._symbol_cache: list[str] | None = None
+        self._row_cache: list[dict[str, str]] | None = None
 
     def _fetch_text(self) -> str:
         request = urllib.request.Request(self.dataset_url, headers=CURRENT_HTML_HEADERS)
@@ -959,12 +1054,23 @@ class GithubSp500CurrentValidationProvider:
                 time.sleep(0.4 * (attempt + 1))
         raise RuntimeError(f"GitHub S&P 500 current constituents request failed: {last_error}") from last_error
 
+    def _load_rows(self) -> list[dict[str, str]]:
+        if self._row_cache is not None:
+            return [dict(row) for row in self._row_cache]
+        text = self._fetch_text()
+        reader = csv.DictReader(io.StringIO(text))
+        rows = [{str(key): str(value or "") for key, value in row.items()} for row in reader]
+        self._row_cache = [dict(row) for row in rows]
+        return rows
+
     def _load_symbols(self) -> list[str]:
         if self._symbol_cache is not None:
             return list(self._symbol_cache)
-        text = self._fetch_text()
-        reader = csv.DictReader(io.StringIO(text))
-        raw_symbols = [str(row.get("Symbol") or "").strip() for row in reader if str(row.get("Symbol") or "").strip()]
+        raw_symbols = [
+            str(row.get("Symbol") or row.get("Ticker") or "").strip()
+            for row in self._load_rows()
+            if str(row.get("Symbol") or row.get("Ticker") or "").strip()
+        ]
         normalized, _ = _normalize_static_members(raw_symbols)
         if len(normalized) < self.definition.minimum_member_count:
             raise RuntimeError(
@@ -972,6 +1078,18 @@ class GithubSp500CurrentValidationProvider:
             )
         self._symbol_cache = list(normalized)
         return list(self._symbol_cache)
+
+    def _load_symbol_metadata(self) -> dict[str, dict[str, Any]]:
+        symbol_metadata: dict[str, dict[str, Any]] = {}
+        for row in self._load_rows():
+            symbol = normalize_wikipedia_ticker(str(row.get("Symbol") or row.get("Ticker") or ""))
+            if not symbol:
+                continue
+            headers = list(row.keys())
+            metadata = _table_row_symbol_metadata(headers, [row.get(header, "") for header in headers])
+            if metadata:
+                symbol_metadata[symbol] = metadata
+        return symbol_metadata
 
     def validate_current_symbols(self, symbols: list[str]) -> list[str]:
         dataset_symbols = set(self._load_symbols())
@@ -1006,7 +1124,77 @@ class GithubSp500CurrentValidationProvider:
                 "current_validation_source": self.provider_name,
                 "current_dataset_url": self.dataset_url,
             },
+            symbol_metadata=self._load_symbol_metadata(),
         )
+
+
+class CurrentIndustryMetadataUniverseEnricher:
+    provider_name = "current_industry_metadata_enricher"
+
+    def __init__(self, *, metadata_provider: Any) -> None:
+        self.metadata_provider = metadata_provider
+
+    def _load_metadata(self) -> dict[str, dict[str, Any]]:
+        load_symbol_metadata = getattr(self.metadata_provider, "_load_symbol_metadata", None)
+        if not callable(load_symbol_metadata):
+            return {}
+        raw_metadata = load_symbol_metadata()
+        if not isinstance(raw_metadata, Mapping):
+            return {}
+        normalized_metadata: dict[str, dict[str, Any]] = {}
+        for raw_symbol, metadata in raw_metadata.items():
+            symbol = normalize_wikipedia_ticker(str(raw_symbol))
+            if symbol and isinstance(metadata, Mapping):
+                normalized_metadata[symbol] = dict(metadata)
+        return normalized_metadata
+
+    def enrich_snapshots(
+        self,
+        snapshots: Sequence[UniverseMembershipSnapshot],
+    ) -> list[UniverseMembershipSnapshot]:
+        current_metadata = self._load_metadata()
+        if not current_metadata:
+            return list(snapshots)
+        enriched_snapshots: list[UniverseMembershipSnapshot] = []
+        metadata_source = str(getattr(self.metadata_provider, "provider_name", self.provider_name))
+        for snapshot in snapshots:
+            snapshot_current_metadata = _enrich_symbol_metadata(
+                {
+                    symbol: current_metadata[symbol]
+                    for symbol in snapshot.normalized_symbols
+                    if symbol in current_metadata
+                },
+                source=metadata_source,
+                source_revision_id=None,
+                anchor=snapshot.effective_date,
+            )
+            merged_symbol_metadata: dict[str, dict[str, Any]] = {}
+            enriched_count = 0
+            for symbol in snapshot.normalized_symbols:
+                existing = dict(snapshot.symbol_metadata.get(symbol) or {})
+                current = snapshot_current_metadata.get(symbol)
+                if current and not _has_industry_metadata(existing):
+                    existing.update(current)
+                    enriched_count += 1
+                elif current:
+                    for key, value in current.items():
+                        existing.setdefault(key, value)
+                if existing:
+                    merged_symbol_metadata[symbol] = existing
+            if not enriched_count:
+                enriched_snapshots.append(snapshot)
+                continue
+            metadata = dict(snapshot.metadata or {})
+            metadata.setdefault("industry_metadata_enrichment_source", metadata_source)
+            metadata["industry_metadata_enriched_symbol_count"] = enriched_count
+            enriched_snapshots.append(
+                replace(
+                    snapshot,
+                    metadata=metadata,
+                    symbol_metadata=merged_symbol_metadata,
+                )
+            )
+        return enriched_snapshots
 
 
 class WikipediaSp500ChangesUniverseHistoryProvider:
@@ -1197,6 +1385,11 @@ class WikipediaSp500ChangesUniverseHistoryProvider:
                     "historical_dataset_change_count": applied_change_count,
                     "source_origin": "historical_dataset",
                     "replaced_source_quality": (current_snapshot.metadata or {}).get("source_quality"),
+                },
+                symbol_metadata={
+                    symbol: baseline_snapshot.symbol_metadata[symbol]
+                    for symbol in reconstructed_symbols
+                    if symbol in baseline_snapshot.symbol_metadata
                 },
             )
         return updated_snapshots
@@ -1395,6 +1588,11 @@ class WikipediaNasdaq100ChangesUniverseHistoryProvider:
                     "source_origin": "historical_dataset",
                     "replaced_source_quality": (current_snapshot.metadata or {}).get("source_quality"),
                 },
+                symbol_metadata={
+                    symbol: baseline_snapshot.symbol_metadata[symbol]
+                    for symbol in reconstructed_symbols
+                    if symbol in baseline_snapshot.symbol_metadata
+                },
             )
         return updated_snapshots
 
@@ -1513,6 +1711,7 @@ class ArchivedNasdaq100UniverseHistoryProvider:
                 "archived_source_url": candidate_url,
                 "source_origin": "historical_dataset",
             },
+            symbol_metadata=extracted.symbol_metadata,
         )
 
     def enrich_snapshots(
@@ -1641,6 +1840,7 @@ class ArchivedNasdaqOfficialActivityUniverseHistoryProvider(ArchivedNasdaq100Uni
                 "official_seed_source_urls": [archive_url],
                 "source_origin": "historical_dataset",
             },
+            symbol_metadata=extracted.symbol_metadata,
         )
 
 
@@ -2087,6 +2287,11 @@ class OfficialAnnouncementUniverseHistoryProvider:
                 "official_previous_source_quality": (previous_snapshot.metadata or {}).get("source_quality"),
                 "source_origin": "official_announcement",
             },
+            symbol_metadata={
+                symbol: previous_snapshot.symbol_metadata[symbol]
+                for symbol in normalized_symbols
+                if symbol in previous_snapshot.symbol_metadata
+            },
         )
 
     def load_anchor_snapshot(
@@ -2245,17 +2450,24 @@ def default_universe_history_providers() -> list[Any]:
         source_page_title=NASDAQ100_SOURCE_PAGE_TITLE,
         minimum_member_count=80,
     )
+    sp500_current_provider = GithubSp500CurrentValidationProvider(
+        definition=sp500_definition,
+    )
+    sp500_industry_enricher = CurrentIndustryMetadataUniverseEnricher(
+        metadata_provider=sp500_current_provider,
+    )
     sp500_free_provider = WikipediaRevisionUniverseHistoryProvider(
         definition=sp500_definition,
         official_provider=SpGlobalAnnouncementUniverseProvider(
             definition=sp500_definition,
         ),
-        historical_dataset_provider=WikipediaSp500ChangesUniverseHistoryProvider(
-            definition=sp500_definition,
+        historical_dataset_provider=SequentialUniverseSnapshotEnricher(
+            WikipediaSp500ChangesUniverseHistoryProvider(
+                definition=sp500_definition,
+            ),
+            sp500_industry_enricher,
         ),
-        current_validation_provider=GithubSp500CurrentValidationProvider(
-            definition=sp500_definition,
-        ),
+        current_validation_provider=sp500_current_provider,
         fallback_provider=StaticSp500UniverseHistoryProvider(),
     )
     nasdaq100_wikipedia_provider = WikipediaRevisionUniverseHistoryProvider(
@@ -2287,6 +2499,7 @@ def default_universe_history_providers() -> list[Any]:
         FmpHistoricalConstituentUniverseHistoryProvider(
             definition=sp500_definition,
             fallback_provider=sp500_free_provider,
+            symbol_metadata_provider=sp500_current_provider,
         ),
         FmpHistoricalConstituentUniverseHistoryProvider(
             definition=nasdaq100_definition,

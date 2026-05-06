@@ -47,3 +47,4 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q"
+cache_dir = ".tmp/pytest-runtime/cache"

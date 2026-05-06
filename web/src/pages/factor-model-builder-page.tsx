@@ -53,6 +53,30 @@ export type FactorModelNeutralizationPreview = {
   method: string;
   status: string;
   blockers: string[];
+  industryField?: string | null;
+  taxonomy?: string | null;
+  coveredSymbolCount?: number | null;
+  missingSymbolCount?: number | null;
+  sourceNames?: string[];
+};
+
+export type FactorModelRiskItem = {
+  code: string;
+  severity?: string;
+  message: string;
+  label?: string;
+  category?: string;
+  factor_id?: string;
+};
+
+export type FactorModelStrategyCreationRisk = {
+  can_create?: boolean;
+  warning_count?: number;
+  blocked_count?: number;
+  warnings?: FactorModelRiskItem[];
+  hard_blockers?: FactorModelRiskItem[];
+  summary_label?: string;
+  summary?: string;
 };
 
 export type FactorModelPreview = {
@@ -68,6 +92,8 @@ export type FactorModelPreview = {
   pitBlockers: string[];
   neutralizationStatus: FactorModelNeutralizationPreview;
   warnings: string[];
+  strategyCreationRisk?: FactorModelStrategyCreationRisk;
+  strategy_creation_risk?: FactorModelStrategyCreationRisk;
 };
 
 export type FactorModelCreateResponse = {
@@ -207,8 +233,22 @@ function blockerLabel(blocker: string): string {
   if (!normalized) return '未知门禁阻塞';
   if (normalized === 'MISSING_INDUSTRY_PIT') return '行业 PIT 字段缺失';
   if (normalized === 'PIT_BLOCKED') return 'PIT 证据不足';
+  if (normalized === 'FUTURE_FUNCTION') return '未来函数';
+  if (normalized === 'UNREPLAYABLE_FIELD') return '不可回放字段';
+  if (normalized === 'CURRENT_ONLY_DATA') return 'current-only 数据';
+  if (normalized === 'UNSAFE_EXPRESSION') return 'unsafe expression';
+  if (normalized === 'MISSING_AVAILABLE_AT') return '缺少 available_at';
+  if (normalized === 'HIGH_CORRELATION') return '高相关提示';
   if (normalized === 'LOCAL_API_UNAVAILABLE') return '预览接口不可用';
   return normalized.replaceAll('_', ' ');
+}
+
+function riskItemLabel(item: FactorModelRiskItem): string {
+  return item.label || item.message || blockerLabel(item.code);
+}
+
+function previewStrategyRisk(preview: FactorModelPreview): FactorModelStrategyCreationRisk | null {
+  return preview.strategyCreationRisk ?? preview.strategy_creation_risk ?? null;
 }
 
 function buildLocalPreview(
@@ -220,6 +260,21 @@ function buildLocalPreview(
   const weightBase = selectedSelections.reduce((total, selection) => total + Math.abs(selection.weightPct), 0);
   const lowPitFactors = selectedFactors.filter((factor) => factor.pitCoveragePct < 80);
   const coveragePct = selectedFactors.length ? Math.min(...selectedFactors.map((factor) => factor.pitCoveragePct)) : 0;
+  const localHardBlockers: FactorModelRiskItem[] = [
+    ...lowPitFactors.map((factor) => ({
+      code: 'PIT_BLOCKED',
+      severity: 'blocker',
+      label: `${factor.displayName} PIT 覆盖不足`,
+      message: `${factor.displayName} PIT 覆盖不足`,
+      factor_id: factor.id,
+    })),
+    ...(previewError ? [{
+      code: 'LOCAL_API_UNAVAILABLE',
+      severity: 'blocker',
+      label: '预览接口不可用',
+      message: previewError,
+    }] : []),
+  ];
   return {
     status: lowPitFactors.length || previewError ? 'BLOCKED' : 'LOCAL_PENDING_API_PREVIEW',
     coveragePct,
@@ -246,6 +301,14 @@ function buildLocalPreview(
       blockers: previewError ? ['LOCAL_API_UNAVAILABLE'] : [],
     },
     warnings: previewError ? [previewError] : [],
+    strategyCreationRisk: {
+      can_create: localHardBlockers.length === 0 && !previewError,
+      warning_count: 0,
+      blocked_count: localHardBlockers.length,
+      warnings: [],
+      hard_blockers: localHardBlockers,
+      summary_label: localHardBlockers.length ? '存在硬阻断' : '等待预览接口确认风险',
+    },
   };
 }
 
@@ -253,6 +316,27 @@ function previewTone(status: string, blockers: string[]): 'good' | 'warn' | 'bad
   if (status === 'READY' && blockers.length === 0) return 'good';
   if (blockers.length > 0 || status === 'BLOCKED') return 'bad';
   return 'warn';
+}
+
+function coverageAdvice(value: number, pending: boolean): string {
+  if (pending) return '等待预览结果后评估样本有效性。';
+  if (value >= 90) return '覆盖稳健，可进入门禁复核。';
+  if (value >= 80) return '覆盖可用，建议检查低覆盖因子。';
+  return '覆盖偏低，先补齐 PIT 样本。';
+}
+
+function turnoverAdvice(value: number, pending: boolean): string {
+  if (pending) return '等待预览结果后评估调仓压力。';
+  if (value <= 15) return '换手温和，成本压力可控。';
+  if (value <= 30) return '换手适中，建议复核成本假设。';
+  return '换手偏高，建议降低高频信号权重。';
+}
+
+function scoreSpreadAdvice(value: number, pending: boolean): string {
+  if (pending) return '等待预览结果后评估分层能力。';
+  if (value >= 1) return '分层清晰，可继续检查尾部风险。';
+  if (value >= 0.4) return '分层可用，建议观察边际样本。';
+  return '分层偏弱，建议调整权重或方向。';
 }
 
 export function FactorModelBuilderPage({
@@ -308,16 +392,34 @@ export function FactorModelBuilderPage({
   );
   const activePreview = preview ?? localPreview;
   const neutralizationBlockers = activePreview.neutralizationStatus.blockers;
+  const strategyRisk = previewStrategyRisk(activePreview);
+  const explicitStrategyRisk = strategyRisk !== null;
+  const strategyHardBlockers = strategyRisk?.hard_blockers ?? [];
+  const strategyWarnings = [
+    ...(strategyRisk?.warnings ?? []),
+    ...(!strategyRisk ? activePreview.warnings.map((warning) => ({
+      code: 'PREVIEW_WARNING',
+      severity: 'warning',
+      label: warning,
+      message: warning,
+    })) : []),
+  ];
   const pitBlocked = activePreview.pitBlockers.length > 0 || minPitCoverage < 80;
   const neutralizationBlocked =
     neutralizationEnabled &&
     (neutralizationBlockers.length > 0 || activePreview.neutralizationStatus.status.startsWith('NOT_EXECUTED'));
-  const previewBlocked =
+  const legacyPreviewBlocked =
     Boolean(previewError) ||
     activePreview.status === 'BLOCKED' ||
-    activePreview.status === 'LOCAL_PENDING_API_PREVIEW' ||
     pitBlocked ||
     neutralizationBlocked;
+  const policyHardBlocked =
+    strategyHardBlockers.length > 0 ||
+    (strategyRisk?.can_create === false && strategyHardBlockers.length === 0) ||
+    (!explicitStrategyRisk && legacyPreviewBlocked);
+  const previewBlocked =
+    activePreview.status === 'LOCAL_PENDING_API_PREVIEW' ||
+    policyHardBlocked;
   const canCreate =
     Boolean(api?.createFactorModel) &&
     !modelNameBlocked &&
@@ -326,10 +428,6 @@ export function FactorModelBuilderPage({
     !previewBlocked &&
     !isCreating &&
     !isPreviewing;
-  const normalizedWeights = activePreview.normalizedWeights.length
-    ? activePreview.normalizedWeights
-    : localPreview.normalizedWeights;
-
   const toggleFactor = (factor: FactorModelOption): void => {
     setSelectedIds((current) => {
       if (current.includes(factor.id)) {
@@ -353,6 +451,14 @@ export function FactorModelBuilderPage({
     previewRequestSeq.current = requestSeq;
     setIsPreviewing(true);
     setPreviewError(null);
+    if (selectedFactors.length === 0 || selectedSelections.length === 0) {
+      if (previewRequestSeq.current === requestSeq) {
+        setPreview(buildLocalPreview(selectedFactors, selectedSelections, neutralizationEnabled, null));
+        setIsPreviewing(false);
+        if (announce) setNotice('暂无可预览因子。');
+      }
+      return;
+    }
     if (!api?.previewFactorModel) {
       if (previewRequestSeq.current === requestSeq) {
         setPreview(buildLocalPreview(selectedFactors, selectedSelections, neutralizationEnabled, null));
@@ -418,14 +524,27 @@ export function FactorModelBuilderPage({
     : activePreview.neutralizationStatus.enabled
       ? '可用'
       : '未启用';
-  const previewBlockers = Array.from(
+  const policyBlockers = Array.from(
     new Set([
-      ...activePreview.pitBlockers.map(blockerLabel),
-      ...neutralizationBlockers.map(blockerLabel),
+      ...(strategyHardBlockers.length ? strategyHardBlockers.map(riskItemLabel) : []),
+      ...(!explicitStrategyRisk ? activePreview.pitBlockers.map(blockerLabel) : []),
+      ...(!explicitStrategyRisk ? neutralizationBlockers.map(blockerLabel) : []),
+      ...(strategyRisk?.can_create === false && strategyHardBlockers.length === 0 ? ['策略创建风险策略阻断'] : []),
+      ...(previewError ? ['预览接口不可用'] : []),
+    ]),
+  ).filter(Boolean);
+  const inputBlockers = Array.from(
+    new Set([
       ...(modelNameBlocked ? ['策略名称未填写'] : []),
       ...(weightBlocked ? [`权重合计为 ${pct(weightTotal, 0)}`] : []),
     ]),
   ).filter(Boolean);
+  const warningLabels = Array.from(new Set(strategyWarnings.map(riskItemLabel).filter(Boolean)));
+  const riskSummaryTone: 'good' | 'warn' | 'bad' = policyBlockers.length || inputBlockers.length
+    ? 'bad'
+    : warningLabels.length
+      ? 'warn'
+      : 'good';
   const gateRows: Array<{ label: string; value: string; tone: 'good' | 'warn' | 'bad' }> = [
     { label: '基础面 available_at 校验', value: pitBlocked ? '阻断' : '通过', tone: pitBlocked ? 'bad' : 'good' },
     { label: '价格与 Universe PIT', value: minPitCoverage < 80 ? '阻断' : '通过', tone: minPitCoverage < 80 ? 'bad' : 'good' },
@@ -433,18 +552,30 @@ export function FactorModelBuilderPage({
     { label: '行业 PIT 状态', value: neutralizationPitValue, tone: neutralizationBlocked ? 'bad' : 'good' },
     { label: '策略名称', value: modelNameBlocked ? '待填写' : '已填写', tone: modelNameBlocked ? 'bad' : 'good' },
     { label: '权重合计', value: pct(weightTotal, 0), tone: weightBlocked ? 'bad' : 'good' },
-    { label: '预览状态', value: localizePreviewStatus(activePreview.status), tone: previewTone(activePreview.status, previewBlockers) },
+    { label: '预览状态', value: localizePreviewStatus(activePreview.status), tone: previewTone(activePreview.status, policyBlockers) },
     { label: '策略类型', value: 'MULTI_FACTOR', tone: 'good' },
   ];
-  const riskCopy = previewBlockers.length
-    ? `当前阻塞：${previewBlockers.join('；')}。`
-    : activePreview.status === 'READY'
-      ? `预览接口返回 READY：${activePreview.readyFactorCount}/${activePreview.factorCount} 个因子可用，覆盖 ${pct(activePreview.coveragePct)}。`
-      : '等待预览接口返回 PIT、权重、中性化与打分样本后再允许物化策略。';
+  const riskTitle = policyBlockers.length
+    ? '存在硬阻断'
+    : inputBlockers.length
+      ? '创建信息待补'
+    : warningLabels.length
+      ? '可创建，需确认风险'
+      : '可创建，无新增风险';
+  const riskCopy = policyBlockers.length
+    ? `不能创建：${policyBlockers.join('；')}。`
+    : inputBlockers.length
+      ? `当前阻塞：${inputBlockers.join('；')}。`
+    : warningLabels.length
+      ? `可创建但需提示：${warningLabels.join('；')}。`
+      : activePreview.status === 'READY'
+        ? `预览接口返回 READY：${activePreview.readyFactorCount}/${activePreview.factorCount} 个因子可用，覆盖 ${pct(activePreview.coveragePct)}。`
+        : '等待预览接口返回 PIT、权重、中性化与打分样本。';
+  const scorePending = isPreviewing && !preview;
   const scoreCards = [
-    { label: '有效覆盖率', value: isPreviewing && !preview ? '读取中' : pct(activePreview.coveragePct) },
-    { label: '预估换手', value: isPreviewing && !preview ? '读取中' : pct(activePreview.turnoverPct) },
-    { label: '得分分布跨度', value: isPreviewing && !preview ? '读取中' : activePreview.scoreSpread.toFixed(2) },
+    { label: '有效覆盖率', value: scorePending ? '读取中' : pct(activePreview.coveragePct), note: coverageAdvice(activePreview.coveragePct, scorePending) },
+    { label: '预估换手', value: scorePending ? '读取中' : pct(activePreview.turnoverPct), note: turnoverAdvice(activePreview.turnoverPct, scorePending) },
+    { label: '得分分布跨度', value: scorePending ? '读取中' : activePreview.scoreSpread.toFixed(2), note: scoreSpreadAdvice(activePreview.scoreSpread, scorePending) },
   ];
   const scoreBars = activePreview.scorePreview.slice(0, 10);
   const scoreValues = scoreBars.map((item) => item.score);
@@ -508,7 +639,6 @@ export function FactorModelBuilderPage({
                 const isSelected = selectedIds.includes(factor.id);
                 const selection = selections.find((item) => item.factorId === factor.id);
                 const direction = selection?.direction ?? factor.defaultDirection;
-                const weight = selection?.weightPct ?? factor.defaultWeight;
                 return (
                   <div className={`factor-pick${isSelected ? '' : ' factor-pick--inactive'}`} key={factor.id}>
                     <input
@@ -524,32 +654,7 @@ export function FactorModelBuilderPage({
                         <span className={`factor-phase2-chip ${direction === 'LOW_IS_GOOD' ? 'factor-phase2-chip--warn' : 'factor-phase2-chip--good'}`}>
                           {DIRECTION_LABELS[direction]}
                         </span>
-                        <span className="factor-phase2-chip factor-phase2-chip--good">{pct(weight, 0)}</span>
                       </span>
-                      <div className="factor-weight-control">
-                        <label htmlFor={`factor-weight-${factor.id}`}>权重</label>
-                        <input
-                          aria-label={`${factor.displayName}权重滑块`}
-                          disabled={!isSelected}
-                          id={`factor-weight-${factor.id}`}
-                          max="100"
-                          min="0"
-                          onChange={(event) => updateWeight(factor.id, event.target.value)}
-                          step="1"
-                          type="range"
-                          value={weight}
-                        />
-                        <input
-                          aria-label={`${factor.displayName}权重`}
-                          disabled={!isSelected}
-                          inputMode="numeric"
-                          max="100"
-                          min="0"
-                          onChange={(event) => updateWeight(factor.id, event.target.value)}
-                          type="number"
-                          value={weight}
-                        />
-                      </div>
                     </div>
                   </div>
                 );
@@ -572,21 +677,42 @@ export function FactorModelBuilderPage({
                 <div className="score-card" key={card.label}>
                   <span>{card.label}</span>
                   <strong>{card.value}</strong>
+                  <small>{card.note}</small>
                 </div>
               ))}
             </div>
-            <div className="bar-chart" aria-label="因子权重分布">
+            <div className="factor-model-weight-controls" aria-label="已选择因子权重操作条">
               {selectedFactors.map((factor) => {
-                const previewWeight = normalizedWeights.find((item) => item.factorId === factor.id);
                 const selection = selectedSelections.find((item) => item.factorId === factor.id);
-                const weight = previewWeight?.normalizedWeightPct ?? selection?.weightPct ?? factor.defaultWeight;
+                const weight = selection?.weightPct ?? factor.defaultWeight;
                 return (
-                  <div className="bar" key={factor.id}>
-                    <span>{factor.family}</span>
-                    <div className="bar-track">
-                      <i style={{ width: `${Math.max(0, Math.min(weight, 100))}%` }} />
+                  <div className="factor-model-weight-row" key={factor.id}>
+                    <div className="factor-model-weight-row__meta">
+                      <strong>{factor.displayName}</strong>
+                      <span>{factor.family}</span>
                     </div>
-                    <b>{pct(weight, 0)}</b>
+                    <div className="factor-weight-control factor-weight-control--preview">
+                      <label htmlFor={`factor-weight-${factor.id}`}>权重</label>
+                      <input
+                        aria-label={`${factor.displayName}权重滑块`}
+                        id={`factor-weight-${factor.id}`}
+                        max="100"
+                        min="0"
+                        onChange={(event) => updateWeight(factor.id, event.target.value)}
+                        step="1"
+                        type="range"
+                        value={weight}
+                      />
+                      <input
+                        aria-label={`${factor.displayName}权重`}
+                        inputMode="numeric"
+                        max="100"
+                        min="0"
+                        onChange={(event) => updateWeight(factor.id, event.target.value)}
+                        type="number"
+                        value={weight}
+                      />
+                    </div>
                   </div>
                 );
               })}
@@ -646,8 +772,8 @@ export function FactorModelBuilderPage({
         <section className="factor-phase2-panel" aria-labelledby="factor-model-gates">
           <div className="factor-phase2-panel__header">
             <div>
-              <h2 id="factor-model-gates">策略门禁</h2>
-              <p>物化前确认 PIT、权重、中性化和回测入口。</p>
+              <h2 id="factor-model-gates">策略创建风险</h2>
+              <p>区分风险提示与硬阻断；高相关只提示，PIT 与表达式问题才阻断。</p>
             </div>
           </div>
           <div className="factor-phase2-panel__body">
@@ -659,9 +785,29 @@ export function FactorModelBuilderPage({
                 </div>
               ))}
             </div>
-            <div className="risk-box">
-              <strong>阻塞策略晋升的条件</strong>
-              {riskCopy}
+            <div className={`strategy-risk-module strategy-risk-module--${riskSummaryTone}`} aria-label="策略创建风险模块">
+              <div className="strategy-risk-summary">
+                <span className={`factor-phase2-chip factor-phase2-chip--${riskSummaryTone}`}>{riskTitle}</span>
+                <p>{riskCopy}</p>
+              </div>
+              {policyBlockers.length ? (
+                <div className="strategy-risk-list" aria-label="硬阻断">
+                  <strong>硬阻断</strong>
+                  {policyBlockers.slice(0, 4).map((blocker) => <span key={blocker}>{blocker}</span>)}
+                </div>
+              ) : null}
+              {warningLabels.length ? (
+                <div className="strategy-risk-list strategy-risk-list--warning" aria-label="风险提示">
+                  <strong>风险提示</strong>
+                  {warningLabels.slice(0, 4).map((warning) => <span key={warning}>{warning}</span>)}
+                </div>
+              ) : null}
+              {!policyBlockers.length && !warningLabels.length ? (
+                <div className="strategy-risk-list strategy-risk-list--clear">
+                  <strong>创建口径</strong>
+                  <span>当前没有高相关、诊断过期或硬阻断；创建后进入既有回测链路。</span>
+                </div>
+              ) : null}
             </div>
             <button
               className="factor-phase2-button factor-phase2-button--primary factor-model-submit"

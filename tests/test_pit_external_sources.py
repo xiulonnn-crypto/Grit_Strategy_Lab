@@ -91,6 +91,51 @@ def test_external_readiness_does_not_mark_empty_catalog_ready(tmp_path, monkeypa
     assert readiness["parquet_catalog_status"]["manifest_row_count"] == 0
 
 
+def test_external_readiness_discovers_nested_legacy_cache_artifacts(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "pit-bulk-cache"
+    (cache_dir / "catalog").mkdir(parents=True)
+    (cache_dir / "manifests").mkdir()
+    (cache_dir / "normalized").mkdir()
+    nested_cache = cache_dir / "grit-pit-bulk-cache"
+    (nested_cache / "catalog").mkdir(parents=True)
+    (nested_cache / "catalog" / "gsl_pit_bulk.duckdb").write_bytes(b"catalog")
+    (nested_cache / "normalized" / "pit_prices" / "symbol_prefix=A" / "year=2026").mkdir(parents=True)
+    (nested_cache / "normalized" / "pit_prices" / "symbol_prefix=A" / "year=2026" / "data.parquet").write_bytes(b"parquet")
+    (nested_cache / "manifests").mkdir()
+    (nested_cache / "manifests" / "kaggle-normalized-catalog.json").write_text(
+        "{"
+        '"provider_id":"kaggle_huge_stock_market_dataset",'
+        '"source_kind":"kaggle_bulk_normalized",'
+        '"dataset_id":"borismarjanovic/price-volume-data-for-all-us-stocks-etfs",'
+        '"row_count":123,'
+        '"duckdb_catalog":"old-root/catalog/gsl_pit_bulk.duckdb",'
+        '"parquet_path":"old-root/normalized/pit_prices"'
+        "}",
+        encoding="utf-8",
+    )
+    (nested_cache / "manifests" / "github-sp500-historical-components.json").write_text(
+        "{"
+        '"provider_id":"github_sp500_historical_components",'
+        '"source_kind":"matrix",'
+        '"member_event_count":456,'
+        '"source_url":"https://github.com/fja05680/sp500"'
+        "}",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KAGGLE_CONFIG_DIR", str(tmp_path / "kaggle-config"))
+
+    readiness = build_external_source_readiness(cache_dir=cache_dir)
+
+    assert readiness["cache_dir"] == str(nested_cache)
+    assert readiness["kaggle_cache_manifest"]["status"] == "READY"
+    assert readiness["kaggle_cache_manifest"]["manifest_count"] == 1
+    assert readiness["matrix_coverage_status"]["status"] == "READY"
+    assert readiness["matrix_coverage_status"]["member_event_count"] == 456
+    assert readiness["parquet_catalog_status"]["status"] == "READY"
+    assert readiness["parquet_catalog_status"]["parquet_file_count"] == 1
+    assert readiness["parquet_catalog_status"]["manifest_row_count"] == 123
+
+
 def test_diff_repair_symbol_extraction_prefers_full_repair_queue():
     script_path = Path(__file__).resolve().parents[1] / "scripts" / "pit_external_sources.py"
     spec = importlib.util.spec_from_file_location("pit_external_sources_script", script_path)

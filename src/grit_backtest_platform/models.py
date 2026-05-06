@@ -105,13 +105,17 @@ class FactorDiagnosticRequest(BaseModel):
 
 
 class FactorDiagnosticPreviewRequest(BaseModel):
-    expression: str = Field(min_length=1)
+    expression: str = ''
     market: str = Field(default='US', min_length=1)
     universe: str = Field(default='SP500', min_length=1)
     dataset_snapshot_id: str | None = None
     universe_snapshot_id: str | None = None
     lookback_years: int = Field(default=5, ge=1, le=10)
     return_window_days: int = Field(default=21, ge=1, le=126)
+    batch: bool = False
+    factor_ids: list[str] = Field(default_factory=list)
+    diagnostic_mode: FactorDiagnosticMode = 'SANDBOX'
+    include: list[str] = Field(default_factory=list)
 
 
 class FactorMiningJobCreateRequest(BaseModel):
@@ -466,6 +470,7 @@ class SnapshotProviderRegistryItemModel(BaseModel):
     error_summary: dict[str, Any] = Field(default_factory=dict)
     pit_permission: dict[str, Any] = Field(default_factory=dict)
     source_governance: dict[str, Any] = Field(default_factory=dict)
+    trust_profile: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = False
     credential_ready: bool = True
     usable: bool = False
@@ -1520,4 +1525,5 @@ class SnapshotOverviewResponseModel(BaseModel):
     provider_readiness_summary: SnapshotProviderReadinessSummaryModel = Field(
         default_factory=SnapshotProviderReadinessSummaryModel
     )
+    data_trust_summary: dict[str, Any] = Field(default_factory=dict)
     bond_fixed_income: BondFixedIncomeOverviewModel

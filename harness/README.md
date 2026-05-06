@@ -29,6 +29,7 @@ harness/
   - Writes `harness/reports/smoke/latest-reset-fixture.txt`.
 - `scripts/codex-test-backend.ps1`
   - Runs the fixed backend pytest slice.
+  - Forces pytest basetemp and Python temp files under `.tmp/pytest-runtime/`.
   - Writes `harness/reports/smoke/latest-backend.txt`.
 - `scripts/codex-test-frontend.ps1`
   - Runs the fixed frontend focused tests.
@@ -54,6 +55,11 @@ harness/
 
 - `harness/reports/smoke/` is for generated smoke output only.
 - Commit only the directory placeholder; generated `latest-*` files stay ignored.
+
+## Temporary Files
+
+- Keep pytest basetemp, debug databases, browser dumps, and scratch output under `.tmp/` or `artifacts/`.
+- Do not create root-level `pytesttmp-*`, `pytest-cache-files-*`, `tmp_dbg_*`, `tmp-promote-*`, or `tmp/` directories during harness work. The repo pytest guard rejects project-external `--basetemp`/`cache_dir` values such as `C:\tmp`, and also rejects in-repo pytest temp-root values unless they live under `.tmp/`.
 
 ## Acceptance Doc
 

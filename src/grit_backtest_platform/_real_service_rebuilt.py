@@ -45,9 +45,13 @@ from .factor_expression_engine import (
     neutralize_by_industry,
     normalize_cross_section,
 )
-from .factor_mining import FactorMiningJobCreateRequest as MiningJobRequest, run_factor_mining_job
+from .factor_mining import (
+    FactorMiningJobCreateRequest as MiningJobRequest,
+    factor_mining_job_id_for_request,
+    run_factor_mining_job,
+)
 from .factor_research import FactorResearchService, build_pit_data_overview
-from .pit_external_sources import default_cache_dir as default_pit_external_cache_dir
+from .pit_external_sources import resolve_cache_dir as default_pit_external_cache_dir
 from .market_data_repository import (
     DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
     DATASET_FUNDAMENTALS_SNAPSHOT_ID,
@@ -65,6 +69,7 @@ from .snapshot_recovery import (
     probe_workspace_market_data_assets,
 )
 from .snapshot_provider_projection import (
+    build_data_trust_summary,
     build_provider_attempts,
     build_provider_readiness_summary,
     build_provider_registry,
@@ -83,6 +88,9 @@ from .universe_history import (
     SOURCE_QUALITY_HISTORICAL_DATASET,
     SOURCE_QUALITY_OFFICIAL_ANNOUNCEMENT,
     SOURCE_QUALITY_WIKIPEDIA_REVISION,
+    CurrentIndustryMetadataUniverseEnricher,
+    GithubSp500CurrentValidationProvider,
+    UniverseDefinition,
     UniverseMembershipSnapshot,
     _is_historical_anchor_quality,
     collect_snapshot_symbols,
@@ -110,6 +118,31 @@ SNAPSHOT_MEMORY_USAGE_LIMIT = 0.80
 SNAPSHOT_SYSTEM_MEMORY_EMERGENCY_LIMIT = 0.95
 SNAPSHOT_REFRESH_HEARTBEAT_INTERVAL_SECONDS = 1.0
 SNAPSHOT_REFRESH_HEARTBEAT_GRACE_SECONDS = 30.0
+SNAPSHOT_PROVIDER_ENV_SIGNATURE_NAMES = (
+    "TIINGO_API_TOKEN",
+    "ALPHAVANTAGE_API_KEY",
+    "FMP_API_KEY",
+    "KAGGLE_API_TOKEN",
+    "KAGGLE_USERNAME",
+    "KAGGLE_KEY",
+    "POLYGON_API_KEY",
+    "SEC_USER_AGENT",
+    "SEC_CONTACT_EMAIL",
+    "SEC_EDGAR_CONTACT_EMAIL",
+    "FRED_API_KEY",
+    "GRIT_ENABLE_OPENBB_PROVIDER",
+    "GRIT_ENABLE_STOOQ_ONLINE",
+)
+
+
+def _snapshot_provider_env_signature() -> str:
+    parts = []
+    for name in SNAPSHOT_PROVIDER_ENV_SIGNATURE_NAMES:
+        value = str(os.getenv(name) or "").strip()
+        parts.append(f"{name}:{1 if value else 0}")
+        if name == "SEC_USER_AGENT":
+            parts.append(f"{name}_HAS_EMAIL:{1 if '@' in value else 0}")
+    return "|".join(parts)
 SNAPSHOT_REFRESH_WORKER_DISCOVERY_TIMEOUT_SECONDS = 3.0
 DIRECT_REFRESH_SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9.-]{0,11}$")
 FORMAL_CORPORATE_ACTION_TYPES = {"dividend", "split", "reverse_split"}
@@ -423,6 +456,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
         self._snapshot_refresh_process: subprocess.Popen[str] | None = None
         self._backtest_run_lock = threading.Lock()
         self._backtest_run_threads: dict[str, threading.Thread] = {}
+        self._factor_mining_job_lock = threading.Lock()
+        self._factor_mining_threads: dict[str, threading.Thread] = {}
+        self._factor_mining_cancel_requests: set[str] = set()
         self._factor_research_service_instance: FactorResearchService | None = None
         self._factor_research_service_lock = threading.Lock()
         try:
@@ -439,7 +475,6 @@ class RealBacktestPlatformService(BacktestPlatformService):
         self._snapshot_overview_cache_seconds = max(0.0, snapshot_cache_ttl)
         self._snapshot_overview_cache: tuple[float, str, dict[str, Any]] | None = None
         self._snapshot_overview_cache_lock = threading.Lock()
-        self._prewarm_read_model_caches()
 
     def _prewarm_read_model_caches(self) -> None:
         for builder in (self.get_snapshot_overview, self.get_pit_data_overview):
@@ -518,7 +553,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         return "|".join(parts)
 
     def get_pit_data_overview(self) -> dict[str, Any]:
-        signature = self._market_data_snapshot_cache_signature()
+        signature = "|".join([self._market_data_snapshot_cache_signature(), _snapshot_provider_env_signature()])
         now = monotonic()
         with self._pit_data_overview_cache_lock:
             cached = self._pit_data_overview_cache
@@ -530,6 +565,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
             ):
                 return deepcopy(cached[2])
             overview = build_pit_data_overview(self.market_data_repository)
+            try:
+                snapshot_overview = self.get_snapshot_overview()
+                data_trust_summary = snapshot_overview.get("data_trust_summary")
+                if isinstance(data_trust_summary, Mapping):
+                    overview["data_trust_summary"] = dict(data_trust_summary)
+            except Exception:
+                overview.setdefault("data_trust_summary", {})
             self._pit_data_overview_cache = (now, signature, deepcopy(overview))
             return overview
 
@@ -790,6 +832,45 @@ class RealBacktestPlatformService(BacktestPlatformService):
         except Exception:
             return {}
 
+    def _factor_mining_market_data(
+        self,
+        symbols: Sequence[str],
+        *,
+        start_date: str,
+        end_date: str,
+    ) -> dict[str, dict[str, list[float]]]:
+        try:
+            start = _parse_iso_date(start_date)
+            warmup_start = (start - timedelta(days=420)).isoformat()
+        except ValueError:
+            warmup_start = None
+        try:
+            rows_by_symbol = self.market_data_repository.load_dataset_price_bars(
+                DATASET_PRICE_SNAPSHOT_ID,
+                symbols,
+                start_date=warmup_start,
+                end_date=end_date or None,
+                include_metadata=False,
+            )
+        except Exception as exc:
+            raise ValueError("因子挖掘需要可读取的价格快照，当前无法读取 ds-price。") from exc
+
+        market_data: dict[str, dict[str, list[float]]] = {}
+        for symbol in symbols:
+            closes: list[float] = []
+            for row in rows_by_symbol.get(str(symbol).strip().upper(), []):
+                if not isinstance(row, Mapping):
+                    continue
+                close = self._factor_finite_float(row.get("adj_close", row.get("close")))
+                if close is not None:
+                    closes.append(close)
+            if len(closes) >= 6:
+                market_data[str(symbol).strip().upper()] = {"Close": closes}
+
+        if len(market_data) < 2:
+            raise ValueError("因子挖掘需要至少两个标的具备运行时价格快照，不能使用 synthetic 或静态样例数据补齐。")
+        return market_data
+
     def _factor_preview_fundamentals(self, symbols: Sequence[str], as_of_date: str) -> dict[str, dict[str, Any]]:
         try:
             grouped = self.market_data_repository.load_dataset_fundamental_points(
@@ -852,12 +933,23 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 return parsed
         return None
 
-    def _factor_industry_mapping(
+    def _factor_industry_snapshot(
         self,
         symbols: Sequence[str],
         universe: Any,
         as_of_date: str,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
+        symbol_set = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+        if not symbol_set:
+            return {
+                "mapping": {},
+                "taxonomy": "GICS",
+                "industry_field": "universe_membership_snapshots.metadata.gics_sector",
+                "covered_symbol_count": 0,
+                "missing_symbol_count": 0,
+                "missing_symbols": [],
+                "source_names": [],
+            }
         normalized_universe = str(universe or "SP500").strip().upper()
         snapshot_id = SP500_UNIVERSE_SNAPSHOT_ID if normalized_universe == "SP500" else None
         if normalized_universe == "NASDAQ100":
@@ -866,24 +958,37 @@ class RealBacktestPlatformService(BacktestPlatformService):
             memberships = self.market_data_repository.load_universe_memberships(
                 universe_snapshot_id=snapshot_id,
                 universe_key=None if snapshot_id else normalized_universe,
+                effective_date_lte=as_of_date,
+                symbols=sorted(symbol_set),
+                active_only=True,
             )
         except Exception:
-            return {}
-        symbol_set = {str(symbol).strip().upper() for symbol in symbols}
-        candidates: dict[str, tuple[str, str]] = {}
+            return {
+                "mapping": {},
+                "taxonomy": "GICS",
+                "industry_field": "universe_membership_snapshots.metadata.gics_sector",
+                "covered_symbol_count": 0,
+                "missing_symbol_count": len(symbol_set),
+                "missing_symbols": sorted(symbol_set),
+                "source_names": [],
+            }
+        candidates: dict[str, tuple[str, str, str]] = {}
         industry_keys = (
-            "industry",
-            "industry_name",
-            "gics_industry",
-            "gics_industry_group",
-            "sector",
-            "sector_name",
             "gics_sector",
             "GICS Sector",
+            "sector",
+            "sector_name",
+            "gics_industry",
+            "gics_industry_group",
+            "industry",
+            "industry_name",
         )
         for row in memberships:
             symbol = str(row.get("symbol") or "").strip().upper()
             effective_date = str(row.get("effective_date") or "").strip()
+            membership_status = str(row.get("membership_status") or "ACTIVE").strip().upper()
+            if membership_status in {"REMOVED", "DELETED", "INACTIVE", "OUT", "EXCLUDED"}:
+                continue
             if symbol not in symbol_set or (effective_date and effective_date > as_of_date):
                 continue
             metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
@@ -896,8 +1001,35 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 continue
             previous = candidates.get(symbol)
             if previous is None or effective_date >= previous[0]:
-                candidates[symbol] = (effective_date, industry)
-        return {symbol: industry for symbol, (_effective_date, industry) in candidates.items()}
+                source_name = str(
+                    metadata.get("industry_classification_source")
+                    or row.get("source")
+                    or metadata.get("source")
+                    or ""
+                ).strip()
+                candidates[symbol] = (effective_date, industry, source_name)
+        mapping = {symbol: industry for symbol, (_effective_date, industry, _source_name) in candidates.items()}
+        missing_symbols = sorted(symbol for symbol in symbol_set if symbol and symbol not in mapping)
+        source_names = sorted({source_name for _date, _industry, source_name in candidates.values() if source_name})
+        return {
+            "mapping": mapping,
+            "taxonomy": "GICS",
+            "industry_field": "universe_membership_snapshots.metadata.gics_sector",
+            "covered_symbol_count": len(mapping),
+            "missing_symbol_count": len(missing_symbols),
+            "missing_symbols": missing_symbols,
+            "source_names": source_names,
+        }
+
+    def _factor_industry_mapping(
+        self,
+        symbols: Sequence[str],
+        universe: Any,
+        as_of_date: str,
+    ) -> dict[str, str]:
+        snapshot = self._factor_industry_snapshot(symbols, universe, as_of_date)
+        mapping = snapshot.get("mapping") if isinstance(snapshot, Mapping) else {}
+        return dict(mapping) if isinstance(mapping, Mapping) else {}
 
     def _factor_model_score_projection(
         self,
@@ -947,7 +1079,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
             symbol_coverages[symbol] = round(available / max(len(normalized_weights), 1), 4)
             combined_scores[symbol] = round(combined, 6) if available else None
 
-        industry_by_symbol = self._factor_industry_mapping(symbols, universe, as_of_date)
+        industry_snapshot = self._factor_industry_snapshot(symbols, universe, as_of_date)
+        industry_by_symbol = dict(industry_snapshot.get("mapping") or {})
         neutralization_result = neutralize_by_industry(
             combined_scores,
             enabled=bool(neutralization.get("enabled")),
@@ -973,7 +1106,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "coverage_ratio": round(coverage_ratio, 4),
             "estimated_turnover": round(estimated_turnover, 4),
             "neutralization_result": neutralization_result,
-            "industry_field": "universe_membership_snapshots.metadata",
+            "industry_field": industry_snapshot.get("industry_field"),
+            "industry_coverage": {
+                key: value for key, value in industry_snapshot.items() if key != "mapping"
+            },
         }
 
     def _decode_factor_mining_job_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
@@ -981,12 +1117,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
         progress = loads(row.get("progress_json"), {})
         top_candidates = loads(row.get("top_candidates_json"), [])
         failed_samples = loads(row.get("failed_samples_json"), [])
+        top_candidate_items = top_candidates if isinstance(top_candidates, list) else []
         return {
             "id": row.get("id"),
             "status": row.get("status"),
             "request": request,
             "progress": progress,
-            "top_candidates": top_candidates if isinstance(top_candidates, list) else [],
+            "top_candidates": self._dedupe_factor_mining_candidates(top_candidate_items),
             "failed_samples": failed_samples if isinstance(failed_samples, list) else [],
             "summary": loads(row.get("summary_json"), {}),
             "created_at": row.get("created_at"),
@@ -994,6 +1131,82 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "completed_at": row.get("completed_at"),
             "error_message": row.get("error_message"),
         }
+
+    def _factor_mining_request_signature(self, request: Mapping[str, Any]) -> tuple[Any, ...]:
+        symbols_value = request.get("symbols")
+        symbols = symbols_value if isinstance(symbols_value, Sequence) and not isinstance(symbols_value, (str, bytes)) else ()
+        universe = str(request.get("universe") or ",".join(str(symbol) for symbol in symbols) or "").strip().upper()
+        operators_value = request.get("operators")
+        operators = (
+            operators_value
+            if isinstance(operators_value, Sequence) and not isinstance(operators_value, (str, bytes))
+            else ()
+        )
+        operator_key = tuple(sorted(str(operator).strip().lower() for operator in operators if str(operator).strip()))
+        try:
+            candidate_count = int(request.get("candidate_count") or 0)
+        except (TypeError, ValueError):
+            candidate_count = 0
+        try:
+            max_depth = int(request.get("max_depth") or 0)
+        except (TypeError, ValueError):
+            max_depth = 0
+        min_rank_ic = round(_coerce_float(request.get("min_rank_ic")), 6)
+        return (
+            universe,
+            str(request.get("start_date") or "").strip(),
+            str(request.get("end_date") or "").strip(),
+            operator_key,
+            candidate_count,
+            min_rank_ic,
+            max_depth,
+        )
+
+    def _factor_mining_row_signature(self, row: Mapping[str, Any]) -> tuple[Any, ...]:
+        request = loads(row.get("request_json"), {})
+        return self._factor_mining_request_signature(request if isinstance(request, Mapping) else {})
+
+    def _dedupe_factor_mining_job_rows(self, rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+        seen: set[tuple[Any, ...]] = set()
+        deduped_rows: list[Mapping[str, Any]] = []
+        for row in rows:
+            signature = self._factor_mining_row_signature(row)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            deduped_rows.append(row)
+        return deduped_rows
+
+    def _find_factor_mining_duplicate_job_row(
+        self,
+        signature: tuple[Any, ...],
+    ) -> Mapping[str, Any] | None:
+        rows = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM factor_mining_jobs
+            ORDER BY created_at DESC, id DESC
+            LIMIT 50
+            """
+        )
+        for row in rows:
+            if self._factor_mining_row_signature(row) == signature:
+                return row
+        return None
+
+    def _dedupe_factor_mining_candidates(self, candidates: Sequence[Any]) -> list[Any]:
+        seen: set[str] = set()
+        deduped_candidates: list[Any] = []
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                continue
+            expression = " ".join(str(candidate.get("expression") or "").split()).lower()
+            signature = expression or str(candidate.get("id") or candidate.get("candidate_id") or "").strip().lower()
+            if not signature or signature in seen:
+                continue
+            seen.add(signature)
+            deduped_candidates.append(candidate)
+        return deduped_candidates
 
     def _project_mining_candidate(self, candidate: Any) -> dict[str, Any]:
         rank_ic = candidate.rank_ic if getattr(candidate, "rank_ic", None) is not None else 0.0
@@ -1025,8 +1238,200 @@ class RealBacktestPlatformService(BacktestPlatformService):
             min_rank_ic=_coerce_float(payload.get("min_rank_ic")),
             max_depth=int(payload.get("max_depth") or 3),
         )
+        mining_request.validate()
+        job_id = factor_mining_job_id_for_request(mining_request)
+        request_signature = self._factor_mining_request_signature(payload)
+        with self._factor_mining_job_lock:
+            duplicate = self._find_factor_mining_duplicate_job_row(request_signature)
+            if duplicate is not None:
+                return self._decode_factor_mining_job_row(duplicate)
         created_at = iso_now()
-        result = run_factor_mining_job(mining_request, top_k=10)
+        market_data = self._factor_mining_market_data(
+            symbols,
+            start_date=mining_request.start_date,
+            end_date=mining_request.end_date,
+        )
+        summary = {
+            "universe_symbol_count": len(symbols),
+            "price_symbol_count": len(market_data),
+            "dataset_snapshot_id": DATASET_PRICE_SNAPSHOT_ID,
+            "market_data_source": "dataset_price_bars",
+            "synthetic_market_data": False,
+            "top_candidate_count": 0,
+            "failed_sample_count": 0,
+            "persisted_to_factor_definitions": False,
+        }
+        progress = {
+            "total_candidates": mining_request.candidate_count,
+            "evaluated_candidates": 0,
+            "failed_candidates": 0,
+            "throughput_per_second": 0.0,
+            "percent": 0.0,
+        }
+        with self._factor_mining_job_lock:
+            duplicate = self._find_factor_mining_duplicate_job_row(request_signature)
+            if duplicate is not None:
+                return self._decode_factor_mining_job_row(duplicate)
+            existing = self.storage.fetch_one("SELECT * FROM factor_mining_jobs WHERE id = ?", (job_id,))
+            existing_status = str(existing.get("status") or "") if existing else ""
+            thread = self._factor_mining_threads.get(job_id)
+            if existing and (
+                existing_status not in {"QUEUED", "RUNNING", "CANCEL_REQUESTED"}
+                or (thread is not None and thread.is_alive())
+            ):
+                return self._decode_factor_mining_job_row(existing)
+            self._factor_mining_cancel_requests.discard(job_id)
+            self.storage.insert_json_row(
+                "factor_mining_jobs",
+                {
+                    "id": job_id,
+                    "status": "RUNNING",
+                    "request_json": dumps({**payload, "symbols": symbols, "dataset_snapshot_id": DATASET_PRICE_SNAPSHOT_ID}),
+                    "progress_json": dumps(progress),
+                    "summary_json": dumps(summary),
+                    "top_candidates_json": dumps([]),
+                    "failed_samples_json": dumps([]),
+                    "created_at": created_at,
+                    "updated_at": created_at,
+                    "completed_at": None,
+                    "error_message": None,
+                },
+            )
+            thread = threading.Thread(
+                target=self._run_factor_mining_job_background,
+                args=(job_id, mining_request, market_data, payload, symbols, created_at),
+                name=f"factor-mining-{job_id}",
+                daemon=True,
+            )
+            self._factor_mining_threads[job_id] = thread
+            thread.start()
+        return self.get_factor_mining_job(job_id)
+
+    def _factor_mining_should_cancel(self, job_id: str) -> bool:
+        with self._factor_mining_job_lock:
+            return job_id in self._factor_mining_cancel_requests
+
+    def _run_factor_mining_job_background(
+        self,
+        job_id: str,
+        mining_request: MiningJobRequest,
+        market_data: dict[str, dict[str, list[float]]],
+        payload: Mapping[str, Any],
+        symbols: Sequence[str],
+        created_at: str,
+    ) -> None:
+        started_at = monotonic()
+        progress_step = max(1, mining_request.candidate_count // 20)
+        last_progress_index = 0
+        last_progress_written_at = 0.0
+
+        def should_cancel_with_progress(candidate_index: int) -> bool:
+            nonlocal last_progress_index, last_progress_written_at
+            current_time = monotonic()
+            should_write_progress = (
+                candidate_index > 0
+                and (
+                    candidate_index == 1
+                    or candidate_index - last_progress_index >= progress_step
+                    or current_time - last_progress_written_at >= 1.0
+                )
+            )
+            if should_write_progress:
+                self._update_factor_mining_running_progress(
+                    job_id,
+                    total_candidates=mining_request.candidate_count,
+                    evaluated_candidates=candidate_index,
+                    started_at=started_at,
+                    now=current_time,
+                )
+                last_progress_index = candidate_index
+                last_progress_written_at = current_time
+            return self._factor_mining_should_cancel(job_id)
+
+        try:
+            result = run_factor_mining_job(
+                mining_request,
+                market_data=market_data,
+                should_cancel=should_cancel_with_progress,
+                top_k=10,
+            )
+            self._store_factor_mining_result(
+                result,
+                payload=payload,
+                symbols=symbols,
+                market_data=market_data,
+                created_at=created_at,
+            )
+        except Exception as exc:
+            failed_at = iso_now()
+            existing = self.storage.fetch_one("SELECT * FROM factor_mining_jobs WHERE id = ?", (job_id,))
+            request_json = existing.get("request_json") if existing else dumps(
+                {**payload, "symbols": symbols, "dataset_snapshot_id": DATASET_PRICE_SNAPSHOT_ID}
+            )
+            summary = loads(existing.get("summary_json"), {}) if existing else {}
+            progress = loads(existing.get("progress_json"), {}) if existing else {}
+            self.storage.insert_json_row(
+                "factor_mining_jobs",
+                {
+                    "id": job_id,
+                    "status": "FAILED",
+                    "request_json": request_json,
+                    "progress_json": dumps({**progress, "percent": float(progress.get("percent") or 0.0)}),
+                    "summary_json": dumps({**summary, "error": str(exc), "persisted_to_factor_definitions": False}),
+                    "top_candidates_json": existing.get("top_candidates_json") if existing else dumps([]),
+                    "failed_samples_json": existing.get("failed_samples_json") if existing else dumps([]),
+                    "created_at": existing.get("created_at") if existing else created_at,
+                    "updated_at": failed_at,
+                    "completed_at": failed_at,
+                    "error_message": str(exc),
+                },
+            )
+        finally:
+            with self._factor_mining_job_lock:
+                self._factor_mining_threads.pop(job_id, None)
+                self._factor_mining_cancel_requests.discard(job_id)
+
+    def _update_factor_mining_running_progress(
+        self,
+        job_id: str,
+        *,
+        total_candidates: int,
+        evaluated_candidates: int,
+        started_at: float,
+        now: float,
+    ) -> None:
+        total = max(0, int(total_candidates))
+        evaluated = max(0, min(int(evaluated_candidates), total))
+        percent = 100.0 if total == 0 else round(evaluated / total * 100.0, 2)
+        if evaluated < total:
+            percent = min(percent, 99.0)
+        elapsed = max(now - started_at, 0.000001)
+        progress = {
+            "total_candidates": total,
+            "evaluated_candidates": evaluated,
+            "failed_candidates": 0,
+            "throughput_per_second": round(evaluated / elapsed, 3),
+            "percent": percent,
+        }
+        self.storage.execute(
+            """
+            UPDATE factor_mining_jobs
+            SET progress_json = ?, updated_at = ?
+            WHERE id = ? AND status IN ('QUEUED', 'RUNNING', 'CANCEL_REQUESTED')
+            """,
+            (dumps(progress), iso_now(), job_id),
+        )
+
+    def _store_factor_mining_result(
+        self,
+        result: Any,
+        *,
+        payload: Mapping[str, Any],
+        symbols: Sequence[str],
+        market_data: Mapping[str, Mapping[str, Sequence[float | int | None]]],
+        created_at: str,
+    ) -> None:
+        completed_at = iso_now()
         job_id = result.job_id
         top_candidates = [self._project_mining_candidate(candidate) for candidate in result.top_candidates]
         failed_samples = [
@@ -1047,6 +1452,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
         }
         summary = {
             "universe_symbol_count": len(symbols),
+            "price_symbol_count": len(market_data),
+            "dataset_snapshot_id": DATASET_PRICE_SNAPSHOT_ID,
+            "market_data_source": "dataset_price_bars",
+            "synthetic_market_data": False,
             "top_candidate_count": len(top_candidates),
             "failed_sample_count": len(failed_samples),
             "persisted_to_factor_definitions": False,
@@ -1056,14 +1465,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
             {
                 "id": job_id,
                 "status": result.status,
-                "request_json": dumps({**payload, "symbols": symbols}),
+                "request_json": dumps({**payload, "symbols": symbols, "dataset_snapshot_id": DATASET_PRICE_SNAPSHOT_ID}),
                 "progress_json": dumps(progress),
                 "summary_json": dumps(summary),
                 "top_candidates_json": dumps(top_candidates),
                 "failed_samples_json": dumps(failed_samples),
                 "created_at": created_at,
-                "updated_at": created_at,
-                "completed_at": created_at,
+                "updated_at": completed_at,
+                "completed_at": completed_at,
                 "error_message": None,
             },
         )
@@ -1093,7 +1502,6 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 """,
                 candidate_rows,
             )
-        return self.get_factor_mining_job(job_id)
 
     def list_factor_mining_jobs(self) -> dict[str, Any]:
         rows = self.storage.fetch_all(
@@ -1104,7 +1512,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
             LIMIT 50
             """
         )
-        items = [self._decode_factor_mining_job_row(row) for row in rows]
+        unique_rows = self._dedupe_factor_mining_job_rows(rows)
+        items = [self._decode_factor_mining_job_row(row) for row in unique_rows]
         return {
             "items": items,
             "summary": {
@@ -1126,11 +1535,353 @@ class RealBacktestPlatformService(BacktestPlatformService):
             raise KeyError(f"Factor mining job not found: {job_id}")
         status = str(row.get("status") or "")
         if status in {"QUEUED", "RUNNING", "CANCEL_REQUESTED"}:
+            with self._factor_mining_job_lock:
+                self._factor_mining_cancel_requests.add(job_id)
             row["status"] = "CANCELLED"
             row["updated_at"] = iso_now()
             row["completed_at"] = row["updated_at"]
             self.storage.insert_json_row("factor_mining_jobs", row)
         return self.get_factor_mining_job(job_id)
+
+    def _normalize_factor_model_risk_item(
+        self,
+        item: Any,
+        *,
+        factor_id: str,
+        factor: Mapping[str, Any] | None,
+        default_code: str,
+        default_message: str,
+        severity: str,
+    ) -> dict[str, Any]:
+        payload = dict(item) if isinstance(item, Mapping) else {"message": str(item or "")}
+        code = str(payload.get("code") or payload.get("reason_code") or default_code).strip().upper()
+        message = str(
+            payload.get("message")
+            or payload.get("summary")
+            or payload.get("label")
+            or payload.get("reason")
+            or default_message
+        ).strip()
+        normalized = dict(payload)
+        normalized.update(
+            {
+                "factor_id": factor_id,
+                "factor_name": (factor or {}).get("name") or payload.get("factor_name") or factor_id,
+                "code": code or default_code,
+                "message": message or default_message,
+                "severity": str(payload.get("severity") or severity).upper(),
+            }
+        )
+        return normalized
+
+    def _dedupe_factor_model_risk_items(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for item in items:
+            key = (
+                str(item.get("factor_id") or ""),
+                str(item.get("code") or "").upper(),
+                str(item.get("message") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(dict(item))
+        return deduped
+
+    def _factor_model_is_hard_blocker(
+        self,
+        item: Mapping[str, Any],
+        *,
+        default_hard: bool = False,
+    ) -> bool:
+        code = str(item.get("code") or item.get("reason_code") or "").upper()
+        text = f"{code} {item.get('message') or ''} {item.get('reason') or ''}".lower()
+        warning_code_fragments = (
+            "HIGH_CORRELATION",
+            "CORRELATION",
+            "SAME_FAMILY",
+            "FAMILY_OVERLAP",
+            "OVERLAP",
+            "IC_UNSTABLE",
+            "WEAK_IC",
+            "IR_UNSTABLE",
+            "TURNOVER_DECAY",
+            "TURNOVER_HIGH",
+            "COVERAGE_EDGE",
+            "LOW_COVERAGE",
+            "DIAGNOSTIC_STALE",
+            "STALE_DIAGNOSTIC",
+        )
+        warning_text_fragments = (
+            "高相关",
+            "同族",
+            "ic 不稳定",
+            "ic不稳定",
+            "ir 不稳定",
+            "换手衰减",
+            "coverage 边缘",
+            "覆盖率边缘",
+            "诊断过期",
+        )
+        if any(fragment in code for fragment in warning_code_fragments) or any(
+            fragment in text for fragment in warning_text_fragments
+        ):
+            return False
+        hard_code_fragments = (
+            "PIT",
+            "FUTURE",
+            "NON_REPLAYABLE",
+            "NOT_REPLAYABLE",
+            "CURRENT_ONLY",
+            "CURRENT-ONLY",
+            "UNSAFE",
+            "AVAILABLE_AT",
+            "NO_FACTOR_SCORE_PREVIEW",
+            "BLOCKED_DATA",
+            "BLOCKED_PIT",
+        )
+        hard_text_fragments = (
+            "pit 缺口",
+            "未来函数",
+            "不可回放",
+            "current-only",
+            "current only",
+            "unsafe expression",
+            "available_at",
+            "可得日",
+            "缺少行业 pit",
+            "行业 pit",
+        )
+        if any(fragment in code for fragment in hard_code_fragments) or any(
+            fragment in text for fragment in hard_text_fragments
+        ):
+            return True
+        return default_hard
+
+    def _factor_model_factor_strategy_risk(
+        self,
+        factor_id: str,
+        factor: Mapping[str, Any],
+    ) -> dict[str, list[dict[str, Any]]]:
+        warnings: list[dict[str, Any]] = []
+        hard_blockers: list[dict[str, Any]] = []
+        risk = factor.get("strategy_creation_risk")
+        risk_payload = risk if isinstance(risk, Mapping) else {}
+        for item in risk_payload.get("warnings") or []:
+            warnings.append(
+                self._normalize_factor_model_risk_item(
+                    item,
+                    factor_id=factor_id,
+                    factor=factor,
+                    default_code="FACTOR_DIAGNOSTIC_WARNING",
+                    default_message="因子诊断存在策略创建风险提示。",
+                    severity="WARNING",
+                )
+            )
+        for item in risk_payload.get("hard_blockers") or []:
+            hard_blockers.append(
+                self._normalize_factor_model_risk_item(
+                    item,
+                    factor_id=factor_id,
+                    factor=factor,
+                    default_code="FACTOR_HARD_BLOCKER",
+                    default_message="因子存在不可回放或 PIT 门禁硬阻断。",
+                    severity="BLOCKER",
+                )
+            )
+        if risk_payload and int(_coerce_float(risk_payload.get("warning_count"), 0.0)) > 0 and not warnings:
+            warnings.append(
+                self._normalize_factor_model_risk_item(
+                    {},
+                    factor_id=factor_id,
+                    factor=factor,
+                    default_code="FACTOR_DIAGNOSTIC_WARNING",
+                    default_message="因子诊断存在策略创建风险提示。",
+                    severity="WARNING",
+                )
+            )
+        if risk_payload and (
+            int(_coerce_float(risk_payload.get("blocked_count"), 0.0)) > 0
+            or risk_payload.get("can_create") is False
+        ) and not hard_blockers:
+            hard_blockers.append(
+                self._normalize_factor_model_risk_item(
+                    {},
+                    factor_id=factor_id,
+                    factor=factor,
+                    default_code="FACTOR_HARD_BLOCKER",
+                    default_message="因子存在硬阻断，不能进入策略创建。",
+                    severity="BLOCKER",
+                )
+            )
+
+        diagnostic_status = str(factor.get("diagnostic_status") or "").upper()
+        default_hard = diagnostic_status.startswith("BLOCKED")
+        readiness_blockers = [
+            blocker
+            for blocker in factor.get("readiness_blockers") or []
+            if isinstance(blocker, Mapping)
+        ]
+        for blocker in readiness_blockers:
+            normalized = self._normalize_factor_model_risk_item(
+                blocker,
+                factor_id=factor_id,
+                factor=factor,
+                default_code=str(blocker.get("code") or diagnostic_status or "FACTOR_READINESS_BLOCKER"),
+                default_message="因子数据门禁存在未处理事项。",
+                severity="BLOCKER" if default_hard else "WARNING",
+            )
+            if self._factor_model_is_hard_blocker(normalized, default_hard=default_hard):
+                hard_blockers.append(normalized)
+            else:
+                warnings.append(normalized)
+        if default_hard and not readiness_blockers and not hard_blockers:
+            hard_blockers.append(
+                self._normalize_factor_model_risk_item(
+                    {},
+                    factor_id=factor_id,
+                    factor=factor,
+                    default_code=diagnostic_status or "FACTOR_BLOCKED",
+                    default_message="因子数据门禁处于阻断状态。",
+                    severity="BLOCKER",
+                )
+            )
+
+        correlation_cluster = factor.get("correlation_cluster")
+        nodes = correlation_cluster.get("nodes") if isinstance(correlation_cluster, Mapping) else []
+        high_correlation_nodes = [
+            node
+            for node in nodes or []
+            if isinstance(node, Mapping)
+            and (
+                str(node.get("risk_label") or "") == "高相关"
+                or _coerce_float(node.get("correlation"), 0.0) >= 0.72
+            )
+        ]
+        if high_correlation_nodes:
+            warnings.append(
+                self._normalize_factor_model_risk_item(
+                    {
+                        "code": "HIGH_CORRELATION",
+                        "message": f"{factor.get('name') or factor_id} 与 {len(high_correlation_nodes)} 个因子高相关，仅作为策略创建风险提示。",
+                        "related_factor_ids": [
+                            str(node.get("factor_id") or "")
+                            for node in high_correlation_nodes
+                            if str(node.get("factor_id") or "")
+                        ],
+                    },
+                    factor_id=factor_id,
+                    factor=factor,
+                    default_code="HIGH_CORRELATION",
+                    default_message="因子与已选或同族因子高相关，仅提示风险。",
+                    severity="WARNING",
+                )
+            )
+
+        return {
+            "warnings": self._dedupe_factor_model_risk_items(warnings),
+            "hard_blockers": self._dedupe_factor_model_risk_items(hard_blockers),
+        }
+
+    def _factor_model_strategy_creation_risk_summary(
+        self,
+        *,
+        warning_count: int,
+        blocked_count: int,
+    ) -> str:
+        if blocked_count:
+            return f"存在 {blocked_count} 个硬阻断，需修复 PIT、表达式或行业数据后才能创建策略。"
+        if warning_count:
+            return f"可创建策略，但存在 {warning_count} 个风险提示；高相关等问题只提示，不阻断创建。"
+        return "策略创建风险检查通过，可创建策略。"
+
+    def _build_factor_model_strategy_creation_risk(
+        self,
+        *,
+        factor_warnings: Sequence[Mapping[str, Any]],
+        factor_hard_blockers: Sequence[Mapping[str, Any]],
+        pit_blockers: Sequence[Mapping[str, Any]],
+        neutralization_status: Mapping[str, Any],
+        coverage_ratio: float,
+        estimated_turnover: float,
+    ) -> dict[str, Any]:
+        warnings = [dict(item) for item in factor_warnings]
+        hard_blockers = [dict(item) for item in factor_hard_blockers]
+        for blocker in pit_blockers:
+            if not isinstance(blocker, Mapping):
+                continue
+            factor_id = str(blocker.get("factor_id") or "MODEL")
+            normalized = self._normalize_factor_model_risk_item(
+                blocker,
+                factor_id=factor_id,
+                factor={},
+                default_code=str(blocker.get("code") or "PIT_BLOCKER"),
+                default_message="PIT 数据或表达式门禁阻断策略创建。",
+                severity="BLOCKER",
+            )
+            if self._factor_model_is_hard_blocker(normalized, default_hard=True):
+                hard_blockers.append(normalized)
+            else:
+                warnings.append(normalized)
+        for code in neutralization_status.get("blockers") or []:
+            hard_blockers.append(
+                self._normalize_factor_model_risk_item(
+                    {
+                        "code": str(code),
+                        "message": "启用行业中性化但缺少 PIT 行业字段，不能创建正式可回放策略。",
+                    },
+                    factor_id="NEUTRALIZATION",
+                    factor={"name": "行业中性化"},
+                    default_code="MISSING_INDUSTRY_PIT",
+                    default_message="启用行业中性化但缺少 PIT 行业字段。",
+                    severity="BLOCKER",
+                )
+            )
+        if 0 < coverage_ratio < 0.8:
+            warnings.append(
+                self._normalize_factor_model_risk_item(
+                    {
+                        "code": "COVERAGE_EDGE",
+                        "message": f"多因子打分覆盖率 {round(coverage_ratio * 100.0, 2)}%，建议复核样本覆盖。",
+                    },
+                    factor_id="MODEL",
+                    factor={"name": "多因子模型"},
+                    default_code="COVERAGE_EDGE",
+                    default_message="多因子打分覆盖率边缘。",
+                    severity="WARNING",
+                )
+            )
+        if estimated_turnover >= 0.55:
+            warnings.append(
+                self._normalize_factor_model_risk_item(
+                    {
+                        "code": "TURNOVER_DECAY",
+                        "message": f"预估换手 {round(estimated_turnover * 100.0, 2)}%，建议评估换手衰减和交易成本。",
+                    },
+                    factor_id="MODEL",
+                    factor={"name": "多因子模型"},
+                    default_code="TURNOVER_DECAY",
+                    default_message="预估换手偏高。",
+                    severity="WARNING",
+                )
+            )
+        warnings = self._dedupe_factor_model_risk_items(warnings)
+        hard_blockers = self._dedupe_factor_model_risk_items(hard_blockers)
+        return {
+            "warning_count": len(warnings),
+            "blocked_count": len(hard_blockers),
+            "warnings": warnings,
+            "hard_blockers": hard_blockers,
+            "can_create": not hard_blockers,
+            "summary": self._factor_model_strategy_creation_risk_summary(
+                warning_count=len(warnings),
+                blocked_count=len(hard_blockers),
+            ),
+        }
 
     def preview_factor_model(self, request: Any) -> dict[str, Any]:
         payload = dict(_as_mapping(request))
@@ -1148,6 +1899,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
             raise ValueError("Factor model weights must not all be zero.")
         normalized_weights: list[dict[str, Any]] = []
         pit_blockers: list[dict[str, Any]] = []
+        factor_risk_warnings: list[dict[str, Any]] = []
+        factor_risk_hard_blockers: list[dict[str, Any]] = []
         for item in components:
             factor_id = str(item.get("factor_id") or "").strip()
             factor = factor_by_id.get(factor_id) or self.get_factor(factor_id)
@@ -1165,6 +1918,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 for blocker in factor.get("readiness_blockers") or []:
                     if isinstance(blocker, Mapping):
                         pit_blockers.append({"factor_id": factor_id, **dict(blocker)})
+            factor_risk = self._factor_model_factor_strategy_risk(factor_id, factor)
+            factor_risk_warnings.extend(factor_risk["warnings"])
+            factor_risk_hard_blockers.extend(factor_risk["hard_blockers"])
+            for blocker in factor_risk["hard_blockers"]:
+                if str(blocker.get("factor_id") or "") == factor_id:
+                    pit_blockers.append(dict(blocker))
         symbols = self._factor_universe_symbols(payload.get("universe"))
         as_of_date = self._factor_preview_as_of(payload)
         neutralization = dict(payload.get("neutralization") or {})
@@ -1177,12 +1936,21 @@ class RealBacktestPlatformService(BacktestPlatformService):
             universe=payload.get("universe"),
         )
         neutralization_result = score_projection["neutralization_result"]
+        industry_coverage = (
+            dict(score_projection.get("industry_coverage") or {})
+            if isinstance(score_projection.get("industry_coverage"), Mapping)
+            else {}
+        )
         neutralization_status = {
             "enabled": bool(neutralization.get("enabled")),
             "method": str(neutralization.get("method") or "industry"),
             "status": neutralization_result.status,
             "blockers": list(neutralization_result.blockers),
-            "industry_field": score_projection.get("industry_field"),
+            "industry_field": industry_coverage.get("industry_field") or score_projection.get("industry_field"),
+            "taxonomy": industry_coverage.get("taxonomy"),
+            "covered_symbol_count": industry_coverage.get("covered_symbol_count"),
+            "missing_symbol_count": industry_coverage.get("missing_symbol_count"),
+            "source_names": list(industry_coverage.get("source_names") or []),
         }
         score_preview = list(score_projection["score_preview"])
         warnings: list[str] = []
@@ -1197,7 +1965,16 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 }
             )
         blocked_factor_ids = {str(item.get("factor_id")) for item in pit_blockers if item.get("factor_id")}
-        status = "BLOCKED" if pit_blockers or neutralization_result.blockers else "READY"
+        pit_blockers = self._dedupe_factor_model_risk_items(pit_blockers)
+        strategy_creation_risk = self._build_factor_model_strategy_creation_risk(
+            factor_warnings=factor_risk_warnings,
+            factor_hard_blockers=factor_risk_hard_blockers,
+            pit_blockers=pit_blockers,
+            neutralization_status=neutralization_status,
+            coverage_ratio=_coerce_float(score_projection["coverage_ratio"], 0.0),
+            estimated_turnover=_coerce_float(score_projection["estimated_turnover"], 0.0),
+        )
+        status = "BLOCKED" if strategy_creation_risk["blocked_count"] else "READY"
         return {
             "status": status,
             "normalized_weights": normalized_weights,
@@ -1213,18 +1990,43 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "pit_blockers": pit_blockers,
             "neutralization_status": neutralization_status,
             "warnings": warnings,
+            "strategy_creation_risk": strategy_creation_risk,
         }
 
     def create_factor_model(self, request: Any) -> dict[str, Any]:
         payload = dict(_as_mapping(request))
         preview = self.preview_factor_model(payload)
-        if preview.get("pit_blockers"):
-            raise ValueError("Factor model contains blocked PIT factors and cannot be materialized.")
+        strategy_creation_risk = (
+            dict(preview.get("strategy_creation_risk"))
+            if isinstance(preview.get("strategy_creation_risk"), Mapping)
+            else {}
+        )
         neutralization_status = preview.get("neutralization_status") if isinstance(preview.get("neutralization_status"), Mapping) else {}
+        hard_blockers = [
+            dict(item)
+            for item in strategy_creation_risk.get("hard_blockers") or []
+            if isinstance(item, Mapping)
+        ]
+        if hard_blockers and any(str(item.get("code") or "").upper() == "MISSING_INDUSTRY_PIT" for item in hard_blockers):
+            raise ValueError("Industry neutralization is enabled but PIT industry fields are missing.")
+        if hard_blockers:
+            raise ValueError("Factor model strategy creation risk contains hard blockers and cannot be materialized.")
         if neutralization_status.get("blockers"):
             raise ValueError("Industry neutralization is enabled but PIT industry fields are missing.")
         now = iso_now()
         strategy_id = self._new_id("strat")
+        neutralization_payload = dict(payload.get("neutralization") or {"enabled": False, "method": "industry"})
+        if neutralization_payload.get("enabled"):
+            neutralization_payload.update(
+                {
+                    "industry_field": neutralization_status.get("industry_field"),
+                    "taxonomy": neutralization_status.get("taxonomy"),
+                    "covered_symbol_count": neutralization_status.get("covered_symbol_count"),
+                    "missing_symbol_count": neutralization_status.get("missing_symbol_count"),
+                    "source_names": list(neutralization_status.get("source_names") or []),
+                    "execution_status": neutralization_status.get("status"),
+                }
+            )
         parameters = {
             "strategy_type": "MULTI_FACTOR",
             "factor_ids": [str(item.get("factor_id")) for item in payload.get("components") or [] if isinstance(item, Mapping)],
@@ -1238,7 +2040,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 for item in payload.get("components") or []
                 if isinstance(item, Mapping)
             },
-            "neutralization": dict(payload.get("neutralization") or {"enabled": False, "method": "industry"}),
+            "neutralization": neutralization_payload,
             "scoring_method": str(payload.get("scoring_method") or "zscore_weighted"),
             "rebalance_frequency": str(payload.get("rebalance_frequency") or "monthly"),
             "pit_snapshot_refs": {
@@ -1247,6 +2049,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "universe_snapshot_id": SP500_UNIVERSE_SNAPSHOT_ID,
             },
             "preview": preview,
+            "strategy_creation_risk": strategy_creation_risk,
         }
         strategy_name = str(payload.get("name") or "多因子策略").strip() or "多因子策略"
         strategy_row = {
@@ -1368,7 +2171,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
         return {
             "enabled": enabled,
             "method": method,
-            "industry_field": neutralization.get("industry_field"),
+            "industry_field": status_payload.get("industry_field") or neutralization.get("industry_field"),
+            "taxonomy": status_payload.get("taxonomy") or neutralization.get("taxonomy"),
+            "covered_symbol_count": status_payload.get("covered_symbol_count") if status_payload.get("covered_symbol_count") is not None else neutralization.get("covered_symbol_count"),
+            "missing_symbol_count": status_payload.get("missing_symbol_count") if status_payload.get("missing_symbol_count") is not None else neutralization.get("missing_symbol_count"),
+            "source_names": list(status_payload.get("source_names") or neutralization.get("source_names") or []),
             "execution_status": execution_status,
             "blocker_reason": blocker_reason,
             "blockers": blockers,
@@ -1717,6 +2524,32 @@ class RealBacktestPlatformService(BacktestPlatformService):
         if providers:
             return list(providers)
         return list(default_universe_history_providers())
+
+    def _enrich_sp500_industry_metadata(
+        self,
+        snapshots: Sequence[UniverseMembershipSnapshot],
+    ) -> list[UniverseMembershipSnapshot]:
+        sp500_snapshots = [
+            snapshot
+            for snapshot in snapshots
+            if str(snapshot.universe_key or "").strip().lower() == SP500_UNIVERSE_KEY
+        ]
+        if not sp500_snapshots:
+            return list(snapshots)
+        try:
+            definition = UniverseDefinition(
+                universe_key=SP500_UNIVERSE_KEY,
+                display_name=SP500_UNIVERSE_NAME,
+                snapshot_id=SP500_UNIVERSE_SNAPSHOT_ID,
+                source_page_title="List of S&P 500 companies",
+                minimum_member_count=400,
+            )
+            enricher = CurrentIndustryMetadataUniverseEnricher(
+                metadata_provider=GithubSp500CurrentValidationProvider(definition=definition)
+            )
+            return enricher.enrich_snapshots(snapshots)
+        except Exception:
+            return list(snapshots)
 
     def _openbb_current_constituent_check(self, snapshot: UniverseMembershipSnapshot) -> dict[str, Any] | None:
         checker = getattr(self.market_data_provider, "current_universe_constituent_checker", None)
@@ -2178,12 +3011,87 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "metadata": dict(merged.get("metadata") or {}),
         }
 
+    @staticmethod
+    def _coerce_positive_int(value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _parse_snapshot_date(value: Any) -> date | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            return None
+
+    def _canonical_anchor_count_for_window(self, *, window_start: Any, window_end: Any) -> int | None:
+        start = self._parse_snapshot_date(window_start)
+        end = self._parse_snapshot_date(window_end)
+        if start is None or end is None or end < start:
+            return None
+        count = len(semiannual_anchor_dates(start, end))
+        return count or None
+
+    def _normalize_universe_progress_metadata(
+        self,
+        metadata: Mapping[str, Any],
+        *,
+        window_start: Any,
+        window_end: Any,
+    ) -> dict[str, Any]:
+        normalized = dict(metadata or {})
+        canonical_count = self._canonical_anchor_count_for_window(window_start=window_start, window_end=window_end)
+        raw_anchor_count = self._coerce_positive_int(normalized.get("anchor_count"))
+        historical_count = self._coerce_positive_int(normalized.get("historical_anchor_count"))
+        if (
+            canonical_count is None
+            or raw_anchor_count is None
+            or historical_count is None
+            or raw_anchor_count <= canonical_count
+            or historical_count > canonical_count
+        ):
+            return normalized
+
+        normalized.setdefault("raw_anchor_count", raw_anchor_count)
+        normalized["anchor_count"] = canonical_count
+        normalized["historical_anchor_count"] = historical_count
+        normalized["fallback_anchor_count"] = max(0, canonical_count - historical_count)
+        normalized["ignored_off_schedule_anchor_count"] = max(0, raw_anchor_count - canonical_count)
+        return normalized
+
     def _format_universe_snapshot(self, item: Mapping[str, Any] | None, defaults: Mapping[str, Any]) -> dict[str, Any]:
         merged = {**defaults, **dict(item or {})}
+        metadata = self._normalize_universe_progress_metadata(
+            dict(merged.get("metadata") or {}),
+            window_start=merged.get("window_start"),
+            window_end=merged.get("window_end"),
+        )
+        status = str(merged.get("status") or "INCOMPLETE").upper()
+        blocker = dict(merged.get("blocker") or {})
+        anchor_count = self._coerce_positive_int(metadata.get("anchor_count"))
+        historical_count = self._coerce_positive_int(metadata.get("historical_anchor_count"))
+        if (
+            anchor_count is not None
+            and historical_count is not None
+            and historical_count >= anchor_count
+            and status in {"INCOMPLETE", "STALE"}
+            and str(blocker.get("code") or "") in {"", "UNIVERSE_HISTORY_INCOMPLETE"}
+        ):
+            status = "READY"
+            blocker = {}
+            if str(merged.get("freshness_label") or "").startswith("Historical anchors are still being repaired"):
+                merged["freshness_label"] = "Historical anchors are complete"
         return {
             "id": merged["id"],
             "name": merged["name"],
-            "status": str(merged.get("status") or "INCOMPLETE").upper(),
+            "status": status,
             "as_of": merged.get("as_of"),
             "freshness_label": merged.get("freshness_label"),
             "window_start": merged.get("window_start"),
@@ -2192,8 +3100,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "member_count": int(merged.get("member_count") or 0),
             "source": str(merged.get("source") or ""),
             "fallback_source": merged.get("fallback_source"),
-            "blocker": dict(merged.get("blocker") or {}),
-            "metadata": dict(merged.get("metadata") or {}),
+            "blocker": blocker,
+            "metadata": metadata,
         }
 
     def _snapshot_row_is_placeholder(self, row: Mapping[str, Any] | None, *, count_key: str) -> bool:
@@ -2398,19 +3306,55 @@ class RealBacktestPlatformService(BacktestPlatformService):
             grouped_universe_snapshots.setdefault(snapshot_id, [])
             grouped_universe_snapshots[snapshot_id].append(snapshot)
             memberships_by_snapshot.setdefault(snapshot_id, [])
-            memberships_by_snapshot[snapshot_id].extend(
-                {
-                    "effective_date": snapshot.effective_date.isoformat(),
-                    "symbol": symbol,
-                    "raw_symbol": symbol,
-                    "membership_status": "ACTIVE",
-                    "source": snapshot.source,
-                    "fallback_source": snapshot.fallback_source,
-                    "metadata": dict(snapshot.metadata),
-                }
-                for symbol in snapshot.normalized_symbols
-            )
+            for symbol in snapshot.normalized_symbols:
+                symbol_metadata = {}
+                if isinstance(getattr(snapshot, "symbol_metadata", None), Mapping):
+                    raw_metadata = snapshot.symbol_metadata.get(symbol) or {}
+                    if isinstance(raw_metadata, Mapping):
+                        symbol_metadata = dict(raw_metadata)
+                memberships_by_snapshot[snapshot_id].append(
+                    {
+                        "effective_date": snapshot.effective_date.isoformat(),
+                        "symbol": symbol,
+                        "raw_symbol": symbol,
+                        "membership_status": "ACTIVE",
+                        "source": snapshot.source,
+                        "fallback_source": snapshot.fallback_source,
+                        "metadata": {
+                            **dict(snapshot.metadata),
+                            **symbol_metadata,
+                        },
+                    }
+                )
         return grouped_universe_snapshots, memberships_by_snapshot
+
+    def _progress_universe_anchor_snapshots(
+        self,
+        anchor_snapshots: Sequence[UniverseMembershipSnapshot],
+        *,
+        window_start: date | None = None,
+        window_end: date | None = None,
+    ) -> tuple[list[UniverseMembershipSnapshot], int]:
+        ordered_anchor_snapshots = sorted(anchor_snapshots, key=lambda item: item.effective_date)
+        if not ordered_anchor_snapshots:
+            return [], 0
+        start = window_start or ordered_anchor_snapshots[0].effective_date
+        end = window_end or ordered_anchor_snapshots[-1].effective_date
+        canonical_dates = set(semiannual_anchor_dates(start, end))
+        if not canonical_dates:
+            return ordered_anchor_snapshots, 0
+        progress_snapshots = [
+            item for item in ordered_anchor_snapshots if item.effective_date in canonical_dates
+        ]
+        if not progress_snapshots:
+            return ordered_anchor_snapshots, 0
+        progress_dates = {item.effective_date for item in progress_snapshots}
+        ignored_dates = {
+            item.effective_date
+            for item in ordered_anchor_snapshots
+            if item.effective_date not in progress_dates
+        }
+        return progress_snapshots, len(ignored_dates)
 
     def _persist_grouped_universe_snapshots(
         self,
@@ -2426,11 +3370,17 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if not anchor_snapshots:
                 continue
             ordered_anchor_snapshots = sorted(anchor_snapshots, key=lambda item: item.effective_date)
+            progress_anchor_snapshots, ignored_off_schedule_anchor_count = self._progress_universe_anchor_snapshots(
+                ordered_anchor_snapshots,
+                window_start=snapshot_window_start,
+                window_end=window_end,
+            )
             latest_snapshot = ordered_anchor_snapshots[-1]
-            latest_anchor_date = latest_snapshot.effective_date.isoformat()
+            latest_progress_snapshot = progress_anchor_snapshots[-1]
+            latest_anchor_date = latest_progress_snapshot.effective_date.isoformat()
             source_quality_breakdown: dict[str, int] = {}
             historical_anchor_count = 0
-            for item in ordered_anchor_snapshots:
+            for item in progress_anchor_snapshots:
                 source_quality = str((item.metadata or {}).get("source_quality") or "").lower()
                 source_quality_breakdown[source_quality or "unknown"] = (
                     source_quality_breakdown.get(source_quality or "unknown", 0) + 1
@@ -2443,11 +3393,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "historical_constituent_api",
                 } and not item.fallback_source:
                     historical_anchor_count += 1
-            total_anchor_count = len(ordered_anchor_snapshots)
+            total_anchor_count = len(progress_anchor_snapshots)
             latest_members = [
                 row
                 for row in memberships_by_snapshot.get(snapshot_id, [])
-                if str(row.get("effective_date")) == latest_anchor_date
+                if str(row.get("effective_date")) == latest_snapshot.effective_date.isoformat()
             ]
             source_names = sorted({str(item.source) for item in ordered_anchor_snapshots if item.source})
             fallback_sources = sorted(
@@ -2502,18 +3452,19 @@ class RealBacktestPlatformService(BacktestPlatformService):
                         ),
                     },
                     "metadata": {
+                        **dict(latest_snapshot.metadata),
                         "source_page_title": latest_snapshot.source_page_title,
                         "source_revision_id": latest_snapshot.source_revision_id,
                         "latest_anchor_date": latest_anchor_date,
                         "anchor_count": total_anchor_count,
                         "historical_anchor_count": historical_anchor_count,
                         "fallback_anchor_count": total_anchor_count - historical_anchor_count,
+                        "ignored_off_schedule_anchor_count": ignored_off_schedule_anchor_count,
                         "historical_constituent_provider": (latest_snapshot.metadata or {}).get("historical_constituent_provider"),
                         "historical_constituent_probe_status": (latest_snapshot.metadata or {}).get("historical_constituent_probe_status"),
                         "source_quality_breakdown": source_quality_breakdown,
                         "source_names": source_names,
                         "fallback_sources": fallback_sources,
-                        **dict(latest_snapshot.metadata),
                     },
                 },
                 memberships=memberships_by_snapshot.get(snapshot_id, []),
@@ -2560,6 +3511,25 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     if window is not None
                 }
             if not targeted_windows:
+                if snapshot_id:
+                    existing_snapshots = self._reconstruct_universe_snapshots_from_memberships(
+                        snapshot_id=snapshot_id,
+                        memberships=existing_universe_memberships.get(snapshot_id, []),
+                    )
+                    enriched_snapshots = self._enrich_sp500_industry_metadata(existing_snapshots)
+                    _, enriched_memberships = self._group_universe_snapshots(enriched_snapshots)
+                    if enriched_memberships.get(snapshot_id):
+                        grouped_universe_snapshots[snapshot_id] = enriched_snapshots
+                        memberships_by_snapshot[snapshot_id] = enriched_memberships[snapshot_id]
+                        warnings.extend(
+                            self._persist_grouped_universe_snapshots(
+                                grouped_universe_snapshots={snapshot_id: enriched_snapshots},
+                                memberships_by_snapshot={snapshot_id: memberships_by_snapshot[snapshot_id]},
+                                snapshot_window_start=snapshot_window_start,
+                                window_end=window_end,
+                                as_of=started_at,
+                            )
+                        )
                 emit_heartbeat(
                     current_stage="universe_snapshots",
                     current_stage_label=f"刷新股票池快照 · {display_name}",
@@ -2616,6 +3586,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     merged_snapshots = [merged_by_date[key] for key in sorted(merged_by_date)]
                 else:
                     merged_snapshots = sorted(provider_specific_snapshots, key=lambda item: item.effective_date)
+                merged_snapshots = self._enrich_sp500_industry_metadata(merged_snapshots)
                 merged_snapshots = self._annotate_openbb_current_constituent_check(merged_snapshots)
                 grouped_universe_snapshots[current_snapshot_id] = merged_snapshots
                 _, grouped_memberships = self._group_universe_snapshots(merged_snapshots)
@@ -2966,12 +3937,21 @@ class RealBacktestPlatformService(BacktestPlatformService):
         existing_price_missing: Sequence[str],
         existing_corporate_missing: Sequence[str],
     ) -> list[str]:
-        target_symbols = {
-            normalized_symbol
-            for row in self.market_data_repository.load_universe_memberships()
-            for normalized_symbol in [self._normalize_refresh_symbol(row.get("symbol"))]
-            if normalized_symbol
-        }
+        symbol_loader = getattr(self.market_data_repository, "list_universe_membership_symbols", None)
+        if callable(symbol_loader):
+            target_symbols = {
+                normalized_symbol
+                for item in symbol_loader()
+                for normalized_symbol in [self._normalize_refresh_symbol(item)]
+                if normalized_symbol
+            }
+        else:
+            target_symbols = {
+                normalized_symbol
+                for row in self.market_data_repository.load_universe_memberships()
+                for normalized_symbol in [self._normalize_refresh_symbol(row.get("symbol"))]
+                if normalized_symbol
+            }
         target_symbols.update(self._snapshot_progress_extra_symbols())
         if target_symbols:
             return sorted(target_symbols)
@@ -3515,7 +4495,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
         }
 
     def _summarize_universe_anchor_progress(self, *, anchor_snapshots: Sequence[Any]) -> dict[str, Any]:
-        ordered_anchor_snapshots = sorted(anchor_snapshots, key=lambda item: item.effective_date)
+        ordered_anchor_snapshots, ignored_off_schedule_anchor_count = self._progress_universe_anchor_snapshots(
+            anchor_snapshots
+        )
         source_quality_breakdown: dict[str, int] = {}
         historical_anchor_count = 0
         official_seed_sources: set[str] = set()
@@ -3545,6 +4527,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "anchor_count": int(anchor_count),
             "historical_anchor_count": int(historical_anchor_count),
             "fallback_anchor_count": int(anchor_count - historical_anchor_count),
+            "ignored_off_schedule_anchor_count": int(ignored_off_schedule_anchor_count),
             "source_quality_breakdown": source_quality_breakdown,
             "official_seed_status": official_seed_status,
             "official_seed_source_count": len(official_seed_sources),
@@ -3588,13 +4571,17 @@ class RealBacktestPlatformService(BacktestPlatformService):
             ordered_anchor_snapshots = sorted(anchor_snapshots, key=lambda item: item.effective_date)
             if not ordered_anchor_snapshots:
                 continue
+            progress_anchor_snapshots, ignored_off_schedule_anchor_count = self._progress_universe_anchor_snapshots(
+                ordered_anchor_snapshots
+            )
             latest_snapshot = ordered_anchor_snapshots[-1]
-            latest_anchor_date = latest_snapshot.effective_date.isoformat()
+            latest_anchor_date = progress_anchor_snapshots[-1].effective_date.isoformat()
             anchor_progress = self._summarize_universe_anchor_progress(anchor_snapshots=ordered_anchor_snapshots)
             latest_members = {
                 str(row.get("symbol") or "").strip().upper()
                 for row in memberships_by_snapshot.get(snapshot_id, [])
-                if str(row.get("effective_date") or "") == latest_anchor_date and str(row.get("symbol") or "").strip()
+                if str(row.get("effective_date") or "") == latest_snapshot.effective_date.isoformat()
+                and str(row.get("symbol") or "").strip()
             }
             previous_rows = list(existing_universe_memberships.get(snapshot_id) or [])
             previous_same_anchor = {
@@ -3628,6 +4615,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     anchor_progress["historical_anchor_count"] - previous_anchor_progress["historical_anchor_count"]
                 ),
                 "fallback_anchor_count": int(anchor_progress["fallback_anchor_count"]),
+                "ignored_off_schedule_anchor_count": int(ignored_off_schedule_anchor_count),
                 "source_quality_breakdown": dict(anchor_progress["source_quality_breakdown"]),
                 "official_seed_status": str(anchor_progress.get("official_seed_status") or "missing"),
                 "official_seed_source_count": int(anchor_progress.get("official_seed_source_count") or 0),
@@ -3635,7 +4623,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "latest_anchor_date": latest_anchor_date,
                 "provider_summary": self._build_universe_provider_summary(
                     snapshot_id=snapshot_id,
-                    anchor_snapshots=ordered_anchor_snapshots,
+                    anchor_snapshots=progress_anchor_snapshots,
                     membership_rows=memberships_by_snapshot.get(snapshot_id, []),
                 ),
             }
@@ -5852,6 +6840,20 @@ class RealBacktestPlatformService(BacktestPlatformService):
             provider_registry,
             provider_attempts,
         )
+        provider_registry_items = [
+            dict(item)
+            for item in (provider_registry.get("items") or [])
+            if isinstance(item, Mapping)
+        ]
+        provider_attempt_items = [
+            dict(item)
+            for item in (provider_attempts.get("items") or [])
+            if isinstance(item, Mapping)
+        ]
+        data_trust_summary = build_data_trust_summary(
+            registry_items=provider_registry_items,
+            attempt_items=provider_attempt_items,
+        )
         return {
             "overall_status": overall_status,
             "last_refreshed_at": max(timestamps) if timestamps else None,
@@ -5863,6 +6865,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "message": message,
             "allowed_actions": allowed_actions,
             "provider_readiness_summary": provider_readiness_summary,
+            "data_trust_summary": data_trust_summary,
         }
 
     def _backfill_dataset_snapshot_progress(
@@ -6065,8 +7068,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
         target_type: str | None = None,
         status: str | None = None,
     ) -> dict[str, Any]:
-        latest_job = self._latest_snapshot_refresh_job()
-        overview = self._build_snapshot_overview(latest_job)
+        overview = self.get_snapshot_overview()
+        latest_job_payload = overview.get("latest_job") if isinstance(overview, Mapping) else None
+        latest_job = dict(latest_job_payload) if isinstance(latest_job_payload, Mapping) else None
         return self._build_snapshot_provider_attempts_payload(
             dataset_snapshots=[
                 dict(item)
@@ -7476,6 +8480,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 str((latest or {}).get("updated_at") or ""),
                 str((latest or {}).get("completed_at") or ""),
                 str(openbb_provider_enabled()),
+                _snapshot_provider_env_signature(),
                 self._market_data_snapshot_cache_signature(),
             ]
         )

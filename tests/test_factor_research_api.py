@@ -176,6 +176,26 @@ def mark_price_snapshot_incomplete(
         )
 
 
+def mark_corporate_actions_snapshot_incomplete(client, *, missing_symbols: list[str]) -> None:
+    repository = client.app.state.service.market_data_repository
+    metadata = {
+        "covered_symbol_count": 4,
+        "total_symbol_count": 4 + len(missing_symbols),
+        "missing_symbols": missing_symbols,
+    }
+    with repository.connect() as conn:
+        conn.execute(
+            """
+            UPDATE dataset_snapshots
+            SET status = 'INCOMPLETE',
+                metadata_json = ?,
+                updated_at = ?
+            WHERE id = 'ds-corporate-actions'
+            """,
+            (dumps(metadata), f"{date.today().isoformat()}T00:00:00Z"),
+        )
+
+
 def mark_fundamental_snapshot_incomplete(client) -> None:
     repository = client.app.state.service.market_data_repository
     metadata = {
@@ -279,6 +299,14 @@ def test_pit_data_overview_requires_dataset_and_universe_snapshots(tmp_path):
     assert ready_payload["fundamental_coverage"]["missing_fields"] == []
     assert ready_payload["full_ready_repair_plan"]["status"] == "READY"
     assert ready_payload["full_ready_repair_plan"]["queue_total_count"] == 0
+    trust_summary = ready_payload["data_trust_summary"]
+    assert trust_summary["summary_label"] == "数据可信层"
+    assert {item["id"] for item in trust_summary["layers"]} >= {
+        "price_primary_chain",
+        "membership_history",
+        "delisted_identity",
+        "corporate_actions_zero_event",
+    }
 
 
 def test_pit_data_overview_exposes_gap_preview_history_and_action_targets(tmp_path):
@@ -320,6 +348,10 @@ def test_pit_data_overview_exposes_gap_preview_history_and_action_targets(tmp_pa
     repair_by_symbol = {item["symbol"]: item for item in repair_plan["queue_sample"]}
     assert repair_by_symbol["AAPL"]["bucket"] == "current_core_missing"
     assert repair_by_symbol["AAPL"]["priority"] == 10
+    assert repair_by_symbol["AAPL"]["next_provider"] == "tiingo"
+    assert repair_by_symbol["AAPL"]["provider_priority"][:3] == ["tiingo", "fmp", "stooq"]
+    assert "可审计 EOD OHLCV 入库记录" in repair_by_symbol["AAPL"]["required_evidence"]
+    assert repair_by_symbol["AAPL"]["trust_blocker"] == "身份/生命周期未闭合，SEC/CIK 或 FMP/Tiingo alias 证据缺失。"
     assert repair_by_symbol["ZZZZ"]["bucket"] == "non_core_missing"
     assert "yahoo" in repair_by_symbol["ZZZZ"]["price_providers"]
     assert repair_plan["rejection_criteria"]
@@ -340,6 +372,100 @@ def test_pit_data_overview_exposes_gap_preview_history_and_action_targets(tmp_pa
     mapped_buckets = {item["id"]: item for item in mapped_payload["coverage_gap"]["buckets"]}
     assert "ZZZZ" not in mapped_buckets["identity_unresolved"]["sample_symbols"]
     assert mapped_payload["coverage_gap"]["identity_resolved_count"] >= 1
+
+
+def test_pit_full_ready_repair_plan_projects_zero_event_candidates(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    repository = client.app.state.service.market_data_repository
+    repository.upsert_symbol_identity(
+        {
+            "symbol": "AAL",
+            "canonical_symbol": "AAL",
+            "company_name": "American Airlines Group Inc.",
+            "cik": "0000006201",
+            "exchange": "NASDAQ",
+            "delisting_date": "2013-12-09",
+            "source": "sec_edgar",
+            "valid_from": "2000-01-01",
+            "valid_to": "2013-12-09",
+        }
+    )
+    mark_corporate_actions_snapshot_incomplete(client, missing_symbols=["AAL"])
+
+    payload = assert_ok(client.get("/pit-data"))
+
+    repair_plan = payload["full_ready_repair_plan"]
+    assert repair_plan["status"] == "NEEDS_REPAIR"
+    assert repair_plan["queue_price_symbols"] == []
+    assert repair_plan["queue_corporate_action_symbols"] == ["AAL"]
+    queue_item = repair_plan["queue_sample"][0]
+    assert queue_item["symbol"] == "AAL"
+    assert queue_item["next_provider"] == "tiingo"
+    assert "公司行动事件，或明确 zero-event certificate" in queue_item["required_evidence"]
+    assert queue_item["trust_blocker"].startswith("公司行动门禁")
+
+    certificates = repair_plan["zero_event_certificates"]
+    assert repair_plan["zero_event_certificate_count"] == 1
+    assert certificates[0]["symbol"] == "AAL"
+    assert certificates[0]["cik"] == "0000006201"
+    assert certificates[0]["member_exit_date"] == "2013-12-09"
+    assert certificates[0]["last_filing_evidence"]["source"] == "sec_edgar"
+    assert certificates[0]["price_action_negative_result"]["provider_priority"][:2] == ["tiingo", "fmp"]
+    assert certificates[0]["conclusion"] == "ZERO_EVENT_CANDIDATE"
+
+
+def test_pit_data_universe_history_series_uses_annual_anchors(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    repository = client.app.state.service.market_data_repository
+    memberships = []
+    annual_members = [
+        ("2014-01-02", ["AAPL", "MSFT"]),
+        ("2014-12-31", ["AAPL", "MSFT", "NVDA", "AMZN"]),
+        ("2015-06-30", ["AAPL", "MSFT", "NVDA"]),
+        ("2015-12-31", ["AAPL", "MSFT", "NVDA", "AMZN"]),
+        ("2026-01-14", ["AAPL", "MSFT", "NVDA", "AMZN"]),
+    ]
+    for effective_date, symbols in annual_members:
+        memberships.extend(
+            {
+                "effective_date": effective_date,
+                "symbol": symbol,
+                "source": "unit_test_revision",
+                "fallback_source": "none",
+                "metadata": {"source_quality": "historical_revision_snapshot"},
+            }
+            for symbol in symbols
+        )
+    repository.replace_universe_snapshot(
+        {
+            "id": "un-sp500",
+            "universe_key": "SP500",
+            "name": "标普500",
+            "status": "READY",
+            "as_of": "2026-01-14",
+            "freshness_label": "单元测试年度历史锚点",
+            "window_start": "2014-01-02",
+            "window_end": "2026-01-14",
+            "anchor_schedule": "annual",
+            "member_count": 4,
+            "source": "unit_test_revision",
+            "fallback_source": "none",
+            "metadata": {"coverage_mode": "point_in_time_anchor"},
+        },
+        memberships=memberships,
+    )
+
+    payload = assert_ok(client.get("/pit-data"))
+    series = payload["universe_history_series"]
+
+    assert [item["date"] for item in series] == ["2014-12-31", "2015-12-31", "2026-01-14"]
+    assert [item["member_count"] for item in series] == [4, 4, 4]
+    assert [bool(item.get("is_latest")) for item in series] == [False, False, True]
+    assert payload["coverage"]["universe_history_anchor_count"] == 5
+    assert payload["coverage"]["universe_history_annual_anchor_count"] == 3
+    assert "5 个原始锚点，年度展示 3 个锚点" in payload["status_reasons"]["universe"]["description"]
 
 
 def test_pit_full_ready_repair_plan_surfaces_provider_cooldown(tmp_path):
@@ -607,6 +733,16 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
         "s_qlty_roe_ltm_raw",
         "s_qlty_fcfy_ttm_raw",
     }
+    expanded_seed_ids = {
+        "s_beta_market_252d_raw",
+        "s_val_cfp_ltm_raw",
+        "s_qlty_leverage_cur_raw",
+        "s_inv_assetgrowth_1y_rank",
+        "s_inv_capex_ltm_raw",
+        "s_mom_6m_rank",
+        "s_liq_amihud_20d_rank",
+        "s_alpha_ffblend_cur_rank",
+    }
     legacy_ids = {
         "momentum_12m_1m",
         "lowvol_realized_252d",
@@ -617,10 +753,14 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
         "size_log_market_cap",
     }
     assert canonical_ids.issubset(ids)
+    assert expanded_seed_ids.issubset(ids)
     assert ids.isdisjoint(legacy_ids)
     assert payload["summary"]["blocked_data_count"] == 0
 
     by_id = {item["id"]: item for item in payload["items"]}
+    assert by_id["s_beta_market_252d_raw"]["name"] == "市场贝塔代理（252日）"
+    assert by_id["s_val_cfp_ltm_raw"]["name"] == "现金流市值比（LTM）"
+    assert by_id["s_alpha_ffblend_cur_rank"]["name"] == "Fama-French 风格合成 Alpha"
     for factor_id in canonical_ids:
         assert by_id[factor_id]["diagnostic_status"] == "READY_TO_DIAGNOSE"
         assert by_id[factor_id]["descriptor"]["canonical_id"] == factor_id
@@ -629,6 +769,12 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
         assert by_id[factor_id]["pit_coverage"]["available_at_gate"] is True
         assert by_id[factor_id]["created_at"]
         assert by_id[factor_id]["updated_at"]
+        assert by_id[factor_id]["ui_state"] in {"robust", "needs_calibration", "decayed", "sandbox"}
+        assert by_id[factor_id]["ui_state_label"] in {"稳健", "待校准", "失效", "沙箱"}
+        assert by_id[factor_id]["batch_diagnostic_summary"]["blocked_count"] == 0
+        assert by_id[factor_id]["correlation_cluster_summary"]["high_correlation_count"] >= 0
+        assert by_id[factor_id]["blocker_reason_summary"]["status"] in {"clear", "warning", "blocked"}
+        assert by_id[factor_id]["strategy_creation_risk"]["can_create"] is True
     first_updated_at = by_id["s_mom_12m1m_rank"]["updated_at"]
     second_payload = assert_ok(client.get("/factors"))
     second_by_id = {item["id"]: item for item in second_payload["items"]}
@@ -648,6 +794,167 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
     assert legacy_detail["name"] == "滚动市盈率倒数 (LTM)"
     assert assert_ok(client.get("/factors/value_bp_latest"))["id"] == "s_val_bp_latest_raw"
     assert assert_ok(client.get("/factors/quality_roe_ltm"))["id"] == "s_qlty_roe_ltm_raw"
+
+
+def test_factor_library_projects_reference_metrics_for_new_factors(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    pit = assert_ok(client.get("/pit-data"))
+    diagnostic_payload = {
+        "start_date": pit["diagnostic_windows"]["verified"]["start_date"],
+        "end_date": pit["as_of_date"],
+        "dataset_snapshot_id": pit["dataset_snapshot_id"],
+        "universe_snapshot_id": pit["universe_snapshot_id"],
+        "return_window_days": 21,
+        "group_count": 5,
+        "diagnostic_mode": "VERIFIED",
+    }
+    reference_factor_ids = [
+        "s_mom_12m1m_rank",
+        "s_vol_252d_rank",
+        "s_size_cur_log",
+        "s_val_ep_ltm_raw",
+        "s_qlty_fcfy_ttm_raw",
+    ]
+    for factor_id in reference_factor_ids:
+        assert_ok(client.post(f"/factors/{factor_id}/diagnostics", json=diagnostic_payload))
+
+    created = assert_ok(
+        client.post(
+            "/factors",
+            json={
+                "name": "5日动量",
+                "market": "US",
+                "universe": "SP500",
+                "expression": "Rank(Delta(Close, 5))",
+                "frequency": "DAILY",
+                "direction": "HIGH_IS_BETTER",
+                "descriptor": manual_descriptor(),
+                "tags": ["人工"],
+            },
+        )
+    )
+    created_summary = created["latest_diagnostic_summary"]
+    assert created_summary["status"] == "REFERENCE_ONLY"
+    assert created_summary["source_factor_id"] in reference_factor_ids
+    assert created_summary["data_lineage"]["kind"] == "REFERENCE_DEFAULT_FACTOR"
+
+    factors = assert_ok(client.get("/factors"))
+    by_id = {item["id"]: item for item in factors["items"]}
+    manual_summary = by_id["m_mom_short_5d_rank"]["latest_diagnostic_summary"]
+    expanded_summary = by_id["s_mom_6m_rank"]["latest_diagnostic_summary"]
+
+    assert manual_summary["status"] == "REFERENCE_ONLY"
+    assert manual_summary["source_factor_id"] in reference_factor_ids
+    assert manual_summary["data_lineage"]["kind"] == "REFERENCE_DEFAULT_FACTOR"
+    assert isinstance(manual_summary["rank_ic"], float)
+    assert expanded_summary["status"] == "REFERENCE_ONLY"
+    assert expanded_summary["source_factor_id"] == "s_mom_12m1m_rank"
+    assert by_id["m_mom_short_5d_rank"]["last_diagnostic_run_id"] is None
+
+
+def test_factor_library_hot_path_does_not_call_heavy_pit_overview(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+
+    service = client.app.state.service
+    service._factor_research_service_instance = None
+
+    def fail_if_called():
+        raise AssertionError("/factors must not wait for the heavy PIT overview builder")
+
+    service.get_pit_data_overview = fail_if_called
+
+    payload = assert_ok(client.get("/factors"))
+
+    assert payload["items"]
+    assert payload["summary"]["pit_status"] in {"READY", "LIMITED_READY", "BLOCKED"}
+
+
+def test_factor_detail_hot_path_does_not_call_heavy_pit_overview(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+
+    service = client.app.state.service
+    service._factor_research_service_instance = None
+
+    def fail_if_called():
+        raise AssertionError("/factors/{id} must not wait for the heavy PIT overview builder")
+
+    service.get_pit_data_overview = fail_if_called
+
+    payload = assert_ok(client.get("/factors/s_alpha_ffblend_cur_rank"))
+
+    assert payload["id"] == "s_alpha_ffblend_cur_rank"
+    assert payload["name"] == "Fama-French 风格合成 Alpha"
+    assert payload["diagnostic_status"] in {"READY_TO_DIAGNOSE", "SANDBOX_READY", "COMPLETED"}
+
+
+def test_factor_library_does_not_fake_ic_sparkline_without_diagnostic(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+
+    payload = assert_ok(client.get("/factors"))
+    factor = next(item for item in payload["items"] if item["id"] == "s_beta_market_252d_raw")
+
+    assert factor["latest_diagnostic_summary"] is None
+    assert factor["ic_sparkline"] == []
+    assert factor["diagnostic_gap_summary"]["rank_ic"].startswith("Rank IC:")
+
+
+def test_factor_list_governance_projection_warns_for_correlation_without_blocking(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+
+    payload = assert_ok(client.get("/factors"))
+    factors = payload["items"]
+    warned = [
+        item
+        for item in factors
+        if item["correlation_cluster_summary"]["high_correlation_count"] > 0
+        and item["strategy_creation_risk"]["warning_count"] > 0
+    ]
+
+    assert warned
+    for factor in warned[:5]:
+        assert factor["strategy_creation_risk"]["can_create"] is True
+        assert factor["strategy_creation_risk"]["blocked_count"] == 0
+        assert factor["blocker_reason_summary"]["status"] in {"warning", "clear"}
+        assert any(
+            warning["code"] == "HIGH_CORRELATION"
+            for warning in factor["strategy_creation_risk"]["warnings"]
+        )
+
+
+def test_factor_batch_preview_is_read_only_and_returns_summary(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    before_runs = client.app.state.service.storage.fetch_one(
+        "SELECT COUNT(*) AS count FROM factor_diagnostic_runs"
+    )["count"]
+
+    preview = assert_ok(
+        client.post(
+            "/factors/diagnostics/preview",
+            json={
+                "batch": True,
+                "factor_ids": ["s_mom_12m1m_rank", "s_val_ep_ltm_raw"],
+                "diagnostic_mode": "SANDBOX",
+                "include": ["ic", "ir", "groups", "turnover", "correlation", "blockers"],
+            },
+        )
+    )
+    after_runs = client.app.state.service.storage.fetch_one(
+        "SELECT COUNT(*) AS count FROM factor_diagnostic_runs"
+    )["count"]
+
+    assert preview["mode"] == "BATCH"
+    assert preview["batch_summary"]["factor_count"] == 2
+    assert preview["batch_summary"]["warning_count"] >= 0
+    assert preview["batch_summary"]["blocked_count"] >= 0
+    assert {item["factor_id"] for item in preview["items"]} == {"s_mom_12m1m_rank", "s_val_ep_ltm_raw"}
+    assert all("strategy_creation_risk" in item for item in preview["items"])
+    assert after_runs == before_runs
 
 
 def test_manual_factor_validation_and_pit_bound_diagnostics(tmp_path):
@@ -764,6 +1071,13 @@ def test_factor_sandbox_diagnostic_runs_with_limited_pit_without_verifying(tmp_p
         "s_qlty_fcfy_ttm_raw",
     }:
         assert by_id[factor_id]["diagnostic_status"] == "SANDBOX_READY"
+        assert by_id[factor_id]["strategy_creation_risk"]["can_create"] is True
+        assert by_id[factor_id]["strategy_creation_risk"]["blocked_count"] == 0
+        assert by_id[factor_id]["blocker_reason_summary"]["status"] in {"clear", "warning"}
+        assert any(
+            item["code"] == "VERIFIED_PIT_WINDOW_INCOMPLETE"
+            for item in by_id[factor_id]["strategy_creation_risk"]["warnings"]
+        )
     assert "历史样本池缺失" in by_id["s_mom_12m1m_rank"]["diagnostic_gap_summary"]["rank_ic"]
 
     formal = client.post(
@@ -999,6 +1313,7 @@ def test_factor_preview_accepts_nested_operator_formula(tmp_path):
     )
 
     assert preview["status"] == "PREVIEW"
+    assert preview["mode"] == "SINGLE"
     assert preview["lookback_years"] == 3
 
 
@@ -1012,6 +1327,9 @@ def test_blocked_seed_factor_cannot_run_diagnostic_without_fundamentals(tmp_path
     factors = assert_ok(client.get("/factors"))
     by_id = {item["id"]: item for item in factors["items"]}
     assert by_id["s_val_ep_ltm_raw"]["diagnostic_status"] == "BLOCKED_PIT"
+    assert by_id["s_val_ep_ltm_raw"]["strategy_creation_risk"]["can_create"] is False
+    assert by_id["s_val_ep_ltm_raw"]["strategy_creation_risk"]["blocked_count"] >= 1
+    assert by_id["s_val_ep_ltm_raw"]["blocker_reason_summary"]["status"] == "blocked"
     assert "基础面 PIT 缺口" in by_id["s_val_ep_ltm_raw"]["diagnostic_gap_summary"]["rank_ic"]
 
     response = client.post(

@@ -1,6 +1,6 @@
 param(
   [string]$DatasetId = "borismarjanovic/price-volume-data-for-all-us-stocks-etfs",
-  [string]$CacheDir = "C:\tmp\grit-pit-bulk-cache",
+  [string]$CacheDir = "",
   [string]$License = "verify_before_import",
   [string]$Kaggle = "kaggle",
   [switch]$NoUnzip
@@ -8,6 +8,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+if (-not $CacheDir) {
+  $CacheDir = Join-Path $RepoRoot ".tmp\pit-bulk-cache"
+}
 $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $Python)) {
   $Python = "python"

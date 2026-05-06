@@ -1,6 +1,7 @@
 # Runtime & Environment
 .venv/
 .python-runtime/
+.python314-home/
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -10,6 +11,7 @@ htmlcov/
 coverage.xml
 
 # Frontend Artifacts
+node_modules/
 web/node_modules/
 web/dist/
 web/.eslintcache
@@ -34,6 +36,8 @@ logs/
 
 # Local restore / QA artifacts
 artifacts/
+.codex-logs/
+output/logs/
 artifacts/browser-acceptance-*/
 artifacts/visual-checks/
 artifacts/*.bundle.lock

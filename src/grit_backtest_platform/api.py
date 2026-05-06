@@ -978,6 +978,11 @@ def _default_db_path() -> Path:
     return Path(configured) if configured else Path.cwd() / '.grit_backtest_platform.sqlite3'
 
 
+def _startup_read_model_prewarm_enabled() -> bool:
+    raw = str(os.getenv("GRIT_STARTUP_READ_MODEL_PREWARM") or "background").strip().lower()
+    return raw not in {"0", "false", "no", "off", "skip", "disabled"} and "PYTEST_CURRENT_TEST" not in os.environ
+
+
 def create_app(
     db_path: str | Path | None = None,
     market_data_provider=None,
@@ -1014,6 +1019,7 @@ def create_app(
     app.state.startup_optimization_recovery_mode = normalized_startup_optimization_recovery_mode
     app.state.cleanup_stop_event = threading.Event()
     app.state.cleanup_thread = None
+    app.state.read_model_prewarm_thread = None
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException):
@@ -1107,6 +1113,21 @@ def create_app(
                 invoke(service.interrupt_incomplete_optimization_jobs)
             except Exception:
                 pass
+
+        if _startup_read_model_prewarm_enabled():
+            def prewarm_read_models() -> None:
+                try:
+                    service._prewarm_read_model_caches()
+                except Exception:
+                    logger.exception("Read-model cache prewarm failed during startup.")
+
+            prewarm_thread = threading.Thread(
+                target=prewarm_read_models,
+                name="read-model-cache-prewarm",
+                daemon=True,
+            )
+            app.state.read_model_prewarm_thread = prewarm_thread
+            prewarm_thread.start()
 
         def loop() -> None:
             while not app.state.cleanup_stop_event.wait(24 * 60 * 60):
