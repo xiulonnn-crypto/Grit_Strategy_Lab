@@ -3,6 +3,8 @@ import { CompositionDashboardView } from '../components/composition-dashboard/co
 import { useApiClient } from '../lib/demoStoreContext';
 import type { ApiCompositionListItem, ApiCompositionSourceIntegrity, ApiCompositionStatus } from '../types';
 
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+
 function sourceIntegrityHasNewVersion(item: ApiCompositionSourceIntegrity): boolean {
   const sourceRefId = String(item.source_ref_id ?? '').trim();
   const currentRefId = String(item.current_ref_id ?? '').trim();
@@ -61,6 +63,10 @@ export function CompositionDashboardPage(): JSX.Element {
         if (!cancelled) {
           setLoading(true);
           setError(null);
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
+        if (cancelled) {
+          return;
         }
         const response = await api.listCompositions();
         const enrichedResponse = response.map(normalizeCompositionListItem);

@@ -21,6 +21,7 @@ $uvicornErrLog = Join-Path $uvicornLogDir 'uvicorn-8010.err.log'
 $focusedTests = @(
     'app.routes.foundation.test.tsx'
     'creation-template.route.test.tsx'
+    'creation-template.batch-render.test.tsx'
     'runs.index.page.test.tsx'
     'composition.dashboard.test.tsx'
     'leg.inventory.test.tsx'
@@ -69,6 +70,27 @@ function Get-PythonExecutable {
     throw 'Python executable not found. Initialize .venv or make python available in PATH.'
 }
 
+function Stop-ProcessTree {
+    param(
+        [int]$TargetProcessId
+    )
+
+    try {
+        $children = Get-CimInstance Win32_Process -Filter "ParentProcessId=$TargetProcessId" -ErrorAction SilentlyContinue
+        foreach ($child in $children) {
+            Stop-ProcessTree -TargetProcessId ([int]$child.ProcessId)
+        }
+    } catch {
+        # Best effort cleanup only; the caller still reports the original timeout.
+    }
+
+    try {
+        Stop-Process -Id $TargetProcessId -Force -ErrorAction SilentlyContinue
+    } catch {
+        # Best effort cleanup only.
+    }
+}
+
 function Invoke-LoggedNodeCommand {
     param(
         [string]$Executable,
@@ -76,6 +98,7 @@ function Invoke-LoggedNodeCommand {
         [string]$WorkingDirectory,
         [string]$ReportPath,
         [hashtable]$ExtraEnvironment = @{},
+        [int]$TimeoutSeconds = 540,
         [switch]$ThrowOnError
     )
 
@@ -116,11 +139,21 @@ function Invoke-LoggedNodeCommand {
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
-    [void]$process.Start()
 
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
+    [void]$process.Start()
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+
+    $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+    if ($timedOut) {
+        Stop-ProcessTree -TargetProcessId $process.Id
+        [void]$process.WaitForExit(5000)
+    } else {
+        $process.WaitForExit()
+    }
+
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
 
     $combined = @(
         '# Command'
@@ -132,17 +165,28 @@ function Invoke-LoggedNodeCommand {
         '# Stderr'
         $stderr.TrimEnd()
     )
+    if ($timedOut) {
+        $combined += @(
+            ''
+            '# Timeout'
+            "Command exceeded $TimeoutSeconds seconds and the process tree was stopped."
+        )
+    }
     $combined | Set-Content -LiteralPath $ReportPath -Encoding utf8
 
     if ($stdout) {
-        $stdout.TrimEnd().Split([Environment]::NewLine) | ForEach-Object {
+        $stdout.TrimEnd().Split([Environment]::NewLine, [System.StringSplitOptions]::None) | ForEach-Object {
             if ($_ -ne '') { Write-Host $_ }
         }
     }
     if ($stderr) {
-        $stderr.TrimEnd().Split([Environment]::NewLine) | ForEach-Object {
+        $stderr.TrimEnd().Split([Environment]::NewLine, [System.StringSplitOptions]::None) | ForEach-Object {
             if ($_ -ne '') { Write-Host $_ }
         }
+    }
+
+    if ($timedOut) {
+        throw "Frontend command timed out after $TimeoutSeconds seconds. See $ReportPath"
     }
 
     if ($ThrowOnError -and $process.ExitCode -ne 0) {
@@ -174,17 +218,17 @@ New-Item -ItemType Directory -Path $uvicornLogDir -Force | Out-Null
 
 $nodeExe = Get-NodeExecutable
 $pythonExe = Get-PythonExecutable
-$vitestEntry = Join-Path $webDir 'node_modules\vitest\vitest.mjs'
+$vitestRunner = Join-Path $webDir 'scripts\run-vitest-fixed.cjs'
 $tscEntry = Join-Path $webDir 'node_modules\typescript\bin\tsc'
 $liveAcceptanceRunner = Join-Path $webDir 'scripts\run-live-acceptance.cjs'
 
-foreach ($requiredPath in @($vitestEntry, $tscEntry, $liveAcceptanceRunner)) {
+foreach ($requiredPath in @($vitestRunner, $tscEntry, $liveAcceptanceRunner)) {
     if (-not (Test-Path -LiteralPath $requiredPath)) {
         throw "Required frontend tool is missing: $requiredPath"
     }
 }
 
-$focusedArguments = @($vitestEntry, 'run') + $focusedTests + $FrontendArgs
+$focusedArguments = @($vitestRunner) + $focusedTests + $FrontendArgs
 $focusedExitCode = Invoke-LoggedNodeCommand `
     -Executable $nodeExe `
     -Arguments $focusedArguments `

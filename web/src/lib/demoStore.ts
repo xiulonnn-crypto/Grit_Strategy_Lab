@@ -13,6 +13,7 @@ import {
   type ApiFactorDiagnosticPreview,
   type ApiFactorDiagnosticPreviewPayload,
   type ApiFactorDiagnosticRunResponse,
+  type ApiFactorGovernanceOverview,
   type ApiFactorListItem,
   type ApiFactorListResponse,
   type ApiFactorMiningJob,
@@ -21,6 +22,12 @@ import {
   type ApiFactorModelCreatePayload,
   type ApiFactorModelPreviewPayload,
   type ApiFactorModelPreviewResponse,
+  type ApiFactorQuarantineCandidate,
+  type ApiFactorQuarantineCandidateListResponse,
+  type ApiFactorQuarantineIntakePayload,
+  type ApiFactorQuarantinePublishPayload,
+  type ApiFactorQuarantinePublishResponse,
+  type ApiFactorQuarantineRunPayload,
   type ApiOptimizationCandidate,
   type ApiOptimizationJobDetail,
   type ApiOptimizationJobListItem,
@@ -792,6 +799,99 @@ function createFactorListItems(): ApiFactorListItem[] {
   });
 }
 
+function createFactorGovernanceOverview(items = createFactorListItems()): ApiFactorGovernanceOverview {
+  const reviewFactor = items.find((item) => item.strategy_creation_risk?.warning_count);
+  const autoFactor = items.find((item) => item.source === 'AUTO_MINED') ?? reviewFactor ?? items[0];
+  const factorIds = [
+    autoFactor?.id ?? 's_mom_12m1m_rank',
+    's_val_ep_ltm_raw',
+    's_vol_252d_rank',
+  ].filter((item, index, array) => item && array.indexOf(item) === index);
+  return {
+    as_of: nowIso(),
+    queue_count: 4,
+    actions: [
+      {
+        id: 'gq-review-demo',
+        kind: 'REVIEW',
+        label: '待复核',
+        title: '估值同簇待复核',
+        detail: '估值因子出现同簇重叠，进入组合前请复核相关性和权重集中度。',
+        factor_ids: ['s_val_ep_ltm_raw'],
+        severity: 'warning',
+      },
+      {
+        id: 'gq-decay-demo',
+        kind: 'DECAYED',
+        label: '退化观察',
+        title: '短窗动量表现退化观察',
+        detail: '最近 OOS Rank IC 低于发布基线，暂不建议升权。',
+        factor_ids: ['s_mom_12m1m_rank'],
+        severity: 'danger',
+      },
+      {
+        id: 'gq-watch-demo',
+        kind: 'WATCH',
+        label: '观察',
+        title: '低波因子拥挤度观察',
+        detail: '引用密度上升但尚未触发阻断，保持 WATCH 状态。',
+        factor_ids: ['s_vol_252d_rank'],
+        severity: 'info',
+      },
+      {
+        id: 'gq-model-demo',
+        kind: 'FACTOR_MODEL_SUGGESTION',
+        label: '策略创建建议',
+        title: '多因子策略草稿建议',
+        detail: '自动发布因子已放入低相关候选篮子，建议权重不超过 20%，进入创建页后仍需预检。',
+        factor_ids: factorIds,
+        suggested_weights: factorIds.map((factorId, index) => ({
+          factor_id: factorId,
+          weight_pct: index === 0 ? 20 : 15,
+          direction: factorId.includes('vol') ? 'LOW_IS_GOOD' : 'HIGH_IS_GOOD',
+        })),
+        severity: 'info',
+        target: {
+          route: '#/factor-models/new',
+          query: {
+            source: 'governance_queue',
+            factorIds: factorIds.join(','),
+            weights: factorIds.map((_, index) => (index === 0 ? '20' : '15')).join(','),
+            directions: factorIds.map((factorId) => (factorId.includes('vol') ? 'LOW_IS_GOOD' : 'HIGH_IS_GOOD')).join(','),
+            modelName: '自动挖掘因子待审查组合',
+          },
+        },
+      },
+    ],
+    summary: { review_count: 1, decayed_count: 1, crowded_count: 1, suggestion_count: 1 },
+  };
+}
+
+function createFactorQuarantineCandidates(): ApiFactorQuarantineCandidateListResponse {
+  return {
+    items: [
+      {
+        id: 'fq_demo_mom_001',
+        mining_candidate_id: 'cand_demo_mom_001',
+        source_mining_job_id: 'fmj_demo_001',
+        expression: 'Rank(Close(t-21) / Close(t-252) - 1)',
+        status: 'PASSED',
+        publish_status: 'ELIGIBLE',
+        gate_summary: { pit: 'Full Ready', is: '通过', oos: '通过', orthogonal: '通过', dedupe: '未命中重复表达式' },
+        cluster_id: 'cluster_demo_mom',
+        candidate_metrics: { rank_ic: 0.041, ir: 0.72, coverage: 91.2 },
+        failure_samples: [],
+        pit_evidence: { status: 'READY', dataset_snapshot_id: 'ds-price', universe_snapshot_id: 'un-sp500' },
+        publish_eligibility: { status: 'ELIGIBLE', reason: '通过 D2 检疫，允许自动发布。' },
+        target_factor_id: null,
+        created_at: nowIso(),
+        updated_at: nowIso(),
+      },
+    ],
+    summary: { total: 1, passed_count: 1, needs_review_count: 0, published_count: 0 },
+  };
+}
+
 function createFactorDetail(id: string): ApiFactorDetail {
   const aliases: Record<string, string> = {
     momentum_12m_1m: 's_mom_12m1m_rank',
@@ -1514,6 +1614,66 @@ export const demoApi: DemoApi = {
         sandbox_ready_count: items.filter((item) => item.diagnostic_status === 'SANDBOX_READY').length,
         blocked_data_count: items.filter((item) => item.diagnostic_status === 'BLOCKED_DATA').length,
         pit_status: 'READY',
+        governance_queue_count: createFactorGovernanceOverview(items).queue_count,
+      },
+    });
+  },
+
+  async getFactorGovernanceOverview(): Promise<ApiFactorGovernanceOverview> {
+    return clone(createFactorGovernanceOverview());
+  },
+
+  async listFactorQuarantineCandidates(): Promise<ApiFactorQuarantineCandidateListResponse> {
+    return clone(createFactorQuarantineCandidates());
+  },
+
+  async factorQuarantineIntake(
+    _payload?: ApiFactorQuarantineIntakePayload,
+  ): Promise<{ items: ApiFactorQuarantineCandidate[]; summary: Record<string, unknown> }> {
+    const response = createFactorQuarantineCandidates();
+    return clone({
+      items: response.items.map((item) => ({
+        ...item,
+        status: 'PENDING',
+        publish_status: 'BLOCKED',
+        publish_eligibility: { status: 'BLOCKED', reason: '已从沙盒进入检疫队列，等待运行 D2 门禁。' },
+      })),
+      summary: {
+        intake_count: response.items.length,
+        source_mining_job_id: 'fmj_demo_001',
+        sandbox_candidates_persisted_to_factor_definitions: false,
+      },
+    });
+  },
+
+  async runFactorQuarantineCandidate(
+    candidateId: string,
+    _payload?: ApiFactorQuarantineRunPayload,
+  ): Promise<ApiFactorQuarantineCandidate> {
+    const candidate = createFactorQuarantineCandidates().items.find((item) => item.id === candidateId)
+      ?? createFactorQuarantineCandidates().items[0];
+    return clone({
+      ...candidate,
+      status: 'PASSED',
+      publish_status: 'ELIGIBLE',
+      publish_eligibility: { status: 'ELIGIBLE', reason: '通过 D2 检疫，允许自动发布。' },
+      latest_run: { status: 'PASSED', completed_at: nowIso() },
+    });
+  },
+
+  async publishFactorQuarantineCandidate(
+    candidateId: string,
+    _payload?: ApiFactorQuarantinePublishPayload,
+  ): Promise<ApiFactorQuarantinePublishResponse> {
+    const candidate = createFactorQuarantineCandidates().items.find((item) => item.id === candidateId)
+      ?? createFactorQuarantineCandidates().items[0];
+    return clone({
+      candidate: {
+        ...candidate,
+        status: 'PUBLISHED',
+        publish_status: 'PUBLISHED',
+        target_factor_id: 'auto_demo_mom_001',
+        published_at: nowIso(),
       },
     });
   },

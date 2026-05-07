@@ -5,6 +5,10 @@
 $env:TIINGO_API_TOKEN = 'replace-with-tiingo-token'
 $env:ALPHAVANTAGE_API_KEY = 'replace-with-alpha-vantage-key'
 $env:FMP_API_KEY = 'replace-with-fmp-key'
+$env:KAGGLE_API_TOKEN = 'replace-with-kaggle-api-token'
+$env:POLYGON_API_KEY = 'replace-with-polygon-api-key'
+$env:NASDAQ_DATA_LINK_API_KEY = 'replace-with-nasdaq-data-link-api-key'
+$env:FINNHUB_API_KEY = 'replace-with-finnhub-api-key'
 
 $env:SEC_CONTACT_EMAIL = 'replace-with-contact-email@example.com'
 $env:SEC_EDGAR_CONTACT_EMAIL = $env:SEC_CONTACT_EMAIL

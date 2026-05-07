@@ -5,7 +5,6 @@ import { useRef } from "react";
 import { useApiClient } from "../lib/demoStoreContext";
 import {
   collectOptimizationParameterSeeds,
-  MULTI_FACTOR_NEUTRALIZATION_ENABLED_OPTIONS,
   MULTI_FACTOR_NEUTRALIZATION_METHOD_OPTIONS,
   MULTI_FACTOR_SCORING_METHOD_OPTIONS,
   MOMENTUM_REBALANCE_FREQUENCY_OPTIONS,
@@ -36,6 +35,8 @@ import type {
   ParameterValue,
 } from "../types";
 import "./optimization-lab-page.css";
+
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
 
 type StepKey = "select" | "config" | "results";
 type HeatmapMetricKey =
@@ -92,7 +93,6 @@ const OPTIMIZATION_DISCRETE_FIELD_OPTIONS: Record<
   observation_timeframe: OBSERVATION_TIMEFRAME_OPTIONS,
   rebalance_frequency: MOMENTUM_REBALANCE_FREQUENCY_OPTIONS,
   scoring_method: MULTI_FACTOR_SCORING_METHOD_OPTIONS,
-  neutralization_enabled: MULTI_FACTOR_NEUTRALIZATION_ENABLED_OPTIONS,
   neutralization_method: MULTI_FACTOR_NEUTRALIZATION_METHOD_OPTIONS,
 };
 
@@ -611,7 +611,6 @@ function humanizeKey(key: string): string {
     grid_interval: "网格间距(%)",
     scoring_method: "打分方法",
     rebalance_frequency: "再平衡频率",
-    neutralization_enabled: "是否启用行业中性化",
     neutralization_method: "中性化方法",
   };
   const factorWeightLabel = formatFactorWeightLabel(key);
@@ -2432,7 +2431,6 @@ function getOptimizationRangeLabel(
     grid_interval: "网格间距(%)",
     scoring_method: "打分方法",
     rebalance_frequency: "再平衡",
-    neutralization_enabled: "行业中性化",
     neutralization_method: "中性化方法",
   };
   const factorWeightLabel = formatFactorWeightLabel(field.key);
@@ -2693,6 +2691,80 @@ function ensureOptimizationJobHasMatchingCombinationCount(
     getOptimizationMatchingCombinationCount(job);
   }
   return job;
+}
+
+function getOptimizationConstraintComparisonSignature(
+  constraints: OptimizationConstraint[],
+): string {
+  return JSON.stringify(
+    constraints
+      .map((constraint) => ({
+        key: constraint.key,
+        operator: constraint.operator,
+        value:
+          typeof constraint.value === "number" && Number.isFinite(constraint.value)
+            ? Number(constraint.value.toFixed(8))
+            : constraint.value,
+      }))
+      .sort((left, right) => {
+        const keyDelta = left.key.localeCompare(right.key);
+        if (keyDelta !== 0) {
+          return keyDelta;
+        }
+        return left.operator.localeCompare(right.operator);
+      }),
+  );
+}
+
+function optimizationConstraintsHaveSameThresholds(
+  left: OptimizationConstraint[],
+  right: OptimizationConstraint[],
+): boolean {
+  return (
+    getOptimizationConstraintComparisonSignature(left) ===
+    getOptimizationConstraintComparisonSignature(right)
+  );
+}
+
+function mergeFullOptimizationMatchingCombinations(
+  currentJob: ApiOptimizationJobDetail,
+  fullJob: ApiOptimizationJobDetail,
+  constraints: OptimizationConstraint[],
+  objective: OptimizationObjective,
+): ApiOptimizationJobDetail {
+  const fullMatchingCombinations = Array.isArray(fullJob.matching_combinations)
+    ? fullJob.matching_combinations
+    : [];
+  if (!fullMatchingCombinations.length) {
+    return currentJob;
+  }
+  const fullJobConstraints = getOptimizationConstraintState(fullJob).constraints;
+  const shouldTrustFullMatchingCombinations =
+    optimizationConstraintsHaveSameThresholds(fullJobConstraints, constraints);
+  const sourceMatchingCombinations = shouldTrustFullMatchingCombinations
+    ? fullMatchingCombinations
+    : filterOptimizationCandidatesByConstraints(fullMatchingCombinations, constraints);
+  const matchingCombinations = rankOptimizationCandidatesByObjective(
+    sourceMatchingCombinations,
+    objective,
+  );
+  const matchingCombinationCount = matchingCombinations.length;
+  const matchingCombinationSource =
+    fullJob.summary.matching_combination_source ??
+    fullJob.matching_combination_source ??
+    currentJob.summary.matching_combination_source ??
+    currentJob.matching_combination_source;
+  return {
+    ...currentJob,
+    matching_combination_count: matchingCombinationCount,
+    matching_combination_source: matchingCombinationSource,
+    matching_combinations: matchingCombinations,
+    summary: {
+      ...currentJob.summary,
+      matching_combination_count: matchingCombinationCount,
+      matching_combination_source: matchingCombinationSource,
+    },
+  };
 }
 
 function formatBestMetricsSummary(
@@ -3580,6 +3652,10 @@ export function OptimizationStrategySelectPage({
       try {
         setLoading(true);
         setError(null);
+        await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
+        if (cancelled) {
+          return;
+        }
         const payload = await api.listStrategies();
         if (!cancelled) {
           setStrategies(payload);
@@ -4538,6 +4614,10 @@ export function OptimizationResultsPage({
       try {
         setLoading(true);
         setError(null);
+        await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
+        if (cancelled) {
+          return;
+        }
         const jobPayload = ensureOptimizationJobHasMatchingCombinationCount(
           await api.getOptimizationJobDetail(jobId, {
             matchingLimit: OPTIMIZATION_DETAIL_ROUTE_MATCHING_LIMIT,
@@ -4688,6 +4768,20 @@ export function OptimizationResultsPage({
     () => getOptimizationSearchSpace(job),
     [job],
   );
+  const resultConstraintSyncSignature = JSON.stringify({
+    jobId: job?.id ?? null,
+    requestObjective: job?.request.objective ?? null,
+    summaryObjective: job?.summary.objective ?? null,
+    requestPresetKey: job?.request.constraint_preset_key ?? null,
+    summaryPresetKey: job?.summary.constraint_preset_key ?? null,
+    resultPresetKey: job?.result.constraint_preset_key ?? null,
+    requestConstraintLabel: job?.request.constraint_label ?? null,
+    summaryConstraintLabel: job?.summary.constraint_label ?? null,
+    resultConstraintLabel: job?.result.constraint_label ?? null,
+    requestConstraints: job?.request.constraints ?? null,
+    summaryConstraints: job?.summary.constraints ?? null,
+    resultConstraints: job?.result.constraints ?? null,
+  });
   const persistedOptimizationConstraintState = useMemo(
     () => getOptimizationConstraintState(job),
     [job],
@@ -4712,7 +4806,7 @@ export function OptimizationResultsPage({
     setConstraintDrafts(constraintDraft.constraints);
     setAppliedConstraints(constraintDraft.constraints);
     setConstraintLiveMessage("");
-  }, [baselineRun, job, strategy]);
+  }, [baselineRun, resultConstraintSyncSignature, strategy]);
 
   const optimizationObjective = appliedObjective
     ? normalizeOptimizationObjective(appliedObjective)
@@ -4722,6 +4816,17 @@ export function OptimizationResultsPage({
   const optimizationConstraints = appliedConstraints.length
     ? appliedConstraints
     : persistedOptimizationConstraintState.constraints;
+  const activeOptimizationFilterRef = useRef<{
+    constraints: OptimizationConstraint[];
+    objective: OptimizationObjective;
+  }>({
+    constraints: [],
+    objective: DEFAULT_OPTIMIZATION_OBJECTIVE,
+  });
+  activeOptimizationFilterRef.current = {
+    constraints: optimizationConstraints,
+    objective: optimizationObjective,
+  };
   const quickFilterConstraints = constraintDrafts.length
     ? constraintDrafts
     : optimizationConstraints;
@@ -5221,7 +5326,18 @@ export function OptimizationResultsPage({
       void api
         .getOptimizationJobDetail(job.id)
         .then((payload) => {
-          setJob(ensureOptimizationJobHasMatchingCombinationCount(payload));
+          const fullPayload = ensureOptimizationJobHasMatchingCombinationCount(payload);
+          const activeFilter = activeOptimizationFilterRef.current;
+          setJob((currentJob) =>
+            currentJob && currentJob.id === fullPayload.id
+              ? mergeFullOptimizationMatchingCombinations(
+                  currentJob,
+                  fullPayload,
+                  activeFilter.constraints,
+                  activeFilter.objective,
+                )
+              : fullPayload,
+          );
         })
         .catch((caught) => {
           setError((caught as Error).message);

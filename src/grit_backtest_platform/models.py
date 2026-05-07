@@ -72,6 +72,9 @@ FactorDiagnosticMode = Literal['VERIFIED', 'SANDBOX']
 FactorDirection = Literal['HIGH_IS_BETTER', 'LOW_IS_BETTER', 'NEUTRAL']
 FactorFrequency = Literal['DAILY', 'WEEKLY', 'MONTHLY']
 FactorMiningJobStatus = Literal['QUEUED', 'RUNNING', 'CANCEL_REQUESTED', 'CANCELLED', 'COMPLETED', 'PARTIALLY_FAILED', 'FAILED']
+FactorQuarantineStatus = Literal['PENDING', 'RUNNING', 'PASSED', 'REJECTED', 'NEEDS_REVIEW', 'PUBLISHED', 'SUPERSEDED']
+FactorPublishStatus = Literal['ELIGIBLE', 'BLOCKED', 'MANUAL_REVIEW_REQUIRED', 'PUBLISHED']
+FactorGovernanceStatus = Literal['WATCH', 'REVIEW', 'DECAYED', 'CROWDED', 'SUSPENDED']
 
 
 class FactorDescriptorRequest(BaseModel):
@@ -135,6 +138,26 @@ class FactorMiningJobCreateRequest(BaseModel):
         if not cleaned:
             raise ValueError('operators must not be empty')
         return cleaned
+
+
+class FactorQuarantineIntakeRequest(BaseModel):
+    mining_job_id: str | None = None
+    candidate_ids: list[str] = Field(default_factory=list)
+
+
+class FactorQuarantineRunRequest(BaseModel):
+    reason: str | None = None
+    rule_version: str | None = None
+
+
+class FactorQuarantinePublishRequest(BaseModel):
+    operator: str | None = None
+    rule_version: str | None = None
+
+
+class FactorModelSuggestionRequest(BaseModel):
+    factor_ids: list[str] = Field(default_factory=list)
+    factor_id: str | None = None
 
 
 class FactorModelComponentRequest(BaseModel):
@@ -405,6 +428,7 @@ class SnapshotRefreshRequest(BaseModel):
     reason: str | None = None
     mode: SnapshotRefreshMode = 'incremental'
     targets: list[SnapshotRefreshTarget] = Field(default_factory=list)
+    repair_symbol_limit: int | None = Field(default=None, ge=1, le=5000)
 
 
 class SnapshotProviderSummaryItem(BaseModel):

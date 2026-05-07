@@ -273,6 +273,90 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS factor_quarantine_candidates (
+        id TEXT PRIMARY KEY,
+        mining_candidate_id TEXT,
+        source_mining_job_id TEXT,
+        expression TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        publish_status TEXT NOT NULL DEFAULT 'BLOCKED',
+        gate_summary_json TEXT NOT NULL DEFAULT '{}',
+        cluster_id TEXT,
+        candidate_metrics_json TEXT NOT NULL DEFAULT '{}',
+        failure_samples_json TEXT NOT NULL DEFAULT '[]',
+        pit_evidence_json TEXT NOT NULL DEFAULT '{}',
+        publish_eligibility_json TEXT NOT NULL DEFAULT '{}',
+        target_factor_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        published_at TEXT,
+        rejected_reason TEXT,
+        UNIQUE(mining_candidate_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS factor_quarantine_runs (
+        id TEXT PRIMARY KEY,
+        candidate_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        request_json TEXT NOT NULL DEFAULT '{}',
+        is_oos_json TEXT NOT NULL DEFAULT '{}',
+        orthogonal_json TEXT NOT NULL DEFAULT '{}',
+        stability_json TEXT NOT NULL DEFAULT '{}',
+        risk_tags_json TEXT NOT NULL DEFAULT '[]',
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        artifact_refs_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        completed_at TEXT,
+        error_message TEXT,
+        FOREIGN KEY (candidate_id) REFERENCES factor_quarantine_candidates(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS factor_publish_events (
+        id TEXT PRIMARY KEY,
+        candidate_id TEXT NOT NULL,
+        factor_id TEXT NOT NULL,
+        event_type TEXT NOT NULL DEFAULT 'AUTO_PUBLISH',
+        rule_version TEXT NOT NULL,
+        before_json TEXT NOT NULL DEFAULT '{}',
+        after_json TEXT NOT NULL DEFAULT '{}',
+        created_by TEXT NOT NULL DEFAULT 'system_rule',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (candidate_id) REFERENCES factor_quarantine_candidates(id),
+        FOREIGN KEY (factor_id) REFERENCES factor_definitions(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS factor_lineage_edges (
+        id TEXT PRIMARY KEY,
+        source_type TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        target_type TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        relation_type TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS factor_crowding_snapshots (
+        id TEXT PRIMARY KEY,
+        factor_id TEXT NOT NULL,
+        snapshot_date TEXT NOT NULL,
+        usage_count INTEGER NOT NULL DEFAULT 0,
+        avg_weight REAL NOT NULL DEFAULT 0,
+        max_weight REAL NOT NULL DEFAULT 0,
+        cluster_published_count INTEGER NOT NULL DEFAULT 0,
+        ic_drift REAL,
+        governance_status TEXT NOT NULL DEFAULT 'WATCH',
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        artifact_refs_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (factor_id) REFERENCES factor_definitions(id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS app_runtime_state (
         state_key TEXT PRIMARY KEY,
         state_json TEXT NOT NULL DEFAULT '{}',
@@ -672,6 +756,30 @@ POST_MIGRATION_INDEX_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_factor_mining_candidates_job_score
     ON factor_mining_candidates(job_id, score DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_factor_quarantine_candidates_status
+    ON factor_quarantine_candidates(status, publish_status, updated_at, id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_factor_quarantine_candidates_job
+    ON factor_quarantine_candidates(source_mining_job_id, status, updated_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_factor_quarantine_runs_candidate
+    ON factor_quarantine_runs(candidate_id, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_factor_publish_events_candidate
+    ON factor_publish_events(candidate_id, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_factor_lineage_edges_target
+    ON factor_lineage_edges(target_type, target_id, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_factor_crowding_snapshots_factor
+    ON factor_crowding_snapshots(factor_id, snapshot_date)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_composition_backtest_runs_recent

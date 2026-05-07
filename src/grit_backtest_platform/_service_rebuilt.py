@@ -63,7 +63,6 @@ OPTIMIZATION_SELECTION_KEYS: dict[str, tuple[str, ...]] = {
     "MULTI_FACTOR": (
         "scoring_method",
         "rebalance_frequency",
-        "neutralization_enabled",
         "neutralization_method",
     ),
 }
@@ -1648,9 +1647,12 @@ class BacktestPlatformService:
         )
         self._read_model_cache: dict[str, tuple[float, str, Any]] = {}
         self._read_model_cache_lock = threading.Lock()
+        self._strategy_library_cache: tuple[str, dict[str, Any]] | None = None
+        self._strategy_library_cache_lock = threading.Lock()
         self._optimization_job_json_compaction_done = False
         self._normalize_existing_backtest_runs_to_temporary_once()
         self._compact_existing_optimization_job_json_once()
+        self._prime_strategy_library_cache()
 
     def _read_model_cache_get(self, key: str, signature: str) -> Any | None:
         if self._read_model_cache_seconds <= 0:
@@ -1681,6 +1683,24 @@ class BacktestPlatformService:
             return
         with self._read_model_cache_lock:
             self._read_model_cache[key] = (time.monotonic(), signature, deepcopy(value))
+
+    def _strategy_library_cache_signature(self) -> str:
+        parts: list[str] = []
+        for suffix in ("", "-wal", "-journal"):
+            path = Path(f"{self.storage.path}{suffix}")
+            try:
+                stat = path.stat()
+            except OSError:
+                parts.append(f"{suffix}:missing")
+                continue
+            parts.append(f"{suffix}:{stat.st_mtime_ns}:{stat.st_size}")
+        return "|".join(parts)
+
+    def _prime_strategy_library_cache(self) -> None:
+        try:
+            self.get_strategy_library()
+        except Exception:
+            self._strategy_library_cache = None
 
     def _strategy_list_cache_signature(self) -> str:
         row = self.storage.fetch_one(
@@ -2810,6 +2830,7 @@ class BacktestPlatformService:
         columns = [
             "id",
             "strategy_id",
+            "(SELECT name FROM strategies WHERE strategies.id = backtest_runs.strategy_id) AS strategy_name",
             "status",
             "source_run_id",
             "request_kind",
@@ -3110,7 +3131,7 @@ class BacktestPlatformService:
         status_label: str | None = None,
         analysis: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        snapshot = dict(parameter_snapshot)
+        snapshot = self._canonicalize_multi_factor_optimization_snapshot(strategy, parameter_snapshot)
         if not snapshot:
             raise ValueError("parameter_snapshot is required")
         candidate_rank = rank if rank is not None else 1
@@ -3144,6 +3165,99 @@ class BacktestPlatformService:
             return fallback
         return candidate_label
 
+    def _canonicalize_multi_factor_optimization_snapshot(
+        self,
+        strategy: Mapping[str, Any],
+        parameter_snapshot: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        snapshot = _normalize_strategy_snapshot_descriptive_fields(dict(parameter_snapshot or {}))
+        strategy_parameters = dict(strategy.get("parameters") or {})
+        strategy_type = str(
+            snapshot.get("strategy_type")
+            or strategy.get("strategy_type")
+            or strategy_parameters.get("strategy_type")
+            or ""
+        ).upper()
+        factor_ids = [
+            str(item).strip()
+            for item in (
+                snapshot.get("factor_ids")
+                or strategy_parameters.get("factor_ids")
+                or []
+            )
+            if str(item).strip()
+        ]
+        if strategy_type != "MULTI_FACTOR" and not factor_ids:
+            return snapshot
+
+        snapshot["strategy_type"] = "MULTI_FACTOR"
+        if factor_ids and not snapshot.get("factor_ids"):
+            snapshot["factor_ids"] = factor_ids
+
+        weights = dict(strategy_parameters.get("weights") or {})
+        weights.update(dict(snapshot.get("weights") or {}))
+        flat_weights: dict[str, float] = {}
+        for key, raw_value in list(snapshot.items()):
+            factor_id = _optimization_factor_id_from_weight_key(key)
+            if factor_id:
+                flat_weights[factor_id] = abs(_as_float(raw_value, 0.0))
+        flat_total = sum(flat_weights.values())
+        if 0 < flat_total <= 1.000001:
+            flat_weights = {
+                factor_id: value * 100.0
+                for factor_id, value in flat_weights.items()
+            }
+        if flat_weights:
+            weights.update(flat_weights)
+        if weights:
+            snapshot["weights"] = weights
+
+        if "directions" not in snapshot and strategy_parameters.get("directions"):
+            snapshot["directions"] = dict(strategy_parameters.get("directions") or {})
+
+        neutralization = dict(strategy_parameters.get("neutralization") or {})
+        neutralization.update(dict(snapshot.get("neutralization") or {}))
+        if "neutralization_enabled" in snapshot:
+            raw_enabled = snapshot.get("neutralization_enabled")
+            neutralization["enabled"] = (
+                raw_enabled
+                if isinstance(raw_enabled, bool)
+                else str(raw_enabled).strip().lower() == "true"
+            )
+        if "neutralization_method" in snapshot:
+            neutralization["method"] = str(snapshot.get("neutralization_method") or "industry")
+        if neutralization:
+            snapshot["neutralization"] = neutralization
+
+        return snapshot
+
+    def _normalize_multi_factor_projection_search_entry(
+        self,
+        strategy: Mapping[str, Any],
+        entry: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        normalized = dict(entry)
+        parameters = dict(strategy.get("parameters") or {})
+        strategy_type = str(strategy.get("strategy_type") or parameters.get("strategy_type") or "").upper()
+        if strategy_type != "MULTI_FACTOR":
+            return normalized
+        key = str(normalized.get("key") or "").strip()
+        if key not in {"rebalance_frequency", "scoring_method"}:
+            return normalized
+        fallback = (
+            parameters.get(key)
+            or strategy.get(key)
+            or ("zscore_weighted" if key == "scoring_method" else "monthly")
+        )
+        current = normalized.get("current") or normalized.get("value") or fallback
+        normalized["mode"] = "fixed"
+        normalized["current"] = current
+        normalized["value"] = current
+        normalized["start"] = current
+        normalized["end"] = current
+        normalized["values"] = [current]
+        return normalized
+
     def _normalize_optimization_candidate(
         self,
         strategy: Mapping[str, Any],
@@ -3153,8 +3267,9 @@ class BacktestPlatformService:
         base_parameter_version_id: str | None,
     ) -> dict[str, Any]:
         strategy_parameters = dict(strategy.get("parameters") or {})
-        parameter_snapshot = _normalize_strategy_snapshot_descriptive_fields(
-            dict(candidate.get("parameter_snapshot") or strategy_parameters)
+        parameter_snapshot = self._canonicalize_multi_factor_optimization_snapshot(
+            strategy,
+            dict(candidate.get("parameter_snapshot") or strategy_parameters),
         )
         parameter_delta = _build_parameter_delta(strategy_parameters, parameter_snapshot)
         metrics = {
@@ -3231,6 +3346,10 @@ class BacktestPlatformService:
                     normalized_entry["constraint_group"] = constraint_group
                 if constraint_target is not None:
                     normalized_entry["constraint_target"] = constraint_target
+                normalized_entry = self._normalize_multi_factor_projection_search_entry(
+                    strategy,
+                    normalized_entry,
+                )
                 normalized_entries.append(normalized_entry)
             if normalized_entries:
                 return normalized_entries
@@ -3290,15 +3409,6 @@ class BacktestPlatformService:
                         "tag": "因子模型",
                     },
                     {
-                        "key": "neutralization_enabled",
-                        "label": "是否启用行业中性化",
-                        "mode": "fixed",
-                        "current": bool(neutralization.get("enabled")),
-                        "value": bool(neutralization.get("enabled")),
-                        "values": [bool(neutralization.get("enabled"))],
-                        "tag": "行业中性化",
-                    },
-                    {
                         "key": "neutralization_method",
                         "label": "中性化方法",
                         "mode": "fixed",
@@ -3309,7 +3419,10 @@ class BacktestPlatformService:
                     },
                 ]
             )
-            return search_space
+            return [
+                self._normalize_multi_factor_projection_search_entry(strategy, entry)
+                for entry in search_space
+            ]
         template = STRATEGY_TEMPLATES.get(strategy_type, STRATEGY_TEMPLATES["GENERAL"])
         template_entries = {field.key: field for field in getattr(template, "fields", [])}
         confirmation_entries = _entry_index(strategy.get("confirmation_fields"))
@@ -13486,23 +13599,10 @@ class BacktestPlatformService:
         parameter_snapshot: Mapping[str, Any],
     ) -> dict[str, Any]:
         effective_strategy = dict(strategy)
-        parameters = dict(parameter_snapshot)
-        if str(parameters.get("strategy_type") or strategy.get("strategy_type") or "").upper() == "MULTI_FACTOR":
-            weights = dict(parameters.get("weights") or {})
-            for key, value in list(parameters.items()):
-                factor_id = _optimization_factor_id_from_weight_key(key)
-                if factor_id:
-                    weights[factor_id] = _as_float(value, 0.0) / 100.0
-            if weights:
-                parameters["weights"] = weights
-            neutralization = dict(parameters.get("neutralization") or {})
-            if "neutralization_enabled" in parameters:
-                raw_enabled = parameters.get("neutralization_enabled")
-                neutralization["enabled"] = raw_enabled if isinstance(raw_enabled, bool) else str(raw_enabled).strip().lower() == "true"
-            if "neutralization_method" in parameters:
-                neutralization["method"] = str(parameters.get("neutralization_method") or "industry")
-            if neutralization:
-                parameters["neutralization"] = neutralization
+        parameters = self._canonicalize_multi_factor_optimization_snapshot(
+            strategy,
+            parameter_snapshot,
+        )
         effective_strategy["parameters"] = parameters
         return effective_strategy
 
@@ -16356,6 +16456,201 @@ class BacktestPlatformService:
         self._read_model_cache_set("strategies:list", cache_signature, strategies)
         return strategies
 
+    def get_strategy_library(self) -> dict[str, Any]:
+        signature = self._strategy_library_cache_signature()
+        with self._strategy_library_cache_lock:
+            cached = self._strategy_library_cache
+            if cached is not None and cached[0] == signature:
+                return deepcopy(cached[1])
+        payload = {
+            "strategies": self._list_strategy_library_strategies(),
+            "runs": self._list_strategy_library_runs(),
+        }
+        with self._strategy_library_cache_lock:
+            self._strategy_library_cache = (signature, deepcopy(payload))
+        return payload
+
+    def _list_strategy_library_strategies(self) -> list[dict[str, Any]]:
+        rows = self.storage.fetch_all(
+            """
+            SELECT
+                id,
+                name,
+                strategy_type,
+                universe_name,
+                lifecycle_status,
+                (
+                    SELECT backtest_runs.id
+                    FROM backtest_runs
+                    WHERE backtest_runs.strategy_id = strategies.id
+                      AND backtest_runs.deleted_at IS NULL
+                    ORDER BY COALESCE(backtest_runs.completed_at, backtest_runs.created_at) DESC,
+                             backtest_runs.created_at DESC,
+                             backtest_runs.id DESC
+                    LIMIT 1
+                ) AS latest_run_id,
+                (
+                    SELECT backtest_runs.id
+                    FROM backtest_runs
+                    WHERE backtest_runs.strategy_id = strategies.id
+                      AND backtest_runs.deleted_at IS NULL
+                      AND UPPER(COALESCE(backtest_runs.status, '')) IN ('COMPLETED', 'COMPLETED_WITH_WARNINGS')
+                    ORDER BY COALESCE(backtest_runs.completed_at, backtest_runs.created_at) DESC,
+                             backtest_runs.created_at DESC,
+                             backtest_runs.id DESC
+                    LIMIT 1
+                ) AS latest_successful_run_id,
+                (
+                    SELECT optimization_jobs.id
+                    FROM optimization_jobs
+                    WHERE optimization_jobs.strategy_id = strategies.id
+                      AND optimization_jobs.deleted_at IS NULL
+                    ORDER BY optimization_jobs.created_at DESC
+                    LIMIT 1
+                ) AS latest_optimization_job_id,
+                current_parameter_version,
+                dataset_snapshot_id,
+                universe_snapshot_id,
+                benchmark_symbol,
+                created_at,
+                updated_at
+            FROM strategies
+            WHERE UPPER(COALESCE(lifecycle_status, 'ACTIVE')) != 'ARCHIVED'
+            ORDER BY updated_at DESC, created_at DESC
+            """
+        )
+        return [self._decode_strategy_library_row(row) for row in rows]
+
+    def _decode_strategy_library_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        current_version = int(row.get("current_parameter_version") or 1)
+        strategy_id = str(row["id"])
+        return {
+            "id": strategy_id,
+            "name": row["name"],
+            "strategy_type": row["strategy_type"],
+            "universe_name": row["universe_name"],
+            "lifecycle_status": row.get("lifecycle_status") or "ACTIVE",
+            "latest_run_id": row.get("latest_run_id"),
+            "latest_successful_run_id": row.get("latest_successful_run_id"),
+            "latest_optimization_job_id": row.get("latest_optimization_job_id"),
+            "current_parameter_version": current_version,
+            "current_parameter_version_id": _parameter_version_id(strategy_id, current_version),
+            "dataset_snapshot_id": row.get("dataset_snapshot_id"),
+            "universe_snapshot_id": row.get("universe_snapshot_id"),
+            "benchmark_symbol": row.get("benchmark_symbol"),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+        }
+
+    def _list_strategy_library_runs(self) -> list[dict[str, Any]]:
+        rows = self.storage.fetch_all(
+            """
+            SELECT
+                backtest_runs.id,
+                backtest_runs.strategy_id,
+                strategies.name AS strategy_name,
+                backtest_runs.status,
+                backtest_runs.start_date,
+                backtest_runs.end_date,
+                backtest_runs.effective_date,
+                backtest_runs.oos_start_date,
+                backtest_runs.source_run_id,
+                backtest_runs.is_permanent,
+                backtest_runs.trades_count,
+                backtest_runs.created_at,
+                backtest_runs.updated_at,
+                backtest_runs.completed_at,
+                CASE WHEN json_valid(backtest_runs.metrics_json)
+                    THEN json_extract(backtest_runs.metrics_json, '$.annualized_return')
+                END AS metric_annualized_return,
+                CASE WHEN json_valid(backtest_runs.metrics_json)
+                    THEN json_extract(backtest_runs.metrics_json, '$.cagr')
+                END AS metric_cagr,
+                CASE WHEN json_valid(backtest_runs.metrics_json)
+                    THEN json_extract(backtest_runs.metrics_json, '$.oos_annualized_return')
+                END AS metric_oos_annualized_return,
+                CASE WHEN json_valid(backtest_runs.metrics_json)
+                    THEN json_extract(backtest_runs.metrics_json, '$.return_sharpe')
+                END AS metric_return_sharpe,
+                CASE WHEN json_valid(backtest_runs.metrics_json)
+                    THEN json_extract(backtest_runs.metrics_json, '$.sharpe')
+                END AS metric_sharpe,
+                CASE WHEN json_valid(backtest_runs.preview_json)
+                    THEN json_extract(backtest_runs.preview_json, '$.effective_date')
+                END AS preview_effective_date,
+                CASE WHEN json_valid(backtest_runs.preview_json)
+                    THEN json_extract(backtest_runs.preview_json, '$.effective_start_date')
+                END AS preview_effective_start_date,
+                CASE WHEN json_valid(backtest_runs.preview_json)
+                    THEN json_extract(backtest_runs.preview_json, '$.effective_end_date')
+                END AS preview_effective_end_date,
+                CASE WHEN json_valid(backtest_runs.preview_json)
+                    THEN json_extract(backtest_runs.preview_json, '$.oos_start_date')
+                END AS preview_oos_start_date,
+                CASE WHEN json_valid(backtest_runs.preview_json)
+                    THEN json_extract(backtest_runs.preview_json, '$.data_segment_type')
+                END AS data_segment_type,
+                COALESCE(
+                    CASE WHEN json_valid(backtest_runs.preview_json)
+                        THEN json_extract(backtest_runs.preview_json, '$.parameter_version_id')
+                    END,
+                    CASE WHEN json_valid(backtest_runs.request_json)
+                        THEN json_extract(backtest_runs.request_json, '$.parameter_version_id')
+                    END
+                ) AS parameter_version_id
+            FROM backtest_runs
+            LEFT JOIN strategies ON strategies.id = backtest_runs.strategy_id
+            WHERE backtest_runs.deleted_at IS NULL
+            ORDER BY COALESCE(backtest_runs.completed_at, backtest_runs.created_at) DESC
+            """
+        )
+        metric_keys = (
+            ("annualized_return", "metric_annualized_return"),
+            ("cagr", "metric_cagr"),
+            ("oos_annualized_return", "metric_oos_annualized_return"),
+            ("return_sharpe", "metric_return_sharpe"),
+            ("sharpe", "metric_sharpe"),
+        )
+        runs: list[dict[str, Any]] = []
+        for row in rows:
+            parameter_version_id = row.get("parameter_version_id")
+            metrics = {
+                key: _as_float(row.get(alias))
+                for key, alias in metric_keys
+                if row.get(alias) is not None
+            }
+            runs.append(
+                {
+                    "id": row["id"],
+                    "strategy_id": row["strategy_id"],
+                    "strategy_name": row.get("strategy_name"),
+                    "status": row["status"],
+                    "start_date": row.get("start_date"),
+                    "end_date": row.get("end_date"),
+                    "effective_date": row.get("effective_date"),
+                    "oos_start_date": row.get("oos_start_date"),
+                    "created_at": row.get("created_at"),
+                    "updated_at": row.get("updated_at"),
+                    "completed_at": row.get("completed_at"),
+                    "metrics": metrics,
+                    "warnings": [],
+                    "preview": {
+                        "effective_date": row.get("preview_effective_date"),
+                        "effective_start_date": row.get("preview_effective_start_date"),
+                        "effective_end_date": row.get("preview_effective_end_date"),
+                        "oos_start_date": row.get("preview_oos_start_date"),
+                        "data_segment_type": row.get("data_segment_type"),
+                        "parameter_version_id": parameter_version_id,
+                    },
+                    "data_segment_type": row.get("data_segment_type"),
+                    "parameter_version_id": parameter_version_id,
+                    "is_permanent": bool(int(row.get("is_permanent") or 0)),
+                    "source_run_id": row.get("source_run_id"),
+                    "trades_count": row.get("trades_count"),
+                }
+            )
+        return runs
+
     def get_strategy_detail(self, strategy_id: str) -> dict[str, Any]:
         row = self.storage.fetch_one("SELECT * FROM strategies WHERE id = ?", (strategy_id,))
         if not row:
@@ -16918,6 +17213,7 @@ class BacktestPlatformService:
         summary = self._build_optimization_job_summary(
             persisted_payload,
             normalized_candidates,
+            compact_matching_combinations=False,
         )
         result = self._build_optimization_job_result(
             persisted_payload,
@@ -18351,16 +18647,36 @@ class BacktestPlatformService:
             payload.get("objective"),
         )
         matching_candidates: list[dict[str, Any]] = []
+        seen_projection_weight_signatures: set[tuple[tuple[str, float], ...]] = set()
+        seen_projection_result_signatures: set[tuple[Any, ...]] = set()
+        dedupe_projection_records = self._is_multi_factor_optimization_strategy(strategy)
         for rank, trial in enumerate(ranked_trials, start=1):
-            if parameter_sum_constraints and not self._optimization_snapshot_satisfies_parameter_sum_constraints(
+            metrics = dict(trial.get("metrics") or {})
+            parameter_snapshot = self._canonicalize_multi_factor_optimization_snapshot(
+                strategy,
                 _as_mapping(trial.get("parameter_snapshot")),
+            )
+            if dedupe_projection_records and "multi_factor_projection_effect" in metrics:
+                projection_weight_signature = self._multi_factor_weight_signature(parameter_snapshot)
+                projection_result_signature = (
+                    _optimization_metrics_signature(metrics),
+                    round(_as_float(trial.get("score"), 0.0), 6),
+                    round(_as_float(metrics.get("multi_factor_projection_effect"), 0.0), 6),
+                )
+                if projection_weight_signature:
+                    if projection_weight_signature in seen_projection_weight_signatures:
+                        continue
+                    seen_projection_weight_signatures.add(projection_weight_signature)
+                if projection_result_signature in seen_projection_result_signatures:
+                    continue
+                seen_projection_result_signatures.add(projection_result_signature)
+            if parameter_sum_constraints and not self._optimization_snapshot_satisfies_parameter_sum_constraints(
+                parameter_snapshot,
                 parameter_sum_constraints,
             ):
                 continue
             if not self._optimization_trial_passes_constraints(trial, constraints):
                 continue
-            metrics = dict(trial.get("metrics") or {})
-            parameter_snapshot = dict(trial.get("parameter_snapshot") or {})
             trial_index = _as_int(trial.get("trial_index"), rank)
             label = f"Trial {trial_index}" if trial_index > 0 else f"Trial {rank}"
             candidate = self._build_candidate_record(
@@ -18520,6 +18836,8 @@ class BacktestPlatformService:
         self,
         payload: Mapping[str, Any],
         candidates: list[dict[str, Any]],
+        *,
+        compact_matching_combinations: bool = True,
     ) -> dict[str, Any]:
         status = str(payload.get("status") or "COMPLETED").upper()
         eta_active = status == "RUNNING"
@@ -18541,7 +18859,10 @@ class BacktestPlatformService:
             payload.get("matching_combination_count"),
             len(matching_combinations),
         )
-        if len(matching_combinations) > OPTIMIZATION_MATCHING_COMBINATION_INLINE_LIMIT:
+        if (
+            compact_matching_combinations
+            and len(matching_combinations) > OPTIMIZATION_MATCHING_COMBINATION_INLINE_LIMIT
+        ):
             matching_combinations = []
         summary = {
             "objective": _normalize_optimization_objective(payload.get("objective")),
@@ -19126,7 +19447,11 @@ class BacktestPlatformService:
                 )
                 if matching_preview_limit is not None:
                     job["matching_combinations"] = job["matching_combinations"][:matching_preview_limit]
-                matching_combination_source = "persisted_candidates"
+                matching_combination_source = (
+                    "all_trials"
+                    if has_persisted_trials and matching_combination_source == "all_trials"
+                    else "persisted_candidates"
+                )
                 expected_matching_count = _as_int(
                     job["summary"].get("matching_combination_count"),
                     len(job["matching_combinations"]),
@@ -19134,8 +19459,17 @@ class BacktestPlatformService:
                 if (
                     matching_preview_limit is None
                     and (
-                    expected_matching_count > len(job["matching_combinations"])
-                    or (not job["matching_combinations"] and not raw_candidates)
+                        expected_matching_count > len(job["matching_combinations"])
+                        or (not job["matching_combinations"] and not raw_candidates)
+                        or (
+                            matching_combination_source == "all_trials"
+                            and has_persisted_trials
+                            and _as_int(
+                                job["summary"].get("persisted_trial_count"),
+                                len(raw_candidates),
+                            )
+                            > len(raw_candidates)
+                        )
                     )
                 ):
                     trial_records = self._load_optimization_trials(
@@ -19285,6 +19619,51 @@ class BacktestPlatformService:
                     constraint_payload.get("constraints") or [],
                 )
             ]
+            rebuilt_matching_from_trials = False
+            loaded_matching_count = len(job["matching_combinations"])
+            expected_matching_count = _as_int(
+                job["summary"].get("matching_combination_count"),
+                loaded_matching_count,
+            )
+            if (
+                matching_preview_limit is None
+                and has_persisted_trials
+                and (
+                    expected_matching_count > loaded_matching_count
+                    or (
+                        matching_combination_source == "all_trials"
+                        and loaded_matching_count == 0
+                        and _as_int(
+                            job["summary"].get("persisted_trial_count"),
+                            len(raw_candidates),
+                        )
+                        > len(raw_candidates)
+                    )
+                )
+            ):
+                detailed_trial_records = self._load_optimization_trials(
+                    str(job["id"]),
+                    include_chart_series=False,
+                    include_metrics_json=True,
+                )
+                rebuilt_matching_combinations = (
+                    self._build_optimization_matching_combination_candidates(
+                        strategy=strategy
+                        or self.get_strategy_detail(str(job["strategy_id"])),
+                        payload=job["request"],
+                        trials=detailed_trial_records,
+                    )
+                )
+                rebuilt_matching_from_trials = True
+                job["matching_combinations"] = rebuilt_matching_combinations
+                job["summary"]["matching_combinations"] = list(
+                    rebuilt_matching_combinations
+                )
+                job["summary"]["matching_combination_count"] = len(
+                    rebuilt_matching_combinations
+                )
+                job["summary"]["matching_combination_source"] = "all_trials"
+                matching_combination_source = "all_trials"
             best_candidate = (
                 matching_candidates[0]
                 if matching_candidates
@@ -19638,8 +20017,9 @@ class BacktestPlatformService:
         ) / 100.0
         current_total = sum(current.values())
         sum_penalty = abs(current_total - 100.0) / 100.0 if current_total else 0.0
-        effect = (current_score - baseline_score) - sum_penalty * 0.08
-        return max(-0.12, min(0.12, effect))
+        raw_effect = (current_score - baseline_score) - sum_penalty * 0.08
+        effect_limit = 0.12
+        return effect_limit * math.tanh(raw_effect / effect_limit)
 
     def _load_optimization_source_run_context(
         self,
@@ -19673,6 +20053,10 @@ class BacktestPlatformService:
         payload: Mapping[str, Any],
         parameter_snapshot: Mapping[str, Any],
     ) -> dict[str, Any] | None:
+        parameter_snapshot = self._canonicalize_multi_factor_optimization_snapshot(
+            strategy,
+            parameter_snapshot,
+        )
         if not self._is_multi_factor_optimization_strategy(strategy, parameter_snapshot):
             return None
         source_run = self._load_optimization_source_run_context(payload, evaluation_request)
@@ -19764,6 +20148,10 @@ class BacktestPlatformService:
         *,
         prepared_context: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        parameter_snapshot = self._canonicalize_multi_factor_optimization_snapshot(
+            strategy,
+            parameter_snapshot,
+        )
         effective_strategy = self._optimization_effective_strategy(strategy, parameter_snapshot)
         if prepared_context is None:
             cached_prepared_context = payload.get(OPTIMIZATION_PREPARED_CONTEXT_KEY) if isinstance(payload, dict) else None
@@ -19795,6 +20183,10 @@ class BacktestPlatformService:
         *,
         prepared_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        parameter_snapshot = self._canonicalize_multi_factor_optimization_snapshot(
+            strategy,
+            parameter_snapshot,
+        )
         projected_trial = self._project_multi_factor_optimization_trial(
             strategy,
             evaluation_request,

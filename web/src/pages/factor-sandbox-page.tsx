@@ -39,6 +39,7 @@ export type FactorMiningCandidate = {
   coveragePct: number;
   turnoverPct: number;
   riskFlags: string[];
+  sourceJobId?: string;
 };
 
 export type FactorMiningCreatePayload = {
@@ -56,6 +57,10 @@ export type FactorSandboxApi = {
   listFactorMiningJobs?: () => Promise<FactorMiningJob[]>;
   createFactorMiningJob?: (payload: FactorMiningCreatePayload) => Promise<FactorMiningJob>;
   cancelFactorMiningJob?: (jobId: string) => Promise<FactorMiningJob | void>;
+  intakeFactorQuarantine?: (payload: {
+    miningJobId?: string;
+    candidateIds?: string[];
+  }) => Promise<{ intakeCount: number; sourceMiningJobId?: string | null }>;
 };
 
 export type FactorSandboxPageProps = {
@@ -207,6 +212,7 @@ export function FactorSandboxPage({
   const [operators, setOperators] = useState<string[]>(['Return', 'Rank', 'ZScore']);
   const [loadingJobs, setLoadingJobs] = useState(Boolean(api?.listFactorMiningJobs));
   const [creatingJob, setCreatingJob] = useState(false);
+  const [intakingCandidateId, setIntakingCandidateId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const creatingJobRef = useRef(false);
@@ -364,6 +370,41 @@ export function FactorSandboxPage({
     }
   };
 
+  const sourceJobIdForCandidate = (candidate: FactorMiningCandidate): string | undefined => {
+    if (candidate.sourceJobId) return candidate.sourceJobId;
+    return visibleJobs.find((job) => job.topCandidates?.some((item) => item.id === candidate.id))?.id;
+  };
+
+  const sendCandidateToQuarantine = async (candidate: FactorMiningCandidate): Promise<void> => {
+    if (!api?.intakeFactorQuarantine) {
+      setError('检疫接收 API 尚未接入。');
+      return;
+    }
+    const sourceJobId = sourceJobIdForCandidate(candidate);
+    if (!sourceJobId) {
+      setError('缺少候选来源任务，无法送入检疫工作台。');
+      return;
+    }
+    setIntakingCandidateId(candidate.id);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api.intakeFactorQuarantine({
+        miningJobId: sourceJobId,
+        candidateIds: [candidate.id],
+      });
+      setNotice(
+        result.intakeCount > 0
+          ? `已送入检疫工作台：${candidate.expression}`
+          : '该候选已在检疫工作台或没有可接收记录。',
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '送入检疫工作台失败。');
+    } finally {
+      setIntakingCandidateId(null);
+    }
+  };
+
   return (
     <main className="factor-phase2-page factor-sandbox-page" data-page-root="factor-sandbox">
       <section className="factor-phase2-hero" aria-labelledby="factor-sandbox-title">
@@ -512,6 +553,14 @@ export function FactorSandboxPage({
                           <span className="factor-phase2-chip" key={flag}>{riskFlagLabel(flag)}</span>
                         ))
                         : <span className="factor-phase2-chip">暂无阻断提示</span>}
+                      <button
+                        className="factor-phase2-button factor-phase2-button--small"
+                        disabled={intakingCandidateId === candidate.id}
+                        type="button"
+                        onClick={() => void sendCandidateToQuarantine(candidate)}
+                      >
+                        {intakingCandidateId === candidate.id ? '送检中...' : '送入检疫'}
+                      </button>
                     </div>
                   </li>
                 ))}

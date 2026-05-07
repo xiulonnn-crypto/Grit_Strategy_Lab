@@ -35,6 +35,8 @@ FREE_ACCOUNT_PROVIDER_NAMES = {
     "sec_edgar",
     "tiingo",
     "tiingo_symbology",
+    "nasdaq_wiki",
+    "finnhub",
     "fmp",
     "fmp_historical_constituent",
     "openbb_tiingo",

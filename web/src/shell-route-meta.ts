@@ -170,7 +170,7 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
       return {
         navKey: 'factor',
         eyebrow: '因子',
-        title: '隔离检疫区',
+        title: '检疫工作台',
         description: '自动挖掘因子的去重、样本外和相关性门禁将在后续里程碑接入。',
         showPageHeading: false,
       };

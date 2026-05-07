@@ -13,6 +13,17 @@ def test_list_strategies_returns_200(tmp_path):
     assert isinstance(response.json(), list)
 
 
+def test_strategy_library_returns_strategy_and_run_lists_once(tmp_path):
+    client = TestClient(create_app(tmp_path / 'grit_backtest.sqlite3'))
+    created = create_grid_strategy(client, idempotency_key='strategy-library-list')["strategy"]
+
+    payload = assert_ok(client.get('/strategy-library'))
+
+    assert set(payload) == {"strategies", "runs"}
+    assert isinstance(payload["runs"], list)
+    assert created["id"] in [item["id"] for item in payload["strategies"]]
+
+
 def test_archived_strategies_are_hidden_from_library_and_workspace_count(tmp_path):
     client = TestClient(create_app(tmp_path / 'grit_backtest.sqlite3'))
     created = create_grid_strategy(client, idempotency_key='archive-strategy-list')["strategy"]

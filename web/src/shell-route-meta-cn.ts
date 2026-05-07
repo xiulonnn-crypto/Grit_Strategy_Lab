@@ -115,12 +115,12 @@ const TEXT = {
     '集中检索机构 Alpha 资产、默认常用因子、最近诊断和 PIT 门禁状态。',
   factorDetailTitle: '因子诊断',
   factorDetailDesc:
-    '查看因子逻辑、IC/IR 诊断、换手衰减、极端场景与合规足迹。',
+    '查看因子逻辑、IC/IR 诊断、换手衰减、极端场景与审计足迹。',
   factorEditorTitle: '因子编辑器',
   factorEditorDesc:
     '用白名单 DSL 编写公式，并在正式诊断前完成 5 年样本内 IC 预览。',
   factorSandbox: '挖掘沙盒',
-  factorQuarantine: '隔离检疫区',
+  factorQuarantine: '检疫工作台',
   data: '数据',
   pitData: 'PIT 清洗中心',
   pitDataTitle: 'PIT 清洗中心',

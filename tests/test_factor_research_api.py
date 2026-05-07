@@ -309,6 +309,24 @@ def test_pit_data_overview_requires_dataset_and_universe_snapshots(tmp_path):
     }
 
 
+def test_pit_data_overview_uses_sql_summary_without_full_membership_hydration(tmp_path, monkeypatch):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    service = client.app.state.service
+    service._invalidate_pit_data_overview_cache()
+
+    def fail_full_membership_hydration(**_kwargs):
+        raise AssertionError("/pit-data must not hydrate full universe membership snapshots for first paint")
+
+    monkeypatch.setattr(service.market_data_repository, "load_universe_memberships", fail_full_membership_hydration)
+
+    payload = assert_ok(client.get("/pit-data"))
+
+    assert payload["overall_status"] == "READY"
+    assert payload["coverage"]["universe_member_rows"] == 4
+    assert payload["source"]["historical_universe_member_rows"] == 4
+
+
 def test_pit_data_overview_exposes_gap_preview_history_and_action_targets(tmp_path):
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
@@ -372,6 +390,55 @@ def test_pit_data_overview_exposes_gap_preview_history_and_action_targets(tmp_pa
     mapped_buckets = {item["id"]: item for item in mapped_payload["coverage_gap"]["buckets"]}
     assert "ZZZZ" not in mapped_buckets["identity_unresolved"]["sample_symbols"]
     assert mapped_payload["coverage_gap"]["identity_resolved_count"] >= 1
+
+
+def test_pit_full_ready_repair_plan_prioritizes_nasdaq_wiki_for_historical_price_gaps(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    repository = client.app.state.service.market_data_repository
+    repository.replace_universe_snapshot(
+        {
+            "id": "un-sp500",
+            "universe_key": "SP500",
+            "name": "S&P 500",
+            "status": "READY",
+            "as_of": "2026-01-01",
+            "freshness_label": "unit historical lifecycle anchors",
+            "window_start": "2000-01-01",
+            "window_end": "2026-01-01",
+            "anchor_schedule": "unit",
+            "member_count": 2,
+            "source": "unit_test_revision",
+            "fallback_source": "none",
+            "metadata": {"coverage_mode": "point_in_time_anchor"},
+        },
+        memberships=[
+            {
+                "effective_date": "2000-01-01",
+                "symbol": "ACE",
+                "source": "unit_test_revision",
+                "fallback_source": "none",
+                "metadata": {"source_quality": "historical_revision_snapshot"},
+            },
+            {
+                "effective_date": "2026-01-01",
+                "symbol": "AAPL",
+                "source": "unit_test_revision",
+                "fallback_source": "none",
+                "metadata": {"source_quality": "historical_revision_snapshot"},
+            },
+        ],
+    )
+    mark_price_snapshot_incomplete(client, missing_symbols=["ACE"])
+
+    payload = assert_ok(client.get("/pit-data"))
+    repair_plan = payload["full_ready_repair_plan"]
+    queue_item = repair_plan["queue_sample"][0]
+
+    assert queue_item["bucket"] == "historical_lifecycle_missing"
+    assert queue_item["provider_priority"][:4] == ["tiingo", "fmp", "nasdaq_wiki", "stooq"]
+    assert queue_item["price_providers"][:4] == ["tiingo", "fmp", "nasdaq_wiki", "stooq"]
+    assert "Nasdaq WIKI/Stooq/Kaggle" in repair_plan["free_source_policy"]
 
 
 def test_pit_full_ready_repair_plan_projects_zero_event_candidates(tmp_path):
@@ -796,7 +863,91 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
     assert assert_ok(client.get("/factors/quality_roe_ltm"))["id"] == "s_qlty_roe_ltm_raw"
 
 
-def test_factor_library_projects_reference_metrics_for_new_factors(tmp_path):
+def test_factor_library_migrates_system_seed_expression_versions(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    assert_ok(client.get("/factors"))
+    storage = client.app.state.service.storage
+    legacy_expressions = {
+        "s_alpha_ffblend_cur_rank": "Rank(Return(Close, 252))",
+        "s_beta_market_252d_raw": "Return(Close, 252)",
+        "s_beta_resid_252d_z": "ZScore(Return(Close, 252))",
+        "s_inv_assetgrowth_1y_rank": "Return(Close, 252)",
+    }
+    expected_expressions = {
+        "s_alpha_ffblend_cur_rank": "FFBlend(Momentum252, ValueEP, QualityROE, Size)",
+        "s_beta_market_252d_raw": "BetaToMarket(Close, 252)",
+        "s_beta_resid_252d_z": "ResidualVolatility(Close, 252)",
+        "s_inv_assetgrowth_1y_rank": "SharesOutstandingGrowth(252) + CapexLTM / MarketCap",
+    }
+    for factor_id, expression in legacy_expressions.items():
+        storage.execute(
+            "UPDATE factor_definitions SET expression = ? WHERE id = ?",
+            (expression, factor_id),
+        )
+        storage.execute(
+            "UPDATE factor_versions SET expression = ?, metadata_json = ? WHERE factor_id = ? AND version = 1",
+            (expression, dumps({"source": "legacy_system_seed"}), factor_id),
+        )
+
+    payload = assert_ok(client.get("/factors"))
+    by_id = {item["id"]: item for item in payload["items"]}
+
+    for factor_id, expression in expected_expressions.items():
+        assert by_id[factor_id]["expression"] == expression
+        version = storage.fetch_one(
+            "SELECT expression, status, metadata_json FROM factor_versions WHERE factor_id = ? AND version = 1",
+            (factor_id,),
+        )
+        assert version["expression"] == expression
+        assert version["status"] == "ACTIVE"
+        assert '"SYSTEM_SEED"' in version["metadata_json"]
+
+
+def test_investment_seed_factors_do_not_share_degenerate_capex_signal(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+
+    assert_ok(client.get("/factors"))
+    repository = client.app.state.service.market_data_repository
+    point_rows = repository.load_dataset_fundamental_points(
+        "ds-fundamentals",
+        ["AAPL", "MSFT", "NVDA", "AMZN"],
+        start_date="2020-01-01",
+        end_date="2026-01-01",
+        as_of_date="2026-01-01",
+    )
+    share_paths = {
+        symbol: {
+            round(float(row["shares_outstanding"]), 4)
+            for row in rows
+            if row.get("shares_outstanding") is not None
+        }
+        for symbol, rows in point_rows.items()
+    }
+    assert all(len(values) > 1 for values in share_paths.values())
+
+    preview = assert_ok(
+        client.post(
+            "/factors/diagnostics/preview",
+            json={
+                "batch": True,
+                "factor_ids": ["s_inv_assetgrowth_1y_rank", "s_inv_capex_ltm_raw"],
+                "diagnostic_mode": "SANDBOX",
+                "include": ["ic", "ir", "groups", "turnover"],
+            },
+        )
+    )
+    by_id = {item["factor_id"]: item["latest_diagnostic_summary"] for item in preview["items"]}
+    asset_growth = by_id["s_inv_assetgrowth_1y_rank"]
+    capex = by_id["s_inv_capex_ltm_raw"]
+
+    assert asset_growth["data_lineage"]["kind"] == "FACTOR_EXPRESSION_PREVIEW"
+    assert capex["data_lineage"]["kind"] == "FACTOR_EXPRESSION_PREVIEW"
+    assert round(asset_growth["rank_ic"], 4) != round(capex["rank_ic"], 4)
+    assert asset_growth["group_returns"] != capex["group_returns"]
+
+
+def test_factor_library_projects_real_preview_metrics_for_new_factors(tmp_path):
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
     pit = assert_ok(client.get("/pit-data"))
@@ -835,22 +986,83 @@ def test_factor_library_projects_reference_metrics_for_new_factors(tmp_path):
         )
     )
     created_summary = created["latest_diagnostic_summary"]
-    assert created_summary["status"] == "REFERENCE_ONLY"
-    assert created_summary["source_factor_id"] in reference_factor_ids
-    assert created_summary["data_lineage"]["kind"] == "REFERENCE_DEFAULT_FACTOR"
+    assert created_summary is None
 
     factors = assert_ok(client.get("/factors"))
     by_id = {item["id"]: item for item in factors["items"]}
     manual_summary = by_id["m_mom_short_5d_rank"]["latest_diagnostic_summary"]
     expanded_summary = by_id["s_mom_6m_rank"]["latest_diagnostic_summary"]
 
-    assert manual_summary["status"] == "REFERENCE_ONLY"
-    assert manual_summary["source_factor_id"] in reference_factor_ids
-    assert manual_summary["data_lineage"]["kind"] == "REFERENCE_DEFAULT_FACTOR"
-    assert isinstance(manual_summary["rank_ic"], float)
-    assert expanded_summary["status"] == "REFERENCE_ONLY"
-    assert expanded_summary["source_factor_id"] == "s_mom_12m1m_rank"
+    assert manual_summary is None
+    assert expanded_summary is None
     assert by_id["m_mom_short_5d_rank"]["last_diagnostic_run_id"] is None
+
+    before_runs = client.app.state.service.storage.fetch_one(
+        "SELECT COUNT(*) AS count FROM factor_diagnostic_runs"
+    )["count"]
+    preview = assert_ok(
+        client.post(
+            "/factors/diagnostics/preview",
+            json={
+                "batch": True,
+                "factor_ids": ["m_mom_short_5d_rank", "s_mom_6m_rank"],
+                "diagnostic_mode": "SANDBOX",
+                "include": ["ic", "ir", "groups", "turnover"],
+            },
+        )
+    )
+    after_runs = client.app.state.service.storage.fetch_one(
+        "SELECT COUNT(*) AS count FROM factor_diagnostic_runs"
+    )["count"]
+    preview_by_id = {item["factor_id"]: item for item in preview["items"]}
+
+    assert after_runs == before_runs
+    for factor_id in ["m_mom_short_5d_rank", "s_mom_6m_rank"]:
+        summary = preview_by_id[factor_id]["latest_diagnostic_summary"]
+        assert summary["status"] == "PREVIEW"
+        assert summary["factor_id"] == factor_id
+        assert summary["data_lineage"]["kind"] == "FACTOR_EXPRESSION_PREVIEW"
+        assert "source_factor_id" not in summary
+        assert isinstance(summary["rank_ic"], float)
+        assert preview_by_id[factor_id]["batch_diagnostic_summary"]["status"] == "PREVIEW"
+
+    style_preview = assert_ok(
+        client.post(
+            "/factors/diagnostics/preview",
+            json={
+                "batch": True,
+                "factor_ids": [
+                    "s_alpha_ffblend_cur_rank",
+                    "s_beta_market_252d_raw",
+                    "s_beta_resid_252d_z",
+                    "s_inv_assetgrowth_1y_rank",
+                ],
+                "diagnostic_mode": "SANDBOX",
+                "include": ["ic", "ir"],
+            },
+        )
+    )
+    style_by_id = {item["factor_id"]: item for item in style_preview["items"]}
+    style_rank_ics = {
+        factor_id: style_by_id[factor_id]["latest_diagnostic_summary"]["rank_ic"]
+        for factor_id in style_by_id
+    }
+    assert set(style_by_id) == {
+        "s_alpha_ffblend_cur_rank",
+        "s_beta_market_252d_raw",
+        "s_beta_resid_252d_z",
+        "s_inv_assetgrowth_1y_rank",
+    }
+    assert all(
+        item["latest_diagnostic_summary"]["data_lineage"]["kind"] == "FACTOR_EXPRESSION_PREVIEW"
+        for item in style_by_id.values()
+    )
+    assert len({by_id[factor_id]["expression"] for factor_id in style_by_id}) == len(style_by_id)
+    for factor_id in style_by_id:
+        assert by_id[factor_id]["strategy_creation_risk"]["blocked_count"] == 0
+        assert by_id[factor_id]["blocker_reason_summary"]["status"] in {"warning", "clear"}
+    assert len({round(value, 4) for value in style_rank_ics.values() if isinstance(value, float)}) >= 2
+    assert round(style_rank_ics["s_alpha_ffblend_cur_rank"], 4) != round(style_rank_ics["s_beta_market_252d_raw"], 4)
 
 
 def test_factor_library_hot_path_does_not_call_heavy_pit_overview(tmp_path):
@@ -954,7 +1166,37 @@ def test_factor_batch_preview_is_read_only_and_returns_summary(tmp_path):
     assert preview["batch_summary"]["blocked_count"] >= 0
     assert {item["factor_id"] for item in preview["items"]} == {"s_mom_12m1m_rank", "s_val_ep_ltm_raw"}
     assert all("strategy_creation_risk" in item for item in preview["items"])
+    assert all(item["latest_diagnostic_summary"]["status"] == "PREVIEW" for item in preview["items"])
+    assert all(item["latest_diagnostic_summary"]["data_lineage"]["kind"] == "FACTOR_EXPRESSION_PREVIEW" for item in preview["items"])
     assert after_runs == before_runs
+
+
+def test_factor_batch_preview_hot_cache_reuses_loaded_pit_frame(tmp_path, monkeypatch):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    factor_service = client.app.state.service._factor_research_service()
+    original_loader = factor_service._load_diagnostic_price_bars
+    load_calls = 0
+
+    def counted_loader(*args, **kwargs):
+        nonlocal load_calls
+        load_calls += 1
+        return original_loader(*args, **kwargs)
+
+    monkeypatch.setattr(factor_service, "_load_diagnostic_price_bars", counted_loader)
+    request_payload = {
+        "batch": True,
+        "factor_ids": ["s_mom_12m1m_rank", "s_val_ep_ltm_raw"],
+        "diagnostic_mode": "SANDBOX",
+        "include": ["ic", "ir", "groups", "turnover", "correlation", "blockers"],
+    }
+
+    first = assert_ok(client.post("/factors/diagnostics/preview", json=request_payload))
+    second = assert_ok(client.post("/factors/diagnostics/preview", json=request_payload))
+
+    assert load_calls == 1
+    assert second["batch_summary"] == first["batch_summary"]
+    assert second["items"] == first["items"]
 
 
 def test_manual_factor_validation_and_pit_bound_diagnostics(tmp_path):
@@ -1315,6 +1557,70 @@ def test_factor_preview_accepts_nested_operator_formula(tmp_path):
     assert preview["status"] == "PREVIEW"
     assert preview["mode"] == "SINGLE"
     assert preview["lookback_years"] == 3
+
+
+def test_factor_preview_accepts_residual_factor_reference_formula(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    pit = assert_ok(client.get("/pit-data"))
+    expression = 'ZScore(Residual(s_mom_6m_rank, by="s_vol_252d_raw"))'
+
+    preview = assert_ok(
+        client.post(
+            "/factors/diagnostics/preview",
+            json={
+                "expression": expression,
+                "lookback_years": 3,
+            },
+        )
+    )
+
+    assert preview["status"] == "PREVIEW"
+    assert preview["mode"] == "SINGLE"
+    assert preview["expression"] == expression
+
+    created = assert_ok(
+        client.post(
+            "/factors",
+            json={
+                "name": "6m residual momentum",
+                "market": "US",
+                "universe": "SP500",
+                "expression": expression,
+                "frequency": "DAILY",
+                "direction": "HIGH_IS_BETTER",
+                "descriptor": manual_descriptor(metric="long", window="126d", operator="z"),
+                "tags": ["manual"],
+            },
+        )
+    )
+
+    assert created["id"] == "m_mom_long_126d_z"
+    assert created["expression"] == expression
+    assert all(
+        item.get("code") != "UNSAFE_EXPRESSION"
+        for item in created["strategy_creation_risk"]["hard_blockers"]
+    )
+    assert created["strategy_creation_risk"]["can_create"] is True
+
+    diagnostic = assert_ok(
+        client.post(
+            f"/factors/{created['id']}/diagnostics",
+            json={
+                "start_date": pit["diagnostic_windows"]["verified"]["start_date"],
+                "end_date": pit["as_of_date"],
+                "dataset_snapshot_id": pit["dataset_snapshot_id"],
+                "universe_snapshot_id": pit["universe_snapshot_id"],
+                "return_window_days": 21,
+                "group_count": 5,
+                "diagnostic_mode": "VERIFIED",
+            },
+        )
+    )
+
+    assert diagnostic["summary"]["factor_id"] == "m_mom_long_126d_z"
+    assert diagnostic["summary"]["rank_ic"] is not None
+    assert diagnostic["summary"]["ic_series"]
 
 
 def test_blocked_seed_factor_cannot_run_diagnostic_without_fundamentals(tmp_path):

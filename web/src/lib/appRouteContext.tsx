@@ -33,7 +33,16 @@ export type AppRoute =
   | { kind: 'factor-detail'; factorId: string }
   | { kind: 'factor-editor'; factorId?: string }
   | { kind: 'factor-sandbox' }
-  | { kind: 'factor-model-builder' }
+  | {
+      kind: 'factor-model-builder';
+      prefill?: {
+        source?: string;
+        factorIds: string[];
+        weights: number[];
+        directions: string[];
+        modelName?: string;
+      };
+    }
   | { kind: 'factor-quarantine' }
   | { kind: 'optimization-index' }
   | { kind: 'optimization-select'; strategyId?: string; sourceRunId?: string; entryPoint?: string }
@@ -54,6 +63,36 @@ function parseBacktestPeriodYears(value: string | null): number | undefined {
 
 function parseCompositionBacktestTab(value: string | null): 'diagnosis' | 'orders' | 'evidence' | undefined {
   return value === 'diagnosis' || value === 'orders' || value === 'evidence' ? value : undefined;
+}
+
+function parseFactorModelPrefill(searchParams: URLSearchParams): AppRoute & { kind: 'factor-model-builder' } {
+  const factorIds = (searchParams.get('factorIds') ?? searchParams.get('factor_ids') ?? '')
+    .split(',')
+    .map((item) => decodeURIComponent(item).trim())
+    .filter(Boolean);
+  if (!factorIds.length) {
+    return { kind: 'factor-model-builder' };
+  }
+  const weights = (searchParams.get('weights') ?? '')
+    .split(',')
+    .map((item) => Number(item))
+    .filter((item) => Number.isFinite(item));
+  const directions = (searchParams.get('directions') ?? '')
+    .split(',')
+    .map((item) => decodeURIComponent(item).trim())
+    .filter(Boolean);
+  const modelName = searchParams.get('modelName') ?? searchParams.get('model_name');
+  const source = searchParams.get('source');
+  return {
+    kind: 'factor-model-builder',
+    prefill: {
+      source: source ? decodeURIComponent(source) : undefined,
+      factorIds,
+      weights,
+      directions,
+      modelName: modelName ? decodeURIComponent(modelName) : undefined,
+    },
+  };
 }
 
 export function parseAppHash(hash: string): AppRoute {
@@ -217,7 +256,7 @@ export function parseAppHash(hash: string): AppRoute {
     return { kind: 'factor-sandbox' };
   }
   if (path === '/factor-models/new') {
-    return { kind: 'factor-model-builder' };
+    return parseFactorModelPrefill(searchParams);
   }
   if (path === '/factors/quarantine') {
     return { kind: 'factor-quarantine' };

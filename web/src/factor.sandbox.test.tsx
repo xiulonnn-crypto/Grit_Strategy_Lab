@@ -163,6 +163,27 @@ describe('FactorSandboxPage', () => {
     expect(screen.queryByText('mine_20260505_001')).not.toBeInTheDocument();
   });
 
+  it('sends a sandbox candidate into the quarantine intake API without creating a factor', async () => {
+    const intakeFactorQuarantine = vi
+      .fn<(payload: { miningJobId?: string; candidateIds?: string[] }) => Promise<{ intakeCount: number }>>()
+      .mockResolvedValue({ intakeCount: 1 });
+
+    render(
+      <FactorSandboxPage
+        api={{ intakeFactorQuarantine }}
+        initialJobs={[runtimeJob]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '送入检疫' }));
+
+    await waitFor(() => expect(intakeFactorQuarantine).toHaveBeenCalledWith({
+      miningJobId: 'fm_runtime_001',
+      candidateIds: ['cand_runtime_001'],
+    }));
+    expect(await screen.findByText('已送入检疫工作台：Rank(Return(Close, 21))')).toBeInTheDocument();
+  });
+
   it('creates a mining job through the injected API without requiring route or global client wiring', async () => {
     const createdJob: FactorMiningJob = {
       id: 'mine_test_001',
@@ -293,9 +314,11 @@ describe('FactorSandboxPage', () => {
   it('keeps the approved sandbox layout as a wide three-column workstation with a mobile single-column fallback', () => {
     const css = readFileSync('src/pages/factor-phase2-pages.css', 'utf8');
 
-    expect(css).toContain('max-width: 1660px;');
+    expect(css).toContain('max-width: 1960px;');
+    expect(css).toMatch(/\.factor-phase2-hero\s*\{[^}]*max-width:\s*1960px;/s);
+    expect(css).toMatch(/\.factor-phase2-hero\s*\{[^}]*margin:\s*0;/s);
     expect(css).toMatch(/\.factor-phase2-workbench\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1\.1fr\)\s*minmax\(0,\s*1fr\)\s*minmax\(320px,\s*0\.78fr\);/s);
     expect(css).toMatch(/\.factor-sandbox-page\s+\.factor-phase2-list--scroll\s*\{[^}]*max-height:\s*calc\([^}]*overflow-y:\s*auto;/s);
-    expect(css).toMatch(/@media\s*\(max-width:\s*1180px\)\s*\{[^}]*\.factor-phase2-hero,\s*\n\s*\.factor-phase2-workbench\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
+    expect(css).toMatch(/@media\s*\(max-width:\s*1180px\)\s*\{[^}]*\.factor-phase2-hero,[^}]*\.factor-phase2-workbench,[^}]*\.factor-quarantine-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
   });
 });

@@ -178,6 +178,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--reason", dest="reason", default=None)
     parser.add_argument("--mode", dest="mode", default="incremental", choices=["incremental", "repair", "full"])
     parser.add_argument("--targets", dest="targets", default=None)
+    parser.add_argument("--repair-symbol-limit", dest="repair_symbol_limit", type=int, default=None)
     parser.add_argument("--db-path", dest="db_path", default=None)
     parser.add_argument("--fee-bps", dest="fee_bps", type=float, default=DEFAULT_BACKTEST_FEE_BPS)
     parser.add_argument("--slippage-bps", dest="slippage_bps", type=float, default=DEFAULT_BACKTEST_SLIPPAGE_BPS)
@@ -198,6 +199,8 @@ def main(argv: list[str] | None = None) -> None:
         targets = _parse_refresh_targets(args.targets)
         if targets:
             payload["targets"] = targets
+        if args.repair_symbol_limit is not None:
+            payload["repair_symbol_limit"] = max(1, int(args.repair_symbol_limit))
         if args.job_id:
             payload["_job_id"] = args.job_id
         if args.job_created_at:

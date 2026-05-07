@@ -23,6 +23,8 @@ import type {
   ApiLegInventoryRow,
 } from '../types';
 
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+
 export function LegInventoryPage(): JSX.Element {
   const api = useApiClient();
   const [inventory, setInventory] = useState<ApiLegInventory | null>(null);
@@ -48,6 +50,8 @@ export function LegInventoryPage(): JSX.Element {
       setError(null);
       const response = await api.getLegInventory();
       setInventory(response);
+      setLoading(false);
+      await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
       const snapshotOverviewPromise = api.getSnapshotOverview
         ? api.getSnapshotOverview().catch(() => null)
         : Promise.resolve(null);

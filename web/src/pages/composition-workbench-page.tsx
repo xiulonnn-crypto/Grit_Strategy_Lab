@@ -31,6 +31,7 @@ import type {
 
 const DEFAULT_BENCHMARK = '60/40 参考组合';
 const DEFAULT_DESCRIPTION = '以策略腿、资产腿与现金腿构建可复核的正式组合。';
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
 const STARTER_WEIGHT_PRESETS: Record<number, number[]> = {
   1: [100],
   2: [60, 40],
@@ -291,6 +292,7 @@ export function CompositionWorkbenchPage(): JSX.Element {
   const routeAddLeg = route.kind === 'composition-workbench' ? route.addLeg : undefined;
   const addLegAppliedRef = useRef<string | null>(null);
   const starterAppliedRef = useRef(false);
+  const initialPreviewRequestedRef = useRef(false);
 
   const [inventory, setInventory] = useState<ApiLegInventory | null>(null);
   const [preview, setPreview] = useState<ApiCompositionPreview | null>(null);
@@ -325,11 +327,35 @@ export function CompositionWorkbenchPage(): JSX.Element {
           setLoading(true);
           setError(null);
         }
-        const inventoryResponse = await api.getLegInventory();
-        let detail: ApiCompositionDetail | null = null;
-        if (routeCompositionId && api.getCompositionDetail) {
-          detail = await api.getCompositionDetail(routeCompositionId);
-        }
+        const [inventoryResponse, detail] = await Promise.all([
+          api.getLegInventory(),
+          routeCompositionId && api.getCompositionDetail
+            ? api.getCompositionDetail(routeCompositionId)
+            : Promise.resolve<ApiCompositionDetail | null>(null),
+        ]);
+        const applyLoadedState = (nextInventory: ApiLegInventory) => {
+          setInventory(nextInventory);
+          setLoadedDetail(detail);
+          if (detail) {
+            setCompositionId(detail.id);
+            setCompositionName(
+              formatCompositionName({
+                name: detail.name,
+                benchmarkLabel:
+                  detail.benchmark_definition?.label ?? detail.benchmark_definition?.symbol ?? null,
+                status: detail.status,
+              }),
+            );
+            setDescription(formatCompositionDescription(detail.description) ?? DEFAULT_DESCRIPTION);
+            setBenchmarkLabel(
+              formatBenchmarkLabel(
+                detail.benchmark_definition?.label ?? detail.benchmark_definition?.symbol ?? null,
+              ),
+            );
+            setRebalanceFrequency(detail.rebalance_frequency || 'quarterly');
+            setSelectedLegs(buildDraftLegsFromDetail(detail));
+          }
+        };
         let enrichedInventory = inventoryResponse;
         const savedStrategyIds = readSavedStrategyLegIds();
         const detailStrategyIds =
@@ -338,7 +364,14 @@ export function CompositionWorkbenchPage(): JSX.Element {
             .map((leg) => String(leg.source_ref_id ?? '').trim())
             .filter((sourceRefId) => sourceRefId.startsWith('strategy_leg::')) ?? [];
         const strategyIdsToMaterialize = [...new Set([...savedStrategyIds, ...detailStrategyIds])];
+        const shouldDeferStarterUntilSavedStrategies =
+          !detail && !routeAddLeg && savedStrategyIds.length > 0;
+        if (!cancelled && !shouldDeferStarterUntilSavedStrategies) {
+          applyLoadedState(inventoryResponse);
+          setLoading(false);
+        }
         if (strategyIdsToMaterialize.length > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
           try {
             const compositionDetailsPromise =
               api.listCompositions && api.getCompositionDetail
@@ -380,28 +413,7 @@ export function CompositionWorkbenchPage(): JSX.Element {
         if (cancelled) {
           return;
         }
-        setInventory(enrichedInventory);
-        setLoadedDetail(detail);
-
-        if (detail) {
-          setCompositionId(detail.id);
-          setCompositionName(
-            formatCompositionName({
-              name: detail.name,
-              benchmarkLabel:
-                detail.benchmark_definition?.label ?? detail.benchmark_definition?.symbol ?? null,
-              status: detail.status,
-            }),
-          );
-          setDescription(formatCompositionDescription(detail.description) ?? DEFAULT_DESCRIPTION);
-          setBenchmarkLabel(
-            formatBenchmarkLabel(
-              detail.benchmark_definition?.label ?? detail.benchmark_definition?.symbol ?? null,
-            ),
-          );
-          setRebalanceFrequency(detail.rebalance_frequency || 'quarterly');
-          setSelectedLegs(buildDraftLegsFromDetail(detail));
-        }
+        applyLoadedState(enrichedInventory);
       } catch (caught) {
         if (!cancelled) {
           setError(`加载组合工作台失败：${(caught as Error).message}`);
@@ -465,7 +477,9 @@ export function CompositionWorkbenchPage(): JSX.Element {
     }
 
     let cancelled = false;
+    const delayMs = initialPreviewRequestedRef.current ? 120 : FIRST_SCREEN_DEFER_MS;
     const timer = window.setTimeout(async () => {
+      initialPreviewRequestedRef.current = true;
       try {
         if (!cancelled) {
           setPreviewLoading(true);
@@ -492,7 +506,7 @@ export function CompositionWorkbenchPage(): JSX.Element {
           setPreviewLoading(false);
         }
       }
-    }, 120);
+    }, delayMs);
 
     return () => {
       cancelled = true;

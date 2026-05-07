@@ -42,10 +42,17 @@ import type {
   ApiFactorDiagnosticPreview,
   ApiFactorDiagnosticPreviewPayload,
   ApiFactorDiagnosticRunResponse,
+  ApiFactorGovernanceOverview,
   ApiFactorListResponse,
   ApiFactorMiningJob,
   ApiFactorMiningJobCreatePayload,
   ApiFactorMiningJobListResponse,
+  ApiFactorQuarantineCandidateListResponse,
+  ApiFactorQuarantineIntakePayload,
+  ApiFactorQuarantineIntakeResponse,
+  ApiFactorQuarantinePublishPayload,
+  ApiFactorQuarantinePublishResponse,
+  ApiFactorQuarantineRunPayload,
   ApiFactorModelCreatePayload,
   ApiFactorModelPreviewPayload,
   ApiFactorModelPreviewResponse,
@@ -446,6 +453,8 @@ function createHttpApiClient(): DemoApi {
         { signal },
       ),
     listStrategies: (signal) => requestJson<ApiStrategyListItem[]>('/strategies', { signal }),
+    getStrategyLibrary: (signal) =>
+      requestJson<{ strategies: ApiStrategyListItem[]; runs: ApiBacktestRunListItem[] }>('/strategy-library', { signal }),
     getStrategyDetail: (id) => requestJson<ApiStrategyDetail>(`/strategies/${encodeURIComponent(id)}/detail`),
     restoreStrategyParameterVersion: (strategyId, parameterVersionId, payload) =>
       requestJson<ApiStrategyDetail>(
@@ -794,6 +803,33 @@ function createHttpApiClient(): DemoApi {
       requestJson<ApiFactorMiningJob>(`/factor-mining/jobs/${encodeURIComponent(id)}`),
     cancelFactorMiningJob: (id: string) =>
       requestJson<ApiFactorMiningJob>(`/factor-mining/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+    getFactorGovernanceOverview: () =>
+      requestJson<ApiFactorGovernanceOverview>('/factor-governance/overview'),
+    listFactorQuarantineCandidates: (params) => {
+      const search = new URLSearchParams();
+      if (params?.status) search.set('status', params.status);
+      if (params?.source_job_id) search.set('source_job_id', params.source_job_id);
+      if (params?.cluster) search.set('cluster', params.cluster);
+      const suffix = search.toString();
+      return requestJson<ApiFactorQuarantineCandidateListResponse>(
+        `/factor-quarantine/candidates${suffix ? `?${suffix}` : ''}`,
+      );
+    },
+    factorQuarantineIntake: (payload?: ApiFactorQuarantineIntakePayload) =>
+      requestJson<ApiFactorQuarantineIntakeResponse>(
+        '/factor-quarantine/intake',
+        withJsonBody(payload ?? {}, { method: 'POST' }),
+      ),
+    runFactorQuarantineCandidate: (candidateId: string, payload?: ApiFactorQuarantineRunPayload) =>
+      requestJson<ApiFactorQuarantineCandidateListResponse['items'][number]>(
+        `/factor-quarantine/candidates/${encodeURIComponent(candidateId)}/run`,
+        withJsonBody(payload ?? {}, { method: 'POST' }),
+      ),
+    publishFactorQuarantineCandidate: (candidateId: string, payload?: ApiFactorQuarantinePublishPayload) =>
+      requestJson<ApiFactorQuarantinePublishResponse>(
+        `/factor-quarantine/candidates/${encodeURIComponent(candidateId)}/publish`,
+        withJsonBody(payload ?? {}, { method: 'POST' }),
+      ),
     previewFactorModel: (payload: ApiFactorModelPreviewPayload) =>
       requestJson<ApiFactorModelPreviewResponse>(
         '/factor-models/preview',

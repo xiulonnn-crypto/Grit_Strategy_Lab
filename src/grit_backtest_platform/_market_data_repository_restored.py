@@ -484,6 +484,9 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_dataset_price_bars_symbol_date ON dataset_price_bars(symbol, date)"
     )
     conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dataset_price_bars_snapshot_symbol_date ON dataset_price_bars(dataset_snapshot_id, symbol, date)"
+    )
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_dataset_actions_symbol_date ON dataset_corporate_actions(symbol, event_date)"
     )
     conn.execute(
@@ -491,6 +494,9 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_dataset_fundamental_points_symbol_date ON dataset_fundamental_points(symbol, date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dataset_fundamental_points_snapshot_symbol_available ON dataset_fundamental_points(dataset_snapshot_id, symbol, available_at, date)"
     )
     _ensure_table_columns(
         conn,
@@ -539,6 +545,22 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_universe_membership_snapshot_symbol_effective ON universe_membership_snapshots(universe_snapshot_id, symbol, effective_date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_universe_membership_snapshot_effective_symbol ON universe_membership_snapshots(universe_snapshot_id, effective_date, symbol)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_universe_membership_snapshot_source_effective ON universe_membership_snapshots(universe_snapshot_id, source, effective_date, symbol)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_universe_membership_snapshot_fallback_effective ON universe_membership_snapshots(universe_snapshot_id, fallback_source, effective_date, symbol)"
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_universe_membership_active_snapshot_effective_symbol
+        ON universe_membership_snapshots(universe_snapshot_id, effective_date, symbol)
+        WHERE membership_status IN ('ACTIVE', 'MEMBER')
+        """
     )
     conn.commit()
 

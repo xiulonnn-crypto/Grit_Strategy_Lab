@@ -256,7 +256,7 @@ const overviewBase: Omit<ApiSnapshotOverview, 'bond_fixed_income'> = {
         label: '价格主链',
         role: 'OHLCV 与复权价格',
         preferred_provider: 'tiingo',
-        provider_ids: ['tiingo', 'fmp', 'stooq'],
+        provider_ids: ['tiingo', 'fmp', 'nasdaq_wiki', 'stooq'],
         status: 'missing_credentials',
         usable_provider_count: 0,
         credential_ready_provider_count: 0,
@@ -288,7 +288,7 @@ const overviewBase: Omit<ApiSnapshotOverview, 'bond_fixed_income'> = {
         label: '退市与身份',
         role: 'CIK lifecycle',
         preferred_provider: 'sec_edgar',
-        provider_ids: ['sec_edgar', 'fmp'],
+        provider_ids: ['sec_edgar', 'fmp', 'finnhub'],
         status: 'missing_credentials',
         usable_provider_count: 0,
         credential_ready_provider_count: 0,
@@ -303,8 +303,8 @@ const overviewBase: Omit<ApiSnapshotOverview, 'bond_fixed_income'> = {
         id: 'long_history_patch',
         label: '长周期补丁',
         role: 'Price-only backfill',
-        preferred_provider: 'stooq',
-        provider_ids: ['stooq', 'kaggle_huge_stock_market_dataset'],
+        preferred_provider: 'nasdaq_wiki',
+        provider_ids: ['nasdaq_wiki', 'stooq', 'kaggle_huge_stock_market_dataset'],
         status: 'registered',
         usable_provider_count: 0,
         credential_ready_provider_count: 0,
@@ -706,7 +706,7 @@ describe('SnapshotsPage', () => {
     const tabs = screen.getAllByRole('tab');
     expect(tabs).toHaveLength(2);
     expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByRole('button', { name: '刷新股票快照' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '刷新股票快照' })).toBeInTheDocument();
     expect(screen.getByText('DATA SNAPSHOTS')).toBeInTheDocument();
     expect(screen.getByText('统一管理股票、指数与固定收益数据快照的覆盖率、刷新状态和入库资格，让研究员在建仓、回测和组合配置前先确认市场数据证据链。')).toBeInTheDocument();
     expect(screen.getByText('健康仪表盘')).toBeInTheDocument();
@@ -731,7 +731,7 @@ describe('SnapshotsPage', () => {
     expect(screen.getByText('边界：不能替代成员历史、公司行动或身份确权。')).toBeInTheDocument();
     const missingKeySelect = screen.getByLabelText('选择缺少的 API_KEY');
     expect(missingKeySelect).toHaveValue('TIINGO_API_TOKEN');
-    const tiingoInput = screen.getByLabelText('TIINGO_API_TOKEN 输入');
+    const tiingoInput = await screen.findByLabelText('TIINGO_API_TOKEN 输入');
     expect(tiingoInput).toHaveAttribute('type', 'password');
     fireEvent.change(tiingoInput, { target: { value: 'local-test-token' } });
     expect(screen.getByText('已暂存到当前浏览器标签页；刷新不会清空，关闭标签页或清空暂存即删除。')).toBeInTheDocument();
@@ -745,7 +745,7 @@ describe('SnapshotsPage', () => {
     await waitFor(() => expect(screen.getByLabelText('ALPHAVANTAGE_API_KEY 输入')).toHaveAttribute('type', 'password'));
     expect(
       screen.getByText(
-        '刷新页面会保留本标签页草稿。真正的 provider 状态仍以后端启动时读到的环境变量为准；请把复制出的命令粘贴到将启动 QuickStart 的同一个 PowerShell。',
+        '复制命令会同时写入 Windows 用户环境和当前 PowerShell 进程；当前后端仍需重启后才会读取新值。',
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '复制 ALPHAVANTAGE_API_KEY 设置命令' })).toBeInTheDocument();
@@ -759,7 +759,8 @@ describe('SnapshotsPage', () => {
     expect(screen.getByLabelText('SEC_USER_AGENT 输入')).toHaveAttribute('type', 'text');
     expect(screen.getByRole('button', { name: '复制 SEC_USER_AGENT 设置命令' })).toBeInTheDocument();
     expect(screen.getByText('成分股历史')).toBeInTheDocument();
-    expect(screen.getByText(/主源：Stooq 长周期价格/)).toBeInTheDocument();
+    expect(screen.getByText(/优先级：Nasdaq WIKI 历史价格 → Stooq 长周期价格/)).toBeInTheDocument();
+    expect(screen.getByText(/优先级：SEC EDGAR \/ CIK → Financial Modeling Prep → Finnhub 身份校验/)).toBeInTheDocument();
     expect(screen.getByText('边界：仅修复价格缺口，不能单独通过正式就绪门禁。')).toBeInTheDocument();
     expect(screen.getByText('Ticker 生命周期与 CIK 确权')).toBeInTheDocument();
     expect(screen.getByText('边界：不提供价格，也不能把停止申报直接等同破产。')).toBeInTheDocument();
@@ -845,7 +846,7 @@ describe('SnapshotsPage', () => {
     renderSnapshotsPage();
 
     expect(await screen.findByRole('heading', { level: 1, name: '数据快照' })).toBeInTheDocument();
-    const tiingoInput = screen.getByLabelText('TIINGO_API_TOKEN 输入');
+    const tiingoInput = await screen.findByLabelText('TIINGO_API_TOKEN 输入');
     fireEvent.change(tiingoInput, { target: { value: 'local-test-token' } });
 
     await waitFor(() =>
@@ -856,15 +857,16 @@ describe('SnapshotsPage', () => {
     renderSnapshotsPage();
 
     expect(await screen.findByRole('heading', { level: 1, name: '数据快照' })).toBeInTheDocument();
-    expect(screen.getByLabelText('TIINGO_API_TOKEN 输入')).toHaveValue('local-test-token');
+    const restoredTiingoInput = await screen.findByLabelText('TIINGO_API_TOKEN 输入');
+    expect(restoredTiingoInput).toHaveValue('local-test-token');
     fireEvent.click(screen.getByRole('button', { name: '清空本标签页暂存' }));
-    expect(screen.getByLabelText('TIINGO_API_TOKEN 输入')).toHaveValue('');
+    expect(restoredTiingoInput).toHaveValue('');
     await waitFor(() =>
       expect(window.sessionStorage.getItem('gsl.snapshots.trustCredentialDrafts.v1')).toBeNull(),
     );
   });
 
-  it('copies a same-shell QuickStart restart command for snapshot provider keys', async () => {
+  it('copies a user-scope persistent QuickStart restart command for snapshot provider keys', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
@@ -880,9 +882,16 @@ describe('SnapshotsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '复制 POLYGON_API_KEY 设置命令' }));
 
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
-    expect(writeText.mock.calls[0]?.[0]).toContain("$env:POLYGON_API_KEY='polygon-token'");
+    expect(writeText.mock.calls[0]?.[0]).toContain(
+      "[Environment]::SetEnvironmentVariable('POLYGON_API_KEY', 'polygon-token', 'User')",
+    );
+    expect(writeText.mock.calls[0]?.[0]).toContain(
+      "[Environment]::SetEnvironmentVariable('POLYGON_API_KEY', 'polygon-token', 'Process')",
+    );
     expect(writeText.mock.calls[0]?.[0]).toContain("powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1");
-    expect(screen.getByText('已复制设置+重启命令；请粘贴到将启动 QuickStart 的同一个 PowerShell。')).toBeInTheDocument();
+    expect(
+      screen.getByText('已复制用户环境持久化+重启命令；粘贴执行一次后，后续新启动 QuickStart 会自动继承。'),
+    ).toBeInTheDocument();
   });
 
   it('counts the S&P 500 and Nasdaq constituent lists as equity basket readiness', async () => {
@@ -1075,6 +1084,34 @@ describe('SnapshotsPage', () => {
     expect(screen.queryByText(/openbb_index_constituents/i)).not.toBeInTheDocument();
   });
 
+  it('localizes Nasdaq WIKI and Finnhub provider ids on the snapshot surface', async () => {
+    const externalOverview: ApiSnapshotOverview = {
+      ...overview,
+      dataset_snapshots: [
+        {
+          ...overview.dataset_snapshots[1],
+          source: 'nasdaq_wiki',
+          fallback_source: null,
+        },
+        ...overview.dataset_snapshots.filter((item) => item.id !== 'ds-price'),
+      ],
+      universe_snapshots: [
+        {
+          ...overview.universe_snapshots[0],
+          source: 'finnhub',
+        },
+        ...overview.universe_snapshots.slice(1),
+      ],
+    };
+    fakeApi.getSnapshotOverview.mockResolvedValue(externalOverview);
+
+    renderSnapshotsPage();
+
+    expect(await screen.findByText('来源 Nasdaq WIKI 历史价格')).toBeInTheDocument();
+    expect(screen.getByText('来源 Finnhub 身份校验')).toBeInTheDocument();
+    expect(screen.queryByText(/nasdaq_wiki/i)).not.toBeInTheDocument();
+  });
+
   it('renders the valuation dataset row inside the equity snapshots list', async () => {
     fakeApi.getSnapshotOverview.mockResolvedValue(overview);
     fakeApi.refreshSnapshots.mockResolvedValue(overview);
@@ -1095,7 +1132,7 @@ describe('SnapshotsPage', () => {
     const tabs = screen.getAllByRole('tab');
     expect(tabs[1]).toHaveAttribute('aria-selected', 'true');
     expect(tabs).toHaveLength(2);
-    expect(screen.getByRole('button', { name: '刷新债券快照' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '刷新债券快照' })).toBeInTheDocument();
     expect(screen.queryByText('资产腿合法来源')).not.toBeInTheDocument();
     expect(screen.queryByText('日终刷新 (EOD)')).not.toBeInTheDocument();
     expect(screen.queryByText('到期收益率（YTM） / 久期 / 凸性')).not.toBeInTheDocument();

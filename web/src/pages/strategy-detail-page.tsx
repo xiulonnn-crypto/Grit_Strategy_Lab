@@ -11,6 +11,8 @@ import './creation-backtest.css';
 import '../page-sections/workspace-recent-runs-lane-b.css';
 import './strategy-detail-page.css';
 
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+
 const TEXT = {
   eyebrow: '策略详情',
   title: '策略详情',
@@ -188,7 +190,6 @@ const HIDDEN_PARAMETER_KEYS = new Set([
   'strategy_type',
   'universe_name',
   'benchmark_symbol',
-  'rebalance_frequency',
   'deviation_threshold',
   'window_size',
   'mean_target',
@@ -289,7 +290,7 @@ function rebalanceLabel(value: string | null | undefined): string {
     daily: '每日',
     weekly: '每周',
     monthly: '每月',
-    quarterly: '每季',
+    quarterly: '每季度',
     semiannual: '每半年',
     yearly: '每年',
     monthly_first_trading_day: '每月首个交易日',
@@ -1185,6 +1186,10 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
       try {
         setRecentRunsLoading(true);
         setRecentRunsError(null);
+        await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
+        if (cancelled) {
+          return;
+        }
         const payload = await api.listBacktestRuns({ limit: 24 });
         if (cancelled) {
           return;

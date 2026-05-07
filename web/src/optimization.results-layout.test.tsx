@@ -30,6 +30,12 @@ afterEach(() => {
 });
 
 describe("Optimization results candidate table layout", () => {
+  it("allows the optimization results page to use the approved 1960px canvas", () => {
+    expect(optimizationLabPageCss).toMatch(
+      /\.optimization-lab-page\s*\{[^}]*width:\s*min\(1960px,\s*100%\);/s,
+    );
+  });
+
   it("keeps the candidate table within the results panel width", async () => {
     await renderApp("#/optimization-jobs/opt-001");
 

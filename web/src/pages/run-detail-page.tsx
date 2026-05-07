@@ -28,6 +28,7 @@ import type {
 import './run-detail-page.css';
 
 const RUN_DETAIL_POLL_INTERVAL_MS = 2000;
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
 const SAVE_CONFIRM_DIALOG = {
   eyebrow: '保存回测',
   title: '保存回测',
@@ -432,6 +433,10 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
       try {
         setDetailLoading(true);
         setDetailError(null);
+        await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
+        if (cancelled) {
+          return;
+        }
         const payload = await api.getBacktestRunDetail(runId, { view: 'initial' });
         if (cancelled) {
           return;

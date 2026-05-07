@@ -423,6 +423,7 @@ describe('composition v2 global index pages', () => {
     });
 
     const table = screen.getByRole('table', { name: '组合列表' });
+    await within(table).findByText(compositions[1].name);
     const qqqRow = within(table).getByText('QQQ网格&标普动量平衡').closest('tr')!;
     fireEvent.click(within(qqqRow).getByRole('button', { name: '待校准：代理覆盖待确认' }));
 
@@ -460,6 +461,7 @@ describe('composition v2 global index pages', () => {
       });
 
       const table = screen.getByRole('table', { name: '组合列表' });
+      await within(table).findByText('标普动量均衡组合');
       const row = within(table).getByText('标普动量均衡组合').closest('tr')!;
       fireEvent.click(within(row).getByRole('button', { name: '待校准：收益样本窗口不足' }));
 
@@ -499,6 +501,7 @@ describe('composition v2 global index pages', () => {
     });
 
     const table = screen.getByRole('table', { name: '组合列表' });
+    await within(table).findByText('QQQ网格&标普动量平衡');
     const row = within(table).getByText('QQQ网格&标普动量平衡').closest('tr')!;
     fireEvent.click(within(row).getByRole('button', { name: '待校准：逻辑一致性漂移' }));
     fireEvent.click(screen.getByRole('button', { name: '确认并重新冻结来源指纹' }));

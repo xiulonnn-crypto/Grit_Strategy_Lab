@@ -2022,9 +2022,11 @@ describe("optimization module flow", () => {
   it("applies roomier spacing inside the in-progress panel", async () => {
     const container = await renderApp("#/optimization-jobs/opt-interrupted");
 
-    const progressPanel = (await waitFor(() =>
-      container.querySelector(".optimization-progress-panel"),
-    )) as HTMLElement;
+    const progressPanel = await waitFor(() => {
+      const element = container.querySelector(".optimization-progress-panel") as HTMLElement | null;
+      expect(element).not.toBeNull();
+      return element!;
+    });
     const metricTile = progressPanel.querySelector(
       ".optimization-metric-tile",
     ) as HTMLElement | null;
@@ -2093,7 +2095,10 @@ describe("optimization module flow", () => {
       multiCandidateApi.getOptimizationJobDetail.bind(multiCandidateApi);
     multiCandidateApi.getOptimizationJobDetail = async (jobId: string) => {
       const job = await originalGetOptimizationJobDetail(jobId);
-      job.candidates = job.candidates.map((candidate, index) => ({
+      const decorateCandidate = (
+        candidate: ApiOptimizationCandidate,
+        index: number,
+      ): ApiOptimizationCandidate => ({
         ...candidate,
         title: `合规候选 ${index + 1}`,
         label: `合规候选 ${index + 1}`,
@@ -2106,7 +2111,11 @@ describe("optimization module flow", () => {
           stability: 76 + index * 2,
           turnover: 8.4 + index * 0.2,
         },
-      }));
+      });
+      job.candidates = job.candidates.map(decorateCandidate);
+      job.matching_combinations = job.matching_combinations?.map(
+        decorateCandidate,
+      );
       job.summary.matching_combination_count = 23;
       job.matching_combination_count = 23;
       job.result.best_candidate_id = job.candidates[0]?.id ?? null;
@@ -2307,9 +2316,11 @@ describe("optimization module flow", () => {
 
     const container = await renderApp("#/optimization-jobs/opt-001");
 
-    const rows = await waitFor(
-      () => container.querySelectorAll(".optimization-results-grid tbody tr"),
-    );
+    const rows = await waitFor(() => {
+      const elements = container.querySelectorAll(".optimization-results-grid tbody tr");
+      expect(elements.length).toBeGreaterThan(0);
+      return elements;
+    });
     const baselineRow = rows[rows.length - 1] as HTMLTableRowElement;
     fireEvent.click(baselineRow);
 
@@ -2909,6 +2920,91 @@ describe("optimization module flow", () => {
     });
   });
 
+  it("hydrates preview-only matching combinations before paginating and sorting the modal", async () => {
+    const previewOnlyApi = createLargeCombinationModalApi();
+    const originalGetOptimizationJobDetail =
+      previewOnlyApi.getOptimizationJobDetail.bind(previewOnlyApi);
+    previewOnlyApi.getOptimizationJobDetail = async (jobId, params) => {
+      const job = await originalGetOptimizationJobDetail(jobId, params);
+      if (jobId !== "opt-001") {
+        return job;
+      }
+      const fullCombinations = job.matching_combinations ?? [];
+      const fullCount =
+        job.summary.matching_combination_count ??
+        job.matching_combination_count ??
+        fullCombinations.length;
+      if (typeof params?.matchingLimit === "number") {
+        job.matching_combinations = fullCombinations.slice(0, 4);
+        job.summary.matching_combinations = structuredClone(
+          job.matching_combinations,
+        );
+      }
+      job.summary.matching_combination_count = fullCount;
+      job.matching_combination_count = fullCount;
+      job.summary.matching_combination_source = "all_trials";
+      job.matching_combination_source = "all_trials";
+      return job;
+    };
+    currentApi = previewOnlyApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("符合约束条件的组合共145个"),
+    );
+    expect(container.textContent).toContain("组合 001");
+    expect(container.textContent).not.toContain("组合 004");
+    expect(container.textContent).not.toContain("组合 005");
+
+    const openButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("查看全部组合"),
+    ) as HTMLButtonElement | undefined;
+    expect(openButton).toBeTruthy();
+
+    fireEvent.click(openButton!);
+
+    const dialog = await waitFor(() => {
+      const element = container.querySelector(
+        ".optimization-all-combinations-dialog",
+      ) as HTMLElement | null;
+      expect(element).not.toBeNull();
+      return element!;
+    });
+
+    await waitFor(() => {
+      expect(dialog.querySelectorAll("tbody tr")).toHaveLength(100);
+      expect(dialog.textContent).toContain("第 1 / 2 页 · 1-100 / 145");
+    });
+
+    const firstCandidateLabel = () =>
+      (
+        dialog.querySelector(
+          "tbody tr:first-child .optimization-all-combinations-dialog__candidate-label",
+        ) as HTMLElement | null
+      )?.textContent ?? "";
+    expect(firstCandidateLabel()).toContain("组合 001");
+
+    const annualizedSortButton = Array.from(
+      dialog.querySelectorAll(".optimization-table-sort-button"),
+    ).find((button) => button.textContent?.includes("年化收益率")) as
+      | HTMLButtonElement
+      | undefined;
+    expect(annualizedSortButton).toBeTruthy();
+
+    fireEvent.click(annualizedSortButton!);
+    fireEvent.click(annualizedSortButton!);
+
+    await waitFor(() => {
+      expect(firstCandidateLabel()).toContain("组合 145");
+      expect(
+        dialog
+          .querySelector("th:nth-child(2)")
+          ?.getAttribute("aria-sort"),
+      ).toBe("ascending");
+    });
+  });
+
   it("marks legacy candidate-only totals as saved candidates instead of full combinations", async () => {
     const api = createOptimizationTestApi() as OptimizationTestApi;
     const originalGetOptimizationJobDetail =
@@ -3357,6 +3453,93 @@ describe("optimization module flow", () => {
     expect(container.textContent).not.toContain(
       "当前约束下暂无候选版本通过过滤",
     );
+  });
+
+  it("keeps the current filter state when the all-combinations modal hydrates full detail", async () => {
+    const fullMatchingApi = createFullMatchingCombinationRefilterApi();
+    const originalGetOptimizationJobDetail =
+      fullMatchingApi.getOptimizationJobDetail.bind(fullMatchingApi);
+    fullMatchingApi.getOptimizationJobDetail = async (jobId, params) => {
+      const job = await originalGetOptimizationJobDetail(jobId, params);
+      const matchingCombinations = job.matching_combinations ?? [];
+      if (typeof params?.matchingLimit === "number") {
+        const fullCount =
+          job.summary.matching_combination_count ??
+          job.matching_combination_count ??
+          matchingCombinations.length;
+        job.matching_combinations = matchingCombinations.slice(
+          0,
+          Math.max(0, Math.trunc(params.matchingLimit)),
+        );
+        job.summary.matching_combination_count = fullCount;
+        job.matching_combination_count = fullCount;
+      }
+      return job;
+    };
+    const originalUpdateOptimizationJobConstraints =
+      fullMatchingApi.updateOptimizationJobConstraints.bind(fullMatchingApi);
+    fullMatchingApi.updateOptimizationJobConstraints = async (jobId, payload) => {
+      const job = await originalUpdateOptimizationJobConstraints(jobId, payload);
+      const matchingCombinations = job.matching_combinations ?? [];
+      job.matching_combinations = matchingCombinations.slice(0, 3);
+      return job;
+    };
+    currentApi = fullMatchingApi;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        "符合约束条件的组合共30个，以下按 收益夏普 Max 输出当前候选版本排序。",
+      ),
+    );
+
+    const maxDrawdownInput = container.querySelector(
+      "#optimization-results-constraint-max_drawdown_pct",
+    ) as HTMLInputElement | null;
+    const refilterButton = Array.from(
+      container.querySelectorAll("button"),
+    ).find((button) => button.textContent?.includes("重新过滤")) as
+      | HTMLButtonElement
+      | undefined;
+
+    expect(maxDrawdownInput).toBeTruthy();
+    expect(refilterButton).toBeTruthy();
+
+    fireEvent.change(maxDrawdownInput!, { target: { value: "2" } });
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        "已修改约束条件，点击“重新过滤”后应用。",
+      ),
+    );
+    fireEvent.click(refilterButton!);
+
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        "符合约束条件的组合共15个，以下按 收益夏普 Max 输出当前候选版本排序。",
+      ),
+    );
+
+    const openButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("查看全部组合"),
+    ) as HTMLButtonElement | undefined;
+    expect(openButton).toBeTruthy();
+
+    fireEvent.click(openButton!);
+
+    const dialog = await waitFor(() => {
+      const element = container.querySelector(
+        ".optimization-all-combinations-dialog",
+      ) as HTMLElement | null;
+      expect(element).not.toBeNull();
+      return element!;
+    });
+
+    await waitFor(() => {
+      expect(dialog.textContent).toContain("共 15 组");
+      expect(dialog.querySelectorAll("tbody tr")).toHaveLength(15);
+      expect(maxDrawdownInput?.value).toBe("2");
+    });
   });
 
   it("shows a toast and keeps the current result state when refiltering would remove every combination", async () => {
@@ -4221,6 +4404,8 @@ describe("optimization module flow", () => {
     );
     expect(container.textContent).toContain("因子权重 · 12-1月截面动量排名");
     expect(container.textContent).toContain("因子权重 · 滚动市盈率倒数 (LTM)");
+    expect(container.textContent).toContain("中性化方法");
+    expect(container.textContent).not.toContain("是否启用行业中性化");
     expect(container.textContent).toContain("默认约束：权重合计 100%");
 
     const budgetCard = Array.from(

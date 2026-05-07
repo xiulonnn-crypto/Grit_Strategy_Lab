@@ -1058,12 +1058,17 @@ describe('composition workbench page', () => {
       </AppRouteProvider>,
     );
 
-    const staleCardTitle = (await screen.findAllByText('QQQ Grid-v2')).find((node) =>
-      node.closest('.composition-workbench-source-card'),
-    );
-    expect(staleCardTitle).toBeDefined();
-    const staleCard = staleCardTitle?.closest('.composition-workbench-source-card');
-    expect(staleCard).not.toBeNull();
+    const staleCard = await waitFor(() => {
+      const card = screen
+        .getAllByText('QQQ Grid-v2')
+        .map((node) => node.closest('.composition-workbench-source-card'))
+        .find((node): node is HTMLElement => node instanceof HTMLElement) ?? null;
+      expect(card).not.toBeNull();
+      if (!card) {
+        throw new Error('composition workbench stale source card did not render');
+      }
+      return card;
+    });
     expect(within(staleCard as HTMLElement).getByText('有新版本')).toBeInTheDocument();
     expect(screen.getAllByText('QQQ Grid-v4').length).toBeGreaterThan(0);
     const upgradeButtons = await screen.findAllByRole('button', { name: '一键升级版本' });

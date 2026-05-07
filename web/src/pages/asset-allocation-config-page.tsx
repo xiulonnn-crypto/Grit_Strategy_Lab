@@ -74,6 +74,7 @@ const FREQUENCY_OPTIONS: Array<{ value: RebalanceFrequency; label: string }> = [
 ];
 
 const LEGACY_DEFAULT_ASSET_SIGNATURE = 'SPY:35|QQQ:25|TLT:25|GLD:15';
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
 
 function normalizeSymbol(value: string): string {
   return value.trim().toUpperCase().replace(/\.US$/, '');
@@ -409,6 +410,10 @@ export function AssetAllocationConfigPage({ sessionId }: { sessionId?: string })
     async function loadSnapshotOverview(): Promise<void> {
       setSnapshotError(null);
       try {
+        await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
+        if (cancelled) {
+          return;
+        }
         const overview = await api.getSnapshotOverview();
         if (!cancelled) {
           setSnapshotOverview(overview);

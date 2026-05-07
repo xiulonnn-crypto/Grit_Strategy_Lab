@@ -1,56 +1,23 @@
 ﻿import { startTransition, useEffect, useState } from 'react';
 import { ApiClientProvider, useApiClient } from './lib/demoStoreContext';
+import { lazy, Suspense } from 'react';
 import {
   AppRouteProvider,
   navigateTo,
   parseAppHash,
   type AppRoute,
 } from './lib/appRouteContext';
-import { BacktestSubmitPage } from './pages/backtest-submit-page-cn';
-import { CompositionAllocationConfigPage, CompositionAllocationResultPage } from './pages/composition-allocation-page';
-import { CompositionBacktestConfigPage } from './pages/composition-backtest-config-page';
-import { CompositionBacktestResultPage } from './pages/composition-backtest-result-page';
-import { CompositionDashboardPage } from './pages/composition-dashboard-page';
-import { CompositionDetailPage } from './pages/composition-detail-page';
-import {
-  CompositionBacktestRunsIndexPage,
-  CompositionLabIndexPage,
-  CompositionListIndexPage,
-} from './pages/composition-global-index-page';
-import { CompositionWorkbenchPage } from './pages/composition-workbench-page';
-import { AssetAllocationConfigPage } from './pages/asset-allocation-config-page';
-import { CreationSessionPage } from './pages/creation-session-page';
-import { CreationTemplatePage } from './pages/creation-template-page';
-import {
-  FactorDetailPage,
-  FactorEditorPage,
-  FactorLibraryPage,
-  FactorPlaceholderPage,
-  PitCleaningCenterPage,
-} from './pages/factors-page';
-import FactorSandboxPage, {
-  type FactorMiningCandidate,
-  type FactorMiningCreatePayload,
-  type FactorMiningJob,
+import type {
+  FactorMiningCandidate,
+  FactorMiningCreatePayload,
+  FactorMiningJob,
 } from './pages/factor-sandbox-page';
-import FactorModelBuilderPage, {
-  type FactorModelCreateResponse,
-  type FactorModelOption,
-  type FactorModelPreview,
-  type FactorModelPreviewPayload,
+import type {
+  FactorModelCreateResponse,
+  FactorModelOption,
+  FactorModelPreview,
+  FactorModelPreviewPayload,
 } from './pages/factor-model-builder-page';
-import { LegInventoryPage } from './pages/leg-inventory-page';
-import {
-  OptimizationConfigPage,
-  OptimizationJobsIndexPage,
-  OptimizationResultsPage,
-  OptimizationStrategySelectPage,
-} from './pages/optimization-lab-page';
-import { RunDetailPage } from './pages/run-detail-page';
-import { RunsIndexPage } from './pages/runs-index-page';
-import { SnapshotsPage } from './pages/snapshots-page';
-import { StrategyDetailPage } from './pages/strategy-detail-page';
-import { WorkspacePage } from './pages/workspace-page-lane-b';
 import { ShellFrameCn } from './shell-frame-cn';
 import type {
   ApiFactorDirection,
@@ -58,8 +25,108 @@ import type {
   ApiFactorMiningCandidate as RuntimeMiningCandidate,
   ApiFactorMiningJob as RuntimeMiningJob,
 } from './types';
+import { CreationTemplatePage } from './pages/creation-template-page';
 
 type ApiClient = ReturnType<typeof useApiClient>;
+type FactorModelBuilderRoute = Extract<AppRoute, { kind: 'factor-model-builder' }>;
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+const FACTOR_CATEGORY_LABELS: Record<string, string> = {
+  mom: '动量',
+  val: '估值',
+  qlty: '质量',
+  vol: '波动',
+  size: '规模',
+  alpha: 'Alpha',
+  beta: '市场',
+  risk: '风险',
+  style: '风格',
+};
+
+// Keep the shell light: each route downloads only the page module it renders.
+const BacktestSubmitPage = lazy(() =>
+  import('./pages/backtest-submit-page-cn').then((module) => ({ default: module.BacktestSubmitPage })),
+);
+const CompositionAllocationConfigPage = lazy(() =>
+  import('./pages/composition-allocation-page').then((module) => ({ default: module.CompositionAllocationConfigPage })),
+);
+const CompositionAllocationResultPage = lazy(() =>
+  import('./pages/composition-allocation-page').then((module) => ({ default: module.CompositionAllocationResultPage })),
+);
+const CompositionBacktestConfigPage = lazy(() =>
+  import('./pages/composition-backtest-config-page').then((module) => ({ default: module.CompositionBacktestConfigPage })),
+);
+const CompositionBacktestResultPage = lazy(() =>
+  import('./pages/composition-backtest-result-page').then((module) => ({ default: module.CompositionBacktestResultPage })),
+);
+const CompositionDashboardPage = lazy(() =>
+  import('./pages/composition-dashboard-page').then((module) => ({ default: module.CompositionDashboardPage })),
+);
+const CompositionDetailPage = lazy(() =>
+  import('./pages/composition-detail-page').then((module) => ({ default: module.CompositionDetailPage })),
+);
+const CompositionBacktestRunsIndexPage = lazy(() =>
+  import('./pages/composition-global-index-page').then((module) => ({ default: module.CompositionBacktestRunsIndexPage })),
+);
+const CompositionLabIndexPage = lazy(() =>
+  import('./pages/composition-global-index-page').then((module) => ({ default: module.CompositionLabIndexPage })),
+);
+const CompositionListIndexPage = lazy(() =>
+  import('./pages/composition-global-index-page').then((module) => ({ default: module.CompositionListIndexPage })),
+);
+const CompositionWorkbenchPage = lazy(() =>
+  import('./pages/composition-workbench-page').then((module) => ({ default: module.CompositionWorkbenchPage })),
+);
+const AssetAllocationConfigPage = lazy(() =>
+  import('./pages/asset-allocation-config-page').then((module) => ({ default: module.AssetAllocationConfigPage })),
+);
+const CreationSessionPage = lazy(() =>
+  import('./pages/creation-session-page').then((module) => ({ default: module.CreationSessionPage })),
+);
+const FactorDetailPage = lazy(() =>
+  import('./pages/factors-page').then((module) => ({ default: module.FactorDetailPage })),
+);
+const FactorEditorPage = lazy(() =>
+  import('./pages/factors-page').then((module) => ({ default: module.FactorEditorPage })),
+);
+const FactorLibraryPage = lazy(() =>
+  import('./pages/factors-page').then((module) => ({ default: module.FactorLibraryPage })),
+);
+const PitCleaningCenterPage = lazy(() =>
+  import('./pages/factors-page').then((module) => ({ default: module.PitCleaningCenterPage })),
+);
+const FactorSandboxPage = lazy(() => import('./pages/factor-sandbox-page'));
+const FactorQuarantinePage = lazy(() => import('./pages/factor-quarantine-page'));
+const FactorModelBuilderPage = lazy(() => import('./pages/factor-model-builder-page'));
+const LegInventoryPage = lazy(() =>
+  import('./pages/leg-inventory-page').then((module) => ({ default: module.LegInventoryPage })),
+);
+const OptimizationConfigPage = lazy(() =>
+  import('./pages/optimization-lab-page').then((module) => ({ default: module.OptimizationConfigPage })),
+);
+const OptimizationJobsIndexPage = lazy(() =>
+  import('./pages/optimization-lab-page').then((module) => ({ default: module.OptimizationJobsIndexPage })),
+);
+const OptimizationResultsPage = lazy(() =>
+  import('./pages/optimization-lab-page').then((module) => ({ default: module.OptimizationResultsPage })),
+);
+const OptimizationStrategySelectPage = lazy(() =>
+  import('./pages/optimization-lab-page').then((module) => ({ default: module.OptimizationStrategySelectPage })),
+);
+const RunDetailPage = lazy(() =>
+  import('./pages/run-detail-page').then((module) => ({ default: module.RunDetailPage })),
+);
+const RunsIndexPage = lazy(() =>
+  import('./pages/runs-index-page').then((module) => ({ default: module.RunsIndexPage })),
+);
+const SnapshotsPage = lazy(() =>
+  import('./pages/snapshots-page').then((module) => ({ default: module.SnapshotsPage })),
+);
+const StrategyDetailPage = lazy(() =>
+  import('./pages/strategy-detail-page').then((module) => ({ default: module.StrategyDetailPage })),
+);
+const WorkspacePage = lazy(() =>
+  import('./pages/workspace-page-lane-b').then((module) => ({ default: module.WorkspacePage })),
+);
 
 function miningCandidateFamily(candidate: RuntimeMiningCandidate, index: number): string {
   const expression = String(candidate.expression ?? '');
@@ -69,7 +136,11 @@ function miningCandidateFamily(candidate: RuntimeMiningCandidate, index: number)
   return `候选 #${index + 1}`;
 }
 
-function mapApiMiningCandidate(candidate: RuntimeMiningCandidate, index: number): FactorMiningCandidate {
+function mapApiMiningCandidate(
+  candidate: RuntimeMiningCandidate,
+  index: number,
+  sourceJobId?: string,
+): FactorMiningCandidate {
   return {
     id: String(candidate.id ?? `candidate-${index + 1}`),
     expression: String(candidate.expression ?? ''),
@@ -78,6 +149,7 @@ function mapApiMiningCandidate(candidate: RuntimeMiningCandidate, index: number)
     coveragePct: Number(candidate.coverage ?? 0) * 100,
     turnoverPct: Number(candidate.turnover ?? 0) * 100,
     riskFlags: Array.isArray(candidate.risk_flags) ? candidate.risk_flags.map(String) : [],
+    sourceJobId,
   };
 }
 
@@ -104,7 +176,7 @@ function mapApiMiningJob(job: RuntimeMiningJob): FactorMiningJob {
     randomSeed: request.random_seed ?? null,
     minRankIc: Number(request.min_rank_ic ?? 0),
     maxDepth: Number(request.max_depth ?? 0),
-    topCandidates: topCandidates.map(mapApiMiningCandidate),
+    topCandidates: topCandidates.map((candidate, index) => mapApiMiningCandidate(candidate, index, job.id)),
   };
 }
 
@@ -114,6 +186,26 @@ function mapDirectionToModel(direction: ApiFactorDirection): 'HIGH_IS_GOOD' | 'L
 
 function mapDirectionToApi(direction: 'HIGH_IS_GOOD' | 'LOW_IS_GOOD'): ApiFactorDirection {
   return direction === 'LOW_IS_GOOD' ? 'LOW_IS_BETTER' : 'HIGH_IS_BETTER';
+}
+
+function factorCategoryLabel(factor: ApiFactorListItem): string {
+  const family = String(factor.factor_family ?? '').trim();
+  if (family) return family;
+  const category = String(factor.descriptor?.category ?? '').trim();
+  return FACTOR_CATEGORY_LABELS[category] ?? (category || '自定义');
+}
+
+function factorMetricLabel(label: string, value: unknown, digits: number): string {
+  if (value === null || value === undefined || value === '') return `${label} 待诊断`;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return `${label} 待诊断`;
+  return `${label} ${numeric.toFixed(digits)}`;
+}
+
+function factorMetricValue(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
 }
 
 function mapFactorOption(factor: ApiFactorListItem): FactorModelOption {
@@ -129,10 +221,20 @@ function mapFactorOption(factor: ApiFactorListItem): FactorModelOption {
   const suggestedWeight = Number(
     factorRecord.default_model_weight ?? factorRecord.suggested_model_weight ?? factorRecord.default_weight ?? 0,
   );
+  const diagnosticSummary: { rank_ic?: unknown; ir?: unknown } =
+    factor.latest_diagnostic_summary ?? factor.batch_diagnostic_summary ?? {};
+  const categoryLabel = factorCategoryLabel(factor);
+  const rankIc = factorMetricValue(diagnosticSummary.rank_ic);
+  const ir = factorMetricValue(diagnosticSummary.ir);
   return {
     id: factor.id,
     displayName: factor.name,
-    family: String(factor.factor_family ?? factor.descriptor?.category ?? '自定义'),
+    family: categoryLabel,
+    categoryLabel,
+    rankIc,
+    ir,
+    rankIcLabel: factorMetricLabel('Rank IC', rankIc, 3),
+    irLabel: factorMetricLabel('IR', ir, 2),
     sourceLabel: factor.source === 'SYSTEM_SEED' ? '系统默认' : factor.source === 'AUTO_MINED' ? '自动挖掘' : '人工',
     diagnosticStatus: factor.diagnostic_status,
     pitCoveragePct: coveragePct,
@@ -212,6 +314,7 @@ function mapModelPreview(response: Awaited<ReturnType<ApiClient['previewFactorMo
       sourceNames: neutralizationSourceNames,
     },
     warnings: Array.isArray(response.warnings) ? response.warnings.map(String) : [],
+    strategyCreationRisk: response.strategy_creation_risk,
   };
 }
 
@@ -221,6 +324,7 @@ function FactorSandboxRoutePage(): JSX.Element {
     <FactorSandboxPage
       api={{
         listFactorMiningJobs: async () => {
+          await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
           const payload = await api.listFactorMiningJobs();
           return payload.items.map(mapApiMiningJob);
         },
@@ -238,32 +342,50 @@ function FactorSandboxRoutePage(): JSX.Element {
             }),
           ),
         cancelFactorMiningJob: async (jobId: string) => mapApiMiningJob(await api.cancelFactorMiningJob(jobId)),
+        intakeFactorQuarantine: async (payload) => {
+          if (!api.factorQuarantineIntake) {
+            throw new Error('检疫接收 API 尚未接入。');
+          }
+          const response = await api.factorQuarantineIntake({
+            mining_job_id: payload.miningJobId,
+            candidate_ids: payload.candidateIds,
+          });
+          return {
+            intakeCount: Number(response?.summary?.intake_count ?? response?.items.length ?? 0),
+            sourceMiningJobId: typeof response?.summary?.source_mining_job_id === 'string'
+              ? response.summary.source_mining_job_id
+              : null,
+          };
+        },
       }}
       onOpenPitGate={() => navigateTo('/pit-data?section=fundamental-requirements')}
     />
   );
 }
 
-function FactorModelBuilderRoutePage(): JSX.Element {
+function FactorModelBuilderRoutePage({ route }: { route: FactorModelBuilderRoute }): JSX.Element {
   const api = useApiClient();
   const [factors, setFactors] = useState<FactorModelOption[]>([]);
 
   useEffect(() => {
     let cancelled = false;
-    api
-      .listFactors()
-      .then((response) => {
-        if (!cancelled) {
-          setFactors(response.items.map(mapFactorOption));
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setFactors([]);
-        }
-      });
+    const timer = window.setTimeout(() => {
+      api
+        .listFactors()
+        .then((response) => {
+          if (!cancelled) {
+            setFactors(response.items.map(mapFactorOption));
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setFactors([]);
+          }
+        });
+    }, FIRST_SCREEN_DEFER_MS);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [api]);
 
@@ -282,9 +404,20 @@ function FactorModelBuilderRoutePage(): JSX.Element {
         },
       }}
       factors={factors}
-      useDefaultFallback={false}
+      autoPreviewDelayMs={FIRST_SCREEN_DEFER_MS}
+      initialPrefill={route.prefill}
+      useDefaultFallback={true}
+      defaultSelectAll={false}
       onCreated={(strategyId) => navigateTo(`/strategies/${strategyId}`)}
     />
+  );
+}
+
+function RouteLoadingFallback(): JSX.Element {
+  return (
+    <div className="route-loading-fallback" role="status">
+      路由加载中...
+    </div>
   );
 }
 
@@ -316,75 +449,84 @@ function AppShell(): JSX.Element {
   return (
     <AppRouteProvider navigate={navigateTo} route={route}>
       <ShellFrameCn route={route}>
-        {route.kind === 'workspace' ? <WorkspacePage /> : null}
-        {route.kind === 'composition-dashboard' ? <CompositionDashboardPage /> : null}
-        {route.kind === 'composition-list' ? <CompositionListIndexPage /> : null}
-        {route.kind === 'composition-backtest-runs' ? <CompositionBacktestRunsIndexPage /> : null}
-        {route.kind === 'composition-lab' ? <CompositionLabIndexPage /> : null}
-        {route.kind === 'leg-inventory' ? <LegInventoryPage /> : null}
-        {route.kind === 'composition-workbench' ? <CompositionWorkbenchPage /> : null}
-        {route.kind === 'composition-detail' ? (
-          <CompositionDetailPage compositionId={route.compositionId} />
-        ) : null}
-        {route.kind === 'composition-backtest-new' ? (
-          <CompositionBacktestConfigPage compositionId={route.compositionId} />
-        ) : null}
-        {route.kind === 'composition-backtest-result' ? (
-          <CompositionBacktestResultPage
-            compositionId={route.compositionId}
-            highlightedEventId={route.eventId}
-            highlightedOrderId={route.orderId}
-            initialTab={route.tab}
-            runId={route.runId}
-          />
-        ) : null}
-        {route.kind === 'composition-allocation-config' ? (
-          <CompositionAllocationConfigPage compositionId={route.compositionId} />
-        ) : null}
-        {route.kind === 'composition-allocation-result' ? (
-          <CompositionAllocationResultPage compositionId={route.compositionId} jobId={route.jobId} />
-        ) : null}
-        {route.kind === 'creation-template' ? <CreationTemplatePage /> : null}
-        {route.kind === 'asset-allocation-config' ? (
-          <AssetAllocationConfigPage sessionId={route.sessionId} />
-        ) : null}
-        {route.kind === 'creation-session' ? <CreationSessionPage sessionId={route.sessionId} /> : null}
-        {route.kind === 'strategy-detail' ? <StrategyDetailPage strategyId={route.strategyId} /> : null}
-        {route.kind === 'backtest' ? (
-          <BacktestSubmitPage
-            periodYears={route.periodYears}
-            sourceRunId={route.sourceRunId}
-            strategyId={route.strategyId}
-          />
-        ) : null}
-        {route.kind === 'runs-index' ? <RunsIndexPage /> : null}
-        {route.kind === 'run' ? <RunDetailPage runId={route.runId} /> : null}
-        {route.kind === 'snapshots' ? <SnapshotsPage /> : null}
-        {route.kind === 'pit-data' ? <PitCleaningCenterPage highlightedSection={route.section} /> : null}
-        {route.kind === 'factor-library' ? (
-          <FactorLibraryPage initialSource={route.source} initialStatus={route.status} initialTag={route.tag} />
-        ) : null}
-        {route.kind === 'factor-detail' ? <FactorDetailPage factorId={route.factorId} /> : null}
-        {route.kind === 'factor-editor' ? <FactorEditorPage factorId={route.factorId} /> : null}
-        {route.kind === 'factor-sandbox' ? <FactorSandboxRoutePage /> : null}
-        {route.kind === 'factor-model-builder' ? <FactorModelBuilderRoutePage /> : null}
-        {route.kind === 'factor-quarantine' ? <FactorPlaceholderPage title="隔离检疫区" /> : null}
-        {route.kind === 'optimization-index' ? <OptimizationJobsIndexPage /> : null}
-        {route.kind === 'optimization-select' ? (
-          <OptimizationStrategySelectPage
-            entryPoint={route.entryPoint}
-            sourceRunId={route.sourceRunId}
-            strategyId={route.strategyId}
-          />
-        ) : null}
-        {route.kind === 'optimization-config' ? (
-          <OptimizationConfigPage
-            entryPoint={route.entryPoint}
-            sourceRunId={route.sourceRunId}
-            strategyId={route.strategyId}
-          />
-        ) : null}
-        {route.kind === 'optimization' ? <OptimizationResultsPage jobId={route.jobId} /> : null}
+        <Suspense fallback={<RouteLoadingFallback />}>
+          {route.kind === 'workspace' ? <WorkspacePage /> : null}
+          {route.kind === 'composition-dashboard' ? <CompositionDashboardPage /> : null}
+          {route.kind === 'composition-list' ? <CompositionListIndexPage /> : null}
+          {route.kind === 'composition-backtest-runs' ? <CompositionBacktestRunsIndexPage /> : null}
+          {route.kind === 'composition-lab' ? <CompositionLabIndexPage /> : null}
+          {route.kind === 'leg-inventory' ? <LegInventoryPage /> : null}
+          {route.kind === 'composition-workbench' ? <CompositionWorkbenchPage /> : null}
+          {route.kind === 'composition-detail' ? (
+            <CompositionDetailPage compositionId={route.compositionId} />
+          ) : null}
+          {route.kind === 'composition-backtest-new' ? (
+            <CompositionBacktestConfigPage compositionId={route.compositionId} />
+          ) : null}
+          {route.kind === 'composition-backtest-result' ? (
+            <CompositionBacktestResultPage
+              compositionId={route.compositionId}
+              highlightedEventId={route.eventId}
+              highlightedOrderId={route.orderId}
+              initialTab={route.tab}
+              runId={route.runId}
+            />
+          ) : null}
+          {route.kind === 'composition-allocation-config' ? (
+            <CompositionAllocationConfigPage compositionId={route.compositionId} />
+          ) : null}
+          {route.kind === 'composition-allocation-result' ? (
+            <CompositionAllocationResultPage compositionId={route.compositionId} jobId={route.jobId} />
+          ) : null}
+          {route.kind === 'creation-template' ? <CreationTemplatePage /> : null}
+          {route.kind === 'asset-allocation-config' ? (
+            <AssetAllocationConfigPage sessionId={route.sessionId} />
+          ) : null}
+          {route.kind === 'creation-session' ? <CreationSessionPage sessionId={route.sessionId} /> : null}
+          {route.kind === 'strategy-detail' ? <StrategyDetailPage strategyId={route.strategyId} /> : null}
+          {route.kind === 'backtest' ? (
+            <BacktestSubmitPage
+              periodYears={route.periodYears}
+              sourceRunId={route.sourceRunId}
+              strategyId={route.strategyId}
+            />
+          ) : null}
+          {route.kind === 'runs-index' ? <RunsIndexPage /> : null}
+          {route.kind === 'run' ? <RunDetailPage runId={route.runId} /> : null}
+          {route.kind === 'snapshots' ? <SnapshotsPage /> : null}
+          {route.kind === 'pit-data' ? (
+            <PitCleaningCenterPage highlightedSection={route.section} initialLoadDelayMs={FIRST_SCREEN_DEFER_MS} />
+          ) : null}
+          {route.kind === 'factor-library' ? (
+            <FactorLibraryPage
+              initialLoadDelayMs={FIRST_SCREEN_DEFER_MS}
+              initialSource={route.source}
+              initialStatus={route.status}
+              initialTag={route.tag}
+            />
+          ) : null}
+          {route.kind === 'factor-detail' ? <FactorDetailPage factorId={route.factorId} /> : null}
+          {route.kind === 'factor-editor' ? <FactorEditorPage factorId={route.factorId} /> : null}
+          {route.kind === 'factor-sandbox' ? <FactorSandboxRoutePage /> : null}
+          {route.kind === 'factor-model-builder' ? <FactorModelBuilderRoutePage route={route} /> : null}
+          {route.kind === 'factor-quarantine' ? <FactorQuarantinePage /> : null}
+          {route.kind === 'optimization-index' ? <OptimizationJobsIndexPage /> : null}
+          {route.kind === 'optimization-select' ? (
+            <OptimizationStrategySelectPage
+              entryPoint={route.entryPoint}
+              sourceRunId={route.sourceRunId}
+              strategyId={route.strategyId}
+            />
+          ) : null}
+          {route.kind === 'optimization-config' ? (
+            <OptimizationConfigPage
+              entryPoint={route.entryPoint}
+              sourceRunId={route.sourceRunId}
+              strategyId={route.strategyId}
+            />
+          ) : null}
+          {route.kind === 'optimization' ? <OptimizationResultsPage jobId={route.jobId} /> : null}
+        </Suspense>
       </ShellFrameCn>
     </AppRouteProvider>
   );

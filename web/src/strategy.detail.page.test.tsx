@@ -178,8 +178,10 @@ describe('StrategyDetailPage', () => {
       id: 'strat-mf-001',
       name: '多因子策略',
       strategy_type: 'MULTI_FACTOR',
+      rebalance_frequency: 'quarterly',
       parameters: {
         strategy_type: 'MULTI_FACTOR',
+        rebalance_frequency: 'quarterly',
         factor_ids: ['s_mom_12m1m_rank', 's_val_ep_ltm_raw'],
         weights: {
           s_mom_12m1m_rank: 0.6,
@@ -199,6 +201,8 @@ describe('StrategyDetailPage', () => {
     expect(await screen.findByText('多因子策略')).toBeInTheDocument();
     expect(screen.getAllByText(/12-1月截面动量排名/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/滚动市盈率倒数 \(LTM\)/).length).toBeGreaterThan(0);
+    expect(screen.getByText('再平衡')).toBeInTheDocument();
+    expect(screen.getAllByText('每季度').length).toBeGreaterThan(0);
     expect(document.body.textContent).not.toContain('s_mom_12m1m_rank 60%');
     expect(document.body.textContent).not.toContain('s_val_ep_ltm_raw 40%');
   });

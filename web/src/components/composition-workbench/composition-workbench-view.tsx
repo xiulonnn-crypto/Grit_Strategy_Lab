@@ -1679,7 +1679,7 @@ export function CompositionWorkbenchView({
           </div>
 
           {(warningItems.length || advisoryItems.length) ? (
-            <div className="composition-workbench-advisories composition-workbench-config-field">
+            <div className="composition-workbench-advisories">
               {warningItems.length ? (
                 <article className="composition-workbench-callout composition-workbench-callout--warning">
                   <strong>风险提示</strong>

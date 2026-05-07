@@ -31,6 +31,7 @@ const TEXT = {
 } as const;
 
 const STRATEGY_BOARD_LIMIT = 6;
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
 
 function isAbortError(caught: unknown): boolean {
   return caught instanceof DOMException
@@ -466,8 +467,16 @@ export function WorkspacePage(): JSX.Element {
       try {
         setLoading(true);
         setError(null);
-        const [workspaceOverview, strategyItems, backtestRuns, optimizationJobs] = await Promise.all([
-          api.getWorkspaceOverview(false, overviewController.signal),
+        const workspaceOverview = await api.getWorkspaceOverview(false, overviewController.signal);
+
+        if (cancelled) {
+          return;
+        }
+
+        setOverview(workspaceOverview);
+        setLoading(false);
+        await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
+        const [strategyItems, backtestRuns, optimizationJobs] = await Promise.all([
           api.listStrategies(overviewController.signal),
           api.listBacktestRuns({ limit: 8 }, overviewController.signal),
           api.listOptimizationJobs(),
@@ -477,7 +486,6 @@ export function WorkspacePage(): JSX.Element {
           return;
         }
 
-        setOverview(workspaceOverview);
         setStrategies(strategyItems);
         setRecentRuns(backtestRuns);
         setRecentOptimizations(optimizationJobs);

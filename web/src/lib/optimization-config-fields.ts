@@ -48,11 +48,6 @@ export const MULTI_FACTOR_SCORING_METHOD_OPTIONS: OptimizationFieldOption[] = [
   { value: "rank_weighted", label: "Rank 加权" },
 ];
 
-export const MULTI_FACTOR_NEUTRALIZATION_ENABLED_OPTIONS: OptimizationFieldOption[] = [
-  { value: "false", label: "不启用" },
-  { value: "true", label: "启用行业中性化" },
-];
-
 export const MULTI_FACTOR_NEUTRALIZATION_METHOD_OPTIONS: OptimizationFieldOption[] = [
   { value: "industry", label: "行业中性" },
 ];
@@ -121,12 +116,6 @@ const OPTIMIZATION_SELECTION_FIELDS: Partial<
       label: "再平衡频率",
       control: "multiselect",
       options: ALLOCATION_REBALANCE_FREQUENCY_OPTIONS,
-    },
-    {
-      key: "neutralization_enabled",
-      label: "是否启用行业中性化",
-      control: "multiselect",
-      options: MULTI_FACTOR_NEUTRALIZATION_ENABLED_OPTIONS,
     },
     {
       key: "neutralization_method",
@@ -241,9 +230,6 @@ function readMultiFactorConfiguredValue(
     neutralization && typeof neutralization === "object" && !Array.isArray(neutralization)
       ? (neutralization as Record<string, unknown>)
       : {};
-  if (key === "neutralization_enabled") {
-    return String(Boolean(neutralizationRecord.enabled));
-  }
   if (key === "neutralization_method") {
     return typeof neutralizationRecord.method === "string" ? neutralizationRecord.method : "industry";
   }

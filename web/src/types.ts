@@ -141,6 +141,11 @@ export type ApiStrategyListItem = {
   latest_completed_run_summary?: ApiStrategyLatestCompletedRunSummary | null;
 };
 
+export type ApiStrategyLibraryResponse = {
+  strategies: ApiStrategyListItem[];
+  runs: ApiBacktestRunListItem[];
+};
+
 export type ApiParameterHistoryEntry = {
   version_number: number;
   parameter_version_id: string;
@@ -2168,6 +2173,7 @@ export type ApiSnapshotRefreshRequest = {
   reason?: string | null;
   mode?: SnapshotRefreshMode;
   targets?: SnapshotRefreshTarget[];
+  repair_symbol_limit?: number | null;
 };
 
 export type ApiPitDataOverview = {
@@ -2201,6 +2207,8 @@ export type ApiPitDataOverview = {
     available_fields: string[];
     missing_fields: string[];
     source_snapshot_status?: string;
+    source_snapshot_updated_at?: string | null;
+    seed_version?: string | null;
   };
   blocking_items: Array<{
     code: string;
@@ -2804,6 +2812,93 @@ export type ApiFactorMiningJobListResponse = {
   summary: Record<string, unknown>;
 };
 
+export type ApiFactorGovernanceAction = {
+  id: string;
+  kind: string;
+  label: string;
+  title: string;
+  detail: string;
+  factor_ids: string[];
+  severity?: "info" | "warning" | "danger" | string;
+  suggested_weights?: Array<{
+    factor_id: string;
+    weight_pct: number;
+    direction: ApiFactorDirection | "HIGH_IS_GOOD" | "LOW_IS_GOOD" | string;
+  }>;
+  target?: {
+    route: string;
+    query?: Record<string, string>;
+  };
+  [key: string]: unknown;
+};
+
+export type ApiFactorGovernanceOverview = {
+  as_of: string;
+  queue_count: number;
+  actions: ApiFactorGovernanceAction[];
+  summary?: Record<string, unknown>;
+};
+
+export type ApiFactorQuarantineCandidate = {
+  id: string;
+  mining_candidate_id?: string | null;
+  source_mining_job_id?: string | null;
+  expression: string;
+  status: string;
+  publish_status: string;
+  gate_summary: Record<string, unknown>;
+  cluster_id?: string | null;
+  candidate_metrics: Record<string, unknown>;
+  failure_samples: Array<Record<string, unknown>>;
+  pit_evidence: Record<string, unknown>;
+  publish_eligibility: Record<string, unknown>;
+  target_factor_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  published_at?: string | null;
+  rejected_reason?: string | null;
+  latest_run?: Record<string, unknown>;
+};
+
+export type ApiFactorQuarantineCandidateListResponse = {
+  items: ApiFactorQuarantineCandidate[];
+  summary: Record<string, unknown>;
+};
+
+export type ApiFactorQuarantineIntakePayload = {
+  mining_job_id?: string;
+  job_id?: string;
+  candidate_ids?: string[];
+};
+
+export type ApiFactorQuarantineIntakeResponse = {
+  items: ApiFactorQuarantineCandidate[];
+  summary: {
+    intake_count?: number;
+    source_mining_job_id?: string | null;
+    sandbox_candidates_persisted_to_factor_definitions?: boolean;
+    [key: string]: unknown;
+  };
+};
+
+export type ApiFactorQuarantineRunPayload = {
+  reason?: string;
+  [key: string]: unknown;
+};
+
+export type ApiFactorQuarantinePublishPayload = {
+  operator?: string;
+  rule_version?: string;
+  [key: string]: unknown;
+};
+
+export type ApiFactorQuarantinePublishResponse = {
+  candidate: ApiFactorQuarantineCandidate;
+  factor?: ApiFactorDetail;
+  event?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
 export type ApiFactorModelComponentPayload = {
   factor_id: string;
   weight: number;
@@ -2876,6 +2971,7 @@ export type DemoApi = {
     signal?: AbortSignal,
   ) => Promise<ApiWorkspaceOverview>;
   listStrategies: (signal?: AbortSignal) => Promise<ApiStrategyListItem[]>;
+  getStrategyLibrary?: (signal?: AbortSignal) => Promise<ApiStrategyLibraryResponse>;
   getStrategyDetail: (id: string) => Promise<ApiStrategyDetail>;
   restoreStrategyParameterVersion?: (
     strategyId: string,
@@ -3095,6 +3191,23 @@ export type DemoApi = {
   createFactorMiningJob: (payload: ApiFactorMiningJobCreatePayload) => Promise<ApiFactorMiningJob>;
   getFactorMiningJob: (id: string) => Promise<ApiFactorMiningJob>;
   cancelFactorMiningJob: (id: string) => Promise<ApiFactorMiningJob>;
+  getFactorGovernanceOverview?: () => Promise<ApiFactorGovernanceOverview>;
+  listFactorQuarantineCandidates?: (params?: {
+    status?: string;
+    source_job_id?: string;
+    cluster?: string;
+  }) => Promise<ApiFactorQuarantineCandidateListResponse>;
+  factorQuarantineIntake?: (
+    payload?: ApiFactorQuarantineIntakePayload,
+  ) => Promise<ApiFactorQuarantineIntakeResponse>;
+  runFactorQuarantineCandidate?: (
+    candidateId: string,
+    payload?: ApiFactorQuarantineRunPayload,
+  ) => Promise<ApiFactorQuarantineCandidate>;
+  publishFactorQuarantineCandidate?: (
+    candidateId: string,
+    payload?: ApiFactorQuarantinePublishPayload,
+  ) => Promise<ApiFactorQuarantinePublishResponse>;
   previewFactorModel: (payload: ApiFactorModelPreviewPayload) => Promise<ApiFactorModelPreviewResponse>;
   createFactorModel: (payload: ApiFactorModelCreatePayload) => Promise<ApiStrategyDetail>;
 };

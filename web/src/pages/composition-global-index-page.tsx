@@ -19,6 +19,8 @@ import type {
 } from '../types';
 import './composition-global-index-page.css';
 
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+
 type Tone = 'good' | 'info' | 'warning' | 'danger' | 'neutral';
 
 type Metric = {
@@ -1713,6 +1715,12 @@ function useCompositions(): PageStatus & { reload: () => void; rows: ApiComposit
       }
       try {
         setStatus({ loading: true, error: null });
+        if (reloadKey === 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
+        }
+        if (cancelled) {
+          return;
+        }
         const response = await api.listCompositions();
         if (!cancelled) {
           setRows(response.filter((item) => item.status !== 'ARCHIVED'));

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
 import {
@@ -40,6 +40,7 @@ const TEXT = {
 } as const;
 
 const REQUIRED_PERIODS: EvidencePeriod[] = ['10Y', '20Y', '30Y'];
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
 
 type RunsTab = 'library' | 'recent';
 
@@ -823,6 +824,7 @@ export function RunsIndexPage(): JSX.Element {
   const [expandedStrategyIds, setExpandedStrategyIds] = useState<Set<string>>(() => new Set());
   const [expandedVersionIds, setExpandedVersionIds] = useState<Set<string>>(() => new Set());
   const [didPrimeExpansion, setDidPrimeExpansion] = useState(false);
+  const autoPrimedVersionKeyRef = useRef<string | null>(null);
   const [hoveredTask, setHoveredTask] = useState<SmartEvidenceTask | null>(null);
   const [taskStates, setTaskStates] = useState<Record<string, TaskState>>({});
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
@@ -839,11 +841,17 @@ export function RunsIndexPage(): JSX.Element {
       try {
         setLoading(true);
         setError(null);
+        await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
+        if (cancelled) {
+          return;
+        }
         const runItems = await api.listBacktestRuns({ limit: 200 }, controller.signal);
         if (cancelled) {
           return;
         }
         setRuns(runItems);
+        setLoading(false);
+        await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
         const strategyIds = [...new Set(runItems.map((run) => run.strategy_id))];
         const detailItems = await Promise.all(
           strategyIds.map(async (strategyId) => {
@@ -912,15 +920,23 @@ export function RunsIndexPage(): JSX.Element {
   );
 
   useEffect(() => {
-    if (didPrimeExpansion || groups.length === 0) {
+    if (groups.length === 0) {
       return;
     }
     const firstGroup = groups[0];
     const firstVersion = firstGroup.versions[0];
+    const firstVersionKey = firstVersion ? versionKey(firstVersion.strategyId, firstVersion.id) : null;
+    const shouldPrime =
+      !didPrimeExpansion ||
+      (strategies.length > 0 && Boolean(firstVersionKey) && autoPrimedVersionKeyRef.current !== firstVersionKey);
+    if (!shouldPrime) {
+      return;
+    }
     setExpandedStrategyIds(new Set([firstGroup.strategyId]));
-    setExpandedVersionIds(firstVersion ? new Set([versionKey(firstVersion.strategyId, firstVersion.id)]) : new Set());
+    setExpandedVersionIds(firstVersionKey ? new Set([firstVersionKey]) : new Set());
+    autoPrimedVersionKeyRef.current = firstVersionKey;
     setDidPrimeExpansion(true);
-  }, [didPrimeExpansion, groups]);
+  }, [didPrimeExpansion, groups, strategies.length]);
 
   function toggleStrategy(group: StrategyEvidenceGroup): void {
     setExpandedStrategyIds((current) => {

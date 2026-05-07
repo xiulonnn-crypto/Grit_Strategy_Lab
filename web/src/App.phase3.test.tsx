@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import App from './app-runtime';
 import { installMockApiServer, setMockPromoteConflict } from './testApiMock';
@@ -30,7 +30,7 @@ describe('App optimization routes', () => {
     expect(await screen.findByText('Grit Strategy Lab')).toBeInTheDocument();
     expect(await screen.findByText('策略工作台')).toBeInTheDocument();
     expect(await screen.findByText('优化实验室')).toBeInTheDocument();
-    expect(document.querySelector('.workspace-page')).not.toBeNull();
+    await waitFor(() => expect(document.querySelector('.workspace-page')).not.toBeNull());
   });
 
   it('keeps the optimization detail route stable while promote conflict returns the stale-base contract', async () => {
@@ -56,6 +56,8 @@ describe('App optimization routes', () => {
         message: 'The strategy has moved to a newer parameter version.',
       }),
     );
-    expect(document.querySelectorAll('.optimization-hero-actions .primary-button').length).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(document.querySelectorAll('.optimization-hero-actions .primary-button').length).toBeGreaterThan(0),
+    );
   });
 });

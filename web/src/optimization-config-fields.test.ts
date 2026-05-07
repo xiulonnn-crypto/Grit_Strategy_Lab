@@ -93,13 +93,13 @@ describe("collectOptimizationParameterSeeds", () => {
       "factor_weight__s_val_ep_ltm_raw_pct",
       "scoring_method",
       "rebalance_frequency",
-      "neutralization_enabled",
       "neutralization_method",
     ]);
     expect(seeds.find((seed) => seed.key === "factor_weight__s_mom_12m1m_rank_pct")?.label).toBe("因子权重 · 12-1月截面动量排名");
     expect(seeds.find((seed) => seed.key === "factor_weight__s_val_ep_ltm_raw_pct")?.label).toBe("因子权重 · 滚动市盈率倒数 (LTM)");
     expect(seeds.find((seed) => seed.key === "factor_weight__s_mom_12m1m_rank_pct")?.value).toBe(60);
-    expect(seeds.find((seed) => seed.key === "neutralization_enabled")?.value).toBe("false");
+    expect(seeds.find((seed) => seed.key === "neutralization_enabled")).toBeUndefined();
+    expect(seeds.find((seed) => seed.key === "neutralization_method")?.value).toBe("industry");
     expect(seeds.find((seed) => seed.key === "scoring_method")?.options?.map((option) => option.value)).toContain("zscore_weighted");
   });
 

@@ -21,6 +21,8 @@ import type {
 import './run-detail-page.css';
 import './snapshots-page.css';
 
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+
 const DATASET_COPY: Record<string, string> = {
   公司行为数据: '1996-01-01 至今的公司事件日期（拆股 / 合股 / 股息 / 财报等）。',
   股票价格数据: '1996-01-01 至今的日线 OHLC 数据。',
@@ -46,8 +48,12 @@ const SOURCE_LABELS: Record<string, string> = {
   SecEdgar: 'SEC EDGAR',
   fmp: 'Financial Modeling Prep',
   Fmp: 'Financial Modeling Prep',
+  finnhub: 'Finnhub 身份校验',
+  Finnhub: 'Finnhub 身份校验',
   fmp_historical_constituent: 'FMP 历史成分',
   FmpHistoricalConstituent: 'FMP 历史成分',
+  nasdaq_wiki: 'Nasdaq WIKI 历史价格',
+  NasdaqWiki: 'Nasdaq WIKI 历史价格',
   openbb_yfinance: 'OpenBB Yahoo 行情',
   openbb_tiingo: 'OpenBB Tiingo 行情',
   openbb_alpha_vantage: 'OpenBB Alpha Vantage 修复',
@@ -883,6 +889,10 @@ export function SnapshotsPage(): JSX.Element {
         if (!cancelled) {
           setLoading(true);
           setError(null);
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
+        if (cancelled) {
+          return;
         }
         const response = await api.getSnapshotOverview();
         if (!cancelled) {

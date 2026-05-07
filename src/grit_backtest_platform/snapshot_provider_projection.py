@@ -39,6 +39,16 @@ SOURCE_GOVERNANCE: dict[str, dict[str, Any]] = {
         "license": "public_download_terms",
         "source_manifest_required": True,
     },
+    "nasdaq_wiki": {
+        "source_url": "https://data.nasdaq.com/api/v3/datasets/WIKI/{symbol}.json",
+        "license": "account_terms_legacy_database",
+        "source_manifest_required": False,
+    },
+    "finnhub": {
+        "source_url": "https://finnhub.io/docs/api",
+        "license": "account_terms",
+        "source_manifest_required": False,
+    },
     "sec_edgar": {
         "source_url": "https://www.sec.gov/edgar/sec-api-documentation",
         "license": "public_sec_data",
@@ -205,6 +215,17 @@ PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
             pit_notes=("Delisted archive rows are price evidence only unless a dataset manifest declares formal action events.",),
         ),
         _definition(
+            "nasdaq_wiki",
+            "Nasdaq Data Link WIKI",
+            "free_account",
+            ("price_history", "long_history_price_patch", "delisted_price_history"),
+            fallback_order={"price_history": 7, "long_history_price_patch": 1, "delisted_price_history": 1},
+            required_env_vars=("NASDAQ_DATA_LINK_API_KEY",),
+            pit_mode="price_only",
+            can_upgrade_pit_readiness=True,
+            pit_notes=("WIKI rows are legacy price evidence through 2018 and do not certify corporate actions.",),
+        ),
+        _definition(
             "polygon",
             "Polygon.io",
             "paid_optional",
@@ -236,6 +257,17 @@ PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
             ("universe_history",),
             fallback_order={"universe_history": 1},
             required_env_vars=("FMP_API_KEY",),
+        ),
+        _definition(
+            "finnhub",
+            "Finnhub",
+            "free_account",
+            ("identity", "targeted_price_repair"),
+            fallback_order={"identity": 4, "targeted_price_repair": 2},
+            required_env_vars=("FINNHUB_API_KEY",),
+            pit_mode="identity_only",
+            can_upgrade_pit_readiness=True,
+            pit_notes=("Finnhub profile and listing status are identity evidence; candle rows are targeted fallback only.",),
         ),
         _definition(
             "alpha_vantage",
@@ -454,6 +486,14 @@ TRUST_PROFILE_OVERRIDES: dict[str, dict[str, Any]] = {
         "limitations": ["price-only；不能证明分红/拆股事件、成员历史或 CIK 身份。"],
         "operator_action": "优先使用 offline ZIP；需要在线补丁时显式设置 GRIT_ENABLE_STOOQ_ONLINE=1。",
     },
+    "nasdaq_wiki": {
+        "trust_tier": "long_history_price_patch",
+        "evidence_scope": ["WIKI adjusted OHLCV through 2018", "legacy delisted price candidates"],
+        "can_upgrade_full_ready": False,
+        "pit_role": "Legacy price-only patch for pre-2018 US equities.",
+        "limitations": ["Price-only; does not certify dividends, splits, identity, or current prices."],
+        "operator_action": "Configure NASDAQ_DATA_LINK_API_KEY or load a local WIKI cache before long-history repair.",
+    },
     "kaggle_huge_stock_market_dataset": {
         "trust_tier": "bulk_price_cache",
         "evidence_scope": ["bulk adjusted OHLCV", "delisted price candidates"],
@@ -477,6 +517,14 @@ TRUST_PROFILE_OVERRIDES: dict[str, dict[str, Any]] = {
         "pit_role": "身份与生命周期确权",
         "limitations": ["identity-only；SEC EDGAR 不提供价格，也不能把停止申报直接写成破产结论。"],
         "operator_action": "配置含联系邮箱的 SEC_USER_AGENT，用 CIK 证明身份和生命周期上下文。",
+    },
+    "finnhub": {
+        "trust_tier": "identity_listing_crosscheck",
+        "evidence_scope": ["company profile", "listing status", "targeted candle fallback"],
+        "can_upgrade_full_ready": False,
+        "pit_role": "Identity and listing-status cross-check with limited targeted price fallback.",
+        "limitations": ["Industry fields are supporting metadata only and are not authoritative PIT GICS evidence."],
+        "operator_action": "Configure FINNHUB_API_KEY for profile/listing validation after SEC/FMP/Tiingo identity checks.",
     },
     "alpha_vantage": {
         "trust_tier": "targeted_action_identity",
@@ -519,7 +567,7 @@ DATA_TRUST_LAYER_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "id": "delisted_identity",
         "label": "退市 / 身份",
         "role": "ticker 生命周期和 CIK",
-        "provider_ids": ("sec_edgar", "tiingo_symbology", "fmp", "alpha_vantage"),
+        "provider_ids": ("sec_edgar", "tiingo_symbology", "fmp", "finnhub", "alpha_vantage"),
         "preferred_provider": "sec_edgar",
         "evidence_scope": ["CIK", "delisting metadata", "canonical symbol", "filing lifecycle"],
         "full_ready_gate": "identity-only 源不能补 OHLCV；用于证明标的身份和不可恢复缺口上下文。",
@@ -537,8 +585,8 @@ DATA_TRUST_LAYER_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "id": "long_history_patch",
         "label": "长周期补丁",
         "role": "70/80/90 年代价格补丁",
-        "provider_ids": ("stooq", "kaggle_huge_stock_market_dataset", "kaggle_delisted_bulk_archive"),
-        "preferred_provider": "stooq",
+        "provider_ids": ("nasdaq_wiki", "stooq", "kaggle_huge_stock_market_dataset", "kaggle_delisted_bulk_archive"),
+        "preferred_provider": "nasdaq_wiki",
         "evidence_scope": ["long-horizon OHLCV", "delisted price rows"],
         "full_ready_gate": "price-only，只能修复价格缺口，不能单独通过公司行动或身份门禁。",
     },
@@ -582,7 +630,11 @@ def _metadata_for_provider(provider: Any) -> dict[str, Any]:
 def _target_types_for_provider(provider: Any, provider_id: str) -> tuple[str, ...]:
     definition = PROVIDER_DEFINITIONS.get(provider_id)
     target_types = list(definition.target_types if definition else ())
-    if callable(getattr(provider, "fetch_history", None)):
+    if callable(getattr(provider, "fetch_history", None)) and provider_id not in {
+        "alpha_vantage",
+        "openbb_alpha_vantage",
+        "finnhub",
+    }:
         target_types.append("price_history")
     if callable(getattr(provider, "fetch_corporate_actions", None)) or bool(getattr(provider, "supports_action_enrichment", False)):
         target_types.append("corporate_actions")

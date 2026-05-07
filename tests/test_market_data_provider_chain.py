@@ -804,13 +804,22 @@ def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(
         ("akshare_us_provider", ("AkshareUsPriceProvider", "AkShareUsPriceProvider")): SimpleNamespace(
             provider_name="akshare_us", fetch_history=lambda *args, **kwargs: None
         ),
-        ("stooq_provider", ("StooqZipPriceProvider", "StooqPriceProvider")): SimpleNamespace(
-            provider_name="stooq", fetch_history=lambda *args, **kwargs: None
-        ),
         ("fmp_identity_provider", ("FmpIdentityRepairProvider", "FmpMarketDataProvider", "FmpPriceRepairProvider")): SimpleNamespace(
             provider_name="fmp",
             fetch_history=lambda *args, **kwargs: None,
             resolve_identity=lambda symbol: {"symbol": symbol, "source": "fmp"},
+        ),
+        ("nasdaq_wiki_provider", ("NasdaqWikiPriceProvider",)): SimpleNamespace(
+            provider_name="nasdaq_wiki", fetch_history=lambda *args, **kwargs: None
+        ),
+        ("stooq_provider", ("StooqZipPriceProvider", "StooqPriceProvider")): SimpleNamespace(
+            provider_name="stooq", fetch_history=lambda *args, **kwargs: None
+        ),
+        ("finnhub_provider", ("FinnhubProvider",)): SimpleNamespace(
+            provider_name="finnhub",
+            fetch_history=lambda *args, **kwargs: None,
+            resolve_identity=lambda symbol: {"symbol": symbol, "source": "finnhub"},
+            supports_targeted_price_repair=True,
         ),
         ("alpha_vantage_provider", ("AlphaVantageProvider", "AlphaVantageEventProvider", "AlphaVantageMarketDataProvider")): SimpleNamespace(
             provider_name="alpha_vantage",
@@ -839,8 +848,10 @@ def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(
         "longbridge_static_info",
         "longbridge",
         "akshare_us",
-        "stooq",
         "fmp",
+        "nasdaq_wiki",
+        "stooq",
+        "finnhub",
         "alpha_vantage",
         "sec_edgar",
     ]
@@ -850,15 +861,18 @@ def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(
         "tiingo",
         "longbridge",
         "akshare_us",
-        "stooq",
         "fmp",
+        "nasdaq_wiki",
+        "stooq",
     ]
     assert [provider.provider_name for provider in runtime.identity_providers] == [
         "tiingo_symbology",
         "longbridge_static_info",
         "fmp",
+        "finnhub",
         "alpha_vantage",
     ]
+    assert [provider.provider_name for provider in runtime.targeted_price_repair_providers] == ["finnhub"]
     assert runtime.fallback_provider.provider_name == "yfinance"
 
 

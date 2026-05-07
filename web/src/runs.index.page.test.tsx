@@ -247,7 +247,7 @@ describe('runs index page', () => {
     expect(taskbar).toHaveTextContent(/批量补齐/);
     expect(taskbar).toHaveTextContent(/补齐长周期/);
 
-    const library = screen.getByLabelText('策略库视图');
+    const library = await screen.findByLabelText('策略库视图');
     expect(library).toHaveClass('runs-library-panel');
     expect(library).toHaveTextContent('Strategy Library');
     expect(library).toHaveTextContent('策略-版本证据树');
@@ -257,6 +257,7 @@ describe('runs index page', () => {
     expect(library).toHaveTextContent('策略 Beta');
 
     const evidenceTree = requireSelector('.runs-library-panel .runs-tree');
+    await waitFor(() => expect(evidenceTree).toHaveTextContent('bt-alpha-20y'));
     expect(evidenceTree).toHaveTextContent('2 次回测 / 2 个版本 · 当前版本 v2 · 最佳证据 v1');
     expect(evidenceTree).toHaveTextContent('证据断裂');
     expect(evidenceTree).toHaveTextContent('10Y 已覆盖');
@@ -279,8 +280,9 @@ describe('runs index page', () => {
     );
     await renderRunsPage();
 
+    const batchButton = await screen.findByRole('button', { name: /批量补齐/ });
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /批量补齐/ }));
+      fireEvent.click(batchButton);
     });
 
     await waitFor(() => {
@@ -317,10 +319,16 @@ describe('runs index page', () => {
     await renderRunsPage();
 
     const library = await screen.findByLabelText('策略库视图');
-    const runRow = library.querySelector('.runs-evidence-row--run');
-    expect(runRow).not.toBeNull();
-    expect(runRow).toHaveTextContent('bt-alpha-20y');
-    fireEvent.click(runRow as HTMLElement);
+    const runRow = await waitFor(() => {
+      const row = library.querySelector('.runs-evidence-row--run');
+      expect(row).not.toBeNull();
+      expect(row).toHaveTextContent('bt-alpha-20y');
+      if (!(row instanceof HTMLElement)) {
+        throw new Error('strategy-library run row did not render');
+      }
+      return row;
+    });
+    fireEvent.click(runRow);
 
     await waitFor(() => expect(window.location.hash).toBe('#/runs/bt-alpha-20y'));
     expect(fakeApi.getBacktestRunDetail).not.toHaveBeenCalled();
@@ -352,7 +360,7 @@ describe('runs index page', () => {
     expect(screen.queryByText(/对比模式/)).toBeNull();
     expect(document.querySelector('.runs-compare-mode, [data-testid="runs-compare-mode"]')).toBeNull();
 
-    const library = screen.getByLabelText('策略库视图');
+    const library = await screen.findByLabelText('策略库视图');
     expect(within(library).queryByRole('button', { name: /^删除$/ })).toBeNull();
     expect(library).not.toHaveTextContent('操作');
 

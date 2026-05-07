@@ -564,15 +564,20 @@ export function CreationTemplatePage(): JSX.Element {
         setLoading(true);
       }
       setLoadError(null);
-      const [strategyItems, runItems] = await Promise.all([
-        api.listStrategies(signal),
-        api.listBacktestRuns({ limit: 100 }, signal),
-      ]);
+      const library = api.getStrategyLibrary
+        ? await api.getStrategyLibrary(signal)
+        : await Promise.all([
+            api.listStrategies(signal),
+            api.listBacktestRuns(undefined, signal),
+          ]).then(([strategyItems, runItems]) => ({
+            strategies: strategyItems,
+            runs: runItems,
+          }));
       if (signal?.aborted) {
         return;
       }
-      setStrategies(strategyItems);
-      setRuns(runItems);
+      setStrategies(library.strategies);
+      setRuns(library.runs);
       if (options.showLoading) {
         setLoading(false);
       }

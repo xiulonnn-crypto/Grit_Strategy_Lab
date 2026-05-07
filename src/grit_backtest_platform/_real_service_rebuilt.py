@@ -566,8 +566,19 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 return deepcopy(cached[2])
             overview = build_pit_data_overview(self.market_data_repository)
             try:
-                snapshot_overview = self.get_snapshot_overview()
-                data_trust_summary = snapshot_overview.get("data_trust_summary")
+                data_trust_summary = None
+                with self._snapshot_overview_cache_lock:
+                    snapshot_cached = self._snapshot_overview_cache
+                    if (
+                        snapshot_cached is not None
+                        and self._snapshot_overview_cache_seconds > 0
+                        and now - snapshot_cached[0] <= self._snapshot_overview_cache_seconds
+                    ):
+                        cached_summary = snapshot_cached[2].get("data_trust_summary")
+                        if isinstance(cached_summary, Mapping):
+                            data_trust_summary = dict(cached_summary)
+                if data_trust_summary is None:
+                    data_trust_summary = build_data_trust_summary(registry_items=[])
                 if isinstance(data_trust_summary, Mapping):
                     overview["data_trust_summary"] = dict(data_trust_summary)
             except Exception:
@@ -767,6 +778,37 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
     def export_factor_diagnostic_report(self, factor_id: str, run_id: str) -> dict[str, Any]:
         return self._factor_research_service().export_factor_diagnostic_report(factor_id, run_id)
+
+    def factor_quarantine_intake(self, request: Any) -> dict[str, Any]:
+        return self._factor_research_service().factor_quarantine_intake(request)
+
+    def list_factor_quarantine_candidates(
+        self,
+        *,
+        status: str | None = None,
+        source_job_id: str | None = None,
+        cluster: str | None = None,
+    ) -> dict[str, Any]:
+        return self._factor_research_service().list_factor_quarantine_candidates(
+            status=status,
+            source_job_id=source_job_id,
+            cluster=cluster,
+        )
+
+    def get_factor_quarantine_candidate(self, candidate_id: str) -> dict[str, Any]:
+        return self._factor_research_service().get_factor_quarantine_candidate(candidate_id)
+
+    def run_factor_quarantine_candidate(self, candidate_id: str, request: Any | None = None) -> dict[str, Any]:
+        return self._factor_research_service().run_factor_quarantine_candidate(candidate_id, request)
+
+    def publish_factor_quarantine_candidate(self, candidate_id: str, request: Any | None = None) -> dict[str, Any]:
+        return self._factor_research_service().publish_factor_quarantine_candidate(candidate_id, request)
+
+    def get_factor_governance_overview(self) -> dict[str, Any]:
+        return self._factor_research_service().get_factor_governance_overview()
+
+    def create_factor_model_suggestion(self, request: Any) -> dict[str, Any]:
+        return self._factor_research_service().create_factor_model_suggestion(request)
 
     def _factor_universe_symbols(self, universe: Any) -> list[str]:
         normalized = str(universe or "SP500").strip().upper()
@@ -1615,6 +1657,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "LOW_COVERAGE",
             "DIAGNOSTIC_STALE",
             "STALE_DIAGNOSTIC",
+            "VERIFIED_PIT_WINDOW_INCOMPLETE",
         )
         warning_text_fragments = (
             "高相关",
@@ -1661,6 +1704,91 @@ class RealBacktestPlatformService(BacktestPlatformService):
         ):
             return True
         return default_hard
+
+    def _factor_model_low_risk_price_gap_context(self) -> dict[str, Any] | None:
+        try:
+            overview = self.get_pit_data_overview()
+        except Exception:
+            return None
+        coverage_gap = overview.get("coverage_gap") if isinstance(overview.get("coverage_gap"), Mapping) else {}
+        buckets = {
+            str(bucket.get("id") or ""): bucket
+            for bucket in coverage_gap.get("buckets") or []
+            if isinstance(bucket, Mapping)
+        }
+        current_core = int(_coerce_float((buckets.get("current_core_missing") or {}).get("count"), 0.0))
+        historical_core = int(_coerce_float((buckets.get("historical_lifecycle_missing") or {}).get("count"), 0.0))
+        non_core_bucket = buckets.get("non_core_missing") or {}
+        non_core = int(
+            _coerce_float(
+                non_core_bucket.get("count")
+                if non_core_bucket.get("count") is not None
+                else coverage_gap.get("default_ignored_count"),
+                0.0,
+            )
+        )
+        non_core_mcap_weight = _coerce_float(non_core_bucket.get("mcap_weight_pct"), 0.0)
+        missing_total = int(_coerce_float(coverage_gap.get("missing_symbol_count"), 0.0))
+        if missing_total <= 0 or non_core <= 0:
+            return None
+        if current_core > 0 or historical_core > 0 or non_core_mcap_weight > 0.0001:
+            return None
+        summary = (
+            f"PIT核心成员价格缺口为 {current_core}，"
+            f"{non_core} 个非核心缺口市值权重占比 {non_core_mcap_weight:.2f}%，"
+            "实盘准入风险极低。"
+        )
+        return {
+            "code": "LOW_RISK_NON_CORE_PRICE_GAP",
+            "label": "低风险准入",
+            "summary": summary,
+            "current_core_missing_count": current_core,
+            "historical_core_missing_count": historical_core,
+            "non_core_missing_count": non_core,
+            "non_core_mcap_weight_pct": round(non_core_mcap_weight, 4),
+            "missing_symbol_count": missing_total,
+        }
+
+    @staticmethod
+    def _factor_model_can_soften_price_gap_blocker(
+        item: Mapping[str, Any],
+        low_risk_context: Mapping[str, Any] | None,
+    ) -> bool:
+        if not low_risk_context:
+            return False
+        code = str(item.get("code") or item.get("reason_code") or "").upper()
+        return code in {
+            "PRICE_SNAPSHOT_NOT_READY",
+            "PIT_GATE_BLOCKED",
+            "PIT_BLOCKER",
+            "BLOCKED_PIT",
+        }
+
+    def _factor_model_soften_low_risk_price_gap_blockers(
+        self,
+        hard_blockers: Sequence[Mapping[str, Any]],
+        low_risk_context: Mapping[str, Any] | None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
+        retained: list[dict[str, Any]] = []
+        warnings: list[dict[str, Any]] = []
+        softened = False
+        for blocker in hard_blockers:
+            item = dict(blocker)
+            if self._factor_model_can_soften_price_gap_blocker(item, low_risk_context):
+                softened = True
+                warnings.append(
+                    {
+                        **item,
+                        "severity": "WARNING",
+                        "label": (low_risk_context or {}).get("label") or item.get("label") or item.get("code"),
+                        "message": (low_risk_context or {}).get("summary") or item.get("message") or "",
+                        "original_message": item.get("message"),
+                        "admission_risk_context": dict(low_risk_context or {}),
+                    }
+                )
+                continue
+            retained.append(item)
+        return retained, warnings, dict(low_risk_context or {}) if softened and low_risk_context else None
 
     def _factor_model_factor_strategy_risk(
         self,
@@ -1792,6 +1920,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         *,
         warning_count: int,
         blocked_count: int,
+        low_risk_context: Mapping[str, Any] | None = None,
     ) -> str:
         if blocked_count:
             return f"存在 {blocked_count} 个硬阻断，需修复 PIT、表达式或行业数据后才能创建策略。"
@@ -1808,6 +1937,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         neutralization_status: Mapping[str, Any],
         coverage_ratio: float,
         estimated_turnover: float,
+        low_risk_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         warnings = [dict(item) for item in factor_warnings]
         hard_blockers = [dict(item) for item in factor_hard_blockers]
@@ -1869,18 +1999,32 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     severity="WARNING",
                 )
             )
-        warnings = self._dedupe_factor_model_risk_items(warnings)
         hard_blockers = self._dedupe_factor_model_risk_items(hard_blockers)
+        hard_blockers, softened_warnings, applied_low_risk_context = self._factor_model_soften_low_risk_price_gap_blockers(
+            hard_blockers,
+            low_risk_context,
+        )
+        warnings.extend(softened_warnings)
+        warnings = self._dedupe_factor_model_risk_items(warnings)
+        summary = self._factor_model_strategy_creation_risk_summary(
+            warning_count=len(warnings),
+            blocked_count=len(hard_blockers),
+        )
+        if applied_low_risk_context and not hard_blockers:
+            summary = f"{applied_low_risk_context.get('summary')} 已转为创建提示，允许物化多因子策略。"
         return {
             "warning_count": len(warnings),
             "blocked_count": len(hard_blockers),
             "warnings": warnings,
             "hard_blockers": hard_blockers,
             "can_create": not hard_blockers,
-            "summary": self._factor_model_strategy_creation_risk_summary(
-                warning_count=len(warnings),
-                blocked_count=len(hard_blockers),
+            "summary_label": (
+                "低风险准入"
+                if applied_low_risk_context and not hard_blockers
+                else ("阻断" if hard_blockers else ("风险提示" if warnings else "无阻断"))
             ),
+            "summary": summary,
+            "admission_risk_context": applied_low_risk_context,
         }
 
     def preview_factor_model(self, request: Any) -> dict[str, Any]:
@@ -1964,8 +2108,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "fix_hash": "#/snapshots",
                 }
             )
-        blocked_factor_ids = {str(item.get("factor_id")) for item in pit_blockers if item.get("factor_id")}
         pit_blockers = self._dedupe_factor_model_risk_items(pit_blockers)
+        low_risk_context = self._factor_model_low_risk_price_gap_context()
         strategy_creation_risk = self._build_factor_model_strategy_creation_risk(
             factor_warnings=factor_risk_warnings,
             factor_hard_blockers=factor_risk_hard_blockers,
@@ -1973,7 +2117,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
             neutralization_status=neutralization_status,
             coverage_ratio=_coerce_float(score_projection["coverage_ratio"], 0.0),
             estimated_turnover=_coerce_float(score_projection["estimated_turnover"], 0.0),
+            low_risk_context=low_risk_context,
         )
+        blocked_factor_ids = {
+            str(item.get("factor_id"))
+            for item in strategy_creation_risk.get("hard_blockers") or []
+            if isinstance(item, Mapping) and item.get("factor_id")
+        }
         status = "BLOCKED" if strategy_creation_risk["blocked_count"] else "READY"
         return {
             "status": status,
@@ -2010,7 +2160,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         if hard_blockers and any(str(item.get("code") or "").upper() == "MISSING_INDUSTRY_PIT" for item in hard_blockers):
             raise ValueError("Industry neutralization is enabled but PIT industry fields are missing.")
         if hard_blockers:
-            raise ValueError("Factor model strategy creation risk contains hard blockers and cannot be materialized.")
+            raise ValueError("多因子策略创建风险包含硬阻断，修复后才能物化策略。")
         if neutralization_status.get("blockers"):
             raise ValueError("Industry neutralization is enabled but PIT industry fields are missing.")
         now = iso_now()
@@ -2295,14 +2445,6 @@ class RealBacktestPlatformService(BacktestPlatformService):
         neutralization = dict(parameters.get("neutralization") or {})
         ranges.extend(
             [
-                {
-                    "key": "neutralization_enabled",
-                    "label": "是否启用行业中性化",
-                    "mode": "fixed",
-                    "current": bool(neutralization.get("enabled")),
-                    "value": bool(neutralization.get("enabled")),
-                    "values": [bool(neutralization.get("enabled"))],
-                },
                 {
                     "key": "neutralization_method",
                     "label": "中性化方法",
@@ -5075,6 +5217,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         universe_snapshots: Sequence[Any],
         existing_price_snapshot: Mapping[str, Any] | None,
         existing_corporate_snapshot: Mapping[str, Any] | None,
+        repair_symbol_limit: Any | None = None,
     ) -> tuple[list[str], dict[str, Any]]:
         metadata: dict[str, Any] = {"selection_mode": mode}
         if mode == "repair":
@@ -5090,7 +5233,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
             )
             if existing_missing:
                 cursor = self._snapshot_repair_cursor(existing_price_snapshot or existing_corporate_snapshot)
-                batch_size = max(1, SNAPSHOT_REPAIR_SYMBOL_BATCH_SIZE)
+                try:
+                    requested_limit = int(repair_symbol_limit) if repair_symbol_limit is not None else 0
+                except (TypeError, ValueError):
+                    requested_limit = 0
+                batch_size = max(1, requested_limit or SNAPSHOT_REPAIR_SYMBOL_BATCH_SIZE)
                 selected, next_cursor = self._repair_symbol_batch(existing_missing, cursor, batch_size)
                 latest_symbols = self._latest_universe_symbols(universe_snapshots) if "universes" in targets else []
                 combined_selection = list(dict.fromkeys([*selected, *latest_symbols]))
@@ -5108,6 +5255,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                         "repair_cursor": next_cursor,
                         "repair_priority": "corporate_first_unified_queue",
                         "existing_corporate_missing_symbol_count": len(existing_corporate_missing),
+                        "repair_symbol_limit": batch_size,
                     }
                 )
                 return combined_selection, metadata
@@ -7962,6 +8110,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             universe_snapshots=selection_universe_snapshots,
             existing_price_snapshot=existing_price_snapshot,
             existing_corporate_snapshot=existing_corporate_snapshot,
+            repair_symbol_limit=payload.get("repair_symbol_limit"),
         )
         if selection_metadata.get("selection_mode") == "repair_missing_symbols_batch":
             warnings.append(

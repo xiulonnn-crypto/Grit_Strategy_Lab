@@ -55,6 +55,12 @@ export function installMockApiServer() {
         );
         return json(await demoApi.getWorkspaceOverview(includeCleanupAudit));
       }
+      if (method === 'GET' && url.pathname === '/strategy-library') {
+        return json({
+          strategies: await demoApi.listStrategies(),
+          runs: await demoApi.listBacktestRuns(),
+        });
+      }
       if (method === 'GET' && url.pathname === '/strategies') return json(await demoApi.listStrategies());
       if (method === 'GET' && segments[0] === 'strategies' && segments[2] === 'detail') return json(await demoApi.getStrategyDetail(segments[1]));
       if (method === 'POST' && segments[0] === 'strategies' && segments[2] === 'parameter-versions' && segments[4] === 'restore') {
@@ -311,6 +317,43 @@ export function installMockApiServer() {
       }
       if (method === 'POST' && segments[0] === 'factor-mining' && segments[1] === 'jobs' && segments[3] === 'cancel') {
         return json(await demoApi.cancelFactorMiningJob(segments[2]));
+      }
+      if (method === 'GET' && url.pathname === '/factor-governance/overview' && demoApi.getFactorGovernanceOverview) {
+        return json(await demoApi.getFactorGovernanceOverview());
+      }
+      if (method === 'GET' && url.pathname === '/factor-quarantine/candidates' && demoApi.listFactorQuarantineCandidates) {
+        return json(await demoApi.listFactorQuarantineCandidates({
+          status: url.searchParams.get('status') ?? undefined,
+          source_job_id: url.searchParams.get('source_job_id') ?? undefined,
+          cluster: url.searchParams.get('cluster') ?? undefined,
+        }));
+      }
+      if (method === 'POST' && url.pathname === '/factor-quarantine/intake' && demoApi.factorQuarantineIntake) {
+        return json(await demoApi.factorQuarantineIntake(body as import('./types').ApiFactorQuarantineIntakePayload));
+      }
+      if (
+        method === 'POST' &&
+        segments[0] === 'factor-quarantine' &&
+        segments[1] === 'candidates' &&
+        segments[3] === 'run' &&
+        demoApi.runFactorQuarantineCandidate
+      ) {
+        return json(await demoApi.runFactorQuarantineCandidate(
+          segments[2],
+          body as import('./types').ApiFactorQuarantineRunPayload,
+        ));
+      }
+      if (
+        method === 'POST' &&
+        segments[0] === 'factor-quarantine' &&
+        segments[1] === 'candidates' &&
+        segments[3] === 'publish' &&
+        demoApi.publishFactorQuarantineCandidate
+      ) {
+        return json(await demoApi.publishFactorQuarantineCandidate(
+          segments[2],
+          body as import('./types').ApiFactorQuarantinePublishPayload,
+        ));
       }
       if (method === 'POST' && url.pathname === '/factor-models/preview') {
         return json(await demoApi.previewFactorModel(body as import('./types').ApiFactorModelPreviewPayload));

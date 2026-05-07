@@ -151,7 +151,13 @@ describe('composition dashboard page', () => {
       render(<CompositionDashboardPage />);
     });
 
-    expect(await screen.findByRole('heading', { level: 1, name: '组合仪表板' })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        document.querySelector('.composition-dashboard-page[data-route-root="compositions"][data-page-root="composition-dashboard"]'),
+      ).not.toBeNull(),
+    );
+    expect(screen.getByRole('heading', { level: 1, name: '组合仪表板' })).toBeInTheDocument();
+    await waitFor(() => expect(document.querySelectorAll('.composition-dashboard-card').length).toBeGreaterThan(0));
 
     const root = document.querySelector(
       '.composition-dashboard-page[data-route-root="compositions"][data-page-root="composition-dashboard"]',
@@ -222,10 +228,16 @@ describe('composition dashboard page', () => {
         document.querySelector('.composition-dashboard-page[data-route-root="compositions"][data-page-root="composition-dashboard"]'),
       ).not.toBeNull(),
     );
-    const balancedCard = document.querySelector('.composition-dashboard-card') as HTMLElement;
-    expect(balancedCard).not.toBeNull();
+    const balancedCard = await waitFor(() => {
+      const card = document.querySelector('.composition-dashboard-card') as HTMLElement | null;
+      expect(card).not.toBeNull();
+      if (!card) {
+        throw new Error('composition dashboard card did not render');
+      }
+      return card;
+    });
 
-    fireEvent.click(within(balancedCard).getByRole('button', { name: '归档' }));
+    fireEvent.click(within(balancedCard as HTMLElement).getByRole('button', { name: '归档' }));
 
     const dialog = await screen.findByRole('dialog', { name: '确认归档组合' });
     fireEvent.click(within(dialog).getByRole('button', { name: '确认归档' }));
@@ -388,10 +400,16 @@ describe('composition dashboard page', () => {
       render(<CompositionDashboardPage />);
     });
 
-    const balancedCard = document.querySelector('.composition-dashboard-card') as HTMLElement;
-    expect(balancedCard).not.toBeNull();
+    const balancedCard = await waitFor(() => {
+      const card = document.querySelector('.composition-dashboard-card') as HTMLElement | null;
+      expect(card).not.toBeNull();
+      if (!card) {
+        throw new Error('composition dashboard card did not render');
+      }
+      return card;
+    });
 
-    fireEvent.click(within(balancedCard).getByRole('button', { name: '归档' }));
+    fireEvent.click(within(balancedCard as HTMLElement).getByRole('button', { name: '归档' }));
 
     expect(fakeApi.updateComposition).not.toHaveBeenCalled();
     const dialog = await screen.findByRole('dialog', { name: '确认归档组合' });

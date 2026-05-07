@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const fakeFactorApi = vi.hoisted(() => ({
@@ -7,6 +7,8 @@ const fakeFactorApi = vi.hoisted(() => ({
   getFactor: vi.fn(),
   getPitDataOverview: vi.fn(),
   runFactorDiagnostics: vi.fn(),
+  previewFactorDiagnostics: vi.fn(),
+  getFactorGovernanceOverview: vi.fn(),
 }));
 
 vi.mock('./lib/demoStoreContext', () => ({ useApiClient: () => fakeFactorApi }));
@@ -185,6 +187,8 @@ afterEach(() => {
   fakeFactorApi.getFactor.mockReset();
   fakeFactorApi.getPitDataOverview.mockReset();
   fakeFactorApi.runFactorDiagnostics.mockReset();
+  fakeFactorApi.previewFactorDiagnostics.mockReset();
+  fakeFactorApi.getFactorGovernanceOverview.mockReset();
   window.location.hash = '';
 });
 
@@ -205,11 +209,24 @@ describe('FactorModelBuilderPage', () => {
     expect(screen.getByLabelText('策略名称')).toHaveValue('多因子核心模型');
     expect(screen.getByRole('button', { name: '启用行业中性化' })).toBeInTheDocument();
     expect(screen.getByLabelText('12-1月截面动量排名权重')).toBeInTheDocument();
-    expect(screen.getAllByText('GICS Level 1 · PIT Snapshot · ZScore 后残差化')[0]).toBeInTheDocument();
+    expect(screen.getAllByText('再平衡配置').length).toBeGreaterThan(0);
+    expect(screen.getByLabelText('每月')).toBeChecked();
+    expect(screen.getByLabelText('每季度')).toBeInTheDocument();
+    expect(screen.getByLabelText('每半年')).toBeInTheDocument();
+    expect(screen.getByLabelText('每年')).toBeInTheDocument();
+    expect(screen.getByLabelText('从不')).toBeInTheDocument();
+    expect(screen.getAllByText('GICS · PIT 行业字段')[0]).toBeInTheDocument();
+    expect(screen.queryByText('GICS Level 1 · PIT Snapshot · ZScore 后残差化')).not.toBeInTheDocument();
     expect(screen.getByText('基础面 available_at 校验')).toBeInTheDocument();
-    expect(screen.getByText('MULTI_FACTOR')).toBeInTheDocument();
+    expect(screen.getAllByText('多因子策略').length).toBeGreaterThanOrEqual(1);
     const selectPanel = document.querySelector('[aria-labelledby="factor-model-select"]');
     const previewPanel = document.querySelector('[aria-labelledby="factor-model-preview"]');
+    const governanceRow = previewPanel?.querySelector('.factor-model-governance-row');
+    expect(selectPanel?.textContent).not.toContain('再平衡配置');
+    expect(governanceRow).not.toBeNull();
+    expect(governanceRow?.children).toHaveLength(2);
+    expect(governanceRow?.textContent).toContain('再平衡配置');
+    expect(governanceRow?.textContent).toContain('启用行业中性化');
     expect(selectPanel?.querySelector('.factor-weight-control')).toBeNull();
     expect(selectPanel?.textContent).not.toContain('30%');
     expect(previewPanel?.querySelectorAll('.factor-weight-control')).toHaveLength(5);
@@ -220,6 +237,114 @@ describe('FactorModelBuilderPage', () => {
     expect(screen.getByText('分层偏弱，建议调整权重或方向。')).toBeInTheDocument();
     expect(screen.getByText('等待预览接口返回样本')).toBeInTheDocument();
     expect(screen.getByText('零写入打分样本')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '创建可回测策略' })[0]).toBeDisabled();
+  });
+
+  it('accepts governance queue factor and weight prefill while staying in draft review mode', () => {
+    render(
+      <FactorModelBuilderPage
+        initialPrefill={{
+          source: 'governance_queue',
+          factorIds: ['s_mom_12m1m_rank', 's_val_ep_ltm_raw'],
+          weights: [20, 30],
+          directions: ['HIGH_IS_BETTER', 'HIGH_IS_BETTER'],
+          modelName: '自动挖掘因子待审查组合',
+        }}
+      />,
+    );
+
+    expect(screen.getByText('治理队列已代入')).toBeInTheDocument();
+    expect(screen.getByText('草稿 / 待审查')).toBeInTheDocument();
+    expect(screen.getByLabelText('策略名称')).toHaveValue('自动挖掘因子待审查组合');
+    expect((document.querySelector('#factor-weight-s_mom_12m1m_rank') as HTMLInputElement | null)?.value).toBe('20');
+    expect((document.querySelector('#factor-weight-s_val_ep_ltm_raw') as HTMLInputElement | null)?.value).toBe('30');
+  });
+
+  it('shows category, Rank IC, and IR tags in selector and weight factor cards', () => {
+    const liveFactors: FactorModelOption[] = [
+      {
+        id: 's_mom_12m1m_rank',
+        displayName: 'API 动量',
+        family: '动量',
+        categoryLabel: '动量',
+        rankIcLabel: 'Rank IC 0.052',
+        irLabel: 'IR 0.42',
+        sourceLabel: '系统默认',
+        diagnosticStatus: 'READY',
+        pitCoveragePct: 100,
+        defaultWeight: 100,
+        defaultDirection: 'HIGH_IS_GOOD',
+      },
+    ];
+
+    render(<FactorModelBuilderPage factors={liveFactors} useDefaultFallback={false} />);
+
+    const selectorCard = screen.getByLabelText('选择API 动量').closest('.factor-pick');
+    expect(selectorCard).not.toBeNull();
+    expect(within(selectorCard as HTMLElement).getByText('类别 动量')).toBeInTheDocument();
+    expect(within(selectorCard as HTMLElement).getByText('Rank IC 0.052')).toBeInTheDocument();
+    expect(within(selectorCard as HTMLElement).getByText('IR 0.42')).toBeInTheDocument();
+    expect(selectorCard?.textContent).not.toContain('高好');
+    expect(selectorCard?.textContent).not.toContain('低好');
+
+    const previewPanel = document.querySelector('[aria-labelledby="factor-model-preview"]');
+    const weightCard = within(previewPanel as HTMLElement).getByText('API 动量').closest('.factor-model-weight-row');
+    expect(weightCard).not.toBeNull();
+    const weightTitle = weightCard?.querySelector('.factor-model-weight-row__title');
+    expect(weightTitle).not.toBeNull();
+    expect(within(weightTitle as HTMLElement).getByText('API 动量')).toBeInTheDocument();
+    expect(within(weightTitle as HTMLElement).getByText('s_mom_12m1m_rank')).toHaveClass('factor-id');
+    expect(within(weightCard as HTMLElement).getByText('类别 动量')).toBeInTheDocument();
+    expect(within(weightCard as HTMLElement).getByText('Rank IC 0.052')).toBeInTheDocument();
+    expect(within(weightCard as HTMLElement).getByText('IR 0.42')).toBeInTheDocument();
+  });
+
+  it('renders every live selector factor sorted by absolute IR descending', () => {
+    const liveFactors: FactorModelOption[] = [
+      ['f_low_positive', 'Low positive IR', 0.012, 0.18],
+      ['f_high_negative', 'High negative IR', -0.091, -1.12],
+      ['f_medium_positive', 'Medium positive IR', 0.052, 0.44],
+      ['f_pending', 'Pending IR', null, null],
+      ['f_second_negative', 'Second negative IR', -0.075, -0.87],
+      ['f_tiny_positive', 'Tiny positive IR', 0.003, 0.05],
+      ['f_top_positive', 'Top positive IR', 0.12, 1.35],
+    ].map(([id, displayName, rankIc, ir]) => ({
+      id: String(id),
+      displayName: String(displayName),
+      family: 'Test',
+      categoryLabel: 'Test',
+      rankIc: rankIc === null ? null : Number(rankIc),
+      rankIcLabel: rankIc === null ? 'Rank IC 待诊断' : `Rank IC ${Number(rankIc).toFixed(3)}`,
+      ir: ir === null ? null : Number(ir),
+      irLabel: ir === null ? 'IR 待诊断' : `IR ${Number(ir).toFixed(2)}`,
+      sourceLabel: 'API',
+      diagnosticStatus: 'READY',
+      pitCoveragePct: 100,
+      defaultWeight: 0,
+      defaultDirection: 'HIGH_IS_GOOD' as const,
+    }));
+
+    render(<FactorModelBuilderPage factors={liveFactors} useDefaultFallback={false} />);
+
+    const selectorPanel = document.querySelector('[aria-labelledby="factor-model-select"]');
+    expect(selectorPanel?.querySelectorAll('.factor-pick')).toHaveLength(7);
+    expect(Array.from(selectorPanel?.querySelectorAll('.factor-pick strong') ?? []).map((node) => node.textContent)).toEqual([
+      'Top positive IR',
+      'High negative IR',
+      'Second negative IR',
+      'Medium positive IR',
+      'Low positive IR',
+      'Tiny positive IR',
+      'Pending IR',
+    ]);
+  });
+
+  it('can render the selector with all factors unchecked by default', () => {
+    render(<FactorModelBuilderPage defaultSelectAll={false} />);
+
+    const selectorPanel = document.querySelector('[aria-labelledby="factor-model-select"]');
+    expect(Array.from(selectorPanel?.querySelectorAll<HTMLInputElement>('.factor-pick input[type="checkbox"]') ?? []).every((node) => !node.checked)).toBe(true);
+    expect(document.querySelector('[aria-labelledby="factor-model-preview"] .factor-model-weight-row')).toBeNull();
     expect(screen.getAllByRole('button', { name: '创建可回测策略' })[0]).toBeDisabled();
   });
 
@@ -256,7 +381,38 @@ describe('FactorModelBuilderPage', () => {
     expect(screen.getByText('换手适中，建议复核成本假设。')).toBeInTheDocument();
     expect(screen.getByText('分层清晰，可继续检查尾部风险。')).toBeInTheDocument();
     expect(screen.getByText('样本 8 个 · 分布跨度 1.37')).toBeInTheDocument();
-    expect(screen.getByText('READY')).toBeInTheDocument();
+    expect(screen.getAllByText('通过').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('lets operators choose rebalance frequency before preview and creation', async () => {
+    const previewFactorModel = vi
+      .fn<(payload: FactorModelPreviewPayload) => Promise<FactorModelPreview>>()
+      .mockResolvedValue(makeReadyPreview());
+    const createFactorModel = vi
+      .fn<(payload: FactorModelPreviewPayload) => Promise<FactorModelCreateResponse>>()
+      .mockResolvedValue({ strategy_id: 'strat_quarterly_factor_model' });
+
+    render(<FactorModelBuilderPage api={{ previewFactorModel, createFactorModel }} />);
+
+    await waitFor(() => expect(previewFactorModel).toHaveBeenCalledTimes(1));
+    expect(previewFactorModel.mock.calls[0][0].rebalanceFrequency).toBe('monthly');
+
+    fireEvent.click(screen.getByLabelText('每季度'));
+
+    await waitFor(() => expect(previewFactorModel).toHaveBeenCalledTimes(2));
+    expect(previewFactorModel.mock.calls.at(-1)?.[0].rebalanceFrequency).toBe('quarterly');
+    const rebalanceRow = screen
+      .getAllByText('再平衡配置')
+      .map((node) => node.closest('.audit-row'))
+      .find(Boolean);
+    expect(rebalanceRow).not.toBeNull();
+    expect(within(rebalanceRow as HTMLElement).getByText('每季度')).toBeInTheDocument();
+
+    await waitFor(() => expect(screen.getAllByRole('button', { name: '创建可回测策略' })[0]).toBeEnabled());
+    fireEvent.click(screen.getAllByRole('button', { name: '创建可回测策略' })[0]);
+
+    await waitFor(() => expect(createFactorModel).toHaveBeenCalledTimes(1));
+    expect(createFactorModel.mock.calls[0][0].rebalanceFrequency).toBe('quarterly');
   });
 
   it('initializes live factors without design preset weights when the API does not provide suggestions', async () => {
@@ -374,6 +530,43 @@ describe('FactorModelBuilderPage', () => {
     await waitFor(() => expect(createFactorModel).toHaveBeenCalledTimes(1));
   });
 
+  it('shows low-risk PIT admission status without disabling creation', async () => {
+    const lowRiskSummary =
+      'PIT核心成员价格缺口为 0，209 个非核心缺口市值权重占比 0.00%，实盘准入风险极低。已转为创建提示，允许物化多因子策略。';
+    const previewFactorModel = vi
+      .fn<(payload: FactorModelPreviewPayload) => Promise<FactorModelPreview>>()
+      .mockResolvedValue(makeReadyPreview({
+        pitBlockers: ['PRICE_SNAPSHOT_NOT_READY'],
+        strategy_creation_risk: {
+          can_create: true,
+          warning_count: 1,
+          blocked_count: 0,
+          warnings: [{
+            code: 'PRICE_SNAPSHOT_NOT_READY',
+            severity: 'warning',
+            label: '低风险准入',
+            message: 'PIT核心成员价格缺口为 0，209 个非核心缺口市值权重占比 0.00%，实盘准入风险极低。',
+          }],
+          hard_blockers: [],
+          summary_label: '低风险准入',
+          summary: lowRiskSummary,
+        },
+      }));
+    const createFactorModel = vi
+      .fn<(payload: FactorModelPreviewPayload) => Promise<FactorModelCreateResponse>>()
+      .mockResolvedValue({ strategy_id: 'strat_low_risk_gap' });
+
+    render(<FactorModelBuilderPage api={{ previewFactorModel, createFactorModel }} />);
+
+    expect((await screen.findAllByText('低风险准入')).length).toBeGreaterThan(0);
+    expect(screen.getByText(lowRiskSummary)).toBeInTheDocument();
+    expect(screen.getAllByText('低风险提示').length).toBeGreaterThan(0);
+    await waitFor(() => expect(screen.getAllByRole('button', { name: '创建可回测策略' })[0]).toBeEnabled());
+    fireEvent.click(screen.getAllByRole('button', { name: '创建可回测策略' })[0]);
+
+    await waitFor(() => expect(createFactorModel).toHaveBeenCalledTimes(1));
+  });
+
   it('disables creation when strategy creation risk reports a hard blocker', async () => {
     const previewFactorModel = vi
       .fn<(payload: FactorModelPreviewPayload) => Promise<FactorModelPreview>>()
@@ -398,7 +591,7 @@ describe('FactorModelBuilderPage', () => {
 
     render(<FactorModelBuilderPage api={{ previewFactorModel, createFactorModel }} />);
 
-    expect(await screen.findByText('不能创建：unsafe expression。')).toBeInTheDocument();
+    expect(await screen.findByText('不能创建：不安全表达式。')).toBeInTheDocument();
     expect(screen.getAllByText('硬阻断').length).toBeGreaterThan(0);
     expect(screen.getAllByRole('button', { name: '创建可回测策略' })[0]).toBeDisabled();
     expect(createFactorModel).not.toHaveBeenCalled();
@@ -466,7 +659,7 @@ describe('FactorModelBuilderPage', () => {
 
     await waitFor(() => expect(createFactorModel).toHaveBeenCalledTimes(1));
     expect(createFactorModel.mock.calls[0][0].neutralization.enabled).toBe(false);
-    expect(await screen.findByText('已创建 MULTI_FACTOR 策略：strat_multifactor_no_neutralization')).toBeInTheDocument();
+    expect(await screen.findByText('已创建多因子策略：strat_multifactor_no_neutralization')).toBeInTheDocument();
   });
 
   it('ignores stale preview responses after neutralization is toggled', async () => {
@@ -500,14 +693,14 @@ describe('FactorModelBuilderPage', () => {
     await waitFor(() => expect(previewFactorModel).toHaveBeenCalledTimes(2));
 
     resolvers[1](blockedPreview);
-    expect(await screen.findByText('BLOCKED')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByText('阻断').length).toBeGreaterThanOrEqual(1));
 
     resolvers[0](readyWithoutNeutralization);
-    await waitFor(() => expect(screen.getByText('BLOCKED')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText('阻断').length).toBeGreaterThanOrEqual(1));
     expect(screen.getByText('不能创建：行业 PIT 字段缺失。')).toBeInTheDocument();
   });
 
-  it('creates a MULTI_FACTOR strategy and leaves navigation as an integration hook', async () => {
+  it('creates a multi-factor strategy and leaves navigation as an integration hook', async () => {
     const previewFactorModel = vi
       .fn<(payload: FactorModelPreviewPayload) => Promise<FactorModelPreview>>()
       .mockResolvedValue(makeReadyPreview());
@@ -533,7 +726,7 @@ describe('FactorModelBuilderPage', () => {
     expect(createFactorModel.mock.calls[0][0].factors.reduce((sum, factor) => sum + factor.weightPct, 0)).toBe(100);
     expect(createFactorModel.mock.calls[0][0].neutralization.enabled).toBe(false);
     expect(onCreated).toHaveBeenCalledWith('strat_multifactor_001');
-    expect(await screen.findByText('已创建 MULTI_FACTOR 策略：strat_multifactor_001')).toBeInTheDocument();
+    expect(await screen.findByText('已创建多因子策略：strat_multifactor_001')).toBeInTheDocument();
   });
 
   it('blocks materialization when the preview API reports missing industry PIT', async () => {
@@ -555,7 +748,7 @@ describe('FactorModelBuilderPage', () => {
     const riskBox = await screen.findByText('不能创建：行业 PIT 字段缺失。');
     expect(riskBox.closest('.strategy-risk-module')).not.toBeNull();
     expect(screen.getAllByText('行业 PIT 字段缺失')[0]).toBeInTheDocument();
-    expect(screen.getByText('BLOCKED')).toBeInTheDocument();
+    expect(screen.getAllByText('阻断').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByRole('button', { name: '创建可回测策略' })[0]).toBeDisabled();
   });
 
@@ -661,6 +854,76 @@ describe('FactorModelBuilderPage', () => {
     expect(within(popover).getByText('92.4%')).toBeInTheDocument();
   });
 
+  it('opens the factor library governance queue modal and routes draft suggestions to the builder', async () => {
+    fakeFactorApi.listFactors.mockResolvedValue({
+      items: [
+        makeFactor(),
+        makeFactor({
+          id: 'a_mom_auto_rank',
+          name: '[Auto-Mined] 动量候选',
+          source: 'AUTO_MINED',
+          lifecycle_status: 'VERIFIED',
+          diagnostic_status: 'COMPLETED',
+          expression: 'Rank(Delta(Close, 63))',
+        }),
+      ],
+      summary: { system_seed_count: 1, pit_status: 'READY', governance_queue_count: 2 },
+    });
+    fakeFactorApi.getFactorGovernanceOverview.mockResolvedValue({
+      as_of: '2026-05-06T09:00:00Z',
+      queue_count: 2,
+      actions: [
+        {
+          id: 'gq_review_a_mom_auto_rank',
+          kind: 'REVIEW',
+          label: '复核',
+          title: '自动挖掘候选需要复核',
+          detail: 'OOS 漂移进入观察区。',
+          factor_ids: ['a_mom_auto_rank'],
+          severity: 'warning',
+        },
+        {
+          id: 'gq_model_a_mom_auto_rank',
+          kind: 'FACTOR_MODEL_SUGGESTION',
+          label: '策略创建建议',
+          title: '多因子策略草稿建议',
+          detail: '建议权重不超过 20%，进入创建页后仍需预检。',
+          factor_ids: ['a_mom_auto_rank', 's_mom_12m1m_rank'],
+          suggested_weights: [
+            { factor_id: 'a_mom_auto_rank', weight_pct: 20, direction: 'HIGH_IS_BETTER' },
+            { factor_id: 's_mom_12m1m_rank', weight_pct: 30, direction: 'HIGH_IS_BETTER' },
+          ],
+          severity: 'info',
+          target: {
+            route: '#/factor-models/new',
+            query: {
+              source: 'governance_queue',
+              factorIds: 'a_mom_auto_rank,s_mom_12m1m_rank',
+              weights: '20,30',
+              directions: 'HIGH_IS_BETTER,HIGH_IS_BETTER',
+            },
+          },
+        },
+      ],
+    });
+    render(<FactorLibraryPage />);
+
+    const trigger = (await screen.findByText('治理队列')).closest('button');
+    expect(trigger).not.toBeNull();
+    fireEvent.click(trigger as HTMLButtonElement);
+
+    expect(await screen.findByRole('dialog', { name: '治理队列' })).toBeInTheDocument();
+    await waitFor(() => expect(fakeFactorApi.getFactorGovernanceOverview).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('自动挖掘候选需要复核')).toBeInTheDocument();
+    expect(screen.getByText('多因子策略草稿建议')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '带入创建页' }));
+
+    await waitFor(() => expect(window.location.hash).toContain('#/factor-models/new'));
+    expect(window.location.hash).toContain('source=governance_queue');
+    expect(decodeURIComponent(window.location.hash)).toContain('a_mom_auto_rank');
+    expect(decodeURIComponent(window.location.hash)).toContain('weights=20,30');
+  });
+
   it('renders no-IC factors as pending instead of showing a synthetic IC curve', async () => {
     fakeFactorApi.listFactors.mockResolvedValue({
       items: [
@@ -722,7 +985,7 @@ describe('FactorModelBuilderPage', () => {
           ],
           readiness_blockers: [{
             code: 'VERIFIED_PIT_WINDOW_INCOMPLETE',
-            message: '完整 Verified PIT 门禁尚未通过，当前仅允许 Sandbox 诊断。',
+            message: '完整PIT 门禁尚未通过，当前仅允许 Sandbox 诊断。',
           }],
           strategy_creation_risk: {
             can_create: true,
@@ -731,7 +994,7 @@ describe('FactorModelBuilderPage', () => {
             warnings: [{
               code: 'VERIFIED_PIT_WINDOW_INCOMPLETE',
               severity: 'warning',
-              message: '完整 Verified PIT 门禁尚未通过，当前仅允许 Sandbox 诊断。',
+              message: '完整PIT 门禁尚未通过，当前仅允许 Sandbox 诊断。',
             }],
             hard_blockers: [],
           },
@@ -754,6 +1017,97 @@ describe('FactorModelBuilderPage', () => {
     expect(screen.queryByText('硬阻断')).not.toBeInTheDocument();
   });
 
+  it('replaces reference diagnostics with read-only real factor preview metrics', async () => {
+    fakeFactorApi.listFactors.mockResolvedValue({
+      items: [
+        makeFactor({
+          id: 's_mom_6m_rank',
+          name: '6个月动量因子',
+          diagnostic_status: 'SANDBOX_READY',
+          ui_state: 'sandbox',
+          ui_state_label: '沙箱',
+          latest_diagnostic_summary: {
+            run_id: 'ref:fdiag_mom_latest',
+            factor_id: 's_mom_6m_rank',
+            status: 'REFERENCE_ONLY',
+            diagnostic_mode: 'SANDBOX',
+            rank_ic: 0.052,
+            ir: 0.42,
+            coverage: 92.4,
+            source_factor_id: 's_mom_12m1m_rank',
+            source_factor_name: '12-1 动量参考因子',
+            data_lineage: {
+              kind: 'REFERENCE_DEFAULT_FACTOR',
+              label: '参考口径：12-1 动量参考因子',
+            },
+          },
+          last_diagnostic_run_id: null,
+          ic_sparkline: [
+            { date: '2026-05-01', value: 0.03 },
+            { date: '2026-05-02', value: 0.05 },
+          ],
+        }),
+      ],
+      summary: { system_seed_count: 1, pit_status: 'BLOCKED' },
+    });
+    const previewPayload = {
+      mode: 'BATCH',
+      status: 'PREVIEW',
+      items: [
+        {
+          factor_id: 's_mom_6m_rank',
+          latest_diagnostic_summary: {
+            run_id: 'preview:s_mom_6m_rank',
+            factor_id: 's_mom_6m_rank',
+            status: 'PREVIEW',
+            diagnostic_mode: 'SANDBOX',
+            rank_ic: 0.031,
+            ir: 0.25,
+            coverage: 88.2,
+            data_lineage: { kind: 'FACTOR_EXPRESSION_PREVIEW', label: '真实口径：因子表达式即时预览' },
+            ic_series: [{ date: '2026-05-01', rank_ic: 0.031 }],
+          },
+          batch_diagnostic_summary: {
+            status: 'PREVIEW',
+            rank_ic: 0.031,
+            ir: 0.25,
+            coverage: 88.2,
+          },
+        },
+      ],
+      batch_summary: {
+        factor_count: 1,
+        robust_count: 0,
+        needs_calibration_count: 0,
+        decayed_count: 0,
+        sandbox_count: 1,
+        warning_count: 0,
+        blocked_count: 0,
+      },
+    };
+    let resolvePreview!: (payload: typeof previewPayload) => void;
+    fakeFactorApi.previewFactorDiagnostics.mockReturnValue(new Promise((resolve) => {
+      resolvePreview = resolve;
+    }));
+
+    render(<FactorLibraryPage />);
+
+    await waitFor(() => expect(fakeFactorApi.previewFactorDiagnostics).toHaveBeenCalledWith(
+      expect.objectContaining({
+        batch: true,
+        factor_ids: ['s_mom_6m_rank'],
+        diagnostic_mode: 'SANDBOX',
+      }),
+    ));
+    expect(screen.queryByText('Rank IC 0.052')).not.toBeInTheDocument();
+    expect(document.querySelector('.factor-diagnostic-cell__reference')).toBeNull();
+    await act(async () => {
+      resolvePreview(previewPayload);
+    });
+    expect(await screen.findByText('Rank IC 0.031')).toBeInTheDocument();
+    expect(document.querySelector('.factor-diagnostic-cell__reference')).toBeNull();
+  });
+
   it('renders factor detail from the light factor response before the PIT overview finishes', async () => {
     fakeFactorApi.getFactor.mockResolvedValue(makeFactorDetail());
     fakeFactorApi.getPitDataOverview.mockReturnValue(new Promise(() => undefined));
@@ -762,6 +1116,8 @@ describe('FactorModelBuilderPage', () => {
 
     expect(await screen.findByRole('heading', { level: 1, name: /Fama-French 风格合成 Alpha诊断报告/ })).toBeInTheDocument();
     expect(screen.getByText('提交 Sandbox 诊断')).toBeDisabled();
+    expect(screen.getByText('审计足迹')).toBeInTheDocument();
+    expect(screen.getByText('回溯窗口')).toBeInTheDocument();
     expect(fakeFactorApi.getPitDataOverview).toHaveBeenCalledTimes(1);
   });
 
@@ -770,12 +1126,25 @@ describe('FactorModelBuilderPage', () => {
     const factorsCss = readFileSync('src/pages/factors-page.css', 'utf8');
 
     expect(css).toMatch(/\.factor-model-builder-page\.factor-phase2-page\s*\{[^}]*width:\s*100%;/s);
+    expect(css).toMatch(/\.factor-model-builder-page\.factor-phase2-page\s*\{[^}]*max-width:\s*1960px;/s);
+    expect(css).toMatch(/\.factor-phase2-hero\s*\{[^}]*max-width:\s*1960px;/s);
+    expect(css).toMatch(/\.factor-phase2-hero\s*\{[^}]*margin:\s*0;/s);
     expect(css).toMatch(/\.factor-model-builder-page \.factor-phase2-workbench--model\s*\{[^}]*grid-template-columns:\s*minmax\(280px,\s*0\.85fr\)\s*minmax\(0,\s*1\.42fr\)\s*minmax\(320px,\s*0\.78fr\);/s);
     expect(css).toContain('.factor-model-builder-page .factor-pick');
     expect(css).toContain('.factor-model-builder-page .factor-model-name-control');
     expect(css).toContain('.factor-model-builder-page .factor-weight-control');
     expect(css).toContain('.factor-model-builder-page .factor-model-weight-controls');
     expect(css).toContain('.factor-model-builder-page .factor-model-weight-row');
+    expect(css).toContain('.factor-model-builder-page .factor-model-weight-row__title');
+    expect(css).toMatch(/\.factor-model-builder-page \.factor-model-weight-row__title \.factor-id\s*\{[^}]*margin-top:\s*0;[^}]*text-align:\s*right;/s);
+    expect(css).toMatch(/\.factor-model-builder-page \.factor-model-weight-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
+    expect(css).toMatch(/\.factor-model-builder-page \.factor-model-selector-list\s*\{[^}]*max-height:\s*calc\(\(96px \* 5\) \+ \(9\.5px \* 4\)\);[^}]*overflow-y:\s*auto;/s);
+    expect(css).toContain('.factor-model-builder-page .factor-model-card-tags');
+    expect(css).toContain('.factor-model-builder-page .factor-model-metric-chip--rank-ic');
+    expect(css).toMatch(/\.factor-model-builder-page \.factor-model-metric-chip\s*\{[^}]*background:\s*#f7f8fa;[^}]*color:\s*#52616d;/s);
+    expect(css).toMatch(/\.factor-model-builder-page \.factor-model-metric-chip--category,[\s\S]*\.factor-model-builder-page \.factor-model-metric-chip--rank-ic,[\s\S]*\.factor-model-builder-page \.factor-model-metric-chip--ir\s*\{[^}]*background:\s*#f7f8fa;[^}]*color:\s*#52616d;/s);
+    expect(css).toMatch(/\.factor-model-builder-page \.factor-model-governance-row\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(min\(240px,\s*100%\),\s*1fr\)\);/s);
+    expect(css).toContain('.factor-model-builder-page .factor-model-rebalance-control');
     expect(css).toContain('.factor-model-builder-page .score-card small');
     expect(css).toContain('.factor-model-builder-page .neutral-block');
     expect(css).toContain('.factor-model-builder-page .switch--off');
@@ -786,7 +1155,9 @@ describe('FactorModelBuilderPage', () => {
     expect(factorsCss).toContain('.factor-diagnostic-state__button');
     expect(factorsCss).toContain('.factor-gate-pill--warn');
     expect(factorsCss).toContain('.factor-sparkline-empty');
-    expect(factorsCss).toMatch(/\.factor-table\s*\{[^}]*min-width:\s*980px;/s);
+    expect(factorsCss).toContain('.factor-level-cell');
+    expect(factorsCss).toContain('.factor-level-badge--s');
+    expect(factorsCss).toMatch(/\.factor-table\s*\{[^}]*min-width:\s*1120px;/s);
     expect(factorsCss).toMatch(/\.factor-diagnostic-cell\s*\{[^}]*grid-template-columns:\s*minmax\(134px,\s*1fr\)\s*max-content\s*116px;/s);
     expect(factorsCss).toMatch(/\.factor-diagnostic-state\s*\{[^}]*position:\s*relative;/s);
     expect(factorsCss).toMatch(/\.factor-diagnostic-popover\s*\{[^}]*z-index:\s*80;/s);

@@ -189,6 +189,19 @@ function trustLayerDisplayCopy(layer: ApiDataTrustLayer): TrustLayerDisplayCopy 
 
 function trustLayerProviderLine(layer: ApiDataTrustLayer, usableCount: number, providerCount: number): string {
   const preferredProvider = formatEquitySourceLabel(layer.preferred_provider || layer.provider_ids?.[0]);
+  const providerIds =
+    Array.isArray(layer.provider_ids) && layer.provider_ids.length
+      ? layer.provider_ids
+      : Array.isArray(layer.registered_provider_ids)
+        ? layer.registered_provider_ids
+        : [];
+  const providerChain = providerIds
+    .map((providerId) => formatEquitySourceLabel(providerId))
+    .filter((label) => label.length > 0)
+    .join(' → ');
+  if (providerChain && providerChain !== preferredProvider) {
+    return `优先级：${providerChain} · 可用 ${usableCount}/${providerCount}`;
+  }
   return `主源：${preferredProvider} · 可用 ${usableCount}/${providerCount}`;
 }
 
@@ -258,6 +271,15 @@ function credentialPlaceholder(envName: string): string {
 
 function quotePowerShellEnvValue(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+function buildPowerShellPersistCredentialCommands(envName: string, value: string): string[] {
+  const quotedEnvName = quotePowerShellEnvValue(envName);
+  const quotedValue = quotePowerShellEnvValue(value);
+  return [
+    `[Environment]::SetEnvironmentVariable(${quotedEnvName}, ${quotedValue}, 'User')`,
+    `[Environment]::SetEnvironmentVariable(${quotedEnvName}, ${quotedValue}, 'Process')`,
+  ];
 }
 
 async function writeTextToClipboard(text: string): Promise<boolean> {
@@ -356,10 +378,14 @@ function formatEquitySourceLabel(value?: string | null): string {
       return 'Tiingo';
     case 'fmp':
       return 'Financial Modeling Prep';
+    case 'finnhub':
+      return 'Finnhub 身份校验';
     case 'fmp_historical_constituent':
       return 'FMP 历史成分';
     case 'stooq':
       return 'Stooq 长周期价格';
+    case 'nasdaq_wiki':
+      return 'Nasdaq WIKI 历史价格';
     case 'kaggle_huge_stock_market_dataset':
       return 'Kaggle 批量价格';
     case 'kaggle_delisted_bulk_archive':
@@ -842,35 +868,37 @@ function DataTrustLayerPanel({ layers }: { layers: ApiDataTrustLayer[] }): JSX.E
     );
   };
   const buildQuickStartCredentialCommand = (activeEnvName: string): string => {
-    const envCommands = missingCredentialOptions
+    const credentialPairs = missingCredentialOptions
       .map((envName) => [envName, String(credentialDrafts[envName] ?? '').trim()] as const)
-      .filter(([, value]) => value)
-      .map(([envName, value]) => `$env:${envName}=${quotePowerShellEnvValue(value)}`);
-    if (!envCommands.some((command) => command.startsWith(`$env:${activeEnvName}=`))) {
+      .filter(([, value]) => value);
+    if (!credentialPairs.some(([envName]) => envName === activeEnvName)) {
       const activeValue = String(credentialDrafts[activeEnvName] ?? '').trim();
       if (activeValue) {
-        envCommands.push(`$env:${activeEnvName}=${quotePowerShellEnvValue(activeValue)}`);
+        credentialPairs.push([activeEnvName, activeValue]);
       }
     }
+    const envCommands = credentialPairs.flatMap(([envName, value]) =>
+      buildPowerShellPersistCredentialCommands(envName, value),
+    );
     return [...envCommands, 'powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1'].join('\n');
   };
   const copyCredentialCommand = async (envName: string): Promise<void> => {
     const value = String(credentialDrafts[envName] ?? '').trim();
     if (!value) {
-      setCredentialNotices((current) => ({ ...current, [envName]: '请先输入本机配置值，再复制启动命令。' }));
+      setCredentialNotices((current) => ({ ...current, [envName]: '请先输入本机配置值，再复制持久化启动命令。' }));
       return;
     }
     const command = buildQuickStartCredentialCommand(envName);
     if (await writeTextToClipboard(command)) {
       setCredentialNotices((current) => ({
         ...current,
-        [envName]: '已复制设置+重启命令；请粘贴到将启动 QuickStart 的同一个 PowerShell。',
+        [envName]: '已复制用户环境持久化+重启命令；粘贴执行一次后，后续新启动 QuickStart 会自动继承。',
       }));
       return;
     }
     setCredentialNotices((current) => ({
       ...current,
-      [envName]: '复制失败；请在将启动 QuickStart 的同一个 PowerShell 中手动设置并重启。',
+      [envName]: '复制失败；请手动写入 Windows 用户环境或 QuickStart-Grit.local.ps1 后重启。',
     }));
   };
   return (
@@ -910,10 +938,10 @@ function DataTrustLayerPanel({ layers }: { layers: ApiDataTrustLayer[] }): JSX.E
             <span className="factor-muted">{missingCredentialOptions.length} 项待配置</span>
           </div>
           <p className="factor-muted">
-            先选择需要补齐的本机配置，再输入值并复制 PowerShell 设置+重启命令；输入值仅保存在当前浏览器标签页，不提交后端、不落库。
+            先选择需要补齐的本机配置，再输入值并复制 PowerShell 用户环境持久化+重启命令；输入值仅保存在当前浏览器标签页，不提交后端、不落库。
           </p>
           <p className="factor-muted snapshots-trust-restart-note">
-            刷新页面会保留本标签页草稿。真正的 provider 状态仍以后端启动时读到的环境变量为准；请把复制出的命令粘贴到将启动 QuickStart 的同一个 PowerShell。
+            复制命令会同时写入 Windows 用户环境和当前 PowerShell 进程；当前后端仍需重启后才会读取新值。
           </p>
           <div className="snapshots-trust-credential-form">
             <label htmlFor="snapshots-missing-api-key-select">选择缺少的 API_KEY</label>
@@ -951,7 +979,7 @@ function DataTrustLayerPanel({ layers }: { layers: ApiDataTrustLayer[] }): JSX.E
                   </button>
                 </div>
                 <small>
-                  {credentialNotices[activeCredential] || '复制命令会带上当前已输入的全部 key，并在同一个 PowerShell 启动 QuickStart。'}
+                  {credentialNotices[activeCredential] || '复制命令会带上当前已输入的全部 key，写入 Windows 用户环境并立即重启 QuickStart。'}
                 </small>
               </div>
             ) : null}

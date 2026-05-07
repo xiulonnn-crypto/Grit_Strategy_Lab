@@ -6,11 +6,41 @@ import { installMockApiServer } from './testApiMock';
 
 let mockServer: ReturnType<typeof installMockApiServer> | null = null;
 
+const ROUTE_ROOT_SELECTOR = [
+  '.workspace-page',
+  '.creation-template-page',
+  '.asset-allocation-page',
+  '.strategy-detail-page',
+  '.composition-dashboard-page',
+  '[data-page-root="composition-global-list"]',
+  '[data-page-root="composition-global-backtest-runs"]',
+  '[data-page-root="composition-global-lab"]',
+  '.leg-inventory-page',
+  '.composition-workbench-page',
+  '.composition-detail-page',
+  '.composition-backtest-config-page',
+  '.composition-backtest-result-page',
+  '[data-page-root="composition-allocation-config"]',
+  '[data-page-root="composition-allocation-result"]',
+  '.backtest-submit-page',
+  '.optimization-lab-page',
+  '.optimization-config-grid',
+  '[data-page-root="runs-index"]',
+  '.runs-index-page',
+  '.snapshots-page',
+  '[data-page-root="pit-cleaning-center"]',
+  '[data-page-root="factor-library"]',
+  '[data-page-root="factor-detail"]',
+  '[data-page-root="factor-editor"]',
+  '[data-page-root="factor-quarantine"]',
+].join(', ');
+
 async function renderApp(hash: string): Promise<void> {
   await act(async () => {
     window.location.hash = hash;
     render(<App />);
   });
+  await waitFor(() => expect(document.querySelector(ROUTE_ROOT_SELECTOR)).not.toBeNull());
 }
 
 beforeEach(() => {
@@ -72,7 +102,9 @@ describe('App runtime routes', () => {
     await renderApp('#/compositions');
 
     expect(document.querySelector('.composition-dashboard-page')).not.toBeNull();
-    expect(await screen.findByRole('heading', { level: 1, name: '组合仪表板' })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { level: 1, name: '组合仪表板' })).toBeInTheDocument(),
+    );
   });
 
   it('renders composition v2 global routes before the dynamic detail route', async () => {
@@ -161,7 +193,7 @@ describe('App runtime routes', () => {
     await renderApp('#/strategies/strat-001/backtest-runs/new');
 
     expect(document.querySelector('.backtest-submit-page')).not.toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: /回测|submit/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /回测|submit/i }));
 
     await waitFor(() => expect(window.location.hash).toBe('#/runs/bt-001'));
     expect((await screen.findAllByText(/bt-001/)).length).toBeGreaterThan(0);
@@ -288,11 +320,17 @@ describe('App runtime routes', () => {
     expect(screen.getAllByText('s_val_ep_ltm_raw').length).toBeGreaterThan(0);
     expect(screen.getByText('诊断状态')).toBeInTheDocument();
     expect(screen.getByText('阻断 / 风险')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '因子级别排序' })).toBeInTheDocument();
     expect(screen.getAllByText(/无阻断|风险提示/).length).toBeGreaterThanOrEqual(5);
     const toolbarFilters = document.querySelector('.factor-toolbar__filters');
     expect(toolbarFilters).not.toBeNull();
-    expect(toolbarFilters?.querySelectorAll('select')).toHaveLength(3);
+    expect(toolbarFilters?.querySelectorAll('select')).toHaveLength(4);
     expect(document.querySelector('.factor-diagnostic-cell__metrics')).not.toBeNull();
+    expect(document.querySelector('.factor-level-cell')).not.toBeNull();
+    expect(screen.getAllByText('B').length).toBeGreaterThan(0);
+    expect(screen.getByLabelText('因子级别名词解释')).toBeInTheDocument();
+    expect(screen.getByText(/先取绝对值/)).toBeInTheDocument();
+    expect(screen.getByText(/S 顶级印钞机: Rank IC > 0.03, IR > 2.0/)).toBeInTheDocument();
     expect(document.querySelector('tbody tr:first-child .factor-diagnostic-state__button')?.textContent).toMatch(/稳健|待校准|失效|沙箱/);
     expect(screen.getByRole('button', { name: '最近更新排序' })).toHaveClass('is-active');
     expect(document.querySelector('tbody tr:first-child .factor-link')?.textContent).toContain('252日年化波动率排名');
@@ -302,6 +340,12 @@ describe('App runtime routes', () => {
     expect(document.querySelector('.factor-table .factor-formula')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '最近诊断排序' }));
     expect(document.querySelector('tbody tr:first-child .factor-link')?.textContent).toContain('12-1月截面动量排名');
+    fireEvent.click(screen.getByRole('button', { name: '因子级别排序' }));
+    expect(screen.getByRole('button', { name: '因子级别排序' })).toHaveClass('is-active');
+    fireEvent.change(screen.getByLabelText('因子级别'), { target: { value: 'D' } });
+    expect(document.querySelectorAll('.factor-table tbody tr')).toHaveLength(0);
+    fireEvent.change(screen.getByLabelText('因子级别'), { target: { value: 'B' } });
+    expect(document.querySelectorAll('.factor-table tbody tr').length).toBeGreaterThan(0);
     expect(screen.getByText('相关性热力图')).toBeInTheDocument();
     expect(screen.getByText('语义聚类 · Pearson / Rank Correlation')).toBeInTheDocument();
     expect(screen.getByLabelText('仅显示高相关对')).toBeInTheDocument();
@@ -332,7 +376,7 @@ describe('App runtime routes', () => {
     expect(screen.getByText('分层收益与 IC 走势')).toBeInTheDocument();
     expect(screen.getByText('风险提示')).toBeInTheDocument();
     expect(screen.getByText('换手率与衰减')).toBeInTheDocument();
-    expect(screen.getByText('合规足迹')).toBeInTheDocument();
+    expect(screen.getByText('审计足迹')).toBeInTheDocument();
 
     cleanup();
     await renderApp('#/factors/new');
@@ -342,6 +386,16 @@ describe('App runtime routes', () => {
     expect(screen.getByText('5 年样本内 IC 预览')).toBeInTheDocument();
     expect(screen.getByText('m_mom_short_5d_rank')).toBeInTheDocument();
     expect(document.querySelector('[data-tooltip*="时间序列排序"]')).not.toBeNull();
+
+    cleanup();
+    await renderApp('#/factors/quarantine');
+
+    expect(document.querySelector('[data-page-root="factor-quarantine"]')).not.toBeNull();
+    expect(await screen.findByRole('heading', { level: 1, name: '检疫工作台' })).toBeInTheDocument();
+    expect(screen.getAllByText('候选队列').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('检疫报告').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('发布审计').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('拒绝样本库')).toBeInTheDocument();
   });
 
   it('keeps factor heatmap row accent confined to the factor column', () => {

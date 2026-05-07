@@ -98,7 +98,7 @@ def test_workspace_overview_can_include_cleanup_audit_without_changing_default_c
     assert overview["last_cleanup_count"] == 0
 
 
-def test_backtest_runs_list_includes_strategy_name_for_runs_index(tmp_path):
+def test_backtest_runs_list_and_detail_include_strategy_name(tmp_path):
     client, _ = create_test_client(tmp_path)
     strategy = create_momentum_strategy(client, idempotency_key="runs-list-strategy-name")["strategy"]
     created_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -113,10 +113,14 @@ def test_backtest_runs_list_includes_strategy_name_for_runs_index(tmp_path):
     )
 
     runs = assert_ok(client.get("/backtest-runs?limit=1"))
+    detail = assert_ok(client.get("/backtest-runs/run_list_strategy_name/detail?view=initial"))
 
     assert runs[0]["id"] == "run_list_strategy_name"
     assert runs[0]["strategy_id"] == strategy["id"]
     assert runs[0]["strategy_name"] == strategy["name"]
+    assert detail["id"] == "run_list_strategy_name"
+    assert detail["strategy_id"] == strategy["id"]
+    assert detail["strategy_name"] == strategy["name"]
 
 
 def test_strategies_list_includes_latest_completed_run_summary_for_workspace_cards(tmp_path):
@@ -231,7 +235,14 @@ def test_snapshot_overview_contract_is_exact_on_fresh_database(tmp_path):
 
 
 def test_snapshot_provider_registry_and_attempts_are_available_on_fresh_database(tmp_path, monkeypatch):
-    for env_name in ("TIINGO_API_TOKEN", "FMP_API_KEY", "SEC_USER_AGENT", "POLYGON_API_KEY"):
+    for env_name in (
+        "TIINGO_API_TOKEN",
+        "FMP_API_KEY",
+        "SEC_USER_AGENT",
+        "POLYGON_API_KEY",
+        "NASDAQ_DATA_LINK_API_KEY",
+        "FINNHUB_API_KEY",
+    ):
         monkeypatch.delenv(env_name, raising=False)
 
     client, _ = create_test_client(tmp_path)
@@ -245,6 +256,8 @@ def test_snapshot_provider_registry_and_attempts_are_available_on_fresh_database
         "openbb_index_constituents",
         "github_sp500_historical_components",
         "kaggle_huge_stock_market_dataset",
+        "nasdaq_wiki",
+        "finnhub",
         "polygon",
     }
     openbb_index = next(item for item in registry["items"] if item["provider_id"] == "openbb_index_constituents")
@@ -267,6 +280,16 @@ def test_snapshot_provider_registry_and_attempts_are_available_on_fresh_database
     assert fmp_constituent["trust_profile"]["can_upgrade_full_ready"] is False
     stooq = next(item for item in registry["items"] if item["provider_id"] == "stooq")
     assert stooq["trust_profile"]["trust_tier"] == "long_history_price_patch"
+    nasdaq_wiki = next(item for item in registry["items"] if item["provider_id"] == "nasdaq_wiki")
+    assert nasdaq_wiki["credential_requirements"]["required_env_vars"] == ["NASDAQ_DATA_LINK_API_KEY"]
+    assert nasdaq_wiki["credential_ready"] is False
+    assert nasdaq_wiki["pit_permission"]["mode"] == "price_only"
+    assert nasdaq_wiki["trust_profile"]["trust_tier"] == "long_history_price_patch"
+    finnhub = next(item for item in registry["items"] if item["provider_id"] == "finnhub")
+    assert finnhub["credential_requirements"]["required_env_vars"] == ["FINNHUB_API_KEY"]
+    assert finnhub["credential_ready"] is False
+    assert finnhub["pit_permission"]["mode"] == "identity_only"
+    assert finnhub["trust_profile"]["trust_tier"] == "identity_listing_crosscheck"
     sec = next(item for item in registry["items"] if item["provider_id"] == "sec_edgar")
     assert sec["credential_requirements"]["required_env_vars"] == ["SEC_USER_AGENT"]
     assert sec["trust_profile"]["trust_tier"] == "identity_lifecycle_authority"
@@ -302,6 +325,25 @@ def test_snapshot_provider_registry_reuses_snapshot_overview_cache(tmp_path, mon
     assert registry["items"]
     assert attempts["rollup"]["policy"] == "unique_provider_latest_job_priority"
     assert build_calls == 1
+
+
+def test_snapshot_provider_registry_masks_nasdaq_wiki_and_finnhub_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("NASDAQ_DATA_LINK_API_KEY", "nasdaq-secret-value")
+    monkeypatch.setenv("FINNHUB_API_KEY", "finnhub-secret-value")
+    client, _ = create_test_client(tmp_path)
+
+    registry = assert_ok(client.get("/data-snapshots/provider-registry"))
+
+    nasdaq_wiki = next(item for item in registry["items"] if item["provider_id"] == "nasdaq_wiki")
+    finnhub = next(item for item in registry["items"] if item["provider_id"] == "finnhub")
+    assert nasdaq_wiki["credential_requirements"]["configured"] is True
+    assert nasdaq_wiki["credential_requirements"]["configured_env_vars"] == ["NASDAQ_DATA_LINK_API_KEY"]
+    assert nasdaq_wiki["credential_requirements"]["missing_env_vars"] == []
+    assert finnhub["credential_requirements"]["configured"] is True
+    assert finnhub["credential_requirements"]["configured_env_vars"] == ["FINNHUB_API_KEY"]
+    assert finnhub["credential_requirements"]["missing_env_vars"] == []
+    assert "nasdaq-secret-value" not in json.dumps(registry)
+    assert "finnhub-secret-value" not in json.dumps(registry)
 
 
 def test_snapshot_overview_cache_signature_tracks_provider_env_status(tmp_path, monkeypatch):
@@ -2773,6 +2815,48 @@ def test_repair_refresh_batches_missing_symbols_without_dropping_unattempted_gap
     assert metadata["repair_cursor"] == 2
     assert metadata["covered_symbol_count"] == 4
     assert metadata["total_symbol_count"] == 5
+
+
+def test_repair_refresh_honors_request_symbol_limit_for_single_job(tmp_path, monkeypatch):
+    monkeypatch.setattr(real_service_module, "SNAPSHOT_REPAIR_SYMBOL_BATCH_SIZE", 2)
+    service = RealBacktestPlatformService(tmp_path / "repair-limit.db", market_data_provider=None)
+    repository = service.market_data_repository
+    repository.replace_dataset_snapshot(
+        {
+            "id": "ds-price",
+            "name": "price",
+            "status": "INCOMPLETE",
+            "as_of": "2026-04-08T00:00:00Z",
+            "freshness_label": "stale",
+            "start_date": "1996-01-01",
+            "end_date": "2026-04-08",
+            "row_count": 0,
+            "source": "mixed_sources",
+            "fallback_source": "mixed_fallbacks",
+            "blocker": {"code": "PRICE_SNAPSHOT_INCOMPLETE", "message": "waiting"},
+            "metadata": {"missing_symbols": ["AAA", "BBB", "CCC", "DDD"], "repair_cursor": 0},
+        },
+        price_bars=[],
+        symbol_coverage=[],
+    )
+
+    refreshed = service.refresh_snapshots(
+        {
+            "reason": "repair-limit",
+            "mode": "repair",
+            "targets": ["price"],
+            "repair_symbol_limit": 3,
+        }
+    )
+
+    stored_snapshot = next(item for item in repository.list_dataset_snapshots() if item["id"] == "ds-price")
+    metadata = dict(stored_snapshot.get("metadata") or {})
+
+    assert refreshed["latest_job"]["request"]["repair_symbol_limit"] == 3
+    assert metadata["selected_missing_symbols"] == ["AAA", "BBB", "CCC"]
+    assert metadata["repair_symbol_limit"] == 3
+    assert metadata["missing_symbols"] == ["DDD"]
+    assert metadata["repair_cursor"] == 3
 
 
 def test_snapshot_overview_recomputes_missing_symbols_from_target_minus_coverage(tmp_path):
@@ -5382,6 +5466,21 @@ def test_large_optimization_job_json_is_compacted_and_detail_can_stream_preview(
     assert compacted_summary["matching_combinations"] == []
     assert compacted_summary["matching_combination_count"] == len(matching_combinations)
 
+    refiltered = assert_ok(
+        client.patch(
+            f"/optimization-jobs/{job_id}",
+            json={
+                "objective": "return_sharpe",
+                "constraint_preset_key": "balanced",
+                "constraint_label": "Preview-safe",
+                "constraints": request_payload["constraints"],
+            },
+        )
+    )
+    assert refiltered["matching_combination_count"] == len(matching_combinations)
+    assert refiltered["matching_combination_source"] == "all_trials"
+    assert len(refiltered["matching_combinations"]) == len(matching_combinations)
+
     def fail_trial_loader(*args, **kwargs):
         raise AssertionError("preview detail should not load the full optimization trial table")
 
@@ -5391,6 +5490,136 @@ def test_large_optimization_job_json_is_compacted_and_detail_can_stream_preview(
     assert detail["summary"]["matching_combination_count"] == len(matching_combinations)
     assert detail["matching_combination_count"] == len(matching_combinations)
     assert len(detail["matching_combinations"]) == 2
+
+
+def test_completed_optimization_job_detail_rebuilds_full_matching_combinations_from_preview(
+    tmp_path,
+):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    base = create_momentum_strategy(
+        client,
+        idempotency_key="optimization-full-matching-from-preview",
+    )
+    strategy = base["strategy"]
+    job_id = "opt_full_matching_from_preview"
+    created_at = "2026-05-07T09:00:00Z"
+    matching_combinations = [
+        {
+            "id": f"trial_{index}",
+            "rank": index,
+            "label": f"Candidate {index}",
+            "status": "SUCCEEDED",
+            "parameter_snapshot": {
+                "lookback_months": 6 + (index % 4),
+                "top_n": 5 + (index % 3),
+            },
+            "metrics": {
+                "annualized_return": 0.05 + index / 10000,
+                "return_sharpe": 0.8 + index / 1000,
+                "out_of_sample_sharpe": 0.9,
+                "max_drawdown_pct": -12.0,
+                "stability": 70.0,
+            },
+            "score": 0.8 + index / 1000,
+        }
+        for index in range(1, 121)
+    ]
+    preview_combinations = matching_combinations[:4]
+    candidates = [dict(item) for item in preview_combinations]
+    request_payload = {
+        "objective": "return_sharpe",
+        "base_parameter_version_id": strategy["current_parameter_version_id"],
+        "source_run_id": strategy["latest_successful_run_id"],
+        "entry_point": "lab_menu",
+        "validation_mode": "walk_forward",
+        "budget_combinations": len(matching_combinations),
+        "completed_combinations": len(matching_combinations),
+        "persisted_trial_count": len(matching_combinations),
+        "next_trial_index": len(matching_combinations) + 1,
+        "status": "COMPLETED",
+        "progress_pct": 100,
+        "current_stage": "Result ready",
+        "latest_update": "Optimization completed.",
+        "constraint_preset_key": "custom",
+        "constraint_label": "Full modal",
+        "constraints": [
+            {
+                "key": "return_sharpe",
+                "label": "Sharpe",
+                "category": "return",
+                "operator": ">=",
+                "value": 0,
+                "unit": "",
+            }
+        ],
+        "matching_combination_count": len(matching_combinations),
+        "matching_combinations": preview_combinations,
+        "matching_combination_source": "all_trials",
+    }
+    summary_payload = {
+        **request_payload,
+        "candidate_count": len(candidates),
+        "best_metrics_summary": {
+            "trial_index": 1,
+            "label": "Candidate 1",
+            "status": "SUCCEEDED",
+            "parameter_snapshot": matching_combinations[0]["parameter_snapshot"],
+            "metrics": matching_combinations[0]["metrics"],
+            "score": matching_combinations[0]["score"],
+        },
+    }
+    service.storage.insert_json_row(
+        "optimization_jobs",
+        {
+            "id": job_id,
+            "strategy_id": strategy["id"],
+            "status": "COMPLETED",
+            "request_json": json.dumps(request_payload),
+            "summary_json": json.dumps(summary_payload),
+            "result_json": json.dumps(
+                {
+                    "best_candidate_id": "trial_1",
+                    "best_candidate_label": "Candidate 1",
+                    "headline": "Result ready",
+                    "summary": "Optimization completed.",
+                    "status": "COMPLETED",
+                    "progress_pct": 100,
+                }
+            ),
+            "candidates_json": json.dumps(candidates),
+            "created_at": created_at,
+            "updated_at": created_at,
+            "completed_at": created_at,
+        },
+    )
+    for trial in matching_combinations:
+        service._persist_optimization_trial(
+            job_id,
+            int(trial["rank"]),
+            status="SUCCEEDED",
+            parameter_snapshot=trial["parameter_snapshot"],
+            metrics=trial["metrics"],
+            chart_series=[],
+            score=trial["score"],
+            error_message=None,
+            started_at=created_at,
+            completed_at=created_at,
+        )
+
+    preview = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail?matching_limit=4"))
+    assert preview["matching_combination_count"] == len(matching_combinations)
+    assert len(preview["matching_combinations"]) == 4
+
+    full = assert_ok(client.get(f"/optimization-jobs/{job_id}/detail"))
+    assert full["matching_combination_count"] == len(matching_combinations)
+    assert full["matching_combination_source"] == "all_trials"
+    assert len(full["matching_combinations"]) == len(matching_combinations)
+    assert full["matching_combinations"][0]["id"] == "trial_120"
+    assert {item["id"] for item in full["matching_combinations"]} == {
+        item["id"] for item in matching_combinations
+    }
 
 
 def test_queued_and_interrupted_optimization_jobs_hide_stale_eta_projection(tmp_path):

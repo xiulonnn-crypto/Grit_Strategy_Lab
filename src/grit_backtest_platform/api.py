@@ -56,8 +56,12 @@ from .models import (
     FactorDiagnosticPreviewRequest,
     FactorDiagnosticRequest,
     FactorMiningJobCreateRequest,
+    FactorModelSuggestionRequest,
     FactorModelCreateRequest,
     FactorModelPreviewRequest,
+    FactorQuarantineIntakeRequest,
+    FactorQuarantinePublishRequest,
+    FactorQuarantineRunRequest,
     LegInventoryResponseModel,
     MaterializeRequest,
     OptimizationCandidateCreateRequest,
@@ -219,14 +223,14 @@ class RuntimeMarketDataProvider:
             provider
             for provider in self.providers
             if callable(getattr(provider, "fetch_history", None))
-            and _provider_name(provider) not in {"alpha_vantage", "openbb_alpha_vantage", "sec_edgar"}
+            and _provider_name(provider) not in {"alpha_vantage", "openbb_alpha_vantage", "sec_edgar", "finnhub"}
         ]
         self.price_provider_names = {_provider_name(provider) for provider in self.price_providers}
         self.targeted_price_repair_providers = [
             provider
             for provider in self.providers
             if callable(getattr(provider, "fetch_history", None))
-            and _provider_name(provider) in {"alpha_vantage", "openbb_alpha_vantage"}
+            and _provider_name(provider) in {"alpha_vantage", "openbb_alpha_vantage", "finnhub"}
             and bool(getattr(provider, "supports_targeted_price_repair", False))
         ]
         self.targeted_price_repair_provider_names = {
@@ -924,8 +928,10 @@ def build_runtime_market_data_provider() -> RuntimeMarketDataProvider:
         ("longbridge_static_info", "longbridge_provider", ("LongbridgeStaticInfoProvider",)),
         ("longbridge", "longbridge_provider", ("LongbridgeQuoteProvider",)),
         ("akshare_us", "akshare_us_provider", ("AkshareUsPriceProvider", "AkShareUsPriceProvider")),
-        ("stooq", "stooq_provider", ("StooqZipPriceProvider", "StooqPriceProvider")),
         ("fmp", "fmp_identity_provider", ("FmpIdentityRepairProvider", "FmpMarketDataProvider", "FmpPriceRepairProvider")),
+        ("nasdaq_wiki", "nasdaq_wiki_provider", ("NasdaqWikiPriceProvider",)),
+        ("stooq", "stooq_provider", ("StooqZipPriceProvider", "StooqPriceProvider")),
+        ("finnhub", "finnhub_provider", ("FinnhubProvider",)),
         ("alpha_vantage", "alpha_vantage_provider", ("AlphaVantageProvider", "AlphaVantageEventProvider", "AlphaVantageMarketDataProvider")),
         ("sec_edgar", "sec_edgar_provider", ("SecEdgarEventProvider", "SecEdgarProvider")),
         ("polygon", "polygon_provider", ("PolygonMarketDataProvider",)),
@@ -1155,6 +1161,10 @@ def create_app(
     @app.get('/strategies')
     def list_strategies():
         return invoke(service.list_strategies)
+
+    @app.get('/strategy-library')
+    def strategy_library():
+        return invoke(service.get_strategy_library)
 
     @app.get('/strategies/{strategy_id}/detail')
     def strategy_detail(strategy_id: str):
@@ -1540,9 +1550,46 @@ def create_app(
     def cancel_factor_mining_job(job_id: str):
         return invoke(service.cancel_factor_mining_job, job_id)
 
+    @app.post('/factor-quarantine/intake')
+    def factor_quarantine_intake(payload: FactorQuarantineIntakeRequest):
+        return invoke(service.factor_quarantine_intake, payload)
+
+    @app.get('/factor-quarantine/candidates')
+    def factor_quarantine_candidates(
+        status: str | None = Query(default=None),
+        source_job_id: str | None = Query(default=None),
+        cluster: str | None = Query(default=None),
+    ):
+        return invoke(
+            service.list_factor_quarantine_candidates,
+            status=status,
+            source_job_id=source_job_id,
+            cluster=cluster,
+        )
+
+    @app.get('/factor-quarantine/candidates/{candidate_id}')
+    def factor_quarantine_candidate(candidate_id: str):
+        return invoke(service.get_factor_quarantine_candidate, candidate_id)
+
+    @app.post('/factor-quarantine/candidates/{candidate_id}/run')
+    def factor_quarantine_run(candidate_id: str, payload: FactorQuarantineRunRequest | None = None):
+        return invoke(service.run_factor_quarantine_candidate, candidate_id, payload)
+
+    @app.post('/factor-quarantine/candidates/{candidate_id}/publish')
+    def factor_quarantine_publish(candidate_id: str, payload: FactorQuarantinePublishRequest | None = None):
+        return invoke(service.publish_factor_quarantine_candidate, candidate_id, payload)
+
+    @app.get('/factor-governance/overview')
+    def factor_governance_overview():
+        return invoke(service.get_factor_governance_overview)
+
     @app.post('/factor-models/preview')
     def preview_factor_model(payload: FactorModelPreviewRequest):
         return invoke(service.preview_factor_model, payload)
+
+    @app.post('/factor-models/suggestions')
+    def factor_model_suggestions(payload: FactorModelSuggestionRequest):
+        return invoke(service.create_factor_model_suggestion, payload)
 
     @app.post('/factor-models')
     def create_factor_model(payload: FactorModelCreateRequest):

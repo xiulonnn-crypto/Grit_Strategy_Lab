@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WorkspacePage } from './pages/workspace-page-lane-b';
 import { ShellFrameCn } from './shell-frame-cn';
@@ -364,6 +364,11 @@ describe('workspace dashboard', () => {
       ));
     });
 
+    await waitFor(() =>
+      expect(
+        container!.querySelectorAll('.workspace-card-grid .workspace-strategy-card h4'),
+      ).toHaveLength(6),
+    );
     const cardTitles = Array.from(
       container!.querySelectorAll('.workspace-card-grid .workspace-strategy-card h4'),
     ).map((node) => node.textContent?.trim());

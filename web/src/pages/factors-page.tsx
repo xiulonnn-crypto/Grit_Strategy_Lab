@@ -3,9 +3,13 @@ import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
 import { formatDateTime } from '../lib/format';
 import type {
+  ApiFactorBatchDiagnosticSummary,
   ApiFactorDetail,
   ApiFactorDiagnosticPreview,
+  ApiFactorDiagnosticPreviewPayload,
   ApiFactorDiagnosticSummary,
+  ApiFactorGovernanceAction,
+  ApiFactorGovernanceOverview,
   ApiFactorListItem,
   ApiFactorListResponse,
   ApiPitDataOverview,
@@ -16,9 +20,18 @@ import './factors-page.css';
 type CoverageGapBucket = NonNullable<ApiPitDataOverview['coverage_gap']>['buckets'][number];
 type CoverageGapSymbolDetail = NonNullable<CoverageGapBucket['symbol_details']>[number];
 type PitOpsGuidanceAction = NonNullable<NonNullable<ApiPitDataOverview['ops_guidance']>['actions']>[number];
-type FactorSortKey = 'rank_ic' | 'updated_at';
+type FactorSortKey = 'rank_ic' | 'level' | 'updated_at';
 type FactorSortDirection = 'asc' | 'desc';
 type FactorSortState = { key: FactorSortKey; direction: FactorSortDirection };
+type FactorLevelKey = 'S' | 'A' | 'B' | 'C' | 'D';
+type FactorLevelProjection = {
+  key: FactorLevelKey;
+  title: string;
+  rankIcRange: string;
+  irRange: string;
+  recommendation: string;
+  score: number;
+};
 
 const STATUS_LABELS: Record<string, string> = {
   READY: 'Full Ready',
@@ -94,6 +107,54 @@ const DIAGNOSTIC_TOOLTIP_LINES = [
   'Rank IC: 因子排序与未来收益排序的相关性，越高说明截面排序越有效。',
   'IR: Rank IC 均值除以波动，衡量诊断稳定性。',
   '覆盖率: 本次诊断中有可用 PIT 样本的证券占比。',
+];
+const FACTOR_LEVELS: FactorLevelProjection[] = [
+  {
+    key: 'S',
+    title: '顶级印钞机',
+    rankIcRange: '> 0.03',
+    irRange: '> 2.0',
+    recommendation: '你的因子在此！极其罕见，具备极高的实战价值，建议作为组合的核心权重。',
+    score: 5,
+  },
+  {
+    key: 'A',
+    title: '优质 Alpha',
+    rankIcRange: '0.02 ~ 0.03',
+    irRange: '1.0 ~ 2.0',
+    recommendation: '非常优秀的因子，可以稳定贡献超额收益。',
+    score: 4,
+  },
+  {
+    key: 'B',
+    title: '合格基准',
+    rankIcRange: '0.01 ~ 0.02',
+    irRange: '0.5 ~ 1.0',
+    recommendation: '中规中矩，可以作为辅助因子增加组合的多元化。',
+    score: 3,
+  },
+  {
+    key: 'C',
+    title: '微弱信号',
+    rankIcRange: '0.005 ~ 0.01',
+    irRange: '0.2 ~ 0.5',
+    recommendation: '信号较弱，容易被交易成本吞噬，需观察长期表现。',
+    score: 2,
+  },
+  {
+    key: 'D',
+    title: '噪声/随机',
+    rankIcRange: '< 0.005',
+    irRange: '< 0.2',
+    recommendation: '基本属于统计噪声，不建议在实盘中使用。',
+    score: 1,
+  },
+];
+const FACTOR_LEVEL_BY_SCORE = new Map(FACTOR_LEVELS.map((level) => [level.score, level]));
+const FACTOR_LEVEL_TOOLTIP_LINES = [
+  '因子级别：Rank IC 均值和 IR (稳定性) 先取绝对值，再按较弱一项保守评级。',
+  ...FACTOR_LEVELS.map((level) => `${level.key} ${level.title}: Rank IC ${level.rankIcRange}, IR ${level.irRange}; ${level.recommendation}`),
+  '未完成真实或预览诊断的因子显示为未评级，不参与等级排序。',
 ];
 type FactorUiState = 'robust' | 'needs_calibration' | 'decayed' | 'sandbox';
 type FactorGateTone = 'good' | 'warn' | 'bad';
@@ -343,7 +404,7 @@ function formatSignedPct(value: number | null | undefined): string {
   return `${pctValue > 0 ? '+' : ''}${pctValue.toFixed(2)}%`;
 }
 
-function usePitOverview(): {
+function usePitOverview(initialLoadDelayMs = 0): {
   pit: ApiPitDataOverview | null;
   loading: boolean;
   error: string | null;
@@ -358,6 +419,17 @@ function usePitOverview(): {
     let alive = true;
     setLoading(true);
     setError(null);
+    if (initialLoadDelayMs > 0 && nonce === 0) {
+      const timer = window.setTimeout(() => {
+        if (alive) {
+          setNonce((value) => value + 1);
+        }
+      }, initialLoadDelayMs);
+      return () => {
+        alive = false;
+        window.clearTimeout(timer);
+      };
+    }
     api
       .getPitDataOverview()
       .then((payload) => {
@@ -372,7 +444,7 @@ function usePitOverview(): {
     return () => {
       alive = false;
     };
-  }, [api, nonce]);
+  }, [api, initialLoadDelayMs, nonce]);
   return { pit, loading, error, reload: () => setNonce((value) => value + 1) };
 }
 
@@ -432,9 +504,40 @@ function diagnosticSeries(factor: ApiFactorListItem): number[] {
   return factor.ic_sparkline.map((point) => point.value).filter(isNumber);
 }
 
-function factorRankIc(factor: ApiFactorListItem): number | null {
-  const value = factor.latest_diagnostic_summary?.rank_ic;
+function factorMetricValue(factor: ApiFactorListItem, key: 'rank_ic' | 'ir'): number | null {
+  const value = factor.latest_diagnostic_summary?.[key] ?? factor.batch_diagnostic_summary?.[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function factorRankIc(factor: ApiFactorListItem): number | null {
+  return factorMetricValue(factor, 'rank_ic');
+}
+
+function metricLevelScore(value: number, metric: 'rank_ic' | 'ir'): number {
+  if (metric === 'rank_ic') {
+    if (value > 0.03) return 5;
+    if (value >= 0.02) return 4;
+    if (value >= 0.01) return 3;
+    if (value >= 0.005) return 2;
+    return 1;
+  }
+  if (value > 2.0) return 5;
+  if (value >= 1.0) return 4;
+  if (value >= 0.5) return 3;
+  if (value >= 0.2) return 2;
+  return 1;
+}
+
+function factorLevel(factor: ApiFactorListItem): FactorLevelProjection | null {
+  const rankIc = factorMetricValue(factor, 'rank_ic');
+  const ir = factorMetricValue(factor, 'ir');
+  if (rankIc === null || ir === null) return null;
+  const score = Math.min(metricLevelScore(Math.abs(rankIc), 'rank_ic'), metricLevelScore(Math.abs(ir), 'ir'));
+  return FACTOR_LEVEL_BY_SCORE.get(score) ?? null;
+}
+
+function factorLevelScore(factor: ApiFactorListItem): number | null {
+  return factorLevel(factor)?.score ?? null;
 }
 
 function referenceDiagnosticLabel(summary: ApiFactorDiagnosticSummary | null | undefined): string | null {
@@ -445,6 +548,64 @@ function referenceDiagnosticLabel(summary: ApiFactorDiagnosticSummary | null | u
   const sourceName = typeof summary.source_factor_name === 'string' ? summary.source_factor_name : null;
   const sourceId = typeof summary.source_factor_id === 'string' ? summary.source_factor_id : null;
   return sourceName ?? sourceId ?? '默认因子';
+}
+
+function needsRealDiagnosticPreview(factor: ApiFactorListItem): boolean {
+  const summary = factor.latest_diagnostic_summary;
+  const status = String(summary?.status ?? '').toUpperCase();
+  const lineage = summary?.data_lineage as Record<string, unknown> | undefined;
+  const lineageKind = String(lineage?.kind ?? '').toUpperCase();
+  if (lineageKind === 'FACTOR_EXPRESSION_PREVIEW' || status === 'PREVIEW') return false;
+  if (factor.last_diagnostic_run_id && status !== 'REFERENCE_ONLY') return false;
+  return status === 'REFERENCE_ONLY' || !summary;
+}
+
+function previewFactorIdsForPayload(payload: ApiFactorListResponse): string[] {
+  return payload.items.filter(needsRealDiagnosticPreview).map((factor) => factor.id);
+}
+
+function previewRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function mergeDiagnosticPreview(
+  current: ApiFactorListResponse,
+  preview: ApiFactorDiagnosticPreview,
+): ApiFactorListResponse {
+  const previewItems = new Map<string, Record<string, unknown>>();
+  (preview.items ?? []).forEach((item) => {
+    const record = previewRecord(item);
+    const factorId = typeof record?.factor_id === 'string' ? record.factor_id : null;
+    if (factorId && record) previewItems.set(factorId, record);
+  });
+  if (!previewItems.size) return current;
+  return {
+    ...current,
+    items: current.items.map((factor) => {
+      const record = previewItems.get(factor.id);
+      if (!record) return factor;
+      const latest = previewRecord(record.latest_diagnostic_summary) as ApiFactorDiagnosticSummary | null;
+      const batch = previewRecord(record.batch_diagnostic_summary) as Partial<ApiFactorBatchDiagnosticSummary> | null;
+      const icSeries = Array.isArray(latest?.ic_series)
+        ? latest.ic_series
+            .map((point) => ({ date: String(point.date ?? ''), value: typeof point.rank_ic === 'number' ? point.rank_ic : NaN }))
+            .filter((point) => Number.isFinite(point.value))
+        : factor.ic_sparkline;
+      return {
+        ...factor,
+        ui_state: typeof record.ui_state === 'string' ? record.ui_state as ApiFactorListItem['ui_state'] : factor.ui_state,
+        ui_state_label: typeof record.ui_state_label === 'string' ? record.ui_state_label : factor.ui_state_label,
+        diagnostic_status: typeof record.diagnostic_status === 'string' ? record.diagnostic_status as ApiFactorListItem['diagnostic_status'] : factor.diagnostic_status,
+        latest_diagnostic_summary: latest ?? factor.latest_diagnostic_summary,
+        batch_diagnostic_summary: batch ? { ...factor.batch_diagnostic_summary, ...batch } : factor.batch_diagnostic_summary,
+        blocker_reason_summary: previewRecord(record.blocker_reason_summary) as ApiFactorListItem['blocker_reason_summary'] ?? factor.blocker_reason_summary,
+        strategy_creation_risk: previewRecord(record.strategy_creation_risk) as ApiFactorListItem['strategy_creation_risk'] ?? factor.strategy_creation_risk,
+        correlation_cluster_summary: previewRecord(record.correlation_cluster_summary) as ApiFactorListItem['correlation_cluster_summary'] ?? factor.correlation_cluster_summary,
+        ic_sparkline: icSeries,
+        ic_sparkline_window: latest ? '真实口径最近12期' : factor.ic_sparkline_window,
+      };
+    }),
+  };
 }
 
 function factorUpdatedAt(factor: ApiFactorListItem): string | null {
@@ -479,7 +640,9 @@ function compareNullableNumber(
 function compareFactorsBySort(left: ApiFactorListItem, right: ApiFactorListItem, sort: FactorSortState): number {
   const diff = sort.key === 'rank_ic'
     ? compareNullableNumber(factorRankIc(left), factorRankIc(right), sort.direction)
-    : compareNullableNumber(factorTimestamp(left), factorTimestamp(right), sort.direction);
+    : sort.key === 'level'
+      ? compareNullableNumber(factorLevelScore(left), factorLevelScore(right), sort.direction)
+      : compareNullableNumber(factorTimestamp(left), factorTimestamp(right), sort.direction);
   if (diff !== 0) return diff;
   return (left.descriptor?.canonical_id ?? left.id).localeCompare(right.descriptor?.canonical_id ?? right.id);
 }
@@ -656,6 +819,166 @@ function factorGateProjection(
   return { label: '无阻断', tone: 'good', reasons: ['可进入策略创建；相关性仅作为风险提示。'] };
 }
 
+type FactorAuditEntry = {
+  id: string;
+  title: string;
+  at?: string | null;
+  detail: string;
+};
+
+const GOVERNANCE_KIND_LABELS: Record<string, string> = {
+  WATCH: '观察',
+  REVIEW: '复核',
+  DECAYED: '退化观察',
+  CROWDED: '拥挤',
+  SUSPENDED: '暂停纳入',
+  FACTOR_MODEL_SUGGESTION: '策略草稿建议',
+};
+
+function governanceKindLabel(kind: string): string {
+  return GOVERNANCE_KIND_LABELS[String(kind ?? '').toUpperCase()] ?? '治理动作';
+}
+
+function governanceActionClass(action: ApiFactorGovernanceAction): string {
+  const severity = String(action.severity ?? '').toLowerCase();
+  if (severity === 'danger') return 'factor-governance-action--danger';
+  if (severity === 'warning') return 'factor-governance-action--warn';
+  return 'factor-governance-action--info';
+}
+
+function buildGovernanceSuggestionRoute(action: ApiFactorGovernanceAction): string {
+  const targetRoute = String(action.target?.route ?? '#/factor-models/new');
+  const params = new URLSearchParams(action.target?.query ?? {});
+  if (!params.has('source')) params.set('source', 'governance_queue');
+  if (!params.has('factorIds') && action.factor_ids.length) params.set('factorIds', action.factor_ids.join(','));
+  if (!params.has('weights') && action.suggested_weights?.length) {
+    params.set('weights', action.suggested_weights.map((item) => String(item.weight_pct)).join(','));
+  }
+  if (!params.has('directions') && action.suggested_weights?.length) {
+    params.set('directions', action.suggested_weights.map((item) => String(item.direction)).join(','));
+  }
+  const query = params.toString();
+  return `${targetRoute}${query ? `${targetRoute.includes('?') ? '&' : '?'}${query}` : ''}`;
+}
+
+function openGovernanceAction(action: ApiFactorGovernanceAction): void {
+  const route = buildGovernanceSuggestionRoute(action);
+  const withoutHash = route.startsWith('#') ? route.slice(1) : route;
+  navigateTo(withoutHash.startsWith('/') ? withoutHash : `/${withoutHash}`);
+}
+
+function buildLocalGovernanceActions(
+  factors: ApiFactorListItem[],
+  highCorrelationIds: Set<string>,
+): ApiFactorGovernanceAction[] {
+  const actions: ApiFactorGovernanceAction[] = [];
+  factors.forEach((factor) => {
+    const status = String(factor.lifecycle_status ?? '').toUpperCase();
+    const state = String(factor.ui_state ?? '').toLowerCase();
+    if (highCorrelationIds.has(factor.id)) {
+      actions.push({
+        id: `high-correlation-${factor.id}`,
+        kind: 'REVIEW',
+        label: '复核',
+        title: `${factor.name} 进入相关性复核`,
+        detail: '与当前相关性视图中的因子高度重合，建议先完成治理复核后再进入新组合。',
+        factor_ids: [factor.id],
+        severity: 'warning',
+      });
+    }
+    if (status === 'DECAYED' || state === 'decayed') {
+      actions.push({
+        id: `decayed-${factor.id}`,
+        kind: 'DECAYED',
+        label: '退化观察',
+        title: `${factor.name} 出现表现退化`,
+        detail: '最近诊断相对发布基线走弱，建议在因子库中降权展示并观察下一次 OOS 结果。',
+        factor_ids: [factor.id],
+        severity: 'warning',
+      });
+    }
+  });
+  const autoMined = factors.find((factor) => factor.source === 'AUTO_MINED' && factor.diagnostic_status === 'COMPLETED');
+  if (autoMined) {
+    actions.push({
+      id: `model-suggestion-${autoMined.id}`,
+      kind: 'FACTOR_MODEL_SUGGESTION',
+      label: '策略草稿建议',
+      title: '多因子策略草稿建议',
+      detail: '治理队列已为自动挖掘因子准备待审查组合，只会带入创建页并保持草稿状态。',
+      factor_ids: [autoMined.id],
+      severity: 'info',
+      suggested_weights: [{ factor_id: autoMined.id, weight_pct: 20, direction: autoMined.direction }],
+      target: { route: '#/factor-models/new', query: { source: 'governance_queue', factorIds: autoMined.id, weights: '20' } },
+    });
+  }
+  return actions.slice(0, 8);
+}
+
+function coerceAuditEntry(value: unknown, index: number): FactorAuditEntry | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const title = String(record.title ?? record.label ?? record.action ?? '').trim();
+  const detail = String(record.detail ?? record.summary ?? record.description ?? '').trim();
+  const at = String(record.at ?? record.timestamp ?? record.event_at ?? '').trim();
+  if (!title && !detail && !at) return null;
+  return {
+    id: String(record.id ?? `${title || 'audit'}-${index}`),
+    title: title || '审计事件',
+    at: at || null,
+    detail: detail || '系统已记录该治理节点。',
+  };
+}
+
+function buildFactorAuditEntries(
+  factor: ApiFactorDetail,
+  summary: ApiFactorDiagnosticSummary | null,
+  pit: ApiPitDataOverview | null,
+): FactorAuditEntry[] {
+  const rawAudit = Array.isArray(summary?.audit_trail) ? summary?.audit_trail : [];
+  const auditEntries = rawAudit.map(coerceAuditEntry).filter((entry): entry is FactorAuditEntry => Boolean(entry));
+  if (auditEntries.length) return auditEntries;
+  const compliance = summary?.compliance_trail as Record<string, unknown> | undefined;
+  const diagnosedAt = recordString(compliance, 'diagnosed_at') ?? factorUpdatedAt(factor);
+  const lookbackStart = recordString(compliance, 'lookback_start') ?? pit?.diagnostic_windows?.verified?.start_date;
+  const lookbackEnd = recordString(compliance, 'lookback_end') ?? pit?.diagnostic_windows?.verified?.end_date ?? pit?.as_of_date;
+  const entries: FactorAuditEntry[] = [
+    {
+      id: 'lookback-window',
+      title: '回溯窗口',
+      at: lookbackEnd ?? null,
+      detail: [lookbackStart, lookbackEnd].filter(Boolean).join(' 至 ') || '沿用当前 PIT 诊断窗口。',
+    },
+  ];
+  if (diagnosedAt) {
+    entries.push({
+      id: 'diagnosed-at',
+      title: summary?.diagnostic_mode === 'SANDBOX' ? '沙盒诊断时间' : '检疫/诊断时间',
+      at: diagnosedAt,
+      detail: `诊断运行 ${summary?.run_id ?? factor.last_diagnostic_run_id ?? '未记录'} 已写入审计足迹。`,
+    });
+  }
+  const publishedAt = recordString(compliance, 'published_at');
+  if (publishedAt) {
+    entries.push({
+      id: 'published-at',
+      title: '发布时间',
+      at: publishedAt,
+      detail: '自动发布事件已保留来源候选、版本和规则快照。',
+    });
+  }
+  const governanceAt = recordString(compliance, 'governance_message_at');
+  if (governanceAt) {
+    entries.push({
+      id: 'governance-at',
+      title: '治理消息时间',
+      at: governanceAt,
+      detail: '治理队列已生成复核、观察或策略草稿建议。',
+    });
+  }
+  return entries;
+}
+
 function DiagnosticSummaryPopover({
   factor,
   onClose,
@@ -776,6 +1099,26 @@ function DiagnosticCell({ factor }: { factor: ApiFactorListItem }): JSX.Element 
         </span>
       ) : null}
       <Sparkline points={factor.ic_sparkline} />
+    </div>
+  );
+}
+
+function FactorLevelCell({ factor }: { factor: ApiFactorListItem }): JSX.Element {
+  const level = factorLevel(factor);
+  if (!level) {
+    return (
+      <div className="factor-level-cell factor-level-cell--empty">
+        <span className="factor-level-badge factor-level-badge--empty">未评级</span>
+      </div>
+    );
+  }
+  const title = `${level.key} ${level.title}: Rank IC ${level.rankIcRange}, IR ${level.irRange}。${level.recommendation}`;
+  return (
+    <div className="factor-level-cell" title={title}>
+      <span className={`factor-level-badge factor-level-badge--${level.key.toLowerCase()}`}>
+        <strong>{level.key}</strong>
+        <span>{level.title}</span>
+      </span>
     </div>
   );
 }
@@ -1200,9 +1543,15 @@ function CoverageGapBucketCard({
   );
 }
 
-export function PitCleaningCenterPage({ highlightedSection }: { highlightedSection?: string }): JSX.Element {
+export function PitCleaningCenterPage({
+  highlightedSection,
+  initialLoadDelayMs = 0,
+}: {
+  highlightedSection?: string;
+  initialLoadDelayMs?: number;
+}): JSX.Element {
   const api = useApiClient();
-  const { pit, loading, error, reload } = usePitOverview();
+  const { pit, loading, error, reload } = usePitOverview(initialLoadDelayMs);
   const [gapOpen, setGapOpen] = useState(highlightedSection === 'coverage-gap');
   const [activeRuleId, setActiveRuleId] = useState('mad');
   const [waiverBusy, setWaiverBusy] = useState(false);
@@ -1724,10 +2073,12 @@ export function FactorLibraryPage({
   initialSource,
   initialStatus,
   initialTag,
+  initialLoadDelayMs = 0,
 }: {
   initialSource?: string;
   initialStatus?: string;
   initialTag?: string;
+  initialLoadDelayMs?: number;
 }): JSX.Element {
   const api = useApiClient();
   const [payload, setPayload] = useState<ApiFactorListResponse | null>(null);
@@ -1735,6 +2086,7 @@ export function FactorLibraryPage({
   const [sourcePrefix, setSourcePrefix] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [operatorFilter, setOperatorFilter] = useState('');
+  const [levelFilter, setLevelFilter] = useState('');
   const [selectedCorrelationFactorId, setSelectedCorrelationFactorId] = useState<string | undefined>();
   const [highCorrelationOnly, setHighCorrelationOnly] = useState(false);
   const [comparisonFactorIds, setComparisonFactorIds] = useState<string[]>([]);
@@ -1742,31 +2094,93 @@ export function FactorLibraryPage({
   const [diagnosticPopoverFactorId, setDiagnosticPopoverFactorId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sort, setSort] = useState<FactorSortState>({ key: 'updated_at', direction: 'desc' });
+  const [governanceOpen, setGovernanceOpen] = useState(false);
+  const [governanceOverview, setGovernanceOverview] = useState<ApiFactorGovernanceOverview | null>(null);
+  const [governanceLoading, setGovernanceLoading] = useState(false);
+  const [governanceError, setGovernanceError] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
-    api
-      .listFactors({ source: initialSource, status: status || undefined, tag: initialTag })
-      .then((factorPayload) => {
+    const loadFactorPayload = async (): Promise<void> => {
+      try {
+        setError(null);
+        const factorPayload = await api.listFactors({ source: initialSource, status: status || undefined, tag: initialTag });
         if (!alive) return;
+        const previewFactorDiagnostics = (api as {
+          previewFactorDiagnostics?: (request: ApiFactorDiagnosticPreviewPayload) => Promise<ApiFactorDiagnosticPreview> | undefined;
+        }).previewFactorDiagnostics;
+        const factorIds = previewFactorIdsForPayload(factorPayload);
+        if (previewFactorDiagnostics && factorIds.length) {
+          const previewRequest = previewFactorDiagnostics({
+            batch: true,
+            factor_ids: factorIds,
+            diagnostic_mode: 'SANDBOX',
+            include: ['ic', 'ir', 'groups', 'turnover', 'correlation', 'blockers'],
+          });
+          if (previewRequest && typeof previewRequest.then === 'function') {
+            try {
+              const diagnosticPreview = await previewRequest;
+              if (!alive) return;
+              setPayload(mergeDiagnosticPreview(factorPayload, diagnosticPreview));
+              return;
+            } catch {
+              // Fall through to the list payload so the factor library remains usable if preview is unavailable.
+            }
+          }
+        }
         setPayload(factorPayload);
+      } catch (err) {
+        if (alive) setError((err as Error).message || 'Failed to load factors.');
+      }
+    };
+    if (initialLoadDelayMs > 0 && payload === null) {
+      const timer = window.setTimeout(() => {
+        if (alive) void loadFactorPayload();
+      }, initialLoadDelayMs);
+      return () => {
+        alive = false;
+        window.clearTimeout(timer);
+      };
+    }
+    void loadFactorPayload();
+    return () => {
+      alive = false;
+    };
+  }, [api, initialLoadDelayMs, initialSource, initialTag, status]);
+  useEffect(() => {
+    if (!governanceOpen || governanceOverview) return;
+    const getFactorGovernanceOverview = (api as {
+      getFactorGovernanceOverview?: () => Promise<ApiFactorGovernanceOverview>;
+    }).getFactorGovernanceOverview;
+    if (!getFactorGovernanceOverview) return;
+    let alive = true;
+    setGovernanceLoading(true);
+    setGovernanceError(null);
+    getFactorGovernanceOverview()
+      .then((overview) => {
+        if (!alive) return;
+        setGovernanceOverview(overview);
       })
       .catch((err: Error) => {
-        if (alive) setError(err.message || '因子库加载失败。');
+        if (alive) setGovernanceError(err.message || '治理队列加载失败。');
+      })
+      .finally(() => {
+        if (alive) setGovernanceLoading(false);
       });
     return () => {
       alive = false;
     };
-  }, [api, initialSource, initialTag, status]);
+  }, [api, governanceOpen, governanceOverview]);
   const factors = useMemo(() => {
     const filtered = (payload?.items ?? []).filter((factor) => {
       const descriptor = factor.descriptor;
       if (sourcePrefix && descriptor?.source_prefix !== sourcePrefix) return false;
       if (categoryFilter && descriptor?.category !== categoryFilter) return false;
       if (operatorFilter && descriptor?.operator !== operatorFilter) return false;
+      if (levelFilter && factorLevel(factor)?.key !== levelFilter) return false;
       return true;
     });
     return [...filtered].sort((left, right) => compareFactorsBySort(left, right, sort));
-  }, [categoryFilter, operatorFilter, payload?.items, sort, sourcePrefix]);
+  }, [categoryFilter, levelFilter, operatorFilter, payload?.items, sort, sourcePrefix]);
   const updateSort = (key: FactorSortKey) => {
     setSort((current) => (
       current.key === key
@@ -1798,6 +2212,11 @@ export function FactorLibraryPage({
           .map((factor) => factor.id)
       : [],
   ), [factors, selectedCorrelationFactor]);
+  const localGovernanceActions = useMemo(
+    () => buildLocalGovernanceActions(factors, highCorrelationIds),
+    [factors, highCorrelationIds],
+  );
+  const governanceActions = governanceOverview?.actions.length ? governanceOverview.actions : localGovernanceActions;
   const comparisonFactors = useMemo(
     () => comparisonFactorIds
       .map((factorId) => factors.find((factor) => factor.id === factorId))
@@ -1822,13 +2241,16 @@ export function FactorLibraryPage({
       Boolean(factor.latest_diagnostic_summary?.run_id)
     )).length;
     const sandboxReadyCount = allFactors.filter((factor) => factor.diagnostic_status === 'SANDBOX_READY').length;
+    const governanceQueueCount = recordNumber(summaryRecord, 'governance_queue_count') ??
+      governanceOverview?.queue_count ??
+      localGovernanceActions.length;
     return {
       systemSeedCount,
       diagnosableCount,
       sandboxReadyCount,
-      highCorrelationCount: highCorrelationIds.size,
+      governanceQueueCount,
     };
-  }, [highCorrelationIds, payload?.items, payload?.summary]);
+  }, [governanceOverview?.queue_count, localGovernanceActions.length, payload?.items, payload?.summary]);
   const pitStatus = recordString(payload?.summary, 'pit_status');
   return (
     <div className="factor-page" data-page-root="factor-library">
@@ -1860,12 +2282,58 @@ export function FactorLibraryPage({
           <strong>{librarySummary.sandboxReadyCount}</strong>
           <p>可在研究沙盒运行，尚未进入正式验证。</p>
         </article>
-        <article className="factor-mini-card">
-          <span>高相关提示</span>
-          <strong>{librarySummary.highCorrelationCount}</strong>
-          <p>基于当前相关性视图，仅提示不自动剔除。</p>
-        </article>
+        <button
+          className="factor-mini-card factor-mini-card--button factor-governance-trigger"
+          type="button"
+          onClick={() => setGovernanceOpen(true)}
+          aria-haspopup="dialog"
+        >
+          <span>治理队列</span>
+          <strong>{librarySummary.governanceQueueCount}</strong>
+          <p>点击查看复核、退化观察、拥挤风险和策略草稿建议。</p>
+        </button>
       </section>
+      {governanceOpen ? (
+        <div className="factor-governance-modal" role="dialog" aria-modal="true" aria-label="治理队列">
+          <div className="factor-governance-modal__panel">
+            <div className="factor-governance-modal__header">
+              <div>
+                <strong>治理队列</strong>
+                <span>待治理动作完整列表，策略建议只会带入创建页并保持草稿状态。</span>
+              </div>
+              <button type="button" className="factor-link" onClick={() => setGovernanceOpen(false)}>关闭</button>
+            </div>
+            {governanceLoading ? <p className="factor-muted">正在加载治理动作...</p> : null}
+            {governanceError ? <p className="factor-error-text">{governanceError}</p> : null}
+            <div className="factor-governance-action-list">
+              {governanceActions.length ? governanceActions.map((action) => (
+                <article className={`factor-governance-action ${governanceActionClass(action)}`} key={action.id}>
+                  <div>
+                    <span className="factor-pill">{governanceKindLabel(action.kind)}</span>
+                    <strong>{action.title}</strong>
+                    <p>{action.detail}</p>
+                    <small>关联因子：{action.factor_ids.join('、') || '待系统匹配'}</small>
+                  </div>
+                  {String(action.kind).toUpperCase() === 'FACTOR_MODEL_SUGGESTION' ? (
+                    <button
+                      className="factor-btn factor-btn--primary factor-btn--small"
+                      type="button"
+                      onClick={() => {
+                        setGovernanceOpen(false);
+                        openGovernanceAction(action);
+                      }}
+                    >
+                      带入创建页
+                    </button>
+                  ) : null}
+                </article>
+              )) : (
+                <div className="factor-governance-empty">当前没有待治理动作。</div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
       <section className="factor-panel">
         <div className="factor-toolbar">
           <div className="factor-segmented">
@@ -1899,6 +2367,12 @@ export function FactorLibraryPage({
                 <option key={value} value={value}>{label}</option>
               ))}
             </select>
+            <select aria-label="因子级别" value={levelFilter} onChange={(event) => setLevelFilter(event.target.value)}>
+              <option value="">全部级别</option>
+              {FACTOR_LEVELS.map((level) => (
+                <option key={level.key} value={level.key}>{level.key} {level.title}</option>
+              ))}
+            </select>
           </div>
           <span className="factor-muted">系统默认 {String(payload?.summary.system_seed_count ?? '0')} 个</span>
         </div>
@@ -1922,6 +2396,15 @@ export function FactorLibraryPage({
                     sort={sort}
                     onSort={updateSort}
                     tooltip={<HelpTooltip label="最近诊断指标解释" lines={DIAGNOSTIC_TOOLTIP_LINES} />}
+                  />
+                </th>
+                <th aria-sort={ariaSortFor('level', sort)}>
+                  <SortableHeader
+                    label="因子级别"
+                    sortKey="level"
+                    sort={sort}
+                    onSort={updateSort}
+                    tooltip={<HelpTooltip label="因子级别名词解释" lines={FACTOR_LEVEL_TOOLTIP_LINES} />}
                   />
                 </th>
                 <th>
@@ -1961,6 +2444,9 @@ export function FactorLibraryPage({
                   </td>
                   <td>
                     <DiagnosticCell factor={factor} />
+                  </td>
+                  <td>
+                    <FactorLevelCell factor={factor} />
                   </td>
                   <td>
                     <div className="factor-gate-cell factor-gate-cell--stacked">
@@ -2119,6 +2605,7 @@ export function FactorDetailPage({ factorId }: { factorId: string }): JSX.Elemen
   if (riskMessages.length < 3) {
     riskMessages.push('成本敏感：换手、冲击、融资和滑点需要在正式交易前复核。');
   }
+  const auditEntries = factor ? buildFactorAuditEntries(factor, summary, pit) : [];
   const reportHref = factor && summary?.run_id
     ? backendHref(`/factors/${factor.id}/diagnostics/${summary.run_id}/report`)
     : null;
@@ -2255,13 +2742,22 @@ export function FactorDetailPage({ factorId }: { factorId: string }): JSX.Elemen
               </article>
 
               <article className="factor-panel factor-detail-panel">
-                <div className="factor-section-title"><span>合规足迹</span></div>
+                <div className="factor-section-title"><span>审计足迹</span></div>
+                <div className="factor-detail-audit-list" aria-label="审计足迹">
+                  {auditEntries.map((entry) => (
+                    <div key={entry.id}>
+                      <strong>{entry.title}</strong>
+                      <span>{entry.at ? formatDateTime(entry.at) : '待记录'}</span>
+                      <p>{entry.detail}</p>
+                    </div>
+                  ))}
+                </div>
                 <p className="factor-detail-trail">
                   {factor.name} 因子使用 {factor.expression} 逻辑，绑定 {datasetId} 与 {universeId}，清洗规则 {cleaningVersion}，诊断时间 {diagnosedAt}，执行人 {operator}。
                 </p>
                 <div className="factor-detail-pdf">
                   <strong>投委会 PDF 附件</strong>
-                  <span>自动带入诊断摘要、PIT 版本、极端场景和合规足迹。</span>
+                  <span>自动带入诊断摘要、PIT 版本、极端场景和审计足迹。</span>
                   {reportHref ? (
                     <a className="factor-btn factor-btn--primary" href={reportHref} target="_blank" rel="noreferrer">生成标准 PDF</a>
                   ) : (

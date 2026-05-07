@@ -12,14 +12,19 @@ from tests.api_test_support import (
     refresh_snapshots,
     submit_backtest,
 )
-from tests.test_factor_research_api import seed_ready_pit_data
+from tests.test_factor_research_api import mark_price_snapshot_incomplete, seed_ready_pit_data
 
 
-def _model_payload(*, neutralization_enabled: bool = False, universe: str = "SP500") -> dict:
+def _model_payload(
+    *,
+    neutralization_enabled: bool = False,
+    universe: str = "SP500",
+    rebalance_frequency: str = "monthly",
+) -> dict:
     return {
         "name": "单元测试多因子模型",
         "universe": universe,
-        "rebalance_frequency": "monthly",
+        "rebalance_frequency": rebalance_frequency,
         "scoring_method": "zscore_weighted",
         "components": [
             {"factor_id": "s_mom_12m1m_rank", "weight": 40, "direction": "HIGH_IS_BETTER"},
@@ -328,6 +333,86 @@ def test_factor_model_strategy_creation_risk_warnings_do_not_block_create(tmp_pa
     assert created["parameters"]["strategy_creation_risk"]["can_create"] is True
 
 
+def test_factor_model_verified_pit_window_warning_does_not_block_create(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    service = client.app.state.service
+    original_list_factors = service.list_factors
+
+    def patched_list_factors(*args, **kwargs):
+        result = original_list_factors(*args, **kwargs)
+        items = []
+        selected = {item["factor_id"] for item in _model_payload()["components"]}
+        for item in result.get("items") or []:
+            row = dict(item)
+            if row.get("id") in selected:
+                row["diagnostic_status"] = "SANDBOX_READY"
+                row["readiness_blockers"] = [
+                    {
+                        "code": "VERIFIED_PIT_WINDOW_INCOMPLETE",
+                        "message": "完整 Verified PIT 门禁未通过，当前仅允许 Sandbox 诊断。",
+                        "severity": "WARNING",
+                    }
+                ]
+            items.append(row)
+        return {**result, "items": items}
+
+    monkeypatch.setattr(service, "list_factors", patched_list_factors)
+
+    preview = assert_ok(client.post("/factor-models/preview", json=_model_payload()))
+
+    risk = preview["strategy_creation_risk"]
+    assert preview["status"] == "READY"
+    assert risk["can_create"] is True
+    assert risk["blocked_count"] == 0
+    assert any(item["code"] == "VERIFIED_PIT_WINDOW_INCOMPLETE" for item in risk["warnings"])
+    assert not any(item["code"] == "VERIFIED_PIT_WINDOW_INCOMPLETE" for item in risk["hard_blockers"])
+
+
+def test_factor_model_low_risk_non_core_price_gap_allows_sandbox_create(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    mark_price_snapshot_incomplete(client, missing_symbols=[f"ZZZ{i:03d}" for i in range(209)])
+    _patch_factor_strategy_risks(
+        client,
+        monkeypatch,
+        {
+            "s_mom_12m1m_rank": {
+                "warning_count": 0,
+                "blocked_count": 1,
+                "can_create": False,
+                "warnings": [],
+                "hard_blockers": [
+                    {
+                        "code": "PRICE_SNAPSHOT_NOT_READY",
+                        "message": "价格 PIT 缺口需要确认。",
+                    }
+                ],
+            }
+        },
+    )
+
+    preview = assert_ok(client.post("/factor-models/preview", json=_model_payload()))
+
+    assert preview["status"] == "READY"
+    risk = preview["strategy_creation_risk"]
+    assert risk["can_create"] is True
+    assert risk["blocked_count"] == 0
+    assert risk["summary_label"] == "低风险准入"
+    assert "PIT核心成员价格缺口为 0" in risk["summary"]
+    assert "209 个非核心缺口" in risk["summary"]
+    assert any(
+        item["code"] == "PRICE_SNAPSHOT_NOT_READY"
+        and item["severity"] == "WARNING"
+        and item.get("admission_risk_context", {}).get("non_core_missing_count") == 209
+        for item in risk["warnings"]
+    )
+
+    created = assert_ok(client.post("/factor-models", json=_model_payload()))
+    assert created["strategy_type"] == "MULTI_FACTOR"
+    assert created["parameters"]["strategy_creation_risk"]["summary_label"] == "低风险准入"
+
+
 def test_factor_model_strategy_creation_risk_hard_blocker_blocks_create(tmp_path, monkeypatch) -> None:
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
@@ -362,7 +447,22 @@ def test_factor_model_strategy_creation_risk_hard_blocker_blocks_create(tmp_path
 
     rejected = client.post("/factor-models", json=_model_payload())
     assert rejected.status_code == 400
-    assert "strategy creation risk" in rejected.json()["message"]
+    assert "策略创建风险" in rejected.json()["message"]
+
+
+def test_factor_model_create_preserves_selected_rebalance_frequency(tmp_path) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+
+    created = assert_ok(client.post("/factor-models", json=_model_payload(rebalance_frequency="yearly")))
+
+    assert created["rebalance_frequency"] == "yearly"
+    assert created["parameters"]["rebalance_frequency"] == "yearly"
+    assert created["multi_factor_profile"]["rebalance_frequency"] == "yearly"
+    detail = assert_ok(client.get(f"/strategies/{created['id']}/detail"))
+    assert detail["rebalance_frequency"] == "yearly"
+    assert detail["parameters"]["rebalance_frequency"] == "yearly"
+    assert detail["multi_factor_profile"]["rebalance_frequency"] == "yearly"
 
 
 def test_factor_model_create_materializes_existing_strategy_and_rejects_missing_industry_pit(tmp_path, monkeypatch) -> None:
@@ -388,10 +488,15 @@ def test_factor_model_create_materializes_existing_strategy_and_rejects_missing_
     assert created["parameters"]["neutralization"] == {"enabled": False, "method": "industry"}
     assert created["parameters"]["preview"]["strategy_creation_risk"]["can_create"] is True
     assert created["parameters"]["strategy_creation_risk"]["blocked_count"] == 0
+    assert created["rebalance_frequency"] == "monthly"
+    assert created["parameters"]["rebalance_frequency"] == "monthly"
     assert created["parameter_history"][0]["source"]["kind"] == "factor_model_builder"
     assert created["multi_factor_profile"]["components"][0]["factor_id"] == "s_mom_12m1m_rank"
     assert created["multi_factor_profile"]["neutralization"]["execution_status"] == "DISABLED"
     assert created["multi_factor_parameter_ranges"]
+    range_keys = [field["key"] for field in created["multi_factor_parameter_ranges"]]
+    assert "neutralization_method" in range_keys
+    assert "neutralization_enabled" not in range_keys
     weight_ranges = {
         field["key"]: field["current"]
         for field in created["multi_factor_parameter_ranges"]
@@ -403,6 +508,7 @@ def test_factor_model_create_materializes_existing_strategy_and_rejects_missing_
     strategy_id = created["id"]
     detail = assert_ok(client.get(f"/strategies/{strategy_id}/detail"))
     assert detail["multi_factor_profile"]["coverage_summary"]["factor_count"] == 4
+    assert detail["multi_factor_profile"]["rebalance_frequency"] == "monthly"
     refresh_snapshots(client, mode="repair", targets=["corporate"])
     _seed_direct_price_history(client)
 
@@ -434,6 +540,8 @@ def test_factor_model_create_materializes_existing_strategy_and_rejects_missing_
     keys = [field["key"] for field in job["request"]["search_space"]]
     assert "scoring_method" in keys
     assert "rebalance_frequency" in keys
+    assert "neutralization_method" in keys
+    assert "neutralization_enabled" not in keys
     assert any(key.startswith("factor_weight__") for key in keys)
     factor_weight_fields = [
         field
@@ -574,6 +682,206 @@ def test_factor_model_create_materializes_existing_strategy_and_rejects_missing_
         for candidate in matching_combinations
     }
     assert len(metric_signatures) > 1
+
+
+def test_multi_factor_optimization_projection_normalizes_weights_and_dedupes_cadence_rows(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    created = assert_ok(client.post("/factor-models", json=_model_payload()))
+    strategy_id = created["id"]
+    run = submit_backtest(
+        client,
+        strategy_id,
+        start_date="2024-01-02",
+        end_date="2024-06-28",
+    )
+    service = client.app.state.service
+
+    def fake_source_run_detail(_run_id):
+        return {
+            "id": run["id"],
+            "metrics": {"total_return": 0.12, "sharpe": 1.1},
+            "chart_series": [
+                {"date": "2024-01-02", "strategy_return": 0.010, "is_oos": False},
+                {"date": "2024-01-03", "strategy_return": -0.004, "is_oos": False},
+                {"date": "2024-01-04", "strategy_return": 0.008, "is_oos": False},
+                {"date": "2024-01-05", "strategy_return": 0.006, "is_oos": True},
+                {"date": "2024-01-08", "strategy_return": -0.002, "is_oos": True},
+                {"date": "2024-01-09", "strategy_return": 0.007, "is_oos": True},
+            ],
+        }
+
+    monkeypatch.setattr(service, "get_backtest_run_detail", fake_source_run_detail)
+    strategy_detail = service.get_strategy_detail(strategy_id)
+    search_space = service._normalize_optimization_search_space(
+        strategy_detail,
+        {
+            "search_space": [
+                {
+                    "key": "factor_weight__s_mom_12m1m_rank_pct",
+                    "label": "Momentum weight",
+                    "mode": "range",
+                    "current": 40,
+                    "start": 35,
+                    "end": 45,
+                    "step": 5,
+                },
+                {
+                    "key": "factor_weight__s_val_ep_ltm_raw_pct",
+                    "label": "Value weight",
+                    "mode": "range",
+                    "current": 25,
+                    "start": 20,
+                    "end": 30,
+                    "step": 5,
+                },
+                {
+                    "key": "factor_weight__s_vol_252d_rank_pct",
+                    "label": "Volatility weight",
+                    "mode": "fixed",
+                    "current": 20,
+                    "value": 20,
+                },
+                {
+                    "key": "factor_weight__s_size_cur_log_pct",
+                    "label": "Size weight",
+                    "mode": "fixed",
+                    "current": 15,
+                    "value": 15,
+                },
+                {
+                    "key": "rebalance_frequency",
+                    "label": "Rebalance cadence",
+                    "mode": "discrete",
+                    "current": "monthly",
+                    "value": "monthly",
+                    "values": ["monthly", "quarterly", "yearly"],
+                },
+            ],
+        },
+    )
+    rebalance_field = next(field for field in search_space if field["key"] == "rebalance_frequency")
+    assert rebalance_field["mode"] == "fixed"
+    assert rebalance_field["values"] == ["monthly"]
+
+    optimization_payload = {
+        "objective": "return_sharpe",
+        "source_run_id": run["id"],
+        "search_space": search_space,
+        "constraints": [
+            {
+                "key": "return_sharpe",
+                "label": "Return Sharpe",
+                "operator": ">=",
+                "value": -999,
+                "unit": "",
+            }
+        ],
+    }
+    trial_snapshots = [
+        {
+            "factor_weight__s_mom_12m1m_rank_pct": 45,
+            "factor_weight__s_val_ep_ltm_raw_pct": 20,
+            "factor_weight__s_vol_252d_rank_pct": 20,
+            "factor_weight__s_size_cur_log_pct": 15,
+            "rebalance_frequency": "monthly",
+        },
+        {
+            "factor_weight__s_mom_12m1m_rank_pct": 45,
+            "factor_weight__s_val_ep_ltm_raw_pct": 20,
+            "factor_weight__s_vol_252d_rank_pct": 20,
+            "factor_weight__s_size_cur_log_pct": 15,
+            "rebalance_frequency": "yearly",
+        },
+        {
+            "factor_weight__s_mom_12m1m_rank_pct": 50,
+            "factor_weight__s_val_ep_ltm_raw_pct": 15,
+            "factor_weight__s_vol_252d_rank_pct": 20,
+            "factor_weight__s_size_cur_log_pct": 15,
+            "rebalance_frequency": "monthly",
+        },
+    ]
+    trials = []
+    for index, snapshot in enumerate(trial_snapshots, start=1):
+        trial = service._evaluate_optimization_trial(
+            strategy_detail,
+            {"source_run_id": run["id"]},
+            dict(optimization_payload),
+            snapshot,
+        )
+        assert (
+            trial["parameter_snapshot"]["weights"]["s_mom_12m1m_rank"]
+            == snapshot["factor_weight__s_mom_12m1m_rank_pct"]
+        )
+        assert (
+            trial["parameter_snapshot"]["weights"]["s_val_ep_ltm_raw"]
+            == snapshot["factor_weight__s_val_ep_ltm_raw_pct"]
+        )
+        trials.append(
+            {
+                **trial,
+                "trial_index": index,
+                "status": "SUCCEEDED",
+                "id": f"trial_{index}",
+            }
+        )
+
+    matching_combinations = service._build_optimization_matching_combination_candidates(
+        strategy=strategy_detail,
+        payload=optimization_payload,
+        trials=trials,
+    )
+    assert len(matching_combinations) == 2
+    weight_signatures = {
+        tuple(sorted(candidate["parameter_snapshot"]["weights"].items()))
+        for candidate in matching_combinations
+    }
+    assert (
+        ("s_mom_12m1m_rank", 45.0),
+        ("s_size_cur_log", 15.0),
+        ("s_val_ep_ltm_raw", 20.0),
+        ("s_vol_252d_rank", 20.0),
+    ) in weight_signatures
+    assert (
+        ("s_mom_12m1m_rank", 50.0),
+        ("s_size_cur_log", 15.0),
+        ("s_val_ep_ltm_raw", 15.0),
+        ("s_vol_252d_rank", 20.0),
+    ) in weight_signatures
+    projected_effects = {
+        candidate["metrics"]["multi_factor_projection_effect"]
+        for candidate in matching_combinations
+    }
+    assert len(projected_effects) == 2
+
+    stale_saturated_trials = [
+        {
+            **trials[0],
+            "id": "trial_stale_cap_a",
+            "trial_index": 11,
+            "metrics": {
+                **trials[0]["metrics"],
+                "multi_factor_projection_effect": 0.12,
+            },
+            "score": 100.0,
+        },
+        {
+            **trials[-1],
+            "id": "trial_stale_cap_b",
+            "trial_index": 12,
+            "metrics": {
+                **trials[0]["metrics"],
+                "multi_factor_projection_effect": 0.12,
+            },
+            "score": 100.0,
+        },
+    ]
+    stale_matching_combinations = service._build_optimization_matching_combination_candidates(
+        strategy=strategy_detail,
+        payload=optimization_payload,
+        trials=stale_saturated_trials,
+    )
+    assert len(stale_matching_combinations) == 1
 
 
 def test_multi_factor_preview_uses_lightweight_precheck_without_full_simulation(tmp_path, monkeypatch) -> None:

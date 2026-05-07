@@ -27,7 +27,7 @@ function readManifest(manifestPath) {
   return parsed;
 }
 
-const vitestEntry = require.resolve('vitest/vitest.mjs');
+const vitestRunner = path.resolve(__dirname, 'run-vitest-fixed.cjs');
 const extraArgs = process.argv.slice(2);
 const manifestPath = resolveManifestPath();
 const manifest = readManifest(manifestPath);
@@ -35,7 +35,7 @@ const liveApiBase = process.env.LIVE_API_BASE || 'http://127.0.0.1:8000';
 
 const result = spawnSync(
   process.execPath,
-  [vitestEntry, 'run', 'workspace.real-api.smoke.test.tsx', ...extraArgs],
+  [vitestRunner, 'workspace.real-api.smoke.test.tsx', ...extraArgs],
   {
     cwd: process.cwd(),
     stdio: 'inherit',
