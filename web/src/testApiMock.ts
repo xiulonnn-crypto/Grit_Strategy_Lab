@@ -298,6 +298,7 @@ export function installMockApiServer() {
           tag: url.searchParams.get('tag') ?? undefined,
           market: url.searchParams.get('market') ?? undefined,
           status: url.searchParams.get('status') ?? undefined,
+          lifecycle: url.searchParams.get('lifecycle') ?? undefined,
         }));
       }
       if (method === 'POST' && url.pathname === '/factors') {
@@ -318,8 +319,41 @@ export function installMockApiServer() {
       if (method === 'POST' && segments[0] === 'factor-mining' && segments[1] === 'jobs' && segments[3] === 'cancel') {
         return json(await demoApi.cancelFactorMiningJob(segments[2]));
       }
+      if (method === 'GET' && url.pathname === '/factor-factory/overview' && demoApi.getFactorFactoryOverview) {
+        return json(await demoApi.getFactorFactoryOverview());
+      }
+      if (method === 'POST' && url.pathname === '/factor-factory/automation/start' && demoApi.startFactorFactoryAutomation) {
+        return json(await demoApi.startFactorFactoryAutomation(body as import('./types').ApiFactorFactoryAutomationPayload));
+      }
+      if (method === 'POST' && url.pathname === '/factor-factory/automation/pause' && demoApi.pauseFactorFactoryAutomation) {
+        return json(await demoApi.pauseFactorFactoryAutomation());
+      }
+      if (method === 'POST' && url.pathname === '/factor-factory/run-now' && demoApi.runFactorFactoryNow) {
+        return json(await demoApi.runFactorFactoryNow(body as import('./types').ApiFactorFactoryRunNowPayload));
+      }
+      if (
+        method === 'POST' &&
+        segments[0] === 'factor-factory' &&
+        segments[1] === 'runs' &&
+        segments[3] === 'cancel' &&
+        demoApi.cancelFactorFactoryRun
+      ) {
+        return json(await demoApi.cancelFactorFactoryRun(segments[2]));
+      }
       if (method === 'GET' && url.pathname === '/factor-governance/overview' && demoApi.getFactorGovernanceOverview) {
         return json(await demoApi.getFactorGovernanceOverview());
+      }
+      if (
+        method === 'POST' &&
+        segments[0] === 'factor-governance' &&
+        segments[1] === 'actions' &&
+        segments[3] === 'execute' &&
+        demoApi.executeFactorGovernanceAction
+      ) {
+        return json(await demoApi.executeFactorGovernanceAction(
+          segments[2],
+          body as import('./types').ApiFactorGovernanceExecutePayload,
+        ));
       }
       if (method === 'GET' && url.pathname === '/factor-quarantine/candidates' && demoApi.listFactorQuarantineCandidates) {
         return json(await demoApi.listFactorQuarantineCandidates({

@@ -11,8 +11,7 @@ export type ShellNavKey =
   | 'runs'
   | 'optimization'
   | 'factor-library'
-  | 'factor-sandbox'
-  | 'factor-quarantine'
+  | 'factor-factory'
   | 'pit-data'
   | 'snapshots';
 
@@ -189,8 +188,7 @@ export const SHELL_NAV_GROUPS: ShellNavGroup[] = [
     label: TEXT.factor,
     items: [
       { key: 'factor-library', href: '#/factors', label: TEXT.factorLibrary, groupKey: 'factor' },
-      { key: 'factor-sandbox', href: '#/factors/sandbox', label: TEXT.factorSandbox, groupKey: 'factor' },
-      { key: 'factor-quarantine', href: '#/factors/quarantine', label: TEXT.factorQuarantine, groupKey: 'factor' },
+      { key: 'factor-factory', href: '#/factors/factory', label: '因子工厂', groupKey: 'factor' },
     ],
   },
   {
@@ -369,9 +367,17 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         description: TEXT.factorEditorDesc,
         showPageHeading: false,
       };
+    case 'factor-factory':
+      return {
+        navKey: 'factor-factory',
+        eyebrow: TEXT.factor,
+        title: '因子工厂',
+        description: '合并挖掘沙盒与检疫工作台，承载每日自动化、立即运行、Auto-Residual、回撤闸门与发布审计。',
+        showPageHeading: false,
+      };
     case 'factor-sandbox':
       return {
-        navKey: 'factor-sandbox',
+        navKey: 'factor-factory',
         eyebrow: TEXT.factor,
         title: TEXT.factorSandbox,
         description: '批量生成候选表达式，观察进度、失败样本与候选风险。',
@@ -387,7 +393,7 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
       };
     case 'factor-quarantine':
       return {
-        navKey: 'factor-quarantine',
+        navKey: 'factor-factory',
         eyebrow: TEXT.factor,
         title: TEXT.factorQuarantine,
         description: '自动挖掘因子的去重、样本外和相关性门禁将在第三期接入。',

@@ -27,7 +27,6 @@ def _build_fixture(output_dir: Path) -> dict[str, str]:
         draft_strategy_session,
         grid_confirmation_payload,
         materialize_session,
-        momentum_confirmation_payload,
         preview_backtest,
         refresh_snapshots,
         submit_backtest,
@@ -123,23 +122,37 @@ def _build_fixture(output_dir: Path) -> dict[str, str]:
 
             optimization_strategy_session = draft_strategy_session(
                 client,
-                strategy_type="MOMENTUM",
-                message="Create a codex harness momentum strategy for optimization coverage.",
-                confirmation_payload=momentum_confirmation_payload(
-                    revision=1,
-                    universe_name="SPY",
-                    rebalance_frequency="monthly",
-                    strategy_name="Codex MOM Strategy",
-                    strategy_description="Momentum strategy reserved for optimization coverage in the Codex harness.",
-                    benchmark_symbol="SPY",
-                    lookback_months=20,
-                    skip_recent_months=1,
-                    top_n=3,
-                    hold_rank_threshold=5,
-                    weighting_method="equal_weight",
-                    rebalance_anchor_dates="01-01,07-01",
-                    capital=100000,
-                ),
+                strategy_type="MEAN_REVERSION",
+                message="Create a codex harness mean reversion strategy for optimization coverage.",
+                confirmation_payload={
+                    "revision": 1,
+                    "strategy_type": "MEAN_REVERSION",
+                    "core": {
+                        "universe_name": "SPY",
+                        "rebalance_frequency": "never",
+                    },
+                    "logic": {},
+                    "parameters": {
+                        "strategy_name": "Codex MOM Strategy",
+                        "strategy_description": (
+                            "Mean reversion strategy reserved for optimization coverage "
+                            "in the Codex harness."
+                        ),
+                        "benchmark_symbol": "SPY",
+                        "observation_timeframe": "daily",
+                        "trading_logic": "Daily SPY mean reversion harness strategy.",
+                        "bollinger_period": 20,
+                        "rsi_period": 6,
+                        "rsi_buy_threshold": 30,
+                        "rsi_sell_threshold": 70,
+                        "atr_period": 14,
+                        "take_profit_atr": 1.5,
+                        "stop_loss_atr": 1.0,
+                        "long_entry_size_pct": 50,
+                        "short_entry_size_pct": 0,
+                        "capital": 100000,
+                    },
+                },
             )
             optimization_strategy = assert_ok(
                 materialize_session(
@@ -148,11 +161,68 @@ def _build_fixture(output_dir: Path) -> dict[str, str]:
                     idempotency_key="seed-momentum-materialize",
                 )
             )
+            preview_backtest(
+                client,
+                optimization_strategy["id"],
+                start_date="2025-01-01",
+                end_date="2026-03-31",
+            )
+            optimization_source_run = submit_backtest(
+                client,
+                optimization_strategy["id"],
+                start_date="2025-01-01",
+                end_date="2026-03-31",
+                idempotency_key="seed-optimization-source-run",
+            )
             optimization_job = create_optimization_job(
                 client,
                 optimization_strategy["id"],
                 base_parameter_version_id=optimization_strategy.get("current_parameter_version_id"),
+                source_run_id=optimization_source_run["id"],
                 objective="sharpe",
+                budget_combinations=6,
+                search_space=[
+                    {
+                        "key": "observation_timeframe",
+                        "label": "Observation timeframe",
+                        "mode": "discrete",
+                        "current": "daily",
+                        "value": "daily",
+                        "values": ["daily", "weekly", "monthly"],
+                        "tag": "Core parameter",
+                    },
+                    {
+                        "key": "bollinger_period",
+                        "label": "Bollinger period",
+                        "mode": "range",
+                        "current": 20,
+                        "start": 18,
+                        "end": 22,
+                        "step": 2,
+                        "tag": "Signal parameter",
+                    },
+                    {
+                        "key": "rsi_buy_threshold",
+                        "label": "RSI buy threshold",
+                        "mode": "range",
+                        "current": 30,
+                        "start": 25,
+                        "end": 35,
+                        "step": 5,
+                        "tag": "Entry parameter",
+                    },
+                    {
+                        "key": "rsi_sell_threshold",
+                        "label": "RSI sell threshold",
+                        "mode": "fixed",
+                        "current": 70,
+                        "value": 70,
+                        "start": 70,
+                        "end": 70,
+                        "step": 1,
+                        "tag": "Fixed parameter",
+                    },
+                ],
                 wait_until_complete=True,
                 timeout_seconds=10.0,
             )
@@ -160,8 +230,8 @@ def _build_fixture(output_dir: Path) -> dict[str, str]:
             workspace = assert_ok(client.get("/workspace/overview"))
             run_detail = assert_ok(client.get(f"/backtest-runs/{run['id']}/detail"))
             job_detail = assert_ok(client.get(f"/optimization-jobs/{optimization_job['id']}/detail"))
-            strategy_detail = assert_ok(client.get(f"/strategies/{detail_strategy['id']}"))
-            config_strategy_detail = assert_ok(client.get(f"/strategies/{optimization_strategy['id']}"))
+            strategy_detail = assert_ok(client.get(f"/strategies/{detail_strategy['id']}/detail"))
+            config_strategy_detail = assert_ok(client.get(f"/strategies/{optimization_strategy['id']}/detail"))
             creation_detail = assert_ok(client.get(f"/strategy-creation-sessions/{creation_session['session_id']}"))
 
             if str(run.get("status") or "").upper() not in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}:
@@ -170,12 +240,25 @@ def _build_fixture(output_dir: Path) -> dict[str, str]:
                 raise RuntimeError(
                     f"Seed optimization job did not complete successfully: {optimization_job.get('status')!r}"
                 )
+            if str(optimization_source_run.get("status") or "").upper() not in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}:
+                raise RuntimeError(
+                    f"Seed optimization source run did not complete successfully: {optimization_source_run.get('status')!r}"
+                )
             if not workspace.get("latest_backtest_run_id"):
                 raise RuntimeError("Workspace overview is missing latest_backtest_run_id after seed generation.")
             if not run_detail.get("id"):
                 raise RuntimeError("Backtest run detail was not retrievable after seed generation.")
             if not job_detail.get("id"):
                 raise RuntimeError("Optimization job detail was not retrievable after seed generation.")
+            job_request = job_detail.get("request") or {}
+            if not job_request.get("source_run_id"):
+                raise RuntimeError("Optimization job fixture is missing source_run_id for baseline comparison.")
+            if not any(
+                str(entry.get("key")) == "observation_timeframe"
+                for entry in job_request.get("search_space") or []
+                if isinstance(entry, dict)
+            ):
+                raise RuntimeError("Optimization job fixture is missing observation_timeframe search coverage.")
             if not strategy_detail.get("id"):
                 raise RuntimeError("Strategy detail was not retrievable after seed generation.")
             if not config_strategy_detail.get("id"):
@@ -194,6 +277,7 @@ def _build_fixture(output_dir: Path) -> dict[str, str]:
         "creation_session_id": creation_session["session_id"],
         "strategy_id": detail_strategy["id"],
         "optimization_strategy_id": optimization_strategy["id"],
+        "optimization_source_run_id": optimization_source_run["id"],
         "run_id": run["id"],
         "optimization_job_id": optimization_job["id"],
     }

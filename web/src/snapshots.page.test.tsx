@@ -830,7 +830,8 @@ describe('SnapshotsPage', () => {
 
     expect(screen.queryByText('5,120 就绪 / 5,128 总数')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '刷新股票快照' }));
+    const refreshButton = await screen.findByRole('button', { name: '刷新股票快照' });
+    fireEvent.click(refreshButton);
     await waitFor(() =>
       expect(fakeApi.refreshSnapshots).toHaveBeenCalledWith({
         mode: 'repair',
@@ -888,9 +889,11 @@ describe('SnapshotsPage', () => {
     expect(writeText.mock.calls[0]?.[0]).toContain(
       "[Environment]::SetEnvironmentVariable('POLYGON_API_KEY', 'polygon-token', 'Process')",
     );
-    expect(writeText.mock.calls[0]?.[0]).toContain("powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1");
+    expect(writeText.mock.calls[0]?.[0]).toContain(
+      "powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1 -ForceRestart -RestartReason 'snapshot provider credentials updated'",
+    );
     expect(
-      screen.getByText('已复制用户环境持久化+重启命令；粘贴执行一次后，后续新启动 QuickStart 会自动继承。'),
+      screen.getByText('已复制用户环境持久化+受保护强制重启命令；粘贴执行一次后，当前 QuickStart 会重新读取配置。'),
     ).toBeInTheDocument();
   });
 

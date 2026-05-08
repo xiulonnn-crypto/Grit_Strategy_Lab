@@ -81,6 +81,35 @@ describe('FactorQuarantinePage', () => {
     expect(screen.getByRole('button', { name: '发布通过项' })).toBeDisabled();
   });
 
+  it('keeps the first render alive when legacy runtime rows have null report fields', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({
+        items: [{
+          id: 'fq_legacy_null_report',
+          expression: 'Residual(s_mom_6m_rank, s_vol_252d_raw)',
+          status: 'NEEDS_REVIEW',
+          publish_status: 'MANUAL_REVIEW_REQUIRED',
+          gate_summary: null,
+          candidate_metrics: null,
+          failure_samples: null,
+          pit_evidence: null,
+          publish_eligibility: null,
+          created_at: '2026-05-08T08:00:00Z',
+          updated_at: '2026-05-08T08:00:00Z',
+        }],
+        summary: { total: 1 },
+      }),
+    );
+
+    renderPage();
+
+    expect(await screen.findByText('Residual(s_mom_6m_rank, s_vol_252d_raw)')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '检疫报告' })).toBeInTheDocument();
+    expect(screen.getAllByText('待生成').length).toBeGreaterThanOrEqual(4);
+    expect(screen.getByText('检疫报告已保留门禁摘要、正交化说明和结果附件引用。')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '发布通过项' })).toBeDisabled();
+  });
+
   it('intakes, batch-runs, and publishes real quarantine candidates through the API', async () => {
     let queue: ApiFactorQuarantineCandidate[] = [];
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {

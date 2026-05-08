@@ -31,7 +31,9 @@ $focusedTests = @(
     'composition.backtest.result.test.tsx'
     'composition.allocation.test.tsx'
     'creation.flow.test.tsx'
+    'factor.factory.test.tsx'
     'factor.sandbox.test.tsx'
+    'factor.quarantine.test.tsx'
     'factor.model-builder.test.tsx'
     'backtest.submit.test.tsx'
     'run-detail.page.test.tsx'
@@ -91,6 +93,46 @@ function Stop-ProcessTree {
     }
 }
 
+function Join-ProcessArguments {
+    param(
+        [string[]]$Arguments
+    )
+
+    $quotedArguments = $Arguments | ForEach-Object {
+        $argument = [string]$_
+        if ($argument -match '[\s"]') {
+            '"' + ($argument -replace '"', '\"') + '"'
+        } else {
+            $argument
+        }
+    }
+    return [string]::Join(' ', $quotedArguments)
+}
+
+function Set-MergedProcessEnvironment {
+    param(
+        [System.Diagnostics.ProcessStartInfo]$StartInfo,
+        [hashtable]$ExtraEnvironment = @{}
+    )
+
+    $environment = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in [System.Environment]::GetEnvironmentVariables().GetEnumerator()) {
+        $environment[[string]$entry.Key] = [string]$entry.Value
+    }
+    foreach ($entry in $ExtraEnvironment.GetEnumerator()) {
+        $environment[[string]$entry.Key] = [string]$entry.Value
+    }
+
+    $processEnvironment = $StartInfo.Environment
+    if ($null -eq $processEnvironment) {
+        $processEnvironment = $StartInfo.EnvironmentVariables
+    }
+    $processEnvironment.Clear()
+    foreach ($key in $environment.Keys) {
+        $processEnvironment[$key] = $environment[$key]
+    }
+}
+
 function Invoke-LoggedNodeCommand {
     param(
         [string]$Executable,
@@ -102,25 +144,9 @@ function Invoke-LoggedNodeCommand {
         [switch]$ThrowOnError
     )
 
-    $environment = @{}
-    foreach ($entry in [System.Environment]::GetEnvironmentVariables().GetEnumerator()) {
-        $environment[$entry.Key] = [string]$entry.Value
-    }
-    foreach ($entry in $ExtraEnvironment.GetEnumerator()) {
-        $environment[$entry.Key] = [string]$entry.Value
-    }
-
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $Executable
-    $quotedArguments = $Arguments | ForEach-Object {
-        $argument = [string]$_
-        if ($argument -match '[\s"]') {
-            '"' + ($argument -replace '"', '\"') + '"'
-        } else {
-            $argument
-        }
-    }
-    $startInfo.Arguments = [string]::Join(' ', $quotedArguments)
+    $startInfo.Arguments = Join-ProcessArguments -Arguments $Arguments
     $startInfo.WorkingDirectory = $WorkingDirectory
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardOutput = $true
@@ -128,14 +154,7 @@ function Invoke-LoggedNodeCommand {
     $startInfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8
     $startInfo.StandardErrorEncoding = [System.Text.Encoding]::UTF8
     $startInfo.CreateNoWindow = $true
-    $processEnvironment = $startInfo.Environment
-    if ($null -eq $processEnvironment) {
-        $processEnvironment = $startInfo.EnvironmentVariables
-    }
-    $processEnvironment.Clear()
-    foreach ($key in $environment.Keys) {
-        $processEnvironment[$key] = $environment[$key]
-    }
+    Set-MergedProcessEnvironment -StartInfo $startInfo -ExtraEnvironment $ExtraEnvironment
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
@@ -213,6 +232,32 @@ function Wait-ForBackendReady {
     throw "Timed out waiting for live acceptance backend at $BaseUrl"
 }
 
+function Start-LiveAcceptanceBackend {
+    param(
+        [string]$Executable,
+        [string[]]$Arguments,
+        [string]$WorkingDirectory,
+        [string]$WorkspaceDbPath
+    )
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $Executable
+    $startInfo.Arguments = Join-ProcessArguments -Arguments $Arguments
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $false
+    $startInfo.RedirectStandardError = $false
+    $startInfo.CreateNoWindow = $true
+    Set-MergedProcessEnvironment -StartInfo $startInfo -ExtraEnvironment @{
+        GRIT_BACKTEST_DB = $WorkspaceDbPath
+    }
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    [void]$process.Start()
+    return $process
+}
+
 New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
 New-Item -ItemType Directory -Path $uvicornLogDir -Force | Out-Null
 
@@ -265,13 +310,11 @@ if ($IncludeLiveAcceptance) {
         $env:GRIT_BACKTEST_DB = $fixtureDbPath
         if (Test-Path -LiteralPath $uvicornOutLog) { Remove-Item -LiteralPath $uvicornOutLog -Force }
         if (Test-Path -LiteralPath $uvicornErrLog) { Remove-Item -LiteralPath $uvicornErrLog -Force }
-        $backendProcess = Start-Process `
-            -FilePath $pythonExe `
-            -ArgumentList @('-m', 'uvicorn', 'grit_backtest_platform.main:app', '--app-dir', 'src', '--host', '127.0.0.1', '--port', '8010') `
+        $backendProcess = Start-LiveAcceptanceBackend `
+            -Executable $pythonExe `
+            -Arguments @('-m', 'uvicorn', 'grit_backtest_platform.main:app', '--app-dir', 'src', '--host', '127.0.0.1', '--port', '8010') `
             -WorkingDirectory $repoRoot `
-            -RedirectStandardOutput $uvicornOutLog `
-            -RedirectStandardError $uvicornErrLog `
-            -PassThru
+            -WorkspaceDbPath $fixtureDbPath
 
         Wait-ForBackendReady -BaseUrl $liveBaseUrl
 

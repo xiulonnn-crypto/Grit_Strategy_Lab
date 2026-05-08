@@ -176,6 +176,74 @@ def mark_price_snapshot_incomplete(
         )
 
 
+def seed_factor_diagnostic_summary(client, factor_id: str, summary: dict, *, run_id: str | None = None) -> None:
+    service = client.app.state.service
+    now = "2026-05-08T09:30:00Z"
+    diagnostic_run_id = run_id or f"fdiag_{factor_id}_unit"
+    summary_payload = {**summary, "run_id": diagnostic_run_id, "factor_id": factor_id, "status": summary.get("status", "COMPLETED")}
+    with service.storage.connection() as conn:
+        conn.execute(
+            """
+            UPDATE factor_definitions
+            SET lifecycle_status = 'VERIFIED',
+                diagnostic_status = 'COMPLETED',
+                updated_at = ?
+            WHERE id = ? AND deleted_at IS NULL
+            """,
+            (now, factor_id),
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO factor_diagnostic_runs (
+                id, factor_id, status, dataset_snapshot_id, universe_snapshot_id,
+                request_json, summary_json, artifact_refs_json, created_at, completed_at, error_message
+            )
+            VALUES (?, ?, 'COMPLETED', 'ds-price', 'un-sp500', '{}', ?, '{}', ?, ?, NULL)
+            """,
+            (diagnostic_run_id, factor_id, dumps(summary_payload), now, now),
+        )
+
+
+def governance_ready_summary(
+    *,
+    rank_ic: float = 0.031,
+    ir: float = 0.82,
+    coverage: float = 96.0,
+    inverted: bool = False,
+    low_efficiency: bool = False,
+) -> dict:
+    if inverted:
+        group_returns = [
+            {"group": "Q1", "mean_return": -0.021, "sample_count": 120},
+            {"group": "Q2", "mean_return": -0.011, "sample_count": 120},
+            {"group": "Q3", "mean_return": 0.002, "sample_count": 120},
+            {"group": "Q4", "mean_return": 0.011, "sample_count": 120},
+            {"group": "Q5", "mean_return": 0.024, "sample_count": 120},
+        ]
+    else:
+        group_returns = [
+            {"group": "Q1", "mean_return": 0.041, "sample_count": 120},
+            {"group": "Q2", "mean_return": 0.024, "sample_count": 120},
+            {"group": "Q3", "mean_return": 0.008, "sample_count": 120},
+            {"group": "Q4", "mean_return": -0.004, "sample_count": 120},
+            {"group": "Q5", "mean_return": -0.016, "sample_count": 120},
+        ]
+    series_value = 0.002 if low_efficiency else rank_ic
+    return {
+        "status": "COMPLETED",
+        "diagnostic_mode": "VERIFIED",
+        "rank_ic": rank_ic,
+        "ic": rank_ic,
+        "ir": ir,
+        "coverage": coverage,
+        "group_returns": group_returns,
+        "ic_series": [
+            {"date": f"2026-04-{day:02d}", "rank_ic": series_value, "ic": series_value, "symbol_count": 420}
+            for day in range(1, 21)
+        ],
+    }
+
+
 def mark_corporate_actions_snapshot_incomplete(client, *, missing_symbols: list[str]) -> None:
     repository = client.app.state.service.market_data_repository
     metadata = {
@@ -863,6 +931,21 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
     assert assert_ok(client.get("/factors/quality_roe_ltm"))["id"] == "s_qlty_roe_ltm_raw"
 
 
+def test_factor_library_projects_standard_factor_categories(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    payload = assert_ok(client.get("/factors"))
+    by_id = {item["id"]: item for item in payload["items"]}
+
+    assert by_id["s_beta_resid_252d_z"]["descriptor"]["category"] == "beta"
+    assert by_id["s_beta_resid_252d_z"]["factor_family"] == "风险"
+    assert by_id["s_inv_assetgrowth_1y_rank"]["descriptor"]["category"] == "inv"
+    assert by_id["s_inv_assetgrowth_1y_rank"]["factor_family"] == "质量"
+    assert by_id["s_inv_capex_ltm_raw"]["factor_family"] == "质量"
+    assert by_id["s_liq_turnover_20d_rank"]["descriptor"]["category"] == "liq"
+    assert by_id["s_liq_turnover_20d_rank"]["factor_family"] == "情绪"
+    assert by_id["s_alpha_ffblend_cur_rank"]["factor_family"] == "其他"
+
+
 def test_factor_library_migrates_system_seed_expression_versions(tmp_path):
     client, _db_path = create_test_client(tmp_path)
     assert_ok(client.get("/factors"))
@@ -1114,6 +1197,153 @@ def test_factor_library_does_not_fake_ic_sparkline_without_diagnostic(tmp_path):
     assert factor["diagnostic_gap_summary"]["rank_ic"].startswith("Rank IC:")
 
 
+def test_factor_governance_projection_maps_diagnostic_states_to_management_rules(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    factor_service = client.app.state.service._factor_research_service()
+
+    stable_ic_series = [
+        {"date": f"2026-0{month}-01", "rank_ic": value}
+        for month, value in enumerate([0.032, 0.031, 0.034, 0.033, 0.032, 0.031], start=1)
+    ]
+    robust_summary = {
+        "run_id": "diag_state_probe",
+        "status": "COMPLETED",
+        "rank_ic": 0.021,
+        "ir": 0.72,
+        "coverage": 91.2,
+        "group_returns": [
+            {"group": "Q1", "mean_return": 0.052, "sample_count": 120},
+            {"group": "Q2", "mean_return": 0.031, "sample_count": 120},
+            {"group": "Q3", "mean_return": 0.011, "sample_count": 120},
+            {"group": "Q4", "mean_return": -0.004, "sample_count": 120},
+            {"group": "Q5", "mean_return": -0.019, "sample_count": 120},
+        ],
+        "ic_series": stable_ic_series,
+    }
+
+    def classify(summary, **overrides):
+        factor = {
+            "id": "s_diag_state_probe",
+            "name": "诊断状态探针",
+            "expression": "Rank(Return(Close, 126))",
+            "lifecycle_status": "VERIFIED",
+            "diagnostic_status": "COMPLETED",
+            "pit_coverage": {"missing_fields": [], "available_at_gate": True},
+            "readiness_blockers": [],
+            "latest_diagnostic_summary": summary,
+            **overrides,
+        }
+        policy = factor_service._build_blocker_policy(factor, {"nodes": [], "edges": []})
+        state, label = factor_service._classify_factor_ui_state(factor, policy)
+        return state, label, policy
+
+    state, label, policy = classify(robust_summary)
+    assert (state, label) == ("robust", "稳健")
+    assert policy["hard_blocker_count"] == 0
+    assert policy["warning_count"] == 0
+
+    calibrated_summary = {**robust_summary, "coverage": 88.8}
+    state, label, policy = classify(calibrated_summary)
+    assert (state, label) == ("needs_calibration", "待校准")
+    assert any(item["code"] == "COVERAGE_EDGE" for item in policy["warnings"])
+
+    decayed_summary = {**robust_summary, "rank_ic": 0.004, "ir": 0.1}
+    state, label, policy = classify(decayed_summary)
+    assert (state, label) == ("decayed", "失效")
+    assert any(item["code"] == "FACTOR_GRADE_DECAYED" for item in policy["hard_blockers"])
+
+    latest_only_inverted_summary = {
+        **robust_summary,
+        "group_returns": [
+            {"group": "Q1", "mean_return": -0.012, "sample_count": 120},
+            {"group": "Q5", "mean_return": 0.038, "sample_count": 120},
+        ],
+    }
+    state, label, policy = classify(latest_only_inverted_summary)
+    assert (state, label) == ("needs_calibration", "待校准")
+    assert not any(item["code"] == "GROUP_RETURNS_INVERTED" for item in policy["hard_blockers"])
+    assert any(item["code"] == "GROUP_RETURNS_MONOTONICITY_WEAK" for item in policy["warnings"])
+
+    recovered_historical_inversion_summary = {
+        **robust_summary,
+        "group_returns": [
+            {"group": "Q1", "mean_return": 0.0167, "sample_count": 176},
+            {"group": "Q2", "mean_return": 0.0082, "sample_count": 176},
+            {"group": "Q3", "mean_return": 0.0139, "sample_count": 177},
+            {"group": "Q4", "mean_return": 0.0182, "sample_count": 176},
+            {"group": "Q5", "mean_return": -0.0051, "sample_count": 177},
+        ],
+        "group_return_series": [
+            {
+                "date": f"2026-0{month}-01",
+                "groups": [
+                    {"group": "Q1", "mean_return": q1, "sample_count": 120},
+                    {"group": "Q5", "mean_return": q5, "sample_count": 120},
+                ],
+            }
+            for month, q1, q5 in [
+                (1, -0.010, 0.022),
+                (2, -0.012, 0.026),
+                (3, -0.011, 0.028),
+                (4, -0.013, 0.027),
+                (5, -0.009, 0.025),
+                (6, 0.080, -0.020),
+                (7, 0.070, -0.010),
+                (8, 0.060, -0.015),
+            ]
+        ],
+    }
+    state, label, policy = classify(recovered_historical_inversion_summary)
+    assert (state, label) == ("needs_calibration", "待校准")
+    assert not any(item["code"] == "GROUP_RETURNS_INVERTED" for item in policy["hard_blockers"])
+    weak_warning = next(item for item in policy["warnings"] if item["code"] == "GROUP_RETURNS_MONOTONICITY_WEAK")
+    assert weak_warning["monotonicity"]["current_inverted_streak"] == 0
+    assert weak_warning["monotonicity"]["max_inverted_streak"] >= 3
+    normalized_summary = factor_service._latest_diagnostic_summary(
+        {
+            "latest_diagnostic_summary": {
+                **recovered_historical_inversion_summary,
+                "monotonicity": {"available": True, "inverted": True, "max_inverted_streak": 3},
+            }
+        }
+    )
+    assert normalized_summary["monotonicity"]["inverted"] is False
+    assert normalized_summary["monotonicity"]["current_inverted_streak"] == 0
+
+    persistent_inverted_summary = {
+        **robust_summary,
+        "group_returns": [
+            {"group": "Q1", "mean_return": -0.011, "sample_count": 360},
+            {"group": "Q5", "mean_return": 0.026, "sample_count": 360},
+        ],
+        "group_return_series": [
+            {
+                "date": f"2026-0{month}-01",
+                "groups": [
+                    {"group": "Q1", "mean_return": q1, "sample_count": 120},
+                    {"group": "Q5", "mean_return": q5, "sample_count": 120},
+                ],
+            }
+            for month, q1, q5 in [
+                (1, -0.010, 0.022),
+                (2, -0.012, 0.026),
+                (3, -0.011, 0.028),
+                (4, -0.013, 0.027),
+                (5, -0.009, 0.025),
+            ]
+        ],
+    }
+    state, label, policy = classify(persistent_inverted_summary)
+    assert (state, label) == ("decayed", "失效")
+    assert any(item["code"] == "GROUP_RETURNS_INVERTED" for item in policy["hard_blockers"])
+    blocker = next(item for item in policy["hard_blockers"] if item["code"] == "GROUP_RETURNS_INVERTED")
+    assert blocker["monotonicity"]["current_inverted_streak"] == 3
+
+    state, label, policy = classify(None, diagnostic_status="READY_TO_DIAGNOSE")
+    assert (state, label) == ("sandbox", "沙箱")
+    assert policy["hard_blocker_count"] == 0
+
+
 def test_factor_list_governance_projection_warns_for_correlation_without_blocking(tmp_path):
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
@@ -1136,6 +1366,639 @@ def test_factor_list_governance_projection_warns_for_correlation_without_blockin
             warning["code"] == "HIGH_CORRELATION"
             for warning in factor["strategy_creation_risk"]["warnings"]
         )
+
+
+def test_factor_governance_overview_promotes_live_like_momentum_tasks_without_history(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+
+    created_specs = [
+        (
+            "6m residual momentum",
+            'ZScore(Residual(s_mom_6m_rank, by="s_vol_252d_raw"))',
+            "long",
+            "z",
+            "m_mom_long_126d_z",
+        ),
+        (
+            "risk adjusted momentum",
+            "Rank(s_mom_6m_rank / s_vol_126d_raw)",
+            "longra",
+            "rank",
+            "m_mom_longra_126d_rank",
+        ),
+        (
+            "downside risk adjusted momentum",
+            "Rank(s_mom_6m_rank / s_vol_downside_126d_raw)",
+            "longdra",
+            "rank",
+            "m_mom_longdra_126d_rank",
+        ),
+    ]
+    for name, expression, metric, operator, expected_id in created_specs:
+        created = assert_ok(
+            client.post(
+                "/factors",
+                json={
+                    "name": name,
+                    "market": "US",
+                    "universe": "SP500",
+                    "expression": expression,
+                    "frequency": "DAILY",
+                    "direction": "HIGH_IS_BETTER",
+                    "descriptor": manual_descriptor(metric=metric, window="126d", operator=operator),
+                    "tags": ["manual"],
+                },
+            )
+        )
+        assert created["id"] == expected_id
+
+    deprecate_id = "m_mom_long_126d_z"
+    keep_id = "m_mom_longra_126d_rank"
+    prune_id = "m_mom_longdra_126d_rank"
+    seed_factor_diagnostic_summary(
+        client,
+        deprecate_id,
+        governance_ready_summary(rank_ic=0.0088, ir=0.1988, coverage=98.54),
+        run_id="fdiag_live_like_noise",
+    )
+    seed_factor_diagnostic_summary(
+        client,
+        keep_id,
+        governance_ready_summary(rank_ic=0.0308, ir=1.3205, coverage=99.13),
+        run_id="fdiag_live_like_keep",
+    )
+    seed_factor_diagnostic_summary(
+        client,
+        prune_id,
+        governance_ready_summary(rank_ic=0.0294, ir=1.2591, coverage=99.13),
+        run_id="fdiag_live_like_prune",
+    )
+
+    overview = assert_ok(client.get("/factor-governance/overview"))
+    actions = overview["actions"]
+    unsupported_kinds = {
+        item["kind"]
+        for item in actions
+        if item["kind"] not in {"DEPRECATE", "PRUNE", "FACTOR_MODEL_SUGGESTION"}
+    }
+
+    assert unsupported_kinds == set()
+    deprecate_action = next(
+        item for item in actions if item["kind"] == "DEPRECATE" and deprecate_id in item["factor_ids"]
+    )
+    prune_action = next(
+        item for item in actions if item["kind"] == "PRUNE" and prune_id in item["factor_ids"]
+    )
+    assert deprecate_action["command"] == "DEPRECATE"
+    assert deprecate_action["offline_detail"]["grade"] == "D"
+    assert deprecate_action["offline_detail"]["noise_like"] is True
+    assert prune_action["command"] == "PRUNE"
+    assert prune_action["keep_factor_id"] == keep_id
+    assert prune_action["offline_detail"]["correlation"] == 0.94
+
+
+def test_size_neutralized_factor_gets_preview_and_persisted_sandbox_diagnostics(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+
+    created = assert_ok(
+        client.post(
+            "/factors",
+            json={
+                "name": "6m size neutral momentum",
+                "market": "US",
+                "universe": "SP500",
+                "expression": 'ZScore(Residual(s_mom_6m_rank, by="s_size_cur_log"))',
+                "frequency": "DAILY",
+                "direction": "HIGH_IS_BETTER",
+                "descriptor": manual_descriptor(metric="longszneu", window="126d", operator="z"),
+                "tags": ["manual"],
+            },
+        )
+    )
+
+    assert created["id"] == "m_mom_longszneu_126d_z"
+    assert "market_cap" in created["data_requirements"]
+    assert "shares_outstanding" in created["data_requirements"]
+
+    preview = assert_ok(
+        client.post(
+            "/factors/diagnostics/preview",
+            json={
+                "batch": True,
+                "factor_ids": [created["id"]],
+                "diagnostic_mode": "SANDBOX",
+                "include": ["ic", "ir", "groups", "turnover", "correlation", "blockers"],
+            },
+        )
+    )
+    preview_summary = preview["items"][0]["latest_diagnostic_summary"]
+
+    assert preview_summary["status"] == "PREVIEW"
+    assert isinstance(preview_summary["rank_ic"], float)
+    assert preview_summary["coverage"] > 0
+    assert preview_summary["data_lineage"]["kind"] == "FACTOR_EXPRESSION_PREVIEW"
+
+    pit = assert_ok(client.get("/pit-data"))
+    diagnostic = assert_ok(
+        client.post(
+            f"/factors/{created['id']}/diagnostics",
+            json={
+                "start_date": pit["diagnostic_windows"]["sandbox"]["start_date"],
+                "end_date": pit["as_of_date"],
+                "dataset_snapshot_id": pit["dataset_snapshot_id"],
+                "universe_snapshot_id": pit["universe_snapshot_id"],
+                "return_window_days": 21,
+                "group_count": 5,
+                "diagnostic_mode": "SANDBOX",
+            },
+        )
+    )
+
+    assert diagnostic["summary"]["status"] == "COMPLETED"
+    assert diagnostic["summary"]["diagnostic_mode"] == "SANDBOX"
+    assert isinstance(diagnostic["summary"]["rank_ic"], float)
+    assert diagnostic["summary"]["coverage"] > 0
+
+    detail = assert_ok(client.get(f"/factors/{created['id']}"))
+    assert detail["latest_diagnostic_summary"]["run_id"] == diagnostic["run_id"]
+    assert detail["latest_diagnostic_summary"]["factor_id"] == created["id"]
+
+
+def test_factor_governance_overview_deprecates_preview_grade_d_seed_factors(tmp_path, monkeypatch):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    target_ids = {"s_liq_amihud_20d_rank", "s_mom_shortrev_1m_rank"}
+    factor_service = client.app.state.service._factor_research_service()
+
+    preview_metrics = {
+        "s_liq_amihud_20d_rank": {"rank_ic": -0.0006, "ir": -0.0211, "coverage": 98.99},
+        "s_mom_shortrev_1m_rank": {"rank_ic": -0.0039, "ir": -0.1232, "coverage": 98.99},
+    }
+
+    def preview_stub(request):
+        payload = request if isinstance(request, dict) else request.model_dump()
+        requested_ids = {str(item) for item in payload.get("factor_ids") or []}
+        items = []
+        for factor_id in sorted(target_ids & requested_ids):
+            metrics = preview_metrics[factor_id]
+            items.append(
+                {
+                    "factor_id": factor_id,
+                    "ui_state": "decayed",
+                    "ui_state_label": "失效",
+                    "diagnostic_status": "SANDBOX_READY",
+                    "latest_diagnostic_summary": {
+                        "run_id": f"preview:{factor_id}",
+                        "factor_id": factor_id,
+                        "status": "PREVIEW",
+                        "diagnostic_mode": "SANDBOX",
+                        "data_lineage": {
+                            "kind": "FACTOR_EXPRESSION_PREVIEW",
+                            "note": "只读预览，不写入正式诊断表。",
+                        },
+                        "rank_ic": metrics["rank_ic"],
+                        "ir": metrics["ir"],
+                        "coverage": metrics["coverage"],
+                        "group_returns": [
+                            {"group": "Q1", "mean_return": 0.01, "sample_count": 50},
+                            {"group": "Q5", "mean_return": 0.02, "sample_count": 50},
+                        ],
+                        "ic_series": [
+                            {"date": f"2026-04-{day:02d}", "rank_ic": metrics["rank_ic"], "ic": metrics["rank_ic"]}
+                            for day in range(1, 12)
+                        ],
+                        "compliance_trail": {"diagnosed_at": "2026-05-08T09:39:17Z"},
+                    },
+                    "batch_diagnostic_summary": {
+                        "status": "PREVIEW",
+                        "latest_run_id": f"preview:{factor_id}",
+                        "diagnostic_mode": "SANDBOX",
+                        **metrics,
+                    },
+                }
+            )
+        return {
+            "mode": "BATCH",
+            "status": "PREVIEW",
+            "diagnostic_mode": "SANDBOX",
+            "items": items,
+            "batch_summary": {"factor_count": len(items), "decayed_count": len(items)},
+        }
+
+    monkeypatch.setattr(factor_service, "preview_diagnostics_batch", preview_stub)
+
+    factors = assert_ok(client.get("/factors?lifecycle=online"))["items"]
+    by_id = {item["id"]: item for item in factors}
+    assert target_ids.issubset(by_id)
+    for factor_id in target_ids:
+        assert by_id[factor_id].get("latest_diagnostic_summary") is None
+
+    preview = assert_ok(
+        client.post(
+            "/factors/diagnostics/preview",
+            json={
+                "batch": True,
+                "factor_ids": sorted(target_ids),
+                "diagnostic_mode": "SANDBOX",
+                "include": ["ic", "ir", "groups", "turnover", "correlation", "blockers"],
+            },
+        )
+    )
+    preview_by_id = {item["factor_id"]: item for item in preview["items"]}
+    assert {item["ui_state"] for item in preview["items"]} == {"decayed"}
+    assert all(item["latest_diagnostic_summary"]["status"] == "PREVIEW" for item in preview["items"])
+
+    overview = assert_ok(client.get("/factor-governance/overview"))
+    deprecate_actions = {
+        action["factor_ids"][0]: action
+        for action in overview["actions"]
+        if action["kind"] == "DEPRECATE" and action["factor_ids"][0] in target_ids
+    }
+    assert set(deprecate_actions) == target_ids
+    for factor_id, action in deprecate_actions.items():
+        preview_summary = preview_by_id[factor_id]["latest_diagnostic_summary"]
+        assert action["offline_detail"]["preview_only"] is True
+        assert action["offline_detail"]["grade"] == "D"
+        assert action["offline_detail"]["rank_ic"] == preview_summary["rank_ic"]
+        assert action["offline_detail"]["ir"] == preview_summary["ir"]
+
+    action = deprecate_actions["s_mom_shortrev_1m_rank"]
+    executed = assert_ok(
+        client.post(
+            f"/factor-governance/actions/{action['id']}/execute",
+            json={
+                "confirm": True,
+                "command": "DEPRECATE",
+                "factor_ids": ["s_mom_shortrev_1m_rank"],
+                "reason": "强制下线：只读预览 Grade D 噪声信号。",
+                "detail": action.get("offline_detail", {}),
+            },
+        )
+    )
+    assert executed["items"][0]["lifecycle_status"] == "DEPRECATED"
+    offline_by_id = {
+        item["id"]: item
+        for item in assert_ok(client.get("/factors?lifecycle=offline"))["items"]
+    }
+    assert offline_by_id["s_mom_shortrev_1m_rank"]["offline_detail"]["evidence"]["preview_only"] is True
+
+
+def test_factor_governance_prune_uses_preview_augmented_cluster_peers(tmp_path, monkeypatch):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    factor_service = client.app.state.service._factor_research_service()
+    keep_id = "s_mom_6m_rank"
+    prune_ids = {"s_mom_shortrev_1m_rank", "s_mom_12m1m_rank"}
+    target_ids = {keep_id, *prune_ids}
+    metrics_by_id = {
+        keep_id: {"rank_ic": 0.028, "ir": 1.1, "coverage": 99.0},
+        "s_mom_shortrev_1m_rank": {"rank_ic": 0.021, "ir": 0.42, "coverage": 97.0},
+        "s_mom_12m1m_rank": {"rank_ic": 0.019, "ir": 0.35, "coverage": 96.0},
+    }
+
+    def preview_stub(request):
+        payload = request if isinstance(request, dict) else request.model_dump()
+        requested_ids = {str(item) for item in payload.get("factor_ids") or []}
+        items = []
+        for factor_id in sorted(target_ids & requested_ids):
+            metrics = metrics_by_id[factor_id]
+            items.append(
+                {
+                    "factor_id": factor_id,
+                    "ui_state": "needs_calibration",
+                    "ui_state_label": "needs calibration",
+                    "diagnostic_status": "SANDBOX_READY",
+                    "latest_diagnostic_summary": {
+                        "run_id": f"preview:{factor_id}",
+                        "factor_id": factor_id,
+                        "status": "PREVIEW",
+                        "diagnostic_mode": "SANDBOX",
+                        "data_lineage": {"kind": "FACTOR_EXPRESSION_PREVIEW"},
+                        "rank_ic": metrics["rank_ic"],
+                        "ir": metrics["ir"],
+                        "coverage": metrics["coverage"],
+                        "group_returns": [
+                            {"group": "Q1", "mean_return": 0.03, "sample_count": 50},
+                            {"group": "Q5", "mean_return": 0.01, "sample_count": 50},
+                        ],
+                        "ic_series": [
+                            {"date": f"2026-04-{day:02d}", "rank_ic": metrics["rank_ic"], "ic": metrics["rank_ic"]}
+                            for day in range(1, 12)
+                        ],
+                        "compliance_trail": {"diagnosed_at": "2026-05-08T09:39:17Z"},
+                    },
+                    "batch_diagnostic_summary": {
+                        "status": "PREVIEW",
+                        "latest_run_id": f"preview:{factor_id}",
+                        "diagnostic_mode": "SANDBOX",
+                        **metrics,
+                    },
+                    "correlation_cluster_summary": {
+                        "status": "HIGH_CORRELATION",
+                        "high_correlation_count": 1,
+                        "top_factor_ids": [keep_id] if factor_id != keep_id else sorted(prune_ids),
+                    },
+                    "strategy_creation_risk": {"warning_count": 1, "hard_blocker_count": 0},
+                }
+            )
+        return {
+            "mode": "BATCH",
+            "status": "PREVIEW",
+            "diagnostic_mode": "SANDBOX",
+            "items": items,
+            "batch_summary": {"factor_count": len(items), "needs_calibration_count": len(items)},
+        }
+
+    original_cluster = factor_service._correlation_cluster
+
+    def cluster_stub(factor_id):
+        if factor_id in prune_ids:
+            return {
+                "anchor_factor_id": factor_id,
+                "nodes": [{"factor_id": keep_id, "name": keep_id, "correlation": 0.94}],
+            }
+        if factor_id == keep_id:
+            return {
+                "anchor_factor_id": keep_id,
+                "nodes": [
+                    {"factor_id": prune_id, "name": prune_id, "correlation": 0.94}
+                    for prune_id in sorted(prune_ids)
+                ],
+            }
+        return original_cluster(factor_id)
+
+    monkeypatch.setattr(factor_service, "preview_diagnostics_batch", preview_stub)
+    monkeypatch.setattr(factor_service, "_correlation_cluster", cluster_stub)
+
+    online = assert_ok(client.get("/factors?lifecycle=online"))["items"]
+    online_by_id = {item["id"]: item for item in online}
+    assert target_ids.issubset(online_by_id)
+    assert all(online_by_id[factor_id].get("latest_diagnostic_summary") is None for factor_id in target_ids)
+
+    overview = assert_ok(client.get("/factor-governance/overview"))
+    prune_actions = {
+        action["factor_ids"][0]: action
+        for action in overview["actions"]
+        if action["kind"] == "PRUNE" and action["factor_ids"][0] in prune_ids
+    }
+    assert set(prune_actions) == prune_ids
+    for factor_id, action in prune_actions.items():
+        assert action["keep_factor_id"] == keep_id
+        comparison = action["offline_detail"]["comparison"]
+        assert comparison["candidate"]["factor_id"] == factor_id
+        assert comparison["mvp"]["factor_id"] == keep_id
+        assert comparison["mvp"]["ir"] == 1.1
+        assert comparison["mvp"]["coverage"] == 99.0
+
+    action = prune_actions["s_mom_shortrev_1m_rank"]
+    executed = assert_ok(
+        client.post(
+            f"/factor-governance/actions/{action['id']}/execute",
+            json={
+                "confirm": True,
+                "command": "PRUNE",
+                "factor_ids": ["s_mom_shortrev_1m_rank"],
+                "keep_factor_id": keep_id,
+                "reason": "Preview-only cluster peer is the stronger MVP.",
+                "detail": action.get("offline_detail", {}),
+            },
+        )
+    )
+    assert executed["items"][0]["lifecycle_status"] == "PRUNED"
+    assert executed["items"][0]["offline_detail"]["keep_factor_id"] == keep_id
+
+
+def test_factor_governance_prune_matches_factor_library_heatmap_high_pairs(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    assert_ok(client.get("/factors"))
+    keep_id = "s_vol_downside_252d_rank"
+    prune_id = "s_vol_mdd_252d_rank"
+    seed_factor_diagnostic_summary(
+        client,
+        keep_id,
+        governance_ready_summary(rank_ic=0.0955, ir=2.7573, coverage=98.99),
+        run_id=f"fdiag_{keep_id}_mvp",
+    )
+    seed_factor_diagnostic_summary(
+        client,
+        prune_id,
+        governance_ready_summary(rank_ic=0.075, ir=1.0997, coverage=98.34),
+        run_id=f"fdiag_{prune_id}_weak",
+    )
+
+    overview = assert_ok(client.get("/factor-governance/overview"))
+    action = next(
+        (
+            item
+            for item in overview["actions"]
+            if item["kind"] == "PRUNE" and item["factor_ids"] == [prune_id]
+        ),
+        None,
+    )
+
+    assert action is not None
+    assert action["keep_factor_id"] == keep_id
+    assert action["offline_detail"]["correlation"] > 0.90
+    assert action["offline_detail"]["comparison"]["mvp"]["factor_id"] == keep_id
+
+
+def test_factor_governance_prune_uses_standard_style_categories(tmp_path, monkeypatch):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    factors = assert_ok(client.get("/factors"))["items"]
+    by_id = {item["id"]: item for item in factors}
+    factor_service = client.app.state.service._factor_research_service()
+
+    assert factor_service._factor_same_prune_cluster(
+        by_id["s_beta_resid_252d_z"],
+        by_id["s_vol_252d_rank"],
+    )
+    assert factor_service._factor_same_prune_cluster(
+        by_id["s_inv_assetgrowth_1y_rank"],
+        by_id["s_qlty_fcfy_ttm_raw"],
+    )
+    assert not factor_service._factor_same_prune_cluster(
+        by_id["s_liq_turnover_20d_rank"],
+        by_id["s_mom_12m1m_rank"],
+    )
+
+    keep_id = "s_vol_252d_rank"
+    prune_id = "s_beta_resid_252d_z"
+    seed_factor_diagnostic_summary(
+        client,
+        keep_id,
+        governance_ready_summary(rank_ic=0.075, ir=2.2, coverage=99.0),
+        run_id=f"fdiag_{keep_id}_style_mvp",
+    )
+    seed_factor_diagnostic_summary(
+        client,
+        prune_id,
+        governance_ready_summary(rank_ic=0.024, ir=0.42, coverage=91.0),
+        run_id=f"fdiag_{prune_id}_style_prune",
+    )
+
+    original_pair_correlation = factor_service._factor_pair_correlation
+
+    def style_pair_correlation(left, right):
+        pair = {str(left.get("id") or ""), str(right.get("id") or "")}
+        if pair == {keep_id, prune_id}:
+            return 0.94
+        return original_pair_correlation(left, right)
+
+    monkeypatch.setattr(factor_service, "_factor_pair_correlation", style_pair_correlation)
+
+    overview = assert_ok(client.get("/factor-governance/overview"))
+    action = next(
+        (
+            item
+            for item in overview["actions"]
+            if item["kind"] == "PRUNE" and item["factor_ids"] == [prune_id]
+        ),
+        None,
+    )
+
+    assert action is not None
+    assert action["keep_factor_id"] == keep_id
+    assert action["offline_detail"]["comparison"]["candidate"]["factor_id"] == prune_id
+    assert action["offline_detail"]["comparison"]["mvp"]["factor_id"] == keep_id
+
+
+def test_factor_governance_deprecate_soft_offlines_and_blocks_model_use(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    assert_ok(client.get("/factors"))
+    factor_id = "s_mom_12m1m_rank"
+    seed_factor_diagnostic_summary(
+        client,
+        factor_id,
+        governance_ready_summary(rank_ic=0.002, ir=0.12, coverage=94.0, inverted=True, low_efficiency=True),
+    )
+
+    overview = assert_ok(client.get("/factor-governance/overview"))
+    action = next(item for item in overview["actions"] if item["kind"] == "DEPRECATE" and factor_id in item["factor_ids"])
+    rejected = client.post(
+        f"/factor-governance/actions/{action['id']}/execute",
+        json={
+            "confirm": False,
+            "command": "DEPRECATE",
+            "factor_ids": [factor_id],
+            "reason": "强制下线：Grade D、低效 20 个交易日且分组收益倒挂。",
+        },
+    )
+    assert rejected.status_code == 400
+
+    executed = assert_ok(
+        client.post(
+            f"/factor-governance/actions/{action['id']}/execute",
+            json={
+                "confirm": True,
+                "command": "DEPRECATE",
+                "factor_ids": [factor_id],
+                "reason": "强制下线：Grade D、低效 20 个交易日且分组收益倒挂。",
+                "detail": action.get("offline_detail", {}),
+            },
+        )
+    )
+    assert executed["command"] == "DEPRECATE"
+    assert executed["affected_factor_ids"] == [factor_id]
+    assert executed["items"][0]["lifecycle_status"] == "DEPRECATED"
+    assert executed["items"][0]["offline_command"] == "DEPRECATE"
+    assert executed["items"][0]["offline_at"]
+
+    online_ids = {item["id"] for item in assert_ok(client.get("/factors?lifecycle=online"))["items"]}
+    offline = assert_ok(client.get("/factors?lifecycle=offline"))
+    offline_by_id = {item["id"]: item for item in offline["items"]}
+    assert factor_id not in online_ids
+    assert offline_by_id[factor_id]["offline_reason"].startswith("强制下线")
+    assert assert_ok(client.get(f"/factors/{factor_id}"))["offline_command"] == "DEPRECATE"
+
+    preview = assert_ok(
+        client.post(
+            "/factor-models/preview",
+            json={
+                "name": "offline factor model",
+                "universe": "SP500",
+                "components": [{"factor_id": factor_id, "weight": 1.0, "direction": "HIGH_IS_BETTER"}],
+            },
+        )
+    )
+    assert preview["status"] == "BLOCKED"
+    blockers = preview["strategy_creation_risk"]["hard_blockers"]
+    assert any(item["code"] == "FACTOR_OFFLINE" for item in blockers)
+    create_response = client.post(
+        "/factor-models",
+        json={
+            "name": "offline factor model",
+            "universe": "SP500",
+            "components": [{"factor_id": factor_id, "weight": 1.0, "direction": "HIGH_IS_BETTER"}],
+        },
+    )
+    assert create_response.status_code == 400
+
+
+def test_factor_governance_prune_keeps_cluster_mvp_and_soft_offlines_redundant_factor(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    factors = assert_ok(client.get("/factors?lifecycle=all"))["items"]
+    prune_id = "s_vol_mdd_252d_rank"
+    keep_id = "s_vol_downside_252d_rank"
+    assert {prune_id, keep_id}.issubset({factor["id"] for factor in factors})
+    seed_factor_diagnostic_summary(
+        client,
+        prune_id,
+        governance_ready_summary(rank_ic=0.018, ir=0.31, coverage=82.0),
+        run_id=f"fdiag_{prune_id}_weak",
+    )
+    seed_factor_diagnostic_summary(
+        client,
+        keep_id,
+        governance_ready_summary(rank_ic=0.095, ir=5.12, coverage=99.0),
+        run_id=f"fdiag_{keep_id}_mvp",
+    )
+
+    overview = assert_ok(client.get("/factor-governance/overview"))
+    action = next(item for item in overview["actions"] if item["kind"] == "PRUNE" and prune_id in item["factor_ids"])
+    factor_by_id = {item["id"]: item for item in factors}
+    assert action["keep_factor_id"] == keep_id
+    comparison = action["offline_detail"]["comparison"]
+    assert comparison["candidate"]["factor_id"] == prune_id
+    assert comparison["candidate"]["factor_name"] == factor_by_id[prune_id]["name"]
+    assert comparison["candidate"]["rank_ic"] == 0.018
+    assert comparison["candidate"]["ir"] == 0.31
+    assert comparison["candidate"]["coverage"] == 82.0
+    assert comparison["mvp"]["factor_id"] == keep_id
+    assert comparison["mvp"]["factor_name"] == factor_by_id[keep_id]["name"]
+    assert comparison["mvp"]["rank_ic"] == 0.095
+    assert comparison["mvp"]["ir"] == 5.12
+    assert comparison["mvp"]["coverage"] == 99.0
+    expected_reason = f"冗余裁剪：同簇高相关且弱于{factor_by_id[keep_id]['name']}"
+    assert action["offline_reason"] == expected_reason
+    executed = assert_ok(
+        client.post(
+            f"/factor-governance/actions/{action['id']}/execute",
+            json={
+                "confirm": True,
+                "command": "PRUNE",
+                "factor_ids": [prune_id],
+                "keep_factor_id": keep_id,
+                "reason": expected_reason,
+                "detail": action.get("offline_detail", {}),
+            },
+        )
+    )
+    assert executed["command"] == "PRUNE"
+    assert executed["keep_factor_id"] == keep_id
+    offline = assert_ok(client.get("/factors?lifecycle=offline"))["items"]
+    offline_by_id = {item["id"]: item for item in offline}
+    assert offline_by_id[prune_id]["lifecycle_status"] == "PRUNED"
+    assert offline_by_id[prune_id]["offline_reason"] == expected_reason
+    assert offline_by_id[prune_id]["offline_detail"]["keep_factor_id"] == keep_id
+    online_ids = {item["id"] for item in assert_ok(client.get("/factors?lifecycle=online"))["items"]}
+    assert keep_id in online_ids
+    assert prune_id not in online_ids
 
 
 def test_factor_batch_preview_is_read_only_and_returns_summary(tmp_path):
@@ -1621,6 +2484,96 @@ def test_factor_preview_accepts_residual_factor_reference_formula(tmp_path):
     assert diagnostic["summary"]["factor_id"] == "m_mom_long_126d_z"
     assert diagnostic["summary"]["rank_ic"] is not None
     assert diagnostic["summary"]["ic_series"]
+
+
+def test_factor_reference_ratio_formulas_produce_diagnostics(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    pit = assert_ok(client.get("/pit-data"))
+    factor_specs = [
+        (
+            "风险调整后动量",
+            "Rank(s_mom_6m_rank / s_vol_126d_raw)",
+            "longra",
+            "m_mom_longra_126d_rank",
+        ),
+        (
+            "下行风险调整后6m动量",
+            "Rank(s_mom_6m_rank / s_vol_downside_126d_raw)",
+            "longdra",
+            "m_mom_longdra_126d_rank",
+        ),
+    ]
+    created_ids = []
+    for name, expression, metric, expected_id in factor_specs:
+        preview = assert_ok(
+            client.post(
+                "/factors/diagnostics/preview",
+                json={"expression": expression, "lookback_years": 3},
+            )
+        )
+        assert preview["status"] == "PREVIEW"
+        created = assert_ok(
+            client.post(
+                "/factors",
+                json={
+                    "name": name,
+                    "market": "US",
+                    "universe": "SP500",
+                    "expression": expression,
+                    "frequency": "DAILY",
+                    "direction": "HIGH_IS_BETTER",
+                    "descriptor": manual_descriptor(metric=metric, window="126d", operator="rank"),
+                    "tags": ["人工"],
+                },
+            )
+        )
+        assert created["id"] == expected_id
+        created_ids.append(expected_id)
+
+    batch_preview = assert_ok(
+        client.post(
+            "/factors/diagnostics/preview",
+            json={
+                "batch": True,
+                "factor_ids": created_ids,
+                "diagnostic_mode": "SANDBOX",
+                "include": ["ic", "ir", "groups", "turnover"],
+            },
+        )
+    )
+    preview_by_id = {item["factor_id"]: item["latest_diagnostic_summary"] for item in batch_preview["items"]}
+    for factor_id in created_ids:
+        summary = preview_by_id[factor_id]
+        assert summary["status"] == "PREVIEW"
+        assert summary["data_lineage"]["kind"] == "FACTOR_EXPRESSION_PREVIEW"
+        assert isinstance(summary["rank_ic"], float)
+        assert summary["coverage"] > 0
+        assert summary["ic_series"]
+        assert summary["group_return_series"]
+        assert summary["monotonicity"]["window_periods"] == 3
+        assert summary["monotonicity"]["required_consecutive_periods"] == 3
+
+    for factor_id in created_ids:
+        diagnostic = assert_ok(
+            client.post(
+                f"/factors/{factor_id}/diagnostics",
+                json={
+                    "start_date": pit["diagnostic_windows"]["verified"]["start_date"],
+                    "end_date": pit["as_of_date"],
+                    "dataset_snapshot_id": pit["dataset_snapshot_id"],
+                    "universe_snapshot_id": pit["universe_snapshot_id"],
+                    "return_window_days": 21,
+                    "group_count": 5,
+                    "diagnostic_mode": "VERIFIED",
+                },
+            )
+        )
+        assert diagnostic["summary"]["factor_id"] == factor_id
+        assert diagnostic["summary"]["rank_ic"] is not None
+        assert diagnostic["summary"]["ic_series"]
+        assert diagnostic["summary"]["group_return_series"]
+        assert diagnostic["summary"]["monotonicity"]["window_periods"] == 3
 
 
 def test_blocked_seed_factor_cannot_run_diagnostic_without_fundamentals(tmp_path):

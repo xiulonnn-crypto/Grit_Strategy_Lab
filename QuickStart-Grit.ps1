@@ -4,6 +4,8 @@ param(
     [switch]$DryRun,
     [switch]$ValidatePythonOnly,
     [switch]$RepairPython,
+    [switch]$ForceRestart,
+    [string]$RestartReason = 'operator requested QuickStart restart',
     [int]$BackendStartupTimeoutSeconds = 75,
     [int]$FrontendStartupTimeoutSeconds = 45
 )
@@ -35,6 +37,7 @@ $marketDataJournalPath = "$marketDataDbPath-journal"
 $backendRecoveryDir = Join-Path $repoRoot 'artifacts\quickstart-recovery'
 $localQuickStartConfigPath = Join-Path $repoRoot 'QuickStart-Grit.local.ps1'
 $localQuickStartExamplePath = Join-Path $repoRoot 'QuickStart-Grit.local.example.ps1'
+$runtimeSupervisorScript = Join-Path $repoRoot 'scripts\runtime_supervisor.py'
 
 function Get-RepoRelativePath {
     param([string]$Path)
@@ -544,6 +547,86 @@ function Test-RepoFrontendPreviewProcess {
     return $hasWatch -and $hasRebuildOnStart -and ($hasExpectedPort -or $usesDefaultPreviewPort)
 }
 
+function Test-RepoFrontendPreviewHttpFingerprint {
+    param([string]$Url = $frontendHealthUrl)
+
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 3
+        $content = [string]$response.Content
+        return (
+            $content.IndexOf('Grit Backtest Platform', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $content.IndexOf('<div id="root"', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        )
+    } catch {
+        return $false
+    }
+}
+
+function Test-RepoBackendProcess {
+    param(
+        [AllowNull()][string]$ProcessPath,
+        [AllowNull()][string]$CommandLine,
+        [int]$Port = 8000
+    )
+
+    if (
+        -not [string]::IsNullOrWhiteSpace($ProcessPath) -and
+        $ProcessPath.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)
+    ) {
+        return $true
+    }
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return $false
+    }
+    if ($CommandLine.IndexOf($repoRoot, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return $true
+    }
+
+    $escapedPort = [regex]::Escape([string]$Port)
+    $hasExpectedPort = $CommandLine -match "(?i)(^|\s)--port(\s+|=)$escapedPort(\s|$)"
+    $isGritBackend =
+        $CommandLine.IndexOf('grit_backtest_platform.main:app', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $CommandLine.IndexOf('grit_backtest_platform.main', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    return $isGritBackend -and $hasExpectedPort
+}
+
+function Assert-RepoBackendListeners {
+    param([int]$Port = 8000)
+
+    $blocked = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($listenerId in @(Get-BackendListenerProcessIds -Port $Port)) {
+        $processPath = Get-ProcessPathSafely -ProcessId $listenerId
+        $commandLine = Get-ProcessCommandLineSafely -ProcessId $listenerId
+        if (-not (Test-RepoBackendProcess -ProcessPath $processPath -CommandLine $commandLine -Port $Port)) {
+            $details = if ($commandLine) { $commandLine } elseif ($processPath) { $processPath } else { 'unknown process' }
+            $blocked.Add(("PID {0} ({1})" -f $listenerId, $details)) | Out-Null
+        }
+    }
+    if ($blocked.Count -gt 0) {
+        throw "Port $Port is already occupied by a non-repo backend process. Listener(s): $($blocked -join ', ')"
+    }
+}
+
+function Assert-RepoFrontendListeners {
+    param([int]$Port = 4173)
+
+    $blocked = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($listenerId in @(Get-FrontendListenerProcessIds -Port $Port)) {
+        $processPath = Get-ProcessPathSafely -ProcessId $listenerId
+        $commandLine = Get-ProcessCommandLineSafely -ProcessId $listenerId
+        $belongsToRepo =
+            (Test-RepoFrontendPreviewProcess -ProcessPath $processPath -CommandLine $commandLine -Port $Port) -or
+            (Test-RepoFrontendPreviewHttpFingerprint -Url $frontendHealthUrl)
+        if (-not $belongsToRepo) {
+            $details = if ($commandLine) { $commandLine } elseif ($processPath) { $processPath } else { 'unknown process' }
+            $blocked.Add(("PID {0} ({1})" -f $listenerId, $details)) | Out-Null
+        }
+    }
+    if ($blocked.Count -gt 0) {
+        throw "Port $Port is already occupied by a non-repo frontend process. Listener(s): $($blocked -join ', ')"
+    }
+}
+
 function Stop-UnhealthyBackendListeners {
     param([int]$Port = 8000)
 
@@ -556,14 +639,16 @@ function Stop-UnhealthyBackendListeners {
     $blocked = New-Object 'System.Collections.Generic.List[string]'
     foreach ($listenerId in $listenerIds) {
         $processPath = Get-ProcessPathSafely -ProcessId $listenerId
-        if ($processPath -and $processPath.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-            Write-Host "Stopping stale backend listener on port $Port (PID $listenerId)." -ForegroundColor Yellow
+        $commandLine = Get-ProcessCommandLineSafely -ProcessId $listenerId
+        if (Test-RepoBackendProcess -ProcessPath $processPath -CommandLine $commandLine -Port $Port) {
+            Write-Host "Stopping repo-owned backend listener on port $Port (PID $listenerId)." -ForegroundColor Yellow
             Stop-Process -Id $listenerId -Force -ErrorAction Stop
             $stopped.Add($listenerId) | Out-Null
             continue
         }
 
-        $blocked.Add(("PID {0}{1}" -f $listenerId, $(if ($processPath) { " at $processPath" } else { '' }))) | Out-Null
+        $details = if ($commandLine) { $commandLine } elseif ($processPath) { $processPath } else { 'unknown process' }
+        $blocked.Add(("PID {0} ({1})" -f $listenerId, $details)) | Out-Null
     }
 
     if ($blocked.Count -gt 0) {
@@ -591,7 +676,7 @@ function Stop-StaleFrontendListeners {
         $belongsToRepo = Test-RepoFrontendPreviewProcess -ProcessPath $processPath -CommandLine $commandLine -Port $Port
 
         if ($belongsToRepo) {
-            Write-Host "Stopping stale frontend listener on port $Port (PID $listenerId)." -ForegroundColor Yellow
+            Write-Host "Stopping repo-owned frontend listener on port $Port (PID $listenerId)." -ForegroundColor Yellow
             Stop-Process -Id $listenerId -Force -ErrorAction Stop
             $stopped.Add($listenerId) | Out-Null
             continue
@@ -689,6 +774,49 @@ function Ensure-BackendProbeReady {
     throw "Backend probe failed before startup.`n$summary"
 }
 
+function Invoke-QuickStartSupervisorGuard {
+    param(
+        [string]$PythonExe,
+        [bool]$Force = $false,
+        [AllowNull()][string]$Reason = $null
+    )
+
+    if ($env:GRIT_RUNTIME_SUPERVISOR_CHILD -eq '1') {
+        return $true
+    }
+    if (-not (Test-Path -LiteralPath $runtimeSupervisorScript)) {
+        Write-Warning "Runtime supervisor not found at $(Get-RepoRelativePath $runtimeSupervisorScript). Continuing without the startup guard."
+        return $true
+    }
+
+    $guardArgs = @('--json', 'guard', 'quickstart', '--owner-pid', [string]$PID, '--requested-by', 'QuickStart-Grit.ps1')
+    if ($Force) {
+        $guardArgs += '--force'
+        if (-not [string]::IsNullOrWhiteSpace($Reason)) {
+            $guardArgs += @('--reason', $Reason)
+        }
+    }
+    $guardOutput = & $PythonExe $runtimeSupervisorScript @guardArgs 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $guardText = Join-OutputLines -Lines $guardOutput
+        throw "QuickStart supervisor guard failed.`n$guardText"
+    }
+    $guardLine = ($guardOutput | Select-Object -Last 1)
+    try {
+        $guard = $guardLine | ConvertFrom-Json
+    } catch {
+        throw "QuickStart supervisor guard returned non-JSON output: $guardLine"
+    }
+    if (-not [bool]$guard.allowed) {
+        $message = if ($guard.message) { [string]$guard.message } else { 'QuickStart startup was skipped by runtime supervisor.' }
+        Write-Host $message -ForegroundColor Green
+        Write-Host "Workspace URL: $workspaceUrl" -ForegroundColor Green
+        Write-Host "Status: powershell -ExecutionPolicy Bypass -File .\scripts\runtime-supervisor.ps1 status quickstart" -ForegroundColor Yellow
+        return $false
+    }
+    return $true
+}
+
 function Start-BackendWindow {
     param([string]$PythonExe)
     $command = @"
@@ -753,25 +881,42 @@ if ($DryRun) {
     exit 0
 }
 
-if (@(Get-BackendListenerProcessIds -Port 8000).Count -gt 0) {
-    Write-Host 'Restarting existing backend listener on port 8000...' -ForegroundColor Yellow
+if (-not (Invoke-QuickStartSupervisorGuard -PythonExe $effectiveState.Python.PythonExe -Force ([bool]$ForceRestart) -Reason $RestartReason)) {
+    exit 0
 }
-Stop-UnhealthyBackendListeners -Port 8000
-Ensure-BackendProbeReady -PythonExe $effectiveState.Python.PythonExe
-Write-Host 'Starting backend...' -ForegroundColor Yellow
-Start-BackendWindow -PythonExe $effectiveState.Python.PythonExe
-if (-not (Wait-HttpReady -Name 'Backend' -Url $backendHealthUrl -TimeoutSeconds $BackendStartupTimeoutSeconds -ProbeTimeoutSec 5 -ExpectedStatusCodes @(200))) {
-    $probe = Invoke-BackendProbe -PythonExe $effectiveState.Python.PythonExe
-    if (Test-HttpReady -Url $backendHealthUrl -TimeoutSec 10 -ExpectedStatusCodes @(200)) {
-        Write-Host "Backend became ready after the startup probe at $backendHealthUrl" -ForegroundColor Green
+
+$skipBackendStart = $false
+if (@(Get-BackendListenerProcessIds -Port 8000).Count -gt 0) {
+    Assert-RepoBackendListeners -Port 8000
+    if ($ForceRestart) {
+        Write-Host "ForceRestart requested: replacing the healthy repo-owned backend so new environment values are loaded." -ForegroundColor Yellow
+        Stop-UnhealthyBackendListeners -Port 8000
+    } elseif (Test-HttpReady -Url $backendHealthUrl -TimeoutSec 5 -ExpectedStatusCodes @(200)) {
+        Write-Host 'Backend already healthy on port 8000; reusing the existing listener.' -ForegroundColor Green
+        $skipBackendStart = $true
     } else {
-        $probeStatus = if ($probe.Succeeded) {
-            'Backend import/storage probe succeeded, but HTTP health was still unavailable.'
+        Write-Host 'Existing backend listener on port 8000 is not healthy; stopping repo-owned stale listener.' -ForegroundColor Yellow
+        Stop-UnhealthyBackendListeners -Port 8000
+    }
+}
+
+if (-not $skipBackendStart) {
+    Ensure-BackendProbeReady -PythonExe $effectiveState.Python.PythonExe
+    Write-Host 'Starting backend...' -ForegroundColor Yellow
+    Start-BackendWindow -PythonExe $effectiveState.Python.PythonExe
+    if (-not (Wait-HttpReady -Name 'Backend' -Url $backendHealthUrl -TimeoutSeconds $BackendStartupTimeoutSeconds -ProbeTimeoutSec 5 -ExpectedStatusCodes @(200))) {
+        $probe = Invoke-BackendProbe -PythonExe $effectiveState.Python.PythonExe
+        if (Test-HttpReady -Url $backendHealthUrl -TimeoutSec 10 -ExpectedStatusCodes @(200)) {
+            Write-Host "Backend became ready after the startup probe at $backendHealthUrl" -ForegroundColor Green
         } else {
-            'Backend import/storage probe failed after startup.'
+            $probeStatus = if ($probe.Succeeded) {
+                'Backend import/storage probe succeeded, but HTTP health was still unavailable.'
+            } else {
+                'Backend import/storage probe failed after startup.'
+            }
+            $probeSummary = if ([string]::IsNullOrWhiteSpace($probe.Summary)) { 'No backend probe output was captured after startup.' } else { $probe.Summary }
+            throw "Backend failed to become ready at $backendHealthUrl within $BackendStartupTimeoutSeconds seconds.`n$probeStatus`n$probeSummary"
         }
-        $probeSummary = if ([string]::IsNullOrWhiteSpace($probe.Summary)) { 'No backend probe output was captured after startup.' } else { $probe.Summary }
-        throw "Backend failed to become ready at $backendHealthUrl within $BackendStartupTimeoutSeconds seconds.`n$probeStatus`n$probeSummary"
     }
 }
 
@@ -789,40 +934,55 @@ Ensure-FrontendDependencies
 
 $initialBundleFreshness = Get-FrontendBundleFreshness
 
+$skipFrontendStart = $false
 if (@(Get-FrontendListenerProcessIds -Port 4173).Count -gt 0) {
-    if (-not $initialBundleFreshness.IsFresh) {
-        Write-Host "Restarting existing frontend preview because the local dist bundle is stale. $(Format-FrontendBundleFreshnessMessage -Freshness $initialBundleFreshness)" -ForegroundColor Yellow
+    Assert-RepoFrontendListeners -Port 4173
+    if ($ForceRestart) {
+        Write-Host "ForceRestart requested: replacing the healthy repo-owned frontend preview." -ForegroundColor Yellow
+        Stop-StaleFrontendListeners -Port 4173
+    } elseif (Test-HttpReady -Url $frontendHealthUrl -TimeoutSec 5 -ExpectedStatusCodes @(200)) {
+        Write-Host 'Frontend preview already healthy on port 4173; reusing the existing listener.' -ForegroundColor Green
+        $skipFrontendStart = $true
     } else {
-        Write-Host 'Restarting existing frontend preview on port 4173...' -ForegroundColor Yellow
+        if (-not $initialBundleFreshness.IsFresh) {
+            Write-Host "Existing frontend preview is unhealthy and the local dist bundle is stale. $(Format-FrontendBundleFreshnessMessage -Freshness $initialBundleFreshness)" -ForegroundColor Yellow
+        } else {
+            Write-Host 'Existing frontend preview on port 4173 is not healthy; stopping repo-owned stale listener.' -ForegroundColor Yellow
+        }
+        Stop-StaleFrontendListeners -Port 4173
     }
 }
-Stop-StaleFrontendListeners -Port 4173
 
-Write-Host 'Building frontend for static preview...' -ForegroundColor Yellow
-Push-Location $frontendDir
-try {
-    $env:VITE_API_BASE_URL = $apiBaseUrl
-    npm run build
-    if ($LASTEXITCODE -ne 0) {
-        $bundleFreshness = Get-FrontendBundleFreshness
-        if (-not $bundleFreshness.DistExists) {
-            throw "Frontend build failed with exit code $LASTEXITCODE and no existing dist bundle was found."
+if (-not $skipFrontendStart) {
+    Write-Host 'Building frontend for static preview...' -ForegroundColor Yellow
+    Push-Location $frontendDir
+    try {
+        $env:VITE_API_BASE_URL = $apiBaseUrl
+        npm run build
+        if ($LASTEXITCODE -ne 0) {
+            $bundleFreshness = Get-FrontendBundleFreshness
+            if (-not $bundleFreshness.DistExists) {
+                throw "Frontend build failed with exit code $LASTEXITCODE and no existing dist bundle was found."
+            }
+            if (-not $bundleFreshness.IsFresh) {
+                throw "Frontend build failed with exit code $LASTEXITCODE and the existing dist bundle is stale. $(Format-FrontendBundleFreshnessMessage -Freshness $bundleFreshness) This machine is currently hitting vite/esbuild spawn EPERM, so QuickStart cannot refresh the UI bundle here."
+            }
+            Write-Warning 'Frontend build failed, but an existing dist bundle was found. Reusing the last successful build.'
         }
-        if (-not $bundleFreshness.IsFresh) {
-            throw "Frontend build failed with exit code $LASTEXITCODE and the existing dist bundle is stale. $(Format-FrontendBundleFreshnessMessage -Freshness $bundleFreshness) This machine is currently hitting vite/esbuild spawn EPERM, so QuickStart cannot refresh the UI bundle here."
-        }
-        Write-Warning 'Frontend build failed, but an existing dist bundle was found. Reusing the last successful build.'
+    } finally {
+        Pop-Location
     }
-} finally {
-    Pop-Location
-}
 
-$nodeExe = (Get-Command node -ErrorAction Stop).Source
-$previewArgs = @($frontendPreviewScript, '--host', '127.0.0.1', '--port', '4173', '--watch')
-if (-not $NoBrowser) {
-    $previewArgs += @('--open-url', $workspaceUrl)
-}
+    $nodeExe = (Get-Command node -ErrorAction Stop).Source
+    $previewArgs = @($frontendPreviewScript, '--host', '127.0.0.1', '--port', '4173', '--watch')
+    if (-not $NoBrowser) {
+        $previewArgs += @('--open-url', $workspaceUrl)
+    }
 
-Write-Host 'Starting frontend static preview with auto rebuild in this window...' -ForegroundColor Green
-Write-Host 'Keep this window open while using the local app. Frontend edits under web/ will rebuild dist automatically.' -ForegroundColor Yellow
-& $nodeExe @previewArgs
+    Write-Host 'Starting frontend static preview with auto rebuild in this window...' -ForegroundColor Green
+    Write-Host 'Keep this window open while using the local app. Frontend edits under web/ will rebuild dist automatically.' -ForegroundColor Yellow
+    $env:GRIT_RUNTIME_SUPERVISOR_CHILD = '1'
+    & $nodeExe @previewArgs
+} else {
+    Write-Host "Workspace URL: $workspaceUrl" -ForegroundColor Green
+}

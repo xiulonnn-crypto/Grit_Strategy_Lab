@@ -58,7 +58,7 @@ OfficialSeedStatus = Literal['complete', 'partial', 'missing']
 LegType = Literal['strategy', 'asset', 'cash']
 CompositionStatus = Literal['DRAFT', 'ACTIVE', 'ARCHIVED']
 FactorSource = Literal['MANUAL', 'SYSTEM_SEED', 'AUTO_MINED']
-FactorLifecycleStatus = Literal['DRAFT', 'VERIFIED', 'PRODUCTION', 'DECAYED']
+FactorLifecycleStatus = Literal['DRAFT', 'VERIFIED', 'PRODUCTION', 'DECAYED', 'DEPRECATED', 'PRUNED']
 FactorDiagnosticStatus = Literal[
     'READY_TO_DIAGNOSE',
     'SANDBOX_READY',
@@ -75,6 +75,9 @@ FactorMiningJobStatus = Literal['QUEUED', 'RUNNING', 'CANCEL_REQUESTED', 'CANCEL
 FactorQuarantineStatus = Literal['PENDING', 'RUNNING', 'PASSED', 'REJECTED', 'NEEDS_REVIEW', 'PUBLISHED', 'SUPERSEDED']
 FactorPublishStatus = Literal['ELIGIBLE', 'BLOCKED', 'MANUAL_REVIEW_REQUIRED', 'PUBLISHED']
 FactorGovernanceStatus = Literal['WATCH', 'REVIEW', 'DECAYED', 'CROWDED', 'SUSPENDED']
+FactorFactoryAutomationStatus = Literal['ACTIVE', 'PAUSED']
+FactorFactoryRunStatus = Literal['QUEUED', 'RUNNING', 'CANCEL_REQUESTED', 'CANCELLED', 'COMPLETED', 'FAILED']
+FactorFactoryRunTrigger = Literal['DAILY', 'MANUAL']
 
 
 class FactorDescriptorRequest(BaseModel):
@@ -140,6 +143,35 @@ class FactorMiningJobCreateRequest(BaseModel):
         return cleaned
 
 
+class FactorFactoryGatePolicy(BaseModel):
+    pit_gate_mode: Literal['DIAGNOSTIC_ONLY'] = 'DIAGNOSTIC_ONLY'
+    max_style_correlation: float = Field(default=0.3, ge=0.0, le=1.0)
+    residual_enabled: bool = True
+    max_drawdown_relative_to_benchmark: float = Field(default=1.5, gt=0.0)
+    min_oos_to_is_ratio: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class FactorFactoryProfile(BaseModel):
+    id: str = 'default'
+    status: FactorFactoryAutomationStatus = 'ACTIVE'
+    timezone: str = 'Asia/Hong_Kong'
+    schedule_time: str = Field(default='14:00', pattern=r'^\d{2}:\d{2}$')
+    request: FactorMiningJobCreateRequest = Field(default_factory=FactorMiningJobCreateRequest)
+    gate_policy: FactorFactoryGatePolicy = Field(default_factory=FactorFactoryGatePolicy)
+
+
+class FactorFactoryAutomationRequest(BaseModel):
+    timezone: str = 'Asia/Hong_Kong'
+    schedule_time: str = Field(default='14:00', pattern=r'^\d{2}:\d{2}$')
+    request: FactorMiningJobCreateRequest = Field(default_factory=FactorMiningJobCreateRequest)
+    gate_policy: FactorFactoryGatePolicy = Field(default_factory=FactorFactoryGatePolicy)
+
+
+class FactorFactoryRunNowRequest(BaseModel):
+    request: FactorMiningJobCreateRequest = Field(default_factory=FactorMiningJobCreateRequest)
+    gate_policy: FactorFactoryGatePolicy = Field(default_factory=FactorFactoryGatePolicy)
+
+
 class FactorQuarantineIntakeRequest(BaseModel):
     mining_job_id: str | None = None
     candidate_ids: list[str] = Field(default_factory=list)
@@ -153,6 +185,16 @@ class FactorQuarantineRunRequest(BaseModel):
 class FactorQuarantinePublishRequest(BaseModel):
     operator: str | None = None
     rule_version: str | None = None
+
+
+class FactorGovernanceExecuteRequest(BaseModel):
+    confirm: bool = False
+    command: str = Field(min_length=1)
+    factor_ids: list[str] = Field(default_factory=list)
+    factor_id: str | None = None
+    reason: str = Field(min_length=1)
+    keep_factor_id: str | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
 
 
 class FactorModelSuggestionRequest(BaseModel):

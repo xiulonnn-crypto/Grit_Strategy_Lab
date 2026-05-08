@@ -31,20 +31,75 @@ const PIT_LABELS: Record<string, string> = {
 };
 
 type BusyAction = 'intake' | 'run' | 'publish' | null;
+type CandidateRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is CandidateRecord {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function asRecord(value: unknown): CandidateRecord {
+  return isRecord(value) ? value : {};
+}
+
+function asRecordList(value: unknown): CandidateRecord[] {
+  return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
+function asText(value: unknown, fallback = ''): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return fallback;
+}
+
+function statusToken(value: unknown): string {
+  return asText(value).trim().toUpperCase();
+}
 
 function candidateSignature(candidate: ApiFactorQuarantineCandidate): string {
   const expression = String(candidate.expression ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
   return expression || String(candidate.id ?? '').trim().toLowerCase();
 }
 
-function normalizeCandidateQueue(items: ApiFactorQuarantineCandidate[]): ApiFactorQuarantineCandidate[] {
+function normalizeCandidate(item: unknown): ApiFactorQuarantineCandidate | null {
+  if (!isRecord(item)) return null;
+  const id = asText(item.id).trim() || asText(item.mining_candidate_id).trim();
+  const expression = asText(item.expression).trim();
+  if (!id && !expression) return null;
+  const fallbackLabel = expression || id;
+  return {
+    ...(item as Partial<ApiFactorQuarantineCandidate>),
+    id: id || fallbackLabel,
+    mining_candidate_id: asText(item.mining_candidate_id) || null,
+    source_mining_job_id: asText(item.source_mining_job_id) || null,
+    expression: expression || fallbackLabel,
+    status: asText(item.status, 'PENDING'),
+    publish_status: asText(item.publish_status, 'MANUAL_REVIEW_REQUIRED'),
+    gate_summary: asRecord(item.gate_summary),
+    cluster_id: asText(item.cluster_id) || null,
+    candidate_metrics: asRecord(item.candidate_metrics),
+    failure_samples: asRecordList(item.failure_samples),
+    pit_evidence: asRecord(item.pit_evidence),
+    publish_eligibility: asRecord(item.publish_eligibility),
+    target_factor_id: asText(item.target_factor_id) || null,
+    created_at: asText(item.created_at),
+    updated_at: asText(item.updated_at),
+    published_at: asText(item.published_at) || null,
+    rejected_reason: asText(item.rejected_reason) || null,
+    latest_run: isRecord(item.latest_run) ? item.latest_run : undefined,
+  };
+}
+
+function normalizeCandidateQueue(items: unknown): ApiFactorQuarantineCandidate[] {
+  if (!Array.isArray(items)) return [];
   const seen = new Set<string>();
   const normalized: ApiFactorQuarantineCandidate[] = [];
   for (const item of items) {
-    const signature = candidateSignature(item);
+    const candidate = normalizeCandidate(item);
+    if (!candidate) continue;
+    const signature = candidateSignature(candidate);
     if (!signature || seen.has(signature)) continue;
     seen.add(signature);
-    normalized.push(item);
+    normalized.push(candidate);
   }
   return normalized;
 }
@@ -61,11 +116,11 @@ function num(value: unknown, digits = 3): string {
 }
 
 function statusLabel(status: string): string {
-  return STATUS_LABELS[String(status ?? '').toUpperCase()] ?? '待检疫';
+  return STATUS_LABELS[statusToken(status)] ?? '待检疫';
 }
 
 function publishLabel(status: string): string {
-  return PUBLISH_LABELS[String(status ?? '').toUpperCase()] ?? '需复核';
+  return PUBLISH_LABELS[statusToken(status)] ?? '需复核';
 }
 
 function pitLabel(value: unknown): string {
@@ -75,19 +130,44 @@ function pitLabel(value: unknown): string {
 }
 
 function chipTone(status: string): string {
-  const normalized = String(status ?? '').toUpperCase();
+  const normalized = statusToken(status);
   if (normalized === 'PASSED' || normalized === 'PUBLISHED' || normalized === 'ELIGIBLE') return 'good';
   if (normalized === 'REJECTED' || normalized === 'BLOCKED') return 'bad';
   return 'warn';
+}
+
+function candidateReport(candidate: ApiFactorQuarantineCandidate) {
+  return {
+    gate: asRecord(candidate.gate_summary),
+    metrics: asRecord(candidate.candidate_metrics),
+    pit: asRecord(candidate.pit_evidence),
+    publish: asRecord(candidate.publish_eligibility),
+  };
+}
+
+function reportReason(candidate: ApiFactorQuarantineCandidate): string {
+  const { gate, publish } = candidateReport(candidate);
+  return asText(publish.reason)
+    || asText(gate.rejected_reason)
+    || '检疫报告已保留门禁摘要、正交化说明和结果附件引用。';
+}
+
+function rejectedReason(candidate: ApiFactorQuarantineCandidate): string {
+  const { gate } = candidateReport(candidate);
+  return asText(candidate.rejected_reason)
+    || asText(gate.rejected_reason)
+    || '门禁未通过，保留用于后续调参。';
 }
 
 function replaceCandidate(
   items: ApiFactorQuarantineCandidate[],
   candidate: ApiFactorQuarantineCandidate,
 ): ApiFactorQuarantineCandidate[] {
-  const matched = items.some((item) => item.id === candidate.id);
-  if (!matched) return normalizeCandidateQueue([candidate, ...items]);
-  return normalizeCandidateQueue(items.map((item) => (item.id === candidate.id ? candidate : item)));
+  const normalized = normalizeCandidate(candidate);
+  if (!normalized) return items;
+  const matched = items.some((item) => item.id === normalized.id);
+  if (!matched) return normalizeCandidateQueue([normalized, ...items]);
+  return normalizeCandidateQueue(items.map((item) => (item.id === normalized.id ? normalized : item)));
 }
 
 export default function FactorQuarantinePage(): JSX.Element {
@@ -131,14 +211,15 @@ export default function FactorQuarantinePage(): JSX.Element {
     () => candidates.find((candidate) => candidate.id === selectedId) ?? candidates[0],
     [candidates, selectedId],
   );
-  const passedCount = candidates.filter((candidate) => candidate.status === 'PASSED' || candidate.status === 'PUBLISHED').length;
-  const reviewCount = candidates.filter((candidate) => candidate.status === 'NEEDS_REVIEW').length;
-  const rejectedCount = candidates.filter((candidate) => candidate.status === 'REJECTED').length;
+  const selectedReport = selected ? candidateReport(selected) : null;
+  const passedCount = candidates.filter((candidate) => ['PASSED', 'PUBLISHED'].includes(statusToken(candidate.status))).length;
+  const reviewCount = candidates.filter((candidate) => statusToken(candidate.status) === 'NEEDS_REVIEW').length;
+  const rejectedCount = candidates.filter((candidate) => statusToken(candidate.status) === 'REJECTED').length;
   const publishableCandidates = candidates.filter((candidate) => (
-    candidate.status === 'PASSED' && candidate.publish_status === 'ELIGIBLE'
+    statusToken(candidate.status) === 'PASSED' && statusToken(candidate.publish_status) === 'ELIGIBLE'
   ));
-  const latestPublished = candidates.filter((candidate) => candidate.status === 'PUBLISHED' || candidate.published_at);
-  const rejectedSamples = candidates.filter((candidate) => candidate.status === 'REJECTED' || candidate.rejected_reason);
+  const latestPublished = candidates.filter((candidate) => statusToken(candidate.status) === 'PUBLISHED' || candidate.published_at);
+  const rejectedSamples = candidates.filter((candidate) => statusToken(candidate.status) === 'REJECTED' || candidate.rejected_reason);
 
   const intakeFromSandbox = async (): Promise<void> => {
     if (!api.factorQuarantineIntake) {
@@ -170,7 +251,7 @@ export default function FactorQuarantinePage(): JSX.Element {
   };
 
   const runnableCandidates = candidates.filter((candidate) => (
-    !['PUBLISHED', 'SUPERSEDED'].includes(String(candidate.status ?? '').toUpperCase())
+    !['PUBLISHED', 'SUPERSEDED'].includes(statusToken(candidate.status))
   ));
 
   const runPendingCandidates = async (): Promise<void> => {
@@ -196,9 +277,9 @@ export default function FactorQuarantinePage(): JSX.Element {
       if (updatedItems[0]) {
         setSelectedId(updatedItems[0].id);
       }
-      const passed = updatedItems.filter((item) => item.status === 'PASSED').length;
-      const review = updatedItems.filter((item) => item.status === 'NEEDS_REVIEW').length;
-      const rejected = updatedItems.filter((item) => item.status === 'REJECTED').length;
+      const passed = updatedItems.filter((item) => statusToken(item.status) === 'PASSED').length;
+      const review = updatedItems.filter((item) => statusToken(item.status) === 'NEEDS_REVIEW').length;
+      const rejected = updatedItems.filter((item) => statusToken(item.status) === 'REJECTED').length;
       setNotice(`已完成一键检疫 ${updatedItems.length} 条：通过 ${passed}、待复核 ${review}、拒绝 ${rejected}。`);
     } catch (err) {
       setError(err instanceof Error ? err.message : '一键检疫失败。');
@@ -212,7 +293,7 @@ export default function FactorQuarantinePage(): JSX.Element {
       setError('自动发布 API 尚未接入。');
       return;
     }
-    const targets = selected && selected.status === 'PASSED' && selected.publish_status === 'ELIGIBLE'
+    const targets = selected && statusToken(selected.status) === 'PASSED' && statusToken(selected.publish_status) === 'ELIGIBLE'
       ? [selected]
       : publishableCandidates;
     if (!targets.length) {
@@ -347,18 +428,18 @@ export default function FactorQuarantinePage(): JSX.Element {
             {selected ? <span className={`factor-phase2-chip factor-phase2-chip--${chipTone(selected.publish_status)}`}>{publishLabel(selected.publish_status)}</span> : null}
           </div>
           <div className="factor-phase2-panel__body">
-            {selected ? (
+            {selected && selectedReport ? (
               <>
                 <div className="factor-quarantine-report">
-                  <div><span>PIT 门禁</span><strong>{pitLabel(selected.gate_summary.pit ?? selected.pit_evidence.status)}</strong></div>
-                  <div><span>样本内 Rank IC</span><strong>{num(selected.gate_summary.is_rank_ic ?? selected.candidate_metrics.rank_ic)}</strong></div>
-                  <div><span>样本外 Rank IC</span><strong>{num(selected.gate_summary.oos_rank_ic)}</strong></div>
-                  <div><span>覆盖率</span><strong>{pct(selected.candidate_metrics.coverage)}</strong></div>
-                  <div><span>最大相关</span><strong>{num(selected.gate_summary.max_abs_correlation)}</strong></div>
-                  <div><span>换手</span><strong>{pct(selected.candidate_metrics.turnover)}</strong></div>
+                  <div><span>PIT 门禁</span><strong>{pitLabel(selectedReport.gate.pit ?? selectedReport.pit.status)}</strong></div>
+                  <div><span>样本内 Rank IC</span><strong>{num(selectedReport.gate.is_rank_ic ?? selectedReport.metrics.rank_ic)}</strong></div>
+                  <div><span>样本外 Rank IC</span><strong>{num(selectedReport.gate.oos_rank_ic)}</strong></div>
+                  <div><span>覆盖率</span><strong>{pct(selectedReport.metrics.coverage)}</strong></div>
+                  <div><span>最大相关</span><strong>{num(selectedReport.gate.max_abs_correlation)}</strong></div>
+                  <div><span>换手</span><strong>{pct(selectedReport.metrics.turnover)}</strong></div>
                 </div>
                 <p className="factor-phase2-copy">
-                  {String(selected.publish_eligibility.reason ?? selected.gate_summary.rejected_reason ?? '检疫报告已保留门禁摘要、正交化说明和结果附件引用。')}
+                  {reportReason(selected)}
                 </p>
               </>
             ) : (
@@ -405,7 +486,7 @@ export default function FactorQuarantinePage(): JSX.Element {
                   <strong>{candidate.expression}</strong>
                   <span>{candidate.cluster_id ? `聚类 ${candidate.cluster_id}` : '未聚类'}</span>
                 </div>
-                <p>{candidate.rejected_reason ?? String(candidate.gate_summary.rejected_reason ?? '门禁未通过，保留用于后续调参。')}</p>
+                <p>{rejectedReason(candidate)}</p>
               </div>
             )) : (
               <div className="factor-phase2-empty">暂无拒绝样本。</div>

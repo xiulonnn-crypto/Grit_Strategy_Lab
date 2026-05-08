@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import hashlib
 import subprocess
 import sys
 import threading
@@ -756,12 +757,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
         tag: str | None = None,
         market: str | None = None,
         status: str | None = None,
+        lifecycle: str | None = None,
     ) -> dict[str, Any]:
         return self._factor_research_service().list_factors(
             source=source,
             tag=tag,
             market=market,
             status=status,
+            lifecycle=lifecycle,
         )
 
     def create_factor(self, request: Any) -> dict[str, Any]:
@@ -806,6 +809,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
     def get_factor_governance_overview(self) -> dict[str, Any]:
         return self._factor_research_service().get_factor_governance_overview()
+
+    def execute_factor_governance_action(self, action_id: str, request: Any) -> dict[str, Any]:
+        return self._factor_research_service().execute_factor_governance_action(action_id, request)
 
     def create_factor_model_suggestion(self, request: Any) -> dict[str, Any]:
         return self._factor_research_service().create_factor_model_suggestion(request)
@@ -1250,18 +1256,534 @@ class RealBacktestPlatformService(BacktestPlatformService):
             deduped_candidates.append(candidate)
         return deduped_candidates
 
+    def _factor_factory_today(self) -> str:
+        return datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+
+    def _factor_factory_default_request(self) -> dict[str, Any]:
+        return {
+            "universe": "SP500",
+            "start_date": "2018-01-01",
+            "end_date": "2024-12-31",
+            "operators": ["return", "rank", "zscore", "winsorize"],
+            "candidate_count": 250,
+            "random_seed": 42,
+            "min_rank_ic": 0.03,
+            "max_depth": 4,
+        }
+
+    def _factor_factory_default_gate_policy(self) -> dict[str, Any]:
+        return {
+            "pit_gate_mode": "DIAGNOSTIC_ONLY",
+            "max_style_correlation": 0.3,
+            "residual_enabled": True,
+            "max_drawdown_relative_to_benchmark": 1.5,
+            "min_oos_to_is_ratio": 0.5,
+        }
+
+    def _factor_factory_request_payload(self, request: Any | None) -> dict[str, Any]:
+        payload = dict(_as_mapping(request or {}))
+        nested_request = payload.get("request")
+        if isinstance(nested_request, Mapping):
+            request_payload = dict(nested_request)
+        else:
+            request_payload = {
+                key: payload[key]
+                for key in (
+                    "universe",
+                    "start_date",
+                    "end_date",
+                    "operators",
+                    "candidate_count",
+                    "random_seed",
+                    "min_rank_ic",
+                    "max_depth",
+                )
+                if key in payload
+            }
+        defaults = self._factor_factory_default_request()
+        merged = {**defaults, **request_payload}
+        merged["operators"] = list(merged.get("operators") or defaults["operators"])
+        return merged
+
+    def _factor_factory_gate_policy_payload(self, request: Any | None) -> dict[str, Any]:
+        payload = dict(_as_mapping(request or {}))
+        policy = payload.get("gate_policy")
+        if not isinstance(policy, Mapping):
+            policy = {}
+        return {**self._factor_factory_default_gate_policy(), **dict(policy)}
+
+    def _factor_factory_config_signature(self, request_payload: Mapping[str, Any], gate_policy: Mapping[str, Any]) -> str:
+        request_signature = "|".join(str(part) for part in self._factor_mining_request_signature(request_payload))
+        policy_signature = dumps(dict(sorted(gate_policy.items())))
+        return hashlib.sha1(f"{request_signature}|{policy_signature}".encode("utf-8")).hexdigest()[:16]
+
+    def _factor_factory_next_run_at(self, schedule_time: str, *, run_date: str | None = None) -> str:
+        day = run_date or self._factor_factory_today()
+        return f"{day}T{schedule_time}:00+08:00"
+
+    def _decode_factor_factory_profile_row(self, row: Mapping[str, Any] | None) -> dict[str, Any]:
+        if not row:
+            return {
+                "id": "default",
+                "status": "PAUSED",
+                "timezone": "Asia/Hong_Kong",
+                "schedule_time": "14:00",
+                "request": self._factor_factory_default_request(),
+                "gate_policy": self._factor_factory_default_gate_policy(),
+                "created_at": None,
+                "updated_at": None,
+                "last_run_date": None,
+                "next_run_at": self._factor_factory_next_run_at("14:00"),
+            }
+        schedule_time = str(row.get("schedule_time") or "14:00")
+        if schedule_time == "23:30":
+            schedule_time = "14:00"
+        next_run_at = row.get("next_run_at")
+        if not next_run_at or str(next_run_at).endswith("T23:30:00+08:00"):
+            next_run_at = self._factor_factory_next_run_at(schedule_time)
+        return {
+            "id": row.get("id"),
+            "status": row.get("status"),
+            "timezone": row.get("timezone"),
+            "schedule_time": schedule_time,
+            "request": loads(row.get("request_json"), self._factor_factory_default_request()),
+            "gate_policy": loads(row.get("gate_policy_json"), self._factor_factory_default_gate_policy()),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+            "last_run_date": row.get("last_run_date"),
+            "next_run_at": next_run_at,
+        }
+
+    def _decode_factor_factory_run_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        mining_job = None
+        if row.get("mining_job_id"):
+            try:
+                mining_job = self.get_factor_mining_job(str(row.get("mining_job_id")))
+            except Exception:
+                mining_job = None
+        return {
+            "id": row.get("id"),
+            "profile_id": row.get("profile_id"),
+            "run_date": row.get("run_date"),
+            "trigger": row.get("trigger"),
+            "status": row.get("status"),
+            "request": loads(row.get("request_json"), {}),
+            "gate_policy": loads(row.get("gate_policy_json"), {}),
+            "config_signature": row.get("config_signature"),
+            "mining_job_id": row.get("mining_job_id"),
+            "mining_job": mining_job,
+            "summary": loads(row.get("summary_json"), {}),
+            "started_at": row.get("started_at"),
+            "completed_at": row.get("completed_at"),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+            "error_message": row.get("error_message"),
+        }
+
+    def _factor_factory_run_status_from_mining_job(self, mining_status: str) -> str:
+        if mining_status in {"QUEUED", "RUNNING"}:
+            return "RUNNING"
+        if mining_status in {"CANCEL_REQUESTED", "CANCELLED"}:
+            return "CANCELLED"
+        if mining_status in {"COMPLETED", "PARTIALLY_FAILED"}:
+            return "COMPLETED"
+        return "FAILED"
+
+    def _record_factor_factory_run_item(
+        self,
+        *,
+        run_id: str,
+        stage: str,
+        source_id: str | None,
+        target_id: str | None,
+        status: str,
+        summary: Mapping[str, Any] | None = None,
+    ) -> None:
+        now = iso_now()
+        self.storage.insert_json_row(
+            "factor_factory_run_items",
+            {
+                "id": f"ffi_{uuid4().hex[:12]}",
+                "run_id": run_id,
+                "stage": stage,
+                "source_id": source_id,
+                "target_id": target_id,
+                "status": status,
+                "summary_json": dumps(dict(summary or {})),
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+
+    def _run_factor_factory_quarantine_pipeline(
+        self,
+        *,
+        run_id: str,
+        mining_job_id: str,
+        summary: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        current_summary = dict(summary)
+        if current_summary.get("auto_quarantine_status") == "COMPLETED":
+            return current_summary
+        if not mining_job_id:
+            return current_summary
+        intake = self.factor_quarantine_intake({
+            "mining_job_id": mining_job_id,
+            "source": "factor_factory",
+            "factory_run_id": run_id,
+        })
+        intake_items = intake.get("items") if isinstance(intake.get("items"), list) else []
+        self._record_factor_factory_run_item(
+            run_id=run_id,
+            stage="QUARANTINE_INTAKE",
+            source_id=mining_job_id,
+            target_id=None,
+            status="COMPLETED",
+            summary={
+                "intake_count": len(intake_items),
+                "source_mining_job_id": mining_job_id,
+            },
+        )
+        quarantine_results: list[dict[str, Any]] = []
+        for item in intake_items:
+            if not isinstance(item, Mapping):
+                continue
+            candidate_id = str(item.get("id") or "").strip()
+            if not candidate_id:
+                continue
+            if str(item.get("status") or "").upper() == "PUBLISHED":
+                continue
+            result = self.run_factor_quarantine_candidate(candidate_id, {
+                "reason": "factor_factory_auto_quarantine",
+                "factory_run_id": run_id,
+                "source_mining_job_id": mining_job_id,
+            })
+            quarantine_results.append(result)
+            self._record_factor_factory_run_item(
+                run_id=run_id,
+                stage="QUARANTINE_RUN",
+                source_id=mining_job_id,
+                target_id=candidate_id,
+                status=str(result.get("status") or "COMPLETED"),
+                summary={
+                    "publish_status": result.get("publish_status"),
+                    "review_reason": result.get("rejected_reason"),
+                    "gate_summary": result.get("gate_summary"),
+                },
+            )
+        current_summary.update({
+            "auto_intake_count": len(intake_items),
+            "auto_quarantine_count": len(quarantine_results),
+            "auto_quarantine_status": "COMPLETED",
+            "quarantine_candidate_ids": [
+                str(item.get("id"))
+                for item in quarantine_results
+                if isinstance(item, Mapping) and item.get("id")
+            ],
+            "quarantine_status_counts": {
+                "passed": sum(1 for item in quarantine_results if item.get("status") == "PASSED"),
+                "needs_review": sum(1 for item in quarantine_results if item.get("status") == "NEEDS_REVIEW"),
+                "rejected": sum(1 for item in quarantine_results if item.get("status") == "REJECTED"),
+                "eligible": sum(1 for item in quarantine_results if item.get("publish_status") == "ELIGIBLE"),
+            },
+            "funnel": self._factor_factory_funnel(),
+        })
+        return current_summary
+
+    def _refresh_factor_factory_run_row(self, row: Mapping[str, Any]) -> Mapping[str, Any]:
+        mining_job_id = str(row.get("mining_job_id") or "")
+        if not mining_job_id:
+            return row
+        try:
+            mining_job = self.get_factor_mining_job(mining_job_id)
+        except Exception:
+            return row
+        next_status = self._factor_factory_run_status_from_mining_job(str(mining_job.get("status") or ""))
+        completed_at = row.get("completed_at")
+        if next_status in {"COMPLETED", "FAILED", "CANCELLED"}:
+            completed_at = completed_at or mining_job.get("completed_at") or iso_now()
+        summary = loads(row.get("summary_json"), {})
+        if not isinstance(summary, Mapping):
+            summary = {}
+        updated_summary = {
+            **dict(summary),
+            "mining_status": mining_job.get("status"),
+            "top_candidate_count": len(mining_job.get("top_candidates") or []),
+            "failed_sample_count": len(mining_job.get("failed_samples") or []),
+            "funnel": self._factor_factory_funnel(),
+        }
+        if next_status == "COMPLETED":
+            try:
+                updated_summary = self._run_factor_factory_quarantine_pipeline(
+                    run_id=str(row.get("id") or ""),
+                    mining_job_id=mining_job_id,
+                    summary=updated_summary,
+                )
+            except Exception as exc:
+                next_status = "FAILED"
+                completed_at = completed_at or iso_now()
+                updated_summary = {
+                    **updated_summary,
+                    "auto_quarantine_status": "FAILED",
+                    "auto_quarantine_error": str(exc),
+                }
+        if next_status != row.get("status") or updated_summary != summary:
+            self.storage.execute(
+                """
+                UPDATE factor_factory_runs
+                SET status = ?, summary_json = ?, completed_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (next_status, dumps(updated_summary), completed_at, iso_now(), row.get("id")),
+            )
+            refreshed = self.storage.fetch_one("SELECT * FROM factor_factory_runs WHERE id = ?", (row.get("id"),))
+            return refreshed or row
+        return row
+
+    def _factor_factory_funnel(self) -> dict[str, int]:
+        mining_jobs = self.list_factor_mining_jobs()
+        quarantine = self.list_factor_quarantine_candidates()
+        mining_items = mining_jobs.get("items") if isinstance(mining_jobs.get("items"), list) else []
+        quarantine_items = quarantine.get("items") if isinstance(quarantine.get("items"), list) else []
+        mined = sum(len(item.get("top_candidates") or []) for item in mining_items if isinstance(item, Mapping))
+        return {
+            "mined_candidates": mined,
+            "quarantine_candidates": len(quarantine_items),
+            "passed": sum(1 for item in quarantine_items if isinstance(item, Mapping) and item.get("status") == "PASSED"),
+            "review_or_observation": sum(1 for item in quarantine_items if isinstance(item, Mapping) and item.get("status") == "NEEDS_REVIEW"),
+            "rejected": sum(1 for item in quarantine_items if isinstance(item, Mapping) and item.get("status") == "REJECTED"),
+            "published": sum(1 for item in quarantine_items if isinstance(item, Mapping) and item.get("status") == "PUBLISHED"),
+        }
+
+    def get_factor_factory_overview(self) -> dict[str, Any]:
+        profile_row = self.storage.fetch_one("SELECT * FROM factor_factory_profiles WHERE id = 'default'")
+        profile = self._decode_factor_factory_profile_row(profile_row)
+        run_rows = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM factor_factory_runs
+            ORDER BY created_at DESC, id DESC
+            LIMIT 10
+            """
+        )
+        refreshed_rows = [self._refresh_factor_factory_run_row(row) for row in run_rows]
+        latest_run = self._decode_factor_factory_run_row(refreshed_rows[0]) if refreshed_rows else None
+        return {
+            "profile": profile,
+            "active_run": latest_run if latest_run and latest_run.get("status") in {"QUEUED", "RUNNING"} else None,
+            "latest_run": latest_run,
+            "runs": [self._decode_factor_factory_run_row(row) for row in refreshed_rows],
+            "funnel": self._factor_factory_funnel(),
+            "mining": self.list_factor_mining_jobs(),
+            "quarantine": self.list_factor_quarantine_candidates(),
+            "gate_policy": profile.get("gate_policy") or self._factor_factory_default_gate_policy(),
+        }
+
+    def _upsert_factor_factory_profile(
+        self,
+        *,
+        status: str,
+        request_payload: Mapping[str, Any],
+        gate_policy: Mapping[str, Any],
+        timezone_name: str,
+        schedule_time: str,
+        run_date: str | None = None,
+    ) -> dict[str, Any]:
+        now = iso_now()
+        existing = self.storage.fetch_one("SELECT * FROM factor_factory_profiles WHERE id = 'default'")
+        created_at = existing.get("created_at") if existing else now
+        self.storage.insert_json_row(
+            "factor_factory_profiles",
+            {
+                "id": "default",
+                "status": status,
+                "timezone": timezone_name or "Asia/Hong_Kong",
+                "schedule_time": schedule_time or "14:00",
+                "request_json": dumps(dict(request_payload)),
+                "gate_policy_json": dumps(dict(gate_policy)),
+                "created_at": created_at,
+                "updated_at": now,
+                "last_run_date": run_date or (existing.get("last_run_date") if existing else None),
+                "next_run_at": self._factor_factory_next_run_at(schedule_time or "14:00"),
+            },
+        )
+        row = self.storage.fetch_one("SELECT * FROM factor_factory_profiles WHERE id = 'default'")
+        return self._decode_factor_factory_profile_row(row)
+
+    def _create_factor_factory_run(
+        self,
+        *,
+        trigger: str,
+        request_payload: Mapping[str, Any],
+        gate_policy: Mapping[str, Any],
+        run_date: str | None = None,
+    ) -> dict[str, Any]:
+        run_date = run_date or self._factor_factory_today()
+        config_signature = self._factor_factory_config_signature(request_payload, gate_policy)
+        if trigger == "DAILY":
+            existing = self.storage.fetch_one(
+                """
+                SELECT *
+                FROM factor_factory_runs
+                WHERE profile_id = 'default' AND run_date = ? AND config_signature = ? AND trigger = 'DAILY'
+                LIMIT 1
+                """,
+                (run_date, config_signature),
+            )
+            if existing:
+                return self._decode_factor_factory_run_row(self._refresh_factor_factory_run_row(existing))
+            run_id = f"ffr_{run_date.replace('-', '')}_{config_signature[:10]}"
+        else:
+            run_id = f"ffr_manual_{uuid4().hex[:12]}"
+        now = iso_now()
+        try:
+            mining_job = self.create_factor_mining_job(dict(request_payload))
+            mining_job_id = str(mining_job.get("id") or "")
+            run_status = self._factor_factory_run_status_from_mining_job(str(mining_job.get("status") or "RUNNING"))
+            error_message = None
+        except Exception as exc:
+            mining_job_id = None
+            run_status = "FAILED"
+            error_message = str(exc)
+        summary = {
+            "trigger": trigger,
+            "daily_automation": trigger == "DAILY",
+            "pit_gate_mode": "DIAGNOSTIC_ONLY",
+            "residual_enabled": bool(gate_policy.get("residual_enabled", True)),
+            "drawdown_threshold": gate_policy.get("max_drawdown_relative_to_benchmark", 1.5),
+            "mining_job_id": mining_job_id,
+            "funnel": self._factor_factory_funnel(),
+        }
+        self.storage.insert_json_row(
+            "factor_factory_runs",
+            {
+                "id": run_id,
+                "profile_id": "default",
+                "run_date": run_date,
+                "trigger": trigger,
+                "status": run_status,
+                "request_json": dumps(dict(request_payload)),
+                "gate_policy_json": dumps(dict(gate_policy)),
+                "config_signature": config_signature,
+                "mining_job_id": mining_job_id,
+                "summary_json": dumps(summary),
+                "started_at": now,
+                "completed_at": now if run_status in {"FAILED", "CANCELLED"} else None,
+                "created_at": now,
+                "updated_at": now,
+                "error_message": error_message,
+            },
+        )
+        self.storage.insert_json_row(
+            "factor_factory_run_items",
+            {
+                "id": f"ffi_{uuid4().hex[:12]}",
+                "run_id": run_id,
+                "stage": "MINING",
+                "source_id": None,
+                "target_id": mining_job_id,
+                "status": run_status,
+                "summary_json": dumps({"request": dict(request_payload), "gate_policy": dict(gate_policy)}),
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        row = self.storage.fetch_one("SELECT * FROM factor_factory_runs WHERE id = ?", (run_id,))
+        return self._decode_factor_factory_run_row(row or {})
+
+    def start_factor_factory_automation(self, request: Any | None = None) -> dict[str, Any]:
+        payload = dict(_as_mapping(request or {}))
+        request_payload = self._factor_factory_request_payload(request)
+        gate_policy = self._factor_factory_gate_policy_payload(request)
+        timezone_name = str(payload.get("timezone") or "Asia/Hong_Kong")
+        schedule_time = str(payload.get("schedule_time") or "14:00")
+        run_date = self._factor_factory_today()
+        profile = self._upsert_factor_factory_profile(
+            status="ACTIVE",
+            request_payload=request_payload,
+            gate_policy=gate_policy,
+            timezone_name=timezone_name,
+            schedule_time=schedule_time,
+            run_date=run_date,
+        )
+        run = self._create_factor_factory_run(
+            trigger="DAILY",
+            request_payload=request_payload,
+            gate_policy=gate_policy,
+            run_date=run_date,
+        )
+        return {**self.get_factor_factory_overview(), "profile": profile, "daily_run": run}
+
+    def pause_factor_factory_automation(self) -> dict[str, Any]:
+        profile_row = self.storage.fetch_one("SELECT * FROM factor_factory_profiles WHERE id = 'default'")
+        profile_payload = self._decode_factor_factory_profile_row(profile_row)
+        profile = self._upsert_factor_factory_profile(
+            status="PAUSED",
+            request_payload=profile_payload.get("request") or self._factor_factory_default_request(),
+            gate_policy=profile_payload.get("gate_policy") or self._factor_factory_default_gate_policy(),
+            timezone_name=str(profile_payload.get("timezone") or "Asia/Hong_Kong"),
+            schedule_time=str(profile_payload.get("schedule_time") or "14:00"),
+        )
+        return {**self.get_factor_factory_overview(), "profile": profile}
+
+    def run_factor_factory_now(self, request: Any | None = None) -> dict[str, Any]:
+        request_payload = self._factor_factory_request_payload(request)
+        gate_policy = self._factor_factory_gate_policy_payload(request)
+        run = self._create_factor_factory_run(
+            trigger="MANUAL",
+            request_payload=request_payload,
+            gate_policy=gate_policy,
+        )
+        return {**self.get_factor_factory_overview(), "manual_run": run}
+
+    def cancel_factor_factory_run(self, run_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one("SELECT * FROM factor_factory_runs WHERE id = ?", (run_id,))
+        if not row:
+            raise KeyError(f"Factor factory run not found: {run_id}")
+        mining_job_id = str(row.get("mining_job_id") or "")
+        if mining_job_id:
+            try:
+                self.cancel_factor_mining_job(mining_job_id)
+            except Exception:
+                pass
+        now = iso_now()
+        self.storage.execute(
+            """
+            UPDATE factor_factory_runs
+            SET status = 'CANCELLED', completed_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, now, run_id),
+        )
+        refreshed = self.storage.fetch_one("SELECT * FROM factor_factory_runs WHERE id = ?", (run_id,))
+        return self._decode_factor_factory_run_row(refreshed or row)
+
     def _project_mining_candidate(self, candidate: Any) -> dict[str, Any]:
         rank_ic = candidate.rank_ic if getattr(candidate, "rank_ic", None) is not None else 0.0
+        fitness_score = getattr(candidate, "fitness_score", None)
+        auto_residual_summary = getattr(candidate, "auto_residual_summary", None) or {}
         return {
             "id": candidate.candidate_id,
             "candidate_id": candidate.candidate_id,
             "rank": candidate.rank,
             "expression": candidate.expression,
-            "score": round(float(rank_ic), 6),
+            "score": round(float(fitness_score if fitness_score is not None else rank_ic), 6),
             "rank_ic": rank_ic,
-            "turnover": 0.0,
+            "pure_rank_ic": getattr(candidate, "pure_rank_ic", None),
+            "ir": getattr(candidate, "information_ratio", None),
+            "information_ratio": getattr(candidate, "information_ratio", None),
+            "holding_period": getattr(candidate, "holding_period", None),
+            "newey_west_lags": getattr(candidate, "newey_west_lags", None),
+            "fitness_score": fitness_score,
+            "max_style_correlation": getattr(candidate, "max_style_correlation", None),
+            "correlation_penalty": getattr(candidate, "correlation_penalty", 0.0),
+            "max_drawdown_pct": getattr(candidate, "max_drawdown_pct", None),
+            "benchmark_max_drawdown_pct": getattr(candidate, "benchmark_max_drawdown_pct", None),
+            "drawdown_vs_benchmark_ratio": getattr(candidate, "drawdown_vs_benchmark_ratio", None),
+            "auto_residual_summary": dict(auto_residual_summary) if isinstance(auto_residual_summary, Mapping) else {},
+            "turnover": getattr(candidate, "turnover", 0.0),
             "coverage": candidate.coverage,
-            "depth": None,
+            "depth": getattr(candidate, "depth", None),
             "risk_flags": list(candidate.risk_flags),
             "status": candidate.status,
             "persisted_to_factor_definitions": False,
@@ -1523,13 +2045,29 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 candidate.candidate_id,
                 job_id,
                 candidate.expression,
+                getattr(candidate, "fitness_score", None) if getattr(candidate, "fitness_score", None) is not None else candidate.rank_ic,
                 candidate.rank_ic,
-                candidate.rank_ic,
-                0.0,
+                getattr(candidate, "turnover", 0.0),
                 candidate.coverage,
-                None,
+                getattr(candidate, "depth", None),
                 dumps(list(candidate.risk_flags)),
-                dumps({"rank": candidate.rank, "status": candidate.status, "persisted_to_factor_definitions": False}),
+                dumps({
+                    "rank": candidate.rank,
+                    "status": candidate.status,
+                    "persisted_to_factor_definitions": False,
+                    "fitness_score": getattr(candidate, "fitness_score", None),
+                    "pure_rank_ic": getattr(candidate, "pure_rank_ic", None),
+                    "ir": getattr(candidate, "information_ratio", None),
+                    "information_ratio": getattr(candidate, "information_ratio", None),
+                    "holding_period": getattr(candidate, "holding_period", None),
+                    "newey_west_lags": getattr(candidate, "newey_west_lags", None),
+                    "max_style_correlation": getattr(candidate, "max_style_correlation", None),
+                    "correlation_penalty": getattr(candidate, "correlation_penalty", 0.0),
+                    "max_drawdown_pct": getattr(candidate, "max_drawdown_pct", None),
+                    "benchmark_max_drawdown_pct": getattr(candidate, "benchmark_max_drawdown_pct", None),
+                    "drawdown_vs_benchmark_ratio": getattr(candidate, "drawdown_vs_benchmark_ratio", None),
+                    "auto_residual_summary": getattr(candidate, "auto_residual_summary", None) or {},
+                }),
                 created_at,
             )
             for candidate in result.all_candidates
@@ -1544,6 +2082,16 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 """,
                 candidate_rows,
             )
+        factory_rows = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM factor_factory_runs
+            WHERE mining_job_id = ? AND status NOT IN ('CANCELLED', 'FAILED')
+            """,
+            (job_id,),
+        )
+        for row in factory_rows:
+            self._refresh_factor_factory_run_row(row)
 
     def list_factor_mining_jobs(self) -> dict[str, Any]:
         rows = self.storage.fetch_all(
@@ -1797,6 +2345,21 @@ class RealBacktestPlatformService(BacktestPlatformService):
     ) -> dict[str, list[dict[str, Any]]]:
         warnings: list[dict[str, Any]] = []
         hard_blockers: list[dict[str, Any]] = []
+        lifecycle = str(factor.get("lifecycle_status") or "").upper()
+        if lifecycle in {"DEPRECATED", "PRUNED"} or factor.get("offline_at"):
+            hard_blockers.append(
+                self._normalize_factor_model_risk_item(
+                    {
+                        "code": "FACTOR_OFFLINE",
+                        "message": str(factor.get("offline_reason") or "因子已下线，不能进入策略创建或算力分配。"),
+                    },
+                    factor_id=factor_id,
+                    factor=factor,
+                    default_code="FACTOR_OFFLINE",
+                    default_message="因子已下线，不能进入策略创建或算力分配。",
+                    severity="BLOCKER",
+                )
+            )
         risk = factor.get("strategy_creation_risk")
         risk_payload = risk if isinstance(risk, Mapping) else {}
         for item in risk_payload.get("warnings") or []:
@@ -4990,6 +5553,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
         fallback_provider: Any,
         fallback_availability: Any | None,
         worker_cap: int,
+        include_price: bool = True,
+        include_corporate: bool = True,
     ) -> dict[str, Any]:
         price_bars: list[dict[str, Any]] = []
         corporate_actions: list[dict[str, Any]] = []
@@ -5027,8 +5592,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 try:
                     fetch_result = future.result()
                 except Exception as exc:
-                    missing_symbols.append(symbol)
-                    corporate_missing_symbols.append(symbol)
+                    if include_price:
+                        missing_symbols.append(symbol)
+                    if include_corporate:
+                        corporate_missing_symbols.append(symbol)
                     errors.append(f"{symbol}: unexpected refresh failure={exc}")
                     continue
 
@@ -5039,8 +5606,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 error_metadata = dict(fetch_result.get("error_metadata") or {})
                 self._record_market_data_provider_metadata(dataset_provider_telemetry, error_metadata)
                 if error:
-                    missing_symbols.append(symbol)
-                    corporate_missing_symbols.append(symbol)
+                    if include_price:
+                        missing_symbols.append(symbol)
+                    if include_corporate:
+                        corporate_missing_symbols.append(symbol)
                     errors.append(str(error))
                     continue
 
@@ -5074,8 +5643,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     or (market_data.get("partial") if isinstance(market_data, Mapping) else False)
                 )
                 if not bars:
-                    missing_symbols.append(symbol)
-                    corporate_missing_symbols.append(symbol)
+                    if include_price:
+                        missing_symbols.append(symbol)
+                    if include_corporate:
+                        corporate_missing_symbols.append(symbol)
                     continue
 
                 normalized_bars: list[dict[str, Any]] = []
@@ -5118,82 +5689,84 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 ]
                 action_probe_sources = self._history_action_probe_sources(market_data_metadata)
                 action_probe_complete = bool(action_probe_sources)
-                price_bars.extend(normalized_bars)
-                corporate_actions.extend(normalized_actions)
-                if formal_actions:
-                    action_dates = [
-                        str(item.get("date") or "").strip()
-                        for item in formal_actions
-                        if str(item.get("date") or "").strip()
-                    ]
-                    if not action_dates:
-                        action_dates = [str(normalized_bars[0]["date"]), str(normalized_bars[-1]["date"])]
-                    formal_action_sources = sorted(
-                        {
-                            str(item.get("source") or "").strip()
+                if include_price:
+                    price_bars.extend(normalized_bars)
+                    coverage_rows.append(
+                        CoverageSummary(
+                            symbol=symbol,
+                            start_date=str(normalized_bars[0]["date"]),
+                            end_date=str(normalized_bars[-1]["date"]),
+                            trade_days=len(normalized_bars),
+                        )
+                    )
+                if include_corporate:
+                    corporate_actions.extend(normalized_actions)
+                    if formal_actions:
+                        action_dates = [
+                            str(item.get("date") or "").strip()
                             for item in formal_actions
-                            if str(item.get("source") or "").strip()
-                        }
-                    )
-                    corporate_coverage_rows.append(
-                        {
-                            "symbol": symbol,
-                            "start_date": min(action_dates),
-                            "end_date": max(action_dates),
-                            "trade_days": len(formal_actions),
-                            "source": (
-                                formal_action_sources[0]
-                                if len(formal_action_sources) == 1
-                                else (action_probe_sources[0] if len(action_probe_sources) == 1 else (market_data_source or ""))
-                            ),
-                            "fallback_source": market_data_fallback_source,
-                            "metadata": {
-                                "coverage_kind": "corporate_events",
-                                "probe_status": "complete_with_events",
-                                "event_scope": "dividend_split_only",
-                                "event_count": len(formal_actions),
-                                "formal_event_types": sorted(
-                                    {
-                                        str(item.get("action_type") or "").strip().lower()
-                                        for item in formal_actions
-                                        if str(item.get("action_type") or "").strip()
-                                    }
+                            if str(item.get("date") or "").strip()
+                        ]
+                        if not action_dates:
+                            action_dates = [str(normalized_bars[0]["date"]), str(normalized_bars[-1]["date"])]
+                        formal_action_sources = sorted(
+                            {
+                                str(item.get("source") or "").strip()
+                                for item in formal_actions
+                                if str(item.get("source") or "").strip()
+                            }
+                        )
+                        corporate_coverage_rows.append(
+                            {
+                                "symbol": symbol,
+                                "start_date": min(action_dates),
+                                "end_date": max(action_dates),
+                                "trade_days": len(formal_actions),
+                                "source": (
+                                    formal_action_sources[0]
+                                    if len(formal_action_sources) == 1
+                                    else (action_probe_sources[0] if len(action_probe_sources) == 1 else (market_data_source or ""))
                                 ),
-                                "probe_provider_names": action_probe_sources,
-                            },
-                        }
-                    )
-                elif action_probe_complete:
-                    corporate_coverage_rows.append(
-                        {
-                            "symbol": symbol,
-                            "start_date": str(normalized_bars[0]["date"]),
-                            "end_date": str(normalized_bars[-1]["date"]),
-                            "trade_days": len(normalized_bars),
-                            "source": action_probe_sources[0] if len(action_probe_sources) == 1 else (market_data_source or ""),
-                            "fallback_source": market_data_fallback_source,
-                            "metadata": {
-                                "coverage_kind": "corporate_probe",
-                                "probe_status": "complete_no_events",
-                                "event_scope": "dividend_split_only",
-                                "event_count": 0,
-                                "probe_provider_names": action_probe_sources,
-                                "probe_window_start": str(normalized_bars[0]["date"]),
-                                "probe_window_end": str(normalized_bars[-1]["date"]),
-                                "price_bar_count": len(normalized_bars),
-                            },
-                        }
-                    )
-                else:
-                    corporate_missing_symbols.append(symbol)
-                coverage_rows.append(
-                    CoverageSummary(
-                        symbol=symbol,
-                        start_date=str(normalized_bars[0]["date"]),
-                        end_date=str(normalized_bars[-1]["date"]),
-                        trade_days=len(normalized_bars),
-                    )
-                )
+                                "fallback_source": market_data_fallback_source,
+                                "metadata": {
+                                    "coverage_kind": "corporate_events",
+                                    "probe_status": "complete_with_events",
+                                    "event_scope": "dividend_split_only",
+                                    "event_count": len(formal_actions),
+                                    "formal_event_types": sorted(
+                                        {
+                                            str(item.get("action_type") or "").strip().lower()
+                                            for item in formal_actions
+                                            if str(item.get("action_type") or "").strip()
+                                        }
+                                    ),
+                                    "probe_provider_names": action_probe_sources,
+                                },
+                            }
+                        )
+                    elif action_probe_complete:
+                        corporate_coverage_rows.append(
+                            {
+                                "symbol": symbol,
+                                "start_date": str(normalized_bars[0]["date"]),
+                                "end_date": str(normalized_bars[-1]["date"]),
+                                "trade_days": len(normalized_bars),
+                                "source": action_probe_sources[0] if len(action_probe_sources) == 1 else (market_data_source or ""),
+                                "fallback_source": market_data_fallback_source,
+                                "metadata": {
+                                    "coverage_kind": "corporate_probe",
+                                    "probe_status": "complete_no_events",
+                                    "event_scope": "dividend_split_only",
+                                    "event_count": 0,
+                                    "probe_provider_names": action_probe_sources,
+                                    "probe_window_start": str(normalized_bars[0]["date"]),
+                                    "probe_window_end": str(normalized_bars[-1]["date"]),
+                                    "price_bar_count": len(normalized_bars),
+                                },
+                            }
+                        )
+                    else:
+                        corporate_missing_symbols.append(symbol)
 
         return {
             "price_bars": price_bars,
@@ -5223,14 +5796,26 @@ class RealBacktestPlatformService(BacktestPlatformService):
         if mode == "repair":
             existing_corporate_missing = self._snapshot_missing_symbols(existing_corporate_snapshot)
             existing_price_missing = self._snapshot_missing_symbols(existing_price_snapshot)
-            existing_missing = list(
-                dict.fromkeys(
-                    [
-                        *existing_corporate_missing,
-                        *[symbol for symbol in existing_price_missing if symbol not in set(existing_corporate_missing)],
-                    ]
+            target_set = {str(item or "").strip().lower() for item in targets}
+            if {"price", "corporate"} <= target_set:
+                existing_missing = list(
+                    dict.fromkeys(
+                        [
+                            *existing_corporate_missing,
+                            *[symbol for symbol in existing_price_missing if symbol not in set(existing_corporate_missing)],
+                        ]
+                    )
                 )
-            )
+                repair_priority = "corporate_first_unified_queue"
+            elif "price" in target_set:
+                existing_missing = list(dict.fromkeys(existing_price_missing))
+                repair_priority = "price_only_queue"
+            elif "corporate" in target_set:
+                existing_missing = list(dict.fromkeys(existing_corporate_missing))
+                repair_priority = "corporate_only_queue"
+            else:
+                existing_missing = []
+                repair_priority = "target_specific_queue"
             if existing_missing:
                 cursor = self._snapshot_repair_cursor(existing_price_snapshot or existing_corporate_snapshot)
                 try:
@@ -5253,7 +5838,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                         "selected_latest_symbols": latest_symbols,
                         "selected_symbol_count": len(combined_selection),
                         "repair_cursor": next_cursor,
-                        "repair_priority": "corporate_first_unified_queue",
+                        "repair_priority": repair_priority,
+                        "existing_price_missing_symbol_count": len(existing_price_missing),
                         "existing_corporate_missing_symbol_count": len(existing_corporate_missing),
                         "repair_symbol_limit": batch_size,
                     }
@@ -5497,6 +6083,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
         cold_backup_result: Mapping[str, Any] | None = None,
         recovery_report: Any | None = None,
         running: bool = False,
+        refresh_price_snapshot: bool = True,
+        refresh_corporate_snapshot: bool = True,
     ) -> None:
         def summarize_source(values: Sequence[str], default: str) -> str:
             cleaned = [str(value) for value in values if str(value or "").strip()]
@@ -5660,7 +6248,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 metadata["preserved_external_repair_scope"] = True
             return metadata
 
-        if price_bars:
+        if refresh_price_snapshot and price_bars:
             price_snapshot_writer(
                 {
                     "id": DATASET_PRICE_SNAPSHOT_ID,
@@ -5717,6 +6305,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
                         "metadata": corrected_price_metadata,
                     },
                 )
+
+        if not refresh_corporate_snapshot:
+            return
 
         merged_corporate_coverage = (
             self._merge_coverage_rows(existing_corporate_coverage, corporate_coverage_rows)
@@ -7841,6 +8432,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
         job_started_at = existing_job_started_at or started_at
         refresh_universes = "universes" in targets
         refresh_market_data = bool({"price", "corporate"} & set(targets))
+        refresh_price_snapshot = "price" in targets
+        refresh_corporate_snapshot = "corporate" in targets
         refresh_index_valuations = "valuations" in targets
         refresh_bond_fixed_income = "bond" in targets
         bond_fixed_income_refresh_stats: dict[str, Any] | None = None
@@ -8123,9 +8716,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
             symbols.update(self._stored_snapshot_symbols())
         symbols.update({"SPY", "QQQ"})
         for strategy in self.list_strategies():
-            universe_name = str(strategy.get("universe_name") or "").strip().upper()
-            if universe_name and universe_name.replace(".", "").isalnum():
-                symbols.add(universe_name)
+            direct_symbol = self._direct_symbol_universe_symbol(strategy)
+            if direct_symbol:
+                symbols.add(direct_symbol)
 
         latest_batch_symbols = set(symbols)
         repair_batch_symbols = set()
@@ -8145,9 +8738,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
         extras = {"SPY", "QQQ"}
         for strategy in self.list_strategies():
-            universe_name = str(strategy.get("universe_name") or "").strip().upper()
-            if universe_name and universe_name.replace(".", "").isalnum():
-                extras.add(universe_name)
+            direct_symbol = self._direct_symbol_universe_symbol(strategy)
+            if direct_symbol:
+                extras.add(direct_symbol)
 
         if mode == "repair":
             latest_batch_symbols.update(extras)
@@ -8160,15 +8753,18 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
         existing_price_missing = self._snapshot_missing_symbols(existing_price_snapshot)
         existing_corporate_missing = self._snapshot_missing_symbols(existing_corporate_snapshot)
+        target_price_missing = existing_price_missing if refresh_price_snapshot else []
+        target_corporate_missing = existing_corporate_missing if refresh_corporate_snapshot else []
         canonical_target_symbols = self._canonical_progress_target_symbols(
             progress_target_symbols=sorted(progress_target_symbols),
             existing_price_coverage=existing_price_coverage,
             existing_corporate_coverage=existing_corporate_coverage,
-            existing_price_missing=existing_price_missing,
-            existing_corporate_missing=existing_corporate_missing,
+            existing_price_missing=target_price_missing,
+            existing_corporate_missing=target_corporate_missing,
         )
         canonical_total_symbol_count = len(canonical_target_symbols)
-        existing_missing_set = set(existing_price_missing) | set(existing_corporate_missing)
+        existing_price_missing_set = set(target_price_missing)
+        existing_corporate_missing_set = set(target_corporate_missing)
 
         latest_window_start = (
             self._latest_market_data_window_start(
@@ -8244,8 +8840,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
         def current_missing_state() -> tuple[list[str], list[str]]:
             if mode == "repair":
                 return (
-                    sorted((existing_missing_set - attempted_repair_symbols) | set(missing_symbol_set)),
-                    sorted((existing_missing_set - attempted_repair_symbols) | set(corporate_missing_symbol_set)),
+                    sorted((existing_price_missing_set - attempted_repair_symbols) | set(missing_symbol_set))
+                    if refresh_price_snapshot
+                    else [],
+                    sorted((existing_corporate_missing_set - attempted_repair_symbols) | set(corporate_missing_symbol_set))
+                    if refresh_corporate_snapshot
+                    else [],
                 )
             return (sorted(missing_symbol_set), sorted(corporate_missing_symbol_set))
 
@@ -8291,6 +8891,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 cold_backup_result=None,
                 recovery_report=None,
                 running=True,
+                refresh_price_snapshot=refresh_price_snapshot,
+                refresh_corporate_snapshot=refresh_corporate_snapshot,
             )
 
         def emit_heartbeat(
@@ -8391,6 +8993,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                             fallback_provider=latest_fallback_provider,
                             fallback_availability=latest_fallback_availability,
                             worker_cap=SNAPSHOT_MARKET_DATA_MAX_WORKERS,
+                            include_price=refresh_price_snapshot,
+                            include_corporate=refresh_corporate_snapshot,
                         )
                     )
                     attempted_latest_symbols.update(latest_symbol_batch)
@@ -8435,6 +9039,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                             fallback_provider=repair_fallback_provider,
                             fallback_availability=repair_fallback_availability,
                             worker_cap=SNAPSHOT_MARKET_DATA_REPAIR_MAX_WORKERS,
+                            include_price=refresh_price_snapshot,
+                            include_corporate=refresh_corporate_snapshot,
                         )
                     )
                     attempted_repair_symbols.update(repair_symbol_batch)
@@ -8479,6 +9085,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                         fallback_provider=fallback_provider,
                         fallback_availability=fallback_availability,
                         worker_cap=SNAPSHOT_MARKET_DATA_MAX_WORKERS,
+                        include_price=refresh_price_snapshot,
+                        include_corporate=refresh_corporate_snapshot,
                     )
                 )
                 attempted_latest_symbols.update(latest_symbol_batch)
@@ -8544,6 +9152,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
             cold_backup_result=cold_backup_result,
             recovery_report=recovery_report,
             running=False,
+            refresh_price_snapshot=refresh_price_snapshot,
+            refresh_corporate_snapshot=refresh_corporate_snapshot,
         )
 
         if refresh_universes and not universe_refresh_completed:

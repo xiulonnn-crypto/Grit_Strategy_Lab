@@ -210,6 +210,10 @@ SCHEMA_STATEMENTS = [
         created_by TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
+        offline_reason TEXT,
+        offline_at TEXT,
+        offline_command TEXT,
+        offline_detail_json TEXT NOT NULL DEFAULT '{}',
         deleted_at TEXT
     )
     """,
@@ -270,6 +274,54 @@ SCHEMA_STATEMENTS = [
         summary_json TEXT NOT NULL DEFAULT '{}',
         created_at TEXT NOT NULL,
         FOREIGN KEY (job_id) REFERENCES factor_mining_jobs(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS factor_factory_profiles (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL DEFAULT 'PAUSED',
+        timezone TEXT NOT NULL DEFAULT 'Asia/Hong_Kong',
+        schedule_time TEXT NOT NULL DEFAULT '14:00',
+        request_json TEXT NOT NULL DEFAULT '{}',
+        gate_policy_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_run_date TEXT,
+        next_run_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS factor_factory_runs (
+        id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL DEFAULT 'default',
+        run_date TEXT NOT NULL,
+        trigger TEXT NOT NULL DEFAULT 'DAILY',
+        status TEXT NOT NULL DEFAULT 'QUEUED',
+        request_json TEXT NOT NULL DEFAULT '{}',
+        gate_policy_json TEXT NOT NULL DEFAULT '{}',
+        config_signature TEXT NOT NULL,
+        mining_job_id TEXT,
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        started_at TEXT,
+        completed_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        error_message TEXT,
+        FOREIGN KEY (mining_job_id) REFERENCES factor_mining_jobs(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS factor_factory_run_items (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        source_id TEXT,
+        target_id TEXT,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES factor_factory_runs(id) ON DELETE CASCADE
     )
     """,
     """
@@ -719,6 +771,12 @@ MIGRATION_COLUMNS = {
         ("deleted_at", "TEXT"),
         ("deleted_reason", "TEXT"),
     ],
+    "factor_definitions": [
+        ("offline_reason", "TEXT"),
+        ("offline_at", "TEXT"),
+        ("offline_command", "TEXT"),
+        ("offline_detail_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ],
 }
 
 
@@ -756,6 +814,23 @@ POST_MIGRATION_INDEX_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_factor_mining_candidates_job_score
     ON factor_mining_candidates(job_id, score DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_factor_factory_profiles_status
+    ON factor_factory_profiles(status, updated_at)
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_factor_factory_runs_daily_signature
+    ON factor_factory_runs(profile_id, run_date, config_signature)
+    WHERE trigger = 'DAILY'
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_factor_factory_runs_recent
+    ON factor_factory_runs(updated_at, created_at, id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_factor_factory_run_items_run_stage
+    ON factor_factory_run_items(run_id, stage, status, updated_at)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_factor_quarantine_candidates_status

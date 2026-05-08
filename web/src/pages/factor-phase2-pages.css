@@ -622,6 +622,160 @@
   background: #c44747;
 }
 
+.factor-factory-page {
+  color: #16242c;
+}
+
+.factor-factory-hero {
+  align-items: center;
+}
+
+.factor-factory-status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid #d8e1e8;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #42515b;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.factor-factory-notice {
+  border-color: #cfe4df;
+  background: #f2fbf8;
+  color: #174e49;
+}
+
+.factor-factory-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.factor-factory-tab {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid #cbd6de;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #41505a;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.factor-factory-tab.is-active,
+.factor-factory-tab:hover {
+  border-color: #1f6f66;
+  background: #e9f7f1;
+  color: #1f6f66;
+}
+
+.factor-factory-funnel {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.factor-factory-workbench {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.82fr) minmax(360px, 1.08fr) minmax(360px, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.factor-factory-gate-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.factor-factory-run-list {
+  max-height: 280px;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+}
+
+.factor-factory-candidate-list {
+  display: grid;
+  gap: 10px;
+}
+
+.factor-factory-candidate-list h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.factor-factory-candidate {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid #e1e8ed;
+  border-radius: 8px;
+  background: #ffffff;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.factor-factory-candidate:hover,
+.factor-factory-candidate:focus-visible,
+.factor-factory-candidate.is-active {
+  border-color: #1f6f66;
+  box-shadow: 0 0 0 3px rgba(31, 111, 102, 0.09);
+  outline: none;
+}
+
+.factor-factory-candidate > span:first-child {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.factor-factory-candidate strong {
+  color: #1f2933;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.factor-factory-candidate small {
+  color: #687782;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.factor-factory-candidate i {
+  flex: 0 0 auto;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.factor-factory-candidate-status {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+  flex: 0 0 auto;
+  max-width: 180px;
+  text-align: right;
+}
+
+.factor-factory-candidate-status small {
+  overflow-wrap: anywhere;
+}
+
+.factor-factory-local-actions {
+  justify-content: flex-start;
+}
+
 .factor-model-builder-page.factor-phase2-page {
   width: 100%;
   max-width: 1960px;
@@ -727,7 +881,10 @@
 
 .factor-model-builder-page .factor-model-name-control {
   display: grid;
-  gap: 8px;
+  grid-template-columns: max-content minmax(180px, 280px);
+  gap: 10px;
+  align-items: center;
+  justify-content: start;
   margin-bottom: 12px;
 }
 
@@ -945,11 +1102,18 @@
 }
 
 .factor-model-builder-page .factor-model-metric-chip--category,
+.factor-model-builder-page .factor-model-metric-chip--level,
 .factor-model-builder-page .factor-model-metric-chip--rank-ic,
 .factor-model-builder-page .factor-model-metric-chip--ir {
   border-color: #dfe6eb;
   background: #f7f8fa;
   color: #52616d;
+}
+
+.factor-model-builder-page .factor-model-metric-chip--level {
+  border-color: rgba(22, 137, 123, 0.24);
+  background: #e8f7f4;
+  color: #0f7469;
 }
 
 .factor-model-builder-page .factor-weight-control {
@@ -1305,7 +1469,9 @@
 @media (max-width: 1180px) {
   .factor-phase2-hero,
   .factor-phase2-workbench,
-  .factor-quarantine-grid {
+  .factor-quarantine-grid,
+  .factor-factory-workbench,
+  .factor-factory-gate-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -1332,12 +1498,14 @@
   }
 
   .factor-phase2-metrics,
+  .factor-factory-funnel,
   .factor-quarantine-report,
   .factor-phase2-field-group,
   .factor-phase2-stat-grid,
   .factor-model-factor,
   .factor-model-builder-page .factor-model-governance-row,
   .factor-model-builder-page .factor-model-rebalance-options,
+  .factor-model-builder-page .factor-model-name-control,
   .factor-model-builder-page .factor-model-weight-row {
     grid-template-columns: minmax(0, 1fr);
   }

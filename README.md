@@ -28,11 +28,18 @@ Grit Strategy Lab 的本地策略研究与回测工作台。当前仓库包含�
 ## 常用命令
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\runtime-supervisor.ps1 status quickstart
+powershell -ExecutionPolicy Bypass -File .\scripts\runtime-supervisor.ps1 start-if-not-running quickstart --reason "local startup"
+powershell -ExecutionPolicy Bypass -File .\scripts\runtime-supervisor.ps1 restart backend-api --reason "operator requested" --force
 powershell -ExecutionPolicy Bypass -File .\QuickStart-Grit.ps1
 powershell -ExecutionPolicy Bypass -File .\QuickStart-Grit.ps1 -NoBrowser
 powershell -ExecutionPolicy Bypass -File .\QuickStart-Grit.ps1 -RepairPython -NoBrowser
+powershell -ExecutionPolicy Bypass -File .\QuickStart-Grit.ps1 -ForceRestart -RestartReason "snapshot provider credentials updated"
 powershell -ExecutionPolicy Bypass -File .\scripts\codex-smoke.ps1
 ```
+
+Codex 对话默认先走 `scripts/runtime-supervisor.ps1` 查看状态或提交启动/重启意图；人工仍可直接运行 `QuickStart-Grit.ps1`，但 QuickStart 会先经过同一套 supervisor 锁与健康检查，健康的 `8000` backend 和 `4173` preview 不会被默认重启。
+当快照页写入 provider key、数据库路径或其它必须由 backend 进程启动时读取的环境配置时，使用受保护的 `QuickStart-Grit.ps1 -ForceRestart -RestartReason ...`。该路径会先由 supervisor 记录 `restart --force`、reason 与 cooldown，再替换 repo-owned 的 `8000/4173` 监听，避免普通 QuickStart 复用旧健康进程后继续显示未配置。
 
 更多启动、测试、恢复和推送细节请直接查看下面的文档与脚本索引，不再在首页重复展开。
 

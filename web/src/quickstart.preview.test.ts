@@ -26,6 +26,34 @@ describe("QuickStart frontend preview bootstrap", () => {
       /\$belongsToRepo\s*=\s*Test-RepoFrontendPreviewProcess\s+-ProcessPath\s+\$processPath\s+-CommandLine\s+\$commandLine\s+-Port\s+\$Port/s,
     );
   });
+
+  it("checks the runtime supervisor before starting local services", () => {
+    expect(quickStartSource).toContain("$runtimeSupervisorScript");
+    expect(quickStartSource).toContain("function Invoke-QuickStartSupervisorGuard");
+    expect(quickStartSource).toContain("'guard', 'quickstart'");
+    expect(quickStartSource).toContain("'--owner-pid', [string]$PID");
+  });
+
+  it("supports protected forced restarts for configuration updates", () => {
+    expect(quickStartSource).toContain("[switch]$ForceRestart");
+    expect(quickStartSource).toContain("[string]$RestartReason");
+    expect(quickStartSource).toContain("$guardArgs += '--force'");
+    expect(quickStartSource).toContain("ForceRestart requested: replacing the healthy repo-owned backend");
+    expect(quickStartSource).toContain("ForceRestart requested: replacing the healthy repo-owned frontend preview");
+  });
+
+  it("reuses healthy backend and preview listeners instead of restarting them", () => {
+    expect(quickStartSource).toContain("$skipBackendStart");
+    expect(quickStartSource).toContain("Backend already healthy on port 8000; reusing the existing listener.");
+    expect(quickStartSource).toContain("$skipFrontendStart");
+    expect(quickStartSource).toContain("Frontend preview already healthy on port 4173; reusing the existing listener.");
+  });
+
+  it("can recognize a healthy repo preview even when Windows hides the command line", () => {
+    expect(quickStartSource).toContain("function Test-RepoFrontendPreviewHttpFingerprint");
+    expect(quickStartSource).toContain("Grit Backtest Platform");
+    expect(quickStartSource).toContain("Test-RepoFrontendPreviewHttpFingerprint -Url $frontendHealthUrl");
+  });
 });
 
 describe("Static preview server rebuild safety", () => {

@@ -74,3 +74,56 @@ def test_pytest_temp_guard_reports_basetemp_cache_and_env_paths() -> None:
     assert errors[0].startswith("--basetemp:")
     assert errors[1].startswith("cache_dir:")
     assert errors[2].startswith("TEMP:")
+
+
+def test_pytest_temp_defaults_use_project_runtime_when_no_basetemp() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    config = _config()
+    env = {
+        "PYTEST_DEBUG_TEMPROOT": str(repo_root.parent / "denied-pytest-temp"),
+        "TMPDIR": "",
+        "TEMP": str(repo_root.parent / "denied-python-temp"),
+        "TMP": str(repo_root.parent / "denied-python-temp"),
+    }
+
+    guard._apply_pytest_temp_defaults(config, repo_root, env=env, process_id=12345)
+
+    assert config.option.basetemp is None
+    for name in ("PYTEST_DEBUG_TEMPROOT", "TMPDIR", "TEMP", "TMP"):
+        assert guard._repo_temp_path_violation(env[name], repo_root, require_project_tmp=True) is None
+        temp_path = Path(env[name])
+        assert temp_path.name == "python-temp-12345"
+        assert temp_path.parent.name == "pytest-runtime"
+        assert temp_path.parent.parent.name == ".tmp"
+    assert guard._collect_temp_guard_errors(config, repo_root, env=env) == []
+
+
+def test_pytest_temp_defaults_preserve_repo_root_violations_for_guard() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    config = _config()
+    bad_repo_temp = str(repo_root / "pytesttmp-manual-run")
+    env = {
+        "PYTEST_DEBUG_TEMPROOT": str(repo_root.parent / "denied-pytest-temp"),
+        "TMPDIR": bad_repo_temp,
+        "TEMP": str(repo_root.parent / "denied-python-temp"),
+        "TMP": str(repo_root.parent / "denied-python-temp"),
+    }
+
+    guard._apply_pytest_temp_defaults(config, repo_root, env=env, process_id=12345)
+    errors = guard._collect_temp_guard_errors(config, repo_root, env=env)
+
+    assert env["TMPDIR"] == bad_repo_temp
+    assert any(error.startswith("TMPDIR:") for error in errors)
+
+
+def test_repo_tmp_path_helper_uses_project_runtime() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+
+    tmp_path = guard._make_repo_tmp_path(repo_root, "test path / with spaces", process_id=12345)
+
+    assert tmp_path.exists()
+    assert tmp_path.parent.name == "12345"
+    assert tmp_path.parent.parent.name == "tmp-paths"
+    assert tmp_path.parent.parent.parent.name == "pytest-runtime"
+    assert tmp_path.parent.parent.parent.parent.name == ".tmp"
+    assert "test_path_with_spaces" in tmp_path.name

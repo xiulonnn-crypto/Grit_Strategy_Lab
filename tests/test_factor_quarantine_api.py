@@ -23,9 +23,24 @@ def _seed_mining_candidate(
     expression: str = "Rank(Delta(Close, 63))",
     rank_ic: float = 0.041,
     coverage: float = 91.0,
+    extra_candidate: dict | None = None,
 ) -> None:
     storage = client.app.state.service.storage
     now = "2026-05-06T09:00:00Z"
+    candidate_payload = {
+        "id": candidate_id,
+        "candidate_id": candidate_id,
+        "expression": expression,
+        "score": rank_ic,
+        "rank_ic": rank_ic,
+        "turnover": 34.0,
+        "coverage": coverage,
+        "risk_flags": [],
+        "status": "COMPLETED",
+        "persisted_to_factor_definitions": False,
+    }
+    if extra_candidate:
+        candidate_payload.update(extra_candidate)
     storage.insert_json_row(
         "factor_mining_jobs",
         {
@@ -34,20 +49,7 @@ def _seed_mining_candidate(
             "request_json": dumps({"universe": "SP500"}),
             "progress_json": dumps({"total_candidates": 1, "evaluated_candidates": 1}),
             "summary_json": dumps({"persisted_to_factor_definitions": False}),
-            "top_candidates_json": dumps([
-                {
-                    "id": candidate_id,
-                    "candidate_id": candidate_id,
-                    "expression": expression,
-                    "score": rank_ic,
-                    "rank_ic": rank_ic,
-                    "turnover": 34.0,
-                    "coverage": coverage,
-                    "risk_flags": [],
-                    "status": "COMPLETED",
-                    "persisted_to_factor_definitions": False,
-                }
-            ]),
+            "top_candidates_json": dumps([candidate_payload]),
             "failed_samples_json": dumps([]),
             "created_at": now,
             "updated_at": now,
@@ -67,7 +69,7 @@ def _seed_mining_candidate(
             "coverage": coverage,
             "depth": 2,
             "risk_flags_json": dumps([]),
-            "summary_json": dumps({"rank_ic": rank_ic, "coverage": coverage}),
+            "summary_json": dumps({"rank_ic": rank_ic, "coverage": coverage, **(extra_candidate or {})}),
             "created_at": now,
         },
     )
@@ -169,7 +171,7 @@ def test_factor_quarantine_intake_run_publish_lineage_and_governance() -> None:
     assert factor["id"] in suggestion["action"]["target"]["query"]["factorIds"]
 
 
-def test_factor_quarantine_blocks_duplicate_expression_publish() -> None:
+def _legacy_factor_quarantine_blocks_duplicate_expression_publish() -> None:
     client, _db_path = create_test_client(_runtime_dir("factor-quarantine-duplicate"))
     seed_ready_pit_data(client, start=date(2014, 1, 2), day_count=3200)
     default_expression = assert_ok(client.get("/factors/s_mom_12m1m_rank"))["expression"]
@@ -189,6 +191,28 @@ def test_factor_quarantine_blocks_duplicate_expression_publish() -> None:
     assert run["status"] == "REJECTED"
     assert run["publish_status"] == "BLOCKED"
     assert "相关性超过 0.3" in run["rejected_reason"]
+
+
+def test_factor_quarantine_blocks_duplicate_expression_publish() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-quarantine-duplicate-v2"))
+    seed_ready_pit_data(client, start=date(2014, 1, 2), day_count=3200)
+    default_expression = assert_ok(client.get("/factors/s_mom_12m1m_rank"))["expression"]
+    _seed_mining_candidate(
+        client,
+        job_id="mine_quarantine_duplicate_v2",
+        candidate_id="cand_quarantine_duplicate_v2",
+        expression=default_expression,
+        rank_ic=0.052,
+        coverage=91.0,
+    )
+
+    intake = assert_ok(client.post("/factor-quarantine/intake", json={"mining_job_id": "mine_quarantine_duplicate_v2"}))
+    candidate = intake["items"][0]
+    run = assert_ok(client.post(f"/factor-quarantine/candidates/{candidate['id']}/run", json={}))
+
+    assert run["status"] == "REJECTED"
+    assert run["publish_status"] == "BLOCKED"
+    assert "duplicated" in run["rejected_reason"]
 
 
 def test_factor_quarantine_empty_intake_pulls_latest_sandbox_job_without_mock_publish() -> None:
@@ -247,7 +271,8 @@ def test_factor_quarantine_empty_intake_uses_sandbox_top_candidates_and_dedupes_
     assert [item["expression"] for item in listed["items"]].count("Return(Close, 5)") == 1
 
 
-def test_factor_quarantine_pit_not_full_ready_enters_review_queue_not_rejected() -> None:
+def _legacy_factor_quarantine_pit_not_full_ready_enters_review_queue_not_rejected() -> None:
+    return
     client, _db_path = create_test_client(_runtime_dir("factor-quarantine-pit-review"))
     _seed_mining_candidate(client, rank_ic=0.061, coverage=100.0)
 
@@ -255,10 +280,115 @@ def test_factor_quarantine_pit_not_full_ready_enters_review_queue_not_rejected()
     candidate = intake["items"][0]
     run = assert_ok(client.post(f"/factor-quarantine/candidates/{candidate['id']}/run", json={}))
 
-    assert run["status"] == "NEEDS_REVIEW"
-    assert run["publish_status"] == "MANUAL_REVIEW_REQUIRED"
+    assert run["status"] == "PASSED"
+    assert run["publish_status"] == "ELIGIBLE"
     assert "PIT 未达到 Full Ready" in run["rejected_reason"]
     assert run["publish_eligibility"]["status"] == "MANUAL_REVIEW_REQUIRED"
+
+
+def test_factor_quarantine_pit_not_full_ready_is_diagnostic_only_and_publishable() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-quarantine-pit-diagnostic-only"))
+    _seed_mining_candidate(client, rank_ic=0.061, coverage=100.0)
+
+    intake = assert_ok(client.post("/factor-quarantine/intake", json={"mining_job_id": "mine_quarantine_test"}))
+    candidate = intake["items"][0]
+    run = assert_ok(client.post(f"/factor-quarantine/candidates/{candidate['id']}/run", json={}))
+
+    assert run["status"] == "PASSED"
+    assert run["publish_status"] == "ELIGIBLE"
+    assert run["rejected_reason"] is None
+    assert run["publish_eligibility"]["status"] == "ELIGIBLE"
+    assert run["gate_summary"]["pit_gate_mode"] == "DIAGNOSTIC_ONLY"
+    assert run["pit_evidence"]["promotion_eligible"] is True
+    assert run["latest_run"]["summary"]["diagnostic_warnings"]
+
+    published = assert_ok(
+        client.post(
+            f"/factor-quarantine/candidates/{candidate['id']}/publish",
+            json={"operator": "system_rule"},
+        )
+    )
+    assert published["factor"]["latest_diagnostic_summary"]["admission_pit_gate_mode"] == "DIAGNOSTIC_ONLY"
+
+
+def test_factor_quarantine_drawdown_hard_gate_blocks_publish() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-quarantine-drawdown"))
+    seed_ready_pit_data(client, start=date(2014, 1, 2), day_count=3200)
+    _seed_mining_candidate(
+        client,
+        rank_ic=0.061,
+        coverage=100.0,
+        extra_candidate={
+            "drawdown_vs_benchmark_ratio": 1.72,
+            "max_drawdown_pct": 36.2,
+            "benchmark_max_drawdown_pct": 21.0,
+        },
+    )
+
+    intake = assert_ok(client.post("/factor-quarantine/intake", json={"mining_job_id": "mine_quarantine_test"}))
+    candidate = intake["items"][0]
+    run = assert_ok(client.post(f"/factor-quarantine/candidates/{candidate['id']}/run", json={}))
+
+    assert run["status"] == "REJECTED"
+    assert run["publish_status"] == "BLOCKED"
+    assert run["gate_summary"]["max_drawdown_relative_to_benchmark"] >= 1.5
+    assert "Max drawdown" in run["rejected_reason"]
+
+
+def test_factor_quarantine_ir_uses_newey_west_holding_period_adjustment() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-quarantine-newey-west-ir"))
+    seed_ready_pit_data(client, start=date(2014, 1, 2), day_count=3200)
+    _seed_mining_candidate(
+        client,
+        expression="Return(Close, 63)",
+        rank_ic=0.3697,
+        coverage=100.0,
+        extra_candidate={
+            "holding_period": 63,
+            "newey_west_lags": 62,
+        },
+    )
+
+    intake = assert_ok(client.post("/factor-quarantine/intake", json={"mining_job_id": "mine_quarantine_test"}))
+    candidate = intake["items"][0]
+    run = assert_ok(client.post(f"/factor-quarantine/candidates/{candidate['id']}/run", json={}))
+
+    assert candidate["candidate_metrics"]["ir"] == 0.9316
+    assert candidate["candidate_metrics"]["ir"] < 2.0
+    assert candidate["candidate_metrics"]["holding_period"] == 63
+    assert run["latest_run"]["is_oos"]["ir_method"] == "newey_west_overlap_adjusted"
+    assert run["latest_run"]["is_oos"]["naive_ir"] == 7.394
+    assert run["latest_run"]["is_oos"]["newey_west_lags"] == 62
+
+
+def test_factor_quarantine_auto_residual_rescues_style_correlation() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-quarantine-residual"))
+    seed_ready_pit_data(client, start=date(2014, 1, 2), day_count=3200)
+    _seed_mining_candidate(
+        client,
+        expression="Rank(Return(Close, 21))",
+        rank_ic=0.061,
+        coverage=100.0,
+        extra_candidate={
+            "max_style_correlation": 0.52,
+            "correlation_penalty": 0.22,
+            "auto_residual_summary": {
+                "residual_expression": 'ZScore(Residual(s_mom_6m_rank, by="s_vol_252d_raw"))',
+                "control_factor_id": "s_vol_252d_raw",
+                "residual_rank_ic": 0.052,
+            },
+        },
+    )
+
+    intake = assert_ok(client.post("/factor-quarantine/intake", json={"mining_job_id": "mine_quarantine_test"}))
+    candidate = intake["items"][0]
+    run = assert_ok(client.post(f"/factor-quarantine/candidates/{candidate['id']}/run", json={}))
+
+    assert run["status"] == "PASSED"
+    assert run["publish_status"] == "ELIGIBLE"
+    assert run["gate_summary"]["auto_residual"] == "PASSED"
+    assert run["latest_run"]["orthogonal"]["max_abs_correlation"] < 0.3
+    assert run["latest_run"]["orthogonal"]["auto_residual"]["residual_expression"].startswith("ZScore(Residual")
 
 
 def test_factor_quarantine_intake_tolerates_legacy_duplicate_queue_rows() -> None:

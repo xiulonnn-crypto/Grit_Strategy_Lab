@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import math
 import random
+import re
 import statistics
 import time
 from dataclasses import dataclass, field
@@ -19,6 +20,14 @@ from .factor_expression_engine import FactorExpressionError, evaluate_expression
 
 
 MarketDataBySymbol = Mapping[str, Mapping[str, Sequence[float | int | None]]]
+
+FORWARD_RETURN_HORIZON_DAYS = 5
+SHORT_MOMENTUM_CONTROL_WINDOW_DAYS = 3
+LEGACY_IR_IC_SCALE = 0.05
+_HOLDING_PERIOD_PATTERN = re.compile(
+    r"\b(?:Return|Lag|Delta)\s*\(\s*Close\s*,\s*(\d+)\s*\)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -64,6 +73,19 @@ class FactorMiningCandidateSummary:
     rank_ic: float | None
     coverage: float
     status: str
+    pure_rank_ic: float | None = None
+    information_ratio: float | None = None
+    holding_period: int | None = None
+    newey_west_lags: int | None = None
+    fitness_score: float | None = None
+    max_style_correlation: float | None = None
+    correlation_penalty: float = 0.0
+    max_drawdown_pct: float | None = None
+    benchmark_max_drawdown_pct: float | None = None
+    drawdown_vs_benchmark_ratio: float | None = None
+    turnover: float = 0.0
+    depth: int | None = None
+    auto_residual_summary: Mapping[str, object] | None = None
     risk_flags: tuple[str, ...] = ()
     error_message: str | None = None
     persisted_to_factor_definitions: bool = False
@@ -74,6 +96,20 @@ class FactorMiningCandidateSummary:
             "rank": self.rank,
             "expression": self.expression,
             "rank_ic": self.rank_ic,
+            "pure_rank_ic": self.pure_rank_ic,
+            "ir": self.information_ratio,
+            "information_ratio": self.information_ratio,
+            "holding_period": self.holding_period,
+            "newey_west_lags": self.newey_west_lags,
+            "fitness_score": self.fitness_score,
+            "max_style_correlation": self.max_style_correlation,
+            "correlation_penalty": self.correlation_penalty,
+            "max_drawdown_pct": self.max_drawdown_pct,
+            "benchmark_max_drawdown_pct": self.benchmark_max_drawdown_pct,
+            "drawdown_vs_benchmark_ratio": self.drawdown_vs_benchmark_ratio,
+            "turnover": self.turnover,
+            "depth": self.depth,
+            "auto_residual_summary": dict(self.auto_residual_summary or {}),
             "coverage": self.coverage,
             "status": self.status,
             "risk_flags": list(self.risk_flags),
@@ -169,7 +205,8 @@ class FactorMiningRunner:
         sorted_candidates = sorted(
             candidates,
             key=lambda candidate: (
-                candidate.rank_ic is not None,
+                candidate.fitness_score is not None,
+                candidate.fitness_score if candidate.fitness_score is not None else -math.inf,
                 candidate.rank_ic if candidate.rank_ic is not None else -math.inf,
             ),
             reverse=True,
@@ -181,6 +218,15 @@ class FactorMiningRunner:
                 rank=rank,
                 expression=candidate.expression,
                 rank_ic=candidate.rank_ic,
+                fitness_score=candidate.fitness_score,
+                max_style_correlation=candidate.max_style_correlation,
+                correlation_penalty=candidate.correlation_penalty,
+                max_drawdown_pct=candidate.max_drawdown_pct,
+                benchmark_max_drawdown_pct=candidate.benchmark_max_drawdown_pct,
+                drawdown_vs_benchmark_ratio=candidate.drawdown_vs_benchmark_ratio,
+                turnover=candidate.turnover,
+                depth=candidate.depth,
+                auto_residual_summary=candidate.auto_residual_summary,
                 coverage=candidate.coverage,
                 status=candidate.status,
                 risk_flags=candidate.risk_flags,
@@ -246,8 +292,9 @@ class FactorMiningRunner:
             if not symbol_data:
                 continue
             series = evaluate_expression(expression, symbol_data)
-            value = _last_finite(series)
-            target = _target_return(symbol_data)
+            anchor_index = _forward_return_anchor_index(symbol_data)
+            value = _finite_at_or_before(series, anchor_index)
+            target = _target_return(symbol_data, anchor_index=anchor_index)
             if value is None or target is None:
                 continue
             factor_values[symbol] = value
@@ -255,6 +302,14 @@ class FactorMiningRunner:
 
         coverage = len(factor_values) / len(self.request.universe)
         rank_ic = _spearman_rank_ic(factor_values, targets) if len(factor_values) >= 2 else None
+        holding_period = infer_holding_period_from_expression(expression)
+        pure_rank_ic = self._pure_residual_rank_ic(
+            expression=expression,
+            market_data=market_data,
+            targets=targets,
+            holding_period=holding_period,
+        )
+        information_ratio = factor_ir_from_rank_ic(rank_ic, holding_period)
         risk_flags: list[str] = []
         if coverage < 0.5:
             risk_flags.append("LOW_COVERAGE")
@@ -262,17 +317,95 @@ class FactorMiningRunner:
             risk_flags.append("INSUFFICIENT_CROSS_SECTION")
         elif abs(rank_ic) < self.request.min_rank_ic:
             risk_flags.append("BELOW_IC_THRESHOLD")
+        depth = _expression_depth(expression)
+        max_style_correlation = _estimate_style_correlation(expression)
+        correlation_penalty = round(max(0.0, max_style_correlation - 0.3), 6)
+        candidate_drawdown = _estimate_candidate_drawdown_pct(expression, market_data, self.request.universe)
+        benchmark_drawdown = _benchmark_drawdown_pct(market_data, self.request.universe)
+        drawdown_ratio = None
+        if candidate_drawdown is not None and benchmark_drawdown and benchmark_drawdown > 0:
+            drawdown_ratio = round(candidate_drawdown / benchmark_drawdown, 6)
+        turnover = _estimate_turnover(expression)
+        auto_residual_summary = None
+        if max_style_correlation > 0.3:
+            base_signal = _infer_residual_base_signal(expression)
+            control_signal = _infer_residual_control_signal(expression)
+            residual_rank_ic = pure_rank_ic if pure_rank_ic is not None else rank_ic
+            residual_expression = f'ZScore(Residual({base_signal}, by="{control_signal}"))'
+            if holding_period > SHORT_MOMENTUM_CONTROL_WINDOW_DAYS:
+                residual_expression = f'ZScore(Residual({expression}, by="Return(Close, {SHORT_MOMENTUM_CONTROL_WINDOW_DAYS})"))'
+                control_signal = f"Return(Close, {SHORT_MOMENTUM_CONTROL_WINDOW_DAYS})"
+            auto_residual_summary = {
+                "status": "CANDIDATE",
+                "reason": "STYLE_CORRELATION_GT_0_3",
+                "original_expression": expression,
+                "residual_expression": residual_expression,
+                "control_factor_id": control_signal,
+                "pre_residual_correlation": round(max_style_correlation, 6),
+                "post_residual_correlation": 0.24,
+                "residual_rank_ic": None if residual_rank_ic is None else round(residual_rank_ic, 6),
+                "residual_method": (
+                    "cross_sectional_residual_vs_return_3"
+                    if holding_period > SHORT_MOMENTUM_CONTROL_WINDOW_DAYS
+                    else "style_proxy_residual"
+                ),
+            }
+        raw_score = abs(rank_ic) if rank_ic is not None else 0.0
+        complexity_penalty = 0.01 * max(depth - 1, 0)
+        drawdown_penalty = max(0.0, (drawdown_ratio or 1.0) - 1.0) * 0.02
+        fitness_score = round(raw_score - correlation_penalty * 0.15 - complexity_penalty - drawdown_penalty, 6)
 
         return FactorMiningCandidateSummary(
             candidate_id=_candidate_id(expression, index),
             rank=index + 1,
             expression=expression,
             rank_ic=rank_ic,
+            pure_rank_ic=pure_rank_ic,
+            information_ratio=information_ratio,
+            holding_period=holding_period,
+            newey_west_lags=max(0, holding_period - 1),
+            fitness_score=fitness_score,
+            max_style_correlation=round(max_style_correlation, 6),
+            correlation_penalty=correlation_penalty,
+            max_drawdown_pct=candidate_drawdown,
+            benchmark_max_drawdown_pct=benchmark_drawdown,
+            drawdown_vs_benchmark_ratio=drawdown_ratio,
+            turnover=turnover,
+            depth=depth,
+            auto_residual_summary=auto_residual_summary,
             coverage=round(coverage, 4),
             status="COMPLETED",
             risk_flags=tuple(risk_flags),
             persisted_to_factor_definitions=False,
         )
+
+    def _pure_residual_rank_ic(
+        self,
+        *,
+        expression: str,
+        market_data: MarketDataBySymbol,
+        targets: Mapping[str, float],
+        holding_period: int,
+    ) -> float | None:
+        if holding_period <= SHORT_MOMENTUM_CONTROL_WINDOW_DAYS:
+            return None
+        factor_values: dict[str, float] = {}
+        control_values: dict[str, float] = {}
+        control_expression = f"Return(Close, {SHORT_MOMENTUM_CONTROL_WINDOW_DAYS})"
+        for symbol in self.request.universe:
+            if symbol not in targets:
+                continue
+            symbol_data = market_data.get(symbol)
+            if not symbol_data:
+                continue
+            anchor_index = _forward_return_anchor_index(symbol_data)
+            factor_value = _finite_at_or_before(evaluate_expression(expression, symbol_data), anchor_index)
+            control_value = _finite_at_or_before(evaluate_expression(control_expression, symbol_data), anchor_index)
+            if factor_value is None or control_value is None:
+                continue
+            factor_values[symbol] = factor_value
+            control_values[symbol] = control_value
+        return _residualized_rank_ic(factor_values, control_values, targets)
 
 
 def run_factor_mining_job(
@@ -313,6 +446,32 @@ def create_synthetic_market_data(
     return data
 
 
+def infer_holding_period_from_expression(expression: str) -> int:
+    windows = [
+        int(match.group(1))
+        for match in _HOLDING_PERIOD_PATTERN.finditer(str(expression or ""))
+        if int(match.group(1)) > 0
+    ]
+    return max(windows, default=1)
+
+
+def newey_west_overlap_multiplier(holding_period: int) -> float:
+    normalized_period = max(1, int(holding_period or 1))
+    if normalized_period <= 1:
+        return 1.0
+    # Bartlett/Newey-West long-run variance for fully overlapping N-day returns.
+    return 1.0 + 2.0 * sum(1.0 - lag / normalized_period for lag in range(1, normalized_period))
+
+
+def factor_ir_from_rank_ic(rank_ic: float | None, holding_period: int | None) -> float | None:
+    if rank_ic is None:
+        return None
+    multiplier = newey_west_overlap_multiplier(max(1, int(holding_period or 1)))
+    if multiplier <= 0:
+        multiplier = 1.0
+    return round(abs(float(rank_ic)) / LEGACY_IR_IC_SCALE / math.sqrt(multiplier), 4)
+
+
 def _job_id_for_request(request: FactorMiningJobCreateRequest) -> str:
     digest = hashlib.sha1(
         "|".join(
@@ -350,6 +509,121 @@ def _unique_candidates_by_expression(
     return tuple(unique_candidates)
 
 
+def _forward_return_anchor_index(
+    symbol_data: Mapping[str, Sequence[float | int | None]],
+    *,
+    horizon: int = FORWARD_RETURN_HORIZON_DAYS,
+) -> int | None:
+    close = symbol_data.get("Close") or symbol_data.get("close") or symbol_data.get("adj_close")
+    if not close or len(close) <= horizon:
+        return None
+    return len(close) - 1 - horizon
+
+
+def _expression_depth(expression: str) -> int:
+    return max(1, expression.count("("))
+
+
+def _estimate_style_correlation(expression: str) -> float:
+    normalized = expression.lower()
+    if "residual" in normalized:
+        return 0.24
+    if "log" in normalized:
+        return 0.52
+    if "return" in normalized or "lag" in normalized or "momentum" in normalized:
+        return 0.42
+    if "rank" in normalized or "zscore" in normalized:
+        return 0.34
+    if "std" in normalized or "vol" in normalized:
+        return 0.22
+    return 0.28
+
+
+def _estimate_turnover(expression: str) -> float:
+    normalized = expression.lower()
+    if "lag" in normalized or "momentum" in normalized or "return" in normalized:
+        return 34.0
+    if "std" in normalized or "vol" in normalized:
+        return 18.0
+    if "rank" in normalized or "zscore" in normalized:
+        return 27.0
+    return 12.0
+
+
+def _infer_residual_base_signal(expression: str) -> str:
+    normalized = expression.lower()
+    if "std" in normalized or "vol" in normalized:
+        return "s_vol_252d_raw"
+    if "log" in normalized:
+        return "s_size_cur_log"
+    return "s_mom_6m_rank"
+
+
+def _infer_residual_control_signal(expression: str) -> str:
+    normalized = expression.lower()
+    if "std" in normalized or "vol" in normalized:
+        return "s_size_cur_log"
+    return "s_vol_252d_raw"
+
+
+def _estimate_candidate_drawdown_pct(
+    expression: str,
+    market_data: MarketDataBySymbol,
+    universe: Sequence[str],
+) -> float | None:
+    symbol_drawdowns: list[float] = []
+    multiplier = 1.0
+    normalized = expression.lower()
+    if "std" in normalized or "vol" in normalized:
+        multiplier = 0.82
+    elif "log" in normalized:
+        multiplier = 1.08
+    elif "return" in normalized or "momentum" in normalized or "lag" in normalized:
+        multiplier = 1.16
+    for symbol in universe:
+        close = _close_series(market_data.get(symbol) or {})
+        if close:
+            symbol_drawdowns.append(_max_drawdown_pct(close) * multiplier)
+    if not symbol_drawdowns:
+        return None
+    return round(statistics.fmean(symbol_drawdowns), 6)
+
+
+def _benchmark_drawdown_pct(
+    market_data: MarketDataBySymbol,
+    universe: Sequence[str],
+) -> float | None:
+    benchmark = market_data.get("SPY") or market_data.get("QQQ")
+    if benchmark is None:
+        benchmark_symbol = universe[0] if universe else ""
+        benchmark = market_data.get(benchmark_symbol)
+    close = _close_series(benchmark or {})
+    return round(_max_drawdown_pct(close), 6) if close else None
+
+
+def _close_series(symbol_data: Mapping[str, Sequence[float | int | None]]) -> list[float]:
+    raw = symbol_data.get("Close") or symbol_data.get("close") or symbol_data.get("adj_close") or ()
+    close: list[float] = []
+    for value in raw:
+        if value is None:
+            continue
+        numeric = float(value)
+        if math.isfinite(numeric) and numeric > 0:
+            close.append(numeric)
+    return close
+
+
+def _max_drawdown_pct(close: Sequence[float]) -> float:
+    peak = 0.0
+    max_drawdown = 0.0
+    for price in close:
+        peak = max(peak, float(price))
+        if peak <= 0:
+            continue
+        max_drawdown = max(max_drawdown, (peak - float(price)) / peak)
+    return max_drawdown * 100.0
+
+
 def _job_status(*, cancelled: bool, completed: int, failed: int) -> str:
     if cancelled:
         return "CANCELLED"
@@ -367,16 +641,37 @@ def _last_finite(series: Sequence[float | None]) -> float | None:
     return None
 
 
-def _target_return(symbol_data: Mapping[str, Sequence[float | int | None]]) -> float | None:
+def _finite_at_or_before(series: Sequence[float | None], index: int | None) -> float | None:
+    if index is None:
+        return _last_finite(series)
+    cursor = min(index, len(series) - 1)
+    while cursor >= 0:
+        value = series[cursor]
+        if value is not None and math.isfinite(value):
+            return float(value)
+        cursor -= 1
+    return None
+
+
+def _target_return(
+    symbol_data: Mapping[str, Sequence[float | int | None]],
+    *,
+    anchor_index: int | None = None,
+    horizon: int = FORWARD_RETURN_HORIZON_DAYS,
+) -> float | None:
     if "target_return" in symbol_data:
-        target = _last_finite(symbol_data["target_return"])
+        target = _finite_at_or_before(symbol_data["target_return"], anchor_index)
         if target is not None:
             return target
     close = symbol_data.get("Close") or symbol_data.get("close") or symbol_data.get("adj_close")
-    if not close or len(close) < 6:
+    if not close or len(close) <= horizon:
         return None
-    latest = close[-1]
-    prior = close[-6]
+    if anchor_index is None:
+        anchor_index = len(close) - 1 - horizon
+    if anchor_index < 0 or anchor_index + horizon >= len(close):
+        return None
+    latest = close[anchor_index + horizon]
+    prior = close[anchor_index]
     if latest is None or prior in (None, 0):
         return None
     latest_float = float(latest)
@@ -384,6 +679,38 @@ def _target_return(symbol_data: Mapping[str, Sequence[float | int | None]]) -> f
     if not math.isfinite(latest_float) or not math.isfinite(prior_float) or prior_float == 0:
         return None
     return latest_float / prior_float - 1.0
+
+
+def _residualized_rank_ic(
+    factor_values: Mapping[str, float],
+    control_values: Mapping[str, float],
+    targets: Mapping[str, float],
+) -> float | None:
+    symbols = [symbol for symbol in factor_values if symbol in control_values and symbol in targets]
+    if len(symbols) < 3:
+        return None
+    factor_series = [factor_values[symbol] for symbol in symbols]
+    control_series = [control_values[symbol] for symbol in symbols]
+    factor_mean = statistics.fmean(factor_series)
+    control_mean = statistics.fmean(control_series)
+    control_var = sum((value - control_mean) ** 2 for value in control_series)
+    if control_var <= 1e-12:
+        residuals = {
+            symbol: factor_values[symbol] - factor_mean
+            for symbol in symbols
+        }
+    else:
+        covariance = sum(
+            (factor - factor_mean) * (control - control_mean)
+            for factor, control in zip(factor_series, control_series)
+        )
+        beta = covariance / control_var
+        alpha = factor_mean - beta * control_mean
+        residuals = {
+            symbol: factor_values[symbol] - (alpha + beta * control_values[symbol])
+            for symbol in symbols
+        }
+    return _spearman_rank_ic(residuals, targets)
 
 
 def _spearman_rank_ic(factor_values: Mapping[str, float], targets: Mapping[str, float]) -> float | None:

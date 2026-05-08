@@ -8,12 +8,17 @@ export type FactorModelOption = {
   displayName: string;
   family: string;
   categoryLabel?: string;
+  factorLevelLabel?: string;
   rankIcLabel?: string;
   irLabel?: string;
   rankIc?: number | null;
   ir?: number | null;
   sourceLabel: string;
   diagnosticStatus: string;
+  lifecycleStatus?: string | null;
+  uiState?: string | null;
+  uiStateLabel?: string | null;
+  isOnline?: boolean;
   pitCoveragePct: number;
   defaultWeight: number;
   defaultDirection: FactorDirection;
@@ -183,6 +188,17 @@ const DEFAULT_FACTORS: FactorModelOption[] = FACTOR_ORDER.map((id) => {
   };
 });
 
+const FACTOR_MODEL_LEVELS = [
+  { key: 'S', title: '高置信 Alpha', score: 5 },
+  { key: 'A', title: '稳健 Alpha', score: 4 },
+  { key: 'B', title: '可用信号', score: 3 },
+  { key: 'C', title: '观察信号', score: 2 },
+  { key: 'D', title: '低效/失效', score: 1 },
+] as const;
+type FactorModelLevelScore = (typeof FACTOR_MODEL_LEVELS)[number]['score'];
+const FACTOR_MODEL_LEVEL_BY_SCORE = new Map(FACTOR_MODEL_LEVELS.map((level) => [level.score, level]));
+const INVALID_FACTOR_DIAGNOSTIC_STATES = new Set(['FAILED', 'INVALID', 'DECAYED']);
+
 const REBALANCE_OPTIONS = [
   { value: 'monthly', label: '每月', summary: '每月复核一次多因子组合权重。' },
   { value: 'quarterly', label: '每季度', summary: '每季度复核一次，降低调仓干扰。' },
@@ -211,7 +227,8 @@ function designFactor(factor: FactorModelOption): FactorModelOption {
 function factorMetricTags(factor: FactorModelOption): Array<{ key: string; label: string }> {
   const category = factor.categoryLabel || factor.family || '自定义';
   return [
-    { key: 'category', label: `类别 ${category}` },
+    { key: 'category', label: category },
+    { key: 'level', label: factorLevelLabel(factor) },
     { key: 'rank-ic', label: factor.rankIcLabel || 'Rank IC 待诊断' },
     { key: 'ir', label: factor.irLabel || 'IR 待诊断' },
   ];
@@ -242,6 +259,46 @@ function irValue(factor: FactorModelOption): number | null {
   return labelMatch ? finiteMetric(labelMatch[0]) : null;
 }
 
+function metricLevelScore(value: number, metric: 'rank_ic' | 'ir'): number {
+  if (metric === 'rank_ic') {
+    if (value > 0.03) return 5;
+    if (value >= 0.02) return 4;
+    if (value >= 0.01) return 3;
+    if (value >= 0.005) return 2;
+    return 1;
+  }
+  if (value > 2.0) return 5;
+  if (value >= 1.0) return 4;
+  if (value >= 0.5) return 3;
+  if (value >= 0.2) return 2;
+  return 1;
+}
+
+function factorLevelLabel(factor: FactorModelOption): string {
+  if (factor.factorLevelLabel) return factor.factorLevelLabel;
+  const rankIc = finiteMetric(factor.rankIc);
+  const ir = irValue(factor);
+  if (rankIc === null || ir === null) return '因子级别 未评级';
+  const score = Math.min(
+    metricLevelScore(Math.abs(rankIc), 'rank_ic'),
+    metricLevelScore(Math.abs(ir), 'ir'),
+  ) as FactorModelLevelScore;
+  const level = FACTOR_MODEL_LEVEL_BY_SCORE.get(score);
+  return level ? `因子级别 ${level.key} ${level.title}` : '因子级别 未评级';
+}
+
+function isSelectableModelFactor(factor: FactorModelOption): boolean {
+  if (factor.isOnline === false) return false;
+  const diagnostic = String(factor.diagnosticStatus ?? '').trim().toUpperCase();
+  const lifecycle = String(factor.lifecycleStatus ?? '').trim().toUpperCase();
+  const uiState = String(factor.uiState ?? '').trim().toLowerCase();
+  return (
+    !INVALID_FACTOR_DIAGNOSTIC_STATES.has(diagnostic) &&
+    lifecycle !== 'DECAYED' &&
+    uiState !== 'decayed'
+  );
+}
+
 function factorOrderIndex(factor: FactorModelOption): number {
   const index = FACTOR_ORDER.indexOf(factor.id as (typeof FACTOR_ORDER)[number]);
   return index === -1 ? Number.MAX_SAFE_INTEGER : index;
@@ -260,7 +317,7 @@ function compareFactorsByAbsIr(left: FactorModelOption, right: FactorModelOption
 
 function modelBasket(factors: FactorModelOption[], useDefaultFallback = true): FactorModelOption[] {
   const sourceFactors = factors.length ? factors : useDefaultFallback ? DEFAULT_FACTORS : [];
-  return sourceFactors.map(designFactor).sort(compareFactorsByAbsIr);
+  return sourceFactors.filter(isSelectableModelFactor).map(designFactor).sort(compareFactorsByAbsIr);
 }
 
 function normalizeSelections(factors: FactorModelOption[], useDefaultFallback = true): FactorModelSelection[] {
@@ -552,7 +609,7 @@ export function FactorModelBuilderPage({
     if (initialPrefill.modelName) {
       setModelName(initialPrefill.modelName);
     }
-    setNotice('治理队列已代入因子与建议权重，当前仍为待审查草稿。');
+    setNotice('治理任务已代入因子与建议权重，当前仍为待审查草稿。');
   }, [basketFactors, initialPrefill, prefillKey]);
 
   const updateWeight = (factorId: string, rawValue: string): void => {
@@ -764,9 +821,9 @@ export function FactorModelBuilderPage({
       </section>
 
       {initialPrefill?.factorIds.length ? (
-        <section className="factor-model-prefill-banner" aria-label="治理队列代入提示">
+        <section className="factor-model-prefill-banner" aria-label="治理任务代入提示">
           <div>
-            <strong>治理队列已代入</strong>
+            <strong>治理任务已代入</strong>
             <span>
               已选 {selectedIds.length} 个因子与建议权重，进入创建页后仍需预览、门禁和人工确认。
             </span>

@@ -1,0 +1,10 @@
+{
+  "db_filename": "seed_workspace.sqlite3",
+  "market_data_db_filename": "seed_workspace_market_data.sqlite3",
+  "creation_session_id": "cs_da4ee953ee19",
+  "strategy_id": "strat_702381219013",
+  "optimization_strategy_id": "strat_1a37cf9c57ec",
+  "optimization_source_run_id": "run_57d441691049",
+  "run_id": "run_59d02f38859d",
+  "optimization_job_id": "opt_de59e8b163ce"
+}

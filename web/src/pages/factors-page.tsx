@@ -24,6 +24,9 @@ type FactorSortKey = 'rank_ic' | 'level' | 'updated_at';
 type FactorSortDirection = 'asc' | 'desc';
 type FactorSortState = { key: FactorSortKey; direction: FactorSortDirection };
 type FactorLevelKey = 'S' | 'A' | 'B' | 'C' | 'D';
+type FactorDiagnosticPreviewRequester = (
+  request: ApiFactorDiagnosticPreviewPayload,
+) => Promise<ApiFactorDiagnosticPreview> | undefined;
 type FactorLevelProjection = {
   key: FactorLevelKey;
   title: string;
@@ -43,6 +46,8 @@ const STATUS_LABELS: Record<string, string> = {
   VERIFIED: '已验证',
   PRODUCTION: '生产中',
   DECAYED: '已失效',
+  DEPRECATED: '已强制下线',
+  PRUNED: '冗余挂起',
   READY_TO_DIAGNOSE: '可诊断',
   SANDBOX_READY: 'Sandbox 可跑',
   BLOCKED_PIT: 'PIT 门禁阻塞',
@@ -74,11 +79,37 @@ const DESCRIPTOR_CATEGORY_LABELS: Record<string, string> = {
   mom: '动量',
   val: '估值',
   qlty: '质量',
-  vol: '波动',
+  vol: '风险',
   size: '规模',
+  beta: '风险',
+  inv: '质量',
+  liq: '情绪',
+  alpha: '其他',
 };
-const DESCRIPTOR_CATEGORY_ORDER = ['mom', 'val', 'qlty', 'vol', 'size'];
+const FACTOR_LIBRARY_CATEGORY_LABELS: Record<string, string> = {
+  mom: '动量',
+  size: '规模',
+  val: '估值',
+  qlty: '质量',
+  risk: '风险',
+  sentiment: '情绪',
+  other: '其他',
+};
+const FACTOR_LIBRARY_CATEGORY_BY_DESCRIPTOR: Record<string, string> = {
+  alpha: 'other',
+  beta: 'risk',
+  inv: 'qlty',
+  liq: 'sentiment',
+  mom: 'mom',
+  qlty: 'qlty',
+  size: 'size',
+  val: 'val',
+  vol: 'risk',
+};
+const FACTOR_LIBRARY_CATEGORY_ORDER = ['mom', 'size', 'val', 'qlty', 'risk', 'sentiment', 'other'];
 const MAX_VISIBLE_CORRELATION_FACTORS = 40;
+const GROUP_MONOTONICITY_WINDOW_PERIODS = 3;
+const GROUP_INVERSION_REQUIRED_STREAK = 3;
 const DESCRIPTOR_OPERATOR_LABELS: Record<string, string> = {
   rank: '截面排名',
   z: '标准化',
@@ -107,6 +138,16 @@ const DIAGNOSTIC_TOOLTIP_LINES = [
   'Rank IC: 因子排序与未来收益排序的相关性，越高说明截面排序越有效。',
   'IR: Rank IC 均值除以波动，衡量诊断稳定性。',
   '覆盖率: 本次诊断中有可用 PIT 样本的证券占比。',
+];
+const TURNOVER_DECAY_TOOLTIP_LINES = [
+  '信号半衰期：Rank IC 衰减曲线降至初始边际贡献一半附近的交易日数。',
+  '预估年换手：按诊断窗口内分层持仓变化折算为年化换手率，用于成本压力判断。',
+  'TRS 成本：冲击、融资和滑点以 bp 拆分，作为交易前复核口径，不等同于真实成交扣费。',
+];
+const GROUP_IC_TOOLTIP_LINES = [
+  '分层收益：按每期因子值从高到低切成 Q1 到 Q5，展示最近 3 期滑动平均后的组均未来收益。',
+  '单调性校验：只有 3 期滑动均值连续 3 次出现 Q1 < Q5，才触发硬阻断。',
+  'IC 走势：排序 IC 使用同一 PIT 样本池和未来收益窗口，滚动展示最近诊断序列。',
 ];
 const FACTOR_LEVELS: FactorLevelProjection[] = [
   {
@@ -157,6 +198,8 @@ const FACTOR_LEVEL_TOOLTIP_LINES = [
   '未完成真实或预览诊断的因子显示为未评级，不参与等级排序。',
 ];
 type FactorUiState = 'robust' | 'needs_calibration' | 'decayed' | 'sandbox';
+type FactorDiagnosticStateFilter = FactorUiState | '';
+type FactorLifecycleTab = 'online' | 'offline';
 type FactorGateTone = 'good' | 'warn' | 'bad';
 
 const UI_STATE_LABELS: Record<FactorUiState, string> = {
@@ -165,18 +208,35 @@ const UI_STATE_LABELS: Record<FactorUiState, string> = {
   decayed: '失效',
   sandbox: '沙箱',
 };
+const UI_STATE_FILTER_OPTIONS: Array<{ value: FactorDiagnosticStateFilter; label: string }> = [
+  { value: '', label: '全部' },
+  { value: 'robust', label: '稳健' },
+  { value: 'needs_calibration', label: '待校准' },
+  { value: 'decayed', label: '失效' },
+  { value: 'sandbox', label: '沙箱' },
+];
+const UI_STATE_MANAGEMENT_ACTIONS: Record<FactorUiState, string> = {
+  robust: '管理动作：准予生产，可作为多因子策略核心权重并允许晋升至正式 PIT 环境；系统每月自动复核。',
+  needs_calibration: '管理动作：限值研究使用，策略创建页应自动给出降权建议。',
+  decayed: '管理动作：物理封存，不计入多因子撮合索引；历史数据保留在归档库用于复盘。',
+  sandbox: '管理动作：仅供预览，禁止进入回放测试；需完成数据治理后再转为稳健或待校准。',
+};
 const FACTOR_WARNING_GATE_CODES = new Set([
   'COVERAGE_EDGE',
   'DIAGNOSTIC_STALE',
+  'GROUP_RETURNS_MONOTONICITY_WEAK',
   'HIGH_CORRELATION',
+  'IC_RECENT_DECAY',
   'IC_UNSTABLE',
   'TURNOVER_DECAY',
   'VERIFIED_PIT_WINDOW_INCOMPLETE',
 ]);
 const FACTOR_HARD_GATE_CODES = new Set([
   'CURRENT_ONLY_DATA',
+  'FACTOR_GRADE_DECAYED',
   'FUNDAMENTAL_PIT_NOT_READY',
   'FUTURE_FUNCTION',
+  'GROUP_RETURNS_INVERTED',
   'INDUSTRY_PIT_NOT_READY',
   'MISSING_AVAILABLE_AT',
   'NON_REPLAYABLE_FIELD',
@@ -187,10 +247,10 @@ const FACTOR_HARD_GATE_CODES = new Set([
 ]);
 
 const UI_STATE_TOOLTIP_LINES = [
-  '稳健：已完成诊断，IC/IR、coverage、分组收益达标，无硬阻断。',
-  '待校准：IC 偏弱、coverage 不足、高相关、换手衰减或诊断过期，但仍可研究提示使用。',
-  '失效：IC 衰减、IR 失真、分组收益倒挂或生命周期为 DECAYED。',
-  '沙箱：Sandbox/Limited readiness，只适合研究预览，不能作为正式 PIT 可回放因子。',
+  '稳健：Grade S/A/B，覆盖率大于 90%，IR 稳定，分组收益单调性良好。准予生产，可作为核心权重并允许晋升至正式 PIT 环境。',
+  '待校准：Grade S/A/B 但存在覆盖率不足、相关性簇拥挤或近期 IC 衰减等风险。限值研究使用，并在策略创建页给出降权建议。',
+  '失效：Grade C/D 或分层收益倒挂。物理封存，不计入多因子撮合索引，历史数据进入归档库复盘。',
+  '沙箱：无 IC/IR 数据。仅供预览，禁止进入回放测试，必须先补齐价格、PIT 或治理数据。',
 ];
 
 const BLOCKER_RISK_TOOLTIP_LINES = [
@@ -467,18 +527,23 @@ function descriptorCategory(factor: ApiFactorListItem): string {
   return factor.descriptor?.category ?? factor.tags.find((tag) => DESCRIPTOR_CATEGORY_LABELS[tag]) ?? 'other';
 }
 
-function descriptorCategoryLabel(category: string): string {
-  return DESCRIPTOR_CATEGORY_LABELS[category] ?? '其他';
+function factorLibraryCategory(factor: ApiFactorListItem): string {
+  const category = descriptorCategory(factor);
+  return FACTOR_LIBRARY_CATEGORY_BY_DESCRIPTOR[category] ?? 'other';
+}
+
+function factorLibraryCategoryLabel(category: string): string {
+  return FACTOR_LIBRARY_CATEGORY_LABELS[category] ?? DESCRIPTOR_CATEGORY_LABELS[category] ?? '其他';
 }
 
 function categorySortIndex(category: string): number {
-  const index = DESCRIPTOR_CATEGORY_ORDER.indexOf(category);
-  return index >= 0 ? index : DESCRIPTOR_CATEGORY_ORDER.length;
+  const index = FACTOR_LIBRARY_CATEGORY_ORDER.indexOf(category);
+  return index >= 0 ? index : FACTOR_LIBRARY_CATEGORY_ORDER.length;
 }
 
 function sortFactorsByCategory(factors: ApiFactorListItem[]): ApiFactorListItem[] {
   return [...factors].sort((left, right) => {
-    const categoryDiff = categorySortIndex(descriptorCategory(left)) - categorySortIndex(descriptorCategory(right));
+    const categoryDiff = categorySortIndex(factorLibraryCategory(left)) - categorySortIndex(factorLibraryCategory(right));
     if (categoryDiff !== 0) return categoryDiff;
     return (left.descriptor?.canonical_id ?? left.id).localeCompare(right.descriptor?.canonical_id ?? right.id);
   });
@@ -486,12 +551,12 @@ function sortFactorsByCategory(factors: ApiFactorListItem[]): ApiFactorListItem[
 
 function correlationGroups(factors: ApiFactorListItem[]): Array<{ category: string; label: string; count: number }> {
   return factors.reduce<Array<{ category: string; label: string; count: number }>>((groups, factor) => {
-    const category = descriptorCategory(factor);
+    const category = factorLibraryCategory(factor);
     const latest = groups.at(-1);
     if (latest?.category === category) {
       latest.count += 1;
     } else {
-      groups.push({ category, label: descriptorCategoryLabel(category), count: 1 });
+      groups.push({ category, label: factorLibraryCategoryLabel(category), count: 1 });
     }
     return groups;
   }, []);
@@ -560,8 +625,44 @@ function needsRealDiagnosticPreview(factor: ApiFactorListItem): boolean {
   return status === 'REFERENCE_ONLY' || !summary;
 }
 
+function isFactorOffline(factor: ApiFactorListItem): boolean {
+  const lifecycle = String(factor.lifecycle_status ?? '').toUpperCase();
+  return lifecycle === 'DEPRECATED' || lifecycle === 'PRUNED' || Boolean(factor.offline_at);
+}
+
 function previewFactorIdsForPayload(payload: ApiFactorListResponse): string[] {
-  return payload.items.filter(needsRealDiagnosticPreview).map((factor) => factor.id);
+  return payload.items.filter((factor) => !isFactorOffline(factor) && needsRealDiagnosticPreview(factor)).map((factor) => factor.id);
+}
+
+export async function previewFactorDiagnosticsForLibrary(
+  previewFactorDiagnostics: FactorDiagnosticPreviewRequester | undefined,
+  factorIds: string[],
+): Promise<ApiFactorDiagnosticPreview | null> {
+  if (!previewFactorDiagnostics || factorIds.length === 0) return null;
+  const request: ApiFactorDiagnosticPreviewPayload = {
+    batch: true,
+    factor_ids: factorIds,
+    diagnostic_mode: 'SANDBOX',
+    include: ['ic', 'ir', 'groups', 'turnover', 'correlation', 'blockers'],
+  };
+
+  try {
+    const preview = await previewFactorDiagnostics(request);
+    if (preview?.items?.length) return preview;
+  } catch {
+    // Fallback below keeps healthy factors populated when one expression breaks batch preview.
+  }
+
+  const items: NonNullable<ApiFactorDiagnosticPreview['items']> = [];
+  for (const factorId of factorIds) {
+    try {
+      const preview = await previewFactorDiagnostics({ ...request, factor_ids: [factorId] });
+      items.push(...(preview?.items ?? []));
+    } catch {
+      // Leave the individual unsupported factor in its explicit no-diagnostic state.
+    }
+  }
+  return items.length ? { mode: 'BATCH', status: 'PREVIEW', items } : null;
 }
 
 function previewRecord(value: unknown): Record<string, unknown> | null {
@@ -623,6 +724,42 @@ function factorTimestamp(factor: ApiFactorListItem): number | null {
 function formatFactorUpdatedAt(factor: ApiFactorListItem): string {
   const value = factorUpdatedAt(factor);
   return value ? formatDateTime(value) : '尚未记录';
+}
+
+function factorPruneMvpName(factor: ApiFactorListItem): string | null {
+  const detail = previewRecord(factor.offline_detail);
+  const requestDetail = previewRecord(detail?.request_detail);
+  const nestedOfflineDetail = previewRecord(requestDetail?.offline_detail);
+  const comparison = previewRecord(detail?.comparison) ?? previewRecord(nestedOfflineDetail?.comparison);
+  const mvp = previewRecord(comparison?.mvp);
+  const name = typeof mvp?.factor_name === 'string'
+    ? mvp.factor_name.trim()
+    : typeof mvp?.name === 'string'
+      ? mvp.name.trim()
+      : '';
+  if (name) return name;
+  const id = typeof mvp?.factor_id === 'string'
+    ? mvp.factor_id.trim()
+    : typeof detail?.keep_factor_id === 'string'
+      ? detail.keep_factor_id.trim()
+      : '';
+  return id || null;
+}
+
+function factorOfflineReason(factor: ApiFactorListItem): string {
+  const lifecycle = String(factor.lifecycle_status ?? '').toUpperCase();
+  if (lifecycle === 'PRUNED' || String(factor.offline_command ?? '').toUpperCase() === 'PRUNE') {
+    const mvpName = factorPruneMvpName(factor);
+    if (mvpName) return `冗余裁剪：同簇高相关且弱于${mvpName}`;
+  }
+  if (factor.offline_reason) return factor.offline_reason;
+  if (lifecycle === 'DEPRECATED') return '强制下线';
+  if (lifecycle === 'PRUNED') return '冗余裁剪';
+  return '未下线';
+}
+
+function formatFactorOfflineAt(factor: ApiFactorListItem): string {
+  return factor.offline_at ? formatDateTime(factor.offline_at) : '线上';
 }
 
 function compareNullableNumber(
@@ -693,6 +830,94 @@ function longShortSpread(factor: ApiFactorListItem): number | null {
   return Number(first) - Number(last);
 }
 
+function factorCoverage(factor: ApiFactorListItem): number | null {
+  const coverage = factor.latest_diagnostic_summary?.coverage ?? factor.batch_diagnostic_summary?.coverage;
+  return typeof coverage === 'number' && Number.isFinite(coverage) ? coverage : null;
+}
+
+function factorGroupReturnShape(factor: ApiFactorListItem): { available: boolean; inverted: boolean; monotonicGood: boolean } {
+  const summary = factor.latest_diagnostic_summary;
+  const monotonicity = summary?.monotonicity;
+  if (monotonicity && typeof monotonicity === 'object' && !Array.isArray(monotonicity)) {
+    const available = Boolean((monotonicity as Record<string, unknown>).available);
+    if (available) {
+      return {
+        available,
+        inverted: Boolean((monotonicity as Record<string, unknown>).inverted),
+        monotonicGood: (monotonicity as Record<string, unknown>).monotonic_good === true,
+      };
+    }
+  }
+  const values = (summary?.group_returns ?? [])
+    .map((item) => item.mean_return)
+    .filter(isNumber);
+  if (values.length < 2) return { available: false, inverted: false, monotonicGood: false };
+  const tolerance = 1e-6;
+  const latestInverted = values[0] + tolerance < values.at(-1)!;
+  const edgeSeries = (summary?.group_return_series ?? [])
+    .map((item) => {
+      const q1 = typeof item.q1_mean_return === 'number'
+        ? item.q1_mean_return
+        : item.groups?.[0]?.mean_return;
+      const q5 = typeof item.q5_mean_return === 'number'
+        ? item.q5_mean_return
+        : item.groups?.at(-1)?.mean_return;
+      return isNumber(q1) && isNumber(q5) ? { q1, q5 } : null;
+    })
+    .filter((item): item is { q1: number; q5: number } => Boolean(item));
+  let streak = 0;
+  for (let index = GROUP_MONOTONICITY_WINDOW_PERIODS - 1; index < edgeSeries.length; index += 1) {
+    const rollingSlice = edgeSeries.slice(index + 1 - GROUP_MONOTONICITY_WINDOW_PERIODS, index + 1);
+    const q1Average = rollingSlice.reduce((total, item) => total + item.q1, 0) / rollingSlice.length;
+    const q5Average = rollingSlice.reduce((total, item) => total + item.q5, 0) / rollingSlice.length;
+    streak = q1Average + tolerance < q5Average ? streak + 1 : 0;
+  }
+  const inverted = streak >= GROUP_INVERSION_REQUIRED_STREAK;
+  let nonIncreasingPairs = 0;
+  for (let index = 1; index < values.length; index += 1) {
+    if (values[index - 1] + tolerance >= values[index]) nonIncreasingPairs += 1;
+  }
+  return {
+    available: true,
+    inverted,
+    monotonicGood: !inverted && !latestInverted && nonIncreasingPairs >= Math.max(1, values.length - 2),
+  };
+}
+
+function factorRecentIcDecay(factor: ApiFactorListItem): boolean {
+  const series = (factor.latest_diagnostic_summary?.ic_series ?? [])
+    .map((point) => point.rank_ic ?? point.ic)
+    .filter(isNumber);
+  if (series.length < 6) return false;
+  const recent = series.slice(-3);
+  const prior = series.slice(0, Math.max(3, series.length - 3));
+  const priorMean = prior.reduce((total, value) => total + value, 0) / prior.length;
+  const recentMean = recent.reduce((total, value) => total + value, 0) / recent.length;
+  if (Math.abs(priorMean) < 0.015) return false;
+  if (priorMean * recentMean < 0 && Math.abs(recentMean) >= 0.005) return true;
+  return Math.abs(recentMean) < Math.max(0.015, Math.abs(priorMean) * 0.55);
+}
+
+function factorRiskCodeSet(factor: ApiFactorListItem): Set<string> {
+  const codes = new Set<string>();
+  const collect = (items: Array<Record<string, unknown>> | undefined) => {
+    (items ?? []).forEach((item) => {
+      const code = String(item.code ?? '').toUpperCase();
+      if (code) codes.add(code);
+    });
+  };
+  collect(factor.strategy_creation_risk?.warnings);
+  collect(factor.strategy_creation_risk?.hard_blockers);
+  collect(factor.readiness_blockers);
+  collect(factor.blocker_reason_summary?.reasons);
+  return codes;
+}
+
+function factorHasAnyRiskCode(factor: ApiFactorListItem, riskCodes: Set<string>): boolean {
+  const codes = factorRiskCodeSet(factor);
+  return Array.from(riskCodes).some((code) => codes.has(code));
+}
+
 function sandboxGapBrief(factor: ApiFactorListItem): string {
   const blocker = factor.readiness_blockers[0] as Record<string, unknown> | undefined;
   const windows = Array.isArray(blocker?.missing_windows) ? blocker.missing_windows : [];
@@ -728,25 +953,54 @@ function factorUiState(factor: ApiFactorListItem): { state: FactorUiState; label
   }
   const lifecycle = String(factor.lifecycle_status ?? '').toUpperCase();
   const diagnostic = factorDisplayStatus(factor).toUpperCase();
-  if (lifecycle === 'DECAYED' || diagnostic === 'FAILED') {
+  const levelScore = factorLevelScore(factor);
+  const groupShape = factorGroupReturnShape(factor);
+  if (isFactorOffline(factor)) {
+    return { state: 'decayed', label: lifecycle === 'PRUNED' ? '冗余挂起' : '已下线' };
+  }
+  if (
+    lifecycle === 'DECAYED' ||
+    diagnostic === 'FAILED' ||
+    (levelScore !== null && levelScore <= 2) ||
+    groupShape.inverted ||
+    factorHasAnyRiskCode(factor, new Set(['FACTOR_GRADE_DECAYED', 'GROUP_RETURNS_INVERTED']))
+  ) {
     return { state: 'decayed', label: UI_STATE_LABELS.decayed };
   }
-  if (diagnostic === 'SANDBOX_READY' || diagnostic === 'BLOCKED_PIT' || diagnostic === 'BLOCKED_DATA') {
+  const summary = factor.latest_diagnostic_summary;
+  const rankIc = factorMetricValue(factor, 'rank_ic');
+  const ir = factorMetricValue(factor, 'ir');
+  const coverage = factorCoverage(factor);
+  if (
+    !summary ||
+    rankIc === null ||
+    ir === null ||
+    diagnostic === 'SANDBOX_READY' ||
+    diagnostic === 'BLOCKED_PIT' ||
+    diagnostic === 'BLOCKED_DATA' ||
+    String(summary.diagnostic_mode ?? '').toUpperCase() === 'SANDBOX'
+  ) {
     return { state: 'sandbox', label: UI_STATE_LABELS.sandbox };
   }
-  const summary = factor.latest_diagnostic_summary;
-  const rankIc = summary?.rank_ic;
-  const ir = summary?.ir;
-  const coverage = summary?.coverage;
-  const hasHealthyMetrics =
-    typeof rankIc === 'number' &&
-    typeof ir === 'number' &&
-    typeof coverage === 'number' &&
-    rankIc >= 0.03 &&
-    ir >= 0.25 &&
-    coverage >= 80 &&
-    factor.readiness_blockers.length === 0;
-  if (diagnostic === 'COMPLETED' && hasHealthyMetrics) {
+  const hasCalibrationRisk = factorHasAnyRiskCode(
+    factor,
+    new Set([
+      'COVERAGE_EDGE',
+      'GROUP_RETURNS_MONOTONICITY_WEAK',
+      'HIGH_CORRELATION',
+      'IC_RECENT_DECAY',
+      'IC_UNSTABLE',
+    ]),
+  ) || factorRecentIcDecay(factor);
+  const isRobust =
+    levelScore !== null &&
+    levelScore >= 3 &&
+    coverage !== null &&
+    coverage > 90 &&
+    groupShape.monotonicGood &&
+    factor.readiness_blockers.length === 0 &&
+    !hasCalibrationRisk;
+  if (diagnostic === 'COMPLETED' && isRobust) {
     return { state: 'robust', label: UI_STATE_LABELS.robust };
   }
   if (diagnostic === 'COMPLETED' || diagnostic === 'READY_TO_DIAGNOSE') {
@@ -785,15 +1039,142 @@ function readinessBlockerReasons(factor: ApiFactorListItem, severity: 'warning' 
     .filter(Boolean);
 }
 
+function uniqueReasonLines(reasons: string[]): string[] {
+  const seen = new Set<string>();
+  return reasons
+    .map((reason) => reason.trim())
+    .filter((reason) => {
+      if (!reason || seen.has(reason)) return false;
+      seen.add(reason);
+      return true;
+    });
+}
+
+function normalizeDiagnosticReason(reason: string): string {
+  return reason
+    .replace(/^(硬阻断|风险提示|治理阻断|观察风险|存在降权\/校准风险)[:：]\s*/, '')
+    .replace(/[。；;，,\s]+$/u, '')
+    .trim();
+}
+
+function diagnosticSentence(reason: string): string {
+  const normalized = normalizeDiagnosticReason(reason);
+  return normalized ? `${normalized}。` : '';
+}
+
+function metricSnapshotReason(metricParts: string[]): string | null {
+  return metricParts.length ? `当前指标：${metricParts.join('，')}。` : null;
+}
+
+function factorStatusReasonLines(factor: ApiFactorListItem): string[] {
+  const uiState = factorUiState(factor);
+  const explicitState = String(factor.ui_state ?? '').toLowerCase();
+  const hasExplicitState = explicitState === uiState.state;
+  const level = factorLevel(factor);
+  const coverage = factorCoverage(factor);
+  const groupShape = factorGroupReturnShape(factor);
+  const rankIc = factorMetricValue(factor, 'rank_ic');
+  const ir = factorMetricValue(factor, 'ir');
+  const diagnosticStatus = factorDisplayStatus(factor);
+  const lifecycleStatus = String(factor.lifecycle_status ?? '').toUpperCase();
+  const hardReasons = uniqueReasonLines([
+    ...creationRiskReasons(factor, 'blocker'),
+    ...blockerSummaryReasons(factor, 'blocker'),
+    ...readinessBlockerReasons(factor, 'blocker'),
+  ]);
+  const warningReasons = uniqueReasonLines([
+    ...creationRiskReasons(factor, 'warning'),
+    ...blockerSummaryReasons(factor, 'warning'),
+    ...readinessBlockerReasons(factor, 'warning'),
+  ]);
+  const metricParts = [
+    level ? `Grade ${level.key}（${level.title}）` : null,
+    coverage !== null ? `覆盖率 ${pct(coverage)}` : null,
+    rankIc !== null ? `Rank IC ${num(rankIc)}` : null,
+    ir !== null ? `IR ${num(ir, 2)}` : null,
+  ].filter((part): part is string => Boolean(part));
+  const lines: string[] = [];
+  const metricLine = metricSnapshotReason(metricParts);
+
+  if (uiState.state === 'robust') {
+    if (
+      level &&
+      level.score >= 3 &&
+      coverage !== null &&
+      coverage > 90 &&
+      !factorRecentIcDecay(factor) &&
+      (!groupShape.available || groupShape.monotonicGood)
+    ) {
+      lines.push(`满足稳健硬指标：${metricParts.join('，')}。`);
+    } else if (hasExplicitState) {
+      lines.push(`后端治理投影返回“${uiState.label}”；当前可见指标为 ${metricParts.join('，') || '待补齐'}。`);
+    }
+    if (groupShape.available && groupShape.monotonicGood) lines.push('分组收益单调性良好，未出现倒挂。');
+    if (!hardReasons.length && !warningReasons.length) lines.push('未返回硬阻断或降权风险。');
+    return uniqueReasonLines(lines).slice(0, 2);
+  }
+
+  if (uiState.state === 'needs_calibration') {
+    if (warningReasons.length) lines.push(`主要风险：${diagnosticSentence(warningReasons[0])}`);
+    else if (coverage !== null && coverage < 90) lines.push(`覆盖率 ${pct(coverage)} 低于 90% 稳健门槛。`);
+    else if (factorRecentIcDecay(factor)) lines.push('近期 IC 出现显著衰减，需要复核稳定性。');
+    else if (groupShape.available && !groupShape.monotonicGood) lines.push('分组收益单调性未通过，需复核 Q1-Q5 排序。');
+    if (!lines.length) lines.push(`Grade S/A/B 因子未完全满足稳健条件；当前指标为 ${metricParts.join('，') || '待补齐'}。`);
+    if (metricLine && !lines.some((line) => line.includes('当前指标'))) lines.push(metricLine);
+    return uniqueReasonLines(lines).slice(0, 2);
+  }
+
+  if (uiState.state === 'decayed') {
+    if (hardReasons.length) lines.push(`核心阻断：${diagnosticSentence(hardReasons[0])}`);
+    else if (isFactorOffline(factor)) lines.push(`因子已下线：${factorOfflineReason(factor)}。`);
+    else if (level && level.score <= 2) lines.push(`因子级别为 Grade ${level.key}（${level.title}），低于生产准入线。`);
+    else if (groupShape.available && groupShape.inverted) lines.push('分层收益出现倒挂，Q1 收益不应优于 Q5。');
+    else if (diagnosticStatus === 'FAILED' || lifecycleStatus === 'DECAYED') {
+      lines.push(`诊断/生命周期状态为 ${STATUS_LABELS[diagnosticStatus] ?? diagnosticStatus}。`);
+    }
+    if (!lines.length) lines.push(`治理投影返回“${uiState.label}”，需物理封存并移入归档复盘。`);
+    if (metricLine) lines.push(metricLine);
+    return uniqueReasonLines(lines).slice(0, 2);
+  }
+
+  if (uiState.state === 'sandbox') {
+    if (!factor.latest_diagnostic_summary || rankIc === null || ir === null) lines.push('缺少完整 IC/IR 诊断数据。');
+    else if (hardReasons.length) lines.push(`治理阻断：${diagnosticSentence(hardReasons[0])}`);
+    else if (warningReasons.length) lines.push(`观察风险：${diagnosticSentence(warningReasons[0])}`);
+    if (coverage !== null) lines.push(`数据治理：当前覆盖率 ${pct(coverage)}，补齐后再晋级。`);
+    if (!lines.length) lines.push(`诊断状态为 ${STATUS_LABELS[diagnosticStatus] ?? diagnosticStatus}，尚未完成正式 PIT 诊断。`);
+    return uniqueReasonLines(lines).slice(0, 2);
+  }
+
+  return [UI_STATE_MANAGEMENT_ACTIONS[uiState.state]];
+}
+
 function factorGateProjection(
   factor: ApiFactorListItem,
   isHighCorrelation: boolean,
 ): { label: string; tone: FactorGateTone; reasons: string[]; fixTarget?: string | null } {
+  const uiState = factorUiState(factor).state;
   const hardReasons = [
     ...creationRiskReasons(factor, 'blocker'),
     ...blockerSummaryReasons(factor, 'blocker'),
     ...readinessBlockerReasons(factor, 'blocker'),
   ].filter(Boolean);
+  if (uiState === 'decayed') {
+    return {
+      label: '物理封存',
+      tone: 'bad',
+      reasons: hardReasons.length ? hardReasons : [UI_STATE_MANAGEMENT_ACTIONS.decayed],
+      fixTarget: factor.gate_fix_target,
+    };
+  }
+  if (uiState === 'sandbox') {
+    return {
+      label: '仅供预览',
+      tone: 'warn',
+      reasons: hardReasons.length ? hardReasons : [UI_STATE_MANAGEMENT_ACTIONS.sandbox],
+      fixTarget: factor.gate_fix_target,
+    };
+  }
   if (hardReasons.length || factor.blocker_reason_summary?.status === 'blocked') {
     return {
       label: '硬阻断',
@@ -808,15 +1189,15 @@ function factorGateProjection(
     ...readinessBlockerReasons(factor, 'warning'),
     ...(isHighCorrelation ? ['高相关提示'] : []),
   ].filter(Boolean);
-  if (warningReasons.length || factor.blocker_reason_summary?.status === 'warning') {
+  if (warningReasons.length || factor.blocker_reason_summary?.status === 'warning' || uiState === 'needs_calibration') {
     return {
-      label: '风险提示',
+      label: '降权建议',
       tone: 'warn',
-      reasons: warningReasons.length ? warningReasons : [factor.blocker_reason_summary?.label ?? '需在策略创建时提示风险'],
+      reasons: warningReasons.length ? warningReasons : [UI_STATE_MANAGEMENT_ACTIONS.needs_calibration],
       fixTarget: factor.gate_fix_target,
     };
   }
-  return { label: '无阻断', tone: 'good', reasons: ['可进入策略创建；相关性仅作为风险提示。'] };
+  return { label: '准予生产', tone: 'good', reasons: [UI_STATE_MANAGEMENT_ACTIONS.robust] };
 }
 
 type FactorAuditEntry = {
@@ -826,7 +1207,23 @@ type FactorAuditEntry = {
   detail: string;
 };
 
+type GovernancePruneComparisonSide = {
+  factorId: string;
+  factorName: string | null;
+  rankIc: number | null;
+  ir: number | null;
+  coverage: number | null;
+};
+
+type GovernancePruneComparison = {
+  candidate: GovernancePruneComparisonSide;
+  mvp: GovernancePruneComparisonSide;
+  correlation: number | null;
+};
+
 const GOVERNANCE_KIND_LABELS: Record<string, string> = {
+  DEPRECATE: '强制下线',
+  PRUNE: '冗余裁剪',
   WATCH: '观察',
   REVIEW: '复核',
   DECAYED: '退化观察',
@@ -836,7 +1233,63 @@ const GOVERNANCE_KIND_LABELS: Record<string, string> = {
 };
 
 function governanceKindLabel(kind: string): string {
-  return GOVERNANCE_KIND_LABELS[String(kind ?? '').toUpperCase()] ?? '治理动作';
+  return GOVERNANCE_KIND_LABELS[String(kind ?? '').toUpperCase()] ?? '治理任务';
+}
+
+function governanceOfflineEffectCopy(action: ApiFactorGovernanceAction): string {
+  const command = String(action.command ?? action.kind ?? '').toUpperCase();
+  if (command === 'PRUNE') {
+    return '冗余裁剪会写入“冗余挂起”状态；冗余因子将从策略配置、因子模型预览和算力预览中排除。';
+  }
+  return '强制下线会写入“已强制下线”状态；因子将从策略配置、因子模型预览和算力预览中排除。';
+}
+
+function governanceActionCommand(action: ApiFactorGovernanceAction): string {
+  return String(action.command ?? action.kind ?? '').toUpperCase();
+}
+
+function governancePruneComparison(action: ApiFactorGovernanceAction): GovernancePruneComparison | null {
+  if (governanceActionCommand(action) !== 'PRUNE') return null;
+  const detail = previewRecord(action.offline_detail);
+  const comparison = previewRecord(detail?.comparison);
+  const candidate = previewRecord(comparison?.candidate);
+  const mvp = previewRecord(comparison?.mvp);
+  const factorIds = (action.affected_factor_ids ?? action.factor_ids ?? []).map(String);
+  const candidateId = recordString(candidate ?? undefined, 'factor_id') ?? factorIds[0] ?? '';
+  const mvpId = recordString(mvp ?? undefined, 'factor_id') ?? action.keep_factor_id ?? '';
+  if (!candidateId || !mvpId) return null;
+  return {
+    candidate: {
+      factorId: candidateId,
+      factorName: recordString(candidate ?? undefined, 'factor_name') ?? recordString(candidate ?? undefined, 'name'),
+      rankIc: recordNumber(candidate ?? undefined, 'rank_ic'),
+      ir: recordNumber(candidate ?? undefined, 'ir'),
+      coverage: recordNumber(candidate ?? undefined, 'coverage'),
+    },
+    mvp: {
+      factorId: mvpId,
+      factorName: recordString(mvp ?? undefined, 'factor_name') ?? recordString(mvp ?? undefined, 'name'),
+      rankIc: recordNumber(mvp ?? undefined, 'rank_ic'),
+      ir: recordNumber(mvp ?? undefined, 'ir'),
+      coverage: recordNumber(mvp ?? undefined, 'coverage'),
+    },
+    correlation: recordNumber(detail ?? undefined, 'correlation') ?? recordNumber(action.criteria, 'correlation'),
+  };
+}
+
+function FactorGovernanceIdentity({ name, id }: { name: string; id: string }): JSX.Element {
+  return (
+    <span className="factor-governance-identity">
+      <strong>{name}</strong>
+      <code>{id}</code>
+    </span>
+  );
+}
+
+function isGovernanceTaskAction(action: ApiFactorGovernanceAction): boolean {
+  const kind = String(action.kind ?? '').toUpperCase();
+  const command = String(action.command ?? '').toUpperCase();
+  return kind === 'FACTOR_MODEL_SUGGESTION' || ['DEPRECATE', 'PRUNE'].includes(command || kind);
 }
 
 function governanceActionClass(action: ApiFactorGovernanceAction): string {
@@ -873,6 +1326,7 @@ function buildLocalGovernanceActions(
 ): ApiFactorGovernanceAction[] {
   const actions: ApiFactorGovernanceAction[] = [];
   factors.forEach((factor) => {
+    if (isFactorOffline(factor)) return;
     const status = String(factor.lifecycle_status ?? '').toUpperCase();
     const state = String(factor.ui_state ?? '').toLowerCase();
     if (highCorrelationIds.has(factor.id)) {
@@ -905,7 +1359,7 @@ function buildLocalGovernanceActions(
       kind: 'FACTOR_MODEL_SUGGESTION',
       label: '策略草稿建议',
       title: '多因子策略草稿建议',
-      detail: '治理队列已为自动挖掘因子准备待审查组合，只会带入创建页并保持草稿状态。',
+      detail: '治理任务已为自动挖掘因子准备待审查组合，只会带入创建页并保持草稿状态。',
       factor_ids: [autoMined.id],
       severity: 'info',
       suggested_weights: [{ factor_id: autoMined.id, weight_pct: 20, direction: autoMined.direction }],
@@ -973,7 +1427,7 @@ function buildFactorAuditEntries(
       id: 'governance-at',
       title: '治理消息时间',
       at: governanceAt,
-      detail: '治理队列已生成复核、观察或策略草稿建议。',
+      detail: '治理任务已生成复核、观察或策略草稿建议。',
     });
   }
   return entries;
@@ -994,8 +1448,7 @@ function DiagnosticSummaryPopover({
   const coverage = summary?.coverage ?? batch?.coverage;
   const diagnosedAt = recordString(summary?.compliance_trail, 'diagnosed_at') ?? batch?.latest_diagnostic_at ?? factorUpdatedAt(factor) ?? '待生成';
   const state = factorUiState(factor);
-  const warnings = creationRiskReasons(factor, 'warning');
-  const blockers = creationRiskReasons(factor, 'blocker');
+  const stateReasons = factorStatusReasonLines(factor);
   return (
     <div className="factor-diagnostic-popover" role="dialog" aria-label={`${factor.name} 最近诊断摘要`}>
       <div className="factor-diagnostic-popover__header">
@@ -1011,13 +1464,15 @@ function DiagnosticSummaryPopover({
         <div><dt>覆盖率</dt><dd>{pct(coverage)}</dd></div>
         <div><dt>诊断时间</dt><dd>{diagnosedAt === '待生成' ? diagnosedAt : formatDateTime(diagnosedAt)}</dd></div>
       </dl>
-      <p>
-        {blockers.length
-          ? `硬阻断：${blockers.slice(0, 2).join('、')}`
-          : warnings.length
-            ? `风险提示：${warnings.slice(0, 2).join('、')}`
-            : '无硬阻断；若存在高相关，仅在策略创建时提示。'}
-      </p>
+      <div className="factor-diagnostic-popover__reason">
+        <strong>判定原因</strong>
+        <ul>
+          {stateReasons.map((reason) => (
+            <li key={reason}>{reason}</li>
+          ))}
+        </ul>
+      </div>
+      <p className="factor-diagnostic-popover__action">{UI_STATE_MANAGEMENT_ACTIONS[state.state]}</p>
     </div>
   );
 }
@@ -1196,10 +1651,10 @@ function FactorCorrelationMatrix({
             aria-label={`选中相关性因子 ${factor.name}`}
             onClick={() => onSelect(factor.id)}
             key={`head-${factor.id}`}
-            data-category={descriptorCategory(factor)}
+            data-category={factorLibraryCategory(factor)}
           >
             {factor.name}
-            <small>{descriptorCategoryLabel(descriptorCategory(factor))}</small>
+            <small>{factorLibraryCategoryLabel(factorLibraryCategory(factor))}</small>
           </button>
         ))}
         {visibleFactors.map((row) => (
@@ -1209,16 +1664,16 @@ function FactorCorrelationMatrix({
               className={row.id === selected.id ? 'is-selected' : ''}
               aria-label={`选中相关性因子 ${row.name}`}
               onClick={() => onSelect(row.id)}
-              data-category={descriptorCategory(row)}
+              data-category={factorLibraryCategory(row)}
             >
               {row.name}
-              <small>{descriptorCategoryLabel(descriptorCategory(row))}</small>
+              <small>{factorLibraryCategoryLabel(factorLibraryCategory(row))}</small>
             </button>
             {visibleFactors.map((column) => {
               const value = factorCorrelation(row, column);
               const isPeer = row.id === selected.id || column.id === selected.id;
               const isHigh = isPeer && row.id !== column.id && value >= 0.7;
-              const isCrossCategoryHigh = isHigh && descriptorCategory(row) !== descriptorCategory(column);
+              const isCrossCategoryHigh = isHigh && factorLibraryCategory(row) !== factorLibraryCategory(column);
               return (
                 <button
                   type="button"
@@ -1229,7 +1684,7 @@ function FactorCorrelationMatrix({
                   onClick={() => onSelect(row.id === selected.id ? column.id : row.id)}
                   key={`${row.id}-${column.id}`}
                   style={{ ['--correlation-strength' as string]: Math.max(0.18, Math.abs(value)) }}
-                  data-category-pair={`${descriptorCategory(row)}-${descriptorCategory(column)}`}
+                  data-category-pair={`${factorLibraryCategory(row)}-${factorLibraryCategory(column)}`}
                 >
                   {value.toFixed(2)}
                 </button>
@@ -2082,7 +2537,10 @@ export function FactorLibraryPage({
 }): JSX.Element {
   const api = useApiClient();
   const [payload, setPayload] = useState<ApiFactorListResponse | null>(null);
-  const [status, setStatus] = useState(initialStatus ?? '');
+  const status = initialStatus ?? '';
+  const [lifecycleTab, setLifecycleTab] = useState<FactorLifecycleTab>('online');
+  const [reloadNonce, setReloadNonce] = useState(0);
+  const [diagnosticStateFilter, setDiagnosticStateFilter] = useState<FactorDiagnosticStateFilter>('');
   const [sourcePrefix, setSourcePrefix] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [operatorFilter, setOperatorFilter] = useState('');
@@ -2098,33 +2556,30 @@ export function FactorLibraryPage({
   const [governanceOverview, setGovernanceOverview] = useState<ApiFactorGovernanceOverview | null>(null);
   const [governanceLoading, setGovernanceLoading] = useState(false);
   const [governanceError, setGovernanceError] = useState<string | null>(null);
+  const [confirmGovernanceAction, setConfirmGovernanceAction] = useState<ApiFactorGovernanceAction | null>(null);
+  const [governanceExecuteBusy, setGovernanceExecuteBusy] = useState(false);
   useEffect(() => {
     let alive = true;
     const loadFactorPayload = async (): Promise<void> => {
       try {
         setError(null);
-        const factorPayload = await api.listFactors({ source: initialSource, status: status || undefined, tag: initialTag });
+        const factorPayload = await api.listFactors({
+          source: initialSource,
+          status: status || undefined,
+          tag: initialTag,
+          lifecycle: lifecycleTab,
+        });
         if (!alive) return;
         const previewFactorDiagnostics = (api as {
           previewFactorDiagnostics?: (request: ApiFactorDiagnosticPreviewPayload) => Promise<ApiFactorDiagnosticPreview> | undefined;
         }).previewFactorDiagnostics;
         const factorIds = previewFactorIdsForPayload(factorPayload);
         if (previewFactorDiagnostics && factorIds.length) {
-          const previewRequest = previewFactorDiagnostics({
-            batch: true,
-            factor_ids: factorIds,
-            diagnostic_mode: 'SANDBOX',
-            include: ['ic', 'ir', 'groups', 'turnover', 'correlation', 'blockers'],
-          });
-          if (previewRequest && typeof previewRequest.then === 'function') {
-            try {
-              const diagnosticPreview = await previewRequest;
-              if (!alive) return;
-              setPayload(mergeDiagnosticPreview(factorPayload, diagnosticPreview));
-              return;
-            } catch {
-              // Fall through to the list payload so the factor library remains usable if preview is unavailable.
-            }
+          const diagnosticPreview = await previewFactorDiagnosticsForLibrary(previewFactorDiagnostics, factorIds);
+          if (!alive) return;
+          if (diagnosticPreview) {
+            setPayload(mergeDiagnosticPreview(factorPayload, diagnosticPreview));
+            return;
           }
         }
         setPayload(factorPayload);
@@ -2145,7 +2600,7 @@ export function FactorLibraryPage({
     return () => {
       alive = false;
     };
-  }, [api, initialLoadDelayMs, initialSource, initialTag, status]);
+  }, [api, initialLoadDelayMs, initialSource, initialTag, lifecycleTab, reloadNonce, status]);
   useEffect(() => {
     if (!governanceOpen || governanceOverview) return;
     const getFactorGovernanceOverview = (api as {
@@ -2161,7 +2616,7 @@ export function FactorLibraryPage({
         setGovernanceOverview(overview);
       })
       .catch((err: Error) => {
-        if (alive) setGovernanceError(err.message || '治理队列加载失败。');
+        if (alive) setGovernanceError(err.message || '治理任务加载失败。');
       })
       .finally(() => {
         if (alive) setGovernanceLoading(false);
@@ -2173,14 +2628,27 @@ export function FactorLibraryPage({
   const factors = useMemo(() => {
     const filtered = (payload?.items ?? []).filter((factor) => {
       const descriptor = factor.descriptor;
+      if (diagnosticStateFilter && factorUiState(factor).state !== diagnosticStateFilter) return false;
       if (sourcePrefix && descriptor?.source_prefix !== sourcePrefix) return false;
-      if (categoryFilter && descriptor?.category !== categoryFilter) return false;
+      if (categoryFilter && factorLibraryCategory(factor) !== categoryFilter) return false;
       if (operatorFilter && descriptor?.operator !== operatorFilter) return false;
       if (levelFilter && factorLevel(factor)?.key !== levelFilter) return false;
       return true;
     });
     return [...filtered].sort((left, right) => compareFactorsBySort(left, right, sort));
-  }, [categoryFilter, levelFilter, operatorFilter, payload?.items, sort, sourcePrefix]);
+  }, [categoryFilter, diagnosticStateFilter, levelFilter, operatorFilter, payload?.items, sort, sourcePrefix]);
+  const factorLookup = useMemo(() => new Map((payload?.items ?? []).map((factor) => [factor.id, factor])), [payload?.items]);
+  const confirmPruneComparison = useMemo(
+    () => confirmGovernanceAction ? governancePruneComparison(confirmGovernanceAction) : null,
+    [confirmGovernanceAction],
+  );
+  const resolveGovernanceFactorIdentity = (factorId: string, fallbackName?: string | null) => {
+    const factor = factorLookup.get(factorId);
+    return {
+      id: factor?.descriptor?.canonical_id ?? factor?.id ?? factorId,
+      name: factor?.name ?? fallbackName ?? factorId,
+    };
+  };
   const updateSort = (key: FactorSortKey) => {
     setSort((current) => (
       current.key === key
@@ -2216,7 +2684,9 @@ export function FactorLibraryPage({
     () => buildLocalGovernanceActions(factors, highCorrelationIds),
     [factors, highCorrelationIds],
   );
-  const governanceActions = governanceOverview?.actions.length ? governanceOverview.actions : localGovernanceActions;
+  const rawGovernanceActions = governanceOverview ? governanceOverview.actions : localGovernanceActions;
+  const governanceActions = rawGovernanceActions.filter(isGovernanceTaskAction);
+  const localGovernanceTaskCount = localGovernanceActions.filter(isGovernanceTaskAction).length;
   const comparisonFactors = useMemo(
     () => comparisonFactorIds
       .map((factorId) => factors.find((factor) => factor.id === factorId))
@@ -2230,6 +2700,39 @@ export function FactorLibraryPage({
       return next.slice(-2);
     });
   };
+  const executeGovernanceAction = async (): Promise<void> => {
+    if (!confirmGovernanceAction) return;
+    const executeAction = api.executeFactorGovernanceAction;
+    if (!executeAction) {
+      setGovernanceError('当前 API 不支持治理任务执行。');
+      return;
+    }
+    const command = String(confirmGovernanceAction.command ?? confirmGovernanceAction.kind ?? '').toUpperCase();
+    const factorIds = (confirmGovernanceAction.affected_factor_ids ?? confirmGovernanceAction.factor_ids ?? []).map(String);
+    setGovernanceExecuteBusy(true);
+    setGovernanceError(null);
+    try {
+      const response = await executeAction(confirmGovernanceAction.id, {
+        confirm: true,
+        command,
+        factor_ids: factorIds,
+        reason: confirmGovernanceAction.offline_reason || confirmGovernanceAction.detail || `${governanceKindLabel(command)}确认执行`,
+        keep_factor_id: confirmGovernanceAction.keep_factor_id ?? null,
+        detail: {
+          action_id: confirmGovernanceAction.id,
+          criteria: confirmGovernanceAction.criteria ?? {},
+          offline_detail: confirmGovernanceAction.offline_detail ?? {},
+        },
+      });
+      setGovernanceOverview(response.governance_overview ?? null);
+      setConfirmGovernanceAction(null);
+      setReloadNonce((value) => value + 1);
+    } catch (err) {
+      setGovernanceError(err instanceof Error ? err.message : '治理任务执行失败。');
+    } finally {
+      setGovernanceExecuteBusy(false);
+    }
+  };
   const librarySummary = useMemo(() => {
     const allFactors = payload?.items ?? [];
     const summaryRecord = payload?.summary;
@@ -2241,17 +2744,37 @@ export function FactorLibraryPage({
       Boolean(factor.latest_diagnostic_summary?.run_id)
     )).length;
     const sandboxReadyCount = allFactors.filter((factor) => factor.diagnostic_status === 'SANDBOX_READY').length;
-    const governanceQueueCount = recordNumber(summaryRecord, 'governance_queue_count') ??
-      governanceOverview?.queue_count ??
-      localGovernanceActions.length;
+    const governanceQueueCount = governanceOverview
+      ? governanceActions.length
+      : recordNumber(summaryRecord, 'governance_queue_count') ?? localGovernanceTaskCount;
     return {
       systemSeedCount,
       diagnosableCount,
       sandboxReadyCount,
       governanceQueueCount,
+      onlineCount: recordNumber(summaryRecord, 'online_count') ?? allFactors.filter((factor) => !isFactorOffline(factor)).length,
+      offlineCount: recordNumber(summaryRecord, 'offline_count') ?? allFactors.filter(isFactorOffline).length,
     };
-  }, [governanceOverview?.queue_count, localGovernanceActions.length, payload?.items, payload?.summary]);
+  }, [governanceActions.length, governanceOverview, localGovernanceTaskCount, payload?.items, payload?.summary]);
   const pitStatus = recordString(payload?.summary, 'pit_status');
+  const confirmAffectedFactorIds = confirmGovernanceAction
+    ? (confirmGovernanceAction.affected_factor_ids ?? confirmGovernanceAction.factor_ids ?? []).map(String)
+    : [];
+  const confirmAffectedIdentities = confirmAffectedFactorIds.map((factorId) => {
+    const fallbackName = confirmPruneComparison?.candidate.factorId === factorId
+      ? confirmPruneComparison.candidate.factorName
+      : null;
+    return resolveGovernanceFactorIdentity(factorId, fallbackName);
+  });
+  const confirmMvpIdentity = confirmGovernanceAction?.keep_factor_id
+    ? resolveGovernanceFactorIdentity(confirmGovernanceAction.keep_factor_id, confirmPruneComparison?.mvp.factorName)
+    : null;
+  const confirmPruneCandidateIdentity = confirmPruneComparison
+    ? resolveGovernanceFactorIdentity(confirmPruneComparison.candidate.factorId, confirmPruneComparison.candidate.factorName)
+    : null;
+  const confirmPruneMvpIdentity = confirmPruneComparison
+    ? resolveGovernanceFactorIdentity(confirmPruneComparison.mvp.factorId, confirmPruneComparison.mvp.factorName)
+    : null;
   return (
     <div className="factor-page" data-page-root="factor-library">
       <PageHero
@@ -2288,22 +2811,22 @@ export function FactorLibraryPage({
           onClick={() => setGovernanceOpen(true)}
           aria-haspopup="dialog"
         >
-          <span>治理队列</span>
+          <span>治理任务</span>
           <strong>{librarySummary.governanceQueueCount}</strong>
           <p>点击查看复核、退化观察、拥挤风险和策略草稿建议。</p>
         </button>
       </section>
       {governanceOpen ? (
-        <div className="factor-governance-modal" role="dialog" aria-modal="true" aria-label="治理队列">
+        <div className="factor-governance-modal" role="dialog" aria-modal="true" aria-label="治理任务">
           <div className="factor-governance-modal__panel">
             <div className="factor-governance-modal__header">
               <div>
-                <strong>治理队列</strong>
-                <span>待治理动作完整列表，策略建议只会带入创建页并保持草稿状态。</span>
+                <strong>治理任务</strong>
+                <span>执行类指令需要二次确认；策略建议只会带入创建页并保持草稿状态。</span>
               </div>
               <button type="button" className="factor-link" onClick={() => setGovernanceOpen(false)}>关闭</button>
             </div>
-            {governanceLoading ? <p className="factor-muted">正在加载治理动作...</p> : null}
+            {governanceLoading ? <p className="factor-muted">正在加载治理任务...</p> : null}
             {governanceError ? <p className="factor-error-text">{governanceError}</p> : null}
             <div className="factor-governance-action-list">
               {governanceActions.length ? governanceActions.map((action) => (
@@ -2326,24 +2849,142 @@ export function FactorLibraryPage({
                       带入创建页
                     </button>
                   ) : null}
+                  {['DEPRECATE', 'PRUNE'].includes(String(action.command ?? action.kind).toUpperCase()) ? (
+                    <button
+                      className="factor-btn factor-btn--primary factor-btn--small"
+                      type="button"
+                      onClick={() => setConfirmGovernanceAction(action)}
+                    >
+                      二次确认
+                    </button>
+                  ) : null}
                 </article>
               )) : (
-                <div className="factor-governance-empty">当前没有待治理动作。</div>
+                <div className="factor-governance-empty">当前没有待治理任务。</div>
               )}
             </div>
           </div>
         </div>
       ) : null}
+      {confirmGovernanceAction ? (
+        <div className="factor-governance-modal" role="dialog" aria-modal="true" aria-label="确认治理任务">
+          <div className="factor-governance-modal__panel factor-governance-modal__panel--confirm">
+            <div className="factor-governance-modal__header">
+              <div>
+                <strong>确认执行 {governanceKindLabel(String(confirmGovernanceAction.command ?? confirmGovernanceAction.kind))}</strong>
+                <span>该操作会写入软下线状态，因子仍可在已下线 tab 和详情页审计。</span>
+              </div>
+              <button type="button" className="factor-link" onClick={() => setConfirmGovernanceAction(null)}>关闭</button>
+            </div>
+            <dl className="factor-kv-grid">
+              <div><dt>任务 ID</dt><dd>{confirmGovernanceAction.id}</dd></div>
+              <div>
+                <dt>关联因子</dt>
+                <dd className="factor-governance-identity-list">
+                  {confirmAffectedIdentities.map((identity) => (
+                    <FactorGovernanceIdentity key={identity.id} name={identity.name} id={identity.id} />
+                  ))}
+                </dd>
+              </div>
+              <div>
+                <dt>保留 MVP</dt>
+                <dd>
+                  {confirmMvpIdentity ? (
+                    <FactorGovernanceIdentity name={confirmMvpIdentity.name} id={confirmMvpIdentity.id} />
+                  ) : '不适用'}
+                </dd>
+              </div>
+              <div><dt>下线原因</dt><dd>{confirmGovernanceAction.offline_reason ?? confirmGovernanceAction.detail}</dd></div>
+            </dl>
+            {confirmPruneComparison && confirmPruneCandidateIdentity && confirmPruneMvpIdentity ? (
+              <section className="factor-governance-prune" aria-label="冗余裁剪参数对比">
+                <div className="factor-governance-prune__header">
+                  <strong>冗余裁剪参数对比</strong>
+                  <span>相关性 {num(confirmPruneComparison.correlation, 2)}</span>
+                </div>
+                <div className="factor-governance-prune__cards">
+                  <article className="factor-governance-prune-card">
+                    <span>待裁剪因子</span>
+                    <FactorGovernanceIdentity name={confirmPruneCandidateIdentity.name} id={confirmPruneCandidateIdentity.id} />
+                    <ul className="factor-governance-prune__metrics">
+                      <li>Rank IC {num(confirmPruneComparison.candidate.rankIc, 3)}</li>
+                      <li>IR {num(confirmPruneComparison.candidate.ir, 2)}</li>
+                      <li>覆盖率 {pct(confirmPruneComparison.candidate.coverage, 2)}</li>
+                    </ul>
+                  </article>
+                  <article className="factor-governance-prune-card factor-governance-prune-card--mvp">
+                    <span>保留 MVP</span>
+                    <FactorGovernanceIdentity name={confirmPruneMvpIdentity.name} id={confirmPruneMvpIdentity.id} />
+                    <ul className="factor-governance-prune__metrics">
+                      <li>Rank IC {num(confirmPruneComparison.mvp.rankIc, 3)}</li>
+                      <li>IR {num(confirmPruneComparison.mvp.ir, 2)}</li>
+                      <li>覆盖率 {pct(confirmPruneComparison.mvp.coverage, 2)}</li>
+                    </ul>
+                  </article>
+                </div>
+                <p className="factor-governance-prune__plan">
+                  <strong>最终方案</strong>
+                  保留 {confirmPruneMvpIdentity.name}（{confirmPruneMvpIdentity.id}），下线 {confirmPruneCandidateIdentity.name}（{confirmPruneCandidateIdentity.id}）；冗余因子不参与多因子合成权重分配。
+                </p>
+              </section>
+            ) : null}
+            <p className="factor-governance-confirm-note">
+              {governanceOfflineEffectCopy(confirmGovernanceAction)}
+            </p>
+            <div className="factor-action-row">
+              <button className="factor-btn factor-btn--small" type="button" onClick={() => setConfirmGovernanceAction(null)}>
+                取消
+              </button>
+              <button
+                className="factor-btn factor-btn--primary"
+                type="button"
+                disabled={governanceExecuteBusy}
+                onClick={() => void executeGovernanceAction()}
+              >
+                {governanceExecuteBusy ? '执行中...' : '确认执行'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <section className="factor-panel">
+        <div className="factor-lifecycle-tabs" role="tablist" aria-label="因子生命周期视图">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={lifecycleTab === 'online'}
+            className={lifecycleTab === 'online' ? 'is-active' : ''}
+            onClick={() => {
+              setLifecycleTab('online');
+              setComparisonFactorIds([]);
+              setSelectedCorrelationFactorId(undefined);
+            }}
+          >
+            线上因子 <span>{librarySummary.onlineCount}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={lifecycleTab === 'offline'}
+            className={lifecycleTab === 'offline' ? 'is-active' : ''}
+            onClick={() => {
+              setLifecycleTab('offline');
+              setComparisonFactorIds([]);
+              setSelectedCorrelationFactorId(undefined);
+            }}
+          >
+            已下线因子 <span>{librarySummary.offlineCount}</span>
+          </button>
+        </div>
         <div className="factor-toolbar">
           <div className="factor-segmented">
-            {[
-              ['', '全部'],
-              ['READY_TO_DIAGNOSE', '可诊断'],
-              ['SANDBOX_READY', 'Sandbox'],
-              ['BLOCKED_DATA', '基础数据待补'],
-            ].map(([value, label]) => (
-              <button className={status === value ? 'is-active' : ''} key={value} onClick={() => setStatus(value)}>
+            {UI_STATE_FILTER_OPTIONS.map(({ value, label }) => (
+              <button
+                className={diagnosticStateFilter === value ? 'is-active' : ''}
+                key={value || 'all'}
+                onClick={() => setDiagnosticStateFilter(value)}
+                type="button"
+              >
                 {label}
               </button>
             ))}
@@ -2357,7 +2998,7 @@ export function FactorLibraryPage({
             </select>
             <select aria-label="因子类别" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
               <option value="">全部类别</option>
-              {Object.entries(DESCRIPTOR_CATEGORY_LABELS).map(([value, label]) => (
+              {Object.entries(FACTOR_LIBRARY_CATEGORY_LABELS).map(([value, label]) => (
                 <option key={value} value={value}>{label}</option>
               ))}
             </select>
@@ -2378,46 +3019,69 @@ export function FactorLibraryPage({
         </div>
         {error ? <div className="factor-panel factor-panel--danger">{error}</div> : null}
         <div className="factor-table-wrap">
-          <table className="factor-table">
+          <table className={`factor-table factor-table--${lifecycleTab}`}>
             <thead>
-              <tr>
-                <th>因子</th>
-                <th>来源</th>
-                <th>
-                  <div className="factor-th-content">
-                    <span>诊断状态</span>
-                    <HelpTooltip label="诊断状态含义" lines={UI_STATE_TOOLTIP_LINES} />
-                  </div>
-                </th>
-                <th aria-sort={ariaSortFor('rank_ic', sort)}>
-                  <SortableHeader
-                    label="最近诊断"
-                    sortKey="rank_ic"
-                    sort={sort}
-                    onSort={updateSort}
-                    tooltip={<HelpTooltip label="最近诊断指标解释" lines={DIAGNOSTIC_TOOLTIP_LINES} />}
-                  />
-                </th>
-                <th aria-sort={ariaSortFor('level', sort)}>
-                  <SortableHeader
-                    label="因子级别"
-                    sortKey="level"
-                    sort={sort}
-                    onSort={updateSort}
-                    tooltip={<HelpTooltip label="因子级别名词解释" lines={FACTOR_LEVEL_TOOLTIP_LINES} />}
-                  />
-                </th>
-                <th>
-                  <div className="factor-th-content">
-                    <span>阻断 / 风险</span>
-                    <HelpTooltip label="阻断与风险含义" lines={BLOCKER_RISK_TOOLTIP_LINES} />
-                  </div>
-                </th>
-                <th aria-sort={ariaSortFor('updated_at', sort)}>
-                  <SortableHeader label="最近更新" sortKey="updated_at" sort={sort} onSort={updateSort} />
-                </th>
-                <th>比对 / 操作</th>
-              </tr>
+              {lifecycleTab === 'online' ? (
+                <tr>
+                  <th>因子</th>
+                  <th>来源</th>
+                  <th>诊断状态</th>
+                  <th aria-sort={ariaSortFor('rank_ic', sort)}>
+                    <SortableHeader
+                      label="最近诊断"
+                      sortKey="rank_ic"
+                      sort={sort}
+                      onSort={updateSort}
+                      tooltip={<HelpTooltip label="最近诊断指标解释" lines={DIAGNOSTIC_TOOLTIP_LINES} />}
+                    />
+                  </th>
+                  <th aria-sort={ariaSortFor('level', sort)}>
+                    <SortableHeader
+                      label="因子级别"
+                      sortKey="level"
+                      sort={sort}
+                      onSort={updateSort}
+                      tooltip={<HelpTooltip label="因子级别名词解释" lines={FACTOR_LEVEL_TOOLTIP_LINES} />}
+                    />
+                  </th>
+                  <th>阻断 / 风险</th>
+                  <th aria-sort={ariaSortFor('updated_at', sort)}>
+                    <SortableHeader
+                      label="最近更新"
+                      sortKey="updated_at"
+                      sort={sort}
+                      onSort={updateSort}
+                    />
+                  </th>
+                  <th>比对 / 操作</th>
+                </tr>
+              ) : (
+                <tr>
+                  <th>因子</th>
+                  <th>来源</th>
+                  <th>诊断状态</th>
+                  <th aria-sort={ariaSortFor('rank_ic', sort)}>
+                    <SortableHeader
+                      label="最近诊断"
+                      sortKey="rank_ic"
+                      sort={sort}
+                      onSort={updateSort}
+                      tooltip={<HelpTooltip label="最近诊断指标解释" lines={DIAGNOSTIC_TOOLTIP_LINES} />}
+                    />
+                  </th>
+                  <th aria-sort={ariaSortFor('level', sort)}>
+                    <SortableHeader
+                      label="因子级别"
+                      sortKey="level"
+                      sort={sort}
+                      onSort={updateSort}
+                      tooltip={<HelpTooltip label="因子级别名词解释" lines={FACTOR_LEVEL_TOOLTIP_LINES} />}
+                    />
+                  </th>
+                  <th>下线原因</th>
+                  <th>下线时间</th>
+                </tr>
+              )}
             </thead>
             <tbody>
               {factors.map((factor) => (
@@ -2426,12 +3090,77 @@ export function FactorLibraryPage({
                   data-correlation-highlight={highCorrelationIds.has(factor.id) ? 'true' : undefined}
                   key={factor.id}
                 >
+                  {lifecycleTab === 'online' ? (
+                    <>
+                      <td>
+                        <div className="factor-name-row">
+                          <button className="factor-link" onClick={() => navigateTo(`/factors/${factor.id}`)}>{factor.name}</button>
+                          <span className="factor-category-tag" data-category={factorLibraryCategory(factor)}>
+                            {factorLibraryCategoryLabel(factorLibraryCategory(factor))}
+                          </span>
+                          <HelpTooltip label={`${factor.name} 公式`} lines={[factor.expression]} mono />
+                        </div>
+                        <code className="factor-id">{factor.descriptor?.canonical_id ?? factor.id}</code>
+                      </td>
+                      <td>{SOURCE_LABELS[factor.source] ?? factor.source}</td>
+                      <td>
+                        <DiagnosticStateCell
+                          factor={factor}
+                          open={diagnosticPopoverFactorId === factor.id}
+                          onToggle={() => setDiagnosticPopoverFactorId((current) => (current === factor.id ? null : factor.id))}
+                          onClose={() => setDiagnosticPopoverFactorId(null)}
+                        />
+                      </td>
+                      <td>
+                        <DiagnosticCell factor={factor} />
+                      </td>
+                      <td>
+                        <FactorLevelCell factor={factor} />
+                      </td>
+                      <td>
+                        <GateRiskCell factor={factor} isHighCorrelation={highCorrelationIds.has(factor.id)} />
+                      </td>
+                      <td>
+                        <span className="factor-updated">
+                          {formatFactorUpdatedAt(factor)}
+                        </span>
+                      </td>
+                      <td>
+                        <div className="factor-row-actions">
+                          <label className="factor-compare-check">
+                            <input
+                              type="checkbox"
+                              checked={comparisonFactorIds.includes(factor.id)}
+                              onChange={(event) => toggleComparisonFactor(factor.id, event.target.checked)}
+                            />
+                            <span>比对</span>
+                          </label>
+                          <button className="factor-link" onClick={() => navigateTo(`/factors/${factor.id}`)} type="button">详情</button>
+                        </div>
+                      </td>
+                    </>
+                  ) : (
+                    <>
                   <td>
                     <div className="factor-name-row">
                       <button className="factor-link" onClick={() => navigateTo(`/factors/${factor.id}`)}>{factor.name}</button>
+                      <span className="factor-category-tag" data-category={factorLibraryCategory(factor)}>
+                        {factorLibraryCategoryLabel(factorLibraryCategory(factor))}
+                      </span>
                       <HelpTooltip label={`${factor.name} 公式`} lines={[factor.expression]} mono />
                     </div>
                     <code className="factor-id">{factor.descriptor?.canonical_id ?? factor.id}</code>
+                    <div className="factor-row-actions factor-row-actions--inline">
+                      <label className="factor-compare-check">
+                        <input
+                          type="checkbox"
+                          checked={comparisonFactorIds.includes(factor.id)}
+                          onChange={(event) => toggleComparisonFactor(factor.id, event.target.checked)}
+                        />
+                        <span>比对</span>
+                      </label>
+                      <button className="factor-link" onClick={() => navigateTo(`/factors/${factor.id}`)} type="button">详情</button>
+                    </div>
                   </td>
                   <td>{SOURCE_LABELS[factor.source] ?? factor.source}</td>
                   <td>
@@ -2449,45 +3178,17 @@ export function FactorLibraryPage({
                     <FactorLevelCell factor={factor} />
                   </td>
                   <td>
-                    <div className="factor-gate-cell factor-gate-cell--stacked">
-                      <GateRiskCell factor={factor} isHighCorrelation={highCorrelationIds.has(factor.id)} />
-                      {factor.diagnostic_status === 'SANDBOX_READY' ? (
-                        <button
-                          aria-label={`${factor.name} 缺口速报`}
-                          className="factor-gap-alert"
-                          onClick={() => setGapPopoverFactorId((current) => (current === factor.id ? null : factor.id))}
-                          type="button"
-                        >
-                          !
-                        </button>
-                      ) : null}
-                      {gapPopoverFactorId === factor.id ? (
-                        <SandboxGapPopover factor={factor} onClose={() => setGapPopoverFactorId(null)} />
-                      ) : null}
-                    </div>
+                    <span className={`factor-offline-reason ${isFactorOffline(factor) ? 'is-offline' : ''}`}>
+                      {factorOfflineReason(factor)}
+                    </span>
                   </td>
                   <td>
-                    {factorUpdatedAt(factor) ? (
-                      <time className="factor-updated" dateTime={factorUpdatedAt(factor) ?? undefined}>
-                        {formatFactorUpdatedAt(factor)}
-                      </time>
-                    ) : (
-                      <span className="factor-updated factor-updated--empty">尚未记录</span>
-                    )}
+                    <span className="factor-updated">
+                      {formatFactorOfflineAt(factor)}
+                    </span>
                   </td>
-                  <td>
-                    <div className="factor-row-actions">
-                      <label className="factor-compare-check">
-                        <input
-                          type="checkbox"
-                          checked={comparisonFactorIds.includes(factor.id)}
-                          onChange={(event) => toggleComparisonFactor(factor.id, event.target.checked)}
-                        />
-                        <span>比对</span>
-                      </label>
-                      <button className="factor-btn factor-btn--small" onClick={() => navigateTo(`/factors/${factor.id}`)}>详情</button>
-                    </div>
-                  </td>
+                    </>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -2497,7 +3198,7 @@ export function FactorLibraryPage({
       <section className="factor-panel factor-correlation-panel">
         <div className="factor-section-title">
           <span>{comparisonFactors.length === 2 ? '因子表现对比图' : '相关性热力图'}</span>
-          <span className="factor-muted">{comparisonFactors.length === 2 ? '双因子指纹比对' : '按类别聚类，点击因子高亮 > 0.7'}</span>
+          <span className="factor-muted">{comparisonFactors.length === 2 ? '双因子指纹比对' : '仅使用当前 tab 与筛选后的因子集合'}</span>
         </div>
         {comparisonFactors.length === 2 ? (
           <FactorComparisonPanel factors={comparisonFactors} onClear={() => setComparisonFactorIds([])} />
@@ -2660,7 +3361,10 @@ export function FactorDetailPage({ factorId }: { factorId: string }): JSX.Elemen
               <article className="factor-panel factor-detail-panel">
                 <div className="factor-section-title">
                   <div>
-                    <span>换手率与衰减</span>
+                    <div className="factor-section-title__heading">
+                      <span>换手率与衰减</span>
+                      <HelpTooltip label="换手率与衰减计算口径" lines={TURNOVER_DECAY_TOOLTIP_LINES} />
+                    </div>
                     <p>{factor.descriptor?.window ?? '当前窗口'} 因子必须说明信号有效期、换手压力和单笔交易摩擦成本，供 TRS 业务核算。</p>
                   </div>
                   <span className="factor-pill factor-pill--warn">成本敏感</span>
@@ -2698,8 +3402,11 @@ export function FactorDetailPage({ factorId }: { factorId: string }): JSX.Elemen
               <article className="factor-panel factor-detail-panel">
                 <div className="factor-section-title">
                   <div>
-                    <span>分层收益与 IC 走势</span>
-                    <p>强因子组到弱因子组保持单调性，极端分组的换手与覆盖率同时展示。</p>
+                    <div className="factor-section-title__heading">
+                      <span>分层收益与 IC 走势</span>
+                      <HelpTooltip label="分层收益与 IC 走势计算口径" lines={GROUP_IC_TOOLTIP_LINES} />
+                    </div>
+                    <p>强因子组到弱因子组使用滑动平均口径检查单调性，极端分组的换手与覆盖率同时展示。</p>
                   </div>
                 </div>
                 <div className="factor-detail-split">

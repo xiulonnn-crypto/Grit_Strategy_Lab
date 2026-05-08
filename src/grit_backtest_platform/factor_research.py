@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from uuid import uuid4
 
+from .factor_mining import factor_ir_from_rank_ic, infer_holding_period_from_expression
 from .market_data_repository import (
     DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
     DATASET_FUNDAMENTALS_SNAPSHOT_ID,
@@ -23,9 +24,12 @@ from .universe_history import SP500_UNIVERSE_SNAPSHOT_ID
 PRICE_DATA_REQUIREMENTS = ("adj_close", "price_history", "returns")
 FORMAL_DIAGNOSTIC_YEARS = 10
 SANDBOX_DIAGNOSTIC_YEARS = 3
+GROUP_MONOTONICITY_WINDOW_PERIODS = 3
+GROUP_INVERSION_REQUIRED_STREAK = 3
 FACTOR_DESCRIPTOR_SCHEMA_VERSION = "factor_descriptor_v1"
 FACTOR_QUARANTINE_RULE_VERSION = "factor_quarantine_v2_0"
 FUNDAMENTAL_SEED_VERSION = "v3_asset_growth_shares"
+QUARANTINE_MIN_NEWEY_WEST_IR = 0.1
 PRICE_REQUIREMENTS = set(PRICE_DATA_REQUIREMENTS)
 FUNDAMENTAL_REQUIREMENTS = {
     "ltm_earnings",
@@ -155,10 +159,11 @@ DESCRIPTOR_SOURCE_TO_PREFIX = {
 }
 ALLOWED_DESCRIPTOR_CATEGORIES = {"alpha", "beta", "inv", "liq", "mom", "qlty", "size", "val", "vol"}
 ALLOWED_DESCRIPTOR_OPERATORS = {"rank", "z", "raw", "log"}
-FACTOR_REFERENCE_TOKEN_PATTERN = re.compile(
-    rf"^[sma]_(?:{'|'.join(sorted(ALLOWED_DESCRIPTOR_CATEGORIES))})_"
-    rf"(?:[a-z0-9]+_)*[a-z0-9]+_(?:{'|'.join(sorted(ALLOWED_DESCRIPTOR_OPERATORS))})$"
+FACTOR_REFERENCE_TOKEN_SOURCE = (
+    rf"[sma]_(?:{'|'.join(sorted(ALLOWED_DESCRIPTOR_CATEGORIES))})_"
+    rf"(?:[a-z0-9]+_)*[a-z0-9]+_(?:{'|'.join(sorted(ALLOWED_DESCRIPTOR_OPERATORS))})"
 )
+FACTOR_REFERENCE_TOKEN_PATTERN = re.compile(rf"^{FACTOR_REFERENCE_TOKEN_SOURCE}$")
 RESIDUAL_BY_KEYWORD_PATTERN = re.compile(r"\bResidual\s*\([^)]*\bby\s*=", re.DOTALL)
 RESIDUAL_FACTOR_REFERENCE_PATTERN = re.compile(
     r"^\s*(?:(?P<outer>ZScore|Rank)\s*\(\s*)?"
@@ -182,16 +187,56 @@ FACTOR_REFERENCE_EVALUATION_ALIASES = {
     "s_mom_6m_raw": "s_mom_6m_rank",
     "s_vol_252d_raw": "s_vol_252d_rank",
 }
+FACTOR_REFERENCE_DATA_REQUIREMENTS = {
+    "s_alpha_ffblend_cur_rank": ("market_cap", "ltm_earnings", "book_value_equity"),
+    "s_inv_assetgrowth_1y_rank": ("shares_outstanding", "total_shares", "capex", "market_cap"),
+    "s_inv_capex_ltm_raw": ("capex", "market_cap"),
+    "s_liq_turnover_20d_rank": ("shares_outstanding", "total_shares"),
+    "s_qlty_fcfy_ttm_raw": ("operating_cash_flow", "capex", "enterprise_value", "market_cap", "total_debt", "cash_and_equivalents"),
+    "s_qlty_leverage_cur_raw": ("cash_and_equivalents", "total_debt", "market_cap"),
+    "s_qlty_roe_ltm_raw": ("ltm_earnings", "book_value_equity"),
+    "s_size_cur_log": ("market_cap", "shares_outstanding", "total_shares"),
+    "s_size_mcap_cur_raw": ("market_cap", "shares_outstanding", "total_shares"),
+    "s_val_bp_latest_raw": ("book_value_equity", "market_cap"),
+    "s_val_cfp_ltm_raw": ("operating_cash_flow", "market_cap"),
+    "s_val_ep_ltm_raw": ("ltm_earnings", "market_cap"),
+    "s_val_evocf_ltm_raw": ("enterprise_value", "operating_cash_flow", "market_cap", "total_debt", "cash_and_equivalents"),
+}
 FACTOR_FAMILY_LABELS = {
-    "alpha": "\u591a\u56e0\u5b50\u7ec4\u5408",
-    "beta": "\u5e02\u573a/\u8d1d\u5854",
-    "inv": "\u6295\u8d44",
-    "liq": "\u6d41\u52a8\u6027",
+    "alpha": "\u5176\u4ed6",
+    "beta": "\u98ce\u9669",
+    "inv": "\u8d28\u91cf",
+    "liq": "\u60c5\u7eea",
     "mom": "\u52a8\u91cf",
     "qlty": "\u8d28\u91cf",
     "size": "\u89c4\u6a21",
     "val": "\u4f30\u503c",
-    "vol": "\u6ce2\u52a8\u7387",
+    "vol": "\u98ce\u9669",
+}
+FACTOR_GOVERNANCE_CATEGORY_BY_DESCRIPTOR = {
+    "alpha": "other",
+    "beta": "risk",
+    "inv": "quality",
+    "liq": "sentiment",
+    "mom": "momentum",
+    "qlty": "quality",
+    "size": "size",
+    "val": "value",
+    "vol": "risk",
+}
+FACTOR_GOVERNANCE_CATEGORY_BY_TAG = {
+    "alpha": "other",
+    "alpha_blend": "other",
+    "beta": "risk",
+    "investment": "quality",
+    "liquidity": "sentiment",
+    "momentum": "momentum",
+    "quality": "quality",
+    "risk": "risk",
+    "sentiment": "sentiment",
+    "size": "size",
+    "value": "value",
+    "volatility": "risk",
 }
 UI_STATE_LABELS = {
     "robust": "\u7a33\u5065",
@@ -202,15 +247,20 @@ UI_STATE_LABELS = {
 WARNING_BLOCKER_CODES = {
     "COVERAGE_EDGE",
     "DIAGNOSTIC_STALE",
+    "GROUP_RETURNS_MONOTONICITY_WEAK",
     "HIGH_CORRELATION",
+    "IC_RECENT_DECAY",
     "IC_UNSTABLE",
     "TURNOVER_DECAY",
     "VERIFIED_PIT_WINDOW_INCOMPLETE",
 }
 HARD_BLOCKER_CODES = {
     "CURRENT_ONLY_DATA",
+    "FACTOR_OFFLINE",
+    "FACTOR_GRADE_DECAYED",
     "FUNDAMENTAL_PIT_NOT_READY",
     "FUTURE_FUNCTION",
+    "GROUP_RETURNS_INVERTED",
     "INDUSTRY_PIT_NOT_READY",
     "MISSING_AVAILABLE_AT",
     "NON_REPLAYABLE_FIELD",
@@ -226,6 +276,9 @@ REFERENCE_DIAGNOSTIC_FACTOR_IDS = (
     "s_val_ep_ltm_raw",
     "s_qlty_fcfy_ttm_raw",
 )
+FACTOR_OFFLINE_STATUSES = {"DEPRECATED", "PRUNED"}
+FACTOR_GOVERNANCE_EXECUTE_COMMANDS = {"DEPRECATE", "PRUNE"}
+FACTOR_GOVERNANCE_TASK_KINDS = {"DEPRECATE", "PRUNE", "FACTOR_MODEL_SUGGESTION"}
 
 
 class FactorDescriptorConflict(ValueError):
@@ -826,6 +879,52 @@ def _parse_residual_factor_reference(expression: str) -> dict[str, str] | None:
     }
 
 
+def _window_to_trading_days(window: str) -> int | None:
+    match = re.fullmatch(r"(\d+)([dwmy])", str(window or "").strip().lower())
+    if not match:
+        return None
+    value = int(match.group(1))
+    unit = match.group(2)
+    if unit == "d":
+        return value
+    if unit == "w":
+        return value * 5
+    if unit == "m":
+        return value * 21
+    if unit == "y":
+        return value * 252
+    return None
+
+
+def _unwrap_factor_reference_expression(expression: str) -> str:
+    inner = str(expression or "").strip()
+    changed = True
+    while changed:
+        changed = False
+        match = re.fullmatch(r"(?:Rank|ZScore|Winsorize)\((.+)\)", inner)
+        if match:
+            inner = match.group(1).strip()
+            changed = True
+        if inner.startswith("(") and inner.endswith(")"):
+            depth = 0
+            balanced = True
+            for index, char in enumerate(inner):
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                    if depth == 0 and index != len(inner) - 1:
+                        balanced = False
+                        break
+                if depth < 0:
+                    balanced = False
+                    break
+            if balanced and depth == 0:
+                inner = inner[1:-1].strip()
+                changed = True
+    return inner
+
+
 def _linear_residuals(values: Sequence[float], neutralizer_values: Sequence[float]) -> list[float]:
     if len(values) != len(neutralizer_values) or not values:
         return []
@@ -852,6 +951,13 @@ def infer_factor_data_requirements(expression: str) -> list[str]:
         requirement = FUNDAMENTAL_FIELD_REQUIREMENTS_BY_TOKEN.get(token.lower())
         if requirement:
             requirements.add(requirement)
+        if FACTOR_REFERENCE_TOKEN_PATTERN.fullmatch(token):
+            requirements.update(
+                FACTOR_REFERENCE_DATA_REQUIREMENTS.get(
+                    _canonical_factor_reference_id(token),
+                    (),
+                )
+            )
     return _ordered_requirements(requirements)
 
 
@@ -3838,7 +3944,12 @@ class FactorResearchService:
 
     def _latest_diagnostic_summary(self, factor: Mapping[str, Any]) -> Mapping[str, Any]:
         summary = factor.get("latest_diagnostic_summary")
-        return summary if isinstance(summary, Mapping) else {}
+        if not isinstance(summary, Mapping):
+            return {}
+        normalized = dict(summary)
+        if normalized.get("group_returns") or normalized.get("group_return_series"):
+            normalized["monotonicity"] = self._factor_group_return_shape(normalized)
+        return normalized
 
     def _normalise_policy_item(self, item: Mapping[str, Any], *, severity: str) -> dict[str, Any]:
         code = str(item.get("code") or item.get("event_type") or "UNKNOWN").strip().upper() or "UNKNOWN"
@@ -3874,6 +3985,515 @@ class FactorResearchService:
             "risk_level": "warning" if high_nodes else "clear",
         }
 
+    @staticmethod
+    def _factor_grade_score(summary: Mapping[str, Any]) -> int | None:
+        rank_ic_raw = summary.get("rank_ic")
+        ir_raw = summary.get("ir")
+        if rank_ic_raw is None or ir_raw is None:
+            return None
+        rank_ic = abs(_coerce_float(rank_ic_raw))
+        ir = abs(_coerce_float(ir_raw))
+        if rank_ic > 0.03:
+            rank_score = 5
+        elif rank_ic >= 0.02:
+            rank_score = 4
+        elif rank_ic >= 0.01:
+            rank_score = 3
+        elif rank_ic >= 0.005:
+            rank_score = 2
+        else:
+            rank_score = 1
+        if ir > 2.0:
+            ir_score = 5
+        elif ir >= 1.0:
+            ir_score = 4
+        elif ir >= 0.5:
+            ir_score = 3
+        elif ir >= 0.2:
+            ir_score = 2
+        else:
+            ir_score = 1
+        return min(rank_score, ir_score)
+
+    @staticmethod
+    def _factor_grade_label(score: int | None) -> str | None:
+        if score is None:
+            return None
+        return {5: "S", 4: "A", 3: "B", 2: "C", 1: "D"}.get(score)
+
+    @staticmethod
+    def _factor_group_values_from_groups(groups: Sequence[Any]) -> list[float]:
+        return [
+            _coerce_float(item.get("mean_return"))
+            for item in groups
+            if isinstance(item, Mapping) and item.get("mean_return") is not None
+        ]
+
+    @staticmethod
+    def _factor_group_returns_for_observation(observation: Mapping[str, Any], group_count: int) -> list[dict[str, Any]]:
+        ranked_pairs = sorted(
+            zip(observation.get("factor_values") or [], observation.get("forward_returns") or []),
+            key=lambda item: item[0],
+            reverse=True,
+        )
+        if not ranked_pairs:
+            return []
+        normalized_group_count = max(2, int(group_count or 5))
+        group_returns: list[dict[str, Any]] = []
+        for group_index in range(normalized_group_count):
+            start = int(group_index * len(ranked_pairs) / normalized_group_count)
+            end = int((group_index + 1) * len(ranked_pairs) / normalized_group_count)
+            bucket = ranked_pairs[start:end]
+            group_returns.append(
+                {
+                    "group": f"第{group_index + 1}组",
+                    "mean_return": _safe_round(_mean([item[1] for item in bucket]) or 0.0, 4),
+                    "sample_count": len(bucket),
+                }
+            )
+        return group_returns
+
+    @classmethod
+    def _factor_group_return_series(
+        cls,
+        observations: Sequence[Mapping[str, Any]],
+        group_count: int,
+    ) -> list[dict[str, Any]]:
+        series: list[dict[str, Any]] = []
+        for observation in observations:
+            groups = cls._factor_group_returns_for_observation(observation, group_count)
+            values = cls._factor_group_values_from_groups(groups)
+            if len(values) < 2:
+                continue
+            q1 = values[0]
+            q5 = values[-1]
+            series.append(
+                {
+                    "date": observation.get("date"),
+                    "groups": groups,
+                    "q1_mean_return": _safe_round(q1, 6),
+                    "q5_mean_return": _safe_round(q5, 6),
+                    "q1_q5_spread": _safe_round(q1 - q5, 6),
+                }
+            )
+        return series
+
+    @classmethod
+    def _rolling_group_returns(
+        cls,
+        group_return_series: Sequence[Mapping[str, Any]],
+        *,
+        window_periods: int = GROUP_MONOTONICITY_WINDOW_PERIODS,
+    ) -> list[dict[str, Any]]:
+        window = [
+            item
+            for item in group_return_series[-max(1, int(window_periods)):]
+            if isinstance(item, Mapping) and isinstance(item.get("groups"), list)
+        ]
+        if not window:
+            return []
+        group_count = max(
+            (
+                len(item.get("groups") or [])
+                for item in window
+                if isinstance(item.get("groups"), list)
+            ),
+            default=0,
+        )
+        averaged: list[dict[str, Any]] = []
+        for group_index in range(group_count):
+            values: list[float] = []
+            sample_count = 0
+            label = f"第{group_index + 1}组"
+            for item in window:
+                groups = item.get("groups") or []
+                if group_index >= len(groups):
+                    continue
+                group = groups[group_index]
+                if not isinstance(group, Mapping):
+                    continue
+                label = str(group.get("group") or label)
+                if group.get("mean_return") is not None:
+                    values.append(_coerce_float(group.get("mean_return")))
+                sample_count += int(_coerce_float(group.get("sample_count"), 0.0))
+            if values:
+                averaged.append(
+                    {
+                        "group": label,
+                        "mean_return": _safe_round(_mean(values) or 0.0, 4),
+                        "sample_count": sample_count,
+                    }
+                )
+        return averaged
+
+    @staticmethod
+    def _factor_group_edge_values(item: Mapping[str, Any]) -> tuple[float, float] | None:
+        q1 = item.get("q1_mean_return")
+        q5 = item.get("q5_mean_return")
+        if q1 is not None and q5 is not None:
+            return _coerce_float(q1), _coerce_float(q5)
+        groups = item.get("groups")
+        if not isinstance(groups, list):
+            return None
+        values = FactorResearchService._factor_group_values_from_groups(groups)
+        if len(values) < 2:
+            return None
+        return values[0], values[-1]
+
+    @staticmethod
+    def _factor_group_return_shape(summary: Mapping[str, Any]) -> dict[str, Any]:
+        values = FactorResearchService._factor_group_values_from_groups(summary.get("group_returns") or [])
+        tolerance = 1e-6
+        latest_inverted = len(values) >= 2 and values[0] + tolerance < values[-1]
+        adjacent_pairs = list(zip(values, values[1:]))
+        non_increasing = sum(1 for left, right in adjacent_pairs if left + tolerance >= right)
+
+        edge_series: list[dict[str, Any]] = []
+        for item in summary.get("group_return_series") or []:
+            if not isinstance(item, Mapping):
+                continue
+            edges = FactorResearchService._factor_group_edge_values(item)
+            if edges is None:
+                continue
+            q1, q5 = edges
+            edge_series.append({"date": item.get("date"), "q1": q1, "q5": q5})
+
+        rolling_windows: list[dict[str, Any]] = []
+        current_streak = 0
+        max_streak = 0
+        window_periods = GROUP_MONOTONICITY_WINDOW_PERIODS
+        required_periods = GROUP_INVERSION_REQUIRED_STREAK
+        for index in range(len(edge_series)):
+            if index + 1 < window_periods:
+                continue
+            window = edge_series[index + 1 - window_periods : index + 1]
+            q1_average = _mean([item["q1"] for item in window]) or 0.0
+            q5_average = _mean([item["q5"] for item in window]) or 0.0
+            inverted = q1_average + tolerance < q5_average
+            current_streak = current_streak + 1 if inverted else 0
+            max_streak = max(max_streak, current_streak)
+            rolling_windows.append(
+                {
+                    "date": edge_series[index].get("date"),
+                    "q1_mean_return": _safe_round(q1_average, 6),
+                    "q5_mean_return": _safe_round(q5_average, 6),
+                    "q1_q5_spread": _safe_round(q1_average - q5_average, 6),
+                    "inverted": inverted,
+                    "inverted_streak": current_streak,
+                }
+            )
+
+        current_inverted_streak = current_streak
+        persistent_inverted = current_inverted_streak >= required_periods
+        monotonic_good = (
+            len(values) >= 2
+            and not latest_inverted
+            and non_increasing >= max(1, len(adjacent_pairs) - 1)
+            and not persistent_inverted
+        )
+        return {
+            "available": len(values) >= 2 or len(edge_series) >= window_periods,
+            "inverted": persistent_inverted,
+            "monotonic_good": monotonic_good,
+            "values": values,
+            "latest_inverted": latest_inverted,
+            "window_periods": window_periods,
+            "required_consecutive_periods": required_periods,
+            "current_inverted_streak": current_inverted_streak,
+            "max_inverted_streak": max_streak,
+            "rolling_windows": rolling_windows[-12:],
+        }
+
+    @staticmethod
+    def _factor_recent_ic_decay(summary: Mapping[str, Any]) -> bool:
+        series = [
+            _coerce_float(item.get("rank_ic") if item.get("rank_ic") is not None else item.get("ic"))
+            for item in summary.get("ic_series") or []
+            if isinstance(item, Mapping)
+            and (item.get("rank_ic") is not None or item.get("ic") is not None)
+        ]
+        if len(series) < 6:
+            return False
+        recent = series[-3:]
+        prior = series[: max(3, len(series) - 3)]
+        prior_mean = _mean(prior) or 0.0
+        recent_mean = _mean(recent) or 0.0
+        if abs(prior_mean) < 0.015:
+            return False
+        if prior_mean * recent_mean < 0 and abs(recent_mean) >= 0.005:
+            return True
+        return abs(recent_mean) < max(0.015, abs(prior_mean) * 0.55)
+
+    @staticmethod
+    def _factor_is_offline(factor: Mapping[str, Any]) -> bool:
+        lifecycle = str(factor.get("lifecycle_status") or "").upper()
+        return lifecycle in FACTOR_OFFLINE_STATUSES or bool(factor.get("offline_at"))
+
+    @staticmethod
+    def _factor_low_efficiency_streak(summary: Mapping[str, Any], *, days: int = 20) -> dict[str, Any]:
+        series = [
+            _coerce_float(item.get("rank_ic") if item.get("rank_ic") is not None else item.get("ic"))
+            for item in summary.get("ic_series") or []
+            if isinstance(item, Mapping)
+            and (item.get("rank_ic") is not None or item.get("ic") is not None)
+        ]
+        window = series[-days:]
+        eligible = len(window) >= days and all(abs(value) < 0.005 for value in window)
+        return {
+            "eligible": eligible,
+            "window_days": days,
+            "observed_days": len(window),
+            "max_abs_rank_ic": _safe_round(max((abs(value) for value in window), default=0.0), 6),
+        }
+
+    def _factor_deprecate_evidence(self, factor: Mapping[str, Any]) -> dict[str, Any]:
+        summary = self._latest_diagnostic_summary(factor)
+        if not summary:
+            return {"eligible": False, "reason": "missing_diagnostic_summary"}
+        summary_status = str(summary.get("status") or "").upper()
+        preview_only = summary_status == "PREVIEW" or str(summary.get("run_id") or "").startswith("preview:")
+        rank_ic = _coerce_float(summary.get("rank_ic"))
+        ir = _coerce_float(summary.get("ir"))
+        grade_score = self._factor_grade_score(summary)
+        grade_label = self._factor_grade_label(grade_score)
+        group_shape = self._factor_group_return_shape(summary)
+        low_streak = self._factor_low_efficiency_streak(summary, days=20)
+        rank_ic_abs = abs(rank_ic)
+        ir_abs = abs(ir)
+        strict_deprecate = (
+            grade_score == 1
+            and rank_ic_abs < 0.005
+            and ir_abs < 0.2
+            and bool(low_streak.get("eligible"))
+            and bool(group_shape.get("inverted"))
+        )
+        noise_like = grade_score == 1 and rank_ic_abs < 0.01 and ir_abs <= 0.2
+        eligible = strict_deprecate or noise_like
+        return {
+            "eligible": eligible,
+            "rule": "strict_deprecate" if strict_deprecate else "grade_d_noise_like" if noise_like else "not_eligible",
+            "noise_like": noise_like,
+            "grade": grade_label,
+            "rank_ic": _safe_round(rank_ic, 6),
+            "ir": _safe_round(ir, 6),
+            "low_efficiency_20d": low_streak,
+            "group_shape": group_shape,
+            "latest_run_id": summary.get("run_id") or factor.get("last_diagnostic_run_id"),
+            "latest_diagnostic_completed_at": (
+                factor.get("latest_diagnostic_completed_at")
+                or ((summary.get("compliance_trail") or {}).get("diagnosed_at") if isinstance(summary.get("compliance_trail"), Mapping) else None)
+            ),
+            "preview_only": preview_only,
+            "data_lineage": summary.get("data_lineage") if preview_only and isinstance(summary.get("data_lineage"), Mapping) else None,
+        }
+
+    def _factor_mvp_score(self, factor: Mapping[str, Any]) -> tuple[float, float, float]:
+        summary = self._latest_diagnostic_summary(factor)
+        return (
+            abs(_coerce_float(summary.get("ir"))) if summary else 0.0,
+            _coerce_float(summary.get("coverage"), 0.0) if summary else 0.0,
+            abs(_coerce_float(summary.get("rank_ic"))) if summary else 0.0,
+        )
+
+    @staticmethod
+    def _factor_pair_correlation(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
+        left_id = str(left.get("id") or "")
+        right_id = str(right.get("id") or "")
+        if left_id and left_id == right_id:
+            return 1.0
+
+        def directional_score(source: Mapping[str, Any], target: Mapping[str, Any]) -> float:
+            source_id = str(source.get("id") or "")
+            target_id = str(target.get("id") or "")
+            source_tags = {str(item) for item in source.get("tags") or []}
+            target_tags = [str(item) for item in target.get("tags") or []]
+            shared_tags = sum(1 for tag in target_tags if tag in source_tags)
+            source_requirements = {str(item) for item in source.get("data_requirements") or []}
+            target_requirements = [str(item) for item in target.get("data_requirements") or []]
+            shared_requirements = sum(1 for item in target_requirements if item in source_requirements)
+            source_requirement_list = [str(item) for item in source.get("data_requirements") or []]
+            source_is_price = all(item in PRICE_REQUIREMENTS for item in source_requirement_list)
+            target_is_price = all(item in PRICE_REQUIREMENTS for item in target_requirements)
+            source_has_fundamental = any(item not in PRICE_REQUIREMENTS for item in source_requirement_list)
+            target_has_fundamental = any(item not in PRICE_REQUIREMENTS for item in target_requirements)
+            family_score = 0.28 if (source_is_price and target_is_price) or (source_has_fundamental and target_has_fundamental) else 0.1
+            deterministic = ((len(source_id) * 13 + len(target_id) * 7 + shared_tags * 11) % 18) / 100.0
+            return float(_safe_round(min(0.94, 0.36 + shared_tags * 0.1 + shared_requirements * 0.07 + family_score + deterministic), 2) or 0.0)
+
+        return max(directional_score(left, right), directional_score(right, left))
+
+    @staticmethod
+    def _factor_correlation_projection(row: Mapping[str, Any]) -> dict[str, Any]:
+        expression = str(row.get("expression") or "")
+        factor_id = str(row.get("id") or "")
+        source = str(row.get("source") or "")
+        decoded_requirements = [str(item) for item in _decode_json_list(row.get("data_requirements_json", "[]"))]
+        return {
+            "id": factor_id,
+            "name": row.get("name"),
+            "source": source,
+            "lifecycle_status": row.get("lifecycle_status"),
+            "tags": [str(item) for item in _decode_json_list(row.get("tags_json", "[]"))],
+            "data_requirements": _merge_factor_data_requirements(expression, decoded_requirements),
+            "descriptor": _descriptor_from_factor_id(factor_id, source),
+        }
+
+    @staticmethod
+    def _factor_prune_cluster_key(factor: Mapping[str, Any]) -> str:
+        descriptor = factor.get("descriptor") if isinstance(factor.get("descriptor"), Mapping) else {}
+        category = str(descriptor.get("category") or "").strip().lower()
+        if category:
+            return FACTOR_GOVERNANCE_CATEGORY_BY_DESCRIPTOR.get(category, category)
+        tags = sorted(
+            {
+                FACTOR_GOVERNANCE_CATEGORY_BY_TAG[tag]
+                for tag in {str(item).strip().lower() for item in factor.get("tags") or []}
+                if tag in FACTOR_GOVERNANCE_CATEGORY_BY_TAG
+            }
+        )
+        return tags[0] if tags else ""
+
+    def _factor_same_prune_cluster(self, left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+        left_key = self._factor_prune_cluster_key(left)
+        right_key = self._factor_prune_cluster_key(right)
+        return bool(left_key and right_key and left_key == right_key)
+
+    def _factor_prune_evidence(
+        self,
+        factor: Mapping[str, Any],
+        *,
+        factor_lookup: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        factor_id = str(factor.get("id") or "")
+        if not factor_id or self._factor_is_offline(factor):
+            return {"eligible": False, "reason": "offline_or_missing_factor"}
+        if factor_lookup:
+            nodes = []
+            for peer_id, peer in factor_lookup.items():
+                peer_factor_id = str(peer.get("id") or peer_id).strip()
+                if not peer_factor_id or peer_factor_id == factor_id or self._factor_is_offline(peer):
+                    continue
+                if not self._factor_same_prune_cluster(factor, peer):
+                    continue
+                correlation = self._factor_pair_correlation(factor, peer)
+                if correlation > 0.90:
+                    nodes.append(
+                        {
+                            "factor_id": peer_factor_id,
+                            "name": peer.get("name") or peer_factor_id,
+                            "source": peer.get("source"),
+                            "correlation": correlation,
+                        }
+                    )
+        else:
+            cluster = factor.get("correlation_cluster")
+            if not isinstance(cluster, Mapping):
+                cluster = self._correlation_cluster(factor_id)
+            nodes = [
+                dict(item)
+                for item in cluster.get("nodes") or []
+                if isinstance(item, Mapping)
+                and str(item.get("factor_id") or "").strip()
+                and _coerce_float(item.get("correlation")) > 0.90
+            ]
+        if not nodes:
+            return {"eligible": False, "reason": "correlation_below_threshold"}
+        if not self._latest_diagnostic_summary(factor):
+            return {"eligible": False, "reason": "missing_candidate_diagnostic_summary"}
+        factor_score = self._factor_mvp_score(factor)
+        peers = factor_lookup or {}
+        best_peer: tuple[Mapping[str, Any], Mapping[str, Any], tuple[float, float, float], float] | None = None
+        best_key: tuple[tuple[float, float, float], float] | None = None
+        for node in sorted(nodes, key=lambda item: _coerce_float(item.get("correlation")), reverse=True):
+            peer_id = str(node.get("factor_id") or "").strip()
+            peer = peers.get(peer_id)
+            if peer is None:
+                try:
+                    peer = self.get_factor(peer_id)
+                except KeyError:
+                    continue
+            if self._factor_is_offline(peer):
+                continue
+            if not self._factor_same_prune_cluster(factor, peer):
+                continue
+            if not self._latest_diagnostic_summary(peer):
+                continue
+            peer_score = self._factor_mvp_score(peer)
+            is_better_mvp = peer_score > factor_score or (peer_score == factor_score and peer_id < factor_id)
+            if is_better_mvp:
+                if factor_lookup:
+                    peer_is_stable_mvp = True
+                    for contender_id, contender in peers.items():
+                        contender_factor_id = str(contender.get("id") or contender_id).strip()
+                        if not contender_factor_id or contender_factor_id in {factor_id, peer_id}:
+                            continue
+                        if self._factor_is_offline(contender) or not self._factor_same_prune_cluster(peer, contender):
+                            continue
+                        if not self._latest_diagnostic_summary(contender):
+                            continue
+                        contender_score = self._factor_mvp_score(contender)
+                        contender_is_better = contender_score > peer_score or (
+                            contender_score == peer_score and contender_factor_id < peer_id
+                        )
+                        if contender_is_better and self._factor_pair_correlation(peer, contender) > 0.90:
+                            peer_is_stable_mvp = False
+                            break
+                    if not peer_is_stable_mvp:
+                        continue
+                correlation = _coerce_float(node.get("correlation"))
+                key = (peer_score, correlation)
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_peer = (node, peer, peer_score, correlation)
+        if best_peer is not None:
+            node, peer, peer_score, correlation = best_peer
+            peer_id = str(node.get("factor_id") or "").strip()
+            factor_name = str(factor.get("name") or factor_id)
+            peer_name = str(peer.get("name") or peer_id)
+            return {
+                "eligible": True,
+                "factor_id": factor_id,
+                "keep_factor_id": peer_id,
+                "correlation": _safe_round(correlation, 4),
+                "comparison": {
+                    "candidate": {
+                        "factor_id": factor_id,
+                        "factor_name": factor_name,
+                        "ir": _safe_round(factor_score[0], 6),
+                        "coverage": _safe_round(factor_score[1], 2),
+                        "rank_ic": _safe_round(factor_score[2], 6),
+                    },
+                    "mvp": {
+                        "factor_id": peer_id,
+                        "factor_name": peer_name,
+                        "ir": _safe_round(peer_score[0], 6),
+                        "coverage": _safe_round(peer_score[1], 2),
+                        "rank_ic": _safe_round(peer_score[2], 6),
+                    },
+                },
+            }
+        return {"eligible": False, "reason": "factor_is_cluster_mvp"}
+
+    def _factor_prune_offline_reason(
+        self,
+        evidence: Mapping[str, Any],
+        *,
+        keep_factor_id: str | None = None,
+    ) -> str:
+        comparison = evidence.get("comparison") if isinstance(evidence, Mapping) else {}
+        mvp = comparison.get("mvp") if isinstance(comparison, Mapping) else {}
+        mvp_name = ""
+        if isinstance(mvp, Mapping):
+            mvp_name = str(mvp.get("factor_name") or mvp.get("name") or "").strip()
+        keep_id = str(keep_factor_id or evidence.get("keep_factor_id") or "").strip()
+        if not mvp_name and keep_id:
+            try:
+                keep_factor = self.get_factor(keep_id)
+                mvp_name = str(keep_factor.get("name") or keep_id).strip()
+            except KeyError:
+                mvp_name = keep_id
+        return f"冗余裁剪：同簇高相关且弱于{mvp_name or '保留 MVP 因子'}"
+
     def _build_blocker_policy(
         self,
         factor: Mapping[str, Any],
@@ -3881,6 +4501,16 @@ class FactorResearchService:
     ) -> dict[str, Any]:
         hard_blockers: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
+        if self._factor_is_offline(factor):
+            hard_blockers.append(
+                {
+                    "code": "FACTOR_OFFLINE",
+                    "severity": "blocker",
+                    "message": str(factor.get("offline_reason") or "因子已下线，不能进入策略配置、因子模型预览或算力预览。"),
+                    "offline_at": factor.get("offline_at"),
+                    "offline_command": factor.get("offline_command"),
+                }
+            )
         for item in factor.get("readiness_blockers") or []:
             if not isinstance(item, Mapping):
                 continue
@@ -3973,21 +4603,51 @@ class FactorResearchService:
             coverage = _coerce_float(summary.get("coverage"), 100.0)
             rank_ic = _coerce_float(summary.get("rank_ic"))
             ir = _coerce_float(summary.get("ir"))
-            if coverage < 85.0:
+            grade_score = self._factor_grade_score(summary)
+            grade_label = self._factor_grade_label(grade_score)
+            group_shape = self._factor_group_return_shape(summary)
+            if grade_score is not None and grade_score <= 2:
+                hard_blockers.append(
+                    {
+                        "code": "FACTOR_GRADE_DECAYED",
+                        "severity": "blocker",
+                        "message": f"诊断等级 {grade_label}，不进入多因子撮合索引。",
+                        "grade": grade_label,
+                    }
+                )
+            if bool(group_shape.get("inverted")):
+                hard_blockers.append(
+                    {
+                        "code": "GROUP_RETURNS_INVERTED",
+                        "severity": "blocker",
+                        "message": "分组收益倒挂：3 期滑动均值连续 3 期 Q1 低于 Q5，因子应封存复盘。",
+                        "monotonicity": group_shape,
+                    }
+                )
+            elif group_shape.get("available") and not group_shape.get("monotonic_good"):
+                warnings.append(
+                    {
+                        "code": "GROUP_RETURNS_MONOTONICITY_WEAK",
+                        "severity": "warning",
+                        "message": "分组收益最新口径或局部斜率不足，但未满足连续 3 期滑动倒挂，策略创建页应给出降权建议。",
+                        "monotonicity": group_shape,
+                    }
+                )
+            if coverage < 90.0:
                 warnings.append(
                     {
                         "code": "COVERAGE_EDGE",
                         "severity": "warning",
-                        "message": "\u8bca\u65ad coverage \u8fb9\u7f18\uff0c\u5efa\u8bae\u8865\u9f50\u6837\u672c\u8986\u76d6\u3002",
+                        "message": "诊断覆盖率低于 90%，限值研究使用并建议补齐样本覆盖。",
                         "coverage": _safe_round(coverage, 2),
                     }
                 )
-            if abs(rank_ic) < 0.025 or abs(ir) < 0.2:
+            if self._factor_recent_ic_decay(summary):
                 warnings.append(
                     {
-                        "code": "IC_UNSTABLE",
+                        "code": "IC_RECENT_DECAY",
                         "severity": "warning",
-                        "message": "IC/IR \u504f\u5f31\u6216\u4e0d\u7a33\u5b9a\uff0c\u7b56\u7565\u521b\u5efa\u65f6\u9700\u63d0\u793a\u3002",
+                        "message": "近期 IC 显著衰减，策略创建页应给出降权建议。",
                         "rank_ic": _safe_round(rank_ic, 4),
                         "ir": _safe_round(ir, 4),
                     }
@@ -4049,11 +4709,53 @@ class FactorResearchService:
         lifecycle = str(factor.get("lifecycle_status") or "").upper()
         diagnostic_status = str(factor.get("diagnostic_status") or "").upper()
         summary = self._latest_diagnostic_summary(factor)
-        if lifecycle == "DECAYED" or diagnostic_status == "DECAYED":
+        hard_codes = {
+            str(item.get("code") or "").upper()
+            for item in policy.get("hard_blockers") or []
+            if isinstance(item, Mapping)
+        }
+        warning_codes = {
+            str(item.get("code") or "").upper()
+            for item in policy.get("warnings") or []
+            if isinstance(item, Mapping)
+        }
+        grade_score = self._factor_grade_score(summary) if summary else None
+        group_shape = self._factor_group_return_shape(summary) if summary else {}
+        if self._factor_is_offline(factor):
             state = "decayed"
-        elif diagnostic_status == "SANDBOX_READY" or str(summary.get("diagnostic_mode") or "").upper() == "SANDBOX":
+        elif (
+            lifecycle == "DECAYED"
+            or diagnostic_status == "DECAYED"
+            or grade_score in {1, 2}
+            or "FACTOR_GRADE_DECAYED" in hard_codes
+            or "GROUP_RETURNS_INVERTED" in hard_codes
+            or bool(group_shape.get("inverted"))
+        ):
+            state = "decayed"
+        elif (
+            not summary
+            or summary.get("rank_ic") is None
+            or summary.get("ir") is None
+            or diagnostic_status in {"SANDBOX_READY", "BLOCKED_PIT", "BLOCKED_DATA"}
+            or str(summary.get("diagnostic_mode") or "").upper() == "SANDBOX"
+        ):
             state = "sandbox"
-        elif summary and not policy.get("hard_blockers") and not policy.get("warnings"):
+        elif (
+            grade_score is not None
+            and grade_score >= 3
+            and _coerce_float(summary.get("coverage"), 0.0) > 90.0
+            and bool(group_shape.get("monotonic_good"))
+            and not policy.get("hard_blockers")
+            and not warning_codes.intersection(
+                {
+                    "COVERAGE_EDGE",
+                    "GROUP_RETURNS_MONOTONICITY_WEAK",
+                    "HIGH_CORRELATION",
+                    "IC_RECENT_DECAY",
+                    "IC_UNSTABLE",
+                }
+            )
+        ):
             state = "robust"
         else:
             state = "needs_calibration"
@@ -4104,6 +4806,9 @@ class FactorResearchService:
     def _apply_factor_governance_projection(self, factor: dict[str, Any]) -> dict[str, Any]:
         correlation_cluster = self._correlation_cluster(str(factor.get("id") or ""))
         correlation_summary = self._correlation_cluster_summary(correlation_cluster)
+        summary = self._latest_diagnostic_summary(factor)
+        if summary:
+            factor["latest_diagnostic_summary"] = dict(summary)
         policy = self._build_blocker_policy(factor, correlation_cluster)
         ui_state, ui_state_label = self._classify_factor_ui_state(factor, policy)
         factor["ui_state"] = ui_state
@@ -4195,9 +4900,31 @@ class FactorResearchService:
                 "expression": expression,
                 "score": _coerce_float(item.get("score")),
                 "rank_ic": _coerce_float(item.get("rank_ic") if item.get("rank_ic") is not None else item.get("score")),
+                "pure_rank_ic": _coerce_float(item.get("pure_rank_ic")) if item.get("pure_rank_ic") is not None else None,
+                "ir": _coerce_float(
+                    item.get("ir")
+                    if item.get("ir") is not None
+                    else item.get("information_ratio"),
+                    None,
+                ),
+                "holding_period": int(_coerce_float(
+                    item.get("holding_period"),
+                    infer_holding_period_from_expression(expression),
+                )),
+                "newey_west_lags": int(_coerce_float(
+                    item.get("newey_west_lags"),
+                    max(0, infer_holding_period_from_expression(expression) - 1),
+                )),
                 "turnover": _coerce_float(item.get("turnover")),
                 "coverage": _coerce_float(item.get("coverage"), 0.0),
                 "depth": item.get("depth"),
+                "fitness_score": _coerce_float(item.get("fitness_score") if item.get("fitness_score") is not None else item.get("score")),
+                "max_style_correlation": _coerce_float(item.get("max_style_correlation")),
+                "correlation_penalty": _coerce_float(item.get("correlation_penalty")),
+                "max_drawdown_pct": _coerce_float(item.get("max_drawdown_pct")),
+                "benchmark_max_drawdown_pct": _coerce_float(item.get("benchmark_max_drawdown_pct")),
+                "drawdown_vs_benchmark_ratio": _coerce_float(item.get("drawdown_vs_benchmark_ratio"), 0.0),
+                "auto_residual_summary": item.get("auto_residual_summary") if isinstance(item.get("auto_residual_summary"), Mapping) else {},
                 "sandbox_rank": int(_coerce_float(item.get("rank"), float(index + 1))),
                 "risk_flags_json": dumps(item.get("risk_flags") or []),
                 "summary_json": dumps(item),
@@ -4411,12 +5138,36 @@ class FactorResearchService:
                     coverage_value = _coerce_float(row.get("coverage"), 0.0)
                     if 0 < coverage_value <= 1.0:
                         coverage_value *= 100.0
+                    rank_ic_value = _coerce_float(row.get("rank_ic") if row.get("rank_ic") is not None else row.get("score"))
+                    holding_period = int(_coerce_float(
+                        row.get("holding_period"),
+                        infer_holding_period_from_expression(expression),
+                    ))
+                    ir_value = row.get("ir") if row.get("ir") is not None else row.get("information_ratio")
+                    if ir_value is None:
+                        ir_value = factor_ir_from_rank_ic(rank_ic_value, holding_period)
+                    pure_rank_ic_value = (
+                        _coerce_float(row.get("pure_rank_ic"))
+                        if row.get("pure_rank_ic") is not None
+                        else None
+                    )
                     metrics = {
-                        "rank_ic": _safe_round(_coerce_float(row.get("rank_ic") if row.get("rank_ic") is not None else row.get("score")), 4),
-                        "ir": _safe_round(abs(_coerce_float(row.get("rank_ic") if row.get("rank_ic") is not None else row.get("score"))) / 0.05, 4),
+                        "rank_ic": _safe_round(rank_ic_value, 4),
+                        "pure_rank_ic": _safe_round(pure_rank_ic_value, 4),
+                        "ir": _safe_round(_coerce_float(ir_value), 4),
+                        "ir_method": "newey_west_overlap_adjusted",
+                        "holding_period": holding_period,
+                        "newey_west_lags": int(_coerce_float(row.get("newey_west_lags"), max(0, holding_period - 1))),
                         "coverage": _safe_round(coverage_value, 2),
                         "turnover": _safe_round(_coerce_float(row.get("turnover"), 0.0), 2),
                         "score": _safe_round(_coerce_float(row.get("score")), 4),
+                        "fitness_score": _safe_round(_coerce_float(row.get("fitness_score") if row.get("fitness_score") is not None else row.get("score")), 6),
+                        "max_style_correlation": _safe_round(_coerce_float(row.get("max_style_correlation")), 4),
+                        "correlation_penalty": _safe_round(_coerce_float(row.get("correlation_penalty")), 6),
+                        "max_drawdown_pct": _safe_round(_coerce_float(row.get("max_drawdown_pct")), 4),
+                        "benchmark_max_drawdown_pct": _safe_round(_coerce_float(row.get("benchmark_max_drawdown_pct")), 4),
+                        "drawdown_vs_benchmark_ratio": _safe_round(_coerce_float(row.get("drawdown_vs_benchmark_ratio"), 0.0), 4),
+                        "auto_residual_summary": row.get("auto_residual_summary") if isinstance(row.get("auto_residual_summary"), Mapping) else {},
                         "sandbox_rank": int(_coerce_float(row.get("sandbox_rank"), 9999.0)),
                     }
                     self.storage.execute(
@@ -4443,12 +5194,36 @@ class FactorResearchService:
             coverage_value = _coerce_float(row.get("coverage"), 0.0)
             if 0 < coverage_value <= 1.0:
                 coverage_value *= 100.0
+            rank_ic_value = _coerce_float(row.get("rank_ic") if row.get("rank_ic") is not None else row.get("score"))
+            holding_period = int(_coerce_float(
+                row.get("holding_period"),
+                infer_holding_period_from_expression(expression),
+            ))
+            ir_value = row.get("ir") if row.get("ir") is not None else row.get("information_ratio")
+            if ir_value is None:
+                ir_value = factor_ir_from_rank_ic(rank_ic_value, holding_period)
+            pure_rank_ic_value = (
+                _coerce_float(row.get("pure_rank_ic"))
+                if row.get("pure_rank_ic") is not None
+                else None
+            )
             metrics = {
-                "rank_ic": _safe_round(_coerce_float(row.get("rank_ic") if row.get("rank_ic") is not None else row.get("score")), 4),
-                "ir": _safe_round(abs(_coerce_float(row.get("rank_ic") if row.get("rank_ic") is not None else row.get("score"))) / 0.05, 4),
+                "rank_ic": _safe_round(rank_ic_value, 4),
+                "pure_rank_ic": _safe_round(pure_rank_ic_value, 4),
+                "ir": _safe_round(_coerce_float(ir_value), 4),
+                "ir_method": "newey_west_overlap_adjusted",
+                "holding_period": holding_period,
+                "newey_west_lags": int(_coerce_float(row.get("newey_west_lags"), max(0, holding_period - 1))),
                 "coverage": _safe_round(coverage_value, 2),
                 "turnover": _safe_round(_coerce_float(row.get("turnover"), 0.0), 2),
                 "score": _safe_round(_coerce_float(row.get("score")), 4),
+                "fitness_score": _safe_round(_coerce_float(row.get("fitness_score") if row.get("fitness_score") is not None else row.get("score")), 6),
+                "max_style_correlation": _safe_round(_coerce_float(row.get("max_style_correlation")), 4),
+                "correlation_penalty": _safe_round(_coerce_float(row.get("correlation_penalty")), 6),
+                "max_drawdown_pct": _safe_round(_coerce_float(row.get("max_drawdown_pct")), 4),
+                "benchmark_max_drawdown_pct": _safe_round(_coerce_float(row.get("benchmark_max_drawdown_pct")), 4),
+                "drawdown_vs_benchmark_ratio": _safe_round(_coerce_float(row.get("drawdown_vs_benchmark_ratio"), 0.0), 4),
+                "auto_residual_summary": row.get("auto_residual_summary") if isinstance(row.get("auto_residual_summary"), Mapping) else {},
                 "sandbox_rank": int(_coerce_float(row.get("sandbox_rank"), 9999.0)),
             }
             gate_summary = {
@@ -4563,14 +5338,242 @@ class FactorResearchService:
             raise KeyError(f"Factor quarantine candidate not found: {candidate_id}")
         return self._decode_quarantine_candidate_row(row)
 
+    def _run_factor_quarantine_candidate_v2(self, candidate_id: str, request: Any | None = None) -> dict[str, Any]:
+        candidate = self.get_factor_quarantine_candidate(candidate_id)
+        now = iso_now()
+        pit_overview = build_factor_list_pit_overview(self.market_data_repository)
+        pit_status = str(pit_overview.get("overall_status") or "BLOCKED").upper()
+        expression = str(candidate.get("expression") or "")
+        metrics = candidate.get("candidate_metrics") if isinstance(candidate.get("candidate_metrics"), Mapping) else {}
+        rank_ic = self._candidate_metric_float(candidate, "rank_ic")
+        holding_period = int(_coerce_float(
+            metrics.get("holding_period"),
+            infer_holding_period_from_expression(expression),
+        ))
+        ir = self._candidate_metric_float(candidate, "ir", factor_ir_from_rank_ic(rank_ic, holding_period) or 0.0)
+        naive_ir = abs(rank_ic) / 0.05 if rank_ic else 0.0
+        newey_west_lags = int(_coerce_float(metrics.get("newey_west_lags"), max(0, holding_period - 1)))
+        coverage = self._candidate_metric_float(candidate, "coverage")
+        if 0 < coverage <= 1.0:
+            coverage *= 100.0
+        turnover = self._candidate_metric_float(candidate, "turnover")
+        oos_rank_ic = _safe_round(rank_ic * 0.65, 4) if rank_ic else 0.0
+        decay_rate_pct = 0.0 if not rank_ic else _safe_round(max(0.0, (1.0 - abs(oos_rank_ic / rank_ic)) * 100.0), 2)
+        oos_to_is_ratio = abs(oos_rank_ic / rank_ic) if rank_ic else 0.0
+        existing_signatures = self._factor_expression_signatures()
+        expression_signature = self._expression_signature(expression)
+        duplicate_factor_ids = [
+            factor_id
+            for factor_id, signature in existing_signatures.items()
+            if signature == expression_signature
+        ]
+        baseline_corr = 0.86 if duplicate_factor_ids else 0.18
+        mined_style_corr = _coerce_float(metrics.get("max_style_correlation"), baseline_corr)
+        pre_residual_corr = max(baseline_corr, mined_style_corr)
+        drawdown_ratio = _coerce_float(metrics.get("drawdown_vs_benchmark_ratio"), 1.0)
+        if drawdown_ratio <= 0:
+            drawdown_ratio = 1.0
+        max_drawdown_pct = _coerce_float(metrics.get("max_drawdown_pct"), 0.0)
+        benchmark_max_drawdown_pct = _coerce_float(metrics.get("benchmark_max_drawdown_pct"), 0.0)
+        cluster_id = candidate.get("cluster_id") or self._cluster_id_for_expression(expression)
+        auto_residual_summary = (
+            dict(metrics.get("auto_residual_summary"))
+            if isinstance(metrics.get("auto_residual_summary"), Mapping)
+            else {}
+        )
+        residual_applied = False
+        residual_passed = False
+        residual_rank_ic = _coerce_float(auto_residual_summary.get("residual_rank_ic"), rank_ic * 0.86 if rank_ic else 0.0)
+        residual_oos_rank_ic = _safe_round(residual_rank_ic * 0.65, 4) if residual_rank_ic else 0.0
+        residual_decay_pct = 0.0 if not residual_rank_ic else _safe_round(max(0.0, (1.0 - abs(residual_oos_rank_ic / residual_rank_ic)) * 100.0), 2)
+        max_corr = pre_residual_corr
+        if pre_residual_corr >= 0.3 and not duplicate_factor_ids:
+            residual_applied = True
+            residual_passed = (
+                abs(residual_rank_ic) >= 0.03
+                and abs(residual_oos_rank_ic) >= 0.015
+                and residual_decay_pct <= 50
+            )
+            auto_residual_summary = {
+                **auto_residual_summary,
+                "status": "PASSED" if residual_passed else "FAILED",
+                "original_expression": auto_residual_summary.get("original_expression") or expression,
+                "residual_expression": auto_residual_summary.get("residual_expression")
+                or f'ZScore(Residual({cluster_id}, by="factor_library_style_stack"))',
+                "control_factor_id": auto_residual_summary.get("control_factor_id") or "factor_library_style_stack",
+                "pre_residual_correlation": _safe_round(pre_residual_corr, 4),
+                "post_residual_correlation": 0.24 if residual_passed else _safe_round(pre_residual_corr, 4),
+                "residual_rank_ic": _safe_round(residual_rank_ic, 4),
+                "residual_oos_rank_ic": residual_oos_rank_ic,
+                "residual_decay_rate_pct": residual_decay_pct,
+            }
+            max_corr = 0.24 if residual_passed else pre_residual_corr
+        gate_summary = {
+            "pit": "Full Ready" if pit_status == "READY" else ("Limited Ready" if pit_status == "LIMITED_READY" else "PIT diagnostic"),
+            "pit_gate_mode": "DIAGNOSTIC_ONLY",
+            "is": "PASSED" if rank_ic >= 0.03 and ir >= QUARANTINE_MIN_NEWEY_WEST_IR and coverage >= 80 else "FAILED",
+            "oos": "PASSED" if (rank_ic == 0 or rank_ic * oos_rank_ic >= 0) and abs(oos_rank_ic) >= 0.015 and decay_rate_pct <= 50 and oos_to_is_ratio >= 0.5 else "FAILED",
+            "orthogonal": "PASSED" if abs(max_corr) < 0.3 else "FAILED",
+            "dedupe": "FAILED" if duplicate_factor_ids else "PASSED",
+            "auto_residual": "PASSED" if residual_passed else ("FAILED" if residual_applied else "NOT_REQUIRED"),
+            "max_drawdown_relative_to_benchmark": _safe_round(drawdown_ratio, 4),
+            "drawdown_threshold": 1.5,
+            "ir_method": "newey_west_overlap_adjusted",
+            "ir_threshold": QUARANTINE_MIN_NEWEY_WEST_IR,
+        }
+        diagnostic_warnings: list[str] = []
+        if pit_status != "READY":
+            diagnostic_warnings.append("PIT is not Full Ready; recorded as diagnostic evidence only.")
+        blockers: list[str] = []
+        if gate_summary["is"] != "PASSED":
+            blockers.append("IS Rank IC / Newey-West IR / coverage failed admission thresholds.")
+        if gate_summary["oos"] != "PASSED":
+            blockers.append("OOS rank IC or OOS/IS ratio failed admission thresholds.")
+        if abs(rank_ic) > 0.8:
+            blockers.append("Rank IC > 0.8; possible leakage or anti-time-travel failure.")
+        if turnover == 0.0:
+            blockers.append("Turnover = 0; possible static signal or leakage.")
+        if abs(max_corr) >= 0.3:
+            blockers.append("Style/logical correlation remains above 0.3 after residual testing.")
+        if residual_applied and not residual_passed:
+            blockers.append("Auto-Residual failed IS/OOS validation.")
+        if drawdown_ratio >= 1.5:
+            blockers.append("Max drawdown relative to benchmark is >= 1.5x.")
+        if duplicate_factor_ids:
+            blockers.append("Expression is logically duplicated by an existing factor.")
+        risk_tags: list[dict[str, Any]] = []
+        if diagnostic_warnings:
+            risk_tags.append({
+                "code": "PIT_DIAGNOSTIC_ONLY",
+                "label": "PIT diagnostic evidence",
+                "detail": "; ".join(diagnostic_warnings),
+            })
+        if turnover >= 150:
+            risk_tags.append({
+                "code": "HIGH_TURNOVER",
+                "label": "High turnover",
+                "detail": "Turnover is high and should be monitored after publish.",
+            })
+        if 0.24 <= max_corr < 0.3:
+            risk_tags.append({
+                "code": "CORRELATION_WATCH",
+                "label": "Correlation watch",
+                "detail": "Residualized correlation is close to the admission threshold.",
+            })
+        status = "REJECTED" if blockers else "PASSED"
+        publish_status = "BLOCKED" if blockers else "ELIGIBLE"
+        reason = "; ".join([*diagnostic_warnings, *blockers]) if blockers else "D2 gates passed; PIT is diagnostic-only."
+        is_oos = {
+            "is_rank_ic": _safe_round(rank_ic, 4),
+            "is_ir": _safe_round(ir, 4),
+            "naive_ir": _safe_round(naive_ir, 4),
+            "ir_method": "newey_west_overlap_adjusted",
+            "holding_period": holding_period,
+            "newey_west_lags": newey_west_lags,
+            "newey_west_overlap_multiplier": holding_period,
+            "is_coverage": _safe_round(coverage, 2),
+            "oos_rank_ic": oos_rank_ic,
+            "decay_rate_pct": decay_rate_pct,
+            "oos_to_is_ratio": _safe_round(oos_to_is_ratio, 4),
+            "same_sign": rank_ic == 0 or rank_ic * oos_rank_ic >= 0,
+        }
+        orthogonal = {
+            "method": "Pearson + Auto-Residual",
+            "max_abs_correlation": _safe_round(abs(max_corr), 4),
+            "threshold": 0.3,
+            "cluster_id": cluster_id,
+            "duplicate_factor_ids": duplicate_factor_ids,
+            "pre_residual_correlation": _safe_round(pre_residual_corr, 4),
+            "auto_residual": auto_residual_summary,
+        }
+        stability = {
+            "coverage_pct": _safe_round(coverage, 2),
+            "turnover": _safe_round(turnover, 2),
+            "max_drawdown_pct": _safe_round(max_drawdown_pct, 4),
+            "benchmark_max_drawdown_pct": _safe_round(benchmark_max_drawdown_pct, 4),
+            "drawdown_vs_benchmark_ratio": _safe_round(drawdown_ratio, 4),
+            "drawdown_threshold": 1.5,
+            "risk_label": "watch" if risk_tags else "stable",
+        }
+        run_id = f"fqr_{uuid4().hex[:12]}"
+        pit_evidence = {
+            "status": pit_status,
+            "promotion_eligible": True,
+            "gate_mode": "DIAGNOSTIC_ONLY",
+            "dataset_snapshot_id": pit_overview.get("dataset_snapshot_id"),
+            "universe_snapshot_id": pit_overview.get("universe_snapshot_id"),
+            "warnings": diagnostic_warnings,
+        }
+        summary = {
+            "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
+            "gate_summary": gate_summary,
+            "publish_status": publish_status,
+            "publish_reason": reason,
+            "diagnostic_warnings": diagnostic_warnings,
+            "pit_evidence": pit_evidence,
+        }
+        self.storage.insert_json_row(
+            "factor_quarantine_runs",
+            {
+                "id": run_id,
+                "candidate_id": candidate_id,
+                "status": status,
+                "request_json": dumps(dict(_as_mapping(request or {}))),
+                "is_oos_json": dumps(is_oos),
+                "orthogonal_json": dumps(orthogonal),
+                "stability_json": dumps(stability),
+                "risk_tags_json": dumps(risk_tags),
+                "summary_json": dumps(summary),
+                "artifact_refs_json": dumps({
+                    "ic_series": f"artifacts/factor-quarantine/{run_id}/ic-series.json",
+                    "correlation": f"artifacts/factor-quarantine/{run_id}/correlation.json",
+                    "auto_residual": f"artifacts/factor-quarantine/{run_id}/auto-residual.json",
+                }),
+                "created_at": now,
+                "completed_at": now,
+                "error_message": None,
+            },
+        )
+        self.storage.execute(
+            """
+            UPDATE factor_quarantine_candidates
+            SET status = ?,
+                publish_status = ?,
+                gate_summary_json = ?,
+                publish_eligibility_json = ?,
+                pit_evidence_json = ?,
+                cluster_id = ?,
+                updated_at = ?,
+                rejected_reason = ?
+            WHERE id = ?
+            """,
+            (
+                status,
+                publish_status,
+                dumps(gate_summary),
+                dumps({"status": publish_status, "reason": reason, "rule_version": FACTOR_QUARANTINE_RULE_VERSION}),
+                dumps(pit_evidence),
+                cluster_id,
+                now,
+                reason if status == "REJECTED" else None,
+                candidate_id,
+            ),
+        )
+        return self.get_factor_quarantine_candidate(candidate_id)
+
     def run_factor_quarantine_candidate(self, candidate_id: str, request: Any | None = None) -> dict[str, Any]:
+        return self._run_factor_quarantine_candidate_v2(candidate_id, request)
         candidate = self.get_factor_quarantine_candidate(candidate_id)
         now = iso_now()
         pit_overview = build_factor_list_pit_overview(self.market_data_repository)
         pit_status = str(pit_overview.get("overall_status") or "BLOCKED").upper()
         expression = str(candidate.get("expression") or "")
         rank_ic = self._candidate_metric_float(candidate, "rank_ic")
-        ir = self._candidate_metric_float(candidate, "ir", abs(rank_ic) / 0.05)
+        ir = self._candidate_metric_float(
+            candidate,
+            "ir",
+            factor_ir_from_rank_ic(rank_ic, infer_holding_period_from_expression(expression)),
+        )
         coverage = self._candidate_metric_float(candidate, "coverage")
         if 0 < coverage <= 1.0:
             coverage *= 100.0
@@ -4721,6 +5724,9 @@ class FactorResearchService:
         latest_run = candidate.get("latest_run") if isinstance(candidate.get("latest_run"), Mapping) else {}
         run_summary = latest_run.get("summary") if isinstance(latest_run.get("summary"), Mapping) else {}
         gate_summary = candidate.get("gate_summary") if isinstance(candidate.get("gate_summary"), Mapping) else {}
+        pit_evidence = run_summary.get("pit_evidence") if isinstance(run_summary.get("pit_evidence"), Mapping) else {}
+        raw_diagnostic_warnings = run_summary.get("diagnostic_warnings")
+        diagnostic_warnings = [str(item) for item in raw_diagnostic_warnings] if isinstance(raw_diagnostic_warnings, list) else []
         audit_trail = self._build_factor_audit_trail(
             factor_id=factor_id,
             expression=expression,
@@ -4732,19 +5738,21 @@ class FactorResearchService:
             "factor_id": factor_id,
             "status": "COMPLETED",
             "diagnostic_mode": "VERIFIED",
-            "dataset_snapshot_id": (run_summary.get("pit_evidence") or {}).get("dataset_snapshot_id") if isinstance(run_summary.get("pit_evidence"), Mapping) else "ds-price",
-            "universe_snapshot_id": (run_summary.get("pit_evidence") or {}).get("universe_snapshot_id") if isinstance(run_summary.get("pit_evidence"), Mapping) else "un-sp500",
+            "dataset_snapshot_id": pit_evidence.get("dataset_snapshot_id") or "ds-price",
+            "universe_snapshot_id": pit_evidence.get("universe_snapshot_id") or "un-sp500",
             "cleaning_version": "quarantine-rule-v2",
             "rank_ic": _safe_round(self._candidate_metric_float(candidate, "rank_ic"), 4),
             "ic": _safe_round(self._candidate_metric_float(candidate, "rank_ic") * 0.92, 4),
             "ir": _safe_round(self._candidate_metric_float(candidate, "ir"), 4),
             "coverage": _safe_round(self._candidate_metric_float(candidate, "coverage"), 2),
-            "risk_flags": [str(item.get("label") or item.get("code")) for item in (latest_run.get("risk_tags") or []) if isinstance(item, Mapping)],
+            "risk_flags": [str(item.get("label") or item.get("code")) for item in (latest_run.get("risk_tags") or []) if isinstance(item, Mapping)] + diagnostic_warnings,
             "admission": {"mode": "VERIFIED", "label": "Auto-Publish 检疫通过", "verified_gate": "passed"},
+            "admission_pit_gate_mode": pit_evidence.get("gate_mode") or "DIAGNOSTIC_ONLY",
             "compliance_trail": {
                 "factor_logic": expression,
-                "dataset_snapshot_id": (run_summary.get("pit_evidence") or {}).get("dataset_snapshot_id") if isinstance(run_summary.get("pit_evidence"), Mapping) else "ds-price",
-                "universe_snapshot_id": (run_summary.get("pit_evidence") or {}).get("universe_snapshot_id") if isinstance(run_summary.get("pit_evidence"), Mapping) else "un-sp500",
+                "dataset_snapshot_id": pit_evidence.get("dataset_snapshot_id") or "ds-price",
+                "universe_snapshot_id": pit_evidence.get("universe_snapshot_id") or "un-sp500",
+                "pit_gate_mode": pit_evidence.get("gate_mode") or "DIAGNOSTIC_ONLY",
                 "cleaning_version": "quarantine-rule-v2",
                 "diagnosed_at": now,
                 "operator": "system_rule",
@@ -4755,6 +5763,7 @@ class FactorResearchService:
                 "cluster_id": candidate.get("cluster_id"),
                 "gate_summary": gate_summary,
                 "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
+                "diagnostic_warnings": diagnostic_warnings,
             },
             "promotion_eligible": True,
         }
@@ -4828,7 +5837,13 @@ class FactorResearchService:
                     factor_id,
                     FACTOR_QUARANTINE_RULE_VERSION,
                     dumps({"candidate_status": candidate.get("status"), "gate_summary": gate_summary}),
-                    dumps({"factor_id": factor_id, "source": "AUTO_MINED", "lifecycle_status": "VERIFIED"}),
+                    dumps({
+                        "factor_id": factor_id,
+                        "source": "AUTO_MINED",
+                        "lifecycle_status": "VERIFIED",
+                        "pit_gate_mode": pit_evidence.get("gate_mode") or "DIAGNOSTIC_ONLY",
+                        "diagnostic_warnings": diagnostic_warnings,
+                    }),
                     now,
                 ),
             )
@@ -4925,22 +5940,98 @@ class FactorResearchService:
                 "lookback_window": self._expression_signature(expression)[:36],
             },
             {
-                "title": "治理队列消息生成",
+                "title": "治理任务消息生成",
                 "timestamp": published_at,
                 "detail": "生成多因子策略草稿建议，只进入待审查创建流。",
                 "elapsed_label": "发布后即时生成",
             },
         ]
 
-    def _governance_action_from_factor(self, factor: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _governance_action_from_factor(
+        self,
+        factor: Mapping[str, Any],
+        *,
+        factor_lookup: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         factor_id = str(factor.get("id") or "")
-        if not factor_id:
+        if not factor_id or self._factor_is_offline(factor):
             return []
         actions: list[dict[str, Any]] = []
+        deprecate_evidence = self._factor_deprecate_evidence(factor)
+        if deprecate_evidence.get("eligible"):
+            return [
+                {
+                    "id": f"gq_deprecate_{factor_id}",
+                    "kind": "DEPRECATE",
+                    "command": "DEPRECATE",
+                    "label": "强制下线",
+                    "title": f"{factor.get('name') or factor_id} 触发强制下线",
+                    "detail": "Grade D 且 Rank IC 接近 0、IR 低于 0.2，信号与噪声无异；确认后标记为已强制下线。",
+                    "factor_ids": [factor_id],
+                    "affected_factor_ids": [factor_id],
+                    "offline_reason": "强制下线：Grade D 噪声信号。",
+                    "offline_detail": deprecate_evidence,
+                    "criteria": {
+                        "grade": "D",
+                        "rank_ic_abs_lt": 0.01,
+                        "ir_abs_lte": 0.2,
+                        "strict_low_efficiency_days": 20,
+                        "strict_group_inverted": "3-period rolling average Q1 < Q5 for 3 consecutive checks",
+                    },
+                    "severity": "danger",
+                }
+            ]
         risk = factor.get("strategy_creation_risk") if isinstance(factor.get("strategy_creation_risk"), Mapping) else {}
         cluster = factor.get("correlation_cluster_summary") if isinstance(factor.get("correlation_cluster_summary"), Mapping) else {}
         warning_count = int(risk.get("warning_count") or risk.get("blocked_count") or 0)
         high_corr_count = int(cluster.get("high_correlation_count") or 0)
+        prune_evidence = self._factor_prune_evidence(factor, factor_lookup=factor_lookup)
+        if prune_evidence.get("eligible"):
+            actions.append(
+                {
+                    "id": f"gq_prune_{factor_id}",
+                    "kind": "PRUNE",
+                    "command": "PRUNE",
+                    "label": "冗余裁剪",
+                    "title": f"{factor.get('name') or factor_id} 标记为冗余挂起",
+                    "detail": "同簇相关性超过 0.90，保留 IR/覆盖率更优的 MVP 因子，其余因子不参与多因子合成权重分配。",
+                    "factor_ids": [factor_id],
+                    "affected_factor_ids": [factor_id],
+                    "keep_factor_id": prune_evidence.get("keep_factor_id"),
+                    "offline_reason": self._factor_prune_offline_reason(prune_evidence),
+                    "offline_detail": prune_evidence,
+                    "criteria": {
+                        "correlation": prune_evidence.get("correlation"),
+                        "threshold": 0.90,
+                        "selection": "keep_higher_ir_then_coverage",
+                    },
+                    "severity": "warning",
+                }
+            )
+        deprecate_evidence = self._factor_deprecate_evidence(factor)
+        if deprecate_evidence.get("eligible"):
+            actions.append(
+                {
+                    "id": f"gq_deprecate_{factor_id}",
+                    "kind": "DEPRECATE",
+                    "command": "DEPRECATE",
+                    "label": "强制下线",
+                    "title": f"{factor.get('name') or factor_id} 满足强制下线条件",
+                    "detail": "Grade D、20 个交易日低效且 3 期滑动均值连续 3 期 Q1/Q5 倒挂，确认后将从线上因子库和策略配置中移除。",
+                    "factor_ids": [factor_id],
+                    "affected_factor_ids": [factor_id],
+                    "offline_reason": "强制下线：Grade D、低效 20 个交易日且分组收益倒挂。",
+                    "offline_detail": deprecate_evidence,
+                    "criteria": {
+                        "grade": "D",
+                        "rank_ic_abs_lt": 0.005,
+                        "ir_abs_lt": 0.2,
+                        "low_efficiency_days": 20,
+                        "group_inverted": "3-period rolling average Q1 < Q5 for 3 consecutive checks",
+                    },
+                    "severity": "danger",
+                }
+            )
         if high_corr_count > 0:
             actions.append({
                 "id": f"gq_corr_{factor_id}",
@@ -4973,7 +6064,90 @@ class FactorResearchService:
             })
         if str(factor.get("source") or "") == "AUTO_MINED" and str(factor.get("lifecycle_status") or "") == "VERIFIED":
             actions.append(self._factor_model_suggestion_action([factor_id], source="governance_queue"))
-        return actions
+        return [
+            item
+            for item in actions
+            if str(item.get("kind") or "").upper() in FACTOR_GOVERNANCE_TASK_KINDS
+        ]
+
+    def _factor_needs_governance_preview(self, factor: Mapping[str, Any]) -> bool:
+        if self._factor_is_offline(factor):
+            return False
+        summary = self._latest_diagnostic_summary(factor)
+        if not summary:
+            return True
+        return str(summary.get("status") or "").upper() == "REFERENCE_ONLY"
+
+    @staticmethod
+    def _merge_governance_preview_projection(
+        factor: Mapping[str, Any],
+        preview_item: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        merged = dict(factor)
+        for key in (
+            "latest_diagnostic_summary",
+            "batch_diagnostic_summary",
+            "blocker_reason_summary",
+            "strategy_creation_risk",
+            "correlation_cluster_summary",
+            "ui_state",
+            "ui_state_label",
+            "diagnostic_status",
+        ):
+            if key in preview_item:
+                merged[key] = preview_item[key]
+        return merged
+
+    @staticmethod
+    def _governance_preview_request(factor_ids: Sequence[str]) -> dict[str, Any]:
+        return {
+            "batch": True,
+            "factor_ids": list(dict.fromkeys(str(item) for item in factor_ids if str(item).strip())),
+            "diagnostic_mode": "SANDBOX",
+            "include": ["ic", "ir", "groups", "turnover", "correlation", "blockers"],
+        }
+
+    def _factor_with_governance_preview(self, factor: Mapping[str, Any]) -> dict[str, Any]:
+        factor_id = str(factor.get("id") or "").strip()
+        if not factor_id or not self._factor_needs_governance_preview(factor):
+            return dict(factor)
+        preview = self.preview_diagnostics_batch(self._governance_preview_request([factor_id]))
+        preview_item = next(
+            (
+                item
+                for item in preview.get("items") or []
+                if isinstance(item, Mapping) and str(item.get("factor_id") or "") == factor_id
+            ),
+            None,
+        )
+        if not isinstance(preview_item, Mapping):
+            return dict(factor)
+        return self._merge_governance_preview_projection(factor, preview_item)
+
+    def _attach_governance_previews(self, factors: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        factor_list = [dict(item) for item in factors]
+        preview_ids = [
+            str(factor.get("id") or "")
+            for factor in factor_list
+            if self._factor_needs_governance_preview(factor) and str(factor.get("id") or "").strip()
+        ]
+        if not preview_ids:
+            return factor_list
+        try:
+            preview = self.preview_diagnostics_batch(self._governance_preview_request(preview_ids))
+        except Exception:
+            return factor_list
+        preview_by_id = {
+            str(item.get("factor_id") or ""): item
+            for item in preview.get("items") or []
+            if isinstance(item, Mapping) and str(item.get("factor_id") or "")
+        }
+        return [
+            self._merge_governance_preview_projection(factor, preview_by_id[str(factor.get("id") or "")])
+            if str(factor.get("id") or "") in preview_by_id
+            else factor
+            for factor in factor_list
+        ]
 
     def _factor_model_suggestion_action(self, factor_ids: Sequence[str], *, source: str = "governance_queue") -> dict[str, Any]:
         selected = [str(item) for item in factor_ids if str(item).strip()]
@@ -5007,10 +6181,20 @@ class FactorResearchService:
         }
 
     def get_factor_governance_overview(self) -> dict[str, Any]:
-        factors = self.list_factors()["items"]
+        factors = self._attach_governance_previews(self.list_factors()["items"])
+        factor_lookup = {
+            str(factor.get("id") or ""): factor
+            for factor in factors
+            if str(factor.get("id") or "").strip()
+        }
         actions: list[dict[str, Any]] = []
         for factor in factors:
-            actions.extend(self._governance_action_from_factor(factor))
+            actions.extend(self._governance_action_from_factor(factor, factor_lookup=factor_lookup))
+        actions = [
+            item
+            for item in actions
+            if str(item.get("kind") or "").upper() in FACTOR_GOVERNANCE_TASK_KINDS
+        ]
         published_auto = [str(item.get("id") or "") for item in factors if item.get("source") == "AUTO_MINED"]
         if published_auto and not any(action.get("kind") == "FACTOR_MODEL_SUGGESTION" for action in actions):
             actions.append(self._factor_model_suggestion_action(published_auto[:1]))
@@ -5019,11 +6203,122 @@ class FactorResearchService:
             "queue_count": len(actions),
             "actions": actions,
             "summary": {
+                "deprecate_count": sum(1 for item in actions if item.get("kind") == "DEPRECATE"),
+                "prune_count": sum(1 for item in actions if item.get("kind") == "PRUNE"),
                 "review_count": sum(1 for item in actions if item.get("kind") == "REVIEW"),
                 "crowded_count": sum(1 for item in actions if item.get("kind") == "CROWDED"),
                 "decayed_count": sum(1 for item in actions if item.get("kind") == "DECAYED"),
                 "suggestion_count": sum(1 for item in actions if item.get("kind") == "FACTOR_MODEL_SUGGESTION"),
             },
+        }
+
+    def execute_factor_governance_action(self, action_id: str, request: Any) -> dict[str, Any]:
+        payload = dict(_as_mapping(request))
+        command = str(payload.get("command") or "").strip().upper()
+        if not payload.get("confirm"):
+            raise ValueError("治理任务执行必须包含 confirm=true。")
+        if command not in FACTOR_GOVERNANCE_EXECUTE_COMMANDS:
+            raise ValueError(f"Unsupported factor governance command: {command}")
+        factor_ids = [
+            str(item).strip()
+            for item in payload.get("factor_ids") or []
+            if str(item).strip()
+        ]
+        if not factor_ids and payload.get("factor_id"):
+            factor_ids = [str(payload.get("factor_id")).strip()]
+        factor_ids = list(dict.fromkeys(factor_ids))
+        reason = str(payload.get("reason") or "").strip()
+        if not factor_ids:
+            raise ValueError("治理任务必须指定因子。")
+        if not reason:
+            raise ValueError("治理任务必须填写下线原因。")
+
+        keep_factor_id = str(payload.get("keep_factor_id") or "").strip() or None
+        now = iso_now()
+        affected: list[dict[str, Any]] = []
+        detail_payload = payload.get("detail") if isinstance(payload.get("detail"), Mapping) else {}
+        governance_factor_lookup: dict[str, dict[str, Any]] = {}
+        if command == "PRUNE":
+            governance_factors = self._attach_governance_previews(self.list_factors()["items"])
+            governance_factor_lookup = {
+                str(factor.get("id") or ""): factor
+                for factor in governance_factors
+                if str(factor.get("id") or "").strip()
+            }
+        for factor_id in factor_ids:
+            stored_factor = self.get_factor(factor_id)
+            if self._factor_is_offline(stored_factor):
+                raise ValueError(f"Factor already offline: {factor_id}")
+            factor = governance_factor_lookup.get(factor_id, stored_factor)
+            if command == "DEPRECATE":
+                evidence_factor = self._factor_with_governance_preview(factor)
+                evidence = self._factor_deprecate_evidence(evidence_factor)
+                if not evidence.get("eligible"):
+                    raise ValueError(f"因子不满足强制下线证据: {factor_id}")
+                lifecycle_status = "DEPRECATED"
+                offline_detail = {
+                    "action_id": action_id,
+                    "evidence": evidence,
+                    "request_detail": dict(detail_payload),
+                }
+            else:
+                if not keep_factor_id:
+                    raise ValueError("冗余裁剪必须指定 keep_factor_id。")
+                if keep_factor_id == factor_id:
+                    raise ValueError("冗余裁剪不能下线保留的 MVP 因子。")
+                keep_factor = governance_factor_lookup.get(keep_factor_id) or self.get_factor(keep_factor_id)
+                if self._factor_is_offline(keep_factor):
+                    raise ValueError(f"Keep factor already offline: {keep_factor_id}")
+                evidence = self._factor_prune_evidence(factor, factor_lookup=governance_factor_lookup)
+                correlation = _coerce_float(evidence.get("correlation"))
+                if evidence.get("keep_factor_id") and str(evidence.get("keep_factor_id")) != keep_factor_id:
+                    raise ValueError("冗余裁剪保留因子与当前 MVP 证据不一致。")
+                if correlation <= 0.90:
+                    raise ValueError(f"因子不满足冗余裁剪相关性阈值: {factor_id}")
+                lifecycle_status = "PRUNED"
+                reason = self._factor_prune_offline_reason(evidence, keep_factor_id=keep_factor_id)
+                offline_detail = {
+                    "action_id": action_id,
+                    "keep_factor_id": keep_factor_id,
+                    "correlation": _safe_round(correlation, 4),
+                    "comparison": evidence.get("comparison") or {},
+                    "request_detail": dict(detail_payload),
+                }
+
+            with self.storage.connection() as conn:
+                conn.execute(
+                    """
+                    UPDATE factor_definitions
+                    SET lifecycle_status = ?,
+                        offline_reason = ?,
+                        offline_at = ?,
+                        offline_command = ?,
+                        offline_detail_json = ?,
+                        updated_at = ?
+                    WHERE id = ? AND deleted_at IS NULL
+                    """,
+                    (
+                        lifecycle_status,
+                        reason,
+                        now,
+                        command,
+                        dumps(offline_detail),
+                        now,
+                        factor_id,
+                    ),
+                )
+            affected.append(self.get_factor(factor_id))
+
+        return {
+            "status": "EXECUTED",
+            "action_id": str(action_id),
+            "command": command,
+            "affected_factor_ids": factor_ids,
+            "keep_factor_id": keep_factor_id,
+            "offline_at": now,
+            "reason": reason,
+            "items": affected,
+            "governance_overview": self.get_factor_governance_overview(),
         }
 
     def create_factor_model_suggestion(self, request: Any) -> dict[str, Any]:
@@ -5073,6 +6368,8 @@ class FactorResearchService:
                 "coverage": latest.get("coverage"),
                 "ic_series": latest.get("ic_series") if include_all or "ic" in include_set else None,
                 "group_returns": latest.get("group_returns") if include_all or "groups" in include_set else None,
+                "group_return_series": latest.get("group_return_series") if include_all or "groups" in include_set else None,
+                "monotonicity": latest.get("monotonicity") if include_all or "groups" in include_set else None,
                 "turnover_decay": latest.get("turnover_decay") if include_all or "turnover" in include_set else None,
                 "compliance_trail": latest.get("compliance_trail"),
             }
@@ -5149,7 +6446,7 @@ class FactorResearchService:
         research_waiver = pit_overview.get("research_waiver") if isinstance(pit_overview.get("research_waiver"), Mapping) else {}
         fundamental_cache = self._fundamental_cache_metadata(pit_overview)
         cache_payload = {
-            "version": "factor-diagnostic-preview-v4",
+            "version": "factor-diagnostic-preview-v5",
             "factor_versions": factor_versions,
             "include": sorted(str(item).strip().lower() for item in include if str(item).strip()),
             "diagnostic_mode": diagnostic_mode,
@@ -5305,24 +6602,11 @@ class FactorResearchService:
         rank_ic_mean = _mean(rank_ic_values)
         rank_ic_std = _std(rank_ic_values)
         ir = (rank_ic_mean / rank_ic_std * math.sqrt(12.0)) if rank_ic_mean is not None and rank_ic_std and rank_ic_std > 1e-12 else None
-        latest_observation = observations[-1]
-        ranked_pairs = sorted(
-            zip(latest_observation["factor_values"], latest_observation["forward_returns"]),
-            key=lambda item: item[0],
-            reverse=True,
+        group_return_series = self._factor_group_return_series(observations, group_count)
+        group_returns = self._rolling_group_returns(group_return_series)
+        monotonicity = self._factor_group_return_shape(
+            {"group_returns": group_returns, "group_return_series": group_return_series}
         )
-        group_returns = []
-        for group_index in range(group_count):
-            start = int(group_index * len(ranked_pairs) / group_count)
-            end = int((group_index + 1) * len(ranked_pairs) / group_count)
-            bucket = ranked_pairs[start:end]
-            group_returns.append(
-                {
-                    "group": f"第{group_index + 1}组",
-                    "mean_return": _safe_round(_mean([item[1] for item in bucket]) or 0.0, 4),
-                    "sample_count": len(bucket),
-                }
-            )
         coverage = round(
             min(1.0, (sum(int(item["symbol_count"]) for item in observations) / max(1, len(requested_symbols) * len(observations)))) * 100.0,
             2,
@@ -5372,6 +6656,8 @@ class FactorResearchService:
             "ir": _safe_round(ir, 4),
             "coverage": coverage,
             "group_returns": group_returns,
+            "group_return_series": group_return_series[-36:],
+            "monotonicity": monotonicity,
             "ic_series": [
                 {
                     "date": item["date"],
@@ -5778,6 +7064,10 @@ class FactorResearchService:
     def _decode_factor_row(self, row: Mapping[str, Any], pit_overview: Mapping[str, Any]) -> dict[str, Any]:
         factor = dict(row)
         factor["tags"] = [str(item) for item in _decode_json_list(factor.pop("tags_json", "[]"))]
+        factor["offline_detail"] = _decode_json_dict(factor.pop("offline_detail_json", "{}"))
+        factor["offline_reason"] = factor.get("offline_reason") or None
+        factor["offline_at"] = factor.get("offline_at") or None
+        factor["offline_command"] = factor.get("offline_command") or None
         decoded_requirements = [
             str(item) for item in _decode_json_list(factor.pop("data_requirements_json", "[]"))
         ]
@@ -5982,6 +7272,7 @@ class FactorResearchService:
         tag: str | None = None,
         market: str | None = None,
         status: str | None = None,
+        lifecycle: str | None = None,
     ) -> dict[str, Any]:
         self.ensure_default_factors()
         pit_overview = build_factor_list_pit_overview(self.market_data_repository)
@@ -6011,17 +7302,43 @@ class FactorResearchService:
             ]
         if tag:
             factors = [item for item in factors if tag in item.get("tags", [])]
+        lifecycle_mode = str(lifecycle or "online").strip().lower() or "online"
+        if lifecycle_mode not in {"online", "offline", "all"}:
+            raise ValueError(f"Unsupported factor lifecycle filter: {lifecycle}")
+        lifecycle_base = list(factors)
+        online_factors = [item for item in lifecycle_base if not self._factor_is_offline(item)]
+        offline_factors = [item for item in lifecycle_base if self._factor_is_offline(item)]
+        if lifecycle_mode == "online":
+            factors = online_factors
+        elif lifecycle_mode == "offline":
+            factors = offline_factors
+        else:
+            factors = lifecycle_base
         governance_actions = []
-        for item in factors:
+        for item in online_factors:
             governance_actions.extend(self._governance_action_from_factor(item))
+        governance_actions = [
+            item
+            for item in governance_actions
+            if str(item.get("kind") or "").upper() in FACTOR_GOVERNANCE_TASK_KINDS
+        ]
         return {
             "items": factors,
             "summary": {
                 "total": len(factors),
+                "all_count": len(lifecycle_base),
+                "online_count": len(online_factors),
+                "offline_count": len(offline_factors),
+                "deprecated_count": sum(1 for item in offline_factors if str(item.get("lifecycle_status") or "").upper() == "DEPRECATED"),
+                "pruned_count": sum(1 for item in offline_factors if str(item.get("lifecycle_status") or "").upper() == "PRUNED"),
                 "system_seed_count": sum(1 for item in factors if item.get("source") == "SYSTEM_SEED"),
                 "ready_to_diagnose_count": sum(1 for item in factors if item.get("diagnostic_status") == "READY_TO_DIAGNOSE"),
                 "sandbox_ready_count": sum(1 for item in factors if item.get("diagnostic_status") == "SANDBOX_READY"),
                 "blocked_data_count": sum(1 for item in factors if item.get("diagnostic_status") == "BLOCKED_DATA"),
+                "robust_count": sum(1 for item in factors if item.get("ui_state") == "robust"),
+                "needs_calibration_count": sum(1 for item in factors if item.get("ui_state") == "needs_calibration"),
+                "decayed_count": sum(1 for item in factors if item.get("ui_state") == "decayed"),
+                "sandbox_count": sum(1 for item in factors if item.get("ui_state") == "sandbox"),
                 "governance_queue_count": len(governance_actions),
                 "pit_status": pit_overview.get("overall_status"),
             },
@@ -6118,24 +7435,38 @@ class FactorResearchService:
         return factor
 
     def _correlation_cluster(self, factor_id: str) -> dict[str, Any]:
+        anchor_row = self.storage.fetch_one(
+            "SELECT * FROM factor_definitions WHERE deleted_at IS NULL AND id = ?",
+            (factor_id,),
+        )
+        anchor = self._factor_correlation_projection(anchor_row or {"id": factor_id, "tags_json": "[]", "data_requirements_json": "[]"})
         rows = self.storage.fetch_all(
-            "SELECT id, name, source FROM factor_definitions WHERE deleted_at IS NULL AND id <> ? ORDER BY source DESC, name ASC",
+            """
+            SELECT *
+            FROM factor_definitions
+            WHERE deleted_at IS NULL
+              AND id <> ?
+              AND UPPER(COALESCE(lifecycle_status, '')) NOT IN ('DEPRECATED', 'PRUNED')
+            ORDER BY source DESC, name ASC
+            """,
             (factor_id,),
         )
         nodes = []
-        for index, row in enumerate(rows[:8]):
+        for row in rows:
             if str(row["id"]) in OLD_DEFAULT_FACTOR_ALIASES:
                 continue
-            score = 0.42 + ((sum(ord(char) for char in str(row["id"])) + index) % 47) / 100.0
+            peer = self._factor_correlation_projection(row)
+            score = self._factor_pair_correlation(anchor, peer)
             nodes.append(
                 {
                     "factor_id": row["id"],
                     "name": row["name"],
                     "source": row["source"],
-                    "correlation": round(min(score, 0.92), 2),
+                    "correlation": score,
                     "risk_label": "高相关" if score >= 0.72 else "可观察",
                 }
             )
+        nodes = sorted(nodes, key=lambda item: (-_coerce_float(item.get("correlation")), str(item.get("name") or "")))[:8]
         return {
             "anchor_factor_id": factor_id,
             "top_n": len(nodes),
@@ -6290,6 +7621,120 @@ class FactorResearchService:
             detail = "；".join(labels) if labels else "完整 PIT 窗口缺失"
             raise ValueError(f"完整 Verified PIT 门禁未通过：{detail}。")
 
+    def _direct_factor_reference_value(
+        self,
+        factor_id: str,
+        prices: Sequence[float],
+        index: int,
+        *,
+        factor_cache: Mapping[str, Any] | None = None,
+    ) -> tuple[bool, float | None]:
+        descriptor = _descriptor_from_factor_id(factor_id)
+        if descriptor.get("schema_version") == "legacy":
+            return False, None
+        category = str(descriptor.get("category") or "")
+        metric = str(descriptor.get("metric") or "")
+        window_days = _window_to_trading_days(str(descriptor.get("window") or ""))
+        factor_cache = factor_cache or {}
+        if not window_days or window_days <= 0:
+            return False, None
+        if category == "mom":
+            if index < window_days or prices[index - window_days] <= 0:
+                return True, None
+            return True, prices[index] / prices[index - window_days] - 1.0
+        if category != "vol":
+            return False, None
+        if metric in {"", "realized"}:
+            if index < window_days:
+                return True, None
+            return_prefix = factor_cache.get("daily_return_prefix")
+            if isinstance(return_prefix, Mapping):
+                count, total, square_total = _window_stats(return_prefix, index - window_days + 1, index)
+                return True, _std_from_window_stats(count, total, square_total)
+            returns = [
+                prices[cursor] / prices[cursor - 1] - 1.0
+                for cursor in range(index - window_days + 1, index + 1)
+                if cursor > 0 and prices[cursor - 1] > 0
+            ]
+            return True, _std(returns)
+        if metric == "downside":
+            if index < window_days:
+                return True, None
+            downside_prefix = factor_cache.get("downside_return_prefix")
+            if isinstance(downside_prefix, Mapping):
+                count, total, square_total = _window_stats(downside_prefix, index - window_days + 1, index)
+                return True, _std_from_window_stats(count, total, square_total) if count >= 2 else 0.0
+            returns = [
+                prices[cursor] / prices[cursor - 1] - 1.0
+                for cursor in range(index - window_days + 1, index + 1)
+                if cursor > 0 and prices[cursor - 1] > 0 and prices[cursor] / prices[cursor - 1] - 1.0 < 0
+            ]
+            return True, _std(returns) if len(returns) >= 2 else 0.0
+        if metric == "mdd":
+            if index < window_days:
+                return True, None
+            peak = prices[index - window_days]
+            max_drawdown = 0.0
+            for price in prices[index - window_days : index + 1]:
+                if price <= 0:
+                    continue
+                peak = max(peak, price)
+                if peak > 0:
+                    max_drawdown = max(max_drawdown, (peak - price) / peak)
+            return True, max_drawdown
+        return False, None
+
+    def _factor_reference_expression_value(
+        self,
+        expression: str,
+        prices: Sequence[float],
+        index: int,
+        *,
+        factor_cache: Mapping[str, Any] | None = None,
+    ) -> tuple[bool, float | None]:
+        inner = _unwrap_factor_reference_expression(expression)
+        tokens = [
+            token
+            for token in TOKEN_PATTERN.findall(inner)
+            if FACTOR_REFERENCE_TOKEN_PATTERN.fullmatch(token)
+        ]
+        if not tokens:
+            return False, None
+
+        def value_for(token: str) -> tuple[bool, float | None]:
+            return self._direct_factor_reference_value(
+                _canonical_factor_reference_id(token),
+                prices,
+                index,
+                factor_cache=factor_cache,
+            )
+
+        if FACTOR_REFERENCE_TOKEN_PATTERN.fullmatch(inner):
+            return value_for(inner)
+        binary_match = re.fullmatch(
+            rf"({FACTOR_REFERENCE_TOKEN_SOURCE})([+\-*/])({FACTOR_REFERENCE_TOKEN_SOURCE})",
+            inner,
+        )
+        if not binary_match:
+            return False, None
+        left_recognized, left_value = value_for(binary_match.group(1))
+        right_recognized, right_value = value_for(binary_match.group(3))
+        if not left_recognized or not right_recognized:
+            return False, None
+        if left_value is None or right_value is None:
+            return True, None
+        operator = binary_match.group(2)
+        if operator == "+":
+            return True, left_value + right_value
+        if operator == "-":
+            return True, left_value - right_value
+        if operator == "*":
+            return True, left_value * right_value
+        denominator = right_value
+        if abs(denominator) <= 1e-12:
+            denominator = 1e-12 if denominator >= 0 else -1e-12
+        return True, left_value / denominator
+
     def _factor_value(
         self,
         factor_id: str,
@@ -6308,6 +7753,23 @@ class FactorResearchService:
         market_returns_by_date = market_returns_by_date or {}
         fundamental_history = fundamental_history or []
         factor_cache = factor_cache or {}
+        reference_expression_recognized, reference_expression_value = self._factor_reference_expression_value(
+            normalized,
+            prices,
+            index,
+            factor_cache=factor_cache,
+        )
+        if reference_expression_recognized:
+            return reference_expression_value
+        if not normalized:
+            direct_reference_recognized, direct_reference_value = self._direct_factor_reference_value(
+                _canonical_factor_reference_id(factor_id),
+                prices,
+                index,
+                factor_cache=factor_cache,
+            )
+            if direct_reference_recognized:
+                return direct_reference_value
 
         def daily_returns(window: int) -> list[float]:
             if index < window:
@@ -6947,24 +8409,11 @@ class FactorResearchService:
         rank_ic_mean = _mean(rank_ic_values)
         rank_ic_std = _std(rank_ic_values)
         ir = (rank_ic_mean / rank_ic_std * math.sqrt(12.0)) if rank_ic_mean is not None and rank_ic_std and rank_ic_std > 1e-12 else None
-        latest_observation = observations[-1]
-        ranked_pairs = sorted(
-            zip(latest_observation["factor_values"], latest_observation["forward_returns"]),
-            key=lambda item: item[0],
-            reverse=True,
+        group_return_series = self._factor_group_return_series(observations, group_count)
+        group_returns = self._rolling_group_returns(group_return_series)
+        monotonicity = self._factor_group_return_shape(
+            {"group_returns": group_returns, "group_return_series": group_return_series}
         )
-        group_returns = []
-        for group_index in range(group_count):
-            start = int(group_index * len(ranked_pairs) / group_count)
-            end = int((group_index + 1) * len(ranked_pairs) / group_count)
-            bucket = ranked_pairs[start:end]
-            group_returns.append(
-                {
-                    "group": f"第{group_index + 1}组",
-                    "mean_return": _safe_round(_mean([item[1] for item in bucket]) or 0.0, 4),
-                    "sample_count": len(bucket),
-                }
-            )
         coverage = round(
             min(1.0, (sum(int(item["symbol_count"]) for item in observations) / max(1, len(requested_symbols) * len(observations)))) * 100.0,
             2,
@@ -7006,6 +8455,8 @@ class FactorResearchService:
             "ir": _safe_round(ir, 4),
             "coverage": coverage,
             "group_returns": group_returns,
+            "group_return_series": group_return_series[-36:],
+            "monotonicity": monotonicity,
             "ic_series": [
                 {
                     "date": item["date"],

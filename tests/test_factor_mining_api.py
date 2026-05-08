@@ -8,9 +8,11 @@ from uuid import uuid4
 
 from grit_backtest_platform.factor_mining import (
     FactorMiningCandidateSummary,
+    FactorMiningRunner,
     FactorMiningJobCreateRequest,
     FactorMiningJobResult,
     create_synthetic_market_data,
+    factor_ir_from_rank_ic,
     factor_mining_job_id_for_request,
     run_factor_mining_job,
 )
@@ -164,6 +166,80 @@ def test_factor_mining_result_has_api_ready_projection_shape() -> None:
         "risk_flags",
         "persisted_to_factor_definitions",
     }.issubset(top_candidate)
+    assert {
+        "fitness_score",
+        "max_style_correlation",
+        "correlation_penalty",
+        "max_drawdown_pct",
+        "benchmark_max_drawdown_pct",
+        "drawdown_vs_benchmark_ratio",
+        "auto_residual_summary",
+    }.issubset(top_candidate)
+
+
+def test_factor_mining_fitness_penalizes_correlation_and_complexity() -> None:
+    result = run_factor_mining_job(_request(candidate_count=16, operators=("return", "std", "log")), top_k=8)
+
+    assert result.top_candidates
+    assert all(candidate.fitness_score is not None for candidate in result.top_candidates)
+    assert any((candidate.max_style_correlation or 0) > 0.3 for candidate in result.all_candidates)
+    assert any(candidate.auto_residual_summary for candidate in result.all_candidates)
+    for candidate in result.all_candidates:
+        if (candidate.max_style_correlation or 0) > 0.3:
+            assert candidate.correlation_penalty > 0
+
+
+def test_factor_mining_uses_non_overlapping_forward_return_anchor() -> None:
+    request = FactorMiningJobCreateRequest(
+        universe=("A", "B", "C", "D"),
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        operators=("return",),
+        candidate_count=1,
+        random_seed=1,
+        min_rank_ic=0.0,
+        max_depth=3,
+    )
+    runner = FactorMiningRunner(request)
+
+    def close_series(day3: float, day6: float, day8: float, day11: float) -> list[float]:
+        values = [100.0] * 12
+        values[3] = day3
+        values[6] = day6
+        values[8] = day8
+        values[11] = day11
+        return values
+
+    market_data = {
+        "A": {"Close": close_series(100.0, 130.0, 100.0, 130.0)},
+        "B": {"Close": close_series(100.0, 120.0, 100.0, 132.0)},
+        "C": {"Close": close_series(100.0, 110.0, 100.0, 132.0)},
+        "D": {"Close": close_series(100.0, 100.0, 100.0, 140.0)},
+    }
+
+    candidate = runner._evaluate_candidate(0, "Return(Close, 3)", market_data)
+
+    assert candidate.rank_ic is not None
+    assert candidate.rank_ic < -0.9
+
+
+def test_factor_mining_newey_west_adjusts_long_horizon_ir() -> None:
+    assert factor_ir_from_rank_ic(0.3697, 63) == 0.9316
+    assert factor_ir_from_rank_ic(0.3697, 63) < 2.0
+
+
+def test_factor_mining_reports_pure_residual_ic_against_short_momentum() -> None:
+    request = _request(candidate_count=1, operators=("return",))
+    market_data = create_synthetic_market_data(request.universe, length=160, seed=11)
+    runner = FactorMiningRunner(request)
+
+    candidate = runner._evaluate_candidate(0, "Return(Close, 63)", market_data)
+
+    assert candidate.holding_period == 63
+    assert candidate.pure_rank_ic is not None
+    assert candidate.auto_residual_summary
+    assert candidate.auto_residual_summary["control_factor_id"] == "Return(Close, 3)"
+    assert candidate.auto_residual_summary["residual_rank_ic"] == round(candidate.pure_rank_ic, 6)
 
 
 def test_factor_mining_top_candidates_are_expression_deduped() -> None:

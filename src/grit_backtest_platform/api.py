@@ -55,6 +55,9 @@ from .models import (
     FactorCreateRequest,
     FactorDiagnosticPreviewRequest,
     FactorDiagnosticRequest,
+    FactorFactoryAutomationRequest,
+    FactorFactoryRunNowRequest,
+    FactorGovernanceExecuteRequest,
     FactorMiningJobCreateRequest,
     FactorModelSuggestionRequest,
     FactorModelCreateRequest,
@@ -1523,8 +1526,9 @@ def create_app(
         tag: str | None = Query(default=None),
         market: str | None = Query(default=None),
         status: str | None = Query(default=None),
+        lifecycle: str | None = Query(default=None),
     ):
-        return invoke(service.list_factors, source=source, tag=tag, market=market, status=status)
+        return invoke(service.list_factors, source=source, tag=tag, market=market, status=status, lifecycle=lifecycle)
 
     @app.post('/factors')
     def create_factor(payload: FactorCreateRequest):
@@ -1549,6 +1553,26 @@ def create_app(
     @app.post('/factor-mining/jobs/{job_id}/cancel')
     def cancel_factor_mining_job(job_id: str):
         return invoke(service.cancel_factor_mining_job, job_id)
+
+    @app.get('/factor-factory/overview')
+    def factor_factory_overview():
+        return invoke(service.get_factor_factory_overview)
+
+    @app.post('/factor-factory/automation/start')
+    def factor_factory_automation_start(payload: FactorFactoryAutomationRequest):
+        return invoke(service.start_factor_factory_automation, payload)
+
+    @app.post('/factor-factory/automation/pause')
+    def factor_factory_automation_pause():
+        return invoke(service.pause_factor_factory_automation)
+
+    @app.post('/factor-factory/run-now')
+    def factor_factory_run_now(payload: FactorFactoryRunNowRequest):
+        return invoke(service.run_factor_factory_now, payload)
+
+    @app.post('/factor-factory/runs/{run_id}/cancel')
+    def factor_factory_run_cancel(run_id: str):
+        return invoke(service.cancel_factor_factory_run, run_id)
 
     @app.post('/factor-quarantine/intake')
     def factor_quarantine_intake(payload: FactorQuarantineIntakeRequest):
@@ -1582,6 +1606,10 @@ def create_app(
     @app.get('/factor-governance/overview')
     def factor_governance_overview():
         return invoke(service.get_factor_governance_overview)
+
+    @app.post('/factor-governance/actions/{action_id}/execute')
+    def factor_governance_action_execute(action_id: str, payload: FactorGovernanceExecuteRequest):
+        return invoke(service.execute_factor_governance_action, action_id, payload)
 
     @app.post('/factor-models/preview')
     def preview_factor_model(payload: FactorModelPreviewRequest):

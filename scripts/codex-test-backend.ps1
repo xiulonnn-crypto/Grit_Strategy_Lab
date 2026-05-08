@@ -34,10 +34,13 @@ $defaultTests = @(
     'tests\test_real_backtest_api.py'
     'tests\test_factor_research_api.py'
     'tests\test_factor_expression_engine.py'
+    'tests\test_factor_factory_api.py'
     'tests\test_factor_mining_api.py'
+    'tests\test_factor_quarantine_api.py'
     'tests\test_multi_factor_strategy_api.py'
     'tests\test_optimization_execution_resume.py'
     'tests\test_optimization_resume_api.py'
+    'tests\test_runtime_supervisor.py'
     'tests\test_strategies_smoke.py'
 )
 

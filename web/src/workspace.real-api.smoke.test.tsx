@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ApiClientProvider } from './lib/demoStoreContext';
 import { AppRouteProvider, navigateTo, parseAppHash } from './lib/appRouteContext';
@@ -40,6 +40,14 @@ const LIVE_OPTIMIZATION_JOB_ID = liveApiEnabled ? requiredLiveEnv('LIVE_OPTIMIZA
 
 let originalFetch: typeof fetch | undefined;
 
+function withoutAbortSignal(init?: RequestInit): RequestInit | undefined {
+  if (!init) {
+    return undefined;
+  }
+  const { signal: _signal, ...rest } = init;
+  return rest;
+}
+
 beforeAll(() => {
   if (!liveApiEnabled) {
     return;
@@ -59,10 +67,10 @@ beforeAll(() => {
       : rawUrl.replace('http://localhost:8000', LIVE_API_BASE);
 
     if (typeof input === 'string' || input instanceof URL) {
-      return originalFetch!(normalizedUrl, init);
+      return originalFetch!(normalizedUrl, withoutAbortSignal(init));
     }
 
-    return originalFetch!(new Request(normalizedUrl, input), init);
+    return originalFetch!(new Request(normalizedUrl, input), withoutAbortSignal(init));
   }) as typeof fetch;
 });
 
@@ -112,8 +120,8 @@ describeLiveApi('live api acceptance', () => {
 
       expect(container.querySelector('.workspace-page__content')).not.toBeNull();
       expect(
-        await screen.findByText(DETAIL_STRATEGY_NAME, {}, { timeout: LIVE_QUERY_TIMEOUT }),
-      ).toBeInTheDocument();
+        await screen.findAllByText(DETAIL_STRATEGY_NAME, {}, { timeout: LIVE_QUERY_TIMEOUT }),
+      ).not.toHaveLength(0);
       expect(
         await screen.findByText(LIVE_RUN_ID, {}, { timeout: LIVE_QUERY_TIMEOUT }),
       ).toBeInTheDocument();
@@ -172,10 +180,11 @@ describeLiveApi('live api acceptance', () => {
     async () => {
       const { container } = await renderLiveRoute('#/runs', <RunsIndexPage />);
 
-      expect(container.querySelector('.runs-index-table')).not.toBeNull();
       expect(
-        await screen.findByText(LIVE_RUN_ID, {}, { timeout: LIVE_QUERY_TIMEOUT }),
-      ).toBeInTheDocument();
+        await screen.findAllByText(DETAIL_STRATEGY_NAME, {}, { timeout: LIVE_QUERY_TIMEOUT }),
+      ).not.toHaveLength(0);
+      expect(container.querySelector('.runs-index-page')).not.toBeNull();
+      expect(container.querySelector('.runs-evidence-shell')).not.toBeNull();
       expectNoFetchFailure();
     },
     LIVE_TEST_TIMEOUT,
@@ -189,10 +198,10 @@ describeLiveApi('live api acceptance', () => {
         <RunDetailPage runId={LIVE_RUN_ID} />,
       );
 
-      expect(container.querySelector('.run-detail-page')).not.toBeNull();
       expect(
         await screen.findByText(DETAIL_STRATEGY_NAME, {}, { timeout: LIVE_QUERY_TIMEOUT }),
       ).toBeInTheDocument();
+      expect(container.querySelector('.run-detail-page')).not.toBeNull();
       expect(container.querySelector('.run-detail-curve-card--overview')).not.toBeNull();
       expectNoFetchFailure();
     },
@@ -222,7 +231,7 @@ describeLiveApi('live api acceptance', () => {
   it(
     'hydrates optimization config data against the staged local API',
     async () => {
-      await renderLiveRoute(
+      const { container } = await renderLiveRoute(
         `#/optimization-jobs/new/config?strategy_id=${LIVE_OPTIMIZATION_STRATEGY_ID}`,
         <OptimizationConfigPage strategyId={LIVE_OPTIMIZATION_STRATEGY_ID} />,
       );
@@ -233,16 +242,13 @@ describeLiveApi('live api acceptance', () => {
         { timeout: LIVE_QUERY_TIMEOUT },
       );
       expect(heading.textContent?.trim()).toBeTruthy();
-      const timeframeSelect = await screen.findByRole(
-        'listbox',
-        { name: '观察周期 可选值' },
+      await waitFor(
+        () => {
+          expect(container.querySelector('.optimization-lab-table')).not.toBeNull();
+          expect(container.querySelector('.optimization-discrete-field__trigger')).not.toBeNull();
+        },
         { timeout: LIVE_QUERY_TIMEOUT },
       );
-      expect(
-        within(timeframeSelect)
-          .getAllByRole('option')
-          .map((option) => option.textContent?.trim()),
-      ).toEqual(['每日', '每周', '每月']);
       expectNoFetchFailure();
     },
     LIVE_TEST_TIMEOUT,

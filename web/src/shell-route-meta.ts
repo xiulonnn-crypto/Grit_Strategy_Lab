@@ -158,6 +158,14 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         description: '用白名单公式编写人工因子，并在正式诊断前预览 IC。',
         showPageHeading: false,
       };
+    case 'factor-factory':
+      return {
+        navKey: 'factor',
+        eyebrow: '因子',
+        title: '因子工厂',
+        description: '合并挖掘沙盒与检疫工作台，承载每日自动化、立即运行、Auto-Residual、回撤闸门与发布审计。',
+        showPageHeading: false,
+      };
     case 'factor-sandbox':
       return {
         navKey: 'factor',

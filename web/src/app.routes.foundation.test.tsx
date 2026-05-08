@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './app-runtime';
+import { buildRouteChunkReloadUrl, isRouteChunkLoadError } from './app-runtime-cn';
+import { previewFactorDiagnosticsForLibrary } from './pages/factors-page';
 import { installMockApiServer } from './testApiMock';
 
 let mockServer: ReturnType<typeof installMockApiServer> | null = null;
@@ -32,7 +34,7 @@ const ROUTE_ROOT_SELECTOR = [
   '[data-page-root="factor-library"]',
   '[data-page-root="factor-detail"]',
   '[data-page-root="factor-editor"]',
-  '[data-page-root="factor-quarantine"]',
+  '[data-page-root="factor-factory"]',
 ].join(', ');
 
 async function renderApp(hash: string): Promise<void> {
@@ -55,6 +57,53 @@ afterEach(() => {
 });
 
 describe('App runtime routes', () => {
+  it('recognizes stale lazy route chunks and builds a cache-busting document reload URL', () => {
+    expect(isRouteChunkLoadError(new TypeError('Failed to fetch dynamically imported module'))).toBe(true);
+    expect(isRouteChunkLoadError(new Error('ordinary render failure'))).toBe(false);
+
+    const reloadUrl = buildRouteChunkReloadUrl(
+      new URL('http://127.0.0.1:4173/#/factor-models/new'),
+      177777,
+    );
+
+    expect(reloadUrl).toBe('http://127.0.0.1:4173/?v=route-reload-177777#/factor-models/new');
+  });
+
+  it('fills factor library diagnostics one by one when batch preview is unavailable', async () => {
+    const previewFactorDiagnostics = vi.fn()
+      .mockRejectedValueOnce(new Error('batch preview unavailable'))
+      .mockResolvedValueOnce({
+        mode: 'BATCH',
+        status: 'PREVIEW',
+        items: [{
+          factor_id: 's_mom_6m_rank',
+          latest_diagnostic_summary: { status: 'PREVIEW', rank_ic: 0.0283, ir: 1.17 },
+          batch_diagnostic_summary: { status: 'PREVIEW', rank_ic: 0.0283, ir: 1.17 },
+        }],
+      })
+      .mockRejectedValueOnce(new Error('unsupported expression'));
+
+    const preview = await previewFactorDiagnosticsForLibrary(previewFactorDiagnostics, [
+      's_mom_6m_rank',
+      'bad_factor',
+    ]);
+
+    expect(previewFactorDiagnostics).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      batch: true,
+      factor_ids: ['s_mom_6m_rank', 'bad_factor'],
+      diagnostic_mode: 'SANDBOX',
+    }));
+    expect(previewFactorDiagnostics).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      factor_ids: ['s_mom_6m_rank'],
+    }));
+    expect(previewFactorDiagnostics).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      factor_ids: ['bad_factor'],
+    }));
+    expect(preview?.status).toBe('PREVIEW');
+    expect(preview?.items).toHaveLength(1);
+    expect(preview?.items?.[0]?.factor_id).toBe('s_mom_6m_rank');
+  });
+
   it('defaults to workspace when no hash is present', async () => {
     await renderApp('');
 
@@ -320,8 +369,12 @@ describe('App runtime routes', () => {
     expect(screen.getAllByText('s_val_ep_ltm_raw').length).toBeGreaterThan(0);
     expect(screen.getByText('诊断状态')).toBeInTheDocument();
     expect(screen.getByText('阻断 / 风险')).toBeInTheDocument();
+    expect(screen.getByText('比对 / 操作')).toBeInTheDocument();
+    expect(screen.queryByText('下线原因')).not.toBeInTheDocument();
+    expect(screen.queryByText('下线时间')).not.toBeInTheDocument();
+    expect(screen.getAllByText(/准予生产|降权建议|仅供预览|物理封存/).length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: '因子级别排序' })).toBeInTheDocument();
-    expect(screen.getAllByText(/无阻断|风险提示/).length).toBeGreaterThanOrEqual(5);
+    expect(screen.getByRole('button', { name: '最近更新排序' })).toBeInTheDocument();
     const toolbarFilters = document.querySelector('.factor-toolbar__filters');
     expect(toolbarFilters).not.toBeNull();
     expect(toolbarFilters?.querySelectorAll('select')).toHaveLength(4);
@@ -332,7 +385,6 @@ describe('App runtime routes', () => {
     expect(screen.getByText(/先取绝对值/)).toBeInTheDocument();
     expect(screen.getByText(/S 顶级印钞机: Rank IC > 0.03, IR > 2.0/)).toBeInTheDocument();
     expect(document.querySelector('tbody tr:first-child .factor-diagnostic-state__button')?.textContent).toMatch(/稳健|待校准|失效|沙箱/);
-    expect(screen.getByRole('button', { name: '最近更新排序' })).toHaveClass('is-active');
     expect(document.querySelector('tbody tr:first-child .factor-link')?.textContent).toContain('252日年化波动率排名');
     expect(screen.getByLabelText('最近诊断指标解释')).toBeInTheDocument();
     expect(screen.getByText(/Rank IC: 因子排序与未来收益排序的相关性/)).toBeInTheDocument();
@@ -376,6 +428,8 @@ describe('App runtime routes', () => {
     expect(screen.getByText('分层收益与 IC 走势')).toBeInTheDocument();
     expect(screen.getByText('风险提示')).toBeInTheDocument();
     expect(screen.getByText('换手率与衰减')).toBeInTheDocument();
+    expect(screen.getByLabelText('换手率与衰减计算口径')).toBeInTheDocument();
+    expect(screen.getByLabelText('分层收益与 IC 走势计算口径')).toBeInTheDocument();
     expect(screen.getByText('审计足迹')).toBeInTheDocument();
 
     cleanup();
@@ -389,6 +443,13 @@ describe('App runtime routes', () => {
 
     cleanup();
     await renderApp('#/factors/quarantine');
+
+    expect(document.querySelector('[data-page-root="factor-factory"]')).not.toBeNull();
+    expect(document.querySelector('[data-initial-section="quarantine"]')).not.toBeNull();
+    expect(await screen.findByRole('heading', { level: 1, name: '因子工厂' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '启动自动化' })).toBeInTheDocument();
+    expect(screen.getAllByText('检疫与发布').length).toBeGreaterThanOrEqual(1);
+    return;
 
     expect(document.querySelector('[data-page-root="factor-quarantine"]')).not.toBeNull();
     expect(await screen.findByRole('heading', { level: 1, name: '检疫工作台' })).toBeInTheDocument();

@@ -2518,7 +2518,13 @@ export type ApiPitIdentityScraperRestartResponse = {
   pit_data: ApiPitDataOverview;
 };
 
-export type ApiFactorLifecycleStatus = "DRAFT" | "VERIFIED" | "PRODUCTION" | "DECAYED";
+export type ApiFactorLifecycleStatus =
+  | "DRAFT"
+  | "VERIFIED"
+  | "PRODUCTION"
+  | "DECAYED"
+  | "DEPRECATED"
+  | "PRUNED";
 export type ApiFactorDiagnosticStatus =
   | "READY_TO_DIAGNOSE"
   | "SANDBOX_READY"
@@ -2557,6 +2563,14 @@ export type ApiFactorDiagnosticSummary = {
   ir?: number | null;
   coverage?: number | null;
   group_returns?: Array<{ group: string; mean_return: number | null; sample_count: number }>;
+  group_return_series?: Array<{
+    date?: string | null;
+    groups: Array<{ group: string; mean_return: number | null; sample_count: number }>;
+    q1_mean_return?: number | null;
+    q5_mean_return?: number | null;
+    q1_q5_spread?: number | null;
+  }>;
+  monotonicity?: Record<string, unknown>;
   ic_series?: Array<{ date: string; ic?: number | null; rank_ic?: number | null; symbol_count?: number }>;
   evidence_heatmap?: Array<{ window: string; bucket: string; value?: number | null; state: string }>;
   turnover_decay?: Record<string, unknown>;
@@ -2630,6 +2644,10 @@ export type ApiFactorListItem = {
   source: ApiFactorSource;
   lifecycle_status: ApiFactorLifecycleStatus;
   diagnostic_status: ApiFactorDiagnosticStatus;
+  offline_reason?: string | null;
+  offline_at?: string | null;
+  offline_command?: "DEPRECATE" | "PRUNE" | string | null;
+  offline_detail?: Record<string, unknown>;
   ui_state?: ApiFactorUiState;
   ui_state_label?: "稳健" | "待校准" | "失效" | "沙箱" | string;
   direction: ApiFactorDirection;
@@ -2783,10 +2801,22 @@ export type ApiFactorMiningCandidate = {
   expression: string;
   score: number;
   rank_ic: number;
+  pure_rank_ic?: number | null;
+  ir?: number | null;
+  information_ratio?: number | null;
+  holding_period?: number | null;
+  newey_west_lags?: number | null;
   turnover: number;
   coverage: number;
   depth?: number;
   risk_flags?: string[];
+  fitness_score?: number | null;
+  max_style_correlation?: number | null;
+  correlation_penalty?: number | null;
+  max_drawdown_pct?: number | null;
+  benchmark_max_drawdown_pct?: number | null;
+  drawdown_vs_benchmark_ratio?: number | null;
+  auto_residual_summary?: Record<string, unknown> | null;
 };
 
 export type ApiFactorMiningJob = {
@@ -2815,10 +2845,16 @@ export type ApiFactorMiningJobListResponse = {
 export type ApiFactorGovernanceAction = {
   id: string;
   kind: string;
+  command?: "DEPRECATE" | "PRUNE" | "FACTOR_MODEL_SUGGESTION" | string;
   label: string;
   title: string;
   detail: string;
   factor_ids: string[];
+  affected_factor_ids?: string[];
+  keep_factor_id?: string | null;
+  offline_reason?: string | null;
+  offline_detail?: Record<string, unknown>;
+  criteria?: Record<string, unknown>;
   severity?: "info" | "warning" | "danger" | string;
   suggested_weights?: Array<{
     factor_id: string;
@@ -2830,6 +2866,28 @@ export type ApiFactorGovernanceAction = {
     query?: Record<string, string>;
   };
   [key: string]: unknown;
+};
+
+export type ApiFactorGovernanceExecutePayload = {
+  confirm: boolean;
+  command: "DEPRECATE" | "PRUNE" | string;
+  factor_ids?: string[];
+  factor_id?: string;
+  reason: string;
+  keep_factor_id?: string | null;
+  detail?: Record<string, unknown>;
+};
+
+export type ApiFactorGovernanceExecuteResponse = {
+  status: string;
+  action_id: string;
+  command: string;
+  affected_factor_ids: string[];
+  keep_factor_id?: string | null;
+  offline_at: string;
+  reason: string;
+  items: ApiFactorListItem[];
+  governance_overview?: ApiFactorGovernanceOverview;
 };
 
 export type ApiFactorGovernanceOverview = {
@@ -2897,6 +2955,84 @@ export type ApiFactorQuarantinePublishResponse = {
   factor?: ApiFactorDetail;
   event?: Record<string, unknown>;
   [key: string]: unknown;
+};
+
+export type ApiFactorFactoryGatePolicy = {
+  pit_gate_mode: "DIAGNOSTIC_ONLY";
+  max_style_correlation: number;
+  residual_enabled: boolean;
+  max_drawdown_relative_to_benchmark: number;
+  min_oos_to_is_ratio: number;
+  [key: string]: unknown;
+};
+
+export type ApiFactorFactoryProfile = {
+  id: string;
+  status: "ACTIVE" | "PAUSED" | string;
+  timezone: string;
+  schedule_time: string;
+  request: ApiFactorMiningJobCreatePayload;
+  gate_policy: ApiFactorFactoryGatePolicy;
+  created_at?: string | null;
+  updated_at?: string | null;
+  last_run_date?: string | null;
+  next_run_at?: string | null;
+  [key: string]: unknown;
+};
+
+export type ApiFactorFactoryRun = {
+  id: string;
+  profile_id?: string | null;
+  run_date: string;
+  trigger: "DAILY" | "MANUAL" | string;
+  status: "QUEUED" | "RUNNING" | "CANCEL_REQUESTED" | "CANCELLED" | "COMPLETED" | "FAILED" | string;
+  request: ApiFactorMiningJobCreatePayload;
+  gate_policy: ApiFactorFactoryGatePolicy;
+  config_signature?: string | null;
+  mining_job_id?: string | null;
+  mining_job?: ApiFactorMiningJob | null;
+  summary?: Record<string, unknown>;
+  started_at?: string | null;
+  completed_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  error_message?: string | null;
+};
+
+export type ApiFactorFactoryFunnel = {
+  mined_candidates: number;
+  quarantine_candidates: number;
+  passed: number;
+  review_or_observation: number;
+  rejected: number;
+  published: number;
+  [key: string]: unknown;
+};
+
+export type ApiFactorFactoryOverview = {
+  profile: ApiFactorFactoryProfile;
+  active_run?: ApiFactorFactoryRun | null;
+  latest_run?: ApiFactorFactoryRun | null;
+  runs: ApiFactorFactoryRun[];
+  funnel: ApiFactorFactoryFunnel;
+  mining: ApiFactorMiningJobListResponse;
+  quarantine: ApiFactorQuarantineCandidateListResponse;
+  gate_policy: ApiFactorFactoryGatePolicy;
+  daily_run?: ApiFactorFactoryRun;
+  manual_run?: ApiFactorFactoryRun;
+  [key: string]: unknown;
+};
+
+export type ApiFactorFactoryAutomationPayload = {
+  timezone?: string;
+  schedule_time?: string;
+  request?: ApiFactorMiningJobCreatePayload;
+  gate_policy?: Partial<ApiFactorFactoryGatePolicy>;
+};
+
+export type ApiFactorFactoryRunNowPayload = {
+  request?: ApiFactorMiningJobCreatePayload;
+  gate_policy?: Partial<ApiFactorFactoryGatePolicy>;
 };
 
 export type ApiFactorModelComponentPayload = {
@@ -3177,6 +3313,7 @@ export type DemoApi = {
     tag?: string;
     market?: string;
     status?: string;
+    lifecycle?: "online" | "offline" | "all" | string;
   }) => Promise<ApiFactorListResponse>;
   createFactor: (payload: ApiFactorCreatePayload) => Promise<ApiFactorDetail>;
   getFactor: (id: string) => Promise<ApiFactorDetail>;
@@ -3191,7 +3328,20 @@ export type DemoApi = {
   createFactorMiningJob: (payload: ApiFactorMiningJobCreatePayload) => Promise<ApiFactorMiningJob>;
   getFactorMiningJob: (id: string) => Promise<ApiFactorMiningJob>;
   cancelFactorMiningJob: (id: string) => Promise<ApiFactorMiningJob>;
+  getFactorFactoryOverview?: () => Promise<ApiFactorFactoryOverview>;
+  startFactorFactoryAutomation?: (
+    payload?: ApiFactorFactoryAutomationPayload,
+  ) => Promise<ApiFactorFactoryOverview>;
+  pauseFactorFactoryAutomation?: () => Promise<ApiFactorFactoryOverview>;
+  runFactorFactoryNow?: (
+    payload?: ApiFactorFactoryRunNowPayload,
+  ) => Promise<ApiFactorFactoryOverview>;
+  cancelFactorFactoryRun?: (id: string) => Promise<ApiFactorFactoryRun>;
   getFactorGovernanceOverview?: () => Promise<ApiFactorGovernanceOverview>;
+  executeFactorGovernanceAction?: (
+    actionId: string,
+    payload: ApiFactorGovernanceExecutePayload,
+  ) => Promise<ApiFactorGovernanceExecuteResponse>;
   listFactorQuarantineCandidates?: (params?: {
     status?: string;
     source_job_id?: string;

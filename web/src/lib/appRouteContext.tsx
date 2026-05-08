@@ -33,6 +33,7 @@ export type AppRoute =
   | { kind: 'factor-detail'; factorId: string }
   | { kind: 'factor-editor'; factorId?: string }
   | { kind: 'factor-sandbox' }
+  | { kind: 'factor-factory'; section?: 'overview' | 'sandbox' | 'quarantine' }
   | {
       kind: 'factor-model-builder';
       prefill?: {
@@ -43,8 +44,8 @@ export type AppRoute =
         modelName?: string;
       };
     }
-  | { kind: 'factor-quarantine' }
   | { kind: 'optimization-index' }
+  | { kind: 'factor-quarantine' }
   | { kind: 'optimization-select'; strategyId?: string; sourceRunId?: string; entryPoint?: string }
   | { kind: 'optimization-config'; strategyId: string; sourceRunId?: string; entryPoint?: string }
   | { kind: 'optimization'; jobId: string };
@@ -252,14 +253,21 @@ export function parseAppHash(hash: string): AppRoute {
   if (path === '/factors/new') {
     return { kind: 'factor-editor' };
   }
+  if (path === '/factors/factory') {
+    const section = searchParams.get('section');
+    return {
+      kind: 'factor-factory',
+      section: section === 'sandbox' || section === 'quarantine' ? section : 'overview',
+    };
+  }
   if (path === '/factors/sandbox') {
-    return { kind: 'factor-sandbox' };
+    return { kind: 'factor-factory', section: 'sandbox' };
   }
   if (path === '/factor-models/new') {
     return parseFactorModelPrefill(searchParams);
   }
   if (path === '/factors/quarantine') {
-    return { kind: 'factor-quarantine' };
+    return { kind: 'factor-factory', section: 'quarantine' };
   }
   const factorDetailMatch = path.match(/^\/factors\/([^/]+)$/);
   if (factorDetailMatch) {

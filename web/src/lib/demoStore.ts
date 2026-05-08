@@ -13,6 +13,11 @@ import {
   type ApiFactorDiagnosticPreview,
   type ApiFactorDiagnosticPreviewPayload,
   type ApiFactorDiagnosticRunResponse,
+  type ApiFactorFactoryAutomationPayload,
+  type ApiFactorFactoryOverview,
+  type ApiFactorFactoryRun,
+  type ApiFactorFactoryRunNowPayload,
+  type ApiFactorGovernanceExecuteResponse,
   type ApiFactorGovernanceOverview,
   type ApiFactorListItem,
   type ApiFactorListResponse,
@@ -612,9 +617,18 @@ const factorFamilyLabels: Record<string, string> = {
   val: '估值',
   mom: '动量',
   qlty: '质量',
-  vol: '低波',
+  vol: '风险',
   size: '规模',
+  alpha: '其他',
+  beta: '风险',
+  inv: '质量',
+  liq: '情绪',
 };
+
+function isFactorOffline(factor: ApiFactorListItem): boolean {
+  const lifecycle = String(factor.lifecycle_status ?? '').toUpperCase();
+  return lifecycle === 'DEPRECATED' || lifecycle === 'PRUNED' || Boolean(factor.offline_at);
+}
 
 function createFactorListItems(): ApiFactorListItem[] {
   const factors: Array<Omit<ApiFactorListItem, 'ic_sparkline' | 'ic_sparkline_window' | 'readiness_blockers' | 'gate_fix_target'>> = [
@@ -809,8 +823,42 @@ function createFactorGovernanceOverview(items = createFactorListItems()): ApiFac
   ].filter((item, index, array) => item && array.indexOf(item) === index);
   return {
     as_of: nowIso(),
-    queue_count: 4,
+    queue_count: 6,
     actions: [
+      {
+        id: 'gq-deprecate-demo',
+        kind: 'DEPRECATE',
+        command: 'DEPRECATE',
+        label: '强制下线',
+        title: '低效噪声因子满足强制下线条件',
+        detail: 'Grade D、20 个交易日低效且 Q1/Q5 严重倒挂，确认后标记为已强制下线。',
+        factor_ids: ['s_mom_12m1m_rank'],
+        affected_factor_ids: ['s_mom_12m1m_rank'],
+        offline_reason: '强制下线：Grade D、低效 20 个交易日且分组收益倒挂。',
+        offline_detail: { grade: 'D', rank_ic: 0.002, ir: 0.12, group_inverted: true },
+        severity: 'danger',
+      },
+      {
+        id: 'gq-prune-demo',
+        kind: 'PRUNE',
+        command: 'PRUNE',
+        label: '冗余裁剪',
+        title: 'BP 因子与 EP 因子同簇高相关',
+        detail: '同簇相关性超过 0.90，保留 IR/覆盖率更优的 MVP 因子。',
+        factor_ids: ['s_val_bp_latest_raw'],
+        affected_factor_ids: ['s_val_bp_latest_raw'],
+        keep_factor_id: 's_val_ep_ltm_raw',
+        offline_reason: '冗余裁剪：同簇高相关且弱于滚动市盈率倒数 (LTM)',
+        offline_detail: {
+          keep_factor_id: 's_val_ep_ltm_raw',
+          correlation: 0.93,
+          comparison: {
+            candidate: { factor_id: 's_val_bp_latest_raw', factor_name: '最新账面市值比' },
+            mvp: { factor_id: 's_val_ep_ltm_raw', factor_name: '滚动市盈率倒数 (LTM)' },
+          },
+        },
+        severity: 'warning',
+      },
       {
         id: 'gq-review-demo',
         kind: 'REVIEW',
@@ -863,7 +911,7 @@ function createFactorGovernanceOverview(items = createFactorListItems()): ApiFac
         },
       },
     ],
-    summary: { review_count: 1, decayed_count: 1, crowded_count: 1, suggestion_count: 1 },
+    summary: { deprecate_count: 1, prune_count: 1, review_count: 1, decayed_count: 1, crowded_count: 1, suggestion_count: 1 },
   };
 }
 
@@ -963,6 +1011,13 @@ function createDemoMiningJob(
         turnover: 0.32,
         coverage: 0.96,
         depth: 3,
+        fitness_score: 0.054,
+        max_style_correlation: 0.24,
+        correlation_penalty: 0,
+        max_drawdown_pct: 0.18,
+        benchmark_max_drawdown_pct: 0.16,
+        drawdown_vs_benchmark_ratio: 1.12,
+        auto_residual_summary: null,
         risk_flags: ['候选不会直接进入正式因子库'],
       },
       {
@@ -973,6 +1028,17 @@ function createDemoMiningJob(
         turnover: 0.21,
         coverage: 0.91,
         depth: 2,
+        fitness_score: 0.031,
+        max_style_correlation: 0.52,
+        correlation_penalty: 0.22,
+        max_drawdown_pct: 0.2,
+        benchmark_max_drawdown_pct: 0.16,
+        drawdown_vs_benchmark_ratio: 1.25,
+        auto_residual_summary: {
+          residual_expression: 'ZScore(Residual(s_mom_6m_rank, by="s_vol_252d_raw"))',
+          control_factor_id: 's_vol_252d_raw',
+          residual_rank_ic: 0.043,
+        },
         risk_flags: ['规模因子需复核容量约束'],
       },
       {
@@ -983,6 +1049,13 @@ function createDemoMiningJob(
         turnover: 0.28,
         coverage: 0.98,
         depth: 4,
+        fitness_score: 0.028,
+        max_style_correlation: 0.29,
+        correlation_penalty: 0,
+        max_drawdown_pct: 0.24,
+        benchmark_max_drawdown_pct: 0.16,
+        drawdown_vs_benchmark_ratio: 1.5,
+        auto_residual_summary: null,
         risk_flags: [],
       },
     ],
@@ -993,6 +1066,98 @@ function createDemoMiningJob(
     created_at: nowIso(),
     updated_at: nowIso(),
     completed_at: status === 'COMPLETED' || status === 'CANCELLED' ? nowIso() : null,
+  };
+}
+
+function createDemoFactorFactoryOverview(
+  profileStatus: 'ACTIVE' | 'PAUSED' = 'PAUSED',
+  trigger: 'DAILY' | 'MANUAL' = 'DAILY',
+  runStatus: ApiFactorFactoryRun['status'] = 'COMPLETED',
+): ApiFactorFactoryOverview {
+  const request: ApiFactorMiningJobCreatePayload = {
+    universe: 'SP500',
+    start_date: '2020-01-01',
+    end_date: '2025-12-31',
+    operators: ['Return', 'Std', 'Rank', 'ZScore', 'Winsorize'],
+    candidate_count: 1000,
+    random_seed: 42,
+    min_rank_ic: 0.03,
+    max_depth: 4,
+  };
+  const gatePolicy = {
+    pit_gate_mode: 'DIAGNOSTIC_ONLY' as const,
+    max_style_correlation: 0.3,
+    residual_enabled: true,
+    max_drawdown_relative_to_benchmark: 1.5,
+    min_oos_to_is_ratio: 0.5,
+  };
+  const miningJob = createDemoMiningJob(request, runStatus === 'CANCELLED' ? 'CANCELLED' : 'COMPLETED');
+  const quarantine = createFactorQuarantineCandidates();
+  const run: ApiFactorFactoryRun = {
+    id: trigger === 'DAILY' ? 'ffr_demo_daily' : 'ffr_demo_manual',
+    profile_id: 'default',
+    run_date: '2026-05-08',
+    trigger,
+    status: runStatus,
+    request,
+    gate_policy: gatePolicy,
+    config_signature: 'demo-factory',
+    mining_job_id: miningJob.id,
+    mining_job: miningJob,
+    summary: {
+      trigger,
+      daily_automation: trigger === 'DAILY',
+      pit_gate_mode: 'DIAGNOSTIC_ONLY',
+      residual_enabled: true,
+      drawdown_threshold: 1.5,
+      top_candidate_count: miningJob.top_candidates.length,
+      funnel: {
+        mined_candidates: miningJob.top_candidates.length,
+        quarantine_candidates: quarantine.items.length,
+      },
+    },
+    started_at: nowIso(),
+    completed_at: runStatus === 'COMPLETED' || runStatus === 'CANCELLED' ? nowIso() : null,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  };
+  const passed = quarantine.items.filter((item) => item.status === 'PASSED').length;
+  const published = quarantine.items.filter((item) => item.status === 'PUBLISHED').length;
+  return {
+    profile: {
+      id: 'default',
+      status: profileStatus,
+      timezone: 'Asia/Hong_Kong',
+      schedule_time: '14:00',
+      request,
+      gate_policy: gatePolicy,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+      last_run_date: profileStatus === 'ACTIVE' ? '2026-05-08' : null,
+      next_run_at: '2026-05-08T14:00:00+08:00',
+    },
+    active_run: runStatus === 'RUNNING' || runStatus === 'QUEUED' ? run : null,
+    latest_run: run,
+    runs: [run],
+    funnel: {
+      mined_candidates: miningJob.top_candidates.length,
+      quarantine_candidates: quarantine.items.length,
+      passed,
+      review_or_observation: quarantine.items.filter((item) => item.status === 'NEEDS_REVIEW').length,
+      rejected: quarantine.items.filter((item) => item.status === 'REJECTED').length,
+      published,
+    },
+    mining: {
+      items: [miningJob],
+      summary: {
+        total: 1,
+        completed_count: runStatus === 'COMPLETED' ? 1 : 0,
+        running_count: runStatus === 'RUNNING' ? 1 : 0,
+        total_candidates: miningJob.progress.total_candidates,
+      },
+    },
+    quarantine,
+    gate_policy: gatePolicy,
   };
 }
 
@@ -1605,10 +1770,26 @@ export const demoApi: DemoApi = {
         (item) => item.lifecycle_status === params.status || item.diagnostic_status === params.status,
       );
     }
+    const lifecycleBase = items;
+    const onlineItems = lifecycleBase.filter((item) => !isFactorOffline(item));
+    const offlineItems = lifecycleBase.filter((item) => isFactorOffline(item));
+    const lifecycle = String(params?.lifecycle ?? 'online').toLowerCase();
+    if (lifecycle === 'offline') {
+      items = offlineItems;
+    } else if (lifecycle === 'all') {
+      items = lifecycleBase;
+    } else {
+      items = onlineItems;
+    }
     return clone({
       items,
       summary: {
         total: items.length,
+        all_count: lifecycleBase.length,
+        online_count: onlineItems.length,
+        offline_count: offlineItems.length,
+        deprecated_count: offlineItems.filter((item) => item.lifecycle_status === 'DEPRECATED').length,
+        pruned_count: offlineItems.filter((item) => item.lifecycle_status === 'PRUNED').length,
         system_seed_count: items.filter((item) => item.source === 'SYSTEM_SEED').length,
         ready_to_diagnose_count: items.filter((item) => item.diagnostic_status === 'READY_TO_DIAGNOSE').length,
         sandbox_ready_count: items.filter((item) => item.diagnostic_status === 'SANDBOX_READY').length,
@@ -1621,6 +1802,35 @@ export const demoApi: DemoApi = {
 
   async getFactorGovernanceOverview(): Promise<ApiFactorGovernanceOverview> {
     return clone(createFactorGovernanceOverview());
+  },
+
+  async executeFactorGovernanceAction(actionId, payload): Promise<ApiFactorGovernanceExecuteResponse> {
+    const command = String(payload.command ?? '').toUpperCase();
+    const offlineAt = nowIso();
+    const factorIds = Array.from(
+      new Set([...(payload.factor_ids ?? []), payload.factor_id ?? ''].map(String).filter((item) => item.length > 0)),
+    );
+    const items = createFactorListItems()
+      .filter((item) => factorIds.includes(item.id))
+      .map((item) => ({
+        ...item,
+        lifecycle_status: command === 'PRUNE' ? 'PRUNED' as const : 'DEPRECATED' as const,
+        offline_command: command,
+        offline_reason: payload.reason,
+        offline_at: offlineAt,
+        offline_detail: payload.detail ?? {},
+      }));
+    return clone({
+      status: 'EXECUTED',
+      action_id: actionId,
+      command,
+      affected_factor_ids: factorIds,
+      keep_factor_id: payload.keep_factor_id ?? null,
+      offline_at: offlineAt,
+      reason: payload.reason,
+      items,
+      governance_overview: createFactorGovernanceOverview(),
+    });
   },
 
   async listFactorQuarantineCandidates(): Promise<ApiFactorQuarantineCandidateListResponse> {
@@ -1839,6 +2049,31 @@ export const demoApi: DemoApi = {
       ),
       id,
     });
+  },
+
+  async getFactorFactoryOverview(): Promise<ApiFactorFactoryOverview> {
+    return clone(createDemoFactorFactoryOverview());
+  },
+
+  async startFactorFactoryAutomation(
+    _payload?: ApiFactorFactoryAutomationPayload,
+  ): Promise<ApiFactorFactoryOverview> {
+    return clone(createDemoFactorFactoryOverview('ACTIVE', 'DAILY', 'COMPLETED'));
+  },
+
+  async pauseFactorFactoryAutomation(): Promise<ApiFactorFactoryOverview> {
+    return clone(createDemoFactorFactoryOverview('PAUSED', 'DAILY', 'COMPLETED'));
+  },
+
+  async runFactorFactoryNow(
+    _payload?: ApiFactorFactoryRunNowPayload,
+  ): Promise<ApiFactorFactoryOverview> {
+    return clone(createDemoFactorFactoryOverview('PAUSED', 'MANUAL', 'COMPLETED'));
+  },
+
+  async cancelFactorFactoryRun(id: string): Promise<ApiFactorFactoryRun> {
+    const overview = createDemoFactorFactoryOverview('ACTIVE', 'DAILY', 'CANCELLED');
+    return clone({ ...overview.latest_run!, id, status: 'CANCELLED' });
   },
 
   async previewFactorModel(payload: ApiFactorModelPreviewPayload): Promise<ApiFactorModelPreviewResponse> {

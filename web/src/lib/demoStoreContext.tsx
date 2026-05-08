@@ -42,6 +42,12 @@ import type {
   ApiFactorDiagnosticPreview,
   ApiFactorDiagnosticPreviewPayload,
   ApiFactorDiagnosticRunResponse,
+  ApiFactorFactoryAutomationPayload,
+  ApiFactorFactoryOverview,
+  ApiFactorFactoryRun,
+  ApiFactorFactoryRunNowPayload,
+  ApiFactorGovernanceExecutePayload,
+  ApiFactorGovernanceExecuteResponse,
   ApiFactorGovernanceOverview,
   ApiFactorListResponse,
   ApiFactorMiningJob,
@@ -780,6 +786,7 @@ function createHttpApiClient(): DemoApi {
       if (params?.tag) search.set('tag', params.tag);
       if (params?.market) search.set('market', params.market);
       if (params?.status) search.set('status', params.status);
+      if (params?.lifecycle) search.set('lifecycle', params.lifecycle);
       const suffix = search.toString();
       return requestJson<ApiFactorListResponse>(`/factors${suffix ? `?${suffix}` : ''}`);
     },
@@ -803,8 +810,28 @@ function createHttpApiClient(): DemoApi {
       requestJson<ApiFactorMiningJob>(`/factor-mining/jobs/${encodeURIComponent(id)}`),
     cancelFactorMiningJob: (id: string) =>
       requestJson<ApiFactorMiningJob>(`/factor-mining/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+    getFactorFactoryOverview: () => requestJson<ApiFactorFactoryOverview>('/factor-factory/overview'),
+    startFactorFactoryAutomation: (payload?: ApiFactorFactoryAutomationPayload) =>
+      requestJson<ApiFactorFactoryOverview>(
+        '/factor-factory/automation/start',
+        withJsonBody(payload ?? {}, { method: 'POST' }),
+      ),
+    pauseFactorFactoryAutomation: () =>
+      requestJson<ApiFactorFactoryOverview>('/factor-factory/automation/pause', { method: 'POST' }),
+    runFactorFactoryNow: (payload?: ApiFactorFactoryRunNowPayload) =>
+      requestJson<ApiFactorFactoryOverview>(
+        '/factor-factory/run-now',
+        withJsonBody(payload ?? {}, { method: 'POST' }),
+      ),
+    cancelFactorFactoryRun: (id: string) =>
+      requestJson<ApiFactorFactoryRun>(`/factor-factory/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
     getFactorGovernanceOverview: () =>
       requestJson<ApiFactorGovernanceOverview>('/factor-governance/overview'),
+    executeFactorGovernanceAction: (actionId: string, payload: ApiFactorGovernanceExecutePayload) =>
+      requestJson<ApiFactorGovernanceExecuteResponse>(
+        `/factor-governance/actions/${encodeURIComponent(actionId)}/execute`,
+        withJsonBody(payload, { method: 'POST' }),
+      ),
     listFactorQuarantineCandidates: (params) => {
       const search = new URLSearchParams();
       if (params?.status) search.set('status', params.status);

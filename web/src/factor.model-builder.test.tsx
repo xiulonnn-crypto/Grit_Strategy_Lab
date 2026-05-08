@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import type { ReactNode } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -8,10 +9,16 @@ const fakeFactorApi = vi.hoisted(() => ({
   getPitDataOverview: vi.fn(),
   runFactorDiagnostics: vi.fn(),
   previewFactorDiagnostics: vi.fn(),
+  previewFactorModel: vi.fn(),
+  createFactorModel: vi.fn(),
   getFactorGovernanceOverview: vi.fn(),
+  executeFactorGovernanceAction: vi.fn(),
 }));
 
-vi.mock('./lib/demoStoreContext', () => ({ useApiClient: () => fakeFactorApi }));
+vi.mock('./lib/demoStoreContext', () => ({
+  ApiClientProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
+  useApiClient: () => fakeFactorApi,
+}));
 
 import FactorModelBuilderPage, {
   type FactorModelCreateResponse,
@@ -19,6 +26,7 @@ import FactorModelBuilderPage, {
   type FactorModelPreview,
   type FactorModelPreviewPayload,
 } from './pages/factor-model-builder-page';
+import { loadFactorModelOptions } from './app-runtime-cn';
 import { FactorDetailPage, FactorLibraryPage } from './pages/factors-page';
 import type { ApiFactorDetail, ApiFactorListItem, ApiPitDataOverview } from './types';
 
@@ -188,7 +196,10 @@ afterEach(() => {
   fakeFactorApi.getPitDataOverview.mockReset();
   fakeFactorApi.runFactorDiagnostics.mockReset();
   fakeFactorApi.previewFactorDiagnostics.mockReset();
+  fakeFactorApi.previewFactorModel.mockReset();
+  fakeFactorApi.createFactorModel.mockReset();
   fakeFactorApi.getFactorGovernanceOverview.mockReset();
+  fakeFactorApi.executeFactorGovernanceAction.mockReset();
   window.location.hash = '';
 });
 
@@ -240,7 +251,7 @@ describe('FactorModelBuilderPage', () => {
     expect(screen.getAllByRole('button', { name: '创建可回测策略' })[0]).toBeDisabled();
   });
 
-  it('accepts governance queue factor and weight prefill while staying in draft review mode', () => {
+  it('accepts governance task factor and weight prefill while staying in draft review mode', () => {
     render(
       <FactorModelBuilderPage
         initialPrefill={{
@@ -253,21 +264,23 @@ describe('FactorModelBuilderPage', () => {
       />,
     );
 
-    expect(screen.getByText('治理队列已代入')).toBeInTheDocument();
+    expect(screen.getByText('治理任务已代入')).toBeInTheDocument();
     expect(screen.getByText('草稿 / 待审查')).toBeInTheDocument();
     expect(screen.getByLabelText('策略名称')).toHaveValue('自动挖掘因子待审查组合');
     expect((document.querySelector('#factor-weight-s_mom_12m1m_rank') as HTMLInputElement | null)?.value).toBe('20');
     expect((document.querySelector('#factor-weight-s_val_ep_ltm_raw') as HTMLInputElement | null)?.value).toBe('30');
   });
 
-  it('shows category, Rank IC, and IR tags in selector and weight factor cards', () => {
+  it('shows category, factor level, Rank IC, and IR tags in selector and weight factor cards', () => {
     const liveFactors: FactorModelOption[] = [
       {
         id: 's_mom_12m1m_rank',
         displayName: 'API 动量',
         family: '动量',
         categoryLabel: '动量',
+        rankIc: 0.052,
         rankIcLabel: 'Rank IC 0.052',
+        ir: 0.42,
         irLabel: 'IR 0.42',
         sourceLabel: '系统默认',
         diagnosticStatus: 'READY',
@@ -281,7 +294,8 @@ describe('FactorModelBuilderPage', () => {
 
     const selectorCard = screen.getByLabelText('选择API 动量').closest('.factor-pick');
     expect(selectorCard).not.toBeNull();
-    expect(within(selectorCard as HTMLElement).getByText('类别 动量')).toBeInTheDocument();
+    expect(within(selectorCard as HTMLElement).getByText('动量')).toBeInTheDocument();
+    expect(within(selectorCard as HTMLElement).getByText('因子级别 C 观察信号')).toBeInTheDocument();
     expect(within(selectorCard as HTMLElement).getByText('Rank IC 0.052')).toBeInTheDocument();
     expect(within(selectorCard as HTMLElement).getByText('IR 0.42')).toBeInTheDocument();
     expect(selectorCard?.textContent).not.toContain('高好');
@@ -294,9 +308,248 @@ describe('FactorModelBuilderPage', () => {
     expect(weightTitle).not.toBeNull();
     expect(within(weightTitle as HTMLElement).getByText('API 动量')).toBeInTheDocument();
     expect(within(weightTitle as HTMLElement).getByText('s_mom_12m1m_rank')).toHaveClass('factor-id');
-    expect(within(weightCard as HTMLElement).getByText('类别 动量')).toBeInTheDocument();
+    expect(within(weightCard as HTMLElement).getByText('动量')).toBeInTheDocument();
+    expect(within(weightCard as HTMLElement).getByText('因子级别 C 观察信号')).toBeInTheDocument();
     expect(within(weightCard as HTMLElement).getByText('Rank IC 0.052')).toBeInTheDocument();
     expect(within(weightCard as HTMLElement).getByText('IR 0.42')).toBeInTheDocument();
+  });
+
+  it('limits selector candidates to online factors whose diagnosis is not invalid', () => {
+    const liveFactors: FactorModelOption[] = [
+      {
+        id: 'online_ready',
+        displayName: 'Online ready factor',
+        family: 'Momentum',
+        rankIc: 0.04,
+        ir: 1.3,
+        sourceLabel: '线上因子',
+        diagnosticStatus: 'COMPLETED',
+        lifecycleStatus: 'VERIFIED',
+        uiState: 'robust',
+        isOnline: true,
+        pitCoveragePct: 100,
+        defaultWeight: 100,
+        defaultDirection: 'HIGH_IS_GOOD',
+      },
+      {
+        id: 'offline_factor',
+        displayName: 'Offline factor',
+        family: 'Value',
+        sourceLabel: '已下线',
+        diagnosticStatus: 'COMPLETED',
+        lifecycleStatus: 'DEPRECATED',
+        isOnline: false,
+        pitCoveragePct: 100,
+        defaultWeight: 0,
+        defaultDirection: 'HIGH_IS_GOOD',
+      },
+      {
+        id: 'failed_factor',
+        displayName: 'Failed factor',
+        family: 'Quality',
+        sourceLabel: '线上因子',
+        diagnosticStatus: 'FAILED',
+        lifecycleStatus: 'VERIFIED',
+        isOnline: true,
+        pitCoveragePct: 100,
+        defaultWeight: 0,
+        defaultDirection: 'HIGH_IS_GOOD',
+      },
+      {
+        id: 'decayed_factor',
+        displayName: 'Decayed factor',
+        family: 'Risk',
+        sourceLabel: '线上因子',
+        diagnosticStatus: 'COMPLETED',
+        lifecycleStatus: 'VERIFIED',
+        uiState: 'decayed',
+        isOnline: true,
+        pitCoveragePct: 100,
+        defaultWeight: 0,
+        defaultDirection: 'LOW_IS_GOOD',
+      },
+    ];
+
+    render(<FactorModelBuilderPage factors={liveFactors} useDefaultFallback={false} />);
+
+    const selectorPanel = document.querySelector('[aria-labelledby="factor-model-select"]');
+    expect(selectorPanel?.querySelectorAll('.factor-pick')).toHaveLength(1);
+    expect(within(selectorPanel as HTMLElement).getByText('Online ready factor')).toBeInTheDocument();
+    expect(screen.queryByText('Offline factor')).not.toBeInTheDocument();
+    expect(screen.queryByText('Failed factor')).not.toBeInTheDocument();
+    expect(screen.queryByText('Decayed factor')).not.toBeInTheDocument();
+  });
+
+  it('hydrates model selector candidates with sandbox preview metrics before mapping options', async () => {
+    const missingMetrics = makeFactor({
+      id: 's_mom_6m_rank',
+      name: '6m momentum',
+      diagnostic_status: 'SANDBOX_READY',
+      ui_state: 'sandbox',
+      latest_diagnostic_summary: null,
+      last_diagnostic_run_id: null,
+      batch_diagnostic_summary: { status: 'NO_DIAGNOSTIC' },
+    });
+    const previewDecayed = makeFactor({
+      id: 'preview_decayed',
+      name: 'Preview decayed',
+      diagnostic_status: 'SANDBOX_READY',
+      ui_state: 'sandbox',
+      latest_diagnostic_summary: null,
+      last_diagnostic_run_id: null,
+      batch_diagnostic_summary: { status: 'NO_DIAGNOSTIC' },
+    });
+    const stillMetricless = makeFactor({
+      id: 'metricless_manual',
+      name: 'Metricless manual',
+      diagnostic_status: 'SANDBOX_READY',
+      ui_state: 'sandbox',
+      latest_diagnostic_summary: null,
+      last_diagnostic_run_id: null,
+      batch_diagnostic_summary: { status: 'NO_DIAGNOSTIC' },
+    });
+    const failed = makeFactor({
+      id: 'failed_factor',
+      name: 'Failed factor',
+      diagnostic_status: 'FAILED',
+      ui_state: 'sandbox',
+      latest_diagnostic_summary: null,
+      last_diagnostic_run_id: null,
+    });
+    const api = {
+      listFactors: vi.fn().mockResolvedValue({
+        items: [missingMetrics, previewDecayed, stillMetricless, failed],
+        summary: {},
+      }),
+      previewFactorDiagnostics: vi.fn().mockResolvedValue({
+        mode: 'BATCH',
+        status: 'PREVIEW',
+        items: [
+          {
+            factor_id: 's_mom_6m_rank',
+            ui_state: 'sandbox',
+            ui_state_label: '沙箱',
+            diagnostic_status: 'SANDBOX_READY',
+            latest_diagnostic_summary: {
+              status: 'PREVIEW',
+              diagnostic_mode: 'SANDBOX',
+              rank_ic: 0.0283,
+              ir: 1.1787,
+              coverage: 98.99,
+            },
+            batch_diagnostic_summary: {
+              status: 'PREVIEW',
+              rank_ic: 0.0283,
+              ir: 1.1787,
+              coverage: 98.99,
+            },
+          },
+          {
+            factor_id: 'preview_decayed',
+            ui_state: 'decayed',
+            ui_state_label: '失效',
+            diagnostic_status: 'SANDBOX_READY',
+            latest_diagnostic_summary: {
+              status: 'PREVIEW',
+              diagnostic_mode: 'SANDBOX',
+              rank_ic: 0.004,
+              ir: 0.1,
+            },
+          },
+          {
+            factor_id: 'metricless_manual',
+            ui_state: 'sandbox',
+            diagnostic_status: 'SANDBOX_READY',
+            latest_diagnostic_summary: {
+              status: 'PREVIEW',
+              diagnostic_mode: 'SANDBOX',
+              rank_ic: null,
+              ir: null,
+            },
+          },
+        ],
+      }),
+    } as unknown as Parameters<typeof loadFactorModelOptions>[0];
+
+    const options = await loadFactorModelOptions(api);
+
+    expect(api.listFactors).toHaveBeenCalledWith({ lifecycle: 'online' });
+    expect(api.previewFactorDiagnostics).toHaveBeenCalledWith(expect.objectContaining({
+      batch: true,
+      diagnostic_mode: 'SANDBOX',
+      factor_ids: ['s_mom_6m_rank', 'preview_decayed', 'metricless_manual'],
+      include: ['ic', 'ir', 'groups', 'turnover', 'correlation', 'blockers'],
+    }));
+    expect(options.map((factor) => factor.id)).toEqual(['s_mom_6m_rank']);
+    expect(options[0]).toMatchObject({
+      rankIc: 0.0283,
+      rankIcLabel: 'Rank IC 0.028',
+      ir: 1.1787,
+      irLabel: 'IR 1.18',
+      uiState: 'sandbox',
+    });
+  });
+
+  it('falls back to single-factor previews when the batch metrics preview fails', async () => {
+    const first = makeFactor({
+      id: 's_mom_6m_rank',
+      name: '6m momentum',
+      diagnostic_status: 'SANDBOX_READY',
+      ui_state: 'sandbox',
+      latest_diagnostic_summary: null,
+      last_diagnostic_run_id: null,
+      batch_diagnostic_summary: { status: 'NO_DIAGNOSTIC' },
+    });
+    const second = makeFactor({
+      id: 's_beta_market_252d_raw',
+      name: 'Market beta',
+      diagnostic_status: 'SANDBOX_READY',
+      ui_state: 'sandbox',
+      latest_diagnostic_summary: null,
+      last_diagnostic_run_id: null,
+      batch_diagnostic_summary: { status: 'NO_DIAGNOSTIC' },
+    });
+    const previewFactorDiagnostics = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('batch preview unavailable'))
+      .mockResolvedValueOnce({
+        mode: 'BATCH',
+        status: 'PREVIEW',
+        items: [
+          {
+            factor_id: 's_mom_6m_rank',
+            ui_state: 'sandbox',
+            latest_diagnostic_summary: { status: 'PREVIEW', rank_ic: 0.0283, ir: 1.1787 },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        mode: 'BATCH',
+        status: 'PREVIEW',
+        items: [
+          {
+            factor_id: 's_beta_market_252d_raw',
+            ui_state: 'sandbox',
+            latest_diagnostic_summary: { status: 'PREVIEW', rank_ic: 0.1114, ir: 1.7363 },
+          },
+        ],
+      });
+    const api = {
+      listFactors: vi.fn().mockResolvedValue({ items: [first, second], summary: {} }),
+      previewFactorDiagnostics,
+    } as unknown as Parameters<typeof loadFactorModelOptions>[0];
+
+    const options = await loadFactorModelOptions(api);
+
+    expect(previewFactorDiagnostics).toHaveBeenCalledTimes(3);
+    expect(previewFactorDiagnostics.mock.calls[0][0].factor_ids).toEqual([
+      's_mom_6m_rank',
+      's_beta_market_252d_raw',
+    ]);
+    expect(previewFactorDiagnostics.mock.calls[1][0].factor_ids).toEqual(['s_mom_6m_rank']);
+    expect(previewFactorDiagnostics.mock.calls[2][0].factor_ids).toEqual(['s_beta_market_252d_raw']);
+    expect(options.map((factor) => factor.id)).toEqual(['s_mom_6m_rank', 's_beta_market_252d_raw']);
+    expect(options.map((factor) => factor.irLabel)).toEqual(['IR 1.18', 'IR 1.74']);
   });
 
   it('renders every live selector factor sorted by absolute IR descending', () => {
@@ -837,13 +1090,21 @@ describe('FactorModelBuilderPage', () => {
 
     expect(await screen.findByText('诊断状态')).toBeInTheDocument();
     expect(screen.getByText('阻断 / 风险')).toBeInTheDocument();
+    expect(screen.getByText('比对 / 操作')).toBeInTheDocument();
+    expect(screen.queryByText('下线原因')).not.toBeInTheDocument();
+    expect(screen.queryByText('下线时间')).not.toBeInTheDocument();
+    expect(screen.getAllByText(/准予生产|降权建议|仅供预览|物理封存/).length).toBeGreaterThan(0);
     expect(screen.getByText('覆盖五类核心风格因子，统一按系统种子治理与诊断。')).toBeInTheDocument();
     expect(screen.queryByText(/SYSTEM_SEED/)).not.toBeInTheDocument();
     expect(fakeFactorApi.getPitDataOverview).not.toHaveBeenCalled();
     expect(screen.queryByRole('columnheader', { name: '状态' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '查看12-1月截面动量排名诊断摘要' })).toHaveTextContent('稳健');
-    expect(screen.getAllByText('风险提示').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('硬阻断').length).toBeGreaterThan(0);
+    const segmented = document.querySelector('.factor-segmented');
+    expect(segmented).not.toBeNull();
+    expect(within(segmented as HTMLElement).getByRole('button', { name: '稳健' })).toBeInTheDocument();
+    expect(within(segmented as HTMLElement).getByRole('button', { name: '待校准' })).toBeInTheDocument();
+    expect(within(segmented as HTMLElement).getByRole('button', { name: '失效' })).toBeInTheDocument();
+    expect(within(segmented as HTMLElement).getByRole('button', { name: '沙箱' })).toBeInTheDocument();
     expect(screen.queryByText('资源队列')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '查看12-1月截面动量排名诊断摘要' }));
@@ -852,9 +1113,211 @@ describe('FactorModelBuilderPage', () => {
     expect(within(popover).getByText('最近诊断摘要')).toBeInTheDocument();
     expect(within(popover).getByText('0.052')).toBeInTheDocument();
     expect(within(popover).getByText('92.4%')).toBeInTheDocument();
+    expect(within(popover).getByText('判定原因')).toBeInTheDocument();
+    expect(within(popover).getByText(/覆盖率 92\.4%/)).toBeInTheDocument();
+    expect(within(popover).getAllByText(/准予生产/).length).toBeGreaterThan(0);
+    const reasonPanel = within(popover).getByText('判定原因').closest('.factor-diagnostic-popover__reason');
+    expect(reasonPanel).not.toBeNull();
+    expect(within(reasonPanel as HTMLElement).getAllByRole('listitem')).toHaveLength(2);
+    expect(reasonPanel as HTMLElement).not.toHaveTextContent('管理动作');
+
+    fireEvent.click(within(segmented as HTMLElement).getByRole('button', { name: '待校准' }));
+    expect(screen.getAllByText('滚动市盈率倒数 (LTM)').length).toBeGreaterThan(0);
+    expect(screen.queryByText('人工不可回放字段')).not.toBeInTheDocument();
   });
 
-  it('opens the factor library governance queue modal and routes draft suggestions to the builder', async () => {
+  it('shows standard category tags beside factor names and filters by the new taxonomy', async () => {
+    fakeFactorApi.listFactors.mockResolvedValue({
+      items: [
+        makeFactor({
+          id: 's_beta_resid_252d_z',
+          name: '残差贝塔代理（252日 Z分）',
+          descriptor: {
+            canonical_id: 's_beta_resid_252d_z',
+            source_prefix: 's',
+            category: 'beta',
+            metric: 'resid',
+            window: '252d',
+            operator: 'z',
+            schema_version: '1',
+          },
+          tags: ['beta'],
+        }),
+        makeFactor({
+          id: 's_inv_assetgrowth_1y_rank',
+          name: '资产增长代理（1年）',
+          descriptor: {
+            canonical_id: 's_inv_assetgrowth_1y_rank',
+            source_prefix: 's',
+            category: 'inv',
+            metric: 'assetgrowth',
+            window: '1y',
+            operator: 'rank',
+            schema_version: '1',
+          },
+          tags: ['investment'],
+        }),
+        makeFactor({
+          id: 's_inv_capex_ltm_raw',
+          name: '资本开支强度（LTM）',
+          descriptor: {
+            canonical_id: 's_inv_capex_ltm_raw',
+            source_prefix: 's',
+            category: 'inv',
+            metric: 'capex',
+            window: 'ltm',
+            operator: 'raw',
+            schema_version: '1',
+          },
+          tags: ['investment'],
+        }),
+        makeFactor({
+          id: 's_liq_turnover_20d_rank',
+          name: '换手率代理（20日）',
+          descriptor: {
+            canonical_id: 's_liq_turnover_20d_rank',
+            source_prefix: 's',
+            category: 'liq',
+            metric: 'turnover',
+            window: '20d',
+            operator: 'rank',
+            schema_version: '1',
+          },
+          tags: ['liquidity'],
+        }),
+        makeFactor({
+          id: 's_alpha_ffblend_cur_rank',
+          name: 'Fama-French 风格合成 Alpha',
+          descriptor: {
+            canonical_id: 's_alpha_ffblend_cur_rank',
+            source_prefix: 's',
+            category: 'alpha',
+            metric: 'ffblend',
+            window: 'cur',
+            operator: 'rank',
+            schema_version: '1',
+          },
+          tags: ['alpha_blend'],
+        }),
+      ],
+      summary: { system_seed_count: 5, pit_status: 'READY', governance_queue_count: 0, online_count: 5, offline_count: 0 },
+    });
+
+    render(<FactorLibraryPage />);
+
+    const factorCell = async (name: string) => {
+      const link = await screen.findByRole('button', { name });
+      return link.closest('td') as HTMLElement;
+    };
+
+    const betaCell = await factorCell('残差贝塔代理（252日 Z分）');
+    expect(within(betaCell).getByText('风险')).toHaveClass('factor-category-tag');
+    const assetGrowthCell = await factorCell('资产增长代理（1年）');
+    expect(within(assetGrowthCell).getByText('质量')).toHaveClass('factor-category-tag');
+    const capexCell = await factorCell('资本开支强度（LTM）');
+    expect(within(capexCell).getByText('质量')).toHaveClass('factor-category-tag');
+    const turnoverCell = await factorCell('换手率代理（20日）');
+    expect(within(turnoverCell).getByText('情绪')).toHaveClass('factor-category-tag');
+    const alphaCell = await factorCell('Fama-French 风格合成 Alpha');
+    expect(within(alphaCell).getByText('其他')).toHaveClass('factor-category-tag');
+
+    fireEvent.change(screen.getByLabelText('因子类别'), { target: { value: 'qlty' } });
+    expect(screen.getByRole('button', { name: '资产增长代理（1年）' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '资本开支强度（LTM）' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '残差贝塔代理（252日 Z分）' })).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('因子类别'), { target: { value: 'sentiment' } });
+    expect(screen.getByRole('button', { name: '换手率代理（20日）' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '资产增长代理（1年）' })).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('因子类别'), { target: { value: 'other' } });
+    expect(screen.getByRole('button', { name: 'Fama-French 风格合成 Alpha' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '换手率代理（20日）' })).not.toBeInTheDocument();
+  });
+
+  it('filters lifecycle tabs and correlation heatmap to the visible factor set', async () => {
+    const onlineFactors = [
+      makeFactor(),
+      makeFactor({
+        id: 's_val_ep_ltm_raw',
+        name: '滚动市盈率倒数 (LTM)',
+        descriptor: {
+          canonical_id: 's_val_ep_ltm_raw',
+          source_prefix: 's',
+          category: 'val',
+          metric: 'ep',
+          window: 'ltm',
+          operator: 'raw',
+          schema_version: '1',
+        },
+      }),
+    ];
+    const offlineFactors = [
+      makeFactor({
+        id: 's_noise_legacy_rank',
+        name: '旧版噪声因子',
+        lifecycle_status: 'DEPRECATED',
+        offline_reason: '强制下线：Grade D、低效 20 个交易日且分组收益倒挂。',
+        offline_at: '2026-05-08T09:00:00Z',
+        offline_command: 'DEPRECATE',
+        ui_state: 'decayed',
+        ui_state_label: '已下线',
+      }),
+      makeFactor({
+        id: 's_val_bp_latest_raw',
+        name: '账面市值比冗余因子',
+        lifecycle_status: 'PRUNED',
+        offline_reason: '冗余裁剪：同簇高相关且非 MVP 因子。',
+        offline_at: '2026-05-08T09:30:00Z',
+        offline_command: 'PRUNE',
+        offline_detail: {
+          keep_factor_id: 's_val_ep_ltm_raw',
+          correlation: 0.93,
+          comparison: {
+            mvp: {
+              factor_id: 's_val_ep_ltm_raw',
+              factor_name: '滚动市盈率倒数 (LTM)',
+            },
+          },
+        },
+        ui_state: 'decayed',
+        ui_state_label: '已下线',
+      }),
+    ];
+    fakeFactorApi.listFactors.mockImplementation((params?: { lifecycle?: string }) => Promise.resolve({
+      items: params?.lifecycle === 'offline' ? offlineFactors : onlineFactors,
+      summary: {
+        system_seed_count: 2,
+        pit_status: 'READY',
+        online_count: onlineFactors.length,
+        offline_count: offlineFactors.length,
+        governance_queue_count: 0,
+      },
+    }));
+
+    render(<FactorLibraryPage />);
+
+    expect(await screen.findByRole('tab', { name: /线上因子/ })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('阻断 / 风险')).toBeInTheDocument();
+    expect(screen.getByText('比对 / 操作')).toBeInTheDocument();
+    expect(screen.queryByText('下线原因')).not.toBeInTheDocument();
+    expect(screen.queryByText('下线时间')).not.toBeInTheDocument();
+    expect(fakeFactorApi.listFactors).toHaveBeenCalledWith(expect.objectContaining({ lifecycle: 'online' }));
+    await waitFor(() => expect(document.querySelector('.factor-correlation__grid')?.getAttribute('style')).toContain('--factor-count: 2'));
+    fireEvent.click(screen.getByRole('tab', { name: /已下线因子/ }));
+    await waitFor(() => expect(fakeFactorApi.listFactors).toHaveBeenCalledWith(expect.objectContaining({ lifecycle: 'offline' })));
+    expect((await screen.findAllByText('旧版噪声因子')).length).toBeGreaterThan(0);
+    expect(screen.getByText('下线原因')).toBeInTheDocument();
+    expect(screen.getByText('下线时间')).toBeInTheDocument();
+    expect(screen.queryByText('阻断 / 风险')).not.toBeInTheDocument();
+    expect(screen.queryByText('比对 / 操作')).not.toBeInTheDocument();
+    expect(screen.getAllByText(/强制下线/).length).toBeGreaterThan(0);
+    expect(screen.getByText('冗余裁剪：同簇高相关且弱于滚动市盈率倒数 (LTM)')).toBeInTheDocument();
+    expect(screen.queryByText('滚动市盈率倒数 (LTM)')).not.toBeInTheDocument();
+    await waitFor(() => expect(document.querySelector('.factor-correlation__grid')?.getAttribute('style')).toContain('--factor-count: 2'));
+  });
+
+  it('opens governance tasks, executes offline actions with confirmation, and routes draft suggestions', async () => {
     fakeFactorApi.listFactors.mockResolvedValue({
       items: [
         makeFactor(),
@@ -867,12 +1330,24 @@ describe('FactorModelBuilderPage', () => {
           expression: 'Rank(Delta(Close, 63))',
         }),
       ],
-      summary: { system_seed_count: 1, pit_status: 'READY', governance_queue_count: 2 },
+      summary: { system_seed_count: 1, pit_status: 'READY', governance_queue_count: 1, online_count: 2, offline_count: 0 },
     });
     fakeFactorApi.getFactorGovernanceOverview.mockResolvedValue({
       as_of: '2026-05-06T09:00:00Z',
       queue_count: 2,
       actions: [
+        {
+          id: 'gq_deprecate_s_mom_12m1m_rank',
+          kind: 'DEPRECATE',
+          command: 'DEPRECATE',
+          label: '强制下线',
+          title: '动量因子满足强制下线条件',
+          detail: 'Grade D、20 个交易日低效且 Q1/Q5 严重倒挂。',
+          factor_ids: ['s_mom_12m1m_rank'],
+          affected_factor_ids: ['s_mom_12m1m_rank'],
+          offline_reason: '强制下线：Grade D、低效 20 个交易日且分组收益倒挂。',
+          severity: 'danger',
+        },
         {
           id: 'gq_review_a_mom_auto_rank',
           kind: 'REVIEW',
@@ -906,33 +1381,186 @@ describe('FactorModelBuilderPage', () => {
         },
       ],
     });
+    fakeFactorApi.executeFactorGovernanceAction.mockResolvedValue({
+      status: 'EXECUTED',
+      action_id: 'gq_deprecate_s_mom_12m1m_rank',
+      command: 'DEPRECATE',
+      affected_factor_ids: ['s_mom_12m1m_rank'],
+      keep_factor_id: null,
+      offline_at: '2026-05-08T09:00:00Z',
+      reason: '强制下线：Grade D、低效 20 个交易日且分组收益倒挂。',
+      items: [
+        makeFactor({
+          lifecycle_status: 'DEPRECATED',
+          offline_reason: '强制下线：Grade D、低效 20 个交易日且分组收益倒挂。',
+          offline_at: '2026-05-08T09:00:00Z',
+          offline_command: 'DEPRECATE',
+        }),
+      ],
+      governance_overview: {
+        as_of: '2026-05-08T09:00:00Z',
+        queue_count: 1,
+        actions: [
+          {
+            id: 'gq_model_a_mom_auto_rank',
+            kind: 'FACTOR_MODEL_SUGGESTION',
+            label: '策略草稿建议',
+            title: '多因子策略草稿建议',
+            detail: '建议权重不超过 20%，进入创建页后仍需预检。',
+            factor_ids: ['a_mom_auto_rank', 's_mom_12m1m_rank'],
+            suggested_weights: [
+              { factor_id: 'a_mom_auto_rank', weight_pct: 20, direction: 'HIGH_IS_BETTER' },
+              { factor_id: 's_mom_12m1m_rank', weight_pct: 30, direction: 'HIGH_IS_BETTER' },
+            ],
+            severity: 'info',
+            target: {
+              route: '#/factor-models/new',
+              query: {
+                source: 'governance_queue',
+                factorIds: 'a_mom_auto_rank,s_mom_12m1m_rank',
+                weights: '20,30',
+                directions: 'HIGH_IS_BETTER,HIGH_IS_BETTER',
+              },
+            },
+          },
+        ],
+      },
+    });
     render(<FactorLibraryPage />);
 
-    const trigger = (await screen.findByText('治理队列')).closest('button');
+    const trigger = (await screen.findByText('治理任务')).closest('button');
     expect(trigger).not.toBeNull();
     fireEvent.click(trigger as HTMLButtonElement);
 
-    expect(await screen.findByRole('dialog', { name: '治理队列' })).toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: '治理任务' })).toBeInTheDocument();
     await waitFor(() => expect(fakeFactorApi.getFactorGovernanceOverview).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText('自动挖掘候选需要复核')).toBeInTheDocument();
-    expect(screen.getByText('多因子策略草稿建议')).toBeInTheDocument();
+    await waitFor(() => expect(trigger).toHaveTextContent('2'));
+    expect(await screen.findByText('动量因子满足强制下线条件')).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole('button', { name: '二次确认' })[0]);
+    const confirmDialog = await screen.findByRole('dialog', { name: '确认治理任务' });
+    expect(confirmDialog).toBeInTheDocument();
+    expect(confirmDialog).toHaveTextContent('强制下线会写入“已强制下线”状态');
+    expect(confirmDialog).not.toHaveTextContent('DEPRECATE');
+    expect(confirmDialog).not.toHaveTextContent('DEPRECATED');
+    expect(confirmDialog).not.toHaveTextContent('PRUNE');
+    expect(confirmDialog).not.toHaveTextContent('PRUNED');
+    fireEvent.click(screen.getByRole('button', { name: '确认执行' }));
+    await waitFor(() => expect(fakeFactorApi.executeFactorGovernanceAction).toHaveBeenCalledWith(
+      'gq_deprecate_s_mom_12m1m_rank',
+      expect.objectContaining({ confirm: true, command: 'DEPRECATE', factor_ids: ['s_mom_12m1m_rank'] }),
+    ));
+    expect(await screen.findByText('多因子策略草稿建议')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '带入创建页' }));
 
     await waitFor(() => expect(window.location.hash).toContain('#/factor-models/new'));
     expect(window.location.hash).toContain('source=governance_queue');
     expect(decodeURIComponent(window.location.hash)).toContain('a_mom_auto_rank');
-    expect(decodeURIComponent(window.location.hash)).toContain('weights=20,30');
+    expect(decodeURIComponent(window.location.hash)).toContain('weights=20');
   });
 
-  it('renders no-IC factors as pending instead of showing a synthetic IC curve', async () => {
+  it('shows prune confirmation factor identities, metric comparison, and final plan', async () => {
+    fakeFactorApi.listFactors.mockResolvedValue({
+      items: [
+        makeFactor({
+          id: 'm_mom_longdra_126d_rank',
+          name: '下行风险调整后6m动量',
+          descriptor: {
+            canonical_id: 'm_mom_longdra_126d_rank',
+            source_prefix: 'm',
+            category: 'mom',
+            metric: 'longdra',
+            window: '126d',
+            operator: 'rank',
+            schema_version: '1',
+          },
+        }),
+        makeFactor({
+          id: 'm_mom_longra_126d_rank',
+          name: '风险调整后动量',
+          descriptor: {
+            canonical_id: 'm_mom_longra_126d_rank',
+            source_prefix: 'm',
+            category: 'mom',
+            metric: 'longra',
+            window: '126d',
+            operator: 'rank',
+            schema_version: '1',
+          },
+        }),
+      ],
+      summary: { system_seed_count: 0, pit_status: 'READY', governance_queue_count: 1, online_count: 2, offline_count: 0 },
+    });
+    fakeFactorApi.getFactorGovernanceOverview.mockResolvedValue({
+      as_of: '2026-05-08T09:00:00Z',
+      queue_count: 1,
+      actions: [
+        {
+          id: 'gq_prune_m_mom_longdra_126d_rank',
+          kind: 'PRUNE',
+          command: 'PRUNE',
+          label: '冗余裁剪',
+          title: '下行风险调整后6m动量 标记为冗余挂起',
+          detail: '同簇相关性超过 0.90，保留 IR/覆盖率更优的 MVP 因子。',
+          factor_ids: ['m_mom_longdra_126d_rank'],
+          affected_factor_ids: ['m_mom_longdra_126d_rank'],
+          keep_factor_id: 'm_mom_longra_126d_rank',
+          offline_reason: '冗余裁剪：同簇高相关且弱于风险调整后动量',
+          offline_detail: {
+            eligible: true,
+            factor_id: 'm_mom_longdra_126d_rank',
+            keep_factor_id: 'm_mom_longra_126d_rank',
+            correlation: 0.94,
+            comparison: {
+              candidate: {
+                factor_id: 'm_mom_longdra_126d_rank',
+                factor_name: '下行风险调整后6m动量',
+                rank_ic: 0.0294,
+                ir: 1.2591,
+                coverage: 99.13,
+              },
+              mvp: {
+                factor_id: 'm_mom_longra_126d_rank',
+                factor_name: '风险调整后动量',
+                rank_ic: 0.0308,
+                ir: 1.3205,
+                coverage: 99.13,
+              },
+            },
+          },
+          severity: 'warning',
+        },
+      ],
+    });
+
+    render(<FactorLibraryPage />);
+    fireEvent.click((await screen.findByText('治理任务')).closest('button') as HTMLButtonElement);
+    fireEvent.click(await screen.findByRole('button', { name: '二次确认' }));
+
+    const confirmDialog = await screen.findByRole('dialog', { name: '确认治理任务' });
+    expect(confirmDialog).toHaveTextContent('待裁剪因子');
+    expect(confirmDialog).toHaveTextContent('保留 MVP');
+    expect(confirmDialog).toHaveTextContent('最终方案');
+    expect(confirmDialog).toHaveTextContent('下行风险调整后6m动量');
+    expect(confirmDialog).toHaveTextContent('m_mom_longdra_126d_rank');
+    expect(confirmDialog).toHaveTextContent('风险调整后动量');
+    expect(confirmDialog).toHaveTextContent('m_mom_longra_126d_rank');
+    expect(confirmDialog).toHaveTextContent('相关性 0.94');
+    expect(confirmDialog).toHaveTextContent('Rank IC 0.029');
+    expect(confirmDialog).toHaveTextContent('IR 1.26');
+    expect(confirmDialog).toHaveTextContent('覆盖率 99.13%');
+    expect(confirmDialog).toHaveTextContent('保留 风险调整后动量');
+    expect(confirmDialog).toHaveTextContent('下线 下行风险调整后6m动量');
+  });
+
+  it('renders no-IC factors as sandbox instead of showing a synthetic IC curve', async () => {
     fakeFactorApi.listFactors.mockResolvedValue({
       items: [
         makeFactor({
           id: 's_beta_market_252d_raw',
           name: '市场贝塔代理（252日）',
           diagnostic_status: 'READY_TO_DIAGNOSE',
-          ui_state: 'needs_calibration',
-          ui_state_label: '待校准',
+          ui_state: 'sandbox',
+          ui_state_label: '沙箱',
           latest_diagnostic_summary: null,
           last_diagnostic_run_id: null,
           ic_sparkline: [],
@@ -951,6 +1579,7 @@ describe('FactorModelBuilderPage', () => {
     expect((await screen.findAllByText('市场贝塔代理（252日）')).length).toBeGreaterThan(0);
     expect(screen.getByText('Rank IC: 尚未提交诊断')).toBeInTheDocument();
     expect(screen.getByText('暂无 IC')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '查看市场贝塔代理（252日）诊断摘要' })).toHaveTextContent('沙箱');
     expect(screen.queryByLabelText('IC 累积曲线缩略图')).not.toBeInTheDocument();
   });
 
@@ -1013,7 +1642,7 @@ describe('FactorModelBuilderPage', () => {
     expect(diagnosticCell?.children[0]).toHaveClass('factor-diagnostic-cell__metrics');
     expect(diagnosticCell?.children[1]).toHaveClass('factor-diagnostic-cell__reference');
     expect(diagnosticCell?.children[2]).toHaveClass('factor-sparkline');
-    expect(screen.getByText('风险提示')).toBeInTheDocument();
+    expect(screen.getAllByText(/降权建议|准予生产|仅供预览|物理封存/).length).toBeGreaterThan(0);
     expect(screen.queryByText('硬阻断')).not.toBeInTheDocument();
   });
 
@@ -1140,9 +1769,11 @@ describe('FactorModelBuilderPage', () => {
     expect(css).toMatch(/\.factor-model-builder-page \.factor-model-weight-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
     expect(css).toMatch(/\.factor-model-builder-page \.factor-model-selector-list\s*\{[^}]*max-height:\s*calc\(\(96px \* 5\) \+ \(9\.5px \* 4\)\);[^}]*overflow-y:\s*auto;/s);
     expect(css).toContain('.factor-model-builder-page .factor-model-card-tags');
+    expect(css).toContain('.factor-model-builder-page .factor-model-metric-chip--level');
     expect(css).toContain('.factor-model-builder-page .factor-model-metric-chip--rank-ic');
     expect(css).toMatch(/\.factor-model-builder-page \.factor-model-metric-chip\s*\{[^}]*background:\s*#f7f8fa;[^}]*color:\s*#52616d;/s);
-    expect(css).toMatch(/\.factor-model-builder-page \.factor-model-metric-chip--category,[\s\S]*\.factor-model-builder-page \.factor-model-metric-chip--rank-ic,[\s\S]*\.factor-model-builder-page \.factor-model-metric-chip--ir\s*\{[^}]*background:\s*#f7f8fa;[^}]*color:\s*#52616d;/s);
+    expect(css).toMatch(/\.factor-model-builder-page \.factor-model-name-control\s*\{[^}]*grid-template-columns:\s*max-content minmax\(180px,\s*280px\);/s);
+    expect(css).toMatch(/\.factor-model-builder-page \.factor-model-metric-chip--category,[\s\S]*\.factor-model-builder-page \.factor-model-metric-chip--level,[\s\S]*\.factor-model-builder-page \.factor-model-metric-chip--rank-ic,[\s\S]*\.factor-model-builder-page \.factor-model-metric-chip--ir\s*\{[^}]*background:\s*#f7f8fa;[^}]*color:\s*#52616d;/s);
     expect(css).toMatch(/\.factor-model-builder-page \.factor-model-governance-row\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(min\(240px,\s*100%\),\s*1fr\)\);/s);
     expect(css).toContain('.factor-model-builder-page .factor-model-rebalance-control');
     expect(css).toContain('.factor-model-builder-page .score-card small');
@@ -1152,12 +1783,25 @@ describe('FactorModelBuilderPage', () => {
     expect(css).toContain('overflow-wrap: anywhere;');
     expect(css).toMatch(/@media\s*\(max-width:\s*720px\)[\s\S]*\.factor-phase2-metrics,[\s\S]*\.factor-model-factor,[\s\S]*\.factor-model-builder-page \.factor-model-weight-row\s*\{[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
     expect(factorsCss).toContain('.factor-diagnostic-popover');
+    expect(factorsCss).toContain('.factor-diagnostic-popover__reason');
     expect(factorsCss).toContain('.factor-diagnostic-state__button');
     expect(factorsCss).toContain('.factor-gate-pill--warn');
     expect(factorsCss).toContain('.factor-sparkline-empty');
+    expect(factorsCss).toContain('.factor-category-tag');
+    expect(factorsCss).not.toContain('.factor-category-tag[data-category="risk"]');
+    expect(factorsCss).toContain('.factor-correlation__group[data-category="sentiment"]');
+    expect(factorsCss).toContain('.factor-correlation__group[data-category="other"]');
+    expect(factorsCss).toContain('.factor-governance-confirm-note');
+    expect(factorsCss).toMatch(/\.factor-governance-modal__panel--confirm \.factor-action-row\s*\{[^}]*justify-content:\s*flex-end;/s);
     expect(factorsCss).toContain('.factor-level-cell');
     expect(factorsCss).toContain('.factor-level-badge--s');
-    expect(factorsCss).toMatch(/\.factor-table\s*\{[^}]*min-width:\s*1120px;/s);
+    expect(factorsCss).toMatch(/\.factor-table-wrap\s*\{[^}]*overflow-x:\s*hidden;/s);
+    expect(factorsCss).toMatch(/\.factor-table\s*\{[^}]*min-width:\s*0;[^}]*table-layout:\s*auto;/s);
+    expect(factorsCss).toMatch(/\.factor-table--online\s*\{[^}]*min-width:\s*0;/s);
+    expect(factorsCss).toMatch(/\.factor-table--online th:nth-child\(1\),\s*\.factor-table--online td:nth-child\(1\)\s*\{[^}]*min-width:\s*min\(200px,\s*21vw\);[^}]*max-width:\s*min\(300px,\s*25vw\);/s);
+    expect(factorsCss).toMatch(/\.factor-table--online th:nth-child\(6\),\s*\.factor-table--online td:nth-child\(6\)\s*\{[^}]*min-width:\s*min\(198px,\s*21vw\);[^}]*max-width:\s*min\(300px,\s*26vw\);/s);
+    expect(factorsCss).toContain('.factor-offline-reason');
+    expect(factorsCss).toContain('.factor-row-actions--inline');
     expect(factorsCss).toMatch(/\.factor-diagnostic-cell\s*\{[^}]*grid-template-columns:\s*minmax\(134px,\s*1fr\)\s*max-content\s*116px;/s);
     expect(factorsCss).toMatch(/\.factor-diagnostic-state\s*\{[^}]*position:\s*relative;/s);
     expect(factorsCss).toMatch(/\.factor-diagnostic-popover\s*\{[^}]*z-index:\s*80;/s);

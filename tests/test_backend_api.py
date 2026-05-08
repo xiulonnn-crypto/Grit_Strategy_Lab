@@ -1034,8 +1034,14 @@ def test_snapshot_refresh_heartbeat_persists_runtime_stage_and_refresh_stats(tmp
     stored_row = service.storage.fetch_one("SELECT * FROM snapshot_refresh_jobs WHERE id = ?", ("snap_heartbeat",))
     decoded_job = service._decode_snapshot_refresh_job(stored_row)
     runtime_state = service._load_snapshot_refresh_runtime_state()
+    runtime_row = service.storage.fetch_one(
+        "SELECT updated_at FROM app_runtime_state WHERE state_key = ?",
+        ("snapshot_refresh_runtime",),
+    )
 
     assert decoded_job is not None
+    assert runtime_row is not None
+    assert runtime_row["updated_at"] == "2026-04-13T07:01:00Z"
     assert decoded_job["summary"]["current_stage"] == "repair_market_data"
     assert decoded_job["summary"]["current_stage_label"] == "正在修复历史缺口数据"
     assert decoded_job["summary"]["heartbeat_at"] == "2026-04-13T07:01:00Z"
@@ -2778,7 +2784,31 @@ def test_snapshot_overview_publishes_benchmark_etf_price_history_coverage(tmp_pa
 
 def test_repair_refresh_batches_missing_symbols_without_dropping_unattempted_gaps(tmp_path, monkeypatch):
     monkeypatch.setattr(real_service_module, "SNAPSHOT_REPAIR_SYMBOL_BATCH_SIZE", 2)
-    service = RealBacktestPlatformService(tmp_path / "repair-batch.db", market_data_provider=None)
+    class _Provider:
+        provider_name = "repair_batch_provider"
+
+        def fetch_history(self, symbol, start_date, end_date):
+            return {
+                "source": self.provider_name,
+                "fallback_source": None,
+                "bars": [
+                    {
+                        "date": "2026-04-08",
+                        "open": 10.0,
+                        "high": 11.0,
+                        "low": 9.0,
+                        "close": 10.5,
+                        "adj_close": 10.5,
+                        "volume": 1000,
+                    }
+                ],
+                "actions": [],
+                "warnings": [],
+                "partial": False,
+                "metadata": {},
+            }
+
+    service = RealBacktestPlatformService(tmp_path / "repair-batch.db", market_data_provider=_Provider())
     repository = service.market_data_repository
     repository.replace_dataset_snapshot(
         {
@@ -2809,7 +2839,8 @@ def test_repair_refresh_batches_missing_symbols_without_dropping_unattempted_gap
     assert price_snapshot["status"] == "INCOMPLETE"
     assert metadata["selection_mode"] == "repair_missing_symbols_batch"
     assert metadata["selected_missing_symbols"] == ["AAA", "BBB"]
-    assert metadata["repair_priority"] == "corporate_first_unified_queue"
+    assert metadata["repair_priority"] == "price_only_queue"
+    assert metadata["existing_price_missing_symbol_count"] == 3
     assert metadata["existing_corporate_missing_symbol_count"] == 0
     assert metadata["missing_symbols"] == ["CCC"]
     assert metadata["repair_cursor"] == 2
@@ -2819,7 +2850,31 @@ def test_repair_refresh_batches_missing_symbols_without_dropping_unattempted_gap
 
 def test_repair_refresh_honors_request_symbol_limit_for_single_job(tmp_path, monkeypatch):
     monkeypatch.setattr(real_service_module, "SNAPSHOT_REPAIR_SYMBOL_BATCH_SIZE", 2)
-    service = RealBacktestPlatformService(tmp_path / "repair-limit.db", market_data_provider=None)
+    class _Provider:
+        provider_name = "repair_limit_provider"
+
+        def fetch_history(self, symbol, start_date, end_date):
+            return {
+                "source": self.provider_name,
+                "fallback_source": None,
+                "bars": [
+                    {
+                        "date": "2026-04-08",
+                        "open": 10.0,
+                        "high": 11.0,
+                        "low": 9.0,
+                        "close": 10.5,
+                        "adj_close": 10.5,
+                        "volume": 1000,
+                    }
+                ],
+                "actions": [],
+                "warnings": [],
+                "partial": False,
+                "metadata": {},
+            }
+
+    service = RealBacktestPlatformService(tmp_path / "repair-limit.db", market_data_provider=_Provider())
     repository = service.market_data_repository
     repository.replace_dataset_snapshot(
         {
@@ -2857,6 +2912,111 @@ def test_repair_refresh_honors_request_symbol_limit_for_single_job(tmp_path, mon
     assert metadata["repair_symbol_limit"] == 3
     assert metadata["missing_symbols"] == ["DDD"]
     assert metadata["repair_cursor"] == 3
+
+
+def test_repair_refresh_price_target_does_not_select_or_write_corporate_queue(tmp_path):
+    class _Provider:
+        provider_name = "price_target_provider"
+
+        def __init__(self) -> None:
+            self.symbols: list[str] = []
+
+        def fetch_history(self, symbol, start_date, end_date):
+            self.symbols.append(str(symbol))
+            return {
+                "source": self.provider_name,
+                "fallback_source": None,
+                "bars": [
+                    {
+                        "date": "2026-04-08",
+                        "open": 10.0,
+                        "high": 11.0,
+                        "low": 9.0,
+                        "close": 10.5,
+                        "adj_close": 10.5,
+                        "volume": 1000,
+                    }
+                ],
+                "actions": [
+                    {
+                        "date": "2026-04-08",
+                        "action_type": "dividend",
+                        "value": 0.25,
+                        "source": self.provider_name,
+                    }
+                ],
+                "warnings": [],
+                "partial": False,
+                "metadata": {},
+            }
+
+    provider = _Provider()
+    service = RealBacktestPlatformService(tmp_path / "price-target-repair.db", market_data_provider=provider)
+    repository = service.market_data_repository
+    repository.replace_dataset_snapshot(
+        {
+            "id": "ds-price",
+            "name": "price",
+            "status": "INCOMPLETE",
+            "as_of": "2026-04-08T00:00:00Z",
+            "freshness_label": "stale",
+            "start_date": "1996-01-01",
+            "end_date": "2026-04-08",
+            "row_count": 0,
+            "source": "existing_price",
+            "fallback_source": None,
+            "blocker": {"code": "PRICE_SNAPSHOT_INCOMPLETE", "message": "waiting"},
+            "metadata": {"missing_symbols": ["PRICE"], "repair_cursor": 0},
+        },
+        price_bars=[],
+        symbol_coverage=[],
+    )
+    repository.replace_dataset_snapshot(
+        {
+            "id": "ds-corporate-actions",
+            "name": "corporate",
+            "status": "INCOMPLETE",
+            "as_of": "2026-04-08T00:00:00Z",
+            "freshness_label": "stale",
+            "start_date": "2026-04-08",
+            "end_date": "2026-04-08",
+            "row_count": 1,
+            "source": "existing_corporate",
+            "fallback_source": None,
+            "blocker": {"code": "CORPORATE_ACTIONS_INCOMPLETE", "message": "waiting"},
+            "metadata": {"missing_symbols": ["CORP"], "repair_cursor": 0},
+        },
+        corporate_actions=[
+            {
+                "symbol": "BASE",
+                "date": "2026-04-08",
+                "action_type": "dividend",
+                "value": 0.1,
+                "source": "existing_corporate",
+                "payload": {},
+            }
+        ],
+        symbol_coverage=[
+            CoverageSummary(symbol="BASE", start_date="2026-04-08", end_date="2026-04-08", trade_days=1)
+        ],
+    )
+
+    service.refresh_snapshots({"reason": "price-target-only", "mode": "repair", "targets": ["price"]})
+
+    stored_price = next(item for item in repository.list_dataset_snapshots() if item["id"] == "ds-price")
+    stored_corporate = next(item for item in repository.list_dataset_snapshots() if item["id"] == "ds-corporate-actions")
+    price_metadata = dict(stored_price.get("metadata") or {})
+    corporate_metadata = dict(stored_corporate.get("metadata") or {})
+
+    assert "CORP" not in provider.symbols
+    assert "SP500" not in provider.symbols
+    assert "PRICE" in provider.symbols
+    assert price_metadata["selected_missing_symbols"] == ["PRICE"]
+    assert price_metadata["repair_priority"] == "price_only_queue"
+    assert price_metadata["existing_corporate_missing_symbol_count"] == 1
+    assert corporate_metadata["missing_symbols"] == ["CORP"]
+    assert stored_corporate["source"] == "existing_corporate"
+    assert repository.count_dataset_snapshot_rows("ds-corporate-actions")["corporate_actions"] == 1
 
 
 def test_snapshot_overview_recomputes_missing_symbols_from_target_minus_coverage(tmp_path):

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { formatDateTime } from '../lib/format';
 import type {
   ApiDataTrustLayer,
@@ -56,6 +56,7 @@ const EQUITY_FILTERS: Array<{ id: EquityFilter; label: string }> = [
 ];
 
 const TRUST_CREDENTIAL_DRAFT_STORAGE_KEY = 'gsl.snapshots.trustCredentialDrafts.v1';
+const SNAPSHOT_CREDENTIAL_RESTART_REASON = 'snapshot provider credentials updated';
 
 const COVERAGE_CHANGE_DATASET_LABELS: Record<string, string> = {
   'ds-price': '股票价格数据',
@@ -880,7 +881,8 @@ function DataTrustLayerPanel({ layers }: { layers: ApiDataTrustLayer[] }): JSX.E
     const envCommands = credentialPairs.flatMap(([envName, value]) =>
       buildPowerShellPersistCredentialCommands(envName, value),
     );
-    return [...envCommands, 'powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1'].join('\n');
+    const restartCommand = `powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1 -ForceRestart -RestartReason ${quotePowerShellEnvValue(SNAPSHOT_CREDENTIAL_RESTART_REASON)}`;
+    return [...envCommands, restartCommand].join('\n');
   };
   const copyCredentialCommand = async (envName: string): Promise<void> => {
     const value = String(credentialDrafts[envName] ?? '').trim();
@@ -892,7 +894,7 @@ function DataTrustLayerPanel({ layers }: { layers: ApiDataTrustLayer[] }): JSX.E
     if (await writeTextToClipboard(command)) {
       setCredentialNotices((current) => ({
         ...current,
-        [envName]: '已复制用户环境持久化+重启命令；粘贴执行一次后，后续新启动 QuickStart 会自动继承。',
+        [envName]: '已复制用户环境持久化+受保护强制重启命令；粘贴执行一次后，当前 QuickStart 会重新读取配置。',
       }));
       return;
     }
@@ -979,7 +981,7 @@ function DataTrustLayerPanel({ layers }: { layers: ApiDataTrustLayer[] }): JSX.E
                   </button>
                 </div>
                 <small>
-                  {credentialNotices[activeCredential] || '复制命令会带上当前已输入的全部 key，写入 Windows 用户环境并立即重启 QuickStart。'}
+                  {credentialNotices[activeCredential] || '复制命令会带上当前已输入的全部 key，写入 Windows 用户环境，并通过受保护 QuickStart 强制重启当前本地服务。'}
                 </small>
               </div>
             ) : null}
@@ -1012,7 +1014,7 @@ export function EquitySnapshotsTab({
     [datasetSnapshots, universeSnapshots],
   );
   const visibleRows = rows.filter((row) => shouldShowRow(row, activeFilter));
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!highlightTarget) return;
     const matched = rows.find((row) => row.id === highlightTarget);
     if (matched) {
