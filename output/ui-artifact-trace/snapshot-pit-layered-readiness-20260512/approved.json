@@ -1,0 +1,14 @@
+{
+  "project": "grit-strategy-lab",
+  "design": "snapshot-pit-layered-readiness-20260512",
+  "created_at": "2026-05-12T00:00:00+08:00",
+  "status": "candidate",
+  "summary": "基于现有 factor-governance v4 sidebar 语言，为 #/snapshots?tab=equity 与 #/pit-data 提供层级金字塔与 PIT 准入联动的 UI 稿。",
+  "artifacts": [
+    "snapshot-pit-layered-readiness-preview.html",
+    "snapshot-pit-layered-readiness-design-spec.md",
+    "handoff-manifest.json"
+  ],
+  "design_md_updated": false,
+  "durable_memory_updated": false
+}

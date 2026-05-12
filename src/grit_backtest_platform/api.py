@@ -73,6 +73,7 @@ from .models import (
     OptimizationJobFilteredResultCreateRequest,
     ParameterVersionRestoreRequest,
     PitIdentityOverrideRequest,
+    PitDataOverviewResponseModel,
     PitIdentityScraperRestartRequest,
     PitResearchWaiverRequest,
     ResumeOptimizationJobRequest,
@@ -81,6 +82,7 @@ from .models import (
     SnapshotProviderAttemptListResponseModel,
     SnapshotProviderRegistryResponseModel,
     SnapshotRefreshRequest,
+    SnapshotOverviewResponseModel,
     StrategyUpdateRequest,
 )
 from .real_service import RealBacktestPlatformService, SnapshotBlockingError
@@ -1500,7 +1502,7 @@ def create_app(
     def delete_candidate(job_id: str, trial_id: str):
         return invoke(service.delete_optimization_candidate, job_id, trial_id)
 
-    @app.get('/pit-data')
+    @app.get('/pit-data', response_model=PitDataOverviewResponseModel)
     def pit_data_overview():
         return invoke(service.get_pit_data_overview)
 
@@ -1644,7 +1646,7 @@ def create_app(
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
-    @app.get('/data-snapshots/overview')
+    @app.get('/data-snapshots/overview', response_model=SnapshotOverviewResponseModel)
     def snapshot_overview():
         return with_bond_snapshot_extension(invoke(service.get_snapshot_overview))
 

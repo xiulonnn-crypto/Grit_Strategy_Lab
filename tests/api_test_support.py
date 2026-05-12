@@ -50,6 +50,9 @@ EXPECTED_SNAPSHOT_OVERVIEW_KEYS = {
     "allowed_actions",
     "provider_readiness_summary",
     "data_trust_summary",
+    "data_layer_readiness",
+    "snapshot_quality_alerts",
+    "factor_dimension_readiness",
     "bond_fixed_income",
 }
 

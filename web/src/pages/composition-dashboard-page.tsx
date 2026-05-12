@@ -3,7 +3,7 @@ import { CompositionDashboardView } from '../components/composition-dashboard/co
 import { useApiClient } from '../lib/demoStoreContext';
 import type { ApiCompositionListItem, ApiCompositionSourceIntegrity, ApiCompositionStatus } from '../types';
 
-const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 80;
 
 function sourceIntegrityHasNewVersion(item: ApiCompositionSourceIntegrity): boolean {
   const sourceRefId = String(item.source_ref_id ?? '').trim();

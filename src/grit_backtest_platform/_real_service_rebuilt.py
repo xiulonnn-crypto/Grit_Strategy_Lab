@@ -51,7 +51,7 @@ from .factor_mining import (
     factor_mining_job_id_for_request,
     run_factor_mining_job,
 )
-from .factor_research import FactorResearchService, build_pit_data_overview
+from .factor_research import FactorResearchService, build_pit_data_overview, _descriptor_from_factor_id
 from .pit_external_sources import resolve_cache_dir as default_pit_external_cache_dir
 from .market_data_repository import (
     DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
@@ -476,6 +476,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
         self._snapshot_overview_cache_seconds = max(0.0, snapshot_cache_ttl)
         self._snapshot_overview_cache: tuple[float, str, dict[str, Any]] | None = None
         self._snapshot_overview_cache_lock = threading.Lock()
+        try:
+            factor_index_cache_ttl = float(os.environ.get("GRIT_MULTI_FACTOR_INDEX_CACHE_SECONDS", "300").strip())
+        except (TypeError, ValueError):
+            factor_index_cache_ttl = 300.0
+        self._multi_factor_factor_index_cache_seconds = max(0.0, factor_index_cache_ttl)
+        self._multi_factor_factor_index_cache: tuple[float, str, dict[str, dict[str, Any]]] | None = None
+        self._multi_factor_factor_index_cache_lock = threading.Lock()
 
     def _prewarm_read_model_caches(self) -> None:
         for builder in (self.get_snapshot_overview, self.get_pit_data_overview):
@@ -554,17 +561,17 @@ class RealBacktestPlatformService(BacktestPlatformService):
         return "|".join(parts)
 
     def get_pit_data_overview(self) -> dict[str, Any]:
-        signature = "|".join([self._market_data_snapshot_cache_signature(), _snapshot_provider_env_signature()])
         now = monotonic()
         with self._pit_data_overview_cache_lock:
             cached = self._pit_data_overview_cache
             if (
                 cached is not None
-                and cached[1] == signature
                 and self._pit_data_overview_cache_seconds > 0
                 and now - cached[0] <= self._pit_data_overview_cache_seconds
+                and str(cached[2].get("overall_status") or "").upper() != "BLOCKED"
             ):
                 return deepcopy(cached[2])
+            signature = "|".join([self._market_data_snapshot_cache_signature(), _snapshot_provider_env_signature()])
             overview = build_pit_data_overview(self.market_data_repository)
             try:
                 data_trust_summary = None
@@ -584,7 +591,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     overview["data_trust_summary"] = dict(data_trust_summary)
             except Exception:
                 overview.setdefault("data_trust_summary", {})
-            self._pit_data_overview_cache = (now, signature, deepcopy(overview))
+            if str(overview.get("overall_status") or "").upper() != "BLOCKED":
+                self._pit_data_overview_cache = (now, signature, deepcopy(overview))
+            else:
+                self._pit_data_overview_cache = None
             return overview
 
     def create_pit_research_waiver(self, request: Any) -> dict[str, Any]:
@@ -2205,6 +2215,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "LOW_COVERAGE",
             "DIAGNOSTIC_STALE",
             "STALE_DIAGNOSTIC",
+            "FACTOR_ADMISSION_10Y_REPAIR",
+            "FULL_READY_ARCHIVAL_GAP",
+            "PIT_METADATA_RECOMPUTE_MISMATCH",
             "VERIFIED_PIT_WINDOW_INCOMPLETE",
         )
         warning_text_fragments = (
@@ -2259,6 +2272,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         except Exception:
             return None
         coverage_gap = overview.get("coverage_gap") if isinstance(overview.get("coverage_gap"), Mapping) else {}
+        admission = overview.get("factor_admission_coverage") if isinstance(overview.get("factor_admission_coverage"), Mapping) else {}
         buckets = {
             str(bucket.get("id") or ""): bucket
             for bucket in coverage_gap.get("buckets") or []
@@ -2277,15 +2291,25 @@ class RealBacktestPlatformService(BacktestPlatformService):
         )
         non_core_mcap_weight = _coerce_float(non_core_bucket.get("mcap_weight_pct"), 0.0)
         missing_total = int(_coerce_float(coverage_gap.get("missing_symbol_count"), 0.0))
+        admission_allows = bool(admission) and not bool(admission.get("blocks_factor_admission"))
+        admission_status = str(admission.get("status") or "").upper()
+        admission_repair_count = int(_coerce_float(admission.get("repair_symbol_count"), 0.0))
+        admission_archival_count = int(_coerce_float(admission.get("archival_missing_count"), 0.0))
         if missing_total <= 0 or non_core <= 0:
             return None
-        if current_core > 0 or historical_core > 0 or non_core_mcap_weight > 0.0001:
+        if current_core > 0 or (historical_core > 0 and not admission_allows) or non_core_mcap_weight > 0.0001:
             return None
         summary = (
             f"PIT核心成员价格缺口为 {current_core}，"
             f"{non_core} 个非核心缺口市值权重占比 {non_core_mcap_weight:.2f}%，"
             "实盘准入风险极低。"
         )
+        if admission_allows:
+            summary = (
+                f"PIT核心成员价格缺口为 {current_core}，10Y因子准入状态 {admission_status or 'READY'}；"
+                f"{admission_repair_count} 个10年窗口补证标的与 {admission_archival_count} 个Full Ready归档缺口进入修复队列，"
+                "已转为创建提示，允许物化多因子策略。"
+            )
         return {
             "code": "LOW_RISK_NON_CORE_PRICE_GAP",
             "label": "低风险准入",
@@ -2295,6 +2319,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "non_core_missing_count": non_core,
             "non_core_mcap_weight_pct": round(non_core_mcap_weight, 4),
             "missing_symbol_count": missing_total,
+            "factor_admission_status": admission_status,
+            "factor_admission_repair_symbol_count": admission_repair_count,
+            "factor_admission_archival_missing_count": admission_archival_count,
         }
 
     @staticmethod
@@ -2811,9 +2838,82 @@ class RealBacktestPlatformService(BacktestPlatformService):
             return False
         return str(parameters.get("strategy_type") or "").upper() == "MULTI_FACTOR" or bool(parameters.get("factor_ids"))
 
+    def _multi_factor_factor_index_signature(self) -> str:
+        try:
+            row = self.storage.fetch_one(
+                """
+                SELECT
+                    COUNT(*) AS row_count,
+                    COALESCE(MAX(updated_at), '') AS max_updated_at,
+                    COALESCE(MAX(deleted_at), '') AS max_deleted_at
+                FROM factor_definitions
+                """
+            )
+        except Exception:
+            return "factor-definitions-unavailable"
+        if not row:
+            return "factor-definitions-empty"
+        return "|".join(
+            [
+                str(row.get("row_count") or 0),
+                str(row.get("max_updated_at") or ""),
+                str(row.get("max_deleted_at") or ""),
+            ]
+        )
+
+    def _load_multi_factor_factor_index(self) -> dict[str, dict[str, Any]]:
+        rows = self.storage.fetch_all(
+            """
+            SELECT id, name, source, diagnostic_status, direction
+            FROM factor_definitions
+            WHERE deleted_at IS NULL
+            ORDER BY source DESC, name ASC
+            """
+        )
+        factors: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            factor_id = str(row.get("id") or "").strip()
+            if not factor_id:
+                continue
+            descriptor = _descriptor_from_factor_id(factor_id, str(row.get("source") or ""))
+            category = str(descriptor.get("category") or row.get("source") or "").strip()
+            factors[factor_id] = {
+                "id": factor_id,
+                "name": row.get("name") or factor_id,
+                "source": row.get("source"),
+                "category": category,
+                "family": category,
+                "descriptor": descriptor,
+                "direction": row.get("direction") or "HIGH_IS_BETTER",
+                "diagnostic_status": row.get("diagnostic_status") or "READY_TO_DIAGNOSE",
+                "pit_coverage": {},
+                "readiness_blockers": [],
+            }
+        return factors
+
     def _multi_factor_factor_index(self) -> dict[str, dict[str, Any]]:
-        factors = self.list_factors().get("items", [])
-        return {str(item.get("id")): dict(item) for item in factors if str(item.get("id") or "").strip()}
+        now = monotonic()
+        signature = self._multi_factor_factor_index_signature()
+        with self._multi_factor_factor_index_cache_lock:
+            cached = self._multi_factor_factor_index_cache
+            if (
+                cached is not None
+                and cached[1] == signature
+                and now - cached[0] <= self._multi_factor_factor_index_cache_seconds
+            ):
+                return deepcopy(cached[2])
+        try:
+            factor_index = self._load_multi_factor_factor_index()
+        except Exception:
+            factors = self.list_factors().get("items", [])
+            factor_index = {
+                str(item.get("id")): dict(item)
+                for item in factors
+                if str(item.get("id") or "").strip()
+            }
+        with self._multi_factor_factor_index_cache_lock:
+            self._multi_factor_factor_index_cache = (now, signature, deepcopy(factor_index))
+        return deepcopy(factor_index)
 
     def _multi_factor_component_rows(self, parameters: Mapping[str, Any]) -> list[dict[str, Any]]:
         factor_ids = [
@@ -6855,6 +6955,18 @@ class RealBacktestPlatformService(BacktestPlatformService):
             return f"{item_name} needs a snapshot refresh before it can be used."
         return "Snapshot refresh is required before this view can be used."
 
+    def _normalize_snapshot_blocker_payload(self, blocker: Any) -> dict[str, Any] | None:
+        payload = dict(blocker or {})
+        code = str(payload.get("code") or "").strip()
+        message = str(payload.get("message") or "").strip()
+        if not code and not message:
+            return None
+        if code:
+            payload["code"] = code
+        if message:
+            payload["message"] = message
+        return payload
+
     def _seed_dataset_snapshots_from_legacy_cache(self, *, as_of: str) -> dict[str, Any] | None:
         dataset_rows = {str(item["id"]): item for item in self.market_data_repository.list_dataset_snapshots()}
         needs_price_snapshot = self._snapshot_row_is_placeholder(
@@ -7534,6 +7646,20 @@ class RealBacktestPlatformService(BacktestPlatformService):
             self._format_universe_snapshot(universe_rows.get(defaults["id"]), defaults)
             for defaults in self._universe_snapshot_defaults()
         ]
+        dataset_snapshots = [
+            {
+                **dict(item),
+                "blocker": self._normalize_snapshot_blocker_payload(item.get("blocker")),
+            }
+            for item in dataset_snapshots
+        ]
+        universe_snapshots = [
+            {
+                **dict(item),
+                "blocker": self._normalize_snapshot_blocker_payload(item.get("blocker")),
+            }
+            for item in universe_snapshots
+        ]
         timestamps = [
             str(value)
             for value in [
@@ -7593,6 +7719,23 @@ class RealBacktestPlatformService(BacktestPlatformService):
             registry_items=provider_registry_items,
             attempt_items=provider_attempt_items,
         )
+        data_layer_readiness = self._build_snapshot_data_layer_readiness(
+            price_row=price_row,
+            corporate_row=corporate_row,
+            valuation_row=valuation_row,
+            fundamental_row=self._backfill_dataset_snapshot_progress(
+                raw_dataset_rows.get(DATASET_FUNDAMENTALS_SNAPSHOT_ID),
+                target_symbols=canonical_target_symbols,
+            ),
+            last_refreshed_at=max(timestamps) if timestamps else None,
+            data_trust_summary=data_trust_summary,
+        )
+        snapshot_quality_alerts = self._build_snapshot_quality_alerts(
+            data_layer_readiness=data_layer_readiness,
+        )
+        factor_dimension_readiness = self._build_snapshot_factor_dimension_readiness(
+            data_layer_readiness=data_layer_readiness,
+        )
         return {
             "overall_status": overall_status,
             "last_refreshed_at": max(timestamps) if timestamps else None,
@@ -7605,6 +7748,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "allowed_actions": allowed_actions,
             "provider_readiness_summary": provider_readiness_summary,
             "data_trust_summary": data_trust_summary,
+            "data_layer_readiness": data_layer_readiness,
+            "snapshot_quality_alerts": snapshot_quality_alerts,
+            "factor_dimension_readiness": factor_dimension_readiness,
         }
 
     def _backfill_dataset_snapshot_progress(
@@ -7725,6 +7871,308 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "latest_percentile_10y": (latest_row or {}).get("pe_ttm_percentile_10y"),
         }
         return row
+
+    def _snapshot_readiness_status(
+        self,
+        *,
+        ready: bool = False,
+        warning: bool = False,
+        blocked: bool = False,
+        disabled: bool = False,
+        calibrating: bool = False,
+    ) -> str:
+        if blocked:
+            return "BLOCKED"
+        if disabled:
+            return "DISABLED"
+        if calibrating:
+            return "CALIBRATING"
+        if warning:
+            return "WARNING"
+        if ready:
+            return "READY"
+        return "WARNING"
+
+    def _build_snapshot_data_layer_readiness(
+        self,
+        *,
+        price_row: Mapping[str, Any],
+        corporate_row: Mapping[str, Any],
+        valuation_row: Mapping[str, Any],
+        fundamental_row: Mapping[str, Any] | None,
+        last_refreshed_at: str | None,
+        data_trust_summary: Mapping[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        price_status = str(price_row.get("status") or "INCOMPLETE").upper()
+        corporate_status = str(corporate_row.get("status") or "INCOMPLETE").upper()
+        valuation_status = str(valuation_row.get("status") or "INCOMPLETE").upper()
+        price_metadata = dict(price_row.get("metadata") or {})
+        corporate_metadata = dict(corporate_row.get("metadata") or {})
+        fundamental_snapshot_id = str(
+            (fundamental_row or {}).get("id") or DATASET_FUNDAMENTALS_SNAPSHOT_ID
+        )
+        fundamental_status = str((fundamental_row or {}).get("status") or "INCOMPLETE").upper()
+        fundamental_metadata = dict((fundamental_row or {}).get("metadata") or {})
+        try:
+            fundamental_counts = self.market_data_repository.count_dataset_snapshot_rows(fundamental_snapshot_id)
+        except Exception:
+            fundamental_counts = {"fundamental_points": 0, "fundamental_coverage": 0}
+        try:
+            fundamental_coverage_rows = (
+                self.market_data_repository.load_dataset_fundamental_coverage(fundamental_snapshot_id)
+                if hasattr(self.market_data_repository, "load_dataset_fundamental_coverage")
+                else []
+            )
+        except Exception:
+            fundamental_coverage_rows = []
+        trust_layers = (
+            list(data_trust_summary.get("layers") or [])
+            if isinstance(data_trust_summary, Mapping)
+            else []
+        )
+        price_trust_layer = next(
+            (
+                layer
+                for layer in trust_layers
+                if str(layer.get("id") or "") == "price_primary_chain"
+            ),
+            {},
+        )
+        membership_trust_layer = next(
+            (
+                layer
+                for layer in trust_layers
+                if str(layer.get("id") or "") == "membership_history"
+            ),
+            {},
+        )
+        price_covered = int(price_metadata.get("covered_symbol_count") or 0)
+        price_total = int(price_metadata.get("total_symbol_count") or 0)
+        price_rows = int(price_row.get("row_count") or 0)
+        corporate_ready = corporate_status in {"READY", "COMPLETED"}
+        market_ready = price_status in {"READY", "COMPLETED"}
+        market_status = self._snapshot_readiness_status(
+            ready=market_ready and corporate_ready,
+            warning=market_ready and not corporate_ready,
+            blocked=not market_ready,
+        )
+        available_fields = [
+            str(field)
+            for field in (fundamental_metadata.get("available_fields") or [])
+            if str(field).strip()
+        ]
+        fundamental_points = int(fundamental_counts.get("fundamental_points") or 0)
+        fundamental_covered = int(fundamental_metadata.get("covered_symbol_count") or len(fundamental_coverage_rows) or 0)
+        fundamental_total = int(fundamental_metadata.get("total_symbol_count") or max(len(fundamental_coverage_rows), 0))
+        fundamental_ready = (
+            fundamental_status in {"READY", "COMPLETED"}
+            and fundamental_points > 0
+            and bool(available_fields)
+        )
+        fundamental_status_value = self._snapshot_readiness_status(
+            ready=fundamental_ready,
+            warning=not fundamental_ready and (fundamental_points > 0 or bool(available_fields)),
+            blocked=not fundamental_ready and fundamental_points <= 0 and not available_fields,
+        )
+        analyst_status = self._snapshot_readiness_status(
+            disabled=False,
+            warning=True,
+        )
+        macro_status = self._snapshot_readiness_status(
+            blocked=not market_ready,
+            calibrating=market_ready,
+        )
+        return [
+            {
+                "layer_id": "l1_market_data",
+                "title_cn": "L1 基础行情",
+                "status": market_status,
+                "summary": (
+                    "OHLCV 与复权价格链路已可支撑价格型因子和正式回放。"
+                    if market_status == "READY"
+                    else (
+                        "OHLCV 已可用，但公司行为仍待补齐；价格型因子可先研究，正式回放需继续修复。"
+                        if market_status == "WARNING"
+                        else "价格快照仍有缺口，需先完成行情与复权链路修复。"
+                    )
+                ),
+                "metrics": [
+                    {"label": "覆盖", "value": f"{price_covered}/{price_total}" if price_total > 0 else "待生成"},
+                    {"label": "价格行数", "value": price_rows},
+                    {"label": "公司行为", "value": "完整" if corporate_ready else "待补"},
+                ],
+                "updated_at": last_refreshed_at,
+                "provider_keys": list(price_trust_layer.get("missing_env_vars") or []),
+                "linked_targets": [DATASET_PRICE_SNAPSHOT_ID, DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID],
+            },
+            {
+                "layer_id": "l2_fundamental_data",
+                "title_cn": "L2 财务截面",
+                "status": fundamental_status_value,
+                "summary": (
+                    "财务字段和发布时点门禁已形成可计算基础，可进入质量与稳健性因子研究。"
+                    if fundamental_status_value == "READY"
+                    else (
+                        "财务快照已有部分字段，但发布日期或覆盖率仍待继续补齐。"
+                        if fundamental_status_value == "WARNING"
+                        else "财务快照尚未形成可审计的点时截面，质量与估值因子仍受阻。"
+                    )
+                ),
+                "metrics": [
+                    {
+                        "label": "覆盖",
+                        "value": (
+                            f"{fundamental_covered}/{fundamental_total}"
+                            if fundamental_total > 0
+                            else "待生成"
+                        ),
+                    },
+                    {"label": "字段数", "value": len(available_fields)},
+                    {"label": "发布日期门禁", "value": "已挂点时门禁" if fundamental_points > 0 else "待补"},
+                ],
+                "updated_at": str((fundamental_row or {}).get("as_of") or last_refreshed_at or ""),
+                "provider_keys": ["FMP_API_KEY"],
+                "linked_targets": [fundamental_snapshot_id],
+            },
+            {
+                "layer_id": "l3_sentiment_data",
+                "title_cn": "L3 分析师与情绪",
+                "status": analyst_status,
+                "summary": "一致预期、卖空与换手补充链路尚未形成正式快照，当前只保留情绪盲区和异常跳变提示。",
+                "metrics": [
+                    {"label": "一致预期样本", "value": "0/3"},
+                    {"label": "卖空链路", "value": "待接入"},
+                    {"label": "换手稳定性", "value": "可用价格代理"},
+                ],
+                "updated_at": last_refreshed_at,
+                "provider_keys": ["ALPHAVANTAGE_API_KEY"],
+                "linked_targets": ["ds-analyst-consensus", "ds-short-volume"],
+            },
+            {
+                "layer_id": "l4_macro_derivatives",
+                "title_cn": "L4 宏观与衍生品",
+                "status": macro_status,
+                "summary": (
+                    "利率和宏观序列已可进入 Beta 校准，期权偏度链路仍待补齐。"
+                    if macro_status == "CALIBRATING"
+                    else "价格与回放链路尚未稳定，宏观敏感度与衍生品计算暂不开放。"
+                ),
+                "metrics": [
+                    {"label": "利率 Beta", "value": "校准中" if macro_status == "CALIBRATING" else "待补"},
+                    {"label": "IV Skew", "value": "待接入"},
+                    {"label": "估值代理", "value": "可用" if valuation_status in {"READY", "COMPLETED"} else "待补"},
+                ],
+                "updated_at": last_refreshed_at,
+                "provider_keys": ["FRED_API_KEY", "POLYGON_API_KEY"],
+                "linked_targets": [DATASET_INDEX_VALUATIONS_SNAPSHOT_ID, "ds-option-skew"],
+            },
+        ]
+
+    def _build_snapshot_quality_alerts(
+        self,
+        *,
+        data_layer_readiness: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        by_id = {
+            str(item.get("layer_id") or ""): dict(item)
+            for item in data_layer_readiness
+            if isinstance(item, Mapping)
+        }
+        alerts: list[dict[str, Any]] = []
+        l2_status = str(by_id.get("l2_fundamental_data", {}).get("status") or "")
+        if l2_status != "READY":
+            alerts.append(
+                {
+                    "code": "FUNDAMENTAL_BALANCE_CHECK_PENDING",
+                    "severity": "HIGH",
+                    "title_cn": "财报完整度待校验",
+                    "detail_cn": "当前尚未形成可审计的财务截面，无法稳定执行 Total Assets = Liabilities + Equity 校验。",
+                    "source_layer": "L2 财务截面",
+                    "blocking": True,
+                    "target": DATASET_FUNDAMENTALS_SNAPSHOT_ID,
+                }
+            )
+        alerts.extend(
+            [
+                {
+                    "code": "CONSENSUS_BLIND_SPOT",
+                    "severity": "MEDIUM",
+                    "title_cn": "一致预期样本不足",
+                    "detail_cn": "分析师一致预期样本数未达到 3 个，当前视作情绪盲区，只允许观察性研究。",
+                    "source_layer": "L3 分析师与情绪",
+                    "blocking": False,
+                    "target": "ds-analyst-consensus",
+                },
+                {
+                    "code": "SHORT_VOLUME_JUMP_REVIEW",
+                    "severity": "MEDIUM",
+                    "title_cn": "卖空成交占比待核查",
+                    "detail_cn": "卖空与微观结构链路尚未入库，暂无法确认 >50% 的异常跳变是否成立。",
+                    "source_layer": "L3 分析师与情绪",
+                    "blocking": False,
+                    "target": "ds-short-volume",
+                },
+                {
+                    "code": "RATE_BETA_CALIBRATING",
+                    "severity": "LOW",
+                    "title_cn": "利率 Beta 校准中",
+                    "detail_cn": "宏观序列与无风险利率敞口仍在校准，暂不作为正式准入硬门禁。",
+                    "source_layer": "L4 宏观与衍生品",
+                    "blocking": False,
+                    "target": "ds-rate-beta",
+                },
+            ]
+        )
+        return alerts
+
+    def _build_snapshot_factor_dimension_readiness(
+        self,
+        *,
+        data_layer_readiness: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        by_id = {
+            str(item.get("layer_id") or ""): dict(item)
+            for item in data_layer_readiness
+            if isinstance(item, Mapping)
+        }
+        l1_status = str(by_id.get("l1_market_data", {}).get("status") or "WARNING")
+        l2_status = str(by_id.get("l2_fundamental_data", {}).get("status") or "BLOCKED")
+        l3_status = str(by_id.get("l3_sentiment_data", {}).get("status") or "WARNING")
+        l4_status = str(by_id.get("l4_macro_derivatives", {}).get("status") or "CALIBRATING")
+        return [
+            {
+                "dimension_id": "price_liquidity",
+                "title_cn": "价格与流动性",
+                "status": l1_status,
+                "supported_factors": ["12-1月动量", "6月动量", "252日波动率", "规模因子"],
+                "blockers": [] if l1_status == "READY" else ["需先补齐价格或复权链路。"],
+                "linked_layers": ["l1_market_data"],
+            },
+            {
+                "dimension_id": "quality_valuation",
+                "title_cn": "质量与估值",
+                "status": l2_status,
+                "supported_factors": ["Accruals", "F-Score", "经营杠杆", "盈利收益率", "账面市值比"],
+                "blockers": [] if l2_status == "READY" else ["财务字段、发布日期或 available_at 门禁仍待补齐。"],
+                "linked_layers": ["l2_fundamental_data"],
+            },
+            {
+                "dimension_id": "sentiment_micro",
+                "title_cn": "情绪与微观结构",
+                "status": l3_status,
+                "supported_factors": ["一致预期修正", "非流动性溢价", "换手率稳定性", "卖空热度"],
+                "blockers": ["一致预期与卖空链路尚未形成正式快照。"] if l3_status != "READY" else [],
+                "linked_layers": ["l3_sentiment_data"],
+            },
+            {
+                "dimension_id": "macro_derivatives",
+                "title_cn": "宏观与衍生品",
+                "status": l4_status,
+                "supported_factors": ["利率敏感度", "通胀敞口", "商品 Beta", "IV Skew"],
+                "blockers": ["宏观序列和期权偏度仍在校准或待接入。"] if l4_status != "READY" else [],
+                "linked_layers": ["l4_macro_derivatives"],
+            },
+        ]
 
     def _sync_strategy_snapshot_bindings(self, *, updated_at: str) -> None:
         rows = self.storage.fetch_all("SELECT * FROM strategies")

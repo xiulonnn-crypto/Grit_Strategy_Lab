@@ -189,6 +189,20 @@ def test_factor_mining_fitness_penalizes_correlation_and_complexity() -> None:
             assert candidate.correlation_penalty > 0
 
 
+def test_factor_mining_drawdown_estimate_is_candidate_specific_within_return_family() -> None:
+    request = _request(candidate_count=1, operators=("return",))
+    market_data = create_synthetic_market_data(request.universe, length=160, seed=13)
+    runner = FactorMiningRunner(request)
+
+    short_return = runner._evaluate_candidate(0, "Return(Close, 3)", market_data)
+    monthly_return = runner._evaluate_candidate(1, "Return(Close, 21)", market_data)
+
+    assert short_return.benchmark_max_drawdown_pct == monthly_return.benchmark_max_drawdown_pct
+    assert short_return.drawdown_vs_benchmark_ratio is not None
+    assert monthly_return.drawdown_vs_benchmark_ratio is not None
+    assert short_return.drawdown_vs_benchmark_ratio != monthly_return.drawdown_vs_benchmark_ratio
+
+
 def test_factor_mining_uses_non_overlapping_forward_return_anchor() -> None:
     request = FactorMiningJobCreateRequest(
         universe=("A", "B", "C", "D"),

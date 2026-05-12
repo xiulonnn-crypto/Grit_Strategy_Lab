@@ -23,7 +23,7 @@ import type {
   ApiLegInventoryRow,
 } from '../types';
 
-const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 80;
 
 export function LegInventoryPage(): JSX.Element {
   const api = useApiClient();

@@ -171,6 +171,116 @@ def test_factor_quarantine_intake_run_publish_lineage_and_governance() -> None:
     assert factor["id"] in suggestion["action"]["target"]["query"]["factorIds"]
 
 
+def test_factor_quarantine_publish_uses_chinese_auto_mined_name_from_id_and_formula() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-quarantine-publish-name"))
+    seed_ready_pit_data(client, start=date(2014, 1, 2), day_count=3200)
+    _seed_mining_candidate(
+        client,
+        job_id="mine_quarantine_name",
+        candidate_id="cand_quarantine_name",
+        expression="ZScore(Return(Close, 126))",
+        rank_ic=0.061,
+        coverage=100.0,
+    )
+
+    intake = assert_ok(client.post("/factor-quarantine/intake", json={"mining_job_id": "mine_quarantine_name"}))
+    candidate = intake["items"][0]
+    run = assert_ok(client.post(f"/factor-quarantine/candidates/{candidate['id']}/run", json={"reason": "unit-test"}))
+    assert run["status"] == "PASSED"
+    assert run["publish_status"] == "ELIGIBLE"
+
+    published = assert_ok(
+        client.post(
+            f"/factor-quarantine/candidates/{candidate['id']}/publish",
+            json={"operator": "system_rule"},
+        )
+    )
+    factor = published["factor"]
+    expected_name = "动量标准化因子（126日收益）"
+    assert factor["id"] == "a_mom_ret_126d_z"
+    assert factor["name"] == expected_name
+    assert "[Auto-Mined]" not in factor["name"]
+    assert "自动挖掘" not in factor["name"]
+    summary = factor["latest_diagnostic_summary"]
+    assert summary["rank_ic"] == 0.061
+    assert summary["ic_series"]
+    assert summary["evidence_heatmap"]
+    assert summary["group_returns"]
+    assert summary["turnover_decay"]
+    assert factor["ic_sparkline"]
+
+    storage = client.app.state.service.storage
+    with storage.connection() as conn:
+        conn.execute(
+            "UPDATE factor_definitions SET name = ? WHERE id = ?",
+            ("自动挖掘动量标准化因子（126日收益）", factor["id"]),
+        )
+        conn.execute(
+            "UPDATE factor_diagnostic_runs SET summary_json = ? WHERE factor_id = ?",
+            (
+                dumps({
+                    "run_id": "fdiag_a_mom_auto_015d73d5_rank_publish",
+                    "factor_id": factor["id"],
+                    "factor_name": "自动挖掘动量标准化因子（126日收益）",
+                    "status": "COMPLETED",
+                    "rank_ic": 0.061,
+                    "ic": 0.0561,
+                    "ir": 0.42,
+                    "coverage": 100.0,
+                    "quarantine": {"candidate_id": candidate["id"]},
+                    "promotion_eligible": True,
+                }),
+                factor["id"],
+            ),
+        )
+    renamed_detail = assert_ok(client.get(f"/factors/{factor['id']}"))
+    assert renamed_detail["name"] == expected_name
+    assert renamed_detail["latest_diagnostic_summary"]["ic_series"]
+    assert renamed_detail["latest_diagnostic_summary"]["evidence_heatmap"]
+    assert renamed_detail["latest_diagnostic_summary"]["data_lineage"]["kind"] == "QUARANTINE_PUBLISH_SUMMARY"
+    assert renamed_detail["ic_sparkline"]
+
+    legacy_id = "a_mom_auto_015d73d5_rank"
+    with storage.connection() as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute(
+            "UPDATE factor_definitions SET id = ?, name = ? WHERE id = ?",
+            (legacy_id, "[Auto-Mined] a_mom_auto_015d73d5_rank", factor["id"]),
+        )
+        conn.execute(
+            "UPDATE factor_versions SET factor_id = ? WHERE factor_id = ?",
+            (legacy_id, factor["id"]),
+        )
+        conn.execute(
+            "UPDATE factor_diagnostic_runs SET factor_id = ? WHERE factor_id = ?",
+            (legacy_id, factor["id"]),
+        )
+        conn.execute(
+            "UPDATE factor_publish_events SET factor_id = ? WHERE factor_id = ?",
+            (legacy_id, factor["id"]),
+        )
+        conn.execute(
+            "UPDATE factor_lineage_edges SET target_id = ? WHERE target_id = ?",
+            (legacy_id, factor["id"]),
+        )
+        conn.execute(
+            "UPDATE factor_crowding_snapshots SET factor_id = ? WHERE factor_id = ?",
+            (legacy_id, factor["id"]),
+        )
+        conn.execute(
+            "UPDATE factor_quarantine_candidates SET target_factor_id = ? WHERE target_factor_id = ?",
+            (legacy_id, factor["id"]),
+        )
+        conn.execute("PRAGMA foreign_keys = ON")
+    detail = assert_ok(client.get(f"/factors/{factor['id']}"))
+    assert detail["id"] == factor["id"]
+    assert detail["name"] == expected_name
+    factors = assert_ok(client.get("/factors"))
+    listed = next(item for item in factors["items"] if item["id"] == factor["id"])
+    assert listed["name"] == expected_name
+    assert all(item["id"] != legacy_id for item in factors["items"])
+
+
 def _legacy_factor_quarantine_blocks_duplicate_expression_publish() -> None:
     client, _db_path = create_test_client(_runtime_dir("factor-quarantine-duplicate"))
     seed_ready_pit_data(client, start=date(2014, 1, 2), day_count=3200)
@@ -212,7 +322,7 @@ def test_factor_quarantine_blocks_duplicate_expression_publish() -> None:
 
     assert run["status"] == "REJECTED"
     assert run["publish_status"] == "BLOCKED"
-    assert "duplicated" in run["rejected_reason"]
+    assert "表达式与已有因子逻辑重复" in run["rejected_reason"]
 
 
 def test_factor_quarantine_empty_intake_pulls_latest_sandbox_job_without_mock_publish() -> None:
@@ -332,7 +442,8 @@ def test_factor_quarantine_drawdown_hard_gate_blocks_publish() -> None:
     assert run["status"] == "REJECTED"
     assert run["publish_status"] == "BLOCKED"
     assert run["gate_summary"]["max_drawdown_relative_to_benchmark"] >= 1.5
-    assert "Max drawdown" in run["rejected_reason"]
+    assert "最大回撤相对基准超过 1.5x" in run["rejected_reason"]
+    assert "PIT Full Ready" not in run["rejected_reason"]
 
 
 def test_factor_quarantine_ir_uses_newey_west_holding_period_adjustment() -> None:

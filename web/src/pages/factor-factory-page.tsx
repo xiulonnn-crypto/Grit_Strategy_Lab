@@ -135,7 +135,7 @@ function requestFromOverview(overview: ApiFactorFactoryOverview | null): ApiFact
 }
 
 function runDateLabel(run: ApiFactorFactoryRun): string {
-  const trigger = statusToken(run.trigger) === 'DAILY' ? '每日自动化' : '立即运行';
+  const trigger = statusToken(run.trigger) === 'DAILY' ? '每日批次' : '临时批次';
   return `${trigger} · ${run.run_date || '未记录日期'}`;
 }
 
@@ -150,28 +150,63 @@ function candidateKey(candidate: ApiFactorMiningCandidate): string {
   return text(candidate.id || candidate.expression, 'candidate');
 }
 
-function candidateResidualSummary(candidate: ApiFactorMiningCandidate | ApiFactorQuarantineCandidate | null): AnyRecord {
-  if (!candidate) return {};
-  const miningResidual = asRecord((candidate as ApiFactorMiningCandidate).auto_residual_summary);
-  if (Object.keys(miningResidual).length) return miningResidual;
-  const metrics = asRecord((candidate as ApiFactorQuarantineCandidate).candidate_metrics);
-  const metricResidual = asRecord(metrics.auto_residual_summary);
-  if (Object.keys(metricResidual).length) return metricResidual;
-  const latestRun = asRecord((candidate as ApiFactorQuarantineCandidate).latest_run);
-  const orthogonal = asRecord(latestRun.orthogonal);
-  return asRecord(orthogonal.auto_residual);
+function candidateSourceId(candidate: ApiFactorMiningCandidate): string {
+  const record = asRecord(candidate);
+  return text(record.candidate_id ?? candidate.id ?? candidate.expression, 'candidate');
 }
 
-function candidateDrawdownRatio(candidate: ApiFactorMiningCandidate | ApiFactorQuarantineCandidate | null): number | null {
-  if (!candidate) return null;
-  const miningRatio = numeric((candidate as ApiFactorMiningCandidate).drawdown_vs_benchmark_ratio);
-  if (miningRatio !== null) return miningRatio;
-  const metrics = asRecord((candidate as ApiFactorQuarantineCandidate).candidate_metrics);
-  const metricRatio = numeric(metrics.drawdown_vs_benchmark_ratio);
-  if (metricRatio !== null) return metricRatio;
-  const latestRun = asRecord((candidate as ApiFactorQuarantineCandidate).latest_run);
-  const stability = asRecord(latestRun.stability);
-  return numeric(stability.drawdown_vs_benchmark_ratio);
+function quarantinedMiningKeys(items: ApiFactorQuarantineCandidate[]): Set<string> {
+  const keys = new Set<string>();
+  items.forEach((candidate) => {
+    const sourceJobId = text(candidate.source_mining_job_id, '');
+    const miningCandidateId = text(candidate.mining_candidate_id, '');
+    const expression = text(candidate.expression, '');
+    if (sourceJobId && miningCandidateId) keys.add(`${sourceJobId}::id::${miningCandidateId}`);
+    if (sourceJobId && expression) keys.add(`${sourceJobId}::expr::${expression}`);
+  });
+  return keys;
+}
+
+function isAlreadyQuarantined(
+  candidate: ApiFactorMiningCandidate & { sourceJobId?: string },
+  keys: Set<string>,
+): boolean {
+  const sourceJobId = text(candidate.sourceJobId, '');
+  const candidateId = candidateSourceId(candidate);
+  const expression = text(candidate.expression, '');
+  return Boolean(
+    sourceJobId &&
+    ((candidateId && keys.has(`${sourceJobId}::id::${candidateId}`)) ||
+      (expression && keys.has(`${sourceJobId}::expr::${expression}`))),
+  );
+}
+
+function localizeQuarantineReason(reason: unknown, options: { omitPitDiagnostic?: boolean } = {}): string {
+  let value = text(reason, '').trim();
+  if (!value) return '';
+  const replacements: Array<[string, string]> = [
+    [
+      'PIT is not Full Ready; recorded as diagnostic evidence only.',
+      options.omitPitDiagnostic ? '' : 'PIT 全量就绪缺口仅作为诊断证据，不阻断发布。',
+    ],
+    ['Rank IC > 0.8; possible leakage or anti-time-travel failure.', 'Rank IC > 0.8，疑似泄露或反时间旅行校验失败。'],
+    ['IS Rank IC / Newey-West IR / coverage failed admission thresholds.', 'IS Rank IC、Newey-West IR 或覆盖率未达到准入阈值。'],
+    ['OOS rank IC or OOS/IS ratio failed admission thresholds.', 'OOS Rank IC 或 OOS/IS 比例未达到准入阈值。'],
+    ['Turnover = 0; possible static signal or leakage.', '换手率为 0，疑似静态信号或泄露。'],
+    ['Style/logical correlation remains above 0.3 after residual testing.', '残差化后风格/逻辑相关性仍高于 0.3。'],
+    ['Auto-Residual failed IS/OOS validation.', 'Auto-Residual 未通过 IS/OOS 校验。'],
+    ['Max drawdown relative to benchmark is >= 1.5x.', '最大回撤相对基准超过 1.5x。'],
+    ['Expression is logically duplicated by an existing factor.', '表达式与已有因子逻辑重复。'],
+    ['D2 gates passed; PIT is diagnostic-only.', 'D2 检疫通过；PIT 全量就绪缺口仅作为诊断证据。'],
+  ];
+  replacements.forEach(([source, target]) => {
+    value = value.split(source).join(target);
+  });
+  return value
+    .split(/[;；]+/)
+    .map((segment) => segment.trim().replace(/[.。]+$/, ''))
+    .filter(Boolean)
+    .join('；');
 }
 
 function pitGateMode(candidate: ApiFactorQuarantineCandidate | null, overview: ApiFactorFactoryOverview | null): string {
@@ -201,8 +236,9 @@ function candidateMetricLine(candidate: ApiFactorQuarantineCandidate): string {
   ].join(' · ');
 }
 
-function candidateReviewReason(candidate: ApiFactorQuarantineCandidate): string {
-  if (statusToken(candidate.status) !== 'NEEDS_REVIEW') return '';
+function candidateDecisionReason(candidate: ApiFactorQuarantineCandidate): string {
+  const status = statusToken(candidate.status);
+  if (status !== 'NEEDS_REVIEW' && status !== 'REJECTED') return '';
   const latestRun = asRecord(candidate.latest_run);
   const latestSummary = asRecord(latestRun.summary);
   const publish = asRecord(candidate.publish_eligibility);
@@ -210,17 +246,42 @@ function candidateReviewReason(candidate: ApiFactorQuarantineCandidate): string 
   const warnings = asList<unknown>(latestSummary.diagnostic_warnings ?? pit.warnings ?? pit.diagnostic_warnings)
     .map(String)
     .filter(Boolean);
-  return text(
+  const reason = text(
     candidate.rejected_reason ??
     publish.reason ??
     latestSummary.publish_reason ??
     warnings[0],
-    '需人工复核门禁原因',
+    '',
+  );
+  return text(
+    localizeQuarantineReason(reason, { omitPitDiagnostic: status === 'REJECTED' }),
+    status === 'REJECTED' ? '检疫未返回硬阻断原因。' : '需人工复核门禁原因',
   );
 }
 
+function candidateDecisionReasonLabel(candidate: ApiFactorQuarantineCandidate): string {
+  return statusToken(candidate.status) === 'REJECTED' ? '拒绝原因' : '复核原因';
+}
+
+function isPublishableCandidate(candidate: ApiFactorQuarantineCandidate): boolean {
+  return statusToken(candidate.status) === 'PASSED' && statusToken(candidate.publish_status) === 'ELIGIBLE';
+}
+
+function quarantineCandidateSortRank(candidate: ApiFactorQuarantineCandidate): number {
+  if (isPublishableCandidate(candidate)) return 0;
+  const status = statusToken(candidate.status);
+  if (['NEEDS_REVIEW', 'PENDING', 'RUNNING', 'QUEUED'].includes(status)) return 1;
+  if (status === 'REJECTED') return 2;
+  if (status === 'PUBLISHED') return 3;
+  return 4;
+}
+
 function sortedQuarantineCandidates(items: ApiFactorQuarantineCandidate[]): ApiFactorQuarantineCandidate[] {
-  return [...items].sort((left, right) => text(right.updated_at).localeCompare(text(left.updated_at)));
+  return [...items].sort((left, right) => {
+    const priorityDelta = quarantineCandidateSortRank(left) - quarantineCandidateSortRank(right);
+    if (priorityDelta !== 0) return priorityDelta;
+    return text(right.updated_at).localeCompare(text(left.updated_at));
+  });
 }
 
 export default function FactorFactoryPage({ initialSection = 'overview' }: FactorFactoryPageProps): JSX.Element {
@@ -258,11 +319,30 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
     void loadOverview();
   }, [loadOverview]);
 
-  const jobs = useMemo(() => asList<ApiFactorMiningJob>(overview?.mining?.items), [overview]);
-  const candidates = useMemo(() => miningCandidates(jobs), [jobs]);
+  const activeRun = overview?.active_run ?? null;
+  const latestRun = overview?.latest_run ?? null;
+  const currentRun = activeRun ?? latestRun;
+  const currentMiningJobId = text(currentRun?.mining_job_id, '');
+  const jobs = useMemo(() => {
+    const allJobs = asList<ApiFactorMiningJob>(overview?.mining?.items);
+    if (!currentMiningJobId) return allJobs;
+    const matched = allJobs.filter((job) => job.id === currentMiningJobId);
+    if (matched.length) return matched;
+    return currentRun?.mining_job ? [currentRun.mining_job] : [];
+  }, [currentMiningJobId, currentRun, overview]);
+  const minedCandidates = useMemo(() => miningCandidates(jobs), [jobs]);
   const quarantineCandidates = useMemo(
-    () => sortedQuarantineCandidates(asList<ApiFactorQuarantineCandidate>(overview?.quarantine?.items)),
-    [overview],
+    () => {
+      const items = sortedQuarantineCandidates(asList<ApiFactorQuarantineCandidate>(overview?.quarantine?.items));
+      if (!currentMiningJobId) return items;
+      return items.filter((candidate) => candidate.source_mining_job_id === currentMiningJobId);
+    },
+    [currentMiningJobId, overview],
+  );
+  const quarantinedKeys = useMemo(() => quarantinedMiningKeys(quarantineCandidates), [quarantineCandidates]);
+  const candidates = useMemo(
+    () => minedCandidates.filter((candidate) => !isAlreadyQuarantined(candidate, quarantinedKeys)),
+    [minedCandidates, quarantinedKeys],
   );
   const selectedMining = useMemo(
     () => candidates.find((candidate) => candidateKey(candidate) === selectedMiningId) ?? candidates[0] ?? null,
@@ -272,16 +352,15 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
     () => quarantineCandidates.find((candidate) => candidate.id === selectedQuarantineId) ?? quarantineCandidates[0] ?? null,
     [quarantineCandidates, selectedQuarantineId],
   );
-  const activeRun = overview?.active_run ?? null;
-  const latestRun = overview?.latest_run ?? null;
-  const funnel = overview?.funnel;
   const profile = overview?.profile;
   const gatePolicy = overview?.gate_policy ?? profile?.gate_policy;
-  const publishableCandidates = quarantineCandidates.filter((candidate) => (
-    statusToken(candidate.status) === 'PASSED' && statusToken(candidate.publish_status) === 'ELIGIBLE'
-  ));
-  const residualSummary = candidateResidualSummary(selectedQuarantine ?? selectedMining);
-  const drawdownRatio = candidateDrawdownRatio(selectedQuarantine ?? selectedMining);
+  const publishableCandidates = quarantineCandidates.filter(isPublishableCandidate);
+  const currentRunFunnel = {
+    mined_candidates: minedCandidates.length,
+    quarantine_candidates: quarantineCandidates.length,
+    passed: publishableCandidates.length,
+    published: quarantineCandidates.filter((candidate) => statusToken(candidate.status) === 'PUBLISHED').length,
+  };
   const drawdownLimit = numeric(gatePolicy?.max_drawdown_relative_to_benchmark) ?? 1.5;
   const pitMode = pitGateMode(selectedQuarantine, overview);
   const diagnosticWarnings = asList<string>(asRecord(selectedQuarantine?.latest_run).diagnostic_warnings)
@@ -332,17 +411,17 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
         gate_policy: gatePolicy,
       });
       setOverview(payload);
-      setNotice('已创建一次性工厂 run；每日自动化状态保持不变。');
+      setNotice('已创建临时挖掘批次；每日自动化状态保持不变。');
     });
   };
 
   const cancelRun = (run: ApiFactorFactoryRun | null): void => {
     if (!run) return;
     void withBusy('cancel', async () => {
-      if (!api.cancelFactorFactoryRun) throw new Error('取消工厂 run API 尚未接入。');
+      if (!api.cancelFactorFactoryRun) throw new Error('取消工厂批次 API 尚未接入。');
       await api.cancelFactorFactoryRun(run.id);
       await loadOverview();
-      setNotice('工厂 run 已发出取消请求。');
+      setNotice('工厂批次已发出取消请求。');
     });
   };
 
@@ -350,13 +429,26 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
     if (!candidate) return;
     void withBusy('intake', async () => {
       if (!api.factorQuarantineIntake) throw new Error('检疫接收 API 尚未接入。');
-      await api.factorQuarantineIntake({
+      if (!api.runFactorQuarantineCandidate) throw new Error('检疫执行 API 尚未接入。');
+      const intake = await api.factorQuarantineIntake({
         mining_job_id: candidate.sourceJobId,
         candidate_ids: [candidate.id],
       });
+      const intaked = asList<ApiFactorQuarantineCandidate>(intake.items);
+      if (!intaked.length) {
+        throw new Error('检疫接收未返回候选，请检查当前挖掘任务与候选 ID。');
+      }
+      const completed = await Promise.all(
+        intaked.map((item) => api.runFactorQuarantineCandidate!(
+          item.id,
+          { reason: 'factor_factory_workbench_intake' },
+        )),
+      );
+      const selected = completed[0] ?? intaked[0];
+      setSelectedQuarantineId(selected.id);
       await loadOverview();
       setSection('quarantine');
-      setNotice('候选已进入 D2 检疫队列。');
+      setNotice(`已送入 D2 检疫并执行 ${completed.length} 个候选；通过后可一键发布。`);
     });
   };
 
@@ -391,11 +483,11 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
     >
       <section className="factor-phase2-hero factor-factory-hero">
         <div>
-          <p className="factor-phase2-hero__eyebrow">Closed-loop Factor Factory</p>
+          <p className="factor-phase2-hero__eyebrow">闭环因子工厂</p>
           <h1>因子工厂</h1>
           <p>
-            挖掘沙盒与检疫工作台已合并为一条闭环流水线。启动自动化代表每日
-            GMT+8 14:00 自动运行；立即运行只创建一次性 run，不改变每日状态。
+            挖掘沙盒与检疫发布已合并为一条投研治理流水线。启动自动化后，每日
+            GMT+8 14:00 生成新挖掘批次，候选因子自动送入检疫；用户只需确认通过项并发布。
           </p>
         </div>
         <div className="factor-phase2-actions">
@@ -428,9 +520,9 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
 
       <section className="factor-factory-status-strip" aria-label="因子工厂状态">
         <span className={chipClass(profile?.status ?? 'PAUSED')}>{statusLabel(profile?.status ?? 'PAUSED')}</span>
-        <span>每日时间：{timezoneLabel(profile?.timezone)} {profile?.schedule_time ?? '14:00'}</span>
-        <span>下次计划：{profile?.next_run_at ? formatDateTime(profile.next_run_at) : '等待启动'}</span>
-        <span className={chipClass(pitMode)}>PIT 门禁：{statusLabel(pitMode)}，不阻断发布</span>
+        <span>每日计划：{timezoneLabel(profile?.timezone)} {profile?.schedule_time ?? '14:00'}</span>
+        <span>下次批次：{profile?.next_run_at ? formatDateTime(profile.next_run_at) : '等待启动'}</span>
+        <span className={chipClass(pitMode)}>10Y 因子准入：{statusLabel(pitMode)}；PIT 全量就绪缺口仅进入审计与风险提示</span>
       </section>
 
       {error ? <div className="factor-phase2-empty factor-phase2-empty--danger">{error}</div> : null}
@@ -444,10 +536,10 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
 
       <section className="factor-phase2-metrics factor-factory-funnel" aria-label="因子漏斗">
         {[
-          ['挖掘候选', funnel?.mined_candidates ?? 0, '来自 sandbox top candidate projection'],
-          ['已送检', funnel?.quarantine_candidates ?? 0, 'D2 检疫队列'],
-          ['检疫通过', funnel?.passed ?? 0, 'PASSED + ELIGIBLE 才可发布'],
-          ['已发布', funnel?.published ?? 0, '正式因子库 AUTO_MINED'],
+          ['挖掘候选', currentRunFunnel.mined_candidates, '当前批次的候选因子池'],
+          ['已送检', currentRunFunnel.quarantine_candidates, '已进入 D2 检疫的候选因子'],
+          ['检疫通过', currentRunFunnel.passed, '通过检疫且具备发布资格'],
+          ['已发布', currentRunFunnel.published, '已入库的自动挖掘因子'],
         ].map(([label, value, hint]) => (
           <div className="factor-phase2-metric" key={String(label)}>
             <p className="factor-phase2-metric__label">{label}</p>
@@ -461,8 +553,8 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
         <article className="factor-phase2-panel factor-factory-runs" data-factory-section="overview">
           <div className="factor-phase2-panel__header">
             <div>
-              <p className="factor-phase2-panel__eyebrow">Automation</p>
-              <h2>自动化 run</h2>
+              <p className="factor-phase2-panel__eyebrow">自动化批次</p>
+              <h2>工厂批次</h2>
             </div>
             <span className={chipClass(activeRun?.status ?? latestRun?.status ?? 'PAUSED')}>
               {activeRun ? statusLabel(activeRun.status) : latestRun ? statusLabel(latestRun.status) : '未启动'}
@@ -498,7 +590,7 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
                   type="button"
                   onClick={() => cancelRun(latestRun)}
                 >
-                  {busy === 'cancel' ? '取消中...' : '取消 run'}
+                  {busy === 'cancel' ? '取消中...' : '取消批次'}
                 </button>
               </div>
             ) : null}
@@ -521,13 +613,13 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
         <article className="factor-phase2-panel" data-factory-section="sandbox">
           <div className="factor-phase2-panel__header">
             <div>
-              <p className="factor-phase2-panel__eyebrow">D1 Sandbox</p>
+              <p className="factor-phase2-panel__eyebrow">D1 挖掘沙盒</p>
               <h2>挖掘队列</h2>
             </div>
             <span className="factor-phase2-chip factor-phase2-chip--info">{jobs.length} 个任务</span>
           </div>
           <div className="factor-phase2-panel__body">
-            {!jobs.length ? <div className="factor-phase2-empty">运行时没有挖掘任务；可点击立即运行创建一次性 run。</div> : null}
+            {!jobs.length ? <div className="factor-phase2-empty">运行时没有挖掘任务；可点击立即运行创建临时挖掘批次。</div> : null}
             <ul className="factor-phase2-list">
               {jobs.slice(0, 5).map((job) => (
                 <li className="factor-phase2-row" key={job.id}>
@@ -547,7 +639,7 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
             </ul>
             <div className="factor-factory-candidate-list">
               <h3>候选摘要</h3>
-              {!candidates.length ? <div className="factor-phase2-empty">没有 top candidate projection；不会展示静态样例。</div> : null}
+              {!candidates.length ? <div className="factor-phase2-empty">当前批次候选已全部进入检疫队列，请在右侧查看检疫结果。</div> : null}
               {candidates.slice(0, 6).map((candidate) => {
                 const key = candidateKey(candidate);
                 return (
@@ -563,9 +655,9 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
                     <span>
                       <strong>{candidate.expression}</strong>
                       <small>
-                        Fitness {formatNumber(candidate.fitness_score ?? candidate.score, 3)}
+                        适应度 {formatNumber(candidate.fitness_score ?? candidate.score, 3)}
                         {' · '}Rank IC {formatNumber(candidate.rank_ic, 3)}
-                        {' · '}Style Corr {formatNumber(candidate.max_style_correlation, 2)}
+                        {' · '}风格相关 {formatNumber(candidate.max_style_correlation, 2)}
                       </small>
                     </span>
                     <i>{formatPct(candidate.coverage)}</i>
@@ -587,7 +679,7 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
         <article className="factor-phase2-panel" data-factory-section="quarantine">
           <div className="factor-phase2-panel__header">
             <div>
-              <p className="factor-phase2-panel__eyebrow">D2 Gate</p>
+              <p className="factor-phase2-panel__eyebrow">D2 检疫门禁</p>
               <h2>检疫与发布</h2>
             </div>
             <span className="factor-phase2-chip factor-phase2-chip--good">{publishableCandidates.length} 个可发布</span>
@@ -595,27 +687,35 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
           <div className="factor-phase2-panel__body">
             {!quarantineCandidates.length ? <div className="factor-phase2-empty">检疫队列为空；请先从挖掘候选送检。</div> : null}
             <ul className="factor-phase2-list">
-              {quarantineCandidates.slice(0, 7).map((candidate) => (
-                <li className="factor-phase2-row" key={candidate.id}>
-                  <button
-                    className={`factor-factory-candidate${selectedQuarantine?.id === candidate.id ? ' is-active' : ''}`}
-                    type="button"
-                    onClick={() => {
-                      setSelectedQuarantineId(candidate.id);
-                      setSection('quarantine');
-                    }}
-                  >
-                    <span>
-                      <strong>{candidate.expression}</strong>
-                      <small>{candidateMetricLine(candidate)}</small>
-                    </span>
-                    <span className="factor-factory-candidate-status">
-                      <i className={chipClass(candidate.status)}>{statusLabel(candidate.status)}</i>
-                      {candidateReviewReason(candidate) ? <small>{candidateReviewReason(candidate)}</small> : null}
-                    </span>
-                  </button>
-                </li>
-              ))}
+              {quarantineCandidates.slice(0, 7).map((candidate) => {
+                const decisionReason = candidateDecisionReason(candidate);
+                return (
+                  <li className="factor-phase2-row" key={candidate.id}>
+                    <button
+                      className={`factor-factory-candidate${selectedQuarantine?.id === candidate.id ? ' is-active' : ''}`}
+                      type="button"
+                      onClick={() => {
+                        setSelectedQuarantineId(candidate.id);
+                        setSection('quarantine');
+                      }}
+                    >
+                      <span>
+                        <strong>{candidate.expression}</strong>
+                        <small>{candidateMetricLine(candidate)}</small>
+                      </span>
+                      <span className="factor-factory-candidate-status">
+                        <i className={chipClass(candidate.status)}>{statusLabel(candidate.status)}</i>
+                        {decisionReason ? (
+                          <small className="factor-factory-candidate-reason">
+                            <b>{candidateDecisionReasonLabel(candidate)}</b>
+                            {decisionReason}
+                          </small>
+                        ) : null}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
             <div className="factor-phase2-actions factor-factory-local-actions">
               <button
@@ -644,65 +744,11 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
         </article>
       </section>
 
-      <section className="factor-factory-gate-grid" aria-label="检疫闸门详情">
+      <section className="factor-factory-gate-grid factor-factory-gate-grid--single" aria-label="检疫闸门详情">
         <article className="factor-phase2-panel">
           <div className="factor-phase2-panel__header">
             <div>
-              <p className="factor-phase2-panel__eyebrow">Auto-Residual</p>
-              <h2>残差信号复核</h2>
-            </div>
-            <span className={chipClass(residualSummary.status ?? (Object.keys(residualSummary).length ? 'PASSED' : 'PENDING'))}>
-              {Object.keys(residualSummary).length ? '已生成' : '待生成'}
-            </span>
-          </div>
-          <div className="factor-phase2-panel__body">
-            <div className="factor-phase2-gate factor-phase2-gate--good">
-              <span className="factor-phase2-gate__status" />
-              <div>
-                <b>{text(residualSummary.residual_expression ?? residualSummary.expression)}</b>
-                <span>风格相关性高于 0.3 时自动残差化，再跑 IS/OOS 与回撤门槛。</span>
-              </div>
-            </div>
-            <div className="factor-quarantine-report">
-              <div><span>控制因子</span><strong>{text(residualSummary.control_factor_id ?? residualSummary.control_factor)}</strong></div>
-              <div><span>残差 Rank IC</span><strong>{formatNumber(residualSummary.residual_rank_ic ?? residualSummary.rank_ic, 3)}</strong></div>
-              <div><span>相关惩罚</span><strong>{formatNumber((selectedMining as ApiFactorMiningCandidate | null)?.correlation_penalty ?? selectedQuarantine?.candidate_metrics?.correlation_penalty, 3)}</strong></div>
-            </div>
-          </div>
-        </article>
-
-        <article className="factor-phase2-panel">
-          <div className="factor-phase2-panel__header">
-            <div>
-              <p className="factor-phase2-panel__eyebrow">Drawdown Gate</p>
-              <h2>回撤硬约束</h2>
-            </div>
-            <span className={chipClass(drawdownRatio === null ? 'PENDING' : drawdownRatio < drawdownLimit ? 'PASSED' : 'BLOCKED')}>
-              {drawdownRatio === null ? '待生成' : drawdownRatio < drawdownLimit ? '通过' : '阻断'}
-            </span>
-          </div>
-          <div className="factor-phase2-panel__body">
-            <div className={`factor-phase2-gate factor-phase2-gate--${
-              drawdownRatio === null ? 'warn' : drawdownRatio < drawdownLimit ? 'good' : 'bad'
-            }`}>
-              <span className="factor-phase2-gate__status" />
-              <div>
-                <b>{drawdownRatio === null ? '待生成' : `${formatNumber(drawdownRatio, 2)}x`}</b>
-                <span>最大回撤相对基准必须小于 {drawdownLimit.toFixed(1)}x。</span>
-              </div>
-            </div>
-            <div className="factor-quarantine-report">
-              <div><span>候选最大回撤</span><strong>{formatPct((selectedMining as ApiFactorMiningCandidate | null)?.max_drawdown_pct ?? selectedQuarantine?.candidate_metrics?.max_drawdown_pct)}</strong></div>
-              <div><span>基准最大回撤</span><strong>{formatPct((selectedMining as ApiFactorMiningCandidate | null)?.benchmark_max_drawdown_pct ?? selectedQuarantine?.candidate_metrics?.benchmark_max_drawdown_pct)}</strong></div>
-              <div><span>硬阈值</span><strong>{drawdownLimit.toFixed(1)}x</strong></div>
-            </div>
-          </div>
-        </article>
-
-        <article className="factor-phase2-panel">
-          <div className="factor-phase2-panel__header">
-            <div>
-              <p className="factor-phase2-panel__eyebrow">PIT Evidence</p>
+              <p className="factor-phase2-panel__eyebrow">PIT 证据链</p>
               <h2>PIT 诊断与发布审计</h2>
             </div>
             <span className={chipClass(pitMode)}>{statusLabel(pitMode)}</span>
@@ -711,8 +757,8 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
             <div className="factor-phase2-gate factor-phase2-gate--warn">
               <span className="factor-phase2-gate__status" />
               <div>
-                <b>PIT 非 Full Ready 不阻断发布</b>
-                <span>它会进入诊断状态、因子级别、发布审计与风险提示；泄露、OOS 衰减、逻辑重复、残差信号失败和回撤超限仍是硬拒绝。</span>
+                <b>10Y 准入通过可送检/发布</b>
+                <span>PIT 全量就绪缺口会进入诊断状态、因子级别、发布审计与风险提示；泄露、OOS 衰减、逻辑重复、残差信号失败和回撤超限仍是硬拒绝。</span>
               </div>
             </div>
             {diagnosticWarnings.length ? (

@@ -692,6 +692,10 @@
   align-items: start;
 }
 
+.factor-factory-gate-grid--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .factor-factory-run-list {
   max-height: 280px;
   overflow-y: auto;
@@ -764,12 +768,24 @@
   justify-items: end;
   gap: 4px;
   flex: 0 0 auto;
-  max-width: 180px;
+  max-width: 240px;
   text-align: right;
 }
 
 .factor-factory-candidate-status small {
   overflow-wrap: anywhere;
+}
+
+.factor-factory-candidate-reason {
+  display: grid;
+  gap: 2px;
+  color: #8a3d18;
+}
+
+.factor-factory-candidate-reason b {
+  color: #8a3d18;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .factor-factory-local-actions {

@@ -21,7 +21,7 @@ import type {
 import './run-detail-page.css';
 import './snapshots-page.css';
 
-const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 80;
 
 const DATASET_COPY: Record<string, string> = {
   公司行为数据: '1996-01-01 至今的公司事件日期（拆股 / 合股 / 股息 / 财报等）。',
@@ -1047,7 +1047,7 @@ export function SnapshotsPage(): JSX.Element {
   const headerEyebrow = 'DATA SNAPSHOTS';
   const headerBody =
     usesApprovedSnapshotsHeader
-      ? '统一管理股票、指数与固定收益数据快照的覆盖率、刷新状态和入库资格，让研究员在建仓、回测和组合配置前先确认市场数据证据链。'
+      ? '以股票与指数快照为主视角，统一呈现行情、财务、情绪和宏观数据的覆盖、时效与可计算性，为因子入库、诊断与回放提供同一套数据判定口径。'
       : getOverviewMessage(overview);
   const refreshButtonLabel = isRefreshRunning
     ? '刷新中...'

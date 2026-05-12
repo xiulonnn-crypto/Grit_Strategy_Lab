@@ -53,7 +53,7 @@ SnapshotRefreshMode = Literal['incremental', 'repair', 'full']
 SnapshotRefreshTarget = Literal['price', 'corporate', 'valuations', 'universes', 'bond']
 DataSegmentType = Literal['FULL', 'TRAIN', 'TEST', 'VALIDATION']
 OptimizationConstraintPresetKey = Literal['balanced', 'defensive', 'offensive']
-SnapshotProviderAccessTier = Literal['public', 'free_account', 'paid_optional']
+SnapshotProviderAccessTier = Literal['public', 'free_account', 'paid_optional', 'public_web', 'repo_local']
 OfficialSeedStatus = Literal['complete', 'partial', 'missing']
 LegType = Literal['strategy', 'asset', 'cash']
 CompositionStatus = Literal['DRAFT', 'ACTIVE', 'ARCHIVED']
@@ -1592,4 +1592,48 @@ class SnapshotOverviewResponseModel(BaseModel):
         default_factory=SnapshotProviderReadinessSummaryModel
     )
     data_trust_summary: dict[str, Any] = Field(default_factory=dict)
+    data_layer_readiness: list[dict[str, Any]] = Field(default_factory=list)
+    snapshot_quality_alerts: list[dict[str, Any]] = Field(default_factory=list)
+    factor_dimension_readiness: list[dict[str, Any]] = Field(default_factory=list)
     bond_fixed_income: BondFixedIncomeOverviewModel
+
+
+class PitDataOverviewResponseModel(BaseModel):
+    dataset_snapshot_id: str
+    fundamental_snapshot_id: str | None = None
+    universe_snapshot_id: str
+    as_of_date: str
+    cleaning_version: str
+    overall_status: str
+    adjusted_price_status: str
+    universe_status: str
+    outlier_cleaning_status: str
+    corporate_action_status: str | None = None
+    fundamental_status: str | None = None
+    coverage: dict[str, Any] = Field(default_factory=dict)
+    fundamental_coverage: dict[str, Any] = Field(default_factory=dict)
+    blocking_items: list[dict[str, Any]] = Field(default_factory=list)
+    status_reasons: dict[str, Any] = Field(default_factory=dict)
+    ops_guidance: dict[str, Any] = Field(default_factory=dict)
+    sample_securities: list[str] = Field(default_factory=list)
+    quality_events: list[dict[str, Any]] = Field(default_factory=list)
+    coverage_gap: dict[str, Any] = Field(default_factory=dict)
+    factor_admission_coverage: dict[str, Any] = Field(default_factory=dict)
+    cleaning_rule_previews: list[dict[str, Any]] = Field(default_factory=list)
+    universe_history_series: list[dict[str, Any]] = Field(default_factory=list)
+    adjustment_trace: dict[str, Any] = Field(default_factory=dict)
+    research_waiver: dict[str, Any] | None = None
+    full_ready_repair_plan: dict[str, Any] = Field(default_factory=dict)
+    external_source_readiness: dict[str, Any] = Field(default_factory=dict)
+    data_trust_summary: dict[str, Any] = Field(default_factory=dict)
+    factor_diagnostics_enabled: bool = False
+    verified_diagnostics_enabled: bool | None = None
+    limited_diagnostics_enabled: bool | None = None
+    sandbox_diagnostics_enabled: bool | None = None
+    diagnostic_windows: dict[str, Any] = Field(default_factory=dict)
+    gate_fix_target: str
+    source: dict[str, Any] = Field(default_factory=dict)
+    pit_layer_readiness: list[dict[str, Any]] = Field(default_factory=list)
+    factor_diagnostic_readiness: list[dict[str, Any]] = Field(default_factory=list)
+    pit_quality_alerts: list[dict[str, Any]] = Field(default_factory=list)
+    snapshot_layer_linkage: list[dict[str, Any]] = Field(default_factory=list)

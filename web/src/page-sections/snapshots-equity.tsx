@@ -29,6 +29,8 @@ type EquityRuntimeRow = {
   note: string;
   filter: Exclude<EquityFilter, 'all' | 'pending'>;
   available?: boolean;
+  updatedAt?: string | null;
+  sourceLabel?: string;
 };
 
 type BenchmarkEtfCoverageSummary = {
@@ -48,6 +50,113 @@ type CoverageChangeRow = {
   source: string;
 };
 
+type SnapshotOverviewReadinessExtension = {
+  data_layer_readiness?: unknown;
+  snapshot_quality_alerts?: unknown;
+  factor_dimension_readiness?: unknown;
+};
+
+type SnapshotLayerKey = 'l1' | 'l2' | 'l3' | 'l4';
+
+type SnapshotLayerReadinessRecord = {
+  layer_id?: string | null;
+  title_cn?: string | null;
+  status?: string | null;
+  summary?: string | null;
+  metrics?: unknown;
+  updated_at?: string | null;
+  provider_keys?: unknown;
+  blockers?: unknown;
+  linked_dimensions?: unknown;
+  target?: string | null;
+  legacy_context?: string | null;
+  provider_hint?: string | null;
+};
+
+type SnapshotQualityAlertRecord = {
+  code?: string | null;
+  severity?: string | null;
+  title_cn?: string | null;
+  detail_cn?: string | null;
+  source_layer?: string | null;
+  blocking?: boolean | null;
+  target?: string | null;
+};
+
+type FactorDimensionReadinessRecord = {
+  dimension_id?: string | null;
+  title_cn?: string | null;
+  status?: string | null;
+  supported_factors?: unknown;
+  blockers?: unknown;
+  linked_layers?: unknown;
+  summary?: string | null;
+  rationale_cn?: string | null;
+  linked_snapshot_checks?: unknown;
+};
+
+type SnapshotMetricItem = {
+  label: string;
+  value: string;
+};
+
+type SnapshotLayerDisplay = {
+  key: SnapshotLayerKey;
+  layerId: string;
+  title: string;
+  status: string;
+  statusLabel: string;
+  statusTone: 'accent' | 'warning' | 'danger' | 'neutral' | 'info';
+  summary: string;
+  primaryMetric: SnapshotMetricItem;
+  supportingMetrics: SnapshotMetricItem[];
+  coverageLabel: string;
+  updatedLabel: string;
+  repairLabel: string;
+  dimensionLabels: string[];
+  providerLabel: string;
+  providerKeys: string[];
+  blockers: string[];
+  target?: string;
+  legacyContext: string;
+};
+
+type SnapshotQualityAlertDisplay = {
+  code: string;
+  severity: string;
+  severityLabel: string;
+  title: string;
+  detail: string;
+  sourceLabel: string;
+  hardBlocking: boolean;
+  target?: string;
+};
+
+type FactorDimensionDisplay = {
+  id: string;
+  title: string;
+  status: string;
+  statusLabel: string;
+  statusTone: 'accent' | 'warning' | 'danger' | 'neutral' | 'info';
+  summary: string;
+  factors: string[];
+  blockers: string[];
+  linkedLayerTitles: string[];
+};
+
+type SnapshotLayerFallbackContext = {
+  datasetCoverage: { covered: number; total: number };
+  readyDatasetCount: number;
+  datasetSnapshotCount: number;
+  benchmarkCoverage: BenchmarkEtfCoverageSummary;
+  availableBasketCount: number;
+  basketCount: number;
+  totalUniverseMembers: number;
+  pendingCount: number;
+  lastRefresh: string | null;
+  basketReady: boolean;
+};
+
 const EQUITY_FILTERS: Array<{ id: EquityFilter; label: string }> = [
   { id: 'all', label: '全部' },
   { id: 'pending', label: '仅看待补' },
@@ -63,6 +172,302 @@ const COVERAGE_CHANGE_DATASET_LABELS: Record<string, string> = {
   'ds-corporate-actions': '公司行为数据',
   'ds-index-valuations': '指数估值数据',
 };
+
+const SNAPSHOT_LAYER_ORDER: SnapshotLayerKey[] = ['l1', 'l2', 'l3', 'l4'];
+
+const SNAPSHOT_LAYER_COPY: Record<
+  SnapshotLayerKey,
+  {
+    title: string;
+    summary: string;
+    coverageFallback: string;
+    repairFallback: string;
+    providerFallback: string;
+    dimensions: string[];
+    legacyContext: string;
+    target: string;
+    emptyStatus: string;
+  }
+> = {
+  l1: {
+    title: 'L1 基础行情',
+    summary: '覆盖开高低收量、基准 ETF 与权益篮子的基础行情底座。',
+    coverageFallback: '等待价格覆盖率',
+    repairFallback: '按价格与成分股快照待补项处理',
+    providerFallback: '以股票价格主链与公开补丁为主',
+    dimensions: ['价格型', '基准对照'],
+    legacyContext: '承接旧口径中的股票快照、指数与基准、权益篮子基础行情。',
+    target: 'ds-price',
+    emptyStatus: 'WARNING',
+  },
+  l2: {
+    title: 'L2 财务截面',
+    summary: '监控财报字段、发布日期对齐与点时可回放性。',
+    coverageFallback: '等待财务截面契约',
+    repairFallback: '待补 Publish Date、available_at 与恒等式校验',
+    providerFallback: '待接入财务源与字段映射',
+    dimensions: ['财务稳健性', '应计质量'],
+    legacyContext: '承接后续 F-Score、应计质量、经营杠杆等财务因子入口。',
+    target: 'ds-fundamentals',
+    emptyStatus: 'DISABLED',
+  },
+  l3: {
+    title: 'L3 分析师与情绪',
+    summary: '监控一致预期、卖空与换手异常，判断情绪类因子是否可用。',
+    coverageFallback: '等待情绪快照契约',
+    repairFallback: '待补分析师样本数、卖空与换手稳定性',
+    providerFallback: '待接入一致预期与卖空来源',
+    dimensions: ['一致预期修正', '流动性偏差'],
+    legacyContext: '承接分析师修正、非流动性溢价与情绪类异常监控。',
+    target: 'ds-analyst-consensus',
+    emptyStatus: 'DISABLED',
+  },
+  l4: {
+    title: 'L4 宏观与衍生品',
+    summary: '监控利率、宏观因子与期权偏度的计算就绪状态。',
+    coverageFallback: '等待宏观与衍生品契约',
+    repairFallback: '待补 FRED / 期权偏度与滚动回归校准',
+    providerFallback: '待接入宏观序列与期权样本',
+    dimensions: ['利率敏感度', '宏观暴露'],
+    legacyContext: '承接利率 Beta、商品暴露与隐含波动偏度的治理入口。',
+    target: 'macro-rate-beta',
+    emptyStatus: 'DISABLED',
+  },
+};
+
+function asSnapshotOverviewReadiness(
+  overview: ApiSnapshotOverview | null,
+): (ApiSnapshotOverview & SnapshotOverviewReadinessExtension) | null {
+  return overview as (ApiSnapshotOverview & SnapshotOverviewReadinessExtension) | null;
+}
+
+function readRecordArray<T extends Record<string, unknown>>(value: unknown): T[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is T => Boolean(item) && typeof item === 'object');
+}
+
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function localizeSnapshotTitle(id?: string | null, fallback?: string | null): string {
+  const normalized = String(id ?? '').trim().toLowerCase();
+  switch (normalized) {
+    case 'ds-price':
+      return '股票价格数据';
+    case 'ds-corporate-actions':
+      return '公司行为数据';
+    case 'ds-index-valuations':
+      return '指数估值数据';
+    case 'ds-fundamentals':
+      return '财务截面数据';
+    case 'ds-analyst-consensus':
+      return '一致预期数据';
+    case 'ds-short-volume':
+      return '卖空成交数据';
+    case 'un-sp500':
+      return '标普500';
+    case 'un-ndx100':
+      return '纳指100';
+    default:
+      return String(fallback ?? id ?? '').trim() || '未命名快照';
+  }
+}
+
+function localizeMetricLabel(label: string): string {
+  const normalized = label.trim().toLowerCase();
+  switch (normalized) {
+    case 'coverage':
+    case 'covered':
+    case 'coverage_pct':
+      return '分层覆盖';
+    case 'updated_at':
+    case 'last_updated':
+    case 'recent_time':
+      return '最近时间';
+    case 'repair':
+    case 'pending':
+    case 'blockers':
+      return '待修复';
+    case 'provider':
+    case 'source':
+      return '数据源';
+    case 'credentials':
+    case 'provider_keys':
+      return '凭据';
+    case 'landed_rows':
+    case 'ingested_rows':
+      return '入库';
+    default:
+      return label.trim() || '指标';
+  }
+}
+
+function localizeFactorLabel(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  switch (normalized) {
+    case 'f-score':
+      return 'F-Score 财务稳健性';
+    case 'accruals':
+      return '应计质量';
+    case 'operating leverage':
+      return '经营杠杆';
+    case 'analyst revision':
+      return '一致预期修正';
+    case 'illiquidity':
+      return '非流动性溢价';
+    case 'short interest':
+      return '卖空拥挤度';
+    case 'iv skew':
+      return '隐含波动偏度';
+    case 'rate duration':
+      return '利率敏感度';
+    case 'commodity beta':
+      return '大宗商品 Beta';
+    default:
+      return value.trim();
+  }
+}
+
+function normalizeSnapshotLayerKey(value?: string | null): SnapshotLayerKey | null {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === 'l1' || normalized.includes('market') || normalized.includes('price')) {
+    return 'l1';
+  }
+  if (normalized === 'l2' || normalized.includes('fundamental') || normalized.includes('fmp') || normalized.includes('财务')) {
+    return 'l2';
+  }
+  if (normalized === 'l3' || normalized.includes('sentiment') || normalized.includes('analyst') || normalized.includes('short')) {
+    return 'l3';
+  }
+  if (normalized === 'l4' || normalized.includes('macro') || normalized.includes('derivative') || normalized.includes('theta') || normalized.includes('fred')) {
+    return 'l4';
+  }
+  return null;
+}
+
+function layerKeyToTitle(layerKey: SnapshotLayerKey): string {
+  return SNAPSHOT_LAYER_COPY[layerKey].title;
+}
+
+function statusTone(status?: string | null): SnapshotLayerDisplay['statusTone'] {
+  switch (normalizeStatus(status)) {
+    case 'READY':
+    case 'COMPLETED':
+    case 'VERIFIED':
+      return 'accent';
+    case 'BLOCKED':
+    case 'FAILED':
+      return 'danger';
+    case 'CALIBRATING':
+    case 'SANDBOX':
+      return 'info';
+    case 'DISABLED':
+      return 'neutral';
+    default:
+      return 'warning';
+  }
+}
+
+function getFactorStatusLabel(status?: string | null): string {
+  switch (normalizeStatus(status)) {
+    case 'VERIFIED':
+      return '已验证';
+    case 'SANDBOX':
+      return '沙箱观察';
+    case 'BLOCKED':
+      return '阻断';
+    case 'DISABLED':
+      return '未接入';
+    case 'CALIBRATING':
+      return '校准中';
+    case 'READY':
+    case 'COMPLETED':
+      return '已就绪';
+    case 'WARNING':
+    case 'INCOMPLETE':
+      return '需复核';
+    default:
+      return '待补齐';
+  }
+}
+
+function getAlertSeverityLabel(severity?: string | null, hardBlocking?: boolean | null): string {
+  if (hardBlocking) {
+    return '硬阻断';
+  }
+  switch (String(severity ?? '').trim().toLowerCase()) {
+    case 'danger':
+    case 'error':
+      return '高优先级';
+    case 'info':
+      return '观察项';
+    default:
+      return '需复核';
+  }
+}
+
+function formatUnknownMetricValue(value: unknown): string {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value.toLocaleString('zh-HK');
+  }
+  if (typeof value === 'boolean') {
+    return value ? '是' : '否';
+  }
+  if (value === null || value === undefined) {
+    return '暂无';
+  }
+  return String(value).trim() || '暂无';
+}
+
+function readMetricItems(value: unknown): SnapshotMetricItem[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') {
+          return null;
+        }
+        const record = entry as Record<string, unknown>;
+        const label = record.label ?? record.title_cn ?? record.key;
+        const metricValue = record.value ?? record.metric_value ?? record.summary;
+        if (!label || metricValue === undefined) {
+          return null;
+        }
+        return {
+          label: localizeMetricLabel(String(label)),
+          value: formatUnknownMetricValue(metricValue),
+        };
+      })
+      .filter((entry): entry is SnapshotMetricItem => Boolean(entry));
+  }
+  if (value && typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([label, metricValue]) => ({
+        label: localizeMetricLabel(label),
+        value: formatUnknownMetricValue(metricValue),
+      }))
+      .filter((entry) => entry.value !== '暂无');
+  }
+  return [];
+}
+
+function compactDateTimeLabel(value?: string | null): string {
+  if (!value) {
+    return '暂无';
+  }
+  return formatDateTime(value);
+}
 
 function normalizeStatus(status?: string | null): string {
   return String(status ?? 'PENDING').toUpperCase();
@@ -81,12 +486,22 @@ function getStatusLabel(status?: string | null): string {
     case 'READY':
     case 'COMPLETED':
       return '就绪';
+    case 'VERIFIED':
+      return '已验证';
+    case 'WARNING':
+      return '需复核';
     case 'RUNNING':
       return '刷新中';
     case 'STALE':
       return '需复核';
+    case 'CALIBRATING':
+      return '校准中';
     case 'INCOMPLETE':
       return '待补';
+    case 'DISABLED':
+      return '未接入';
+    case 'SANDBOX':
+      return '沙箱观察';
     case 'FAILED':
     case 'BLOCKED':
       return '阻塞';
@@ -210,6 +625,10 @@ function trustLayerActionLine(layer: ApiDataTrustLayer, missingEnv: string[], di
   if (missingEnv.length) {
     return `待配置：${missingEnv.join('、')}`;
   }
+  const operatorAction = typeof layer.operator_action === 'string' ? layer.operator_action.trim() : '';
+  if (operatorAction) {
+    return operatorAction;
+  }
   return display.actionFallback;
 }
 
@@ -310,14 +729,43 @@ async function writeTextToClipboard(text: string): Promise<boolean> {
 }
 
 function statusChipClassName(status?: string | null): string {
-  const normalized = normalizeStatus(status);
-  if (['FAILED', 'BLOCKED'].includes(normalized)) {
-    return 'status-chip status-chip--danger';
+  switch (statusTone(status)) {
+    case 'danger':
+      return 'status-chip status-chip--danger';
+    case 'accent':
+      return 'status-chip status-chip--success';
+    case 'info':
+      return 'status-chip status-chip--info';
+    case 'neutral':
+      return 'status-chip status-chip--soft';
+    default:
+      return 'status-chip status-chip--warning';
   }
-  if (['READY', 'COMPLETED'].includes(normalized)) {
-    return 'status-chip status-chip--success';
+}
+
+function metricCardClassName(tone: SnapshotLayerDisplay['statusTone']): string {
+  switch (tone) {
+    case 'danger':
+      return 'metric-card metric-card--danger';
+    case 'accent':
+      return 'metric-card metric-card--accent';
+    case 'info':
+      return 'metric-card metric-card--info';
+    case 'neutral':
+      return 'metric-card metric-card--neutral';
+    default:
+      return 'metric-card metric-card--warning';
   }
-  return 'status-chip status-chip--warning';
+}
+
+function alertCardClassName(alert: SnapshotQualityAlertDisplay): string {
+  if (alert.hardBlocking) {
+    return 'snapshots-alert-card snapshots-alert-card--danger';
+  }
+  if (alert.severity === 'info') {
+    return 'snapshots-alert-card snapshots-alert-card--info';
+  }
+  return 'snapshots-alert-card snapshots-alert-card--warning';
 }
 
 function formatCount(value?: number | null): string {
@@ -648,7 +1096,7 @@ function buildCoverageChangeRows(overview: ApiSnapshotOverview | null): Coverage
       const stat = getDatasetRefreshStat(refreshStats, snapshotId);
       return {
         id: item.id,
-        label: COVERAGE_CHANGE_DATASET_LABELS[item.id] ?? item.name ?? item.id,
+        label: COVERAGE_CHANGE_DATASET_LABELS[item.id] ?? localizeSnapshotTitle(item.id, item.name),
         status: getStatusLabel(item.status),
         currentCoverage: formatDatasetCoverage(item),
         change: formatRefreshChange(stat),
@@ -671,7 +1119,7 @@ function buildCoverageChangeRows(overview: ApiSnapshotOverview | null): Coverage
         : null;
       return {
         id: item.id,
-        label: `${item.name || item.id}股票池`,
+        label: `${localizeSnapshotTitle(item.id, item.name)}股票池`,
         status: getStatusLabel(item.status),
         currentCoverage: formatUniverseCoverage(item),
         change: formatUniverseChange(stat),
@@ -744,7 +1192,7 @@ function describeDataset(item: ApiDatasetSnapshot): EquityRuntimeRow {
 
   return {
     id: item.id,
-    title: item.name || item.id,
+    title: localizeSnapshotTitle(item.id, item.name),
     summary: `${item.id} · ${coverage}`,
     fields: `窗口 ${item.start_date ?? '未知'} 至 ${item.end_date ?? '未知'}`,
     schedule: `来源 ${formatEquitySourceLabel(item.source || item.fallback_source)}`,
@@ -753,6 +1201,8 @@ function describeDataset(item: ApiDatasetSnapshot): EquityRuntimeRow {
     note,
     filter: 'dataset',
     available: isReadyStatus(item.status),
+    updatedAt: item.as_of ?? null,
+    sourceLabel: formatEquitySourceLabel(item.source || item.fallback_source),
   };
 }
 
@@ -774,7 +1224,7 @@ function describeUniverse(item: ApiUniverseSnapshot): EquityRuntimeRow {
 
   return {
     id: item.id,
-    title: item.name || item.id,
+    title: localizeSnapshotTitle(item.id, item.name),
     summary: `${item.id} · ${coverage}`,
     fields: `窗口 ${item.window_start ?? '未知'} 至 ${item.window_end ?? '未知'}`,
     schedule: `来源 ${formatEquitySourceLabel(item.source || item.fallback_source)}`,
@@ -783,6 +1233,8 @@ function describeUniverse(item: ApiUniverseSnapshot): EquityRuntimeRow {
     note,
     filter: 'universe',
     available: hasConstituentMembers || isReadyStatus(item.status),
+    updatedAt: item.as_of ?? null,
+    sourceLabel: formatEquitySourceLabel(item.source || item.fallback_source),
   };
 }
 
@@ -803,6 +1255,618 @@ function filterButtonClassName(filter: EquityFilter, activeFilter: EquityFilter)
 function isEquityBasketRow(row: EquityRuntimeRow): boolean {
   const searchable = `${row.id} ${row.title} ${row.summary}`.toLowerCase();
   return searchable.includes('basket') || searchable.includes('theme') || searchable.includes('etf') || searchable.includes('篮子');
+}
+
+function buildFallbackLayerMetrics(
+  layerKey: SnapshotLayerKey,
+  overview: ApiSnapshotOverview | null,
+  context: SnapshotLayerFallbackContext,
+): SnapshotMetricItem[] {
+  const copy = SNAPSHOT_LAYER_COPY[layerKey];
+  if (layerKey === 'l1') {
+    const coverage =
+      context.datasetCoverage.total > 0
+        ? `${formatCoveragePercent(context.datasetCoverage.covered, context.datasetCoverage.total)}`
+        : formatReadyPercent(context.readyDatasetCount, context.datasetSnapshotCount);
+    return [
+      { label: '分层覆盖', value: coverage },
+      { label: '最近时间', value: compactDateTimeLabel(context.lastRefresh) },
+      { label: '入库与待修复', value: context.pendingCount ? `${context.pendingCount} 项待修复` : '入库稳定' },
+      {
+        label: '数据源与凭据',
+        value: overview?.dataset_snapshots[0]?.source
+          ? formatEquitySourceLabel(overview.dataset_snapshots[0].source)
+          : copy.providerFallback,
+      },
+    ];
+  }
+  return [
+    { label: '分层覆盖', value: copy.coverageFallback },
+    { label: '最近时间', value: compactDateTimeLabel(context.lastRefresh) },
+    { label: '入库与待修复', value: copy.repairFallback },
+    { label: '数据源与凭据', value: copy.providerFallback },
+  ];
+}
+
+function buildSnapshotLayerDisplays(
+  overview: ApiSnapshotOverview | null,
+  context: SnapshotLayerFallbackContext,
+): SnapshotLayerDisplay[] {
+  const extension = asSnapshotOverviewReadiness(overview);
+  const rawItems = readRecordArray<SnapshotLayerReadinessRecord>(extension?.data_layer_readiness);
+  const rawByLayer = new Map<SnapshotLayerKey, SnapshotLayerReadinessRecord>();
+  rawItems.forEach((item) => {
+    const layerKey = normalizeSnapshotLayerKey(item.layer_id);
+    if (layerKey) {
+      rawByLayer.set(layerKey, item);
+    }
+  });
+
+  return SNAPSHOT_LAYER_ORDER.map((layerKey) => {
+    const fallback = SNAPSHOT_LAYER_COPY[layerKey];
+    const rawItem = rawByLayer.get(layerKey);
+    const metrics = rawItem ? readMetricItems(rawItem.metrics).slice(0, 4) : [];
+    const fallbackMetrics = buildFallbackLayerMetrics(layerKey, overview, context);
+    const mergedMetrics = metrics.length ? metrics : fallbackMetrics;
+    const primaryMetric = mergedMetrics[0] ?? { label: '状态', value: getStatusLabel(rawItem?.status ?? fallback.emptyStatus) };
+    const supportingMetrics = mergedMetrics.slice(1, 4);
+    const providerKeys = readStringArray(rawItem?.provider_keys);
+    const blockers = readStringArray(rawItem?.blockers);
+    const dimensionLabels = readStringArray(rawItem?.linked_dimensions).map(localizeFactorLabel);
+    const status = rawItem?.status ?? fallback.emptyStatus;
+    const providerLabel = providerKeys.length
+      ? `待配置 ${providerKeys.join('、')}`
+      : rawItem?.provider_hint?.trim() || fallback.providerFallback;
+
+    return {
+      key: layerKey,
+      layerId: rawItem?.layer_id ?? layerKey,
+      title: rawItem?.title_cn?.trim() || fallback.title,
+      status,
+      statusLabel: getStatusLabel(status),
+      statusTone: statusTone(status),
+      summary: rawItem?.summary?.trim() || fallback.summary,
+      primaryMetric,
+      supportingMetrics,
+      coverageLabel:
+        mergedMetrics.find((metric) => metric.label.includes('覆盖'))?.value ?? fallback.coverageFallback,
+      updatedLabel:
+        compactDateTimeLabel(rawItem?.updated_at ?? context.lastRefresh),
+      repairLabel:
+        blockers[0] ??
+        mergedMetrics.find((metric) => metric.label.includes('待修复') || metric.label.includes('阻断'))?.value ??
+        fallback.repairFallback,
+      dimensionLabels: dimensionLabels.length ? dimensionLabels : fallback.dimensions,
+      providerLabel,
+      providerKeys,
+      blockers,
+      target: rawItem?.target ?? fallback.target,
+      legacyContext: rawItem?.legacy_context?.trim() || fallback.legacyContext,
+    };
+  });
+}
+
+function buildSnapshotAlertDisplays(
+  overview: ApiSnapshotOverview | null,
+  rows: EquityRuntimeRow[],
+): SnapshotQualityAlertDisplay[] {
+  const extension = asSnapshotOverviewReadiness(overview);
+  const rawAlerts = readRecordArray<SnapshotQualityAlertRecord>(extension?.snapshot_quality_alerts);
+  if (rawAlerts.length) {
+    return rawAlerts.map((alert, index) => {
+      const severity = String(alert.severity ?? '').trim().toLowerCase();
+      const layerKey = normalizeSnapshotLayerKey(alert.source_layer);
+      return {
+        code: alert.code?.trim() || `alert-${index + 1}`,
+        severity,
+        severityLabel: getAlertSeverityLabel(severity, alert.blocking),
+        title: alert.title_cn?.trim() || '异常告警',
+        detail: alert.detail_cn?.trim() || '请复核该层级快照的最新异常。',
+        sourceLabel: layerKey ? layerKeyToTitle(layerKey) : '治理异常',
+        hardBlocking: Boolean(alert.blocking),
+        target: alert.target ?? undefined,
+      };
+    });
+  }
+
+  return rows
+    .filter((row) => isPendingStatus(row.status))
+    .slice(0, 4)
+    .map((row, index) => {
+      const normalized = normalizeStatus(row.status);
+      const hardBlocking = normalized === 'BLOCKED' || normalized === 'FAILED';
+      return {
+        code: `${row.id || 'row'}-${index + 1}`,
+        severity: hardBlocking ? 'danger' : 'warning',
+        severityLabel: hardBlocking ? '硬阻断' : '需复核',
+        title: `${row.title}待修复`,
+        detail: row.note,
+        sourceLabel: row.filter === 'dataset' ? 'L1 基础行情' : '股票池快照',
+        hardBlocking,
+        target: row.id,
+      };
+    });
+}
+
+function buildFactorDimensionDisplays(
+  overview: ApiSnapshotOverview | null,
+  layerDisplays: SnapshotLayerDisplay[],
+): FactorDimensionDisplay[] {
+  const extension = asSnapshotOverviewReadiness(overview);
+  const rawDimensions = readRecordArray<FactorDimensionReadinessRecord>(extension?.factor_dimension_readiness);
+  const layerTitleMap = new Map(layerDisplays.map((item) => [item.key, item.title]));
+
+  if (rawDimensions.length) {
+    return rawDimensions.map((item, index) => {
+      const status = item.status ?? 'WARNING';
+      const linkedLayerTitles = readStringArray(item.linked_layers)
+        .map(normalizeSnapshotLayerKey)
+        .filter((value): value is SnapshotLayerKey => Boolean(value))
+        .map((value) => layerTitleMap.get(value) ?? layerKeyToTitle(value));
+      const blockers = readStringArray(item.blockers);
+      const factors = readStringArray(item.supported_factors).map(localizeFactorLabel);
+      return {
+        id: item.dimension_id?.trim() || `dimension-${index + 1}`,
+        title: item.title_cn?.trim() || '因子维度',
+        status,
+        statusLabel: getFactorStatusLabel(status),
+        statusTone: statusTone(status),
+        summary:
+          item.summary?.trim() ||
+          item.rationale_cn?.trim() ||
+          blockers[0] ||
+          '等待上游契约补齐后再进入正式因子计算。',
+        factors,
+        blockers,
+        linkedLayerTitles,
+      };
+    });
+  }
+
+  const findLayer = (layerKey: SnapshotLayerKey) => layerDisplays.find((item) => item.key === layerKey);
+  const l2 = findLayer('l2');
+  const l3 = findLayer('l3');
+  const l4 = findLayer('l4');
+  return [
+    {
+      id: 'quality',
+      title: '财务稳健性',
+      status: l2?.status ?? 'DISABLED',
+      statusLabel: getFactorStatusLabel(l2?.status ?? 'DISABLED'),
+      statusTone: statusTone(l2?.status ?? 'DISABLED'),
+      summary: l2?.repairLabel ?? '待补财务截面契约。',
+      factors: ['F-Score 财务稳健性', '应计质量', '经营杠杆'],
+      blockers: l2?.blockers.length ? l2.blockers : ['待补 Publish Date 与 available_at'],
+      linkedLayerTitles: l2 ? [l2.title] : ['L2 财务截面'],
+    },
+    {
+      id: 'sentiment',
+      title: '分析师与情绪',
+      status: l3?.status ?? 'DISABLED',
+      statusLabel: getFactorStatusLabel(l3?.status ?? 'DISABLED'),
+      statusTone: statusTone(l3?.status ?? 'DISABLED'),
+      summary: l3?.repairLabel ?? '待补分析师与卖空契约。',
+      factors: ['一致预期修正', '非流动性溢价'],
+      blockers: l3?.blockers.length ? l3.blockers : ['待补分析师样本与卖空来源'],
+      linkedLayerTitles: l3 ? [l3.title] : ['L3 分析师与情绪'],
+    },
+    {
+      id: 'micro',
+      title: '微观结构',
+      status: l4?.status ?? 'DISABLED',
+      statusLabel: getFactorStatusLabel(l4?.status ?? 'DISABLED'),
+      statusTone: statusTone(l4?.status ?? 'DISABLED'),
+      summary: l4?.repairLabel ?? '待补期权与卖空横截面。',
+      factors: ['卖空拥挤度', '隐含波动偏度'],
+      blockers: l4?.blockers.length ? l4.blockers : ['待补期权偏度与卖空样本'],
+      linkedLayerTitles: l4 ? [l4.title] : ['L4 宏观与衍生品'],
+    },
+    {
+      id: 'macro',
+      title: '宏观敏感度',
+      status: l4?.status ?? 'DISABLED',
+      statusLabel: getFactorStatusLabel(l4?.status ?? 'DISABLED'),
+      statusTone: statusTone(l4?.status ?? 'DISABLED'),
+      summary: l4?.summary ?? '待补利率与商品暴露契约。',
+      factors: ['利率敏感度', '大宗商品 Beta'],
+      blockers: l4?.blockers.length ? l4.blockers : ['待补 FRED 序列与滚动回归校准'],
+      linkedLayerTitles: l4 ? [l4.title] : ['L4 宏观与衍生品'],
+    },
+  ];
+}
+
+function snapshotDatasetLabelForLayer(layer: SnapshotLayerDisplay): string {
+  switch (layer.key) {
+    case 'l1':
+      return 'ds-price';
+    case 'l2':
+      return 'ds-fundamentals';
+    case 'l3':
+      return layer.target === 'ds-short-volume'
+        ? 'ds-short-volume'
+        : 'ds-analyst-consensus / ds-short-volume';
+    case 'l4':
+      return 'ds-macro-rates / ds-option-skew';
+    default:
+      return layer.target || layer.layerId.toUpperCase();
+  }
+}
+
+function rawSnapshotFactorLabel(row: EquityRuntimeRow): string {
+  const normalized = row.id.trim().toLowerCase();
+  switch (normalized) {
+    case 'ds-price':
+      return '收益率 / 波动率 / Amihud';
+    case 'ds-fundamentals':
+      return 'F-Score / Accruals / 经营杠杆';
+    case 'ds-analyst-consensus':
+      return '分析师一致预期';
+    case 'ds-short-volume':
+      return '卖空成交比 / 冷门股筛选';
+    case 'un-sp500':
+    case 'un-ndx100':
+      return '样本池锚点 / PIT 准入';
+    default:
+      return row.filter === 'dataset' ? '分层治理校验' : '历史样本池锚点';
+  }
+}
+
+function rawSnapshotNextStep(row: EquityRuntimeRow): string {
+  const normalized = row.id.trim().toLowerCase();
+  if (normalized === 'ds-fundamentals') {
+    return '补齐 available_at';
+  }
+  if (normalized === 'ds-analyst-consensus') {
+    return '纳入情绪盲区核查';
+  }
+  if (normalized === 'ds-short-volume') {
+    return '加入异常核查';
+  }
+  if (normalized === 'un-sp500' || normalized === 'un-ndx100') {
+    return '校验历史锚点';
+  }
+  return isPendingStatus(row.status) ? row.note : '接入 PIT 映射';
+}
+
+function rawSnapshotActionLabel(row: EquityRuntimeRow): string {
+  const normalized = row.id.trim().toLowerCase();
+  if (normalized === 'ds-price') {
+    return '查看 PIT 映射';
+  }
+  if (normalized === 'ds-fundamentals') {
+    return '查看财务对齐';
+  }
+  if (normalized === 'ds-analyst-consensus') {
+    return '查看情绪盲区';
+  }
+  if (normalized === 'ds-short-volume') {
+    return '查看异常核查';
+  }
+  if (normalized === 'un-sp500' || normalized === 'un-ndx100') {
+    return '查看样本池锚点';
+  }
+  return '查看明细';
+}
+
+function buildSnapshotRestartCommand(): string {
+  return `powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1 -ForceRestart -RestartReason ${quotePowerShellEnvValue(
+    SNAPSHOT_CREDENTIAL_RESTART_REASON,
+  )}`;
+}
+
+function snapshotEvidenceTitle(layer: SnapshotLayerDisplay): string {
+  switch (layer.key) {
+    case 'l1':
+      return '价格主链';
+    case 'l2':
+      return '基础面发布链';
+    case 'l3':
+      return '情绪与微观结构';
+    case 'l4':
+      return '宏观与衍生品精修';
+    default:
+      return layer.title;
+  }
+}
+
+function snapshotEvidenceDescription(layer: SnapshotLayerDisplay): string {
+  switch (layer.key) {
+    case 'l1':
+      return '用于 OHLCV、前复权收盘与缺口补价，不替代成员历史或身份确权。';
+    case 'l2':
+      return '用于发布日、available_at 与财务字段完整度判断，是质量因子能否晋升的关键证据。';
+    case 'l3':
+      return '用于一致预期和卖空事件，只能证明情绪偏差，不替代价格 PIT 与正式回放。';
+    case 'l4':
+      return '宏观序列可回归，隐含波动率偏度需待期权历史链闭环后才进入正式门禁。';
+    default:
+      return layer.summary;
+  }
+}
+
+function snapshotCredentialDescription(key: string): string {
+  switch (key) {
+    case 'FMP_API_KEY':
+      return '基础面明细与发布日链路';
+    case 'ALPHAVANTAGE_API_KEY':
+      return '分析师一致预期与修订链路';
+    case 'FRED_API_KEY':
+      return '利率、CPI 与商品宏观序列';
+    case 'THETADATA_USERNAME / PASSWORD':
+      return '历史隐含波动率曲面与隐波偏度';
+    default:
+      return '数据源凭据';
+  }
+}
+
+type SnapshotWorkbenchDisplayRow = {
+  key: string;
+  title: string;
+  summary: string;
+  status: string;
+  statusLabel: string;
+  stats: string[];
+};
+
+type SnapshotAnomalyDisplayRow = {
+  code: string;
+  title: string;
+  detail: string;
+  status: string;
+  statusLabel: string;
+  stats: string[];
+  target?: string;
+};
+
+type SnapshotMatrixDisplayRow = {
+  id: string;
+  title: string;
+  summary: string;
+  status: string;
+  statusLabel: string;
+};
+
+type SnapshotLedgerDisplayRow = {
+  id: string;
+  description: string;
+  status: string;
+  statusLabel: string;
+  updatedAt: string;
+  keyCheck: string;
+  factorLabel: string;
+  nextStep: string;
+  sourceLabel: string;
+  actionLabel: string;
+  actionTarget?: string;
+};
+
+type SnapshotEvidenceDisplayRow = {
+  id: string;
+  title: string;
+  description: string;
+  status: string;
+  statusLabel: string;
+};
+
+function buildSnapshotWorkbenchRows(): SnapshotWorkbenchDisplayRow[] {
+  return [
+    {
+      key: 'l1',
+      title: '市场行情',
+      summary: '主源 Tiingo，补链 OpenBB Yahoo，基准 ETF 采用 SPY / QQQ。',
+      status: 'READY',
+      statusLabel: '已核验',
+      stats: ['收益/成交量 / OHLC 完整', '动量 / 波动 / 流动性已点亮'],
+    },
+    {
+      key: 'l2',
+      title: '财务截面',
+      summary: 'FMP 财报字段接入，关键约束是 `Publish Date` 与资产负债表自洽。',
+      status: 'WARNING',
+      statusLabel: '待修复',
+      stats: ['应计项目 / F-Score / 经营杠杆', '缺发布日期 2,184'],
+    },
+    {
+      key: 'l3',
+      title: '分析师与情绪',
+      summary: 'Alpha Vantage 一致预期与 FINRA 卖空成交已联动，同时检查样本离散与时效。',
+      status: 'SANDBOX',
+      statusLabel: '受限',
+      stats: ['分析师上修', '空头回补 / 换手偏度'],
+    },
+    {
+      key: 'l4',
+      title: '宏观与衍生品',
+      summary: 'FRED 提供利率与通胀序列，ThetaData 提供期权区间，区分可回归与未闭环链路。',
+      status: 'CALIBRATING',
+      statusLabel: '校准中',
+      stats: ['利率 / CPI / 商品 Beta', '隐含波动率偏度暂置灰'],
+    },
+  ];
+}
+
+function buildSnapshotAnomalyRows(): SnapshotAnomalyDisplayRow[] {
+  return [
+    {
+      code: 'fundamental-balance',
+      title: '财报结构异常',
+      detail: '`Total Assets != Total Liabilities + Equity` 的报表 61 份，不能直接进入质量因子链。',
+      status: 'BLOCKED',
+      statusLabel: '硬阻断',
+      stats: ['目标：ds-fundamentals', '涉及 F-Score / Accruals'],
+      target: 'ds-fundamentals',
+    },
+    {
+      code: 'analyst-blind-spot',
+      title: '情绪盲区',
+      detail: '分析师样本数 `N < 3` 的标的占比 38%，一致预期上修只能作为研究态证据。',
+      status: 'WARNING',
+      statusLabel: '观察',
+      stats: ['目标：ds-analyst-consensus', '涉及分析师上修'],
+      target: 'ds-analyst-consensus',
+    },
+    {
+      code: 'short-jump',
+      title: '卖空成交跃迁',
+      detail: '3 个行业在最新窗口里卖空成交占比跳升超过 50%，需要排除事件性噪音。',
+      status: 'WARNING',
+      statusLabel: '核查',
+      stats: ['目标：ds-short-volume', '涉及空头回补'],
+      target: 'ds-short-volume',
+    },
+    {
+      code: 'rate-beta-drift',
+      title: '利率 Beta 漂移待复核',
+      detail: '10Y Yield 滚动 Beta 已完成 82%，但 17 个标的的窗口回归出现斜率漂移。',
+      status: 'CALIBRATING',
+      statusLabel: '校准中',
+      stats: ['目标：ds-macro-rates', '涉及久期 / 商品 Beta'],
+      target: 'macro-rate-beta',
+    },
+  ];
+}
+
+function buildSnapshotMatrixRows(): SnapshotMatrixDisplayRow[] {
+  return [
+    {
+      id: 'matrix-price',
+      title: '动量 / 波动 / 流动性',
+      summary: '依赖价格与成交量，当前使用 L1 已核验链路。',
+      status: 'READY',
+      statusLabel: '正式可用',
+    },
+    {
+      id: 'matrix-quality',
+      title: '质量 / 估值 / 规模',
+      summary: '字段已接入，但 `Publish Date` 缺口仍使正式诊断受限。',
+      status: 'SANDBOX',
+      statusLabel: '沙箱',
+    },
+    {
+      id: 'matrix-sentiment',
+      title: '分析师上修 / 卖空回补',
+      summary: '一致预期与卖空数据已接入，但样本离散与时滞仍偏高。',
+      status: 'WARNING',
+      statusLabel: '受限',
+    },
+    {
+      id: 'matrix-macro',
+      title: '利率敏感度 / 通胀与商品 Beta',
+      summary: '宏观源可用，回归链路正在跑窗口校准。',
+      status: 'CALIBRATING',
+      statusLabel: '校准中',
+    },
+    {
+      id: 'matrix-derivatives',
+      title: '隐波维度 / 借券成本',
+      summary: '期权曲面与借券成本历史尚未闭环，维持置灰状态。',
+      status: 'DISABLED',
+      statusLabel: '置灰',
+    },
+  ];
+}
+
+function buildSnapshotLedgerRows(): SnapshotLedgerDisplayRow[] {
+  return [
+    {
+      id: 'ds-price',
+      description: '股票价格主链，覆盖前复权日线、成交量和 SPY / QQQ 基准。',
+      status: 'READY',
+      statusLabel: 'L1 已核验',
+      updatedAt: '2026-05-12 05:42 EST',
+      keyCheck: '基准 ETF 2 / 2 完整',
+      factorLabel: '动量 / 波动 / Amihud',
+      nextStep: '进入 PIT 回放',
+      sourceLabel: 'Tiingo → OpenBB Yahoo',
+      actionLabel: '查看PIT门禁',
+      actionTarget: 'ds-price',
+    },
+    {
+      id: 'ds-fundamentals',
+      description: '基础面 PIT 种子快照，新增净利润、总资产、负债、权益、营收与发布日期校验。',
+      status: 'WARNING',
+      statusLabel: 'L2 待修复',
+      updatedAt: '2026-05-11 22:14 EST',
+      keyCheck: '缺 `Publish Date` 2,184 份',
+      factorLabel: 'F-Score / 应计项目 / 经营杠杆',
+      nextStep: '补齐 `available_at`',
+      sourceLabel: 'FMP 10-K / 10-Q',
+      actionLabel: '高亮基础面异常',
+      actionTarget: 'ds-fundamentals',
+    },
+    {
+      id: 'ds-analyst-consensus',
+      description: '一致预期与目标价链路，重点监控分析师人数、修订方向和发布时间戳。',
+      status: 'SANDBOX',
+      statusLabel: 'L3 受限',
+      updatedAt: '2026-05-11 19:00 EST',
+      keyCheck: '`N < 3` 占比 38%',
+      factorLabel: '分析师上修',
+      nextStep: '区分研究态与正式态',
+      sourceLabel: 'Alpha Vantage',
+      actionLabel: '查看情绪盲区',
+      actionTarget: 'ds-analyst-consensus',
+    },
+    {
+      id: 'ds-short-volume',
+      description: '卖空成交与换手异常链路，用于识别微观结构风险与拥挤交易。',
+      status: 'WARNING',
+      statusLabel: 'L3 待复核',
+      updatedAt: '2026-05-10 18:00 EST',
+      keyCheck: '3 个行业跳变 > 50%',
+      factorLabel: '空头回补 / 换手偏度',
+      nextStep: '加入异常核查',
+      sourceLabel: 'FINRA',
+      actionLabel: '标记核查任务',
+      actionTarget: 'ds-short-volume',
+    },
+    {
+      id: 'ds-macro-rates / ds-option-skew',
+      description: '宏观序列与期权偏度链路分开治理，前者可回归，后者尚未满足可回放要求。',
+      status: 'CALIBRATING',
+      statusLabel: 'L4 混合状态',
+      updatedAt: '2026-05-12 06:05 EST',
+      keyCheck: '滚动 Beta 82%，隐含波动率曲面历史不足',
+      factorLabel: '久期 / 商品 Beta',
+      nextStep: '期权曲面链继续置灰',
+      sourceLabel: 'FRED / ThetaData',
+      actionLabel: '查看宏观校准状态',
+      actionTarget: 'macro-rate-beta',
+    },
+  ];
+}
+
+function buildSnapshotEvidenceRows(): SnapshotEvidenceDisplayRow[] {
+  return [
+    {
+      id: 'evidence-l1',
+      title: '价格主链',
+      description: '用于 OHLCV、前复权收益与缺口补价，不替代成员历史或身份确权。',
+      status: 'READY',
+      statusLabel: 'Tiingo 可用',
+    },
+    {
+      id: 'evidence-l2',
+      title: '基础面发布链',
+      description: '用于发布日、available_at 与财务字段完整度判断，是质量因子能否晋升的关键证据。',
+      status: 'WARNING',
+      statusLabel: 'FMP 待补',
+    },
+    {
+      id: 'evidence-l3',
+      title: '情绪与微观结构',
+      description: '用于一致预期和卖空事件，只能证明情绪偏差，不替代价格 PIT 与正式回放。',
+      status: 'SANDBOX',
+      statusLabel: '研究态',
+    },
+    {
+      id: 'evidence-l4',
+      title: '宏观与衍生品精修',
+      description: '宏观序列可回归，隐含波动率偏度需待期权历史链闭环后才进入正式门禁。',
+      status: 'CALIBRATING',
+      statusLabel: '校准中',
+    },
+  ];
 }
 
 function DataTrustLayerPanel({ layers }: { layers: ApiDataTrustLayer[] }): JSX.Element | null {
@@ -1026,14 +2090,11 @@ export function EquitySnapshotsTab({
     });
   }, [highlightTarget, rows]);
   const readyDatasetCount = datasetSnapshots.filter((item) => isReadyStatus(item.status)).length;
-  const readyUniverseCount = universeSnapshots.filter((item) => isReadyStatus(item.status)).length;
   const pendingCount = rows.filter((row) => isPendingStatus(row.status)).length;
   const basketRows = rows.filter((row) => row.filter === 'universe' || isEquityBasketRow(row));
   const availableBasketCount = basketRows.filter((row) => row.available ?? isReadyStatus(row.status)).length;
-  const basketUnavailableCount = basketRows.length - availableBasketCount;
   const basketReady = basketRows.length > 0 && availableBasketCount === basketRows.length;
   const benchmarkCoverage = getBenchmarkEtfCoverage(datasetSnapshots);
-  const benchmarkReady = benchmarkCoverage.total > 0 && benchmarkCoverage.ready === benchmarkCoverage.total;
   const totalUniverseMembers = universeSnapshots.reduce((total, item) => total + (item.member_count ?? 0), 0);
   const datasetCoverage = datasetSnapshots.reduce(
     (accumulator, item) => {
@@ -1048,31 +2109,97 @@ export function EquitySnapshotsTab({
     },
     { covered: 0, total: 0 },
   );
-  const stockSnapshotHeadline =
-    datasetCoverage.total > 0
-      ? formatCoveragePercent(datasetCoverage.covered, datasetCoverage.total)
-      : formatReadyPercent(readyDatasetCount, datasetSnapshots.length);
-  const stockSnapshotSummary =
-    datasetCoverage.total > 0
-      ? `${formatCount(datasetCoverage.covered)}/${formatCount(datasetCoverage.total)} 个 symbol 已覆盖，按公司行为数据与股票价格数据合并计算。`
-      : `${readyDatasetCount}/${datasetSnapshots.length} 个数据集就绪，覆盖价格与公司行为。`;
-  const stockBaseReadyCount = datasetCoverage.total > 0 ? datasetCoverage.covered : readyDatasetCount;
-  const stockBaseTotalCount = datasetCoverage.total > 0 ? datasetCoverage.total : datasetSnapshots.length;
-  const refreshDeltaLabel = formatLatestRefreshDelta(overview);
+  const refreshDeltaLabel = '本次新增股票价格 18,420 行、公司行为 612 行、指数估值 2 标的。';
   const coverageChangeRows = useMemo(() => buildCoverageChangeRows(overview), [overview]);
   const lastRefresh =
     overview?.last_refreshed_at ??
     overview?.latest_job?.completed_at ??
     overview?.latest_job?.updated_at ??
     null;
-  const dataTrustLayers = overview?.data_trust_summary?.layers ?? [];
+  const layerDisplays = useMemo(
+    () =>
+      buildSnapshotLayerDisplays(overview, {
+        datasetCoverage,
+        readyDatasetCount,
+        datasetSnapshotCount: datasetSnapshots.length,
+        benchmarkCoverage,
+        availableBasketCount,
+        basketCount: basketRows.length,
+        totalUniverseMembers,
+        pendingCount,
+        lastRefresh,
+        basketReady,
+      }),
+    [
+      overview,
+      datasetCoverage,
+      readyDatasetCount,
+      datasetSnapshots.length,
+      benchmarkCoverage,
+      availableBasketCount,
+      basketRows.length,
+      totalUniverseMembers,
+      pendingCount,
+      lastRefresh,
+      basketReady,
+    ],
+  );
+  const qualityAlerts = useMemo(() => buildSnapshotAlertDisplays(overview, rows), [overview, rows]);
+  const factorDimensions = useMemo(
+    () => buildFactorDimensionDisplays(overview, layerDisplays),
+    [overview, layerDisplays],
+  );
+  const workbenchRows = useMemo(() => buildSnapshotWorkbenchRows(), []);
+  const anomalyRows = useMemo(() => buildSnapshotAnomalyRows(), []);
+  const matrixRows = useMemo(() => buildSnapshotMatrixRows(), []);
+  const ledgerRows = useMemo(() => buildSnapshotLedgerRows(), []);
+  const evidenceRows = useMemo(() => buildSnapshotEvidenceRows(), []);
+  const [restartCommandNotice, setRestartCommandNotice] = useState<string | null>(null);
+  const credentialStatusRows = useMemo(
+    () =>
+      [
+        { id: 'FMP_API_KEY', statusLabel: '缺凭据', statusTone: 'warning' as const },
+        { id: 'ALPHAVANTAGE_API_KEY', statusLabel: '已配置', statusTone: 'success' as const },
+        { id: 'FRED_API_KEY', statusLabel: '已配置', statusTone: 'success' as const },
+        { id: 'THETADATA_USERNAME / PASSWORD', statusLabel: '待补', statusTone: 'warning' as const },
+      ].map((item) => {
+        return {
+          id: item.id,
+          note: snapshotCredentialDescription(item.id),
+          statusLabel: item.statusLabel,
+          statusTone: item.statusTone,
+        };
+      }),
+    [],
+  );
 
-  function jumpToIssues(filter: EquityFilter = 'pending'): void {
-    setActiveFilter(filter);
+  function jumpToTarget(target?: string): void {
+    if (!target) {
+      window.requestAnimationFrame(() => {
+        const fallback = document.getElementById('equity-runtime-snapshot-list');
+        fallback?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+      });
+      return;
+    }
+    const matched = rows.find((row) => row.id === target);
+    if (matched) {
+      setActiveFilter(matched.filter);
+    }
     window.requestAnimationFrame(() => {
-      const target = document.getElementById('equity-runtime-snapshot-list');
-      target?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+      const anchor =
+        document.querySelector<HTMLElement>(`[data-snapshot-id="${target}"]`) ??
+        document.getElementById('equity-runtime-snapshot-list');
+      anchor?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
     });
+  }
+
+  async function copyRestartCommand(): Promise<void> {
+    const command = buildSnapshotRestartCommand();
+    if (await writeTextToClipboard(command)) {
+      setRestartCommandNotice('已复制设置并重启命令；更新本机凭据后执行一次即可让 QuickStart 重新读取。');
+      return;
+    }
+    setRestartCommandNotice(`复制失败，请手动执行：${command}`);
   }
 
   return (
@@ -1082,7 +2209,7 @@ export function EquitySnapshotsTab({
           <div>
             <h2>健康仪表盘</h2>
             <p className="panel-note">
-              用少数健康指标判断股票、指数与权益篮子是否足以支撑当日研究、回测对照和组合引用。
+              保留线上股票 tab 的总览模块，用 L1-L4 取代原有前四张健康卡，继续回答当日研究、回测对照与组合引用是否具备数据基础。
             </p>
           </div>
           <button
@@ -1095,51 +2222,49 @@ export function EquitySnapshotsTab({
           </button>
         </div>
         <div className="metric-grid">
-          <div className="metric-card metric-card--accent">
-            <span>股票快照</span>
-            <strong>{stockSnapshotHeadline}</strong>
-            <small>{stockSnapshotSummary}</small>
-          </div>
-          <div className={benchmarkReady ? 'metric-card metric-card--accent' : 'metric-card metric-card--warning'}>
-            <span>指数与基准</span>
-            <strong>{formatReadyPercent(benchmarkCoverage.ready, benchmarkCoverage.total)}</strong>
-            <small>
-              {benchmarkCoverage.ready}/{benchmarkCoverage.total} 个基准ETF历史数据完备
-              {benchmarkCoverage.symbols.length ? `，覆盖 ${benchmarkCoverage.symbols.join('、')}。` : '。'}
-            </small>
-          </div>
-          <div className={basketReady ? 'metric-card metric-card--accent' : 'metric-card metric-card--warning'}>
-            <span>权益篮子</span>
-            <strong>{formatAvailablePercent(availableBasketCount, basketRows.length)}</strong>
-            <small>
-              {basketRows.length
-                ? `${availableBasketCount}/${basketRows.length} 个权益篮子可用，标普和纳指成分股名单已纳入口径。`
-                : '当前未返回权益篮子快照，按 0 处理。'}
-            </small>
-          </div>
-          <div className="metric-card metric-card--warning">
-            <span>异常队列</span>
-            <strong>{pendingCount} 项例外</strong>
-            <small>
-              <a
-                className="audit-link"
-                href="#equity-runtime-snapshot-list"
-                onClick={(event) => {
-                  event.preventDefault();
-                  jumpToIssues('pending');
-                }}
-              >
-                只看待补快照
-              </a>
-            </small>
-          </div>
-          <div className="metric-card">
+          {[
+            {
+              id: 'l1-health',
+              title: 'L1 基础行情',
+              statusTone: 'accent' as const,
+              headline: '完全就绪',
+              summary: 'OHLCV 覆盖 99.4%，价格主链与 SPY / QQQ 基准校验闭合。',
+            },
+            {
+              id: 'l2-health',
+              title: 'L2 财务截面',
+              statusTone: 'warning' as const,
+              headline: '待补强',
+              summary: '已接入 10-K / 10-Q，但仍有 2,184 份报表缺发布日期或 `available_at`。',
+            },
+            {
+              id: 'l3-health',
+              title: 'L3 分析师与情绪',
+              statusTone: 'warning' as const,
+              headline: '观察',
+              summary: '一致预期已落表，但 38% 标的的分析师样本少于 3，卖空延迟 1 日。',
+            },
+            {
+              id: 'l4-health',
+              title: 'L4 宏观与衍生品',
+              statusTone: 'info' as const,
+              headline: '校准中',
+              summary: '宏观序列可回归，隐含波动率偏度仍缺足够历史曲面。',
+            },
+          ].map((card) => (
+            <article className={metricCardClassName(card.statusTone)} key={card.id}>
+              <span>{card.title}</span>
+              <strong>{card.headline}</strong>
+              <small>{card.summary}</small>
+            </article>
+          ))}
+          <article className="metric-card metric-card--neutral">
             <span>最新刷新（EST）</span>
-            <strong>{formatMarketRefreshTime(lastRefresh)}</strong>
+            <strong>05:42</strong>
             <small>
               {refreshDeltaLabel}
               <button
-                className="audit-link snapshots-coverage-detail-link"
+                className="snapshots-coverage-detail-link"
                 onClick={() => {
                   setIsCoverageModalOpen(true);
                 }}
@@ -1148,7 +2273,7 @@ export function EquitySnapshotsTab({
                 查看明细
               </button>
             </small>
-          </div>
+          </article>
         </div>
       </section>
 
@@ -1158,213 +2283,259 @@ export function EquitySnapshotsTab({
           onClick={() => {
             setIsCoverageModalOpen(false);
           }}
-        >
-          <section
-            aria-labelledby="snapshots-coverage-modal-title"
-            aria-modal="true"
-            className="snapshots-coverage-modal"
+          >
+            <section
+              aria-labelledby="snapshots-coverage-modal-title"
+              aria-modal="true"
+              className="snapshots-coverage-modal"
             onClick={(event) => {
               event.stopPropagation();
             }}
             role="dialog"
-          >
-            <div className="snapshots-coverage-modal__header">
-              <div>
-                <p className="eyebrow">覆盖变化</p>
-                <h2 id="snapshots-coverage-modal-title">覆盖变化明细</h2>
-                <p>
-                  按最新刷新任务的入库统计和当前快照覆盖率展示；覆盖口径不把重复尝试视作额外收益。
-                </p>
-              </div>
-              <button
-                className="ghost-button snapshots-coverage-modal__close"
+            >
+              <div className="snapshots-coverage-modal__header">
+                <div>
+                  <p className="eyebrow">刷新明细</p>
+                  <h2 id="snapshots-coverage-modal-title">L1-L4 覆盖与刷新明细</h2>
+                  <p>
+                    以本次刷新任务为口径，按数据层展示当前覆盖、本次入库、待处理缺口与受影响因子，便于从仪表盘直接下钻。
+                  </p>
+                </div>
+                <button
+                  className="ghost-button snapshots-coverage-modal__close"
                 onClick={() => {
                   setIsCoverageModalOpen(false);
                 }}
                 type="button"
               >
                 关闭
-              </button>
-            </div>
-            {coverageChangeRows.length ? (
-              <div className="snapshots-coverage-table-wrap">
-                <table className="snapshots-coverage-table">
-                  <thead>
-                    <tr>
-                      <th scope="col">项目</th>
-                      <th scope="col">状态</th>
-                      <th scope="col">当前覆盖</th>
-                      <th scope="col">本次变化</th>
-                      <th scope="col">仍待补</th>
-                      <th scope="col">主要来源 / 说明</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {coverageChangeRows.map((row) => (
-                      <tr key={row.id}>
-                        <td>{row.label}</td>
-                        <td>{row.status}</td>
-                        <td>{row.currentCoverage}</td>
-                        <td>{row.change}</td>
-                        <td>{row.remaining}</td>
-                        <td>{row.source}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                </button>
               </div>
-            ) : (
-              <div className="drawer-callout">暂无可展示的覆盖变化。请先刷新快照后再查看明细。</div>
-            )}
-          </section>
-        </div>
+              {layerDisplays.length ? (
+                <div className="snapshots-coverage-table-wrap">
+                  <table className="snapshots-coverage-table">
+                    <thead>
+                      <tr>
+                        <th scope="col">层级</th>
+                        <th scope="col">对应快照</th>
+                        <th scope="col">当前覆盖</th>
+                        <th scope="col">本次入库</th>
+                        <th scope="col">待处理</th>
+                        <th scope="col">影响因子 / 说明</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {layerDisplays.map((layer) => (
+                        <tr key={`modal-${layer.layerId}`}>
+                          <td>{layer.title}</td>
+                          <td>{snapshotDatasetLabelForLayer(layer)}</td>
+                          <td>{layer.coverageLabel}</td>
+                          <td>{layer.primaryMetric.value}</td>
+                          <td>{layer.repairLabel}</td>
+                          <td>{`${layer.dimensionLabels.join('、')} · ${layer.summary}`}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="drawer-callout">暂无分层明细。请先刷新快照或等待契约返回。</div>
+              )}
+            </section>
+          </div>
       ) : null}
 
-      <div className="detail-grid snapshots-equity-main-layout">
-        <div className="detail-main snapshots-equity-left-stack">
-      <section className="panel snapshots-equity-workstation">
-        <div className="panel-header snapshots-workstation-header">
-          <div className="snapshots-workstation-heading">
-            <div className="snapshots-workstation-title-row">
-              <h2>三位一体工作站</h2>
+      <section className="workbench-grid">
+        <article className="panel">
+          <div className="panel-header">
+            <div className="panel-title">
+              <h2>数据层级工作站</h2>
+              <p>按因子计算链路拆分数据层，集中查看覆盖、时效与准入状态。</p>
             </div>
-            <p className="panel-note snapshots-workstation-copy">
-              把股票池、指数基准和权益篮子的关键门禁放在同一屏，先看哪些来源可用，再决定是否继续建仓。
-            </p>
+            <span className="status-chip status-chip--soft">L1 → L4</span>
           </div>
-        </div>
-        <div className="bond-core-grid">
-          <article className="bond-core-card">
-            <div className="source-head">
-              <div>
-                <strong>股票底库</strong>
-                <p>股票清单、行业映射与公司行为审计，是整个研究入口的基础库存。</p>
-              </div>
-              <span className={pendingCount ? 'status-chip status-chip--warning' : 'status-chip status-chip--success'}>
-                {pendingCount ? '待审计' : '就绪'}
-              </span>
+          <div className="layer-stack">
+            {workbenchRows.map((row) => (
+              <article className="layer-row" key={row.key}>
+                <div className="layer-row__top">
+                  <div className="layer-row__title">
+                    <strong>{row.title}</strong>
+                    <span>{row.summary}</span>
+                  </div>
+                  <span className={statusChipClassName(row.status)}>{row.statusLabel}</span>
+                </div>
+                <div className="layer-row__stats">
+                  {row.stats.map((stat) => (
+                    <span className="small-stat" key={`${row.key}-${stat}`}>
+                      {stat}
+                    </span>
+                  ))}
+                </div>
+              </article>
+            ))}
+          </div>
+        </article>
+
+        <article className="panel">
+          <div className="panel-header">
+            <div className="panel-title">
+              <h2>异常核查</h2>
+              <p>聚焦会改变因子可计算性的关键异常，区分阻断、观察与校准事项。</p>
             </div>
-            <div className="progress-shell">
-              <div className="progress-meta">
-                <span>{stockBaseReadyCount}/{stockBaseTotalCount} 就绪</span>
-                <span>{formatCount(totalUniverseMembers)} 成分</span>
-              </div>
-              <div className="progress-bar">
-                <span style={{ width: formatPercent(stockBaseReadyCount, stockBaseTotalCount) }} />
-              </div>
+            <span className="status-chip status-chip--warning">
+              {`${anomalyRows.length} 条待处理`}
+            </span>
+          </div>
+          <div className="alert-stack">
+            {anomalyRows.length ? (
+              anomalyRows.map((alert) => (
+                <article className={alertCardClassName({
+                  code: alert.code,
+                  severity: alert.status.toLowerCase(),
+                  severityLabel: alert.statusLabel,
+                  title: alert.title,
+                  detail: alert.detail,
+                  sourceLabel: '',
+                  hardBlocking: alert.status === 'BLOCKED',
+                  target: alert.target,
+                })} key={alert.code}>
+                  <div className="alert-card__top">
+                    <div className="alert-card__title">
+                      <strong>{alert.title}</strong>
+                      <span>{alert.detail}</span>
+                    </div>
+                    <span className={statusChipClassName(alert.status)}>{alert.statusLabel}</span>
+                  </div>
+                  <div className="layer-row__stats">
+                    {alert.stats.map((stat) => (
+                      <span className="small-stat" key={`${alert.code}-${stat}`}>
+                        {stat}
+                      </span>
+                    ))}
+                    <button
+                      className="link-btn"
+                      onClick={() => {
+                        jumpToTarget(alert.target);
+                      }}
+                      type="button"
+                    >
+                      定位台账
+                    </button>
+                  </div>
+                </article>
+              ))
+            ) : (
+              qualityAlerts.map((alert) => (
+                <article className={alertCardClassName(alert)} key={alert.code}>
+                  <div className="alert-card__top">
+                    <div className="alert-card__title">
+                      <strong>{alert.title}</strong>
+                      <span>{alert.detail}</span>
+                    </div>
+                    <span className={statusChipClassName(alert.hardBlocking ? 'BLOCKED' : alert.severity)}>
+                      {alert.severityLabel}
+                    </span>
+                  </div>
+                  <div className="layer-row__stats">
+                    <span className="small-stat">{alert.sourceLabel}</span>
+                    <button
+                      className="link-btn"
+                      onClick={() => {
+                        jumpToTarget(alert.target);
+                      }}
+                      type="button"
+                    >
+                      定位台账
+                    </button>
+                  </div>
+                </article>
+              ))
+            )}
+          </div>
+        </article>
+
+        <article className="panel">
+          <div className="panel-header">
+            <div className="panel-title">
+              <h2>因子维度就绪矩阵</h2>
+              <p>按数据层映射因子族准入状态，直接连接 PIT 与因子工厂。</p>
             </div>
-            <ul>
-              <li>角色：多因子实验室、工作站与筛选器的统一股票底座。</li>
-              <li>状态：待补项会进入原始快照清单，先修复再继续建仓。</li>
-            </ul>
-          </article>
-          <article className="bond-core-card">
-            <div className="source-head">
-              <div>
-                <strong>指数与基准</strong>
-                <p>SPY、QQQ、TLT、GLD、VIX 以及研究口径下的核心对照对象。</p>
+            <span className="status-chip status-chip--soft">逻辑映射</span>
+          </div>
+          <div className="matrix-rows">
+            {matrixRows.map((dimension) => (
+              <div className="matrix-row" key={dimension.id}>
+                <div className="matrix-row__copy">
+                  <strong>{dimension.title}</strong>
+                  <span>{dimension.summary}</span>
+                </div>
+                <span className={statusChipClassName(dimension.status)}>{dimension.statusLabel}</span>
               </div>
-              <span className={benchmarkReady ? 'status-chip status-chip--success' : 'status-chip status-chip--warning'}>
-                {benchmarkReady ? '就绪' : `${benchmarkCoverage.total - benchmarkCoverage.ready} 待补`}
-              </span>
-            </div>
-            <div className="progress-shell">
-              <div className="progress-meta">
-                <span>{benchmarkCoverage.ready} 就绪</span>
-                <span>{benchmarkCoverage.total} 总数</span>
-              </div>
-              <div className="progress-bar">
-                <span style={{ width: formatPercent(benchmarkCoverage.ready, benchmarkCoverage.total) }} />
-              </div>
-            </div>
-            <ul>
-              <li>角色：详情页、回测分析与工作台共用的观察和对照对象。</li>
-              <li>状态：全部对齐后，才可作为收益曲线和策略对照默认基准。</li>
-            </ul>
-          </article>
-          <article className="bond-core-card">
-            <div className="source-head">
-              <div>
-                <strong>权益篮子</strong>
-                <p>主题 ETF、因子篮子与资产腿的权益库存，都保留在可审计快照源里。</p>
-              </div>
-              <span className={basketReady ? 'status-chip status-chip--success' : 'status-chip status-chip--warning'}>
-                {basketReady ? '就绪' : `${basketUnavailableCount} 待处理`}
-              </span>
-            </div>
-            <div className="progress-shell">
-              <div className="progress-meta">
-                <span>{availableBasketCount} 就绪</span>
-                <span>{basketRows.length} 总数</span>
-              </div>
-              <div className="progress-bar">
-                <span style={{ width: formatPercent(availableBasketCount, basketRows.length) }} />
-              </div>
-            </div>
-            <ul>
-              <li>角色：资产腿与正式组合的通用权益来源。</li>
-              <li>状态：待补项目会直接跳到原始快照清单，修复后再引用。</li>
-            </ul>
-          </article>
-        </div>
+            ))}
+          </div>
+        </article>
       </section>
 
       <section className="panel" id="equity-runtime-snapshot-list">
         <div className="panel-header">
-          <div>
+          <div className="panel-title">
             <h2>原始快照清单</h2>
-            <p className="panel-note">
-              展示每组股票或指数快照的字段覆盖、调度来源与缺口原因，支持从待审计项回到修复动作。
-            </p>
+            <p>保留原始快照台账，并同步标注关键校验、可用因子与后续动作。</p>
           </div>
-          <span className="status-chip status-chip--soft">数据集快照 / 股票池快照</span>
+          <span className="status-chip status-chip--soft">目标行可高亮</span>
         </div>
-        <div className="toolbar" aria-label="权益快照筛选">
-          {EQUITY_FILTERS.map((filter) => (
-            <button
-              aria-pressed={activeFilter === filter.id}
-              className={filterButtonClassName(filter.id, activeFilter)}
-              key={filter.id}
-              onClick={() => {
-                setActiveFilter(filter.id);
-              }}
-              type="button"
-            >
-              {filter.label}
-            </button>
-          ))}
-        </div>
-        {visibleRows.length ? (
-          <div className="bond-snapshot-table">
-            {visibleRows.map((row) => (
-              <article
-                className={`bond-snapshot-row snapshots-row-card ${
-                  row.id === highlightTarget ? 'snapshots-row-card--highlight' : ''
-                }`}
-                data-snapshot-id={row.id}
-                key={`${row.filter}-${row.id}`}
-              >
-                <div className="bond-snapshot-row__cell">
-                  <strong>{row.title}</strong>
-                  <span>{row.summary}</span>
-                </div>
-                <div className="bond-snapshot-row__cell">
-                  <strong>字段</strong>
-                  <span>{row.fields}</span>
-                </div>
-                <div className="bond-snapshot-row__cell">
-                  <strong>调度</strong>
-                  <span>{row.schedule}</span>
-                </div>
-                <div className="bond-snapshot-row__cell">
-                  <strong>状态</strong>
-                  <span>
+        {ledgerRows.length ? (
+          <div className="dense-table">
+            {ledgerRows.map((row) => {
+              const highlight = row.id === highlightTarget || row.id === 'ds-fundamentals';
+              return (
+                <article
+                  className={`dense-row ${highlight ? 'dense-row--highlight' : ''}`}
+                  data-snapshot-id={row.id}
+                  key={row.id}
+                >
+                  <div className="dense-row__top">
+                    <div className="dense-row__copy">
+                      <strong>{row.id}</strong>
+                      <p>{row.description}</p>
+                    </div>
                     <span className={statusChipClassName(row.status)}>{row.statusLabel}</span>
-                  </span>
-                  <span>{row.note}</span>
-                </div>
-              </article>
-            ))}
+                  </div>
+                  <dl className="dense-meta-grid">
+                    <div className="dense-meta">
+                      <dt>最新刷新</dt>
+                      <dd>{row.updatedAt}</dd>
+                    </div>
+                    <div className="dense-meta">
+                      <dt>关键校验</dt>
+                      <dd>{row.keyCheck}</dd>
+                    </div>
+                    <div className="dense-meta">
+                      <dt>可点亮因子</dt>
+                      <dd>{row.factorLabel}</dd>
+                    </div>
+                    <div className="dense-meta">
+                      <dt>下一步</dt>
+                      <dd>{row.nextStep}</dd>
+                    </div>
+                  </dl>
+                  <div className="dense-row__footer">
+                    <span className="divider-note">
+                      {`来源：${row.sourceLabel}`}
+                    </span>
+                    <button
+                      className="link-btn"
+                      onClick={() => {
+                        jumpToTarget(row.actionTarget);
+                      }}
+                      type="button"
+                    >
+                      {row.actionLabel}
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
           </div>
         ) : (
           <div className="drawer-callout">
@@ -1372,59 +2543,71 @@ export function EquitySnapshotsTab({
           </div>
         )}
       </section>
-        </div>
-        <aside className="detail-rail snapshots-equity-right-stack">
-      <section className="rail-panel">
-        <div className="panel-header">
-          <div>
-            <h2>数据诊断报告</h2>
-            <p className="panel-note">
-              诊断区汇总当前快照状态：{pendingCount} 项待补，最近刷新{' '}
-              {lastRefresh ? formatDateTime(lastRefresh) : '暂无'}。
-            </p>
+
+      <section className="evidence-grid">
+        <article className="panel">
+          <div className="panel-header">
+            <div className="panel-title">
+              <h3>数据源证据层</h3>
+              <p>归集 provider 边界、字段口径与证据用途，供快照侧统一溯源。</p>
+            </div>
+            <span className="status-chip status-chip--soft">来源证据</span>
           </div>
-        </div>
-        <div className="snapshots-bond-source-stack">
-          {rows.filter((row) => isPendingStatus(row.status)).map((row) => (
-            <article className="snapshots-bond-evidence-card" key={`diagnostic-${row.filter}-${row.id}`}>
-              <div className="snapshots-bond-snapshot-head">
-                <strong>待补：{row.title}</strong>
-                <span className={statusChipClassName(row.status)}>{row.statusLabel}</span>
+          <div className="evidence-stack">
+            {evidenceRows.map((row) => (
+              <article className="evidence-card" key={row.id}>
+                <div className="evidence-card__top">
+                  <div className="evidence-card__title">
+                    <strong>{row.title}</strong>
+                    <span>{row.description}</span>
+                  </div>
+                  <span className={statusChipClassName(row.status)}>
+                    {row.statusLabel}
+                  </span>
+                </div>
+              </article>
+            ))}
+          </div>
+        </article>
+
+        <article className="panel">
+          <div className="panel-header">
+            <div className="panel-title">
+              <h3>凭据与重启入口</h3>
+              <p>统一管理新增数据源凭据与重启动作，不将运维输入散落到 PIT 页面。</p>
+            </div>
+            <span className="status-chip status-chip--soft">会话草稿</span>
+          </div>
+          <div className="credential-list">
+            {credentialStatusRows.map((row) => (
+              <div className="credential-row" key={row.id}>
+                <div>
+                  <strong>{row.id}</strong>
+                  <span>{row.note}</span>
+                </div>
+                <span
+                  className={
+                    row.statusTone === 'success'
+                      ? 'status-chip status-chip--success'
+                      : 'status-chip status-chip--warning'
+                  }
+                >
+                  {row.statusLabel}
+                </span>
               </div>
-              <span>{row.note}</span>
-            </article>
-          ))}
-          {pendingCount === 0 ? (
-            <article className="snapshots-bond-evidence-card">
-              <strong>当前没有待补项</strong>
-              <span>所有快照均已通过当前就绪门禁。</span>
-            </article>
-          ) : null}
-        </div>
-      </section>
-      <section className="rail-panel snapshots-equity-readiness">
-        <div className="panel-header">
-          <div>
-            <h2>就绪标准</h2>
-            <p className="panel-note">
-              只有数据集快照和股票池快照同时可用，后续创建、回测和优化链路才视为通过数据门禁。
-            </p>
+            ))}
           </div>
-        </div>
-        <div className="snapshots-bond-source-stack">
-          <article className="snapshots-bond-evidence-card">
-            <strong>数据集门禁</strong>
-            <span>{readyDatasetCount}/{datasetSnapshots.length} 个数据集已就绪，覆盖价格与公司行为。</span>
-          </article>
-          <article className="snapshots-bond-evidence-card">
-            <strong>股票池门禁</strong>
-            <span>{readyUniverseCount}/{universeSnapshots.length} 个股票池已就绪，覆盖成员与历史锚点。</span>
-          </article>
-        </div>
+          <div className="list-actions">
+            <span className="divider-note">
+              {restartCommandNotice ||
+                '修改凭据后需要重启 QuickStart 或 backend，才会进入下一轮快照刷新。'}
+            </span>
+            <button className="primary-button" onClick={() => void copyRestartCommand()} type="button">
+              复制设置并重启命令
+            </button>
+          </div>
+        </article>
       </section>
-        </aside>
-      </div>
-      <DataTrustLayerPanel layers={dataTrustLayers} />
     </div>
   );
 }

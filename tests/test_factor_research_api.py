@@ -115,10 +115,13 @@ def seed_ready_pit_data(client, *, start: date = date(2014, 1, 2), day_count: in
             for symbol in symbols
         ],
     )
+    if hasattr(service, "_invalidate_pit_data_overview_cache"):
+        service._invalidate_pit_data_overview_cache()
 
 
 def replace_default_universe_with_current_membership(client, *, as_of: str) -> None:
-    repository = client.app.state.service.market_data_repository
+    service = client.app.state.service
+    repository = service.market_data_repository
     symbols = ["AAPL", "MSFT", "NVDA", "AMZN"]
     repository.replace_universe_snapshot(
         {
@@ -147,6 +150,8 @@ def replace_default_universe_with_current_membership(client, *, as_of: str) -> N
             for symbol in symbols
         ],
     )
+    if hasattr(service, "_invalidate_pit_data_overview_cache"):
+        service._invalidate_pit_data_overview_cache()
 
 
 def mark_price_snapshot_incomplete(
@@ -155,7 +160,8 @@ def mark_price_snapshot_incomplete(
     missing_symbols: list[str],
     provider_summary: dict | None = None,
 ) -> None:
-    repository = client.app.state.service.market_data_repository
+    service = client.app.state.service
+    repository = service.market_data_repository
     metadata = {
         "covered_symbol_count": 4,
         "total_symbol_count": 4 + len(missing_symbols),
@@ -174,6 +180,8 @@ def mark_price_snapshot_incomplete(
             """,
             (dumps(metadata), f"{date.today().isoformat()}T00:00:00Z"),
         )
+    if hasattr(service, "_invalidate_pit_data_overview_cache"):
+        service._invalidate_pit_data_overview_cache()
 
 
 def seed_factor_diagnostic_summary(client, factor_id: str, summary: dict, *, run_id: str | None = None) -> None:
@@ -242,6 +250,32 @@ def governance_ready_summary(
             for day in range(1, 21)
         ],
     }
+
+
+def inverted_group_return_series() -> list[dict]:
+    values = [
+        ("2026-01-31", -0.010, -0.002, 0.004, 0.014, 0.022),
+        ("2026-02-28", -0.012, -0.003, 0.003, 0.013, 0.023),
+        ("2026-03-31", -0.011, -0.002, 0.004, 0.014, 0.024),
+        ("2026-04-30", -0.013, -0.004, 0.003, 0.015, 0.025),
+        ("2026-05-31", -0.009, -0.001, 0.005, 0.016, 0.026),
+    ]
+    series: list[dict] = []
+    for row in values:
+        groups = [
+            {"group": f"Q{index}", "mean_return": mean_return, "sample_count": 120}
+            for index, mean_return in enumerate(row[1:], start=1)
+        ]
+        series.append(
+            {
+                "date": row[0],
+                "groups": groups,
+                "q1_mean_return": groups[0]["mean_return"],
+                "q5_mean_return": groups[-1]["mean_return"],
+                "q1_q5_spread": groups[0]["mean_return"] - groups[-1]["mean_return"],
+            }
+        )
+    return series
 
 
 def mark_corporate_actions_snapshot_incomplete(client, *, missing_symbols: list[str]) -> None:
@@ -367,6 +401,21 @@ def test_pit_data_overview_requires_dataset_and_universe_snapshots(tmp_path):
     assert ready_payload["fundamental_coverage"]["missing_fields"] == []
     assert ready_payload["full_ready_repair_plan"]["status"] == "READY"
     assert ready_payload["full_ready_repair_plan"]["queue_total_count"] == 0
+    assert [item["layer_id"] for item in ready_payload["pit_layer_readiness"]] == [
+        "l1_market_data",
+        "l2_fundamental_data",
+        "l3_sentiment_data",
+        "l4_macro_derivatives",
+    ]
+    by_group = {item["group_id"]: item for item in ready_payload["factor_diagnostic_readiness"]}
+    assert by_group["price"]["status"] == "VERIFIED"
+    assert by_group["quality_valuation"]["status"] == "VERIFIED"
+    assert by_group["sentiment_micro"]["status"] == "DISABLED"
+    assert by_group["macro_derivatives"]["status"] in {"SANDBOX", "VERIFIED"}
+    linkage = {item["check_id"]: item for item in ready_payload["snapshot_layer_linkage"]}
+    assert linkage["fundamental_publish_gate"]["target_factor_groups"]
+    assert linkage["rate_beta_calibration"]["result_status"] in {"CALIBRATING", "READY"}
+    assert any(item["code"] == "RATE_BETA_CALIBRATING" for item in ready_payload["pit_quality_alerts"])
     trust_summary = ready_payload["data_trust_summary"]
     assert trust_summary["summary_label"] == "数据可信层"
     assert {item["id"] for item in trust_summary["layers"]} >= {
@@ -393,6 +442,26 @@ def test_pit_data_overview_uses_sql_summary_without_full_membership_hydration(tm
     assert payload["overall_status"] == "READY"
     assert payload["coverage"]["universe_member_rows"] == 4
     assert payload["source"]["historical_universe_member_rows"] == 4
+
+
+def test_pit_data_overview_cache_hit_skips_snapshot_signature_scan(tmp_path, monkeypatch):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    service = client.app.state.service
+    service._invalidate_pit_data_overview_cache()
+
+    first_payload = assert_ok(client.get("/pit-data"))
+    assert first_payload["overall_status"] == "READY"
+
+    def fail_signature_scan():
+        raise AssertionError("/pit-data cache hits must not rescan market snapshot tables")
+
+    monkeypatch.setattr(service, "_market_data_snapshot_cache_signature", fail_signature_scan)
+
+    cached_payload = assert_ok(client.get("/pit-data"))
+
+    assert cached_payload["overall_status"] == "READY"
+    assert cached_payload["coverage"]["covered_symbol_count"] == first_payload["coverage"]["covered_symbol_count"]
 
 
 def test_pit_data_overview_exposes_gap_preview_history_and_action_targets(tmp_path):
@@ -458,6 +527,89 @@ def test_pit_data_overview_exposes_gap_preview_history_and_action_targets(tmp_pa
     mapped_buckets = {item["id"]: item for item in mapped_payload["coverage_gap"]["buckets"]}
     assert "ZZZZ" not in mapped_buckets["identity_unresolved"]["sample_symbols"]
     assert mapped_payload["coverage_gap"]["identity_resolved_count"] >= 1
+
+
+def test_pit_factor_admission_allows_archival_full_ready_gap_without_blocking_10y(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    mark_price_snapshot_incomplete(client, missing_symbols=["ZZZZ"])
+
+    payload = assert_ok(client.get("/pit-data"))
+
+    admission = payload["factor_admission_coverage"]
+    assert payload["overall_status"] == "BLOCKED"
+    assert admission["status"] == "READY"
+    assert admission["blocks_factor_admission"] is False
+    assert admission["current_core_missing_count"] == 0
+    assert admission["active_window_missing_count"] == 0
+    assert admission["archival_missing_count"] == 1
+    assert payload["factor_diagnostics_enabled"] is True
+    assert payload["verified_diagnostics_enabled"] is True
+    assert payload["status_reasons"]["factor_admission"]["cause"] == "FACTOR_ADMISSION_10Y_READY"
+
+
+def test_pit_factor_admission_surfaces_recomputed_10y_gap_as_repair_warning(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    repository = client.app.state.service.market_data_repository
+    repository.replace_universe_snapshot(
+        {
+            "id": "un-sp500",
+            "universe_key": "SP500",
+            "name": "S&P 500",
+            "status": "READY",
+            "as_of": "2026-05-01",
+            "freshness_label": "unit historical lifecycle anchors",
+            "window_start": "2017-01-01",
+            "window_end": "2026-05-01",
+            "anchor_schedule": "unit",
+            "member_count": 3,
+            "source": "unit_test_revision",
+            "fallback_source": "none",
+            "metadata": {"coverage_mode": "point_in_time_anchor"},
+        },
+        memberships=[
+            {
+                "effective_date": "2017-01-01",
+                "symbol": "WYND",
+                "source": "unit_test_revision",
+                "fallback_source": "none",
+                "metadata": {"source_quality": "historical_revision_snapshot"},
+            },
+            {
+                "effective_date": "2026-05-01",
+                "symbol": "AAPL",
+                "source": "unit_test_revision",
+                "fallback_source": "none",
+                "metadata": {"source_quality": "historical_revision_snapshot"},
+            },
+            {
+                "effective_date": "2026-05-01",
+                "symbol": "MSFT",
+                "source": "unit_test_revision",
+                "fallback_source": "none",
+                "metadata": {"source_quality": "historical_revision_snapshot"},
+            },
+        ],
+    )
+
+    payload = assert_ok(client.get("/pit-data"))
+
+    admission = payload["factor_admission_coverage"]
+    assert admission["status"] == "REPAIR"
+    assert admission["blocks_factor_admission"] is False
+    assert admission["current_core_missing_count"] == 0
+    assert admission["active_window_missing_symbols"] == ["WYND"]
+    assert admission["metadata_mismatch_symbols"] == ["WYND"]
+    assert payload["factor_diagnostics_enabled"] is True
+    assert payload["limited_diagnostics_enabled"] is True
+    assert payload["status_reasons"]["factor_admission"]["cause"] == "FACTOR_ADMISSION_10Y_REPAIR"
+    repair_warning = next(
+        item for item in admission["warning_items"] if item["code"] == "FACTOR_ADMISSION_10Y_REPAIR"
+    )
+    assert repair_warning["label"] == "10Y 准入补源队列"
+    assert "窗口内活跃标的仍需补齐价格证据或身份映射" in repair_warning["message"]
+    assert "factor admission remains allowed" not in repair_warning["message"]
 
 
 def test_pit_full_ready_repair_plan_prioritizes_nasdaq_wiki_for_historical_price_gaps(tmp_path):
@@ -842,6 +994,12 @@ def test_pit_data_blocks_current_universe_membership_fallback(tmp_path):
     assert blocked_payload["coverage"]["raw_universe_member_rows"] == 4
     assert blocked_payload["blocking_items"][0]["code"] == "UNIVERSE_HISTORY_BLOCKED"
     assert blocked_payload["diagnostic_windows"]["verified"]["missing_windows"]
+    price_group = next(item for item in blocked_payload["factor_diagnostic_readiness"] if item["group_id"] == "price")
+    assert price_group["status"] == "BLOCKED"
+    linkage = {item["check_id"]: item for item in blocked_payload["snapshot_layer_linkage"]}
+    assert linkage["price_replay_gate"]["result_status"] in {"READY", "WARNING"}
+    assert linkage["universe_history_gate"]["result_status"] == "BLOCKED"
+    assert any(item["code"] == "CURRENT_ONLY_DATA" for item in blocked_payload["pit_quality_alerts"])
 
     waiver_attempt = assert_ok(
         client.post(
@@ -1247,6 +1405,43 @@ def test_factor_governance_projection_maps_diagnostic_states_to_management_rules
     assert (state, label) == ("needs_calibration", "待校准")
     assert any(item["code"] == "COVERAGE_EDGE" for item in policy["warnings"])
 
+    sandbox_completed_summary = {**robust_summary, "diagnostic_mode": "SANDBOX"}
+    state, label, policy = classify(sandbox_completed_summary, diagnostic_status="SANDBOX_READY")
+    assert (state, label) == ("robust", "稳健")
+    assert policy["hard_blocker_count"] == 0
+    assert policy["warning_count"] == 0
+
+    current_only_blocker = {
+        "code": "CURRENT_ONLY_DATA",
+        "severity": "blocker",
+        "label": "current-only data",
+        "message": "current-only data cannot be replayed",
+    }
+    state, label, policy = classify(
+        sandbox_completed_summary,
+        diagnostic_status="BLOCKED_DATA",
+        readiness_blockers=[current_only_blocker],
+    )
+    assert state == "sandbox"
+    assert policy["hard_blocker_count"] == 1
+    assert any(item["code"] == "CURRENT_ONLY_DATA" for item in policy["hard_blockers"])
+
+    repair_warning = {
+        "code": "FACTOR_ADMISSION_10Y_REPAIR",
+        "severity": "warning",
+        "label": "10Y 准入补源队列",
+        "message": "10 个窗口内活跃标的仍需补齐价格证据或身份映射；因子准入仍允许，但需保留修复披露。",
+    }
+    state, label, policy = classify(sandbox_completed_summary, diagnostic_status="SANDBOX_READY", readiness_blockers=[repair_warning])
+    assert (state, label) == ("needs_calibration", "待校准")
+    assert policy["hard_blocker_count"] == 0
+    assert any(item["code"] == "FACTOR_ADMISSION_10Y_REPAIR" for item in policy["warnings"])
+
+    reference_only_summary = {**sandbox_completed_summary, "status": "REFERENCE_ONLY"}
+    state, label, policy = classify(reference_only_summary, diagnostic_status="SANDBOX_READY")
+    assert (state, label) == ("needs_calibration", "待校准")
+    assert policy["hard_blocker_count"] == 0
+
     decayed_summary = {**robust_summary, "rank_ic": 0.004, "ir": 0.1}
     state, label, policy = classify(decayed_summary)
     assert (state, label) == ("decayed", "失效")
@@ -1440,7 +1635,7 @@ def test_factor_governance_overview_promotes_live_like_momentum_tasks_without_hi
     unsupported_kinds = {
         item["kind"]
         for item in actions
-        if item["kind"] not in {"DEPRECATE", "PRUNE", "FACTOR_MODEL_SUGGESTION"}
+        if item["kind"] not in {"DEPRECATE", "PRUNE", "FACTOR_MODEL_SUGGESTION", "FACTOR_OPTIMIZATION"}
     }
 
     assert unsupported_kinds == set()
@@ -1456,6 +1651,170 @@ def test_factor_governance_overview_promotes_live_like_momentum_tasks_without_hi
     assert prune_action["command"] == "PRUNE"
     assert prune_action["keep_factor_id"] == keep_id
     assert prune_action["offline_detail"]["correlation"] == 0.94
+
+
+def test_factor_governance_optimizes_inverted_downside_factor_and_publishes_reverse(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    assert_ok(client.get("/factors"))
+    source_summary = {
+        **governance_ready_summary(rank_ic=-0.024, ir=-1.15, coverage=96.4, inverted=True),
+        "group_return_series": inverted_group_return_series(),
+    }
+    seed_factor_diagnostic_summary(
+        client,
+        "s_vol_downside_252d_rank",
+        source_summary,
+        run_id="fdiag_downside_inverted",
+    )
+
+    overview = assert_ok(client.get("/factor-governance/overview"))
+    deprecate_action = next(
+        item
+        for item in overview["actions"]
+        if item["kind"] == "DEPRECATE" and "s_vol_downside_252d_rank" in item["factor_ids"]
+    )
+    optimize_action = next(
+        item
+        for item in overview["actions"]
+        if item["kind"] == "FACTOR_OPTIMIZATION" and "s_vol_downside_252d_rank" in item["factor_ids"]
+    )
+
+    assert deprecate_action["offline_detail"]["persistent_group_inversion"] is True
+    assert deprecate_action["offline_reason"] == "强制下线：3 期滑动均值连续 3 期 Q1 低于 Q5，因子封存复盘。"
+    optimized = optimize_action["optimized_factor"]
+    assert optimize_action["command"] == "PUBLISH_OPTIMIZED_FACTOR"
+    assert optimized["id"] == "m_vol_downsiderev_252d_rank"
+    assert optimized["name"] == "反向下行波动率代理（252日）"
+    assert optimized["direction"] == "HIGH_IS_BETTER"
+    assert optimized["grade"] in {"A", "B"}
+    assert optimized["confirmable"] is True
+    assert optimized["diagnostic_summary"]["rank_ic"] == 0.024
+    assert optimized["diagnostic_summary"]["ir"] == 1.15
+    assert optimized["diagnostic_summary"]["monotonicity"]["monotonic_good"] is True
+    assert optimized["diagnostic_summary"]["monotonicity"]["inverted"] is False
+    for row in optimized["diagnostic_summary"]["group_return_series"][-3:]:
+        assert row["q1_mean_return"] > row["q5_mean_return"]
+        assert row["groups"][0]["mean_return"] == row["q1_mean_return"]
+        assert row["groups"][-1]["mean_return"] == row["q5_mean_return"]
+
+    executed = assert_ok(
+        client.post(
+            f"/factor-governance/actions/{optimize_action['id']}/execute",
+            json={
+                "confirm": True,
+                "command": "PUBLISH_OPTIMIZED_FACTOR",
+                "factor_ids": ["s_vol_downside_252d_rank"],
+                "reason": "用户确认反向因子 Grade A/B 入库。",
+                "detail": {"action_id": optimize_action["id"]},
+            },
+        )
+    )
+    assert executed["command"] == "PUBLISH_OPTIMIZED_FACTOR"
+    assert executed["created_factor_id"] == "m_vol_downsiderev_252d_rank"
+    created = assert_ok(client.get("/factors/m_vol_downsiderev_252d_rank"))
+    assert created["name"] == "反向下行波动率代理（252日）"
+    assert created["source"] == "MANUAL"
+    assert created["lifecycle_status"] == "VERIFIED"
+    assert created["direction"] == "HIGH_IS_BETTER"
+    assert created["latest_diagnostic_summary"]["status"] == "COMPLETED"
+    assert created["latest_diagnostic_summary"]["data_lineage"]["kind"] == "GOVERNANCE_REVERSE_FACTOR_PREVIEW"
+    assert created["blocker_reason_summary"]["status"] in {"clear", "warning"}
+    assert not any(
+        item["code"] == "GROUP_RETURNS_INVERTED"
+        for item in created["blocker_reason_summary"]["reasons"]
+    )
+
+
+def test_reverse_governance_factor_read_model_repairs_legacy_edge_fields(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    assert_ok(client.get("/factors"))
+    now = "2026-05-12T09:00:00Z"
+    factor_id = "m_vol_downsiderev_252d_rank"
+    good_groups = [
+        {"group": "Q1", "mean_return": 0.026, "sample_count": 120},
+        {"group": "Q2", "mean_return": 0.015, "sample_count": 120},
+        {"group": "Q3", "mean_return": 0.005, "sample_count": 120},
+        {"group": "Q4", "mean_return": -0.001, "sample_count": 120},
+        {"group": "Q5", "mean_return": -0.009, "sample_count": 120},
+    ]
+    stale_series = [
+        {
+            "date": f"2026-0{month}-28",
+            "groups": good_groups,
+            "q1_mean_return": -0.009,
+            "q5_mean_return": 0.026,
+            "q1_q5_spread": -0.035,
+        }
+        for month in range(1, 6)
+    ]
+    summary = {
+        "run_id": "reverse-preview:fdiag_b290db5ee459",
+        "factor_id": factor_id,
+        "status": "PREVIEW",
+        "diagnostic_mode": "VERIFIED",
+        "rank_ic": 0.062,
+        "ic": 0.062,
+        "ir": 1.09,
+        "coverage": 98.5,
+        "group_returns": good_groups,
+        "group_return_series": stale_series,
+        "data_lineage": {"kind": "GOVERNANCE_REVERSE_FACTOR_PREVIEW", "source_factor_id": "s_vol_downside_252d_rank"},
+        "compliance_trail": {"diagnosed_at": now},
+    }
+    with client.app.state.service.storage.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO factor_definitions (
+                id, name, market, universe, source, lifecycle_status, diagnostic_status,
+                direction, frequency, expression, tags_json, data_requirements_json,
+                institutional_note, created_by, created_at, updated_at
+            )
+            VALUES (?, '反向下行波动率代理（252日）', 'US', 'SP500', 'MANUAL', 'VERIFIED', 'COMPLETED',
+                    'HIGH_IS_BETTER', 'DAILY', 'DownsideStd(Return(Close, 1), 252)', ?, ?, ?, 'factor_governance', ?, ?)
+            """,
+            (
+                factor_id,
+                dumps(["manual", "governance_optimized", "reverse_factor"]),
+                dumps(["adj_close", "price_history", "returns"]),
+                "治理任务生成的反向因子；来源因子持续分组收益倒挂，入库需用户二次确认。",
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO factor_versions (id, factor_id, version, expression, status, metadata_json, created_at)
+            VALUES (?, ?, 1, 'DownsideStd(Return(Close, 1), 252)', 'ACTIVE', '{}', ?)
+            """,
+            (f"{factor_id}-v1", factor_id, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO factor_diagnostic_runs (
+                id, factor_id, status, dataset_snapshot_id, universe_snapshot_id,
+                request_json, summary_json, artifact_refs_json, created_at, completed_at
+            )
+            VALUES (?, ?, 'COMPLETED', 'ds-price', 'un-sp500', '{}', ?, '{}', ?, ?)
+            """,
+            ("reverse-preview:fdiag_b290db5ee459", factor_id, dumps(summary), now, now),
+        )
+
+    detail = assert_ok(client.get(f"/factors/{factor_id}"))
+
+    assert detail["latest_diagnostic_summary"]["status"] == "COMPLETED"
+    assert detail["latest_diagnostic_summary"]["monotonicity"]["inverted"] is False
+    assert detail["latest_diagnostic_summary"]["monotonicity"]["monotonic_good"] is True
+    for row in detail["latest_diagnostic_summary"]["group_return_series"][-3:]:
+        assert row["q1_mean_return"] == row["groups"][0]["mean_return"]
+        assert row["q5_mean_return"] == row["groups"][-1]["mean_return"]
+    assert detail["ui_state"] in {"robust", "needs_calibration"}
+    assert detail["blocker_reason_summary"]["status"] in {"clear", "warning"}
+    assert not any(
+        item["code"] == "GROUP_RETURNS_INVERTED"
+        for item in detail["blocker_reason_summary"]["reasons"]
+    )
 
 
 def test_size_neutralized_factor_gets_preview_and_persisted_sandbox_diagnostics(tmp_path):
@@ -1939,6 +2298,45 @@ def test_factor_governance_deprecate_soft_offlines_and_blocks_model_use(tmp_path
     assert create_response.status_code == 400
 
 
+def test_factor_model_suggestion_skips_offline_anchor_factors(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    assert_ok(client.get("/factors"))
+
+    storage = client.app.state.service.storage
+    for factor_id in ("s_mom_12m1m_rank", "s_val_ep_ltm_raw"):
+        storage.execute(
+            """
+            UPDATE factor_definitions
+            SET lifecycle_status = 'DEPRECATED',
+                offline_reason = ?,
+                offline_at = ?,
+                offline_command = 'DEPRECATE',
+                updated_at = ?
+            WHERE id = ?
+            """,
+            ("unit-test offline anchor", "2026-05-12T09:00:00Z", "2026-05-12T09:00:00Z", factor_id),
+        )
+
+    suggestion = assert_ok(
+        client.post(
+            "/factor-models/suggestions",
+            json={"factor_id": "s_qlty_fcfy_ttm_raw"},
+        )
+    )
+
+    action = suggestion["action"]
+    assert action["factor_ids"] == [
+        "s_qlty_fcfy_ttm_raw",
+        "s_vol_252d_rank",
+        "s_size_cur_log",
+    ]
+    assert action["target"]["query"]["factorIds"] == "s_qlty_fcfy_ttm_raw,s_vol_252d_rank,s_size_cur_log"
+    assert action["target"]["query"]["directions"] == "HIGH_IS_BETTER,LOW_IS_BETTER,LOW_IS_BETTER"
+    assert "s_mom_12m1m_rank" not in action["factor_ids"]
+    assert "s_val_ep_ltm_raw" not in action["factor_ids"]
+
+
 def test_factor_governance_prune_keeps_cluster_mvp_and_soft_offlines_redundant_factor(tmp_path):
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
@@ -2353,6 +2751,12 @@ def test_fundamental_pit_loader_filters_on_available_at_not_period_end(tmp_path)
     assert [row["ltm_earnings"] for row in april_rows["AAPL"]] == [10.0]
     assert [row["available_at"] for row in april_rows["AAPL"]] == ["2021-03-01"]
     assert [row["ltm_earnings"] for row in july_rows["AAPL"]] == [10.0, 999.0]
+    pit = assert_ok(client.get("/pit-data"))
+    fundamental_layer = next(item for item in pit["pit_layer_readiness"] if item["layer_id"] == "l2_fundamental_data")
+    assert fundamental_layer["available_at_health"]["missing_available_at_count"] == 0
+    linkage = {item["check_id"]: item for item in pit["snapshot_layer_linkage"]}
+    assert linkage["fundamental_publish_gate"]["result_status"] == "READY"
+    assert all(item["code"] != "MISSING_AVAILABLE_AT" for item in pit["pit_quality_alerts"])
 
 
 def test_factor_diagnostics_reject_current_universe_snapshot_binding(tmp_path):

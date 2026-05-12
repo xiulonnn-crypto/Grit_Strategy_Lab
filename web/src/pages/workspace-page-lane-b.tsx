@@ -31,7 +31,8 @@ const TEXT = {
 } as const;
 
 const STRATEGY_BOARD_LIMIT = 6;
-const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 80;
+const OPTIMIZATION_ACTIVITY_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1000;
 
 function isAbortError(caught: unknown): boolean {
   return caught instanceof DOMException
@@ -461,6 +462,7 @@ export function WorkspacePage(): JSX.Element {
 
   useEffect(() => {
     let cancelled = false;
+    let optimizationTimer: number | null = null;
     const overviewController = new AbortController();
 
     async function load(): Promise<void> {
@@ -476,11 +478,15 @@ export function WorkspacePage(): JSX.Element {
         setOverview(workspaceOverview);
         setLoading(false);
         await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
-        const [strategyItems, backtestRuns, optimizationJobs] = await Promise.all([
-          api.listStrategies(overviewController.signal),
-          api.listBacktestRuns({ limit: 8 }, overviewController.signal),
-          api.listOptimizationJobs(),
-        ]);
+        const library = api.getStrategyLibrary
+          ? await api.getStrategyLibrary(overviewController.signal)
+          : null;
+        const [strategyItems, backtestRuns] = library
+          ? [library.strategies, library.runs.slice(0, 8)]
+          : await Promise.all([
+              api.listStrategies(overviewController.signal),
+              api.listBacktestRuns({ limit: 8 }, overviewController.signal),
+            ]);
 
         if (cancelled) {
           return;
@@ -488,7 +494,6 @@ export function WorkspacePage(): JSX.Element {
 
         setStrategies(strategyItems);
         setRecentRuns(backtestRuns);
-        setRecentOptimizations(optimizationJobs);
 
         const runSummariesById = Object.fromEntries(
           backtestRuns.map((run) => [run.id, toRunSummaryDetail(run)] as const),
@@ -501,6 +506,24 @@ export function WorkspacePage(): JSX.Element {
           ),
         );
         setLoading(false);
+
+        const loadOptimizationActivity = async (): Promise<void> => {
+          try {
+            const optimizationJobs = await api.listOptimizationJobs();
+            if (!cancelled) {
+              setRecentOptimizations(optimizationJobs);
+            }
+          } catch {
+            // Optimization activity is not required for first paint.
+          }
+        };
+        if (OPTIMIZATION_ACTIVITY_DEFER_MS > 0) {
+          optimizationTimer = window.setTimeout(() => {
+            void loadOptimizationActivity();
+          }, OPTIMIZATION_ACTIVITY_DEFER_MS);
+        } else {
+          await loadOptimizationActivity();
+        }
       } catch (caught) {
         if (isAbortError(caught)) {
           return;
@@ -518,6 +541,9 @@ export function WorkspacePage(): JSX.Element {
     void load();
     return () => {
       cancelled = true;
+      if (optimizationTimer !== null) {
+        window.clearTimeout(optimizationTimer);
+      }
       overviewController.abort();
     };
   }, [api]);

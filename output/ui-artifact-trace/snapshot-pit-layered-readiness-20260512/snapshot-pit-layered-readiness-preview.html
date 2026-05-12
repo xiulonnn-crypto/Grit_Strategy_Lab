@@ -1,0 +1,2269 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Grit Strategy Lab 数据快照与 PIT 联动升级 UI 稿</title>
+  <style>
+    :root {
+      --bg-page: #f0f2f5;
+      --bg-shell: #edf1f5;
+      --bg-surface: #ffffff;
+      --bg-subtle: #f9fafb;
+      --bg-accent-soft: #f4faf8;
+      --bg-info-soft: #eef4ff;
+      --bg-warning-soft: #fff7e8;
+      --bg-danger-soft: #fff8f7;
+      --bg-success-soft: #ecfdf3;
+      --text-title: #111827;
+      --text-main: #1f2937;
+      --text-sub: #64748b;
+      --text-muted: #94a3b8;
+      --line: #e5e7eb;
+      --line-strong: #d7e1e5;
+      --primary: #1f877b;
+      --primary-strong: #176b61;
+      --primary-soft: #e6f4f1;
+      --success: #2b8a3e;
+      --warning: #b86813;
+      --danger: #c45c4f;
+      --info: #325aa8;
+      --shadow-card: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.05);
+      --shadow-float: 0 18px 44px rgba(15, 23, 42, 0.12);
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif;
+      color: var(--text-main);
+      background: var(--bg-page);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top left, rgba(31, 135, 123, 0.08), transparent 32%),
+        linear-gradient(180deg, #f3f5f8 0%, var(--bg-shell) 100%);
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+
+    .app-shell {
+      display: grid;
+      grid-template-columns: 236px minmax(0, 1fr);
+      min-height: 100vh;
+      background: var(--bg-page);
+    }
+
+    .app-sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 22px;
+      padding: 24px 16px 20px;
+      border-right: 1px solid rgba(229, 231, 235, 0.92);
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(250, 252, 253, 0.98)),
+        #ffffff;
+    }
+
+    .brand-block {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--line);
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .brand-mark {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      background: linear-gradient(180deg, var(--primary) 0%, var(--primary-strong) 100%);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+    }
+
+    .brand-copy {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .brand-copy strong {
+      color: var(--text-title);
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    .brand-copy small {
+      color: var(--text-sub);
+      font-size: 12px;
+    }
+
+    .sidebar-nav {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .sidebar-nav__group {
+      display: grid;
+      gap: 8px;
+    }
+
+    .sidebar-nav__group-label {
+      margin: 0;
+      padding: 0 12px;
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .sidebar-nav__group-items {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .sidebar-nav__link {
+      display: flex;
+      align-items: center;
+      min-height: 46px;
+      padding: 0 14px;
+      border: 1px solid transparent;
+      border-radius: 14px;
+      color: #344256;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 600;
+      transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+    }
+
+    .sidebar-nav__link:hover {
+      background: #f8fafc;
+      border-color: var(--line);
+    }
+
+    .sidebar-nav__link--active {
+      border-color: rgba(31, 135, 123, 0.14);
+      background: linear-gradient(180deg, rgba(230, 244, 241, 0.95), rgba(241, 249, 247, 0.98));
+      color: var(--primary-strong);
+      font-weight: 700;
+      box-shadow: inset 3px 0 0 var(--primary-strong);
+    }
+
+    .app-main {
+      min-width: 0;
+      padding: 28px 32px 32px;
+    }
+
+    .route-page {
+      display: none;
+      max-width: 1660px;
+      margin: 0 auto;
+    }
+
+    .route-page.is-active {
+      display: block;
+    }
+
+    .page-surface {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .hero-card,
+    .panel,
+    .metric-card,
+    .banner {
+      border: 1px solid var(--line);
+      background: var(--bg-surface);
+      box-shadow: var(--shadow-card);
+    }
+
+    .hero-card {
+      border-radius: 20px;
+      padding: 24px 28px;
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: flex-start;
+      background: linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
+    }
+
+    .hero-copy {
+      display: grid;
+      gap: 12px;
+      min-width: 0;
+      flex: 1 1 auto;
+      max-width: 880px;
+    }
+
+    .hero-eyebrow {
+      margin: 0;
+      color: var(--primary);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .hero-title-row {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .hero-title-row h1 {
+      margin: 0;
+      color: var(--text-title);
+      font-size: 28px;
+      line-height: 34px;
+      font-weight: 700;
+    }
+
+    .hero-copy p {
+      margin: 0;
+      color: var(--text-sub);
+      line-height: 22px;
+    }
+
+    .hero-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .hero-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .snapshots-header-card {
+      display: block;
+      min-height: auto;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
+    }
+
+    .snapshots-header {
+      display: block;
+    }
+
+    .snapshots-header__copy {
+      max-width: none;
+    }
+
+    .snapshots-header__eyebrow {
+      display: none;
+    }
+
+    .snapshots-header__title {
+      margin: 0;
+      color: var(--text-title);
+      font-size: 28px;
+      line-height: 34px;
+      font-weight: 700;
+    }
+
+    .snapshots-header__body {
+      margin: 8px 0 0;
+      max-width: none;
+      color: var(--text-sub);
+      font-size: 14px;
+      line-height: 1.55;
+      white-space: normal;
+    }
+
+    .snapshots-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .snapshots-tab {
+      min-height: 38px;
+      padding: 0 16px;
+      border-radius: 999px;
+      border: 1px solid rgba(229, 231, 235, 0.94);
+      background: #fff;
+      color: #5b7391;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .snapshots-tab:hover {
+      background: #fbfcfd;
+    }
+
+    .snapshots-tab--active {
+      border-color: rgba(31, 135, 123, 0.18);
+      background: var(--primary-soft);
+      color: var(--primary-strong);
+      box-shadow: none;
+    }
+
+    .btn {
+      min-height: 40px;
+      border-radius: 8px;
+      border: 1px solid var(--line-strong);
+      background: #fff;
+      color: var(--text-main);
+      font-weight: 700;
+      padding: 0 14px;
+      cursor: pointer;
+    }
+
+    .btn--primary {
+      border-color: var(--primary);
+      background: var(--primary);
+      color: #fff;
+    }
+
+    .btn--soft {
+      background: var(--bg-subtle);
+    }
+
+    .chip,
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 28px;
+      padding: 0 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .chip {
+      background: var(--bg-subtle);
+      color: var(--text-main);
+      border: 1px solid var(--line);
+    }
+
+    .status-pill::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: currentColor;
+      opacity: 0.88;
+    }
+
+    .status-pill--ready {
+      background: var(--bg-success-soft);
+      color: var(--success);
+    }
+
+    .status-pill--warning,
+    .status-pill--limited {
+      background: var(--bg-warning-soft);
+      color: var(--warning);
+    }
+
+    .status-pill--blocked {
+      background: var(--bg-danger-soft);
+      color: var(--danger);
+    }
+
+    .status-pill--calibrating,
+    .status-pill--sandbox,
+    .status-pill--observe {
+      background: var(--bg-info-soft);
+      color: var(--info);
+    }
+
+    .status-pill--disabled {
+      background: #f3f4f6;
+      color: #6b7280;
+    }
+
+    .metric-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .metric-card {
+      border-radius: 18px;
+      padding: 18px;
+      display: grid;
+      gap: 10px;
+      min-height: 156px;
+    }
+
+    .metric-card__top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .metric-kicker {
+      display: grid;
+      gap: 4px;
+    }
+
+    .metric-kicker span {
+      color: var(--text-sub);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .metric-kicker strong {
+      color: var(--text-title);
+      font-size: 24px;
+      line-height: 28px;
+      font-weight: 700;
+    }
+
+    .metric-card p,
+    .metric-card small {
+      margin: 0;
+      color: var(--text-sub);
+      line-height: 20px;
+    }
+
+    .metric-detail-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .detail-pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 0 10px;
+      border-radius: 999px;
+      background: var(--bg-subtle);
+      color: var(--text-sub);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .workbench-grid {
+      display: grid;
+      grid-template-columns: 1.1fr 1fr 1.1fr;
+      gap: 16px;
+      align-items: start;
+    }
+
+    .panel {
+      border-radius: 18px;
+      padding: 18px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .panel-title {
+      display: grid;
+      gap: 6px;
+    }
+
+    .panel-title h2,
+    .panel-title h3 {
+      margin: 0;
+      color: var(--text-title);
+      font-size: 20px;
+      line-height: 28px;
+      font-weight: 700;
+    }
+
+    .panel-title p {
+      margin: 0;
+      color: var(--text-sub);
+      line-height: 20px;
+    }
+
+    .panel-note {
+      margin: 0;
+      color: var(--text-sub);
+      line-height: 20px;
+    }
+
+    .snapshots-global-dashboard-panel .panel-header {
+      align-items: flex-start;
+    }
+
+    .snapshots-global-dashboard-panel h2 {
+      margin: 0;
+      color: var(--text-title);
+      font-size: 20px;
+      line-height: 28px;
+      font-weight: 700;
+    }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .snapshots-equity-overview .metric-card {
+      display: grid;
+      align-content: start;
+      gap: 4px;
+      min-width: 0;
+      min-height: auto;
+      padding: 10px 12px;
+      border-radius: 14px;
+    }
+
+    .snapshots-equity-overview .metric-card span {
+      color: #5f7694;
+      font-size: 12px;
+      line-height: 1.55;
+      font-weight: 700;
+    }
+
+    .snapshots-equity-overview .metric-card strong {
+      color: var(--text-title);
+      font-size: 22px;
+      line-height: 1.05;
+      font-weight: 700;
+    }
+
+    .snapshots-equity-overview .metric-card small {
+      color: var(--text-sub);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .snapshots-equity-overview .metric-card--accent {
+      border-color: rgba(31, 135, 123, 0.18);
+      background: linear-gradient(180deg, #ffffff 0%, #f5fbf8 100%);
+    }
+
+    .snapshots-equity-overview .metric-card--accent strong {
+      color: var(--primary);
+    }
+
+    .snapshots-equity-overview .metric-card--warning {
+      border-color: rgba(184, 104, 19, 0.22);
+      background: linear-gradient(180deg, #ffffff 0%, #fffaf0 100%);
+    }
+
+    .snapshots-coverage-detail-link {
+      display: inline-flex;
+      align-items: center;
+      min-height: 20px;
+      margin-left: 8px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--primary-strong);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .snapshots-coverage-detail-link:hover {
+      color: var(--primary);
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+
+    .snapshots-coverage-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(15, 23, 42, 0.38);
+    }
+
+    .snapshots-coverage-modal {
+      display: grid;
+      gap: 18px;
+      width: min(1120px, 100%);
+      max-height: min(760px, calc(100vh - 48px));
+      overflow: hidden;
+      padding: 22px;
+      border: 1px solid rgba(229, 231, 235, 0.98);
+      border-radius: 18px;
+      background: #ffffff;
+      box-shadow: 0 18px 40px rgba(15, 23, 42, 0.16);
+    }
+
+    .snapshots-coverage-modal__header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .snapshots-coverage-modal__header h2 {
+      margin: 0;
+      color: var(--text-title);
+      font-size: 20px;
+      line-height: 1.3;
+    }
+
+    .snapshots-coverage-modal__header p:not(.hero-eyebrow) {
+      max-width: 780px;
+      margin: 6px 0 0;
+      color: var(--text-sub);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .snapshots-coverage-modal__close {
+      flex: 0 0 auto;
+      min-height: 36px;
+    }
+
+    .snapshots-coverage-table-wrap {
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+
+    .snapshots-coverage-table {
+      width: 100%;
+      min-width: 980px;
+      border-collapse: collapse;
+      background: #ffffff;
+    }
+
+    .snapshots-coverage-table th,
+    .snapshots-coverage-table td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      color: var(--text-main);
+      font-size: 13px;
+      line-height: 1.45;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .snapshots-coverage-table th {
+      background: #f9fafb;
+      color: var(--text-sub);
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .snapshots-coverage-table td:first-child {
+      color: var(--text-title);
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .snapshots-coverage-table tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .layer-stack,
+    .alert-stack,
+    .matrix-rows,
+    .evidence-stack {
+      display: grid;
+      gap: 12px;
+    }
+
+    .layer-row,
+    .alert-card,
+    .evidence-card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--bg-subtle);
+      padding: 14px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .layer-row__top,
+    .alert-card__top,
+    .evidence-card__top,
+    .dense-row__top,
+    .bucket-card__top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .layer-row__title,
+    .alert-card__title,
+    .evidence-card__title,
+    .bucket-card__title {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .layer-row__title strong,
+    .alert-card__title strong,
+    .evidence-card__title strong,
+    .bucket-card__title strong {
+      color: var(--text-title);
+      font-size: 15px;
+      line-height: 20px;
+    }
+
+    .layer-row__title span,
+    .alert-card__title span,
+    .evidence-card__title span,
+    .bucket-card__title span {
+      color: var(--text-sub);
+      font-size: 12px;
+      line-height: 18px;
+    }
+
+    .layer-row__stats,
+    .bucket-metrics {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .small-stat {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 0 10px;
+      border-radius: 999px;
+      background: #fff;
+      border: 1px solid var(--line);
+      color: var(--text-sub);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .matrix-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--bg-subtle);
+    }
+
+    .matrix-row__copy {
+      display: grid;
+      gap: 4px;
+    }
+
+    .matrix-row__copy strong {
+      color: var(--text-title);
+      font-size: 15px;
+      line-height: 20px;
+    }
+
+    .matrix-row__copy span {
+      color: var(--text-sub);
+      font-size: 12px;
+      line-height: 18px;
+    }
+
+    .dense-table {
+      display: grid;
+      gap: 12px;
+    }
+
+    .dense-row {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #fff;
+      padding: 16px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .dense-row--highlight {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(31, 135, 123, 0.12);
+    }
+
+    .dense-row__copy {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .dense-row__copy strong {
+      color: var(--text-title);
+      font-size: 17px;
+      line-height: 22px;
+    }
+
+    .dense-row__copy p {
+      margin: 0;
+      color: var(--text-sub);
+      line-height: 20px;
+    }
+
+    .dense-meta-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .dense-meta {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .dense-meta dt {
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .dense-meta dd {
+      margin: 0;
+      color: var(--text-main);
+      font-size: 14px;
+      line-height: 20px;
+    }
+
+    .dense-row__footer,
+    .list-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .link-btn {
+      border: 0;
+      padding: 0;
+      background: transparent;
+      color: var(--primary-strong);
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .evidence-grid,
+    .pit-two-col,
+    .pit-bottom-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      align-items: start;
+    }
+
+    .credential-list,
+    .kv-list,
+    .action-list,
+    .check-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .credential-row,
+    .kv-row,
+    .action-row,
+    .check-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--bg-subtle);
+    }
+
+    .credential-row strong,
+    .kv-row strong,
+    .action-row strong,
+    .check-row strong {
+      color: var(--text-title);
+      font-size: 14px;
+    }
+
+    .credential-row span,
+    .kv-row span,
+    .action-row span,
+    .check-row span {
+      color: var(--text-sub);
+      font-size: 12px;
+      line-height: 18px;
+    }
+
+    .banner {
+      border-radius: 16px;
+      padding: 16px 18px;
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: flex-start;
+      background: linear-gradient(180deg, #fff8f7 0%, #fffdfd 100%);
+    }
+
+    .banner__copy {
+      display: grid;
+      gap: 6px;
+    }
+
+    .banner__copy strong {
+      color: var(--danger);
+      font-size: 15px;
+    }
+
+    .banner__copy p {
+      margin: 0;
+      color: var(--text-sub);
+      line-height: 20px;
+    }
+
+    .ops-strip {
+      border-radius: 16px;
+      border: 1px solid rgba(31, 135, 123, 0.18);
+      background: linear-gradient(180deg, rgba(230, 244, 241, 0.92), rgba(245, 251, 248, 0.96));
+      box-shadow: var(--shadow-card);
+      padding: 16px 18px;
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .ops-strip__copy {
+      display: grid;
+      gap: 4px;
+    }
+
+    .ops-strip__copy strong {
+      color: var(--text-title);
+      font-size: 16px;
+      line-height: 22px;
+    }
+
+    .ops-strip__copy span {
+      color: var(--text-sub);
+      line-height: 20px;
+    }
+
+    .ops-strip__actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .bucket-grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .bucket-card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--bg-subtle);
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: repeat(8, minmax(0, 1fr));
+      gap: 8px;
+      align-items: end;
+      min-height: 84px;
+    }
+
+    .timeline span {
+      display: grid;
+      align-items: end;
+      justify-items: center;
+      gap: 6px;
+    }
+
+    .timeline i {
+      display: block;
+      width: 100%;
+      border-radius: 999px 999px 4px 4px;
+      background: linear-gradient(180deg, rgba(31, 135, 123, 0.22), rgba(31, 135, 123, 0.72));
+      min-height: 16px;
+    }
+
+    .timeline span.is-warning i {
+      background: linear-gradient(180deg, rgba(184, 104, 19, 0.22), rgba(184, 104, 19, 0.78));
+    }
+
+    .timeline span.is-danger i {
+      background: linear-gradient(180deg, rgba(196, 92, 79, 0.2), rgba(196, 92, 79, 0.82));
+    }
+
+    .timeline small {
+      color: var(--text-muted);
+      font-size: 11px;
+    }
+
+    .rule-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .rule-tab {
+      min-height: 34px;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--text-sub);
+      font-weight: 700;
+    }
+
+    .rule-tab.is-active {
+      border-color: rgba(31, 135, 123, 0.24);
+      background: var(--primary-soft);
+      color: var(--primary-strong);
+    }
+
+    .rule-preview {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--bg-subtle);
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .rule-preview__stats {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .rule-preview__stats div {
+      display: grid;
+      gap: 4px;
+    }
+
+    .rule-preview__stats span {
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .rule-preview__stats strong {
+      color: var(--text-title);
+      font-size: 20px;
+      line-height: 24px;
+    }
+
+    .sample-chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .sample-chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 0 10px;
+      border-radius: 999px;
+      background: #fff;
+      border: 1px solid var(--line);
+      color: var(--text-sub);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .divider-note {
+      color: var(--text-sub);
+      font-size: 12px;
+      line-height: 18px;
+    }
+
+    .route-footer {
+      color: var(--text-muted);
+      font-size: 12px;
+      line-height: 18px;
+      text-align: right;
+    }
+
+    @media (max-width: 1279px) {
+      .app-shell {
+        grid-template-columns: 92px minmax(0, 1fr);
+      }
+
+      .brand-copy,
+      .sidebar-nav__group-label {
+        display: none;
+      }
+
+      .sidebar-nav__link {
+        justify-content: center;
+        text-align: center;
+        padding: 0 10px;
+        font-size: 12px;
+      }
+
+      .workbench-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .metric-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 1023px) {
+      .metric-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .metric-strip,
+      .dense-meta-grid,
+      .pit-two-col,
+      .pit-bottom-grid,
+      .evidence-grid,
+      .rule-preview__stats {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .hero-card {
+        flex-direction: column;
+      }
+
+      .hero-actions {
+        justify-content: flex-start;
+      }
+
+    }
+
+    @media (max-width: 767px) {
+      .app-shell {
+        grid-template-columns: 1fr;
+      }
+
+      .app-sidebar {
+        gap: 14px;
+        padding: 16px 20px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .brand-copy {
+        display: flex;
+      }
+
+      .sidebar-nav {
+        gap: 12px;
+      }
+
+      .sidebar-nav__group-label {
+        display: block;
+      }
+
+      .sidebar-nav__group-items {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .sidebar-nav__link {
+        justify-content: flex-start;
+        font-size: 13px;
+      }
+
+      .app-main {
+        padding: 20px;
+      }
+
+      .hero-card,
+      .panel,
+      .metric-card,
+      .banner,
+      .ops-strip {
+        border-radius: 16px;
+      }
+
+      .hero-title-row h1 {
+        font-size: 24px;
+        line-height: 30px;
+      }
+
+      .metric-strip,
+      .metric-grid,
+      .dense-meta-grid,
+      .pit-two-col,
+      .pit-bottom-grid,
+      .evidence-grid,
+      .rule-preview__stats {
+        grid-template-columns: 1fr;
+      }
+
+      .metric-card {
+        min-height: 0;
+      }
+
+      .timeline {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="app-sidebar" aria-label="主导航">
+      <a class="brand-block" href="#/workspace">
+        <span class="brand-mark" aria-hidden="true">GSL</span>
+        <span class="brand-copy">
+          <strong>Grit Strategy Lab</strong>
+          <small>策略研究与回测平台</small>
+        </span>
+      </a>
+      <nav class="sidebar-nav">
+        <section class="sidebar-nav__group">
+          <p class="sidebar-nav__group-label">组合</p>
+          <div class="sidebar-nav__group-items">
+            <a class="sidebar-nav__link" href="#/compositions">组合仪表板</a>
+            <a class="sidebar-nav__link" href="#/legs">资产库</a>
+          </div>
+        </section>
+        <section class="sidebar-nav__group">
+          <p class="sidebar-nav__group-label">策略</p>
+          <div class="sidebar-nav__group-items">
+            <a class="sidebar-nav__link" href="#/workspace">策略工作台</a>
+            <a class="sidebar-nav__link" href="#/strategies">策略库</a>
+          </div>
+        </section>
+        <section class="sidebar-nav__group">
+          <p class="sidebar-nav__group-label">因子</p>
+          <div class="sidebar-nav__group-items">
+            <a class="sidebar-nav__link" href="#/factors">因子库</a>
+            <a class="sidebar-nav__link" href="#/factors/factory">因子工厂</a>
+          </div>
+        </section>
+        <section class="sidebar-nav__group">
+          <p class="sidebar-nav__group-label">数据</p>
+          <div class="sidebar-nav__group-items">
+            <a class="sidebar-nav__link nav-pit" href="#/pit-data">PIT 清洗中心</a>
+            <a class="sidebar-nav__link nav-snapshots" href="#/snapshots">数据快照</a>
+          </div>
+        </section>
+      </nav>
+    </aside>
+
+    <main class="app-main">
+      <section class="route-page is-active" data-page="snapshots">
+        <div class="page-surface">
+          <section class="hero-card snapshots-header-card">
+            <div class="snapshots-header">
+              <div class="snapshots-header__copy">
+                <p class="snapshots-header__eyebrow">数据快照</p>
+                <h1 class="snapshots-header__title">数据快照</h1>
+                <p class="snapshots-header__body">以股票与指数快照为主视角，统一呈现行情、财务、情绪和宏观数据的覆盖、时效与可计算性，为因子入库、诊断与回放提供同一套数据判定口径。</p>
+              </div>
+            </div>
+            <div class="snapshots-tabs" role="tablist" aria-label="快照标签">
+              <button class="snapshots-tab snapshots-tab--active" aria-selected="true" role="tab" type="button">股票/指数</button>
+              <button class="snapshots-tab" aria-selected="false" role="tab" type="button">债券/固定收益</button>
+            </div>
+          </section>
+
+          <section class="panel snapshots-equity-overview snapshots-global-dashboard-panel">
+            <div class="panel-header">
+              <div>
+                <h2>健康仪表盘</h2>
+                <p class="panel-note">
+                  保留线上股票 tab 的总览模块，用 L1-L4 取代原有前四张健康卡，继续回答当日研究、回测对照与组合引用是否具备数据基础。
+                </p>
+              </div>
+              <button class="btn btn--primary" type="button">刷新股票快照</button>
+            </div>
+            <div class="metric-grid" aria-label="股票快照健康仪表盘">
+              <article class="metric-card metric-card--accent">
+                <span>L1 基础行情</span>
+                <strong>完全就绪</strong>
+                <small>OHLCV 覆盖 99.4%，价格主链与 SPY / QQQ 基准校验闭合。</small>
+              </article>
+              <article class="metric-card metric-card--warning">
+                <span>L2 财务截面</span>
+                <strong>待补强</strong>
+                <small>已接入 10-K / 10-Q，但仍有 2,184 份报表缺发布日期或 `available_at`。</small>
+              </article>
+              <article class="metric-card metric-card--warning">
+                <span>L3 分析师与情绪</span>
+                <strong>观察</strong>
+                <small>一致预期已落表，但 38% 标的分析师样本数少于 3，卖空成交延迟 1 日。</small>
+              </article>
+              <article class="metric-card metric-card--warning">
+                <span>L4 宏观与衍生品</span>
+                <strong>校准中</strong>
+                <small>宏观序列可回归，隐含波动率偏度仍缺足够历史曲面。</small>
+              </article>
+              <article class="metric-card">
+                <span>最新刷新（EST）</span>
+                <strong>05:42</strong>
+                <small>
+                  本次新增股票价格 18,420 行、公司行为 612 行、指数估值 2 标的。
+                  <button class="snapshots-coverage-detail-link" data-open-coverage-modal="true" type="button">查看明细</button>
+                </small>
+              </article>
+            </div>
+          </section>
+
+          <div class="snapshots-coverage-modal-backdrop" data-coverage-modal hidden>
+            <section
+              aria-labelledby="snapshots-coverage-modal-title"
+              aria-modal="true"
+              class="snapshots-coverage-modal"
+              role="dialog"
+            >
+              <div class="snapshots-coverage-modal__header">
+                <div>
+                  <p class="hero-eyebrow">刷新明细</p>
+                  <h2 id="snapshots-coverage-modal-title">L1-L4 覆盖与刷新明细</h2>
+                  <p>
+                    以本次刷新任务为口径，按数据层展示当前覆盖、本次入库、待处理缺口与受影响因子，便于从仪表盘直接下钻。
+                  </p>
+                </div>
+                <button class="btn snapshots-coverage-modal__close" data-close-coverage-modal="true" type="button">关闭</button>
+              </div>
+              <div class="snapshots-coverage-table-wrap">
+                <table class="snapshots-coverage-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">层级</th>
+                      <th scope="col">对应快照</th>
+                      <th scope="col">当前覆盖</th>
+                      <th scope="col">本次入库</th>
+                      <th scope="col">待处理</th>
+                      <th scope="col">影响因子 / 说明</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>L1 基础行情</td>
+                      <td>ds-price</td>
+                      <td>502 / 505 标的</td>
+                      <td>18,420 行</td>
+                      <td>3 个价格缺口待补</td>
+                      <td>动量、波动、流动性、Amihud</td>
+                    </tr>
+                    <tr>
+                      <td>L2 财务截面</td>
+                      <td>ds-fundamentals</td>
+                      <td>财报字段已接入</td>
+                      <td>2,184 份报表更新</td>
+                      <td>发布日期 / `available_at` 待补</td>
+                      <td>F-Score、应计项目、经营杠杆</td>
+                    </tr>
+                    <tr>
+                      <td>L3 分析师与情绪</td>
+                      <td>ds-analyst-consensus / ds-short-volume</td>
+                      <td>一致预期与卖空链路已落表</td>
+                      <td>67 个样本更新</td>
+                      <td>`N &lt; 3` 占比 38%，卖空延迟 1 日</td>
+                      <td>分析师上修、空头回补、换手偏度</td>
+                    </tr>
+                    <tr>
+                      <td>L4 宏观与衍生品</td>
+                      <td>ds-macro-rates / ds-option-skew</td>
+                      <td>宏观序列可回归</td>
+                      <td>滚动 Beta 17 组重算</td>
+                      <td>期权曲面历史不足</td>
+                      <td>久期、通胀 / 商品 Beta、隐波偏度</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
+          <section class="workbench-grid">
+            <article class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <h2>数据层级工作站</h2>
+                  <p>按因子计算链路拆分数据层，集中查看覆盖、时效与准入状态。</p>
+                </div>
+                <span class="chip">L1 → L4</span>
+              </div>
+              <div class="layer-stack">
+                <article class="layer-row">
+                  <div class="layer-row__top">
+                    <div class="layer-row__title">
+                      <strong>市场行情</strong>
+                      <span>主源 Tiingo，补链 OpenBB Yahoo，基准 ETF 采用 SPY / QQQ。</span>
+                    </div>
+                    <span class="status-pill status-pill--ready">已核验</span>
+                  </div>
+                  <div class="layer-row__stats">
+                    <span class="small-stat">收盘价 / 成交量 / OHLC 完整</span>
+                    <span class="small-stat">动量 / 波动 / 流动性已点亮</span>
+                  </div>
+                </article>
+
+                <article class="layer-row">
+                  <div class="layer-row__top">
+                    <div class="layer-row__title">
+                      <strong>财务截面</strong>
+                      <span>FMP 财报字段接入，关键约束是 `Publish Date` 与资产负债表自洽。</span>
+                    </div>
+                    <span class="status-pill status-pill--warning">待修复</span>
+                  </div>
+                  <div class="layer-row__stats">
+                    <span class="small-stat">应计项目 / F-Score / 经营杠杆</span>
+                    <span class="small-stat">缺发布日 2,184</span>
+                  </div>
+                </article>
+
+                <article class="layer-row">
+                  <div class="layer-row__top">
+                    <div class="layer-row__title">
+                      <strong>分析师与情绪</strong>
+                      <span>Alpha Vantage 一致预期与 FINRA 卖空成交联动，同步检查样本离散与时效。</span>
+                    </div>
+                    <span class="status-pill status-pill--observe">受限</span>
+                  </div>
+                  <div class="layer-row__stats">
+                    <span class="small-stat">分析师上修</span>
+                    <span class="small-stat">空头回补 / 换手偏度</span>
+                  </div>
+                </article>
+
+                <article class="layer-row">
+                  <div class="layer-row__top">
+                    <div class="layer-row__title">
+                      <strong>宏观与衍生品</strong>
+                      <span>FRED 提供利率与通胀序列，ThetaData 提供期权偏度，区分可回归与未闭环链路。</span>
+                    </div>
+                    <span class="status-pill status-pill--calibrating">校准中</span>
+                  </div>
+                  <div class="layer-row__stats">
+                    <span class="small-stat">利率 / CPI / 商品 Beta</span>
+                    <span class="small-stat">隐含波动率偏度暂置灰</span>
+                  </div>
+                </article>
+              </div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <h2>异常核查</h2>
+                  <p>聚焦会改变因子可计算性的关键异常，区分阻断、观察与校准事项。</p>
+                </div>
+                <span class="chip">4 条待处理</span>
+              </div>
+              <div class="alert-stack">
+                <article class="alert-card">
+                  <div class="alert-card__top">
+                    <div class="alert-card__title">
+                      <strong>财报结构异常</strong>
+                      <span>`Total Assets != Total Liabilities + Equity` 的报表 61 份，不能直接进入质量因子链。</span>
+                    </div>
+                    <span class="status-pill status-pill--blocked">硬阻断</span>
+                  </div>
+                  <div class="layer-row__stats">
+                    <span class="small-stat">目标：ds-fundamentals</span>
+                    <span class="small-stat">涉及 F-Score / Accruals</span>
+                  </div>
+                </article>
+
+                <article class="alert-card">
+                  <div class="alert-card__top">
+                    <div class="alert-card__title">
+                      <strong>情绪盲区</strong>
+                      <span>分析师样本数 `N &lt; 3` 的标的占比 38%，一致预期上修只能作为研究态证据。</span>
+                    </div>
+                    <span class="status-pill status-pill--warning">观察</span>
+                  </div>
+                  <div class="layer-row__stats">
+                    <span class="small-stat">目标：ds-analyst-consensus</span>
+                    <span class="small-stat">涉及分析师上修</span>
+                  </div>
+                </article>
+
+                <article class="alert-card">
+                  <div class="alert-card__top">
+                    <div class="alert-card__title">
+                      <strong>卖空成交跃迁</strong>
+                      <span>3 个行业在最新窗口里卖空成交占比跳升超过 50%，需要排除事件性噪音。</span>
+                    </div>
+                    <span class="status-pill status-pill--warning">核查</span>
+                  </div>
+                  <div class="layer-row__stats">
+                    <span class="small-stat">目标：ds-short-volume</span>
+                    <span class="small-stat">涉及空头回补</span>
+                  </div>
+                </article>
+
+                <article class="alert-card">
+                  <div class="alert-card__top">
+                    <div class="alert-card__title">
+                      <strong>利率 Beta 漂移待复核</strong>
+                      <span>10Y Yield 滚动 Beta 已完成 82%，但 17 个标的的窗口回归出现斜率漂移。</span>
+                    </div>
+                    <span class="status-pill status-pill--calibrating">校准中</span>
+                  </div>
+                  <div class="layer-row__stats">
+                    <span class="small-stat">目标：ds-macro-rates</span>
+                    <span class="small-stat">涉及久期 / 商品 Beta</span>
+                  </div>
+                </article>
+              </div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <h2>因子维度就绪矩阵</h2>
+                  <p>按数据层映射因子族准入状态，直接连接 PIT 与因子工厂。</p>
+                </div>
+                <span class="chip">逻辑映射</span>
+              </div>
+              <div class="matrix-rows">
+                <div class="matrix-row">
+                  <div class="matrix-row__copy">
+                    <strong>动量 / 波动 / 流动性</strong>
+                    <span>依赖价格与成交量，当前使用 L1 已核验链路。</span>
+                  </div>
+                  <span class="status-pill status-pill--ready">正式可用</span>
+                </div>
+
+                <div class="matrix-row">
+                  <div class="matrix-row__copy">
+                    <strong>质量 / 估值 / 规模</strong>
+                    <span>字段已接入，但 `Publish Date` 缺口仍使正式诊断受限。</span>
+                  </div>
+                  <span class="status-pill status-pill--sandbox">沙箱</span>
+                </div>
+
+                <div class="matrix-row">
+                  <div class="matrix-row__copy">
+                    <strong>分析师上修 / 卖空回补</strong>
+                    <span>一致预期与卖空数据已接入，但样本离散与时滞仍偏高。</span>
+                  </div>
+                  <span class="status-pill status-pill--limited">受限</span>
+                </div>
+
+                <div class="matrix-row">
+                  <div class="matrix-row__copy">
+                    <strong>利率敏感度 / 通胀与商品 Beta</strong>
+                    <span>宏观源可用，回归链路正在跑窗口校准。</span>
+                  </div>
+                  <span class="status-pill status-pill--calibrating">校准中</span>
+                </div>
+
+                <div class="matrix-row">
+                  <div class="matrix-row__copy">
+                    <strong>隐波偏度 / 借券成本</strong>
+                    <span>期权曲面与借券成本历史链未闭合，维持置灰状态。</span>
+                  </div>
+                  <span class="status-pill status-pill--disabled">置灰</span>
+                </div>
+              </div>
+            </article>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div class="panel-title">
+                <h2>原始快照清单</h2>
+                  <p>保留原始快照台账，并同步标注关键校验、可用因子与后续动作。</p>
+              </div>
+              <span class="chip">目标行可高亮</span>
+            </div>
+            <div class="dense-table">
+              <article class="dense-row">
+                <div class="dense-row__top">
+                  <div class="dense-row__copy">
+                    <strong>ds-price</strong>
+                    <p>股票价格主链，覆盖前复权日线、成交量和 SPY / QQQ 基准。</p>
+                  </div>
+                  <span class="status-pill status-pill--ready">L1 已核验</span>
+                </div>
+                <dl class="dense-meta-grid">
+                  <div class="dense-meta"><dt>最新刷新</dt><dd>2026-05-12 05:42 EST</dd></div>
+                  <div class="dense-meta"><dt>关键校验</dt><dd>基准 ETF 2 / 2 完整</dd></div>
+                  <div class="dense-meta"><dt>可点亮因子</dt><dd>动量 / 波动 / Amihud</dd></div>
+                  <div class="dense-meta"><dt>下一步</dt><dd>进入 PIT 回放</dd></div>
+                </dl>
+                <div class="dense-row__footer">
+                  <span class="divider-note">来源：Tiingo → OpenBB Yahoo</span>
+                  <button class="link-btn" type="button">查看 PIT 门禁</button>
+                </div>
+              </article>
+
+              <article class="dense-row dense-row--highlight">
+                <div class="dense-row__top">
+                  <div class="dense-row__copy">
+                    <strong>ds-fundamentals</strong>
+                    <p>基础面 PIT 种子快照，新增净利润、总资产、负债、权益、营收与发布日校验。</p>
+                  </div>
+                  <span class="status-pill status-pill--warning">L2 待修复</span>
+                </div>
+                <dl class="dense-meta-grid">
+                  <div class="dense-meta"><dt>最新刷新</dt><dd>2026-05-11 22:14 EST</dd></div>
+                  <div class="dense-meta"><dt>关键校验</dt><dd>缺 `Publish Date` 2,184 份</dd></div>
+                  <div class="dense-meta"><dt>可点亮因子</dt><dd>F-Score / 应计项目 / 经营杠杆</dd></div>
+                  <div class="dense-meta"><dt>下一步</dt><dd>补齐 `available_at`</dd></div>
+                </dl>
+                <div class="dense-row__footer">
+                  <span class="divider-note">来源：FMP 10-K / 10-Q</span>
+                  <button class="link-btn" type="button">高亮基础面异常</button>
+                </div>
+              </article>
+
+              <article class="dense-row">
+                <div class="dense-row__top">
+                  <div class="dense-row__copy">
+                    <strong>ds-analyst-consensus</strong>
+                    <p>一致预期与目标价链路，重点监控分析师人数、修订方向和发布时间戳。</p>
+                  </div>
+                  <span class="status-pill status-pill--observe">L3 受限</span>
+                </div>
+                <dl class="dense-meta-grid">
+                  <div class="dense-meta"><dt>最新刷新</dt><dd>2026-05-11 19:00 EST</dd></div>
+                  <div class="dense-meta"><dt>关键校验</dt><dd>`N &lt; 3` 占比 38%</dd></div>
+                  <div class="dense-meta"><dt>可点亮因子</dt><dd>分析师上修</dd></div>
+                  <div class="dense-meta"><dt>下一步</dt><dd>区分研究态与正式态</dd></div>
+                </dl>
+                <div class="dense-row__footer">
+                  <span class="divider-note">来源：Alpha Vantage</span>
+                  <button class="link-btn" type="button">查看情绪盲区</button>
+                </div>
+              </article>
+
+              <article class="dense-row">
+                <div class="dense-row__top">
+                  <div class="dense-row__copy">
+                    <strong>ds-short-volume</strong>
+                    <p>卖空成交与换手异常链路，用于识别微观结构风险与拥挤交易。</p>
+                  </div>
+                  <span class="status-pill status-pill--warning">L3 待复核</span>
+                </div>
+                <dl class="dense-meta-grid">
+                  <div class="dense-meta"><dt>最新刷新</dt><dd>2026-05-10 18:00 EST</dd></div>
+                  <div class="dense-meta"><dt>关键校验</dt><dd>3 个行业跳变 &gt; 50%</dd></div>
+                  <div class="dense-meta"><dt>可点亮因子</dt><dd>空头回补 / 换手偏度</dd></div>
+                  <div class="dense-meta"><dt>下一步</dt><dd>加入异常核查</dd></div>
+                </dl>
+                <div class="dense-row__footer">
+                  <span class="divider-note">来源：FINRA</span>
+                  <button class="link-btn" type="button">标记核查任务</button>
+                </div>
+              </article>
+
+              <article class="dense-row">
+                <div class="dense-row__top">
+                  <div class="dense-row__copy">
+                    <strong>ds-macro-rates / ds-option-skew</strong>
+                    <p>宏观序列与期权偏度链路分开治理，前者可回归，后者尚未满足可回放要求。</p>
+                  </div>
+                  <span class="status-pill status-pill--calibrating">L4 混合状态</span>
+                </div>
+                <dl class="dense-meta-grid">
+                  <div class="dense-meta"><dt>最新刷新</dt><dd>2026-05-12 06:05 EST</dd></div>
+                  <div class="dense-meta"><dt>关键校验</dt><dd>滚动 Beta 82%，隐含波动率曲面历史不足</dd></div>
+                  <div class="dense-meta"><dt>可点亮因子</dt><dd>久期 / 商品 Beta</dd></div>
+                  <div class="dense-meta"><dt>下一步</dt><dd>期权曲面继续置灰</dd></div>
+                </dl>
+                <div class="dense-row__footer">
+                  <span class="divider-note">来源：FRED / ThetaData</span>
+                  <button class="link-btn" type="button">查看宏观校准状态</button>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section class="evidence-grid">
+            <article class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <h3>数据源证据层</h3>
+                  <p>归集 provider 边界、字段口径与证据用途，供快照侧统一溯源。</p>
+                </div>
+                <span class="chip">来源证据</span>
+              </div>
+              <div class="evidence-stack">
+                <article class="evidence-card">
+                  <div class="evidence-card__top">
+                    <div class="evidence-card__title">
+                      <strong>价格主链</strong>
+                      <span>用于 OHLCV、前复权收盘与缺口补价，不替代成员历史或身份确权。</span>
+                    </div>
+                    <span class="status-pill status-pill--ready">Tiingo 可用</span>
+                  </div>
+                </article>
+                <article class="evidence-card">
+                  <div class="evidence-card__top">
+                    <div class="evidence-card__title">
+                      <strong>基础面发布链</strong>
+                      <span>用于发布日、available_at 与财务字段完整度判断，是质量因子能否晋升的关键证据。</span>
+                    </div>
+                    <span class="status-pill status-pill--warning">FMP 待补</span>
+                  </div>
+                </article>
+                <article class="evidence-card">
+                  <div class="evidence-card__top">
+                    <div class="evidence-card__title">
+                      <strong>情绪与微观结构</strong>
+                      <span>用于一致预期和卖空事件，只能证明情绪偏差，不替代价格 PIT 与正式回放。</span>
+                    </div>
+                    <span class="status-pill status-pill--observe">研究态</span>
+                  </div>
+                </article>
+                <article class="evidence-card">
+                  <div class="evidence-card__top">
+                    <div class="evidence-card__title">
+                      <strong>宏观与衍生品精修</strong>
+                      <span>宏观序列可回归，隐含波动率偏度需待期权历史链闭环后才进入正式门禁。</span>
+                    </div>
+                    <span class="status-pill status-pill--calibrating">校准中</span>
+                  </div>
+                </article>
+              </div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <h3>凭据与重启入口</h3>
+                  <p>统一管理新增数据源凭据与重启动作，不将运维输入散落到 PIT 页面。</p>
+                </div>
+                <span class="chip">会话草稿</span>
+              </div>
+              <div class="credential-list">
+                <div class="credential-row">
+                  <div>
+                    <strong>FMP_API_KEY</strong>
+                    <span>基础面明细与发布日链路</span>
+                  </div>
+                  <span class="status-pill status-pill--warning">缺凭据</span>
+                </div>
+                <div class="credential-row">
+                  <div>
+                    <strong>ALPHAVANTAGE_API_KEY</strong>
+                    <span>分析师一致预期与修订链路</span>
+                  </div>
+                  <span class="status-pill status-pill--ready">已配置</span>
+                </div>
+                <div class="credential-row">
+                  <div>
+                    <strong>FRED_API_KEY</strong>
+                    <span>利率、CPI 与商品宏观序列</span>
+                  </div>
+                  <span class="status-pill status-pill--ready">已配置</span>
+                </div>
+                <div class="credential-row">
+                  <div>
+                    <strong>THETADATA_USERNAME / PASSWORD</strong>
+                    <span>历史隐含波动率曲面与隐波偏度</span>
+                  </div>
+                  <span class="status-pill status-pill--warning">待补</span>
+                </div>
+              </div>
+              <div class="list-actions">
+                <span class="divider-note">修改凭据后需要重启 QuickStart 或 backend，才会进入下一轮快照刷新。</span>
+                <button class="btn btn--primary" type="button">复制设置并重启命令</button>
+              </div>
+            </article>
+          </section>
+
+          <div class="route-footer">基准路由：#/snapshots?tab=equity</div>
+        </div>
+      </section>
+
+      <section class="route-page" data-page="pit">
+        <div class="page-surface">
+          <section class="hero-card">
+            <div class="hero-copy">
+              <p class="hero-eyebrow">数据基座</p>
+              <div class="hero-title-row">
+                <h1>PIT 清洗中心</h1>
+                <span class="status-pill status-pill--limited">有限就绪</span>
+              </div>
+              <p>将源层快照转换为可回放、可诊断、可审计的点时数据门禁，隔离未来函数、幸存者偏差与仅现值字段（`current-only`）。</p>
+              <div class="hero-meta">
+                <span class="chip">正式窗口 2016-05-01 至 2026-05-12</span>
+                <span class="chip">研究窗口 2023-05-01 至 2026-05-12</span>
+                <span class="chip">链接源：#/snapshots?tab=equity</span>
+              </div>
+            </div>
+            <div class="hero-actions">
+              <button class="btn" type="button">跳转数据快照</button>
+              <button class="btn btn--primary" type="button">重新检查 PIT 门禁</button>
+            </div>
+          </section>
+
+          <section class="banner">
+            <div class="banner__copy">
+              <strong>研究豁免已启用</strong>
+              <p>已临时忽略 17 个非核心缺口，仅允许研究诊断，不允许正式晋升。预计 IC 扰动 0.0032，市值权重 0.41%。</p>
+            </div>
+            <button class="btn" type="button">撤销豁免</button>
+          </section>
+
+          <section class="metric-strip" aria-label="四层 PIT 准入卡">
+            <article class="metric-card">
+              <div class="metric-card__top">
+                <div class="metric-kicker">
+                  <span>L1 价格可回放</span>
+                  <strong>完全就绪</strong>
+                </div>
+                <span class="status-pill status-pill--ready">可正式诊断</span>
+              </div>
+              <p>前复权轨迹和 SPY / QQQ 校验闭合，价格型因子已不再受当前样本缺口阻断。</p>
+              <div class="metric-detail-row">
+                <span class="detail-pill">价格缺口 0</span>
+                <span class="detail-pill">复权轨迹 10 年完整</span>
+              </div>
+            </article>
+
+            <article class="metric-card">
+              <div class="metric-card__top">
+                <div class="metric-kicker">
+                  <span>L2 基础面 PIT</span>
+                  <strong>阻塞</strong>
+                </div>
+                <span class="status-pill status-pill--blocked">available_at 缺失</span>
+              </div>
+              <p>231 个标的仍缺 `available_at` 或 `Publish Date`，质量与估值族正式诊断不能放行。</p>
+              <div class="metric-detail-row">
+                <span class="detail-pill">F-Score 沙箱</span>
+                <span class="detail-pill">Accruals 阻塞</span>
+              </div>
+            </article>
+
+            <article class="metric-card">
+              <div class="metric-card__top">
+                <div class="metric-kicker">
+                  <span>L3 情绪重放性</span>
+                  <strong>观察</strong>
+                </div>
+                <span class="status-pill status-pill--observe">仅现值字段风险</span>
+              </div>
+              <p>分析师上修与 FINRA 卖空成交可用于研究诊断，但历史修订明细与样本覆盖仍不稳定。</p>
+              <div class="metric-detail-row">
+                <span class="detail-pill">N &lt; 3 占比 38%</span>
+                <span class="detail-pill">卖空延迟 1 日</span>
+              </div>
+            </article>
+
+            <article class="metric-card">
+              <div class="metric-card__top">
+                <div class="metric-kicker">
+                  <span>L4 宏观 / 衍生品</span>
+                  <strong>校准中</strong>
+                </div>
+                <span class="status-pill status-pill--calibrating">回归与曲面分离</span>
+              </div>
+              <p>利率 / CPI / 商品 Beta 已可回归，隐波偏度仍缺 5 年期曲面历史，维持灰态。</p>
+              <div class="metric-detail-row">
+                <span class="detail-pill">利率 Beta 82%</span>
+                <span class="detail-pill">隐波偏度置灰</span>
+              </div>
+            </article>
+          </section>
+
+          <section class="ops-strip">
+            <div class="ops-strip__copy">
+              <strong>数据运维指令</strong>
+              <span>当前 PIT 的核心风险不在价格链，而在基础面发布时间戳与情绪字段的可回放性。优先修复 `ds-fundamentals`，再决定是否重跑正式诊断。</span>
+            </div>
+            <div class="ops-strip__actions">
+              <button class="btn" type="button">重启身份修复任务</button>
+              <button class="btn" type="button">查看覆盖率缺口</button>
+              <button class="btn btn--primary" type="button">跳转 ds-fundamentals</button>
+            </div>
+          </section>
+
+          <section class="pit-two-col">
+            <article class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <h2>PIT 门禁摘要</h2>
+                  <p>按数据层汇总门禁结论，明确正式诊断、沙箱与受限准入。</p>
+                </div>
+                <span class="status-pill status-pill--limited">仅限研究</span>
+              </div>
+              <div class="kv-list">
+                <div class="kv-row">
+                  <div>
+                    <strong>价格快照</strong>
+                    <span>ds-price · PIT v2026.05.12</span>
+                  </div>
+                  <span class="status-pill status-pill--ready">L1 通过</span>
+                </div>
+                <div class="kv-row">
+                  <div>
+                    <strong>基础面快照</strong>
+                    <span>ds-fundamentals · 发布日期对齐缺口 231</span>
+                  </div>
+                  <span class="status-pill status-pill--blocked">L2 阻塞</span>
+                </div>
+                <div class="kv-row">
+                  <div>
+                    <strong>样本池快照</strong>
+                    <span>un-sp500 · 历史锚点 61 个</span>
+                  </div>
+                  <span class="status-pill status-pill--ready">样本池通过</span>
+                </div>
+                <div class="kv-row">
+                  <div>
+                    <strong>诊断模式</strong>
+                    <span>价格族开放正式诊断，质量族回退沙箱，情绪族维持受限准入。</span>
+                  </div>
+                  <span class="status-pill status-pill--observe">分层准入</span>
+                </div>
+              </div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <h2>因子诊断准入矩阵</h2>
+                  <p>从 PIT 视角重述因子族准入层级，区分正式诊断、沙箱、受限与置灰。</p>
+                </div>
+                <span class="chip">准入门槛</span>
+              </div>
+              <div class="matrix-rows">
+                <div class="matrix-row">
+                  <div class="matrix-row__copy">
+                    <strong>动量 / 波动 / 流动性</strong>
+                    <span>价格链与样本池已通过，允许开展正式 10Y 诊断。</span>
+                  </div>
+                  <span class="status-pill status-pill--ready">正式可用</span>
+                </div>
+
+                <div class="matrix-row">
+                  <div class="matrix-row__copy">
+                    <strong>质量 / 估值 / 规模</strong>
+                    <span>基础面字段已入 PIT 种子，但发布时间戳不完整，仅开放沙箱。</span>
+                  </div>
+                  <span class="status-pill status-pill--sandbox">沙箱</span>
+                </div>
+
+                <div class="matrix-row">
+                  <div class="matrix-row__copy">
+                    <strong>分析师上修 / 卖空回补</strong>
+                    <span>存在仅现值字段与样本离散问题，维持有限就绪，不允许晋升。</span>
+                  </div>
+                  <span class="status-pill status-pill--limited">受限</span>
+                </div>
+
+                <div class="matrix-row">
+                  <div class="matrix-row__copy">
+                    <strong>利率 / 通胀 / 商品 Beta</strong>
+                    <span>序列已可回归，但仍有 17 个标的的回归窗口漂移待复核。</span>
+                  </div>
+                  <span class="status-pill status-pill--calibrating">校准中</span>
+                </div>
+
+                <div class="matrix-row">
+                  <div class="matrix-row__copy">
+                    <strong>隐波偏度 / 借券成本</strong>
+                    <span>缺少期权曲面历史与借券成本账本，维持置灰。</span>
+                  </div>
+                  <span class="status-pill status-pill--disabled">置灰</span>
+                </div>
+              </div>
+            </article>
+          </section>
+
+          <section class="pit-bottom-grid">
+            <article class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <h3>覆盖率下钻</h3>
+                  <p>按缺口类型定位覆盖不足的时间段、样本权重与受影响因子。</p>
+                </div>
+                <span class="chip">3 个主要缺口</span>
+              </div>
+              <div class="bucket-grid">
+                <article class="bucket-card">
+                  <div class="bucket-card__top">
+                    <div class="bucket-card__title">
+                      <strong>基础面发布时间戳晚到</strong>
+                      <span>L2 缺口。影响质量、估值、规模等依赖 observation-date 对齐的因子。</span>
+                    </div>
+                    <span class="status-pill status-pill--blocked">231 个</span>
+                  </div>
+                  <div class="bucket-metrics">
+                    <span class="small-stat">缺失占比 12.4%</span>
+                    <span class="small-stat">市值权重 7.8%</span>
+                    <span class="small-stat">阻断正式诊断</span>
+                  </div>
+                  <div class="timeline">
+                    <span><i style="height:62%"></i><small>Q1</small></span>
+                    <span class="is-warning"><i style="height:100%"></i><small>Q2</small></span>
+                    <span class="is-warning"><i style="height:88%"></i><small>Q3</small></span>
+                    <span><i style="height:56%"></i><small>Q4</small></span>
+                    <span><i style="height:42%"></i><small>Q1</small></span>
+                    <span class="is-warning"><i style="height:78%"></i><small>Q2</small></span>
+                    <span><i style="height:39%"></i><small>Q3</small></span>
+                    <span><i style="height:24%"></i><small>Q4</small></span>
+                  </div>
+                  <div class="sample-chip-row">
+                    <span class="sample-chip">ABT</span>
+                    <span class="sample-chip">COF</span>
+                    <span class="sample-chip">MSCI</span>
+                    <span class="sample-chip">RJF</span>
+                  </div>
+                </article>
+
+                <article class="bucket-card">
+                  <div class="bucket-card__top">
+                    <div class="bucket-card__title">
+                      <strong>历史成员身份待解</strong>
+                      <span>价格链修复后，残余问题集中在退市符号生命周期与本地身份缓存。</span>
+                    </div>
+                    <span class="status-pill status-pill--warning">17 个</span>
+                  </div>
+                  <div class="bucket-metrics">
+                    <span class="small-stat">缺失占比 0.9%</span>
+                    <span class="small-stat">市值权重 0.4%</span>
+                    <span class="small-stat">可研究豁免</span>
+                  </div>
+                  <div class="timeline">
+                    <span><i style="height:48%"></i><small>2018</small></span>
+                    <span><i style="height:55%"></i><small>2019</small></span>
+                    <span><i style="height:31%"></i><small>2020</small></span>
+                    <span><i style="height:44%"></i><small>2021</small></span>
+                    <span><i style="height:25%"></i><small>2022</small></span>
+                    <span><i style="height:18%"></i><small>2023</small></span>
+                    <span><i style="height:12%"></i><small>2024</small></span>
+                    <span><i style="height:8%"></i><small>2025</small></span>
+                  </div>
+                  <div class="sample-chip-row">
+                    <span class="sample-chip">ABK</span>
+                    <span class="sample-chip">ACE</span>
+                    <span class="sample-chip">ANR</span>
+                    <span class="sample-chip">APOL</span>
+                  </div>
+                </article>
+
+                <article class="bucket-card">
+                  <div class="bucket-card__top">
+                    <div class="bucket-card__title">
+                      <strong>情绪字段仅现值化</strong>
+                      <span>L3 缺口。一致预期与期权偏度虽有最新值，但历史明细不足，不能作为正式诊断证据。</span>
+                    </div>
+                    <span class="status-pill status-pill--observe">研究态</span>
+                  </div>
+                  <div class="bucket-metrics">
+                    <span class="small-stat">影响 3 个因子族</span>
+                    <span class="small-stat">晋升资格关闭</span>
+                    <span class="small-stat">允许预览</span>
+                  </div>
+                  <div class="timeline">
+                    <span class="is-danger"><i style="height:78%"></i><small>1W</small></span>
+                    <span class="is-danger"><i style="height:96%"></i><small>1M</small></span>
+                    <span class="is-warning"><i style="height:74%"></i><small>3M</small></span>
+                    <span class="is-warning"><i style="height:69%"></i><small>6M</small></span>
+                    <span><i style="height:34%"></i><small>1Y</small></span>
+                    <span><i style="height:18%"></i><small>2Y</small></span>
+                    <span><i style="height:10%"></i><small>3Y</small></span>
+                    <span><i style="height:10%"></i><small>5Y</small></span>
+                  </div>
+                  <div class="sample-chip-row">
+                    <span class="sample-chip">分析师上修</span>
+                    <span class="sample-chip">空头回补</span>
+                  <span class="sample-chip">隐波偏度</span>
+                  </div>
+                </article>
+              </div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <h3>点时异常核查与规则工作站</h3>
+                  <p>统一管理去极值、发布日期对齐与宏观回归漂移规则。</p>
+                </div>
+                <span class="chip">情景试算</span>
+              </div>
+              <div class="check-list">
+                <div class="check-row">
+                  <div>
+                    <strong>FUNDAMENTAL_AVAILABLE_AT_MISSING</strong>
+                    <span>发布日期缺失会直接把质量 / 估值因子挡在正式诊断之外。</span>
+                  </div>
+                  <span class="status-pill status-pill--blocked">硬阻断</span>
+                </div>
+                <div class="check-row">
+                  <div>
+                    <strong>ANALYST_CONSENSUS_SAMPLE_LOW</strong>
+                    <span>`N &lt; 3` 时进入情绪盲区，不允许晋升，只保留研究提示。</span>
+                  </div>
+                  <span class="status-pill status-pill--warning">待复核</span>
+                </div>
+                <div class="check-row">
+                  <div>
+                    <strong>RATE_BETA_DRIFT_PENDING</strong>
+                    <span>窗口斜率漂移不阻断价格因子，但会让宏观敞口维持校准态。</span>
+                  </div>
+                  <span class="status-pill status-pill--calibrating">校准中</span>
+                </div>
+              </div>
+
+              <div class="rule-tabs" aria-label="清洗规则工作台">
+                <button class="rule-tab is-active" type="button">MAD</button>
+                <button class="rule-tab" type="button">3σ</button>
+                <button class="rule-tab" type="button">ZScore 截尾</button>
+                <button class="rule-tab" type="button">发布日期对齐</button>
+              </div>
+
+              <div class="rule-preview">
+                <div class="rule-preview__stats">
+                  <div>
+                    <span>剔除比例</span>
+                    <strong>4.8%</strong>
+                  </div>
+                  <div>
+                    <span>命中样本</span>
+                    <strong>184</strong>
+                  </div>
+                  <div>
+                    <span>当前判断</span>
+                    <strong>可继续</strong>
+                  </div>
+                </div>
+                <p class="divider-note">当前规则：先按 MAD 去极值，再对 L3 / L4 新字段应用 ZScore 截尾；基础面字段需先完成 `available_at` 对齐，再进入统一截面标准化。</p>
+                <div class="sample-chip-row">
+                  <span class="sample-chip">AAL 2026-03-27 +6.2σ</span>
+                  <span class="sample-chip">MSFT 2026-04-10 publish_date +11d</span>
+                  <span class="sample-chip">XOM 10Y Beta 斜率漂移</span>
+                </div>
+              </div>
+            </article>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div class="panel-title">
+                <h2>门禁行动列表</h2>
+                <p>阻塞码可直接回跳到 `#/snapshots?tab=equity&target=...` 的具体对象，支持修复闭环。</p>
+              </div>
+                <span class="chip">定位入口</span>
+            </div>
+            <div class="action-list">
+              <div class="action-row">
+                <div>
+                  <strong>FUNDAMENTAL_PIT_NOT_READY</strong>
+                  <span>跳转 `#/snapshots?tab=equity&target=ds-fundamentals` 并高亮基础面发布日异常。</span>
+                </div>
+                <button class="btn" type="button">定位快照</button>
+              </div>
+              <div class="action-row">
+                <div>
+                  <strong>ANALYST_CONSENSUS_NOT_REPLAYABLE</strong>
+                  <span>跳转 `#/snapshots?tab=equity&target=ds-analyst-consensus`，保留仅现值字段风险提示。</span>
+                </div>
+                <button class="btn" type="button">定位快照</button>
+              </div>
+              <div class="action-row">
+                <div>
+                  <strong>IV_SURFACE_NOT_READY</strong>
+                  <span>跳转 `#/snapshots?tab=equity&target=ds-option-skew`，明确隐波偏度维持置灰。</span>
+                </div>
+                <button class="btn" type="button">定位快照</button>
+              </div>
+            </div>
+          </section>
+
+          <div class="route-footer">基准路由：#/pit-data</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    function getPreviewPage() {
+      const hash = window.location.hash || "";
+      const hashPath = hash.split("?")[0];
+      if (hashPath === "#/pit-data") {
+        return "pit";
+      }
+      if (hashPath === "#/snapshots" || hashPath === "") {
+        return "snapshots";
+      }
+      const params = new URLSearchParams(window.location.search);
+      return params.get("page") === "pit" ? "pit" : "snapshots";
+    }
+
+    function renderPreviewPage() {
+      const page = getPreviewPage();
+      document.querySelectorAll(".route-page").forEach((node) => {
+        node.classList.toggle("is-active", node.dataset.page === page);
+      });
+      document.querySelector(".nav-snapshots")?.classList.toggle("sidebar-nav__link--active", page === "snapshots");
+      document.querySelector(".nav-pit")?.classList.toggle("sidebar-nav__link--active", page === "pit");
+    }
+
+    function setCoverageModalOpen(isOpen) {
+      const modal = document.querySelector("[data-coverage-modal]");
+      if (!modal) {
+        return;
+      }
+      if (isOpen) {
+        modal.removeAttribute("hidden");
+      } else {
+        modal.setAttribute("hidden", "true");
+      }
+    }
+
+    window.addEventListener("hashchange", renderPreviewPage);
+    document.querySelectorAll("[data-open-coverage-modal]").forEach((button) => {
+      button.addEventListener("click", () => setCoverageModalOpen(true));
+    });
+    document.querySelectorAll("[data-close-coverage-modal]").forEach((button) => {
+      button.addEventListener("click", () => setCoverageModalOpen(false));
+    });
+    document.querySelector("[data-coverage-modal]")?.addEventListener("click", (event) => {
+      if (event.target === event.currentTarget) {
+        setCoverageModalOpen(false);
+      }
+    });
+    renderPreviewPage();
+  </script>
+</body>
+</html>

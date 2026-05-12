@@ -31,7 +31,7 @@ import type {
 
 const DEFAULT_BENCHMARK = '60/40 参考组合';
 const DEFAULT_DESCRIPTION = '以策略腿、资产腿与现金腿构建可复核的正式组合。';
-const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 80;
 const STARTER_WEIGHT_PRESETS: Record<number, number[]> = {
   1: [100],
   2: [60, 40],

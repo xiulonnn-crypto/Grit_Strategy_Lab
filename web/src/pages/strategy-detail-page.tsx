@@ -11,7 +11,7 @@ import './creation-backtest.css';
 import '../page-sections/workspace-recent-runs-lane-b.css';
 import './strategy-detail-page.css';
 
-const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 80;
 
 const TEXT = {
   eyebrow: '策略详情',

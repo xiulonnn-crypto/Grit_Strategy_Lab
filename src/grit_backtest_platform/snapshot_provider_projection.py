@@ -947,11 +947,219 @@ def _trust_layer_operator_action(layer: Mapping[str, Any], provider_rows: Sequen
     return "查看 registry 最近尝试与限制说明，再决定是否进入修复队列。"
 
 
+def _latest_job_id_for_attempts(attempt_items: Sequence[Mapping[str, Any]]) -> str | None:
+    latest_job_id = ""
+    latest_attempted_at = ""
+    for item in attempt_items:
+        job_id = str(item.get("job_id") or "").strip()
+        if not job_id:
+            continue
+        attempted_at = str(item.get("attempted_at") or "")
+        if (attempted_at, job_id) >= (latest_attempted_at, latest_job_id):
+            latest_attempted_at = attempted_at
+            latest_job_id = job_id
+    return latest_job_id or None
+
+
+def _join_readable_names(items: Sequence[str]) -> str:
+    ordered: list[str] = []
+    for item in items:
+        text = str(item or "").strip()
+        if text and text not in ordered:
+            ordered.append(text)
+    return "、".join(ordered)
+
+
+def _provider_label(provider_row: Mapping[str, Any]) -> str:
+    return str(provider_row.get("source_name") or provider_row.get("provider_id") or "").strip()
+
+
+def _provider_required_envs(provider_row: Mapping[str, Any]) -> list[str]:
+    credential_requirements = (
+        provider_row.get("credential_requirements")
+        if isinstance(provider_row.get("credential_requirements"), Mapping)
+        else {}
+    )
+    required_envs = [
+        str(env)
+        for env in (credential_requirements.get("required_env_vars") or [])
+        if str(env).strip()
+    ]
+    if required_envs:
+        return list(dict.fromkeys(required_envs))
+    configured_envs = [
+        str(env)
+        for env in (credential_requirements.get("configured_env_vars") or [])
+        if str(env).strip()
+    ]
+    return list(dict.fromkeys(configured_envs))
+
+
+def _provider_has_current_credential_rejection(
+    provider_row: Mapping[str, Any],
+    rollup_row: Mapping[str, Any],
+) -> bool:
+    if int(rollup_row.get("latest_job_event_count") or 0) <= 0:
+        return False
+    error_summary = provider_row.get("error_summary") if isinstance(provider_row.get("error_summary"), Mapping) else {}
+    reason_blob = " ".join(
+        str(error_summary.get(key) or "")
+        for key in ("reason", "error")
+    ).lower()
+    return any(
+        token in reason_blob
+        for token in (
+            "credential_rejected",
+            "invalid_credentials",
+            "invalid_api_key",
+            "invalid api key",
+            "unauthorized",
+            "forbidden",
+        )
+    )
+
+
+def _provider_is_currently_cooling_down(
+    provider_row: Mapping[str, Any],
+    rollup_row: Mapping[str, Any],
+) -> bool:
+    quota_cooldown = provider_row.get("quota_cooldown") if isinstance(provider_row.get("quota_cooldown"), Mapping) else {}
+    return bool(
+        provider_row.get("readiness_status") == "cooldown"
+        or rollup_row.get("cooldown_active")
+        or rollup_row.get("quota_limited")
+        or quota_cooldown.get("cooldown_active")
+        or quota_cooldown.get("quota_limited")
+    )
+
+
+def _provider_current_issue_message(
+    provider_row: Mapping[str, Any],
+    rollup_row: Mapping[str, Any],
+) -> str | None:
+    label = _provider_label(provider_row)
+    env_text = _join_readable_names(_provider_required_envs(provider_row))
+    if _provider_has_current_credential_rejection(provider_row, rollup_row):
+        key_label = env_text or "当前凭据"
+        return f"{label} 当前返回凭据被拒，请核对或更换 {key_label}。"
+    if _provider_is_currently_cooling_down(provider_row, rollup_row):
+        quota_cooldown = (
+            provider_row.get("quota_cooldown")
+            if isinstance(provider_row.get("quota_cooldown"), Mapping)
+            else {}
+        )
+        next_retry_at = str(quota_cooldown.get("next_retry_at") or "").strip()
+        if next_retry_at:
+            return f"{label} 当前处于冷却窗口，{next_retry_at} 后可重跑。"
+        return f"{label} 当前处于冷却窗口，待窗口结束后重跑。"
+    if int(rollup_row.get("latest_job_event_count") or 0) <= 0:
+        return None
+    status = str(rollup_row.get("status") or "").strip().lower()
+    if status not in {"failed", "unavailable"}:
+        return None
+    error_summary = provider_row.get("error_summary") if isinstance(provider_row.get("error_summary"), Mapping) else {}
+    reason_blob = " ".join(
+        str(error_summary.get(key) or "")
+        for key in ("reason", "error")
+    ).lower()
+    if "entitlement_required" in reason_blob:
+        return f"{label} 当前账号权限不足，需要提升套餐或改走其他证据源。"
+    return f"{label} 最近一次刷新未通过，请复查后重跑。"
+
+
+def _provider_is_available_in_latest_job(
+    provider_row: Mapping[str, Any],
+    rollup_row: Mapping[str, Any],
+) -> bool:
+    if not bool(provider_row.get("enabled")) or not bool(provider_row.get("credential_ready")):
+        return False
+    if _provider_has_current_credential_rejection(provider_row, rollup_row):
+        return False
+    if _provider_is_currently_cooling_down(provider_row, rollup_row):
+        return False
+    if int(rollup_row.get("latest_job_event_count") or 0) <= 0:
+        return False
+    status = str(rollup_row.get("status") or "").strip().lower()
+    return status in {"succeeded", "skipped"}
+
+
+def _provider_is_configured_but_not_exercised(
+    provider_row: Mapping[str, Any],
+    rollup_row: Mapping[str, Any],
+) -> bool:
+    if not bool(provider_row.get("enabled")) or not bool(provider_row.get("credential_ready")):
+        return False
+    if _provider_has_current_credential_rejection(provider_row, rollup_row):
+        return False
+    if _provider_is_currently_cooling_down(provider_row, rollup_row):
+        return False
+    return int(rollup_row.get("latest_job_event_count") or 0) <= 0
+
+
+def _trust_layer_operator_action_live(
+    layer: Mapping[str, Any],
+    provider_rows: Sequence[Mapping[str, Any]],
+    attempt_rollup_by_provider: Mapping[str, Mapping[str, Any]],
+) -> str:
+    preferred_provider = str(layer.get("preferred_provider") or "")
+    preferred = next((item for item in provider_rows if str(item.get("provider_id") or "") == preferred_provider), None)
+    preferred_profile = preferred.get("trust_profile") if isinstance((preferred or {}).get("trust_profile"), Mapping) else {}
+    preferred_action = str((preferred_profile or {}).get("operator_action") or "").strip()
+
+    missing_env = [
+        str(env)
+        for item in provider_rows
+        for env in ((item.get("credential_requirements") or {}).get("missing_env_vars") or [])
+        if str(env).strip()
+    ]
+    if missing_env:
+        return f"补齐 {_join_readable_names(missing_env)} 后重跑该层证据。"
+
+    available_labels: list[str] = []
+    standby_labels: list[str] = []
+    issue_messages: list[str] = []
+    for item in provider_rows:
+        provider_id = str(item.get("provider_id") or "").strip()
+        rollup_row = (
+            attempt_rollup_by_provider.get(provider_id)
+            if isinstance(attempt_rollup_by_provider.get(provider_id), Mapping)
+            else {}
+        )
+        issue_message = _provider_current_issue_message(item, rollup_row)
+        if issue_message:
+            issue_messages.append(issue_message)
+            continue
+        if _provider_is_available_in_latest_job(item, rollup_row):
+            available_labels.append(_provider_label(item))
+            continue
+        if _provider_is_configured_but_not_exercised(item, rollup_row):
+            standby_labels.append(_provider_label(item))
+
+    parts: list[str] = []
+    if available_labels:
+        parts.append(f"当前可用：{_join_readable_names(available_labels)}。")
+    parts.extend(issue_messages)
+    if standby_labels:
+        parts.append(f"已配置但本轮未命中：{_join_readable_names(standby_labels)}。需要该层补证时可单独重跑。")
+    if parts:
+        return " ".join(parts)
+    if preferred_action:
+        return preferred_action
+    return "查看最近尝试与凭据状态后，再决定下一步修复动作。"
+
+
 def build_data_trust_summary(
     *,
     registry_items: Sequence[Mapping[str, Any]],
     attempt_items: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
+    latest_job_id = _latest_job_id_for_attempts(attempt_items)
+    attempt_rollup = build_provider_attempt_rollup(attempt_items, latest_job_id=latest_job_id)
+    attempt_rollup_by_provider = {
+        str(item.get("provider_id") or "").strip(): dict(item)
+        for item in (attempt_rollup.get("providers") or [])
+        if str(item.get("provider_id") or "").strip()
+    }
     by_provider = {
         str(item.get("provider_id") or "").strip(): dict(item)
         for item in registry_items
@@ -991,7 +1199,7 @@ def build_data_trust_summary(
                 "preferred_provider": layer.get("preferred_provider"),
                 "evidence_scope": list(layer.get("evidence_scope") or []),
                 "full_ready_gate": layer.get("full_ready_gate"),
-                "operator_action": _trust_layer_operator_action(layer, provider_rows),
+                "operator_action": _trust_layer_operator_action_live(layer, provider_rows, attempt_rollup_by_provider),
                 "provider_count": len(provider_rows),
                 "usable_provider_count": len(usable_provider_ids),
             }

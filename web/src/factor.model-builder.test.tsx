@@ -99,9 +99,15 @@ function makeFactor(overrides: Partial<ApiFactorListItem> = {}): ApiFactorListIt
       run_id: 'diag_mom_latest',
       status: 'COMPLETED',
       rank_ic: 0.052,
-      ir: 0.42,
+      ir: 0.72,
       coverage: 92.4,
-      group_returns: [],
+      group_returns: [
+        { group: 'Q1', mean_return: 0.052, sample_count: 120 },
+        { group: 'Q2', mean_return: 0.031, sample_count: 120 },
+        { group: 'Q3', mean_return: 0.012, sample_count: 120 },
+        { group: 'Q4', mean_return: -0.004, sample_count: 120 },
+        { group: 'Q5', mean_return: -0.019, sample_count: 120 },
+      ],
       ic_series: [],
       compliance_trail: { diagnosed_at: '2026-05-05T09:00:00Z' },
     },
@@ -785,7 +791,7 @@ describe('FactorModelBuilderPage', () => {
 
   it('shows low-risk PIT admission status without disabling creation', async () => {
     const lowRiskSummary =
-      'PIT核心成员价格缺口为 0，209 个非核心缺口市值权重占比 0.00%，实盘准入风险极低。已转为创建提示，允许物化多因子策略。';
+      'PIT核心成员价格缺口为 0，10Y因子准入状态 REPAIR；209 个10年窗口补证标的与 209 个Full Ready归档缺口进入修复队列，已转为创建提示，允许物化多因子策略。';
     const previewFactorModel = vi
       .fn<(payload: FactorModelPreviewPayload) => Promise<FactorModelPreview>>()
       .mockResolvedValue(makeReadyPreview({
@@ -798,7 +804,7 @@ describe('FactorModelBuilderPage', () => {
             code: 'PRICE_SNAPSHOT_NOT_READY',
             severity: 'warning',
             label: '低风险准入',
-            message: 'PIT核心成员价格缺口为 0，209 个非核心缺口市值权重占比 0.00%，实盘准入风险极低。',
+            message: 'PIT核心成员价格缺口为 0，10Y因子准入状态 REPAIR；209 个10年窗口补证标的与 209 个Full Ready归档缺口进入修复队列。',
           }],
           hard_blockers: [],
           summary_label: '低风险准入',
@@ -1016,7 +1022,7 @@ describe('FactorModelBuilderPage', () => {
     expect(screen.getAllByRole('button', { name: '创建可回测策略' })[0]).toBeDisabled();
   });
 
-  it('renders factor library diagnostic state and blocker risk columns with a diagnostic popover', async () => {
+  it('renders factor library diagnostic state columns with a diagnostic popover', async () => {
     fakeFactorApi.listFactors.mockResolvedValue({
       items: [
         makeFactor(),
@@ -1089,11 +1095,18 @@ describe('FactorModelBuilderPage', () => {
     render(<FactorLibraryPage />);
 
     expect(await screen.findByText('诊断状态')).toBeInTheDocument();
-    expect(screen.getByText('阻断 / 风险')).toBeInTheDocument();
     expect(screen.getByText('比对 / 操作')).toBeInTheDocument();
+    expect(screen.queryByLabelText('因子列说明')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('来源列说明')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('诊断状态说明')).toBeInTheDocument();
+    expect(screen.getByLabelText('最近诊断指标解释')).toBeInTheDocument();
+    expect(screen.getByLabelText('因子级别名词解释')).toBeInTheDocument();
+    expect(screen.getByLabelText('最近更新说明')).toBeInTheDocument();
+    expect(screen.queryByLabelText('比对与操作说明')).not.toBeInTheDocument();
     expect(screen.queryByText('下线原因')).not.toBeInTheDocument();
     expect(screen.queryByText('下线时间')).not.toBeInTheDocument();
-    expect(screen.getAllByText(/准予生产|降权建议|仅供预览|物理封存/).length).toBeGreaterThan(0);
+    expect(screen.queryByText('阻断 / 风险')).not.toBeInTheDocument();
+    expect(screen.getAllByText(/稳健|待校准|失效|沙箱/).length).toBeGreaterThan(0);
     expect(screen.getByText('覆盖五类核心风格因子，统一按系统种子治理与诊断。')).toBeInTheDocument();
     expect(screen.queryByText(/SYSTEM_SEED/)).not.toBeInTheDocument();
     expect(fakeFactorApi.getPitDataOverview).not.toHaveBeenCalled();
@@ -1122,8 +1135,226 @@ describe('FactorModelBuilderPage', () => {
     expect(reasonPanel as HTMLElement).not.toHaveTextContent('管理动作');
 
     fireEvent.click(within(segmented as HTMLElement).getByRole('button', { name: '待校准' }));
-    expect(screen.getAllByText('滚动市盈率倒数 (LTM)').length).toBeGreaterThan(0);
-    expect(screen.queryByText('人工不可回放字段')).not.toBeInTheDocument();
+    const factorTable = screen.getByRole('table');
+    expect(within(factorTable).getAllByText('滚动市盈率倒数 (LTM)').length).toBeGreaterThan(0);
+    expect(within(factorTable).queryByText('人工不可回放字段')).not.toBeInTheDocument();
+  });
+
+  it('keeps 10Y admission repair as a warning instead of a hard blocker', async () => {
+    const repairMessage = '10 active-in-window symbols still need price evidence or identity repair; factor admission remains allowed with repair disclosure.';
+    const repairWarning = {
+      code: 'FACTOR_ADMISSION_10Y_REPAIR',
+      severity: 'WARNING',
+      label: '10Y repair queue',
+      message: repairMessage,
+    };
+    fakeFactorApi.listFactors.mockResolvedValue({
+      items: [
+        makeFactor({
+          id: 's_mom_repair_10y',
+          name: '10Y补源动量',
+          ui_state: 'robust',
+          ui_state_label: '稳健',
+          readiness_blockers: [repairWarning],
+          blocker_reason_summary: {
+            status: 'warning',
+            label: '1 个风险提示',
+            reasons: [{ ...repairWarning, severity: 'warning' }],
+            warning_count: 1,
+            blocked_count: 0,
+          },
+          strategy_creation_risk: {
+            can_create: true,
+            warning_count: 1,
+            blocked_count: 0,
+            warnings: [{ ...repairWarning, severity: 'warning' }],
+            hard_blockers: [],
+          },
+        }),
+      ],
+      summary: { system_seed_count: 1, pit_status: 'REPAIR', governance_queue_count: 0, online_count: 1, offline_count: 0 },
+    });
+    fakeFactorApi.getPitDataOverview.mockResolvedValue(makePitOverview());
+
+    render(<FactorLibraryPage />);
+
+    const factorButton = await screen.findByRole('button', { name: '10Y补源动量' });
+    const row = factorButton.closest('tr') as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(screen.getByRole('button', { name: '查看10Y补源动量诊断摘要' })).toHaveTextContent('待校准');
+    expect(within(row).queryByText('降权建议')).not.toBeInTheDocument();
+    expect(within(row).queryByText('10Y 准入补源队列')).not.toBeInTheDocument();
+    expect(within(row).queryByText('稳健')).not.toBeInTheDocument();
+    expect(within(row).queryByText('硬阻断')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '查看10Y补源动量诊断摘要' }));
+    const popover = await screen.findByRole('dialog', { name: '10Y补源动量 最近诊断摘要' });
+    expect(within(popover).getByText(/主要风险：10Y 准入补源队列。/)).toBeInTheDocument();
+    expect(within(popover).getByText(/降权建议/)).toBeInTheDocument();
+    expect(popover).not.toHaveTextContent('10Y repair queue');
+    expect(popover).not.toHaveTextContent('active-in-window symbols');
+  });
+
+  it('uses group bars and factor id for governance reverse diagnostic popovers', async () => {
+    const reverseFactorId = 'm_vol_downsiderev_252d_rank';
+    const goodGroups = [
+      { group: 'Q1', mean_return: 0.026, sample_count: 120 },
+      { group: 'Q2', mean_return: 0.015, sample_count: 120 },
+      { group: 'Q3', mean_return: 0.005, sample_count: 120 },
+      { group: 'Q4', mean_return: -0.001, sample_count: 120 },
+      { group: 'Q5', mean_return: -0.009, sample_count: 120 },
+    ];
+    fakeFactorApi.listFactors.mockResolvedValue({
+      items: [
+        makeFactor({
+          id: reverseFactorId,
+          name: '反向下行波动率代理（252日）',
+          source: 'MANUAL',
+          lifecycle_status: 'VERIFIED',
+          diagnostic_status: 'COMPLETED',
+          ui_state: 'robust',
+          ui_state_label: '稳健',
+          latest_diagnostic_summary: {
+            run_id: 'reverse-preview:fdiag_b290db5ee459',
+            factor_id: reverseFactorId,
+            status: 'COMPLETED',
+            diagnostic_mode: 'VERIFIED',
+            rank_ic: 0.062,
+            ir: 1.09,
+            coverage: 98.5,
+            group_returns: goodGroups,
+            group_return_series: Array.from({ length: 5 }, (_, index) => ({
+              date: `2026-0${index + 1}-28`,
+              groups: goodGroups,
+              q1_mean_return: -0.009,
+              q5_mean_return: 0.026,
+              q1_q5_spread: -0.035,
+            })),
+            data_lineage: { kind: 'GOVERNANCE_REVERSE_FACTOR_PREVIEW' },
+            compliance_trail: { diagnosed_at: '2026-05-08T18:43:00Z' },
+          },
+          blocker_reason_summary: {
+            status: 'clear',
+            label: '无阻断',
+            reasons: [],
+            warning_count: 0,
+            blocked_count: 0,
+          },
+          strategy_creation_risk: {
+            can_create: true,
+            warning_count: 0,
+            blocked_count: 0,
+            warnings: [],
+            hard_blockers: [],
+          },
+        }),
+      ],
+      summary: { system_seed_count: 0, pit_status: 'READY', governance_queue_count: 0, online_count: 1, offline_count: 0 },
+    });
+
+    render(<FactorLibraryPage />);
+
+    const stateButton = await screen.findByRole('button', { name: '查看反向下行波动率代理（252日）诊断摘要' });
+    expect(stateButton).toHaveTextContent('稳健');
+    expect(stateButton).not.toHaveTextContent('失效');
+    fireEvent.click(stateButton);
+
+    const popover = await screen.findByRole('dialog', { name: '反向下行波动率代理（252日） 最近诊断摘要' });
+    expect(popover).toHaveTextContent(`稳健 · ${reverseFactorId}`);
+    expect(popover).not.toHaveTextContent('reverse-preview:fdiag_b290db5ee459');
+    expect(popover).not.toHaveTextContent('分组收益倒挂');
+    expect(within(popover).getByText(/分组收益单调性良好/)).toBeInTheDocument();
+  });
+
+  it('reclassifies completed A/B sandbox diagnostics to calibration states on the online table', async () => {
+    fakeFactorApi.listFactors.mockResolvedValue({
+      items: [
+        makeFactor({
+          id: 's_alpha_ffblend_cur_rank',
+          name: 'Fama-French 风格合成 Alpha',
+          diagnostic_status: 'SANDBOX_READY',
+          ui_state: 'sandbox',
+          ui_state_label: '沙箱',
+          latest_diagnostic_summary: {
+            run_id: 'fdiag_alpha_live',
+            status: 'COMPLETED',
+            diagnostic_mode: 'SANDBOX',
+            rank_ic: 0.0134,
+            ir: 0.5853,
+            coverage: 58.98,
+            group_returns: [
+              { group: 'Q1', mean_return: 0.0167, sample_count: 120 },
+              { group: 'Q2', mean_return: 0.0082, sample_count: 120 },
+              { group: 'Q3', mean_return: 0.0139, sample_count: 120 },
+              { group: 'Q4', mean_return: 0.0182, sample_count: 120 },
+              { group: 'Q5', mean_return: -0.0051, sample_count: 120 },
+            ],
+            ic_series: [
+              { date: '2025-12-17', rank_ic: 0.0128 },
+              { date: '2026-01-20', rank_ic: 0.0334 },
+              { date: '2026-02-19', rank_ic: 0.0260 },
+              { date: '2026-03-20', rank_ic: 0.0218 },
+            ],
+          },
+          strategy_creation_risk: {
+            can_create: true,
+            warning_count: 2,
+            blocked_count: 0,
+            warnings: [
+              {
+                code: 'COVERAGE_EDGE',
+                severity: 'warning',
+                message: '诊断覆盖率低于 90%，限值研究使用并建议补齐样本覆盖。',
+              },
+              {
+                code: 'FULL_READY_ARCHIVAL_GAP',
+                severity: 'warning',
+                message: '189 个前置窗口或非核心标的仍在 Full Ready 归档修复队列。',
+              },
+            ],
+            hard_blockers: [],
+          },
+          blocker_reason_summary: {
+            status: 'warning',
+            label: '2 个风险提示',
+            reasons: [
+              {
+                code: 'COVERAGE_EDGE',
+                severity: 'warning',
+                message: '诊断覆盖率低于 90%，限值研究使用并建议补齐样本覆盖。',
+              },
+              {
+                code: 'FULL_READY_ARCHIVAL_GAP',
+                severity: 'warning',
+                message: '189 个前置窗口或非核心标的仍在 Full Ready 归档修复队列。',
+              },
+            ],
+            warning_count: 2,
+            blocked_count: 0,
+          },
+          batch_diagnostic_summary: {
+            status: 'COMPLETED',
+            latest_run_id: 'fdiag_alpha_live',
+            diagnostic_mode: 'SANDBOX',
+            rank_ic: 0.0134,
+            ir: 0.5853,
+            coverage: 58.98,
+            completed_at: '2026-05-08T10:43:32Z',
+            ui_state: 'sandbox',
+            warning_count: 2,
+            blocked_count: 0,
+          },
+        }),
+      ],
+      summary: { system_seed_count: 1, pit_status: 'REPAIR', governance_queue_count: 0, online_count: 1, offline_count: 0 },
+    });
+
+    render(<FactorLibraryPage />);
+
+    const stateButton = await screen.findByRole('button', { name: '查看Fama-French 风格合成 Alpha诊断摘要' });
+    expect(stateButton).toHaveTextContent('待校准');
+    expect(stateButton).not.toHaveTextContent('沙箱');
+    expect(screen.getByText('B')).toBeInTheDocument();
   });
 
   it('shows standard category tags beside factor names and filters by the new taxonomy', async () => {
@@ -1298,7 +1529,6 @@ describe('FactorModelBuilderPage', () => {
     render(<FactorLibraryPage />);
 
     expect(await screen.findByRole('tab', { name: /线上因子/ })).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByText('阻断 / 风险')).toBeInTheDocument();
     expect(screen.getByText('比对 / 操作')).toBeInTheDocument();
     expect(screen.queryByText('下线原因')).not.toBeInTheDocument();
     expect(screen.queryByText('下线时间')).not.toBeInTheDocument();
@@ -1330,7 +1560,7 @@ describe('FactorModelBuilderPage', () => {
           expression: 'Rank(Delta(Close, 63))',
         }),
       ],
-      summary: { system_seed_count: 1, pit_status: 'READY', governance_queue_count: 1, online_count: 2, offline_count: 0 },
+      summary: { system_seed_count: 1, pit_status: 'READY', governance_queue_count: 1, strategy_usage_factor_count: 2, online_count: 2, offline_count: 0 },
     });
     fakeFactorApi.getFactorGovernanceOverview.mockResolvedValue({
       as_of: '2026-05-06T09:00:00Z',
@@ -1428,17 +1658,21 @@ describe('FactorModelBuilderPage', () => {
     });
     render(<FactorLibraryPage />);
 
-    const trigger = (await screen.findByText('治理任务')).closest('button');
-    expect(trigger).not.toBeNull();
-    fireEvent.click(trigger as HTMLButtonElement);
+    expect(await screen.findByText('策略使用中因子')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /查看 PIT 门禁/ })).not.toBeInTheDocument();
+    const trigger = await screen.findByRole('button', { name: /治理任务/ });
+    fireEvent.click(trigger);
 
     expect(await screen.findByRole('dialog', { name: '治理任务' })).toBeInTheDocument();
     await waitFor(() => expect(fakeFactorApi.getFactorGovernanceOverview).toHaveBeenCalledTimes(1));
+    expect(document.querySelector('.factor-governance-modal__body')).not.toBeNull();
     await waitFor(() => expect(trigger).toHaveTextContent('2'));
     expect(await screen.findByText('动量因子满足强制下线条件')).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole('button', { name: '二次确认' })[0]);
     const confirmDialog = await screen.findByRole('dialog', { name: '确认治理任务' });
     expect(confirmDialog).toBeInTheDocument();
+    expect(confirmDialog.querySelector('.factor-governance-modal__body')).not.toBeNull();
+    expect(confirmDialog.querySelector('.factor-governance-modal__footer')).not.toBeNull();
     expect(confirmDialog).toHaveTextContent('强制下线会写入“已强制下线”状态');
     expect(confirmDialog).not.toHaveTextContent('DEPRECATE');
     expect(confirmDialog).not.toHaveTextContent('DEPRECATED');
@@ -1456,6 +1690,176 @@ describe('FactorModelBuilderPage', () => {
     expect(window.location.hash).toContain('source=governance_queue');
     expect(decodeURIComponent(window.location.hash)).toContain('a_mom_auto_rank');
     expect(decodeURIComponent(window.location.hash)).toContain('weights=20');
+  });
+
+  it('refreshes the governance trigger count from the latest overview during first load', async () => {
+    fakeFactorApi.listFactors.mockResolvedValue({
+      items: [
+        makeFactor(),
+        makeFactor({
+          id: 'a_mom_auto_rank',
+          name: '[Auto-Mined] 动量候选',
+          source: 'AUTO_MINED',
+          lifecycle_status: 'VERIFIED',
+          diagnostic_status: 'COMPLETED',
+          expression: 'Rank(Delta(Close, 63))',
+        }),
+      ],
+      summary: { system_seed_count: 1, pit_status: 'READY', governance_queue_count: 1, strategy_usage_factor_count: 2, online_count: 2, offline_count: 0 },
+    });
+    let resolveOverview!: (overview: {
+      as_of: string;
+      queue_count: number;
+      actions: Array<Record<string, unknown>>;
+    }) => void;
+    fakeFactorApi.getFactorGovernanceOverview.mockReturnValue(new Promise((resolve) => {
+      resolveOverview = resolve;
+    }));
+
+    render(<FactorLibraryPage />);
+
+    const trigger = await screen.findByRole('button', { name: /治理任务/ });
+    expect(trigger).toHaveTextContent('1');
+    await waitFor(() => expect(fakeFactorApi.getFactorGovernanceOverview).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      resolveOverview({
+        as_of: '2026-05-12T09:00:00Z',
+        queue_count: 2,
+        actions: [
+          {
+            id: 'gq_deprecate_s_mom_12m1m_rank',
+            kind: 'DEPRECATE',
+            command: 'DEPRECATE',
+            label: '强制下线',
+            title: '12-1 动量因子需要强制下线',
+            detail: 'Grade D 且连续分组收益倒挂，需要进入治理队列。',
+            factor_ids: ['s_mom_12m1m_rank'],
+            affected_factor_ids: ['s_mom_12m1m_rank'],
+            severity: 'danger',
+          },
+          {
+            id: 'gq_model_a_mom_auto_rank',
+            kind: 'FACTOR_MODEL_SUGGESTION',
+            label: '策略草稿建议',
+            title: '自动挖掘因子建议进入策略草稿',
+            detail: '治理任务建议把自动挖掘因子带入多因子创建页。',
+            factor_ids: ['a_mom_auto_rank', 's_mom_12m1m_rank'],
+            suggested_weights: [
+              { factor_id: 'a_mom_auto_rank', weight_pct: 20, direction: 'HIGH_IS_BETTER' },
+              { factor_id: 's_mom_12m1m_rank', weight_pct: 30, direction: 'HIGH_IS_BETTER' },
+            ],
+            severity: 'info',
+            target: {
+              route: '#/factor-models/new',
+              query: {
+                source: 'governance_queue',
+                factorIds: 'a_mom_auto_rank,s_mom_12m1m_rank',
+                weights: '20,30',
+                directions: 'HIGH_IS_BETTER,HIGH_IS_BETTER',
+              },
+            },
+          },
+        ],
+      });
+    });
+    await waitFor(() => expect(trigger).toHaveTextContent('2'));
+
+    fireEvent.click(trigger);
+
+    expect(await screen.findByRole('dialog', { name: '治理任务' })).toBeInTheDocument();
+    await waitFor(() => expect(fakeFactorApi.getFactorGovernanceOverview).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('12-1 动量因子需要强制下线')).toBeInTheDocument();
+  });
+
+  it('confirms factor optimization tasks and submits the reverse factor publish command', async () => {
+    fakeFactorApi.listFactors.mockResolvedValue({
+      items: [
+        makeFactor({
+          id: 's_vol_downside_252d_rank',
+          name: '下行波动率代理（252日）',
+          source: 'SYSTEM_SEED',
+          lifecycle_status: 'VERIFIED',
+          diagnostic_status: 'COMPLETED',
+          expression: 'DownsideStd(Return(Close, 1), 252)',
+        }),
+      ],
+      summary: { system_seed_count: 1, pit_status: 'READY', governance_queue_count: 1, strategy_usage_factor_count: 1, online_count: 1, offline_count: 0 },
+    });
+    fakeFactorApi.getFactorGovernanceOverview.mockResolvedValue({
+      as_of: '2026-05-12T09:00:00Z',
+      queue_count: 1,
+      actions: [
+        {
+          id: 'gq_optimize_s_vol_downside_252d_rank',
+          kind: 'FACTOR_OPTIMIZATION',
+          command: 'PUBLISH_OPTIMIZED_FACTOR',
+          label: '因子优化',
+          title: '下行波动率代理（252日） 生成反向因子待入库',
+          detail: '分组收益倒挂，反向因子再次诊断为 Grade B，等待确认入库。',
+          factor_ids: ['s_vol_downside_252d_rank'],
+          affected_factor_ids: ['s_vol_downside_252d_rank'],
+          severity: 'info',
+          optimized_factor: {
+            id: 'm_vol_downsiderev_252d_rank',
+            name: '反向下行波动率代理（252日）',
+            expression: 'DownsideStd(Return(Close, 1), 252)',
+            direction: 'HIGH_IS_BETTER',
+            grade: 'B',
+            confirmable: true,
+            diagnostic_summary: { rank_ic: 0.021, ir: 0.72, coverage: 96.2 },
+          },
+        },
+      ],
+    });
+    fakeFactorApi.executeFactorGovernanceAction.mockResolvedValue({
+      status: 'EXECUTED',
+      action_id: 'gq_optimize_s_vol_downside_252d_rank',
+      command: 'PUBLISH_OPTIMIZED_FACTOR',
+      affected_factor_ids: ['s_vol_downside_252d_rank'],
+      keep_factor_id: null,
+      offline_at: '2026-05-12T09:05:00Z',
+      executed_at: '2026-05-12T09:05:00Z',
+      reason: '分组收益倒挂，反向因子再次诊断为 Grade B，等待确认入库。',
+      items: [
+        makeFactor({
+          id: 'm_vol_downsiderev_252d_rank',
+          name: '反向下行波动率代理（252日）',
+          source: 'MANUAL',
+          lifecycle_status: 'VERIFIED',
+          diagnostic_status: 'COMPLETED',
+          expression: 'DownsideStd(Return(Close, 1), 252)',
+        }),
+      ],
+      created_factor_id: 'm_vol_downsiderev_252d_rank',
+      governance_overview: {
+        as_of: '2026-05-12T09:05:00Z',
+        queue_count: 0,
+        actions: [],
+      },
+    });
+
+    render(<FactorLibraryPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /治理任务/ }));
+    expect(await screen.findByText('下行波动率代理（252日） 生成反向因子待入库')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: '确认入库' }));
+
+    const confirmDialog = await screen.findByRole('dialog', { name: '确认治理任务' });
+    expect(confirmDialog).toHaveTextContent('优化后因子');
+    expect(confirmDialog).toHaveTextContent('反向下行波动率代理（252日）');
+    expect(confirmDialog).toHaveTextContent('m_vol_downsiderev_252d_rank');
+    expect(confirmDialog).toHaveTextContent('Grade B');
+    expect(confirmDialog).toHaveTextContent('Rank IC');
+    expect(confirmDialog).toHaveTextContent('0.021');
+    fireEvent.click(within(confirmDialog).getByRole('button', { name: '确认入库' }));
+
+    await waitFor(() => expect(fakeFactorApi.executeFactorGovernanceAction).toHaveBeenCalledWith(
+      'gq_optimize_s_vol_downside_252d_rank',
+      expect.objectContaining({
+        confirm: true,
+        command: 'PUBLISH_OPTIMIZED_FACTOR',
+        factor_ids: ['s_vol_downside_252d_rank'],
+      }),
+    ));
   });
 
   it('shows prune confirmation factor identities, metric comparison, and final plan', async () => {
@@ -1642,7 +2046,7 @@ describe('FactorModelBuilderPage', () => {
     expect(diagnosticCell?.children[0]).toHaveClass('factor-diagnostic-cell__metrics');
     expect(diagnosticCell?.children[1]).toHaveClass('factor-diagnostic-cell__reference');
     expect(diagnosticCell?.children[2]).toHaveClass('factor-sparkline');
-    expect(screen.getAllByText(/降权建议|准予生产|仅供预览|物理封存/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/稳健|待校准|失效|沙箱/).length).toBeGreaterThan(0);
     expect(screen.queryByText('硬阻断')).not.toBeInTheDocument();
   });
 
@@ -1785,7 +2189,7 @@ describe('FactorModelBuilderPage', () => {
     expect(factorsCss).toContain('.factor-diagnostic-popover');
     expect(factorsCss).toContain('.factor-diagnostic-popover__reason');
     expect(factorsCss).toContain('.factor-diagnostic-state__button');
-    expect(factorsCss).toContain('.factor-gate-pill--warn');
+    expect(factorsCss).not.toContain('.factor-gate-pill--warn');
     expect(factorsCss).toContain('.factor-sparkline-empty');
     expect(factorsCss).toContain('.factor-category-tag');
     expect(factorsCss).not.toContain('.factor-category-tag[data-category="risk"]');
@@ -1793,13 +2197,22 @@ describe('FactorModelBuilderPage', () => {
     expect(factorsCss).toContain('.factor-correlation__group[data-category="other"]');
     expect(factorsCss).toContain('.factor-governance-confirm-note');
     expect(factorsCss).toMatch(/\.factor-governance-modal__panel--confirm \.factor-action-row\s*\{[^}]*justify-content:\s*flex-end;/s);
+    expect(factorsCss).toMatch(/\.factor-governance-modal\s*\{[^}]*z-index:\s*100;[^}]*background:\s*rgba\(17,\s*24,\s*39,\s*0\.22\);[^}]*backdrop-filter:\s*blur\(6px\);/s);
+    expect(factorsCss).toMatch(/\.factor-governance-modal__panel\s*\{[^}]*grid-template-rows:\s*auto minmax\(0,\s*1fr\) auto;[^}]*overflow:\s*hidden;[^}]*border-radius:\s*16px;[^}]*background:\s*linear-gradient\(180deg,\s*#ffffff 0%,\s*#fcfcfd 100%\);[^}]*box-shadow:\s*var\(--shadow-float,\s*0 16px 36px rgba\(15,\s*23,\s*42,\s*0\.12\)\);/s);
+    expect(factorsCss).toMatch(/\.factor-governance-modal__header\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;[^}]*z-index:\s*2;[^}]*background:\s*linear-gradient\(180deg,\s*#ffffff 0%,\s*#fcfcfd 100%\);/s);
+    expect(factorsCss).toMatch(/\.factor-governance-modal__body\s*\{[^}]*min-height:\s*0;[^}]*overflow:\s*auto;[^}]*padding:\s*18px 24px 24px;[^}]*overscroll-behavior:\s*contain;/s);
+    expect(factorsCss).toMatch(/\.factor-governance-modal__footer\s*\{[^}]*border-top:\s*1px solid var\(--gsl-color-border,\s*#e5e7eb\);[^}]*background:\s*#ffffff;/s);
+    expect(factorsCss).toContain('.factor-governance-modal__close');
+    expect(factorsCss).toMatch(/\.factor-governance-action\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*max-content;[^}]*border-radius:\s*12px;[^}]*background:\s*#ffffff;/s);
+    expect(factorsCss).toMatch(/@media\s*\(max-width:\s*720px\)[\s\S]*\.factor-governance-modal\s*\{[\s\S]*padding:\s*16px;[\s\S]*\.factor-governance-modal__body\s*\{[\s\S]*padding:\s*14px 18px 18px;[\s\S]*\.factor-governance-action\s*\{[\s\S]*grid-template-columns:\s*1fr;/s);
     expect(factorsCss).toContain('.factor-level-cell');
     expect(factorsCss).toContain('.factor-level-badge--s');
     expect(factorsCss).toMatch(/\.factor-table-wrap\s*\{[^}]*overflow-x:\s*hidden;/s);
     expect(factorsCss).toMatch(/\.factor-table\s*\{[^}]*min-width:\s*0;[^}]*table-layout:\s*auto;/s);
     expect(factorsCss).toMatch(/\.factor-table--online\s*\{[^}]*min-width:\s*0;/s);
     expect(factorsCss).toMatch(/\.factor-table--online th:nth-child\(1\),\s*\.factor-table--online td:nth-child\(1\)\s*\{[^}]*min-width:\s*min\(200px,\s*21vw\);[^}]*max-width:\s*min\(300px,\s*25vw\);/s);
-    expect(factorsCss).toMatch(/\.factor-table--online th:nth-child\(6\),\s*\.factor-table--online td:nth-child\(6\)\s*\{[^}]*min-width:\s*min\(198px,\s*21vw\);[^}]*max-width:\s*min\(300px,\s*26vw\);/s);
+    expect(factorsCss).toContain('.factor-table--online th:nth-child(7)');
+    expect(factorsCss).not.toContain('.factor-table--online th:nth-child(8)');
     expect(factorsCss).toContain('.factor-offline-reason');
     expect(factorsCss).toContain('.factor-row-actions--inline');
     expect(factorsCss).toMatch(/\.factor-diagnostic-cell\s*\{[^}]*grid-template-columns:\s*minmax\(134px,\s*1fr\)\s*max-content\s*116px;/s);
@@ -1810,8 +2223,7 @@ describe('FactorModelBuilderPage', () => {
     expect(factorsCss).toMatch(/\.factor-table tbody tr:has\(\.factor-diagnostic-popover\),[\s\S]*\.factor-table tbody tr:has\(\.factor-gap-popover\)\s*\{[\s\S]*z-index:\s*60;/s);
     expect(factorsCss).toMatch(/\.factor-row-actions\s*\{[^}]*display:\s*grid;/s);
     expect(factorsCss).toMatch(/\.factor-table td\s*\{[^}]*vertical-align:\s*middle;/s);
-    expect(factorsCss).toMatch(/\.factor-gate-reason\s*\{[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;[^}]*\}/s);
-    expect(factorsCss).not.toMatch(/\.factor-gate-reason\s*\{[^}]*-webkit-line-clamp:/s);
+    expect(factorsCss).not.toContain('.factor-gate-reason');
     expect(factorsCss).toMatch(/\.factor-table tbody tr:last-child \.factor-gap-popover\s*\{[^}]*top:\s*auto;[^}]*bottom:\s*30px;/s);
   });
 });

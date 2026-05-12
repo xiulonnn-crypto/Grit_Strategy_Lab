@@ -381,6 +381,132 @@ function createSnapshotOverview(refreshedAt = '2026-04-01T07:48:00Z'): ApiSnapsh
     blocking_target: null,
     message: '这里会集中展示价格数据、公司行为和股票池的最新状态。',
     allowed_actions: ['refresh_snapshots'],
+    data_layer_readiness: [
+      {
+        layer_id: 'l1_market_data',
+        title_cn: 'L1 基础行情',
+        status: 'READY',
+        summary: 'OHLCV、基准 ETF 与刷新链路均已就绪。',
+        metrics: [
+          { label: '价格快照', value: '2/2', detail: 'ds-price / ds-corporate-actions' },
+          { label: '基准覆盖', value: '2/2', detail: 'SPY、QQQ 可回放' },
+        ],
+        updated_at: refreshedAt,
+        provider_keys: ['yahoo'],
+        linked_targets: ['ds-price', 'ds-corporate-actions'],
+      },
+      {
+        layer_id: 'l2_fundamental_data',
+        title_cn: 'L2 财务截面',
+        status: 'WARNING',
+        summary: '财务截面可接入，但发布日与恒等式校验仍待补齐。',
+        metrics: [
+          { label: '财报快照', value: '待接入', detail: 'FMP 10-K / 10-Q' },
+          { label: 'PIT 对齐', value: '待校验', detail: 'publish_date / available_at' },
+        ],
+        updated_at: refreshedAt,
+        provider_keys: ['FMP_API_KEY'],
+        linked_targets: ['ds-fundamentals'],
+      },
+      {
+        layer_id: 'l3_sentiment_data',
+        title_cn: 'L3 分析师与情绪',
+        status: 'WARNING',
+        summary: '一致预期与卖空链路尚未形成稳定覆盖。',
+        metrics: [
+          { label: '一致预期', value: '样本不足', detail: '分析师样本数低于 3' },
+          { label: '卖空链路', value: '待校验', detail: '短卖成交占比仍需巡检' },
+        ],
+        updated_at: refreshedAt,
+        provider_keys: ['ALPHAVANTAGE_API_KEY', 'FINRA'],
+        linked_targets: ['analyst-consensus', 'short-volume'],
+      },
+      {
+        layer_id: 'l4_macro_derivatives',
+        title_cn: 'L4 宏观与衍生品',
+        status: 'CALIBRATING',
+        summary: '宏观序列可纳入，但利率 Beta 与 IV Skew 仍在校准。',
+        metrics: [
+          { label: 'FRED 利率', value: '可接入', detail: '10Y Yield / CPI' },
+          { label: 'IV Skew', value: '待接入', detail: 'ThetaData 期权面板' },
+        ],
+        updated_at: refreshedAt,
+        provider_keys: ['FRED_API_KEY', 'THETADATA'],
+        linked_targets: ['fred-10y', 'iv-skew'],
+      },
+    ],
+    snapshot_quality_alerts: [
+      {
+        code: 'FUNDAMENTAL_BALANCE_CHECK_PENDING',
+        severity: 'warning',
+        title_cn: '财报恒等式待校验',
+        detail_cn: '资产、负债与权益恒等式尚未完成逐项核验。',
+        source_layer: 'l2_fundamental_data',
+        blocking: false,
+        target: 'ds-fundamentals',
+      },
+      {
+        code: 'CONSENSUS_BLIND_SPOT',
+        severity: 'warning',
+        title_cn: '情绪样本仍有盲区',
+        detail_cn: '一致预期样本数低于 3 时，分析师修正因子仅允许观察。',
+        source_layer: 'l3_sentiment_data',
+        blocking: false,
+        target: 'analyst-consensus',
+      },
+      {
+        code: 'SHORT_VOLUME_JUMP_REVIEW',
+        severity: 'warning',
+        title_cn: '卖空成交需巡检',
+        detail_cn: '短卖成交占比若出现异常跳变，应触发人工复核。',
+        source_layer: 'l3_sentiment_data',
+        blocking: false,
+        target: 'short-volume',
+      },
+      {
+        code: 'RATE_BETA_CALIBRATING',
+        severity: 'info',
+        title_cn: '利率 Beta 校准中',
+        detail_cn: '宏观回归链路已预留，但滚动回归仍未完成定标。',
+        source_layer: 'l4_macro_derivatives',
+        blocking: false,
+        target: 'fred-10y',
+      },
+    ],
+    factor_dimension_readiness: [
+      {
+        dimension_id: 'price_liquidity',
+        title_cn: '价格与流动性',
+        status: 'READY',
+        supported_factors: ['12-1 动量', '6m 动量', '波动率', '规模'],
+        blockers: [],
+        linked_layers: ['l1_market_data'],
+      },
+      {
+        dimension_id: 'quality_valuation',
+        title_cn: '质量与估值',
+        status: 'WARNING',
+        supported_factors: ['Accruals', 'F-Score', 'ROE', 'FCFY'],
+        blockers: ['财务发布日未完成 PIT 校验'],
+        linked_layers: ['l2_fundamental_data'],
+      },
+      {
+        dimension_id: 'sentiment_micro',
+        title_cn: '情绪与微观结构',
+        status: 'WARNING',
+        supported_factors: ['分析师修正', '超额换手', '空头回补'],
+        blockers: ['一致预期样本数不足', '卖空成交链路待巡检'],
+        linked_layers: ['l3_sentiment_data'],
+      },
+      {
+        dimension_id: 'macro_derivatives',
+        title_cn: '宏观与衍生品',
+        status: 'CALIBRATING',
+        supported_factors: ['利率敏感度', '通胀 Beta', 'IV Skew'],
+        blockers: ['滚动回归尚在校准', '期权面板尚未接入'],
+        linked_layers: ['l4_macro_derivatives'],
+      },
+    ],
     bond_fixed_income: {
       global_pulse: {
         status: 'READY',
@@ -527,6 +653,136 @@ function createPitDataOverview(): ApiPitDataOverview {
     factor_diagnostics_enabled: true,
     verified_diagnostics_enabled: true,
     sandbox_diagnostics_enabled: true,
+    pit_layer_readiness: [
+      {
+        layer_id: 'l1_market_data',
+        title_cn: 'L1 基础行情',
+        status: 'READY',
+        summary: '价格回放、样本池与复权链路均已通过。',
+        pit_alignment: '支持价格型因子回放与 10Y 诊断窗口。',
+        blockers: [],
+        available_at_health: null,
+      },
+      {
+        layer_id: 'l2_fundamental_data',
+        title_cn: 'L2 财务截面',
+        status: 'READY',
+        summary: '财务字段与 available_at 对齐满足 PIT 计算要求。',
+        pit_alignment: '可支撑质量、估值与财务稳健性因子。',
+        blockers: [],
+        available_at_health: {
+          status: 'healthy',
+          sampled_row_count: 24,
+          missing_available_at_count: 0,
+        },
+      },
+      {
+        layer_id: 'l3_sentiment_data',
+        title_cn: 'L3 分析师与情绪',
+        status: 'DISABLED',
+        summary: '情绪与卖空链路尚未纳入本期 PIT 回放。',
+        pit_alignment: '仅保留逻辑映射，不开放正式诊断。',
+        blockers: ['一致预期与卖空时序尚未入库'],
+        available_at_health: null,
+      },
+      {
+        layer_id: 'l4_macro_derivatives',
+        title_cn: 'L4 宏观与衍生品',
+        status: 'CALIBRATING',
+        summary: '宏观暴露回归可计算，但校准仍在进行。',
+        pit_alignment: '宏观与衍生品因子先进入沙箱观察。',
+        blockers: [],
+        available_at_health: null,
+      },
+    ],
+    factor_diagnostic_readiness: [
+      {
+        group_id: 'price',
+        title_cn: '价格型',
+        status: 'VERIFIED',
+        factors: ['12-1 动量', '6m 动量', '252d 波动率', '规模'],
+        rationale_cn: '价格、样本池与复权序列齐备，可直接进入正式诊断。',
+        linked_snapshot_checks: ['price_replay_gate', 'universe_history_gate'],
+      },
+      {
+        group_id: 'quality_valuation',
+        title_cn: '质量/估值型',
+        status: 'VERIFIED',
+        factors: ['Accruals', 'F-Score', 'ROE', 'FCFY'],
+        rationale_cn: '财务字段与 available_at 对齐满足 PIT 门禁。',
+        linked_snapshot_checks: ['fundamental_publish_gate', 'fundamental_balance_check'],
+      },
+      {
+        group_id: 'sentiment_micro',
+        title_cn: '情绪/微观型',
+        status: 'DISABLED',
+        factors: ['分析师修正', '空头回补', '超额换手'],
+        rationale_cn: '本期未纳入正式 PIT 数据链路，维持停用。',
+        linked_snapshot_checks: ['consensus_sample_gate', 'short_volume_gate'],
+      },
+      {
+        group_id: 'macro_derivatives',
+        title_cn: '宏观/衍生品型',
+        status: 'SANDBOX',
+        factors: ['利率敏感度', '通胀 Beta', 'IV Skew'],
+        rationale_cn: '宏观序列可用，但回归校准与期权面板仍处于观察阶段。',
+        linked_snapshot_checks: ['rate_beta_calibration', 'iv_skew_feed'],
+      },
+    ],
+    pit_quality_alerts: [
+      {
+        code: 'RATE_BETA_CALIBRATING',
+        severity: 'LOW',
+        title_cn: '利率 Beta 校准中',
+        detail_cn: '宏观回归链路可运行，但滚动参数仍需校准。',
+        hard_blocking: false,
+        linked_factor_groups: ['macro_derivatives'],
+      },
+    ],
+    snapshot_layer_linkage: [
+      {
+        check_id: 'price_replay_gate',
+        check_title_cn: '价格回放可用',
+        source_layer: 'L1 基础行情',
+        target_factor_groups: ['价格型', '宏观/衍生品型'],
+        result_status: 'READY',
+      },
+      {
+        check_id: 'universe_history_gate',
+        check_title_cn: '样本池历史锚点通过',
+        source_layer: 'L1 基础行情',
+        target_factor_groups: ['价格型', '宏观/衍生品型'],
+        result_status: 'READY',
+      },
+      {
+        check_id: 'fundamental_publish_gate',
+        check_title_cn: '发布日与 available_at 对齐',
+        source_layer: 'L2 财务截面',
+        target_factor_groups: ['质量/估值型'],
+        result_status: 'READY',
+      },
+      {
+        check_id: 'fundamental_balance_check',
+        check_title_cn: '财报恒等式检查',
+        source_layer: 'L2 财务截面',
+        target_factor_groups: ['质量/估值型'],
+        result_status: 'READY',
+      },
+      {
+        check_id: 'consensus_sample_gate',
+        check_title_cn: '一致预期样本门槛',
+        source_layer: 'L3 分析师与情绪',
+        target_factor_groups: ['情绪/微观型'],
+        result_status: 'DISABLED',
+      },
+      {
+        check_id: 'rate_beta_calibration',
+        check_title_cn: '利率 Beta 校准',
+        source_layer: 'L4 宏观与衍生品',
+        target_factor_groups: ['宏观/衍生品型'],
+        result_status: 'CALIBRATING',
+      },
+    ],
     diagnostic_windows: {
       sandbox: {
         mode: 'SANDBOX',
@@ -588,8 +844,9 @@ function createFactorDiagnosticSummary(factorId: string): ApiFactorListItem['lat
       financing_cost_bps: 32,
     },
     stress_scenarios: [
-      { name: '2008 金融危机代理补测', data_kind: '代理数据', status: '需要复核', rank_ic: -0.08 },
-      { name: '2020 成长股牛市', data_kind: '真实 PIT 样本', status: '观察', rank_ic: 0.02 },
+      { id: 'dotcom-crisis-2000', name: '2000 互联网危机', start_date: '2000-03-01', end_date: '2002-10-31', data_kind: '历史压力场景/可代理', coverage_source: 'historical_or_proxy', blocks_factor_admission: false, status: '需要复核', rank_ic: -0.06 },
+      { id: 'gfc-2008', name: '2008 金融危机', start_date: '2008-09-01', end_date: '2009-03-31', data_kind: '历史压力场景/可代理', coverage_source: 'historical_or_proxy', blocks_factor_admission: false, status: '需要复核', rank_ic: -0.08 },
+      { id: 'bear-market-2022', name: '2022 熊市/加息冲击', start_date: '2022-01-03', end_date: '2022-10-14', data_kind: '真实 PIT 样本', coverage_source: 'pit_price_window', blocks_factor_admission: false, status: '观察', rank_ic: 0.02 },
     ],
     risk_flags: ['市场风格切换时需关注动量崩溃。'],
     compliance_trail: {
@@ -823,7 +1080,7 @@ function createFactorGovernanceOverview(items = createFactorListItems()): ApiFac
   ].filter((item, index, array) => item && array.indexOf(item) === index);
   return {
     as_of: nowIso(),
-    queue_count: 6,
+    queue_count: 7,
     actions: [
       {
         id: 'gq-deprecate-demo',
@@ -887,6 +1144,26 @@ function createFactorGovernanceOverview(items = createFactorListItems()): ApiFac
         severity: 'info',
       },
       {
+        id: 'gq-optimize-downside-demo',
+        kind: 'FACTOR_OPTIMIZATION',
+        command: 'PUBLISH_OPTIMIZED_FACTOR',
+        label: '因子优化',
+        title: '下行波动率代理（252日） 生成反向因子待入库',
+        detail: '分组收益连续倒挂，已生成反向下行波动率代理并再次诊断为 Grade B，等待确认入库。',
+        factor_ids: ['s_vol_downside_252d_rank'],
+        affected_factor_ids: ['s_vol_downside_252d_rank'],
+        severity: 'info',
+        optimized_factor: {
+          id: 'm_vol_downsiderev_252d_rank',
+          name: '反向下行波动率代理（252日）',
+          expression: 'DownsideStd(Return(Close, 1), 252)',
+          direction: 'HIGH_IS_BETTER',
+          grade: 'B',
+          confirmable: true,
+          diagnostic_summary: { rank_ic: 0.024, ir: 0.82, coverage: 96.4 },
+        },
+      },
+      {
         id: 'gq-model-demo',
         kind: 'FACTOR_MODEL_SUGGESTION',
         label: '策略创建建议',
@@ -911,7 +1188,7 @@ function createFactorGovernanceOverview(items = createFactorListItems()): ApiFac
         },
       },
     ],
-    summary: { deprecate_count: 1, prune_count: 1, review_count: 1, decayed_count: 1, crowded_count: 1, suggestion_count: 1 },
+    summary: { deprecate_count: 1, prune_count: 1, review_count: 1, decayed_count: 1, crowded_count: 1, suggestion_count: 1, optimization_count: 1 },
   };
 }
 
@@ -1796,6 +2073,8 @@ export const demoApi: DemoApi = {
         blocked_data_count: items.filter((item) => item.diagnostic_status === 'BLOCKED_DATA').length,
         pit_status: 'READY',
         governance_queue_count: createFactorGovernanceOverview(items).queue_count,
+        strategy_usage_factor_count: 3,
+        strategy_usage_factor_ids: ['s_mom_12m1m_rank', 's_val_ep_ltm_raw', 's_vol_252d_rank'],
       },
     });
   },
@@ -1810,6 +2089,36 @@ export const demoApi: DemoApi = {
     const factorIds = Array.from(
       new Set([...(payload.factor_ids ?? []), payload.factor_id ?? ''].map(String).filter((item) => item.length > 0)),
     );
+    if (command === 'PUBLISH_OPTIMIZED_FACTOR') {
+      const created = createFactorListItems().find((item) => item.id === 's_vol_downside_252d_rank');
+      const createdFactor = created
+        ? {
+            ...created,
+            id: 'm_vol_downsiderev_252d_rank',
+            name: '反向下行波动率代理（252日）',
+            source: 'MANUAL' as const,
+            lifecycle_status: 'VERIFIED' as const,
+            diagnostic_status: 'COMPLETED' as const,
+            direction: 'HIGH_IS_BETTER' as const,
+            expression: 'DownsideStd(Return(Close, 1), 252)',
+            tags: ['manual', 'governance_optimized', 'reverse_factor'],
+          }
+        : null;
+      return clone({
+        status: 'EXECUTED',
+        action_id: actionId,
+        command,
+        affected_factor_ids: factorIds,
+        keep_factor_id: null,
+        offline_at: offlineAt,
+        executed_at: offlineAt,
+        reason: payload.reason,
+        created_factor_id: createdFactor?.id,
+        created_factor: createdFactor ?? undefined,
+        items: createdFactor ? [createdFactor] : [],
+        governance_overview: createFactorGovernanceOverview(),
+      });
+    }
     const items = createFactorListItems()
       .filter((item) => factorIds.includes(item.id))
       .map((item) => ({

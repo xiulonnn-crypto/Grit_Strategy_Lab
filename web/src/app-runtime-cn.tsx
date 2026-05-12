@@ -31,7 +31,7 @@ import { CreationTemplatePage } from './pages/creation-template-page';
 
 type ApiClient = ReturnType<typeof useApiClient>;
 type FactorModelBuilderRoute = Extract<AppRoute, { kind: 'factor-model-builder' }>;
-const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 80;
 const ROUTE_CHUNK_RELOAD_PREFIX = 'gsl:route-chunk-reload';
 const FACTOR_CATEGORY_LABELS: Record<string, string> = {
   mom: '动量',

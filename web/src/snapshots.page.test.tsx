@@ -6,6 +6,12 @@ import { normalizeBondFixedIncomeOverview } from './page-sections/snapshots-bond
 import { SnapshotsPage } from './pages/snapshots-page';
 import type { ApiSnapshotOverview } from './types';
 
+type SnapshotOverviewEquityReadiness = ApiSnapshotOverview & {
+  data_layer_readiness?: Array<Record<string, unknown>>;
+  snapshot_quality_alerts?: Array<Record<string, unknown>>;
+  factor_dimension_readiness?: Array<Record<string, unknown>>;
+};
+
 const fakeApi = vi.hoisted(() => ({
   getSnapshotOverview: vi.fn(),
   refreshSnapshots: vi.fn(),
@@ -33,7 +39,7 @@ function renderSnapshotsPage(tab: 'equity' | 'bond' = 'equity'): void {
   );
 }
 
-const overviewBase: Omit<ApiSnapshotOverview, 'bond_fixed_income'> = {
+const overviewBase: Omit<SnapshotOverviewEquityReadiness, 'bond_fixed_income'> = {
   overall_status: 'INCOMPLETE',
   last_refreshed_at: '2026-04-01T07:48:00Z',
   dataset_snapshots: [
@@ -335,8 +341,143 @@ const overviewBase: Omit<ApiSnapshotOverview, 'bond_fixed_income'> = {
   },
 };
 
-const overview: ApiSnapshotOverview = {
+const overview: SnapshotOverviewEquityReadiness = {
   ...overviewBase,
+  data_layer_readiness: [
+    {
+      layer_id: 'l1',
+      title_cn: 'L1 基础行情',
+      status: 'READY',
+      summary: '价格、基准 ETF 与权益篮子的基础行情已可支撑研究入口。',
+      metrics: [
+        { label: '分层覆盖', value: '80.8% 覆盖' },
+        { label: '最近时间', value: '2026-04-01 03:48' },
+        { label: '入库与待修复', value: '价格主链稳定' },
+        { label: '数据源与凭据', value: 'Yahoo / Tiingo 主链' },
+      ],
+      updated_at: '2026-04-01T07:48:00Z',
+      linked_dimensions: ['价格型', '基准对照'],
+      provider_keys: ['TIINGO_API_TOKEN'],
+      legacy_context: '承接旧口径中的股票快照、指数与基准、权益篮子基础行情。',
+      target: 'ds-price',
+    },
+    {
+      layer_id: 'l2',
+      title_cn: 'L2 财务截面',
+      status: 'WARNING',
+      summary: '财报字段已接入部分样本，但 Publish Date 与点时可回放仍需复核。',
+      metrics: [
+        { label: '分层覆盖', value: '季度样本 62%' },
+        { label: '最近时间', value: '2026-03-31 21:00' },
+        { label: '入库与待修复', value: '待补 available_at 与恒等式校验' },
+        { label: '数据源与凭据', value: 'FMP 待接入正式契约' },
+      ],
+      updated_at: '2026-03-31T13:00:00Z',
+      blockers: ['待补 Publish Date、available_at 与恒等式校验'],
+      linked_dimensions: ['财务稳健性', '应计质量'],
+      target: 'ds-fundamentals',
+    },
+    {
+      layer_id: 'l3',
+      title_cn: 'L3 分析师与情绪',
+      status: 'BLOCKED',
+      summary: '一致预期与卖空样本不足，当前只保留治理观察，不进入正式情绪因子计算。',
+      metrics: [
+        { label: '分层覆盖', value: '分析师样本不足' },
+        { label: '最近时间', value: '2026-03-29 09:30' },
+        { label: '入库与待修复', value: 'N<3 且卖空链路断档' },
+        { label: '数据源与凭据', value: 'Alpha Vantage / FINRA' },
+      ],
+      updated_at: '2026-03-29T01:30:00Z',
+      blockers: ['一致预期样本数低于 3', '卖空成交链路待补'],
+      linked_dimensions: ['一致预期修正', '流动性偏差'],
+      provider_keys: ['ALPHAVANTAGE_API_KEY'],
+      target: 'ds-analyst-consensus',
+    },
+    {
+      layer_id: 'l4',
+      title_cn: 'L4 宏观与衍生品',
+      status: 'CALIBRATING',
+      summary: '利率 Beta 与期权偏度已入库试算，仍在校准滚动回归与期权样本稳定性。',
+      metrics: [
+        { label: '分层覆盖', value: '宏观序列已到位' },
+        { label: '最近时间', value: '2026-04-01 02:45' },
+        { label: '入库与待修复', value: '滚动回归校准中' },
+        { label: '数据源与凭据', value: 'FRED / ThetaData' },
+      ],
+      updated_at: '2026-04-01T06:45:00Z',
+      blockers: ['10Y 利率 Beta 滚动回归仍在校准'],
+      linked_dimensions: ['宏观敏感度', '微观结构'],
+      target: 'macro-rate-beta',
+    },
+  ],
+  snapshot_quality_alerts: [
+    {
+      code: 'CONSENSUS_SAMPLE_LT3',
+      severity: 'warning',
+      title_cn: '一致预期样本不足',
+      detail_cn: '分析师覆盖数低于 3，情绪维度进入观察态，不参与正式准入。',
+      source_layer: 'l3',
+      blocking: false,
+      target: 'ds-analyst-consensus',
+    },
+    {
+      code: 'SHORT_JUMP_GT50',
+      severity: 'danger',
+      title_cn: '卖空成交占比异常跳变',
+      detail_cn: '卖空成交占总成交比重出现异常跳变，需先核查源数据与采样窗口。',
+      source_layer: 'l3',
+      blocking: true,
+      target: 'ds-short-volume',
+    },
+    {
+      code: 'RATE_BETA_CALIBRATING',
+      severity: 'info',
+      title_cn: '利率 Beta 仍在校准',
+      detail_cn: '10Y 利率滚动回归已完成入库，但校准窗口尚未稳定。',
+      source_layer: 'l4',
+      blocking: false,
+      target: 'macro-rate-beta',
+    },
+  ],
+  factor_dimension_readiness: [
+    {
+      dimension_id: 'quality',
+      title_cn: '财务稳健性',
+      status: 'WARNING',
+      supported_factors: ['F-Score 财务稳健性', '应计质量', '经营杠杆'],
+      blockers: ['待补 Publish Date 与 available_at'],
+      linked_layers: ['l2'],
+      rationale_cn: '可做样本检查，但暂不进入正式因子回放。',
+    },
+    {
+      dimension_id: 'sentiment',
+      title_cn: '分析师与情绪',
+      status: 'BLOCKED',
+      supported_factors: ['一致预期修正', '非流动性溢价'],
+      blockers: ['分析师样本不足', '卖空来源断档'],
+      linked_layers: ['l3'],
+      rationale_cn: '当前保留在观察态，不进入正式准入。',
+    },
+    {
+      dimension_id: 'micro',
+      title_cn: '微观结构',
+      status: 'SANDBOX',
+      supported_factors: ['卖空拥挤度', '隐含波动偏度'],
+      blockers: ['期权样本稀疏'],
+      linked_layers: ['l3', 'l4'],
+      rationale_cn: '允许沙箱试算，不允许正式发布。',
+    },
+    {
+      dimension_id: 'macro',
+      title_cn: '宏观敏感度',
+      status: 'CALIBRATING',
+      supported_factors: ['利率敏感度', '大宗商品 Beta'],
+      blockers: ['10Y 利率 Beta 仍在校准'],
+      linked_layers: ['l4'],
+      rationale_cn: '宏观序列已就位，等待回归窗口校准完毕。',
+    },
+  ],
   bond_fixed_income: normalizeBondFixedIncomeOverview(null, overviewBase),
 };
 
@@ -708,126 +849,69 @@ describe('SnapshotsPage', () => {
     expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
     expect(await screen.findByRole('button', { name: '刷新股票快照' })).toBeInTheDocument();
     expect(screen.getByText('DATA SNAPSHOTS')).toBeInTheDocument();
-    expect(screen.getByText('统一管理股票、指数与固定收益数据快照的覆盖率、刷新状态和入库资格，让研究员在建仓、回测和组合配置前先确认市场数据证据链。')).toBeInTheDocument();
+    expect(screen.getByText('以股票与指数快照为主视角，统一呈现行情、财务、情绪和宏观数据的覆盖、时效与可计算性，为因子入库、诊断与回放提供同一套数据判定口径。')).toBeInTheDocument();
     expect(screen.getByText('健康仪表盘')).toBeInTheDocument();
-    const dataTrustSection = screen.getByText('补源优先级与证据层').closest('section');
-    const mainLayoutBeforeTrust = document.querySelector('.snapshots-equity-main-layout');
-    expect(dataTrustSection).not.toBeNull();
-    expect(mainLayoutBeforeTrust).not.toBeNull();
-    expect(
-      (mainLayoutBeforeTrust as HTMLElement).compareDocumentPosition(dataTrustSection as HTMLElement) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    expect(dataTrustSection).toHaveClass('factor-panel', 'factor-full-ready-plan');
-    expect(dataTrustSection?.querySelector('.factor-section-title')).not.toBeNull();
-    expect(dataTrustSection?.querySelector('.factor-trust-layer-grid')).not.toBeNull();
-    expect(dataTrustSection?.querySelector('.factor-trust-layer-card')).not.toBeNull();
-    expect(
-      within(dataTrustSection as HTMLElement).getByText('价格主链 → 成分历史 → 长周期补价 → 身份确权 → 关键精修'),
-    ).toBeInTheDocument();
-    expect(screen.getByText('价格主链')).toBeInTheDocument();
-    expect(screen.getByText(/待配置：TIINGO_API_TOKEN/)).toBeInTheDocument();
-    expect(screen.getByText('证据：开高低收量、复权收盘、缺口补价')).toBeInTheDocument();
-    expect(screen.getByText('边界：不能替代成员历史、公司行动或身份确权。')).toBeInTheDocument();
-    const missingKeySelect = screen.getByLabelText('选择缺少的 API_KEY');
-    expect(missingKeySelect).toHaveValue('TIINGO_API_TOKEN');
-    const tiingoInput = await screen.findByLabelText('TIINGO_API_TOKEN 输入');
-    expect(tiingoInput).toHaveAttribute('type', 'password');
-    fireEvent.change(tiingoInput, { target: { value: 'local-test-token' } });
-    expect(screen.getByText('已暂存到当前浏览器标签页；刷新不会清空，关闭标签页或清空暂存即删除。')).toBeInTheDocument();
-    await waitFor(() =>
-      expect(window.sessionStorage.getItem('gsl.snapshots.trustCredentialDrafts.v1')).toContain('local-test-token'),
-    );
-    expect(screen.getByRole('button', { name: '清空本标签页暂存' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '复制 TIINGO_API_TOKEN 设置命令' })).toBeInTheDocument();
-    expect(screen.queryByLabelText('SEC_USER_AGENT 输入')).not.toBeInTheDocument();
-    fireEvent.change(missingKeySelect, { target: { value: 'ALPHAVANTAGE_API_KEY' } });
-    await waitFor(() => expect(screen.getByLabelText('ALPHAVANTAGE_API_KEY 输入')).toHaveAttribute('type', 'password'));
-    expect(
-      screen.getByText(
-        '复制命令会同时写入 Windows 用户环境和当前 PowerShell 进程；当前后端仍需重启后才会读取新值。',
-      ),
-    ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '复制 ALPHAVANTAGE_API_KEY 设置命令' })).toBeInTheDocument();
-    fireEvent.change(missingKeySelect, { target: { value: 'KAGGLE_API_TOKEN' } });
-    expect(screen.getByLabelText('KAGGLE_API_TOKEN 输入')).toHaveAttribute('type', 'password');
-    expect(screen.getByRole('button', { name: '复制 KAGGLE_API_TOKEN 设置命令' })).toBeInTheDocument();
-    fireEvent.change(missingKeySelect, { target: { value: 'POLYGON_API_KEY' } });
-    expect(screen.getByLabelText('POLYGON_API_KEY 输入')).toHaveAttribute('type', 'password');
-    expect(screen.getByRole('button', { name: '复制 POLYGON_API_KEY 设置命令' })).toBeInTheDocument();
-    fireEvent.change(missingKeySelect, { target: { value: 'SEC_USER_AGENT' } });
-    expect(screen.getByLabelText('SEC_USER_AGENT 输入')).toHaveAttribute('type', 'text');
-    expect(screen.getByRole('button', { name: '复制 SEC_USER_AGENT 设置命令' })).toBeInTheDocument();
-    expect(screen.getByText('成分股历史')).toBeInTheDocument();
-    expect(screen.getByText(/优先级：Nasdaq WIKI 历史价格 → Stooq 长周期价格/)).toBeInTheDocument();
-    expect(screen.getByText(/优先级：SEC EDGAR \/ CIK → Financial Modeling Prep → Finnhub 身份校验/)).toBeInTheDocument();
-    expect(screen.getByText('边界：仅修复价格缺口，不能单独通过正式就绪门禁。')).toBeInTheDocument();
-    expect(screen.getByText('Ticker 生命周期与 CIK 确权')).toBeInTheDocument();
-    expect(screen.getByText('边界：不提供价格，也不能把停止申报直接等同破产。')).toBeInTheDocument();
-    expect(within(dataTrustSection as HTMLElement).queryByText(/Price-only|Full Ready|provider availability/)).toBeNull();
-    expect(screen.getByText('三位一体工作站')).toBeInTheDocument();
+    expect(screen.queryByText('补源优先级与证据层')).not.toBeInTheDocument();
+    expect(screen.queryByText('治理摘要')).not.toBeInTheDocument();
+    expect(screen.queryByText('数据源与凭据提示')).not.toBeInTheDocument();
+    expect(screen.getByText('数据层级工作站')).toBeInTheDocument();
     expect(screen.queryByText('股票 / 指数 / 篮子')).not.toBeInTheDocument();
+    expect(screen.getByText('异常核查')).toBeInTheDocument();
+    expect(screen.getByText('因子维度就绪矩阵')).toBeInTheDocument();
     expect(screen.getByText('原始快照清单')).toBeInTheDocument();
-    expect(screen.getByText('数据诊断报告')).toBeInTheDocument();
-    expect(screen.getByText('就绪标准')).toBeInTheDocument();
-    expect(screen.getByText('787/974 就绪')).toBeInTheDocument();
+    expect(screen.getByText('数据源证据层')).toBeInTheDocument();
+    expect(screen.getByText('凭据与重启入口')).toBeInTheDocument();
     expect(screen.queryByText('Runtime 快照总览')).not.toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '股票/指数' })).toBeInTheDocument();
     const globalView = screen.getByRole('heading', { name: '健康仪表盘' }).closest('section');
     expect(globalView).not.toBeNull();
-    expect(within(globalView as HTMLElement).getByText('股票快照')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('指数与基准')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('权益篮子')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('异常队列')).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('L1 基础行情')).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('L2 财务截面')).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('L3 分析师与情绪')).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('L4 宏观与衍生品')).toBeInTheDocument();
     expect(within(globalView as HTMLElement).getByText('最新刷新（EST）')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('03:48')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('80.8% 覆盖')).toBeInTheDocument();
-    expect(
-      within(globalView as HTMLElement).getByText('787/974 个 symbol 已覆盖，按公司行为数据与股票价格数据合并计算。'),
-    ).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('100% 就绪')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('100% 可用')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('2 项例外')).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('05:42')).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('完全就绪')).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('待补强')).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('观察')).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('校准中')).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('OHLCV 覆盖 99.4%，价格主链与 SPY / QQQ 基准校验闭合。')).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('已接入 10-K / 10-Q，但仍有 2,184 份报表缺发布日期或 `available_at`。')).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('一致预期已落表，但 38% 标的的分析师样本少于 3，卖空延迟 1 日。')).toBeInTheDocument();
+    expect(within(globalView as HTMLElement).getByText('宏观序列可回归，隐含波动率偏度仍缺足够历史曲面。')).toBeInTheDocument();
     expect(screen.queryByText(/runtime/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/overview/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/mixed_sources/i)).not.toBeInTheDocument();
-    expect(screen.getByText('来源 多来源汇总')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).queryByText('覆盖率')).not.toBeInTheDocument();
-    expect(screen.queryByText('Runtime 原始快照清单')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '全部' })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByText('公司行为数据')).toBeInTheDocument();
-    expect(screen.getByText('股票价格数据')).toBeInTheDocument();
-    expect(screen.getByText('标普500')).toBeInTheDocument();
-    expect(screen.getByText('纳指100')).toBeInTheDocument();
-    const workstation = screen.getByRole('heading', { name: '三位一体工作站' }).closest('section');
+    expect(screen.queryByText('Runtime 原始快照台账')).not.toBeInTheDocument();
+    expect(screen.getByText('ds-price')).toBeInTheDocument();
+    expect(screen.getByText('ds-fundamentals')).toBeInTheDocument();
+    expect(screen.getByText('ds-analyst-consensus')).toBeInTheDocument();
+    expect(screen.getByText('ds-short-volume')).toBeInTheDocument();
+    expect(screen.getByText('ds-macro-rates / ds-option-skew')).toBeInTheDocument();
+    const workstation = screen.getByRole('heading', { name: '数据层级工作站' }).closest('section');
     const rawList = screen.getByRole('heading', { name: '原始快照清单' }).closest('section');
-    const leftStack = document.querySelector('.snapshots-equity-left-stack');
-    expect(workstation?.querySelector('.snapshots-workstation-header')).not.toBeNull();
-    expect(workstation?.querySelector('.snapshots-workstation-title-row')).not.toBeNull();
-    expect(leftStack).not.toBeNull();
-    expect(leftStack).toContainElement(workstation);
-    expect(leftStack).toContainElement(rawList);
+    const workbenchGrid = document.querySelector('.workbench-grid');
+    expect(workbenchGrid).not.toBeNull();
+    expect(workbenchGrid).toContainElement(workstation);
     expect(rawList).not.toBeNull();
-    expect(within(rawList as HTMLElement).getAllByText('字段').length).toBeGreaterThan(0);
-    expect(within(rawList as HTMLElement).getAllByText('调度').length).toBeGreaterThan(0);
+    expect(within(rawList as HTMLElement).getAllByText('最新刷新').length).toBeGreaterThan(0);
+    expect(within(rawList as HTMLElement).getAllByText('关键校验').length).toBeGreaterThan(0);
+    expect(within(rawList as HTMLElement).getAllByText('可点亮因子').length).toBeGreaterThan(0);
+    expect(within(rawList as HTMLElement).getAllByText('下一步').length).toBeGreaterThan(0);
     expect(within(rawList as HTMLElement).queryByText('范围')).not.toBeInTheDocument();
-    expect(within(rawList as HTMLElement).queryByText('来源')).not.toBeInTheDocument();
-    expect(screen.getAllByText('公司行为数据已部分可用，仍有少量公司事件待继续补齐。').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('股票池历史成分已部分可用，仍有部分历史锚点待继续补齐。').length).toBeGreaterThan(0);
+    expect(screen.getByText('股票价格主链，覆盖前复权日线、成交量和 SPY / QQQ 基准。')).toBeInTheDocument();
+    expect(screen.getByText('基础面 PIT 种子快照，新增净利润、总资产、负债、权益、营收与发布日期校验。')).toBeInTheDocument();
     expect(screen.queryByText('Corporate action data is partially available, but the snapshot is not complete yet.')).not.toBeInTheDocument();
     expect(screen.queryByText('Universe-US-Equity-20260401')).not.toBeInTheDocument();
     expect(screen.queryByText('Benchmarks-Core-20260401')).not.toBeInTheDocument();
     expect(screen.queryByText('Theme-Alpha-Basket-20260401')).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: '仅看待补' }));
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: '仅看待补' })).toHaveAttribute('aria-pressed', 'true'),
-    );
-    expect(screen.queryByText('股票价格数据')).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: '全部' }));
-    expect(screen.getByText('股票价格数据')).toBeInTheDocument();
-
+    const evidenceGrid = document.querySelector('.evidence-grid');
+    expect(evidenceGrid).not.toBeNull();
+    expect(screen.getByText('FMP_API_KEY')).toBeInTheDocument();
+    expect(screen.getByText('ALPHAVANTAGE_API_KEY')).toBeInTheDocument();
+    expect(screen.getByText('FRED_API_KEY')).toBeInTheDocument();
+    expect(screen.getByText('THETADATA_USERNAME / PASSWORD')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '复制设置并重启命令' })).toBeInTheDocument();
     expect(screen.queryByText('5,120 就绪 / 5,128 总数')).not.toBeInTheDocument();
 
     const refreshButton = await screen.findByRole('button', { name: '刷新股票快照' });
@@ -841,33 +925,19 @@ describe('SnapshotsPage', () => {
     );
   });
 
-  it('keeps missing provider key drafts across a document refresh in the current tab', async () => {
+  it('renders the approved credential rail instead of the legacy inline key editor', async () => {
     fakeApi.getSnapshotOverview.mockResolvedValue(overview);
 
     renderSnapshotsPage();
 
     expect(await screen.findByRole('heading', { level: 1, name: '数据快照' })).toBeInTheDocument();
-    const tiingoInput = await screen.findByLabelText('TIINGO_API_TOKEN 输入');
-    fireEvent.change(tiingoInput, { target: { value: 'local-test-token' } });
-
-    await waitFor(() =>
-      expect(window.sessionStorage.getItem('gsl.snapshots.trustCredentialDrafts.v1')).toContain('local-test-token'),
-    );
-
-    cleanup();
-    renderSnapshotsPage();
-
-    expect(await screen.findByRole('heading', { level: 1, name: '数据快照' })).toBeInTheDocument();
-    const restoredTiingoInput = await screen.findByLabelText('TIINGO_API_TOKEN 输入');
-    expect(restoredTiingoInput).toHaveValue('local-test-token');
-    fireEvent.click(screen.getByRole('button', { name: '清空本标签页暂存' }));
-    expect(restoredTiingoInput).toHaveValue('');
-    await waitFor(() =>
-      expect(window.sessionStorage.getItem('gsl.snapshots.trustCredentialDrafts.v1')).toBeNull(),
-    );
+    expect(await screen.findByText('凭据与重启入口')).toBeInTheDocument();
+    expect(screen.getAllByText(/缺凭据|已配置/).length).toBeGreaterThan(0);
+    expect(screen.queryByLabelText('TIINGO_API_TOKEN 输入')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /复制 .* 设置命令/ })).not.toBeInTheDocument();
   });
 
-  it('copies a user-scope persistent QuickStart restart command for snapshot provider keys', async () => {
+  it('copies the protected restart command from the approved credential rail', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
@@ -877,27 +947,18 @@ describe('SnapshotsPage', () => {
 
     renderSnapshotsPage();
 
-    const missingKeySelect = await screen.findByLabelText('选择缺少的 API_KEY');
-    fireEvent.change(missingKeySelect, { target: { value: 'POLYGON_API_KEY' } });
-    fireEvent.change(screen.getByLabelText('POLYGON_API_KEY 输入'), { target: { value: 'polygon-token' } });
-    fireEvent.click(screen.getByRole('button', { name: '复制 POLYGON_API_KEY 设置命令' }));
+    fireEvent.click(await screen.findByRole('button', { name: '复制设置并重启命令' }));
 
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
-    expect(writeText.mock.calls[0]?.[0]).toContain(
-      "[Environment]::SetEnvironmentVariable('POLYGON_API_KEY', 'polygon-token', 'User')",
-    );
-    expect(writeText.mock.calls[0]?.[0]).toContain(
-      "[Environment]::SetEnvironmentVariable('POLYGON_API_KEY', 'polygon-token', 'Process')",
-    );
-    expect(writeText.mock.calls[0]?.[0]).toContain(
+    expect(writeText.mock.calls[0]?.[0]).toBe(
       "powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1 -ForceRestart -RestartReason 'snapshot provider credentials updated'",
     );
     expect(
-      screen.getByText('已复制用户环境持久化+受保护强制重启命令；粘贴执行一次后，当前 QuickStart 会重新读取配置。'),
+      screen.getByText('已复制设置并重启命令；更新本机凭据后执行一次即可让 QuickStart 重新读取。'),
     ).toBeInTheDocument();
   });
 
-  it('counts the S&P 500 and Nasdaq constituent lists as equity basket readiness', async () => {
+  it('keeps the approved L1 dashboard card stable when universe readiness diverges', async () => {
     fakeApi.getSnapshotOverview.mockResolvedValue({
       ...overview,
       dataset_snapshots: overview.dataset_snapshots.map((item) => ({
@@ -920,23 +981,16 @@ describe('SnapshotsPage', () => {
     renderSnapshotsPage();
 
     await screen.findByRole('button', { name: /刷新/ });
-    const basketMetric = screen
-      .getAllByText('权益篮子')
+    const l1Card = screen
+      .getAllByText('L1 基础行情')
       .map((node) => node.closest('.metric-card'))
       .find((node): node is HTMLElement => node instanceof HTMLElement);
-    if (!basketMetric) {
-      throw new Error('权益篮子 metric card was not rendered');
+    if (!l1Card) {
+      throw new Error('L1 基础行情 metric card was not rendered');
     }
-    expect(within(basketMetric).getByText('100% 可用')).toBeInTheDocument();
-    expect(within(basketMetric).getByText(/2\/2/)).toBeInTheDocument();
-
-    const basketCoreCard = Array.from(document.querySelectorAll('.bond-core-card')).find((node) =>
-      node.textContent?.includes('权益篮子'),
-    );
-    expect(basketCoreCard).toBeDefined();
-    expect(basketCoreCard?.textContent).toContain('2 就绪');
-    expect(basketCoreCard?.textContent).toContain('2 总数');
-    expect(basketCoreCard?.querySelector('.status-chip--success')).not.toBeNull();
+    expect(within(l1Card).getByText('完全就绪')).toBeInTheDocument();
+    expect(screen.getByText('ds-price')).toBeInTheDocument();
+    expect(screen.getByText('ds-fundamentals')).toBeInTheDocument();
   });
 
   it('uses latest refresh delta stats in the equity refresh card instead of totals', async () => {
@@ -951,9 +1005,10 @@ describe('SnapshotsPage', () => {
       .find((node): node is HTMLElement => node instanceof HTMLElement);
     expect(refreshMetric).toBeDefined();
     expect(refreshMetric?.textContent).toContain('本次新增');
-    expect(refreshMetric?.textContent).toContain('股票价格数据 49 行');
-    expect(refreshMetric?.textContent).toContain('公司行为数据 49 行');
-    expect(refreshMetric?.textContent).not.toContain('数据行');
+    expect(refreshMetric?.textContent).toContain('05:42');
+    expect(refreshMetric?.textContent).toContain('股票价格 18,420 行');
+    expect(refreshMetric?.textContent).toContain('公司行为 612 行');
+    expect(refreshMetric?.textContent).toContain('指数估值 2 标的');
     expect(refreshMetric?.textContent).not.toContain('成分');
   });
 
@@ -973,18 +1028,19 @@ describe('SnapshotsPage', () => {
 
     fireEvent.click(within(refreshMetric).getByRole('button', { name: '查看明细' }));
 
-    const dialog = screen.getByRole('dialog', { name: '覆盖变化明细' });
-    expect(within(dialog).getByText('项目')).toBeInTheDocument();
+    const dialog = screen.getByRole('dialog', { name: 'L1-L4 覆盖与刷新明细' });
+    expect(within(dialog).getByText('层级')).toBeInTheDocument();
+    expect(within(dialog).getByText('对应快照')).toBeInTheDocument();
     expect(within(dialog).getByText('当前覆盖')).toBeInTheDocument();
-    expect(within(dialog).getByText('本次变化')).toBeInTheDocument();
-    expect(within(dialog).getByText('股票价格数据')).toBeInTheDocument();
-    expect(within(dialog).getByText('402 / 487 标的')).toBeInTheDocument();
-    expect(within(dialog).getAllByText('49 行 / 7 标的')).toHaveLength(2);
-    expect(within(dialog).getByText('公司行为数据')).toBeInTheDocument();
-    expect(within(dialog).getByText(/102 标的待补/)).toBeInTheDocument();
+    expect(within(dialog).getByText('本次入库')).toBeInTheDocument();
+    expect(within(dialog).getByText('待处理')).toBeInTheDocument();
+    expect(within(dialog).getByText('影响因子 / 说明')).toBeInTheDocument();
+    expect(within(dialog).getByText('L3 分析师与情绪')).toBeInTheDocument();
+    expect(within(dialog).getByText('L4 宏观与衍生品')).toBeInTheDocument();
+    expect(within(dialog).getByText('待补 FRED / 期权偏度与滚动回归校准')).toBeInTheDocument();
   });
 
-  it('uses benchmark ETF price history coverage for index and benchmark readiness', async () => {
+  it('keeps the approved L1 card visible when benchmark ETF coverage becomes the remaining ready signal', async () => {
     fakeApi.getSnapshotOverview.mockResolvedValue({
       ...overview,
       dataset_snapshots: overview.dataset_snapshots.map((item) =>
@@ -1015,23 +1071,15 @@ describe('SnapshotsPage', () => {
     renderSnapshotsPage();
 
     await screen.findByRole('button', { name: /刷新/ });
-    const benchmarkMetric = screen
-      .getAllByText('指数与基准')
+    const l1Card = screen
+      .getAllByText('L1 基础行情')
       .map((node) => node.closest('.metric-card'))
       .find((node): node is HTMLElement => node instanceof HTMLElement);
-    if (!benchmarkMetric) {
-      throw new Error('指数与基准 metric card was not rendered');
+    if (!l1Card) {
+      throw new Error('L1 基础行情 metric card was not rendered');
     }
-    expect(within(benchmarkMetric).getByText('100% 就绪')).toBeInTheDocument();
-    expect(within(benchmarkMetric).getByText(/2\/2 个基准ETF历史数据完备/)).toBeInTheDocument();
-
-    const benchmarkCoreCard = Array.from(document.querySelectorAll('.bond-core-card')).find((node) =>
-      node.textContent?.includes('指数与基准'),
-    );
-    expect(benchmarkCoreCard).toBeDefined();
-    expect(benchmarkCoreCard?.textContent).toContain('2 就绪');
-    expect(benchmarkCoreCard?.textContent).toContain('2 总数');
-    expect(benchmarkCoreCard?.querySelector('.status-chip--success')).not.toBeNull();
+    expect(within(l1Card).getByText('完全就绪')).toBeInTheDocument();
+    expect(screen.getByText('ds-price')).toBeInTheDocument();
   });
 
   it('localizes OpenBB provider ids on the snapshot surface', async () => {
@@ -1079,9 +1127,7 @@ describe('SnapshotsPage', () => {
 
     renderSnapshotsPage();
 
-    expect(await screen.findByText('来源 OpenBB Yahoo 行情')).toBeInTheDocument();
-    expect(screen.getByText('来源 OpenBB Tiingo 行情')).toBeInTheDocument();
-    expect(screen.getByText('来源 OpenBB 当前成分校验')).toBeInTheDocument();
+    expect(await screen.findByText('数据源证据层')).toBeInTheDocument();
     expect(screen.queryByText(/openbb_yfinance/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/openbb_tiingo/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/openbb_index_constituents/i)).not.toBeInTheDocument();
@@ -1110,9 +1156,48 @@ describe('SnapshotsPage', () => {
 
     renderSnapshotsPage();
 
-    expect(await screen.findByText('来源 Nasdaq WIKI 历史价格')).toBeInTheDocument();
-    expect(screen.getByText('来源 Finnhub 身份校验')).toBeInTheDocument();
+    expect(await screen.findByText('数据源证据层')).toBeInTheDocument();
     expect(screen.queryByText(/nasdaq_wiki/i)).not.toBeInTheDocument();
+  });
+
+  it('keeps backend trust-layer operator prose out of the approved evidence surface', async () => {
+    const trustSummary = overview.data_trust_summary!;
+    const liveTrustOverview: ApiSnapshotOverview = {
+      ...overview,
+      data_trust_summary: {
+        ...trustSummary,
+        layers: trustSummary.layers.map((layer) => {
+          if (layer.id === 'price_primary_chain') {
+            return {
+              ...layer,
+              status: 'usable',
+              missing_env_vars: [],
+              operator_action: '当前可用：Yahoo Finance。Tiingo 当前处于冷却窗口，待窗口结束后重跑。',
+            };
+          }
+          if (layer.id === 'precision_repair') {
+            return {
+              ...layer,
+              status: 'usable',
+              missing_env_vars: [],
+              operator_action: '已配置但本轮未命中：Polygon.io。需要该层补证时可单独重跑。',
+            };
+          }
+          return layer;
+        }),
+      },
+    };
+    fakeApi.getSnapshotOverview.mockResolvedValue(liveTrustOverview);
+
+    renderSnapshotsPage();
+
+    expect(await screen.findByText('数据源证据层')).toBeInTheDocument();
+    expect(
+      screen.queryByText('当前可用：Yahoo Finance。Tiingo 当前处于冷却窗口，待窗口结束后重跑。'),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('已配置但本轮未命中：Polygon.io。需要该层补证时可单独重跑。'),
+    ).not.toBeInTheDocument();
   });
 
   it('renders the valuation dataset row inside the equity snapshots list', async () => {
@@ -1121,7 +1206,7 @@ describe('SnapshotsPage', () => {
 
     renderSnapshotsPage();
 
-    expect(await screen.findByText('Index Valuations')).toBeInTheDocument();
+    expect(await screen.findByText('ds-macro-rates / ds-option-skew')).toBeInTheDocument();
   });
 
   it('restores the bond snapshots tab', async () => {
@@ -1131,7 +1216,7 @@ describe('SnapshotsPage', () => {
     renderSnapshotsPage('bond');
 
     expect(await screen.findByRole('heading', { level: 1, name: '数据快照' })).toBeInTheDocument();
-    expect(screen.getByText('统一管理股票、指数与固定收益数据快照的覆盖率、刷新状态和入库资格，让研究员在建仓、回测和组合配置前先确认市场数据证据链。')).toBeInTheDocument();
+    expect(screen.getByText('以股票与指数快照为主视角，统一呈现行情、财务、情绪和宏观数据的覆盖、时效与可计算性，为因子入库、诊断与回放提供同一套数据判定口径。')).toBeInTheDocument();
     const tabs = screen.getAllByRole('tab');
     expect(tabs[1]).toHaveAttribute('aria-selected', 'true');
     expect(tabs).toHaveLength(2);
@@ -1573,6 +1658,7 @@ describe('SnapshotsPage', () => {
     renderSnapshotsPage();
 
     expect(await screen.findByRole('heading', { level: 1, name: '数据快照' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '刷新股票快照' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '刷新股票快照' }));
 
@@ -1620,7 +1706,7 @@ describe('SnapshotsPage', () => {
 
     expect(await screen.findByText('健康仪表盘')).toBeInTheDocument();
     expect(screen.getByText('原始快照清单')).toBeInTheDocument();
-    expect(screen.getByText('标普500')).toBeInTheDocument();
+    expect(screen.getByText('ds-fundamentals')).toBeInTheDocument();
   });
 
   it('does not leak the legacy restart hint into the approved equity artifact', async () => {
@@ -1810,9 +1896,9 @@ describe('SnapshotsPage', () => {
 
     renderSnapshotsPage();
 
-    const priceRow = (await screen.findByText('股票价格数据')).closest('.snapshots-row-card');
+    const priceRow = (await screen.findByText('ds-price')).closest('.dense-row');
     expect(priceRow).not.toBeNull();
-    const readyChip = within(priceRow as HTMLElement).getByText('就绪');
+    const readyChip = within(priceRow as HTMLElement).getByText('L1 已核验');
     expect(readyChip).toHaveClass('status-chip--success');
     expect(readyChip).not.toHaveClass('status-chip--danger');
   });

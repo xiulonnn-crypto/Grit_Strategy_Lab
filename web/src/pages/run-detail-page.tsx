@@ -28,7 +28,7 @@ import type {
 import './run-detail-page.css';
 
 const RUN_DETAIL_POLL_INTERVAL_MS = 2000;
-const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 80;
 const SAVE_CONFIRM_DIALOG = {
   eyebrow: '保存回测',
   title: '保存回测',

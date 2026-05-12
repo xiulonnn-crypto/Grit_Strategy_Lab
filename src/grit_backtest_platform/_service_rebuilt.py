@@ -15140,6 +15140,35 @@ class BacktestPlatformService:
             "estimated_completed_at": payload.get("estimated_completed_at"),
         }
 
+    def _compact_optimization_candidate_heatmap_for_first_paint(
+        self,
+        candidate: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        compact_candidate = dict(candidate)
+        analysis = compact_candidate.get("analysis")
+        if not isinstance(analysis, Mapping):
+            return compact_candidate
+        compact_analysis = dict(analysis)
+        heatmap = compact_analysis.get("heatmap")
+        if not isinstance(heatmap, Mapping):
+            compact_candidate["analysis"] = compact_analysis
+            return compact_candidate
+        compact_heatmap = dict(heatmap)
+        compact_cells: list[dict[str, Any]] = []
+        for cell in heatmap.get("cells") or []:
+            if not isinstance(cell, Mapping):
+                continue
+            compact_cell = {
+                key: cell.get(key)
+                for key in ("x", "y", "score", "is_candidate", "tone")
+                if key in cell
+            }
+            compact_cells.append(compact_cell)
+        compact_heatmap["cells"] = compact_cells
+        compact_analysis["heatmap"] = compact_heatmap
+        compact_candidate["analysis"] = compact_analysis
+        return compact_candidate
+
     def _hydrate_optimization_job(
         self,
         row: Mapping[str, Any],
@@ -15297,12 +15326,25 @@ class BacktestPlatformService:
         return False
 
     def _purge_legacy_mock_optimization_jobs(self) -> list[str]:
+        legacy_markers = [
+            LEGACY_MOCK_OPTIMIZATION_LABELS[0],
+            LEGACY_MOCK_OPTIMIZATION_LABELS_GARBLED[0],
+            LEGACY_MOCK_OPTIMIZATION_LABELS_ZH[0],
+            "Baseline + 1",
+        ]
+        legacy_marker_patterns = []
+        for marker in legacy_markers:
+            legacy_marker_patterns.append(marker)
+            legacy_marker_patterns.append(json.dumps(marker, ensure_ascii=True)[1:-1])
+        marker_filters = " OR ".join("candidates_json LIKE ?" for _ in legacy_marker_patterns)
         rows = self.storage.fetch_all(
-            """
+            f"""
             SELECT id, request_json, summary_json, result_json, candidates_json
             FROM optimization_jobs
             WHERE deleted_at IS NULL
-            """
+              AND ({marker_filters})
+            """,
+            tuple(f"%{marker}%" for marker in legacy_marker_patterns),
         )
         legacy_ids = [
             str(row.get("id") or "")
@@ -19608,6 +19650,10 @@ class BacktestPlatformService:
                     )
                 if analysis:
                     normalized_candidate["analysis"] = analysis
+                if matching_preview_limit is not None:
+                    normalized_candidate = self._compact_optimization_candidate_heatmap_for_first_paint(
+                        normalized_candidate,
+                    )
                 normalized_candidates.append(normalized_candidate)
             job["candidates"] = normalized_candidates
             job["summary"]["candidate_count"] = len(normalized_candidates)

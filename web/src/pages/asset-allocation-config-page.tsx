@@ -74,7 +74,7 @@ const FREQUENCY_OPTIONS: Array<{ value: RebalanceFrequency; label: string }> = [
 ];
 
 const LEGACY_DEFAULT_ASSET_SIGNATURE = 'SPY:35|QQQ:25|TLT:25|GLD:15';
-const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 80;
 
 function normalizeSymbol(value: string): string {
   return value.trim().toUpperCase().replace(/\.US$/, '');

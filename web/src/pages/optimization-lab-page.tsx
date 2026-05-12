@@ -36,7 +36,7 @@ import type {
 } from "../types";
 import "./optimization-lab-page.css";
 
-const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 80;
 
 type StepKey = "select" | "config" | "results";
 type HeatmapMetricKey =

@@ -286,12 +286,14 @@ class FactorMiningRunner:
         market_data: MarketDataBySymbol,
     ) -> FactorMiningCandidateSummary:
         factor_values: dict[str, float] = {}
+        factor_series_by_symbol: dict[str, Sequence[float | None]] = {}
         targets: dict[str, float] = {}
         for symbol in self.request.universe:
             symbol_data = market_data.get(symbol)
             if not symbol_data:
                 continue
             series = evaluate_expression(expression, symbol_data)
+            factor_series_by_symbol[symbol] = series
             anchor_index = _forward_return_anchor_index(symbol_data)
             value = _finite_at_or_before(series, anchor_index)
             target = _target_return(symbol_data, anchor_index=anchor_index)
@@ -320,8 +322,12 @@ class FactorMiningRunner:
         depth = _expression_depth(expression)
         max_style_correlation = _estimate_style_correlation(expression)
         correlation_penalty = round(max(0.0, max_style_correlation - 0.3), 6)
-        candidate_drawdown = _estimate_candidate_drawdown_pct(expression, market_data, self.request.universe)
-        benchmark_drawdown = _benchmark_drawdown_pct(market_data, self.request.universe)
+        candidate_drawdown, benchmark_drawdown = _estimate_candidate_portfolio_drawdowns_pct(
+            factor_series_by_symbol,
+            market_data,
+            self.request.universe,
+            rank_ic=rank_ic,
+        )
         drawdown_ratio = None
         if candidate_drawdown is not None and benchmark_drawdown and benchmark_drawdown > 0:
             drawdown_ratio = round(candidate_drawdown / benchmark_drawdown, 6)
@@ -566,39 +572,67 @@ def _infer_residual_control_signal(expression: str) -> str:
     return "s_vol_252d_raw"
 
 
-def _estimate_candidate_drawdown_pct(
-    expression: str,
+def _estimate_candidate_portfolio_drawdowns_pct(
+    factor_series_by_symbol: Mapping[str, Sequence[float | None]],
     market_data: MarketDataBySymbol,
     universe: Sequence[str],
-) -> float | None:
-    symbol_drawdowns: list[float] = []
-    multiplier = 1.0
-    normalized = expression.lower()
-    if "std" in normalized or "vol" in normalized:
-        multiplier = 0.82
-    elif "log" in normalized:
-        multiplier = 1.08
-    elif "return" in normalized or "momentum" in normalized or "lag" in normalized:
-        multiplier = 1.16
+    *,
+    rank_ic: float | None,
+) -> tuple[float | None, float | None]:
+    direction = 1.0 if rank_ic is None or rank_ic >= 0 else -1.0
+    candidate_equity = 1.0
+    benchmark_equity = 1.0
+    candidate_curve = [candidate_equity]
+    benchmark_curve = [benchmark_equity]
+    observation_count = 0
+    close_by_symbol = {
+        symbol: _close_series(market_data.get(symbol) or {})
+        for symbol in universe
+    }
+
+    max_length = 0
     for symbol in universe:
-        close = _close_series(market_data.get(symbol) or {})
-        if close:
-            symbol_drawdowns.append(_max_drawdown_pct(close) * multiplier)
-    if not symbol_drawdowns:
-        return None
-    return round(statistics.fmean(symbol_drawdowns), 6)
+        close = close_by_symbol.get(symbol) or []
+        signals = factor_series_by_symbol.get(symbol) or ()
+        max_length = max(max_length, min(len(close), len(signals)))
 
+    for index in range(1, max_length):
+        eligible: list[tuple[float, float]] = []
+        for symbol in universe:
+            close = close_by_symbol.get(symbol) or []
+            signals = factor_series_by_symbol.get(symbol) or ()
+            if index >= len(close) or index - 1 >= len(signals):
+                continue
+            signal = signals[index - 1]
+            prior = close[index - 1]
+            current = close[index]
+            if (
+                signal is None
+                or not math.isfinite(float(signal))
+                or prior <= 0
+                or current <= 0
+            ):
+                continue
+            one_day_return = current / prior - 1.0
+            if not math.isfinite(one_day_return):
+                continue
+            eligible.append((direction * float(signal), one_day_return))
+        if len(eligible) < 2:
+            continue
+        eligible.sort(key=lambda item: item[0], reverse=True)
+        selected_count = max(1, math.ceil(len(eligible) * 0.3))
+        selected_returns = [item[1] for item in eligible[:selected_count]]
+        candidate_return = statistics.fmean(selected_returns)
+        benchmark_return = statistics.fmean(item[1] for item in eligible)
+        candidate_equity *= max(0.0, 1.0 + candidate_return)
+        benchmark_equity *= max(0.0, 1.0 + benchmark_return)
+        candidate_curve.append(candidate_equity)
+        benchmark_curve.append(benchmark_equity)
+        observation_count += 1
 
-def _benchmark_drawdown_pct(
-    market_data: MarketDataBySymbol,
-    universe: Sequence[str],
-) -> float | None:
-    benchmark = market_data.get("SPY") or market_data.get("QQQ")
-    if benchmark is None:
-        benchmark_symbol = universe[0] if universe else ""
-        benchmark = market_data.get(benchmark_symbol)
-    close = _close_series(benchmark or {})
-    return round(_max_drawdown_pct(close), 6) if close else None
+    if observation_count < 20:
+        return None, None
+    return round(_max_drawdown_pct(candidate_curve), 6), round(_max_drawdown_pct(benchmark_curve), 6)
 
 
 def _close_series(symbol_data: Mapping[str, Sequence[float | int | None]]) -> list[float]:

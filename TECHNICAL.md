@@ -53,6 +53,10 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - Runtime 工作台页面不得在 API 空结果或失败时用本地样例补位；必须展示真实 empty/error 状态，并把页面按钮的 API 调用作为交互证明的一部分。mock fixture 只能用于单测，不能作为 live route 验收证据。
 - 因子工厂的检疫候选来源必须与挖掘队列保持同一投影：只接收 mining job 的 top candidates，不读取内部全量候选 ledger；列表按归一化表达式去重。PIT 非 Full Ready 仅写入诊断证据、风险提示和发布审计，不再单独阻断发布；候选仍必须通过泄露/OOS 衰减/逻辑重复/Auto-Residual/回撤等硬闸门后才可自动发布。
 - 用户报告已批准 UI 在某个具体 live route 或对象 ID 上漂移时，验收必须抓取用户给出的精确 URL/ID；只抽样列表第一条、默认 demo 对象或旧截图不能作为该问题的完成证据。
+- 技术方案只决定数据契约、状态语义和交互责任；批准 HTML/SPEC/PNG 才决定前台模块数量、顺序、卡片数量、标题和密度。实现时不得把技术方案里“可以展示”的信息全部直接铺上页面，除非批准稿已给出位置，或 Trace Matrix 明确登记为批准偏离。
+- 对已批准稿明确定义了文案、状态值、统计数字或时间戳的设计锁定页，前台必须先通过 view-model / formatter / approved constants 冻结这些展示口径；未经 Trace Matrix 明确标注为“允许 live 替换”的字段，不能把实时 refresh delta、waiver 计数、诊断窗口、provider 缺口直接渗透到前台主舞台。
+- live-vs-design 同宽对拍必须等待首个真实内容模块渲染完成，例如 `健康仪表盘`、`数据运维指令`、卡片列表或目标表格；只等路由 H1、页面标题或 shell 可见就截图，属于无效验收证据。
+- 在声称“100% 一致”之前，验收记录必须显式声明共享 shell 是否在本次批准范围内。若只验 page content area，必须写清楚“不含共享侧栏/顶栏”；若 shell 在范围内，则必须同时核对导航项数量、分组、选中态和标题位置，不能默认忽略。
 - worker 交付给 reviewer 前必须先跑交付前自测门，按 reviewer 拒收清单自查测试、Trace Matrix、截图、DOM 文案、交互证明、文档 delta 和剩余偏离，并明确回答 `Would reviewer refuse this?`；答案不是确定的 `No` 时不得交付。
 - 交付前自测不能替代正式 reviewer，它只是阻止明显不合格切片进入评审。
 - 临时截图、DOM dump、trace matrix 草稿和浏览器记录应放在 `.tmp/`、`artifacts/` 或 `output/logs/grit-coder/`，不要散落在 repo 根目录。
@@ -404,6 +408,7 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - `GET /data-snapshots/overview`
 - `POST /admin/snapshot-refresh-jobs`
 - `GET /data-snapshots/overview` 的 `dataset_snapshots[]` 现在包含 `ds-index-valuations`；其 metadata 暴露 `proxy_keys`、`observation_frequency`、`latest_pe_ttm`、`latest_percentile_10y`
+- `GET /data-snapshots/overview` 本期 additive 暴露 `data_layer_readiness[]`、`snapshot_quality_alerts[]` 与 `factor_dimension_readiness[]`，供 `#/snapshots?tab=equity` 渲染 L1-L4 分层治理、异常告警和因子维度就绪矩阵；不得改变既有 `overall_status`、`blocking_code`、`provider_readiness_summary` 与 `bond_fixed_income` 的语义
 
 当前一期 Compose First 的补充真相：
 
@@ -422,8 +427,8 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 当前多因子第二期第一步的补充真相：
 
 - 正式可操作交付面包括 `PIT 清洗中心`、`因子库`、`因子详情/诊断`、`因子编辑器`、`因子工厂` 与 `多因子策略创建`。三期本轮不改策略详情、回测详情、回测配置、优化配置或优化结果页模块。
-- 左侧导航的 `因子` 组当前包含 `因子库` 与 `因子工厂`；`#/factors/factory` 合并原 `挖掘沙盒` 与 `检疫工作台`，旧 `#/factors/sandbox`、`#/factors/quarantine` 仍保持兼容并进入同一页对应分区。因子工厂首屏任务队列、候选摘要、检疫队列和漏斗必须读取 `GET /factor-factory/overview` 的运行时结果，不得用本地默认任务、静态候选或设计稿样例补位；每日自动化固定为 `GMT+8 14:00`，工厂 run 完成挖掘后必须自动送入 D2 并执行检疫；候选只保存表达式、fitness、非重叠 Rank IC、Newey-West 修正 IR、回撤和残差摘要，不能直接进入正式因子库。长周期动量的 IR 必须按持有期重叠收益做 Newey-West/Bartlett 修正，63 日动量需记录相对 `Return(Close, 3)` 的残差 IC 作为纯净 IC 证据。`数据` 组必须同时保留 `PIT 清洗中心` 与 `数据快照`；`数据快照` 是既有快照入口，本期只保留导航可达，不做页面结构改造。
-- `GET /pit-data` 只负责点时价格、样本池、异常清洗与未来函数门禁摘要，供因子诊断判断数据可用性。
+- 左侧导航的 `因子` 组当前包含 `因子库` 与 `因子工厂`；`#/factors/factory` 合并原 `挖掘沙盒` 与 `检疫工作台`，旧 `#/factors/sandbox`、`#/factors/quarantine` 仍保持兼容并进入同一页对应分区。因子工厂首屏任务队列、候选摘要、检疫队列和漏斗必须读取 `GET /factor-factory/overview` 的运行时结果，不得用本地默认任务、静态候选或设计稿样例补位；每日自动化固定为 `GMT+8 14:00`，工厂 run 完成挖掘后必须自动送入 D2 并执行检疫；候选只保存表达式、fitness、非重叠 Rank IC、Newey-West 修正 IR、回撤和残差摘要，不能直接进入正式因子库。长周期动量的 IR 必须按持有期重叠收益做 Newey-West/Bartlett 修正，63 日动量需记录相对 `Return(Close, 3)` 的残差 IC 作为纯净 IC 证据。`数据` 组必须同时保留 `PIT 清洗中心` 与 `数据快照`；本期数据页已升级为“快照分层治理 + PIT 门禁联动”，其中 `#/snapshots?tab=equity` 保留线上工作台骨架并引入 L1-L4 数据层级，`#/pit-data` 保留既有清洗链路并新增 L1-L4 PIT 准入与因子维度就绪矩阵。
+- `GET /pit-data` 负责点时价格、样本池、异常清洗与未来函数门禁摘要，供因子诊断判断数据可用性；本期 additive 暴露 `pit_layer_readiness[]`、`factor_diagnostic_readiness[]`、`pit_quality_alerts[]` 与 `snapshot_layer_linkage[]`，用于 L1-L4 PIT 准入、因子维度就绪矩阵和 `snapshot -> PIT` 逻辑映射。
 - `POST /pit-data/research-waiver`、`DELETE /pit-data/research-waiver/{waiver_id}`、`POST /pit-data/identity-overrides` 与 `POST /pit-data/identity-scraper/restart` 是 PIT 清洗中心当前写入面：分别负责研究态豁免、撤销豁免、人工身份映射和身份修复任务重启。它们只改变 PIT 诊断治理状态，不绕过 Full Ready、正式晋升或组合入库门禁。
 - `GET /pit-data` 属于全路由首屏性能敏感 API：服务可以对读取结果使用短时缓存，但 PIT 写入接口必须主动失效缓存，避免豁免、身份覆盖或身份修复任务重启后的页面继续显示旧治理状态。
 - `GET /factors`、`POST /factors`、`GET /factors/{factor_id}`、`POST /factors/{factor_id}/diagnostics`、`POST /factors/diagnostics/preview` 与 `GET /factors/{factor_id}/diagnostics/{run_id}/report` 是因子库固定 API 切片；`POST/GET /factor-mining/jobs`、`GET /factor-mining/jobs/{job_id}`、`POST /factor-mining/jobs/{job_id}/cancel` 是挖掘任务 API 切片，创建任务必须读取 `ds-price` 运行时价格快照并在摘要中暴露 `market_data_source=dataset_price_bars`、`synthetic_market_data=false` 与价格标的覆盖数量，缺少可用价格快照时返回中文阻断；`GET /factor-factory/overview`、`POST /factor-factory/automation/start`、`POST /factor-factory/automation/pause`、`POST /factor-factory/run-now` 与 `POST /factor-factory/runs/{id}/cancel` 是因子工厂固定 API 切片；`POST /factor-models/preview` 与 `POST /factor-models` 是多因子策略创建固定 API 切片。若请求或响应字段变化，`src/grit_backtest_platform/models.py`、`web/src/types.ts`、demo store 与 test API mock 必须同任务同步。本期因子治理合同保持 additive：`GET /factors` 追加前台诊断状态、批量诊断摘要、相关性簇摘要、阻断原因摘要、策略创建风险和 `lifecycle=online|offline|all` 查询；下线投影只读返回 `offline_reason`、`offline_at`、`offline_command` 与 `offline_detail`。`POST /factors/diagnostics/preview` 在单因子 preview 外支持 `{batch: true, factor_ids, diagnostic_mode, include}` 只读批量投影，不落库、不新增批量 UI。
@@ -647,6 +652,7 @@ Factor routes: `#/factors/factory` is the canonical production workbench. `#/fac
 
 - focused frontend tests 是默认阻塞门禁。
 - 对已批准 HTML/SPEC 的 UI 任务，focused frontend tests 只是必要条件；最终验收还必须包含 `UI Artifact Trace Matrix`、桌面截图、DOM 文案/状态扫描和关键交互证明。
+- 本次 `#/snapshots?tab=equity` 与 `#/pit-data` 联动升级的正式 Trace Matrix 位于 `output/ui-artifact-trace/snapshot-pit-layered-readiness-20260512/ui-trace-matrix.md`；其批准设计包位于 `output/ui-artifact-trace/snapshot-pit-layered-readiness-20260512/`，实现与验收都必须以该目录中的 HTML/SPEC/PNG 为基线。
 - 对已批准 HTML/SPEC 的 UI 任务，worker 必须在正式 reviewer 前提交交付前自测结果；缺少自测结果时视为测试流程未完成。
 - 全局 `tsc --noEmit` 必须始终跑，并始终产出报告。
 - 只有显式传入 `-StrictGlobalTypes` 时，全局 TypeScript debt 才是阻塞门禁。

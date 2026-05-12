@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseAppHash } from './lib/appRouteContext';
 import { ApiClientProvider } from './lib/demoStoreContext';
@@ -115,7 +115,7 @@ function factoryOverview(overrides: Partial<ApiFactorFactoryOverview> = {}): Api
     published_at: null,
     rejected_reason: null,
     latest_run: {
-      diagnostic_warnings: ['PIT 非 Full Ready 不阻断发布'],
+      diagnostic_warnings: ['10Y 准入通过可送检/发布'],
       orthogonal: {
         max_abs_correlation: 0.24,
         auto_residual: {
@@ -195,43 +195,96 @@ describe('FactorFactoryPage', () => {
     expect(parseAppHash('#/factors/quarantine')).toEqual({ kind: 'factor-factory', section: 'quarantine' });
   });
 
-  it('renders funnel, residual, drawdown, and PIT diagnostic non-blocking evidence from runtime data', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(factoryOverview()));
+  it('renders current-run funnel, quarantine reasons, and PIT diagnostic evidence from runtime data', async () => {
+    const overview = factoryOverview();
+    const olderMiningJob = {
+      ...overview.mining.items[0],
+      id: 'fm_old_factory_001',
+      top_candidates: [{
+        ...overview.mining.items[0].top_candidates[0],
+        id: 'cand_old_factory',
+        expression: 'Rank(Return(Close, 63))',
+      }],
+    };
+    const olderQuarantineCandidate = {
+      ...overview.quarantine.items[0],
+      id: 'fq_old_factory_001',
+      source_mining_job_id: 'fm_old_factory_001',
+      expression: 'Rank(Return(Close, 63))',
+    };
+    const rejectedCurrentCandidate = {
+      ...overview.quarantine.items[0],
+      id: 'fq_factory_rejected_001',
+      mining_candidate_id: 'cand_factory_rejected',
+      expression: 'Return(Close, 5)',
+      status: 'REJECTED',
+      publish_status: 'BLOCKED',
+      rejected_reason: 'Max drawdown relative to benchmark is >= 1.5x.',
+      updated_at: '2026-05-08T09:05:00Z',
+    };
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({
+      ...overview,
+      mining: { ...overview.mining, items: [olderMiningJob, ...overview.mining.items] },
+      quarantine: { ...overview.quarantine, items: [olderQuarantineCandidate, rejectedCurrentCandidate, ...overview.quarantine.items] },
+    }));
 
     renderFactory();
 
     expect(await screen.findByRole('heading', { level: 1, name: '因子工厂' })).toBeInTheDocument();
-    expect(await screen.findByText('每日时间：GMT+8 14:00')).toBeInTheDocument();
+    expect(await screen.findByText('每日计划：GMT+8 14:00')).toBeInTheDocument();
     expect(screen.getByText('挖掘候选')).toBeInTheDocument();
-    expect(screen.getAllByText('1000').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText('ZScore(Residual(s_mom_6m_rank, by="s_vol_252d_raw"))')).toBeInTheDocument();
-    expect(screen.getByText('1.20x')).toBeInTheDocument();
-    expect(screen.getByText('输出 2026-05-08 · Rank IC 0.061 · IR 1.22 · 覆盖 100.0%')).toBeInTheDocument();
-    expect(screen.getAllByText('PIT 非 Full Ready 不阻断发布').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('当前批次的候选因子池')).toBeInTheDocument();
+    expect(screen.getByText('已进入 D2 检疫的候选因子')).toBeInTheDocument();
+    expect(screen.getByText('通过检疫且具备发布资格')).toBeInTheDocument();
+    expect(screen.getByText('已入库的自动挖掘因子')).toBeInTheDocument();
+  expect(
+    screen.getAllByText('输出 2026-05-08 · Rank IC 0.061 · IR 1.22 · 覆盖 100.0%').length,
+  ).toBeGreaterThanOrEqual(1);
+    const sandboxPanel = document.querySelector('[data-factory-section="sandbox"]') as HTMLElement;
+    const quarantinePanel = document.querySelector('[data-factory-section="quarantine"]') as HTMLElement;
+    expect(within(sandboxPanel).queryByText('Rank(Return(Close, 21))')).not.toBeInTheDocument();
+    expect(within(sandboxPanel).getByText('当前批次候选已全部进入检疫队列，请在右侧查看检疫结果。')).toBeInTheDocument();
+    expect(within(quarantinePanel).getByText('Rank(Return(Close, 21))')).toBeInTheDocument();
+    const quarantineList = quarantinePanel.querySelector('.factor-phase2-list') as HTMLElement;
+    const quarantineButtons = within(quarantineList).getAllByRole('button');
+    expect(quarantineButtons[0]).toHaveTextContent('Rank(Return(Close, 21))');
+    expect(quarantineButtons[1]).toHaveTextContent('Return(Close, 5)');
+    expect(screen.getByRole('button', { name: '送入检疫' })).toBeDisabled();
+    expect(screen.queryByText('Rank(Return(Close, 63))')).not.toBeInTheDocument();
+    expect(screen.queryByText('当前 run 的 top candidate projection')).not.toBeInTheDocument();
+    expect(screen.queryByText('PASSED + ELIGIBLE 才可发布')).not.toBeInTheDocument();
+    expect(screen.queryByText('正式因子库 AUTO_MINED')).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '残差信号复核' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '回撤硬约束' })).not.toBeInTheDocument();
+    expect(screen.getAllByText('10Y 准入通过可送检/发布').length).toBeGreaterThanOrEqual(1);
     expect(screen.getByRole('button', { name: '发布因子' })).not.toBeDisabled();
     expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining('/factor-factory/overview'), expect.any(Object));
   });
 
-  it('shows review reasons below the needs-review status label on quarantine cards', async () => {
+  it('shows rejected reasons as a dedicated column on quarantine cards', async () => {
     const overview = factoryOverview();
-    const reviewCandidate = {
+    const rejectedCandidate = {
       ...overview.quarantine.items[0],
-      status: 'NEEDS_REVIEW',
-      publish_status: 'MANUAL_REVIEW_REQUIRED',
+      status: 'REJECTED',
+      publish_status: 'BLOCKED',
+      rejected_reason: 'PIT is not Full Ready; recorded as diagnostic evidence only.; Max drawdown relative to benchmark is >= 1.5x.',
       publish_eligibility: {
-        status: 'MANUAL_REVIEW_REQUIRED',
-        reason: 'OOS 衰减需要人工复核',
+        status: 'BLOCKED',
+        reason: 'PIT is not Full Ready; recorded as diagnostic evidence only.; Max drawdown relative to benchmark is >= 1.5x.',
       },
     };
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({
       ...overview,
-      quarantine: { ...overview.quarantine, items: [reviewCandidate] },
+      quarantine: { ...overview.quarantine, items: [rejectedCandidate] },
     }));
 
     renderFactory('quarantine');
 
-    expect(await screen.findByText('待复核')).toBeInTheDocument();
-    expect(screen.getByText('OOS 衰减需要人工复核')).toBeInTheDocument();
+    expect(await screen.findByText('已拒绝')).toBeInTheDocument();
+    expect(screen.getByText('拒绝原因')).toBeInTheDocument();
+    expect(screen.getByText('最大回撤相对基准超过 1.5x')).toBeInTheDocument();
+    expect(screen.queryByText(/PIT is not Full Ready/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Max drawdown relative to benchmark/)).not.toBeInTheDocument();
   });
 
   it('separates daily automation from one-shot run-now actions', async () => {
@@ -255,7 +308,7 @@ describe('FactorFactoryPage', () => {
     expect(await screen.findByText('每日自动化已启动；GMT+8 14:00 运行，并自动送检与执行检疫。')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '立即运行' }));
-    expect(await screen.findByText('已创建一次性工厂 run；每日自动化状态保持不变。')).toBeInTheDocument();
+    expect(await screen.findByText('已创建临时挖掘批次；每日自动化状态保持不变。')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '暂停自动化' }));
     expect(await screen.findByText('每日自动化已暂停；已存在的历史 run 不会被删除。')).toBeInTheDocument();
@@ -271,34 +324,42 @@ describe('FactorFactoryPage', () => {
   });
 
   it('runs intake, quarantine, and publish through live endpoints without sample fallback', async () => {
+    const overview = factoryOverview();
+    const overviewBeforeIntake = {
+      ...overview,
+      quarantine: { ...overview.quarantine, items: [], summary: { total: 0 } },
+    };
+    let hasQuarantineResult = false;
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = new URL(String(input));
       if (url.pathname === '/factor-quarantine/intake') {
-        return jsonResponse({ items: factoryOverview().quarantine.items, summary: { intake_count: 1 } });
+        hasQuarantineResult = true;
+        return jsonResponse({ items: overview.quarantine.items, summary: { intake_count: 1 } });
       }
       if (url.pathname === '/factor-quarantine/candidates/fq_factory_001/run') {
-        return jsonResponse(factoryOverview().quarantine.items[0]);
+        return jsonResponse(overview.quarantine.items[0]);
       }
       if (url.pathname === '/factor-quarantine/candidates/fq_factory_001/publish') {
-        return jsonResponse({ candidate: { ...factoryOverview().quarantine.items[0], status: 'PUBLISHED' } });
+        return jsonResponse({ candidate: { ...overview.quarantine.items[0], status: 'PUBLISHED' } });
       }
-      return jsonResponse(factoryOverview());
+      return jsonResponse(hasQuarantineResult ? overview : overviewBeforeIntake);
     });
 
     renderFactory('sandbox');
 
     expect((await screen.findAllByText('Rank(Return(Close, 21))')).length).toBeGreaterThanOrEqual(1);
     fireEvent.click(screen.getByRole('button', { name: '送入检疫' }));
-    expect(await screen.findByText('候选已进入 D2 检疫队列。')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: '执行检疫' }));
-    expect(await screen.findByText('检疫已完成，PIT 证据按诊断项写入。')).toBeInTheDocument();
+    expect(await screen.findByText('已送入 D2 检疫并执行 1 个候选；通过后可一键发布。')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '发布因子' }));
     expect(await screen.findByText('候选已发布到正式因子库，并记录发布审计。')).toBeInTheDocument();
 
     expect(fetchSpy).toHaveBeenCalledWith(
       expect.stringContaining('/factor-quarantine/intake'),
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      expect.stringContaining('/factor-quarantine/candidates/fq_factory_001/run'),
       expect.objectContaining({ method: 'POST' }),
     );
     expect(fetchSpy).toHaveBeenCalledWith(

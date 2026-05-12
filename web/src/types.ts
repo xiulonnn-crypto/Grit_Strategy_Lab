@@ -868,7 +868,9 @@ export type ApiSnapshotBlocker = {
 export type ApiSnapshotProviderAccessTier =
   | "public"
   | "free_account"
-  | "paid_optional";
+  | "paid_optional"
+  | "public_web"
+  | "repo_local";
 
 export type ApiSnapshotProviderSummaryItem = {
   kinds?: string[];
@@ -2166,6 +2168,41 @@ export type ApiSnapshotOverview = {
   allowed_actions?: string[];
   provider_readiness_summary?: ApiSnapshotProviderReadinessSummary;
   data_trust_summary?: ApiDataTrustSummary;
+  data_layer_readiness?: Array<{
+    layer_id: string;
+    title_cn: string;
+    status: string;
+    summary: string;
+    metrics?: Array<{
+      label: string;
+      value: string | number | null;
+      detail?: string | null;
+      tone?: string | null;
+    }>;
+    updated_at?: string | null;
+    provider_keys?: string[];
+    linked_targets?: string[];
+    [key: string]: unknown;
+  }>;
+  snapshot_quality_alerts?: Array<{
+    code: string;
+    severity: string;
+    title_cn: string;
+    detail_cn: string;
+    source_layer: string;
+    blocking: boolean;
+    target?: string | null;
+    [key: string]: unknown;
+  }>;
+  factor_dimension_readiness?: Array<{
+    dimension_id: string;
+    title_cn: string;
+    status: string;
+    supported_factors: string[];
+    blockers?: string[];
+    linked_layers?: string[];
+    [key: string]: unknown;
+  }>;
   bond_fixed_income: ApiBondFixedIncomeOverview;
 };
 
@@ -2295,6 +2332,46 @@ export type ApiPitDataOverview = {
       action_label?: string;
       action_target?: string;
     }>;
+  };
+  factor_admission_coverage?: {
+    status: string;
+    window_years: number;
+    window_start: string;
+    window_end: string;
+    blocks_factor_admission: boolean;
+    diagnostics_enabled: boolean;
+    source?: string;
+    active_universe_symbol_count: number;
+    covered_symbol_count: number;
+    current_core_missing_count: number;
+    current_core_missing_symbols?: string[];
+    active_window_missing_count: number;
+    active_window_missing_symbols?: string[];
+    repair_symbol_count: number;
+    repair_symbols?: string[];
+    archival_missing_count: number;
+    archival_missing_symbols?: string[];
+    metadata_missing_count: number;
+    metadata_mismatch_count: number;
+    metadata_mismatch_symbols?: string[];
+    warning_items?: Array<{
+      code: string;
+      label?: string;
+      message: string;
+      symbols?: string[];
+      fix_hash?: string;
+      [key: string]: unknown;
+    }>;
+    hard_blockers?: Array<{
+      code: string;
+      label?: string;
+      message: string;
+      symbols?: string[];
+      fix_hash?: string;
+      [key: string]: unknown;
+    }>;
+    policy?: string;
+    stress_scenario_policy?: string;
   };
   cleaning_rule_previews?: Array<{
     id: string;
@@ -2467,6 +2544,47 @@ export type ApiPitDataOverview = {
   };
   gate_fix_target: string;
   source?: Record<string, unknown>;
+  pit_layer_readiness?: Array<{
+    layer_id: string;
+    title_cn: string;
+    status: string;
+    summary: string;
+    pit_alignment: string;
+    blockers?: string[];
+    available_at_health?: {
+      status?: string;
+      sampled_row_count?: number;
+      missing_available_at_count?: number;
+      [key: string]: unknown;
+    } | null;
+    [key: string]: unknown;
+  }>;
+  factor_diagnostic_readiness?: Array<{
+    group_id: string;
+    title_cn: string;
+    status: string;
+    factors: string[];
+    rationale_cn: string;
+    linked_snapshot_checks?: string[];
+    [key: string]: unknown;
+  }>;
+  pit_quality_alerts?: Array<{
+    code: string;
+    severity: string;
+    title_cn: string;
+    detail_cn: string;
+    hard_blocking: boolean;
+    linked_factor_groups?: string[];
+    [key: string]: unknown;
+  }>;
+  snapshot_layer_linkage?: Array<{
+    check_id: string;
+    check_title_cn: string;
+    source_layer: string;
+    target_factor_groups: string[];
+    result_status: string;
+    [key: string]: unknown;
+  }>;
 };
 
 export type ApiPitResearchWaiverPayload = {
@@ -2845,7 +2963,7 @@ export type ApiFactorMiningJobListResponse = {
 export type ApiFactorGovernanceAction = {
   id: string;
   kind: string;
-  command?: "DEPRECATE" | "PRUNE" | "FACTOR_MODEL_SUGGESTION" | string;
+  command?: "DEPRECATE" | "PRUNE" | "PUBLISH_OPTIMIZED_FACTOR" | "FACTOR_MODEL_SUGGESTION" | string;
   label: string;
   title: string;
   detail: string;
@@ -2870,7 +2988,7 @@ export type ApiFactorGovernanceAction = {
 
 export type ApiFactorGovernanceExecutePayload = {
   confirm: boolean;
-  command: "DEPRECATE" | "PRUNE" | string;
+  command: "DEPRECATE" | "PRUNE" | "PUBLISH_OPTIMIZED_FACTOR" | string;
   factor_ids?: string[];
   factor_id?: string;
   reason: string;
@@ -2885,8 +3003,11 @@ export type ApiFactorGovernanceExecuteResponse = {
   affected_factor_ids: string[];
   keep_factor_id?: string | null;
   offline_at: string;
+  executed_at?: string;
   reason: string;
   items: ApiFactorListItem[];
+  created_factor_id?: string;
+  created_factor?: ApiFactorListItem;
   governance_overview?: ApiFactorGovernanceOverview;
 };
 

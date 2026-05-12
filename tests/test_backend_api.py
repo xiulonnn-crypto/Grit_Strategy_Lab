@@ -31,6 +31,7 @@ from grit_backtest_platform.api import create_app
 from grit_backtest_platform._real_service_rebuilt import RealBacktestPlatformService
 from grit_backtest_platform import _real_service_rebuilt as real_service_module
 from grit_backtest_platform.market_data_repository import CoverageSummary, MarketDataRepository
+from grit_backtest_platform.snapshot_provider_projection import build_data_trust_summary
 from grit_backtest_platform.universe_history import (
     ANCHOR_SCHEDULE,
     NASDAQ100_UNIVERSE_KEY,
@@ -232,6 +233,25 @@ def test_snapshot_overview_contract_is_exact_on_fresh_database(tmp_path):
     }
     price_layer = next(item for item in trust_summary["layers"] if item["id"] == "price_primary_chain")
     assert price_layer["preferred_provider"] == "tiingo"
+    assert [item["layer_id"] for item in overview["data_layer_readiness"]] == [
+        "l1_market_data",
+        "l2_fundamental_data",
+        "l3_sentiment_data",
+        "l4_macro_derivatives",
+    ]
+    by_layer = {item["layer_id"]: item for item in overview["data_layer_readiness"]}
+    assert by_layer["l1_market_data"]["status"] in {"READY", "WARNING", "BLOCKED"}
+    assert by_layer["l4_macro_derivatives"]["status"] in {"CALIBRATING", "BLOCKED"}
+    assert {item["code"] for item in overview["snapshot_quality_alerts"]} >= {
+        "FUNDAMENTAL_BALANCE_CHECK_PENDING",
+        "CONSENSUS_BLIND_SPOT",
+        "SHORT_VOLUME_JUMP_REVIEW",
+        "RATE_BETA_CALIBRATING",
+    }
+    factor_dimensions = {item["dimension_id"]: item for item in overview["factor_dimension_readiness"]}
+    assert factor_dimensions["price_liquidity"]["status"] in {"READY", "WARNING", "BLOCKED"}
+    assert factor_dimensions["quality_valuation"]["linked_layers"] == ["l2_fundamental_data"]
+    assert factor_dimensions["macro_derivatives"]["status"] in {"CALIBRATING", "BLOCKED"}
 
 
 def test_snapshot_provider_registry_and_attempts_are_available_on_fresh_database(tmp_path, monkeypatch):
@@ -363,6 +383,173 @@ def test_snapshot_overview_cache_signature_tracks_provider_env_status(tmp_path, 
     )
 
     assert "TIINGO_API_TOKEN" not in configured_price_layer["missing_env_vars"]
+
+
+def test_snapshot_trust_summary_prefers_live_provider_state_over_static_key_prompts():
+    registry_items = [
+        {
+            "provider_id": "yahoo",
+            "source_name": "Yahoo Finance",
+            "credential_requirements": {
+                "required_env_vars": [],
+                "configured_env_vars": [],
+                "missing_env_vars": [],
+            },
+            "quota_cooldown": {"quota_limited": False, "cooldown_active": False, "next_retry_at": None},
+            "error_summary": {"status": "succeeded", "reason": None, "error": None},
+            "trust_profile": {"operator_action": "保留为公开价格基线。"},
+            "enabled": True,
+            "credential_ready": True,
+            "usable": True,
+            "readiness_status": "usable",
+        },
+        {
+            "provider_id": "tiingo",
+            "source_name": "Tiingo",
+            "credential_requirements": {
+                "required_env_vars": ["TIINGO_API_TOKEN"],
+                "configured_env_vars": ["TIINGO_API_TOKEN"],
+                "missing_env_vars": [],
+            },
+            "quota_cooldown": {
+                "quota_limited": True,
+                "cooldown_active": True,
+                "next_retry_at": "2026-05-11T05:37:32Z",
+            },
+            "error_summary": {"status": "skipped", "reason": "primary_price_source_already_selected", "error": None},
+            "trust_profile": {"operator_action": "配置 TIINGO_API_TOKEN 后用于 PIT 第一修复队列。"},
+            "enabled": True,
+            "credential_ready": True,
+            "usable": False,
+            "readiness_status": "cooldown",
+        },
+        {
+            "provider_id": "sec_edgar",
+            "source_name": "SEC EDGAR",
+            "credential_requirements": {
+                "required_env_vars": ["SEC_USER_AGENT"],
+                "configured_env_vars": ["SEC_USER_AGENT"],
+                "missing_env_vars": [],
+            },
+            "quota_cooldown": {"quota_limited": False, "cooldown_active": False, "next_retry_at": None},
+            "error_summary": {"status": "succeeded", "reason": None, "error": None},
+            "trust_profile": {"operator_action": "用 SEC 生成身份生命周期证据。"},
+            "enabled": True,
+            "credential_ready": True,
+            "usable": True,
+            "readiness_status": "usable",
+        },
+        {
+            "provider_id": "finnhub",
+            "source_name": "Finnhub",
+            "credential_requirements": {
+                "required_env_vars": ["FINNHUB_API_KEY"],
+                "configured_env_vars": ["FINNHUB_API_KEY"],
+                "missing_env_vars": [],
+            },
+            "quota_cooldown": {"quota_limited": False, "cooldown_active": False, "next_retry_at": None},
+            "error_summary": {"status": "failed", "reason": "credential_rejected", "error": "credential_rejected"},
+            "trust_profile": {"operator_action": "配置 FINNHUB_API_KEY 后做身份交叉校验。"},
+            "enabled": True,
+            "credential_ready": True,
+            "usable": True,
+            "readiness_status": "usable",
+        },
+        {
+            "provider_id": "polygon",
+            "source_name": "Polygon.io",
+            "credential_requirements": {
+                "required_env_vars": ["POLYGON_API_KEY"],
+                "configured_env_vars": ["POLYGON_API_KEY"],
+                "missing_env_vars": [],
+            },
+            "quota_cooldown": {"quota_limited": False, "cooldown_active": False, "next_retry_at": None},
+            "error_summary": {
+                "status": "unavailable",
+                "reason": "missing POLYGON_API_KEY",
+                "error": "missing POLYGON_API_KEY",
+            },
+            "trust_profile": {"operator_action": "配置 Polygon 后用于关键缺口精修。"},
+            "enabled": True,
+            "credential_ready": True,
+            "usable": True,
+            "readiness_status": "usable",
+        },
+    ]
+    attempt_items = [
+        {
+            "provider_id": "yahoo",
+            "job_id": "snap_latest",
+            "attempted_at": "2026-05-11T05:11:02Z",
+            "status": "succeeded",
+            "snapshot_id": "ds-price",
+            "target_type": "price_history",
+            "quota_limited": False,
+            "cooldown_active": False,
+        },
+        {
+            "provider_id": "tiingo",
+            "job_id": "snap_latest",
+            "attempted_at": "2026-05-11T05:11:02Z",
+            "status": "skipped",
+            "snapshot_id": "ds-price",
+            "target_type": "price_history",
+            "quota_limited": True,
+            "cooldown_active": True,
+            "next_retry_at": "2026-05-11T05:37:32Z",
+        },
+        {
+            "provider_id": "sec_edgar",
+            "job_id": "snap_latest",
+            "attempted_at": "2026-05-11T05:11:02Z",
+            "status": "succeeded",
+            "snapshot_id": "ds-corporate-actions",
+            "target_type": "corporate_actions",
+            "quota_limited": False,
+            "cooldown_active": False,
+        },
+        {
+            "provider_id": "finnhub",
+            "job_id": "snap_latest",
+            "attempted_at": "2026-05-11T05:11:02Z",
+            "status": "failed",
+            "snapshot_id": "ds-price",
+            "target_type": "price_history",
+            "quota_limited": False,
+            "cooldown_active": False,
+            "reason": "credential_rejected",
+            "error": "credential_rejected",
+        },
+        {
+            "provider_id": "polygon",
+            "job_id": None,
+            "attempted_at": "2026-05-11T05:00:35Z",
+            "status": "unavailable",
+            "snapshot_id": "ds-price",
+            "target_type": "price_history",
+            "quota_limited": False,
+            "cooldown_active": False,
+            "reason": "missing POLYGON_API_KEY",
+            "error": "missing POLYGON_API_KEY",
+        },
+    ]
+
+    summary = build_data_trust_summary(registry_items=registry_items, attempt_items=attempt_items)
+
+    price_layer = next(item for item in summary["layers"] if item["id"] == "price_primary_chain")
+    assert "Yahoo Finance" in price_layer["operator_action"]
+    assert "Tiingo 当前处于冷却窗口" in price_layer["operator_action"]
+    assert "TIINGO_API_TOKEN" not in price_layer["operator_action"]
+
+    identity_layer = next(item for item in summary["layers"] if item["id"] == "delisted_identity")
+    assert "SEC EDGAR" in identity_layer["operator_action"]
+    assert "Finnhub 当前返回凭据被拒" in identity_layer["operator_action"]
+    assert "FINNHUB_API_KEY" in identity_layer["operator_action"]
+
+    precision_layer = next(item for item in summary["layers"] if item["id"] == "precision_repair")
+    assert "Polygon.io" in precision_layer["operator_action"]
+    assert "本轮未命中" in precision_layer["operator_action"]
+    assert "POLYGON_API_KEY" not in precision_layer["operator_action"]
 
 
 def test_snapshot_progress_targets_use_distinct_symbol_projection(tmp_path, monkeypatch):
@@ -6289,6 +6476,42 @@ def test_optimization_heatmap_cells_include_selected_metric_values(tmp_path):
     assert all("annualized_return" in cell["metrics"] for cell in heatmap["cells"])
     assert all("return_sharpe" in cell["metrics"] for cell in heatmap["cells"])
     assert all("max_drawdown_pct" in cell["metrics"] for cell in heatmap["cells"])
+
+
+def test_optimization_first_paint_heatmap_keeps_scores_without_cell_metrics(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    compact = service._compact_optimization_candidate_heatmap_for_first_paint(
+        {
+            "id": "trial_1",
+            "analysis": {
+                "heatmap": {
+                    "x_key": "lookback_months",
+                    "y_key": "top_n",
+                    "x_values": [6, 7],
+                    "y_values": [10, 11],
+                    "cells": [
+                        {
+                            "x": 7,
+                            "y": 11,
+                            "score": 1.18,
+                            "metrics": {
+                                "annualized_return": 0.124,
+                                "return_sharpe": 1.18,
+                                "max_drawdown_pct": -12.6,
+                            },
+                            "is_candidate": True,
+                            "tone": "hot",
+                        }
+                    ],
+                }
+            },
+        }
+    )
+
+    cell = compact["analysis"]["heatmap"]["cells"][0]
+    assert cell == {"x": 7, "y": 11, "score": 1.18, "is_candidate": True, "tone": "hot"}
 
 
 def test_list_optimization_jobs_purges_legacy_mock_rows(tmp_path):

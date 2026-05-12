@@ -545,7 +545,13 @@ export function FactorModelBuilderPage({
       message: warning,
     })) : []),
   ];
-  const pitBlocked = activePreview.pitBlockers.length > 0 || minPitCoverage < 80;
+  const explicitPitHardBlocked = strategyHardBlockers.some((item) => {
+    const code = String(item.code ?? '').toUpperCase();
+    return code.includes('PIT') || code.includes('PRICE_10Y') || code.includes('UNIVERSE_10Y');
+  });
+  const pitBlocked = explicitStrategyRisk
+    ? explicitPitHardBlocked
+    : activePreview.pitBlockers.length > 0 || minPitCoverage < 80;
   const neutralizationBlocked =
     neutralizationEnabled &&
     (neutralizationBlockers.length > 0 || activePreview.neutralizationStatus.status.startsWith('NOT_EXECUTED'));
@@ -696,11 +702,6 @@ export function FactorModelBuilderPage({
     }
   };
 
-  const neutralizationValue = neutralizationBlocked
-    ? '未执行'
-    : activePreview.neutralizationStatus.enabled
-      ? '已执行'
-      : '未启用';
   const neutralizationPitValue = neutralizationBlockers.length
     ? neutralizationBlockers.map(blockerLabel).join('、')
     : activePreview.neutralizationStatus.enabled
@@ -742,15 +743,15 @@ export function FactorModelBuilderPage({
     activePreview.pitBlockers.length > 0;
   const pitGateValue = pitBlocked ? (pitSoftenedForAdmission ? '低风险提示' : '阻断') : '通过';
   const pitGateTone: 'good' | 'warn' | 'bad' = pitBlocked ? (pitSoftenedForAdmission ? 'warn' : 'bad') : 'good';
-  const pricePitValue = minPitCoverage < 80 ? (pitSoftenedForAdmission ? '低风险提示' : '阻断') : '通过';
-  const pricePitTone: 'good' | 'warn' | 'bad' = minPitCoverage < 80 ? (pitSoftenedForAdmission ? 'warn' : 'bad') : 'good';
+  const admissionPricePitValue = pitSoftenedForAdmission ? '低风险提示' : pitBlocked ? '阻断' : '10Y通过';
+  const admissionPricePitTone: 'good' | 'warn' | 'bad' = pitSoftenedForAdmission ? 'warn' : pitBlocked ? 'bad' : 'good';
   const selectedRebalanceOption =
     REBALANCE_OPTIONS.find((option) => option.value === rebalanceFrequency) ?? REBALANCE_OPTIONS[0];
   const gateRows: Array<{ label: string; value: string; tone: 'good' | 'warn' | 'bad' }> = [
     { label: '基础面 available_at 校验', value: pitGateValue, tone: pitGateTone },
-    { label: '价格与 Universe PIT', value: pricePitValue, tone: pricePitTone },
-    { label: '行业中性化', value: neutralizationValue, tone: neutralizationBlocked ? 'bad' : 'good' },
+    { label: '价格与 Universe PIT(10Y)', value: admissionPricePitValue, tone: admissionPricePitTone },
     { label: '行业 PIT 状态', value: neutralizationPitValue, tone: neutralizationBlocked ? 'bad' : 'good' },
+    { label: '压力场景覆盖', value: explicitStrategyRisk ? '审计提示' : '等待 API', tone: warningLabels.length ? 'warn' : 'good' },
     { label: '策略名称', value: modelNameBlocked ? '待填写' : '已填写', tone: modelNameBlocked ? 'bad' : 'good' },
     { label: '权重合计', value: pct(weightTotal, 0), tone: weightBlocked ? 'bad' : 'good' },
     { label: '再平衡配置', value: selectedRebalanceOption.label, tone: 'good' },

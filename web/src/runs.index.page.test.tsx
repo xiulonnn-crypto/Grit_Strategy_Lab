@@ -257,7 +257,8 @@ describe('runs index page', () => {
     expect(library).toHaveTextContent('策略 Beta');
 
     const evidenceTree = requireSelector('.runs-library-panel .runs-tree');
-    await waitFor(() => expect(evidenceTree).toHaveTextContent('bt-alpha-20y'));
+    await waitFor(() => {
+      expect(evidenceTree).toHaveTextContent('bt-alpha-20y');
     expect(evidenceTree).toHaveTextContent('2 次回测 / 2 个版本 · 当前版本 v2 · 最佳证据 v1');
     expect(evidenceTree).toHaveTextContent('证据断裂');
     expect(evidenceTree).toHaveTextContent('10Y 已覆盖');
@@ -267,6 +268,7 @@ describe('runs index page', () => {
     expect(evidenceTree).toHaveTextContent('20Y · 永久回测 · 2006-03-31 至 2026-03-31');
     expect(evidenceTree).not.toHaveTextContent('str-alpha-v2 ·');
     expect(evidenceTree).not.toHaveTextContent('bt-alpha-10y');
+    });
 
     expect(fakeApi.getBacktestRunDetail).not.toHaveBeenCalled();
   });

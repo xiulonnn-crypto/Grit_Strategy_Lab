@@ -40,7 +40,7 @@ const TEXT = {
 } as const;
 
 const REQUIRED_PERIODS: EvidencePeriod[] = ['10Y', '20Y', '30Y'];
-const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 1200;
+const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 80;
 
 type RunsTab = 'library' | 'recent';
 

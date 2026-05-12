@@ -155,6 +155,41 @@ def _seed_sp500_industry_pit_metadata(client) -> None:
             for symbol, (sector, sub_industry) in sectors.items()
         ],
     )
+    with repository.connect() as conn:
+        for symbol in sectors:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO dataset_symbol_coverage (
+                    dataset_snapshot_id, symbol, start_date, end_date, trade_days,
+                    source, fallback_source, metadata_json
+                )
+                VALUES ('ds-price', ?, '2014-01-02', ?, 2520, 'unit_test', 'none', ?)
+                """,
+                (
+                    symbol,
+                    as_of,
+                    json.dumps({"coverage_kind": "price_daily", "fixture": "sp500_industry_complete"}),
+                ),
+            )
+        conn.execute(
+            """
+            UPDATE dataset_snapshots
+            SET metadata_json = ?
+            WHERE id = 'ds-price'
+            """,
+            (
+                json.dumps(
+                    {
+                        "covered_symbol_count": len(sectors),
+                        "total_symbol_count": len(sectors),
+                        "fixture": "sp500_industry_complete",
+                    }
+                ),
+            ),
+        )
+    service = client.app.state.service
+    if hasattr(service, "_invalidate_pit_data_overview_cache"):
+        service._invalidate_pit_data_overview_cache()
 
 
 def _patch_factor_strategy_risks(client, monkeypatch, risks_by_factor: dict[str, dict]) -> None:
@@ -400,7 +435,7 @@ def test_factor_model_low_risk_non_core_price_gap_allows_sandbox_create(tmp_path
     assert risk["blocked_count"] == 0
     assert risk["summary_label"] == "低风险准入"
     assert "PIT核心成员价格缺口为 0" in risk["summary"]
-    assert "209 个非核心缺口" in risk["summary"]
+    assert "209 个Full Ready归档缺口" in risk["summary"]
     assert any(
         item["code"] == "PRICE_SNAPSHOT_NOT_READY"
         and item["severity"] == "WARNING"
@@ -463,6 +498,25 @@ def test_factor_model_create_preserves_selected_rebalance_frequency(tmp_path) ->
     assert detail["rebalance_frequency"] == "yearly"
     assert detail["parameters"]["rebalance_frequency"] == "yearly"
     assert detail["multi_factor_profile"]["rebalance_frequency"] == "yearly"
+
+
+def test_multi_factor_strategy_detail_uses_lightweight_factor_index(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    created = assert_ok(client.post("/factor-models", json=_model_payload()))
+    service = client.app.state.service
+    service._multi_factor_factor_index_cache = None
+
+    def fail_heavy_factor_list(*args, **kwargs):
+        raise AssertionError("strategy detail should not hydrate the full factor governance list")
+
+    monkeypatch.setattr(service, "list_factors", fail_heavy_factor_list)
+
+    detail = assert_ok(client.get(f"/strategies/{created['id']}/detail"))
+
+    components = detail["multi_factor_profile"]["components"]
+    assert [item["factor_id"] for item in components] == created["parameters"]["factor_ids"]
+    assert components[0]["name"]
 
 
 def test_factor_model_create_materializes_existing_strategy_and_rejects_missing_industry_pit(tmp_path, monkeypatch) -> None:

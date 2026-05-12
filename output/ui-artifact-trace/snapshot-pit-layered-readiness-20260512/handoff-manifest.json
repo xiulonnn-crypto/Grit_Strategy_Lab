@@ -1,0 +1,125 @@
+{
+  "project": "grit-strategy-lab",
+  "design": "snapshot-pit-layered-readiness-20260512",
+  "created_at": "2026-05-12T00:00:00+08:00",
+  "status": "candidate",
+  "based_on": {
+    "design_system": "factor-governance-20260505-v4-sidebar",
+    "docs": [
+      "DESIGN.md",
+      "TECHNICAL.md",
+      "ARCHITECTURE.md"
+    ]
+  },
+  "html_preview": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\snapshot-pit-layered-readiness-20260512\\snapshot-pit-layered-readiness-preview.html",
+  "spec": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\snapshot-pit-layered-readiness-20260512\\snapshot-pit-layered-readiness-design-spec.md",
+  "routes": [
+    {
+      "page_key": "snapshots_equity_layered",
+      "route": "#/snapshots?tab=equity",
+      "preview_fragment": "#/snapshots?tab=equity",
+      "sidebar_active": "数据快照",
+      "canonical_modules": [
+        "live-style header and tab strip",
+        "health dashboard panel",
+        "L1-L4 dashboard cards",
+        "latest refresh card",
+        "coverage detail modal",
+        "data layer workbench",
+        "alert workbench",
+        "factor dimension readiness matrix",
+        "raw snapshot ledger",
+        "source trust evidence",
+        "credential and restart rail"
+      ],
+      "required_states": [
+        "ready",
+        "needs_repair",
+        "observe",
+        "calibrating",
+        "blocked_target_highlight",
+        "coverage_modal_open"
+      ],
+      "allowed_live_substitutions": [
+        "latest refresh time",
+        "provider chain labels",
+        "coverage and missing counts",
+        "dataset ids and row-level notes"
+      ],
+      "forbidden_runtime_drift": [
+        "reverting to stock/index/basket-only parallel governance",
+        "removing factor readiness matrix",
+        "hiding anomaly causes behind generic ready/pending copy"
+      ],
+      "screenshots": {
+        "desktop": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\snapshot-pit-layered-readiness-20260512\\snapshots-equity-layered-readiness-desktop.png",
+        "desktop_modal": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\snapshot-pit-layered-readiness-20260512\\snapshots-equity-coverage-modal-desktop.png",
+        "mobile": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\snapshot-pit-layered-readiness-20260512\\snapshots-equity-layered-readiness-mobile.png"
+      }
+    },
+    {
+      "page_key": "pit_layered_readiness",
+      "route": "#/pit-data",
+      "preview_fragment": "#/pit-data",
+      "sidebar_active": "PIT 清洗中心",
+      "canonical_modules": [
+        "hero",
+        "research waiver banner",
+        "L1-L4 PIT admission cards",
+        "ops guidance strip",
+        "PIT summary",
+        "factor diagnostic admission matrix",
+        "coverage drilldown buckets",
+        "anomaly checklist",
+        "rule workstation",
+        "action list"
+      ],
+      "required_states": [
+        "verified",
+        "sandbox",
+        "limited",
+        "calibrating",
+        "disabled",
+        "hard_blocker"
+      ],
+      "allowed_live_substitutions": [
+        "snapshot ids",
+        "missing counts and impact estimates",
+        "bucket examples and samples",
+        "blocker codes and fix targets"
+      ],
+      "forbidden_runtime_drift": [
+        "moving provider credential surfaces into PIT page",
+        "removing diagnostic admission matrix",
+        "flattening PIT gate to one generic blocker card",
+        "showing external repair queue as the first-screen primary module"
+      ],
+      "screenshots": {
+        "desktop": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\snapshot-pit-layered-readiness-20260512\\pit-layered-readiness-desktop.png",
+        "mobile": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\snapshot-pit-layered-readiness-20260512\\pit-layered-readiness-mobile.png"
+      }
+    }
+  ],
+  "responsive_viewports": {
+    "desktop": {
+      "width": 1960,
+      "height": 2400
+    },
+    "mobile": {
+      "width": 430,
+      "height": 2600
+    }
+  },
+  "design_md_follow_up": {
+    "status": "deferred_until_user_approval",
+    "promotable_rules": [
+      "snapshots uses L1-L4 data layer language as the top-level governance grammar",
+      "pit and snapshots share status semantics but keep source-governance versus replay-governance ownership separate"
+    ],
+    "screen_specific_rules": [
+      "first-screen bucket selection",
+      "default blocker action targets",
+      "current product copy and example counts"
+    ]
+  }
+}
