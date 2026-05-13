@@ -76,6 +76,7 @@ from .models import (
     PitDataOverviewResponseModel,
     PitIdentityScraperRestartRequest,
     PitResearchWaiverRequest,
+    ResumeBacktestRunRequest,
     ResumeOptimizationJobRequest,
     PromoteTrialRequest,
     PrepareConfirmationRequest,
@@ -998,6 +999,7 @@ def create_app(
     db_path: str | Path | None = None,
     market_data_provider=None,
     *,
+    startup_backtest_recovery_mode: str | None = None,
     startup_optimization_recovery_mode: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title='Grit Backtest Platform', version=__version__)
@@ -1019,6 +1021,13 @@ def create_app(
         db_path or _default_db_path(),
         market_data_provider=resolved_market_data_provider,
     )
+    normalized_startup_backtest_recovery_mode = str(
+        startup_backtest_recovery_mode
+        or os.getenv("GRIT_STARTUP_BACKTEST_RECOVERY")
+        or "resume"
+    ).strip().lower()
+    if normalized_startup_backtest_recovery_mode not in {"resume", "interrupt", "skip"}:
+        normalized_startup_backtest_recovery_mode = "resume"
     normalized_startup_optimization_recovery_mode = str(
         startup_optimization_recovery_mode
         or os.getenv("GRIT_STARTUP_OPTIMIZATION_RECOVERY")
@@ -1027,6 +1036,7 @@ def create_app(
     if normalized_startup_optimization_recovery_mode not in {"resume", "interrupt", "skip"}:
         normalized_startup_optimization_recovery_mode = "resume"
     app.state.service = service
+    app.state.startup_backtest_recovery_mode = normalized_startup_backtest_recovery_mode
     app.state.startup_optimization_recovery_mode = normalized_startup_optimization_recovery_mode
     app.state.cleanup_stop_event = threading.Event()
     app.state.cleanup_thread = None
@@ -1110,10 +1120,16 @@ def create_app(
     @app.on_event('startup')
     def startup_cleanup_worker():
         run_cleanup_cycle()
-        try:
-            invoke(service.resume_incomplete_backtest_runs)
-        except Exception:
-            pass
+        if app.state.startup_backtest_recovery_mode == "resume":
+            try:
+                invoke(service.resume_incomplete_backtest_runs)
+            except Exception:
+                pass
+        elif app.state.startup_backtest_recovery_mode == "interrupt":
+            try:
+                invoke(service.interrupt_incomplete_backtest_runs)
+            except Exception:
+                pass
         if app.state.startup_optimization_recovery_mode == "resume":
             try:
                 invoke(service.resume_incomplete_optimization_jobs)
@@ -1252,6 +1268,10 @@ def create_app(
     @app.post('/backtest-runs/{run_id}/clone')
     def clone_backtest_run(run_id: str, payload: BacktestRunCloneRequest):
         return invoke(service.clone_backtest_run, run_id, payload)
+
+    @app.post('/backtest-runs/{run_id}/resume')
+    def resume_backtest_run(run_id: str, payload: ResumeBacktestRunRequest):
+        return invoke(service.resume_backtest_run, run_id, payload)
 
     @app.get('/leg-inventory', response_model=LegInventoryResponseModel)
     def leg_inventory():

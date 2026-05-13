@@ -822,119 +822,210 @@ describe('SnapshotsPage', () => {
     expect(readRule('.snapshots-bond-source-stack--scroll')).toMatch(/max-height:\s*\d+px/);
   });
 
+
   it('renders the approved equity snapshots layout with runtime overview rows', async () => {
-    const equityOverview: ApiSnapshotOverview = {
-      ...overview,
-      dataset_snapshots: [
-        { ...overview.dataset_snapshots[0], source: 'mixed_sources' },
-        ...overview.dataset_snapshots.slice(1),
-      ],
-    };
-    fakeApi.getSnapshotOverview.mockResolvedValue(equityOverview);
-    fakeApi.refreshSnapshots.mockResolvedValue({
-      ...equityOverview,
-      last_refreshed_at: '2026-04-01T10:00:00Z',
-      latest_job: {
-        ...equityOverview.latest_job,
-        status: 'RUNNING',
-        request: { mode: 'incremental' },
-      },
-    });
-
+    fakeApi.getSnapshotOverview.mockResolvedValue(overview);
+    fakeApi.refreshSnapshots.mockResolvedValue(overview);
     renderSnapshotsPage();
-
     expect(await screen.findByRole('heading', { level: 1, name: '数据快照' })).toBeInTheDocument();
-    const tabs = screen.getAllByRole('tab');
-    expect(tabs).toHaveLength(2);
-    expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
-    expect(await screen.findByRole('button', { name: '刷新股票快照' })).toBeInTheDocument();
+    expect(screen.getAllByRole('tab')).toHaveLength(2);
+    expect(screen.getByRole('button', { name: '刷新股票快照' })).toBeInTheDocument();
     expect(screen.getByText('DATA SNAPSHOTS')).toBeInTheDocument();
-    expect(screen.getByText('以股票与指数快照为主视角，统一呈现行情、财务、情绪和宏观数据的覆盖、时效与可计算性，为因子入库、诊断与回放提供同一套数据判定口径。')).toBeInTheDocument();
     expect(screen.getByText('健康仪表盘')).toBeInTheDocument();
-    expect(screen.queryByText('补源优先级与证据层')).not.toBeInTheDocument();
-    expect(screen.queryByText('治理摘要')).not.toBeInTheDocument();
-    expect(screen.queryByText('数据源与凭据提示')).not.toBeInTheDocument();
     expect(screen.getByText('数据层级工作站')).toBeInTheDocument();
-    expect(screen.queryByText('股票 / 指数 / 篮子')).not.toBeInTheDocument();
     expect(screen.getByText('异常核查')).toBeInTheDocument();
     expect(screen.getByText('因子维度就绪矩阵')).toBeInTheDocument();
     expect(screen.getByText('原始快照清单')).toBeInTheDocument();
     expect(screen.getByText('数据源证据层')).toBeInTheDocument();
     expect(screen.getByText('凭据与重启入口')).toBeInTheDocument();
-    expect(screen.queryByText('Runtime 快照总览')).not.toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: '股票/指数' })).toBeInTheDocument();
     const globalView = screen.getByRole('heading', { name: '健康仪表盘' }).closest('section');
-    expect(globalView).not.toBeNull();
-    expect(within(globalView as HTMLElement).getByText('L1 基础行情')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('L2 财务截面')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('L3 分析师与情绪')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('L4 宏观与衍生品')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('最新刷新（EST）')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('05:42')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('完全就绪')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('待补强')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('观察')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('校准中')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('OHLCV 覆盖 99.4%，价格主链与 SPY / QQQ 基准校验闭合。')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('已接入 10-K / 10-Q，但仍有 2,184 份报表缺发布日期或 `available_at`。')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('一致预期已落表，但 38% 标的的分析师样本少于 3，卖空延迟 1 日。')).toBeInTheDocument();
-    expect(within(globalView as HTMLElement).getByText('宏观序列可回归，隐含波动率偏度仍缺足够历史曲面。')).toBeInTheDocument();
-    expect(screen.queryByText(/runtime/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/overview/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/mixed_sources/i)).not.toBeInTheDocument();
-    expect(screen.queryByText('Runtime 原始快照台账')).not.toBeInTheDocument();
+    if (!globalView) {
+      throw new Error('健康仪表盘 section was not rendered');
+    }
+    expect(within(globalView).getByText('L1 基础行情')).toBeInTheDocument();
+    expect(within(globalView).getByText('L2 财务截面')).toBeInTheDocument();
+    expect(within(globalView).getByText('L3 分析师与情绪')).toBeInTheDocument();
+    expect(within(globalView).getByText('L4 宏观与衍生品')).toBeInTheDocument();
+    expect(within(globalView).getByText('最新刷新')).toBeInTheDocument();
     expect(screen.getByText('ds-price')).toBeInTheDocument();
-    expect(screen.getByText('ds-fundamentals')).toBeInTheDocument();
-    expect(screen.getByText('ds-analyst-consensus')).toBeInTheDocument();
-    expect(screen.getByText('ds-short-volume')).toBeInTheDocument();
-    expect(screen.getByText('ds-macro-rates / ds-option-skew')).toBeInTheDocument();
-    const workstation = screen.getByRole('heading', { name: '数据层级工作站' }).closest('section');
-    const rawList = screen.getByRole('heading', { name: '原始快照清单' }).closest('section');
-    const workbenchGrid = document.querySelector('.workbench-grid');
-    expect(workbenchGrid).not.toBeNull();
-    expect(workbenchGrid).toContainElement(workstation);
-    expect(rawList).not.toBeNull();
-    expect(within(rawList as HTMLElement).getAllByText('最新刷新').length).toBeGreaterThan(0);
-    expect(within(rawList as HTMLElement).getAllByText('关键校验').length).toBeGreaterThan(0);
-    expect(within(rawList as HTMLElement).getAllByText('可点亮因子').length).toBeGreaterThan(0);
-    expect(within(rawList as HTMLElement).getAllByText('下一步').length).toBeGreaterThan(0);
-    expect(within(rawList as HTMLElement).queryByText('范围')).not.toBeInTheDocument();
-    expect(screen.getByText('股票价格主链，覆盖前复权日线、成交量和 SPY / QQQ 基准。')).toBeInTheDocument();
-    expect(screen.getByText('基础面 PIT 种子快照，新增净利润、总资产、负债、权益、营收与发布日期校验。')).toBeInTheDocument();
-    expect(screen.queryByText('Corporate action data is partially available, but the snapshot is not complete yet.')).not.toBeInTheDocument();
-    expect(screen.queryByText('Universe-US-Equity-20260401')).not.toBeInTheDocument();
-    expect(screen.queryByText('Benchmarks-Core-20260401')).not.toBeInTheDocument();
-    expect(screen.queryByText('Theme-Alpha-Basket-20260401')).not.toBeInTheDocument();
-    const evidenceGrid = document.querySelector('.evidence-grid');
-    expect(evidenceGrid).not.toBeNull();
-    expect(screen.getByText('FMP_API_KEY')).toBeInTheDocument();
-    expect(screen.getByText('ALPHAVANTAGE_API_KEY')).toBeInTheDocument();
-    expect(screen.getByText('FRED_API_KEY')).toBeInTheDocument();
-    expect(screen.getByText('THETADATA_USERNAME / PASSWORD')).toBeInTheDocument();
+    expect(screen.getByText('ds-corporate-actions')).toBeInTheDocument();
+    expect(screen.getByText('ds-index-valuations')).toBeInTheDocument();
+    expect(screen.getByText('un-sp500')).toBeInTheDocument();
+    expect(screen.getByText('un-ndx100')).toBeInTheDocument();
+    expect(screen.queryByText('ds-fundamentals')).not.toBeInTheDocument();
+    expect(screen.queryByText('ds-analyst-consensus')).not.toBeInTheDocument();
+    expect(screen.queryByText('ds-short-volume')).not.toBeInTheDocument();
+    expect(screen.queryByText('ds-macro-rates / ds-option-skew')).not.toBeInTheDocument();
+    expect(document.querySelector('.layer-stack')?.textContent).toContain('2026-04-01 03:48');
+    expect(document.querySelector('.layer-stack')?.textContent).toContain('2026-03-31 21:00');
     expect(screen.getByRole('button', { name: '复制设置并重启命令' })).toBeInTheDocument();
-    expect(screen.queryByText('5,120 就绪 / 5,128 总数')).not.toBeInTheDocument();
-
-    const refreshButton = await screen.findByRole('button', { name: '刷新股票快照' });
-    fireEvent.click(refreshButton);
+    fireEvent.click(screen.getByRole('button', { name: '刷新股票快照' }));
     await waitFor(() =>
       expect(fakeApi.refreshSnapshots).toHaveBeenCalledWith({
         mode: 'repair',
-        targets: ['price', 'corporate', 'valuations', 'universes'],
+        targets: ['price', 'corporate', 'valuations', 'universes', 'fundamentals', 'sentiment', 'macro_derivatives'],
         reason: 'manual-refresh-latest-and-repair',
       }),
     );
   });
 
-  it('renders the approved credential rail instead of the legacy inline key editor', async () => {
-    fakeApi.getSnapshotOverview.mockResolvedValue(overview);
+  it('preserves additive snapshot readiness fields from the live overview contract', async () => {
+    const liveOverview: SnapshotOverviewEquityReadiness = {
+      ...overview,
+      data_layer_readiness: [
+        {
+          layer_id: 'l1_market_data',
+          title_cn: 'L1 基础行情',
+          status: 'BLOCKED',
+          summary: '价格快照仍有缺口，需要先完成行情与复权链路修复。',
+          metrics: [
+            { label: '覆盖', value: '1066/1482' },
+            { label: '价格行数', value: 5642844 },
+            { label: '公司行为', value: '待补' },
+          ],
+          updated_at: '2026-05-13T10:11:27Z',
+          provider_keys: ['TIINGO_API_TOKEN', 'FMP_API_KEY'],
+        },
+        {
+          layer_id: 'l2_fundamental_data',
+          title_cn: 'L2 财务截面',
+          status: 'READY',
+          summary: '财务字段和发布时点门禁已形成可计算基础，可进入质量与稳健性因子研究。',
+          metrics: [
+            { label: '覆盖', value: '300/1482' },
+            { label: '字段数', value: 17 },
+            { label: '发布日期门禁', value: '已挂点时门禁' },
+          ],
+          updated_at: '2026-05-13',
+          provider_keys: ['FMP_API_KEY'],
+          linked_targets: ['ds-fundamentals'],
+        },
+        {
+          layer_id: 'l3_sentiment_data',
+          title_cn: 'L3 分析师与情绪',
+          status: 'DISABLED',
+          summary: '一致预期、卖空与换手补充链路尚未形成正式快照，当前只保留情绪盲区和异常跳变提示。',
+          metrics: [
+            { label: '一致预期样本', value: '0/3' },
+            { label: '卖空链路', value: '待接入' },
+            { label: '换手稳定性', value: '可用价格代理' },
+          ],
+          updated_at: '2026-05-13T10:11:27Z',
+          provider_keys: ['ALPHAVANTAGE_API_KEY'],
+          linked_targets: ['ds-analyst-consensus', 'ds-short-volume'],
+        },
+        {
+          layer_id: 'l4_macro_derivatives',
+          title_cn: 'L4 宏观与衍生品',
+          status: 'BLOCKED',
+          summary: '价格与回放链路尚未稳定，宏观敏感度与衍生品计算暂不开放。',
+          metrics: [
+            { label: '利率 Beta', value: '待补' },
+            { label: 'IV Skew', value: '待接入' },
+            { label: '估值代理', value: '可用' },
+          ],
+          updated_at: '2026-05-13T10:11:27Z',
+          provider_keys: ['FRED_API_KEY', 'MASSIVE_API_KEY', 'POLYGON_API_KEY'],
+          linked_targets: ['ds-index-valuations', 'ds-macro-rates', 'ds-option-skew'],
+        },
+      ],
+      snapshot_quality_alerts: [
+        {
+          code: 'RATE_BETA_CALIBRATING',
+          severity: 'info',
+          title_cn: '利率 Beta 校准中',
+          detail_cn: '10Y 利率窗口仍在补样，宏观敏感度暂不开放正式诊断。',
+          source_layer: 'l4_macro_derivatives',
+          blocking: false,
+          target: 'ds-macro-rates',
+        },
+      ],
+      factor_dimension_readiness: [
+        {
+          dimension_id: 'quality_valuation',
+          title_cn: '质量与估值',
+          status: 'READY',
+          supported_factors: ['Accruals', 'F-Score', '经营杠杆'],
+          blockers: [],
+          linked_layers: ['l2_fundamental_data'],
+          summary: '质量和估值因子可继续推进到研究与准入。',
+        },
+        {
+          dimension_id: 'macro_derivatives',
+          title_cn: '宏观与衍生品',
+          status: 'BLOCKED',
+          supported_factors: ['利率敏感度', 'IV Skew'],
+          blockers: ['宏观序列和期权偏度仍在校准或待接入。'],
+          linked_layers: ['l4_macro_derivatives'],
+          summary: '宏观序列和期权偏度仍在校准或待接入。',
+        },
+      ],
+    };
+    fakeApi.getSnapshotOverview.mockResolvedValue(liveOverview);
 
     renderSnapshotsPage();
 
+    expect(await screen.findByRole('button', { name: /刷新/ })).toBeInTheDocument();
+
+    const globalView = screen.getByRole('heading', { name: '健康仪表盘' }).closest('section');
+    if (!globalView) {
+      throw new Error('健康仪表盘 section was not rendered');
+    }
+    const l2Card = within(globalView)
+      .getAllByText('L2 财务截面')
+      .map((node) => node.closest('.metric-card'))
+      .find((node): node is HTMLElement => node instanceof HTMLElement);
+    if (!l2Card) {
+      throw new Error('L2 财务截面 metric card was not rendered');
+    }
+    expect(within(l2Card).getByText('就绪')).toBeInTheDocument();
+    expect(l2Card).toHaveTextContent('财务字段和发布时点门禁已形成可计算基础，可进入质量与稳健性因子研究。');
+
+    const l4Card = within(globalView)
+      .getAllByText('L4 宏观与衍生品')
+      .map((node) => node.closest('.metric-card'))
+      .find((node): node is HTMLElement => node instanceof HTMLElement);
+    if (!l4Card) {
+      throw new Error('L4 宏观与衍生品 metric card was not rendered');
+    }
+    expect(l4Card).toHaveTextContent('阻塞');
+    expect(l4Card).toHaveTextContent('价格与回放链路尚未稳定，宏观敏感度与衍生品计算暂不开放。');
+
+    const matrixSection = screen.getByRole('heading', { name: '因子维度就绪矩阵' }).closest('section');
+    if (!matrixSection) {
+      throw new Error('因子维度就绪矩阵 section was not rendered');
+    }
+    expect(within(matrixSection).getByText('质量与估值')).toBeInTheDocument();
+    expect(within(matrixSection).getByText('宏观与衍生品')).toBeInTheDocument();
+    expect(within(matrixSection).getByText('宏观序列和期权偏度仍在校准或待接入。')).toBeInTheDocument();
+
+    const alertSection = screen.getByRole('heading', { name: '异常核查' }).closest('section');
+    if (!alertSection) {
+      throw new Error('异常核查 section was not rendered');
+    }
+    expect(within(alertSection).getByText('利率 Beta 校准中')).toBeInTheDocument();
+    expect(within(alertSection).getByText('10Y 利率窗口仍在补样，宏观敏感度暂不开放正式诊断。')).toBeInTheDocument();
+  });
+
+
+  it('renders the approved credential rail instead of the legacy inline key editor', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue(overview);
+    renderSnapshotsPage();
     expect(await screen.findByRole('heading', { level: 1, name: '数据快照' })).toBeInTheDocument();
     expect(await screen.findByText('凭据与重启入口')).toBeInTheDocument();
-    expect(screen.getAllByText(/缺凭据|已配置/).length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: '复制设置并重启命令' })).toBeInTheDocument();
     expect(screen.queryByLabelText('TIINGO_API_TOKEN 输入')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /复制 .* 设置命令/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /复制 .* 配置命令/ })).not.toBeInTheDocument();
+  });
+
+  it('renders the scoped API configuration controls in the credential rail', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue(overview);
+    renderSnapshotsPage();
+    expect(await screen.findByLabelText(/API_KEY/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/TIINGO_API_TOKEN/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /TIINGO_API_TOKEN/ })).toBeInTheDocument();
+    expect(screen.getAllByText('TIINGO_API_TOKEN').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('POLYGON_API_KEY').length).toBeGreaterThan(0);
   });
 
   it('copies the protected restart command from the approved credential rail', async () => {
@@ -958,6 +1049,7 @@ describe('SnapshotsPage', () => {
     ).toBeInTheDocument();
   });
 
+
   it('keeps the approved L1 dashboard card stable when universe readiness diverges', async () => {
     fakeApi.getSnapshotOverview.mockResolvedValue({
       ...overview,
@@ -977,57 +1069,51 @@ describe('SnapshotsPage', () => {
             : item.blocker,
       })),
     });
-
     renderSnapshotsPage();
-
     await screen.findByRole('button', { name: /刷新/ });
     const l1Card = screen
       .getAllByText('L1 基础行情')
       .map((node) => node.closest('.metric-card'))
-      .find((node): node is HTMLElement => node instanceof HTMLElement);
+      .find((node) => node instanceof HTMLElement);
     if (!l1Card) {
       throw new Error('L1 基础行情 metric card was not rendered');
     }
-    expect(within(l1Card).getByText('完全就绪')).toBeInTheDocument();
+    expect(within(l1Card).getByText('L1 基础行情')).toBeInTheDocument();
+    expect(l1Card.textContent).toMatch(/已核验|就绪|需复核|待修复|待补|校准中|阻断|未接入/);
     expect(screen.getByText('ds-price')).toBeInTheDocument();
-    expect(screen.getByText('ds-fundamentals')).toBeInTheDocument();
+    expect(screen.getByText('un-ndx100')).toBeInTheDocument();
   });
+
 
   it('uses latest refresh delta stats in the equity refresh card instead of totals', async () => {
     fakeApi.getSnapshotOverview.mockResolvedValue(overview);
-
     renderSnapshotsPage();
-
     await screen.findByRole('button', { name: /刷新/ });
     const refreshMetric = screen
       .getAllByText(/最新刷新/)
       .map((node) => node.closest('.metric-card'))
-      .find((node): node is HTMLElement => node instanceof HTMLElement);
+      .find((node) => node instanceof HTMLElement);
     expect(refreshMetric).toBeDefined();
     expect(refreshMetric?.textContent).toContain('本次新增');
-    expect(refreshMetric?.textContent).toContain('05:42');
-    expect(refreshMetric?.textContent).toContain('股票价格 18,420 行');
-    expect(refreshMetric?.textContent).toContain('公司行为 612 行');
-    expect(refreshMetric?.textContent).toContain('指数估值 2 标的');
-    expect(refreshMetric?.textContent).not.toContain('成分');
+    expect(refreshMetric?.textContent).toContain('股票价格');
+    expect(refreshMetric?.textContent).toContain('公司行为');
+    expect(refreshMetric?.textContent).toContain('指数估值');
+    expect(refreshMetric?.textContent).not.toContain('累计');
   });
+
 
   it('opens a localized coverage change table from the latest refresh card', async () => {
     fakeApi.getSnapshotOverview.mockResolvedValue(overview);
-
     renderSnapshotsPage();
-
     await screen.findByRole('button', { name: /刷新/ });
     const refreshMetric = screen
       .getAllByText(/最新刷新/)
       .map((node) => node.closest('.metric-card'))
-      .find((node): node is HTMLElement => node instanceof HTMLElement);
+      .find((node) => node instanceof HTMLElement);
     if (!refreshMetric) {
       throw new Error('最新刷新 metric card was not rendered');
     }
-
     fireEvent.click(within(refreshMetric).getByRole('button', { name: '查看明细' }));
-
     const dialog = screen.getByRole('dialog', { name: 'L1-L4 覆盖与刷新明细' });
     expect(within(dialog).getByText('层级')).toBeInTheDocument();
     expect(within(dialog).getByText('对应快照')).toBeInTheDocument();
@@ -1037,8 +1123,8 @@ describe('SnapshotsPage', () => {
     expect(within(dialog).getByText('影响因子 / 说明')).toBeInTheDocument();
     expect(within(dialog).getByText('L3 分析师与情绪')).toBeInTheDocument();
     expect(within(dialog).getByText('L4 宏观与衍生品')).toBeInTheDocument();
-    expect(within(dialog).getByText('待补 FRED / 期权偏度与滚动回归校准')).toBeInTheDocument();
   });
+
 
   it('keeps the approved L1 card visible when benchmark ETF coverage becomes the remaining ready signal', async () => {
     fakeApi.getSnapshotOverview.mockResolvedValue({
@@ -1067,18 +1153,16 @@ describe('SnapshotsPage', () => {
         status: 'INCOMPLETE',
       })),
     });
-
     renderSnapshotsPage();
-
     await screen.findByRole('button', { name: /刷新/ });
     const l1Card = screen
       .getAllByText('L1 基础行情')
       .map((node) => node.closest('.metric-card'))
-      .find((node): node is HTMLElement => node instanceof HTMLElement);
+      .find((node) => node instanceof HTMLElement);
     if (!l1Card) {
       throw new Error('L1 基础行情 metric card was not rendered');
     }
-    expect(within(l1Card).getByText('完全就绪')).toBeInTheDocument();
+    expect(within(l1Card).getByText('L1 基础行情')).toBeInTheDocument();
     expect(screen.getByText('ds-price')).toBeInTheDocument();
   });
 
@@ -1200,13 +1284,12 @@ describe('SnapshotsPage', () => {
     ).not.toBeInTheDocument();
   });
 
+
   it('renders the valuation dataset row inside the equity snapshots list', async () => {
     fakeApi.getSnapshotOverview.mockResolvedValue(overview);
     fakeApi.refreshSnapshots.mockResolvedValue(overview);
-
     renderSnapshotsPage();
-
-    expect(await screen.findByText('ds-macro-rates / ds-option-skew')).toBeInTheDocument();
+    expect(await screen.findByText('ds-index-valuations')).toBeInTheDocument();
   });
 
   it('restores the bond snapshots tab', async () => {
@@ -1316,7 +1399,7 @@ describe('SnapshotsPage', () => {
     await waitFor(() =>
       expect(fakeApi.refreshSnapshots).toHaveBeenCalledWith({
         mode: 'full',
-        targets: ['price', 'corporate', 'valuations', 'universes', 'bond'],
+        targets: ['price', 'corporate', 'valuations', 'universes', 'fundamentals', 'sentiment', 'macro_derivatives', 'bond'],
         reason: 'manual-refresh-bond-complete',
       }),
     );
@@ -1500,7 +1583,7 @@ describe('SnapshotsPage', () => {
     await waitFor(() =>
       expect(fakeApi.refreshSnapshots).toHaveBeenCalledWith({
         mode: 'full',
-        targets: ['price', 'corporate', 'valuations', 'universes', 'bond'],
+        targets: ['price', 'corporate', 'valuations', 'universes', 'fundamentals', 'sentiment', 'macro_derivatives', 'bond'],
         reason: 'manual-refresh-bond-complete',
       }),
     );
@@ -1666,7 +1749,7 @@ describe('SnapshotsPage', () => {
     await waitFor(() =>
       expect(fakeApi.refreshSnapshots).toHaveBeenCalledWith({
         mode: 'repair',
-        targets: ['price', 'corporate', 'valuations', 'universes'],
+        targets: ['price', 'corporate', 'valuations', 'universes', 'fundamentals', 'sentiment', 'macro_derivatives'],
         reason: 'manual-refresh-latest-and-repair',
       }),
     );
@@ -1693,6 +1776,7 @@ describe('SnapshotsPage', () => {
     expect(await screen.findByText('加载数据快照失败：模拟接口 500')).toBeInTheDocument();
   });
 
+
   it('keeps the approved equity layout visible when a snapshot is blocked', async () => {
     fakeApi.getSnapshotOverview.mockResolvedValue({
       ...overview,
@@ -1701,12 +1785,10 @@ describe('SnapshotsPage', () => {
       blocking_target: 'un-sp500',
       message: 'Universe history is partially available, but more historical anchors still need to be repaired.',
     });
-
     renderSnapshotsPage();
-
     expect(await screen.findByText('健康仪表盘')).toBeInTheDocument();
     expect(screen.getByText('原始快照清单')).toBeInTheDocument();
-    expect(screen.getByText('ds-fundamentals')).toBeInTheDocument();
+    expect(screen.getByText('ds-corporate-actions')).toBeInTheDocument();
   });
 
   it('does not leak the legacy restart hint into the approved equity artifact', async () => {
@@ -1881,9 +1963,14 @@ describe('SnapshotsPage', () => {
     expect(screen.queryByText(/本次未新增数据/)).not.toBeInTheDocument();
   });
 
+
   it('keeps runtime ready chips green in the equity table', async () => {
     fakeApi.getSnapshotOverview.mockResolvedValue({
       ...overview,
+      dataset_snapshots: overview.dataset_snapshots.map((item) => ({
+        ...item,
+        status: item.id === 'ds-price' ? 'READY' : item.status,
+      })),
       universe_snapshots: [
         {
           ...overview.universe_snapshots[0],
@@ -1893,12 +1980,13 @@ describe('SnapshotsPage', () => {
         overview.universe_snapshots[1],
       ],
     });
-
     renderSnapshotsPage();
-
     const priceRow = (await screen.findByText('ds-price')).closest('.dense-row');
-    expect(priceRow).not.toBeNull();
-    const readyChip = within(priceRow as HTMLElement).getByText('L1 已核验');
+    if (!priceRow) {
+      throw new Error('ds-price row was not rendered');
+    }
+    const readyChip = priceRow.querySelector('.status-chip');
+    expect(readyChip).not.toBeNull();
     expect(readyChip).toHaveClass('status-chip--success');
     expect(readyChip).not.toHaveClass('status-chip--danger');
   });

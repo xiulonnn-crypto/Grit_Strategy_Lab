@@ -78,7 +78,7 @@ const BOND_SOURCE_LABELS: Record<string, string> = {
 
 const BOND_COMPLETE_REFRESH_REQUEST: ApiSnapshotRefreshRequest = {
   mode: 'full',
-  targets: ['price', 'corporate', 'valuations', 'universes', 'bond'],
+  targets: ['price', 'corporate', 'valuations', 'universes', 'fundamentals', 'sentiment', 'macro_derivatives', 'bond'],
   reason: 'manual-refresh-bond-complete',
 };
 

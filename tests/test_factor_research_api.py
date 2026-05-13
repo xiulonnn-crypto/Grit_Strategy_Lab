@@ -812,6 +812,7 @@ def test_pit_external_source_readiness_tracks_cache_and_optional_credentials(tmp
     monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
     monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
     monkeypatch.delenv("KAGGLE_KEY", raising=False)
+    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
     monkeypatch.delenv("POLYGON_API_KEY", raising=False)
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
@@ -2697,6 +2698,7 @@ def test_fundamental_pit_loader_filters_on_available_at_not_period_end(tmp_path)
                 "symbol": "AAPL",
                 "date": "2020-12-31",
                 "period_end_date": "2020-12-31",
+                "publish_date": "2021-03-01",
                 "available_at": "2021-03-01",
                 "ltm_earnings": 10.0,
                 "book_value_equity": 50.0,
@@ -2710,6 +2712,7 @@ def test_fundamental_pit_loader_filters_on_available_at_not_period_end(tmp_path)
                 "symbol": "AAPL",
                 "date": "2020-12-31",
                 "period_end_date": "2020-12-31",
+                "publish_date": "2021-06-01",
                 "available_at": "2021-06-01",
                 "ltm_earnings": 999.0,
                 "book_value_equity": 999.0,
@@ -2757,6 +2760,164 @@ def test_fundamental_pit_loader_filters_on_available_at_not_period_end(tmp_path)
     linkage = {item["check_id"]: item for item in pit["snapshot_layer_linkage"]}
     assert linkage["fundamental_publish_gate"]["result_status"] == "READY"
     assert all(item["code"] != "MISSING_AVAILABLE_AT" for item in pit["pit_quality_alerts"])
+
+
+def test_pit_data_blocks_fundamentals_without_publish_date(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    service = client.app.state.service
+    repository = service.market_data_repository
+    repository.replace_fundamental_snapshot(
+        {
+            "id": "ds-fundamentals",
+            "name": "基础面 PIT 数据",
+            "status": "READY",
+            "as_of": "2021-03-01",
+            "freshness_label": "unit-test",
+            "start_date": "2020-12-31",
+            "end_date": "2020-12-31",
+            "row_count": 1,
+            "source": "unit_test",
+            "fallback_source": "none",
+            "metadata": {
+                "covered_symbol_count": 1,
+                "total_symbol_count": 1,
+                "available_fields": [
+                    "ltm_earnings",
+                    "revenue",
+                    "gross_profit",
+                    "net_income",
+                    "market_cap",
+                    "book_value_equity",
+                    "operating_cash_flow",
+                    "capex",
+                    "enterprise_value",
+                    "total_shares",
+                    "shares_outstanding",
+                    "total_assets",
+                    "current_assets",
+                    "current_liabilities",
+                    "long_term_debt",
+                    "total_debt",
+                    "cash_and_equivalents",
+                ],
+            },
+        },
+        fundamental_points=[
+            {
+                "symbol": "AAPL",
+                "date": "2020-12-31",
+                "period_end_date": "2020-12-31",
+                "available_at": "2021-03-01",
+                "ltm_earnings": 10.0,
+                "revenue": 100.0,
+                "gross_profit": 40.0,
+                "net_income": 8.0,
+                "market_cap": 2_000_000.0,
+                "book_value_equity": 50.0,
+                "operating_cash_flow": 12.0,
+                "capex": 2.0,
+                "enterprise_value": 2_200_000.0,
+                "total_shares": 1_000_000.0,
+                "shares_outstanding": 1_000_000.0,
+                "total_assets": 120.0,
+                "current_assets": 40.0,
+                "current_liabilities": 20.0,
+                "long_term_debt": 10.0,
+                "total_debt": 15.0,
+                "cash_and_equivalents": 5.0,
+            }
+        ],
+        fundamental_coverage=[
+            {
+                "symbol": "AAPL",
+                "start_date": "2020-12-31",
+                "end_date": "2020-12-31",
+                "observation_count": 1,
+                "fields": [
+                    "ltm_earnings",
+                    "revenue",
+                    "gross_profit",
+                    "net_income",
+                    "market_cap",
+                    "book_value_equity",
+                    "operating_cash_flow",
+                    "capex",
+                    "enterprise_value",
+                    "total_shares",
+                    "shares_outstanding",
+                    "total_assets",
+                    "current_assets",
+                    "current_liabilities",
+                    "long_term_debt",
+                    "total_debt",
+                    "cash_and_equivalents",
+                ],
+            }
+        ],
+    )
+    if hasattr(service, "_invalidate_pit_data_overview_cache"):
+        service._invalidate_pit_data_overview_cache()
+
+    pit = assert_ok(client.get("/pit-data"))
+
+    fundamental_layer = next(item for item in pit["pit_layer_readiness"] if item["layer_id"] == "l2_fundamental_data")
+    assert fundamental_layer["available_at_health"]["missing_publish_date_count"] == 1
+    linkage = {item["check_id"]: item for item in pit["snapshot_layer_linkage"]}
+    assert linkage["fundamental_publish_gate"]["result_status"] == "BLOCKED"
+    assert any(item["code"] == "MISSING_PUBLISH_DATE" for item in pit["pit_quality_alerts"])
+
+
+def test_pit_data_promotes_persisted_consensus_to_observation(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    service = client.app.state.service
+    repository = service.market_data_repository
+    repository.replace_signal_snapshot(
+        {
+            "id": "ds-analyst-consensus",
+            "name": "分析师预期样本",
+            "status": "READY",
+            "as_of": "2026-04-01",
+            "freshness_label": "unit-test",
+            "start_date": "2026-03-01",
+            "end_date": "2026-04-01",
+            "row_count": 1,
+            "source": "unit_test",
+            "fallback_source": "none",
+            "metadata": {"covered_symbol_count": 1, "total_symbol_count": 1},
+        },
+        signal_points=[
+            {
+                "entity_key": "AAPL",
+                "date": "2026-04-01",
+                "publish_date": "2026-04-01",
+                "available_at": "2026-04-01",
+                "metric_key": "eps_surprise_pct",
+                "metric_value": 0.08,
+                "source": "unit_test",
+                "raw": {"provider": "alpha_vantage"},
+            }
+        ],
+        signal_coverage=[
+            {
+                "entity_key": "AAPL",
+                "start_date": "2026-04-01",
+                "end_date": "2026-04-01",
+                "observation_count": 1,
+                "source": "unit_test",
+            }
+        ],
+    )
+    if hasattr(service, "_invalidate_pit_data_overview_cache"):
+        service._invalidate_pit_data_overview_cache()
+
+    pit = assert_ok(client.get("/pit-data"))
+    l3_layer = next(item for item in pit["pit_layer_readiness"] if item["layer_id"] == "l3_sentiment_data")
+    linkage = {item["check_id"]: item for item in pit["snapshot_layer_linkage"]}
+
+    assert l3_layer["status"] == "OBSERVATION"
+    assert linkage["consensus_sample_gate"]["result_status"] == "OBSERVATION"
 
 
 def test_factor_diagnostics_reject_current_universe_snapshot_binding(tmp_path):

@@ -363,7 +363,10 @@ function layerKeyToTitle(layerKey: SnapshotLayerKey): string {
 
 function statusTone(status?: string | null): SnapshotLayerDisplay['statusTone'] {
   switch (normalizeStatus(status)) {
-    case 'READY':
+    case 'OBSERVATION':
+      return 'warning'; /*
+      return '?弦?航?;
+    */ case 'READY':
     case 'COMPLETED':
     case 'VERIFIED':
       return 'accent';
@@ -373,6 +376,9 @@ function statusTone(status?: string | null): SnapshotLayerDisplay['statusTone'] 
     case 'CALIBRATING':
     case 'SANDBOX':
       return 'info';
+    case 'WARNING':
+    case 'INCOMPLETE':
+      return 'warning';
     case 'DISABLED':
       return 'neutral';
     default:
@@ -1648,225 +1654,70 @@ type SnapshotEvidenceDisplayRow = {
   statusLabel: string;
 };
 
-function buildSnapshotWorkbenchRows(): SnapshotWorkbenchDisplayRow[] {
-  return [
-    {
-      key: 'l1',
-      title: '市场行情',
-      summary: '主源 Tiingo，补链 OpenBB Yahoo，基准 ETF 采用 SPY / QQQ。',
-      status: 'READY',
-      statusLabel: '已核验',
-      stats: ['收益/成交量 / OHLC 完整', '动量 / 波动 / 流动性已点亮'],
-    },
-    {
-      key: 'l2',
-      title: '财务截面',
-      summary: 'FMP 财报字段接入，关键约束是 `Publish Date` 与资产负债表自洽。',
-      status: 'WARNING',
-      statusLabel: '待修复',
-      stats: ['应计项目 / F-Score / 经营杠杆', '缺发布日期 2,184'],
-    },
-    {
-      key: 'l3',
-      title: '分析师与情绪',
-      summary: 'Alpha Vantage 一致预期与 FINRA 卖空成交已联动，同时检查样本离散与时效。',
-      status: 'SANDBOX',
-      statusLabel: '受限',
-      stats: ['分析师上修', '空头回补 / 换手偏度'],
-    },
-    {
-      key: 'l4',
-      title: '宏观与衍生品',
-      summary: 'FRED 提供利率与通胀序列，ThetaData 提供期权区间，区分可回归与未闭环链路。',
-      status: 'CALIBRATING',
-      statusLabel: '校准中',
-      stats: ['利率 / CPI / 商品 Beta', '隐含波动率偏度暂置灰'],
-    },
-  ];
+function buildSnapshotWorkbenchRows(layerDisplays: SnapshotLayerDisplay[]): SnapshotWorkbenchDisplayRow[] {
+  return layerDisplays.map((layer) => ({
+    key: layer.key,
+    title: layer.title,
+    summary: layer.summary,
+    status: layer.status,
+    statusLabel: layer.statusLabel,
+    stats: [
+      `${layer.primaryMetric.label} ${layer.primaryMetric.value}`,
+      ...layer.supportingMetrics
+        .filter((metric) => metric.value !== layer.updatedLabel)
+        .slice(0, 2)
+        .map((metric) => `${metric.label} ${metric.value}`),
+      layer.providerLabel,
+    ].filter(Boolean),
+  }));
 }
 
-function buildSnapshotAnomalyRows(): SnapshotAnomalyDisplayRow[] {
-  return [
-    {
-      code: 'fundamental-balance',
-      title: '财报结构异常',
-      detail: '`Total Assets != Total Liabilities + Equity` 的报表 61 份，不能直接进入质量因子链。',
-      status: 'BLOCKED',
-      statusLabel: '硬阻断',
-      stats: ['目标：ds-fundamentals', '涉及 F-Score / Accruals'],
-      target: 'ds-fundamentals',
-    },
-    {
-      code: 'analyst-blind-spot',
-      title: '情绪盲区',
-      detail: '分析师样本数 `N < 3` 的标的占比 38%，一致预期上修只能作为研究态证据。',
-      status: 'WARNING',
-      statusLabel: '观察',
-      stats: ['目标：ds-analyst-consensus', '涉及分析师上修'],
-      target: 'ds-analyst-consensus',
-    },
-    {
-      code: 'short-jump',
-      title: '卖空成交跃迁',
-      detail: '3 个行业在最新窗口里卖空成交占比跳升超过 50%，需要排除事件性噪音。',
-      status: 'WARNING',
-      statusLabel: '核查',
-      stats: ['目标：ds-short-volume', '涉及空头回补'],
-      target: 'ds-short-volume',
-    },
-    {
-      code: 'rate-beta-drift',
-      title: '利率 Beta 漂移待复核',
-      detail: '10Y Yield 滚动 Beta 已完成 82%，但 17 个标的的窗口回归出现斜率漂移。',
-      status: 'CALIBRATING',
-      statusLabel: '校准中',
-      stats: ['目标：ds-macro-rates', '涉及久期 / 商品 Beta'],
-      target: 'macro-rate-beta',
-    },
-  ];
+function buildSnapshotAnomalyRows(alerts: SnapshotQualityAlertDisplay[]): SnapshotAnomalyDisplayRow[] {
+  return alerts.map((alert) => ({
+    code: alert.code,
+    title: alert.title,
+    detail: alert.detail,
+    status: alert.hardBlocking ? 'BLOCKED' : alert.severity.toUpperCase(),
+    statusLabel: alert.severityLabel,
+    stats: [alert.sourceLabel].filter(Boolean),
+    target: alert.target,
+  }));
 }
 
-function buildSnapshotMatrixRows(): SnapshotMatrixDisplayRow[] {
-  return [
-    {
-      id: 'matrix-price',
-      title: '动量 / 波动 / 流动性',
-      summary: '依赖价格与成交量，当前使用 L1 已核验链路。',
-      status: 'READY',
-      statusLabel: '正式可用',
-    },
-    {
-      id: 'matrix-quality',
-      title: '质量 / 估值 / 规模',
-      summary: '字段已接入，但 `Publish Date` 缺口仍使正式诊断受限。',
-      status: 'SANDBOX',
-      statusLabel: '沙箱',
-    },
-    {
-      id: 'matrix-sentiment',
-      title: '分析师上修 / 卖空回补',
-      summary: '一致预期与卖空数据已接入，但样本离散与时滞仍偏高。',
-      status: 'WARNING',
-      statusLabel: '受限',
-    },
-    {
-      id: 'matrix-macro',
-      title: '利率敏感度 / 通胀与商品 Beta',
-      summary: '宏观源可用，回归链路正在跑窗口校准。',
-      status: 'CALIBRATING',
-      statusLabel: '校准中',
-    },
-    {
-      id: 'matrix-derivatives',
-      title: '隐波维度 / 借券成本',
-      summary: '期权曲面与借券成本历史尚未闭环，维持置灰状态。',
-      status: 'DISABLED',
-      statusLabel: '置灰',
-    },
-  ];
+function buildSnapshotMatrixRows(dimensions: FactorDimensionDisplay[]): SnapshotMatrixDisplayRow[] {
+  return dimensions.map((dimension) => ({
+    id: dimension.id,
+    title: dimension.title,
+    summary: dimension.summary,
+    status: dimension.status,
+    statusLabel: dimension.statusLabel,
+  }));
 }
 
-function buildSnapshotLedgerRows(): SnapshotLedgerDisplayRow[] {
-  return [
-    {
-      id: 'ds-price',
-      description: '股票价格主链，覆盖前复权日线、成交量和 SPY / QQQ 基准。',
-      status: 'READY',
-      statusLabel: 'L1 已核验',
-      updatedAt: '2026-05-12 05:42 EST',
-      keyCheck: '基准 ETF 2 / 2 完整',
-      factorLabel: '动量 / 波动 / Amihud',
-      nextStep: '进入 PIT 回放',
-      sourceLabel: 'Tiingo → OpenBB Yahoo',
-      actionLabel: '查看PIT门禁',
-      actionTarget: 'ds-price',
-    },
-    {
-      id: 'ds-fundamentals',
-      description: '基础面 PIT 种子快照，新增净利润、总资产、负债、权益、营收与发布日期校验。',
-      status: 'WARNING',
-      statusLabel: 'L2 待修复',
-      updatedAt: '2026-05-11 22:14 EST',
-      keyCheck: '缺 `Publish Date` 2,184 份',
-      factorLabel: 'F-Score / 应计项目 / 经营杠杆',
-      nextStep: '补齐 `available_at`',
-      sourceLabel: 'FMP 10-K / 10-Q',
-      actionLabel: '高亮基础面异常',
-      actionTarget: 'ds-fundamentals',
-    },
-    {
-      id: 'ds-analyst-consensus',
-      description: '一致预期与目标价链路，重点监控分析师人数、修订方向和发布时间戳。',
-      status: 'SANDBOX',
-      statusLabel: 'L3 受限',
-      updatedAt: '2026-05-11 19:00 EST',
-      keyCheck: '`N < 3` 占比 38%',
-      factorLabel: '分析师上修',
-      nextStep: '区分研究态与正式态',
-      sourceLabel: 'Alpha Vantage',
-      actionLabel: '查看情绪盲区',
-      actionTarget: 'ds-analyst-consensus',
-    },
-    {
-      id: 'ds-short-volume',
-      description: '卖空成交与换手异常链路，用于识别微观结构风险与拥挤交易。',
-      status: 'WARNING',
-      statusLabel: 'L3 待复核',
-      updatedAt: '2026-05-10 18:00 EST',
-      keyCheck: '3 个行业跳变 > 50%',
-      factorLabel: '空头回补 / 换手偏度',
-      nextStep: '加入异常核查',
-      sourceLabel: 'FINRA',
-      actionLabel: '标记核查任务',
-      actionTarget: 'ds-short-volume',
-    },
-    {
-      id: 'ds-macro-rates / ds-option-skew',
-      description: '宏观序列与期权偏度链路分开治理，前者可回归，后者尚未满足可回放要求。',
-      status: 'CALIBRATING',
-      statusLabel: 'L4 混合状态',
-      updatedAt: '2026-05-12 06:05 EST',
-      keyCheck: '滚动 Beta 82%，隐含波动率曲面历史不足',
-      factorLabel: '久期 / 商品 Beta',
-      nextStep: '期权曲面链继续置灰',
-      sourceLabel: 'FRED / ThetaData',
-      actionLabel: '查看宏观校准状态',
-      actionTarget: 'macro-rate-beta',
-    },
-  ];
+function buildSnapshotLedgerRows(rows: EquityRuntimeRow[]): SnapshotLedgerDisplayRow[] {
+  return rows.map((row) => ({
+    id: row.id,
+    description: `${row.summary} · ${row.note}`,
+    status: row.status,
+    statusLabel: row.statusLabel,
+    updatedAt: compactDateTimeLabel(row.updatedAt),
+    keyCheck: row.fields,
+    factorLabel: rawSnapshotFactorLabel(row),
+    nextStep: rawSnapshotNextStep(row),
+    sourceLabel: row.sourceLabel || row.schedule,
+    actionLabel: rawSnapshotActionLabel(row),
+    actionTarget: row.id,
+  }));
 }
 
-function buildSnapshotEvidenceRows(): SnapshotEvidenceDisplayRow[] {
-  return [
-    {
-      id: 'evidence-l1',
-      title: '价格主链',
-      description: '用于 OHLCV、前复权收益与缺口补价，不替代成员历史或身份确权。',
-      status: 'READY',
-      statusLabel: 'Tiingo 可用',
-    },
-    {
-      id: 'evidence-l2',
-      title: '基础面发布链',
-      description: '用于发布日、available_at 与财务字段完整度判断，是质量因子能否晋升的关键证据。',
-      status: 'WARNING',
-      statusLabel: 'FMP 待补',
-    },
-    {
-      id: 'evidence-l3',
-      title: '情绪与微观结构',
-      description: '用于一致预期和卖空事件，只能证明情绪偏差，不替代价格 PIT 与正式回放。',
-      status: 'SANDBOX',
-      statusLabel: '研究态',
-    },
-    {
-      id: 'evidence-l4',
-      title: '宏观与衍生品精修',
-      description: '宏观序列可回归，隐含波动率偏度需待期权历史链闭环后才进入正式门禁。',
-      status: 'CALIBRATING',
-      statusLabel: '校准中',
-    },
-  ];
+function buildSnapshotEvidenceRows(layerDisplays: SnapshotLayerDisplay[]): SnapshotEvidenceDisplayRow[] {
+  return layerDisplays.map((layer) => ({
+    id: `evidence-${layer.key}`,
+    title: snapshotEvidenceTitle(layer),
+    description: `${snapshotEvidenceDescription(layer)} ${layer.providerLabel}`,
+    status: layer.status,
+    statusLabel: layer.statusLabel,
+  }));
 }
 
 function DataTrustLayerPanel({ layers }: { layers: ApiDataTrustLayer[] }): JSX.Element | null {
@@ -2028,7 +1879,7 @@ function DataTrustLayerPanel({ layers }: { layers: ApiDataTrustLayer[] }): JSX.E
                 <label htmlFor={`snapshots-trust-selected-${activeCredential}`}>{activeCredential}</label>
                 <div className="snapshots-trust-input__row">
                   <input
-                    aria-label={`${activeCredential} 输入`}
+                    aria-label={`输入 ${activeCredential} 凭据`}
                     autoComplete="off"
                     id={`snapshots-trust-selected-${activeCredential}`}
                     onChange={(event) => updateCredentialDraft(activeCredential, event.target.value)}
@@ -2041,7 +1892,7 @@ function DataTrustLayerPanel({ layers }: { layers: ApiDataTrustLayer[] }): JSX.E
                     onClick={() => void copyCredentialCommand(activeCredential)}
                     type="button"
                   >
-                    复制 {activeCredential} 设置命令
+                    生成 {activeCredential} 凭据命令
                   </button>
                 </div>
                 <small>
@@ -2109,7 +1960,7 @@ export function EquitySnapshotsTab({
     },
     { covered: 0, total: 0 },
   );
-  const refreshDeltaLabel = '本次新增股票价格 18,420 行、公司行为 612 行、指数估值 2 标的。';
+  const refreshDeltaLabel = formatLatestRefreshDelta(overview);
   const coverageChangeRows = useMemo(() => buildCoverageChangeRows(overview), [overview]);
   const lastRefresh =
     overview?.last_refreshed_at ??
@@ -2149,31 +2000,107 @@ export function EquitySnapshotsTab({
     () => buildFactorDimensionDisplays(overview, layerDisplays),
     [overview, layerDisplays],
   );
-  const workbenchRows = useMemo(() => buildSnapshotWorkbenchRows(), []);
-  const anomalyRows = useMemo(() => buildSnapshotAnomalyRows(), []);
-  const matrixRows = useMemo(() => buildSnapshotMatrixRows(), []);
-  const ledgerRows = useMemo(() => buildSnapshotLedgerRows(), []);
-  const evidenceRows = useMemo(() => buildSnapshotEvidenceRows(), []);
+  const workbenchRows = useMemo(() => buildSnapshotWorkbenchRows(layerDisplays), [layerDisplays]);
+  const anomalyRows = useMemo(() => buildSnapshotAnomalyRows(qualityAlerts), [qualityAlerts]);
+  const matrixRows = useMemo(() => buildSnapshotMatrixRows(factorDimensions), [factorDimensions]);
+  const ledgerRows = useMemo(() => buildSnapshotLedgerRows(rows), [rows]);
+  const evidenceRows = useMemo(() => buildSnapshotEvidenceRows(layerDisplays), [layerDisplays]);
+  const trustLayers = overview?.data_trust_summary?.layers ?? [];
+  const [credentialDrafts, setCredentialDrafts] = useState<Record<string, string>>(() =>
+    readCredentialDraftsFromSession(),
+  );
+  const [credentialNotices, setCredentialNotices] = useState<Record<string, string>>({});
+  const missingCredentialOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const ordered: string[] = [];
+    trustLayers.forEach((layer) => {
+      (layer.missing_env_vars ?? []).forEach((envName) => {
+        if (!seen.has(envName)) {
+          seen.add(envName);
+          ordered.push(envName);
+        }
+      });
+    });
+    return ordered;
+  }, [trustLayers]);
+  const [selectedCredential, setSelectedCredential] = useState('');
+  const missingCredentialKey = missingCredentialOptions.join('\u0000');
+  useEffect(() => {
+    setCredentialDrafts((current) => {
+      const allowed = new Set(missingCredentialOptions);
+      const filtered = Object.fromEntries(Object.entries(current).filter(([envName]) => allowed.has(envName)));
+      const currentKeys = Object.keys(current).sort().join('\u0000');
+      const filteredKeys = Object.keys(filtered).sort().join('\u0000');
+      return currentKeys === filteredKeys ? current : filtered;
+    });
+  }, [missingCredentialKey, missingCredentialOptions]);
+  useEffect(() => {
+    writeCredentialDraftsToSession(credentialDrafts);
+  }, [credentialDrafts]);
+  useEffect(() => {
+    if (!missingCredentialOptions.length) {
+      if (selectedCredential) {
+        setSelectedCredential('');
+      }
+      return;
+    }
+    if (!selectedCredential || !missingCredentialOptions.includes(selectedCredential)) {
+      setSelectedCredential(missingCredentialOptions[0]);
+    }
+  }, [missingCredentialKey, missingCredentialOptions, selectedCredential]);
+  const activeCredential = missingCredentialOptions.includes(selectedCredential)
+    ? selectedCredential
+    : missingCredentialOptions[0] ?? '';
   const [restartCommandNotice, setRestartCommandNotice] = useState<string | null>(null);
   const credentialStatusRows = useMemo(
-    () =>
-      [
-        { id: 'FMP_API_KEY', statusLabel: '缺凭据', statusTone: 'warning' as const },
-        { id: 'ALPHAVANTAGE_API_KEY', statusLabel: '已配置', statusTone: 'success' as const },
-        { id: 'FRED_API_KEY', statusLabel: '已配置', statusTone: 'success' as const },
-        { id: 'THETADATA_USERNAME / PASSWORD', statusLabel: '待补', statusTone: 'warning' as const },
-      ].map((item) => {
-        return {
-          id: item.id,
-          note: snapshotCredentialDescription(item.id),
-          statusLabel: item.statusLabel,
-          statusTone: item.statusTone,
-        };
-      }),
-    [],
+    () => {
+      const missingEnv = new Set(
+        trustLayers.flatMap((layer) => layer.missing_env_vars ?? []),
+      );
+      const providerKeys = Array.from(
+        new Set(layerDisplays.flatMap((layer) => layer.providerKeys).filter((key) => key.trim().length > 0)),
+      );
+      return providerKeys.map((key) => ({
+        id: key,
+        note: snapshotCredentialDescription(key),
+        statusLabel: missingEnv.has(key) ? '待补' : '已配置',
+        statusTone: missingEnv.has(key) ? ('warning' as const) : ('success' as const),
+      }));
+    },
+    [layerDisplays, trustLayers],
   );
-
-  function jumpToTarget(target?: string): void {
+  const dataSourceStatusRows = useMemo(
+    () =>
+      trustLayers.length
+        ? trustLayers.slice(0, 4).map((layer) => {
+          const usableCount = layer.usable_provider_count ?? layer.usable_provider_ids?.length ?? 0;
+          const providerCount = layer.provider_count ?? layer.registered_provider_ids?.length ?? layer.provider_ids?.length ?? 0;
+          const display = trustLayerDisplayCopy(layer);
+          const missingEnv = layer.missing_env_vars ?? [];
+          return {
+            id: layer.id,
+            title: display.label,
+            note: trustLayerProviderLine(layer, usableCount, providerCount),
+            status: layer.status,
+            statusLabel: getTrustStatusLabel(layer.status),
+            action: missingEnv.length
+              ? `待配置 ${missingEnv.join(' / ')}，配置后强制重启刷新。`
+              : usableCount > 0
+                ? '已接入数据源，按层级策略参与刷新。'
+                : '暂无可用凭据，需先补齐 API 配置。',
+          };
+        })
+        : layerDisplays.map((layer) => ({
+          id: layer.layerId,
+          title: layer.title,
+          note: layer.providerLabel,
+          status: layer.status,
+          statusLabel: layer.statusLabel,
+          action: layer.legacyContext,
+        })),
+    [layerDisplays, trustLayers],
+  );
+function jumpToTarget(target?: string): void {
     if (!target) {
       window.requestAnimationFrame(() => {
         const fallback = document.getElementById('equity-runtime-snapshot-list');
@@ -2202,6 +2129,55 @@ export function EquitySnapshotsTab({
     setRestartCommandNotice(`复制失败，请手动执行：${command}`);
   }
 
+  const updateCredentialDraft = (envName: string, value: string): void => {
+    setCredentialDrafts((current) => ({ ...current, [envName]: value }));
+    setCredentialNotices((current) => ({
+      ...current,
+      [envName]: '已暂存当前输入，复制命令后再写入本机环境。',
+    }));
+  };
+  const clearCredentialDrafts = (): void => {
+    setCredentialDrafts({});
+    setCredentialNotices(
+      Object.fromEntries(missingCredentialOptions.map((envName) => [envName, '已清空本标签页暂存草稿。'])),
+    );
+  };
+  const buildQuickStartCredentialCommand = (activeEnvName: string): string => {
+    const credentialPairs = missingCredentialOptions
+      .map((envName) => [envName, String(credentialDrafts[envName] ?? '').trim()] as const)
+      .filter(([, value]) => value);
+    if (!credentialPairs.some(([envName]) => envName === activeEnvName)) {
+      const activeValue = String(credentialDrafts[activeEnvName] ?? '').trim();
+      if (activeValue) {
+        credentialPairs.push([activeEnvName, activeValue]);
+      }
+    }
+    const envCommands = credentialPairs.flatMap(([envName, value]) =>
+      buildPowerShellPersistCredentialCommands(envName, value),
+    );
+    const restartCommand = `powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1 -ForceRestart -RestartReason ${quotePowerShellEnvValue(SNAPSHOT_CREDENTIAL_RESTART_REASON)}`;
+    return [...envCommands, restartCommand].join('\n');
+  };
+  const copyCredentialCommand = async (envName: string): Promise<void> => {
+    const value = String(credentialDrafts[envName] ?? '').trim();
+    if (!value) {
+      setCredentialNotices((current) => ({ ...current, [envName]: '请输入 API key 后再复制配置命令。' }));
+      return;
+    }
+    const command = buildQuickStartCredentialCommand(envName);
+    if (await writeTextToClipboard(command)) {
+      setCredentialNotices((current) => ({
+        ...current,
+        [envName]: '已复制 API 配置与受保护重启命令。',
+      }));
+      return;
+    }
+    setCredentialNotices((current) => ({
+      ...current,
+      [envName]: '复制失败，请手动执行生成的 PowerShell 配置命令。',
+    }));
+  };
+
   return (
     <div className="snapshots-equity-view">
       <section className="panel snapshots-equity-overview snapshots-global-dashboard-panel">
@@ -2222,45 +2198,16 @@ export function EquitySnapshotsTab({
           </button>
         </div>
         <div className="metric-grid">
-          {[
-            {
-              id: 'l1-health',
-              title: 'L1 基础行情',
-              statusTone: 'accent' as const,
-              headline: '完全就绪',
-              summary: 'OHLCV 覆盖 99.4%，价格主链与 SPY / QQQ 基准校验闭合。',
-            },
-            {
-              id: 'l2-health',
-              title: 'L2 财务截面',
-              statusTone: 'warning' as const,
-              headline: '待补强',
-              summary: '已接入 10-K / 10-Q，但仍有 2,184 份报表缺发布日期或 `available_at`。',
-            },
-            {
-              id: 'l3-health',
-              title: 'L3 分析师与情绪',
-              statusTone: 'warning' as const,
-              headline: '观察',
-              summary: '一致预期已落表，但 38% 标的的分析师样本少于 3，卖空延迟 1 日。',
-            },
-            {
-              id: 'l4-health',
-              title: 'L4 宏观与衍生品',
-              statusTone: 'info' as const,
-              headline: '校准中',
-              summary: '宏观序列可回归，隐含波动率偏度仍缺足够历史曲面。',
-            },
-          ].map((card) => (
-            <article className={metricCardClassName(card.statusTone)} key={card.id}>
-              <span>{card.title}</span>
-              <strong>{card.headline}</strong>
-              <small>{card.summary}</small>
+          {layerDisplays.map((layer) => (
+            <article className={metricCardClassName(layer.statusTone)} key={layer.layerId}>
+              <span>{layer.title}</span>
+              <strong>{layer.statusLabel}</strong>
+              <small>{`${layer.primaryMetric.label} ${layer.primaryMetric.value} · ${layer.summary}`}</small>
             </article>
           ))}
           <article className="metric-card metric-card--neutral">
-            <span>最新刷新（EST）</span>
-            <strong>05:42</strong>
+            <span>最新刷新</span>
+            <strong>{compactDateTimeLabel(lastRefresh)}</strong>
             <small>
               {refreshDeltaLabel}
               <button
@@ -2579,8 +2526,22 @@ export function EquitySnapshotsTab({
             <span className="status-chip status-chip--soft">会话草稿</span>
           </div>
           <div className="credential-list">
-            {credentialStatusRows.map((row) => (
+            {dataSourceStatusRows.map((row) => (
               <div className="credential-row" key={row.id}>
+                <div>
+                  <strong>{row.title}</strong>
+                  <span>{row.note}</span>
+                  <span>{row.action}</span>
+                </div>
+                <span
+                  className={trustStatusChipClassName(row.status)}
+                >
+                  {row.statusLabel}
+                </span>
+              </div>
+            ))}
+            {credentialStatusRows.map((row) => (
+              <div className="credential-row credential-row--api-key" key={`api-${row.id}`}>
                 <div>
                   <strong>{row.id}</strong>
                   <span>{row.note}</span>
@@ -2597,6 +2558,55 @@ export function EquitySnapshotsTab({
               </div>
             ))}
           </div>
+          {missingCredentialOptions.length ? (
+            <div className="snapshots-trust-credential-panel snapshots-trust-credential-panel--compact">
+              <div className="snapshots-trust-credential-form">
+                <label htmlFor="snapshots-equity-api-key-select">选择待配置 API_KEY</label>
+                <select
+                  aria-label="选择待配置 API_KEY"
+                  id="snapshots-equity-api-key-select"
+                  onChange={(event) => setSelectedCredential(event.target.value)}
+                  value={activeCredential}
+                >
+                  {missingCredentialOptions.map((envName) => (
+                    <option key={envName} value={envName}>
+                      {envName}
+                    </option>
+                  ))}
+                </select>
+                {activeCredential ? (
+                  <div className="snapshots-trust-input">
+                    <label htmlFor={`snapshots-equity-api-key-${activeCredential}`}>{activeCredential}</label>
+                    <div className="snapshots-trust-input__row">
+                      <input
+                        aria-label={`输入 ${activeCredential} 凭据`}
+                        autoComplete="off"
+                        id={`snapshots-equity-api-key-${activeCredential}`}
+                        onChange={(event) => updateCredentialDraft(activeCredential, event.target.value)}
+                        placeholder={credentialPlaceholder(activeCredential)}
+                        type={credentialInputType(activeCredential)}
+                        value={credentialDrafts[activeCredential] ?? ''}
+                      />
+                      <button
+                        className="ghost-button snapshots-trust-copy-button"
+                        onClick={() => void copyCredentialCommand(activeCredential)}
+                        type="button"
+                      >
+                        生成 {activeCredential} 凭据命令
+                      </button>
+                    </div>
+                    <small>
+                      {credentialNotices[activeCredential] ||
+                        '配置命令会写入 Windows 用户环境，并通过受保护 QuickStart 强制重启当前本地服务。'}
+                    </small>
+                  </div>
+                ) : null}
+                <button className="ghost-button snapshots-trust-copy-button" onClick={clearCredentialDrafts} type="button">
+                  清空暂存草稿
+                </button>
+              </div>
+            </div>
+          ) : null}
           <div className="list-actions">
             <span className="divider-note">
               {restartCommandNotice ||

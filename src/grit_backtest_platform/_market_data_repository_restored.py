@@ -12,6 +12,10 @@ DATASET_PRICE_SNAPSHOT_ID = "ds-price"
 DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID = "ds-corporate-actions"
 DATASET_INDEX_VALUATIONS_SNAPSHOT_ID = "ds-index-valuations"
 DATASET_FUNDAMENTALS_SNAPSHOT_ID = "ds-fundamentals"
+DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID = "ds-analyst-consensus"
+DATASET_SHORT_VOLUME_SNAPSHOT_ID = "ds-short-volume"
+DATASET_MACRO_RATES_SNAPSHOT_ID = "ds-macro-rates"
+DATASET_OPTION_SKEW_SNAPSHOT_ID = "ds-option-skew"
 DEFAULT_UNIVERSE_ANCHOR_SCHEDULE = "01-01,07-01"
 
 
@@ -86,8 +90,16 @@ def _rebuild_fundamental_points_available_at_pk(conn: sqlite3.Connection) -> Non
             symbol TEXT NOT NULL,
             date TEXT NOT NULL,
             period_end_date TEXT,
+            publish_date TEXT,
+            statement_date TEXT,
             available_at TEXT NOT NULL,
+            fiscal_year INTEGER,
+            fiscal_period TEXT,
+            time_provenance TEXT,
             ltm_earnings REAL,
+            revenue REAL,
+            gross_profit REAL,
+            net_income REAL,
             market_cap REAL,
             book_value_equity REAL,
             operating_cash_flow REAL,
@@ -95,6 +107,10 @@ def _rebuild_fundamental_points_available_at_pk(conn: sqlite3.Connection) -> Non
             enterprise_value REAL,
             total_shares REAL,
             shares_outstanding REAL,
+            total_assets REAL,
+            current_assets REAL,
+            current_liabilities REAL,
+            long_term_debt REAL,
             total_debt REAL,
             cash_and_equivalents REAL,
             provider_market_cap REAL,
@@ -112,20 +128,36 @@ def _rebuild_fundamental_points_available_at_pk(conn: sqlite3.Connection) -> Non
     conn.execute(
         """
         INSERT OR REPLACE INTO dataset_fundamental_points (
-            dataset_snapshot_id, symbol, date, period_end_date, available_at,
-            ltm_earnings, market_cap, book_value_equity,
+            dataset_snapshot_id, symbol, date, period_end_date, publish_date, statement_date, available_at,
+            fiscal_year, fiscal_period, time_provenance,
+            ltm_earnings, revenue, gross_profit, net_income, market_cap, book_value_equity,
             operating_cash_flow, capex, enterprise_value, total_shares,
-            shares_outstanding, total_debt, cash_and_equivalents,
+            shares_outstanding, total_assets, current_assets, current_liabilities, long_term_debt,
+            total_debt, cash_and_equivalents,
             provider_market_cap, provider_enterprise_value,
             market_cap_source, enterprise_value_source,
             source, fallback_source, metadata_json
         )
         SELECT
             dataset_snapshot_id, symbol, date, COALESCE(period_end_date, date),
+            CASE
+                WHEN COALESCE(publish_date, '') <> '' THEN publish_date
+                WHEN COALESCE(source, '') = 'local_seed_fundamentals' THEN COALESCE(available_at, date)
+                ELSE NULL
+            END,
+            COALESCE(statement_date, period_end_date, date),
             COALESCE(available_at, date),
-            ltm_earnings, market_cap, book_value_equity,
+            fiscal_year,
+            fiscal_period,
+            CASE
+                WHEN COALESCE(time_provenance, '') <> '' THEN time_provenance
+                WHEN COALESCE(source, '') = 'local_seed_fundamentals' THEN 'legacy_local_seed_available_at'
+                ELSE 'legacy_publish_date_missing'
+            END,
+            ltm_earnings, revenue, gross_profit, net_income, market_cap, book_value_equity,
             operating_cash_flow, capex, enterprise_value, total_shares,
-            COALESCE(shares_outstanding, total_shares), total_debt, cash_and_equivalents,
+            COALESCE(shares_outstanding, total_shares), total_assets, current_assets, current_liabilities, long_term_debt,
+            total_debt, cash_and_equivalents,
             provider_market_cap, provider_enterprise_value,
             market_cap_source, enterprise_value_source,
             source, fallback_source, metadata_json
@@ -311,8 +343,16 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
             symbol TEXT NOT NULL,
             date TEXT NOT NULL,
             period_end_date TEXT,
+            publish_date TEXT,
+            statement_date TEXT,
             available_at TEXT,
+            fiscal_year INTEGER,
+            fiscal_period TEXT,
+            time_provenance TEXT,
             ltm_earnings REAL,
+            revenue REAL,
+            gross_profit REAL,
+            net_income REAL,
             market_cap REAL,
             book_value_equity REAL,
             operating_cash_flow REAL,
@@ -320,6 +360,10 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
             enterprise_value REAL,
             total_shares REAL,
             shares_outstanding REAL,
+            total_assets REAL,
+            current_assets REAL,
+            current_liabilities REAL,
+            long_term_debt REAL,
             total_debt REAL,
             cash_and_equivalents REAL,
             provider_market_cap REAL,
@@ -347,6 +391,41 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
             fallback_source TEXT,
             metadata_json TEXT NOT NULL DEFAULT '{}',
             PRIMARY KEY(dataset_snapshot_id, symbol),
+            FOREIGN KEY(dataset_snapshot_id) REFERENCES dataset_snapshots(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dataset_signal_points (
+            dataset_snapshot_id TEXT NOT NULL,
+            entity_key TEXT NOT NULL,
+            date TEXT NOT NULL,
+            publish_date TEXT,
+            available_at TEXT,
+            metric_key TEXT NOT NULL,
+            metric_value REAL,
+            source TEXT NOT NULL DEFAULT '',
+            fallback_source TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            raw_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(dataset_snapshot_id, entity_key, date, metric_key, available_at),
+            FOREIGN KEY(dataset_snapshot_id) REFERENCES dataset_snapshots(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dataset_signal_coverage (
+            dataset_snapshot_id TEXT NOT NULL,
+            entity_key TEXT NOT NULL,
+            start_date TEXT,
+            end_date TEXT,
+            observation_count INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT '',
+            fallback_source TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(dataset_snapshot_id, entity_key),
             FOREIGN KEY(dataset_snapshot_id) REFERENCES dataset_snapshots(id) ON DELETE CASCADE
         )
         """
@@ -503,9 +582,21 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
         "dataset_fundamental_points",
         [
             ("period_end_date", "TEXT"),
+            ("publish_date", "TEXT"),
+            ("statement_date", "TEXT"),
             ("available_at", "TEXT"),
+            ("fiscal_year", "INTEGER"),
+            ("fiscal_period", "TEXT"),
+            ("time_provenance", "TEXT"),
             ("book_value_equity", "REAL"),
+            ("revenue", "REAL"),
+            ("gross_profit", "REAL"),
+            ("net_income", "REAL"),
             ("shares_outstanding", "REAL"),
+            ("total_assets", "REAL"),
+            ("current_assets", "REAL"),
+            ("current_liabilities", "REAL"),
+            ("long_term_debt", "REAL"),
             ("total_debt", "REAL"),
             ("cash_and_equivalents", "REAL"),
             ("provider_market_cap", "REAL"),
@@ -520,6 +611,15 @@ def initialize_market_data_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_dataset_fundamental_points_symbol_available_at ON dataset_fundamental_points(symbol, available_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dataset_signal_points_snapshot_entity_available ON dataset_signal_points(dataset_snapshot_id, entity_key, available_at, date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dataset_signal_points_snapshot_metric ON dataset_signal_points(dataset_snapshot_id, metric_key, date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dataset_signal_coverage_snapshot_entity ON dataset_signal_coverage(dataset_snapshot_id, entity_key)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_bond_fixed_income_instrument_date ON bond_fixed_income_snapshots(instrument_id, snapshot_date)"
@@ -944,8 +1044,16 @@ class MarketDataRepository:
                     self._normalize_symbol(str(item["symbol"])),
                     str(item["date"]),
                     item.get("period_end_date") or item.get("date"),
-                    item.get("available_at") or item.get("date"),
+                    item.get("publish_date"),
+                    item.get("statement_date") or item.get("period_end_date") or item.get("date"),
+                    item.get("available_at") or item.get("publish_date") or item.get("date"),
+                    item.get("fiscal_year"),
+                    item.get("fiscal_period"),
+                    item.get("time_provenance"),
                     item.get("ltm_earnings"),
+                    item.get("revenue"),
+                    item.get("gross_profit"),
+                    item.get("net_income"),
                     item.get("market_cap"),
                     item.get("book_value_equity"),
                     item.get("operating_cash_flow"),
@@ -953,6 +1061,10 @@ class MarketDataRepository:
                     item.get("enterprise_value"),
                     item.get("total_shares"),
                     item.get("shares_outstanding") or item.get("total_shares"),
+                    item.get("total_assets"),
+                    item.get("current_assets"),
+                    item.get("current_liabilities"),
+                    item.get("long_term_debt"),
                     item.get("total_debt"),
                     item.get("cash_and_equivalents"),
                     item.get("provider_market_cap"),
@@ -970,14 +1082,16 @@ class MarketDataRepository:
                 conn.executemany(
                     """
                     INSERT INTO dataset_fundamental_points (
-                        dataset_snapshot_id, symbol, date, period_end_date, available_at,
-                        ltm_earnings, market_cap, book_value_equity,
+                        dataset_snapshot_id, symbol, date, period_end_date, publish_date, statement_date, available_at,
+                        fiscal_year, fiscal_period, time_provenance,
+                        ltm_earnings, revenue, gross_profit, net_income, market_cap, book_value_equity,
                         operating_cash_flow, capex, enterprise_value, total_shares,
-                        shares_outstanding, total_debt, cash_and_equivalents,
+                        shares_outstanding, total_assets, current_assets, current_liabilities, long_term_debt,
+                        total_debt, cash_and_equivalents,
                         provider_market_cap, provider_enterprise_value,
                         market_cap_source, enterprise_value_source,
                         source, fallback_source, metadata_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     point_rows,
                 )
@@ -1004,6 +1118,75 @@ class MarketDataRepository:
                         dataset_snapshot_id, symbol, start_date, end_date, observation_count,
                         fields_json, source, fallback_source, metadata_json
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    coverage_rows,
+                )
+        return dataset_snapshot_id
+
+    def replace_signal_snapshot(
+        self,
+        snapshot: Mapping[str, Any],
+        *,
+        signal_points: Iterable[Mapping[str, Any]] = (),
+        signal_coverage: Iterable[Mapping[str, Any]] = (),
+    ) -> str:
+        dataset_snapshot_id = str(snapshot["id"])
+        with self.connect() as conn:
+            self._upsert_dataset_snapshot(conn, snapshot)
+            conn.execute("DELETE FROM dataset_signal_points WHERE dataset_snapshot_id = ?", (dataset_snapshot_id,))
+            conn.execute("DELETE FROM dataset_signal_coverage WHERE dataset_snapshot_id = ?", (dataset_snapshot_id,))
+
+            point_rows = [
+                (
+                    dataset_snapshot_id,
+                    str(item.get("entity_key") or item.get("symbol") or item.get("series_key") or "").strip().upper(),
+                    str(item["date"]),
+                    item.get("publish_date"),
+                    item.get("available_at"),
+                    str(item.get("metric_key") or "").strip(),
+                    item.get("metric_value"),
+                    str(item.get("source") or snapshot.get("source") or ""),
+                    item.get("fallback_source", snapshot.get("fallback_source")),
+                    dumps(_ensure_json_dict(item.get("metadata"))),
+                    dumps(_ensure_json_dict(item.get("raw"))),
+                )
+                for item in signal_points
+                if str(item.get("date") or "").strip()
+                and str(item.get("metric_key") or "").strip()
+                and str(item.get("entity_key") or item.get("symbol") or item.get("series_key") or "").strip()
+            ]
+            if point_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO dataset_signal_points (
+                        dataset_snapshot_id, entity_key, date, publish_date, available_at,
+                        metric_key, metric_value, source, fallback_source, metadata_json, raw_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    point_rows,
+                )
+
+            coverage_rows = [
+                (
+                    dataset_snapshot_id,
+                    str(item.get("entity_key") or item.get("symbol") or item.get("series_key") or "").strip().upper(),
+                    item.get("start_date"),
+                    item.get("end_date"),
+                    int(item.get("observation_count") or 0),
+                    str(item.get("source") or snapshot.get("source") or ""),
+                    item.get("fallback_source", snapshot.get("fallback_source")),
+                    dumps(_ensure_json_dict(item.get("metadata"))),
+                )
+                for item in signal_coverage
+                if str(item.get("entity_key") or item.get("symbol") or item.get("series_key") or "").strip()
+            ]
+            if coverage_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO dataset_signal_coverage (
+                        dataset_snapshot_id, entity_key, start_date, end_date, observation_count,
+                        source, fallback_source, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     coverage_rows,
                 )
@@ -1291,6 +1474,54 @@ class MarketDataRepository:
                 """,
                 (dataset_snapshot_id,),
             ).fetchall()
+            fundamental_point_rows = conn.execute(
+                """
+                SELECT * FROM dataset_fundamental_points
+                WHERE dataset_snapshot_id = ?
+                ORDER BY symbol, COALESCE(available_at, publish_date, date), date
+                """,
+                (dataset_snapshot_id,),
+            ).fetchall()
+            fundamental_coverage_rows = conn.execute(
+                """
+                SELECT * FROM dataset_fundamental_coverage
+                WHERE dataset_snapshot_id = ?
+                ORDER BY symbol
+                """,
+                (dataset_snapshot_id,),
+            ).fetchall()
+            signal_point_rows = conn.execute(
+                """
+                SELECT * FROM dataset_signal_points
+                WHERE dataset_snapshot_id = ?
+                ORDER BY entity_key, COALESCE(available_at, publish_date, date), date, metric_key
+                """,
+                (dataset_snapshot_id,),
+            ).fetchall()
+            signal_coverage_rows = conn.execute(
+                """
+                SELECT * FROM dataset_signal_coverage
+                WHERE dataset_snapshot_id = ?
+                ORDER BY entity_key
+                """,
+                (dataset_snapshot_id,),
+            ).fetchall()
+        decoded_fundamental_coverage: list[dict[str, Any]] = []
+        for row in fundamental_coverage_rows:
+            item = self._decode_json_row(dict(row), "metadata_json")
+            item["fields"] = [str(field) for field in loads(item.pop("fields_json", "[]"), [])]
+            decoded_fundamental_coverage.append(item)
+        decoded_signal_points: list[dict[str, Any]] = []
+        for row in signal_point_rows:
+            item = dict(row)
+            item["metadata"] = loads(item.pop("metadata_json", None), {})
+            item["raw"] = loads(item.pop("raw_json", None), {})
+            decoded_signal_points.append(item)
+        decoded_signal_coverage: list[dict[str, Any]] = []
+        for row in signal_coverage_rows:
+            item = dict(row)
+            item["metadata"] = loads(item.pop("metadata_json", None), {})
+            decoded_signal_coverage.append(item)
         return {
             "price_bars": [self._decode_json_row(dict(row), "metadata_json") for row in price_rows],
             "corporate_actions": [self._decode_json_row(dict(row), "payload_json") for row in action_rows],
@@ -1299,6 +1530,10 @@ class MarketDataRepository:
             "index_valuation_coverage": [
                 self._decode_json_row(dict(row), "metadata_json") for row in valuation_coverage_rows
             ],
+            "fundamental_points": [self._decode_json_row(dict(row), "metadata_json") for row in fundamental_point_rows],
+            "fundamental_coverage": decoded_fundamental_coverage,
+            "signal_points": decoded_signal_points,
+            "signal_coverage": decoded_signal_coverage,
         }
 
     def load_dataset_symbol_coverage(self, dataset_snapshot_id: str) -> list[dict[str, Any]]:
@@ -1339,6 +1574,14 @@ class MarketDataRepository:
                 "SELECT COUNT(*) AS count FROM dataset_fundamental_coverage WHERE dataset_snapshot_id = ?",
                 (dataset_snapshot_id,),
             ).fetchone()
+            signal_point_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM dataset_signal_points WHERE dataset_snapshot_id = ?",
+                (dataset_snapshot_id,),
+            ).fetchone()
+            signal_coverage_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM dataset_signal_coverage WHERE dataset_snapshot_id = ?",
+                (dataset_snapshot_id,),
+            ).fetchone()
         return {
             "price_bars": int((price_row or {}).get("count") or 0),
             "corporate_actions": int((action_row or {}).get("count") or 0),
@@ -1347,6 +1590,8 @@ class MarketDataRepository:
             "index_valuation_coverage": int((valuation_coverage_row or {}).get("count") or 0),
             "fundamental_points": int((fundamental_point_row or {}).get("count") or 0),
             "fundamental_coverage": int((fundamental_coverage_row or {}).get("count") or 0),
+            "signal_points": int((signal_point_row or {}).get("count") or 0),
+            "signal_coverage": int((signal_coverage_row or {}).get("count") or 0),
         }
 
     def summarize_dataset_symbols(
@@ -1585,6 +1830,110 @@ class MarketDataRepository:
             decoded_rows.append(item)
         return decoded_rows
 
+    def load_dataset_signal_points(
+        self,
+        dataset_snapshot_id: str,
+        entity_keys: Iterable[str] | None = None,
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        as_of_date: str | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        sql = """
+            SELECT *
+            FROM dataset_signal_points
+            WHERE dataset_snapshot_id = ?
+        """
+        params: list[Any] = [dataset_snapshot_id]
+        normalized_keys = [str(item).strip().upper() for item in (entity_keys or []) if str(item).strip()]
+        if normalized_keys:
+            sql += f" AND entity_key IN ({','.join('?' for _ in normalized_keys)})"
+            params.extend(normalized_keys)
+        if start_date:
+            sql += " AND COALESCE(available_at, publish_date, date) >= ?"
+            params.append(start_date)
+        if end_date:
+            sql += " AND COALESCE(available_at, publish_date, date) <= ?"
+            params.append(end_date)
+        if as_of_date:
+            sql += " AND COALESCE(available_at, publish_date, date) <= ?"
+            params.append(as_of_date)
+        sql += " ORDER BY entity_key ASC, COALESCE(available_at, publish_date, date) ASC, date ASC, metric_key ASC"
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            item = dict(row)
+            item["metadata"] = loads(item.pop("metadata_json", None), {})
+            item["raw"] = loads(item.pop("raw_json", None), {})
+            grouped.setdefault(str(item["entity_key"]), []).append(item)
+        return grouped
+
+    def load_dataset_signal_coverage(
+        self,
+        dataset_snapshot_id: str,
+        entity_keys: Iterable[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        sql = """
+            SELECT *
+            FROM dataset_signal_coverage
+            WHERE dataset_snapshot_id = ?
+        """
+        params: list[Any] = [dataset_snapshot_id]
+        normalized_keys = [str(item).strip().upper() for item in (entity_keys or []) if str(item).strip()]
+        if normalized_keys:
+            sql += f" AND entity_key IN ({','.join('?' for _ in normalized_keys)})"
+            params.extend(normalized_keys)
+        sql += " ORDER BY entity_key ASC"
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        decoded_rows: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["metadata"] = loads(item.pop("metadata_json", None), {})
+            decoded_rows.append(item)
+        return decoded_rows
+
+    def summarize_dataset_fundamental_time_contract(self, dataset_snapshot_id: str) -> dict[str, int]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS point_count,
+                    SUM(CASE WHEN COALESCE(TRIM(available_at), '') = '' THEN 1 ELSE 0 END) AS missing_available_at_count,
+                    SUM(CASE WHEN COALESCE(TRIM(publish_date), '') = '' THEN 1 ELSE 0 END) AS missing_publish_date_count
+                FROM dataset_fundamental_points
+                WHERE dataset_snapshot_id = ?
+                """,
+                (dataset_snapshot_id,),
+            ).fetchone()
+        return {
+            "point_count": int((row or {}).get("point_count") or 0),
+            "missing_available_at_count": int((row or {}).get("missing_available_at_count") or 0),
+            "missing_publish_date_count": int((row or {}).get("missing_publish_date_count") or 0),
+        }
+
+    def summarize_dataset_signal_time_contract(self, dataset_snapshot_id: str) -> dict[str, int]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS point_count,
+                    COUNT(DISTINCT entity_key) AS entity_count,
+                    SUM(CASE WHEN COALESCE(TRIM(available_at), '') = '' THEN 1 ELSE 0 END) AS missing_available_at_count,
+                    SUM(CASE WHEN COALESCE(TRIM(publish_date), '') = '' THEN 1 ELSE 0 END) AS missing_publish_date_count
+                FROM dataset_signal_points
+                WHERE dataset_snapshot_id = ?
+                """,
+                (dataset_snapshot_id,),
+            ).fetchone()
+        return {
+            "point_count": int((row or {}).get("point_count") or 0),
+            "entity_count": int((row or {}).get("entity_count") or 0),
+            "missing_available_at_count": int((row or {}).get("missing_available_at_count") or 0),
+            "missing_publish_date_count": int((row or {}).get("missing_publish_date_count") or 0),
+        }
+
     def load_universe_memberships(
         self,
         *,
@@ -1635,6 +1984,63 @@ class MarketDataRepository:
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [self._decode_json_row(dict(row), "metadata_json") for row in rows]
+
+    def load_universe_membership_symbols_as_of(
+        self,
+        *,
+        universe_snapshot_id: str | None = None,
+        universe_key: str | None = None,
+        effective_date_lte: str | None = None,
+    ) -> list[str]:
+        if not universe_snapshot_id and not universe_key:
+            return []
+        outer_join = " JOIN universe_snapshots us ON us.id = ums.universe_snapshot_id" if universe_key else ""
+        inner_join = " JOIN universe_snapshots inner_us ON inner_us.id = inner_ums.universe_snapshot_id" if universe_key else ""
+        target_date_filters: list[str] = []
+        target_date_params: list[Any] = []
+        outer_filters: list[str] = ["COALESCE(NULLIF(ums.symbol, ''), '') <> ''"]
+        outer_params: list[Any] = []
+        if universe_snapshot_id:
+            target_date_filters.append("inner_ums.universe_snapshot_id = ?")
+            target_date_params.append(universe_snapshot_id)
+            outer_filters.append("ums.universe_snapshot_id = ?")
+            outer_params.append(universe_snapshot_id)
+        if universe_key:
+            target_date_filters.append("inner_us.universe_key = ?")
+            target_date_params.append(universe_key)
+            outer_filters.append("us.universe_key = ?")
+            outer_params.append(universe_key)
+        if effective_date_lte:
+            target_date_filters.append("inner_ums.effective_date <= ?")
+            target_date_params.append(effective_date_lte)
+            outer_filters.append("ums.effective_date <= ?")
+            outer_params.append(effective_date_lte)
+        target_date_sql = " AND ".join(target_date_filters) if target_date_filters else "1=1"
+        outer_filter_sql = " AND ".join(outer_filters) if outer_filters else "1=1"
+        sql = f"""
+            SELECT DISTINCT ums.symbol
+            FROM universe_membership_snapshots ums
+            {outer_join}
+            WHERE {outer_filter_sql}
+              AND ums.effective_date = (
+                SELECT MAX(inner_ums.effective_date)
+                FROM universe_membership_snapshots inner_ums
+                {inner_join}
+                WHERE {target_date_sql}
+              )
+            ORDER BY ums.symbol ASC
+        """
+        params = [*outer_params, *target_date_params]
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        symbols: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            symbol = self._normalize_symbol(str(row["symbol"]))
+            if symbol and symbol not in seen:
+                symbols.append(symbol)
+                seen.add(symbol)
+        return symbols
 
     def list_universe_membership_symbols(self) -> list[str]:
         with self.connect() as conn:

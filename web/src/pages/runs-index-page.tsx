@@ -12,6 +12,7 @@ import {
   type StrategyEvidenceStatus,
   type VersionEvidenceNode,
 } from '../lib/runs-strategy-library-view-model';
+import { formatStrategyVersionTag, getStrategyDisplayName } from '../lib/strategy-version';
 import type { ApiBacktestRunDetail, ApiBacktestRunListItem, ApiStrategyDetail } from '../types';
 import './runs-index-page.css';
 
@@ -181,6 +182,24 @@ function formatPeriodRange(run: RunEvidenceNode): string {
     return `${run.startDate} 至 ${run.endDate}`;
   }
   return run.startDate ?? run.endDate ?? '未记录周期';
+}
+
+function formatRunListPeriod(run: ApiBacktestRunListItem): string {
+  const startDate = run.preview?.effective_start_date ?? run.start_date ?? null;
+  const endDate = run.preview?.effective_end_date ?? run.end_date ?? null;
+  if (startDate && endDate) {
+    return `${startDate} 至 ${endDate}`;
+  }
+  return startDate ?? endDate ?? '--';
+}
+
+function formatRunListVersionTag(run: ApiBacktestRunListItem): string {
+  const parameterVersionId = run.parameter_version_id ?? run.preview?.parameter_version_id ?? null;
+  return formatStrategyVersionTag(parameterVersionId) ?? parameterVersionId ?? '--';
+}
+
+function formatRunListStrategyName(run: ApiBacktestRunListItem): string {
+  return getStrategyDisplayName(run.strategy_name ?? run.strategy_id, run.strategy_id);
 }
 
 function shortRunId(id: string): string {
@@ -706,6 +725,8 @@ function RecentRunRow({
   selected: boolean;
 }): JSX.Element {
   const metrics = run.metrics;
+  const strategyName = formatRunListStrategyName(run);
+  const versionTag = formatRunListVersionTag(run);
   return (
     <div
       aria-label={`打开回测详情 ${run.id}`}
@@ -726,12 +747,19 @@ function RecentRunRow({
         </button>
       </div>
       <div role="cell">
-        {run.strategy_name ?? run.strategy_id} · {run.parameter_version_id ?? run.preview?.parameter_version_id ?? '--'}
+        <div className="runs-recent-strategy">
+          <strong>{strategyName}</strong>
+          <span>{versionTag}</span>
+        </div>
       </div>
       <div role="cell">{run.is_permanent === false ? '临时回测' : '永久回测'}</div>
       <div role="cell">
         <StatusBadge status={run.status} />
       </div>
+      <div role="cell">{formatRunListPeriod(run)}</div>
+      <div role="cell">{formatMetricValue(metrics?.total_return, { percent: true, signed: true })}</div>
+      <div role="cell">{formatMetricValue(metrics?.annualized_return, { percent: true, signed: true })}</div>
+      <div role="cell">{formatMetricValue(metrics?.max_drawdown, { percent: true })}</div>
       <div role="cell">{formatMetricValue(metrics?.sharpe)}</div>
       <div role="cell">{formatDate(run.completed_at ?? run.updated_at)}</div>
       <div role="cell">
@@ -1205,10 +1233,14 @@ export function RunsIndexPage(): JSX.Element {
                 </div>
                 <div className="runs-recent-table" role="table" aria-label="最近运行表">
                   <div className="runs-recent-grid runs-recent-grid--header header" role="row">
-                    <div role="columnheader">回测号</div>
+                    <div role="columnheader">回测id</div>
                     <div role="columnheader">策略</div>
                     <div role="columnheader">类型</div>
                     <div role="columnheader">状态</div>
+                    <div role="columnheader">时间周期</div>
+                    <div role="columnheader">总收益率</div>
+                    <div role="columnheader">年化收益率</div>
+                    <div role="columnheader">最大回撤</div>
                     <div role="columnheader">夏普</div>
                     <div role="columnheader">完成时间</div>
                     <div role="columnheader">操作</div>

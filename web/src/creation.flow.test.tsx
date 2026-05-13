@@ -452,6 +452,7 @@ describe('creation flow', () => {
         strategy_type: 'GRID',
         universe_name: 'QQQ',
         current_parameter_version: 4,
+        created_at: '2026-04-20T09:00:00Z',
         updated_at: '2026-04-28T13:22:00Z',
       },
     ]);
@@ -477,17 +478,19 @@ describe('creation flow', () => {
         .map((header) => header.textContent?.replace(/升序|降序/g, '')),
     ).toEqual([
       '策略名',
-      '版本',
       '策略类型',
       '10Y年化收益/夏普',
       '20Y年化收益/夏普',
       '30Y年化收益/夏普',
       '状态',
+      '创建时间',
       '最近编辑时间',
       '操作',
     ]);
     expect(screen.getByText('QQQ 网格交易策略')).toBeInTheDocument();
     expect(screen.getByText('v4')).toBeInTheDocument();
+    expect(screen.getByText('strat-grid')).toBeInTheDocument();
+    expect(screen.queryByText('投资标的：QQQ')).not.toBeInTheDocument();
     expect(screen.getByText('网格交易')).toBeInTheDocument();
     expect(screen.getAllByText('已验证').length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('+10.1% / 1.18')).toBeInTheDocument();
@@ -665,57 +668,64 @@ describe('creation flow', () => {
     expect(screen.getAllByText('生成中').length).toBeGreaterThanOrEqual(3);
   });
 
-  it('默认按最近编辑倒序，并支持按收益列排序', async () => {
+  it('默认按创建时间倒序，并支持按收益列排序', async () => {
     fakeApi.listStrategies.mockResolvedValue([
       {
-        id: 'strat-recent',
-        name: '近期低收益策略',
+        id: 'strat-z-low',
+        name: '创建时间较早策略',
         strategy_type: 'MOMENTUM',
         universe_name: 'SP500',
         current_parameter_version: 2,
-        updated_at: '2026-04-28T13:22:00Z',
+        created_at: '2026-04-20T09:00:00Z',
+        updated_at: '2026-04-30T08:55:26Z',
       },
       {
-        id: 'strat-older',
-        name: '旧版高收益策略',
+        id: 'strat-a-high',
+        name: '创建时间最新策略',
         strategy_type: 'GRID',
         universe_name: 'QQQ',
         current_parameter_version: 1,
-        updated_at: '2026-04-20T09:00:00Z',
+        created_at: '2026-04-28T13:22:00Z',
+        updated_at: '2026-04-21T08:00:00Z',
       },
     ]);
     fakeApi.listBacktestRuns.mockResolvedValue([
       {
-        id: 'bt-recent-10y',
-        strategy_id: 'strat-recent',
-        status: 'COMPLETED',
-        start_date: '2016-04-28',
-        end_date: '2026-04-28',
-        completed_at: '2026-04-28T13:22:00Z',
-        metrics: { total_return: 0.2, annualized_return: 0.02, sharpe: 0.8, max_drawdown: -0.1 },
-      },
-      {
-        id: 'bt-older-10y',
-        strategy_id: 'strat-older',
+        id: 'bt-low-10y',
+        strategy_id: 'strat-z-low',
         status: 'COMPLETED',
         start_date: '2016-04-28',
         end_date: '2026-04-28',
         completed_at: '2026-04-20T09:00:00Z',
+        metrics: { total_return: 0.2, annualized_return: 0.02, sharpe: 0.8, max_drawdown: -0.1 },
+      },
+      {
+        id: 'bt-high-10y',
+        strategy_id: 'strat-a-high',
+        status: 'COMPLETED',
+        start_date: '2016-04-28',
+        end_date: '2026-04-28',
+        completed_at: '2026-04-28T13:22:00Z',
         metrics: { total_return: 1.1, annualized_return: 0.08, sharpe: 1.4, max_drawdown: -0.08 },
       },
     ]);
 
     render(<CreationTemplatePage />);
 
-    expect(await screen.findByText('近期低收益策略')).toBeInTheDocument();
+    expect(await screen.findByText('创建时间最新策略')).toBeInTheDocument();
     const readFirstStrategyName = () =>
       screen.getAllByRole('row').slice(1)[0]?.querySelector('.strategy-library-name-cell strong')?.textContent;
 
-    expect(readFirstStrategyName()).toBe('近期低收益策略');
+    expect(readFirstStrategyName()).toBe('创建时间最新策略');
+    expect(screen.getByRole('columnheader', { name: /创建时间/ })).toHaveAttribute('aria-sort', 'descending');
+
+    fireEvent.click(screen.getByRole('button', { name: '按创建时间切换为升序' }));
+
+    expect(readFirstStrategyName()).toBe('创建时间较早策略');
 
     fireEvent.click(screen.getByRole('button', { name: '按10Y年化收益/夏普排序' }));
 
-    expect(readFirstStrategyName()).toBe('旧版高收益策略');
+    expect(readFirstStrategyName()).toBe('创建时间最新策略');
   });
 
   it('removes open-confirmation button and refreshes grid fields from sent message', async () => {

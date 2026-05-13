@@ -179,6 +179,27 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS backtest_run_checkpoints (
+        run_id TEXT PRIMARY KEY,
+        stage TEXT NOT NULL DEFAULT 'PREPARING',
+        state_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES backtest_runs(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS backtest_run_checkpoint_chunks (
+        run_id TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        daily_performance_json TEXT NOT NULL DEFAULT '[]',
+        trades_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES backtest_runs(id) ON DELETE CASCADE,
+        PRIMARY KEY(run_id, chunk_index)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS snapshot_refresh_jobs (
         id TEXT PRIMARY KEY,
         status TEXT NOT NULL,
@@ -798,6 +819,14 @@ POST_MIGRATION_INDEX_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_backtest_runs_status_recent
     ON backtest_runs(status, deleted_at, completed_at, created_at, id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_backtest_run_checkpoints_updated
+    ON backtest_run_checkpoints(updated_at, run_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_backtest_run_checkpoint_chunks_run_chunk
+    ON backtest_run_checkpoint_chunks(run_id, chunk_index)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_optimization_jobs_strategy_recent

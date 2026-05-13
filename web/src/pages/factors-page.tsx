@@ -14,6 +14,7 @@ import type {
   ApiFactorListResponse,
   ApiPitDataOverview,
   ApiPitIdentityScraperRestartResponse,
+  ApiSnapshotOverview,
 } from '../types';
 import './factors-page.css';
 
@@ -34,6 +35,7 @@ type PitLayerReadinessItem = {
   updated_at?: string | null;
   metrics: Array<{ label: string; value: string }>;
 };
+type SnapshotLayerStatusMap = Record<string, string>;
 type FactorDiagnosticReadinessItem = {
   group_id: string;
   title_cn: string;
@@ -1948,7 +1950,7 @@ function asMetricValue(value: unknown): string {
 function statusVariant(value: unknown): string {
   const normalized = String(value ?? '').toUpperCase();
   if (['READY', 'VERIFIED', 'COMPLETED', 'READY_TO_DIAGNOSE'].includes(normalized)) return 'ready';
-  if (['SANDBOX', 'SANDBOX_READY', 'LIMITED_READY', 'WARNING', 'CALIBRATING'].includes(normalized)) return 'limited-ready';
+  if (['SANDBOX', 'SANDBOX_READY', 'LIMITED_READY', 'WARNING', 'CALIBRATING', 'OBSERVATION'].includes(normalized)) return 'limited-ready';
   if (['BLOCKED', 'BLOCKED_PIT', 'BLOCKED_DATA', 'FAILED'].includes(normalized)) return 'blocked';
   if (['DISABLED', 'UNAVAILABLE', 'INCOMPLETE'].includes(normalized)) return 'unavailable';
   return normalized.toLowerCase().replaceAll('_', '-');
@@ -1956,6 +1958,7 @@ function statusVariant(value: unknown): string {
 
 function pitLayerStatusLabel(value: unknown): string {
   const normalized = String(value ?? '').toUpperCase();
+  if (normalized === 'OBSERVATION') return '?弦?航?';
   return PIT_LAYER_STATUS_LABELS[normalized] ?? pitStatusLabel(normalized);
 }
 
@@ -1989,6 +1992,32 @@ function factorDiagnosticStatusFromPit(
   if (pit.verified_diagnostics_enabled) return 'VERIFIED';
   if (pit.sandbox_diagnostics_enabled || pit.limited_diagnostics_enabled) return 'SANDBOX';
   return 'BLOCKED';
+}
+
+function pitLayerKey(value?: string | null): string {
+  const normalized = String(value ?? '').toLowerCase();
+  if (normalized.includes('l1') || normalized.includes('market') || normalized.includes('price')) return 'l1';
+  if (normalized.includes('l2') || normalized.includes('fundamental')) return 'l2';
+  if (normalized.includes('l3') || normalized.includes('sentiment') || normalized.includes('analyst')) return 'l3';
+  if (normalized.includes('l4') || normalized.includes('macro') || normalized.includes('derivative')) return 'l4';
+  return normalized || 'layer';
+}
+
+function snapshotLayerStatusMap(overview: ApiSnapshotOverview | null): SnapshotLayerStatusMap {
+  const rawLayers = Array.isArray(overview?.data_layer_readiness)
+    ? overview.data_layer_readiness
+    : [];
+  return Object.fromEntries(
+    rawLayers
+      .map((layer) => {
+        if (!layer || typeof layer !== 'object') return null;
+        const record = layer as Record<string, unknown>;
+        const key = pitLayerKey(String(record.layer_id ?? record.id ?? ''));
+        const status = String(record.status ?? '').trim();
+        return key && status ? [key, status] as const : null;
+      })
+      .filter((entry): entry is readonly [string, string] => Boolean(entry)),
+  );
 }
 
 function buildPitLayerReadiness(pit: PitOverviewExtended): PitLayerReadinessItem[] {
@@ -2729,6 +2758,7 @@ export function PitCleaningCenterPage({
 }): JSX.Element {
   const api = useApiClient();
   const { pit, loading, error, reload } = usePitOverview(initialLoadDelayMs);
+  const [snapshotLayerStatuses, setSnapshotLayerStatuses] = useState<SnapshotLayerStatusMap>({});
   const [gapOpen, setGapOpen] = useState(highlightedSection === 'coverage-gap');
   const [activeRuleId, setActiveRuleId] = useState('mad');
   const [waiverBusy, setWaiverBusy] = useState(false);
@@ -2748,8 +2778,31 @@ export function PitCleaningCenterPage({
       setGapOpen(true);
     }
   }, [highlightedSection]);
+  useEffect(() => {
+    let alive = true;
+    api
+      .getSnapshotOverview()
+      .then((payload) => {
+        if (alive) setSnapshotLayerStatuses(snapshotLayerStatusMap(payload));
+      })
+      .catch(() => {
+        if (alive) setSnapshotLayerStatuses({});
+      });
+    return () => {
+      alive = false;
+    };
+  }, [api]);
   const rulePreviews = pit?.cleaning_rule_previews ?? [];
   const activeRule = rulePreviews.find((item) => item.id === activeRuleId) ?? rulePreviews[0];
+  const openCoverageGapSection = (): void => {
+    setGapOpen(true);
+    window.requestAnimationFrame(() => {
+      const target = document.getElementById('coverage-gap');
+      target?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+      target?.setAttribute('tabindex', '-1');
+      target?.focus?.({ preventScroll: true });
+    });
+  };
   const openMapping = (detail: CoverageGapSymbolDetail): void => {
     setSelectedMapping(detail);
     setMappingCanonical(detail.canonical_symbol || detail.symbol);
@@ -2828,12 +2881,103 @@ export function PitCleaningCenterPage({
         ? 'SANDBOX_READY'
         : 'BLOCKED';
   const pitExtended = pit as PitOverviewExtended | null;
-  const approvedPitCards = useMemo(() => buildApprovedPitMetricCards(), []);
-  const approvedPitSummaryRows = useMemo(() => buildApprovedPitSummaryRows(), []);
-  const approvedPitMatrixRows = useMemo(() => buildApprovedPitMatrixRows(), []);
-  const approvedPitCoverageCards = useMemo(() => buildApprovedPitCoverageCards(), []);
-  const approvedPitRuleAlerts = useMemo(() => buildApprovedPitRuleAlerts(), []);
-  const approvedPitActionRows = useMemo(() => buildApprovedPitActionRows(), []);
+  const pitLayerReadiness = useMemo(
+    () => (pitExtended ? buildPitLayerReadiness(pitExtended) : []),
+    [pitExtended],
+  );
+  const factorDiagnosticReadiness = useMemo(
+    () => (pitExtended ? buildFactorDiagnosticReadiness(pitExtended) : []),
+    [pitExtended],
+  );
+  const pitQualityAlerts = useMemo(
+    () => (pitExtended ? buildPitQualityAlerts(pitExtended) : []),
+    [pitExtended],
+  );
+  const snapshotLayerLinkage = useMemo(
+    () => (pitExtended ? buildSnapshotLayerLinkage(pitExtended) : []),
+    [pitExtended],
+  );
+  const approvedPitCards = useMemo(
+    () => pitLayerReadiness.map((layer) => {
+      const displayStatus = snapshotLayerStatuses[pitLayerKey(layer.layer_id)] ?? layer.status;
+      return {
+        id: layer.layer_id,
+        title: layer.title_cn,
+        headline: pitLayerStatusLabel(displayStatus),
+        pill: pitLayerStatusLabel(displayStatus),
+        status: displayStatus,
+        body: layer.summary,
+        details: [
+          layer.pit_alignment || layer.detail || layer.reason,
+          ...layer.metrics.slice(1, 3).map((metric) => `${metric.label} ${metric.value}`),
+          ...layer.blockers.slice(0, 1),
+        ].filter((detail): detail is string => Boolean(detail)).slice(0, 3),
+      };
+    }),
+    [pitLayerReadiness, snapshotLayerStatuses],
+  );
+  const approvedPitSummaryRows = useMemo(
+    () => snapshotLayerLinkage.slice(0, 4).map((item) => ({
+      id: item.check_id,
+      title: item.check_title_cn,
+      summary: item.detail_cn,
+      status: item.result_status,
+      statusLabel: pitLayerStatusLabel(item.result_status),
+    })),
+    [snapshotLayerLinkage],
+  );
+  const approvedPitMatrixRows = useMemo(
+    () => factorDiagnosticReadiness.map((group) => ({
+      id: group.group_id,
+      title: group.title_cn,
+      summary: `${group.rationale_cn}${group.factors.length ? ` · ${group.factors.join(' / ')}` : ''}`,
+      status: group.status,
+      statusLabel: factorDiagnosticStatusLabel(group.status),
+    })),
+    [factorDiagnosticReadiness],
+  );
+  const approvedPitRuleAlerts = useMemo(() => pitQualityAlerts.slice(0, 6), [pitQualityAlerts]);
+  const approvedPitActionRows = useMemo(() => {
+    const rows = snapshotLayerLinkage
+      .filter((item) => String(item.result_status ?? '').toUpperCase() !== 'READY')
+      .map((item) => {
+        const normalizedLayer = String(item.source_layer ?? '').toUpperCase();
+        const normalizedCheck = String(item.check_id ?? '').toLowerCase();
+        let target = '#/snapshots?tab=equity';
+        if (normalizedLayer.includes('L2') || normalizedCheck.includes('fundamental')) {
+          target = '#/snapshots?tab=equity&target=ds-fundamentals';
+        } else if (normalizedCheck.includes('consensus')) {
+          target = '#/snapshots?tab=equity&target=ds-analyst-consensus';
+        } else if (normalizedCheck.includes('iv') || normalizedCheck.includes('macro')) {
+          target = '#/snapshots?tab=equity&target=ds-option-skew';
+        } else if (normalizedCheck.includes('price') || normalizedCheck.includes('universe')) {
+          target = '#/snapshots?tab=equity&target=ds-price';
+        }
+        return {
+          id: item.check_id,
+          code: item.check_title_cn,
+          summary: item.detail_cn,
+          target,
+        };
+      });
+    if (rows.length) {
+      return rows;
+    }
+    return (pit?.ops_guidance?.actions ?? []).map((action, index) => ({
+      id: `ops-action-${index + 1}`,
+      code: pitPriorityLabel(action.priority),
+      summary: pitCopy(action.label),
+      target: action.target,
+    }));
+  }, [pit?.ops_guidance?.actions, snapshotLayerLinkage]);
+  const coverageGapBuckets = pit?.coverage_gap?.buckets ?? [];
+  const verifiedWindow = pit?.diagnostic_windows?.verified;
+  const sandboxWindow = pit?.diagnostic_windows?.sandbox;
+  const waiverImpact = pit?.research_waiver?.impact_estimate;
+  const opsHeadline = pitCopy(
+    pit?.ops_guidance?.headline ?? reasonText('adjusted_price', '请先完成价格与基础面门禁修复，再启动正式诊断。'),
+  );
+  const opsActions = pit?.ops_guidance?.actions ?? [];
   const showCoverageGap = gapOpen || Boolean(pit?.coverage_gap);
   return (
     <div className="factor-page" data-page-root="pit-cleaning-center">
@@ -2841,21 +2985,17 @@ export function PitCleaningCenterPage({
         eyebrow="数据基座"
         title="PIT 清洗中心"
         description="将源层快照转换为可回放、可诊断、可审计的点时数据门禁，隔离未来函数、幸存者偏差与仅现值字段（`current-only`）。"
-        status="有限就绪"
+        status={pit ? pitLayerStatusLabel(factorAdmissionStatus) : '读取中'}
         meta={
           pit ? (
             <>
-              <span className="pit-chip">正式窗口 2016-05-01 至 2026-05-12</span>
-              <span className="pit-chip">研究窗口 2023-05-01 至 2026-05-12</span>
-              <span className="pit-chip">链接源：#/snapshots?tab=equity</span>
+              {verifiedWindow ? <span className="pit-chip">正式窗口 {verifiedWindow.start_date} 至 {verifiedWindow.end_date}</span> : null}
+              {sandboxWindow ? <span className="pit-chip">研究窗口 {sandboxWindow.start_date} 至 {sandboxWindow.end_date}</span> : null}
             </>
           ) : undefined
         }
         actions={
           <>
-            <button className="factor-btn" onClick={() => goToHashTarget('#/snapshots?tab=equity')} type="button">
-              跳转数据快照
-            </button>
             <button className="factor-btn factor-btn--primary" onClick={reload} type="button">
               重新检查 PIT 门禁
             </button>
@@ -2871,9 +3011,8 @@ export function PitCleaningCenterPage({
               <div>
                 <strong>研究豁免已启用</strong>
                 <p>
-                  已临时忽略 17 个非核心缺口，仅允许研究诊断，不允许正式晋升。
+                  已临时忽略 {pit.research_waiver.ignored_symbol_count} 个非核心缺口，仅允许研究诊断，不允许正式晋升。预计 IC 扰动 {num(waiverImpact?.estimated_ic_delta_abs, 4)}，市值权重 {pct(waiverImpact?.mcap_weight_pct, 2)}。
                 </p>
-                <p>预计 IC 扰动 0.0032，市值权重 0.41%。</p>
               </div>
                 <button
                   className="factor-btn factor-btn--small"
@@ -2925,31 +3064,33 @@ export function PitCleaningCenterPage({
           <section className="ops-strip">
             <div className="ops-strip__copy">
               <strong>数据运维指令</strong>
-              <span>当前 PIT 的核心风险不在价格链，而在基础面发布时间戳与情绪字段的可回放性。优先修复 `ds-fundamentals`，再决定是否重跑正式诊断。</span>
+              <span>{opsHeadline}</span>
             </div>
             <div className="ops-strip__actions">
-              <button
-                className="factor-btn"
-                onClick={() =>
-                  setSelectedOpsAction({
-                    label: '重启身份修复任务',
-                    target: 'pit://restart-identity',
-                    priority: 'HIGH',
-                  })
-                }
-                type="button"
-              >
-                重启身份修复任务
-              </button>
-              <button className="factor-btn" onClick={() => setGapOpen(true)} type="button">
+              {(pit?.ops_guidance?.identity_pending_count ?? 0) > 0 ? (
+                <button
+                  className="factor-btn"
+                  onClick={() =>
+                    setSelectedOpsAction({
+                      label: '重启身份修复任务',
+                      target: 'pit://restart-identity',
+                      priority: 'HIGH',
+                    })
+                  }
+                  type="button"
+                >
+                  重启身份修复任务
+                </button>
+              ) : null}
+              <button className="factor-btn" onClick={openCoverageGapSection} type="button">
                 查看覆盖率缺口
               </button>
               <button
                 className="factor-btn factor-btn--primary"
-                onClick={() => goToHashTarget('#/snapshots?tab=equity&target=ds-fundamentals')}
+                onClick={() => goToHashTarget(opsActions[0]?.target ?? '#/snapshots?tab=equity&target=ds-fundamentals')}
                 type="button"
               >
-                跳转 ds-fundamentals
+                {pitCopy(opsActions[0]?.label ?? '跳转 ds-fundamentals')}
               </button>
             </div>
           </section>
@@ -2960,7 +3101,7 @@ export function PitCleaningCenterPage({
                   <h2>PIT 门禁摘要</h2>
                   <p>按数据层汇总门禁结论，明确正式诊断、沙箱与受限准入。</p>
                 </div>
-                <span className="pit-chip pit-chip--warning">仅限研究</span>
+                <span className={`pit-chip ${pit?.research_waiver ? 'pit-chip--warning' : ''}`}>{pit?.research_waiver ? '仅限研究' : pitLayerStatusLabel(factorAdmissionStatus)}</span>
               </div>
               <div className="kv-list">
                 {approvedPitSummaryRows.map((row) => (
@@ -3004,53 +3145,17 @@ export function PitCleaningCenterPage({
                     <h3>覆盖率下钻</h3>
                     <p>按缺口类型定位覆盖不足的时间段、样本权重与受影响因子。</p>
                   </div>
-                  <span className="pit-chip">3 个主要缺口</span>
+                  <span className="pit-chip">{`${coverageGapBuckets.length} 个主要缺口`}</span>
                 </div>
-                <div className="bucket-grid">
-                  {approvedPitCoverageCards.map((bucket, bucketIndex) => {
-                    const heights = [
-                      [62, 100, 88, 56, 42, 78, 39, 24],
-                      [48, 55, 31, 44, 25, 18, 12, 8],
-                      [78, 96, 74, 69, 34, 18, 10, 10],
-                    ][bucketIndex] ?? [24, 24, 24, 24, 24, 24, 24, 24];
-                    return (
-                      <article className="bucket-card" key={bucket.id}>
-                        <div className="bucket-card__top">
-                          <div className="bucket-card__title">
-                            <strong>{bucket.title}</strong>
-                            <span>{bucket.summary}</span>
-                          </div>
-                          <span className={`factor-pill factor-pill--${statusVariant(bucket.status)}`}>{bucket.statusLabel}</span>
-                        </div>
-                        <div className="bucket-metrics">
-                          {bucket.metrics.map((metric) => (
-                            <span className="small-stat" key={`${bucket.id}-${metric}`}>
-                              {metric}
-                            </span>
-                          ))}
-                        </div>
-                        <div className="timeline">
-                          {bucket.timeline.map((label, index) => (
-                            <span
-                              className={label === 'Q2' || label === 'Q3' || label === '1W' || label === '1M' ? 'is-warning' : ''}
-                              key={`${bucket.id}-${label}-${index}`}
-                            >
-                              <i style={{ height: `${heights[index] ?? 24}%` }} />
-                              <small>{label}</small>
-                            </span>
-                          ))}
-                        </div>
-                        <div className="sample-chip-row">
-                          {bucket.chips.map((symbol) => (
-                            <span className="sample-chip" key={`${bucket.id}-${symbol}`}>
-                              {symbol}
-                            </span>
-                          ))}
-                        </div>
-                      </article>
-                    );
-                  })}
-                </div>
+                {coverageGapBuckets.length ? (
+                  <div className="bucket-grid">
+                    {coverageGapBuckets.map((bucket) => (
+                      <CoverageGapBucketCard bucket={bucket} key={bucket.id} onOpenMapping={openMapping} />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="factor-empty">当前没有覆盖率缺口。</div>
+                )}
               </article>
 
               <article className={`factor-panel ${highlightedSection ? 'factor-panel--highlight' : ''}`}>
@@ -3059,7 +3164,7 @@ export function PitCleaningCenterPage({
                     <h3>点时异常核查与规则工作站</h3>
                     <p>统一管理去极值、发布日期对齐与宏观回归漂移规则。</p>
                   </div>
-                  <span className="pit-chip">情景试算</span>
+                  <span className="pit-chip">{`${approvedPitRuleAlerts.length} 条异常`}</span>
                 </div>
                 <div className="check-list">
                   {approvedPitRuleAlerts.map((alert) => (
@@ -3074,41 +3179,49 @@ export function PitCleaningCenterPage({
                     </div>
                   ))}
                 </div>
-                <div className="rule-tabs" aria-label="清洗规则工作台">
-                  {['MAD', '3σ', 'ZScore 截尾', '发布日期对齐'].map((rule) => (
-                    <button
-                      aria-pressed={rule === 'MAD'}
-                      className={`rule-tab ${rule === 'MAD' ? 'is-active' : ''}`}
-                      key={rule}
-                      onClick={() => undefined}
-                      type="button"
-                    >
-                      {rule}
-                    </button>
-                  ))}
-                </div>
-                <div className="rule-preview">
-                  <div className="rule-preview__stats">
-                    <div>
-                      <span>剔除比例</span>
-                      <strong>4.8%</strong>
+                {rulePreviews.length ? (
+                  <>
+                    <div className="rule-tabs" aria-label="清洗规则工作台">
+                      {rulePreviews.map((rule) => (
+                        <button
+                          aria-pressed={rule.id === activeRule?.id}
+                          className={`rule-tab ${rule.id === activeRule?.id ? 'is-active' : ''}`}
+                          key={rule.id}
+                          onClick={() => setActiveRuleId(rule.id)}
+                          type="button"
+                        >
+                          {rule.label}
+                        </button>
+                      ))}
                     </div>
-                    <div>
-                      <span>命中样本</span>
-                      <strong>184</strong>
-                    </div>
-                    <div>
-                      <span>当前判断</span>
-                      <strong>可继续</strong>
-                    </div>
-                  </div>
-                  <p className="divider-note">当前规则：先按 MAD 去极值，再对 L3 / L4 新字段应用 ZScore 截尾；基础面字段需先完成 `available_at` 对齐，再进入统一截面标准化。</p>
-                  <div className="sample-chip-row">
-                    <span className="sample-chip">AAL 2026-03-27 +6.2σ</span>
-                    <span className="sample-chip">MSFT 2026-04-10 publish_date +11d</span>
-                    <span className="sample-chip">XOM 10Y Beta 斜率漂移</span>
-                  </div>
-                </div>
+                    {activeRule ? (
+                      <div className="rule-preview">
+                        <div className="rule-preview__stats">
+                          <div>
+                            <span>剔除比例</span>
+                            <strong>{pct(activeRule.excluded_pct, 2)}</strong>
+                          </div>
+                          <div>
+                            <span>命中样本</span>
+                            <strong>{activeRule.excluded_count}</strong>
+                          </div>
+                          <div>
+                            <span>当前判断</span>
+                            <strong>{pitLayerStatusLabel(activeRule.status)}</strong>
+                          </div>
+                        </div>
+                        <p className="divider-note">{`${pitCopy(activeRule.description)} ${pitCopy(activeRule.threshold_label)}`}</p>
+                        <div className="sample-chip-row">
+                          {activeRule.sample_points.slice(0, 3).map((point, index) => (
+                            <span className="sample-chip" key={`${activeRule.id}-${point.symbol}-${point.date}-${index}`}>
+                              {`${point.symbol} ${point.date} ${num(point.value, 4)}`}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </>
+                ) : null}
               </article>
             </section>
           ) : null}

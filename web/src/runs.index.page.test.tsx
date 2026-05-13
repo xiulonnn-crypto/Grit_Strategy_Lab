@@ -341,15 +341,37 @@ describe('runs index page', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: /最近运行/ }));
     const recentRuns = await screen.findByLabelText('最近运行');
+    const columnHeaders = within(recentRuns)
+      .getAllByRole('columnheader')
+      .map((header) => header.textContent?.trim());
     expect(recentRuns).toHaveTextContent('最近运行时间线');
     expect(recentRuns).toHaveTextContent('操作');
+    expect(columnHeaders).toEqual([
+      '回测id',
+      '策略',
+      '类型',
+      '状态',
+      '时间周期',
+      '总收益率',
+      '年化收益率',
+      '最大回撤',
+      '夏普',
+      '完成时间',
+      '操作',
+    ]);
     expect(within(recentRuns).getAllByRole('button', { name: /^删除$/ }).length).toBeGreaterThan(0);
     expect(recentRuns).toHaveTextContent('bt-alpha-10y');
     expect(recentRuns).toHaveTextContent('bt-beta-10y');
 
-    const betaRow = within(recentRuns).getByText('策略 Beta · str-beta-v1').closest('.runs-recent-row');
-    expect(betaRow).not.toBeNull();
-    fireEvent.click(betaRow as HTMLElement);
+    const betaRow = within(recentRuns).getByRole('row', { name: /打开回测详情 bt-beta-10y/ });
+    expect(betaRow).toHaveTextContent('策略 Beta');
+    expect(betaRow).toHaveTextContent('v1');
+    expect(betaRow).toHaveTextContent('2016-03-31 至 2026-03-31');
+    expect(betaRow).toHaveTextContent('+25.1%');
+    expect(betaRow).toHaveTextContent('+11.4%');
+    expect(betaRow).toHaveTextContent('-5.6%');
+    expect(betaRow).toHaveTextContent('1.42');
+    fireEvent.click(betaRow);
 
     await waitFor(() => expect(window.location.hash).toBe('#/runs/bt-beta-10y'));
     expect(fakeApi.getBacktestRunDetail).not.toHaveBeenCalled();

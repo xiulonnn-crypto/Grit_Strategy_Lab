@@ -10,6 +10,7 @@ from grit_backtest_platform.pit_external_sources import (
     kaggle_credential_status,
     matrix_manifest_from_events,
     parse_sp500_matrix_csv,
+    polygon_credential_status,
 )
 
 
@@ -75,6 +76,17 @@ def test_kaggle_credential_status_rejects_wrapped_placeholder_tokens(tmp_path, m
     assert "placeholder-token" not in str(status)
 
 
+def test_polygon_credential_status_accepts_massive_or_legacy_env(monkeypatch):
+    monkeypatch.setenv("MASSIVE_API_KEY", "massive-unit-key")
+    monkeypatch.delenv("POLYGON_API_KEY", raising=False)
+
+    status = polygon_credential_status()
+
+    assert status["configured"] is True
+    assert status["configured_env_vars"] == ["MASSIVE_API_KEY"]
+    assert status["missing_env_vars"] == []
+
+
 def test_external_readiness_does_not_mark_empty_catalog_ready(tmp_path, monkeypatch):
     cache_dir = tmp_path / "pit-bulk-cache"
     (cache_dir / "catalog").mkdir(parents=True)
@@ -134,6 +146,58 @@ def test_external_readiness_discovers_nested_legacy_cache_artifacts(tmp_path, mo
     assert readiness["parquet_catalog_status"]["status"] == "READY"
     assert readiness["parquet_catalog_status"]["parquet_file_count"] == 1
     assert readiness["parquet_catalog_status"]["manifest_row_count"] == 123
+
+
+def test_bulk_normalize_supports_mixed_kaggle_and_delisted_archive_layouts(tmp_path):
+    duckdb = pytest.importorskip("duckdb")
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "pit_external_sources.py"
+    spec = importlib.util.spec_from_file_location("pit_external_sources_script_normalize", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    cache_dir = tmp_path / "pit-bulk-cache"
+    raw_dir = cache_dir / "raw"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "aapl.us.txt").write_text(
+        "Date,Open,High,Low,Close,Volume\n"
+        "2024-01-02,100,101,99,100.5,1000\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "MEL_19900102_20070629_ARANDKEI.csv").write_text(
+        "TICKER,DATE,OPEN,HIGH,LOW,CLOSE,ADJ_CLOSE,VOLUME\n"
+        "MEL,19900102,10,11,9,10.2,10.5,2000\n",
+        encoding="utf-8",
+    )
+
+    exit_code = module.main(
+        [
+            "--cache-dir",
+            str(cache_dir),
+            "bulk-normalize",
+            "--input-dir",
+            str(raw_dir),
+            "--write-parquet",
+        ]
+    )
+
+    assert exit_code == 0
+
+    catalog = cache_dir / "catalog" / "gsl_pit_bulk.duckdb"
+    con = duckdb.connect(str(catalog), read_only=True)
+    rows = con.execute(
+        """
+        SELECT symbol, cast(date AS VARCHAR) AS date, close, adj_close
+        FROM pit_prices
+        ORDER BY symbol, date
+        """
+    ).fetchall()
+    con.close()
+
+    assert rows == [
+        ("AAPL", "2024-01-02", 100.5, 100.5),
+        ("MEL", "1990-01-02", 10.2, 10.5),
+    ]
 
 
 def test_diff_repair_symbol_extraction_prefers_full_repair_queue():

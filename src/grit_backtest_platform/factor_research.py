@@ -12,9 +12,13 @@ from uuid import uuid4
 
 from .factor_mining import factor_ir_from_rank_ic, infer_holding_period_from_expression
 from .market_data_repository import (
+    DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID,
     DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
     DATASET_FUNDAMENTALS_SNAPSHOT_ID,
+    DATASET_MACRO_RATES_SNAPSHOT_ID,
+    DATASET_OPTION_SKEW_SNAPSHOT_ID,
     DATASET_PRICE_SNAPSHOT_ID,
+    DATASET_SHORT_VOLUME_SNAPSHOT_ID,
 )
 from .pit_external_sources import build_external_source_readiness
 from .storage import SQLiteStorage, dumps, iso_now, loads
@@ -33,6 +37,9 @@ QUARANTINE_MIN_NEWEY_WEST_IR = 0.1
 PRICE_REQUIREMENTS = set(PRICE_DATA_REQUIREMENTS)
 FUNDAMENTAL_REQUIREMENTS = {
     "ltm_earnings",
+    "revenue",
+    "gross_profit",
+    "net_income",
     "market_cap",
     "book_value_equity",
     "operating_cash_flow",
@@ -40,11 +47,18 @@ FUNDAMENTAL_REQUIREMENTS = {
     "enterprise_value",
     "total_shares",
     "shares_outstanding",
+    "total_assets",
+    "current_assets",
+    "current_liabilities",
+    "long_term_debt",
     "total_debt",
     "cash_and_equivalents",
 }
 FUNDAMENTAL_FIELD_REQUIREMENTS = {
     "LtmEarnings": "ltm_earnings",
+    "Revenue": "revenue",
+    "GrossProfit": "gross_profit",
+    "NetIncome": "net_income",
     "MarketCap": "market_cap",
     "BookValueEquity": "book_value_equity",
     "OperatingCashFlow": "operating_cash_flow",
@@ -54,6 +68,10 @@ FUNDAMENTAL_FIELD_REQUIREMENTS = {
     "EnterpriseValue": "enterprise_value",
     "TotalShares": "total_shares",
     "SharesOutstanding": "shares_outstanding",
+    "TotalAssets": "total_assets",
+    "CurrentAssets": "current_assets",
+    "CurrentLiabilities": "current_liabilities",
+    "LongTermDebt": "long_term_debt",
     "TotalDebt": "total_debt",
     "CashAndEquivalents": "cash_and_equivalents",
 }
@@ -66,6 +84,9 @@ DATA_REQUIREMENT_ORDER = (
     "price_history",
     "returns",
     "ltm_earnings",
+    "revenue",
+    "gross_profit",
+    "net_income",
     "market_cap",
     "book_value_equity",
     "operating_cash_flow",
@@ -73,6 +94,10 @@ DATA_REQUIREMENT_ORDER = (
     "enterprise_value",
     "total_shares",
     "shares_outstanding",
+    "total_assets",
+    "current_assets",
+    "current_liabilities",
+    "long_term_debt",
     "total_debt",
     "cash_and_equivalents",
 )
@@ -1404,21 +1429,37 @@ def ensure_default_fundamental_snapshot(market_data_repository: Any) -> None:
             years_elapsed = date_index * 63.0 / 365.0
             share_cycle = 1.0 + (((date_index + symbol_index) % 5) - 2) * 0.001
             total_shares = max(1.0, base_shares * (1.0 + annual_share_growth * years_elapsed) * share_cycle)
+            revenue = market_cap * (0.42 + (symbol_index % 6) * 0.03)
+            gross_profit = revenue * (0.36 + (symbol_index % 4) * 0.025)
+            net_income = revenue * (0.08 + (symbol_index % 5) * 0.01)
             book_value_equity = market_cap * (0.32 + (symbol_index % 8) * 0.018)
             ltm_earnings = market_cap * base_margin
             operating_cash_flow = ltm_earnings * (1.12 + (symbol_index % 3) * 0.04)
             capex = ltm_earnings * (0.18 + (symbol_index % 4) * 0.015)
+            total_assets = market_cap * (0.78 + (symbol_index % 6) * 0.04)
+            current_assets = total_assets * (0.33 + (symbol_index % 4) * 0.02)
+            current_liabilities = total_assets * (0.18 + (symbol_index % 5) * 0.015)
+            long_term_debt = market_cap * (0.07 + (symbol_index % 4) * 0.01)
             total_debt = market_cap * (0.10 + (symbol_index % 5) * 0.012)
             cash_and_equivalents = market_cap * (0.055 + (symbol_index % 4) * 0.006)
             enterprise_value = market_cap + total_debt - cash_and_equivalents
             available_at = min(current_date + timedelta(days=45), anchor_end)
+            quarter = ((current_date.month - 1) // 3) + 1
             points.append(
                 {
                     "symbol": symbol,
                     "date": current_date.isoformat(),
                     "period_end_date": current_date.isoformat(),
+                    "publish_date": available_at.isoformat(),
+                    "statement_date": current_date.isoformat(),
                     "available_at": available_at.isoformat(),
+                    "fiscal_year": current_date.year,
+                    "fiscal_period": f"Q{quarter}",
+                    "time_provenance": "local_seed_publish_date",
                     "ltm_earnings": round(ltm_earnings, 4),
+                    "revenue": round(revenue, 4),
+                    "gross_profit": round(gross_profit, 4),
+                    "net_income": round(net_income, 4),
                     "market_cap": round(market_cap, 4),
                     "book_value_equity": round(book_value_equity, 4),
                     "operating_cash_flow": round(operating_cash_flow, 4),
@@ -1426,6 +1467,10 @@ def ensure_default_fundamental_snapshot(market_data_repository: Any) -> None:
                     "enterprise_value": round(enterprise_value, 4),
                     "total_shares": round(total_shares, 4),
                     "shares_outstanding": round(total_shares, 4),
+                    "total_assets": round(total_assets, 4),
+                    "current_assets": round(current_assets, 4),
+                    "current_liabilities": round(current_liabilities, 4),
+                    "long_term_debt": round(long_term_debt, 4),
                     "total_debt": round(total_debt, 4),
                     "cash_and_equivalents": round(cash_and_equivalents, 4),
                     "provider_market_cap": round(market_cap * 1.0004, 4),
@@ -1440,6 +1485,7 @@ def ensure_default_fundamental_snapshot(market_data_repository: Any) -> None:
                         "market_cap_formula": "adjusted_close * shares_outstanding",
                         "provider_market_cap_diff_pct": 0.04,
                         "annual_share_growth": round(annual_share_growth, 6),
+                        "publish_time_contract": "publish_date_and_available_at",
                     },
                 }
             )
@@ -1474,6 +1520,7 @@ def ensure_default_fundamental_snapshot(market_data_repository: Any) -> None:
                 "seeded_by": "FactorResearchService",
                 "seeded_at": now,
                 "seed_version": FUNDAMENTAL_SEED_VERSION,
+                "time_contract": "publish_date_and_available_at",
             },
         },
         fundamental_points=points,
@@ -3753,6 +3800,7 @@ def _pit_layer_status(
     blocked: bool = False,
     disabled: bool = False,
     calibrating: bool = False,
+    observation: bool = False,
 ) -> str:
     if blocked:
         return "BLOCKED"
@@ -3760,6 +3808,8 @@ def _pit_layer_status(
         return "DISABLED"
     if calibrating:
         return "CALIBRATING"
+    if observation:
+        return "OBSERVATION"
     if warning:
         return "WARNING"
     if ready:
@@ -3793,9 +3843,17 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
     price_snapshot = _snapshot_by_id(dataset_snapshots, DATASET_PRICE_SNAPSHOT_ID)
     corporate_snapshot = _snapshot_by_id(dataset_snapshots, DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID)
     fundamental_snapshot = _snapshot_by_id(dataset_snapshots, DATASET_FUNDAMENTALS_SNAPSHOT_ID)
+    analyst_snapshot = _snapshot_by_id(dataset_snapshots, DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID)
+    short_volume_snapshot = _snapshot_by_id(dataset_snapshots, DATASET_SHORT_VOLUME_SNAPSHOT_ID)
+    macro_rates_snapshot = _snapshot_by_id(dataset_snapshots, DATASET_MACRO_RATES_SNAPSHOT_ID)
+    option_skew_snapshot = _snapshot_by_id(dataset_snapshots, DATASET_OPTION_SKEW_SNAPSHOT_ID)
     universe_snapshot = _snapshot_by_id(universe_snapshots, SP500_UNIVERSE_SNAPSHOT_ID)
     dataset_snapshot_id = str((price_snapshot or {}).get("id") or DATASET_PRICE_SNAPSHOT_ID)
     fundamental_snapshot_id = str((fundamental_snapshot or {}).get("id") or DATASET_FUNDAMENTALS_SNAPSHOT_ID)
+    analyst_snapshot_id = str((analyst_snapshot or {}).get("id") or DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID)
+    short_volume_snapshot_id = str((short_volume_snapshot or {}).get("id") or DATASET_SHORT_VOLUME_SNAPSHOT_ID)
+    macro_rates_snapshot_id = str((macro_rates_snapshot or {}).get("id") or DATASET_MACRO_RATES_SNAPSHOT_ID)
+    option_skew_snapshot_id = str((option_skew_snapshot or {}).get("id") or DATASET_OPTION_SKEW_SNAPSHOT_ID)
     universe_snapshot_id = str((universe_snapshot or {}).get("id") or SP500_UNIVERSE_SNAPSHOT_ID)
     price_status = str((price_snapshot or {}).get("status") or "MISSING").upper()
     fundamental_status = str((fundamental_snapshot or {}).get("status") or "MISSING").upper()
@@ -3809,6 +3867,22 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
         fundamental_counts = market_data_repository.count_dataset_snapshot_rows(fundamental_snapshot_id)
     except Exception:
         fundamental_counts = {"fundamental_points": 0, "fundamental_coverage": 0}
+    try:
+        analyst_counts = market_data_repository.count_dataset_snapshot_rows(analyst_snapshot_id)
+    except Exception:
+        analyst_counts = {"signal_points": 0, "signal_coverage": 0}
+    try:
+        short_volume_counts = market_data_repository.count_dataset_snapshot_rows(short_volume_snapshot_id)
+    except Exception:
+        short_volume_counts = {"signal_points": 0, "signal_coverage": 0}
+    try:
+        macro_rates_counts = market_data_repository.count_dataset_snapshot_rows(macro_rates_snapshot_id)
+    except Exception:
+        macro_rates_counts = {"signal_points": 0, "signal_coverage": 0}
+    try:
+        option_skew_counts = market_data_repository.count_dataset_snapshot_rows(option_skew_snapshot_id)
+    except Exception:
+        option_skew_counts = {"signal_points": 0, "signal_coverage": 0}
     try:
         fundamental_coverage_rows = (
             market_data_repository.load_dataset_fundamental_coverage(fundamental_snapshot_id)
@@ -3842,9 +3916,54 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
         for item in rows
         if isinstance(item, Mapping)
     ]
-    missing_available_at_count = sum(
-        1 for item in sampled_fundamental_rows if not str(item.get("available_at") or "").strip()
+    try:
+        fundamental_time_contract = (
+            market_data_repository.summarize_dataset_fundamental_time_contract(fundamental_snapshot_id)
+            if hasattr(market_data_repository, "summarize_dataset_fundamental_time_contract")
+            else {}
+        )
+    except Exception:
+        fundamental_time_contract = {}
+    missing_available_at_count = int(
+        fundamental_time_contract.get("missing_available_at_count")
+        or sum(1 for item in sampled_fundamental_rows if not str(item.get("available_at") or "").strip())
     )
+    missing_publish_date_count = int(
+        fundamental_time_contract.get("missing_publish_date_count")
+        or sum(1 for item in sampled_fundamental_rows if not str(item.get("publish_date") or "").strip())
+    )
+    try:
+        analyst_signal_contract = (
+            market_data_repository.summarize_dataset_signal_time_contract(analyst_snapshot_id)
+            if hasattr(market_data_repository, "summarize_dataset_signal_time_contract")
+            else {}
+        )
+    except Exception:
+        analyst_signal_contract = {}
+    try:
+        short_volume_signal_contract = (
+            market_data_repository.summarize_dataset_signal_time_contract(short_volume_snapshot_id)
+            if hasattr(market_data_repository, "summarize_dataset_signal_time_contract")
+            else {}
+        )
+    except Exception:
+        short_volume_signal_contract = {}
+    try:
+        macro_rates_signal_contract = (
+            market_data_repository.summarize_dataset_signal_time_contract(macro_rates_snapshot_id)
+            if hasattr(market_data_repository, "summarize_dataset_signal_time_contract")
+            else {}
+        )
+    except Exception:
+        macro_rates_signal_contract = {}
+    try:
+        option_skew_signal_contract = (
+            market_data_repository.summarize_dataset_signal_time_contract(option_skew_snapshot_id)
+            if hasattr(market_data_repository, "summarize_dataset_signal_time_contract")
+            else {}
+        )
+    except Exception:
+        option_skew_signal_contract = {}
     history_summary = _load_pit_universe_history_summary(
         market_data_repository,
         universe_snapshot_id=universe_snapshot_id,
@@ -4150,22 +4269,68 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
         and history_summary.raw_count > 0
         and history_summary.historical_count <= 0
     )
-    fundamental_available_at_ready = missing_available_at_count <= 0 and fundamental_point_rows > 0
+    fundamental_time_contract_ready = (
+        fundamental_point_rows > 0
+        and missing_available_at_count <= 0
+        and missing_publish_date_count <= 0
+    )
+    analyst_point_rows = int(
+        analyst_signal_contract.get("point_count") or analyst_counts.get("signal_points") or 0
+    )
+    short_volume_point_rows = int(
+        short_volume_signal_contract.get("point_count") or short_volume_counts.get("signal_points") or 0
+    )
+    macro_rates_point_rows = int(
+        macro_rates_signal_contract.get("point_count") or macro_rates_counts.get("signal_points") or 0
+    )
+    option_skew_point_rows = int(
+        option_skew_signal_contract.get("point_count") or option_skew_counts.get("signal_points") or 0
+    )
+    analyst_gate_status = (
+        "READY"
+        if analyst_point_rows > 0
+        and str(_metadata_for_row(analyst_snapshot or {}).get("pit_gate_status") or "").upper() == "READY"
+        and int(analyst_signal_contract.get("missing_available_at_count") or 0) <= 0
+        and int(analyst_signal_contract.get("missing_publish_date_count") or 0) <= 0
+        else ("OBSERVATION" if analyst_point_rows > 0 else "DISABLED")
+    )
+    short_volume_gate_status = "OBSERVATION" if short_volume_point_rows > 0 else "DISABLED"
+    macro_gate_status = (
+        "READY"
+        if macro_rates_point_rows > 0
+        and str(_metadata_for_row(macro_rates_snapshot or {}).get("pit_gate_status") or "").upper() == "READY"
+        and int(macro_rates_signal_contract.get("missing_available_at_count") or 0) <= 0
+        and int(macro_rates_signal_contract.get("missing_publish_date_count") or 0) <= 0
+        else ("CALIBRATING" if sandbox_enabled else "BLOCKED")
+    )
+    iv_skew_gate_status = (
+        "READY"
+        if option_skew_point_rows > 0
+        and str(_metadata_for_row(option_skew_snapshot or {}).get("pit_gate_status") or "").upper() == "READY"
+        and int(option_skew_signal_contract.get("missing_available_at_count") or 0) <= 0
+        and int(option_skew_signal_contract.get("missing_publish_date_count") or 0) <= 0
+        else ("OBSERVATION" if option_skew_point_rows > 0 else "DISABLED")
+    )
     l1_status = _pit_layer_status(
         ready=adjusted_price_status == "READY" and corporate_status == "READY",
         warning=adjusted_price_status == "READY" and corporate_status != "READY",
         blocked=adjusted_price_status != "READY",
     )
     l2_status = _pit_layer_status(
-        ready=fundamental_ready and fundamental_available_at_ready,
-        warning=not (fundamental_ready and fundamental_available_at_ready)
+        ready=fundamental_ready and fundamental_time_contract_ready,
+        warning=not (fundamental_ready and fundamental_time_contract_ready)
         and (fundamental_point_rows > 0 or bool(fundamental_fields)),
         blocked=fundamental_point_rows <= 0 and not fundamental_fields,
     )
-    l3_status = _pit_layer_status(disabled=True)
+    l3_status = _pit_layer_status(
+        ready=analyst_gate_status == "READY" and short_volume_gate_status == "READY",
+        observation=analyst_gate_status == "OBSERVATION" or short_volume_gate_status == "OBSERVATION",
+        disabled=analyst_gate_status == "DISABLED" and short_volume_gate_status == "DISABLED",
+    )
     l4_status = _pit_layer_status(
+        ready=macro_gate_status == "READY" and iv_skew_gate_status == "READY",
         blocked=not sandbox_enabled,
-        calibrating=sandbox_enabled,
+        calibrating=sandbox_enabled and not (macro_gate_status == "READY" and iv_skew_gate_status == "READY"),
     )
     pit_layer_readiness = [
         {
@@ -4212,9 +4377,10 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
                 ]
             ),
             "available_at_health": {
-                "status": "healthy" if fundamental_available_at_ready else "blocked",
+                "status": "healthy" if fundamental_time_contract_ready else "blocked",
                 "sampled_row_count": len(sampled_fundamental_rows),
                 "missing_available_at_count": missing_available_at_count,
+                "missing_publish_date_count": missing_publish_date_count,
             },
         },
         {
@@ -4225,6 +4391,12 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "pit_alignment": "缺少正式来源前，不将情绪信号计入可验证样本。",
             "blockers": ["一致预期样本不足，卖空与换手微观结构链路待接入。"],
             "available_at_health": None,
+            "evidence_status": {
+                "analyst_consensus": analyst_gate_status,
+                "short_volume": short_volume_gate_status,
+                "analyst_point_rows": analyst_point_rows,
+                "short_volume_point_rows": short_volume_point_rows,
+            },
         },
         {
             "layer_id": "l4_macro_derivatives",
@@ -4238,6 +4410,12 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "pit_alignment": "滚动回归与衍生品偏度计算需要稳定的回放价格链路。",
             "blockers": [] if l4_status == "CALIBRATING" else ["缺少可回放价格或样本池，宏观敏感度无法计算。"],
             "available_at_health": None,
+            "evidence_status": {
+                "macro_rates": macro_gate_status,
+                "iv_skew": iv_skew_gate_status,
+                "macro_point_rows": macro_rates_point_rows,
+                "iv_skew_point_rows": option_skew_point_rows,
+            },
         },
     ]
     factor_diagnostic_readiness = [
@@ -4257,9 +4435,9 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "group_id": "quality_valuation",
             "title_cn": "质量/估值型",
             "status": _pit_factor_group_status(
-                verified=verified_enabled and fundamental_ready and fundamental_available_at_ready,
+                verified=verified_enabled and fundamental_ready and fundamental_time_contract_ready,
                 sandbox=(limited_diagnostics_enabled or sandbox_enabled) and fundamental_point_rows > 0,
-                blocked=not fundamental_ready or not fundamental_available_at_ready,
+                blocked=not fundamental_ready or not fundamental_time_contract_ready,
             ),
             "factors": ["Accruals", "F-Score", "经营杠杆", "盈利收益率", "账面市值比"],
             "rationale_cn": "依赖财务字段、发布时点和 available_at 门禁。",
@@ -4268,7 +4446,11 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
         {
             "group_id": "sentiment_micro",
             "title_cn": "情绪/微观型",
-            "status": _pit_factor_group_status(disabled=True),
+            "status": _pit_factor_group_status(
+                sandbox=l3_status == "OBSERVATION",
+                disabled=l3_status == "DISABLED",
+                blocked=l3_status == "BLOCKED",
+            ),
             "factors": ["一致预期修正", "非流动性溢价", "换手率稳定性", "卖空热度"],
             "rationale_cn": "当前仅保留情绪盲区提示，不对外提供正式 PIT 样本。",
             "linked_snapshot_checks": ["l3_sentiment_data", "consensus_sample_gate", "short_volume_gate"],
@@ -4304,6 +4486,17 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
                 "severity": "HIGH",
                 "title_cn": "财务字段缺少 available_at 门禁",
                 "detail_cn": f"抽样到 {missing_available_at_count} 条财务记录缺少 available_at，质量与估值型因子保持阻断。",
+                "hard_blocking": True,
+                "linked_factor_groups": ["quality_valuation"],
+            }
+        )
+    if missing_publish_date_count > 0:
+        pit_quality_alerts.append(
+            {
+                "code": "MISSING_PUBLISH_DATE",
+                "severity": "HIGH",
+                "title_cn": "韐Ｗ摮挾蝻箏? publish_date ?函?",
+                "detail_cn": f"抽样到 {missing_publish_date_count} 条财务记录缺少 publish_date，质量与估值型因子保持阻断。",
                 "hard_blocking": True,
                 "linked_factor_groups": ["quality_valuation"],
             }
@@ -4361,7 +4554,7 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "check_title_cn": "发布日期与 available_at 门禁",
             "source_layer": "L2 财务截面",
             "target_factor_groups": ["质量/估值型"],
-            "result_status": "READY" if fundamental_available_at_ready else "BLOCKED",
+            "result_status": "READY" if fundamental_time_contract_ready else "BLOCKED",
         },
         {
             "check_id": "fundamental_balance_check",
@@ -4375,21 +4568,28 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "check_title_cn": "一致预期样本数",
             "source_layer": "L3 分析师与情绪",
             "target_factor_groups": ["情绪/微观型"],
-            "result_status": "DISABLED",
+            "result_status": analyst_gate_status,
+        },
+        {
+            "check_id": "short_volume_gate",
+            "check_title_cn": "卖空成交样本数",
+            "source_layer": "L3 分析师与情绪",
+            "target_factor_groups": ["情绪/微观型"],
+            "result_status": short_volume_gate_status,
         },
         {
             "check_id": "rate_beta_calibration",
             "check_title_cn": "利率 Beta 校准状态",
             "source_layer": "L4 宏观与衍生品",
             "target_factor_groups": ["宏观/衍生品型"],
-            "result_status": l4_status,
+            "result_status": macro_gate_status,
         },
         {
             "check_id": "iv_skew_feed",
             "check_title_cn": "IV Skew 衍生链路",
             "source_layer": "L4 宏观与衍生品",
             "target_factor_groups": ["宏观/衍生品型"],
-            "result_status": "DISABLED",
+            "result_status": iv_skew_gate_status,
         },
     ]
     return {
@@ -4423,6 +4623,11 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "available_fields": fundamental_fields,
             "missing_fields": sorted(FUNDAMENTAL_REQUIREMENTS.difference(fundamental_field_set)),
             "source_snapshot_status": fundamental_status,
+            "source_snapshot_updated_at": (fundamental_snapshot or {}).get("updated_at"),
+            "seed_version": str(fundamental_metadata.get("seed_version") or ""),
+            "missing_available_at_count": missing_available_at_count,
+            "missing_publish_date_count": missing_publish_date_count,
+            "time_contract": str(fundamental_metadata.get("time_contract") or ""),
         },
         "blocking_items": blocker_items,
         "status_reasons": status_reasons,

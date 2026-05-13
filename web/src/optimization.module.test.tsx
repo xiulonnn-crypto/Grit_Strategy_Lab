@@ -1102,6 +1102,12 @@ function createOptimizationTestApi(): DemoApi {
     async cloneBacktestRun(): Promise<never> {
       throw new Error("not implemented");
     },
+    async resumeBacktestRun(id: string): Promise<ApiBacktestRunDetail> {
+      if (id !== run.id) {
+        throw new Error(`Run ${id} not found`);
+      }
+      return structuredClone(run);
+    },
     async listOptimizationJobs(): Promise<ApiOptimizationJobListItem[]> {
       return [...jobs.values()]
         .map(({ job }) => buildOptimizationJobListItem(strategy, job))

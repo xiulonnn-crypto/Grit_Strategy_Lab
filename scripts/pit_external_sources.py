@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -196,6 +197,29 @@ def _quote_sql(value: str) -> str:
     return "'" + value.replace("'", "''").replace("\\", "/") + "'"
 
 
+def _quote_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _discover_csv_headers(paths: Sequence[str]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for raw_path in paths:
+        path = Path(raw_path)
+        rows: list[str]
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                rows = next(csv.reader(handle), [])
+        except UnicodeDecodeError:
+            with path.open("r", encoding="latin-1", newline="") as handle:
+                rows = next(csv.reader(handle), [])
+        for header in rows:
+            candidate = str(header or "").strip()
+            normalized = candidate.lower()
+            if candidate and normalized not in headers:
+                headers[normalized] = candidate
+    return headers
+
+
 def command_bulk_normalize(args: argparse.Namespace) -> int:
     try:
         import duckdb  # type: ignore
@@ -217,40 +241,98 @@ def command_bulk_normalize(args: argparse.Namespace) -> int:
     )
     if not csv_files:
         raise SystemExit(f"No non-empty CSV/TXT files were found under {input_dir}")
+    available_headers = _discover_csv_headers(csv_files)
     file_list_sql = "[" + ",".join(_quote_sql(path) for path in csv_files) + "]"
+
+    def header_ref(*names: str) -> str | None:
+        for name in names:
+            actual = available_headers.get(str(name or "").strip().lower())
+            if actual:
+                return _quote_identifier(actual)
+        return None
+
+    def numeric_expr(*names: str, fallback: str | None = None) -> str:
+        refs = [header_ref(name) for name in names]
+        refs = [ref for ref in refs if ref]
+        terms = [f"try_cast({ref} AS DOUBLE)" for ref in refs]
+        if fallback:
+            terms.append(fallback)
+        if not terms:
+            return "NULL"
+        if len(terms) == 1:
+            return terms[0]
+        return "coalesce(" + ", ".join(terms) + ")"
+
+    file_symbol_sql = "regexp_replace(regexp_extract(filename, '[^/\\\\]+$', 0), '\\.[^.]+$', '')"
+    fallback_symbol_sql = (
+        "CASE "
+        f"WHEN lower({file_symbol_sql}) LIKE '%_arandkei' THEN regexp_extract({file_symbol_sql}, '^[^_]+', 0) "
+        f"ELSE {file_symbol_sql} "
+        "END"
+    )
+    raw_symbol_terms = [
+        f"nullif(trim(cast({ref} AS VARCHAR)), '')"
+        for ref in (header_ref("ticker"), header_ref("symbol"))
+        if ref
+    ]
+    raw_symbol_terms.append(fallback_symbol_sql)
+    raw_symbol_sql = "coalesce(" + ", ".join(raw_symbol_terms) + ")"
+
+    date_ref = header_ref("date")
+    if not date_ref:
+        raise SystemExit(f"No usable date column was found under {input_dir}")
+    normalized_date_sql = (
+        "coalesce("
+        f"try_cast({date_ref} AS DATE), "
+        f"try_cast(try_strptime(trim(cast({date_ref} AS VARCHAR)), '%Y%m%d') AS DATE), "
+        f"try_cast(try_strptime(trim(cast({date_ref} AS VARCHAR)), '%Y-%m-%d') AS DATE), "
+        f"try_cast(try_strptime(trim(cast({date_ref} AS VARCHAR)), '%m/%d/%Y') AS DATE)"
+        ")"
+    )
+    normalized_close_sql = numeric_expr("close")
+    normalized_adj_close_sql = numeric_expr("adj close", "adj_close", fallback=normalized_close_sql)
+
     con = duckdb.connect(str(catalog_path))
     con.execute(
         f"""
         CREATE OR REPLACE TABLE pit_prices AS
-        WITH raw_prices AS (
+        WITH input_rows AS (
           SELECT
-            regexp_replace(regexp_extract(filename, '[^/\\\\]+$', 0), '\\.[^.]+$', '') AS file_symbol,
-            Date,
-            Open,
-            High,
-            Low,
-            Close,
-            Volume,
+            {file_symbol_sql} AS file_symbol,
+            *
+          FROM read_csv_auto({file_list_sql}, filename=true, union_by_name=true, ignore_errors=true, all_varchar=true)
+        ),
+        raw_prices AS (
+          SELECT
+            file_symbol,
+            {raw_symbol_sql} AS raw_symbol,
+            {normalized_date_sql} AS normalized_date,
+            {numeric_expr("open")} AS normalized_open,
+            {numeric_expr("high")} AS normalized_high,
+            {numeric_expr("low")} AS normalized_low,
+            {normalized_close_sql} AS normalized_close,
+            {normalized_adj_close_sql} AS normalized_adj_close,
+            {numeric_expr("volume")} AS normalized_volume,
             filename
-          FROM read_csv_auto({file_list_sql}, filename=true, union_by_name=true, ignore_errors=true)
+          FROM input_rows
         )
         SELECT
           upper(
             CASE
-              WHEN lower(file_symbol) LIKE '%.us' THEN substr(file_symbol, 1, length(file_symbol) - 3)
-              ELSE file_symbol
+              WHEN lower(raw_symbol) LIKE '%.us' THEN substr(raw_symbol, 1, length(raw_symbol) - 3)
+              ELSE raw_symbol
             END
           ) AS symbol,
-          try_cast(Date AS DATE) AS date,
-          try_cast(Open AS DOUBLE) AS open,
-          try_cast(High AS DOUBLE) AS high,
-          try_cast(Low AS DOUBLE) AS low,
-          try_cast(Close AS DOUBLE) AS close,
-          try_cast(Close AS DOUBLE) AS adj_close,
-          try_cast(Volume AS DOUBLE) AS volume,
+          normalized_date AS date,
+          normalized_open AS open,
+          normalized_high AS high,
+          normalized_low AS low,
+          normalized_close AS close,
+          normalized_adj_close AS adj_close,
+          normalized_volume AS volume,
           filename AS source_file
         FROM raw_prices
-        WHERE Date IS NOT NULL
+        WHERE raw_symbol IS NOT NULL AND normalized_date IS NOT NULL
         """
     )
     con.execute("CREATE INDEX IF NOT EXISTS idx_pit_prices_symbol_date ON pit_prices(symbol, date)")

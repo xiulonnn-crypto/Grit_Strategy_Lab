@@ -25,13 +25,14 @@ import json
 import threading
 import time
 from typing import Any
+from types import SimpleNamespace
 
 from grit_backtest_platform import api as api_module
 from grit_backtest_platform.api import create_app
 from grit_backtest_platform._real_service_rebuilt import RealBacktestPlatformService
 from grit_backtest_platform import _real_service_rebuilt as real_service_module
 from grit_backtest_platform.market_data_repository import CoverageSummary, MarketDataRepository
-from grit_backtest_platform.snapshot_provider_projection import build_data_trust_summary
+from grit_backtest_platform.snapshot_provider_projection import build_data_trust_summary, build_provider_registry
 from grit_backtest_platform.universe_history import (
     ANCHOR_SCHEDULE,
     NASDAQ100_UNIVERSE_KEY,
@@ -200,6 +201,60 @@ def test_strategies_list_includes_latest_completed_run_summary_for_workspace_car
     }
 
 
+def test_historical_weight_normalization_warning_is_sanitized_from_completed_runs(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    strategy = create_momentum_strategy(client, idempotency_key="historical-warning-sanitize")["strategy"]
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    run_id = "run_historical_weight_warning"
+
+    _insert_backtest_run(
+        client,
+        run_id=run_id,
+        strategy_id=strategy["id"],
+        created_at=created_at,
+        is_permanent=1,
+        artifact_paths=[],
+    )
+
+    client.app.state.service.storage.execute(
+        """
+        UPDATE backtest_runs
+        SET status = ?,
+            request_json = ?,
+            preview_json = ?,
+            warnings_json = ?
+        WHERE id = ?
+        """,
+        (
+            "COMPLETED_WITH_WARNINGS",
+            json.dumps({"parameter_version_id": strategy["current_parameter_version_id"]}),
+            json.dumps(
+                {
+                    "parameter_version_id": strategy["current_parameter_version_id"],
+                    "warnings": ["Allocation weights were normalized to 100%."],
+                }
+            ),
+            json.dumps(["Allocation weights were normalized to 100%."]),
+            run_id,
+        ),
+    )
+
+    listed_runs = assert_ok(client.get("/backtest-runs"))
+    listed_run = next(item for item in listed_runs if item["id"] == run_id)
+    detail = assert_ok(client.get(f"/backtest-runs/{run_id}/detail"))
+    strategies = assert_ok(client.get("/strategies"))
+    strategy_item = next(item for item in strategies if item["id"] == strategy["id"])
+    summary = strategy_item["latest_completed_run_summary"]
+
+    assert listed_run["status"] == "COMPLETED"
+    assert listed_run["warnings"] == []
+    assert detail["status"] == "COMPLETED"
+    assert detail["warnings"] == []
+    assert detail["preview"]["warnings"] == []
+    assert summary["status"] == "COMPLETED"
+    assert summary["warning_count"] == 0
+
+
 def test_snapshot_overview_contract_is_exact_on_fresh_database(tmp_path):
     client, _ = create_test_client(tmp_path)
 
@@ -259,6 +314,7 @@ def test_snapshot_provider_registry_and_attempts_are_available_on_fresh_database
         "TIINGO_API_TOKEN",
         "FMP_API_KEY",
         "SEC_USER_AGENT",
+        "MASSIVE_API_KEY",
         "POLYGON_API_KEY",
         "NASDAQ_DATA_LINK_API_KEY",
         "FINNHUB_API_KEY",
@@ -314,13 +370,65 @@ def test_snapshot_provider_registry_and_attempts_are_available_on_fresh_database
     assert sec["credential_requirements"]["required_env_vars"] == ["SEC_USER_AGENT"]
     assert sec["trust_profile"]["trust_tier"] == "identity_lifecycle_authority"
     polygon = next(item for item in registry["items"] if item["provider_id"] == "polygon")
-    assert polygon["credential_requirements"]["required_env_vars"] == ["POLYGON_API_KEY"]
+    assert polygon["credential_requirements"]["required_env_vars"] == ["MASSIVE_API_KEY", "POLYGON_API_KEY"]
     assert polygon["source_governance"]["license"] == "account_terms"
     assert attempts["latest_job_id"] is None
     assert attempts["items"] == []
     assert attempts["rollup"]["policy"] == "unique_provider_latest_job_priority"
     assert attempts["rollup"]["event_count"] == 0
     assert attempts["rollup"]["unique_provider_count"] == 0
+
+
+def test_snapshot_overview_surfaces_persisted_phase2_dataset_evidence(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    repository = service.market_data_repository
+    repository.replace_signal_snapshot(
+        {
+            "id": "ds-analyst-consensus",
+            "name": "分析师预期样本",
+            "status": "READY",
+            "as_of": "2026-05-13",
+            "freshness_label": "unit-test",
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-13",
+            "row_count": 1,
+            "source": "unit_test",
+            "fallback_source": "none",
+            "metadata": {"covered_symbol_count": 1, "total_symbol_count": 1},
+        },
+        signal_points=[
+            {
+                "entity_key": "AAPL",
+                "date": "2026-05-13",
+                "publish_date": "2026-05-13",
+                "available_at": "2026-05-13",
+                "metric_key": "eps_surprise_pct",
+                "metric_value": 0.05,
+                "source": "unit_test",
+            }
+        ],
+        signal_coverage=[
+            {
+                "entity_key": "AAPL",
+                "start_date": "2026-05-13",
+                "end_date": "2026-05-13",
+                "observation_count": 1,
+                "source": "unit_test",
+            }
+        ],
+    )
+    if hasattr(service, "_invalidate_snapshot_overview_cache"):
+        service._invalidate_snapshot_overview_cache()
+
+    overview = assert_ok(client.get("/data-snapshots/overview"))
+
+    dataset_ids = [item["id"] for item in overview["dataset_snapshots"]]
+    assert "ds-analyst-consensus" in dataset_ids
+    l3_layer = next(item for item in overview["data_layer_readiness"] if item["layer_id"] == "l3_sentiment_data")
+    evidence_items = list(l3_layer.get("linked_target_evidence") or [])
+    analyst_evidence = next(item for item in evidence_items if item["dataset_id"] == "ds-analyst-consensus")
+    assert analyst_evidence["evidence_kind"] == "dataset_snapshot"
 
 
 def test_snapshot_provider_registry_reuses_snapshot_overview_cache(tmp_path, monkeypatch):
@@ -347,23 +455,63 @@ def test_snapshot_provider_registry_reuses_snapshot_overview_cache(tmp_path, mon
     assert build_calls == 1
 
 
-def test_snapshot_provider_registry_masks_nasdaq_wiki_and_finnhub_keys(tmp_path, monkeypatch):
+def test_snapshot_provider_registry_masks_nasdaq_wiki_finnhub_and_massive_keys(tmp_path, monkeypatch):
     monkeypatch.setenv("NASDAQ_DATA_LINK_API_KEY", "nasdaq-secret-value")
     monkeypatch.setenv("FINNHUB_API_KEY", "finnhub-secret-value")
+    monkeypatch.setenv("MASSIVE_API_KEY", "massive-secret-value")
+    monkeypatch.delenv("POLYGON_API_KEY", raising=False)
     client, _ = create_test_client(tmp_path)
 
     registry = assert_ok(client.get("/data-snapshots/provider-registry"))
 
     nasdaq_wiki = next(item for item in registry["items"] if item["provider_id"] == "nasdaq_wiki")
     finnhub = next(item for item in registry["items"] if item["provider_id"] == "finnhub")
+    polygon = next(item for item in registry["items"] if item["provider_id"] == "polygon")
     assert nasdaq_wiki["credential_requirements"]["configured"] is True
     assert nasdaq_wiki["credential_requirements"]["configured_env_vars"] == ["NASDAQ_DATA_LINK_API_KEY"]
     assert nasdaq_wiki["credential_requirements"]["missing_env_vars"] == []
     assert finnhub["credential_requirements"]["configured"] is True
     assert finnhub["credential_requirements"]["configured_env_vars"] == ["FINNHUB_API_KEY"]
     assert finnhub["credential_requirements"]["missing_env_vars"] == []
+    assert polygon["credential_requirements"]["configured"] is True
+    assert polygon["credential_requirements"]["configured_env_vars"] == ["MASSIVE_API_KEY"]
+    assert polygon["credential_requirements"]["missing_env_vars"] == []
     assert "nasdaq-secret-value" not in json.dumps(registry)
     assert "finnhub-secret-value" not in json.dumps(registry)
+    assert "massive-secret-value" not in json.dumps(registry)
+
+
+def test_snapshot_provider_registry_marks_rejected_massive_key_unusable(monkeypatch):
+    monkeypatch.setenv("MASSIVE_API_KEY", "massive-secret-value")
+    monkeypatch.delenv("POLYGON_API_KEY", raising=False)
+    provider = SimpleNamespace(provider_name="polygon", metadata={"access_tier": "paid_optional"})
+
+    registry = build_provider_registry(
+        market_data_provider=SimpleNamespace(providers=[provider]),
+        attempt_items=[
+            {
+                "provider_id": "polygon",
+                "status": "unavailable",
+                "reason": "invalid_credentials",
+                "error": "invalid_credentials",
+                "target_type": "price_history",
+                "snapshot_id": "ds-price",
+                "job_id": "snap_latest",
+                "attempted_at": "2026-05-13T10:11:27Z",
+                "quota_limited": False,
+                "cooldown_active": False,
+            }
+        ],
+    )
+
+    polygon = next(item for item in registry["items"] if item["provider_id"] == "polygon")
+    assert polygon["credential_requirements"]["configured"] is True
+    assert polygon["credential_requirements"]["configured_env_vars"] == ["MASSIVE_API_KEY"]
+    assert polygon["credential_ready"] is False
+    assert polygon["usable"] is False
+    assert polygon["readiness_status"] == "invalid_credentials"
+    assert polygon["trust_profile"]["credential_status"] == "invalid_credentials"
+    assert "massive-secret-value" not in json.dumps(registry)
 
 
 def test_snapshot_overview_cache_signature_tracks_provider_env_status(tmp_path, monkeypatch):
@@ -572,6 +720,61 @@ def test_snapshot_progress_targets_use_distinct_symbol_projection(tmp_path, monk
     )
 
     assert {"AAPL", "MSFT"}.issubset(set(symbols))
+
+
+def test_snapshot_progress_targets_include_asset_allocation_symbols(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    session = draft_strategy_session(
+        client,
+        strategy_type="ASSET_ALLOCATION",
+        message="Create a four asset allocation model.",
+        confirmation_payload={
+            "revision": 1,
+            "strategy_type": "ASSET_ALLOCATION",
+            "core": {
+                "strategy_type": "ASSET_ALLOCATION",
+                "universe_name": "Global Allocation",
+                "rebalance_frequency": "quarterly",
+            },
+            "parameters": {
+                "strategy_name": "Asset allocation progress symbols",
+                "strategy_description": "Progress targets should include every configured asset.",
+                "benchmark_symbol": "SPY",
+                "capital": 100000,
+                "allocation_assets": [
+                    {"symbol": "SPY", "display_name": "S&P 500 ETF", "asset_class": "Equity"},
+                    {"symbol": "QQQ", "display_name": "Nasdaq 100 ETF", "asset_class": "Growth Equity"},
+                    {"symbol": "TLT", "display_name": "20Y Treasury ETF", "asset_class": "Treasury"},
+                    {"symbol": "GLD", "display_name": "Gold ETF", "asset_class": "Commodity"},
+                ],
+                "allocation_weight__SPY_pct": 35,
+                "allocation_weight__QQQ_pct": 25,
+                "allocation_weight__TLT_pct": 25,
+                "allocation_weight__GLD_pct": 15,
+                "investment_mode": "all_in",
+                "rebalance_enabled": True,
+                "rebalance_frequency": "quarterly",
+                "rebalance_threshold_pct": 5,
+                "cost_model_enabled": True,
+                "fee_bps": 1.5,
+                "slippage_bps": 2.5,
+                "expense_ratio_bps": 8,
+            },
+        },
+    )
+    assert_ok(materialize_session(client, session["session_id"], idempotency_key="asset-allocation-progress-symbols"))
+
+    symbols = service._canonical_progress_target_symbols(
+        progress_target_symbols=[],
+        existing_price_coverage=[],
+        existing_corporate_coverage=[],
+        existing_price_missing=[],
+        existing_corporate_missing=[],
+    )
+
+    assert {"SPY", "QQQ", "TLT", "GLD"}.issubset(set(symbols))
 
 
 def test_snapshot_provider_registry_does_not_import_openbb_when_disabled(tmp_path, monkeypatch):
@@ -1189,6 +1392,89 @@ def test_scoped_market_data_provider_enables_targeted_price_repair_only_when_req
         {"excluded": set(), "allow_targeted_price_repair": True}
     ]
     assert scoped is not runtime_provider
+
+
+def test_scoped_market_data_provider_keeps_polygon_available_for_targeted_price_repair(tmp_path, monkeypatch):
+    monkeypatch.delenv("GRIT_ENABLE_PAID_OPTIONAL_PROVIDERS", raising=False)
+
+    class _NamedProvider:
+        def __init__(self, provider_name: str) -> None:
+            self.provider_name = provider_name
+
+    class _FakeRuntimeProvider:
+        provider_name = "runtime"
+
+        def __init__(self, providers: list[_NamedProvider], captured: list[dict[str, object]] | None = None) -> None:
+            self.providers = list(providers)
+            self.missing_providers: list[str] = []
+            self.universe_history_providers: list[object] = []
+            self.captured = captured if captured is not None else []
+
+        def scoped_copy(self, *, exclude_provider_names=None, allow_targeted_price_repair=None):
+            excluded = {str(item) for item in (exclude_provider_names or [])}
+            self.captured.append(
+                {
+                    "excluded": excluded,
+                    "allow_targeted_price_repair": bool(allow_targeted_price_repair),
+                }
+            )
+            return _FakeRuntimeProvider(
+                [provider for provider in self.providers if provider.provider_name not in excluded],
+                captured=self.captured,
+            )
+
+    runtime_provider = _FakeRuntimeProvider(
+        [_NamedProvider("yfinance"), _NamedProvider("polygon")]
+    )
+    service = RealBacktestPlatformService(tmp_path / "scoped-targeted-repair-polygon.db", market_data_provider=runtime_provider)
+
+    scoped = service._scoped_market_data_provider(
+        mode="repair",
+        window_start=date(2026, 4, 1),
+        allow_targeted_price_repair=True,
+    )
+
+    assert runtime_provider.captured == [
+        {"excluded": set(), "allow_targeted_price_repair": True}
+    ]
+    assert [provider.provider_name for provider in scoped.providers] == ["yfinance", "polygon"]
+
+
+def test_start_snapshot_refresh_subprocess_preserves_repair_symbol_limit(tmp_path, monkeypatch):
+    service = RealBacktestPlatformService(tmp_path / "snapshot-refresh-subprocess.db", market_data_provider=None)
+    captured: dict[str, Any] = {}
+
+    class _DummyProcess:
+        pid = 4321
+
+    def fake_popen(command, cwd=None, env=None, creationflags=0):
+        captured["command"] = list(command)
+        captured["cwd"] = cwd
+        captured["env"] = dict(env or {})
+        captured["creationflags"] = creationflags
+        return _DummyProcess()
+
+    monkeypatch.setattr(real_service_module.subprocess, "Popen", fake_popen)
+
+    service._start_snapshot_refresh_subprocess(
+        job={
+            "id": "snap_repair_limit",
+            "created_at": "2026-05-13T00:00:00Z",
+            "started_at": "2026-05-13T00:00:01Z",
+        },
+        payload={
+            "reason": "repair-limit-check",
+            "mode": "repair",
+            "targets": ["price"],
+            "repair_symbol_limit": 174,
+        },
+        mode="repair",
+        targets=["price"],
+    )
+
+    assert captured["command"][-2:] == ["--repair-symbol-limit", "174"]
+    assert "refresh-snapshots" in captured["command"]
+    assert service._snapshot_refresh_process.pid == 4321
 
 
 def test_snapshot_refresh_heartbeat_persists_runtime_stage_and_refresh_stats(tmp_path):
@@ -3101,6 +3387,77 @@ def test_repair_refresh_honors_request_symbol_limit_for_single_job(tmp_path, mon
     assert metadata["repair_cursor"] == 3
 
 
+def test_repair_refresh_symbol_limit_skips_benchmark_extra_refresh(tmp_path):
+    class _Provider:
+        provider_name = "bounded_repair_provider"
+
+        def __init__(self) -> None:
+            self.symbols: list[str] = []
+
+        def fetch_history(self, symbol, start_date, end_date):
+            self.symbols.append(str(symbol))
+            return {
+                "source": self.provider_name,
+                "fallback_source": None,
+                "bars": [
+                    {
+                        "date": "2026-04-08",
+                        "open": 10.0,
+                        "high": 11.0,
+                        "low": 9.0,
+                        "close": 10.5,
+                        "adj_close": 10.5,
+                        "volume": 1000,
+                    }
+                ],
+                "actions": [],
+                "warnings": [],
+                "partial": False,
+                "metadata": {},
+            }
+
+    provider = _Provider()
+    service = RealBacktestPlatformService(tmp_path / "bounded-repair.db", market_data_provider=provider)
+    repository = service.market_data_repository
+    repository.replace_dataset_snapshot(
+        {
+            "id": "ds-price",
+            "name": "price",
+            "status": "INCOMPLETE",
+            "as_of": "2026-04-08T00:00:00Z",
+            "freshness_label": "stale",
+            "start_date": "1996-01-01",
+            "end_date": "2026-04-08",
+            "row_count": 0,
+            "source": "mixed_sources",
+            "fallback_source": "mixed_fallbacks",
+            "blocker": {"code": "PRICE_SNAPSHOT_INCOMPLETE", "message": "waiting"},
+            "metadata": {"missing_symbols": ["AAA", "BBB"], "repair_cursor": 0},
+        },
+        price_bars=[],
+        symbol_coverage=[
+            CoverageSummary(symbol="SPY", start_date="1996-01-02", end_date="2026-04-08", trade_days=7600),
+            CoverageSummary(symbol="QQQ", start_date="1999-03-10", end_date="2026-04-08", trade_days=6900),
+        ],
+    )
+
+    service.refresh_snapshots(
+        {
+            "reason": "bounded-repair",
+            "mode": "repair",
+            "targets": ["price"],
+            "repair_symbol_limit": 1,
+        }
+    )
+
+    stored_snapshot = next(item for item in repository.list_dataset_snapshots() if item["id"] == "ds-price")
+    metadata = dict(stored_snapshot.get("metadata") or {})
+
+    assert provider.symbols == ["AAA"]
+    assert metadata["selected_missing_symbols"] == ["AAA"]
+    assert metadata["skipped_latest_extra_symbols_due_to_repair_limit"] == ["QQQ", "SPY"]
+
+
 def test_repair_refresh_price_target_does_not_select_or_write_corporate_queue(tmp_path):
     class _Provider:
         provider_name = "price_target_provider"
@@ -3326,6 +3683,152 @@ def test_repair_refresh_with_universe_target_includes_latest_members(tmp_path, m
     assert price_snapshot["status"] == "READY"
     assert any(symbol == "AAA" and start == "1996-01-01" for symbol, start, _ in provider.calls)
     assert any(symbol == "LATEST1" and start == previous_end.isoformat() for symbol, start, _ in provider.calls)
+
+
+def test_repair_refresh_promotes_missing_asset_allocation_symbols_to_full_history_queue(tmp_path):
+    class AssetAllocationRepairProvider:
+        provider_name = "asset_allocation_repair_provider"
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str]] = []
+
+        def fetch_history(self, symbol, start_date, end_date):
+            self.calls.append((str(symbol), start_date.isoformat(), end_date.isoformat()))
+            return {
+                "source": self.provider_name,
+                "fallback_source": None,
+                "bars": [
+                    {
+                        "date": end_date.isoformat(),
+                        "open": 10.0,
+                        "high": 11.0,
+                        "low": 9.0,
+                        "close": 10.5,
+                        "adj_close": 10.5,
+                        "volume": 1000,
+                    }
+                ],
+                "actions": [],
+                "warnings": [],
+                "partial": False,
+                "metadata": {},
+            }
+
+    provider = AssetAllocationRepairProvider()
+    client = TestClient(create_app(tmp_path / "repair-asset-allocation.db", market_data_provider=provider))
+    service = client.app.state.service
+    repository = service.market_data_repository
+
+    session = draft_strategy_session(
+        client,
+        strategy_type="ASSET_ALLOCATION",
+        message="Create a four asset allocation model.",
+        confirmation_payload={
+            "revision": 1,
+            "strategy_type": "ASSET_ALLOCATION",
+            "core": {
+                "strategy_type": "ASSET_ALLOCATION",
+                "universe_name": "Global Allocation",
+                "rebalance_frequency": "quarterly",
+            },
+            "parameters": {
+                "strategy_name": "Asset allocation repair queue",
+                "strategy_description": "Repair should fetch missing ETF history in full-history mode.",
+                "benchmark_symbol": "SPY",
+                "capital": 100000,
+                "allocation_assets": [
+                    {"symbol": "SPY", "display_name": "S&P 500 ETF", "asset_class": "Equity"},
+                    {"symbol": "QQQ", "display_name": "Nasdaq 100 ETF", "asset_class": "Growth Equity"},
+                    {"symbol": "TLT", "display_name": "20Y Treasury ETF", "asset_class": "Treasury"},
+                    {"symbol": "GLD", "display_name": "Gold ETF", "asset_class": "Commodity"},
+                ],
+                "allocation_weight__SPY_pct": 35,
+                "allocation_weight__QQQ_pct": 25,
+                "allocation_weight__TLT_pct": 25,
+                "allocation_weight__GLD_pct": 15,
+                "investment_mode": "all_in",
+                "rebalance_enabled": True,
+                "rebalance_frequency": "quarterly",
+                "rebalance_threshold_pct": 5,
+                "cost_model_enabled": True,
+                "fee_bps": 1.5,
+                "slippage_bps": 2.5,
+                "expense_ratio_bps": 8,
+            },
+        },
+    )
+    assert_ok(materialize_session(client, session["session_id"], idempotency_key="asset-allocation-repair-symbols"))
+
+    previous_end = date.today() - timedelta(days=1)
+    repository.replace_dataset_snapshot(
+        {
+            "id": "ds-price",
+            "name": "price",
+            "status": "INCOMPLETE",
+            "as_of": "2026-04-08T00:00:00Z",
+            "freshness_label": "stale",
+            "start_date": "1996-01-01",
+            "end_date": previous_end.isoformat(),
+            "row_count": 2,
+            "source": "mixed_sources",
+            "fallback_source": "mixed_fallbacks",
+            "blocker": {"code": "PRICE_SNAPSHOT_INCOMPLETE", "message": "waiting"},
+            "metadata": {"missing_symbols": ["AAA"], "repair_cursor": 0},
+        },
+        price_bars=[
+            {
+                "symbol": "SPY",
+                "date": previous_end.isoformat(),
+                "open": 500.0,
+                "high": 501.0,
+                "low": 499.0,
+                "close": 500.0,
+                "adj_close": 500.0,
+                "volume": 1_000_000,
+                "source": "seed",
+            },
+            {
+                "symbol": "QQQ",
+                "date": previous_end.isoformat(),
+                "open": 400.0,
+                "high": 401.0,
+                "low": 399.0,
+                "close": 400.0,
+                "adj_close": 400.0,
+                "volume": 1_000_000,
+                "source": "seed",
+            },
+        ],
+        symbol_coverage=[
+            {
+                "symbol": "SPY",
+                "start_date": "1996-01-02",
+                "end_date": previous_end.isoformat(),
+                "trade_days": 7500,
+                "source": "seed",
+            },
+            {
+                "symbol": "QQQ",
+                "start_date": "1999-03-10",
+                "end_date": previous_end.isoformat(),
+                "trade_days": 6800,
+                "source": "seed",
+            },
+        ],
+    )
+
+    refreshed = service.refresh_snapshots({"reason": "repair-asset-allocation", "mode": "repair", "targets": ["price"]})
+    stored_snapshot = next(item for item in repository.list_dataset_snapshots() if item["id"] == "ds-price")
+    metadata = dict(stored_snapshot.get("metadata") or {})
+
+    assert refreshed["latest_job"]["request"]["mode"] == "repair"
+    assert metadata["selected_missing_symbols"] == ["AAA"]
+    assert metadata["selected_required_strategy_symbols"] == ["GLD", "TLT"]
+    assert any(symbol == "AAA" and start == "1996-01-01" for symbol, start, _ in provider.calls)
+    assert any(symbol == "TLT" and start == "1996-01-01" for symbol, start, _ in provider.calls)
+    assert any(symbol == "GLD" and start == "1996-01-01" for symbol, start, _ in provider.calls)
+    assert any(symbol == "SPY" and start == previous_end.isoformat() for symbol, start, _ in provider.calls)
+    assert any(symbol == "QQQ" and start == previous_end.isoformat() for symbol, start, _ in provider.calls)
 
 
 def test_snapshot_memory_guard_uses_python_process_limit_not_busy_system_alone(tmp_path, monkeypatch):

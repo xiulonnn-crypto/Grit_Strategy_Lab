@@ -47,6 +47,16 @@
   line-height: 22px;
 }
 
+.factor-page[data-page-root="pit-cleaning-center"] .factor-page-hero > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.factor-page[data-page-root="pit-cleaning-center"] .factor-page-hero > div:first-child > p:not(.factor-page-hero__eyebrow) {
+  max-width: none;
+  white-space: nowrap;
+}
+
 .factor-page-hero__actions {
   display: flex;
   align-items: center;
@@ -889,6 +899,54 @@
   line-height: 18px;
 }
 
+.factor-page[data-page-root="pit-cleaning-center"] .pit-two-col .factor-panel,
+.factor-page[data-page-root="pit-cleaning-center"] .pit-bottom-grid .factor-panel {
+  padding: 16px;
+}
+
+.factor-page[data-page-root="pit-cleaning-center"] .pit-two-col .panel-header,
+.factor-page[data-page-root="pit-cleaning-center"] .pit-bottom-grid .panel-header {
+  margin-bottom: 10px;
+}
+
+.factor-page[data-page-root="pit-cleaning-center"] .pit-two-col .panel-title p,
+.factor-page[data-page-root="pit-cleaning-center"] .pit-bottom-grid .panel-title p {
+  line-height: 18px;
+}
+
+.factor-page[data-page-root="pit-cleaning-center"] .kv-list,
+.factor-page[data-page-root="pit-cleaning-center"] .check-list,
+.factor-page[data-page-root="pit-cleaning-center"] .matrix-rows--pit,
+.factor-page[data-page-root="pit-cleaning-center"] .bucket-grid {
+  gap: 8px;
+}
+
+.factor-page[data-page-root="pit-cleaning-center"] .kv-row,
+.factor-page[data-page-root="pit-cleaning-center"] .check-row,
+.factor-page[data-page-root="pit-cleaning-center"] .matrix-row--pit {
+  gap: 8px;
+  padding: 9px 12px;
+  border-radius: 12px;
+}
+
+.factor-page[data-page-root="pit-cleaning-center"] .kv-row span,
+.factor-page[data-page-root="pit-cleaning-center"] .check-row span,
+.factor-page[data-page-root="pit-cleaning-center"] .matrix-row--pit span {
+  line-height: 16px;
+}
+
+.factor-page[data-page-root="pit-cleaning-center"] .bucket-card {
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+}
+
+.factor-page[data-page-root="pit-cleaning-center"] .bucket-card__title span,
+.factor-page[data-page-root="pit-cleaning-center"] .bucket-card p,
+.factor-page[data-page-root="pit-cleaning-center"] .bucket-card small {
+  line-height: 17px;
+}
+
 .bucket-metrics {
   display: flex;
   flex-wrap: wrap;
@@ -1043,6 +1101,10 @@
 .factor-waiver-banner p {
   margin: 6px 0 0;
   color: #8a641e;
+}
+
+.factor-page[data-page-root="pit-cleaning-center"] .factor-waiver-banner p {
+  white-space: nowrap;
 }
 
 .factor-ops-guidance {
@@ -3280,6 +3342,11 @@
   .factor-page-hero {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .factor-page[data-page-root="pit-cleaning-center"] .factor-page-hero > div:first-child > p:not(.factor-page-hero__eyebrow),
+  .factor-page[data-page-root="pit-cleaning-center"] .factor-waiver-banner p {
+    white-space: normal;
   }
 
   .ops-strip {

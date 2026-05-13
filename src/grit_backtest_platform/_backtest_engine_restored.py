@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from statistics import mean, pstdev
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 
 def _parse_date(value: str | date) -> date:
@@ -130,6 +130,105 @@ class IndexValuationPoint:
     source: str = ""
     fallback_source: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+BacktestCheckpointCallback = Callable[[Mapping[str, Any], Sequence[DailyPerformancePoint], Sequence[TradeRecord]], None]
+
+
+def _hydrate_trade_records(
+    rows: Sequence[TradeRecord | Mapping[str, Any]] | None,
+) -> list[TradeRecord]:
+    hydrated: list[TradeRecord] = []
+    for item in rows or []:
+        if isinstance(item, TradeRecord):
+            hydrated.append(item)
+            continue
+        mapping = dict(item)
+        hydrated.append(
+            TradeRecord(
+                date=str(mapping.get("date") or mapping.get("trade_date") or ""),
+                symbol=str(mapping.get("symbol") or ""),
+                action=str(mapping.get("action") or ""),
+                price=_to_float(mapping.get("price")),
+                weight_before=_to_float(mapping.get("weight_before")),
+                weight_after=_to_float(mapping.get("weight_after")),
+                reason=str(mapping.get("reason") or ""),
+                quantity=(
+                    float(mapping.get("quantity"))
+                    if mapping.get("quantity") not in (None, "")
+                    else None
+                ),
+                net_amount=(
+                    float(mapping.get("net_amount"))
+                    if mapping.get("net_amount") not in (None, "")
+                    else None
+                ),
+                contribution_multiplier=(
+                    float(mapping.get("contribution_multiplier"))
+                    if mapping.get("contribution_multiplier") not in (None, "")
+                    else None
+                ),
+                valuation_percentile_10y=(
+                    float(mapping.get("valuation_percentile_10y"))
+                    if mapping.get("valuation_percentile_10y") not in (None, "")
+                    else None
+                ),
+                valuation_bucket=str(mapping.get("valuation_bucket") or "") or None,
+            )
+        )
+    return hydrated
+
+
+def _hydrate_daily_performance_points(
+    rows: Sequence[DailyPerformancePoint | Mapping[str, Any]] | None,
+) -> list[DailyPerformancePoint]:
+    hydrated: list[DailyPerformancePoint] = []
+    for item in rows or []:
+        if isinstance(item, DailyPerformancePoint):
+            hydrated.append(item)
+            continue
+        mapping = dict(item)
+        hydrated.append(
+            DailyPerformancePoint(
+                date=str(mapping.get("date") or mapping.get("trade_date") or ""),
+                equity=_to_float(mapping.get("equity")),
+                strategy_return=_to_float(mapping.get("strategy_return")),
+                benchmark_return=_to_float(mapping.get("benchmark_return")),
+                drawdown=_to_float(mapping.get("drawdown")),
+                exposure=_to_float(mapping.get("exposure")),
+                universe_size=int(mapping.get("universe_size") or 0),
+                in_sample=bool(mapping.get("in_sample")),
+            )
+        )
+    return hydrated
+
+
+def _emit_backtest_checkpoint(
+    callback: BacktestCheckpointCallback | None,
+    *,
+    state: Mapping[str, Any],
+    completed_steps: int,
+    total_steps: int,
+    daily_points: Sequence[DailyPerformancePoint],
+    trades: Sequence[TradeRecord],
+) -> None:
+    if callback is None:
+        return
+    progress_pct = 100 if total_steps <= 0 else min(
+        100,
+        max(0, int(round((completed_steps / total_steps) * 100))),
+    )
+    callback(
+        {
+            **dict(state),
+            "completed_steps": completed_steps,
+            "persisted_step_count": len(daily_points),
+            "total_step_count": total_steps,
+            "progress_pct": progress_pct,
+        },
+        daily_points,
+        trades,
+    )
 
 
 def _normalize_bars(bars: Iterable[Mapping[str, Any]]) -> list[MarketBar]:
@@ -469,6 +568,11 @@ def _run_grid_backtest(
     parameters: Mapping[str, Any],
     benchmark_series: list[MarketBar],
     master_dates: list[str],
+    resume_state: Mapping[str, Any] | None = None,
+    resume_daily_performance: Sequence[DailyPerformancePoint | Mapping[str, Any]] | None = None,
+    resume_trades: Sequence[TradeRecord | Mapping[str, Any]] | None = None,
+    checkpoint_callback: BacktestCheckpointCallback | None = None,
+    checkpoint_interval_steps: int = 40,
 ) -> BacktestResult:
     primary_symbol = config.benchmark_symbol if config.benchmark_symbol in symbol_series else next(iter(symbol_series.keys()))
     primary_series = symbol_series.get(primary_symbol, [])
@@ -486,19 +590,34 @@ def _run_grid_backtest(
     sell_step = max(_to_float(parameters.get("sell_size_pct"), 0.0) / 100.0, 0.0)
     max_stop_loss_pct = _to_float(parameters.get("max_stop_loss_pct"), 0.0)
 
-    equity = config.initial_equity
-    equity_curve = [equity]
-    returns: list[float] = []
-    daily_points: list[DailyPerformancePoint] = []
-    trades: list[TradeRecord] = []
-    total_turnover = 0.0
-    winning_days = 0
-    position_weight = 0.0
-    anchor_price: float | None = None
-    entry_anchor_price: float | None = None
+    resume_payload = dict(resume_state or {})
+    daily_points = _hydrate_daily_performance_points(resume_daily_performance)
+    trades = _hydrate_trade_records(resume_trades)
+    returns = [point.strategy_return for point in daily_points]
+    equity = _to_float(
+        resume_payload.get("equity"),
+        daily_points[-1].equity if daily_points else config.initial_equity,
+    )
+    equity_curve = [config.initial_equity, *[point.equity for point in daily_points]]
+    total_turnover = _to_float(resume_payload.get("total_turnover"))
+    if total_turnover <= 0 and trades:
+        total_turnover = sum(abs(trade.weight_after - trade.weight_before) for trade in trades)
+    winning_days = sum(1 for value in returns if value > 0)
+    position_weight = _to_float(resume_payload.get("position_weight"))
+    anchor_price = (
+        float(resume_payload.get("anchor_price"))
+        if resume_payload.get("anchor_price") not in (None, "")
+        else None
+    )
+    entry_anchor_price = (
+        float(resume_payload.get("entry_anchor_price"))
+        if resume_payload.get("entry_anchor_price") not in (None, "")
+        else None
+    )
     oos_cut = max(int(len(master_dates) * (1.0 - config.oos_fraction)), 1)
+    start_index = max(int(resume_payload.get("next_index") or 1), 1)
     first_index = primary_index.get(master_dates[0])
-    if first_index is not None and initial_weight > 0:
+    if not daily_points and first_index is not None and initial_weight > 0:
         first_bar = primary_series[first_index]
         first_open = _tradeable_open(first_bar)
         first_close = _tradeable_close(first_bar)
@@ -546,8 +665,26 @@ def _run_grid_backtest(
                     in_sample=0 < oos_cut,
                 )
             )
+            _emit_backtest_checkpoint(
+                checkpoint_callback,
+                state={
+                    "checkpoint_kind": "grid",
+                    "next_index": 1,
+                    "equity": equity,
+                    "position_weight": position_weight,
+                    "anchor_price": anchor_price,
+                    "entry_anchor_price": entry_anchor_price,
+                    "total_turnover": total_turnover,
+                    "current_stage": f"Simulating grid backtest ({len(daily_points)}/{len(master_dates)})",
+                    "latest_update": f"Processed {len(daily_points)}/{len(master_dates)} grid steps.",
+                },
+                completed_steps=len(daily_points),
+                total_steps=len(master_dates),
+                daily_points=daily_points,
+                trades=trades,
+            )
 
-    for index in range(1, len(master_dates)):
+    for index in range(start_index, len(master_dates)):
         execution_date = master_dates[index]
         previous_date = master_dates[index - 1]
         position_index = primary_index.get(execution_date)
@@ -629,6 +766,31 @@ def _run_grid_backtest(
                 in_sample=index < oos_cut,
             )
         )
+        if (
+            checkpoint_callback is not None
+            and (
+                len(daily_points) % max(int(checkpoint_interval_steps), 1) == 0
+                or index >= len(master_dates) - 1
+            )
+        ):
+            _emit_backtest_checkpoint(
+                checkpoint_callback,
+                state={
+                    "checkpoint_kind": "grid",
+                    "next_index": index + 1,
+                    "equity": equity,
+                    "position_weight": position_weight,
+                    "anchor_price": anchor_price,
+                    "entry_anchor_price": entry_anchor_price,
+                    "total_turnover": total_turnover,
+                    "current_stage": f"Simulating grid backtest ({len(daily_points)}/{len(master_dates)})",
+                    "latest_update": f"Processed {len(daily_points)}/{len(master_dates)} grid steps.",
+                },
+                completed_steps=len(daily_points),
+                total_steps=len(master_dates),
+                daily_points=daily_points,
+                trades=trades,
+            )
 
     total_return, cagr, volatility, sharpe, max_drawdown = _curve_metrics(equity_curve, returns)
     oos_returns = [point.strategy_return for point in daily_points if not point.in_sample]
@@ -666,6 +828,11 @@ def _run_mean_reversion_backtest(
     parameters: Mapping[str, Any],
     benchmark_series: list[MarketBar],
     master_dates: list[str],
+    resume_state: Mapping[str, Any] | None = None,
+    resume_daily_performance: Sequence[DailyPerformancePoint | Mapping[str, Any]] | None = None,
+    resume_trades: Sequence[TradeRecord | Mapping[str, Any]] | None = None,
+    checkpoint_callback: BacktestCheckpointCallback | None = None,
+    checkpoint_interval_steps: int = 40,
 ) -> BacktestResult:
     primary_symbol = config.benchmark_symbol if config.benchmark_symbol in symbol_series else next(iter(symbol_series.keys()))
     primary_series = symbol_series.get(primary_symbol, [])
@@ -687,19 +854,31 @@ def _run_mean_reversion_backtest(
     long_entry_weight = _clamp_weight(_to_float(parameters.get("long_entry_size_pct"), 0.0) / 100.0)
     short_entry_weight = _clamp_weight(_to_float(parameters.get("short_entry_size_pct"), 0.0) / 100.0)
 
-    equity = max(_to_float(parameters.get("capital"), config.initial_equity), 1.0)
-    equity_curve = [equity]
-    returns: list[float] = []
-    daily_points: list[DailyPerformancePoint] = []
-    trades: list[TradeRecord] = []
-    total_turnover = 0.0
-    winning_days = 0
-    position_weight = 0.0
-    entry_price: float | None = None
-    effective_date: str | None = None
+    resume_payload = dict(resume_state or {})
+    starting_equity = max(_to_float(parameters.get("capital"), config.initial_equity), 1.0)
+    daily_points = _hydrate_daily_performance_points(resume_daily_performance)
+    trades = _hydrate_trade_records(resume_trades)
+    returns = [point.strategy_return for point in daily_points]
+    equity = _to_float(
+        resume_payload.get("equity"),
+        daily_points[-1].equity if daily_points else starting_equity,
+    )
+    equity_curve = [starting_equity, *[point.equity for point in daily_points]]
+    total_turnover = _to_float(resume_payload.get("total_turnover"))
+    if total_turnover <= 0 and trades:
+        total_turnover = sum(abs(trade.weight_after - trade.weight_before) for trade in trades)
+    winning_days = sum(1 for value in returns if value > 0)
+    position_weight = _to_float(resume_payload.get("position_weight"))
+    entry_price = (
+        float(resume_payload.get("entry_price"))
+        if resume_payload.get("entry_price") not in (None, "")
+        else None
+    )
+    effective_date = str(resume_payload.get("effective_date") or "").strip() or None
     oos_cut = max(int(len(master_dates) * (1.0 - config.oos_fraction)), 1)
+    start_index = max(int(resume_payload.get("next_index") or 1), 1)
 
-    for index in range(1, len(master_dates)):
+    for index in range(start_index, len(master_dates)):
         execution_date = master_dates[index]
         previous_date = master_dates[index - 1]
         position_index = primary_index.get(execution_date)
@@ -810,6 +989,31 @@ def _run_mean_reversion_backtest(
                 in_sample=index < oos_cut,
             )
         )
+        if (
+            checkpoint_callback is not None
+            and (
+                len(daily_points) % max(int(checkpoint_interval_steps), 1) == 0
+                or index >= len(master_dates) - 1
+            )
+        ):
+            _emit_backtest_checkpoint(
+                checkpoint_callback,
+                state={
+                    "checkpoint_kind": "mean_reversion",
+                    "next_index": index + 1,
+                    "equity": equity,
+                    "position_weight": position_weight,
+                    "entry_price": entry_price,
+                    "effective_date": effective_date,
+                    "total_turnover": total_turnover,
+                    "current_stage": f"Simulating mean-reversion backtest ({len(daily_points)}/{max(len(master_dates) - 1, 1)})",
+                    "latest_update": f"Processed {len(daily_points)}/{max(len(master_dates) - 1, 1)} mean-reversion steps.",
+                },
+                completed_steps=len(daily_points),
+                total_steps=max(len(master_dates) - 1, 1),
+                daily_points=daily_points,
+                trades=trades,
+            )
 
     total_return, cagr, volatility, sharpe, max_drawdown = _curve_metrics(equity_curve, returns)
     oos_returns = [point.strategy_return for point in daily_points if not point.in_sample]
@@ -850,6 +1054,11 @@ def _run_buy_and_hold_backtest(
     benchmark_series: list[MarketBar],
     master_dates: list[str],
     valuation_series: Mapping[str, list[IndexValuationPoint]] | None = None,
+    resume_state: Mapping[str, Any] | None = None,
+    resume_daily_performance: Sequence[DailyPerformancePoint | Mapping[str, Any]] | None = None,
+    resume_trades: Sequence[TradeRecord | Mapping[str, Any]] | None = None,
+    checkpoint_callback: BacktestCheckpointCallback | None = None,
+    checkpoint_interval_steps: int = 40,
 ) -> BacktestResult:
     primary_symbol = config.benchmark_symbol if config.benchmark_symbol in symbol_series else next(iter(symbol_series.keys()))
     primary_series = symbol_series.get(primary_symbol, [])
@@ -874,24 +1083,54 @@ def _run_buy_and_hold_backtest(
         contribution_indexes = [0]
     contribution_set = set(contribution_indexes)
 
-    cash = 0.0
-    shares = 0.0
-    total_contributed = 0.0
-    prior_account_value = 0.0
-    equity_curve = [1.0]
-    returns: list[float] = []
+    resume_payload = dict(resume_state or {})
+    cash = _to_float(resume_payload.get("cash"))
+    shares = _to_float(resume_payload.get("shares"))
+    total_contributed = _to_float(resume_payload.get("total_contributed"))
+    prior_account_value = _to_float(resume_payload.get("prior_account_value"))
+    daily_points = _hydrate_daily_performance_points(resume_daily_performance)
+    trades = _hydrate_trade_records(resume_trades)
+    equity_curve = [1.0, *[point.equity for point in daily_points]]
+    returns = [point.strategy_return for point in daily_points]
     oos_cut = max(int(len(master_dates) * (1.0 - config.oos_fraction)), 1)
-    daily_points: list[DailyPerformancePoint] = []
-    trades: list[TradeRecord] = []
-    total_turnover = 0.0
-    coverage_days = 0
-    effective_date: str | None = None
-    warnings: list[str] = []
+    total_turnover = _to_float(resume_payload.get("total_turnover"))
+    if total_turnover <= 0 and trades:
+        total_turnover = float(len(trades))
+    coverage_days = int(resume_payload.get("coverage_days") or 0)
+    if coverage_days <= 0 and daily_points:
+        coverage_days = sum(1 for point in daily_points if point.universe_size > 0)
+    effective_date = str(resume_payload.get("effective_date") or "").strip() or None
+    warnings = [str(item) for item in list(resume_payload.get("warnings") or []) if str(item).strip()]
     valuation_points = list((valuation_series or {}).get(dynamic_investment_proxy_key) or [])
-    valuation_cursor = 0
+    valuation_cursor = int(resume_payload.get("valuation_cursor") or 0)
     latest_valuation_point: IndexValuationPoint | None = None
+    latest_valuation_payload = resume_payload.get("latest_valuation_point")
+    if isinstance(latest_valuation_payload, Mapping):
+        latest_valuation_point = IndexValuationPoint(
+            date=str(latest_valuation_payload.get("date") or ""),
+            proxy_symbol=str(latest_valuation_payload.get("proxy_symbol") or ""),
+            pe_ttm=(
+                float(latest_valuation_payload.get("pe_ttm"))
+                if latest_valuation_payload.get("pe_ttm") not in (None, "")
+                else None
+            ),
+            pe_ttm_percentile_10y=(
+                float(latest_valuation_payload.get("pe_ttm_percentile_10y"))
+                if latest_valuation_payload.get("pe_ttm_percentile_10y") not in (None, "")
+                else None
+            ),
+            source=str(latest_valuation_payload.get("source") or ""),
+            fallback_source=(
+                str(latest_valuation_payload.get("fallback_source"))
+                if latest_valuation_payload.get("fallback_source")
+                else None
+            ),
+            metadata=dict(latest_valuation_payload.get("metadata") or {}),
+        )
+    start_index = max(int(resume_payload.get("next_index") or 0), 0)
 
-    for master_index, trade_date in enumerate(master_dates):
+    for master_index in range(start_index, len(master_dates)):
+        trade_date = master_dates[master_index]
         position_index = primary_index.get(trade_date)
         if position_index is None:
             continue
@@ -998,6 +1237,36 @@ def _run_buy_and_hold_backtest(
             )
         )
         prior_account_value = account_value
+        if (
+            checkpoint_callback is not None
+            and (
+                len(daily_points) % max(int(checkpoint_interval_steps), 1) == 0
+                or master_index >= len(master_dates) - 1
+            )
+        ):
+            _emit_backtest_checkpoint(
+                checkpoint_callback,
+                state={
+                    "checkpoint_kind": "buy_and_hold",
+                    "next_index": master_index + 1,
+                    "cash": cash,
+                    "shares": shares,
+                    "total_contributed": total_contributed,
+                    "prior_account_value": prior_account_value,
+                    "total_turnover": total_turnover,
+                    "coverage_days": coverage_days,
+                    "effective_date": effective_date,
+                    "warnings": list(warnings),
+                    "valuation_cursor": valuation_cursor,
+                    "latest_valuation_point": asdict(latest_valuation_point) if latest_valuation_point is not None else None,
+                    "current_stage": f"Simulating buy-and-hold backtest ({len(daily_points)}/{len(master_dates)})",
+                    "latest_update": f"Processed {len(daily_points)}/{len(master_dates)} buy-and-hold steps.",
+                },
+                completed_steps=len(daily_points),
+                total_steps=len(master_dates),
+                daily_points=daily_points,
+                trades=trades,
+            )
 
     total_return, cagr, volatility, sharpe, max_drawdown = _curve_metrics(equity_curve, returns)
     winning_days = sum(1 for value in returns if value > 0)
@@ -1030,21 +1299,30 @@ def _run_buy_and_hold_backtest(
     )
 
 
-def _asset_allocation_symbols(parameters: Mapping[str, Any], symbol_series: Mapping[str, list[MarketBar]]) -> list[str]:
+def _asset_allocation_configured_symbols(parameters: Mapping[str, Any]) -> list[str]:
     raw_assets = parameters.get("allocation_assets")
     symbols: list[str] = []
     if isinstance(raw_assets, list):
         for asset in raw_assets:
             raw_symbol = asset.get("symbol") if isinstance(asset, Mapping) else asset
             symbol = str(raw_symbol or "").strip().upper()
-            if symbol and symbol in symbol_series and symbol not in symbols:
+            if symbol and symbol not in symbols:
                 symbols.append(symbol)
     for key in parameters:
         text = str(key)
         if text.startswith("allocation_weight__") and text.endswith("_pct"):
             symbol = text.removeprefix("allocation_weight__").removesuffix("_pct").strip().upper()
-            if symbol and symbol in symbol_series and symbol not in symbols:
+            if symbol and symbol not in symbols:
                 symbols.append(symbol)
+    return symbols
+
+
+def _asset_allocation_symbols(parameters: Mapping[str, Any], symbol_series: Mapping[str, list[MarketBar]]) -> list[str]:
+    symbols = [
+        symbol
+        for symbol in _asset_allocation_configured_symbols(parameters)
+        if symbol in symbol_series
+    ]
     return symbols or list(symbol_series.keys())
 
 
@@ -1052,6 +1330,14 @@ def _asset_allocation_target_weights(
     parameters: Mapping[str, Any],
     symbol_series: Mapping[str, list[MarketBar]],
 ) -> tuple[dict[str, float], list[str]]:
+    configured_symbols = _asset_allocation_configured_symbols(parameters)
+    missing_symbols = [
+        symbol
+        for symbol in configured_symbols
+        if symbol not in symbol_series
+    ]
+    if missing_symbols:
+        return {}, [f"Allocation assets missing price history: {', '.join(missing_symbols)}."]
     symbols = _asset_allocation_symbols(parameters, symbol_series)
     raw_weights: dict[str, float] = {}
     warnings: list[str] = []
@@ -1082,6 +1368,11 @@ def _run_asset_allocation_backtest(
     parameters: Mapping[str, Any],
     benchmark_series: list[MarketBar],
     master_dates: list[str],
+    resume_state: Mapping[str, Any] | None = None,
+    resume_daily_performance: Sequence[DailyPerformancePoint | Mapping[str, Any]] | None = None,
+    resume_trades: Sequence[TradeRecord | Mapping[str, Any]] | None = None,
+    checkpoint_callback: BacktestCheckpointCallback | None = None,
+    checkpoint_interval_steps: int = 40,
 ) -> BacktestResult:
     if len(master_dates) < 2 or not symbol_series:
         empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -1090,7 +1381,7 @@ def _run_asset_allocation_backtest(
     target_weights, warnings = _asset_allocation_target_weights(parameters, symbol_series)
     if not target_weights:
         empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        return BacktestResult(metrics=empty_metrics, warnings=["No allocation assets with market bars were available"])
+        return BacktestResult(metrics=empty_metrics, warnings=warnings or ["No allocation assets with market bars were available"])
 
     index_by_symbol = {
         symbol: {bar.date: idx for idx, bar in enumerate(series)}
@@ -1108,17 +1399,30 @@ def _run_asset_allocation_backtest(
     if bool(parameters.get("cost_model_enabled", False)):
         expense_ratio_daily = max(_to_float(parameters.get("expense_ratio_bps"), 0.0), 0.0) / 10000.0 / 252.0
 
-    current_weights: dict[str, float] = {}
-    equity = config.initial_equity
-    equity_curve = [equity]
-    returns: list[float] = []
+    resume_payload = dict(resume_state or {})
+    current_weights = {
+        str(symbol): float(weight)
+        for symbol, weight in dict(resume_payload.get("current_weights") or {}).items()
+        if float(weight) > 0
+    }
+    daily_points = _hydrate_daily_performance_points(resume_daily_performance)
+    trades = _hydrate_trade_records(resume_trades)
+    returns = [point.strategy_return for point in daily_points]
+    equity = _to_float(
+        resume_payload.get("equity"),
+        daily_points[-1].equity if daily_points else config.initial_equity,
+    )
+    equity_curve = [config.initial_equity, *[point.equity for point in daily_points]]
     oos_cut = max(int((len(master_dates) - 1) * (1.0 - config.oos_fraction)), 1)
-    daily_points: list[DailyPerformancePoint] = []
-    trades: list[TradeRecord] = []
-    total_turnover = 0.0
-    coverage_days = 0
+    total_turnover = _to_float(resume_payload.get("total_turnover"))
+    if total_turnover <= 0 and trades:
+        total_turnover = sum(abs(trade.weight_after - trade.weight_before) for trade in trades)
+    coverage_days = int(resume_payload.get("coverage_days") or 0)
+    if coverage_days <= 0 and daily_points:
+        coverage_days = sum(1 for point in daily_points if point.universe_size > 0)
+    start_index = max(int(resume_payload.get("next_index") or 1), 1)
 
-    for index in range(1, len(master_dates)):
+    for index in range(start_index, len(master_dates)):
         previous_date = master_dates[index - 1]
         trade_date = master_dates[index]
         rebalance_turnover = 0.0
@@ -1219,6 +1523,30 @@ def _run_asset_allocation_backtest(
                 in_sample=(index - 1) < oos_cut,
             )
         )
+        if (
+            checkpoint_callback is not None
+            and (
+                len(daily_points) % max(int(checkpoint_interval_steps), 1) == 0
+                or index >= len(master_dates) - 1
+            )
+        ):
+            _emit_backtest_checkpoint(
+                checkpoint_callback,
+                state={
+                    "checkpoint_kind": "asset_allocation",
+                    "next_index": index + 1,
+                    "equity": equity,
+                    "current_weights": dict(current_weights),
+                    "total_turnover": total_turnover,
+                    "coverage_days": coverage_days,
+                    "current_stage": f"Simulating asset-allocation backtest ({len(daily_points)}/{max(len(master_dates) - 1, 1)})",
+                    "latest_update": f"Processed {len(daily_points)}/{max(len(master_dates) - 1, 1)} asset-allocation steps.",
+                },
+                completed_steps=len(daily_points),
+                total_steps=max(len(master_dates) - 1, 1),
+                daily_points=daily_points,
+                trades=trades,
+            )
 
     total_return, cagr, volatility, sharpe, max_drawdown = _curve_metrics(equity_curve, returns)
     winning_days = sum(1 for value in returns if value > 0)
@@ -1301,6 +1629,11 @@ def run_backtest_prepared(
     *,
     config: BacktestConfig | None = None,
     parameters: Mapping[str, Any] | None = None,
+    resume_state: Mapping[str, Any] | None = None,
+    resume_daily_performance: Sequence[DailyPerformancePoint | Mapping[str, Any]] | None = None,
+    resume_trades: Sequence[TradeRecord | Mapping[str, Any]] | None = None,
+    checkpoint_callback: BacktestCheckpointCallback | None = None,
+    checkpoint_interval_steps: int = 40,
 ) -> BacktestResult:
     config = config or BacktestConfig()
     parameters = dict(parameters or {})
@@ -1334,6 +1667,11 @@ def run_backtest_prepared(
             parameters=parameters,
             benchmark_series=benchmark_series,
             master_dates=requested_window_dates,
+            resume_state=resume_state,
+            resume_daily_performance=resume_daily_performance,
+            resume_trades=resume_trades,
+            checkpoint_callback=checkpoint_callback,
+            checkpoint_interval_steps=checkpoint_interval_steps,
         )
     if str(template_key).lower() in {"mean_reversion", "reversion"}:
         return _run_mean_reversion_backtest(
@@ -1342,6 +1680,11 @@ def run_backtest_prepared(
             parameters=parameters,
             benchmark_series=benchmark_series,
             master_dates=requested_window_dates,
+            resume_state=resume_state,
+            resume_daily_performance=resume_daily_performance,
+            resume_trades=resume_trades,
+            checkpoint_callback=checkpoint_callback,
+            checkpoint_interval_steps=checkpoint_interval_steps,
         )
     if str(template_key).lower() in {"buy_and_hold", "dca"}:
         return _run_buy_and_hold_backtest(
@@ -1351,6 +1694,11 @@ def run_backtest_prepared(
             benchmark_series=benchmark_series,
             master_dates=requested_window_dates,
             valuation_series=valuation_series,
+            resume_state=resume_state,
+            resume_daily_performance=resume_daily_performance,
+            resume_trades=resume_trades,
+            checkpoint_callback=checkpoint_callback,
+            checkpoint_interval_steps=checkpoint_interval_steps,
         )
     if str(template_key).lower() in {"asset_allocation", "allocation", "global_allocation"}:
         return _run_asset_allocation_backtest(
@@ -1359,6 +1707,11 @@ def run_backtest_prepared(
             parameters=parameters,
             benchmark_series=benchmark_series,
             master_dates=requested_window_dates,
+            resume_state=resume_state,
+            resume_daily_performance=resume_daily_performance,
+            resume_trades=resume_trades,
+            checkpoint_callback=checkpoint_callback,
+            checkpoint_interval_steps=checkpoint_interval_steps,
         )
     minimum_history = lookback_days + skip_recent_days
     if len(master_dates) < minimum_history + 2:
@@ -1396,19 +1749,31 @@ def run_backtest_prepared(
             ],
         }
     )
-    target_weights: dict[str, float] = {}
-    equity = config.initial_equity
-    equity_curve = [equity]
-    returns: list[float] = []
+    resume_payload = dict(resume_state or {})
+    target_weights = {
+        str(symbol): float(weight)
+        for symbol, weight in dict(resume_payload.get("target_weights") or {}).items()
+        if float(weight) > 0
+    }
+    daily_points = _hydrate_daily_performance_points(resume_daily_performance)
+    trades = _hydrate_trade_records(resume_trades)
+    returns = [point.strategy_return for point in daily_points]
+    equity = _to_float(
+        resume_payload.get("equity"),
+        daily_points[-1].equity if daily_points else config.initial_equity,
+    )
+    equity_curve = [config.initial_equity, *[point.equity for point in daily_points]]
     oos_cut = max(int(len(live_execution_dates) * (1.0 - config.oos_fraction)), 1)
-    daily_points: list[DailyPerformancePoint] = []
-    trades: list[TradeRecord] = []
     benchmark_index = {bar.date: idx for idx, bar in enumerate(benchmark_series)}
-    total_turnover = 0.0
-    latest_rebalance_turnover = 0.0
+    total_turnover = _to_float(resume_payload.get("total_turnover"))
+    if total_turnover <= 0 and trades:
+        total_turnover = sum(abs(trade.weight_after - trade.weight_before) for trade in trades)
+    latest_rebalance_turnover = _to_float(resume_payload.get("latest_rebalance_turnover"))
     rebalances = set(rebalance_indexes)
-    live_point_index = 0
-    for master_index in range(first_signal_index, len(master_dates) - 1):
+    live_point_index = int(resume_payload.get("live_point_index") or len(daily_points))
+    start_master_index = max(int(resume_payload.get("next_master_index") or first_signal_index), first_signal_index)
+    total_steps = len(live_execution_dates)
+    for master_index in range(start_master_index, len(master_dates) - 1):
         as_of_date = master_dates[master_index]
         execution_date = master_dates[master_index + 1]
         if config.start_date and execution_date < str(config.start_date):
@@ -1518,6 +1883,31 @@ def run_backtest_prepared(
             )
         )
         live_point_index += 1
+        if (
+            checkpoint_callback is not None
+            and (
+                len(daily_points) % max(int(checkpoint_interval_steps), 1) == 0
+                or master_index >= len(master_dates) - 2
+            )
+        ):
+            _emit_backtest_checkpoint(
+                checkpoint_callback,
+                state={
+                    "checkpoint_kind": "momentum",
+                    "next_master_index": master_index + 1,
+                    "live_point_index": live_point_index,
+                    "equity": equity,
+                    "target_weights": dict(target_weights),
+                    "total_turnover": total_turnover,
+                    "latest_rebalance_turnover": latest_rebalance_turnover,
+                    "current_stage": f"Simulating momentum backtest ({len(daily_points)}/{max(total_steps, 1)})",
+                    "latest_update": f"Processed {len(daily_points)}/{max(total_steps, 1)} momentum steps.",
+                },
+                completed_steps=len(daily_points),
+                total_steps=max(total_steps, 1),
+                daily_points=daily_points,
+                trades=trades,
+            )
     total_return, cagr, volatility, sharpe, max_drawdown = _curve_metrics(equity_curve, returns)
     winning_days = sum(1 for value in returns if value > 0)
     oos_returns = [point.strategy_return for point in daily_points if not point.in_sample]

@@ -67,7 +67,18 @@ function buildRecentRunItems(
       sharpe: score.sharpe,
       completedAt: run.completed_at ?? detail?.completed_at ?? run.updated_at ?? run.created_at,
       periodLabel: oosStart ? `OOS 起始 ${oosStart}` : '还没有完整区间',
-      statusLabel: run.status === 'QUEUED' ? '排队中' : run.status === 'RUNNING' ? '运行中' : run.status === 'COMPLETED' ? '已完成' : run.status === 'COMPLETED_WITH_WARNINGS' ? '已完成有提醒' : '失败',
+      statusLabel:
+        run.status === 'QUEUED'
+          ? '排队中'
+          : run.status === 'RUNNING'
+            ? '运行中'
+            : run.status === 'INTERRUPTED'
+              ? '已中断'
+              : run.status === 'COMPLETED'
+                ? '已完成'
+                : run.status === 'COMPLETED_WITH_WARNINGS'
+                  ? '已完成有提醒'
+                  : '失败',
     };
   });
 }

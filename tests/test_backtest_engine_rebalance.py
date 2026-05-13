@@ -188,7 +188,7 @@ def test_asset_allocation_quarterly_schedule_rebalances_even_below_drift_thresho
     assert all(trade.reason == "asset_allocation:quarterly" for trade in result.trades)
 
 
-def test_asset_allocation_available_weights_normalize_without_operator_warning():
+def test_asset_allocation_missing_configured_asset_blocks_silent_reweighting():
     dates = ["2024-01-02", "2024-01-03"]
     spy_bars = [
         {"date": date, "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "adj_close": 100.0}
@@ -213,9 +213,10 @@ def test_asset_allocation_available_weights_normalize_without_operator_warning()
         benchmark_bars=spy_bars,
     )
 
-    assert result.warnings == []
-    assert result.trades[0].symbol == "SPY"
-    assert result.trades[0].weight_after == 1.0
+    assert result.warnings == ["Allocation assets missing price history: QQQ."]
+    assert result.daily_performance == []
+    assert result.trades == []
+    assert result.coverage_ratio == 0.0
 
 
 def test_buy_and_hold_dynamic_logic_uses_valuation_series_to_scale_contributions():

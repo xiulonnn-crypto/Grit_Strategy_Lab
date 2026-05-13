@@ -2969,6 +2969,18 @@ export const demoApi: DemoApi = {
     state.runs.unshift(cloneRun);
     return clone(cloneRun);
   },
+  async resumeBacktestRun(id: string, _idempotencyKey: string): Promise<ApiBacktestRunDetail> {
+    const run = findRun(id);
+    if (run.status === 'INTERRUPTED') {
+      run.status = 'RUNNING';
+      run.resume_ready = false;
+      run.interrupted_reason = null;
+      run.current_stage = '断点恢复中';
+      run.latest_update = '已继续回测，正在从断点恢复。';
+      run.updated_at = nowIso();
+    }
+    return clone(run);
+  },
   async listOptimizationJobs(): Promise<ApiOptimizationJobListItem[]> {
     state.optimizationJobs.forEach((job) => {
       if (isOptimizationInFlight(job.status)) {

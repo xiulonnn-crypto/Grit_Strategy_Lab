@@ -15,7 +15,10 @@ from .fallback_provider import ProviderAvailability, ProviderExecutionSignal
 from .yahoo_provider import SymbolMarketData
 
 
-POLYGON_BASE_URL = "https://api.polygon.io"
+MASSIVE_BASE_URL = "https://api.massive.com"
+POLYGON_BASE_URL = MASSIVE_BASE_URL
+POLYGON_LEGACY_BASE_URL = "https://api.polygon.io"
+POLYGON_ACCEPTED_ENV_VARS = ("MASSIVE_API_KEY", "POLYGON_API_KEY")
 
 
 @dataclass(frozen=True)
@@ -31,14 +34,34 @@ class PolygonMarketDataProvider:
     supports_action_enrichment = True
     supports_targeted_price_repair = True
 
-    def __init__(self, api_key: str | None = None, *, timeout: int = 30, retries: int = 2) -> None:
-        self.api_key = str(api_key or os.getenv("POLYGON_API_KEY") or "").strip()
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        base_url: str | None = None,
+        timeout: int = 30,
+        retries: int = 2,
+    ) -> None:
+        if api_key:
+            self.api_key = str(api_key).strip()
+            self.api_key_env_var = "explicit"
+        else:
+            self.api_key, self.api_key_env_var = _resolve_api_key_with_source()
+        self.base_url = str(
+            base_url
+            or os.getenv("MASSIVE_API_BASE_URL")
+            or os.getenv("POLYGON_API_BASE_URL")
+            or MASSIVE_BASE_URL
+        ).strip().rstrip("/")
         self.timeout = int(timeout)
         self.retries = int(retries)
         self.metadata = {
             "access_tier": "paid_optional",
-            "required_env_vars": ["POLYGON_API_KEY"],
+            "required_env_vars": list(POLYGON_ACCEPTED_ENV_VARS),
+            "accepted_env_vars": list(POLYGON_ACCEPTED_ENV_VARS),
+            "base_url": self.base_url,
             "provider": self.provider_name,
+            "api_key_env_var": self.api_key_env_var,
         }
 
     def availability(self) -> ProviderAvailability:
@@ -46,7 +69,7 @@ class PolygonMarketDataProvider:
             return ProviderAvailability(
                 provider_name=self.provider_name,
                 available=False,
-                reason="missing POLYGON_API_KEY",
+                reason="missing MASSIVE_API_KEY or POLYGON_API_KEY",
                 metadata={**self.metadata, "credential_status": "missing"},
             )
         return ProviderAvailability(
@@ -236,46 +259,146 @@ class PolygonMarketDataProvider:
                 "Polygon API key is missing.",
                 status="unavailable",
                 reason="missing_credentials",
-                metadata={"provider": self.provider_name, "required_env_vars": ["POLYGON_API_KEY"]},
+                metadata={"provider": self.provider_name, "required_env_vars": list(POLYGON_ACCEPTED_ENV_VARS)},
             )
-        query = dict(params)
-        query["apiKey"] = self.api_key
-        url = POLYGON_BASE_URL + path + "?" + urllib.parse.urlencode(query)
         last_error: Exception | None = None
-        for attempt in range(max(1, self.retries)):
-            request = urllib.request.Request(url, headers={"Accept": "application/json"})
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    return json.loads(response.read().decode("utf-8"))
-            except urllib.error.HTTPError as exc:
-                last_error = exc
-                if exc.code in {429, 503}:
-                    retry_after = exc.headers.get("Retry-After")
-                    raise ProviderExecutionSignal(
-                        f"Polygon rate limit or service throttle for {path}.",
-                        status="limited",
-                        reason="quota_or_rate_limited",
-                        metadata={
-                            "provider": self.provider_name,
-                            "quota_limited": True,
-                            "retry_after": retry_after,
-                        },
-                    ) from exc
-                if exc.code in {401, 403}:
-                    raise ProviderExecutionSignal(
-                        "Polygon credential was rejected.",
-                        status="unavailable",
-                        reason="invalid_credentials",
-                        metadata={"provider": self.provider_name},
-                    ) from exc
-                if attempt >= self.retries - 1:
-                    break
-            except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-                last_error = exc
-                if attempt >= self.retries - 1:
-                    break
-                time.sleep(1.0 + attempt)
+        attempted_auth_modes: list[str] = []
+        for auth_mode in ("query", "bearer"):
+            if auth_mode not in attempted_auth_modes:
+                attempted_auth_modes.append(auth_mode)
+            for attempt in range(max(1, self.retries)):
+                query = dict(params)
+                headers = {"Accept": "application/json"}
+                if auth_mode == "query":
+                    query["apiKey"] = self.api_key
+                else:
+                    headers["Authorization"] = f"Bearer {self.api_key}"
+                query_string = urllib.parse.urlencode(query)
+                url = self.base_url + path + (f"?{query_string}" if query_string else "")
+                request = urllib.request.Request(url, headers=headers)
+                try:
+                    with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                        return json.loads(response.read().decode("utf-8"))
+                except urllib.error.HTTPError as exc:
+                    last_error = exc
+                    if exc.code in {429, 503}:
+                        retry_after = exc.headers.get("Retry-After")
+                        raise ProviderExecutionSignal(
+                            f"Polygon rate limit or service throttle for {path}.",
+                            status="limited",
+                            reason="quota_or_rate_limited",
+                            metadata={
+                                "provider": self.provider_name,
+                                "quota_limited": True,
+                                "retry_after": retry_after,
+                                "auth_mode": auth_mode,
+                                "api_key_env_var": self.api_key_env_var,
+                            },
+                        ) from exc
+                    if exc.code in {401, 403}:
+                        error_body = _read_http_error_body(exc)
+                        if auth_mode == "query":
+                            break
+                        reason = _classify_auth_failure(error_body, status_code=int(exc.code))
+                        status = "failed" if reason == "entitlement_required" else "unavailable"
+                        raise ProviderExecutionSignal(
+                            "Polygon/Massive request was rejected.",
+                            status=status,
+                            reason=reason,
+                            metadata={
+                                "provider": self.provider_name,
+                                "auth_modes_attempted": attempted_auth_modes,
+                                "api_key_env_var": self.api_key_env_var,
+                                "base_url": self.base_url,
+                                "status_code": int(exc.code),
+                                "provider_error_fingerprint": _error_fingerprint(error_body),
+                            },
+                        ) from exc
+                    if attempt >= self.retries - 1:
+                        break
+                except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+                    last_error = exc
+                    if attempt >= self.retries - 1:
+                        break
+                    time.sleep(1.0 + attempt)
         raise RuntimeError(f"Polygon request failed for {path}: {last_error}") from last_error
+
+
+def _resolve_api_key(explicit_key: str | None = None) -> str:
+    if explicit_key:
+        return str(explicit_key).strip()
+    key, _ = _resolve_api_key_with_source()
+    return key
+
+
+def _resolve_api_key_with_source() -> tuple[str, str | None]:
+    for env_name in POLYGON_ACCEPTED_ENV_VARS:
+        value = str(os.getenv(env_name) or "").strip()
+        if value:
+            return value, env_name
+    return "", None
+
+
+def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
+    try:
+        body = exc.read()
+    except Exception:
+        return ""
+    if not body:
+        return ""
+    try:
+        return body.decode("utf-8", errors="replace")
+    except Exception:
+        return str(body)
+
+
+def _classify_auth_failure(error_body: str, *, status_code: int) -> str:
+    body = str(error_body or "").lower()
+    if any(
+        term in body
+        for term in (
+            "not authorized",
+            "not subscribed",
+            "not entitled",
+            "do not have access",
+            "no access",
+            "forbidden",
+            "permission",
+            "premium",
+            "subscription",
+            "plan",
+            "upgrade",
+        )
+    ):
+        return "entitlement_required"
+    if any(
+        term in body
+        for term in (
+            "invalid api",
+            "incorrect api",
+            "api key is invalid",
+            "invalid key",
+            "unknown api key",
+            "unauthorized",
+        )
+    ):
+        return "invalid_credentials"
+    if status_code == 403:
+        return "entitlement_required"
+    return "invalid_credentials"
+
+
+def _error_fingerprint(error_body: str) -> str:
+    try:
+        payload = json.loads(error_body)
+    except Exception:
+        return "http_error_body" if error_body else "http_error_without_body"
+    if isinstance(payload, dict):
+        for key in ("status", "error", "message"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value[:120]
+    return "http_error_body"
 
 
 def _to_float(value: Any) -> float | None:

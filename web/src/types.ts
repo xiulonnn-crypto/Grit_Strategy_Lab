@@ -10,6 +10,7 @@ export type CreationSessionStrategyType = Exclude<StrategyType, "MULTI_FACTOR">;
 export type BacktestRunStatus =
   | "QUEUED"
   | "RUNNING"
+  | "INTERRUPTED"
   | "COMPLETED"
   | "COMPLETED_WITH_WARNINGS"
   | "FAILED";
@@ -22,7 +23,15 @@ export type OptimizationJobStatus =
   | "FAILED";
 export type PromoteMode = "set_current" | "create_copy";
 export type SnapshotRefreshMode = "incremental" | "repair" | "full";
-export type SnapshotRefreshTarget = "price" | "corporate" | "valuations" | "universes" | "bond";
+export type SnapshotRefreshTarget =
+  | "price"
+  | "corporate"
+  | "valuations"
+  | "universes"
+  | "fundamentals"
+  | "sentiment"
+  | "macro_derivatives"
+  | "bond";
 export type ParameterValue =
   | string
   | number
@@ -649,6 +658,14 @@ export type ApiBacktestRunListItem = {
   is_permanent?: boolean;
   source_run_id?: string | null;
   trades_count?: number;
+  resume_ready?: boolean;
+  interrupted_reason?: string | null;
+  progress_pct?: number;
+  persisted_step_count?: number;
+  total_step_count?: number;
+  next_step_index?: number;
+  current_stage?: string | null;
+  latest_update?: string | null;
 };
 
 export type ApiBacktestTradeItem = {
@@ -856,6 +873,14 @@ export type ApiBacktestRunDetail = {
   trade_audit?: ApiBacktestTradeAudit[];
   analysis?: ApiBacktestRunDetailAnalysis;
   multi_factor_attribution?: ApiMultiFactorAttribution | null;
+  resume_ready?: boolean;
+  interrupted_reason?: string | null;
+  progress_pct?: number;
+  persisted_step_count?: number;
+  total_step_count?: number;
+  next_step_index?: number;
+  current_stage?: string | null;
+  latest_update?: string | null;
 };
 
 export type ApiSnapshotBlocker = {
@@ -2246,6 +2271,9 @@ export type ApiPitDataOverview = {
     source_snapshot_status?: string;
     source_snapshot_updated_at?: string | null;
     seed_version?: string | null;
+    missing_available_at_count?: number;
+    missing_publish_date_count?: number;
+    time_contract?: string | null;
   };
   blocking_items: Array<{
     code: string;
@@ -2555,6 +2583,7 @@ export type ApiPitDataOverview = {
       status?: string;
       sampled_row_count?: number;
       missing_available_at_count?: number;
+      missing_publish_date_count?: number;
       [key: string]: unknown;
     } | null;
     [key: string]: unknown;
@@ -3285,6 +3314,10 @@ export type DemoApi = {
     payload: Record<string, unknown>,
   ) => Promise<ApiBacktestRunDetail>;
   cloneBacktestRun: (
+    id: string,
+    idempotencyKey: string,
+  ) => Promise<ApiBacktestRunDetail>;
+  resumeBacktestRun: (
     id: string,
     idempotencyKey: string,
   ) => Promise<ApiBacktestRunDetail>;

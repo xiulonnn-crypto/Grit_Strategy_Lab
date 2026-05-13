@@ -41,7 +41,7 @@ StrategyType = Literal[
     'MULTI_FACTOR',
 ]
 FieldSource = Literal['user_input', 'system_inference', 'system_default', 'manual_override']
-BacktestRunStatus = Literal['QUEUED', 'RUNNING', 'COMPLETED', 'COMPLETED_WITH_WARNINGS', 'FAILED']
+BacktestRunStatus = Literal['QUEUED', 'RUNNING', 'INTERRUPTED', 'COMPLETED', 'COMPLETED_WITH_WARNINGS', 'FAILED']
 BacktestExecutionStage = Literal['DATA_FETCHING', 'SIMULATING', 'METRIC_CALCULATING']
 OptimizationJobStatus = Literal['QUEUED', 'RUNNING', 'INTERRUPTED', 'COMPLETED', 'PARTIALLY_FAILED', 'FAILED']
 OptimizationMatchingCombinationSource = Literal['all_trials', 'persisted_candidates']
@@ -50,7 +50,16 @@ SnapshotKind = Literal['DATASET', 'UNIVERSE']
 TrialStatus = Literal['SUCCEEDED', 'FAILED', 'PENDING']
 PromoteMode = Literal['set_current', 'create_copy']
 SnapshotRefreshMode = Literal['incremental', 'repair', 'full']
-SnapshotRefreshTarget = Literal['price', 'corporate', 'valuations', 'universes', 'bond']
+SnapshotRefreshTarget = Literal[
+    'price',
+    'corporate',
+    'valuations',
+    'universes',
+    'fundamentals',
+    'sentiment',
+    'macro_derivatives',
+    'bond',
+]
 DataSegmentType = Literal['FULL', 'TRAIN', 'TEST', 'VALIDATION']
 OptimizationConstraintPresetKey = Literal['balanced', 'defensive', 'offensive']
 SnapshotProviderAccessTier = Literal['public', 'free_account', 'paid_optional', 'public_web', 'repo_local']
@@ -404,6 +413,10 @@ class BacktestRunCreateRequest(BacktestRunPreviewRequest):
 class BacktestRunCloneRequest(BaseModel):
     idempotency_key: str = Field(min_length=1)
     is_permanent: bool = False
+
+
+class ResumeBacktestRunRequest(BaseModel):
+    idempotency_key: str = Field(min_length=1)
 
 
 class OptimizationConstraint(BaseModel):

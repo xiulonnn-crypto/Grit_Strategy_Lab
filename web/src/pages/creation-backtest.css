@@ -694,7 +694,7 @@
 
 .strategy-library-table {
   width: 100%;
-  min-width: 1080px;
+  min-width: 1120px;
   border-collapse: collapse;
 }
 
@@ -753,19 +753,28 @@
 .strategy-library-name-cell {
   display: grid;
   gap: 4px;
-  min-width: 150px;
+  min-width: 190px;
   white-space: normal;
 }
 
-.strategy-library-name-cell strong {
+.strategy-library-name-cell__title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.strategy-library-name-cell__title strong {
   color: var(--gsl-text-title);
   font-size: 0.94rem;
   line-height: 1.35;
 }
 
-.strategy-library-name-cell span {
+.strategy-library-name-cell__meta {
   color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   font-size: 0.78rem;
+  font-weight: 700;
 }
 
 .strategy-library-version,

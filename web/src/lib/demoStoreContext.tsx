@@ -557,6 +557,11 @@ function createHttpApiClient(): DemoApi {
         `/backtest-runs/${encodeURIComponent(id)}/clone`,
         withJsonBody({ idempotency_key: idempotencyKey }, { method: 'POST' }),
       ),
+    resumeBacktestRun: (id, idempotencyKey) =>
+      requestJson<ApiBacktestRunDetail>(
+        `/backtest-runs/${encodeURIComponent(id)}/resume`,
+        withJsonBody({ idempotency_key: idempotencyKey }, { method: 'POST' }),
+      ),
     listOptimizationJobs: () => requestJson<ApiOptimizationJobListItem[]>('/optimization-jobs'),
     getOptimizationJobDetail: (id, params) => {
       const query = new URLSearchParams();

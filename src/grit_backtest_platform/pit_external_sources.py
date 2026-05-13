@@ -156,13 +156,16 @@ def kaggle_credential_status() -> dict[str, Any]:
 
 
 def polygon_credential_status() -> dict[str, Any]:
-    configured = bool(str(os.getenv("POLYGON_API_KEY") or "").strip())
+    accepted_env_vars = ["MASSIVE_API_KEY", "POLYGON_API_KEY"]
+    configured_env_vars = [name for name in accepted_env_vars if str(os.getenv(name) or "").strip()]
+    configured = bool(configured_env_vars)
     return {
         "configured": configured,
         "credential_status": "present" if configured else "missing",
-        "required_env_vars": ["POLYGON_API_KEY"],
-        "configured_env_vars": ["POLYGON_API_KEY"] if configured else [],
-        "missing_env_vars": [] if configured else ["POLYGON_API_KEY"],
+        "required_env_vars": accepted_env_vars,
+        "accepted_env_vars": accepted_env_vars,
+        "configured_env_vars": configured_env_vars,
+        "missing_env_vars": [] if configured else accepted_env_vars,
         "secret_persistence": "disabled",
     }
 

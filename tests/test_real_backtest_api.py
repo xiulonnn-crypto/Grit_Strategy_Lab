@@ -26,6 +26,11 @@ from tests.api_test_support import (
 
 START_DATE = "2024-03-01"
 END_DATE = "2025-03-31"
+BACKTEST_RESTART_RECOVERY_WARNING = "服务重启后已恢复；由于当前尚未持久化部分进度，本次回测已从头重新开始。"
+LEGACY_BACKTEST_RESTART_RECOVERY_WARNING = (
+    "Recovered after service restart; this backtest restarted from the beginning "
+    "because partial progress is not persisted yet."
+)
 
 
 def test_submit_backtest_returns_immediately_and_finishes_in_background(tmp_path):
@@ -78,6 +83,149 @@ def test_submit_backtest_returns_immediately_and_finishes_in_background(tmp_path
     assert latest["status"] in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
     assert latest["completed_at"]
     assert latest["chart_series"]
+
+
+def test_run_backtest_submission_persists_restart_recovery_warning_on_completed_run(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    strategy = create_momentum_strategy(
+        client,
+        idempotency_key="materialize-momentum-recovery-warning",
+        universe_name="SPY",
+        rebalance_frequency="monthly",
+        top_n=1,
+    )["strategy"]
+    refresh_snapshots(client)
+
+    service = client.app.state.service
+    request_payload = service._normalize_run_request(
+        strategy,
+        {
+            "idempotency_key": "run-recovery-warning",
+            "start_date": START_DATE,
+            "end_date": END_DATE,
+            "parameter_version_id": strategy["current_parameter_version_id"],
+        },
+    )
+    recovery_context = service._build_backtest_restart_recovery_context(
+        "RUNNING",
+        previous_updated_at="2026-05-13T09:30:00Z",
+        restarted_at="2026-05-13T09:35:00Z",
+    )
+
+    service._run_backtest_submission(
+        run_id="run_recovery_warning",
+        strategy_id=strategy["id"],
+        strategy=strategy,
+        request_payload=request_payload,
+        created_at="2026-05-13T09:00:00Z",
+        recovery_context=recovery_context,
+    )
+
+    detail = assert_ok(client.get("/backtest-runs/run_recovery_warning/detail"))
+    assert detail["status"] in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
+    assert BACKTEST_RESTART_RECOVERY_WARNING in detail["warnings"]
+    assert all("Recovered after service restart" not in warning for warning in detail["warnings"])
+    assert detail["preview"]["environment_summary"]["recovery"]["restarted_from_status"] == "RUNNING"
+    assert detail["preview"]["environment_summary"]["recovery"]["restarts_from_beginning"] is True
+
+
+def test_resume_incomplete_backtest_runs_marks_restarted_runs_before_worker_restart(tmp_path, monkeypatch):
+    client, _ = create_test_client(tmp_path)
+    strategy = create_momentum_strategy(
+        client,
+        idempotency_key="materialize-momentum-resume-running",
+        universe_name="SPY",
+        rebalance_frequency="monthly",
+        top_n=1,
+    )["strategy"]
+    service = client.app.state.service
+    request_payload = service._normalize_run_request(
+        strategy,
+        {
+            "idempotency_key": "run-resume-warning",
+            "start_date": START_DATE,
+            "end_date": END_DATE,
+            "parameter_version_id": strategy["current_parameter_version_id"],
+        },
+    )
+    initial_preview = service._build_pending_backtest_preview(strategy, request_payload)
+    service.storage.insert_json_row(
+        "backtest_runs",
+        service._build_backtest_run_row(
+            run_id="run_resume_warning",
+            strategy_id=strategy["id"],
+            status="RUNNING",
+            request_payload=request_payload,
+            created_at="2026-05-13T09:00:00Z",
+            updated_at="2026-05-13T09:30:00Z",
+            preview=initial_preview,
+            parameter_snapshot=initial_preview.get("parameter_snapshot") or {},
+            environment_summary=initial_preview.get("environment_summary") or {},
+        ),
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_start_backtest_run_runner(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service, "_start_backtest_run_runner", fake_start_backtest_run_runner)
+
+    resumed = service.resume_incomplete_backtest_runs()
+
+    assert resumed == ["run_resume_warning"]
+    detail = assert_ok(client.get("/backtest-runs/run_resume_warning/detail"))
+    assert detail["status"] == "QUEUED"
+    assert BACKTEST_RESTART_RECOVERY_WARNING in detail["warnings"]
+    assert all("Recovered after service restart" not in warning for warning in detail["warnings"])
+    assert detail["preview"]["environment_summary"]["recovery"]["restarted_from_status"] == "RUNNING"
+    assert captured["run_id"] == "run_resume_warning"
+    assert captured["recovery_context"]["restarts_from_beginning"] is True
+
+
+def test_legacy_restart_recovery_warning_is_localized_on_run_detail(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    strategy = create_momentum_strategy(
+        client,
+        idempotency_key="materialize-momentum-legacy-recovery-warning",
+        universe_name="SPY",
+        rebalance_frequency="monthly",
+        top_n=1,
+    )["strategy"]
+    refresh_snapshots(client)
+
+    submitted = submit_backtest(
+        client,
+        strategy["id"],
+        idempotency_key="run-legacy-recovery-warning",
+        start_date=START_DATE,
+        end_date=END_DATE,
+        parameter_version_id=strategy["current_parameter_version_id"],
+    )
+    run_id = submitted["id"]
+    preview = dict(submitted.get("preview") or {})
+    preview["warnings"] = [LEGACY_BACKTEST_RESTART_RECOVERY_WARNING]
+    client.app.state.service.storage.execute(
+        """
+        UPDATE backtest_runs
+        SET status = ?,
+            warnings_json = ?,
+            preview_json = ?
+        WHERE id = ?
+        """,
+        (
+            "COMPLETED_WITH_WARNINGS",
+            json.dumps([LEGACY_BACKTEST_RESTART_RECOVERY_WARNING]),
+            json.dumps(preview),
+            run_id,
+        ),
+    )
+
+    detail = assert_ok(client.get(f"/backtest-runs/{run_id}/detail"))
+
+    assert detail["warnings"] == [BACKTEST_RESTART_RECOVERY_WARNING]
+    assert detail["preview"]["warnings"] == [BACKTEST_RESTART_RECOVERY_WARNING]
 
 
 def test_momentum_backtest_loads_warmup_before_start_and_executes_first_order_on_start(tmp_path):
@@ -589,6 +737,113 @@ def test_single_symbol_preview_submit_ignores_global_price_snapshot_incomplete_w
     assert submitted["preview"]["snapshot_summary"]["price_dataset_status"] == "INCOMPLETE"
     assert submitted["preview"]["snapshot_summary"]["blocking"] is False
     assert submitted["preview"]["environment_summary"]["symbols"] == ["QQQ"]
+
+
+def test_asset_allocation_preview_blocks_when_configured_asset_price_history_is_missing(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    session = draft_strategy_session(
+        client,
+        strategy_type="ASSET_ALLOCATION",
+        message="Create a two asset allocation model.",
+        confirmation_payload={
+            "revision": 1,
+            "strategy_type": "ASSET_ALLOCATION",
+            "core": {
+                "strategy_type": "ASSET_ALLOCATION",
+                "universe_name": "Global Allocation",
+                "rebalance_frequency": "quarterly",
+            },
+            "parameters": {
+                "strategy_name": "Asset allocation missing coverage test",
+                "strategy_description": "Two asset allocation model.",
+                "benchmark_symbol": "SPY",
+                "capital": 100000,
+                "allocation_assets": [
+                    {"symbol": "SPY", "display_name": "S&P 500 ETF", "asset_class": "Equity"},
+                    {"symbol": "TLT", "display_name": "20Y Treasury ETF", "asset_class": "Treasury"},
+                ],
+                "allocation_weight__SPY_pct": 60,
+                "allocation_weight__TLT_pct": 40,
+                "investment_mode": "all_in",
+                "rebalance_enabled": True,
+                "rebalance_frequency": "quarterly",
+                "rebalance_threshold_pct": 5,
+                "cost_model_enabled": True,
+                "fee_bps": 1.5,
+                "slippage_bps": 2.5,
+                "expense_ratio_bps": 8,
+            },
+        },
+    )
+    strategy = assert_ok(
+        materialize_session(
+            client,
+            session["session_id"],
+            idempotency_key="asset-allocation-missing-coverage",
+        )
+    )
+    bars = [
+        {
+            "symbol": "SPY",
+            "date": value,
+            "open": price,
+            "high": price,
+            "low": price,
+            "close": price,
+            "adj_close": price,
+            "volume": 1_000_000,
+            "source": "test_seed",
+        }
+        for value, price in [
+            ("2024-03-01", 100.0),
+            ("2024-03-04", 101.0),
+            ("2024-03-05", 102.0),
+        ]
+    ]
+    client.app.state.service.market_data_repository.replace_dataset_snapshot(
+        {
+            "id": "ds-price",
+            "name": "Test price snapshot",
+            "status": "READY",
+            "as_of": "2024-03-05",
+            "start_date": "2024-03-01",
+            "end_date": "2024-03-05",
+            "row_count": len(bars),
+            "source": "test_seed",
+        },
+        price_bars=bars,
+        symbol_coverage=[
+            {
+                "symbol": "SPY",
+                "start_date": "2024-03-01",
+                "end_date": "2024-03-05",
+                "trade_days": 3,
+                "source": "test_seed",
+            }
+        ],
+    )
+
+    response = client.post(
+        f"/strategies/{strategy['id']}/backtest-runs/preview",
+        json={"start_date": "2024-03-01", "end_date": "2024-03-05"},
+    )
+    submitted = client.post(
+        f"/strategies/{strategy['id']}/backtest-runs",
+        json={
+            "idempotency_key": "run-asset-allocation-missing-coverage",
+            "start_date": "2024-03-01",
+            "end_date": "2024-03-05",
+            "parameter_version_id": strategy["current_parameter_version_id"],
+        },
+    )
+
+    assert response.status_code == 409
+    assert submitted.status_code == 409
+    summary = response.json()["snapshot_summary"]
+    assert summary["blocking"] is True
+    assert summary["blocking_code"] == "REQUEST_SYMBOLS_MISSING_PRICE_HISTORY"
+    assert summary["missing_symbols"] == ["TLT"]
+    assert "TLT" in summary["message"]
 
 
 def test_named_sp500_universe_preview_bypasses_global_snapshot_status_when_request_data_is_usable(tmp_path):

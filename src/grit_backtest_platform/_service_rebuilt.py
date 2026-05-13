@@ -109,6 +109,18 @@ OPTIMIZATION_SUPPORTED_CONSTRAINT_KEYS: tuple[str, ...] = (
     "stability",
     "return_sharpe",
 )
+LEGACY_IGNORED_BACKTEST_WARNINGS = frozenset(
+    {
+        "Allocation weights were normalized to 100%.",
+    }
+)
+BACKTEST_RESTART_RECOVERY_WARNING = "服务重启后已恢复；由于当前尚未持久化部分进度，本次回测已从头重新开始。"
+LEGACY_LOCALIZED_BACKTEST_WARNINGS = {
+    (
+        "Recovered after service restart; this backtest restarted from the beginning "
+        "because partial progress is not persisted yet."
+    ): BACKTEST_RESTART_RECOVERY_WARNING,
+}
 
 OPTIMIZATION_CONSTRAINT_PRESET_DEFAULTS: dict[str, tuple[dict[str, Any], ...]] = {
     "balanced": (
@@ -388,6 +400,39 @@ OPTIMIZATION_CONSTRAINT_PRESET_DEFAULTS: dict[str, tuple[dict[str, Any], ...]] =
         },
     ),
 }
+
+
+def _sanitize_backtest_warning_list(warnings: Sequence[Any] | None) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in warnings or []:
+        text = str(item or "").strip()
+        text = LEGACY_LOCALIZED_BACKTEST_WARNINGS.get(text, text)
+        if not text or text in LEGACY_IGNORED_BACKTEST_WARNINGS or text in seen:
+            continue
+        seen.add(text)
+        cleaned.append(text)
+    return cleaned
+
+
+def _sanitize_backtest_warning_state(
+    status: Any,
+    warnings: Sequence[Any] | None,
+) -> tuple[str, list[str]]:
+    cleaned_warnings = _sanitize_backtest_warning_list(warnings)
+    cleaned_status = str(status or "")
+    if cleaned_status.upper() == "COMPLETED_WITH_WARNINGS" and not cleaned_warnings:
+        cleaned_status = "COMPLETED"
+    return cleaned_status, cleaned_warnings
+
+
+def _sanitize_backtest_preview_payload(preview: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(preview, Mapping):
+        return {}
+    normalized = dict(preview)
+    if "warnings" in normalized:
+        normalized["warnings"] = _sanitize_backtest_warning_list(normalized.get("warnings"))
+    return normalized
 
 LEGACY_MOCK_OPTIMIZATION_LABELS = (
     "Top candidate",
@@ -2118,15 +2163,16 @@ class BacktestPlatformService:
         ]
 
     def _build_strategy_latest_completed_run_summary(self, row: Mapping[str, Any]) -> dict[str, Any]:
-        preview = loads(row.get("preview_json"), {})
+        preview = _sanitize_backtest_preview_payload(loads(row.get("preview_json"), {}))
         if not isinstance(preview, dict):
             preview = {}
         metrics = loads(row.get("metrics_json"), {})
         if not isinstance(metrics, dict):
             metrics = {}
-        warnings = loads(row.get("warnings_json"), [])
-        if not isinstance(warnings, list):
-            warnings = []
+        status, warnings = _sanitize_backtest_warning_state(
+            row.get("status"),
+            loads(row.get("warnings_json"), []),
+        )
         request = loads(row.get("request_json"), {})
         if not isinstance(request, dict):
             request = {}
@@ -2143,7 +2189,7 @@ class BacktestPlatformService:
             "run_id": row["id"],
             "parameter_version": _parse_parameter_version_number(parameter_version_id),
             "parameter_version_id": parameter_version_id,
-            "status": row.get("status") or "COMPLETED",
+            "status": status or "COMPLETED",
             "total_return": float(metrics.get("total_return") or 0.0),
             "annualized_return": float(
                 metrics.get("annualized_return", metrics.get("cagr") or 0.0) or 0.0
@@ -2818,6 +2864,12 @@ class BacktestPlatformService:
             run[decoded_name] = loads(run.pop(column, None), default)
         if isinstance(run.get("parameter_snapshot"), dict):
             run["parameter_snapshot"] = _normalize_strategy_snapshot_descriptive_fields(run["parameter_snapshot"])
+        if isinstance(run.get("preview"), dict):
+            run["preview"] = _sanitize_backtest_preview_payload(run["preview"])
+        run["status"], run["warnings"] = _sanitize_backtest_warning_state(
+            run.get("status"),
+            run.get("warnings"),
+        )
         run["is_permanent"] = bool(int(run.get("is_permanent") or 0))
         return run
 
@@ -2856,7 +2908,7 @@ class BacktestPlatformService:
         return ", ".join(columns)
 
     def _decode_run_list_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
-        preview = loads(row.get("preview_json"), {})
+        preview = _sanitize_backtest_preview_payload(loads(row.get("preview_json"), {}))
         if not isinstance(preview, dict):
             preview = {}
         request = loads(row.get("request_json"), {})
@@ -2869,16 +2921,18 @@ class BacktestPlatformService:
         if not isinstance(parameter_snapshot, dict):
             parameter_snapshot = {}
         parameter_snapshot = _normalize_strategy_snapshot_descriptive_fields(parameter_snapshot)
-        warnings = loads(row.get("warnings_json"), [])
-        if not isinstance(warnings, list):
-            warnings = []
+        status, warnings = _sanitize_backtest_warning_state(
+            row.get("status"),
+            loads(row.get("warnings_json"), []),
+        )
         parameter_version_id = preview.get("parameter_version_id") or request.get("parameter_version_id")
+        execution_progress = dict((preview.get("environment_summary") or {}).get("execution_progress") or {})
 
         return {
             "id": row["id"],
             "strategy_id": row["strategy_id"],
             "strategy_name": _display_strategy_name(row.get("strategy_name"), parameter_snapshot),
-            "status": row["status"],
+            "status": status,
             "start_date": row.get("start_date"),
             "end_date": row.get("end_date"),
             "effective_date": row.get("effective_date"),
@@ -2901,6 +2955,14 @@ class BacktestPlatformService:
             "is_permanent": bool(int(row.get("is_permanent") or 0)),
             "source_run_id": row.get("source_run_id"),
             "trades_count": row.get("trades_count"),
+            "resume_ready": bool(request.get("resume_ready")) or status == "INTERRUPTED",
+            "interrupted_reason": request.get("interrupted_reason") or ("service_restart" if status == "INTERRUPTED" else None),
+            "progress_pct": int(execution_progress.get("progress_pct") or request.get("progress_pct") or 0),
+            "persisted_step_count": int(execution_progress.get("persisted_step_count") or request.get("persisted_step_count") or 0),
+            "total_step_count": int(execution_progress.get("total_step_count") or request.get("total_step_count") or 0),
+            "next_step_index": int(execution_progress.get("next_step_index") or request.get("next_step_index") or 0),
+            "current_stage": execution_progress.get("current_stage") or request.get("current_stage"),
+            "latest_update": execution_progress.get("latest_update") or request.get("latest_update"),
         }
 
     def _flatten_confirmation(self, confirmation_fields: Mapping[str, Any], top_level: Mapping[str, Any]) -> dict[str, Any]:

@@ -1740,6 +1740,22 @@ export const demoApi: DemoApi = {
     return clone(state.runs[0]);
   },
 
+  async resumeBacktestRun(id: string, _idempotencyKey: string): Promise<ApiBacktestRunDetail> {
+    const run = state.runs.find((item) => item.id === id);
+    if (!run) {
+      throw new ApiError({ status: 404, code: 'run_not_found', message: `Run ${id} was not found.` });
+    }
+    if (run.status === 'INTERRUPTED') {
+      run.status = 'RUNNING';
+      run.resume_ready = false;
+      run.interrupted_reason = null;
+      run.current_stage = '断点恢复中';
+      run.latest_update = '已继续回测，正在从断点恢复。';
+      run.updated_at = nowIso();
+    }
+    return clone(run);
+  },
+
   async getOptimizationJobDetail(
     id: string,
     _params?: { matchingLimit?: number },

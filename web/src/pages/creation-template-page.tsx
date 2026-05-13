@@ -13,13 +13,15 @@ type TemplateCard = {
 };
 
 type HorizonKey = 'tenYear' | 'twentyYear' | 'thirtyYear';
-type SortKey = HorizonKey | 'updatedAt';
+type SortKey = HorizonKey | 'createdAt' | 'updatedAt';
 type SortDirection = 'asc' | 'desc';
 
 type SortState = {
   key: SortKey;
   direction: SortDirection;
 };
+
+const DEFAULT_SORT_STATE: SortState = { key: 'createdAt', direction: 'desc' };
 
 type StrategyReturnLink = {
   label: string;
@@ -43,6 +45,8 @@ type StrategyLibraryRow = {
   inflightReturns: Record<HorizonKey, boolean>;
   statusLabel: '已验证' | '待回测' | '生成中';
   statusTone: 'ready' | 'pending' | 'running';
+  createdAtLabel: string;
+  createdAtTime: number;
   updatedAtLabel: string;
   updatedAtTime: number;
   latestOptimizationJobId?: string | null;
@@ -56,7 +60,7 @@ const TEXT = {
   pageCopy: '集中管理已创建策略、参数版本、长期回测表现与后续研究动作。',
   newStrategy: '新建策略',
   listTitle: '策略列表',
-  listCopy: '按最近编辑时间排序，支持查看策略、发起回测与进入优化配置。',
+  listCopy: '默认按创建时间倒序排列，支持点击表头排序、查看策略、发起回测与进入优化配置。',
   strategyCount: '策略总数',
   completedLongTerm: '已完成长期回测',
   pendingLongTerm: '待补充回测',
@@ -381,12 +385,19 @@ function buildRows(
         inflightReturns,
         statusLabel: hasInflightRun ? '生成中' : hasLongTermRun ? '已验证' : '待回测',
         statusTone: hasInflightRun ? 'running' : hasLongTermRun ? 'ready' : 'pending',
+        createdAtLabel: formatDateTime(strategy.created_at),
+        createdAtTime: toValidDate(strategy.created_at)?.getTime() ?? 0,
         updatedAtLabel: formatDateTime(strategy.updated_at ?? strategy.created_at),
         updatedAtTime: toValidDate(strategy.updated_at ?? strategy.created_at)?.getTime() ?? 0,
         latestOptimizationJobId: strategy.latest_optimization_job_id,
       } satisfies StrategyLibraryRow;
     })
-    .sort((left, right) => right.updatedAtTime - left.updatedAtTime);
+    .sort(
+      (left, right) =>
+        right.createdAtTime - left.createdAtTime ||
+        right.updatedAtTime - left.updatedAtTime ||
+        left.name.localeCompare(right.name, 'zh-CN')
+    );
 }
 
 function hasAnyReturn(row: StrategyLibraryRow): boolean {
@@ -432,15 +443,24 @@ function compareNullableNumbers(
 
 function sortRows(rows: StrategyLibraryRow[], sortState: SortState): StrategyLibraryRow[] {
   return rows.slice().sort((left, right) => {
-    const compared =
-      sortState.key === 'updatedAt'
-        ? compareNullableNumbers(left.updatedAtTime, right.updatedAtTime, sortState.direction)
-        : compareNullableNumbers(
-            left.returns[sortState.key]?.sortValue ?? null,
-            right.returns[sortState.key]?.sortValue ?? null,
-            sortState.direction,
-          );
-    return compared || right.updatedAtTime - left.updatedAtTime || left.name.localeCompare(right.name);
+    let compared = 0;
+    if (sortState.key === 'createdAt') {
+      compared = compareNullableNumbers(left.createdAtTime, right.createdAtTime, sortState.direction);
+    } else if (sortState.key === 'updatedAt') {
+      compared = compareNullableNumbers(left.updatedAtTime, right.updatedAtTime, sortState.direction);
+    } else {
+      compared = compareNullableNumbers(
+        left.returns[sortState.key]?.sortValue ?? null,
+        right.returns[sortState.key]?.sortValue ?? null,
+        sortState.direction,
+      );
+    }
+    return (
+      compared ||
+      right.createdAtTime - left.createdAtTime ||
+      right.updatedAtTime - left.updatedAtTime ||
+      left.name.localeCompare(right.name, 'zh-CN')
+    );
   });
 }
 
@@ -546,7 +566,7 @@ export function CreationTemplatePage(): JSX.Element {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
-  const [sortState, setSortState] = useState<SortState>({ key: 'updatedAt', direction: 'desc' });
+  const [sortState, setSortState] = useState<SortState>(DEFAULT_SORT_STATE);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [busyStrategyType, setBusyStrategyType] = useState<StrategyType | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -801,10 +821,10 @@ export function CreationTemplatePage(): JSX.Element {
               <thead>
                 <tr>
                   <th>策略名</th>
-                  <th>版本</th>
                   <th>策略类型</th>
                   {HORIZONS.map((horizon) => renderSortableHeader(horizon.key, horizon.headerLabel))}
                   <th>状态</th>
+                  {renderSortableHeader('createdAt', '创建时间')}
                   {renderSortableHeader('updatedAt', '最近编辑时间')}
                   <th>{TEXT.actions}</th>
                 </tr>
@@ -814,12 +834,12 @@ export function CreationTemplatePage(): JSX.Element {
                   <tr key={row.id}>
                     <td>
                       <div className="strategy-library-name-cell">
-                        <strong>{row.name}</strong>
-                        <span>投资标的：{row.universeName}</span>
+                        <div className="strategy-library-name-cell__title">
+                          <strong>{row.name}</strong>
+                          <span className="strategy-library-version">{row.currentVersionLabel}</span>
+                        </div>
+                        <span className="strategy-library-name-cell__meta">{row.id}</span>
                       </div>
-                    </td>
-                    <td>
-                      <span className="strategy-library-version">{row.currentVersionLabel}</span>
                     </td>
                     <td>
                       <span className="strategy-library-type">{row.strategyTypeLabel}</span>
@@ -863,6 +883,7 @@ export function CreationTemplatePage(): JSX.Element {
                         {generatingStrategyId === row.id ? '生成中' : row.statusLabel}
                       </span>
                     </td>
+                    <td>{row.createdAtLabel}</td>
                     <td>{row.updatedAtLabel}</td>
                     <td>
                       <div className="strategy-library-actions">

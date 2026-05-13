@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_right
 import math
 import os
 import re
@@ -20,9 +21,19 @@ from uuid import uuid4
 
 from .backtest_engine import (
     BacktestConfig,
+    BacktestMetrics,
+    BacktestResult,
+    DailyPerformancePoint,
     DYNAMIC_BUY_AND_HOLD_UNSUPPORTED_WARNING,
+    TradeRecord,
+    _curve_metrics,
+    _first_date_index_on_or_after,
+    _momentum_target_weights,
     _normalize_bars,
+    _parse_rebalance_anchor_dates,
+    _rebalance_keys,
     _signal_score,
+    _window_master_dates,
     prepare_backtest_inputs,
     run_backtest,
     run_backtest_prepared,
@@ -51,13 +62,22 @@ from .factor_mining import (
     factor_mining_job_id_for_request,
     run_factor_mining_job,
 )
-from .factor_research import FactorResearchService, build_pit_data_overview, _descriptor_from_factor_id
+from .factor_research import (
+    FactorResearchService,
+    build_pit_data_overview,
+    ensure_default_fundamental_snapshot,
+    _descriptor_from_factor_id,
+)
 from .pit_external_sources import resolve_cache_dir as default_pit_external_cache_dir
 from .market_data_repository import (
+    DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID,
     DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
     DATASET_FUNDAMENTALS_SNAPSHOT_ID,
     DATASET_INDEX_VALUATIONS_SNAPSHOT_ID,
+    DATASET_MACRO_RATES_SNAPSHOT_ID,
+    DATASET_OPTION_SKEW_SNAPSHOT_ID,
     DATASET_PRICE_SNAPSHOT_ID,
+    DATASET_SHORT_VOLUME_SNAPSHOT_ID,
     CoverageSummary,
     IndexValuationCoverageSummary,
     MarketDataRepository,
@@ -76,7 +96,14 @@ from .snapshot_provider_projection import (
     build_provider_registry,
     openbb_provider_enabled,
 )
-from .service import BacktestPlatformService, _as_mapping
+from .service import (
+    BACKTEST_RESTART_RECOVERY_WARNING,
+    BacktestPlatformService,
+    ContractConflictError,
+    _as_mapping,
+    _sanitize_backtest_warning_list,
+    _sanitize_backtest_warning_state,
+)
 from .storage import dumps, iso_now, is_snapshot_blocking, loads
 from .universe_history import (
     ANCHOR_SCHEDULE,
@@ -103,6 +130,17 @@ DEFAULT_UNIVERSE_SYMBOLS = {
     "SP500": ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "AVGO", "COST"],
     "NASDAQ100": ["QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "AVGO"],
 }
+SNAPSHOT_CORE_DATASET_IDS = (
+    DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
+    DATASET_PRICE_SNAPSHOT_ID,
+)
+SNAPSHOT_OPTIONAL_PHASE2_DATASET_IDS = (
+    DATASET_FUNDAMENTALS_SNAPSHOT_ID,
+    DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID,
+    DATASET_SHORT_VOLUME_SNAPSHOT_ID,
+    DATASET_MACRO_RATES_SNAPSHOT_ID,
+    DATASET_OPTION_SKEW_SNAPSHOT_ID,
+)
 
 
 SNAPSHOT_START_DATE = date(1996, 1, 1)
@@ -126,6 +164,9 @@ SNAPSHOT_PROVIDER_ENV_SIGNATURE_NAMES = (
     "KAGGLE_API_TOKEN",
     "KAGGLE_USERNAME",
     "KAGGLE_KEY",
+    "MASSIVE_API_KEY",
+    "MASSIVE_API_BASE_URL",
+    "POLYGON_API_BASE_URL",
     "POLYGON_API_KEY",
     "SEC_USER_AGENT",
     "SEC_CONTACT_EMAIL",
@@ -162,6 +203,9 @@ DEFAULT_DYNAMIC_INVESTMENT_RULES = [
     {"min_percentile": 10.0, "max_percentile": 30.0, "multiplier": 1.5},
     {"min_percentile": 0.0, "max_percentile": 10.0, "multiplier": 2.0},
 ]
+BACKTEST_RUNNER_CLAIM_PREFIX = "backtest_runner_claim:"
+BACKTEST_RUNNER_LEASE_SECONDS = 300.0
+BACKTEST_CHECKPOINT_INTERVAL_STEPS = 40
 
 
 class SnapshotBlockingError(ValueError):
@@ -457,6 +501,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
         self._snapshot_refresh_process: subprocess.Popen[str] | None = None
         self._backtest_run_lock = threading.Lock()
         self._backtest_run_threads: dict[str, threading.Thread] = {}
+        self._backtest_runner_owner_id = str(
+            os.getenv("GRIT_BACKTEST_RUNNER_OWNER_ID") or f"{os.getpid()}:{uuid4().hex[:12]}"
+        )
         self._factor_mining_job_lock = threading.Lock()
         self._factor_mining_threads: dict[str, threading.Thread] = {}
         self._factor_mining_cancel_requests: set[str] = set()
@@ -978,18 +1025,74 @@ class RealBacktestPlatformService(BacktestPlatformService):
         price_rows: Sequence[Mapping[str, Any]],
         fundamental: Mapping[str, Any] | None,
     ) -> float | None:
-        data = self._factor_expression_input(price_rows, fundamental)
-        if not data:
-            return None
+        series = self._factor_expression_series(
+            expression,
+            price_rows,
+            [fundamental] if isinstance(fundamental, Mapping) else None,
+        )
+        for value in reversed(series):
+            if value is not None:
+                return value
+        return None
+
+    def _factor_expression_series(
+        self,
+        expression: str,
+        price_rows: Sequence[Mapping[str, Any]],
+        fundamental_rows: Sequence[Mapping[str, Any]] | None,
+    ) -> list[float | None]:
+        normalized_price_rows = [dict(row) for row in price_rows if isinstance(row, Mapping)]
+        if not normalized_price_rows:
+            return []
+        closes = [
+            self._factor_finite_float(row.get("adj_close", row.get("close")))
+            for row in normalized_price_rows
+        ]
+        if not any(value is not None for value in closes):
+            return []
+        data: dict[str, list[float | None]] = {"Close": closes}
+        ordered_fundamentals = [
+            dict(row)
+            for row in (fundamental_rows or [])
+            if isinstance(row, Mapping)
+        ]
+        ordered_fundamentals.sort(
+            key=lambda item: (
+                str(item.get("available_at") or item.get("date") or ""),
+                str(item.get("date") or ""),
+            )
+        )
+        if ordered_fundamentals:
+            price_dates = [str(row.get("date") or "") for row in normalized_price_rows]
+            for canonical_name, aliases in FIELD_ALIASES.items():
+                if canonical_name == "Close":
+                    continue
+                latest_value = None
+                values: list[float | None] = []
+                point_index = 0
+                for price_date in price_dates:
+                    while point_index < len(ordered_fundamentals):
+                        point = ordered_fundamentals[point_index]
+                        point_date = str(point.get("available_at") or point.get("date") or "")
+                        if point_date > price_date:
+                            break
+                        for alias in aliases:
+                            candidate = self._factor_finite_float(point.get(alias))
+                            if candidate is not None:
+                                latest_value = candidate
+                                break
+                        point_index += 1
+                    values.append(latest_value)
+                if any(value is not None for value in values):
+                    data[canonical_name] = values
         try:
             series = evaluate_expression(expression, data)
         except (FactorExpressionError, ValueError, TypeError, ZeroDivisionError):
-            return None
-        for value in reversed(series):
-            parsed = self._factor_finite_float(value)
-            if parsed is not None:
-                return parsed
-        return None
+            return [None] * len(normalized_price_rows)
+        normalized_series = [self._factor_finite_float(value) for value in series[: len(normalized_price_rows)]]
+        if len(normalized_series) < len(normalized_price_rows):
+            normalized_series.extend([None] * (len(normalized_price_rows) - len(normalized_series)))
+        return normalized_series
 
     def _factor_industry_snapshot(
         self,
@@ -997,8 +1100,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
         universe: Any,
         as_of_date: str,
     ) -> dict[str, Any]:
-        symbol_set = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
-        if not symbol_set:
+        normalized_symbols = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
+        if not normalized_symbols:
             return {
                 "mapping": {},
                 "taxonomy": "GICS",
@@ -1008,18 +1111,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "missing_symbols": [],
                 "source_names": [],
             }
-        normalized_universe = str(universe or "SP500").strip().upper()
-        snapshot_id = SP500_UNIVERSE_SNAPSHOT_ID if normalized_universe == "SP500" else None
-        if normalized_universe == "NASDAQ100":
-            snapshot_id = NASDAQ100_UNIVERSE_SNAPSHOT_ID
+        symbol_set = set(normalized_symbols)
         try:
-            memberships = self.market_data_repository.load_universe_memberships(
-                universe_snapshot_id=snapshot_id,
-                universe_key=None if snapshot_id else normalized_universe,
-                effective_date_lte=as_of_date,
-                symbols=sorted(symbol_set),
-                active_only=True,
-            )
+            histories = self._factor_industry_histories(normalized_symbols, universe, as_of_date)
         except Exception:
             return {
                 "mapping": {},
@@ -1030,7 +1124,33 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "missing_symbols": sorted(symbol_set),
                 "source_names": [],
             }
-        candidates: dict[str, tuple[str, str, str]] = {}
+        return self._factor_industry_snapshot_from_histories(normalized_symbols, as_of_date, histories)
+
+    def _factor_industry_membership_selector(self, universe: Any) -> tuple[str | None, str | None]:
+        normalized_universe = str(universe or "SP500").strip().upper()
+        snapshot_id = SP500_UNIVERSE_SNAPSHOT_ID if normalized_universe == "SP500" else None
+        if normalized_universe == "NASDAQ100":
+            snapshot_id = NASDAQ100_UNIVERSE_SNAPSHOT_ID
+        return snapshot_id, None if snapshot_id else normalized_universe
+
+    def _factor_industry_histories(
+        self,
+        symbols: Sequence[str],
+        universe: Any,
+        effective_date_lte: str,
+    ) -> dict[str, list[tuple[str, str, str]]]:
+        normalized_symbols = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
+        if not normalized_symbols:
+            return {}
+        snapshot_id, universe_key = self._factor_industry_membership_selector(universe)
+        memberships = self.market_data_repository.load_universe_memberships(
+            universe_snapshot_id=snapshot_id,
+            universe_key=universe_key,
+            effective_date_lte=effective_date_lte,
+            symbols=normalized_symbols,
+            active_only=True,
+        )
+        histories: dict[str, list[tuple[str, str, str]]] = {}
         industry_keys = (
             "gics_sector",
             "GICS Sector",
@@ -1045,9 +1165,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
             symbol = str(row.get("symbol") or "").strip().upper()
             effective_date = str(row.get("effective_date") or "").strip()
             membership_status = str(row.get("membership_status") or "ACTIVE").strip().upper()
-            if membership_status in {"REMOVED", "DELETED", "INACTIVE", "OUT", "EXCLUDED"}:
-                continue
-            if symbol not in symbol_set or (effective_date and effective_date > as_of_date):
+            if (
+                symbol not in normalized_symbols
+                or not effective_date
+                or effective_date > effective_date_lte
+                or membership_status in {"REMOVED", "DELETED", "INACTIVE", "OUT", "EXCLUDED"}
+            ):
                 continue
             metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
             industry = ""
@@ -1057,18 +1180,47 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     break
             if not industry:
                 continue
-            previous = candidates.get(symbol)
-            if previous is None or effective_date >= previous[0]:
-                source_name = str(
-                    metadata.get("industry_classification_source")
-                    or row.get("source")
-                    or metadata.get("source")
-                    or ""
-                ).strip()
-                candidates[symbol] = (effective_date, industry, source_name)
-        mapping = {symbol: industry for symbol, (_effective_date, industry, _source_name) in candidates.items()}
-        missing_symbols = sorted(symbol for symbol in symbol_set if symbol and symbol not in mapping)
-        source_names = sorted({source_name for _date, _industry, source_name in candidates.values() if source_name})
+            source_name = str(
+                metadata.get("industry_classification_source")
+                or row.get("source")
+                or metadata.get("source")
+                or ""
+            ).strip()
+            history = histories.setdefault(symbol, [])
+            entry = (effective_date, industry, source_name)
+            if history and history[-1][0] == effective_date:
+                history[-1] = entry
+            else:
+                history.append(entry)
+        return histories
+
+    def _factor_industry_snapshot_from_histories(
+        self,
+        symbols: Sequence[str],
+        as_of_date: str,
+        histories: Mapping[str, Sequence[tuple[str, str, str]]],
+    ) -> dict[str, Any]:
+        normalized_symbols = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
+        mapping: dict[str, str] = {}
+        missing_symbols: list[str] = []
+        source_names: set[str] = set()
+        for symbol in normalized_symbols:
+            history = list(histories.get(symbol) or [])
+            if not history:
+                missing_symbols.append(symbol)
+                continue
+            history_dates = [entry[0] for entry in history]
+            history_index = bisect_right(history_dates, as_of_date) - 1
+            if history_index < 0:
+                missing_symbols.append(symbol)
+                continue
+            _effective_date, industry, source_name = history[history_index]
+            if not industry:
+                missing_symbols.append(symbol)
+                continue
+            mapping[symbol] = industry
+            if source_name:
+                source_names.add(source_name)
         return {
             "mapping": mapping,
             "taxonomy": "GICS",
@@ -1076,8 +1228,41 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "covered_symbol_count": len(mapping),
             "missing_symbol_count": len(missing_symbols),
             "missing_symbols": missing_symbols,
-            "source_names": source_names,
+            "source_names": sorted(source_names),
         }
+
+    def _precompute_factor_industry_mappings(
+        self,
+        symbols: Sequence[str],
+        universe: Any,
+        as_of_dates: Sequence[str],
+    ) -> dict[str, dict[str, str]]:
+        normalized_symbols = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
+        normalized_dates = sorted({str(value).strip() for value in as_of_dates if str(value).strip()})
+        if not normalized_symbols or not normalized_dates:
+            return {}
+        try:
+            histories = self._factor_industry_histories(normalized_symbols, universe, normalized_dates[-1])
+        except Exception:
+            return {}
+        cursors = {symbol: 0 for symbol in normalized_symbols}
+        active_entries: dict[str, tuple[str, str]] = {}
+        mappings: dict[str, dict[str, str]] = {}
+        for as_of_date in normalized_dates:
+            mapping: dict[str, str] = {}
+            for symbol in normalized_symbols:
+                history = histories.get(symbol) or []
+                cursor = cursors.get(symbol, 0)
+                while cursor < len(history) and history[cursor][0] <= as_of_date:
+                    _effective_date, industry, source_name = history[cursor]
+                    active_entries[symbol] = (industry, source_name)
+                    cursor += 1
+                cursors[symbol] = cursor
+                active_entry = active_entries.get(symbol)
+                if active_entry and active_entry[0]:
+                    mapping[symbol] = active_entry[0]
+            mappings[as_of_date] = mapping
+        return mappings
 
     def _factor_industry_mapping(
         self,
@@ -2945,6 +3130,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "weight": weight,
                     "normalized_weight": round(weight / total_abs_weight, 6),
                     "diagnostic_status": factor.get("diagnostic_status"),
+                    "latest_diagnostic_summary": dict(factor.get("latest_diagnostic_summary") or {}),
+                    "batch_diagnostic_summary": dict(factor.get("batch_diagnostic_summary") or {}),
+                    "strategy_creation_risk": dict(factor.get("strategy_creation_risk") or {}),
                     "pit_coverage": dict(factor.get("pit_coverage") or factor.get("coverage") or {}),
                     "readiness_blockers": list(factor.get("readiness_blockers") or []),
                 }
@@ -3143,6 +3331,111 @@ class RealBacktestPlatformService(BacktestPlatformService):
             strategy["multi_factor_parameter_ranges"] = self._build_multi_factor_parameter_ranges(strategy)
         return strategy
 
+    def _hydrate_multi_factor_attribution_component(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        hydrated = dict(row)
+        if hydrated.get("latest_diagnostic_summary") or hydrated.get("batch_diagnostic_summary"):
+            return hydrated
+        factor_id = str(hydrated.get("factor_id") or "").strip()
+        if not factor_id:
+            return hydrated
+        try:
+            factor = dict(self.get_factor(factor_id))
+        except Exception:
+            return hydrated
+        for key in ("latest_diagnostic_summary", "batch_diagnostic_summary", "strategy_creation_risk"):
+            if factor.get(key):
+                hydrated[key] = dict(factor.get(key) or {})
+        return hydrated
+
+    def _multi_factor_attribution_quality(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        diagnostic = dict(row.get("latest_diagnostic_summary") or row.get("batch_diagnostic_summary") or {})
+        risk = dict(row.get("strategy_creation_risk") or {})
+        warning_items = [
+            dict(item)
+            for item in risk.get("warnings") or []
+            if isinstance(item, Mapping)
+        ]
+
+        rank_ic = _coerce_float(diagnostic.get("rank_ic"), math.nan)
+        ic = _coerce_float(diagnostic.get("ic"), math.nan)
+        ir = _coerce_float(diagnostic.get("ir"), math.nan)
+        coverage_pct = _coerce_float(diagnostic.get("coverage"), math.nan)
+        if not math.isfinite(coverage_pct):
+            coverage_warning = next(
+                (
+                    item
+                    for item in warning_items
+                    if str(item.get("code") or "").upper() == "COVERAGE_EDGE"
+                    and item.get("coverage") is not None
+                ),
+                None,
+            )
+            if coverage_warning is not None:
+                coverage_pct = _coerce_float(coverage_warning.get("coverage"), math.nan)
+
+        spread_values: list[float] = []
+        group_returns = diagnostic.get("group_returns")
+        if isinstance(group_returns, Sequence) and not isinstance(group_returns, (str, bytes)):
+            finite_group_returns = [
+                _coerce_float(item.get("mean_return"), math.nan)
+                for item in group_returns
+                if isinstance(item, Mapping)
+            ]
+            finite_group_returns = [value for value in finite_group_returns if math.isfinite(value)]
+            if len(finite_group_returns) >= 2:
+                spread_values.append(abs(finite_group_returns[0] - finite_group_returns[-1]))
+        for item in warning_items:
+            monotonicity = item.get("monotonicity")
+            if not isinstance(monotonicity, Mapping):
+                continue
+            for window in monotonicity.get("rolling_windows") or []:
+                if not isinstance(window, Mapping):
+                    continue
+                spread = _coerce_float(window.get("q1_q5_spread"), math.nan)
+                if math.isfinite(spread):
+                    spread_values.append(abs(spread))
+            values = [
+                _coerce_float(value, math.nan)
+                for value in monotonicity.get("values") or []
+            ]
+            values = [value for value in values if math.isfinite(value)]
+            if len(values) >= 2:
+                spread_values.append(abs(values[0] - values[-1]))
+
+        signal_strength = 0.05
+        if math.isfinite(rank_ic):
+            signal_strength += abs(rank_ic)
+        elif math.isfinite(ic):
+            signal_strength += abs(ic)
+        if math.isfinite(ir):
+            signal_strength += min(abs(ir), 2.0) * 0.18
+        if spread_values:
+            signal_strength += min(max(spread_values), 0.25) * 2.0
+
+        coverage_factor = 1.0
+        if math.isfinite(coverage_pct):
+            coverage_factor = min(1.0, max(0.05, coverage_pct / 100.0))
+
+        correlation_penalty = 1.0
+        for item in warning_items:
+            if str(item.get("code") or "").upper() != "HIGH_CORRELATION":
+                continue
+            max_correlation = _coerce_float(item.get("max_correlation"), math.nan)
+            if math.isfinite(max_correlation):
+                correlation_penalty = min(
+                    correlation_penalty,
+                    max(0.45, 1.0 - max(0.0, max_correlation - 0.8) * 0.8),
+                )
+
+        quality = max(0.0001, signal_strength * coverage_factor * correlation_penalty)
+        return {
+            "quality": quality,
+            "rank_ic": rank_ic if math.isfinite(rank_ic) else None,
+            "ic": ic if math.isfinite(ic) else None,
+            "ir": ir if math.isfinite(ir) else None,
+            "coverage_pct": coverage_pct if math.isfinite(coverage_pct) else None,
+        }
+
     def _build_multi_factor_attribution(self, run: Mapping[str, Any]) -> dict[str, Any] | None:
         preview_payload = dict(run.get("preview") or {})
         parameters = dict(run.get("parameter_snapshot") or preview_payload.get("parameter_snapshot") or {})
@@ -3150,9 +3443,22 @@ class RealBacktestPlatformService(BacktestPlatformService):
             return None
         profile = self._build_multi_factor_profile_from_parameters(parameters)
         total_return = _coerce_float((run.get("metrics") or {}).get("total_return"), 0.0)
-        contributions = []
+        component_impacts: list[tuple[dict[str, Any], dict[str, Any], float]] = []
         for row in profile.get("components") or []:
-            contribution = total_return * _coerce_float(row.get("normalized_weight"), 0.0)
+            hydrated_row = self._hydrate_multi_factor_attribution_component(row)
+            quality = self._multi_factor_attribution_quality(hydrated_row)
+            impact = abs(_coerce_float(hydrated_row.get("normalized_weight"), 0.0)) * _coerce_float(quality.get("quality"), 0.0)
+            component_impacts.append((hydrated_row, quality, impact))
+        total_impact = sum(impact for _row, _quality, impact in component_impacts)
+        if total_impact <= 0:
+            total_impact = sum(abs(_coerce_float(row.get("normalized_weight"), 0.0)) for row, _quality, _impact in component_impacts)
+        contributions = []
+        for row, quality, impact in component_impacts:
+            normalized_weight = _coerce_float(row.get("normalized_weight"), 0.0)
+            contribution_share = impact / total_impact if total_impact > 0 else abs(normalized_weight)
+            contribution = total_return * contribution_share
+            if normalized_weight < 0:
+                contribution *= -1.0
             contributions.append(
                 {
                     "factor_id": row.get("factor_id"),
@@ -3160,8 +3466,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "family": row.get("family"),
                     "direction": row.get("direction"),
                     "normalized_weight": row.get("normalized_weight"),
+                    "attribution_weight": round(contribution_share, 6),
+                    "diagnostic_score": round(_coerce_float(quality.get("quality"), 0.0), 6),
+                    "rank_ic": quality.get("rank_ic"),
+                    "ic": quality.get("ic"),
+                    "ir": quality.get("ir"),
+                    "diagnostic_coverage_pct": quality.get("coverage_pct"),
                     "contribution_pct": round(contribution * 100.0, 2),
                     "source": "estimated",
+                    "basis": "diagnostic_adjusted_weight",
                 }
             )
         neutralization = dict(profile.get("neutralization") or {})
@@ -3304,7 +3617,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
             }
             excluded.update({"openbb_tiingo", "openbb_alpha_vantage"} & provider_names)
         if str(os.getenv("GRIT_ENABLE_PAID_OPTIONAL_PROVIDERS") or "").strip().lower() not in {"1", "true", "yes", "on"}:
-            excluded.update(self._paid_optional_provider_names())
+            paid_optional_providers = self._paid_optional_provider_names()
+            if allow_targeted_price_repair:
+                # PIT repair keeps Polygon available as the precision lane even when
+                # broader paid optional providers stay disabled for normal refreshes.
+                paid_optional_providers.discard("polygon")
+            excluded.update(paid_optional_providers)
         if window_start < LONGBRIDGE_MIN_HISTORY_DATE:
             excluded.update({"longbridge", "longbridge_static_info"})
         if not excluded and not allow_targeted_price_repair:
@@ -3516,16 +3834,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
             try:
                 normalized_targets = [str(item) for item in raw_targets if str(item).strip()]
             except TypeError as exc:
-                raise ValueError("Snapshot refresh targets must be a list of price, corporate, valuations, universes, or bond.") from exc
+                raise ValueError("Snapshot refresh targets must be a list of price, corporate, valuations, universes, fundamentals, sentiment, macro_derivatives, or bond.") from exc
 
-        allowed_targets = {"price", "corporate", "valuations", "universes", "bond"}
+        allowed_targets = {"price", "corporate", "valuations", "universes", "fundamentals", "sentiment", "macro_derivatives", "bond"}
         cleaned_targets = [item.strip().lower() for item in normalized_targets if item.strip().lower() in allowed_targets]
         if normalized_targets and not cleaned_targets:
-            raise ValueError("Snapshot refresh targets must include price, corporate, valuations, universes, or bond.")
+            raise ValueError("Snapshot refresh targets must include price, corporate, valuations, universes, fundamentals, sentiment, macro_derivatives, or bond.")
         if not cleaned_targets:
-            cleaned_targets = ["price", "corporate", "valuations", "universes", "bond"]
-        elif "bond" not in cleaned_targets and mode != "repair":
-            cleaned_targets = ["price", "corporate", "valuations", "universes", "bond"]
+            cleaned_targets = ["price", "corporate", "valuations", "universes", "fundamentals", "sentiment", "macro_derivatives", "bond"]
         payload["mode"] = mode
         payload["targets"] = cleaned_targets
         return payload, mode, cleaned_targets
@@ -3761,6 +4077,75 @@ class RealBacktestPlatformService(BacktestPlatformService):
             },
         ]
 
+    def _optional_dataset_snapshot_defaults(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": DATASET_FUNDAMENTALS_SNAPSHOT_ID,
+                "name": "基础面 PIT 数据",
+                "status": "INCOMPLETE",
+                "as_of": None,
+                "freshness_label": "尚未入库",
+                "start_date": SNAPSHOT_START_DATE.isoformat(),
+                "end_date": None,
+                "row_count": 0,
+                "source": "",
+                "fallback_source": None,
+                "blocker": None,
+            },
+            {
+                "id": DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID,
+                "name": "分析师预期样本",
+                "status": "INCOMPLETE",
+                "as_of": None,
+                "freshness_label": "尚未入库",
+                "start_date": SNAPSHOT_START_DATE.isoformat(),
+                "end_date": None,
+                "row_count": 0,
+                "source": "",
+                "fallback_source": None,
+                "blocker": None,
+            },
+            {
+                "id": DATASET_SHORT_VOLUME_SNAPSHOT_ID,
+                "name": "FINRA 空头成交样本",
+                "status": "INCOMPLETE",
+                "as_of": None,
+                "freshness_label": "尚未入库",
+                "start_date": SNAPSHOT_START_DATE.isoformat(),
+                "end_date": None,
+                "row_count": 0,
+                "source": "",
+                "fallback_source": None,
+                "blocker": None,
+            },
+            {
+                "id": DATASET_MACRO_RATES_SNAPSHOT_ID,
+                "name": "宏观利率序列",
+                "status": "INCOMPLETE",
+                "as_of": None,
+                "freshness_label": "尚未入库",
+                "start_date": SNAPSHOT_START_DATE.isoformat(),
+                "end_date": None,
+                "row_count": 0,
+                "source": "",
+                "fallback_source": None,
+                "blocker": None,
+            },
+            {
+                "id": DATASET_OPTION_SKEW_SNAPSHOT_ID,
+                "name": "IV Skew 证据流",
+                "status": "INCOMPLETE",
+                "as_of": None,
+                "freshness_label": "尚未入库",
+                "start_date": SNAPSHOT_START_DATE.isoformat(),
+                "end_date": None,
+                "row_count": 0,
+                "source": "",
+                "fallback_source": None,
+                "blocker": None,
+            },
+        ]
+
     def _universe_snapshot_defaults(self) -> list[dict[str, Any]]:
         return [
             {
@@ -3922,6 +4307,65 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 str(row.get("fallback_source") or "").strip(),
             )
         )
+
+    def _dataset_snapshot_has_persisted_evidence(self, row: Mapping[str, Any] | None, dataset_snapshot_id: str) -> bool:
+        if not row:
+            return False
+        try:
+            counts = self.market_data_repository.count_dataset_snapshot_rows(dataset_snapshot_id)
+        except Exception:
+            counts = {}
+        if any(int(value or 0) > 0 for value in counts.values()):
+            return True
+        if int(row.get("row_count") or 0) > 0:
+            return True
+        return any(
+            (
+                row.get("as_of"),
+                str(row.get("source") or "").strip(),
+                str(row.get("fallback_source") or "").strip(),
+            )
+        ) and not self._snapshot_row_is_placeholder(row, count_key="row_count")
+
+    def _phase2_dataset_refresh_stats(
+        self,
+        *,
+        refresh_fundamentals: bool,
+        refresh_sentiment: bool,
+        refresh_macro_derivatives: bool,
+    ) -> dict[str, dict[str, Any]]:
+        stats: dict[str, dict[str, Any]] = {}
+        if refresh_fundamentals:
+            ensure_default_fundamental_snapshot(self.market_data_repository)
+        for dataset_id, display_name, enabled in (
+            (DATASET_FUNDAMENTALS_SNAPSHOT_ID, "基础面 PIT 数据", refresh_fundamentals),
+            (DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID, "分析师预期样本", refresh_sentiment),
+            (DATASET_SHORT_VOLUME_SNAPSHOT_ID, "FINRA 空头成交样本", refresh_sentiment),
+            (DATASET_MACRO_RATES_SNAPSHOT_ID, "宏观利率序列", refresh_macro_derivatives),
+            (DATASET_OPTION_SKEW_SNAPSHOT_ID, "IV Skew 证据流", refresh_macro_derivatives),
+        ):
+            if not enabled:
+                continue
+            snapshot = next(
+                (item for item in self.market_data_repository.list_dataset_snapshots() if str(item.get("id") or "") == dataset_id),
+                None,
+            )
+            counts = self.market_data_repository.count_dataset_snapshot_rows(dataset_id)
+            updated_row_count = sum(int(value or 0) for value in counts.values())
+            metadata = dict((snapshot or {}).get("metadata") or {})
+            updated_symbol_count = int(
+                metadata.get("covered_symbol_count")
+                or counts.get("fundamental_coverage")
+                or counts.get("signal_coverage")
+                or 0
+            )
+            stats[dataset_id] = {
+                "name": str((snapshot or {}).get("name") or display_name),
+                "updated_symbol_count": updated_symbol_count,
+                "updated_row_count": updated_row_count,
+                "provider_summary": {},
+            }
+        return stats
 
     def _snapshot_missing_symbols(self, snapshot: Mapping[str, Any] | None) -> list[str]:
         metadata = dict(snapshot.get("metadata") or {}) if snapshot else {}
@@ -4723,6 +5167,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
             direct_symbol = self._direct_symbol_universe_symbol(strategy)
             if direct_symbol:
                 extras.add(direct_symbol)
+            for symbol in self._asset_allocation_symbols_from_parameters(strategy.get("parameters")):
+                extras.add(symbol)
             benchmark_symbol = str(
                 strategy.get("benchmark_symbol")
                 or (strategy.get("parameters") or {}).get("benchmark_symbol")
@@ -4732,6 +5178,52 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if normalized_benchmark_symbol:
                 extras.add(normalized_benchmark_symbol)
         return extras
+
+    def _required_price_repair_symbols(
+        self,
+        *,
+        refresh_price_snapshot: bool,
+        existing_price_coverage: Sequence[Mapping[str, Any]],
+        existing_price_missing: Sequence[str],
+    ) -> set[str]:
+        if not refresh_price_snapshot:
+            return set()
+        covered_symbols = {
+            normalized_symbol
+            for item in existing_price_coverage
+            for normalized_symbol in [self._normalize_refresh_symbol(item.get("symbol"))]
+            if normalized_symbol
+        }
+        missing_symbols = {
+            normalized_symbol
+            for item in existing_price_missing
+            for normalized_symbol in [self._normalize_refresh_symbol(item)]
+            if normalized_symbol
+        }
+        strategy_symbols = self._snapshot_progress_extra_symbols() | {"SPY", "QQQ"}
+        universe_symbols: set[str] = set()
+        if not missing_symbols:
+            symbol_loader = getattr(self.market_data_repository, "list_universe_membership_symbols", None)
+            if callable(symbol_loader):
+                universe_symbols.update(
+                    normalized_symbol
+                    for item in symbol_loader()
+                    for normalized_symbol in [self._normalize_refresh_symbol(item)]
+                    if normalized_symbol
+                )
+            else:
+                universe_symbols.update(
+                    normalized_symbol
+                    for row in self.market_data_repository.load_universe_memberships()
+                    for normalized_symbol in [self._normalize_refresh_symbol(row.get("symbol"))]
+                    if normalized_symbol
+                )
+        candidate_symbols = strategy_symbols | universe_symbols
+        return {
+            symbol
+            for symbol in candidate_symbols
+            if symbol in missing_symbols or symbol not in covered_symbols
+        }
 
     def _canonical_progress_target_symbols(
         self,
@@ -4817,6 +5309,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
         return {
             DATASET_PRICE_SNAPSHOT_ID: _bucket(),
             DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID: _bucket(),
+            DATASET_FUNDAMENTALS_SNAPSHOT_ID: _bucket(),
+            DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID: _bucket(),
+            DATASET_SHORT_VOLUME_SNAPSHOT_ID: _bucket(),
+            DATASET_MACRO_RATES_SNAPSHOT_ID: _bucket(),
+            DATASET_OPTION_SKEW_SNAPSHOT_ID: _bucket(),
         }
 
     def _provider_metric_bucket(
@@ -5100,8 +5597,21 @@ class RealBacktestPlatformService(BacktestPlatformService):
         landed_breakdowns = {
             DATASET_PRICE_SNAPSHOT_ID: self._provider_row_breakdown(price_bars),
             DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID: self._provider_row_breakdown(corporate_actions),
+            DATASET_FUNDAMENTALS_SNAPSHOT_ID: {},
+            DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID: {},
+            DATASET_SHORT_VOLUME_SNAPSHOT_ID: {},
+            DATASET_MACRO_RATES_SNAPSHOT_ID: {},
+            DATASET_OPTION_SKEW_SNAPSHOT_ID: {},
         }
-        for snapshot_id in (DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID, DATASET_PRICE_SNAPSHOT_ID):
+        for snapshot_id in (
+            DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
+            DATASET_PRICE_SNAPSHOT_ID,
+            DATASET_FUNDAMENTALS_SNAPSHOT_ID,
+            DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID,
+            DATASET_SHORT_VOLUME_SNAPSHOT_ID,
+            DATASET_MACRO_RATES_SNAPSHOT_ID,
+            DATASET_OPTION_SKEW_SNAPSHOT_ID,
+        ):
             payload = telemetry.get(snapshot_id) if isinstance(telemetry, Mapping) else None
             providers_payload = payload.get("providers") if isinstance(payload, Mapping) else {}
             normalized_providers: dict[str, Any] = {}
@@ -5351,6 +5861,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         memberships_by_snapshot: Mapping[str, Sequence[Mapping[str, Any]]],
         existing_universe_memberships: Mapping[str, Sequence[Mapping[str, Any]]],
         dataset_provider_telemetry: Mapping[str, Any] | None = None,
+        phase2_dataset_stats: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         price_symbols = {
             str(item.get("symbol") or "").strip().upper()
@@ -5437,8 +5948,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             price_bars=price_bars,
             corporate_actions=corporate_actions,
         )
-        return {
-            "datasets": {
+        dataset_stats = {
                 DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID: {
                     "name": "\u516c\u53f8\u884c\u4e3a\u6570\u636e",
                     "updated_symbol_count": int(len(corporate_symbols)),
@@ -5457,7 +5967,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "updated_row_count": int(len(index_valuations or [])),
                     "provider_summary": dataset_provider_summary.get(DATASET_INDEX_VALUATIONS_SNAPSHOT_ID, {}),
                 },
-            },
+            }
+        for dataset_id, payload in (phase2_dataset_stats or {}).items():
+            dataset_stats[str(dataset_id)] = dict(payload)
+        return {
+            "datasets": dataset_stats,
             "universes": universes,
         }
 
@@ -6800,7 +7314,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         core_datasets = [
             item
             for item in dataset_snapshots
-            if str(item.get("id") or "") != DATASET_INDEX_VALUATIONS_SNAPSHOT_ID
+            if str(item.get("id") or "") in SNAPSHOT_CORE_DATASET_IDS
         ]
         statuses = [str(item.get("status") or "INCOMPLETE").upper() for item in [*core_datasets, *universe_snapshots]]
         if not statuses:
@@ -6894,7 +7408,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
         universe_snapshots: list[dict[str, Any]],
         latest_job: Mapping[str, Any] | None,
     ) -> tuple[str | None, str | None, str, list[str]]:
-        for item in [*dataset_snapshots, *universe_snapshots]:
+        core_dataset_snapshots = [
+            item for item in dataset_snapshots if str(item.get("id") or "") in SNAPSHOT_CORE_DATASET_IDS
+        ]
+        for item in [*core_dataset_snapshots, *universe_snapshots]:
             status = str(item.get("status") or "INCOMPLETE").upper()
             blocker = dict(item.get("blocker") or {})
             if status == "READY" and not blocker:
@@ -7422,6 +7939,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
             command.extend(["--reason", str(reason)])
         if targets:
             command.extend(["--targets", ",".join(str(item) for item in targets)])
+        repair_symbol_limit = payload.get("repair_symbol_limit")
+        if repair_symbol_limit is not None:
+            command.extend(["--repair-symbol-limit", str(repair_symbol_limit)])
 
         process = subprocess.Popen(
             command,
@@ -7637,11 +8157,29 @@ class RealBacktestPlatformService(BacktestPlatformService):
             DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID: corporate_row,
             DATASET_INDEX_VALUATIONS_SNAPSHOT_ID: valuation_row,
         }
+        optional_dataset_rows = {
+            DATASET_FUNDAMENTALS_SNAPSHOT_ID: self._backfill_dataset_snapshot_progress(
+                raw_dataset_rows.get(DATASET_FUNDAMENTALS_SNAPSHOT_ID),
+                target_symbols=canonical_target_symbols,
+            ),
+            DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID: dict(raw_dataset_rows.get(DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID) or {}),
+            DATASET_SHORT_VOLUME_SNAPSHOT_ID: dict(raw_dataset_rows.get(DATASET_SHORT_VOLUME_SNAPSHOT_ID) or {}),
+            DATASET_MACRO_RATES_SNAPSHOT_ID: dict(raw_dataset_rows.get(DATASET_MACRO_RATES_SNAPSHOT_ID) or {}),
+            DATASET_OPTION_SKEW_SNAPSHOT_ID: dict(raw_dataset_rows.get(DATASET_OPTION_SKEW_SNAPSHOT_ID) or {}),
+        }
         universe_rows = {str(item["id"]): item for item in self.market_data_repository.list_universe_snapshots()}
         dataset_snapshots = [
             self._format_dataset_snapshot(dataset_rows.get(defaults["id"]), defaults)
             for defaults in self._dataset_snapshot_defaults()
         ]
+        dataset_snapshots.extend(
+            self._format_dataset_snapshot(optional_dataset_rows.get(defaults["id"]), defaults)
+            for defaults in self._optional_dataset_snapshot_defaults()
+            if self._dataset_snapshot_has_persisted_evidence(
+                optional_dataset_rows.get(defaults["id"]),
+                defaults["id"],
+            )
+        )
         universe_snapshots = [
             self._format_universe_snapshot(universe_rows.get(defaults["id"]), defaults)
             for defaults in self._universe_snapshot_defaults()
@@ -7723,10 +8261,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
             price_row=price_row,
             corporate_row=corporate_row,
             valuation_row=valuation_row,
-            fundamental_row=self._backfill_dataset_snapshot_progress(
-                raw_dataset_rows.get(DATASET_FUNDAMENTALS_SNAPSHOT_ID),
-                target_symbols=canonical_target_symbols,
-            ),
+            fundamental_row=optional_dataset_rows.get(DATASET_FUNDAMENTALS_SNAPSHOT_ID),
+            analyst_row=optional_dataset_rows.get(DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID),
+            short_volume_row=optional_dataset_rows.get(DATASET_SHORT_VOLUME_SNAPSHOT_ID),
+            macro_rates_row=optional_dataset_rows.get(DATASET_MACRO_RATES_SNAPSHOT_ID),
+            option_skew_row=optional_dataset_rows.get(DATASET_OPTION_SKEW_SNAPSHOT_ID),
             last_refreshed_at=max(timestamps) if timestamps else None,
             data_trust_summary=data_trust_summary,
         )
@@ -7736,6 +8275,18 @@ class RealBacktestPlatformService(BacktestPlatformService):
         factor_dimension_readiness = self._build_snapshot_factor_dimension_readiness(
             data_layer_readiness=data_layer_readiness,
         )
+        if "start_backtest" in allowed_actions:
+            l2_readiness = next(
+                (
+                    item
+                    for item in data_layer_readiness
+                    if str(item.get("layer_id") or "").upper() == "L2"
+                ),
+                None,
+            )
+            l2_status = str((l2_readiness or {}).get("status") or "").upper()
+            if l2_status not in {"READY", "COMPLETED", "VERIFIED"}:
+                allowed_actions = [action for action in allowed_actions if action != "start_backtest"]
         return {
             "overall_status": overall_status,
             "last_refreshed_at": max(timestamps) if timestamps else None,
@@ -7900,6 +8451,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
         corporate_row: Mapping[str, Any],
         valuation_row: Mapping[str, Any],
         fundamental_row: Mapping[str, Any] | None,
+        analyst_row: Mapping[str, Any] | None,
+        short_volume_row: Mapping[str, Any] | None,
+        macro_rates_row: Mapping[str, Any] | None,
+        option_skew_row: Mapping[str, Any] | None,
         last_refreshed_at: str | None,
         data_trust_summary: Mapping[str, Any] | None,
     ) -> list[dict[str, Any]]:
@@ -7918,6 +8473,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
         except Exception:
             fundamental_counts = {"fundamental_points": 0, "fundamental_coverage": 0}
         try:
+            fundamental_time_contract = (
+                self.market_data_repository.summarize_dataset_fundamental_time_contract(fundamental_snapshot_id)
+                if hasattr(self.market_data_repository, "summarize_dataset_fundamental_time_contract")
+                else {}
+            )
+        except Exception:
+            fundamental_time_contract = {}
+        try:
             fundamental_coverage_rows = (
                 self.market_data_repository.load_dataset_fundamental_coverage(fundamental_snapshot_id)
                 if hasattr(self.market_data_repository, "load_dataset_fundamental_coverage")
@@ -7925,6 +8488,42 @@ class RealBacktestPlatformService(BacktestPlatformService):
             )
         except Exception:
             fundamental_coverage_rows = []
+        analyst_snapshot_id = str((analyst_row or {}).get("id") or DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID)
+        short_volume_snapshot_id = str((short_volume_row or {}).get("id") or DATASET_SHORT_VOLUME_SNAPSHOT_ID)
+        macro_rates_snapshot_id = str((macro_rates_row or {}).get("id") or DATASET_MACRO_RATES_SNAPSHOT_ID)
+        option_skew_snapshot_id = str((option_skew_row or {}).get("id") or DATASET_OPTION_SKEW_SNAPSHOT_ID)
+        try:
+            analyst_signal_contract = (
+                self.market_data_repository.summarize_dataset_signal_time_contract(analyst_snapshot_id)
+                if hasattr(self.market_data_repository, "summarize_dataset_signal_time_contract")
+                else {}
+            )
+        except Exception:
+            analyst_signal_contract = {}
+        try:
+            short_volume_signal_contract = (
+                self.market_data_repository.summarize_dataset_signal_time_contract(short_volume_snapshot_id)
+                if hasattr(self.market_data_repository, "summarize_dataset_signal_time_contract")
+                else {}
+            )
+        except Exception:
+            short_volume_signal_contract = {}
+        try:
+            macro_rates_signal_contract = (
+                self.market_data_repository.summarize_dataset_signal_time_contract(macro_rates_snapshot_id)
+                if hasattr(self.market_data_repository, "summarize_dataset_signal_time_contract")
+                else {}
+            )
+        except Exception:
+            macro_rates_signal_contract = {}
+        try:
+            option_skew_signal_contract = (
+                self.market_data_repository.summarize_dataset_signal_time_contract(option_skew_snapshot_id)
+                if hasattr(self.market_data_repository, "summarize_dataset_signal_time_contract")
+                else {}
+            )
+        except Exception:
+            option_skew_signal_contract = {}
         trust_layers = (
             list(data_trust_summary.get("layers") or [])
             if isinstance(data_trust_summary, Mapping)
@@ -7964,22 +8563,41 @@ class RealBacktestPlatformService(BacktestPlatformService):
         fundamental_points = int(fundamental_counts.get("fundamental_points") or 0)
         fundamental_covered = int(fundamental_metadata.get("covered_symbol_count") or len(fundamental_coverage_rows) or 0)
         fundamental_total = int(fundamental_metadata.get("total_symbol_count") or max(len(fundamental_coverage_rows), 0))
+        missing_publish_date_count = int(fundamental_time_contract.get("missing_publish_date_count") or 0)
+        missing_available_at_count = int(fundamental_time_contract.get("missing_available_at_count") or 0)
         fundamental_ready = (
             fundamental_status in {"READY", "COMPLETED"}
             and fundamental_points > 0
             and bool(available_fields)
+            and missing_publish_date_count <= 0
+            and missing_available_at_count <= 0
         )
         fundamental_status_value = self._snapshot_readiness_status(
             ready=fundamental_ready,
             warning=not fundamental_ready and (fundamental_points > 0 or bool(available_fields)),
             blocked=not fundamental_ready and fundamental_points <= 0 and not available_fields,
         )
+        analyst_point_rows = int(analyst_signal_contract.get("point_count") or 0)
+        short_volume_point_rows = int(short_volume_signal_contract.get("point_count") or 0)
+        macro_rates_point_rows = int(macro_rates_signal_contract.get("point_count") or 0)
+        option_skew_point_rows = int(option_skew_signal_contract.get("point_count") or 0)
         analyst_status = self._snapshot_readiness_status(
-            disabled=False,
-            warning=True,
+            ready=analyst_point_rows > 0
+            and int(analyst_signal_contract.get("missing_publish_date_count") or 0) <= 0
+            and int(analyst_signal_contract.get("missing_available_at_count") or 0) <= 0
+            and short_volume_point_rows > 0,
+            warning=analyst_point_rows > 0 or short_volume_point_rows > 0,
+            blocked=False,
+            disabled=analyst_point_rows <= 0 and short_volume_point_rows <= 0,
         )
         macro_status = self._snapshot_readiness_status(
             blocked=not market_ready,
+            ready=macro_rates_point_rows > 0
+            and option_skew_point_rows > 0
+            and int(macro_rates_signal_contract.get("missing_publish_date_count") or 0) <= 0
+            and int(macro_rates_signal_contract.get("missing_available_at_count") or 0) <= 0
+            and int(option_skew_signal_contract.get("missing_publish_date_count") or 0) <= 0
+            and int(option_skew_signal_contract.get("missing_available_at_count") or 0) <= 0,
             calibrating=market_ready,
         )
         return [
@@ -8033,6 +8651,21 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "updated_at": str((fundamental_row or {}).get("as_of") or last_refreshed_at or ""),
                 "provider_keys": ["FMP_API_KEY"],
                 "linked_targets": [fundamental_snapshot_id],
+                "linked_target_evidence": [
+                    {
+                        "dataset_id": fundamental_snapshot_id,
+                        "evidence_kind": (
+                            "dataset_snapshot"
+                            if self._dataset_snapshot_has_persisted_evidence(fundamental_row, fundamental_snapshot_id)
+                            else "readiness_only_provider_attempt"
+                        ),
+                    }
+                ],
+                "available_at_health": {
+                    "missing_available_at_count": missing_available_at_count,
+                    "missing_publish_date_count": missing_publish_date_count,
+                    "status": "healthy" if fundamental_ready else "blocked",
+                },
             },
             {
                 "layer_id": "l3_sentiment_data",
@@ -8046,7 +8679,25 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 ],
                 "updated_at": last_refreshed_at,
                 "provider_keys": ["ALPHAVANTAGE_API_KEY"],
-                "linked_targets": ["ds-analyst-consensus", "ds-short-volume"],
+                "linked_targets": [analyst_snapshot_id, short_volume_snapshot_id],
+                "linked_target_evidence": [
+                    {
+                        "dataset_id": analyst_snapshot_id,
+                        "evidence_kind": (
+                            "dataset_snapshot"
+                            if self._dataset_snapshot_has_persisted_evidence(analyst_row, analyst_snapshot_id)
+                            else "readiness_only_provider_attempt"
+                        ),
+                    },
+                    {
+                        "dataset_id": short_volume_snapshot_id,
+                        "evidence_kind": (
+                            "dataset_snapshot"
+                            if self._dataset_snapshot_has_persisted_evidence(short_volume_row, short_volume_snapshot_id)
+                            else "readiness_only_provider_attempt"
+                        ),
+                    },
+                ],
             },
             {
                 "layer_id": "l4_macro_derivatives",
@@ -8063,8 +8714,27 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     {"label": "估值代理", "value": "可用" if valuation_status in {"READY", "COMPLETED"} else "待补"},
                 ],
                 "updated_at": last_refreshed_at,
-                "provider_keys": ["FRED_API_KEY", "POLYGON_API_KEY"],
-                "linked_targets": [DATASET_INDEX_VALUATIONS_SNAPSHOT_ID, "ds-option-skew"],
+                "provider_keys": ["FRED_API_KEY", "MASSIVE_API_KEY", "POLYGON_API_KEY"],
+                "linked_targets": [DATASET_INDEX_VALUATIONS_SNAPSHOT_ID, macro_rates_snapshot_id, option_skew_snapshot_id],
+                "linked_target_evidence": [
+                    {"dataset_id": DATASET_INDEX_VALUATIONS_SNAPSHOT_ID, "evidence_kind": "dataset_snapshot"},
+                    {
+                        "dataset_id": macro_rates_snapshot_id,
+                        "evidence_kind": (
+                            "dataset_snapshot"
+                            if self._dataset_snapshot_has_persisted_evidence(macro_rates_row, macro_rates_snapshot_id)
+                            else "readiness_only_provider_attempt"
+                        ),
+                    },
+                    {
+                        "dataset_id": option_skew_snapshot_id,
+                        "evidence_kind": (
+                            "dataset_snapshot"
+                            if self._dataset_snapshot_has_persisted_evidence(option_skew_row, option_skew_snapshot_id)
+                            else "readiness_only_provider_attempt"
+                        ),
+                    },
+                ],
             },
         ]
 
@@ -8119,7 +8789,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "detail_cn": "宏观序列与无风险利率敞口仍在校准，暂不作为正式准入硬门禁。",
                     "source_layer": "L4 宏观与衍生品",
                     "blocking": False,
-                    "target": "ds-rate-beta",
+                    "target": DATASET_MACRO_RATES_SNAPSHOT_ID,
                 },
             ]
         )
@@ -8504,26 +9174,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
         universe_snapshot_id = self._resolved_universe_snapshot_id(strategy, request_payload)
         if universe_snapshot_id:
-            memberships = self.market_data_repository.load_universe_memberships(
+            symbols = self.market_data_repository.load_universe_membership_symbols_as_of(
                 universe_snapshot_id=universe_snapshot_id,
+                effective_date_lte=str((request_payload or {}).get("end_date") or date.today().isoformat()),
             )
-            if memberships:
-                requested_end_date = str((request_payload or {}).get("end_date") or date.today().isoformat())
-                eligible_dates = sorted(
-                    {
-                        str(item.get("effective_date"))
-                        for item in memberships
-                        if str(item.get("effective_date")) <= requested_end_date
-                    }
-                )
-                target_date = eligible_dates[-1] if eligible_dates else str(memberships[-1].get("effective_date"))
-                symbols = [
-                    str(item.get("symbol") or "").upper()
-                    for item in memberships
-                    if str(item.get("effective_date")) == target_date
-                ]
-                if symbols:
-                    return symbols
+            if symbols:
+                return symbols
 
         universe_name = self._normalized_universe_name(strategy)
         if universe_name in {"SP500", "S&P500", "SP-500"}:
@@ -8550,6 +9206,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         valuation_proxy_key = str(parameters.get("dynamic_investment_proxy_key") or "").strip().lower() or None
         dataset_snapshot_id = str(request_payload.get("dataset_snapshot_id") or DATASET_PRICE_SNAPSHOT_ID)
         direct_symbol_universe = self._uses_direct_symbol_universe(strategy)
+        requires_complete_symbol_coverage = str(strategy.get("strategy_type") or "").upper() == "ASSET_ALLOCATION"
         universe_snapshot_id = self._resolved_universe_snapshot_id(strategy, request_payload)
         supporting_dataset_id = DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID
         universe_membership_symbols: list[str] = []
@@ -8615,28 +9272,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
                         "message": "Snapshot data is not ready yet. Refresh snapshots before running this flow.",
                     }
                 }
-            memberships = self.market_data_repository.load_universe_memberships(universe_snapshot_id=universe_snapshot_id)
-            if memberships:
-                requested_end_date = str(request_payload.get("end_date") or date.today().isoformat())
-                eligible_dates = sorted(
-                    {
-                        str(item.get("effective_date"))
-                        for item in memberships
-                        if str(item.get("effective_date")) <= requested_end_date
-                    }
-                )
-                target_date = eligible_dates[-1] if eligible_dates else str(memberships[-1].get("effective_date"))
-                universe_membership_symbols = [
-                    str(item.get("symbol") or "").upper()
-                    for item in memberships
-                    if str(item.get("effective_date")) == target_date
-                ]
+            if symbols:
+                universe_membership_symbols = list(symbols)
 
         return {
             "benchmark_symbol": benchmark_symbol,
             "symbols": symbols,
             "dataset_snapshot_id": dataset_snapshot_id,
             "direct_symbol_universe": direct_symbol_universe,
+            "requires_complete_symbol_coverage": requires_complete_symbol_coverage,
             "universe_snapshot_id": universe_snapshot_id,
             "supporting_dataset_id": supporting_dataset_id,
             "price_dataset": price_dataset,
@@ -8664,6 +9308,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         symbols = [str(symbol).upper() for symbol in context.get("symbols") or []]
         dataset_snapshot_id = str(context.get("dataset_snapshot_id") or DATASET_PRICE_SNAPSHOT_ID)
         direct_symbol_universe = bool(context.get("direct_symbol_universe"))
+        requires_complete_symbol_coverage = bool(context.get("requires_complete_symbol_coverage"))
         universe_snapshot_id = context.get("universe_snapshot_id")
         supporting_dataset_id = context.get("supporting_dataset_id") or DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID
         price_dataset = dict(context.get("price_dataset") or {})
@@ -8677,6 +9322,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
         normalized_available_symbols = [str(symbol).upper() for symbol in available_symbols]
         blocking_items = []
         all_requested_symbols_available = len(normalized_available_symbols) == len(symbols)
+        missing_required_symbols = [
+            symbol
+            for symbol in symbols
+            if symbol not in set(normalized_available_symbols)
+        ]
         price_snapshot_ready_for_request = benchmark_trade_days > 0 and bool(normalized_available_symbols)
         universe_snapshot_ready_for_request = direct_symbol_universe or bool(universe_membership_symbols)
         valuation_latest_observation_date = str(
@@ -8706,6 +9356,22 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "blocker": {
                         "code": "INDEX_VALUATIONS_INCOMPLETE",
                         "message": "Index valuation history is required before dynamic DCA can be backtested.",
+                    },
+                }
+            )
+        if requires_complete_symbol_coverage and missing_required_symbols:
+            required_snapshots.append(
+                {
+                    "id": dataset_snapshot_id,
+                    "status": "INCOMPLETE",
+                    "blocker": {
+                        "code": "REQUEST_SYMBOLS_MISSING_PRICE_HISTORY",
+                        "target": dataset_snapshot_id,
+                        "message": (
+                            "Configured symbols are missing price history: "
+                            + ", ".join(missing_required_symbols)
+                            + "."
+                        ),
                     },
                 }
             )
@@ -8770,6 +9436,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "valuation_latest_observation_date": valuation_latest_observation_date,
             "universe_status": universe_status,
             "latest_trade_date": latest_trade_date,
+            "missing_symbols": missing_required_symbols,
         }
 
     def _snapshot_summary_from_coverage_context(self, context: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -8883,9 +9550,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
         refresh_price_snapshot = "price" in targets
         refresh_corporate_snapshot = "corporate" in targets
         refresh_index_valuations = "valuations" in targets
+        refresh_fundamentals = "fundamentals" in targets
+        refresh_sentiment = "sentiment" in targets
+        refresh_macro_derivatives = "macro_derivatives" in targets
+        refresh_phase2 = refresh_fundamentals or refresh_sentiment or refresh_macro_derivatives
         refresh_bond_fixed_income = "bond" in targets
         bond_fixed_income_refresh_stats: dict[str, Any] | None = None
         valuation_refresh_result: dict[str, Any] | None = None
+        phase2_refresh_stats: dict[str, dict[str, Any]] = {}
         seeded_legacy_snapshot = (
             self._seed_dataset_snapshots_from_legacy_cache(as_of=started_at) if refresh_market_data else None
         )
@@ -9010,6 +9682,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
             warnings.extend(str(item) for item in (bond_fixed_income_refresh_stats.get("warnings") or []) if item)
             errors.extend(str(item) for item in (bond_fixed_income_refresh_stats.get("errors") or []) if item)
 
+        if refresh_phase2:
+            phase2_refresh_stats = self._phase2_dataset_refresh_stats(
+                refresh_fundamentals=refresh_fundamentals,
+                refresh_sentiment=refresh_sentiment,
+                refresh_macro_derivatives=refresh_macro_derivatives,
+            )
+
         if refresh_universes and not refresh_market_data:
             grouped_universe_snapshots, memberships_by_snapshot, universe_warnings = self._run_universe_refresh_phase(
                 mode=mode,
@@ -9071,18 +9750,21 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 grouped_universe_snapshots=grouped_universe_snapshots,
                 memberships_by_snapshot=memberships_by_snapshot,
                 existing_universe_memberships=existing_universe_memberships,
+                phase2_dataset_stats=phase2_refresh_stats,
             )
             if bond_fixed_income_refresh_stats is not None:
                 refresh_stats["bond_fixed_income"] = bond_fixed_income_refresh_stats
             bond_updated_rows = int((bond_fixed_income_refresh_stats or {}).get("updated_row_count") or 0)
+            phase2_symbol_count = sum(int(item.get("updated_symbol_count") or 0) for item in phase2_refresh_stats.values())
+            phase2_row_count = sum(int(item.get("updated_row_count") or 0) for item in phase2_refresh_stats.values())
             job = self._build_snapshot_refresh_job(
                 job_id=job_id,
                 request=payload,
                 overview=preview_overview,
                 mode=mode,
                 targets=targets,
-                symbol_count=int(len((valuation_refresh_result or {}).get("coverage_rows") or [])) + bond_updated_rows,
-                row_count=int(len((valuation_refresh_result or {}).get("rows") or [])) + bond_updated_rows,
+                symbol_count=int(len((valuation_refresh_result or {}).get("coverage_rows") or [])) + phase2_symbol_count + bond_updated_rows,
+                row_count=int(len((valuation_refresh_result or {}).get("rows") or [])) + phase2_row_count + bond_updated_rows,
                 warnings=warnings,
                 errors=errors,
                 created_at=job_created_at,
@@ -9115,18 +9797,21 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 grouped_universe_snapshots=grouped_universe_snapshots,
                 memberships_by_snapshot=memberships_by_snapshot,
                 existing_universe_memberships=existing_universe_memberships,
+                phase2_dataset_stats=phase2_refresh_stats,
             )
             if bond_fixed_income_refresh_stats is not None:
                 refresh_stats["bond_fixed_income"] = bond_fixed_income_refresh_stats
             bond_updated_rows = int((bond_fixed_income_refresh_stats or {}).get("updated_row_count") or 0)
+            phase2_symbol_count = sum(int(item.get("updated_symbol_count") or 0) for item in phase2_refresh_stats.values())
+            phase2_row_count = sum(int(item.get("updated_row_count") or 0) for item in phase2_refresh_stats.values())
             job = self._build_snapshot_refresh_job(
                 job_id=job_id,
                 request=payload,
                 overview=preview_overview,
                 mode=mode,
                 targets=targets,
-                symbol_count=bond_updated_rows,
-                row_count=bond_updated_rows,
+                symbol_count=phase2_symbol_count + bond_updated_rows,
+                row_count=phase2_row_count + bond_updated_rows,
                 warnings=warnings,
                 errors=errors,
                 created_at=job_created_at,
@@ -9162,11 +9847,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
         symbols = set(selected_symbols)
         if not symbols:
             symbols.update(self._stored_snapshot_symbols())
-        symbols.update({"SPY", "QQQ"})
-        for strategy in self.list_strategies():
-            direct_symbol = self._direct_symbol_universe_symbol(strategy)
-            if direct_symbol:
-                symbols.add(direct_symbol)
+        extra_symbols = self._snapshot_progress_extra_symbols() | {"SPY", "QQQ"}
+        symbols.update(extra_symbols)
+        required_price_repair_symbols = self._required_price_repair_symbols(
+            refresh_price_snapshot=refresh_price_snapshot,
+            existing_price_coverage=existing_price_coverage,
+            existing_price_missing=self._snapshot_missing_symbols(existing_price_snapshot),
+        )
+        repair_symbol_limit_requested = payload.get("repair_symbol_limit") is not None
 
         latest_batch_symbols = set(symbols)
         repair_batch_symbols = set()
@@ -9181,23 +9869,27 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 for symbol in (selection_metadata.get("selected_missing_symbols") or [])
                 if str(symbol or "").strip()
             }
+            repair_batch_symbols.update(required_price_repair_symbols)
             if not latest_batch_symbols and not repair_batch_symbols:
                 latest_batch_symbols = set(symbols)
-
-        extras = {"SPY", "QQQ"}
-        for strategy in self.list_strategies():
-            direct_symbol = self._direct_symbol_universe_symbol(strategy)
-            if direct_symbol:
-                extras.add(direct_symbol)
-
-        if mode == "repair":
-            latest_batch_symbols.update(extras)
+            if repair_symbol_limit_requested and repair_batch_symbols:
+                skipped_extra_symbols = sorted(
+                    (extra_symbols - required_price_repair_symbols)
+                    - latest_batch_symbols
+                    - repair_batch_symbols
+                )
+                if skipped_extra_symbols:
+                    selection_metadata["skipped_latest_extra_symbols_due_to_repair_limit"] = skipped_extra_symbols
+            else:
+                latest_batch_symbols.update(extra_symbols - required_price_repair_symbols)
+            if required_price_repair_symbols:
+                selection_metadata["selected_required_strategy_symbols"] = sorted(required_price_repair_symbols)
         else:
-            latest_batch_symbols = set(symbols) | extras
+            latest_batch_symbols = set(symbols) | extra_symbols
 
         progress_target_symbols = latest_batch_symbols | repair_batch_symbols
         if not progress_target_symbols:
-            progress_target_symbols = set(symbols) | extras
+            progress_target_symbols = set(symbols) | extra_symbols
 
         existing_price_missing = self._snapshot_missing_symbols(existing_price_snapshot)
         existing_corporate_missing = self._snapshot_missing_symbols(existing_corporate_snapshot)
@@ -9639,10 +10331,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
             memberships_by_snapshot=memberships_by_snapshot,
             existing_universe_memberships=existing_universe_memberships,
             dataset_provider_telemetry=dataset_provider_telemetry,
+            phase2_dataset_stats=phase2_refresh_stats,
         )
         if bond_fixed_income_refresh_stats is not None:
             refresh_stats["bond_fixed_income"] = bond_fixed_income_refresh_stats
         bond_updated_rows = int((bond_fixed_income_refresh_stats or {}).get("updated_row_count") or 0)
+        phase2_symbol_count = sum(int(item.get("updated_symbol_count") or 0) for item in phase2_refresh_stats.values())
+        phase2_row_count = sum(int(item.get("updated_row_count") or 0) for item in phase2_refresh_stats.values())
         job = self._build_snapshot_refresh_job(
             job_id=job_id,
             request=payload,
@@ -9652,12 +10347,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
             symbol_count=(
                 len(coverage_rows)
                 + int(len((valuation_refresh_result or {}).get("coverage_rows") or []))
+                + phase2_symbol_count
                 + bond_updated_rows
             ),
             row_count=(
                 len(price_bars)
                 + len(corporate_actions)
                 + int(len((valuation_refresh_result or {}).get("rows") or []))
+                + phase2_row_count
                 + bond_updated_rows
             ),
             warnings=warnings,
@@ -9919,12 +10616,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
         requested_start = str(request_payload.get("start_date") or "").strip()
         if not requested_start:
             return None
-        parameters = self._engine_parameters(strategy)
-        if str(parameters.get("template_key") or parameters.get("strategy_type") or "").lower() != "momentum":
-            return requested_start
         try:
             start_date = _parse_iso_date(requested_start)
         except ValueError:
+            return requested_start
+        parameters = self._engine_parameters(strategy)
+        template_key = str(parameters.get("template_key") or parameters.get("strategy_type") or "").lower()
+        if template_key == "multi_factor":
+            return (start_date - timedelta(days=620)).isoformat()
+        if template_key != "momentum":
             return requested_start
         minimum_history = max(int(_coerce_float(parameters.get("lookback_days"), 0.0)), 0) + max(
             int(_coerce_float(parameters.get("skip_recent_days"), 0.0)),
@@ -10385,20 +11085,408 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "prepared_inputs": prepared_inputs,
         }
 
+    def _simulate_multi_factor_run_from_prepared_context(
+        self,
+        strategy: Mapping[str, Any],
+        request_payload: Mapping[str, Any],
+        prepared_context: Mapping[str, Any],
+        *,
+        multi_factor_precheck: Mapping[str, Any] | None = None,
+        recovery_context: Mapping[str, Any] | None = None,
+        checkpoint_bundle: Mapping[str, Any] | None = None,
+        checkpoint_callback: Callable[[Mapping[str, Any], Sequence[DailyPerformancePoint], Sequence[TradeRecord]], None] | None = None,
+    ) -> BacktestResult:
+        prepared_inputs = prepared_context["prepared_inputs"]
+        config = prepared_context.get("config") or BacktestConfig()
+        parameters = self._engine_parameters(strategy)
+        component_rows = self._multi_factor_component_rows(parameters)
+        factor_ids = [
+            str(row.get("factor_id") or "").strip()
+            for row in component_rows
+            if str(row.get("factor_id") or "").strip()
+        ]
+        symbol_series = prepared_inputs.symbol_series
+        benchmark_series = prepared_inputs.benchmark_series
+        master_dates = list(prepared_inputs.master_dates)
+        empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        if not symbol_series or not factor_ids:
+            return BacktestResult(metrics=empty_metrics, warnings=["No multi-factor symbols or factors available"])
+        requested_window_dates = _window_master_dates(master_dates, config)
+        if len(requested_window_dates) < 2:
+            return BacktestResult(metrics=empty_metrics, warnings=["Not enough benchmark dates for requested range"])
+
+        price_rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        index_by_symbol: dict[str, dict[str, int]] = {}
+        symbols = [str(symbol).upper() for symbol in symbol_series]
+        for symbol, series in symbol_series.items():
+            price_rows = [
+                {
+                    "date": bar.date,
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "adj_close": bar.adj_close,
+                    "volume": bar.volume,
+                }
+                for bar in series
+            ]
+            price_rows_by_symbol[str(symbol).upper()] = price_rows
+            index_by_symbol[str(symbol).upper()] = {
+                str(bar.date): idx
+                for idx, bar in enumerate(series)
+            }
+
+        try:
+            fundamental_rows_by_symbol = self.market_data_repository.load_dataset_fundamental_points(
+                DATASET_FUNDAMENTALS_SNAPSHOT_ID,
+                symbols,
+                end_date=str(config.end_date) if config.end_date else None,
+            )
+        except Exception:
+            fundamental_rows_by_symbol = {}
+
+        factor_by_id: dict[str, dict[str, Any]] = {}
+        factor_series_by_id: dict[str, dict[str, list[float | None]]] = {}
+        for factor_id in factor_ids:
+            try:
+                factor = dict(self.get_factor(factor_id))
+            except Exception:
+                factor = {}
+            factor_by_id[factor_id] = factor
+            expression = str(factor.get("expression") or "").strip()
+            factor_series_by_id[factor_id] = {}
+            for symbol in symbols:
+                price_rows = price_rows_by_symbol.get(symbol, [])
+                if not expression:
+                    factor_series_by_id[factor_id][symbol] = [None] * len(price_rows)
+                    continue
+                factor_series_by_id[factor_id][symbol] = self._factor_expression_series(
+                    expression,
+                    price_rows,
+                    fundamental_rows_by_symbol.get(symbol),
+                )
+
+        holding_count = max(int(parameters.get("holding_count") or parameters.get("top_n") or 5), 1)
+        lookback_days = max(int(parameters.get("lookback_days") or parameters.get("signal_lookback_days") or 252), 5)
+        skip_recent_days = max(int(parameters.get("skip_recent_days") or 0), 0)
+        hold_rank_threshold = max(int(parameters.get("hold_rank_threshold") or holding_count), 1)
+        weighting_method = str(parameters.get("weighting_method") or "score_weighted").strip().lower()
+        frequency = str(parameters.get("rebalance_frequency") or "monthly").lower()
+        anchor_dates = _parse_rebalance_anchor_dates(parameters.get("rebalance_anchor_dates"))
+        minimum_history = lookback_days + skip_recent_days
+        if len(master_dates) < minimum_history + 2:
+            return BacktestResult(metrics=empty_metrics, warnings=["Not enough benchmark dates for requested lookback"])
+        first_execution_index = _first_date_index_on_or_after(master_dates, str(config.start_date) if config.start_date else None)
+        if first_execution_index >= len(master_dates):
+            return BacktestResult(metrics=empty_metrics, warnings=["Not enough benchmark dates for requested range"])
+        first_signal_index = max(minimum_history, first_execution_index - 1)
+        if first_signal_index >= len(master_dates) - 1:
+            return BacktestResult(metrics=empty_metrics, warnings=["Not enough benchmark dates for requested lookback"])
+
+        live_execution_dates = [
+            master_dates[index + 1]
+            for index in range(first_signal_index, len(master_dates) - 1)
+            if not config.start_date or master_dates[index + 1] >= str(config.start_date)
+        ]
+        if not live_execution_dates:
+            return BacktestResult(metrics=empty_metrics, warnings=["Not enough benchmark dates for requested range"])
+
+        rebalance_indexes = sorted(
+            {
+                first_signal_index,
+                *[
+                    idx
+                    for idx in _rebalance_keys(master_dates, frequency, anchor_dates)
+                    if idx >= first_signal_index
+                    and idx < len(master_dates) - 1
+                    and (not config.start_date or master_dates[idx + 1] >= str(config.start_date))
+                ],
+            }
+        )
+        benchmark_index = {bar.date: idx for idx, bar in enumerate(benchmark_series)}
+        universe_name = str(strategy.get("universe_name") or request_payload.get("universe") or "SP500").strip() or "SP500"
+        neutralization_enabled = bool((parameters.get("neutralization") or {}).get("enabled"))
+        industry_by_date: dict[str, dict[str, str]] = {}
+        if neutralization_enabled and rebalance_indexes:
+            industry_by_date = self._precompute_factor_industry_mappings(
+                symbols,
+                universe_name,
+                [master_dates[index] for index in rebalance_indexes if 0 <= index < len(master_dates)],
+            )
+
+        checkpoint_state = dict((checkpoint_bundle or {}).get("state") or {})
+        resumed_daily_points = [
+            DailyPerformancePoint(**dict(item))
+            for item in list((checkpoint_bundle or {}).get("daily_performance") or [])
+            if isinstance(item, Mapping)
+        ]
+        resumed_trades = [
+            TradeRecord(**dict(item))
+            for item in list((checkpoint_bundle or {}).get("trades") or [])
+            if isinstance(item, Mapping)
+        ]
+        target_weights = {
+            str(symbol): float(weight)
+            for symbol, weight in dict(checkpoint_state.get("target_weights") or {}).items()
+            if float(weight) > 0
+        }
+        equity = _coerce_float(
+            checkpoint_state.get("equity"),
+            resumed_daily_points[-1].equity if resumed_daily_points else config.initial_equity,
+        )
+        equity_curve = [config.initial_equity, *[point.equity for point in resumed_daily_points]]
+        returns = [point.strategy_return for point in resumed_daily_points]
+        oos_cut = max(int(len(live_execution_dates) * (1.0 - config.oos_fraction)), 1)
+        daily_points = list(resumed_daily_points)
+        trades = list(resumed_trades)
+        total_turnover = _coerce_float(checkpoint_state.get("total_turnover"))
+        if total_turnover <= 0 and trades:
+            total_turnover = sum(abs(item.weight_after - item.weight_before) for item in trades)
+        latest_rebalance_turnover = _coerce_float(checkpoint_state.get("latest_rebalance_turnover"))
+        rebalances = set(rebalance_indexes)
+        live_point_index = int(checkpoint_state.get("live_point_index") or len(daily_points))
+        total_steps = len(live_execution_dates)
+        start_master_index = max(int(checkpoint_state.get("next_master_index") or first_signal_index), first_signal_index)
+
+        for master_index in range(start_master_index, len(master_dates) - 1):
+            as_of_date = master_dates[master_index]
+            execution_date = master_dates[master_index + 1]
+            if config.start_date and execution_date < str(config.start_date):
+                continue
+            if master_index in rebalances:
+                component_scores: dict[str, dict[str, float | None]] = {}
+                for row in component_rows:
+                    factor_id = str(row.get("factor_id") or "").strip()
+                    direction = self._factor_score_direction(
+                        row.get("direction") or factor_by_id.get(factor_id, {}).get("direction")
+                    )
+                    raw_values = {}
+                    for symbol in symbols:
+                        position_index = index_by_symbol.get(symbol, {}).get(as_of_date)
+                        if position_index is None:
+                            continue
+                        factor_series = factor_series_by_id.get(factor_id, {}).get(symbol) or []
+                        if position_index >= len(factor_series):
+                            continue
+                        raw_values[symbol] = factor_series[position_index]
+                    component_scores[factor_id] = normalize_cross_section(
+                        raw_values,
+                        direction=direction,
+                    ).scores
+
+                combined_scores: dict[str, float | None] = {}
+                for symbol in symbols:
+                    combined = 0.0
+                    available = 0
+                    for row in component_rows:
+                        factor_id = str(row.get("factor_id") or "").strip()
+                        score = component_scores.get(factor_id, {}).get(symbol)
+                        if score is None:
+                            continue
+                        combined += _coerce_float(row.get("normalized_weight"), 0.0) * float(score)
+                        available += 1
+                    combined_scores[symbol] = round(combined, 6) if available else None
+
+                if neutralization_enabled:
+                    if as_of_date not in industry_by_date:
+                        industry_by_date[as_of_date] = self._factor_industry_mapping(symbols, universe_name, as_of_date)
+                    final_scores = neutralize_by_industry(
+                        combined_scores,
+                        enabled=True,
+                        industry_by_symbol=industry_by_date.get(as_of_date) or None,
+                    ).values
+                else:
+                    final_scores = combined_scores
+
+                scored = [
+                    (float(score), symbol)
+                    for symbol, score in final_scores.items()
+                    if score is not None and math.isfinite(float(score))
+                ]
+                scored.sort(reverse=True)
+                rebalance_turnover = 0.0
+                retained_positions: list[tuple[float, str]] = []
+                current_symbols = {
+                    symbol
+                    for symbol, weight in target_weights.items()
+                    if weight > 1e-9
+                }
+                if current_symbols:
+                    for rank, entry in enumerate(scored, start=1):
+                        score, symbol = entry
+                        if symbol in current_symbols and rank <= hold_rank_threshold:
+                            retained_positions.append((score, symbol))
+                selected_positions = list(retained_positions[:holding_count])
+                selected_symbols = {symbol for _, symbol in selected_positions}
+                for score, symbol in scored:
+                    if symbol in selected_symbols:
+                        continue
+                    selected_positions.append((score, symbol))
+                    selected_symbols.add(symbol)
+                    if len(selected_positions) >= holding_count:
+                        break
+                selected_positions = selected_positions[:holding_count]
+                next_weights = _momentum_target_weights(selected_positions, weighting_method)
+                all_symbols = set(target_weights) | set(next_weights)
+                for symbol in sorted(all_symbols):
+                    previous_weight = target_weights.get(symbol, 0.0)
+                    next_weight = next_weights.get(symbol, 0.0)
+                    if abs(previous_weight - next_weight) <= 1e-9:
+                        continue
+                    price = 0.0
+                    series = symbol_series.get(symbol, [])
+                    position_index = index_by_symbol.get(symbol, {}).get(execution_date)
+                    if position_index is not None and position_index < len(series):
+                        price = series[position_index].open
+                    trades.append(
+                        TradeRecord(
+                            date=execution_date,
+                            symbol=symbol,
+                            action="buy" if next_weight > previous_weight else "sell",
+                            price=price,
+                            weight_before=previous_weight,
+                            weight_after=next_weight,
+                            reason=f"multi_factor:{frequency}",
+                        )
+                    )
+                    rebalance_turnover += abs(previous_weight - next_weight)
+                total_turnover += rebalance_turnover
+                latest_rebalance_turnover = rebalance_turnover
+                target_weights = next_weights
+
+            strategy_return = 0.0
+            for symbol, weight in target_weights.items():
+                series = symbol_series.get(symbol, [])
+                position_index = index_by_symbol.get(symbol, {}).get(execution_date)
+                if position_index is None or position_index == 0:
+                    continue
+                bar = series[position_index]
+                previous_bar = series[position_index - 1]
+                if previous_bar.adj_close <= 0:
+                    continue
+                strategy_return += weight * (bar.adj_close / previous_bar.adj_close - 1.0)
+            if target_weights and trades and execution_date == trades[-1].date:
+                strategy_return -= (config.transaction_cost_bps / 10000.0) * latest_rebalance_turnover
+
+            benchmark_return = 0.0
+            benchmark_pos = benchmark_index.get(execution_date)
+            if benchmark_pos is not None and benchmark_pos > 0:
+                current = benchmark_series[benchmark_pos].adj_close
+                prior = benchmark_series[benchmark_pos - 1].adj_close
+                if prior > 0:
+                    benchmark_return = current / prior - 1.0
+
+            equity *= 1.0 + strategy_return
+            returns.append(strategy_return)
+            equity_curve.append(equity)
+            peak = max(equity_curve)
+            drawdown = equity / peak - 1.0 if peak else 0.0
+            daily_points.append(
+                DailyPerformancePoint(
+                    date=execution_date,
+                    equity=equity,
+                    strategy_return=strategy_return,
+                    benchmark_return=benchmark_return,
+                    drawdown=drawdown,
+                    exposure=sum(target_weights.values()),
+                    universe_size=len(target_weights),
+                    in_sample=live_point_index < oos_cut,
+                )
+            )
+            live_point_index += 1
+            if (
+                checkpoint_callback is not None
+                and (
+                    len(daily_points) % BACKTEST_CHECKPOINT_INTERVAL_STEPS == 0
+                    or master_index >= len(master_dates) - 2
+                )
+            ):
+                checkpoint_callback(
+                    {
+                        "checkpoint_kind": "multi_factor",
+                        "next_master_index": master_index + 1,
+                        "live_point_index": live_point_index,
+                        "equity": equity,
+                        "target_weights": dict(target_weights),
+                        "total_turnover": total_turnover,
+                        "latest_rebalance_turnover": latest_rebalance_turnover,
+                        "persisted_step_count": len(daily_points),
+                        "total_step_count": max(total_steps, 1),
+                        "progress_pct": min(100, max(0, int(round((len(daily_points) / max(total_steps, 1)) * 100)))),
+                        "current_stage": f"Simulating multi-factor backtest ({len(daily_points)}/{max(total_steps, 1)})",
+                        "latest_update": f"Processed {len(daily_points)}/{max(total_steps, 1)} multi-factor steps.",
+                    },
+                    daily_points,
+                    trades,
+                )
+
+        total_return, cagr, volatility, sharpe, max_drawdown = _curve_metrics(equity_curve, returns)
+        winning_days = sum(1 for value in returns if value > 0)
+        oos_returns = [point.strategy_return for point in daily_points if not point.in_sample]
+        oos_curve = [1.0]
+        for value in oos_returns:
+            oos_curve.append(oos_curve[-1] * (1.0 + value))
+        _, oos_cagr, _, oos_sharpe, _ = _curve_metrics(oos_curve, oos_returns)
+        coverage_days = sum(1 for point in daily_points if point.universe_size > 0)
+        coverage_ratio = coverage_days / len(daily_points) if daily_points else 0.0
+        metrics = BacktestMetrics(
+            total_return=total_return,
+            cagr=cagr,
+            annualized_volatility=volatility,
+            sharpe=sharpe,
+            max_drawdown=max_drawdown,
+            turnover=total_turnover / max(len(daily_points), 1),
+            win_rate=winning_days / max(len(returns), 1),
+            oos_cagr=oos_cagr,
+            oos_sharpe=oos_sharpe,
+        )
+        return BacktestResult(
+            metrics=metrics,
+            daily_performance=daily_points,
+            trades=trades,
+            warnings=[],
+            effective_date=daily_points[0].date if daily_points else None,
+            oos_start_date=daily_points[oos_cut].date if len(daily_points) > oos_cut else None,
+            coverage_ratio=coverage_ratio,
+            coverage_days=coverage_days,
+        )
+
     def _simulate_run_from_prepared_context(
         self,
         strategy: Mapping[str, Any],
         request_payload: Mapping[str, Any],
         prepared_context: Mapping[str, Any],
+        *,
+        multi_factor_precheck: Mapping[str, Any] | None = None,
+        recovery_context: Mapping[str, Any] | None = None,
+        checkpoint_bundle: Mapping[str, Any] | None = None,
+        checkpoint_callback: Callable[[Mapping[str, Any], Sequence[DailyPerformancePoint], Sequence[TradeRecord]], None] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
         benchmark_symbol = str(prepared_context.get("benchmark_symbol") or strategy.get("benchmark_symbol") or "SPY").upper()
         symbols = list(prepared_context.get("symbols") or self._resolve_universe_symbols(strategy, request_payload))
         snapshot_summary = dict(prepared_context.get("snapshot_summary") or self._snapshot_summary(strategy, request_payload))
-        result = run_backtest_prepared(
-            prepared_context["prepared_inputs"],
-            config=prepared_context.get("config"),
-            parameters=self._engine_parameters(strategy),
-        )
+        if str(strategy.get("strategy_type") or "").upper() == "MULTI_FACTOR":
+            result = self._simulate_multi_factor_run_from_prepared_context(
+                strategy,
+                request_payload,
+                prepared_context,
+                multi_factor_precheck=multi_factor_precheck,
+                recovery_context=recovery_context,
+                checkpoint_bundle=checkpoint_bundle,
+                checkpoint_callback=checkpoint_callback,
+            )
+        else:
+            result = run_backtest_prepared(
+                prepared_context["prepared_inputs"],
+                config=prepared_context.get("config"),
+                parameters=self._engine_parameters(strategy),
+                resume_state=(checkpoint_bundle or {}).get("state"),
+                resume_daily_performance=(checkpoint_bundle or {}).get("daily_performance"),
+                resume_trades=(checkpoint_bundle or {}).get("trades"),
+                checkpoint_callback=checkpoint_callback,
+                checkpoint_interval_steps=BACKTEST_CHECKPOINT_INTERVAL_STEPS,
+            )
 
         benchmark_equity = 100.0
         chart_series: list[dict[str, Any]] = []
@@ -10428,6 +11516,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
         warnings = _merge_runtime_backtest_warnings(warnings, strategy.get("parameters") or {})
         if result.coverage_ratio < 0.8:
             warnings.append("Coverage below 80%")
+        recovery_warning = str((recovery_context or {}).get("warning") or "").strip()
+        if recovery_warning and recovery_warning not in warnings:
+            warnings.append(recovery_warning)
         summary = metric_summary(asdict(result.metrics))
         preview = {
             "strategy_id": strategy["id"],
@@ -10453,14 +11544,32 @@ class RealBacktestPlatformService(BacktestPlatformService):
             },
             "blind_test_zone": {"label": "Blind Test Zone", "oos_start_date": result.oos_start_date},
         }
-        multi_factor_precheck = self._build_multi_factor_precheck(strategy, request_payload)
-        if multi_factor_precheck is not None:
-            preview["multi_factor_precheck"] = multi_factor_precheck
+        resolved_multi_factor_precheck = (
+            dict(multi_factor_precheck)
+            if isinstance(multi_factor_precheck, Mapping)
+            else self._build_multi_factor_precheck(strategy, request_payload)
+        )
+        if resolved_multi_factor_precheck is not None:
+            preview["multi_factor_precheck"] = resolved_multi_factor_precheck
+        preview = self._apply_backtest_recovery_context_to_preview(preview, recovery_context)
         return preview, chart_series, trades
 
-    def _simulate_run(self, strategy: Mapping[str, Any], request_payload: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    def _simulate_run(
+        self,
+        strategy: Mapping[str, Any],
+        request_payload: Mapping[str, Any],
+        *,
+        multi_factor_precheck: Mapping[str, Any] | None = None,
+        recovery_context: Mapping[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
         prepared_context = self._prepare_backtest_run_context(strategy, request_payload)
-        return self._simulate_run_from_prepared_context(strategy, request_payload, prepared_context)
+        return self._simulate_run_from_prepared_context(
+            strategy,
+            request_payload,
+            prepared_context,
+            multi_factor_precheck=multi_factor_precheck,
+            recovery_context=recovery_context,
+        )
 
     def _lightweight_preview_symbols(self, strategy: Mapping[str, Any]) -> list[str]:
         allocation_symbols = self._asset_allocation_symbols_from_parameters(strategy.get("parameters") or {})
@@ -10531,6 +11640,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "symbols": symbols,
                 "dataset_snapshot_id": dataset_snapshot_id,
                 "direct_symbol_universe": direct_symbol_universe,
+                "requires_complete_symbol_coverage": str(strategy.get("strategy_type") or "").upper() == "ASSET_ALLOCATION",
                 "universe_snapshot_id": universe_snapshot_id,
                 "supporting_dataset_id": supporting_dataset_id,
                 "price_dataset": price_dataset,
@@ -10636,6 +11746,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
         self,
         strategy: Mapping[str, Any],
         request_payload: Mapping[str, Any],
+        *,
+        multi_factor_precheck: Mapping[str, Any] | None = None,
+        recovery_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         parameter_snapshot = dict(
             self._parameter_snapshot_for_version(strategy, request_payload.get("parameter_version_id"))
@@ -10665,10 +11778,391 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "universe_snapshot_id": request_payload.get("universe_snapshot_id"),
             },
         }
-        multi_factor_precheck = self._build_multi_factor_precheck(strategy, request_payload)
-        if multi_factor_precheck is not None:
-            preview["multi_factor_precheck"] = multi_factor_precheck
-        return preview
+        resolved_multi_factor_precheck = (
+            dict(multi_factor_precheck)
+            if isinstance(multi_factor_precheck, Mapping)
+            else self._build_multi_factor_precheck(strategy, request_payload)
+        )
+        if resolved_multi_factor_precheck is not None:
+            preview["multi_factor_precheck"] = resolved_multi_factor_precheck
+        return self._apply_backtest_recovery_context_to_preview(preview, recovery_context)
+
+    def _build_backtest_restart_recovery_context(
+        self,
+        previous_status: Any,
+        *,
+        previous_updated_at: Any = None,
+        restarted_at: str | None = None,
+    ) -> dict[str, Any]:
+        recovered_at = str(restarted_at or iso_now())
+        return {
+            "mode": "startup_restart_recovery",
+            "warning": BACKTEST_RESTART_RECOVERY_WARNING,
+            "restarted_from_status": str(previous_status or "RUNNING"),
+            "restarted_at": recovered_at,
+            "previous_updated_at": str(previous_updated_at or "").strip() or None,
+            "restarts_from_beginning": True,
+        }
+
+    def _apply_backtest_recovery_context_to_preview(
+        self,
+        preview: Mapping[str, Any],
+        recovery_context: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(recovery_context, Mapping) or not recovery_context:
+            return dict(preview)
+        preview_payload = dict(preview)
+        warning = str(recovery_context.get("warning") or "").strip()
+        warnings = [
+            str(item).strip()
+            for item in preview_payload.get("warnings") or []
+            if str(item).strip()
+        ]
+        if warning and warning not in warnings:
+            warnings.append(warning)
+        preview_payload["warnings"] = warnings
+        environment_summary = dict(preview_payload.get("environment_summary") or {})
+        environment_summary["recovery"] = {
+            "mode": str(recovery_context.get("mode") or "startup_restart_recovery"),
+            "restarted_from_status": str(recovery_context.get("restarted_from_status") or "RUNNING"),
+            "restarted_at": str(recovery_context.get("restarted_at") or ""),
+            "previous_updated_at": recovery_context.get("previous_updated_at"),
+            "restarts_from_beginning": bool(recovery_context.get("restarts_from_beginning", True)),
+            "resumed_from_checkpoint": bool(recovery_context.get("resumed_from_checkpoint", False)),
+            "persisted_step_count": int(recovery_context.get("persisted_step_count") or 0),
+            "total_step_count": int(recovery_context.get("total_step_count") or 0),
+            "progress_pct": int(recovery_context.get("progress_pct") or 0),
+            "current_stage": recovery_context.get("current_stage"),
+            "latest_update": recovery_context.get("latest_update"),
+        }
+        preview_payload["environment_summary"] = environment_summary
+        return preview_payload
+
+    def _backtest_runner_claim_key(self, run_id: str) -> str:
+        return f"{BACKTEST_RUNNER_CLAIM_PREFIX}{run_id}"
+
+    def _backtest_runner_claim_payload(self, run_id: str, *, heartbeat_at: str | None = None) -> dict[str, Any]:
+        return {
+            "run_id": run_id,
+            "owner_id": self._backtest_runner_owner_id,
+            "pid": os.getpid(),
+            "heartbeat_at": heartbeat_at or iso_now(),
+        }
+
+    def _backtest_runner_process_is_active(self, pid: Any) -> bool:
+        process_id = int(pid or 0)
+        if process_id <= 0:
+            return False
+        if process_id == os.getpid():
+            return True
+        try:
+            os.kill(process_id, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+
+    def _backtest_runner_claim_is_stale(self, heartbeat_at: Any, *, pid: Any = None) -> bool:
+        if pid is not None and not self._backtest_runner_process_is_active(pid):
+            return True
+        heartbeat_text = str(heartbeat_at or "").strip()
+        if not heartbeat_text:
+            return True
+        try:
+            heartbeat_value = datetime.fromisoformat(heartbeat_text.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        return (datetime.now(timezone.utc) - heartbeat_value).total_seconds() >= BACKTEST_RUNNER_LEASE_SECONDS
+
+    def _try_acquire_backtest_runner_claim(self, run_id: str) -> bool:
+        claim_key = self._backtest_runner_claim_key(run_id)
+        heartbeat_at = iso_now()
+        claim_payload = self._backtest_runner_claim_payload(run_id, heartbeat_at=heartbeat_at)
+        with self.storage.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT state_json, updated_at FROM app_runtime_state WHERE state_key = ?",
+                (claim_key,),
+            ).fetchone()
+            existing_state = loads(row["state_json"], {}) if row else {}
+            existing_owner_id = str(existing_state.get("owner_id") or "").strip()
+            existing_heartbeat_at = existing_state.get("heartbeat_at") or (row["updated_at"] if row else None)
+            if (
+                existing_owner_id
+                and existing_owner_id != self._backtest_runner_owner_id
+                and not self._backtest_runner_claim_is_stale(
+                    existing_heartbeat_at,
+                    pid=existing_state.get("pid"),
+                )
+            ):
+                return False
+            conn.execute(
+                """
+                INSERT INTO app_runtime_state (state_key, state_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(state_key) DO UPDATE SET
+                    state_json = excluded.state_json,
+                    updated_at = excluded.updated_at
+                """,
+                (claim_key, dumps(claim_payload), heartbeat_at),
+            )
+        return True
+
+    def _refresh_backtest_runner_claim(self, run_id: str) -> bool:
+        claim_key = self._backtest_runner_claim_key(run_id)
+        heartbeat_at = iso_now()
+        with self.storage.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT state_json FROM app_runtime_state WHERE state_key = ?",
+                (claim_key,),
+            ).fetchone()
+            if not row:
+                return False
+            claim_state = loads(row["state_json"], {})
+            if str(claim_state.get("owner_id") or "").strip() != self._backtest_runner_owner_id:
+                return False
+            claim_payload = {
+                **claim_state,
+                "run_id": run_id,
+                "owner_id": self._backtest_runner_owner_id,
+                "pid": os.getpid(),
+                "heartbeat_at": heartbeat_at,
+            }
+            conn.execute(
+                "UPDATE app_runtime_state SET state_json = ?, updated_at = ? WHERE state_key = ?",
+                (dumps(claim_payload), heartbeat_at, claim_key),
+            )
+        return True
+
+    def _release_backtest_runner_claim(self, run_id: str) -> None:
+        claim_key = self._backtest_runner_claim_key(run_id)
+        with self.storage.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT state_json FROM app_runtime_state WHERE state_key = ?",
+                (claim_key,),
+            ).fetchone()
+            if not row:
+                return
+            claim_state = loads(row["state_json"], {})
+            if str(claim_state.get("owner_id") or "").strip() != self._backtest_runner_owner_id:
+                return
+            conn.execute("DELETE FROM app_runtime_state WHERE state_key = ?", (claim_key,))
+
+    def _clear_backtest_runner_claim(self, run_id: str) -> None:
+        self.storage.execute(
+            "DELETE FROM app_runtime_state WHERE state_key = ?",
+            (self._backtest_runner_claim_key(run_id),),
+        )
+
+    def _load_backtest_checkpoint_bundle(self, run_id: str) -> dict[str, Any] | None:
+        row = self.storage.fetch_one(
+            "SELECT * FROM backtest_run_checkpoints WHERE run_id = ?",
+            (run_id,),
+        )
+        if row is None:
+            return None
+        chunk_rows = self.storage.fetch_all(
+            """
+            SELECT chunk_index, daily_performance_json, trades_json
+            FROM backtest_run_checkpoint_chunks
+            WHERE run_id = ?
+            ORDER BY chunk_index ASC
+            """,
+            (run_id,),
+        )
+        daily_performance: list[dict[str, Any]] = []
+        trades: list[dict[str, Any]] = []
+        for chunk_row in chunk_rows:
+            daily_performance.extend(list(loads(chunk_row.get("daily_performance_json"), [])))
+            trades.extend(list(loads(chunk_row.get("trades_json"), [])))
+        return {
+            "run_id": run_id,
+            "stage": str(row.get("stage") or "PREPARING"),
+            "state": dict(loads(row.get("state_json"), {})),
+            "daily_performance": daily_performance,
+            "trades": trades,
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+        }
+
+    def _persist_backtest_checkpoint(
+        self,
+        run_id: str,
+        *,
+        stage: str,
+        state: Mapping[str, Any],
+        daily_performance: Sequence[DailyPerformancePoint | Mapping[str, Any]] | None = None,
+        trades: Sequence[TradeRecord | Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        now = iso_now()
+        daily_rows = [
+            asdict(item) if isinstance(item, DailyPerformancePoint) else dict(item)
+            for item in (daily_performance or [])
+        ]
+        trade_rows = [
+            asdict(item) if isinstance(item, TradeRecord) else dict(item)
+            for item in (trades or [])
+        ]
+        with self.storage.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM backtest_run_checkpoints WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            existing_state = loads(row["state_json"], {}) if row else {}
+            persisted_point_count = int(existing_state.get("persisted_point_count") or 0)
+            persisted_trade_count = int(existing_state.get("persisted_trade_count") or 0)
+            next_point_rows = daily_rows[persisted_point_count:]
+            next_trade_rows = trade_rows[persisted_trade_count:]
+            if next_point_rows or next_trade_rows:
+                chunk_row = conn.execute(
+                    "SELECT COALESCE(MAX(chunk_index), -1) AS max_chunk_index FROM backtest_run_checkpoint_chunks WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                max_chunk_index = chunk_row["max_chunk_index"] if chunk_row else -1
+                next_chunk_index = (int(max_chunk_index) if max_chunk_index not in (None, "") else -1) + 1
+                conn.execute(
+                    """
+                    INSERT INTO backtest_run_checkpoint_chunks (
+                        run_id,
+                        chunk_index,
+                        daily_performance_json,
+                        trades_json,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        next_chunk_index,
+                        dumps(next_point_rows),
+                        dumps(next_trade_rows),
+                        now,
+                    ),
+                )
+            state_payload = dict(state)
+            state_payload["persisted_point_count"] = len(daily_rows)
+            state_payload["persisted_trade_count"] = len(trade_rows)
+            state_payload.setdefault("persisted_step_count", len(daily_rows))
+            created_at = str(row["created_at"]) if row else now
+            conn.execute(
+                """
+                INSERT INTO backtest_run_checkpoints (run_id, stage, state_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    stage = excluded.stage,
+                    state_json = excluded.state_json,
+                    updated_at = excluded.updated_at
+                """,
+                (run_id, stage, dumps(state_payload), created_at, now),
+            )
+        return {
+            "run_id": run_id,
+            "stage": stage,
+            "state": state_payload,
+            "updated_at": now,
+        }
+
+    def _clear_backtest_checkpoint(self, run_id: str) -> None:
+        with self.storage.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM backtest_run_checkpoint_chunks WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM backtest_run_checkpoints WHERE run_id = ?", (run_id,))
+
+    def _build_backtest_checkpoint_recovery_context(
+        self,
+        previous_status: Any,
+        checkpoint_bundle: Mapping[str, Any],
+        *,
+        previous_updated_at: Any = None,
+        restarted_at: str | None = None,
+    ) -> dict[str, Any]:
+        checkpoint_state = dict(checkpoint_bundle.get("state") or {})
+        return {
+            "mode": "checkpoint_resume",
+            "restarted_from_status": str(previous_status or "INTERRUPTED"),
+            "restarted_at": str(restarted_at or iso_now()),
+            "previous_updated_at": str(previous_updated_at or "").strip() or None,
+            "restarts_from_beginning": False,
+            "resumed_from_checkpoint": True,
+            "persisted_step_count": int(checkpoint_state.get("persisted_step_count") or 0),
+            "total_step_count": int(checkpoint_state.get("total_step_count") or 0),
+            "progress_pct": int(checkpoint_state.get("progress_pct") or 0),
+            "current_stage": checkpoint_state.get("current_stage"),
+            "latest_update": checkpoint_state.get("latest_update"),
+        }
+
+    def _backtest_next_step_index(self, checkpoint_state: Mapping[str, Any] | None) -> int:
+        state = dict(checkpoint_state or {})
+        return int(
+            state.get("next_step_index")
+            or state.get("next_master_index")
+            or state.get("next_index")
+            or 0
+        )
+
+    def _build_backtest_progress_request_payload(
+        self,
+        request_payload: Mapping[str, Any],
+        *,
+        status: str,
+        checkpoint_state: Mapping[str, Any] | None = None,
+        resume_ready: bool = False,
+        interrupted_reason: str | None = None,
+    ) -> dict[str, Any]:
+        state = dict(checkpoint_state or {})
+        payload = dict(request_payload)
+        payload["status"] = status
+        payload["progress_pct"] = int(state.get("progress_pct") or 0)
+        payload["persisted_step_count"] = int(
+            state.get("persisted_step_count")
+            or state.get("completed_steps")
+            or 0
+        )
+        payload["total_step_count"] = int(state.get("total_step_count") or 0)
+        payload["next_step_index"] = self._backtest_next_step_index(state)
+        payload["current_stage"] = state.get("current_stage")
+        payload["latest_update"] = state.get("latest_update")
+        payload["resume_ready"] = bool(resume_ready)
+        payload["interrupted_reason"] = interrupted_reason
+        return payload
+
+    def _apply_backtest_checkpoint_state_to_preview(
+        self,
+        preview: Mapping[str, Any],
+        checkpoint_state: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        state = dict(checkpoint_state or {})
+        if not state:
+            return dict(preview)
+        preview_payload = dict(preview)
+        preview_payload["progress_pct"] = int(state.get("progress_pct") or 0)
+        preview_payload["persisted_step_count"] = int(
+            state.get("persisted_step_count")
+            or state.get("completed_steps")
+            or 0
+        )
+        preview_payload["total_step_count"] = int(state.get("total_step_count") or 0)
+        preview_payload["next_step_index"] = self._backtest_next_step_index(state)
+        if state.get("current_stage") is not None:
+            preview_payload["current_stage"] = state.get("current_stage")
+        if state.get("latest_update") is not None:
+            preview_payload["latest_update"] = state.get("latest_update")
+        environment_summary = dict(preview_payload.get("environment_summary") or {})
+        environment_summary["execution_progress"] = {
+            "progress_pct": preview_payload["progress_pct"],
+            "persisted_step_count": preview_payload["persisted_step_count"],
+            "total_step_count": preview_payload["total_step_count"],
+            "next_step_index": preview_payload["next_step_index"],
+            "current_stage": preview_payload.get("current_stage"),
+            "latest_update": preview_payload.get("latest_update"),
+        }
+        preview_payload["environment_summary"] = environment_summary
+        return preview_payload
 
     def _build_backtest_run_row(
         self,
@@ -10776,9 +12270,16 @@ class RealBacktestPlatformService(BacktestPlatformService):
         strategy: Mapping[str, Any],
         request_payload: Mapping[str, Any],
         created_at: str,
+        multi_factor_precheck: Mapping[str, Any] | None = None,
+        recovery_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         effective_strategy = self._strategy_for_run(strategy, request_payload)
-        preview, chart_series, trades = self._simulate_run(effective_strategy, request_payload)
+        preview, chart_series, trades = self._simulate_run(
+            effective_strategy,
+            request_payload,
+            multi_factor_precheck=multi_factor_precheck,
+            recovery_context=recovery_context,
+        )
         completed_at = iso_now()
         metrics = preview["metrics"]
         trade_audit = self._build_trade_audits(
@@ -10824,16 +12325,46 @@ class RealBacktestPlatformService(BacktestPlatformService):
         strategy: Mapping[str, Any],
         request_payload: Mapping[str, Any],
         created_at: str,
+        multi_factor_precheck: Mapping[str, Any] | None = None,
+        recovery_context: Mapping[str, Any] | None = None,
+        claim_acquired: bool = False,
     ) -> None:
+        if not claim_acquired and not self._try_acquire_backtest_runner_claim(run_id):
+            return
+        effective_strategy = self._strategy_for_run(strategy, request_payload)
+        checkpoint_bundle = self._load_backtest_checkpoint_bundle(run_id)
+        checkpoint_state = dict((checkpoint_bundle or {}).get("state") or {})
+        if not checkpoint_state:
+            checkpoint_state = {
+                "progress_pct": 0,
+                "persisted_step_count": 0,
+                "total_step_count": 0,
+                "next_step_index": 0,
+                "current_stage": "Preparing backtest inputs",
+                "latest_update": "Loading market data and snapshot context.",
+            }
         running_at = iso_now()
-        running_preview = self._build_pending_backtest_preview(strategy, request_payload)
+        running_request_payload = self._build_backtest_progress_request_payload(
+            request_payload,
+            status="RUNNING",
+            checkpoint_state=checkpoint_state,
+        )
+        running_preview = self._apply_backtest_checkpoint_state_to_preview(
+            self._build_pending_backtest_preview(
+                effective_strategy,
+                running_request_payload,
+                multi_factor_precheck=multi_factor_precheck,
+                recovery_context=recovery_context,
+            ),
+            checkpoint_state,
+        )
         self.storage.insert_json_row(
             "backtest_runs",
             self._build_backtest_run_row(
                 run_id=run_id,
                 strategy_id=strategy_id,
                 status="RUNNING",
-                request_payload=request_payload,
+                request_payload=running_request_payload,
                 created_at=created_at,
                 updated_at=running_at,
                 preview=running_preview,
@@ -10841,15 +12372,106 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 environment_summary=running_preview.get("environment_summary") or {},
             ),
         )
+        if checkpoint_bundle is None:
+            self._persist_backtest_checkpoint(
+                run_id,
+                stage="PREPARING",
+                state=checkpoint_state,
+            )
+            checkpoint_bundle = self._load_backtest_checkpoint_bundle(run_id)
         try:
-            completed_row = self._build_completed_backtest_run_row(
+            prepared_context = self._prepare_backtest_run_context(effective_strategy, request_payload)
+
+            def checkpoint_callback(
+                state: Mapping[str, Any],
+                daily_performance: Sequence[DailyPerformancePoint],
+                trades: Sequence[TradeRecord],
+            ) -> None:
+                if not self._refresh_backtest_runner_claim(run_id):
+                    raise RuntimeError(f"Backtest runner claim lost: {run_id}")
+                persisted_checkpoint = self._persist_backtest_checkpoint(
+                    run_id,
+                    stage="SIMULATING",
+                    state=state,
+                    daily_performance=daily_performance,
+                    trades=trades,
+                )
+                progress_request_payload = self._build_backtest_progress_request_payload(
+                    request_payload,
+                    status="RUNNING",
+                    checkpoint_state=persisted_checkpoint["state"],
+                )
+                progress_preview = self._apply_backtest_checkpoint_state_to_preview(
+                    self._build_pending_backtest_preview(
+                        effective_strategy,
+                        progress_request_payload,
+                        multi_factor_precheck=multi_factor_precheck,
+                        recovery_context=recovery_context,
+                    ),
+                    persisted_checkpoint["state"],
+                )
+                self.storage.insert_json_row(
+                    "backtest_runs",
+                    self._build_backtest_run_row(
+                        run_id=run_id,
+                        strategy_id=strategy_id,
+                        status="RUNNING",
+                        request_payload=progress_request_payload,
+                        created_at=created_at,
+                        updated_at=str(persisted_checkpoint.get("updated_at") or iso_now()),
+                        preview=progress_preview,
+                        parameter_snapshot=progress_preview.get("parameter_snapshot") or {},
+                        environment_summary=progress_preview.get("environment_summary") or {},
+                    ),
+                )
+
+            preview, chart_series, trades = self._simulate_run_from_prepared_context(
+                effective_strategy,
+                request_payload,
+                prepared_context,
+                multi_factor_precheck=multi_factor_precheck,
+                recovery_context=recovery_context,
+                checkpoint_bundle=checkpoint_bundle,
+                checkpoint_callback=checkpoint_callback,
+            )
+            completed_at = iso_now()
+            metrics = preview["metrics"]
+            trade_audit = self._build_trade_audits(
+                run_id=run_id,
+                strategy=effective_strategy,
+                request_payload=request_payload,
+                trades=trades,
+                oos_start_date=preview.get("oos_start_date"),
+            )
+            trade_audit_items = self._build_trade_audit_items(trade_audit)
+            completed_row = self._build_backtest_run_row(
                 run_id=run_id,
                 strategy_id=strategy_id,
-                strategy=strategy,
+                status="COMPLETED_WITH_WARNINGS" if preview["warnings"] else "COMPLETED",
                 request_payload=request_payload,
                 created_at=created_at,
+                updated_at=completed_at,
+                preview=preview,
+                metrics=metrics,
+                parameter_snapshot=preview.get("parameter_snapshot") or {},
+                environment_summary=preview.get("environment_summary") or {},
+                relative_metrics=build_relative_metrics(chart_series),
+                consistency_score=build_consistency_score(chart_series),
+                risk_metrics=build_risk_metrics(metrics, chart_series),
+                drawdown_events=build_drawdown_events(chart_series, preview.get("oos_start_date")),
+                rolling_metrics=build_rolling_metrics(chart_series, 252),
+                monthly_returns=build_monthly_returns(chart_series, preview.get("oos_start_date")),
+                chart_series=chart_series,
+                trades=trades,
+                trade_audit_items=trade_audit_items,
+                trade_audit=trade_audit,
+                warnings=preview.get("warnings") or [],
+                completed_at=completed_at,
+                coverage_ratio=preview.get("coverage_ratio"),
+                coverage_days=preview.get("coverage_days"),
             )
             completed_at = str(completed_row.get("completed_at") or iso_now())
+            self._clear_backtest_checkpoint(run_id)
             self.storage.insert_json_row("backtest_runs", completed_row)
             self._set_latest_run_reference(
                 strategy_id=strategy_id,
@@ -10859,7 +12481,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
             )
         except Exception as exc:
             failed_at = iso_now()
-            failed_preview = self._build_pending_backtest_preview(strategy, request_payload)
+            self._clear_backtest_checkpoint(run_id)
+            failed_preview = self._build_pending_backtest_preview(effective_strategy, request_payload)
             self.storage.insert_json_row(
                 "backtest_runs",
                 self._build_backtest_run_row(
@@ -10883,6 +12506,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 mark_successful=False,
             )
         finally:
+            self._release_backtest_runner_claim(run_id)
             with self._backtest_run_lock:
                 self._backtest_run_threads.pop(run_id, None)
 
@@ -10894,10 +12518,17 @@ class RealBacktestPlatformService(BacktestPlatformService):
         strategy: Mapping[str, Any],
         request_payload: Mapping[str, Any],
         created_at: str,
+        multi_factor_precheck: Mapping[str, Any] | None = None,
+        recovery_context: Mapping[str, Any] | None = None,
+        claim_acquired: bool = False,
     ) -> bool:
+        if not claim_acquired and not self._try_acquire_backtest_runner_claim(run_id):
+            return False
         with self._backtest_run_lock:
             existing_thread = self._backtest_run_threads.get(run_id)
             if existing_thread and existing_thread.is_alive():
+                if not claim_acquired:
+                    self._release_backtest_runner_claim(run_id)
                 return False
             thread = threading.Thread(
                 target=self._run_backtest_submission,
@@ -10907,6 +12538,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "strategy": dict(strategy),
                     "request_payload": dict(request_payload),
                     "created_at": created_at,
+                    "multi_factor_precheck": dict(multi_factor_precheck) if isinstance(multi_factor_precheck, Mapping) else None,
+                    "recovery_context": dict(recovery_context) if isinstance(recovery_context, Mapping) else None,
+                    "claim_acquired": True,
                 },
                 name=f"backtest-run-{run_id}",
                 daemon=True,
@@ -10914,6 +12548,64 @@ class RealBacktestPlatformService(BacktestPlatformService):
             self._backtest_run_threads[run_id] = thread
             thread.start()
         return True
+
+    def interrupt_incomplete_backtest_runs(self) -> list[str]:
+        rows = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM backtest_runs
+            WHERE deleted_at IS NULL AND status IN (?, ?)
+            ORDER BY created_at ASC, id ASC
+            """,
+            ("QUEUED", "RUNNING"),
+        )
+        interrupted_run_ids: list[str] = []
+        for row in rows:
+            run_id = str(row.get("id") or "").strip()
+            strategy_id = str(row.get("strategy_id") or "").strip()
+            if not run_id or not strategy_id:
+                continue
+            interrupted_at = iso_now()
+            request_payload = loads(row.get("request_json"), {})
+            if not isinstance(request_payload, dict):
+                request_payload = {}
+            checkpoint_bundle = self._load_backtest_checkpoint_bundle(run_id)
+            checkpoint_state = dict((checkpoint_bundle or {}).get("state") or {})
+            interrupted_request_payload = self._build_backtest_progress_request_payload(
+                request_payload,
+                status="INTERRUPTED",
+                checkpoint_state=checkpoint_state,
+                resume_ready=True,
+                interrupted_reason="service_restart",
+            )
+            preview_payload = loads(row.get("preview_json"), {})
+            if not isinstance(preview_payload, dict):
+                preview_payload = {}
+            if not preview_payload:
+                try:
+                    strategy = self.get_strategy_detail(strategy_id)
+                except Exception:
+                    strategy = None
+                if strategy is not None:
+                    preview_payload = self._build_pending_backtest_preview(strategy, interrupted_request_payload)
+            preview_payload = self._apply_backtest_checkpoint_state_to_preview(preview_payload, checkpoint_state)
+            self.storage.insert_json_row(
+                "backtest_runs",
+                self._build_backtest_run_row(
+                    run_id=run_id,
+                    strategy_id=strategy_id,
+                    status="INTERRUPTED",
+                    request_payload=interrupted_request_payload,
+                    created_at=str(row.get("created_at") or interrupted_at),
+                    updated_at=interrupted_at,
+                    preview=preview_payload,
+                    parameter_snapshot=preview_payload.get("parameter_snapshot") or {},
+                    environment_summary=preview_payload.get("environment_summary") or {},
+                ),
+            )
+            self._clear_backtest_runner_claim(run_id)
+            interrupted_run_ids.append(run_id)
+        return interrupted_run_ids
 
     def resume_incomplete_backtest_runs(self) -> list[str]:
         rows = self.storage.fetch_all(
@@ -10948,22 +12640,201 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     ("FAILED", f"Strategy not found: {strategy_id}", failed_at, failed_at, run_id),
                 )
                 continue
+            recovered_at = iso_now()
+            checkpoint_bundle = self._load_backtest_checkpoint_bundle(run_id)
+            checkpoint_state = dict((checkpoint_bundle or {}).get("state") or {})
+            recovery_context = (
+                self._build_backtest_checkpoint_recovery_context(
+                    row.get("status"),
+                    checkpoint_bundle,
+                    previous_updated_at=row.get("updated_at"),
+                    restarted_at=recovered_at,
+                )
+                if checkpoint_state.get("persisted_step_count")
+                else self._build_backtest_restart_recovery_context(
+                    row.get("status"),
+                    previous_updated_at=row.get("updated_at"),
+                    restarted_at=recovered_at,
+                )
+            )
+            queued_request_payload = self._build_backtest_progress_request_payload(
+                request_payload,
+                status="QUEUED",
+                checkpoint_state=checkpoint_state,
+            )
+            pending_preview = self._apply_backtest_checkpoint_state_to_preview(
+                self._build_pending_backtest_preview(
+                    strategy,
+                    queued_request_payload,
+                    recovery_context=recovery_context,
+                ),
+                checkpoint_state,
+            )
+            self.storage.insert_json_row(
+                "backtest_runs",
+                self._build_backtest_run_row(
+                    run_id=run_id,
+                    strategy_id=strategy_id,
+                    status="QUEUED",
+                    request_payload=queued_request_payload,
+                    created_at=str(row.get("created_at") or recovered_at),
+                    updated_at=recovered_at,
+                    preview=pending_preview,
+                    parameter_snapshot=pending_preview.get("parameter_snapshot") or {},
+                    environment_summary=pending_preview.get("environment_summary") or {},
+                ),
+            )
             if self._start_backtest_run_runner(
                 run_id=run_id,
                 strategy_id=strategy_id,
                 strategy=strategy,
-                request_payload=request_payload,
+                request_payload=queued_request_payload,
                 created_at=str(row.get("created_at") or iso_now()),
+                multi_factor_precheck=pending_preview.get("multi_factor_precheck"),
+                recovery_context=recovery_context,
             ):
                 resumed_run_ids.append(run_id)
         return resumed_run_ids
+
+    def resume_backtest_run(self, run_id: str, request: Any) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        idempotency_key = str(payload.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required")
+
+        run = self.get_backtest_run_detail(run_id)
+        status = str(run.get("status") or "").upper()
+        request_payload = dict(run.get("request") or {})
+        existing_resume_key = str(request_payload.get("resume_idempotency_key") or "").strip()
+        if existing_resume_key and status in {"QUEUED", "RUNNING"}:
+            if existing_resume_key == idempotency_key:
+                return run
+            raise ContractConflictError(
+                "BACKTEST_RUN_RESUME_IDEMPOTENCY_CONFLICT",
+                "Backtest run was already resumed with a different idempotency key",
+                blocking_target={"run_id": run_id},
+            )
+        if status != "INTERRUPTED":
+            raise ContractConflictError(
+                "BACKTEST_RUN_NOT_RESUMABLE",
+                "Only interrupted backtest runs can be resumed",
+                blocking_target={"run_id": run_id},
+            )
+
+        checkpoint_bundle = self._load_backtest_checkpoint_bundle(run_id)
+        checkpoint_state = dict((checkpoint_bundle or {}).get("state") or {})
+        resumed_at = iso_now()
+        resumed_request_payload = self._build_backtest_progress_request_payload(
+            request_payload,
+            status="RUNNING",
+            checkpoint_state=checkpoint_state,
+            interrupted_reason=None,
+        )
+        resumed_request_payload["resume_idempotency_key"] = idempotency_key
+        resumed_request_payload["resume_ready"] = False
+        resumed_request_payload["current_stage"] = (
+            checkpoint_state.get("current_stage")
+            or "Preparing backtest inputs"
+        )
+        resumed_request_payload["latest_update"] = (
+            f"Resuming backtest from checkpoint step {int(checkpoint_state.get('persisted_step_count') or 0)}/{int(checkpoint_state.get('total_step_count') or 0)}."
+            if checkpoint_state.get("persisted_step_count")
+            else "Resuming backtest from the beginning after interruption."
+        )
+        recovery_context = (
+            self._build_backtest_checkpoint_recovery_context(
+                "INTERRUPTED",
+                checkpoint_bundle,
+                previous_updated_at=run.get("updated_at"),
+                restarted_at=resumed_at,
+            )
+            if checkpoint_state.get("persisted_step_count")
+            else self._build_backtest_restart_recovery_context(
+                "INTERRUPTED",
+                previous_updated_at=run.get("updated_at"),
+                restarted_at=resumed_at,
+            )
+        )
+        strategy = self.get_strategy_detail(str(run["strategy_id"]))
+        resumed_preview = self._apply_backtest_checkpoint_state_to_preview(
+            self._build_pending_backtest_preview(
+                strategy,
+                resumed_request_payload,
+                recovery_context=recovery_context,
+            ),
+            checkpoint_state,
+        )
+        self.storage.insert_json_row(
+            "backtest_runs",
+            self._build_backtest_run_row(
+                run_id=run_id,
+                strategy_id=str(run["strategy_id"]),
+                status="RUNNING",
+                request_payload=resumed_request_payload,
+                created_at=str(run.get("created_at") or resumed_at),
+                updated_at=resumed_at,
+                preview=resumed_preview,
+                parameter_snapshot=resumed_preview.get("parameter_snapshot") or {},
+                environment_summary=resumed_preview.get("environment_summary") or {},
+            ),
+        )
+        started = self._start_backtest_run_runner(
+            run_id=run_id,
+            strategy_id=str(run["strategy_id"]),
+            strategy=strategy,
+            request_payload=resumed_request_payload,
+            created_at=str(run.get("created_at") or resumed_at),
+            multi_factor_precheck=resumed_preview.get("multi_factor_precheck"),
+            recovery_context=recovery_context,
+        )
+        if not started:
+            interrupted_request_payload = self._build_backtest_progress_request_payload(
+                request_payload,
+                status="INTERRUPTED",
+                checkpoint_state=checkpoint_state,
+                resume_ready=True,
+                interrupted_reason="service_restart",
+            )
+            interrupted_preview = self._apply_backtest_checkpoint_state_to_preview(
+                self._build_pending_backtest_preview(
+                    strategy,
+                    interrupted_request_payload,
+                    recovery_context=recovery_context,
+                ),
+                checkpoint_state,
+            )
+            self.storage.insert_json_row(
+                "backtest_runs",
+                self._build_backtest_run_row(
+                    run_id=run_id,
+                    strategy_id=str(run["strategy_id"]),
+                    status="INTERRUPTED",
+                    request_payload=interrupted_request_payload,
+                    created_at=str(run.get("created_at") or resumed_at),
+                    updated_at=iso_now(),
+                    preview=interrupted_preview,
+                    parameter_snapshot=interrupted_preview.get("parameter_snapshot") or {},
+                    environment_summary=interrupted_preview.get("environment_summary") or {},
+                ),
+            )
+            raise ContractConflictError(
+                "BACKTEST_RUN_RESUME_START_FAILED",
+                "Backtest run could not be resumed because another runner is still active",
+                blocking_target={"run_id": run_id},
+            )
+        return self.get_backtest_run_detail(run_id)
 
     def submit_backtest_run(self, strategy_id: str, request: Any) -> dict[str, Any]:
         strategy = self.get_strategy_detail(strategy_id)
         payload = self._normalize_run_request(strategy, _as_mapping(request))
         if not payload.get("idempotency_key"):
             raise ValueError("idempotency_key is required")
-        multi_factor_precheck = self._build_multi_factor_precheck(strategy, payload)
+        effective_strategy = self._strategy_for_run(strategy, payload)
+        if str(effective_strategy.get("strategy_type") or "").upper() == "ASSET_ALLOCATION":
+            snapshot_summary = self._snapshot_summary(effective_strategy, payload)
+            if is_snapshot_blocking(snapshot_summary):
+                raise SnapshotBlockingError(snapshot_summary)
+        multi_factor_precheck = self._build_multi_factor_precheck(effective_strategy, payload)
         if multi_factor_precheck and str(multi_factor_precheck.get("status") or "").upper() == "BLOCKED":
             blocker_parts = []
             for item in multi_factor_precheck.get("blocked_factors") or []:
@@ -10976,7 +12847,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
             raise ValueError(f"多因子预检未通过：{blocker_text}")
         run_id = self._new_id("run")
         now = iso_now()
-        pending_preview = self._build_pending_backtest_preview(strategy, payload)
+        pending_preview = self._build_pending_backtest_preview(
+            strategy,
+            payload,
+            multi_factor_precheck=multi_factor_precheck,
+        )
         self.storage.insert_json_row(
             "backtest_runs",
             self._build_backtest_run_row(
@@ -11002,6 +12877,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             strategy=strategy,
             request_payload=payload,
             created_at=now,
+            multi_factor_precheck=multi_factor_precheck,
         )
         return self.get_backtest_run_detail(run_id)
 
@@ -11037,22 +12913,108 @@ class RealBacktestPlatformService(BacktestPlatformService):
             },
         }
 
+    def _build_backtest_checkpoint_projection(
+        self,
+        checkpoint_bundle: Mapping[str, Any] | None,
+        *,
+        oos_start_date: str | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if not isinstance(checkpoint_bundle, Mapping):
+            return [], []
+        daily_points = [
+            DailyPerformancePoint(**dict(item))
+            for item in list(checkpoint_bundle.get("daily_performance") or [])
+            if isinstance(item, Mapping)
+        ]
+        trade_records = [
+            TradeRecord(**dict(item))
+            for item in list(checkpoint_bundle.get("trades") or [])
+            if isinstance(item, Mapping)
+        ]
+        benchmark_equity = 100.0
+        chart_series: list[dict[str, Any]] = []
+        for point in daily_points:
+            benchmark_equity *= 1.0 + float(point.benchmark_return or 0.0)
+            chart_series.append(
+                {
+                    "trade_date": point.date,
+                    "equity": round(float(point.equity), 4),
+                    "benchmark": round(benchmark_equity, 4),
+                    "drawdown": round(float(point.drawdown) * 100.0, 4),
+                    "is_oos": not bool(point.in_sample),
+                    "strategy_return": float(point.strategy_return or 0.0),
+                    "benchmark_return": float(point.benchmark_return or 0.0),
+                }
+            )
+        trades: list[dict[str, Any]] = []
+        for item in trade_records:
+            trade = asdict(item)
+            trade["trade_date"] = trade.pop("date")
+            trade["segment"] = (
+                "OOS"
+                if oos_start_date and str(trade["trade_date"]) >= str(oos_start_date)
+                else "IS"
+            )
+            trades.append(trade)
+        return chart_series, trades
+
     def get_backtest_run_detail(self, run_id: str, view: str = "full") -> dict[str, Any]:
         normalized_view = self._normalize_backtest_run_detail_view(view)
         run = super().get_backtest_run_detail(run_id, view=normalized_view)
         parameter_snapshot = dict(run.get("parameter_snapshot") or {})
-        run["warnings"] = _merge_runtime_backtest_warnings(run.get("warnings") or [], parameter_snapshot)
+        run["status"], run["warnings"] = _sanitize_backtest_warning_state(
+            run.get("status"),
+            _merge_runtime_backtest_warnings(run.get("warnings") or [], parameter_snapshot),
+        )
         if run.get("preview"):
             preview_payload = dict(run.get("preview") or {})
             preview_parameters = dict(preview_payload.get("parameter_snapshot") or parameter_snapshot)
-            preview_payload["warnings"] = _merge_runtime_backtest_warnings(
-                preview_payload.get("warnings") or run.get("warnings") or [],
-                preview_parameters,
+            preview_payload["warnings"] = _sanitize_backtest_warning_list(
+                _merge_runtime_backtest_warnings(
+                    preview_payload.get("warnings") or run.get("warnings") or [],
+                    preview_parameters,
+                )
             )
             run["preview"] = preview_payload
-        if run.get("warnings") and str(run.get("status") or "").upper() == "COMPLETED":
-            run["status"] = "COMPLETED_WITH_WARNINGS"
+        request_progress = dict(run.get("request") or {})
+        preview_progress = dict((run.get("preview") or {}).get("environment_summary") or {})
+        execution_progress = dict(preview_progress.get("execution_progress") or {})
+        run["resume_ready"] = bool(request_progress.get("resume_ready")) or str(run.get("status") or "").upper() == "INTERRUPTED"
+        run["interrupted_reason"] = (
+            request_progress.get("interrupted_reason")
+            or ("service_restart" if str(run.get("status") or "").upper() == "INTERRUPTED" else None)
+        )
+        run["progress_pct"] = int(execution_progress.get("progress_pct") or request_progress.get("progress_pct") or 0)
+        run["persisted_step_count"] = int(
+            execution_progress.get("persisted_step_count")
+            or request_progress.get("persisted_step_count")
+            or 0
+        )
+        run["total_step_count"] = int(
+            execution_progress.get("total_step_count")
+            or request_progress.get("total_step_count")
+            or 0
+        )
+        run["next_step_index"] = int(
+            execution_progress.get("next_step_index")
+            or request_progress.get("next_step_index")
+            or 0
+        )
+        run["current_stage"] = execution_progress.get("current_stage") or request_progress.get("current_stage")
+        run["latest_update"] = execution_progress.get("latest_update") or request_progress.get("latest_update")
         chart_series = list(run.get("chart_series") or [])
+        checkpoint_bundle = None
+        if str(run.get("status") or "").upper() in {"RUNNING", "INTERRUPTED"} and not chart_series:
+            checkpoint_bundle = self._load_backtest_checkpoint_bundle(run_id)
+            checkpoint_chart_series, checkpoint_trades = self._build_backtest_checkpoint_projection(
+                checkpoint_bundle,
+                oos_start_date=run.get("oos_start_date"),
+            )
+            if checkpoint_chart_series:
+                chart_series = checkpoint_chart_series
+                run["chart_series"] = checkpoint_chart_series
+            if checkpoint_trades and normalized_view == "full":
+                run["trades"] = checkpoint_trades
         if normalized_view in {"full", "initial"}:
             rolling_metrics = list(run.get("rolling_metrics") or [])
             if chart_series and self._rolling_metrics_need_rebuild(rolling_metrics):
@@ -11104,7 +13066,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         if normalized_view == "full":
             run["trades"] = _enrich_trade_records_with_execution_values(run, run.get("trades") or [])
         if normalized_view in {"full", "initial"}:
-            if str(run.get("status") or "").upper() in {"QUEUED", "RUNNING"}:
+            if str(run.get("status") or "").upper() in {"QUEUED", "RUNNING", "INTERRUPTED"}:
                 run["analysis"] = self._build_inflight_run_detail_analysis()
             else:
                 run["analysis"] = build_run_detail_analysis(run)

@@ -4,7 +4,7 @@ export type WorkspaceRecentRunItem = {
   id: string;
   runId: string;
   strategyName: string;
-  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'COMPLETED_WITH_WARNINGS' | 'FAILED';
+  status: 'QUEUED' | 'RUNNING' | 'INTERRUPTED' | 'COMPLETED' | 'COMPLETED_WITH_WARNINGS' | 'FAILED';
   totalReturn: string;
   sharpe: string;
   completedAt?: string | null;
@@ -48,7 +48,13 @@ function formatTime(value?: string | null): string {
 }
 
 function getStatusTone(status: WorkspaceRecentRunItem['status']): string {
-  return status === 'FAILED' ? 'danger' : status === 'COMPLETED_WITH_WARNINGS' ? 'warning' : 'success';
+  if (status === 'FAILED') {
+    return 'danger';
+  }
+  if (status === 'COMPLETED_WITH_WARNINGS' || status === 'INTERRUPTED') {
+    return 'warning';
+  }
+  return 'success';
 }
 
 function normalizeRecentRuns(recentRuns: WorkspaceRecentRunItem[] | undefined): WorkspaceRecentRunItem[] {

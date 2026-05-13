@@ -1159,6 +1159,14 @@
   padding-top: 12px;
 }
 
+.snapshots-equity-view .snapshots-trust-credential-panel--compact {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(249, 250, 251, 0.92);
+  padding: 12px;
+}
+
 .snapshots-equity-view .snapshots-trust-credential-title {
   margin-bottom: 0;
 }
@@ -1394,11 +1402,11 @@
 
 .snapshots-equity-view .evidence-card {
   display: grid;
-  gap: 8px;
-  padding: 12px 13px;
+  gap: 10px;
+  padding: 14px;
   border-radius: 14px;
-  border: 0;
-  background: transparent;
+  border: 1px solid var(--line);
+  background: rgba(249, 250, 251, 0.92);
 }
 
 .snapshots-equity-view .rail-panel strong {

@@ -126,6 +126,9 @@ const ALL_SNAPSHOT_REFRESH_TARGETS: SnapshotRefreshTarget[] = [
   'corporate',
   'valuations',
   'universes',
+  'fundamentals',
+  'sentiment',
+  'macro_derivatives',
   'bond',
 ];
 
@@ -188,6 +191,15 @@ function normalizeSnapshotOverview(raw: unknown): ApiSnapshotOverview {
           payload.data_trust_summary && typeof payload.data_trust_summary === 'object'
             ? payload.data_trust_summary
             : undefined,
+        data_layer_readiness: Array.isArray(payload.data_layer_readiness)
+          ? payload.data_layer_readiness
+          : undefined,
+        snapshot_quality_alerts: Array.isArray(payload.snapshot_quality_alerts)
+          ? payload.snapshot_quality_alerts
+          : undefined,
+        factor_dimension_readiness: Array.isArray(payload.factor_dimension_readiness)
+          ? payload.factor_dimension_readiness
+          : undefined,
       };
       return {
         ...normalizedOverview,
@@ -938,7 +950,7 @@ export function SnapshotsPage(): JSX.Element {
       const isBondRefresh = activeTab === 'bond';
       const refreshTargets: SnapshotRefreshTarget[] = isBondRefresh
         ? ALL_SNAPSHOT_REFRESH_TARGETS
-        : ['price', 'corporate', 'valuations', 'universes'];
+        : ['price', 'corporate', 'valuations', 'universes', 'fundamentals', 'sentiment', 'macro_derivatives'];
       const refreshReason = isBondRefresh
         ? 'manual-refresh-bond-complete'
         : 'manual-refresh-latest-and-repair';

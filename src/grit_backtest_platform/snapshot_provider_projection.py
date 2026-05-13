@@ -70,7 +70,7 @@ SOURCE_GOVERNANCE: dict[str, dict[str, Any]] = {
         "source_manifest_required": True,
     },
     "polygon": {
-        "source_url": "https://polygon.io/docs/rest/stocks/aggregates/custom-bars",
+        "source_url": "https://massive.com/docs/rest/stocks/aggregates/custom-bars",
         "license": "account_terms",
         "source_manifest_required": False,
     },
@@ -229,25 +229,26 @@ PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
             "polygon",
             "Polygon.io",
             "paid_optional",
-            ("price_history", "corporate_actions", "identity", "targeted_price_repair"),
+            ("price_history", "corporate_actions", "identity", "targeted_price_repair", "option_skew"),
             fallback_order={
                 "price_history": 11,
                 "corporate_actions": 9,
                 "identity": 5,
                 "targeted_price_repair": 3,
+                "option_skew": 1,
             },
-            required_env_vars=("POLYGON_API_KEY",),
+            required_env_vars=("MASSIVE_API_KEY", "POLYGON_API_KEY"),
             optional_layer="paid_external",
             pit_mode="precision_evidence_source",
             can_upgrade_pit_readiness=True,
-            pit_notes=("Polygon precision repair is gated by POLYGON_API_KEY and should be reserved for critical gaps.",),
+            pit_notes=("Polygon/Massive precision repair is gated by MASSIVE_API_KEY or POLYGON_API_KEY and should be reserved for critical gaps.",),
         ),
         _definition(
             "fmp",
             "Financial Modeling Prep",
             "free_account",
-            ("price_history", "identity"),
-            fallback_order={"price_history": 7, "identity": 3},
+            ("price_history", "identity", "fundamentals"),
+            fallback_order={"price_history": 7, "identity": 3, "fundamentals": 1},
             required_env_vars=("FMP_API_KEY",),
         ),
         _definition(
@@ -273,9 +274,24 @@ PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
             "alpha_vantage",
             "Alpha Vantage",
             "free_account",
-            ("corporate_actions", "identity", "targeted_price_repair"),
-            fallback_order={"corporate_actions": 4, "identity": 4, "targeted_price_repair": 1},
+            ("corporate_actions", "identity", "targeted_price_repair", "earnings_expectations"),
+            fallback_order={"corporate_actions": 4, "identity": 4, "targeted_price_repair": 1, "earnings_expectations": 1},
             required_env_vars=("ALPHAVANTAGE_API_KEY",),
+        ),
+        _definition(
+            "finra_short_volume",
+            "FINRA Short Volume",
+            "public_web",
+            ("short_volume",),
+            fallback_order={"short_volume": 1},
+        ),
+        _definition(
+            "fred_macro_series",
+            "FRED Macro Series",
+            "free_account",
+            ("macro_series",),
+            fallback_order={"macro_series": 1},
+            required_env_vars=("FRED_API_KEY",),
         ),
         _definition(
             "sec_edgar",
@@ -539,7 +555,7 @@ TRUST_PROFILE_OVERRIDES: dict[str, dict[str, Any]] = {
         "evidence_scope": ["precision OHLCV", "corporate actions", "identity"],
         "can_upgrade_full_ready": True,
         "pit_role": "付费精修来源",
-        "limitations": ["需要 POLYGON_API_KEY；仅用于关键缺口，不作为默认免费链。"],
+        "limitations": ["需要 MASSIVE_API_KEY 或 POLYGON_API_KEY；仅用于关键缺口，不作为默认免费链。"],
         "operator_action": "有 key 时用于关键 delisted、生命周期或公司行动精修候选。",
     },
 }
@@ -638,6 +654,8 @@ def _target_types_for_provider(provider: Any, provider_id: str) -> tuple[str, ..
         target_types.append("price_history")
     if callable(getattr(provider, "fetch_corporate_actions", None)) or bool(getattr(provider, "supports_action_enrichment", False)):
         target_types.append("corporate_actions")
+    if callable(getattr(provider, "fetch_earnings", None)):
+        target_types.append("earnings_expectations")
     if callable(getattr(provider, "resolve_identity", None)):
         target_types.append("identity")
     if callable(getattr(provider, "load_snapshots", None)):
@@ -722,7 +740,8 @@ def _credential_requirements(provider_id: str, definition: ProviderDefinition | 
     if provider_id == "polygon":
         status = polygon_credential_status()
         return {
-            "required_env_vars": ["POLYGON_API_KEY"],
+            "required_env_vars": status.get("required_env_vars", ["MASSIVE_API_KEY", "POLYGON_API_KEY"]),
+            "accepted_env_vars": status.get("accepted_env_vars", ["MASSIVE_API_KEY", "POLYGON_API_KEY"]),
             "configured": bool(status.get("configured")),
             "configured_env_vars": status.get("configured_env_vars", []),
             "missing_env_vars": status.get("missing_env_vars", []),
@@ -772,11 +791,14 @@ def _provider_readiness_status(
     *,
     enabled: bool,
     credential_ready: bool,
+    credential_rejected: bool = False,
     quota_limited: bool,
     cooldown_active: bool,
 ) -> str:
     if not enabled:
         return "disabled"
+    if credential_rejected:
+        return "invalid_credentials"
     if not credential_ready:
         return "missing_credentials"
     if cooldown_active:
@@ -784,6 +806,17 @@ def _provider_readiness_status(
     if quota_limited:
         return "quota_limited"
     return "usable"
+
+
+def _provider_credential_rejected(error_summary: Mapping[str, Any] | None) -> bool:
+    if not isinstance(error_summary, Mapping):
+        return False
+    tokens = {
+        str(error_summary.get("status") or "").strip().lower(),
+        str(error_summary.get("reason") or "").strip().lower(),
+        str(error_summary.get("error") or "").strip().lower(),
+    }
+    return bool(tokens & {"invalid_credentials", "credential_rejected", "auth_failed"})
 
 
 def _infer_attempt_status(provider_payload: Mapping[str, Any], summary_payload: Mapping[str, Any]) -> str:
@@ -839,6 +872,16 @@ def _snapshot_target(snapshot_id: str, snapshot_kind: str) -> str:
         return "universe_history"
     if snapshot_id == "ds-corporate-actions":
         return "corporate_actions"
+    if snapshot_id == "ds-fundamentals":
+        return "fundamentals"
+    if snapshot_id == "ds-analyst-consensus":
+        return "earnings_expectations"
+    if snapshot_id == "ds-short-volume":
+        return "short_volume"
+    if snapshot_id == "ds-macro-rates":
+        return "macro_series"
+    if snapshot_id == "ds-option-skew":
+        return "option_skew"
     if snapshot_id == "ds-index-valuations":
         return "index_valuations"
     if snapshot_id == "bond_fixed_income":
@@ -906,7 +949,11 @@ def _trust_profile(
         if str(item).strip()
     ]
     profile["can_upgrade_pit_readiness"] = bool(pit_permission.get("can_upgrade_pit_readiness", True))
-    profile["credential_status"] = "missing" if missing_env_vars else ("configured" if configured_env_vars else "not_required")
+    profile["credential_status"] = (
+        "invalid_credentials"
+        if readiness_status == "invalid_credentials"
+        else ("missing" if missing_env_vars else ("configured" if configured_env_vars else "not_required"))
+    )
     profile["missing_env_vars"] = missing_env_vars
     profile["readiness_status"] = readiness_status
     profile["secret_persistence"] = "disabled"
@@ -1600,10 +1647,12 @@ def build_provider_registry(
             "reason": missing_reason or (latest_attempt or {}).get("reason"),
             "error": missing_reason or (latest_attempt or {}).get("error"),
         }
-        credential_ready = bool(credential_requirements.get("configured"))
+        credential_rejected = _provider_credential_rejected(error_summary)
+        credential_ready = bool(credential_requirements.get("configured")) and not credential_rejected
         usable = (
             enabled
             and credential_ready
+            and not credential_rejected
             and not bool(quota_cooldown.get("quota_limited"))
             and not bool(quota_cooldown.get("cooldown_active"))
         )
@@ -1611,6 +1660,7 @@ def build_provider_registry(
         readiness_status = _provider_readiness_status(
             enabled=enabled,
             credential_ready=credential_ready,
+            credential_rejected=credential_rejected,
             quota_limited=bool(quota_cooldown.get("quota_limited")),
             cooldown_active=bool(quota_cooldown.get("cooldown_active")),
         )

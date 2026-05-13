@@ -4,6 +4,8 @@ import json
 import sqlite3
 from datetime import date, timedelta
 
+import pytest
+
 from tests.api_test_support import (
     assert_ok,
     create_optimization_job,
@@ -94,6 +96,75 @@ def _seed_direct_price_history(client) -> None:
             "end_date": end.isoformat(),
             "row_count": len(bars),
             "source": "test_seed",
+        },
+        price_bars=bars,
+        symbol_coverage=coverage,
+    )
+
+
+def _seed_divergent_multi_factor_price_history(client) -> None:
+    bars = []
+    coverage = []
+    start = date(2022, 1, 3)
+    end = date(2025, 6, 30)
+    symbol_profiles = {
+        "AAPL": (0.0018, 0.0025),
+        "MSFT": (0.0009, 0.0004),
+        "NVDA": (0.0024, 0.0045),
+        "AMZN": (0.0013, 0.0016),
+        "META": (0.0007, 0.0003),
+        "GOOGL": (0.0011, 0.0005),
+        "TSLA": (0.0019, 0.0052),
+        "AMD": (0.0021, 0.0038),
+        "AVGO": (0.0015, 0.0008),
+        "COST": (0.0008, 0.0002),
+        "SPY": (0.0010, 0.0006),
+    }
+    for symbol, (drift, amplitude) in symbol_profiles.items():
+        trade_days = 0
+        cursor = start
+        price = 100.0 + trade_days
+        while cursor <= end:
+            if cursor.weekday() < 5:
+                oscillation = amplitude if trade_days % 2 == 0 else -amplitude * 0.85
+                daily_return = drift + oscillation
+                price = round(price * (1.0 + daily_return), 6)
+                high = round(price * (1.0 + abs(amplitude) * 0.6 + 0.001), 6)
+                low = round(price * (1.0 - abs(amplitude) * 0.6 - 0.001), 6)
+                bars.append(
+                    {
+                        "symbol": symbol,
+                        "date": cursor.isoformat(),
+                        "open": price,
+                        "high": high,
+                        "low": low,
+                        "close": price,
+                        "adj_close": price,
+                        "volume": 1_000_000 + trade_days * 100,
+                        "source": "test_seed_divergent",
+                    }
+                )
+                trade_days += 1
+            cursor += timedelta(days=1)
+        coverage.append(
+            {
+                "symbol": symbol,
+                "start_date": start.isoformat(),
+                "end_date": end.isoformat(),
+                "trade_days": trade_days,
+                "source": "test_seed_divergent",
+            }
+        )
+    client.app.state.service.market_data_repository.replace_dataset_snapshot(
+        {
+            "id": "ds-price",
+            "name": "多因子分歧价格快照",
+            "status": "READY",
+            "as_of": end.isoformat(),
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "row_count": len(bars),
+            "source": "test_seed_divergent",
         },
         price_bars=bars,
         symbol_coverage=coverage,
@@ -292,6 +363,98 @@ def test_factor_model_industry_neutralization_uses_seeded_sp500_gics_pit(tmp_pat
     assert run["metrics"]
     assert run["multi_factor_attribution"]["factor_contributions"]
     assert run["multi_factor_attribution"]["neutralization_status"]["execution_status"] == "EXECUTED"
+
+
+def test_multi_factor_backtest_prefetches_industry_memberships_once_for_execution(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    _seed_sp500_industry_pit_metadata(client)
+
+    created = assert_ok(client.post("/factor-models", json=_model_payload(neutralization_enabled=True)))
+    strategy_id = created["id"]
+
+    refresh_snapshots(client, mode="repair", targets=["corporate"])
+    _seed_direct_price_history(client)
+
+    repository = client.app.state.service.market_data_repository
+    original_load_universe_memberships = repository.load_universe_memberships
+    calls: list[dict] = []
+
+    def tracked_load_universe_memberships(**kwargs):
+        calls.append(dict(kwargs))
+        return original_load_universe_memberships(**kwargs)
+
+    monkeypatch.setattr(repository, "load_universe_memberships", tracked_load_universe_memberships)
+
+    run = submit_backtest(
+        client,
+        strategy_id,
+        start_date="2024-01-02",
+        end_date="2025-06-30",
+        idempotency_key="run-mf-membership-prefetch",
+    )
+
+    assert run["status"] in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
+    assert len(calls) == 1
+    execution_calls = [call for call in calls if call.get("active_only") is True]
+    assert len(execution_calls) == 1
+    assert execution_calls[0].get("universe_snapshot_id") == "un-sp500"
+    assert execution_calls[0].get("effective_date_lte") == "2025-06-02"
+
+
+def test_multi_factor_attribution_uses_diagnostic_quality_for_equal_weights(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    service = client.app.state.service
+    monkeypatch.setattr(
+        service,
+        "_multi_factor_factor_index",
+        lambda: {
+            "factor_high_quality": {
+                "name": "High quality factor",
+                "category": "momentum",
+                "direction": "HIGH_IS_BETTER",
+                "latest_diagnostic_summary": {
+                    "rank_ic": 0.52,
+                    "ir": 1.2,
+                    "coverage": 100.0,
+                },
+            },
+            "factor_low_quality": {
+                "name": "Low quality factor",
+                "category": "alpha",
+                "direction": "HIGH_IS_BETTER",
+                "latest_diagnostic_summary": {
+                    "rank_ic": 0.04,
+                    "ir": 0.3,
+                    "coverage": 55.0,
+                },
+            },
+        },
+    )
+    run = {
+        "metrics": {"total_return": 0.24},
+        "parameter_snapshot": {
+            "strategy_type": "MULTI_FACTOR",
+            "factor_ids": ["factor_high_quality", "factor_low_quality"],
+            "weights": {
+                "factor_high_quality": 50,
+                "factor_low_quality": 50,
+            },
+        },
+    }
+
+    attribution = service._build_multi_factor_attribution(run)
+
+    contributions = attribution["factor_contributions"]
+    contribution_by_id = {item["factor_id"]: item for item in contributions}
+    high = contribution_by_id["factor_high_quality"]
+    low = contribution_by_id["factor_low_quality"]
+    assert high["normalized_weight"] == low["normalized_weight"] == 0.5
+    assert high["diagnostic_score"] > low["diagnostic_score"]
+    assert high["contribution_pct"] > low["contribution_pct"]
+    assert high["contribution_pct"] != low["contribution_pct"]
+    assert high["basis"] == "diagnostic_adjusted_weight"
+    assert sum(item["contribution_pct"] for item in contributions) == pytest.approx(24.0, abs=0.02)
 
 
 def test_factor_model_preview_filters_industry_pit_memberships(tmp_path, monkeypatch) -> None:
@@ -736,6 +899,58 @@ def test_factor_model_create_materializes_existing_strategy_and_rejects_missing_
         for candidate in matching_combinations
     }
     assert len(metric_signatures) > 1
+
+
+def test_multi_factor_backtest_uses_selected_factor_basket_for_ranking(tmp_path) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    refresh_snapshots(client, mode="repair", targets=["corporate"])
+    _seed_divergent_multi_factor_price_history(client)
+
+    momentum_payload = {
+        "name": "动量单因子模型",
+        "universe": "SP500",
+        "rebalance_frequency": "monthly",
+        "scoring_method": "zscore_weighted",
+        "components": [
+            {"factor_id": "s_mom_12m1m_rank", "weight": 100, "direction": "HIGH_IS_BETTER"},
+        ],
+        "neutralization": {"enabled": False, "method": "industry"},
+    }
+    low_vol_payload = {
+        "name": "低波单因子模型",
+        "universe": "SP500",
+        "rebalance_frequency": "monthly",
+        "scoring_method": "zscore_weighted",
+        "components": [
+            {"factor_id": "s_vol_252d_rank", "weight": 100, "direction": "LOW_IS_BETTER"},
+        ],
+        "neutralization": {"enabled": False, "method": "industry"},
+    }
+
+    momentum_strategy = assert_ok(client.post("/factor-models", json=momentum_payload))
+    low_vol_strategy = assert_ok(client.post("/factor-models", json=low_vol_payload))
+
+    momentum_run = submit_backtest(
+        client,
+        momentum_strategy["id"],
+        start_date="2024-01-02",
+        end_date="2025-06-30",
+        idempotency_key="mf-basket-momentum",
+    )
+    low_vol_run = submit_backtest(
+        client,
+        low_vol_strategy["id"],
+        start_date="2024-01-02",
+        end_date="2025-06-30",
+        idempotency_key="mf-basket-low-vol",
+    )
+
+    assert momentum_run["parameter_snapshot"]["factor_ids"] == ["s_mom_12m1m_rank"]
+    assert low_vol_run["parameter_snapshot"]["factor_ids"] == ["s_vol_252d_rank"]
+    assert momentum_run["metrics"]["total_return"] != pytest.approx(low_vol_run["metrics"]["total_return"])
+    assert momentum_run["metrics"]["sharpe"] != pytest.approx(low_vol_run["metrics"]["sharpe"])
+    assert momentum_run["chart_series"] != low_vol_run["chart_series"]
 
 
 def test_multi_factor_optimization_projection_normalizes_weights_and_dedupes_cadence_rows(tmp_path, monkeypatch) -> None:

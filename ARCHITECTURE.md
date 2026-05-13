@@ -36,6 +36,7 @@
 - `backtest_runs` 通过 `is_permanent` 记录某次运行是永久的还是临时的。
 - `backtest_runs` 还保存 `artifact_paths_json` 与 `trade_audit_json`，以便工件和审计数据能够被一致地回放或清理。
 - `backtest_runs.trade_audit_items_json` 是供运行详情页使用的轻量证据列表投影。完整的 `trade_audit_json` 仍然是单笔交易审计下钻时的事实来源，但详情接口在热路径上不允许解码整个审计大对象。
+- `backtest_run_checkpoints` 与 `backtest_run_checkpoint_chunks` 现在是回测恢复链路的正式事实来源。前者保存当前阶段、步进游标、累计净值与恢复元数据，后者按块持久化 `daily_performance` 与 `trades` 增量，用于 `RUNNING -> INTERRUPTED -> resume` 的断点续跑，而不是服务重启后的整段重放。
 - `strategies` 与 `backtest_runs` 的列表读模型允许使用带更新时间签名的短时缓存，并在同一轮页面导航内使用突发窗口复用，避免工作台、资产库和策略列表重复解码相同投影。
 - `optimization_jobs` 保存优化任务级别的请求、摘要与结果投影。
 - `optimization_jobs.summary_json` 现在是运行中详情的主投影。心跳写入会持久化 `completed_combinations`、`next_trial_index`、`best_metrics_summary`、ETA 与 `heartbeat_at`，因此 `GET /optimization-jobs/{id}/detail` 在返回 `QUEUED`、`RUNNING`、`INTERRUPTED` 状态时，无需扫描 `optimization_job_trials`，只有旧记录缺少这些字段时才会回退补水。
@@ -148,6 +149,7 @@
 
 - 固定频率再平衡（月度、季度、半年、年度）表示在调仓点后的下一个可交易日执行目标权重校准。
 - 偏离阈值只作为额外漂移触发，不取消固定频率触发。
+- 显式资产篮子是硬契约：`allocation_assets` 或 `allocation_weight__*_pct` 声明的每个标的都必须在价格快照中具备可用历史。缺任一标的时，preview 与 submit 都必须通过 `REQUEST_SYMBOLS_MISSING_PRICE_HISTORY` 阻断；引擎直调只能返回空结果和缺价 warning，不能把缺价资产静默剔除后重配剩余权重。
 
 ## 6. 指标基线
 
@@ -215,6 +217,7 @@
 - `POST /factor-models/preview` 是零写入预览，返回权重归一、PIT 覆盖、score preview、换手估计、PIT blocker、行业中性化状态和 additive `strategy_creation_risk`。`POST /factor-models` 复用现有 `strategies` 与 `strategy_parameter_versions`，写入 `strategy_type=MULTI_FACTOR`，并保存 `factor_ids`、`weights`、`directions`、`neutralization`、`scoring_method`、`rebalance_frequency` 与 `pit_snapshot_refs`；创建前必须重新跑 preview，只有 `strategy_creation_risk.hard_blockers` 或启用中性化但缺 PIT 行业字段时拒绝物化，高相关和同族重叠只提示风险。核心/历史核心 PIT 价格缺口为 0 且非核心缺口市值权重为 0 的价格缺口只进入 `admission_risk_context` 和 `summary_label=低风险准入`，不作为 `POST /factor-models` 物化阻断。
 - 多因子行业映射只读取 `effective_date <= as_of_date` 且成员状态仍可用的 `universe_membership_snapshots` 行，并在 SQL 层按当前预览/回测候选 symbol 切片，避免从百万级 universe membership 历史全量扫描。行业解析按 `gics_sector` / `GICS Sector` / `sector` 等真实 metadata 字段执行，并把 `taxonomy=GICS`、`industry_field`、覆盖/缺失数量和来源名作为 additive neutralization evidence 返回。旧成员行没有行业 metadata 时继续形成 blocker，不允许单一行业、静态十个 symbol 或未来日期兜底。
 - 多因子第二期第二步继续复用既有策略、回测和优化数据流，不新增表。策略参数快照仍是 `strategies` 与 `strategy_parameter_versions` 的 JSON truth，回测运行读取运行时参数快照，优化任务仍写入现有 `optimization_jobs` 与 trial/checkpoint 结构。
+- `MULTI_FACTOR` 回测必须走 type-aware 信号路径：运行时参数快照中的 `factor_ids`、权重、方向、打分方法和行业中性化设置必须进入截面排序与持仓选择。不得退化到通用价格动量或模板默认 `_signal_score`；新增或修改回测路径时必须有差异化回归，证明两个不同因子篮子会产生不同排序、交易或指标。
 - 第二步在现有响应上追加可选 view-model：`multi_factor_profile` 从策略参数、因子库元数据、PIT 覆盖和诊断状态构建；`multi_factor_precheck` 在回测 preview 与 submit 前构建并作为提交门禁；`multi_factor_attribution` 从回测运行参数、因子得分、持仓/收益摘要生成，并用 `attribution_source` 标明完整归因或估算归因；`multi_factor_parameter_ranges` 把因子权重、打分方法、再平衡频率和中性化方法映射为现有优化参数范围，不把 `neutralization.enabled` 暴露成搜索参数。
 - 行业中性化是证据门禁，不是展示装饰。只有 PIT 行业字段存在且执行路径有证据时才允许展示为已执行；缺字段时 profile/precheck/attribution 都必须暴露 blocker 或未执行状态，submit 也必须拒绝启用中性化的多因子回测。
 - 优化配置把多因子权重等参数折叠进现有 search space，不另建多因子优化服务。候选参数摘要、结果卡和参数差异渲染必须经统一 formatter 输出中文业务文案，不能直接暴露 raw JSON、raw enum 或嵌套对象字符串。
@@ -419,12 +422,30 @@ Phase 1.2 extends the Phase 1.1 persistence model without adding a second compos
 - Bond risk contribution fields reserve `duration_contribution_years` and `convexity_contribution` so fixed-income legs can feed risk-budget prechecks without changing the Phase 1.1 leg storage model.
 - `GET /data-snapshots/overview` remains the only snapshot overview endpoint. Its `bond_fixed_income` segment adds `quality_audit`, `repair_rules`, `daily_accrual_status`, and `risk_budget_inputs`; refresh/repair actions still use `POST /admin/snapshot-refresh-jobs` with target `bond` and mode `repair` or `full`.
 
+## Snapshot / PIT phase2 data plane (2026-05-13)
+
+- Snapshot / PIT 继续共用 `GET /data-snapshots/overview` 与 `GET /pit-data` 两条 additive 读模型，不新增第二套快照 API，也不改变 `#/snapshots?tab=equity`、`#/snapshots?tab=bond`、`#/pit-data` 的批准信息架构。
+- L2 基础面层现在由 `ds-fundamentals`、`dataset_fundamental_points` 与 `dataset_fundamental_coverage` 承担正式时态职责。`publish_date` 与 `available_at` 是独立字段：前者表示供应商可公开披露时间，后者表示本系统可安全消费时间；两者缺一不可，`period_end_date` 只保留为 statement period 证据，不能再参与 PIT readiness 冒充。
+- L3 / L4 phase2 数据面通过 `dataset_signal_points` 与 `dataset_signal_coverage` 持久化 `ds-analyst-consensus`、`ds-short-volume`、`ds-macro-rates`、`ds-option-skew`。这些 snapshot row 会与 provider-attempt evidence 一起投影到快照页与 PIT 页，但 raw signal ledger 继续留在 metadata / raw payload，不直接进入首屏 contract。
+- snapshot read model 允许“正式 dataset row”和“readiness-only provider evidence”并存，但必须显式区分：`dataset_snapshots[]` 只包含真实持久化 row；`data_layer_readiness[]`、`factor_dimension_readiness[]` 与 snapshot/PIT linkage 如果引用的是未落库证据，必须明确标记为 readiness-only，而不是让页面看起来像已有正式 snapshot row。
+- Snapshot 与 PIT 的状态机继续解耦。快照页回答“源侧有没有刷新到、证据健不健康”，PIT 页回答“这些数据能不能重放、能不能做诊断”。因此同一层可以出现 `L3 WARNING` vs `L3 DISABLED/OBSERVATION`、`L4 BLOCKED` vs `L4 CALIBRATING` 的差异，但差异原因要由后端读模型负责，不交给前端猜测。
+- `POST /admin/snapshot-refresh-jobs` 仍是唯一刷新入口，phase2 target 扩展为 `fundamentals`、`sentiment`、`macro_derivatives`。phase2 refresh 只负责 snapshot/provider/readiness 数据面，不允许把任何候选因子、检疫结果或发布结果直接写入正式因子库。
+- L4 IV / macro evidence 的默认生产基线是 Massive / legacy Polygon 兼容链路。`MASSIVE_API_KEY` 与 `POLYGON_API_KEY` 都可以驱动 precision / option-skew 相关证据；ThetaData 在 architecture 上被视作后续可插拔 provider，而不是 phase2 必选主路径。
+- factor governance 仍坚持 staged publishing：phase2 新增的数据面只提升 `Factor Factory -> D2 Quarantine -> Publish` 的证据质量，不改变“10Y admission 可推进、30Y Full Ready 继续补证”的准入分层，也不允许 mining sandbox 候选绕过 D2 直接写 `factor_definitions`。
+
 ## PIT external-source repair architecture
 
 - `/pit-data` owns the operator-facing repair state. Its `external_source_readiness` field is additive and summarizes external evidence readiness without changing existing PIT blockers or snapshot routes.
 - `.tmp/pit-bulk-cache` is the default local cache root for Kaggle ZIP/CSV payloads, Matrix manifests, DuckDB lookup catalogs, and partitioned Parquet output. If older imports are nested one level deeper under `grit-pit-bulk-cache`, the PIT readiness resolver treats that child directory as the active cache when the outer root has no manifests, catalog, or normalized artifacts. These large or third-party files are local runtime artifacts inside the project temp area and must be referenced by manifest hash, schema fingerprint, row count, license, source URL, and import time.
 - Historical component Matrix sources such as `github_sp500_historical_components` are membership skeletons only. They can decide whether a symbol belonged to the S&P 500 at an effective date, but they cannot provide price, split, dividend, or delisting evidence by themselves.
 - Kaggle bulk sources such as `kaggle_huge_stock_market_dataset` and delisted archives are price-only PIT inputs. They may fill adjusted OHLCV gaps for repair-queue symbols after conflict checks against `ds-price`, but they do not clear corporate-action blockers unless separate split/dividend evidence or a zero-event certificate exists.
-- Polygon is an optional precision layer. When `POLYGON_API_KEY` is present, targeted repair can use aggregates for OHLCV, ticker/reference for inactive identity, and splits/dividends for corporate-action evidence. Without the key, the provider remains registered but reports missing credentials.
+- Polygon/Massive is an optional precision layer. When `MASSIVE_API_KEY` or legacy `POLYGON_API_KEY` is present, targeted repair can use aggregates for OHLCV, ticker/reference for inactive identity, and splits/dividends for corporate-action evidence. The provider defaults to `https://api.massive.com` and can be overridden with `MASSIVE_API_BASE_URL` or `POLYGON_API_BASE_URL`; without a key, it remains registered but reports missing credentials.
 - Provider registry entries for external PIT sources expose governance metadata (`source_url`, license, hash, row count, schema fingerprint, last import time, PIT permission) and credential status only. Secret values must never cross API, storage, logs, manifests, screenshots, or docs.
 - Diff repair imports only symbols in the current `/pit-data.full_ready_repair_plan` queue, never an entire 20GB-class dataset. Existing price rows win when adjusted-price deltas exceed the configured conflict threshold; those candidates stay blocked as `price_conflict` until reviewed.
+
+## Backtest recovery and multi-factor execution note (2026-05-13)
+
+- 回测执行现在和优化任务一样具备正式的恢复状态机：服务启动可按 `GRIT_STARTUP_BACKTEST_RECOVERY=resume|interrupt|skip` 处理遗留 `QUEUED/RUNNING` 记录；`interrupt` 会把它们显式转成 `INTERRUPTED`，`resume` 会从最新 checkpoint 继续，而不是从头重跑。
+- `app_runtime_state` 中的 `backtest_runner_claim:*` 是跨进程 runner claim 真相；claim 按 owner + lease 维护，用来防止多个服务实例同时认领同一个回测 run。`POST /backtest-runs/{id}/resume` 只允许恢复 `INTERRUPTED` run，并要求 `idempotency_key` 来保证人工恢复操作幂等。
+- Multi-factor execution no longer re-queries `universe_membership_snapshots` on every rebalance date. The runner preloads industry membership history once per run and reuses in-memory mappings for each rebalance date.
+- Universe symbol resolution for backtests now uses a targeted `load_universe_membership_symbols_as_of(...)` repository query instead of loading the full membership history and filtering in Python. This is the hot-path read model for long-history reruns and should stay index-friendly.
