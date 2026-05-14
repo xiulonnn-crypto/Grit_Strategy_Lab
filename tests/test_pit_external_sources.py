@@ -78,7 +78,6 @@ def test_kaggle_credential_status_rejects_wrapped_placeholder_tokens(tmp_path, m
 
 def test_polygon_credential_status_accepts_massive_or_legacy_env(monkeypatch):
     monkeypatch.setenv("MASSIVE_API_KEY", "massive-unit-key")
-    monkeypatch.delenv("POLYGON_API_KEY", raising=False)
 
     status = polygon_credential_status()
 

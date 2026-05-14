@@ -16,6 +16,7 @@ type FakeApi = {
   listCompositions?: ReturnType<typeof vi.fn>;
   listCompositionBacktestRuns?: ReturnType<typeof vi.fn>;
   listCompositionAllocationJobs?: ReturnType<typeof vi.fn>;
+  updateComposition?: ReturnType<typeof vi.fn>;
   refreshCompositionDiagnostics?: ReturnType<typeof vi.fn>;
   refreshCompositionSourceFreezes?: ReturnType<typeof vi.fn>;
   confirmCompositionProxy?: ReturnType<typeof vi.fn>;
@@ -25,6 +26,7 @@ const fakeApi = vi.hoisted<FakeApi>(() => ({
   listCompositions: vi.fn(),
   listCompositionBacktestRuns: vi.fn(),
   listCompositionAllocationJobs: vi.fn(),
+  updateComposition: vi.fn(),
   refreshCompositionDiagnostics: vi.fn(),
   refreshCompositionSourceFreezes: vi.fn(),
   confirmCompositionProxy: vi.fn(),
@@ -132,6 +134,30 @@ const sourceLogicDriftDiagnosis: ApiCompositionStatusDiagnosis = {
   ],
 };
 
+const legNewParametersDiagnosis: ApiCompositionStatusDiagnosis = {
+  status: '待校准',
+  issue_type: '腿有新参数',
+  diagnosis_type: 'strategy_leg_new_parameters',
+  diagnosis_label: '待校准：腿有新参数',
+  frontend_explanation: '策略、参数版本与回测周期保持不变，但同周期下已经出现新的回测结果，当前组合仍冻结在旧来源上。',
+  action: '先查看对应策略腿，再决定是否吸收新的同周期回测结果。',
+  resolution_criteria: '已明确保留旧来源，或已切换到新的同周期回测来源。',
+  actions: [
+    {
+      label: '查看对应腿',
+      action_key: 'open_strategy_leg',
+      action_kind: 'inspect',
+      route: '/legs?source_ref_id=strategy_leg%3A%3Astrat_0be646e45c26-v1%3A%3Arun_c974e22597c3',
+    },
+    {
+      label: '打开组合工作台',
+      action_key: 'open_composition_workbench',
+      action_kind: 'open_new_tab',
+      route: '/compositions/workbench?composition_id=cmp-params',
+    },
+  ],
+};
+
 const compositions: ApiCompositionListItem[] = [
   {
     id: 'cmp-001',
@@ -188,6 +214,19 @@ const compositions: ApiCompositionListItem[] = [
     annualized_return: 0.114,
     sharpe: 1.06,
     max_drawdown: -0.168,
+    return_quality_summary: {
+      status: 'verified',
+      metric_basis: 'aligned_recent_window',
+      metric_window_label: '2016-04 - 2026-03',
+      source_metric_basis: 'frozen_strategy_run_full_window',
+      alignment_window_start: '2016-04',
+      alignment_window_end: '2026-03',
+      aligned_points: 120,
+      missing_points: 0,
+      coverage_pct: 100,
+      fallback_used: false,
+      notes: [],
+    },
     updated_at: '2026-04-29T08:00:00.000Z',
     latest_activity_label: '2022 压力窗口需复盘',
     allowed_actions: ['open_composition_workbench'],
@@ -364,6 +403,7 @@ beforeEach(() => {
   fakeApi.listCompositions = vi.fn().mockResolvedValue(compositions);
   fakeApi.listCompositionBacktestRuns = vi.fn().mockResolvedValue(backtestRuns);
   fakeApi.listCompositionAllocationJobs = vi.fn().mockResolvedValue(allocationJobs);
+  fakeApi.updateComposition = vi.fn().mockResolvedValue({ ...compositions[0], status: 'ARCHIVED' });
   fakeApi.refreshCompositionDiagnostics = vi.fn().mockResolvedValue(compositions[0]);
   fakeApi.refreshCompositionSourceFreezes = vi.fn().mockResolvedValue(compositions[0]);
   fakeApi.confirmCompositionProxy = vi.fn().mockResolvedValue(compositions[1]);
@@ -406,6 +446,7 @@ describe('composition v2 global index pages', () => {
     expect(qqqRow).toHaveTextContent('+11.4%');
     expect(qqqRow).toHaveTextContent('1.06');
     expect(qqqRow).toHaveTextContent('-16.8%');
+    expect(qqqRow).toHaveTextContent('组合指标窗口 2016-04 - 2026-03');
     expect(qqqRow).toHaveTextContent('10Y 已覆盖');
     expect(qqqRow).toHaveTextContent('20Y 待补齐');
     expect(qqqRow).toHaveTextContent('30Y 待补齐');
@@ -415,6 +456,35 @@ describe('composition v2 global index pages', () => {
     expect(screen.queryByText('版本漂移')).toBeNull();
     expect(screen.queryByText(/127\.0\.0\.1:8000/)).toBeNull();
     expect(screen.queryByText(/Stepper|mock|placeholder/i)).toBeNull();
+  });
+
+  it('archives a composition from the list only after second confirmation and reloads live rows', async () => {
+    fakeApi.listCompositions = vi.fn()
+      .mockResolvedValueOnce(compositions)
+      .mockResolvedValue(compositions.filter((item) => item.id !== 'cmp-001'));
+    fakeApi.updateComposition = vi.fn().mockResolvedValue({ ...compositions[0], status: 'ARCHIVED' });
+
+    await act(async () => {
+      render(<CompositionListIndexPage />);
+    });
+
+    const table = screen.getByRole('table', { name: '组合列表' });
+    expect(await within(table).findByText('全天候研究组合')).toBeInTheDocument();
+    const row = within(table).getByText('全天候研究组合').closest('tr')!;
+    fireEvent.click(within(row).getByRole('button', { name: '归档' }));
+
+    expect(fakeApi.updateComposition).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole('dialog', { name: '确认归档组合' });
+    expect(within(dialog).getByText('cmp-001')).toBeInTheDocument();
+    expect(within(dialog).getByText(/不会被物理清除/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/不再计入当前引用数/)).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '确认归档' }));
+
+    await waitFor(() => expect(fakeApi.updateComposition).toHaveBeenCalledWith('cmp-001', { status: 'ARCHIVED' }));
+    await waitFor(() => expect(fakeApi.listCompositions).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(within(table).queryByText('全天候研究组合')).toBeNull());
+    expect(within(table).getByText('QQQ网格&标普动量平衡')).toBeInTheDocument();
   });
 
   it('opens the status label dialog with three plain-language sections and confirms proxy coverage', async () => {
@@ -521,6 +591,54 @@ describe('composition v2 global index pages', () => {
     expect(within(dialog!).getByText('稳健：证据链完整')).toBeInTheDocument();
     expect(within(dialog!).getByText('当前无需处理。')).toBeInTheDocument();
     expect(within(dialog!).queryByRole('button', { name: '确认并重新冻结来源指纹' })).toBeNull();
+  });
+
+  it('shows the strategy-leg new-parameters diagnosis and opens the matching leg in the current page', async () => {
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+    try {
+      fakeApi.listCompositions = vi.fn().mockResolvedValue([
+        {
+          ...compositions[0],
+          id: 'cmp-params',
+          name: '多因子核心模型-v1 组合',
+          primary_diagnosis: legNewParametersDiagnosis,
+          diagnoses: [legNewParametersDiagnosis],
+          has_new_version: false,
+          source_integrity: [
+            {
+              leg_id: 'leg-mf-v1',
+              display_name: '多因子核心模型-v1',
+              source_ref_id: 'strategy_leg::strat_0be646e45c26-v1::run_c974e22597c3',
+              freeze_hash: 'hash-mf-v1',
+              signature_status: 'stale',
+              drift_status: 'drifted',
+              has_new_parameters: true,
+              current_ref_id: 'strategy_leg::strat_0be646e45c26-v1::run_054d4cee4b1c',
+              checked_at: '2026-05-14T09:20:00.000Z',
+              alerts: ['A newer completed run exists for the same strategy version and backtest period.'],
+            },
+          ],
+        },
+      ]);
+
+      await act(async () => {
+        render(<CompositionListIndexPage />);
+      });
+
+      const table = screen.getByRole('table', { name: '组合列表' });
+      await within(table).findByText('多因子核心模型-v1 组合');
+      const row = within(table).getByText('多因子核心模型-v1 组合').closest('tr')!;
+      fireEvent.click(within(row).getByRole('button', { name: '待校准：腿有新参数' }));
+
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByText('策略、参数版本与回测周期保持不变，但同周期下已经出现新的回测结果，当前组合仍冻结在旧来源上。')).toBeInTheDocument();
+      fireEvent.click(within(dialog).getByRole('button', { name: '查看对应腿' }));
+
+      expect(window.location.hash).toBe('#/legs?source_ref_id=strategy_leg%3A%3Astrat_0be646e45c26-v1%3A%3Arun_c974e22597c3');
+      expect(openSpy).not.toHaveBeenCalled();
+    } finally {
+      openSpy.mockRestore();
+    }
   });
 
   it('filters composition rows and saves the selected list view', async () => {

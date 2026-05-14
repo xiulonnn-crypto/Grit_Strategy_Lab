@@ -4410,6 +4410,7 @@ describe("optimization module flow", () => {
     );
     expect(container.textContent).toContain("因子权重 · 12-1月截面动量排名");
     expect(container.textContent).toContain("因子权重 · 滚动市盈率倒数 (LTM)");
+    expect(container.textContent).toContain("持仓数量");
     expect(container.textContent).toContain("中性化方法");
     expect(container.textContent).not.toContain("是否启用行业中性化");
     expect(container.textContent).toContain("默认约束：权重合计 100%");
@@ -4419,7 +4420,7 @@ describe("optimization module flow", () => {
     ).find((card) => card.textContent?.includes("有效组合")) as
       | HTMLElement
       | undefined;
-    expect(budgetCard?.querySelector("strong")?.textContent).toBe("5");
+    expect(budgetCard?.querySelector("strong")?.textContent).toBe("45");
   });
 
   it("keeps search range inputs editable while the user clears or types a minus sign", async () => {

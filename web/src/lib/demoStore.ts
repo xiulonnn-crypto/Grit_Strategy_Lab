@@ -1497,6 +1497,7 @@ function createDemoFactorModelStrategy(payload: ApiFactorModelCreatePayload): Ap
     weights: Object.fromEntries(payload.components.map((component) => [component.factor_id, component.weight])),
     directions: Object.fromEntries(payload.components.map((component) => [component.factor_id, component.direction])),
     neutralization: payload.neutralization,
+    top_n: payload.top_n ?? 8,
     scoring_method: payload.scoring_method,
     rebalance_frequency: payload.rebalance_frequency,
     pit_snapshot_refs: preview.coverage,

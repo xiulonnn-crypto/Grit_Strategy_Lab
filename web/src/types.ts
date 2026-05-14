@@ -1220,6 +1220,7 @@ export type ApiLegInventoryRow = {
   status: string;
   status_label: string;
   has_new_version: boolean;
+  has_new_parameters?: boolean;
   is_orphan: boolean;
   attribute_tags: string[];
   allowed_actions: string[];
@@ -1233,6 +1234,8 @@ export type ApiLegInventoryRow = {
   alerts?: string[];
   return_quality?: ApiCompositionReturnQualityLeg | null;
   config?: Record<string, unknown>;
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
 export type ApiLegInventory = {
@@ -1444,6 +1447,9 @@ export type ApiCompositionScore = {
 
 export type ApiCompositionReturnQualitySummary = {
   status: string;
+  metric_basis?: string | null;
+  metric_window_label?: string | null;
+  source_metric_basis?: string | null;
   alignment_window_start?: string | null;
   alignment_window_end?: string | null;
   aligned_points: number;
@@ -1463,6 +1469,14 @@ export type ApiCompositionReturnQualityLeg = {
   aligned_points: number;
   missing_points: number;
   coverage_pct: number;
+  metric_basis?: string | null;
+  source_metric_basis?: string | null;
+  source_run_id?: string | null;
+  source_annualized_return_pct?: number | null;
+  source_max_drawdown_pct?: number | null;
+  aligned_annualized_return_pct?: number | null;
+  aligned_max_drawdown_pct?: number | null;
+  aligned_sharpe?: number | null;
   window_start?: string | null;
   window_end?: string | null;
   issue_types?: string[];
@@ -1488,6 +1502,7 @@ export type ApiCompositionSourceIntegrity = {
   freeze_hash?: string | null;
   signature_status: string;
   drift_status: string;
+  has_new_parameters?: boolean;
   current_ref_id?: string | null;
   checked_at?: string | null;
   alerts: string[];
@@ -1638,6 +1653,7 @@ export type ApiCompositionListItem = {
   allowed_actions: string[];
   has_new_version?: boolean;
   source_integrity?: ApiCompositionSourceIntegrity[];
+  return_quality_summary?: ApiCompositionReturnQualitySummary;
   primary_diagnosis?: ApiCompositionStatusDiagnosis | null;
   diagnoses?: ApiCompositionStatusDiagnosis[];
 };
@@ -2207,6 +2223,10 @@ export type ApiSnapshotOverview = {
     updated_at?: string | null;
     provider_keys?: string[];
     linked_targets?: string[];
+    linked_target_evidence?: Array<{
+      dataset_id: string;
+      evidence_kind: string;
+    }>;
     [key: string]: unknown;
   }>;
   snapshot_quality_alerts?: Array<{
@@ -2217,6 +2237,8 @@ export type ApiSnapshotOverview = {
     source_layer: string;
     blocking: boolean;
     target?: string | null;
+    action_label_cn?: string | null;
+    operator_action_cn?: string | null;
     [key: string]: unknown;
   }>;
   factor_dimension_readiness?: Array<{
@@ -3200,6 +3222,7 @@ export type ApiFactorModelPreviewPayload = {
   name?: string | null;
   universe: string;
   rebalance_frequency: string;
+  top_n?: number | null;
   scoring_method: string;
   components: ApiFactorModelComponentPayload[];
   neutralization: ApiFactorModelNeutralizationPayload;

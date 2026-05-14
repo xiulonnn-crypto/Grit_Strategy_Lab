@@ -296,13 +296,24 @@ def test_snapshot_overview_contract_is_exact_on_fresh_database(tmp_path):
     ]
     by_layer = {item["layer_id"]: item for item in overview["data_layer_readiness"]}
     assert by_layer["l1_market_data"]["status"] in {"READY", "WARNING", "BLOCKED"}
+    assert by_layer["l3_sentiment_data"]["status"] == "BLOCKED"
+    assert by_layer["l3_sentiment_data"]["metrics"][0]["value"] == "0/3"
     assert by_layer["l4_macro_derivatives"]["status"] in {"CALIBRATING", "BLOCKED"}
+    l4_metrics = {item["label"]: item["value"] for item in by_layer["l4_macro_derivatives"]["metrics"]}
+    assert l4_metrics["宏观利率数据"] == "0 / 10 覆盖"
+    assert l4_metrics["通过标准"] == "10 / 10"
     assert {item["code"] for item in overview["snapshot_quality_alerts"]} >= {
         "FUNDAMENTAL_BALANCE_CHECK_PENDING",
         "CONSENSUS_BLIND_SPOT",
         "SHORT_VOLUME_JUMP_REVIEW",
         "RATE_BETA_CALIBRATING",
     }
+    consensus_alert = next(item for item in overview["snapshot_quality_alerts"] if item["code"] == "CONSENSUS_BLIND_SPOT")
+    assert consensus_alert["blocking"] is True
+    assert "0/3" in consensus_alert["detail_cn"]
+    assert "ALPHAVANTAGE_API_KEY" in consensus_alert["operator_action_cn"]
+    rate_alert = next(item for item in overview["snapshot_quality_alerts"] if item["code"] == "RATE_BETA_CALIBRATING")
+    assert "0 / 10" in rate_alert["detail_cn"]
     factor_dimensions = {item["dimension_id"]: item for item in overview["factor_dimension_readiness"]}
     assert factor_dimensions["price_liquidity"]["status"] in {"READY", "WARNING", "BLOCKED"}
     assert factor_dimensions["quality_valuation"]["linked_layers"] == ["l2_fundamental_data"]
@@ -315,7 +326,6 @@ def test_snapshot_provider_registry_and_attempts_are_available_on_fresh_database
         "FMP_API_KEY",
         "SEC_USER_AGENT",
         "MASSIVE_API_KEY",
-        "POLYGON_API_KEY",
         "NASDAQ_DATA_LINK_API_KEY",
         "FINNHUB_API_KEY",
     ):
@@ -370,7 +380,7 @@ def test_snapshot_provider_registry_and_attempts_are_available_on_fresh_database
     assert sec["credential_requirements"]["required_env_vars"] == ["SEC_USER_AGENT"]
     assert sec["trust_profile"]["trust_tier"] == "identity_lifecycle_authority"
     polygon = next(item for item in registry["items"] if item["provider_id"] == "polygon")
-    assert polygon["credential_requirements"]["required_env_vars"] == ["MASSIVE_API_KEY", "POLYGON_API_KEY"]
+    assert polygon["credential_requirements"]["required_env_vars"] == ["MASSIVE_API_KEY"]
     assert polygon["source_governance"]["license"] == "account_terms"
     assert attempts["latest_job_id"] is None
     assert attempts["items"] == []
@@ -431,6 +441,285 @@ def test_snapshot_overview_surfaces_persisted_phase2_dataset_evidence(tmp_path):
     assert analyst_evidence["evidence_kind"] == "dataset_snapshot"
 
 
+def test_snapshot_overview_uses_macro_series_coverage_for_rate_beta(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    repository = service.market_data_repository
+    series_ids = ["DGS2", "DGS10", "FEDFUNDS", "SOFR"]
+    signal_points = [
+        {
+            "entity_key": series_id,
+            "date": f"2026-05-{day:02d}",
+            "publish_date": f"2026-05-{day:02d}",
+            "available_at": f"2026-05-{day:02d}",
+            "metric_key": "rate_value",
+            "metric_value": 4.0 + index / 100,
+            "source": "unit_test_fred",
+        }
+        for index, series_id in enumerate(series_ids, start=1)
+        for day in range(10, 13)
+    ]
+    repository.replace_signal_snapshot(
+        {
+            "id": "ds-macro-rates",
+            "name": "FRED macro rates",
+            "status": "READY",
+            "as_of": "2026-05-14",
+            "freshness_label": "unit-test",
+            "start_date": "2026-05-10",
+            "end_date": "2026-05-12",
+            "row_count": len(signal_points),
+            "source": "fred_macro_series",
+            "fallback_source": None,
+            "metadata": {
+                "covered_symbol_count": 4,
+                "total_symbol_count": 10,
+                "pit_gate_status": "READY",
+            },
+        },
+        signal_points=signal_points,
+        signal_coverage=[
+            {
+                "entity_key": series_id,
+                "start_date": "2026-05-10",
+                "end_date": "2026-05-12",
+                "observation_count": 3,
+                "source": "unit_test_fred",
+            }
+            for series_id in series_ids
+        ],
+    )
+    if hasattr(service, "_invalidate_snapshot_overview_cache"):
+        service._invalidate_snapshot_overview_cache()
+
+    overview = assert_ok(client.get("/data-snapshots/overview"))
+
+    l4_layer = next(item for item in overview["data_layer_readiness"] if item["layer_id"] == "l4_macro_derivatives")
+    l4_metrics = {item["label"]: item["value"] for item in l4_layer["metrics"]}
+    assert l4_metrics["宏观利率数据"] == "4 / 10 覆盖"
+    assert l4_layer["evidence_status"]["macro_point_rows"] == 12
+    assert l4_layer["evidence_status"]["macro_covered_series"] == 4
+    assert l4_layer["evidence_status"]["macro_required_series"] == 10
+    assert l4_layer["evidence_status"]["macro_rates"] == "CALIBRATING"
+    rate_alert = next(item for item in overview["snapshot_quality_alerts"] if item["code"] == "RATE_BETA_CALIBRATING")
+    assert "宏观利率数据当前 4 / 10 覆盖" in rate_alert["detail_cn"]
+
+    pit = assert_ok(client.get("/pit-data"))
+    linkage = {item["check_id"]: item for item in pit["snapshot_layer_linkage"]}
+    assert linkage["rate_beta_calibration"]["result_status"] != "READY"
+
+
+def test_snapshot_refresh_lands_phase2_dataset_rows_and_pit_gates(tmp_path, monkeypatch):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    monkeypatch.setattr(
+        service,
+        "_fetch_fmp_fundamental_points",
+        lambda *, symbols, as_of: [
+            {
+                "symbol": "AAPL",
+                "date": "2026-03-31",
+                "period_end_date": "2026-03-31",
+                "publish_date": "2026-05-01",
+                "statement_date": "2026-03-31",
+                "available_at": "2026-05-01",
+                "fiscal_year": 2026,
+                "fiscal_period": "Q1",
+                "time_provenance": "unit_test",
+                "ltm_earnings": 10.0,
+                "revenue": 100.0,
+                "gross_profit": 45.0,
+                "net_income": 12.0,
+                "market_cap": 2_000_000.0,
+                "book_value_equity": 60.0,
+                "operating_cash_flow": 15.0,
+                "capex": -2.0,
+                "enterprise_value": 2_100_000.0,
+                "total_shares": 1_000_000.0,
+                "shares_outstanding": 1_000_000.0,
+                "total_assets": 120.0,
+                "current_assets": 40.0,
+                "current_liabilities": 20.0,
+                "long_term_debt": 10.0,
+                "total_debt": 15.0,
+                "cash_and_equivalents": 5.0,
+                "source": "unit_test_fmp",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        service,
+        "_fetch_alpha_vantage_consensus_points",
+        lambda *, symbols, as_of: [
+            {
+                "entity_key": "AAPL",
+                "date": f"2026-03-{day:02d}",
+                "publish_date": "2026-04-15",
+                "available_at": "2026-04-15",
+                "metric_key": f"eps_surprise_pct_{index}",
+                "metric_value": 0.07 + index / 100,
+                "source": "unit_test_alpha",
+            }
+            for index, day in enumerate(range(29, 32), start=1)
+        ],
+    )
+    monkeypatch.setattr(
+        service,
+        "_fetch_finra_short_volume_points",
+        lambda *, symbols, as_of: [
+            {
+                "entity_key": "AAPL",
+                "date": "2026-05-13",
+                "publish_date": "2026-05-13",
+                "available_at": "2026-05-14",
+                "metric_key": "short_volume_ratio",
+                "metric_value": 0.42,
+                "source": "unit_test_finra",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        service,
+        "_fetch_fred_macro_rate_points",
+        lambda *, symbols, as_of: [
+            {
+                "entity_key": f"FRED_SERIES_{series_index:02d}",
+                "date": "2026-05-13",
+                "publish_date": "2026-05-13",
+                "available_at": "2026-05-13",
+                "metric_key": "rate_value",
+                "metric_value": 4.0 + series_index / 100,
+                "source": "unit_test_fred",
+            }
+            for series_index in range(1, 11)
+        ],
+    )
+    monkeypatch.setattr(
+        service,
+        "_fetch_polygon_option_skew_points",
+        lambda *, symbols, as_of: [
+            {
+                "entity_key": "AAPL",
+                "date": "2026-05-13",
+                "publish_date": "2026-05-13",
+                "available_at": "2026-05-13",
+                "metric_key": "iv_skew_put_call_25d",
+                "metric_value": 0.04,
+                "source": "unit_test_polygon",
+            }
+        ],
+    )
+
+    refreshed = assert_ok(
+        client.post(
+            "/admin/snapshot-refresh-jobs",
+            json={
+                "mode": "repair",
+                "targets": ["fundamentals", "sentiment", "macro_derivatives"],
+                "symbols": ["AAPL"],
+                "phase2_max_symbols": 1,
+            },
+        )
+    )
+
+    dataset_ids = {item["id"] for item in refreshed["dataset_snapshots"]}
+    assert {
+        "ds-fundamentals",
+        "ds-analyst-consensus",
+        "ds-short-volume",
+        "ds-macro-rates",
+        "ds-option-skew",
+    } <= dataset_ids
+    refresh_datasets = refreshed["latest_job"]["summary"]["refresh_stats"]["datasets"]
+    assert refresh_datasets["ds-analyst-consensus"]["provider_summary"]["providers"]["alpha_vantage"]["status"] == "succeeded"
+    assert refresh_datasets["ds-option-skew"]["provider_summary"]["providers"]["polygon"]["landed_row_count"] == 1
+
+    layers = {item["layer_id"]: item for item in refreshed["data_layer_readiness"]}
+    assert layers["l2_fundamental_data"]["status"] == "READY"
+    assert layers["l3_sentiment_data"]["status"] == "READY"
+    assert layers["l4_macro_derivatives"]["status"] in {"READY", "BLOCKED", "CALIBRATING"}
+    assert layers["l3_sentiment_data"]["evidence_status"]["short_volume"] == "READY"
+    refreshed_alert_codes = {item["code"] for item in refreshed["snapshot_quality_alerts"]}
+    assert "CONSENSUS_BLIND_SPOT" not in refreshed_alert_codes
+    assert "SHORT_VOLUME_JUMP_REVIEW" not in refreshed_alert_codes
+
+    pit = assert_ok(client.get("/pit-data"))
+    linkage = {item["check_id"]: item for item in pit["snapshot_layer_linkage"]}
+    assert linkage["fundamental_publish_gate"]["result_status"] == "READY"
+    assert linkage["consensus_sample_gate"]["result_status"] == "READY"
+    assert linkage["short_volume_gate"]["result_status"] == "READY"
+    assert linkage["rate_beta_calibration"]["result_status"] == "READY"
+    assert linkage["iv_skew_feed"]["result_status"] == "READY"
+
+
+def test_snapshot_refresh_keeps_missing_time_signal_rows_out_of_dataset_snapshots(tmp_path, monkeypatch):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    monkeypatch.setattr(
+        service,
+        "_fetch_alpha_vantage_consensus_points",
+        lambda *, symbols, as_of: [
+            {
+                "entity_key": "AAPL",
+                "date": "2026-03-31",
+                "metric_key": "eps_surprise_pct",
+                "metric_value": 0.07,
+                "source": "unit_test_alpha",
+            }
+        ],
+    )
+    monkeypatch.setattr(service, "_fetch_finra_short_volume_points", lambda *, symbols, as_of: [])
+
+    refreshed = assert_ok(
+        client.post(
+            "/admin/snapshot-refresh-jobs",
+            json={"mode": "repair", "targets": ["sentiment"], "symbols": ["AAPL"]},
+        )
+    )
+
+    dataset_ids = {item["id"] for item in refreshed["dataset_snapshots"]}
+    assert "ds-analyst-consensus" not in dataset_ids
+    refresh_datasets = refreshed["latest_job"]["summary"]["refresh_stats"]["datasets"]
+    provider_payload = refresh_datasets["ds-analyst-consensus"]["provider_summary"]["providers"]["alpha_vantage"]
+    assert provider_payload["status"] == "empty"
+    assert provider_payload["reason"] == "provider_returned_rows_without_publish_date_or_available_at"
+    l3_layer = next(item for item in refreshed["data_layer_readiness"] if item["layer_id"] == "l3_sentiment_data")
+    evidence = next(item for item in l3_layer["linked_target_evidence"] if item["dataset_id"] == "ds-analyst-consensus")
+    assert evidence["evidence_kind"] == "readiness_only_provider_attempt"
+
+
+def test_phase2_finra_short_volume_request_uses_browser_user_agent(tmp_path, monkeypatch):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    captured_headers: dict[str, str] = {}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b"Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market\r\n20260513|AAPL|10|0|100|Q\r\n"
+
+    def fake_urlopen(request, timeout):
+        nonlocal captured_headers
+        captured_headers = {key.lower(): value for key, value in request.header_items()}
+        return _Response()
+
+    monkeypatch.setattr(real_service_module.urllib.request, "urlopen", fake_urlopen)
+
+    points = service._fetch_finra_short_volume_points(symbols=["AAPL"], as_of="2026-05-13T00:00:00Z")
+
+    assert "mozilla/5.0" in captured_headers["user-agent"].lower()
+    ratio = next(item for item in points if item["metric_key"] == "short_volume_ratio")
+    assert ratio["metric_value"] == 0.1
+    assert ratio["publish_date"] == "2026-05-13"
+    assert ratio["available_at"] == "2026-05-14"
+
+
 def test_snapshot_provider_registry_reuses_snapshot_overview_cache(tmp_path, monkeypatch):
     client, _ = create_test_client(tmp_path)
     service = client.app.state.service
@@ -455,11 +744,77 @@ def test_snapshot_provider_registry_reuses_snapshot_overview_cache(tmp_path, mon
     assert build_calls == 1
 
 
+def test_snapshot_overview_build_does_not_hold_snapshot_cache_lock(tmp_path, monkeypatch):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    original_builder = service._build_snapshot_overview
+
+    def lock_checking_builder(*args, **kwargs):
+        acquired = service._snapshot_overview_cache_lock.acquire(blocking=False)
+        try:
+            assert acquired, "/data-snapshots/overview must not hold the snapshot cache lock while rebuilding"
+            return original_builder(*args, **kwargs)
+        finally:
+            if acquired:
+                service._snapshot_overview_cache_lock.release()
+
+    monkeypatch.setattr(service, "_build_snapshot_overview", lock_checking_builder)
+
+    overview = assert_ok(client.get("/data-snapshots/overview"))
+
+    assert overview["dataset_snapshots"]
+
+
+def test_snapshot_overview_coalesces_concurrent_cache_miss(tmp_path, monkeypatch):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    service._invalidate_snapshot_overview_cache()
+    monkeypatch.setattr(service, "_market_data_snapshot_cache_signature", lambda: "unit-test-market-signature")
+    build_calls = 0
+    build_calls_lock = threading.Lock()
+    start_barrier = threading.Barrier(5)
+    payload = {
+        "dataset_snapshots": [{"id": "ds-price", "status": "READY"}],
+        "universe_snapshots": [{"id": "un-sp500", "status": "READY"}],
+        "data_trust_summary": {"layers": []},
+    }
+    results: list[dict[str, Any]] = []
+    errors: list[BaseException] = []
+
+    def slow_builder(*args, **kwargs):
+        nonlocal build_calls
+        with build_calls_lock:
+            build_calls += 1
+        time.sleep(0.15)
+        return dict(payload)
+
+    def worker() -> None:
+        try:
+            start_barrier.wait(timeout=2)
+            results.append(service.get_snapshot_overview())
+        except BaseException as exc:  # pragma: no cover - surfaced via assertion below
+            errors.append(exc)
+
+    monkeypatch.setattr(service, "_build_snapshot_overview", slow_builder)
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    start_barrier.wait(timeout=2)
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert build_calls == 1
+    assert len(results) == 4
+    assert all(result["dataset_snapshots"][0]["id"] == "ds-price" for result in results)
+
+
 def test_snapshot_provider_registry_masks_nasdaq_wiki_finnhub_and_massive_keys(tmp_path, monkeypatch):
     monkeypatch.setenv("NASDAQ_DATA_LINK_API_KEY", "nasdaq-secret-value")
     monkeypatch.setenv("FINNHUB_API_KEY", "finnhub-secret-value")
     monkeypatch.setenv("MASSIVE_API_KEY", "massive-secret-value")
-    monkeypatch.delenv("POLYGON_API_KEY", raising=False)
     client, _ = create_test_client(tmp_path)
 
     registry = assert_ok(client.get("/data-snapshots/provider-registry"))
@@ -483,7 +838,6 @@ def test_snapshot_provider_registry_masks_nasdaq_wiki_finnhub_and_massive_keys(t
 
 def test_snapshot_provider_registry_marks_rejected_massive_key_unusable(monkeypatch):
     monkeypatch.setenv("MASSIVE_API_KEY", "massive-secret-value")
-    monkeypatch.delenv("POLYGON_API_KEY", raising=False)
     provider = SimpleNamespace(provider_name="polygon", metadata={"access_tier": "paid_optional"})
 
     registry = build_provider_registry(
@@ -607,15 +961,15 @@ def test_snapshot_trust_summary_prefers_live_provider_state_over_static_key_prom
             "provider_id": "polygon",
             "source_name": "Polygon.io",
             "credential_requirements": {
-                "required_env_vars": ["POLYGON_API_KEY"],
-                "configured_env_vars": ["POLYGON_API_KEY"],
+                "required_env_vars": ["MASSIVE_API_KEY"],
+                "configured_env_vars": ["MASSIVE_API_KEY"],
                 "missing_env_vars": [],
             },
             "quota_cooldown": {"quota_limited": False, "cooldown_active": False, "next_retry_at": None},
             "error_summary": {
                 "status": "unavailable",
-                "reason": "missing POLYGON_API_KEY",
-                "error": "missing POLYGON_API_KEY",
+                "reason": "missing MASSIVE_API_KEY",
+                "error": "missing MASSIVE_API_KEY",
             },
             "trust_profile": {"operator_action": "配置 Polygon 后用于关键缺口精修。"},
             "enabled": True,
@@ -677,8 +1031,8 @@ def test_snapshot_trust_summary_prefers_live_provider_state_over_static_key_prom
             "target_type": "price_history",
             "quota_limited": False,
             "cooldown_active": False,
-            "reason": "missing POLYGON_API_KEY",
-            "error": "missing POLYGON_API_KEY",
+            "reason": "missing MASSIVE_API_KEY",
+            "error": "missing MASSIVE_API_KEY",
         },
     ]
 
@@ -697,7 +1051,7 @@ def test_snapshot_trust_summary_prefers_live_provider_state_over_static_key_prom
     precision_layer = next(item for item in summary["layers"] if item["id"] == "precision_repair")
     assert "Polygon.io" in precision_layer["operator_action"]
     assert "本轮未命中" in precision_layer["operator_action"]
-    assert "POLYGON_API_KEY" not in precision_layer["operator_action"]
+    assert "MASSIVE_API_KEY" not in precision_layer["operator_action"]
 
 
 def test_snapshot_progress_targets_use_distinct_symbol_projection(tmp_path, monkeypatch):

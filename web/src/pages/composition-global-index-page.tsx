@@ -202,6 +202,16 @@ function formatSharpe(value?: number | null): string {
   return value.toFixed(2);
 }
 
+function formatCompositionMetricWindow(item: ApiCompositionListItem): string | null {
+  const quality = item.return_quality_summary;
+  const start = quality?.alignment_window_start;
+  const end = quality?.alignment_window_end;
+  if (!start || !end) {
+    return null;
+  }
+  return `组合指标窗口 ${start} - ${end}`;
+}
+
 function formatSignedDecimal(value?: number | null, digits = 2): string {
   if (typeof value !== 'number' || Number.isNaN(value)) {
     return '暂无';
@@ -1177,12 +1187,16 @@ function Toolbar({
 }
 
 function CompositionListTable({
+  archivingCompositionId,
   compositions,
   loading,
+  onArchiveRequest,
   onDiagnosisOpen,
 }: {
+  archivingCompositionId?: string | null;
   compositions: ApiCompositionListItem[];
   loading: boolean;
+  onArchiveRequest: (item: ApiCompositionListItem) => void;
   onDiagnosisOpen: (item: ApiCompositionListItem) => void;
 }): JSX.Element {
   return (
@@ -1204,6 +1218,7 @@ function CompositionListTable({
           ? compositions.map((item) => {
               const pendingDecisionCount = item.pending_decision_count ?? (compositionNeedsDecision(item) ? 1 : 0);
               const diagnosis = primaryCompositionDiagnosis(item);
+              const metricWindow = formatCompositionMetricWindow(item);
               return (
                 <tr key={item.id}>
                   <td>
@@ -1232,6 +1247,7 @@ function CompositionListTable({
                     <div className="composition-global-index__value-stack">
                       <strong>{formatRatioAsPercent(item.annualized_return, { signed: true })}</strong>
                       <span>夏普 {formatSharpe(item.sharpe)} · 回撤 {formatRatioAsPercent(item.max_drawdown, { forceNegative: true })}</span>
+                      {metricWindow ? <span>{metricWindow}</span> : null}
                     </div>
                   </td>
                   <td>
@@ -1246,13 +1262,23 @@ function CompositionListTable({
                     </div>
                   </td>
                   <td>
-                    <button
-                      className="composition-global-index__text-button"
-                      onClick={() => goTo(`/compositions/${encodeURIComponent(item.id)}`)}
-                      type="button"
-                    >
-                      查看详情
-                    </button>
+                    <div className="composition-global-index__row-actions">
+                      <button
+                        className="composition-global-index__text-button"
+                        onClick={() => goTo(`/compositions/${encodeURIComponent(item.id)}`)}
+                        type="button"
+                      >
+                        查看详情
+                      </button>
+                      <button
+                        className="composition-global-index__text-button composition-global-index__text-button--danger"
+                        disabled={archivingCompositionId === item.id}
+                        onClick={() => onArchiveRequest(item)}
+                        type="button"
+                      >
+                        {archivingCompositionId === item.id ? '归档中...' : '归档'}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               );
@@ -1260,6 +1286,88 @@ function CompositionListTable({
           : null}
       </tbody>
     </table>
+  );
+}
+
+function CompositionArchiveDialog({
+  error,
+  item,
+  onCancel,
+  onConfirm,
+  saving,
+}: {
+  error: string | null;
+  item: ApiCompositionListItem;
+  onCancel: () => void;
+  onConfirm: () => void;
+  saving: boolean;
+}): JSX.Element {
+  return (
+    <div className="composition-global-index__dialog-backdrop" role="presentation">
+      <div
+        aria-label="确认归档组合"
+        aria-modal="true"
+        className="composition-global-index__dialog composition-global-index__archive-dialog"
+        role="dialog"
+      >
+        <div className="composition-global-index__dialog-header">
+          <div>
+            <p className="composition-global-index__dialog-eyebrow">归档确认</p>
+            <h2>确认归档组合</h2>
+          </div>
+          <button
+            aria-label="关闭归档确认"
+            className="composition-global-index__text-button"
+            disabled={saving}
+            onClick={onCancel}
+            type="button"
+          >
+            关闭
+          </button>
+        </div>
+        <div className="composition-global-index__archive-copy">
+          <p>
+            归档后该组合会从组合列表和默认运营视图隐藏，历史回测、冻结来源与审计证据不会被物理清除。
+          </p>
+          <p>
+            资产库引用计数会在下一次读取时按非归档组合重新计算；该组合的 {item.leg_count} 条腿将不再计入当前引用数。
+          </p>
+        </div>
+        <dl className="composition-global-index__archive-summary">
+          <div>
+            <dt>组合名称</dt>
+            <dd>{item.name}</dd>
+          </div>
+          <div>
+            <dt>稳定 ID</dt>
+            <dd>{item.id}</dd>
+          </div>
+        </dl>
+        {error ? (
+          <div className="composition-global-index__error" role="alert">
+            {error}
+          </div>
+        ) : null}
+        <div className="composition-global-index__dialog-footer">
+          <button
+            className="composition-global-index__ghost-button"
+            disabled={saving}
+            onClick={onCancel}
+            type="button"
+          >
+            取消
+          </button>
+          <button
+            className="composition-global-index__danger-button"
+            disabled={saving}
+            onClick={onConfirm}
+            type="button"
+          >
+            {saving ? '归档中...' : '确认归档'}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1814,10 +1922,14 @@ function useAllocationJobs(): PageStatus & { reload: () => void; rows: ApiCompos
 }
 
 export function CompositionListIndexPage(): JSX.Element {
+  const api = useApiClient();
   const { error, loading, reload, rows } = useCompositions();
   const [filters, setFilters] = useState<CompositionListFilterState>(() => initialCompositionListFilters());
   const [viewSaveStatus, setViewSaveStatus] = useState<string | null>(null);
   const [diagnosisItem, setDiagnosisItem] = useState<ApiCompositionListItem | null>(null);
+  const [pendingArchiveItem, setPendingArchiveItem] = useState<ApiCompositionListItem | null>(null);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [archivingCompositionId, setArchivingCompositionId] = useState<string | null>(null);
   const filteredRows = useMemo(() => filterCompositions(rows, filters), [filters, rows]);
   const metrics = useMemo<Metric[]>(() => {
     const activeRows = rows.filter((item) => item.status === 'ACTIVE');
@@ -1839,6 +1951,40 @@ export function CompositionListIndexPage(): JSX.Element {
     setFilters(next);
     setViewSaveStatus(null);
     writeCompositionListHash(next);
+  }
+
+  function requestArchive(item: ApiCompositionListItem): void {
+    setArchiveError(null);
+    setPendingArchiveItem(item);
+  }
+
+  function cancelArchive(): void {
+    if (pendingArchiveItem && archivingCompositionId === pendingArchiveItem.id) {
+      return;
+    }
+    setPendingArchiveItem(null);
+    setArchiveError(null);
+  }
+
+  async function confirmArchive(): Promise<void> {
+    if (!pendingArchiveItem) {
+      return;
+    }
+    if (!api.updateComposition) {
+      setArchiveError('当前运行时还未接入组合状态写入接口，无法归档组合。');
+      return;
+    }
+    try {
+      setArchiveError(null);
+      setArchivingCompositionId(pendingArchiveItem.id);
+      await api.updateComposition(pendingArchiveItem.id, { status: 'ARCHIVED' });
+      setPendingArchiveItem(null);
+      reload();
+    } catch (caught) {
+      setArchiveError(`归档组合失败：${(caught as Error).message}`);
+    } finally {
+      setArchivingCompositionId(null);
+    }
   }
 
   return (
@@ -1904,12 +2050,27 @@ export function CompositionListIndexPage(): JSX.Element {
             onSecondaryAction={() => updateFilters(DEFAULT_COMPOSITION_LIST_FILTERS)}
             secondaryActionLabel="重置筛选"
           />
-          <CompositionListTable compositions={filteredRows} loading={loading} onDiagnosisOpen={setDiagnosisItem} />
+          <CompositionListTable
+            archivingCompositionId={archivingCompositionId}
+            compositions={filteredRows}
+            loading={loading}
+            onArchiveRequest={requestArchive}
+            onDiagnosisOpen={setDiagnosisItem}
+          />
         </PanelShell>
         <DecisionRail compositions={filteredRows} onDiagnosisOpen={setDiagnosisItem} />
       </div>
       {diagnosisItem ? (
         <CompositionDiagnosisDialog item={diagnosisItem} onClose={() => setDiagnosisItem(null)} onCompleted={reload} />
+      ) : null}
+      {pendingArchiveItem ? (
+        <CompositionArchiveDialog
+          error={archiveError}
+          item={pendingArchiveItem}
+          onCancel={cancelArchive}
+          onConfirm={() => void confirmArchive()}
+          saving={archivingCompositionId === pendingArchiveItem.id}
+        />
       ) : null}
     </div>
   );

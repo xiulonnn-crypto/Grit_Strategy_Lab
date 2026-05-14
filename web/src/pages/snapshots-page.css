@@ -903,6 +903,13 @@
   line-height: 20px;
 }
 
+.snapshots-equity-view .dense-row__identifier {
+  color: var(--gsl-text-muted);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 11px;
+  line-height: 16px;
+}
+
 .snapshots-equity-view .dense-meta-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -948,6 +955,19 @@
   cursor: pointer;
 }
 
+.snapshots-equity-view .snapshots-ledger-detail {
+  display: grid;
+  gap: 8px;
+}
+
+.snapshots-equity-view .snapshots-ledger-detail p {
+  margin: 0;
+}
+
+.snapshots-equity-view .snapshots-ledger-detail strong {
+  color: var(--gsl-text-title);
+}
+
 .snapshots-equity-view .evidence-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -974,6 +994,12 @@
 .snapshots-equity-view .credential-row strong {
   color: var(--gsl-text-title);
   font-size: 14px;
+}
+
+.snapshots-equity-view .credential-row__copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
 }
 
 .snapshots-equity-view .credential-row span {

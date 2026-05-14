@@ -912,7 +912,9 @@ describe('CompositionDetailPage', () => {
     expect(Math.max(...drawdownYValues.slice(1, -1))).toBeGreaterThan(drawdownBaselineY);
     expect(document.querySelectorAll('[data-ui="composition-version-marker"]').length).toBeGreaterThan(0);
     const chartText = document.querySelector<SVGSVGElement>('[data-ui="composition-return-chart"]')?.textContent ?? '';
-    expect(chartText).not.toContain('2026-03-31');
+    expect(chartText).toContain('2026-01-31');
+    expect(chartText).toContain('2026-03-31');
+    expect(chartText).toContain('+3.5%');
     expect(chartText).not.toContain('Q1');
     expect(chartText).not.toContain('Q1 rebalance');
   });
@@ -935,6 +937,7 @@ describe('CompositionDetailPage', () => {
     expect(document.querySelector<HTMLElement>('[data-kpi-key="risk_contribution_deviation"]')?.textContent).toContain('风险贡献偏离');
     expect(document.querySelector<HTMLElement>('[data-kpi-key="correlation_stress"]')?.textContent).toContain('相关性压力');
     expect(document.querySelector<HTMLElement>('[data-kpi-key="return_quality"]')?.textContent).toContain('100%');
+    expect(document.querySelector<HTMLElement>('[data-kpi-key="return_quality"]')?.textContent).toContain('组合指标窗口 2026-01-31 - 2026-03-31');
 
     const netReturnCard = document.querySelector<HTMLElement>('[data-kpi-key="net_return"]');
     expect(netReturnCard?.textContent).not.toContain('净收益优先读取累计净收益；缺失时回退为预估净年化。');
@@ -1078,9 +1081,9 @@ describe('CompositionDetailPage', () => {
 
     const tooltip = await waitFor(() => document.querySelector('[data-ui="composition-return-tooltip"]'));
     expect(tooltip).not.toBeNull();
-    expect(tooltip?.textContent).toContain('收益节点 2');
+    expect(tooltip?.textContent).toContain('2026-02-28');
+    expect(tooltip?.textContent).not.toContain('收益节点 2');
     expect(tooltip?.textContent).not.toContain('P2');
-    expect(tooltip?.textContent).not.toContain('2026-02-28');
     expect(tooltip?.textContent).toContain('2.00%');
     expect(tooltip?.textContent).toContain('1.40%');
     expect(tooltip?.textContent).toContain('1.93%');

@@ -1775,7 +1775,7 @@ function buildPitDataOverview(): ApiPitDataOverview {
           provider_ids: ['polygon'],
           preferred_provider: 'polygon',
           evidence_scope: ['precision price repair', 'corporate actions'],
-          missing_env_vars: ['POLYGON_API_KEY'],
+          missing_env_vars: ['MASSIVE_API_KEY'],
           provider_count: 1,
           usable_provider_count: 0,
           full_ready_gate: '用于免费链无法闭合的关键缺口，仍不暴露密钥值。',
@@ -1840,7 +1840,7 @@ function buildPitDataOverview(): ApiPitDataOverview {
       polygon_status: {
         credential_status: 'missing',
         configured: false,
-        required_env_vars: ['POLYGON_API_KEY'],
+        required_env_vars: ['MASSIVE_API_KEY'],
         secret_persistence: 'disabled',
       },
       critical_polygon_candidates: [
@@ -2716,6 +2716,7 @@ function buildDemoFactorModelStrategy(payload: ApiFactorModelCreatePayload): Api
     weights: Object.fromEntries(payload.components.map((component) => [component.factor_id, component.weight])),
     directions: Object.fromEntries(payload.components.map((component) => [component.factor_id, component.direction])),
     neutralization: payload.neutralization,
+    top_n: payload.top_n ?? 8,
     scoring_method: payload.scoring_method,
     rebalance_frequency: payload.rebalance_frequency,
     pit_snapshot_refs: preview.coverage,

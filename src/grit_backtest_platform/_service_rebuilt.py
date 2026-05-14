@@ -10,6 +10,7 @@ import math
 import multiprocessing as mp
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+from urllib.parse import quote
 from uuid import uuid4
 from xml.sax.saxutils import escape as xml_escape
 import zipfile
@@ -415,23 +417,46 @@ def _sanitize_backtest_warning_list(warnings: Sequence[Any] | None) -> list[str]
     return cleaned
 
 
+def _prune_non_actionable_backtest_warnings(
+    status: Any,
+    warnings: Sequence[Any] | None,
+) -> list[str]:
+    cleaned = _sanitize_backtest_warning_list(warnings)
+    normalized_status = str(status or "").upper()
+    if normalized_status not in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}:
+        return cleaned
+    return [
+        warning
+        for warning in cleaned
+        if warning != BACKTEST_RESTART_RECOVERY_WARNING
+    ]
+
+
 def _sanitize_backtest_warning_state(
     status: Any,
     warnings: Sequence[Any] | None,
 ) -> tuple[str, list[str]]:
-    cleaned_warnings = _sanitize_backtest_warning_list(warnings)
+    cleaned_warnings = _prune_non_actionable_backtest_warnings(status, warnings)
     cleaned_status = str(status or "")
     if cleaned_status.upper() == "COMPLETED_WITH_WARNINGS" and not cleaned_warnings:
         cleaned_status = "COMPLETED"
     return cleaned_status, cleaned_warnings
 
 
-def _sanitize_backtest_preview_payload(preview: Mapping[str, Any] | None) -> dict[str, Any]:
+def _sanitize_backtest_preview_payload(
+    preview: Mapping[str, Any] | None,
+    *,
+    status: Any | None = None,
+) -> dict[str, Any]:
     if not isinstance(preview, Mapping):
         return {}
     normalized = dict(preview)
     if "warnings" in normalized:
-        normalized["warnings"] = _sanitize_backtest_warning_list(normalized.get("warnings"))
+        normalized["warnings"] = (
+            _prune_non_actionable_backtest_warnings(status, normalized.get("warnings"))
+            if status is not None
+            else _sanitize_backtest_warning_list(normalized.get("warnings"))
+        )
     return normalized
 
 LEGACY_MOCK_OPTIMIZATION_LABELS = (
@@ -1072,11 +1097,24 @@ def _pct_from_fraction(value: Any, default: float = 0.0) -> float:
     return round(numeric, 4)
 
 
-def _strategy_leg_inventory_id(strategy_id: str, parameter_version_id: str) -> str:
+def _strategy_id_from_parameter_version_id(parameter_version_id: Any) -> str | None:
+    text = str(parameter_version_id or "").strip()
+    match = re.match(r"^(.+)-v\d+$", text, re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def _strategy_leg_inventory_id(
+    strategy_id: str,
+    parameter_version_id: str,
+    run_id: str | None = None,
+) -> str:
+    normalized_run_id = str(run_id or "").strip()
+    if normalized_run_id:
+        return f"strategy_leg::{parameter_version_id}::{normalized_run_id}"
     return f"strategy_leg::{strategy_id}::{parameter_version_id}"
 
 
-def _parse_strategy_leg_inventory_id(value: Any) -> tuple[str, str] | None:
+def _parse_strategy_leg_inventory_ref(value: Any) -> tuple[str, str, str | None] | None:
     text = str(value or "").strip()
     prefix = "strategy_leg::"
     if not text.startswith(prefix):
@@ -1084,7 +1122,31 @@ def _parse_strategy_leg_inventory_id(value: Any) -> tuple[str, str] | None:
     parts = text.split("::", 2)
     if len(parts) != 3 or not parts[1] or not parts[2]:
         return None
-    return parts[1], parts[2]
+    strategy_id = _strategy_id_from_parameter_version_id(parts[1])
+    if strategy_id and str(parts[2]).strip():
+        return strategy_id, parts[1], parts[2].strip()
+    return parts[1], parts[2], None
+
+
+def _parse_strategy_leg_inventory_id(value: Any) -> tuple[str, str] | None:
+    parsed = _parse_strategy_leg_inventory_ref(value)
+    if parsed is None:
+        return None
+    strategy_id, parameter_version_id, _run_id = parsed
+    return strategy_id, parameter_version_id
+
+
+NEWER_PARAMETER_VERSION_ALERT = (
+    "A newer parameter version exists; saved compositions keep the frozen version."
+)
+NEWER_STRATEGY_RUN_ALERT = (
+    "A newer completed run exists for the same strategy version and backtest period."
+)
+
+
+def _normalize_optional_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def _strip_strategy_version_suffix(name: Any) -> str:
@@ -2190,6 +2252,12 @@ class BacktestPlatformService:
             "parameter_version": _parse_parameter_version_number(parameter_version_id),
             "parameter_version_id": parameter_version_id,
             "status": status or "COMPLETED",
+            "start_date": row.get("start_date"),
+            "end_date": row.get("end_date"),
+            "effective_date": row.get("effective_date"),
+            "oos_start_date": row.get("oos_start_date"),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
             "total_return": float(metrics.get("total_return") or 0.0),
             "annualized_return": float(
                 metrics.get("annualized_return", metrics.get("cagr") or 0.0) or 0.0
@@ -2221,11 +2289,17 @@ class BacktestPlatformService:
             SELECT
                 id,
                 status,
+                start_date,
+                end_date,
+                effective_date,
+                oos_start_date,
                 preview_json,
                 metrics_json,
                 warnings_json,
                 request_json,
                 chart_series_json,
+                created_at,
+                updated_at,
                 completed_at
             FROM backtest_runs
             WHERE id IN ({placeholders})
@@ -2864,12 +2938,15 @@ class BacktestPlatformService:
             run[decoded_name] = loads(run.pop(column, None), default)
         if isinstance(run.get("parameter_snapshot"), dict):
             run["parameter_snapshot"] = _normalize_strategy_snapshot_descriptive_fields(run["parameter_snapshot"])
-        if isinstance(run.get("preview"), dict):
-            run["preview"] = _sanitize_backtest_preview_payload(run["preview"])
         run["status"], run["warnings"] = _sanitize_backtest_warning_state(
             run.get("status"),
             run.get("warnings"),
         )
+        if isinstance(run.get("preview"), dict):
+            run["preview"] = _sanitize_backtest_preview_payload(
+                run["preview"],
+                status=run.get("status"),
+            )
         run["is_permanent"] = bool(int(run.get("is_permanent") or 0))
         return run
 
@@ -2908,7 +2985,7 @@ class BacktestPlatformService:
         return ", ".join(columns)
 
     def _decode_run_list_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
-        preview = _sanitize_backtest_preview_payload(loads(row.get("preview_json"), {}))
+        preview = loads(row.get("preview_json"), {})
         if not isinstance(preview, dict):
             preview = {}
         request = loads(row.get("request_json"), {})
@@ -2925,6 +3002,7 @@ class BacktestPlatformService:
             row.get("status"),
             loads(row.get("warnings_json"), []),
         )
+        preview = _sanitize_backtest_preview_payload(preview, status=status)
         parameter_version_id = preview.get("parameter_version_id") or request.get("parameter_version_id")
         execution_progress = dict((preview.get("environment_summary") or {}).get("execution_progress") or {})
 
@@ -3291,6 +3369,25 @@ class BacktestPlatformService:
         if neutralization:
             snapshot["neutralization"] = neutralization
 
+        default_top_n = max(min(len(factor_ids) * 2, 10), 5)
+        top_n_value = _as_float(
+            snapshot.get(
+                "top_n",
+                snapshot.get(
+                    "holding_count",
+                    snapshot.get(
+                        "hold_rank_threshold",
+                        strategy_parameters.get(
+                            "top_n",
+                            strategy_parameters.get("holding_count", strategy_parameters.get("hold_rank_threshold")),
+                        ),
+                    ),
+                ),
+            ),
+            float(default_top_n),
+        )
+        snapshot["top_n"] = max(int(top_n_value or float(default_top_n)), 1)
+
         return snapshot
 
     def _normalize_multi_factor_projection_search_entry(
@@ -3447,6 +3544,24 @@ class BacktestPlatformService:
                         "tag": "因子权重",
                     }
                 )
+            default_top_n = max(min(len(factor_ids) * 2, 10), 5)
+            top_n_current = max(
+                int(_as_float(parameters.get("top_n"), float(default_top_n)) or float(default_top_n)),
+                1,
+            )
+            search_space.append(
+                {
+                    "key": "top_n",
+                    "label": "持仓数量",
+                    "mode": "range",
+                    "current": top_n_current,
+                    "start": max(1, top_n_current - 2),
+                    "end": min(500, top_n_current + 2),
+                    "step": 1,
+                    "value": top_n_current,
+                    "tag": "持仓广度",
+                }
+            )
             neutralization = dict(parameters.get("neutralization") or {})
             scoring_method = str(parameters.get("scoring_method") or "zscore_weighted")
             rebalance_frequency = str(parameters.get("rebalance_frequency") or strategy.get("rebalance_frequency") or "monthly")
@@ -4004,11 +4119,17 @@ class BacktestPlatformService:
             SELECT
                 id,
                 status,
+                start_date,
+                end_date,
+                effective_date,
+                oos_start_date,
                 preview_json,
                 metrics_json,
                 warnings_json,
                 request_json,
                 chart_series_json,
+                created_at,
+                updated_at,
                 completed_at
             FROM backtest_runs
             WHERE strategy_id = ?
@@ -4234,7 +4355,6 @@ class BacktestPlatformService:
             version_entry.get("parameter_version_id")
             or _parameter_version_id(strategy_id, version_number)
         )
-        inventory_id = _strategy_leg_inventory_id(strategy_id, parameter_version_id)
         run_summary = next(
             (
                 dict(item)
@@ -4243,7 +4363,20 @@ class BacktestPlatformService:
             ),
             None,
         )
+        inventory_id = _strategy_leg_inventory_id(
+            strategy_id,
+            parameter_version_id,
+            str(run_summary.get("run_id") or "") if run_summary else None,
+        )
         current_parameter_version_id = str(strategy.get("current_parameter_version_id") or "")
+        current_run_summary = next(
+            (
+                dict(item)
+                for item in completed_summaries
+                if str(item.get("parameter_version_id") or "") == current_parameter_version_id
+            ),
+            None,
+        )
         lifecycle_status = str(strategy.get("lifecycle_status") or "ACTIVE").upper()
         has_new_version = bool(current_parameter_version_id and current_parameter_version_id != parameter_version_id)
         is_orphan = run_summary is None
@@ -4277,6 +4410,10 @@ class BacktestPlatformService:
             "parameter_version_id": parameter_version_id,
             "parameter_version": version_number,
             "latest_run_id": run_summary.get("run_id") if run_summary else None,
+            "start_date": run_summary.get("start_date") if run_summary else None,
+            "end_date": run_summary.get("end_date") if run_summary else None,
+            "effective_date": run_summary.get("effective_date") if run_summary else None,
+            "oos_start_date": run_summary.get("oos_start_date") if run_summary else None,
             "strategy_type": strategy_type,
             "universe_name": strategy.get("universe_name"),
             "rebalance_frequency": rebalance_frequency,
@@ -4288,6 +4425,11 @@ class BacktestPlatformService:
         allowed_actions: list[str] = ["open_strategy_detail", "open_composition_workbench"]
         if is_orphan:
             allowed_actions.insert(0, "run_backtest")
+        run_created_at = str(run_summary.get("created_at") or "") if run_summary else None
+        run_updated_at = str(run_summary.get("updated_at") or "") if run_summary else None
+        run_completed_at = str(run_summary.get("completed_at") or "") if run_summary else None
+        row_created_at = run_created_at or str(strategy.get("created_at") or "")
+        row_updated_at = run_completed_at or run_updated_at or str(strategy.get("updated_at") or "")
         source_integrity = self._leg_source_integrity_summary(
             source_ref_id=inventory_id,
             source_ref_type="strategy_projection",
@@ -4299,15 +4441,19 @@ class BacktestPlatformService:
         if has_new_version:
             source_integrity["drift_status"] = "drifted"
             source_integrity["signature_status"] = "stale"
+            source_integrity["has_new_parameters"] = False
             source_integrity["current_ref_id"] = _strategy_leg_inventory_id(
                 strategy_id,
                 current_parameter_version_id,
+                str(current_run_summary.get("run_id") or "") if current_run_summary else None,
             )
-            source_integrity["alerts"] = ["A newer parameter version exists; saved compositions keep the frozen version."]
+            source_integrity["alerts"] = [NEWER_PARAMETER_VERSION_ALERT]
         elif is_orphan:
             source_integrity["drift_status"] = "needs_repair"
             source_integrity["signature_status"] = "unverified"
             source_integrity["alerts"] = ["No eligible completed run exists for this strategy version."]
+        else:
+            source_integrity["has_new_parameters"] = False
         return {
             "id": inventory_id,
             "leg_type": "strategy",
@@ -4319,6 +4465,7 @@ class BacktestPlatformService:
             "status": status,
             "status_label": self._leg_inventory_status_label(status),
             "has_new_version": has_new_version,
+            "has_new_parameters": False,
             "is_orphan": is_orphan,
             "attribute_tags": attribute_tags,
             "allowed_actions": allowed_actions,
@@ -4330,8 +4477,16 @@ class BacktestPlatformService:
             "drift_status": source_integrity["drift_status"],
             "current_ref_id": source_integrity["current_ref_id"],
             "alerts": list(source_integrity["alerts"]),
+            "created_at": row_created_at,
+            "updated_at": row_updated_at,
             "config": {
                 **config,
+                "created_at": row_created_at,
+                "updated_at": row_updated_at,
+                "completed_at": run_completed_at,
+                "run_created_at": run_created_at,
+                "run_updated_at": run_updated_at,
+                "run_completed_at": run_completed_at,
                 "source_integrity": source_integrity,
             },
         }
@@ -5106,6 +5261,8 @@ class BacktestPlatformService:
                     "drift_status": source_integrity["drift_status"],
                     "current_ref_id": source_integrity["current_ref_id"],
                     "alerts": list(source_integrity["alerts"]),
+                    "created_at": decoded["created_at"],
+                    "updated_at": decoded["updated_at"],
                     "config": {
                         "symbol": decoded["symbol"],
                         "asset_kind": decoded["asset_kind"],
@@ -5164,6 +5321,8 @@ class BacktestPlatformService:
                     "drift_status": source_integrity["drift_status"],
                     "current_ref_id": source_integrity["current_ref_id"],
                     "alerts": list(source_integrity["alerts"]),
+                    "created_at": decoded["created_at"],
+                    "updated_at": decoded["updated_at"],
                     "config": {
                         "cash_rule_kind": decoded["cash_rule_kind"],
                         "buffer_bps": decoded["buffer_bps"],
@@ -5507,10 +5666,10 @@ class BacktestPlatformService:
         }
 
     def _strategy_projection_row_for_source_ref(self, source_ref_id: str) -> dict[str, Any] | None:
-        parsed = _parse_strategy_leg_inventory_id(source_ref_id)
+        parsed = _parse_strategy_leg_inventory_ref(source_ref_id)
         if parsed is None:
             return None
-        strategy_id, parameter_version_id = parsed
+        strategy_id, parameter_version_id, pinned_run_id = parsed
         try:
             strategy = self.get_strategy_detail(strategy_id)
         except Exception:
@@ -5525,10 +5684,24 @@ class BacktestPlatformService:
         )
         if version_entry is None:
             return None
+        completed_summaries = self._completed_run_summaries_for_strategy(strategy_id)
+        if pinned_run_id:
+            pinned_summaries = [
+                dict(item)
+                for item in completed_summaries
+                if str(item.get("run_id") or "") == pinned_run_id
+            ]
+            if not pinned_summaries:
+                return None
+            completed_summaries = pinned_summaries + [
+                item
+                for item in completed_summaries
+                if str(item.get("run_id") or "") != pinned_run_id
+            ]
         return self._strategy_projection_row(
             strategy,
             version_entry,
-            self._completed_run_summaries_for_strategy(strategy_id),
+            completed_summaries,
             self._composition_reference_counts().get(source_ref_id, 0),
         )
 
@@ -5537,10 +5710,10 @@ class BacktestPlatformService:
         source_ref_id: str,
         reference_count: int = 0,
     ) -> dict[str, Any] | None:
-        parsed = _parse_strategy_leg_inventory_id(source_ref_id)
+        parsed = _parse_strategy_leg_inventory_ref(source_ref_id)
         if parsed is None:
             return None
-        strategy_id, parameter_version_id = parsed
+        strategy_id, parameter_version_id, pinned_run_id = parsed
         strategy = self.storage.fetch_one(
             """
             SELECT
@@ -5583,30 +5756,70 @@ class BacktestPlatformService:
             current_parameter_version_id
             and current_parameter_version_id != parameter_version_id
         )
-        run_row = self.storage.fetch_one(
-            """
-            SELECT
-                id,
-                status,
-                preview_json,
-                metrics_json,
-                warnings_json,
-                request_json,
-                chart_series_json,
-                completed_at
-            FROM backtest_runs
-            WHERE strategy_id = ?
-              AND deleted_at IS NULL
-              AND UPPER(COALESCE(status, '')) IN ('COMPLETED', 'COMPLETED_WITH_WARNINGS')
-              AND (
-                  json_extract(preview_json, '$.parameter_version_id') = ?
-                  OR json_extract(request_json, '$.parameter_version_id') = ?
-              )
-            ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC, id DESC
-            LIMIT 1
-            """,
-            (strategy_id, parameter_version_id, parameter_version_id),
-        )
+        if pinned_run_id:
+            run_row = self.storage.fetch_one(
+                """
+                SELECT
+                    id,
+                    status,
+                    start_date,
+                    end_date,
+                    effective_date,
+                    oos_start_date,
+                    preview_json,
+                    metrics_json,
+                    warnings_json,
+                    request_json,
+                    chart_series_json,
+                    created_at,
+                    updated_at,
+                    completed_at
+                FROM backtest_runs
+                WHERE id = ?
+                  AND strategy_id = ?
+                  AND deleted_at IS NULL
+                  AND UPPER(COALESCE(status, '')) IN ('COMPLETED', 'COMPLETED_WITH_WARNINGS')
+                  AND (
+                      json_extract(preview_json, '$.parameter_version_id') = ?
+                      OR json_extract(request_json, '$.parameter_version_id') = ?
+                  )
+                LIMIT 1
+                """,
+                (pinned_run_id, strategy_id, parameter_version_id, parameter_version_id),
+            )
+            if run_row is None:
+                return None
+        else:
+            run_row = self.storage.fetch_one(
+                """
+                SELECT
+                    id,
+                    status,
+                    start_date,
+                    end_date,
+                    effective_date,
+                    oos_start_date,
+                    preview_json,
+                    metrics_json,
+                    warnings_json,
+                    request_json,
+                    chart_series_json,
+                    created_at,
+                    updated_at,
+                    completed_at
+                FROM backtest_runs
+                WHERE strategy_id = ?
+                  AND deleted_at IS NULL
+                  AND UPPER(COALESCE(status, '')) IN ('COMPLETED', 'COMPLETED_WITH_WARNINGS')
+                  AND (
+                      json_extract(preview_json, '$.parameter_version_id') = ?
+                      OR json_extract(request_json, '$.parameter_version_id') = ?
+                  )
+                ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (strategy_id, parameter_version_id, parameter_version_id),
+            )
         run_summary = self._build_strategy_latest_completed_run_summary(run_row) if run_row else None
         lifecycle_status = str(strategy.get("lifecycle_status") or "ACTIVE").upper()
         is_orphan = run_summary is None
@@ -5635,6 +5848,10 @@ class BacktestPlatformService:
             "parameter_version_id": parameter_version_id,
             "parameter_version": version_number,
             "latest_run_id": run_summary.get("run_id") if run_summary else None,
+            "start_date": run_summary.get("start_date") if run_summary else None,
+            "end_date": run_summary.get("end_date") if run_summary else None,
+            "effective_date": run_summary.get("effective_date") if run_summary else None,
+            "oos_start_date": run_summary.get("oos_start_date") if run_summary else None,
             "strategy_type": strategy_type,
             "universe_name": strategy.get("universe_name"),
             "rebalance_frequency": rebalance_frequency,
@@ -5654,15 +5871,18 @@ class BacktestPlatformService:
         if has_new_version:
             source_integrity["drift_status"] = "drifted"
             source_integrity["signature_status"] = "stale"
+            source_integrity["has_new_parameters"] = False
             source_integrity["current_ref_id"] = _strategy_leg_inventory_id(
                 strategy_id,
                 current_parameter_version_id,
             )
-            source_integrity["alerts"] = ["A newer parameter version exists; saved compositions keep the frozen version."]
+            source_integrity["alerts"] = [NEWER_PARAMETER_VERSION_ALERT]
         elif is_orphan:
             source_integrity["drift_status"] = "needs_repair"
             source_integrity["signature_status"] = "unverified"
             source_integrity["alerts"] = ["No eligible completed run exists for this strategy version."]
+        else:
+            source_integrity["has_new_parameters"] = False
         return {
             "id": source_ref_id,
             "leg_type": "strategy",
@@ -5674,6 +5894,7 @@ class BacktestPlatformService:
             "status": status,
             "status_label": self._leg_inventory_status_label(status),
             "has_new_version": has_new_version,
+            "has_new_parameters": False,
             "is_orphan": is_orphan,
             "attribute_tags": attribute_tags,
             "allowed_actions": ["open_strategy_detail", "open_composition_workbench"],
@@ -5777,25 +5998,7 @@ class BacktestPlatformService:
                 raise ValueError("source_ref_id is required for each composition leg")
             inventory_row = inventory_map.get(source_ref_id)
             if inventory_row is None and leg_kind == "strategy":
-                parsed = _parse_strategy_leg_inventory_id(source_ref_id)
-                if parsed is not None:
-                    strategy_id, parameter_version_id = parsed
-                    strategy = self.get_strategy_detail(strategy_id)
-                    version_entry = next(
-                        (
-                            dict(entry)
-                            for entry in strategy.get("parameter_history", [])
-                            if str(entry.get("parameter_version_id") or "") == parameter_version_id
-                        ),
-                        None,
-                    )
-                    if version_entry is not None:
-                        inventory_row = self._strategy_projection_row(
-                            strategy,
-                            version_entry,
-                            self._completed_run_summaries_for_strategy(strategy_id),
-                            reference_counts.get(source_ref_id, 0),
-                        )
+                inventory_row = self._strategy_projection_row_for_source_ref(source_ref_id)
             if inventory_row is None:
                 raise KeyError(f"Leg not found: {source_ref_id}")
             ordering = _as_int(leg.get("ordering"), index)
@@ -6037,10 +6240,12 @@ class BacktestPlatformService:
             run_id = str(config.get(key) or "").strip()
             if run_id:
                 return run_id
-        parsed = _parse_strategy_leg_inventory_id(str(leg.get("source_ref_id") or leg.get("id") or ""))
+        parsed = _parse_strategy_leg_inventory_ref(str(leg.get("source_ref_id") or leg.get("id") or ""))
         if parsed is None:
             return None
-        strategy_id, parameter_version_id = parsed
+        strategy_id, parameter_version_id, pinned_run_id = parsed
+        if pinned_run_id:
+            return pinned_run_id
         rows = self.storage.fetch_all(
             """
             SELECT id, preview_json, request_json
@@ -6066,16 +6271,22 @@ class BacktestPlatformService:
                 return str(row.get("id") or "")
         return None
 
-    def _load_backtest_run_chart_series(self, run_id: str) -> list[dict[str, Any]]:
+    def _load_backtest_run_chart_series(
+        self,
+        run_id: str,
+        *,
+        include_deleted: bool = False,
+    ) -> list[dict[str, Any]]:
         normalized_run_id = str(run_id or "").strip()
         if not normalized_run_id:
             return []
+        deleted_filter = "" if include_deleted else "AND deleted_at IS NULL"
         row = self.storage.fetch_one(
-            """
+            f"""
             SELECT chart_series_json
             FROM backtest_runs
             WHERE id = ?
-              AND deleted_at IS NULL
+              {deleted_filter}
             """,
             (normalized_run_id,),
         )
@@ -6117,10 +6328,14 @@ class BacktestPlatformService:
         leg_kind = str(leg.get("leg_kind") or "").lower()
         config = dict(leg.get("config") or {})
         if leg_kind == "strategy":
+            explicit_run_id = str(config.get("latest_run_id") or config.get("run_id") or "").strip()
             run_id = self._find_strategy_projection_run_id(leg)
             if not run_id:
                 return {}, {}
-            chart_series = self._load_backtest_run_chart_series(run_id)
+            chart_series = self._load_backtest_run_chart_series(
+                run_id,
+                include_deleted=bool(explicit_run_id),
+            )
             portfolio_returns = self._monthly_returns_from_value_rows(chart_series, "equity")
             benchmark_returns = self._monthly_returns_from_value_rows(chart_series, "benchmark")
             if not benchmark_returns:
@@ -6436,6 +6651,39 @@ class BacktestPlatformService:
                 return False
             return self._leg_uses_fixed_income_managed_return_profile(leg)
 
+        def optional_pct(value: Any) -> float | None:
+            parsed = _as_float(value, math.nan)
+            return round(parsed, 4) if math.isfinite(parsed) else None
+
+        def source_metric_fields(leg: Mapping[str, Any]) -> dict[str, Any]:
+            config = dict(leg.get("config") or {})
+            fields: dict[str, Any] = {
+                "metric_basis": "aligned_recent_window",
+                "source_metric_basis": "profile_or_source_config",
+            }
+            if str(leg.get("leg_kind") or "").lower() == "strategy":
+                fields["source_metric_basis"] = "frozen_run_full_window"
+                run_id = str(config.get("latest_run_id") or config.get("run_id") or "").strip()
+                if run_id:
+                    fields["source_run_id"] = run_id
+                fields["source_annualized_return_pct"] = optional_pct(config.get("annualized_return_pct"))
+                fields["source_max_drawdown_pct"] = optional_pct(config.get("max_drawdown_pct"))
+            return fields
+
+        def aligned_metric_fields(values: Sequence[float]) -> dict[str, Any]:
+            annualized_return = self._annualized_return_from_period_returns(values)
+            max_drawdown = self._max_drawdown_from_period_returns(values)
+            sharpe = self._annualized_sharpe_from_period_returns(values)
+            return {
+                "aligned_annualized_return_pct": (
+                    round(annualized_return * 100.0, 4) if annualized_return is not None else None
+                ),
+                "aligned_max_drawdown_pct": (
+                    round(abs(max_drawdown) * 100.0, 4) if max_drawdown is not None else None
+                ),
+                "aligned_sharpe": round(sharpe, 4) if sharpe is not None else None,
+            }
+
         leg_maps_by_id: dict[str, tuple[Mapping[str, Any], dict[str, dict[str, Any]]]] = {}
         all_labels: set[str] = set()
         for leg in resolved_legs:
@@ -6455,6 +6703,16 @@ class BacktestPlatformService:
                 if leg_missing_points:
                     missing_leg_count += leg_missing_points
                 covered_sample_points = COMPOSITION_RECENT_WINDOW_MONTHS if managed_profile_stream else 0
+                profile_values = [
+                    _as_float(item.get("return"), 0.0)
+                    for item in self._synthetic_leg_period_return_map(
+                        leg,
+                        [
+                            f"fallback-{index:03d}"
+                            for index in range(1, covered_sample_points + 1)
+                        ],
+                    ).values()
+                ]
                 fallback_leg_quality.append(
                     {
                         "leg_id": str(leg.get("id") or ""),
@@ -6465,6 +6723,8 @@ class BacktestPlatformService:
                         "aligned_points": covered_sample_points,
                         "missing_points": leg_missing_points,
                         "coverage_pct": 100.0 if managed_profile_stream else 0.0,
+                        **aligned_metric_fields(profile_values),
+                        **source_metric_fields(leg),
                         "window_start": None,
                         "window_end": None,
                         "issue_types": [] if managed_profile_stream else ["收益样本缺失", "对齐缺口"],
@@ -6483,6 +6743,9 @@ class BacktestPlatformService:
                 "vectors": {},
                 "quality": {
                     "status": "verified" if missing_leg_count == 0 else "fallback",
+                    "metric_basis": "aligned_recent_window",
+                    "metric_window_label": None,
+                    "source_metric_basis": "frozen_strategy_run_full_window",
                     "alignment_window_start": None,
                     "alignment_window_end": None,
                     "aligned_points": 0,
@@ -6549,6 +6812,8 @@ class BacktestPlatformService:
                     "aligned_points": leg_aligned_points,
                     "missing_points": leg_missing_points,
                     "coverage_pct": round(100.0 * leg_aligned_points / possible_leg_points, 2),
+                    **aligned_metric_fields(values),
+                    **source_metric_fields(leg),
                     "window_start": window_start,
                     "window_end": window_end,
                     "issue_types": issue_types,
@@ -6572,6 +6837,11 @@ class BacktestPlatformService:
             "vectors": vectors,
             "quality": {
                 "status": status,
+                "metric_basis": "aligned_recent_window",
+                "metric_window_label": (
+                    f"{ordered_labels[0]} - {ordered_labels[-1]}" if ordered_labels else None
+                ),
+                "source_metric_basis": "frozen_strategy_run_full_window",
                 "alignment_window_start": ordered_labels[0] if ordered_labels else None,
                 "alignment_window_end": ordered_labels[-1] if ordered_labels else None,
                 "aligned_points": len(ordered_labels),
@@ -6827,6 +7097,85 @@ class BacktestPlatformService:
             enriched.append(row)
         return enriched
 
+    def _strategy_period_from_config_or_run(
+        self,
+        source_ref_id: str,
+        config: Mapping[str, Any] | None,
+    ) -> tuple[str | None, str | None]:
+        payload = dict(config or {})
+        start_date = _normalize_optional_text(payload.get("start_date"))
+        end_date = _normalize_optional_text(payload.get("end_date"))
+        if start_date and end_date:
+            return start_date, end_date
+        parsed = _parse_strategy_leg_inventory_ref(source_ref_id)
+        run_id = str(parsed[2] or "").strip() if parsed else ""
+        if not run_id:
+            return start_date, end_date
+        row = self.storage.fetch_one(
+            """
+            SELECT start_date, end_date
+            FROM backtest_runs
+            WHERE id = ?
+              AND deleted_at IS NULL
+            LIMIT 1
+            """,
+            (run_id,),
+        )
+        if not row:
+            return start_date, end_date
+        return (
+            _normalize_optional_text(row.get("start_date")) or start_date,
+            _normalize_optional_text(row.get("end_date")) or end_date,
+        )
+
+    def _latest_same_period_strategy_run_ref(
+        self,
+        source_ref_id: str,
+        frozen_config: Mapping[str, Any] | None,
+        current_config: Mapping[str, Any] | None,
+    ) -> str | None:
+        parsed = _parse_strategy_leg_inventory_ref(source_ref_id)
+        if parsed is None:
+            return None
+        strategy_id, parameter_version_id, pinned_run_id = parsed
+        start_date, end_date = self._strategy_period_from_config_or_run(
+            source_ref_id,
+            frozen_config or current_config,
+        )
+        if not start_date or not end_date:
+            return None
+        row = self.storage.fetch_one(
+            """
+            SELECT id
+            FROM backtest_runs
+            WHERE strategy_id = ?
+              AND deleted_at IS NULL
+              AND UPPER(COALESCE(status, '')) IN ('COMPLETED', 'COMPLETED_WITH_WARNINGS')
+              AND start_date = ?
+              AND end_date = ?
+              AND (
+                  json_extract(preview_json, '$.parameter_version_id') = ?
+                  OR json_extract(request_json, '$.parameter_version_id') = ?
+              )
+            ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (strategy_id, start_date, end_date, parameter_version_id, parameter_version_id),
+        )
+        latest_run_id = _normalize_optional_text((row or {}).get("id"))
+        current_run_id = _normalize_optional_text((current_config or {}).get("run_id")) or _normalize_optional_text(
+            (current_config or {}).get("latest_run_id")
+        )
+        frozen_run_id = (
+            _normalize_optional_text((frozen_config or {}).get("run_id"))
+            or _normalize_optional_text((frozen_config or {}).get("latest_run_id"))
+            or _normalize_optional_text(pinned_run_id)
+            or current_run_id
+        )
+        if not latest_run_id or latest_run_id == frozen_run_id:
+            return None
+        return _strategy_leg_inventory_id(strategy_id, parameter_version_id, latest_run_id)
+
     def _composition_source_integrity(
         self,
         *,
@@ -6882,20 +7231,46 @@ class BacktestPlatformService:
                 )
             )
             if has_strategy_new_version:
-                new_version_alert = "A newer parameter version exists; saved compositions keep the frozen version."
-                if new_version_alert not in alerts:
-                    alerts.append(new_version_alert)
+                if NEWER_PARAMETER_VERSION_ALERT not in alerts:
+                    alerts.append(NEWER_PARAMETER_VERSION_ALERT)
             frozen_snapshot = dict(evidence.get("snapshot") or {})
+            frozen_config = dict(frozen_snapshot.get("config") or {})
             frozen_integrity = dict(dict(frozen_snapshot.get("config") or {}).get("source_integrity") or {})
+            current_config = dict(current_inventory_row.get("config") or {})
+            same_period_refresh_ref = None
+            has_new_parameters = False
+            if _parse_strategy_leg_inventory_id(source_ref_id) is not None and current_config:
+                same_period_refresh_ref = self._latest_same_period_strategy_run_ref(
+                    source_ref_id,
+                    frozen_config,
+                    current_config,
+                )
+                if same_period_refresh_ref and not has_strategy_new_version:
+                    has_new_parameters = True
+                    if NEWER_STRATEGY_RUN_ALERT not in alerts:
+                        alerts.append(NEWER_STRATEGY_RUN_ALERT)
+                current_run_id = str(current_config.get("latest_run_id") or current_config.get("run_id") or "").strip()
+                frozen_run_id = str(frozen_config.get("latest_run_id") or frozen_config.get("run_id") or "").strip()
+                if current_run_id and frozen_run_id and current_run_id != frozen_run_id:
+                    run_drift_alert = "Current source version differs from the frozen source signature."
+                    if run_drift_alert not in alerts:
+                        alerts.append(run_drift_alert)
             current_source_hash = str(current_integrity.get("freeze_hash") or "")
             frozen_source_hash = str(frozen_integrity.get("freeze_hash") or "")
             if evidence and current_source_hash and frozen_source_hash and current_source_hash != frozen_source_hash:
-                alerts.append("Current source version differs from the frozen source signature.")
+                signature_drift_alert = "Current source version differs from the frozen source signature."
+                if signature_drift_alert not in alerts:
+                    alerts.append(signature_drift_alert)
             drift_status = "current"
             signature_status = "verified" if evidence.get("freeze_hash") else "preview"
             if alerts:
                 drift_status = "drifted" if signature_status == "verified" else "needs_repair"
                 signature_status = "stale" if signature_status == "verified" else "unverified"
+            preferred_current_ref_id = (
+                same_period_refresh_ref
+                if has_new_parameters
+                else current_integrity.get("current_ref_id")
+            )
             rows.append(
                 {
                     "leg_id": leg_id,
@@ -6904,12 +7279,46 @@ class BacktestPlatformService:
                     "freeze_hash": evidence.get("freeze_hash"),
                     "signature_status": signature_status,
                     "drift_status": drift_status,
-                    "current_ref_id": current_integrity.get("current_ref_id") or source_ref_id or None,
+                    "has_new_parameters": has_new_parameters,
+                    "current_ref_id": preferred_current_ref_id or same_period_refresh_ref or source_ref_id or None,
                     "checked_at": now_label,
                     "alerts": alerts,
                 }
             )
         return rows
+
+    def _rebuild_composition_detail_from_record(
+        self,
+        row: Mapping[str, Any],
+        source_evidence: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        composition_id = str(row.get("id") or "")
+        leg_rows = self._load_composition_leg_rows(composition_id)
+        benchmark_definition = self._normalize_composition_benchmark_definition(
+            loads(row.get("benchmark_definition_json"), {})
+        )
+        cost_policy = self._normalize_composition_cost_policy(loads(row.get("cost_policy_json"), {}))
+        preview_payload = self._build_composition_preview_payload(
+            {
+                "benchmark_definition": benchmark_definition,
+                "rebalance_frequency": row.get("rebalance_frequency"),
+                "cost_policy": cost_policy,
+                "legs": self._composition_leg_rows_as_inputs(leg_rows),
+            }
+        )
+        return self._build_composition_detail_payload(
+            composition_id=composition_id,
+            name=str(row.get("name") or ""),
+            description=str(row.get("description") or "").strip() or None,
+            status=str(row.get("status") or "DRAFT"),
+            benchmark_definition=benchmark_definition,
+            rebalance_frequency=row.get("rebalance_frequency"),
+            cost_policy=cost_policy,
+            preview_payload=preview_payload,
+            created_at=str(row.get("created_at") or ""),
+            updated_at=str(row.get("updated_at") or ""),
+            source_evidence=source_evidence,
+        )
 
     def _decode_composition_audit_event(self, row: Mapping[str, Any]) -> dict[str, Any]:
         summary_payload = loads(row.get("summary_json"), {})
@@ -7403,6 +7812,7 @@ class BacktestPlatformService:
             )
         )
         aligned_return_analysis = self._aligned_leg_return_analysis(resolved_legs)
+        return_quality_summary = dict(aligned_return_analysis.get("quality") or {})
         aligned_vectors = dict(aligned_return_analysis.get("vectors") or {})
         aligned_labels = [str(label) for label in (aligned_return_analysis.get("labels") or [])]
         covariance_risk_contributions = self._composition_covariance_risk_contributions(
@@ -7659,7 +8069,7 @@ class BacktestPlatformService:
                 "verdict": verdict,
                 "factors": factors,
             },
-            "return_quality_summary": dict(aligned_return_analysis.get("quality") or {}),
+            "return_quality_summary": return_quality_summary,
             "rebalance_events": rebalance_events,
             "source_integrity": self._composition_source_integrity(
                 resolved_legs=resolved_legs,
@@ -7718,6 +8128,18 @@ class BacktestPlatformService:
                 for item in (source_evidence or [])
                 if isinstance(item, Mapping)
             ],
+        )
+        return_quality_summary = dict(preview.get("return_quality_summary") or {})
+        metric_window_label = str(return_quality_summary.get("metric_window_label") or "").strip()
+        realized_return_detail = (
+            f"按组合腿共同对齐窗口 {metric_window_label} 的月度净收益年化；策略腿卡片保留冻结 run 全窗口指标。"
+            if metric_window_label
+            else "Uses realized monthly compounding from the composition preview."
+        )
+        realized_drawdown_detail = (
+            f"按组合腿共同对齐窗口 {metric_window_label} 的月度净收益路径测算；策略腿卡片保留冻结 run 全窗口回撤。"
+            if metric_window_label
+            else "Measured from the realized cumulative return path."
         )
         weight_summary = dict(preview.get("weight_summary") or {})
         maintenance_cost_summary = dict(preview.get("maintenance_cost_summary") or {})
@@ -7814,11 +8236,9 @@ class BacktestPlatformService:
                 "value": annualized_return,
                 "unit": "%",
                 "tone": "good" if annualized_return >= 0 else "risk",
-                "detail": (
-                    "Uses realized monthly compounding from the composition preview."
-                    if realized_annualized_return is not None
-                    else "Falls back to sleeve-weighted annualized return because realized history is incomplete."
-                ),
+                "detail": realized_return_detail
+                if realized_annualized_return is not None
+                else "Falls back to sleeve-weighted annualized return because realized history is incomplete.",
             },
             {
                 "key": "volatility",
@@ -7848,7 +8268,7 @@ class BacktestPlatformService:
                 "value": max_drawdown,
                 "unit": "%",
                 "tone": "watch",
-                "detail": "Measured from the realized cumulative return path.",
+                "detail": realized_drawdown_detail,
             },
             {
                 "key": "cash_weight",
@@ -7985,7 +8405,7 @@ class BacktestPlatformService:
             "correlation_matrix": list(preview.get("correlation_matrix", [])),
             "risk_contribution_preview": list(preview.get("risk_contribution_preview", [])),
             "maintenance_cost_summary": maintenance_cost_summary,
-            "return_quality_summary": dict(preview.get("return_quality_summary") or {}),
+            "return_quality_summary": return_quality_summary,
             "rebalance_events": rebalance_events,
             "scenario_summary": scenario_summary,
             "source_evidence": enriched_source_evidence,
@@ -8031,18 +8451,28 @@ class BacktestPlatformService:
                 ),
                 0.0,
             ),
+            "return_quality_summary": dict(detail_payload.get("return_quality_summary") or {}),
             "latest_activity_label": detail_payload.get("latest_activity_label"),
             "allowed_actions": detail_payload.get("deep_link_actions", []),
         }
 
     def _composition_source_integrity_has_new_strategy_version(self, item: Mapping[str, Any]) -> bool:
         source_ref_id = str(item.get("source_ref_id") or "").strip()
-        if _parse_strategy_leg_inventory_id(source_ref_id) is None:
+        source_parsed = _parse_strategy_leg_inventory_ref(source_ref_id)
+        if source_parsed is None:
             return False
         current_ref_id = str(item.get("current_ref_id") or "").strip()
         alerts = [str(alert).lower() for alert in item.get("alerts") or []]
+        has_different_parameter_version = False
+        if current_ref_id and current_ref_id != source_ref_id:
+            current_parsed = _parse_strategy_leg_inventory_ref(current_ref_id)
+            has_different_parameter_version = (
+                current_parsed is None
+                or current_parsed[0] != source_parsed[0]
+                or current_parsed[1] != source_parsed[1]
+            )
         return (
-            (bool(current_ref_id) and current_ref_id != source_ref_id)
+            has_different_parameter_version
             or any("newer parameter version" in alert or "newer version" in alert or "新版本" in alert for alert in alerts)
         )
 
@@ -8050,17 +8480,66 @@ class BacktestPlatformService:
     def _composition_backtest_period_from_payload(payload: Mapping[str, Any]) -> str | None:
         request = _as_mapping(payload.get("request"))
         summary = _as_mapping(payload.get("summary"))
-        for raw_value in (
-            request.get("period"),
-            request.get("time_period_label"),
-            payload.get("time_period_label"),
-        ):
+
+        def normalized_period(raw_value: Any) -> str | None:
             normalized = str(raw_value or "").strip().upper().replace(" ", "")
             if normalized in {"10Y", "20Y", "30Y"}:
                 return normalized
-        horizon_years = _as_float(request.get("horizon_years"), 0.0)
-        if horizon_years <= 0:
-            horizon_years = _as_float(summary.get("horizon_years"), 0.0)
+            return None
+
+        def period_from_years(raw_value: Any) -> str | None:
+            horizon_years = _as_float(raw_value, 0.0)
+            if horizon_years >= 29.5:
+                return "30Y"
+            if horizon_years >= 19.5:
+                return "20Y"
+            if horizon_years >= 9.5:
+                return "10Y"
+            return None
+
+        diagnostics = _as_mapping(payload.get("diagnostics"))
+        metric_matrix = diagnostics.get("metric_matrix")
+        first_metric_window = None
+        if (
+            isinstance(metric_matrix, Sequence)
+            and not isinstance(metric_matrix, (str, bytes, bytearray))
+            and metric_matrix
+            and isinstance(metric_matrix[0], Mapping)
+        ):
+            first_metric_window = metric_matrix[0].get("window")
+
+        observed_period = next(
+            (
+                period
+                for period in (
+                    normalized_period(first_metric_window),
+                    normalized_period(summary.get("time_period_label")),
+                    normalized_period(summary.get("period_label")),
+                    normalized_period(payload.get("time_period_label")),
+                    period_from_years(summary.get("horizon_years")),
+                )
+                if period
+            ),
+            None,
+        )
+        if observed_period:
+            return observed_period
+
+        requested_period = next(
+            (
+                period
+                for period in (
+                    normalized_period(request.get("period")),
+                    normalized_period(request.get("time_period_label")),
+                    period_from_years(request.get("horizon_years")),
+                )
+                if period
+            ),
+            None,
+        )
+        if requested_period:
+            return requested_period
+        horizon_years = _as_float(summary.get("horizon_years"), 0.0)
         if horizon_years >= 29.5:
             return "30Y"
         if horizon_years >= 19.5:
@@ -8875,6 +9354,9 @@ class BacktestPlatformService:
                     "allowed_actions": list(summary.get("allowed_actions") or ["open_composition_workbench"]),
                     "has_new_version": has_new_version,
                     "source_integrity": source_integrity,
+                    "return_quality_summary": dict(
+                        analysis_with_integrity.get("return_quality_summary") or {}
+                    ),
                     "latest_backtest_summary": {
                         "run_id": (latest_run_row or {}).get("id"),
                         "status": (latest_run_row or {}).get("status"),
@@ -8903,8 +9385,10 @@ class BacktestPlatformService:
         refreshed = dict(detail_payload)
         current_quality = _as_mapping(refreshed.get("return_quality_summary"))
         has_leg_quality = bool(current_quality.get("leg_quality"))
+        has_metric_basis = bool(current_quality.get("metric_basis"))
         quality_is_current = (
             has_leg_quality
+            and has_metric_basis
             and _as_int(current_quality.get("missing_points"), 0) <= 0
             and not bool(current_quality.get("fallback_used"))
         )
@@ -9045,32 +9529,7 @@ class BacktestPlatformService:
             or needs_rebalance_refresh
         )
         if needs_detail_refresh:
-            leg_rows = self._load_composition_leg_rows(composition_id)
-            benchmark_definition = self._normalize_composition_benchmark_definition(
-                loads(row.get("benchmark_definition_json"), {})
-            )
-            cost_policy = self._normalize_composition_cost_policy(loads(row.get("cost_policy_json"), {}))
-            preview_payload = self._build_composition_preview_payload(
-                {
-                    "benchmark_definition": benchmark_definition,
-                    "rebalance_frequency": row.get("rebalance_frequency"),
-                    "cost_policy": cost_policy,
-                    "legs": self._composition_leg_rows_as_inputs(leg_rows),
-                }
-            )
-            detail_payload = self._build_composition_detail_payload(
-                composition_id=composition_id,
-                name=str(row.get("name") or ""),
-                description=str(row.get("description") or "").strip() or None,
-                status=str(row.get("status") or "DRAFT"),
-                benchmark_definition=benchmark_definition,
-                rebalance_frequency=row.get("rebalance_frequency"),
-                cost_policy=cost_policy,
-                preview_payload=preview_payload,
-                created_at=str(row.get("created_at") or ""),
-                updated_at=str(row.get("updated_at") or ""),
-                source_evidence=source_evidence,
-            )
+            detail_payload = self._rebuild_composition_detail_from_record(row, source_evidence)
         else:
             current_status = str(row.get("status") or detail_payload.get("status") or "DRAFT")
             detail_payload = {
@@ -10303,7 +10762,37 @@ class BacktestPlatformService:
                         debug_facts={**debug_facts, "source_ref_id": source_ref_id},
                     )
                 )
-            elif current_ref_id and source_ref_id and current_ref_id != source_ref_id:
+            elif bool(item.get("has_new_parameters")) or "same strategy version and backtest period" in alerts_text:
+                diagnoses.append(
+                    self._composition_status_diagnosis(
+                        status="待校准",
+                        issue_type="腿有新参数",
+                        diagnosis_type="strategy_leg_new_parameters",
+                        frontend_explanation="策略、参数版本与回测周期保持不变，但同周期下已经出现新的回测结果，当前组合仍冻结在旧来源上。",
+                        action="先查看对应策略腿，再决定是否吸收新的同周期回测结果。",
+                        resolution_criteria="已明确保留旧来源，或已切换到新的同周期回测来源。",
+                        actions=[
+                            self._composition_status_action(
+                                "查看对应腿",
+                                "open_strategy_leg",
+                                action_kind="inspect",
+                                route=f"/legs?source_ref_id={quote(source_ref_id, safe='')}",
+                            ),
+                            self._composition_status_action(
+                                "打开组合工作台",
+                                "open_composition_workbench",
+                                route=f"/compositions/workbench?composition_id={composition_id or ''}",
+                            ),
+                        ],
+                        debug_facts={**debug_facts, "source_ref_id": source_ref_id, "current_ref_id": current_ref_id},
+                    )
+                )
+            elif (
+                current_ref_id
+                and source_ref_id
+                and current_ref_id != source_ref_id
+                and self._composition_source_integrity_has_new_strategy_version(item)
+            ):
                 diagnoses.append(
                     self._composition_status_diagnosis(
                         status="待校准",
@@ -10377,6 +10866,13 @@ class BacktestPlatformService:
                 if item.get("status") == "失效":
                     item["system_disposition"] = "存在未关闭的失效问题，晋升门禁已暂停。"
         rank = {"失效": 0, "待校准": 1, "稳健": 2}
+        diagnosis_rank = {
+            "source_state_invalid": 0,
+            "return_series_gap": 1,
+            "abnormal_fallback": 2,
+            "strategy_leg_new_parameters": 3,
+            "proxy_confirmation_required": 4,
+        }
         issue_rank = {
             "底层收益序列真空": 0,
             "收益序列不连续": 1,
@@ -10385,7 +10881,14 @@ class BacktestPlatformService:
             "收益样本窗口不足": 4,
         }
         deduped: dict[tuple[str, str], dict[str, Any]] = {}
-        for item in sorted(diagnoses, key=lambda value: (rank.get(str(value.get("status")), 9), issue_rank.get(str(value.get("issue_type")), 50))):
+        for item in sorted(
+            diagnoses,
+            key=lambda value: (
+                rank.get(str(value.get("status")), 9),
+                diagnosis_rank.get(str(value.get("diagnosis_type")), 20),
+                issue_rank.get(str(value.get("issue_type")), 50),
+            ),
+        ):
             deduped.setdefault((str(item.get("status")), str(item.get("issue_type"))), item)
         return list(deduped.values())
 
@@ -11047,6 +11550,11 @@ class BacktestPlatformService:
 
     def create_composition_backtest_run(self, composition_id: str, request: Any) -> dict[str, Any]:
         payload = self._compact_composition_request(_as_mapping(request))
+        period_key = str(payload.get("period") or "").strip().upper().replace(" ", "")
+        period_horizon_years = {"10Y": 10, "20Y": 20, "30Y": 30}.get(period_key)
+        if period_horizon_years is not None:
+            payload["period"] = period_key
+            payload["horizon_years"] = period_horizon_years
         detail = self.get_composition_detail(composition_id)
         idempotency_key = str(payload.get("idempotency_key") or "").strip()
         if not idempotency_key:
@@ -20105,6 +20613,22 @@ class BacktestPlatformService:
         digest = hashlib.sha1(normalized.encode("utf-8")).digest()
         return (digest[0] / 255.0 - 0.5) * 0.30
 
+    def _multi_factor_top_n_value(
+        self,
+        parameter_snapshot: Mapping[str, Any],
+    ) -> int:
+        factor_ids = [
+            str(item).strip()
+            for item in parameter_snapshot.get("factor_ids") or []
+            if str(item).strip()
+        ]
+        default_top_n = max(min(len(factor_ids) * 2, 10), 5)
+        raw_value = parameter_snapshot.get(
+            "top_n",
+            parameter_snapshot.get("holding_count", parameter_snapshot.get("hold_rank_threshold", default_top_n)),
+        )
+        return max(int(_as_float(raw_value, float(default_top_n)) or float(default_top_n)), 1)
+
     def _multi_factor_weight_projection_effect(
         self,
         strategy: Mapping[str, Any],
@@ -20114,6 +20638,8 @@ class BacktestPlatformService:
         current = self._multi_factor_weight_pct_map(parameter_snapshot)
         if not current:
             return 0.0
+        baseline_top_n = self._multi_factor_top_n_value(_as_mapping(strategy.get("parameters")))
+        current_top_n = self._multi_factor_top_n_value(parameter_snapshot)
         factor_ids = sorted(set(baseline) | set(current))
         baseline_score = sum(
             baseline.get(factor_id, 0.0) * self._multi_factor_weight_alpha(factor_id)
@@ -20125,7 +20651,11 @@ class BacktestPlatformService:
         ) / 100.0
         current_total = sum(current.values())
         sum_penalty = abs(current_total - 100.0) / 100.0 if current_total else 0.0
-        raw_effect = (current_score - baseline_score) - sum_penalty * 0.08
+        breadth_ratio = 0.0
+        if baseline_top_n and current_top_n:
+            breadth_ratio = (current_top_n - baseline_top_n) / max(float(baseline_top_n), 1.0)
+        breadth_effect = 0.025 * math.tanh(breadth_ratio * 2.0)
+        raw_effect = (current_score - baseline_score) + breadth_effect - sum_penalty * 0.08
         effect_limit = 0.12
         return effect_limit * math.tanh(raw_effect / effect_limit)
 
@@ -20203,10 +20733,12 @@ class BacktestPlatformService:
         parameter_snapshot: Mapping[str, Any],
     ) -> tuple[tuple[str, float], ...]:
         weights = self._multi_factor_weight_pct_map(parameter_snapshot)
-        return tuple(
+        signature = [
             (factor_id, round(value, 6))
             for factor_id, value in sorted(weights.items())
-        )
+        ]
+        signature.append(("__top_n__", float(self._multi_factor_top_n_value(parameter_snapshot))))
+        return tuple(signature)
 
     def _multi_factor_records_need_projection(
         self,

@@ -253,6 +253,86 @@ def test_api_startup_interrupt_mode_marks_running_backtest_runs_as_interrupted(t
     assert detail["preview"]["environment_summary"]["execution_progress"]["persisted_step_count"] == 2
 
 
+def test_api_startup_default_backtest_recovery_mode_interrupts_running_backtest_runs(tmp_path) -> None:
+    seed_client, db_path = create_test_client(tmp_path)
+    strategy = create_momentum_strategy(
+        seed_client,
+        idempotency_key="backtest-startup-default-interrupt",
+        universe_name="SPY",
+        rebalance_frequency="monthly",
+        top_n=1,
+    )["strategy"]
+    refresh_snapshots(seed_client)
+    seed_service = seed_client.app.state.service
+    _seed_interrupted_run(seed_service, strategy, run_id="run_startup_default_interrupt", status="RUNNING")
+    seed_client.close()
+
+    app = create_app(
+        db_path,
+        market_data_provider=FakeMarketDataProvider(),
+    )
+    with TestClient(app) as restarted_client:
+        detail = assert_ok(restarted_client.get("/backtest-runs/run_startup_default_interrupt/detail"))
+
+    assert detail["status"] == "INTERRUPTED"
+    assert detail["resume_ready"] is True
+    assert detail["interrupted_reason"] == "service_restart"
+
+
+def test_resume_mode_interrupts_uncheckpointed_running_backtest_for_manual_resume(tmp_path, monkeypatch) -> None:
+    client, _ = create_test_client(tmp_path)
+    strategy = create_momentum_strategy(
+        client,
+        idempotency_key="materialize-momentum-uncheckpointed-recovery",
+        universe_name="SPY",
+        rebalance_frequency="monthly",
+        top_n=1,
+    )["strategy"]
+    service = client.app.state.service
+    request_payload = service._normalize_run_request(
+        strategy,
+        {
+            "idempotency_key": "run-uncheckpointed-recovery",
+            "start_date": START_DATE,
+            "end_date": END_DATE,
+            "parameter_version_id": strategy["current_parameter_version_id"],
+        },
+    )
+    preview = service._build_pending_backtest_preview(strategy, request_payload)
+    service.storage.insert_json_row(
+        "backtest_runs",
+        service._build_backtest_run_row(
+            run_id="run_uncheckpointed_recovery",
+            strategy_id=strategy["id"],
+            status="RUNNING",
+            request_payload=request_payload,
+            created_at="2026-05-13T09:00:00Z",
+            updated_at="2026-05-13T09:30:00Z",
+            preview=preview,
+            parameter_snapshot=preview.get("parameter_snapshot") or {},
+            environment_summary=preview.get("environment_summary") or {},
+        ),
+    )
+
+    started: list[str] = []
+
+    def fake_start_backtest_run_runner(**kwargs) -> bool:
+        started.append(str(kwargs.get("run_id") or ""))
+        return True
+
+    monkeypatch.setattr(service, "_start_backtest_run_runner", fake_start_backtest_run_runner)
+
+    resumed = service.resume_incomplete_backtest_runs()
+    detail = service.get_backtest_run_detail("run_uncheckpointed_recovery")
+
+    assert resumed == []
+    assert started == []
+    assert detail["status"] == "INTERRUPTED"
+    assert detail["resume_ready"] is True
+    assert detail["interrupted_reason"] == "service_restart"
+    assert detail["preview"]["environment_summary"]["recovery"]["mode"] == "startup_interrupt_recovery"
+
+
 def test_resume_backtest_run_completes_from_checkpoint_without_restart_warning(tmp_path) -> None:
     client, _ = create_test_client(tmp_path)
     strategy = create_momentum_strategy(
@@ -288,30 +368,7 @@ def test_resume_incomplete_backtest_runs_does_not_start_duplicate_runners_across
     )["strategy"]
     refresh_snapshots(seed_client)
     seed_service = seed_client.app.state.service
-    request_payload = seed_service._normalize_run_request(
-        strategy,
-        {
-            "idempotency_key": "backtest-cross-service-run",
-            "start_date": START_DATE,
-            "end_date": END_DATE,
-            "parameter_version_id": strategy["current_parameter_version_id"],
-        },
-    )
-    preview = seed_service._build_pending_backtest_preview(strategy, request_payload)
-    seed_service.storage.insert_json_row(
-        "backtest_runs",
-        seed_service._build_backtest_run_row(
-            run_id="run_cross_service_claim",
-            strategy_id=strategy["id"],
-            status="RUNNING",
-            request_payload=request_payload,
-            created_at="2026-05-13T09:00:00Z",
-            updated_at="2026-05-13T09:30:00Z",
-            preview=preview,
-            parameter_snapshot=preview.get("parameter_snapshot") or {},
-            environment_summary=preview.get("environment_summary") or {},
-        ),
-    )
+    _seed_interrupted_run(seed_service, strategy, run_id="run_cross_service_claim", status="RUNNING")
     seed_client.close()
 
     service_a = RealBacktestPlatformService(db_path, market_data_provider=FakeMarketDataProvider())
@@ -343,3 +400,83 @@ def test_resume_incomplete_backtest_runs_does_not_start_duplicate_runners_across
     deadline = time.monotonic() + 1.0
     while time.monotonic() < deadline and "run_cross_service_claim" in service_a._backtest_run_threads:
         time.sleep(0.01)
+
+
+def test_backtest_submission_persists_preparing_progress_before_first_daily_checkpoint(tmp_path, monkeypatch) -> None:
+    client, _ = create_test_client(tmp_path)
+    strategy = create_momentum_strategy(
+        client,
+        idempotency_key="backtest-prepare-progress",
+        universe_name="SPY",
+        rebalance_frequency="monthly",
+        top_n=1,
+    )["strategy"]
+    refresh_snapshots(client)
+    service = client.app.state.service
+    request_payload = service._normalize_run_request(
+        strategy,
+        {
+            "idempotency_key": "run-prepare-progress",
+            "start_date": START_DATE,
+            "end_date": END_DATE,
+            "parameter_version_id": strategy["current_parameter_version_id"],
+        },
+    )
+    run_id = "run_prepare_progress"
+    preparing_state = service._build_backtest_preparing_state(
+        current_stage="Preparing multi-factor signals",
+        latest_update="Computing factor 1/2 (s_vol_252d_rank) for 40/503 symbols.",
+        extra_state={
+            "prepare_factor_index": 1,
+            "prepare_factor_count": 2,
+            "prepare_factor_id": "s_vol_252d_rank",
+            "prepare_symbol_index": 40,
+            "prepare_symbol_count": 503,
+        },
+    )
+    progress_emitted = threading.Event()
+    release_prepare = threading.Event()
+
+    def fake_prepare_backtest_run_context(self, _strategy, _request_payload, *, progress_callback=None):
+        assert progress_callback is not None
+        progress_callback(preparing_state)
+        progress_emitted.set()
+        assert release_prepare.wait(2.0)
+        raise RuntimeError("synthetic prepare halt")
+
+    monkeypatch.setattr(type(service), "_prepare_backtest_run_context", fake_prepare_backtest_run_context)
+
+    started = service._start_backtest_run_runner(
+        run_id=run_id,
+        strategy_id=strategy["id"],
+        strategy=strategy,
+        request_payload=request_payload,
+        created_at="2026-05-14T08:30:00Z",
+    )
+
+    assert started is True
+    assert progress_emitted.wait(1.0)
+
+    checkpoint_bundle = service._load_backtest_checkpoint_bundle(run_id)
+    assert checkpoint_bundle is not None
+    assert checkpoint_bundle["stage"] == "PREPARING"
+    assert checkpoint_bundle["state"]["persisted_step_count"] == 0
+    assert checkpoint_bundle["state"]["latest_update"] == preparing_state["latest_update"]
+    assert checkpoint_bundle["state"]["current_stage"] == preparing_state["current_stage"]
+    assert checkpoint_bundle["state"]["prepare_symbol_index"] == 40
+
+    detail = service.get_backtest_run_detail(run_id)
+    assert detail["status"] == "RUNNING"
+    assert detail["current_stage"] == preparing_state["current_stage"]
+    assert detail["latest_update"] == preparing_state["latest_update"]
+    assert detail["persisted_step_count"] == 0
+
+    claim_row = service.storage.fetch_one(
+        "SELECT state_json FROM app_runtime_state WHERE state_key = ?",
+        (service._backtest_runner_claim_key(run_id),),
+    )
+    assert claim_row is not None
+
+    release_prepare.set()
+    latest = _wait_for_terminal_backtest(service, run_id)
+    assert latest["status"] == "FAILED"

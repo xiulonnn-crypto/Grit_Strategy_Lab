@@ -18,7 +18,7 @@ from .yahoo_provider import SymbolMarketData
 MASSIVE_BASE_URL = "https://api.massive.com"
 POLYGON_BASE_URL = MASSIVE_BASE_URL
 POLYGON_LEGACY_BASE_URL = "https://api.polygon.io"
-POLYGON_ACCEPTED_ENV_VARS = ("MASSIVE_API_KEY", "POLYGON_API_KEY")
+POLYGON_ACCEPTED_ENV_VARS = ("MASSIVE_API_KEY",)
 
 
 @dataclass(frozen=True)
@@ -69,7 +69,7 @@ class PolygonMarketDataProvider:
             return ProviderAvailability(
                 provider_name=self.provider_name,
                 available=False,
-                reason="missing MASSIVE_API_KEY or POLYGON_API_KEY",
+                reason="missing MASSIVE_API_KEY",
                 metadata={**self.metadata, "credential_status": "missing"},
             )
         return ProviderAvailability(

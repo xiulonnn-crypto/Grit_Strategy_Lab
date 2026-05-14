@@ -114,6 +114,18 @@ function isBacktestRunInProgress(status: string | null | undefined): boolean {
   return normalized === 'QUEUED' || normalized === 'RUNNING';
 }
 
+function isBacktestRunInterrupted(status: string | null | undefined): boolean {
+  return String(status ?? '').toUpperCase() === 'INTERRUPTED';
+}
+
+function createBacktestResumeIdempotencyKey(runId: string): string {
+  const randomPart =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `resume-backtest-${runId}-${randomPart}`;
+}
+
 function hasRunDetailContext(detail: ApiBacktestRunDetail | null): boolean {
   if (!detail) {
     return false;
@@ -421,6 +433,7 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
   const [contextLoading, setContextLoading] = useState(false);
   const [contextError, setContextError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [rerunBusy, setRerunBusy] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
   const [saveDialogError, setSaveDialogError] = useState<string | null>(null);
@@ -541,6 +554,8 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
     setAuditError(null);
     setContextLoading(false);
     setContextError(null);
+    setActionNotice(null);
+    setRerunBusy(false);
   }, [runId]);
 
   useEffect(() => {
@@ -677,11 +692,36 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
     }
   }
 
-  function handleRerunBacktest(): void {
-    if (!detail?.strategy_id) {
+  async function handleRerunBacktest(): Promise<void> {
+    if (!detail) {
       return;
     }
+
     setActionNotice(null);
+
+    if (isBacktestRunInterrupted(detail.status)) {
+      try {
+        setRerunBusy(true);
+        const resumed = await api.resumeBacktestRun(
+          detail.id,
+          createBacktestResumeIdempotencyKey(detail.id),
+        );
+        setDetail((current) => mergeRunDetail(current, resumed));
+        setSelectedTradeId((current) => current ?? getDefaultTradeId(resumed));
+        setDetailError(null);
+        setActionNotice(resumed.latest_update ?? '已继续回测，页面会自动刷新最新进度。');
+      } catch (caught) {
+        setActionNotice(`继续回测失败：${(caught as Error).message}`);
+      } finally {
+        setRerunBusy(false);
+      }
+      return;
+    }
+
+    if (!detail.strategy_id) {
+      return;
+    }
+
     navigateTo(
       `/strategies/${encodeURIComponent(detail.strategy_id)}/backtest-runs/new?source_run_id=${encodeURIComponent(detail.id)}`,
     );
@@ -736,7 +776,9 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
   const strategyVersionTag = getStrategyVersionTag(resolvedDetail);
   const runStatus = formatRunStatusLabel(resolvedDetail.status);
   const runInProgress = isBacktestRunInProgress(resolvedDetail.status);
-  const canRerun = Boolean(resolvedDetail.strategy_id) && !runInProgress;
+  const interruptedRun = isBacktestRunInterrupted(resolvedDetail.status);
+  const rerunActionLabel = interruptedRun ? '继续回测' : '重跑回测';
+  const canRerun = interruptedRun ? !rerunBusy : Boolean(resolvedDetail.strategy_id) && !runInProgress;
   const canOptimize = Boolean(resolvedDetail.strategy_id) && !runInProgress;
   const detailContextReady = hasRunDetailContext(resolvedDetail);
   const runWarnings = collectRunWarnings(resolvedDetail);
@@ -998,9 +1040,11 @@ export function RunDetailPage({ runId }: { runId: string }): JSX.Element {
             </button>
           ) : null}
           <button
-            className="ghost-button"
+            aria-label={rerunActionLabel}
+            className="ghost-button run-detail-hero__rerun-button"
+            data-label={rerunActionLabel}
             disabled={!canRerun}
-            onClick={handleRerunBacktest}
+            onClick={() => void handleRerunBacktest()}
             type="button"
           >
             重跑回测

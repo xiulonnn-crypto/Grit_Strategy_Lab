@@ -156,7 +156,7 @@ def kaggle_credential_status() -> dict[str, Any]:
 
 
 def polygon_credential_status() -> dict[str, Any]:
-    accepted_env_vars = ["MASSIVE_API_KEY", "POLYGON_API_KEY"]
+    accepted_env_vars = ["MASSIVE_API_KEY"]
     configured_env_vars = [name for name in accepted_env_vars if str(os.getenv(name) or "").strip()]
     configured = bool(configured_env_vars)
     return {

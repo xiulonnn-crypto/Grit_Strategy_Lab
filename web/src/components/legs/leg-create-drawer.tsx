@@ -29,7 +29,9 @@ type StrategyLegDrawerProps = {
   open: boolean;
   onClose: () => void;
   rows: ApiLegInventoryRow[];
-  onSaveAndAdd: (row: ApiLegInventoryRow) => void;
+  onSaveAndAdd: (row: ApiLegInventoryRow) => Promise<void>;
+  savingRowId?: string | null;
+  errorMessage?: string | null;
 };
 
 const DEFAULT_CASH_FORM: ApiCashLegCreatePayload = {
@@ -714,6 +716,8 @@ export function StrategyLegDrawer({
   onClose,
   onSaveAndAdd,
   rows,
+  savingRowId = null,
+  errorMessage = null,
 }: StrategyLegDrawerProps): JSX.Element | null {
   const strategyRows = rows.filter((row) => row.leg_type === 'strategy');
   const firstStrategyId = strategyRows[0]?.id ?? '';
@@ -736,27 +740,34 @@ export function StrategyLegDrawer({
   const strategyCurvePoints = buildPolylinePoints(buildCurveValues(metrics, 'strategy'));
   const benchmarkCurvePoints = buildPolylinePoints(buildCurveValues(metrics, 'benchmark'));
   const strategyCurveFillPath = buildFillPath(strategyCurvePoints);
+  const savingSelectedRow = Boolean(selectedRow && savingRowId === selectedRow.id);
 
   return (
     <DrawerShell
       headerActions={(
         <div className="leg-inventory-drawer__actions">
-          <button className="ghost-button" onClick={onClose} type="button">
+          <button className="ghost-button" disabled={Boolean(savingRowId)} onClick={onClose} type="button">
             取消
           </button>
           <button
             className="primary-button"
-            disabled={!selectedRow}
+            disabled={!selectedRow || Boolean(savingRowId)}
             onClick={() => {
               if (selectedRow) {
-                onSaveAndAdd(selectedRow);
+                void onSaveAndAdd(selectedRow);
               }
             }}
             type="button"
           >
-            保存并加入库
+            {savingSelectedRow ? '保存中...' : '保存并加入库'}
           </button>
-          <button aria-label="关闭抽屉" className="leg-inventory-drawer__x" onClick={onClose} type="button">
+          <button
+            aria-label="关闭抽屉"
+            className="leg-inventory-drawer__x"
+            disabled={Boolean(savingRowId)}
+            onClick={onClose}
+            type="button"
+          >
             ×
           </button>
         </div>
@@ -769,6 +780,11 @@ export function StrategyLegDrawer({
     >
       <div className="leg-inventory-drawer__body leg-inventory-drawer__body--wide" data-drawer-kind="strategy">
         <div className="leg-inventory-drawer__form">
+          {errorMessage ? (
+            <div className="error-banner" role="alert">
+              {errorMessage}
+            </div>
+          ) : null}
           <section className="leg-inventory-drawer__section">
             <div className="leg-inventory-drawer__section-header">
               <div className="leg-inventory-drawer__copy">

@@ -15,6 +15,7 @@ import {
   materializeSavedStrategyRows,
   mergeInventoryWithSavedStrategies,
   readSavedStrategyLegEdits,
+  readSavedStrategyLegFreezes,
   readSavedStrategyLegIds,
   upgradeStrategyLegVersions,
 } from '../lib/saved-strategy-leg-inventory';
@@ -403,6 +404,7 @@ export function CompositionWorkbenchPage(): JSX.Element {
                   ),
                   [],
                   readSavedStrategyLegEdits(),
+                  readSavedStrategyLegFreezes(),
                 ),
               ) ?? inventoryResponse;
           } catch {

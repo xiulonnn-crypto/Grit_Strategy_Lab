@@ -75,6 +75,15 @@
   row-gap: 8px;
 }
 
+.run-detail-hero__rerun-button {
+  font-size: 0;
+}
+
+.run-detail-hero__rerun-button::before {
+  content: attr(data-label);
+  font-size: 0.95rem;
+}
+
 .run-detail-save-modal {
   width: min(560px, 100%);
   display: grid;

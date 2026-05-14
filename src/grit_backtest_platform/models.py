@@ -226,6 +226,7 @@ class FactorModelPreviewRequest(BaseModel):
     name: str | None = None
     universe: str = Field(default='SP500', min_length=1)
     rebalance_frequency: str = Field(default='monthly', min_length=1)
+    top_n: int | None = Field(default=None, ge=1, le=500)
     scoring_method: str = Field(default='zscore_weighted', min_length=1)
     components: list[FactorModelComponentRequest] = Field(default_factory=list, min_length=1)
     neutralization: FactorModelNeutralizationRequest = Field(default_factory=FactorModelNeutralizationRequest)
@@ -795,6 +796,7 @@ class LegInventoryRowModel(BaseModel):
     status: str
     status_label: str
     has_new_version: bool = False
+    has_new_parameters: bool = False
     is_orphan: bool = False
     attribute_tags: list[str] = Field(default_factory=list)
     allowed_actions: list[AllowedAction | str] = Field(default_factory=list)
@@ -808,6 +810,8 @@ class LegInventoryRowModel(BaseModel):
     alerts: list[str] = Field(default_factory=list)
     return_quality: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 class LegInventoryResponseModel(BaseModel):
@@ -957,6 +961,9 @@ class CompositionScoreModel(BaseModel):
 
 class CompositionReturnQualitySummaryModel(BaseModel):
     status: str = 'limited'
+    metric_basis: str | None = None
+    metric_window_label: str | None = None
+    source_metric_basis: str | None = None
     alignment_window_start: str | None = None
     alignment_window_end: str | None = None
     aligned_points: int = 0
@@ -987,6 +994,7 @@ class CompositionSourceIntegrityModel(BaseModel):
     freeze_hash: str | None = None
     signature_status: str = 'unverified'
     drift_status: str = 'unknown'
+    has_new_parameters: bool = False
     current_ref_id: str | None = None
     checked_at: str | None = None
     alerts: list[str] = Field(default_factory=list)
@@ -1092,6 +1100,7 @@ class CompositionListItemModel(BaseModel):
     allowed_actions: list[AllowedAction | str] = Field(default_factory=list)
     has_new_version: bool = False
     source_integrity: list[CompositionSourceIntegrityModel] = Field(default_factory=list)
+    return_quality_summary: CompositionReturnQualitySummaryModel = Field(default_factory=CompositionReturnQualitySummaryModel)
     latest_backtest_summary: dict[str, Any] = Field(default_factory=dict)
     backtest_period_coverage: list[dict[str, Any]] = Field(default_factory=list)
     lab_summary: dict[str, Any] = Field(default_factory=dict)

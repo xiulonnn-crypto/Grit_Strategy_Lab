@@ -1024,10 +1024,10 @@ def create_app(
     normalized_startup_backtest_recovery_mode = str(
         startup_backtest_recovery_mode
         or os.getenv("GRIT_STARTUP_BACKTEST_RECOVERY")
-        or "resume"
+        or "interrupt"
     ).strip().lower()
     if normalized_startup_backtest_recovery_mode not in {"resume", "interrupt", "skip"}:
-        normalized_startup_backtest_recovery_mode = "resume"
+        normalized_startup_backtest_recovery_mode = "interrupt"
     normalized_startup_optimization_recovery_mode = str(
         startup_optimization_recovery_mode
         or os.getenv("GRIT_STARTUP_OPTIMIZATION_RECOVERY")

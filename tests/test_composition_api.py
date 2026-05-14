@@ -66,9 +66,14 @@ def _seed_completed_run_with_monthly_series(
     month_count: int = 150,
     start_year: int = 2013,
     start_month: int = 1,
+    monthly_return: float = 0.012,
+    benchmark_monthly_return: float = 0.006,
+    annualized_return: float = 0.16,
+    sharpe: float = 1.4,
+    completed_at: str | None = None,
 ) -> str:
     run_id = f"run_{uuid4().hex[:10]}"
-    timestamp = _iso_now()
+    timestamp = completed_at or _iso_now()
     chart_series = []
     equity = 100.0
     benchmark = 100.0
@@ -76,23 +81,31 @@ def _seed_completed_run_with_monthly_series(
         month_index = start_month - 1 + offset
         year = start_year + month_index // 12
         month = month_index % 12 + 1
-        equity *= 1.0 + (0.012 + (0.001 if offset % 3 == 0 else -0.0005))
-        benchmark *= 1.0 + 0.006
+        equity *= 1.0 + (monthly_return + (0.001 if offset % 3 == 0 else -0.0005))
+        benchmark *= 1.0 + benchmark_monthly_return
         chart_series.append(
             {
                 "trade_date": f"{year:04d}-{month:02d}-28",
                 "equity": round(equity, 6),
                 "benchmark": round(benchmark, 6),
-                "benchmark_return": 0.006,
+                "benchmark_return": benchmark_monthly_return,
                 "is_oos": offset >= month_count - 36,
             }
         )
+    start_date = f"{start_year:04d}-{start_month:02d}-01"
+    end_date = chart_series[-1]["trade_date"] if chart_series else start_date
+    effective_date = chart_series[0]["trade_date"] if chart_series else start_date
+    oos_start_date = chart_series[max(0, month_count - 36)]["trade_date"] if chart_series else start_date
     client.app.state.service.storage.insert_json_row(
         "backtest_runs",
         {
             "id": run_id,
             "strategy_id": strategy_id,
             "status": "COMPLETED",
+            "start_date": start_date,
+            "end_date": end_date,
+            "effective_date": effective_date,
+            "oos_start_date": oos_start_date,
             "request_json": json.dumps(
                 {
                     "execution_policy": "T_CLOSE_TO_T1_OPEN",
@@ -105,8 +118,8 @@ def _seed_completed_run_with_monthly_series(
             "metrics_json": json.dumps(
                 {
                     "total_return": equity / 100.0 - 1.0,
-                    "annualized_return": 0.16,
-                    "sharpe": 1.4,
+                    "annualized_return": annualized_return,
+                    "sharpe": sharpe,
                     "max_drawdown": -0.08,
                 }
             ),
@@ -516,9 +529,13 @@ def test_leg_inventory_defaults_to_manual_asset_and_cash_rows_only(tmp_path):
     cash_row = next(row for row in inventory["rows"] if row["leg_type"] == "cash")
 
     assert asset_row["id"] == asset_leg["id"]
+    assert asset_row["created_at"] == asset_leg["created_at"]
+    assert asset_row["updated_at"] == asset_leg["updated_at"]
     assert asset_row["config"]["source_snapshot_id"] == "ds-price"
     assert asset_row["return_quality"]["issue_types"] == ["收益样本缺失", "对齐缺口"]
     assert cash_row["id"] == cash_leg["id"]
+    assert cash_row["created_at"] == cash_leg["created_at"]
+    assert cash_row["updated_at"] == cash_leg["updated_at"]
     assert cash_row["config"]["buffer_bps"] == 35.0
     assert cash_row["return_quality"]["issue_types"] == []
     assert cash_row["return_quality"]["missing_points"] == 0
@@ -1662,6 +1679,65 @@ def test_composition_backtest_run_accepts_frozen_source_run_deep_link(tmp_path):
     assert orders["generated_from"] == "composition_rebalance_events_and_strategy_trades"
 
 
+def test_composition_backtest_coverage_uses_actual_window_when_request_period_drifts(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    composition = _create_sleeve_os_composition(client)
+    run_id = "comp_run_requested_30y_actual_10y"
+    timestamp = _iso_now()
+    run_payload = {
+        "id": run_id,
+        "run_id": run_id,
+        "composition_id": composition["id"],
+        "status": "COMPLETED",
+        "created_at": timestamp,
+        "completed_at": timestamp,
+        "request": {
+            "period": "30Y",
+            "horizon_years": 10,
+        },
+        "summary": {
+            "composition_name": composition["name"],
+            "horizon_years": 10.0,
+            "annualized_return": 8.0,
+            "sharpe": 1.1,
+            "max_drawdown": 9.0,
+        },
+        "diagnostics": {
+            "metric_matrix": [
+                {"window": "10Y", "annualized_return": 8.0, "sharpe": 1.1, "max_drawdown": 9.0},
+            ],
+        },
+    }
+    client.app.state.service.storage.insert_json_row(
+        "composition_backtest_runs",
+        {
+            "id": run_id,
+            "composition_id": composition["id"],
+            "status": "COMPLETED",
+            "request_json": json.dumps(run_payload["request"]),
+            "result_json": json.dumps(run_payload),
+            "orders_json": json.dumps([]),
+            "evidence_json": json.dumps({}),
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            "completed_at": timestamp,
+            "deleted_at": None,
+            "deleted_reason": None,
+        },
+    )
+
+    listed = assert_ok(client.get("/compositions"))
+    list_item = next(item for item in listed if item["id"] == composition["id"])
+
+    assert list_item["backtest_period_coverage"][0]["period"] == "10Y"
+    assert list_item["backtest_period_coverage"][0]["status"] == "covered"
+    assert list_item["backtest_period_coverage"][0]["run_id"] == run_id
+    assert list_item["backtest_period_coverage"][1]["period"] == "20Y"
+    assert list_item["backtest_period_coverage"][1]["status"] == "missing"
+    assert list_item["backtest_period_coverage"][2]["period"] == "30Y"
+    assert list_item["backtest_period_coverage"][2]["status"] == "missing"
+
+
 def test_global_composition_artifacts_refresh_current_status_labels(tmp_path):
     client, _ = create_test_client(tmp_path)
     composition = _create_sleeve_os_composition(client)
@@ -2067,7 +2143,7 @@ def test_composition_detail_and_list_flag_saved_strategy_leg_new_version(tmp_pat
     )["strategy"]
     current_parameter_version_id = revised["current_parameter_version_id"]
     assert current_parameter_version_id != base_parameter_version_id
-    _seed_completed_run(client, strategy["id"], current_parameter_version_id)
+    current_run_id = _seed_completed_run(client, strategy["id"], current_parameter_version_id)
 
     detail = assert_ok(client.get(f"/compositions/{composition['id']}"))
     strategy_integrity = next(
@@ -2077,7 +2153,7 @@ def test_composition_detail_and_list_flag_saved_strategy_leg_new_version(tmp_pat
     assert strategy_integrity["signature_status"] == "stale"
     assert (
         strategy_integrity["current_ref_id"]
-        == f"strategy_leg::{strategy['id']}::{current_parameter_version_id}"
+        == f"strategy_leg::{current_parameter_version_id}::{current_run_id}"
     )
     assert any("newer parameter version exists" in alert for alert in strategy_integrity["alerts"])
 
@@ -2085,6 +2161,116 @@ def test_composition_detail_and_list_flag_saved_strategy_leg_new_version(tmp_pat
     list_item = next(item for item in listed if item["id"] == composition["id"])
     assert list_item["has_new_version"] is True
     assert any(item["source_ref_id"] == stale_strategy_leg_ref for item in list_item["source_integrity"])
+
+
+def test_composition_detail_and_list_keep_frozen_same_version_strategy_run_source(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    asset_leg, cash_leg = _create_seed_legs(client)
+    created = create_momentum_strategy(client, idempotency_key="composition-run-drift-base")
+    strategy = created["strategy"]
+    parameter_version_id = strategy["current_parameter_version_id"]
+    first_run_id = _seed_completed_run_with_monthly_series(
+        client,
+        strategy["id"],
+        parameter_version_id,
+        monthly_return=0.02,
+        annualized_return=0.27,
+        sharpe=1.85,
+        completed_at="2026-05-01T09:00:00Z",
+    )
+    strategy_leg_ref = f"strategy_leg::{parameter_version_id}::{first_run_id}"
+    payload = {
+        "name": "Same Version Run Drift Overlay",
+        "description": "Composition should keep the frozen run when the same parameter version gets a newer run.",
+        "benchmark_definition": {"label": "S&P 500", "symbol": "SPY"},
+        "rebalance_frequency": "quarterly",
+        "legs": [
+            {
+                "leg_kind": "strategy",
+                "source_ref_id": strategy_leg_ref,
+                "weight_pct": 80,
+                "weight_locked": False,
+                "ordering": 1,
+            },
+            {
+                "leg_kind": "asset",
+                "source_ref_id": asset_leg["id"],
+                "weight_pct": 10,
+                "weight_locked": False,
+                "ordering": 2,
+            },
+            {
+                "leg_kind": "cash",
+                "source_ref_id": cash_leg["id"],
+                "weight_pct": 10,
+                "weight_locked": False,
+                "ordering": 3,
+            },
+        ],
+        "status": "ACTIVE",
+    }
+
+    composition = assert_ok(client.post("/compositions", json=payload))
+    first_return = next(item["value"] for item in composition["kpis"] if item["key"] == "annualized_return")
+    first_strategy_leg = next(item for item in composition["normalized_legs"] if item["source_ref_id"] == strategy_leg_ref)
+    assert first_strategy_leg["config"]["latest_run_id"] == first_run_id
+
+    second_run_id = _seed_completed_run_with_monthly_series(
+        client,
+        strategy["id"],
+        parameter_version_id,
+        monthly_return=-0.006,
+        annualized_return=-0.04,
+        sharpe=-0.15,
+        completed_at="2026-05-02T09:00:00Z",
+    )
+
+    detail = assert_ok(client.get(f"/compositions/{composition['id']}"))
+    frozen_strategy_leg = next(item for item in detail["normalized_legs"] if item["source_ref_id"] == strategy_leg_ref)
+    frozen_return = next(item["value"] for item in detail["kpis"] if item["key"] == "annualized_return")
+    strategy_integrity = next(item for item in detail["source_integrity"] if item["source_ref_id"] == strategy_leg_ref)
+    strategy_quality = next(
+        item
+        for item in detail["return_quality_summary"]["leg_quality"]
+        if item["source_ref_id"] == strategy_leg_ref
+    )
+
+    assert second_run_id != first_run_id
+    assert frozen_strategy_leg["config"]["latest_run_id"] == first_run_id
+    assert frozen_return == pytest.approx(first_return, abs=0.001)
+    assert strategy_integrity["current_ref_id"] == f"strategy_leg::{parameter_version_id}::{second_run_id}"
+    assert strategy_integrity["has_new_parameters"] is True
+    assert strategy_integrity["drift_status"] == "drifted"
+    assert strategy_integrity["signature_status"] == "stale"
+    assert any("same strategy version and backtest period" in alert for alert in strategy_integrity["alerts"])
+    assert detail["return_quality_summary"]["metric_basis"] == "aligned_recent_window"
+    assert detail["return_quality_summary"]["metric_window_label"]
+    assert strategy_quality["source_run_id"] == first_run_id
+    assert strategy_quality["source_metric_basis"] == "frozen_run_full_window"
+    assert strategy_quality["source_annualized_return_pct"] == pytest.approx(27.0, abs=0.001)
+    assert strategy_quality["aligned_annualized_return_pct"] is not None
+    assert detail["primary_diagnosis"]["diagnosis_type"] == "strategy_leg_new_parameters"
+    assert detail["primary_diagnosis"]["diagnosis_label"] == "待校准：腿有新参数"
+
+    listed = assert_ok(client.get("/compositions"))
+    list_item = next(item for item in listed if item["id"] == composition["id"])
+    list_strategy_integrity = next(
+        item for item in list_item["source_integrity"] if item["source_ref_id"] == strategy_leg_ref
+    )
+    assert list_strategy_integrity["current_ref_id"] == f"strategy_leg::{parameter_version_id}::{second_run_id}"
+    assert list_strategy_integrity["has_new_parameters"] is True
+    assert list_item["has_new_version"] is False
+    assert list_item["annualized_return"] == pytest.approx(frozen_return, abs=0.001)
+    assert list_item["return_quality_summary"]["metric_basis"] == "aligned_recent_window"
+    assert list_item["primary_diagnosis"]["diagnosis_label"] == "待校准：腿有新参数"
+    assert list_item["primary_diagnosis"]["actions"][0]["label"] == "查看对应腿"
+    assert list_item["primary_diagnosis"]["actions"][0]["route"] == (
+        f"/legs?source_ref_id=strategy_leg%3A%3A{parameter_version_id}%3A%3A{first_run_id}"
+    )
+    assert list_item["sharpe"] == pytest.approx(
+        next(item["value"] for item in detail["kpis"] if item["key"] == "sharpe"),
+        abs=0.001,
+    )
 
 
 def test_source_signature_stale_does_not_flag_strategy_version_update(tmp_path):

@@ -104,6 +104,13 @@ type ExposureDrilldownRow = {
   tone: 'good' | 'info' | 'warn';
 };
 
+type ChartPadding = {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+};
+
 function getToneClassName(tone?: string | null): string {
   switch (String(tone || '').toLowerCase()) {
     case 'positive':
@@ -143,6 +150,16 @@ function formatChartPercentValue(value?: number | null): string {
   }
   const prefix = value > 0 ? '+' : '';
   return `${prefix}${value.toFixed(2)}%`;
+}
+
+function formatChartAxisPercentValue(value: number): string {
+  if (!Number.isFinite(value)) {
+    return '暂无';
+  }
+  const absValue = Math.abs(value);
+  const precision = absValue >= 10 || absValue === 0 ? 0 : 1;
+  const prefix = value > 0 ? '+' : '';
+  return `${prefix}${value.toFixed(precision)}%`;
 }
 
 function formatHistoryPercentValue(value?: number | null): string {
@@ -573,6 +590,9 @@ function getReturnQualityDetail(detail: ApiCompositionDetail): string {
   const quality = detail.return_quality_summary;
   if (!quality) {
     return '收益质量等待运行态补齐。';
+  }
+  if (quality.alignment_window_start && quality.alignment_window_end) {
+    return `组合指标窗口 ${quality.alignment_window_start} - ${quality.alignment_window_end}，共 ${quality.aligned_points} 个月。`;
   }
   if (quality.fallback_used) {
     return `存在代理覆盖或临时补值，状态标签会说明是否需要处理。`;
@@ -1087,14 +1107,39 @@ function getBenchmarkLegendLabel(detail: ApiCompositionDetail): string {
   return label;
 }
 
-function getPoint(index: number, total: number, value: number, min: number, max: number, width: number, height: number, padding = 18): { x: number; y: number } {
+function resolveChartPadding(padding: number | ChartPadding): ChartPadding {
+  return typeof padding === 'number'
+    ? { top: padding, right: padding, bottom: padding, left: padding }
+    : padding;
+}
+
+function getPoint(
+  index: number,
+  total: number,
+  value: number,
+  min: number,
+  max: number,
+  width: number,
+  height: number,
+  padding: number | ChartPadding = 18,
+): { x: number; y: number } {
+  const resolvedPadding = resolveChartPadding(padding);
   const range = max - min || 1;
-  const x = padding + (index / Math.max(total - 1, 1)) * (width - padding * 2);
-  const y = height - padding - ((value - min) / range) * (height - padding * 2);
+  const usableWidth = width - resolvedPadding.left - resolvedPadding.right;
+  const usableHeight = height - resolvedPadding.top - resolvedPadding.bottom;
+  const x = resolvedPadding.left + (index / Math.max(total - 1, 1)) * usableWidth;
+  const y = height - resolvedPadding.bottom - ((value - min) / range) * usableHeight;
   return { x, y };
 }
 
-function buildLinePath(values: number[], width: number, height: number, min?: number, max?: number): string {
+function buildLinePath(
+  values: number[],
+  width: number,
+  height: number,
+  min?: number,
+  max?: number,
+  padding: number | ChartPadding = 18,
+): string {
   if (!values.length) {
     return '';
   }
@@ -1102,7 +1147,7 @@ function buildLinePath(values: number[], width: number, height: number, min?: nu
   const domainMax = max ?? Math.max(...values);
   return values
     .map((value, index) => {
-      const point = getPoint(index, values.length, value, domainMin, domainMax, width, height);
+      const point = getPoint(index, values.length, value, domainMin, domainMax, width, height, padding);
       return `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
     })
     .join(' ');
@@ -1118,16 +1163,24 @@ function buildAreaPath(values: number[], width: number, height: number, baseline
   return `M ${start.x.toFixed(2)} ${start.y.toFixed(2)} ${line.slice(1)} L ${end.x.toFixed(2)} ${end.y.toFixed(2)} Z`;
 }
 
-function buildDrawdownBandArea(values: number[], width: number, height: number, zeroAxisY: number): string {
+function buildDrawdownBandArea(
+  values: number[],
+  width: number,
+  height: number,
+  zeroAxisY: number,
+  padding: number | ChartPadding = 18,
+): string {
   if (!values.length) {
     return '';
   }
-  const padding = 18;
+  const resolvedPadding = resolveChartPadding(padding);
   const baselineY = Math.min(height - 40, Math.max(56, zeroAxisY));
-  const bandHeight = Math.max(18, height - padding - baselineY);
+  const bandHeight = Math.max(18, height - resolvedPadding.bottom - baselineY);
   const maxDepth = Math.max(...values.map((value) => Math.abs(Math.min(value, 0))), 0.01);
   const points = values.map((value, index) => {
-    const x = padding + (index / Math.max(values.length - 1, 1)) * (width - padding * 2);
+    const x =
+      resolvedPadding.left
+      + (index / Math.max(values.length - 1, 1)) * (width - resolvedPadding.left - resolvedPadding.right);
     const depth = Math.abs(Math.min(value, 0)) / maxDepth;
     const y = baselineY + depth * bandHeight;
     return { x, y };
@@ -1140,6 +1193,34 @@ function buildDrawdownBandArea(values: number[], width: number, height: number, 
     `L ${last.x.toFixed(2)} ${baselineY.toFixed(2)}`,
     'Z',
   ].join(' ');
+}
+
+function buildReturnChartValueTicks(min: number, max: number, count = 5): number[] {
+  const safeMin = Number.isFinite(min) ? min : 0;
+  const safeMax = Number.isFinite(max) ? max : 0.01;
+  if (count <= 1 || safeMin === safeMax) {
+    return [safeMax];
+  }
+  const range = safeMax - safeMin;
+  return Array.from({ length: count }, (_, index) => safeMax - (range * index) / (count - 1));
+}
+
+function buildReturnChartDateTicks(
+  points: ApiCompositionDetail['returns_preview'],
+  count = 4,
+): Array<{ index: number; label: string; anchor: 'start' | 'middle' | 'end' }> {
+  if (!points.length) {
+    return [];
+  }
+  const candidates = Array.from({ length: count }, (_, tickIndex) =>
+    Math.round(((points.length - 1) * tickIndex) / Math.max(count - 1, 1)),
+  );
+  const uniqueIndexes = [...new Set(candidates)];
+  return uniqueIndexes.map((index, tickIndex) => ({
+    index,
+    label: getReturnPointDateLabel(points[index]),
+    anchor: tickIndex === 0 ? 'start' : tickIndex === uniqueIndexes.length - 1 ? 'end' : 'middle',
+  }));
 }
 
 function getRebalanceChartMarkers(detail: ApiCompositionDetail): Array<{ index: number; label: string; key: string }> {
@@ -1205,6 +1286,14 @@ function formatShortDate(value?: string | null): string {
     return date.toISOString().slice(0, 10);
   }
   return text.slice(0, 10);
+}
+
+function getReturnPointDateLabel(point?: ApiCompositionDetail['returns_preview'][number] | null): string {
+  const dateLabel = formatShortDate(point?.date);
+  if (dateLabel !== '日期待补') {
+    return dateLabel;
+  }
+  return getDisplayText(point?.label, '日期待补');
 }
 
 function getRecordString(source: Record<string, unknown> | undefined, keys: string[]): string | null {
@@ -2863,6 +2952,11 @@ export function CompositionDetailView({
     : null;
   const approvedChartWidth = 1000;
   const approvedChartHeight = 320;
+  const returnChartPadding: ChartPadding = { top: 28, right: 24, bottom: 40, left: 58 };
+  const chartPlotLeft = returnChartPadding.left;
+  const chartPlotRight = approvedChartWidth - returnChartPadding.right;
+  const chartPlotTop = returnChartPadding.top;
+  const chartPlotBottom = approvedChartHeight - returnChartPadding.bottom;
   const cumulativeSeries = detail ? detail.returns_preview.map((item) => item.cumulative_return_pct) : [];
   const benchmarkSeries = detail ? detail.benchmark_series.map((item) => item.cumulative_return_pct) : [];
   const spreadSeries = detail ? detail.spread_series.map((item) => item.spread_pct) : [];
@@ -2888,15 +2982,19 @@ export function CompositionDetailView({
         cumulativeMax,
         approvedChartWidth,
         approvedChartHeight,
+        returnChartPadding,
       ).y,
     ),
   );
+  const returnChartValueTicks = buildReturnChartValueTicks(cumulativeMin, cumulativeMax);
+  const returnChartDateTicks = detail ? buildReturnChartDateTicks(detail.returns_preview) : [];
   const cumulativePath = buildLinePath(
     cumulativeSeries,
     approvedChartWidth,
     approvedChartHeight,
     cumulativeMin,
     cumulativeMax,
+    returnChartPadding,
   );
   const benchmarkPath = buildLinePath(
     benchmarkSeries,
@@ -2904,6 +3002,7 @@ export function CompositionDetailView({
     approvedChartHeight,
     cumulativeMin,
     cumulativeMax,
+    returnChartPadding,
   );
   const costDragPath = buildLinePath(
     costDragSeries,
@@ -2911,8 +3010,9 @@ export function CompositionDetailView({
     approvedChartHeight,
     cumulativeMin,
     cumulativeMax,
+    returnChartPadding,
   );
-  const drawdownArea = buildDrawdownBandArea(drawdownSeries, approvedChartWidth, approvedChartHeight, chartZeroAxisY);
+  const drawdownArea = buildDrawdownBandArea(drawdownSeries, approvedChartWidth, approvedChartHeight, chartZeroAxisY, returnChartPadding);
   const drawdownBandArea = drawdownArea;
   const versionChartMarkers =
     detail
@@ -2926,6 +3026,7 @@ export function CompositionDetailView({
             cumulativeMax,
             approvedChartWidth,
             approvedChartHeight,
+            returnChartPadding,
           );
           return { ...marker, point };
         })
@@ -2944,6 +3045,7 @@ export function CompositionDetailView({
           cumulativeMax,
           approvedChartWidth,
           approvedChartHeight,
+          returnChartPadding,
         )
       : null;
   const hoveredReturnPoint =
@@ -2953,7 +3055,7 @@ export function CompositionDetailView({
   const hoveredSpreadPoint =
     detail && safeHoveredReturnIndex !== null ? detail.spread_series[safeHoveredReturnIndex] : null;
   const hoveredCostDragValue = safeHoveredReturnIndex !== null ? costDragSeries[safeHoveredReturnIndex] : null;
-  const hoveredReturnLabel = safeHoveredReturnIndex !== null ? `收益节点 ${safeHoveredReturnIndex + 1}` : '收益节点';
+  const hoveredReturnLabel = hoveredReturnPoint ? getReturnPointDateLabel(hoveredReturnPoint) : '日期待补';
   const tooltipWidth = 180;
   const tooltipHeight = 96;
   const tooltipX = hoveredChartPoint
@@ -2973,7 +3075,10 @@ export function CompositionDetailView({
     const width = bounds.width || approvedChartWidth;
     const clientX = Number.isFinite(event.clientX) ? event.clientX : bounds.left + width / 2;
     const relativeX = Math.min(width, Math.max(0, clientX - bounds.left));
-    const nextIndex = Math.round((relativeX / Math.max(width, 1)) * Math.max(cumulativeSeries.length - 1, 0));
+    const svgX = (relativeX / Math.max(width, 1)) * approvedChartWidth;
+    const clampedX = Math.min(chartPlotRight, Math.max(chartPlotLeft, svgX));
+    const plotWidth = Math.max(chartPlotRight - chartPlotLeft, 1);
+    const nextIndex = Math.round(((clampedX - chartPlotLeft) / plotWidth) * Math.max(cumulativeSeries.length - 1, 0));
     setHoveredReturnIndex(nextIndex);
   };
 
@@ -3207,7 +3312,53 @@ export function CompositionDetailView({
                 preserveAspectRatio="xMidYMid meet"
                 viewBox="0 0 1000 320"
               >
-                <line className="composition-detail-grid-line" x1="24" x2="976" y1={chartZeroAxisY} y2={chartZeroAxisY} />
+                {returnChartValueTicks.map((tick) => {
+                  const y = getPoint(
+                    0,
+                    Math.max(cumulativeSeries.length, 1),
+                    tick,
+                    cumulativeMin,
+                    cumulativeMax,
+                    approvedChartWidth,
+                    approvedChartHeight,
+                    returnChartPadding,
+                  ).y;
+                  return (
+                    <g key={`return-y-${tick.toFixed(4)}`}>
+                      <line className="composition-detail-grid-line" x1={chartPlotLeft} x2={chartPlotRight} y1={y} y2={y} />
+                      <text className="composition-detail-axis-label composition-detail-axis-label--y" textAnchor="end" x={chartPlotLeft - 10} y={y + 4}>
+                        {formatChartAxisPercentValue(tick)}
+                      </text>
+                    </g>
+                  );
+                })}
+                {returnChartDateTicks.map((tick) => {
+                  const x = getPoint(
+                    tick.index,
+                    Math.max(cumulativeSeries.length, 1),
+                    0,
+                    cumulativeMin,
+                    cumulativeMax,
+                    approvedChartWidth,
+                    approvedChartHeight,
+                    returnChartPadding,
+                  ).x;
+                  return (
+                    <g key={`return-x-${tick.index}-${tick.label}`}>
+                      <line
+                        className="composition-detail-grid-line composition-detail-grid-line--vertical"
+                        x1={x}
+                        x2={x}
+                        y1={chartPlotTop}
+                        y2={chartPlotBottom}
+                      />
+                      <text className="composition-detail-axis-label composition-detail-axis-label--x" textAnchor={tick.anchor} x={x} y={approvedChartHeight - 12}>
+                        {tick.label}
+                      </text>
+                    </g>
+                  );
+                })}
+                <line className="composition-detail-grid-line composition-detail-grid-line--zero" x1={chartPlotLeft} x2={chartPlotRight} y1={chartZeroAxisY} y2={chartZeroAxisY} />
                 {drawdownBandArea ? (
                   <path className="composition-detail-drawdown-area" d={drawdownBandArea} data-ui="composition-drawdown-band" />
                 ) : null}
@@ -3225,7 +3376,7 @@ export function CompositionDetailView({
                       className="composition-detail-rebalance-marker__line"
                       x1={marker.point.x}
                       x2={marker.point.x}
-                      y1="34"
+                      y1={chartPlotTop + 6}
                       y2={chartZeroAxisY}
                     />
                     <circle
@@ -3242,8 +3393,8 @@ export function CompositionDetailView({
                       className="composition-detail-hover-line"
                       x1={hoveredChartPoint.x}
                       x2={hoveredChartPoint.x}
-                      y1="24"
-                      y2={chartZeroAxisY}
+                      y1={chartPlotTop}
+                      y2={chartPlotBottom}
                     />
                     <circle className="composition-detail-hover-dot" cx={hoveredChartPoint.x} cy={hoveredChartPoint.y} r="5" />
                     <g transform={`translate(${tooltipX.toFixed(2)} ${tooltipY.toFixed(2)})`}>

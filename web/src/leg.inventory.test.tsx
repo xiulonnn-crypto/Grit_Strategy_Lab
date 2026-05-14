@@ -2,7 +2,11 @@ import { readFileSync } from 'node:fs';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LegInventoryPage } from './pages/leg-inventory-page';
-import { SAVED_STRATEGY_LEG_STORAGE_KEY } from './lib/saved-strategy-leg-inventory';
+import {
+  SAVED_STRATEGY_LEG_FREEZE_STORAGE_KEY,
+  SAVED_STRATEGY_LEG_STORAGE_KEY,
+  buildStrategyCandidateRows,
+} from './lib/saved-strategy-leg-inventory';
 import type { ApiLegInventory, ApiSnapshotOverview } from './types';
 
 type FakeApi = {
@@ -13,6 +17,7 @@ type FakeApi = {
   createCashLeg?: ReturnType<typeof vi.fn>;
   listStrategies?: ReturnType<typeof vi.fn>;
   listBacktestRuns?: ReturnType<typeof vi.fn>;
+  saveBacktestRun?: ReturnType<typeof vi.fn>;
   listCompositions?: ReturnType<typeof vi.fn>;
   getCompositionDetail?: ReturnType<typeof vi.fn>;
   getSnapshotOverview?: ReturnType<typeof vi.fn>;
@@ -26,6 +31,7 @@ const fakeApi = vi.hoisted<FakeApi>(() => ({
   createCashLeg: vi.fn(),
   listStrategies: vi.fn(),
   listBacktestRuns: vi.fn(),
+  saveBacktestRun: vi.fn(),
   listCompositions: vi.fn(),
   getCompositionDetail: vi.fn(),
   getSnapshotOverview: vi.fn(),
@@ -238,6 +244,15 @@ describe('leg inventory page', () => {
     fakeApi.createCashLeg = vi.fn();
     fakeApi.listStrategies = vi.fn().mockResolvedValue([]);
     fakeApi.listBacktestRuns = vi.fn().mockResolvedValue([]);
+    fakeApi.saveBacktestRun = vi.fn().mockImplementation((id: string) =>
+      Promise.resolve({
+        id,
+        is_permanent: true,
+        created_at: '2026-04-28T02:00:00Z',
+        updated_at: '2026-04-28T02:00:00Z',
+        completed_at: '2026-04-28T02:00:00Z',
+      }),
+    );
     fakeApi.listCompositions = vi.fn().mockResolvedValue([]);
     fakeApi.getCompositionDetail = vi.fn();
     fakeApi.getSnapshotOverview = vi.fn().mockResolvedValue(snapshotOverview);
@@ -307,6 +322,45 @@ describe('leg inventory page', () => {
     );
   });
 
+  it('adds a creation-time column before actions and sorts newest rows first', async () => {
+    fakeApi.getLegInventory = vi.fn().mockResolvedValue({
+      ...inventory,
+      counts: { all: 2, strategy: 0, asset: 1, cash: 1 },
+      rows: [
+        {
+          ...inventory.rows[0],
+          id: 'asset-leg-older',
+          name: 'Older asset leg',
+          source_ref_id: 'asset-leg-older',
+          created_at: '2026-04-20T00:00:00Z',
+          updated_at: '2026-04-20T00:00:00Z',
+        },
+        {
+          ...inventory.rows[1],
+          id: 'cash-leg-newer',
+          name: 'Newer cash leg',
+          source_ref_id: 'cash-leg-newer',
+          created_at: '2026-04-22T00:00:00Z',
+          updated_at: '2026-04-22T00:00:00Z',
+        },
+      ],
+    });
+
+    await act(async () => {
+      render(<LegInventoryPage />);
+    });
+
+    expect(await screen.findAllByText('创建时间')).not.toHaveLength(0);
+    const headers = Array.from(document.querySelectorAll('.leg-inventory-table thead th'));
+    expect(headers.at(-2)?.textContent).toContain('创建时间');
+    expect(headers.at(-1)?.textContent).toContain('操作');
+
+    const tableRows = Array.from(document.querySelectorAll('.leg-inventory-table tbody tr'));
+    expect(tableRows).toHaveLength(2);
+    expect(tableRows[0].textContent).toContain('cash-leg-newer');
+    expect(tableRows[1].textContent).toContain('asset-leg-older');
+  });
+
   it('hydrates saved strategy leg reference counts from the inventory contract', async () => {
     const rowId = 'strategy_leg::strat-tested-001::strat-tested-001-v2';
     window.localStorage.setItem(SAVED_STRATEGY_LEG_STORAGE_KEY, JSON.stringify([rowId]));
@@ -355,6 +409,89 @@ describe('leg inventory page', () => {
     const cells = within(strategyRow as HTMLTableRowElement).getAllByRole('cell');
     expect(within(cells[4]).getByText('1')).toBeInTheDocument();
     expect(within(strategyRow as HTMLTableRowElement).queryByText('敶﹝')).toBeNull();
+  });
+
+  it('renders saved strategy legs from the local freeze before deferred strategy hydration finishes', async () => {
+    const rowId = 'strategy_leg::strat_immediate::strat_immediate-v1';
+    let resolveStrategies: ((value: Array<Record<string, unknown>>) => void) | null = null;
+    let resolveRuns: ((value: Array<Record<string, unknown>>) => void) | null = null;
+    let strategiesResolved = false;
+    let runsResolved = false;
+    const strategiesPromise = new Promise<Array<Record<string, unknown>>>((resolve) => {
+      resolveStrategies = (value) => {
+        strategiesResolved = true;
+        resolve(value);
+      };
+    });
+    const runsPromise = new Promise<Array<Record<string, unknown>>>((resolve) => {
+      resolveRuns = (value) => {
+        runsResolved = true;
+        resolve(value);
+      };
+    });
+    window.localStorage.setItem(SAVED_STRATEGY_LEG_STORAGE_KEY, JSON.stringify([rowId]));
+    window.localStorage.setItem(
+      SAVED_STRATEGY_LEG_FREEZE_STORAGE_KEY,
+      JSON.stringify({
+        [rowId]: {
+          saved_at: '2026-05-14T09:00:00Z',
+          frozen_row: {
+            id: rowId,
+            leg_type: 'strategy',
+            name: 'Immediate Strat-v1',
+            version_label: 'v1',
+            proof_label: 'run_immediate_v1',
+            reference_count: 1,
+            reference_summary: 'Used in 1 saved composition',
+            status: 'READY',
+            status_label: 'Ready',
+            has_new_version: false,
+            is_orphan: false,
+            attribute_tags: ['strategy', 'version:v1'],
+            allowed_actions: ['open_strategy_detail', 'open_composition_workbench'],
+            source_ref_id: rowId,
+            source_ref_type: 'strategy_projection',
+            freeze_hash: 'freeze-immediate-v1',
+            signature_status: 'verified',
+            drift_status: 'current',
+            current_ref_id: rowId,
+            alerts: [],
+            created_at: '2026-05-14T09:00:00Z',
+            updated_at: '2026-05-14T09:00:00Z',
+            config: {
+              strategy_id: 'strat_immediate',
+              parameter_version_id: 'strat_immediate-v1',
+              parameter_version: 1,
+              latest_run_id: 'run_immediate_v1',
+              run_id: 'run_immediate_v1',
+              is_permanent: true,
+              source_integrity: {
+                freeze_hash: 'freeze-immediate-v1',
+                signature_status: 'verified',
+                drift_status: 'current',
+                current_ref_id: rowId,
+                alerts: [],
+              },
+            },
+          },
+        },
+      }),
+    );
+    fakeApi.listStrategies = vi.fn().mockReturnValue(strategiesPromise);
+    fakeApi.listBacktestRuns = vi.fn().mockReturnValue(runsPromise);
+
+    render(<LegInventoryPage />);
+
+    expect(await screen.findByText('asset-leg-001')).toBeInTheDocument();
+    expect(await screen.findByText('Immediate Strat-v1')).toBeInTheDocument();
+    expect(strategiesResolved).toBe(false);
+    expect(runsResolved).toBe(false);
+
+    await act(async () => {
+      resolveStrategies?.([]);
+      resolveRuns?.([]);
+      await Promise.all([strategiesPromise, runsPromise]);
+    });
   });
 
   it('keeps saved strategy legs for older parameter versions and marks them as having a new version', async () => {
@@ -414,9 +551,470 @@ describe('leg inventory page', () => {
     expect(within(strategyRow as HTMLTableRowElement).getByText('有新版本')).toBeInTheDocument();
   });
 
+  it('keeps a saved strategy leg anchored to the frozen source run while surfacing new parameters', async () => {
+    const rowId = 'strategy_leg::strat_0be646e45c26::strat_0be646e45c26-v1';
+    const sourceIntegrity = {
+      leg_id: rowId,
+      display_name: '多因子核心模型',
+      source_ref_id: rowId,
+      freeze_hash: 'frozen-run-c974',
+      signature_status: 'verified',
+      drift_status: 'current',
+      current_ref_id: rowId,
+      checked_at: '2026-05-12T11:13:14Z',
+      alerts: [],
+    };
+    window.localStorage.setItem(SAVED_STRATEGY_LEG_STORAGE_KEY, JSON.stringify([rowId]));
+    window.localStorage.setItem(
+      SAVED_STRATEGY_LEG_FREEZE_STORAGE_KEY,
+      JSON.stringify({
+        [rowId]: {
+          saved_at: '2026-05-12T11:14:00Z',
+          frozen_row: {
+            id: rowId,
+            leg_type: 'strategy',
+            name: '多因子核心模型-v1',
+            version_label: 'v1',
+            proof_label: 'run_c974e22597c3',
+            reference_count: 1,
+            reference_summary: 'Used in 1 saved composition',
+            status: 'READY',
+            status_label: 'Ready',
+            has_new_version: false,
+            is_orphan: false,
+            attribute_tags: ['strategy', 'multi_factor', 'version:v1'],
+            allowed_actions: ['open_strategy_detail', 'open_composition_workbench'],
+            source_ref_id: rowId,
+            source_ref_type: 'strategy_projection',
+            source_integrity: sourceIntegrity,
+            freeze_hash: 'frozen-run-c974',
+            signature_status: 'verified',
+            drift_status: 'current',
+            current_ref_id: rowId,
+            alerts: [],
+            created_at: '2026-05-12T11:14:00Z',
+            updated_at: '2026-05-12T11:14:00Z',
+            config: {
+              strategy_id: 'strat_0be646e45c26',
+              parameter_version_id: 'strat_0be646e45c26-v1',
+              parameter_version: 1,
+              latest_run_id: 'run_c974e22597c3',
+              run_id: 'run_c974e22597c3',
+              run_completed_at: '2026-05-12T11:13:14Z',
+              annualized_return_pct: 17,
+              max_drawdown_pct: 11,
+              oos_sharpe: 1.25,
+              source_integrity: sourceIntegrity,
+            },
+          },
+        },
+      }),
+    );
+    fakeApi.listStrategies = vi.fn().mockResolvedValue([
+      {
+        id: 'strat_0be646e45c26',
+        name: '多因子核心模型',
+        strategy_type: 'MULTI_FACTOR',
+        universe_name: 'US Equity',
+        current_parameter_version: 2,
+        current_parameter_version_id: 'strat_0be646e45c26-v2',
+      },
+    ]);
+    fakeApi.listBacktestRuns = vi.fn().mockResolvedValue([
+      {
+        id: 'run_054d4cee4b1c',
+        strategy_id: 'strat_0be646e45c26',
+        strategy_name: '多因子核心模型',
+        status: 'COMPLETED',
+        completed_at: '2026-05-13T09:18:34Z',
+        parameter_version_id: 'strat_0be646e45c26-v1',
+        metrics: {
+          annualized_return: 0.22,
+          max_drawdown: -0.09,
+          oos_sharpe: 1.6,
+        },
+      },
+      {
+        id: 'run_c974e22597c3',
+        strategy_id: 'strat_0be646e45c26',
+        strategy_name: '多因子核心模型',
+        status: 'COMPLETED',
+        completed_at: '2026-05-12T11:13:14Z',
+        parameter_version_id: 'strat_0be646e45c26-v1',
+        metrics: {
+          annualized_return: 0.17,
+          max_drawdown: -0.11,
+          oos_sharpe: 1.25,
+        },
+      },
+    ]);
+
+    await act(async () => {
+      render(<LegInventoryPage />);
+    });
+
+    const strategyRow = (await screen.findByText('run_c974e22597c3')).closest('tr');
+    expect(strategyRow).not.toBeNull();
+    expect(strategyRow?.textContent).not.toContain('run_054d4cee4b1c');
+    expect(strategyRow?.textContent).toContain('+17.0%');
+    expect(strategyRow?.textContent).not.toContain('+22.0%');
+    fireEvent.click(strategyRow as HTMLTableRowElement);
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('run_c974e22597c3')).toBeInTheDocument();
+    expect(within(dialog).queryByText(/run_054d4cee4b1c/)).toBeNull();
+    expect(strategyRow?.textContent).toContain('有新版本');
+    expect(strategyRow?.textContent).toContain('保存时间');
+  });
+
+  it('keeps latest strategy candidates split by backtest period for the same parameter version', () => {
+    const rows = buildStrategyCandidateRows(
+      [
+        {
+          id: 'strat_0be646e45c26',
+          name: 'Multi factor core model',
+          strategy_type: 'MULTI_FACTOR',
+          universe_name: 'US Equity',
+          current_parameter_version: 1,
+          current_parameter_version_id: 'strat_0be646e45c26-v1',
+        },
+      ],
+      [
+        {
+          id: 'run_c974e22597c3',
+          strategy_id: 'strat_0be646e45c26',
+          strategy_name: 'Multi factor core model',
+          status: 'COMPLETED',
+          completed_at: '2026-05-11T09:00:00Z',
+          parameter_version_id: 'strat_0be646e45c26-v1',
+          start_date: '2016-05-11',
+          end_date: '2026-05-11',
+          metrics: {
+            annualized_return: 0.17,
+            max_drawdown: -0.11,
+            oos_sharpe: 1.25,
+          },
+        },
+        {
+          id: 'run_d7a83285ac8a',
+          strategy_id: 'strat_0be646e45c26',
+          strategy_name: 'Multi factor core model',
+          status: 'COMPLETED',
+          completed_at: '2026-05-11T09:13:32Z',
+          parameter_version_id: 'strat_0be646e45c26-v1',
+          start_date: '2016-05-11',
+          end_date: '2026-05-11',
+          metrics: {
+            annualized_return: 0.19,
+            max_drawdown: -0.1,
+            oos_sharpe: 1.31,
+          },
+        },
+        {
+          id: 'run_5cc47aa661a4',
+          strategy_id: 'strat_0be646e45c26',
+          strategy_name: 'Multi factor core model',
+          status: 'COMPLETED',
+          completed_at: '2026-05-11T09:20:52Z',
+          parameter_version_id: 'strat_0be646e45c26-v1',
+          start_date: '2006-05-11',
+          end_date: '2026-05-11',
+          metrics: {
+            annualized_return: 0.47,
+            max_drawdown: -0.76,
+            oos_sharpe: 1.28,
+          },
+        },
+      ],
+    );
+
+    expect(rows.map((row) => row.source_ref_id)).toEqual(
+      expect.arrayContaining([
+        'strategy_leg::strat_0be646e45c26-v1::run_d7a83285ac8a',
+        'strategy_leg::strat_0be646e45c26-v1::run_5cc47aa661a4',
+      ]),
+    );
+    expect(rows.map((row) => row.source_ref_id)).not.toContain(
+      'strategy_leg::strat_0be646e45c26-v1::run_c974e22597c3',
+    );
+
+    const tenYearRow = rows.find((row) => row.source_ref_id?.endsWith('run_d7a83285ac8a'));
+    const twentyYearRow = rows.find((row) => row.source_ref_id?.endsWith('run_5cc47aa661a4'));
+    expect(tenYearRow?.config?.start_date).toBe('2016-05-11');
+    expect(tenYearRow?.config?.end_date).toBe('2026-05-11');
+    expect(twentyYearRow?.config?.start_date).toBe('2006-05-11');
+    expect(twentyYearRow?.config?.end_date).toBe('2026-05-11');
+  });
+
+  it('flags same-version same-period refreshed runs as new parameters and copies the matching run', async () => {
+    const frozenRowId = 'strategy_leg::strat_0be646e45c26-v1::run_c974e22597c3';
+    const latestTenYearRowId = 'strategy_leg::strat_0be646e45c26-v1::run_d7a83285ac8a';
+    const latestTwentyYearRowId = 'strategy_leg::strat_0be646e45c26-v1::run_5cc47aa661a4';
+    const sourceIntegrity = {
+      leg_id: frozenRowId,
+      display_name: 'Multi factor core model',
+      source_ref_id: frozenRowId,
+      freeze_hash: 'frozen-run-c974',
+      signature_status: 'verified',
+      drift_status: 'current',
+      current_ref_id: frozenRowId,
+      checked_at: '2026-05-11T09:00:00Z',
+      alerts: [],
+    };
+
+    window.localStorage.setItem(SAVED_STRATEGY_LEG_STORAGE_KEY, JSON.stringify([frozenRowId]));
+    window.localStorage.setItem(
+      SAVED_STRATEGY_LEG_FREEZE_STORAGE_KEY,
+      JSON.stringify({
+        [frozenRowId]: {
+          saved_at: '2026-05-12T11:14:00Z',
+          frozen_row: {
+            id: frozenRowId,
+            leg_type: 'strategy',
+            name: 'Multi factor core model-v1',
+            version_label: 'v1',
+            proof_label: 'run_c974e22597c3',
+            reference_count: 1,
+            reference_summary: 'Used in 1 saved composition',
+            status: 'READY',
+            status_label: 'Ready',
+            has_new_version: false,
+            has_new_parameters: false,
+            is_orphan: false,
+            attribute_tags: ['strategy', 'multi_factor', 'version:v1'],
+            allowed_actions: ['open_strategy_detail', 'open_composition_workbench'],
+            source_ref_id: frozenRowId,
+            source_ref_type: 'strategy_projection',
+            source_integrity: sourceIntegrity,
+            freeze_hash: 'frozen-run-c974',
+            signature_status: 'verified',
+            drift_status: 'current',
+            current_ref_id: frozenRowId,
+            alerts: [],
+            created_at: '2026-05-12T11:14:00Z',
+            updated_at: '2026-05-12T11:14:00Z',
+            config: {
+              strategy_id: 'strat_0be646e45c26',
+              parameter_version_id: 'strat_0be646e45c26-v1',
+              parameter_version: 1,
+              latest_run_id: 'run_c974e22597c3',
+              run_id: 'run_c974e22597c3',
+              run_completed_at: '2026-05-11T09:00:00Z',
+              annualized_return_pct: 17,
+              max_drawdown_pct: 11,
+              oos_sharpe: 1.25,
+              start_date: '2016-05-11',
+              end_date: '2026-05-11',
+              effective_date: '2016-06-01',
+              oos_start_date: '2024-01-01',
+              source_integrity: sourceIntegrity,
+            },
+          },
+        },
+      }),
+    );
+    fakeApi.listStrategies = vi.fn().mockResolvedValue([
+      {
+        id: 'strat_0be646e45c26',
+        name: 'Multi factor core model',
+        strategy_type: 'MULTI_FACTOR',
+        universe_name: 'US Equity',
+        current_parameter_version: 1,
+        current_parameter_version_id: 'strat_0be646e45c26-v1',
+      },
+    ]);
+    fakeApi.listBacktestRuns = vi.fn().mockResolvedValue([
+      {
+        id: 'run_c974e22597c3',
+        strategy_id: 'strat_0be646e45c26',
+        strategy_name: 'Multi factor core model',
+        status: 'COMPLETED',
+        completed_at: '2026-05-11T09:00:00Z',
+        parameter_version_id: 'strat_0be646e45c26-v1',
+        start_date: '2016-05-11',
+        end_date: '2026-05-11',
+        effective_date: '2016-06-01',
+        oos_start_date: '2024-01-01',
+        metrics: {
+          annualized_return: 0.17,
+          max_drawdown: -0.11,
+          oos_sharpe: 1.25,
+        },
+      },
+      {
+        id: 'run_d7a83285ac8a',
+        strategy_id: 'strat_0be646e45c26',
+        strategy_name: 'Multi factor core model',
+        status: 'COMPLETED',
+        completed_at: '2026-05-11T09:13:32Z',
+        parameter_version_id: 'strat_0be646e45c26-v1',
+        start_date: '2016-05-11',
+        end_date: '2026-05-11',
+        effective_date: '2016-06-01',
+        oos_start_date: '2024-01-01',
+        metrics: {
+          annualized_return: 0.19,
+          max_drawdown: -0.1,
+          oos_sharpe: 1.31,
+        },
+      },
+      {
+        id: 'run_5cc47aa661a4',
+        strategy_id: 'strat_0be646e45c26',
+        strategy_name: 'Multi factor core model',
+        status: 'COMPLETED',
+        completed_at: '2026-05-11T09:20:52Z',
+        parameter_version_id: 'strat_0be646e45c26-v1',
+        start_date: '2006-05-11',
+        end_date: '2026-05-11',
+        effective_date: '2006-06-01',
+        oos_start_date: '2024-01-01',
+        metrics: {
+          annualized_return: 0.47,
+          max_drawdown: -0.76,
+          oos_sharpe: 1.28,
+        },
+      },
+    ]);
+
+    await act(async () => {
+      render(<LegInventoryPage />);
+    });
+
+    const strategyRow = (await screen.findByText('run_c974e22597c3')).closest('tr');
+    expect(strategyRow).not.toBeNull();
+    expect(strategyRow?.textContent).toContain('run_c974e22597c3');
+    expect(strategyRow?.textContent).not.toContain('run_d7a83285ac8a');
+    expect(strategyRow?.textContent).not.toContain('run_5cc47aa661a4');
+    expect(strategyRow?.textContent).toContain('有新参数');
+    expect(within(strategyRow as HTMLTableRowElement).getByRole('button', { name: '复制新参数' })).toBeInTheDocument();
+
+    fireEvent.click(within(strategyRow as HTMLTableRowElement).getByRole('button', { name: '复制新参数' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('复制新参数')).toBeInTheDocument();
+    expect(within(dialog).getByText('strat_0be646e45c26 · v1')).toBeInTheDocument();
+    expect(within(dialog).queryByText('run_5cc47aa661a4')).toBeNull();
+    fireEvent.click(within(dialog).getByRole('button', { name: '确认生成' }));
+
+    await waitFor(() =>
+      expect(JSON.parse(window.localStorage.getItem(SAVED_STRATEGY_LEG_STORAGE_KEY) ?? '[]')).toEqual(
+        expect.arrayContaining([frozenRowId, latestTenYearRowId]),
+      ),
+    );
+    expect(JSON.parse(window.localStorage.getItem(SAVED_STRATEGY_LEG_STORAGE_KEY) ?? '[]')).not.toContain(
+      latestTwentyYearRowId,
+    );
+  });
+
+  it('prefers the referenced frozen strategy source over a newer same-version run after reload', async () => {
+    const cachedLatestId = 'strategy_leg::strat_0be646e45c26-v1::run_054d4cee4b1c';
+    const frozenId = 'strategy_leg::strat_0be646e45c26-v1::run_5cc47aa661a4';
+    window.localStorage.setItem(SAVED_STRATEGY_LEG_STORAGE_KEY, JSON.stringify([cachedLatestId]));
+    window.localStorage.setItem(
+      SAVED_STRATEGY_LEG_FREEZE_STORAGE_KEY,
+      JSON.stringify({
+        [cachedLatestId]: {
+          saved_at: '2026-05-14T08:00:00Z',
+          frozen_row: {
+            id: cachedLatestId,
+            leg_type: 'strategy',
+            name: 'Multi factor core model-v1',
+            version_label: 'v1',
+            proof_label: 'run_054d4cee4b1c',
+            reference_count: 0,
+            reference_summary: 'Not used in saved compositions yet',
+            status: 'READY',
+            status_label: 'Ready',
+            has_new_version: false,
+            is_orphan: false,
+            attribute_tags: ['strategy', 'multi_factor', 'version:v1'],
+            allowed_actions: ['open_strategy_detail', 'open_composition_workbench'],
+            source_ref_id: cachedLatestId,
+            source_ref_type: 'strategy_projection',
+            signature_status: 'verified',
+            drift_status: 'current',
+            current_ref_id: cachedLatestId,
+            alerts: [],
+            config: {
+              strategy_id: 'strat_0be646e45c26',
+              parameter_version_id: 'strat_0be646e45c26-v1',
+              latest_run_id: 'run_054d4cee4b1c',
+              run_id: 'run_054d4cee4b1c',
+              annualized_return_pct: 6.8,
+              max_drawdown_pct: 45.9,
+              oos_sharpe: 0.4,
+            },
+          },
+        },
+      }),
+    );
+    fakeApi.getLegInventory = vi.fn().mockResolvedValue({
+      ...inventory,
+      counts: { all: 2, strategy: 0, asset: 1, cash: 1 },
+      strategy_reference_counts: {
+        [frozenId]: 1,
+      },
+      rows: inventory.rows,
+    });
+    fakeApi.listStrategies = vi.fn().mockResolvedValue([
+      {
+        id: 'strat_0be646e45c26',
+        name: 'Multi factor core model',
+        strategy_type: 'MULTI_FACTOR',
+        universe_name: 'SP500',
+        current_parameter_version: 2,
+        current_parameter_version_id: 'strat_0be646e45c26-v2',
+      },
+    ]);
+    fakeApi.listBacktestRuns = vi.fn().mockResolvedValue([
+      {
+        id: 'run_054d4cee4b1c',
+        strategy_id: 'strat_0be646e45c26',
+        strategy_name: 'Multi factor core model',
+        status: 'COMPLETED',
+        completed_at: '2026-05-13T09:18:34Z',
+        parameter_version_id: 'strat_0be646e45c26-v1',
+        metrics: {
+          annualized_return: 0.068034,
+          max_drawdown: -0.458657,
+          oos_sharpe: 0.4,
+        },
+      },
+      {
+        id: 'run_5cc47aa661a4',
+        strategy_id: 'strat_0be646e45c26',
+        strategy_name: 'Multi factor core model',
+        status: 'COMPLETED',
+        completed_at: '2026-05-11T09:20:52Z',
+        parameter_version_id: 'strat_0be646e45c26-v1',
+        is_permanent: true,
+        metrics: {
+          annualized_return: 0.4699293607230932,
+          max_drawdown: -0.7665531387808946,
+          oos_sharpe: 1.2772278991104027,
+        },
+      },
+    ]);
+
+    await act(async () => {
+      render(<LegInventoryPage />);
+    });
+
+    const strategyRow = (await screen.findByText('run_5cc47aa661a4')).closest('tr');
+    expect(strategyRow).not.toBeNull();
+    expect(strategyRow?.textContent).not.toContain('run_054d4cee4b1c');
+    fireEvent.click(strategyRow as HTMLTableRowElement);
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(frozenId)).toBeInTheDocument();
+    expect(within(dialog).queryByText(cachedLatestId)).toBeNull();
+  });
+
   it('copies a stale saved strategy leg to the latest version after confirmation', async () => {
     const staleRowId = 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-v2';
-    const latestRowId = 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-v4';
+    const normalizedStaleRowId = 'strategy_leg::strat_53315d3dd88b-v2::run_32b4cce6719a';
+    const latestRowId = 'strategy_leg::strat_53315d3dd88b-v4::run_95db6d1d4ba9';
     window.localStorage.setItem(SAVED_STRATEGY_LEG_STORAGE_KEY, JSON.stringify([staleRowId]));
     fakeApi.listStrategies = vi.fn().mockResolvedValue([
       {
@@ -475,7 +1073,7 @@ describe('leg inventory page', () => {
 
     await waitFor(() => expect(screen.getByText('strat_53315d3dd88b · v4')).toBeInTheDocument());
     expect(JSON.parse(window.localStorage.getItem(SAVED_STRATEGY_LEG_STORAGE_KEY) ?? '[]')).toEqual(
-      expect.arrayContaining([staleRowId, latestRowId]),
+      expect.arrayContaining([normalizedStaleRowId, latestRowId]),
     );
     expect(screen.queryByRole('button', { name: '复制新版本' })).toBeNull();
   });
@@ -621,6 +1219,73 @@ describe('leg inventory page', () => {
     expect(within(rightSections[0] as HTMLElement).getByText('验证摘要')).toBeInTheDocument();
     expect(within(rightSections[1] as HTMLElement).getByText('核心参数')).toBeInTheDocument();
     expect(leftForm?.textContent).not.toContain('核心参数');
+  });
+
+  it('promotes a temporary source run to permanent when saving a strategy leg freeze', async () => {
+    fakeApi.listStrategies = vi.fn().mockResolvedValue([
+      {
+        id: 'strat-tested-001',
+        name: 'S&P momentum',
+        strategy_type: 'MOMENTUM',
+        universe_name: 'S&P 500',
+        current_parameter_version: 2,
+        current_parameter_version_id: 'strat-tested-001-v2',
+      },
+    ]);
+    fakeApi.listBacktestRuns = vi.fn().mockResolvedValue([
+      {
+        id: 'run-tested-001',
+        strategy_id: 'strat-tested-001',
+        strategy_name: 'S&P momentum',
+        status: 'COMPLETED',
+        completed_at: '2026-04-26T10:00:00Z',
+        updated_at: '2026-04-26T10:00:00Z',
+        parameter_version_id: 'strat-tested-001-v2',
+        is_permanent: false,
+        metrics: {
+          oos_annualized_return: 0.21,
+          oos_max_drawdown: -0.12,
+          oos_sharpe: 1.4,
+        },
+      },
+    ]);
+    fakeApi.saveBacktestRun = vi.fn().mockResolvedValue({
+      id: 'run-tested-001',
+      strategy_id: 'strat-tested-001',
+      strategy_name: 'S&P momentum',
+      status: 'COMPLETED',
+      parameter_version_id: 'strat-tested-001-v2',
+      metrics: {
+        oos_annualized_return: 0.21,
+        oos_max_drawdown: -0.12,
+        oos_sharpe: 1.4,
+      },
+      is_permanent: true,
+      created_at: '2026-04-26T09:59:00Z',
+      updated_at: '2026-04-26T10:05:00Z',
+      completed_at: '2026-04-26T10:00:00Z',
+    });
+
+    await act(async () => {
+      render(<LegInventoryPage />);
+    });
+
+    expect(await screen.findByText('asset-leg-001')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '+ 新建腿' }));
+
+    const dialog = await screen.findByRole('dialog', { name: '创建策略腿' });
+    const saveButton = dialog.querySelector('.leg-inventory-drawer__actions .primary-button');
+    expect(saveButton).not.toBeNull();
+    fireEvent.click(saveButton as HTMLButtonElement);
+
+    await waitFor(() => expect(fakeApi.saveBacktestRun).toHaveBeenCalledWith('run-tested-001'));
+
+    const savedIds = JSON.parse(window.localStorage.getItem(SAVED_STRATEGY_LEG_STORAGE_KEY) ?? '[]');
+    expect(savedIds).toContain('strategy_leg::strat-tested-001-v2::run-tested-001');
+
+    const savedFreezes = JSON.parse(window.localStorage.getItem(SAVED_STRATEGY_LEG_FREEZE_STORAGE_KEY) ?? '{}');
+    expect(savedFreezes['strategy_leg::strat-tested-001-v2::run-tested-001']?.frozen_row?.config?.is_permanent).toBe(true);
+    expect(savedFreezes['strategy_leg::strat-tested-001-v2::run-tested-001']?.frozen_row?.config?.run_id).toBe('run-tested-001');
   });
 
   it('requires confirmation before archiving an inventory leg', async () => {

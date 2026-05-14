@@ -77,6 +77,7 @@
 
 .composition-global-index__primary-button,
 .composition-global-index__ghost-button,
+.composition-global-index__danger-button,
 .composition-global-index__text-button {
   display: inline-flex;
   align-items: center;
@@ -100,6 +101,12 @@
   color: var(--gsl-text-main);
 }
 
+.composition-global-index__danger-button {
+  border: 1px solid var(--danger);
+  background: var(--danger);
+  color: #ffffff;
+}
+
 .composition-global-index__text-button {
   min-height: 34px;
   padding: 0;
@@ -107,6 +114,17 @@
   background: transparent;
   color: var(--gsl-color-primary-strong);
   white-space: nowrap;
+}
+
+.composition-global-index__text-button--danger {
+  color: var(--danger);
+}
+
+.composition-global-index__danger-button:disabled,
+.composition-global-index__ghost-button:disabled,
+.composition-global-index__text-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
 }
 
 .composition-global-index__scenario-button {
@@ -127,6 +145,7 @@
 
 .composition-global-index__primary-button:focus-visible,
 .composition-global-index__ghost-button:focus-visible,
+.composition-global-index__danger-button:focus-visible,
 .composition-global-index__text-button:focus-visible,
 .composition-global-index__scenario-button:focus-visible,
 .composition-global-index__status-button:focus-visible,
@@ -429,6 +448,14 @@
   font-size: 14px;
 }
 
+.composition-global-index__row-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 96px;
+}
+
 .composition-global-index__table--lab .composition-global-index__value-stack strong,
 .composition-global-index__table--lab .composition-global-index__text-button {
   word-break: keep-all;
@@ -492,6 +519,10 @@
   box-shadow: 0 24px 70px rgba(15, 23, 42, 0.22);
 }
 
+.composition-global-index__archive-dialog {
+  width: min(540px, 100%);
+}
+
 .composition-global-index__dialog-header {
   display: flex;
   align-items: flex-start;
@@ -509,6 +540,54 @@
 .composition-global-index__dialog-header h2 {
   font-size: 21px;
   line-height: 28px;
+}
+
+.composition-global-index__dialog-eyebrow {
+  margin: 0 0 4px;
+  color: var(--gsl-color-primary-strong);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.composition-global-index__archive-copy {
+  display: grid;
+  gap: 8px;
+}
+
+.composition-global-index__archive-copy p {
+  margin: 0;
+  color: var(--gsl-text-sub);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.composition-global-index__archive-summary {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+
+.composition-global-index__archive-summary div {
+  display: grid;
+  gap: 4px;
+}
+
+.composition-global-index__archive-summary dt {
+  color: var(--gsl-text-sub);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.composition-global-index__archive-summary dd {
+  margin: 0;
+  color: var(--gsl-text-title);
+  font-size: 14px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .composition-global-index__diagnosis-sections {

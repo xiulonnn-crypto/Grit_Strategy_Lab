@@ -70,7 +70,6 @@ def test_polygon_provider_maps_prices_actions_and_identity():
 
 
 def test_polygon_provider_accepts_massive_api_key_env(monkeypatch):
-    monkeypatch.delenv("POLYGON_API_KEY", raising=False)
     monkeypatch.setenv("MASSIVE_API_KEY", "massive-unit-key")
 
     provider = PolygonMarketDataProvider()

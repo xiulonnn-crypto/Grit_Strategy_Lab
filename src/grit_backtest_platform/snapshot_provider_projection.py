@@ -237,11 +237,11 @@ PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
                 "targeted_price_repair": 3,
                 "option_skew": 1,
             },
-            required_env_vars=("MASSIVE_API_KEY", "POLYGON_API_KEY"),
+            required_env_vars=("MASSIVE_API_KEY",),
             optional_layer="paid_external",
             pit_mode="precision_evidence_source",
             can_upgrade_pit_readiness=True,
-            pit_notes=("Polygon/Massive precision repair is gated by MASSIVE_API_KEY or POLYGON_API_KEY and should be reserved for critical gaps.",),
+            pit_notes=("Polygon/Massive precision repair is gated by MASSIVE_API_KEY and should be reserved for critical gaps.",),
         ),
         _definition(
             "fmp",
@@ -555,7 +555,7 @@ TRUST_PROFILE_OVERRIDES: dict[str, dict[str, Any]] = {
         "evidence_scope": ["precision OHLCV", "corporate actions", "identity"],
         "can_upgrade_full_ready": True,
         "pit_role": "付费精修来源",
-        "limitations": ["需要 MASSIVE_API_KEY 或 POLYGON_API_KEY；仅用于关键缺口，不作为默认免费链。"],
+        "limitations": ["需要 MASSIVE_API_KEY；仅用于关键缺口，不作为默认免费链。"],
         "operator_action": "有 key 时用于关键 delisted、生命周期或公司行动精修候选。",
     },
 }
@@ -740,8 +740,8 @@ def _credential_requirements(provider_id: str, definition: ProviderDefinition | 
     if provider_id == "polygon":
         status = polygon_credential_status()
         return {
-            "required_env_vars": status.get("required_env_vars", ["MASSIVE_API_KEY", "POLYGON_API_KEY"]),
-            "accepted_env_vars": status.get("accepted_env_vars", ["MASSIVE_API_KEY", "POLYGON_API_KEY"]),
+            "required_env_vars": status.get("required_env_vars", ["MASSIVE_API_KEY"]),
+            "accepted_env_vars": status.get("accepted_env_vars", ["MASSIVE_API_KEY"]),
             "configured": bool(status.get("configured")),
             "configured_env_vars": status.get("configured_env_vars", []),
             "missing_env_vars": status.get("missing_env_vars", []),

@@ -270,6 +270,24 @@
   stroke-width: 1;
 }
 
+.composition-detail-grid-line--vertical {
+  stroke: rgba(15, 23, 42, 0.06);
+}
+
+.composition-detail-grid-line--zero {
+  stroke: rgba(15, 23, 42, 0.16);
+}
+
+.composition-detail-axis-label {
+  fill: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.composition-detail-axis-label--x {
+  fill: #536983;
+}
+
 .composition-detail-performance-path,
 .composition-detail-benchmark-path,
 .composition-detail-spread-path,

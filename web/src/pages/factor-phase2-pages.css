@@ -939,6 +939,16 @@
   background: #fbfcfd;
 }
 
+.factor-model-builder-page .factor-model-top-n-control {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #dfe6eb;
+  border-radius: 14px;
+  background: #fbfcfd;
+}
+
 .factor-model-builder-page .factor-model-rebalance-control__header {
   display: grid;
   gap: 4px;
@@ -1286,10 +1296,55 @@
 }
 
 .factor-model-builder-page .factor-model-governance-row > .factor-model-rebalance-control,
+.factor-model-builder-page .factor-model-governance-row > .factor-model-top-n-control,
 .factor-model-builder-page .factor-model-governance-row > .neutral-block {
   min-width: 0;
   height: 100%;
   margin: 0;
+}
+
+.factor-model-builder-page .factor-model-top-n-fields {
+  display: grid;
+  gap: 8px;
+}
+
+.factor-model-builder-page .factor-model-top-n-fields label,
+.factor-model-builder-page .factor-model-top-n-summary span {
+  color: #415877;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.factor-model-builder-page .factor-model-top-n-fields input {
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid #dfe6eb;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #071423;
+  font-size: 14px;
+  font-weight: 760;
+}
+
+.factor-model-builder-page .factor-model-top-n-fields input:focus {
+  border-color: #16897b;
+  outline: 2px solid rgba(22, 137, 123, 0.18);
+  outline-offset: 1px;
+}
+
+.factor-model-builder-page .factor-model-top-n-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.factor-model-builder-page .factor-model-top-n-summary strong {
+  color: #071423;
+  font-size: 18px;
+  font-weight: 850;
 }
 
 .factor-model-builder-page .neutral-block {

@@ -393,6 +393,7 @@ function mapModelPayload(payload: FactorModelPreviewPayload) {
     name: payload.modelName,
     universe: 'SP500',
     rebalance_frequency: payload.rebalanceFrequency,
+    top_n: payload.topN,
     scoring_method: 'zscore_weighted',
     components: payload.factors.map((factor) => ({
       factor_id: factor.factorId,

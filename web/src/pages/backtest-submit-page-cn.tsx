@@ -123,9 +123,11 @@ function readRunPrefill(detail: ApiBacktestRunDetail): RunPrefill {
   const lastTradeDate = chartSeries[chartSeries.length - 1]?.trade_date ?? null;
   const snapshotSummary = detail.snapshot_summary ?? detail.preview?.snapshot_summary;
   const effectiveDate = readString(detail.effective_date);
+  const requestedStartDate = readString(detail.start_date) ?? readString(detail.preview?.effective_start_date);
+  const requestedEndDate = readString(detail.end_date) ?? readString(detail.preview?.effective_end_date);
   return {
-    startDate: firstTradeDate ?? readString(detail.preview?.effective_start_date) ?? effectiveDate,
-    endDate: lastTradeDate ?? readString(detail.preview?.effective_end_date) ?? effectiveDate,
+    startDate: requestedStartDate ?? firstTradeDate ?? effectiveDate,
+    endDate: requestedEndDate ?? lastTradeDate ?? effectiveDate,
     parameterVersionId:
       readString(detail.parameter_version_id) ?? readString(detail.preview?.parameter_version_id),
     datasetSnapshotId: readSnapshotValue(snapshotSummary, ['dataset_snapshot_id', 'datasetSnapshotId']),

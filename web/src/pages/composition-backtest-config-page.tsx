@@ -51,6 +51,13 @@ function getBlockedSources(detail: ApiCompositionDetail | null): number {
   return (detail?.source_integrity ?? []).filter((item) => item.alerts.length > 0).length;
 }
 
+function horizonYearsForPeriod(period: (typeof PERIODS)[number]['key']): number | null {
+  if (period === '10Y') return 10;
+  if (period === '20Y') return 20;
+  if (period === '30Y') return 30;
+  return null;
+}
+
 export function CompositionBacktestConfigPage({
   compositionId,
 }: CompositionBacktestConfigPageProps): JSX.Element {
@@ -118,9 +125,11 @@ export function CompositionBacktestConfigPage({
     try {
       setSubmitting(true);
       setSubmitError(null);
+      const horizonYears = horizonYearsForPeriod(period);
       const response = await api.createCompositionBacktestRun(compositionId, {
         composition_version: detail.updated_at,
         period,
+        ...(horizonYears ? { horizon_years: horizonYears } : {}),
         rebalance_frequency: rebalanceFrequency,
         drift_threshold_pct: driftThreshold,
         fee_bps: feeBps,

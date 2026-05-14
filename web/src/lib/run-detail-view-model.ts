@@ -79,6 +79,9 @@ export function formatRunStatusLabel(value: string): string {
   if (normalized.includes('running') || normalized.includes('pending') || normalized.includes('queued')) {
     return '运行中';
   }
+  if (normalized.includes('interrupt')) {
+    return '已中断';
+  }
   if (normalized.includes('fail') || normalized.includes('error')) {
     return '失败';
   }

@@ -12,12 +12,14 @@ const fakeApi = vi.hoisted(() => ({
   saveBacktestRun: vi.fn(),
   getBacktestTradeAudit: vi.fn(),
   getBacktestRunTrades: vi.fn(),
+  resumeBacktestRun: vi.fn(),
   createOptimizationJob: vi.fn(),
 })) as {
   getBacktestRunDetail: ReturnType<typeof vi.fn>;
   saveBacktestRun: ReturnType<typeof vi.fn>;
   getBacktestTradeAudit: ReturnType<typeof vi.fn>;
   getBacktestRunTrades: ReturnType<typeof vi.fn>;
+  resumeBacktestRun: ReturnType<typeof vi.fn>;
   createOptimizationJob: ReturnType<typeof vi.fn>;
 };
 
@@ -352,10 +354,15 @@ beforeEach(() => {
   fakeApi.saveBacktestRun.mockReset();
   fakeApi.getBacktestTradeAudit.mockReset();
   fakeApi.getBacktestRunTrades.mockReset();
+  fakeApi.resumeBacktestRun.mockReset();
   fakeApi.createOptimizationJob.mockReset();
   fakeApi.saveBacktestRun.mockResolvedValue({
     ...detail,
     is_permanent: true,
+  });
+  fakeApi.resumeBacktestRun.mockResolvedValue({
+    ...detail,
+    status: 'RUNNING',
   });
   fakeApi.createOptimizationJob.mockResolvedValue({ id: 'opt-001' });
   Object.defineProperty(window.navigator, 'clipboard', {
@@ -961,6 +968,42 @@ describe('RunDetailPage', () => {
     await waitFor(() =>
       expect(window.location.hash).toBe('#/strategies/strat-001/backtest-runs/new?source_run_id=bt-9.6802970000'),
     );
+  });
+
+  it('translates interrupted runs and resumes them from the hero action', async () => {
+    fakeApi.getBacktestRunDetail.mockResolvedValue({
+      ...detail,
+      id: 'bt-interrupted',
+      status: 'INTERRUPTED',
+      resume_ready: true,
+      interrupted_reason: '服务重启',
+      analysis: undefined,
+    } satisfies ApiBacktestRunDetail);
+    fakeApi.resumeBacktestRun.mockResolvedValue({
+      ...detail,
+      id: 'bt-interrupted',
+      status: 'RUNNING',
+      resume_ready: false,
+      interrupted_reason: null,
+      latest_update: '已继续回测，正在从断点恢复。',
+    } satisfies ApiBacktestRunDetail);
+
+    render(<RunDetailPage runId="bt-interrupted" />);
+
+    expect(await screen.findByText('美股质量动量')).toBeInTheDocument();
+    expect(screen.getByText('已中断')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '继续回测' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '继续回测' }));
+
+    await waitFor(() =>
+      expect(fakeApi.resumeBacktestRun).toHaveBeenCalledWith(
+        'bt-interrupted',
+        expect.stringMatching(/^resume-backtest-bt-interrupted-/),
+      ),
+    );
+    expect(await screen.findByText('已继续回测，正在从断点恢复。')).toBeInTheDocument();
+    expect(screen.getByText('进行中')).toBeInTheDocument();
   });
 
   it('saves temporary runs as permanent after confirmation', async () => {

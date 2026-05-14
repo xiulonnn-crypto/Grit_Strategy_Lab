@@ -1780,6 +1780,8 @@ class MarketDataRepository:
             SELECT *
             FROM dataset_fundamental_points
             WHERE dataset_snapshot_id = ?
+              AND COALESCE(TRIM(available_at), '') != ''
+              AND COALESCE(TRIM(publish_date), '') != ''
         """
         params: list[Any] = [dataset_snapshot_id]
         normalized_symbols = [self._normalize_symbol(symbol) for symbol in (symbols or []) if symbol]
@@ -1843,6 +1845,8 @@ class MarketDataRepository:
             SELECT *
             FROM dataset_signal_points
             WHERE dataset_snapshot_id = ?
+              AND COALESCE(TRIM(available_at), '') != ''
+              AND COALESCE(TRIM(publish_date), '') != ''
         """
         params: list[Any] = [dataset_snapshot_id]
         normalized_keys = [str(item).strip().upper() for item in (entity_keys or []) if str(item).strip()]

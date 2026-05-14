@@ -849,12 +849,12 @@ describe('composition workbench page', () => {
     });
     window.localStorage.setItem(
       SAVED_STRATEGY_LEG_STORAGE_KEY,
-      JSON.stringify(['strategy_leg::strat-saved::pv-010']),
+      JSON.stringify(['strategy_leg::pv-010::bt-saved-010']),
     );
     window.localStorage.setItem(
       SAVED_STRATEGY_LEG_EDIT_STORAGE_KEY,
       JSON.stringify({
-        'strategy_leg::strat-saved::pv-010': {
+        'strategy_leg::pv-010::bt-saved-010': {
           name: '已保存策略腿',
           freeze_mode: 'snapshot_locked',
           notes: 'saved from leg inventory',
@@ -932,7 +932,7 @@ describe('composition workbench page', () => {
           legs: expect.arrayContaining([
             expect.objectContaining({
               leg_kind: 'strategy',
-              source_ref_id: 'strategy_leg::strat-saved::pv-010',
+              source_ref_id: 'strategy_leg::pv-010::bt-saved-010',
             }),
           ]),
         }),
@@ -941,8 +941,8 @@ describe('composition workbench page', () => {
   });
 
   it('offers one-click strategy version upgrade only when the latest saved strategy leg is also in the source library', async () => {
-    const staleRef = 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-v2';
-    const latestRef = 'strategy_leg::strat_53315d3dd88b::strat_53315d3dd88b-v4';
+    const staleRef = 'strategy_leg::strat_53315d3dd88b-v2::run_32b4cce6719a';
+    const latestRef = 'strategy_leg::strat_53315d3dd88b-v4::run_95db6d1d4ba9';
     const staleComposition: ApiCompositionDetail = {
       ...existingComposition,
       id: 'composition_630718a64821',

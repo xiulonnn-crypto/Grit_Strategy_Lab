@@ -244,10 +244,12 @@ describe('回测提交页', () => {
       strategy_id: 'strat-001',
       strategy_name: 'QQQ 均值回归策略',
       status: 'COMPLETED',
+      start_date: '2016-03-24',
+      end_date: '2026-03-24',
       metrics: { total_return: 0.12, sharpe: 0.82, max_drawdown: -0.15 },
       chart_series: [
-        { trade_date: '2024-01-02', equity: 100, benchmark: 100, drawdown: 0, is_oos: false },
-        { trade_date: '2025-03-28', equity: 112, benchmark: 106, drawdown: -0.15, is_oos: true },
+        { trade_date: '2017-04-26', equity: 100, benchmark: 100, drawdown: 0, is_oos: false },
+        { trade_date: '2026-03-24', equity: 112, benchmark: 106, drawdown: -0.15, is_oos: true },
       ],
       snapshot_summary: {
         dataset_snapshot_id: 'ds-seed',
@@ -261,8 +263,8 @@ describe('回测提交页', () => {
       render(<BacktestSubmitPage strategyId="strat-001" sourceRunId="bt-seed" />);
     });
 
-    expect(await screen.findByDisplayValue('2024-01-02')).toBeInTheDocument();
-    expect(await screen.findByDisplayValue('2025-03-28')).toBeInTheDocument();
+    expect(await screen.findByDisplayValue('2016-03-24')).toBeInTheDocument();
+    expect(await screen.findByDisplayValue('2026-03-24')).toBeInTheDocument();
     expect(screen.getByText('pv-seed')).toBeInTheDocument();
     expect(screen.getByText('ds-seed')).toBeInTheDocument();
     expect(screen.getByText('不适用（单标的）')).toBeInTheDocument();
@@ -271,8 +273,8 @@ describe('回测提交页', () => {
     await waitFor(() =>
       expect(fakeApi.submitBacktestRun).toHaveBeenCalledWith('strat-001', {
         idempotency_key: 'run-strat-001',
-        start_date: '2024-01-02',
-        end_date: '2025-03-28',
+        start_date: '2016-03-24',
+        end_date: '2026-03-24',
         parameter_version_id: 'pv-seed',
         dataset_snapshot_id: 'ds-seed',
         is_permanent: false,

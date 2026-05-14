@@ -57,6 +57,7 @@ describe("collectOptimizationParameterSeeds", () => {
           s_mom_12m1m_rank: 0.6,
           s_val_ep_ltm_raw: 0.4,
         },
+        top_n: 8,
         neutralization: { enabled: false, method: "industry" },
         scoring_method: "zscore_weighted",
         rebalance_frequency: "monthly",
@@ -91,6 +92,7 @@ describe("collectOptimizationParameterSeeds", () => {
     expect(seeds.map((seed) => seed.key)).toEqual([
       "factor_weight__s_mom_12m1m_rank_pct",
       "factor_weight__s_val_ep_ltm_raw_pct",
+      "top_n",
       "scoring_method",
       "rebalance_frequency",
       "neutralization_method",
@@ -98,6 +100,7 @@ describe("collectOptimizationParameterSeeds", () => {
     expect(seeds.find((seed) => seed.key === "factor_weight__s_mom_12m1m_rank_pct")?.label).toBe("因子权重 · 12-1月截面动量排名");
     expect(seeds.find((seed) => seed.key === "factor_weight__s_val_ep_ltm_raw_pct")?.label).toBe("因子权重 · 滚动市盈率倒数 (LTM)");
     expect(seeds.find((seed) => seed.key === "factor_weight__s_mom_12m1m_rank_pct")?.value).toBe(60);
+    expect(seeds.find((seed) => seed.key === "top_n")?.value).toBe(8);
     expect(seeds.find((seed) => seed.key === "neutralization_enabled")).toBeUndefined();
     expect(seeds.find((seed) => seed.key === "neutralization_method")?.value).toBe("industry");
     expect(seeds.find((seed) => seed.key === "scoring_method")?.options?.map((option) => option.value)).toContain("zscore_weighted");
@@ -152,5 +155,54 @@ describe("collectOptimizationParameterSeeds", () => {
 
     expect(seeds.find((seed) => seed.key === "factor_weight__s_mom_12m1m_rank_pct")?.value).toBe(60);
     expect(seeds.find((seed) => seed.key === "factor_weight__s_val_ep_ltm_raw_pct")?.value).toBe(40);
+  });
+
+  it("backfills the default multi-factor holding count when legacy strategy params omit top_n", () => {
+    const strategy: ApiStrategyDetail = {
+      id: "strat-mf-legacy-topn",
+      name: "Legacy Multi Factor",
+      strategy_type: "MULTI_FACTOR",
+      universe_name: "SP500",
+      rebalance_frequency: "monthly",
+      benchmark_symbol: "SPY",
+      parameter_history: [],
+      parameters: {
+        strategy_type: "MULTI_FACTOR",
+        factor_ids: [
+          "s_mom_12m1m_rank",
+          "s_val_ep_ltm_raw",
+          "s_vol_252d_rank",
+          "s_size_cur_log",
+        ],
+        weights: {
+          s_mom_12m1m_rank: 0.4,
+          s_val_ep_ltm_raw: 0.25,
+          s_vol_252d_rank: 0.2,
+          s_size_cur_log: 0.15,
+        },
+        neutralization: { enabled: false, method: "industry" },
+        scoring_method: "zscore_weighted",
+        rebalance_frequency: "monthly",
+      },
+      multi_factor_profile: {
+        components: [
+          { factor_id: "s_mom_12m1m_rank", name: "Momentum", weight: 0.4, normalized_weight: 0.4 },
+          { factor_id: "s_val_ep_ltm_raw", name: "Value", weight: 0.25, normalized_weight: 0.25 },
+          { factor_id: "s_vol_252d_rank", name: "Volatility", weight: 0.2, normalized_weight: 0.2 },
+          { factor_id: "s_size_cur_log", name: "Size", weight: 0.15, normalized_weight: 0.15 },
+        ],
+        neutralization: {
+          enabled: false,
+          method: "industry",
+          execution_status: "DISABLED",
+        },
+        scoring_method: "zscore_weighted",
+        rebalance_frequency: "monthly",
+      },
+    };
+
+    const seeds = collectOptimizationParameterSeeds(strategy);
+
+    expect(seeds.find((seed) => seed.key === "top_n")?.value).toBe(8);
   });
 });

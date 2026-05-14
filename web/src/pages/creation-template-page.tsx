@@ -166,6 +166,10 @@ function isCompletedRun(run: ApiBacktestRunListItem): boolean {
   return run.status === 'COMPLETED' || run.status === 'COMPLETED_WITH_WARNINGS';
 }
 
+function isPermanentRun(run: ApiBacktestRunListItem): boolean {
+  return run.is_permanent !== false;
+}
+
 function isInflightRun(run: ApiBacktestRunListItem): boolean {
   return run.status === 'QUEUED' || run.status === 'RUNNING';
 }
@@ -343,8 +347,9 @@ function buildRows(
       const currentStrategyRuns = currentRuns.filter(
         (run) => run.strategy_id === strategy.id && matchesCurrentParameterVersion(strategy, run),
       );
-      const strategyRuns = currentStrategyRuns.filter(isCompletedRun);
-      const inflightRuns = currentStrategyRuns.filter(isInflightRun);
+      const evidenceRuns = currentStrategyRuns.filter(isPermanentRun);
+      const strategyRuns = evidenceRuns.filter(isCompletedRun);
+      const inflightRuns = evidenceRuns.filter(isInflightRun);
       const returns: Record<HorizonKey, StrategyReturnLink | null> = {
         tenYear: null,
         twentyYear: null,
@@ -481,7 +486,7 @@ function buildSubmissionPayload(
     parameter_version_id: row.currentParameterVersionId ?? undefined,
     dataset_snapshot_id: row.datasetSnapshotId ?? undefined,
     universe_snapshot_id: row.universeSnapshotId ?? undefined,
-    is_permanent: false,
+    is_permanent: true,
   };
 }
 
@@ -499,7 +504,7 @@ function submittedDetailToListItem(
     parameter_version_id:
       detail.parameter_version_id ??
       (typeof payload.parameter_version_id === 'string' ? payload.parameter_version_id : row.currentParameterVersionId),
-    is_permanent: detail.is_permanent ?? false,
+    is_permanent: detail.is_permanent ?? true,
   };
 }
 

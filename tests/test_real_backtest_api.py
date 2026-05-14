@@ -122,14 +122,19 @@ def test_run_backtest_submission_persists_restart_recovery_warning_on_completed_
     )
 
     detail = assert_ok(client.get("/backtest-runs/run_recovery_warning/detail"))
-    assert detail["status"] in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
-    assert BACKTEST_RESTART_RECOVERY_WARNING in detail["warnings"]
-    assert all("Recovered after service restart" not in warning for warning in detail["warnings"])
+    runs = assert_ok(client.get("/backtest-runs"))
+    listed = next(item for item in runs if item["id"] == "run_recovery_warning")
+
+    assert detail["status"] == "COMPLETED"
+    assert detail["warnings"] == []
+    assert detail["preview"]["warnings"] == []
+    assert listed["status"] == "COMPLETED"
+    assert listed["warnings"] == []
     assert detail["preview"]["environment_summary"]["recovery"]["restarted_from_status"] == "RUNNING"
     assert detail["preview"]["environment_summary"]["recovery"]["restarts_from_beginning"] is True
 
 
-def test_resume_incomplete_backtest_runs_marks_restarted_runs_before_worker_restart(tmp_path, monkeypatch):
+def test_resume_incomplete_backtest_runs_interrupts_uncheckpointed_runs_for_manual_resume(tmp_path, monkeypatch):
     client, _ = create_test_client(tmp_path)
     strategy = create_momentum_strategy(
         client,
@@ -174,14 +179,13 @@ def test_resume_incomplete_backtest_runs_marks_restarted_runs_before_worker_rest
 
     resumed = service.resume_incomplete_backtest_runs()
 
-    assert resumed == ["run_resume_warning"]
+    assert resumed == []
     detail = assert_ok(client.get("/backtest-runs/run_resume_warning/detail"))
-    assert detail["status"] == "QUEUED"
-    assert BACKTEST_RESTART_RECOVERY_WARNING in detail["warnings"]
-    assert all("Recovered after service restart" not in warning for warning in detail["warnings"])
-    assert detail["preview"]["environment_summary"]["recovery"]["restarted_from_status"] == "RUNNING"
-    assert captured["run_id"] == "run_resume_warning"
-    assert captured["recovery_context"]["restarts_from_beginning"] is True
+    assert detail["status"] == "INTERRUPTED"
+    assert detail["resume_ready"] is True
+    assert detail["interrupted_reason"] == "service_restart"
+    assert detail["preview"]["environment_summary"]["recovery"]["mode"] == "startup_interrupt_recovery"
+    assert captured == {}
 
 
 def test_legacy_restart_recovery_warning_is_localized_on_run_detail(tmp_path):
@@ -224,8 +228,9 @@ def test_legacy_restart_recovery_warning_is_localized_on_run_detail(tmp_path):
 
     detail = assert_ok(client.get(f"/backtest-runs/{run_id}/detail"))
 
-    assert detail["warnings"] == [BACKTEST_RESTART_RECOVERY_WARNING]
-    assert detail["preview"]["warnings"] == [BACKTEST_RESTART_RECOVERY_WARNING]
+    assert detail["status"] == "COMPLETED"
+    assert detail["warnings"] == []
+    assert detail["preview"]["warnings"] == []
 
 
 def test_momentum_backtest_loads_warmup_before_start_and_executes_first_order_on_start(tmp_path):

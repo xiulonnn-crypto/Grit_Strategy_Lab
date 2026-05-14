@@ -42,6 +42,7 @@ export type FactorModelPreviewPayload = {
   factors: FactorModelSelection[];
   neutralization: FactorModelNeutralizationConfig;
   rebalanceFrequency: string;
+  topN: number;
 };
 
 export type FactorModelPreviewWeight = {
@@ -206,6 +207,10 @@ const REBALANCE_OPTIONS = [
   { value: 'yearly', label: '每年', summary: '每年复核一次，强调长期持仓稳定性。' },
   { value: 'never', label: '从不', summary: '创建后不按固定周期触发再平衡。' },
 ] as const;
+
+function defaultTopNForFactorCount(factorCount: number): number {
+  return Math.max(Math.min(factorCount * 2, 10), 5);
+}
 
 function pct(value: number, digits = 1): string {
   return `${value.toFixed(digits)}%`;
@@ -489,6 +494,7 @@ export function FactorModelBuilderPage({
   const [selections, setSelections] = useState<FactorModelSelection[]>(() => normalizeSelections(factors, useDefaultFallback));
   const [neutralizationEnabled, setNeutralizationEnabled] = useState(false);
   const [rebalanceFrequency, setRebalanceFrequency] = useState('monthly');
+  const [topN, setTopN] = useState(() => defaultTopNForFactorCount(basketFactors.length));
   const [preview, setPreview] = useState<FactorModelPreview | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [isPreviewing, setIsPreviewing] = useState(false);
@@ -511,6 +517,8 @@ export function FactorModelBuilderPage({
     : 0;
   const weightBlocked = Math.round(weightTotal) !== 100;
   const modelNameBlocked = modelName.trim().length === 0;
+  const topNBlocked = !Number.isInteger(topN) || topN < 1 || topN > 500;
+  const topNValidationMessage = '持仓数量必须是 1 到 500 的整数。';
 
   const neutralization: FactorModelNeutralizationConfig = useMemo(() => ({
     enabled: neutralizationEnabled,
@@ -524,7 +532,8 @@ export function FactorModelBuilderPage({
     factors: selectedSelections,
     neutralization,
     rebalanceFrequency,
-  }), [modelName, neutralization, rebalanceFrequency, selectedSelections]);
+    topN,
+  }), [modelName, neutralization, rebalanceFrequency, selectedSelections, topN]);
   const payloadKey = useMemo(() => JSON.stringify(payload), [payload]);
   const prefillKey = useMemo(() => JSON.stringify(initialPrefill ?? null), [initialPrefill]);
   const localPreview = useMemo(
@@ -571,6 +580,7 @@ export function FactorModelBuilderPage({
     Boolean(api?.createFactorModel) &&
     !modelNameBlocked &&
     selectedFactors.length > 0 &&
+    !topNBlocked &&
     !weightBlocked &&
     !previewBlocked &&
     !isCreating &&
@@ -627,11 +637,33 @@ export function FactorModelBuilderPage({
     );
   };
 
+  const updateTopN = (rawValue: string): void => {
+    if (rawValue.trim().length === 0) {
+      setTopN(0);
+      return;
+    }
+    const value = Number(rawValue);
+    if (!Number.isFinite(value)) {
+      setTopN(0);
+      return;
+    }
+    setTopN(Math.max(0, Math.min(500, Math.trunc(value))));
+  };
+
   const runPreview = useCallback(async (announce = true): Promise<void> => {
     const requestSeq = previewRequestSeq.current + 1;
     previewRequestSeq.current = requestSeq;
     setIsPreviewing(true);
     setPreviewError(null);
+    if (topNBlocked) {
+      if (previewRequestSeq.current === requestSeq) {
+        setPreview(buildLocalPreview(selectedFactors, selectedSelections, neutralizationEnabled, topNValidationMessage));
+        setPreviewError(topNValidationMessage);
+        setIsPreviewing(false);
+        if (announce) setNotice(topNValidationMessage);
+      }
+      return;
+    }
     if (selectedFactors.length === 0 || selectedSelections.length === 0) {
       if (previewRequestSeq.current === requestSeq) {
         setPreview(buildLocalPreview(selectedFactors, selectedSelections, neutralizationEnabled, null));
@@ -664,7 +696,7 @@ export function FactorModelBuilderPage({
         setIsPreviewing(false);
       }
     }
-  }, [api, neutralizationEnabled, payload, selectedFactors, selectedSelections]);
+  }, [api, neutralizationEnabled, payload, selectedFactors, selectedSelections, topNBlocked, topNValidationMessage]);
 
   useEffect(() => {
     setPreview(null);
@@ -719,6 +751,7 @@ export function FactorModelBuilderPage({
   const inputBlockers = Array.from(
     new Set([
       ...(modelNameBlocked ? ['策略名称未填写'] : []),
+      ...(topNBlocked ? [topNValidationMessage] : []),
       ...(weightBlocked ? [`权重合计为 ${pct(weightTotal, 0)}`] : []),
     ]),
   ).filter(Boolean);
@@ -753,6 +786,7 @@ export function FactorModelBuilderPage({
     { label: '行业 PIT 状态', value: neutralizationPitValue, tone: neutralizationBlocked ? 'bad' : 'good' },
     { label: '压力场景覆盖', value: explicitStrategyRisk ? '审计提示' : '等待 API', tone: warningLabels.length ? 'warn' : 'good' },
     { label: '策略名称', value: modelNameBlocked ? '待填写' : '已填写', tone: modelNameBlocked ? 'bad' : 'good' },
+    { label: '持仓数量', value: topNBlocked ? '无效' : String(topN), tone: topNBlocked ? 'bad' : 'good' },
     { label: '权重合计', value: pct(weightTotal, 0), tone: weightBlocked ? 'bad' : 'good' },
     { label: '再平衡配置', value: selectedRebalanceOption.label, tone: 'good' },
     { label: '预览状态', value: localizePreviewStatus(activePreview.status), tone: previewTone(activePreview.status, policyBlockers) },
@@ -958,6 +992,30 @@ export function FactorModelBuilderPage({
                       <span>{option.label}</span>
                     </label>
                   ))}
+                </div>
+              </div>
+              <div className="factor-model-top-n-control">
+                <div className="factor-model-rebalance-control__header">
+                  <span>持仓数量</span>
+                  <small>每次调仓后保留的目标持仓数。</small>
+                </div>
+                <div className="factor-model-top-n-fields">
+                  <label htmlFor="factor-model-top-n-input">持仓数量</label>
+                  <input
+                    aria-label="持仓数量"
+                    id="factor-model-top-n-input"
+                    inputMode="numeric"
+                    max="500"
+                    min="1"
+                    onChange={(event) => updateTopN(event.target.value)}
+                    step="1"
+                    type="number"
+                    value={topN > 0 ? topN : ''}
+                  />
+                </div>
+                <div className="factor-model-top-n-summary">
+                  <span>当前设置</span>
+                  <strong>{topNBlocked ? '无效' : `${topN} 个标的`}</strong>
                 </div>
               </div>
               <div className="neutral-block">

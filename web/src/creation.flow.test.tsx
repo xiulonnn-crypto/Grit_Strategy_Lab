@@ -617,6 +617,7 @@ describe('creation flow', () => {
             start_date: payload.start_date,
             end_date: payload.end_date,
             parameter_version_id: payload.parameter_version_id,
+            is_permanent: true,
           }),
         );
       }),
@@ -647,18 +648,18 @@ describe('creation flow', () => {
         end_date: '2026-03-24',
         parameter_version_id: 'strat-balanced-v2',
         dataset_snapshot_id: 'ds-price',
-        is_permanent: false,
+        is_permanent: true,
       }),
     );
     expect(fakeApi.submitBacktestRun).toHaveBeenNthCalledWith(
       2,
       'strat-balanced',
-      expect.objectContaining({ start_date: '2006-03-24', end_date: '2026-03-24' }),
+      expect.objectContaining({ start_date: '2006-03-24', end_date: '2026-03-24', is_permanent: true }),
     );
     expect(fakeApi.submitBacktestRun).toHaveBeenNthCalledWith(
       3,
       'strat-balanced',
-      expect.objectContaining({ start_date: '1996-03-24', end_date: '2026-03-24' }),
+      expect.objectContaining({ start_date: '1996-03-24', end_date: '2026-03-24', is_permanent: true }),
     );
 
     resolveSubmissions.forEach((resolve) => resolve());
@@ -964,5 +965,51 @@ describe('creation flow', () => {
     expect(await screen.findByText('保存失败，请重试')).toBeInTheDocument();
     expect(fakeApi.prepareConfirmation).not.toHaveBeenCalled();
     expect(fakeApi.materializeStrategy).not.toHaveBeenCalled();
+  });
+
+  it('prefers permanent current-version returns over newer temporary runs in the strategy library row', async () => {
+    fakeApi.listStrategies.mockResolvedValue([
+      {
+        id: 'strat-permanent',
+        name: 'Permanent Horizon Strategy',
+        strategy_type: 'ASSET_ALLOCATION',
+        universe_name: 'Global Allocation',
+        current_parameter_version: 2,
+        current_parameter_version_id: 'strat-permanent-v2',
+        updated_at: '2026-05-14T08:55:26Z',
+      },
+    ]);
+    fakeApi.listBacktestRuns.mockResolvedValue([
+      {
+        id: 'bt-temp-10y',
+        strategy_id: 'strat-permanent',
+        strategy_name: 'Permanent Horizon Strategy',
+        status: 'COMPLETED',
+        start_date: '2017-04-26',
+        end_date: '2026-03-24',
+        completed_at: '2026-05-14T08:12:00Z',
+        parameter_version_id: 'strat-permanent-v2',
+        is_permanent: false,
+        metrics: { total_return: 2.45, annualized_return: 0.201, sharpe: 1.91, max_drawdown: -0.1 },
+      },
+      {
+        id: 'bt-perm-10y',
+        strategy_id: 'strat-permanent',
+        strategy_name: 'Permanent Horizon Strategy',
+        status: 'COMPLETED',
+        start_date: '2016-03-24',
+        end_date: '2026-03-24',
+        completed_at: '2026-05-13T18:45:00Z',
+        parameter_version_id: 'strat-permanent-v2',
+        is_permanent: true,
+        metrics: { total_return: 1.54, annualized_return: 0.149, sharpe: 0.82, max_drawdown: -0.12 },
+      },
+    ]);
+
+    render(<CreationTemplatePage />);
+
+    expect(await screen.findByText('Permanent Horizon Strategy')).toBeInTheDocument();
+    expect(screen.getByText('+14.9% / 0.82')).toBeInTheDocument();
+    expect(screen.queryByText('+20.1% / 1.91')).not.toBeInTheDocument();
   });
 });

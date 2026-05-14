@@ -26,13 +26,13 @@ vi.mock('./lib/demoStoreContext', () => ({
   useApiClient: () => fakeApi,
 }));
 
-function renderSnapshotsPage(tab: 'equity' | 'bond' = 'equity'): void {
+function renderSnapshotsPage(tab: 'equity' | 'bond' = 'equity', target?: string): void {
   render(
     <AppRouteProvider
       navigate={(path) => {
         window.location.hash = path;
       }}
-      route={{ kind: 'snapshots', tab }}
+      route={{ kind: 'snapshots', tab, target }}
     >
       <SnapshotsPage />
     </AppRouteProvider>,
@@ -331,11 +331,11 @@ const overviewBase: Omit<SnapshotOverviewEquityReadiness, 'bond_fixed_income'> =
         usable_provider_count: 0,
         credential_ready_provider_count: 0,
         latest_attempt_status: 'MISSING_CREDENTIAL',
-        missing_env_vars: ['POLYGON_API_KEY'],
+        missing_env_vars: ['MASSIVE_API_KEY'],
         evidence_scope: ['keyed price/action repair'],
         can_upgrade_full_ready: true,
         limitations: ['仅在密钥存在时用于关键标的精修。'],
-        operator_action: '配置 Polygon key 后用于关键缺口补证。',
+        operator_action: '配置 MASSIVE_API_KEY 后用于关键缺口补证。',
       },
     ],
   },
@@ -392,6 +392,13 @@ const overview: SnapshotOverviewEquityReadiness = {
       blockers: ['一致预期样本数低于 3', '卖空成交链路待补'],
       linked_dimensions: ['一致预期修正', '流动性偏差'],
       provider_keys: ['ALPHAVANTAGE_API_KEY'],
+      linked_targets: ['ds-analyst-consensus'],
+      linked_target_evidence: [
+        {
+          dataset_id: 'ds-analyst-consensus',
+          evidence_kind: 'readiness_only_provider_attempt',
+        },
+      ],
       target: 'ds-analyst-consensus',
     },
     {
@@ -829,7 +836,7 @@ describe('SnapshotsPage', () => {
     renderSnapshotsPage();
     expect(await screen.findByRole('heading', { level: 1, name: '数据快照' })).toBeInTheDocument();
     expect(screen.getAllByRole('tab')).toHaveLength(2);
-    expect(screen.getByRole('button', { name: '刷新股票快照' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '刷新股票快照' })).toBeInTheDocument();
     expect(screen.getByText('DATA SNAPSHOTS')).toBeInTheDocument();
     expect(screen.getByText('健康仪表盘')).toBeInTheDocument();
     expect(screen.getByText('数据层级工作站')).toBeInTheDocument();
@@ -853,7 +860,7 @@ describe('SnapshotsPage', () => {
     expect(screen.getByText('un-sp500')).toBeInTheDocument();
     expect(screen.getByText('un-ndx100')).toBeInTheDocument();
     expect(screen.queryByText('ds-fundamentals')).not.toBeInTheDocument();
-    expect(screen.queryByText('ds-analyst-consensus')).not.toBeInTheDocument();
+    expect(screen.getByText('ds-analyst-consensus')).toBeInTheDocument();
     expect(screen.queryByText('ds-short-volume')).not.toBeInTheDocument();
     expect(screen.queryByText('ds-macro-rates / ds-option-skew')).not.toBeInTheDocument();
     expect(document.querySelector('.layer-stack')?.textContent).toContain('2026-04-01 03:48');
@@ -867,6 +874,18 @@ describe('SnapshotsPage', () => {
         reason: 'manual-refresh-latest-and-repair',
       }),
     );
+  });
+
+  it('renders readiness-only snapshot targets in the raw ledger when the route points to observation evidence', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue(overview);
+    renderSnapshotsPage('equity', 'ds-analyst-consensus');
+
+    expect(await screen.findByText('ds-analyst-consensus')).toBeInTheDocument();
+    const detail = await screen.findByRole('region', { name: /一致预期数据/ });
+    expect(within(detail).getByText('Alpha Vantage')).toBeInTheDocument();
+    expect(within(detail).getByText(/ds-analyst-consensus/)).toBeInTheDocument();
+    expect(within(detail).getByText('纳入情绪盲区核查')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '收起明细' })).toBeInTheDocument();
   });
 
   it('preserves additive snapshot readiness fields from the live overview contract', async () => {
@@ -921,11 +940,13 @@ describe('SnapshotsPage', () => {
           summary: '价格与回放链路尚未稳定，宏观敏感度与衍生品计算暂不开放。',
           metrics: [
             { label: '利率 Beta', value: '待补' },
+            { label: '宏观利率数据', value: '4 / 10 覆盖' },
+            { label: '通过标准', value: '10 / 10' },
             { label: 'IV Skew', value: '待接入' },
             { label: '估值代理', value: '可用' },
           ],
           updated_at: '2026-05-13T10:11:27Z',
-          provider_keys: ['FRED_API_KEY', 'MASSIVE_API_KEY', 'POLYGON_API_KEY'],
+          provider_keys: ['FRED_API_KEY', 'MASSIVE_API_KEY'],
           linked_targets: ['ds-index-valuations', 'ds-macro-rates', 'ds-option-skew'],
         },
       ],
@@ -1003,8 +1024,11 @@ describe('SnapshotsPage', () => {
     if (!alertSection) {
       throw new Error('异常核查 section was not rendered');
     }
+    expect(within(alertSection).getByText('一致预期样本 0/3：无可用数据')).toBeInTheDocument();
+    expect(within(alertSection).getByText(/阻塞理由：ds-analyst-consensus 当前 0\/3/)).toBeInTheDocument();
+    expect(within(alertSection).getByText(/继续使用 ALPHAVANTAGE_API_KEY/)).toBeInTheDocument();
     expect(within(alertSection).getByText('利率 Beta 校准中')).toBeInTheDocument();
-    expect(within(alertSection).getByText('10Y 利率窗口仍在补样，宏观敏感度暂不开放正式诊断。')).toBeInTheDocument();
+    expect(within(alertSection).getByText(/宏观利率数据当前 4 \/ 10 覆盖，通过标准 10 \/ 10/)).toBeInTheDocument();
   });
 
 
@@ -1025,7 +1049,73 @@ describe('SnapshotsPage', () => {
     expect(screen.getByLabelText(/TIINGO_API_TOKEN/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /TIINGO_API_TOKEN/ })).toBeInTheDocument();
     expect(screen.getAllByText('TIINGO_API_TOKEN').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('POLYGON_API_KEY').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('ALPHAVANTAGE_API_KEY').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('NASDAQ_DATA_LINK_API_KEY').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('FINNHUB_API_KEY').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('MASSIVE_API_KEY').length).toBeGreaterThan(0);
+  });
+
+  it('keeps trust-layer cards out of the credential rail and only shows actionable credential entries', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue(overview);
+    renderSnapshotsPage();
+    const rail = (await screen.findByText('凭据与重启入口')).closest('article');
+    if (!rail) {
+      throw new Error('凭据与重启入口 article was not rendered');
+    }
+    expect(within(rail).queryByText('价格主链')).not.toBeInTheDocument();
+    expect(within(rail).queryByText('成分股历史')).not.toBeInTheDocument();
+    expect(within(rail).queryByText('退市与身份')).not.toBeInTheDocument();
+    expect(within(rail).queryByText('公司行动')).not.toBeInTheDocument();
+    expect(within(rail).getAllByText('TIINGO_API_TOKEN').length).toBeGreaterThan(0);
+  });
+
+  it('derives missing credential inputs from runtime blockers when trust layers omit missing_env_vars', async () => {
+    const blockerDrivenOverview: SnapshotOverviewEquityReadiness = {
+      ...overview,
+      data_trust_summary: {
+        ...(overview.data_trust_summary ?? {}),
+        layers: (overview.data_trust_summary?.layers ?? []).map((layer) => ({
+          ...layer,
+          missing_env_vars: [],
+        })),
+      },
+      data_layer_readiness: [
+        {
+          layer_id: 'l4_macro_derivatives',
+          title_cn: 'L4 宏观与衍生品',
+          status: 'BLOCKED',
+          summary: '价格与回放链路尚未稳定，宏观敏感度与衍生品计算暂不开放。',
+          metrics: [
+            { label: '利率 Beta', value: '待补' },
+            { label: '宏观利率数据', value: '4 / 10 覆盖' },
+            { label: '通过标准', value: '10 / 10' },
+            { label: 'IV Skew', value: '待接入' },
+            { label: '估值代理', value: '可用' },
+          ],
+          updated_at: '2026-05-13T10:11:27Z',
+          provider_keys: ['FRED_API_KEY'],
+          linked_targets: ['ds-macro-rates'],
+        },
+      ],
+      provider_readiness_summary: {
+        ...overview.provider_readiness_summary,
+        top_blockers: [
+          {
+            provider_id: 'fred_macro_series',
+            code: 'missing_credentials',
+            message: 'Required provider environment variables are missing.',
+            target: ['FRED_API_KEY'],
+          },
+        ],
+      } as NonNullable<ApiSnapshotOverview['provider_readiness_summary']>,
+    };
+    fakeApi.getSnapshotOverview.mockResolvedValue(blockerDrivenOverview);
+
+    renderSnapshotsPage();
+
+    expect(await screen.findByText('凭据与重启入口')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('FRED_API_KEY')).toBeInTheDocument();
+    expect(screen.getByLabelText('输入 FRED_API_KEY 凭据')).toBeInTheDocument();
   });
 
   it('copies the protected restart command from the approved credential rail', async () => {
@@ -1789,6 +1879,26 @@ describe('SnapshotsPage', () => {
     expect(await screen.findByText('健康仪表盘')).toBeInTheDocument();
     expect(screen.getByText('原始快照清单')).toBeInTheDocument();
     expect(screen.getByText('ds-corporate-actions')).toBeInTheDocument();
+  });
+
+  it('expands raw snapshot details when a ledger action is clicked', async () => {
+    fakeApi.getSnapshotOverview.mockResolvedValue(overview);
+
+    renderSnapshotsPage();
+
+    expect(await screen.findByText('原始快照清单')).toBeInTheDocument();
+    await waitFor(() => expect(document.querySelector('[data-snapshot-id="ds-price"]')).not.toBeNull());
+    const ledgerRow = document.querySelector<HTMLElement>('[data-snapshot-id="ds-price"]');
+    if (!ledgerRow) {
+      throw new Error('ds-price ledger row was not rendered');
+    }
+
+    fireEvent.click(within(ledgerRow).getByRole('button'));
+
+    expect(within(ledgerRow).getByRole('region', { name: /明细/ })).toBeInTheDocument();
+    expect(within(ledgerRow).getByText(/关键校验：/)).toBeInTheDocument();
+    expect(within(ledgerRow).getByText(/复核建议：/)).toBeInTheDocument();
+    expect(within(ledgerRow).getByRole('button', { name: '收起明细' })).toBeInTheDocument();
   });
 
   it('does not leak the legacy restart hint into the approved equity artifact', async () => {

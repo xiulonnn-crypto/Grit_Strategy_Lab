@@ -105,6 +105,7 @@ const OPTIMIZATION_SELECTION_FIELDS: Partial<
     { key: "slippage_bps", label: "滑点(bps)", control: "text" },
   ],
   MULTI_FACTOR: [
+    { key: "top_n", label: "持仓数量", control: "text" },
     {
       key: "scoring_method",
       label: "打分方法",
@@ -217,11 +218,69 @@ function readFactorWeightSeeds(
     .filter((field): field is OptimizationParameterSeed => field !== null && hasParameterValue(field.value));
 }
 
+function readMultiFactorTopN(
+  strategy: ApiStrategyDetail,
+  parameterSnapshot?: Record<string, ParameterValue> | null,
+): number {
+  const factorIds = new Set<string>();
+  const ingestFactorIds = (value: unknown): void => {
+    if (!Array.isArray(value)) {
+      return;
+    }
+    value.forEach((item) => {
+      if (typeof item === "string" && item.trim()) {
+        factorIds.add(item.trim());
+      }
+    });
+  };
+  ingestFactorIds(parameterSnapshot?.factor_ids);
+  ingestFactorIds(strategy.parameters?.factor_ids);
+  if (!factorIds.size) {
+    const rawWeights =
+      (parameterSnapshot?.weights as Record<string, unknown> | undefined) ??
+      (strategy.parameters?.weights as Record<string, unknown> | undefined);
+    if (rawWeights && typeof rawWeights === "object" && !Array.isArray(rawWeights)) {
+      Object.keys(rawWeights).forEach((factorId) => {
+        if (factorId.trim()) {
+          factorIds.add(factorId.trim());
+        }
+      });
+    }
+  }
+  if (!factorIds.size) {
+    (strategy.multi_factor_profile?.components ?? []).forEach((component) => {
+      if (component.factor_id.trim()) {
+        factorIds.add(component.factor_id.trim());
+      }
+    });
+  }
+  const factorCount = factorIds.size;
+  const defaultTopN = Math.max(Math.min(factorCount * 2, 10), 5);
+  const rawTopN =
+    parameterSnapshot?.top_n ??
+    parameterSnapshot?.holding_count ??
+    strategy.parameters?.top_n ??
+    strategy.parameters?.holding_count;
+  const numericTopN =
+    typeof rawTopN === "number"
+      ? rawTopN
+      : typeof rawTopN === "string" && rawTopN.trim().length > 0
+        ? Number(rawTopN)
+        : Number.NaN;
+  if (Number.isFinite(numericTopN) && numericTopN >= 1) {
+    return Math.trunc(numericTopN);
+  }
+  return defaultTopN;
+}
+
 function readMultiFactorConfiguredValue(
   strategy: ApiStrategyDetail,
   key: string,
   parameterSnapshot?: Record<string, ParameterValue> | null,
 ): ParameterValue | undefined {
+  if (key === "top_n") {
+    return readMultiFactorTopN(strategy, parameterSnapshot);
+  }
   if (parameterSnapshot?.[key] !== undefined) {
     return parameterSnapshot[key];
   }

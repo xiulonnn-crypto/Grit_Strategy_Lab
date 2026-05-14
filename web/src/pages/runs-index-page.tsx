@@ -107,6 +107,8 @@ function statusLabel(status: string, isVirtual = false): string {
       return '排队中';
     case 'RUNNING':
       return '计算中...';
+    case 'INTERRUPTED':
+      return '已中断';
     case 'COMPLETED':
       return '已完成';
     case 'COMPLETED_WITH_WARNINGS':

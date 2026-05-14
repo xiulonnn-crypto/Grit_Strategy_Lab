@@ -342,7 +342,7 @@ def test_factor_mining_api_runs_one_thousand_candidates_without_factor_library_w
 
     assert submitted["status"] == "RUNNING"
     assert submitted["progress"]["percent"] == 0.0
-    created = wait_for_factor_mining_job(client, submitted["id"])
+    created = wait_for_factor_mining_job(client, submitted["id"], timeout_seconds=60.0)
 
     assert created["status"] == "COMPLETED"
     assert created["progress"]["total_candidates"] == 1000

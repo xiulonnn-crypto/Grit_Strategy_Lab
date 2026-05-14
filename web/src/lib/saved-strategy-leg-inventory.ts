@@ -2,6 +2,7 @@ import type {
   ApiBacktestRunListItem,
   ApiCompositionDetail,
   ApiCompositionLegInput,
+  ApiCompositionSourceIntegrity,
   ApiLegInventory,
   ApiLegInventoryRow,
   ApiStrategyListItem,
@@ -10,6 +11,7 @@ import type {
 const ELIGIBLE_STRATEGY_RUN_STATUSES = new Set(['COMPLETED', 'COMPLETED_WITH_WARNINGS']);
 export const SAVED_STRATEGY_LEG_STORAGE_KEY = 'grit.legInventory.savedStrategyLegIds.v1';
 export const SAVED_STRATEGY_LEG_EDIT_STORAGE_KEY = 'grit.legInventory.savedStrategyLegEdits.v1';
+export const SAVED_STRATEGY_LEG_FREEZE_STORAGE_KEY = 'grit.legInventory.savedStrategyLegFreezes.v1';
 
 export type SavedStrategyLegEditPayload = {
   name: string;
@@ -19,10 +21,52 @@ export type SavedStrategyLegEditPayload = {
 };
 
 export type SavedStrategyLegEditStore = Record<string, SavedStrategyLegEditPayload>;
+export type SavedStrategyLegFreezePayload = {
+  saved_at: string;
+  frozen_row: ApiLegInventoryRow;
+};
+export type SavedStrategyLegFreezeStore = Record<string, SavedStrategyLegFreezePayload>;
 export type StrategyLegReferenceCounts = Map<string, number> | Record<string, number>;
+const NEWER_STRATEGY_RUN_ALERT = 'A newer completed run exists for the same strategy version and backtest period.';
+
+const FROZEN_STRATEGY_RUN_CONFIG_KEYS = new Set([
+  'latest_run_id',
+  'run_id',
+  'is_permanent',
+  'metrics',
+  'annualized_return_pct',
+  'max_drawdown_pct',
+  'oos_sharpe',
+  'start_date',
+  'end_date',
+  'effective_date',
+  'oos_start_date',
+  'trades_count',
+  'created_at',
+  'updated_at',
+  'completed_at',
+  'run_created_at',
+  'run_updated_at',
+  'run_completed_at',
+]);
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function readStringFromRecord(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : [];
 }
 
 function readMetricNumber(
@@ -152,6 +196,88 @@ export function writeSavedStrategyLegEdits(edits: SavedStrategyLegEditStore): vo
   }
 }
 
+function normalizeSavedFreeze(id: string, value: unknown): SavedStrategyLegFreezePayload | null {
+  const record = asRecord(value);
+  const frozenRow = asRecord(record.frozen_row);
+  const rowId = readStringFromRecord(frozenRow, 'id') ?? id;
+  if (!rowId || readStringFromRecord(frozenRow, 'leg_type') !== 'strategy') {
+    return null;
+  }
+  const savedAt =
+    readStringFromRecord(record, 'saved_at') ??
+    readStringFromRecord(frozenRow, 'created_at') ??
+    new Date(0).toISOString();
+  return {
+    saved_at: savedAt,
+    frozen_row: {
+      ...(frozenRow as Partial<ApiLegInventoryRow>),
+      id: rowId,
+      leg_type: 'strategy',
+      name: readStringFromRecord(frozenRow, 'name') ?? rowId,
+      reference_count: typeof frozenRow.reference_count === 'number' ? frozenRow.reference_count : 0,
+      reference_summary:
+        readStringFromRecord(frozenRow, 'reference_summary') ?? buildReferenceSummary(0),
+      status: readStringFromRecord(frozenRow, 'status') ?? 'READY',
+      status_label: readStringFromRecord(frozenRow, 'status_label') ?? 'Ready',
+      has_new_version: Boolean(frozenRow.has_new_version),
+      has_new_parameters: Boolean(frozenRow.has_new_parameters),
+      is_orphan: Boolean(frozenRow.is_orphan),
+      attribute_tags: readStringArray(frozenRow.attribute_tags),
+      allowed_actions: readStringArray(frozenRow.allowed_actions),
+      config: asRecord(frozenRow.config),
+      created_at: savedAt,
+      updated_at: readStringFromRecord(frozenRow, 'updated_at') ?? savedAt,
+    } as ApiLegInventoryRow,
+  };
+}
+
+export function readSavedStrategyLegFreezes(): SavedStrategyLegFreezeStore {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+  try {
+    const raw = window.localStorage.getItem(SAVED_STRATEGY_LEG_FREEZE_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed as Record<string, unknown>).flatMap(([id, value]) => {
+        const normalized = normalizeSavedFreeze(id, value);
+        return normalized ? [[id, normalized]] : [];
+      }),
+    );
+  } catch {
+    return {};
+  }
+}
+
+export function writeSavedStrategyLegFreezes(freezes: SavedStrategyLegFreezeStore): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(SAVED_STRATEGY_LEG_FREEZE_STORAGE_KEY, JSON.stringify(freezes));
+  } catch {
+    // Losing the source freeze should not block the route; the ID preference still keeps the row recoverable.
+  }
+}
+
+export function buildSavedStrategyLegFreeze(
+  row: ApiLegInventoryRow,
+  savedAt = new Date().toISOString(),
+): SavedStrategyLegFreezePayload {
+  const frozenRow = cloneJson({
+    ...row,
+    created_at: savedAt,
+    updated_at: row.updated_at ?? savedAt,
+  });
+  return {
+    saved_at: savedAt,
+    frozen_row: frozenRow,
+  };
+}
+
 export function applyStrategyLegEdit(
   row: ApiLegInventoryRow,
   edit?: SavedStrategyLegEditPayload,
@@ -211,6 +337,54 @@ function getStrategyVersionNumber(
   return match ? Number(match[1]) : null;
 }
 
+function getStrategyIdFromParameterVersionId(parameterVersionId: string): string | null {
+  const match = parameterVersionId.match(/^(.+)-v\d+$/i);
+  return match?.[1] ?? null;
+}
+
+function normalizeWindowValue(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized ? normalized : null;
+}
+
+function getStrategyRunPeriodKey(
+  strategyId: string,
+  parameterVersionId: string,
+  startDate: string | null,
+  endDate: string | null,
+): string {
+  return `${strategyId}::${parameterVersionId}::${startDate ?? 'start:unknown'}::${endDate ?? 'end:unknown'}`;
+}
+
+function getRunSelectionKey(run: ApiBacktestRunListItem): string {
+  return getStrategyRunPeriodKey(
+    run.strategy_id,
+    String(run.parameter_version_id ?? ''),
+    normalizeWindowValue(run.start_date),
+    normalizeWindowValue(run.end_date),
+  );
+}
+
+function getRowRunId(row: ApiLegInventoryRow): string | null {
+  const config = asRecord(row.config);
+  return readStringFromRecord(config, 'run_id') ?? readStringFromRecord(config, 'latest_run_id');
+}
+
+function buildStrategySourceRefId(
+  strategyId: string,
+  parameterVersionId: string,
+  runId?: string | null,
+): string {
+  const normalizedRunId = String(runId ?? '').trim();
+  if (normalizedRunId) {
+    return `strategy_leg::${parameterVersionId}::${normalizedRunId}`;
+  }
+  return `strategy_leg::${strategyId}::${parameterVersionId}`;
+}
+
 export function buildStrategyLegDefaultName(row: ApiLegInventoryRow): string {
   const versionLabel = String(row.version_label ?? '').trim();
   if (!versionLabel || row.name.endsWith(`-${versionLabel}`)) {
@@ -226,28 +400,62 @@ export function buildStrategyCandidateRows(
 ): ApiLegInventoryRow[] {
   const strategyById = new Map(strategies.map((strategy) => [strategy.id, strategy]));
   const latestRunByStrategyVersion = new Map<string, ApiBacktestRunListItem>();
-
-  runs
+  const latestRunByStrategyPeriod = new Map<string, ApiBacktestRunListItem>();
+  const eligibleRuns = runs
     .filter((run) => ELIGIBLE_STRATEGY_RUN_STATUSES.has(String(run.status ?? '').toUpperCase()))
     .filter((run) => Boolean(run.strategy_id && run.parameter_version_id))
-    .sort((left, right) => getRunSortTime(right) - getRunSortTime(left))
-    .forEach((run) => {
-      const key = `${run.strategy_id}::${run.parameter_version_id}`;
-      if (!latestRunByStrategyVersion.has(key)) {
-        latestRunByStrategyVersion.set(key, run);
-      }
-    });
+    .sort((left, right) => getRunSortTime(right) - getRunSortTime(left));
 
-  return Array.from(latestRunByStrategyVersion.values()).map((run): ApiLegInventoryRow => {
+  eligibleRuns.forEach((run) => {
+    const key = `${run.strategy_id}::${run.parameter_version_id}`;
+    if (!latestRunByStrategyVersion.has(key)) {
+      latestRunByStrategyVersion.set(key, run);
+    }
+    const periodKey = getRunSelectionKey(run);
+    if (!latestRunByStrategyPeriod.has(periodKey)) {
+      latestRunByStrategyPeriod.set(periodKey, run);
+    }
+  });
+
+  const selectedRunsById = new Map<string, ApiBacktestRunListItem>();
+  Array.from(latestRunByStrategyPeriod.values()).forEach((run) => {
+    selectedRunsById.set(run.id, run);
+  });
+  eligibleRuns.forEach((run) => {
+    const parameterVersionId = run.parameter_version_id as string;
+    const rowId = buildStrategySourceRefId(run.strategy_id, parameterVersionId, run.id);
+    const legacyRowId = buildStrategySourceRefId(run.strategy_id, parameterVersionId);
+    if (getReferenceCount(referenceCounts, rowId) > 0 || getReferenceCount(referenceCounts, legacyRowId) > 0) {
+      selectedRunsById.set(run.id, run);
+    }
+  });
+
+  return Array.from(selectedRunsById.values()).map((run): ApiLegInventoryRow => {
     const strategy = strategyById.get(run.strategy_id);
     const parameterVersionId = run.parameter_version_id as string;
-    const rowId = `strategy_leg::${run.strategy_id}::${parameterVersionId}`;
-    const referenceCount = getReferenceCount(referenceCounts, rowId);
+    const rowId = buildStrategySourceRefId(run.strategy_id, parameterVersionId, run.id);
+    const legacyRowId = buildStrategySourceRefId(run.strategy_id, parameterVersionId);
+    const referenceCount =
+      getReferenceCount(referenceCounts, rowId) || getReferenceCount(referenceCounts, legacyRowId);
     const hasNewVersion =
       Boolean(strategy?.current_parameter_version_id) &&
       strategy?.current_parameter_version_id !== parameterVersionId;
+    const currentRun = strategy?.current_parameter_version_id
+      ? latestRunByStrategyPeriod.get(
+          getStrategyRunPeriodKey(
+            run.strategy_id,
+            strategy.current_parameter_version_id,
+            normalizeWindowValue(run.start_date),
+            normalizeWindowValue(run.end_date),
+          ),
+        ) ?? latestRunByStrategyVersion.get(`${run.strategy_id}::${strategy.current_parameter_version_id}`)
+      : null;
     const currentRefId = strategy?.current_parameter_version_id
-      ? `strategy_leg::${run.strategy_id}::${strategy.current_parameter_version_id}`
+      ? buildStrategySourceRefId(
+          run.strategy_id,
+          strategy.current_parameter_version_id,
+          currentRun?.id ?? null,
+        )
       : rowId;
     const annualizedReturnPct = toPercentMetric(
       readMetricNumber(run.metrics, 'annualized_return', 'cagr', 'oos_annualized_return'),
@@ -270,6 +478,7 @@ export function buildStrategyCandidateRows(
       freeze_hash: null,
       signature_status: hasNewVersion ? 'stale' : 'verified',
       drift_status: hasNewVersion ? 'drifted' : 'current',
+      has_new_parameters: false,
       current_ref_id: currentRefId,
       checked_at: run.completed_at ?? run.updated_at ?? run.created_at ?? null,
       alerts: hasNewVersion
@@ -292,6 +501,7 @@ export function buildStrategyCandidateRows(
           ? 'Completed with warnings'
           : 'Ready',
       has_new_version: hasNewVersion,
+      has_new_parameters: false,
       is_orphan: false,
       attribute_tags: tags,
       allowed_actions: [
@@ -312,18 +522,248 @@ export function buildStrategyCandidateRows(
         parameter_version: getStrategyVersionNumber(strategy, parameterVersionId),
         latest_run_id: run.id,
         run_id: run.id,
+        is_permanent: run.is_permanent ?? false,
+        created_at: run.created_at ?? null,
+        updated_at: run.updated_at ?? null,
+        completed_at: run.completed_at ?? null,
+        run_created_at: run.created_at ?? null,
+        run_updated_at: run.updated_at ?? null,
+        run_completed_at: run.completed_at ?? null,
         metrics: run.metrics ?? null,
         annualized_return_pct: annualizedReturnPct ?? 0,
         max_drawdown_pct: Math.abs(maxDrawdownPct ?? 0),
         oos_sharpe: readMetricNumber(run.metrics, 'oos_sharpe', 'out_of_sample_sharpe', 'sharpe') ?? 0,
         start_date: run.start_date ?? null,
         end_date: run.end_date ?? null,
+        effective_date: run.effective_date ?? null,
+        oos_start_date: run.oos_start_date ?? null,
         trades_count: run.trades_count ?? null,
         rebalance_frequency: strategy?.rebalance_frequency ?? null,
         source_integrity: sourceIntegrity,
       },
+      created_at: run.created_at ?? run.completed_at ?? run.updated_at ?? null,
+      updated_at: run.completed_at ?? run.updated_at ?? run.created_at ?? null,
     };
   });
+}
+
+function pickFrozenRunConfig(frozenConfig: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(frozenConfig).filter(([key]) => FROZEN_STRATEGY_RUN_CONFIG_KEYS.has(key)),
+  );
+}
+
+function buildFrozenMetricFallback(frozenConfig: Record<string, unknown>): Record<string, unknown> | null {
+  const metricKeys = ['annualized_return_pct', 'max_drawdown_pct', 'oos_sharpe'] as const;
+  const metrics = Object.fromEntries(
+    metricKeys
+      .map((key) => [key, frozenConfig[key]] as const)
+      .filter(([, value]) => typeof value === 'number' && Number.isFinite(value)),
+  );
+  return Object.keys(metrics).length > 0 ? metrics : null;
+}
+
+function getRowSourceIntegrity(row: ApiLegInventoryRow): Record<string, unknown> {
+  const config = asRecord(row.config);
+  return asRecord(row.source_integrity ?? config.source_integrity);
+}
+
+function mergeFrozenSourceIntegrity(
+  currentRow: ApiLegInventoryRow,
+  frozenRow: ApiLegInventoryRow,
+): ApiCompositionSourceIntegrity {
+  const currentIntegrity = getRowSourceIntegrity(currentRow);
+  const frozenIntegrity = getRowSourceIntegrity(frozenRow);
+  const shouldUseCurrentStatus =
+    currentRow.has_new_version || currentRow.has_new_parameters || currentRow.is_orphan;
+  const alerts = shouldUseCurrentStatus
+    ? readStringArray(currentIntegrity.alerts)
+    : readStringArray(frozenIntegrity.alerts);
+  const mergedIntegrity = {
+    ...currentIntegrity,
+    ...frozenIntegrity,
+  };
+  const signatureStatus = shouldUseCurrentStatus
+    ? currentIntegrity.signature_status ?? currentRow.signature_status
+    : frozenIntegrity.signature_status ?? currentIntegrity.signature_status;
+  const driftStatus = shouldUseCurrentStatus
+    ? currentIntegrity.drift_status ?? currentRow.drift_status
+    : frozenIntegrity.drift_status ?? currentIntegrity.drift_status;
+  const currentRefId = shouldUseCurrentStatus
+    ? currentIntegrity.current_ref_id ?? currentRow.current_ref_id
+    : frozenIntegrity.current_ref_id ?? currentIntegrity.current_ref_id;
+  const checkedAt = shouldUseCurrentStatus
+    ? currentIntegrity.checked_at ?? frozenIntegrity.checked_at
+    : frozenIntegrity.checked_at ?? currentIntegrity.checked_at;
+  return {
+    ...mergedIntegrity,
+    leg_id: readStringFromRecord(mergedIntegrity, 'leg_id') ?? frozenRow.id,
+    display_name: readStringFromRecord(mergedIntegrity, 'display_name') ?? frozenRow.name ?? currentRow.name,
+    source_ref_id:
+      readStringFromRecord(mergedIntegrity, 'source_ref_id') ??
+      frozenRow.source_ref_id ??
+      currentRow.source_ref_id ??
+      frozenRow.id,
+    freeze_hash:
+      readStringFromRecord(mergedIntegrity, 'freeze_hash') ?? frozenRow.freeze_hash ?? currentRow.freeze_hash ?? null,
+    signature_status: typeof signatureStatus === 'string' && signatureStatus.trim() ? signatureStatus : 'verified',
+    drift_status: typeof driftStatus === 'string' && driftStatus.trim() ? driftStatus : 'current',
+    has_new_parameters: shouldUseCurrentStatus
+      ? Boolean(currentIntegrity.has_new_parameters ?? currentRow.has_new_parameters)
+      : Boolean(
+          frozenIntegrity.has_new_parameters ??
+            currentIntegrity.has_new_parameters ??
+            currentRow.has_new_parameters,
+        ),
+    current_ref_id: typeof currentRefId === 'string' && currentRefId.trim() ? currentRefId : null,
+    checked_at: typeof checkedAt === 'string' && checkedAt.trim() ? checkedAt : null,
+    alerts,
+  };
+}
+
+function markRowWithNewParameters(
+  row: ApiLegInventoryRow,
+  target: ApiLegInventoryRow,
+): ApiLegInventoryRow {
+  const currentIntegrity = getRowSourceIntegrity(row);
+  const nextAlerts = Array.from(
+    new Set([...readStringArray(currentIntegrity.alerts), ...readStringArray(row.alerts), NEWER_STRATEGY_RUN_ALERT]),
+  );
+  const nextIntegrity: ApiCompositionSourceIntegrity = {
+    ...currentIntegrity,
+    leg_id: readStringFromRecord(currentIntegrity, 'leg_id') ?? row.id,
+    display_name: readStringFromRecord(currentIntegrity, 'display_name') ?? row.name,
+    source_ref_id: readStringFromRecord(currentIntegrity, 'source_ref_id') ?? row.source_ref_id ?? row.id,
+    freeze_hash: readStringFromRecord(currentIntegrity, 'freeze_hash') ?? row.freeze_hash ?? null,
+    signature_status: 'stale',
+    drift_status: 'drifted',
+    has_new_parameters: true,
+    current_ref_id: target.source_ref_id ?? target.id,
+    checked_at:
+      readStringFromRecord(asRecord(target.config), 'run_completed_at') ??
+      target.updated_at ??
+      readStringFromRecord(currentIntegrity, 'checked_at') ??
+      null,
+    alerts: nextAlerts,
+  };
+  const attributeTags = row.attribute_tags.includes('newer_parameters_available')
+    ? row.attribute_tags
+    : [...row.attribute_tags, 'newer_parameters_available'];
+  return {
+    ...row,
+    has_new_parameters: true,
+    status: row.status === 'ARCHIVED' ? row.status : 'STALE',
+    status_label: row.status === 'ARCHIVED' ? row.status_label : 'Newer run available',
+    attribute_tags: attributeTags,
+    source_integrity: nextIntegrity,
+    signature_status: nextIntegrity.signature_status,
+    drift_status: nextIntegrity.drift_status,
+    current_ref_id: nextIntegrity.current_ref_id,
+    alerts: nextAlerts,
+    config: {
+      ...asRecord(row.config),
+      source_integrity: nextIntegrity,
+    },
+  };
+}
+
+function findSamePeriodUpdateTarget(
+  row: ApiLegInventoryRow,
+  candidates: ApiLegInventoryRow[],
+): ApiLegInventoryRow | null {
+  if (row.leg_type !== 'strategy' || row.has_new_version || row.is_orphan) {
+    return null;
+  }
+  const sourceSignature = getStrategyPeriodSignatureForRow(row);
+  if (!sourceSignature?.startDate || !sourceSignature.endDate) {
+    return null;
+  }
+  const sourceRunId = sourceSignature.runId;
+  const sourceSortTime = getStrategyRowSortTime(row);
+  return (
+    candidates
+      .filter((candidate) => {
+        if (candidate.leg_type !== 'strategy' || hasStrategyPendingUpdate(candidate)) {
+          return false;
+        }
+        if (!sameStrategyPeriod(row, candidate)) {
+          return false;
+        }
+        const candidateRunId = getStrategyPeriodSignatureForRow(candidate)?.runId ?? getRowRunId(candidate);
+        return Boolean(
+          candidateRunId &&
+            candidateRunId !== sourceRunId &&
+            getStrategyRowSortTime(candidate) > sourceSortTime,
+        );
+      })
+      .sort((left, right) => getStrategyRowSortTime(right) - getStrategyRowSortTime(left))[0] ?? null
+  );
+}
+
+function applyStrategyLegFreeze(
+  currentRow: ApiLegInventoryRow,
+  freeze?: SavedStrategyLegFreezePayload,
+): ApiLegInventoryRow {
+  if (!freeze) {
+    return currentRow;
+  }
+  const frozenRow = freeze.frozen_row;
+  const currentConfig = asRecord(currentRow.config);
+  const frozenConfig = asRecord(frozenRow.config);
+  const sourceIntegrity = mergeFrozenSourceIntegrity(currentRow, frozenRow);
+  const frozenSourceRefId =
+    (typeof frozenRow.source_ref_id === 'string' && frozenRow.source_ref_id.trim())
+      ? frozenRow.source_ref_id
+      : frozenRow.id;
+  const frozenRunConfig = pickFrozenRunConfig(frozenConfig);
+  const config: Record<string, unknown> = {
+    ...currentConfig,
+    ...frozenRunConfig,
+    source_integrity: sourceIntegrity,
+    saved_strategy_source_frozen_at: freeze.saved_at,
+  };
+  if (!('metrics' in frozenRunConfig)) {
+    const frozenMetricFallback = buildFrozenMetricFallback(frozenConfig);
+    if (frozenMetricFallback) {
+      config.metrics = frozenMetricFallback;
+    }
+  }
+  return {
+    ...currentRow,
+    id: frozenRow.id || currentRow.id,
+    name: frozenRow.name || currentRow.name,
+    version_label: frozenRow.version_label ?? currentRow.version_label,
+    proof_label: frozenRow.proof_label ?? currentRow.proof_label,
+    reference_count:
+      typeof frozenRow.reference_count === 'number'
+        ? frozenRow.reference_count
+        : currentRow.reference_count,
+    reference_summary: frozenRow.reference_summary ?? currentRow.reference_summary,
+    source_ref_id: frozenSourceRefId || currentRow.source_ref_id,
+    source_ref_type: frozenRow.source_ref_type ?? currentRow.source_ref_type,
+    source_integrity: sourceIntegrity,
+    freeze_hash: typeof sourceIntegrity.freeze_hash === 'string' ? sourceIntegrity.freeze_hash : currentRow.freeze_hash,
+    signature_status:
+      typeof sourceIntegrity.signature_status === 'string'
+        ? sourceIntegrity.signature_status
+        : currentRow.signature_status,
+    drift_status:
+      typeof sourceIntegrity.drift_status === 'string' ? sourceIntegrity.drift_status : currentRow.drift_status,
+    current_ref_id:
+      typeof sourceIntegrity.current_ref_id === 'string' ? sourceIntegrity.current_ref_id : currentRow.current_ref_id,
+    alerts: readStringArray(sourceIntegrity.alerts),
+    config,
+    created_at: frozenRow.created_at ?? freeze.saved_at ?? currentRow.created_at,
+    updated_at: frozenRow.updated_at ?? freeze.saved_at ?? currentRow.updated_at,
+  };
+}
+
+function freezeSourceMatchesRow(freeze: SavedStrategyLegFreezePayload, row: ApiLegInventoryRow): boolean {
+  const frozenSourceRefId =
+    freeze.frozen_row.source_ref_id && typeof freeze.frozen_row.source_ref_id === 'string'
+      ? freeze.frozen_row.source_ref_id
+      : freeze.frozen_row.id;
+  return frozenSourceRefId === row.id || frozenSourceRefId === row.source_ref_id;
 }
 
 export function materializeSavedStrategyRows(
@@ -331,23 +771,178 @@ export function materializeSavedStrategyRows(
   strategyRows: ApiLegInventoryRow[],
   currentRows: ApiLegInventoryRow[] = [],
   edits: SavedStrategyLegEditStore = {},
+  freezes: SavedStrategyLegFreezeStore = {},
 ): ApiLegInventoryRow[] {
   const byId = new Map([...currentRows, ...strategyRows].map((row) => [row.id, row]));
+  const rowSourceMatches = (
+    row: ApiLegInventoryRow,
+    parsed: { strategyId: string; parameterVersionId: string; runId: string | null },
+  ): boolean => {
+    if (row.leg_type !== 'strategy') {
+      return false;
+    }
+    const rowParsed = parseStrategySourceRefId(String(row.source_ref_id ?? row.id));
+    const config = asRecord(row.config);
+    const rowStrategyId =
+      (typeof config.strategy_id === 'string' && config.strategy_id.trim()) ||
+      rowParsed?.strategyId ||
+      null;
+    const rowParameterVersionId =
+      (typeof config.parameter_version_id === 'string' && config.parameter_version_id.trim()) ||
+      rowParsed?.parameterVersionId ||
+      null;
+    return rowStrategyId === parsed.strategyId && rowParameterVersionId === parsed.parameterVersionId;
+  };
+  const rowSourceScore = (
+    row: ApiLegInventoryRow,
+    id: string,
+    parsed: { strategyId: string; parameterVersionId: string; runId: string | null },
+    frozenReference?: ApiLegInventoryRow,
+  ): number => {
+    const rowSourceRefId = String(row.source_ref_id ?? row.id);
+    const rowParsed = parseStrategySourceRefId(rowSourceRefId);
+    const config = asRecord(row.config);
+    const configRunId = readStringFromRecord(config, 'run_id') ?? readStringFromRecord(config, 'latest_run_id');
+    const runId = rowParsed?.runId ?? configRunId;
+    let score = 0;
+    if (row.reference_count > 0) {
+      score += 1000;
+    }
+    if (rowSourceRefId === id || row.id === id) {
+      score += 100;
+    }
+    if (parsed.runId && runId === parsed.runId) {
+      score += 50;
+    }
+    if (frozenReference && sameStrategyPeriod(row, frozenReference)) {
+      score += 500;
+    }
+    if (config.is_permanent === true) {
+      score += 20;
+    }
+    return score;
+  };
+  const findEquivalentStrategyRow = (
+    id: string,
+    frozenReference?: ApiLegInventoryRow,
+  ): ApiLegInventoryRow | undefined => {
+    const parsed = parseStrategySourceRefId(id);
+    if (!parsed) {
+      return undefined;
+    }
+    return [...currentRows, ...strategyRows]
+      .filter((row) => rowSourceMatches(row, parsed))
+      .sort((left, right) => rowSourceScore(right, id, parsed, frozenReference) - rowSourceScore(left, id, parsed, frozenReference))[0];
+  };
   return ids.flatMap((id) => {
-    const row = byId.get(id);
-    return row ? [applyStrategyLegEdit({ ...row, name: buildStrategyLegDefaultName(row) }, edits[id])] : [];
+    const freeze = freezes[id];
+    const authoritativeRow = findEquivalentStrategyRow(id, freeze?.frozen_row);
+    const row = authoritativeRow ?? byId.get(id) ?? freeze?.frozen_row;
+    if (!row) {
+      return [];
+    }
+    const effectiveFreeze =
+      authoritativeRow && authoritativeRow.reference_count > 0 && freeze && !freezeSourceMatchesRow(freeze, authoritativeRow)
+        ? undefined
+        : freeze;
+    const candidatePool = [...currentRows, ...strategyRows].filter(
+      (candidate, index, collection) => collection.findIndex((item) => item.id === candidate.id) === index,
+    );
+    const frozenReference = effectiveFreeze?.frozen_row;
+    const samePeriodUpdateTarget =
+      frozenReference &&
+      sameStrategyPeriod(frozenReference, row) &&
+      getStrategyRowSortTime(row) > getStrategyRowSortTime(frozenReference)
+        ? row
+        : findSamePeriodUpdateTarget(frozenReference ?? row, candidatePool);
+    const rowWithLatestPeriodRun =
+      samePeriodUpdateTarget && !hasStrategyPendingUpdate(row)
+        ? markRowWithNewParameters(row, samePeriodUpdateTarget)
+        : row;
+    const frozenRow = applyStrategyLegFreeze(rowWithLatestPeriodRun, effectiveFreeze);
+    return [applyStrategyLegEdit({ ...frozenRow, name: buildStrategyLegDefaultName(frozenRow) }, edits[id])];
   });
 }
 
-function parseStrategySourceRefId(sourceRefId: string): { strategyId: string; parameterVersionId: string } | null {
+function parseStrategySourceRefId(
+  sourceRefId: string,
+): { strategyId: string; parameterVersionId: string; runId: string | null } | null {
   const match = sourceRefId.match(/^strategy_leg::(.+)::(.+)$/);
   if (!match) {
     return null;
   }
+  const inferredStrategyId = getStrategyIdFromParameterVersionId(match[1]);
+  if (inferredStrategyId) {
+    return {
+      strategyId: inferredStrategyId,
+      parameterVersionId: match[1],
+      runId: match[2],
+    };
+  }
   return {
     strategyId: match[1],
     parameterVersionId: match[2],
+    runId: null,
   };
+}
+
+function getStrategyPeriodSignatureForRow(row: ApiLegInventoryRow): {
+  strategyId: string | null;
+  parameterVersionId: string | null;
+  runId: string | null;
+  startDate: string | null;
+  endDate: string | null;
+} | null {
+  if (row.leg_type !== 'strategy') {
+    return null;
+  }
+  const parsed = parseStrategySourceRefId(String(row.source_ref_id ?? row.id));
+  const config = asRecord(row.config);
+  const strategyId = readStringFromRecord(config, 'strategy_id') ?? parsed?.strategyId ?? null;
+  const parameterVersionId =
+    readStringFromRecord(config, 'parameter_version_id') ?? parsed?.parameterVersionId ?? null;
+  if (!strategyId || !parameterVersionId) {
+    return null;
+  }
+  return {
+    strategyId,
+    parameterVersionId,
+    runId: parsed?.runId ?? getRowRunId(row),
+    startDate: normalizeWindowValue(config.start_date),
+    endDate: normalizeWindowValue(config.end_date),
+  };
+}
+
+function sameStrategyPeriod(left: ApiLegInventoryRow, right: ApiLegInventoryRow): boolean {
+  const leftSignature = getStrategyPeriodSignatureForRow(left);
+  const rightSignature = getStrategyPeriodSignatureForRow(right);
+  if (!leftSignature || !rightSignature) {
+    return false;
+  }
+  return (
+    leftSignature.strategyId === rightSignature.strategyId &&
+    leftSignature.parameterVersionId === rightSignature.parameterVersionId &&
+    Boolean(leftSignature.startDate) &&
+    Boolean(leftSignature.endDate) &&
+    leftSignature.startDate === rightSignature.startDate &&
+    leftSignature.endDate === rightSignature.endDate
+  );
+}
+
+function getStrategyRowSortTime(row: ApiLegInventoryRow): number {
+  const config = asRecord(row.config);
+  const timestamp =
+    readStringFromRecord(config, 'run_completed_at') ??
+    readStringFromRecord(config, 'completed_at') ??
+    row.updated_at ??
+    row.created_at ??
+    '';
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function hasStrategyPendingUpdate(row: ApiLegInventoryRow | null | undefined): boolean {
+  return Boolean(row?.has_new_version || row?.has_new_parameters);
 }
 
 function getStrategyIdFromLeg(leg: ApiCompositionLegInput): string | null {
@@ -385,18 +980,25 @@ function findLatestStrategyRowForLeg(
   inventoryRows: ApiLegInventoryRow[],
 ): ApiLegInventoryRow | null {
   const strategyId = getStrategyIdFromLeg(leg);
+  const currentRow = findInventoryRowForLeg(leg, inventoryRows);
   if (!strategyId) {
     return null;
   }
   return (
     inventoryRows.find((row) => {
-      if (row.leg_type !== 'strategy' || row.has_new_version) {
+      if (row.leg_type !== 'strategy' || hasStrategyPendingUpdate(row)) {
         return false;
       }
       if (row.status === 'NEEDS_RUN' || row.attribute_tags.includes('needs_run')) {
         return false;
       }
-      return getStrategyIdFromRow(row) === strategyId;
+      if (getStrategyIdFromRow(row) !== strategyId) {
+        return false;
+      }
+      if (currentRow?.has_new_parameters) {
+        return sameStrategyPeriod(currentRow, row);
+      }
+      return true;
     }) ?? null
   );
 }
@@ -409,7 +1011,7 @@ export function canUpgradeStrategyLegVersions(
     if (leg.leg_kind !== 'strategy') {
       return false;
     }
-    return Boolean(findInventoryRowForLeg(leg, inventoryRows)?.has_new_version);
+    return hasStrategyPendingUpdate(findInventoryRowForLeg(leg, inventoryRows));
   });
   if (staleStrategyLegs.length === 0) {
     return false;
@@ -432,7 +1034,7 @@ export function upgradeStrategyLegVersions(
       return leg;
     }
     const currentRow = findInventoryRowForLeg(leg, inventoryRows);
-    if (!currentRow?.has_new_version) {
+    if (!hasStrategyPendingUpdate(currentRow)) {
       return leg;
     }
     const latestRow = findLatestStrategyRowForLeg(leg, inventoryRows);

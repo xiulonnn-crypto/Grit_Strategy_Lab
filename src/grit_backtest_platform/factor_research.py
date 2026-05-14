@@ -4286,18 +4286,35 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
     option_skew_point_rows = int(
         option_skew_signal_contract.get("point_count") or option_skew_counts.get("signal_points") or 0
     )
+    analyst_required_points = 3
+    macro_rates_required_points = 10
+    macro_rates_metadata = _metadata_for_row(macro_rates_snapshot or {})
+    macro_rates_covered_series = int(
+        macro_rates_metadata.get("covered_symbol_count") or macro_rates_counts.get("signal_coverage") or 0
+    )
+    macro_rates_required_series = max(
+        macro_rates_required_points,
+        int(macro_rates_metadata.get("total_symbol_count") or 0),
+    )
     analyst_gate_status = (
         "READY"
-        if analyst_point_rows > 0
+        if analyst_point_rows >= analyst_required_points
         and str(_metadata_for_row(analyst_snapshot or {}).get("pit_gate_status") or "").upper() == "READY"
         and int(analyst_signal_contract.get("missing_available_at_count") or 0) <= 0
         and int(analyst_signal_contract.get("missing_publish_date_count") or 0) <= 0
         else ("OBSERVATION" if analyst_point_rows > 0 else "DISABLED")
     )
-    short_volume_gate_status = "OBSERVATION" if short_volume_point_rows > 0 else "DISABLED"
+    short_volume_gate_status = (
+        "READY"
+        if short_volume_point_rows > 0
+        and str(_metadata_for_row(short_volume_snapshot or {}).get("pit_gate_status") or "").upper() == "READY"
+        and int(short_volume_signal_contract.get("missing_available_at_count") or 0) <= 0
+        and int(short_volume_signal_contract.get("missing_publish_date_count") or 0) <= 0
+        else ("OBSERVATION" if short_volume_point_rows > 0 else "DISABLED")
+    )
     macro_gate_status = (
         "READY"
-        if macro_rates_point_rows > 0
+        if macro_rates_covered_series >= macro_rates_required_series
         and str(_metadata_for_row(macro_rates_snapshot or {}).get("pit_gate_status") or "").upper() == "READY"
         and int(macro_rates_signal_contract.get("missing_available_at_count") or 0) <= 0
         and int(macro_rates_signal_contract.get("missing_publish_date_count") or 0) <= 0
@@ -4324,6 +4341,7 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
     )
     l3_status = _pit_layer_status(
         ready=analyst_gate_status == "READY" and short_volume_gate_status == "READY",
+        blocked=analyst_gate_status == "BLOCKED",
         observation=analyst_gate_status == "OBSERVATION" or short_volume_gate_status == "OBSERVATION",
         disabled=analyst_gate_status == "DISABLED" and short_volume_gate_status == "DISABLED",
     )
@@ -4389,7 +4407,9 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "status": l3_status,
             "summary": "一致预期、卖空和换手情绪链路尚未入库，当前仅保留研究盲区提示，不进入正式 PIT 诊断。",
             "pit_alignment": "缺少正式来源前，不将情绪信号计入可验证样本。",
-            "blockers": ["一致预期样本不足，卖空与换手微观结构链路待接入。"],
+            "blockers": [
+                f"阻塞理由：ds-analyst-consensus 当前 {min(analyst_point_rows, analyst_required_points)}/{analyst_required_points}；继续使用 ALPHAVANTAGE_API_KEY 补齐一致预期样本。"
+            ],
             "available_at_health": None,
             "evidence_status": {
                 "analyst_consensus": analyst_gate_status,
@@ -4414,6 +4434,8 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
                 "macro_rates": macro_gate_status,
                 "iv_skew": iv_skew_gate_status,
                 "macro_point_rows": macro_rates_point_rows,
+                "macro_covered_series": macro_rates_covered_series,
+                "macro_required_series": macro_rates_required_series,
                 "iv_skew_point_rows": option_skew_point_rows,
             },
         },
@@ -4523,13 +4545,14 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
                 "linked_factor_groups": ["price", "quality_valuation", "sentiment_micro", "macro_derivatives"],
             }
         )
-    if l4_status == "CALIBRATING":
+    if macro_rates_covered_series < macro_rates_required_series:
+        macro_current = min(macro_rates_covered_series, macro_rates_required_series)
         pit_quality_alerts.append(
             {
                 "code": "RATE_BETA_CALIBRATING",
                 "severity": "LOW",
                 "title_cn": "宏观敞口仍在校准",
-                "detail_cn": "利率 Beta 和 IV Skew 仍处于校准或待接入阶段，本期只允许沙箱观察。",
+                "detail_cn": f"宏观利率数据当前 {macro_current} / {macro_rates_required_series} 覆盖，通过标准 {macro_rates_required_series} / {macro_rates_required_series}；继续补充 ds-macro-rates 后再校准利率 Beta。",
                 "hard_blocking": False,
                 "linked_factor_groups": ["macro_derivatives"],
             }

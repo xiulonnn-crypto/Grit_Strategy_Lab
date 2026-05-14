@@ -377,6 +377,46 @@ describe('runs index page', () => {
     expect(fakeApi.getBacktestRunDetail).not.toHaveBeenCalled();
   });
 
+  it('renders interrupted backtest runs with the localized status label', async () => {
+    const interruptedRun: ApiBacktestRunListItem = {
+      id: 'bt-gamma-interrupted',
+      strategy_id: 'str-beta',
+      strategy_name: 'Strategy Beta',
+      parameter_version_id: 'str-beta-v1',
+      status: 'INTERRUPTED',
+      start_date: '2014-03-31',
+      end_date: '2024-03-31',
+      created_at: '2026-04-02T03:00:00.000Z',
+      updated_at: '2026-04-02T03:10:00.000Z',
+      completed_at: '2026-04-02T03:10:00.000Z',
+      metrics: {},
+      warnings: [],
+      preview: {
+        effective_start_date: '2014-03-31',
+        effective_end_date: '2024-03-31',
+        data_segment_type: 'FULL',
+        parameter_version_id: 'str-beta-v1',
+      },
+      data_segment_type: 'FULL',
+      trades_count: 0,
+      is_permanent: true,
+    };
+    fakeApi.listBacktestRuns.mockResolvedValueOnce([...runs, interruptedRun]);
+
+    await renderRunsPage();
+
+    const tabs = screen.getAllByRole('tab');
+    fireEvent.click(tabs[1]);
+
+    await waitFor(() => {
+      expect(document.querySelector('.runs-recent-table')).not.toBeNull();
+    });
+
+    const interruptedRow = screen.getByRole('row', { name: /bt-gamma-interrupted/ });
+    expect(interruptedRow).toHaveTextContent('\u5df2\u4e2d\u65ad');
+    expect(interruptedRow).not.toHaveTextContent('INTERRUPTED');
+  });
+
   it('keeps the strategy library read-only while preserving historical recent-run operations', async () => {
     await renderRunsPage();
 

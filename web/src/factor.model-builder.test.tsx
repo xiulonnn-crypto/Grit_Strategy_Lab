@@ -224,6 +224,7 @@ describe('FactorModelBuilderPage', () => {
     expect(screen.getAllByText('自由现金流收益率 (TTM)').length).toBeGreaterThan(0);
     expect(screen.getAllByText('即时对数总市值').length).toBeGreaterThan(0);
     expect(screen.getByLabelText('策略名称')).toHaveValue('多因子核心模型');
+    expect(screen.getByLabelText('持仓数量')).toHaveValue(10);
     expect(screen.getByRole('button', { name: '启用行业中性化' })).toBeInTheDocument();
     expect(screen.getByLabelText('12-1月截面动量排名权重')).toBeInTheDocument();
     expect(screen.getAllByText('再平衡配置').length).toBeGreaterThan(0);
@@ -241,8 +242,9 @@ describe('FactorModelBuilderPage', () => {
     const governanceRow = previewPanel?.querySelector('.factor-model-governance-row');
     expect(selectPanel?.textContent).not.toContain('再平衡配置');
     expect(governanceRow).not.toBeNull();
-    expect(governanceRow?.children).toHaveLength(2);
+    expect(governanceRow?.children).toHaveLength(3);
     expect(governanceRow?.textContent).toContain('再平衡配置');
+    expect(governanceRow?.textContent).toContain('持仓数量');
     expect(governanceRow?.textContent).toContain('启用行业中性化');
     expect(selectPanel?.querySelector('.factor-weight-control')).toBeNull();
     expect(selectPanel?.textContent).not.toContain('30%');
@@ -619,6 +621,7 @@ describe('FactorModelBuilderPage', () => {
     expect(previewFactorModel.mock.calls[0][0]).toMatchObject({
       modelName: '多因子核心模型',
       rebalanceFrequency: 'monthly',
+      topN: 10,
       neutralization: {
         enabled: false,
         taxonomy: 'GICS',
@@ -672,6 +675,31 @@ describe('FactorModelBuilderPage', () => {
 
     await waitFor(() => expect(createFactorModel).toHaveBeenCalledTimes(1));
     expect(createFactorModel.mock.calls[0][0].rebalanceFrequency).toBe('quarterly');
+  });
+
+  it('lets operators configure Top N before preview and creation', async () => {
+    const previewFactorModel = vi
+      .fn<(payload: FactorModelPreviewPayload) => Promise<FactorModelPreview>>()
+      .mockResolvedValue(makeReadyPreview());
+    const createFactorModel = vi
+      .fn<(payload: FactorModelPreviewPayload) => Promise<FactorModelCreateResponse>>()
+      .mockResolvedValue({ strategy_id: 'strat_top_n_factor_model' });
+
+    render(<FactorModelBuilderPage api={{ previewFactorModel, createFactorModel }} />);
+
+    await waitFor(() => expect(previewFactorModel).toHaveBeenCalledTimes(1));
+    expect(previewFactorModel.mock.calls[0][0].topN).toBe(10);
+
+    fireEvent.change(screen.getByLabelText('持仓数量'), { target: { value: '12' } });
+
+    await waitFor(() => expect(previewFactorModel).toHaveBeenCalledTimes(2));
+    expect(previewFactorModel.mock.calls.at(-1)?.[0].topN).toBe(12);
+
+    await waitFor(() => expect(screen.getAllByRole('button', { name: '创建可回测策略' })[0]).toBeEnabled());
+    fireEvent.click(screen.getAllByRole('button', { name: '创建可回测策略' })[0]);
+
+    await waitFor(() => expect(createFactorModel).toHaveBeenCalledTimes(1));
+    expect(createFactorModel.mock.calls[0][0].topN).toBe(12);
   });
 
   it('initializes live factors without design preset weights when the API does not provide suggestions', async () => {
@@ -983,6 +1011,7 @@ describe('FactorModelBuilderPage', () => {
     expect(createFactorModel.mock.calls[0][0].modelName).toBe('真实 PIT 多因子策略');
     expect(createFactorModel.mock.calls[0][0].factors).toHaveLength(5);
     expect(createFactorModel.mock.calls[0][0].factors.reduce((sum, factor) => sum + factor.weightPct, 0)).toBe(100);
+    expect(createFactorModel.mock.calls[0][0].topN).toBe(10);
     expect(createFactorModel.mock.calls[0][0].neutralization.enabled).toBe(false);
     expect(onCreated).toHaveBeenCalledWith('strat_multifactor_001');
     expect(await screen.findByText('已创建多因子策略：strat_multifactor_001')).toBeInTheDocument();

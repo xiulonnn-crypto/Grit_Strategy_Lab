@@ -22,11 +22,13 @@ def _model_payload(
     neutralization_enabled: bool = False,
     universe: str = "SP500",
     rebalance_frequency: str = "monthly",
+    top_n: int = 8,
 ) -> dict:
     return {
         "name": "单元测试多因子模型",
         "universe": universe,
         "rebalance_frequency": rebalance_frequency,
+        "top_n": top_n,
         "scoring_method": "zscore_weighted",
         "components": [
             {"factor_id": "s_mom_12m1m_rank", "weight": 40, "direction": "HIGH_IS_BETTER"},
@@ -402,6 +404,57 @@ def test_multi_factor_backtest_prefetches_industry_memberships_once_for_executio
     assert execution_calls[0].get("effective_date_lte") == "2025-06-02"
 
 
+def test_multi_factor_simulation_emits_preparation_progress_updates(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    created = assert_ok(client.post("/factor-models", json=_model_payload()))
+    strategy_id = created["id"]
+
+    refresh_snapshots(client, mode="repair", targets=["corporate"])
+    _seed_direct_price_history(client)
+
+    service = client.app.state.service
+    strategy = service.get_strategy_detail(strategy_id)
+    request_payload = service._normalize_run_request(
+        strategy,
+        {
+            "idempotency_key": "run-mf-prepare-progress",
+            "start_date": "2024-01-02",
+            "end_date": "2025-06-30",
+            "parameter_version_id": strategy["current_parameter_version_id"],
+        },
+    )
+    prepared_context = service._prepare_backtest_run_context(strategy, request_payload)
+    progress_states: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        service.market_data_repository,
+        "load_dataset_fundamental_points",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        service,
+        "_factor_expression_series",
+        lambda _expression, price_rows, _fundamental_rows: [1.0] * len(price_rows),
+    )
+
+    preview, chart_series, trades = service._simulate_run_from_prepared_context(
+        strategy,
+        request_payload,
+        prepared_context,
+        preparation_progress_callback=lambda state: progress_states.append(dict(state)),
+    )
+
+    assert preview["effective_date"] is not None
+    assert chart_series
+    assert trades
+    assert progress_states
+    assert progress_states[0]["current_stage"] == "Preparing multi-factor signals"
+    assert str(progress_states[0]["latest_update"]).startswith("Loading fundamental history")
+    assert any("Computing factor" in str(state.get("latest_update") or "") for state in progress_states)
+    assert any("Starting day-by-day simulation" in str(state.get("latest_update") or "") for state in progress_states)
+
+
 def test_multi_factor_attribution_uses_diagnostic_quality_for_equal_weights(tmp_path, monkeypatch) -> None:
     client, _db_path = create_test_client(tmp_path)
     service = client.app.state.service
@@ -682,6 +735,54 @@ def test_multi_factor_strategy_detail_uses_lightweight_factor_index(tmp_path, mo
     assert components[0]["name"]
 
 
+def test_legacy_multi_factor_strategy_rows_backfill_default_top_n_for_library_and_detail(tmp_path) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    created = assert_ok(client.post("/factor-models", json=_model_payload()))
+    strategy_id = created["id"]
+    service = client.app.state.service
+
+    legacy_parameters = dict(created["parameters"])
+    legacy_parameters.pop("top_n", None)
+    legacy_parameters.pop("holding_count", None)
+
+    legacy_history = [dict(entry) for entry in created["parameter_history"]]
+    legacy_history[0] = {
+        **legacy_history[0],
+        "parameters": dict(legacy_history[0]["parameters"]),
+    }
+    legacy_history[0]["parameters"].pop("top_n", None)
+    legacy_history[0]["parameters"].pop("holding_count", None)
+
+    service.storage.execute(
+        """
+        UPDATE strategies
+        SET parameters_json = ?, parameter_history_json = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            json.dumps(legacy_parameters),
+            json.dumps(legacy_history),
+            "2026-05-14T10:00:00Z",
+            strategy_id,
+        ),
+    )
+
+    library_rows = assert_ok(client.get("/strategies"))
+    library_row = next(item for item in library_rows if item["id"] == strategy_id)
+    assert library_row["parameters"]["top_n"] == 8
+    assert library_row["parameters"]["holding_count"] == 8
+
+    detail = assert_ok(client.get(f"/strategies/{strategy_id}/detail"))
+    assert detail["parameters"]["top_n"] == 8
+    assert detail["parameters"]["holding_count"] == 8
+    assert detail["parameter_history"][0]["parameters"]["top_n"] == 8
+    top_n_range = next(
+        field for field in detail["multi_factor_parameter_ranges"] if field["key"] == "top_n"
+    )
+    assert top_n_range["current"] == 8
+
+
 def test_factor_model_create_materializes_existing_strategy_and_rejects_missing_industry_pit(tmp_path, monkeypatch) -> None:
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
@@ -703,6 +804,7 @@ def test_factor_model_create_materializes_existing_strategy_and_rejects_missing_
         "s_size_cur_log",
     ]
     assert created["parameters"]["neutralization"] == {"enabled": False, "method": "industry"}
+    assert created["parameters"]["top_n"] == 8
     assert created["parameters"]["preview"]["strategy_creation_risk"]["can_create"] is True
     assert created["parameters"]["strategy_creation_risk"]["blocked_count"] == 0
     assert created["rebalance_frequency"] == "monthly"
@@ -712,6 +814,7 @@ def test_factor_model_create_materializes_existing_strategy_and_rejects_missing_
     assert created["multi_factor_profile"]["neutralization"]["execution_status"] == "DISABLED"
     assert created["multi_factor_parameter_ranges"]
     range_keys = [field["key"] for field in created["multi_factor_parameter_ranges"]]
+    assert "top_n" in range_keys
     assert "neutralization_method" in range_keys
     assert "neutralization_enabled" not in range_keys
     weight_ranges = {
@@ -744,6 +847,7 @@ def test_factor_model_create_materializes_existing_strategy_and_rejects_missing_
         start_date="2024-01-02",
         end_date="2024-06-28",
     )
+    assert run["parameter_snapshot"]["top_n"] == 8
     assert run["multi_factor_attribution"]["attribution_source"] == "estimated"
     assert run["multi_factor_attribution"]["factor_contributions"]
     assert any(item["title"] == "因子归因" for item in run["analysis"]["decision_rail"]["items"])
@@ -755,6 +859,7 @@ def test_factor_model_create_materializes_existing_strategy_and_rejects_missing_
         wait_until_complete=False,
     )
     keys = [field["key"] for field in job["request"]["search_space"]]
+    assert "top_n" in keys
     assert "scoring_method" in keys
     assert "rebalance_frequency" in keys
     assert "neutralization_method" in keys
@@ -1026,6 +1131,15 @@ def test_multi_factor_optimization_projection_normalizes_weights_and_dedupes_cad
                     "value": "monthly",
                     "values": ["monthly", "quarterly", "yearly"],
                 },
+                {
+                    "key": "top_n",
+                    "label": "持仓数量",
+                    "mode": "range",
+                    "current": 8,
+                    "start": 6,
+                    "end": 10,
+                    "step": 2,
+                },
             ],
         },
     )
@@ -1054,6 +1168,7 @@ def test_multi_factor_optimization_projection_normalizes_weights_and_dedupes_cad
             "factor_weight__s_vol_252d_rank_pct": 20,
             "factor_weight__s_size_cur_log_pct": 15,
             "rebalance_frequency": "monthly",
+            "top_n": 8,
         },
         {
             "factor_weight__s_mom_12m1m_rank_pct": 45,
@@ -1061,6 +1176,7 @@ def test_multi_factor_optimization_projection_normalizes_weights_and_dedupes_cad
             "factor_weight__s_vol_252d_rank_pct": 20,
             "factor_weight__s_size_cur_log_pct": 15,
             "rebalance_frequency": "yearly",
+            "top_n": 10,
         },
         {
             "factor_weight__s_mom_12m1m_rank_pct": 50,
@@ -1068,6 +1184,7 @@ def test_multi_factor_optimization_projection_normalizes_weights_and_dedupes_cad
             "factor_weight__s_vol_252d_rank_pct": 20,
             "factor_weight__s_size_cur_log_pct": 15,
             "rebalance_frequency": "monthly",
+            "top_n": 8,
         },
     ]
     trials = []
@@ -1100,7 +1217,7 @@ def test_multi_factor_optimization_projection_normalizes_weights_and_dedupes_cad
         payload=optimization_payload,
         trials=trials,
     )
-    assert len(matching_combinations) == 2
+    assert len(matching_combinations) == 3
     weight_signatures = {
         tuple(sorted(candidate["parameter_snapshot"]["weights"].items()))
         for candidate in matching_combinations
@@ -1121,7 +1238,8 @@ def test_multi_factor_optimization_projection_normalizes_weights_and_dedupes_cad
         candidate["metrics"]["multi_factor_projection_effect"]
         for candidate in matching_combinations
     }
-    assert len(projected_effects) == 2
+    assert len(projected_effects) == 3
+    assert {candidate["parameter_snapshot"]["top_n"] for candidate in matching_combinations} == {8, 10}
 
     stale_saturated_trials = [
         {

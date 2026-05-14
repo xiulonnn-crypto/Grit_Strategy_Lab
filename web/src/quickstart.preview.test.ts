@@ -98,7 +98,6 @@ describe("QuickStart local provider environment", () => {
   it("documents the external PIT source keys that QuickStart can load locally", () => {
     expect(quickStartSource).toContain("QuickStart-Grit.local.ps1");
     expect(quickStartLocalExampleSource).toContain("$env:KAGGLE_API_TOKEN");
-    expect(quickStartLocalExampleSource).toContain("$env:POLYGON_API_KEY");
     expect(quickStartLocalExampleSource).toContain("$env:NASDAQ_DATA_LINK_API_KEY");
     expect(quickStartLocalExampleSource).toContain("$env:FINNHUB_API_KEY");
   });

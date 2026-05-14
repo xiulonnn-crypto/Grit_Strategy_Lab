@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+from grit_backtest_platform import _real_service_rebuilt as real_service_module
 from grit_backtest_platform.storage import dumps
 from tests.api_test_support import assert_ok, create_test_client
 
@@ -464,6 +465,29 @@ def test_pit_data_overview_cache_hit_skips_snapshot_signature_scan(tmp_path, mon
     assert cached_payload["coverage"]["covered_symbol_count"] == first_payload["coverage"]["covered_symbol_count"]
 
 
+def test_pit_data_overview_build_does_not_hold_pit_cache_lock(tmp_path, monkeypatch):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    service = client.app.state.service
+    service._invalidate_pit_data_overview_cache()
+    original_builder = real_service_module.build_pit_data_overview
+
+    def lock_checking_builder(repository):
+        acquired = service._pit_data_overview_cache_lock.acquire(blocking=False)
+        try:
+            assert acquired, "/pit-data must not hold the PIT cache lock while rebuilding"
+            return original_builder(repository)
+        finally:
+            if acquired:
+                service._pit_data_overview_cache_lock.release()
+
+    monkeypatch.setattr(real_service_module, "build_pit_data_overview", lock_checking_builder)
+
+    payload = assert_ok(client.get("/pit-data"))
+
+    assert payload["overall_status"] == "READY"
+
+
 def test_pit_data_overview_exposes_gap_preview_history_and_action_targets(tmp_path):
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
@@ -813,7 +837,6 @@ def test_pit_external_source_readiness_tracks_cache_and_optional_credentials(tmp
     monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
     monkeypatch.delenv("KAGGLE_KEY", raising=False)
     monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
-    monkeypatch.delenv("POLYGON_API_KEY", raising=False)
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
     mark_price_snapshot_incomplete(client, missing_symbols=["AAPL", "ZZZZ"])
