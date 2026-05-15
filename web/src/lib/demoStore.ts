@@ -679,20 +679,64 @@ function createPitDataOverview(): ApiPitDataOverview {
       {
         layer_id: 'l3_sentiment_data',
         title_cn: 'L3 分析师与情绪',
-        status: 'DISABLED',
-        summary: '情绪与卖空链路尚未纳入本期 PIT 回放。',
-        pit_alignment: '仅保留逻辑映射，不开放正式诊断。',
-        blockers: ['一致预期与卖空时序尚未入库'],
+        status: 'PARTIAL_READY',
+        summary: '卖空样本已可用于情绪与微观结构研究，一致预期仍在观察。',
+        pit_alignment: '一致预期与卖空样本按子模块独立回放，不再整层停用。',
+        blockers: ['一致预期样本仍需补齐'],
         available_at_health: null,
+        submodules: [
+          {
+            id: 'analyst_consensus',
+            title_cn: '分析师一致预期',
+            status: 'OBSERVATION',
+            usable: true,
+            summary_cn: '样本不足，先作为观察证据。',
+            linked_targets: ['ds-analyst-consensus'],
+            metrics: { point_rows: 2, required_points: 3 },
+            blockers: ['一致预期样本不足'],
+          },
+          {
+            id: 'short_volume',
+            title_cn: '卖空成交样本',
+            status: 'READY',
+            usable: true,
+            summary_cn: '可用于 short-volume 与微观结构因子研究。',
+            linked_targets: ['ds-short-volume'],
+            metrics: { point_rows: 256 },
+            blockers: [],
+          },
+        ],
       },
       {
         layer_id: 'l4_macro_derivatives',
         title_cn: 'L4 宏观与衍生品',
-        status: 'CALIBRATING',
-        summary: '宏观暴露回归可计算，但校准仍在进行。',
-        pit_alignment: '宏观与衍生品因子先进入沙箱观察。',
+        status: 'PARTIAL_READY',
+        summary: '宏观与期权特征源已可用，正式 IC 诊断仍需价格回放门禁。',
+        pit_alignment: '宏观与衍生品因子先作为 feature source 暴露。',
         blockers: [],
         available_at_health: null,
+        submodules: [
+          {
+            id: 'macro_rates',
+            title_cn: '宏观利率序列',
+            status: 'READY',
+            usable: true,
+            summary_cn: '可用于利率敏感度和宏观 Beta 特征。',
+            linked_targets: ['ds-macro-rates'],
+            metrics: { covered_series: 10, required_series: 10 },
+            blockers: [],
+          },
+          {
+            id: 'option_skew',
+            title_cn: '期权偏度链路',
+            status: 'READY',
+            usable: true,
+            summary_cn: '可用于 IV Skew 衍生品风险偏度特征。',
+            linked_targets: ['ds-option-skew'],
+            metrics: { point_rows: 75 },
+            blockers: [],
+          },
+        ],
       },
     ],
     factor_diagnostic_readiness: [
@@ -715,18 +759,36 @@ function createPitDataOverview(): ApiPitDataOverview {
       {
         group_id: 'sentiment_micro',
         title_cn: '情绪/微观型',
-        status: 'DISABLED',
+        status: 'PARTIAL_READY',
         factors: ['分析师修正', '空头回补', '超额换手'],
-        rationale_cn: '本期未纳入正式 PIT 数据链路，维持停用。',
+        rationale_cn: '卖空样本已可用，可先开放情绪与微观结构研究；一致预期仍观察。',
         linked_snapshot_checks: ['consensus_sample_gate', 'short_volume_gate'],
+        required_checks: ['consensus_sample_gate', 'short_volume_gate'],
+        satisfied_checks: ['short_volume_gate'],
+        blocked_checks: ['consensus_sample_gate'],
+        upstream_capabilities: [
+          {
+            capability_id: 'factor.sentiment_micro',
+            factor_groups: ['sentiment_micro'],
+            mode: 'PARTIAL_READY',
+            allowed_actions: ['research_preview', 'run_sandbox_diagnostics'],
+            required_checks: ['consensus_sample_gate', 'short_volume_gate'],
+            satisfied_checks: ['short_volume_gate'],
+            blocked_checks: ['consensus_sample_gate'],
+            summary_cn: '卖空样本可先支持 short-volume 因子研究。',
+          },
+        ],
       },
       {
         group_id: 'macro_derivatives',
         title_cn: '宏观/衍生品型',
-        status: 'SANDBOX',
+        status: 'PARTIAL_READY',
         factors: ['利率敏感度', '通胀 Beta', 'IV Skew'],
-        rationale_cn: '宏观序列可用，但回归校准与期权面板仍处于观察阶段。',
+        rationale_cn: '宏观序列与期权偏度可作为特征源，正式诊断仍按 L1 价格回放检查。',
         linked_snapshot_checks: ['rate_beta_calibration', 'iv_skew_feed'],
+        required_checks: ['rate_beta_calibration', 'iv_skew_feed', 'price_replay_gate'],
+        satisfied_checks: ['rate_beta_calibration', 'iv_skew_feed'],
+        blocked_checks: [],
       },
     ],
     pit_quality_alerts: [
@@ -773,14 +835,27 @@ function createPitDataOverview(): ApiPitDataOverview {
         check_title_cn: '一致预期样本门槛',
         source_layer: 'L3 分析师与情绪',
         target_factor_groups: ['情绪/微观型'],
-        result_status: 'DISABLED',
+        result_status: 'OBSERVATION',
+        hard_blocking: false,
+        capability_mode: 'PARTIAL_READY',
+      },
+      {
+        check_id: 'short_volume_gate',
+        check_title_cn: '卖空成交样本',
+        source_layer: 'L3 分析师与情绪',
+        target_factor_groups: ['情绪/微观型'],
+        result_status: 'READY',
+        hard_blocking: false,
+        capability_mode: 'PARTIAL_READY',
       },
       {
         check_id: 'rate_beta_calibration',
         check_title_cn: '利率 Beta 校准',
         source_layer: 'L4 宏观与衍生品',
         target_factor_groups: ['宏观/衍生品型'],
-        result_status: 'CALIBRATING',
+        result_status: 'READY',
+        hard_blocking: false,
+        capability_mode: 'PARTIAL_READY',
       },
     ],
     diagnostic_windows: {
@@ -885,6 +960,96 @@ const factorFamilyLabels: Record<string, string> = {
 function isFactorOffline(factor: ApiFactorListItem): boolean {
   const lifecycle = String(factor.lifecycle_status ?? '').toUpperCase();
   return lifecycle === 'DEPRECATED' || lifecycle === 'PRUNED' || Boolean(factor.offline_at);
+}
+
+function demoFactorTierLevel(factor: Pick<ApiFactorListItem, 'id' | 'expression' | 'descriptor' | 'source'>): 'F1' | 'F2' | 'F3' {
+  const category = String(factor.descriptor?.category ?? '').toLowerCase();
+  const expression = String(factor.expression ?? '');
+  if (category === 'alpha' || factor.id.includes('_alpha_') || /ffblend|blend|composite/i.test(expression)) return 'F3';
+  if (factor.descriptor?.operator === 'raw' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(expression.trim())) return 'F1';
+  return 'F2';
+}
+
+function demoFactorLifecycle(factor: ApiFactorListItem): 'sandbox' | 'online' | 'offline' | 'to_be_verified' | 'archived' {
+  if (
+    factor.lifecycle === 'sandbox' ||
+    factor.lifecycle === 'online' ||
+    factor.lifecycle === 'offline' ||
+    factor.lifecycle === 'to_be_verified' ||
+    factor.lifecycle === 'archived'
+  ) {
+    return factor.lifecycle;
+  }
+  if (isFactorOffline(factor)) return 'archived';
+  if (['BLOCKED_DATA', 'BLOCKED_PIT', 'FAILED'].includes(String(factor.diagnostic_status ?? '').toUpperCase())) return 'to_be_verified';
+  if (factor.lifecycle_status === 'DRAFT' && factor.source !== 'SYSTEM_SEED') return 'sandbox';
+  return 'online';
+}
+
+function demoFactorOpStatus(factor: ApiFactorListItem): ApiFactorListItem['op_status'] {
+  const expression = String(factor.expression ?? '').toLowerCase();
+  const operator = String(factor.descriptor?.operator ?? '').toLowerCase();
+  const lights = [
+    { code: 'W', key: 'winsorize', label: '去极值', active: /winsor|mad/.test(expression), status: 'missing' },
+    { code: 'N', key: 'neutralize', label: '中性化', active: /neutral|residual|beta/.test(expression), status: 'missing' },
+    { code: 'Z', key: 'zscore', label: '标准化', active: operator === 'z' || /zscore|z_score/.test(expression), status: 'missing' },
+    { code: 'T', key: 'tsrank', label: '时序排名', active: operator === 'rank' || /rank|tsrank/.test(expression), status: 'missing' },
+  ].map((item) => ({ ...item, status: item.active ? 'done' : 'missing' }));
+  return {
+    lights,
+    completed: lights.filter((item) => item.active).map((item) => item.code),
+    missing: lights.filter((item) => !item.active).map((item) => item.code),
+    summary: lights.filter((item) => item.active).map((item) => `${item.code} ${item.label}`).join(' / ') || '原始字段',
+  };
+}
+
+function withDemoFactorGovernanceProjection(factor: ApiFactorListItem): ApiFactorListItem {
+  const tier = factor.tier_level ?? demoFactorTierLevel(factor);
+  const lifecycle = demoFactorLifecycle(factor);
+  const level = factor.factor_level ?? (lifecycle === 'archived' ? 'D' : (factor.latest_diagnostic_summary ? 'A' : tier === 'F1' ? 'B' : 'C'));
+  return {
+    ...factor,
+    tier_level: tier,
+    tier_label: factor.tier_label ?? (tier === 'F1' ? 'F1 原始' : tier === 'F3' ? 'F3 组合' : 'F2 改造'),
+    tier_projection: factor.tier_projection ?? {
+      key: tier,
+      label: tier === 'F1' ? 'F1 原始' : tier === 'F3' ? 'F3 组合' : 'F2 改造',
+      description: tier === 'F1' ? '直接映射 API 或数据库的原始字段' : tier === 'F3' ? '多因子融合后的最终信号' : '单因子提纯后的改造结果',
+    },
+    lifecycle,
+    lifecycle_label: factor.lifecycle_label ?? (lifecycle === 'sandbox' ? '沙箱' : lifecycle === 'to_be_verified' ? '待校准' : lifecycle === 'archived' ? '已归档' : '线上'),
+    lifecycle_projection: factor.lifecycle_projection ?? {
+      key: lifecycle,
+      label: lifecycle === 'sandbox' ? '沙箱' : lifecycle === 'to_be_verified' ? '待校准' : lifecycle === 'archived' ? '已归档' : '线上',
+      description: '因子库一期治理生命周期投影',
+    },
+    factor_level: level,
+    factor_level_label: factor.factor_level_label ?? `${level} ${level === 'S' ? '核心' : level === 'A' ? '可入选' : level === 'B' ? '观察' : level === 'C' ? '待校准' : '归档'}`,
+    factor_level_projection: factor.factor_level_projection ?? {
+      key: level,
+      label: `${level} ${level === 'S' ? '核心' : level === 'A' ? '可入选' : level === 'B' ? '观察' : level === 'C' ? '待校准' : '归档'}`,
+      description: '按 IC/IR、覆盖率、稳定性与阻断状态综合评级',
+    },
+    op_status: factor.op_status ?? demoFactorOpStatus(factor),
+    lineage_summary: factor.lineage_summary ?? {
+      has_lineage: true,
+      parent_count: tier === 'F3' ? 4 : Math.max(1, factor.data_requirements.length),
+      parent_ids: tier === 'F3'
+        ? ['s_mom_12m1m_rank', 's_val_ep_ltm_raw', 's_qlty_roe_ltm_raw', 's_size_cur_log']
+        : factor.data_requirements.slice(0, 4),
+      root_source: tier === 'F3' ? 's_mom_12m1m_rank' : factor.data_requirements[0] ?? factor.expression,
+      relation_types: [tier === 'F3' ? 'COMPOSED_FROM' : tier === 'F1' ? 'DIRECT_SOURCE' : 'DERIVED_FROM'],
+    },
+    quality_view: factor.quality_view ?? {
+      rank_ic: factor.latest_diagnostic_summary?.rank_ic ?? null,
+      ir: factor.latest_diagnostic_summary?.ir ?? null,
+      coverage: factor.latest_diagnostic_summary?.coverage ?? null,
+      decay_days: 21,
+      decay_label: '21日',
+      sparkline: factor.ic_sparkline,
+      sparkline_window: factor.ic_sparkline_window,
+    },
+  };
 }
 
 function createFactorListItems(): ApiFactorListItem[] {
@@ -1040,7 +1205,7 @@ function createFactorListItems(): ApiFactorListItem[] {
             coverage: '覆盖: 等待首次诊断',
             next_action: '提交 Verified 诊断',
           };
-    return {
+    return withDemoFactorGovernanceProjection({
       ...factor,
       factor_family: factorFamilyLabels[factor.descriptor?.category ?? ''] ?? '自定义',
       formula_version: 'seed-v2',
@@ -1066,7 +1231,7 @@ function createFactorListItems(): ApiFactorListItem[] {
       ic_sparkline_window: '最近12期',
       gate_fix_target: blocked ? '#/pit-data?section=fundamental-requirements' : '#/pit-data',
       diagnostic_gap_summary: diagnosticGapSummary,
-    };
+    });
   });
 }
 
@@ -1282,7 +1447,7 @@ function createDemoMiningJob(
     top_candidates: [
       {
         id: 'cand-demo-rank-001',
-        expression: 'ZScore(Winsorize(Return(Close, 21)))',
+        expression: 's_mom_6m_rank * s_qlty_roe_ltm_raw',
         score: 0.061,
         rank_ic: 0.061,
         turnover: 0.32,
@@ -1295,11 +1460,16 @@ function createDemoMiningJob(
         benchmark_max_drawdown_pct: 0.16,
         drawdown_vs_benchmark_ratio: 1.12,
         auto_residual_summary: null,
+        source_factor_ids: ['s_mom_6m_rank', 's_qlty_roe_ltm_raw'],
+        recipe_kind: 'template',
+        recipe_family: 'style_blend',
+        orthogonality_intent: 'quality_driven_momentum',
+        composition_metadata: { label: 'Quality-Driven Momentum', publish_boundary: 'manual_after_quarantine' },
         risk_flags: ['候选不会直接进入正式因子库'],
       },
       {
         id: 'cand-demo-rank-002',
-        expression: 'Rank(Log(MarketCap)) * -1',
+        expression: 's_mom_6m_rank / s_vol_252d_rank',
         score: 0.048,
         rank_ic: 0.048,
         turnover: 0.21,
@@ -1316,6 +1486,11 @@ function createDemoMiningJob(
           control_factor_id: 's_vol_252d_raw',
           residual_rank_ic: 0.043,
         },
+        source_factor_ids: ['s_mom_6m_rank', 's_vol_252d_rank'],
+        recipe_kind: 'template',
+        recipe_family: 'risk_adjusted',
+        orthogonality_intent: 'risk_adjusted_momentum',
+        composition_metadata: { label: 'Risk-Adjusted Momentum', publish_boundary: 'manual_after_quarantine' },
         risk_flags: ['规模因子需复核容量约束'],
       },
       {
@@ -1356,10 +1531,34 @@ function createDemoFactorFactoryOverview(
     start_date: '2020-01-01',
     end_date: '2025-12-31',
     operators: ['Return', 'Std', 'Rank', 'ZScore', 'Winsorize'],
-    candidate_count: 1000,
+    candidate_count: 40,
     random_seed: 42,
     min_rank_ic: 0.03,
     max_depth: 4,
+    generation_mode: 'HYBRID_COMPOSITION',
+    source_factor_ids: [
+      's_mom_6m_rank',
+      's_qlty_roe_ltm_raw',
+      's_vol_252d_rank',
+      's_val_cfp_ltm_raw',
+      's_size_cur_log',
+      's_vol_downside_252d_rank',
+      's_liq_amihud_20d_rank',
+    ],
+    recipe_families: [
+      'style_blend',
+      'risk_adjusted',
+      'value_anchor',
+      'divergence',
+      'residual_neutralized',
+      'ts_denoise',
+    ],
+    exploration_budget: 24,
+    composition_policy: {
+      mode: 'template_plus_exploration',
+      publish_boundary: 'manual_after_quarantine',
+      auto_intake_to_quarantine: true,
+    },
   };
   const gatePolicy = {
     pit_gate_mode: 'DIAGNOSTIC_ONLY' as const,
@@ -2065,11 +2264,17 @@ export const demoApi: DemoApi = {
       );
     }
     const lifecycleBase = items;
-    const onlineItems = lifecycleBase.filter((item) => !isFactorOffline(item));
-    const offlineItems = lifecycleBase.filter((item) => isFactorOffline(item));
+    const onlineItems = lifecycleBase.filter((item) => demoFactorLifecycle(item) === 'online');
+    const sandboxItems = lifecycleBase.filter((item) => demoFactorLifecycle(item) === 'sandbox');
+    const toBeVerifiedItems = lifecycleBase.filter((item) => demoFactorLifecycle(item) === 'to_be_verified');
+    const archivedItems = lifecycleBase.filter((item) => demoFactorLifecycle(item) === 'archived');
     const lifecycle = String(params?.lifecycle ?? 'online').toLowerCase();
-    if (lifecycle === 'offline') {
-      items = offlineItems;
+    if (lifecycle === 'offline' || lifecycle === 'archived') {
+      items = archivedItems;
+    } else if (lifecycle === 'sandbox') {
+      items = sandboxItems;
+    } else if (lifecycle === 'to_be_verified') {
+      items = toBeVerifiedItems;
     } else if (lifecycle === 'all') {
       items = lifecycleBase;
     } else {
@@ -2081,9 +2286,15 @@ export const demoApi: DemoApi = {
         total: items.length,
         all_count: lifecycleBase.length,
         online_count: onlineItems.length,
-        offline_count: offlineItems.length,
-        deprecated_count: offlineItems.filter((item) => item.lifecycle_status === 'DEPRECATED').length,
-        pruned_count: offlineItems.filter((item) => item.lifecycle_status === 'PRUNED').length,
+        offline_count: archivedItems.length,
+        archived_count: archivedItems.length,
+        lifecycle_sandbox_count: sandboxItems.length,
+        to_be_verified_count: toBeVerifiedItems.length,
+        f1_count: lifecycleBase.filter((item) => item.tier_level === 'F1').length,
+        f2_count: lifecycleBase.filter((item) => item.tier_level === 'F2').length,
+        f3_count: lifecycleBase.filter((item) => item.tier_level === 'F3').length,
+        deprecated_count: archivedItems.filter((item) => item.lifecycle_status === 'DEPRECATED').length,
+        pruned_count: archivedItems.filter((item) => item.lifecycle_status === 'PRUNED').length,
         system_seed_count: items.filter((item) => item.source === 'SYSTEM_SEED').length,
         ready_to_diagnose_count: items.filter((item) => item.diagnostic_status === 'READY_TO_DIAGNOSE').length,
         sandbox_ready_count: items.filter((item) => item.diagnostic_status === 'SANDBOX_READY').length,
@@ -2240,6 +2451,7 @@ export const demoApi: DemoApi = {
       descriptor: { ...payload.descriptor, metric: descriptorMetric, schema_version: 'factor_descriptor_v1', canonical_id: id },
       tags: payload.tags,
       data_requirements: ['adj_close', 'price_history', 'returns'],
+      description: payload.description ?? null,
       institutional_note: '人工因子需要通过 PIT 诊断后才能进入已验证状态。',
       latest_diagnostic_summary: null,
       diagnostic_gap_summary: {

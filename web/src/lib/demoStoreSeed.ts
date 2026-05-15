@@ -507,6 +507,7 @@ export function createInitialState(): DemoState {
     assetLegs,
     cashLegs,
     compositions: [composition],
+    factors: [],
     optimizationJobs: [optimizationJob],
     sessions: [],
     runs: [run],

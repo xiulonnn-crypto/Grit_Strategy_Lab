@@ -1192,6 +1192,262 @@ class MarketDataRepository:
                 )
         return dataset_snapshot_id
 
+    def merge_fundamental_snapshot(
+        self,
+        snapshot: Mapping[str, Any],
+        *,
+        fundamental_points: Iterable[Mapping[str, Any]] = (),
+    ) -> str:
+        dataset_snapshot_id = str(snapshot["id"])
+        point_items = [
+            item
+            for item in fundamental_points
+            if str(item.get("symbol") or "").strip() and str(item.get("date") or "").strip()
+        ]
+        with self.connect() as conn:
+            self._upsert_dataset_snapshot(conn, snapshot)
+            point_rows = [
+                (
+                    dataset_snapshot_id,
+                    self._normalize_symbol(str(item["symbol"])),
+                    str(item["date"]),
+                    item.get("period_end_date") or item.get("date"),
+                    item.get("publish_date"),
+                    item.get("statement_date") or item.get("period_end_date") or item.get("date"),
+                    item.get("available_at") or item.get("publish_date") or item.get("date"),
+                    item.get("fiscal_year"),
+                    item.get("fiscal_period"),
+                    item.get("time_provenance"),
+                    item.get("ltm_earnings"),
+                    item.get("revenue"),
+                    item.get("gross_profit"),
+                    item.get("net_income"),
+                    item.get("market_cap"),
+                    item.get("book_value_equity"),
+                    item.get("operating_cash_flow"),
+                    item.get("capex"),
+                    item.get("enterprise_value"),
+                    item.get("total_shares"),
+                    item.get("shares_outstanding") or item.get("total_shares"),
+                    item.get("total_assets"),
+                    item.get("current_assets"),
+                    item.get("current_liabilities"),
+                    item.get("long_term_debt"),
+                    item.get("total_debt"),
+                    item.get("cash_and_equivalents"),
+                    item.get("provider_market_cap"),
+                    item.get("provider_enterprise_value"),
+                    item.get("market_cap_source"),
+                    item.get("enterprise_value_source"),
+                    str(item.get("source") or snapshot.get("source") or ""),
+                    item.get("fallback_source", snapshot.get("fallback_source")),
+                    dumps(_ensure_json_dict(item.get("metadata"))),
+                )
+                for item in point_items
+            ]
+            if point_rows:
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO dataset_fundamental_points (
+                        dataset_snapshot_id, symbol, date, period_end_date, publish_date, statement_date, available_at,
+                        fiscal_year, fiscal_period, time_provenance,
+                        ltm_earnings, revenue, gross_profit, net_income, market_cap, book_value_equity,
+                        operating_cash_flow, capex, enterprise_value, total_shares,
+                        shares_outstanding, total_assets, current_assets, current_liabilities, long_term_debt,
+                        total_debt, cash_and_equivalents,
+                        provider_market_cap, provider_enterprise_value,
+                        market_cap_source, enterprise_value_source,
+                        source, fallback_source, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    point_rows,
+                )
+            all_rows = [
+                dict(row)
+                for row in conn.execute(
+                """
+                SELECT *
+                FROM dataset_fundamental_points
+                WHERE dataset_snapshot_id = ?
+                ORDER BY symbol, date
+                """,
+                (dataset_snapshot_id,),
+                ).fetchall()
+            ]
+            field_names = [
+                "ltm_earnings",
+                "revenue",
+                "gross_profit",
+                "net_income",
+                "market_cap",
+                "book_value_equity",
+                "operating_cash_flow",
+                "capex",
+                "enterprise_value",
+                "total_shares",
+                "shares_outstanding",
+                "total_assets",
+                "current_assets",
+                "current_liabilities",
+                "long_term_debt",
+                "total_debt",
+                "cash_and_equivalents",
+            ]
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for item in all_rows:
+                symbol = str(item.get("symbol") or "")
+                if symbol:
+                    grouped.setdefault(symbol, []).append(item)
+            coverage_rows = []
+            for symbol, rows in sorted(grouped.items()):
+                dates = sorted(str(row.get("date") or "")[:10] for row in rows if row.get("date"))
+                coverage_rows.append(
+                    (
+                        dataset_snapshot_id,
+                        symbol,
+                        dates[0] if dates else None,
+                        dates[-1] if dates else None,
+                        len(rows),
+                        dumps(sorted({field for row in rows for field in field_names if row.get(field) is not None})),
+                        str(rows[0].get("source") or snapshot.get("source") or ""),
+                        rows[0].get("fallback_source", snapshot.get("fallback_source")),
+                        dumps(_ensure_json_dict(snapshot.get("metadata"))),
+                    )
+                )
+            conn.execute("DELETE FROM dataset_fundamental_coverage WHERE dataset_snapshot_id = ?", (dataset_snapshot_id,))
+            if coverage_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO dataset_fundamental_coverage (
+                        dataset_snapshot_id, symbol, start_date, end_date, observation_count,
+                        fields_json, source, fallback_source, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    coverage_rows,
+                )
+            dates = sorted(str(row.get("date") or "")[:10] for row in all_rows if row.get("date"))
+            metadata = _ensure_json_dict(snapshot.get("metadata"))
+            metadata["covered_symbol_count"] = len(coverage_rows)
+            metadata["available_fields"] = sorted(
+                {
+                    field
+                    for row in all_rows
+                    for field in field_names
+                    if row.get(field) is not None
+                }
+            )
+            self._upsert_dataset_snapshot(
+                conn,
+                {
+                    **dict(snapshot),
+                    "row_count": len(all_rows),
+                    "start_date": dates[0] if dates else snapshot.get("start_date"),
+                    "end_date": dates[-1] if dates else snapshot.get("end_date"),
+                    "metadata": metadata,
+                },
+            )
+        return dataset_snapshot_id
+
+    def merge_signal_snapshot(
+        self,
+        snapshot: Mapping[str, Any],
+        *,
+        signal_points: Iterable[Mapping[str, Any]] = (),
+    ) -> str:
+        dataset_snapshot_id = str(snapshot["id"])
+        point_items = [
+            item
+            for item in signal_points
+            if str(item.get("date") or "").strip()
+            and str(item.get("metric_key") or "").strip()
+            and str(item.get("entity_key") or item.get("symbol") or item.get("series_key") or "").strip()
+        ]
+        with self.connect() as conn:
+            self._upsert_dataset_snapshot(conn, snapshot)
+            point_rows = [
+                (
+                    dataset_snapshot_id,
+                    str(item.get("entity_key") or item.get("symbol") or item.get("series_key") or "").strip().upper(),
+                    str(item["date"]),
+                    item.get("publish_date"),
+                    item.get("available_at"),
+                    str(item.get("metric_key") or "").strip(),
+                    item.get("metric_value"),
+                    str(item.get("source") or snapshot.get("source") or ""),
+                    item.get("fallback_source", snapshot.get("fallback_source")),
+                    dumps(_ensure_json_dict(item.get("metadata"))),
+                    dumps(_ensure_json_dict(item.get("raw"))),
+                )
+                for item in point_items
+            ]
+            if point_rows:
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO dataset_signal_points (
+                        dataset_snapshot_id, entity_key, date, publish_date, available_at,
+                        metric_key, metric_value, source, fallback_source, metadata_json, raw_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    point_rows,
+                )
+            all_rows = [
+                dict(row)
+                for row in conn.execute(
+                """
+                SELECT *
+                FROM dataset_signal_points
+                WHERE dataset_snapshot_id = ?
+                ORDER BY entity_key, date, metric_key
+                """,
+                (dataset_snapshot_id,),
+                ).fetchall()
+            ]
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for item in all_rows:
+                entity_key = str(item.get("entity_key") or "")
+                if entity_key:
+                    grouped.setdefault(entity_key, []).append(item)
+            coverage_rows = []
+            for entity_key, rows in sorted(grouped.items()):
+                dates = sorted(str(row.get("date") or "")[:10] for row in rows if row.get("date"))
+                coverage_rows.append(
+                    (
+                        dataset_snapshot_id,
+                        entity_key,
+                        dates[0] if dates else None,
+                        dates[-1] if dates else None,
+                        len(rows),
+                        str(rows[0].get("source") or snapshot.get("source") or ""),
+                        rows[0].get("fallback_source", snapshot.get("fallback_source")),
+                        dumps(_ensure_json_dict(snapshot.get("metadata"))),
+                    )
+                )
+            conn.execute("DELETE FROM dataset_signal_coverage WHERE dataset_snapshot_id = ?", (dataset_snapshot_id,))
+            if coverage_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO dataset_signal_coverage (
+                        dataset_snapshot_id, entity_key, start_date, end_date, observation_count,
+                        source, fallback_source, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    coverage_rows,
+                )
+            dates = sorted(str(row.get("date") or "")[:10] for row in all_rows if row.get("date"))
+            metadata = _ensure_json_dict(snapshot.get("metadata"))
+            metadata["covered_symbol_count"] = len(coverage_rows)
+            self._upsert_dataset_snapshot(
+                conn,
+                {
+                    **dict(snapshot),
+                    "row_count": len(all_rows),
+                    "start_date": dates[0] if dates else snapshot.get("start_date"),
+                    "end_date": dates[-1] if dates else snapshot.get("end_date"),
+                    "metadata": metadata,
+                },
+            )
+        return dataset_snapshot_id
+
     def merge_dataset_snapshot(
         self,
         snapshot: Mapping[str, Any],

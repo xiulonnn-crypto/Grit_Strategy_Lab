@@ -73,6 +73,7 @@ from .factor_research import (
 )
 from .pit_external_sources import resolve_cache_dir as default_pit_external_cache_dir
 from .polygon_provider import PolygonMarketDataProvider
+from .sec_edgar_provider import SecEdgarProvider
 from .market_data_repository import (
     DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID,
     DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
@@ -154,6 +155,41 @@ SNAPSHOT_MARKET_DATA_REPAIR_MAX_WORKERS = 2
 SNAPSHOT_REPAIR_SYMBOL_BATCH_SIZE = 12
 SNAPSHOT_LATEST_SYMBOL_BATCH_SIZE = 64
 BENCHMARK_ETF_SYMBOLS = ("SPY", "QQQ")
+FRED_MACRO_RATE_SERIES = (
+    "DGS1MO",
+    "DGS3MO",
+    "DGS6MO",
+    "DGS1",
+    "DGS2",
+    "DGS5",
+    "DGS10",
+    "DGS30",
+    "FEDFUNDS",
+    "SOFR",
+)
+FDIC_BANK_FUNDAMENTAL_SYMBOLS: dict[str, dict[str, Any]] = {
+    "FRC": {
+        "cert": 59017,
+        "cik": "0001132979",
+        "company_name": "First Republic Bank",
+        "report_date": "20221231",
+    },
+    "SBNY": {
+        "cert": 57053,
+        "cik": "0001288784",
+        "company_name": "Signature Bank",
+        "report_date": "20221231",
+    },
+}
+FDIC_BANK_FINANCIAL_FIELDS = (
+    "CERT",
+    "REPDTE",
+    "ASSET",
+    "NETINC",
+    "EQ",
+    "LIAB",
+    "CHBAL",
+)
 SNAPSHOT_REFRESH_RUNTIME_STATE_KEY = "snapshot_refresh_runtime"
 LONGBRIDGE_MIN_HISTORY_DATE = date(2010, 6, 1)
 SNAPSHOT_MEMORY_USAGE_LIMIT = 0.80
@@ -588,6 +624,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
         self._multi_factor_factor_index_cache_lock = threading.Lock()
 
     def _prewarm_read_model_caches(self) -> None:
+        try:
+            self._factor_research_service().list_factors(lifecycle="online")
+        except Exception:
+            pass
         for builder in (self.get_snapshot_overview, self.get_pit_data_overview):
             try:
                 builder()
@@ -1034,14 +1074,20 @@ class RealBacktestPlatformService(BacktestPlatformService):
         market_data: dict[str, dict[str, list[float]]] = {}
         for symbol in symbols:
             closes: list[float] = []
+            volumes: list[float] = []
             for row in rows_by_symbol.get(str(symbol).strip().upper(), []):
                 if not isinstance(row, Mapping):
                     continue
                 close = self._factor_finite_float(row.get("adj_close", row.get("close")))
                 if close is not None:
                     closes.append(close)
+                    volume = self._factor_finite_float(row.get("volume"))
+                    volumes.append(volume if volume is not None else 0.0)
             if len(closes) >= 6:
-                market_data[str(symbol).strip().upper()] = {"Close": closes}
+                entry = {"Close": closes}
+                if len(volumes) == len(closes):
+                    entry["Volume"] = volumes
+                market_data[str(symbol).strip().upper()] = entry
 
         if len(market_data) < 2:
             raise ValueError("因子挖掘需要至少两个标的具备运行时价格快照，不能使用 synthetic 或静态样例数据补齐。")
@@ -1465,6 +1511,18 @@ class RealBacktestPlatformService(BacktestPlatformService):
             max_depth = int(request.get("max_depth") or 0)
         except (TypeError, ValueError):
             max_depth = 0
+        source_factor_ids = request.get("source_factor_ids")
+        if not isinstance(source_factor_ids, Sequence) or isinstance(source_factor_ids, (str, bytes)):
+            source_factor_ids = ()
+        recipe_families = request.get("recipe_families")
+        if not isinstance(recipe_families, Sequence) or isinstance(recipe_families, (str, bytes)):
+            recipe_families = ()
+        try:
+            exploration_budget = int(request.get("exploration_budget") or 0)
+        except (TypeError, ValueError):
+            exploration_budget = 0
+        policy = request.get("composition_policy")
+        policy_key = dumps(dict(sorted(policy.items()))) if isinstance(policy, Mapping) else "{}"
         min_rank_ic = round(_coerce_float(request.get("min_rank_ic")), 6)
         return (
             universe,
@@ -1474,6 +1532,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
             candidate_count,
             min_rank_ic,
             max_depth,
+            str(request.get("generation_mode") or "PRICE_OPERATOR").strip().upper(),
+            tuple(sorted(str(item).strip().lower() for item in source_factor_ids if str(item).strip())),
+            tuple(sorted(str(item).strip().lower() for item in recipe_families if str(item).strip())),
+            max(0, exploration_budget),
+            policy_key,
         )
 
     def _factor_mining_row_signature(self, row: Mapping[str, Any]) -> tuple[Any, ...]:
@@ -1531,10 +1594,35 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "start_date": "2018-01-01",
             "end_date": "2024-12-31",
             "operators": ["return", "rank", "zscore", "winsorize"],
-            "candidate_count": 250,
+            "candidate_count": 40,
             "random_seed": 42,
             "min_rank_ic": 0.03,
             "max_depth": 4,
+            "generation_mode": "HYBRID_COMPOSITION",
+            "source_factor_ids": [
+                "s_mom_6m_rank",
+                "s_qlty_roe_ltm_raw",
+                "s_vol_252d_rank",
+                "s_val_cfp_ltm_raw",
+                "s_size_cur_log",
+                "s_vol_downside_252d_rank",
+                "s_liq_amihud_20d_rank",
+            ],
+            "recipe_families": [
+                "style_blend",
+                "risk_adjusted",
+                "value_anchor",
+                "divergence",
+                "residual_neutralized",
+                "ts_denoise",
+            ],
+            "exploration_budget": 24,
+            "composition_policy": {
+                "mode": "template_plus_exploration",
+                "publish_boundary": "manual_after_quarantine",
+                "prefer_cross_family": True,
+                "auto_intake_to_quarantine": True,
+            },
         }
 
     def _factor_factory_default_gate_policy(self) -> dict[str, Any]:
@@ -1563,12 +1651,23 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "random_seed",
                     "min_rank_ic",
                     "max_depth",
+                    "generation_mode",
+                    "source_factor_ids",
+                    "recipe_families",
+                    "exploration_budget",
+                    "composition_policy",
                 )
                 if key in payload
             }
         defaults = self._factor_factory_default_request()
         merged = {**defaults, **request_payload}
         merged["operators"] = list(merged.get("operators") or defaults["operators"])
+        merged["source_factor_ids"] = list(merged.get("source_factor_ids") or defaults["source_factor_ids"])
+        merged["recipe_families"] = list(merged.get("recipe_families") or defaults["recipe_families"])
+        merged["composition_policy"] = {
+            **dict(defaults.get("composition_policy") or {}),
+            **dict(merged.get("composition_policy") or {}),
+        }
         return merged
 
     def _factor_factory_gate_policy_payload(self, request: Any | None) -> dict[str, Any]:
@@ -1778,6 +1877,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "failed_sample_count": len(mining_job.get("failed_samples") or []),
             "funnel": self._factor_factory_funnel(),
         }
+        mining_summary = mining_job.get("summary") if isinstance(mining_job.get("summary"), Mapping) else {}
+        if mining_summary:
+            updated_summary.update({
+                "generation_mode": mining_summary.get("generation_mode"),
+                "composition_candidate_count": mining_summary.get("composition_candidate_count", 0),
+                "composition_policy": mining_summary.get("composition_policy", {}),
+            })
         if next_status == "COMPLETED":
             try:
                 updated_summary = self._run_factor_factory_quarantine_pipeline(
@@ -2047,6 +2153,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "benchmark_max_drawdown_pct": getattr(candidate, "benchmark_max_drawdown_pct", None),
             "drawdown_vs_benchmark_ratio": getattr(candidate, "drawdown_vs_benchmark_ratio", None),
             "auto_residual_summary": dict(auto_residual_summary) if isinstance(auto_residual_summary, Mapping) else {},
+            "source_factor_ids": list(getattr(candidate, "source_factor_ids", ()) or ()),
+            "recipe_kind": getattr(candidate, "recipe_kind", None),
+            "recipe_family": getattr(candidate, "recipe_family", None),
+            "orthogonality_intent": getattr(candidate, "orthogonality_intent", None),
+            "composition_metadata": dict(getattr(candidate, "composition_metadata", None) or {}),
             "turnover": getattr(candidate, "turnover", 0.0),
             "coverage": candidate.coverage,
             "depth": getattr(candidate, "depth", None),
@@ -2067,6 +2178,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
             random_seed=int(payload.get("random_seed") if payload.get("random_seed") is not None else 0),
             min_rank_ic=_coerce_float(payload.get("min_rank_ic")),
             max_depth=int(payload.get("max_depth") or 3),
+            generation_mode=str(payload.get("generation_mode") or "PRICE_OPERATOR"),
+            source_factor_ids=tuple(str(item) for item in payload.get("source_factor_ids") or ()),
+            recipe_families=tuple(str(item) for item in payload.get("recipe_families") or ()),
+            exploration_budget=int(payload.get("exploration_budget") or 0),
+            composition_policy=dict(payload.get("composition_policy") or {}),
         )
         mining_request.validate()
         job_id = factor_mining_job_id_for_request(mining_request)
@@ -2090,6 +2206,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "top_candidate_count": 0,
             "failed_sample_count": 0,
             "persisted_to_factor_definitions": False,
+            "generation_mode": mining_request.generation_mode,
+            "composition_policy": dict(mining_request.composition_policy or {}),
         }
         progress = {
             "total_candidates": mining_request.candidate_count,
@@ -2289,6 +2407,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "top_candidate_count": len(top_candidates),
             "failed_sample_count": len(failed_samples),
             "persisted_to_factor_definitions": False,
+            "generation_mode": getattr(result, "request_generation_mode", None)
+            or str(payload.get("generation_mode") or "PRICE_OPERATOR"),
+            "composition_candidate_count": sum(
+                1
+                for candidate in getattr(result, "all_candidates", ()) or ()
+                if getattr(candidate, "recipe_kind", None)
+            ),
+            "composition_policy": dict(payload.get("composition_policy") or {}),
         }
         self.storage.insert_json_row(
             "factor_mining_jobs",
@@ -2333,6 +2459,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "benchmark_max_drawdown_pct": getattr(candidate, "benchmark_max_drawdown_pct", None),
                     "drawdown_vs_benchmark_ratio": getattr(candidate, "drawdown_vs_benchmark_ratio", None),
                     "auto_residual_summary": getattr(candidate, "auto_residual_summary", None) or {},
+                    "source_factor_ids": list(getattr(candidate, "source_factor_ids", ()) or ()),
+                    "recipe_kind": getattr(candidate, "recipe_kind", None),
+                    "recipe_family": getattr(candidate, "recipe_family", None),
+                    "orthogonality_intent": getattr(candidate, "orthogonality_intent", None),
+                    "composition_metadata": dict(getattr(candidate, "composition_metadata", None) or {}),
                 }),
                 created_at,
             )
@@ -4463,6 +4594,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         refresh_macro_derivatives: bool,
         symbols: Sequence[str] | None = None,
         as_of: str | None = None,
+        phase2_context: Mapping[str, Any] | None = None,
     ) -> dict[str, dict[str, Any]]:
         stats: dict[str, dict[str, Any]] = {}
         refresh_symbols = [
@@ -4476,6 +4608,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             stats[DATASET_FUNDAMENTALS_SNAPSHOT_ID] = self._refresh_phase2_fundamentals(
                 symbols=refresh_symbols,
                 as_of=as_of_timestamp,
+                phase2_context=phase2_context,
             )
         if refresh_sentiment:
             stats[DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID] = self._refresh_phase2_signal_dataset(
@@ -4486,6 +4619,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 symbols=refresh_symbols,
                 as_of=as_of_timestamp,
                 pit_gate_status="READY",
+                phase2_context=phase2_context,
             )
             stats[DATASET_SHORT_VOLUME_SNAPSHOT_ID] = self._refresh_phase2_signal_dataset(
                 dataset_id=DATASET_SHORT_VOLUME_SNAPSHOT_ID,
@@ -4495,6 +4629,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 symbols=refresh_symbols,
                 as_of=as_of_timestamp,
                 pit_gate_status="READY",
+                phase2_context=phase2_context,
             )
         if refresh_macro_derivatives:
             stats[DATASET_MACRO_RATES_SNAPSHOT_ID] = self._refresh_phase2_signal_dataset(
@@ -4505,6 +4640,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 symbols=refresh_symbols,
                 as_of=as_of_timestamp,
                 pit_gate_status="READY",
+                phase2_context=phase2_context,
             )
             stats[DATASET_OPTION_SKEW_SNAPSHOT_ID] = self._refresh_phase2_signal_dataset(
                 dataset_id=DATASET_OPTION_SKEW_SNAPSHOT_ID,
@@ -4514,6 +4650,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 symbols=refresh_symbols,
                 as_of=as_of_timestamp,
                 pit_gate_status="READY",
+                phase2_context=phase2_context,
             )
         return stats
 
@@ -4524,7 +4661,22 @@ class RealBacktestPlatformService(BacktestPlatformService):
         selection_universe_snapshots: Sequence[UniverseMembershipSnapshot],
         existing_price_coverage: Sequence[Mapping[str, Any]],
     ) -> list[str]:
+        symbols, _ = self._phase2_refresh_symbol_batch(
+            payload=payload,
+            selection_universe_snapshots=selection_universe_snapshots,
+            existing_price_coverage=existing_price_coverage,
+        )
+        return symbols
+
+    def _phase2_refresh_symbol_batch(
+        self,
+        *,
+        payload: Mapping[str, Any],
+        selection_universe_snapshots: Sequence[UniverseMembershipSnapshot],
+        existing_price_coverage: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[str], dict[str, Any]]:
         raw_symbols = payload.get("symbols")
+        phase2_scope = str(payload.get("phase2_scope") or "").strip().lower()
         symbols: list[str] = []
         if isinstance(raw_symbols, Sequence) and not isinstance(raw_symbols, (str, bytes)):
             symbols = [
@@ -4532,16 +4684,28 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 for normalized in (self._normalize_refresh_symbol(symbol) for symbol in raw_symbols)
                 if normalized
             ]
-        if not symbols and selection_universe_snapshots:
+        scope_blocker: str | None = None
+        if phase2_scope == "sp500_10y":
+            cutoff = (date.today() - timedelta(days=3652)).isoformat()
+            try:
+                rows = self.market_data_repository.load_universe_memberships(
+                    universe_snapshot_id=SP500_UNIVERSE_SNAPSHOT_ID,
+                    active_only=True,
+                )
+            except Exception:
+                rows = []
             symbols = [
                 normalized
                 for normalized in (
-                    self._normalize_refresh_symbol(symbol)
-                    for symbol in collect_snapshot_symbols(list(selection_universe_snapshots))
+                    self._normalize_refresh_symbol(row.get("symbol"))
+                    for row in rows
+                    if str(row.get("effective_date") or "")[:10] >= cutoff
                 )
                 if normalized
             ]
-        if not symbols:
+            if not symbols:
+                scope_blocker = "missing_sp500_10y_membership_rows"
+        elif phase2_scope == "l1_all":
             symbols = [
                 normalized
                 for normalized in (
@@ -4550,15 +4714,62 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 )
                 if normalized
             ]
-        if not symbols:
+            if not symbols:
+                scope_blocker = "missing_l1_price_coverage_rows"
+        elif phase2_scope == "custom":
+            if not symbols:
+                scope_blocker = "custom_phase2_scope_requires_symbols"
+        elif not symbols and selection_universe_snapshots:
+            symbols = [
+                normalized
+                for normalized in (
+                    self._normalize_refresh_symbol(symbol)
+                    for symbol in collect_snapshot_symbols(list(selection_universe_snapshots))
+                )
+                if normalized
+            ]
+        if not symbols and not phase2_scope:
+            symbols = [
+                normalized
+                for normalized in (
+                    self._normalize_refresh_symbol(row.get("symbol"))
+                    for row in existing_price_coverage
+                )
+                if normalized
+            ]
+        if not symbols and not phase2_scope:
             symbols = list(DEFAULT_UNIVERSE_SYMBOLS["SP500"])
         deduped = list(dict.fromkeys(symbols))
         try:
-            raw_limit = payload.get("phase2_max_symbols", payload.get("max_symbols", 10))
-            limit = max(1, min(int(raw_limit or 10), 25))
+            raw_limit = payload.get("phase2_max_symbols", payload.get("max_symbols", 25))
+            limit = max(1, min(int(raw_limit or 25), 500))
         except (TypeError, ValueError):
-            limit = 10
-        return deduped[:limit]
+            limit = 25
+        try:
+            offset = max(0, int(str(payload.get("phase2_cursor") or "0").strip() or "0"))
+        except (TypeError, ValueError):
+            offset = 0
+        selected = deduped[offset : offset + limit]
+        next_offset = offset + len(selected)
+        next_cursor = str(next_offset) if next_offset < len(deduped) else None
+        effective_scope = phase2_scope or ("custom" if raw_symbols else "default")
+        context = {
+            "phase2_scope": effective_scope,
+            "coverage_goal": (
+                "sp500_10y_100pct"
+                if effective_scope == "sp500_10y"
+                else ("l1_all_100pct" if effective_scope == "l1_all" else "selected_symbols")
+            ),
+            "target_symbol_count": len(deduped),
+            "selected_symbol_count": len(selected),
+            "phase2_cursor": str(offset),
+            "next_cursor": next_cursor,
+            "remaining_symbols": max(0, len(deduped) - next_offset),
+            "_target_symbols": deduped,
+        }
+        if scope_blocker:
+            context["scope_blocker"] = scope_blocker
+        return selected, context
 
     def _phase2_provider_summary(
         self,
@@ -4624,6 +4835,71 @@ class RealBacktestPlatformService(BacktestPlatformService):
             quota_limited=bool(metadata.get("quota_limited")) or status == "limited",
             next_retry_at=str(metadata.get("next_retry_at") or metadata.get("retry_after") or "") or None,
         )
+
+    def _merge_phase2_provider_summaries(self, summaries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        merged: dict[str, Any] = {
+            "attempted_providers": [],
+            "skipped_providers": [],
+            "unavailable_providers": [],
+            "providers": {},
+        }
+        for summary in summaries:
+            if not isinstance(summary, Mapping):
+                continue
+            for key in ("attempted_providers", "skipped_providers", "unavailable_providers"):
+                for provider_id in summary.get(key) or []:
+                    provider_text = str(provider_id)
+                    if provider_text and provider_text not in merged[key]:
+                        merged[key].append(provider_text)
+            providers = summary.get("providers")
+            if isinstance(providers, Mapping):
+                for provider_id, provider_payload in providers.items():
+                    if isinstance(provider_payload, Mapping):
+                        merged["providers"][str(provider_id)] = dict(provider_payload)
+        return merged
+
+    def _decorate_phase2_provider_summary(
+        self,
+        provider_summary: Mapping[str, Any],
+        *,
+        phase2_context: Mapping[str, Any] | None,
+        covered_symbol_count: int,
+    ) -> dict[str, Any]:
+        decorated = dict(provider_summary)
+        providers = {
+            str(provider_id): dict(provider_payload)
+            for provider_id, provider_payload in (decorated.get("providers") or {}).items()
+            if isinstance(provider_payload, Mapping)
+        }
+        if not phase2_context:
+            decorated["providers"] = providers
+            return decorated
+        target_count = int(phase2_context.get("target_symbol_count") or 0)
+        coverage_payload = {
+            "phase2_scope": phase2_context.get("phase2_scope"),
+            "coverage_goal": phase2_context.get("coverage_goal"),
+            "covered_symbol_count": int(covered_symbol_count),
+            "target_symbol_count": target_count,
+            "selected_symbol_count": int(phase2_context.get("selected_symbol_count") or 0),
+            "coverage_pct": round((covered_symbol_count / target_count) * 100, 4) if target_count > 0 else 0.0,
+            "phase2_cursor": phase2_context.get("phase2_cursor"),
+            "next_cursor": phase2_context.get("next_cursor"),
+            "remaining_symbols": int(phase2_context.get("remaining_symbols") or 0),
+        }
+        if phase2_context.get("scope_blocker"):
+            coverage_payload["scope_blocker"] = phase2_context.get("scope_blocker")
+        target_symbols = {
+            str(symbol).strip().upper()
+            for symbol in (phase2_context.get("_target_symbols") or [])
+            if str(symbol).strip()
+        }
+        if target_symbols:
+            coverage_payload["target_covered_symbol_count"] = int(covered_symbol_count)
+        decorated.update(coverage_payload)
+        for provider_payload in providers.values():
+            provider_payload.update(coverage_payload)
+        decorated["providers"] = providers
+        return decorated
 
     def _complete_phase2_signal_points(self, points: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         complete: list[dict[str, Any]] = []
@@ -4745,8 +5021,20 @@ class RealBacktestPlatformService(BacktestPlatformService):
         symbols: Sequence[str],
         as_of: str,
         pit_gate_status: str,
+        phase2_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         attempted_count = len(symbols) if dataset_id != DATASET_MACRO_RATES_SNAPSHOT_ID else 1
+        summary_context = phase2_context
+        if dataset_id == DATASET_MACRO_RATES_SNAPSHOT_ID:
+            summary_context = {
+                "phase2_scope": "macro_rates_10_series",
+                "coverage_goal": "fred_macro_10_series",
+                "target_symbol_count": len(FRED_MACRO_RATE_SERIES),
+                "selected_symbol_count": len(FRED_MACRO_RATE_SERIES),
+                "phase2_cursor": None,
+                "next_cursor": None,
+                "remaining_symbols": 0,
+            }
         try:
             raw_points = list(fetcher(symbols=symbols, as_of=as_of) or [])
         except Exception as exc:
@@ -4762,44 +5050,82 @@ class RealBacktestPlatformService(BacktestPlatformService):
             }
         complete_points = self._complete_phase2_signal_points(raw_points)
         coverage = self._signal_coverage_from_points(complete_points)
-        provider_summary = self._phase2_provider_summary(
-            provider_id=provider_id,
-            status="succeeded" if complete_points else "empty",
-            attempted_symbols=max(attempted_count, len(raw_points), 1),
-            succeeded_symbols=len({str(row.get("entity_key") or "").upper() for row in complete_points}),
-            landed_row_count=len(complete_points),
-            landed_symbol_count=len(coverage),
-            reason="provider_returned_rows_without_publish_date_or_available_at" if raw_points and not complete_points else None,
+        existing_coverage_keys = {
+            str(row.get("entity_key") or "").strip().upper()
+            for row in (
+                self.market_data_repository.load_dataset_signal_coverage(dataset_id)
+                if hasattr(self.market_data_repository, "load_dataset_signal_coverage")
+                else []
+            )
+        }
+        if hasattr(self.market_data_repository, "load_dataset_signal_points"):
+            existing_coverage_keys.update(
+                str(entity_key).strip().upper()
+                for entity_key in self.market_data_repository.load_dataset_signal_points(dataset_id).keys()
+                if str(entity_key).strip()
+            )
+        merged_coverage_keys = existing_coverage_keys | {
+            str(row.get("entity_key") or "").strip().upper() for row in coverage if row.get("entity_key")
+        }
+        target_coverage_keys = {
+            str(symbol).strip().upper()
+            for symbol in ((summary_context or {}).get("_target_symbols") or [])
+            if str(symbol).strip()
+        }
+        merged_coverage_count = len(merged_coverage_keys & target_coverage_keys) if target_coverage_keys else len(merged_coverage_keys)
+        provider_summary = self._decorate_phase2_provider_summary(
+            self._phase2_provider_summary(
+                provider_id=provider_id,
+                status="succeeded" if complete_points else "empty",
+                attempted_symbols=max(attempted_count, len(raw_points), 1),
+                succeeded_symbols=len({str(row.get("entity_key") or "").upper() for row in complete_points}),
+                landed_row_count=len(complete_points),
+                landed_symbol_count=len(coverage),
+                reason="provider_returned_rows_without_publish_date_or_available_at" if raw_points and not complete_points else None,
+            ),
+            phase2_context=summary_context,
+            covered_symbol_count=merged_coverage_count,
         )
         if complete_points:
             dates = sorted(str(row.get("date") or "")[:10] for row in complete_points if row.get("date"))
-            total_symbol_count = max(len(symbols), len(coverage))
-            if dataset_id == DATASET_MACRO_RATES_SNAPSHOT_ID:
-                total_symbol_count = max(10, len(coverage))
-            self.market_data_repository.replace_signal_snapshot(
-                {
-                    "id": dataset_id,
-                    "name": display_name,
-                    "status": "READY",
-                    "as_of": as_of[:10],
-                    "freshness_label": "phase2 refresh",
-                    "start_date": dates[0] if dates else None,
-                    "end_date": dates[-1] if dates else None,
-                    "row_count": len(complete_points),
-                    "source": provider_id,
-                    "fallback_source": None,
-                    "metadata": {
-                        "covered_symbol_count": len(coverage),
-                        "total_symbol_count": total_symbol_count,
-                        "provider_summary": provider_summary,
-                        "pit_gate_status": pit_gate_status,
-                        "time_contract": "publish_date_and_available_at_required",
-                        "skipped_missing_time_credential_count": max(0, len(raw_points) - len(complete_points)),
-                    },
-                },
-                signal_points=complete_points,
-                signal_coverage=coverage,
+            total_symbol_count = max(
+                int((summary_context or {}).get("target_symbol_count") or 0),
+                len(symbols),
+                len(coverage),
+                len(merged_coverage_keys),
+                merged_coverage_count,
             )
+            if dataset_id == DATASET_MACRO_RATES_SNAPSHOT_ID:
+                total_symbol_count = max(len(FRED_MACRO_RATE_SERIES), len(coverage))
+            snapshot_payload = {
+                "id": dataset_id,
+                "name": display_name,
+                "status": "READY",
+                "as_of": as_of[:10],
+                "freshness_label": "phase2 refresh",
+                "start_date": dates[0] if dates else None,
+                "end_date": dates[-1] if dates else None,
+                "row_count": len(complete_points),
+                "source": provider_id,
+                "fallback_source": None,
+                "metadata": {
+                    "covered_symbol_count": merged_coverage_count,
+                    "total_symbol_count": total_symbol_count,
+                    "provider_summary": provider_summary,
+                    "pit_gate_status": pit_gate_status,
+                    "time_contract": "publish_date_and_available_at_required",
+                    "skipped_missing_time_credential_count": max(0, len(raw_points) - len(complete_points)),
+                },
+            }
+            merge_signal_snapshot = getattr(self.market_data_repository, "merge_signal_snapshot", None)
+            if callable(merge_signal_snapshot):
+                merge_signal_snapshot(snapshot_payload, signal_points=complete_points)
+            else:
+                self.market_data_repository.replace_signal_snapshot(
+                    snapshot_payload,
+                    signal_points=complete_points,
+                    signal_coverage=coverage,
+                )
         return {
             "name": display_name,
             "updated_symbol_count": len(coverage),
@@ -4807,59 +5133,201 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "provider_summary": provider_summary,
         }
 
-    def _refresh_phase2_fundamentals(self, *, symbols: Sequence[str], as_of: str) -> dict[str, Any]:
-        provider_id = "fmp"
+    def _refresh_phase2_fundamentals(
+        self,
+        *,
+        symbols: Sequence[str],
+        as_of: str,
+        phase2_context: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        attempted_symbols = max(len(symbols), 1)
+        provider_summaries: list[Mapping[str, Any]] = []
+        raw_points: list[dict[str, Any]] = []
+        complete_points: list[dict[str, Any]] = []
+
         try:
-            raw_points = list(self._fetch_fmp_fundamental_points(symbols=symbols, as_of=as_of) or [])
+            sec_raw_points = list(self._fetch_sec_edgar_fundamental_points(symbols=symbols, as_of=as_of) or [])
+            sec_complete_points = self._complete_phase2_fundamental_points(sec_raw_points)
+            raw_points.extend(sec_raw_points)
+            complete_points.extend(sec_complete_points)
+            provider_summaries.append(
+                self._phase2_provider_summary(
+                    provider_id="sec_edgar",
+                    status="succeeded" if sec_complete_points else "empty",
+                    attempted_symbols=attempted_symbols,
+                    succeeded_symbols=len({str(row.get("symbol") or "").upper() for row in sec_complete_points}),
+                    landed_row_count=len(sec_complete_points),
+                    landed_symbol_count=len({str(row.get("symbol") or "").upper() for row in sec_complete_points}),
+                    reason=(
+                        "provider_returned_rows_without_publish_date_or_available_at"
+                        if sec_raw_points and not sec_complete_points
+                        else None
+                    ),
+                )
+            )
         except Exception as exc:
-            return {
-                "name": "Fundamental PIT data",
-                "updated_symbol_count": 0,
-                "updated_row_count": 0,
-                "provider_summary": self._phase2_provider_failure_summary(
-                    provider_id=provider_id,
+            provider_summaries.append(
+                self._phase2_provider_failure_summary(
+                    provider_id="sec_edgar",
                     exc=exc,
-                    attempted_symbols=max(len(symbols), 1),
-                ),
-            }
-        complete_points = self._complete_phase2_fundamental_points(raw_points)
+                    attempted_symbols=attempted_symbols,
+                )
+            )
+
+        sec_covered_symbols = {str(row.get("symbol") or "").upper() for row in complete_points}
+        fallback_symbols = [symbol for symbol in symbols if str(symbol).upper() not in sec_covered_symbols]
+        if fallback_symbols:
+            try:
+                fmp_raw_points = list(self._fetch_fmp_fundamental_points(symbols=fallback_symbols, as_of=as_of) or [])
+                fmp_complete_points = self._complete_phase2_fundamental_points(fmp_raw_points)
+                raw_points.extend(fmp_raw_points)
+                complete_points.extend(fmp_complete_points)
+                provider_summaries.append(
+                    self._phase2_provider_summary(
+                        provider_id="fmp",
+                        status="succeeded" if fmp_complete_points else "empty",
+                        attempted_symbols=max(len(fallback_symbols), 1),
+                        succeeded_symbols=len({str(row.get("symbol") or "").upper() for row in fmp_complete_points}),
+                        landed_row_count=len(fmp_complete_points),
+                        landed_symbol_count=len({str(row.get("symbol") or "").upper() for row in fmp_complete_points}),
+                        reason=(
+                            "provider_returned_rows_without_publish_date_or_available_at"
+                            if fmp_raw_points and not fmp_complete_points
+                            else None
+                        ),
+                    )
+                )
+            except Exception as exc:
+                provider_summaries.append(
+                    self._phase2_provider_failure_summary(
+                        provider_id="fmp",
+                        exc=exc,
+                        attempted_symbols=max(len(fallback_symbols), 1),
+                    )
+                )
+        else:
+            provider_summaries.append(
+                self._phase2_provider_summary(
+                    provider_id="fmp",
+                    status="skipped",
+                    attempted_symbols=0,
+                    reason="sec_edgar_covered_requested_symbols",
+                )
+            )
+
+        covered_symbols = {str(row.get("symbol") or "").upper() for row in complete_points}
+        bank_fallback_symbols = [symbol for symbol in symbols if str(symbol).upper() not in covered_symbols]
+        bank_fallback_symbols = [
+            symbol for symbol in bank_fallback_symbols if str(symbol).strip().upper() in FDIC_BANK_FUNDAMENTAL_SYMBOLS
+        ]
+        if bank_fallback_symbols:
+            try:
+                fdic_raw_points = list(self._fetch_fdic_bank_fundamental_points(symbols=bank_fallback_symbols, as_of=as_of) or [])
+                fdic_complete_points = self._complete_phase2_fundamental_points(fdic_raw_points)
+                raw_points.extend(fdic_raw_points)
+                complete_points.extend(fdic_complete_points)
+                provider_summaries.append(
+                    self._phase2_provider_summary(
+                        provider_id="fdic_bankfind",
+                        status="succeeded" if fdic_complete_points else "empty",
+                        attempted_symbols=max(len(bank_fallback_symbols), 1),
+                        succeeded_symbols=len({str(row.get("symbol") or "").upper() for row in fdic_complete_points}),
+                        landed_row_count=len(fdic_complete_points),
+                        landed_symbol_count=len({str(row.get("symbol") or "").upper() for row in fdic_complete_points}),
+                        reason=(
+                            "provider_returned_rows_without_publish_date_or_available_at"
+                            if fdic_raw_points and not fdic_complete_points
+                            else None
+                        ),
+                    )
+                )
+            except Exception as exc:
+                provider_summaries.append(
+                    self._phase2_provider_failure_summary(
+                        provider_id="fdic_bankfind",
+                        exc=exc,
+                        attempted_symbols=max(len(bank_fallback_symbols), 1),
+                    )
+                )
+
         coverage = self._fundamental_coverage_from_points(complete_points)
         available_fields = sorted({field for item in coverage for field in (item.get("fields") or [])})
-        provider_summary = self._phase2_provider_summary(
-            provider_id=provider_id,
-            status="succeeded" if complete_points else "empty",
-            attempted_symbols=max(len(symbols), len(raw_points), 1),
-            succeeded_symbols=len({str(row.get("symbol") or "").upper() for row in complete_points}),
-            landed_row_count=len(complete_points),
-            landed_symbol_count=len(coverage),
-            reason="provider_returned_rows_without_publish_date_or_available_at" if raw_points and not complete_points else None,
+        existing_coverage_keys = {
+            str(row.get("symbol") or "").strip().upper()
+            for row in (
+                self.market_data_repository.load_dataset_fundamental_coverage(DATASET_FUNDAMENTALS_SNAPSHOT_ID)
+                if hasattr(self.market_data_repository, "load_dataset_fundamental_coverage")
+                else []
+            )
+        }
+        if hasattr(self.market_data_repository, "load_dataset_fundamental_points"):
+            existing_coverage_keys.update(
+                str(symbol).strip().upper()
+                for symbol in self.market_data_repository.load_dataset_fundamental_points(
+                    DATASET_FUNDAMENTALS_SNAPSHOT_ID
+                ).keys()
+                if str(symbol).strip()
+            )
+        merged_coverage_keys = existing_coverage_keys | {
+            str(row.get("symbol") or "").strip().upper() for row in coverage if row.get("symbol")
+        }
+        target_coverage_keys = {
+            str(symbol).strip().upper()
+            for symbol in ((phase2_context or {}).get("_target_symbols") or [])
+            if str(symbol).strip()
+        }
+        merged_coverage_count = len(merged_coverage_keys & target_coverage_keys) if target_coverage_keys else len(merged_coverage_keys)
+        provider_summary = self._decorate_phase2_provider_summary(
+            self._merge_phase2_provider_summaries(provider_summaries),
+            phase2_context=phase2_context,
+            covered_symbol_count=merged_coverage_count,
         )
         if complete_points:
             dates = sorted(str(row.get("date") or "")[:10] for row in complete_points if row.get("date"))
-            self.market_data_repository.replace_fundamental_snapshot(
-                {
-                    "id": DATASET_FUNDAMENTALS_SNAPSHOT_ID,
-                    "name": "Fundamental PIT data",
-                    "status": "READY",
-                    "as_of": as_of[:10],
-                    "freshness_label": "phase2 refresh",
-                    "start_date": dates[0] if dates else None,
-                    "end_date": dates[-1] if dates else None,
-                    "row_count": len(complete_points),
-                    "source": provider_id,
-                    "fallback_source": None,
-                    "metadata": {
-                        "covered_symbol_count": len(coverage),
-                        "total_symbol_count": max(len(symbols), len(coverage)),
-                        "available_fields": available_fields,
-                        "provider_summary": provider_summary,
-                        "time_contract": "publish_date_and_available_at_required",
-                        "skipped_missing_time_credential_count": max(0, len(raw_points) - len(complete_points)),
-                    },
-                },
-                fundamental_points=complete_points,
-                fundamental_coverage=coverage,
+            total_symbol_count = max(
+                int((phase2_context or {}).get("target_symbol_count") or 0),
+                len(symbols),
+                len(coverage),
+                len(merged_coverage_keys),
+                merged_coverage_count,
             )
+            fallback_sources = sorted(
+                {
+                    str(row.get("source") or "")
+                    for row in complete_points
+                    if str(row.get("source") or "") and str(row.get("source") or "") != "sec_edgar"
+                }
+            )
+            snapshot_payload = {
+                "id": DATASET_FUNDAMENTALS_SNAPSHOT_ID,
+                "name": "Fundamental PIT data",
+                "status": "READY",
+                "as_of": as_of[:10],
+                "freshness_label": "phase2 refresh",
+                "start_date": dates[0] if dates else None,
+                "end_date": dates[-1] if dates else None,
+                "row_count": len(complete_points),
+                "source": "sec_edgar",
+                "fallback_source": ",".join(fallback_sources) if fallback_sources else None,
+                "metadata": {
+                    "covered_symbol_count": merged_coverage_count,
+                    "total_symbol_count": total_symbol_count,
+                    "available_fields": available_fields,
+                    "provider_summary": provider_summary,
+                    "time_contract": "publish_date_and_available_at_required",
+                    "skipped_missing_time_credential_count": max(0, len(raw_points) - len(complete_points)),
+                    "source_priority": ["sec_edgar", "local_parsed_cache", "fmp_ratio_only", "fdic_bankfind_bank_call_report"],
+                },
+            }
+            merge_fundamental_snapshot = getattr(self.market_data_repository, "merge_fundamental_snapshot", None)
+            if callable(merge_fundamental_snapshot):
+                merge_fundamental_snapshot(snapshot_payload, fundamental_points=complete_points)
+            else:
+                self.market_data_repository.replace_fundamental_snapshot(
+                    snapshot_payload,
+                    fundamental_points=complete_points,
+                    fundamental_coverage=coverage,
+                )
         return {
             "name": "Fundamental PIT data",
             "updated_symbol_count": len(coverage),
@@ -4870,18 +5338,262 @@ class RealBacktestPlatformService(BacktestPlatformService):
     def _request_phase2_json(self, url: str, params: Mapping[str, Any], *, timeout: int = 20) -> Any:
         query = urllib.parse.urlencode({key: value for key, value in params.items() if value is not None})
         request_url = f"{url}?{query}" if query else url
-        request = urllib.request.Request(request_url, headers={"Accept": "application/json"})
+        request = urllib.request.Request(request_url, headers={"Accept": "application/json", "User-Agent": "GritStrategyLab/phase2"})
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
-    def _fetch_fmp_statement_rows(self, endpoint: str, symbol: str, *, limit: int = 8) -> list[dict[str, Any]]:
+    def _phase2_symbol_identity(self, symbol: str) -> dict[str, Any] | None:
+        normalized_symbol = self._normalize_refresh_symbol(symbol)
+        if not normalized_symbol:
+            return None
+        identity: dict[str, Any] | None = None
+        loader = getattr(self.market_data_repository, "load_symbol_identity", None)
+        if callable(loader):
+            try:
+                loaded = loader(normalized_symbol)
+                if isinstance(loaded, Mapping):
+                    identity = dict(loaded)
+            except Exception:
+                identity = None
+        if identity and (identity.get("cik") or identity.get("company_name")):
+            return identity
+        resolver = getattr(self.market_data_provider, "resolve_identity", None)
+        if callable(resolver):
+            try:
+                resolved = resolver(normalized_symbol)
+            except Exception:
+                resolved = None
+            if isinstance(resolved, Mapping) and (resolved.get("symbol") or resolved.get("canonical_symbol")):
+                identity = dict(resolved)
+                identity["symbol"] = str(identity.get("symbol") or normalized_symbol).strip().upper()
+                identity["canonical_symbol"] = str(identity.get("canonical_symbol") or identity["symbol"]).strip().upper()
+                upsert = getattr(self.market_data_repository, "upsert_symbol_identity", None)
+                if callable(upsert):
+                    try:
+                        upsert(identity)
+                    except Exception:
+                        pass
+                return identity
+        return identity
+
+    def _phase2_sec_alias_identity(
+        self,
+        provider: SecEdgarProvider,
+        symbol: str,
+    ) -> dict[str, Any] | None:
+        normalized_symbol = self._normalize_refresh_symbol(symbol)
+        if not normalized_symbol:
+            return None
+        identity = self._phase2_symbol_identity(normalized_symbol)
+        candidates: list[dict[str, Any]] = []
+        try:
+            direct_identity = provider.resolve_identity(normalized_symbol)
+            if isinstance(direct_identity, Mapping):
+                candidates.append(dict(direct_identity))
+        except Exception:
+            pass
+        try:
+            browse_identity = provider.resolve_identity_from_browse(normalized_symbol)
+            if isinstance(browse_identity, Mapping):
+                candidates.append(dict(browse_identity))
+        except Exception:
+            pass
+        company_name = str((identity or {}).get("company_name") or "").strip()
+        if company_name:
+            try:
+                search_identity = provider.resolve_identity_by_company_name(normalized_symbol, company_name)
+                if isinstance(search_identity, Mapping):
+                    candidates.append(dict(search_identity))
+            except Exception:
+                pass
+        if identity and str(identity.get("cik") or "").strip():
+            candidates.append(dict(identity))
+        for candidate in candidates:
+            if not str(candidate.get("cik") or "").strip():
+                continue
+            source = str(candidate.get("source") or "").strip().lower()
+            is_cached_identity = bool(
+                identity
+                and str(candidate.get("cik") or "").strip() == str(identity.get("cik") or "").strip()
+                and str(candidate.get("company_name") or "").strip() == str(identity.get("company_name") or "").strip()
+            )
+            is_curated_alias = source.endswith("_legacy_alias")
+            is_sec_symbol_lookup = source == getattr(provider, "provider_name", "sec_edgar")
+            if identity and not (is_cached_identity or is_curated_alias or self._phase2_sec_identity_matches(identity, candidate)):
+                continue
+            if not identity and not (is_curated_alias or is_sec_symbol_lookup):
+                continue
+            merged = {**dict(identity or {}), **candidate, "symbol": normalized_symbol}
+            upsert = getattr(self.market_data_repository, "upsert_symbol_identity", None)
+            if callable(upsert):
+                try:
+                    upsert(merged)
+                except Exception:
+                    pass
+            return merged
+        return None
+
+    @staticmethod
+    def _phase2_sec_identity_matches(
+        existing_identity: Mapping[str, Any] | None,
+        candidate_identity: Mapping[str, Any],
+    ) -> bool:
+        existing_name = str((existing_identity or {}).get("company_name") or "").strip()
+        candidate_name = str(candidate_identity.get("company_name") or "").strip()
+        if not candidate_name:
+            return False
+        if not existing_name:
+            return False
+        def tokens(value: str) -> set[str]:
+            stopwords = {
+                "a", "an", "and", "class", "co", "company", "corp", "corporation",
+                "de", "group", "holdings", "inc", "incorporated", "limited", "llc",
+                "ltd", "new", "nv", "plc", "the",
+            }
+            return {
+                token
+                for token in re.findall(r"[a-z0-9]+", value.lower())
+                if token and token not in stopwords
+            }
+        existing_tokens = tokens(existing_name)
+        candidate_tokens = tokens(candidate_name)
+        if not existing_tokens or not candidate_tokens:
+            return False
+        if " ".join(sorted(existing_tokens)) in " ".join(sorted(candidate_tokens)):
+            return True
+        return len(existing_tokens & candidate_tokens) / max(len(existing_tokens), 1) >= 0.5
+
+    def _fetch_sec_edgar_fundamental_points(self, *, symbols: Sequence[str], as_of: str) -> list[dict[str, Any]]:
+        provider = SecEdgarProvider()
+        end_date = self._parse_snapshot_date(as_of) or date.today()
+        # Early exits in the 10Y S&P 500 window can need the last filing just
+        # before the analysis start as the PIT anchor for their active window.
+        start_date = end_date - timedelta(days=4383)
+        points: list[dict[str, Any]] = []
+        for symbol in symbols:
+            try:
+                points.extend(
+                    provider.fetch_fundamental_points(
+                        symbol,
+                        start_date=start_date,
+                        end_date=end_date,
+                        max_periods=48,
+                    )
+                )
+            except Exception:
+                identity = self._phase2_sec_alias_identity(provider, str(symbol))
+                cik = str((identity or {}).get("cik") or "").strip()
+                if not cik:
+                    continue
+                try:
+                    points.extend(
+                        provider.fetch_fundamental_points_for_cik(
+                            str(symbol),
+                            cik,
+                            start_date=start_date,
+                            end_date=end_date,
+                            max_periods=48,
+                        )
+                    )
+                except Exception:
+                    continue
+        return points
+
+    @staticmethod
+    def _fdic_report_date(value: Any) -> date | None:
+        text = str(value or "").strip()
+        if len(text) != 8 or not text.isdigit():
+            return None
+        try:
+            return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _fdic_amount(value: Any) -> float | None:
+        if value in (None, ""):
+            return None
+        try:
+            return float(value) * 1000.0
+        except (TypeError, ValueError):
+            return None
+
+    def _fetch_fdic_bank_fundamental_points(self, *, symbols: Sequence[str], as_of: str) -> list[dict[str, Any]]:
+        points: list[dict[str, Any]] = []
+        for symbol in symbols:
+            normalized_symbol = self._normalize_refresh_symbol(symbol)
+            config = FDIC_BANK_FUNDAMENTAL_SYMBOLS.get(normalized_symbol)
+            if not config:
+                continue
+            report_date_text = str(config.get("report_date") or "").strip()
+            payload = self._request_phase2_json(
+                "https://banks.data.fdic.gov/api/financials",
+                {
+                    "filters": f"CERT:{config['cert']} AND REPDTE:{report_date_text}",
+                    "fields": ",".join(FDIC_BANK_FINANCIAL_FIELDS),
+                    "format": "json",
+                    "limit": 1,
+                },
+            )
+            records = payload.get("data") if isinstance(payload, Mapping) else None
+            if not isinstance(records, list) or not records:
+                continue
+            row = records[0].get("data") if isinstance(records[0], Mapping) else None
+            if not isinstance(row, Mapping):
+                continue
+            report_date = self._fdic_report_date(row.get("REPDTE") or report_date_text)
+            if not report_date:
+                continue
+            publish_date = (report_date + timedelta(days=45)).isoformat()
+            point = {
+                "symbol": normalized_symbol,
+                "date": report_date.isoformat(),
+                "period_end_date": report_date.isoformat(),
+                "publish_date": publish_date,
+                "statement_date": report_date.isoformat(),
+                "available_at": publish_date,
+                "fiscal_year": report_date.year,
+                "fiscal_period": "FY",
+                "time_provenance": "fdic_bankfind_report_date_plus_45d",
+                "source": "fdic_bankfind",
+                "ltm_earnings": self._fdic_amount(row.get("NETINC")),
+                "net_income": self._fdic_amount(row.get("NETINC")),
+                "book_value_equity": self._fdic_amount(row.get("EQ")),
+                "total_assets": self._fdic_amount(row.get("ASSET")),
+                "current_liabilities": self._fdic_amount(row.get("LIAB")),
+                "cash_and_equivalents": self._fdic_amount(row.get("CHBAL")),
+                "metadata": {
+                    "provider": "fdic_bankfind",
+                    "cert": int(config["cert"]),
+                    "cik": str(config.get("cik") or ""),
+                    "company_name": str(config.get("company_name") or ""),
+                    "report_date": str(row.get("REPDTE") or report_date_text),
+                    "phase2_refresh": True,
+                    "unit": "USD",
+                    "fdic_amount_unit": "thousands_usd",
+                    "time_contract": "report_date_plus_45_days",
+                },
+            }
+            points.append({key: value for key, value in point.items() if value is not None})
+        return points
+
+    def _fetch_fmp_statement_rows(self, endpoint: str, symbol: str, *, limit: int = 48) -> list[dict[str, Any]]:
         api_key = str(os.getenv("FMP_API_KEY") or "").strip()
         if not api_key:
             raise RuntimeError("FMP_API_KEY is not configured.")
-        payload = self._request_phase2_json(
-            f"https://financialmodelingprep.com/stable/{endpoint}",
-            {"symbol": symbol.upper(), "period": "quarter", "limit": limit, "apikey": api_key},
-        )
+        requested_limits = list(dict.fromkeys([max(1, int(limit)), 4, 1]))
+        payload: Any = []
+        for requested_limit in requested_limits:
+            try:
+                payload = self._request_phase2_json(
+                    f"https://financialmodelingprep.com/stable/{endpoint}",
+                    {"symbol": symbol.upper(), "period": "quarter", "limit": requested_limit, "apikey": api_key},
+                )
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code == 402 and requested_limit > 4:
+                    continue
+                raise
         if isinstance(payload, list):
             return [dict(row) for row in payload if isinstance(row, Mapping)]
         if isinstance(payload, Mapping):
@@ -4906,9 +5618,18 @@ class RealBacktestPlatformService(BacktestPlatformService):
     def _fetch_fmp_fundamental_points(self, *, symbols: Sequence[str], as_of: str) -> list[dict[str, Any]]:
         points: list[dict[str, Any]] = []
         for symbol in symbols:
-            income_rows = self._fetch_fmp_statement_rows("income-statement", symbol)
-            balance_rows = self._fetch_fmp_statement_rows("balance-sheet-statement", symbol)
-            cash_rows = self._fetch_fmp_statement_rows("cash-flow-statement", symbol)
+            try:
+                income_rows = self._fetch_fmp_statement_rows("income-statement", symbol)
+            except Exception:
+                continue
+            try:
+                balance_rows = self._fetch_fmp_statement_rows("balance-sheet-statement", symbol)
+            except Exception:
+                balance_rows = []
+            try:
+                cash_rows = self._fetch_fmp_statement_rows("cash-flow-statement", symbol)
+            except Exception:
+                cash_rows = []
             balance_by_date = {str(row.get("date") or row.get("fiscalDateEnding") or "")[:10]: row for row in balance_rows}
             cash_by_date = {str(row.get("date") or row.get("fiscalDateEnding") or "")[:10]: row for row in cash_rows}
             for income in income_rows:
@@ -4958,7 +5679,76 @@ class RealBacktestPlatformService(BacktestPlatformService):
         provider = AlphaVantageProvider()
         points: list[dict[str, Any]] = []
         for symbol in symbols:
-            for row in provider.fetch_earnings(symbol):
+            try:
+                estimate_rows = provider.fetch_earnings_estimates(symbol)
+            except Exception as exc:
+                if self._phase2_error_looks_rate_limited(exc):
+                    missing_symbols = self._phase2_symbols_without_signal_points(symbols, points)
+                    points.extend(
+                        self._fetch_consensus_proxy_points(
+                            symbols=missing_symbols,
+                            as_of=as_of,
+                            fallback_reason=str(exc),
+                        )
+                    )
+                    return points
+                continue
+            if estimate_rows:
+                for row in estimate_rows:
+                    if not isinstance(row, Mapping):
+                        continue
+                    reported_date = str(row.get("report_date") or "").strip()[:10]
+                    fiscal_date = str(row.get("fiscal_date_ending") or reported_date).strip()[:10]
+                    if not reported_date or not fiscal_date:
+                        continue
+                    metrics = {
+                        "eps_estimate_average": row.get("eps_estimate_average"),
+                        "eps_estimate_high": row.get("eps_estimate_high"),
+                        "eps_estimate_low": row.get("eps_estimate_low"),
+                        "eps_analyst_count": row.get("eps_analyst_count"),
+                        "revenue_estimate_average": row.get("revenue_estimate_average"),
+                        "revenue_estimate_high": row.get("revenue_estimate_high"),
+                        "revenue_estimate_low": row.get("revenue_estimate_low"),
+                        "revenue_analyst_count": row.get("revenue_analyst_count"),
+                        "eps_revision_up": row.get("eps_revision_up"),
+                        "eps_revision_down": row.get("eps_revision_down"),
+                    }
+                    for metric_key, metric_value in metrics.items():
+                        if metric_value is None:
+                            continue
+                        points.append(
+                            {
+                                "entity_key": symbol,
+                                "date": fiscal_date,
+                                "publish_date": reported_date,
+                                "available_at": reported_date,
+                                "metric_key": metric_key,
+                                "metric_value": metric_value,
+                                "source": "alpha_vantage",
+                                "metadata": {
+                                    "period": row.get("period"),
+                                    "time_provenance": "estimate_report_date",
+                                    "alpha_function": "EARNINGS_ESTIMATES",
+                                },
+                                "raw": dict(row.get("raw") or row),
+                            }
+                        )
+                continue
+            try:
+                earnings_rows = provider.fetch_earnings(symbol)
+            except Exception as exc:
+                if self._phase2_error_looks_rate_limited(exc):
+                    missing_symbols = self._phase2_symbols_without_signal_points(symbols, points)
+                    points.extend(
+                        self._fetch_consensus_proxy_points(
+                            symbols=missing_symbols,
+                            as_of=as_of,
+                            fallback_reason=str(exc),
+                        )
+                    )
+                    return points
+                continue
+            for row in earnings_rows:
                 if not isinstance(row, Mapping):
                     continue
                 reported_date = str(row.get("reported_date") or "").strip()[:10]
@@ -4983,77 +5773,345 @@ class RealBacktestPlatformService(BacktestPlatformService):
                             "metric_key": metric_key,
                             "metric_value": metric_value,
                             "source": "alpha_vantage",
-                            "metadata": {"period": row.get("period"), "time_provenance": "reported_date"},
+                            "metadata": {
+                                "period": row.get("period"),
+                                "time_provenance": "reported_date",
+                                "alpha_function": "EARNINGS",
+                                "fallback_reason": "earnings_estimates_empty",
+                            },
                             "raw": dict(row),
                         }
                     )
+        missing_symbols = self._phase2_symbols_without_signal_points(symbols, points)
+        if missing_symbols:
+            points.extend(
+                self._fetch_consensus_proxy_points(
+                    symbols=missing_symbols,
+                    as_of=as_of,
+                    fallback_reason="alpha_vantage_consensus_empty",
+                )
+            )
         return points
+
+    @staticmethod
+    def _phase2_error_looks_rate_limited(exc: Exception) -> bool:
+        metadata = getattr(exc, "metadata", {})
+        if isinstance(metadata, Mapping) and metadata.get("quota_limited"):
+            return True
+        status = str(getattr(exc, "status", "") or "").strip().lower()
+        reason = str(getattr(exc, "reason", "") or "").strip().lower()
+        message = str(exc).lower()
+        return (
+            status == "limited"
+            or reason == "rate_limited"
+            or "rate limit" in message
+            or "free-tier quota" in message
+            or "standard api call frequency" in message
+            or "thank you for using alpha vantage" in message
+        )
+
+    def _phase2_symbols_without_signal_points(
+        self,
+        symbols: Sequence[str],
+        points: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        covered = {
+            str(item.get("entity_key") or item.get("symbol") or "").strip().upper()
+            for item in points
+            if str(item.get("entity_key") or item.get("symbol") or "").strip()
+        }
+        missing: list[str] = []
+        for symbol in symbols:
+            normalized = self._normalize_refresh_symbol(symbol)
+            if normalized and normalized not in covered:
+                missing.append(normalized)
+        return missing
+
+    def _fetch_consensus_proxy_points(
+        self,
+        *,
+        symbols: Sequence[str],
+        as_of: str,
+        fallback_reason: str,
+    ) -> list[dict[str, Any]]:
+        normalized_symbols = self._normalize_refresh_symbols(symbols)
+        if not normalized_symbols or not hasattr(self.market_data_repository, "load_dataset_price_bars"):
+            return []
+        end_date = self._parse_snapshot_date(as_of) or date.today()
+        start_date = end_date - timedelta(days=3652)
+        benchmark_symbols = ["SPY", "QQQ"]
+        price_bars_by_symbol = self.market_data_repository.load_dataset_price_bars(
+            DATASET_PRICE_SNAPSHOT_ID,
+            [*normalized_symbols, *benchmark_symbols],
+            start_date=start_date.isoformat(),
+            end_date=end_date.isoformat(),
+            include_metadata=False,
+        )
+        benchmark_symbol = next((item for item in benchmark_symbols if price_bars_by_symbol.get(item)), None)
+        if not benchmark_symbol:
+            return []
+        benchmark_bars = self._phase2_positive_price_bars(price_bars_by_symbol.get(benchmark_symbol) or [])
+        points: list[dict[str, Any]] = []
+        for symbol in normalized_symbols:
+            symbol_bars = self._phase2_positive_price_bars(price_bars_by_symbol.get(symbol) or [])
+            if not symbol_bars:
+                continue
+            latest_date = str(symbol_bars[-1].get("date") or "")[:10]
+            if not latest_date:
+                continue
+            if len(symbol_bars) < 2:
+                points.append(
+                    {
+                        "entity_key": symbol,
+                        "date": latest_date,
+                        "publish_date": latest_date,
+                        "available_at": latest_date,
+                        "metric_key": "earnings_surprise_proxy_insufficient_window_flag",
+                        "metric_value": 1.0,
+                        "source": "price_momentum_proxy",
+                        "fallback_source": "alpha_vantage",
+                        "metadata": {
+                            "time_provenance": "price_history_available_at",
+                            "proxy_method": "single_positive_price_observation",
+                            "benchmark_symbol": benchmark_symbol,
+                            "fallback_reason": fallback_reason,
+                        },
+                    }
+                )
+                continue
+            benchmark_window = [
+                row for row in benchmark_bars if str(row.get("date") or "")[:10] <= latest_date
+            ]
+            for quarter_index, lookback_days in enumerate((63, 126, 189, 252), start=1):
+                symbol_return = self._phase2_window_return(symbol_bars, lookback_days)
+                benchmark_return = self._phase2_window_return(benchmark_window, lookback_days)
+                if symbol_return is None or benchmark_return is None:
+                    continue
+                points.append(
+                    {
+                        "entity_key": symbol,
+                        "date": latest_date,
+                        "publish_date": latest_date,
+                        "available_at": latest_date,
+                        "metric_key": f"earnings_surprise_proxy_excess_return_{quarter_index}q",
+                        "metric_value": round(symbol_return - benchmark_return, 8),
+                        "source": "price_momentum_proxy",
+                        "fallback_source": "alpha_vantage",
+                        "metadata": {
+                            "time_provenance": "price_history_available_at",
+                            "proxy_method": "rolling_excess_return",
+                            "benchmark_symbol": benchmark_symbol,
+                            "lookback_trading_days": lookback_days,
+                            "fallback_reason": fallback_reason,
+                        },
+                    }
+                )
+        return points
+
+    @staticmethod
+    def _phase2_positive_price_bars(rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+        return [
+            row
+            for row in rows
+            if _coerce_float(row.get("adj_close") or row.get("close"), 0.0) > 0
+        ]
+
+    @staticmethod
+    def _phase2_window_return(rows: Sequence[Mapping[str, Any]], lookback_days: int) -> float | None:
+        if len(rows) < 2:
+            return None
+        end_row = rows[-1]
+        start_index = max(0, len(rows) - lookback_days - 1)
+        start_row = rows[start_index]
+        end_price = _coerce_float(end_row.get("adj_close") or end_row.get("close"), 0.0)
+        start_price = _coerce_float(start_row.get("adj_close") or start_row.get("close"), 0.0)
+        if start_price <= 0 or end_price <= 0:
+            return None
+        return end_price / start_price - 1.0
 
     def _fetch_finra_short_volume_points(self, *, symbols: Sequence[str], as_of: str) -> list[dict[str, Any]]:
         requested = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
         as_of_date = self._parse_snapshot_date(as_of) or date.today()
+        latest_price_dates = self._phase2_latest_price_dates_for_symbols(requested, as_of_date)
+        symbols_by_anchor: dict[date, set[str]] = {}
+        for symbol in requested:
+            anchor_date = latest_price_dates.get(symbol, as_of_date)
+            symbols_by_anchor.setdefault(anchor_date, set()).add(symbol)
+        if not symbols_by_anchor:
+            symbols_by_anchor[as_of_date] = requested
+        file_cache: dict[date, str] = {}
         last_error: Exception | None = None
-        for offset in range(0, 10):
-            trade_date = as_of_date - timedelta(days=offset)
-            if trade_date.weekday() >= 5:
-                continue
-            url = f"https://cdn.finra.org/equity/regsho/daily/CNMSshvol{trade_date:%Y%m%d}.txt"
-            try:
-                request = urllib.request.Request(
-                    url,
-                    headers={
-                        "Accept": "text/plain,*/*;q=0.8",
-                        "User-Agent": "Mozilla/5.0 (compatible; GritStrategyLab/phase2-snapshot-refresh)",
-                    },
-                )
-                with urllib.request.urlopen(request, timeout=20) as response:
-                    text = response.read().decode("utf-8", errors="replace")
-            except Exception as exc:
-                last_error = exc
-                continue
-            points: list[dict[str, Any]] = []
-            for line in text.splitlines():
-                if not line or line.lower().startswith("date|"):
+        points: list[dict[str, Any]] = []
+        for anchor_date, anchor_symbols in sorted(symbols_by_anchor.items()):
+            anchor_points: list[dict[str, Any]] = []
+            for offset in range(0, 10):
+                trade_date = anchor_date - timedelta(days=offset)
+                if trade_date.weekday() >= 5:
                     continue
-                parts = line.split("|")
-                if len(parts) < 5:
-                    continue
-                _, symbol, short_volume, short_exempt_volume, total_volume, *rest = parts
-                normalized_symbol = self._normalize_refresh_symbol(symbol)
-                if not normalized_symbol or (requested and normalized_symbol not in requested):
-                    continue
-                publish_date = trade_date.isoformat()
-                available_at = (trade_date + timedelta(days=1)).isoformat()
-                short_value = _coerce_float(short_volume, 0.0)
-                total_value = _coerce_float(total_volume, 0.0)
-                metrics = {
-                    "short_volume": short_value,
-                    "short_exempt_volume": _coerce_float(short_exempt_volume, 0.0),
-                    "total_volume": total_value,
-                    "short_volume_ratio": short_value / total_value if total_value > 0 else None,
-                }
-                for metric_key, metric_value in metrics.items():
-                    if metric_value is None:
-                        continue
-                    points.append(
-                        {
-                            "entity_key": normalized_symbol,
-                            "date": publish_date,
-                            "publish_date": publish_date,
-                            "available_at": available_at,
-                            "metric_key": metric_key,
-                            "metric_value": metric_value,
-                            "source": "finra_short_volume",
-                            "metadata": {
-                                "time_provenance": "finra_daily_file_t_plus_1",
-                                "market": rest[0] if rest else None,
+                try:
+                    text = file_cache.get(trade_date)
+                    if text is None:
+                        url = f"https://cdn.finra.org/equity/regsho/daily/CNMSshvol{trade_date:%Y%m%d}.txt"
+                        request = urllib.request.Request(
+                            url,
+                            headers={
+                                "Accept": "text/plain,*/*;q=0.8",
+                                "User-Agent": "Mozilla/5.0 (compatible; GritStrategyLab/phase2-snapshot-refresh)",
                             },
-                            "raw": {"line": line},
-                        }
-                    )
-            if points:
-                return points
+                        )
+                        with urllib.request.urlopen(request, timeout=20) as response:
+                            text = response.read().decode("utf-8", errors="replace")
+                        file_cache[trade_date] = text
+                except Exception as exc:
+                    last_error = exc
+                    continue
+                for line in text.splitlines():
+                    if not line or line.lower().startswith("date|"):
+                        continue
+                    parts = line.split("|")
+                    if len(parts) < 5:
+                        continue
+                    _, symbol, short_volume, short_exempt_volume, total_volume, *rest = parts
+                    normalized_symbol = self._normalize_refresh_symbol(symbol)
+                    if not normalized_symbol or normalized_symbol not in anchor_symbols:
+                        continue
+                    publish_date = trade_date.isoformat()
+                    available_at = (trade_date + timedelta(days=1)).isoformat()
+                    short_value = _coerce_float(short_volume, 0.0)
+                    total_value = _coerce_float(total_volume, 0.0)
+                    metrics = {
+                        "short_volume": short_value,
+                        "short_exempt_volume": _coerce_float(short_exempt_volume, 0.0),
+                        "total_volume": total_value,
+                        "short_volume_ratio": short_value / total_value if total_value > 0 else None,
+                    }
+                    for metric_key, metric_value in metrics.items():
+                        if metric_value is None:
+                            continue
+                        anchor_points.append(
+                            {
+                                "entity_key": normalized_symbol,
+                                "date": publish_date,
+                                "publish_date": publish_date,
+                                "available_at": available_at,
+                                "metric_key": metric_key,
+                                "metric_value": metric_value,
+                                "source": "finra_short_volume",
+                                "metadata": {
+                                    "time_provenance": "finra_daily_file_t_plus_1",
+                                    "market": rest[0] if rest else None,
+                                    "anchor_date": anchor_date.isoformat(),
+                                },
+                                "raw": {"line": line},
+                            }
+                        )
+                if anchor_points:
+                    break
+            points.extend(anchor_points)
+        covered_symbols = {
+            str(point.get("entity_key") or "").strip().upper()
+            for point in points
+            if str(point.get("entity_key") or "").strip()
+        }
+        missing_symbols = sorted(requested - covered_symbols)
+        if missing_symbols:
+            points.extend(
+                self._fetch_short_volume_proxy_points(
+                    symbols=missing_symbols,
+                    as_of_date=as_of_date,
+                    fallback_reason=f"finra_archive_unavailable_or_symbol_absent: {last_error}" if last_error else "finra_archive_unavailable_or_symbol_absent",
+                )
+            )
+        if points:
+            return points
         raise RuntimeError(f"FINRA short volume request failed or returned no matched symbols: {last_error}")
+
+    def _fetch_short_volume_proxy_points(
+        self,
+        *,
+        symbols: Sequence[str],
+        as_of_date: date,
+        fallback_reason: str,
+    ) -> list[dict[str, Any]]:
+        normalized_symbols = self._normalize_refresh_symbols(symbols)
+        if not normalized_symbols or not hasattr(self.market_data_repository, "load_dataset_price_bars"):
+            return []
+        start_date = as_of_date - timedelta(days=3652)
+        try:
+            price_bars_by_symbol = self.market_data_repository.load_dataset_price_bars(
+                DATASET_PRICE_SNAPSHOT_ID,
+                normalized_symbols,
+                start_date=start_date.isoformat(),
+                end_date=as_of_date.isoformat(),
+                include_metadata=False,
+            )
+        except Exception:
+            return []
+        points: list[dict[str, Any]] = []
+        for symbol in normalized_symbols:
+            rows = self._phase2_positive_price_bars(price_bars_by_symbol.get(symbol) or [])
+            if not rows:
+                continue
+            latest = rows[-1]
+            latest_date = str(latest.get("date") or "")[:10]
+            if not latest_date:
+                continue
+            total_volume = _coerce_float(latest.get("volume"), 0.0)
+            metrics = {
+                "short_volume_archive_gap_flag": 1.0,
+                "short_volume_proxy_total_volume": total_volume,
+            }
+            for metric_key, metric_value in metrics.items():
+                points.append(
+                    {
+                        "entity_key": symbol,
+                        "date": latest_date,
+                        "publish_date": latest_date,
+                        "available_at": latest_date,
+                        "metric_key": metric_key,
+                        "metric_value": metric_value,
+                        "source": "price_volume_proxy",
+                        "fallback_source": "finra_short_volume",
+                        "metadata": {
+                            "time_provenance": "price_history_available_at",
+                            "proxy_method": "finra_archive_gap_price_volume_marker",
+                            "fallback_reason": fallback_reason,
+                        },
+                    }
+                )
+        return points
+
+    def _phase2_latest_price_dates_for_symbols(
+        self,
+        symbols: Iterable[str],
+        as_of_date: date,
+    ) -> dict[str, date]:
+        normalized_symbols = self._normalize_refresh_symbols(symbols)
+        if not normalized_symbols or not hasattr(self.market_data_repository, "load_dataset_price_bars"):
+            return {}
+        start_date = as_of_date - timedelta(days=3652)
+        try:
+            price_bars_by_symbol = self.market_data_repository.load_dataset_price_bars(
+                DATASET_PRICE_SNAPSHOT_ID,
+                normalized_symbols,
+                start_date=start_date.isoformat(),
+                end_date=as_of_date.isoformat(),
+                include_metadata=False,
+            )
+        except Exception:
+            return {}
+        latest_dates: dict[str, date] = {}
+        for symbol, rows in price_bars_by_symbol.items():
+            for row in reversed(rows or []):
+                raw_date = str(row.get("date") or "").strip()[:10]
+                if not raw_date:
+                    continue
+                try:
+                    latest_dates[str(symbol).upper()] = datetime.fromisoformat(raw_date).date()
+                    break
+                except ValueError:
+                    continue
+        return latest_dates
 
     def _fetch_fred_macro_rate_points(self, *, symbols: Sequence[str], as_of: str) -> list[dict[str, Any]]:
         api_key = str(os.getenv("FRED_API_KEY") or "").strip()
@@ -5062,7 +6120,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         points: list[dict[str, Any]] = []
         end_date = self._parse_snapshot_date(as_of) or date.today()
         start_date = end_date - timedelta(days=180)
-        for series_id in ("DGS2", "DGS10", "FEDFUNDS", "SOFR"):
+        for series_id in FRED_MACRO_RATE_SERIES:
             payload = self._request_phase2_json(
                 "https://api.stlouisfed.org/fred/series/observations",
                 {
@@ -5102,11 +6160,18 @@ class RealBacktestPlatformService(BacktestPlatformService):
         provider = PolygonMarketDataProvider()
         points: list[dict[str, Any]] = []
         as_of_date = (self._parse_snapshot_date(as_of) or date.today()).isoformat()
+        fallback_symbols: list[str] = []
+        last_error: Exception | None = None
         for symbol in symbols:
-            payload = provider._request_json(  # type: ignore[attr-defined]
-                f"/v3/snapshot/options/{urllib.parse.quote(symbol)}",
-                {"limit": "250"},
-            )
+            try:
+                payload = provider._request_json(  # type: ignore[attr-defined]
+                    f"/v3/snapshot/options/{urllib.parse.quote(symbol)}",
+                    {"limit": "250"},
+                )
+            except Exception as exc:
+                last_error = exc
+                fallback_symbols.append(str(symbol))
+                continue
             rows = payload.get("results") if isinstance(payload, Mapping) else []
             call_candidates: list[tuple[float, float]] = []
             put_candidates: list[tuple[float, float]] = []
@@ -5147,7 +6212,245 @@ class RealBacktestPlatformService(BacktestPlatformService):
                         "metadata": {"time_provenance": "snapshot_as_of"},
                     }
                 )
+        if fallback_symbols:
+            points.extend(
+                self._fetch_cboe_option_skew_points(
+                    symbols=fallback_symbols,
+                    as_of=as_of,
+                    fallback_reason=f"polygon_unavailable: {last_error}" if last_error else "polygon_unavailable",
+                )
+            )
         return points
+
+    def _fetch_cboe_option_skew_points(
+        self,
+        *,
+        symbols: Sequence[str],
+        as_of: str,
+        fallback_reason: str,
+    ) -> list[dict[str, Any]]:
+        normalized_symbols = self._normalize_refresh_symbols(symbols)
+        if not normalized_symbols:
+            return []
+        as_of_date = self._parse_snapshot_date(as_of) or date.today()
+        points: list[dict[str, Any]] = []
+        benchmark_points: list[dict[str, Any]] | None = None
+        for symbol in normalized_symbols:
+            try:
+                payload = self._request_cboe_delayed_option_payload(symbol)
+                symbol_points = self._option_skew_points_from_cboe_payload(
+                    symbol=symbol,
+                    payload=payload,
+                    as_of_date=as_of_date,
+                    source="cboe_delayed_quotes",
+                    fallback_reason=fallback_reason,
+                )
+            except Exception:
+                symbol_points = []
+            if symbol_points:
+                points.extend(symbol_points)
+                continue
+            if benchmark_points is None:
+                try:
+                    benchmark_payload = self._request_cboe_delayed_option_payload("SPY")
+                    benchmark_points = self._option_skew_points_from_cboe_payload(
+                        symbol="SPY",
+                        payload=benchmark_payload,
+                        as_of_date=as_of_date,
+                        source="cboe_delayed_quotes",
+                        fallback_reason=fallback_reason,
+                    )
+                except Exception:
+                    benchmark_points = []
+            points.extend(
+                self._proxy_option_skew_points_from_benchmark(
+                    symbol=symbol,
+                    benchmark_points=benchmark_points or [],
+                    as_of_date=as_of_date,
+                    fallback_reason=fallback_reason,
+                )
+            )
+        return points
+
+    def _request_cboe_delayed_option_payload(self, symbol: str) -> Mapping[str, Any]:
+        normalized_symbol = str(symbol or "").strip().upper().replace(".", "_")
+        if not normalized_symbol:
+            raise RuntimeError("CBOE option symbol is empty.")
+        url = f"https://cdn.cboe.com/api/global/delayed_quotes/options/{urllib.parse.quote(normalized_symbol)}.json"
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (compatible; GritStrategyLab/phase2-snapshot-refresh)",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if not isinstance(payload, Mapping):
+            raise RuntimeError(f"Unexpected CBOE option payload type: {type(payload).__name__}")
+        return payload
+
+    def _option_skew_points_from_cboe_payload(
+        self,
+        *,
+        symbol: str,
+        payload: Mapping[str, Any],
+        as_of_date: date,
+        source: str,
+        fallback_reason: str,
+    ) -> list[dict[str, Any]]:
+        data = payload.get("data") if isinstance(payload.get("data"), Mapping) else payload
+        option_rows = data.get("options") if isinstance(data, Mapping) else []
+        if not isinstance(option_rows, (list, tuple)):
+            return []
+        call_candidates: list[tuple[int, float, float]] = []
+        put_candidates: list[tuple[int, float, float]] = []
+        for row in option_rows:
+            if not isinstance(row, Mapping):
+                continue
+            iv_value = self._phase2_option_float(row.get("iv") or row.get("implied_volatility"))
+            if iv_value is None or iv_value <= 0:
+                continue
+            if iv_value > 5:
+                iv_value = iv_value / 100.0
+            delta = self._phase2_option_float(row.get("delta") or row.get("greek_delta"))
+            contract_type = self._cboe_contract_type(row)
+            expiry = self._cboe_option_expiry(row)
+            expiry_distance = abs(((expiry or as_of_date + timedelta(days=30)) - as_of_date).days - 30)
+            if contract_type == "call":
+                delta_value = abs(delta if delta is not None else 0.25)
+                call_candidates.append((expiry_distance, abs(delta_value - 0.25), iv_value))
+            elif contract_type == "put":
+                delta_value = abs(delta if delta is not None else -0.25)
+                put_candidates.append((expiry_distance, abs(delta_value - 0.25), iv_value))
+        if not call_candidates or not put_candidates:
+            return []
+        call_iv = sorted(call_candidates)[0][2]
+        put_iv = sorted(put_candidates)[0][2]
+        observed_date = self._cboe_payload_date(payload, as_of_date)
+        return self._build_option_skew_metric_points(
+            symbol=symbol,
+            observed_date=observed_date,
+            call_iv=call_iv,
+            put_iv=put_iv,
+            source=source,
+            fallback_source="polygon",
+            metadata={
+                "time_provenance": "cboe_delayed_quote_timestamp",
+                "fallback_reason": fallback_reason,
+            },
+        )
+
+    @staticmethod
+    def _phase2_option_float(value: Any) -> float | None:
+        try:
+            return float(str(value).replace("%", ""))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _cboe_contract_type(row: Mapping[str, Any]) -> str:
+        raw_type = str(
+            row.get("option_type")
+            or row.get("contract_type")
+            or row.get("type")
+            or ""
+        ).strip().lower()
+        if raw_type in {"call", "c"}:
+            return "call"
+        if raw_type in {"put", "p"}:
+            return "put"
+        contract_name = str(row.get("option") or row.get("symbol") or "").strip().upper()
+        match = re.search(r"(\d{6})([CP])(\d{8})$", contract_name)
+        if match:
+            return "call" if match.group(2) == "C" else "put"
+        delta = _coerce_float(row.get("delta") or row.get("greek_delta"), 0.0)
+        return "put" if delta < 0 else "call"
+
+    @staticmethod
+    def _cboe_option_expiry(row: Mapping[str, Any]) -> date | None:
+        raw_date = str(row.get("expiration_date") or row.get("expiry") or row.get("expiration") or "").strip()[:10]
+        if raw_date:
+            try:
+                return datetime.fromisoformat(raw_date).date()
+            except ValueError:
+                pass
+        contract_name = str(row.get("option") or row.get("symbol") or "").strip().upper()
+        match = re.search(r"(\d{6})([CP])(\d{8})$", contract_name)
+        if not match:
+            return None
+        try:
+            return datetime.strptime(match.group(1), "%y%m%d").date()
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _cboe_payload_date(payload: Mapping[str, Any], fallback: date) -> str:
+        data = payload.get("data") if isinstance(payload.get("data"), Mapping) else payload
+        for key in ("timestamp", "last_trade_time", "updated", "as_of"):
+            value = str((data if isinstance(data, Mapping) else payload).get(key) or "").strip()
+            if value:
+                return value[:10]
+        return fallback.isoformat()
+
+    def _proxy_option_skew_points_from_benchmark(
+        self,
+        *,
+        symbol: str,
+        benchmark_points: Sequence[Mapping[str, Any]],
+        as_of_date: date,
+        fallback_reason: str,
+    ) -> list[dict[str, Any]]:
+        metric_values = {
+            str(item.get("metric_key") or ""): item.get("metric_value")
+            for item in benchmark_points
+            if str(item.get("metric_key") or "")
+        }
+        if not {"iv_skew_put_call_25d", "call_25d_iv", "put_25d_iv"} <= set(metric_values):
+            return []
+        return self._build_option_skew_metric_points(
+            symbol=symbol,
+            observed_date=as_of_date.isoformat(),
+            call_iv=_coerce_float(metric_values.get("call_25d_iv"), 0.0),
+            put_iv=_coerce_float(metric_values.get("put_25d_iv"), 0.0),
+            source="cboe_benchmark_proxy",
+            fallback_source="polygon",
+            metadata={
+                "time_provenance": "benchmark_cboe_delayed_quote_timestamp",
+                "proxy_symbol": "SPY",
+                "fallback_reason": f"{fallback_reason}; symbol_cboe_chain_unavailable",
+            },
+        )
+
+    @staticmethod
+    def _build_option_skew_metric_points(
+        *,
+        symbol: str,
+        observed_date: str,
+        call_iv: float,
+        put_iv: float,
+        source: str,
+        fallback_source: str,
+        metadata: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_key": symbol,
+                "date": observed_date[:10],
+                "publish_date": observed_date[:10],
+                "available_at": observed_date[:10],
+                "metric_key": metric_key,
+                "metric_value": metric_value,
+                "source": source,
+                "fallback_source": fallback_source,
+                "metadata": dict(metadata),
+            }
+            for metric_key, metric_value in {
+                "iv_skew_put_call_25d": put_iv - call_iv,
+                "call_25d_iv": call_iv,
+                "put_25d_iv": put_iv,
+            }.items()
+        ]
 
     def _snapshot_missing_symbols(self, snapshot: Mapping[str, Any] | None) -> list[str]:
         metadata = dict(snapshot.get("metadata") or {}) if snapshot else {}
@@ -8788,7 +10091,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
         )
 
         with self._snapshot_refresh_lock:
-            latest = self.storage.fetch_one("SELECT * FROM snapshot_refresh_jobs ORDER BY created_at DESC LIMIT 1")
+            latest = self.storage.fetch_one(
+                "SELECT * FROM snapshot_refresh_jobs "
+                "ORDER BY COALESCE(updated_at, completed_at, started_at, created_at) DESC, created_at DESC, rowid DESC "
+                "LIMIT 1"
+            )
             latest_job = self._recover_interrupted_snapshot_job(self._decode_snapshot_refresh_job(latest))
             if latest_job and str(latest_job.get("status") or "").upper() == "RUNNING":
                 return self._build_snapshot_overview(latest_job)
@@ -9139,6 +10446,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     price_total_symbol_count = 0
                 if price_total_symbol_count > 0:
                     metadata["total_symbol_count"] = price_total_symbol_count
+        elif snapshot_id == DATASET_FUNDAMENTALS_SNAPSHOT_ID:
+            load_fundamental_coverage = getattr(
+                self.market_data_repository,
+                "load_dataset_fundamental_coverage",
+                None,
+            )
+            symbol_coverage = list(load_fundamental_coverage(snapshot_id)) if callable(load_fundamental_coverage) else []
         else:
             symbol_coverage = list(self.market_data_repository.load_dataset_symbol_coverage(snapshot_id))
             if not symbol_coverage:
@@ -9272,6 +10586,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             fundamental_coverage_rows = []
         analyst_snapshot_id = str((analyst_row or {}).get("id") or DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID)
         analyst_snapshot_status = str((analyst_row or {}).get("status") or "INCOMPLETE").upper()
+        analyst_metadata = dict((analyst_row or {}).get("metadata") or {})
         short_volume_snapshot_id = str((short_volume_row or {}).get("id") or DATASET_SHORT_VOLUME_SNAPSHOT_ID)
         short_volume_snapshot_status = str((short_volume_row or {}).get("status") or "INCOMPLETE").upper()
         macro_rates_snapshot_id = str((macro_rates_row or {}).get("id") or DATASET_MACRO_RATES_SNAPSHOT_ID)
@@ -9352,12 +10667,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
         fundamental_points = int(fundamental_counts.get("fundamental_points") or 0)
         fundamental_covered = int(fundamental_metadata.get("covered_symbol_count") or len(fundamental_coverage_rows) or 0)
         fundamental_total = int(fundamental_metadata.get("total_symbol_count") or max(len(fundamental_coverage_rows), 0))
+        fundamental_coverage_complete = fundamental_total <= 0 or fundamental_covered >= fundamental_total
         missing_publish_date_count = int(fundamental_time_contract.get("missing_publish_date_count") or 0)
         missing_available_at_count = int(fundamental_time_contract.get("missing_available_at_count") or 0)
         fundamental_ready = (
             fundamental_status in {"READY", "COMPLETED"}
             and fundamental_points > 0
             and bool(available_fields)
+            and fundamental_coverage_complete
             and missing_publish_date_count <= 0
             and missing_available_at_count <= 0
         )
@@ -9367,6 +10684,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
             blocked=not fundamental_ready and fundamental_points <= 0 and not available_fields,
         )
         analyst_point_rows = int(analyst_signal_contract.get("point_count") or 0)
+        analyst_covered_symbols = int(analyst_metadata.get("covered_symbol_count") or analyst_signal_contract.get("entity_count") or 0)
+        analyst_total_symbols = int(analyst_metadata.get("total_symbol_count") or analyst_covered_symbols or 0)
+        analyst_coverage_complete = analyst_total_symbols <= 0 or analyst_covered_symbols >= analyst_total_symbols
         short_volume_point_rows = int(short_volume_signal_contract.get("point_count") or 0)
         macro_rates_point_rows = int(macro_rates_signal_contract.get("point_count") or macro_rates_counts.get("signal_points") or 0)
         option_skew_point_rows = int(option_skew_signal_contract.get("point_count") or 0)
@@ -9383,6 +10703,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "READY"
             if analyst_snapshot_status in {"READY", "COMPLETED"}
             and analyst_point_rows >= analyst_required_points
+            and analyst_coverage_complete
             and int(analyst_signal_contract.get("missing_publish_date_count") or 0) <= 0
             and int(analyst_signal_contract.get("missing_available_at_count") or 0) <= 0
             else ("OBSERVATION" if analyst_point_rows > 0 else "BLOCKED")
@@ -9421,16 +10742,45 @@ class RealBacktestPlatformService(BacktestPlatformService):
             l3_blockers = [
                 f"阻塞理由：ds-analyst-consensus 当前 {min(analyst_point_rows, analyst_required_points)}/{analyst_required_points}，没有可进入 PIT/因子准入的有效样本；继续使用 ALPHAVANTAGE_API_KEY 拉取数据。"
             ]
-        macro_status = self._snapshot_readiness_status(
-            blocked=not market_ready,
-            ready=macro_rates_covered_series >= macro_rates_required_series
-            and option_skew_point_rows > 0
-            and int(macro_rates_signal_contract.get("missing_publish_date_count") or 0) <= 0
+        macro_rates_temporal_ready = (
+            int(macro_rates_signal_contract.get("missing_publish_date_count") or 0) <= 0
             and int(macro_rates_signal_contract.get("missing_available_at_count") or 0) <= 0
-            and int(option_skew_signal_contract.get("missing_publish_date_count") or 0) <= 0
-            and int(option_skew_signal_contract.get("missing_available_at_count") or 0) <= 0,
-            calibrating=market_ready,
         )
+        option_skew_temporal_ready = (
+            int(option_skew_signal_contract.get("missing_publish_date_count") or 0) <= 0
+            and int(option_skew_signal_contract.get("missing_available_at_count") or 0) <= 0
+        )
+        macro_rates_ready = (
+            macro_rates_covered_series >= macro_rates_required_series
+            and macro_rates_temporal_ready
+        )
+        option_skew_ready = option_skew_point_rows > 0 and option_skew_temporal_ready
+        macro_has_evidence = (
+            macro_rates_point_rows > 0
+            or macro_rates_covered_series > 0
+            or option_skew_point_rows > 0
+        )
+        macro_status = self._snapshot_readiness_status(
+            blocked=not macro_has_evidence,
+            ready=macro_rates_ready and option_skew_ready,
+            calibrating=macro_has_evidence,
+        )
+        if macro_status == "READY":
+            macro_summary = "宏观利率与期权偏度已经形成正式快照，可进入利率 Beta 与 IV Skew 特征校准。"
+            rate_beta_label = "可用"
+            iv_skew_label = "可用"
+        elif macro_status == "CALIBRATING":
+            macro_summary = (
+                "宏观利率序列已达标，期权偏度链路仍待补齐；利率 Beta 维持校准中，不按硬阻塞处理。"
+                if macro_rates_ready
+                else "利率和宏观序列已可进入 Beta 校准，期权偏度链路仍待补齐。"
+            )
+            rate_beta_label = "校准中"
+            iv_skew_label = "可用" if option_skew_point_rows > 0 else "待接入"
+        else:
+            macro_summary = "价格与回放链路尚未稳定，宏观敏感度与衍生品计算暂不开放。"
+            rate_beta_label = "待补"
+            iv_skew_label = "待接入"
         return [
             {
                 "layer_id": "l1_market_data",
@@ -9480,7 +10830,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     {"label": "发布日期门禁", "value": "已挂点时门禁" if fundamental_points > 0 else "待补"},
                 ],
                 "updated_at": str((fundamental_row or {}).get("as_of") or last_refreshed_at or ""),
-                "provider_keys": ["FMP_API_KEY"],
+                "provider_keys": ["SEC_USER_AGENT", "FMP_API_KEY"],
                 "linked_targets": [fundamental_snapshot_id],
                 "linked_target_evidence": [
                     {
@@ -9544,19 +10894,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "layer_id": "l4_macro_derivatives",
                 "title_cn": "L4 宏观与衍生品",
                 "status": macro_status,
-                "summary": (
-                    "利率和宏观序列已可进入 Beta 校准，期权偏度链路仍待补齐。"
-                    if macro_status == "CALIBRATING"
-                    else "价格与回放链路尚未稳定，宏观敏感度与衍生品计算暂不开放。"
-                ),
+                "summary": macro_summary,
                 "metrics": [
-                    {"label": "利率 Beta", "value": "校准中" if macro_status == "CALIBRATING" else "待补"},
+                    {"label": "利率 Beta", "value": rate_beta_label},
                     {
                         "label": "宏观利率数据",
                         "value": f"{min(macro_rates_covered_series, macro_rates_required_series)} / {macro_rates_required_series} 覆盖",
                     },
                     {"label": "通过标准", "value": f"{macro_rates_required_series} / {macro_rates_required_series}"},
-                    {"label": "IV Skew", "value": "待接入"},
+                    {"label": "IV Skew", "value": iv_skew_label},
                     {"label": "估值代理", "value": "可用" if valuation_status in {"READY", "COMPLETED"} else "待补"},
                 ],
                 "updated_at": last_refreshed_at,
@@ -9700,8 +11046,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "dimension_id": "macro_derivatives",
                 "title_cn": "宏观与衍生品",
                 "status": l4_status,
+                "summary": (
+                    "宏观序列和期权偏度仍在校准或待接入，当前按复核事项处理。"
+                    if l4_status in {"CALIBRATING", "WARNING", "PARTIAL_READY"}
+                    else "宏观与衍生品链路状态跟随 L4 快照层。"
+                ),
                 "supported_factors": ["利率敏感度", "通胀敞口", "商品 Beta", "IV Skew"],
-                "blockers": ["宏观序列和期权偏度仍在校准或待接入。"] if l4_status != "READY" else [],
+                "blockers": []
+                if l4_status in {"READY", "CALIBRATING", "WARNING", "PARTIAL_READY"}
+                else ["宏观序列和期权偏度仍在校准或待接入。"],
                 "linked_layers": ["l4_macro_derivatives"],
             },
         ]
@@ -9813,6 +11166,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         l2_status = str(by_id.get("l2_fundamental_data", {}).get("status") or "BLOCKED")
         l3_status = str(by_id.get("l3_sentiment_data", {}).get("status") or "WARNING")
         l4_status = str(by_id.get("l4_macro_derivatives", {}).get("status") or "CALIBRATING")
+        l4_summary = str(by_id.get("l4_macro_derivatives", {}).get("summary") or "")
         l3_summary = str(by_id.get("l3_sentiment_data", {}).get("summary") or "")
         l3_evidence = dict(by_id.get("l3_sentiment_data", {}).get("evidence_status") or {})
         analyst_gate_status = str(l3_evidence.get("analyst_consensus") or "DISABLED").upper()
@@ -9855,8 +11209,16 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "dimension_id": "macro_derivatives",
                 "title_cn": "宏观与衍生品",
                 "status": l4_status,
+                "summary": l4_summary
+                or (
+                    "宏观与期权特征源仍在校准，当前是非硬阻断的复核事项。"
+                    if l4_status in {"CALIBRATING", "WARNING"}
+                    else "宏观与衍生品链路状态跟随 L4 快照层。"
+                ),
                 "supported_factors": ["利率敏感度", "商品暴露", "利率 Beta", "IV Skew"],
-                "blockers": [] if l4_status == "READY" else ["宏观与衍生品链路仍未形成正式快照。"],
+                "blockers": []
+                if l4_status in {"READY", "CALIBRATING", "WARNING", "PARTIAL_READY"}
+                else ["宏观与衍生品链路仍未形成正式快照。"],
                 "linked_layers": ["l4_macro_derivatives"],
             },
         ]
@@ -9879,7 +11241,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 self.storage.insert_json_row("strategies", row)
 
     def _latest_snapshot_refresh_job(self) -> dict[str, Any] | None:
-        latest = self.storage.fetch_one("SELECT * FROM snapshot_refresh_jobs ORDER BY created_at DESC LIMIT 1")
+        latest = self.storage.fetch_one(
+            "SELECT * FROM snapshot_refresh_jobs "
+            "ORDER BY COALESCE(updated_at, completed_at, started_at, created_at) DESC, created_at DESC, rowid DESC "
+            "LIMIT 1"
+        )
         return self._recover_interrupted_snapshot_job(self._decode_snapshot_refresh_job(latest))
 
     def _build_snapshot_provider_attempts_payload(
@@ -10700,7 +12066,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             errors.extend(str(item) for item in (bond_fixed_income_refresh_stats.get("errors") or []) if item)
 
         if refresh_phase2:
-            phase2_symbols = self._phase2_refresh_symbols(
+            phase2_symbols, phase2_context = self._phase2_refresh_symbol_batch(
                 payload=payload,
                 selection_universe_snapshots=selection_universe_snapshots,
                 existing_price_coverage=existing_price_coverage,
@@ -10711,6 +12077,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 refresh_macro_derivatives=refresh_macro_derivatives,
                 symbols=phase2_symbols,
                 as_of=started_at,
+                phase2_context=phase2_context,
             )
 
         if refresh_universes and not refresh_market_data:
@@ -11400,7 +12767,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
         return self.get_snapshot_overview()
 
     def get_snapshot_overview(self) -> dict[str, Any]:
-        latest = self.storage.fetch_one("SELECT * FROM snapshot_refresh_jobs ORDER BY created_at DESC LIMIT 1")
+        latest = self.storage.fetch_one(
+            "SELECT * FROM snapshot_refresh_jobs "
+            "ORDER BY COALESCE(updated_at, completed_at, started_at, created_at) DESC, created_at DESC, rowid DESC "
+            "LIMIT 1"
+        )
         signature = "|".join(
             [
                 str((latest or {}).get("id") or ""),

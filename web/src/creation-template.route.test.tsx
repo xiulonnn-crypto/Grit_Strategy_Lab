@@ -47,7 +47,7 @@ describe('创建模板页', () => {
     ).toEqual([
       '策略名',
       '策略类型',
-      '10Y年化收益/夏普',
+      '10Y年化收益/夏普/回撤',
       '20Y年化收益/夏普',
       '30Y年化收益/夏普',
       '状态',
@@ -56,8 +56,9 @@ describe('创建模板页', () => {
       '操作',
     ]);
     expect(screen.getAllByRole('button', { name: '查看' }).length).toBeGreaterThan(0);
-    expect(screen.getAllByRole('button', { name: '回测' }).length).toBeGreaterThan(0);
-    expect(screen.getAllByRole('button', { name: '优化' }).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: '回测' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '优化' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '归档' }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole('button', { name: /一键生成/ }).length).toBeGreaterThan(0);
   });
 

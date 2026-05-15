@@ -1224,6 +1224,50 @@ function rankOptimizationCandidatesByObjective(
     }));
 }
 
+function getOptimizationCandidateVisibleMetricSignature(
+  candidate: OptimizationDisplayCandidate,
+): string | null {
+  const signature = [
+    formatReturnRate(
+      getCandidateMetric(candidate, "annualized_return") ??
+        getCandidateMetric(candidate, "cagr"),
+    ),
+    formatMetric(
+      getCandidateMetric(candidate, "return_sharpe") ??
+        getCandidateMetric(candidate, "sharpe"),
+    ),
+    formatMetric(getCandidateMetric(candidate, "out_of_sample_sharpe")),
+    formatPercentMetric(getCandidateMetric(candidate, "max_drawdown_pct")),
+    formatMetric(getCandidateMetric(candidate, "stability"), 0),
+  ];
+  return signature.every((value) => value === "-") ? null : signature.join("|");
+}
+
+function prioritizeVisibleDistinctOptimizationCandidates(
+  candidates: OptimizationDisplayCandidate[],
+): OptimizationDisplayCandidate[] {
+  const primary: OptimizationDisplayCandidate[] = [];
+  const duplicates: OptimizationDisplayCandidate[] = [];
+  const seenSignatures = new Set<string>();
+
+  for (const candidate of candidates) {
+    const signature = getOptimizationCandidateVisibleMetricSignature(candidate);
+    if (signature && seenSignatures.has(signature)) {
+      duplicates.push(candidate);
+      continue;
+    }
+    if (signature) {
+      seenSignatures.add(signature);
+    }
+    primary.push(candidate);
+  }
+
+  return [...primary, ...duplicates].map((candidate, index) => ({
+    ...candidate,
+    rank: index + 1,
+  }));
+}
+
 function getOptimizationAllCombinationsDefaultSortKey(
   objective: OptimizationObjective,
 ): OptimizationAllCombinationSortKey {
@@ -1295,7 +1339,7 @@ function sortOptimizationCandidatesForModal(
   sortKey: OptimizationAllCombinationSortKey,
   direction: SortDirection,
 ): OptimizationDisplayCandidate[] {
-  return [...candidates].sort((left, right) => {
+  const sortedCandidates = [...candidates].sort((left, right) => {
     let comparison = 0;
 
     switch (sortKey) {
@@ -1383,6 +1427,17 @@ function sortOptimizationCandidatesForModal(
 
     return String(left.id ?? "").localeCompare(String(right.id ?? ""));
   });
+  if (
+    sortKey === "annualized_return" ||
+    sortKey === "return_sharpe" ||
+    sortKey === "out_of_sample_sharpe" ||
+    sortKey === "max_drawdown_pct" ||
+    sortKey === "stability" ||
+    sortKey === "composite_score"
+  ) {
+    return prioritizeVisibleDistinctOptimizationCandidates(sortedCandidates);
+  }
+  return sortedCandidates;
 }
 
 export function buildOptimizationRerunPayload(
@@ -2744,9 +2799,8 @@ function mergeFullOptimizationMatchingCombinations(
   const sourceMatchingCombinations = shouldTrustFullMatchingCombinations
     ? fullMatchingCombinations
     : filterOptimizationCandidatesByConstraints(fullMatchingCombinations, constraints);
-  const matchingCombinations = rankOptimizationCandidatesByObjective(
-    sourceMatchingCombinations,
-    objective,
+  const matchingCombinations = prioritizeVisibleDistinctOptimizationCandidates(
+    rankOptimizationCandidatesByObjective(sourceMatchingCombinations, objective),
   );
   const matchingCombinationCount = matchingCombinations.length;
   const matchingCombinationSource =
@@ -4843,9 +4897,11 @@ export function OptimizationResultsPage({
         job?.candidates ?? [],
         optimizationConstraints,
       );
-      return rankOptimizationCandidatesByObjective(
-        filteredCandidates,
-        optimizationObjective,
+      return prioritizeVisibleDistinctOptimizationCandidates(
+        rankOptimizationCandidatesByObjective(
+          filteredCandidates,
+          optimizationObjective,
+        ),
       );
     },
     [job?.candidates, optimizationConstraints, optimizationObjective],
@@ -4865,9 +4921,11 @@ export function OptimizationResultsPage({
         job.matching_combinations,
         optimizationConstraints,
       );
-      return rankOptimizationCandidatesByObjective(
-        filteredCandidates,
-        optimizationObjective,
+      return prioritizeVisibleDistinctOptimizationCandidates(
+        rankOptimizationCandidatesByObjective(
+          filteredCandidates,
+          optimizationObjective,
+        ),
       );
     },
     [

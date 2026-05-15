@@ -2,16 +2,25 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CompositionDashboardPage } from './pages/composition-dashboard-page';
-import type { ApiCompositionListItem, ApiCompositionStatusDiagnosis } from './types';
+import type {
+  ApiCompositionGlobalAllocationJobListItem,
+  ApiCompositionGlobalBacktestRunListItem,
+  ApiCompositionListItem,
+  ApiCompositionStatusDiagnosis,
+} from './types';
 
 type FakeApi = {
   listCompositions?: ReturnType<typeof vi.fn>;
+  listCompositionBacktestRuns?: ReturnType<typeof vi.fn>;
+  listCompositionAllocationJobs?: ReturnType<typeof vi.fn>;
   getCompositionDetail?: ReturnType<typeof vi.fn>;
   updateComposition?: ReturnType<typeof vi.fn>;
 };
 
 const fakeApi = vi.hoisted<FakeApi>(() => ({
   listCompositions: vi.fn(),
+  listCompositionBacktestRuns: vi.fn(),
+  listCompositionAllocationJobs: vi.fn(),
   getCompositionDetail: vi.fn(),
   updateComposition: vi.fn(),
 }));
@@ -98,6 +107,94 @@ const compositions: ApiCompositionListItem[] = [
   },
 ];
 
+const compositionBacktestRuns: ApiCompositionGlobalBacktestRunListItem[] = [
+  {
+    id: 'comp-run-record-100',
+    run_id: 'comp-run-100',
+    composition_id: 'comp-balanced',
+    composition_name: 'Balanced Runtime Combo',
+    composition_version_label: 'v7',
+    status: 'COMPLETED',
+    time_period_label: '10Y',
+    verdict_label: '稳定',
+    verdict_detail: 'verified_from_composition_detail_preview',
+    annualized_return: 0.103,
+    sharpe: 1.18,
+    max_drawdown: -0.082,
+    scenario_label: '2022 紧缩窗口',
+    scenario_status_label: '压力通过',
+    created_at: '2026-04-20T02:00:00.000Z',
+    completed_at: '2026-04-20T02:30:00.000Z',
+  },
+  {
+    id: 'comp-run-record-archived',
+    run_id: 'comp-run-archived',
+    composition_id: 'comp-archived',
+    composition_name: 'Archived Hidden Composition',
+    composition_version_label: 'v1',
+    status: 'COMPLETED',
+    time_period_label: '10Y',
+    verdict_label: '已归档',
+    verdict_detail: '归档记录不进入最近活动',
+    annualized_return: 0.031,
+    sharpe: 0.34,
+    max_drawdown: -0.094,
+    scenario_label: 'Archived scenario',
+    scenario_status_label: 'archived',
+    created_at: '2026-04-21T02:00:00.000Z',
+    completed_at: '2026-04-21T02:30:00.000Z',
+  },
+];
+
+const compositionAllocationJobs: ApiCompositionGlobalAllocationJobListItem[] = [
+  {
+    id: 'alloc-record-200',
+    job_id: 'alloc-job-200',
+    composition_id: 'comp-growth',
+    composition_name: 'Growth Runtime Combo',
+    composition_version_label: 'v5',
+    status: 'COMPLETED',
+    method_key: 'risk_parity',
+    method_label: 'Risk Parity',
+    method_detail: '资产配置候选已生成',
+    best_candidate_label: '风险平价候选',
+    candidate_count: 6,
+    promotion_ready_count: 0,
+    promotion_gate_label: '测试参考',
+    gate_status: 'reference',
+    migration_cost_bps: 8,
+    annualized_return_delta: 0.014,
+    sharpe_delta: 0.11,
+    max_drawdown_delta: -0.02,
+    enb: 78,
+    created_at: '2026-04-19T04:00:00.000Z',
+    completed_at: '2026-04-19T04:20:00.000Z',
+  },
+  {
+    id: 'alloc-record-archived',
+    job_id: 'alloc-job-archived',
+    composition_id: 'comp-archived',
+    composition_name: 'Archived Hidden Composition',
+    composition_version_label: 'v1',
+    status: 'COMPLETED',
+    method_key: 'black_litterman',
+    method_label: 'Black-Litterman',
+    method_detail: 'efficient frontier generated',
+    best_candidate_label: 'Archived candidate',
+    candidate_count: 1,
+    promotion_ready_count: 0,
+    promotion_gate_label: 'archived',
+    gate_status: 'blocked',
+    migration_cost_bps: 0,
+    annualized_return_delta: 0,
+    sharpe_delta: 0,
+    max_drawdown_delta: 0,
+    enb: 1,
+    created_at: '2026-04-22T04:00:00.000Z',
+    completed_at: '2026-04-22T04:20:00.000Z',
+  },
+];
+
 const driftDiagnosis: ApiCompositionStatusDiagnosis = {
   status: '待校准',
   issue_type: '逻辑一致性漂移',
@@ -118,6 +215,8 @@ const driftDiagnosis: ApiCompositionStatusDiagnosis = {
 
 beforeEach(() => {
   fakeApi.listCompositions = vi.fn().mockResolvedValue(compositions);
+  fakeApi.listCompositionBacktestRuns = vi.fn().mockResolvedValue(compositionBacktestRuns);
+  fakeApi.listCompositionAllocationJobs = vi.fn().mockResolvedValue(compositionAllocationJobs);
   fakeApi.getCompositionDetail = vi.fn().mockImplementation((id: string) =>
     Promise.resolve({
       id,
@@ -165,15 +264,32 @@ describe('composition dashboard page', () => {
     expect(root).not.toBeNull();
     expect(screen.getByRole('heading', { level: 2, name: '我的组合' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '待处理动作' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: '最近活动' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '最近回测优化' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '组合观察' })).toBeInTheDocument();
     expect(screen.getAllByText('平衡收益组合').length).toBeGreaterThan(0);
     expect(screen.getAllByText('成长增强组合').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('固定收益防守草稿').length).toBeGreaterThan(0);
     expect(screen.queryByText('Archived Hidden Composition')).toBeNull();
     expect(document.querySelectorAll('.composition-dashboard-card')).toHaveLength(2);
     expect(document.querySelectorAll('.composition-dashboard-task')).toHaveLength(3);
-    expect(document.querySelectorAll('.composition-dashboard-activity')).toHaveLength(4);
+    await waitFor(() => expect(document.querySelectorAll('.composition-dashboard-activity')).toHaveLength(2));
+    expect(fakeApi.listCompositionBacktestRuns).toHaveBeenCalledTimes(1);
+    expect(fakeApi.listCompositionAllocationJobs).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('回测记录 #100')).toBeInTheDocument();
+    expect(screen.getByText('优化记录 #200')).toBeInTheDocument();
+    expect(screen.getByText('组合回测')).toBeInTheDocument();
+    expect(screen.getByText('组合优化')).toBeInTheDocument();
+    expect(screen.getByText(/风险平价/)).toBeInTheDocument();
+    expect(screen.getByText(/10 年窗口/)).toBeInTheDocument();
+    expect(screen.getByText(/来自组合详情预演的已验证证据/)).toBeInTheDocument();
+    expect(screen.queryByText(/Risk Parity/)).toBeNull();
+    expect(screen.queryByText(/verified_from_composition_detail_preview/)).toBeNull();
+    expect(screen.queryByText(/Growth Runtime Combo/)).toBeNull();
+    expect(screen.queryByText(/Archived Hidden Composition/)).toBeNull();
+    expect(screen.queryByText(/优化记录 #archived/)).toBeNull();
+    fireEvent.click(screen.getByText('回测记录 #100').closest('button') as HTMLButtonElement);
+    await waitFor(() => expect(window.location.hash).toBe('#/compositions/comp-balanced/backtest-runs/comp-run-100'));
+    fireEvent.click(screen.getByText('优化记录 #200').closest('button') as HTMLButtonElement);
+    await waitFor(() => expect(window.location.hash).toBe('#/compositions/comp-growth/allocation-jobs/alloc-job-200'));
     expect(screen.queryByText(/当前最大回撤达到 -12\.9%/)).toBeNull();
     expect(screen.queryByText('策略工作台')).toBeNull();
     expect(screen.getByText('冻结来源覆盖')).toBeInTheDocument();

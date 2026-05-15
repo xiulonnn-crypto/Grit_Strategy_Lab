@@ -780,7 +780,8 @@ describe('SnapshotsPage', () => {
       return snapshotsCss.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`, 's'))?.[1] ?? '';
     };
 
-    expect(readRule('.snapshots-page')).toContain('--snapshots-global-dashboard-min-height: 248px');
+    expect(readRule('.snapshots-page')).toContain('--snapshots-global-dashboard-min-height: 200px');
+    expect(readRule('.snapshots-page')).toContain('--snapshots-global-dashboard-card-height: 150px');
     expect(readRule('.snapshots-page')).toContain(
       'font-family: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif',
     );
@@ -796,7 +797,17 @@ describe('SnapshotsPage', () => {
     expect(readRule('.snapshots-equity-view > .panel.snapshots-equity-overview')).toContain(
       'min-height: var(--snapshots-global-dashboard-min-height)',
     );
+    expect(readRule('.snapshots-equity-view > .panel.snapshots-equity-overview')).toContain('padding: 12px 18px 7px');
     expect(readRule('.snapshots-equity-view .metric-card')).not.toMatch(/min-height:\s*(?:1[4-9]\d|[2-9]\d{2,})px/);
+    expect(readRule('.snapshots-equity-view .snapshots-equity-overview .metric-card')).toContain(
+      'height: var(--snapshots-global-dashboard-card-height)',
+    );
+    expect(readRule('.snapshots-equity-view .snapshots-equity-overview .metric-card small')).toContain(
+      '-webkit-line-clamp: 3',
+    );
+    expect(readRule('.snapshots-equity-view .snapshots-equity-overview .metric-card small')).toContain(
+      'font-size: 14px',
+    );
     expect(readRule('.snapshots-equity-view .bond-core-card')).not.toMatch(/min-height:\s*(?:3[0-9]\d|[4-9]\d{2,})px/);
     expect(readRule('.snapshots-equity-view .detail-rail .rail-panel:last-child')).not.toMatch(/min-height:\s*(?:3[0-9]\d|[4-9]\d{2,})px/);
     expect(readRule('.snapshots-equity-view .snapshots-bond-source-stack')).toContain('gap: 8px');
@@ -813,7 +824,8 @@ describe('SnapshotsPage', () => {
       return snapshotsCss.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`, 's'))?.[1] ?? '';
     };
 
-    expect(readRule('.snapshots-page')).toContain('--snapshots-global-dashboard-min-height: 248px');
+    expect(readRule('.snapshots-page')).toContain('--snapshots-global-dashboard-min-height: 200px');
+    expect(readRule('.snapshots-page')).toContain('--snapshots-global-dashboard-card-height: 150px');
     expect(readRule('.snapshots-bond-view')).not.toMatch(/margin-top:\s*(?:[3-9]\d|[1-9]\d{2,})px/);
     expect(readRule('.snapshots-bond-view')).toContain('gap: 23px');
     expect(readRule('.snapshots-page.snapshots-page--bond')).toContain('gap: 16px');
@@ -821,7 +833,14 @@ describe('SnapshotsPage', () => {
     expect(readRule('.snapshots-bond-health-panel')).toContain(
       'min-height: var(--snapshots-global-dashboard-min-height)',
     );
-    expect(readRule('.snapshots-bond-health-panel')).toContain('padding: 14px 18px');
+    expect(readRule('.snapshots-bond-health-panel')).toContain('padding: 12px 18px 7px');
+    expect(readRule('.snapshots-bond-health-panel .snapshots-bond-pulse-card')).toContain(
+      'height: var(--snapshots-global-dashboard-card-height)',
+    );
+    expect(readRule('.snapshots-bond-health-panel .snapshots-bond-pulse-card p,\n.snapshots-bond-health-panel .snapshots-bond-pulse-card span')).toContain(
+      'font-size: 14px',
+    );
+    expect(readRule('.snapshots-bond-health-panel .snapshots-bond-ring-svg')).toContain('width: 64px');
     expect(readRule('.snapshots-page .snapshots-bond-panel')).toContain('box-shadow: none');
     expect(readRule('.snapshots-bond-workstation-grid')).toContain('grid-template-columns: minmax(0, 1fr) 330px');
     expect(readRule('.snapshots-bond-audit-layout')).toContain('grid-template-columns: minmax(0, 1fr) 330px');
@@ -872,6 +891,8 @@ describe('SnapshotsPage', () => {
         mode: 'repair',
         targets: ['price', 'corporate', 'valuations', 'universes', 'fundamentals', 'sentiment', 'macro_derivatives'],
         reason: 'manual-refresh-latest-and-repair',
+        phase2_scope: 'sp500_10y',
+        phase2_max_symbols: 25,
       }),
     );
   });
@@ -936,10 +957,10 @@ describe('SnapshotsPage', () => {
         {
           layer_id: 'l4_macro_derivatives',
           title_cn: 'L4 宏观与衍生品',
-          status: 'BLOCKED',
-          summary: '价格与回放链路尚未稳定，宏观敏感度与衍生品计算暂不开放。',
+          status: 'CALIBRATING',
+          summary: '利率和宏观序列已可进入 Beta 校准，期权偏度链路仍待补齐。',
           metrics: [
-            { label: '利率 Beta', value: '待补' },
+            { label: '利率 Beta', value: '校准中' },
             { label: '宏观利率数据', value: '4 / 10 覆盖' },
             { label: '通过标准', value: '10 / 10' },
             { label: 'IV Skew', value: '待接入' },
@@ -974,11 +995,11 @@ describe('SnapshotsPage', () => {
         {
           dimension_id: 'macro_derivatives',
           title_cn: '宏观与衍生品',
-          status: 'BLOCKED',
+          status: 'CALIBRATING',
           supported_factors: ['利率敏感度', 'IV Skew'],
-          blockers: ['宏观序列和期权偏度仍在校准或待接入。'],
+          blockers: [],
           linked_layers: ['l4_macro_derivatives'],
-          summary: '宏观序列和期权偏度仍在校准或待接入。',
+          summary: '利率和宏观序列已可进入 Beta 校准，期权偏度链路仍待补齐。',
         },
       ],
     };
@@ -999,7 +1020,7 @@ describe('SnapshotsPage', () => {
     if (!l2Card) {
       throw new Error('L2 财务截面 metric card was not rendered');
     }
-    expect(within(l2Card).getByText('就绪')).toBeInTheDocument();
+    expect(within(l2Card).getByText('已就绪')).toBeInTheDocument();
     expect(l2Card).toHaveTextContent('财务字段和发布时点门禁已形成可计算基础，可进入质量与稳健性因子研究。');
 
     const l4Card = within(globalView)
@@ -1009,18 +1030,20 @@ describe('SnapshotsPage', () => {
     if (!l4Card) {
       throw new Error('L4 宏观与衍生品 metric card was not rendered');
     }
-    expect(l4Card).toHaveTextContent('阻塞');
-    expect(l4Card).toHaveTextContent('价格与回放链路尚未稳定，宏观敏感度与衍生品计算暂不开放。');
+    expect(l4Card).toHaveTextContent('校准中');
+    expect(l4Card).not.toHaveTextContent('阻塞');
+    expect(l4Card).toHaveTextContent('利率和宏观序列已可进入 Beta 校准，期权偏度链路仍待补齐。');
 
-    const matrixSection = screen.getByRole('heading', { name: '因子维度就绪矩阵' }).closest('section');
+    const matrixSection = screen.getByRole('heading', { name: '因子维度就绪矩阵' }).closest('article');
     if (!matrixSection) {
       throw new Error('因子维度就绪矩阵 section was not rendered');
     }
     expect(within(matrixSection).getByText('质量与估值')).toBeInTheDocument();
     expect(within(matrixSection).getByText('宏观与衍生品')).toBeInTheDocument();
-    expect(within(matrixSection).getByText('宏观序列和期权偏度仍在校准或待接入。')).toBeInTheDocument();
+    expect(within(matrixSection).getByText('利率和宏观序列已可进入 Beta 校准，期权偏度链路仍待补齐。')).toBeInTheDocument();
+    expect(within(matrixSection).getByText('校准中')).toBeInTheDocument();
 
-    const alertSection = screen.getByRole('heading', { name: '异常核查' }).closest('section');
+    const alertSection = screen.getByRole('heading', { name: '异常核查' }).closest('article');
     if (!alertSection) {
       throw new Error('异常核查 section was not rendered');
     }
@@ -1029,6 +1052,75 @@ describe('SnapshotsPage', () => {
     expect(within(alertSection).getByText(/继续使用 ALPHAVANTAGE_API_KEY/)).toBeInTheDocument();
     expect(within(alertSection).getByText('利率 Beta 校准中')).toBeInTheDocument();
     expect(within(alertSection).getByText(/宏观利率数据当前 4 \/ 10 覆盖，通过标准 10 \/ 10/)).toBeInTheDocument();
+  });
+
+
+  it('keeps the raw fundamental ledger aligned with the L2 governance state', async () => {
+    const staleFundamentalOverview: SnapshotOverviewEquityReadiness = {
+      ...overview,
+      dataset_snapshots: [
+        ...overview.dataset_snapshots,
+        {
+          id: 'ds-fundamentals',
+          name: 'Fundamental PIT data',
+          status: 'READY',
+          as_of: '2026-05-15',
+          freshness_label: 'phase2 refresh',
+          start_date: '1970-01-02',
+          end_date: '2026-05-13',
+          row_count: 99600,
+          source: 'sec_edgar',
+          fallback_source: null,
+          blocker: null,
+          metadata: {
+            covered_symbol_count: 0,
+            total_symbol_count: 1482,
+            missing_symbols: ['AAPL'],
+            available_fields: ['market_cap'],
+          },
+        },
+      ],
+      data_layer_readiness: [
+        ...(overview.data_layer_readiness ?? []).filter((item) => String(item.layer_id ?? '') !== 'l2'),
+        {
+          layer_id: 'l2_fundamental_data',
+          title_cn: 'L2 财务截面',
+          status: 'WARNING',
+          summary: '财务快照已有部分字段，但发布日期或覆盖率仍待继续补齐。',
+          metrics: [
+            { label: '覆盖', value: '300/1482' },
+            { label: '字段数', value: 17 },
+            { label: '发布日期门禁', value: '已挂点时门禁' },
+          ],
+          updated_at: '2026-05-15',
+          provider_keys: ['SEC_USER_AGENT', 'FMP_API_KEY'],
+          linked_targets: ['ds-fundamentals'],
+          linked_target_evidence: [
+            {
+              dataset_id: 'ds-fundamentals',
+              evidence_kind: 'dataset_snapshot',
+            },
+          ],
+        },
+      ],
+    };
+    fakeApi.getSnapshotOverview.mockResolvedValue(staleFundamentalOverview);
+
+    renderSnapshotsPage();
+
+    const ledgerSection = (await screen.findByRole('heading', { name: '原始快照清单' })).closest('section');
+    if (!ledgerSection) {
+      throw new Error('原始快照清单 section was not rendered');
+    }
+    const fundamentalRow = within(ledgerSection).getByText('ds-fundamentals').closest('article');
+    if (!fundamentalRow) {
+      throw new Error('ds-fundamentals ledger row was not rendered');
+    }
+
+    expect(fundamentalRow).toHaveTextContent('需复核');
+    expect(fundamentalRow).toHaveTextContent(/覆盖 300\/1482/);
+    expect(fundamentalRow).toHaveTextContent('财务快照已有部分字段，但发布日期或覆盖率仍待继续补齐。');
+    expect(fundamentalRow).not.toHaveTextContent('0 / 1,482 覆盖');
   });
 
 
@@ -1083,10 +1175,10 @@ describe('SnapshotsPage', () => {
         {
           layer_id: 'l4_macro_derivatives',
           title_cn: 'L4 宏观与衍生品',
-          status: 'BLOCKED',
-          summary: '价格与回放链路尚未稳定，宏观敏感度与衍生品计算暂不开放。',
+          status: 'CALIBRATING',
+          summary: '利率和宏观序列已可进入 Beta 校准，期权偏度链路仍待补齐。',
           metrics: [
-            { label: '利率 Beta', value: '待补' },
+            { label: '利率 Beta', value: '校准中' },
             { label: '宏观利率数据', value: '4 / 10 覆盖' },
             { label: '通过标准', value: '10 / 10' },
             { label: 'IV Skew', value: '待接入' },
@@ -1841,6 +1933,8 @@ describe('SnapshotsPage', () => {
         mode: 'repair',
         targets: ['price', 'corporate', 'valuations', 'universes', 'fundamentals', 'sentiment', 'macro_derivatives'],
         reason: 'manual-refresh-latest-and-repair',
+        phase2_scope: 'sp500_10y',
+        phase2_max_symbols: 25,
       }),
     );
 

@@ -3,6 +3,7 @@ import type {
   ApiBacktestRunTradeAudit,
   ApiCashLeg,
   ApiCompositionDetail,
+  ApiFactorDetail,
   ApiOptimizationCandidate,
   ApiOptimizationJobDetail,
   ApiStrategyCreationSession,
@@ -17,6 +18,7 @@ export type DemoState = {
   assetLegs: ApiAssetLeg[];
   cashLegs: ApiCashLeg[];
   compositions: ApiCompositionDetail[];
+  factors: ApiFactorDetail[];
   optimizationJobs: ApiOptimizationJobDetail[];
   sessions: ApiStrategyCreationSession[];
   runs: import('../types').ApiBacktestRunDetail[];

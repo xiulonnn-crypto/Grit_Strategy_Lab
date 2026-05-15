@@ -48,16 +48,25 @@ MAX_AST_DEPTH = 18
 
 FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "Close": ("Close", "close", "adj_close", "adjusted_close"),
+    "Open": ("Open", "open", "adj_open", "adjusted_open"),
+    "Volume": ("Volume", "volume"),
     "MarketCap": ("MarketCap", "market_cap"),
     "BookValueEquity": ("BookValueEquity", "book_value_equity"),
+    "NetIncome": ("NetIncome", "net_income"),
     "LtmEarnings": ("LtmEarnings", "ltm_earnings"),
+    "OperatingCashFlow": ("OperatingCashFlow", "operating_cash_flow"),
     "OperatingCashFlowLTM": (
         "OperatingCashFlowLTM",
         "operating_cash_flow_ltm",
         "operating_cash_flow",
     ),
+    "SharesOutstanding": ("SharesOutstanding", "shares_outstanding", "total_shares"),
+    "TotalAssets": ("TotalAssets", "total_assets"),
     "CapexLTM": ("CapexLTM", "capex_ltm", "capex"),
     "EnterpriseValue": ("EnterpriseValue", "enterprise_value"),
+    "Turnover": ("Turnover", "turnover"),
+    "RetUp": ("RetUp", "ret_up"),
+    "RetDown": ("RetDown", "ret_down"),
 }
 
 FIELD_NAMES = frozenset(FIELD_ALIASES)
@@ -65,6 +74,14 @@ FUNCTION_NAMES = frozenset(
     {
         "Return",
         "Std",
+        "StdDev",
+        "Mean",
+        "Sum",
+        "Abs",
+        "Correlation",
+        "Skew",
+        "Ts_Rank",
+        "TsRank",
         "Log",
         "Rank",
         "ZScore",
@@ -365,6 +382,31 @@ class _Evaluator:
         if name == "Std":
             self._expect_arg_count(name, node.args, 2)
             return _rolling_std(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
+        if name == "StdDev":
+            self._expect_arg_count(name, node.args, 2)
+            return _rolling_std(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
+        if name == "Mean":
+            self._expect_arg_count(name, node.args, 2)
+            return _rolling_mean(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
+        if name == "Sum":
+            self._expect_arg_count(name, node.args, 2)
+            return _rolling_sum(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
+        if name == "Abs":
+            self._expect_arg_count(name, node.args, 1)
+            return _map_series(self.to_series(self.evaluate(node.args[0])), abs)
+        if name == "Correlation":
+            self._expect_arg_count(name, node.args, 3)
+            return _rolling_correlation(
+                self.to_series(self.evaluate(node.args[0])),
+                self.to_series(self.evaluate(node.args[1])),
+                self._positive_int(node.args[2]),
+            )
+        if name == "Skew":
+            self._expect_arg_count(name, node.args, 2)
+            return _rolling_skew(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
+        if name in {"Ts_Rank", "TsRank"}:
+            self._expect_arg_count(name, node.args, 2)
+            return _rolling_ts_rank(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
         if name == "Log":
             self._expect_arg_count(name, node.args, 1)
             return _map_series(self.to_series(self.evaluate(node.args[0])), _safe_log)
@@ -389,6 +431,18 @@ class _Evaluator:
         for alias in aliases:
             if alias in self._data:
                 return _coerce_series(self._data[alias])
+        if canonical_name == "Turnover":
+            return _binary_series(
+                self._resolve_field("Volume"),
+                self._resolve_field("SharesOutstanding"),
+                lambda volume, shares: None if shares == 0 else volume / shares,
+                self._length,
+            )
+        if canonical_name in {"RetUp", "RetDown"}:
+            returns = _return_series(self._resolve_field("Close"), 1)
+            if canonical_name == "RetUp":
+                return [value if value is not None and value > 0 else None for value in returns]
+            return [value if value is not None and value < 0 else None for value in returns]
         raise UnknownFieldError(f"field not available in data: {canonical_name}")
 
     def _parse_time_lag(self, node: ast.AST) -> int:
@@ -487,6 +541,94 @@ def _rolling_std(series: Series, window: int) -> Series:
         else:
             result.append(statistics.pstdev(value for value in window_values if value is not None))
     return result
+
+
+def _rolling_mean(series: Series, window: int) -> Series:
+    result: Series = []
+    for index in range(len(series)):
+        if index + 1 < window:
+            result.append(None)
+            continue
+        window_values = series[index + 1 - window : index + 1]
+        finite_values = [value for value in window_values if value is not None]
+        result.append(statistics.fmean(finite_values) if len(finite_values) == window else None)
+    return result
+
+
+def _rolling_sum(series: Series, window: int) -> Series:
+    result: Series = []
+    for index in range(len(series)):
+        if index + 1 < window:
+            result.append(None)
+            continue
+        window_values = series[index + 1 - window : index + 1]
+        finite_values = [value for value in window_values if value is not None]
+        result.append(sum(finite_values) if len(finite_values) == window else None)
+    return result
+
+
+def _rolling_correlation(left: Series, right: Series, window: int) -> Series:
+    result: Series = []
+    for index in range(len(left)):
+        if index + 1 < window:
+            result.append(None)
+            continue
+        left_values = left[index + 1 - window : index + 1]
+        right_values = right[index + 1 - window : index + 1]
+        if any(value is None for value in left_values) or any(value is None for value in right_values):
+            result.append(None)
+            continue
+        left_finite = [float(value) for value in left_values if value is not None]
+        right_finite = [float(value) for value in right_values if value is not None]
+        result.append(_pearson_series(left_finite, right_finite))
+    return result
+
+
+def _rolling_skew(series: Series, window: int) -> Series:
+    result: Series = []
+    for index in range(len(series)):
+        if index + 1 < window:
+            result.append(None)
+            continue
+        window_values = series[index + 1 - window : index + 1]
+        finite_values = [float(value) for value in window_values if value is not None]
+        if len(finite_values) != window or len(finite_values) < 3:
+            result.append(None)
+            continue
+        mean = statistics.fmean(finite_values)
+        stdev = statistics.stdev(finite_values)
+        if stdev <= 0:
+            result.append(None)
+            continue
+        count = len(finite_values)
+        result.append(count / ((count - 1) * (count - 2)) * sum(((value - mean) / stdev) ** 3 for value in finite_values))
+    return result
+
+
+def _rolling_ts_rank(series: Series, window: int) -> Series:
+    result: Series = []
+    for index, value in enumerate(series):
+        if value is None or index + 1 < window:
+            result.append(None)
+            continue
+        window_values = [item for item in series[index + 1 - window : index + 1] if item is not None]
+        if len(window_values) != window:
+            result.append(None)
+            continue
+        result.append(sum(1 for item in window_values if item <= value) / len(window_values))
+    return result
+
+
+def _pearson_series(left: Sequence[float], right: Sequence[float]) -> float | None:
+    if len(left) != len(right) or len(left) < 2:
+        return None
+    left_mean = statistics.fmean(left)
+    right_mean = statistics.fmean(right)
+    numerator = sum((x - left_mean) * (y - right_mean) for x, y in zip(left, right))
+    left_var = sum((x - left_mean) ** 2 for x in left)
+    right_var = sum((y - right_mean) ** 2 for y in right)
+    denominator = math.sqrt(left_var * right_var)
+    return None if denominator <= 1e-12 else numerator / denominator
 
 
 def _rank_series(series: Series) -> Series:

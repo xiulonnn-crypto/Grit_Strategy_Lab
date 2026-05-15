@@ -3011,6 +3011,124 @@ describe("optimization module flow", () => {
     });
   });
 
+  it("keeps the candidate panel visually distinct when raw objective ties cluster together", async () => {
+    const api = createOptimizationTestApi() as OptimizationTestApi;
+    const originalGetOptimizationJobDetail =
+      api.getOptimizationJobDetail.bind(api);
+
+    api.getOptimizationJobDetail = async (
+      jobId: string,
+    ): Promise<ApiOptimizationJobDetail> => {
+      const job = await originalGetOptimizationJobDetail(jobId);
+      if (jobId !== "opt-001") {
+        return job;
+      }
+      const easyConstraints = [
+        {
+          key: "return_sharpe",
+          label: "收益夏普",
+          category: "return" as const,
+          operator: ">=" as const,
+          value: -100,
+          baseline_value: -100,
+          unit: "",
+          source: "manual" as const,
+        },
+      ];
+      const baseCandidate = job.candidates[0]!;
+      const makeCombination = (
+        id: string,
+        rank: number,
+        topN: number,
+        annualizedReturn: number,
+        returnSharpe: number,
+        outOfSampleSharpe: number,
+        maxDrawdownPct: number,
+        stability: number,
+      ): ApiOptimizationCandidate => ({
+        ...structuredClone(baseCandidate),
+        id,
+        rank,
+        label: `候选 ${rank}`,
+        title: `候选 ${rank}`,
+        parameter_snapshot: {
+          ...structuredClone(baseCandidate.parameter_snapshot),
+          top_n: topN,
+        },
+        metrics: {
+          ...structuredClone(baseCandidate.metrics),
+          annualized_return: annualizedReturn,
+          return_sharpe: returnSharpe,
+          out_of_sample_sharpe: outOfSampleSharpe,
+          max_drawdown_pct: maxDrawdownPct,
+          stability,
+        },
+        score: returnSharpe,
+      });
+
+      job.request.constraints = structuredClone(easyConstraints);
+      job.summary.constraints = structuredClone(easyConstraints);
+      job.result.constraints = structuredClone(easyConstraints);
+      job.matching_combinations = [
+        makeCombination("trial_10", 1, 50, 0.294265, 0.906057, 1.18747, -67.1, 44),
+        makeCombination("trial_11", 2, 55, 0.294264, 0.906056, 1.18746, -67.1, 44),
+        makeCombination("trial_12", 3, 60, 0.294263, 0.906055, 1.18745, -67.1, 44),
+        makeCombination("trial_30", 4, 10, 0.2835, 0.884, 1.1603, -67.4, 44),
+        makeCombination("trial_50", 5, 20, 0.2728, 0.8618, 1.133, -67.6, 43),
+      ];
+      job.candidates = structuredClone(job.matching_combinations.slice(0, 3));
+      job.summary.matching_combinations = structuredClone(job.matching_combinations);
+      job.summary.matching_combination_count = job.matching_combinations.length;
+      job.matching_combination_count = job.matching_combinations.length;
+      job.summary.matching_combination_source = "all_trials";
+      job.matching_combination_source = "all_trials";
+      return job;
+    };
+    currentApi = api;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("符合约束条件的组合共5个"),
+    );
+    const rows = Array.from(
+      container.querySelectorAll(".optimization-lab-table tbody tr"),
+    ).slice(0, 3);
+    expect(rows).toHaveLength(3);
+    expect(rows[0].textContent).toContain("买入排名阈值：50");
+    expect(rows[1].textContent).toContain("买入排名阈值：10");
+    expect(rows[2].textContent).toContain("买入排名阈值：20");
+    expect(rows.map((row) => row.textContent).join("\n")).not.toContain(
+      "买入排名阈值：55",
+    );
+
+    const openButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("查看全部组合"),
+    ) as HTMLButtonElement | undefined;
+    expect(openButton).toBeTruthy();
+
+    fireEvent.click(openButton!);
+
+    const dialog = await waitFor(() => {
+      const element = container.querySelector(
+        ".optimization-all-combinations-dialog",
+      ) as HTMLElement | null;
+      expect(element).not.toBeNull();
+      return element!;
+    });
+    const modalRows = Array.from(dialog.querySelectorAll("tbody tr")).slice(
+      0,
+      3,
+    );
+    expect(modalRows).toHaveLength(3);
+    expect(modalRows[0].textContent).toContain("买入排名阈值 50");
+    expect(modalRows[1].textContent).toContain("买入排名阈值 10");
+    expect(modalRows[2].textContent).toContain("买入排名阈值 20");
+    expect(modalRows.map((row) => row.textContent).join("\n")).not.toContain(
+      "买入排名阈值 55",
+    );
+  });
+
   it("marks legacy candidate-only totals as saved candidates instead of full combinations", async () => {
     const api = createOptimizationTestApi() as OptimizationTestApi;
     const originalGetOptimizationJobDetail =

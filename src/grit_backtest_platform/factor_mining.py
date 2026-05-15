@@ -14,7 +14,7 @@ import re
 import statistics
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .factor_expression_engine import FactorExpressionError, evaluate_expression
 
@@ -25,9 +25,67 @@ FORWARD_RETURN_HORIZON_DAYS = 5
 SHORT_MOMENTUM_CONTROL_WINDOW_DAYS = 3
 LEGACY_IR_IC_SCALE = 0.05
 _HOLDING_PERIOD_PATTERN = re.compile(
-    r"\b(?:Return|Lag|Delta)\s*\(\s*Close\s*,\s*(\d+)\s*\)",
+    r"\b(?:Return|Lag|Delta|TsRank\s*\(\s*Return)\s*\(\s*Close\s*,\s*(\d+)\s*\)",
     re.IGNORECASE,
 )
+GENERATION_MODE_PRICE_OPERATOR = "PRICE_OPERATOR"
+GENERATION_MODE_HYBRID_COMPOSITION = "HYBRID_COMPOSITION"
+DEFAULT_COMPOSITION_SOURCE_FACTORS = (
+    "s_mom_6m_rank",
+    "s_qlty_roe_ltm_raw",
+    "s_vol_252d_rank",
+    "s_val_cfp_ltm_raw",
+    "s_size_cur_log",
+    "s_vol_downside_252d_rank",
+    "s_liq_amihud_20d_rank",
+)
+DEFAULT_COMPOSITION_RECIPE_FAMILIES = (
+    "style_blend",
+    "risk_adjusted",
+    "value_anchor",
+    "divergence",
+    "residual_neutralized",
+    "ts_denoise",
+)
+_FACTOR_REFERENCE_PATTERN = re.compile(r"\bs_[a-z0-9_]+(?:_raw|_rank)?\b", re.IGNORECASE)
+_BINARY_FACTOR_REFERENCE_PATTERN = re.compile(
+    r"^\s*(s_[a-z0-9_]+(?:_raw|_rank)?)\s*([+\-*/])\s*(s_[a-z0-9_]+(?:_raw|_rank)?)\s*$",
+    re.IGNORECASE,
+)
+_RESIDUAL_FACTOR_REFERENCE_PATTERN = re.compile(
+    r"^\s*ZScore\s*\(\s*Residual\s*\(\s*(s_[a-z0-9_]+(?:_raw|_rank)?)\s*,\s*by\s*=\s*['\"]"
+    r"(s_[a-z0-9_]+(?:_raw|_rank)?)['\"]\s*\)\s*\)\s*$",
+    re.IGNORECASE,
+)
+_TS_RANK_RETURN_PATTERN = re.compile(
+    r"^\s*Ts_?Rank\s*\(\s*Return\s*\(\s*Close\s*,\s*(\d+)\s*\)\s*,\s*(\d+)\s*\)\s*$",
+    re.IGNORECASE,
+)
+_FACTOR_ALIASES = {
+    "s_vol_252d_raw": "s_vol_252d_rank",
+    "s_mom_ret_126d_z": "s_mom_6m_rank",
+}
+_FACTOR_FAMILIES = {
+    "s_mom_6m_rank": "momentum",
+    "s_mom_1m_rank": "momentum",
+    "s_mom_12d_rank": "momentum",
+    "s_qlty_roe_ltm_raw": "quality",
+    "s_vol_252d_rank": "risk",
+    "s_vol_downside_252d_rank": "risk",
+    "s_val_cfp_ltm_raw": "value",
+    "s_size_cur_log": "size",
+    "s_liq_amihud_20d_rank": "liquidity",
+}
+
+
+@dataclass(frozen=True)
+class CompositionCandidateSpec:
+    expression: str
+    source_factor_ids: tuple[str, ...] = ()
+    recipe_kind: str | None = None
+    recipe_family: str | None = None
+    orthogonality_intent: str | None = None
+    composition_metadata: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -40,24 +98,34 @@ class FactorMiningJobCreateRequest:
     random_seed: int
     min_rank_ic: float = 0.0
     max_depth: int = 3
+    generation_mode: str = GENERATION_MODE_PRICE_OPERATOR
+    source_factor_ids: tuple[str, ...] = ()
+    recipe_families: tuple[str, ...] = ()
+    exploration_budget: int = 0
+    composition_policy: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> "FactorMiningJobCreateRequest":
         return cls(
-            universe=tuple(str(symbol) for symbol in payload.get("universe", ())),
+            universe=_coerce_string_tuple(payload.get("universe", ())),
             start_date=str(payload.get("start_date", "")),
             end_date=str(payload.get("end_date", "")),
-            operators=tuple(str(operator) for operator in payload.get("operators", ())),
+            operators=_coerce_string_tuple(payload.get("operators", ())),
             candidate_count=int(payload.get("candidate_count", 0)),
             random_seed=int(payload.get("random_seed", 0)),
             min_rank_ic=float(payload.get("min_rank_ic", 0.0)),
             max_depth=int(payload.get("max_depth", 3)),
+            generation_mode=str(payload.get("generation_mode") or GENERATION_MODE_PRICE_OPERATOR),
+            source_factor_ids=_coerce_string_tuple(payload.get("source_factor_ids", ())),
+            recipe_families=_coerce_string_tuple(payload.get("recipe_families", ())),
+            exploration_budget=int(payload.get("exploration_budget", 0) or 0),
+            composition_policy=dict(payload.get("composition_policy") or {}),
         )
 
     def validate(self) -> None:
         if not self.universe:
             raise ValueError("universe is required")
-        if not self.operators:
+        if not self.operators and self.generation_mode.upper() != GENERATION_MODE_HYBRID_COMPOSITION:
             raise ValueError("operators are required")
         if self.candidate_count <= 0:
             raise ValueError("candidate_count must be positive")
@@ -86,6 +154,11 @@ class FactorMiningCandidateSummary:
     turnover: float = 0.0
     depth: int | None = None
     auto_residual_summary: Mapping[str, object] | None = None
+    source_factor_ids: tuple[str, ...] = ()
+    recipe_kind: str | None = None
+    recipe_family: str | None = None
+    orthogonality_intent: str | None = None
+    composition_metadata: Mapping[str, object] | None = None
     risk_flags: tuple[str, ...] = ()
     error_message: str | None = None
     persisted_to_factor_definitions: bool = False
@@ -110,6 +183,11 @@ class FactorMiningCandidateSummary:
             "turnover": self.turnover,
             "depth": self.depth,
             "auto_residual_summary": dict(self.auto_residual_summary or {}),
+            "source_factor_ids": list(self.source_factor_ids),
+            "recipe_kind": self.recipe_kind,
+            "recipe_family": self.recipe_family,
+            "orthogonality_intent": self.orthogonality_intent,
+            "composition_metadata": dict(self.composition_metadata or {}),
             "coverage": self.coverage,
             "status": self.status,
             "risk_flags": list(self.risk_flags),
@@ -179,6 +257,7 @@ class FactorMiningRunner:
         )
         start = time.perf_counter()
         rng = random.Random(self.request.random_seed)
+        composition_specs = self._composition_candidate_specs(rng)
         candidates: list[FactorMiningCandidateSummary] = []
         failures: list[FactorMiningFailedSample] = []
         cancelled = False
@@ -187,9 +266,10 @@ class FactorMiningRunner:
             if should_cancel is not None and should_cancel(index):
                 cancelled = True
                 break
-            expression = self._generate_expression(index, rng)
+            spec = self._generate_candidate_spec(index, rng, composition_specs)
+            expression = spec.expression
             try:
-                candidate = self._evaluate_candidate(index, expression, data)
+                candidate = self._evaluate_candidate(index, expression, data, metadata=spec)
                 candidates.append(candidate)
             except (FactorExpressionError, ValueError, ZeroDivisionError) as exc:
                 failures.append(
@@ -227,6 +307,11 @@ class FactorMiningRunner:
                 turnover=candidate.turnover,
                 depth=candidate.depth,
                 auto_residual_summary=candidate.auto_residual_summary,
+                source_factor_ids=candidate.source_factor_ids,
+                recipe_kind=candidate.recipe_kind,
+                recipe_family=candidate.recipe_family,
+                orthogonality_intent=candidate.orthogonality_intent,
+                composition_metadata=candidate.composition_metadata,
                 coverage=candidate.coverage,
                 status=candidate.status,
                 risk_flags=candidate.risk_flags,
@@ -256,8 +341,60 @@ class FactorMiningRunner:
             all_candidates=ranked_candidates,
         )
 
+    def _uses_composition_generation(self) -> bool:
+        return self.request.generation_mode.upper() == GENERATION_MODE_HYBRID_COMPOSITION
+
+    def _generate_candidate_spec(
+        self,
+        index: int,
+        rng: random.Random,
+        composition_specs: Sequence[CompositionCandidateSpec],
+    ) -> CompositionCandidateSpec:
+        if index < len(composition_specs):
+            return composition_specs[index]
+        return CompositionCandidateSpec(expression=self._generate_expression(index, rng))
+
+    def _composition_candidate_specs(self, rng: random.Random) -> tuple[CompositionCandidateSpec, ...]:
+        if not self._uses_composition_generation():
+            return ()
+        parent_pool = tuple(
+            _canonical_factor_id(item)
+            for item in (self.request.source_factor_ids or DEFAULT_COMPOSITION_SOURCE_FACTORS)
+            if str(item).strip()
+        )
+        active_parents = tuple(dict.fromkeys(parent_pool or DEFAULT_COMPOSITION_SOURCE_FACTORS))
+        active_parent_set = set(active_parents)
+        families = {
+            str(item).strip().lower()
+            for item in (self.request.recipe_families or DEFAULT_COMPOSITION_RECIPE_FAMILIES)
+            if str(item).strip()
+        } or set(DEFAULT_COMPOSITION_RECIPE_FAMILIES)
+        specs: list[CompositionCandidateSpec] = []
+        for spec in _composition_template_specs():
+            if spec.recipe_family not in families:
+                continue
+            if spec.source_factor_ids and not set(spec.source_factor_ids).issubset(active_parent_set):
+                continue
+            specs.append(spec)
+
+        exploration_budget = max(0, int(self.request.exploration_budget or 0))
+        if exploration_budget:
+            specs.extend(_exploratory_pairwise_specs(active_parents, budget=exploration_budget, rng=rng))
+
+        seen: set[tuple[str, tuple[str, ...]]] = set()
+        unique_specs: list[CompositionCandidateSpec] = []
+        for spec in specs:
+            parents = tuple(sorted(_canonical_factor_id(item) for item in spec.source_factor_ids))
+            key = (_expression_signature(spec.expression), parents)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_specs.append(spec)
+        return tuple(unique_specs)
+
     def _generate_expression(self, index: int, rng: random.Random) -> str:
-        operator = self.request.operators[index % len(self.request.operators)].strip().lower()
+        operators = self.request.operators or ("return", "rank", "zscore", "winsorize")
+        operator = operators[index % len(operators)].strip().lower()
         window = rng.choice((3, 5, 10, 21, 63, 126, 252))
         secondary_window = rng.choice((3, 5, 10, 21, 63))
 
@@ -284,6 +421,8 @@ class FactorMiningRunner:
         index: int,
         expression: str,
         market_data: MarketDataBySymbol,
+        *,
+        metadata: CompositionCandidateSpec | None = None,
     ) -> FactorMiningCandidateSummary:
         factor_values: dict[str, float] = {}
         factor_series_by_symbol: dict[str, Sequence[float | None]] = {}
@@ -292,7 +431,7 @@ class FactorMiningRunner:
             symbol_data = market_data.get(symbol)
             if not symbol_data:
                 continue
-            series = evaluate_expression(expression, symbol_data)
+            series = _evaluate_factor_mining_expression(expression, symbol_data)
             factor_series_by_symbol[symbol] = series
             anchor_index = _forward_return_anchor_index(symbol_data)
             value = _finite_at_or_before(series, anchor_index)
@@ -362,7 +501,7 @@ class FactorMiningRunner:
         fitness_score = round(raw_score - correlation_penalty * 0.15 - complexity_penalty - drawdown_penalty, 6)
 
         return FactorMiningCandidateSummary(
-            candidate_id=_candidate_id(expression, index),
+            candidate_id=_candidate_id(expression, index, source_factor_ids=metadata.source_factor_ids if metadata else ()),
             rank=index + 1,
             expression=expression,
             rank_ic=rank_ic,
@@ -379,6 +518,11 @@ class FactorMiningRunner:
             turnover=turnover,
             depth=depth,
             auto_residual_summary=auto_residual_summary,
+            source_factor_ids=metadata.source_factor_ids if metadata else (),
+            recipe_kind=metadata.recipe_kind if metadata else None,
+            recipe_family=metadata.recipe_family if metadata else None,
+            orthogonality_intent=metadata.orthogonality_intent if metadata else None,
+            composition_metadata=metadata.composition_metadata if metadata else None,
             coverage=round(coverage, 4),
             status="COMPLETED",
             risk_flags=tuple(risk_flags),
@@ -405,7 +549,7 @@ class FactorMiningRunner:
             if not symbol_data:
                 continue
             anchor_index = _forward_return_anchor_index(symbol_data)
-            factor_value = _finite_at_or_before(evaluate_expression(expression, symbol_data), anchor_index)
+            factor_value = _finite_at_or_before(_evaluate_factor_mining_expression(expression, symbol_data), anchor_index)
             control_value = _finite_at_or_before(evaluate_expression(control_expression, symbol_data), anchor_index)
             if factor_value is None or control_value is None:
                 continue
@@ -452,6 +596,142 @@ def create_synthetic_market_data(
     return data
 
 
+def _coerce_string_tuple(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return tuple(part.strip() for part in value.split(",") if part.strip())
+    if isinstance(value, Sequence):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    return ()
+
+
+def _canonical_factor_id(value: object) -> str:
+    raw = str(value or "").strip()
+    lowered = raw.lower()
+    return _FACTOR_ALIASES.get(lowered, lowered)
+
+
+def _expression_signature(expression: str) -> str:
+    return " ".join(str(expression or "").split()).lower()
+
+
+def _composition_template_specs() -> tuple[CompositionCandidateSpec, ...]:
+    return (
+        CompositionCandidateSpec(
+            expression="s_mom_6m_rank * s_qlty_roe_ltm_raw",
+            source_factor_ids=("s_mom_6m_rank", "s_qlty_roe_ltm_raw"),
+            recipe_kind="template",
+            recipe_family="style_blend",
+            orthogonality_intent="quality_driven_momentum",
+            composition_metadata={"label": "Quality-Driven Momentum", "publish_boundary": "manual_after_quarantine"},
+        ),
+        CompositionCandidateSpec(
+            expression="s_mom_6m_rank / s_vol_252d_rank",
+            source_factor_ids=("s_mom_6m_rank", "s_vol_252d_rank"),
+            recipe_kind="template",
+            recipe_family="risk_adjusted",
+            orthogonality_intent="risk_adjusted_momentum",
+            composition_metadata={"label": "Risk-Adjusted Momentum", "publish_boundary": "manual_after_quarantine"},
+        ),
+        CompositionCandidateSpec(
+            expression='ZScore(Residual(s_val_cfp_ltm_raw, by="s_size_cur_log"))',
+            source_factor_ids=("s_val_cfp_ltm_raw", "s_size_cur_log"),
+            recipe_kind="template",
+            recipe_family="value_anchor",
+            orthogonality_intent="size_neutral_cashflow_value",
+            composition_metadata={"label": "Value-Cashflow Anchor", "publish_boundary": "manual_after_quarantine"},
+        ),
+        CompositionCandidateSpec(
+            expression="s_mom_6m_rank - s_vol_downside_252d_rank",
+            source_factor_ids=("s_mom_6m_rank", "s_vol_downside_252d_rank"),
+            recipe_kind="template",
+            recipe_family="divergence",
+            orthogonality_intent="momentum_downside_divergence",
+            composition_metadata={"label": "Momentum Divergence", "publish_boundary": "manual_after_quarantine"},
+        ),
+        CompositionCandidateSpec(
+            expression='ZScore(Residual(s_liq_amihud_20d_rank, by="s_size_cur_log"))',
+            source_factor_ids=("s_liq_amihud_20d_rank", "s_size_cur_log"),
+            recipe_kind="template",
+            recipe_family="residual_neutralized",
+            orthogonality_intent="size_neutral_liquidity_anomaly",
+            composition_metadata={"label": "Size-Neutral Liquidity", "publish_boundary": "manual_after_quarantine"},
+        ),
+        CompositionCandidateSpec(
+            expression="TsRank(Return(Close, 5), 252)",
+            source_factor_ids=(),
+            recipe_kind="template",
+            recipe_family="ts_denoise",
+            orthogonality_intent="short_return_time_series_denoise",
+            composition_metadata={"label": "Short-Horizon Return Denoise", "publish_boundary": "manual_after_quarantine"},
+        ),
+    )
+
+
+def _exploratory_pairwise_specs(
+    source_factor_ids: Sequence[str],
+    *,
+    budget: int,
+    rng: random.Random,
+) -> tuple[CompositionCandidateSpec, ...]:
+    candidates = [
+        _canonical_factor_id(item)
+        for item in source_factor_ids
+        if _canonical_factor_id(item) in _FACTOR_FAMILIES
+    ]
+    pairs: list[tuple[str, str]] = []
+    for left_index, left in enumerate(candidates):
+        for right in candidates[left_index + 1:]:
+            left_family = _FACTOR_FAMILIES.get(left)
+            right_family = _FACTOR_FAMILIES.get(right)
+            if not left_family or not right_family:
+                continue
+            if left_family == right_family:
+                continue
+            if left_family == right_family == "momentum":
+                continue
+            pairs.append((left, right))
+    rng.shuffle(pairs)
+    specs: list[CompositionCandidateSpec] = []
+    for left, right in pairs:
+        if len(specs) >= budget:
+            break
+        left_family = _FACTOR_FAMILIES[left]
+        right_family = _FACTOR_FAMILIES[right]
+        parents = tuple(sorted((left, right)))
+        expression = f"{left} * {right}"
+        intent = "cross_family_style_blend"
+        if "risk" in {left_family, right_family}:
+            momentum = left if left_family == "momentum" else right if right_family == "momentum" else left
+            risk = right if momentum == left else left
+            expression = f"{momentum} / {risk}"
+            intent = "risk_adjusted_pairwise"
+        elif "size" in {left_family, right_family} and ({left_family, right_family} & {"value", "liquidity"}):
+            target = right if left_family == "size" else left
+            expression = f'ZScore(Residual({target}, by="s_size_cur_log"))'
+            intent = "size_neutral_pairwise"
+        elif "momentum" in {left_family, right_family} and "quality" not in {left_family, right_family}:
+            momentum = left if left_family == "momentum" else right
+            control = right if momentum == left else left
+            expression = f"{momentum} - {control}"
+            intent = "momentum_divergence_pairwise"
+        specs.append(
+            CompositionCandidateSpec(
+                expression=expression,
+                source_factor_ids=parents,
+                recipe_kind="exploratory_pairwise",
+                recipe_family="pairwise_cross_family",
+                orthogonality_intent=intent,
+                composition_metadata={
+                    "label": "Bounded Pairwise Composition",
+                    "left_family": left_family,
+                    "right_family": right_family,
+                    "publish_boundary": "manual_after_quarantine",
+                },
+            )
+        )
+    return tuple(specs)
+
+
 def infer_holding_period_from_expression(expression: str) -> int:
     windows = [
         int(match.group(1))
@@ -490,14 +770,20 @@ def _job_id_for_request(request: FactorMiningJobCreateRequest) -> str:
                 str(request.random_seed),
                 f"{request.min_rank_ic:.12g}",
                 str(request.max_depth),
+                request.generation_mode.upper(),
+                ",".join(_canonical_factor_id(item) for item in request.source_factor_ids),
+                ",".join(str(item).strip().lower() for item in request.recipe_families),
+                str(max(0, int(request.exploration_budget or 0))),
             )
         ).encode("utf-8")
     ).hexdigest()[:12]
     return f"fm_{digest}"
 
 
-def _candidate_id(expression: str, index: int) -> str:
-    digest = hashlib.sha1(f"{index}:{expression}".encode("utf-8")).hexdigest()[:12]
+def _candidate_id(expression: str, index: int, *, source_factor_ids: Sequence[str] = ()) -> str:
+    parent_key = ",".join(sorted(_canonical_factor_id(item) for item in source_factor_ids))
+    seed = f"{_expression_signature(expression)}|{parent_key}" if parent_key else f"{index}:{expression}"
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12]
     return f"cand_{digest}"
 
 
@@ -507,7 +793,8 @@ def _unique_candidates_by_expression(
     seen: set[str] = set()
     unique_candidates: list[FactorMiningCandidateSummary] = []
     for candidate in candidates:
-        signature = " ".join(candidate.expression.split()).lower()
+        parent_key = ",".join(sorted(candidate.source_factor_ids))
+        signature = f"{_expression_signature(candidate.expression)}|{parent_key}"
         if not signature or signature in seen:
             continue
         seen.add(signature)
@@ -532,8 +819,19 @@ def _expression_depth(expression: str) -> int:
 
 def _estimate_style_correlation(expression: str) -> float:
     normalized = expression.lower()
+    tokens = {_canonical_factor_id(match.group(0)) for match in _FACTOR_REFERENCE_PATTERN.finditer(expression)}
     if "residual" in normalized:
         return 0.24
+    if "tsrank" in normalized or "ts_rank" in normalized:
+        return 0.29
+    if len(tokens) >= 2:
+        families = {_FACTOR_FAMILIES.get(token) for token in tokens}
+        if "risk" in families and "momentum" in families:
+            return 0.27
+        if "size" in families and ({"value", "liquidity"} & families):
+            return 0.24
+        if len(families) >= 2:
+            return 0.26
     if "log" in normalized:
         return 0.52
     if "return" in normalized or "lag" in normalized or "momentum" in normalized:
@@ -547,6 +845,10 @@ def _estimate_style_correlation(expression: str) -> float:
 
 def _estimate_turnover(expression: str) -> float:
     normalized = expression.lower()
+    if "tsrank" in normalized or "ts_rank" in normalized:
+        return 72.0
+    if "amihud" in normalized or "liq" in normalized:
+        return 48.0
     if "lag" in normalized or "momentum" in normalized or "return" in normalized:
         return 34.0
     if "std" in normalized or "vol" in normalized:
@@ -570,6 +872,234 @@ def _infer_residual_control_signal(expression: str) -> str:
     if "std" in normalized or "vol" in normalized:
         return "s_size_cur_log"
     return "s_vol_252d_raw"
+
+
+def _evaluate_factor_mining_expression(
+    expression: str,
+    symbol_data: Mapping[str, Sequence[float | int | None]],
+) -> list[float | None]:
+    formula = str(expression or "").strip()
+    if (
+        not _FACTOR_REFERENCE_PATTERN.search(formula)
+        and not re.search(r"\bTs_?Rank\s*\(", formula, flags=re.IGNORECASE)
+    ):
+        return list(evaluate_expression(formula, symbol_data))
+
+    ts_rank = _TS_RANK_RETURN_PATTERN.match(formula)
+    if ts_rank:
+        return _series_ts_rank(
+            _series_return(_close_series(symbol_data), int(ts_rank.group(1))),
+            int(ts_rank.group(2)),
+        )
+
+    residual = _RESIDUAL_FACTOR_REFERENCE_PATTERN.match(formula)
+    if residual:
+        target = _series_from_factor_reference(residual.group(1), symbol_data)
+        control = _series_from_factor_reference(residual.group(2), symbol_data)
+        return _series_zscore(_series_binary(target, control, "-"))
+
+    binary = _BINARY_FACTOR_REFERENCE_PATTERN.match(formula)
+    if binary:
+        left = _series_from_factor_reference(binary.group(1), symbol_data)
+        right = _series_from_factor_reference(binary.group(3), symbol_data)
+        return _series_binary(left, right, binary.group(2))
+
+    direct_factor = re.match(r"^\s*(s_[a-z0-9_]+(?:_raw|_rank)?)\s*$", formula, flags=re.IGNORECASE)
+    if direct_factor:
+        return _series_from_factor_reference(direct_factor.group(1), symbol_data)
+
+    return list(evaluate_expression(formula, symbol_data))
+
+
+def _series_from_factor_reference(
+    factor_id: str,
+    symbol_data: Mapping[str, Sequence[float | int | None]],
+) -> list[float | None]:
+    canonical = _canonical_factor_id(factor_id)
+    close = _close_series(symbol_data)
+    if not close:
+        raise FactorExpressionError(f"missing close series for {factor_id}")
+    one_day_return = _series_return(close, 1)
+    if canonical == "s_mom_6m_rank":
+        return _series_return(close, 126)
+    if canonical == "s_mom_1m_rank":
+        return _series_return(close, 21)
+    if canonical == "s_mom_12d_rank":
+        return _series_return(close, 12)
+    if canonical == "s_vol_252d_rank":
+        return _series_std(one_day_return, 252, downside_only=False)
+    if canonical == "s_vol_downside_252d_rank":
+        return _series_std(one_day_return, 252, downside_only=True)
+    if canonical == "s_size_cur_log":
+        market_cap = _numeric_series(symbol_data, "MarketCap", len(close))
+        if market_cap:
+            return [math.log(value) if value and value > 0 else None for value in market_cap]
+        return [math.log(value) if value > 0 else None for value in close]
+    if canonical == "s_qlty_roe_ltm_raw":
+        trailing_return = _series_return(close, 252)
+        trailing_vol = _series_std(one_day_return, 126, downside_only=False)
+        return _series_binary(trailing_return, _series_scale(trailing_vol, 0.5), "-")
+    if canonical == "s_val_cfp_ltm_raw":
+        market_cap = _numeric_series(symbol_data, "MarketCap", len(close))
+        cashflow = _numeric_series(symbol_data, "OperatingCashflow", len(close))
+        if market_cap and cashflow:
+            return _series_binary(cashflow, market_cap, "/")
+        return [1.0 / value if value > 0 else None for value in close]
+    if canonical == "s_liq_amihud_20d_rank":
+        volume = _numeric_series(symbol_data, "Volume", len(close)) or _numeric_series(symbol_data, "volume", len(close))
+        if not volume:
+            volume = [max(price * 10_000.0, 1.0) for price in close]
+        raw = [
+            None if ret is None or volume[index] in (None, 0) else abs(ret) / max(float(volume[index]), 1.0)
+            for index, ret in enumerate(one_day_return[: len(volume)])
+        ]
+        return _series_rolling_mean(raw, 20)
+    raise FactorExpressionError(f"unsupported factor reference: {factor_id}")
+
+
+def _numeric_series(
+    symbol_data: Mapping[str, Sequence[float | int | None]],
+    key: str,
+    length: int,
+) -> list[float] | None:
+    raw = symbol_data.get(key) or symbol_data.get(key.lower())
+    if not raw:
+        return None
+    values: list[float] = []
+    for value in raw[:length]:
+        if value is None:
+            values.append(float("nan"))
+            continue
+        numeric = float(value)
+        values.append(numeric if math.isfinite(numeric) else float("nan"))
+    if not any(math.isfinite(value) and value != 0 for value in values):
+        return None
+    while len(values) < length:
+        values.append(values[-1] if values else float("nan"))
+    return values
+
+
+def _series_return(close: Sequence[float], window: int) -> list[float | None]:
+    normalized_window = max(1, int(window or 1))
+    output: list[float | None] = []
+    for index, value in enumerate(close):
+        prior_index = index - normalized_window
+        if prior_index < 0:
+            output.append(None)
+            continue
+        prior = close[prior_index]
+        if prior <= 0:
+            output.append(None)
+            continue
+        output.append(value / prior - 1.0)
+    return output
+
+
+def _series_std(series: Sequence[float | None], window: int, *, downside_only: bool) -> list[float | None]:
+    normalized_window = max(2, int(window or 2))
+    output: list[float | None] = []
+    for index in range(len(series)):
+        start = max(0, index + 1 - normalized_window)
+        values = [
+            float(value)
+            for value in series[start:index + 1]
+            if value is not None and math.isfinite(float(value)) and (not downside_only or float(value) < 0)
+        ]
+        if len(values) < 2:
+            output.append(None)
+        else:
+            output.append(statistics.pstdev(values))
+    return output
+
+
+def _series_rolling_mean(series: Sequence[float | None], window: int) -> list[float | None]:
+    normalized_window = max(1, int(window or 1))
+    output: list[float | None] = []
+    for index in range(len(series)):
+        start = max(0, index + 1 - normalized_window)
+        values = [
+            float(value)
+            for value in series[start:index + 1]
+            if value is not None and math.isfinite(float(value))
+        ]
+        output.append(statistics.fmean(values) if values else None)
+    return output
+
+
+def _series_zscore(series: Sequence[float | None], window: int = 252) -> list[float | None]:
+    normalized_window = max(2, int(window or 2))
+    output: list[float | None] = []
+    for index in range(len(series)):
+        start = max(0, index + 1 - normalized_window)
+        values = [
+            float(value)
+            for value in series[start:index + 1]
+            if value is not None and math.isfinite(float(value))
+        ]
+        current = series[index]
+        if current is None or len(values) < 2:
+            output.append(None)
+            continue
+        stdev = statistics.pstdev(values)
+        output.append(None if stdev <= 0 else (float(current) - statistics.fmean(values)) / stdev)
+    return output
+
+
+def _series_ts_rank(series: Sequence[float | None], window: int) -> list[float | None]:
+    normalized_window = max(2, int(window or 2))
+    output: list[float | None] = []
+    for index, current in enumerate(series):
+        start = max(0, index + 1 - normalized_window)
+        values = [
+            float(value)
+            for value in series[start:index + 1]
+            if value is not None and math.isfinite(float(value))
+        ]
+        if current is None or not values:
+            output.append(None)
+            continue
+        rank = sum(1 for value in values if value <= float(current))
+        output.append(rank / len(values))
+    return output
+
+
+def _series_binary(
+    left: Sequence[float | None],
+    right: Sequence[float | None],
+    operator: str,
+) -> list[float | None]:
+    length = min(len(left), len(right))
+    output: list[float | None] = []
+    for index in range(length):
+        left_value = left[index]
+        right_value = right[index]
+        if (
+            left_value is None
+            or right_value is None
+            or not math.isfinite(float(left_value))
+            or not math.isfinite(float(right_value))
+        ):
+            output.append(None)
+            continue
+        if operator == "+":
+            output.append(float(left_value) + float(right_value))
+        elif operator == "-":
+            output.append(float(left_value) - float(right_value))
+        elif operator == "*":
+            output.append(float(left_value) * float(right_value))
+        elif operator == "/":
+            denominator = float(right_value)
+            output.append(None if abs(denominator) <= 1e-12 else float(left_value) / denominator)
+        else:
+            output.append(None)
+    return output
+
+
+def _series_scale(series: Sequence[float | None], scalar: float) -> list[float | None]:
+    return [
+        None if value is None or not math.isfinite(float(value)) else float(value) * scalar
+        for value in series
+    ]
 
 
 def _estimate_candidate_portfolio_drawdowns_pct(

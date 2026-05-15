@@ -149,7 +149,7 @@ const allocationJob = {
       quality_label: 'heuristic_from_composition_detail_preview',
       evidence_label: 'Derived from full-window composition rebalance events and source return streams; these are model instructions, not broker fills.',
       constraint_violations: [],
-      allowed_actions: ['promote_candidate'],
+      allowed_actions: [],
     },
     {
       id: 'risk_parity',
@@ -161,7 +161,7 @@ const allocationJob = {
       quality_label: 'heuristic_from_composition_detail_preview',
       evidence_label: 'Derived from full-window composition rebalance events and source return streams; these are model instructions, not broker fills.',
       constraint_violations: [],
-      allowed_actions: ['promote_candidate'],
+      allowed_actions: [],
     },
     {
       id: 'max_sharpe',
@@ -173,7 +173,7 @@ const allocationJob = {
       quality_label: 'heuristic_from_composition_detail_preview',
       evidence_label: 'Derived from full-window composition rebalance events and source return streams; these are model instructions, not broker fills.',
       constraint_violations: [],
-      allowed_actions: ['promote_candidate'],
+      allowed_actions: [],
     },
   ],
   frontier_points: [
@@ -208,14 +208,14 @@ const failedStatusDiagnosis = {
       route: '/compositions/workbench?composition_id=comp-001',
     },
   ],
-  system_disposition: '存在未关闭的失效问题，晋升门禁已暂停。',
+  system_disposition: '存在未关闭的失效问题，仅保留测试参考。',
 };
 
 const blockedEvidenceAllocationJob = {
   ...allocationJob,
   evidence_grade: 'C',
   candidates: allocationJob.candidates.map((candidate) => {
-    if (!candidate.allowed_actions.includes('promote_candidate')) {
+    if (candidate.id === 'current' || candidate.id === 'benchmark') {
       return candidate;
     }
     return {
@@ -466,7 +466,7 @@ describe('Composition allocation split UI', () => {
     });
   });
 
-  it('renders the v5 selector result page and promotes the selected candidate through the confirmation dialog', async () => {
+  it('renders the v5 selector result page as a test reference without draft promotion', async () => {
     await act(async () => {
       render(<CompositionAllocationResultPage compositionId="comp-001" jobId="alloc-001" />);
     });
@@ -481,7 +481,7 @@ describe('Composition allocation split UI', () => {
     expect(screen.getByRole('heading', { level: 2, name: '相对表现 · 提议方案 / 当前组合 - 1' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '极端行情压力测试' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '候选选择器 · 多维度选拔赛' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: '执行决策' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: '测试参考' })).toBeInTheDocument();
     expect(screen.getByText('上方不可达到')).toBeInTheDocument();
     expect(document.querySelector('.composition-allocation-frontier__unreachable')).not.toBeNull();
     expect(document.querySelector('.composition-allocation-frontier__curve-line')).not.toBeNull();
@@ -589,32 +589,14 @@ describe('Composition allocation split UI', () => {
     expect(pageText).not.toMatch(
       /Min Vol|Current|Risk Parity|Max Sharpe|Benchmark|查看详情|另存为实验|一键晋升 v1\.3/,
     );
-
-    fireEvent.click(screen.getByRole('button', { name: '生成草稿版本' }));
-    expect(screen.getByRole('dialog', { name: '确认生成草稿版本' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '确认生成草稿' }));
-
-    expect(screen.getByRole('button', { name: '确认生成草稿' })).toBeDisabled();
-    fireEvent.change(screen.getByRole('textbox', { name: '升级理由' }), {
-      target: { value: '采用配置实验室候选，降低组合风险暴露。' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: '确认生成草稿' }));
-
-    await waitFor(() => {
-      expect(fakeApi.promoteCompositionAllocationCandidateToDraft).toHaveBeenCalledWith(
-        'comp-001',
-        'alloc-001',
-        'max_sharpe',
-        expect.objectContaining({
-          decision_note: '采用配置实验室候选，降低组合风险暴露。',
-        }),
-      );
-    });
-    expect(await screen.findByText(/已生成草稿版本 v7：最大夏普预览/)).toBeInTheDocument();
+    expect(screen.getByText('配置实验结果仅作为测试参考，正式组合仍以当前保存配置为准。')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '生成草稿版本' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: '确认生成草稿版本' })).toBeNull();
+    expect(fakeApi.promoteCompositionAllocationCandidateToDraft).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: '查看详情' })).not.toBeInTheDocument();
   });
 
-  it('blocks draft creation on the result page when a candidate has an unresolved failed status label', async () => {
+  it('keeps status repair actions without exposing draft creation for failed labels', async () => {
     fakeApi.getCompositionAllocationJob = vi.fn().mockResolvedValue(blockedEvidenceAllocationJob);
 
     await act(async () => {
@@ -622,14 +604,12 @@ describe('Composition allocation split UI', () => {
     });
 
     expect(await screen.findByRole('heading', { level: 1, name: '组合优化结果' })).toBeInTheDocument();
-    const promoteButton = screen.getByRole('button', { name: '生成草稿版本' });
-    expect(promoteButton).toBeDisabled();
-    expect(screen.getByText('存在未关闭的失效问题，晋升门禁已暂停。')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '生成草稿版本' })).toBeNull();
+    expect(screen.getByText('存在未关闭的失效问题，仅保留测试参考。')).toBeInTheDocument();
     const statusAction = screen.getByRole('button', { name: '打开组合工作台' });
     fireEvent.click(statusAction);
     expect(navigateToMock).toHaveBeenCalledWith('/compositions/workbench?composition_id=comp-001');
 
-    fireEvent.click(promoteButton);
     expect(screen.queryByRole('dialog', { name: '确认生成草稿版本' })).not.toBeInTheDocument();
     expect(fakeApi.promoteCompositionAllocationCandidateToDraft).not.toHaveBeenCalled();
   });

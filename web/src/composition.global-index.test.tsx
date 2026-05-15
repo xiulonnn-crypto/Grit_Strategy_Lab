@@ -16,6 +16,7 @@ type FakeApi = {
   listCompositions?: ReturnType<typeof vi.fn>;
   listCompositionBacktestRuns?: ReturnType<typeof vi.fn>;
   listCompositionAllocationJobs?: ReturnType<typeof vi.fn>;
+  deleteCompositionBacktestRun?: ReturnType<typeof vi.fn>;
   updateComposition?: ReturnType<typeof vi.fn>;
   refreshCompositionDiagnostics?: ReturnType<typeof vi.fn>;
   refreshCompositionSourceFreezes?: ReturnType<typeof vi.fn>;
@@ -26,6 +27,7 @@ const fakeApi = vi.hoisted<FakeApi>(() => ({
   listCompositions: vi.fn(),
   listCompositionBacktestRuns: vi.fn(),
   listCompositionAllocationJobs: vi.fn(),
+  deleteCompositionBacktestRun: vi.fn(),
   updateComposition: vi.fn(),
   refreshCompositionDiagnostics: vi.fn(),
   refreshCompositionSourceFreezes: vi.fn(),
@@ -181,14 +183,15 @@ const compositions: ApiCompositionListItem[] = [
       { period: '30Y', status: 'missing', label: '30Y 待补齐' },
     ],
     allocation_lab_label: 'Risk Parity',
-    allocation_lab_detail: '候选可晋升',
+    allocation_lab_detail: '测试参考',
+    lab_summary: { job_id: 'alloc_job_54b2', summary: { candidate_count: 1 } },
     pending_decision_count: 1,
     promotion_candidate_count: 1,
     annualized_return: 0.082,
     sharpe: 1.21,
     max_drawdown: -0.094,
     updated_at: '2026-04-30T08:00:00.000Z',
-    latest_activity_label: '候选等待晋升审查',
+    latest_activity_label: '配置实验结果仅作测试参考',
     allowed_actions: ['open_composition_workbench'],
     source_integrity: [],
   },
@@ -357,8 +360,9 @@ const allocationJobs: ApiCompositionGlobalAllocationJobListItem[] = [
     method_detail: 'Allocation candidates were derived deterministically from the saved composition preview.',
     best_candidate_label: 'Risk Parity preview',
     candidate_count: 4,
-    promotion_ready_count: 1,
-    promotion_gate_label: '可通过',
+    promotion_ready_count: 0,
+    promotion_gate_label: '测试参考',
+    gate_status: 'reference',
     migration_cost_bps: 14,
     annualized_return_delta: 0.014,
     sharpe_delta: 0.08,
@@ -384,7 +388,7 @@ const allocationJobs: ApiCompositionGlobalAllocationJobListItem[] = [
     best_candidate_label: 'min_vol',
     candidate_count: 3,
     promotion_ready_count: 0,
-    promotion_gate_label: '门禁阻断',
+    promotion_gate_label: '状态需复核',
     migration_cost_bps: 4,
     annualized_return_delta: 0.006,
     sharpe_delta: 0.03,
@@ -403,6 +407,14 @@ beforeEach(() => {
   fakeApi.listCompositions = vi.fn().mockResolvedValue(compositions);
   fakeApi.listCompositionBacktestRuns = vi.fn().mockResolvedValue(backtestRuns);
   fakeApi.listCompositionAllocationJobs = vi.fn().mockResolvedValue(allocationJobs);
+  fakeApi.deleteCompositionBacktestRun = vi.fn().mockResolvedValue({
+    id: 'comp_run_81f2',
+    run_id: 'comp_run_81f2',
+    composition_id: 'cmp-001',
+    status: 'DELETED',
+    deleted_at: '2026-05-15T08:00:00.000Z',
+    deleted_reason: 'user_deleted',
+  });
   fakeApi.updateComposition = vi.fn().mockResolvedValue({ ...compositions[0], status: 'ARCHIVED' });
   fakeApi.refreshCompositionDiagnostics = vi.fn().mockResolvedValue(compositions[0]);
   fakeApi.refreshCompositionSourceFreezes = vi.fn().mockResolvedValue(compositions[0]);
@@ -419,7 +431,7 @@ afterEach(() => {
 });
 
 describe('composition v2 global index pages', () => {
-  it('renders the composition list with compact hero, metrics, table and decision rail', async () => {
+  it('renders the composition list with compact hero, clickable decision metric and full-width table', async () => {
     await act(async () => {
       render(<CompositionListIndexPage />);
     });
@@ -435,10 +447,14 @@ describe('composition v2 global index pages', () => {
       '状态标签',
       '10Y年化/夏普/回撤',
       '周期完整度',
-      '待决策',
+      '状态待办',
       '操作',
     ]);
-    expect(screen.getByRole('heading', { level: 2, name: '待决策事项' })).toBeInTheDocument();
+    expect(screen.getByText('状态待处理')).toBeInTheDocument();
+    expect(screen.queryByText('待处理状态标签')).toBeNull();
+    expect(screen.queryByText('待晋升候选')).toBeNull();
+    expect(screen.queryByRole('heading', { level: 2, name: '状态待处理' })).toBeNull();
+    expect(await within(table).findByText('QQQ网格&标普动量平衡')).toBeInTheDocument();
     expect(screen.getAllByText('稳健：证据链完整').length).toBeGreaterThan(0);
     expect(screen.getByText('配置 v5')).toBeInTheDocument();
     const qqqRow = within(table).getByText('QQQ网格&标普动量平衡').closest('tr');
@@ -454,6 +470,15 @@ describe('composition v2 global index pages', () => {
     expect(screen.queryByText('来源复核')).toBeNull();
     expect(screen.getAllByText('版本更新').length).toBeGreaterThan(0);
     expect(screen.queryByText('版本漂移')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '查看状态待处理' }));
+    const decisionDialog = screen.getByRole('dialog', { name: '状态待处理' });
+    expect(within(decisionDialog).queryByText('全天候研究组合')).toBeNull();
+    expect(within(decisionDialog).queryByText('候选晋升')).toBeNull();
+    expect(within(decisionDialog).getByText('QQQ网格&标普动量平衡')).toBeInTheDocument();
+    expect(within(decisionDialog).getByText('待校准：代理覆盖待确认')).toBeInTheDocument();
+    expect(within(decisionDialog).queryByText('稳健：证据链完整')).toBeNull();
+    expect(within(decisionDialog).queryByRole('button', { name: '进入晋升审查' })).toBeNull();
+    expect(within(decisionDialog).queryByText(/配置候选等待晋升审查/)).toBeNull();
     expect(screen.queryByText(/127\.0\.0\.1:8000/)).toBeNull();
     expect(screen.queryByText(/Stepper|mock|placeholder/i)).toBeNull();
   });
@@ -667,37 +692,57 @@ describe('composition v2 global index pages', () => {
 
     expect(await screen.findByRole('heading', { level: 1, name: '组合回测列表' })).toBeInTheDocument();
     expect(screen.getByRole('table', { name: '组合回测列表' })).toBeInTheDocument();
-    expect(screen.getByText('集中查看组合回测、压力窗口与状态标签。')).toBeInTheDocument();
+    expect(screen.getByText('集中查看组合回测、压力窗口与运行时间。')).toBeInTheDocument();
     expect(screen.getByText('按组合版本快照查看运行结果。')).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '压力窗口' })).toBeInTheDocument();
-    expect(screen.getByText('选择窗口查看回撤与修复表现。')).toBeInTheDocument();
+    expect(screen.getByText('展示回撤与修复表现。')).toBeInTheDocument();
+    expect(screen.queryByLabelText('当前压力窗口')).toBeNull();
     expect(screen.getAllByText('历史最差三个月').length).toBeGreaterThan(0);
+    expect(screen.queryByLabelText('标签颜色说明')).toBeNull();
 
     const table = screen.getByRole('table', { name: '组合回测列表' });
     fireEvent.click(within(table).getAllByRole('button', { name: '查看' })[0]);
     expect(window.location.hash).toBe('#/compositions/cmp-001/backtest-runs/comp_run_81f2');
   });
 
-  it('opens status label actions from global backtest rows', async () => {
+  it('requires confirmation before deleting a global composition backtest row', async () => {
+    fakeApi.listCompositionBacktestRuns = vi.fn()
+      .mockResolvedValueOnce(backtestRuns)
+      .mockResolvedValueOnce(backtestRuns.slice(1));
+
+    await act(async () => {
+      render(<CompositionBacktestRunsIndexPage />);
+    });
+
+    const table = screen.getByRole('table', { name: '组合回测列表' });
+    const row = within(table).getByText('全天候研究组合').closest('tr')!;
+    fireEvent.click(within(row).getByRole('button', { name: '删除' }));
+
+    const dialog = screen.getByRole('dialog', { name: '删除组合回测' });
+    expect(within(dialog).getByText(/comp_run_81f2/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/逻辑删除/)).toBeInTheDocument();
+    expect(fakeApi.deleteCompositionBacktestRun).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '确认删除' }));
+
+    await waitFor(() => expect(fakeApi.deleteCompositionBacktestRun).toHaveBeenCalledWith('cmp-001', 'comp_run_81f2'));
+    await waitFor(() => expect(within(table).queryByText('全天候研究组合')).toBeNull());
+  });
+
+  it('omits status labels from global backtest rows', async () => {
     await act(async () => {
       render(<CompositionBacktestRunsIndexPage />);
     });
 
     const table = screen.getByRole('table', { name: '组合回测列表' });
     const qqqRow = within(table).getByText('QQQ网格&标普动量平衡').closest('tr')!;
-    fireEvent.click(within(qqqRow).getByRole('button', { name: '待校准：代理覆盖待确认' }));
-
-    expect(screen.getByRole('dialog', { name: '代理覆盖待确认状态标签' })).toBeInTheDocument();
-    expect(screen.getByText('确认代理关系，或替换来源。')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '确认代理关系' }));
-
-    await waitFor(() => expect(fakeApi.confirmCompositionProxy).toHaveBeenCalledWith(
-      'cmp-002',
-      expect.objectContaining({ proxy_signature: 'proxy::QQQ::UNREGISTERED::test' }),
-    ));
+    expect(within(qqqRow).queryByRole('button', { name: '待校准：代理覆盖待确认' })).toBeNull();
+    expect(within(qqqRow).queryByText('待校准：代理覆盖待确认')).toBeNull();
+    expect(within(qqqRow).queryByText(/proxy evidence required/)).toBeNull();
+    expect(fakeApi.confirmCompositionProxy).not.toHaveBeenCalled();
   });
 
-  it('filters global backtest rows, localizes headers, and updates the pressure scenario rail', async () => {
+  it('filters global backtest rows, localizes headers, and keeps the pressure scenario rail read-only', async () => {
     window.location.hash = '#/compositions/backtest-runs?scenario=历史最差三个月';
     await act(async () => {
       render(<CompositionBacktestRunsIndexPage />);
@@ -707,45 +752,81 @@ describe('composition v2 global index pages', () => {
     expect(within(table).getByText('全天候研究组合')).toBeInTheDocument();
     expect(within(table).queryByText('QQQ网格&标普动量平衡')).toBeNull();
     expect(screen.queryByLabelText('当前压力窗口')).toBeNull();
-    expect(screen.getByText('点击压力窗口查看该组合的极端行情表现。')).toBeInTheDocument();
+    expect(screen.getByText('点击左侧列表中的压力窗口查看对应回测的极端行情表现。')).toBeInTheDocument();
     expect(within(table).getAllByRole('columnheader').map((header) => header.textContent)).toEqual([
+      '回测id',
       '组合名',
       '时间周期',
-      '状态标签',
       '压力窗口',
       '年化收益',
       '夏普',
       '回撤',
+      '运行时间',
       '操作',
     ]);
 
     fireEvent.change(screen.getByLabelText('压力窗口筛选'), { target: { value: '2022 紧缩熊市' } });
     expect(within(table).queryByText('全天候研究组合')).toBeNull();
     expect(within(table).getByText('QQQ网格&标普动量平衡')).toBeInTheDocument();
-    expect(within(table).getByText('待校准：代理覆盖待确认')).toBeInTheDocument();
+    expect(within(table).getByText('配置 v5 frozen')).toBeInTheDocument();
+    expect(within(table).queryByText('待校准：代理覆盖待确认')).toBeNull();
     expect(within(table).queryByText(/proxy evidence required/)).toBeNull();
     expect(window.location.hash).toBe('#/compositions/backtest-runs?scenario=2022+%E7%B4%A7%E7%BC%A9%E7%86%8A%E5%B8%82');
 
     fireEvent.change(screen.getByLabelText('压力窗口筛选'), { target: { value: '历史最差三个月' } });
-    const scenarioButton = screen.getByRole('button', { name: '查看 历史最差三个月压力场景' });
-    expect(scenarioButton).not.toHaveTextContent('修复 组合 120d');
-    fireEvent.click(scenarioButton);
-    expect(screen.getByLabelText('当前压力窗口')).toHaveTextContent('历史最差三个月');
-    expect(screen.getByLabelText('当前压力窗口')).toHaveTextContent('全天候研究组合');
-    expect(screen.getByLabelText('当前压力窗口')).toHaveTextContent('2018-10 至 2018-12');
-    expect(screen.getByLabelText('当前压力窗口')).toHaveTextContent('窗口回撤');
-    expect(screen.getByLabelText('当前压力窗口')).toHaveTextContent('-12.9%');
-    expect(screen.getByLabelText('当前压力窗口')).toHaveTextContent('基准回撤');
-    expect(screen.getByLabelText('当前压力窗口')).toHaveTextContent('-17.0%');
-    expect(screen.getByLabelText('当前压力窗口')).toHaveTextContent('相对抗跌');
-    expect(screen.getByLabelText('当前压力窗口')).toHaveTextContent('+4.0pt');
     const rail = screen.getByRole('heading', { level: 2, name: '压力窗口' }).closest('aside')!;
+    const hashAfterFilter = window.location.hash;
+    const railScenario = within(rail).getByText('历史最差三个月');
+    expect(railScenario.closest('.composition-global-index__scenario-item')).not.toHaveTextContent('修复 组合 120d');
     expect(within(rail).queryByRole('button', { name: '查看 历史最差三个月压力场景' })).toBeNull();
+    fireEvent.click(railScenario);
+    expect(window.location.hash).toBe(hashAfterFilter);
+    expect(screen.queryByLabelText('当前压力窗口')).toBeNull();
     expect(within(table).queryByText('QQQ网格&标普动量平衡')).toBeNull();
     expect(within(table).getByText('全天候研究组合')).toBeInTheDocument();
   });
 
-  it('renders the lab as a job list and keeps promotion gated through draft creation', async () => {
+  it('sorts global backtest rows by runtime descending by default', async () => {
+    fakeApi.listCompositionBacktestRuns = vi.fn().mockResolvedValue([...backtestRuns].reverse());
+
+    await act(async () => {
+      render(<CompositionBacktestRunsIndexPage />);
+    });
+
+    const table = screen.getByRole('table', { name: '组合回测列表' });
+    const bodyRows = within(table).getAllByRole('row').slice(1);
+    expect(within(bodyRows[0]).getByText('comp_run_81f2')).toBeInTheDocument();
+    expect(within(bodyRows[1]).getByText('comp_run_rate_2022')).toBeInTheDocument();
+  });
+
+  it('shows the selected run pressure-window details without filtering when clicking global backtest row pressure text', async () => {
+    await act(async () => {
+      render(<CompositionBacktestRunsIndexPage />);
+    });
+
+    const table = screen.getByRole('table', { name: '组合回测列表' });
+    const row = within(table).getByText('全天候研究组合').closest('tr')!;
+    fireEvent.click(within(row).getByRole('button', { name: '查看 历史最差三个月压力窗口详情' }));
+
+    expect(window.location.hash).toBe('');
+    expect(within(table).getByText('QQQ网格&标普动量平衡')).toBeInTheDocument();
+    const currentScenario = screen.getByLabelText('当前压力窗口');
+    expect(currentScenario).toHaveTextContent('历史最差三个月');
+    expect(currentScenario).toHaveTextContent('comp_run_81f2');
+    expect(currentScenario).toHaveTextContent('全天候研究组合');
+    expect(currentScenario).toHaveTextContent('2018-10 至 2018-12');
+    expect(currentScenario).toHaveTextContent('窗口回撤');
+    expect(currentScenario).toHaveTextContent('-12.9%');
+    expect(currentScenario).toHaveTextContent('基准回撤');
+    expect(currentScenario).toHaveTextContent('-17.0%');
+    expect(currentScenario).toHaveTextContent('修复周期');
+    expect(currentScenario).toHaveTextContent('组合 120d / 基准 120d');
+    expect(currentScenario).toHaveTextContent('相对抗跌');
+    expect(currentScenario).toHaveTextContent('+4.0pt');
+    expect(currentScenario).toHaveTextContent('来自本次组合回测收益序列的滚动三个月最差窗口。');
+  });
+
+  it('renders the lab as a test-reference job list without promotion review tasks', async () => {
     await act(async () => {
       render(<CompositionLabIndexPage />);
     });
@@ -768,14 +849,13 @@ describe('composition v2 global index pages', () => {
     expect(firstRow!).toHaveTextContent('Δ年化 +1.4%');
     expect(firstRow!).toHaveTextContent('Δ夏普 +0.08');
     expect(firstRow!).toHaveTextContent('Δ回撤 -1.8%');
-    expect(firstRow!).toHaveTextContent('最佳 风险平价');
-    expect(screen.getByRole('heading', { level: 2, name: '晋升审查' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '生成草稿版本' })).toBeEnabled();
-    fireEvent.click(screen.getByRole('button', { name: '生成草稿版本' }));
-    expect(window.location.hash).toBe('#/compositions/cmp-001/allocation-jobs/alloc_job_54b2');
-    fireEvent.click(screen.getByRole('button', { name: '创建决策包' }));
-    expect(window.location.hash).toBe('#/compositions/cmp-001/allocation-jobs/alloc_job_54b2?intent=decision-packet');
+    expect(firstRow!).toHaveTextContent('参考 风险平价');
+    expect(firstRow!).toHaveTextContent('测试参考');
+    expect(screen.queryByRole('heading', { level: 2, name: '晋升审查' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '生成草稿版本' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '创建决策包' })).toBeNull();
     expect(screen.queryByText('保存为正式版本')).toBeNull();
+    expect(screen.queryByText('待晋升候选')).toBeNull();
     expect(screen.queryByText('heuristic_from_composition_detail_preview')).toBeNull();
     expect(screen.queryByText(/Allocation candidates were derived/i)).toBeNull();
     expect(screen.queryByText(/Risk Parity preview/i)).toBeNull();

@@ -7,6 +7,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from grit_backtest_platform.factor_mining import (
+    DEFAULT_COMPOSITION_RECIPE_FAMILIES,
+    DEFAULT_COMPOSITION_SOURCE_FACTORS,
     FactorMiningCandidateSummary,
     FactorMiningRunner,
     FactorMiningJobCreateRequest,
@@ -268,6 +270,35 @@ def test_factor_mining_top_candidates_are_expression_deduped() -> None:
     assert len(expressions) == len(set(expressions))
 
 
+def test_factor_mining_hybrid_composition_emits_templates_and_pairwise_candidates() -> None:
+    request = FactorMiningJobCreateRequest(
+        universe=("AAPL", "MSFT", "NVDA", "AMZN", "JPM", "XOM"),
+        start_date="2018-01-01",
+        end_date="2024-12-31",
+        operators=("return", "rank"),
+        candidate_count=14,
+        random_seed=7,
+        min_rank_ic=0.0,
+        max_depth=4,
+        generation_mode="HYBRID_COMPOSITION",
+        source_factor_ids=DEFAULT_COMPOSITION_SOURCE_FACTORS,
+        recipe_families=DEFAULT_COMPOSITION_RECIPE_FAMILIES,
+        exploration_budget=6,
+        composition_policy={"mode": "template_plus_exploration"},
+    )
+
+    result = run_factor_mining_job(request, top_k=14)
+    composed = [candidate for candidate in result.all_candidates if candidate.recipe_kind]
+    expressions = {candidate.expression for candidate in composed}
+
+    assert result.status == "COMPLETED"
+    assert "s_mom_6m_rank * s_qlty_roe_ltm_raw" in expressions
+    assert 'ZScore(Residual(s_val_cfp_ltm_raw, by="s_size_cur_log"))' in expressions
+    assert any(candidate.recipe_kind == "exploratory_pairwise" for candidate in composed)
+    assert all(candidate.source_factor_ids or candidate.recipe_family == "ts_denoise" for candidate in composed)
+    assert len({(candidate.expression, tuple(sorted(candidate.source_factor_ids))) for candidate in composed}) == len(composed)
+
+
 def test_factor_mining_unknown_operator_is_contained_as_failed_sample() -> None:
     result = run_factor_mining_job(_request(candidate_count=5, operators=("return", "UnknownOp")))
 
@@ -367,6 +398,43 @@ def test_factor_mining_api_runs_one_thousand_candidates_without_factor_library_w
     assert detail["id"] == created["id"]
     cancelled = assert_ok(client.post(f"/factor-mining/jobs/{created['id']}/cancel"))
     assert cancelled["id"] == created["id"]
+
+
+def test_factor_mining_api_hybrid_composition_keeps_candidates_in_sandbox() -> None:
+    client, _db_path = create_test_client(_runtime_test_dir("hybrid-composition"))
+    seed_factor_mining_price_snapshot(client)
+    storage = client.app.state.service.storage
+    before = storage.fetch_one("SELECT COUNT(*) AS count FROM factor_definitions")["count"]
+
+    submitted = assert_ok(
+        client.post(
+            "/factor-mining/jobs",
+            json={
+                "universe": "AAPL,MSFT,NVDA,AMZN,JPM,XOM",
+                "start_date": "2018-01-01",
+                "end_date": "2024-12-31",
+                "operators": ["return", "rank"],
+                "candidate_count": 12,
+                "random_seed": 17,
+                "min_rank_ic": 0.0,
+                "max_depth": 4,
+                "generation_mode": "HYBRID_COMPOSITION",
+                "source_factor_ids": list(DEFAULT_COMPOSITION_SOURCE_FACTORS),
+                "recipe_families": list(DEFAULT_COMPOSITION_RECIPE_FAMILIES),
+                "exploration_budget": 4,
+                "composition_policy": {"mode": "template_plus_exploration"},
+            },
+        )
+    )
+    created = wait_for_factor_mining_job(client, submitted["id"])
+
+    assert created["status"] == "COMPLETED"
+    assert created["summary"]["generation_mode"] == "HYBRID_COMPOSITION"
+    assert created["summary"]["composition_candidate_count"] >= 1
+    assert any(candidate.get("recipe_kind") == "template" for candidate in created["top_candidates"])
+    assert any(candidate.get("source_factor_ids") for candidate in created["top_candidates"])
+    after = storage.fetch_one("SELECT COUNT(*) AS count FROM factor_definitions")["count"]
+    assert after == before
 
 
 def test_factor_mining_api_reports_running_progress_before_completion(monkeypatch) -> None:

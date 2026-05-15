@@ -341,12 +341,12 @@ function promotionReadinessBlockedReason(readiness: AllocationPromotionReadiness
     return null;
   }
   if (blockers.has('evidence_grade_c') || readiness.evidenceGrade === 'C') {
-    return '存在未关闭的失效问题，晋升门禁已暂停。';
+    return '存在未关闭的失效问题，仅保留测试参考。';
   }
   if (blockers.has('constraint_violations') || readiness.policyViolationCount > 0) {
     return '存在约束违反，请先调整候选约束。';
   }
-  return '晋升门禁未通过，暂不能生成草稿版本。';
+  return '参考门禁未通过，仅保留测试参考。';
 }
 
 function statusActionFromReadiness(
@@ -941,7 +941,7 @@ function buildCandidates(legs: AllocationLeg[]): AllocationCandidate[] {
       verdict: '收益效率最高，但执行约束触发预警。',
       sourceEvidence: '来源：最大夏普目标、ADV 占比、压力回撤审计。',
       executionLimited: true,
-      violation: '流动性压力超过 15%，需交易台复核后再晋升。',
+      violation: '流动性压力超过 15%，需交易台复核后再采用。',
       variant: 0,
     },
     {
@@ -1203,7 +1203,7 @@ function buildCandidatesFromJob(job: ApiCompositionAllocationJob | null, model: 
         statusActionLabel: statusAction?.label ?? null,
         statusActionPath: statusAction?.path ?? null,
         violation: constraintViolations.length > 0
-          ? '存在约束提示，请复核后晋升。'
+          ? '存在约束提示，请复核后采用。'
           : readinessBlockedReason
             ? readinessBlockedReason
           : undefined,
@@ -2389,7 +2389,7 @@ function HoverSnapshot({
           );
         })}
       </div>
-      <p>权重快照用于核对迁移方向，不作为晋升入口。</p>
+      <p>权重快照用于核对迁移方向，不作为执行入口。</p>
     </aside>
   );
 }
@@ -2871,23 +2871,19 @@ function CandidateSelectorPanel({
 
 function ExecutionDecisionPanel({
   candidate,
-  disabledReason,
   legs,
-  onOpenPromotion,
-  promotionSuccess,
+  statusReason,
 }: {
   candidate: AllocationCandidate;
-  disabledReason: string | null;
   legs: AllocationLeg[];
-  onOpenPromotion: () => void;
-  promotionSuccess: string | null;
+  statusReason: string | null;
 }): JSX.Element {
-  const statusLabel = disabledReason ? '门禁阻断' : candidate.executionLimited ? '执行受限' : '可晋升';
+  const statusLabel = statusReason ? '需复核' : candidate.executionLimited ? '执行受限' : '测试参考';
   return (
     <aside className="composition-allocation-panel composition-allocation-decision-card" data-ui="allocation-decision-card">
       <div className="composition-allocation-panel__header">
         <div>
-          <h2>执行决策</h2>
+          <h2>测试参考</h2>
           <p>{objectiveLabel(candidate.objectiveKey)} · 排名 {candidate.rank}</p>
         </div>
         <span className={candidate.executionLimited ? 'composition-allocation-status composition-allocation-status--warning' : 'composition-allocation-status composition-allocation-status--good'}>
@@ -2911,18 +2907,12 @@ function ExecutionDecisionPanel({
           <span>流动性压力 {candidate.liquidityPressurePct.toFixed(1)}%</span>
         </div>
         <p className={candidate.executionLimited ? 'composition-allocation-warning-copy' : ''}>{candidate.verdict}</p>
-        {candidate.violation && candidate.violation !== disabledReason ? <div className="composition-allocation-violation">{candidate.violation}</div> : null}
-        {disabledReason ? <div className="composition-allocation-violation">{disabledReason}</div> : null}
-        {promotionSuccess ? <div className="composition-allocation-action-state" role="status">{promotionSuccess}</div> : null}
-        <button
-          className="composition-allocation-primary-button composition-allocation-decision-card__primary"
-          disabled={Boolean(disabledReason)}
-          onClick={onOpenPromotion}
-          type="button"
-        >
-          生成草稿版本
-        </button>
-        {disabledReason && candidate.statusActionPath ? (
+        {candidate.violation && candidate.violation !== statusReason ? <div className="composition-allocation-violation">{candidate.violation}</div> : null}
+        {statusReason ? <div className="composition-allocation-violation">{statusReason}</div> : null}
+        <div className="composition-allocation-action-state" role="status">
+          配置实验结果仅作为测试参考，正式组合仍以当前保存配置为准。
+        </div>
+        {statusReason && candidate.statusActionPath ? (
           <button
             className="composition-allocation-ghost-button"
             onClick={() => navigateTo(candidate.statusActionPath ?? '')}
@@ -2946,11 +2936,11 @@ function AuditDisclosure({ candidate }: { candidate: AllocationCandidate }): JSX
         </div>
       </div>
       <div className="composition-allocation-audit__grid">
-        <div className="composition-allocation-evidence-box">
+      <div className="composition-allocation-evidence-box">
           <strong>候选来源</strong>
           <span>{candidate.label} · 换手 {formatPct(candidate.turnover, 1)} · 摩擦 {candidate.migrationCostBps} bps。</span>
           <strong>执行判断</strong>
-          <span>{candidate.executionLimited ? '需交易台复核，暂缓自动晋升。' : '执行窗口可控，可进入决策卡确认。'}</span>
+          <span>{candidate.executionLimited ? '需交易台复核，仅保留测试参考。' : '执行窗口可控，仅用于测试比较。'}</span>
         </div>
         <div className="composition-allocation-evidence-box">
           <strong>收益质量</strong>
@@ -2965,108 +2955,6 @@ function AuditDisclosure({ candidate }: { candidate: AllocationCandidate }): JSX
   );
 }
 
-function buildPromotionPayload(legs: AllocationLeg[], candidate: AllocationCandidate): Record<string, unknown> {
-  return {
-    legs: legs.map((leg) => {
-      const target = candidate.weights.find((item) => item.legId === leg.id);
-      return {
-        config: leg.config,
-        display_name: leg.displayName,
-        leg_kind: leg.legKind,
-        ordering: leg.ordering,
-        source_ref_id: leg.sourceRefId,
-        source_ref_type: leg.sourceRefType,
-        weight_locked: leg.locked,
-        weight_pct: target?.weight ?? leg.currentWeight,
-      };
-    }),
-  };
-}
-
-function buildPromotionChangeRows(legs: AllocationLeg[], candidate: AllocationCandidate): string[] {
-  const rows = legs
-    .map((leg) => {
-      const target = candidate.weights.find((item) => item.legId === leg.id);
-      const nextWeight = target?.weight ?? leg.currentWeight;
-      if (Math.abs(nextWeight - leg.currentWeight) < 0.05) {
-        return null;
-      }
-      return `${leg.displayName || leg.name} 权重：${leg.currentWeight.toFixed(1)}% -> ${nextWeight.toFixed(1)}%`;
-    })
-    .filter((item): item is string => Boolean(item));
-  rows.push(`候选方案：${candidate.label}`);
-  rows.push(`迁移成本：${candidate.migrationCostBps} bps，预估换手：${candidate.turnover.toFixed(1)}%`);
-  return rows;
-}
-
-function PromotionDialog({
-  candidate,
-  error,
-  legs,
-  onCancel,
-  onConfirm,
-  onReasonChange,
-  reason,
-  submitting,
-}: {
-  candidate: AllocationCandidate;
-  error: string | null;
-  legs: AllocationLeg[];
-  onCancel: () => void;
-  onConfirm: () => void;
-  onReasonChange: (value: string) => void;
-  reason: string;
-  submitting: boolean;
-}): JSX.Element {
-  const changes = buildPromotionChangeRows(legs, candidate);
-  return (
-    <div className="composition-allocation-dialog-backdrop" role="presentation">
-      <section
-        aria-labelledby="allocation-promotion-dialog-title"
-        aria-modal="true"
-        className="composition-allocation-dialog"
-        role="dialog"
-      >
-        <div className="composition-allocation-panel__header">
-          <div>
-            <h2 id="allocation-promotion-dialog-title">确认生成草稿版本</h2>
-            <p>{candidate.label} · {candidate.sourceEvidence}</p>
-          </div>
-        </div>
-        <div className="composition-allocation-dialog__grid">
-          <span>预估摩擦 <strong>{candidate.migrationCostBps} 个基点</strong></span>
-          <span>流动性压力 <strong>{candidate.liquidityPressurePct.toFixed(1)}%</strong></span>
-          <span>修复周期 <strong>{candidate.recoveryDays} 天</strong></span>
-        </div>
-        <div className="composition-allocation-dialog__changes">
-          {changes.map((change) => (
-            <span key={change}>{change}</span>
-          ))}
-        </div>
-        <CandidateBars candidate={candidate} legs={legs} />
-        <label className="composition-allocation-dialog__reason">
-          <span>升级理由</span>
-          <textarea
-            aria-label="升级理由"
-            onChange={(event) => onReasonChange(event.target.value)}
-            placeholder="例如：采用配置实验室候选，降低组合风险暴露。"
-            value={reason}
-          />
-        </label>
-        {error ? <div className="composition-allocation-violation" role="alert">{error}</div> : null}
-        <div className="composition-allocation-actions">
-          <button className="composition-allocation-ghost-button" onClick={onCancel} type="button">
-            取消
-          </button>
-          <button className="composition-allocation-primary-button" disabled={submitting || !reason.trim()} onClick={onConfirm} type="button">
-            {submitting ? '提交中' : '确认生成草稿'}
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
 export function CompositionAllocationResultPage({
   compositionId,
   intent = 'min-vol',
@@ -3076,7 +2964,6 @@ export function CompositionAllocationResultPage({
   intent?: AllocationIntentKey;
   jobId: string;
 }): JSX.Element {
-  const api = useApiClient();
   const pageRef = useRef<HTMLElement | null>(null);
   const { loading, model, warning } = useAllocationModel(compositionId);
   const allocationJob = useAllocationJob(compositionId, jobId);
@@ -3091,11 +2978,6 @@ export function CompositionAllocationResultPage({
   const initialObjective: AllocationObjectiveKey = intent === 'expert' ? 'min-vol' : intent;
   const [selectedObjective, setSelectedObjective] = useState<AllocationObjectiveKey>(initialObjective);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string>('');
-  const [promotionDialogOpen, setPromotionDialogOpen] = useState(false);
-  const [promotionSubmitting, setPromotionSubmitting] = useState(false);
-  const [promotionError, setPromotionError] = useState<string | null>(null);
-  const [promotionSuccess, setPromotionSuccess] = useState<string | null>(null);
-  const [promotionReason, setPromotionReason] = useState('');
 
   useEffect(() => {
     scrollAllocationPageToTop();
@@ -3128,16 +3010,9 @@ export function CompositionAllocationResultPage({
     ?? buildCandidates(DEFAULT_MODEL.legs)[0]!;
   const selectedPointId = selectedCandidate?.id ?? selectedObjective;
   const selectedPoint = frontierPoints.find((point) => point.id === selectedPointId) ?? frontierPoints[0];
-  const promotionReadinessReason = promotionReadinessBlockedReason(selectedCandidate?.promotionReadiness);
-  const promotionDisabledReason = !api.promoteCompositionAllocationCandidateToDraft
-    ? '候选晋升接口未接入，暂不能生成草稿版本。'
-    : selectedCandidate?.canPromote === false
-      ? '该候选不是可晋升方案。'
-      : promotionReadinessReason
-        ? promotionReadinessReason
-        : selectedCandidate?.executionLimited
-          ? '该候选触发执行受限，请先完成交易台流动性复核。'
-          : null;
+  const referenceStatusReason =
+    promotionReadinessBlockedReason(selectedCandidate?.promotionReadiness)
+    ?? (selectedCandidate?.executionLimited ? '该候选触发执行受限，请先完成交易台流动性复核。' : null);
 
   useEffect(() => {
     if (selectedPoint) {
@@ -3149,38 +3024,10 @@ export function CompositionAllocationResultPage({
     setSelectedObjective(nextObjective);
     const nextCandidate = rankCandidatesForObjective(candidates, nextObjective)[0];
     setSelectedCandidateId(nextCandidate?.id ?? '');
-    setPromotionDialogOpen(false);
-    setPromotionError(null);
-    setPromotionSuccess(null);
-    setPromotionReason('');
   }
 
   function handleSelectCandidate(candidateId: string): void {
     setSelectedCandidateId(candidateId);
-    setPromotionDialogOpen(false);
-    setPromotionError(null);
-    setPromotionSuccess(null);
-    setPromotionReason('');
-  }
-
-  async function handleConfirmPromotion(): Promise<void> {
-    if (!selectedCandidate || !api.promoteCompositionAllocationCandidateToDraft) {
-      return;
-    }
-    try {
-      setPromotionSubmitting(true);
-      setPromotionError(null);
-      const draftVersion = await api.promoteCompositionAllocationCandidateToDraft(compositionId, jobId, selectedCandidate.id, {
-        decision_note: promotionReason.trim(),
-      });
-      setPromotionDialogOpen(false);
-      setPromotionReason('');
-      setPromotionSuccess(`已生成草稿版本 v${draftVersion.version_number}：${selectedCandidate.label}`);
-    } catch (caught) {
-      setPromotionError(`生成草稿版本失败：${(caught as Error).message}`);
-    } finally {
-      setPromotionSubmitting(false);
-    }
   }
 
   return (
@@ -3242,14 +3089,8 @@ export function CompositionAllocationResultPage({
         </div>
         <ExecutionDecisionPanel
           candidate={selectedCandidate}
-          disabledReason={promotionDisabledReason}
           legs={model.legs}
-          onOpenPromotion={() => {
-            setPromotionDialogOpen(true);
-            setPromotionError(null);
-            setPromotionReason('');
-          }}
-          promotionSuccess={promotionSuccess}
+          statusReason={referenceStatusReason}
         />
       </div>
       <StressTestPanel
@@ -3259,20 +3100,6 @@ export function CompositionAllocationResultPage({
         scenarios={model.stressScenarios}
       />
       <AuditDisclosure candidate={selectedCandidate} />
-      {promotionDialogOpen ? (
-        <PromotionDialog
-          candidate={selectedCandidate}
-          error={promotionError}
-          legs={model.legs}
-          onCancel={() => setPromotionDialogOpen(false)}
-          onConfirm={() => {
-            void handleConfirmPromotion();
-          }}
-          onReasonChange={setPromotionReason}
-          reason={promotionReason}
-          submitting={promotionSubmitting}
-        />
-      ) : null}
     </main>
   );
 }

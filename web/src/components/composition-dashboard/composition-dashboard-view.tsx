@@ -1,8 +1,7 @@
-import { useState } from 'react';
-import { formatDateTime, formatRatio } from '../../lib/format';
+import { useMemo, useState } from 'react';
+import { formatRatio } from '../../lib/format';
 import {
   formatComposePercent,
-  formatCompositionActivityLabel,
   formatCompositionName,
   formatCompositionStatusLabel,
   formatRebalanceCadence,
@@ -12,17 +11,25 @@ import {
   diagnosisNeedsAction,
 } from '../../lib/composition-diagnostics';
 import { navigateTo } from '../../lib/appRouteContext';
+import type { WorkspaceRecentRunItem } from '../../page-sections/workspace-recent-runs-lane-b';
 import type {
+  ApiCompositionGlobalAllocationJobListItem,
+  ApiCompositionGlobalBacktestRunListItem,
   ApiCompositionListItem,
   ApiCompositionStatusAction,
   ApiCompositionSourceIntegrity,
   ApiCompositionStatus,
 } from '../../types';
+import '../../page-sections/workspace-recent-runs-lane-b.css';
 import './composition-dashboard.css';
 
 type CompositionDashboardViewProps = {
   compositions: ApiCompositionListItem[];
+  backtestRuns?: ApiCompositionGlobalBacktestRunListItem[];
+  allocationJobs?: ApiCompositionGlobalAllocationJobListItem[];
   loading?: boolean;
+  activityLoading?: boolean;
+  activityError?: string | null;
   error?: string | null;
   savingCompositionId?: string | null;
   writeError?: string | null;
@@ -321,9 +328,316 @@ function ActionButton({
   );
 }
 
+function pad(value: number): string {
+  return String(value).padStart(2, '0');
+}
+
+function formatActivityDate(value?: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+  const isoMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) {
+    return `${isoMatch[1]}.${isoMatch[2]}.${isoMatch[3]}`;
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return `${parsed.getFullYear()}.${pad(parsed.getMonth() + 1)}.${pad(parsed.getDate())}`;
+}
+
+function formatRelativeTime(value?: string | null): string {
+  if (!value) {
+    return '时间未知';
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return '时间未知';
+  }
+  const diffMs = Date.now() - parsed.getTime();
+  const diffMinutes = Math.max(1, Math.round(diffMs / 60_000));
+  if (diffMinutes < 60) {
+    return `${diffMinutes} 分钟前`;
+  }
+  const diffHours = Math.round(diffMinutes / 60);
+  if (diffHours < 24) {
+    return `${diffHours} 小时前`;
+  }
+  return `${Math.round(diffHours / 24)} 天前`;
+}
+
+function pickActivityTime(...values: Array<string | null | undefined>): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function formatActivityStatus(status?: string | null): string {
+  switch (String(status ?? '').toUpperCase()) {
+    case 'QUEUED':
+      return '排队中';
+    case 'RUNNING':
+      return '进行中';
+    case 'INTERRUPTED':
+      return '已中断';
+    case 'COMPLETED':
+      return '已完成';
+    case 'COMPLETED_WITH_WARNINGS':
+      return '已完成有提醒';
+    case 'PARTIALLY_FAILED':
+      return '部分失败';
+    case 'FAILED':
+      return '失败';
+    default:
+      return '状态待确认';
+  }
+}
+
+function formatSignedMetric(value?: number | null, digits = 2): string {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return '-';
+  }
+  return `${value > 0 ? '+' : ''}${value.toFixed(digits)}`;
+}
+
+function formatActivityPercent(value?: number | null): string {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return '-';
+  }
+  return formatComposePercent(value);
+}
+
+function formatActivityPeriodLabel(value?: string | null): string | null {
+  const raw = String(value ?? '').trim();
+  if (!raw) {
+    return null;
+  }
+  const yearMatch = raw.match(/^(\d+)Y$/i);
+  if (yearMatch) {
+    return `${yearMatch[1]} 年窗口`;
+  }
+  const monthMatch = raw.match(/^(\d+)M$/i);
+  if (monthMatch) {
+    return `${monthMatch[1]} 个月窗口`;
+  }
+  return raw;
+}
+
+function metricTone(value?: number | null): WorkspaceRecentRunItem['badges'][number]['tone'] {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return 'neutral';
+  }
+  return value < 0 ? 'negative' : 'positive';
+}
+
+function activityTimelineTone(status: string): WorkspaceRecentRunItem['badges'][number]['tone'] {
+  const normalized = status.toUpperCase();
+  if (normalized === 'FAILED') {
+    return 'negative';
+  }
+  if (['INTERRUPTED', 'COMPLETED_WITH_WARNINGS', 'PARTIALLY_FAILED'].includes(normalized)) {
+    return 'warning';
+  }
+  return 'positive';
+}
+
+function resolveCompositionActivityName(
+  compositionId: string,
+  compositionName: string | null | undefined,
+  compositionNamesById: Record<string, string>,
+): string {
+  return compositionNamesById[compositionId] || compositionName || compositionId;
+}
+
+function formatActivityRecordLabel(kind: 'backtest' | 'optimization', rawId: string): string {
+  const cleanedId = rawId
+    .replace(/^composition[-_]?backtest[-_]?run[-_]?/i, '')
+    .replace(/^composition[-_]?run[-_]?/i, '')
+    .replace(/^comp[-_]?run[-_]?/i, '')
+    .replace(/^allocation[-_]?job[-_]?/i, '')
+    .replace(/^alloc[-_]?job[-_]?/i, '')
+    .replace(/^backtest[-_]?run[-_]?/i, '')
+    .replace(/^run[-_]?/i, '')
+    .replace(/^job[-_]?/i, '');
+  const suffix = cleanedId && cleanedId !== rawId ? ` #${cleanedId}` : '';
+  return kind === 'optimization' ? `优化记录${suffix}` : `回测记录${suffix}`;
+}
+
+function normalizeAllocationMethodKey(value?: string | null): string {
+  const normalized = String(value ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (!normalized) {
+    return '';
+  }
+  if (['risk_parity', 'parity'].includes(normalized)) {
+    return 'risk_parity';
+  }
+  if (['min_vol', 'minimum_volatility', 'minimum_variance'].includes(normalized)) {
+    return 'min_vol';
+  }
+  if (['max_sharpe', 'maximum_sharpe'].includes(normalized)) {
+    return 'max_sharpe';
+  }
+  if (['mvo', 'mean_variance', 'mean_variance_optimization'].includes(normalized)) {
+    return 'mean_variance';
+  }
+  if (['black_litterman', 'black_litterman_model'].includes(normalized)) {
+    return 'black_litterman';
+  }
+  if (['efficient_frontier', 'frontier'].includes(normalized)) {
+    return 'efficient_frontier';
+  }
+  return normalized;
+}
+
+function allocationMethodLabel(methodKey?: string | null, methodLabel?: string | null): string {
+  const key = normalizeAllocationMethodKey(methodKey ?? methodLabel);
+  if (key === 'risk_parity') return '风险平价';
+  if (key === 'min_vol') return '最小波动';
+  if (key === 'max_sharpe') return '最大夏普';
+  if (key === 'mean_variance') return '均值方差优化';
+  if (key === 'black_litterman') return '贝莱克-利特曼';
+  if (key === 'efficient_frontier') return '有效前沿';
+  return formatAllocationCopy(methodLabel) ?? '优化方法待确认';
+}
+
+function formatEvidenceCopy(value?: string | null): string | null {
+  const raw = String(value ?? '').trim();
+  if (!raw) {
+    return null;
+  }
+  const normalized = raw.toLowerCase();
+  if (normalized === 'verified_from_composition_detail_preview') {
+    return '来自组合详情预演的已验证证据';
+  }
+  if (normalized === 'proxy_from_composition_detail_preview') {
+    return '来自组合详情预演的代理证据';
+  }
+  if (normalized === 'heuristic_from_composition_detail_preview') {
+    return '来自组合详情预演';
+  }
+  if (/^[a-z0-9_:-]+$/i.test(raw) && raw.includes('_')) {
+    return '运行证据待人工复核';
+  }
+  return raw;
+}
+
+function formatAllocationCopy(value?: string | null): string | null {
+  const raw = String(value ?? '').trim();
+  if (!raw) {
+    return null;
+  }
+  const normalized = raw.toLowerCase();
+  const evidenceCopy = formatEvidenceCopy(raw);
+  if (evidenceCopy && evidenceCopy !== raw) return evidenceCopy;
+  if (normalized === 'allocation candidates were derived deterministically from the saved composition preview.') {
+    return '确定性候选生成';
+  }
+  if (normalized === 'derived from full-window composition rebalance events and source return streams; these are model instructions, not broker fills.') {
+    return '来自完整窗口组合再平衡事件和来源收益流；这是模型调仓指令，不是券商成交回报。';
+  }
+  if (normalized === 'current saved allocation.') {
+    return '当前已保存配置。';
+  }
+  if (normalized === 'benchmark reference portfolio for comparison only.') {
+    return '仅用于对比的基准组合。';
+  }
+  if (['pass', 'passed'].includes(normalized)) {
+    return '可通过';
+  }
+  if (['blocked', 'block'].includes(normalized)) {
+    return '门禁阻断';
+  }
+  if (['review', 'needs_review', 'pending_review'].includes(normalized)) {
+    return '待审查';
+  }
+  return raw
+    .replace(/\bRisk Parity\b/gi, '风险平价')
+    .replace(/\bBlack[-\s]?Litterman\b/gi, '贝莱克-利特曼')
+    .replace(/\bMVO\b/gi, '均值方差优化')
+    .replace(/\bMean[-\s]?Variance(?: Optimization)?\b/gi, '均值方差优化')
+    .replace(/\bMinimum Volatility\b/gi, '最小波动')
+    .replace(/\bMin Vol\b/gi, '最小波动')
+    .replace(/\bMax(?:imum)? Sharpe\b/gi, '最大夏普')
+    .replace(/\befficient frontier\b/gi, '有效前沿');
+}
+
+function buildBacktestActivityItems(
+  runs: ApiCompositionGlobalBacktestRunListItem[],
+  compositionNamesById: Record<string, string>,
+): WorkspaceRecentRunItem[] {
+  return runs.filter((run) => Boolean(compositionNamesById[run.composition_id])).map((run) => {
+    const runId = run.run_id ?? run.id;
+    const completedAt = pickActivityTime(run.completed_at, run.created_at);
+    const scenarioLabel = formatEvidenceCopy(run.scenario_label ?? run.verdict_label) ?? formatActivityStatus(run.status);
+    const verdictDetail = formatEvidenceCopy(run.verdict_detail);
+    const dateLabel = formatActivityDate(completedAt);
+    return {
+      id: `composition-backtest-${run.id}`,
+      kind: 'backtest',
+      activityId: formatActivityRecordLabel('backtest', runId),
+      strategyName: resolveCompositionActivityName(run.composition_id, run.composition_name, compositionNamesById),
+      strategyVersionTag: run.composition_version_label,
+      status: run.status,
+      completedAt,
+      statusLabel: formatActivityStatus(run.status),
+      kindLabel: '组合回测',
+      metaLabel: [formatActivityPeriodLabel(run.time_period_label), verdictDetail, dateLabel].filter(Boolean).join(' · ') || '回测窗口待确认',
+      badges: [
+        { text: `年化收益率 ${formatActivityPercent(run.annualized_return)}`, tone: metricTone(run.annualized_return) },
+        { text: `收益夏普 ${typeof run.sharpe === 'number' ? formatRatio(run.sharpe) : '-'}`, tone: 'neutral' },
+        { text: `压力窗口 ${scenarioLabel}`, tone: run.scenario_status_label ? 'warning' : 'neutral' },
+      ],
+      completedRelativeLabel: formatRelativeTime(completedAt),
+      navigatePath: `/compositions/${encodeURIComponent(run.composition_id)}/backtest-runs/${encodeURIComponent(runId)}`,
+    };
+  });
+}
+
+function buildAllocationActivityItems(
+  jobs: ApiCompositionGlobalAllocationJobListItem[],
+  compositionNamesById: Record<string, string>,
+): WorkspaceRecentRunItem[] {
+  return jobs.filter((job) => Boolean(compositionNamesById[job.composition_id])).map((job) => {
+    const jobId = job.job_id ?? job.id;
+    const completedAt = pickActivityTime(job.completed_at, job.created_at);
+    const candidateCount = job.candidate_count ?? 0;
+    const gateTone = job.gate_status === 'blocked' ? 'warning' : 'neutral';
+    const methodLabel = allocationMethodLabel(job.method_key, job.method_label);
+    const detailLabel = formatAllocationCopy(job.method_detail);
+    const gateLabel = formatAllocationCopy(job.promotion_gate_label);
+    return {
+      id: `composition-optimization-${job.id}`,
+      kind: 'optimization',
+      activityId: formatActivityRecordLabel('optimization', jobId),
+      strategyName: resolveCompositionActivityName(job.composition_id, job.composition_name, compositionNamesById),
+      strategyVersionTag: job.composition_version_label,
+      status: job.status,
+      completedAt,
+      statusLabel: formatActivityStatus(job.status),
+      kindLabel: '组合优化',
+      metaLabel: [methodLabel, detailLabel, gateLabel].filter(Boolean).join(' · ') || '优化任务待确认',
+      badges: [
+        { text: `候选 ${candidateCount}`, tone: 'neutral' },
+        { text: job.gate_status === 'blocked' ? '需复核' : '测试参考', tone: gateTone },
+        { text: `夏普增量 ${formatSignedMetric(job.sharpe_delta)}`, tone: metricTone(job.sharpe_delta) },
+      ],
+      completedRelativeLabel: formatRelativeTime(completedAt),
+      navigatePath: `/compositions/${encodeURIComponent(job.composition_id)}/allocation-jobs/${encodeURIComponent(jobId)}`,
+    };
+  });
+}
+
 export function CompositionDashboardView({
   compositions,
+  backtestRuns = [],
+  allocationJobs = [],
   loading,
+  activityLoading = false,
+  activityError = null,
   error,
   savingCompositionId = null,
   writeError = null,
@@ -336,7 +650,7 @@ export function CompositionDashboardView({
   const activeCompositions = liveCompositions.filter(
     (composition) => String(composition.status || '').toUpperCase() === 'ACTIVE',
   );
-  const archivedCompositions = liveCompositions.filter(
+  const archivedCompositions = compositions.filter(
     (composition) => String(composition.status || '').toUpperCase() === 'ARCHIVED',
   );
   const pendingTasks = buildTaskList(liveCompositions);
@@ -349,8 +663,29 @@ export function CompositionDashboardView({
   const dominantCadenceLabel = getDominantCadenceLabel(liveCompositions);
   const visibleCompositions = updatedCompositions.slice(0, 2);
   const visibleTasks = pendingTasks.slice(0, 3);
-  const visibleActivities = updatedCompositions.slice(0, 4);
   const observationCards = buildObservationCards(liveCompositions);
+  const recentActivityItems = useMemo(() => {
+    const compositionNamesById = Object.fromEntries(
+      liveCompositions.map((composition) => [
+        composition.id,
+        formatCompositionName({
+          benchmarkLabel: composition.benchmark_label,
+          name: composition.name,
+          status: composition.status,
+        }),
+      ] as const),
+    );
+    return [
+      ...buildBacktestActivityItems(backtestRuns, compositionNamesById),
+      ...buildAllocationActivityItems(allocationJobs, compositionNamesById),
+    ]
+      .sort((left, right) => {
+        const leftTime = left.completedAt ? new Date(left.completedAt).getTime() : 0;
+        const rightTime = right.completedAt ? new Date(right.completedAt).getTime() : 0;
+        return rightTime - leftTime;
+      })
+      .slice(0, 8);
+  }, [allocationJobs, backtestRuns, liveCompositions]);
   const pendingArchiveComposition =
     liveCompositions.find((composition) => composition.id === pendingArchiveId) ?? null;
 
@@ -655,27 +990,59 @@ export function CompositionDashboardView({
             <section className="composition-dashboard-panel">
               <div className="composition-dashboard-panel__header">
                 <div className="composition-dashboard-panel__copy">
-                  <h2>最近活动</h2>
-                  <p>记录组合、来源与回测的最新变动，便于追踪近期版本与维护节奏。</p>
+                  <h2>最近回测优化</h2>
+                  <p>按组合维度展示最新组合回测与资产配置优化记录，点击进入对应结果页。</p>
                 </div>
-                <span className="composition-dashboard-chip">最近 {Math.min(updatedCompositions.length, 8)} 项</span>
+                <span className="composition-dashboard-chip">最近 {recentActivityItems.length} 项</span>
               </div>
 
-              <div className="composition-dashboard-activity-list">
-                {visibleActivities.map((composition) => (
-                  <article className="composition-dashboard-activity" key={`${composition.id}-activity`}>
-                    <strong>
-                      {formatCompositionName({
-                        name: composition.name,
-                        benchmarkLabel: composition.benchmark_label,
-                        status: composition.status,
-                      })}
-                    </strong>
-                    <span className="composition-dashboard-activity__meta">
-                      {formatCompositionActivityLabel(composition.latest_activity_label)} · {formatDateTime(composition.updated_at)}
-                    </span>
-                  </article>
-                ))}
+              <div className="composition-dashboard-activity-list workspace-recent-runs__timeline">
+                {activityLoading ? (
+                  Array.from({ length: 3 }, (_, index) => (
+                    <div className="workspace-recent-runs__card workspace-recent-runs__card--skeleton" key={`composition-activity-skeleton-${index}`} />
+                  ))
+                ) : activityError ? (
+                  <div className="workspace-recent-runs__empty workspace-recent-runs__empty--error" role="alert">
+                    <p>{activityError}</p>
+                  </div>
+                ) : recentActivityItems.length > 0 ? (
+                  recentActivityItems.map((item) => (
+                    <div className={`workspace-recent-runs__item workspace-recent-runs__item--${activityTimelineTone(item.status)}`} key={item.id}>
+                      <span className={`workspace-recent-runs__rail-dot workspace-recent-runs__rail-dot--${activityTimelineTone(item.status)}`} aria-hidden="true" />
+                      <button
+                        className="composition-dashboard-activity workspace-recent-runs__card"
+                        onClick={() => navigateTo(item.navigatePath)}
+                        type="button"
+                      >
+                      <div className="workspace-recent-runs__row-top">
+                        <span className="workspace-recent-runs__run-id">{item.activityId}</span>
+                        <span className={`workspace-recent-runs__kind workspace-recent-runs__kind--${item.kind === 'optimization' ? 'optimization' : 'temporary'}`}>
+                          {item.kindLabel}
+                        </span>
+                      </div>
+                      <div className="workspace-recent-runs__strategy-row">
+                        <h4 className="workspace-recent-runs__strategy">{item.strategyName}</h4>
+                        {item.strategyVersionTag ? <span className="workspace-recent-runs__version">{item.strategyVersionTag}</span> : null}
+                      </div>
+                      <p className="workspace-recent-runs__period">{item.metaLabel}</p>
+                      <div className="workspace-recent-runs__badge-row">
+                        <div className="workspace-recent-runs__badges">
+                          {item.badges.map((badge) => (
+                            <span className={`workspace-recent-runs__badge workspace-recent-runs__badge--${badge.tone}`} key={`${item.id}-${badge.text}`}>
+                              {badge.text}
+                            </span>
+                          ))}
+                        </div>
+                        <span className="workspace-recent-runs__completed">{item.completedRelativeLabel}</span>
+                      </div>
+                      </button>
+                    </div>
+                  ))
+                ) : (
+                  <div className="workspace-recent-runs__empty" role="status">
+                    <p>暂无组合回测或优化记录。</p>
+                  </div>
+                )}
               </div>
             </section>
 

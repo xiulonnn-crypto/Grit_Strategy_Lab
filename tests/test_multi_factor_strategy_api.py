@@ -1268,7 +1268,220 @@ def test_multi_factor_optimization_projection_normalizes_weights_and_dedupes_cad
         payload=optimization_payload,
         trials=stale_saturated_trials,
     )
-    assert len(stale_matching_combinations) == 1
+    assert len(stale_matching_combinations) == 2
+    assert {candidate["id"] for candidate in stale_matching_combinations} == {
+        "trial_stale_cap_a",
+        "trial_stale_cap_b",
+    }
+
+    mixed_projection_trials = stale_saturated_trials + [
+        {
+            **trials[1],
+            "id": "trial_distinct_projection",
+            "trial_index": 13,
+            "metrics": {
+                **trials[1]["metrics"],
+                "annualized_return": trials[1]["metrics"]["annualized_return"] + 0.02,
+                "multi_factor_projection_effect": 0.24,
+            },
+            "score": 99.0,
+        }
+    ]
+    mixed_matching_combinations = service._build_optimization_matching_combination_candidates(
+        strategy=strategy_detail,
+        payload=optimization_payload,
+        trials=mixed_projection_trials,
+    )
+    assert len(mixed_matching_combinations) == 3
+    assert {candidate["id"] for candidate in mixed_matching_combinations[:2]} == {
+        "trial_stale_cap_a",
+        "trial_distinct_projection",
+    }
+    assert mixed_matching_combinations[-1]["id"] == "trial_stale_cap_b"
+
+
+def test_multi_factor_optimization_trial_prefers_prepared_context_over_projection(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    service = client.app.state.service
+    strategy = {
+        "id": "strat_multi_factor_prepared_context",
+        "strategy_type": "MULTI_FACTOR",
+        "parameters": {
+            "strategy_type": "MULTI_FACTOR",
+            "factor_ids": ["s_mom_12m1m_rank", "s_val_ep_ltm_raw"],
+            "weights": {"s_mom_12m1m_rank": 60, "s_val_ep_ltm_raw": 40},
+            "top_n": 10,
+        },
+    }
+    evaluation_request = {"source_run_id": "run_multi_factor_source"}
+    payload = {"objective": "return_sharpe", "source_run_id": "run_multi_factor_source"}
+    prepared_context = {"prepared": True}
+    captured = {}
+
+    def fail_projection(*_args, **_kwargs):
+        raise AssertionError("prepared optimization trials should not use projected metrics")
+
+    def fake_preview_and_chart(
+        _strategy,
+        _evaluation_request,
+        _payload,
+        parameter_snapshot,
+        *,
+        prepared_context=None,
+    ):
+        captured["prepared_context"] = prepared_context
+        captured["parameter_snapshot"] = dict(parameter_snapshot)
+        return {
+            "metrics": {
+                "total_return": 0.08,
+                "annualized_return": 0.12,
+                "annualized_volatility": 0.16,
+                "sharpe": 1.25,
+                "oos_sharpe": 1.05,
+                "max_drawdown": -0.06,
+                "turnover": 0.2,
+                "win_rate": 0.57,
+            }
+        }, [
+            {
+                "trade_date": "2024-01-02",
+                "strategy_return": 0.01,
+                "drawdown": 0.0,
+                "is_oos": False,
+            },
+            {
+                "trade_date": "2024-01-03",
+                "strategy_return": 0.02,
+                "drawdown": -1.0,
+                "is_oos": True,
+            },
+        ]
+
+    monkeypatch.setattr(service, "_project_multi_factor_optimization_trial", fail_projection)
+    monkeypatch.setattr(
+        service,
+        "_build_optimization_trial_preview_and_chart_series",
+        fake_preview_and_chart,
+    )
+
+    trial = service._evaluate_optimization_trial(
+        strategy,
+        evaluation_request,
+        payload,
+        {
+            "factor_weight__s_mom_12m1m_rank_pct": 55,
+            "factor_weight__s_val_ep_ltm_raw_pct": 45,
+            "top_n": 25,
+        },
+        prepared_context=prepared_context,
+    )
+
+    assert captured["prepared_context"] is prepared_context
+    assert captured["parameter_snapshot"]["top_n"] == 25
+    assert trial["parameter_snapshot"]["weights"]["s_mom_12m1m_rank"] == 55
+    assert trial["parameter_snapshot"]["weights"]["s_val_ep_ltm_raw"] == 45
+    assert trial["metrics"]["return_sharpe"] == 1.25
+    assert "multi_factor_projection_effect" not in trial["metrics"]
+
+
+def test_multi_factor_optimization_runner_reuses_prepared_context_for_trials(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    service = client.app.state.service
+    strategy = {
+        "id": "strat_multi_factor_runner_prepared_context",
+        "strategy_type": "MULTI_FACTOR",
+        "name": "Prepared-context runner",
+        "parameters": {
+            "strategy_type": "MULTI_FACTOR",
+            "factor_ids": ["s_mom_12m1m_rank", "s_val_ep_ltm_raw"],
+            "weights": {"s_mom_12m1m_rank": 60, "s_val_ep_ltm_raw": 40},
+            "top_n": 10,
+        },
+    }
+    payload = {
+        "objective": "return_sharpe",
+        "source_run_id": "run_prepared_context_source",
+        "budget_combinations": 2,
+        "search_space": [
+            {"key": "top_n", "label": "持仓数量", "mode": "range", "start": 5, "end": 10, "step": 5},
+        ],
+    }
+    planned_snapshots = [
+        {**strategy["parameters"], "top_n": 5},
+        {**strategy["parameters"], "top_n": 10},
+    ]
+    prepared_context = {"prepared": True}
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(service, "get_strategy_detail", lambda _strategy_id: strategy)
+    monkeypatch.setattr(service, "_normalize_optimization_search_space", lambda _strategy, request: request["search_space"])
+    monkeypatch.setattr(service, "_optimization_base_snapshot", lambda _strategy, _request: (planned_snapshots[0], {"id": "run_prepared_context_source"}))
+    monkeypatch.setattr(service, "_plan_optimization_search_snapshots", lambda _base, _space, _budget: planned_snapshots)
+    monkeypatch.setattr(service, "_build_optimization_evaluation_request", lambda _strategy, source_run=None: {"source_run_id": source_run["id"]})
+    monkeypatch.setattr(service, "_ensure_optimization_snapshots_ready", lambda **_kwargs: None)
+    monkeypatch.setattr(service, "_refresh_optimization_runner_claim", lambda _job_id: True)
+    monkeypatch.setattr(service, "_load_optimization_trials", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(service, "_prepare_backtest_run_context", lambda _strategy, _request: prepared_context)
+    monkeypatch.setattr(service, "_persist_optimization_job", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, "_optimization_runtime_best_summary", lambda _state: None)
+    monkeypatch.setattr(
+        service,
+        "_best_optimization_trial_summary",
+        lambda _trials, _objective=None: {
+            "trial_index": 1,
+            "label": "Trial 1",
+            "status": "SUCCEEDED",
+            "parameter_snapshot": planned_snapshots[0],
+            "metrics": {"return_sharpe": 1.1},
+            "score": 1.1,
+        },
+    )
+    monkeypatch.setattr(service, "_build_optimization_candidates_from_trial_pool", lambda **kwargs: ([], list(kwargs.get("trials") or [])))
+    monkeypatch.setattr(service, "_build_optimization_matching_combination_candidates", lambda **_kwargs: [])
+
+    def fake_sequential(**kwargs):
+        captured["sequential_prepared_context"] = kwargs.get("prepared_context")
+        return {
+            1: service._optimization_trial_record(
+                job_id=kwargs["job_id"],
+                trial_index=1,
+                status="SUCCEEDED",
+                parameter_snapshot=planned_snapshots[0],
+                metrics={"annualized_return": 0.11, "return_sharpe": 1.1},
+                score=1.1,
+                error_message=None,
+                started_at="2026-05-15T00:00:00Z",
+                completed_at="2026-05-15T00:00:01Z",
+            ),
+            2: service._optimization_trial_record(
+                job_id=kwargs["job_id"],
+                trial_index=2,
+                status="SUCCEEDED",
+                parameter_snapshot=planned_snapshots[1],
+                metrics={"annualized_return": 0.12, "return_sharpe": 1.2},
+                score=1.2,
+                error_message=None,
+                started_at="2026-05-15T00:00:01Z",
+                completed_at="2026-05-15T00:00:02Z",
+            ),
+        }, 0
+
+    def fake_backfill(_job_id, _strategy, _evaluation_request, _payload, trials, *, prepared_context=None):
+        captured["backfill_prepared_context"] = prepared_context
+        return list(trials)
+
+    monkeypatch.setattr(service, "_run_sequential_optimization_trials", fake_sequential)
+    monkeypatch.setattr(service, "_backfill_optimization_top_trial_chart_series", fake_backfill)
+
+    service._run_real_optimization_job(
+        "opt_prepared_context_runner",
+        strategy["id"],
+        payload,
+        created_at="2026-05-15T00:00:00Z",
+    )
+
+    assert captured["sequential_prepared_context"] is prepared_context
+    assert captured["backfill_prepared_context"] is prepared_context
 
 
 def test_multi_factor_preview_uses_lightweight_precheck_without_full_simulation(tmp_path, monkeypatch) -> None:

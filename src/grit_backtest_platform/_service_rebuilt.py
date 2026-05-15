@@ -1008,6 +1008,17 @@ def _optimization_metrics_signature(metrics: Mapping[str, Any]) -> tuple[float, 
     )
 
 
+def _optimization_projection_display_signature(metrics: Mapping[str, Any]) -> tuple[float, float, float, float, float]:
+    payload = _as_mapping(metrics)
+    return (
+        round(_optimization_constraint_metric_value(payload, "annualized_return") or 0.0, 1),
+        round(_optimization_constraint_metric_value(payload, "return_sharpe") or 0.0, 2),
+        round(_optimization_constraint_metric_value(payload, "out_of_sample_sharpe") or 0.0, 2),
+        round(_optimization_constraint_metric_value(payload, "max_drawdown_pct") or 0.0, 1),
+        round(_optimization_constraint_metric_value(payload, "stability") or 0.0, 0),
+    )
+
+
 def _optimization_parameter_snapshot_signature(snapshot: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
     return tuple(
         sorted(
@@ -9312,18 +9323,8 @@ class BacktestPlatformService:
                 if latest_job_row
                 else {}
             )
-            draft_count_row = self.storage.fetch_one(
-                """
-                SELECT COUNT(*) AS count
-                FROM composition_versions
-                WHERE composition_id = ?
-                  AND status = 'DRAFT'
-                  AND deleted_at IS NULL
-                """,
-                (composition_id,),
-            )
             evidence_grade = self._composition_evidence_grade_from_detail(analysis_with_integrity)
-            pending_decision_count = _as_int((draft_count_row or {}).get("count"), 0)
+            pending_decision_count = 0
             if primary_diagnosis and primary_diagnosis.get("status") in {"待校准", "失效"}:
                 pending_decision_count += 1
             latest_version_number = self._latest_composition_version_number(composition_id)
@@ -11436,7 +11437,7 @@ class BacktestPlatformService:
                     candidate=candidate,
                 )
                 candidate["promotion_readiness"] = readiness
-                candidate["allowed_actions"] = ["promote_candidate"] if readiness.get("status") == "ready" else []
+                candidate["allowed_actions"] = []
             candidates.append(candidate)
         enriched["candidates"] = candidates
         return enriched
@@ -11580,11 +11581,12 @@ class BacktestPlatformService:
             FROM composition_backtest_runs
             WHERE id = ?
               AND composition_id = ?
-              AND deleted_at IS NULL
             """,
             (run_id, composition_id),
         )
         if row:
+            if row.get("deleted_at") is not None:
+                raise KeyError(f"Composition backtest run not found: {run_id}")
             return self._composition_overlay_current_status(self._composition_decode_run_row(row))
         state = self._composition_load_artifact_state(
             kind="backtest_run",
@@ -11594,6 +11596,40 @@ class BacktestPlatformService:
         run_payload = self._build_composition_backtest_run_payload(state)
         self._persist_composition_backtest_run(run_payload, state)
         return run_payload
+
+    def delete_composition_backtest_run(self, composition_id: str, run_id: str) -> dict[str, Any]:
+        self._load_composition_record(composition_id)
+        row = self.storage.fetch_one(
+            """
+            SELECT id, composition_id, deleted_at
+            FROM composition_backtest_runs
+            WHERE id = ?
+              AND composition_id = ?
+            """,
+            (run_id, composition_id),
+        )
+        if not row or row.get("deleted_at") is not None:
+            raise KeyError(f"Composition backtest run not found: {run_id}")
+        deleted_at = iso_now()
+        deleted_reason = "user_deleted"
+        self.storage.execute(
+            """
+            UPDATE composition_backtest_runs
+            SET status = ?, deleted_at = ?, deleted_reason = ?, updated_at = ?
+            WHERE id = ?
+              AND composition_id = ?
+              AND deleted_at IS NULL
+            """,
+            ("DELETED", deleted_at, deleted_reason, deleted_at, run_id, composition_id),
+        )
+        return {
+            "id": run_id,
+            "run_id": run_id,
+            "composition_id": composition_id,
+            "status": "DELETED",
+            "deleted_at": deleted_at,
+            "deleted_reason": deleted_reason,
+        }
 
     def _build_composition_backtest_run_payload(self, state: Mapping[str, Any]) -> dict[str, Any]:
         detail = self._composition_attach_diagnoses(
@@ -12374,13 +12410,14 @@ class BacktestPlatformService:
             FROM composition_backtest_runs
             WHERE id = ?
               AND composition_id = ?
-              AND deleted_at IS NULL
             """,
             (run_id, composition_id),
         )
         detail: Mapping[str, Any] = {}
         orders: list[dict[str, Any]] = []
         if row:
+            if row.get("deleted_at") is not None:
+                raise KeyError(f"Composition backtest run not found: {run_id}")
             result_payload = loads(row.get("result_json"), {})
             detail = result_payload if isinstance(result_payload, Mapping) else {}
             persisted_orders = loads(row.get("orders_json"), [])
@@ -12975,7 +13012,7 @@ class BacktestPlatformService:
                     "quality_label": "heuristic_from_composition_detail_preview",
                     "evidence_label": self._composition_evidence_label(),
                     "constraint_violations": [],
-                    "allowed_actions": [] if is_reference else ["promote_candidate"],
+                    "allowed_actions": [],
                 }
             )
         diagnoses = list(detail.get("diagnoses") or [])
@@ -12987,7 +13024,7 @@ class BacktestPlatformService:
                     candidate=candidate,
                 )
                 candidate["promotion_readiness"] = readiness
-                candidate["allowed_actions"] = ["promote_candidate"] if readiness.get("status") == "ready" else []
+                candidate["allowed_actions"] = []
             else:
                 candidate["promotion_readiness"] = {
                     "status": "reference",
@@ -13111,32 +13148,15 @@ class BacktestPlatformService:
             )
             for row in rows
         ]
-        decision_queue: list[dict[str, Any]] = []
-        for item in items:
-            for candidate in item.get("candidates") or []:
-                if not isinstance(candidate, Mapping):
-                    continue
-                readiness = _as_mapping(candidate.get("promotion_readiness"))
-                if readiness.get("status") == "ready" and "promote_candidate" in set(candidate.get("allowed_actions") or []):
-                    decision_queue.append(
-                        {
-                            "kind": "allocation_candidate",
-                            "job_id": item.get("job_id") or item.get("id"),
-                            "candidate_id": candidate.get("id"),
-                            "composition_id": item.get("composition_id"),
-                            "label": candidate.get("label"),
-                            "evidence_grade": readiness.get("evidence_grade"),
-                            "migration_cost_bps": readiness.get("migration_cost_bps"),
-                        }
-                    )
         return {
             "items": items,
             "summary": {
                 "total": len(items),
                 "completed": len([item for item in items if str(item.get("status") or "").upper().startswith("COMPLETED")]),
-                "promotable_candidates": len(decision_queue),
+                "promotable_candidates": 0,
+                "reference_jobs": len(items),
             },
-            "decision_queue": decision_queue,
+            "decision_queue": [],
         }
 
     @staticmethod
@@ -13320,6 +13340,7 @@ class BacktestPlatformService:
         candidate_id: str,
         request: Any | None = None,
     ) -> dict[str, Any]:
+        raise ValueError("Composition allocation results are test references and cannot create promotion drafts.")
         detail = self.get_composition_detail(composition_id)
         job = self.get_composition_allocation_job(composition_id, job_id)
         candidate = self._find_composition_allocation_candidate(job, candidate_id)
@@ -15978,6 +15999,21 @@ class BacktestPlatformService:
             summary.get("next_trial_index"),
             _as_int(request.get("next_trial_index"), completed_combinations + 1),
         )
+        search_space = [
+            dict(item)
+            for item in list(request.get("search_space") or summary.get("search_space") or [])
+            if isinstance(item, Mapping)
+        ]
+        if (
+            not running_like
+            and persisted_trial_count > 0
+            and completed_combinations >= persisted_trial_count
+            and budget_combinations > persisted_trial_count
+            and self._optimization_parameter_sum_constraints(search_space)
+        ):
+            budget_combinations = persisted_trial_count
+            completed_combinations = min(completed_combinations, budget_combinations)
+            next_trial_index = min(next_trial_index, budget_combinations + 1)
         estimated_remaining_minutes = None
         estimated_completed_at = None
         if eta_active:
@@ -17187,6 +17223,15 @@ class BacktestPlatformService:
                 CASE WHEN json_valid(backtest_runs.metrics_json)
                     THEN json_extract(backtest_runs.metrics_json, '$.sharpe')
                 END AS metric_sharpe,
+                CASE WHEN json_valid(backtest_runs.metrics_json)
+                    THEN json_extract(backtest_runs.metrics_json, '$.max_drawdown')
+                END AS metric_max_drawdown,
+                CASE WHEN json_valid(backtest_runs.metrics_json)
+                    THEN json_extract(backtest_runs.metrics_json, '$.max_drawdown_pct')
+                END AS metric_max_drawdown_pct,
+                CASE WHEN json_valid(backtest_runs.risk_metrics_json)
+                    THEN json_extract(backtest_runs.risk_metrics_json, '$.max_drawdown')
+                END AS risk_max_drawdown,
                 CASE WHEN json_valid(backtest_runs.preview_json)
                     THEN json_extract(backtest_runs.preview_json, '$.effective_date')
                 END AS preview_effective_date,
@@ -17213,6 +17258,7 @@ class BacktestPlatformService:
             FROM backtest_runs
             LEFT JOIN strategies ON strategies.id = backtest_runs.strategy_id
             WHERE backtest_runs.deleted_at IS NULL
+              AND UPPER(COALESCE(strategies.lifecycle_status, 'ACTIVE')) != 'ARCHIVED'
             ORDER BY COALESCE(backtest_runs.completed_at, backtest_runs.created_at) DESC
             """
         )
@@ -17222,6 +17268,8 @@ class BacktestPlatformService:
             ("oos_annualized_return", "metric_oos_annualized_return"),
             ("return_sharpe", "metric_return_sharpe"),
             ("sharpe", "metric_sharpe"),
+            ("max_drawdown", "metric_max_drawdown"),
+            ("max_drawdown_pct", "metric_max_drawdown_pct"),
         )
         runs: list[dict[str, Any]] = []
         for row in rows:
@@ -17231,6 +17279,8 @@ class BacktestPlatformService:
                 for key, alias in metric_keys
                 if row.get(alias) is not None
             }
+            if "max_drawdown" not in metrics and row.get("risk_max_drawdown") is not None:
+                metrics["max_drawdown"] = _as_float(row.get("risk_max_drawdown"))
             runs.append(
                 {
                     "id": row["id"],
@@ -17262,6 +17312,119 @@ class BacktestPlatformService:
                 }
             )
         return runs
+
+    def _strategy_leg_reference_counts_for_strategy(self, strategy_id: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for source_ref_id, reference_count in self._composition_reference_counts().items():
+            parsed = _parse_strategy_leg_inventory_ref(source_ref_id)
+            if parsed is None:
+                continue
+            referenced_strategy_id, _parameter_version_id, _run_id = parsed
+            if referenced_strategy_id != strategy_id:
+                continue
+            counts[source_ref_id] = counts.get(source_ref_id, 0) + int(reference_count or 0)
+        return dict(sorted(counts.items()))
+
+    def preview_strategy_archive(self, strategy_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one(
+            "SELECT id, name, lifecycle_status FROM strategies WHERE id = ?",
+            (strategy_id,),
+        )
+        if not row:
+            raise KeyError(f"Strategy not found: {strategy_id}")
+        reference_counts = self._strategy_leg_reference_counts_for_strategy(strategy_id)
+        reference_count = sum(reference_counts.values())
+        backtest_count = _as_int(
+            (
+                self.storage.fetch_one(
+                    "SELECT COUNT(*) AS count FROM backtest_runs WHERE strategy_id = ? AND deleted_at IS NULL",
+                    (strategy_id,),
+                )
+                or {}
+            ).get("count"),
+            0,
+        )
+        optimization_count = _as_int(
+            (
+                self.storage.fetch_one(
+                    "SELECT COUNT(*) AS count FROM optimization_jobs WHERE strategy_id = ? AND deleted_at IS NULL",
+                    (strategy_id,),
+                )
+                or {}
+            ).get("count"),
+            0,
+        )
+        can_archive = reference_count <= 0
+        return {
+            "strategy_id": strategy_id,
+            "id": strategy_id,
+            "name": row.get("name"),
+            "lifecycle_status": row.get("lifecycle_status") or "ACTIVE",
+            "can_archive": can_archive,
+            "reference_count": reference_count,
+            "strategy_leg_reference_counts": reference_counts,
+            "backtest_run_count": backtest_count,
+            "optimization_job_count": optimization_count,
+            "blocking_code": None if can_archive else "strategy_leg_reference_protected",
+            "next_action": "confirm_archive" if can_archive else "remove_composition_references",
+        }
+
+    def archive_strategy(self, strategy_id: str, request: Any) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        if payload.get("confirm") is not True:
+            raise ValueError("confirm=true is required to archive a strategy")
+        preview = self.preview_strategy_archive(strategy_id)
+        reference_count = int(preview.get("reference_count") or 0)
+        if reference_count > 0:
+            raise ContractConflictError(
+                "strategy_leg_reference_protected",
+                "This strategy is referenced by active composition legs and cannot be archived.",
+                blocking_target={
+                    "strategy_id": strategy_id,
+                    "reference_count": reference_count,
+                    "strategy_leg_reference_counts": preview.get("strategy_leg_reference_counts") or {},
+                },
+                next_action="remove_composition_references",
+                extra={"archive_preview": preview},
+            )
+
+        archived_at = iso_now()
+        self.storage.execute(
+            """
+            UPDATE strategies
+            SET lifecycle_status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("ARCHIVED", archived_at, strategy_id),
+        )
+        self.storage.execute(
+            """
+            UPDATE backtest_runs
+            SET status = ?, deleted_at = ?, deleted_reason = ?, updated_at = ?
+            WHERE strategy_id = ?
+              AND deleted_at IS NULL
+            """,
+            ("DELETED", archived_at, "strategy_archived", archived_at, strategy_id),
+        )
+        self.storage.execute(
+            """
+            UPDATE optimization_jobs
+            SET status = ?, deleted_at = ?, deleted_reason = ?, updated_at = ?
+            WHERE strategy_id = ?
+              AND deleted_at IS NULL
+            """,
+            ("DELETED", archived_at, "strategy_archived", archived_at, strategy_id),
+        )
+        return {
+            "strategy_id": strategy_id,
+            "id": strategy_id,
+            "status": "ARCHIVED",
+            "archived_at": archived_at,
+            "deleted_at": archived_at,
+            "deleted_reason": "strategy_archived",
+            "deleted_backtest_run_count": int(preview.get("backtest_run_count") or 0),
+            "deleted_optimization_job_count": int(preview.get("optimization_job_count") or 0),
+        }
 
     def get_strategy_detail(self, strategy_id: str) -> dict[str, Any]:
         row = self.storage.fetch_one("SELECT * FROM strategies WHERE id = ?", (strategy_id,))
@@ -19260,28 +19423,21 @@ class BacktestPlatformService:
         )
         matching_candidates: list[dict[str, Any]] = []
         seen_projection_weight_signatures: set[tuple[tuple[str, float], ...]] = set()
-        seen_projection_result_signatures: set[tuple[Any, ...]] = set()
         dedupe_projection_records = self._is_multi_factor_optimization_strategy(strategy)
         for rank, trial in enumerate(ranked_trials, start=1):
             metrics = dict(trial.get("metrics") or {})
+            projection_metric_signature: tuple[float, float, float, float, float] | None = None
             parameter_snapshot = self._canonicalize_multi_factor_optimization_snapshot(
                 strategy,
                 _as_mapping(trial.get("parameter_snapshot")),
             )
             if dedupe_projection_records and "multi_factor_projection_effect" in metrics:
                 projection_weight_signature = self._multi_factor_weight_signature(parameter_snapshot)
-                projection_result_signature = (
-                    _optimization_metrics_signature(metrics),
-                    round(_as_float(trial.get("score"), 0.0), 6),
-                    round(_as_float(metrics.get("multi_factor_projection_effect"), 0.0), 6),
-                )
+                projection_metric_signature = _optimization_projection_display_signature(metrics)
                 if projection_weight_signature:
                     if projection_weight_signature in seen_projection_weight_signatures:
                         continue
                     seen_projection_weight_signatures.add(projection_weight_signature)
-                if projection_result_signature in seen_projection_result_signatures:
-                    continue
-                seen_projection_result_signatures.add(projection_result_signature)
             if parameter_sum_constraints and not self._optimization_snapshot_satisfies_parameter_sum_constraints(
                 parameter_snapshot,
                 parameter_sum_constraints,
@@ -19312,8 +19468,27 @@ class BacktestPlatformService:
             candidate["id"] = str(trial.get("id") or f"trial_{trial_index or rank}")
             candidate["allowed_actions"] = []
             candidate["analysis"] = {}
+            if projection_metric_signature is not None:
+                candidate["_projection_metric_signature"] = projection_metric_signature
             matching_candidates.append(candidate)
-        return matching_candidates
+        primary_candidates: list[dict[str, Any]] = []
+        duplicate_metric_candidates: list[dict[str, Any]] = []
+        seen_projection_metric_signatures: set[tuple[float, float, float, float, float]] = set()
+        for candidate in matching_candidates:
+            projection_metric_signature = candidate.pop("_projection_metric_signature", None)
+            if (
+                projection_metric_signature is not None
+                and projection_metric_signature in seen_projection_metric_signatures
+            ):
+                duplicate_metric_candidates.append(candidate)
+                continue
+            if projection_metric_signature is not None:
+                seen_projection_metric_signatures.add(projection_metric_signature)
+            primary_candidates.append(candidate)
+        ordered_candidates = primary_candidates + duplicate_metric_candidates
+        for index, candidate in enumerate(ordered_candidates, start=1):
+            candidate["rank"] = index
+        return ordered_candidates
 
     def _normalized_optimization_trial_summary(self, trial: Mapping[str, Any]) -> dict[str, Any]:
         summary = self._optimization_trial_summary(trial)
@@ -19885,6 +20060,62 @@ class BacktestPlatformService:
             job["summary"]["matching_combination_source"] = (
                 matching_combination_source
             )
+        parameter_sum_constraints = self._optimization_parameter_sum_constraints(
+            list(normalized_search_space or []),
+        )
+        if (
+            not running_like
+            and has_persisted_trials
+            and parameter_sum_constraints
+            and persisted_trial_count > 0
+            and completed_combinations >= persisted_trial_count
+            and budget_combinations > persisted_trial_count
+        ):
+            budget_combinations = persisted_trial_count
+            job["request"]["budget_combinations"] = budget_combinations
+            job["summary"]["budget_combinations"] = budget_combinations
+        if (
+            not running_like
+            and has_persisted_trials
+            and matching_combination_source == "all_trials"
+        ):
+            actual_matching_count = self._count_optimization_trials_matching_constraints(
+                str(job["id"]),
+                constraint_payload.get("constraints") or [],
+            )
+            projected_matching_count = _as_int(
+                job["summary"].get("matching_combination_count"),
+                len(job["matching_combinations"]),
+            )
+            should_rebuild_all_trial_matching = (
+                actual_matching_count != projected_matching_count
+                or (
+                    matching_preview_limit is None
+                    and actual_matching_count > len(job["matching_combinations"])
+                )
+            )
+            if should_rebuild_all_trial_matching:
+                detailed_trial_records = self._load_optimization_trials(
+                    str(job["id"]),
+                    include_chart_series=False,
+                    include_metrics_json=True,
+                )
+                rebuilt_matching_combinations = self._build_optimization_matching_combination_candidates(
+                    strategy=strategy,
+                    payload=job["request"],
+                    trials=detailed_trial_records,
+                )
+                job["matching_combinations"] = (
+                    rebuilt_matching_combinations[:matching_preview_limit]
+                    if matching_preview_limit is not None
+                    else rebuilt_matching_combinations
+                )
+                job["summary"]["matching_combinations"] = list(job["matching_combinations"])
+                job["summary"]["matching_combination_count"] = len(rebuilt_matching_combinations)
+                job["summary"]["matching_combination_source"] = "all_trials"
+                matching_combination_source = "all_trials"
+            else:
+                job["summary"]["matching_combination_count"] = actual_matching_count
 
         def build_matching_combinations_from_candidate_records(
             candidate_records: Sequence[Mapping[str, Any]],
@@ -19917,9 +20148,6 @@ class BacktestPlatformService:
             candidate_metrics_need_repair = any(
                 _optimization_metrics_need_repair(_as_mapping(candidate).get("metrics"))
                 for candidate in raw_candidates
-            )
-            parameter_sum_constraints = self._optimization_parameter_sum_constraints(
-                list(normalized_search_space or []),
             )
             if parameter_sum_constraints and any(
                 not self._optimization_snapshot_satisfies_parameter_sum_constraints(
@@ -20827,6 +21055,21 @@ class BacktestPlatformService:
             strategy,
             parameter_snapshot,
         )
+        if prepared_context is not None:
+            preview, chart_series = self._build_optimization_trial_preview_and_chart_series(
+                strategy,
+                evaluation_request,
+                payload,
+                parameter_snapshot,
+                prepared_context=prepared_context,
+            )
+            metrics = self._build_real_optimization_metrics(preview, chart_series)
+            return {
+                "parameter_snapshot": dict(parameter_snapshot),
+                "metrics": metrics,
+                "chart_series": chart_series,
+                "score": self._score_optimization_metrics(metrics, payload.get("objective")),
+            }
         projected_trial = self._project_multi_factor_optimization_trial(
             strategy,
             evaluation_request,
@@ -20940,6 +21183,7 @@ class BacktestPlatformService:
                     raise ValueError("No optimization combinations satisfy the default weight-sum constraint")
                 planned_snapshots = [dict(base_snapshot)]
             budget_combinations = min(max(1, budget_combinations), len(planned_snapshots))
+            request_payload["budget_combinations"] = budget_combinations
             planned_snapshots = planned_snapshots[:budget_combinations]
             persisted_trials = {
                 trial["trial_index"]: trial
@@ -20964,6 +21208,13 @@ class BacktestPlatformService:
                 evaluation_request=evaluation_request,
                 parameter_snapshot=base_snapshot,
             )
+            prepared_context: Mapping[str, Any] | None = None
+            if self._is_multi_factor_optimization_strategy(strategy, base_snapshot):
+                prepare_context = getattr(self, "_prepare_backtest_run_context", None)
+                if callable(prepare_context):
+                    prepared_strategy = self._optimization_effective_strategy(strategy, base_snapshot)
+                    prepared_context = prepare_context(prepared_strategy, evaluation_request)
+                    request_payload[OPTIMIZATION_PREPARED_CONTEXT_KEY] = prepared_context
             runtime_state = self._optimization_runtime_state(
                 search_space,
                 request_payload.get("objective"),
@@ -20981,6 +21232,7 @@ class BacktestPlatformService:
                     evaluation_request,
                     request_payload,
                     list(persisted_trials.values()),
+                    prepared_context=prepared_context,
                 )
                 successful_trials = [trial for trial in final_trials if str(trial.get("status") or "").upper() == "SUCCEEDED"]
                 best_summary = self._optimization_runtime_best_summary(runtime_state) or self._best_optimization_trial_summary(
@@ -21182,6 +21434,7 @@ class BacktestPlatformService:
                     ),
                     delay_seconds=delay_seconds,
                     runtime_state=runtime_state,
+                    prepared_context=prepared_context,
                 )
                 failures += sequential_failures
 
@@ -21191,6 +21444,7 @@ class BacktestPlatformService:
                 evaluation_request,
                 request_payload,
                 list(trial_records.values()),
+                prepared_context=prepared_context,
             )
             completed_count = len(final_trials)
             successful_trials = [trial for trial in final_trials if str(trial.get("status") or "").upper() == "SUCCEEDED"]

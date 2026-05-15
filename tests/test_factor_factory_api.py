@@ -26,6 +26,29 @@ def _factory_payload(candidate_count: int = 8) -> dict:
             "random_seed": 17,
             "min_rank_ic": 0.0,
             "max_depth": 3,
+            "generation_mode": "HYBRID_COMPOSITION",
+            "source_factor_ids": [
+                "s_mom_6m_rank",
+                "s_qlty_roe_ltm_raw",
+                "s_vol_252d_rank",
+                "s_val_cfp_ltm_raw",
+                "s_size_cur_log",
+                "s_vol_downside_252d_rank",
+                "s_liq_amihud_20d_rank",
+            ],
+            "recipe_families": [
+                "style_blend",
+                "risk_adjusted",
+                "value_anchor",
+                "divergence",
+                "residual_neutralized",
+                "ts_denoise",
+            ],
+            "exploration_budget": 4,
+            "composition_policy": {
+                "mode": "template_plus_exploration",
+                "publish_boundary": "manual_after_quarantine",
+            },
         },
         "gate_policy": {
             "pit_gate_mode": "DIAGNOSTIC_ONLY",
@@ -71,6 +94,9 @@ def test_factor_factory_run_auto_intakes_and_executes_quarantine() -> None:
 
     overview = assert_ok(client.get("/factor-factory/overview"))
     summary = overview["latest_run"]["summary"]
+    assert overview["latest_run"]["request"]["generation_mode"] == "HYBRID_COMPOSITION"
+    assert summary["generation_mode"] == "HYBRID_COMPOSITION"
+    assert summary["composition_candidate_count"] >= 1
     assert summary["auto_quarantine_status"] == "COMPLETED"
     assert summary["auto_intake_count"] >= 1
     assert summary["auto_quarantine_count"] >= 1
@@ -78,6 +104,8 @@ def test_factor_factory_run_auto_intakes_and_executes_quarantine() -> None:
     quarantine = assert_ok(client.get(f"/factor-quarantine/candidates?source_job_id={mining_job_id}"))
     assert quarantine["items"]
     assert {item["status"] for item in quarantine["items"]}.isdisjoint({"PENDING", "RUNNING"})
+    assert all(item["publish_status"] != "PUBLISHED" for item in quarantine["items"])
+    assert any(item["candidate_metrics"].get("source_factor_ids") for item in quarantine["items"])
 
 
 def test_factor_factory_run_now_does_not_enable_daily_automation() -> None:

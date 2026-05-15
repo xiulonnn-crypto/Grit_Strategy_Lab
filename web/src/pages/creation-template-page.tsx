@@ -2,7 +2,13 @@ import { useEffect, useMemo, useState } from 'react';
 import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
 import { formatStrategyVersionTag, getStrategyDisplayName } from '../lib/strategy-version';
-import type { ApiBacktestRunDetail, ApiBacktestRunListItem, ApiStrategyListItem, StrategyType } from '../types';
+import type {
+  ApiBacktestRunDetail,
+  ApiBacktestRunListItem,
+  ApiStrategyArchivePreview,
+  ApiStrategyListItem,
+  StrategyType,
+} from '../types';
 import './creation-backtest.css';
 
 type TemplateCard = {
@@ -26,6 +32,7 @@ const DEFAULT_SORT_STATE: SortState = { key: 'createdAt', direction: 'desc' };
 type StrategyReturnLink = {
   label: string;
   sharpeLabel: string;
+  drawdownLabel: string | null;
   runId: string;
   horizonLabel: '10Y' | '20Y' | '30Y';
   sortValue: number;
@@ -50,6 +57,13 @@ type StrategyLibraryRow = {
   updatedAtLabel: string;
   updatedAtTime: number;
   latestOptimizationJobId?: string | null;
+};
+
+type StrategyArchiveDialogState = {
+  row: StrategyLibraryRow;
+  preview: ApiStrategyArchivePreview;
+  error: string | null;
+  submitting: boolean;
 };
 
 type StatusFilter = 'all' | 'ready' | 'pending';
@@ -82,6 +96,14 @@ const TEXT = {
   view: '查看',
   backtest: '回测',
   optimize: '优化',
+  archive: '归档',
+  archiveChecking: '校验中',
+  archiveToastSuccess: '策略已归档，对应回测与优化记录已逻辑删除。',
+  archiveToastErrorPrefix: '策略归档失败：',
+  archiveBlockedPrefix: '策略仍被策略腿引用，不能归档。当前引用数：',
+  archiveModalTitle: '确认归档策略',
+  archiveModalCopy: '该操作会将策略标记为已归档，并把对应回测、优化记录标记为已删除；数据库记录不会被物理清除。',
+  archiveConfirm: '确认归档',
   createModalEyebrow: '新建策略',
   createModalTitle: '选择策略类型',
   createModalCopy:
@@ -146,7 +168,7 @@ const STRATEGY_TYPE_LABELS: Record<StrategyType, string> = {
 };
 
 const HORIZONS: Array<{ key: HorizonKey; label: '10Y' | '20Y' | '30Y'; headerLabel: string; years: number }> = [
-  { key: 'tenYear', label: '10Y', headerLabel: '10Y年化收益/夏普', years: 10 },
+  { key: 'tenYear', label: '10Y', headerLabel: '10Y年化收益/夏普/回撤', years: 10 },
   { key: 'twentyYear', label: '20Y', headerLabel: '20Y年化收益/夏普', years: 20 },
   { key: 'thirtyYear', label: '30Y', headerLabel: '30Y年化收益/夏普', years: 30 },
 ];
@@ -241,6 +263,14 @@ function formatSharpe(value: number | undefined): string {
   return value.toFixed(2);
 }
 
+function formatDrawdown(value: number | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '-';
+  }
+  const percent = Math.abs(value) <= 1 ? value * 100 : value;
+  return `${percent.toFixed(1)}%`;
+}
+
 function getRunStartDate(run: ApiBacktestRunListItem): string | null | undefined {
   return run.start_date ?? run.preview?.effective_start_date;
 }
@@ -313,9 +343,14 @@ function buildReturnLink(run: ApiBacktestRunListItem, horizonKey: HorizonKey): S
     return null;
   }
   const sharpe = readMetric(run.metrics, ['return_sharpe', 'sharpe']);
+  const drawdown = readMetric(run.metrics, ['max_drawdown', 'maximum_drawdown', 'drawdown', 'max_drawdown_pct']);
+  const sharpeLabel = formatSharpe(sharpe);
+  const drawdownLabel = horizonKey === 'tenYear' ? formatDrawdown(drawdown) : null;
+  const metricLabel = drawdownLabel ? `${label} / ${sharpeLabel} / ${drawdownLabel}` : `${label} / ${sharpeLabel}`;
   return {
-    label: `${label} / ${formatSharpe(sharpe)}`,
-    sharpeLabel: formatSharpe(sharpe),
+    label: metricLabel,
+    sharpeLabel,
+    drawdownLabel,
     runId: run.id,
     horizonLabel: horizon.label,
     sortValue: annualizedReturn,
@@ -551,9 +586,10 @@ function ReturnCell({
       </button>
     );
   }
+  const drawdownAria = link.drawdownLabel ? `，最大回撤 ${link.drawdownLabel}` : '';
   return (
     <button
-      aria-label={`查看 ${name} ${link.horizonLabel} 回测，年化收益 ${link.label}，夏普 ${link.sharpeLabel}`}
+      aria-label={`查看 ${name} ${link.horizonLabel} 回测，年化收益 ${link.label}，夏普 ${link.sharpeLabel}${drawdownAria}`}
       className={`strategy-library-return strategy-library-return--${link.tone}`}
       onClick={() => navigateTo(`/runs/${link.runId}`)}
       type="button"
@@ -576,6 +612,8 @@ export function CreationTemplatePage(): JSX.Element {
   const [busyStrategyType, setBusyStrategyType] = useState<StrategyType | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
   const [generatingStrategyId, setGeneratingStrategyId] = useState<string | null>(null);
+  const [archivingStrategyId, setArchivingStrategyId] = useState<string | null>(null);
+  const [archiveDialog, setArchiveDialog] = useState<StrategyArchiveDialogState | null>(null);
   const [generationToast, setGenerationToast] = useState<{ tone: 'info' | 'success' | 'error'; message: string } | null>(
     null,
   );
@@ -640,6 +678,19 @@ export function CreationTemplatePage(): JSX.Element {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [busyStrategyType, isCreateModalOpen]);
 
+  useEffect(() => {
+    if (!archiveDialog) {
+      return undefined;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !archiveDialog.submitting) {
+        setArchiveDialog(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [archiveDialog]);
+
   const rows = useMemo(() => buildRows(strategies, runs), [runs, strategies]);
   const visibleRows = useMemo(
     () => sortRows(rows.filter((row) => matchesSearch(row, search) && matchesStatus(row, statusFilter)), sortState),
@@ -695,6 +746,64 @@ export function CreationTemplatePage(): JSX.Element {
       });
     } finally {
       setGeneratingStrategyId(null);
+    }
+  }
+
+  async function handleArchiveClick(row: StrategyLibraryRow): Promise<void> {
+    if (archivingStrategyId !== null) {
+      return;
+    }
+    if (!api.previewStrategyArchive || !api.archiveStrategy) {
+      setGenerationToast({ tone: 'error', message: `${TEXT.archiveToastErrorPrefix}当前 API 尚未提供策略归档接口。` });
+      return;
+    }
+    try {
+      setArchivingStrategyId(row.id);
+      const preview = await api.previewStrategyArchive(row.id);
+      if (!preview.can_archive || preview.reference_count > 0) {
+        setGenerationToast({
+          tone: 'error',
+          message: `${TEXT.archiveBlockedPrefix}${preview.reference_count}`,
+        });
+        return;
+      }
+      setArchiveDialog({ row, preview, error: null, submitting: false });
+    } catch (caught) {
+      setGenerationToast({
+        tone: 'error',
+        message: `${TEXT.archiveToastErrorPrefix}${(caught as Error).message}`,
+      });
+    } finally {
+      setArchivingStrategyId(null);
+    }
+  }
+
+  async function handleConfirmArchive(): Promise<void> {
+    const current = archiveDialog;
+    if (!current || !api.archiveStrategy || current.submitting) {
+      return;
+    }
+    try {
+      setArchiveDialog({ ...current, error: null, submitting: true });
+      setArchivingStrategyId(current.row.id);
+      const result = await api.archiveStrategy(current.row.id, { confirm: true });
+      setStrategies((items) => items.filter((item) => item.id !== current.row.id));
+      setRuns((items) => items.filter((item) => item.strategy_id !== current.row.id));
+      await loadLibrary(undefined, { showLoading: false });
+      setGenerationToast({
+        tone: 'success',
+        message: `${TEXT.archiveToastSuccess}（回测 ${result.deleted_backtest_run_count} 条，优化 ${result.deleted_optimization_job_count} 条）`,
+      });
+      setArchiveDialog(null);
+    } catch (caught) {
+      const message = (caught as Error).message;
+      setArchiveDialog((latest) => (latest ? { ...latest, error: message, submitting: false } : latest));
+      setGenerationToast({
+        tone: 'error',
+        message: `${TEXT.archiveToastErrorPrefix}${message}`,
+      });
+    } finally {
+      setArchivingStrategyId(null);
     }
   }
 
@@ -897,17 +1006,11 @@ export function CreationTemplatePage(): JSX.Element {
                         </button>
                         <button
                           className="ghost-button"
-                          onClick={() => navigateTo(`/strategies/${row.id}/backtest-runs/new`)}
+                          disabled={archivingStrategyId === row.id}
+                          onClick={() => void handleArchiveClick(row)}
                           type="button"
                         >
-                          {TEXT.backtest}
-                        </button>
-                        <button
-                          className="ghost-button"
-                          onClick={() => navigateTo(`/optimization-jobs/new/config?strategy_id=${encodeURIComponent(row.id)}`)}
-                          type="button"
-                        >
-                          {TEXT.optimize}
+                          {archivingStrategyId === row.id ? TEXT.archiveChecking : TEXT.archive}
                         </button>
                       </div>
                     </td>
@@ -918,6 +1021,74 @@ export function CreationTemplatePage(): JSX.Element {
           </div>
         ) : null}
       </section>
+
+      {archiveDialog ? (
+        <div className="strategy-library-modal-backdrop">
+          <section
+            aria-labelledby="strategy-library-archive-title"
+            aria-modal="true"
+            className="strategy-library-archive-modal"
+            role="dialog"
+          >
+            <div className="strategy-library-create-modal__header">
+              <div>
+                <p className="strategy-library-eyebrow">{TEXT.archive}</p>
+                <h2 id="strategy-library-archive-title">{TEXT.archiveModalTitle}</h2>
+                <p>{TEXT.archiveModalCopy}</p>
+              </div>
+              <button
+                className="ghost-button"
+                disabled={archiveDialog.submitting}
+                onClick={() => setArchiveDialog(null)}
+                type="button"
+              >
+                {TEXT.close}
+              </button>
+            </div>
+
+            <div className="strategy-library-archive-summary">
+              <div>
+                <span>策略</span>
+                <strong>{archiveDialog.row.name}</strong>
+                <code>{archiveDialog.row.id}</code>
+              </div>
+              <div>
+                <span>策略腿引用数</span>
+                <strong>{archiveDialog.preview.reference_count}</strong>
+              </div>
+              <div>
+                <span>将逻辑删除回测</span>
+                <strong>{archiveDialog.preview.backtest_run_count}</strong>
+              </div>
+              <div>
+                <span>将逻辑删除优化</span>
+                <strong>{archiveDialog.preview.optimization_job_count}</strong>
+              </div>
+            </div>
+
+            {archiveDialog.error ? <div className="error-banner" role="alert">{archiveDialog.error}</div> : null}
+
+            <div className="strategy-library-archive-modal__actions">
+              <button
+                className="ghost-button"
+                disabled={archiveDialog.submitting}
+                onClick={() => setArchiveDialog(null)}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                className="primary-button"
+                disabled={archiveDialog.submitting}
+                onClick={() => void handleConfirmArchive()}
+                type="button"
+              >
+                {archiveDialog.submitting ? TEXT.archiveChecking : TEXT.archiveConfirm}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {isCreateModalOpen ? (
         <div className="strategy-library-modal-backdrop">

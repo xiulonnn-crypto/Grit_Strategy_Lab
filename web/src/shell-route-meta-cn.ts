@@ -55,7 +55,7 @@ const TEXT = {
   compositionLab: '组合实验室',
   compositionLabTitle: '组合实验室',
   compositionLabDesc:
-    '集中查看配置实验作业、候选方案和晋升审查。',
+    '集中查看配置实验作业和候选方案，结果仅作测试参考。',
   legInventory: '资产库',
   legInventoryTitle: '策略资产库',
   legInventoryDesc:
@@ -76,7 +76,7 @@ const TEXT = {
     '验证组合在不同周期、再平衡规则和数据质量门禁下的稳定性。',
   compositionAllocationTitle: '组合实验室',
   compositionAllocationDesc:
-    '围绕资产配置意图生成候选权重，并用有效前沿和迁移成本复核晋升价值。',
+    '围绕资产配置意图生成候选权重，并用有效前沿和迁移成本做测试参考。',
   creation: '策略库',
   creationEyebrow: '策略管理',
   creationTemplateTitle: '策略库',

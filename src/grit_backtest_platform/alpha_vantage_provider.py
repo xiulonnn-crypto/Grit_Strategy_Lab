@@ -32,6 +32,14 @@ def _parse_float(value: Any, default: float | None = None) -> float | None:
         return default
 
 
+def _first_present(row: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
 class AlphaVantageProvider:
     provider_name = "alpha_vantage"
     supports_targeted_price_repair = True
@@ -265,6 +273,87 @@ class AlphaVantageProvider:
                     }
                 )
         return earnings
+
+    def fetch_earnings_estimates(self, symbol: str) -> list[dict[str, Any]]:
+        data = self._request_json_payload(
+            {"function": "EARNINGS_ESTIMATES", "symbol": symbol.upper()},
+            symbol=symbol,
+        )
+        estimates: list[dict[str, Any]] = []
+        row_groups = (
+            ("quarterly", "quarterlyEarningsEstimates"),
+            ("annual", "annualEarningsEstimates"),
+            ("quarterly", "quarterlyEstimates"),
+            ("annual", "annualEstimates"),
+            ("estimate", "estimates"),
+        )
+        for period, key in row_groups:
+            rows = data.get(key)
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                fiscal_date = _first_present(
+                    row,
+                    "fiscalDateEnding",
+                    "fiscal_date_ending",
+                    "periodEnding",
+                    "date",
+                )
+                report_date = _first_present(
+                    row,
+                    "reportedDate",
+                    "reportDate",
+                    "estimateDate",
+                    "updatedDate",
+                    "date",
+                    "fiscalDateEnding",
+                )
+                estimates.append(
+                    {
+                        "period": period,
+                        "fiscal_date_ending": str(fiscal_date or "").strip()[:10],
+                        "report_date": str(report_date or "").strip()[:10],
+                        "eps_estimate_average": _parse_float(
+                            _first_present(row, "estimatedEPSAvg", "epsEstimateAverage", "eps_estimate_average", "epsAverage")
+                        ),
+                        "eps_estimate_high": _parse_float(
+                            _first_present(row, "estimatedEPSHigh", "epsEstimateHigh", "eps_estimate_high", "epsHigh")
+                        ),
+                        "eps_estimate_low": _parse_float(
+                            _first_present(row, "estimatedEPSLow", "epsEstimateLow", "eps_estimate_low", "epsLow")
+                        ),
+                        "eps_analyst_count": _parse_float(
+                            _first_present(row, "estimatedEPSAnalystCount", "epsAnalystCount", "eps_analyst_count")
+                        ),
+                        "revenue_estimate_average": _parse_float(
+                            _first_present(
+                                row,
+                                "estimatedRevenueAvg",
+                                "revenueEstimateAverage",
+                                "revenue_estimate_average",
+                                "revenueAverage",
+                            )
+                        ),
+                        "revenue_estimate_high": _parse_float(
+                            _first_present(row, "estimatedRevenueHigh", "revenueEstimateHigh", "revenue_estimate_high")
+                        ),
+                        "revenue_estimate_low": _parse_float(
+                            _first_present(row, "estimatedRevenueLow", "revenueEstimateLow", "revenue_estimate_low")
+                        ),
+                        "revenue_analyst_count": _parse_float(
+                            _first_present(row, "estimatedRevenueAnalystCount", "revenueAnalystCount", "revenue_analyst_count")
+                        ),
+                        "eps_revision_up": _parse_float(_first_present(row, "epsRevisionUp", "eps_revision_up", "revisionsUp")),
+                        "eps_revision_down": _parse_float(
+                            _first_present(row, "epsRevisionDown", "eps_revision_down", "revisionsDown")
+                        ),
+                        "source": self.provider_name,
+                        "raw": dict(row),
+                    }
+                )
+        return estimates
 
     def fetch_listing_status(
         self,

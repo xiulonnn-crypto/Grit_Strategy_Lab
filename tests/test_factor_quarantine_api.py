@@ -281,6 +281,51 @@ def test_factor_quarantine_publish_uses_chinese_auto_mined_name_from_id_and_form
     assert all(item["id"] != legacy_id for item in factors["items"])
 
 
+def test_factor_quarantine_preserves_composition_parent_lineage() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-quarantine-composition-lineage"))
+    seed_ready_pit_data(client, start=date(2014, 1, 2), day_count=3200)
+    expression = "s_mom_6m_rank * s_qlty_roe_ltm_raw"
+    _seed_mining_candidate(
+        client,
+        job_id="mine_composition_lineage",
+        candidate_id="cand_composition_lineage",
+        expression=expression,
+        rank_ic=0.061,
+        coverage=100.0,
+        extra_candidate={
+            "source_factor_ids": ["s_mom_6m_rank", "s_qlty_roe_ltm_raw"],
+            "recipe_kind": "template",
+            "recipe_family": "style_blend",
+            "orthogonality_intent": "quality_driven_momentum",
+            "composition_metadata": {"publish_boundary": "manual_after_quarantine"},
+            "max_style_correlation": 0.24,
+            "drawdown_vs_benchmark_ratio": 1.1,
+        },
+    )
+
+    intake = assert_ok(client.post("/factor-quarantine/intake", json={"mining_job_id": "mine_composition_lineage"}))
+    candidate = intake["items"][0]
+    metrics = candidate["candidate_metrics"]
+    assert metrics["source_factor_ids"] == ["s_mom_6m_rank", "s_qlty_roe_ltm_raw"]
+    assert metrics["recipe_family"] == "style_blend"
+
+    storage = client.app.state.service.storage
+    parent_edges = storage.fetch_one(
+        """
+        SELECT COUNT(*) AS count
+        FROM factor_lineage_edges
+        WHERE target_id = ? AND relation_type = 'COMPOSED_FROM'
+        """,
+        (candidate["id"],),
+    )
+    assert parent_edges["count"] == 2
+
+    run = assert_ok(client.post(f"/factor-quarantine/candidates/{candidate['id']}/run", json={"reason": "unit-test"}))
+    assert run["latest_run"]["orthogonal"]["source_factor_ids"] == ["s_mom_6m_rank", "s_qlty_roe_ltm_raw"]
+    assert run["latest_run"]["summary"]["composition"]["publish_boundary"] == "manual_after_quarantine"
+    assert run["publish_status"] != "PUBLISHED"
+
+
 def _legacy_factor_quarantine_blocks_duplicate_expression_publish() -> None:
     client, _db_path = create_test_client(_runtime_dir("factor-quarantine-duplicate"))
     seed_ready_pit_data(client, start=date(2014, 1, 2), day_count=3200)

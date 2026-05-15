@@ -12,6 +12,8 @@ type FakeApi = {
   listStrategies: ReturnType<typeof vi.fn>;
   materializeStrategy: ReturnType<typeof vi.fn>;
   prepareConfirmation: ReturnType<typeof vi.fn>;
+  previewStrategyArchive: ReturnType<typeof vi.fn>;
+  archiveStrategy: ReturnType<typeof vi.fn>;
   submitBacktestRun: ReturnType<typeof vi.fn>;
   updateConfirmation: ReturnType<typeof vi.fn>;
 };
@@ -24,6 +26,8 @@ const fakeApi = vi.hoisted<FakeApi>(() => ({
   listStrategies: vi.fn(),
   materializeStrategy: vi.fn(),
   prepareConfirmation: vi.fn(),
+  previewStrategyArchive: vi.fn(),
+  archiveStrategy: vi.fn(),
   submitBacktestRun: vi.fn(),
   updateConfirmation: vi.fn(),
 }));
@@ -386,10 +390,31 @@ beforeEach(() => {
   fakeApi.listStrategies.mockReset();
   fakeApi.materializeStrategy.mockReset();
   fakeApi.prepareConfirmation.mockReset();
+  fakeApi.previewStrategyArchive.mockReset();
+  fakeApi.archiveStrategy.mockReset();
   fakeApi.submitBacktestRun.mockReset();
   fakeApi.updateConfirmation.mockReset();
   fakeApi.listBacktestRuns.mockResolvedValue([]);
   fakeApi.listStrategies.mockResolvedValue([]);
+  fakeApi.previewStrategyArchive.mockResolvedValue({
+    id: 'strat-archive',
+    strategy_id: 'strat-archive',
+    can_archive: true,
+    reference_count: 0,
+    strategy_leg_reference_counts: {},
+    backtest_run_count: 0,
+    optimization_job_count: 0,
+  });
+  fakeApi.archiveStrategy.mockResolvedValue({
+    id: 'strat-archive',
+    strategy_id: 'strat-archive',
+    status: 'ARCHIVED',
+    archived_at: '2026-05-15T08:00:00Z',
+    deleted_at: '2026-05-15T08:00:00Z',
+    deleted_reason: 'strategy_archived',
+    deleted_backtest_run_count: 0,
+    deleted_optimization_job_count: 0,
+  });
   fakeApi.submitBacktestRun.mockResolvedValue({
     id: 'bt-submitted',
     strategy_id: 'strat-submitted',
@@ -479,7 +504,7 @@ describe('creation flow', () => {
     ).toEqual([
       '策略名',
       '策略类型',
-      '10Y年化收益/夏普',
+      '10Y年化收益/夏普/回撤',
       '20Y年化收益/夏普',
       '30Y年化收益/夏普',
       '状态',
@@ -493,12 +518,153 @@ describe('creation flow', () => {
     expect(screen.queryByText('投资标的：QQQ')).not.toBeInTheDocument();
     expect(screen.getByText('网格交易')).toBeInTheDocument();
     expect(screen.getAllByText('已验证').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText('+10.1% / 1.18')).toBeInTheDocument();
+    expect(screen.getByText('+10.1% / 1.18 / -6.4%')).toBeInTheDocument();
     expect(screen.getAllByText('一键生成')).toHaveLength(2);
 
     fireEvent.click(screen.getByRole('button', { name: /查看 QQQ 网格交易策略 10Y 回测/ }));
 
     expect(window.location.hash).toBe('#/runs/bt-grid-10y');
+  });
+
+  it('keeps drawdown only in the 10Y strategy library metric cell', async () => {
+    fakeApi.listStrategies.mockResolvedValue([
+      {
+        id: 'strat-grid',
+        name: 'QQQ Grid Horizon Strategy',
+        strategy_type: 'GRID',
+        universe_name: 'QQQ',
+        current_parameter_version: 4,
+        created_at: '2026-04-20T09:00:00Z',
+        updated_at: '2026-04-28T13:22:00Z',
+      },
+    ]);
+    fakeApi.listBacktestRuns.mockResolvedValue([
+      {
+        id: 'bt-grid-10y',
+        strategy_id: 'strat-grid',
+        status: 'COMPLETED',
+        start_date: '2016-03-24',
+        end_date: '2026-03-24',
+        completed_at: '2026-04-28T13:22:00Z',
+        metrics: { annualized_return: 0.101, sharpe: 1.18, max_drawdown: -0.064 },
+      },
+      {
+        id: 'bt-grid-20y',
+        strategy_id: 'strat-grid',
+        status: 'COMPLETED',
+        start_date: '2006-03-24',
+        end_date: '2026-03-24',
+        completed_at: '2026-04-28T13:21:00Z',
+        metrics: { annualized_return: 0.082, sharpe: 0.72, max_drawdown: -0.18 },
+      },
+      {
+        id: 'bt-grid-30y',
+        strategy_id: 'strat-grid',
+        status: 'COMPLETED',
+        start_date: '1996-03-24',
+        end_date: '2026-03-24',
+        completed_at: '2026-04-28T13:20:00Z',
+        metrics: { annualized_return: 0.063, sharpe: 0.55, max_drawdown: -0.28 },
+      },
+    ]);
+
+    render(<CreationTemplatePage />);
+
+    expect(await screen.findByText('QQQ Grid Horizon Strategy')).toBeInTheDocument();
+    expect(screen.getByText('+10.1% / 1.18 / -6.4%')).toBeInTheDocument();
+    expect(screen.getByText('+8.2% / 0.72')).toBeInTheDocument();
+    expect(screen.getByText('+6.3% / 0.55')).toBeInTheDocument();
+    expect(screen.queryByText('+8.2% / 0.72 / -18.0%')).not.toBeInTheDocument();
+    expect(screen.queryByText('+6.3% / 0.55 / -28.0%')).not.toBeInTheDocument();
+  });
+
+  it('archives a strategy only after reference preview and second confirmation', async () => {
+    fakeApi.listStrategies
+      .mockResolvedValueOnce([
+        {
+          id: 'strat-archive',
+          name: 'Archive Candidate',
+          strategy_type: 'GRID',
+          universe_name: 'QQQ',
+          current_parameter_version: 1,
+          created_at: '2026-04-20T09:00:00Z',
+          updated_at: '2026-04-28T13:22:00Z',
+        },
+      ])
+      .mockResolvedValueOnce([]);
+    fakeApi.listBacktestRuns.mockResolvedValue([]);
+    fakeApi.previewStrategyArchive.mockResolvedValue({
+      id: 'strat-archive',
+      strategy_id: 'strat-archive',
+      name: 'Archive Candidate',
+      can_archive: true,
+      reference_count: 0,
+      strategy_leg_reference_counts: {},
+      backtest_run_count: 2,
+      optimization_job_count: 1,
+    });
+    fakeApi.archiveStrategy.mockResolvedValue({
+      id: 'strat-archive',
+      strategy_id: 'strat-archive',
+      status: 'ARCHIVED',
+      archived_at: '2026-05-15T08:00:00Z',
+      deleted_at: '2026-05-15T08:00:00Z',
+      deleted_reason: 'strategy_archived',
+      deleted_backtest_run_count: 2,
+      deleted_optimization_job_count: 1,
+    });
+
+    render(<CreationTemplatePage />);
+
+    expect(await screen.findByText('Archive Candidate')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '归档' }));
+
+    const dialog = await screen.findByRole('dialog', { name: '确认归档策略' });
+    expect(dialog).toHaveTextContent('strat-archive');
+    expect(dialog).toHaveTextContent('将逻辑删除回测');
+    expect(dialog).toHaveTextContent('2');
+    expect(fakeApi.previewStrategyArchive).toHaveBeenCalledWith('strat-archive');
+
+    fireEvent.click(screen.getByRole('button', { name: '确认归档' }));
+
+    await waitFor(() => expect(fakeApi.archiveStrategy).toHaveBeenCalledWith('strat-archive', { confirm: true }));
+    expect(await screen.findByRole('status')).toHaveTextContent('回测 2 条，优化 1 条');
+  });
+
+  it('blocks strategy archive when an active strategy leg reference exists', async () => {
+    fakeApi.listStrategies.mockResolvedValue([
+      {
+        id: 'strat-referenced',
+        name: 'Referenced Strategy',
+        strategy_type: 'GRID',
+        universe_name: 'QQQ',
+        current_parameter_version: 1,
+        created_at: '2026-04-20T09:00:00Z',
+        updated_at: '2026-04-28T13:22:00Z',
+      },
+    ]);
+    fakeApi.listBacktestRuns.mockResolvedValue([]);
+    fakeApi.previewStrategyArchive.mockResolvedValue({
+      id: 'strat-referenced',
+      strategy_id: 'strat-referenced',
+      name: 'Referenced Strategy',
+      can_archive: false,
+      reference_count: 2,
+      strategy_leg_reference_counts: { 'strategy_leg::strat-referenced::strat-referenced-v1': 2 },
+      backtest_run_count: 1,
+      optimization_job_count: 1,
+      blocking_code: 'strategy_leg_reference_protected',
+    });
+
+    render(<CreationTemplatePage />);
+
+    expect(await screen.findByText('Referenced Strategy')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '归档' }));
+
+    await waitFor(() => expect(fakeApi.previewStrategyArchive).toHaveBeenCalledWith('strat-referenced'));
+    expect(screen.queryByRole('dialog', { name: '确认归档策略' })).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('当前引用数：2');
+    expect(fakeApi.archiveStrategy).not.toHaveBeenCalled();
   });
 
   it('does not reuse older parameter-version returns for the current strategy library row', async () => {
@@ -557,9 +723,9 @@ describe('creation flow', () => {
     expect(strategyName).toBeInTheDocument();
     expect(screen.getByText('v2')).toBeInTheDocument();
     expect(strategyRow?.querySelector('.strategy-library-status')?.textContent).toBe('待回测');
-    expect(screen.queryByText('+14.9% / 0.82')).not.toBeInTheDocument();
-    expect(screen.queryByText('+10.8% / 0.61')).not.toBeInTheDocument();
-    expect(screen.queryByText('+8.5% / 0.50')).not.toBeInTheDocument();
+    expect(screen.queryByText('+14.9% / 0.82 / -12.0%')).not.toBeInTheDocument();
+    expect(screen.queryByText('+10.8% / 0.61 / -18.0%')).not.toBeInTheDocument();
+    expect(screen.queryByText('+8.5% / 0.50 / -22.0%')).not.toBeInTheDocument();
     expect(screen.getAllByText('一键生成')).toHaveLength(3);
   });
 
@@ -724,7 +890,7 @@ describe('creation flow', () => {
 
     expect(readFirstStrategyName()).toBe('创建时间较早策略');
 
-    fireEvent.click(screen.getByRole('button', { name: '按10Y年化收益/夏普排序' }));
+    fireEvent.click(screen.getByRole('button', { name: '按10Y年化收益/夏普/回撤排序' }));
 
     expect(readFirstStrategyName()).toBe('创建时间最新策略');
   });
@@ -1009,7 +1175,7 @@ describe('creation flow', () => {
     render(<CreationTemplatePage />);
 
     expect(await screen.findByText('Permanent Horizon Strategy')).toBeInTheDocument();
-    expect(screen.getByText('+14.9% / 0.82')).toBeInTheDocument();
-    expect(screen.queryByText('+20.1% / 1.91')).not.toBeInTheDocument();
+    expect(screen.getByText('+14.9% / 0.82 / -12.0%')).toBeInTheDocument();
+    expect(screen.queryByText('+20.1% / 1.91 / -10.0%')).not.toBeInTheDocument();
   });
 });

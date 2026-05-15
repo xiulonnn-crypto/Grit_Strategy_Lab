@@ -28,6 +28,8 @@ type Metric = {
   value: string;
   detail: string;
   accent?: boolean;
+  ariaLabel?: string;
+  onSelect?: () => void;
 };
 
 type PageStatus = {
@@ -61,8 +63,8 @@ type BacktestRunFilterState = {
 type AllocationLabFilterState = {
   compositionId: string;
   method: string;
-  status: 'all' | 'promotion_ready' | 'review' | 'blocked';
-  gate: 'all' | 'pass' | 'review' | 'blocked';
+  status: 'all' | 'reference' | 'review' | 'blocked';
+  gate: 'all' | 'reference' | 'review' | 'blocked';
 };
 
 type ToolbarFilter =
@@ -107,6 +109,13 @@ const DATE_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
   day: '2-digit',
 });
 
+const DATE_TIME_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+});
+
 function goTo(path: string): void {
   window.location.hash = path;
 }
@@ -138,6 +147,26 @@ function formatDate(value?: string | null): string {
     return '待记录';
   }
   return DATE_FORMATTER.format(date);
+}
+
+function formatRunTime(value?: string | null): string {
+  if (!value) {
+    return '时间待确认';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '时间待确认';
+  }
+  return DATE_TIME_FORMATTER.format(date);
+}
+
+function runTimeValue(row: Pick<ApiCompositionGlobalBacktestRunListItem, 'completed_at' | 'created_at'>): number {
+  const value = row.completed_at ?? row.created_at;
+  if (!value) {
+    return 0;
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
 function activityLabel(value?: string | null): string {
@@ -348,67 +377,16 @@ function evidenceLabel(value?: string | null, label?: string | null): string {
 
 function statusTone(value?: string | null): Tone {
   const normalized = String(value ?? '').toLowerCase();
-  if (['active', 'completed', 'succeeded', 'ready', 'pass', 'promotion_ready'].includes(normalized)) {
+  if (['active', 'completed', 'succeeded', 'ready', 'pass'].includes(normalized)) {
     return 'good';
   }
-  if (['running', 'queued', 'draft', 'review', 'watch', 'completed_with_warnings'].includes(normalized)) {
+  if (['running', 'queued', 'draft', 'review', 'watch', 'completed_with_warnings', 'reference'].includes(normalized)) {
     return 'warning';
   }
   if (['failed', 'blocked', 'rejected', 'policy_violation'].includes(normalized)) {
     return 'danger';
   }
   return 'info';
-}
-
-function backtestStatusLabel(value?: string | null): string {
-  const normalized = String(value ?? '').toUpperCase();
-  if (normalized === 'COMPLETED') {
-    return '完成';
-  }
-  if (normalized === 'COMPLETED_WITH_WARNINGS') {
-    return '完成（待校准）';
-  }
-  if (normalized === 'RUNNING') {
-    return '运行中';
-  }
-  if (normalized === 'FAILED') {
-    return '失败';
-  }
-  return value ? String(value) : '状态待确认';
-}
-
-function backtestVerdictLabel(value?: string | null, status?: string | null): string {
-  const normalized = String(value ?? '').trim().toLowerCase();
-  if (normalized === '10y stable') {
-    return '10Y 稳定';
-  }
-  if (normalized === 'proxy evidence required') {
-    return '代理覆盖待确认';
-  }
-  if (normalized === 'limited window') {
-    return '样本窗口有限';
-  }
-  if (normalized === 'completed' || normalized === 'completed_with_warnings') {
-    return backtestStatusLabel(value);
-  }
-  return value ? String(value) : backtestStatusLabel(status);
-}
-
-function backtestEvidenceLabel(value?: string | null, grade?: string | null): string {
-  const normalized = String(value ?? '').trim().toLowerCase();
-  if (!normalized) {
-    return evidenceLabel(grade);
-  }
-  if (normalized === 'proxy_from_composition_detail_preview') {
-    return '来自组合详情预演的代理覆盖';
-  }
-  if (normalized.includes('model instructions') || normalized.includes('not broker fills')) {
-    return '模型调仓流水，非券商成交回报';
-  }
-  if (normalized === 'derived from full-window composition rebalance events and source return streams') {
-    return '来自全窗口再平衡与来源收益流';
-  }
-  return String(value);
 }
 
 function scenarioStatusLabel(value?: string | null): string {
@@ -459,17 +437,58 @@ function needsSourceReview(item: ApiCompositionListItem): boolean {
   return hasVersionDrift(item.source_integrity) || diagnosisNeedsAction(primaryCompositionDiagnosis(item));
 }
 
+function compositionDecisionActionCount(item: ApiCompositionListItem): number {
+  let total = 0;
+  if (hasVersionUpdate(item)) {
+    total += 1;
+  }
+  if (needsSourceReview(item)) {
+    total += 1;
+  }
+  return total;
+}
+
 function compositionNeedsDecision(item: ApiCompositionListItem): boolean {
-  const pendingCount = item.pending_decision_count ?? 0;
-  return pendingCount > 0 || hasVersionUpdate(item) || needsSourceReview(item);
+  return compositionDecisionActionCount(item) > 0;
 }
 
 function decisionLabel(item: ApiCompositionListItem): string {
-  return primaryCompositionDiagnosis(item).diagnosis_label;
+  const diagnosis = primaryCompositionDiagnosis(item);
+  if (diagnosisNeedsAction(diagnosis)) {
+    return diagnosis.diagnosis_label;
+  }
+  if (hasVersionUpdate(item)) {
+    return '版本更新';
+  }
+  if (hasVersionDrift(item.source_integrity)) {
+    return '来源复核';
+  }
+  return '无';
 }
 
 function decisionTone(item: ApiCompositionListItem): Tone {
-  return diagnosisTone(primaryCompositionDiagnosis(item)) as Tone;
+  const diagnosis = primaryCompositionDiagnosis(item);
+  if (diagnosisNeedsAction(diagnosis)) {
+    return diagnosisTone(diagnosis) as Tone;
+  }
+  if (hasVersionUpdate(item) || hasVersionDrift(item.source_integrity)) {
+    return 'warning';
+  }
+  return 'neutral';
+}
+
+function decisionSummary(item: ApiCompositionListItem): string {
+  const diagnosis = primaryCompositionDiagnosis(item);
+  if (diagnosisNeedsAction(diagnosis)) {
+    return diagnosis.action || diagnosis.frontend_explanation;
+  }
+  if (hasVersionUpdate(item)) {
+    return '策略腿出现新版本，需要决定保留冻结来源还是吸收新版本。';
+  }
+  if (hasVersionDrift(item.source_integrity)) {
+    return '来源冻结与当前来源出现差异，需要复核后再关闭提醒。';
+  }
+  return activityLabel(item.latest_activity_label);
 }
 
 function formatCompositionVersionTag(value?: string | null): string {
@@ -641,6 +660,10 @@ function backtestScenarioValue(row: ApiCompositionGlobalBacktestRunListItem): st
   return String(row.scenario_label || row.scenario_id || '未定位压力窗口');
 }
 
+function backtestRunStableId(row: ApiCompositionGlobalBacktestRunListItem): string {
+  return row.run_id ?? row.id;
+}
+
 function backtestPeriodLabel(row: ApiCompositionGlobalBacktestRunListItem): string {
   return row.time_period_label || '时间周期待确认';
 }
@@ -676,10 +699,14 @@ function filterBacktestRuns(
   });
 }
 
-function allocationJobGateStatus(row: ApiCompositionGlobalAllocationJobListItem): 'pass' | 'review' | 'blocked' {
+function sortBacktestRunsByRunTimeDesc(rows: ApiCompositionGlobalBacktestRunListItem[]): ApiCompositionGlobalBacktestRunListItem[] {
+  return [...rows].sort((left, right) => runTimeValue(right) - runTimeValue(left));
+}
+
+function allocationJobGateStatus(row: ApiCompositionGlobalAllocationJobListItem): 'reference' | 'review' | 'blocked' {
   const explicit = String(row.gate_status ?? '').trim().toLowerCase();
-  if (explicit === 'pass' || explicit === 'ready') {
-    return 'pass';
+  if (explicit === 'reference' || explicit === 'pass' || explicit === 'ready') {
+    return 'reference';
   }
   if (explicit === 'blocked') {
     return 'blocked';
@@ -689,7 +716,7 @@ function allocationJobGateStatus(row: ApiCompositionGlobalAllocationJobListItem)
   if (blocked) {
     return 'blocked';
   }
-  return (row.promotion_ready_count ?? 0) > 0 ? 'pass' : 'review';
+  return 'reference';
 }
 
 function allocationJobStatus(row: ApiCompositionGlobalAllocationJobListItem): AllocationLabFilterState['status'] {
@@ -697,7 +724,7 @@ function allocationJobStatus(row: ApiCompositionGlobalAllocationJobListItem): Al
   if (gateStatus === 'blocked') {
     return 'blocked';
   }
-  return (row.promotion_ready_count ?? 0) > 0 ? 'promotion_ready' : 'review';
+  return gateStatus === 'reference' ? 'reference' : 'review';
 }
 
 function allocationJobMethodValue(row: ApiCompositionGlobalAllocationJobListItem): string {
@@ -706,8 +733,8 @@ function allocationJobMethodValue(row: ApiCompositionGlobalAllocationJobListItem
 
 function normalizeAllocationLabFilters(value: Partial<AllocationLabFilterState>): AllocationLabFilterState {
   const status =
-    value.status === 'promotion_ready' || value.status === 'review' || value.status === 'blocked' ? value.status : 'all';
-  const gate = value.gate === 'pass' || value.gate === 'review' || value.gate === 'blocked' ? value.gate : 'all';
+    value.status === 'reference' || value.status === 'review' || value.status === 'blocked' ? value.status : 'all';
+  const gate = value.gate === 'reference' || value.gate === 'review' || value.gate === 'blocked' ? value.gate : 'all';
   return {
     compositionId: value.compositionId && value.compositionId !== 'all' ? String(value.compositionId) : 'all',
     method: value.method && value.method !== 'all' ? normalizeAllocationMethodKey(String(value.method)) : 'all',
@@ -1088,16 +1115,32 @@ function Hero({
 function MetricGrid({ metrics }: { metrics: Metric[] }): JSX.Element {
   return (
     <section className="composition-global-index__metrics" aria-label="页面概览">
-      {metrics.map((metric) => (
-        <article
-          className={`composition-global-index__metric ${metric.accent ? 'composition-global-index__metric--accent' : ''}`}
-          key={metric.label}
-        >
-          <span>{metric.label}</span>
-          <strong>{metric.value}</strong>
-          <small>{metric.detail}</small>
-        </article>
-      ))}
+      {metrics.map((metric) => {
+        const className = `composition-global-index__metric ${metric.accent ? 'composition-global-index__metric--accent' : ''}`;
+        const content = (
+          <>
+            <span>{metric.label}</span>
+            <strong>{metric.value}</strong>
+            <small>{metric.detail}</small>
+          </>
+        );
+        return metric.onSelect ? (
+          <button
+            aria-label={metric.ariaLabel ?? metric.label}
+            className={className}
+            data-ui="composition-global-index-metric-decision"
+            key={metric.label}
+            onClick={metric.onSelect}
+            type="button"
+          >
+            {content}
+          </button>
+        ) : (
+          <article className={className} key={metric.label}>
+            {content}
+          </article>
+        );
+      })}
     </section>
   );
 }
@@ -1207,7 +1250,7 @@ function CompositionListTable({
           <th>状态标签</th>
           <th>10Y年化/夏普/回撤</th>
           <th>周期完整度</th>
-          <th>待决策</th>
+          <th>状态待办</th>
           <th>操作</th>
         </tr>
       </thead>
@@ -1216,7 +1259,7 @@ function CompositionListTable({
         {!loading && compositions.length === 0 ? <EmptyRows colSpan={6} message="暂无符合当前筛选的组合记录。" /> : null}
         {!loading
           ? compositions.map((item) => {
-              const pendingDecisionCount = item.pending_decision_count ?? (compositionNeedsDecision(item) ? 1 : 0);
+              const pendingDecisionCount = compositionDecisionActionCount(item);
               const diagnosis = primaryCompositionDiagnosis(item);
               const metricWindow = formatCompositionMetricWindow(item);
               return (
@@ -1371,72 +1414,151 @@ function CompositionArchiveDialog({
   );
 }
 
-function BacktestRunTable({
-  loading,
-  onDiagnosisOpen,
-  onScenarioSelect,
-  rows,
+function CompositionBacktestRunDeleteDialog({
+  error,
+  item,
+  onCancel,
+  onConfirm,
+  saving,
 }: {
+  error: string | null;
+  item: ApiCompositionGlobalBacktestRunListItem;
+  onCancel: () => void;
+  onConfirm: () => void;
+  saving: boolean;
+}): JSX.Element {
+  const runId = item.run_id ?? item.id;
+  return (
+    <div className="composition-global-index__dialog-backdrop" role="presentation">
+      <div
+        aria-label="删除组合回测"
+        aria-modal="true"
+        className="composition-global-index__dialog composition-global-index__archive-dialog"
+        role="dialog"
+      >
+        <div className="composition-global-index__dialog-header">
+          <div>
+            <p className="composition-global-index__dialog-eyebrow">删除确认</p>
+            <h2>删除组合回测</h2>
+          </div>
+          <button
+            aria-label="关闭删除确认"
+            className="composition-global-index__text-button"
+            disabled={saving}
+            onClick={onCancel}
+            type="button"
+          >
+            关闭
+          </button>
+        </div>
+        <div className="composition-global-index__archive-copy">
+          <p>
+            确认后这条组合回测会被逻辑删除，并从全局回测列表、组合详情历史和订单入口隐藏。
+          </p>
+          <p>
+            后端仍保留审计字段与原始记录标记，不会物理清除已生成的证据。
+          </p>
+        </div>
+        <dl className="composition-global-index__archive-summary">
+          <div>
+            <dt>组合名称</dt>
+            <dd>{item.composition_name ?? item.composition_id}</dd>
+          </div>
+          <div>
+            <dt>稳定 ID</dt>
+            <dd>{runId}</dd>
+          </div>
+        </dl>
+        {error ? (
+          <div className="composition-global-index__error" role="alert">
+            {error}
+          </div>
+        ) : null}
+        <div className="composition-global-index__dialog-footer">
+          <button
+            className="composition-global-index__ghost-button"
+            disabled={saving}
+            onClick={onCancel}
+            type="button"
+          >
+            取消
+          </button>
+          <button
+            className="composition-global-index__danger-button"
+            disabled={saving}
+            onClick={onConfirm}
+            type="button"
+          >
+            {saving ? '删除中...' : '确认删除'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BacktestRunTable({
+  deletingRunId,
+  loading,
+  onDeleteRequest,
+  onPressureWindowSelect,
+  rows,
+  selectedPressureRunId,
+}: {
+  deletingRunId?: string | null;
   loading: boolean;
-  onDiagnosisOpen: (item: ApiCompositionGlobalBacktestRunListItem) => void;
-  onScenarioSelect: (scenario: string, rowId?: string) => void;
+  onDeleteRequest: (item: ApiCompositionGlobalBacktestRunListItem) => void;
+  onPressureWindowSelect: (item: ApiCompositionGlobalBacktestRunListItem) => void;
   rows: ApiCompositionGlobalBacktestRunListItem[];
+  selectedPressureRunId: string | null;
 }): JSX.Element {
   return (
-    <table className="composition-global-index__table composition-global-index__table--compact" aria-label="组合回测列表">
+    <table className="composition-global-index__table composition-global-index__table--compact composition-global-index__table--backtests" aria-label="组合回测列表">
       <thead>
         <tr>
+          <th>回测id</th>
           <th>组合名</th>
           <th>时间周期</th>
-          <th>状态标签</th>
           <th>压力窗口</th>
           <th>年化收益</th>
           <th>夏普</th>
           <th>回撤</th>
+          <th>运行时间</th>
           <th>操作</th>
         </tr>
       </thead>
       <tbody>
-        {loading ? <LoadingRows colSpan={8} /> : null}
-        {!loading && rows.length === 0 ? <EmptyRows colSpan={8} message="暂无可重载的组合回测记录。" /> : null}
+        {loading ? <LoadingRows colSpan={9} /> : null}
+        {!loading && rows.length === 0 ? <EmptyRows colSpan={9} message="暂无可重载的组合回测记录。" /> : null}
         {!loading
           ? rows.map((row) => {
-              const runId = row.run_id ?? row.id;
+              const runId = backtestRunStableId(row);
               const scenario = backtestScenarioValue(row);
-              const diagnosis = primaryCompositionDiagnosis(row);
+              const runTime = row.completed_at ?? row.created_at;
+              const isSelectedPressureRun = selectedPressureRunId === runId;
               return (
                 <tr key={row.id}>
                   <td>
+                    <span className="composition-global-index__run-id">{runId}</span>
+                  </td>
+                  <td>
                     <div className="composition-global-index__name-cell">
-                      <div className="composition-global-index__name-line">
-                        <strong>{row.composition_name ?? row.composition_id}</strong>
-                        <StatusPill tone={statusTone(row.status)}>{row.composition_version_label ?? '版本快照待确认'}</StatusPill>
-                      </div>
-                      <span>{runId} · {formatDate(row.completed_at ?? row.created_at)}</span>
+                      <strong>{row.composition_name ?? row.composition_id}</strong>
+                      <span className="composition-global-index__version-label">{formatCompositionVersionTag(row.composition_version_label)}</span>
                     </div>
                   </td>
                   <td>
-                    <StatusPill tone={statusTone(row.status)}>{backtestPeriodLabel(row)}</StatusPill>
-                  </td>
-                  <td>
-                    <div className="composition-global-index__value-stack">
-                      <button
-                        className="composition-global-index__status-button"
-                        onClick={() => onDiagnosisOpen(row)}
-                        type="button"
-                      >
-                        <StatusPill tone={diagnosisTone(diagnosis) as Tone}>{diagnosis.diagnosis_label}</StatusPill>
-                      </button>
-                      <span>{backtestVerdictLabel(row.verdict_label, row.status)} · {backtestEvidenceLabel(row.verdict_detail ?? row.evidence_label, row.evidence_grade)}</span>
-                    </div>
+                    <span className="composition-global-index__plain-cell">{backtestPeriodLabel(row)}</span>
                   </td>
                   <td>
                     <button
-                      className="composition-global-index__scenario-button"
-                      onClick={() => onScenarioSelect(scenario, row.id)}
+                      aria-label={`查看 ${scenario}压力窗口详情`}
+                      aria-pressed={isSelectedPressureRun}
+                      className="composition-global-index__plain-cell composition-global-index__pressure-window"
+                      onClick={() => onPressureWindowSelect(row)}
                       type="button"
                     >
-                      <StatusPill tone={statusTone(row.scenario_status_label)}>{scenario}</StatusPill>
+                      {scenario}
                     </button>
                   </td>
                   <td>
@@ -1451,15 +1573,28 @@ function BacktestRunTable({
                     </strong>
                   </td>
                   <td>
-                    <button
-                      className="composition-global-index__text-button"
-                      onClick={() =>
-                        goTo(`/compositions/${encodeURIComponent(row.composition_id)}/backtest-runs/${encodeURIComponent(runId)}`)
-                      }
-                      type="button"
-                    >
-                      查看
-                    </button>
+                    <span className="composition-global-index__run-time">{formatRunTime(runTime)}</span>
+                  </td>
+                  <td>
+                    <div className="composition-global-index__row-actions">
+                      <button
+                        className="composition-global-index__text-button"
+                        onClick={() =>
+                          goTo(`/compositions/${encodeURIComponent(row.composition_id)}/backtest-runs/${encodeURIComponent(runId)}`)
+                        }
+                        type="button"
+                      >
+                        查看
+                      </button>
+                      <button
+                        className="composition-global-index__text-button composition-global-index__text-button--danger"
+                        disabled={deletingRunId === runId}
+                        onClick={() => onDeleteRequest(row)}
+                        type="button"
+                      >
+                        删除
+                      </button>
+                    </div>
                   </td>
                 </tr>
               );
@@ -1535,8 +1670,8 @@ function AllocationJobTable({
                         {formatRatioAsPercent(row.max_drawdown_delta, { signed: true })}
                       </span>
                       <span>
-                        最佳 {allocationMethodLabel(row.best_candidate_label ?? row.method_key ?? row.method_label)} · 候选{' '}
-                        {formatNumber(row.candidate_count, '0')} / 可晋升 {formatNumber(row.promotion_ready_count, '0')}
+                        参考 {allocationMethodLabel(row.best_candidate_label ?? row.method_key ?? row.method_label)} · 候选{' '}
+                        {formatNumber(row.candidate_count, '0')} 个
                       </span>
                     </div>
                   </td>
@@ -1551,7 +1686,7 @@ function AllocationJobTable({
                           {diagnosis.diagnosis_label}
                         </StatusPill>
                       </button>
-                      <span>{row.promotion_gate_label ?? (gateStatus === 'pass' ? '可通过' : '待审查')}</span>
+                      <span>{row.promotion_gate_label ?? (gateStatus === 'blocked' ? '状态需复核' : '测试参考')}</span>
                     </div>
                   </td>
                   <td>
@@ -1568,7 +1703,7 @@ function AllocationJobTable({
                       }
                       type="button"
                     >
-                      进入审查
+                      查看结果
                     </button>
                   </td>
                 </tr>
@@ -1580,120 +1715,139 @@ function AllocationJobTable({
   );
 }
 
-function DecisionRail({
+function CompositionDecisionDialog({
   compositions,
+  onClose,
   onDiagnosisOpen,
 }: {
   compositions: ApiCompositionListItem[];
+  onClose: () => void;
   onDiagnosisOpen: (item: ApiCompositionListItem) => void;
 }): JSX.Element {
-  const decisions = compositions.filter(compositionNeedsDecision).slice(0, 3);
+  const decisions = compositions.filter(compositionNeedsDecision);
+  const decisionCount = decisions.reduce((total, item) => total + compositionDecisionActionCount(item), 0);
   return (
-    <aside className="composition-global-index__rail-card">
-      <header>
-        <h2>待决策事项</h2>
-        <p>按状态标签、版本确认和候选晋升汇总。</p>
-      </header>
-      <div className="composition-global-index__rail-list">
-        {decisions.length === 0 ? (
-          <article className="composition-global-index__queue-item">
-            <header>
-              <strong>暂无待决策事项</strong>
-              <StatusPill>已清空</StatusPill>
-            </header>
-            <p>当前筛选范围内没有待处理状态标签、版本更新或候选晋升提醒。</p>
-          </article>
-        ) : null}
-        {decisions.map((item) => (
-          <article className="composition-global-index__queue-item" key={item.id}>
-            <header>
-              <strong>{item.name}</strong>
-              <StatusPill tone={decisionTone(item)}>{decisionLabel(item)}</StatusPill>
-            </header>
-            <p>{activityLabel(item.latest_activity_label)}</p>
-            <button
-              className="composition-global-index__text-button"
-              onClick={() => onDiagnosisOpen(item)}
-              type="button"
-            >
-              查看状态标签
-            </button>
-          </article>
-        ))}
-      </div>
-    </aside>
+    <div className="composition-global-index__dialog-backdrop" onClick={onClose} role="presentation">
+      <section
+        aria-label="状态待处理"
+        aria-modal="true"
+        className="composition-global-index__dialog composition-global-index__decision-dialog"
+        data-ui="composition-decision-dialog"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <header className="composition-global-index__dialog-header">
+          <div>
+            <span className="composition-global-index__eyebrow">组合队列</span>
+            <h2>状态待处理</h2>
+          </div>
+          <StatusPill tone={decisionCount > 0 ? 'warning' : 'neutral'}>{`${formatNumber(decisionCount)} 项`}</StatusPill>
+        </header>
+        <div className="composition-global-index__rail-list">
+          {decisions.length === 0 ? (
+            <article className="composition-global-index__queue-item">
+              <header>
+                <strong>暂无状态待处理事项</strong>
+                <StatusPill>已清空</StatusPill>
+              </header>
+              <p>当前筛选范围内没有版本更新或来源复核提醒。</p>
+            </article>
+          ) : null}
+          {decisions.map((item) => {
+            const diagnosis = primaryCompositionDiagnosis(item);
+            const canOpenDiagnosis = diagnosisNeedsAction(diagnosis);
+            return (
+              <article className="composition-global-index__queue-item" key={item.id}>
+                <header>
+                  <strong>{item.name}</strong>
+                  <StatusPill tone={decisionTone(item)}>{decisionLabel(item)}</StatusPill>
+                </header>
+                <p>{decisionSummary(item)}</p>
+                <div className="composition-global-index__dialog-actions">
+                  {canOpenDiagnosis ? (
+                    <button
+                      className="composition-global-index__text-button"
+                      onClick={() => {
+                        onClose();
+                        onDiagnosisOpen(item);
+                      }}
+                      type="button"
+                    >
+                      查看状态标签
+                    </button>
+                  ) : null}
+                  <button
+                    className="composition-global-index__text-button"
+                    onClick={() => goTo(`/compositions/${encodeURIComponent(item.id)}`)}
+                    type="button"
+                  >
+                    查看组合
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+        <footer className="composition-global-index__dialog-footer">
+          <button className="composition-global-index__ghost-button" onClick={onClose} type="button">
+            关闭
+          </button>
+        </footer>
+      </section>
+    </div>
   );
 }
 
 function ScenarioRail({
-  onScenarioSelect,
   rows,
-  selectedRunId,
-  selectedScenario,
+  selectedRun,
 }: {
-  onScenarioSelect: (scenario: string, rowId?: string) => void;
   rows: ApiCompositionGlobalBacktestRunListItem[];
-  selectedRunId: string | null;
-  selectedScenario: string;
+  selectedRun: ApiCompositionGlobalBacktestRunListItem | null;
 }): JSX.Element {
   const scenarioRows = uniqueOptions(rows, backtestScenarioValue, backtestScenarioValue)
     .map((option) => rows.find((row) => backtestScenarioValue(row) === option.value))
     .filter((row): row is ApiCompositionGlobalBacktestRunListItem => Boolean(row))
     .slice(0, 4);
-  const selectedRows =
-    selectedScenario === 'all'
-      ? rows
-      : rows.filter((row) => backtestRowMatchesScenario(row, selectedScenario));
-  const activeRow =
-    selectedRunId
-      ? selectedRows.find((row) => row.id === selectedRunId || row.run_id === selectedRunId) ??
-        rows.find((row) => row.id === selectedRunId || row.run_id === selectedRunId) ??
-        null
-      : null;
-  const activeScenario = activeRow ? backtestScenarioValue(activeRow) : '暂无压力窗口';
-  const visibleScenarioRows = activeRow
-    ? scenarioRows.filter((row) => row.id !== activeRow.id)
-    : scenarioRows;
   return (
     <aside className="composition-global-index__rail-card">
       <header>
         <h2>压力窗口</h2>
-        <p>选择窗口查看回撤与修复表现。</p>
+        <p>展示回撤与修复表现。</p>
       </header>
-      {activeRow ? (
+      {selectedRun ? (
         <section className="composition-global-index__scenario-summary" aria-label="当前压力窗口">
           <header>
-            <strong>{activeScenario}</strong>
-            <StatusPill tone={statusTone(activeRow.scenario_status_label)}>
-              {scenarioStatusLabel(activeRow.scenario_status_label)}
+            <strong>{backtestScenarioValue(selectedRun)}</strong>
+            <StatusPill tone={statusTone(selectedRun.scenario_status_label)}>
+              {scenarioStatusLabel(selectedRun.scenario_status_label)}
             </StatusPill>
           </header>
           <p>
-            {activeRow.composition_name ?? activeRow.composition_id}
-            {` · ${scenarioPeriodLabel(activeRow)}`}
+            {backtestRunStableId(selectedRun)} · {selectedRun.composition_name ?? selectedRun.composition_id} · {scenarioPeriodLabel(selectedRun)}
           </p>
           <div className="composition-global-index__mini-grid">
             <div>
               <span>窗口回撤</span>
-              <strong>{formatRatioAsPercent(activeRow.scenario_drawdown ?? activeRow.max_drawdown, { forceNegative: true })}</strong>
+              <strong>{formatRatioAsPercent(selectedRun.scenario_drawdown ?? selectedRun.max_drawdown, { forceNegative: true })}</strong>
             </div>
             <div>
               <span>基准回撤</span>
-              <strong>{formatRatioAsPercent(activeRow.scenario_benchmark_drawdown, { forceNegative: true })}</strong>
+              <strong>{formatRatioAsPercent(selectedRun.scenario_benchmark_drawdown, { forceNegative: true })}</strong>
             </div>
             <div>
               <span>修复周期</span>
-              <strong>{formatScenarioRecovery(activeRow)}</strong>
+              <strong>{formatScenarioRecovery(selectedRun)}</strong>
             </div>
             <div>
               <span>相对抗跌</span>
-              <strong>{formatStressPoints(activeRow.scenario_defensive_delta)}</strong>
+              <strong>{formatStressPoints(selectedRun.scenario_defensive_delta)}</strong>
             </div>
           </div>
-          {activeRow.scenario_source ? <p className="composition-global-index__scenario-source">{activeRow.scenario_source}</p> : null}
+          {selectedRun.scenario_source ? <p className="composition-global-index__scenario-source">{selectedRun.scenario_source}</p> : null}
         </section>
       ) : (
-        <p className="composition-global-index__scenario-hint">点击压力窗口查看该组合的极端行情表现。</p>
+        <p className="composition-global-index__scenario-hint">点击左侧列表中的压力窗口查看对应回测的极端行情表现。</p>
       )}
       <div className="composition-global-index__rail-list">
         {scenarioRows.length === 0 ? (
@@ -1705,18 +1859,13 @@ function ScenarioRail({
             <p>等待持久化回测返回可定位的压力窗口。</p>
           </article>
         ) : null}
-        {visibleScenarioRows.map((row) => (
-          <button
-            aria-label={`查看 ${backtestScenarioValue(row)}压力场景`}
+        {scenarioRows.map((row) => (
+          <article
             className={[
               'composition-global-index__queue-item',
-              'composition-global-index__queue-button',
               'composition-global-index__scenario-item',
-              activeRow?.id === row.id ? 'is-active' : '',
             ].filter(Boolean).join(' ')}
             key={row.id}
-            onClick={() => onScenarioSelect(backtestScenarioValue(row), row.id)}
-            type="button"
           >
             <header>
               <strong>{backtestScenarioValue(row)}</strong>
@@ -1731,79 +1880,9 @@ function ScenarioRail({
               <span>回撤 {formatRatioAsPercent(row.scenario_drawdown ?? row.max_drawdown, { forceNegative: true })}</span>
               <span>相对 {formatStressPoints(row.scenario_defensive_delta)}</span>
             </div>
-          </button>
+          </article>
         ))}
       </div>
-    </aside>
-  );
-}
-
-function PromotionRail({ rows }: { rows: ApiCompositionGlobalAllocationJobListItem[] }): JSX.Element {
-  const reviewCandidate = rows.find((row) => (row.promotion_ready_count ?? 0) > 0) ?? rows[0];
-  const reviewRoute = reviewCandidate
-    ? `/compositions/${encodeURIComponent(reviewCandidate.composition_id)}/allocation-jobs/${encodeURIComponent(reviewCandidate.job_id ?? reviewCandidate.id)}`
-    : null;
-  return (
-    <aside className="composition-global-index__rail-card">
-      <header>
-        <h2>晋升审查</h2>
-        <p>候选不能直接保存为正式版本，必须先生成草稿版本。</p>
-      </header>
-      {reviewCandidate ? (
-        <article className="composition-global-index__review-card">
-          <header>
-            <strong>{allocationMethodLabel(reviewCandidate.method_key ?? reviewCandidate.method_label)}</strong>
-            <StatusPill tone={diagnosisTone(primaryCompositionDiagnosis(reviewCandidate)) as Tone}>
-              {primaryCompositionDiagnosis(reviewCandidate).diagnosis_label}
-            </StatusPill>
-          </header>
-          <div className="composition-global-index__mini-grid">
-            <div>
-              <span>Δ夏普</span>
-              <strong>{formatSignedDecimal(reviewCandidate.sharpe_delta)}</strong>
-            </div>
-            <div>
-              <span>迁移成本</span>
-              <strong>{formatBps(reviewCandidate.migration_cost_bps)}</strong>
-            </div>
-            <div>
-              <span>约束违反</span>
-              <strong>{formatNumber(reviewCandidate.policy_violation_count, '0')}</strong>
-            </div>
-          </div>
-          <button
-            className="composition-global-index__primary-button"
-            disabled={(reviewCandidate.policy_violation_count ?? 0) > 0}
-            onClick={() => {
-              if (reviewRoute) {
-                goTo(reviewRoute);
-              }
-            }}
-            type="button"
-          >
-            生成草稿版本
-          </button>
-          <button
-            className="composition-global-index__ghost-button"
-            onClick={() => {
-              if (reviewRoute) {
-                goTo(`${reviewRoute}?intent=decision-packet`);
-              }
-            }}
-            type="button"
-          >
-            创建决策包
-          </button>
-        </article>
-      ) : (
-        <article className="composition-global-index__queue-item">
-          <header>
-            <strong>暂无可审查候选</strong>
-            <StatusPill>待作业</StatusPill>
-          </header>
-          <p>完成配置实验后，候选将在这里进入晋升审查。</p>
-        </article>
-      )}
     </aside>
   );
 }
@@ -1927,6 +2006,7 @@ export function CompositionListIndexPage(): JSX.Element {
   const [filters, setFilters] = useState<CompositionListFilterState>(() => initialCompositionListFilters());
   const [viewSaveStatus, setViewSaveStatus] = useState<string | null>(null);
   const [diagnosisItem, setDiagnosisItem] = useState<ApiCompositionListItem | null>(null);
+  const [decisionDialogOpen, setDecisionDialogOpen] = useState(false);
   const [pendingArchiveItem, setPendingArchiveItem] = useState<ApiCompositionListItem | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const [archivingCompositionId, setArchivingCompositionId] = useState<string | null>(null);
@@ -1934,16 +2014,22 @@ export function CompositionListIndexPage(): JSX.Element {
   const metrics = useMemo<Metric[]>(() => {
     const activeRows = rows.filter((item) => item.status === 'ACTIVE');
     const robustCount = rows.filter((item) => primaryCompositionDiagnosis(item).status === '稳健').length;
-    const pendingCandidates = rows.reduce((total, item) => total + (item.promotion_candidate_count ?? 0), 0);
-    const statusActionCount = rows.filter((item) => needsSourceReview(item) || hasVersionUpdate(item)).length;
+    const labReferenceCount = rows.filter((item) => Boolean((item.lab_summary as { job_id?: unknown } | null | undefined)?.job_id)).length;
+    const statusActionTotal = rows.reduce((total, item) => total + compositionDecisionActionCount(item), 0);
     return [
       { label: '可运行组合', value: formatNumber(activeRows.length), detail: '已通过来源冻结与权重合计检查。', accent: true },
       { label: '稳健状态', value: formatNumber(robustCount), detail: '状态标签已关闭或无需处理。' },
-      { label: '待晋升候选', value: formatNumber(pendingCandidates), detail: '来自已完成配置作业。' },
-      { label: '待处理状态标签', value: formatNumber(statusActionCount), detail: '代理确认、冻结签名或策略版本仍需处理。' },
+      { label: '配置实验参考', value: formatNumber(labReferenceCount), detail: '结果仅用于测试比较，不进入待办队列。' },
+      {
+        label: '状态待处理',
+        value: formatNumber(statusActionTotal),
+        detail: '仅统计版本更新与来源复核，配置实验保持参考态。',
+        ariaLabel: '查看状态待处理',
+        onSelect: () => setDecisionDialogOpen(true),
+      },
     ];
   }, [rows]);
-  const pendingDecisions = rows.filter(compositionNeedsDecision).length;
+  const statusActionTotal = rows.reduce((total, item) => total + compositionDecisionActionCount(item), 0);
   const draftCount = rows.filter((item) => item.status === 'DRAFT').length;
   const statusKnown = rows.filter((item) => primaryCompositionDiagnosis(item).diagnosis_label).length;
   const statusCoverage = rows.length > 0 ? `${Math.round((statusKnown / rows.length) * 100)}%` : '0%';
@@ -1995,14 +2081,14 @@ export function CompositionListIndexPage(): JSX.Element {
             新建组合
           </button>
         }
-        chips={[`正式组合 ${rows.filter((item) => item.status === 'ACTIVE').length} 个`, `待决策 ${pendingDecisions} 项`, `草稿版本 ${draftCount} 个`, `状态标签覆盖 ${statusCoverage}`]}
+        chips={[`正式组合 ${rows.filter((item) => item.status === 'ACTIVE').length} 个`, `状态待处理 ${statusActionTotal} 项`, `草稿版本 ${draftCount} 个`, `状态标签覆盖 ${statusCoverage}`]}
         eyebrow="组合中心"
         summary="集中查看组合状态标签与待处理事项，形成组合运营工作清单。"
         title="组合列表"
       />
       <MetricGrid metrics={metrics} />
       {error ? <div className="composition-global-index__error">{error}</div> : null}
-      <div className="composition-global-index__layout">
+      <div className="composition-global-index__layout composition-global-index__layout--wide">
         <PanelShell countLabel={`${filteredRows.length}/${rows.length} 条记录`} description="按组合摘要快速筛查，状态标签进入弹层查看原因和动作。" title="全部组合">
           <Toolbar
             actionLabel="保存视图"
@@ -2058,8 +2144,14 @@ export function CompositionListIndexPage(): JSX.Element {
             onDiagnosisOpen={setDiagnosisItem}
           />
         </PanelShell>
-        <DecisionRail compositions={filteredRows} onDiagnosisOpen={setDiagnosisItem} />
       </div>
+      {decisionDialogOpen ? (
+        <CompositionDecisionDialog
+          compositions={rows}
+          onClose={() => setDecisionDialogOpen(false)}
+          onDiagnosisOpen={setDiagnosisItem}
+        />
+      ) : null}
       {diagnosisItem ? (
         <CompositionDiagnosisDialog item={diagnosisItem} onClose={() => setDiagnosisItem(null)} onCompleted={reload} />
       ) : null}
@@ -2077,11 +2169,18 @@ export function CompositionListIndexPage(): JSX.Element {
 }
 
 export function CompositionBacktestRunsIndexPage(): JSX.Element {
+  const api = useApiClient();
   const { error, loading, reload, rows } = useBacktestRuns();
   const [filters, setFilters] = useState<BacktestRunFilterState>(() => readBacktestRunFiltersFromHash());
-  const [selectedScenarioRunId, setSelectedScenarioRunId] = useState<string | null>(null);
-  const [diagnosisItem, setDiagnosisItem] = useState<CompositionDiagnosisTarget | null>(null);
-  const filteredRows = useMemo(() => filterBacktestRuns(rows, filters), [filters, rows]);
+  const [selectedPressureRunId, setSelectedPressureRunId] = useState<string | null>(null);
+  const [pendingDeleteRun, setPendingDeleteRun] = useState<ApiCompositionGlobalBacktestRunListItem | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
+  const filteredRows = useMemo(() => sortBacktestRunsByRunTimeDesc(filterBacktestRuns(rows, filters)), [filters, rows]);
+  const selectedPressureRun = useMemo(
+    () => rows.find((row) => backtestRunStableId(row) === selectedPressureRunId || row.id === selectedPressureRunId) ?? null,
+    [rows, selectedPressureRunId],
+  );
   const completedRows = rows.filter((row) => ['COMPLETED', 'COMPLETED_WITH_WARNINGS'].includes(String(row.status).toUpperCase()));
   const scenarioCount = new Set(rows.filter((row) => row.scenario_label || row.scenario_id).map(backtestScenarioValue)).size;
   const orderCount = rows.reduce((total, row) => total + (row.order_count ?? 0), 0);
@@ -2093,13 +2192,6 @@ export function CompositionBacktestRunsIndexPage(): JSX.Element {
     ],
     [rows],
   );
-  const statusOptions = useMemo(
-    () => [
-      { label: '全部', value: 'all' },
-      ...uniqueOptions(rows, (row) => String(row.status ?? '').toUpperCase(), (row) => backtestStatusLabel(row.status)),
-    ],
-    [rows],
-  );
   const scenarioOptions = useMemo(
     () => [
       { label: '全部', value: 'all' },
@@ -2107,29 +2199,60 @@ export function CompositionBacktestRunsIndexPage(): JSX.Element {
     ],
     [rows],
   );
-  const updateFilters = (nextFilters: BacktestRunFilterState, selectedRunId: string | null = null): void => {
+  const updateFilters = (nextFilters: BacktestRunFilterState): void => {
     const normalized = normalizeBacktestRunFilters(nextFilters);
-    setSelectedScenarioRunId(selectedRunId);
     setFilters(normalized);
     writeBacktestRunHash(normalized);
   };
-  const selectScenario = (scenario: string, rowId?: string): void => {
-    updateFilters(normalizeBacktestRunFilters({ ...filters, scenario }), rowId ?? null);
+  const requestDelete = (item: ApiCompositionGlobalBacktestRunListItem): void => {
+    setDeleteError(null);
+    setPendingDeleteRun(item);
+  };
+  const cancelDelete = (): void => {
+    if (pendingDeleteRun && deletingRunId === (pendingDeleteRun.run_id ?? pendingDeleteRun.id)) {
+      return;
+    }
+    setPendingDeleteRun(null);
+    setDeleteError(null);
+  };
+  const confirmDelete = async (): Promise<void> => {
+    if (!pendingDeleteRun) {
+      return;
+    }
+    if (!api.deleteCompositionBacktestRun) {
+      setDeleteError('当前运行时还未接入组合回测删除接口，无法删除该记录。');
+      return;
+    }
+    const runId = pendingDeleteRun.run_id ?? pendingDeleteRun.id;
+    try {
+      setDeleteError(null);
+      setDeletingRunId(runId);
+      await api.deleteCompositionBacktestRun(pendingDeleteRun.composition_id, runId);
+      if (selectedPressureRunId === runId || selectedPressureRunId === pendingDeleteRun.id) {
+        setSelectedPressureRunId(null);
+      }
+      setPendingDeleteRun(null);
+      reload();
+    } catch (caught) {
+      setDeleteError(`删除组合回测失败：${(caught as Error).message}`);
+    } finally {
+      setDeletingRunId(null);
+    }
   };
   return (
     <div className="composition-global-index-page" data-page-root="composition-global-backtest-runs" data-route-root="compositions-backtest-runs">
       <Hero
         chips={[`已完成 ${completedRows.length} 次`, `需复盘 ${rows.filter((row) => statusTone(row.scenario_status_label) === 'danger').length} 次`, `订单记录 ${orderCount} 笔`, '模拟订单需显式标记']}
         eyebrow="组合回测"
-        summary="集中查看组合回测、压力窗口与状态标签。"
+        summary="集中查看组合回测、压力窗口与运行时间。"
         title="组合回测列表"
       />
       <MetricGrid
         metrics={[
           { label: '稳定裁决', value: formatNumber(completedRows.length), detail: '10Y 或更长窗口通过核心门禁。', accent: true },
-          { label: '压力窗口', value: formatNumber(scenarioCount), detail: '2008、2020、2022 可联动复盘。' },
+          { label: '压力窗口', value: formatNumber(scenarioCount), detail: '2008、2020、2022 可对照复盘。' },
           { label: '订单留痕', value: formatNumber(orderCount), detail: '组合建仓、再平衡与内部对冲。' },
-          { label: '状态待处理', value: formatNumber(statusActionCount), detail: '代理覆盖、异常补值或样本窗口仍需处理。' },
+          { label: '复核待处理', value: formatNumber(statusActionCount), detail: '代理覆盖、异常补值或样本窗口仍需处理。' },
         ]}
       />
       {error ? <div className="composition-global-index__error">{error}</div> : null}
@@ -2143,37 +2266,30 @@ export function CompositionBacktestRunsIndexPage(): JSX.Element {
             }}
             filters={[
               { key: 'compositionId', label: '组合', value: filters.compositionId, options: compositionOptions },
-              { key: 'status', label: '状态', value: filters.status, options: statusOptions },
               { key: 'scenario', label: '压力窗口', value: filters.scenario, options: scenarioOptions },
-              {
-                key: 'evidenceGrade',
-                label: '状态标签',
-                value: filters.evidenceGrade,
-                options: [
-                  { label: '全部', value: 'all' },
-                  { label: '稳健', value: 'A' },
-                  { label: '待校准', value: 'B' },
-                  { label: '失效', value: 'C' },
-                ],
-              },
             ]}
           />
-          <BacktestRunTable
-            loading={loading}
-            onDiagnosisOpen={setDiagnosisItem}
-            onScenarioSelect={selectScenario}
-            rows={filteredRows}
-          />
+          <div className="composition-global-index__table-scroll" aria-label="组合回测列表横向滚动区域">
+            <BacktestRunTable
+              deletingRunId={deletingRunId}
+              loading={loading}
+              onDeleteRequest={requestDelete}
+              onPressureWindowSelect={(row) => setSelectedPressureRunId(backtestRunStableId(row))}
+              rows={filteredRows}
+              selectedPressureRunId={selectedPressureRunId}
+            />
+          </div>
         </PanelShell>
-        <ScenarioRail
-          onScenarioSelect={selectScenario}
-          rows={rows}
-          selectedRunId={selectedScenarioRunId}
-          selectedScenario={filters.scenario}
-        />
+        <ScenarioRail rows={rows} selectedRun={selectedPressureRun} />
       </div>
-      {diagnosisItem ? (
-        <CompositionDiagnosisDialog item={diagnosisItem} onClose={() => setDiagnosisItem(null)} onCompleted={reload} />
+      {pendingDeleteRun ? (
+        <CompositionBacktestRunDeleteDialog
+          error={deleteError}
+          item={pendingDeleteRun}
+          onCancel={cancelDelete}
+          onConfirm={() => void confirmDelete()}
+          saving={deletingRunId === (pendingDeleteRun.run_id ?? pendingDeleteRun.id)}
+        />
       ) : null}
     </div>
   );
@@ -2188,7 +2304,6 @@ export function CompositionLabIndexPage(): JSX.Element {
   const [viewSaveStatus, setViewSaveStatus] = useState<string | null>(null);
   const [diagnosisItem, setDiagnosisItem] = useState<CompositionDiagnosisTarget | null>(null);
   const filteredRows = useMemo(() => filterAllocationJobs(rows, filters), [filters, rows]);
-  const readyRows = rows.filter((row) => (row.promotion_ready_count ?? 0) > 0 && (row.policy_violation_count ?? 0) === 0);
   const sharpeValues = rows.map((row) => row.sharpe_delta).filter((value): value is number => typeof value === 'number');
   const medianSharpe = sharpeValues.length > 0 ? sharpeValues.sort((a, b) => a - b)[Math.floor(sharpeValues.length / 2)] : null;
   const enbValues = rows.map((row) => row.enb).filter((value): value is number => typeof value === 'number');
@@ -2217,22 +2332,22 @@ export function CompositionLabIndexPage(): JSX.Element {
   return (
     <div className="composition-global-index-page" data-page-root="composition-global-lab" data-route-root="compositions-lab">
       <Hero
-        chips={[`已完成作业 ${rows.length} 个`, `待晋升候选 ${readyRows.length} 个`, `政策违反 ${blocked} 项`, `草稿版本待生成`]}
+        chips={[`已完成作业 ${rows.length} 个`, `测试参考 ${rows.length} 个`, `政策违反 ${blocked} 项`, `不生成待办`]}
         eyebrow="配置实验室"
-        summary="跨组合追踪资产配置实验，把有效前沿、候选权重、迁移成本和状态标签门禁收口到同一个晋升审查工作台。"
+        summary="跨组合追踪资产配置实验，结果仅作为测试参考。"
         title="组合实验室"
       />
       <MetricGrid
         metrics={[
-          { label: '可晋升候选', value: formatNumber(readyRows.length), detail: '通过约束、状态标签和迁移成本预检。', accent: true },
+          { label: '测试参考作业', value: formatNumber(rows.length), detail: '配置实验只用于比较与复盘。', accent: true },
           { label: '扣费后 Sharpe 改善', value: medianSharpe === null ? '暂无' : medianSharpe.toFixed(2), detail: '按候选中位数计算。' },
           { label: '平均 ENB', value: avgEnb === null ? '暂无' : avgEnb.toFixed(1), detail: '用于确认候选分散度。' },
-          { label: '待修复门禁', value: formatNumber(blocked), detail: '现金下限、失效状态或政策违反。' },
+          { label: '需复核状态', value: formatNumber(blocked), detail: '现金下限、失效状态或政策违反，仅作参考提示。' },
         ]}
       />
       {error ? <div className="composition-global-index__error">{error}</div> : null}
-      <div className="composition-global-index__layout">
-        <PanelShell countLabel={`${filteredRows.length}/${rows.length} 条作业`} description="按组合、方法、候选状态和晋升门禁集中查看配置实验。" title="实验作业列表">
+      <div className="composition-global-index__layout composition-global-index__layout--wide">
+        <PanelShell countLabel={`${filteredRows.length}/${rows.length} 条作业`} description="按组合、方法和参考状态集中查看配置实验。" title="实验作业列表">
           <Toolbar
             actionLabel="保存视图"
             actionStatus={viewSaveStatus}
@@ -2245,9 +2360,9 @@ export function CompositionLabIndexPage(): JSX.Element {
                 value: filters.status,
                 options: [
                   { label: '全部', value: 'all' },
-                  { label: '待晋升', value: 'promotion_ready' },
-                  { label: '待审查', value: 'review' },
-                  { label: '门禁阻断', value: 'blocked' },
+                  { label: '测试参考', value: 'reference' },
+                  { label: '需复核', value: 'review' },
+                  { label: '状态阻断', value: 'blocked' },
                 ],
               },
               {
@@ -2256,8 +2371,8 @@ export function CompositionLabIndexPage(): JSX.Element {
                 value: filters.gate,
                 options: [
                   { label: '全部', value: 'all' },
-                  { label: '可通过', value: 'pass' },
-                  { label: '待审查', value: 'review' },
+                  { label: '参考可用', value: 'reference' },
+                  { label: '需复核', value: 'review' },
                   { label: '阻断', value: 'blocked' },
                 ],
               },
@@ -2274,7 +2389,6 @@ export function CompositionLabIndexPage(): JSX.Element {
           />
           <AllocationJobTable loading={loading} onDiagnosisOpen={setDiagnosisItem} rows={filteredRows} />
         </PanelShell>
-        <PromotionRail rows={filteredRows.length > 0 ? filteredRows : rows} />
       </div>
       {diagnosisItem ? (
         <CompositionDiagnosisDialog item={diagnosisItem} onClose={() => setDiagnosisItem(null)} onCompleted={reload} />

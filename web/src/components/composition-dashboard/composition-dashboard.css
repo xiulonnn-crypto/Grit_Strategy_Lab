@@ -390,12 +390,13 @@
 }
 
 .composition-dashboard-activity {
+  appearance: none;
   display: grid;
-  gap: 4px;
-  padding: 14px 15px;
-  border-radius: 14px;
-  border: 1px solid #e5e7eb;
-  background: linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
+  width: 100%;
+  gap: 10px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
 }
 
 .composition-dashboard-observation__chart {

@@ -155,6 +155,31 @@ export type ApiStrategyLibraryResponse = {
   runs: ApiBacktestRunListItem[];
 };
 
+export type ApiStrategyArchivePreview = {
+  id: string;
+  strategy_id: string;
+  name?: string | null;
+  lifecycle_status?: string | null;
+  can_archive: boolean;
+  reference_count: number;
+  strategy_leg_reference_counts?: Record<string, number>;
+  backtest_run_count: number;
+  optimization_job_count: number;
+  blocking_code?: string | null;
+  next_action?: string | null;
+};
+
+export type ApiStrategyArchiveResult = {
+  id: string;
+  strategy_id: string;
+  status: string;
+  archived_at: string;
+  deleted_at: string;
+  deleted_reason: string;
+  deleted_backtest_run_count: number;
+  deleted_optimization_job_count: number;
+};
+
 export type ApiParameterHistoryEntry = {
   version_number: number;
   parameter_version_id: string;
@@ -1701,6 +1726,15 @@ export type ApiCompositionGlobalBacktestRunListItem = {
   completed_at?: string | null;
 };
 
+export type ApiCompositionBacktestRunDeleteResult = {
+  id: string;
+  run_id?: string | null;
+  composition_id: string;
+  status: string;
+  deleted_at: string;
+  deleted_reason: string;
+};
+
 export type ApiCompositionGlobalAllocationJobListItem = {
   id: string;
   job_id?: string | null;
@@ -2258,6 +2292,10 @@ export type ApiSnapshotRefreshRequest = {
   mode?: SnapshotRefreshMode;
   targets?: SnapshotRefreshTarget[];
   repair_symbol_limit?: number | null;
+  symbols?: string[];
+  phase2_scope?: 'sp500_10y' | 'l1_all' | 'custom' | null;
+  phase2_max_symbols?: number | null;
+  phase2_cursor?: string | null;
 };
 
 export type ApiPitDataOverview = {
@@ -2608,6 +2646,34 @@ export type ApiPitDataOverview = {
       missing_publish_date_count?: number;
       [key: string]: unknown;
     } | null;
+    metrics?: Array<{
+      label: string;
+      value: string | number | boolean | null;
+      [key: string]: unknown;
+    }>;
+    submodules?: Array<{
+      id: string;
+      title_cn: string;
+      status: string;
+      usable: boolean;
+      summary_cn: string;
+      linked_targets?: string[];
+      metrics?: Record<string, unknown>;
+      blockers?: string[];
+      upstream_capabilities?: Array<Record<string, unknown>>;
+      [key: string]: unknown;
+    }>;
+    upstream_capabilities?: Array<{
+      capability_id: string;
+      factor_groups: string[];
+      mode: string;
+      allowed_actions: string[];
+      required_checks?: string[];
+      satisfied_checks?: string[];
+      blocked_checks?: string[];
+      summary_cn?: string;
+      [key: string]: unknown;
+    }>;
     [key: string]: unknown;
   }>;
   factor_diagnostic_readiness?: Array<{
@@ -2617,6 +2683,20 @@ export type ApiPitDataOverview = {
     factors: string[];
     rationale_cn: string;
     linked_snapshot_checks?: string[];
+    required_checks?: string[];
+    satisfied_checks?: string[];
+    blocked_checks?: string[];
+    upstream_capabilities?: Array<{
+      capability_id: string;
+      factor_groups: string[];
+      mode: string;
+      allowed_actions: string[];
+      required_checks?: string[];
+      satisfied_checks?: string[];
+      blocked_checks?: string[];
+      summary_cn?: string;
+      [key: string]: unknown;
+    }>;
     [key: string]: unknown;
   }>;
   pit_quality_alerts?: Array<{
@@ -2634,6 +2714,9 @@ export type ApiPitDataOverview = {
     source_layer: string;
     target_factor_groups: string[];
     result_status: string;
+    hard_blocking?: boolean;
+    capability_mode?: string;
+    detail_cn?: string;
     [key: string]: unknown;
   }>;
 };
@@ -2803,6 +2886,68 @@ export type ApiFactorBatchDiagnosticSummary = {
   [key: string]: unknown;
 };
 
+export type ApiFactorTierLevel = "F1" | "F2" | "F3" | string;
+export type ApiFactorLifecycleProjectionKey = "sandbox" | "online" | "to_be_verified" | "archived" | string;
+export type ApiFactorLevelKey = "S" | "A" | "B" | "C" | "D" | string;
+
+export type ApiFactorTierProjection = {
+  key: ApiFactorTierLevel;
+  label: string;
+  name?: string;
+  kind?: "raw" | "refined" | "composite" | string;
+  description?: string;
+  [key: string]: unknown;
+};
+
+export type ApiFactorLifecycleProjection = {
+  key: ApiFactorLifecycleProjectionKey;
+  label: string;
+  description?: string;
+  source_status?: string;
+  [key: string]: unknown;
+};
+
+export type ApiFactorLevelProjection = {
+  key: ApiFactorLevelKey;
+  label: string;
+  description?: string;
+  [key: string]: unknown;
+};
+
+export type ApiFactorOpStatus = {
+  lights: Array<{
+    code: "W" | "N" | "Z" | "T" | string;
+    key: string;
+    label: string;
+    active: boolean;
+    status: "done" | "missing" | string;
+  }>;
+  completed?: string[];
+  missing?: string[];
+  summary?: string;
+  [key: string]: unknown;
+};
+
+export type ApiFactorLineageSummary = {
+  has_lineage: boolean;
+  parent_count: number;
+  parent_ids: string[];
+  root_source?: string | null;
+  relation_types?: string[];
+  [key: string]: unknown;
+};
+
+export type ApiFactorQualityView = {
+  rank_ic?: number | null;
+  ir?: number | null;
+  coverage?: number | null;
+  decay_days?: number | null;
+  decay_label?: string | null;
+  sparkline?: Array<{ date?: string; value: number }>;
+  sparkline_window?: string | null;
+  [key: string]: unknown;
+};
+
 export type ApiFactorListItem = {
   id: string;
   name: string;
@@ -2813,6 +2958,18 @@ export type ApiFactorListItem = {
   source: ApiFactorSource;
   lifecycle_status: ApiFactorLifecycleStatus;
   diagnostic_status: ApiFactorDiagnosticStatus;
+  tier_level?: ApiFactorTierLevel;
+  tier_label?: string;
+  tier_projection?: ApiFactorTierProjection;
+  lifecycle?: ApiFactorLifecycleProjectionKey;
+  lifecycle_label?: string;
+  lifecycle_projection?: ApiFactorLifecycleProjection;
+  factor_level?: ApiFactorLevelKey;
+  factor_level_label?: string;
+  factor_level_projection?: ApiFactorLevelProjection;
+  op_status?: ApiFactorOpStatus;
+  lineage_summary?: ApiFactorLineageSummary;
+  quality_view?: ApiFactorQualityView;
   offline_reason?: string | null;
   offline_at?: string | null;
   offline_command?: "DEPRECATE" | "PRUNE" | string | null;
@@ -2829,6 +2986,7 @@ export type ApiFactorListItem = {
   coverage_loss?: number;
   tags: string[];
   data_requirements: string[];
+  description?: string | null;
   institutional_note?: string | null;
   latest_diagnostic_summary?: ApiFactorDiagnosticSummary | null;
   last_diagnostic_run_id?: string | null;
@@ -2869,6 +3027,14 @@ export type ApiFactorDetail = ApiFactorListItem & {
       risk_label: string;
     }>;
   };
+  lineage_tree?: {
+    factor_id: string;
+    persisted: boolean;
+    node?: Record<string, unknown>;
+    parents?: Array<Record<string, unknown>>;
+    parent_count?: number;
+    nodes: Array<Record<string, unknown>>;
+  };
 };
 
 export type ApiFactorListResponse = {
@@ -2881,6 +3047,7 @@ export type ApiFactorCreatePayload = {
   market: string;
   universe: string;
   expression: string;
+  description?: string | null;
   frequency: ApiFactorFrequency;
   direction: ApiFactorDirection;
   tags: string[];
@@ -2963,6 +3130,11 @@ export type ApiFactorMiningJobCreatePayload = {
   random_seed?: number | null;
   min_rank_ic: number;
   max_depth?: number;
+  generation_mode?: "PRICE_OPERATOR" | "HYBRID_COMPOSITION" | string;
+  source_factor_ids?: string[];
+  recipe_families?: string[];
+  exploration_budget?: number;
+  composition_policy?: Record<string, unknown>;
 };
 
 export type ApiFactorMiningCandidate = {
@@ -2986,6 +3158,11 @@ export type ApiFactorMiningCandidate = {
   benchmark_max_drawdown_pct?: number | null;
   drawdown_vs_benchmark_ratio?: number | null;
   auto_residual_summary?: Record<string, unknown> | null;
+  source_factor_ids?: string[];
+  recipe_kind?: string | null;
+  recipe_family?: string | null;
+  orthogonality_intent?: string | null;
+  composition_metadata?: Record<string, unknown> | null;
 };
 
 export type ApiFactorMiningJob = {
@@ -3282,6 +3459,8 @@ export type DemoApi = {
   listStrategies: (signal?: AbortSignal) => Promise<ApiStrategyListItem[]>;
   getStrategyLibrary?: (signal?: AbortSignal) => Promise<ApiStrategyLibraryResponse>;
   getStrategyDetail: (id: string) => Promise<ApiStrategyDetail>;
+  previewStrategyArchive?: (id: string) => Promise<ApiStrategyArchivePreview>;
+  archiveStrategy?: (id: string, payload: { confirm: true }) => Promise<ApiStrategyArchiveResult>;
   restoreStrategyParameterVersion?: (
     strategyId: string,
     parameterVersionId: string,
@@ -3420,6 +3599,10 @@ export type DemoApi = {
     id: string,
     runId: string,
   ) => Promise<ApiCompositionBacktestRun>;
+  deleteCompositionBacktestRun?: (
+    id: string,
+    runId: string,
+  ) => Promise<ApiCompositionBacktestRunDeleteResult>;
   getCompositionBacktestOrders?: (
     id: string,
     runId: string,
@@ -3490,7 +3673,7 @@ export type DemoApi = {
     tag?: string;
     market?: string;
     status?: string;
-    lifecycle?: "online" | "offline" | "all" | string;
+    lifecycle?: "online" | "offline" | "all" | "sandbox" | "to_be_verified" | "archived" | string;
   }) => Promise<ApiFactorListResponse>;
   createFactor: (payload: ApiFactorCreatePayload) => Promise<ApiFactorDetail>;
   getFactor: (id: string) => Promise<ApiFactorDetail>;

@@ -23,6 +23,7 @@ import type {
   ApiCompositionBacktestOrderPage,
   ApiCompositionBacktestOrdersQuery,
   ApiCompositionBacktestRun,
+  ApiCompositionBacktestRunDeleteResult,
   ApiCompositionBacktestRunPayload,
   ApiCompositionGlobalAllocationJobListItem,
   ApiCompositionGlobalBacktestRunListItem,
@@ -75,6 +76,8 @@ import type {
   ApiSnapshotOverview,
   ApiSnapshotProviderAttempts,
   ApiSnapshotProviderRegistry,
+  ApiStrategyArchivePreview,
+  ApiStrategyArchiveResult,
   ApiStrategyCreationSession,
   ApiStrategyDetail,
   ApiStrategyListItem,
@@ -299,9 +302,6 @@ function mapCompositionListItem(item: ApiCompositionListItem): ApiCompositionLis
   const latestBacktestPayload = readRecord(latestBacktestSummary.summary);
   const labSummary = readRecord(item.lab_summary);
   const labPayload = readRecord(labSummary.summary);
-  const promotionReadiness = readRecord(item.promotion_readiness);
-  const promotionCandidateCount =
-    item.promotion_candidate_count ?? readNumber(labPayload.candidate_count) ?? (promotionReadiness.status === 'ready' ? 1 : 0);
   return {
     ...item,
     version_status_label: item.version_status_label ?? (item.version_status === 'ACTIVE' ? '正式版本' : item.version_status ?? null),
@@ -319,8 +319,8 @@ function mapCompositionListItem(item: ApiCompositionListItem): ApiCompositionLis
     allocation_lab_label: item.allocation_lab_label ?? readString(labPayload.intent) ?? null,
     allocation_lab_detail:
       item.allocation_lab_detail ??
-      (typeof promotionCandidateCount === 'number' ? `${promotionCandidateCount} 个候选待确认` : null),
-    promotion_candidate_count: promotionCandidateCount,
+      (typeof readNumber(labPayload.candidate_count) === 'number' ? `${readNumber(labPayload.candidate_count)} 个候选仅作测试参考` : null),
+    promotion_candidate_count: item.promotion_candidate_count ?? 0,
     primary_diagnosis: item.primary_diagnosis ?? item.diagnoses?.[0] ?? null,
     diagnoses: item.diagnoses ?? (item.primary_diagnosis ? [item.primary_diagnosis] : []),
   };
@@ -389,12 +389,7 @@ function mapCompositionBacktestRunItem(run: ApiCompositionBacktestRun): ApiCompo
 function mapCompositionAllocationJobItem(job: ApiCompositionAllocationJob): ApiCompositionGlobalAllocationJobListItem {
   const summary = readRecord(job.summary);
   const candidates = readRecordArray(job.candidates);
-  const promotable = candidates.filter((candidate) => {
-    const actions = Array.isArray(candidate.allowed_actions) ? candidate.allowed_actions : [];
-    const readiness = readRecord(candidate.promotion_readiness);
-    return actions.includes('promote_candidate') && readiness.status !== 'blocked';
-  });
-  const reviewCandidate = promotable[0] ?? candidates.find((candidate) => candidate.id !== 'current' && candidate.id !== 'benchmark') ?? candidates[0] ?? {};
+  const reviewCandidate = candidates.find((candidate) => candidate.id !== 'current' && candidate.id !== 'benchmark') ?? candidates[0] ?? {};
   const currentCandidate = candidates.find((candidate) => candidate.id === 'current') ?? {};
   const metrics = readRecord(reviewCandidate.metrics);
   const currentMetrics = readRecord(currentCandidate.metrics);
@@ -405,9 +400,7 @@ function mapCompositionAllocationJobItem(job: ApiCompositionAllocationJob): ApiC
     normalizeAllocationMethodKey(reviewCandidate.label);
   const gateStatus = readiness.status === 'blocked'
     ? 'blocked'
-    : promotable.length > 0
-      ? 'pass'
-      : 'review';
+    : 'reference';
   return {
     id: job.id,
     job_id: job.job_id,
@@ -421,8 +414,8 @@ function mapCompositionAllocationJobItem(job: ApiCompositionAllocationJob): ApiC
     best_candidate_label: allocationMethodLabel(reviewCandidate.label ?? reviewCandidate.id),
     candidate_count:
       readNumber(summary.candidate_count) ?? candidates.filter((candidate) => candidate.id !== 'current' && candidate.id !== 'benchmark').length,
-    promotion_ready_count: promotable.length,
-    promotion_gate_label: readiness.status === 'blocked' ? '门禁阻断' : promotable.length > 0 ? '可晋升' : '待审查',
+    promotion_ready_count: 0,
+    promotion_gate_label: readiness.status === 'blocked' ? '状态需复核' : '测试参考',
     gate_status: gateStatus,
     migration_cost_bps: readNumber(readiness.migration_cost_bps),
     annualized_return_delta: metricDelta(metrics.annualized_return ?? metrics.cagr, currentMetrics.annualized_return ?? currentMetrics.cagr),
@@ -462,6 +455,13 @@ function createHttpApiClient(): DemoApi {
     getStrategyLibrary: (signal) =>
       requestJson<{ strategies: ApiStrategyListItem[]; runs: ApiBacktestRunListItem[] }>('/strategy-library', { signal }),
     getStrategyDetail: (id) => requestJson<ApiStrategyDetail>(`/strategies/${encodeURIComponent(id)}/detail`),
+    previewStrategyArchive: (id) =>
+      requestJson<ApiStrategyArchivePreview>(`/strategies/${encodeURIComponent(id)}/archive-preview`),
+    archiveStrategy: (id, payload) =>
+      requestJson<ApiStrategyArchiveResult>(
+        `/strategies/${encodeURIComponent(id)}/archive`,
+        withJsonBody(payload, { method: 'POST' }),
+      ),
     restoreStrategyParameterVersion: (strategyId, parameterVersionId, payload) =>
       requestJson<ApiStrategyDetail>(
         `/strategies/${encodeURIComponent(strategyId)}/parameter-versions/${encodeURIComponent(parameterVersionId)}/restore`,
@@ -688,6 +688,11 @@ function createHttpApiClient(): DemoApi {
     getCompositionBacktestRun: (id, runId) =>
       requestJson<ApiCompositionBacktestRun>(
         `/compositions/${encodeURIComponent(id)}/backtest-runs/${encodeURIComponent(runId)}`,
+      ),
+    deleteCompositionBacktestRun: (id, runId) =>
+      requestJson<ApiCompositionBacktestRunDeleteResult>(
+        `/compositions/${encodeURIComponent(id)}/backtest-runs/${encodeURIComponent(runId)}`,
+        { method: 'DELETE' },
       ),
     getCompositionBacktestOrders: (id, runId, params?: ApiCompositionBacktestOrdersQuery) => {
       const query = new URLSearchParams();

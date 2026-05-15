@@ -695,7 +695,7 @@ function AppShell(): JSX.Element {
             ) : null}
             {route.kind === 'factor-library' ? (
               <FactorLibraryPage
-                initialLoadDelayMs={FIRST_SCREEN_DEFER_MS}
+                initialLoadDelayMs={0}
                 initialSource={route.source}
                 initialStatus={route.status}
                 initialTag={route.tag}

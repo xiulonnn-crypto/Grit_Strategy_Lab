@@ -149,6 +149,7 @@
 .composition-global-index__text-button:focus-visible,
 .composition-global-index__scenario-button:focus-visible,
 .composition-global-index__status-button:focus-visible,
+.composition-global-index__metric:focus-visible,
 .composition-global-index__queue-button:focus-visible {
   outline: 2px solid rgba(31, 135, 123, 0.28);
   outline-offset: 2px;
@@ -214,6 +215,18 @@
   box-shadow: var(--shadow);
 }
 
+button.composition-global-index__metric {
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+button.composition-global-index__metric:hover {
+  border-color: rgba(31, 135, 123, 0.28);
+  background: #f5fbf8;
+}
+
 .composition-global-index__metric span {
   color: var(--gsl-text-sub);
   font-size: 12px;
@@ -242,6 +255,10 @@
   grid-template-columns: minmax(0, 1fr) 330px;
   gap: 18px;
   align-items: start;
+}
+
+.composition-global-index__layout--wide {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .composition-global-index__panel,
@@ -341,10 +358,34 @@
   border-collapse: collapse;
 }
 
+.composition-global-index__table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-gutter: stable;
+}
+
 .composition-global-index__table--compact th,
 .composition-global-index__table--compact td {
   padding-left: 8px;
   padding-right: 8px;
+}
+
+.composition-global-index__table--backtests {
+  min-width: 1060px;
+}
+
+.composition-global-index__table--backtests th:last-child,
+.composition-global-index__table--backtests td:last-child {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  background: #ffffff;
+  box-shadow: -10px 0 14px rgba(13, 38, 51, 0.08);
+}
+
+.composition-global-index__table--backtests th:last-child {
+  z-index: 2;
+  background: var(--gsl-bg-subtle);
 }
 
 .composition-global-index__table--lab {
@@ -423,6 +464,52 @@
   min-height: 24px;
   padding: 0 8px;
   font-size: 11px;
+}
+
+.composition-global-index__run-id,
+.composition-global-index__run-time {
+  display: inline-flex;
+  color: var(--gsl-text-title);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.composition-global-index__version-label,
+.composition-global-index__plain-cell {
+  color: var(--gsl-text-muted);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.composition-global-index__pressure-window {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--gsl-color-primary-strong);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 20px;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.composition-global-index__pressure-window:hover,
+.composition-global-index__pressure-window[aria-pressed="true"] {
+  color: var(--gsl-color-primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.composition-global-index__pressure-window:focus-visible {
+  outline: 2px solid rgba(31, 135, 123, 0.28);
+  outline-offset: 3px;
 }
 
 .composition-global-index__name-cell strong,
@@ -521,6 +608,10 @@
 
 .composition-global-index__archive-dialog {
   width: min(540px, 100%);
+}
+
+.composition-global-index__decision-dialog {
+  width: min(760px, 100%);
 }
 
 .composition-global-index__dialog-header {

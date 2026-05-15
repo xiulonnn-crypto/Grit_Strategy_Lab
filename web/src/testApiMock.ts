@@ -63,6 +63,18 @@ export function installMockApiServer() {
       }
       if (method === 'GET' && url.pathname === '/strategies') return json(await demoApi.listStrategies());
       if (method === 'GET' && segments[0] === 'strategies' && segments[2] === 'detail') return json(await demoApi.getStrategyDetail(segments[1]));
+      if (method === 'GET' && segments[0] === 'strategies' && segments[2] === 'archive-preview') {
+        if (!demoApi.previewStrategyArchive) {
+          return new Response(JSON.stringify({ message: 'previewStrategyArchive is not implemented' }), { status: 501 });
+        }
+        return json(await demoApi.previewStrategyArchive(segments[1]));
+      }
+      if (method === 'POST' && segments[0] === 'strategies' && segments[2] === 'archive') {
+        if (!demoApi.archiveStrategy) {
+          return new Response(JSON.stringify({ message: 'archiveStrategy is not implemented' }), { status: 501 });
+        }
+        return json(await demoApi.archiveStrategy(segments[1], body as { confirm: true }));
+      }
       if (method === 'POST' && segments[0] === 'strategies' && segments[2] === 'parameter-versions' && segments[4] === 'restore') {
         if (!demoApi.restoreStrategyParameterVersion) {
           return new Response(JSON.stringify({ message: 'restoreStrategyParameterVersion is not implemented' }), { status: 501 });

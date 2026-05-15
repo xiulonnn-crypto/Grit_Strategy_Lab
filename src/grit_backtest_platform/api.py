@@ -84,6 +84,7 @@ from .models import (
     SnapshotProviderRegistryResponseModel,
     SnapshotRefreshRequest,
     SnapshotOverviewResponseModel,
+    StrategyArchiveRequest,
     StrategyUpdateRequest,
 )
 from .real_service import RealBacktestPlatformService, SnapshotBlockingError
@@ -1141,6 +1142,11 @@ def create_app(
             except Exception:
                 pass
 
+        try:
+            invoke(service.list_factors, lifecycle="online")
+        except Exception:
+            logger.exception("Factor list warmup failed during startup.")
+
         if _startup_read_model_prewarm_enabled():
             def prewarm_read_models() -> None:
                 try:
@@ -1194,6 +1200,14 @@ def create_app(
     @app.patch('/strategies/{strategy_id}')
     def patch_strategy(strategy_id: str, payload: StrategyUpdateRequest):
         return invoke(service.update_strategy, strategy_id, payload)
+
+    @app.get('/strategies/{strategy_id}/archive-preview')
+    def strategy_archive_preview(strategy_id: str):
+        return invoke(service.preview_strategy_archive, strategy_id)
+
+    @app.post('/strategies/{strategy_id}/archive')
+    def archive_strategy(strategy_id: str, payload: StrategyArchiveRequest):
+        return invoke(service.archive_strategy, strategy_id, payload)
 
     @app.post('/strategies/{strategy_id}/parameter-versions/{parameter_version_id}/restore')
     def restore_strategy_parameter_version(
@@ -1340,6 +1354,10 @@ def create_app(
     @app.get('/compositions/{composition_id}/backtest-runs/{run_id}', response_model=CompositionBacktestRunResponseModel)
     def composition_backtest_run_detail(composition_id: str, run_id: str):
         return invoke(service.get_composition_backtest_run, composition_id, run_id)
+
+    @app.delete('/compositions/{composition_id}/backtest-runs/{run_id}')
+    def delete_composition_backtest_run(composition_id: str, run_id: str):
+        return invoke(service.delete_composition_backtest_run, composition_id, run_id)
 
     @app.get('/compositions/{composition_id}/backtest-runs/{run_id}/orders', response_model=CompositionBacktestOrderPageModel)
     def composition_backtest_orders(

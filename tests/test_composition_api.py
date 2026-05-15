@@ -1679,6 +1679,40 @@ def test_composition_backtest_run_accepts_frozen_source_run_deep_link(tmp_path):
     assert orders["generated_from"] == "composition_rebalance_events_and_strategy_trades"
 
 
+def test_delete_composition_backtest_run_logically_hides_run_and_blocks_artifact_fallback(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    composition = _create_sleeve_os_composition(client)
+
+    created_run = assert_ok(
+        client.post(
+            f"/compositions/{composition['id']}/backtest-runs",
+            json={"idempotency_key": "delete-composition-backtest-run", "horizon_years": 10},
+        )
+    )
+    run_id = created_run["run_id"]
+
+    deleted = assert_ok(client.delete(f"/compositions/{composition['id']}/backtest-runs/{run_id}"))
+    global_runs = assert_ok(client.get("/compositions/backtest-runs"))
+    deleted_row = client.app.state.service.storage.fetch_one(
+        "SELECT status, deleted_at, deleted_reason FROM composition_backtest_runs WHERE id = ?",
+        (run_id,),
+    )
+
+    assert deleted["id"] == run_id
+    assert deleted["run_id"] == run_id
+    assert deleted["composition_id"] == composition["id"]
+    assert deleted["status"] == "DELETED"
+    assert deleted["deleted_reason"] == "user_deleted"
+    assert deleted["deleted_at"]
+    assert all(item["run_id"] != run_id for item in global_runs["items"])
+    assert deleted_row is not None
+    assert deleted_row["status"] == "DELETED"
+    assert deleted_row["deleted_at"] is not None
+    assert deleted_row["deleted_reason"] == "user_deleted"
+    assert client.get(f"/compositions/{composition['id']}/backtest-runs/{run_id}").status_code == 404
+    assert client.get(f"/compositions/{composition['id']}/backtest-runs/{run_id}/orders").status_code == 404
+
+
 def test_composition_backtest_coverage_uses_actual_window_when_request_period_drifts(tmp_path):
     client, _ = create_test_client(tmp_path)
     composition = _create_sleeve_os_composition(client)
@@ -1852,7 +1886,7 @@ def test_composition_allocation_job_status_and_shape(tmp_path):
     min_vol_candidate = next(item for item in created_job["candidates"] if item["id"] == "min_vol")
     assert current_candidate["allowed_actions"] == []
     assert benchmark_candidate["allowed_actions"] == []
-    assert min_vol_candidate["allowed_actions"] == ["promote_candidate"]
+    assert min_vol_candidate["allowed_actions"] == []
     assert "volatility" in current_candidate["metrics"]
     assert min_vol_candidate["metrics"]["max_drawdown"] < current_candidate["metrics"]["max_drawdown"]
     locked_cash_leg = next(leg for leg in composition["normalized_legs"] if leg["leg_kind"] == "cash")
@@ -1899,6 +1933,8 @@ def test_composition_allocation_job_status_and_shape(tmp_path):
 
     global_jobs = assert_ok(client.get("/compositions/allocation-jobs"))
     assert any(item["job_id"] == created_job["job_id"] for item in global_jobs["items"])
+    assert global_jobs["summary"]["promotable_candidates"] == 0
+    assert global_jobs["decision_queue"] == []
 
 
 def test_composition_allocation_job_ignores_stale_evidence_grade_block_when_current_status_allows(tmp_path):
@@ -1939,19 +1975,15 @@ def test_composition_allocation_job_ignores_stale_evidence_grade_block_when_curr
     min_vol_candidate = next(item for item in fetched_job["candidates"] if item["id"] == "min_vol")
     assert min_vol_candidate["promotion_readiness"]["status"] == "ready"
     assert "evidence_grade_c" not in min_vol_candidate["promotion_readiness"]["blockers"]
-    assert "promote_candidate" in min_vol_candidate["allowed_actions"]
+    assert min_vol_candidate["allowed_actions"] == []
 
 
-def test_composition_v2_versions_promotion_and_decision_packet_are_snapshots(tmp_path):
+def test_composition_allocation_candidates_are_reference_only_and_do_not_create_promotion_tasks(tmp_path):
     client, _ = create_test_client(tmp_path)
     composition = _create_sleeve_os_composition(client)
-
-    created_run = assert_ok(
-        client.post(
-            f"/compositions/{composition['id']}/backtest-runs",
-            json={"idempotency_key": "v2-run", "horizon_years": 10},
-        )
-    )
+    list_before_job = assert_ok(client.get("/compositions"))
+    item_before_job = next(item for item in list_before_job if item["id"] == composition["id"])
+    pending_before_job = item_before_job["pending_decision_count"]
     created_job = assert_ok(
         client.post(
             f"/compositions/{composition['id']}/allocation-jobs",
@@ -1963,66 +1995,27 @@ def test_composition_v2_versions_promotion_and_decision_packet_are_snapshots(tmp
     assert any(item["status"] == "ACTIVE" for item in versions_before["items"])
 
     candidate = next(item for item in created_job["candidates"] if item["id"] == "risk_parity")
-    draft = assert_ok(
-        client.post(
-            f"/compositions/{composition['id']}/allocation-jobs/{created_job['job_id']}/candidates/{candidate['id']}/promote-draft",
-            json={"decision_note": "Review candidate as draft only."},
-        )
+    assert candidate["allowed_actions"] == []
+    rejected = client.post(
+        f"/compositions/{composition['id']}/allocation-jobs/{created_job['job_id']}/candidates/{candidate['id']}/promote-draft",
+        json={"decision_note": "Review candidate as draft only."},
     )
-    assert draft["status"] == "DRAFT"
-    assert draft["source_kind"] == "allocation_candidate"
-    assert draft["diff"]["weight_changes"]
-    assert draft["evidence"]["required_steps"] == [
-        "diff_review",
-        "constraint_check",
-        "migration_cost_review",
-        "evidence_gate",
-    ]
+    assert rejected.status_code == 400
+    assert "test references" in rejected.text
 
-    blocked = client.post(
-        f"/compositions/{composition['id']}/allocation-jobs/{created_job['job_id']}/candidates/current/promote-draft",
-        json={"decision_note": "Reference rows cannot promote."},
+    global_jobs = assert_ok(client.get("/compositions/allocation-jobs"))
+    assert global_jobs["summary"]["promotable_candidates"] == 0
+    assert global_jobs["decision_queue"] == []
+
+    current_list = assert_ok(client.get("/compositions"))
+    current_item = next(item for item in current_list if item["id"] == composition["id"])
+    assert current_item["pending_decision_count"] == pending_before_job
+
+    versions_after = assert_ok(client.get(f"/compositions/{composition['id']}/versions"))
+    assert not any(
+        item.get("source_kind") == "allocation_candidate"
+        for item in versions_after["items"]
     )
-    assert blocked.status_code == 400
-
-    packet = assert_ok(
-        client.post(
-            f"/compositions/{composition['id']}/decision-packets",
-            json={
-                "version_id": draft["id"],
-                "backtest_run_id": created_run["run_id"],
-                "allocation_job_id": created_job["job_id"],
-                "candidate_id": candidate["id"],
-                "recommendation": "committee_review",
-                "notes": "Snapshot should not drift after current composition changes.",
-            },
-        )
-    )
-    assert packet["version_id"] == draft["id"]
-    assert packet["source_refs"]["candidate_id"] == candidate["id"]
-    assert packet["packet"]["snapshot"]["version"]["id"] == draft["id"]
-    original_packet_snapshot = packet["packet"]
-
-    assert_ok(client.patch(f"/compositions/{composition['id']}", json={"status": "DRAFT"}))
-    fetched_packet = assert_ok(
-        client.get(f"/compositions/{composition['id']}/decision-packets/{packet['id']}")
-    )
-    assert fetched_packet["packet"] == original_packet_snapshot
-
-    markdown_response = client.get(
-        f"/compositions/{composition['id']}/decision-packets/{packet['id']}/export?format=markdown"
-    )
-    assert markdown_response.status_code == 200, markdown_response.text
-    assert markdown_response.headers["content-type"].startswith("text/markdown")
-    assert draft["id"] in markdown_response.text
-
-    html_response = client.get(
-        f"/compositions/{composition['id']}/decision-packets/{packet['id']}/export?format=html"
-    )
-    assert html_response.status_code == 200, html_response.text
-    assert html_response.headers["content-type"].startswith("text/html")
-    assert "<!doctype html>" in html_response.text.lower()
-
 
 def test_composition_update_skips_noop_versions_and_requires_upgrade_reason(tmp_path):
     client, _ = create_test_client(tmp_path)

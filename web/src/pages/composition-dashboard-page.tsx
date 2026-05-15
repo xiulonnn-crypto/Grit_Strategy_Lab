@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react';
 import { CompositionDashboardView } from '../components/composition-dashboard/composition-dashboard-view';
 import { useApiClient } from '../lib/demoStoreContext';
-import type { ApiCompositionListItem, ApiCompositionSourceIntegrity, ApiCompositionStatus } from '../types';
+import type {
+  ApiCompositionGlobalAllocationJobListItem,
+  ApiCompositionGlobalBacktestRunListItem,
+  ApiCompositionListItem,
+  ApiCompositionSourceIntegrity,
+  ApiCompositionStatus,
+} from '../types';
 
 const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 80;
 
@@ -42,8 +48,12 @@ function normalizeCompositionListItem(composition: ApiCompositionListItem): ApiC
 export function CompositionDashboardPage(): JSX.Element {
   const api = useApiClient();
   const [compositions, setCompositions] = useState<ApiCompositionListItem[]>([]);
+  const [compositionBacktestRuns, setCompositionBacktestRuns] = useState<ApiCompositionGlobalBacktestRunListItem[]>([]);
+  const [compositionAllocationJobs, setCompositionAllocationJobs] = useState<ApiCompositionGlobalAllocationJobListItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [activityLoading, setActivityLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [activityError, setActivityError] = useState<string | null>(null);
   const [savingCompositionId, setSavingCompositionId] = useState<string | null>(null);
   const [writeError, setWriteError] = useState<string | null>(null);
 
@@ -55,6 +65,7 @@ export function CompositionDashboardPage(): JSX.Element {
         if (!cancelled) {
           setError('当前运行时还未接入组合列表接口，请等待主线程完成路由与 HTTP 客户端集成。');
           setLoading(false);
+          setActivityLoading(false);
         }
         return;
       }
@@ -62,7 +73,9 @@ export function CompositionDashboardPage(): JSX.Element {
       try {
         if (!cancelled) {
           setLoading(true);
+          setActivityLoading(true);
           setError(null);
+          setActivityError(null);
         }
         await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
         if (cancelled) {
@@ -73,9 +86,30 @@ export function CompositionDashboardPage(): JSX.Element {
         if (!cancelled) {
           setCompositions(enrichedResponse);
           setWriteError(null);
+          setLoading(false);
+        }
+
+        try {
+          const [backtestRuns, allocationJobs] = await Promise.all([
+            api.listCompositionBacktestRuns ? api.listCompositionBacktestRuns() : Promise.resolve([]),
+            api.listCompositionAllocationJobs ? api.listCompositionAllocationJobs() : Promise.resolve([]),
+          ]);
+          if (!cancelled) {
+            setCompositionBacktestRuns(backtestRuns);
+            setCompositionAllocationJobs(allocationJobs);
+          }
+        } catch (caught) {
+          if (!cancelled) {
+            setActivityError(`组合最近记录加载失败：${(caught as Error).message}`);
+          }
+        } finally {
+          if (!cancelled) {
+            setActivityLoading(false);
+          }
         }
       } catch (caught) {
         if (!cancelled) {
+          setActivityLoading(false);
           setError(`加载组合仪表板失败：${(caught as Error).message}`);
         }
       } finally {
@@ -111,6 +145,10 @@ export function CompositionDashboardPage(): JSX.Element {
 
   return (
     <CompositionDashboardView
+      allocationJobs={compositionAllocationJobs}
+      activityError={activityError}
+      activityLoading={activityLoading}
+      backtestRuns={compositionBacktestRuns}
       compositions={compositions}
       error={error}
       loading={loading}

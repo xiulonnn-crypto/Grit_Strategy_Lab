@@ -31,6 +31,7 @@ type EquityRuntimeRow = {
   available?: boolean;
   updatedAt?: string | null;
   sourceLabel?: string;
+  governanceSummary?: string;
 };
 
 type BenchmarkEtfCoverageSummary = {
@@ -399,6 +400,7 @@ function statusTone(status?: string | null): SnapshotLayerDisplay['statusTone'] 
       return 'danger';
     case 'CALIBRATING':
     case 'SANDBOX':
+    case 'PARTIAL_READY':
       return 'info';
     case 'WARNING':
     case 'INCOMPLETE':
@@ -422,6 +424,8 @@ function getFactorStatusLabel(status?: string | null): string {
       return '未接入';
     case 'CALIBRATING':
       return '校准中';
+    case 'PARTIAL_READY':
+      return '部分可用';
     case 'READY':
     case 'COMPLETED':
       return '已就绪';
@@ -515,7 +519,7 @@ function getStatusLabel(status?: string | null): string {
   switch (normalizeStatus(status)) {
     case 'READY':
     case 'COMPLETED':
-      return '就绪';
+      return '已就绪';
     case 'VERIFIED':
       return '已验证';
     case 'WARNING':
@@ -526,6 +530,8 @@ function getStatusLabel(status?: string | null): string {
       return '需复核';
     case 'CALIBRATING':
       return '校准中';
+    case 'PARTIAL_READY':
+      return '部分可用';
     case 'INCOMPLETE':
       return '待补';
     case 'DISABLED':
@@ -1258,6 +1264,8 @@ function layerProviderSourceLabel(providerKeys: string[]): string {
           return 'Financial Modeling Prep';
         case 'FRED_API_KEY':
           return 'FRED';
+        case 'SEC_USER_AGENT':
+          return 'SEC EDGAR';
         case 'NASDAQ_DATA_LINK_API_KEY':
           return 'Nasdaq Data Link';
         case 'FINNHUB_API_KEY':
@@ -1325,6 +1333,35 @@ function describeReadinessOnlyDataset(
     available: false,
     updatedAt: layer.updated_at ?? null,
     sourceLabel,
+    governanceSummary: summary || undefined,
+  };
+}
+
+function describeDatasetWithLayerGovernance(
+  row: EquityRuntimeRow,
+  layer: SnapshotLayerReadinessRecord,
+): EquityRuntimeRow {
+  const orderedMetrics = selectReadinessMetrics(row.id, readMetricItems(layer.metrics));
+  const coverageMetric = orderedMetrics.find((metric) => metric.label.includes('覆盖')) ?? orderedMetrics[0];
+  const status = String(layer.status ?? row.status).trim() || row.status;
+  const summary = String(layer.summary ?? '').trim();
+  const fields = orderedMetrics
+    .slice(0, 2)
+    .map((metric) => `${metric.label} ${metric.value}`)
+    .join(' · ');
+  const sourceLabel = layerProviderSourceLabel(readStringArray(layer.provider_keys));
+
+  return {
+    ...row,
+    summary: coverageMetric ? `${row.id} · ${coverageMetric.label} ${coverageMetric.value}` : row.summary,
+    fields: fields || row.fields,
+    status,
+    statusLabel: getStatusLabel(status),
+    note: summary || row.note,
+    available: isReadyStatus(status),
+    updatedAt: layer.updated_at ?? row.updatedAt,
+    sourceLabel: sourceLabel || row.sourceLabel,
+    governanceSummary: summary || row.governanceSummary,
   };
 }
 
@@ -1364,10 +1401,29 @@ function layerTargetIds(layer: SnapshotLayerReadinessRecord): string[] {
   return orderedTargets;
 }
 
+function buildDatasetGovernanceLayers(
+  readinessLayers: SnapshotLayerReadinessRecord[],
+): Map<string, SnapshotLayerReadinessRecord> {
+  const layersByDatasetId = new Map<string, SnapshotLayerReadinessRecord>();
+  readinessLayers.forEach((layer) => {
+    const targets = layerTargetIds(layer).filter((target) => target.startsWith('ds-'));
+    if (targets.length !== 1) {
+      return;
+    }
+    layersByDatasetId.set(targets[0], layer);
+  });
+  return layersByDatasetId;
+}
+
 function buildEquityRuntimeRows(overview: ApiSnapshotOverview | null): EquityRuntimeRow[] {
-  const datasetRows = (overview?.dataset_snapshots ?? []).map(describeDataset);
-  const datasetRowsById = new Map(datasetRows.map((row) => [row.id, row] as const));
   const readinessLayers = readRecordArray<SnapshotLayerReadinessRecord>(overview?.data_layer_readiness);
+  const governanceLayersByDatasetId = buildDatasetGovernanceLayers(readinessLayers);
+  const datasetRows = (overview?.dataset_snapshots ?? []).map((item) => {
+    const row = describeDataset(item);
+    const governanceLayer = governanceLayersByDatasetId.get(row.id);
+    return governanceLayer ? describeDatasetWithLayerGovernance(row, governanceLayer) : row;
+  });
+  const datasetRowsById = new Map(datasetRows.map((row) => [row.id, row] as const));
   const readinessRowsById = buildReadinessOnlyDatasetRows(readinessLayers, datasetRowsById);
   const orderedRows: EquityRuntimeRow[] = [];
   const emittedIds = new Set<string>();
@@ -2036,6 +2092,9 @@ function rawSnapshotCoverageSummary(row: EquityRuntimeRow): string {
 }
 
 function rawSnapshotStateSummary(row: EquityRuntimeRow): string {
+  if (row.governanceSummary) {
+    return row.governanceSummary;
+  }
   const copy = rawSnapshotLedgerCopy(row);
   const status = normalizeStatus(row.status);
   if (status === 'READY' || status === 'COMPLETED' || status === 'VERIFIED') {
@@ -2053,7 +2112,8 @@ function rawSnapshotSubtitle(row: EquityRuntimeRow): string {
   const currentState = coverage
     ? `当前 ${coverage}，${rawSnapshotStateSummary(row)}`
     : `当前${rawSnapshotStateSummary(row)}`;
-  return `${copy.purpose} · ${currentState}。`;
+  const suffix = /[。！？.!?]$/.test(currentState) ? '' : '。';
+  return `${copy.purpose} · ${currentState}${suffix}`;
 }
 
 function buildSnapshotRestartCommand(): string {

@@ -359,6 +359,29 @@ def test_alpha_vantage_provider_parses_earnings_listing_status_and_rate_limit(mo
                     }
                 )
             )
+        if function == "EARNINGS_ESTIMATES":
+            return _FakeHttpResponse(
+                json.dumps(
+                    {
+                        "quarterlyEarningsEstimates": [
+                            {
+                                "fiscalDateEnding": "2026-06-30",
+                                "reportDate": "2026-07-25",
+                                "estimatedEPSAvg": "2.50",
+                                "estimatedEPSHigh": "2.70",
+                                "estimatedEPSLow": "2.30",
+                                "estimatedEPSAnalystCount": "24",
+                                "estimatedRevenueAvg": "100000000000",
+                                "estimatedRevenueHigh": "105000000000",
+                                "estimatedRevenueLow": "95000000000",
+                                "estimatedRevenueAnalystCount": "21",
+                                "epsRevisionUp": "8",
+                                "epsRevisionDown": "2",
+                            }
+                        ]
+                    }
+                )
+            )
         if function == "LISTING_STATUS":
             state = params.get("state", [""])[0]
             if state == "active":
@@ -383,11 +406,16 @@ def test_alpha_vantage_provider_parses_earnings_listing_status_and_rate_limit(mo
     monkeypatch.setattr("grit_backtest_platform.alpha_vantage_provider.urllib.request.urlopen", fake_urlopen)
 
     earnings = provider.fetch_earnings("AAPL")
+    estimates = provider.fetch_earnings_estimates("AAPL")
     listing_status = provider.fetch_listing_status(state="delisted")
     identity = provider.resolve_identity("TWTR")
 
     assert provider.availability().available is True
     assert len(earnings) == 2
+    assert len(estimates) == 1
+    assert estimates[0]["period"] == "quarterly"
+    assert estimates[0]["eps_estimate_average"] == 2.5
+    assert estimates[0]["revenue_analyst_count"] == 21.0
     assert earnings[0]["period"] == "quarterly"
     assert earnings[1]["period"] == "annual"
     assert listing_status[0]["symbol"] == "TWTR"
@@ -513,6 +541,21 @@ def test_sec_edgar_provider_resolves_identity_and_emits_report_filed(monkeypatch
     assert all(action["action_type"] == "report_filed" for action in actions)
 
 
+def test_sec_edgar_provider_resolves_legacy_ticker_alias(monkeypatch):
+    provider = SecEdgarProvider(user_agent="Test test@example.com")
+    monkeypatch.setattr(provider, "_load_ticker_index", lambda: {})
+
+    identity = provider.resolve_identity("YHOO")
+
+    assert identity is not None
+    assert identity["cik"] == "0001011006"
+    assert identity["company_name"] == "Yahoo Inc"
+    assert identity["source"] == "sec_edgar_legacy_alias"
+    cce_identity = provider.resolve_identity("CCE")
+    assert cce_identity is not None
+    assert cce_identity["cik"] == "0001491675"
+
+
 def test_sec_edgar_provider_accepts_gzip_payload(monkeypatch):
     import gzip
 
@@ -544,6 +587,123 @@ def test_sec_edgar_provider_accepts_gzip_payload(monkeypatch):
 
     assert identity is not None
     assert identity["cik"] == "0000789019"
+
+
+def test_sec_edgar_provider_parses_companyfacts_fundamental_points(monkeypatch):
+    monkeypatch.setenv("SEC_USER_AGENT", "Codex Test/1.0")
+    monkeypatch.setenv("SEC_CONTACT_EMAIL", "coder@example.com")
+    provider = SecEdgarProvider()
+
+    def fake_urlopen(request, timeout=0):
+        url = _request_url(request)
+        if "company_tickers.json" in url:
+            return _FakeHttpResponse(
+                json.dumps(
+                    {
+                        "0": {
+                            "ticker": "AAPL",
+                            "title": "Apple Inc.",
+                            "cik_str": 320193,
+                            "exchange": "NASDAQ",
+                        }
+                    }
+                )
+            )
+        if "companyfacts/CIK0000320193.json" in url:
+            fact_row = {
+                "end": "2026-03-31",
+                "filed": "2026-05-01",
+                "fy": 2026,
+                "fp": "Q1",
+                "form": "10-Q",
+                "accn": "0000320193-26-000010",
+            }
+            return _FakeHttpResponse(
+                json.dumps(
+                    {
+                        "cik": 320193,
+                        "facts": {
+                            "us-gaap": {
+                                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                                    "units": {"USD": [{**fact_row, "val": 100.0}]}
+                                },
+                                "NetIncomeLoss": {"units": {"USD": [{**fact_row, "val": 12.0}]}},
+                                "Assets": {"units": {"USD": [{**fact_row, "val": 120.0}]}},
+                                "LiabilitiesCurrent": {"units": {"USD": [{**fact_row, "val": 20.0}]}},
+                                "StockholdersEquity": {"units": {"USD": [{**fact_row, "val": 60.0}]}},
+                            }
+                        },
+                    }
+                )
+            )
+        raise AssertionError(f"Unexpected SEC request: {url}")
+
+    monkeypatch.setattr("grit_backtest_platform.sec_edgar_provider.urllib.request.urlopen", fake_urlopen)
+
+    points = provider.fetch_fundamental_points("AAPL", start_date=date(2026, 1, 1), end_date=date(2026, 12, 31))
+
+    assert len(points) == 1
+    point = points[0]
+    assert point["source"] == "sec_edgar"
+    assert point["publish_date"] == "2026-05-01"
+    assert point["available_at"] == "2026-05-01"
+    assert point["revenue"] == 100.0
+    assert point["net_income"] == 12.0
+    assert point["total_assets"] == 120.0
+    assert point["metadata"]["fact_tags"] == [
+        "Assets",
+        "LiabilitiesCurrent",
+        "NetIncomeLoss",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "StockholdersEquity",
+    ]
+
+
+def test_sec_edgar_provider_parses_ifrs_companyfacts_fundamental_points():
+    provider = SecEdgarProvider(user_agent="Test test@example.com")
+    fact_row = {
+        "end": "2025-12-31",
+        "filed": "2026-03-13",
+        "fy": 2025,
+        "fp": "FY",
+        "form": "20-F",
+        "accn": "0001650107-26-000029",
+    }
+    payload = {
+        "cik": 1650107,
+        "facts": {
+            "ifrs-full": {
+                "Revenue": {"units": {"EUR": [{**fact_row, "val": 100.0}]}},
+                "GrossProfit": {"units": {"EUR": [{**fact_row, "val": 35.0}]}},
+                "ProfitLoss": {"units": {"EUR": [{**fact_row, "val": 12.0}]}},
+                "Assets": {"units": {"EUR": [{**fact_row, "val": 250.0}]}},
+                "Equity": {"units": {"EUR": [{**fact_row, "val": 90.0}]}},
+                "CurrentLiabilities": {"units": {"EUR": [{**fact_row, "val": 40.0}]}},
+                "Borrowings": {"units": {"EUR": [{**fact_row, "val": 70.0}]}},
+                "CashAndCashEquivalents": {"units": {"EUR": [{**fact_row, "val": 18.0}]}},
+                "NumberOfSharesOutstanding": {"units": {"shares": [{**fact_row, "val": 4.0}]}},
+            }
+        },
+    }
+
+    points = provider._fundamental_points_from_payload(
+        "CCEP",
+        payload,
+        start_date=date(2025, 1, 1),
+        end_date=date(2026, 12, 31),
+    )
+
+    assert len(points) == 1
+    point = points[0]
+    assert point["publish_date"] == "2026-03-13"
+    assert point["revenue"] == 100.0
+    assert point["gross_profit"] == 35.0
+    assert point["net_income"] == 12.0
+    assert point["total_assets"] == 250.0
+    assert point["book_value_equity"] == 90.0
+    assert point["total_debt"] == 70.0
+    assert point["shares_outstanding"] == 4.0
+    assert point["metadata"]["fact_taxonomies"] == ["ifrs-full"]
 
 
 def test_fmp_identity_provider_delisted_identity_and_price_backfill(monkeypatch):

@@ -5,6 +5,7 @@ import re
 import hashlib
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -81,8 +82,10 @@ FUNDAMENTAL_FIELD_REQUIREMENTS_BY_TOKEN = {
 }
 DATA_REQUIREMENT_ORDER = (
     "adj_close",
+    "open",
     "price_history",
     "returns",
+    "volume",
     "ltm_earnings",
     "revenue",
     "gross_profit",
@@ -101,6 +104,19 @@ DATA_REQUIREMENT_ORDER = (
     "total_debt",
     "cash_and_equivalents",
 )
+PRICE_FIELD_REQUIREMENTS = {
+    "Close": ("adj_close", "price_history"),
+    "Open": ("open", "price_history"),
+    "Volume": ("volume",),
+    "DollarVolume": ("volume",),
+    "Turnover": ("volume", "shares_outstanding"),
+    "RetUp": ("returns",),
+    "RetDown": ("returns",),
+}
+PRICE_FIELD_REQUIREMENTS_BY_TOKEN = {
+    token.lower(): tuple(requirements)
+    for token, requirements in PRICE_FIELD_REQUIREMENTS.items()
+}
 HISTORICAL_MEMBERSHIP_MARKERS = (
     "historical",
     "revision",
@@ -133,16 +149,20 @@ NON_HISTORICAL_MEMBERSHIP_SOURCE_NAMES = (
 ALLOWED_OPERATORS = {
     "Rank",
     "Ts_Rank",
+    "TsRank",
     "Delta",
     "Return",
     "Mean",
+    "Sum",
     "Std",
+    "StdDev",
     "ZScore",
     "Winsorize",
     "Neutralize",
     "Correlation",
     "Log",
     "Close",
+    "Open",
     "Volume",
     "Abs",
     "Amihud",
@@ -157,7 +177,10 @@ ALLOWED_OPERATORS = {
     "ResidualVolatility",
     "SharesOutstandingGrowth",
     "Size",
+    "Skew",
     "Turnover",
+    "RetUp",
+    "RetDown",
     "ValueEP",
 }
 
@@ -307,7 +330,49 @@ REFERENCE_DIAGNOSTIC_FACTOR_IDS = (
     "s_val_ep_ltm_raw",
     "s_qlty_fcfy_ttm_raw",
 )
-FACTOR_OFFLINE_STATUSES = {"DEPRECATED", "PRUNED"}
+FACTOR_OFFLINE_STATUSES = {"DEPRECATED", "PRUNED", "ARCHIVED"}
+FACTOR_TIER_PROJECTIONS = {
+    "F1": {
+        "key": "F1",
+        "label": "F1 原始",
+        "name": "原始库",
+        "kind": "raw",
+        "description": "直接映射 API 或数据库的原始字段，只增不改。",
+    },
+    "F2": {
+        "key": "F2",
+        "label": "F2 改造",
+        "name": "改造库",
+        "kind": "refined",
+        "description": "完成单因子提纯、标准化或排名处理的可比信号。",
+    },
+    "F3": {
+        "key": "F3",
+        "label": "F3 组合",
+        "name": "组合库",
+        "kind": "composite",
+        "description": "多因子融合、风格复合或风险调节后的最终 Alpha。",
+    },
+}
+FACTOR_LIFECYCLE_PROJECTIONS = {
+    "sandbox": {"key": "sandbox", "label": "沙箱", "description": "观察期因子，仅用于研究回测。"},
+    "online": {"key": "online", "label": "线上", "description": "当前可用于正式策略引用的因子。"},
+    "to_be_verified": {"key": "to_be_verified", "label": "待校准", "description": "数据、环境或质量指标需要复核。"},
+    "archived": {"key": "archived", "label": "已归档", "description": "逻辑失效或同簇冗余后保留审计。"},
+}
+FACTOR_LEVEL_PROJECTIONS = {
+    "S": {"key": "S", "label": "S 核心", "description": "强预测、稳定且可作为核心候选。"},
+    "A": {"key": "A", "label": "A 可入选", "description": "质量达标，可进入组合候选池。"},
+    "B": {"key": "B", "label": "B 观察", "description": "基础字段或稳定观察因子。"},
+    "C": {"key": "C", "label": "C 待校准", "description": "需要补诊断、补数据或复核稳定性。"},
+    "D": {"key": "D", "label": "D 归档", "description": "失效、冗余或仅作归档复盘。"},
+}
+FACTOR_OP_LIGHTS = (
+    ("W", "winsorize", "去极值"),
+    ("N", "neutralize", "中性化"),
+    ("Z", "zscore", "标准化"),
+    ("T", "tsrank", "时序排名"),
+)
 FACTOR_GOVERNANCE_EXECUTE_COMMANDS = {"DEPRECATE", "PRUNE", "PUBLISH_OPTIMIZED_FACTOR"}
 FACTOR_GOVERNANCE_TASK_KINDS = {"DEPRECATE", "PRUNE", "FACTOR_MODEL_SUGGESTION", "FACTOR_OPTIMIZATION"}
 
@@ -624,6 +689,86 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
     return {}
 
 
+MANUAL_FACTOR_DESCRIPTION_BY_ID = {
+    "m_mom_riskadj_126x21_raw": "逻辑：通过 21 日波动率平滑半年收益，避免选出暴涨暴跌股票。作用：提升夏普比率，减少净值回撤。",
+    "m_qlty_accruals_ltm_raw": "逻辑：衡量净利润与经营现金流的应计差额。作用：作为负向剔除指标，规避业绩造假或盈余质量差的标的。",
+    "m_liq_pvdiv_10d_raw": "逻辑：观察过去 10 日价格排名与成交量排名相关性。作用：区分放量上涨的健康趋势与缩量上涨/放量滞涨的反转风险。",
+    "m_val_turnover_skew_60d_raw": "逻辑：计算过去 60 日换手率偏度。作用：识别筹码在少数交易日集中成交带来的短期超额收益线索。",
+    "m_mom_path_eff_20d_raw": "逻辑：用净位移除以路径总长度衡量趋势纯度。作用：配合动量筛掉“电风扇”震荡行情。",
+    "m_vol_asym_updown_60d_raw": "逻辑：分别计算上涨日和下跌日收益波动。作用：识别下跌波动更剧烈的恐慌盘，可作为回撤惩罚项。",
+    "m_liq_vol_conc_21d_raw": "逻辑：计算成交量与绝对收益率相关性。作用：筛选大幅价格变动伴随真实放量、机构介入度较高的标的。",
+    "m_vol_ret_skew_252d_raw": "逻辑：衡量过去一年收益率分布偏度。作用：过滤高偏度、博彩型、暴涨暴跌标的。",
+    "m_alpha_overnight_21d_raw": "逻辑：衡量过去一个月平均隔夜收益。作用：捕捉非交易时段信息流入，但诊断中保留日内承接风险提示。",
+}
+
+
+def _manual_factor_description(factor_id: str) -> str | None:
+    return MANUAL_FACTOR_DESCRIPTION_BY_ID.get(str(factor_id or "").strip().lower())
+
+
+def _is_structured_factor_description(value: Any) -> bool:
+    text = str(value or "").strip()
+    return text.startswith("逻辑：") and "作用：" in text
+
+
+def _factor_formula_description(
+    *,
+    factor_id: str,
+    name: str,
+    expression: str,
+    direction: str = "HIGH_IS_BETTER",
+) -> str:
+    manual_description = _manual_factor_description(factor_id)
+    if manual_description:
+        return manual_description
+
+    normalized = re.sub(r"\s+", "", str(expression or "")).lower()
+    factor_id_lower = str(factor_id or "").lower()
+    name_text = str(name or "该因子").strip() or "该因子"
+    direction_copy = "数值越低越优先" if str(direction or "").upper() == "LOW_IS_BETTER" else "数值越高越优先"
+
+    if "close(t-21)/close(t-252)" in normalized or "return(close,126)" in normalized or "mom" in factor_id_lower:
+        logic = f"{name_text}基于历史收盘价变化衡量中期趋势延续或价格路径强度，要求价格样本满足 PIT 回放口径。"
+        action = f"用于识别趋势更清晰的相对强势标的，{direction_copy}，后续仍需结合 Rank IC、回撤和拥挤度校准。"
+    elif "std" in normalized and "return(close" in normalized:
+        logic = f"{name_text}基于收益率标准差刻画价格波动强弱，反映标的在诊断窗口内的风险暴露。"
+        action = f"用于低波动、防御或风险惩罚场景，{direction_copy}，需要结合收益和换手成本判断是否可交易。"
+    elif "drawdown" in normalized:
+        logic = f"{name_text}根据价格序列中的峰谷回撤评估历史下行风险。"
+        action = f"用于剔除尾部回撤过深的标的，{direction_copy}，适合作为组合优化的风险约束输入。"
+    elif "ltmearnings/marketcap" in normalized or "bookvalueequity/marketcap" in normalized:
+        logic = f"{name_text}使用 PIT 财务字段与市值构造估值截面，避免用当前值回填历史。"
+        action = f"用于寻找估值补偿更高的股票，{direction_copy}，需要关注成长股阶段性失效和财报可得日。"
+    elif "ltmearnings/bookvalueequity" in normalized or "roe" in factor_id_lower:
+        logic = f"{name_text}使用净利润与账面权益衡量资本回报效率，财务字段必须通过 available_at 门禁。"
+        action = f"用于筛选盈利质量与资本效率更好的公司，{direction_copy}，适合作为质量维度输入。"
+    elif "operatingcashflow" in normalized:
+        logic = f"{name_text}使用经营现金流与市值或资产负债字段衡量现金创造质量。"
+        action = f"用于过滤账面利润质量不足的标的，{direction_copy}，需要财务 PIT 覆盖稳定后进入正式诊断。"
+    elif "marketcap" in normalized or "size" in factor_id_lower:
+        logic = f"{name_text}使用 PIT 市值或股本字段刻画公司规模暴露。"
+        action = f"用于控制规模风险或捕捉小市值溢价，{direction_copy}，应与流动性和容量约束一起使用。"
+    elif "turnover" in normalized or "volume" in normalized or "amihud" in normalized or "liq" in factor_id_lower:
+        logic = f"{name_text}使用成交量、换手率或价格冲击度量流动性与资金参与强度。"
+        action = f"用于识别交易活跃度、拥挤度和容量风险，{direction_copy}，后续需结合成交成本诊断。"
+    elif "beta" in factor_id_lower:
+        logic = f"{name_text}通过市场相关或残差波动估计系统性风险暴露。"
+        action = f"用于风险分解、残差化和组合约束，{direction_copy}，不应单独替代 Alpha 信号。"
+    else:
+        logic = f"{name_text}根据公式 {expression or factor_id} 构造可回放截面信号，并由 PIT 数据门禁控制可诊断范围。"
+        action = f"用于因子库诊断、排序和模型候选评估，{direction_copy}，需通过覆盖率、IC 和稳定性校准后再晋升。"
+    return f"逻辑：{logic}作用：{action}"
+
+
+def _factor_formula_description_from_row(row: Mapping[str, Any]) -> str:
+    return _factor_formula_description(
+        factor_id=str(row.get("id") or ""),
+        name=str(row.get("name") or ""),
+        expression=str(row.get("expression") or ""),
+        direction=str(row.get("direction") or "HIGH_IS_BETTER"),
+    )
+
+
 def _coerce_float(value: Any, default: float = 0.0) -> float:
     try:
         parsed = float(value)
@@ -686,6 +831,51 @@ def _std(values: Sequence[float]) -> float | None:
         return None
     mean = sum(values) / len(values)
     return math.sqrt(sum((value - mean) ** 2 for value in values) / (len(values) - 1))
+
+
+def _skew(values: Sequence[float]) -> float | None:
+    if len(values) < 3:
+        return None
+    mean = sum(values) / len(values)
+    stdev = _std(values)
+    if stdev is None or stdev <= 1e-12:
+        return None
+    count = len(values)
+    standardized_third_moment = sum(((value - mean) / stdev) ** 3 for value in values)
+    return count / ((count - 1) * (count - 2)) * standardized_third_moment
+
+
+def _diagnostic_min_cross_section_count(symbol_count: int) -> int:
+    if symbol_count <= 0:
+        return 3
+    return min(25, max(3, math.ceil(symbol_count * 0.05)))
+
+
+def _factor_diagnostic_coverage_detail(
+    observations: Sequence[Mapping[str, Any]],
+    requested_symbols: Sequence[str],
+    series_by_symbol: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> dict[str, Any]:
+    requested_count = len(requested_symbols)
+    counts = [int(item.get("symbol_count") or 0) for item in observations if int(item.get("symbol_count") or 0) > 0]
+    observation_count = len(counts)
+    average_symbol_count = (sum(counts) / observation_count) if observation_count else 0.0
+    coverage = (
+        min(1.0, average_symbol_count / max(1, requested_count)) * 100.0
+        if observation_count
+        else 0.0
+    )
+    return {
+        "coverage": round(coverage, 2),
+        "requested_symbol_count": requested_count,
+        "series_symbol_count": len(series_by_symbol),
+        "observation_count": observation_count,
+        "average_symbol_count": round(average_symbol_count, 2),
+        "min_symbol_count": min(counts) if counts else 0,
+        "max_symbol_count": max(counts) if counts else 0,
+        "min_cross_section_symbols": _diagnostic_min_cross_section_count(requested_count),
+        "method": "global_calendar_cross_section",
+    }
 
 
 def _mean(values: Sequence[float]) -> float | None:
@@ -837,7 +1027,11 @@ def _descriptor_from_parts(
         raise ValueError("因子描述符处理算子必须是 rank、z、raw 或 log。")
     for key in ("category", "metric", "window", "operator"):
         value = normalized[key]
-        if value and not DESCRIPTOR_TOKEN_PATTERN.fullmatch(value):
+        if key == "metric":
+            valid_token = bool(re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*", value)) if value else True
+        else:
+            valid_token = bool(DESCRIPTOR_TOKEN_PATTERN.fullmatch(value)) if value else True
+        if value and not valid_token:
             raise ValueError(f"因子描述符 {key} 只能包含小写字母与数字。")
     if not normalized["window"]:
         raise ValueError("因子描述符窗口不能为空。")
@@ -979,8 +1173,51 @@ def _auto_mined_formula_identity(expression: str) -> AutoMinedFormulaIdentity:
     )
     return_window = re.search(r"\bReturn\s*\(\s*Close\s*,\s*(\d+)\s*\)", formula, flags=re.IGNORECASE)
     delta_window = re.search(r"\bDelta\s*\(\s*Close\s*,\s*(\d+)\s*\)", formula, flags=re.IGNORECASE)
+    formula_compact = formula.replace(" ", "")
 
-    if std_return:
+    if "s_mom_6m_rank" in formula_compact and "s_qlty_roe_ltm_raw" in formula_compact:
+        category = "alpha"
+        metric = "momqlty"
+        window = "6m"
+        operator = "rank"
+        operator_label = AUTO_MINED_OPERATOR_NAME_LABELS.get("rank", "")
+        signal_label = "quality driven momentum"
+    elif "s_mom_6m_rank" in formula_compact and "s_vol_252d_rank" in formula_compact and "/" in formula_compact:
+        category = "alpha"
+        metric = "momrisk"
+        window = "6m"
+        operator = "rank"
+        operator_label = AUTO_MINED_OPERATOR_NAME_LABELS.get("rank", "")
+        signal_label = "risk adjusted momentum"
+    elif "s_val_cfp_ltm_raw" in formula_compact and "s_size_cur_log" in formula_compact:
+        category = "alpha"
+        metric = "valcfpsize"
+        window = "ltm"
+        operator = "z"
+        operator_label = AUTO_MINED_OPERATOR_NAME_LABELS.get("z", "")
+        signal_label = "size neutral cashflow value"
+    elif "s_mom_6m_rank" in formula_compact and "s_vol_downside_252d_rank" in formula_compact:
+        category = "alpha"
+        metric = "momdownside"
+        window = "6m"
+        operator = "rank"
+        operator_label = AUTO_MINED_OPERATOR_NAME_LABELS.get("rank", "")
+        signal_label = "momentum downside divergence"
+    elif "s_liq_amihud_20d_rank" in formula_compact and "s_size_cur_log" in formula_compact:
+        category = "alpha"
+        metric = "liqsize"
+        window = "20d"
+        operator = "z"
+        operator_label = AUTO_MINED_OPERATOR_NAME_LABELS.get("z", "")
+        signal_label = "size neutral liquidity anomaly"
+    elif re.search(r"\bTs_?Rank\s*\(\s*Return\s*\(\s*Close\s*,\s*5\s*\)\s*,\s*252\s*\)", formula, flags=re.IGNORECASE):
+        category = "alpha"
+        metric = "momtsrank"
+        window = "5d"
+        operator = "rank"
+        operator_label = AUTO_MINED_OPERATOR_NAME_LABELS.get("rank", "")
+        signal_label = "short return time-series denoise"
+    elif std_return:
         category = "vol"
         metric = "retstd"
         window = f"{std_return.group(1)}d"
@@ -1179,6 +1416,7 @@ def _linear_residuals(values: Sequence[float], neutralizer_values: Sequence[floa
 def infer_factor_data_requirements(expression: str) -> list[str]:
     requirements: set[str] = set()
     for token in TOKEN_PATTERN.findall(str(expression or "")):
+        requirements.update(PRICE_FIELD_REQUIREMENTS_BY_TOKEN.get(token.lower(), ()))
         requirement = FUNDAMENTAL_FIELD_REQUIREMENTS_BY_TOKEN.get(token.lower())
         if requirement:
             requirements.add(requirement)
@@ -3749,7 +3987,7 @@ def build_factor_list_pit_overview(market_data_repository: Any) -> dict[str, Any
         "universe_snapshot_id": universe_snapshot_id,
         "as_of_date": str((price_snapshot or {}).get("as_of") or (universe_snapshot or {}).get("as_of") or now[:10]),
         "overall_status": overall_status,
-        "fundamental_status": "READY" if fundamental_ready else "BLOCKED",
+        "fundamental_status": fundamental_status,
         "fundamental_coverage": {
             "covered_symbol_count": int((fundamental_snapshot or {}).get("metadata", {}).get("covered_symbol_count") or fundamental_counts.get("fundamental_coverage") or 0)
             if isinstance((fundamental_snapshot or {}).get("metadata"), Mapping)
@@ -3796,6 +4034,7 @@ def build_factor_list_pit_overview(market_data_repository: Any) -> dict[str, Any
 def _pit_layer_status(
     *,
     ready: bool = False,
+    partial: bool = False,
     warning: bool = False,
     blocked: bool = False,
     disabled: bool = False,
@@ -3808,6 +4047,8 @@ def _pit_layer_status(
         return "DISABLED"
     if calibrating:
         return "CALIBRATING"
+    if partial:
+        return "PARTIAL_READY"
     if observation:
         return "OBSERVATION"
     if warning:
@@ -3820,6 +4061,7 @@ def _pit_layer_status(
 def _pit_factor_group_status(
     *,
     verified: bool = False,
+    partial: bool = False,
     sandbox: bool = False,
     blocked: bool = False,
     disabled: bool = False,
@@ -3830,9 +4072,63 @@ def _pit_factor_group_status(
         return "DISABLED"
     if verified:
         return "VERIFIED"
+    if partial:
+        return "PARTIAL_READY"
     if sandbox:
         return "SANDBOX"
     return "DISABLED"
+
+
+def _pit_status_is_usable(status: str) -> bool:
+    return str(status or "").upper() in {"READY", "VERIFIED", "PARTIAL_READY", "SANDBOX", "SANDBOX_READY", "LIMITED_READY", "OBSERVATION", "CALIBRATING"}
+
+
+def _pit_submodule(
+    *,
+    submodule_id: str,
+    title_cn: str,
+    status: str,
+    summary_cn: str,
+    linked_targets: Sequence[str] = (),
+    metrics: Mapping[str, Any] | None = None,
+    blockers: Sequence[str] = (),
+    upstream_capabilities: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    normalized_status = str(status or "BLOCKED").upper()
+    return {
+        "id": submodule_id,
+        "title_cn": title_cn,
+        "status": normalized_status,
+        "usable": _pit_status_is_usable(normalized_status),
+        "summary_cn": summary_cn,
+        "linked_targets": [str(item) for item in linked_targets if str(item).strip()],
+        "metrics": dict(metrics or {}),
+        "blockers": [str(item) for item in blockers if str(item).strip()],
+        "upstream_capabilities": [dict(item) for item in upstream_capabilities],
+    }
+
+
+def _pit_capability(
+    capability_id: str,
+    *,
+    factor_groups: Sequence[str],
+    mode: str,
+    allowed_actions: Sequence[str],
+    required_checks: Sequence[str],
+    satisfied_checks: Sequence[str],
+    blocked_checks: Sequence[str],
+    summary_cn: str,
+) -> dict[str, Any]:
+    return {
+        "capability_id": capability_id,
+        "factor_groups": [str(item) for item in factor_groups if str(item).strip()],
+        "mode": str(mode or "BLOCKED").upper(),
+        "allowed_actions": [str(item) for item in allowed_actions if str(item).strip()],
+        "required_checks": [str(item) for item in required_checks if str(item).strip()],
+        "satisfied_checks": [str(item) for item in satisfied_checks if str(item).strip()],
+        "blocked_checks": [str(item) for item in blocked_checks if str(item).strip()],
+        "summary_cn": summary_cn,
+    }
 
 
 def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
@@ -4328,27 +4624,153 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
         and int(option_skew_signal_contract.get("missing_publish_date_count") or 0) <= 0
         else ("OBSERVATION" if option_skew_point_rows > 0 else "DISABLED")
     )
+    price_replay_ready = adjusted_price_status == "READY"
+    universe_history_ready = resolved_universe_status == "READY"
+    return_diagnostic_ready = price_replay_ready and universe_history_ready
+    fundamental_has_partial_evidence = fundamental_point_rows > 0 or bool(fundamental_fields)
+    fundamental_feature_ready = fundamental_point_rows > 0 and bool(fundamental_fields) and fundamental_time_contract_ready
+    analyst_feature_ready = analyst_gate_status == "READY"
+    short_volume_feature_ready = short_volume_gate_status == "READY"
+    l3_has_feature_ready = analyst_feature_ready or short_volume_feature_ready
+    l3_has_observation = analyst_gate_status == "OBSERVATION" or short_volume_gate_status == "OBSERVATION"
+    macro_feature_ready = macro_gate_status == "READY"
+    iv_feature_ready = iv_skew_gate_status == "READY"
+    l4_has_feature_ready = macro_feature_ready or iv_feature_ready
     l1_status = _pit_layer_status(
         ready=adjusted_price_status == "READY" and corporate_status == "READY",
+        partial=adjusted_price_status == "READY" and corporate_status != "READY",
         warning=adjusted_price_status == "READY" and corporate_status != "READY",
         blocked=adjusted_price_status != "READY",
     )
     l2_status = _pit_layer_status(
         ready=fundamental_ready and fundamental_time_contract_ready,
+        partial=not (fundamental_ready and fundamental_time_contract_ready) and fundamental_has_partial_evidence,
         warning=not (fundamental_ready and fundamental_time_contract_ready)
         and (fundamental_point_rows > 0 or bool(fundamental_fields)),
         blocked=fundamental_point_rows <= 0 and not fundamental_fields,
     )
     l3_status = _pit_layer_status(
         ready=analyst_gate_status == "READY" and short_volume_gate_status == "READY",
+        partial=l3_has_feature_ready and not (analyst_feature_ready and short_volume_feature_ready),
         blocked=analyst_gate_status == "BLOCKED",
-        observation=analyst_gate_status == "OBSERVATION" or short_volume_gate_status == "OBSERVATION",
+        observation=not l3_has_feature_ready and l3_has_observation,
         disabled=analyst_gate_status == "DISABLED" and short_volume_gate_status == "DISABLED",
     )
     l4_status = _pit_layer_status(
-        ready=macro_gate_status == "READY" and iv_skew_gate_status == "READY",
-        blocked=not sandbox_enabled,
-        calibrating=sandbox_enabled and not (macro_gate_status == "READY" and iv_skew_gate_status == "READY"),
+        ready=macro_feature_ready and iv_feature_ready and return_diagnostic_ready,
+        partial=l4_has_feature_ready and not (macro_feature_ready and iv_feature_ready and return_diagnostic_ready),
+        blocked=not sandbox_enabled and not l4_has_feature_ready,
+        calibrating=sandbox_enabled and not l4_has_feature_ready,
+    )
+    l1_blocked_checks = [
+        check_id
+        for check_id, ready in (
+            ("price_replay_gate", price_replay_ready),
+            ("universe_history_gate", universe_history_ready),
+            ("corporate_action_gate", corporate_status == "READY"),
+        )
+        if not ready
+    ]
+    l1_satisfied_checks = [
+        check_id
+        for check_id, ready in (
+            ("price_replay_gate", price_replay_ready),
+            ("universe_history_gate", universe_history_ready),
+            ("corporate_action_gate", corporate_status == "READY"),
+        )
+        if ready
+    ]
+    quality_blocked_checks = [
+        check_id
+        for check_id, ready in (
+            ("fundamental_publish_gate", fundamental_time_contract_ready),
+            ("fundamental_balance_check", fundamental_ready),
+        )
+        if not ready
+    ]
+    quality_satisfied_checks = [
+        check_id
+        for check_id, ready in (
+            ("fundamental_publish_gate", fundamental_time_contract_ready),
+            ("fundamental_balance_check", fundamental_ready),
+        )
+        if ready
+    ]
+    sentiment_blocked_checks = [
+        check_id
+        for check_id, ready in (
+            ("consensus_sample_gate", analyst_feature_ready),
+            ("short_volume_gate", short_volume_feature_ready),
+        )
+        if not ready
+    ]
+    sentiment_satisfied_checks = [
+        check_id
+        for check_id, ready in (
+            ("consensus_sample_gate", analyst_feature_ready),
+            ("short_volume_gate", short_volume_feature_ready),
+        )
+        if ready
+    ]
+    macro_blocked_checks = [
+        check_id
+        for check_id, ready in (
+            ("rate_beta_calibration", macro_feature_ready),
+            ("iv_skew_feed", iv_feature_ready),
+            ("price_replay_gate", price_replay_ready),
+            ("universe_history_gate", universe_history_ready),
+        )
+        if not ready
+    ]
+    macro_satisfied_checks = [
+        check_id
+        for check_id, ready in (
+            ("rate_beta_calibration", macro_feature_ready),
+            ("iv_skew_feed", iv_feature_ready),
+            ("price_replay_gate", price_replay_ready),
+            ("universe_history_gate", universe_history_ready),
+        )
+        if ready
+    ]
+    price_capability = _pit_capability(
+        "factor.price_liquidity",
+        factor_groups=["price"],
+        mode="VERIFIED" if verified_enabled and return_diagnostic_ready else ("SANDBOX" if sandbox_enabled and price_replay_ready else "BLOCKED"),
+        allowed_actions=(["run_verified_diagnostics", "factor_mining"] if verified_enabled and return_diagnostic_ready else (["run_sandbox_diagnostics"] if sandbox_enabled and price_replay_ready else [])),
+        required_checks=["price_replay_gate", "universe_history_gate", "corporate_action_gate"],
+        satisfied_checks=l1_satisfied_checks,
+        blocked_checks=l1_blocked_checks,
+        summary_cn="价格型因子需要复权价格、历史样本池和公司行为链路同时闭合。",
+    )
+    quality_capability = _pit_capability(
+        "factor.quality_valuation",
+        factor_groups=["quality_valuation"],
+        mode="VERIFIED" if verified_enabled and fundamental_ready and fundamental_time_contract_ready else ("PARTIAL_READY" if fundamental_feature_ready or fundamental_has_partial_evidence else "BLOCKED"),
+        allowed_actions=(["run_verified_diagnostics", "factor_mining"] if verified_enabled and fundamental_ready and fundamental_time_contract_ready else (["research_preview", "run_sandbox_diagnostics"] if fundamental_feature_ready or fundamental_has_partial_evidence else [])),
+        required_checks=["fundamental_publish_gate", "fundamental_balance_check"],
+        satisfied_checks=quality_satisfied_checks,
+        blocked_checks=quality_blocked_checks,
+        summary_cn="财务字段可按 available_at 回放时，质量和估值因子可按覆盖范围进入研究或诊断。",
+    )
+    sentiment_capability = _pit_capability(
+        "factor.sentiment_micro",
+        factor_groups=["sentiment_micro"],
+        mode="VERIFIED" if verified_enabled and analyst_feature_ready and short_volume_feature_ready else ("PARTIAL_READY" if l3_has_feature_ready else ("SANDBOX" if l3_has_observation else "DISABLED")),
+        allowed_actions=(["run_verified_diagnostics", "factor_mining"] if verified_enabled and analyst_feature_ready and short_volume_feature_ready else (["research_preview", "run_sandbox_diagnostics"] if l3_has_feature_ready or l3_has_observation else [])),
+        required_checks=["consensus_sample_gate", "short_volume_gate"],
+        satisfied_checks=sentiment_satisfied_checks,
+        blocked_checks=sentiment_blocked_checks,
+        summary_cn="分析师一致预期与卖空样本按子模块独立放行，卖空样本可单独支持微观结构研究。",
+    )
+    macro_capability = _pit_capability(
+        "factor.macro_derivatives",
+        factor_groups=["macro_derivatives"],
+        mode="VERIFIED" if verified_enabled and macro_feature_ready and iv_feature_ready and return_diagnostic_ready else ("PARTIAL_READY" if l4_has_feature_ready else ("SANDBOX" if sandbox_enabled else "BLOCKED")),
+        allowed_actions=(["run_verified_diagnostics", "factor_mining"] if verified_enabled and macro_feature_ready and iv_feature_ready and return_diagnostic_ready else (["feature_preview", "research_preview"] if l4_has_feature_ready else (["run_sandbox_diagnostics"] if sandbox_enabled else []))),
+        required_checks=["rate_beta_calibration", "iv_skew_feed", "price_replay_gate", "universe_history_gate"],
+        satisfied_checks=macro_satisfied_checks,
+        blocked_checks=macro_blocked_checks,
+        summary_cn="宏观与期权特征源可先作为 feature source；正式 IC 诊断仍需要 L1 价格和样本池。",
     )
     pit_layer_readiness = [
         {
@@ -4365,12 +4787,40 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
                 )
             ),
             "pit_alignment": "使用复权价、价格历史和收益序列进行 PIT 回放。",
+            "metrics": [
+                {"label": "价格行", "value": int(counts.get("price_bars") or 0)},
+                {"label": "覆盖标的", "value": f"{coverage_ready}/{coverage_total}"},
+                {"label": "历史锚点", "value": history_summary.historical_count},
+            ],
             "blockers": [
                 item["message"]
                 for item in blocker_items
                 if str(item.get("code") or "") in {"PRICE_SNAPSHOT_NOT_READY"}
             ],
             "available_at_health": None,
+            "submodules": [
+                _pit_submodule(
+                    submodule_id="price_replay",
+                    title_cn="复权价格回放",
+                    status="READY" if price_replay_ready else "BLOCKED",
+                    summary_cn="提供价格型因子的收益序列和 IC 目标窗口。",
+                    linked_targets=[dataset_snapshot_id],
+                    metrics={"price_bar_rows": int(counts.get("price_bars") or 0), "coverage_pct": coverage_pct},
+                    blockers=[] if price_replay_ready else ["复权价格快照仍未就绪。"],
+                    upstream_capabilities=[price_capability],
+                ),
+                _pit_submodule(
+                    submodule_id="universe_history",
+                    title_cn="历史样本池",
+                    status="READY" if universe_history_ready else "BLOCKED",
+                    summary_cn="决定历史时点的可交易样本，避免当前成分股透视。",
+                    linked_targets=[universe_snapshot_id],
+                    metrics={"historical_member_rows": history_summary.historical_count, "annual_anchor_count": len(universe_history_series)},
+                    blockers=[] if universe_history_ready else ["历史成员锚点缺失。"],
+                    upstream_capabilities=[price_capability],
+                ),
+            ],
+            "upstream_capabilities": [price_capability],
         },
         {
             "layer_id": "l2_fundamental_data",
@@ -4386,6 +4836,11 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
                 )
             ),
             "pit_alignment": "必须以 publish_date / available_at 而非财报截止日对齐可得信息。",
+            "metrics": [
+                {"label": "覆盖率", "value": f"{fundamental_coverage_pct}%"},
+                {"label": "可用字段", "value": len(fundamental_fields)},
+                {"label": "PIT 点位", "value": fundamental_point_rows},
+            ],
             "blockers": (
                 []
                 if l2_status == "READY"
@@ -4400,15 +4855,57 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
                 "missing_available_at_count": missing_available_at_count,
                 "missing_publish_date_count": missing_publish_date_count,
             },
+            "submodules": [
+                _pit_submodule(
+                    submodule_id="fundamental_fields",
+                    title_cn="财务快照字段",
+                    status="READY" if fundamental_ready and fundamental_time_contract_ready else ("PARTIAL_READY" if fundamental_has_partial_evidence else "BLOCKED"),
+                    summary_cn="已有字段可用于质量、估值和财务稳定性研究；覆盖缺口会降级为部分可用。",
+                    linked_targets=[fundamental_snapshot_id],
+                    metrics={
+                        "available_field_count": len(fundamental_fields),
+                        "fundamental_point_rows": fundamental_point_rows,
+                        "coverage_pct": fundamental_coverage_pct,
+                    },
+                    blockers=[] if fundamental_ready and fundamental_time_contract_ready else sorted(FUNDAMENTAL_REQUIREMENTS.difference(fundamental_field_set))[:5],
+                    upstream_capabilities=[quality_capability],
+                ),
+                _pit_submodule(
+                    submodule_id="fundamental_time_contract",
+                    title_cn="发布日期与 available_at",
+                    status="READY" if fundamental_time_contract_ready else ("PARTIAL_READY" if fundamental_point_rows > 0 else "BLOCKED"),
+                    summary_cn="按信息可得日回放财务字段，防止用财报截止日偷看未来。",
+                    linked_targets=[fundamental_snapshot_id],
+                    metrics={
+                        "missing_available_at_count": missing_available_at_count,
+                        "missing_publish_date_count": missing_publish_date_count,
+                    },
+                    blockers=[] if fundamental_time_contract_ready else ["缺少 publish_date 或 available_at 的行仍需修复。"],
+                    upstream_capabilities=[quality_capability],
+                ),
+            ],
+            "upstream_capabilities": [quality_capability],
         },
         {
             "layer_id": "l3_sentiment_data",
             "title_cn": "L3 分析师与情绪",
             "status": l3_status,
-            "summary": "一致预期、卖空和换手情绪链路尚未入库，当前仅保留研究盲区提示，不进入正式 PIT 诊断。",
-            "pit_alignment": "缺少正式来源前，不将情绪信号计入可验证样本。",
-            "blockers": [
-                f"阻塞理由：ds-analyst-consensus 当前 {min(analyst_point_rows, analyst_required_points)}/{analyst_required_points}；继续使用 ALPHAVANTAGE_API_KEY 补齐一致预期样本。"
+            "summary": (
+                "一致预期与卖空样本均已形成 PIT 证据，可进入情绪与微观结构诊断。"
+                if l3_status == "READY"
+                else (
+                    "部分情绪/微观结构子模块已有可用样本，可按子模块开放研究或沙箱诊断。"
+                    if l3_status == "PARTIAL_READY"
+                    else "一致预期、卖空和换手情绪链路尚未完全入库，当前仅保留研究盲区提示。"
+                )
+            ),
+            "pit_alignment": "一致预期和卖空样本按 publish_date / available_at 独立回放，避免把整体层级阻塞传染给已可用子模块。",
+            "metrics": [
+                {"label": "一致预期点位", "value": analyst_point_rows},
+                {"label": "卖空样本点位", "value": short_volume_point_rows},
+            ],
+            "blockers": [] if l3_status in {"READY", "PARTIAL_READY"} else [
+                f"ds-analyst-consensus 当前 {min(analyst_point_rows, analyst_required_points)}/{analyst_required_points}，卖空样本 {short_volume_point_rows} 行。"
             ],
             "available_at_health": None,
             "evidence_status": {
@@ -4417,18 +4914,50 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
                 "analyst_point_rows": analyst_point_rows,
                 "short_volume_point_rows": short_volume_point_rows,
             },
+            "submodules": [
+                _pit_submodule(
+                    submodule_id="analyst_consensus",
+                    title_cn="分析师一致预期",
+                    status=analyst_gate_status,
+                    summary_cn="用于一致预期修正和盈利预期变化类因子。",
+                    linked_targets=[analyst_snapshot_id],
+                    metrics={"point_rows": analyst_point_rows, "required_points": analyst_required_points},
+                    blockers=[] if analyst_feature_ready else ["一致预期样本不足或 PIT 时间字段未闭合。"],
+                    upstream_capabilities=[sentiment_capability],
+                ),
+                _pit_submodule(
+                    submodule_id="short_volume",
+                    title_cn="卖空成交样本",
+                    status=short_volume_gate_status,
+                    summary_cn="卖空样本可单独支持情绪和微观结构类因子研究。",
+                    linked_targets=[short_volume_snapshot_id],
+                    metrics={"point_rows": short_volume_point_rows},
+                    blockers=[] if short_volume_feature_ready else ["卖空样本尚未形成可回放 PIT 序列。"],
+                    upstream_capabilities=[sentiment_capability],
+                ),
+            ],
+            "upstream_capabilities": [sentiment_capability],
         },
         {
             "layer_id": "l4_macro_derivatives",
             "title_cn": "L4 宏观与衍生品",
             "status": l4_status,
             "summary": (
-                "价格与样本池已可支持宏观敞口校准，但利率 Beta 与 IV Skew 仍处于校准阶段。"
-                if l4_status == "CALIBRATING"
-                else "价格或样本池仍未闭合，宏观与衍生品诊断暂不开放。"
+                "宏观利率与期权偏度已可作为特征源，正式 IC 诊断仍需价格和样本池门禁。"
+                if l4_status == "PARTIAL_READY"
+                else (
+                    "价格与样本池已可支持宏观敞口校准，但利率 Beta 与 IV Skew 仍处于校准阶段。"
+                    if l4_status == "CALIBRATING"
+                    else "价格或样本池仍未闭合，宏观与衍生品诊断暂不开放。"
+                )
             ),
             "pit_alignment": "滚动回归与衍生品偏度计算需要稳定的回放价格链路。",
-            "blockers": [] if l4_status == "CALIBRATING" else ["缺少可回放价格或样本池，宏观敏感度无法计算。"],
+            "metrics": [
+                {"label": "宏观序列", "value": f"{macro_rates_covered_series}/{macro_rates_required_series}"},
+                {"label": "宏观点位", "value": macro_rates_point_rows},
+                {"label": "期权偏度点位", "value": option_skew_point_rows},
+            ],
+            "blockers": [] if l4_status in {"CALIBRATING", "PARTIAL_READY", "READY"} else ["缺少可回放价格或样本池，宏观敏感度无法计算。"],
             "available_at_health": None,
             "evidence_status": {
                 "macro_rates": macro_gate_status,
@@ -4438,6 +4967,33 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
                 "macro_required_series": macro_rates_required_series,
                 "iv_skew_point_rows": option_skew_point_rows,
             },
+            "submodules": [
+                _pit_submodule(
+                    submodule_id="macro_rates",
+                    title_cn="宏观利率序列",
+                    status=macro_gate_status,
+                    summary_cn="用于利率敏感度、通胀敞口与宏观 Beta 特征。",
+                    linked_targets=[macro_rates_snapshot_id],
+                    metrics={
+                        "point_rows": macro_rates_point_rows,
+                        "covered_series": macro_rates_covered_series,
+                        "required_series": macro_rates_required_series,
+                    },
+                    blockers=[] if macro_feature_ready else ["宏观序列覆盖仍在校准。"],
+                    upstream_capabilities=[macro_capability],
+                ),
+                _pit_submodule(
+                    submodule_id="option_skew",
+                    title_cn="期权偏度链路",
+                    status=iv_skew_gate_status,
+                    summary_cn="用于 IV Skew 与衍生品风险偏度特征。",
+                    linked_targets=[option_skew_snapshot_id],
+                    metrics={"point_rows": option_skew_point_rows},
+                    blockers=[] if iv_feature_ready else ["期权偏度样本尚未形成正式 PIT 链路。"],
+                    upstream_capabilities=[macro_capability],
+                ),
+            ],
+            "upstream_capabilities": [macro_capability],
         },
     ]
     factor_diagnostic_readiness = [
@@ -4445,48 +5001,69 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "group_id": "price",
             "title_cn": "价格型",
             "status": _pit_factor_group_status(
-                verified=verified_enabled and adjusted_price_status == "READY" and resolved_universe_status == "READY",
-                sandbox=(limited_diagnostics_enabled or sandbox_enabled) and adjusted_price_status == "READY",
-                blocked=adjusted_price_status != "READY" or resolved_universe_status != "READY",
+                verified=verified_enabled and return_diagnostic_ready,
+                sandbox=(limited_diagnostics_enabled or sandbox_enabled) and price_replay_ready,
+                blocked=not return_diagnostic_ready,
             ),
             "factors": ["12-1月动量", "6月动量", "252日波动率", "规模因子"],
             "rationale_cn": "依赖复权价格、历史样本池和可回放收益序列。",
             "linked_snapshot_checks": ["l1_market_data", "price_replay_gate", "universe_history_gate"],
+            "required_checks": ["price_replay_gate", "universe_history_gate", "corporate_action_gate"],
+            "satisfied_checks": l1_satisfied_checks,
+            "blocked_checks": l1_blocked_checks,
+            "upstream_capabilities": [price_capability],
         },
         {
             "group_id": "quality_valuation",
             "title_cn": "质量/估值型",
             "status": _pit_factor_group_status(
                 verified=verified_enabled and fundamental_ready and fundamental_time_contract_ready,
+                partial=not (fundamental_ready and fundamental_time_contract_ready) and fundamental_has_partial_evidence,
                 sandbox=(limited_diagnostics_enabled or sandbox_enabled) and fundamental_point_rows > 0,
-                blocked=not fundamental_ready or not fundamental_time_contract_ready,
+                blocked=not fundamental_has_partial_evidence,
             ),
             "factors": ["Accruals", "F-Score", "经营杠杆", "盈利收益率", "账面市值比"],
             "rationale_cn": "依赖财务字段、发布时点和 available_at 门禁。",
             "linked_snapshot_checks": ["l2_fundamental_data", "fundamental_publish_gate", "fundamental_balance_check"],
+            "required_checks": ["fundamental_publish_gate", "fundamental_balance_check"],
+            "satisfied_checks": quality_satisfied_checks,
+            "blocked_checks": quality_blocked_checks,
+            "upstream_capabilities": [quality_capability],
         },
         {
             "group_id": "sentiment_micro",
             "title_cn": "情绪/微观型",
             "status": _pit_factor_group_status(
+                verified=verified_enabled and analyst_feature_ready and short_volume_feature_ready,
+                partial=l3_has_feature_ready,
                 sandbox=l3_status == "OBSERVATION",
                 disabled=l3_status == "DISABLED",
                 blocked=l3_status == "BLOCKED",
             ),
             "factors": ["一致预期修正", "非流动性溢价", "换手率稳定性", "卖空热度"],
-            "rationale_cn": "当前仅保留情绪盲区提示，不对外提供正式 PIT 样本。",
+            "rationale_cn": "一致预期与卖空样本按子模块独立判断；卖空样本 READY 时可先开放微观结构研究。",
             "linked_snapshot_checks": ["l3_sentiment_data", "consensus_sample_gate", "short_volume_gate"],
+            "required_checks": ["consensus_sample_gate", "short_volume_gate"],
+            "satisfied_checks": sentiment_satisfied_checks,
+            "blocked_checks": sentiment_blocked_checks,
+            "upstream_capabilities": [sentiment_capability],
         },
         {
             "group_id": "macro_derivatives",
             "title_cn": "宏观/衍生品型",
             "status": _pit_factor_group_status(
-                sandbox=sandbox_enabled and adjusted_price_status == "READY" and resolved_universe_status == "READY",
-                blocked=adjusted_price_status != "READY" or resolved_universe_status != "READY",
+                verified=verified_enabled and macro_feature_ready and iv_feature_ready and return_diagnostic_ready,
+                partial=l4_has_feature_ready and not (macro_feature_ready and iv_feature_ready and return_diagnostic_ready),
+                sandbox=sandbox_enabled and return_diagnostic_ready,
+                blocked=not sandbox_enabled and not l4_has_feature_ready,
             ),
             "factors": ["利率敏感度", "通胀敞口", "商品 Beta", "IV Skew"],
-            "rationale_cn": "可先做宏观 Beta 校准，期权偏度仍待衍生品链路正式接入。",
+            "rationale_cn": "宏观与期权特征源可先开放 feature preview；正式 IC 诊断仍依赖 L1 价格和样本池。",
             "linked_snapshot_checks": ["l4_macro_derivatives", "rate_beta_calibration", "iv_skew_feed"],
+            "required_checks": ["rate_beta_calibration", "iv_skew_feed", "price_replay_gate", "universe_history_gate"],
+            "satisfied_checks": macro_satisfied_checks,
+            "blocked_checks": macro_blocked_checks,
+            "upstream_capabilities": [macro_capability],
         },
     ]
     pit_quality_alerts = []
@@ -4564,6 +5141,9 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "source_layer": "L1 基础行情",
             "target_factor_groups": ["价格型", "宏观/衍生品型"],
             "result_status": l1_status,
+            "detail_cn": "价格型和正式 IC 诊断必须绑定可回放复权价格。",
+            "hard_blocking": not price_replay_ready,
+            "capability_mode": price_capability["mode"],
         },
         {
             "check_id": "universe_history_gate",
@@ -4571,6 +5151,9 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "source_layer": "L1 基础行情",
             "target_factor_groups": ["价格型", "宏观/衍生品型"],
             "result_status": "READY" if resolved_universe_status == "READY" else "BLOCKED",
+            "detail_cn": "历史样本池锚点缺失时不能用当前成分股替代回放窗口。",
+            "hard_blocking": resolved_universe_status != "READY",
+            "capability_mode": price_capability["mode"],
         },
         {
             "check_id": "fundamental_publish_gate",
@@ -4578,6 +5161,9 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "source_layer": "L2 财务截面",
             "target_factor_groups": ["质量/估值型"],
             "result_status": "READY" if fundamental_time_contract_ready else "BLOCKED",
+            "detail_cn": "财务字段必须按 publish_date / available_at 对齐到信息可得日。",
+            "hard_blocking": not fundamental_time_contract_ready and not fundamental_has_partial_evidence,
+            "capability_mode": quality_capability["mode"],
         },
         {
             "check_id": "fundamental_balance_check",
@@ -4585,6 +5171,9 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "source_layer": "L2 财务截面",
             "target_factor_groups": ["质量/估值型"],
             "result_status": l2_status,
+            "detail_cn": "字段覆盖不完整时保留部分可用，正式诊断只放行满足字段要求的因子。",
+            "hard_blocking": not fundamental_has_partial_evidence,
+            "capability_mode": quality_capability["mode"],
         },
         {
             "check_id": "consensus_sample_gate",
@@ -4592,6 +5181,9 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "source_layer": "L3 分析师与情绪",
             "target_factor_groups": ["情绪/微观型"],
             "result_status": analyst_gate_status,
+            "detail_cn": "一致预期样本不足只影响分析师因子，不应关闭卖空样本能力。",
+            "hard_blocking": analyst_gate_status == "BLOCKED",
+            "capability_mode": sentiment_capability["mode"],
         },
         {
             "check_id": "short_volume_gate",
@@ -4599,6 +5191,9 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "source_layer": "L3 分析师与情绪",
             "target_factor_groups": ["情绪/微观型"],
             "result_status": short_volume_gate_status,
+            "detail_cn": "卖空成交样本 READY 时可单独支持情绪和微观结构研究。",
+            "hard_blocking": short_volume_gate_status == "BLOCKED",
+            "capability_mode": sentiment_capability["mode"],
         },
         {
             "check_id": "rate_beta_calibration",
@@ -4606,6 +5201,9 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "source_layer": "L4 宏观与衍生品",
             "target_factor_groups": ["宏观/衍生品型"],
             "result_status": macro_gate_status,
+            "detail_cn": "宏观利率序列可作为特征源；正式诊断还要检查 L1 回放依赖。",
+            "hard_blocking": macro_gate_status == "BLOCKED",
+            "capability_mode": macro_capability["mode"],
         },
         {
             "check_id": "iv_skew_feed",
@@ -4613,6 +5211,9 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "source_layer": "L4 宏观与衍生品",
             "target_factor_groups": ["宏观/衍生品型"],
             "result_status": iv_skew_gate_status,
+            "detail_cn": "期权偏度样本可作为衍生品特征源；缺失时只关闭对应子能力。",
+            "hard_blocking": iv_skew_gate_status == "BLOCKED",
+            "capability_mode": macro_capability["mode"],
         },
     ]
     return {
@@ -4626,7 +5227,7 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
         "universe_status": resolved_universe_status,
         "outlier_cleaning_status": outlier_cleaning_status,
         "corporate_action_status": corporate_status,
-        "fundamental_status": "READY" if fundamental_ready else "BLOCKED",
+        "fundamental_status": l2_status,
         "coverage": {
             "covered_symbol_count": coverage_ready,
             "total_symbol_count": coverage_total,
@@ -4718,6 +5319,9 @@ class FactorResearchService:
         self._diagnostic_data_cache_seconds = 600.0
         self._diagnostic_data_cache_lock = threading.Lock()
         self._diagnostic_data_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._factor_list_pit_overview_cache_seconds = 300.0
+        self._factor_list_pit_overview_cache_lock = threading.Lock()
+        self._factor_list_pit_overview_cache: tuple[float, dict[str, Any]] | None = None
         ensure_default_fundamental_snapshot(self.market_data_repository)
         self.ensure_default_factors()
 
@@ -4725,6 +5329,17 @@ class FactorResearchService:
         if self._pit_overview_builder:
             return dict(self._pit_overview_builder())
         return build_pit_data_overview(self.market_data_repository)
+
+    def _factor_list_pit_overview(self) -> dict[str, Any]:
+        now = time.time()
+        with self._factor_list_pit_overview_cache_lock:
+            cached = self._factor_list_pit_overview_cache
+            if cached and now - cached[0] <= self._factor_list_pit_overview_cache_seconds:
+                return deepcopy(cached[1])
+        overview = build_factor_list_pit_overview(self.market_data_repository)
+        with self._factor_list_pit_overview_cache_lock:
+            self._factor_list_pit_overview_cache = (time.time(), deepcopy(overview))
+        return overview
 
     def create_research_waiver(self, request: Any) -> dict[str, Any]:
         payload = dict(_as_mapping(request))
@@ -4794,18 +5409,24 @@ class FactorResearchService:
         now = iso_now()
         with self.storage.connection() as conn:
             for seed in DEFAULT_SEED_FACTORS:
+                seed_note = _factor_formula_description(
+                    factor_id=seed.id,
+                    name=seed.name,
+                    expression=seed.expression,
+                    direction=seed.direction,
+                )
                 existing = conn.execute("SELECT * FROM factor_definitions WHERE id = ?", (seed.id,)).fetchone()
                 if existing:
                     tags_json = dumps(list(seed.tags))
                     requirements_json = dumps(list(seed.data_requirements))
-                    version_metadata_json = dumps({"source": "SYSTEM_SEED", "descriptor": seed.descriptor.as_dict()})
+                    version_metadata_json = dumps(self._factor_version_metadata_for_seed(seed))
                     changed = (
                         str(existing.get("name") or "") != seed.name
                         or str(existing.get("expression") or "") != seed.expression
                         or str(existing.get("direction") or "") != seed.direction
                         or str(existing.get("tags_json") or "") != tags_json
                         or str(existing.get("data_requirements_json") or "") != requirements_json
-                        or str(existing.get("institutional_note") or "") != seed.institutional_note
+                        or str(existing.get("institutional_note") or "") != seed_note
                     )
                     if changed:
                         conn.execute(
@@ -4826,7 +5447,7 @@ class FactorResearchService:
                                 seed.direction,
                                 tags_json,
                                 requirements_json,
-                                seed.institutional_note,
+                                seed_note,
                                 now,
                                 seed.id,
                             ),
@@ -4875,6 +5496,7 @@ class FactorResearchService:
                                     now,
                                 ),
                             )
+                    self._upsert_seed_factor_lineage(conn, seed, now)
                     continue
                 conn.execute(
                     """
@@ -4893,7 +5515,7 @@ class FactorResearchService:
                         seed.expression,
                         dumps(list(seed.tags)),
                         dumps(list(seed.data_requirements)),
-                        seed.institutional_note,
+                        seed_note,
                         now,
                         now,
                     ),
@@ -4907,10 +5529,11 @@ class FactorResearchService:
                         f"{seed.id}-v1",
                         seed.id,
                         seed.expression,
-                        dumps({"source": "SYSTEM_SEED", "descriptor": seed.descriptor.as_dict()}),
+                        dumps(self._factor_version_metadata_for_seed(seed)),
                         now,
                     ),
                 )
+                self._upsert_seed_factor_lineage(conn, seed, now)
             auto_rows = conn.execute(
                 """
                 SELECT id, name, expression, source
@@ -5053,6 +5676,31 @@ class FactorResearchService:
                         """,
                         (repaired_name, now, row["id"]),
                     )
+            description_rows = conn.execute(
+                """
+                SELECT id, name, expression, direction, institutional_note
+                FROM factor_definitions
+                WHERE deleted_at IS NULL
+                """
+            ).fetchall()
+            for row in description_rows:
+                current_note = str(row.get("institutional_note") or "").strip()
+                manual_note = _manual_factor_description(str(row.get("id") or ""))
+                if _is_structured_factor_description(current_note) and not manual_note:
+                    self._upsert_seed_factor_lineage(conn, seed, now)
+                    continue
+                generated_note = manual_note or _factor_formula_description_from_row(row)
+                if current_note == generated_note:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE factor_definitions
+                    SET institutional_note = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (generated_note, now, row["id"]),
+                )
 
     def _factor_readiness(self, factor: Mapping[str, Any], pit_overview: Mapping[str, Any]) -> tuple[str, list[dict[str, Any]]]:
         requirements = set(str(item) for item in factor.get("data_requirements") or [])
@@ -6376,6 +7024,287 @@ class FactorResearchService:
             ),
         }
 
+    @staticmethod
+    def _factor_descriptor_mapping(factor: Mapping[str, Any]) -> Mapping[str, Any]:
+        descriptor = factor.get("descriptor")
+        if isinstance(descriptor, Mapping):
+            return descriptor
+        return _descriptor_from_factor_id(str(factor.get("id") or ""), str(factor.get("source") or ""))
+
+    @staticmethod
+    def _factor_expression_is_direct_raw_field(expression: str) -> bool:
+        normalized = str(expression or "").strip()
+        if not normalized:
+            return False
+        return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", normalized) is not None
+
+    @staticmethod
+    def _factor_tier_key(factor: Mapping[str, Any]) -> str:
+        descriptor = FactorResearchService._factor_descriptor_mapping(factor)
+        category = str(descriptor.get("category") or "").strip().lower()
+        operator = str(descriptor.get("operator") or "").strip().lower()
+        expression = str(factor.get("expression") or "")
+        expression_lower = expression.lower()
+        source = str(factor.get("source") or "").upper()
+        if category == "alpha" or any(token in expression_lower for token in ("ffblend(", "composite", "blend(")):
+            return "F3"
+        if source == "AUTO_MINED":
+            source_factor_ids = factor.get("source_factor_ids")
+            if isinstance(source_factor_ids, Sequence) and not isinstance(source_factor_ids, (str, bytes)) and len(source_factor_ids) > 1:
+                return "F3"
+            if any(token in expression_lower for token in ("+", "residual(", "neutralize(", "zscore(", "rank(", "tsrank(")):
+                return "F2"
+        if operator == "raw" and FactorResearchService._factor_expression_is_direct_raw_field(expression):
+            return "F1"
+        return "F2"
+
+    @staticmethod
+    def _factor_tier_projection(factor: Mapping[str, Any]) -> dict[str, Any]:
+        tier_key = FactorResearchService._factor_tier_key(factor)
+        return dict(FACTOR_TIER_PROJECTIONS.get(tier_key, FACTOR_TIER_PROJECTIONS["F2"]))
+
+    @staticmethod
+    def _factor_processing_ops(factor: Mapping[str, Any]) -> dict[str, Any]:
+        descriptor = FactorResearchService._factor_descriptor_mapping(factor)
+        operator = str(descriptor.get("operator") or "").strip().lower()
+        expression_lower = str(factor.get("expression") or "").lower()
+        done = {
+            "winsorize": any(token in expression_lower for token in ("winsor", "mad(")),
+            "neutralize": any(token in expression_lower for token in ("neutral", "residual", "beta")),
+            "zscore": operator == "z" or any(token in expression_lower for token in ("zscore", "z_score")),
+            "tsrank": operator == "rank" or any(token in expression_lower for token in ("rank(", "tsrank", "ts_rank")),
+        }
+        lights = [
+            {
+                "code": code,
+                "key": key,
+                "label": label,
+                "active": bool(done.get(key)),
+                "status": "done" if done.get(key) else "missing",
+            }
+            for code, key, label in FACTOR_OP_LIGHTS
+        ]
+        return {
+            "lights": lights,
+            "completed": [item["code"] for item in lights if item["active"]],
+            "missing": [item["code"] for item in lights if not item["active"]],
+            "summary": " / ".join(f"{item['code']} {item['label']}" for item in lights if item["active"]) or "原始字段",
+        }
+
+    def _factor_lifecycle_projection(self, factor: Mapping[str, Any], policy: Mapping[str, Any]) -> dict[str, Any]:
+        lifecycle_status = str(factor.get("lifecycle_status") or "").upper()
+        diagnostic_status = str(factor.get("diagnostic_status") or "").upper()
+        source = str(factor.get("source") or "").upper()
+        hard_blockers = [item for item in policy.get("hard_blockers") or [] if isinstance(item, Mapping)]
+        if self._factor_is_offline(factor) or lifecycle_status in {"ARCHIVED", "DELETED"}:
+            key = "archived"
+        elif hard_blockers or diagnostic_status in {"BLOCKED_PIT", "BLOCKED_DATA", "FAILED"}:
+            key = "to_be_verified"
+        elif lifecycle_status == "DRAFT" and source in {"MANUAL", "AUTO_MINED"}:
+            key = "sandbox"
+        else:
+            key = "online"
+        projection = dict(FACTOR_LIFECYCLE_PROJECTIONS[key])
+        projection["source_status"] = lifecycle_status or diagnostic_status
+        return projection
+
+    @staticmethod
+    def _factor_level_projection(factor: Mapping[str, Any], policy: Mapping[str, Any]) -> dict[str, Any]:
+        summary = factor.get("latest_diagnostic_summary")
+        grade_label = FactorResearchService._factor_grade_label(
+            FactorResearchService._factor_grade_score(summary if isinstance(summary, Mapping) else {})
+        )
+        hard_blockers = [item for item in policy.get("hard_blockers") or [] if isinstance(item, Mapping)]
+        warnings = [item for item in policy.get("warnings") or [] if isinstance(item, Mapping)]
+        lifecycle = str(factor.get("lifecycle_status") or "").upper()
+        if lifecycle in FACTOR_OFFLINE_STATUSES:
+            key = "D"
+        elif hard_blockers:
+            key = "C"
+        elif grade_label:
+            key = grade_label
+        elif warnings:
+            key = "C"
+        else:
+            key = "B" if FactorResearchService._factor_tier_key(factor) == "F1" else "C"
+        return dict(FACTOR_LEVEL_PROJECTIONS.get(key, FACTOR_LEVEL_PROJECTIONS["C"]))
+
+    @staticmethod
+    def _factor_quality_view(factor: Mapping[str, Any]) -> dict[str, Any]:
+        summary = factor.get("latest_diagnostic_summary")
+        if not isinstance(summary, Mapping):
+            summary = {}
+        turnover = summary.get("turnover_decay") if isinstance(summary.get("turnover_decay"), Mapping) else {}
+        half_life_days = turnover.get("half_life_days") if isinstance(turnover, Mapping) else None
+        decay_days = int(_coerce_float(half_life_days, 0.0)) if half_life_days is not None else None
+        return {
+            "rank_ic": summary.get("rank_ic"),
+            "ir": summary.get("ir"),
+            "coverage": summary.get("coverage"),
+            "decay_days": decay_days,
+            "decay_label": f"{decay_days}日" if decay_days else "待生成",
+            "sparkline": factor.get("ic_sparkline") or [],
+            "sparkline_window": factor.get("ic_sparkline_window"),
+        }
+
+    def _factor_lineage_rows(self, factor_id: str) -> list[dict[str, Any]]:
+        rows = self.storage.fetch_all(
+            """
+            SELECT source_type, source_id, relation_type, metadata_json, created_at
+            FROM factor_lineage_edges
+            WHERE target_type = 'factor' AND target_id = ?
+            ORDER BY created_at ASC, source_type ASC, source_id ASC
+            """,
+            (factor_id,),
+        )
+        return [
+            {
+                "source_type": str(row.get("source_type") or ""),
+                "source_id": str(row.get("source_id") or ""),
+                "relation_type": str(row.get("relation_type") or ""),
+                "metadata": _decode_json_dict(row.get("metadata_json")),
+                "created_at": row.get("created_at"),
+            }
+            for row in rows
+        ]
+
+    @staticmethod
+    def _virtual_lineage_rows_for_factor(factor: Mapping[str, Any]) -> list[dict[str, Any]]:
+        factor_id = str(factor.get("id") or "")
+        tier_key = FactorResearchService._factor_tier_key(factor)
+        expression = str(factor.get("expression") or "")
+        if factor_id == "s_alpha_ffblend_cur_rank":
+            return [
+                {"source_type": "factor", "source_id": parent_id, "relation_type": "COMPOSED_FROM", "metadata": {"virtual": True}, "created_at": None}
+                for parent_id in ("s_mom_12m1m_rank", "s_val_ep_ltm_raw", "s_qlty_roe_ltm_raw", "s_size_cur_log")
+            ]
+        if tier_key == "F1":
+            return [{
+                "source_type": "raw_field",
+                "source_id": expression,
+                "relation_type": "DIRECT_SOURCE",
+                "metadata": {"virtual": True, "note": "原始字段直连"},
+                "created_at": None,
+            }]
+        requirements = [str(item) for item in factor.get("data_requirements") or [] if str(item).strip()]
+        if requirements:
+            return [
+                {
+                    "source_type": "raw_field",
+                    "source_id": requirement,
+                    "relation_type": "DERIVED_FROM",
+                    "metadata": {"virtual": True, "expression": expression},
+                    "created_at": None,
+                }
+                for requirement in requirements[:4]
+            ]
+        return []
+
+    def _factor_lineage_summary(self, factor: Mapping[str, Any]) -> dict[str, Any]:
+        factor_id = str(factor.get("id") or "")
+        rows = self._factor_lineage_rows(factor_id)
+        if not rows:
+            rows = self._virtual_lineage_rows_for_factor(factor)
+        parent_ids = [row["source_id"] for row in rows if row.get("source_id")]
+        root_sources = [
+            row["source_id"]
+            for row in rows
+            if str(row.get("source_type") or "") in {"raw_field", "factor_expression", "mining_job"}
+            and row.get("source_id")
+        ]
+        return {
+            "has_lineage": bool(rows),
+            "parent_count": len(parent_ids),
+            "parent_ids": parent_ids[:6],
+            "root_source": root_sources[0] if root_sources else (parent_ids[0] if parent_ids else None),
+            "relation_types": sorted({str(row.get("relation_type") or "") for row in rows if row.get("relation_type")}),
+        }
+
+    def _factor_lineage_tree(self, factor: Mapping[str, Any]) -> dict[str, Any]:
+        factor_id = str(factor.get("id") or "")
+        rows = self._factor_lineage_rows(factor_id)
+        persisted = True
+        if not rows:
+            rows = self._virtual_lineage_rows_for_factor(factor)
+            persisted = False
+        parents = [
+            {
+                "id": row.get("source_id"),
+                "type": row.get("source_type"),
+                "label": row.get("source_id"),
+                "relation_type": row.get("relation_type"),
+                "metadata": row.get("metadata") or {},
+                "created_at": row.get("created_at"),
+            }
+            for row in rows
+        ]
+        return {
+            "factor_id": factor_id,
+            "persisted": persisted,
+            "node": {
+                "id": factor_id,
+                "type": "factor",
+                "label": factor.get("name") or factor_id,
+                "tier_level": self._factor_tier_key(factor),
+            },
+            "parents": parents,
+            "parent_count": len(parents),
+            "nodes": parents,
+        }
+
+    @staticmethod
+    def _factor_version_metadata_for_seed(seed: SeedFactor) -> dict[str, Any]:
+        seed_factor = {
+            "id": seed.id,
+            "source": "SYSTEM_SEED",
+            "expression": seed.expression,
+            "descriptor": seed.descriptor.as_dict(),
+            "data_requirements": list(seed.data_requirements),
+        }
+        tier = FactorResearchService._factor_tier_projection(seed_factor)
+        return {
+            "source": "SYSTEM_SEED",
+            "descriptor": seed.descriptor.as_dict(),
+            "tier_level": tier["key"],
+            "tier_label": tier["label"],
+            "op_status": FactorResearchService._factor_processing_ops(seed_factor),
+        }
+
+    def _upsert_seed_factor_lineage(self, conn: Any, seed: SeedFactor, now: str) -> None:
+        seed_factor = {
+            "id": seed.id,
+            "source": "SYSTEM_SEED",
+            "expression": seed.expression,
+            "descriptor": seed.descriptor.as_dict(),
+            "data_requirements": list(seed.data_requirements),
+        }
+        for row in self._virtual_lineage_rows_for_factor(seed_factor):
+            source_type = str(row.get("source_type") or "")
+            source_id = str(row.get("source_id") or "")
+            relation_type = str(row.get("relation_type") or "")
+            if not source_type or not source_id or not relation_type:
+                continue
+            edge_id = f"fl_seed_{self._signature_hash(seed.id + source_type + source_id + relation_type, 16)}"
+            metadata = dict(row.get("metadata") or {})
+            metadata["seeded_by"] = "FactorResearchService"
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO factor_lineage_edges (
+                    id, source_type, source_id, target_type, target_id, relation_type, metadata_json, created_at
+                )
+                VALUES (?, ?, ?, 'factor', ?, ?, ?, ?)
+                """,
+                (
+                    edge_id,
+                    source_type,
+                    source_id,
+                    seed.id,
+                    relation_type,
+                    dumps(metadata),
+                    now,
+                ),
+            )
+
     def _apply_factor_governance_projection(self, factor: dict[str, Any]) -> dict[str, Any]:
         correlation_cluster = self._correlation_cluster(str(factor.get("id") or ""))
         correlation_summary = self._correlation_cluster_summary(correlation_cluster)
@@ -6384,6 +7313,21 @@ class FactorResearchService:
             factor["latest_diagnostic_summary"] = dict(summary)
         policy = self._build_blocker_policy(factor, correlation_cluster)
         ui_state, ui_state_label = self._classify_factor_ui_state(factor, policy)
+        tier = self._factor_tier_projection(factor)
+        lifecycle = self._factor_lifecycle_projection(factor, policy)
+        level = self._factor_level_projection(factor, policy)
+        factor["tier_level"] = tier["key"]
+        factor["tier_label"] = tier["label"]
+        factor["tier_projection"] = tier
+        factor["lifecycle"] = lifecycle["key"]
+        factor["lifecycle_label"] = lifecycle["label"]
+        factor["lifecycle_projection"] = lifecycle
+        factor["factor_level"] = level["key"]
+        factor["factor_level_label"] = level["label"]
+        factor["factor_level_projection"] = level
+        factor["op_status"] = self._factor_processing_ops(factor)
+        factor["lineage_summary"] = self._factor_lineage_summary(factor)
+        factor["quality_view"] = self._factor_quality_view(factor)
         factor["ui_state"] = ui_state
         factor["ui_state_label"] = ui_state_label
         factor["correlation_cluster_summary"] = correlation_summary
@@ -6418,6 +7362,12 @@ class FactorResearchService:
             else ()
         )
         operator_key = tuple(sorted(str(operator).strip().lower() for operator in operators if str(operator).strip()))
+        source_factor_ids = request.get("source_factor_ids")
+        if not isinstance(source_factor_ids, Sequence) or isinstance(source_factor_ids, (str, bytes)):
+            source_factor_ids = ()
+        recipe_families = request.get("recipe_families")
+        if not isinstance(recipe_families, Sequence) or isinstance(recipe_families, (str, bytes)):
+            recipe_families = ()
         return (
             universe,
             str(request.get("start_date") or "").strip(),
@@ -6426,6 +7376,10 @@ class FactorResearchService:
             int(_coerce_float(request.get("candidate_count"), 0.0)),
             round(_coerce_float(request.get("min_rank_ic")), 6),
             int(_coerce_float(request.get("max_depth"), 0.0)),
+            str(request.get("generation_mode") or "PRICE_OPERATOR").strip().upper(),
+            tuple(sorted(str(item).strip().lower() for item in source_factor_ids if str(item).strip())),
+            tuple(sorted(str(item).strip().lower() for item in recipe_families if str(item).strip())),
+            int(_coerce_float(request.get("exploration_budget"), 0.0)),
         )
 
     def _recent_unique_factor_mining_job_rows(self, *, limit: int = 50) -> list[Mapping[str, Any]]:
@@ -6498,6 +7452,15 @@ class FactorResearchService:
                 "benchmark_max_drawdown_pct": _coerce_float(item.get("benchmark_max_drawdown_pct")),
                 "drawdown_vs_benchmark_ratio": _coerce_float(item.get("drawdown_vs_benchmark_ratio"), 0.0),
                 "auto_residual_summary": item.get("auto_residual_summary") if isinstance(item.get("auto_residual_summary"), Mapping) else {},
+                "source_factor_ids": [
+                    str(source_id)
+                    for source_id in (item.get("source_factor_ids") or [])
+                    if str(source_id).strip()
+                ],
+                "recipe_kind": item.get("recipe_kind"),
+                "recipe_family": item.get("recipe_family"),
+                "orthogonality_intent": item.get("orthogonality_intent"),
+                "composition_metadata": item.get("composition_metadata") if isinstance(item.get("composition_metadata"), Mapping) else {},
                 "sandbox_rank": int(_coerce_float(item.get("rank"), float(index + 1))),
                 "risk_flags_json": dumps(item.get("risk_flags") or []),
                 "summary_json": dumps(item),
@@ -6662,7 +7625,7 @@ class FactorResearchService:
             requested_job_id = source_job_ids[0]
         now = iso_now()
         inserted = []
-        pit_overview = build_factor_list_pit_overview(self.market_data_repository)
+        pit_overview = self._factor_list_pit_overview()
         pit_status = str(pit_overview.get("overall_status") or "BLOCKED").upper()
         for row in rows:
             expression = str(row.get("expression") or "").strip()
@@ -6731,6 +7694,11 @@ class FactorResearchService:
                         "benchmark_max_drawdown_pct": _safe_round(_coerce_float(row.get("benchmark_max_drawdown_pct")), 4),
                         "drawdown_vs_benchmark_ratio": _safe_round(_coerce_float(row.get("drawdown_vs_benchmark_ratio"), 0.0), 4),
                         "auto_residual_summary": row.get("auto_residual_summary") if isinstance(row.get("auto_residual_summary"), Mapping) else {},
+                        "source_factor_ids": [str(item) for item in row.get("source_factor_ids") or [] if str(item).strip()],
+                        "recipe_kind": row.get("recipe_kind"),
+                        "recipe_family": row.get("recipe_family"),
+                        "orthogonality_intent": row.get("orthogonality_intent"),
+                        "composition_metadata": row.get("composition_metadata") if isinstance(row.get("composition_metadata"), Mapping) else {},
                         "sandbox_rank": int(_coerce_float(row.get("sandbox_rank"), 9999.0)),
                     }
                     self.storage.execute(
@@ -6787,6 +7755,11 @@ class FactorResearchService:
                 "benchmark_max_drawdown_pct": _safe_round(_coerce_float(row.get("benchmark_max_drawdown_pct")), 4),
                 "drawdown_vs_benchmark_ratio": _safe_round(_coerce_float(row.get("drawdown_vs_benchmark_ratio"), 0.0), 4),
                 "auto_residual_summary": row.get("auto_residual_summary") if isinstance(row.get("auto_residual_summary"), Mapping) else {},
+                "source_factor_ids": [str(item) for item in row.get("source_factor_ids") or [] if str(item).strip()],
+                "recipe_kind": row.get("recipe_kind"),
+                "recipe_family": row.get("recipe_family"),
+                "orthogonality_intent": row.get("orthogonality_intent"),
+                "composition_metadata": row.get("composition_metadata") if isinstance(row.get("composition_metadata"), Mapping) else {},
                 "sandbox_rank": int(_coerce_float(row.get("sandbox_rank"), 9999.0)),
             }
             gate_summary = {
@@ -6840,6 +7813,30 @@ class FactorResearchService:
                         "target_id": candidate_id,
                         "relation_type": "INTAKE",
                         "metadata_json": dumps({"mining_candidate_id": row.get("id")}),
+                        "created_at": now,
+                    },
+                )
+            for source_factor_id in metrics.get("source_factor_ids") or []:
+                parent_id = str(source_factor_id or "").strip()
+                if not parent_id:
+                    continue
+                edge_id = f"fl_{self._signature_hash(parent_id + candidate_id, 16)}"
+                self.storage.insert_json_row(
+                    "factor_lineage_edges",
+                    {
+                        "id": edge_id,
+                        "source_type": "factor",
+                        "source_id": parent_id,
+                        "target_type": "quarantine_candidate",
+                        "target_id": candidate_id,
+                        "relation_type": "COMPOSED_FROM",
+                        "metadata_json": dumps({
+                            "mining_candidate_id": row.get("id"),
+                            "recipe_kind": metrics.get("recipe_kind"),
+                            "recipe_family": metrics.get("recipe_family"),
+                            "orthogonality_intent": metrics.get("orthogonality_intent"),
+                            "publish_boundary": "manual_after_quarantine",
+                        }),
                         "created_at": now,
                     },
                 )
@@ -6904,7 +7901,7 @@ class FactorResearchService:
     def _run_factor_quarantine_candidate_v2(self, candidate_id: str, request: Any | None = None) -> dict[str, Any]:
         candidate = self.get_factor_quarantine_candidate(candidate_id)
         now = iso_now()
-        pit_overview = build_factor_list_pit_overview(self.market_data_repository)
+        pit_overview = self._factor_list_pit_overview()
         pit_status = str(pit_overview.get("overall_status") or "BLOCKED").upper()
         expression = str(candidate.get("expression") or "")
         metrics = candidate.get("candidate_metrics") if isinstance(candidate.get("candidate_metrics"), Mapping) else {}
@@ -6939,6 +7936,15 @@ class FactorResearchService:
         max_drawdown_pct = _coerce_float(metrics.get("max_drawdown_pct"), 0.0)
         benchmark_max_drawdown_pct = _coerce_float(metrics.get("benchmark_max_drawdown_pct"), 0.0)
         cluster_id = candidate.get("cluster_id") or self._cluster_id_for_expression(expression)
+        source_factor_ids = [str(item) for item in metrics.get("source_factor_ids") or [] if str(item).strip()]
+        composition_summary = {
+            "source_factor_ids": source_factor_ids,
+            "recipe_kind": metrics.get("recipe_kind"),
+            "recipe_family": metrics.get("recipe_family"),
+            "orthogonality_intent": metrics.get("orthogonality_intent"),
+            "composition_metadata": metrics.get("composition_metadata") if isinstance(metrics.get("composition_metadata"), Mapping) else {},
+            "publish_boundary": "manual_after_quarantine",
+        }
         auto_residual_summary = (
             dict(metrics.get("auto_residual_summary"))
             if isinstance(metrics.get("auto_residual_summary"), Mapping)
@@ -6983,6 +7989,8 @@ class FactorResearchService:
             "drawdown_threshold": 1.5,
             "ir_method": "newey_west_overlap_adjusted",
             "ir_threshold": QUARANTINE_MIN_NEWEY_WEST_IR,
+            "recipe_kind": composition_summary.get("recipe_kind"),
+            "recipe_family": composition_summary.get("recipe_family"),
         }
         diagnostic_warnings: list[str] = []
         if pit_status != "READY":
@@ -7048,6 +8056,8 @@ class FactorResearchService:
             "duplicate_factor_ids": duplicate_factor_ids,
             "pre_residual_correlation": _safe_round(pre_residual_corr, 4),
             "auto_residual": auto_residual_summary,
+            "source_factor_ids": source_factor_ids,
+            "orthogonality_intent": composition_summary.get("orthogonality_intent"),
         }
         stability = {
             "coverage_pct": _safe_round(coverage, 2),
@@ -7066,6 +8076,7 @@ class FactorResearchService:
             "dataset_snapshot_id": pit_overview.get("dataset_snapshot_id"),
             "universe_snapshot_id": pit_overview.get("universe_snapshot_id"),
             "warnings": diagnostic_warnings,
+            "composition": composition_summary,
         }
         summary = {
             "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
@@ -7074,6 +8085,7 @@ class FactorResearchService:
             "publish_reason": reason,
             "diagnostic_warnings": diagnostic_warnings,
             "pit_evidence": pit_evidence,
+            "composition": composition_summary,
         }
         self.storage.insert_json_row(
             "factor_quarantine_runs",
@@ -7128,7 +8140,7 @@ class FactorResearchService:
         return self._run_factor_quarantine_candidate_v2(candidate_id, request)
         candidate = self.get_factor_quarantine_candidate(candidate_id)
         now = iso_now()
-        pit_overview = build_factor_list_pit_overview(self.market_data_repository)
+        pit_overview = self._factor_list_pit_overview()
         pit_status = str(pit_overview.get("overall_status") or "BLOCKED").upper()
         expression = str(candidate.get("expression") or "")
         rank_ic = self._candidate_metric_float(candidate, "rank_ic")
@@ -7445,6 +8457,32 @@ class FactorResearchService:
                         now,
                     ),
                 )
+            candidate_metrics = candidate.get("candidate_metrics") if isinstance(candidate.get("candidate_metrics"), Mapping) else {}
+            for parent_id in candidate_metrics.get("source_factor_ids") or []:
+                parent_factor_id = str(parent_id or "").strip()
+                if not parent_factor_id:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO factor_lineage_edges (
+                        id, source_type, source_id, target_type, target_id, relation_type, metadata_json, created_at
+                    )
+                    VALUES (?, 'factor', ?, 'factor', ?, 'COMPOSED_FROM', ?, ?)
+                    """,
+                    (
+                        f"fl_{uuid4().hex[:12]}",
+                        parent_factor_id,
+                        factor_id,
+                        dumps({
+                            "source_candidate_id": candidate_id,
+                            "recipe_kind": candidate_metrics.get("recipe_kind"),
+                            "recipe_family": candidate_metrics.get("recipe_family"),
+                            "orthogonality_intent": candidate_metrics.get("orthogonality_intent"),
+                            "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
+                        }),
+                        now,
+                    ),
+                )
             conn.execute(
                 """
                 UPDATE factor_quarantine_candidates
@@ -7636,6 +8674,35 @@ class FactorResearchService:
             for item in actions
             if str(item.get("kind") or "").upper() in FACTOR_GOVERNANCE_TASK_KINDS
         ]
+
+    def _factor_governance_task_count(
+        self,
+        factor: Mapping[str, Any],
+        *,
+        factor_lookup: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> int:
+        factor_id = str(factor.get("id") or "")
+        if not factor_id or self._factor_is_offline(factor):
+            return 0
+        count = 0
+        try:
+            if self._factor_prune_evidence(factor, factor_lookup=factor_lookup).get("eligible"):
+                count += 1
+        except Exception:
+            pass
+        try:
+            if self._factor_deprecate_evidence(factor).get("eligible"):
+                count += 1
+        except Exception:
+            pass
+        try:
+            if self._factor_reverse_optimization_action(factor) is not None:
+                count += 1
+        except Exception:
+            pass
+        if str(factor.get("source") or "") == "AUTO_MINED" and str(factor.get("lifecycle_status") or "") == "VERIFIED":
+            count += 1
+        return count
 
     def _factor_needs_governance_preview(self, factor: Mapping[str, Any]) -> bool:
         if self._factor_is_offline(factor):
@@ -8004,6 +9071,15 @@ class FactorResearchService:
         for factor_id in factor_ids:
             stored_factor = self.get_factor(factor_id)
             if self._factor_is_offline(stored_factor):
+                existing_detail = stored_factor.get("offline_detail") if isinstance(stored_factor.get("offline_detail"), Mapping) else {}
+                existing_action_id = str(existing_detail.get("action_id") or "").strip()
+                existing_command = str(stored_factor.get("offline_command") or "").strip().upper()
+                existing_keep_factor_id = str(existing_detail.get("keep_factor_id") or "").strip() or None
+                same_action = not existing_action_id or existing_action_id == str(action_id)
+                same_keep = command != "PRUNE" or not keep_factor_id or existing_keep_factor_id == keep_factor_id
+                if existing_command == command and same_action and same_keep:
+                    affected.append(stored_factor)
+                    continue
                 raise ValueError(f"Factor already offline: {factor_id}")
             factor = governance_factor_lookup.get(factor_id, stored_factor)
             if command == "DEPRECATE":
@@ -8363,10 +9439,8 @@ class FactorResearchService:
         monotonicity = self._factor_group_return_shape(
             {"group_returns": group_returns, "group_return_series": group_return_series}
         )
-        coverage = round(
-            min(1.0, (sum(int(item["symbol_count"]) for item in observations) / max(1, len(requested_symbols) * len(observations)))) * 100.0,
-            2,
-        )
+        coverage_detail = _factor_diagnostic_coverage_detail(observations, requested_symbols, series_by_symbol)
+        coverage = float(coverage_detail["coverage"])
         risk_flags = []
         if abs(rank_ic_mean or 0.0) < 0.02:
             risk_flags.append("Rank IC 接近 0，建议复核方向和样本稳定性。")
@@ -8411,6 +9485,7 @@ class FactorResearchService:
             "rank_ic": _safe_round(rank_ic_mean, 4),
             "ir": _safe_round(ir, 4),
             "coverage": coverage,
+            "coverage_detail": coverage_detail,
             "group_returns": group_returns,
             "group_return_series": group_return_series[-36:],
             "monotonicity": monotonicity,
@@ -8458,6 +9533,9 @@ class FactorResearchService:
             },
             "artifact_refs": artifact_refs,
             "symbol_count": len(series_by_symbol),
+            "observation_count": coverage_detail["observation_count"],
+            "average_symbol_count": coverage_detail["average_symbol_count"],
+            "cross_section_threshold": coverage_detail["min_cross_section_symbols"],
             "pit_readiness_mode": pit_readiness_mode,
             "waiver_id": research_waiver.get("id") if isinstance(research_waiver, Mapping) else None,
             "ignored_symbol_count": len(ignored_symbols),
@@ -8639,7 +9717,7 @@ class FactorResearchService:
         )
         normalized_symbols = [normalizer(symbol) for symbol in symbols if str(symbol).strip()]
         sql = """
-            SELECT symbol, date, close, adj_close, volume
+            SELECT symbol, date, open, close, adj_close, volume
             FROM dataset_price_bars
             WHERE dataset_snapshot_id = ?
         """
@@ -8658,6 +9736,7 @@ class FactorResearchService:
                 {
                     "symbol": symbol,
                     "date": row["date"],
+                    "open": row["open"],
                     "close": row["close"],
                     "adj_close": row["adj_close"],
                     "volume": row["volume"],
@@ -8759,11 +9838,11 @@ class FactorResearchService:
             if str(item).strip()
         ]
         include = [str(item) for item in payload.get("include") or [] if str(item).strip()]
-        factors = list(self.list_factors()["items"])
+        factors = list(self.list_factors(include_governance_queue=False)["items"])
         if requested_ids:
             requested_set = set(requested_ids)
             factors = [item for item in factors if str(item.get("id")) in requested_set]
-        pit_overview = build_factor_list_pit_overview(self.market_data_repository)
+        pit_overview = self._factor_list_pit_overview()
         diagnostic_mode = str(payload.get("diagnostic_mode") or "SANDBOX").upper()
         if diagnostic_mode not in {"VERIFIED", "SANDBOX"}:
             diagnostic_mode = "SANDBOX"
@@ -8820,6 +9899,7 @@ class FactorResearchService:
     def _decode_factor_row(self, row: Mapping[str, Any], pit_overview: Mapping[str, Any]) -> dict[str, Any]:
         factor = dict(row)
         factor["name"] = _factor_display_name_from_row(row)
+        factor["description"] = factor.get("institutional_note") or None
         factor["tags"] = [str(item) for item in _decode_json_list(factor.pop("tags_json", "[]"))]
         factor["offline_detail"] = _decode_json_dict(factor.pop("offline_detail_json", "{}"))
         factor["offline_reason"] = factor.get("offline_reason") or None
@@ -9052,9 +10132,10 @@ class FactorResearchService:
         market: str | None = None,
         status: str | None = None,
         lifecycle: str | None = None,
+        include_governance_queue: bool = True,
     ) -> dict[str, Any]:
         self.ensure_default_factors()
-        pit_overview = build_factor_list_pit_overview(self.market_data_repository)
+        pit_overview = self._factor_list_pit_overview()
         rows = self.storage.fetch_all(
             """
             SELECT *
@@ -9081,26 +10162,38 @@ class FactorResearchService:
             ]
         if tag:
             factors = [item for item in factors if tag in item.get("tags", [])]
-        lifecycle_mode = str(lifecycle or "online").strip().lower() or "online"
-        if lifecycle_mode not in {"online", "offline", "all"}:
+        lifecycle_mode = str(lifecycle).strip().lower() if lifecycle is not None else "active"
+        lifecycle_mode = lifecycle_mode or "active"
+        if lifecycle_mode not in {"active", "online", "offline", "all", "sandbox", "to_be_verified", "archived"}:
             raise ValueError(f"Unsupported factor lifecycle filter: {lifecycle}")
         lifecycle_base = list(factors)
-        online_factors = [item for item in lifecycle_base if not self._factor_is_offline(item)]
-        offline_factors = [item for item in lifecycle_base if self._factor_is_offline(item)]
+        online_factors = [item for item in lifecycle_base if str(item.get("lifecycle") or "") == "online"]
+        sandbox_factors = [item for item in lifecycle_base if str(item.get("lifecycle") or "") == "sandbox"]
+        to_be_verified_factors = [item for item in lifecycle_base if str(item.get("lifecycle") or "") == "to_be_verified"]
+        archived_factors = [item for item in lifecycle_base if str(item.get("lifecycle") or "") == "archived"]
+        active_factors = [item for item in lifecycle_base if str(item.get("lifecycle") or "") != "archived"]
         if lifecycle_mode == "online":
             factors = online_factors
-        elif lifecycle_mode == "offline":
-            factors = offline_factors
+        elif lifecycle_mode == "active":
+            factors = active_factors
+        elif lifecycle_mode in {"offline", "archived"}:
+            factors = archived_factors
+        elif lifecycle_mode == "sandbox":
+            factors = sandbox_factors
+        elif lifecycle_mode == "to_be_verified":
+            factors = to_be_verified_factors
         else:
             factors = lifecycle_base
-        governance_actions = []
-        for item in online_factors:
-            governance_actions.extend(self._governance_action_from_factor(item))
-        governance_actions = [
-            item
-            for item in governance_actions
-            if str(item.get("kind") or "").upper() in FACTOR_GOVERNANCE_TASK_KINDS
-        ]
+        factor_lookup = {
+            str(item.get("id") or ""): item
+            for item in lifecycle_base
+            if str(item.get("id") or "").strip()
+        }
+        governance_queue_count = (
+            sum(self._factor_governance_task_count(item, factor_lookup=factor_lookup) for item in active_factors)
+            if include_governance_queue
+            else 0
+        )
         strategy_usage_factor_ids = [
             factor_id
             for factor_id in self._strategy_usage_factor_ids()
@@ -9112,9 +10205,15 @@ class FactorResearchService:
                 "total": len(factors),
                 "all_count": len(lifecycle_base),
                 "online_count": len(online_factors),
-                "offline_count": len(offline_factors),
-                "deprecated_count": sum(1 for item in offline_factors if str(item.get("lifecycle_status") or "").upper() == "DEPRECATED"),
-                "pruned_count": sum(1 for item in offline_factors if str(item.get("lifecycle_status") or "").upper() == "PRUNED"),
+                "offline_count": len(archived_factors),
+                "archived_count": len(archived_factors),
+                "lifecycle_sandbox_count": len(sandbox_factors),
+                "to_be_verified_count": len(to_be_verified_factors),
+                "deprecated_count": sum(1 for item in archived_factors if str(item.get("lifecycle_status") or "").upper() == "DEPRECATED"),
+                "pruned_count": sum(1 for item in archived_factors if str(item.get("lifecycle_status") or "").upper() == "PRUNED"),
+                "f1_count": sum(1 for item in lifecycle_base if str(item.get("tier_level") or "") == "F1"),
+                "f2_count": sum(1 for item in lifecycle_base if str(item.get("tier_level") or "") == "F2"),
+                "f3_count": sum(1 for item in lifecycle_base if str(item.get("tier_level") or "") == "F3"),
                 "system_seed_count": sum(1 for item in factors if item.get("source") == "SYSTEM_SEED"),
                 "ready_to_diagnose_count": sum(1 for item in factors if item.get("diagnostic_status") == "READY_TO_DIAGNOSE"),
                 "sandbox_ready_count": sum(1 for item in factors if item.get("diagnostic_status") == "SANDBOX_READY"),
@@ -9123,7 +10222,7 @@ class FactorResearchService:
                 "needs_calibration_count": sum(1 for item in factors if item.get("ui_state") == "needs_calibration"),
                 "decayed_count": sum(1 for item in factors if item.get("ui_state") == "decayed"),
                 "sandbox_count": sum(1 for item in factors if item.get("ui_state") == "sandbox"),
-                "governance_queue_count": len(governance_actions),
+                "governance_queue_count": governance_queue_count,
                 "strategy_usage_factor_count": len(strategy_usage_factor_ids),
                 "strategy_usage_factor_ids": strategy_usage_factor_ids,
                 "pit_status": pit_overview.get("overall_status"),
@@ -9140,6 +10239,9 @@ class FactorResearchService:
         factor_id = descriptor.canonical_id
         now = iso_now()
         tags = [str(item).strip() for item in payload.get("tags") or [] if str(item).strip()]
+        description = str(payload.get("description") or payload.get("institutional_note") or "").strip()
+        if not description:
+            description = "人工因子，需通过 PIT 诊断后才能进入已验证状态。"
         data_requirements = _merge_factor_data_requirements(
             expression,
             (),
@@ -9188,6 +10290,10 @@ class FactorResearchService:
                 """,
                 (f"{factor_id}-v1", factor_id, expression, dumps({"risks": risks, "descriptor": descriptor.as_dict()}), now),
             )
+            conn.execute(
+                "UPDATE factor_definitions SET institutional_note = ?, updated_at = ? WHERE id = ?",
+                (description, now, factor_id),
+            )
         return self.get_factor(factor_id)
 
     def get_factor(self, factor_id: str) -> dict[str, Any]:
@@ -9199,7 +10305,7 @@ class FactorResearchService:
         )
         if not row:
             raise KeyError(f"Factor not found: {factor_id}")
-        pit_overview = build_factor_list_pit_overview(self.market_data_repository)
+        pit_overview = self._factor_list_pit_overview()
         factor = self._decode_factor_row(row, pit_overview)
         versions = self.storage.fetch_all(
             "SELECT * FROM factor_versions WHERE factor_id = ? ORDER BY version DESC",
@@ -9218,6 +10324,7 @@ class FactorResearchService:
         ]
         factor["correlation_cluster"] = self._correlation_cluster(resolved_factor_id)
         self._apply_factor_governance_projection(factor)
+        factor["lineage_tree"] = self._factor_lineage_tree(factor)
         return factor
 
     def _correlation_cluster(self, factor_id: str) -> dict[str, Any]:
@@ -9361,11 +10468,26 @@ class FactorResearchService:
         dataset_status = str(dataset_snapshot.get("status") or "MISSING").upper()
         counts = self.market_data_repository.count_dataset_snapshot_rows(dataset_snapshot_id)
         has_price_rows = int(counts.get("price_bars") or 0) > 0
+        admission = pit_overview.get("factor_admission_coverage")
+        admission_hard_blockers = []
+        admission_allows_verified = False
+        if isinstance(admission, Mapping):
+            admission_hard_blockers = [
+                dict(item)
+                for item in (admission.get("hard_blockers") or [])
+                if isinstance(item, Mapping)
+            ]
+            admission_allows_verified = (
+                str(admission.get("status") or "").upper() == "READY"
+                and bool(admission.get("diagnostics_enabled"))
+                and not bool(admission.get("blocks_factor_admission"))
+                and not admission_hard_blockers
+            )
         if diagnostic_mode == "SANDBOX":
             if not has_price_rows:
                 raise ValueError(f"Sandbox 诊断需要至少存在价格快照行：{dataset_snapshot_id}。")
         elif dataset_status != "READY" or not has_price_rows:
-            if not limited_ready or not has_price_rows:
+            if not has_price_rows or not (limited_ready or admission_allows_verified):
                 raise ValueError(f"诊断数据快照未就绪：{dataset_snapshot_id}。")
 
         universe_snapshot = _snapshot_by_id(
@@ -9428,6 +10550,31 @@ class FactorResearchService:
             if index < window_days or prices[index - window_days] <= 0:
                 return True, None
             return True, prices[index] / prices[index - window_days] - 1.0
+        if category == "size":
+            return True, math.log(prices[index]) if prices[index] > 0 else None
+        if category == "qlty" and metric == "roe":
+            if index < min(126, index + 1):
+                return True, None
+            momentum_window = min(252, index)
+            volatility_window = min(126, index)
+            momentum = prices[index] / prices[index - momentum_window] - 1.0 if momentum_window > 0 and prices[index - momentum_window] > 0 else 0.0
+            returns = [
+                prices[cursor] / prices[cursor - 1] - 1.0
+                for cursor in range(index - volatility_window + 1, index + 1)
+                if cursor > 0 and prices[cursor - 1] > 0
+            ]
+            return True, momentum - 0.5 * (_std(returns) or 0.0)
+        if category == "val" and metric in {"cfp", "ep", "bp"}:
+            return True, 1.0 / prices[index] if prices[index] > 0 else None
+        if category == "liq" and metric == "amihud":
+            if index < 20:
+                return True, None
+            values = [
+                abs(prices[cursor] / prices[cursor - 1] - 1.0) / max(prices[cursor], 1.0)
+                for cursor in range(index - 19, index + 1)
+                if cursor > 0 and prices[cursor - 1] > 0
+            ]
+            return True, _mean(values)
         if category != "vol":
             return False, None
         if metric in {"", "realized"}:
@@ -9497,6 +10644,22 @@ class FactorResearchService:
 
         if FACTOR_REFERENCE_TOKEN_PATTERN.fullmatch(inner):
             return value_for(inner)
+        residual_match = RESIDUAL_FACTOR_REFERENCE_PATTERN.fullmatch(inner)
+        if residual_match:
+            target_token = residual_match.group("target")
+            control_token = residual_match.group("by")
+            if not (
+                FACTOR_REFERENCE_TOKEN_PATTERN.fullmatch(target_token)
+                and FACTOR_REFERENCE_TOKEN_PATTERN.fullmatch(control_token)
+            ):
+                return False, None
+            target_recognized, target_value = value_for(target_token)
+            control_recognized, control_value = value_for(control_token)
+            if not target_recognized or not control_recognized:
+                return False, None
+            if target_value is None or control_value is None:
+                return True, None
+            return True, target_value - control_value
         binary_match = re.fullmatch(
             rf"({FACTOR_REFERENCE_TOKEN_SOURCE})([+\-*/])({FACTOR_REFERENCE_TOKEN_SOURCE})",
             inner,
@@ -9566,6 +10729,30 @@ class FactorResearchService:
                 if prices[cursor - 1] > 0
             ]
 
+        def window_volumes(window: int) -> list[float]:
+            if index + 1 < window or not rows:
+                return []
+            return [
+                _coerce_float(rows[cursor].get("volume"))
+                for cursor in range(index - window + 1, index + 1)
+                if _coerce_float(rows[cursor].get("volume")) > 0
+            ]
+
+        def rolling_volume_return_pairs(window: int) -> tuple[list[float], list[float]]:
+            if index < window or not rows:
+                return [], []
+            volumes: list[float] = []
+            abs_returns: list[float] = []
+            for cursor in range(index - window + 1, index + 1):
+                if cursor <= 0 or prices[cursor - 1] <= 0:
+                    continue
+                volume = _coerce_float(rows[cursor].get("volume"))
+                if volume <= 0:
+                    continue
+                volumes.append(volume)
+                abs_returns.append(abs(prices[cursor] / prices[cursor - 1] - 1.0))
+            return volumes, abs_returns
+
         def paired_market_returns(window: int) -> tuple[list[float], list[float]]:
             if index < window or not rows:
                 return [], []
@@ -9633,6 +10820,114 @@ class FactorResearchService:
                 _coerce_float(fundamental.get("capex")),
             )
 
+        ts_rank_match = re.fullmatch(r"Ts_?Rank\(Return\(Close,(\d+)\),(\d+)\)", normalized, flags=re.IGNORECASE)
+        if ts_rank_match:
+            return_window = int(ts_rank_match.group(1))
+            rank_window = int(ts_rank_match.group(2))
+            if index < return_window:
+                return None
+            current = prices[index] / prices[index - return_window] - 1.0 if prices[index - return_window] > 0 else None
+            if current is None:
+                return None
+            values = []
+            start = max(return_window, index - rank_window + 1)
+            for cursor in range(start, index + 1):
+                prior = prices[cursor - return_window]
+                if prior > 0:
+                    values.append(prices[cursor] / prior - 1.0)
+            if not values:
+                return None
+            return sum(1 for value in values if value <= current) / len(values)
+        risk_adjusted_momentum_match = re.fullmatch(
+            r"Return\(Close,(\d+)\)/(?:Std|StdDev)\(Return\(Close,1\),(\d+)\)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if risk_adjusted_momentum_match:
+            return_window = int(risk_adjusted_momentum_match.group(1))
+            volatility_window = int(risk_adjusted_momentum_match.group(2))
+            if index < max(return_window, volatility_window) or prices[index - return_window] <= 0:
+                return None
+            denominator = _std(daily_returns(volatility_window))
+            if denominator is None or abs(denominator) <= 1e-12:
+                return None
+            return (prices[index] / prices[index - return_window] - 1.0) / denominator
+        path_efficiency_match = re.fullmatch(
+            r"Abs\(Close-Close\(t-(\d+)\)\)/Sum\(Abs\(Close-Close\(t-1\)\),(\d+)\)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if path_efficiency_match:
+            lag_window = int(path_efficiency_match.group(1))
+            path_window = int(path_efficiency_match.group(2))
+            if lag_window != path_window or index < max(lag_window, path_window):
+                return None
+            denominator = sum(
+                abs(prices[cursor] - prices[cursor - 1])
+                for cursor in range(index - path_window + 1, index + 1)
+                if cursor > 0 and prices[cursor] > 0 and prices[cursor - 1] > 0
+            )
+            if denominator <= 1e-12:
+                return None
+            return abs(prices[index] - prices[index - lag_window]) / denominator
+        pv_divergence_match = re.fullmatch(
+            r"Correlation\(Rank\(Close\),Rank\(Volume\),(\d+)\)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if pv_divergence_match:
+            window = int(pv_divergence_match.group(1))
+            if index + 1 < window:
+                return None
+            close_values = [
+                prices[cursor]
+                for cursor in range(index - window + 1, index + 1)
+                if prices[cursor] > 0
+            ]
+            volume_values = window_volumes(window)
+            if len(close_values) != len(volume_values) or len(close_values) < 2:
+                return None
+            return _pearson(_rank(close_values), _rank(volume_values))
+        volume_concentration_match = re.fullmatch(
+            r"Correlation\(Volume,Abs\(Return\(Close,1\)\),(\d+)\)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if volume_concentration_match:
+            volumes, abs_returns = rolling_volume_return_pairs(int(volume_concentration_match.group(1)))
+            return _pearson(volumes, abs_returns)
+        return_skew_match = re.fullmatch(r"Skew\(Return\(Close,1\),(\d+)\)", normalized, flags=re.IGNORECASE)
+        if return_skew_match:
+            return _skew(daily_returns(int(return_skew_match.group(1))))
+        volatility_asymmetry_match = re.fullmatch(
+            r"(?:Std|StdDev)\(RetUp,(\d+)\)/(?:Std|StdDev)\(RetDown,(\d+)\)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if volatility_asymmetry_match:
+            up_window = int(volatility_asymmetry_match.group(1))
+            down_window = int(volatility_asymmetry_match.group(2))
+            if up_window != down_window:
+                return None
+            returns = daily_returns(up_window)
+            upside_std = _std([value for value in returns if value > 0])
+            downside_std = _std([value for value in returns if value < 0])
+            if upside_std is None or downside_std is None or downside_std <= 1e-12:
+                return None
+            return upside_std / downside_std
+        overnight_match = re.fullmatch(r"Mean\(Open/Close\(t-1\),(\d+)\)", normalized, flags=re.IGNORECASE)
+        if overnight_match:
+            window = int(overnight_match.group(1))
+            if index < window or not rows:
+                return None
+            values = []
+            for cursor in range(index - window + 1, index + 1):
+                if cursor <= 0 or prices[cursor - 1] <= 0:
+                    continue
+                open_price = _coerce_float(rows[cursor].get("open"))
+                if open_price > 0:
+                    values.append(open_price / prices[cursor - 1])
+            return _mean(values)
         if factor_id == "s_beta_market_252d_raw" or normalized.startswith("BetaToMarket("):
             return rolling_beta(252)
         if factor_id == "s_beta_resid_252d_z" or normalized.startswith("ResidualVolatility("):
@@ -9698,8 +10993,8 @@ class FactorResearchService:
             if index < 21 or prices[index - 21] <= 0:
                 return None
             return prices[index] / prices[index - 21] - 1.0
-        if factor_id in {"s_vol_252d_rank", "s_vol_252d_raw", "lowvol_realized_252d"} or normalized.startswith("Std(Return(Close,1),"):
-            match = re.search(r"Std\(Return\(Close,1\),(\d+)\)", normalized)
+        if factor_id in {"s_vol_252d_rank", "s_vol_252d_raw", "lowvol_realized_252d"} or re.match(r"^(?:Std|StdDev)\(Return\(Close,1\),", normalized, flags=re.IGNORECASE):
+            match = re.search(r"(?:Std|StdDev)\(Return\(Close,1\),(\d+)\)", normalized, flags=re.IGNORECASE)
             window = int(match.group(1)) if match else 252
             if index < window:
                 return None
@@ -9730,6 +11025,8 @@ class FactorResearchService:
             capex = _coerce_float(fundamental.get("capex"))
             provider_enterprise_value = _coerce_float(fundamental.get("provider_enterprise_value"))
             stored_enterprise_value = _coerce_float(fundamental.get("enterprise_value"))
+            net_income = _coerce_float(fundamental.get("net_income"))
+            total_assets = _coerce_float(fundamental.get("total_assets"))
             total_debt = _coerce_float(fundamental.get("total_debt"))
             cash_and_equivalents = _coerce_float(fundamental.get("cash_and_equivalents"))
             enterprise_value = (
@@ -9739,6 +11036,8 @@ class FactorResearchService:
                 if stored_enterprise_value > 0
                 else market_cap + total_debt - cash_and_equivalents
             )
+            if "NetIncome-OperatingCashFlow" in normalized and "TotalAssets" in normalized:
+                return -((net_income - operating_cash_flow) / total_assets) if total_assets > 0 else None
             if factor_id == "s_alpha_ffblend_cur_rank" or normalized.startswith("FFBlend("):
                 if index < 252 or prices[index - 252] <= 0 or market_cap <= 0:
                     return None
@@ -9748,14 +11047,27 @@ class FactorResearchService:
                 size_penalty = math.log(market_cap) if market_cap > 0 else 0.0
                 return 0.45 * momentum + 1.5 * earnings_yield + 0.5 * roe - 0.02 * size_penalty
             if factor_id == "s_liq_turnover_20d_rank" or normalized.startswith("Mean(Turnover,"):
-                if index < 20 or shares_outstanding <= 0 or not rows:
+                match = re.search(r"Mean\(Turnover,(\d+)\)", normalized)
+                window = int(match.group(1)) if match else 20
+                if index + 1 < window or shares_outstanding <= 0 or not rows:
                     return None
                 turnover_values = [
                     _coerce_float(rows[cursor].get("volume")) / shares_outstanding
-                    for cursor in range(index - 19, index + 1)
+                    for cursor in range(index - window + 1, index + 1)
                     if _coerce_float(rows[cursor].get("volume")) > 0
                 ]
                 return _mean(turnover_values)
+            turnover_skew_match = re.fullmatch(r"Skew\(Turnover,(\d+)\)", normalized, flags=re.IGNORECASE)
+            if turnover_skew_match:
+                window = int(turnover_skew_match.group(1))
+                if index + 1 < window or shares_outstanding <= 0 or not rows:
+                    return None
+                turnover_values = [
+                    _coerce_float(rows[cursor].get("volume")) / shares_outstanding
+                    for cursor in range(index - window + 1, index + 1)
+                    if _coerce_float(rows[cursor].get("volume")) > 0
+                ]
+                return _skew(turnover_values)
             if factor_id == "s_inv_assetgrowth_1y_rank" or "SharesOutstandingGrowth" in normalized:
                 capex_intensity = capex / market_cap if market_cap > 0 else 0.0
                 current_date = _parse_date(rows[index].get("date")) if rows else None
@@ -9949,6 +11261,15 @@ class FactorResearchService:
         fundamental_cursor_by_symbol = {symbol: 0 for symbol in sorted_fundamentals}
         residual_reference = _parse_residual_factor_reference(expression)
         date_values: dict[str, dict[str, dict[str, float]]] = {}
+        all_observation_dates = sorted(
+            {
+                str(row.get("date") or "")
+                for rows in series_by_symbol.values()
+                for row in rows
+                if start_date <= str(row.get("date") or "") <= end_date
+            }
+        )
+        global_observation_dates = all_observation_dates[::21]
 
         def compute_diagnostic_value(
             prices: Sequence[float],
@@ -10039,9 +11360,16 @@ class FactorResearchService:
                         entry["neutralizer_value"] = neutralizer_value
                     date_values.setdefault(observation_date, {})[symbol] = entry
                 continue
-            for index in range(0, max(len(rows) - return_window_days, 0), 21):
-                observation_date = str(rows[index].get("date") or "")
-                if observation_date < start_date or observation_date > end_date:
+            row_index_by_date = {
+                str(row.get("date") or ""): index
+                for index, row in enumerate(rows)
+                if str(row.get("date") or "")
+            }
+            for observation_date in global_observation_dates:
+                index = row_index_by_date.get(observation_date)
+                if index is None:
+                    continue
+                if index < 0 or index >= len(prices) or index + return_window_days >= len(prices):
                     continue
                 fundamental = None
                 if symbol_fundamentals:
@@ -10077,8 +11405,9 @@ class FactorResearchService:
                     entry["neutralizer_value"] = neutralizer_value
                 date_values.setdefault(observation_date, {})[symbol] = entry
         observations = []
+        min_cross_section_count = _diagnostic_min_cross_section_count(len(symbols))
         for observation_date, symbol_map in sorted(date_values.items()):
-            if len(symbol_map) < 3:
+            if len(symbol_map) < min_cross_section_count:
                 continue
             raw_factor_values = [item["value"] for item in symbol_map.values()]
             operator = (
@@ -10127,6 +11456,21 @@ class FactorResearchService:
         if diagnostic_mode not in {"VERIFIED", "SANDBOX"}:
             raise ValueError("诊断模式必须是 VERIFIED 或 SANDBOX。")
         pit_overview = self._pit_overview()
+        admission = pit_overview.get("factor_admission_coverage")
+        admission_hard_blockers = []
+        admission_allows_verified = False
+        if isinstance(admission, Mapping):
+            admission_hard_blockers = [
+                dict(item)
+                for item in (admission.get("hard_blockers") or [])
+                if isinstance(item, Mapping)
+            ]
+            admission_allows_verified = (
+                str(admission.get("status") or "").upper() == "READY"
+                and bool(admission.get("diagnostics_enabled"))
+                and not bool(admission.get("blocks_factor_admission"))
+                and not admission_hard_blockers
+            )
         research_waiver = pit_overview.get("research_waiver") if isinstance(pit_overview.get("research_waiver"), Mapping) else None
         pit_readiness_mode = str(pit_overview.get("overall_status") or "BLOCKED").upper()
         ignored_symbols = [
@@ -10147,9 +11491,10 @@ class FactorResearchService:
             diagnostic_mode == "VERIFIED"
             and factor.get("diagnostic_status") == "SANDBOX_READY"
             and pit_readiness_mode != "LIMITED_READY"
+            and not admission_allows_verified
         ):
             blockers = factor.get("readiness_blockers") or []
-            missing_windows = blockers[0].get("missing_windows") if blockers and isinstance(blockers[0], Mapping) else []
+            missing_windows = (blockers[0].get("missing_windows") if blockers and isinstance(blockers[0], Mapping) else []) or []
             labels = [
                 str(item.get("label") or "")
                 for item in missing_windows
@@ -10200,10 +11545,8 @@ class FactorResearchService:
         monotonicity = self._factor_group_return_shape(
             {"group_returns": group_returns, "group_return_series": group_return_series}
         )
-        coverage = round(
-            min(1.0, (sum(int(item["symbol_count"]) for item in observations) / max(1, len(requested_symbols) * len(observations)))) * 100.0,
-            2,
-        )
+        coverage_detail = _factor_diagnostic_coverage_detail(observations, requested_symbols, series_by_symbol)
+        coverage = float(coverage_detail["coverage"])
         risk_flags = []
         if abs(rank_ic_mean or 0.0) < 0.02:
             risk_flags.append("Rank IC 接近 0，预测性较弱。")
@@ -10240,6 +11583,7 @@ class FactorResearchService:
             "rank_ic": _safe_round(rank_ic_mean, 4),
             "ir": _safe_round(ir, 4),
             "coverage": coverage,
+            "coverage_detail": coverage_detail,
             "group_returns": group_returns,
             "group_return_series": group_return_series[-36:],
             "monotonicity": monotonicity,
@@ -10290,6 +11634,9 @@ class FactorResearchService:
                 "matrix": f"artifacts/factors/{run_id}/diagnostic-matrix.json",
             },
             "symbol_count": len(series_by_symbol),
+            "observation_count": coverage_detail["observation_count"],
+            "average_symbol_count": coverage_detail["average_symbol_count"],
+            "cross_section_threshold": coverage_detail["min_cross_section_symbols"],
             "pit_readiness_mode": pit_readiness_mode,
             "waiver_id": research_waiver.get("id") if isinstance(research_waiver, Mapping) else None,
             "ignored_symbol_count": len(ignored_symbols),

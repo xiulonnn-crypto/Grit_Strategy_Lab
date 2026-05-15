@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import sqlite3
+
 from datetime import date, timedelta
 
 from grit_backtest_platform import _real_service_rebuilt as real_service_module
+from grit_backtest_platform.factor_research import validate_factor_expression
 from grit_backtest_platform.storage import dumps
 from tests.api_test_support import assert_ok, create_test_client
 
@@ -17,7 +20,7 @@ def _business_days(start: date, count: int) -> list[date]:
     return days
 
 
-def seed_ready_pit_data(client, *, start: date = date(2014, 1, 2), day_count: int = 3200) -> None:
+def seed_ready_pit_data(client, *, start: date = date(2014, 1, 2), day_count: int = 3200, oscillating: bool = False) -> None:
     service = client.app.state.service
     repository = service.market_data_repository
     symbols = ["AAPL", "MSFT", "NVDA", "AMZN"]
@@ -28,7 +31,11 @@ def seed_ready_pit_data(client, *, start: date = date(2014, 1, 2), day_count: in
         price = 100.0 + symbol_index * 9.0
         drift = 0.0006 + symbol_index * 0.0002
         for day_index, current_day in enumerate(days):
-            price = round(price * (1.0 + drift + (day_index % 7) * 0.00005), 4)
+            if oscillating:
+                cycle = (0.006, -0.004, 0.003, -0.005, 0.007, -0.002, 0.001)
+                price = round(max(1.0, price * (1.0 + drift + cycle[day_index % len(cycle)])), 4)
+            else:
+                price = round(price * (1.0 + drift + (day_index % 7) * 0.00005), 4)
             price_bars.append(
                 {
                     "symbol": symbol,
@@ -181,6 +188,105 @@ def mark_price_snapshot_incomplete(
             """,
             (dumps(metadata), f"{date.today().isoformat()}T00:00:00Z"),
         )
+    if hasattr(service, "_invalidate_pit_data_overview_cache"):
+        service._invalidate_pit_data_overview_cache()
+
+
+def seed_partial_fundamental_snapshot(client) -> None:
+    service = client.app.state.service
+    repository = service.market_data_repository
+    fields = ["ltm_earnings", "revenue", "market_cap"]
+    repository.replace_fundamental_snapshot(
+        {
+            "id": "ds-fundamentals",
+            "name": "基础面 PIT 数据",
+            "status": "READY",
+            "as_of": "2026-04-01",
+            "freshness_label": "unit-test partial fundamentals",
+            "start_date": "2025-12-31",
+            "end_date": "2025-12-31",
+            "row_count": 1,
+            "source": "unit_test",
+            "fallback_source": "none",
+            "metadata": {
+                "covered_symbol_count": 1,
+                "total_symbol_count": 4,
+                "available_fields": fields,
+            },
+        },
+        fundamental_points=[
+            {
+                "symbol": "AAPL",
+                "date": "2025-12-31",
+                "period_end_date": "2025-12-31",
+                "publish_date": "2026-02-15",
+                "available_at": "2026-02-15",
+                "ltm_earnings": 10.0,
+                "revenue": 100.0,
+                "market_cap": 2_000_000.0,
+            }
+        ],
+        fundamental_coverage=[
+            {
+                "symbol": "AAPL",
+                "start_date": "2025-12-31",
+                "end_date": "2025-12-31",
+                "observation_count": 1,
+                "fields": fields,
+            }
+        ],
+    )
+    if hasattr(service, "_invalidate_pit_data_overview_cache"):
+        service._invalidate_pit_data_overview_cache()
+
+
+def seed_ready_signal_snapshot(client, dataset_id: str, *, point_count: int = 1, total_symbol_count: int | None = None) -> None:
+    service = client.app.state.service
+    repository = service.market_data_repository
+    entities = [f"SERIES{i:02d}" for i in range(point_count)]
+    if dataset_id == "ds-short-volume":
+        entities = ["AAPL", "MSFT", "NVDA", "AMZN"][: max(1, min(point_count, 4))]
+    repository.replace_signal_snapshot(
+        {
+            "id": dataset_id,
+            "name": dataset_id,
+            "status": "READY",
+            "as_of": "2026-04-01",
+            "freshness_label": "unit-test signal",
+            "start_date": "2026-03-01",
+            "end_date": "2026-04-01",
+            "row_count": len(entities),
+            "source": "unit_test",
+            "fallback_source": "none",
+            "metadata": {
+                "pit_gate_status": "READY",
+                "covered_symbol_count": len(entities),
+                "total_symbol_count": total_symbol_count or len(entities),
+            },
+        },
+        signal_points=[
+            {
+                "entity_key": entity,
+                "date": "2026-04-01",
+                "publish_date": "2026-04-01",
+                "available_at": "2026-04-01",
+                "metric_key": "sample_value",
+                "metric_value": 1.0 + index,
+                "source": "unit_test",
+            }
+            for index, entity in enumerate(entities)
+        ],
+        signal_coverage=[
+            {
+                "entity_key": entity,
+                "start_date": "2026-04-01",
+                "end_date": "2026-04-01",
+                "observation_count": 1,
+                "source": "unit_test",
+            }
+            for entity in entities
+        ],
+    )
     if hasattr(service, "_invalidate_pit_data_overview_cache"):
         service._invalidate_pit_data_overview_cache()
 
@@ -554,7 +660,7 @@ def test_pit_data_overview_exposes_gap_preview_history_and_action_targets(tmp_pa
 
 
 def test_pit_factor_admission_allows_archival_full_ready_gap_without_blocking_10y(tmp_path):
-    client, _db_path = create_test_client(tmp_path)
+    client, db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
     mark_price_snapshot_incomplete(client, missing_symbols=["ZZZZ"])
 
@@ -570,6 +676,46 @@ def test_pit_factor_admission_allows_archival_full_ready_gap_without_blocking_10
     assert payload["factor_diagnostics_enabled"] is True
     assert payload["verified_diagnostics_enabled"] is True
     assert payload["status_reasons"]["factor_admission"]["cause"] == "FACTOR_ADMISSION_10Y_READY"
+
+    created = assert_ok(
+        client.post(
+            "/factors",
+            json={
+                "name": "Volume Concentration",
+                "market": "US",
+                "universe": "SP500",
+                "expression": "Correlation(Volume, Abs(Return(Close,1)),21)",
+                "description": "unit regression factor",
+                "frequency": "DAILY",
+                "direction": "HIGH_IS_BETTER",
+                "descriptor": manual_descriptor(category="liq", metric="vol_conc", window="21d", operator="raw"),
+                "tags": ["manual", "factor_zoo"],
+            },
+        )
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE factor_definitions SET diagnostic_status = 'SANDBOX_READY' WHERE id = ?",
+            (created["id"],),
+        )
+
+    diagnostic = assert_ok(
+        client.post(
+            f"/factors/{created['id']}/diagnostics",
+            json={
+                "start_date": payload["diagnostic_windows"]["verified"]["start_date"],
+                "end_date": payload["as_of_date"],
+                "dataset_snapshot_id": payload["dataset_snapshot_id"],
+                "universe_snapshot_id": payload["universe_snapshot_id"],
+                "return_window_days": 21,
+                "group_count": 5,
+                "diagnostic_mode": "VERIFIED",
+            },
+        )
+    )
+    assert diagnostic["summary"]["factor_id"] == "m_liq_vol_conc_21d_raw"
+    assert diagnostic["summary"]["diagnostic_mode"] == "VERIFIED"
+    assert diagnostic["summary"]["coverage"] > 0
 
 
 def test_pit_factor_admission_surfaces_recomputed_10y_gap_as_repair_warning(tmp_path):
@@ -1078,6 +1224,34 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
     assert by_id["s_beta_market_252d_raw"]["name"] == "市场贝塔代理（252日）"
     assert by_id["s_val_cfp_ltm_raw"]["name"] == "现金流市值比（LTM）"
     assert by_id["s_alpha_ffblend_cur_rank"]["name"] == "Fama-French 风格合成 Alpha"
+    assert payload["summary"]["f1_count"] >= 1
+    assert payload["summary"]["f2_count"] >= 1
+    assert payload["summary"]["f3_count"] >= 1
+    assert payload["summary"]["lifecycle_sandbox_count"] >= 0
+    assert payload["summary"]["to_be_verified_count"] >= 0
+    assert by_id["s_size_mcap_cur_raw"]["tier_level"] == "F1"
+    assert by_id["s_size_mcap_cur_raw"]["tier_label"] == "F1 原始"
+    assert by_id["s_val_ep_ltm_raw"]["tier_level"] == "F2"
+    assert by_id["s_mom_12m1m_rank"]["tier_level"] == "F2"
+    assert by_id["s_alpha_ffblend_cur_rank"]["tier_level"] == "F3"
+    assert by_id["s_alpha_ffblend_cur_rank"]["tier_label"] == "F3 组合"
+    assert by_id["s_mom_12m1m_rank"]["lifecycle"] == "online"
+    assert by_id["s_mom_12m1m_rank"]["lifecycle_label"] == "线上"
+    assert by_id["s_mom_12m1m_rank"]["factor_level"] in {"B", "C"}
+    assert by_id["s_mom_12m1m_rank"]["factor_level_label"] in {"B 观察", "C 待校准"}
+    assert "T" in by_id["s_mom_12m1m_rank"]["op_status"]["completed"]
+    assert {light["code"] for light in by_id["s_mom_12m1m_rank"]["op_status"]["lights"]} == {"W", "N", "Z", "T"}
+    assert by_id["s_alpha_ffblend_cur_rank"]["lineage_summary"]["parent_count"] >= 4
+    assert by_id["s_alpha_ffblend_cur_rank"]["lineage_summary"]["has_lineage"] is True
+    assert set(by_id["s_alpha_ffblend_cur_rank"]["lineage_summary"]["parent_ids"]) >= {
+        "s_mom_12m1m_rank",
+        "s_val_ep_ltm_raw",
+        "s_qlty_roe_ltm_raw",
+        "s_size_cur_log",
+    }
+    assert set(by_id["s_size_mcap_cur_raw"]["lineage_summary"]["relation_types"]) >= {"DIRECT_SOURCE"}
+    quality_view = by_id["s_mom_12m1m_rank"]["quality_view"]
+    assert set(quality_view) >= {"rank_ic", "ir", "decay_label", "coverage", "sparkline"}
     for factor_id in canonical_ids:
         assert by_id[factor_id]["diagnostic_status"] == "READY_TO_DIAGNOSE"
         assert by_id[factor_id]["descriptor"]["canonical_id"] == factor_id
@@ -1111,6 +1285,34 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
     assert legacy_detail["name"] == "滚动市盈率倒数 (LTM)"
     assert assert_ok(client.get("/factors/value_bp_latest"))["id"] == "s_val_bp_latest_raw"
     assert assert_ok(client.get("/factors/quality_roe_ltm"))["id"] == "s_qlty_roe_ltm_raw"
+    detail = assert_ok(client.get("/factors/s_alpha_ffblend_cur_rank"))
+    assert detail["lineage_tree"]["node"]["id"] == "s_alpha_ffblend_cur_rank"
+    assert detail["lineage_tree"]["parent_count"] >= 4
+    assert {parent["id"] for parent in detail["lineage_tree"]["parents"]} >= {
+        "s_mom_12m1m_rank",
+        "s_val_ep_ltm_raw",
+        "s_qlty_roe_ltm_raw",
+        "s_size_cur_log",
+    }
+
+
+def test_factor_library_lifecycle_queries_accept_phase1_aliases(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    assert_ok(client.get("/factors"))
+
+    all_payload = assert_ok(client.get("/factors?lifecycle=all"))
+    online_payload = assert_ok(client.get("/factors?lifecycle=online"))
+    sandbox_payload = assert_ok(client.get("/factors?lifecycle=sandbox"))
+    to_be_verified_payload = assert_ok(client.get("/factors?lifecycle=to_be_verified"))
+    archived_payload = assert_ok(client.get("/factors?lifecycle=archived"))
+    offline_alias_payload = assert_ok(client.get("/factors?lifecycle=offline"))
+
+    assert len(all_payload["items"]) >= len(online_payload["items"])
+    assert all(item["lifecycle"] == "online" for item in online_payload["items"])
+    assert all(item["lifecycle"] == "sandbox" for item in sandbox_payload["items"])
+    assert all(item["lifecycle"] == "to_be_verified" for item in to_be_verified_payload["items"])
+    assert all(item["lifecycle"] == "archived" for item in archived_payload["items"])
+    assert [item["id"] for item in archived_payload["items"]] == [item["id"] for item in offline_alias_payload["items"]]
 
 
 def test_factor_library_projects_standard_factor_categories(tmp_path):
@@ -2423,6 +2625,80 @@ def test_factor_governance_prune_keeps_cluster_mvp_and_soft_offlines_redundant_f
     assert prune_id not in online_ids
 
 
+def test_factor_governance_prune_execute_is_idempotent_for_stale_confirmation(tmp_path):
+    client, db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client, oscillating=True)
+    for expected_id, name, expression, descriptor in [
+        (
+            "m_liq_pvdiv_10d_raw",
+            "价量背离因子",
+            "Correlation(Rank(Close), Rank(Volume), 10)",
+            manual_descriptor(category="liq", metric="pvdiv", window="10d", operator="raw"),
+        ),
+        (
+            "m_liq_vol_conc_21d_raw",
+            "量能汇聚因子",
+            "Correlation(Volume, Abs(Return(Close,1)),21)",
+            manual_descriptor(category="liq", metric="vol_conc", window="21d", operator="raw"),
+        ),
+    ]:
+        created = assert_ok(
+            client.post(
+                "/factors",
+                json={
+                    "name": name,
+                    "market": "US",
+                    "universe": "SP500",
+                    "expression": expression,
+                    "description": name,
+                    "frequency": "DAILY",
+                    "direction": "HIGH_IS_BETTER",
+                    "descriptor": descriptor,
+                    "tags": ["manual", "factor_zoo"],
+                },
+            )
+        )
+        assert created["id"] == expected_id
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE factor_definitions SET lifecycle_status = 'VERIFIED' WHERE id IN (?, ?)",
+            ("m_liq_pvdiv_10d_raw", "m_liq_vol_conc_21d_raw"),
+        )
+    seed_factor_diagnostic_summary(
+        client,
+        "m_liq_pvdiv_10d_raw",
+        governance_ready_summary(rank_ic=0.021, ir=0.8, coverage=98.99),
+        run_id="fdiag_m_liq_pvdiv_10d_raw_weak",
+    )
+    seed_factor_diagnostic_summary(
+        client,
+        "m_liq_vol_conc_21d_raw",
+        governance_ready_summary(rank_ic=0.0253, ir=1.0171, coverage=98.99),
+        run_id="fdiag_m_liq_vol_conc_21d_raw_mvp",
+    )
+
+    overview = assert_ok(client.get("/factor-governance/overview"))
+    action = next(item for item in overview["actions"] if item["id"] == "gq_prune_m_liq_pvdiv_10d_raw")
+    payload = {
+        "confirm": True,
+        "command": "PRUNE",
+        "factor_ids": ["m_liq_pvdiv_10d_raw"],
+        "keep_factor_id": action["keep_factor_id"],
+        "reason": action["offline_reason"],
+        "detail": action.get("offline_detail", {}),
+    }
+
+    executed = assert_ok(client.post(f"/factor-governance/actions/{action['id']}/execute", json=payload))
+    replayed = assert_ok(client.post(f"/factor-governance/actions/{action['id']}/execute", json=payload))
+
+    assert executed["command"] == "PRUNE"
+    assert replayed["command"] == "PRUNE"
+    assert replayed["keep_factor_id"] == "m_liq_vol_conc_21d_raw"
+    assert replayed["affected_factor_ids"] == ["m_liq_pvdiv_10d_raw"]
+    assert replayed["items"][0]["lifecycle_status"] == "PRUNED"
+    assert all(item["id"] != action["id"] for item in replayed["governance_overview"]["actions"])
+
+
 def test_factor_batch_preview_is_read_only_and_returns_summary(tmp_path):
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
@@ -2482,6 +2758,48 @@ def test_factor_batch_preview_hot_cache_reuses_loaded_pit_frame(tmp_path, monkey
     assert load_calls == 1
     assert second["batch_summary"] == first["batch_summary"]
     assert second["items"] == first["items"]
+
+
+def test_factor_batch_preview_skips_governance_queue_build(tmp_path, monkeypatch):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    factor_service = client.app.state.service._factor_research_service()
+
+    def fail_governance_action(*_args, **_kwargs):
+        raise AssertionError("preview hot path must not build governance actions")
+
+    monkeypatch.setattr(factor_service, "_governance_action_from_factor", fail_governance_action)
+
+    preview = assert_ok(
+        client.post(
+            "/factors/diagnostics/preview",
+            json={
+                "batch": True,
+                "factor_ids": ["s_mom_12m1m_rank", "s_val_ep_ltm_raw"],
+                "diagnostic_mode": "SANDBOX",
+                "include": ["ic", "ir", "groups", "turnover", "correlation", "blockers"],
+            },
+        )
+    )
+
+    assert preview["mode"] == "BATCH"
+    assert {item["factor_id"] for item in preview["items"]} == {"s_mom_12m1m_rank", "s_val_ep_ltm_raw"}
+
+
+def test_factor_list_uses_lightweight_governance_queue_count(tmp_path, monkeypatch):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    factor_service = client.app.state.service._factor_research_service()
+
+    def fail_governance_action(*_args, **_kwargs):
+        raise AssertionError("factor list should expose only lightweight queue count")
+
+    monkeypatch.setattr(factor_service, "_governance_action_from_factor", fail_governance_action)
+
+    payload = assert_ok(client.get("/factors?lifecycle=online"))
+
+    assert payload["items"]
+    assert "governance_queue_count" in payload["summary"]
 
 
 def test_manual_factor_validation_and_pit_bound_diagnostics(tmp_path):
@@ -2577,6 +2895,243 @@ def test_manual_factor_validation_and_pit_bound_diagnostics(tmp_path):
     assert result["summary"]["universe_snapshot_id"] == "un-sp500"
     assert result["summary"]["diagnostic_mode"] == "VERIFIED"
     assert result["summary"]["coverage"] > 0
+
+
+def test_factor_diagnostic_uses_global_calendar_for_staggered_symbol_history(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    factor_service = client.app.state.service._factor_research_service()
+    symbols = [f"T{i:03d}" for i in range(200)]
+    days = _business_days(date(2020, 1, 2), 180)
+    bars_by_symbol = {}
+    for symbol_index, symbol in enumerate(symbols):
+        offset = symbol_index % 7
+        price = 100.0 + symbol_index * 0.1
+        rows = []
+        for day_index, current_day in enumerate(days[offset:]):
+            price = round(price * (1.0 + 0.0004 + (day_index % 5) * 0.0001), 4)
+            rows.append(
+                {
+                    "date": current_day.isoformat(),
+                    "open": price * 0.999,
+                    "high": price * 1.002,
+                    "low": price * 0.998,
+                    "close": price,
+                    "adj_close": price,
+                    "volume": 1_000_000 + day_index,
+                }
+            )
+        bars_by_symbol[symbol] = rows
+
+    observations, _series_by_symbol, requested_symbols = factor_service._diagnostic_observations(
+        factor_id="m_test_global_calendar_1d_raw",
+        expression="Return(Close,1)",
+        direction="HIGH_IS_BETTER",
+        descriptor={"operator": "raw"},
+        dataset_snapshot_id="ds-price",
+        fundamental_snapshot_id="ds-fundamentals",
+        universe_snapshot_id="un-sp500",
+        start_date=days[21].isoformat(),
+        end_date=days[-22].isoformat(),
+        return_window_days=21,
+        symbols_override=symbols,
+        bars_by_symbol_override=bars_by_symbol,
+    )
+
+    counts = [item["symbol_count"] for item in observations]
+    assert observations
+    assert min(counts) == len(symbols)
+    assert round(sum(counts) / (len(requested_symbols) * len(counts)) * 100.0, 2) == 100.0
+
+
+def test_seed_factor_descriptions_are_generated_and_persisted(tmp_path):
+    client, db_path = create_test_client(tmp_path)
+
+    payload = assert_ok(client.get("/factors"))
+    seed = next(item for item in payload["items"] if item["id"] == "s_mom_12m1m_rank")
+
+    assert seed["description"].startswith("逻辑：")
+    assert "作用：" in seed["description"]
+    assert seed["institutional_note"] == seed["description"]
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT institutional_note FROM factor_definitions WHERE id = ?",
+            ("s_mom_12m1m_rank",),
+        ).fetchone()
+
+    assert row is not None
+    assert str(row["institutional_note"]).startswith("逻辑：")
+
+
+def test_planned_manual_factor_description_repairs_prior_formula_fallback(tmp_path):
+    client, db_path = create_test_client(tmp_path)
+    stale_description = (
+        "逻辑：开盘/收盘跳空因子根据公式 Mean(Open / Close(t-1),21) 构造可回放截面信号。"
+        "作用：用于因子库诊断、排序和模型候选评估。"
+    )
+    expected_description = "逻辑：衡量过去一个月平均隔夜收益。作用：捕捉非交易时段信息流入，但诊断中保留日内承接风险提示。"
+    created = assert_ok(
+        client.post(
+            "/factors",
+            json={
+                "name": "Overnight Alpha",
+                "market": "US",
+                "universe": "SP500",
+                "expression": "Mean(Open / Close(t-1),21)",
+                "description": stale_description,
+                "frequency": "DAILY",
+                "direction": "HIGH_IS_BETTER",
+                "descriptor": manual_descriptor(category="alpha", metric="overnight", window="21d", operator="raw"),
+                "tags": ["manual", "factor_zoo"],
+            },
+        )
+    )
+
+    assert created["id"] == "m_alpha_overnight_21d_raw"
+    assert created["description"] == expected_description
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE factor_definitions SET institutional_note = ? WHERE id = ?",
+            (stale_description, "m_alpha_overnight_21d_raw"),
+        )
+
+    client.app.state.service._factor_research_service().ensure_default_factors()
+    repaired = assert_ok(client.get("/factors/m_alpha_overnight_21d_raw"))
+
+    assert repaired["description"] == expected_description
+    assert repaired["institutional_note"] == expected_description
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT institutional_note FROM factor_definitions WHERE id = ?",
+            ("m_alpha_overnight_21d_raw",),
+        ).fetchone()
+
+    assert row is not None
+    assert row["institutional_note"] == expected_description
+
+
+def test_planned_manual_factor_zoo_formulas_create_with_descriptions_and_diagnose(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client, oscillating=True)
+    pit = assert_ok(client.get("/pit-data"))
+    specs = [
+        (
+            "m_mom_riskadj_126x21_raw",
+            "Risk-Adjusted Momentum",
+            "Return(Close,126) / StdDev(Return(Close,1),21)",
+            "HIGH_IS_BETTER",
+            manual_descriptor(category="mom", metric="riskadj", window="126x21", operator="raw"),
+            "逻辑：通过 21 日波动率平滑半年收益，避免选出暴涨暴跌股票。作用：提升夏普比率，减少净值回撤。",
+        ),
+        (
+            "m_qlty_accruals_ltm_raw",
+            "Accruals Quality",
+            "-((NetIncome - OperatingCashFlow) / TotalAssets)",
+            "HIGH_IS_BETTER",
+            manual_descriptor(category="qlty", metric="accruals", window="ltm", operator="raw"),
+            "逻辑：衡量净利润与经营现金流的应计差额。作用：作为负向剔除指标，规避业绩造假或盈余质量差的标的。",
+        ),
+        (
+            "m_liq_pvdiv_10d_raw",
+            "Price-Volume Divergence",
+            "Correlation(Rank(Close), Rank(Volume), 10)",
+            "HIGH_IS_BETTER",
+            manual_descriptor(category="liq", metric="pvdiv", window="10d", operator="raw"),
+            "逻辑：观察过去 10 日价格排名与成交量排名相关性。作用：区分放量上涨的健康趋势与缩量上涨/放量滞涨的反转风险。",
+        ),
+        (
+            "m_val_turnover_skew_60d_raw",
+            "Turnover Skewness",
+            "Skew(Turnover,60)",
+            "HIGH_IS_BETTER",
+            manual_descriptor(category="val", metric="turnover_skew", window="60d", operator="raw"),
+            "逻辑：计算过去 60 日换手率偏度。作用：识别筹码在少数交易日集中成交带来的短期超额收益线索。",
+        ),
+        (
+            "m_mom_path_eff_20d_raw",
+            "Price Efficiency",
+            "Abs(Close - Close(t-20)) / Sum(Abs(Close - Close(t-1)),20)",
+            "HIGH_IS_BETTER",
+            manual_descriptor(category="mom", metric="path_eff", window="20d", operator="raw"),
+            "逻辑：用净位移除以路径总长度衡量趋势纯度。作用：配合动量筛掉“电风扇”震荡行情。",
+        ),
+        (
+            "m_vol_asym_updown_60d_raw",
+            "Volatility Asymmetry",
+            "StdDev(RetUp,60) / StdDev(RetDown,60)",
+            "HIGH_IS_BETTER",
+            manual_descriptor(category="vol", metric="asym_updown", window="60d", operator="raw"),
+            "逻辑：分别计算上涨日和下跌日收益波动。作用：识别下跌波动更剧烈的恐慌盘，可作为回撤惩罚项。",
+        ),
+        (
+            "m_liq_vol_conc_21d_raw",
+            "Volume Concentration",
+            "Correlation(Volume, Abs(Return(Close,1)),21)",
+            "HIGH_IS_BETTER",
+            manual_descriptor(category="liq", metric="vol_conc", window="21d", operator="raw"),
+            "逻辑：计算成交量与绝对收益率相关性。作用：筛选大幅价格变动伴随真实放量、机构介入度较高的标的。",
+        ),
+        (
+            "m_vol_ret_skew_252d_raw",
+            "Return Skewness",
+            "Skew(Return(Close,1),252)",
+            "LOW_IS_BETTER",
+            manual_descriptor(category="vol", metric="ret_skew", window="252d", operator="raw"),
+            "逻辑：衡量过去一年收益率分布偏度。作用：过滤高偏度、博彩型、暴涨暴跌标的。",
+        ),
+        (
+            "m_alpha_overnight_21d_raw",
+            "Overnight Alpha",
+            "Mean(Open / Close(t-1),21)",
+            "HIGH_IS_BETTER",
+            manual_descriptor(category="alpha", metric="overnight", window="21d", operator="raw"),
+            "逻辑：衡量过去一个月平均隔夜收益。作用：捕捉非交易时段信息流入，但诊断中保留日内承接风险提示。",
+        ),
+    ]
+
+    for expected_id, name, expression, direction, descriptor, description in specs:
+        preview = assert_ok(client.post("/factors/diagnostics/preview", json={"expression": expression, "lookback_years": 3}))
+        assert preview["status"] == "PREVIEW"
+        created = assert_ok(
+            client.post(
+                "/factors",
+                json={
+                    "name": name,
+                    "market": "US",
+                    "universe": "SP500",
+                    "expression": expression,
+                    "description": description,
+                    "frequency": "DAILY",
+                    "direction": direction,
+                    "descriptor": descriptor,
+                    "tags": ["manual", "factor_zoo"],
+                },
+            )
+        )
+        assert created["id"] == expected_id
+        assert created["description"] == description
+        assert created["institutional_note"] == description
+
+        diagnostic = assert_ok(
+            client.post(
+                f"/factors/{expected_id}/diagnostics",
+                json={
+                    "start_date": pit["diagnostic_windows"]["verified"]["start_date"],
+                    "end_date": pit["as_of_date"],
+                    "dataset_snapshot_id": pit["dataset_snapshot_id"],
+                    "universe_snapshot_id": pit["universe_snapshot_id"],
+                    "return_window_days": 21,
+                    "group_count": 5,
+                    "diagnostic_mode": "VERIFIED",
+                },
+            )
+        )
+        assert diagnostic["summary"]["factor_id"] == expected_id
+        assert diagnostic["summary"]["rank_ic"] is not None
+        assert diagnostic["summary"]["coverage"] > 0
 
 
 def test_factor_sandbox_diagnostic_runs_with_limited_pit_without_verifying(tmp_path):
@@ -2943,6 +3498,70 @@ def test_pit_data_promotes_persisted_consensus_to_observation(tmp_path):
     assert linkage["consensus_sample_gate"]["result_status"] == "OBSERVATION"
 
 
+def test_pit_data_marks_partial_fundamental_fields_as_capability(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    seed_partial_fundamental_snapshot(client)
+
+    pit = assert_ok(client.get("/pit-data"))
+    l2_layer = next(item for item in pit["pit_layer_readiness"] if item["layer_id"] == "l2_fundamental_data")
+    quality_group = next(item for item in pit["factor_diagnostic_readiness"] if item["group_id"] == "quality_valuation")
+    field_module = next(item for item in l2_layer["submodules"] if item["id"] == "fundamental_fields")
+
+    assert pit["fundamental_status"] == "PARTIAL_READY"
+    assert l2_layer["status"] == "PARTIAL_READY"
+    assert field_module["usable"] is True
+    assert field_module["metrics"]["available_field_count"] == 3
+    assert quality_group["status"] == "PARTIAL_READY"
+    assert "fundamental_balance_check" in quality_group["blocked_checks"]
+    assert quality_group["upstream_capabilities"][0]["allowed_actions"] == [
+        "research_preview",
+        "run_sandbox_diagnostics",
+    ]
+
+
+def test_pit_data_exposes_short_volume_without_disabling_sentiment(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    seed_ready_signal_snapshot(client, "ds-short-volume", point_count=2)
+
+    pit = assert_ok(client.get("/pit-data"))
+    l3_layer = next(item for item in pit["pit_layer_readiness"] if item["layer_id"] == "l3_sentiment_data")
+    sentiment_group = next(item for item in pit["factor_diagnostic_readiness"] if item["group_id"] == "sentiment_micro")
+    short_module = next(item for item in l3_layer["submodules"] if item["id"] == "short_volume")
+    linkage = {item["check_id"]: item for item in pit["snapshot_layer_linkage"]}
+
+    assert l3_layer["status"] == "PARTIAL_READY"
+    assert short_module["status"] == "READY"
+    assert short_module["usable"] is True
+    assert sentiment_group["status"] == "PARTIAL_READY"
+    assert sentiment_group["status"] != "DISABLED"
+    assert "short_volume_gate" in sentiment_group["satisfied_checks"]
+    assert linkage["short_volume_gate"]["result_status"] == "READY"
+    assert linkage["short_volume_gate"]["hard_blocking"] is False
+
+
+def test_pit_data_exposes_macro_features_when_price_replay_is_blocked(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    mark_price_snapshot_incomplete(client, missing_symbols=["AABA"])
+    seed_ready_signal_snapshot(client, "ds-macro-rates", point_count=10, total_symbol_count=10)
+    seed_ready_signal_snapshot(client, "ds-option-skew", point_count=2)
+
+    pit = assert_ok(client.get("/pit-data"))
+    l4_layer = next(item for item in pit["pit_layer_readiness"] if item["layer_id"] == "l4_macro_derivatives")
+    macro_group = next(item for item in pit["factor_diagnostic_readiness"] if item["group_id"] == "macro_derivatives")
+    macro_module = next(item for item in l4_layer["submodules"] if item["id"] == "macro_rates")
+    iv_module = next(item for item in l4_layer["submodules"] if item["id"] == "option_skew")
+
+    assert l4_layer["status"] == "PARTIAL_READY"
+    assert macro_module["status"] == "READY"
+    assert iv_module["status"] == "READY"
+    assert macro_group["status"] == "PARTIAL_READY"
+    assert "price_replay_gate" in macro_group["blocked_checks"]
+    assert macro_group["upstream_capabilities"][0]["mode"] == "PARTIAL_READY"
+
+
 def test_factor_diagnostics_reject_current_universe_snapshot_binding(tmp_path):
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
@@ -3162,6 +3781,32 @@ def test_factor_reference_ratio_formulas_produce_diagnostics(tmp_path):
         assert diagnostic["summary"]["ic_series"]
         assert diagnostic["summary"]["group_return_series"]
         assert diagnostic["summary"]["monotonicity"]["window_periods"] == 3
+
+
+def test_factor_preview_accepts_planned_composition_recipes(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    expressions = [
+        "s_mom_6m_rank * s_qlty_roe_ltm_raw",
+        "s_mom_6m_rank / s_vol_252d_rank",
+        'ZScore(Residual(s_val_cfp_ltm_raw, by="s_size_cur_log"))',
+        "s_mom_6m_rank - s_vol_downside_252d_rank",
+        'ZScore(Residual(s_liq_amihud_20d_rank, by="s_size_cur_log"))',
+        "TsRank(Return(Close, 5), 252)",
+    ]
+
+    for expression in expressions:
+        assert validate_factor_expression(expression) == []
+        preview = assert_ok(
+            client.post(
+                "/factors/diagnostics/preview",
+                json={"expression": expression, "lookback_years": 3},
+            )
+        )
+        assert preview["status"] == "PREVIEW"
+        assert preview["expression"] == expression
+        summary = preview.get("latest_diagnostic_summary") or preview.get("summary") or preview
+        assert (summary.get("rank_ic") if isinstance(summary, dict) else None) is not None or preview["rank_ic_preview"] is not None
 
 
 def test_blocked_seed_factor_cannot_run_diagnostic_without_fundamentals(tmp_path):

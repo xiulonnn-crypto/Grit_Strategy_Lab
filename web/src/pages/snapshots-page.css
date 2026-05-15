@@ -1,6 +1,7 @@
 .snapshots-page {
   min-width: 0;
-  --snapshots-global-dashboard-min-height: 248px;
+  --snapshots-global-dashboard-min-height: 200px;
+  --snapshots-global-dashboard-card-height: 150px;
   font-family: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif;
 }
 
@@ -472,20 +473,20 @@
 .snapshots-equity-view > .panel.snapshots-equity-overview {
   min-height: var(--snapshots-global-dashboard-min-height);
   align-content: start;
-  padding: 14px 18px;
-  gap: 10px;
+  padding: 12px 18px 7px;
+  gap: 8px;
 }
 
 .snapshots-bond-health-panel {
   min-height: var(--snapshots-global-dashboard-min-height);
   align-content: start;
-  padding: 14px 18px;
-  gap: 10px;
+  padding: 12px 18px 7px;
+  gap: 8px;
 }
 
 .snapshots-page .snapshots-bond-panel.snapshots-bond-health-panel {
-  padding: 14px 18px;
-  gap: 10px;
+  padding: 12px 18px 7px;
+  gap: 8px;
 }
 
 .snapshots-global-dashboard-panel .panel-header,
@@ -536,6 +537,7 @@
 
 .snapshots-equity-overview .metric-grid {
   gap: 8px;
+  align-items: stretch;
 }
 
 .snapshots-equity-view .metric-card {
@@ -746,7 +748,9 @@
   align-content: start;
   gap: 4px;
   min-width: 0;
-  min-height: auto;
+  height: var(--snapshots-global-dashboard-card-height);
+  min-height: var(--snapshots-global-dashboard-card-height);
+  overflow: hidden;
   padding: 10px 12px;
   border-radius: 14px;
 }
@@ -767,8 +771,12 @@
 
 .snapshots-equity-view .snapshots-equity-overview .metric-card small {
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  font-size: 14px;
+  line-height: 1.45;
 }
 
 .snapshots-equity-view .layer-stack,
@@ -1652,6 +1660,7 @@
 
 .snapshots-bond-health-panel .snapshots-bond-pulse-grid {
   gap: 10px;
+  align-items: stretch;
 }
 
 .snapshots-bond-pulse-card,
@@ -1685,6 +1694,9 @@
 
 .snapshots-bond-health-panel .snapshots-bond-pulse-card {
   gap: 6px;
+  height: var(--snapshots-global-dashboard-card-height);
+  min-height: var(--snapshots-global-dashboard-card-height);
+  overflow: hidden;
   padding: 10px 12px;
 }
 
@@ -1745,19 +1757,35 @@
 }
 
 .snapshots-bond-health-panel .snapshots-bond-pulse-bar {
-  height: 10px;
+  height: 8px;
 }
 
 .snapshots-bond-health-panel .snapshots-bond-pulse-card p,
 .snapshots-bond-health-panel .snapshots-bond-pulse-card span {
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.45;
 }
 
+.snapshots-bond-health-panel .snapshots-bond-pulse-card > p {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+
+.snapshots-bond-health-panel .snapshots-bond-pulse-card:first-child > p,
+.snapshots-bond-health-panel .snapshots-bond-pulse-card--global-anomaly > p {
+  -webkit-line-clamp: 2;
+}
+
+.snapshots-bond-health-panel .snapshots-bond-chip-row {
+  gap: 6px;
+}
+
 .snapshots-bond-health-panel .snapshots-bond-pulse-card .status-chip {
-  min-height: 28px;
-  padding: 0 10px;
-  font-size: 11px;
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
 }
 
 .snapshots-bond-anomaly-jump {
@@ -1792,7 +1820,7 @@
 }
 
 .snapshots-bond-health-panel .snapshots-bond-ring-inline {
-  gap: 10px;
+  gap: 8px;
 }
 
 .snapshots-bond-work-card__top {
@@ -1829,7 +1857,7 @@
 }
 
 .snapshots-bond-health-panel .snapshots-bond-ring-copy span {
-  line-height: 1.45;
+  line-height: 1.28;
 }
 
 .snapshots-bond-ring-inline text {
@@ -1839,7 +1867,7 @@
 }
 
 .snapshots-bond-health-panel .snapshots-bond-ring-inline text {
-  font-size: 18px;
+  font-size: 15px;
 }
 
 .snapshots-bond-ring-svg {
@@ -1849,8 +1877,8 @@
 }
 
 .snapshots-bond-health-panel .snapshots-bond-ring-svg {
-  width: 80px;
-  height: 80px;
+  width: 64px;
+  height: 64px;
 }
 
 .snapshots-bond-detail-stack {

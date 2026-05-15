@@ -104,6 +104,76 @@ describe('App runtime routes', () => {
     expect(preview?.items?.[0]?.factor_id).toBe('s_mom_6m_rank');
   });
 
+  it('defers factor governance overview until the queue modal is opened', async () => {
+    await renderApp('#/factors');
+
+    const requestedPaths = () => (mockServer?.fetchSpy.mock.calls ?? []).map(([input]) => {
+      const url = new URL(input instanceof Request ? input.url : String(input), 'http://localhost');
+      return `${url.pathname}${url.search}`;
+    });
+
+    expect(requestedPaths()).toContain('/factors?lifecycle=all');
+    expect(requestedPaths()).not.toContain('/factor-governance/overview');
+
+    fireEvent.click(document.querySelector<HTMLButtonElement>('.factor-governance-trigger')!);
+
+    await waitFor(() => expect(requestedPaths()).toContain('/factor-governance/overview'));
+  });
+
+  it('posts factor descriptions and renders them on the factor detail subtitle only', async () => {
+    await renderApp('#/factors/new');
+
+    const description = '逻辑：用测试描述验证因子经济含义。作用：在列表与详情页展示为因子描述。';
+    const inputs = Array.from(document.querySelectorAll<HTMLInputElement>('.factor-field input:not([readonly])'));
+    const textareas = Array.from(document.querySelectorAll<HTMLTextAreaElement>('.factor-field textarea'));
+
+    fireEvent.change(inputs[0], { target: { value: '描述字段回归因子' } });
+    fireEvent.change(inputs[1], { target: { value: 'desc_payload' } });
+    fireEvent.change(inputs[2], { target: { value: '21d' } });
+    fireEvent.change(textareas[0], { target: { value: 'Return(Close,21)' } });
+    fireEvent.change(textareas[1], { target: { value: description } });
+    fireEvent.click(document.querySelector<HTMLButtonElement>('.factor-btn--primary')!);
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/factors/m_mom_desc_payload_21d_rank');
+    });
+
+    const createCall = mockServer?.fetchSpy.mock.calls.find(([input, init]) => (
+      String(input).endsWith('/factors') && (init as RequestInit | undefined)?.method === 'POST'
+    ));
+    expect(createCall).toBeTruthy();
+    expect(JSON.parse(String((createCall?.[1] as RequestInit).body))).toMatchObject({
+      description,
+      descriptor: {
+        source_prefix: 'm',
+        category: 'mom',
+        metric: 'desc_payload',
+        window: '21d',
+        operator: 'rank',
+      },
+    });
+
+    const detailSubtitle = await waitFor(() => {
+      const node = document.querySelector('.factor-detail-subtitle');
+      expect(node).not.toBeNull();
+      expect(node?.textContent).toContain(description);
+      return node;
+    });
+    expect(detailSubtitle?.textContent).toContain('因子描述');
+    expect(screen.getByRole('button', { name: '点击诊断' })).toBeEnabled();
+    expect(screen.getByText('尚未生成诊断报告')).toBeInTheDocument();
+    expect(document.querySelector('.factor-detail-metrics')).toBeNull();
+
+    await act(async () => {
+      window.location.hash = '#/factors';
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+
+    await waitFor(() => expect(document.querySelector('[data-page-root="factor-library"]')).not.toBeNull());
+    expect(document.querySelector('.factor-row-description')).toBeNull();
+    expect(document.body.textContent).not.toContain(description);
+  });
+
   it('defaults to workspace when no hash is present', async () => {
     await renderApp('');
 
@@ -321,14 +391,17 @@ describe('App runtime routes', () => {
     expect(screen.getByText('L2 财务截面')).toBeInTheDocument();
     expect(screen.getByText('L3 分析师与情绪')).toBeInTheDocument();
     expect(screen.getByText('L4 宏观与衍生品')).toBeInTheDocument();
-    expect(screen.getByText('数据运维指令')).toBeInTheDocument();
+    expect(screen.getAllByText('部分可用').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('卖空样本').length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/卖空样本已可用/).length).toBeGreaterThan(0);
+    expect(screen.queryByText('数据运维指令')).not.toBeInTheDocument();
     expect(screen.getByText('PIT 门禁摘要')).toBeInTheDocument();
     expect(screen.getByText('因子诊断准入矩阵')).toBeInTheDocument();
+    expect(screen.queryByText(/consensus_sample_gate|short_volume_gate|price_replay_gate/)).not.toBeInTheDocument();
     expect(screen.getByText('覆盖率下钻')).toBeInTheDocument();
     expect(screen.getByText('点时异常核查与规则工作站')).toBeInTheDocument();
     expect(screen.getByText('门禁行动列表')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '查看覆盖率缺口' }));
-    await waitFor(() => expect(document.getElementById('coverage-gap')).toHaveAttribute('tabindex', '-1'));
+    expect(document.getElementById('coverage-gap')).not.toBeNull();
     expect(screen.queryByText(/Price-only/i)).not.toBeInTheDocument();
   });
 
@@ -337,7 +410,7 @@ describe('App runtime routes', () => {
 
     expect(document.querySelector('[data-page-root="factor-detail"]')).not.toBeNull();
     expect(await screen.findByRole('heading', { level: 1, name: '12-1月截面动量排名诊断报告' })).toBeInTheDocument();
-    const verifyButton = screen.getByRole('button', { name: '保存为已验证' });
+    const verifyButton = screen.getByRole('button', { name: '重新诊断' });
     expect(verifyButton).toHaveClass('factor-detail-action-btn', 'factor-detail-action-btn--primary');
     expect(screen.getByRole('link', { name: '生成投委会 PDF' })).toHaveClass('factor-detail-action-btn');
     expect(screen.getByText('分层收益与 IC 走势')).toBeInTheDocument();
@@ -392,5 +465,39 @@ describe('App runtime routes', () => {
       /\.factor-universe-chart\s*\{[^}]*max-height:\s*calc\(180px \* 3 \+ 12px \* 2 \+ 32px\);[^}]*\}/s,
     );
     expect(css).toMatch(/\.factor-universe-chart\s*\{[^}]*overflow-y:\s*auto;[^}]*\}/s);
+  });
+
+  it('keeps the PIT cleaning center density aligned to the approved UI draft', () => {
+    const source = readFileSync('src/pages/factors-page.tsx', 'utf8');
+    const css = readFileSync('src/pages/factors-page.css', 'utf8');
+
+    expect(source).toMatch(/const PIT_COVERAGE_PREVIEW_LIMIT = 3;/);
+    expect(source).toMatch(/visibleCoverageGapBuckets\s*=\s*coverageGapBuckets\.slice\(0,\s*PIT_COVERAGE_PREVIEW_LIMIT\)/);
+    expect(source).toMatch(/details:\s*compactPitCardDetails\(layer\)/);
+    expect(source).toMatch(/compactPitSubmoduleTitle\(submodule\)/);
+    expect(source).toMatch(/compactPitSubmoduleStatus\(submodule\.status\)/);
+    expect(source).toMatch(/summary:\s*compactDiagnosticSummary\(group\)/);
+    expect(source).not.toContain('<strong>数据运维指令</strong>');
+    expect(css).toMatch(
+      /\.factor-page\[data-page-root="pit-cleaning-center"\]\s+\.pit-layer-card p\s*\{[^}]*-webkit-line-clamp:\s*2;[^}]*\}/s,
+    );
+    expect(css).toMatch(
+      /\.factor-page\[data-page-root="pit-cleaning-center"\]\s+\.factor-card-grid--pit\s+\.pit-layer-card\s*\{[^}]*grid-template-rows:\s*auto auto auto minmax\(32px,\s*1fr\);[^}]*height:\s*100%;[^}]*\}/s,
+    );
+    expect(css).toMatch(
+      /\.factor-page\[data-page-root="pit-cleaning-center"\]\s+\.pit-layer-card__detail-row\s*\{[^}]*flex-wrap:\s*nowrap;[^}]*\}/s,
+    );
+    expect(css).toMatch(
+      /\.pit-layer-card__submodules\s*\{[^}]*align-self:\s*end;[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);[^}]*grid-auto-rows:\s*32px;[^}]*gap:\s*6px;[^}]*margin-top:\s*auto;[^}]*\}/s,
+    );
+    expect(css).toMatch(
+      /\.pit-submodule-pill\s*\{[^}]*height:\s*32px;[^}]*\}/s,
+    );
+    expect(css).toMatch(
+      /\.factor-card-grid--pit\s+\.pit-layer-card\s+\.pit-submodule-pill strong\s*\{[^}]*font-size:\s*12px;[^}]*line-height:\s*16px;[^}]*\}/s,
+    );
+    expect(css).toMatch(
+      /\.factor-page\[data-page-root="pit-cleaning-center"\]\s+\.factor-waiver-banner\s*\{[^}]*padding:\s*16px 18px;[^}]*\}/s,
+    );
   });
 });

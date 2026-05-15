@@ -28,6 +28,30 @@ const DEFAULT_REQUEST: ApiFactorMiningJobCreatePayload = {
   random_seed: 42,
   min_rank_ic: 0.03,
   max_depth: 4,
+  generation_mode: 'HYBRID_COMPOSITION',
+  source_factor_ids: [
+    's_mom_6m_rank',
+    's_qlty_roe_ltm_raw',
+    's_vol_252d_rank',
+    's_val_cfp_ltm_raw',
+    's_size_cur_log',
+    's_vol_downside_252d_rank',
+    's_liq_amihud_20d_rank',
+  ],
+  recipe_families: [
+    'style_blend',
+    'risk_adjusted',
+    'value_anchor',
+    'divergence',
+    'residual_neutralized',
+    'ts_denoise',
+  ],
+  exploration_budget: 24,
+  composition_policy: {
+    mode: 'template_plus_exploration',
+    publish_boundary: 'manual_after_quarantine',
+    auto_intake_to_quarantine: true,
+  },
 };
 
 function isRecord(value: unknown): value is AnyRecord {
@@ -112,6 +136,30 @@ function statusLabel(value: unknown): string {
   return labels[status] ?? text(value);
 }
 
+function generationModeLabel(value: unknown): string {
+  const mode = text(value, 'PRICE_OPERATOR').toUpperCase();
+  if (mode === 'HYBRID_COMPOSITION') return '二次组合';
+  return '价格算子';
+}
+
+function recipeFamilyLabel(value: unknown): string {
+  const family = text(value, '').toLowerCase();
+  const labels: Record<string, string> = {
+    style_blend: '风格复合',
+    risk_adjusted: '风险调节',
+    value_anchor: '估值锚定',
+    divergence: '背离惩罚',
+    residual_neutralized: '残差中性化',
+    ts_denoise: '时序降噪',
+    pairwise_cross_family: '跨风格探索',
+  };
+  return labels[family] ?? text(value, '组合模板');
+}
+
+function sourceFactorList(candidate: ApiFactorMiningCandidate): string[] {
+  return asList<unknown>(candidate.source_factor_ids).map(String).filter(Boolean);
+}
+
 function timezoneLabel(value: unknown): string {
   const raw = text(value, 'Asia/Hong_Kong');
   if (raw === 'Asia/Hong_Kong' || raw === 'GMT+8' || raw === 'UTC+8') return 'GMT+8';
@@ -131,12 +179,34 @@ function requestFromOverview(overview: ApiFactorFactoryOverview | null): ApiFact
     random_seed: numeric(request.random_seed) ?? DEFAULT_REQUEST.random_seed,
     min_rank_ic: numeric(request.min_rank_ic) ?? DEFAULT_REQUEST.min_rank_ic,
     max_depth: numeric(request.max_depth) ?? DEFAULT_REQUEST.max_depth,
+    generation_mode: text(request.generation_mode, DEFAULT_REQUEST.generation_mode ?? 'HYBRID_COMPOSITION'),
+    source_factor_ids: Array.isArray(request.source_factor_ids) && request.source_factor_ids.length
+      ? request.source_factor_ids.map(String)
+      : DEFAULT_REQUEST.source_factor_ids,
+    recipe_families: Array.isArray(request.recipe_families) && request.recipe_families.length
+      ? request.recipe_families.map(String)
+      : DEFAULT_REQUEST.recipe_families,
+    exploration_budget: numeric(request.exploration_budget) ?? DEFAULT_REQUEST.exploration_budget,
+    composition_policy: isRecord(request.composition_policy)
+      ? request.composition_policy
+      : DEFAULT_REQUEST.composition_policy,
   };
 }
 
 function runDateLabel(run: ApiFactorFactoryRun): string {
   const trigger = statusToken(run.trigger) === 'DAILY' ? '每日批次' : '临时批次';
   return `${trigger} · ${run.run_date || '未记录日期'}`;
+}
+
+function miningJobWorkDate(
+  job: ApiFactorMiningJob,
+  runs: Array<ApiFactorFactoryRun | null | undefined>,
+): string {
+  const factoryRun = runs.find(
+    (run): run is ApiFactorFactoryRun =>
+      Boolean(run && (run.mining_job_id === job.id || run.mining_job?.id === job.id)),
+  );
+  return formatShortDate(factoryRun?.run_date ?? job.created_at);
 }
 
 function miningCandidates(jobs: ApiFactorMiningJob[]): Array<ApiFactorMiningCandidate & { sourceJobId: string }> {
@@ -520,6 +590,9 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
 
       <section className="factor-factory-status-strip" aria-label="因子工厂状态">
         <span className={chipClass(profile?.status ?? 'PAUSED')}>{statusLabel(profile?.status ?? 'PAUSED')}</span>
+        <span className="factor-phase2-chip factor-phase2-chip--info">
+          {generationModeLabel(profile?.request?.generation_mode)} · 自动送检，人工发布
+        </span>
         <span>每日计划：{timezoneLabel(profile?.timezone)} {profile?.schedule_time ?? '14:00'}</span>
         <span>下次批次：{profile?.next_run_at ? formatDateTime(profile.next_run_at) : '等待启动'}</span>
         <span className={chipClass(pitMode)}>10Y 因子准入：{statusLabel(pitMode)}；PIT 全量就绪缺口仅进入审计与风险提示</span>
@@ -621,27 +694,39 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
           <div className="factor-phase2-panel__body">
             {!jobs.length ? <div className="factor-phase2-empty">运行时没有挖掘任务；可点击立即运行创建临时挖掘批次。</div> : null}
             <ul className="factor-phase2-list">
-              {jobs.slice(0, 5).map((job) => (
-                <li className="factor-phase2-row" key={job.id}>
-                  <div className="factor-phase2-row__top">
-                    <h3>{job.id}</h3>
-                    <span className={chipClass(job.status)}>{statusLabel(job.status)}</span>
-                  </div>
-                  <div className="factor-phase2-progress" aria-label={`${job.id} 进度`}>
-                    <span style={{ width: `${Math.max(0, Math.min(100, numeric(job.progress?.percent) ?? 0))}%` }} />
-                  </div>
-                  <p>
-                    {text(job.request?.universe)} · {text(job.request?.start_date)} 至 {text(job.request?.end_date)}
-                    {' · '}目标 {text(job.request?.candidate_count)} 个
-                  </p>
-                </li>
-              ))}
+              {jobs.slice(0, 5).map((job) => {
+                const workDate = miningJobWorkDate(job, [currentRun, latestRun, ...(overview?.runs ?? [])]);
+                return (
+                  <li className="factor-phase2-row" key={job.id}>
+                    <div className="factor-phase2-row__top">
+                      <h3>{job.id}</h3>
+                      <span className={chipClass(job.status)}>{statusLabel(job.status)}</span>
+                    </div>
+                    <p>
+                      {generationModeLabel(job.request?.generation_mode)}
+                      {' · '}
+                      {(job.request?.recipe_families ?? []).slice(0, 3).map(recipeFamilyLabel).join(' / ') || '默认模板'}
+                      {' · 自动送检，人工发布'}
+                    </p>
+                    <div className="factor-phase2-progress" aria-label={`${job.id} 进度`}>
+                      <span style={{ width: `${Math.max(0, Math.min(100, numeric(job.progress?.percent) ?? 0))}%` }} />
+                    </div>
+                    <p>
+                      <span data-ui="factor-factory-mining-job-work-date">工作日期 {workDate}</span>
+                      {' · '}
+                      {text(job.request?.universe)} · {text(job.request?.start_date)} 至 {text(job.request?.end_date)}
+                      {' · '}目标 {text(job.request?.candidate_count)} 个
+                    </p>
+                  </li>
+                );
+              })}
             </ul>
             <div className="factor-factory-candidate-list">
               <h3>候选摘要</h3>
               {!candidates.length ? <div className="factor-phase2-empty">当前批次候选已全部进入检疫队列，请在右侧查看检疫结果。</div> : null}
               {candidates.slice(0, 6).map((candidate) => {
                 const key = candidateKey(candidate);
+                const sourceFactors = sourceFactorList(candidate);
                 return (
                   <button
                     className={`factor-factory-candidate${selectedMining && candidateKey(selectedMining) === key ? ' is-active' : ''}`}
@@ -654,6 +739,14 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
                   >
                     <span>
                       <strong>{candidate.expression}</strong>
+                      <small>
+                        {recipeFamilyLabel(candidate.recipe_family)}
+                        {candidate.recipe_kind ? ` · ${text(candidate.recipe_kind)}` : ''}
+                        {candidate.orthogonality_intent ? ` · ${text(candidate.orthogonality_intent)}` : ''}
+                      </small>
+                      {sourceFactors.length ? (
+                        <small>父因子 {sourceFactors.join(' / ')}</small>
+                      ) : null}
                       <small>
                         适应度 {formatNumber(candidate.fitness_score ?? candidate.score, 3)}
                         {' · '}Rank IC {formatNumber(candidate.rank_ic, 3)}

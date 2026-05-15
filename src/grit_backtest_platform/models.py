@@ -50,6 +50,7 @@ SnapshotKind = Literal['DATASET', 'UNIVERSE']
 TrialStatus = Literal['SUCCEEDED', 'FAILED', 'PENDING']
 PromoteMode = Literal['set_current', 'create_copy']
 SnapshotRefreshMode = Literal['incremental', 'repair', 'full']
+SnapshotPhase2Scope = Literal['sp500_10y', 'l1_all', 'custom']
 SnapshotRefreshTarget = Literal[
     'price',
     'corporate',
@@ -81,6 +82,7 @@ FactorDiagnosticMode = Literal['VERIFIED', 'SANDBOX']
 FactorDirection = Literal['HIGH_IS_BETTER', 'LOW_IS_BETTER', 'NEUTRAL']
 FactorFrequency = Literal['DAILY', 'WEEKLY', 'MONTHLY']
 FactorMiningJobStatus = Literal['QUEUED', 'RUNNING', 'CANCEL_REQUESTED', 'CANCELLED', 'COMPLETED', 'PARTIALLY_FAILED', 'FAILED']
+FactorMiningGenerationMode = Literal['PRICE_OPERATOR', 'HYBRID_COMPOSITION']
 FactorQuarantineStatus = Literal['PENDING', 'RUNNING', 'PASSED', 'REJECTED', 'NEEDS_REVIEW', 'PUBLISHED', 'SUPERSEDED']
 FactorPublishStatus = Literal['ELIGIBLE', 'BLOCKED', 'MANUAL_REVIEW_REQUIRED', 'PUBLISHED']
 FactorGovernanceStatus = Literal['WATCH', 'REVIEW', 'DECAYED', 'CROWDED', 'SUSPENDED']
@@ -102,6 +104,7 @@ class FactorCreateRequest(BaseModel):
     market: str = Field(default='US', min_length=1)
     universe: str = Field(default='SP500', min_length=1)
     expression: str = Field(min_length=1)
+    description: str | None = None
     frequency: FactorFrequency = 'DAILY'
     direction: FactorDirection = 'HIGH_IS_BETTER'
     tags: list[str] = Field(default_factory=list)
@@ -142,6 +145,11 @@ class FactorMiningJobCreateRequest(BaseModel):
     random_seed: int | None = None
     min_rank_ic: float = Field(default=0.03, ge=-1.0, le=1.0)
     max_depth: int = Field(default=4, ge=1, le=8)
+    generation_mode: FactorMiningGenerationMode = 'PRICE_OPERATOR'
+    source_factor_ids: list[str] = Field(default_factory=list)
+    recipe_families: list[str] = Field(default_factory=list)
+    exploration_budget: int = Field(default=0, ge=0, le=500)
+    composition_policy: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator('operators')
     @classmethod
@@ -150,6 +158,11 @@ class FactorMiningJobCreateRequest(BaseModel):
         if not cleaned:
             raise ValueError('operators must not be empty')
         return cleaned
+
+    @field_validator('source_factor_ids', 'recipe_families')
+    @classmethod
+    def _clean_string_list(cls, value: list[str]) -> list[str]:
+        return [str(item).strip() for item in value if str(item).strip()]
 
 
 class FactorFactoryGatePolicy(BaseModel):
@@ -392,6 +405,10 @@ class StrategyUpdateRequest(BaseModel):
     universe_snapshot_id: str | None = None
 
 
+class StrategyArchiveRequest(BaseModel):
+    confirm: bool = False
+
+
 class BacktestRunPreviewRequest(BaseModel):
     start_date: str | None = None
     end_date: str | None = None
@@ -485,6 +502,10 @@ class SnapshotRefreshRequest(BaseModel):
     mode: SnapshotRefreshMode = 'incremental'
     targets: list[SnapshotRefreshTarget] = Field(default_factory=list)
     repair_symbol_limit: int | None = Field(default=None, ge=1, le=5000)
+    symbols: list[str] = Field(default_factory=list)
+    phase2_scope: SnapshotPhase2Scope | None = None
+    phase2_max_symbols: int | None = Field(default=None, ge=1, le=500)
+    phase2_cursor: str | None = None
 
 
 class SnapshotProviderSummaryItem(BaseModel):

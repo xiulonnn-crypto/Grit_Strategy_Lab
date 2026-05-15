@@ -56,6 +56,30 @@ def test_expression_engine_evaluates_rank_zscore_winsorize() -> None:
     assert winsorized[3] < 250.0
 
 
+def test_expression_engine_evaluates_new_factor_library_operators() -> None:
+    data = {
+        "Open": [99.0, 101.0, 103.0, 104.0, 108.0],
+        "Close": [100.0, 102.0, 101.0, 106.0, 110.0],
+        "Volume": [1000, 1300, 900, 1800, 2200],
+        "SharesOutstanding": [10000, 10000, 10000, 10000, 10000],
+    }
+
+    path = evaluate_expression("Abs(Close - Close(t-2)) / Sum(Abs(Close - Close(t-1)), 2)", data)
+    assert path[-1] == pytest.approx(abs(110.0 - 101.0) / (abs(106.0 - 101.0) + abs(110.0 - 106.0)))
+
+    overnight = evaluate_expression("Mean(Open / Close(t-1), 2)", data)
+    assert overnight[-1] == pytest.approx(((104.0 / 101.0) + (108.0 / 106.0)) / 2.0)
+
+    turnover_skew = evaluate_expression("Skew(Turnover, 3)", data)
+    assert turnover_skew[-1] is not None
+
+    volume_concentration = evaluate_expression("Correlation(Volume, Abs(Return(Close, 1)), 3)", data)
+    assert volume_concentration[-1] is not None
+
+    asymmetry = evaluate_expression("StdDev(RetUp, 3) / StdDev(RetDown, 3)", data)
+    assert len(asymmetry) == 5
+
+
 @pytest.mark.parametrize(
     ("expression", "error_type"),
     [
@@ -63,7 +87,7 @@ def test_expression_engine_evaluates_rank_zscore_winsorize() -> None:
         ('__import__("os").system("echo no")', UnsafeExpressionError),
         ("Close; Return(Close, 1)", UnsafeExpressionError),
         ("Close(t+1)", FutureReferenceError),
-        ("Open + Close", UnknownFieldError),
+        ("FooField + Close", UnknownFieldError),
         ("Foo(Close)", UnknownOperatorError),
     ],
 )

@@ -958,6 +958,8 @@ export function SnapshotsPage(): JSX.Element {
         mode: isBondRefresh ? 'full' : 'repair',
         targets: refreshTargets,
         reason: refreshReason,
+        phase2_scope: isBondRefresh ? undefined : 'sp500_10y',
+        phase2_max_symbols: isBondRefresh ? undefined : 25,
         ...requestOverride,
       };
       setRefreshing(true);

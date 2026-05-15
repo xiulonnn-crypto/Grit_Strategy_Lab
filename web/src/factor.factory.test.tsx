@@ -27,6 +27,29 @@ function factoryOverview(overrides: Partial<ApiFactorFactoryOverview> = {}): Api
     random_seed: 42,
     min_rank_ic: 0.03,
     max_depth: 4,
+    generation_mode: 'HYBRID_COMPOSITION',
+    source_factor_ids: [
+      's_mom_6m_rank',
+      's_qlty_roe_ltm_raw',
+      's_vol_252d_rank',
+      's_val_cfp_ltm_raw',
+      's_size_cur_log',
+      's_vol_downside_252d_rank',
+      's_liq_amihud_20d_rank',
+    ],
+    recipe_families: [
+      'style_blend',
+      'risk_adjusted',
+      'value_anchor',
+      'divergence',
+      'residual_neutralized',
+      'ts_denoise',
+    ],
+    exploration_budget: 24,
+    composition_policy: {
+      mode: 'template_plus_exploration',
+      publish_boundary: 'manual_after_quarantine',
+    },
   };
   const gatePolicy = {
     pit_gate_mode: 'DIAGNOSTIC_ONLY' as const,
@@ -48,7 +71,7 @@ function factoryOverview(overrides: Partial<ApiFactorFactoryOverview> = {}): Api
     },
     top_candidates: [{
       id: 'cand_factory_residual',
-      expression: 'Rank(Return(Close, 21))',
+      expression: 's_mom_6m_rank * s_qlty_roe_ltm_raw',
       score: 0.052,
       rank_ic: 0.061,
       turnover: 0.31,
@@ -66,6 +89,11 @@ function factoryOverview(overrides: Partial<ApiFactorFactoryOverview> = {}): Api
         control_factor_id: 's_vol_252d_raw',
         residual_rank_ic: 0.052,
       },
+      source_factor_ids: ['s_mom_6m_rank', 's_qlty_roe_ltm_raw'],
+      recipe_kind: 'template',
+      recipe_family: 'style_blend',
+      orthogonality_intent: 'quality_driven_momentum',
+      composition_metadata: { label: 'Quality-Driven Momentum', publish_boundary: 'manual_after_quarantine' },
     }],
     failed_samples: [],
     created_at: '2026-05-08T08:00:00Z',
@@ -76,7 +104,7 @@ function factoryOverview(overrides: Partial<ApiFactorFactoryOverview> = {}): Api
     id: 'fq_factory_001',
     mining_candidate_id: 'cand_factory_residual',
     source_mining_job_id: 'fm_factory_001',
-    expression: 'Rank(Return(Close, 21))',
+    expression: 's_mom_6m_rank * s_qlty_roe_ltm_raw',
     status: 'PASSED',
     publish_status: 'ELIGIBLE',
     gate_summary: {
@@ -242,12 +270,14 @@ describe('FactorFactoryPage', () => {
   ).toBeGreaterThanOrEqual(1);
     const sandboxPanel = document.querySelector('[data-factory-section="sandbox"]') as HTMLElement;
     const quarantinePanel = document.querySelector('[data-factory-section="quarantine"]') as HTMLElement;
+    expect(within(sandboxPanel).getByText('工作日期 2026-05-08')).toBeInTheDocument();
+    expect(within(sandboxPanel).getByText('二次组合 · 风格复合 / 风险调节 / 估值锚定 · 自动送检，人工发布')).toBeInTheDocument();
     expect(within(sandboxPanel).queryByText('Rank(Return(Close, 21))')).not.toBeInTheDocument();
     expect(within(sandboxPanel).getByText('当前批次候选已全部进入检疫队列，请在右侧查看检疫结果。')).toBeInTheDocument();
-    expect(within(quarantinePanel).getByText('Rank(Return(Close, 21))')).toBeInTheDocument();
+    expect(within(quarantinePanel).getByText('s_mom_6m_rank * s_qlty_roe_ltm_raw')).toBeInTheDocument();
     const quarantineList = quarantinePanel.querySelector('.factor-phase2-list') as HTMLElement;
     const quarantineButtons = within(quarantineList).getAllByRole('button');
-    expect(quarantineButtons[0]).toHaveTextContent('Rank(Return(Close, 21))');
+    expect(quarantineButtons[0]).toHaveTextContent('s_mom_6m_rank * s_qlty_roe_ltm_raw');
     expect(quarantineButtons[1]).toHaveTextContent('Return(Close, 5)');
     expect(screen.getByRole('button', { name: '送入检疫' })).toBeDisabled();
     expect(screen.queryByText('Rank(Return(Close, 63))')).not.toBeInTheDocument();
@@ -347,7 +377,9 @@ describe('FactorFactoryPage', () => {
 
     renderFactory('sandbox');
 
-    expect((await screen.findAllByText('Rank(Return(Close, 21))')).length).toBeGreaterThanOrEqual(1);
+    expect((await screen.findAllByText('s_mom_6m_rank * s_qlty_roe_ltm_raw')).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('风格复合 · template · quality_driven_momentum')).toBeInTheDocument();
+    expect(screen.getByText('父因子 s_mom_6m_rank / s_qlty_roe_ltm_raw')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '送入检疫' }));
     expect(await screen.findByText('已送入 D2 检疫并执行 1 个候选；通过后可一键发布。')).toBeInTheDocument();
 
@@ -374,6 +406,6 @@ describe('FactorFactoryPage', () => {
     renderFactory();
 
     expect(await screen.findByText(/factory offline/)).toBeInTheDocument();
-    expect(screen.queryByText('Rank(Return(Close, 21))')).not.toBeInTheDocument();
+    expect(screen.queryByText('s_mom_6m_rank * s_qlty_roe_ltm_raw')).not.toBeInTheDocument();
   });
 });
