@@ -481,6 +481,7 @@ OPTIMIZATION_PREPARED_CONTEXT_KEY = "__optimization_prepared_context"
 OPTIMIZATION_SOURCE_RUN_CONTEXT_KEY = "__optimization_source_run_context"
 OPTIMIZATION_RUNNER_CLAIM_PREFIX = "optimization_runner_claim:"
 OPTIMIZATION_RUNNER_LEASE_SECONDS = 300.0
+OPTIMIZATION_RUNNER_HEARTBEAT_SECONDS = 30.0
 OPTIMIZATION_ETA_RECENT_COMPLETIONS_WINDOW = 8
 
 
@@ -2592,6 +2593,19 @@ class BacktestPlatformService:
         if os.getenv("PYTEST_CURRENT_TEST"):
             return "thread"
         return "subprocess"
+
+    def _optimization_runner_heartbeat_seconds(self) -> float:
+        configured = str(os.getenv("GRIT_OPTIMIZATION_RUNNER_HEARTBEAT_SECONDS") or "").strip()
+        if configured:
+            try:
+                value = float(configured)
+            except (TypeError, ValueError):
+                value = OPTIMIZATION_RUNNER_HEARTBEAT_SECONDS
+        else:
+            value = OPTIMIZATION_RUNNER_HEARTBEAT_SECONDS
+        if value <= 0:
+            return 0.0
+        return min(max(value, 1.0), max(1.0, OPTIMIZATION_RUNNER_LEASE_SECONDS / 2.0))
 
     def _optimization_worker_project_root(self) -> Path:
         return Path(__file__).resolve().parents[2]
@@ -18991,6 +19005,43 @@ class BacktestPlatformService:
         ]
         for offset, (trial_index, parameter_snapshot) in enumerate(normalized_pending):
             trial_started_at = self._optimization_timestamp_now()
+            if runtime_state is not None:
+                in_flight_best_summary = self._optimization_runtime_best_summary(runtime_state)
+            else:
+                in_flight_best_summary = self._best_optimization_trial_summary(
+                    list(trial_records.values()),
+                    request_payload.get("objective"),
+                )
+            heartbeat_errors: list[BaseException] = []
+            heartbeat_stop = threading.Event()
+            heartbeat_interval = self._optimization_runner_heartbeat_seconds()
+
+            def heartbeat_in_flight_trial() -> None:
+                if heartbeat_interval <= 0:
+                    return
+                while not heartbeat_stop.wait(heartbeat_interval):
+                    try:
+                        publish_progress(
+                            completed_count=len(trial_records),
+                            best_summary=in_flight_best_summary,
+                            next_trial_index=trial_index,
+                            current_stage=f"Running trial {trial_index}/{budget_combinations}",
+                            latest_update=f"Evaluating trial {trial_index}/{budget_combinations}.",
+                            force=True,
+                        )
+                    except BaseException as exc:
+                        heartbeat_errors.append(exc)
+                        heartbeat_stop.set()
+                        return
+
+            heartbeat_thread: threading.Thread | None = None
+            if heartbeat_interval > 0:
+                heartbeat_thread = threading.Thread(
+                    target=heartbeat_in_flight_trial,
+                    name=f"optimization-heartbeat-{job_id}-{trial_index}",
+                    daemon=True,
+                )
+                heartbeat_thread.start()
             try:
                 trial_result = self._evaluate_optimization_trial(
                     strategy,
@@ -19011,6 +19062,13 @@ class BacktestPlatformService:
                     "score": 0.0,
                 }
                 error_message = str(exc).strip() or exc.__class__.__name__
+            finally:
+                heartbeat_stop.set()
+                if heartbeat_thread is not None:
+                    heartbeat_thread.join(timeout=1.0)
+
+            if heartbeat_errors:
+                raise heartbeat_errors[0]
 
             trial_parameter_snapshot = dict(trial_result.get("parameter_snapshot") or parameter_snapshot)
             trial_metrics = dict(trial_result.get("metrics") or {})
@@ -19548,6 +19606,32 @@ class BacktestPlatformService:
 
         completed_records.sort(key=lambda item: item[1])
         recent_records = completed_records[-OPTIMIZATION_ETA_RECENT_COMPLETIONS_WINDOW:]
+        positive_durations = sorted(duration for _, _, duration in recent_records if duration > 0)
+        if positive_durations:
+            median_duration = positive_durations[len(positive_durations) // 2]
+            max_expected_idle_gap = max(
+                600.0,
+                (median_duration + self._optimization_step_delay_seconds()) * 4.0,
+            )
+            contiguous_segments: list[list[tuple[datetime, datetime, float]]] = []
+            current_segment: list[tuple[datetime, datetime, float]] = []
+            previous_completed: datetime | None = None
+            for record in recent_records:
+                started, completed, _ = record
+                idle_gap = (
+                    (started - previous_completed).total_seconds()
+                    if previous_completed is not None
+                    else 0.0
+                )
+                if current_segment and idle_gap > max_expected_idle_gap:
+                    contiguous_segments.append(current_segment)
+                    current_segment = []
+                current_segment.append(record)
+                previous_completed = completed
+            if current_segment:
+                contiguous_segments.append(current_segment)
+            if contiguous_segments:
+                recent_records = contiguous_segments[-1]
         per_trial_projection: float | None = None
 
         if len(recent_records) >= 2:
@@ -19569,6 +19653,44 @@ class BacktestPlatformService:
             "estimated_remaining_minutes": int(math.ceil(projected_seconds / 60.0)) if projected_seconds > 0 else 0,
             "estimated_completed_at": estimated_completed_at.isoformat().replace("+00:00", "Z"),
         }
+
+    def _optimization_active_execution_seconds(
+        self,
+        trials: Sequence[Mapping[str, Any]],
+    ) -> float | None:
+        total_seconds = 0.0
+        counted_trials = 0
+        for trial in trials:
+            started_at = trial.get("started_at")
+            completed_at = trial.get("completed_at")
+            if not started_at or not completed_at:
+                continue
+            try:
+                started = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+                completed = datetime.fromisoformat(str(completed_at).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            duration = (completed - started).total_seconds()
+            if duration < 0:
+                continue
+            total_seconds += duration
+            counted_trials += 1
+        if counted_trials == 0:
+            return None
+        return round(total_seconds, 3)
+
+    def _optimization_job_active_execution_seconds(self, job_id: str) -> float | None:
+        rows = self.storage.fetch_all(
+            """
+            SELECT started_at, completed_at
+            FROM optimization_job_trials
+            WHERE job_id = ?
+              AND started_at IS NOT NULL
+              AND completed_at IS NOT NULL
+            """,
+            (job_id,),
+        )
+        return self._optimization_active_execution_seconds(rows)
 
     def _persist_optimization_job(
         self,
@@ -19691,6 +19813,13 @@ class BacktestPlatformService:
         heartbeat_at = str(payload.get("heartbeat_at") or "").strip() or None
         if heartbeat_at:
             summary["heartbeat_at"] = heartbeat_at
+        active_execution_seconds = _as_float(
+            payload.get("active_execution_seconds", payload.get("execution_seconds")),
+            -1.0,
+        )
+        if active_execution_seconds >= 0:
+            summary["active_execution_seconds"] = round(active_execution_seconds, 3)
+            summary["execution_seconds"] = round(active_execution_seconds, 3)
         if payload.get("current_stage") is not None:
             summary["current_stage"] = payload.get("current_stage")
         elif status == "COMPLETED":
@@ -19750,6 +19879,18 @@ class BacktestPlatformService:
         baseline_parameter_version_id = str(payload.get("base_parameter_version_id") or "").strip() or None
         progress_pct = min(100, max(0, _as_int(payload.get("progress_pct"), 100 if status == "COMPLETED" else 0)))
         constraint_payload = _normalize_optimization_constraints_payload(payload)
+        active_execution_seconds = _as_float(
+            payload.get("active_execution_seconds", payload.get("execution_seconds")),
+            -1.0,
+        )
+        execution_payload = (
+            {
+                "active_execution_seconds": round(active_execution_seconds, 3),
+                "execution_seconds": round(active_execution_seconds, 3),
+            }
+            if active_execution_seconds >= 0
+            else {}
+        )
         if status in {"QUEUED", "RUNNING", "INTERRUPTED"}:
             headline = self._canonical_optimization_candidate_label(
                 payload.get("latest_candidate_label"),
@@ -19769,6 +19910,7 @@ class BacktestPlatformService:
                 "estimated_remaining_minutes": payload.get("estimated_remaining_minutes") if eta_active else None,
                 "estimated_completed_at": payload.get("estimated_completed_at") if eta_active else None,
                 **constraint_payload,
+                **execution_payload,
             }
 
         best_candidate = candidates[0] if candidates else None
@@ -19796,6 +19938,7 @@ class BacktestPlatformService:
             "estimated_remaining_minutes": payload.get("estimated_remaining_minutes"),
             "estimated_completed_at": payload.get("estimated_completed_at"),
             **constraint_payload,
+            **execution_payload,
         }
 
     def _hydrate_optimization_job(
@@ -20033,6 +20176,13 @@ class BacktestPlatformService:
         has_persisted_trials = self._optimization_job_has_persisted_trials(
             str(job["id"])
         )
+        if not running_like and has_persisted_trials:
+            active_execution_seconds = self._optimization_job_active_execution_seconds(str(job["id"]))
+            if active_execution_seconds is not None:
+                job["summary"]["active_execution_seconds"] = active_execution_seconds
+                job["summary"]["execution_seconds"] = active_execution_seconds
+                job["result"]["active_execution_seconds"] = active_execution_seconds
+                job["result"]["execution_seconds"] = active_execution_seconds
         job["strategy_name"] = _display_strategy_name(
             row.get("strategy_name") or job.get("strategy_name") or strategy.get("name"),
             strategy.get("parameters"),
@@ -21055,6 +21205,14 @@ class BacktestPlatformService:
             strategy,
             parameter_snapshot,
         )
+        projected_trial = self._project_multi_factor_optimization_trial(
+            strategy,
+            evaluation_request,
+            payload,
+            parameter_snapshot,
+        )
+        if projected_trial is not None:
+            return projected_trial
         if prepared_context is not None:
             preview, chart_series = self._build_optimization_trial_preview_and_chart_series(
                 strategy,
@@ -21070,14 +21228,6 @@ class BacktestPlatformService:
                 "chart_series": chart_series,
                 "score": self._score_optimization_metrics(metrics, payload.get("objective")),
             }
-        projected_trial = self._project_multi_factor_optimization_trial(
-            strategy,
-            evaluation_request,
-            payload,
-            parameter_snapshot,
-        )
-        if projected_trial is not None:
-            return projected_trial
         preview, chart_series = self._build_optimization_trial_preview_and_chart_series(
             strategy,
             evaluation_request,
@@ -21126,20 +21276,30 @@ class BacktestPlatformService:
                 persist=bool(chart_series),
             )
             if not chart_series:
-                _, chart_series = self._build_optimization_trial_preview_and_chart_series(
+                projected_trial = self._project_multi_factor_optimization_trial(
                     strategy,
                     evaluation_request,
                     payload,
                     dict(trial.get("parameter_snapshot") or {}),
-                    prepared_context=prepared_context,
                 )
-                repaired_metrics = self._repair_optimization_trial_metrics(
-                    job_id,
-                    trial_index,
-                    repaired_metrics,
-                    chart_series=chart_series,
-                    persist=False,
-                )
+                if projected_trial is not None and list(projected_trial.get("chart_series") or []):
+                    chart_series = [dict(point) for point in list(projected_trial.get("chart_series") or [])]
+                    repaired_metrics = dict(projected_trial.get("metrics") or repaired_metrics)
+                else:
+                    _, chart_series = self._build_optimization_trial_preview_and_chart_series(
+                        strategy,
+                        evaluation_request,
+                        payload,
+                        dict(trial.get("parameter_snapshot") or {}),
+                        prepared_context=prepared_context,
+                    )
+                    repaired_metrics = self._repair_optimization_trial_metrics(
+                        job_id,
+                        trial_index,
+                        repaired_metrics,
+                        chart_series=chart_series,
+                        persist=False,
+                    )
                 self._persist_optimization_trial(
                     job_id,
                     trial_index,
@@ -21209,12 +21369,6 @@ class BacktestPlatformService:
                 parameter_snapshot=base_snapshot,
             )
             prepared_context: Mapping[str, Any] | None = None
-            if self._is_multi_factor_optimization_strategy(strategy, base_snapshot):
-                prepare_context = getattr(self, "_prepare_backtest_run_context", None)
-                if callable(prepare_context):
-                    prepared_strategy = self._optimization_effective_strategy(strategy, base_snapshot)
-                    prepared_context = prepare_context(prepared_strategy, evaluation_request)
-                    request_payload[OPTIMIZATION_PREPARED_CONTEXT_KEY] = prepared_context
             runtime_state = self._optimization_runtime_state(
                 search_space,
                 request_payload.get("objective"),
@@ -21269,6 +21423,7 @@ class BacktestPlatformService:
                         trials=successful_trials,
                     )
                 )
+                active_execution_seconds = self._optimization_active_execution_seconds(final_trials)
                 ensure_runner_claim()
                 self._persist_optimization_job(
                     job_id,
@@ -21289,6 +21444,14 @@ class BacktestPlatformService:
                         "matching_combination_count": len(matching_combinations),
                         "matching_combinations": matching_combinations,
                         "matching_combination_source": "all_trials",
+                        **(
+                            {
+                                "active_execution_seconds": active_execution_seconds,
+                                "execution_seconds": active_execution_seconds,
+                            }
+                            if active_execution_seconds is not None
+                            else {}
+                        ),
                     },
                     final_candidates,
                     created_at=created_at,
@@ -21482,6 +21645,7 @@ class BacktestPlatformService:
                     trials=successful_trials,
                 )
             )
+            active_execution_seconds = self._optimization_active_execution_seconds(final_trials)
             ensure_runner_claim()
             self._persist_optimization_job(
                 job_id,
@@ -21502,6 +21666,14 @@ class BacktestPlatformService:
                     "matching_combination_count": len(matching_combinations),
                     "matching_combinations": matching_combinations,
                     "matching_combination_source": "all_trials",
+                    **(
+                        {
+                            "active_execution_seconds": active_execution_seconds,
+                            "execution_seconds": active_execution_seconds,
+                        }
+                        if active_execution_seconds is not None
+                        else {}
+                    ),
                 },
                 final_candidates,
                 created_at=created_at,

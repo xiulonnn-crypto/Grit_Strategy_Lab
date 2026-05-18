@@ -1,0 +1,1286 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>组合因子策略创建页 UI 稿</title>
+  <style>
+    :root {
+      --gsl-bg-main: #f0f2f5;
+      --gsl-bg-surface: #ffffff;
+      --gsl-bg-surface-soft: #fbfcfd;
+      --gsl-bg-subtle: #f7faf9;
+      --gsl-color-primary: #1f877b;
+      --gsl-color-primary-strong: #176b61;
+      --gsl-color-primary-soft: #e6f4f1;
+      --gsl-color-benchmark: #4c78c7;
+      --gsl-color-success: #2b8a3e;
+      --gsl-color-success-soft: #ecfdf3;
+      --gsl-color-warning: #b86813;
+      --gsl-color-warning-soft: #fff7e8;
+      --gsl-color-danger: #c45c4f;
+      --gsl-color-danger-soft: #fff8f7;
+      --gsl-color-border: #e5e7eb;
+      --gsl-color-border-soft: #eef2f4;
+      --gsl-text-title: #111827;
+      --gsl-text-main: #1f2937;
+      --gsl-text-sub: #64748b;
+      --gsl-text-muted: #94a3b8;
+      --gsl-shadow-card: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+      --gsl-radius-panel: 16px;
+      --gsl-radius-control: 12px;
+      color-scheme: light;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--gsl-bg-main);
+      color: var(--gsl-text-main);
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif;
+      font-size: 14px;
+      line-height: 1.58;
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+
+    .app-shell {
+      display: grid;
+      grid-template-columns: 236px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 24px 18px;
+      background: #f8fafc;
+      border-right: 1px solid var(--gsl-color-border);
+      display: grid;
+      align-content: start;
+      gap: 22px;
+    }
+
+    .brand {
+      display: grid;
+      gap: 4px;
+      padding: 0 8px;
+    }
+
+    .brand strong {
+      color: var(--gsl-text-title);
+      font-size: 17px;
+      letter-spacing: 0;
+    }
+
+    .brand span {
+      color: var(--gsl-text-muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .nav-group {
+      display: grid;
+      gap: 6px;
+    }
+
+    .nav-label {
+      color: var(--gsl-text-muted);
+      font-size: 11px;
+      font-weight: 700;
+      padding: 0 10px;
+    }
+
+    .nav-item {
+      align-items: center;
+      border-radius: 12px;
+      color: var(--gsl-text-sub);
+      display: grid;
+      font-weight: 650;
+      grid-template-columns: 26px minmax(0, 1fr);
+      min-height: 40px;
+      padding: 0 10px;
+    }
+
+    .nav-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: #cbd5e1;
+    }
+
+    .nav-item.is-active {
+      background: var(--gsl-color-primary-soft);
+      color: var(--gsl-color-primary-strong);
+    }
+
+    .nav-item.is-active .nav-dot {
+      background: var(--gsl-color-primary);
+    }
+
+    .workspace {
+      min-width: 0;
+      padding: 28px 32px 48px;
+    }
+
+    .topbar {
+      align-items: center;
+      display: flex;
+      gap: 14px;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+
+    .route-meta {
+      color: var(--gsl-text-sub);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .route-meta span,
+    .chip,
+    .status-pill {
+      align-items: center;
+      border: 1px solid var(--gsl-color-border);
+      border-radius: 999px;
+      display: inline-flex;
+      gap: 6px;
+      min-height: 28px;
+      padding: 4px 10px;
+      white-space: nowrap;
+    }
+
+    .status-pill {
+      background: var(--gsl-color-success-soft);
+      border-color: #bdebc8;
+      color: var(--gsl-color-success);
+      font-size: 12px;
+      font-weight: 750;
+    }
+
+    .top-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .btn {
+      align-items: center;
+      border: 1px solid var(--gsl-color-border);
+      border-radius: 10px;
+      cursor: default;
+      display: inline-flex;
+      font-weight: 750;
+      min-height: 40px;
+      padding: 0 14px;
+      white-space: nowrap;
+    }
+
+    .btn.primary {
+      background: var(--gsl-color-primary);
+      border-color: var(--gsl-color-primary);
+      color: white;
+    }
+
+    .btn.ghost {
+      background: white;
+      color: var(--gsl-text-main);
+    }
+
+    .hero {
+      background: var(--gsl-bg-surface);
+      border: 1px solid var(--gsl-color-border);
+      border-radius: var(--gsl-radius-panel);
+      box-shadow: var(--gsl-shadow-card);
+      display: grid;
+      gap: 18px;
+      margin-bottom: 18px;
+      padding: 26px;
+    }
+
+    .hero-main {
+      align-items: start;
+      display: grid;
+      gap: 18px;
+      grid-template-columns: minmax(0, 1fr) 420px;
+    }
+
+    .eyebrow {
+      color: var(--gsl-color-primary-strong);
+      font-size: 11px;
+      font-weight: 800;
+      margin: 0 0 8px;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      color: var(--gsl-text-title);
+      font-size: 30px;
+      line-height: 1.18;
+      font-weight: 760;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      color: var(--gsl-text-title);
+      font-size: 19px;
+      line-height: 1.32;
+      font-weight: 760;
+    }
+
+    h3 {
+      color: var(--gsl-text-title);
+      font-size: 16px;
+      line-height: 1.36;
+      font-weight: 760;
+    }
+
+    .hero-copy,
+    .panel-copy {
+      color: var(--gsl-text-sub);
+      max-width: 760px;
+    }
+
+    .hero-kpis {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .hero-kpi {
+      background: var(--gsl-bg-subtle);
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 14px;
+      padding: 13px 14px;
+    }
+
+    .hero-kpi span,
+    .metric-card span,
+    .table th,
+    .small-label {
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .hero-kpi strong {
+      color: var(--gsl-text-title);
+      display: block;
+      font-size: 18px;
+      line-height: 1.35;
+      margin-top: 4px;
+    }
+
+    .step-strip {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .step-chip {
+      background: var(--gsl-bg-surface-soft);
+      border: 1px solid var(--gsl-color-border);
+      border-radius: 999px;
+      color: var(--gsl-text-sub);
+      display: flex;
+      font-size: 12px;
+      font-weight: 760;
+      gap: 8px;
+      min-height: 36px;
+      padding: 8px 12px;
+      white-space: nowrap;
+    }
+
+    .step-chip strong {
+      color: var(--gsl-color-primary-strong);
+      font-size: 12px;
+    }
+
+    .layout {
+      align-items: start;
+      display: grid;
+      gap: 18px;
+      grid-template-columns: minmax(0, 1fr) 348px;
+    }
+
+    .main-stack,
+    .rail {
+      display: grid;
+      gap: 16px;
+    }
+
+    .panel {
+      background: var(--gsl-bg-surface);
+      border: 1px solid var(--gsl-color-border);
+      border-radius: var(--gsl-radius-panel);
+      box-shadow: var(--gsl-shadow-card);
+      display: grid;
+      gap: 18px;
+      padding: 22px;
+    }
+
+    .panel-header {
+      align-items: start;
+      display: flex;
+      gap: 16px;
+      justify-content: space-between;
+    }
+
+    .panel-index {
+      align-items: center;
+      background: var(--gsl-color-primary-soft);
+      border-radius: 999px;
+      color: var(--gsl-color-primary-strong);
+      display: inline-flex;
+      font-size: 12px;
+      font-weight: 850;
+      height: 28px;
+      justify-content: center;
+      min-width: 28px;
+    }
+
+    .factor-card {
+      align-items: start;
+      background: #ffffff;
+      border: 1px solid #cfe8e4;
+      border-radius: 14px;
+      display: grid;
+      gap: 18px;
+      grid-template-columns: minmax(0, 1fr) 276px;
+      padding: 18px;
+    }
+
+    .factor-title {
+      display: grid;
+      gap: 9px;
+    }
+
+    .factor-title strong {
+      color: var(--gsl-text-title);
+      font-size: 18px;
+      line-height: 1.36;
+    }
+
+    .factor-id {
+      color: var(--gsl-text-muted);
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .chip {
+      background: var(--gsl-bg-surface-soft);
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+      font-weight: 720;
+    }
+
+    .chip.good {
+      background: var(--gsl-color-success-soft);
+      border-color: #bdebc8;
+      color: var(--gsl-color-success);
+    }
+
+    .chip.warn {
+      background: var(--gsl-color-warning-soft);
+      border-color: #f0d39c;
+      color: var(--gsl-color-warning);
+    }
+
+    .diagnostic-mini {
+      background: var(--gsl-bg-subtle);
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 14px;
+      display: grid;
+      gap: 10px;
+      padding: 14px;
+    }
+
+    .diagnostic-mini h3 {
+      font-size: 14px;
+    }
+
+    .diag-grid {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .diag-item {
+      background: white;
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 12px;
+      padding: 10px;
+    }
+
+    .diag-item span {
+      color: var(--gsl-text-muted);
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .diag-item strong {
+      color: var(--gsl-text-title);
+      display: block;
+      font-size: 17px;
+      line-height: 1.4;
+      margin-top: 2px;
+    }
+
+    .control-grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .control,
+    .option-card,
+    .metric-card,
+    .sector-row,
+    .holding-row,
+    .constraint-card {
+      background: var(--gsl-bg-surface-soft);
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 14px;
+    }
+
+    .control {
+      display: grid;
+      gap: 7px;
+      min-height: 108px;
+      padding: 14px;
+    }
+
+    .control strong {
+      color: var(--gsl-text-title);
+      font-size: 18px;
+      line-height: 1.2;
+    }
+
+    .control small {
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .sector-diagnostic {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .sector-risk {
+      border: 1px solid #f0d39c;
+      border-radius: 14px;
+      background: var(--gsl-color-warning-soft);
+      display: grid;
+      gap: 9px;
+      padding: 14px;
+    }
+
+    .sector-risk span {
+      color: var(--gsl-color-warning);
+      font-size: 12px;
+      font-weight: 750;
+    }
+
+    .sector-risk strong {
+      color: var(--gsl-text-title);
+      font-size: 15px;
+    }
+
+    .sector-risk small {
+      color: #8a5414;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .mapping-layout {
+      display: grid;
+      gap: 14px;
+      grid-template-columns: 0.92fr 1.08fr;
+    }
+
+    .option-stack {
+      display: grid;
+      gap: 10px;
+    }
+
+    .option-card {
+      display: grid;
+      gap: 5px;
+      padding: 14px;
+    }
+
+    .option-card.is-selected {
+      background: #f3fbf9;
+      border-color: #b8ddd7;
+      box-shadow: inset 4px 0 0 var(--gsl-color-primary);
+    }
+
+    .option-card strong {
+      color: var(--gsl-text-title);
+      font-size: 15px;
+    }
+
+    .option-card span {
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .cap-panel {
+      background: #ffffff;
+      border: 1px solid var(--gsl-color-border);
+      border-radius: 14px;
+      display: grid;
+      gap: 14px;
+      padding: 16px;
+    }
+
+    .cap-header {
+      align-items: center;
+      display: flex;
+      gap: 12px;
+      justify-content: space-between;
+    }
+
+    .switch {
+      background: var(--gsl-color-primary);
+      border-radius: 999px;
+      display: inline-flex;
+      height: 24px;
+      justify-content: flex-end;
+      padding: 3px;
+      width: 44px;
+    }
+
+    .switch::after {
+      background: white;
+      border-radius: 999px;
+      content: "";
+      height: 18px;
+      width: 18px;
+    }
+
+    .sector-list,
+    .holding-list,
+    .rail-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .sector-row,
+    .holding-row {
+      align-items: center;
+      display: grid;
+      gap: 10px;
+      grid-template-columns: 128px minmax(0, 1fr) 62px;
+      padding: 10px 12px;
+    }
+
+    .sector-row strong,
+    .holding-row strong {
+      color: var(--gsl-text-title);
+      font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .bar {
+      background: #e8eef1;
+      border-radius: 999px;
+      height: 8px;
+      overflow: hidden;
+      width: 100%;
+    }
+
+    .bar span {
+      background: var(--gsl-color-primary);
+      border-radius: inherit;
+      display: block;
+      height: 100%;
+    }
+
+    .bar.warn span {
+      background: var(--gsl-color-warning);
+    }
+
+    .bar.blue span {
+      background: var(--gsl-color-benchmark);
+    }
+
+    .num {
+      color: var(--gsl-text-title);
+      font-variant-numeric: tabular-nums;
+      font-weight: 760;
+      text-align: right;
+    }
+
+    .constraint-grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .constraint-card {
+      display: grid;
+      gap: 10px;
+      min-height: 128px;
+      padding: 14px;
+    }
+
+    .constraint-card strong {
+      color: var(--gsl-text-title);
+      font-size: 16px;
+    }
+
+    .constraint-card span {
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+      font-weight: 680;
+    }
+
+    .metric-grid {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .metric-card {
+      display: grid;
+      gap: 4px;
+      padding: 13px 14px;
+    }
+
+    .metric-card strong {
+      color: var(--gsl-text-title);
+      font-size: 18px;
+      line-height: 1.32;
+    }
+
+    .table-wrap {
+      border: 1px solid var(--gsl-color-border);
+      border-radius: 14px;
+      overflow: hidden;
+    }
+
+    .table {
+      border-collapse: collapse;
+      width: 100%;
+    }
+
+    .table th,
+    .table td {
+      border-bottom: 1px solid var(--gsl-color-border-soft);
+      padding: 11px 12px;
+      text-align: left;
+      vertical-align: middle;
+    }
+
+    .table tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .table td {
+      color: var(--gsl-text-main);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .table .negative {
+      color: var(--gsl-color-danger);
+    }
+
+    .rail {
+      position: sticky;
+      top: 24px;
+    }
+
+    .rail-card {
+      background: var(--gsl-bg-surface);
+      border: 1px solid var(--gsl-color-border);
+      border-radius: var(--gsl-radius-panel);
+      box-shadow: var(--gsl-shadow-card);
+      display: grid;
+      gap: 16px;
+      padding: 18px;
+    }
+
+    .rail-item {
+      align-items: start;
+      border-bottom: 1px solid var(--gsl-color-border-soft);
+      display: grid;
+      gap: 4px;
+      grid-template-columns: minmax(0, 1fr) auto;
+      padding-bottom: 12px;
+    }
+
+    .rail-item:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .rail-item strong {
+      color: var(--gsl-text-title);
+      display: block;
+      font-size: 13px;
+    }
+
+    .rail-item span {
+      color: var(--gsl-text-sub);
+      display: block;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .rail-badge {
+      border-radius: 999px;
+      color: var(--gsl-color-success);
+      font-size: 12px;
+      font-weight: 800;
+      padding: 2px 0;
+    }
+
+    .warning-box {
+      background: var(--gsl-color-warning-soft);
+      border: 1px solid #f0d39c;
+      border-radius: 14px;
+      color: #74440d;
+      display: grid;
+      gap: 8px;
+      padding: 14px;
+    }
+
+    .warning-box strong {
+      color: var(--gsl-color-warning);
+      font-size: 13px;
+    }
+
+    .warning-box span {
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .footer-actions {
+      display: grid;
+      gap: 10px;
+    }
+
+    .footer-actions .btn {
+      justify-content: center;
+      min-height: 44px;
+      width: 100%;
+    }
+
+    @media (max-width: 1180px) {
+      .app-shell {
+        grid-template-columns: 92px minmax(0, 1fr);
+      }
+
+      .sidebar {
+        padding: 20px 14px;
+      }
+
+      .brand span,
+      .nav-label,
+      .nav-item span:not(.nav-dot) {
+        display: none;
+      }
+
+      .nav-item {
+        justify-items: center;
+        grid-template-columns: 1fr;
+      }
+
+      .hero-main,
+      .layout,
+      .mapping-layout,
+      .factor-card {
+        grid-template-columns: 1fr;
+      }
+
+      .rail {
+        position: static;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .app-shell {
+        display: block;
+      }
+
+      .sidebar {
+        display: none;
+      }
+
+      .workspace {
+        padding: 18px 16px 32px;
+      }
+
+      .topbar,
+      .panel-header,
+      .cap-header {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .top-actions {
+        width: 100%;
+      }
+
+      .top-actions .btn {
+        justify-content: center;
+        flex: 1 1 150px;
+      }
+
+      h1 {
+        font-size: 26px;
+      }
+
+      .hero,
+      .panel,
+      .rail-card {
+        border-radius: 14px;
+        padding: 18px;
+      }
+
+      .hero-kpis,
+      .step-strip,
+      .control-grid,
+      .sector-diagnostic,
+      .constraint-grid,
+      .metric-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .sector-row,
+      .holding-row {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .num {
+        text-align: left;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+      }
+
+      .table {
+        min-width: 640px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell" data-artifact="composite-factor-strategy-creation">
+    <aside class="sidebar" aria-label="主导航">
+      <div class="brand">
+        <strong>Grit Strategy Lab</strong>
+        <span>研究到实盘的策略工作台</span>
+      </div>
+      <nav class="nav-group">
+        <div class="nav-label">工作流</div>
+        <div class="nav-item"><span class="nav-dot"></span><span>工作台</span></div>
+        <div class="nav-item is-active"><span class="nav-dot"></span><span>策略库</span></div>
+        <div class="nav-item"><span class="nav-dot"></span><span>回测运行</span></div>
+        <div class="nav-item"><span class="nav-dot"></span><span>优化任务</span></div>
+      </nav>
+      <nav class="nav-group">
+        <div class="nav-label">研究资产</div>
+        <div class="nav-item"><span class="nav-dot"></span><span>因子库</span></div>
+        <div class="nav-item"><span class="nav-dot"></span><span>PIT 数据</span></div>
+        <div class="nav-item"><span class="nav-dot"></span><span>快照治理</span></div>
+      </nav>
+    </aside>
+
+    <main class="workspace">
+      <div class="topbar">
+        <div class="route-meta" aria-label="页面上下文">
+          <span>#/factor-models/new</span>
+          <span>strategyType=COMPOSITE_FACTOR</span>
+          <span>source=factor_library</span>
+        </div>
+        <div class="top-actions">
+          <button class="btn ghost" type="button">返回策略库</button>
+          <button class="btn ghost" type="button">保存草稿</button>
+          <button class="btn primary" type="button">创建策略</button>
+        </div>
+      </div>
+
+      <section class="hero" aria-labelledby="page-title" data-ui="page-hero">
+        <div class="hero-main">
+          <div>
+            <p class="eyebrow">组合因子策略</p>
+            <h1 id="page-title">组合因子策略创建</h1>
+            <p class="hero-copy">基于已完成 WNZT 的 S/A 级 L3 因子生成可回测、可优化、可进入实盘约束评估的策略版本。</p>
+          </div>
+          <div class="hero-kpis" aria-label="策略创建摘要">
+            <article class="hero-kpi">
+              <span>因子权重</span>
+              <strong>100%</strong>
+            </article>
+            <article class="hero-kpi">
+              <span>默认持仓</span>
+              <strong>Top 50</strong>
+            </article>
+            <article class="hero-kpi">
+              <span>行业硬上限</span>
+              <strong>20%</strong>
+            </article>
+            <article class="hero-kpi">
+              <span>执行名义本金</span>
+              <strong>USD 10M</strong>
+            </article>
+          </div>
+        </div>
+        <div class="step-strip" aria-label="创建步骤">
+          <div class="step-chip"><strong>01</strong><span>股票池过滤</span></div>
+          <div class="step-chip"><strong>02</strong><span>权重映射</span></div>
+          <div class="step-chip"><strong>03</strong><span>再平衡逻辑</span></div>
+          <div class="step-chip"><strong>04</strong><span>实盘约束</span></div>
+        </div>
+      </section>
+
+      <div class="layout">
+        <div class="main-stack">
+          <section class="panel" aria-labelledby="factor-source-title" data-ui="factor-source-panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">因子来源</p>
+                <h2 id="factor-source-title">已选 L3 因子</h2>
+                <p class="panel-copy">来源限定为已完成 WNZT、诊断完成、S/A 级、L3 的可发布因子。</p>
+              </div>
+              <span class="status-pill">准入通过</span>
+            </div>
+            <article class="factor-card" data-ui="selected-factor-card">
+              <div class="factor-title">
+                <strong>质量动量残差 L3 组合因子</strong>
+                <span class="factor-id">s_alpha_ffblend_l3_rank</span>
+                <div class="chip-row">
+                  <span class="chip good">WNZT 完成</span>
+                  <span class="chip good">S 级</span>
+                  <span class="chip good">L3</span>
+                  <span class="chip good">诊断完成</span>
+                  <span class="chip">HIGH_IS_BETTER</span>
+                </div>
+              </div>
+              <aside class="diagnostic-mini" data-ui="diagnostic-summary-card">
+                <h3>Diagnostic Summary</h3>
+                <div class="diag-grid">
+                  <div class="diag-item"><span>Rank IC</span><strong>0.061</strong></div>
+                  <div class="diag-item"><span>IR</span><strong>0.84</strong></div>
+                  <div class="diag-item"><span>覆盖率</span><strong>96.4%</strong></div>
+                  <div class="diag-item"><span>单调性</span><strong>良好</strong></div>
+                </div>
+              </aside>
+            </article>
+          </section>
+
+          <section class="panel" aria-labelledby="universe-title" data-ui="universe-filtering-panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow"><span class="panel-index">01</span> Universe Filtering</p>
+                <h2 id="universe-title">股票池过滤</h2>
+                <p class="panel-copy">过滤不可交易、流动性不足与退市风险标的，过滤结果进入后续 Top 标的选择。</p>
+              </div>
+              <span class="status-pill">过滤后 486 / 503</span>
+            </div>
+
+            <div class="control-grid" aria-label="股票池过滤参数">
+              <article class="control">
+                <span class="small-label">最低 ADV</span>
+                <strong>5,000,000</strong>
+                <small>USD，20 日均成交额</small>
+              </article>
+              <article class="control">
+                <span class="small-label">停牌状态</span>
+                <strong>剔除</strong>
+                <small>当前停牌或无法撮合标的</small>
+              </article>
+              <article class="control">
+                <span class="small-label">退市窗口</span>
+                <strong>30 天</strong>
+                <small>即将退市 Ticker 禁入</small>
+              </article>
+            </div>
+
+            <div>
+              <div class="panel-header" style="margin-bottom: 10px;">
+                <div>
+                  <h3>行业诊断最弱区间</h3>
+                  <p class="panel-copy">基于最新正式诊断摘要投影，供股票池过滤时定位行业风险来源。</p>
+                </div>
+              </div>
+              <div class="sector-diagnostic" data-ui="worst-sector-summary">
+                <article class="sector-risk">
+                  <span>Rank IC -0.018</span>
+                  <strong>公用事业</strong>
+                  <small>样本 318，覆盖率 91.2%</small>
+                </article>
+                <article class="sector-risk">
+                  <span>Rank IC -0.012</span>
+                  <strong>能源</strong>
+                  <small>样本 442，覆盖率 94.6%</small>
+                </article>
+                <article class="sector-risk">
+                  <span>Rank IC -0.009</span>
+                  <strong>房地产</strong>
+                  <small>样本 266，覆盖率 88.9%</small>
+                </article>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel" aria-labelledby="mapping-title" data-ui="weight-mapping-panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow"><span class="panel-index">02</span> Weight Mapping</p>
+                <h2 id="mapping-title">权重映射</h2>
+                <p class="panel-copy">将 L3 因子分数映射为持仓权重，并执行个股上限与行业硬上限截断。</p>
+              </div>
+              <span class="status-pill">行业暴露已收敛</span>
+            </div>
+
+            <div class="mapping-layout">
+              <div class="option-stack" aria-label="权重映射方式">
+                <article class="option-card is-selected">
+                  <strong>等权 Top-K</strong>
+                  <span>Top 50，每只目标权重 2.00%</span>
+                </article>
+                <article class="option-card">
+                  <strong>分值比例法</strong>
+                  <span>按 L3 分数比例分配，分数越高权重越高</span>
+                </article>
+                <article class="option-card">
+                  <strong>风险优化启发式</strong>
+                  <span>行业约束、个股上限与分数排序循环求解</span>
+                </article>
+              </div>
+
+              <div class="cap-panel" data-ui="sector-cap-panel">
+                <div class="cap-header">
+                  <div>
+                    <h3>行业硬上限</h3>
+                    <p class="panel-copy">GICS Sector 单行业最高 20.00%，超额权重按分数比例分摊到其他未触顶行业。</p>
+                  </div>
+                  <span class="switch" aria-label="行业硬上限开启"></span>
+                </div>
+
+                <div class="metric-grid" aria-label="行业截断摘要">
+                  <article class="metric-card">
+                    <span>截断前最大行业</span>
+                    <strong>31.4%</strong>
+                  </article>
+                  <article class="metric-card">
+                    <span>截断后最大行业</span>
+                    <strong>20.0%</strong>
+                  </article>
+                  <article class="metric-card">
+                    <span>已重分摊权重</span>
+                    <strong>11.4%</strong>
+                  </article>
+                  <article class="metric-card">
+                    <span>残余现金</span>
+                    <strong>0.6%</strong>
+                  </article>
+                </div>
+
+                <div class="sector-list" aria-label="行业暴露预览">
+                  <div class="sector-row">
+                    <strong>信息技术</strong>
+                    <div class="bar warn"><span style="width: 100%;"></span></div>
+                    <span class="num">20.0%</span>
+                  </div>
+                  <div class="sector-row">
+                    <strong>通信服务</strong>
+                    <div class="bar blue"><span style="width: 93%;"></span></div>
+                    <span class="num">18.6%</span>
+                  </div>
+                  <div class="sector-row">
+                    <strong>金融</strong>
+                    <div class="bar"><span style="width: 76%;"></span></div>
+                    <span class="num">15.2%</span>
+                  </div>
+                  <div class="sector-row">
+                    <strong>医疗保健</strong>
+                    <div class="bar"><span style="width: 64%;"></span></div>
+                    <span class="num">12.8%</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="table-wrap" data-ui="top-holdings-preview">
+              <table class="table" aria-label="Top 标的权重预览">
+                <thead>
+                  <tr>
+                    <th>排名</th>
+                    <th>Ticker</th>
+                    <th>行业</th>
+                    <th>L3 分数</th>
+                    <th>基础权重</th>
+                    <th>目标权重</th>
+                    <th>调整</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td>1</td><td>NVDA</td><td>信息技术</td><td>98.7</td><td>2.00%</td><td>1.52%</td><td class="negative">行业截断</td></tr>
+                  <tr><td>2</td><td>MSFT</td><td>信息技术</td><td>97.9</td><td>2.00%</td><td>1.52%</td><td class="negative">行业截断</td></tr>
+                  <tr><td>3</td><td>META</td><td>通信服务</td><td>96.3</td><td>2.00%</td><td>2.12%</td><td>分摊增配</td></tr>
+                  <tr><td>4</td><td>UNH</td><td>医疗保健</td><td>94.8</td><td>2.00%</td><td>2.18%</td><td>分摊增配</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel" aria-labelledby="rebalance-title" data-ui="rebalance-panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow"><span class="panel-index">03</span> Rebalance Logic</p>
+                <h2 id="rebalance-title">再平衡逻辑</h2>
+                <p class="panel-copy">定时调仓与排名阈值同时生效，持仓跌出阈值后进入强制换新队列。</p>
+              </div>
+              <span class="status-pill">月初调仓</span>
+            </div>
+            <div class="constraint-grid">
+              <article class="constraint-card">
+                <span>定时触发</span>
+                <strong>每月首个交易日</strong>
+                <span>基于最新 L3 分数重建 Top 50 权重</span>
+              </article>
+              <article class="constraint-card">
+                <span>阈值触发</span>
+                <strong>跌出前 20%</strong>
+                <span>现有持仓排名低于阈值时强制替换</span>
+              </article>
+            </div>
+          </section>
+
+          <section class="panel" aria-labelledby="execution-title" data-ui="execution-panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow"><span class="panel-index">04</span> Execution Constraints</p>
+                <h2 id="execution-title">实盘约束</h2>
+                <p class="panel-copy">成本、滑点与成交冲击计入预览与正式回测，避免策略 Alpha 被交易摩擦吞噬。</p>
+              </div>
+              <span class="status-pill">成本模型已启用</span>
+            </div>
+            <div class="metric-grid">
+              <article class="metric-card">
+                <span>名义本金</span>
+                <strong>USD 10M</strong>
+              </article>
+              <article class="metric-card">
+                <span>佣金</span>
+                <strong>1.5 bps</strong>
+              </article>
+              <article class="metric-card">
+                <span>基础滑点</span>
+                <strong>2.5 bps</strong>
+              </article>
+              <article class="metric-card">
+                <span>冲击上限</span>
+                <strong>75 bps</strong>
+              </article>
+            </div>
+            <div class="table-wrap" data-ui="execution-cost-preview">
+              <table class="table" aria-label="执行成本预览">
+                <thead>
+                  <tr>
+                    <th>成本项</th>
+                    <th>模型输入</th>
+                    <th>回测扣减</th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td>佣金</td><td>1.5 bps</td><td>0.015%</td><td>已计入</td></tr>
+                  <tr><td>印花税</td><td>0 bps</td><td>0.000%</td><td>按市场配置</td></tr>
+                  <tr><td>滑点</td><td>2.5 bps + ADV 冲击</td><td>0.041%</td><td>已计入</td></tr>
+                  <tr><td>流动性冲击</td><td>USD 10M 名义本金</td><td>0.028%</td><td>ADV 约束通过</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <aside class="rail" aria-label="创建状态栏">
+          <section class="rail-card" data-ui="creation-readiness-rail">
+            <div>
+              <p class="eyebrow">创建状态</p>
+              <h2>策略版本预检</h2>
+            </div>
+            <div class="rail-list">
+              <div class="rail-item">
+                <div><strong>L3 因子准入</strong><span>WNZT、S/A、诊断完成</span></div>
+                <span class="rail-badge">通过</span>
+              </div>
+              <div class="rail-item">
+                <div><strong>股票池过滤</strong><span>剔除 17 个不可交易标的</span></div>
+                <span class="rail-badge">通过</span>
+              </div>
+              <div class="rail-item">
+                <div><strong>行业硬上限</strong><span>GICS Sector 单行业 20%</span></div>
+                <span class="rail-badge">通过</span>
+              </div>
+              <div class="rail-item">
+                <div><strong>执行成本</strong><span>佣金、滑点、冲击已扣减</span></div>
+                <span class="rail-badge">通过</span>
+              </div>
+            </div>
+            <div class="warning-box">
+              <strong>预览提示</strong>
+              <span>行业约束后残余现金 0.6%，正式回测将按现金持仓记录。</span>
+            </div>
+            <div class="footer-actions">
+              <button class="btn primary" type="button">创建并进入回测</button>
+              <button class="btn ghost" type="button">查看参数 JSON</button>
+            </div>
+          </section>
+
+          <section class="rail-card" data-ui="payload-rail">
+            <div>
+              <p class="eyebrow">参数快照</p>
+              <h2>COMPOSITE_FACTOR</h2>
+            </div>
+            <div class="rail-list">
+              <div class="rail-item"><div><strong>factor_id</strong><span>s_alpha_ffblend_l3_rank</span></div></div>
+              <div class="rail-item"><div><strong>weight_mapping.method</strong><span>equal_top_k</span></div></div>
+              <div class="rail-item"><div><strong>sector_cap_pct</strong><span>20</span></div></div>
+              <div class="rail-item"><div><strong>rebalance.schedule</strong><span>monthly_start</span></div></div>
+              <div class="rail-item"><div><strong>notional_usd</strong><span>10000000</span></div></div>
+            </div>
+          </section>
+        </aside>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,187 @@
+{
+  "title": "Grit Backtest Platform V1",
+  "url": "http://127.0.0.1:4173/?v=route-reload-1779094281976#/factor-models/new",
+  "rootClass": "factor-phase2-page factor-model-builder-page",
+  "rootRect": {
+    "x": 268,
+    "y": 28,
+    "width": 1140,
+    "height": 1299
+  },
+  "modules": [
+    {
+      "index": 0,
+      "tag": "section",
+      "className": "factor-phase2-hero",
+      "aria": "factor-model-title",
+      "heading": "多因子策略创建",
+      "text": "多因子策略多因子策略创建从系统默认因子和已验证人工因子中选择信号，配置权重、方向和行业中性化，零写入预览覆盖率、打分分布和换手，再物化为可回测策略。保存草稿预览打分创建可回测策略",
+      "rect": {
+        "x": 268,
+        "y": 28,
+        "width": 1140,
+        "height": 173
+      }
+    },
+    {
+      "index": 1,
+      "tag": "p",
+      "className": "factor-phase2-hero__eyebrow",
+      "aria": null,
+      "heading": "",
+      "text": "多因子策略",
+      "rect": {
+        "x": 293,
+        "y": 61,
+        "width": 708,
+        "height": 19
+      }
+    },
+    {
+      "index": 2,
+      "tag": "section",
+      "className": "factor-phase2-workbench factor-phase2-workbench--model",
+      "aria": "多因子模型工作台",
+      "heading": "选择因子",
+      "text": "选择因子只允许可诊断或沙盒可跑的因子参与预览。策略名称因子接口未返回可用因子，当前无法创建策略。权重与打分预览MAD/Winsorize、ZScore、方向调整和行业中性化统一由表达式引擎执行。零写入预览有效覆盖率0.0%覆盖偏低，先补齐 PIT 样本。预估换手0.0%换手温和，成本压力可控。得分分布跨度0.00分层偏弱，建议调整权重或方向。再平衡配置每月复核一次多因子组合权重。每月每季度每半年每年从不持仓数量每次调仓后保留的目标持仓数。持仓数量当前设置5 个标的启用行业中性化GICS · PIT 行业字段行业中性",
+      "rect": {
+        "x": 268,
+        "y": 219,
+        "width": 1140,
+        "height": 1107
+      }
+    },
+    {
+      "index": 3,
+      "tag": "section",
+      "className": "factor-phase2-panel",
+      "aria": "factor-model-select",
+      "heading": "选择因子",
+      "text": "选择因子只允许可诊断或沙盒可跑的因子参与预览。策略名称因子接口未返回可用因子，当前无法创建策略。",
+      "rect": {
+        "x": 268,
+        "y": 219,
+        "width": 295,
+        "height": 274
+      }
+    },
+    {
+      "index": 4,
+      "tag": "div",
+      "className": "factor-phase2-panel__header",
+      "aria": null,
+      "heading": "选择因子",
+      "text": "选择因子只允许可诊断或沙盒可跑的因子参与预览。",
+      "rect": {
+        "x": 269,
+        "y": 220,
+        "width": 293,
+        "height": 115
+      }
+    },
+    {
+      "index": 5,
+      "tag": "div",
+      "className": "factor-phase2-panel__body",
+      "aria": null,
+      "heading": "",
+      "text": "策略名称因子接口未返回可用因子，当前无法创建策略。",
+      "rect": {
+        "x": 269,
+        "y": 336,
+        "width": 293,
+        "height": 157
+      }
+    },
+    {
+      "index": 6,
+      "tag": "section",
+      "className": "factor-phase2-panel",
+      "aria": "factor-model-preview",
+      "heading": "权重与打分预览",
+      "text": "权重与打分预览MAD/Winsorize、ZScore、方向调整和行业中性化统一由表达式引擎执行。零写入预览有效覆盖率0.0%覆盖偏低，先补齐 PIT 样本。预估换手0.0%换手温和，成本压力可控。得分分布跨度0.00分层偏弱，建议调整权重或方向。再平衡配置每月复核一次多因子组合权重。每月每季度每半年每年从不持仓数量每次调仓后保留的目标持仓数。持仓数量当前设置5 个标的启用行业中性化GICS · PIT 行业字段行业中性化已关闭覆盖未启用阶段保留原始截面分缺口未启用，无需行业 PIT等待预览接口返回样本低分高分零写",
+      "rect": {
+        "x": 579,
+        "y": 219,
+        "width": 493,
+        "height": 1047
+      }
+    },
+    {
+      "index": 7,
+      "tag": "div",
+      "className": "factor-phase2-panel__header",
+      "aria": null,
+      "heading": "权重与打分预览",
+      "text": "权重与打分预览MAD/Winsorize、ZScore、方向调整和行业中性化统一由表达式引擎执行。零写入预览",
+      "rect": {
+        "x": 580,
+        "y": 220,
+        "width": 491,
+        "height": 115
+      }
+    },
+    {
+      "index": 8,
+      "tag": "div",
+      "className": "factor-phase2-panel__body",
+      "aria": null,
+      "heading": "",
+      "text": "有效覆盖率0.0%覆盖偏低，先补齐 PIT 样本。预估换手0.0%换手温和，成本压力可控。得分分布跨度0.00分层偏弱，建议调整权重或方向。再平衡配置每月复核一次多因子组合权重。每月每季度每半年每年从不持仓数量每次调仓后保留的目标持仓数。持仓数量当前设置5 个标的启用行业中性化GICS · PIT 行业字段行业中性化已关闭覆盖未启用阶段保留原始截面分缺口未启用，无需行业 PIT等待预览接口返回样本低分高分零写入打分样本",
+      "rect": {
+        "x": 580,
+        "y": 336,
+        "width": 491,
+        "height": 930
+      }
+    },
+    {
+      "index": 9,
+      "tag": "section",
+      "className": "factor-phase2-panel",
+      "aria": "factor-model-gates",
+      "heading": "策略创建风险",
+      "text": "策略创建风险区分风险提示与硬阻断；高相关只提示，PIT 与表达式问题才阻断。基础面 available_at 校验通过价格与 Universe PIT(10Y)10Y通过行业 PIT 状态未启用压力场景覆盖审计提示策略名称已填写持仓数量5权重合计0%再平衡配置每月预览状态本地校验实盘准入等待预览接口确认风险策略类型多因子策略创建信息待补当前阻塞：权重合计为 0%。创建口径当前没有高相关、诊断过期或硬阻断；创建后进入既有回测链路。创建可回测策略",
+      "rect": {
+        "x": 1088,
+        "y": 219,
+        "width": 320,
+        "height": 1107
+      }
+    },
+    {
+      "index": 10,
+      "tag": "div",
+      "className": "factor-phase2-panel__header",
+      "aria": null,
+      "heading": "策略创建风险",
+      "text": "策略创建风险区分风险提示与硬阻断；高相关只提示，PIT 与表达式问题才阻断。",
+      "rect": {
+        "x": 1089,
+        "y": 220,
+        "width": 318,
+        "height": 115
+      }
+    },
+    {
+      "index": 11,
+      "tag": "div",
+      "className": "factor-phase2-panel__body",
+      "aria": null,
+      "heading": "",
+      "text": "基础面 available_at 校验通过价格与 Universe PIT(10Y)10Y通过行业 PIT 状态未启用压力场景覆盖审计提示策略名称已填写持仓数量5权重合计0%再平衡配置每月预览状态本地校验实盘准入等待预览接口确认风险策略类型多因子策略创建信息待补当前阻塞：权重合计为 0%。创建口径当前没有高相关、诊断过期或硬阻断；创建后进入既有回测链路。创建可回测策略",
+      "rect": {
+        "x": 1089,
+        "y": 336,
+        "width": 318,
+        "height": 990
+      }
+    }
+  ],
+  "bodyTextSample": "多因子策略多因子策略创建从系统默认因子和已验证人工因子中选择信号，配置权重、方向和行业中性化，零写入预览覆盖率、打分分布和换手，再物化为可回测策略。保存草稿预览打分创建可回测策略选择因子只允许可诊断或沙盒可跑的因子参与预览。策略名称因子接口未返回可用因子，当前无法创建策略。权重与打分预览MAD/Winsorize、ZScore、方向调整和行业中性化统一由表达式引擎执行。零写入预览有效覆盖率0.0%覆盖偏低，先补齐 PIT 样本。预估换手0.0%换手温和，成本压力可控。得分分布跨度0.00分层偏弱，建议调整权重或方向。再平衡配置每月复核一次多因子组合权重。每月每季度每半年每年从不持仓数量每次调仓后保留的目标持仓数。持仓数量当前设置5 个标的启用行业中性化GICS · PIT 行业字段行业中性化已关闭覆盖未启用阶段保留原始截面分缺口未启用，无需行业 PIT等待预览接口返回样本低分高分零写入打分样本策略创建风险区分风险提示与硬阻断；高相关只提示，PIT 与表达式问题才阻断。基础面 available_at 校验通过价格与 Universe PIT(10Y)10Y通过行业 PIT 状态未启用压力场景覆盖审计提示策略名称已填写持仓数量5权重合计0%再平衡配置每月预览状态本地校验实盘准入等待预览接口确认风险策略类型多因子策略创建信息待补当前阻塞：权重合计为 0%。创建口径当前没有高相关、诊断过期或硬阻断；创建后进入既有回测链路。创建可回测策略",
+  "css": {
+    "background": "rgba(0, 0, 0, 0)",
+    "color": "rgb(7, 20, 35)",
+    "font": "Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans SC\", \"Segoe UI\", sans-serif"
+  }
+}

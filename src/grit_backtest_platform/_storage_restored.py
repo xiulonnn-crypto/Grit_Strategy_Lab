@@ -52,7 +52,8 @@ def _dict_row_factory(cursor: sqlite3.Cursor, row: tuple[Any, ...]) -> dict[str,
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 3000")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA synchronous = NORMAL")
 
 def _try_enable_wal_mode(conn: sqlite3.Connection) -> None:
     try:
@@ -1016,7 +1017,7 @@ class SQLiteStorage:
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30.0)
         conn.row_factory = _dict_row_factory
         _apply_pragmas(conn)
         try:

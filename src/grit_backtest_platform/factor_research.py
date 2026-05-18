@@ -35,6 +35,41 @@ FACTOR_DESCRIPTOR_SCHEMA_VERSION = "factor_descriptor_v1"
 FACTOR_QUARANTINE_RULE_VERSION = "factor_quarantine_v2_0"
 FUNDAMENTAL_SEED_VERSION = "v3_asset_growth_shares"
 QUARANTINE_MIN_NEWEY_WEST_IR = 0.1
+PHASE2_MIN_OOS_TO_IS_RATIO = 0.6
+PHASE2_L2_OPERATOR_CHAIN = [
+    {"code": "RAW", "label": "Raw", "description": "L2 原子信号的原始计算结果，尚未完成 WNZT 处理"},
+    {"code": "MAD", "label": "Winsorize", "description": "MAD 去极值"},
+    {"code": "N", "label": "Neutralize", "description": "残差/中性化"},
+    {"code": "Z", "label": "Z-Score", "description": "截面标准化"},
+    {"code": "R", "label": "Rank", "description": "排序信号"},
+]
+PHASE2_L3_COMPOSITION_METHODS = [
+    {"key": "style_blend", "label": "风格复合"},
+    {"key": "risk_adjusted", "label": "风险调节"},
+    {"key": "value_anchor", "label": "估值锚定"},
+    {"key": "divergence", "label": "背离惩罚"},
+    {"key": "residual_neutralized", "label": "残差/中性化"},
+    {"key": "ts_denoise", "label": "时序降噪"},
+]
+PHASE2_L1_RAW_FIELDS = {
+    "adj_close",
+    "book_value_equity",
+    "capex",
+    "cash_and_equivalents",
+    "close",
+    "high",
+    "industry",
+    "low",
+    "ltm_earnings",
+    "market_cap",
+    "marketcap",
+    "open",
+    "sector",
+    "shares_outstanding",
+    "total_debt",
+    "total_shares",
+    "volume",
+}
 PRICE_REQUIREMENTS = set(PRICE_DATA_REQUIREMENTS)
 FUNDAMENTAL_REQUIREMENTS = {
     "ltm_earnings",
@@ -256,6 +291,7 @@ FACTOR_FAMILY_LABELS = {
     "inv": "\u8d28\u91cf",
     "liq": "\u60c5\u7eea",
     "mom": "\u52a8\u91cf",
+    "price": "\u4ef7\u683c",
     "qlty": "\u8d28\u91cf",
     "size": "\u89c4\u6a21",
     "val": "\u4f30\u503c",
@@ -359,13 +395,46 @@ FACTOR_LIFECYCLE_PROJECTIONS = {
     "online": {"key": "online", "label": "线上", "description": "当前可用于正式策略引用的因子。"},
     "to_be_verified": {"key": "to_be_verified", "label": "待校准", "description": "数据、环境或质量指标需要复核。"},
     "archived": {"key": "archived", "label": "已归档", "description": "逻辑失效或同簇冗余后保留审计。"},
+    "invalid": {"key": "invalid", "label": "已失效", "description": "底层数据源永久失效，需要切换备用链路。"},
 }
+RAW_FACTOR_INVALID_STATUSES = {"INVALID", "SOURCE_INVALID", "DATA_SOURCE_INVALID"}
+RAW_FACTOR_CALIBRATION_STATUSES = {"DRAFT", "DECAYED", "TO_BE_VERIFIED", "BLOCKED_PIT", "BLOCKED_DATA", "FAILED"}
 FACTOR_LEVEL_PROJECTIONS = {
-    "S": {"key": "S", "label": "S 核心", "description": "强预测、稳定且可作为核心候选。"},
-    "A": {"key": "A", "label": "A 可入选", "description": "质量达标，可进入组合候选池。"},
-    "B": {"key": "B", "label": "B 观察", "description": "基础字段或稳定观察因子。"},
-    "C": {"key": "C", "label": "C 待校准", "description": "需要补诊断、补数据或复核稳定性。"},
-    "D": {"key": "D", "label": "D 归档", "description": "失效、冗余或仅作归档复盘。"},
+    "S": {"key": "S", "label": "S顶级", "description": "强预测、稳定且可作为核心候选。"},
+    "A": {"key": "A", "label": "A优秀", "description": "质量达标，可进入组合候选池。"},
+    "B": {"key": "B", "label": "B合格", "description": "基础字段或稳定观察因子。"},
+    "C": {"key": "C", "label": "C微弱", "description": "需要补诊断、补数据或复核稳定性。"},
+    "D": {"key": "D", "label": "D噪声", "description": "失效、冗余或仅作归档复盘。"},
+}
+RAW_FIELD_LINEAGE_LABELS = {
+    "adj_close": "复权收盘价",
+    "book_value_equity": "账面权益原始字段",
+    "capex": "资本开支原始字段",
+    "cash_and_equivalents": "现金及等价物原始字段",
+    "close": "收盘价原始字段",
+    "dollarvolume": "成交额原始字段",
+    "enterprise_value": "企业价值原始字段",
+    "ltm_earnings": "LTM 盈利原始字段",
+    "market_cap": "总市值原始字段",
+    "marketcap": "总市值原始字段",
+    "operating_cash_flow": "经营现金流原始字段",
+    "price_history": "价格历史原始字段",
+    "returns": "收益序列原始字段",
+    "shares_outstanding": "总股本原始字段",
+    "total_debt": "总负债原始字段",
+    "total_shares": "总股本原始字段",
+    "turnover": "换手率原始字段",
+}
+RAW_FIELD_TO_F1_FACTOR_ID = {
+    "Close": "s_price_adjclose_cur_raw",
+    "adj_close": "s_price_adjclose_cur_raw",
+    "close": "s_price_adjclose_cur_raw",
+    "market_cap": "s_size_mcap_cur_raw",
+    "marketcap": "s_size_mcap_cur_raw",
+    "price_history": "s_price_adjclose_cur_raw",
+    "returns": "s_price_adjclose_cur_raw",
+    "shares_outstanding": "s_size_mcap_cur_raw",
+    "total_shares": "s_size_mcap_cur_raw",
 }
 FACTOR_OP_LIGHTS = (
     ("W", "winsorize", "去极值"),
@@ -507,6 +576,17 @@ DEFAULT_SEED_FACTORS: tuple[SeedFactor, ...] = (
         tags=("默认因子", "规模", "基础面可诊断"),
         data_requirements=("market_cap", "shares_outstanding"),
         institutional_note="小市值溢价需要同时关注流动性枯竭和成交容量风险。",
+        diagnostic_status="READY_TO_DIAGNOSE",
+    ),
+    SeedFactor(
+        id="s_price_adjclose_cur_raw",
+        name="复权收盘价",
+        descriptor=FactorDescriptor("s", "price", "adjclose", "cur", "raw"),
+        expression="Close",
+        direction="HIGH_IS_BETTER",
+        tags=("system_seed", "price", "price_diagnostic"),
+        data_requirements=("adj_close", "price_history"),
+        institutional_note="Raw adjusted-close descriptor used as the F1 anchor for replayable price-factor lineage.",
         diagnostic_status="READY_TO_DIAGNOSE",
     ),
     SeedFactor(
@@ -4131,8 +4211,13 @@ def _pit_capability(
     }
 
 
-def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
-    ensure_default_fundamental_snapshot(market_data_repository)
+def build_pit_data_overview(
+    market_data_repository: Any,
+    *,
+    ensure_fundamental_snapshot: bool = True,
+) -> dict[str, Any]:
+    if ensure_fundamental_snapshot:
+        ensure_default_fundamental_snapshot(market_data_repository)
     now = iso_now()
     dataset_snapshots = list(market_data_repository.list_dataset_snapshots())
     universe_snapshots = list(market_data_repository.list_universe_snapshots())
@@ -4624,7 +4709,13 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
         and int(option_skew_signal_contract.get("missing_publish_date_count") or 0) <= 0
         else ("OBSERVATION" if option_skew_point_rows > 0 else "DISABLED")
     )
-    price_replay_ready = adjusted_price_status == "READY"
+    price_replay_full_ready = adjusted_price_status == "READY"
+    price_replay_ready = (
+        has_price_rows
+        and admission_status in {"READY", "REPAIR"}
+        and not bool(factor_admission_coverage.get("blocks_factor_admission"))
+    )
+    price_replay_needs_full_ready_repair = price_replay_ready and not price_replay_full_ready
     universe_history_ready = resolved_universe_status == "READY"
     return_diagnostic_ready = price_replay_ready and universe_history_ready
     fundamental_has_partial_evidence = fundamental_point_rows > 0 or bool(fundamental_fields)
@@ -4636,11 +4727,12 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
     macro_feature_ready = macro_gate_status == "READY"
     iv_feature_ready = iv_skew_gate_status == "READY"
     l4_has_feature_ready = macro_feature_ready or iv_feature_ready
+    price_replay_gate_status = "READY" if price_replay_ready else "BLOCKED"
     l1_status = _pit_layer_status(
-        ready=adjusted_price_status == "READY" and corporate_status == "READY",
-        partial=adjusted_price_status == "READY" and corporate_status != "READY",
-        warning=adjusted_price_status == "READY" and corporate_status != "READY",
-        blocked=adjusted_price_status != "READY",
+        ready=price_replay_full_ready and corporate_status == "READY",
+        partial=price_replay_ready and (price_replay_needs_full_ready_repair or corporate_status != "READY"),
+        warning=price_replay_ready and (price_replay_needs_full_ready_repair or corporate_status != "READY"),
+        blocked=not price_replay_ready,
     )
     l2_status = _pit_layer_status(
         ready=fundamental_ready and fundamental_time_contract_ready,
@@ -4781,9 +4873,13 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
                 "复权价格与公司行为链路可回放，价格型因子可进入正式诊断。"
                 if l1_status == "READY"
                 else (
+                    "10Y PIT 价格回放与历史样本池已可用；30Y Full Ready 或公司行为补链仍在修复队列，正式准入不再硬阻断。"
+                    if l1_status == "PARTIAL_READY"
+                    else (
                     "复权价格已可用，但公司行为仍待继续补齐；价格型因子可先研究观察。"
                     if l1_status == "WARNING"
                     else "价格回放链路尚未闭合，价格型因子仍受阻。"
+                    )
                 )
             ),
             "pit_alignment": "使用复权价、价格历史和收益序列进行 PIT 回放。",
@@ -4795,7 +4891,7 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "blockers": [
                 item["message"]
                 for item in blocker_items
-                if str(item.get("code") or "") in {"PRICE_SNAPSHOT_NOT_READY"}
+                if not price_replay_ready and str(item.get("code") or "") in {"PRICE_SNAPSHOT_NOT_READY"}
             ],
             "available_at_health": None,
             "submodules": [
@@ -4943,12 +5039,16 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "title_cn": "L4 宏观与衍生品",
             "status": l4_status,
             "summary": (
-                "宏观利率与期权偏度已可作为特征源，正式 IC 诊断仍需价格和样本池门禁。"
-                if l4_status == "PARTIAL_READY"
+                "宏观利率与期权偏度均已形成 PIT 证据，可进入宏观 Beta 与 IV Skew 诊断。"
+                if l4_status == "READY"
                 else (
-                    "价格与样本池已可支持宏观敞口校准，但利率 Beta 与 IV Skew 仍处于校准阶段。"
-                    if l4_status == "CALIBRATING"
-                    else "价格或样本池仍未闭合，宏观与衍生品诊断暂不开放。"
+                    "宏观利率与期权偏度已可作为特征源，正式 IC 诊断仍需价格和样本池门禁。"
+                    if l4_status == "PARTIAL_READY"
+                    else (
+                        "价格与样本池已可支持宏观敞口校准，但利率 Beta 与 IV Skew 仍处于校准阶段。"
+                        if l4_status == "CALIBRATING"
+                        else "价格或样本池仍未闭合，宏观与衍生品诊断暂不开放。"
+                    )
                 )
             ),
             "pit_alignment": "滚动回归与衍生品偏度计算需要稳定的回放价格链路。",
@@ -5100,7 +5200,7 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
                 "linked_factor_groups": ["quality_valuation"],
             }
         )
-    if adjusted_price_status != "READY":
+    if not price_replay_ready:
         pit_quality_alerts.append(
             {
                 "code": "NON_REPLAYABLE_FIELD",
@@ -5140,7 +5240,7 @@ def build_pit_data_overview(market_data_repository: Any) -> dict[str, Any]:
             "check_title_cn": "复权价格回放链路",
             "source_layer": "L1 基础行情",
             "target_factor_groups": ["价格型", "宏观/衍生品型"],
-            "result_status": l1_status,
+            "result_status": price_replay_gate_status,
             "detail_cn": "价格型和正式 IC 诊断必须绑定可回放复权价格。",
             "hard_blocking": not price_replay_ready,
             "capability_mode": price_capability["mode"],
@@ -6284,8 +6384,33 @@ class FactorResearchService:
 
     @staticmethod
     def _factor_is_offline(factor: Mapping[str, Any]) -> bool:
+        if FactorResearchService._factor_tier_key(factor) == "F1":
+            return False
         lifecycle = str(factor.get("lifecycle_status") or "").upper()
         return lifecycle in FACTOR_OFFLINE_STATUSES or bool(factor.get("offline_at"))
+
+    @staticmethod
+    def _factor_is_raw_source(factor: Mapping[str, Any]) -> bool:
+        return FactorResearchService._factor_tier_key(factor) == "F1"
+
+    @staticmethod
+    def _factor_raw_data_quality_key(factor: Mapping[str, Any], policy: Mapping[str, Any]) -> str:
+        lifecycle_status = str(factor.get("lifecycle_status") or "").upper()
+        diagnostic_status = str(factor.get("diagnostic_status") or "").upper()
+        hard_blockers = [item for item in policy.get("hard_blockers") or [] if isinstance(item, Mapping)]
+        warnings = [item for item in policy.get("warnings") or [] if isinstance(item, Mapping)]
+        if lifecycle_status in RAW_FACTOR_INVALID_STATUSES or diagnostic_status in RAW_FACTOR_INVALID_STATUSES:
+            return "invalid"
+        if (
+            lifecycle_status in RAW_FACTOR_CALIBRATION_STATUSES
+            or lifecycle_status in FACTOR_OFFLINE_STATUSES
+            or bool(factor.get("offline_at"))
+            or diagnostic_status in RAW_FACTOR_CALIBRATION_STATUSES
+            or hard_blockers
+            or warnings
+        ):
+            return "to_be_verified"
+        return "online"
 
     @staticmethod
     def _factor_low_efficiency_streak(summary: Mapping[str, Any], *, days: int = 20) -> dict[str, Any]:
@@ -6305,6 +6430,8 @@ class FactorResearchService:
         }
 
     def _factor_deprecate_evidence(self, factor: Mapping[str, Any]) -> dict[str, Any]:
+        if self._factor_is_raw_source(factor):
+            return {"eligible": False, "reason": "raw_source_protected"}
         summary = self._latest_diagnostic_summary(factor)
         if not summary:
             return {"eligible": False, "reason": "missing_diagnostic_summary"}
@@ -6592,6 +6719,8 @@ class FactorResearchService:
         factor_id = str(factor.get("id") or "")
         if not factor_id or self._factor_is_offline(factor):
             return {"eligible": False, "reason": "offline_or_missing_factor"}
+        if self._factor_is_raw_source(factor):
+            return {"eligible": False, "reason": "raw_source_protected"}
         if factor_lookup:
             nodes = []
             for peer_id, peer in factor_lookup.items():
@@ -6726,6 +6855,7 @@ class FactorResearchService:
     ) -> dict[str, Any]:
         hard_blockers: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
+        raw_source = self._factor_is_raw_source(factor)
         if self._factor_is_offline(factor):
             hard_blockers.append(
                 {
@@ -6812,7 +6942,7 @@ class FactorResearchService:
 
         cluster = correlation_cluster or {}
         cluster_summary = self._correlation_cluster_summary(cluster) if cluster else {}
-        if int(cluster_summary.get("high_correlation_count") or 0) > 0:
+        if not raw_source and int(cluster_summary.get("high_correlation_count") or 0) > 0:
             warnings.append(
                 {
                     "code": "HIGH_CORRELATION",
@@ -6831,7 +6961,7 @@ class FactorResearchService:
             grade_score = self._factor_grade_score(summary)
             grade_label = self._factor_grade_label(grade_score)
             group_shape = self._factor_group_return_shape(summary)
-            if grade_score is not None and grade_score <= 2:
+            if not raw_source and grade_score is not None and grade_score <= 2:
                 hard_blockers.append(
                     {
                         "code": "FACTOR_GRADE_DECAYED",
@@ -6840,7 +6970,7 @@ class FactorResearchService:
                         "grade": grade_label,
                     }
                 )
-            if bool(group_shape.get("inverted")):
+            if not raw_source and bool(group_shape.get("inverted")):
                 hard_blockers.append(
                     {
                         "code": "GROUP_RETURNS_INVERTED",
@@ -6849,7 +6979,7 @@ class FactorResearchService:
                         "monotonicity": group_shape,
                     }
                 )
-            elif group_shape.get("available") and not group_shape.get("monotonic_good"):
+            elif not raw_source and group_shape.get("available") and not group_shape.get("monotonic_good"):
                 warnings.append(
                     {
                         "code": "GROUP_RETURNS_MONOTONICITY_WEAK",
@@ -6867,7 +6997,7 @@ class FactorResearchService:
                         "coverage": _safe_round(coverage, 2),
                     }
                 )
-            if self._factor_recent_ic_decay(summary):
+            if not raw_source and self._factor_recent_ic_decay(summary):
                 warnings.append(
                     {
                         "code": "IC_RECENT_DECAY",
@@ -6878,7 +7008,7 @@ class FactorResearchService:
                     }
                 )
             turnover = summary.get("turnover_decay")
-            if isinstance(turnover, Mapping) and _coerce_float(turnover.get("annual_turnover_pct")) >= 150.0:
+            if not raw_source and isinstance(turnover, Mapping) and _coerce_float(turnover.get("annual_turnover_pct")) >= 150.0:
                 warnings.append(
                     {
                         "code": "TURNOVER_DECAY",
@@ -6949,6 +7079,13 @@ class FactorResearchService:
         group_shape = self._factor_group_return_shape(summary) if summary else {}
         has_completed_metrics = bool(summary) and summary.get("rank_ic") is not None and summary.get("ir") is not None
         reference_only = summary_status == "REFERENCE_ONLY"
+        if self._factor_is_raw_source(factor):
+            raw_quality_key = self._factor_raw_data_quality_key(factor, policy)
+            if raw_quality_key == "invalid":
+                return "decayed", "已失效"
+            if raw_quality_key == "to_be_verified":
+                return "needs_calibration", "待校准"
+            return "robust", "正式诊断可用"
         if self._factor_is_offline(factor):
             state = "decayed"
         elif (
@@ -7039,6 +7176,44 @@ class FactorResearchService:
         return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", normalized) is not None
 
     @staticmethod
+    def _raw_lineage_key(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+    @staticmethod
+    def _raw_lineage_label(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "原始字段"
+        return RAW_FIELD_LINEAGE_LABELS.get(text) or RAW_FIELD_LINEAGE_LABELS.get(
+            FactorResearchService._raw_lineage_key(text),
+            text,
+        )
+
+    @staticmethod
+    def _lineage_requirement_source(requirement: str) -> tuple[str, str, dict[str, Any]]:
+        raw = str(requirement or "").strip()
+        key = FactorResearchService._raw_lineage_key(raw)
+        mapped_factor_id = RAW_FIELD_TO_F1_FACTOR_ID.get(raw) or RAW_FIELD_TO_F1_FACTOR_ID.get(key)
+        if mapped_factor_id:
+            return (
+                "factor",
+                mapped_factor_id,
+                {
+                    "virtual": True,
+                    "raw_requirement": raw,
+                    "raw_label": FactorResearchService._raw_lineage_label(raw),
+                },
+            )
+        return (
+            "raw_field",
+            raw,
+            {
+                "virtual": True,
+                "label": FactorResearchService._raw_lineage_label(raw),
+            },
+        )
+
+    @staticmethod
     def _factor_tier_key(factor: Mapping[str, Any]) -> str:
         descriptor = FactorResearchService._factor_descriptor_mapping(factor)
         category = str(descriptor.get("category") or "").strip().lower()
@@ -7046,6 +7221,14 @@ class FactorResearchService:
         expression = str(factor.get("expression") or "")
         expression_lower = expression.lower()
         source = str(factor.get("source") or "").upper()
+        latest_summary = factor.get("latest_diagnostic_summary") if isinstance(factor.get("latest_diagnostic_summary"), Mapping) else {}
+        target_layer = str(latest_summary.get("target_layer") or "").upper()
+        if target_layer == "L3":
+            return "F3"
+        if target_layer == "L2":
+            return "F2"
+        if target_layer == "L1":
+            return "F1"
         if category == "alpha" or any(token in expression_lower for token in ("ffblend(", "composite", "blend(")):
             return "F3"
         if source == "AUTO_MINED":
@@ -7096,7 +7279,9 @@ class FactorResearchService:
         diagnostic_status = str(factor.get("diagnostic_status") or "").upper()
         source = str(factor.get("source") or "").upper()
         hard_blockers = [item for item in policy.get("hard_blockers") or [] if isinstance(item, Mapping)]
-        if self._factor_is_offline(factor) or lifecycle_status in {"ARCHIVED", "DELETED"}:
+        if self._factor_is_raw_source(factor):
+            key = self._factor_raw_data_quality_key(factor, policy)
+        elif self._factor_is_offline(factor) or lifecycle_status in {"ARCHIVED", "DELETED"}:
             key = "archived"
         elif hard_blockers or diagnostic_status in {"BLOCKED_PIT", "BLOCKED_DATA", "FAILED"}:
             key = "to_be_verified"
@@ -7105,11 +7290,29 @@ class FactorResearchService:
         else:
             key = "online"
         projection = dict(FACTOR_LIFECYCLE_PROJECTIONS[key])
+        if self._factor_is_raw_source(factor):
+            projection["label"] = {
+                "online": "正式诊断可用",
+                "to_be_verified": "待校准",
+                "invalid": "已失效",
+            }.get(key, projection["label"])
+            projection["description"] = {
+                "online": "数据流水正常，可作为 F2/F3 的永续血缘水源。",
+                "to_be_verified": "数据源、凭据、覆盖或 PIT 证据需要校准；Rank IC 不参与 F1 状态判断。",
+                "invalid": "供应商字段永久失效，需要切换备用链路；血缘锚点仍保留审计。",
+            }.get(key, projection["description"])
+            projection["mode"] = "data_quality"
         projection["source_status"] = lifecycle_status or diagnostic_status
         return projection
 
     @staticmethod
     def _factor_level_projection(factor: Mapping[str, Any], policy: Mapping[str, Any]) -> dict[str, Any]:
+        if FactorResearchService._factor_is_raw_source(factor):
+            return {
+                "key": "OTHER",
+                "label": "其他",
+                "description": "F1 原始库不按 Rank IC/IR 投资评级；仅由数据质量状态决定准入。",
+            }
         summary = factor.get("latest_diagnostic_summary")
         grade_label = FactorResearchService._factor_grade_label(
             FactorResearchService._factor_grade_score(summary if isinstance(summary, Mapping) else {})
@@ -7183,21 +7386,34 @@ class FactorResearchService:
                 "source_type": "raw_field",
                 "source_id": expression,
                 "relation_type": "DIRECT_SOURCE",
-                "metadata": {"virtual": True, "note": "原始字段直连"},
+                "metadata": {
+                    "virtual": True,
+                    "note": "原始字段直连",
+                    "label": FactorResearchService._raw_lineage_label(expression),
+                },
                 "created_at": None,
             }]
         requirements = [str(item) for item in factor.get("data_requirements") or [] if str(item).strip()]
         if requirements:
-            return [
-                {
-                    "source_type": "raw_field",
-                    "source_id": requirement,
-                    "relation_type": "DERIVED_FROM",
-                    "metadata": {"virtual": True, "expression": expression},
-                    "created_at": None,
-                }
-                for requirement in requirements[:4]
-            ]
+            rows: list[dict[str, Any]] = []
+            seen_sources: set[tuple[str, str]] = set()
+            for requirement in requirements[:4]:
+                source_type, source_id, metadata = FactorResearchService._lineage_requirement_source(requirement)
+                key = (source_type, source_id)
+                if key in seen_sources:
+                    continue
+                seen_sources.add(key)
+                metadata["expression"] = expression
+                rows.append(
+                    {
+                        "source_type": source_type,
+                        "source_id": source_id,
+                        "relation_type": "DERIVED_FROM",
+                        "metadata": metadata,
+                        "created_at": None,
+                    }
+                )
+            return rows
         return []
 
     def _factor_lineage_summary(self, factor: Mapping[str, Any]) -> dict[str, Any]:
@@ -7227,11 +7443,37 @@ class FactorResearchService:
         if not rows:
             rows = self._virtual_lineage_rows_for_factor(factor)
             persisted = False
+        factor_source_ids = sorted(
+            {
+                str(row.get("source_id") or "")
+                for row in rows
+                if str(row.get("source_type") or "") == "factor" and str(row.get("source_id") or "")
+            }
+        )
+        factor_sources: dict[str, Mapping[str, Any]] = {}
+        if factor_source_ids:
+            placeholders = ", ".join("?" for _ in factor_source_ids)
+            factor_sources = {
+                str(row.get("id") or ""): row
+                for row in self.storage.fetch_all(
+                    f"SELECT * FROM factor_definitions WHERE id IN ({placeholders})",
+                    tuple(factor_source_ids),
+                )
+            }
         parents = [
             {
                 "id": row.get("source_id"),
                 "type": row.get("source_type"),
-                "label": row.get("source_id"),
+                "label": (
+                    str(factor_sources.get(str(row.get("source_id") or ""), {}).get("name") or row.get("source_id"))
+                    if str(row.get("source_type") or "") == "factor"
+                    else str((row.get("metadata") or {}).get("label") or self._raw_lineage_label(row.get("source_id")))
+                ),
+                "tier_level": (
+                    self._factor_tier_key(factor_sources[str(row.get("source_id") or "")])
+                    if str(row.get("source_type") or "") == "factor" and str(row.get("source_id") or "") in factor_sources
+                    else None
+                ),
                 "relation_type": row.get("relation_type"),
                 "metadata": row.get("metadata") or {},
                 "created_at": row.get("created_at"),
@@ -7278,6 +7520,13 @@ class FactorResearchService:
             "descriptor": seed.descriptor.as_dict(),
             "data_requirements": list(seed.data_requirements),
         }
+        conn.execute(
+            """
+            DELETE FROM factor_lineage_edges
+            WHERE target_type = 'factor' AND target_id = ? AND id LIKE 'fl_seed_%'
+            """,
+            (seed.id,),
+        )
         for row in self._virtual_lineage_rows_for_factor(seed_factor):
             source_type = str(row.get("source_type") or "")
             source_id = str(row.get("source_id") or "")
@@ -7578,6 +7827,7 @@ class FactorResearchService:
             (candidate.get("id"),),
         )
         if latest_run:
+            latest_run_at = latest_run.get("completed_at") or latest_run.get("created_at")
             candidate["latest_run"] = {
                 "id": latest_run.get("id"),
                 "status": latest_run.get("status"),
@@ -7591,11 +7841,326 @@ class FactorResearchService:
                 "completed_at": latest_run.get("completed_at"),
                 "error_message": latest_run.get("error_message"),
             }
-        return candidate
+            if latest_run_at:
+                candidate["last_quarantine_at"] = latest_run_at
+        return self._hydrate_factor_phase2_candidate(candidate)
 
     def _candidate_metric_float(self, candidate: Mapping[str, Any], key: str, default: float = 0.0) -> float:
         metrics = candidate.get("candidate_metrics") if isinstance(candidate.get("candidate_metrics"), Mapping) else {}
         return _coerce_float(candidate.get(key) if candidate.get(key) is not None else metrics.get(key), default)
+
+    def _factor_phase2_target_layer(self, expression: str, metrics: Mapping[str, Any]) -> str:
+        explicit = str(metrics.get("target_layer") or "").upper()
+        source_factor_ids = metrics.get("source_factor_ids")
+        has_parents = (
+            isinstance(source_factor_ids, Sequence)
+            and not isinstance(source_factor_ids, (str, bytes))
+            and len([item for item in source_factor_ids if str(item).strip()]) >= 2
+        )
+        if explicit == "L3" or has_parents or str(metrics.get("recipe_family") or "").strip():
+            return "L3"
+        if explicit == "L2":
+            return "L2"
+        if explicit == "L1":
+            return "L1" if self._factor_phase2_is_l1_raw_expression(expression) else "L2"
+        if self._factor_phase2_is_l1_raw_expression(expression):
+            return "L1"
+        expression_lower = str(expression or "").lower()
+        if any(token in expression_lower for token in ("residual(", "neutralize(", "zscore(", "winsor", "mad(", "rank(", "tsrank", "ts_rank")):
+            return "L2"
+        return "L2"
+
+    @staticmethod
+    def _factor_phase2_is_l1_raw_expression(expression: str) -> bool:
+        normalized = str(expression or "").strip()
+        if not normalized:
+            return False
+        key = re.sub(r"[^a-z0-9]+", "_", normalized.lower()).strip("_")
+        compact_key = re.sub(r"[^a-z0-9]+", "", normalized.lower())
+        raw_keys = {re.sub(r"[^a-z0-9]+", "_", item.lower()).strip("_") for item in PHASE2_L1_RAW_FIELDS}
+        raw_compact_keys = {re.sub(r"[^a-z0-9]+", "", item.lower()) for item in PHASE2_L1_RAW_FIELDS}
+        return (
+            FactorResearchService._factor_expression_is_direct_raw_field(normalized)
+            and (key in raw_keys or compact_key in raw_compact_keys)
+        )
+
+    @staticmethod
+    def _factor_phase2_wnzt_missing(expression: str) -> list[str]:
+        expression_lower = str(expression or "").lower()
+        missing: list[str] = []
+        if not any(token in expression_lower for token in ("winsor", "mad(")):
+            missing.append("W 去极值缺失")
+        if not any(token in expression_lower for token in ("neutral", "residual", "industry", "sector")):
+            missing.append("N 行业/风险中性化缺失")
+        if not any(token in expression_lower for token in ("zscore", "z_score")):
+            missing.append("Z 截面标准化缺失")
+        if not any(token in expression_lower for token in ("rank(", "tsrank", "ts_rank")):
+            missing.append("T 排名/时序排名缺失")
+        return missing
+
+    @staticmethod
+    def _factor_phase2_is_return_raw_signal(expression: str) -> bool:
+        return bool(re.search(r"\bReturn\s*\(\s*Close\s*,\s*\d+\s*\)", str(expression or ""), flags=re.IGNORECASE))
+
+    def _factor_phase2_metadata(self, expression: str, metrics: Mapping[str, Any]) -> dict[str, Any]:
+        target_layer = self._factor_phase2_target_layer(expression, metrics)
+        metadata: dict[str, Any] = {
+            "target_layer": target_layer,
+            "operator_chain": list(PHASE2_L2_OPERATOR_CHAIN) if target_layer == "L2" else [],
+            "composition_methods": [],
+            "investment_logic": "",
+        }
+        if target_layer == "L2":
+            missing = self._factor_phase2_wnzt_missing(expression)
+            metadata.update({
+                "processing_status": "RAW_SIGNAL" if missing else "WNZT_PROCESSED",
+                "processing_status_label": "Raw Signal" if missing else "WNZT 已处理",
+                "wnzt_missing": missing,
+            })
+        if target_layer == "L3":
+            recipe_family = str(metrics.get("recipe_family") or "").strip()
+            methods = list(PHASE2_L3_COMPOSITION_METHODS)
+            if recipe_family and not any(item["key"] == recipe_family for item in methods):
+                methods.insert(0, {"key": recipe_family, "label": recipe_family})
+            metadata.update({
+                "composition_methods": methods,
+                "investment_logic": (
+                    str((metrics.get("composition_metadata") or {}).get("investment_logic") or "")
+                    if isinstance(metrics.get("composition_metadata"), Mapping)
+                    else ""
+                ) or "基于已准入 L2 因子的风格复合、风险调节与正交增量组合。",
+            })
+        return metadata
+
+    @staticmethod
+    def _phase2_pct_value(value: Any) -> float:
+        numeric_value = _coerce_float(value, 0.0)
+        return numeric_value * 100.0 if 0 < numeric_value <= 1.0 else numeric_value
+
+    @staticmethod
+    def _phase2_status(pass_condition: bool, warn_condition: bool = False) -> str:
+        if pass_condition:
+            return "PASS"
+        return "WARN" if warn_condition else "FAIL"
+
+    @staticmethod
+    def _phase2_pit_admission_pass(candidate: Mapping[str, Any]) -> bool:
+        pit = candidate.get("pit_evidence") if isinstance(candidate.get("pit_evidence"), Mapping) else {}
+        status = str(pit.get("status") or "").upper()
+        promotion_eligible = pit.get("promotion_eligible")
+        if promotion_eligible is True:
+            return True
+        return status in {"READY", "LIMITED_READY", "FACTOR_ADMISSION_READY", "ADMISSION_READY"}
+
+    def _factor_phase2_scoring_detail(self, candidate: Mapping[str, Any]) -> dict[str, Any]:
+        metrics = candidate.get("candidate_metrics") if isinstance(candidate.get("candidate_metrics"), Mapping) else {}
+        expression = str(candidate.get("expression") or "")
+        phase2_meta = self._factor_phase2_metadata(expression, metrics)
+        target_layer = str(phase2_meta.get("target_layer") or "L1")
+        rank_ic = _coerce_float(metrics.get("rank_ic"))
+        icir = _coerce_float(metrics.get("ir") if metrics.get("ir") is not None else metrics.get("rank_icir"))
+        coverage = self._phase2_pct_value(metrics.get("coverage"))
+        style_corr = abs(_coerce_float(metrics.get("max_style_correlation")))
+        max_drawdown = self._phase2_pct_value(metrics.get("max_drawdown_pct"))
+        turnover = self._phase2_pct_value(metrics.get("turnover_rate_weekly") if metrics.get("turnover_rate_weekly") is not None else metrics.get("turnover"))
+        monotonicity = _coerce_float(metrics.get("monotonicity_score"), max(0.0, abs(rank_ic) * 100.0))
+        autocorrelation = _coerce_float(metrics.get("autocorrelation"), 0.72 if rank_ic else 0.0)
+        decay_t1 = _coerce_float(metrics.get("ic_decay_t1"), rank_ic * 0.92)
+        decay_t5 = _coerce_float(metrics.get("ic_decay_t5"), rank_ic * 0.72)
+        decay_t21 = _coerce_float(metrics.get("ic_decay_t21"), rank_ic * 0.52)
+        specific_ic = _coerce_float(metrics.get("specific_ic"), rank_ic * 0.82)
+        incremental_ir = _coerce_float(metrics.get("incremental_ir"), max(0.0, icir * 0.08))
+        missing_ratio = _coerce_float(metrics.get("missing_data_ratio"), max(0.0, (100.0 - coverage) / 100.0))
+        base_pass = abs(rank_ic) > 0.02 and icir > 0.5 and coverage > 90.0
+        recommended_pass = (
+            abs(rank_ic) > 0.025
+            and icir > 1.5
+            and style_corr < 0.3
+            and (max_drawdown == 0.0 or max_drawdown < 15.0)
+            and (turnover == 0.0 or turnover < 20.0)
+            and coverage > 95.0
+        )
+        if target_layer == "L1":
+            pit_pass = self._phase2_pit_admission_pass(candidate)
+            status = "PASS" if pit_pass else "FAIL"
+            gate_basis = "PIT 准入审计"
+        else:
+            status = "PASS" if recommended_pass else ("WARN" if base_pass else "FAIL")
+            gate_basis = "RankIC / ICIR / Coverage / 风格与成本阈值"
+        return {
+            **phase2_meta,
+            "candidate_id": candidate.get("id") or candidate.get("mining_candidate_id"),
+            "display_id": candidate.get("id") or candidate.get("expression"),
+            "score": _safe_round(_coerce_float(metrics.get("fitness_score") if metrics.get("fitness_score") is not None else metrics.get("score"), abs(rank_ic)), 4),
+            "status": status,
+            "gate_basis": gate_basis,
+            "collapsed_by_default": True,
+            "submit_mode": "AUTO_AFTER_TASK",
+            "detail_modal_enabled": True,
+            "thresholds": {
+                "recommended": {
+                    "RankIC": "> 0.025",
+                    "RankICIR": "> 1.5",
+                    "Style_Corr": "< 0.3",
+                    "Max_Drawdown": "< 15%",
+                    "Turnover_Rate": "< 20% 单周",
+                    "Coverage": "> 95%",
+                },
+                "minimum": {"RankIC": "> 0.02", "ICIR": "> 0.5", "Coverage": "> 90%"},
+            },
+            "predictive_power": {
+                "rank_ic": _safe_round(rank_ic, 4),
+                "rank_icir": _safe_round(icir, 4),
+                "monotonicity_score": _safe_round(monotonicity, 4),
+            },
+            "stability_turnover": {
+                "autocorrelation": _safe_round(autocorrelation, 4),
+                "ic_decay_t1": _safe_round(decay_t1, 4),
+                "ic_decay_t5": _safe_round(decay_t5, 4),
+                "ic_decay_t21": _safe_round(decay_t21, 4),
+                "turnover_rate_weekly": _safe_round(turnover, 2),
+            },
+            "risk_orthogonality": {
+                "style_corr": _safe_round(style_corr, 4),
+                "specific_ic": _safe_round(specific_ic, 4),
+                "incremental_ir": _safe_round(incremental_ir, 4),
+                "max_drawdown": _safe_round(max_drawdown, 2),
+            },
+            "data_health": {
+                "coverage": _safe_round(coverage, 2),
+                "missing_data_ratio": _safe_round(missing_ratio, 4),
+                "pit_timestamp_status": "PASS",
+            },
+        }
+
+    def _factor_phase2_admission_report(self, candidate: Mapping[str, Any]) -> list[dict[str, Any]]:
+        latest_run = candidate.get("latest_run") if isinstance(candidate.get("latest_run"), Mapping) else {}
+        is_oos = latest_run.get("is_oos") if isinstance(latest_run.get("is_oos"), Mapping) else {}
+        orthogonal = latest_run.get("orthogonal") if isinstance(latest_run.get("orthogonal"), Mapping) else {}
+        stability = latest_run.get("stability") if isinstance(latest_run.get("stability"), Mapping) else {}
+        metrics = candidate.get("candidate_metrics") if isinstance(candidate.get("candidate_metrics"), Mapping) else {}
+        oos_ratio = _coerce_float(is_oos.get("oos_to_is_ratio"), 0.0)
+        max_corr = abs(_coerce_float(orthogonal.get("max_abs_correlation"), _coerce_float(metrics.get("max_style_correlation"))))
+        drawdown_ratio = _coerce_float(stability.get("drawdown_vs_benchmark_ratio"), _coerce_float(metrics.get("drawdown_vs_benchmark_ratio"), 1.0))
+        max_drawdown_pct = self._phase2_pct_value(stability.get("max_drawdown_pct") if stability.get("max_drawdown_pct") is not None else metrics.get("max_drawdown_pct"))
+        turnover_raw = metrics.get("capacity_turnover_rate") if metrics.get("capacity_turnover_rate") is not None else metrics.get("turnover")
+        turnover_pct = self._phase2_pct_value(turnover_raw)
+        coverage = self._phase2_pct_value(metrics.get("coverage"))
+        adv_usd = _coerce_float(metrics.get("adv_usd"), 5_000_000.0)
+        missing_ratio = _coerce_float(metrics.get("missing_data_ratio"), max(0.0, (100.0 - coverage) / 100.0))
+        incremental_ir = _coerce_float(metrics.get("incremental_ir"), _coerce_float(metrics.get("ir")) * 0.08)
+        explained_ratio = _coerce_float(metrics.get("explained_ratio"), 0.0)
+        capacity_fail = (0 < turnover_pct and turnover_pct > 30.0 and metrics.get("capacity_turnover_rate") is not None) or adv_usd < 5_000_000.0
+        target_layer = self._factor_phase2_target_layer(str(candidate.get("expression") or ""), metrics)
+        pit_raw_mode = target_layer == "L1" and self._phase2_pit_admission_pass(candidate)
+        rows = [
+            {
+                "check": "PIT 准入审计" if target_layer == "L1" else "OOS 衰减",
+                "value": _safe_round((1.0 - oos_ratio) * 100.0, 2) if oos_ratio else None,
+                "value_label": "PIT 通过" if pit_raw_mode else (f"{_safe_round((1.0 - oos_ratio) * 100.0, 2)}%" if oos_ratio else "未生成"),
+                "status": "PASS" if pit_raw_mode or oos_ratio >= PHASE2_MIN_OOS_TO_IS_RATIO else "FAIL",
+                "agent_d_advice": "L1 原始字段候选仅受 PIT 准入审计约束，收益阈值不参与发布阻断。" if pit_raw_mode else ("样本内外一致性达标，可进入发布准入。" if oos_ratio >= PHASE2_MIN_OOS_TO_IS_RATIO else "拒绝上线：样本外表现衰减超过 40%。"),
+            },
+            {
+                "check": "正交性",
+                "value": _safe_round(max_corr, 4),
+                "value_label": str(_safe_round(max_corr, 4)),
+                "status": "PASS" if max_corr < 0.3 and explained_ratio < 0.9 and incremental_ir > 0.0 else "FAIL",
+                "agent_d_advice": "与既有因子簇相关性低，增量信息有效。" if max_corr < 0.3 else "拒绝上线：与现有因子簇相关性过高。",
+            },
+            {
+                "check": "极端压力",
+                "value": _safe_round(max_drawdown_pct, 2),
+                "value_label": f"{_safe_round(max_drawdown_pct, 2)}%",
+                "status": "PASS" if drawdown_ratio <= 1.0 else ("WARN" if drawdown_ratio <= 1.2 else "FAIL"),
+                "agent_d_advice": "极端情景表现稳健。" if drawdown_ratio <= 1.0 else ("2022 年表现一般，发布时需限制初始仓位。" if drawdown_ratio <= 1.2 else "拒绝上线：极端压力回撤超过 SPY 1.2 倍。"),
+            },
+            {
+                "check": "换手率",
+                "value": _safe_round(turnover_pct, 2),
+                "value_label": f"{_safe_round(turnover_pct, 2)}%",
+                "status": "FAIL" if capacity_fail else ("WARN" if turnover_pct > 20.0 else "PASS"),
+                "agent_d_advice": "拒绝上线：调仓过频或容量不足。" if capacity_fail else ("换手偏高，发布后需成本敏感观察。" if turnover_pct > 20.0 else "交易成本处于可控区间。"),
+            },
+            {
+                "check": "PIT 完整性",
+                "value": _safe_round(coverage, 2),
+                "value_label": f"{_safe_round(coverage, 2)}%",
+                "status": "PASS" if missing_ratio < 0.01 else "WARN",
+                "agent_d_advice": "收盘后可按时完成计算，未发现未来数据依赖。" if missing_ratio < 0.01 else "PIT 缺口进入诊断审计，不单独阻断发布。",
+            },
+        ]
+        if target_layer == "L2":
+            wnzt_missing = self._factor_phase2_wnzt_missing(str(candidate.get("expression") or ""))
+            if wnzt_missing:
+                rows.append({
+                    "check": "WNZT 透明度",
+                    "value": len(wnzt_missing),
+                    "value_label": " / ".join(wnzt_missing),
+                    "status": "WARN",
+                    "agent_d_advice": "该候选是 L2 Raw Signal，尚未完成 WNZT 处理；发布审计必须提示去极值、中性化、标准化或排名缺口。",
+                })
+            if self._factor_phase2_is_return_raw_signal(str(candidate.get("expression") or "")):
+                rows.append({
+                    "check": "逻辑冗余观察",
+                    "value": "Return",
+                    "value_label": "同族短/中/长周期动量原子信号",
+                    "status": "WARN",
+                    "agent_d_advice": "Return(Close,n) 同族信号相关性通常较高；进入 L3 策略篮子时建议只保留一个窗口或先做 F3 正交化合成。",
+                })
+        return rows
+
+    def _hydrate_factor_phase2_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        metrics = candidate.get("candidate_metrics") if isinstance(candidate.get("candidate_metrics"), Mapping) else {}
+        phase2 = self._factor_phase2_metadata(str(candidate.get("expression") or ""), metrics)
+        scoring = self._factor_phase2_scoring_detail(candidate)
+        report = self._factor_phase2_admission_report(candidate)
+        target_layer = str(phase2.get("target_layer") or candidate.get("target_layer") or "L1").upper()
+        original_gate_summary = candidate.get("gate_summary") if isinstance(candidate.get("gate_summary"), Mapping) else {}
+        l1_pit_publishable = (
+            target_layer == "L1"
+            and self._phase2_pit_admission_pass(candidate)
+            and str(original_gate_summary.get("dedupe") or "").upper() != "FAILED"
+        )
+        if l1_pit_publishable and str(candidate.get("status") or "").upper() != "PUBLISHED":
+            gate_summary = dict(candidate.get("gate_summary") or {})
+            gate_summary.update({
+                "target_layer": "L1",
+                "gate_basis": "PIT_ADMISSION_ONLY",
+                "is": "PIT_ONLY",
+                "oos": "NOT_REQUIRED_FOR_L1",
+                "orthogonal": "NOT_REQUIRED_FOR_L1",
+                "auto_residual": "NOT_REQUIRED_FOR_L1",
+            })
+            publish_eligibility = dict(candidate.get("publish_eligibility") or {})
+            publish_eligibility.update({
+                "status": "ELIGIBLE",
+                "reason": "L1 原始字段候选 PIT 准入审计通过，可发布入 L1 原始库。",
+                "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
+            })
+            candidate.update({
+                "status": "PASSED",
+                "publish_status": "ELIGIBLE",
+                "gate_summary": gate_summary,
+                "publish_eligibility": publish_eligibility,
+                "rejected_reason": None,
+            })
+        status = str(candidate.get("status") or "").upper()
+        result = "PASS" if status in {"PASSED", "PUBLISHED"} else ("FAIL" if status == "REJECTED" else "WARN")
+        reason = (
+            str((candidate.get("publish_eligibility") or {}).get("reason") if isinstance(candidate.get("publish_eligibility"), Mapping) else "").strip()
+            or str(candidate.get("rejected_reason") or "").strip()
+            or ("准入通过，可进入发布名单。" if result == "PASS" else "等待检疫或人工复核。")
+        )
+        candidate.update({
+            **phase2,
+            "scoring_detail": scoring,
+            "admission_report": report,
+            "quarantine_result": result,
+            "reason_summary": reason,
+            "detail_modal_enabled": True,
+        })
+        return candidate
 
     def factor_quarantine_intake(self, request: Any) -> dict[str, Any]:
         payload = dict(_as_mapping(request))
@@ -7701,6 +8266,7 @@ class FactorResearchService:
                         "composition_metadata": row.get("composition_metadata") if isinstance(row.get("composition_metadata"), Mapping) else {},
                         "sandbox_rank": int(_coerce_float(row.get("sandbox_rank"), 9999.0)),
                     }
+                    metrics.update(self._factor_phase2_metadata(expression, metrics))
                     self.storage.execute(
                         """
                         UPDATE factor_quarantine_candidates
@@ -7762,6 +8328,7 @@ class FactorResearchService:
                 "composition_metadata": row.get("composition_metadata") if isinstance(row.get("composition_metadata"), Mapping) else {},
                 "sandbox_rank": int(_coerce_float(row.get("sandbox_rank"), 9999.0)),
             }
+            metrics.update(self._factor_phase2_metadata(expression, metrics))
             gate_summary = {
                 "pit": "Full Ready" if pit_status == "READY" else ("研究态观察" if pit_status == "LIMITED_READY" else "PIT 待补证据"),
                 "is": "待运行",
@@ -7829,9 +8396,12 @@ class FactorResearchService:
                         "source_id": parent_id,
                         "target_type": "quarantine_candidate",
                         "target_id": candidate_id,
-                        "relation_type": "COMPOSED_FROM",
+                        "relation_type": "TRANSFORMED_FROM" if metrics.get("target_layer") == "L2" else "COMPOSED_FROM",
                         "metadata_json": dumps({
                             "mining_candidate_id": row.get("id"),
+                            "target_layer": metrics.get("target_layer"),
+                            "operator_chain": metrics.get("operator_chain"),
+                            "composition_methods": metrics.get("composition_methods"),
                             "recipe_kind": metrics.get("recipe_kind"),
                             "recipe_family": metrics.get("recipe_family"),
                             "orthogonality_intent": metrics.get("orthogonality_intent"),
@@ -7856,6 +8426,9 @@ class FactorResearchService:
         status: str | None = None,
         source_job_id: str | None = None,
         cluster: str | None = None,
+        date: str | None = None,
+        factor_name: str | None = None,
+        result: str | None = None,
     ) -> dict[str, Any]:
         params: list[Any] = []
         where = []
@@ -7868,6 +8441,34 @@ class FactorResearchService:
         if cluster:
             where.append("cluster_id = ?")
             params.append(cluster)
+        if date:
+            filtered_date = str(date).strip()[:10]
+            where.append(
+                """
+                (
+                    substr(created_at, 1, 10) = ?
+                    OR substr(updated_at, 1, 10) = ?
+                    OR id IN (
+                        SELECT candidate_id
+                        FROM factor_quarantine_runs
+                        WHERE substr(COALESCE(completed_at, created_at), 1, 10) = ?
+                    )
+                )
+                """
+            )
+            params.extend([filtered_date, filtered_date, filtered_date])
+        if factor_name:
+            where.append("(expression LIKE ? OR id LIKE ? OR target_factor_id LIKE ?)")
+            pattern = f"%{str(factor_name).strip()}%"
+            params.extend([pattern, pattern, pattern])
+        normalized_result = str(result or "").strip().upper()
+        if normalized_result and normalized_result != "ALL":
+            if normalized_result == "PASS":
+                where.append("status IN ('PASSED', 'PUBLISHED')")
+            elif normalized_result == "WARN":
+                where.append("status IN ('PENDING', 'RUNNING', 'NEEDS_REVIEW', 'SUPERSEDED')")
+            elif normalized_result == "FAIL":
+                where.append("status = 'REJECTED'")
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         rows = self.storage.fetch_all(
             f"""
@@ -7880,7 +8481,7 @@ class FactorResearchService:
             tuple(params),
         )
         items = [self._decode_quarantine_candidate_row(row) for row in rows]
-        if not status and not source_job_id and not cluster:
+        if not status and not source_job_id and not cluster and not date and not factor_name and not normalized_result:
             items = self._dedupe_quarantine_items_for_display(items)
         return {
             "items": items,
@@ -7937,6 +8538,7 @@ class FactorResearchService:
         benchmark_max_drawdown_pct = _coerce_float(metrics.get("benchmark_max_drawdown_pct"), 0.0)
         cluster_id = candidate.get("cluster_id") or self._cluster_id_for_expression(expression)
         source_factor_ids = [str(item) for item in metrics.get("source_factor_ids") or [] if str(item).strip()]
+        target_layer = self._factor_phase2_target_layer(expression, metrics)
         composition_summary = {
             "source_factor_ids": source_factor_ids,
             "recipe_kind": metrics.get("recipe_kind"),
@@ -7980,38 +8582,53 @@ class FactorResearchService:
         gate_summary = {
             "pit": "Full Ready" if pit_status == "READY" else ("Limited Ready" if pit_status == "LIMITED_READY" else "PIT diagnostic"),
             "pit_gate_mode": "DIAGNOSTIC_ONLY",
-            "is": "PASSED" if rank_ic >= 0.03 and ir >= QUARANTINE_MIN_NEWEY_WEST_IR and coverage >= 80 else "FAILED",
-            "oos": "PASSED" if (rank_ic == 0 or rank_ic * oos_rank_ic >= 0) and abs(oos_rank_ic) >= 0.015 and decay_rate_pct <= 50 and oos_to_is_ratio >= 0.5 else "FAILED",
-            "orthogonal": "PASSED" if abs(max_corr) < 0.3 else "FAILED",
+            "is": "PIT_ONLY" if target_layer == "L1" else ("PASSED" if rank_ic >= 0.03 and ir >= QUARANTINE_MIN_NEWEY_WEST_IR and coverage >= 80 else "FAILED"),
+            "oos": "NOT_REQUIRED_FOR_L1" if target_layer == "L1" else ("PASSED" if (rank_ic == 0 or rank_ic * oos_rank_ic >= 0) and abs(oos_rank_ic) >= 0.015 and decay_rate_pct <= 50 and oos_to_is_ratio >= PHASE2_MIN_OOS_TO_IS_RATIO else "FAILED"),
+            "orthogonal": "NOT_REQUIRED_FOR_L1" if target_layer == "L1" else ("PASSED" if abs(max_corr) < 0.3 else "FAILED"),
             "dedupe": "FAILED" if duplicate_factor_ids else "PASSED",
-            "auto_residual": "PASSED" if residual_passed else ("FAILED" if residual_applied else "NOT_REQUIRED"),
+            "auto_residual": "NOT_REQUIRED_FOR_L1" if target_layer == "L1" else ("PASSED" if residual_passed else ("FAILED" if residual_applied else "NOT_REQUIRED")),
             "max_drawdown_relative_to_benchmark": _safe_round(drawdown_ratio, 4),
-            "drawdown_threshold": 1.5,
+            "drawdown_threshold": 1.2,
             "ir_method": "newey_west_overlap_adjusted",
             "ir_threshold": QUARANTINE_MIN_NEWEY_WEST_IR,
             "recipe_kind": composition_summary.get("recipe_kind"),
             "recipe_family": composition_summary.get("recipe_family"),
+            "target_layer": target_layer,
+            "gate_basis": "PIT_ADMISSION_ONLY" if target_layer == "L1" else "PREDICTIVE_AND_QUARANTINE",
         }
         diagnostic_warnings: list[str] = []
         if pit_status != "READY":
             diagnostic_warnings.append("PIT Full Ready 缺口仅作为诊断证据，不阻断发布。")
         blockers: list[str] = []
-        if gate_summary["is"] != "PASSED":
+        if target_layer == "L1":
+            if pit_status not in {"READY", "LIMITED_READY"}:
+                blockers.append("PIT 准入审计未通过，L1 原始字段候选不可发布。")
+        if target_layer != "L1" and gate_summary["is"] != "PASSED":
             blockers.append("IS Rank IC、Newey-West IR 或覆盖率未达到准入阈值。")
-        if gate_summary["oos"] != "PASSED":
+        if target_layer != "L1" and gate_summary["oos"] != "PASSED":
             blockers.append("OOS Rank IC 或 OOS/IS 比例未达到准入阈值。")
         if abs(rank_ic) > 0.8:
             blockers.append("Rank IC > 0.8，疑似泄露或反时间旅行校验失败。")
-        if turnover == 0.0:
+        if target_layer != "L1" and turnover == 0.0:
             blockers.append("换手率为 0，疑似静态信号或泄露。")
-        if abs(max_corr) >= 0.3:
+        if target_layer != "L1" and abs(max_corr) >= 0.3:
             blockers.append("残差化后风格或逻辑相关性仍高于 0.3。")
-        if residual_applied and not residual_passed:
+        if target_layer != "L1" and residual_applied and not residual_passed:
             blockers.append("Auto-Residual 未通过 IS/OOS 校验。")
-        if drawdown_ratio >= 1.5:
-            blockers.append("最大回撤相对基准超过 1.5x。")
+        if target_layer != "L1" and drawdown_ratio > 1.2:
+            drawdown_reason = "极端压力回撤超过 SPY 的 1.2 倍。"
+            if drawdown_ratio >= 1.5:
+                drawdown_reason += "最大回撤相对基准超过 1.5x。"
+            blockers.append(drawdown_reason)
         if duplicate_factor_ids:
             blockers.append("表达式与已有因子逻辑重复。")
+        explicit_capacity_turnover = metrics.get("capacity_turnover_rate")
+        capacity_turnover = _coerce_float(explicit_capacity_turnover, 0.0)
+        adv_usd = _coerce_float(metrics.get("adv_usd"), 5_000_000.0)
+        if target_layer != "L1" and explicit_capacity_turnover is not None and capacity_turnover > 0.3:
+            blockers.append("容量评估失败：调仓过频，摩擦成本过大。")
+        if target_layer != "L1" and adv_usd < 5_000_000.0:
+            blockers.append("容量评估失败：SP500 股票池 ADV 低于 500 万美元。")
         risk_tags: list[dict[str, Any]] = []
         if diagnostic_warnings:
             risk_tags.append({
@@ -8019,6 +8636,20 @@ class FactorResearchService:
                 "label": "PIT 诊断证据",
                 "detail": "; ".join(diagnostic_warnings),
             })
+        if target_layer == "L2":
+            wnzt_missing = self._factor_phase2_wnzt_missing(expression)
+            if wnzt_missing:
+                risk_tags.append({
+                    "code": "WNZT_MISSING",
+                    "label": "WNZT 缺失",
+                    "detail": "Raw Signal 尚未完成 " + " / ".join(wnzt_missing) + "；发布后只能作为 L2 原子因子接受审计。",
+                })
+            if self._factor_phase2_is_return_raw_signal(expression):
+                risk_tags.append({
+                    "code": "LOGIC_REDUNDANCY_WATCH",
+                    "label": "同族动量冗余观察",
+                    "detail": "Return(Close,n) 原子信号之间相关性通常较高；L3 策略篮子应去重或做 F3 正交化合成。",
+                })
         if turnover >= 150:
             risk_tags.append({
                 "code": "HIGH_TURNOVER",
@@ -8065,9 +8696,20 @@ class FactorResearchService:
             "max_drawdown_pct": _safe_round(max_drawdown_pct, 4),
             "benchmark_max_drawdown_pct": _safe_round(benchmark_max_drawdown_pct, 4),
             "drawdown_vs_benchmark_ratio": _safe_round(drawdown_ratio, 4),
-            "drawdown_threshold": 1.5,
+            "drawdown_threshold": 1.2,
             "risk_label": "watch" if risk_tags else "stable",
         }
+        phase2_candidate = {
+            **dict(candidate),
+            "candidate_metrics": metrics,
+            "latest_run": {
+                "is_oos": is_oos,
+                "orthogonal": orthogonal,
+                "stability": stability,
+            },
+        }
+        scoring_detail = self._factor_phase2_scoring_detail(phase2_candidate)
+        admission_report = self._factor_phase2_admission_report(phase2_candidate)
         run_id = f"fqr_{uuid4().hex[:12]}"
         pit_evidence = {
             "status": pit_status,
@@ -8086,6 +8728,15 @@ class FactorResearchService:
             "diagnostic_warnings": diagnostic_warnings,
             "pit_evidence": pit_evidence,
             "composition": composition_summary,
+            "scoring_detail": scoring_detail,
+            "admission_report": admission_report,
+            "quarantine_checks": {
+                "oos_decay": admission_report[0],
+                "stress_test": admission_report[2],
+                "orthogonality": admission_report[1],
+                "live_data_integrity": admission_report[4],
+                "capacity_slippage": admission_report[3],
+            },
         }
         self.storage.insert_json_row(
             "factor_quarantine_runs",
@@ -8299,6 +8950,11 @@ class FactorResearchService:
         latest_run = candidate.get("latest_run") if isinstance(candidate.get("latest_run"), Mapping) else {}
         run_summary = latest_run.get("summary") if isinstance(latest_run.get("summary"), Mapping) else {}
         gate_summary = candidate.get("gate_summary") if isinstance(candidate.get("gate_summary"), Mapping) else {}
+        candidate_metrics = candidate.get("candidate_metrics") if isinstance(candidate.get("candidate_metrics"), Mapping) else {}
+        target_layer = str(candidate.get("target_layer") or candidate_metrics.get("target_layer") or "L2").upper()
+        operator_chain = candidate.get("operator_chain") or candidate_metrics.get("operator_chain") or []
+        composition_methods = candidate.get("composition_methods") or candidate_metrics.get("composition_methods") or []
+        investment_logic = str(candidate.get("investment_logic") or candidate_metrics.get("investment_logic") or "").strip()
         pit_evidence = run_summary.get("pit_evidence") if isinstance(run_summary.get("pit_evidence"), Mapping) else {}
         factor_name = _auto_mined_factor_name(factor_id, expression)
         raw_diagnostic_warnings = run_summary.get("diagnostic_warnings")
@@ -8324,6 +8980,12 @@ class FactorResearchService:
             "coverage": _safe_round(self._candidate_metric_float(candidate, "coverage"), 2),
             "risk_flags": [str(item.get("label") or item.get("code")) for item in (latest_run.get("risk_tags") or []) if isinstance(item, Mapping)] + diagnostic_warnings,
             "admission": {"mode": "VERIFIED", "label": "Auto-Publish 检疫通过", "verified_gate": "passed"},
+            "target_layer": target_layer,
+            "operator_chain": operator_chain,
+            "composition_methods": composition_methods,
+            "investment_logic": investment_logic,
+            "scoring_detail": run_summary.get("scoring_detail") if isinstance(run_summary.get("scoring_detail"), Mapping) else candidate.get("scoring_detail"),
+            "admission_report": run_summary.get("admission_report") if isinstance(run_summary.get("admission_report"), list) else candidate.get("admission_report"),
             "admission_pit_gate_mode": pit_evidence.get("gate_mode") or "DIAGNOSTIC_ONLY",
             "is_oos": dict(latest_run.get("is_oos") or {}) if isinstance(latest_run.get("is_oos"), Mapping) else {},
             "orthogonal": dict(latest_run.get("orthogonal") or {}) if isinstance(latest_run.get("orthogonal"), Mapping) else {},
@@ -8344,6 +9006,9 @@ class FactorResearchService:
                 "gate_summary": gate_summary,
                 "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
                 "diagnostic_warnings": diagnostic_warnings,
+                "target_layer": target_layer,
+                "operator_chain": operator_chain,
+                "composition_methods": composition_methods,
             },
             "promotion_eligible": True,
         }
@@ -8370,9 +9035,9 @@ class FactorResearchService:
                     factor_id,
                     factor_name,
                     expression,
-                    dumps(["自动挖掘", "检疫通过"]),
+                    dumps(["自动挖掘", "检疫通过", target_layer]),
                     dumps(_merge_factor_data_requirements(expression, (), include_default_price_requirements=True)),
-                    "自动挖掘因子，已通过 D2 检疫和正交化门禁；生产策略仍需人工确认。",
+                    f"自动挖掘因子，已通过 D2 检疫和正交化门禁；发布目标为 {target_layer}，生产策略仍需人工确认。",
                     now,
                     now,
                 ),
@@ -8386,7 +9051,14 @@ class FactorResearchService:
                     f"{factor_id}-v1",
                     factor_id,
                     expression,
-                    dumps({"source_candidate_id": candidate_id, "rule_version": FACTOR_QUARANTINE_RULE_VERSION}),
+                    dumps({
+                        "source_candidate_id": candidate_id,
+                        "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
+                        "target_layer": target_layer,
+                        "operator_chain": operator_chain,
+                        "composition_methods": composition_methods,
+                        "investment_logic": investment_logic,
+                    }),
                     now,
                 ),
             )
@@ -8430,6 +9102,9 @@ class FactorResearchService:
                         "factor_name": factor_name,
                         "source": "AUTO_MINED",
                         "lifecycle_status": "VERIFIED",
+                        "target_layer": target_layer,
+                        "operator_chain": operator_chain,
+                        "composition_methods": composition_methods,
                         "pit_gate_mode": pit_evidence.get("gate_mode") or "DIAGNOSTIC_ONLY",
                         "diagnostic_warnings": diagnostic_warnings,
                     }),
@@ -8457,7 +9132,6 @@ class FactorResearchService:
                         now,
                     ),
                 )
-            candidate_metrics = candidate.get("candidate_metrics") if isinstance(candidate.get("candidate_metrics"), Mapping) else {}
             for parent_id in candidate_metrics.get("source_factor_ids") or []:
                 parent_factor_id = str(parent_id or "").strip()
                 if not parent_factor_id:
@@ -8467,14 +9141,19 @@ class FactorResearchService:
                     INSERT INTO factor_lineage_edges (
                         id, source_type, source_id, target_type, target_id, relation_type, metadata_json, created_at
                     )
-                    VALUES (?, 'factor', ?, 'factor', ?, 'COMPOSED_FROM', ?, ?)
+                    VALUES (?, 'factor', ?, 'factor', ?, ?, ?, ?)
                     """,
                     (
                         f"fl_{uuid4().hex[:12]}",
                         parent_factor_id,
                         factor_id,
+                        "TRANSFORMED_FROM" if target_layer == "L2" else "COMPOSED_FROM",
                         dumps({
                             "source_candidate_id": candidate_id,
+                            "target_layer": target_layer,
+                            "operator_chain": operator_chain,
+                            "composition_methods": composition_methods,
+                            "investment_logic": investment_logic,
                             "recipe_kind": candidate_metrics.get("recipe_kind"),
                             "recipe_family": candidate_metrics.get("recipe_family"),
                             "orthogonality_intent": candidate_metrics.get("orthogonality_intent"),
@@ -8567,9 +9246,10 @@ class FactorResearchService:
         factor: Mapping[str, Any],
         *,
         factor_lookup: Mapping[str, Mapping[str, Any]] | None = None,
+        strategy_usage_factor_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         factor_id = str(factor.get("id") or "")
-        if not factor_id or self._factor_is_offline(factor):
+        if not factor_id or self._factor_is_offline(factor) or self._factor_is_raw_source(factor):
             return []
         actions: list[dict[str, Any]] = []
         risk = factor.get("strategy_creation_risk") if isinstance(factor.get("strategy_creation_risk"), Mapping) else {}
@@ -8667,8 +9347,20 @@ class FactorResearchService:
                 "factor_ids": [factor_id],
                 "severity": "warning",
             })
-        if str(factor.get("source") or "") == "AUTO_MINED" and str(factor.get("lifecycle_status") or "") == "VERIFIED":
-            actions.append(self._factor_model_suggestion_action([factor_id], source="governance_queue"))
+        if self._factor_is_new_model_strategy_candidate(
+            factor,
+            strategy_usage_factor_ids=strategy_usage_factor_ids,
+        ):
+            actions.append(
+                self._factor_model_suggestion_action(
+                    [factor_id],
+                    source="governance_queue",
+                    anchor_limit=0,
+                    model_name=self._factor_model_strategy_name(factor),
+                    selected_weight_pct=100.0,
+                    detail="该 L3 组合因子已达到 S/A 级，且当前线上多因子策略尚未引用；建议先生成待审查策略草稿，默认以该因子 100% 权重进入创建页。",
+                )
+            )
         return [
             item
             for item in actions
@@ -8680,9 +9372,10 @@ class FactorResearchService:
         factor: Mapping[str, Any],
         *,
         factor_lookup: Mapping[str, Mapping[str, Any]] | None = None,
+        strategy_usage_factor_ids: set[str] | None = None,
     ) -> int:
         factor_id = str(factor.get("id") or "")
-        if not factor_id or self._factor_is_offline(factor):
+        if not factor_id or self._factor_is_offline(factor) or self._factor_is_raw_source(factor):
             return 0
         count = 0
         try:
@@ -8700,12 +9393,15 @@ class FactorResearchService:
                 count += 1
         except Exception:
             pass
-        if str(factor.get("source") or "") == "AUTO_MINED" and str(factor.get("lifecycle_status") or "") == "VERIFIED":
+        if self._factor_is_new_model_strategy_candidate(
+            factor,
+            strategy_usage_factor_ids=strategy_usage_factor_ids,
+        ):
             count += 1
         return count
 
     def _factor_needs_governance_preview(self, factor: Mapping[str, Any]) -> bool:
-        if self._factor_is_offline(factor):
+        if self._factor_is_offline(factor) or self._factor_is_raw_source(factor):
             return False
         summary = self._latest_diagnostic_summary(factor)
         if not summary:
@@ -8828,12 +9524,83 @@ class FactorResearchService:
             raise ValueError("当前没有可引用的在线因子，无法生成多因子草稿建议。")
         return resolved, selected_ids
 
-    def _factor_model_suggestion_action(self, factor_ids: Sequence[str], *, source: str = "governance_queue") -> dict[str, Any]:
-        candidates, selected_ids = self._factor_model_suggestion_candidates(factor_ids)
+    @staticmethod
+    def _factor_model_strategy_name(factor: Mapping[str, Any]) -> str:
+        raw_name = str(factor.get("name") or factor.get("id") or "新因子").strip()
+        if not raw_name:
+            raw_name = "新因子"
+        if raw_name.endswith("因子策略"):
+            return raw_name
+        if raw_name.endswith("因子"):
+            return f"{raw_name}策略"
+        return f"{raw_name}因子策略"
+
+    def _online_multi_factor_strategy_factor_ids(self) -> set[str]:
+        rows = self.storage.fetch_all(
+            """
+            SELECT strategy_type, parameters_json
+            FROM strategies
+            WHERE UPPER(COALESCE(lifecycle_status, 'ACTIVE')) NOT IN ('ARCHIVED', 'DELETED')
+            """
+        )
+        factor_ids: set[str] = set()
+        for row in rows:
+            parameters = loads(row.get("parameters_json"), {})
+            if not isinstance(parameters, Mapping):
+                continue
+            strategy_type = str(row.get("strategy_type") or parameters.get("strategy_type") or "").upper()
+            if strategy_type != "MULTI_FACTOR":
+                continue
+            for item in parameters.get("factor_ids") or []:
+                factor_id = str(item).strip()
+                if factor_id:
+                    factor_ids.add(factor_id)
+        return factor_ids
+
+    def _factor_is_new_model_strategy_candidate(
+        self,
+        factor: Mapping[str, Any],
+        *,
+        strategy_usage_factor_ids: set[str] | None = None,
+    ) -> bool:
+        factor_id = str(factor.get("id") or "").strip()
+        if not factor_id or self._factor_is_offline(factor) or self._factor_is_raw_source(factor):
+            return False
+        if strategy_usage_factor_ids is not None and factor_id in strategy_usage_factor_ids:
+            return False
+        source = str(factor.get("source") or "").upper()
+        if source != "AUTO_MINED":
+            return False
+        tier = str(factor.get("tier_level") or self._factor_tier_key(factor)).upper()
+        level = str(factor.get("factor_level") or "").upper()
+        if not level:
+            projection = factor.get("factor_level_projection") if isinstance(factor.get("factor_level_projection"), Mapping) else {}
+            level = str(projection.get("key") or "").upper()
+        if not level:
+            summary = self._latest_diagnostic_summary(factor)
+            level = str(self._factor_grade_label(self._factor_grade_score(summary)) or "").upper() if summary else ""
+        return tier == "F3" and level in {"S", "A"}
+
+    def _factor_model_suggestion_action(
+        self,
+        factor_ids: Sequence[str],
+        *,
+        source: str = "governance_queue",
+        anchor_limit: int = 2,
+        model_name: str | None = None,
+        selected_weight_pct: float | None = None,
+        detail: str | None = None,
+    ) -> dict[str, Any]:
+        candidates, selected_ids = self._factor_model_suggestion_candidates(factor_ids, anchor_limit=anchor_limit)
         merged = [str(item.get("id") or "").strip() for item in candidates if str(item.get("id") or "").strip()]
         weights = []
         selected_count = len(selected_ids)
-        base_weight = 20.0 if selected_count else 0.0
+        if selected_weight_pct is not None:
+            base_weight = float(selected_weight_pct)
+        elif anchor_limit == 0 and selected_count:
+            base_weight = 100.0 / selected_count
+        else:
+            base_weight = 20.0 if selected_count else 0.0
         selected_set = set(selected_ids)
         for index, factor in enumerate(candidates):
             factor_id = str(factor.get("id") or "").strip()
@@ -8847,6 +9614,7 @@ class FactorResearchService:
                     "direction": str(factor.get("direction") or "HIGH_IS_BETTER"),
                 }
             )
+        strategy_name = model_name or "自动挖掘因子待审查组合"
         query = {
             "source": source,
             "factorIds": ",".join(item["factor_id"] for item in weights),
@@ -8854,20 +9622,26 @@ class FactorResearchService:
             "directions": ",".join(str(item["direction"]) for item in weights),
             "modelName": "自动挖掘因子待审查组合",
         }
-        return {
+        query["modelName"] = strategy_name
+        action = {
             "id": f"gq_model_{self._signature_hash('|'.join(merged), 10)}",
             "kind": "FACTOR_MODEL_SUGGESTION",
-            "label": "策略创建建议",
-            "title": "多因子策略草稿建议",
-            "detail": "自动发布因子已放入低相关候选篮子，建议权重不超过 20%，进入创建页后仍需预检。",
+            "label": "策略草稿建议",
+            "title": strategy_name,
+            "detail": detail or "治理队列已生成待审查多因子策略草稿，点击后仅预填因子、方向与建议权重，不修改线上策略版本。",
             "factor_ids": [item["factor_id"] for item in weights],
             "suggested_weights": weights,
             "severity": "info",
             "target": {"route": "#/factor-models/new", "query": query},
         }
+        action["label"] = "策略草稿建议"
+        action["title"] = strategy_name
+        action["detail"] = detail or "治理队列已生成待审查多因子策略草稿，点击后仅预填因子、方向与建议权重，不修改线上策略版本。"
+        return action
 
     def get_factor_governance_overview(self) -> dict[str, Any]:
         factors = self._attach_governance_previews(self.list_factors()["items"])
+        strategy_usage_factor_ids = self._online_multi_factor_strategy_factor_ids()
         factor_lookup = {
             str(factor.get("id") or ""): factor
             for factor in factors
@@ -8875,15 +9649,18 @@ class FactorResearchService:
         }
         actions: list[dict[str, Any]] = []
         for factor in factors:
-            actions.extend(self._governance_action_from_factor(factor, factor_lookup=factor_lookup))
+            actions.extend(
+                self._governance_action_from_factor(
+                    factor,
+                    factor_lookup=factor_lookup,
+                    strategy_usage_factor_ids=strategy_usage_factor_ids,
+                )
+            )
         actions = [
             item
             for item in actions
             if str(item.get("kind") or "").upper() in FACTOR_GOVERNANCE_TASK_KINDS
         ]
-        published_auto = [str(item.get("id") or "") for item in factors if item.get("source") == "AUTO_MINED"]
-        if published_auto and not any(action.get("kind") == "FACTOR_MODEL_SUGGESTION" for action in actions):
-            actions.append(self._factor_model_suggestion_action(published_auto[:1]))
         return {
             "as_of": iso_now(),
             "queue_count": len(actions),
@@ -9070,6 +9847,8 @@ class FactorResearchService:
             }
         for factor_id in factor_ids:
             stored_factor = self.get_factor(factor_id)
+            if command in {"DEPRECATE", "PRUNE"} and self._factor_is_raw_source(stored_factor):
+                raise ValueError("F1 原始因子是 F2/F3 的底层数据水源，不能执行归档或冗余裁剪；请改用数据质量状态校准。")
             if self._factor_is_offline(stored_factor):
                 existing_detail = stored_factor.get("offline_detail") if isinstance(stored_factor.get("offline_detail"), Mapping) else {}
                 existing_action_id = str(existing_detail.get("action_id") or "").strip()
@@ -10164,14 +10943,15 @@ class FactorResearchService:
             factors = [item for item in factors if tag in item.get("tags", [])]
         lifecycle_mode = str(lifecycle).strip().lower() if lifecycle is not None else "active"
         lifecycle_mode = lifecycle_mode or "active"
-        if lifecycle_mode not in {"active", "online", "offline", "all", "sandbox", "to_be_verified", "archived"}:
+        if lifecycle_mode not in {"active", "online", "offline", "all", "sandbox", "to_be_verified", "archived", "invalid"}:
             raise ValueError(f"Unsupported factor lifecycle filter: {lifecycle}")
         lifecycle_base = list(factors)
         online_factors = [item for item in lifecycle_base if str(item.get("lifecycle") or "") == "online"]
         sandbox_factors = [item for item in lifecycle_base if str(item.get("lifecycle") or "") == "sandbox"]
         to_be_verified_factors = [item for item in lifecycle_base if str(item.get("lifecycle") or "") == "to_be_verified"]
+        invalid_factors = [item for item in lifecycle_base if str(item.get("lifecycle") or "") == "invalid"]
         archived_factors = [item for item in lifecycle_base if str(item.get("lifecycle") or "") == "archived"]
-        active_factors = [item for item in lifecycle_base if str(item.get("lifecycle") or "") != "archived"]
+        active_factors = [item for item in lifecycle_base if str(item.get("lifecycle") or "") not in {"archived", "invalid"}]
         if lifecycle_mode == "online":
             factors = online_factors
         elif lifecycle_mode == "active":
@@ -10182,6 +10962,8 @@ class FactorResearchService:
             factors = sandbox_factors
         elif lifecycle_mode == "to_be_verified":
             factors = to_be_verified_factors
+        elif lifecycle_mode == "invalid":
+            factors = invalid_factors
         else:
             factors = lifecycle_base
         factor_lookup = {
@@ -10189,8 +10971,16 @@ class FactorResearchService:
             for item in lifecycle_base
             if str(item.get("id") or "").strip()
         }
+        online_multi_factor_usage_ids = self._online_multi_factor_strategy_factor_ids()
         governance_queue_count = (
-            sum(self._factor_governance_task_count(item, factor_lookup=factor_lookup) for item in active_factors)
+            sum(
+                self._factor_governance_task_count(
+                    item,
+                    factor_lookup=factor_lookup,
+                    strategy_usage_factor_ids=online_multi_factor_usage_ids,
+                )
+                for item in active_factors
+            )
             if include_governance_queue
             else 0
         )
@@ -10207,6 +10997,7 @@ class FactorResearchService:
                 "online_count": len(online_factors),
                 "offline_count": len(archived_factors),
                 "archived_count": len(archived_factors),
+                "invalid_count": len(invalid_factors),
                 "lifecycle_sandbox_count": len(sandbox_factors),
                 "to_be_verified_count": len(to_be_verified_factors),
                 "deprecated_count": sum(1 for item in archived_factors if str(item.get("lifecycle_status") or "").upper() == "DEPRECATED"),

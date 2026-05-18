@@ -30,6 +30,7 @@ from types import SimpleNamespace
 from grit_backtest_platform import api as api_module
 from grit_backtest_platform.api import create_app
 from grit_backtest_platform._real_service_rebuilt import RealBacktestPlatformService
+from grit_backtest_platform._storage_restored import SQLiteStorage
 from grit_backtest_platform import _real_service_rebuilt as real_service_module
 from grit_backtest_platform.market_data_repository import CoverageSummary, MarketDataRepository
 from grit_backtest_platform.snapshot_provider_projection import build_data_trust_summary, build_provider_registry
@@ -69,6 +70,19 @@ def test_market_data_repository_uses_wal_and_busy_timeout(tmp_path):
     repository = MarketDataRepository(tmp_path / "market-data-locking.db")
 
     with repository.connect() as conn:
+        busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()["timeout"]
+        journal_mode = str(conn.execute("PRAGMA journal_mode").fetchone()["journal_mode"]).lower()
+        synchronous = int(conn.execute("PRAGMA synchronous").fetchone()["synchronous"])
+
+    assert busy_timeout >= 30000
+    assert journal_mode == "wal"
+    assert synchronous == 1
+
+
+def test_platform_storage_uses_wal_and_busy_timeout(tmp_path):
+    storage = SQLiteStorage(tmp_path / "platform-locking.db")
+
+    with storage.connection() as conn:
         busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()["timeout"]
         journal_mode = str(conn.execute("PRAGMA journal_mode").fetchone()["journal_mode"]).lower()
         synchronous = int(conn.execute("PRAGMA synchronous").fetchone()["synchronous"])
@@ -295,10 +309,12 @@ def test_snapshot_overview_contract_is_exact_on_fresh_database(tmp_path):
         "l4_macro_derivatives",
     ]
     by_layer = {item["layer_id"]: item for item in overview["data_layer_readiness"]}
+    pit_overview = assert_ok(client.get("/pit-data"))
+    pit_by_layer = {item["layer_id"]: item for item in pit_overview["pit_layer_readiness"]}
     assert by_layer["l1_market_data"]["status"] in {"READY", "WARNING", "BLOCKED"}
-    assert by_layer["l3_sentiment_data"]["status"] == "BLOCKED"
+    assert by_layer["l3_sentiment_data"]["status"] == pit_by_layer["l3_sentiment_data"]["status"]
     assert by_layer["l3_sentiment_data"]["metrics"][0]["value"] == "0/3"
-    assert by_layer["l4_macro_derivatives"]["status"] in {"CALIBRATING", "BLOCKED"}
+    assert by_layer["l4_macro_derivatives"]["status"] == pit_by_layer["l4_macro_derivatives"]["status"]
     l4_metrics = {item["label"]: item["value"] for item in by_layer["l4_macro_derivatives"]["metrics"]}
     assert l4_metrics["宏观利率数据"] == "0 / 10 覆盖"
     assert l4_metrics["通过标准"] == "10 / 10"
@@ -308,6 +324,13 @@ def test_snapshot_overview_contract_is_exact_on_fresh_database(tmp_path):
         "SHORT_VOLUME_JUMP_REVIEW",
         "RATE_BETA_CALIBRATING",
     }
+    fundamental_alert = next(
+        item for item in overview["snapshot_quality_alerts"] if item["code"] == "FUNDAMENTAL_BALANCE_CHECK_PENDING"
+    )
+    assert fundamental_alert["title_cn"] in {"财务平衡校验不可用", "财务平衡校验部分可用"}
+    assert "待复核" not in fundamental_alert["title_cn"]
+    assert "可用部分" in fundamental_alert["detail_cn"]
+    assert "阻塞点" in fundamental_alert["detail_cn"]
     consensus_alert = next(item for item in overview["snapshot_quality_alerts"] if item["code"] == "CONSENSUS_BLIND_SPOT")
     assert consensus_alert["blocking"] is True
     assert "0/3" in consensus_alert["detail_cn"]
@@ -524,7 +547,9 @@ def test_snapshot_overview_uses_macro_series_coverage_for_rate_beta(tmp_path):
 
     l4_layer = next(item for item in overview["data_layer_readiness"] if item["layer_id"] == "l4_macro_derivatives")
     l4_metrics = {item["label"]: item["value"] for item in l4_layer["metrics"]}
-    assert l4_layer["status"] == "CALIBRATING"
+    pit = assert_ok(client.get("/pit-data"))
+    pit_l4_layer = next(item for item in pit["pit_layer_readiness"] if item["layer_id"] == "l4_macro_derivatives")
+    assert l4_layer["status"] == pit_l4_layer["status"]
     assert l4_metrics["利率 Beta"] == "校准中"
     assert l4_metrics["宏观利率数据"] == "4 / 10 覆盖"
     assert l4_layer["evidence_status"]["macro_point_rows"] == 12
@@ -535,11 +560,7 @@ def test_snapshot_overview_uses_macro_series_coverage_for_rate_beta(tmp_path):
     assert "宏观利率数据当前 4 / 10 覆盖" in rate_alert["detail_cn"]
     assert rate_alert["blocking"] is False
     factor_dimensions = {item["dimension_id"]: item for item in overview["factor_dimension_readiness"]}
-    assert factor_dimensions["macro_derivatives"]["status"] == "CALIBRATING"
-    assert factor_dimensions["macro_derivatives"]["blockers"] == []
-    assert "利率和宏观序列已可进入 Beta 校准" in factor_dimensions["macro_derivatives"]["summary"]
-
-    pit = assert_ok(client.get("/pit-data"))
+    assert factor_dimensions["macro_derivatives"]["status"] == pit_l4_layer["status"]
     linkage = {item["check_id"]: item for item in pit["snapshot_layer_linkage"]}
     assert linkage["rate_beta_calibration"]["result_status"] != "READY"
 

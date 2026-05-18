@@ -126,8 +126,8 @@ function makeFactor(overrides: Partial<ApiFactorListItem> = {}): ApiFactorListIt
     lifecycle_label: '线上',
     lifecycle_projection: { key: 'online', label: '线上', description: '通过校验并可用于线上策略' },
     factor_level: 'A',
-    factor_level_label: 'A 可入选',
-    factor_level_projection: { key: 'A', label: 'A 可入选', description: '稳定观察，允许进入组合候选' },
+    factor_level_label: 'A优秀',
+    factor_level_projection: { key: 'A', label: 'A优秀', description: '稳定观察，允许进入组合候选' },
     op_status: {
       lights: [
         { code: 'W', key: 'winsorize', label: '去极值', active: true, status: 'done' },
@@ -344,7 +344,7 @@ describe('FactorModelBuilderPage', () => {
     const selectorCard = screen.getByLabelText('选择API 动量').closest('.factor-pick');
     expect(selectorCard).not.toBeNull();
     expect(within(selectorCard as HTMLElement).getByText('动量')).toBeInTheDocument();
-    expect(within(selectorCard as HTMLElement).getByText('因子级别 C 观察信号')).toBeInTheDocument();
+    expect(within(selectorCard as HTMLElement).getByText('因子级别 C微弱')).toBeInTheDocument();
     expect(within(selectorCard as HTMLElement).getByText('Rank IC 0.052')).toBeInTheDocument();
     expect(within(selectorCard as HTMLElement).getByText('IR 0.42')).toBeInTheDocument();
     expect(selectorCard?.textContent).not.toContain('高好');
@@ -358,7 +358,7 @@ describe('FactorModelBuilderPage', () => {
     expect(within(weightTitle as HTMLElement).getByText('API 动量')).toBeInTheDocument();
     expect(within(weightTitle as HTMLElement).getByText('s_mom_12m1m_rank')).toHaveClass('factor-id');
     expect(within(weightCard as HTMLElement).getByText('动量')).toBeInTheDocument();
-    expect(within(weightCard as HTMLElement).getByText('因子级别 C 观察信号')).toBeInTheDocument();
+    expect(within(weightCard as HTMLElement).getByText('因子级别 C微弱')).toBeInTheDocument();
     expect(within(weightCard as HTMLElement).getByText('Rank IC 0.052')).toBeInTheDocument();
     expect(within(weightCard as HTMLElement).getByText('IR 0.42')).toBeInTheDocument();
   });
@@ -1112,7 +1112,7 @@ describe('FactorModelBuilderPage', () => {
           tier_label: 'F1 原始',
           tier_projection: { key: 'F1', label: 'F1 原始', description: '直接映射 API 或数据库原始字段' },
           factor_level: 'B',
-          factor_level_label: 'B 观察',
+          factor_level_label: 'B合格',
           lifecycle: 'online',
           lifecycle_label: '线上',
           lineage_summary: {
@@ -1134,6 +1134,36 @@ describe('FactorModelBuilderPage', () => {
             summary: '原始字段',
           },
         }),
+        makeFactor({
+          id: 's_price_adjclose_cur_raw',
+          name: '复权收盘价',
+          descriptor: {
+            canonical_id: 's_price_adjclose_cur_raw',
+            source_prefix: 's',
+            category: 'price',
+            metric: 'adjclose',
+            window: 'cur',
+            operator: 'raw',
+            schema_version: '1',
+          },
+          expression: 'Close',
+          tier_level: 'F1',
+          tier_label: 'F1 原始',
+          tier_projection: { key: 'F1', label: 'F1 原始', description: '源数据 API 或数据库原始字段' },
+          factor_family: '价格',
+          tags: ['price'],
+          factor_level: 'B',
+          factor_level_label: 'B合格',
+          lifecycle: 'online',
+          lifecycle_label: '线上',
+          lineage_summary: {
+            has_lineage: true,
+            parent_count: 1,
+            parent_ids: ['Close'],
+            root_source: 'Close',
+            relation_types: ['DIRECT_SOURCE'],
+          },
+        }),
         makeFactor(),
         makeFactor({
           id: 's_val_ep_ltm_raw',
@@ -1153,7 +1183,7 @@ describe('FactorModelBuilderPage', () => {
           expression: 'Earnings / MarketCap',
           tags: ['val'],
           factor_level: 'C',
-          factor_level_label: 'C 待校准',
+          factor_level_label: 'C微弱',
           strategy_creation_risk: {
             can_create: true,
             warning_count: 1,
@@ -1190,7 +1220,7 @@ describe('FactorModelBuilderPage', () => {
           lifecycle: 'sandbox',
           lifecycle_label: '沙箱',
           factor_level: 'C',
-          factor_level_label: 'C 待校准',
+          factor_level_label: 'C微弱',
           lineage_summary: {
             has_lineage: true,
             parent_count: 4,
@@ -1201,13 +1231,13 @@ describe('FactorModelBuilderPage', () => {
         }),
       ],
       summary: {
-        system_seed_count: 4,
+        system_seed_count: 5,
         pit_status: 'READY',
-        online_count: 3,
+        online_count: 4,
         lifecycle_sandbox_count: 1,
         to_be_verified_count: 0,
         archived_count: 0,
-        f1_count: 1,
+        f1_count: 2,
         f2_count: 2,
         f3_count: 1,
       },
@@ -1217,13 +1247,18 @@ describe('FactorModelBuilderPage', () => {
     render(<FactorLibraryPage />);
 
     expect(await screen.findByRole('columnheader', { name: /因子基本信息/ })).toBeInTheDocument();
-    expect(screen.getByRole('columnheader', { name: /所属库/ })).toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: /所属库/ })).not.toBeInTheDocument();
     expect(screen.getByRole('columnheader', { name: /血缘溯源/ })).toBeInTheDocument();
     expect(screen.getByRole('columnheader', { name: /算子状态灯/ })).toBeInTheDocument();
     expect(screen.getByRole('columnheader', { name: /质量指标/ })).toBeInTheDocument();
     expect(screen.getByRole('columnheader', { name: /因子级别/ })).toBeInTheDocument();
     expect(screen.getByRole('columnheader', { name: /生命周期/ })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: /创建时间/ })).toHaveAttribute('aria-sort', 'descending');
     expect(screen.getByRole('columnheader', { name: /操作/ })).toBeInTheDocument();
+    const headerTexts = within(screen.getByRole('table')).getAllByRole('columnheader').map((header) => header.textContent ?? '');
+    expect(headerTexts.findIndex((text) => text.includes('创建时间'))).toBeLessThan(
+      headerTexts.findIndex((text) => text.includes('操作')),
+    );
     expect(screen.getByLabelText('因子级别名词解释')).toBeInTheDocument();
     expect(screen.queryByText('导出审计台账')).not.toBeInTheDocument();
     expect(screen.queryByText('分组收益单调性')).not.toBeInTheDocument();
@@ -1233,31 +1268,60 @@ describe('FactorModelBuilderPage', () => {
     expect(screen.queryByText(/SYSTEM_SEED/)).not.toBeInTheDocument();
     expect(fakeFactorApi.getPitDataOverview).not.toHaveBeenCalled();
 
-    expect(screen.getByRole('tab', { name: /F1 原始/ })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: /F2 改造/ })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: /F3 组合/ })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: /沙箱/ })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: /待校准/ })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: /F2 改造库/ })).toHaveAttribute('aria-selected', 'true');
+    expect(document.querySelector('.factor-layer-tabs')).toBeNull();
+    const tierFilter = screen.getByLabelText('所属库筛选');
+    const lifecycleFilter = screen.getByLabelText('因子生命周期视图');
+    const familyFilter = screen.getByLabelText('因子族多选');
+    const libraryFamilyRow = screen.getByLabelText('因子族与所属库筛选');
+    const lifecycleLevelRow = screen.getByLabelText('因子级别与生命周期筛选');
+    expect(within(familyFilter).getByRole('button', { name: '全部因子族' })).toHaveClass('is-active');
+    expect(libraryFamilyRow).toContainElement(tierFilter);
+    expect(libraryFamilyRow).toContainElement(familyFilter);
+    expect(lifecycleLevelRow).toContainElement(lifecycleFilter);
+    expect(libraryFamilyRow.firstElementChild).toBe(familyFilter);
+    expect(libraryFamilyRow.lastElementChild).toBe(tierFilter);
+    expect(libraryFamilyRow.querySelector('select')).toBeNull();
+    expect(within(tierFilter).getByRole('tab', { name: /全部库 1/ })).toHaveAttribute('aria-selected', 'true');
+    expect(within(tierFilter).getByRole('tab', { name: /F1 原始库 0/ })).toBeInTheDocument();
+    expect(within(tierFilter).getByRole('tab', { name: /F2 改造库 1/ })).toBeInTheDocument();
+    expect(within(tierFilter).getByRole('tab', { name: /F3 组合库 0/ })).toBeInTheDocument();
+    expect(within(lifecycleFilter).getByRole('tab', { name: /全部生命周期 1/ })).toBeInTheDocument();
+    expect(within(lifecycleFilter).getByRole('tab', { name: /沙箱 0/ })).toBeInTheDocument();
+    expect(within(lifecycleFilter).getByRole('tab', { name: /线上 1/ })).toBeInTheDocument();
+    expect(within(lifecycleFilter).getByRole('tab', { name: /待校准 0/ })).toBeInTheDocument();
     expect(screen.getByText('因子资产台账')).toBeInTheDocument();
-    expect(screen.getByText(/当前视图：F2 改造库/)).toBeInTheDocument();
+    expect(screen.getByText(/当前范围：全部库/)).toBeInTheDocument();
+    expect(screen.queryByText(/当前视图 \d+ 个因子/)).not.toBeInTheDocument();
     expect(screen.getByText('F1 原始指标')).toBeInTheDocument();
     expect(screen.getByText('F2 已标准化')).toBeInTheDocument();
     expect(screen.getByText('F3 在线 Alpha')).toBeInTheDocument();
     expect(screen.getByText('待校准/归档')).toBeInTheDocument();
     const levelFilter = screen.getByLabelText('因子级别筛选');
-    for (const level of ['S', 'A', 'B']) {
+    const allLevelButton = within(levelFilter).getByRole('button', { name: '全部因子级别' });
+    expect(allLevelButton).not.toHaveClass('is-active');
+    for (const level of ['S顶级', 'A优秀', 'B合格']) {
       expect(within(levelFilter).getByRole('button', { name: level })).toHaveClass('is-active');
     }
-    for (const level of ['C', 'D']) {
+    for (const level of ['C微弱', 'D噪声', '其他']) {
       expect(within(levelFilter).getByRole('button', { name: level })).not.toHaveClass('is-active');
     }
+    expect(lifecycleLevelRow).toContainElement(levelFilter);
+    expect(lifecycleLevelRow.firstElementChild).toBe(levelFilter);
+    expect(lifecycleLevelRow.lastElementChild).toBe(lifecycleFilter);
 
     const factorTable = screen.getByRole('table');
-    expect(within(factorTable).getByText('12-1月截面动量排名')).toBeInTheDocument();
-    expect(within(factorTable).getAllByText('F2 改造').length).toBeGreaterThan(0);
-    expect(within(factorTable).queryByText('总市值原值')).not.toBeInTheDocument();
     expect(within(factorTable).queryByText('Fama-French 风格合成 Alpha')).not.toBeInTheDocument();
+    fireEvent.click(within(levelFilter).getByRole('button', { name: 'C微弱' }));
+    expect(within(levelFilter).getByRole('button', { name: 'C微弱' })).toHaveClass('is-active');
+    expect(within(factorTable).getByText('12-1月截面动量排名')).toBeInTheDocument();
+    expect(within(factorTable).queryByText('默认库')).not.toBeInTheDocument();
+    expect(within(factorTable).queryByText('人工库')).not.toBeInTheDocument();
+    expect(within(factorTable).queryByText('挖掘库')).not.toBeInTheDocument();
+    expect(within(factorTable).queryByText('F2 改造')).not.toBeInTheDocument();
+    expect(within(factorTable).queryByText('总市值原值')).not.toBeInTheDocument();
+    expect(within(factorTable).queryByText('F1 原始')).not.toBeInTheDocument();
+    expect(within(factorTable).queryByText('复权收盘价')).not.toBeInTheDocument();
+    expect(within(factorTable).getByText('Fama-French 风格合成 Alpha')).toBeInTheDocument();
     expect(within(factorTable).getAllByRole('button', { name: /查看血缘/ }).length).toBeGreaterThanOrEqual(1);
     expect(within(factorTable).getAllByText('W').length).toBeGreaterThan(0);
     expect(within(factorTable).getAllByText('N').length).toBeGreaterThan(0);
@@ -1270,29 +1334,50 @@ describe('FactorModelBuilderPage', () => {
     expect(within(factorTable).getAllByText(/覆盖 92\.4%/).length).toBeGreaterThan(0);
     expect(document.querySelector('.factor-sparkline__zero')).not.toBeNull();
     expect(document.querySelector('.factor-sparkline__zero-label')).not.toBeNull();
-    expect(within(factorTable).getAllByRole('button', { name: '诊断' }).length).toBeGreaterThan(0);
+    expect(within(factorTable).queryByRole('button', { name: '诊断' })).not.toBeInTheDocument();
     expect(within(factorTable).getAllByRole('button', { name: '详情' }).length).toBeGreaterThan(0);
     expect(screen.queryByText('血缘树预览')).not.toBeInTheDocument();
-    const lineageButton = within(factorTable).getAllByRole('button', { name: /查看血缘/ })[0];
+    const momentumRow = within(factorTable).getByText('12-1月截面动量排名').closest('tr') as HTMLElement;
+    const lineageButton = within(momentumRow).getByRole('button', { name: /查看血缘/ });
     expect(lineageButton).toHaveAttribute('aria-haspopup', 'dialog');
     fireEvent.click(lineageButton);
     const lineageDialog = screen.getByRole('dialog', { name: '血缘树预览' });
     expect(lineageDialog).toHaveClass('factor-lineage-preview');
     expect(within(lineageDialog).getByText('血缘树预览')).toBeInTheDocument();
+    expect(within(lineageDialog).getByText('复权收盘价')).toBeInTheDocument();
     expect(within(lineageDialog).getByText(/当前预览：/)).toBeInTheDocument();
     fireEvent.click(within(lineageDialog).getByRole('button', { name: '收起' }));
     expect(screen.queryByText('血缘树预览')).not.toBeInTheDocument();
     expect(screen.getByText('正交性热力图')).toBeInTheDocument();
     expect(screen.getByText('相关性阈值 0.70')).toBeInTheDocument();
 
-    fireEvent.click(within(levelFilter).getByRole('button', { name: 'C' }));
-    fireEvent.click(screen.getByRole('tab', { name: /F3 组合库/ }));
+    expect(within(levelFilter).getByRole('button', { name: 'C微弱' })).toHaveClass('is-active');
+    expect(allLevelButton).not.toHaveClass('is-active');
+    fireEvent.click(within(tierFilter).getByRole('tab', { name: /F3 组合库/ }));
     expect(within(factorTable).getByText('Fama-French 风格合成 Alpha')).toBeInTheDocument();
-    expect(within(factorTable).getByText('F3 组合')).toBeInTheDocument();
+    expect(within(factorTable).queryByText('F3 组合')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('tab', { name: /F1 原始库/ }));
+    fireEvent.click(allLevelButton);
+    fireEvent.click(within(tierFilter).getByRole('tab', { name: /F1 原始库/ }));
+    const f1QualityFilter = screen.getByLabelText('F1 数据质量状态视图');
+    expect(within(f1QualityFilter).getByRole('tab', { name: /全部数据质量状态 2/ })).toHaveAttribute('aria-selected', 'true');
+    expect(within(f1QualityFilter).getByRole('tab', { name: /正式诊断可用 2/ })).toBeInTheDocument();
+    expect(within(f1QualityFilter).getByRole('tab', { name: /待校准 0/ })).toBeInTheDocument();
+    expect(within(f1QualityFilter).getByRole('tab', { name: /已失效 0/ })).toBeInTheDocument();
+    expect(within(f1QualityFilter).queryByRole('tab', { name: /已归档/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: /数据质量状态/ })).toBeInTheDocument();
+    expect(screen.queryByText('F1 归入“其他”，不按 RankIC/IR 分级约束')).not.toBeInTheDocument();
+    expect(within(factorTable).getAllByLabelText('其他因子级别').length).toBeGreaterThanOrEqual(2);
     expect(within(factorTable).getByText('总市值原值')).toBeInTheDocument();
-    expect(within(factorTable).getByText('F1 原始')).toBeInTheDocument();
+    expect(within(factorTable).getByText('复权收盘价')).toBeInTheDocument();
+    expect(within(factorTable).queryByText('F1 原始')).not.toBeInTheDocument();
+
+    fireEvent.click(within(tierFilter).getByRole('tab', { name: /全部库/ }));
+    fireEvent.click(within(familyFilter).getByRole('button', { name: '动量' }));
+    expect(within(tierFilter).getByRole('tab', { name: /全部库 1/ })).toHaveAttribute('aria-selected', 'true');
+    expect(within(tierFilter).getByRole('tab', { name: /F2 改造库 1/ })).toBeInTheDocument();
+    expect(within(lifecycleFilter).getByRole('tab', { name: /全部生命周期 1/ })).toBeInTheDocument();
+    expect(within(factorTable).getByText('12-1月截面动量排名')).toBeInTheDocument();
   });
 
   it('keeps 10Y admission repair as a warning instead of a hard blocker', async () => {
@@ -1313,7 +1398,7 @@ describe('FactorModelBuilderPage', () => {
           lifecycle: 'to_be_verified',
           lifecycle_label: '待校准',
           factor_level: 'C',
-          factor_level_label: 'C 待校准',
+          factor_level_label: 'C微弱',
           readiness_blockers: [repairWarning],
           blocker_reason_summary: {
             status: 'warning',
@@ -1337,12 +1422,12 @@ describe('FactorModelBuilderPage', () => {
 
     render(<FactorLibraryPage />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'C' }));
+    fireEvent.click(screen.getByRole('button', { name: 'C微弱' }));
     const factorButton = await screen.findByRole('button', { name: '10Y补源动量' });
     const row = factorButton.closest('tr') as HTMLElement;
     expect(row).not.toBeNull();
     expect(within(row).getByText('C')).toBeInTheDocument();
-    expect(within(row).getByText('C 待校准')).toBeInTheDocument();
+    expect(within(row).getByLabelText('C微弱')).toBeInTheDocument();
     expect(within(row).getByText('待校准')).toBeInTheDocument();
     expect(within(row).queryByText('降权建议')).not.toBeInTheDocument();
     expect(within(row).queryByText('10Y 准入补源队列')).not.toBeInTheDocument();
@@ -1441,7 +1526,7 @@ describe('FactorModelBuilderPage', () => {
           lifecycle: 'to_be_verified',
           lifecycle_label: '待校准',
           factor_level: 'B',
-          factor_level_label: 'B 观察',
+          factor_level_label: 'B合格',
           latest_diagnostic_summary: {
             run_id: 'fdiag_alpha_live',
             status: 'COMPLETED',
@@ -1522,7 +1607,7 @@ describe('FactorModelBuilderPage', () => {
     const row = factorButton.closest('tr') as HTMLElement;
     expect(row).not.toBeNull();
     expect(within(row).getByText('B')).toBeInTheDocument();
-    expect(within(row).getByText('B 观察')).toBeInTheDocument();
+    expect(within(row).getByLabelText('B合格')).toBeInTheDocument();
     expect(within(row).getByText('待校准')).toBeInTheDocument();
     expect(row).not.toHaveTextContent('沙箱');
   });
@@ -1620,18 +1705,22 @@ describe('FactorModelBuilderPage', () => {
     const turnoverCell = await factorCell('换手率代理（20日）');
     expect(within(turnoverCell).getByText('情绪')).toHaveClass('factor-category-tag');
     const alphaCell = await factorCell('Fama-French 风格合成 Alpha');
-    expect(within(alphaCell).getByText('其他')).toHaveClass('factor-category-tag');
+    expect(within(alphaCell).getByText('综合')).toHaveClass('factor-category-tag');
 
-    fireEvent.change(screen.getByLabelText('因子族'), { target: { value: 'qlty' } });
+    const familyFilter = screen.getByLabelText('因子族多选');
+    expect(screen.queryByLabelText('因子族')).not.toBeInTheDocument();
+
+    fireEvent.click(within(familyFilter).getByRole('button', { name: '质量' }));
     expect(screen.getByRole('button', { name: '资产增长代理（1年）' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '资本开支强度（LTM）' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '残差贝塔代理（252日 Z分）' })).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText('因子族'), { target: { value: 'sentiment' } });
+    fireEvent.click(within(familyFilter).getByRole('button', { name: '情绪' }));
     expect(screen.getByRole('button', { name: '换手率代理（20日）' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '资产增长代理（1年）' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '资产增长代理（1年）' })).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText('因子族'), { target: { value: 'other' } });
+    fireEvent.click(within(familyFilter).getByRole('button', { name: '全部因子族' }));
+    fireEvent.click(within(familyFilter).getByRole('button', { name: '综合' }));
     expect(screen.getByRole('button', { name: 'Fama-French 风格合成 Alpha' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '换手率代理（20日）' })).not.toBeInTheDocument();
   });
@@ -1720,7 +1809,7 @@ describe('FactorModelBuilderPage', () => {
     expect(fakeFactorApi.listFactors).toHaveBeenCalledWith(expect.objectContaining({ lifecycle: 'all' }));
     await waitFor(() => expect(document.querySelector('.factor-correlation__grid')?.getAttribute('style')).toContain('--factor-count: 4'));
     fireEvent.click(screen.getByRole('tab', { name: /已归档/ }));
-    await waitFor(() => expect(fakeFactorApi.listFactors).toHaveBeenCalledWith(expect.objectContaining({ lifecycle: 'archived' })));
+    expect(fakeFactorApi.listFactors).toHaveBeenCalledTimes(1);
     expect((await screen.findAllByText('旧版噪声因子')).length).toBeGreaterThan(0);
     expect(screen.queryByText('阻断 / 风险')).not.toBeInTheDocument();
     expect(screen.queryByText('比对 / 操作')).not.toBeInTheDocument();
@@ -1773,21 +1862,21 @@ describe('FactorModelBuilderPage', () => {
           id: 'gq_model_a_mom_auto_rank',
           kind: 'FACTOR_MODEL_SUGGESTION',
           label: '策略创建建议',
-          title: '多因子策略草稿建议',
-          detail: '建议权重不超过 20%，进入创建页后仍需预检。',
-          factor_ids: ['a_mom_auto_rank', 's_mom_12m1m_rank'],
+          title: '[Auto-Mined] 动量因子策略',
+          detail: '该 L3 组合因子已达到 S/A 级，且当前线上多因子策略尚未引用；建议以该因子 100% 权重生成待审查策略草稿。',
+          factor_ids: ['a_mom_auto_rank'],
           suggested_weights: [
-            { factor_id: 'a_mom_auto_rank', weight_pct: 20, direction: 'HIGH_IS_BETTER' },
-            { factor_id: 's_mom_12m1m_rank', weight_pct: 30, direction: 'HIGH_IS_BETTER' },
+            { factor_id: 'a_mom_auto_rank', weight_pct: 100, direction: 'HIGH_IS_BETTER' },
           ],
           severity: 'info',
           target: {
             route: '#/factor-models/new',
             query: {
               source: 'governance_queue',
-              factorIds: 'a_mom_auto_rank,s_mom_12m1m_rank',
-              weights: '20,30',
-              directions: 'HIGH_IS_BETTER,HIGH_IS_BETTER',
+              factorIds: 'a_mom_auto_rank',
+              weights: '100',
+              directions: 'HIGH_IS_BETTER',
+              modelName: '[Auto-Mined] 动量因子策略',
             },
           },
         },
@@ -1817,21 +1906,21 @@ describe('FactorModelBuilderPage', () => {
             id: 'gq_model_a_mom_auto_rank',
             kind: 'FACTOR_MODEL_SUGGESTION',
             label: '策略草稿建议',
-            title: '多因子策略草稿建议',
-            detail: '建议权重不超过 20%，进入创建页后仍需预检。',
-            factor_ids: ['a_mom_auto_rank', 's_mom_12m1m_rank'],
+            title: '[Auto-Mined] 动量因子策略',
+            detail: '该 L3 组合因子已达到 S/A 级，且当前线上多因子策略尚未引用；建议以该因子 100% 权重生成待审查策略草稿。',
+            factor_ids: ['a_mom_auto_rank'],
             suggested_weights: [
-              { factor_id: 'a_mom_auto_rank', weight_pct: 20, direction: 'HIGH_IS_BETTER' },
-              { factor_id: 's_mom_12m1m_rank', weight_pct: 30, direction: 'HIGH_IS_BETTER' },
+              { factor_id: 'a_mom_auto_rank', weight_pct: 100, direction: 'HIGH_IS_BETTER' },
             ],
             severity: 'info',
             target: {
               route: '#/factor-models/new',
               query: {
                 source: 'governance_queue',
-                factorIds: 'a_mom_auto_rank,s_mom_12m1m_rank',
-                weights: '20,30',
-                directions: 'HIGH_IS_BETTER,HIGH_IS_BETTER',
+                factorIds: 'a_mom_auto_rank',
+                weights: '100',
+                directions: 'HIGH_IS_BETTER',
+                modelName: '[Auto-Mined] 动量因子策略',
               },
             },
           },
@@ -1865,13 +1954,15 @@ describe('FactorModelBuilderPage', () => {
       'gq_deprecate_s_mom_12m1m_rank',
       expect.objectContaining({ confirm: true, command: 'DEPRECATE', factor_ids: ['s_mom_12m1m_rank'] }),
     ));
-    expect(await screen.findByText('多因子策略草稿建议')).toBeInTheDocument();
+    expect(await screen.findByText('[Auto-Mined] 动量因子策略')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '带入创建页' }));
 
     await waitFor(() => expect(window.location.hash).toContain('#/factor-models/new'));
     expect(window.location.hash).toContain('source=governance_queue');
     expect(decodeURIComponent(window.location.hash)).toContain('a_mom_auto_rank');
-    expect(decodeURIComponent(window.location.hash)).toContain('weights=20');
+    expect(decodeURIComponent(window.location.hash)).toContain('weights=100');
+    const routedQuery = new URLSearchParams(window.location.hash.split('?')[1] ?? '');
+    expect(routedQuery.get('modelName')).toBe('[Auto-Mined] 动量因子策略');
   });
 
   it('shows governance execute failures inside the confirmation dialog', async () => {
@@ -1981,19 +2072,18 @@ describe('FactorModelBuilderPage', () => {
             label: '策略草稿建议',
             title: '自动挖掘因子建议进入策略草稿',
             detail: '治理任务建议把自动挖掘因子带入多因子创建页。',
-            factor_ids: ['a_mom_auto_rank', 's_mom_12m1m_rank'],
+            factor_ids: ['a_mom_auto_rank'],
             suggested_weights: [
-              { factor_id: 'a_mom_auto_rank', weight_pct: 20, direction: 'HIGH_IS_BETTER' },
-              { factor_id: 's_mom_12m1m_rank', weight_pct: 30, direction: 'HIGH_IS_BETTER' },
+              { factor_id: 'a_mom_auto_rank', weight_pct: 100, direction: 'HIGH_IS_BETTER' },
             ],
             severity: 'info',
             target: {
               route: '#/factor-models/new',
               query: {
                 source: 'governance_queue',
-                factorIds: 'a_mom_auto_rank,s_mom_12m1m_rank',
-                weights: '20,30',
-                directions: 'HIGH_IS_BETTER,HIGH_IS_BETTER',
+                factorIds: 'a_mom_auto_rank',
+                weights: '100',
+                directions: 'HIGH_IS_BETTER',
               },
             },
           },
@@ -2455,9 +2545,16 @@ describe('FactorModelBuilderPage', () => {
     expect(factorsCss).toContain('.factor-level-cell');
     expect(factorsCss).toContain('.factor-level-badge--s');
     expect(factorsCss).toContain('.factor-tier-tabs');
+    expect(factorsCss).toContain('.factor-ledger-filter-row--library-family');
+    expect(factorsCss).toContain('.factor-ledger-filter-row--lifecycle-level');
+    expect(factorsCss).toContain('.factor-family-filter');
+    expect(factorsCss).not.toContain('.factor-source-tag');
     expect(factorsCss).toContain('.factor-level-filter');
-    expect(factorsCss).toContain('.factor-tier-badge--f1');
-    expect(factorsCss).toContain('.factor-tier-badge--f3');
+    expect(factorsCss).toContain('.factor-level-filter__all');
+    expect(factorsCss).toMatch(/\.factor-ledger-filter-row\s*\{[^}]*justify-content:\s*flex-start;/s);
+    expect(factorsCss).toMatch(/\.factor-ledger-filter-row \.factor-tier-tabs,\s*\.factor-ledger-filter-row \.factor-lifecycle-tabs\s*\{[^}]*margin-left:\s*auto;/s);
+    expect(factorsCss).toMatch(/\.factor-family-filter\s*\{[^}]*justify-content:\s*flex-start;[^}]*flex:\s*0 1 auto;/s);
+    expect(factorsCss).toMatch(/\.factor-level-filter\s*\{[^}]*justify-content:\s*flex-start;[^}]*flex:\s*0 1 auto;/s);
     expect(factorsCss).toContain('.factor-lineage-button');
     expect(factorsCss).toMatch(/\.factor-lineage-preview\s*\{[^}]*position:\s*fixed;[^}]*min-height:\s*94px;[^}]*box-shadow:\s*0 0 0 9999px/s);
     expect(factorsCss).toContain('.factor-op-light.is-active');
@@ -2466,10 +2563,14 @@ describe('FactorModelBuilderPage', () => {
     expect(factorsCss).toContain('.factor-diagnostic-cell__separator');
     expect(factorsCss).toMatch(/\.factor-table-wrap\s*\{[^}]*overflow-x:\s*auto;/s);
     expect(factorsCss).toMatch(/\.factor-table\s*\{[^}]*width:\s*100%;[^}]*min-width:\s*100%;[^}]*table-layout:\s*auto;/s);
-    expect(factorsCss).toMatch(/\.factor-table--phase1\s*\{[^}]*min-width:\s*1340px;/s);
+    expect(factorsCss).toMatch(/\.factor-table--phase1\s*\{[^}]*min-width:\s*1420px;/s);
     expect(factorsCss).toMatch(/\.factor-table--phase1 th:nth-child\(1\),\s*\.factor-table--phase1 td:nth-child\(1\)\s*\{[^}]*min-width:\s*310px;[^}]*max-width:\s*none;/s);
-    expect(factorsCss).toMatch(/\.factor-table--phase1 th:nth-child\(5\),\s*\.factor-table--phase1 td:nth-child\(5\)\s*\{[^}]*min-width:\s*450px;[^}]*width:\s*450px;/s);
+    expect(factorsCss).toMatch(/\.factor-table--phase1 th:nth-child\(4\),\s*\.factor-table--phase1 td:nth-child\(4\)\s*\{[^}]*min-width:\s*430px;[^}]*width:\s*430px;/s);
+    expect(factorsCss).toMatch(/\.factor-table--phase1 th:nth-child\(5\),\s*\.factor-table--phase1 td:nth-child\(5\)\s*\{[^}]*min-width:\s*138px;[^}]*white-space:\s*nowrap;/s);
+    expect(factorsCss).toContain('.factor-table--phase1 th:nth-child(7)');
     expect(factorsCss).toContain('.factor-table--phase1 th:nth-child(8)');
+    expect(factorsCss).toContain('.factor-table__level-header .factor-th-content');
+    expect(factorsCss).toContain('.factor-created-at');
     expect(factorsCss).toContain('.factor-offline-reason');
     expect(factorsCss).toContain('.factor-row-actions--inline');
     expect(factorsCss).toMatch(/\.factor-diagnostic-cell\s*\{[^}]*grid-template-columns:\s*minmax\(300px,\s*1fr\)\s*112px;[^}]*min-width:\s*420px;/s);

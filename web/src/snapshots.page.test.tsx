@@ -365,7 +365,7 @@ const overview: SnapshotOverviewEquityReadiness = {
       layer_id: 'l2',
       title_cn: 'L2 财务截面',
       status: 'WARNING',
-      summary: '财报字段已接入部分样本，但 Publish Date 与点时可回放仍需复核。',
+      summary: '财报字段已接入部分样本，但 Publish Date 与点时可回放仍需继续补齐。',
       metrics: [
         { label: '分层覆盖', value: '季度样本 62%' },
         { label: '最近时间', value: '2026-03-31 21:00' },
@@ -1041,7 +1041,7 @@ describe('SnapshotsPage', () => {
     expect(within(matrixSection).getByText('质量与估值')).toBeInTheDocument();
     expect(within(matrixSection).getByText('宏观与衍生品')).toBeInTheDocument();
     expect(within(matrixSection).getByText('利率和宏观序列已可进入 Beta 校准，期权偏度链路仍待补齐。')).toBeInTheDocument();
-    expect(within(matrixSection).getByText('校准中')).toBeInTheDocument();
+    expect(within(matrixSection).getByText('部分可用')).toBeInTheDocument();
 
     const alertSection = screen.getByRole('heading', { name: '异常核查' }).closest('article');
     if (!alertSection) {
@@ -1117,7 +1117,7 @@ describe('SnapshotsPage', () => {
       throw new Error('ds-fundamentals ledger row was not rendered');
     }
 
-    expect(fundamentalRow).toHaveTextContent('需复核');
+    expect(fundamentalRow).toHaveTextContent('部分可用');
     expect(fundamentalRow).toHaveTextContent(/覆盖 300\/1482/);
     expect(fundamentalRow).toHaveTextContent('财务快照已有部分字段，但发布日期或覆盖率仍待继续补齐。');
     expect(fundamentalRow).not.toHaveTextContent('0 / 1,482 覆盖');
@@ -1261,7 +1261,7 @@ describe('SnapshotsPage', () => {
       throw new Error('L1 基础行情 metric card was not rendered');
     }
     expect(within(l1Card).getByText('L1 基础行情')).toBeInTheDocument();
-    expect(l1Card.textContent).toMatch(/已核验|就绪|需复核|待修复|待补|校准中|阻断|未接入/);
+    expect(l1Card.textContent).toMatch(/已就绪|部分可用|不可用|待修复|待补/);
     expect(screen.getByText('ds-price')).toBeInTheDocument();
     expect(screen.getByText('un-ndx100')).toBeInTheDocument();
   });
@@ -1550,7 +1550,7 @@ describe('SnapshotsPage', () => {
     expect(screen.getByText('阻塞 0')).toBeInTheDocument();
     expect(screen.getByText('100% 已覆盖')).toBeInTheDocument();
     expect(screen.getByText('28/28 关键字段可用')).toBeInTheDocument();
-    expect(screen.getByText('推算/豁免字段计入可用；只有缺失或待复核才影响资产腿和组合。')).toBeInTheDocument();
+    expect(screen.getByText('推算/豁免字段计入可用；只有缺失或部分可用才影响资产腿和组合。')).toBeInTheDocument();
     expect(screen.getByText('全局异常队列')).toBeInTheDocument();
     expect(screen.getByText('无债券异常')).toBeInTheDocument();
     const globalAnomalyCard = screen.getByText('全局异常队列').closest('article');

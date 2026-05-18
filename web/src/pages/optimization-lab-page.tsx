@@ -1999,6 +1999,26 @@ function readNumber(value: unknown): number | undefined {
   return undefined;
 }
 
+function readOptimizationExecutionSeconds(
+  job?: ApiOptimizationJobDetail | null,
+): number | null {
+  const candidates = [
+    job?.summary?.active_execution_seconds,
+    job?.summary?.execution_seconds,
+    job?.result?.active_execution_seconds,
+    job?.result?.execution_seconds,
+    job?.active_execution_seconds,
+    job?.execution_seconds,
+  ];
+  for (const candidate of candidates) {
+    const parsed = readNumber(candidate);
+    if (parsed !== undefined && parsed >= 0) {
+      return Math.round(parsed);
+    }
+  }
+  return null;
+}
+
 function clampMetric(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -5307,10 +5327,12 @@ export function OptimizationResultsPage({
       (job?.request.base_parameter_version_id as string | null | undefined) ??
       null,
   );
-  const heroElapsedSeconds = calculateElapsedSeconds(
-    job?.created_at,
-    job?.completed_at ?? job?.updated_at,
-  );
+  const heroElapsedSeconds =
+    readOptimizationExecutionSeconds(job) ??
+    calculateElapsedSeconds(
+      job?.created_at,
+      job?.completed_at ?? job?.updated_at,
+    );
   const heroSummary = formatOptimizationHeroSummary(
     optimizationCombinationCount,
     heroElapsedSeconds,
@@ -6001,7 +6023,7 @@ export function OptimizationResultsPage({
               <div className="optimization-metric-row">
                 <article className="optimization-metric-tile">
                   <span>年化收益率</span>
-                  <strong>
+                  <strong style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
                     {formatReturnRate(
                       getCandidateMetric(selectedCandidate, "annualized_return") ??
                         getCandidateMetric(selectedCandidate, "cagr"),
@@ -6701,7 +6723,7 @@ export function OptimizationResultsPage({
                   style={{ display: "grid", gap: "10px", padding: "16px 18px" }}
                 >
                   <span>已完成组合</span>
-                  <strong>
+                  <strong style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
                     {budgetCombinations
                       ? `${completedCombinations} / ${budgetCombinations}`
                       : `${completedCombinations}`}
@@ -6712,21 +6734,21 @@ export function OptimizationResultsPage({
                   style={{ display: "grid", gap: "10px", padding: "16px 18px" }}
                 >
                   <span>当前阶段</span>
-                  <strong>{currentStage}</strong>
+                  <strong style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>{currentStage}</strong>
                 </article>
                 <article
                   className="optimization-metric-tile"
                   style={{ display: "grid", gap: "10px", padding: "16px 18px" }}
                 >
                   <span>预计剩余</span>
-                  <strong>{formatEtaMinutes(estimatedRemainingMinutes)}</strong>
+                  <strong style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>{formatEtaMinutes(estimatedRemainingMinutes)}</strong>
                 </article>
                 <article
                   className="optimization-metric-tile"
                   style={{ display: "grid", gap: "10px", padding: "16px 18px" }}
                 >
                   <span>预计完成</span>
-                  <strong>
+                  <strong style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
                     {formatExpectedCompletion(estimatedCompletedAt)}
                   </strong>
                 </article>

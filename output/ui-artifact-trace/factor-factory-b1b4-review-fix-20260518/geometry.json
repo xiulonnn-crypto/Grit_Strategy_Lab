@@ -1,0 +1,393 @@
+{
+  "page": {
+    "scrollWidth": 1960,
+    "clientWidth": 1960,
+    "hasHorizontalOverflow": false
+  },
+  "panels": [
+    {
+      "i": 0,
+      "heading": "因子任务",
+      "x": 272,
+      "y": 396,
+      "width": 546,
+      "height": 760,
+      "scrollHeight": 758,
+      "clientHeight": 758,
+      "overflowY": "hidden",
+      "overflowX": "hidden",
+      "whiteSpace": "normal",
+      "gridTemplateColumns": "543.969px"
+    },
+    {
+      "i": 1,
+      "heading": "因子打分",
+      "x": 832,
+      "y": 396,
+      "width": 496,
+      "height": 760,
+      "scrollHeight": 758,
+      "clientHeight": 758,
+      "overflowY": "hidden",
+      "overflowX": "hidden",
+      "whiteSpace": "normal",
+      "gridTemplateColumns": "494.344px"
+    },
+    {
+      "i": 2,
+      "heading": "因子检疫",
+      "x": 1342,
+      "y": 396,
+      "width": 586,
+      "height": 760,
+      "scrollHeight": 758,
+      "clientHeight": 758,
+      "overflowY": "hidden",
+      "overflowX": "hidden",
+      "whiteSpace": "normal",
+      "gridTemplateColumns": "583.688px"
+    }
+  ],
+  "panelBodies": [
+    {
+      "i": 0,
+      "heading": "因子任务",
+      "x": 273,
+      "y": 471,
+      "width": 544,
+      "height": 684,
+      "scrollHeight": 684,
+      "clientHeight": 684,
+      "overflowY": "auto",
+      "overflowX": "hidden",
+      "whiteSpace": "normal",
+      "gridTemplateColumns": "507.969px"
+    },
+    {
+      "i": 1,
+      "heading": "因子打分",
+      "x": 833,
+      "y": 471,
+      "width": 494,
+      "height": 632,
+      "scrollHeight": 3232,
+      "clientHeight": 632,
+      "overflowY": "auto",
+      "overflowX": "hidden",
+      "whiteSpace": "normal",
+      "gridTemplateColumns": "458.344px"
+    },
+    {
+      "i": 2,
+      "heading": "因子检疫",
+      "x": 1343,
+      "y": 471,
+      "width": 584,
+      "height": 684,
+      "scrollHeight": 861,
+      "clientHeight": 684,
+      "overflowY": "auto",
+      "overflowX": "hidden",
+      "whiteSpace": "normal",
+      "gridTemplateColumns": "547.688px"
+    }
+  ],
+  "taskCards": [
+    {
+      "i": 0,
+      "height": 94,
+      "text": "2026-05-15 Raw 标准链改造Raw -> Winsorize -> Neutralize -> Z-Score -> Rank。已完成L218 当前候选18 交付候选"
+    },
+    {
+      "i": 1,
+      "height": 94,
+      "text": "2026-05-15 PIT 基础因子挖掘价格型、质量/估值型、情绪/微观型、宏观/衍生品型基础候选。已完成L110 当前候选10 交付候选"
+    },
+    {
+      "i": 2,
+      "height": 132,
+      "text": "2026-05-15 L3 组合因子生成风格复合、风险调节、估值锚定、背离惩罚、残差/中性化、时序降噪。已完成L30 当前候选0 交付候选"
+    }
+  ],
+  "scoreCards": [
+    {
+      "i": 0,
+      "height": 112,
+      "className": "factor-factory-score-card is-collapsed",
+      "text": "Rank(Return(Close, 126))2026-05-15 · L2 · 分数 3737WARNRankIC 0.406Coverage 100.0%详情"
+    },
+    {
+      "i": 1,
+      "height": 112,
+      "className": "factor-factory-score-card is-collapsed",
+      "text": "Rank(Return(Close, 21))2026-05-15 · L2 · 分数 4141WARNRankIC 0.455Coverage 100.0%详情"
+    },
+    {
+      "i": 2,
+      "height": 112,
+      "className": "factor-factory-score-card is-collapsed",
+      "text": "ZScore(Return(Close, 21))2026-05-15 · L2 · 分数 4141WARNRankIC 0.455Coverage 100.0%详情"
+    },
+    {
+      "i": 3,
+      "height": 112,
+      "className": "factor-factory-score-card is-collapsed",
+      "text": "ZScore(Return(Close, 126))2026-05-15 · L2 · 分数 3838WARNRankIC 0.418Coverage 100.0%详情"
+    },
+    {
+      "i": 4,
+      "height": 112,
+      "className": "factor-factory-score-card is-collapsed",
+      "text": "Winsorize(Return(Close, 3), 3)2026-05-15 · L2 · 分数 4545WARNRankIC 0.491Coverage 100.0%详情"
+    },
+    {
+      "i": 5,
+      "height": 112,
+      "className": "factor-factory-score-card is-collapsed",
+      "text": "ZScore(Return(Close, 5))2026-05-15 · L2 · 分数 6868WARNRankIC 0.721Coverage 100.0%详情"
+    }
+  ],
+  "filterValues": [
+    {
+      "type": "date",
+      "value": "2026-05-15"
+    },
+    {
+      "type": "text",
+      "value": ""
+    },
+    {
+      "type": "select",
+      "value": "ALL"
+    }
+  ],
+  "resultRows": [
+    {
+      "i": 0,
+      "height": 58,
+      "columns": [
+        "2026-05-15",
+        "Rank(Return(Close, 126))",
+        "FAIL",
+        "最大回撤相对基准超过 1.5x。",
+        "详情"
+      ]
+    },
+    {
+      "i": 1,
+      "height": 58,
+      "columns": [
+        "2026-05-15",
+        "Rank(Return(Close, 21))",
+        "FAIL",
+        "最大回撤相对基准超过 1.5x。",
+        "详情"
+      ]
+    },
+    {
+      "i": 2,
+      "height": 58,
+      "columns": [
+        "2026-05-15",
+        "ZScore(Return(Close, 21))",
+        "FAIL",
+        "最大回撤相对基准超过 1.5x。",
+        "详情"
+      ]
+    },
+    {
+      "i": 3,
+      "height": 92,
+      "columns": [
+        "2026-05-15",
+        "ZScore(Return(Close, 126))",
+        "FAIL",
+        "残差化后风格或逻辑相关性仍高于 0.3。；最大回撤相对基准超过 1.5x。；表达式与已有因子逻辑重复。",
+        "详情"
+      ]
+    },
+    {
+      "i": 4,
+      "height": 58,
+      "columns": [
+        "2026-05-15",
+        "Winsorize(Return(Close, 3), 3)",
+        "FAIL",
+        "最大回撤相对基准超过 1.5x。",
+        "详情"
+      ]
+    },
+    {
+      "i": 5,
+      "height": 58,
+      "columns": [
+        "2026-05-15",
+        "ZScore(Return(Close, 5))",
+        "FAIL",
+        "最大回撤相对基准超过 1.5x。",
+        "详情"
+      ]
+    },
+    {
+      "i": 6,
+      "height": 58,
+      "columns": [
+        "2026-05-15",
+        "Return(Close, 3)",
+        "FAIL",
+        "最大回撤相对基准超过 1.5x。",
+        "详情"
+      ]
+    },
+    {
+      "i": 7,
+      "height": 58,
+      "columns": [
+        "2026-05-15",
+        "Rank(Return(Close, 5))",
+        "FAIL",
+        "最大回撤相对基准超过 1.5x。",
+        "详情"
+      ]
+    }
+  ],
+  "resultButtons": [
+    {
+      "i": 0,
+      "text": "详情",
+      "x": 1838,
+      "y": 628,
+      "width": 56,
+      "height": 38,
+      "scrollHeight": 36,
+      "clientHeight": 36,
+      "overflowY": "visible",
+      "overflowX": "visible",
+      "whiteSpace": "nowrap",
+      "gridTemplateColumns": "none"
+    },
+    {
+      "i": 1,
+      "text": "详情",
+      "x": 1838,
+      "y": 692,
+      "width": 56,
+      "height": 38,
+      "scrollHeight": 36,
+      "clientHeight": 36,
+      "overflowY": "visible",
+      "overflowX": "visible",
+      "whiteSpace": "nowrap",
+      "gridTemplateColumns": "none"
+    },
+    {
+      "i": 2,
+      "text": "详情",
+      "x": 1838,
+      "y": 756,
+      "width": 56,
+      "height": 38,
+      "scrollHeight": 36,
+      "clientHeight": 36,
+      "overflowY": "visible",
+      "overflowX": "visible",
+      "whiteSpace": "nowrap",
+      "gridTemplateColumns": "none"
+    },
+    {
+      "i": 3,
+      "text": "详情",
+      "x": 1838,
+      "y": 837,
+      "width": 56,
+      "height": 38,
+      "scrollHeight": 36,
+      "clientHeight": 36,
+      "overflowY": "visible",
+      "overflowX": "visible",
+      "whiteSpace": "nowrap",
+      "gridTemplateColumns": "none"
+    },
+    {
+      "i": 4,
+      "text": "详情",
+      "x": 1838,
+      "y": 918,
+      "width": 56,
+      "height": 38,
+      "scrollHeight": 36,
+      "clientHeight": 36,
+      "overflowY": "visible",
+      "overflowX": "visible",
+      "whiteSpace": "nowrap",
+      "gridTemplateColumns": "none"
+    },
+    {
+      "i": 5,
+      "text": "详情",
+      "x": 1838,
+      "y": 982,
+      "width": 56,
+      "height": 38,
+      "scrollHeight": 36,
+      "clientHeight": 36,
+      "overflowY": "visible",
+      "overflowX": "visible",
+      "whiteSpace": "nowrap",
+      "gridTemplateColumns": "none"
+    },
+    {
+      "i": 6,
+      "text": "详情",
+      "x": 1838,
+      "y": 1046,
+      "width": 56,
+      "height": 38,
+      "scrollHeight": 36,
+      "clientHeight": 36,
+      "overflowY": "visible",
+      "overflowX": "visible",
+      "whiteSpace": "nowrap",
+      "gridTemplateColumns": "none"
+    },
+    {
+      "i": 7,
+      "text": "详情",
+      "x": 1838,
+      "y": 1110,
+      "width": 56,
+      "height": 38,
+      "scrollHeight": 36,
+      "clientHeight": 36,
+      "overflowY": "visible",
+      "overflowX": "visible",
+      "whiteSpace": "nowrap",
+      "gridTemplateColumns": "none"
+    }
+  ],
+  "modal": {
+    "title": "Rank(Return(Close, 126))",
+    "modal": {
+      "width": 1120,
+      "height": 687,
+      "overflowY": "hidden",
+      "gridTemplateColumns": "1118px"
+    },
+    "body": {
+      "width": 1118,
+      "height": 591,
+      "overflowY": "auto",
+      "gridTemplateColumns": "475.188px 580.812px"
+    },
+    "contains": {
+      "scoring": true,
+      "quarantine": true,
+      "agentD": true
+    }
+  },
+  "screenshots": {
+    "main": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factor-factory-b1b4-review-fix-20260518\\factory-main-1960.png",
+    "modal": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factor-factory-b1b4-review-fix-20260518\\factory-detail-modal-1960.png",
+    "url": "http://127.0.0.1:4173/?v=1779097330301#/factors/factory"
+  }
+}

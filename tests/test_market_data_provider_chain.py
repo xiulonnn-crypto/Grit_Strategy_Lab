@@ -629,6 +629,7 @@ def test_sec_edgar_provider_parses_companyfacts_fundamental_points(monkeypatch):
                                 },
                                 "NetIncomeLoss": {"units": {"USD": [{**fact_row, "val": 12.0}]}},
                                 "Assets": {"units": {"USD": [{**fact_row, "val": 120.0}]}},
+                                "Liabilities": {"units": {"USD": [{**fact_row, "val": 60.0}]}},
                                 "LiabilitiesCurrent": {"units": {"USD": [{**fact_row, "val": 20.0}]}},
                                 "StockholdersEquity": {"units": {"USD": [{**fact_row, "val": 60.0}]}},
                             }
@@ -650,8 +651,10 @@ def test_sec_edgar_provider_parses_companyfacts_fundamental_points(monkeypatch):
     assert point["revenue"] == 100.0
     assert point["net_income"] == 12.0
     assert point["total_assets"] == 120.0
+    assert point["total_liabilities"] == 60.0
     assert point["metadata"]["fact_tags"] == [
         "Assets",
+        "Liabilities",
         "LiabilitiesCurrent",
         "NetIncomeLoss",
         "RevenueFromContractWithCustomerExcludingAssessedTax",
@@ -677,6 +680,7 @@ def test_sec_edgar_provider_parses_ifrs_companyfacts_fundamental_points():
                 "GrossProfit": {"units": {"EUR": [{**fact_row, "val": 35.0}]}},
                 "ProfitLoss": {"units": {"EUR": [{**fact_row, "val": 12.0}]}},
                 "Assets": {"units": {"EUR": [{**fact_row, "val": 250.0}]}},
+                "Liabilities": {"units": {"EUR": [{**fact_row, "val": 160.0}]}},
                 "Equity": {"units": {"EUR": [{**fact_row, "val": 90.0}]}},
                 "CurrentLiabilities": {"units": {"EUR": [{**fact_row, "val": 40.0}]}},
                 "Borrowings": {"units": {"EUR": [{**fact_row, "val": 70.0}]}},
@@ -700,6 +704,7 @@ def test_sec_edgar_provider_parses_ifrs_companyfacts_fundamental_points():
     assert point["gross_profit"] == 35.0
     assert point["net_income"] == 12.0
     assert point["total_assets"] == 250.0
+    assert point["total_liabilities"] == 160.0
     assert point["book_value_equity"] == 90.0
     assert point["total_debt"] == 70.0
     assert point["shares_outstanding"] == 4.0

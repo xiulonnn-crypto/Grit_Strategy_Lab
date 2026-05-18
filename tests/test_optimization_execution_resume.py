@@ -241,6 +241,70 @@ def test_resume_incomplete_optimization_jobs_resumes_running_jobs_after_restart(
     assert executed_snapshots == planned[2:]
 
 
+def test_resumed_optimization_job_heartbeats_during_long_inflight_trial(tmp_path, monkeypatch):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    service.refresh_snapshots({"mode": "repair", "targets": ["price", "corporate", "universes"]})
+    strategy = create_momentum_strategy(client, idempotency_key="opt-exec-inflight-heartbeat")["strategy"]
+
+    job_id, planned = _seed_running_job(service, strategy, completed_trials=2)
+    second_trial_started = threading.Event()
+    release_second_trial = threading.Event()
+    call_count = 0
+
+    def fake_trial(
+        strategy_detail: dict[str, Any],
+        evaluation_request: dict[str, Any],
+        payload: dict[str, Any],
+        parameter_snapshot: dict[str, Any],
+        *,
+        prepared_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            second_trial_started.set()
+            release_second_trial.wait(timeout=1.0)
+        return _sample_trial_result(parameter_snapshot, score=1.8 + call_count / 10.0)
+
+    monkeypatch.setattr(service, "_evaluate_optimization_trial", fake_trial)
+    monkeypatch.setattr(service, "_optimization_step_delay_seconds", lambda: 0.0)
+    monkeypatch.setattr(service, "_optimization_runner_heartbeat_seconds", lambda: 0.02)
+
+    resumed = service.resume_incomplete_optimization_jobs()
+    assert resumed == [job_id]
+    assert second_trial_started.wait(1.0)
+
+    inflight = service.get_optimization_job_detail(job_id)
+    first_heartbeat = str(inflight["summary"].get("heartbeat_at") or "")
+    assert inflight["status"] == "RUNNING"
+    assert inflight["summary"]["completed_combinations"] == 3
+    assert inflight["summary"]["next_trial_index"] == 4
+    assert inflight["summary"]["current_stage"] == "Running trial 4/4"
+
+    deadline = time.monotonic() + 1.0
+    refreshed = inflight
+    while time.monotonic() < deadline:
+        time.sleep(0.03)
+        refreshed = service.get_optimization_job_detail(job_id)
+        if (
+            str(refreshed["summary"].get("heartbeat_at") or "") != first_heartbeat
+            and refreshed["summary"]["latest_update"] == "Evaluating trial 4/4."
+        ):
+            break
+
+    assert refreshed["summary"]["completed_combinations"] == 3
+    assert refreshed["summary"]["latest_update"] == "Evaluating trial 4/4."
+    assert str(refreshed["summary"].get("heartbeat_at") or "") != first_heartbeat
+
+    release_second_trial.set()
+    job = _wait_for_terminal_job(service, job_id)
+    assert job["status"] == "COMPLETED"
+    assert job["summary"]["completed_combinations"] == 4
+    assert call_count == 2
+    assert planned[2:]
+
+
 def test_resume_incomplete_optimization_jobs_preserves_constraint_contract_fields(tmp_path, monkeypatch):
     client, _ = create_test_client(tmp_path)
     service = client.app.state.service
@@ -1872,6 +1936,89 @@ def test_eta_projection_prefers_recent_completion_window_over_old_history(tmp_pa
 
     assert eta["estimated_remaining_minutes"] == 2
     assert eta["estimated_completed_at"] is not None
+
+
+def test_eta_projection_ignores_resume_downtime_gap(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    eta = service._optimization_eta_projection(
+        [
+            {"started_at": "2026-05-15T08:38:08Z", "completed_at": "2026-05-15T08:43:12Z"},
+            {"started_at": "2026-05-15T08:43:12Z", "completed_at": "2026-05-15T08:48:36Z"},
+            {"started_at": "2026-05-15T09:05:38Z", "completed_at": "2026-05-15T09:10:58Z"},
+            {"started_at": "2026-05-18T07:07:54Z", "completed_at": "2026-05-18T07:13:15Z"},
+            {"started_at": "2026-05-18T07:13:15Z", "completed_at": "2026-05-18T07:18:30Z"},
+            {"started_at": "2026-05-18T07:18:30Z", "completed_at": "2026-05-18T07:23:57Z"},
+            {"started_at": "2026-05-18T07:23:57Z", "completed_at": "2026-05-18T07:29:00Z"},
+            {"started_at": "2026-05-18T07:34:00Z", "completed_at": "2026-05-18T07:39:06Z"},
+        ],
+        budget_combinations=720,
+        completed_combinations=19,
+    )
+
+    assert eta["estimated_remaining_minutes"] < 5000
+    assert eta["estimated_completed_at"] is not None
+
+
+def test_completed_detail_reports_active_execution_seconds_without_resume_gap(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    service.refresh_snapshots({"mode": "repair", "targets": ["price", "corporate", "universes"]})
+    strategy = create_momentum_strategy(client, idempotency_key="opt-exec-active-duration")["strategy"]
+    planned = service._plan_optimization_search_snapshots(
+        dict(strategy.get("parameters") or {}),
+        SEARCH_SPACE,
+        2,
+    )
+    job_id = "opt_active_duration_gap"
+    service._persist_optimization_job(
+        job_id,
+        strategy["id"],
+        {
+            "objective": "sharpe",
+            "base_parameter_version_id": strategy["current_parameter_version_id"],
+            "entry_point": "lab_menu",
+            "validation_mode": "walk_forward",
+            "budget_combinations": 2,
+            "completed_combinations": 2,
+            "persisted_trial_count": 2,
+            "next_trial_index": 3,
+            "status": "COMPLETED",
+            "progress_pct": 100,
+            "search_space": SEARCH_SPACE,
+        },
+        [],
+        created_at="2026-05-15T08:00:00Z",
+        updated_at="2026-05-18T08:00:00Z",
+        completed_at="2026-05-18T08:00:00Z",
+    )
+    for trial_index, (snapshot, started_at, completed_at) in enumerate(
+        [
+            (planned[0], "2026-05-15T08:00:00Z", "2026-05-15T08:05:00Z"),
+            (planned[1], "2026-05-18T07:59:00Z", "2026-05-18T08:00:00Z"),
+        ],
+        start=1,
+    ):
+        sample = _sample_trial_result(snapshot, score=1.0 + trial_index / 10.0)
+        service._persist_optimization_trial(
+            job_id,
+            trial_index,
+            status="SUCCEEDED",
+            parameter_snapshot=sample["parameter_snapshot"],
+            metrics=sample["metrics"],
+            chart_series=sample["chart_series"],
+            score=sample["score"],
+            error_message=None,
+            started_at=started_at,
+            completed_at=completed_at,
+        )
+
+    detail = service.get_optimization_job_detail(job_id)
+
+    assert detail["summary"]["active_execution_seconds"] == pytest.approx(360.0)
+    assert detail["result"]["active_execution_seconds"] == pytest.approx(360.0)
+    assert detail["summary"]["active_execution_seconds"] < 24 * 60 * 60
 
 
 def test_parallel_controller_falls_back_to_sequential_when_parallel_runner_errors(tmp_path, monkeypatch):

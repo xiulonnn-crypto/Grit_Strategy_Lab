@@ -1,0 +1,1701 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>因子工厂 B1-B4 二期工作台</title>
+  <style>
+    :root {
+      --gsl-bg-main: #f0f2f5;
+      --gsl-bg-surface: #ffffff;
+      --gsl-bg-surface-soft: #fbfcfd;
+      --gsl-bg-subtle: #f9fafb;
+      --gsl-bg-accent-soft: #f5fbf8;
+      --gsl-color-primary: #1f877b;
+      --gsl-color-primary-strong: #176b61;
+      --gsl-color-primary-soft: #e6f4f1;
+      --gsl-color-benchmark: #4c78c7;
+      --gsl-color-blue-soft: #eef5ff;
+      --gsl-color-success: #2b8a3e;
+      --gsl-color-success-soft: #ecfdf3;
+      --gsl-color-warning: #b86813;
+      --gsl-color-warning-soft: #fff7e8;
+      --gsl-color-danger: #c45c4f;
+      --gsl-color-danger-soft: #fff8f7;
+      --gsl-color-border: #e5e7eb;
+      --gsl-color-border-soft: #eef2f4;
+      --gsl-color-border-strong: #d7e1e5;
+      --gsl-text-title: #111827;
+      --gsl-text-main: #1f2937;
+      --gsl-text-sub: #64748b;
+      --gsl-text-muted: #94a3b8;
+      --shadow-card: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.05);
+      --shadow-lift: 0 18px 40px rgba(17, 24, 39, 0.06);
+      --workbench-panel-height: 760px;
+    }
+
+    * {
+      box-sizing: border-box;
+      min-width: 0;
+    }
+
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      max-width: 100%;
+      overflow-x: hidden;
+      background: var(--gsl-bg-main);
+      color: var(--gsl-text-main);
+      font-family: Inter, "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+
+    .design-canvas {
+      width: min(1960px, 100%);
+      max-width: 1960px;
+      min-height: 1120px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 240px minmax(0, 1fr);
+      background: var(--gsl-bg-main);
+    }
+
+    .sidebar {
+      background: var(--gsl-bg-surface);
+      border-right: 1px solid var(--gsl-color-border);
+      padding: 24px 18px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 28px;
+    }
+
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, var(--gsl-color-primary), var(--gsl-color-benchmark));
+      color: #fff;
+      display: grid;
+      place-items: center;
+      font-weight: 800;
+      letter-spacing: 0;
+      flex: 0 0 auto;
+    }
+
+    .brand strong {
+      display: block;
+      color: var(--gsl-text-title);
+      font-size: 15px;
+      white-space: nowrap;
+    }
+
+    .brand span {
+      color: var(--gsl-text-muted);
+      font-size: 12px;
+    }
+
+    .nav-group {
+      margin: 20px 0;
+    }
+
+    .nav-group h2 {
+      margin: 0 0 8px;
+      color: var(--gsl-text-muted);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .nav-link {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 36px;
+      padding: 9px 11px;
+      margin: 3px 0;
+      border-radius: 12px;
+      color: var(--gsl-text-main);
+      text-decoration: none;
+      gap: 8px;
+    }
+
+    .nav-link.is-active {
+      background: var(--gsl-color-primary-soft);
+      color: var(--gsl-color-primary-strong);
+      box-shadow: inset 3px 0 0 var(--gsl-color-primary);
+      font-weight: 700;
+    }
+
+    .nav-link span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    main {
+      padding: 32px;
+    }
+
+    .page {
+      display: grid;
+      gap: 18px;
+    }
+
+    .hero {
+      min-height: 142px;
+      background: linear-gradient(135deg, #ffffff 0%, #f5fbf8 58%, #f8fbff 100%);
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 22px;
+      box-shadow: var(--shadow-card);
+      padding: 24px 26px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 22px;
+      align-items: start;
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--gsl-color-primary-strong);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      margin-bottom: 8px;
+      color: var(--gsl-text-title);
+      font-size: 28px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 0;
+      color: var(--gsl-text-title);
+      font-size: 18px;
+      line-height: 1.28;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 0 0 4px;
+      color: var(--gsl-text-title);
+      font-size: 14px;
+      line-height: 1.3;
+      letter-spacing: 0;
+    }
+
+    .hero p {
+      max-width: 880px;
+      margin-bottom: 0;
+      color: var(--gsl-text-sub);
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .btn {
+      border: 1px solid var(--gsl-color-border-strong);
+      background: var(--gsl-bg-surface);
+      color: var(--gsl-text-main);
+      border-radius: 12px;
+      padding: 9px 14px;
+      min-height: 38px;
+      cursor: default;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+      white-space: nowrap;
+    }
+
+    .btn-primary {
+      border-color: var(--gsl-color-primary);
+      background: var(--gsl-color-primary);
+      color: #fff;
+      font-weight: 700;
+    }
+
+    .status-strip {
+      background: var(--gsl-bg-surface);
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 16px;
+      box-shadow: var(--shadow-card);
+      padding: 13px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      color: var(--gsl-text-sub);
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--gsl-color-border);
+      border-radius: 999px;
+      padding: 4px 9px;
+      min-height: 26px;
+      color: var(--gsl-text-sub);
+      background: var(--gsl-bg-subtle);
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .chip-success {
+      border-color: #bfe6cc;
+      background: var(--gsl-color-success-soft);
+      color: var(--gsl-color-success);
+    }
+
+    .chip-warning {
+      border-color: #f0d29b;
+      background: var(--gsl-color-warning-soft);
+      color: var(--gsl-color-warning);
+    }
+
+    .chip-danger {
+      border-color: #edc7c2;
+      background: var(--gsl-color-danger-soft);
+      color: var(--gsl-color-danger);
+    }
+
+    .chip-info {
+      border-color: #c9dcfb;
+      background: var(--gsl-color-blue-soft);
+      color: #315d9f;
+    }
+
+    .publish-queue,
+    .panel,
+    .metric,
+    .admission-card {
+      border: 1px solid var(--gsl-color-border-soft);
+      background: var(--gsl-bg-surface);
+      border-radius: 18px;
+      box-shadow: var(--shadow-card);
+    }
+
+    .publish-queue {
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .publish-queue[data-publishable-count="0"] {
+      display: none;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+    }
+
+    .section-head p {
+      margin: 4px 0 0;
+      color: var(--gsl-text-sub);
+    }
+
+    .publish-list {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .publish-card {
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 14px;
+      padding: 13px;
+      background: var(--gsl-bg-surface-soft);
+      display: grid;
+      gap: 10px;
+    }
+
+    .publish-card header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .publish-card p {
+      margin: 0;
+      color: var(--gsl-text-sub);
+      overflow-wrap: anywhere;
+    }
+
+    .publish-card footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .score-pill {
+      min-width: 50px;
+      height: 34px;
+      border-radius: 12px;
+      display: grid;
+      place-items: center;
+      background: var(--gsl-color-primary-soft);
+      color: var(--gsl-color-primary-strong);
+      font-weight: 800;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .metric {
+      padding: 14px;
+      min-height: 112px;
+    }
+
+    .metric span {
+      display: block;
+      color: var(--gsl-text-muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .metric strong {
+      display: block;
+      margin-top: 6px;
+      color: var(--gsl-text-title);
+      font-size: 26px;
+      line-height: 1.15;
+    }
+
+    .metric p {
+      margin: 6px 0 0;
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+    }
+
+    .layers {
+      display: grid;
+      grid-template-columns: 1.1fr 1fr 1.18fr;
+      gap: 14px;
+      align-items: start;
+    }
+
+    .panel {
+      height: var(--workbench-panel-height);
+      overflow: hidden;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+    }
+
+    .panel-header {
+      padding: 16px 16px 12px;
+      border-bottom: 1px solid var(--gsl-color-border-soft);
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .panel-header p {
+      margin-bottom: 4px;
+      color: var(--gsl-text-muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .panel-body {
+      min-height: 0;
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+      align-content: start;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
+    }
+
+    .panel-body::-webkit-scrollbar,
+    .modal-body::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    .panel-body::-webkit-scrollbar-track,
+    .modal-body::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .panel-body::-webkit-scrollbar-thumb,
+    .modal-body::-webkit-scrollbar-thumb {
+      background: #cfd8de;
+      border-radius: 999px;
+    }
+
+    .task-family-tabs {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .family-tab {
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 14px;
+      background: var(--gsl-bg-subtle);
+      padding: 10px;
+      box-shadow: inset 3px 0 0 var(--family-color);
+    }
+
+    .family-tab.is-active {
+      background: var(--gsl-bg-accent-soft);
+      border-color: #cde6df;
+    }
+
+    .family-tab strong {
+      display: block;
+      color: var(--gsl-text-title);
+      font-size: 13px;
+    }
+
+    .family-tab small {
+      display: block;
+      margin-top: 5px;
+      color: var(--gsl-text-sub);
+      line-height: 1.45;
+    }
+
+    .task-board,
+    .score-stack,
+    .score-card-list,
+    .threshold-table,
+    .quarantine-grid,
+    .quarantine-card-list,
+    .admission-report {
+      display: grid;
+      gap: 10px;
+    }
+
+    .task-row {
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 14px;
+      background: var(--gsl-bg-surface-soft);
+      padding: 13px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto 96px;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .task-row p,
+    .score-row p,
+    .metric-group p,
+    .publish-card p,
+    .admission-card p {
+      margin-bottom: 0;
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .task-row strong,
+    .score-row strong,
+    .publish-card strong,
+    .admission-card strong {
+      display: block;
+      color: var(--gsl-text-title);
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+
+    .task-delivery {
+      text-align: right;
+    }
+
+    .task-delivery strong {
+      font-size: 20px;
+      color: var(--gsl-color-primary-strong);
+    }
+
+    .progress {
+      height: 6px;
+      margin-top: 8px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #edf1f3;
+    }
+
+    .progress span {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--gsl-color-primary), var(--gsl-color-benchmark));
+    }
+
+    .operator-chain {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .op {
+      min-width: 34px;
+      text-align: center;
+      border-radius: 999px;
+      border: 1px solid #cde6df;
+      background: var(--gsl-color-primary-soft);
+      color: var(--gsl-color-primary-strong);
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .score-row {
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 14px;
+      background: var(--gsl-bg-surface-soft);
+      padding: 13px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .score-card,
+    .quarantine-list-row {
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 14px;
+      background: var(--gsl-bg-surface-soft);
+      padding: 13px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .score-card-main {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .score-card strong,
+    .quarantine-list-row strong {
+      display: block;
+      color: var(--gsl-text-title);
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+
+    .score-card p,
+    .quarantine-list-row p {
+      margin: 4px 0 0;
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .card-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .compact-metric-grid,
+    .quarantine-meta-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .quarantine-meta-grid {
+      grid-template-columns: 94px minmax(0, 1fr) 88px minmax(0, 1.2fr);
+    }
+
+    .mini-metric,
+    .quarantine-field {
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 12px;
+      background: #fff;
+      padding: 9px 10px;
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+    }
+
+    .mini-metric b,
+    .quarantine-field b {
+      display: block;
+      margin-top: 2px;
+      color: var(--gsl-text-title);
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+
+    .card-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .panel-action-bar {
+      position: sticky;
+      bottom: -14px;
+      z-index: 2;
+      margin: 4px -14px -14px;
+      padding: 12px 14px;
+      border-top: 1px solid var(--gsl-color-border-soft);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.88), #fff);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .panel-action-bar p {
+      margin: 0;
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+    }
+
+    .metric-groups {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .metric-group {
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 12px;
+      background: #fff;
+      padding: 10px;
+    }
+
+    .metric-group strong {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+    }
+
+    .metric-list {
+      margin-top: 8px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .metric-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+    }
+
+    .metric-line b {
+      color: var(--gsl-text-title);
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .threshold-row {
+      display: grid;
+      grid-template-columns: 64px minmax(0, 1fr) 96px minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 12px;
+      padding: 9px 10px;
+      background: #fff;
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+    }
+
+    .threshold-row b {
+      color: var(--gsl-text-title);
+      overflow-wrap: anywhere;
+    }
+
+    .threshold-row.is-head {
+      background: var(--gsl-bg-subtle);
+      color: var(--gsl-text-muted);
+      font-weight: 800;
+    }
+
+    .test-lane {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .test-card {
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 12px;
+      background: var(--gsl-bg-subtle);
+      padding: 10px;
+    }
+
+    .test-card strong {
+      display: block;
+      color: var(--gsl-text-title);
+      font-size: 12px;
+    }
+
+    .test-card p {
+      margin: 5px 0 0;
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+    }
+
+    .search-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(0, .75fr) minmax(0, .6fr) auto;
+      gap: 8px;
+    }
+
+    .quarantine-result-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .quarantine-list-row {
+      grid-template-columns: 96px minmax(0, 1fr) 78px minmax(0, 1.35fr) 72px;
+      align-items: center;
+      font-size: 12px;
+    }
+
+    .quarantine-list-row.is-head {
+      border-color: transparent;
+      background: var(--gsl-bg-subtle);
+      color: var(--gsl-text-muted);
+      font-weight: 800;
+      min-height: 42px;
+    }
+
+    .quarantine-list-row > span,
+    .quarantine-list-row > div {
+      overflow-wrap: anywhere;
+    }
+
+    .field {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid var(--gsl-color-border-strong);
+      border-radius: 12px;
+      padding: 8px 10px;
+      color: var(--gsl-text-main);
+      background: var(--gsl-bg-surface);
+    }
+
+    .report-row {
+      display: grid;
+      grid-template-columns: minmax(100px, .9fr) 88px 74px minmax(0, 1.6fr);
+      gap: 10px;
+      align-items: center;
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 12px;
+      padding: 10px;
+      background: #fff;
+      font-size: 12px;
+    }
+
+    .report-row.is-head {
+      background: var(--gsl-bg-subtle);
+      color: var(--gsl-text-muted);
+      font-weight: 800;
+    }
+
+    .report-row p {
+      margin: 0;
+      color: var(--gsl-text-sub);
+      overflow-wrap: anywhere;
+    }
+
+    .report-row strong {
+      color: var(--gsl-text-title);
+      overflow-wrap: anywhere;
+    }
+
+    .history-brief {
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 14px;
+      padding: 12px;
+      background: var(--gsl-bg-surface-soft);
+      display: grid;
+      gap: 8px;
+    }
+
+    .history-brief p {
+      margin: 0;
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+    }
+
+    .admission {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .admission-card {
+      padding: 14px;
+      min-height: 128px;
+    }
+
+    .admission-card h3 {
+      margin-top: 10px;
+    }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      padding: 32px;
+      background: rgba(15, 23, 42, 0.36);
+      display: grid;
+      place-items: center;
+    }
+
+    .modal-backdrop[hidden] {
+      display: none;
+    }
+
+    .factor-modal {
+      width: min(1120px, 100%);
+      max-height: 86vh;
+      overflow: hidden;
+      border-radius: 20px;
+      border: 1px solid var(--gsl-color-border-soft);
+      background: var(--gsl-bg-surface);
+      box-shadow: var(--shadow-lift);
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+    }
+
+    .modal-head {
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--gsl-color-border-soft);
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: start;
+    }
+
+    .modal-head p {
+      margin: 4px 0 0;
+      color: var(--gsl-text-sub);
+    }
+
+    .modal-body {
+      min-height: 0;
+      overflow-y: auto;
+      padding: 18px 20px 20px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .modal-summary {
+      display: grid;
+      grid-template-columns: 130px minmax(0, 1fr) 110px minmax(0, 1.4fr);
+      gap: 10px;
+    }
+
+    .modal-summary div,
+    .modal-section {
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 14px;
+      background: var(--gsl-bg-surface-soft);
+      padding: 12px;
+    }
+
+    .modal-summary span {
+      display: block;
+      color: var(--gsl-text-muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .modal-summary strong {
+      display: block;
+      margin-top: 4px;
+      color: var(--gsl-text-title);
+      overflow-wrap: anywhere;
+    }
+
+    .factor-modal-grid {
+      display: grid;
+      grid-template-columns: 1fr 1.12fr;
+      gap: 14px;
+      align-items: start;
+    }
+
+    .modal-section h3 {
+      margin-bottom: 10px;
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    }
+
+    @media (max-width: 1500px) {
+      :root {
+        --workbench-panel-height: 620px;
+      }
+
+      main {
+        padding: 24px;
+      }
+
+      .layers,
+      .publish-list {
+        grid-template-columns: 1fr;
+      }
+
+      .test-lane {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 1180px) {
+      .design-canvas {
+        grid-template-columns: 96px minmax(0, 1fr);
+      }
+
+      .sidebar {
+        padding: 18px 10px;
+      }
+
+      .brand {
+        justify-content: center;
+      }
+
+      .brand div:last-child,
+      .nav-group h2,
+      .nav-link span,
+      .nav-link b {
+        display: none;
+      }
+
+      .nav-link {
+        justify-content: center;
+      }
+
+      .summary-grid,
+      .admission {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 820px) {
+      .design-canvas {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        border-right: 0;
+        border-bottom: 1px solid var(--gsl-color-border);
+        display: flex;
+        gap: 8px;
+        overflow: hidden;
+      }
+
+      .brand {
+        margin: 0;
+      }
+
+      .nav-group {
+        margin: 0;
+        display: flex;
+        gap: 4px;
+      }
+
+      main {
+        padding: 16px;
+      }
+
+      .hero,
+      .section-head,
+      .task-row,
+      .score-row,
+      .score-card-main,
+      .quarantine-meta-grid,
+      .threshold-row,
+      .report-row,
+      .search-row,
+      .quarantine-list-row,
+      .modal-head,
+      .modal-summary,
+      .factor-modal-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .actions,
+      .hero .actions,
+      .task-delivery {
+        justify-content: flex-start;
+        text-align: left;
+      }
+
+      .summary-grid,
+      .task-family-tabs,
+      .metric-groups,
+      .compact-metric-grid,
+      .test-lane,
+      .admission {
+        grid-template-columns: 1fr;
+      }
+
+      .modal-backdrop {
+        padding: 14px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="design-canvas">
+    <aside class="sidebar" aria-label="主导航">
+      <div class="brand">
+        <div class="brand-mark">G</div>
+        <div>
+          <strong>Grit Strategy Lab</strong>
+          <span>研究工作台</span>
+        </div>
+      </div>
+      <div class="nav-group">
+        <h2>组合</h2>
+        <a class="nav-link" href="#"><span>组合仪表盘</span></a>
+        <a class="nav-link" href="#"><span>资产库</span></a>
+      </div>
+      <div class="nav-group">
+        <h2>策略</h2>
+        <a class="nav-link" href="#"><span>策略库</span></a>
+        <a class="nav-link" href="#"><span>回测运行</span></a>
+      </div>
+      <div class="nav-group">
+        <h2>因子</h2>
+        <a class="nav-link" href="#"><span>因子库</span></a>
+        <a class="nav-link is-active" href="#"><span>因子工厂</span><b>3</b></a>
+      </div>
+      <div class="nav-group">
+        <h2>数据</h2>
+        <a class="nav-link" href="#"><span>PIT 清洗中心</span></a>
+        <a class="nav-link" href="#"><span>数据快照</span></a>
+      </div>
+    </aside>
+
+    <main>
+      <div class="page">
+        <section class="hero">
+          <div>
+            <p class="eyebrow">闭环因子工厂</p>
+            <h1>因子任务生产台</h1>
+            <p>按 B1 挖掘、B2 改造、B3 组合、B4 检疫发布组织因子生产；候选先完成打分送检，再由检疫准入报告决定是否一键发布到 L2 或 L3。</p>
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary" type="button">启动自动化</button>
+            <button class="btn" type="button">暂停自动化</button>
+            <button class="btn" type="button">立即运行</button>
+          </div>
+        </section>
+
+        <section class="status-strip" aria-label="因子工厂状态">
+          <span class="chip chip-success">自动化 ACTIVE</span>
+          <span>每日计划：GMT+8 14:00</span>
+          <span>下次批次：2026-05-19 14:00</span>
+          <span class="chip chip-info">立即运行不改变自动化状态</span>
+          <span class="chip chip-warning">PIT 非 Full Ready 进入审计，不单独拒绝发布</span>
+        </section>
+
+        <section class="publish-queue" data-publishable-count="3" aria-label="可发布因子名单">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">优先处理</p>
+              <h2>可发布因子名单</h2>
+              <p>检疫准入报告通过后，改造因子发布入 L2，组合因子发布入 L3；操作会保留血缘、算子链与审计摘要。</p>
+            </div>
+            <button class="btn btn-primary" type="button">一键发布</button>
+          </div>
+          <div class="publish-list">
+            <article class="publish-card">
+              <header>
+                <div>
+                  <strong class="mono">l2_mom_resid_vol_zrank</strong>
+                  <p>目标 L2 · 父因子 s_mom_12m1m_rank · MAD / N / Z / T</p>
+                </div>
+                <div class="score-pill">86</div>
+              </header>
+              <footer>
+                <span class="chip chip-success">检疫 PASS</span>
+                <button class="btn js-open-factor-modal" type="button" data-factor="l2_mom_resid_vol_zrank" data-result="PASS" data-reason="送检阈值全部通过，检疫报告允许发布入 L2。">详情</button>
+              </footer>
+            </article>
+            <article class="publish-card">
+              <header>
+                <div>
+                  <strong class="mono">l3_quality_momentum_blend</strong>
+                  <p>目标 L3 · 父因子 2 个 · 投资逻辑与正交性审计齐全</p>
+                </div>
+                <div class="score-pill">79</div>
+              </header>
+              <footer>
+                <span class="chip chip-success">准入 PASS</span>
+                <button class="btn js-open-factor-modal" type="button" data-factor="l3_quality_momentum_blend" data-result="PASS" data-reason="父因子、投资逻辑与正交性审计齐全，可发布入 L3。">详情</button>
+              </footer>
+            </article>
+            <article class="publish-card">
+              <header>
+                <div>
+                  <strong class="mono">l2_value_quality_sector_z</strong>
+                  <p>目标 L2 · 质量/估值 PIT lane · Coverage 97.8%</p>
+                </div>
+                <div class="score-pill">82</div>
+              </header>
+              <footer>
+                <span class="chip chip-warning">仓位限制</span>
+                <button class="btn js-open-factor-modal" type="button" data-factor="l2_value_quality_sector_z" data-result="WARN" data-reason="检疫通过但需要写入仓位限制与观察期。">详情</button>
+              </footer>
+            </article>
+          </div>
+        </section>
+
+        <section class="summary-grid" aria-label="工厂运行摘要">
+          <article class="metric">
+            <span>任务池</span>
+            <strong>18</strong>
+            <p>挖掘、改造、组合任务</p>
+          </article>
+          <article class="metric">
+            <span>候选交付</span>
+            <strong>126</strong>
+            <p>本批任务最终候选</p>
+          </article>
+          <article class="metric">
+            <span>已送检</span>
+            <strong>42</strong>
+            <p>进入检疫候选池</p>
+          </article>
+          <article class="metric">
+            <span>发布准入</span>
+            <strong>9</strong>
+            <p>L2/L3 可发布项</p>
+          </article>
+          <article class="metric">
+            <span>历史拒绝</span>
+            <strong>214</strong>
+            <p>可搜索拒绝原因</p>
+          </article>
+          <article class="metric">
+            <span>硬阻断</span>
+            <strong>7</strong>
+            <p>泄露、未来函数、OOS 衰减</p>
+          </article>
+        </section>
+
+        <section class="layers" aria-label="因子工厂三层工作台">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p>第一层</p>
+                <h2>因子任务</h2>
+              </div>
+              <span class="chip chip-info">状态口径统一</span>
+            </div>
+            <div class="panel-body">
+              <div class="task-family-tabs">
+                <div class="family-tab is-active" style="--family-color:#1f877b">
+                  <strong>因子挖掘类</strong>
+                  <small>价格型、质量/估值型、情绪/微观型、宏观/衍生品型 PIT lane 生成 L1 基础候选。</small>
+                </div>
+                <div class="family-tab" style="--family-color:#4c78c7">
+                  <strong>因子改造类</strong>
+                  <small>基于 L1 执行 MAD、残差/中性化、ZScore、TsRank/Rank 算子链。</small>
+                </div>
+                <div class="family-tab" style="--family-color:#7b61b5">
+                  <strong>因子组合类</strong>
+                  <small>从已准入 L2 或显式豁免来源构建 L3 组合候选。</small>
+                </div>
+              </div>
+
+              <div class="task-board">
+                <article class="task-row">
+                  <div>
+                    <strong>2026-05-18 价格型基础因子挖掘</strong>
+                    <p>动量、反转、波动、流动性；10Y 价格与样本池准入通过。</p>
+                    <div class="progress"><span style="width:100%"></span></div>
+                  </div>
+                  <span class="chip chip-success">已完成</span>
+                  <div class="task-delivery">
+                    <strong>64</strong>
+                    <p>交付候选</p>
+                  </div>
+                </article>
+
+                <article class="task-row">
+                  <div>
+                    <strong>2026-05-18 质量/估值基础因子挖掘</strong>
+                    <p>ROE、FCF yield、BP、EP；3 个字段缺少 available_at，保留待校准审计。</p>
+                    <div class="progress"><span style="width:72%"></span></div>
+                  </div>
+                  <span class="chip chip-warning">进行中</span>
+                  <div class="task-delivery">
+                    <strong>34</strong>
+                    <p>当前候选</p>
+                  </div>
+                </article>
+
+                <article class="task-row">
+                  <div>
+                    <strong>2026-05-19 残差动量改造</strong>
+                    <p class="mono">s_mom_12m1m_rank -> l2_mom_resid_vol_zrank</p>
+                    <div class="operator-chain">
+                      <span class="op">MAD</span>
+                      <span class="op">N</span>
+                      <span class="op">Z</span>
+                      <span class="op">T</span>
+                    </div>
+                  </div>
+                  <span class="chip">待开始</span>
+                  <div class="task-delivery">
+                    <strong>18</strong>
+                    <p>预计候选</p>
+                  </div>
+                </article>
+
+                <article class="task-row">
+                  <div>
+                    <strong>2026-05-19 质量驱动动量组合</strong>
+                    <p>父因子 l2_mom_resid_vol_zrank / l2_qlty_roe_sector_z；组合逻辑进入 B3。</p>
+                    <div class="operator-chain">
+                      <span class="op">风格复合</span>
+                      <span class="op">风险调节</span>
+                      <span class="op">背离惩罚</span>
+                    </div>
+                  </div>
+                  <span class="chip">待开始</span>
+                  <div class="task-delivery">
+                    <strong>9</strong>
+                    <p>预计候选</p>
+                  </div>
+                </article>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p>第二层</p>
+                <h2>因子打分</h2>
+              </div>
+              <span class="chip chip-warning">默认收起</span>
+            </div>
+            <div class="panel-body">
+              <div class="score-card-list" aria-label="因子打分收起卡片">
+                <article class="score-card is-collapsed">
+                  <div class="score-card-main">
+                    <div>
+                      <strong class="mono">l2_mom_resid_vol_zrank</strong>
+                      <p>2026-05-18 · L2 · 分数 86</p>
+                      <div class="card-meta">
+                        <span class="chip chip-success">PASS</span>
+                        <span class="chip chip-info">RankIC 0.031</span>
+                        <span class="chip chip-info">Coverage 97.3%</span>
+                      </div>
+                    </div>
+                    <div class="score-pill">86</div>
+                  </div>
+                  <div class="card-actions">
+                    <button class="btn js-open-factor-modal" type="button" data-factor="l2_mom_resid_vol_zrank" data-result="PASS" data-reason="送检阈值全部通过，检疫报告允许发布入 L2。">详情</button>
+                  </div>
+                </article>
+
+                <article class="score-card is-collapsed">
+                  <div class="score-card-main">
+                    <div>
+                      <strong class="mono">l3_quality_momentum_blend</strong>
+                      <p>2026-05-18 · L3 · 分数 79</p>
+                      <div class="card-meta">
+                        <span class="chip chip-warning">WARN</span>
+                        <span class="chip chip-info">RankIC 0.027</span>
+                        <span class="chip chip-info">IR +0.06</span>
+                      </div>
+                    </div>
+                    <div class="score-pill">79</div>
+                  </div>
+                  <div class="card-actions">
+                    <button class="btn js-open-factor-modal" type="button" data-factor="l3_quality_momentum_blend" data-result="WARN" data-reason="极端压力表现一般，发布前需写入仓位限制。">详情</button>
+                  </div>
+                </article>
+
+                <article class="score-card is-collapsed">
+                  <div class="score-card-main">
+                    <div>
+                      <strong class="mono">macro_option_skew_proxy</strong>
+                      <p>2026-05-17 · L1 · 分数 31</p>
+                      <div class="card-meta">
+                        <span class="chip chip-danger">FAIL</span>
+                        <span class="chip chip-info">Coverage 61.4%</span>
+                        <span class="chip chip-warning">不送检</span>
+                      </div>
+                    </div>
+                    <div class="score-pill" style="background:var(--gsl-color-danger-soft);color:var(--gsl-color-danger)">31</div>
+                  </div>
+                  <div class="card-actions">
+                    <button class="btn js-open-factor-modal" type="button" data-factor="macro_option_skew_proxy" data-result="FAIL" data-reason="个股 option skew 缺少可回放 PIT 证据，仅允许 benchmark proxy 观察。">详情</button>
+                  </div>
+                </article>
+              </div>
+
+              <div class="threshold-table" aria-label="送检阈值">
+                <div class="threshold-row is-head">
+                  <span>类别</span>
+                  <span>指标</span>
+                  <span>阈值</span>
+                  <span>送检判断</span>
+                </div>
+                <div class="threshold-row">
+                  <span>效益</span>
+                  <b>RankIC</b>
+                  <span>&gt; 0.025</span>
+                  <span>核心收益能力</span>
+                </div>
+                <div class="threshold-row">
+                  <span>效益</span>
+                  <b>RankICIR</b>
+                  <span>&gt; 1.5</span>
+                  <span>收益稳定性</span>
+                </div>
+                <div class="threshold-row">
+                  <span>风险</span>
+                  <b>Style_Corr</b>
+                  <span>&lt; 0.3</span>
+                  <span>必须已执行 N 中性化</span>
+                </div>
+                <div class="threshold-row">
+                  <span>风险</span>
+                  <b>Max_Drawdown</b>
+                  <span>&lt; 15%</span>
+                  <span>单因子历史最差表现</span>
+                </div>
+                <div class="threshold-row">
+                  <span>成本</span>
+                  <b>Turnover_Rate</b>
+                  <span>&lt; 20%</span>
+                  <span>单周换手约束</span>
+                </div>
+                <div class="threshold-row">
+                  <span>质量</span>
+                  <b>Coverage</b>
+                  <span>&gt; 95%</span>
+                  <span>样本代表性</span>
+                </div>
+              </div>
+
+              <div class="panel-action-bar" aria-label="送检操作">
+                <p>自动化任务完成后自动送检；人工运行只需统一触发一次。</p>
+                <button class="btn btn-primary" type="button">一键送检</button>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p>第三层</p>
+                <h2>因子检疫</h2>
+              </div>
+              <span class="chip chip-success">结果收起</span>
+            </div>
+            <div class="panel-body">
+              <div class="search-row">
+                <input class="field" type="date" value="2026-05-18" aria-label="日期" />
+                <input class="field" value="l2_mom" aria-label="因子名" />
+                <select class="field" aria-label="结果">
+                  <option>全部结果</option>
+                  <option>PASS</option>
+                  <option>WARN</option>
+                  <option>FAIL</option>
+                </select>
+                <button class="btn" type="button">查询</button>
+              </div>
+
+              <div class="quarantine-result-list" aria-label="因子检疫结果列表">
+                <div class="quarantine-list-row is-head">
+                  <span>日期</span>
+                  <span>因子名</span>
+                  <span>结果</span>
+                  <span>原因</span>
+                  <span>操作</span>
+                </div>
+                <article class="quarantine-list-row">
+                  <span>2026-05-18</span>
+                  <strong class="mono">l2_mom_resid_vol_zrank</strong>
+                  <span class="chip chip-success">PASS</span>
+                  <p>样本外与正交性通过，PIT 完整性 99.4%。</p>
+                  <button class="btn js-open-factor-modal" type="button" data-factor="l2_mom_resid_vol_zrank" data-result="PASS" data-reason="OOS 衰减 12%，正交性 0.22，PIT 完整性 99.4%，准入报告允许发布。">详情</button>
+                </article>
+                <article class="quarantine-list-row">
+                  <span>2026-05-18</span>
+                  <strong class="mono">l3_quality_momentum_blend</strong>
+                  <span class="chip chip-warning">WARN</span>
+                  <p>极端压力表现一般，发布时需限制初始仓位。</p>
+                  <button class="btn js-open-factor-modal" type="button" data-factor="l3_quality_momentum_blend" data-result="WARN" data-reason="极端压力 -18.5%，2022 年表现一般；发布时需限制初始仓位。">详情</button>
+                </article>
+                <article class="quarantine-list-row">
+                  <span>2026-05-17</span>
+                  <strong class="mono">l2_turnover_alpha_fast</strong>
+                  <span class="chip chip-danger">FAIL</span>
+                  <p>换手率 45%，调仓过频，摩擦成本过大。</p>
+                  <button class="btn js-open-factor-modal" type="button" data-factor="l2_turnover_alpha_fast" data-result="FAIL" data-reason="换手率 45%，调仓过频，摩擦成本过大，拒绝上线。">详情</button>
+                </article>
+                <article class="quarantine-list-row">
+                  <span>2026-05-17</span>
+                  <strong class="mono">macro_option_skew_proxy</strong>
+                  <span class="chip chip-danger">FAIL</span>
+                  <p>个股 option skew 不可回放，PIT 证据不足。</p>
+                  <button class="btn js-open-factor-modal" type="button" data-factor="macro_option_skew_proxy" data-result="FAIL" data-reason="个股 option skew 不可回放，PIT 证据不足，仅保留 benchmark proxy 观察。">详情</button>
+                </article>
+              </div>
+
+              <div class="history-brief">
+                <strong>历史检疫可查</strong>
+                <p>可按表达式、因子 ID、父因子、拒绝原因、规则版本、批次日期搜索历史拒绝记录，避免同类因子重复送检。</p>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <section class="admission" aria-label="发布准入规则">
+          <article class="admission-card">
+            <span class="chip chip-success">L2 发布准入</span>
+            <h3>改造因子入库</h3>
+            <p>改造因子检疫通过后发布入 L2 改造库，保留 `TRANSFORMED_FROM` 血缘和完整 `operator_chain_json`。</p>
+          </article>
+          <article class="admission-card">
+            <span class="chip chip-success">L3 发布准入</span>
+            <h3>组合因子入库</h3>
+            <p>组合因子检疫通过后发布入 L3 组合库，保留父因子、投资逻辑、相关性与正交性审计。</p>
+          </article>
+          <article class="admission-card">
+            <span class="chip chip-warning">历史检疫</span>
+            <h3>拒绝记录复盘</h3>
+            <p>历史拒绝因子可按表达式、任务类、目标层、规则版本和拒绝原因搜索，复核后可重跑或归档。</p>
+          </article>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div class="modal-backdrop factor-detail-modal" hidden role="dialog" aria-modal="true" aria-labelledby="factor-detail-title">
+    <section class="factor-modal">
+      <header class="modal-head">
+        <div>
+          <p class="eyebrow">因子详情</p>
+          <h2 id="factor-detail-title" class="mono">l2_mom_resid_vol_zrank</h2>
+          <p id="factor-detail-reason">OOS 衰减 12%，正交性 0.22，PIT 完整性 99.4%，准入报告允许发布。</p>
+        </div>
+        <div class="actions">
+          <span id="factor-detail-result" class="chip chip-success">PASS</span>
+          <button class="btn js-close-factor-modal" type="button">关闭</button>
+        </div>
+      </header>
+      <div class="modal-body">
+        <div class="modal-summary">
+          <div>
+            <span>送检日期</span>
+            <strong>2026-05-18</strong>
+          </div>
+          <div>
+            <span>因子名</span>
+            <strong id="factor-detail-name" class="mono">l2_mom_resid_vol_zrank</strong>
+          </div>
+          <div>
+            <span>目标层</span>
+            <strong>L2 / L3</strong>
+          </div>
+          <div>
+            <span>准入结论</span>
+            <strong>通过检疫后可发布；WARN 项需写入限制条件。</strong>
+          </div>
+        </div>
+
+        <div class="factor-modal-grid">
+          <section class="modal-section" aria-label="因子打分明细">
+            <h3>因子打分明细</h3>
+            <div class="metric-groups">
+              <div class="metric-group">
+                <strong>核心预测能力 <span class="chip chip-success">PASS</span></strong>
+                <div class="metric-list">
+                  <span class="metric-line">RankIC <b>0.031</b></span>
+                  <span class="metric-line">RankICIR <b>1.82</b></span>
+                  <span class="metric-line">单调性 <b>Q1-Q5 稳定</b></span>
+                </div>
+              </div>
+              <div class="metric-group">
+                <strong>稳定性与换手 <span class="chip chip-warning">WATCH</span></strong>
+                <div class="metric-list">
+                  <span class="metric-line">自相关 <b>0.68</b></span>
+                  <span class="metric-line">IC Decay T+21 <b>0.018</b></span>
+                  <span class="metric-line">周换手 <b>16%</b></span>
+                </div>
+              </div>
+              <div class="metric-group">
+                <strong>风险与正交 <span class="chip chip-success">PASS</span></strong>
+                <div class="metric-list">
+                  <span class="metric-line">Style_Corr <b>0.22</b></span>
+                  <span class="metric-line">Specific IC <b>+0.07</b></span>
+                  <span class="metric-line">Max Drawdown <b>11.8%</b></span>
+                </div>
+              </div>
+              <div class="metric-group">
+                <strong>数据健康度 <span class="chip chip-success">PASS</span></strong>
+                <div class="metric-list">
+                  <span class="metric-line">Coverage <b>97.3%</b></span>
+                  <span class="metric-line">Missing Ratio <b>0.6%</b></span>
+                  <span class="metric-line">PIT 时间戳 <b>通过</b></span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="modal-section" aria-label="因子检疫明细">
+            <h3>因子检疫明细</h3>
+            <div class="test-lane" aria-label="五大检疫检测">
+              <div class="test-card">
+                <strong>样本外失效</strong>
+                <p>OOS/IS &gt; 60%，最近 3-6 个月未见数据闭合。</p>
+              </div>
+              <div class="test-card">
+                <strong>极端情景压力</strong>
+                <p>2020-03、2022 回放；Q5 回撤不超过 SPY 1.2 倍。</p>
+              </div>
+              <div class="test-card">
+                <strong>正交与共线</strong>
+                <p>Incremental IR &gt; 0.05，残差独立性有效。</p>
+              </div>
+              <div class="test-card">
+                <strong>模拟盘数据质量</strong>
+                <p>PIT 完整性、未来数据嫌疑、断流与逻辑跳空。</p>
+              </div>
+              <div class="test-card">
+                <strong>成本与容量</strong>
+                <p>换手、滑点、ADV 与容量化约束。</p>
+              </div>
+            </div>
+
+            <div class="admission-report" aria-label="准入报告">
+              <div class="report-row is-head">
+                <span>检测项</span>
+                <span>结果</span>
+                <span>状态</span>
+                <span>Agent D 建议</span>
+              </div>
+              <div class="report-row">
+                <strong>OOS 衰减</strong>
+                <span>12%</span>
+                <span class="chip chip-success">PASS</span>
+                <p>样本内外一致性极高，可进入发布准入。</p>
+              </div>
+              <div class="report-row">
+                <strong>正交性</strong>
+                <span>0.22</span>
+                <span class="chip chip-success">PASS</span>
+                <p>与现有动量簇相关性低，增量信息有效。</p>
+              </div>
+              <div class="report-row">
+                <strong>极端压力</strong>
+                <span>-18.5%</span>
+                <span class="chip chip-warning">WARN</span>
+                <p>2022 年表现一般，发布时需限制初始仓位。</p>
+              </div>
+              <div class="report-row">
+                <strong>换手率</strong>
+                <span>45%</span>
+                <span class="chip chip-danger">FAIL</span>
+                <p>拒绝上线：调仓过频，摩擦成本过大。</p>
+              </div>
+              <div class="report-row">
+                <strong>PIT 完整性</strong>
+                <span>99.4%</span>
+                <span class="chip chip-success">PASS</span>
+                <p>下午收盘后可按时完成计算，未发现未来数据依赖。</p>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const factorModal = document.querySelector(".factor-detail-modal");
+    const factorTitle = document.querySelector("#factor-detail-title");
+    const factorName = document.querySelector("#factor-detail-name");
+    const factorReason = document.querySelector("#factor-detail-reason");
+    const factorResult = document.querySelector("#factor-detail-result");
+
+    function setResultChip(result) {
+      factorResult.className = "chip";
+      if (result === "PASS") factorResult.classList.add("chip-success");
+      if (result === "WARN") factorResult.classList.add("chip-warning");
+      if (result === "FAIL") factorResult.classList.add("chip-danger");
+      factorResult.textContent = result;
+    }
+
+    document.querySelectorAll(".js-open-factor-modal").forEach((button) => {
+      button.addEventListener("click", () => {
+        const factor = button.dataset.factor || "factor";
+        const result = button.dataset.result || "PASS";
+        const reason = button.dataset.reason || "检疫明细已生成。";
+        factorTitle.textContent = factor;
+        factorName.textContent = factor;
+        factorReason.textContent = reason;
+        setResultChip(result);
+        factorModal.hidden = false;
+      });
+    });
+
+    document.querySelectorAll(".js-close-factor-modal").forEach((button) => {
+      button.addEventListener("click", () => {
+        factorModal.hidden = true;
+      });
+    });
+
+    factorModal.addEventListener("click", (event) => {
+      if (event.target === factorModal) {
+        factorModal.hidden = true;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,136 @@
+{
+  "capturedAt": "2026-05-18T10:12:57.058Z",
+  "url": "http://127.0.0.1:4173/?v=1779099173342#/factors/factory",
+  "screenshots": {
+    "main": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factor-factory-seven-gate-fix-20260518\\factory-seven-gate-main.png",
+    "modal": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factor-factory-seven-gate-fix-20260518\\factory-seven-gate-modal.png"
+  },
+  "geometry": {
+    "url": "http://127.0.0.1:4173/?v=1779099173342#/factors/factory",
+    "viewport": {
+      "width": 1960,
+      "height": 1200
+    },
+    "scroll": {
+      "documentWidth": 1960,
+      "bodyWidth": 1960,
+      "horizontalOverflow": false
+    },
+    "panels": {
+      "tasks": {
+        "x": 272,
+        "y": 855,
+        "width": 546,
+        "height": 760,
+        "bottom": 1615,
+        "right": 818
+      },
+      "scoring": {
+        "x": 832,
+        "y": 855,
+        "width": 496,
+        "height": 760,
+        "bottom": 1615,
+        "right": 1328
+      },
+      "quarantine": {
+        "x": 1342,
+        "y": 855,
+        "width": 586,
+        "height": 760,
+        "bottom": 1615,
+        "right": 1928
+      },
+      "publish": {
+        "x": 272,
+        "y": 266,
+        "width": 1656,
+        "height": 441,
+        "bottom": 707,
+        "right": 1928
+      }
+    },
+    "panelHeightsOk": true,
+    "scoring": {
+      "cardCount": 0,
+      "sendDisabled": true,
+      "text": "B2 因子打分因子打分默认收起暂无待送检候选；已送检因子已移至 B3 因子检疫列表。一键送检"
+    },
+    "quarantine": {
+      "rowCount": 24,
+      "headerText": "B3 因子检疫因子检疫显示 24/24",
+      "dateValue": "2026-05-15",
+      "firstDates": [
+        "2026-05-15",
+        "2026-05-15",
+        "2026-05-15",
+        "2026-05-15",
+        "2026-05-15",
+        "2026-05-15",
+        "2026-05-15",
+        "2026-05-15",
+        "2026-05-15",
+        "2026-05-15"
+      ],
+      "sortedDesc": true,
+      "detailButtonNowrap": true
+    },
+    "publish": {
+      "visible": true,
+      "cardCount": 4,
+      "text": "B4 发布准入可发布因子名单一键发布PASSL1Return(Close, 5)算子链：未记录详情PASSL1Return(Close, 252)算子链：未记录详情PASSL1Return(Close, 3)算子链：未记录详情PASSL1Return(Close, 63)算子链：未记录详情",
+      "hasL1": true
+    }
+  },
+  "modal": {
+    "visible": true,
+    "rect": {
+      "width": 1120,
+      "height": 500,
+      "x": 420,
+      "y": 350
+    },
+    "bodyScrollHeight": 404,
+    "bodyClientHeight": 404,
+    "hasPit": true,
+    "hasPass": true,
+    "textSample": "2026-05-15 · L1Return(Close, 5)PASS关闭因子打分明细PIT 准入审计PIT 准入审计 · 通过100.0%数据覆盖率 · 覆盖充分0.0%缺失率 · 仅作数据质量校准F1 原始因子水源角色 · 不参与 RankIC 优选因子检疫明细检测项结果状态Agent D 建议PIT 准入审计PIT 通过PASSF1 原始库候选仅受 PIT 准入审计约束，收益阈值不参与发布阻断。正交性0.24PASS与既有因子簇相关性低，增量信息有效。极端压力62.41%FAIL拒绝上线：极端压力回撤超过 SPY 1.2 倍。换手率34.0%WARN换手偏高，发布后需成本敏感观察。PIT 完整性100.0%PASS收盘后可按时完成计算，未发现未来数据依赖。"
+  },
+  "gates": [
+    {
+      "requirement": "B3 default shows full submitted history",
+      "selector": ".factor-factory-result-row:not(.factor-factory-result-row--head)",
+      "evidence": "24/24 rows"
+    },
+    {
+      "requirement": "latest completed scoring date selected without pre-filtering",
+      "selector": "input[type=date]",
+      "evidence": "2026-05-15; header B3 因子检疫因子检疫显示 24/24"
+    },
+    {
+      "requirement": "submitted factors absent from B2 scoring",
+      "selector": ".factor-factory-score-card",
+      "evidence": "0 cards; send disabled true"
+    },
+    {
+      "requirement": "L1 publishable factors appear in B4",
+      "selector": ".factor-factory-publish-card",
+      "evidence": "4 cards; L1 true"
+    },
+    {
+      "requirement": "fixed-height panels and no horizontal scroll",
+      "selector": "[data-factory-section]",
+      "evidence": "{\"panelHeightsOk\":true,\"horizontalOverflow\":false}"
+    },
+    {
+      "requirement": "quarantine detail action stays on one line",
+      "selector": ".factor-factory-result-row button",
+      "evidence": "nowrap true"
+    },
+    {
+      "requirement": "detail modal shows scoring/quarantine report context",
+      "selector": ".factor-detail-modal",
+      "evidence": "{\"hasPit\":true,\"hasPass\":true,\"rect\":{\"width\":1120,\"height\":500,\"x\":420,\"y\":350}}"
+    }
+  ]
+}

@@ -20,6 +20,10 @@ const TEXT = {
   batchFill: '批量补齐',
   copy: '按策略与参数版本归档回测证据，集中呈现收益、回撤、夏普与长周期覆盖。',
   diagnostics: '运行诊断',
+  resumeAll: '\u4e00\u952e\u6062\u590d',
+  resumeAllDone: (count: number) => `\u5df2\u6062\u590d ${count} \u4e2a\u4e2d\u65ad\u56de\u6d4b`,
+  resumeAllFailed: (count: number, message: string) => `${count} \u4e2a\u56de\u6d4b\u6062\u590d\u5931\u8d25\uff1a${message}`,
+  resumeAllRunning: '\u6062\u590d\u4e2d',
   deleteConfirm: '确认删除',
   deleteTitle: '删除回测',
   empty: '暂无回测任务。先 materialize 一个策略再回到这里。',
@@ -55,6 +59,12 @@ type DeleteState = {
   busy: boolean;
   error: string | null;
   run: ApiBacktestRunListItem | null;
+};
+
+type ResumeAllState = {
+  busy: boolean;
+  error: string | null;
+  message: string | null;
 };
 
 function isAbortError(caught: unknown): boolean {
@@ -131,6 +141,18 @@ function statusTone(status: string): 'success' | 'warning' | 'danger' | 'neutral
     return 'success';
   }
   return 'neutral';
+}
+
+function isInterruptedRun(run: ApiBacktestRunListItem): boolean {
+  return String(run.status ?? '').toUpperCase() === 'INTERRUPTED';
+}
+
+function createBacktestResumeIdempotencyKey(runId: string): string {
+  const randomPart =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `runs-index-resume-${runId}-${randomPart}`;
 }
 
 function evidenceTone(status: StrategyEvidenceStatus): 'success' | 'warning' | 'danger' {
@@ -370,6 +392,31 @@ function detailToListItem(detail: ApiBacktestRunDetail, task: SmartEvidenceTask)
     trades_count: detail.trades_count,
     updated_at: detail.updated_at,
     warnings: detail.warnings,
+  };
+}
+
+function mergeRunListItemWithDetail(
+  item: ApiBacktestRunListItem,
+  detail: ApiBacktestRunDetail,
+): ApiBacktestRunListItem {
+  return {
+    ...item,
+    completed_at: detail.completed_at ?? item.completed_at,
+    created_at: detail.created_at ?? item.created_at,
+    data_segment_type: detail.data_segment_type ?? item.data_segment_type,
+    end_date: detail.end_date ?? item.end_date,
+    is_permanent: detail.is_permanent ?? item.is_permanent,
+    metrics: detail.metrics ?? item.metrics,
+    parameter_version_id: detail.parameter_version_id ?? item.parameter_version_id,
+    preview: detail.preview ?? item.preview,
+    source_run_id: detail.source_run_id ?? item.source_run_id,
+    start_date: detail.start_date ?? item.start_date,
+    status: detail.status ?? item.status,
+    strategy_id: detail.strategy_id ?? item.strategy_id,
+    strategy_name: detail.strategy_name ?? item.strategy_name,
+    trades_count: detail.trades_count ?? item.trades_count,
+    updated_at: detail.updated_at ?? item.updated_at,
+    warnings: detail.warnings ?? item.warnings,
   };
 }
 
@@ -862,6 +909,7 @@ export function RunsIndexPage(): JSX.Element {
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [deleteState, setDeleteState] = useState<DeleteState>({ busy: false, error: null, run: null });
+  const [resumeAllState, setResumeAllState] = useState<ResumeAllState>({ busy: false, error: null, message: null });
 
   useEffect(() => {
     let cancelled = false;
@@ -940,6 +988,7 @@ export function RunsIndexPage(): JSX.Element {
       ),
     [permanentOnly, query, runs, showTemporary],
   );
+  const interruptedRecentRuns = useMemo(() => recentRuns.filter(isInterruptedRun), [recentRuns]);
   const headingMetrics = useMemo(
     () => ({
       groups: unfilteredGroups.length,
@@ -1099,6 +1148,52 @@ export function RunsIndexPage(): JSX.Element {
     }
   }
 
+  async function resumeInterruptedRuns(): Promise<void> {
+    if (resumeAllState.busy || interruptedRecentRuns.length === 0) {
+      return;
+    }
+
+    const targets = interruptedRecentRuns;
+    setResumeAllState({ busy: true, error: null, message: null });
+
+    const results = await Promise.allSettled(
+      targets.map((run) => api.resumeBacktestRun(run.id, createBacktestResumeIdempotencyKey(run.id))),
+    );
+    const resumedDetails = results
+      .filter((result): result is PromiseFulfilledResult<ApiBacktestRunDetail> => result.status === 'fulfilled')
+      .map((result) => result.value);
+    const detailById = new Map(resumedDetails.map((detail) => [detail.id, detail]));
+
+    if (detailById.size > 0) {
+      setRuns((current) =>
+        current.map((run) => {
+          const detail = detailById.get(run.id);
+          return detail ? mergeRunListItemWithDetail(run, detail) : run;
+        }),
+      );
+      setSelectedDetail((current) => {
+        if (!current) {
+          return current;
+        }
+        const detail = detailById.get(current.id);
+        return detail ? { ...current, ...detail } : current;
+      });
+      if (selectedRunId && detailById.has(selectedRunId)) {
+        setDetailError(null);
+      }
+    }
+
+    const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+    const firstFailure = failures[0]?.reason;
+    setResumeAllState({
+      busy: false,
+      error: failures.length
+        ? TEXT.resumeAllFailed(failures.length, firstFailure instanceof Error ? firstFailure.message : String(firstFailure))
+        : null,
+      message: resumedDetails.length ? TEXT.resumeAllDone(resumedDetails.length) : null,
+    });
+  }
+
   return (
     <div className="runs-index-page" data-page-root="runs-index">
       <section className="runs-page-heading">
@@ -1232,6 +1327,30 @@ export function RunsIndexPage(): JSX.Element {
                     <h2>{TEXT.recentTitle}</h2>
                     <p>按完成时间记录最新回测，保留审计与复核入口。</p>
                   </div>
+                  {interruptedRecentRuns.length || resumeAllState.message || resumeAllState.error ? (
+                    <div className="runs-recent-actions">
+                      {resumeAllState.message ? (
+                        <span className="runs-recent-action-note" role="status">
+                          {resumeAllState.message}
+                        </span>
+                      ) : null}
+                      {resumeAllState.error ? (
+                        <span className="runs-recent-action-note runs-recent-action-note--error" role="alert">
+                          {resumeAllState.error}
+                        </span>
+                      ) : null}
+                      {interruptedRecentRuns.length ? (
+                        <button
+                          className="action-button runs-recent-resume"
+                          disabled={resumeAllState.busy}
+                          onClick={() => void resumeInterruptedRuns()}
+                          type="button"
+                        >
+                          {resumeAllState.busy ? TEXT.resumeAllRunning : TEXT.resumeAll}
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="runs-recent-table" role="table" aria-label="最近运行表">
                   <div className="runs-recent-grid runs-recent-grid--header header" role="row">

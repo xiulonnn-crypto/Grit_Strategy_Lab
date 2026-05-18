@@ -1,0 +1,136 @@
+[
+  {
+    "viewport": {
+      "name": "1960",
+      "width": 1960,
+      "height": 1200
+    },
+    "screenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factor-factory-review-truncation-20260518\\factory-1960-after.png",
+    "audit": {
+      "url": "http://127.0.0.1:4173/?v=1779094457568#/factors/factory",
+      "title": "因子工厂",
+      "width": 1960,
+      "scrollWidth": 1960,
+      "noHorizontalScroll": true,
+      "panels": [
+        {
+          "section": "tasks",
+          "panelHeight": 760,
+          "panelClientHeight": 758,
+          "panelScrollHeight": 758,
+          "panelOverflowY": "hidden",
+          "panelDisplay": "grid",
+          "bodyClientHeight": 682,
+          "bodyScrollHeight": 815,
+          "bodyOverflowY": "auto",
+          "bodyOversizedAgainstPanel": false
+        },
+        {
+          "section": "scoring",
+          "panelHeight": 760,
+          "panelClientHeight": 758,
+          "panelScrollHeight": 758,
+          "panelOverflowY": "hidden",
+          "panelDisplay": "grid",
+          "bodyClientHeight": 633,
+          "bodyScrollHeight": 633,
+          "bodyOverflowY": "auto",
+          "bodyOversizedAgainstPanel": false
+        },
+        {
+          "section": "quarantine",
+          "panelHeight": 760,
+          "panelClientHeight": 758,
+          "panelScrollHeight": 758,
+          "panelOverflowY": "hidden",
+          "panelDisplay": "grid",
+          "bodyClientHeight": 682,
+          "bodyScrollHeight": 682,
+          "bodyOverflowY": "auto",
+          "bodyOversizedAgainstPanel": false
+        }
+      ],
+      "rowIssues": [
+        {
+          "className": "factor-factory-result-row factor-factory-result-row--head",
+          "clientWidth": 493,
+          "scrollWidth": 493,
+          "overflows": false,
+          "text": "日期因子名结果原因操作"
+        }
+      ],
+      "resultBodyOverflow": {
+        "clientWidth": 527,
+        "scrollWidth": 527,
+        "overflows": false
+      }
+    }
+  },
+  {
+    "viewport": {
+      "name": "1366",
+      "width": 1366,
+      "height": 950
+    },
+    "screenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factor-factory-review-truncation-20260518\\factory-1366-after.png",
+    "audit": {
+      "url": "http://127.0.0.1:4173/?v=1779094459429#/factors/factory",
+      "title": "因子工厂",
+      "width": 1366,
+      "scrollWidth": 1366,
+      "noHorizontalScroll": true,
+      "panels": [
+        {
+          "section": "tasks",
+          "panelHeight": 640,
+          "panelClientHeight": 638,
+          "panelScrollHeight": 638,
+          "panelOverflowY": "hidden",
+          "panelDisplay": "grid",
+          "bodyClientHeight": 562,
+          "bodyScrollHeight": 791,
+          "bodyOverflowY": "auto",
+          "bodyOversizedAgainstPanel": false
+        },
+        {
+          "section": "scoring",
+          "panelHeight": 640,
+          "panelClientHeight": 638,
+          "panelScrollHeight": 638,
+          "panelOverflowY": "hidden",
+          "panelDisplay": "grid",
+          "bodyClientHeight": 513,
+          "bodyScrollHeight": 513,
+          "bodyOverflowY": "auto",
+          "bodyOversizedAgainstPanel": false
+        },
+        {
+          "section": "quarantine",
+          "panelHeight": 640,
+          "panelClientHeight": 638,
+          "panelScrollHeight": 638,
+          "panelOverflowY": "hidden",
+          "panelDisplay": "grid",
+          "bodyClientHeight": 562,
+          "bodyScrollHeight": 562,
+          "bodyOverflowY": "auto",
+          "bodyOversizedAgainstPanel": false
+        }
+      ],
+      "rowIssues": [
+        {
+          "className": "factor-factory-result-row factor-factory-result-row--head",
+          "clientWidth": 1015,
+          "scrollWidth": 1015,
+          "overflows": false,
+          "text": "日期因子名结果原因操作"
+        }
+      ],
+      "resultBodyOverflow": {
+        "clientWidth": 1049,
+        "scrollWidth": 1049,
+        "overflows": false
+      }
+    }
+  }
+]

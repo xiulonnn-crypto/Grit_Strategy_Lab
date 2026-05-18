@@ -2,7 +2,13 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
 import { formatDateTime, formatPercent, formatRatio } from '../lib/format';
-import { formatFactorDisplayName, formatFactorList } from '../lib/factor-display';
+import {
+  factorIdFromWeightKey,
+  formatFactorDisplayName,
+  formatFactorList,
+  formatFactorWeightLabel,
+  type FactorDisplayNameLookup,
+} from '../lib/factor-display';
 import { buildOptimizationConfigPath } from '../lib/optimization-routes';
 import { formatParameterLabel as formatSharedParameterLabel, formatParameterValue as formatSharedParameterValue } from '../lib/adapters';
 import { formatStrategyVersionTag, getStrategyDisplayName } from '../lib/strategy-version';
@@ -100,6 +106,7 @@ const PARAMETER_LABELS: Record<string, string> = {
   weights: '权重方案',
   directions: '方向设置',
   neutralization: '行业中性化',
+  neutralization_method: '中性化方法',
   pit_snapshot_refs: 'PIT 快照',
   dataset_snapshot_id: '数据集快照',
   fundamental_snapshot_id: '基本面快照',
@@ -117,11 +124,11 @@ const PARAMETER_LABELS: Record<string, string> = {
   lookback_months: '回看月数',
   skip_recent_months: '跳过最近月数',
   hold_rank_threshold: '保留排名阈值',
-  top_n: '入选数量',
+  top_n: '持仓数量',
   weighting_method: '权重方式',
   rebalance_anchor_dates: '调仓锚点',
   max_position_pct: '单票上限',
-  holding_count: '持仓数量',
+  holding_count: '实际持仓数量',
   lookback_days: '回看天数',
   signal_lookback_days: '信号观察天数',
   initial_position: '初始仓位',
@@ -172,6 +179,7 @@ const PARAMETER_ORDER: Record<string, number> = {
   weights: 192,
   directions: 193,
   neutralization: 194,
+  neutralization_method: 195,
   pit_snapshot_refs: 195,
   scoring_method: 196,
   max_position_pct: 200,
@@ -199,6 +207,8 @@ const HIDDEN_PARAMETER_KEYS = new Set([
   'dynamic_investment_metric_key',
   'dynamic_investment_rules',
   'preview',
+  'strategy_creation_risk',
+  'multi_factor_precheck',
 ]);
 
 const HIDDEN_HISTORY_PARAMETER_KEYS = new Set([
@@ -210,6 +220,9 @@ const HIDDEN_HISTORY_PARAMETER_KEYS = new Set([
   'dynamic_investment_proxy_key',
   'dynamic_investment_metric_key',
   'dynamic_investment_rules',
+  'preview',
+  'strategy_creation_risk',
+  'multi_factor_precheck',
 ]);
 
 const HISTORY_COMMENT_LABELS: Record<string, string> = {
@@ -308,12 +321,76 @@ function timeframeLabel(value: string): string {
   return map[value.toLowerCase()] ?? value;
 }
 
-function parameterLabel(key: string): string {
+function parameterOrder(key: string): number {
+  return factorIdFromWeightKey(key) ? (PARAMETER_ORDER.weights ?? 192) + 1 : (PARAMETER_ORDER[key] ?? 999);
+}
+
+function rememberFactorDisplayName(lookup: FactorDisplayNameLookup, factorId: unknown, name: unknown): void {
+  if (typeof factorId !== 'string' || !factorId.trim() || typeof name !== 'string' || !name.trim()) {
+    return;
+  }
+  lookup[factorId.trim()] = name.trim();
+}
+
+function collectFactorDisplayNames(value: unknown, lookup: FactorDisplayNameLookup): void {
+  if (!value || typeof value !== 'object') {
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectFactorDisplayNames(item, lookup));
+    return;
+  }
+
+  const record = value as Record<string, unknown>;
+  rememberFactorDisplayName(lookup, record.factor_id, record.name ?? record.factor_name ?? record.display_name ?? record.label);
+  Object.values(record).forEach((item) => collectFactorDisplayNames(item, lookup));
+}
+
+function buildFactorDisplayNames(
+  strategy: ApiStrategyDetail | null,
+  historyEntry?: EnrichedParameterHistoryEntry | null,
+): FactorDisplayNameLookup {
+  const lookup: FactorDisplayNameLookup = {};
+  collectFactorDisplayNames(strategy?.parameters, lookup);
+  collectFactorDisplayNames(strategy?.multi_factor_profile, lookup);
+  collectFactorDisplayNames(historyEntry?.parameters, lookup);
+  return lookup;
+}
+
+function parameterLabel(key: string, factorNames: FactorDisplayNameLookup = {}): string {
+  const factorWeightLabel = formatFactorWeightLabel(key, factorNames[factorIdFromWeightKey(key) ?? '']);
+  if (factorWeightLabel) {
+    return factorWeightLabel;
+  }
   if (PARAMETER_LABELS[key]) {
     return PARAMETER_LABELS[key];
   }
   const sharedLabel = formatSharedParameterLabel(key);
   return sharedLabel !== key ? sharedLabel : key.replace(/_/g, ' ');
+}
+
+function neutralizationStatusLabel(value: string | null | undefined): string | null {
+  const normalized = String(value ?? '').trim().toUpperCase();
+  if (!normalized) {
+    return null;
+  }
+  const map: Record<string, string> = {
+    EXECUTED: '已执行',
+    READY: '已就绪',
+    NOT_EXECUTED: '未执行',
+    NOT_EXECUTED_MISSING_INDUSTRY_PIT: '未执行：缺少 PIT 行业字段',
+    LOCAL_PENDING_API_PREVIEW: '等待预检',
+  };
+  return map[normalized] ?? '状态待确认';
+}
+
+function scoringMethodLabel(value: string | null | undefined): string {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  const map: Record<string, string> = {
+    zscore_weighted: '标准化加权',
+    rank_weighted: '排名加权',
+  };
+  return map[normalized] ?? formatSharedParameterValue(String(value ?? ''), 'scoring_method');
 }
 
 function historyCommentLabel(value: string | null | undefined): string {
@@ -346,10 +423,40 @@ function truncateText(value: string, maxLength = 68): string {
   return `${trimmed.slice(0, maxLength).trimEnd()}...`;
 }
 
-function historyChangeSummary(entry: EnrichedParameterHistoryEntry): string {
+function formatHistorySummaryLine(line: string, factorNames: FactorDisplayNameLookup): string {
+  return line
+    .replace(/\bfactor[_\s]+weight[_\s]+([a-z0-9]+(?:[_\s]+[a-z0-9]+)*)[_\s]+pct\b/gi, (_match, rawFactorId: string) => {
+      const factorId = rawFactorId.trim().toLowerCase().replace(/[_\s]+/g, '_');
+      return formatFactorWeightLabel(`factor_weight__${factorId}_pct`, factorNames[factorId]) ?? `因子权重 · ${formatFactorDisplayName(factorId, factorNames[factorId])}`;
+    })
+    .replace(/\bfactor[_\s]+ids\b/gi, '因子篮子')
+    .replace(/\bneutralization[_\s]+method\b/gi, '中性化方法')
+    .replace(/\bscoring[_\s]+method\b/gi, '打分方法')
+    .replace(/\brebalance[_\s]+frequency\b/gi, '再平衡频率')
+    .replace(/\bholding[_\s]+count\b/gi, '实际持仓数量')
+    .replace(/\btop[_\s]+n\b/gi, '持仓数量')
+    .replace(/\bweights\b/gi, '权重方案')
+    .replace(/\bdirections\b/gi, '方向设置')
+    .replace(/\bindustry\b/gi, '行业中性')
+    .replace(/\bzscore_weighted\b/gi, '标准化加权')
+    .replace(/\brank_weighted\b/gi, '排名加权')
+    .replace(/\bsemiannual\b/gi, '每半年')
+    .replace(/\bquarterly\b/gi, '每季度')
+    .replace(/\bmonthly\b/gi, '每月')
+    .replace(/\byearly\b/gi, '每年');
+}
+
+function formatHistorySummaryText(value: string, factorNames: FactorDisplayNameLookup): string {
+  return value
+    .split(/\r?\n/)
+    .map((line) => formatHistorySummaryLine(line, factorNames))
+    .join('\n');
+}
+
+function historyChangeSummary(entry: EnrichedParameterHistoryEntry, factorNames: FactorDisplayNameLookup = {}): string {
   const summary = readDisplayText(entry.change_summary);
   if (summary) {
-    return summary;
+    return formatHistorySummaryText(summary, factorNames);
   }
   const comment = readDisplayText(entry.comment);
   return comment ? historyCommentLabel(comment) : TEXT.historyChangeSummaryFallback;
@@ -426,6 +533,7 @@ function sourceTypeLabel(value: string | null | undefined): string {
     optimization: '优化候选',
     optimization_job: '优化作业',
     optimization_candidate: '优化候选',
+    optimization_promotion: '优化晋升',
     candidate: '优化候选',
     parameter_version: '参数版本',
   };
@@ -447,6 +555,7 @@ function sourceFieldLabel(key: string): string {
     parameter_version_id: '参数版本',
     source_parameter_version_id: '来源参数版本',
     base_parameter_version_id: '基准参数版本',
+    candidate_label: '候选标签',
   };
   return map[key] ?? key.replace(/_/g, ' ');
 }
@@ -602,7 +711,7 @@ function hasParameterValue(value: ParameterValue | undefined): boolean {
   return true;
 }
 
-function formatWeightRecord(record: Record<string, unknown>): string {
+function formatWeightRecord(record: Record<string, unknown>, factorNames: FactorDisplayNameLookup): string {
   const entries = Object.entries(record)
     .map(([factorId, weight]) => {
       const numeric = typeof weight === 'number' ? weight : Number(weight);
@@ -615,16 +724,21 @@ function formatWeightRecord(record: Record<string, unknown>): string {
     ? entries
         .map(({ factorId, numeric }) => {
           const pctValue = decimalScale ? numeric * 100 : numeric;
-          return `${formatFactorDisplayName(factorId)} ${Number(pctValue.toFixed(2))}%`;
+          return `${formatFactorDisplayName(factorId, factorNames[factorId])} ${Number(pctValue.toFixed(2))}%`;
         })
         .join('；')
     : '-';
 }
 
-function formatParameterValue(key: string, value: ParameterValue): string {
+function formatParameterValue(
+  key: string,
+  value: ParameterValue,
+  factorNames: FactorDisplayNameLookup = {},
+): string {
   if (value === null || value === undefined || value === '') return '-';
   if (key === 'strategy_type') return strategyTypeLabel(String(value));
   if (key === 'benchmark_symbol') return benchmarkLabel(String(value));
+  if (key === 'scoring_method') return scoringMethodLabel(String(value));
   if (key === 'rebalance_frequency' || key === 'investment_frequency') return rebalanceLabel(String(value));
   if (key === 'observation_timeframe') return timeframeLabel(String(value));
   if (typeof value === 'number') {
@@ -653,25 +767,31 @@ function formatParameterValue(key: string, value: ParameterValue): string {
   }
   if (Array.isArray(value)) {
     if (key === 'factor_ids') {
-      return value.length ? formatFactorList(value) : '-';
+      return value.length ? formatFactorList(value, factorNames) : '-';
     }
     return value.length ? `${value.length} 项配置` : '-';
   }
   if (typeof value === 'object') {
     const record = value as Record<string, unknown>;
     if (key === 'weights') {
-      return formatWeightRecord(record);
+      return formatWeightRecord(record, factorNames);
     }
     if (key === 'directions') {
       const entries = Object.entries(record)
-        .map(([factorId, direction]) => `${formatFactorDisplayName(factorId)} ${formatSharedParameterValue(String(direction ?? ''), 'direction')}`)
+        .map(([factorId, direction]) => `${formatFactorDisplayName(factorId, factorNames[factorId])} ${formatSharedParameterValue(String(direction ?? ''), 'direction')}`)
         .filter((item) => item.trim().length > 0);
       return entries.length ? entries.join('；') : '-';
     }
     if (key === 'neutralization') {
       const enabled = Boolean(record.enabled);
       const method = formatSharedParameterValue(String(record.method ?? 'industry'), 'neutralization_method');
-      const status = typeof record.execution_status === 'string' ? record.execution_status : null;
+      const status = neutralizationStatusLabel(
+        typeof record.execution_status === 'string'
+          ? record.execution_status
+          : typeof record.status === 'string'
+            ? record.status
+            : null,
+      );
       return `${enabled ? '启用' : '未启用'} · ${method}${status ? ` · ${status}` : ''}`;
     }
     if (key === 'pit_snapshot_refs') {
@@ -939,7 +1059,7 @@ function buildStrategySummary(strategy: ApiStrategyDetail): string {
         : null);
     parts.push(factorCount ? `组合 ${factorCount} 个因子形成综合评分` : '按因子篮子形成综合评分');
     if (scoringMethod) {
-      parts.push(`使用${formatSharedParameterValue(scoringMethod, 'scoring_method')}打分`);
+      parts.push(`使用${scoringMethodLabel(scoringMethod)}打分`);
     }
     if (neutralization) {
       const enabled = Boolean(neutralization.enabled);
@@ -1093,6 +1213,7 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
   }
 
   const strategySummary = useMemo(() => (strategy ? buildStrategySummary(strategy) : ''), [strategy]);
+  const factorDisplayNames = useMemo(() => buildFactorDisplayNames(strategy), [strategy]);
   const tradingLogic = useMemo(() => {
     const value = strategy?.parameters?.trading_logic;
     return typeof value === 'string' && value.trim() ? value : null;
@@ -1102,13 +1223,13 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
     const parameters = strategy?.parameters ?? {};
     return Object.entries(parameters)
       .filter(([key, value]) => !HIDDEN_PARAMETER_KEYS.has(key) && hasParameterValue(value))
-      .sort((left, right) => (PARAMETER_ORDER[left[0]] ?? 999) - (PARAMETER_ORDER[right[0]] ?? 999))
+      .sort((left, right) => parameterOrder(left[0]) - parameterOrder(right[0]))
       .map(([key, value]) => ({
         key,
-        label: parameterLabel(key),
-        value: formatParameterValue(key, value),
+        label: parameterLabel(key, factorDisplayNames),
+        value: formatParameterValue(key, value, factorDisplayNames),
       }));
-  }, [strategy]);
+  }, [factorDisplayNames, strategy]);
 
   const parameterHistoryRows = useMemo<EnrichedParameterHistoryEntry[]>(
     () => (strategy?.parameter_history ?? []) as EnrichedParameterHistoryEntry[],
@@ -1144,18 +1265,22 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
     const value = selectedHistoryEntry?.parameters?.trading_logic;
     return typeof value === 'string' && value.trim() ? value : null;
   }, [selectedHistoryEntry]);
+  const selectedHistoryFactorDisplayNames = useMemo(
+    () => buildFactorDisplayNames(strategy, selectedHistoryEntry),
+    [selectedHistoryEntry, strategy],
+  );
 
   const selectedHistoryCards = useMemo<ParameterCardItem[]>(() => {
     const parameters = selectedHistoryEntry?.parameters ?? {};
     return Object.entries(parameters)
       .filter(([key, value]) => !HIDDEN_HISTORY_PARAMETER_KEYS.has(key) && key !== 'trading_logic' && hasParameterValue(value))
-      .sort((left, right) => (PARAMETER_ORDER[left[0]] ?? 999) - (PARAMETER_ORDER[right[0]] ?? 999))
+      .sort((left, right) => parameterOrder(left[0]) - parameterOrder(right[0]))
       .map(([key, value]) => ({
         key,
-        label: parameterLabel(key),
-        value: formatParameterValue(key, value),
+        label: parameterLabel(key, selectedHistoryFactorDisplayNames),
+        value: formatParameterValue(key, value, selectedHistoryFactorDisplayNames),
       }));
-  }, [selectedHistoryEntry]);
+  }, [selectedHistoryEntry, selectedHistoryFactorDisplayNames]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1343,7 +1468,7 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
                               <span>{entry.created_at ? formatDateTime(entry.created_at) : '-'}</span>
                             </div>
                           </td>
-                          <td className="strategy-detail-history-table__summary">{renderMultilineText(historyChangeSummary(entry))}</td>
+                          <td className="strategy-detail-history-table__summary">{renderMultilineText(historyChangeSummary(entry, factorDisplayNames))}</td>
                           <td className="strategy-detail-history-table__decision">{historyDecisionNoteSummary(entry)}</td>
                           <td>
                             <div className="strategy-detail-history-table__actions">
@@ -1483,7 +1608,7 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
             </div>
             <section className="strategy-detail-history-modal__section">
               <h4>{TEXT.historyDetailChangeSummary}</h4>
-              <p>{renderMultilineText(historyChangeSummary(selectedHistoryEntry))}</p>
+              <p>{renderMultilineText(historyChangeSummary(selectedHistoryEntry, selectedHistoryFactorDisplayNames))}</p>
             </section>
             <section className="strategy-detail-history-modal__section">
               <h4>{TEXT.historyDetailDecisionNote}</h4>
@@ -1575,7 +1700,7 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
               <span>当前基准</span>
               <strong>{currentHistoryLabel}</strong>
             </div>
-            <p className="strategy-detail-restore-modal__summary">{renderMultilineText(historyChangeSummary(restoreTargetEntry))}</p>
+            <p className="strategy-detail-restore-modal__summary">{renderMultilineText(historyChangeSummary(restoreTargetEntry, factorDisplayNames))}</p>
             <label className="strategy-detail-restore-modal__field">
               <span>{TEXT.restoreDecisionNoteLabel}</span>
               <textarea

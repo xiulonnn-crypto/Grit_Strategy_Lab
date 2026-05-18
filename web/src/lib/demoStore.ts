@@ -1024,10 +1024,10 @@ function withDemoFactorGovernanceProjection(factor: ApiFactorListItem): ApiFacto
       description: '因子库一期治理生命周期投影',
     },
     factor_level: level,
-    factor_level_label: factor.factor_level_label ?? `${level} ${level === 'S' ? '核心' : level === 'A' ? '可入选' : level === 'B' ? '观察' : level === 'C' ? '待校准' : '归档'}`,
+    factor_level_label: factor.factor_level_label ?? `${level}${level === 'S' ? '顶级' : level === 'A' ? '优秀' : level === 'B' ? '合格' : level === 'C' ? '微弱' : '噪声'}`,
     factor_level_projection: factor.factor_level_projection ?? {
       key: level,
-      label: `${level} ${level === 'S' ? '核心' : level === 'A' ? '可入选' : level === 'B' ? '观察' : level === 'C' ? '待校准' : '归档'}`,
+      label: `${level}${level === 'S' ? '顶级' : level === 'A' ? '优秀' : level === 'B' ? '合格' : level === 'C' ? '微弱' : '噪声'}`,
       description: '按 IC/IR、覆盖率、稳定性与阻断状态综合评级',
     },
     op_status: factor.op_status ?? demoFactorOpStatus(factor),
@@ -1243,6 +1243,13 @@ function createFactorGovernanceOverview(items = createFactorListItems()): ApiFac
     's_val_ep_ltm_raw',
     's_vol_252d_rank',
   ].filter((item, index, array) => item && array.indexOf(item) === index);
+  const modelSuggestionFactorIds = factorIds.slice(0, 1);
+  const modelSuggestionBaseName = String(autoFactor?.name ?? autoFactor?.id ?? 'Auto-Mined').trim();
+  const modelSuggestionName = modelSuggestionBaseName.endsWith('\u56e0\u5b50\u7b56\u7565')
+    ? modelSuggestionBaseName
+    : modelSuggestionBaseName.endsWith('\u56e0\u5b50')
+      ? `${modelSuggestionBaseName}\u7b56\u7565`
+      : `${modelSuggestionBaseName}\u56e0\u5b50\u7b56\u7565`;
   return {
     as_of: nowIso(),
     queue_count: 7,
@@ -1332,12 +1339,12 @@ function createFactorGovernanceOverview(items = createFactorListItems()): ApiFac
         id: 'gq-model-demo',
         kind: 'FACTOR_MODEL_SUGGESTION',
         label: '策略创建建议',
-        title: '多因子策略草稿建议',
-        detail: '自动发布因子已放入低相关候选篮子，建议权重不超过 20%，进入创建页后仍需预检。',
-        factor_ids: factorIds,
-        suggested_weights: factorIds.map((factorId, index) => ({
+        title: modelSuggestionName,
+        detail: '该 L3 组合因子已达到 S/A 级，且当前线上多因子策略尚未引用；建议以该因子 100% 权重生成待审查策略草稿。',
+        factor_ids: modelSuggestionFactorIds,
+        suggested_weights: modelSuggestionFactorIds.map((factorId) => ({
           factor_id: factorId,
-          weight_pct: index === 0 ? 20 : 15,
+          weight_pct: 100,
           direction: factorId.includes('vol') ? 'LOW_IS_GOOD' : 'HIGH_IS_GOOD',
         })),
         severity: 'info',
@@ -1345,10 +1352,10 @@ function createFactorGovernanceOverview(items = createFactorListItems()): ApiFac
           route: '#/factor-models/new',
           query: {
             source: 'governance_queue',
-            factorIds: factorIds.join(','),
-            weights: factorIds.map((_, index) => (index === 0 ? '20' : '15')).join(','),
-            directions: factorIds.map((factorId) => (factorId.includes('vol') ? 'LOW_IS_GOOD' : 'HIGH_IS_GOOD')).join(','),
-            modelName: '自动挖掘因子待审查组合',
+            factorIds: modelSuggestionFactorIds[0] ?? '',
+            weights: '100',
+            directions: (modelSuggestionFactorIds[0] ?? '').includes('vol') ? 'LOW_IS_GOOD' : 'HIGH_IS_GOOD',
+            modelName: modelSuggestionName,
           },
         },
       },

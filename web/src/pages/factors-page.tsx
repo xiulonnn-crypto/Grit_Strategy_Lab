@@ -96,10 +96,11 @@ type PitOverviewExtended = ApiPitDataOverview & {
   pit_quality_alerts?: unknown;
   snapshot_layer_linkage?: unknown;
 };
-type FactorSortKey = 'rank_ic' | 'level' | 'updated_at';
+type FactorSortKey = 'rank_ic' | 'level' | 'created_at' | 'updated_at';
 type FactorSortDirection = 'asc' | 'desc';
 type FactorSortState = { key: FactorSortKey; direction: FactorSortDirection };
-type FactorLevelKey = 'S' | 'A' | 'B' | 'C' | 'D';
+type FactorLevelKey = 'S' | 'A' | 'B' | 'C' | 'D' | 'OTHER';
+const DEFAULT_FACTOR_LEVEL_FILTERS: FactorLevelKey[] = ['S', 'A', 'B'];
 type FactorDiagnosticPreviewRequester = (
   request: ApiFactorDiagnosticPreviewPayload,
 ) => Promise<ApiFactorDiagnosticPreview> | undefined;
@@ -186,30 +187,27 @@ const DIAGNOSTIC_READINESS_LABELS: Record<string, string> = {
   DISABLED: '停用',
 };
 
-const SOURCE_LABELS: Record<string, string> = {
-  SYSTEM_SEED: '系统默认',
-  MANUAL: '人工',
-  AUTO_MINED: '自动挖掘',
-};
 const DESCRIPTOR_CATEGORY_LABELS: Record<string, string> = {
   mom: '动量',
   val: '估值',
   qlty: '质量',
   vol: '风险',
   size: '规模',
+  price: '价格',
   beta: '风险',
   inv: '质量',
   liq: '情绪',
-  alpha: '其他',
+  alpha: '综合',
 };
 const FACTOR_LIBRARY_CATEGORY_LABELS: Record<string, string> = {
   mom: '动量',
+  price: '价格',
   size: '规模',
   val: '估值',
   qlty: '质量',
   risk: '风险',
   sentiment: '情绪',
-  other: '其他',
+  other: '综合',
 };
 const FACTOR_LIBRARY_CATEGORY_BY_DESCRIPTOR: Record<string, string> = {
   alpha: 'other',
@@ -217,12 +215,13 @@ const FACTOR_LIBRARY_CATEGORY_BY_DESCRIPTOR: Record<string, string> = {
   inv: 'qlty',
   liq: 'sentiment',
   mom: 'mom',
+  price: 'price',
   qlty: 'qlty',
   size: 'size',
   val: 'val',
   vol: 'risk',
 };
-const FACTOR_LIBRARY_CATEGORY_ORDER = ['mom', 'size', 'val', 'qlty', 'risk', 'sentiment', 'other'];
+const FACTOR_LIBRARY_CATEGORY_ORDER = ['mom', 'price', 'size', 'val', 'qlty', 'risk', 'sentiment', 'other'];
 const MAX_VISIBLE_CORRELATION_FACTORS = 40;
 const GROUP_MONOTONICITY_WINDOW_PERIODS = 3;
 const GROUP_INVERSION_REQUIRED_STREAK = 3;
@@ -268,7 +267,7 @@ const GROUP_IC_TOOLTIP_LINES = [
 const FACTOR_LEVELS: FactorLevelProjection[] = [
   {
     key: 'S',
-    title: '顶级印钞机',
+    title: '顶级',
     rankIcRange: '> 0.03',
     irRange: '> 2.0',
     recommendation: '你的因子在此！极其罕见，具备极高的实战价值，建议作为组合的核心权重。',
@@ -276,7 +275,7 @@ const FACTOR_LEVELS: FactorLevelProjection[] = [
   },
   {
     key: 'A',
-    title: '优质 Alpha',
+    title: '优秀',
     rankIcRange: '0.02 ~ 0.03',
     irRange: '1.0 ~ 2.0',
     recommendation: '非常优秀的因子，可以稳定贡献超额收益。',
@@ -284,7 +283,7 @@ const FACTOR_LEVELS: FactorLevelProjection[] = [
   },
   {
     key: 'B',
-    title: '合格基准',
+    title: '合格',
     rankIcRange: '0.01 ~ 0.02',
     irRange: '0.5 ~ 1.0',
     recommendation: '中规中矩，可以作为辅助因子增加组合的多元化。',
@@ -292,7 +291,7 @@ const FACTOR_LEVELS: FactorLevelProjection[] = [
   },
   {
     key: 'C',
-    title: '微弱信号',
+    title: '微弱',
     rankIcRange: '0.005 ~ 0.01',
     irRange: '0.2 ~ 0.5',
     recommendation: '信号较弱，容易被交易成本吞噬，需观察长期表现。',
@@ -300,22 +299,45 @@ const FACTOR_LEVELS: FactorLevelProjection[] = [
   },
   {
     key: 'D',
-    title: '噪声/随机',
+    title: '噪声',
     rankIcRange: '< 0.005',
     irRange: '< 0.2',
     recommendation: '基本属于统计噪声，不建议在实盘中使用。',
     score: 1,
   },
+  {
+    key: 'OTHER',
+    title: '其他',
+    rankIcRange: '不适用',
+    irRange: '不适用',
+    recommendation: 'F1 原始因子作为上层因子的底层水源，只按数据质量状态治理，不参与 Rank IC/IR 投资评级。',
+    score: 0,
+  },
 ];
 const FACTOR_LEVEL_BY_SCORE = new Map(FACTOR_LEVELS.map((level) => [level.score, level]));
+function factorLevelDisplayLabel(level: FactorLevelProjection): string {
+  return level.key === 'OTHER' ? level.title : `${level.key}${level.title}`;
+}
 const FACTOR_LEVEL_TOOLTIP_LINES = [
   '因子级别：Rank IC 均值和 IR (稳定性) 先取绝对值，再按较弱一项保守评级。',
-  ...FACTOR_LEVELS.map((level) => `${level.key} ${level.title}: Rank IC ${level.rankIcRange}, IR ${level.irRange}; ${level.recommendation}`),
+  ...FACTOR_LEVELS.map((level) => (
+    level.key === 'OTHER'
+      ? `${level.title}: ${level.recommendation}`
+      : `${level.key}${level.title}: Rank IC ${level.rankIcRange}, IR ${level.irRange}; ${level.recommendation}`
+  )),
   '未完成真实或预览诊断的因子显示为未评级，不参与等级排序。',
 ];
 type FactorUiState = 'robust' | 'needs_calibration' | 'decayed' | 'sandbox';
 type FactorDiagnosticStateFilter = FactorUiState | '';
-type FactorLifecycleTab = 'all' | 'sandbox' | 'online' | 'offline' | 'to_be_verified' | 'archived';
+type FactorLifecycleTab = 'all' | 'sandbox' | 'online' | 'offline' | 'to_be_verified' | 'archived' | 'invalid';
+type FactorLifecycleKey = Exclude<FactorLifecycleTab, 'all'>;
+type FactorTierFilter = 'all' | 'F1' | 'F2' | 'F3';
+type FactorLedgerStatusMode = 'lifecycle' | 'data_quality';
+const RAW_DATA_QUALITY_LABELS: Partial<Record<FactorLifecycleKey, string>> = {
+  online: '正式诊断可用',
+  to_be_verified: '待校准',
+  invalid: '已失效',
+};
 
 const FACTOR_LIFECYCLE_TABS: Array<{ key: FactorLifecycleTab; label: string; countKey: string }> = [
   { key: 'all', label: '全部生命周期', countKey: 'allCount' },
@@ -325,16 +347,59 @@ const FACTOR_LIFECYCLE_TABS: Array<{ key: FactorLifecycleTab; label: string; cou
   { key: 'archived', label: '已归档', countKey: 'archivedCount' },
 ];
 
+const F1_DATA_QUALITY_TABS: Array<{ key: FactorLifecycleTab; label: string; countKey: string }> = [
+  { key: 'all', label: '全部数据质量状态', countKey: 'allCount' },
+  { key: 'online', label: '正式诊断可用', countKey: 'onlineCount' },
+  { key: 'to_be_verified', label: '待校准', countKey: 'toBeVerifiedCount' },
+  { key: 'invalid', label: '已失效', countKey: 'invalidCount' },
+];
+
 const FACTOR_LAYER_TABS: Array<{ key: 'F1' | 'F2' | 'F3'; title: string; description: string; countKey: 'f1Count' | 'f2Count' | 'f3Count' }> = [
   { key: 'F1', title: 'F1 原始库', description: 'API/DB 直连字段，只增不改', countKey: 'f1Count' },
   { key: 'F2', title: 'F2 改造库', description: '去极值、中性化、标准化与排名', countKey: 'f2Count' },
   { key: 'F3', title: 'F3 组合库', description: '风格复合、风险调节与背离惩罚', countKey: 'f3Count' },
 ];
 
-const FACTOR_LAYER_LABELS: Record<'F1' | 'F2' | 'F3', string> = {
+const FACTOR_TIER_FILTERS: Array<{ key: FactorTierFilter; label: string }> = [
+  { key: 'all', label: '全部库' },
+  ...FACTOR_LAYER_TABS.map((tab) => ({ key: tab.key, label: tab.title })),
+];
+
+const FACTOR_LAYER_LABELS: Record<FactorTierFilter, string> = {
+  all: '全部库',
   F1: 'F1 原始库',
   F2: 'F2 改造库',
   F3: 'F3 组合库',
+};
+const RAW_FIELD_LINEAGE_LABELS: Record<string, string> = {
+  adj_close: '复权收盘价',
+  book_value_equity: '账面权益原始字段',
+  capex: '资本开支原始字段',
+  cash_and_equivalents: '现金及等价物原始字段',
+  close: '收盘价原始字段',
+  Close: '收盘价原始字段',
+  enterprise_value: '企业价值原始字段',
+  ltm_earnings: 'LTM 盈利原始字段',
+  market_cap: '总市值原始字段',
+  MarketCap: '总市值原始字段',
+  operating_cash_flow: '经营现金流原始字段',
+  price_history: '价格历史原始字段',
+  returns: '收益序列原始字段',
+  shares_outstanding: '总股本原始字段',
+  total_debt: '总负债原始字段',
+  total_shares: '总股本原始字段',
+  turnover: '换手率原始字段',
+};
+const RAW_FIELD_TO_F1_FACTOR_ID: Record<string, string> = {
+  adj_close: 's_price_adjclose_cur_raw',
+  close: 's_price_adjclose_cur_raw',
+  Close: 's_price_adjclose_cur_raw',
+  market_cap: 's_size_mcap_cur_raw',
+  MarketCap: 's_size_mcap_cur_raw',
+  price_history: 's_price_adjclose_cur_raw',
+  returns: 's_price_adjclose_cur_raw',
+  shares_outstanding: 's_size_mcap_cur_raw',
+  total_shares: 's_size_mcap_cur_raw',
 };
 
 const UI_STATE_LABELS: Record<FactorUiState, string> = {
@@ -687,7 +752,69 @@ function factorLibraryCategory(factor: ApiFactorListItem): string {
 }
 
 function factorLibraryCategoryLabel(category: string): string {
-  return FACTOR_LIBRARY_CATEGORY_LABELS[category] ?? DESCRIPTOR_CATEGORY_LABELS[category] ?? '其他';
+  return FACTOR_LIBRARY_CATEGORY_LABELS[category] ?? DESCRIPTOR_CATEGORY_LABELS[category] ?? '未分类';
+}
+
+function rawLineageKey(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+function normalizeLineageParentId(parentId: string): string {
+  return RAW_FIELD_TO_F1_FACTOR_ID[parentId] ?? RAW_FIELD_TO_F1_FACTOR_ID[rawLineageKey(parentId)] ?? parentId;
+}
+
+function rawLineageLabel(parentId: string): string {
+  return RAW_FIELD_LINEAGE_LABELS[parentId] ?? RAW_FIELD_LINEAGE_LABELS[rawLineageKey(parentId)] ?? parentId;
+}
+
+function isRawSourceFactor(factor: ApiFactorListItem): boolean {
+  return factor.tier_level === 'F1' || factor.tier_projection?.key === 'F1';
+}
+
+function factorLifecycleKey(factor: ApiFactorListItem): FactorLifecycleKey {
+  if (isFactorOffline(factor)) return 'archived';
+  const rawKey = String(factor.lifecycle ?? factor.lifecycle_projection?.key ?? (isFactorOffline(factor) ? 'archived' : 'online'));
+  if (rawKey === 'offline') return isRawSourceFactor(factor) ? 'to_be_verified' : 'archived';
+  if (rawKey === 'sandbox' || rawKey === 'online' || rawKey === 'to_be_verified' || rawKey === 'archived' || rawKey === 'invalid') {
+    return rawKey;
+  }
+  return isFactorOffline(factor) ? 'archived' : 'online';
+}
+
+function rawFactorDataQualityKey(factor: ApiFactorListItem): FactorLifecycleKey {
+  const projectionKey = String(factor.lifecycle ?? factor.lifecycle_projection?.key ?? '').toLowerCase();
+  const lifecycle = String(factor.lifecycle_status ?? '').toUpperCase();
+  const diagnostic = factorDisplayStatus(factor).toUpperCase();
+  if (
+    projectionKey === 'invalid' ||
+    lifecycle === 'INVALID' ||
+    lifecycle === 'SOURCE_INVALID' ||
+    lifecycle === 'DATA_SOURCE_INVALID'
+  ) {
+    return 'invalid';
+  }
+  if (
+    projectionKey === 'to_be_verified' ||
+    projectionKey === 'archived' ||
+    lifecycle === 'DRAFT' ||
+    lifecycle === 'DECAYED' ||
+    lifecycle === 'DEPRECATED' ||
+    lifecycle === 'PRUNED' ||
+    diagnostic === 'BLOCKED_PIT' ||
+    diagnostic === 'BLOCKED_DATA' ||
+    diagnostic === 'FAILED' ||
+    factorPolicyHardBlockerCount(factor) > 0 ||
+    factorPolicyWarningCount(factor) > 0
+  ) {
+    return 'to_be_verified';
+  }
+  return 'online';
+}
+
+function factorLedgerStatusKey(factor: ApiFactorListItem, mode: FactorLedgerStatusMode): FactorLifecycleKey {
+  return mode === 'data_quality' && isRawSourceFactor(factor)
+    ? rawFactorDataQualityKey(factor)
+    : factorLifecycleKey(factor);
 }
 
 const MANUAL_FACTOR_DESCRIPTION_BY_ID: Record<string, string> = {
@@ -825,13 +952,15 @@ function metricLevelScore(value: number, metric: 'rank_ic' | 'ir'): number {
 }
 
 function factorLevel(factor: ApiFactorListItem): FactorLevelProjection | null {
+  if (isRawSourceFactor(factor)) {
+    return FACTOR_LEVELS.find((level) => level.key === 'OTHER') ?? null;
+  }
   const backendLevel = String(factor.factor_level ?? factor.factor_level_projection?.key ?? '').toUpperCase();
   if (backendLevel && FACTOR_LEVEL_BY_SCORE.size) {
     const matched = FACTOR_LEVELS.find((level) => level.key === backendLevel);
     if (matched) {
       return {
         ...matched,
-        title: factor.factor_level_label ?? factor.factor_level_projection?.label ?? matched.title,
         recommendation: factor.factor_level_projection?.description ?? matched.recommendation,
       };
     }
@@ -839,14 +968,15 @@ function factorLevel(factor: ApiFactorListItem): FactorLevelProjection | null {
   const rankIc = factorMetricValue(factor, 'rank_ic');
   const ir = factorMetricValue(factor, 'ir');
   if (rankIc === null || ir === null) {
-    return FACTOR_LEVELS.find((level) => level.key === (factor.tier_level === 'F1' ? 'B' : 'C')) ?? null;
+    return FACTOR_LEVELS.find((level) => level.key === (factor.tier_level === 'F1' ? 'OTHER' : 'C')) ?? null;
   }
   const score = Math.min(metricLevelScore(Math.abs(rankIc), 'rank_ic'), metricLevelScore(Math.abs(ir), 'ir'));
   return FACTOR_LEVEL_BY_SCORE.get(score) ?? null;
 }
 
 function factorLevelScore(factor: ApiFactorListItem): number | null {
-  return factorLevel(factor)?.score ?? null;
+  const level = factorLevel(factor);
+  return level && level.key !== 'OTHER' ? level.score : null;
 }
 
 function referenceDiagnosticLabel(summary: ApiFactorDiagnosticSummary | null | undefined): string | null {
@@ -870,6 +1000,7 @@ function needsRealDiagnosticPreview(factor: ApiFactorListItem): boolean {
 }
 
 function isFactorOffline(factor: ApiFactorListItem): boolean {
+  if (isRawSourceFactor(factor)) return false;
   const lifecycle = String(factor.lifecycle_status ?? '').toUpperCase();
   return lifecycle === 'DEPRECATED' || lifecycle === 'PRUNED' || Boolean(factor.offline_at);
 }
@@ -976,9 +1107,20 @@ function factorTimestamp(factor: ApiFactorListItem): number | null {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
+function factorCreatedTimestamp(factor: ApiFactorListItem): number | null {
+  const value = factor.created_at ?? null;
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
 function formatFactorUpdatedAt(factor: ApiFactorListItem): string {
   const value = factorUpdatedAt(factor);
   return value ? formatDateTime(value) : '尚未记录';
+}
+
+function formatFactorCreatedAt(factor: ApiFactorListItem): string {
+  return factor.created_at ? formatDateTime(factor.created_at) : '尚未记录';
 }
 
 function factorPruneMvpName(factor: ApiFactorListItem): string | null {
@@ -1034,7 +1176,9 @@ function compareFactorsBySort(left: ApiFactorListItem, right: ApiFactorListItem,
     ? compareNullableNumber(factorRankIc(left), factorRankIc(right), sort.direction)
     : sort.key === 'level'
       ? compareNullableNumber(factorLevelScore(left), factorLevelScore(right), sort.direction)
-      : compareNullableNumber(factorTimestamp(left), factorTimestamp(right), sort.direction);
+      : sort.key === 'created_at'
+        ? compareNullableNumber(factorCreatedTimestamp(left), factorCreatedTimestamp(right), sort.direction)
+        : compareNullableNumber(factorTimestamp(left), factorTimestamp(right), sort.direction);
   if (diff !== 0) return diff;
   return (left.descriptor?.canonical_id ?? left.id).localeCompare(right.descriptor?.canonical_id ?? right.id);
 }
@@ -1315,6 +1459,12 @@ function factorUiState(factor: ApiFactorListItem): { state: FactorUiState; label
       (diagnostic === 'BLOCKED_PIT' || diagnostic === 'BLOCKED_DATA')
       && !hasCompletedMetrics
     );
+  if (isRawSourceFactor(factor)) {
+    const dataQuality = rawFactorDataQualityKey(factor);
+    if (dataQuality === 'invalid') return { state: 'decayed', label: '已失效' };
+    if (dataQuality === 'to_be_verified') return { state: 'needs_calibration', label: UI_STATE_LABELS.needs_calibration };
+    return { state: 'robust', label: '正式诊断可用' };
+  }
   if (isFactorOffline(factor)) {
     return { state: 'decayed', label: lifecycle === 'PRUNED' ? '冗余挂起' : '已下线' };
   }
@@ -1464,6 +1614,23 @@ function factorStatusReasonLines(factor: ApiFactorListItem): string[] {
   const lines: string[] = [];
   const metricLine = metricSnapshotReason(metricParts);
 
+  if (isRawSourceFactor(factor)) {
+    const dataQuality = rawFactorDataQualityKey(factor);
+    if (dataQuality === 'invalid') {
+      lines.push('数据源永久失效或供应商字段不可用，需要切换备用链路。');
+      lines.push('F1 原始因子保留血缘锚点，不进入已归档或冗余裁剪。');
+    } else if (dataQuality === 'to_be_verified') {
+      if (hardReasons.length) lines.push(`数据质量待校准：${diagnosticSentence(hardReasons[0])}`);
+      else if (warningReasons.length) lines.push(`数据质量待校准：${diagnosticSentence(warningReasons[0])}`);
+      else lines.push('数据源、凭据、覆盖或 PIT 证据需要校准。');
+      lines.push('Rank IC/IR 不参与 F1 原始库状态判断。');
+    } else {
+      lines.push('数据流水正常，可作为 F2/F3 的永续血缘水源。');
+      lines.push('Rank IC/IR 不参与 F1 生命周期或归档判断。');
+    }
+    return uniqueReasonLines(lines).slice(0, 2);
+  }
+
   if (uiState.state === 'robust') {
     if (
       level &&
@@ -1515,6 +1682,18 @@ function factorStatusReasonLines(factor: ApiFactorListItem): string[] {
   }
 
   return [UI_STATE_MANAGEMENT_ACTIONS[uiState.state]];
+}
+
+function factorManagementAction(factor: ApiFactorListItem, state: FactorUiState): string {
+  if (!isRawSourceFactor(factor)) return UI_STATE_MANAGEMENT_ACTIONS[state];
+  const dataQuality = rawFactorDataQualityKey(factor);
+  if (dataQuality === 'invalid') {
+    return '管理动作：保留 F1 血缘锚点，切换备用数据链路；不执行归档或冗余裁剪。';
+  }
+  if (dataQuality === 'to_be_verified') {
+    return '管理动作：校准数据源、凭据、覆盖或 PIT 证据；Rank IC/IR 不作为阻断阈值。';
+  }
+  return '管理动作：作为 F2/F3 的正式数据水源保留，每次数据刷新后复核可得性。';
 }
 
 type FactorAuditEntry = {
@@ -1635,6 +1814,29 @@ function buildGovernanceSuggestionRoute(action: ApiFactorGovernanceAction): stri
   return `${targetRoute}${query ? `${targetRoute.includes('?') ? '&' : '?'}${query}` : ''}`;
 }
 
+function factorModelStrategyName(factor: ApiFactorListItem): string {
+  const baseName = (factor.name || factor.id || '新因子').trim();
+  if (baseName.endsWith('因子策略')) return baseName;
+  if (baseName.endsWith('因子')) return `${baseName}策略`;
+  return `${baseName}因子策略`;
+}
+
+function isFactorModelStrategySuggestionCandidate(
+  factor: ApiFactorListItem,
+  strategyUsageFactorIds: Set<string>,
+): boolean {
+  const tier = String(factor.tier_level ?? factor.tier_projection?.key ?? '').toUpperCase();
+  const level = String(factor.factor_level ?? factor.factor_level_projection?.key ?? '').toUpperCase();
+  const source = String(factor.source ?? '').toUpperCase();
+  return (
+    tier === 'F3' &&
+    (level === 'S' || level === 'A') &&
+    source === 'AUTO_MINED' &&
+    !isFactorOffline(factor) &&
+    !strategyUsageFactorIds.has(factor.id)
+  );
+}
+
 function openGovernanceAction(action: ApiFactorGovernanceAction): void {
   const route = buildGovernanceSuggestionRoute(action);
   const withoutHash = route.startsWith('#') ? route.slice(1) : route;
@@ -1644,6 +1846,7 @@ function openGovernanceAction(action: ApiFactorGovernanceAction): void {
 function buildLocalGovernanceActions(
   factors: ApiFactorListItem[],
   highCorrelationIds: Set<string>,
+  strategyUsageFactorIds: Set<string>,
 ): ApiFactorGovernanceAction[] {
   const actions: ApiFactorGovernanceAction[] = [];
   factors.forEach((factor) => {
@@ -1673,18 +1876,33 @@ function buildLocalGovernanceActions(
       });
     }
   });
-  const autoMined = factors.find((factor) => factor.source === 'AUTO_MINED' && factor.diagnostic_status === 'COMPLETED');
-  if (autoMined) {
+  const modelCandidate = factors.find((factor) => isFactorModelStrategySuggestionCandidate(factor, strategyUsageFactorIds));
+  if (modelCandidate) {
+    const strategyName = factorModelStrategyName(modelCandidate);
     actions.push({
-      id: `model-suggestion-${autoMined.id}`,
+      id: `model-suggestion-${modelCandidate.id}`,
       kind: 'FACTOR_MODEL_SUGGESTION',
       label: '策略草稿建议',
-      title: '多因子策略草稿建议',
-      detail: '治理任务已为自动挖掘因子准备待审查组合，只会带入创建页并保持草稿状态。',
-      factor_ids: [autoMined.id],
+      title: strategyName,
+      detail: '该 L3 组合因子已达到 S/A 级，且当前线上多因子策略尚未引用；建议以该因子 100% 权重生成待审查策略草稿。',
+      factor_ids: [modelCandidate.id],
       severity: 'info',
-      suggested_weights: [{ factor_id: autoMined.id, weight_pct: 20, direction: autoMined.direction }],
-      target: { route: '#/factor-models/new', query: { source: 'governance_queue', factorIds: autoMined.id, weights: '20' } },
+      suggested_weights: [{ factor_id: modelCandidate.id, weight_pct: 100, direction: modelCandidate.direction }],
+      target: {
+        route: '#/factor-models/new',
+        query: {
+          source: 'governance_queue',
+          factorIds: modelCandidate.id,
+          weights: '100',
+          directions: modelCandidate.direction,
+          modelName: strategyName,
+        },
+      },
+    });
+    Object.assign(actions[actions.length - 1], {
+      label: '策略草稿建议',
+      title: strategyName,
+      detail: '该 L3 组合因子已达到 S/A 级，且当前线上多因子策略尚未引用；建议以该因子 100% 权重生成待审查策略草稿。',
     });
   }
   return actions.slice(0, 8);
@@ -1798,7 +2016,7 @@ function DiagnosticSummaryPopover({
           ))}
         </ul>
       </div>
-      <p className="factor-diagnostic-popover__action">{UI_STATE_MANAGEMENT_ACTIONS[state.state]}</p>
+      <p className="factor-diagnostic-popover__action">{factorManagementAction(factor, state.state)}</p>
     </div>
   );
 }
@@ -1869,12 +2087,6 @@ function DiagnosticCell({ factor }: { factor: ApiFactorListItem }): JSX.Element 
   );
 }
 
-function FactorTierCell({ factor }: { factor: ApiFactorListItem }): JSX.Element {
-  const key = String(factor.tier_level ?? factor.tier_projection?.key ?? 'F2');
-  const label = factor.tier_label ?? factor.tier_projection?.label ?? `${key} 改造`;
-  return <span className={`factor-tier-badge factor-tier-badge--${key.toLowerCase()}`}>{label}</span>;
-}
-
 function FactorLineageCell({
   factor,
   selected,
@@ -1924,13 +2136,32 @@ function OperatorStatusLights({ factor }: { factor: ApiFactorListItem }): JSX.El
   );
 }
 
-function FactorLifecycleCell({ factor }: { factor: ApiFactorListItem }): JSX.Element {
-  const key = String(factor.lifecycle ?? factor.lifecycle_projection?.key ?? (isFactorOffline(factor) ? 'archived' : 'online'));
-  const label = factor.lifecycle_label ?? factor.lifecycle_projection?.label ?? (isFactorOffline(factor) ? '已归档' : '线上');
+function FactorLifecycleCell({
+  factor,
+  mode = 'lifecycle',
+}: {
+  factor: ApiFactorListItem;
+  mode?: FactorLedgerStatusMode;
+}): JSX.Element {
+  const key = factorLedgerStatusKey(factor, mode);
+  const label = mode === 'data_quality' && isRawSourceFactor(factor)
+    ? (RAW_DATA_QUALITY_LABELS[key] ?? '待校准')
+    : isFactorOffline(factor)
+      ? '已归档'
+      : factor.lifecycle_label ?? factor.lifecycle_projection?.label ?? '线上';
   return <span className={`factor-lifecycle-badge factor-lifecycle-badge--${key}`}>{label}</span>;
 }
 
 function FactorLevelCell({ factor }: { factor: ApiFactorListItem }): JSX.Element {
+  if (isRawSourceFactor(factor)) {
+    return (
+      <div className="factor-level-cell factor-level-cell--raw" title="F1 原始库归入其他级别；不按 Rank IC/IR 投资评级，仅按数据质量状态治理。">
+        <span className="factor-level-badge factor-level-badge--other" aria-label="其他因子级别">
+          <span>其他</span>
+        </span>
+      </div>
+    );
+  }
   const level = factorLevel(factor);
   if (!level) {
     return (
@@ -1939,11 +2170,13 @@ function FactorLevelCell({ factor }: { factor: ApiFactorListItem }): JSX.Element
       </div>
     );
   }
-  const title = `${level.key} ${level.title}: Rank IC ${level.rankIcRange}, IR ${level.irRange}。${level.recommendation}`;
+  const title = level.key === 'OTHER'
+    ? `${level.title}: ${level.recommendation}`
+    : `${level.key} ${level.title}: Rank IC ${level.rankIcRange}, IR ${level.irRange}。${level.recommendation}`;
   return (
     <div className="factor-level-cell" title={title}>
-      <span className={`factor-level-badge factor-level-badge--${level.key.toLowerCase()}`}>
-        <strong>{level.key}</strong>
+      <span className={`factor-level-badge factor-level-badge--${level.key.toLowerCase()}`} aria-label={factorLevelDisplayLabel(level)}>
+        {level.key === 'OTHER' ? null : <strong>{level.key}</strong>}
         <span>{level.title}</span>
       </span>
     </div>
@@ -2064,11 +2297,37 @@ function FactorLineagePreview({
   onClose: () => void;
 }): JSX.Element {
   const parentIds = factor.lineage_summary?.parent_ids ?? [];
-  const parentFactors = parentIds
-    .map((parentId) => factors.find((item) => item.id === parentId || item.descriptor?.canonical_id === parentId))
+  const factorById = new Map<string, ApiFactorListItem>();
+  factors.forEach((item) => {
+    factorById.set(item.id, item);
+    if (item.descriptor?.canonical_id) factorById.set(item.descriptor.canonical_id, item);
+  });
+  const parentFactors: ApiFactorListItem[] = [];
+  const rawParentLabels: string[] = [];
+  const seenParentFactorIds = new Set<string>();
+  parentIds.forEach((parentId) => {
+    const normalizedParentId = normalizeLineageParentId(parentId);
+    const matched = factorById.get(normalizedParentId) ?? factorById.get(parentId);
+    if (matched) {
+      if (!seenParentFactorIds.has(matched.id)) {
+        seenParentFactorIds.add(matched.id);
+        parentFactors.push(matched);
+      }
+    } else {
+      rawParentLabels.push(rawLineageLabel(parentId));
+    }
+  });
+  const nestedParentFactors = parentFactors
+    .flatMap((parent) => parent.lineage_summary?.parent_ids ?? [])
+    .map((parentId) => factorById.get(normalizeLineageParentId(parentId)) ?? factorById.get(parentId))
     .filter((item): item is ApiFactorListItem => Boolean(item));
-  const rootName = factor.lineage_summary?.root_source ?? parentFactors[0]?.name ?? parentIds[0] ?? factor.name;
-  const source = parentFactors.find((item) => item.tier_level === 'F1') ?? factors.find((item) => item.tier_level === 'F1');
+  const rootSource = factor.lineage_summary?.root_source ?? parentIds[0] ?? '';
+  const rootFactor = factorById.get(normalizeLineageParentId(rootSource)) ?? factorById.get(rootSource);
+  const rootLabel = rootSource ? rawLineageLabel(rootSource) : '';
+  const rootName = rootFactor?.name ?? (rootLabel ? rootLabel : (parentFactors[0]?.name ?? factor.name));
+  const source = factor.tier_level === 'F1'
+    ? factor
+    : parentFactors.find((item) => item.tier_level === 'F1') ?? nestedParentFactors.find((item) => item.tier_level === 'F1');
   const refined = factor.tier_level === 'F2'
     ? factor
     : parentFactors.find((item) => item.tier_level === 'F2') ?? factors.find((item) => item.tier_level === 'F2');
@@ -2076,7 +2335,7 @@ function FactorLineagePreview({
     ? factor
     : factors.find((item) => item.tier_level === 'F3' && parentIds.includes(item.id));
   const nodes = [
-    { tier: 'F1 原始库', name: source?.name ?? rootName },
+    { tier: 'F1 原始库', name: source?.name ?? rawParentLabels[0] ?? rootName },
     { tier: 'F2 改造库', name: refined?.name ?? (factor.tier_level === 'F1' ? '待改造' : factor.name) },
     { tier: 'F3 组合库', name: composite?.name ?? (factor.tier_level === 'F3' ? factor.name : '待组合') },
   ];
@@ -3817,24 +4076,32 @@ export function FactorLibraryPage({
   const api = useApiClient();
   const [payload, setPayload] = useState<ApiFactorListResponse | null>(null);
   const status = initialStatus ?? '';
-  const [tierTab, setTierTab] = useState<'F1' | 'F2' | 'F3'>('F2');
+  const [tierFilter, setTierFilter] = useState<FactorTierFilter>('all');
   const [lifecycleTab, setLifecycleTab] = useState<FactorLifecycleTab>('all');
   const [reloadNonce, setReloadNonce] = useState(0);
-  const [categoryFilter, setCategoryFilter] = useState('');
-  const [levelFilters, setLevelFilters] = useState<FactorLevelKey[]>(['S', 'A', 'B']);
+  const [categoryFilters, setCategoryFilters] = useState<string[]>([]);
+  const [levelFilters, setLevelFilters] = useState<FactorLevelKey[]>(() => [...DEFAULT_FACTOR_LEVEL_FILTERS]);
   const [selectedCorrelationFactorId, setSelectedCorrelationFactorId] = useState<string | undefined>();
   const [lineagePreviewFactorId, setLineagePreviewFactorId] = useState<string | null>(null);
   const [comparisonFactorIds, setComparisonFactorIds] = useState<string[]>([]);
   const [gapPopoverFactorId, setGapPopoverFactorId] = useState<string | null>(null);
   const [diagnosticPopoverFactorId, setDiagnosticPopoverFactorId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [sort, setSort] = useState<FactorSortState>({ key: 'updated_at', direction: 'desc' });
+  const [sort, setSort] = useState<FactorSortState>({ key: 'created_at', direction: 'desc' });
   const [governanceOpen, setGovernanceOpen] = useState(false);
   const [governanceOverview, setGovernanceOverview] = useState<ApiFactorGovernanceOverview | null>(null);
   const [governanceLoading, setGovernanceLoading] = useState(false);
   const [governanceError, setGovernanceError] = useState<string | null>(null);
   const [confirmGovernanceAction, setConfirmGovernanceAction] = useState<ApiFactorGovernanceAction | null>(null);
   const [governanceExecuteBusy, setGovernanceExecuteBusy] = useState(false);
+  const ledgerStatusMode: FactorLedgerStatusMode = tierFilter === 'F1' ? 'data_quality' : 'lifecycle';
+  const ledgerStatusTabs = ledgerStatusMode === 'data_quality' ? F1_DATA_QUALITY_TABS : FACTOR_LIFECYCLE_TABS;
+  useEffect(() => {
+    const tabAllowed = ledgerStatusTabs.some((tab) => tab.key === lifecycleTab);
+    if (!tabAllowed) {
+      setLifecycleTab('all');
+    }
+  }, [ledgerStatusTabs, lifecycleTab]);
   useEffect(() => {
     let alive = true;
     const loadFactorPayload = async (): Promise<void> => {
@@ -3844,7 +4111,7 @@ export function FactorLibraryPage({
           source: initialSource,
           status: status || undefined,
           tag: initialTag,
-          lifecycle: lifecycleTab,
+          lifecycle: 'all',
         });
         if (!alive) return;
         const previewFactorDiagnostics = (api as {
@@ -3877,7 +4144,7 @@ export function FactorLibraryPage({
     return () => {
       alive = false;
     };
-  }, [api, initialLoadDelayMs, initialSource, initialTag, lifecycleTab, reloadNonce, status]);
+  }, [api, initialLoadDelayMs, initialSource, initialTag, reloadNonce, status]);
   useEffect(() => {
     if (governanceOverview || !governanceOpen) return;
     const getFactorGovernanceOverview = (api as {
@@ -3913,16 +4180,44 @@ export function FactorLibraryPage({
       alive = false;
     };
   }, [api, governanceOpen, governanceOverview]);
-  const factors = useMemo(() => {
+  const categoryScopedFactors = useMemo(() => {
+    const selectedCategories = new Set(categoryFilters);
+    return (payload?.items ?? []).filter((factor) => !selectedCategories.size || selectedCategories.has(factorLibraryCategory(factor)));
+  }, [categoryFilters, payload?.items]);
+  const levelScopedFactors = useMemo(() => {
     const selectedLevels = new Set(levelFilters);
-    const filtered = (payload?.items ?? []).filter((factor) => {
-      if (factor.tier_level !== tierTab) return false;
-      if (categoryFilter && factorLibraryCategory(factor) !== categoryFilter) return false;
-      if (selectedLevels.size && !selectedLevels.has(factorLevel(factor)?.key as FactorLevelKey)) return false;
+    return categoryScopedFactors.filter((factor) => (
+      !selectedLevels.size || selectedLevels.has(factorLevel(factor)?.key as FactorLevelKey)
+    ));
+  }, [categoryScopedFactors, levelFilters]);
+  const tierCountFactors = useMemo(() => (
+    levelScopedFactors.filter((factor) => lifecycleTab === 'all' || factorLedgerStatusKey(factor, ledgerStatusMode) === lifecycleTab)
+  ), [ledgerStatusMode, levelScopedFactors, lifecycleTab]);
+  const tierFilterCounts = useMemo(() => ({
+    all: tierCountFactors.length,
+    F1: tierCountFactors.filter((factor) => factor.tier_level === 'F1').length,
+    F2: tierCountFactors.filter((factor) => factor.tier_level === 'F2').length,
+    F3: tierCountFactors.filter((factor) => factor.tier_level === 'F3').length,
+  }), [tierCountFactors]);
+  const lifecycleCountFactors = useMemo(() => (
+    levelScopedFactors.filter((factor) => tierFilter === 'all' || factor.tier_level === tierFilter)
+  ), [levelScopedFactors, tierFilter]);
+  const lifecycleFilterCounts = useMemo(() => ({
+    all: lifecycleCountFactors.length,
+    sandbox: lifecycleCountFactors.filter((factor) => factorLedgerStatusKey(factor, ledgerStatusMode) === 'sandbox').length,
+    online: lifecycleCountFactors.filter((factor) => factorLedgerStatusKey(factor, ledgerStatusMode) === 'online').length,
+    to_be_verified: lifecycleCountFactors.filter((factor) => factorLedgerStatusKey(factor, ledgerStatusMode) === 'to_be_verified').length,
+    archived: lifecycleCountFactors.filter((factor) => factorLedgerStatusKey(factor, ledgerStatusMode) === 'archived').length,
+    invalid: lifecycleCountFactors.filter((factor) => factorLedgerStatusKey(factor, ledgerStatusMode) === 'invalid').length,
+  }), [ledgerStatusMode, lifecycleCountFactors]);
+  const factors = useMemo(() => {
+    const filtered = levelScopedFactors.filter((factor) => {
+      if (tierFilter !== 'all' && factor.tier_level !== tierFilter) return false;
+      if (lifecycleTab !== 'all' && factorLedgerStatusKey(factor, ledgerStatusMode) !== lifecycleTab) return false;
       return true;
     });
     return [...filtered].sort((left, right) => compareFactorsBySort(left, right, sort));
-  }, [categoryFilter, levelFilters, payload?.items, sort, tierTab]);
+  }, [ledgerStatusMode, levelScopedFactors, lifecycleTab, sort, tierFilter]);
   const factorLookup = useMemo(() => new Map((payload?.items ?? []).map((factor) => [factor.id, factor])), [payload?.items]);
   const confirmPruneComparison = useMemo(
     () => confirmGovernanceAction ? governancePruneComparison(confirmGovernanceAction) : null,
@@ -3948,6 +4243,16 @@ export function FactorLibraryPage({
         ? current.filter((item) => item !== level)
         : [...current, level]
     ));
+  };
+  const toggleCategoryFilter = (category: string) => {
+    setCategoryFilters((current) => (
+      current.includes(category)
+        ? current.filter((item) => item !== category)
+        : [...current, category]
+    ));
+    setComparisonFactorIds([]);
+    setSelectedCorrelationFactorId(undefined);
+    setLineagePreviewFactorId(null);
   };
   useEffect(() => {
     const visibleIds = new Set(factors.map((factor) => factor.id));
@@ -3990,9 +4295,13 @@ export function FactorLibraryPage({
           .map((factor) => factor.id)
       : [],
   ), [factors, selectedCorrelationFactor]);
+  const strategyUsageFactorIds = useMemo(
+    () => new Set(stringArray(payload?.summary?.strategy_usage_factor_ids)),
+    [payload?.summary],
+  );
   const localGovernanceActions = useMemo(
-    () => buildLocalGovernanceActions(factors, highCorrelationIds),
-    [factors, highCorrelationIds],
+    () => buildLocalGovernanceActions(factors, highCorrelationIds, strategyUsageFactorIds),
+    [factors, highCorrelationIds, strategyUsageFactorIds],
   );
   const rawGovernanceActions = governanceOverview ? governanceOverview.actions : localGovernanceActions;
   const governanceActions = rawGovernanceActions.filter(isGovernanceTaskAction);
@@ -4141,29 +4450,6 @@ export function FactorLibraryPage({
           </>
         }
       />
-      <section className="factor-layer-tabs" role="tablist" aria-label="因子库分层">
-        {FACTOR_LAYER_TABS.map((tab) => (
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tierTab === tab.key}
-            className={`factor-layer-tab ${tierTab === tab.key ? 'is-active' : ''}`}
-            key={tab.key}
-            onClick={() => {
-              setTierTab(tab.key);
-              setComparisonFactorIds([]);
-              setSelectedCorrelationFactorId(undefined);
-              setLineagePreviewFactorId(null);
-            }}
-          >
-            <div>
-              <strong>{tab.title}</strong>
-              <span>{tab.description}</span>
-            </div>
-            <em>{String(librarySummary[tab.countKey])}</em>
-          </button>
-        ))}
-      </section>
       <section className="factor-card-grid factor-card-grid--metrics factor-library-summary" aria-label="因子库摘要指标">
         <article className="factor-mini-card">
           <span>F1 原始指标</span>
@@ -4359,10 +4645,86 @@ export function FactorLibraryPage({
         <div className="factor-ledger-header">
           <div>
             <strong>因子资产台账</strong>
-            <p>当前视图：{FACTOR_LAYER_LABELS[tierTab]}，表头按机构级因子治理字段重排</p>
+            <p>当前范围：{FACTOR_LAYER_LABELS[tierFilter]}，表头按机构级因子治理字段重排</p>
           </div>
-          <div className="factor-lifecycle-tabs" role="tablist" aria-label="因子生命周期视图">
-            {FACTOR_LIFECYCLE_TABS.map((tab) => (
+        </div>
+        <div className="factor-ledger-filter-row factor-ledger-filter-row--library-family" aria-label="因子族与所属库筛选">
+          <div className="factor-family-filter" aria-label="因子族多选">
+            <button
+              className={!categoryFilters.length ? 'is-active' : ''}
+              onClick={() => {
+                setCategoryFilters([]);
+                setComparisonFactorIds([]);
+                setSelectedCorrelationFactorId(undefined);
+                setLineagePreviewFactorId(null);
+              }}
+              type="button"
+            >
+              全部因子族
+            </button>
+            {FACTOR_LIBRARY_CATEGORY_ORDER.map((category) => (
+              <button
+                className={categoryFilters.includes(category) ? 'is-active' : ''}
+                key={category}
+                onClick={() => toggleCategoryFilter(category)}
+                type="button"
+              >
+                {factorLibraryCategoryLabel(category)}
+              </button>
+            ))}
+          </div>
+          <div className="factor-tier-tabs" role="tablist" aria-label="所属库筛选">
+            {FACTOR_TIER_FILTERS.map((tab) => (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tierFilter === tab.key}
+                className={tierFilter === tab.key ? 'is-active' : ''}
+                key={tab.key}
+                onClick={() => {
+                  setTierFilter(tab.key);
+                  setComparisonFactorIds([]);
+                  setSelectedCorrelationFactorId(undefined);
+                  setLineagePreviewFactorId(null);
+                }}
+              >
+                {tab.label} <span>{String(tierFilterCounts[tab.key])}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+        <div
+          className={`factor-ledger-filter-row factor-ledger-filter-row--lifecycle-level factor-ledger-filter-row--${ledgerStatusMode}`}
+          aria-label={ledgerStatusMode === 'data_quality' ? '因子级别与数据质量状态筛选' : '因子级别与生命周期筛选'}
+        >
+          <div
+            className={`factor-level-filter ${ledgerStatusMode === 'data_quality' ? 'factor-level-filter--reference' : ''}`}
+            aria-label="因子级别筛选"
+          >
+            <button
+              className={!levelFilters.length ? 'factor-level-filter__all is-active' : 'factor-level-filter__all'}
+              onClick={() => setLevelFilters([])}
+              type="button"
+            >
+              全部因子级别
+            </button>
+            {FACTOR_LEVELS.map((level) => (
+              <button
+                className={levelFilters.includes(level.key) ? 'is-active' : ''}
+                key={level.key}
+                onClick={() => toggleLevelFilter(level.key)}
+                type="button"
+              >
+                {factorLevelDisplayLabel(level)}
+              </button>
+            ))}
+          </div>
+          <div
+            className="factor-lifecycle-tabs"
+            role="tablist"
+            aria-label={ledgerStatusMode === 'data_quality' ? 'F1 数据质量状态视图' : '因子生命周期视图'}
+          >
+            {ledgerStatusTabs.map((tab) => (
               <button
                 type="button"
                 role="tab"
@@ -4376,33 +4738,10 @@ export function FactorLibraryPage({
                   setLineagePreviewFactorId(null);
                 }}
               >
-                {tab.label} <span>{String(librarySummary[tab.countKey as keyof typeof librarySummary] ?? 0)}</span>
+                {tab.label} <span>{String(lifecycleFilterCounts[tab.key as keyof typeof lifecycleFilterCounts] ?? 0)}</span>
               </button>
             ))}
           </div>
-        </div>
-        <div className="factor-toolbar">
-          <div className="factor-toolbar__filters" aria-label="因子表格筛选项">
-            <select aria-label="因子族" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
-              <option value="">全部因子族</option>
-              {Object.entries(FACTOR_LIBRARY_CATEGORY_LABELS).map(([value, label]) => (
-                <option key={value} value={value}>{label}</option>
-              ))}
-            </select>
-            <div className="factor-level-filter" aria-label="因子级别筛选">
-              {FACTOR_LEVELS.map((level) => (
-                <button
-                  className={levelFilters.includes(level.key) ? 'is-active' : ''}
-                  key={level.key}
-                  onClick={() => toggleLevelFilter(level.key)}
-                  type="button"
-                >
-                  {level.key}
-                </button>
-              ))}
-            </div>
-          </div>
-          <span className="factor-muted">当前视图 {factors.length} 个因子</span>
         </div>
         {error ? <div className="factor-panel factor-panel--danger">{error}</div> : null}
         <div className="factor-table-wrap">
@@ -4410,7 +4749,6 @@ export function FactorLibraryPage({
             <thead>
               <tr>
                 <th><div className="factor-th-content"><span>因子基本信息</span></div></th>
-                <th><div className="factor-th-content"><span>所属库</span></div></th>
                 <th><div className="factor-th-content"><span>血缘溯源</span></div></th>
                 <th><div className="factor-th-content"><span>算子状态灯</span></div></th>
                 <th aria-sort={ariaSortFor('rank_ic', sort)}>
@@ -4422,7 +4760,7 @@ export function FactorLibraryPage({
                     tooltip={<HelpTooltip label="质量指标解释" lines={DIAGNOSTIC_TOOLTIP_LINES} />}
                   />
                 </th>
-                <th aria-sort={ariaSortFor('level', sort)}>
+                <th className="factor-table__level-header" aria-sort={ariaSortFor('level', sort)}>
                   <SortableHeader
                     label="因子级别"
                     sortKey="level"
@@ -4431,7 +4769,15 @@ export function FactorLibraryPage({
                     tooltip={<HelpTooltip label="因子级别名词解释" lines={FACTOR_LEVEL_TOOLTIP_LINES} />}
                   />
                 </th>
-                <th><div className="factor-th-content"><span>生命周期</span></div></th>
+                <th><div className="factor-th-content"><span>{ledgerStatusMode === 'data_quality' ? '数据质量状态' : '生命周期'}</span></div></th>
+                <th aria-sort={ariaSortFor('created_at', sort)}>
+                  <SortableHeader
+                    label="创建时间"
+                    sortKey="created_at"
+                    sort={sort}
+                    onSort={updateSort}
+                  />
+                </th>
                 <th><div className="factor-th-content"><span>操作</span></div></th>
               </tr>
             </thead>
@@ -4452,7 +4798,6 @@ export function FactorLibraryPage({
                     </div>
                     <code className="factor-id">{factor.descriptor?.canonical_id ?? factor.id}</code>
                   </td>
-                  <td><FactorTierCell factor={factor} /></td>
                   <td>
                     <FactorLineageCell
                       factor={factor}
@@ -4462,11 +4807,15 @@ export function FactorLibraryPage({
                   </td>
                   <td><OperatorStatusLights factor={factor} /></td>
                   <td><DiagnosticCell factor={factor} /></td>
-                  <td><FactorLevelCell factor={factor} /></td>
-                  <td><FactorLifecycleCell factor={factor} /></td>
+                  <td className="factor-table__level-cell"><FactorLevelCell factor={factor} /></td>
+                  <td><FactorLifecycleCell factor={factor} mode={ledgerStatusMode} /></td>
+                  <td>
+                    <time className="factor-created-at" dateTime={factor.created_at ?? undefined}>
+                      {formatFactorCreatedAt(factor)}
+                    </time>
+                  </td>
                   <td>
                     <div className="factor-row-actions">
-                      <button className="factor-link" onClick={() => navigateTo(`/factors/${factor.id}`)} type="button">诊断</button>
                       <button className="factor-link" onClick={() => navigateTo(`/factors/${factor.id}`)} type="button">详情</button>
                     </div>
                   </td>

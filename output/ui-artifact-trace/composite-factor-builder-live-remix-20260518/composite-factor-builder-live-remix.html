@@ -1,0 +1,1586 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>组合因子策略创建页 UI 稿</title>
+    <style>
+      :root {
+        --bg: #f4f7f8;
+        --surface: #ffffff;
+        --surface-soft: #f8fafb;
+        --line: #dfe7eb;
+        --line-strong: #c9d6dc;
+        --text: #071423;
+        --muted: #52697a;
+        --subtle: #7b8f9e;
+        --green: #16897b;
+        --green-dark: #0f6f66;
+        --green-soft: #e7f5f2;
+        --amber: #a76616;
+        --amber-soft: #fff5df;
+        --red: #b4403a;
+        --red-soft: #fff0ed;
+        --blue: #286c9e;
+        --blue-soft: #edf6fc;
+        --violet: #6d5aa9;
+        --violet-soft: #f3f1fb;
+        --shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+        --font: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font);
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+
+      .app-frame {
+        min-height: 100vh;
+        display: grid;
+        grid-template-columns: 240px minmax(0, 1fr);
+      }
+
+      .app-sidebar {
+        position: sticky;
+        top: 0;
+        align-self: start;
+        height: 100vh;
+        background: #fff;
+        border-right: 1px solid #d9e3e7;
+        padding: 18px 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+
+      .brand {
+        display: grid;
+        grid-template-columns: 38px minmax(0, 1fr);
+        align-items: center;
+        gap: 10px;
+      }
+
+      .brand-mark {
+        width: 38px;
+        height: 38px;
+        border-radius: 8px;
+        background: #0f6f66;
+        color: #fff;
+        display: grid;
+        place-items: center;
+        font-weight: 800;
+        font-size: 14px;
+      }
+
+      .brand strong {
+        display: block;
+        font-size: 15px;
+      }
+
+      .brand span {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 3px;
+      }
+
+      .nav-section {
+        display: grid;
+        gap: 7px;
+      }
+
+      .nav-title {
+        color: #7d8c98;
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+        padding: 0 8px;
+      }
+
+      .nav-link {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        min-height: 34px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        color: #425767;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .nav-link svg {
+        width: 17px;
+        height: 17px;
+        stroke-width: 2;
+        flex: none;
+      }
+
+      .nav-link.is-active {
+        background: var(--green-soft);
+        color: var(--green-dark);
+      }
+
+      .app-main {
+        min-width: 0;
+        padding: 28px 32px 56px 28px;
+      }
+
+      .factor-model-builder-page.factor-phase2-page {
+        width: 100%;
+        max-width: 1960px;
+        margin: 0;
+      }
+
+      .factor-model-builder-page .factor-phase2-hero,
+      .factor-model-builder-page .factor-phase2-panel {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        box-shadow: var(--shadow);
+      }
+
+      .factor-model-builder-page .factor-phase2-hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 16px;
+        align-items: center;
+        padding: 28px 30px;
+      }
+
+      .factor-phase2-hero__eyebrow {
+        margin: 0 0 7px;
+        color: var(--green-dark);
+        font-size: 12px;
+        font-weight: 850;
+        text-transform: uppercase;
+      }
+
+      .factor-phase2-hero h1 {
+        margin: 0;
+        font-size: 30px;
+        line-height: 1.18;
+        letter-spacing: 0;
+      }
+
+      .factor-phase2-hero p {
+        margin: 11px 0 0;
+        max-width: 880px;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.65;
+      }
+
+      .factor-phase2-actions {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .factor-phase2-button {
+        min-height: 38px;
+        border: 1px solid #cddbe0;
+        border-radius: 8px;
+        padding: 9px 14px;
+        background: #fff;
+        color: #213745;
+        font-weight: 800;
+        cursor: default;
+      }
+
+      .factor-phase2-button--primary {
+        border-color: var(--green);
+        background: var(--green);
+        color: #fff;
+      }
+
+      .factor-phase2-button--ghost {
+        color: var(--green-dark);
+        border-color: #b7d9d3;
+        background: #f8fcfb;
+      }
+
+      .factor-phase2-workbench {
+        margin-top: 16px;
+      }
+
+      .factor-model-builder-page .factor-phase2-workbench--model {
+        display: grid;
+        grid-template-columns: minmax(280px, 0.85fr) minmax(0, 1.42fr) minmax(320px, 0.78fr);
+        gap: 16px;
+        align-items: start;
+      }
+
+      .factor-phase2-panel {
+        overflow: hidden;
+      }
+
+      .factor-phase2-panel__header {
+        min-height: 114px;
+        padding: 22px 24px 18px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+      }
+
+      .factor-phase2-panel__header h2 {
+        margin: 0;
+        font-size: 18px;
+        line-height: 1.2;
+      }
+
+      .factor-phase2-panel__header p {
+        margin: 9px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.55;
+      }
+
+      .factor-phase2-panel__body {
+        padding: 18px 20px 22px;
+        display: grid;
+        gap: 14px;
+      }
+
+      .factor-model-name-control {
+        display: grid;
+        grid-template-columns: max-content minmax(0, 1fr);
+        align-items: center;
+        gap: 9px;
+        padding: 10px 12px;
+        background: var(--surface-soft);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+      }
+
+      .factor-model-name-control span {
+        font-size: 12px;
+        color: var(--muted);
+        font-weight: 800;
+      }
+
+      .factor-model-name-control input {
+        min-width: 0;
+        height: 34px;
+        border: 1px solid #cbd9de;
+        border-radius: 8px;
+        padding: 0 10px;
+        color: var(--text);
+        background: #fff;
+        font-weight: 800;
+      }
+
+      .factor-pick,
+      .score-card,
+      .audit-row,
+      .config-block,
+      .diagnostic-card,
+      .mapping-card,
+      .preview-row {
+        border: 1px solid var(--line);
+        background: #fff;
+        border-radius: 12px;
+      }
+
+      .factor-pick {
+        padding: 14px;
+        display: grid;
+        gap: 10px;
+        border-color: #b7d9d3;
+        background: #f8fcfb;
+      }
+
+      .factor-pick__top {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .factor-pick strong,
+      .config-block h3,
+      .diagnostic-card h3 {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.35;
+      }
+
+      .factor-id {
+        color: var(--subtle);
+        font-size: 11px;
+        font-weight: 800;
+        text-align: right;
+      }
+
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .factor-phase2-chip {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 23px;
+        border-radius: 999px;
+        padding: 3px 8px;
+        background: #eef4f6;
+        color: #52616d;
+        font-size: 11px;
+        font-weight: 850;
+        white-space: nowrap;
+      }
+
+      .factor-phase2-chip--good {
+        background: var(--green-soft);
+        color: var(--green-dark);
+      }
+
+      .factor-phase2-chip--warn {
+        background: var(--amber-soft);
+        color: var(--amber);
+      }
+
+      .factor-phase2-chip--info {
+        background: var(--blue-soft);
+        color: var(--blue);
+      }
+
+      .factor-phase2-chip--violet {
+        background: var(--violet-soft);
+        color: var(--violet);
+      }
+
+      .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .mini-metric {
+        border: 1px solid #e1e8ec;
+        border-radius: 10px;
+        padding: 9px;
+        background: #fff;
+      }
+
+      .mini-metric span {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .mini-metric strong {
+        display: block;
+        margin-top: 4px;
+        font-size: 16px;
+      }
+
+      .diagnostic-card {
+        padding: 13px;
+        background: var(--surface-soft);
+      }
+
+      .diagnostic-card p {
+        margin: 8px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .sector-list {
+        display: grid;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .sector-row {
+        display: grid;
+        grid-template-columns: 72px minmax(0, 1fr) 48px;
+        gap: 8px;
+        align-items: center;
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .sector-row span:first-child {
+        color: #2e4050;
+      }
+
+      .sector-row span:last-child {
+        color: var(--red);
+        text-align: right;
+      }
+
+      .bar-track {
+        height: 8px;
+        background: #e6edf0;
+        border-radius: 999px;
+        overflow: hidden;
+      }
+
+      .bar-fill {
+        display: block;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--red);
+      }
+
+      .locked-weight {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 13px;
+        border: 1px solid #b7d9d3;
+        border-radius: 12px;
+        background: var(--green-soft);
+      }
+
+      .locked-weight span {
+        color: var(--green-dark);
+        font-size: 12px;
+        font-weight: 850;
+      }
+
+      .locked-weight strong {
+        font-size: 20px;
+      }
+
+      .score-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .score-card {
+        padding: 13px;
+        background: var(--surface-soft);
+      }
+
+      .score-card span {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 850;
+      }
+
+      .score-card strong {
+        display: block;
+        margin-top: 5px;
+        font-size: 21px;
+      }
+
+      .score-card small {
+        display: block;
+        margin-top: 4px;
+        color: var(--subtle);
+        font-size: 11px;
+        line-height: 1.4;
+      }
+
+      .config-block {
+        padding: 15px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .config-heading {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: start;
+      }
+
+      .step-label {
+        color: var(--green-dark);
+        font-size: 11px;
+        font-weight: 900;
+      }
+
+      .config-block p {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .filter-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .filter-pill {
+        border: 1px solid #d9e5e9;
+        border-radius: 10px;
+        padding: 10px;
+        background: #fbfdfd;
+        min-height: 76px;
+      }
+
+      .filter-pill span {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .filter-pill strong {
+        display: block;
+        margin-top: 6px;
+        font-size: 14px;
+      }
+
+      .control-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .control-grid--four {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+
+      .control-field {
+        display: grid;
+        gap: 6px;
+        border: 1px solid #d9e5e9;
+        border-radius: 10px;
+        padding: 8px;
+        background: #fbfdfd;
+      }
+
+      .control-field--wide {
+        grid-column: 1 / -1;
+      }
+
+      .control-field span,
+      .control-field label {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 850;
+      }
+
+      .control-field input,
+      .control-field select {
+        width: 100%;
+        height: 32px;
+        border: 1px solid #cbd9de;
+        border-radius: 8px;
+        background: #fff;
+        color: var(--text);
+        padding: 0 8px;
+        font-weight: 800;
+        font-size: 13px;
+      }
+
+      .control-field input[type='range'] {
+        height: 28px;
+        padding: 0;
+        accent-color: var(--green);
+      }
+
+      .number-pair {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 64px;
+        gap: 6px;
+      }
+
+      .checkbox-list {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 7px;
+      }
+
+      .check-row {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 5px;
+        min-height: 34px;
+        padding: 7px 6px;
+        border: 1px solid #d9e5e9;
+        border-radius: 10px;
+        background: #fff;
+        color: #233846;
+        font-size: 11px;
+        font-weight: 850;
+      }
+
+      .check-row input {
+        width: 16px;
+        height: 16px;
+        accent-color: var(--green);
+        flex: none;
+      }
+
+      .mapping-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .mapping-card {
+        padding: 10px;
+        background: #fbfdfd;
+        min-height: 84px;
+      }
+
+      .mapping-card.is-selected {
+        border-color: #98cfc6;
+        background: var(--green-soft);
+      }
+
+      .mapping-card strong {
+        display: block;
+        font-size: 13px;
+      }
+
+      .mapping-card span {
+        display: block;
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.45;
+      }
+
+      .allocation-switch {
+        display: grid;
+        gap: 9px;
+        padding: 12px;
+        border: 1px solid #d4e3e8;
+        border-radius: 12px;
+        background: #fbfdfd;
+      }
+
+      .allocation-switch__title {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .allocation-switch__title strong {
+        font-size: 13px;
+      }
+
+      .segmented-control {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .segment-option {
+        border: 1px solid #d9e5e9;
+        border-radius: 10px;
+        padding: 10px;
+        background: #fff;
+      }
+
+      .segment-option.is-selected {
+        border-color: #98cfc6;
+        background: var(--green-soft);
+      }
+
+      .segment-option strong {
+        display: block;
+        font-size: 13px;
+      }
+
+      .segment-option span {
+        display: block;
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.45;
+      }
+
+      .sector-cap-module {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 170px;
+        gap: 12px;
+        padding: 12px;
+        border: 1px solid #cbe0e4;
+        border-radius: 12px;
+        background: #f7fbfc;
+      }
+
+      .cap-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .cap-row {
+        display: grid;
+        grid-template-columns: 72px minmax(0, 1fr) 74px;
+        gap: 8px;
+        align-items: center;
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .cap-row span:last-child {
+        text-align: right;
+        color: #2f4958;
+      }
+
+      .cap-before {
+        background: var(--amber);
+      }
+
+      .cap-after {
+        background: var(--green);
+      }
+
+      .cap-summary {
+        display: grid;
+        gap: 8px;
+      }
+
+      .cap-summary div {
+        border: 1px solid #d9e5e9;
+        border-radius: 10px;
+        padding: 9px;
+        background: #fff;
+      }
+
+      .cap-summary span {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 850;
+      }
+
+      .cap-summary strong {
+        display: block;
+        margin-top: 4px;
+        font-size: 17px;
+      }
+
+      .rebalance-grid,
+      .execution-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .preview-row {
+        padding: 12px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .preview-row span {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .preview-row strong {
+        font-size: 14px;
+        text-align: right;
+      }
+
+      .audit-list {
+        display: grid;
+        gap: 9px;
+      }
+
+      .audit-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 12px;
+        align-items: center;
+        padding: 12px;
+      }
+
+      .audit-row strong {
+        display: block;
+        font-size: 13px;
+      }
+
+      .audit-row span {
+        display: block;
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.45;
+      }
+
+      .validator-card {
+        border: 1px solid #d8e6e5;
+        border-radius: 12px;
+        background: #f8fcfb;
+        padding: 13px;
+        display: grid;
+        gap: 10px;
+      }
+
+      .validator-card--warn {
+        border-color: #f0d8a9;
+        background: #fffaf0;
+      }
+
+      .validator-card strong {
+        font-size: 14px;
+      }
+
+      .validator-card p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .wznt-strip {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 6px;
+      }
+
+      .wznt-strip span {
+        display: grid;
+        place-items: center;
+        min-height: 32px;
+        border-radius: 8px;
+        background: var(--green);
+        color: #fff;
+        font-size: 13px;
+        font-weight: 900;
+      }
+
+      .risk-kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .risk-kpi {
+        border: 1px solid #d9e5e9;
+        border-radius: 10px;
+        padding: 9px;
+        background: #fff;
+      }
+
+      .risk-kpi span {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 850;
+      }
+
+      .risk-kpi strong {
+        display: block;
+        margin-top: 4px;
+        font-size: 16px;
+      }
+
+      .risk-box {
+        padding: 13px;
+        border-radius: 12px;
+        border: 1px solid #d8e6e5;
+        background: #f8fcfb;
+      }
+
+      .risk-box strong {
+        display: block;
+        font-size: 14px;
+      }
+
+      .risk-box p {
+        margin: 8px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .creation-summary {
+        display: grid;
+        gap: 8px;
+      }
+
+      .creation-summary .preview-row {
+        min-height: 55px;
+      }
+
+      .factor-model-submit {
+        width: 100%;
+        justify-content: center;
+        margin-top: 2px;
+      }
+
+      .trace-strip {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .trace-strip div {
+        border: 1px solid #d9e5e9;
+        border-radius: 10px;
+        padding: 9px;
+        background: #fff;
+      }
+
+      .trace-strip span {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 850;
+      }
+
+      .trace-strip strong {
+        display: block;
+        margin-top: 4px;
+        font-size: 14px;
+      }
+
+      @media (max-width: 1180px) {
+        .app-frame {
+          grid-template-columns: 76px minmax(0, 1fr);
+        }
+
+        .app-sidebar {
+          padding: 16px 10px;
+        }
+
+        .brand {
+          grid-template-columns: 1fr;
+          justify-items: center;
+        }
+
+        .brand div:not(.brand-mark),
+        .nav-title,
+        .nav-link span {
+          display: none;
+        }
+
+        .nav-link {
+          justify-content: center;
+          padding: 9px;
+        }
+
+        .factor-model-builder-page .factor-phase2-workbench--model {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+
+      @media (max-width: 720px) {
+        .app-frame {
+          display: block;
+        }
+
+        .app-sidebar {
+          position: static;
+          height: auto;
+          flex-direction: row;
+          align-items: center;
+          overflow-x: auto;
+          padding: 10px 12px;
+        }
+
+        .brand {
+          grid-template-columns: 30px auto;
+          justify-items: start;
+          flex: none;
+        }
+
+        .brand-mark {
+          width: 30px;
+          height: 30px;
+          font-size: 11px;
+        }
+
+        .brand div:not(.brand-mark) {
+          display: block;
+        }
+
+        .nav-section {
+          display: flex;
+          flex: none;
+        }
+
+        .nav-title,
+        .nav-link span {
+          display: none;
+        }
+
+        .app-main {
+          padding: 14px 12px 36px;
+        }
+
+        .factor-model-builder-page .factor-phase2-hero {
+          grid-template-columns: minmax(0, 1fr);
+          padding: 20px;
+          border-radius: 14px;
+        }
+
+        .factor-phase2-hero h1 {
+          font-size: 24px;
+        }
+
+        .factor-phase2-actions {
+          justify-content: stretch;
+        }
+
+        .factor-phase2-button {
+          flex: 1 1 140px;
+        }
+
+        .factor-phase2-panel__header {
+          min-height: auto;
+          padding: 18px;
+        }
+
+        .factor-phase2-panel__body {
+          padding: 16px;
+        }
+
+        .metric-grid,
+        .score-grid,
+        .filter-grid,
+        .mapping-grid,
+        .control-grid,
+        .control-grid--four,
+        .checkbox-list,
+        .segmented-control,
+        .risk-kpi-grid,
+        .rebalance-grid,
+        .execution-grid,
+        .trace-strip,
+        .sector-cap-module {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app-frame">
+      <aside class="app-sidebar" aria-label="Grit Strategy Lab 导航">
+        <div class="brand">
+          <div class="brand-mark">GSL</div>
+          <div>
+            <strong>Strategy Lab</strong>
+            <span>Research Workbench</span>
+          </div>
+        </div>
+
+        <nav class="nav-section" aria-label="组合">
+          <div class="nav-title">组合</div>
+          <div class="nav-link">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 5h16M4 12h16M4 19h16" /></svg>
+            <span>工作台</span>
+          </div>
+          <div class="nav-link">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M5 19V5m0 14h14M9 15l3-5 3 3 4-7" /></svg>
+            <span>组合中心</span>
+          </div>
+        </nav>
+
+        <nav class="nav-section" aria-label="策略">
+          <div class="nav-title">策略</div>
+          <div class="nav-link">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 7h16M7 4v6m10-6v6M6 14h12M9 18h6" /></svg>
+            <span>策略库</span>
+          </div>
+          <div class="nav-link is-active">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 3v18m7-12H5m12 8H7" /></svg>
+            <span>创建策略</span>
+          </div>
+        </nav>
+
+        <nav class="nav-section" aria-label="因子">
+          <div class="nav-title">因子</div>
+          <div class="nav-link">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 18l5-6 4 3 7-9" /></svg>
+            <span>因子库</span>
+          </div>
+          <div class="nav-link">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M8 4h8v6H8zM5 14h6v6H5zM13 14h6v6h-6z" /></svg>
+            <span>因子工厂</span>
+          </div>
+        </nav>
+      </aside>
+
+      <main class="app-main">
+        <section class="factor-phase2-page factor-model-builder-page" data-page-root="factor-model-builder">
+          <section class="factor-phase2-hero" aria-labelledby="factor-model-title">
+            <div>
+              <p class="factor-phase2-hero__eyebrow">COMPOSITE_FACTOR · 美股 L3 单因子 100%</p>
+              <h1 id="factor-model-title">组合因子策略创建</h1>
+              <p>
+                面向美股的 L3 因子组合策略配置。先校验因子准入与可交易股票池，再完成权重映射、再平衡和交易成本建模，生成可回测策略。
+              </p>
+            </div>
+            <div class="factor-phase2-actions" aria-label="策略创建操作">
+              <button class="factor-phase2-button">保存草稿</button>
+              <button class="factor-phase2-button factor-phase2-button--ghost">预览组合</button>
+              <button class="factor-phase2-button factor-phase2-button--primary">创建可回测策略</button>
+            </div>
+          </section>
+
+          <section class="factor-phase2-workbench factor-phase2-workbench--model" aria-label="组合因子策略工作台">
+            <section class="factor-phase2-panel" aria-labelledby="factor-model-select">
+              <div class="factor-phase2-panel__header">
+                <h2 id="factor-model-select">因子来源</h2>
+                <p>仅接收 WNZT 完成、S/A 评级、L3 层级的美股因子；当前权重固定 100%。</p>
+              </div>
+              <div class="factor-phase2-panel__body">
+                <label class="factor-model-name-control">
+                  <span>策略名称</span>
+                  <input value="L3 质量动量组合策略" aria-label="策略名称" />
+                </label>
+
+                <article class="factor-pick" aria-label="已选 L3 因子">
+                  <div class="factor-pick__top">
+                    <div>
+                      <strong>质量动量残差因子</strong>
+                      <div class="chips" aria-label="因子准入标签">
+                        <span class="factor-phase2-chip factor-phase2-chip--good">WNZT 完成</span>
+                        <span class="factor-phase2-chip factor-phase2-chip--good">S 级</span>
+                        <span class="factor-phase2-chip factor-phase2-chip--info">L3</span>
+                        <span class="factor-phase2-chip factor-phase2-chip--violet">诊断完成</span>
+                      </div>
+                    </div>
+                    <span class="factor-id">l3_quality_mom_resid_v8</span>
+                  </div>
+                  <div class="metric-grid" aria-label="因子统计">
+                    <div class="mini-metric">
+                      <span>Rank IC</span>
+                      <strong>0.071</strong>
+                    </div>
+                    <div class="mini-metric">
+                      <span>IR</span>
+                      <strong>1.46</strong>
+                    </div>
+                    <div class="mini-metric">
+                      <span>覆盖率</span>
+                      <strong>99.1%</strong>
+                    </div>
+                    <div class="mini-metric">
+                      <span>最近 WNZT</span>
+                      <strong>2026-05-17</strong>
+                    </div>
+                  </div>
+                </article>
+
+                <div class="locked-weight" aria-label="因子权重">
+                  <span>因子权重已锁定</span>
+                  <strong>100%</strong>
+                </div>
+
+                <article class="diagnostic-card" aria-label="Diagnostic Summary">
+                  <h3>Diagnostic Summary</h3>
+                  <p>过去 252 日，因子在低流动性与高监管扰动行业表现偏弱，过滤阶段优先处理。</p>
+                  <div class="sector-list" aria-label="表现最弱行业">
+                    <div class="sector-row">
+                      <span>公用事业</span>
+                      <div class="bar-track"><span class="bar-fill" style="width: 78%"></span></div>
+                      <span>-0.18 IC</span>
+                    </div>
+                    <div class="sector-row">
+                      <span>能源</span>
+                      <div class="bar-track"><span class="bar-fill" style="width: 64%"></span></div>
+                      <span>-0.12 IC</span>
+                    </div>
+                    <div class="sector-row">
+                      <span>房地产</span>
+                      <div class="bar-track"><span class="bar-fill" style="width: 56%"></span></div>
+                      <span>-0.09 IC</span>
+                    </div>
+                  </div>
+                </article>
+              </div>
+            </section>
+
+            <section class="factor-phase2-panel" aria-labelledby="factor-model-preview">
+              <div class="factor-phase2-panel__header">
+                <h2 id="factor-model-preview">配置与权重预览</h2>
+                <p>四步配置直接生成策略参数；行业超限按规则裁断或回填。</p>
+              </div>
+              <div class="factor-phase2-panel__body">
+                <div class="score-grid" aria-label="组合预览摘要">
+                  <div class="score-card">
+                    <span>过滤后标的</span>
+                    <strong>486 / 503</strong>
+                    <small>低 ADV、停牌、OTC、退市窗口已拦截</small>
+                  </div>
+                  <div class="score-card">
+                    <span>行业裁断</span>
+                    <strong>11.4%</strong>
+                    <small>科技行业从 31.4% 降至 20.0%</small>
+                  </div>
+                  <div class="score-card">
+                    <span>现金留存</span>
+                    <strong>0.6%</strong>
+                    <small>默认保持现金，可切换回填满仓</small>
+                  </div>
+                </div>
+
+                <article class="config-block" aria-label="股票池过滤">
+                  <div class="config-heading">
+                    <div>
+                      <span class="step-label">STEP 01</span>
+                      <h3>股票池过滤</h3>
+                      <p>设定美股可交易性与流动性底线。</p>
+                    </div>
+                    <span class="factor-phase2-chip factor-phase2-chip--good">通过</span>
+                  </div>
+                  <div class="control-grid">
+                    <div class="control-field">
+                      <span>成交额门槛</span>
+                      <div class="number-pair">
+                        <input value="5,000,000" aria-label="ADV 门槛" />
+                        <select aria-label="ADV 周期">
+                          <option>20D</option>
+                          <option>60D</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div class="control-field">
+                      <label for="delist-window">退市窗口期</label>
+                      <input id="delist-window" type="range" min="0" max="90" value="30" />
+                      <strong>未来 30 天</strong>
+                    </div>
+                  </div>
+                  <div class="checkbox-list" aria-label="交易状态过滤">
+                    <label class="check-row"><input type="checkbox" checked />停牌</label>
+                    <label class="check-row"><input type="checkbox" checked />OTC/Pink</label>
+                    <label class="check-row"><input type="checkbox" checked />LULD 暂停</label>
+                    <label class="check-row"><input type="checkbox" checked />退市窗口</label>
+                  </div>
+                  <div class="trace-strip" aria-label="诊断驱动过滤">
+                    <div>
+                      <span>公用事业</span>
+                      <strong>保守降权</strong>
+                    </div>
+                    <div>
+                      <span>能源</span>
+                      <strong>ADV 加严</strong>
+                    </div>
+                    <div>
+                      <span>房地产</span>
+                      <strong>压力检查</strong>
+                    </div>
+                    <div>
+                      <span>低流动性</span>
+                      <strong>17 只剔除</strong>
+                    </div>
+                  </div>
+                </article>
+
+                <article class="config-block" aria-label="权重映射">
+                  <div class="config-heading">
+                    <div>
+                      <span class="step-label">STEP 02</span>
+                      <h3>权重映射</h3>
+                      <p>将因子分数映射为目标仓位，控制行业和个股集中度。</p>
+                    </div>
+                    <span class="factor-phase2-chip factor-phase2-chip--good">Top 50</span>
+                  </div>
+                  <div class="mapping-grid" aria-label="权重映射模式">
+                    <div class="mapping-card is-selected">
+                      <strong>等权 Top-K</strong>
+                      <span>Top 50 等权，每只 2.00%。</span>
+                    </div>
+                    <div class="mapping-card">
+                      <strong>分值比例法</strong>
+                      <span>按因子分数比例分配资金。</span>
+                    </div>
+                    <div class="mapping-card">
+                      <strong>风险优化启发式</strong>
+                      <span>在上限内提高收益与分散度。</span>
+                    </div>
+                  </div>
+                  <div class="control-grid control-grid--four">
+                    <div class="control-field">
+                      <span>Top-N</span>
+                      <input value="50" aria-label="持仓数量 Top-N" />
+                    </div>
+                    <div class="control-field">
+                      <span>行业上限</span>
+                      <input value="20.0%" aria-label="行业硬上限" />
+                    </div>
+                    <div class="control-field">
+                      <span>个股上限</span>
+                      <input value="2.0%" aria-label="个股权重上限" />
+                    </div>
+                    <div class="control-field">
+                      <span>最低权重</span>
+                      <input value="0.25%" aria-label="最低目标权重" />
+                    </div>
+                  </div>
+
+                  <div class="sector-cap-module" aria-label="行业硬上限">
+                    <div class="cap-list">
+                      <div class="cap-row">
+                        <span>科技</span>
+                        <div class="bar-track"><span class="bar-fill cap-before" style="width: 100%"></span></div>
+                        <span>31.4% → 20.0%</span>
+                      </div>
+                      <div class="cap-row">
+                        <span>医疗</span>
+                        <div class="bar-track"><span class="bar-fill cap-after" style="width: 73%"></span></div>
+                        <span>14.6%</span>
+                      </div>
+                      <div class="cap-row">
+                        <span>工业</span>
+                        <div class="bar-track"><span class="bar-fill cap-after" style="width: 69%"></span></div>
+                        <span>13.8%</span>
+                      </div>
+                      <div class="cap-row">
+                        <span>金融</span>
+                        <div class="bar-track"><span class="bar-fill cap-after" style="width: 62%"></span></div>
+                        <span>12.4%</span>
+                      </div>
+                    </div>
+                    <div class="cap-summary">
+                      <div>
+                        <span>截断超额</span>
+                        <strong>11.4%</strong>
+                      </div>
+                      <div>
+                        <span>残余现金</span>
+                        <strong>0.6%</strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="allocation-switch" aria-label="裁断权重重分配">
+                    <div class="allocation-switch__title">
+                      <strong>裁断权重重分配</strong>
+                      <span class="factor-phase2-chip factor-phase2-chip--warn">默认保持现金</span>
+                    </div>
+                    <div class="segmented-control">
+                      <div class="segment-option is-selected">
+                        <strong>保持现金</strong>
+                        <span>裁断后进入现金腿，降低再分配误差。</span>
+                      </div>
+                      <div class="segment-option">
+                        <strong>按比例回填</strong>
+                        <span>按剩余行业分值比例回填，目标满仓。</span>
+                      </div>
+                    </div>
+                  </div>
+                </article>
+
+                <article class="config-block" aria-label="再平衡逻辑">
+                  <div class="config-heading">
+                    <div>
+                      <span class="step-label">STEP 03</span>
+                      <h3>再平衡逻辑</h3>
+                      <p>控制调仓节奏与交易指令下限。</p>
+                    </div>
+                    <span class="factor-phase2-chip factor-phase2-chip--info">月度</span>
+                  </div>
+                  <div class="control-grid">
+                    <div class="control-field">
+                      <span>调仓频率</span>
+                      <select aria-label="调仓频率">
+                        <option>每月</option>
+                        <option>每周</option>
+                        <option>每日</option>
+                      </select>
+                    </div>
+                    <div class="control-field">
+                      <span>交易日规则</span>
+                      <select aria-label="交易日规则">
+                        <option>首个交易日</option>
+                        <option>末个交易日</option>
+                        <option>固定周一</option>
+                      </select>
+                    </div>
+                    <div class="control-field">
+                      <span>排名阈值触发</span>
+                      <input value="跌出前 20%" aria-label="排名阈值触发" />
+                    </div>
+                    <div class="control-field">
+                      <span>最小交易金额</span>
+                      <input value="10,000 USD" aria-label="最小交易金额" />
+                    </div>
+                  </div>
+                </article>
+
+                <article class="config-block" aria-label="实盘约束">
+                  <div class="config-heading">
+                    <div>
+                      <span class="step-label">STEP 04</span>
+                      <h3>实盘约束</h3>
+                      <p>统一设置本金、税费与冲击成本。</p>
+                    </div>
+                    <span class="factor-phase2-chip factor-phase2-chip--warn">已计入</span>
+                  </div>
+                  <div class="control-grid">
+                    <div class="control-field">
+                      <span>初始本金</span>
+                      <input value="10,000,000 USD" aria-label="初始本金" />
+                    </div>
+                    <div class="control-field">
+                      <span>固定佣金</span>
+                      <input value="1.5 bps" aria-label="固定佣金" />
+                    </div>
+                    <div class="control-field">
+                      <span>印花税</span>
+                      <input value="0.0 bps" aria-label="印花税" />
+                    </div>
+                    <div class="control-field">
+                      <span>基础滑点</span>
+                      <input value="2.5 bps" aria-label="基础滑点" />
+                    </div>
+                    <div class="control-field">
+                      <span>冲击系数 β</span>
+                      <input value="0.65" aria-label="冲击系数 beta" />
+                    </div>
+                    <div class="control-field">
+                      <span>最大冲击</span>
+                      <input value="75 bps" aria-label="最大冲击" />
+                    </div>
+                  </div>
+                </article>
+              </div>
+            </section>
+
+            <section class="factor-phase2-panel" aria-labelledby="factor-model-gates">
+              <div class="factor-phase2-panel__header">
+                <h2 id="factor-model-gates">策略创建风险</h2>
+                <p>实时校验因子准入、行业裁断与交易成本。</p>
+              </div>
+              <div class="factor-phase2-panel__body">
+                <div class="validator-card" aria-label="L3 因子准入检查">
+                  <div class="config-heading">
+                    <strong>L3 因子准入检查</strong>
+                    <span class="factor-phase2-chip factor-phase2-chip--good">可创建</span>
+                  </div>
+                  <div class="wznt-strip" aria-label="WNZT 状态">
+                    <span>W</span>
+                    <span>N</span>
+                    <span>Z</span>
+                    <span>T</span>
+                  </div>
+                  <p>WNZT 全通过，S 级 L3 因子，PIT 覆盖率 99.1%。任一项失效则禁用创建。</p>
+                </div>
+
+                <div class="validator-card" aria-label="行业截断预测">
+                  <div class="config-heading">
+                    <strong>行业截断预测</strong>
+                    <span class="factor-phase2-chip factor-phase2-chip--warn">保持现金</span>
+                  </div>
+                  <div class="risk-kpi-grid">
+                    <div class="risk-kpi">
+                      <span>被裁断权重</span>
+                      <strong>11.4%</strong>
+                    </div>
+                    <div class="risk-kpi">
+                      <span>残余现金</span>
+                      <strong>0.6%</strong>
+                    </div>
+                    <div class="risk-kpi">
+                      <span>满仓率</span>
+                      <strong>99.4%</strong>
+                    </div>
+                    <div class="risk-kpi">
+                      <span>超额行业</span>
+                      <strong>1 个</strong>
+                    </div>
+                  </div>
+                  <p>现金留存超过 10% 时提示跟踪误差；回填模式可目标满仓。</p>
+                </div>
+
+                <div class="validator-card validator-card--warn" aria-label="成本预估">
+                  <div class="config-heading">
+                    <strong>成本预估</strong>
+                    <span class="factor-phase2-chip factor-phase2-chip--warn">6.8 bps</span>
+                  </div>
+                  <div class="risk-kpi-grid">
+                    <div class="risk-kpi">
+                      <span>平均每笔滑点</span>
+                      <strong>6.8 bps</strong>
+                    </div>
+                    <div class="risk-kpi">
+                      <span>固定成本</span>
+                      <strong>1.5 bps</strong>
+                    </div>
+                    <div class="risk-kpi">
+                      <span>冲击系数 β</span>
+                      <strong>0.65</strong>
+                    </div>
+                    <div class="risk-kpi">
+                      <span>单笔上限</span>
+                      <strong>75 bps</strong>
+                    </div>
+                  </div>
+                  <p>基于 10,000,000 USD 本金和订单 / ADV 比例估算，成本写入回测参数。</p>
+                </div>
+
+                <div class="audit-list" aria-label="实时门禁摘要">
+                  <div class="audit-row">
+                    <div>
+                      <strong>交易可执行性</strong>
+                      <span>停牌、OTC/Pink、LULD 暂停和退市窗口均已拦截。</span>
+                    </div>
+                    <span class="factor-phase2-chip factor-phase2-chip--good">通过</span>
+                  </div>
+                  <div class="audit-row">
+                    <div>
+                      <strong>跟踪误差提示</strong>
+                      <span>当前残余现金 0.6%，低于 10% 预警线。</span>
+                    </div>
+                    <span class="factor-phase2-chip factor-phase2-chip--info">正常</span>
+                  </div>
+                </div>
+
+                <div class="risk-box" aria-label="策略类型摘要">
+                  <strong>Strategy Type: COMPOSITE_FACTOR</strong>
+                  <p>创建后进入现有策略详情页，回测、参数优化、结果晋升沿用其他策略的标准链路。</p>
+                </div>
+
+                <div class="creation-summary" aria-label="创建参数摘要">
+                  <div class="preview-row">
+                    <span>持仓数量</span>
+                    <strong>50</strong>
+                  </div>
+                  <div class="preview-row">
+                    <span>单票目标权重</span>
+                    <strong>2.00%</strong>
+                  </div>
+                  <div class="preview-row">
+                    <span>单行业硬上限</span>
+                    <strong>20.00%</strong>
+                  </div>
+                  <div class="preview-row">
+                    <span>裁断处理</span>
+                    <strong>保持现金</strong>
+                  </div>
+                  <div class="preview-row">
+                    <span>再平衡频率</span>
+                    <strong>月度 + 排名阈值</strong>
+                  </div>
+                </div>
+
+                <button class="factor-phase2-button factor-phase2-button--primary factor-model-submit">创建可回测策略</button>
+              </div>
+            </section>
+          </section>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

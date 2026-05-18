@@ -1300,7 +1300,7 @@ def test_multi_factor_optimization_projection_normalizes_weights_and_dedupes_cad
     assert mixed_matching_combinations[-1]["id"] == "trial_stale_cap_b"
 
 
-def test_multi_factor_optimization_trial_prefers_prepared_context_over_projection(tmp_path, monkeypatch) -> None:
+def test_multi_factor_optimization_trial_prefers_projection_over_prepared_context(tmp_path, monkeypatch) -> None:
     client, _db_path = create_test_client(tmp_path)
     service = client.app.state.service
     strategy = {
@@ -1316,52 +1316,42 @@ def test_multi_factor_optimization_trial_prefers_prepared_context_over_projectio
     evaluation_request = {"source_run_id": "run_multi_factor_source"}
     payload = {"objective": "return_sharpe", "source_run_id": "run_multi_factor_source"}
     prepared_context = {"prepared": True}
-    captured = {}
 
-    def fail_projection(*_args, **_kwargs):
-        raise AssertionError("prepared optimization trials should not use projected metrics")
-
-    def fake_preview_and_chart(
+    def fake_projection(
         _strategy,
         _evaluation_request,
         _payload,
         parameter_snapshot,
-        *,
-        prepared_context=None,
     ):
-        captured["prepared_context"] = prepared_context
-        captured["parameter_snapshot"] = dict(parameter_snapshot)
         return {
+            "parameter_snapshot": dict(parameter_snapshot),
             "metrics": {
-                "total_return": 0.08,
-                "annualized_return": 0.12,
-                "annualized_volatility": 0.16,
-                "sharpe": 1.25,
-                "oos_sharpe": 1.05,
-                "max_drawdown": -0.06,
-                "turnover": 0.2,
-                "win_rate": 0.57,
-            }
-        }, [
-            {
-                "trade_date": "2024-01-02",
-                "strategy_return": 0.01,
-                "drawdown": 0.0,
-                "is_oos": False,
+                "return_sharpe": 2.5,
+                "out_of_sample_sharpe": 2.1,
+                "annualized_return": 0.32,
+                "total_return_pct": 44.0,
+                "stability": 88.0,
+                "multi_factor_projection_effect": 0.08,
             },
-            {
-                "trade_date": "2024-01-03",
-                "strategy_return": 0.02,
-                "drawdown": -1.0,
-                "is_oos": True,
-            },
-        ]
+            "chart_series": [
+                {
+                    "trade_date": "2024-01-02",
+                    "strategy_return": 0.01,
+                    "drawdown": 0.0,
+                    "is_oos": False,
+                },
+            ],
+            "score": 2.5,
+        }
 
-    monkeypatch.setattr(service, "_project_multi_factor_optimization_trial", fail_projection)
+    def fail_preview_and_chart(*_args, **_kwargs):
+        raise AssertionError("projectable multi-factor optimization should not execute a full trial simulation")
+
+    monkeypatch.setattr(service, "_project_multi_factor_optimization_trial", fake_projection)
     monkeypatch.setattr(
         service,
         "_build_optimization_trial_preview_and_chart_series",
-        fake_preview_and_chart,
+        fail_preview_and_chart,
     )
 
     trial = service._evaluate_optimization_trial(
@@ -1376,15 +1366,100 @@ def test_multi_factor_optimization_trial_prefers_prepared_context_over_projectio
         prepared_context=prepared_context,
     )
 
-    assert captured["prepared_context"] is prepared_context
-    assert captured["parameter_snapshot"]["top_n"] == 25
+    assert trial["parameter_snapshot"]["top_n"] == 25
     assert trial["parameter_snapshot"]["weights"]["s_mom_12m1m_rank"] == 55
     assert trial["parameter_snapshot"]["weights"]["s_val_ep_ltm_raw"] == 45
-    assert trial["metrics"]["return_sharpe"] == 1.25
-    assert "multi_factor_projection_effect" not in trial["metrics"]
+    assert trial["metrics"]["return_sharpe"] == 2.5
+    assert trial["metrics"]["multi_factor_projection_effect"] == 0.08
 
 
-def test_multi_factor_optimization_runner_reuses_prepared_context_for_trials(tmp_path, monkeypatch) -> None:
+def test_multi_factor_top_trial_backfill_uses_projection_chart_without_full_simulation(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    service = client.app.state.service
+    strategy = {
+        "id": "strat_multi_factor_projection_backfill",
+        "strategy_type": "MULTI_FACTOR",
+        "parameters": {
+            "strategy_type": "MULTI_FACTOR",
+            "factor_ids": ["s_mom_12m1m_rank", "s_val_ep_ltm_raw"],
+            "weights": {"s_mom_12m1m_rank": 60, "s_val_ep_ltm_raw": 40},
+            "top_n": 10,
+        },
+    }
+    payload = {"objective": "return_sharpe", "source_run_id": "run_multi_factor_source"}
+    evaluation_request = {"source_run_id": "run_multi_factor_source"}
+    trials = [
+        {
+            "trial_index": 1,
+            "status": "SUCCEEDED",
+            "parameter_snapshot": {
+                "factor_weight__s_mom_12m1m_rank_pct": 55,
+                "factor_weight__s_val_ep_ltm_raw_pct": 45,
+                "top_n": 25,
+            },
+            "metrics": {"return_sharpe": 1.2, "out_of_sample_sharpe": 1.0},
+            "score": 1.2,
+            "started_at": "2026-05-15T00:00:00Z",
+            "completed_at": "2026-05-15T00:00:01Z",
+        }
+    ]
+    persisted: dict[str, object] = {}
+
+    def fake_projection(
+        _strategy,
+        _evaluation_request,
+        _payload,
+        parameter_snapshot,
+    ):
+        return {
+            "parameter_snapshot": dict(parameter_snapshot),
+            "metrics": {
+                "return_sharpe": 2.4,
+                "out_of_sample_sharpe": 2.0,
+                "annualized_return": 0.3,
+                "total_return_pct": 42.0,
+                "stability": 87.0,
+                "multi_factor_projection_effect": 0.07,
+            },
+            "chart_series": [
+                {
+                    "trade_date": "2024-01-02",
+                    "strategy_return": 0.01,
+                    "drawdown": 0.0,
+                    "is_oos": False,
+                },
+            ],
+            "score": 2.4,
+        }
+
+    def fail_preview_and_chart(*_args, **_kwargs):
+        raise AssertionError("top-trial chart backfill should reuse projected chart series")
+
+    def capture_persist(*_args, **kwargs):
+        persisted["chart_series"] = list(kwargs.get("chart_series") or [])
+        persisted["metrics"] = dict(kwargs.get("metrics") or {})
+
+    monkeypatch.setattr(service, "_load_optimization_trial_chart_series_map", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(service, "_project_multi_factor_optimization_trial", fake_projection)
+    monkeypatch.setattr(service, "_build_optimization_trial_preview_and_chart_series", fail_preview_and_chart)
+    monkeypatch.setattr(service, "_persist_optimization_trial", capture_persist)
+
+    final_trials = service._backfill_optimization_top_trial_chart_series(
+        "opt_projection_backfill",
+        strategy,
+        evaluation_request,
+        payload,
+        trials,
+    )
+
+    assert final_trials[0]["metrics"]["return_sharpe"] == 2.4
+    assert final_trials[0]["metrics"]["multi_factor_projection_effect"] == 0.07
+    assert final_trials[0]["chart_series"]
+    assert persisted["chart_series"]
+    assert persisted["metrics"]["multi_factor_projection_effect"] == 0.07
+
+
+def test_multi_factor_optimization_runner_skips_prepared_context_for_projected_trials(tmp_path, monkeypatch) -> None:
     client, _db_path = create_test_client(tmp_path)
     service = client.app.state.service
     strategy = {
@@ -1410,7 +1485,6 @@ def test_multi_factor_optimization_runner_reuses_prepared_context_for_trials(tmp
         {**strategy["parameters"], "top_n": 5},
         {**strategy["parameters"], "top_n": 10},
     ]
-    prepared_context = {"prepared": True}
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(service, "get_strategy_detail", lambda _strategy_id: strategy)
@@ -1421,7 +1495,10 @@ def test_multi_factor_optimization_runner_reuses_prepared_context_for_trials(tmp
     monkeypatch.setattr(service, "_ensure_optimization_snapshots_ready", lambda **_kwargs: None)
     monkeypatch.setattr(service, "_refresh_optimization_runner_claim", lambda _job_id: True)
     monkeypatch.setattr(service, "_load_optimization_trials", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(service, "_prepare_backtest_run_context", lambda _strategy, _request: prepared_context)
+    def fail_prepare_context(*_args, **_kwargs):
+        raise AssertionError("projected optimization should not preload prepared context")
+
+    monkeypatch.setattr(service, "_prepare_backtest_run_context", fail_prepare_context)
     monkeypatch.setattr(service, "_persist_optimization_job", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(service, "_optimization_runtime_best_summary", lambda _state: None)
     monkeypatch.setattr(
@@ -1480,8 +1557,8 @@ def test_multi_factor_optimization_runner_reuses_prepared_context_for_trials(tmp
         created_at="2026-05-15T00:00:00Z",
     )
 
-    assert captured["sequential_prepared_context"] is prepared_context
-    assert captured["backfill_prepared_context"] is prepared_context
+    assert captured["sequential_prepared_context"] is None
+    assert captured["backfill_prepared_context"] is None
 
 
 def test_multi_factor_preview_uses_lightweight_precheck_without_full_simulation(tmp_path, monkeypatch) -> None:

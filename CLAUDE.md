@@ -190,6 +190,8 @@ Before editing, read:
 
 Before editing, prepare a UI Artifact Trace Matrix that maps approved HTML/spec modules to target files/components, required copy/status/value formatting, interactions, responsive expectations, tests, screenshot evidence, DOM copy scan, and allowed deviations.
 
+For design-locked work, the matrix must also include a design-vs-live parity grid. Cover conditional modules from the approved artifact under states where they are visible, such as publishable queues, non-empty history lists, empty states, warning/failure rows, disabled controls, and opened modals. If the current live API does not naturally produce an approved-artifact state, use an auditable fixture/seed or mark the review blocked; do not accept "0 rows, therefore hidden" as design parity.
+
 You own only these frontend files:
 - [paste exact files]
 
@@ -207,6 +209,7 @@ Return:
 - UI Artifact Trace Matrix status
 - screenshot paths for required breakpoints
 - DOM copy/status scan results
+- design-vs-live parity grid covering module order, card/list counts, visible/hidden conditional modules, field labels, controls, density, and approved deviations
 - interaction proof for in-scope tabs, filters, drawers, sticky regions, disabled/joined states, save/refresh actions
 - unresolved deviations from approved HTML/spec
 - pre-delivery self-review result, including the answer to "Would reviewer refuse this?" and evidence for "No"
@@ -231,6 +234,7 @@ Review against these repo truths:
 - Shared runtime client truth stays in web/src/lib/demoStoreContext.tsx.
 - Shell layout truth stays in web/src/shell-frame-cn.tsx and web/src/shell-route-meta-cn.ts.
 - Delivered UI artifact work must include a UI Artifact Trace Matrix plus screenshot, DOM copy/status, and interaction evidence.
+- For design-locked UI, reject the slice if the matrix lacks approved-artifact paths, design screenshot, live screenshot, conditional-state coverage, or an explicit approved-deviation list.
 - Worker output must include a pre-delivery self-review result before formal review.
 - Optimization detail must preserve distinct progress, interrupted, and terminal states.
 - Snapshot pages must consume formal overview contracts instead of inventing screenshot-only data shapes.

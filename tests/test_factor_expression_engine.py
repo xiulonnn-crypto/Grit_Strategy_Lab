@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 
 import pytest
 
@@ -78,6 +79,28 @@ def test_expression_engine_evaluates_new_factor_library_operators() -> None:
 
     asymmetry = evaluate_expression("StdDev(RetUp, 3) / StdDev(RetDown, 3)", data)
     assert len(asymmetry) == 5
+
+
+def test_expression_engine_rolling_std_matches_population_window_contract() -> None:
+    values = [1.0, 2.0, 3.0, None, 5.0, 6.0, 7.0, 8.0]
+
+    rolling_std = evaluate_expression("Std(Close, 3)", {"Close": values})
+    expected = []
+    for index in range(len(values)):
+        if index + 1 < 3:
+            expected.append(None)
+            continue
+        window_values = values[index - 2 : index + 1]
+        if any(value is None for value in window_values):
+            expected.append(None)
+        else:
+            expected.append(statistics.pstdev(float(value) for value in window_values if value is not None))
+
+    for actual, expected_value in zip(rolling_std, expected):
+        if expected_value is None:
+            assert actual is None
+        else:
+            assert actual == pytest.approx(expected_value)
 
 
 @pytest.mark.parametrize(

@@ -55,7 +55,7 @@ def _factory_payload(candidate_count: int = 8) -> dict:
             "max_style_correlation": 0.3,
             "residual_enabled": True,
             "max_drawdown_relative_to_benchmark": 1.5,
-            "min_oos_to_is_ratio": 0.5,
+            "min_oos_to_is_ratio": 0.6,
         },
     }
 
@@ -100,6 +100,16 @@ def test_factor_factory_run_auto_intakes_and_executes_quarantine() -> None:
     assert summary["auto_quarantine_status"] == "COMPLETED"
     assert summary["auto_intake_count"] >= 1
     assert summary["auto_quarantine_count"] >= 1
+    assert overview["phase2_contract"]["flow"] == "B1-B2-B3-B4"
+    assert overview["phase2_contract"]["l2_operator_chain"] == "Raw -> Winsorize -> Neutralize -> Z-Score -> Rank"
+    assert [row["kind"] for row in overview["task_rows"]] == ["mining", "refinement", "composition"]
+    assert {row["status"] for row in overview["task_rows"]} <= {"待开始", "进行中", "已完成"}
+    assert overview["task_rows"][0]["target_layer"] == "L2"
+    assert "原子信号" in overview["task_rows"][0]["title"]
+    assert overview["scoring_candidates"] == []
+    assert overview["quarantine_result_rows"]
+    assert all(row["quarantine_result"] in {"PASS", "WARN", "FAIL"} for row in overview["quarantine_result_rows"])
+    assert all(row["target_layer"] != "L1" for row in overview["quarantine_result_rows"] if "Return(" in row["factor_name"])
 
     quarantine = assert_ok(client.get(f"/factor-quarantine/candidates?source_job_id={mining_job_id}"))
     assert quarantine["items"]

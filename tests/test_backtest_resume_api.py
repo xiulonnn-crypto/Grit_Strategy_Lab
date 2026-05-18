@@ -12,6 +12,7 @@ from grit_backtest_platform.api import create_app
 from grit_backtest_platform.backtest_engine import run_backtest_prepared
 from grit_backtest_platform.models import BacktestRunStatus, ResumeBacktestRunRequest
 from grit_backtest_platform.real_service import RealBacktestPlatformService
+from grit_backtest_platform.storage import iso_now
 
 from tests.api_test_support import FakeMarketDataProvider, assert_ok, create_momentum_strategy, create_test_client, refresh_snapshots
 
@@ -70,6 +71,7 @@ def _seed_interrupted_run(
     run_id: str,
     status: str = "INTERRUPTED",
     completed_steps: int = 2,
+    error_message: str | None = None,
 ) -> tuple[dict[str, Any], Any]:
     request_payload, _prepared_context, checkpoint_snapshot, full_result = _build_checkpoint_snapshot(
         service,
@@ -105,11 +107,13 @@ def _seed_interrupted_run(
             strategy_id=strategy["id"],
             status=status,
             request_payload=seeded_request_payload,
-            created_at="2026-05-13T09:55:00Z",
+            created_at=iso_now(),
             updated_at="2026-05-13T10:05:00Z",
             preview=preview,
             parameter_snapshot=preview.get("parameter_snapshot") or {},
             environment_summary=preview.get("environment_summary") or {},
+            error_message=error_message,
+            completed_at=iso_now() if status == "FAILED" else None,
         ),
     )
     service._persist_backtest_checkpoint(
@@ -400,6 +404,152 @@ def test_resume_incomplete_backtest_runs_does_not_start_duplicate_runners_across
     deadline = time.monotonic() + 1.0
     while time.monotonic() < deadline and "run_cross_service_claim" in service_a._backtest_run_threads:
         time.sleep(0.01)
+
+
+def test_list_backtest_runs_interrupts_orphaned_running_backtests(tmp_path) -> None:
+    client, _ = create_test_client(tmp_path)
+    strategy = create_momentum_strategy(
+        client,
+        idempotency_key="backtest-orphan-reconcile",
+        universe_name="SPY",
+        rebalance_frequency="monthly",
+        top_n=1,
+    )["strategy"]
+    refresh_snapshots(client)
+    service = client.app.state.service
+    _seed_interrupted_run(service, strategy, run_id="run_orphaned_claim", status="RUNNING")
+    service.storage.execute(
+        "UPDATE backtest_runs SET updated_at = ? WHERE id = ?",
+        ("2000-01-01T00:00:00Z", "run_orphaned_claim"),
+    )
+
+    running_rows = service.list_backtest_runs(status="RUNNING")
+    detail = service.get_backtest_run_detail("run_orphaned_claim")
+
+    assert all(item["id"] != "run_orphaned_claim" for item in running_rows)
+    assert detail["status"] == "INTERRUPTED"
+    assert detail["resume_ready"] is True
+    assert detail["interrupted_reason"] == "service_restart"
+    assert detail["persisted_step_count"] == 2
+    assert detail["total_step_count"] > 0
+
+
+def test_list_backtest_runs_converts_database_lock_failures_to_resumable_interruptions(tmp_path) -> None:
+    client, _ = create_test_client(tmp_path)
+    strategy = create_momentum_strategy(
+        client,
+        idempotency_key="backtest-db-lock-reconcile",
+        universe_name="SPY",
+        rebalance_frequency="monthly",
+        top_n=1,
+    )["strategy"]
+    refresh_snapshots(client)
+    service = client.app.state.service
+    _seed_interrupted_run(
+        service,
+        strategy,
+        run_id="run_database_lock_failure",
+        status="FAILED",
+        error_message="database is locked",
+    )
+
+    failed_rows = service.list_backtest_runs(status="FAILED")
+    detail = service.get_backtest_run_detail("run_database_lock_failure")
+
+    assert all(item["id"] != "run_database_lock_failure" for item in failed_rows)
+    assert detail["status"] == "INTERRUPTED"
+    assert detail["resume_ready"] is True
+    assert detail["interrupted_reason"] == "database_lock"
+    assert detail["latest_update"] == "主库短暂写锁，回测已安全中断；请确认后恢复运行。"
+
+
+def test_list_backtest_runs_converts_claim_lost_failures_to_resumable_interruptions(tmp_path) -> None:
+    client, _ = create_test_client(tmp_path)
+    strategy = create_momentum_strategy(
+        client,
+        idempotency_key="backtest-claim-lost-reconcile",
+        universe_name="SPY",
+        rebalance_frequency="monthly",
+        top_n=1,
+    )["strategy"]
+    refresh_snapshots(client)
+    service = client.app.state.service
+    _seed_interrupted_run(
+        service,
+        strategy,
+        run_id="run_claim_lost_failure",
+        status="FAILED",
+        error_message="Backtest runner claim lost: run_claim_lost_failure",
+    )
+
+    failed_rows = service.list_backtest_runs(status="FAILED")
+    detail = service.get_backtest_run_detail("run_claim_lost_failure")
+
+    assert all(item["id"] != "run_claim_lost_failure" for item in failed_rows)
+    assert detail["status"] == "INTERRUPTED"
+    assert detail["resume_ready"] is True
+    assert detail["interrupted_reason"] == "runner_claim_lost"
+    assert detail["latest_update"] == "runner claim 曾短暂丢失，回测已安全中断；请确认后恢复运行。"
+
+
+def test_list_backtest_runs_keeps_claimed_running_backtests(tmp_path) -> None:
+    client, _ = create_test_client(tmp_path)
+    strategy = create_momentum_strategy(
+        client,
+        idempotency_key="backtest-active-claim-reconcile",
+        universe_name="SPY",
+        rebalance_frequency="monthly",
+        top_n=1,
+    )["strategy"]
+    refresh_snapshots(client)
+    service = client.app.state.service
+    _seed_interrupted_run(service, strategy, run_id="run_active_claim", status="RUNNING")
+    service.storage.execute(
+        "UPDATE backtest_runs SET updated_at = ? WHERE id = ?",
+        ("2000-01-01T00:00:00Z", "run_active_claim"),
+    )
+
+    class ActiveThread:
+        def is_alive(self) -> bool:
+            return True
+
+    assert service._try_acquire_backtest_runner_claim("run_active_claim") is True
+    with service._backtest_run_lock:
+        service._backtest_run_threads["run_active_claim"] = ActiveThread()
+    try:
+        running_rows = service.list_backtest_runs(status="RUNNING")
+    finally:
+        with service._backtest_run_lock:
+            service._backtest_run_threads.pop("run_active_claim", None)
+        service._release_backtest_runner_claim("run_active_claim")
+
+    listed = next(item for item in running_rows if item["id"] == "run_active_claim")
+    assert listed["status"] == "RUNNING"
+
+
+def test_active_local_runner_recreates_missing_claim_on_refresh(tmp_path) -> None:
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    run_id = "run_missing_claim_refresh"
+
+    class ActiveThread:
+        def is_alive(self) -> bool:
+            return True
+
+    with service._backtest_run_lock:
+        service._backtest_run_threads[run_id] = ActiveThread()
+    try:
+        assert service._refresh_backtest_runner_claim(run_id) is True
+        claim = service.storage.fetch_one(
+            "SELECT state_json FROM app_runtime_state WHERE state_key = ?",
+            (service._backtest_runner_claim_key(run_id),),
+        )
+    finally:
+        with service._backtest_run_lock:
+            service._backtest_run_threads.pop(run_id, None)
+        service._release_backtest_runner_claim(run_id)
+
+    assert claim is not None
 
 
 def test_backtest_submission_persists_preparing_progress_before_first_daily_checkpoint(tmp_path, monkeypatch) -> None:

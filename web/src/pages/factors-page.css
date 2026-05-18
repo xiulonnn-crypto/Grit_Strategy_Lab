@@ -971,6 +971,56 @@
   margin-bottom: 10px;
 }
 
+.factor-ledger-filter-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 0;
+}
+
+.factor-ledger-filter-row--library-family,
+.factor-ledger-filter-row--lifecycle-level {
+  margin-bottom: 14px;
+}
+
+.factor-ledger-filter-row .factor-tier-tabs,
+.factor-ledger-filter-row .factor-lifecycle-tabs {
+  margin-bottom: 0;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.factor-family-filter {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-start;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.factor-family-filter button {
+  min-height: 34px;
+  border: 1px solid var(--gsl-color-border, #e5e7eb);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--gsl-text-sub, #64748b);
+  padding: 0 10px;
+  font-weight: 900;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.factor-family-filter button.is-active {
+  border-color: rgba(31, 135, 123, 0.32);
+  background: var(--gsl-color-primary-soft, #e6f4f1);
+  color: var(--gsl-color-primary-strong, #176b61);
+}
+
+.factor-ledger-header .factor-tier-tabs,
 .factor-ledger-header .factor-lifecycle-tabs {
   margin-bottom: 0;
   flex: 0 0 auto;
@@ -1004,24 +1054,45 @@
   display: inline-flex;
   align-items: center;
   flex-wrap: wrap;
+  justify-content: flex-start;
   gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .factor-level-filter button {
-  min-width: 34px;
+  min-width: 58px;
   min-height: 34px;
   border: 1px solid var(--gsl-color-border, #e5e7eb);
   border-radius: 8px;
   background: #ffffff;
   color: var(--gsl-text-sub, #64748b);
+  padding: 0 10px;
   font-weight: 900;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .factor-level-filter button.is-active {
   border-color: rgba(31, 135, 123, 0.32);
   background: var(--gsl-color-primary-soft, #e6f4f1);
   color: var(--gsl-color-primary-strong, #176b61);
+}
+
+.factor-level-filter--reference button {
+  opacity: 0.78;
+}
+
+.factor-level-filter__note {
+  color: var(--gsl-text-muted, #94a3b8);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.factor-level-filter__all {
+  min-width: 112px;
+  padding-inline: 12px;
 }
 
 .factor-toolbar__filters {
@@ -2098,7 +2169,7 @@
 }
 
 .factor-table--phase1 {
-  min-width: 1340px;
+  min-width: 1420px;
 }
 
 .factor-table th,
@@ -2116,42 +2187,51 @@
 
 .factor-table--phase1 th:nth-child(2),
 .factor-table--phase1 td:nth-child(2) {
-  width: 88px;
+  width: 98px;
   white-space: nowrap;
 }
 
 .factor-table--phase1 th:nth-child(3),
 .factor-table--phase1 td:nth-child(3) {
-  width: 98px;
+  width: 108px;
   white-space: nowrap;
 }
 
 .factor-table--phase1 th:nth-child(4),
 .factor-table--phase1 td:nth-child(4) {
-  width: 108px;
-  white-space: nowrap;
+  min-width: 430px;
+  width: 430px;
 }
 
 .factor-table--phase1 th:nth-child(5),
 .factor-table--phase1 td:nth-child(5) {
-  min-width: 450px;
-  width: 450px;
+  min-width: 138px;
+  width: 138px;
+  white-space: nowrap;
 }
 
 .factor-table--phase1 th:nth-child(6),
 .factor-table--phase1 td:nth-child(6) {
-  width: 104px;
+  width: 88px;
+  white-space: nowrap;
 }
 
 .factor-table--phase1 th:nth-child(7),
 .factor-table--phase1 td:nth-child(7) {
-  width: 88px;
+  width: 132px;
   white-space: nowrap;
 }
 
 .factor-table--phase1 th:nth-child(8),
 .factor-table--phase1 td:nth-child(8) {
   width: 92px;
+  white-space: nowrap;
+}
+
+.factor-created-at {
+  color: var(--gsl-text-sub, #64748b);
+  font-size: 12px;
+  font-weight: 800;
   white-space: nowrap;
 }
 
@@ -2203,6 +2283,17 @@
   font-weight: 800;
   padding: 0;
   cursor: pointer;
+}
+
+.factor-table__level-header .factor-th-content {
+  min-width: 122px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.factor-table__level-header .factor-sort-header {
+  min-width: 82px;
+  white-space: nowrap;
 }
 
 .factor-sort-header.is-active {
@@ -2624,6 +2715,12 @@
   color: #475569;
 }
 
+.factor-lifecycle-badge--invalid {
+  border-color: rgba(196, 92, 79, 0.22);
+  background: #fff8f7;
+  color: #c45c4f;
+}
+
 .factor-level-cell {
   display: grid;
   gap: 5px;
@@ -2649,9 +2746,10 @@
 .factor-level-badge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 0;
   width: fit-content;
   max-width: 100%;
+  min-width: 58px;
   min-height: 26px;
   border: 1px solid transparent;
   border-radius: 999px;
@@ -2690,6 +2788,13 @@
   border-color: rgba(43, 138, 62, 0.22);
   background: #ecfdf3;
   color: #2b8a3e;
+}
+
+.factor-level-badge--raw,
+.factor-level-badge--other {
+  border-color: rgba(31, 135, 123, 0.24);
+  background: #f0f9f7;
+  color: #176b61;
 }
 
 .factor-level-badge--c {
@@ -3959,6 +4064,20 @@
   .factor-ops-guidance {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .factor-ledger-header {
+    flex-direction: column;
+  }
+
+  .factor-ledger-filter-row {
+    justify-content: flex-start;
+  }
+
+  .factor-family-filter,
+  .factor-level-filter {
+    justify-content: flex-start;
+    flex-basis: 100%;
   }
 
   .factor-mapping-layout {

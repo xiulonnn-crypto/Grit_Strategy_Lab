@@ -10,6 +10,7 @@ type FakeApi = {
   getBacktestRunDetail: ReturnType<typeof vi.fn>;
   submitBacktestRun: ReturnType<typeof vi.fn>;
   deleteBacktestRun: ReturnType<typeof vi.fn>;
+  resumeBacktestRun: ReturnType<typeof vi.fn>;
 };
 
 const fakeApi = vi.hoisted<FakeApi>(() => ({
@@ -19,6 +20,7 @@ const fakeApi = vi.hoisted<FakeApi>(() => ({
   getBacktestRunDetail: vi.fn(),
   submitBacktestRun: vi.fn(),
   deleteBacktestRun: vi.fn(),
+  resumeBacktestRun: vi.fn(),
 }));
 
 vi.mock('./lib/demoStoreContext', () => ({
@@ -209,6 +211,19 @@ beforeEach(() => {
     id: 'bt-alpha-10y',
     deleted_at: '2026-04-13T08:15:00.000Z',
     deleted_reason: 'manual_delete',
+  });
+  fakeApi.resumeBacktestRun.mockImplementation((id: string) => {
+    const source = runs.find((run) => run.id === id) ?? runs[0];
+    return Promise.resolve({
+      ...source,
+      id,
+      status: 'RUNNING',
+      completed_at: null,
+      updated_at: '2026-04-02T03:15:00.000Z',
+      current_stage: '继续回测中',
+      latest_update: '已继续回测',
+      resume_ready: false,
+    });
   });
   window.location.hash = '#/runs';
 });
@@ -415,6 +430,81 @@ describe('runs index page', () => {
     const interruptedRow = screen.getByRole('row', { name: /bt-gamma-interrupted/ });
     expect(interruptedRow).toHaveTextContent('\u5df2\u4e2d\u65ad');
     expect(interruptedRow).not.toHaveTextContent('INTERRUPTED');
+  });
+
+  it('shows one-click recovery in recent runs and resumes every interrupted backtest in the list', async () => {
+    const interruptedRunA: ApiBacktestRunListItem = {
+      ...runs[0],
+      id: 'bt-gamma-interrupted',
+      strategy_id: 'str-beta',
+      strategy_name: 'Strategy Beta',
+      parameter_version_id: 'str-beta-v1',
+      status: 'INTERRUPTED',
+      start_date: '2014-03-31',
+      end_date: '2024-03-31',
+      created_at: '2026-04-02T03:00:00.000Z',
+      updated_at: '2026-04-02T03:10:00.000Z',
+      completed_at: '2026-04-02T03:10:00.000Z',
+      metrics: {},
+      warnings: [],
+      trades_count: 0,
+    };
+    const interruptedRunB: ApiBacktestRunListItem = {
+      ...runs[1],
+      id: 'bt-delta-interrupted',
+      strategy_id: 'str-alpha',
+      strategy_name: 'Strategy Alpha',
+      parameter_version_id: 'str-alpha-v2',
+      status: 'INTERRUPTED',
+      start_date: '2016-03-31',
+      end_date: '2026-03-31',
+      created_at: '2026-04-03T03:00:00.000Z',
+      updated_at: '2026-04-03T03:10:00.000Z',
+      completed_at: '2026-04-03T03:10:00.000Z',
+      metrics: {},
+      warnings: [],
+      trades_count: 0,
+    };
+    const pageRuns = [...runs, interruptedRunA, interruptedRunB];
+    fakeApi.listBacktestRuns.mockResolvedValueOnce(pageRuns);
+    fakeApi.resumeBacktestRun.mockImplementation((id: string) => {
+      const source = pageRuns.find((run) => run.id === id) ?? interruptedRunA;
+      return Promise.resolve({
+        ...source,
+        status: 'RUNNING',
+        completed_at: null,
+        updated_at: '2026-04-03T03:15:00.000Z',
+        current_stage: '继续回测中',
+        latest_update: '已继续回测',
+        resume_ready: false,
+      });
+    });
+
+    await renderRunsPage();
+
+    fireEvent.click(screen.getByRole('tab', { name: /最近运行/ }));
+    const recentRuns = await screen.findByLabelText('最近运行');
+    const resumeButton = within(recentRuns).getByRole('button', { name: '\u4e00\u952e\u6062\u590d' });
+    fireEvent.click(resumeButton);
+
+    await waitFor(() => {
+      expect(fakeApi.resumeBacktestRun).toHaveBeenCalledTimes(2);
+    });
+    expect(fakeApi.resumeBacktestRun).toHaveBeenCalledWith(
+      'bt-gamma-interrupted',
+      expect.stringMatching(/^runs-index-resume-bt-gamma-interrupted-/),
+    );
+    expect(fakeApi.resumeBacktestRun).toHaveBeenCalledWith(
+      'bt-delta-interrupted',
+      expect.stringMatching(/^runs-index-resume-bt-delta-interrupted-/),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole('row', { name: /bt-gamma-interrupted/ })).toHaveTextContent('计算中...');
+      expect(screen.getByRole('row', { name: /bt-delta-interrupted/ })).toHaveTextContent('计算中...');
+    });
+    expect(recentRuns).toHaveTextContent('\u5df2\u6062\u590d 2 \u4e2a\u4e2d\u65ad\u56de\u6d4b');
+    expect(within(recentRuns).queryByRole('button', { name: '\u4e00\u952e\u6062\u590d' })).toBeNull();
   });
 
   it('keeps the strategy library read-only while preserving historical recent-run operations', async () => {

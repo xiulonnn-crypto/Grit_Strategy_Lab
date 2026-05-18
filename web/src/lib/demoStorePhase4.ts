@@ -2280,10 +2280,10 @@ function withDemoFactorGovernanceProjection(factor: ApiFactorListItem): ApiFacto
       description: '因子库一期治理生命周期投影',
     },
     factor_level: level,
-    factor_level_label: factor.factor_level_label ?? `${level} ${level === 'S' ? '核心' : level === 'A' ? '可入选' : level === 'B' ? '观察' : level === 'C' ? '待校准' : '归档'}`,
+    factor_level_label: factor.factor_level_label ?? `${level}${level === 'S' ? '顶级' : level === 'A' ? '优秀' : level === 'B' ? '合格' : level === 'C' ? '微弱' : '噪声'}`,
     factor_level_projection: factor.factor_level_projection ?? {
       key: level,
-      label: `${level} ${level === 'S' ? '核心' : level === 'A' ? '可入选' : level === 'B' ? '观察' : level === 'C' ? '待校准' : '归档'}`,
+      label: `${level}${level === 'S' ? '顶级' : level === 'A' ? '优秀' : level === 'B' ? '合格' : level === 'C' ? '微弱' : '噪声'}`,
       description: '按 IC/IR、覆盖率、稳定性与阻断状态综合评级',
     },
     op_status: factor.op_status ?? demoFactorOpStatus(factor),

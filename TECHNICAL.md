@@ -28,6 +28,18 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 ### 1.3 已批准 UI 交付物实施门禁
 
+#### 1.3.1 Design-locked UI 防漏验收规则
+
+当任务引用已批准 HTML/SPEC/PNG、用户明确要求“按 UI 稿 100% 一致”，或前一轮 review 已指出与 UI 稿存在差距时，`UI Artifact Trace Matrix` 不能只证明运行态功能正确，必须同时证明“批准稿场景已被复现”。缺少以下任一项时，不得关闭 UI 验收：
+
+- **批准基线定位**：矩阵必须列出批准 HTML、SPEC、PNG 的绝对或仓库相对路径、截图时间、目标 viewport，以及本次是否包含 shared shell。
+- **条件模块覆盖**：批准稿里出现但依赖数据条件的模块必须被造出可见状态再验收，例如 `publishable_count > 0` 的发布区、空态/非空态列表、WARN/FAIL/PASS 混合态、弹层展开态。若 live API 暂无该状态，应使用可审计 fixture 或临时种子数据；不能用 `0 条所以不展示` 判定为通过。
+- **设计 vs live 双向对照**：矩阵必须包含设计截图与 live 截图，逐项比较模块数量、模块顺序、标题、卡片数、状态 chip、关键列、按钮文案、弹层内容、密度、留白、固定高度、内部滚动、右侧空白和按钮是否折行。只写 `scrollWidth`、`panel height` 或路由可达不够。
+- **内容架构断言**：对卡片、列表、弹层、rail、drawer、table 这类组合 UI，必须记录每个模块应该出现的字段与控件；若设计稿定义“只保留详情按钮”，则矩阵要断言没有额外操作。
+- **允许偏离登记**：任何与批准稿不同的 live 字段替换、状态合并、模块缺省、顺序调整、密度变化，都必须在矩阵里写成 `approved_deviation` 并说明批准来源；没有来源即为设计漂移。
+- **截图目检结论**：最终报告必须说明已经打开最终截图并肉眼检查。保存截图、DOM 断言或测试绿色都不能单独支撑“UI 稿一致”。
+- **Reviewer 否决权**：reviewer 发现矩阵未覆盖批准稿条件模块、仅验证当前 live 数据、或截图显示明显结构/密度偏差时，必须拒收并要求补齐矩阵或重新实现。
+
 所有 UI 实现页面（新增、改造、修复、重构）只要存在 `DESIGN.md`、批准 HTML/SPEC、截图、设计稿或用户给出的目标页面，就必须把这些材料作为 UI 实施硬基线，不能只把它们当作参考图。
 
 实施前必须先形成 `UI Artifact Trace Matrix`，记录：
@@ -51,7 +63,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - 表格单元格需要保持浏览器原生 `table-cell` 布局，不要把 `td` / `th` 本身改成 `display: grid`、`display: flex` 等。若单元格内部需要栅格或弹性排版，必须新增内部 wrapper；多行内容验收要比较该单元格高度与整行高度，确认分隔线不会提前断开。
 - live API 或 demo data 与静态设计稿不一致时，页面必须通过 view-model / formatter 统一前台展示，不能直接暴露 raw backend label、未翻译英文、乱码、占位符或实现说明语气。
 - Runtime 工作台页面不得在 API 空结果或失败时用本地样例补位；必须展示真实 empty/error 状态，并把页面按钮的 API 调用作为交互证明的一部分。mock fixture 只能用于单测，不能作为 live route 验收证据。
-- 因子工厂的检疫候选来源必须与挖掘队列保持同一投影：只接收 mining job 的 top candidates，不读取内部全量候选 ledger；列表按归一化表达式去重。PIT 非 Full Ready 仅写入诊断证据、风险提示和发布审计，不再单独阻断发布；候选仍必须通过泄露/OOS 衰减/逻辑重复/Auto-Residual/回撤等硬闸门后才可自动发布。
+- 因子工厂的检疫候选来源必须与挖掘队列保持同一投影：只接收 mining job 的 top candidates，不读取内部全量候选 ledger；列表按归一化表达式去重。L1 只允许 `Close/Open/Volume/MarketCap/Sector` 等未经算子的事实字段走 PIT-only 准入；只要表达式出现 `Return/MA/Std` 等算子，就归入 L2 Raw Signal 并继续通过泄露、OOS 衰减、逻辑重复、Auto-Residual/正交性、容量与回撤等硬闸门后才可自动发布。
 - 用户报告已批准 UI 在某个具体 live route 或对象 ID 上漂移时，验收必须抓取用户给出的精确 URL/ID；只抽样列表第一条、默认 demo 对象或旧截图不能作为该问题的完成证据。
 - 技术方案只决定数据契约、状态语义和交互责任；批准 HTML/SPEC/PNG 才决定前台模块数量、顺序、卡片数量、标题和密度。实现时不得把技术方案里“可以展示”的信息全部直接铺上页面，除非批准稿已给出位置，或 Trace Matrix 明确登记为批准偏离。
 - 对已批准稿明确定义了文案、状态值、统计数字或时间戳的设计锁定页，前台必须先通过 view-model / formatter / approved constants 冻结这些展示口径；未经 Trace Matrix 明确标注为“允许 live 替换”的字段，不能把实时 refresh delta、waiver 计数、诊断窗口、provider 缺口直接渗透到前台主舞台。
@@ -77,11 +89,13 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 | 主题 | 当前真相 | 说明 |
 | --- | --- | --- |
-| 固定 Codex 脚本 | `scripts/codex-reset-fixture.ps1`、`scripts/codex-test-backend.ps1`、`scripts/codex-test-frontend.ps1`、`scripts/codex-smoke.ps1` 已存在 | 这是当前 repo 级固定入口 |
+| 固定 Codex 脚本 | `scripts/codex-reset-fixture.ps1`、`scripts/codex-test-backend.ps1`、`scripts/codex-test-frontend.ps1`、`scripts/codex-smoke.ps1`、`scripts/codex-validate-fast.ps1`、`scripts/codex-validate-full.ps1` 已存在 | 这是当前 repo 级固定入口 |
 | 已提交种子 fixture | `harness/fixtures/seed_workspace/` 已包含 workspace DB、market-data DB 与 manifest | fixture reset 与 manifest-driven live acceptance 可用 |
 | `codex-reset-fixture.ps1` | 已按 committed fixture 模式实现，并复制到 `.tmp/codex-fixture/` | 运行后输出 staged workspace DB 路径 |
 | `codex-test-frontend.ps1 -IncludeLiveAcceptance` | 支持 `LIVE_FIXTURE_MANIFEST` 与 `LIVE_API_BASE`，会启动 `8010` fixture backend 并运行 live real-api smoke | 当前固定验证入口 |
 | `codex-smoke.ps1` | 当前会先执行 fixture reset，再跑 backend/frontend 固定入口 | fixture 资产存在；失败时应报告具体 reset/API/UI 断言 |
+| `codex-validate-fast.ps1` | 日常推云默认入口，保留 fetch/merge-base/ahead-behind、diff check 与按改动范围选择后端/前端校验 | pre-push 会在 CHANGELOG/版本快照无待提交后调用 committed scope |
+| `codex-validate-full.ps1` | 大改、发版或合并前入口，复用固定 backend/frontend 脚本并默认并行执行 | 需要串行排障时传 `-Sequential` |
 | `README.md` 中的 Codex smoke 描述 | 仍偏旧 | 若与脚本行为冲突，以 `scripts/codex-*.ps1` 和本文件为准 |
 
 ### 1.6 CHANGELOG 维护规则
@@ -142,6 +156,8 @@ Codex 在本仓库的默认阅读顺序固定如下：
 | 脚本 | 责任 | 当前状态 |
 | --- | --- | --- |
 | `scripts/codex-reset-fixture.ps1` | 把 committed fixture 复制到 `.tmp/codex-fixture/`，并生成 reset 报告 | 已可用，输出 staged workspace DB 路径 |
+| `scripts/codex-validate-fast.ps1` | 日常推云快速门禁：git fetch/merge-base/ahead-behind、cached/working/committed diff check、按改动范围运行 targeted backend 或 frontend 校验 | pre-push 默认调用 `-Scope Committed -SkipFetch`，手工日常推云可直接运行默认入口 |
+| `scripts/codex-validate-full.ps1` | 大改、发版或合并前完整门禁，默认并行执行 backend 与 frontend 固定入口并写入 full gate 摘要 | 如需复现旧串行行为，传 `-Sequential` |
 | `scripts/codex-test-backend.ps1` | 跑固定 backend pytest 切片，并写入 `latest-backend.txt` | 当前可直接使用 |
 | `scripts/codex-test-frontend.ps1` | 跑固定 frontend focused tests，始终输出全局 TypeScript 报告，可选 strict/live acceptance | `-IncludeLiveAcceptance` 会使用 committed seed fixture 启动真实 API smoke |
 | `scripts/codex-smoke.ps1` | 纯 orchestrator，先 reset fixture，再跑 backend/frontend 固定入口 | fixture 资产存在；不再按缺失 fixture 预判阻塞 |
@@ -202,9 +218,12 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 在已提交种子 fixture 资产存在后，当前建议如下：
 
-- backend 改动：直接运行 `scripts/codex-test-backend.ps1`
-- frontend 改动：直接运行 `scripts/codex-test-frontend.ps1`
-- `scripts/codex-smoke.ps1` 可作为 fixture-backed orchestrator 使用；失败时报告具体 reset/API/UI 断言
+- 日常推云：默认运行 `scripts/codex-validate-fast.ps1`；它会保留廉价 git 门禁，并按改动范围决定是否跑 backend targeted slice、`tsc --noEmit` 和相关 Vitest。
+- 只改文档或 CHANGELOG：fast gate 不跑 backend/frontend。
+- 只改 backend：fast gate 跑受影响 pytest；改 API/types/shared contract 时同时跑 backend 与 frontend。
+- 只改 frontend：fast gate 跑 `tsc --noEmit` 与相关 Vitest。
+- 大改、发版或合并主线前：运行 `scripts/codex-validate-full.ps1`；它复用固定 backend/frontend 入口，并在两边都需要时并行执行。
+- `scripts/codex-smoke.ps1` 可作为 fixture-backed orchestrator 使用；失败时报告具体 reset/API/UI 断言。
 - `scripts/codex-test-frontend.ps1` 通过 `web/scripts/run-vitest-fixed.cjs` 启动 Vitest，固定入口会避开 Vite config/esbuild 子进程加载路径，并对 Windows `net use` realpath probe 做启动保护；若命令超过 540 秒，脚本会写入 timeout 报告并停止子进程树。
 
 ## 4. 系统与运行时总览
@@ -427,17 +446,17 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 当前多因子第二期第一步的补充真相：
 
 - 正式可操作交付面包括 `PIT 清洗中心`、`因子库`、`因子详情/诊断`、`因子编辑器`、`因子工厂` 与 `多因子策略创建`。三期本轮不改策略详情、回测详情、回测配置、优化配置或优化结果页模块。
-- 左侧导航的 `因子` 组当前包含 `因子库` 与 `因子工厂`；`#/factors/factory` 合并原 `挖掘沙盒` 与 `检疫工作台`，旧 `#/factors/sandbox`、`#/factors/quarantine` 仍保持兼容并进入同一页对应分区。因子工厂首屏任务队列、候选摘要、检疫队列和漏斗必须读取 `GET /factor-factory/overview` 的运行时结果，不得用本地默认任务、静态候选或设计稿样例补位；每日自动化固定为 `GMT+8 14:00`，工厂 run 完成挖掘后必须自动送入 D2 并执行检疫；候选只保存表达式、fitness、非重叠 Rank IC、Newey-West 修正 IR、回撤和残差摘要，不能直接进入正式因子库。长周期动量的 IR 必须按持有期重叠收益做 Newey-West/Bartlett 修正，63 日动量需记录相对 `Return(Close, 3)` 的残差 IC 作为纯净 IC 证据。`数据` 组必须同时保留 `PIT 清洗中心` 与 `数据快照`；本期数据页已升级为“快照分层治理 + PIT 门禁联动”，其中 `#/snapshots?tab=equity` 保留线上工作台骨架并引入 L1-L4 数据层级，`#/pit-data` 保留既有清洗链路并新增 L1-L4 PIT 准入与因子维度就绪矩阵。
+- 左侧导航的 `因子` 组当前包含 `因子库` 与 `因子工厂`；`#/factors/factory` 合并原 `挖掘沙盒` 与 `检疫工作台`，旧 `#/factors/sandbox`、`#/factors/quarantine` 仍保持兼容并进入同一生产台。因子工厂首屏按 `B1 因子任务 -> B2 因子打分 -> B3 因子检疫 -> B4 发布准入` 展示，任务队列、打分候选、检疫历史和可发布名单必须读取 `GET /factor-factory/overview` 的运行时结果，不得用本地默认任务、静态候选或设计稿样例补位；每日自动化固定为 `GMT+8 14:00`，立即执行仍走 `POST /factor-factory/run-now` 且不改变自动化状态，工厂 run 完成挖掘后必须自动送检并执行检疫。未经算子的 L1 原始字段只看 PIT 准入审计即可进入发布准入；`Return(Close, n)`、`MA(...)`、`Std(...)` 等含算子候选必须归入 L2 Raw Signal，记录 WNZT 缺失和同族逻辑冗余观察，并继续执行预测、OOS、正交、压力、容量和数据完整性门禁。L2 改造候选必须记录 `Raw -> Winsorize -> Neutralize -> Z-Score -> Rank` 标准链，L3 组合候选必须记录父因子、组合手段、投资逻辑和相关性/正交性审计。长周期动量的 IR 必须按持有期重叠收益做 Newey-West/Bartlett 修正，63 日动量需记录相对 `Return(Close, 3)` 的残差 IC 作为纯净 IC 证据。`数据` 组必须同时保留 `PIT 清洗中心` 与 `数据快照`；本期数据页已升级为“快照分层治理 + PIT 门禁联动”，其中 `#/snapshots?tab=equity` 保留线上工作台骨架并引入 L1-L4 数据层级，`#/pit-data` 保留既有清洗链路并新增 L1-L4 PIT 准入与因子维度就绪矩阵。
 - `GET /pit-data` 负责点时价格、样本池、异常清洗与未来函数门禁摘要，供因子诊断判断数据可用性；本期 additive 暴露 `pit_layer_readiness[]`、`factor_diagnostic_readiness[]`、`pit_quality_alerts[]` 与 `snapshot_layer_linkage[]`，用于 L1-L4 PIT 准入、因子维度就绪矩阵和 `snapshot -> PIT` 逻辑映射。
 - `POST /pit-data/research-waiver`、`DELETE /pit-data/research-waiver/{waiver_id}`、`POST /pit-data/identity-overrides` 与 `POST /pit-data/identity-scraper/restart` 是 PIT 清洗中心当前写入面：分别负责研究态豁免、撤销豁免、人工身份映射和身份修复任务重启。它们只改变 PIT 诊断治理状态，不绕过 Full Ready、正式晋升或组合入库门禁。
 - `GET /pit-data` 属于全路由首屏性能敏感 API：服务可以对读取结果使用短时缓存，但 PIT 写入接口必须主动失效缓存，避免豁免、身份覆盖或身份修复任务重启后的页面继续显示旧治理状态。
 - `GET /factors`、`POST /factors`、`GET /factors/{factor_id}`、`POST /factors/{factor_id}/diagnostics`、`POST /factors/diagnostics/preview` 与 `GET /factors/{factor_id}/diagnostics/{run_id}/report` 是因子库固定 API 切片；`POST/GET /factor-mining/jobs`、`GET /factor-mining/jobs/{job_id}`、`POST /factor-mining/jobs/{job_id}/cancel` 是挖掘任务 API 切片，创建任务必须读取 `ds-price` 运行时价格快照并在摘要中暴露 `market_data_source=dataset_price_bars`、`synthetic_market_data=false` 与价格标的覆盖数量，缺少可用价格快照时返回中文阻断；`GET /factor-factory/overview`、`POST /factor-factory/automation/start`、`POST /factor-factory/automation/pause`、`POST /factor-factory/run-now` 与 `POST /factor-factory/runs/{id}/cancel` 是因子工厂固定 API 切片；`POST /factor-models/preview` 与 `POST /factor-models` 是多因子策略创建固定 API 切片。若请求或响应字段变化，`src/grit_backtest_platform/models.py`、`web/src/types.ts`、demo store 与 test API mock 必须同任务同步。本期因子治理合同保持 additive：`GET /factors` 追加前台诊断状态、批量诊断摘要、相关性簇摘要、阻断原因摘要、策略创建风险和 `lifecycle=online|offline|all` 查询；下线投影只读返回 `offline_reason`、`offline_at`、`offline_command` 与 `offline_detail`。`POST /factors/diagnostics/preview` 在单因子 preview 外支持 `{batch: true, factor_ids, diagnostic_mode, include}` 只读批量投影，不落库、不新增批量 UI。
 - 因子详情页交付不得只用路由可达、标题/文案存在或 mock 单测作为通过标准。涉及批准稿的 `#/factors/:factorId` 必须用实际 canonical route（例如 `#/factors/s_mom_12m1m_rank`）建立 UI trace matrix，逐项核对紧凑标题区、十格证据热力图、换手率与衰减、分层收益、极端场景、风险提示、审计足迹和 PDF 报告入口，并保留截图或 DOM 结构证据；未完成这些证据时不能宣布页面与设计稿一致。
-- 三期检疫与治理固定 API 覆盖 `POST /factor-quarantine/intake`、`GET /factor-quarantine/candidates`、候选详情、候选重跑、候选发布、因子工厂 API、`GET /factor-governance/overview`、`POST /factor-governance/actions/{action_id}/execute` 与 `POST /factor-models/suggestions`。PIT 非 Full Ready 在因子工厂检疫中只作为诊断证据，不得单独制造 `REJECTED` 或 `MANUAL_REVIEW_REQUIRED`；泄露/反穿越、`Rank IC > 0.8`、`Turnover = 0`、OOS/IS 衰减 `< 0.5`、逻辑重复、Auto-Residual 失败和最大回撤相对基准 `>= 1.5x` 仍是硬拒绝。治理概览只返回 `DEPRECATE`、`PRUNE` 与 `FACTOR_MODEL_SUGGESTION`，不把历史 `REVIEW/CROWDED/DECAYED` 诊断消息混入任务弹层；对没有正式诊断但批量只读预览已投影为 Grade D 噪声的线上因子，治理概览必须用同一 `FACTOR_EXPRESSION_PREVIEW` 证据生成 `DEPRECATE` 任务并在 `offline_detail.preview_only` 留痕；`PRUNE` 的同簇 MVP 比较必须使用同一批预览增强后的线上因子集合，并复用因子库热力图的 pairwise 相关性口径，但只在同 descriptor category / 同风格簇内触发，不能重新读取缺少预览摘要的原始因子行或只看 cluster top-N 而漏掉冗余任务；执行类治理任务必须带 `confirm=true`、指令、因子 id 和理由，服务端执行前重新计算证据；`DEPRECATE` 写入 `DEPRECATED`，`PRUNE` 只写入冗余因子的 `PRUNED` 并保留 MVP 证据，策略草稿建议只跳转创建页且保持草稿。接口契约变更必须同步 `src/grit_backtest_platform/models.py`、`web/src/types.ts` 和对应 demo/mock 客户端。
+- 三期检疫与治理固定 API 覆盖 `POST /factor-quarantine/intake`、`GET /factor-quarantine/candidates`、候选详情、候选重跑、候选发布、因子工厂 API、`GET /factor-governance/overview`、`POST /factor-governance/actions/{action_id}/execute` 与 `POST /factor-models/suggestions`。`GET /factor-quarantine/candidates` 支持 `date`、`factor_name`、`result=ALL|PASS|WARN|FAIL` 查询历史检疫记录和拒绝原因。L1 原始字段以 PIT 准入审计作为发布门禁，收益阈值不参与阻断；含算子的 L2/L3 候选继续执行预测、OOS、正交、压力、容量和数据完整性门禁，其中 OOS/IS 最低比例为 `0.6`，极端压力回撤不得超过 SPY 的 `1.2x`，泄露/反穿越、`Rank IC > 0.8`、逻辑重复、Auto-Residual 失败、容量不可行仍是硬拒绝。治理概览只返回 `DEPRECATE`、`PRUNE` 与 `FACTOR_MODEL_SUGGESTION`，不把历史 `REVIEW/CROWDED/DECAYED` 诊断消息混入任务弹层；对没有正式诊断但批量只读预览已投影为 Grade D 噪声的线上因子，治理概览必须用同一 `FACTOR_EXPRESSION_PREVIEW` 证据生成 `DEPRECATE` 任务并在 `offline_detail.preview_only` 留痕；`PRUNE` 的同簇 MVP 比较必须使用同一批预览增强后的线上因子集合，并复用因子库热力图的 pairwise 相关性口径，但只在同 descriptor category / 同风格簇内触发，不能重新读取缺少预览摘要的原始因子行或只看 cluster top-N 而漏掉冗余任务；执行类治理任务必须带 `confirm=true`、指令、因子 id 和理由，服务端执行前重新计算证据；`DEPRECATE` 写入 `DEPRECATED`，`PRUNE` 只写入冗余因子的 `PRUNED` 并保留 MVP 证据，策略草稿建议只跳转创建页且保持草稿。接口契约变更必须同步 `src/grit_backtest_platform/models.py`、`web/src/types.ts` 和对应 demo/mock 客户端。
 - 因子库 UI 改造边界固定在 `#/factors` 内 additive 升级：表格上方新增 `线上因子 / 已下线因子` tab；表头固定为 `因子、来源、诊断状态、最近诊断、因子级别、下线原因、下线时间`；指标区第四张卡改为 `治理任务`，点击后懒加载完整治理动作弹层，`DEPRECATE/PRUNE` 打开二次确认后才写入下线状态。底部相关性热力图只能接收当前 tab 与当前筛选条件下的可见因子集合，tab 或筛选切换后必须清理不再可见的选中/比对状态。
 - 因子详情 UI 改造边界固定为右侧足迹模块：`合规足迹` 改为 `审计足迹`，展示回溯窗口、检疫/诊断、发布和治理消息时间；其他指标、布局和操作不随本轮调整。
 - 多因子创建页只接受治理任务传入的因子、方向和建议权重作为草稿预填，仍必须走预览、PIT 门禁和人工确认；不得直接覆盖生产策略版本，下线因子必须被 preview/create 拒绝或排除。
-- 本轮后端切片覆盖 `tests/test_factor_factory_api.py`、`tests/test_factor_mining_api.py`、`tests/test_factor_quarantine_api.py` 与 `tests/test_factor_research_api.py` 的工厂自动化、fitness、Auto-Residual、回撤闸门、PIT 诊断非阻断、治理执行、软下线和策略模型阻断；前端切片为 `web/src/factor.factory.test.tsx`、`web/src/factor.model-builder.test.tsx` 与 `web/src/app.routes.foundation.test.tsx` 的工厂路由兼容、自动化按钮、漏斗、残差报告、回撤闸门、PIT 诊断、治理任务、二次确认、路由预填、双 tab、七列表头、热力图筛选和检疫工作台断言。固定验证仍使用 `scripts/codex-test-backend.ps1`、`scripts/codex-test-frontend.ps1`，契约变更后补 `-StrictGlobalTypes`。
+- 本轮后端切片覆盖 `tests/test_factor_factory_api.py`、`tests/test_factor_mining_api.py`、`tests/test_factor_quarantine_api.py` 与 `tests/test_factor_research_api.py` 的工厂自动化、B1-B4 read-model、F1 PIT-only 发布门禁、L2 标准算子链、L3 组合手段、fitness、Auto-Residual、检疫历史查询、治理执行、软下线和策略模型阻断；前端切片为 `web/src/factor.factory.test.tsx`、`web/src/factor.model-builder.test.tsx` 与 `web/src/app.routes.foundation.test.tsx` 的工厂路由兼容、自动化按钮、固定高度生产台、默认收起打分卡、一键送检、一键发布、日期/因子名/结果筛选、详情弹层、治理任务、二次确认、路由预填、热力图筛选和检疫工作台断言。固定验证仍使用 `scripts/codex-test-backend.ps1`、`scripts/codex-test-frontend.ps1`，契约变更后补 `-StrictGlobalTypes`。
 - 默认五类常用因子固定使用 7 个 baseline 分层描述符 canonical ID：`s_val_ep_ltm_raw`、`s_val_bp_latest_raw`、`s_mom_12m1m_rank`、`s_qlty_roe_ltm_raw`、`s_qlty_fcfy_ttm_raw`、`s_vol_252d_rank` 与 `s_size_cur_log`。Factor Zoo 种子层可继续 additive 扩展 beta、投资、流动性、alpha blend 等自研描述符，但必须仍走本项目白名单表达式引擎，不能引入外部 factor 包或第三方 factor 代码。旧默认 ID 只作为 alias 兼容读取，不能出现在 `GET /factors` 列表展示中。`POST /factors` 必须携带 `source_category_metric_window_operator` 描述符，人工因子 ID 由 `m_<category>_<metric>_<window>_<operator>` 生成，重复 descriptor 返回 409。
 - 基础面 PIT 数据平面由 `ds-fundamentals`、`dataset_fundamental_points` 与 `dataset_fundamental_coverage` 承载；基本面点位必须有 `available_at`，诊断只能读取 `available_at <= observation_date/as_of_date` 的观测，不能用财报期末日替代可得日。市值默认由复权收盘价乘 `shares_outstanding` 推导，供应商市值只保留差异；企业价值优先使用供应商 EV，缺失时回退为 `MarketCap + TotalDebt - CashAndEquivalents`。若 `ds-fundamentals` 缺失或字段不全，应显示明确的 `基础面 PIT 缺口` 并阻止诊断。
 - 表达式引擎统一供诊断、挖掘和多因子打分使用，白名单只允许价格字段、基础四则、`Lag`、`Return`、`Std`、`Log`、`Rank`、`Winsorize`、`ZScore` 等安全算子；必须拒绝 `import`、`eval`、`__`、分号、未知字段、未知算子、过深 AST 与 `t+N` 未来引用。行业中性化在缺少 PIT 行业字段时只能返回未执行 blocker，不能展示已执行。
@@ -642,9 +661,11 @@ Factor routes: `#/factors/factory` is the canonical production workbench. `#/fac
 
 | 改动类型 | 当前应跑的最小验证路径 |
 | --- | --- |
-| 仅后端改动 | `scripts/codex-test-backend.ps1` |
-| 仅前端改动 | `scripts/codex-test-frontend.ps1` |
-| 跨栈且不依赖 fixture | backend 与 frontend 固定入口分别执行 |
+| 仅文档或 CHANGELOG 改动 | `scripts/codex-validate-fast.ps1`，只保留 git 与 diff check，不跑 backend/frontend |
+| 仅后端改动 | `scripts/codex-validate-fast.ps1`，由脚本选择受影响 pytest；必要时再手工跑 `scripts/codex-test-backend.ps1` |
+| 仅前端改动 | `scripts/codex-validate-fast.ps1`，阻塞执行 `tsc --noEmit` 与相关 Vitest；必要时再手工跑 `scripts/codex-test-frontend.ps1` |
+| API/types/shared contract 改动 | `scripts/codex-validate-fast.ps1` 同时跑 backend 与 frontend 快速校验 |
+| 跨栈且不依赖 fixture | 日常推云用 fast gate；大改、发版或合并前用 `scripts/codex-validate-full.ps1` |
 | 依赖 fixture 的验收 | `scripts/codex-test-frontend.ps1 -IncludeLiveAcceptance`，会 reset fixture、启动 `8010` backend 并运行 live real-api smoke |
 | 全量 Codex smoke | `scripts/codex-smoke.ps1`，作为 reset fixture + backend/frontend 固定入口的 orchestrator |
 
@@ -652,6 +673,9 @@ Factor routes: `#/factors/factory` is the canonical production workbench. `#/fac
 
 - focused frontend tests 是默认阻塞门禁。
 - 对已批准 HTML/SPEC 的 UI 任务，focused frontend tests 只是必要条件；最终验收还必须包含 `UI Artifact Trace Matrix`、桌面截图、DOM 文案/状态扫描和关键交互证明。
+- 设计锁定页面的 `UI Artifact Trace Matrix` 必须在实现或最终 review 前定义可量化验收项，而不是交付后补报告。至少覆盖：模块高度、容器/表格宽度、右侧空白、文本或图表重叠、按钮折行、滚动条、sticky/浮层位置、弹层初始/打开/关闭状态、桌面与必要移动视口、截图文件名和允许偏离项。
+- 表格、台账、热力图、抽屉、弹层等高密度 UI 必须补 DOM geometry 或等价 CSS contract：例如 `rightBlankAtDefault=0`、文本区域不压图表、操作按钮同一行、关键列完全可见。只验证表头、class 名、关键词、路由可达或单测绿色不得作为 UI 100% 对齐依据。
+- 交付报告必须说明最终截图已经被实际打开检查；如果只保存截图但未查看，不得声明视觉验收通过。多代理实施中，Verification/Trace owner 对缺失截图、缺失几何断言或明显视觉偏差拥有否决权。
 - 本次 `#/snapshots?tab=equity` 与 `#/pit-data` 联动升级的正式 Trace Matrix 位于 `output/ui-artifact-trace/snapshot-pit-layered-readiness-20260512/ui-trace-matrix.md`；其批准设计包位于 `output/ui-artifact-trace/snapshot-pit-layered-readiness-20260512/`，实现与验收都必须以该目录中的 HTML/SPEC/PNG 为基线。
 - 对 `#/snapshots`、`#/pit-data` 这类 additive 治理页，一旦后端已暴露正式 read-model contract，前台必须保留批准稿的信息架构，但把卡片、矩阵、台账和行动列表切换到显式 live view-model mapper；不得继续由 `buildApproved*` 一类硬编码数组控制主舞台内容。对应测试也必须验证“批准结构 + runtime contract projection”，不能再把 synthetic row id、静态数量或 demo-only 文案当成真实交付。
 - 对已批准 HTML/SPEC 的 UI 任务，worker 必须在正式 reviewer 前提交交付前自测结果；缺少自测结果时视为测试流程未完成。

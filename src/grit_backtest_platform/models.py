@@ -170,7 +170,7 @@ class FactorFactoryGatePolicy(BaseModel):
     max_style_correlation: float = Field(default=0.3, ge=0.0, le=1.0)
     residual_enabled: bool = True
     max_drawdown_relative_to_benchmark: float = Field(default=1.5, gt=0.0)
-    min_oos_to_is_ratio: float = Field(default=0.5, ge=0.0, le=1.0)
+    min_oos_to_is_ratio: float = Field(default=0.6, ge=0.0, le=1.0)
 
 
 class FactorFactoryProfile(BaseModel):
@@ -192,6 +192,7 @@ class FactorFactoryAutomationRequest(BaseModel):
 class FactorFactoryRunNowRequest(BaseModel):
     request: FactorMiningJobCreateRequest = Field(default_factory=FactorMiningJobCreateRequest)
     gate_policy: FactorFactoryGatePolicy = Field(default_factory=FactorFactoryGatePolicy)
+    pipeline_scope: Literal['B1_B2_B3_B4', 'B1_ONLY', 'B2_B3', 'FULL'] = 'B1_B2_B3_B4'
 
 
 class FactorQuarantineIntakeRequest(BaseModel):

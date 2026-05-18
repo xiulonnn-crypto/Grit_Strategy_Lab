@@ -847,6 +847,9 @@ function createHttpApiClient(): DemoApi {
       if (params?.status) search.set('status', params.status);
       if (params?.source_job_id) search.set('source_job_id', params.source_job_id);
       if (params?.cluster) search.set('cluster', params.cluster);
+      if (params?.date) search.set('date', params.date);
+      if (params?.factor_name) search.set('factor_name', params.factor_name);
+      if (params?.result) search.set('result', params.result);
       const suffix = search.toString();
       return requestJson<ApiFactorQuarantineCandidateListResponse>(
         `/factor-quarantine/candidates${suffix ? `?${suffix}` : ''}`,

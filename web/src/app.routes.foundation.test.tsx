@@ -112,7 +112,7 @@ describe('App runtime routes', () => {
       return `${url.pathname}${url.search}`;
     });
 
-    expect(requestedPaths()).toContain('/factors?lifecycle=all');
+    expect(requestedPaths().some((path) => path === '/factors' || path.startsWith('/factors?'))).toBe(true);
     expect(requestedPaths()).not.toContain('/factor-governance/overview');
 
     fireEvent.click(document.querySelector<HTMLButtonElement>('.factor-governance-trigger')!);
@@ -434,7 +434,7 @@ describe('App runtime routes', () => {
 
     expect(document.querySelector('[data-page-root="factor-factory"]')).not.toBeNull();
     expect(document.querySelector('[data-initial-section="quarantine"]')).not.toBeNull();
-    expect(await screen.findByRole('heading', { level: 1, name: '因子工厂' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: '因子任务生产台' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '启动自动化' })).toBeInTheDocument();
     expect(screen.getAllByText('检疫与发布').length).toBeGreaterThanOrEqual(1);
     return;

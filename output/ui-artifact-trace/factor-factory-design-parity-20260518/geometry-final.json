@@ -1,0 +1,250 @@
+{
+  "designUrl": "file:///C:/Fin/Grit_Strategy_Lab/output/ui-artifact-trace/factor-factory-b1-b4-phase2-20260518/factor-factory-b1-b4-phase2-ui.html",
+  "liveUrl": "http://127.0.0.1:4173/?v=1779095587444#/factors/factory",
+  "design": {
+    "viewport": {
+      "width": 1960,
+      "height": 1600
+    },
+    "noHorizontalScroll": true,
+    "scrollWidth": 1960,
+    "clientWidth": 1960,
+    "page": null,
+    "hero": {
+      "x": 272,
+      "y": 32,
+      "width": 1656,
+      "height": 142,
+      "radius": "22px",
+      "columns": "1274px 306px",
+      "overflowX": "visible",
+      "overflowY": "visible"
+    },
+    "statusStrip": {
+      "x": 272,
+      "y": 192,
+      "width": 1656,
+      "height": 56,
+      "radius": "16px",
+      "columns": "none",
+      "overflowX": "visible",
+      "overflowY": "visible"
+    },
+    "metrics": {
+      "x": 272,
+      "y": 522.531,
+      "width": 1656,
+      "height": 112,
+      "radius": "0px",
+      "columns": "266px 266px 266px 266px 266px 266px",
+      "overflowX": "visible",
+      "overflowY": "visible"
+    },
+    "publish": {
+      "x": 272,
+      "y": 266,
+      "width": 1656,
+      "height": 238.531,
+      "radius": "18px",
+      "columns": "1618px",
+      "overflowX": "visible",
+      "overflowY": "visible"
+    },
+    "workbench": {
+      "x": 272,
+      "y": 652.531,
+      "width": 1656,
+      "height": 760,
+      "radius": "0px",
+      "columns": "545.969px 496.344px 585.688px",
+      "overflowX": "visible",
+      "overflowY": "visible"
+    },
+    "firstPanel": {
+      "x": 272,
+      "y": 652.531,
+      "width": 545.969,
+      "height": 760,
+      "radius": "18px",
+      "columns": "543.969px",
+      "overflowX": "hidden",
+      "overflowY": "hidden"
+    },
+    "admission": {
+      "x": 272,
+      "y": 1430.531,
+      "width": 1656,
+      "height": 128,
+      "radius": "0px",
+      "columns": "542.656px 542.672px 542.672px",
+      "overflowX": "visible",
+      "overflowY": "visible"
+    },
+    "modal": null,
+    "factorFactoryClasses": [
+      "summary-grid",
+      "layers",
+      "admission",
+      "admission-card",
+      "admission-card",
+      "admission-card",
+      "admission-report"
+    ]
+  },
+  "live": {
+    "viewport": {
+      "width": 1960,
+      "height": 1600
+    },
+    "noHorizontalScroll": true,
+    "scrollWidth": 1960,
+    "clientWidth": 1960,
+    "page": {
+      "x": 272,
+      "y": 32,
+      "width": 1656,
+      "height": 1270,
+      "radius": "0px",
+      "columns": "1656px",
+      "overflowX": "hidden",
+      "overflowY": "auto"
+    },
+    "hero": {
+      "x": 272,
+      "y": 32,
+      "width": 1656,
+      "height": 142,
+      "radius": "22px",
+      "columns": "1246px 334px",
+      "overflowX": "visible",
+      "overflowY": "visible"
+    },
+    "statusStrip": {
+      "x": 272,
+      "y": 192,
+      "width": 1656,
+      "height": 56,
+      "radius": "16px",
+      "columns": "none",
+      "overflowX": "visible",
+      "overflowY": "visible"
+    },
+    "metrics": {
+      "x": 272,
+      "y": 266,
+      "width": 1656,
+      "height": 112,
+      "radius": "0px",
+      "columns": "266px 266px 266px 266px 266px 266px",
+      "overflowX": "visible",
+      "overflowY": "visible"
+    },
+    "publish": null,
+    "workbench": {
+      "x": 272,
+      "y": 396,
+      "width": 1656,
+      "height": 760,
+      "radius": "0px",
+      "columns": "545.969px 496.344px 585.688px",
+      "overflowX": "visible",
+      "overflowY": "visible"
+    },
+    "firstPanel": {
+      "x": 272,
+      "y": 396,
+      "width": 545.969,
+      "height": 760,
+      "radius": "18px",
+      "columns": "543.969px",
+      "overflowX": "hidden",
+      "overflowY": "hidden"
+    },
+    "admission": {
+      "x": 272,
+      "y": 1174,
+      "width": 1656,
+      "height": 128,
+      "radius": "0px",
+      "columns": "403.5px 403.5px 403.5px 403.5px",
+      "overflowX": "visible",
+      "overflowY": "visible"
+    },
+    "modal": null,
+    "factorFactoryClasses": [
+      "factor-phase2-page factor-factory-page factor-factory-b1b4-page",
+      "factor-phase2-hero factor-factory-hero",
+      "factor-factory-status-strip",
+      "factor-phase2-metrics factor-factory-funnel",
+      "factor-factory-workbench factor-factory-workbench--b1b4",
+      "factor-phase2-panel factor-factory-fixed-panel",
+      "factor-phase2-panel__body factor-factory-scroll-body",
+      "factor-factory-task-family-tabs",
+      "factor-factory-family-tab is-active",
+      "factor-factory-family-tab",
+      "factor-factory-family-tab",
+      "factor-factory-task-card",
+      "factor-factory-task-card",
+      "factor-factory-task-card",
+      "factor-phase2-panel factor-factory-fixed-panel",
+      "factor-phase2-panel__body factor-factory-scroll-body factor-factory-panel-with-footer",
+      "factor-factory-panel-action-bar",
+      "factor-phase2-panel factor-factory-fixed-panel",
+      "factor-phase2-panel__body factor-factory-scroll-body",
+      "factor-factory-filter-row",
+      "factor-factory-result-table",
+      "factor-factory-result-row factor-factory-result-row--head",
+      "factor-factory-admission-rules"
+    ]
+  },
+  "delta": {
+    "hero": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0,
+      "radius": "22px -> 22px",
+      "columns": "1274px 306px -> 1246px 334px"
+    },
+    "statusStrip": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0,
+      "radius": "16px -> 16px",
+      "columns": "none -> none"
+    },
+    "metrics": {
+      "x": 0,
+      "y": -256.531,
+      "width": 0,
+      "height": 0,
+      "radius": "0px -> 0px",
+      "columns": "266px 266px 266px 266px 266px 266px -> 266px 266px 266px 266px 266px 266px"
+    },
+    "workbench": {
+      "x": 0,
+      "y": -256.531,
+      "width": 0,
+      "height": 0,
+      "radius": "0px -> 0px",
+      "columns": "545.969px 496.344px 585.688px -> 545.969px 496.344px 585.688px"
+    },
+    "firstPanel": {
+      "x": 0,
+      "y": -256.531,
+      "width": 0,
+      "height": 0,
+      "radius": "18px -> 18px",
+      "columns": "543.969px -> 543.969px"
+    },
+    "admission": {
+      "x": 0,
+      "y": -256.531,
+      "width": 0,
+      "height": 0,
+      "radius": "0px -> 0px",
+      "columns": "542.656px 542.672px 542.672px -> 403.5px 403.5px 403.5px 403.5px"
+    }
+  }
+}

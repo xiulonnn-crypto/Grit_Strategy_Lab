@@ -978,6 +978,32 @@
   min-width: 0;
 }
 
+.runs-recent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.runs-recent-action-note {
+  color: var(--runs-primary-strong);
+  font-size: 12px;
+  font-weight: 850;
+  line-height: 18px;
+  text-align: right;
+}
+
+.runs-recent-action-note--error {
+  color: var(--runs-danger);
+}
+
+.runs-recent-resume {
+  min-width: 96px;
+  white-space: nowrap;
+}
+
 .runs-recent-grid {
   display: grid;
   grid-template-columns:

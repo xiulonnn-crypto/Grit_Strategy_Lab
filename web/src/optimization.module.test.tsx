@@ -2036,6 +2036,7 @@ describe("optimization module flow", () => {
     const metricTile = progressPanel.querySelector(
       ".optimization-metric-tile",
     ) as HTMLElement | null;
+    const metricValue = metricTile?.querySelector("strong") as HTMLElement | null;
     const summaryRows = progressPanel.querySelectorAll(
       ".optimization-summary-row",
     );
@@ -2045,12 +2046,19 @@ describe("optimization module flow", () => {
     ) as HTMLElement | null;
 
     expect(metricTile).toBeTruthy();
+    expect(metricValue).toBeTruthy();
     expect(middleSummaryRow).toBeTruthy();
     expect(summaryValue).toBeTruthy();
 
     expect(getComputedStyle(progressPanel).gap).toBe("22px");
     expect(getComputedStyle(metricTile!).paddingTop).toBe("16px");
     expect(getComputedStyle(metricTile!).gap).toBe("10px");
+    expect(
+      getComputedStyle(metricValue!).whiteSpace || metricValue!.style.whiteSpace,
+    ).toBe("normal");
+    expect(
+      getComputedStyle(metricValue!).overflowWrap || metricValue!.style.overflowWrap,
+    ).toBe("anywhere");
     expect(getComputedStyle(middleSummaryRow!).display).toBe("grid");
     expect(getComputedStyle(middleSummaryRow!).paddingTop).toBe("14px");
     expect(getComputedStyle(summaryValue!).textAlign).toBe("left");
@@ -2228,6 +2236,35 @@ describe("optimization module flow", () => {
     ) as HTMLButtonElement | null;
     expect(activeShelfCard).toBeTruthy();
     expect(activeShelfCard?.textContent).not.toBe(initialActiveShelfText);
+  });
+
+  it("uses active execution seconds for the completed-job hero duration", async () => {
+    const api = createOptimizationTestApi();
+    const originalGetOptimizationJobDetail =
+      api.getOptimizationJobDetail.bind(api);
+    api.getOptimizationJobDetail = async (jobId: string) => {
+      const job = await originalGetOptimizationJobDetail(jobId);
+      job.created_at = "2026-05-15T08:00:00.000Z";
+      job.updated_at = "2026-05-18T08:00:00.000Z";
+      job.completed_at = "2026-05-18T08:00:00.000Z";
+      job.summary.active_execution_seconds = 125;
+      job.result.active_execution_seconds = 125;
+      return job;
+    };
+    currentApi = api;
+
+    const container = await renderApp("#/optimization-jobs/opt-001");
+
+    await waitFor(() =>
+      expect(
+        container.querySelector(".optimization-results-grid"),
+      ).not.toBeNull(),
+    );
+    const subtitle = container.querySelector(
+      ".optimization-lab-panel--hero p:not(.optimization-lab-eyebrow)",
+    ) as HTMLParagraphElement | null;
+    expect(subtitle?.textContent).toContain("优化组合共 70个，耗时 2分钟");
+    expect(subtitle?.textContent).not.toContain("4320分钟");
   });
 
   it("shows discrete observation timeframe values in parameter combination summaries", async () => {

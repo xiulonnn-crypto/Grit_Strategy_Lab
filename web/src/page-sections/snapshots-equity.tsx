@@ -415,15 +415,13 @@ function statusTone(status?: string | null): SnapshotLayerDisplay['statusTone'] 
 function getFactorStatusLabel(status?: string | null): string {
   switch (normalizeStatus(status)) {
     case 'VERIFIED':
-      return '已验证';
+      return '已就绪';
     case 'SANDBOX':
-      return '沙箱观察';
+      return '部分可用';
     case 'BLOCKED':
-      return '阻断';
     case 'DISABLED':
-      return '未接入';
+      return '不可用';
     case 'CALIBRATING':
-      return '校准中';
     case 'PARTIAL_READY':
       return '部分可用';
     case 'READY':
@@ -431,24 +429,24 @@ function getFactorStatusLabel(status?: string | null): string {
       return '已就绪';
     case 'WARNING':
     case 'INCOMPLETE':
-      return '需复核';
+      return '部分可用';
     default:
-      return '待补齐';
+      return '部分可用';
   }
 }
 
 function getAlertSeverityLabel(severity?: string | null, hardBlocking?: boolean | null): string {
   if (hardBlocking) {
-    return '硬阻断';
+    return '不可用';
   }
   switch (String(severity ?? '').trim().toLowerCase()) {
     case 'danger':
     case 'error':
-      return '高优先级';
+      return '不可用';
     case 'info':
-      return '观察项';
+      return '部分可用';
     default:
-      return '需复核';
+      return '部分可用';
   }
 }
 
@@ -521,28 +519,22 @@ function getStatusLabel(status?: string | null): string {
     case 'COMPLETED':
       return '已就绪';
     case 'VERIFIED':
-      return '已验证';
+      return '已就绪';
     case 'WARNING':
-      return '需复核';
     case 'RUNNING':
-      return '刷新中';
     case 'STALE':
-      return '需复核';
     case 'CALIBRATING':
-      return '校准中';
     case 'PARTIAL_READY':
-      return '部分可用';
     case 'INCOMPLETE':
-      return '待补';
-    case 'DISABLED':
-      return '未接入';
     case 'SANDBOX':
-      return '沙箱观察';
+    case 'OBSERVATION':
+      return '部分可用';
+    case 'DISABLED':
     case 'FAILED':
     case 'BLOCKED':
-      return '阻塞';
+      return '不可用';
     default:
-      return '待刷新';
+      return '部分可用';
   }
 }
 
@@ -1779,7 +1771,7 @@ function buildSnapshotAlertDisplays(
       return {
         code: `${row.id || 'row'}-${index + 1}`,
         severity: hardBlocking ? 'danger' : 'warning',
-        severityLabel: hardBlocking ? '硬阻断' : '需复核',
+        severityLabel: hardBlocking ? '不可用' : '部分可用',
         title: `${row.title}待修复`,
         detail: row.note,
         reviewGuide: guidance.reviewGuide,
@@ -2376,7 +2368,7 @@ function credentialRuntimeStatusFromBlocker(
     combined.includes('transient')
   ) {
     return {
-      statusLabel: '需复核',
+      statusLabel: '部分可用',
       statusTone: 'warning',
       reason:
         key === 'ALPHAVANTAGE_API_KEY'
@@ -2901,7 +2893,7 @@ export function EquitySnapshotsTab({
         const reviewStatus: CredentialRuntimeStatus | null =
           isFixedCredentialRailKey && !missingStatus && !runtimeStatus
             ? {
-              statusLabel: '待复核',
+              statusLabel: '部分可用',
               statusTone: 'warning',
               reason: '固定凭据入口：若页面仍显示数据缺口，请确认该 key 已写入 QuickStart 环境并强制重启。',
               actionGuide: snapshotCredentialActionGuide(key, 'review'),

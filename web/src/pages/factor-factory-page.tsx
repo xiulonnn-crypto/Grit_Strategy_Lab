@@ -2,17 +2,21 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useApiClient } from '../lib/demoStoreContext';
 import { formatDateTime } from '../lib/format';
 import type {
+  ApiFactorAdmissionReportRow,
   ApiFactorFactoryOverview,
   ApiFactorFactoryRun,
-  ApiFactorMiningCandidate,
-  ApiFactorMiningJob,
+  ApiFactorFactoryTaskRow,
   ApiFactorMiningJobCreatePayload,
+  ApiFactorOperatorChainStep,
   ApiFactorQuarantineCandidate,
+  ApiFactorQuarantineResultRow,
+  ApiFactorScoringCandidate,
+  ApiPublishableFactorRow,
 } from '../types';
 import './factor-phase2-pages.css';
 
 type FactorySection = 'overview' | 'sandbox' | 'quarantine';
-type BusyAction = 'start' | 'pause' | 'run-now' | 'cancel' | 'intake' | 'run-quarantine' | 'publish' | null;
+type BusyAction = 'start' | 'pause' | 'run-now' | 'send' | 'publish' | 'search' | null;
 type AnyRecord = Record<string, unknown>;
 
 export type FactorFactoryPageProps = {
@@ -23,7 +27,7 @@ const DEFAULT_REQUEST: ApiFactorMiningJobCreatePayload = {
   universe: 'SP500',
   start_date: '2018-01-01',
   end_date: '2024-12-31',
-  operators: ['return', 'rank', 'zscore', 'winsorize'],
+  operators: ['return', 'winsorize', 'neutralize', 'zscore', 'rank'],
   candidate_count: 250,
   random_seed: 42,
   min_rank_ic: 0.03,
@@ -54,16 +58,24 @@ const DEFAULT_REQUEST: ApiFactorMiningJobCreatePayload = {
   },
 };
 
+const L2_OPERATOR_CHAIN: ApiFactorOperatorChainStep[] = [
+  { code: 'RAW', label: 'Raw' },
+  { code: 'MAD', label: 'Winsorize' },
+  { code: 'N', label: 'Neutralize' },
+  { code: 'Z', label: 'Z-Score' },
+  { code: 'R', label: 'Rank' },
+];
+
 function isRecord(value: unknown): value is AnyRecord {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function asRecord(value: unknown): AnyRecord {
-  return isRecord(value) ? value : {};
-}
-
 function asList<T>(value: unknown): T[] {
   return Array.isArray(value) ? value as T[] : [];
+}
+
+function record(value: unknown): AnyRecord {
+  return isRecord(value) ? value : {};
 }
 
 function text(value: unknown, fallback = '未生成'): string {
@@ -72,39 +84,76 @@ function text(value: unknown, fallback = '未生成'): string {
   return fallback;
 }
 
-function numeric(value: unknown): number | null {
+function numeric(value: unknown, fallback = 0): number {
   const parsed = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function formatNumber(value: unknown, digits = 2): string {
-  const parsed = numeric(value);
-  return parsed === null ? '未生成' : parsed.toFixed(digits);
-}
-
-function formatPct(value: unknown, digits = 1): string {
-  const parsed = numeric(value);
-  if (parsed === null) return '未生成';
+function pct(value: unknown, digits = 1): string {
+  const parsed = numeric(value, NaN);
+  if (!Number.isFinite(parsed)) return '未生成';
   const scaled = Math.abs(parsed) <= 1 ? parsed * 100 : parsed;
   return `${scaled.toFixed(digits)}%`;
 }
 
-function formatShortDate(value: unknown): string {
+function decimal(value: unknown, digits = 3): string {
+  const parsed = numeric(value, NaN);
+  return Number.isFinite(parsed) ? parsed.toFixed(digits) : '未生成';
+}
+
+function shortDate(value: unknown): string {
   const raw = text(value, '');
   if (!raw) return '未记录';
-  const datePart = raw.includes('T') ? raw.split('T')[0] : raw.slice(0, 10);
-  return datePart || '未记录';
+  return raw.includes('T') ? raw.split('T')[0] : raw.slice(0, 10);
 }
 
 function statusToken(value: unknown): string {
   return text(value, '').trim().toUpperCase();
 }
 
+function timestampValue(value: unknown): number {
+  const parsed = Date.parse(text(value, ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function taskSortTime(row: ApiFactorFactoryTaskRow): string {
+  const raw = record(row);
+  return text(raw.completed_at ?? raw.updated_at ?? raw.started_at ?? raw.task_date, '');
+}
+
+function sortByTimeDesc<T>(items: T[], getTime: (item: T) => unknown): T[] {
+  return [...items].sort((left, right) => {
+    const delta = timestampValue(getTime(right)) - timestampValue(getTime(left));
+    if (delta !== 0) return delta;
+    return text((right as AnyRecord).id ?? (right as AnyRecord).candidate_id, '')
+      .localeCompare(text((left as AnyRecord).id ?? (left as AnyRecord).candidate_id, ''));
+  });
+}
+
+function candidateEventTime(candidate: ApiFactorQuarantineCandidate | undefined | null): string {
+  if (!candidate) return '';
+  const latestRun = record(candidate.latest_run);
+  return text(
+    latestRun.completed_at
+      ?? latestRun.created_at
+      ?? (candidate as AnyRecord).last_quarantine_at
+      ?? candidate.updated_at
+      ?? candidate.created_at,
+    '',
+  );
+}
+
+function displayScore(value: unknown): string {
+  const parsed = numeric(value, NaN);
+  if (!Number.isFinite(parsed)) return 'N/A';
+  return Math.abs(parsed) <= 1 ? String(Math.round(parsed * 100)) : parsed.toFixed(0);
+}
+
 function chipTone(value: unknown): 'good' | 'warn' | 'bad' | 'info' {
   const status = statusToken(value);
-  if (['ACTIVE', 'COMPLETED', 'PASSED', 'ELIGIBLE', 'PUBLISHED'].includes(status)) return 'good';
-  if (['REJECTED', 'BLOCKED', 'FAILED'].includes(status)) return 'bad';
-  if (['RUNNING', 'QUEUED', 'DIAGNOSTIC_ONLY'].includes(status)) return 'info';
+  if (['ACTIVE', 'COMPLETED', 'PASSED', 'PASS', 'ELIGIBLE', 'PUBLISHED', '已完成'].includes(status)) return 'good';
+  if (['REJECTED', 'BLOCKED', 'FAILED', 'FAIL'].includes(status)) return 'bad';
+  if (['RUNNING', 'QUEUED', '进行中'].includes(status)) return 'info';
   return 'warn';
 }
 
@@ -117,17 +166,17 @@ function statusLabel(value: unknown): string {
   const labels: Record<string, string> = {
     ACTIVE: '每日自动化已启用',
     PAUSED: '每日自动化已暂停',
-    QUEUED: '排队中',
-    RUNNING: '运行中',
+    QUEUED: '待开始',
+    RUNNING: '进行中',
     CANCEL_REQUESTED: '取消中',
     CANCELLED: '已取消',
     COMPLETED: '已完成',
     FAILED: '失败',
-    PENDING: '待检疫',
-    PASSED: '已通过',
-    REJECTED: '已拒绝',
-    NEEDS_REVIEW: '待复核',
-    PUBLISHED: '已发布',
+    PENDING: 'WARN',
+    PASSED: 'PASS',
+    REJECTED: 'FAIL',
+    NEEDS_REVIEW: 'WARN',
+    PUBLISHED: 'PASS',
     ELIGIBLE: '可发布',
     BLOCKED: '阻断',
     MANUAL_REVIEW_REQUIRED: '需人工裁决',
@@ -136,238 +185,203 @@ function statusLabel(value: unknown): string {
   return labels[status] ?? text(value);
 }
 
-function generationModeLabel(value: unknown): string {
-  const mode = text(value, 'PRICE_OPERATOR').toUpperCase();
-  if (mode === 'HYBRID_COMPOSITION') return '二次组合';
-  return '价格算子';
+function targetLayer(candidate: ApiFactorQuarantineCandidate | ApiFactorScoringCandidate | ApiPublishableFactorRow): string {
+  return text((candidate as { target_layer?: unknown }).target_layer, 'L2');
 }
 
-function recipeFamilyLabel(value: unknown): string {
-  const family = text(value, '').toLowerCase();
-  const labels: Record<string, string> = {
-    style_blend: '风格复合',
-    risk_adjusted: '风险调节',
-    value_anchor: '估值锚定',
-    divergence: '背离惩罚',
-    residual_neutralized: '残差中性化',
-    ts_denoise: '时序降噪',
-    pairwise_cross_family: '跨风格探索',
-  };
-  return labels[family] ?? text(value, '组合模板');
+function displayLayerText(value: unknown, fallback = '未生成'): string {
+  return text(value, fallback).replace(/\bL([1-3])\b/g, 'F$1');
 }
 
-function sourceFactorList(candidate: ApiFactorMiningCandidate): string[] {
-  return asList<unknown>(candidate.source_factor_ids).map(String).filter(Boolean);
-}
-
-function timezoneLabel(value: unknown): string {
-  const raw = text(value, 'Asia/Hong_Kong');
-  if (raw === 'Asia/Hong_Kong' || raw === 'GMT+8' || raw === 'UTC+8') return 'GMT+8';
-  return raw;
+function displayTargetLayer(value: unknown): string {
+  return displayLayerText(text(value, 'L2'));
 }
 
 function requestFromOverview(overview: ApiFactorFactoryOverview | null): ApiFactorMiningJobCreatePayload {
   const request = overview?.profile?.request ?? overview?.latest_run?.request ?? DEFAULT_REQUEST;
   return {
-    universe: text(request.universe, DEFAULT_REQUEST.universe),
-    start_date: text(request.start_date, DEFAULT_REQUEST.start_date),
-    end_date: text(request.end_date, DEFAULT_REQUEST.end_date),
-    operators: Array.isArray(request.operators) && request.operators.length
-      ? request.operators.map(String)
-      : DEFAULT_REQUEST.operators,
-    candidate_count: numeric(request.candidate_count) ?? DEFAULT_REQUEST.candidate_count,
-    random_seed: numeric(request.random_seed) ?? DEFAULT_REQUEST.random_seed,
-    min_rank_ic: numeric(request.min_rank_ic) ?? DEFAULT_REQUEST.min_rank_ic,
-    max_depth: numeric(request.max_depth) ?? DEFAULT_REQUEST.max_depth,
-    generation_mode: text(request.generation_mode, DEFAULT_REQUEST.generation_mode ?? 'HYBRID_COMPOSITION'),
+    ...DEFAULT_REQUEST,
+    ...request,
+    operators: Array.isArray(request.operators) && request.operators.length ? request.operators.map(String) : DEFAULT_REQUEST.operators,
     source_factor_ids: Array.isArray(request.source_factor_ids) && request.source_factor_ids.length
       ? request.source_factor_ids.map(String)
       : DEFAULT_REQUEST.source_factor_ids,
     recipe_families: Array.isArray(request.recipe_families) && request.recipe_families.length
       ? request.recipe_families.map(String)
       : DEFAULT_REQUEST.recipe_families,
-    exploration_budget: numeric(request.exploration_budget) ?? DEFAULT_REQUEST.exploration_budget,
     composition_policy: isRecord(request.composition_policy)
       ? request.composition_policy
       : DEFAULT_REQUEST.composition_policy,
   };
 }
 
-function runDateLabel(run: ApiFactorFactoryRun): string {
-  const trigger = statusToken(run.trigger) === 'DAILY' ? '每日批次' : '临时批次';
-  return `${trigger} · ${run.run_date || '未记录日期'}`;
+function buildTaskRows(overview: ApiFactorFactoryOverview | null): ApiFactorFactoryTaskRow[] {
+  const rows = asList<ApiFactorFactoryTaskRow>(overview?.task_rows);
+  if (rows.length) return sortByTimeDesc(rows, taskSortTime);
+  const run = overview?.latest_run;
+  const date = shortDate(run?.run_date ?? new Date().toISOString());
+  const count = asList(record(run?.mining_job).top_candidates).length;
+  const status = run ? statusLabel(run.status) : '待开始';
+  return sortByTimeDesc([
+    {
+      id: `${date}-mining`,
+      task_date: date,
+      kind: 'mining',
+      title: `${date} PIT 原子信号挖掘`,
+      summary: 'PIT 原始字段可留在 F1；Return/MA/Std 等算子候选进入 F2 Raw Signal。',
+      status,
+      target_layer: 'L2',
+      current_candidate_count: count,
+      delivered_candidate_count: status === '已完成' ? count : null,
+      expected_candidate_count: numeric(overview?.profile?.request?.candidate_count, DEFAULT_REQUEST.candidate_count),
+    },
+    {
+      id: `${date}-refinement`,
+      task_date: date,
+      kind: 'refinement',
+      title: `${date} Raw 标准链改造`,
+      summary: 'Raw -> Winsorize -> Neutralize -> Z-Score -> Rank。',
+      status,
+      target_layer: 'L2',
+      operator_chain: L2_OPERATOR_CHAIN,
+      current_candidate_count: 0,
+      delivered_candidate_count: 0,
+    },
+    {
+      id: `${date}-composition`,
+      task_date: date,
+      kind: 'composition',
+      title: `${date} F3 组合因子生成`,
+      summary: '风格复合、风险调节、估值锚定、背离惩罚、残差/中性化、时序降噪。',
+      status,
+      target_layer: 'L3',
+      current_candidate_count: 0,
+      delivered_candidate_count: 0,
+      parent_factor_ids: overview?.profile?.request?.source_factor_ids ?? [],
+    },
+  ], taskSortTime);
 }
 
-function miningJobWorkDate(
-  job: ApiFactorMiningJob,
-  runs: Array<ApiFactorFactoryRun | null | undefined>,
-): string {
-  const factoryRun = runs.find(
-    (run): run is ApiFactorFactoryRun =>
-      Boolean(run && (run.mining_job_id === job.id || run.mining_job?.id === job.id)),
-  );
-  return formatShortDate(factoryRun?.run_date ?? job.created_at);
+function scoringFromCandidate(candidate: ApiFactorQuarantineCandidate): ApiFactorScoringCandidate {
+  const submittedAt = candidateEventTime(candidate) || text(candidate.created_at, '');
+  const detail = isRecord(candidate.scoring_detail) ? candidate.scoring_detail as ApiFactorScoringCandidate : null;
+  if (detail) return {
+    ...detail,
+    candidate_id: candidate.id,
+    display_id: candidate.expression,
+    target_layer: targetLayer(candidate),
+    submitted_at: submittedAt,
+    quarantine_candidate_id: candidate.id,
+    quarantine_result: candidate.quarantine_result,
+  };
+  const metrics = record(candidate.candidate_metrics);
+  return {
+    candidate_id: candidate.id,
+    display_id: candidate.expression,
+    target_layer: targetLayer(candidate),
+    submitted_at: submittedAt,
+    score: numeric(metrics.fitness_score ?? metrics.score ?? metrics.rank_ic, 0),
+    status: text(candidate.quarantine_result, 'WARN'),
+    collapsed_by_default: true,
+    detail_modal_enabled: true,
+    predictive_power: {
+      rank_ic: metrics.rank_ic,
+      rank_icir: metrics.ir,
+      monotonicity_score: metrics.monotonicity_score,
+    },
+    stability_turnover: {
+      turnover_rate_weekly: metrics.turnover,
+    },
+    risk_orthogonality: {
+      style_corr: metrics.max_style_correlation,
+      max_drawdown: metrics.max_drawdown_pct,
+    },
+    data_health: {
+      coverage: metrics.coverage,
+      missing_data_ratio: metrics.missing_data_ratio,
+    },
+  };
 }
 
-function miningCandidates(jobs: ApiFactorMiningJob[]): Array<ApiFactorMiningCandidate & { sourceJobId: string }> {
-  return jobs.flatMap((job) => (job.top_candidates ?? []).map((candidate) => ({
-    ...candidate,
-    sourceJobId: job.id,
-  })));
+function quarantineRowFromCandidate(candidate: ApiFactorQuarantineCandidate): ApiFactorQuarantineResultRow {
+  return {
+    candidate_id: candidate.id,
+    submitted_at: candidateEventTime(candidate) || text(candidate.created_at, ''),
+    factor_name: candidate.expression,
+    target_layer: targetLayer(candidate),
+    quarantine_result: text(candidate.quarantine_result, statusToken(candidate.status) === 'REJECTED' ? 'FAIL' : 'WARN'),
+    reason_summary: text(candidate.reason_summary ?? candidate.rejected_reason ?? candidate.publish_eligibility?.reason, '等待检疫或人工复核。'),
+    detail_modal_enabled: true,
+  };
 }
 
-function candidateKey(candidate: ApiFactorMiningCandidate): string {
-  return text(candidate.id || candidate.expression, 'candidate');
+function publishableFromCandidate(candidate: ApiFactorQuarantineCandidate): ApiPublishableFactorRow | null {
+  if (statusToken(candidate.status) !== 'PASSED' || statusToken(candidate.publish_status) !== 'ELIGIBLE') return null;
+  return {
+    candidate_id: candidate.id,
+    factor_id: text(candidate.target_factor_id ?? candidate.id),
+    factor_name: candidate.expression,
+    target_layer: targetLayer(candidate) as ApiPublishableFactorRow['target_layer'],
+    score: numeric(record(candidate.scoring_detail).score ?? record(candidate.candidate_metrics).score, 0),
+    quarantine_status: 'PASS',
+    parent_factor_ids: asList<string>(record(candidate.candidate_metrics).source_factor_ids).map(String),
+    operator_chain: candidate.operator_chain ?? [],
+    composition_methods: candidate.composition_methods ?? [],
+    investment_logic: candidate.investment_logic,
+    detail_modal_enabled: true,
+  };
 }
 
-function candidateSourceId(candidate: ApiFactorMiningCandidate): string {
-  const record = asRecord(candidate);
-  return text(record.candidate_id ?? candidate.id ?? candidate.expression, 'candidate');
-}
-
-function quarantinedMiningKeys(items: ApiFactorQuarantineCandidate[]): Set<string> {
-  const keys = new Set<string>();
-  items.forEach((candidate) => {
-    const sourceJobId = text(candidate.source_mining_job_id, '');
-    const miningCandidateId = text(candidate.mining_candidate_id, '');
-    const expression = text(candidate.expression, '');
-    if (sourceJobId && miningCandidateId) keys.add(`${sourceJobId}::id::${miningCandidateId}`);
-    if (sourceJobId && expression) keys.add(`${sourceJobId}::expr::${expression}`);
-  });
-  return keys;
-}
-
-function isAlreadyQuarantined(
-  candidate: ApiFactorMiningCandidate & { sourceJobId?: string },
-  keys: Set<string>,
-): boolean {
-  const sourceJobId = text(candidate.sourceJobId, '');
-  const candidateId = candidateSourceId(candidate);
-  const expression = text(candidate.expression, '');
-  return Boolean(
-    sourceJobId &&
-    ((candidateId && keys.has(`${sourceJobId}::id::${candidateId}`)) ||
-      (expression && keys.has(`${sourceJobId}::expr::${expression}`))),
-  );
-}
-
-function localizeQuarantineReason(reason: unknown, options: { omitPitDiagnostic?: boolean } = {}): string {
-  let value = text(reason, '').trim();
-  if (!value) return '';
-  const replacements: Array<[string, string]> = [
-    [
-      'PIT is not Full Ready; recorded as diagnostic evidence only.',
-      options.omitPitDiagnostic ? '' : 'PIT 全量就绪缺口仅作为诊断证据，不阻断发布。',
-    ],
-    ['Rank IC > 0.8; possible leakage or anti-time-travel failure.', 'Rank IC > 0.8，疑似泄露或反时间旅行校验失败。'],
-    ['IS Rank IC / Newey-West IR / coverage failed admission thresholds.', 'IS Rank IC、Newey-West IR 或覆盖率未达到准入阈值。'],
-    ['OOS rank IC or OOS/IS ratio failed admission thresholds.', 'OOS Rank IC 或 OOS/IS 比例未达到准入阈值。'],
-    ['Turnover = 0; possible static signal or leakage.', '换手率为 0，疑似静态信号或泄露。'],
-    ['Style/logical correlation remains above 0.3 after residual testing.', '残差化后风格/逻辑相关性仍高于 0.3。'],
-    ['Auto-Residual failed IS/OOS validation.', 'Auto-Residual 未通过 IS/OOS 校验。'],
-    ['Max drawdown relative to benchmark is >= 1.5x.', '最大回撤相对基准超过 1.5x。'],
-    ['Expression is logically duplicated by an existing factor.', '表达式与已有因子逻辑重复。'],
-    ['D2 gates passed; PIT is diagnostic-only.', 'D2 检疫通过；PIT 全量就绪缺口仅作为诊断证据。'],
-  ];
-  replacements.forEach(([source, target]) => {
-    value = value.split(source).join(target);
-  });
-  return value
-    .split(/[;；]+/)
-    .map((segment) => segment.trim().replace(/[.。]+$/, ''))
-    .filter(Boolean)
-    .join('；');
-}
-
-function pitGateMode(candidate: ApiFactorQuarantineCandidate | null, overview: ApiFactorFactoryOverview | null): string {
-  if (!candidate) return text(overview?.gate_policy?.pit_gate_mode, 'DIAGNOSTIC_ONLY');
-  const gate = asRecord(candidate.gate_summary);
-  const pit = asRecord(candidate.pit_evidence);
-  return text(gate.pit_gate_mode ?? pit.gate_mode ?? overview?.gate_policy?.pit_gate_mode, 'DIAGNOSTIC_ONLY');
-}
-
-function candidateOutputDate(candidate: ApiFactorQuarantineCandidate): string {
-  const latestRun = asRecord(candidate.latest_run);
-  return formatShortDate(
-    candidate.published_at ??
-    latestRun.completed_at ??
-    candidate.updated_at ??
-    candidate.created_at,
-  );
-}
-
-function candidateMetricLine(candidate: ApiFactorQuarantineCandidate): string {
-  const metrics = asRecord(candidate.candidate_metrics);
+function metricPairs(detail: ApiFactorScoringCandidate | undefined): Array<[string, unknown, string]> {
+  const predictive = record(detail?.predictive_power);
+  const stability = record(detail?.stability_turnover);
+  const risk = record(detail?.risk_orthogonality);
+  const health = record(detail?.data_health);
+  if (String(detail?.target_layer ?? '').toUpperCase() === 'L1') {
+    return [
+      ['PIT 准入审计', displayLayerText(detail?.gate_basis, 'PIT 准入审计'), '通过'],
+      ['数据覆盖率', health.coverage, '覆盖充分'],
+      ['缺失率', health.missing_data_ratio, '仅作数据质量校准'],
+      ['水源角色', text(detail?.factor_id ?? detail?.name, 'F1 原始因子'), '不参与 RankIC 优选'],
+    ];
+  }
   return [
-    `输出 ${candidateOutputDate(candidate)}`,
-    `Rank IC ${formatNumber(metrics.rank_ic, 3)}`,
-    `IR ${formatNumber(metrics.ir, 2)}`,
-    `覆盖 ${formatPct(metrics.coverage)}`,
-  ].join(' · ');
+    ['RankIC', predictive.rank_ic, '> 0.025'],
+    ['RankICIR', predictive.rank_icir, '> 1.5'],
+    ['单调性', predictive.monotonicity_score, 'Q1-Q5 稳定'],
+    ['自相关', stability.autocorrelation, '稳定性'],
+    ['IC Decay T+1', stability.ic_decay_t1, '预测衰减'],
+    ['IC Decay T+5', stability.ic_decay_t5, '预测衰减'],
+    ['IC Decay T+21', stability.ic_decay_t21, '预测衰减'],
+    ['Turnover_Rate', stability.turnover_rate_weekly, '< 20% 单周'],
+    ['Style_Corr', risk.style_corr, '< 0.3'],
+    ['Specific IC', risk.specific_ic, '增量信息'],
+    ['Incremental IR', risk.incremental_ir, '> 0.05'],
+    ['Max_Drawdown', risk.max_drawdown, '< 15%'],
+    ['Coverage', health.coverage, '> 95%'],
+    ['Missing Data Ratio', health.missing_data_ratio, '< 1%'],
+  ];
 }
 
-function candidateDecisionReason(candidate: ApiFactorQuarantineCandidate): string {
-  const status = statusToken(candidate.status);
-  if (status !== 'NEEDS_REVIEW' && status !== 'REJECTED') return '';
-  const latestRun = asRecord(candidate.latest_run);
-  const latestSummary = asRecord(latestRun.summary);
-  const publish = asRecord(candidate.publish_eligibility);
-  const pit = asRecord(candidate.pit_evidence);
-  const warnings = asList<unknown>(latestSummary.diagnostic_warnings ?? pit.warnings ?? pit.diagnostic_warnings)
-    .map(String)
-    .filter(Boolean);
-  const reason = text(
-    candidate.rejected_reason ??
-    publish.reason ??
-    latestSummary.publish_reason ??
-    warnings[0],
-    '',
-  );
-  return text(
-    localizeQuarantineReason(reason, { omitPitDiagnostic: status === 'REJECTED' }),
-    status === 'REJECTED' ? '检疫未返回硬阻断原因。' : '需人工复核门禁原因',
-  );
+function chainLabel(chain: ApiFactorOperatorChainStep[] | undefined): string {
+  const labels = asList<ApiFactorOperatorChainStep>(chain).map((step) => step.label || step.code).filter(Boolean);
+  return labels.length ? labels.join(' -> ') : '未记录';
 }
 
-function candidateDecisionReasonLabel(candidate: ApiFactorQuarantineCandidate): string {
-  return statusToken(candidate.status) === 'REJECTED' ? '拒绝原因' : '复核原因';
-}
-
-function isPublishableCandidate(candidate: ApiFactorQuarantineCandidate): boolean {
-  return statusToken(candidate.status) === 'PASSED' && statusToken(candidate.publish_status) === 'ELIGIBLE';
-}
-
-function quarantineCandidateSortRank(candidate: ApiFactorQuarantineCandidate): number {
-  if (isPublishableCandidate(candidate)) return 0;
-  const status = statusToken(candidate.status);
-  if (['NEEDS_REVIEW', 'PENDING', 'RUNNING', 'QUEUED'].includes(status)) return 1;
-  if (status === 'REJECTED') return 2;
-  if (status === 'PUBLISHED') return 3;
-  return 4;
-}
-
-function sortedQuarantineCandidates(items: ApiFactorQuarantineCandidate[]): ApiFactorQuarantineCandidate[] {
-  return [...items].sort((left, right) => {
-    const priorityDelta = quarantineCandidateSortRank(left) - quarantineCandidateSortRank(right);
-    if (priorityDelta !== 0) return priorityDelta;
-    return text(right.updated_at).localeCompare(text(left.updated_at));
-  });
-}
-
-export default function FactorFactoryPage({ initialSection = 'overview' }: FactorFactoryPageProps): JSX.Element {
+export default function FactorFactoryPage({ initialSection: _initialSection = 'overview' }: FactorFactoryPageProps): JSX.Element {
   const api = useApiClient();
   const [overview, setOverview] = useState<ApiFactorFactoryOverview | null>(null);
-  const [section, setSection] = useState<FactorySection>(initialSection);
-  const [selectedMiningId, setSelectedMiningId] = useState('');
-  const [selectedQuarantineId, setSelectedQuarantineId] = useState('');
   const [loading, setLoading] = useState(Boolean(api.getFactorFactoryOverview));
   const [busy, setBusy] = useState<BusyAction>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [detailCandidateId, setDetailCandidateId] = useState<string | null>(null);
+  const [filters, setFilters] = useState({ date: '', factorName: '', result: 'ALL' });
+  const [autoFilterDate, setAutoFilterDate] = useState('');
+  const [searchedRows, setSearchedRows] = useState<ApiFactorQuarantineResultRow[] | null>(null);
 
   const loadOverview = useCallback(async (): Promise<void> => {
     if (!api.getFactorFactoryOverview) {
-      setOverview(null);
       setError('因子工厂 API 尚未接入，无法加载自动化状态。');
       setLoading(false);
       return;
@@ -389,53 +403,62 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
     void loadOverview();
   }, [loadOverview]);
 
-  const activeRun = overview?.active_run ?? null;
-  const latestRun = overview?.latest_run ?? null;
-  const currentRun = activeRun ?? latestRun;
-  const currentMiningJobId = text(currentRun?.mining_job_id, '');
-  const jobs = useMemo(() => {
-    const allJobs = asList<ApiFactorMiningJob>(overview?.mining?.items);
-    if (!currentMiningJobId) return allJobs;
-    const matched = allJobs.filter((job) => job.id === currentMiningJobId);
-    if (matched.length) return matched;
-    return currentRun?.mining_job ? [currentRun.mining_job] : [];
-  }, [currentMiningJobId, currentRun, overview]);
-  const minedCandidates = useMemo(() => miningCandidates(jobs), [jobs]);
   const quarantineCandidates = useMemo(
-    () => {
-      const items = sortedQuarantineCandidates(asList<ApiFactorQuarantineCandidate>(overview?.quarantine?.items));
-      if (!currentMiningJobId) return items;
-      return items.filter((candidate) => candidate.source_mining_job_id === currentMiningJobId);
-    },
-    [currentMiningJobId, overview],
+    () => asList<ApiFactorQuarantineCandidate>(overview?.quarantine?.items),
+    [overview],
   );
-  const quarantinedKeys = useMemo(() => quarantinedMiningKeys(quarantineCandidates), [quarantineCandidates]);
-  const candidates = useMemo(
-    () => minedCandidates.filter((candidate) => !isAlreadyQuarantined(candidate, quarantinedKeys)),
-    [minedCandidates, quarantinedKeys],
-  );
-  const selectedMining = useMemo(
-    () => candidates.find((candidate) => candidateKey(candidate) === selectedMiningId) ?? candidates[0] ?? null,
-    [candidates, selectedMiningId],
-  );
-  const selectedQuarantine = useMemo(
-    () => quarantineCandidates.find((candidate) => candidate.id === selectedQuarantineId) ?? quarantineCandidates[0] ?? null,
-    [quarantineCandidates, selectedQuarantineId],
-  );
-  const profile = overview?.profile;
-  const gatePolicy = overview?.gate_policy ?? profile?.gate_policy;
-  const publishableCandidates = quarantineCandidates.filter(isPublishableCandidate);
-  const currentRunFunnel = {
-    mined_candidates: minedCandidates.length,
-    quarantine_candidates: quarantineCandidates.length,
-    passed: publishableCandidates.length,
-    published: quarantineCandidates.filter((candidate) => statusToken(candidate.status) === 'PUBLISHED').length,
-  };
-  const drawdownLimit = numeric(gatePolicy?.max_drawdown_relative_to_benchmark) ?? 1.5;
-  const pitMode = pitGateMode(selectedQuarantine, overview);
-  const diagnosticWarnings = asList<string>(asRecord(selectedQuarantine?.latest_run).diagnostic_warnings)
-    .map(String)
-    .concat(asList<string>(selectedQuarantine?.pit_evidence?.diagnostic_warnings).map(String));
+  const taskRows = useMemo(() => buildTaskRows(overview), [overview]);
+  const quarantineCandidateById = useMemo(() => {
+    const entries = quarantineCandidates.map((candidate) => [text(candidate.id, ''), candidate] as const);
+    return new Map(entries.filter(([id]) => Boolean(id)));
+  }, [quarantineCandidates]);
+  const scoringCandidates = useMemo<ApiFactorScoringCandidate[]>(() => {
+    const direct = asList<ApiFactorScoringCandidate>(overview?.scoring_candidates);
+    const rows: ApiFactorScoringCandidate[] = direct.map((candidate): ApiFactorScoringCandidate => {
+        const quarantineId = text(candidate.quarantine_candidate_id ?? candidate.candidate_id, '');
+        const source = quarantineCandidateById.get(quarantineId);
+        return {
+          ...candidate,
+          quarantine_candidate_id: quarantineId || candidate.quarantine_candidate_id,
+          submitted_at: candidateEventTime(source) || text(candidate.submitted_at, ''),
+        };
+      });
+    return sortByTimeDesc(rows, (candidate) => candidate.submitted_at);
+  }, [overview, quarantineCandidateById]);
+  const quarantineRows = useMemo(() => {
+    const direct = asList<ApiFactorQuarantineResultRow>(overview?.quarantine_result_rows);
+    const rows = direct.length
+      ? direct.map((row) => {
+        const source = quarantineCandidateById.get(text(row.candidate_id, ''));
+        return {
+          ...row,
+          submitted_at: candidateEventTime(source) || text(row.submitted_at, ''),
+        };
+      })
+      : quarantineCandidates.map(quarantineRowFromCandidate);
+    return sortByTimeDesc(rows, (row) => row.submitted_at);
+  }, [overview, quarantineCandidates, quarantineCandidateById]);
+  const publishableFactors = useMemo(() => {
+    const direct = asList<ApiPublishableFactorRow>(overview?.publishable_factors);
+    if (direct.length) return direct;
+    return quarantineCandidates.map(publishableFromCandidate).filter((item): item is ApiPublishableFactorRow => Boolean(item));
+  }, [overview, quarantineCandidates]);
+  const renderedQuarantineRows = searchedRows ?? quarantineRows;
+  const latestSubmittedDate = shortDate(scoringCandidates[0]?.submitted_at ?? quarantineRows[0]?.submitted_at ?? '');
+  const detailCandidate = quarantineCandidates.find((candidate) => candidate.id === detailCandidateId) ?? null;
+  const detailScoring = detailCandidate ? scoringFromCandidate(detailCandidate) : undefined;
+  const detailReport = asList<ApiFactorAdmissionReportRow>(detailCandidate?.admission_report);
+  const latestRun = overview?.latest_run ?? null;
+
+  useEffect(() => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(latestSubmittedDate)) return;
+    setFilters((current) => {
+      if (current.date && current.date !== autoFilterDate) return current;
+      if (current.date === latestSubmittedDate) return current;
+      return { ...current, date: latestSubmittedDate };
+    });
+    setAutoFilterDate(latestSubmittedDate);
+  }, [autoFilterDate, latestSubmittedDate]);
 
   const withBusy = async (action: BusyAction, task: () => Promise<void>): Promise<void> => {
     setBusy(action);
@@ -454,10 +477,10 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
     void withBusy('start', async () => {
       if (!api.startFactorFactoryAutomation) throw new Error('启动自动化 API 尚未接入。');
       const payload = await api.startFactorFactoryAutomation({
-        timezone: profile?.timezone ?? 'Asia/Hong_Kong',
+        timezone: overview?.profile?.timezone ?? 'Asia/Hong_Kong',
         schedule_time: '14:00',
         request: requestFromOverview(overview),
-        gate_policy: gatePolicy,
+        gate_policy: overview?.gate_policy ?? overview?.profile?.gate_policy,
       });
       setOverview(payload);
       setNotice('每日自动化已启动；GMT+8 14:00 运行，并自动送检与执行检疫。');
@@ -467,8 +490,7 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
   const pauseAutomation = (): void => {
     void withBusy('pause', async () => {
       if (!api.pauseFactorFactoryAutomation) throw new Error('暂停自动化 API 尚未接入。');
-      const payload = await api.pauseFactorFactoryAutomation();
-      setOverview(payload);
+      setOverview(await api.pauseFactorFactoryAutomation());
       setNotice('每日自动化已暂停；已存在的历史 run 不会被删除。');
     });
   };
@@ -478,141 +500,139 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
       if (!api.runFactorFactoryNow) throw new Error('立即运行 API 尚未接入。');
       const payload = await api.runFactorFactoryNow({
         request: requestFromOverview(overview),
-        gate_policy: gatePolicy,
+        gate_policy: overview?.gate_policy ?? overview?.profile?.gate_policy,
+        pipeline_scope: 'B1_B2_B3_B4',
       });
       setOverview(payload);
-      setNotice('已创建临时挖掘批次；每日自动化状态保持不变。');
+      setNotice('已创建临时 B1-B4 批次；每日自动化状态保持不变。');
     });
   };
 
-  const cancelRun = (run: ApiFactorFactoryRun | null): void => {
-    if (!run) return;
-    void withBusy('cancel', async () => {
-      if (!api.cancelFactorFactoryRun) throw new Error('取消工厂批次 API 尚未接入。');
-      await api.cancelFactorFactoryRun(run.id);
-      await loadOverview();
-      setNotice('工厂批次已发出取消请求。');
-    });
-  };
-
-  const sendToQuarantine = (candidate: (ApiFactorMiningCandidate & { sourceJobId?: string }) | null): void => {
-    if (!candidate) return;
-    void withBusy('intake', async () => {
+  const sendAllToQuarantine = (): void => {
+    void withBusy('send', async () => {
       if (!api.factorQuarantineIntake) throw new Error('检疫接收 API 尚未接入。');
       if (!api.runFactorQuarantineCandidate) throw new Error('检疫执行 API 尚未接入。');
-      const intake = await api.factorQuarantineIntake({
-        mining_job_id: candidate.sourceJobId,
-        candidate_ids: [candidate.id],
-      });
-      const intaked = asList<ApiFactorQuarantineCandidate>(intake.items);
-      if (!intaked.length) {
-        throw new Error('检疫接收未返回候选，请检查当前挖掘任务与候选 ID。');
-      }
-      const completed = await Promise.all(
-        intaked.map((item) => api.runFactorQuarantineCandidate!(
-          item.id,
-          { reason: 'factor_factory_workbench_intake' },
-        )),
-      );
-      const selected = completed[0] ?? intaked[0];
-      setSelectedQuarantineId(selected.id);
+      const miningJobId = text(latestRun?.mining_job_id, '');
+      const intake = await api.factorQuarantineIntake({ mining_job_id: miningJobId || undefined });
+      const items = asList<ApiFactorQuarantineCandidate>(intake.items);
+      await Promise.all(items.map((item) => api.runFactorQuarantineCandidate!(
+        item.id,
+        { reason: 'factor_factory_bulk_send_to_quarantine' },
+      )));
       await loadOverview();
-      setSection('quarantine');
-      setNotice(`已送入 D2 检疫并执行 ${completed.length} 个候选；通过后可一键发布。`);
+      setNotice(`一键送检已完成：${items.length} 个候选进入检疫并执行准入检测。`);
     });
   };
 
-  const runQuarantine = (candidate: ApiFactorQuarantineCandidate | null): void => {
-    if (!candidate) return;
-    void withBusy('run-quarantine', async () => {
-      if (!api.runFactorQuarantineCandidate) throw new Error('检疫执行 API 尚未接入。');
-      await api.runFactorQuarantineCandidate(candidate.id, { reason: 'factor_factory_workbench' });
-      await loadOverview();
-      setNotice('检疫已完成，PIT 证据按诊断项写入。');
-    });
-  };
-
-  const publishCandidate = (candidate: ApiFactorQuarantineCandidate | null): void => {
-    if (!candidate) return;
+  const publishAll = (): void => {
     void withBusy('publish', async () => {
       if (!api.publishFactorQuarantineCandidate) throw new Error('发布 API 尚未接入。');
-      await api.publishFactorQuarantineCandidate(candidate.id, { operator: 'system_rule' });
+      const ids = publishableFactors.map((item) => text(item.candidate_id, '')).filter(Boolean);
+      await ids.reduce(
+        (chain, id) => chain.then(() => api.publishFactorQuarantineCandidate!(id, { operator: 'system_rule' })),
+        Promise.resolve<unknown>(undefined),
+      );
       await loadOverview();
-      setNotice('候选已发布到正式因子库，并记录发布审计。');
+      setNotice(`一键发布已完成：${ids.length} 个因子写入 F2/F3 发布审计。`);
     });
   };
 
-  const activeSectionClass = (value: FactorySection): string =>
-    `factor-factory-tab${section === value ? ' is-active' : ''}`;
+  const searchQuarantine = (): void => {
+    void withBusy('search', async () => {
+      if (api.listFactorQuarantineCandidates) {
+        const payload = await api.listFactorQuarantineCandidates({
+          date: filters.date || undefined,
+          factor_name: filters.factorName || undefined,
+          result: filters.result,
+        });
+        setSearchedRows(sortByTimeDesc(payload.items.map(quarantineRowFromCandidate), (row) => row.submitted_at));
+      } else {
+        setSearchedRows(null);
+      }
+    });
+  };
 
   return (
     <main
-      className="factor-phase2-page factor-factory-page"
+      className="factor-phase2-page factor-factory-page factor-factory-b1b4-page"
       data-page-root="factor-factory"
-      data-initial-section={initialSection}
+      data-initial-section={_initialSection}
     >
       <section className="factor-phase2-hero factor-factory-hero">
         <div>
           <p className="factor-phase2-hero__eyebrow">闭环因子工厂</p>
-          <h1>因子工厂</h1>
+          <h1>因子任务生产台</h1>
           <p>
-            挖掘沙盒与检疫发布已合并为一条投研治理流水线。启动自动化后，每日
-            GMT+8 14:00 生成新挖掘批次，候选因子自动送入检疫；用户只需确认通过项并发布。
+            按 B1 挖掘、B2 改造、B3 组合、B4 检疫发布组织因子生产；候选先完成打分送检，
+            再由检疫准入报告决定是否一键发布到 F2 或 F3。
           </p>
         </div>
         <div className="factor-phase2-actions">
-          <button
-            className="factor-phase2-button factor-phase2-button--primary"
-            disabled={busy !== null || loading}
-            type="button"
-            onClick={startAutomation}
-          >
+          <button className="factor-phase2-button factor-phase2-button--primary" disabled={busy !== null || loading} type="button" onClick={startAutomation}>
             {busy === 'start' ? '启动中...' : '启动自动化'}
           </button>
-          <button
-            className="factor-phase2-button"
-            disabled={busy !== null || loading}
-            type="button"
-            onClick={pauseAutomation}
-          >
+          <button className="factor-phase2-button" disabled={busy !== null || loading} type="button" onClick={pauseAutomation}>
             {busy === 'pause' ? '暂停中...' : '暂停自动化'}
           </button>
-          <button
-            className="factor-phase2-button"
-            disabled={busy !== null || loading}
-            type="button"
-            onClick={runNow}
-          >
+          <button className="factor-phase2-button" disabled={busy !== null || loading} type="button" onClick={runNow}>
             {busy === 'run-now' ? '运行中...' : '立即运行'}
           </button>
         </div>
       </section>
 
       <section className="factor-factory-status-strip" aria-label="因子工厂状态">
-        <span className={chipClass(profile?.status ?? 'PAUSED')}>{statusLabel(profile?.status ?? 'PAUSED')}</span>
-        <span className="factor-phase2-chip factor-phase2-chip--info">
-          {generationModeLabel(profile?.request?.generation_mode)} · 自动送检，人工发布
-        </span>
-        <span>每日计划：{timezoneLabel(profile?.timezone)} {profile?.schedule_time ?? '14:00'}</span>
-        <span>下次批次：{profile?.next_run_at ? formatDateTime(profile.next_run_at) : '等待启动'}</span>
-        <span className={chipClass(pitMode)}>10Y 因子准入：{statusLabel(pitMode)}；PIT 全量就绪缺口仅进入审计与风险提示</span>
+        <span className={chipClass(overview?.profile?.status ?? 'PAUSED')}>{statusLabel(overview?.profile?.status ?? 'PAUSED')}</span>
+        <span>每日计划：GMT+8 14:00</span>
+        <span>检疫与发布</span>
+        <span>下次批次：{overview?.profile?.next_run_at ? formatDateTime(overview.profile.next_run_at) : '等待启动'}</span>
+        <span>立即运行：不改变自动化状态</span>
+        <span className={chipClass('DIAGNOSTIC_ONLY')}>PIT 非 Full Ready 仅进入诊断/风险提示</span>
       </section>
 
       {error ? <div className="factor-phase2-empty factor-phase2-empty--danger">{error}</div> : null}
       {notice ? <div className="factor-phase2-empty factor-factory-notice">{notice}</div> : null}
 
-      <section className="factor-factory-tabs" aria-label="因子工厂分区">
-        <button className={activeSectionClass('overview')} type="button" onClick={() => setSection('overview')}>工厂总览</button>
-        <button className={activeSectionClass('sandbox')} type="button" onClick={() => setSection('sandbox')}>挖掘队列</button>
-        <button className={activeSectionClass('quarantine')} type="button" onClick={() => setSection('quarantine')}>检疫与发布</button>
-      </section>
+      {publishableFactors.length > 0 ? (
+        <section className="factor-phase2-panel factor-factory-publish-queue" aria-label="可发布因子名单">
+          <div className="factor-phase2-panel__header">
+            <div>
+              <p className="factor-phase2-panel__eyebrow">B4 发布准入</p>
+              <h2>可发布因子名单</h2>
+            </div>
+            <button className="factor-phase2-button factor-phase2-button--primary" disabled={busy !== null} type="button" onClick={publishAll}>
+              {busy === 'publish' ? '发布中...' : '一键发布'}
+            </button>
+          </div>
+          <div className="factor-factory-publish-list">
+            {publishableFactors.map((item) => (
+              <article className="factor-factory-publish-card" key={text(item.candidate_id ?? item.factor_id)}>
+                <div>
+                  <span className={chipClass(item.quarantine_status)}>{item.quarantine_status}</span>
+                  <span className="factor-phase2-chip factor-phase2-chip--info">{displayTargetLayer(item.target_layer)}</span>
+                </div>
+                <strong>{text(item.factor_name ?? item.factor_id)}</strong>
+                <small>
+                  {item.target_layer === 'L3'
+                    ? `组合逻辑：${asList<{ label?: string }>(item.composition_methods).map((method) => method.label).filter(Boolean).join(' / ') || '未记录'}`
+                    : `算子链：${chainLabel(item.operator_chain)}`}
+                </small>
+                <button className="factor-phase2-button factor-phase2-button--small" type="button" onClick={() => setDetailCandidateId(text(item.candidate_id, ''))}>
+                  详情
+                </button>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
-      <section className="factor-phase2-metrics factor-factory-funnel" aria-label="因子漏斗">
+      <section className="factor-phase2-metrics factor-factory-funnel" aria-label="因子工厂摘要">
         {[
-          ['挖掘候选', currentRunFunnel.mined_candidates, '当前批次的候选因子池'],
-          ['已送检', currentRunFunnel.quarantine_candidates, '已进入 D2 检疫的候选因子'],
-          ['检疫通过', currentRunFunnel.passed, '通过检疫且具备发布资格'],
-          ['已发布', currentRunFunnel.published, '已入库的自动挖掘因子'],
+          ['任务池', taskRows.length, 'B1/B2/B3 任务'],
+          ['候选交付', numeric(overview?.task_summary?.delivered_candidates, scoringCandidates.length), '最终交付候选因子数'],
+          ['已送检', numeric(overview?.task_summary?.submitted_to_quarantine, quarantineRows.length), '进入 B3 检疫'],
+          ['发布准入', publishableFactors.length, 'F2/F3 可发布'],
+          ['历史拒绝', numeric(overview?.task_summary?.rejected_history_count, quarantineRows.filter((row) => row.quarantine_result === 'FAIL').length), '可检索原因'],
+          ['硬阻断', numeric(overview?.task_summary?.hard_blocked_count, 0), '不可发布'],
         ].map(([label, value, hint]) => (
           <div className="factor-phase2-metric" key={String(label)}>
             <p className="factor-phase2-metric__label">{label}</p>
@@ -622,255 +642,230 @@ export default function FactorFactoryPage({ initialSection = 'overview' }: Facto
         ))}
       </section>
 
-      <section className="factor-factory-workbench">
-        <article className="factor-phase2-panel factor-factory-runs" data-factory-section="overview">
+      <section className="factor-factory-workbench factor-factory-workbench--b1b4">
+        <article className="factor-phase2-panel factor-factory-fixed-panel" data-factory-section="tasks">
           <div className="factor-phase2-panel__header">
             <div>
-              <p className="factor-phase2-panel__eyebrow">自动化批次</p>
-              <h2>工厂批次</h2>
+              <p className="factor-phase2-panel__eyebrow">B1 因子任务</p>
+              <h2>因子任务</h2>
             </div>
-            <span className={chipClass(activeRun?.status ?? latestRun?.status ?? 'PAUSED')}>
-              {activeRun ? statusLabel(activeRun.status) : latestRun ? statusLabel(latestRun.status) : '未启动'}
-            </span>
+            <span className="factor-phase2-chip factor-phase2-chip--info">{taskRows.length} 类任务</span>
           </div>
-          <div className="factor-phase2-panel__body">
-            {loading ? <div className="factor-phase2-empty">正在读取工厂状态...</div> : null}
-            {!loading && !overview ? <div className="factor-phase2-empty">没有可用工厂状态。</div> : null}
-            {latestRun ? (
-              <div className="factor-phase2-row">
+          <div className="factor-phase2-panel__body factor-factory-scroll-body">
+            <div className="factor-factory-task-family-tabs" aria-label="因子任务类型">
+              <article className="factor-factory-family-tab is-active">
+                <strong>因子挖掘类</strong>
+                <small>F1 仅保留原始字段；出现 Return/MA/Std 等算子即作为 F2 Raw Signal 送检。</small>
+              </article>
+              <article className="factor-factory-family-tab">
+                <strong>因子改造类</strong>
+                <small>基于 F1 执行 MAD、残差/中性化、ZScore、TsRank/Rank 算子链。</small>
+              </article>
+              <article className="factor-factory-family-tab">
+                <strong>因子组合类</strong>
+                <small>从已准入 F2 或豁免来源构建 F3 组合候选。</small>
+              </article>
+            </div>
+            {taskRows.map((task) => (
+              <article className="factor-factory-task-card" key={task.id}>
                 <div className="factor-phase2-row__top">
-                  <h3>{runDateLabel(latestRun)}</h3>
-                  <span className={chipClass(latestRun.status)}>{statusLabel(latestRun.status)}</span>
+                  <div>
+                    <h3>{displayLayerText(task.title)}</h3>
+                    <small>{displayLayerText(task.summary)}</small>
+                  </div>
+                  <span className={chipClass(task.status)}>{task.status}</span>
                 </div>
-                <p>{latestRun.id}</p>
-                <div className="factor-phase2-stat-grid">
-                  <div className="factor-phase2-stat">
-                    <b>{latestRun.mining_job_id ?? '未生成'}</b>
-                    <span>挖掘任务</span>
-                  </div>
-                  <div className="factor-phase2-stat">
-                    <b>{text(latestRun.summary?.top_candidate_count, '0')}</b>
-                    <span>候选摘要</span>
-                  </div>
-                  <div className="factor-phase2-stat">
-                    <b>{formatNumber(latestRun.summary?.drawdown_threshold ?? drawdownLimit, 1)}x</b>
-                    <span>回撤上限</span>
-                  </div>
+                <div className="factor-factory-task-meta" aria-label="任务交付摘要">
+                  <span>{displayTargetLayer(task.target_layer)}</span>
+                  <span>{task.current_candidate_count ?? 0} 当前候选</span>
+                  <strong>{task.delivered_candidate_count ?? task.current_candidate_count ?? 0} 交付候选</strong>
                 </div>
-                <button
-                  className="factor-phase2-button factor-phase2-button--small"
-                  disabled={busy !== null || !['QUEUED', 'RUNNING'].includes(statusToken(latestRun.status))}
-                  type="button"
-                  onClick={() => cancelRun(latestRun)}
-                >
-                  {busy === 'cancel' ? '取消中...' : '取消批次'}
+              </article>
+            ))}
+          </div>
+        </article>
+
+        <article className="factor-phase2-panel factor-factory-fixed-panel" data-factory-section="scoring">
+          <div className="factor-phase2-panel__header">
+            <div>
+              <p className="factor-phase2-panel__eyebrow">B2 因子打分</p>
+              <h2>因子打分</h2>
+            </div>
+            <span className="factor-phase2-chip factor-phase2-chip--info">默认收起</span>
+          </div>
+          <div className="factor-phase2-panel__body factor-factory-scroll-body factor-factory-panel-with-footer">
+            {!scoringCandidates.length ? <div className="factor-phase2-empty">暂无待送检候选；已送检因子已移至 B3 因子检疫列表。</div> : null}
+            {scoringCandidates.map((candidate) => (
+              <article className="factor-factory-score-card is-collapsed" key={candidate.candidate_id}>
+                <div className="factor-factory-score-card__head">
+                  <div>
+                    <strong>{candidate.display_id}</strong>
+                    <small>{shortDate(candidate.submitted_at)} · {displayTargetLayer(candidate.target_layer)} · 分数 {displayScore(candidate.score)}</small>
+                  </div>
+                  <b>{displayScore(candidate.score)}</b>
+                </div>
+                <div className="factor-factory-score-card__chips">
+                  <span className={chipClass(candidate.status ?? candidate.quarantine_result)}>{candidate.status ?? candidate.quarantine_result ?? 'WARN'}</span>
+                  <span className="factor-phase2-chip factor-phase2-chip--info">
+                    {candidate.target_layer === 'L1'
+                      ? displayLayerText(candidate.gate_basis, 'PIT 准入审计')
+                      : `RankIC ${decimal(record(candidate.predictive_power).rank_ic)}`}
+                  </span>
+                  <span className="factor-phase2-chip factor-phase2-chip--info">Coverage {pct(record(candidate.data_health).coverage)}</span>
+                </div>
+                <button className="factor-phase2-button factor-phase2-button--small" type="button" onClick={() => setDetailCandidateId(text(candidate.quarantine_candidate_id ?? candidate.candidate_id, ''))}>
+                  详情
                 </button>
-              </div>
-            ) : null}
-            {overview?.runs?.length ? (
-              <ul className="factor-phase2-list factor-factory-run-list">
-                {overview.runs.slice(0, 4).map((run) => (
-                  <li className="factor-phase2-row" key={run.id}>
-                    <div className="factor-phase2-row__top">
-                      <strong>{runDateLabel(run)}</strong>
-                      <span className={chipClass(run.status)}>{statusLabel(run.status)}</span>
-                    </div>
-                    <p>{run.id}</p>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
+              </article>
+            ))}
+          </div>
+          <div className="factor-factory-panel-action-bar">
+            <button className="factor-phase2-button factor-phase2-button--primary" disabled={busy !== null || loading || scoringCandidates.length === 0} type="button" onClick={sendAllToQuarantine}>
+              {busy === 'send' ? '送检中...' : '一键送检'}
+            </button>
           </div>
         </article>
 
-        <article className="factor-phase2-panel" data-factory-section="sandbox">
+        <article className="factor-phase2-panel factor-factory-fixed-panel" data-factory-section="quarantine">
           <div className="factor-phase2-panel__header">
             <div>
-              <p className="factor-phase2-panel__eyebrow">D1 挖掘沙盒</p>
-              <h2>挖掘队列</h2>
+              <p className="factor-phase2-panel__eyebrow">B3 因子检疫</p>
+              <h2>因子检疫</h2>
             </div>
-            <span className="factor-phase2-chip factor-phase2-chip--info">{jobs.length} 个任务</span>
+            <span className="factor-phase2-chip factor-phase2-chip--info">显示 {renderedQuarantineRows.length}/{quarantineRows.length}</span>
           </div>
-          <div className="factor-phase2-panel__body">
-            {!jobs.length ? <div className="factor-phase2-empty">运行时没有挖掘任务；可点击立即运行创建临时挖掘批次。</div> : null}
-            <ul className="factor-phase2-list">
-              {jobs.slice(0, 5).map((job) => {
-                const workDate = miningJobWorkDate(job, [currentRun, latestRun, ...(overview?.runs ?? [])]);
-                return (
-                  <li className="factor-phase2-row" key={job.id}>
-                    <div className="factor-phase2-row__top">
-                      <h3>{job.id}</h3>
-                      <span className={chipClass(job.status)}>{statusLabel(job.status)}</span>
-                    </div>
-                    <p>
-                      {generationModeLabel(job.request?.generation_mode)}
-                      {' · '}
-                      {(job.request?.recipe_families ?? []).slice(0, 3).map(recipeFamilyLabel).join(' / ') || '默认模板'}
-                      {' · 自动送检，人工发布'}
-                    </p>
-                    <div className="factor-phase2-progress" aria-label={`${job.id} 进度`}>
-                      <span style={{ width: `${Math.max(0, Math.min(100, numeric(job.progress?.percent) ?? 0))}%` }} />
-                    </div>
-                    <p>
-                      <span data-ui="factor-factory-mining-job-work-date">工作日期 {workDate}</span>
-                      {' · '}
-                      {text(job.request?.universe)} · {text(job.request?.start_date)} 至 {text(job.request?.end_date)}
-                      {' · '}目标 {text(job.request?.candidate_count)} 个
-                    </p>
-                  </li>
-                );
-              })}
-            </ul>
-            <div className="factor-factory-candidate-list">
-              <h3>候选摘要</h3>
-              {!candidates.length ? <div className="factor-phase2-empty">当前批次候选已全部进入检疫队列，请在右侧查看检疫结果。</div> : null}
-              {candidates.slice(0, 6).map((candidate) => {
-                const key = candidateKey(candidate);
-                const sourceFactors = sourceFactorList(candidate);
-                return (
-                  <button
-                    className={`factor-factory-candidate${selectedMining && candidateKey(selectedMining) === key ? ' is-active' : ''}`}
-                    key={`${candidate.sourceJobId}-${key}`}
-                    type="button"
-                    onClick={() => {
-                      setSelectedMiningId(key);
-                      setSection('sandbox');
-                    }}
-                  >
-                    <span>
-                      <strong>{candidate.expression}</strong>
-                      <small>
-                        {recipeFamilyLabel(candidate.recipe_family)}
-                        {candidate.recipe_kind ? ` · ${text(candidate.recipe_kind)}` : ''}
-                        {candidate.orthogonality_intent ? ` · ${text(candidate.orthogonality_intent)}` : ''}
-                      </small>
-                      {sourceFactors.length ? (
-                        <small>父因子 {sourceFactors.join(' / ')}</small>
-                      ) : null}
-                      <small>
-                        适应度 {formatNumber(candidate.fitness_score ?? candidate.score, 3)}
-                        {' · '}Rank IC {formatNumber(candidate.rank_ic, 3)}
-                        {' · '}风格相关 {formatNumber(candidate.max_style_correlation, 2)}
-                      </small>
-                    </span>
-                    <i>{formatPct(candidate.coverage)}</i>
-                  </button>
-                );
-              })}
-              <button
-                className="factor-phase2-button factor-phase2-button--primary"
-                disabled={busy !== null || !selectedMining}
-                type="button"
-                onClick={() => sendToQuarantine(selectedMining)}
-              >
-                {busy === 'intake' ? '送检中...' : '送入检疫'}
+          <div className="factor-phase2-panel__body factor-factory-scroll-body">
+            <div className="factor-factory-filter-row" aria-label="历史检疫筛选">
+              <label>
+                日期
+                <input type="date" value={filters.date} onChange={(event) => setFilters((current) => ({ ...current, date: event.target.value }))} />
+              </label>
+              <label>
+                因子名
+                <input type="text" value={filters.factorName} onChange={(event) => setFilters((current) => ({ ...current, factorName: event.target.value }))} />
+              </label>
+              <label>
+                结果
+                <select value={filters.result} onChange={(event) => setFilters((current) => ({ ...current, result: event.target.value }))}>
+                  <option value="ALL">全部结果</option>
+                  <option value="PASS">PASS</option>
+                  <option value="WARN">WARN</option>
+                  <option value="FAIL">FAIL</option>
+                </select>
+              </label>
+              <button className="factor-phase2-button factor-phase2-button--small" disabled={busy !== null} type="button" onClick={searchQuarantine}>
+                查询
               </button>
             </div>
-          </div>
-        </article>
-
-        <article className="factor-phase2-panel" data-factory-section="quarantine">
-          <div className="factor-phase2-panel__header">
-            <div>
-              <p className="factor-phase2-panel__eyebrow">D2 检疫门禁</p>
-              <h2>检疫与发布</h2>
-            </div>
-            <span className="factor-phase2-chip factor-phase2-chip--good">{publishableCandidates.length} 个可发布</span>
-          </div>
-          <div className="factor-phase2-panel__body">
-            {!quarantineCandidates.length ? <div className="factor-phase2-empty">检疫队列为空；请先从挖掘候选送检。</div> : null}
-            <ul className="factor-phase2-list">
-              {quarantineCandidates.slice(0, 7).map((candidate) => {
-                const decisionReason = candidateDecisionReason(candidate);
-                return (
-                  <li className="factor-phase2-row" key={candidate.id}>
-                    <button
-                      className={`factor-factory-candidate${selectedQuarantine?.id === candidate.id ? ' is-active' : ''}`}
-                      type="button"
-                      onClick={() => {
-                        setSelectedQuarantineId(candidate.id);
-                        setSection('quarantine');
-                      }}
-                    >
-                      <span>
-                        <strong>{candidate.expression}</strong>
-                        <small>{candidateMetricLine(candidate)}</small>
-                      </span>
-                      <span className="factor-factory-candidate-status">
-                        <i className={chipClass(candidate.status)}>{statusLabel(candidate.status)}</i>
-                        {decisionReason ? (
-                          <small className="factor-factory-candidate-reason">
-                            <b>{candidateDecisionReasonLabel(candidate)}</b>
-                            {decisionReason}
-                          </small>
-                        ) : null}
-                      </span>
+            <div className="factor-factory-result-table" role="table" aria-label="因子检疫结果列表">
+              <div className="factor-factory-result-row factor-factory-result-row--head" role="row">
+                <span role="columnheader">日期</span>
+                <span role="columnheader">因子名</span>
+                <span role="columnheader">结果</span>
+                <span role="columnheader">原因</span>
+                <span role="columnheader">操作</span>
+              </div>
+              {!renderedQuarantineRows.length ? <div className="factor-phase2-empty">没有匹配的检疫历史记录。</div> : null}
+              {renderedQuarantineRows.map((row) => (
+                <div className="factor-factory-result-row" role="row" key={row.candidate_id}>
+                  <span role="cell">{shortDate(row.submitted_at)}</span>
+                  <span role="cell">{row.factor_name}</span>
+                  <span role="cell"><i className={chipClass(row.quarantine_result)}>{row.quarantine_result}</i></span>
+                  <span role="cell">{displayLayerText(row.reason_summary)}</span>
+                  <span role="cell">
+                    <button className="factor-phase2-button factor-phase2-button--small" type="button" onClick={() => setDetailCandidateId(row.candidate_id)}>
+                      详情
                     </button>
-                  </li>
-                );
-              })}
-            </ul>
-            <div className="factor-phase2-actions factor-factory-local-actions">
-              <button
-                className="factor-phase2-button"
-                disabled={busy !== null || !selectedQuarantine}
-                type="button"
-                onClick={() => runQuarantine(selectedQuarantine)}
-              >
-                {busy === 'run-quarantine' ? '检疫中...' : '执行检疫'}
-              </button>
-              <button
-                className="factor-phase2-button factor-phase2-button--primary"
-                disabled={
-                  busy !== null ||
-                  !selectedQuarantine ||
-                  statusToken(selectedQuarantine.status) !== 'PASSED' ||
-                  statusToken(selectedQuarantine.publish_status) !== 'ELIGIBLE'
-                }
-                type="button"
-                onClick={() => publishCandidate(selectedQuarantine)}
-              >
-                {busy === 'publish' ? '发布中...' : '发布因子'}
-              </button>
+                  </span>
+                </div>
+              ))}
             </div>
           </div>
         </article>
       </section>
 
-      <section className="factor-factory-gate-grid factor-factory-gate-grid--single" aria-label="检疫闸门详情">
-        <article className="factor-phase2-panel">
-          <div className="factor-phase2-panel__header">
-            <div>
-              <p className="factor-phase2-panel__eyebrow">PIT 证据链</p>
-              <h2>PIT 诊断与发布审计</h2>
-            </div>
-            <span className={chipClass(pitMode)}>{statusLabel(pitMode)}</span>
-          </div>
-          <div className="factor-phase2-panel__body">
-            <div className="factor-phase2-gate factor-phase2-gate--warn">
-              <span className="factor-phase2-gate__status" />
-              <div>
-                <b>10Y 准入通过可送检/发布</b>
-                <span>PIT 全量就绪缺口会进入诊断状态、因子级别、发布审计与风险提示；泄露、OOS 衰减、逻辑重复、残差信号失败和回撤超限仍是硬拒绝。</span>
-              </div>
-            </div>
-            {diagnosticWarnings.length ? (
-              <ul className="factor-phase2-list">
-                {diagnosticWarnings.slice(0, 4).map((warning) => (
-                  <li className="factor-phase2-row" key={warning}>{warning}</li>
-                ))}
-              </ul>
-            ) : (
-              <div className="factor-phase2-empty">当前候选没有 PIT 诊断警告。</div>
-            )}
-            {selectedQuarantine?.target_factor_id ? (
-              <div className="factor-phase2-empty factor-factory-notice">
-                发布审计目标：{selectedQuarantine.target_factor_id}
-              </div>
-            ) : null}
-          </div>
+      <section className="factor-factory-admission-rules" aria-label="发布准入规则">
+        <article>
+          <h3>F2 改造库</h3>
+          <p>改造因子检疫通过后发布入 F2，必须保留 TRANSFORMED_FROM 血缘和 Raw {'->'} Winsorize {'->'} Neutralize {'->'} Z-Score {'->'} Rank。</p>
+        </article>
+        <article>
+          <h3>F3 组合库</h3>
+          <p>组合因子检疫通过后发布入 F3，必须保留父因子、投资逻辑、组合手段和相关性/正交性审计。</p>
+        </article>
+        <article>
+          <h3>历史检疫</h3>
+          <p>历史拒绝因子与原因可搜索，失败项不可发布，WARN 项需要带限制条件进入审计。</p>
+        </article>
+        <article>
+          <h3>F1 原始数据</h3>
+          <p>F1 仅限 Close、Open、Volume、MarketCap、Sector 等未经算子的事实字段；出现 Return、MA、Std 等算子即进入 F2 Raw Signal，并保留 WNZT 缺失与同族冗余提示。</p>
         </article>
       </section>
+
+      {detailCandidate ? (
+        <div className="factor-detail-modal-backdrop" role="presentation" onClick={() => setDetailCandidateId(null)}>
+          <section className="factor-detail-modal" role="dialog" aria-modal="true" aria-labelledby="factor-detail-title" onClick={(event) => event.stopPropagation()}>
+            <header>
+              <div>
+                <p className="factor-phase2-panel__eyebrow">{shortDate(candidateEventTime(detailCandidate))} · {displayTargetLayer(targetLayer(detailCandidate))}</p>
+                <h2 id="factor-detail-title">{detailCandidate.expression}</h2>
+              </div>
+              <span className={chipClass(detailCandidate.quarantine_result)}>{detailCandidate.quarantine_result ?? statusLabel(detailCandidate.status)}</span>
+              <button className="factor-phase2-button factor-phase2-button--small" type="button" onClick={() => setDetailCandidateId(null)}>关闭</button>
+            </header>
+            <div className="factor-detail-modal__body">
+              <section>
+                <h3>因子打分明细</h3>
+                <div className="factor-detail-metric-grid">
+                  {metricPairs(detailScoring).map(([name, value, threshold]) => {
+                    const percentMetric = /Coverage|Turnover|Drawdown|Missing|覆盖率|缺失率/.test(name);
+                    const parsedValue = numeric(value, NaN);
+                    const displayValue = percentMetric
+                      ? pct(value)
+                      : Number.isFinite(parsedValue)
+                        ? decimal(value)
+                        : text(value, '未生成');
+                    return (
+                      <div className="factor-phase2-stat" key={name}>
+                        <b>{displayValue}</b>
+                        <span>{name} · {threshold}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="factor-detail-chip-row">
+                  {asList<ApiFactorOperatorChainStep>(detailCandidate.operator_chain).map((step) => (
+                    <span className="factor-phase2-chip factor-phase2-chip--info" key={step.code}>{step.label}</span>
+                  ))}
+                  {asList<{ key?: string; label?: string }>(detailCandidate.composition_methods).map((method) => (
+                    <span className="factor-phase2-chip factor-phase2-chip--info" key={method.key ?? method.label}>{method.label}</span>
+                  ))}
+                </div>
+              </section>
+              <section>
+                <h3>因子检疫明细</h3>
+                <div className="factor-factory-report-table" role="table" aria-label="准入报告">
+                  <div className="factor-factory-report-row factor-factory-report-row--head" role="row">
+                    <span role="columnheader">检测项</span>
+                    <span role="columnheader">结果</span>
+                    <span role="columnheader">状态</span>
+                    <span role="columnheader">Agent D 建议</span>
+                  </div>
+                  {detailReport.map((row) => (
+                    <div className="factor-factory-report-row" role="row" key={row.check}>
+                      <span role="cell">{displayLayerText(row.check)}</span>
+                      <span role="cell">{displayLayerText(row.value_label ?? text(row.value))}</span>
+                      <span role="cell"><i className={chipClass(row.status)}>{row.status}</i></span>
+                      <span role="cell">{displayLayerText(row.agent_d_advice)}</span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }

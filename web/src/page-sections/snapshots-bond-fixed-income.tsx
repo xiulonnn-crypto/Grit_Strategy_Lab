@@ -134,7 +134,7 @@ const BOND_QUALITY_STATUS_LABELS: Record<string, string> = {
   FULL: '完整',
   PARTIAL: '部分',
   UNKNOWN: '无需比较',
-  WATCH: '待复核',
+  WATCH: '部分可用',
   READY: '就绪',
   REPAIR: '需修复',
   COMPOSABLE: '可进入组合',
@@ -1893,7 +1893,7 @@ function getBondWorkbenchMetricCards({
         {
           label: '30Y-10Y 利差（Spread）',
           value: formatBpsValue(thirtyTenSpreadBps),
-          detail: selectedGroupCount.ready === selectedGroupCount.sourced ? '长端久期与应计字段已完成对齐。' : '长端字段仍需复核，应优先检查应计与估值点位。',
+          detail: selectedGroupCount.ready === selectedGroupCount.sourced ? '长端久期与应计字段已完成对齐。' : '长端字段部分可用，应优先检查应计与估值点位。',
           tone: selectedGroupCount.ready === selectedGroupCount.sourced ? undefined : 'warn',
         },
       ];
@@ -2484,7 +2484,7 @@ function createInstrumentAuditAction(
     return { label: '补齐字段', tone: 'danger' };
   }
   if (cells.some((cell) => cell.tone === 'warn')) {
-    return { label: '待复核', tone: 'warn' };
+    return { label: '部分可用', tone: 'warn' };
   }
   if (cells.some((cell) => cell.tone === 'imputed')) {
     return { label: '已推算', tone: 'imputed' };
@@ -2581,7 +2581,7 @@ function BondAuditMatrix({
       <div className="snapshots-bond-audit-toolbar">
         <div className="snapshots-bond-chip-row">
           <span className="status-chip status-chip--success">绿格 = 字段可用（含推算/豁免）</span>
-          <span className="status-chip status-chip--warning">黄格 = 待复核</span>
+          <span className="status-chip status-chip--warning">黄格 = 部分可用</span>
           <span className="status-chip status-chip--danger">红格 = 缺失</span>
         </div>
         <div className="snapshots-bond-chip-row">
@@ -2871,7 +2871,7 @@ export function BondFixedIncomeSnapshotsTab({
               <div className="snapshots-bond-ring-copy">
                 <strong>{fieldCoveragePercent}% 已覆盖</strong>
                 <span>{fieldAvailability.available}/{fieldAvailability.total} 关键字段可用</span>
-                <span>推算/豁免字段计入可用；只有缺失或待复核才影响资产腿和组合。</span>
+                <span>推算/豁免字段计入可用；只有缺失或部分可用才影响资产腿和组合。</span>
               </div>
             </div>
           </article>
@@ -3287,7 +3287,7 @@ export function BondFixedIncomeSnapshotsTab({
                   <div className="snapshots-bond-collapsible-section__title">
                     <strong>质量审计</strong>
                     <span className={hasQualityAuditIssues ? 'status-chip status-chip--warning' : 'status-chip status-chip--success'}>
-                      {hasQualityAuditIssues ? '存在待复核项' : '无异常，已收起'}
+                      {hasQualityAuditIssues ? '存在部分可用项' : '无异常，已收起'}
                     </span>
                     <span className="status-chip status-chip--soft">{qualityAuditRows.length} 条记录</span>
                   </div>

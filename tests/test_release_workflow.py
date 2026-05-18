@@ -19,6 +19,19 @@ def _load_prepare_push():
 prepare_push = _load_prepare_push()
 
 
+def _load_pre_push_hook_module():
+    module_path = Path(__file__).resolve().parents[1] / "scripts" / "pre_push_hook.py"
+    spec = importlib.util.spec_from_file_location("grit_pre_push_hook", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+pre_push_hook = _load_pre_push_hook_module()
+
+
 def _write_repo_files(repo_root: Path, changelog: str, version: str = "0.1.1") -> None:
     (repo_root / "src" / "grit_backtest_platform").mkdir(parents=True)
     (repo_root / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
@@ -27,6 +40,35 @@ def _write_repo_files(repo_root: Path, changelog: str, version: str = "0.1.1") -
         '__all__ = ["__version__"]\n\n'
         f'__version__ = "{version}"\n',
         encoding="utf-8",
+    )
+
+
+def test_pre_push_hook_uses_single_remote_sha_as_fast_gate_base() -> None:
+    remote_sha = "1234567890abcdef1234567890abcdef12345678"
+
+    assert (
+        pre_push_hook._remote_base_ref(
+            [["refs/heads/main", "abcdef", "refs/heads/main", remote_sha]]
+        )
+        == remote_sha
+    )
+
+
+def test_pre_push_hook_does_not_guess_base_for_new_or_multi_ref_push() -> None:
+    assert (
+        pre_push_hook._remote_base_ref(
+            [["refs/heads/new", "abcdef", "refs/heads/new", "0000000000000000000000000000000000000000"]]
+        )
+        is None
+    )
+    assert (
+        pre_push_hook._remote_base_ref(
+            [
+                ["refs/heads/a", "abcdef", "refs/heads/a", "1234567890abcdef1234567890abcdef12345678"],
+                ["refs/heads/b", "fedcba", "refs/heads/b", "abcdef1234567890abcdef1234567890abcdef12"],
+            ]
+        )
+        is None
     )
 
 

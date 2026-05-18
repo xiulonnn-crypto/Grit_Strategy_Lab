@@ -676,6 +676,25 @@ def test_pit_factor_admission_allows_archival_full_ready_gap_without_blocking_10
     assert payload["factor_diagnostics_enabled"] is True
     assert payload["verified_diagnostics_enabled"] is True
     assert payload["status_reasons"]["factor_admission"]["cause"] == "FACTOR_ADMISSION_10Y_READY"
+    l1_layer = next(item for item in payload["pit_layer_readiness"] if item["layer_id"] == "l1_market_data")
+    assert l1_layer["status"] != "BLOCKED"
+    price_replay = next(item for item in l1_layer["submodules"] if item["id"] == "price_replay")
+    assert price_replay["status"] == "READY"
+    price_group = next(item for item in payload["factor_diagnostic_readiness"] if item["group_id"] == "price")
+    assert price_group["status"] == "VERIFIED"
+    linkage = {item["check_id"]: item for item in payload["snapshot_layer_linkage"]}
+    assert linkage["price_replay_gate"]["result_status"] == "READY"
+    assert linkage["price_replay_gate"]["hard_blocking"] is False
+    snapshot_overview = assert_ok(client.get("/data-snapshots/overview"))
+    snapshot_layers = {item["layer_id"]: item for item in snapshot_overview["data_layer_readiness"]}
+    pit_layers = {item["layer_id"]: item for item in payload["pit_layer_readiness"]}
+    assert {
+        layer_id: snapshot_layers[layer_id]["status"]
+        for layer_id in pit_layers
+    } == {
+        layer_id: pit_layer["status"]
+        for layer_id, pit_layer in pit_layers.items()
+    }
 
     created = assert_ok(
         client.post(
@@ -1197,6 +1216,7 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
         "s_qlty_fcfy_ttm_raw",
     }
     expanded_seed_ids = {
+        "s_price_adjclose_cur_raw",
         "s_beta_market_252d_raw",
         "s_val_cfp_ltm_raw",
         "s_qlty_leverage_cur_raw",
@@ -1231,6 +1251,8 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
     assert payload["summary"]["to_be_verified_count"] >= 0
     assert by_id["s_size_mcap_cur_raw"]["tier_level"] == "F1"
     assert by_id["s_size_mcap_cur_raw"]["tier_label"] == "F1 原始"
+    assert by_id["s_price_adjclose_cur_raw"]["name"] == "复权收盘价"
+    assert by_id["s_price_adjclose_cur_raw"]["tier_level"] == "F1"
     assert by_id["s_val_ep_ltm_raw"]["tier_level"] == "F2"
     assert by_id["s_mom_12m1m_rank"]["tier_level"] == "F2"
     assert by_id["s_alpha_ffblend_cur_rank"]["tier_level"] == "F3"
@@ -1238,7 +1260,7 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
     assert by_id["s_mom_12m1m_rank"]["lifecycle"] == "online"
     assert by_id["s_mom_12m1m_rank"]["lifecycle_label"] == "线上"
     assert by_id["s_mom_12m1m_rank"]["factor_level"] in {"B", "C"}
-    assert by_id["s_mom_12m1m_rank"]["factor_level_label"] in {"B 观察", "C 待校准"}
+    assert by_id["s_mom_12m1m_rank"]["factor_level_label"] in {"B合格", "C微弱"}
     assert "T" in by_id["s_mom_12m1m_rank"]["op_status"]["completed"]
     assert {light["code"] for light in by_id["s_mom_12m1m_rank"]["op_status"]["lights"]} == {"W", "N", "Z", "T"}
     assert by_id["s_alpha_ffblend_cur_rank"]["lineage_summary"]["parent_count"] >= 4
@@ -1249,7 +1271,10 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
         "s_qlty_roe_ltm_raw",
         "s_size_cur_log",
     }
+    assert by_id["s_size_cur_log"]["lineage_summary"]["parent_ids"] == ["s_size_mcap_cur_raw"]
+    assert by_id["s_mom_12m1m_rank"]["lineage_summary"]["parent_ids"] == ["s_price_adjclose_cur_raw"]
     assert set(by_id["s_size_mcap_cur_raw"]["lineage_summary"]["relation_types"]) >= {"DIRECT_SOURCE"}
+    assert set(by_id["s_price_adjclose_cur_raw"]["lineage_summary"]["relation_types"]) >= {"DIRECT_SOURCE"}
     quality_view = by_id["s_mom_12m1m_rank"]["quality_view"]
     assert set(quality_view) >= {"rank_ic", "ir", "decay_label", "coverage", "sparkline"}
     for factor_id in canonical_ids:
@@ -1294,6 +1319,16 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
         "s_qlty_roe_ltm_raw",
         "s_size_cur_log",
     }
+    assert {parent["label"] for parent in detail["lineage_tree"]["parents"]} >= {
+        "12-1月截面动量排名",
+        "滚动市盈率倒数 (LTM)",
+        "滚动净资产收益率 (LTM)",
+        "即时对数总市值",
+    }
+    momentum_detail = assert_ok(client.get("/factors/s_mom_12m1m_rank"))
+    assert momentum_detail["lineage_tree"]["parents"][0]["id"] == "s_price_adjclose_cur_raw"
+    assert momentum_detail["lineage_tree"]["parents"][0]["label"] == "复权收盘价"
+    assert momentum_detail["lineage_tree"]["parents"][0]["tier_level"] == "F1"
 
 
 def test_factor_library_lifecycle_queries_accept_phase1_aliases(tmp_path):
@@ -2522,6 +2557,155 @@ def test_factor_governance_deprecate_soft_offlines_and_blocks_model_use(tmp_path
         },
     )
     assert create_response.status_code == 400
+
+
+def test_f1_raw_sources_ignore_rankic_governance_and_reject_archive_actions(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    assert_ok(client.get("/factors"))
+    raw_id = "s_price_adjclose_cur_raw"
+    seed_factor_diagnostic_summary(
+        client,
+        raw_id,
+        governance_ready_summary(rank_ic=-0.019, ir=-0.12, coverage=99.2, inverted=True, low_efficiency=True),
+        run_id="fdiag_raw_close_rankic_noise",
+    )
+
+    factors = assert_ok(client.get("/factors?lifecycle=all"))["items"]
+    raw_factor = next(item for item in factors if item["id"] == raw_id)
+    assert raw_factor["tier_level"] == "F1"
+    assert raw_factor["lifecycle"] == "online"
+    assert raw_factor["lifecycle_label"] == "正式诊断可用"
+    assert raw_factor["ui_state"] == "robust"
+    assert raw_factor["ui_state_label"] == "正式诊断可用"
+    assert raw_factor["factor_level"] == "OTHER"
+    assert raw_factor["factor_level_label"] == "其他"
+
+    overview = assert_ok(client.get("/factor-governance/overview"))
+    protected_actions = [
+        item
+        for item in overview["actions"]
+        if item["kind"] in {"DEPRECATE", "PRUNE"} and raw_id in item.get("factor_ids", [])
+    ]
+    assert protected_actions == []
+
+    rejected = client.post(
+        f"/factor-governance/actions/gq_deprecate_{raw_id}/execute",
+        json={
+            "confirm": True,
+            "command": "DEPRECATE",
+            "factor_ids": [raw_id],
+            "reason": "低 RankIC 不能成为 F1 归档原因。",
+        },
+    )
+    assert rejected.status_code == 400
+    assert "不能执行归档或冗余裁剪" in rejected.text
+
+
+def test_factor_governance_suggests_l3_sa_factor_strategy_until_used_online(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    assert_ok(client.get("/factors"))
+
+    created = assert_ok(
+        client.post(
+            "/factors",
+            json={
+                "name": "质量动量组合因子",
+                "market": "US",
+                "universe": "SP500",
+                "expression": "Rank(s_mom_12m1m_rank + s_val_ep_ltm_raw)",
+                "frequency": "DAILY",
+                "direction": "HIGH_IS_BETTER",
+                "descriptor": manual_descriptor(category="alpha", metric="blend", window="126d", operator="rank"),
+                "tags": ["manual", "phase2_l3"],
+            },
+        )
+    )
+    factor_id = created["id"]
+    storage = client.app.state.service.storage
+    storage.execute(
+        """
+        UPDATE factor_definitions
+        SET name = '质量动量组合因子',
+            source = 'AUTO_MINED',
+            lifecycle_status = 'VERIFIED',
+            diagnostic_status = 'COMPLETED'
+        WHERE id = ?
+        """,
+        (factor_id,),
+    )
+    seed_factor_diagnostic_summary(
+        client,
+        factor_id,
+        {
+            **governance_ready_summary(rank_ic=0.033, ir=1.25, coverage=96.0),
+            "target_layer": "L3",
+        },
+        run_id="fdiag_l3_sa_model_suggestion",
+    )
+    factor_payload = assert_ok(client.get("/factors"))
+    factor_name = next(item["name"] for item in factor_payload["items"] if item["id"] == factor_id)
+    expected_strategy_name = f"{factor_name}策略" if factor_name.endswith("因子") else f"{factor_name}因子策略"
+
+    overview = assert_ok(client.get("/factor-governance/overview"))
+    action = next(
+        item
+        for item in overview["actions"]
+        if item["kind"] == "FACTOR_MODEL_SUGGESTION" and item["factor_ids"] == [factor_id]
+    )
+    assert action["title"] == expected_strategy_name
+    assert action["suggested_weights"] == [
+        {"factor_id": factor_id, "weight_pct": 100.0, "direction": "HIGH_IS_BETTER"}
+    ]
+    assert action["target"]["route"] == "#/factor-models/new"
+    assert action["target"]["query"] == {
+        "source": "governance_queue",
+        "factorIds": factor_id,
+        "weights": "100",
+        "directions": "HIGH_IS_BETTER",
+        "modelName": expected_strategy_name,
+    }
+
+    strategy_parameters = {
+        "strategy_type": "MULTI_FACTOR",
+        "factor_ids": [factor_id],
+        "weights": {factor_id: 100},
+        "directions": {factor_id: "HIGH_IS_BETTER"},
+    }
+    storage.execute(
+        """
+        INSERT INTO strategies (
+            id, name, description, strategy_type, universe_name, rebalance_frequency,
+            lifecycle_status, benchmark_symbol, current_parameter_version,
+            parameters_json, confirmation_fields_json, parameter_history_json,
+            allowed_actions_json, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "strat_existing_l3_factor",
+            expected_strategy_name,
+            "Existing active multi-factor strategy for governance suggestion suppression.",
+            "MULTI_FACTOR",
+            "SP500",
+            "monthly",
+            "ACTIVE",
+            "SPY",
+            1,
+            dumps(strategy_parameters),
+            dumps({}),
+            dumps([]),
+            dumps([]),
+            "2026-05-18T00:00:00Z",
+            "2026-05-18T00:00:00Z",
+        ),
+    )
+    refreshed = assert_ok(client.get("/factor-governance/overview"))
+    assert not any(
+        item["kind"] == "FACTOR_MODEL_SUGGESTION" and item["factor_ids"] == [factor_id]
+        for item in refreshed["actions"]
+    )
 
 
 def test_factor_model_suggestion_skips_offline_anchor_factors(tmp_path):

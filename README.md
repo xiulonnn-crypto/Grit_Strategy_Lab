@@ -64,6 +64,8 @@ Codex 对话默认先走 `scripts/runtime-supervisor.ps1` 查看状态或提交�
 ## 脚本索引
 
 - [scripts/codex-smoke.ps1](./scripts/codex-smoke.ps1)：一键执行固定 smoke 链路
+- [scripts/codex-validate-fast.ps1](./scripts/codex-validate-fast.ps1)：日常推云快速门禁，按改动范围运行受影响校验
+- [scripts/codex-validate-full.ps1](./scripts/codex-validate-full.ps1)：大改、发版或合并前完整门禁，可并行跑后端与前端固定入口
 - [scripts/codex-test-backend.ps1](./scripts/codex-test-backend.ps1)：固定后端测试入口
 - [scripts/codex-test-frontend.ps1](./scripts/codex-test-frontend.ps1)：固定前端测试入口
 - [scripts/run-recovery-tests.ps1](./scripts/run-recovery-tests.ps1)：前端测试恢复路径

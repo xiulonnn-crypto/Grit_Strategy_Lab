@@ -1623,12 +1623,18 @@ def create_app(
         status: str | None = Query(default=None),
         source_job_id: str | None = Query(default=None),
         cluster: str | None = Query(default=None),
+        date: str | None = Query(default=None),
+        factor_name: str | None = Query(default=None),
+        result: str | None = Query(default=None),
     ):
         return invoke(
             service.list_factor_quarantine_candidates,
             status=status,
             source_job_id=source_job_id,
             cluster=cluster,
+            date=date,
+            factor_name=factor_name,
+            result=result,
         )
 
     @app.get('/factor-quarantine/candidates/{candidate_id}')

@@ -190,11 +190,11 @@ const DEFAULT_FACTORS: FactorModelOption[] = FACTOR_ORDER.map((id) => {
 });
 
 const FACTOR_MODEL_LEVELS = [
-  { key: 'S', title: '高置信 Alpha', score: 5 },
-  { key: 'A', title: '稳健 Alpha', score: 4 },
-  { key: 'B', title: '可用信号', score: 3 },
-  { key: 'C', title: '观察信号', score: 2 },
-  { key: 'D', title: '低效/失效', score: 1 },
+  { key: 'S', title: '顶级', score: 5 },
+  { key: 'A', title: '优秀', score: 4 },
+  { key: 'B', title: '合格', score: 3 },
+  { key: 'C', title: '微弱', score: 2 },
+  { key: 'D', title: '噪声', score: 1 },
 ] as const;
 type FactorModelLevelScore = (typeof FACTOR_MODEL_LEVELS)[number]['score'];
 const FACTOR_MODEL_LEVEL_BY_SCORE = new Map(FACTOR_MODEL_LEVELS.map((level) => [level.score, level]));
@@ -289,7 +289,7 @@ function factorLevelLabel(factor: FactorModelOption): string {
     metricLevelScore(Math.abs(ir), 'ir'),
   ) as FactorModelLevelScore;
   const level = FACTOR_MODEL_LEVEL_BY_SCORE.get(score);
-  return level ? `因子级别 ${level.key} ${level.title}` : '因子级别 未评级';
+  return level ? `因子级别 ${level.key}${level.title}` : '因子级别 未评级';
 }
 
 function isSelectableModelFactor(factor: FactorModelOption): boolean {

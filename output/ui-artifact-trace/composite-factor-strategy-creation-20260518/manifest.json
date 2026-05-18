@@ -1,0 +1,77 @@
+{
+  "artifact": "composite-factor-strategy-creation",
+  "title": "组合因子策略创建页 UI 稿",
+  "created_at": "2026-05-18T00:00:00+08:00",
+  "route": "#/factor-models/new?strategyType=COMPOSITE_FACTOR",
+  "source_plan": "合成因子策略计划，包含 Sector Cap 与 Diagnostic Summary",
+  "canonical_html": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\composite-factor-strategy-creation-20260518\\composite-factor-strategy-creation.html",
+  "desktop_png": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\composite-factor-strategy-creation-20260518\\composite-factor-strategy-creation-desktop.png",
+  "mobile_png": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\composite-factor-strategy-creation-20260518\\composite-factor-strategy-creation-mobile.png",
+  "design_spec": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\composite-factor-strategy-creation-20260518\\design-spec.md",
+  "canonical_sections": [
+    {
+      "key": "page-hero",
+      "selector": "[data-ui=\"page-hero\"]",
+      "purpose": "页面标题、策略类型、关键默认参数"
+    },
+    {
+      "key": "factor-source",
+      "selector": "[data-ui=\"factor-source-panel\"]",
+      "purpose": "合格 L3 因子来源与 100% 权重"
+    },
+    {
+      "key": "diagnostic-summary",
+      "selector": "[data-ui=\"diagnostic-summary-card\"]",
+      "purpose": "选中因子的诊断简报"
+    },
+    {
+      "key": "universe-filtering",
+      "selector": "[data-ui=\"universe-filtering-panel\"]",
+      "purpose": "ADV、停牌、退市窗口过滤"
+    },
+    {
+      "key": "worst-sector-summary",
+      "selector": "[data-ui=\"worst-sector-summary\"]",
+      "purpose": "诊断摘要中的最弱行业"
+    },
+    {
+      "key": "weight-mapping",
+      "selector": "[data-ui=\"weight-mapping-panel\"]",
+      "purpose": "权重映射方法与 Top-K"
+    },
+    {
+      "key": "sector-cap",
+      "selector": "[data-ui=\"sector-cap-panel\"]",
+      "purpose": "行业硬上限、截断和重分摊预览"
+    },
+    {
+      "key": "rebalance",
+      "selector": "[data-ui=\"rebalance-panel\"]",
+      "purpose": "定时调仓和阈值调仓"
+    },
+    {
+      "key": "execution",
+      "selector": "[data-ui=\"execution-panel\"]",
+      "purpose": "佣金、滑点和流动性冲击成本"
+    },
+    {
+      "key": "readiness-rail",
+      "selector": "[data-ui=\"creation-readiness-rail\"]",
+      "purpose": "创建预检状态和主提交动作"
+    }
+  ],
+  "viewport_baselines": [
+    {
+      "name": "desktop",
+      "width": 1440,
+      "height": 1800
+    },
+    {
+      "name": "mobile",
+      "width": 390,
+      "height": 1600
+    }
+  ],
+  "status": "draft_for_user_review",
+  "design_md_updated": false
+}

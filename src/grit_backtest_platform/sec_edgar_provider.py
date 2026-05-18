@@ -37,6 +37,7 @@ SEC_FUNDAMENTAL_FACT_TAGS: dict[str, tuple[str, ...]] = {
     "total_shares": ("WeightedAverageNumberOfDilutedSharesOutstanding", "WeightedAverageNumberOfSharesOutstandingBasic"),
     "shares_outstanding": ("EntityCommonStockSharesOutstanding",),
     "total_assets": ("Assets",),
+    "total_liabilities": ("Liabilities",),
     "current_assets": ("AssetsCurrent",),
     "current_liabilities": ("LiabilitiesCurrent",),
     "long_term_debt": (
@@ -65,6 +66,7 @@ SEC_IFRS_FUNDAMENTAL_FACT_TAGS: dict[str, tuple[str, ...]] = {
     "total_shares": ("AdjustedWeightedAverageShares",),
     "shares_outstanding": ("NumberOfSharesOutstanding",),
     "total_assets": ("Assets",),
+    "total_liabilities": ("Liabilities",),
     "current_assets": ("CurrentAssets",),
     "current_liabilities": ("CurrentLiabilities",),
     "long_term_debt": ("LongtermBorrowings",),

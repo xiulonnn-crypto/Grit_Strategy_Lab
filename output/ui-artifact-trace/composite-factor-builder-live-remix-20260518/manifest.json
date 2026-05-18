@@ -1,0 +1,66 @@
+{
+  "name": "composite-factor-builder-live-remix-20260518",
+  "language": "zh-CN",
+  "sourceRoute": "http://127.0.0.1:4173/?v=route-reload-1779094281976#/factor-models/new",
+  "sourceRootClass": "factor-phase2-page factor-model-builder-page",
+  "sourceWorkbenchClass": "factor-phase2-workbench factor-phase2-workbench--model",
+  "generatedAt": "2026-05-18T18:58:00+08:00",
+  "outputDir": "C:/Fin/Grit_Strategy_Lab/output/ui-artifact-trace/composite-factor-builder-live-remix-20260518",
+  "artifacts": {
+    "html": "C:/Fin/Grit_Strategy_Lab/output/ui-artifact-trace/composite-factor-builder-live-remix-20260518/composite-factor-builder-live-remix.html",
+    "desktopPng": "C:/Fin/Grit_Strategy_Lab/output/ui-artifact-trace/composite-factor-builder-live-remix-20260518/composite-factor-builder-live-remix-desktop.png",
+    "mobilePng": "C:/Fin/Grit_Strategy_Lab/output/ui-artifact-trace/composite-factor-builder-live-remix-20260518/composite-factor-builder-live-remix-mobile.png",
+    "designSpec": "C:/Fin/Grit_Strategy_Lab/output/ui-artifact-trace/composite-factor-builder-live-remix-20260518/design-spec.md",
+    "baselineDesktopPng": "C:/Fin/Grit_Strategy_Lab/output/ui-artifact-trace/composite-factor-builder-live-remix-20260518/live-factor-models-new-baseline-desktop.png",
+    "baselineMobilePng": "C:/Fin/Grit_Strategy_Lab/output/ui-artifact-trace/composite-factor-builder-live-remix-20260518/live-factor-models-new-baseline-mobile.png",
+    "baselineDom": "C:/Fin/Grit_Strategy_Lab/output/ui-artifact-trace/composite-factor-builder-live-remix-20260518/live-factor-models-new-dom.json"
+  },
+  "requirementsCovered": [
+    "基于 live #/factor-models/new 当前创建页模块改造",
+    "组合因子策略创建页",
+    "页面参数限定为美股策略应用",
+    "移除 ST/*ST 和涨跌停等 A 股概念",
+    "中文金融表达简洁专业",
+    "仅支持 WNZT 已完成的 S/A 级 L3 美股因子",
+    "单因子默认权重 100%",
+    "Diagnostic Summary 进入股票池过滤前的因子来源栏",
+    "成交额门槛和退市窗口期桌面同排",
+    "股票池过滤包含 ADV 数值输入与 20D/60D 周期选择",
+    "股票池过滤包含停牌、OTC/Pink、LULD 暂停、退市窗口四项同排",
+    "权重映射包含等权 Top-K、分值比例法、启发式风险优化",
+    "权重映射四个输入框桌面同排：Top-N、行业上限、个股上限、最低权重",
+    "行业硬上限 Sector Cap 20% 裁断与重分摊预测",
+    "裁断权重重分配开关：保持现金与按比例回填",
+    "再平衡逻辑包含频率、交易日规则、排名阈值和最小交易金额",
+    "实盘约束包含本金、佣金、印花税、基础滑点、冲击系数 beta 和最大冲击",
+    "右侧风险栏作为实时校验器，覆盖 L3 准入、行业裁断预测和成本预估",
+    "创建后沿用其他策略的回测和优化流程"
+  ],
+  "viewportVerification": {
+    "desktop": {
+      "viewport": "1440x1200",
+      "rootHeight": 2026,
+      "previewPanelHeight": 1826,
+      "checkboxCount": 4,
+      "weightInputCount": 4,
+      "horizontalOverflow": 0,
+      "screenshot": "composite-factor-builder-live-remix-desktop.png"
+    },
+    "mobile": {
+      "viewport": "390x1200",
+      "bodyHeight": 6377,
+      "horizontalOverflow": 0,
+      "panelCount": 3,
+      "checkboxCount": 4,
+      "screenshot": "composite-factor-builder-live-remix-mobile.png"
+    }
+  },
+  "implementationNotes": [
+    "UI 稿保留 factor-model-builder-page 的现有 shell 与三栏工作台语义。",
+    "美股交易状态过滤使用 halted、OTC/Pink、LULD paused、delisting window。",
+    "行业硬上限在设计中表达为循环裁断与按分数比例重分摊，不要求 CVXPY。",
+    "裁断权重重分配默认保持现金，按比例回填用于目标满仓。",
+    "右侧风险栏应由参数 view-model 实时驱动，而不是静态说明文案。",
+    "本次只输出设计稿和 trace 文件，未修改应用源码，未修改 DESIGN.md。"
+  ]
+}

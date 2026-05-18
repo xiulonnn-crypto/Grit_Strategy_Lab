@@ -11,6 +11,7 @@ import ast
 import math
 import re
 import statistics
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -531,15 +532,36 @@ def _return_series(series: Series, periods: int) -> Series:
 
 def _rolling_std(series: Series, window: int) -> Series:
     result: Series = []
-    for index in range(len(series)):
-        if index + 1 < window:
+    normalized_window = max(1, int(window or 1))
+    window_values: deque[SeriesValue] = deque()
+    running_sum = 0.0
+    running_sum_sq = 0.0
+    finite_count = 0
+    for value in series:
+        window_values.append(value)
+        if value is not None:
+            numeric = float(value)
+            running_sum += numeric
+            running_sum_sq += numeric * numeric
+            finite_count += 1
+        if len(window_values) > normalized_window:
+            expired = window_values.popleft()
+            if expired is not None:
+                numeric = float(expired)
+                running_sum -= numeric
+                running_sum_sq -= numeric * numeric
+                finite_count -= 1
+        if len(window_values) < normalized_window:
             result.append(None)
             continue
-        window_values = series[index + 1 - window : index + 1]
-        if any(value is None for value in window_values):
+        if finite_count != normalized_window:
             result.append(None)
         else:
-            result.append(statistics.pstdev(value for value in window_values if value is not None))
+            mean = running_sum / normalized_window
+            variance = running_sum_sq / normalized_window - mean * mean
+            if variance < 0.0:
+                variance = 0.0
+            result.append(math.sqrt(variance))
     return result
 
 

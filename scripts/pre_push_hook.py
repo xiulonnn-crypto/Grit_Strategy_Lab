@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 from datetime import date
@@ -59,6 +60,60 @@ def _git_stdout(repo_root: Path, args: list[str]) -> str | None:
     return completed.stdout.strip()
 
 
+def _read_push_updates() -> list[list[str]]:
+    if sys.stdin.isatty():
+        return []
+
+    updates: list[list[str]] = []
+    for raw_line in sys.stdin:
+        parts = raw_line.strip().split()
+        if len(parts) >= 4:
+            updates.append(parts[:4])
+    return updates
+
+
+def _remote_base_ref(push_updates: list[list[str]]) -> str | None:
+    if len(push_updates) != 1:
+        return None
+
+    remote_sha = push_updates[0][3]
+    if not remote_sha or set(remote_sha) == {"0"}:
+        return None
+    return remote_sha
+
+
+def _run_fast_gate(repo_root: Path, remote: str | None, push_updates: list[list[str]]) -> int:
+    script_path = repo_root / "scripts" / "codex-validate-fast.ps1"
+    if not script_path.exists():
+        print(f"pre-push: fast validation script is missing: {script_path}", file=sys.stderr)
+        return 1
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+    if powershell is None:
+        print("pre-push: PowerShell executable not found; cannot run fast validation.", file=sys.stderr)
+        return 1
+
+    command = [
+        powershell,
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script_path),
+        "-Scope",
+        "Committed",
+        "-Remote",
+        remote or "origin",
+        "-SkipFetch",
+    ]
+    base_ref = _remote_base_ref(push_updates)
+    if base_ref:
+        command.extend(["-BaseRef", base_ref])
+
+    completed = subprocess.run(command, cwd=repo_root, check=False)
+    return completed.returncode
+
+
 def _infer_minimum_revision(repo_root: Path) -> int:
     upstream = _git_stdout(repo_root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
     if not upstream:
@@ -81,9 +136,12 @@ def _infer_minimum_revision(repo_root: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--repo-root", default=".")
+    parser.add_argument("remote", nargs="?")
+    parser.add_argument("remote_url", nargs="?")
     args, _ = parser.parse_known_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
+    push_updates = _read_push_updates()
     try:
         release_date_value = os.getenv("GRIT_CHANGELOG_RELEASE_DATE")
         effective_date = date.fromisoformat(release_date_value) if release_date_value else None
@@ -120,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"pre-push: suggested commit message: {result.commit_message}", file=sys.stderr)
         return 1
 
-    return 0
+    return _run_fast_gate(repo_root, args.remote, push_updates)
 
 
 if __name__ == "__main__":

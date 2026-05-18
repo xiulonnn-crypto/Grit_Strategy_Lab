@@ -1,0 +1,13 @@
+{
+  "screenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factor-factory-review-truncation-20260518\\factory-1960-tasks-scrolled-after.png",
+  "result": {
+    "ok": true,
+    "scrollTop": 133,
+    "scrollHeight": 815,
+    "clientHeight": 682,
+    "lastCardText": "2026-05-18 L3 组合因子生成待开始风格复合、风险调节、估值锚定、背离惩罚、残差/中性化、时序降噪。L3目标层0当前候选0最终交付",
+    "bodyBottom": 1145.984375,
+    "lastTop": 870,
+    "lastBottom": 1120.15625
+  }
+}

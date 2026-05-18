@@ -959,11 +959,17 @@ class RealBacktestPlatformService(BacktestPlatformService):
         status: str | None = None,
         source_job_id: str | None = None,
         cluster: str | None = None,
+        date: str | None = None,
+        factor_name: str | None = None,
+        result: str | None = None,
     ) -> dict[str, Any]:
         return self._factor_research_service().list_factor_quarantine_candidates(
             status=status,
             source_job_id=source_job_id,
             cluster=cluster,
+            date=date,
+            factor_name=factor_name,
+            result=result,
         )
 
     def get_factor_quarantine_candidate(self, candidate_id: str) -> dict[str, Any]:
@@ -1631,7 +1637,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "max_style_correlation": 0.3,
             "residual_enabled": True,
             "max_drawdown_relative_to_benchmark": 1.5,
-            "min_oos_to_is_ratio": 0.5,
+            "min_oos_to_is_ratio": 0.6,
         }
 
     def _factor_factory_request_payload(self, request: Any | None) -> dict[str, Any]:
@@ -1927,6 +1933,208 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "published": sum(1 for item in quarantine_items if isinstance(item, Mapping) and item.get("status") == "PUBLISHED"),
         }
 
+    @staticmethod
+    def _factor_factory_task_status(run: Mapping[str, Any] | None) -> str:
+        status = str((run or {}).get("status") or "").upper()
+        if status in {"QUEUED", "PENDING"}:
+            return "待开始"
+        if status in {"RUNNING", "CANCEL_REQUESTED"}:
+            return "进行中"
+        return "已完成" if status else "待开始"
+
+    @staticmethod
+    def _factor_factory_quarantine_result(candidate: Mapping[str, Any]) -> str:
+        result = str(candidate.get("quarantine_result") or "").upper()
+        if result in {"PASS", "WARN", "FAIL"}:
+            return result
+        status = str(candidate.get("status") or "").upper()
+        if status in {"PASSED", "PUBLISHED"}:
+            return "PASS"
+        if status == "REJECTED":
+            return "FAIL"
+        return "WARN"
+
+    @staticmethod
+    def _factor_factory_candidate_event_time(candidate: Mapping[str, Any]) -> Any:
+        latest_run = candidate.get("latest_run") if isinstance(candidate.get("latest_run"), Mapping) else {}
+        return (
+            latest_run.get("completed_at")
+            or latest_run.get("created_at")
+            or candidate.get("last_quarantine_at")
+            or candidate.get("updated_at")
+            or candidate.get("created_at")
+        )
+
+    def _factor_factory_phase2_rows(
+        self,
+        *,
+        profile: Mapping[str, Any],
+        latest_run: Mapping[str, Any] | None,
+        runs: Sequence[Mapping[str, Any]],
+        mining: Mapping[str, Any],
+        quarantine: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        mining_items = mining.get("items") if isinstance(mining.get("items"), list) else []
+        quarantine_items = quarantine.get("items") if isinstance(quarantine.get("items"), list) else []
+        run_date = str((latest_run or {}).get("run_date") or self._factor_factory_today())
+        top_candidates = []
+        if latest_run and isinstance(latest_run.get("mining_job"), Mapping):
+            top_candidates = list(latest_run["mining_job"].get("top_candidates") or [])
+        elif mining_items:
+            top_candidates = list((mining_items[0] or {}).get("top_candidates") or [])
+        l2_count = sum(1 for item in quarantine_items if isinstance(item, Mapping) and item.get("target_layer") == "L2")
+        l3_count = sum(1 for item in quarantine_items if isinstance(item, Mapping) and item.get("target_layer") == "L3")
+        task_status = self._factor_factory_task_status(latest_run)
+        task_rows = [
+            {
+                "id": f"{run_date}-mining",
+                "task_date": run_date,
+                "kind": "mining",
+                "title": f"{run_date} PIT 原子信号挖掘",
+                "summary": "L1 仅保留原始字段；Return/MA/Std 等算子候选进入 L2 Raw Signal。",
+                "status": task_status,
+                "target_layer": "L2",
+                "delivered_candidate_count": len(top_candidates) if task_status == "已完成" else None,
+                "current_candidate_count": len(top_candidates),
+                "expected_candidate_count": ((profile.get("request") or {}).get("candidate_count") if isinstance(profile.get("request"), Mapping) else None),
+            },
+            {
+                "id": f"{run_date}-refinement",
+                "task_date": run_date,
+                "kind": "refinement",
+                "title": f"{run_date} Raw 标准链改造",
+                "summary": "Raw -> Winsorize -> Neutralize -> Z-Score -> Rank。",
+                "status": task_status,
+                "target_layer": "L2",
+                "operator_chain": [
+                    {"code": "RAW", "label": "Raw"},
+                    {"code": "MAD", "label": "Winsorize"},
+                    {"code": "N", "label": "Neutralize"},
+                    {"code": "Z", "label": "Z-Score"},
+                    {"code": "R", "label": "Rank"},
+                ],
+                "delivered_candidate_count": l2_count,
+                "current_candidate_count": l2_count,
+            },
+            {
+                "id": f"{run_date}-composition",
+                "task_date": run_date,
+                "kind": "composition",
+                "title": f"{run_date} L3 组合因子生成",
+                "summary": "风格复合、风险调节、估值锚定、背离惩罚、残差/中性化、时序降噪。",
+                "status": task_status,
+                "target_layer": "L3",
+                "parent_factor_ids": list(((profile.get("request") or {}).get("source_factor_ids") or []) if isinstance(profile.get("request"), Mapping) else []),
+                "delivered_candidate_count": l3_count,
+                "current_candidate_count": l3_count,
+            },
+        ]
+        ranked_quarantine_items = sorted(
+            [item for item in quarantine_items if isinstance(item, Mapping)],
+            key=lambda item: str(self._factor_factory_candidate_event_time(item) or ""),
+            reverse=True,
+        )
+        factor_service = self._factor_research_service()
+        submitted_signatures = {
+            factor_service._expression_signature(str(item.get("expression") or ""))
+            for item in ranked_quarantine_items
+            if str(item.get("expression") or "").strip()
+        }
+        scoring_candidates = []
+        for index, item in enumerate(top_candidates):
+            if not isinstance(item, Mapping):
+                continue
+            expression = str(item.get("expression") or "").strip()
+            if not expression:
+                continue
+            signature = factor_service._expression_signature(expression)
+            if signature in submitted_signatures:
+                continue
+            metrics = dict(item)
+            metrics.setdefault("sandbox_rank", index + 1)
+            candidate_id = str(item.get("id") or item.get("candidate_id") or f"{run_date}-pending-{index + 1}")
+            pending_candidate = {
+                "id": candidate_id,
+                "expression": expression,
+                "candidate_metrics": metrics,
+                "created_at": item.get("created_at") or (latest_run or {}).get("created_at") or run_date,
+                "updated_at": item.get("updated_at") or (latest_run or {}).get("updated_at") or run_date,
+                "pit_evidence": {
+                    "promotion_eligible": True,
+                    "gate_mode": "DIAGNOSTIC_ONLY",
+                },
+            }
+            detail = factor_service._factor_phase2_scoring_detail(pending_candidate)
+            scoring_candidates.append({
+                **dict(detail),
+                "candidate_id": candidate_id,
+                "display_id": expression,
+                "target_layer": detail.get("target_layer") or "L2",
+                "submitted_at": pending_candidate["updated_at"],
+                "quarantine_candidate_id": None,
+                "quarantine_result": None,
+            })
+        quarantine_result_rows = []
+        for item in ranked_quarantine_items:
+            if not isinstance(item, Mapping):
+                continue
+            publish_eligibility = item.get("publish_eligibility") if isinstance(item.get("publish_eligibility"), Mapping) else {}
+            reason_summary = (
+                item.get("reason_summary")
+                or item.get("rejected_reason")
+                or publish_eligibility.get("reason")
+                or "等待检疫或人工复核。"
+            )
+            event_time = self._factor_factory_candidate_event_time(item)
+            quarantine_result_rows.append({
+                "candidate_id": item.get("id"),
+                "submitted_at": event_time,
+                "factor_name": item.get("expression"),
+                "target_layer": item.get("target_layer") or "L2",
+                "quarantine_result": self._factor_factory_quarantine_result(item),
+                "reason_summary": reason_summary,
+                "detail_modal_enabled": True,
+            })
+        publishable_factors = [
+            {
+                "candidate_id": item.get("id"),
+                "factor_id": item.get("target_factor_id") or item.get("id"),
+                "factor_name": item.get("expression"),
+                "target_layer": item.get("target_layer") or "L2",
+                "score": (item.get("scoring_detail") or {}).get("score") if isinstance(item.get("scoring_detail"), Mapping) else None,
+                "quarantine_status": self._factor_factory_quarantine_result(item),
+                "parent_factor_ids": list((item.get("candidate_metrics") or {}).get("source_factor_ids") or []) if isinstance(item.get("candidate_metrics"), Mapping) else [],
+                "operator_chain": item.get("operator_chain") or [],
+                "composition_methods": item.get("composition_methods") or [],
+                "investment_logic": item.get("investment_logic") or "",
+                "detail_modal_enabled": True,
+            }
+            for item in quarantine_items
+            if isinstance(item, Mapping)
+            and str(item.get("status") or "").upper() == "PASSED"
+            and str(item.get("publish_status") or "").upper() == "ELIGIBLE"
+        ]
+        return {
+            "task_summary": {
+                "total_tasks": len(task_rows),
+                "delivered_candidates": sum(int(row.get("current_candidate_count") or 0) for row in task_rows),
+                "submitted_to_quarantine": len(quarantine_items),
+                "publishable_count": len(publishable_factors),
+                "rejected_history_count": sum(1 for item in quarantine_items if isinstance(item, Mapping) and str(item.get("status") or "").upper() == "REJECTED"),
+                "hard_blocked_count": sum(1 for item in quarantine_items if isinstance(item, Mapping) and self._factor_factory_quarantine_result(item) == "FAIL"),
+            },
+            "task_rows": task_rows,
+            "scoring_candidates": scoring_candidates,
+            "quarantine_result_rows": quarantine_result_rows,
+            "publishable_factors": publishable_factors,
+            "phase2_contract": {
+                "flow": "B1-B2-B3-B4",
+                "daily_schedule": "GMT+8 14:00",
+                "l2_operator_chain": "Raw -> Winsorize -> Neutralize -> Z-Score -> Rank",
+                "l3_composition_methods": ["风格复合", "风险调节", "估值锚定", "背离惩罚", "残差/中性化", "时序降噪"],
+            },
+        }
+
     def get_factor_factory_overview(self) -> dict[str, Any]:
         profile_row = self.storage.fetch_one("SELECT * FROM factor_factory_profiles WHERE id = 'default'")
         profile = self._decode_factor_factory_profile_row(profile_row)
@@ -1940,16 +2148,27 @@ class RealBacktestPlatformService(BacktestPlatformService):
         )
         refreshed_rows = [self._refresh_factor_factory_run_row(row) for row in run_rows]
         latest_run = self._decode_factor_factory_run_row(refreshed_rows[0]) if refreshed_rows else None
-        return {
+        runs = [self._decode_factor_factory_run_row(row) for row in refreshed_rows]
+        mining = self.list_factor_mining_jobs()
+        quarantine = self.list_factor_quarantine_candidates()
+        overview = {
             "profile": profile,
             "active_run": latest_run if latest_run and latest_run.get("status") in {"QUEUED", "RUNNING"} else None,
             "latest_run": latest_run,
-            "runs": [self._decode_factor_factory_run_row(row) for row in refreshed_rows],
+            "runs": runs,
             "funnel": self._factor_factory_funnel(),
-            "mining": self.list_factor_mining_jobs(),
-            "quarantine": self.list_factor_quarantine_candidates(),
+            "mining": mining,
+            "quarantine": quarantine,
             "gate_policy": profile.get("gate_policy") or self._factor_factory_default_gate_policy(),
         }
+        overview.update(self._factor_factory_phase2_rows(
+            profile=profile,
+            latest_run=latest_run,
+            runs=runs,
+            mining=mining,
+            quarantine=quarantine,
+        ))
+        return overview
 
     def _upsert_factor_factory_profile(
         self,
@@ -4978,6 +5197,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "total_shares",
             "shares_outstanding",
             "total_assets",
+            "total_liabilities",
             "current_assets",
             "current_liabilities",
             "long_term_debt",
@@ -5560,6 +5780,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "net_income": self._fdic_amount(row.get("NETINC")),
                 "book_value_equity": self._fdic_amount(row.get("EQ")),
                 "total_assets": self._fdic_amount(row.get("ASSET")),
+                "total_liabilities": self._fdic_amount(row.get("LIAB")),
                 "current_liabilities": self._fdic_amount(row.get("LIAB")),
                 "cash_and_equivalents": self._fdic_amount(row.get("CHBAL")),
                 "metadata": {
@@ -5664,6 +5885,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                         "total_shares": income.get("weightedAverageShsOutDil"),
                         "shares_outstanding": income.get("weightedAverageShsOutDil"),
                         "total_assets": balance.get("totalAssets"),
+                        "total_liabilities": balance.get("totalLiabilities"),
                         "current_assets": balance.get("totalCurrentAssets"),
                         "current_liabilities": balance.get("totalCurrentLiabilities"),
                         "long_term_debt": balance.get("longTermDebt"),
@@ -10346,6 +10568,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
             registry_items=provider_registry_items,
             attempt_items=provider_attempt_items,
         )
+        pit_overview = build_pit_data_overview(
+            self.market_data_repository,
+            ensure_fundamental_snapshot=False,
+        )
         data_layer_readiness = self._build_snapshot_data_layer_readiness(
             price_row=price_row,
             corporate_row=corporate_row,
@@ -10357,6 +10583,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             option_skew_row=optional_dataset_rows.get(DATASET_OPTION_SKEW_SNAPSHOT_ID),
             last_refreshed_at=max(timestamps) if timestamps else None,
             data_trust_summary=data_trust_summary,
+            pit_overview=pit_overview,
         )
         snapshot_quality_alerts = self._build_snapshot_quality_alerts(
             data_layer_readiness=data_layer_readiness,
@@ -10553,6 +10780,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         option_skew_row: Mapping[str, Any] | None,
         last_refreshed_at: str | None,
         data_trust_summary: Mapping[str, Any] | None,
+        pit_overview: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         price_status = str(price_row.get("status") or "INCOMPLETE").upper()
         corporate_status = str(corporate_row.get("status") or "INCOMPLETE").upper()
@@ -10781,7 +11009,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             macro_summary = "价格与回放链路尚未稳定，宏观敏感度与衍生品计算暂不开放。"
             rate_beta_label = "待补"
             iv_skew_label = "待接入"
-        return [
+        snapshot_layers = [
             {
                 "layer_id": "l1_market_data",
                 "title_cn": "L1 基础行情",
@@ -10937,6 +11165,60 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 },
             },
         ]
+        return self._sync_snapshot_data_layer_readiness_with_pit(
+            snapshot_layers,
+            pit_overview=pit_overview,
+        )
+
+    def _sync_snapshot_data_layer_readiness_with_pit(
+        self,
+        snapshot_layers: Sequence[Mapping[str, Any]],
+        *,
+        pit_overview: Mapping[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        pit_layers = {
+            str(item.get("layer_id") or ""): dict(item)
+            for item in (pit_overview or {}).get("pit_layer_readiness", [])
+            if isinstance(item, Mapping)
+        }
+        if not pit_layers:
+            return [dict(item) for item in snapshot_layers]
+
+        synced_layers: list[dict[str, Any]] = []
+        for layer in snapshot_layers:
+            current = dict(layer)
+            pit_layer = pit_layers.get(str(current.get("layer_id") or ""))
+            if not pit_layer:
+                synced_layers.append(current)
+                continue
+
+            current_status = str(current.get("status") or "").upper()
+            pit_status = str(pit_layer.get("status") or current_status).upper()
+            if pit_status:
+                current["status"] = pit_status
+            current["pit_readiness_source"] = "pit-data"
+            current["pit_summary"] = pit_layer.get("summary")
+            current["pit_metrics"] = list(pit_layer.get("metrics") or [])
+            current["pit_alignment"] = pit_layer.get("pit_alignment")
+
+            if pit_status != current_status or not str(current.get("summary") or "").strip():
+                current["summary"] = pit_layer.get("summary") or current.get("summary")
+            if pit_status in {"READY", "PARTIAL_READY", "OBSERVATION", "CALIBRATING"} or pit_status != current_status:
+                current["blockers"] = list(pit_layer.get("blockers") or [])
+            if isinstance(pit_layer.get("submodules"), Sequence) and not isinstance(
+                pit_layer.get("submodules"),
+                (str, bytes),
+            ):
+                current["submodules"] = list(pit_layer.get("submodules") or [])
+            if isinstance(pit_layer.get("upstream_capabilities"), Sequence) and not isinstance(
+                pit_layer.get("upstream_capabilities"),
+                (str, bytes),
+            ):
+                current["upstream_capabilities"] = list(pit_layer.get("upstream_capabilities") or [])
+            if isinstance(pit_layer.get("available_at_health"), Mapping):
+                current["available_at_health"] = dict(pit_layer.get("available_at_health") or {})
+            synced_layers.append(current)
+        return synced_layers
 
     def _build_snapshot_quality_alerts_legacy(
         self,
@@ -11002,6 +11284,134 @@ class RealBacktestPlatformService(BacktestPlatformService):
             ]
         )
         return alerts
+
+    def _summarize_fundamental_balance_check(self, dataset_snapshot_id: str) -> dict[str, Any]:
+        empty_result = {
+            "status": "UNAVAILABLE",
+            "title_cn": "财务平衡校验不可用",
+            "detail_cn": "可用部分：暂无财务点位；阻塞点：缺少可审计的资产、负债与权益字段。",
+            "blocking": True,
+            "severity": "HIGH",
+        }
+        try:
+            with self.market_data_repository.connect() as conn:
+                columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(dataset_fundamental_points)").fetchall()
+                }
+                row = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total_points,
+                        SUM(CASE WHEN COALESCE(publish_date, '') <> '' THEN 1 ELSE 0 END) AS publish_ready,
+                        SUM(CASE WHEN COALESCE(available_at, '') <> '' THEN 1 ELSE 0 END) AS available_ready,
+                        SUM(CASE WHEN total_assets IS NOT NULL THEN 1 ELSE 0 END) AS assets_ready,
+                        SUM(CASE WHEN book_value_equity IS NOT NULL THEN 1 ELSE 0 END) AS equity_ready,
+                        SUM(CASE WHEN total_debt IS NOT NULL THEN 1 ELSE 0 END) AS debt_ready,
+                        SUM(
+                            CASE
+                                WHEN total_assets IS NOT NULL
+                                 AND book_value_equity IS NOT NULL
+                                 AND total_debt IS NOT NULL
+                                THEN 1
+                                ELSE 0
+                            END
+                        ) AS debt_equity_checkable
+                    FROM dataset_fundamental_points
+                    WHERE dataset_snapshot_id = ?
+                    """,
+                    (dataset_snapshot_id,),
+                ).fetchone()
+        except Exception:
+            return empty_result
+
+        if row is None:
+            return empty_result
+        counts = {key: int(row[key] or 0) for key in row.keys()}
+        total_points = counts.get("total_points", 0)
+        if total_points <= 0:
+            return empty_result
+
+        usable_part = (
+            f"可用部分：{counts['publish_ready']}/{total_points} 条有 publish_date，"
+            f"{counts['available_ready']}/{total_points} 条有 available_at，"
+            f"{counts['assets_ready']} 条有 total_assets，"
+            f"{counts['equity_ready']} 条有 book_value_equity，"
+            f"{counts['debt_ready']} 条有 total_debt，"
+            f"{counts['debt_equity_checkable']} 条可做资产/权益/债务口径检查。"
+        )
+        if "total_liabilities" not in columns:
+            return {
+                "status": "PARTIAL_READY",
+                "title_cn": "财务平衡校验部分可用",
+                "detail_cn": (
+                    f"{usable_part}阻塞点：当前基础面表没有 total_liabilities 字段，"
+                    "不能完整执行 Total Assets = Liabilities + Equity，只能先完成时间门禁和资产/权益/债务可用性检查。"
+                ),
+                "blocking": False,
+                "severity": "MEDIUM",
+            }
+
+        try:
+            with self.market_data_repository.connect() as conn:
+                exact_row = conn.execute(
+                    """
+                    SELECT
+                        SUM(
+                            CASE
+                                WHEN total_assets IS NOT NULL
+                                 AND total_liabilities IS NOT NULL
+                                 AND book_value_equity IS NOT NULL
+                                THEN 1
+                                ELSE 0
+                            END
+                        ) AS exact_checkable,
+                        SUM(
+                            CASE
+                                WHEN total_assets IS NOT NULL
+                                 AND total_liabilities IS NOT NULL
+                                 AND book_value_equity IS NOT NULL
+                                 AND ABS(total_assets - total_liabilities - book_value_equity)
+                                     <= MAX(1.0, ABS(total_assets)) * 0.01
+                                THEN 1
+                                ELSE 0
+                            END
+                        ) AS exact_pass
+                    FROM dataset_fundamental_points
+                    WHERE dataset_snapshot_id = ?
+                    """,
+                    (dataset_snapshot_id,),
+                ).fetchone()
+        except Exception:
+            return {
+                "status": "PARTIAL_READY",
+                "title_cn": "财务平衡校验部分可用",
+                "detail_cn": f"{usable_part}阻塞点：完整会计恒等式查询失败，需检查基础面表结构。",
+                "blocking": False,
+                "severity": "MEDIUM",
+            }
+
+        exact_values = dict(exact_row or {})
+        exact_checkable = int(exact_values.get("exact_checkable") or 0)
+        exact_pass = int(exact_values.get("exact_pass") or 0)
+        if exact_checkable > 0 and exact_pass == exact_checkable:
+            return {
+                "status": "READY",
+                "title_cn": "财务平衡校验已就绪",
+                "detail_cn": f"{usable_part}完整会计恒等式通过 {exact_pass}/{exact_checkable}。",
+                "blocking": False,
+                "severity": "INFO",
+            }
+        return {
+            "status": "PARTIAL_READY" if exact_checkable > 0 else "UNAVAILABLE",
+            "title_cn": "财务平衡校验部分可用" if exact_checkable > 0 else "财务平衡校验不可用",
+            "detail_cn": (
+                f"{usable_part}阻塞点：完整会计恒等式通过 {exact_pass}/{exact_checkable}，"
+                "仍需修复负债或权益口径后才能标记已就绪。"
+            ),
+            "blocking": exact_checkable <= 0,
+            "severity": "MEDIUM" if exact_checkable > 0 else "HIGH",
+        }
 
     def _build_snapshot_factor_dimension_readiness_legacy(
         self,
@@ -11070,7 +11480,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if isinstance(item, Mapping)
         }
         alerts: list[dict[str, Any]] = []
-        l2_status = str(by_id.get("l2_fundamental_data", {}).get("status") or "")
+        l2_layer = by_id.get("l2_fundamental_data", {})
+        l2_status = str(l2_layer.get("status") or "").upper()
         l3_evidence = dict(by_id.get("l3_sentiment_data", {}).get("evidence_status") or {})
         analyst_gate_status = str(l3_evidence.get("analyst_consensus") or "DISABLED").upper()
         short_volume_gate_status = str(l3_evidence.get("short_volume") or "DISABLED").upper()
@@ -11083,18 +11494,45 @@ class RealBacktestPlatformService(BacktestPlatformService):
         )
         macro_rates_required_points = int(l4_evidence.get("macro_required_series") or 10)
 
-        if l2_status != "READY":
+        balance_check = self._summarize_fundamental_balance_check(DATASET_FUNDAMENTALS_SNAPSHOT_ID)
+        balance_status = str(balance_check.get("status") or "UNAVAILABLE").upper()
+        if l2_status not in {"READY", "COMPLETED", "VERIFIED"} or balance_status != "READY":
+            l2_unavailable = l2_status in {"BLOCKED", "DISABLED", "FAILED"}
+            l2_metrics = {
+                str(item.get("label") or ""): item.get("value")
+                for item in (l2_layer.get("metrics") or [])
+                if isinstance(item, Mapping)
+            }
+            coverage_value = l2_metrics.get("覆盖率") or l2_metrics.get("覆盖") or "暂无"
+            fields_value = l2_metrics.get("可用字段") or l2_metrics.get("字段数") or "暂无"
+            points_value = l2_metrics.get("PIT 点位") or l2_metrics.get("发布日期门禁") or "暂无"
+            l2_blockers = [str(item) for item in (l2_layer.get("blockers") or []) if str(item).strip()]
+            blocker_text = "；".join(l2_blockers) if l2_blockers else "资产负债平衡需要完整 publish_date、available_at 与资产/负债/权益字段同时可审计。"
+            balance_unavailable = balance_status in {"BLOCKED", "DISABLED", "FAILED", "UNAVAILABLE"}
+            alert_unavailable = l2_unavailable or balance_unavailable
+            detail_prefix = (
+                f"可用部分：L2 财务截面覆盖 {coverage_value}，字段 {fields_value}，PIT 点位/门禁 {points_value}；"
+                f"阻塞点：{blocker_text}"
+            )
+            balance_detail = str(balance_check.get("detail_cn") or "").strip()
             alerts.append(
                 {
                     "code": "FUNDAMENTAL_BALANCE_CHECK_PENDING",
-                    "severity": "HIGH",
-                    "title_cn": "财务平衡校验待复核",
-                    "detail_cn": "基础面正式快照尚未闭环，当前不能把 Total Assets = Liabilities + Equity 视为正式通过。",
+                    "severity": "HIGH" if alert_unavailable else "MEDIUM",
+                    "title_cn": "财务平衡校验不可用" if alert_unavailable else "财务平衡校验部分可用",
+                    "detail_cn": (
+                        balance_detail
+                        if l2_status in {"READY", "COMPLETED", "VERIFIED"} and balance_detail
+                        else f"{detail_prefix}；{balance_detail}"
+                    ),
                     "source_layer": "L2 财务截面",
-                    "blocking": True,
+                    "blocking": alert_unavailable,
                     "target": DATASET_FUNDAMENTALS_SNAPSHOT_ID,
                     "action_label_cn": "查看基础面台账",
-                    "operator_action_cn": "进入原始快照清单中的 ds-fundamentals，先核对 available_at、publish_date 与资产负债平衡校验；未通过前不要把该批基础面数据用于正式 PIT 准入。",
+                    "operator_action_cn": (
+                        "进入 ds-fundamentals 查看可用字段、publish_date 与 available_at；"
+                        "若仍缺少负债或权益口径，只把已覆盖字段用于观察，不把财务平衡校验标记为已就绪。"
+                    ),
                 }
             )
         if analyst_gate_status != "READY":
@@ -14415,6 +14853,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         interrupted_at: str | None = None,
         recovery_context: Mapping[str, Any] | None = None,
         latest_update_override: str | None = None,
+        interrupted_reason: str = "service_restart",
     ) -> str | None:
         run_id = str(row.get("id") or "").strip()
         strategy_id = str(row.get("strategy_id") or "").strip()
@@ -14433,7 +14872,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             status="INTERRUPTED",
             checkpoint_state=checkpoint_state,
             resume_ready=True,
-            interrupted_reason="service_restart",
+            interrupted_reason=interrupted_reason,
         )
         if latest_update_override:
             interrupted_request_payload["latest_update"] = latest_update_override
@@ -14505,6 +14944,40 @@ class RealBacktestPlatformService(BacktestPlatformService):
             return True
         return (datetime.now(timezone.utc) - heartbeat_value).total_seconds() >= BACKTEST_RUNNER_LEASE_SECONDS
 
+    def _backtest_run_activity_is_stale(self, updated_at: Any) -> bool:
+        return self._backtest_runner_claim_is_stale(updated_at)
+
+    def _is_transient_storage_lock_error(self, value: Any) -> bool:
+        message = str(value or "").lower()
+        return "database is locked" in message or "database table is locked" in message
+
+    def _is_retryable_backtest_runtime_error(self, value: Any) -> bool:
+        message = str(value or "").lower()
+        return self._is_transient_storage_lock_error(message) or "backtest runner claim lost" in message
+
+    def _backtest_failure_is_retryable(self, run: Mapping[str, Any]) -> bool:
+        status = str(run.get("status") or "").upper()
+        return status == "FAILED" and self._is_retryable_backtest_runtime_error(run.get("error_message"))
+
+    def _backtest_runner_claim_is_active(self, run_id: str) -> bool:
+        row = self.storage.fetch_one(
+            "SELECT state_json, updated_at FROM app_runtime_state WHERE state_key = ?",
+            (self._backtest_runner_claim_key(run_id),),
+        )
+        if row is None:
+            return False
+        claim_state = loads(row.get("state_json"), {})
+        owner_id = str(claim_state.get("owner_id") or "").strip()
+        if owner_id == self._backtest_runner_owner_id:
+            with self._backtest_run_lock:
+                local_thread = self._backtest_run_threads.get(run_id)
+                return bool(local_thread and local_thread.is_alive())
+        heartbeat_at = claim_state.get("heartbeat_at") or row.get("updated_at")
+        pid = claim_state.get("pid")
+        if pid is not None and self._backtest_runner_process_is_active(pid):
+            return True
+        return not self._backtest_runner_claim_is_stale(heartbeat_at, pid=pid)
+
     def _try_acquire_backtest_runner_claim(self, run_id: str) -> bool:
         claim_key = self._backtest_runner_claim_key(run_id)
         heartbeat_at = iso_now()
@@ -14549,7 +15022,26 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 (claim_key,),
             ).fetchone()
             if not row:
-                return False
+                with self._backtest_run_lock:
+                    local_thread = self._backtest_run_threads.get(run_id)
+                    local_thread_alive = bool(local_thread and local_thread.is_alive())
+                if not local_thread_alive:
+                    return False
+                conn.execute(
+                    """
+                    INSERT INTO app_runtime_state (state_key, state_json, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(state_key) DO UPDATE SET
+                        state_json = excluded.state_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        claim_key,
+                        dumps(self._backtest_runner_claim_payload(run_id, heartbeat_at=heartbeat_at)),
+                        heartbeat_at,
+                    ),
+                )
+                return True
             claim_state = loads(row["state_json"], {})
             if str(claim_state.get("owner_id") or "").strip() != self._backtest_runner_owner_id:
                 return False
@@ -15179,6 +15671,35 @@ class RealBacktestPlatformService(BacktestPlatformService):
             )
         except Exception as exc:
             failed_at = iso_now()
+            if self._is_transient_storage_lock_error(exc):
+                checkpoint_bundle = self._load_backtest_checkpoint_bundle(run_id)
+                checkpoint_state = dict((checkpoint_bundle or {}).get("state") or {})
+                recovery_context = self._build_backtest_manual_resume_required_context(
+                    "RUNNING",
+                    checkpoint_state,
+                    previous_updated_at=failed_at,
+                    restarted_at=failed_at,
+                )
+                latest_update = "主库短暂写锁，回测已安全中断；请确认后恢复运行。"
+                recovery_context["mode"] = "runtime_storage_lock_recovery"
+                recovery_context["latest_update"] = latest_update
+                row = self.storage.fetch_one("SELECT * FROM backtest_runs WHERE id = ?", (run_id,))
+                if row is not None:
+                    self._interrupt_backtest_run_row(
+                        row,
+                        checkpoint_bundle=checkpoint_bundle,
+                        interrupted_at=failed_at,
+                        recovery_context=recovery_context,
+                        latest_update_override=latest_update,
+                        interrupted_reason="database_lock",
+                    )
+                    self._set_latest_run_reference(
+                        strategy_id=strategy_id,
+                        run_id=run_id,
+                        updated_at=failed_at,
+                        mark_successful=False,
+                    )
+                    return
             self._clear_backtest_checkpoint(run_id)
             failed_preview = self._build_pending_backtest_preview(effective_strategy, request_payload)
             self.storage.insert_json_row(
@@ -15264,6 +15785,89 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 row,
                 checkpoint_bundle=checkpoint_bundle,
                 interrupted_at=iso_now(),
+            )
+            if interrupted_run_id:
+                interrupted_run_ids.append(interrupted_run_id)
+        return interrupted_run_ids
+
+    def reconcile_orphaned_backtest_runs(self, run_ids: Sequence[str] | None = None) -> list[str]:
+        params: list[Any] = ["QUEUED", "RUNNING", "FAILED"]
+        run_filter = ""
+        normalized_run_ids = [str(item).strip() for item in (run_ids or []) if str(item).strip()]
+        if normalized_run_ids:
+            placeholders = ", ".join("?" for _ in normalized_run_ids)
+            run_filter = f" AND id IN ({placeholders})"
+            params.extend(normalized_run_ids)
+        rows = self.storage.fetch_all(
+            f"""
+            SELECT *
+            FROM backtest_runs
+            WHERE deleted_at IS NULL AND status IN (?, ?, ?){run_filter}
+            ORDER BY created_at ASC, id ASC
+            """,
+            params,
+        )
+        interrupted_run_ids: list[str] = []
+        for row in rows:
+            run_id = str(row.get("id") or "").strip()
+            if not run_id:
+                continue
+            status = str(row.get("status") or "").upper()
+            if status == "FAILED":
+                if not self._backtest_failure_is_retryable(row):
+                    continue
+                checkpoint_bundle = self._load_backtest_checkpoint_bundle(run_id)
+                checkpoint_state = dict((checkpoint_bundle or {}).get("state") or {})
+                recovered_at = iso_now()
+                claim_lost = "backtest runner claim lost" in str(row.get("error_message") or "").lower()
+                latest_update = (
+                    "runner claim 曾短暂丢失，回测已安全中断；请确认后恢复运行。"
+                    if claim_lost
+                    else "主库短暂写锁，回测已安全中断；请确认后恢复运行。"
+                )
+                recovery_context = self._build_backtest_manual_resume_required_context(
+                    "FAILED",
+                    checkpoint_state,
+                    previous_updated_at=row.get("updated_at"),
+                    restarted_at=recovered_at,
+                )
+                recovery_context["mode"] = "runtime_runner_claim_recovery" if claim_lost else "runtime_storage_lock_recovery"
+                recovery_context["latest_update"] = latest_update
+                interrupted_run_id = self._interrupt_backtest_run_row(
+                    row,
+                    checkpoint_bundle=checkpoint_bundle,
+                    interrupted_at=recovered_at,
+                    recovery_context=recovery_context,
+                    latest_update_override=latest_update,
+                    interrupted_reason="runner_claim_lost" if claim_lost else "database_lock",
+                )
+                if interrupted_run_id:
+                    interrupted_run_ids.append(interrupted_run_id)
+                continue
+            with self._backtest_run_lock:
+                local_thread = self._backtest_run_threads.get(run_id)
+                local_thread_alive = bool(local_thread and local_thread.is_alive())
+            if local_thread_alive:
+                continue
+            if self._backtest_runner_claim_is_active(run_id):
+                continue
+            if not self._backtest_run_activity_is_stale(row.get("updated_at")):
+                continue
+            checkpoint_bundle = self._load_backtest_checkpoint_bundle(run_id)
+            checkpoint_state = dict((checkpoint_bundle or {}).get("state") or {})
+            recovered_at = iso_now()
+            recovery_context = self._build_backtest_manual_resume_required_context(
+                row.get("status"),
+                checkpoint_state,
+                previous_updated_at=row.get("updated_at"),
+                restarted_at=recovered_at,
+            )
+            interrupted_run_id = self._interrupt_backtest_run_row(
+                row,
+                checkpoint_bundle=checkpoint_bundle,
+                interrupted_at=recovered_at,
+                recovery_context=recovery_context,
+                latest_update_override=str(recovery_context.get("latest_update") or "").strip() or None,
             )
             if interrupted_run_id:
                 interrupted_run_ids.append(interrupted_run_id)
@@ -15382,6 +15986,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
         run = self.get_backtest_run_detail(run_id)
         status = str(run.get("status") or "").upper()
+        retryable_failed_run = self._backtest_failure_is_retryable(run)
         request_payload = dict(run.get("request") or {})
         existing_resume_key = str(request_payload.get("resume_idempotency_key") or "").strip()
         if existing_resume_key and status in {"QUEUED", "RUNNING"}:
@@ -15392,7 +15997,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "Backtest run was already resumed with a different idempotency key",
                 blocking_target={"run_id": run_id},
             )
-        if status != "INTERRUPTED":
+        if status != "INTERRUPTED" and not retryable_failed_run:
             raise ContractConflictError(
                 "BACKTEST_RUN_NOT_RESUMABLE",
                 "Only interrupted backtest runs can be resumed",
@@ -15421,14 +16026,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
         )
         recovery_context = (
             self._build_backtest_checkpoint_recovery_context(
-                "INTERRUPTED",
+                status,
                 checkpoint_bundle,
                 previous_updated_at=run.get("updated_at"),
                 restarted_at=resumed_at,
             )
             if checkpoint_state.get("persisted_step_count")
             else self._build_backtest_restart_recovery_context(
-                "INTERRUPTED",
+                status,
                 previous_updated_at=run.get("updated_at"),
                 restarted_at=resumed_at,
             )
@@ -15501,6 +16106,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 blocking_target={"run_id": run_id},
             )
         return self.get_backtest_run_detail(run_id)
+
+    def list_backtest_runs(self, limit: int | None = None, status: str | None = None) -> list[dict[str, Any]]:
+        self.reconcile_orphaned_backtest_runs()
+        return super().list_backtest_runs(limit=limit, status=status)
 
     def submit_backtest_run(self, strategy_id: str, request: Any) -> dict[str, Any]:
         strategy = self.get_strategy_detail(strategy_id)
@@ -15637,6 +16246,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         return chart_series, trades
 
     def get_backtest_run_detail(self, run_id: str, view: str = "full") -> dict[str, Any]:
+        self.reconcile_orphaned_backtest_runs([run_id])
         normalized_view = self._normalize_backtest_run_detail_view(view)
         run = super().get_backtest_run_detail(run_id, view=normalized_view)
         parameter_snapshot = dict(run.get("parameter_snapshot") or {})
@@ -15658,9 +16268,22 @@ class RealBacktestPlatformService(BacktestPlatformService):
         request_progress = dict(run.get("request") or {})
         preview_progress = dict((run.get("preview") or {}).get("environment_summary") or {})
         execution_progress = dict(preview_progress.get("execution_progress") or {})
-        run["resume_ready"] = bool(request_progress.get("resume_ready")) or str(run.get("status") or "").upper() == "INTERRUPTED"
+        retryable_failed_run = self._backtest_failure_is_retryable(run)
+        retryable_failure_reason = None
+        if retryable_failed_run:
+            retryable_failure_reason = (
+                "database_lock"
+                if self._is_transient_storage_lock_error(run.get("error_message"))
+                else "runner_claim_lost"
+            )
+        run["resume_ready"] = (
+            bool(request_progress.get("resume_ready"))
+            or str(run.get("status") or "").upper() == "INTERRUPTED"
+            or retryable_failed_run
+        )
         run["interrupted_reason"] = (
             request_progress.get("interrupted_reason")
+            or retryable_failure_reason
             or ("service_restart" if str(run.get("status") or "").upper() == "INTERRUPTED" else None)
         )
         run["progress_pct"] = int(execution_progress.get("progress_pct") or request_progress.get("progress_pct") or 0)

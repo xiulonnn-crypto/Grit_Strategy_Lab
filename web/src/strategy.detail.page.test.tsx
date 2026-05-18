@@ -182,29 +182,109 @@ describe('StrategyDetailPage', () => {
       parameters: {
         strategy_type: 'MULTI_FACTOR',
         rebalance_frequency: 'quarterly',
-        factor_ids: ['s_mom_12m1m_rank', 's_val_ep_ltm_raw'],
+        factor_ids: ['a_mom_ret_126d_z', 's_alpha_ffblend_cur_rank'],
         weights: {
-          s_mom_12m1m_rank: 0.6,
-          s_val_ep_ltm_raw: 0.4,
+          a_mom_ret_126d_z: 80,
+          s_alpha_ffblend_cur_rank: 20,
         },
         directions: {
-          s_mom_12m1m_rank: 'HIGH_IS_BETTER',
-          s_val_ep_ltm_raw: 'HIGH_IS_BETTER',
+          a_mom_ret_126d_z: 'HIGH_IS_BETTER',
+          s_alpha_ffblend_cur_rank: 'HIGH_IS_BETTER',
+        },
+        neutralization: {
+          enabled: true,
+          method: 'industry',
+          execution_status: 'EXECUTED',
         },
         scoring_method: 'zscore_weighted',
+        strategy_creation_risk: { warning_count: 7 },
+        factor_weight__a_mom_ret_126d_z_pct: 80,
+        factor_weight__s_alpha_ffblend_cur_rank_pct: 20,
+        neutralization_method: 'industry',
+        top_n: 50,
+        holding_count: 50,
       },
+      parameter_history: [
+        {
+          version_number: 1,
+          parameter_version_id: 'pv-mf-001',
+          revision: 1,
+          created_at: '2026-05-12T08:44:00Z',
+          parameters: {
+            factor_ids: ['a_mom_ret_126d_z', 's_alpha_ffblend_cur_rank'],
+            weights: {
+              a_mom_ret_126d_z: 80,
+              s_alpha_ffblend_cur_rank: 20,
+            },
+            directions: {
+              a_mom_ret_126d_z: 'HIGH_IS_BETTER',
+              s_alpha_ffblend_cur_rank: 'HIGH_IS_BETTER',
+            },
+            neutralization: {
+              enabled: true,
+              method: 'industry',
+              execution_status: 'EXECUTED',
+            },
+            factor_weight__a_mom_ret_126d_z_pct: 80,
+            factor_weight__s_alpha_ffblend_cur_rank_pct: 20,
+            strategy_creation_risk: { warning_count: 7 },
+          },
+          comment: 'Initial import.',
+          change_summary:
+            'factor weight  a mom ret 126d z pct 82→80\nfactor weight  s alpha ffblend cur rank pct 18→20\nweights 已配置→已配置\nneutralization method 空→industry\nscoring method 空→zscore_weighted\nholding count 空→50',
+          decision_note: '多因子模型创建',
+          rollbackable: false,
+        },
+      ],
     } satisfies ApiStrategyDetail);
     ({ StrategyDetailPage } = await import('./pages/strategy-detail-page'));
 
     render(<StrategyDetailPage strategyId="strat-mf-001" />);
 
     expect(await screen.findByText('多因子策略')).toBeInTheDocument();
-    expect(screen.getAllByText(/12-1月截面动量排名/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/滚动市盈率倒数 \(LTM\)/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/126日收益动量标准化因子/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/法玛-弗伦奇风格合成阿尔法排名/).length).toBeGreaterThan(0);
     expect(screen.getByText('再平衡')).toBeInTheDocument();
     expect(screen.getAllByText('每季度').length).toBeGreaterThan(0);
-    expect(document.body.textContent).not.toContain('s_mom_12m1m_rank 60%');
-    expect(document.body.textContent).not.toContain('s_val_ep_ltm_raw 40%');
+    expect(screen.getByText('因子权重 · 126日收益动量标准化因子')).toBeInTheDocument();
+    expect(screen.getByText('因子权重 · 法玛-弗伦奇风格合成阿尔法排名')).toBeInTheDocument();
+    expect(screen.getByText('因子权重 · 126日收益动量标准化因子 82→80')).toBeInTheDocument();
+    expect(screen.getByText('因子权重 · 法玛-弗伦奇风格合成阿尔法排名 18→20')).toBeInTheDocument();
+    expect(screen.getByText('权重方案 已配置→已配置')).toBeInTheDocument();
+    expect(screen.getByText('中性化方法 空→行业中性')).toBeInTheDocument();
+    expect(screen.getByText('打分方法 空→标准化加权')).toBeInTheDocument();
+    expect(screen.getByText('实际持仓数量 空→50')).toBeInTheDocument();
+    expect(screen.getByText('标准化加权')).toBeInTheDocument();
+    expect(screen.getByText(/已执行/)).toBeInTheDocument();
+    expect(screen.getAllByText('持仓数量').length).toBeGreaterThan(0);
+    expect(screen.getByText('实际持仓数量')).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain('a_mom_ret_126d_z');
+    expect(document.body.textContent).not.toContain('s_alpha_ffblend_cur_rank');
+    expect(document.body.textContent).not.toContain('factor_weight__');
+    expect(document.body.textContent).not.toContain('factor weight');
+    expect(document.body.textContent).not.toContain('neutralization method');
+    expect(document.body.textContent).not.toContain('zscore_weighted');
+    expect(document.body.textContent).not.toContain('Z-Score 加权');
+    expect(document.body.textContent).not.toContain('strategy creation risk');
+    expect(document.body.textContent).not.toContain('EXECUTED');
+
+    fireEvent.click(screen.getByRole('button', { name: HISTORY_OPEN_LABEL }));
+    const dialog = await screen.findByRole('dialog', { name: HISTORY_DETAIL_TITLE });
+    expect(dialog.textContent).toContain('因子权重 · 126日收益动量标准化因子');
+    expect(dialog.textContent).toContain('因子权重 · 法玛-弗伦奇风格合成阿尔法排名');
+    expect(dialog.textContent).toContain('权重方案 已配置→已配置');
+    expect(dialog.textContent).toContain('中性化方法 空→行业中性');
+    expect(dialog.textContent).toContain('打分方法 空→标准化加权');
+    expect(dialog.textContent).toContain('标准化加权');
+    expect(dialog.textContent).toContain('已执行');
+    expect(dialog.textContent).not.toContain('a_mom_ret_126d_z');
+    expect(dialog.textContent).not.toContain('s_alpha_ffblend_cur_rank');
+    expect(dialog.textContent).not.toContain('factor_weight__');
+    expect(dialog.textContent).not.toContain('factor weight');
+    expect(dialog.textContent).not.toContain('neutralization method');
+    expect(dialog.textContent).not.toContain('zscore_weighted');
+    expect(dialog.textContent).not.toContain('Z-Score 加权');
+    expect(dialog.textContent).not.toContain('EXECUTED');
   });
 
   it('renders the detail layout, opens a revision session, shows recent runs on a timeline, and opens the latest optimization result', async () => {
@@ -246,7 +326,7 @@ describe('StrategyDetailPage', () => {
     expect(screen.getByText('v1')).toBeInTheDocument();
     expect(screen.queryByText('pv-002')).not.toBeInTheDocument();
     expect(screen.queryByText('pv-001')).not.toBeInTheDocument();
-    expect(screen.getByText('2025/01/01 - 2026/03/27')).toBeInTheDocument();
+    expect(await screen.findByText('2025/01/01 - 2026/03/27')).toBeInTheDocument();
     expect(screen.getByText('2026/03/27')).toBeInTheDocument();
     expect(screen.getByText('年化 +9.4%')).toBeInTheDocument();
     expect(screen.getByText('夏普 1.14')).toBeInTheDocument();

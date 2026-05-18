@@ -411,6 +411,8 @@ export type ApiOptimizationJobListItem = {
   latest_update?: string | null;
   estimated_remaining_minutes?: number | null;
   estimated_completed_at?: string | null;
+  active_execution_seconds?: number | null;
+  execution_seconds?: number | null;
   best_candidate_id?: string | null;
   best_candidate_label?: string | null;
   constraint_preset_key?: ApiOptimizationConstraintPresetKey | null;
@@ -488,6 +490,8 @@ export type ApiOptimizationJobDetail = {
     latest_update?: string | null;
     estimated_remaining_minutes?: number | null;
     estimated_completed_at?: string | null;
+    active_execution_seconds?: number | null;
+    execution_seconds?: number | null;
     search_space?: ApiOptimizationSearchSpaceField[];
     constraint_preset_key?: ApiOptimizationConstraintPresetKey | null;
     constraint_label?: string | null;
@@ -511,6 +515,8 @@ export type ApiOptimizationJobDetail = {
     constraint_preset_key?: ApiOptimizationConstraintPresetKey | null;
     constraint_label?: string | null;
     constraints?: ApiOptimizationConstraint[];
+    active_execution_seconds?: number | null;
+    execution_seconds?: number | null;
     [key: string]: unknown;
   };
   candidates: ApiOptimizationCandidate[];
@@ -518,6 +524,8 @@ export type ApiOptimizationJobDetail = {
   created_at?: string;
   updated_at?: string;
   completed_at?: string | null;
+  active_execution_seconds?: number | null;
+  execution_seconds?: number | null;
   resume_ready?: boolean;
   persisted_trial_count?: number | null;
   next_trial_index?: number | null;
@@ -2776,7 +2784,10 @@ export type ApiFactorLifecycleStatus =
   | "PRODUCTION"
   | "DECAYED"
   | "DEPRECATED"
-  | "PRUNED";
+  | "PRUNED"
+  | "INVALID"
+  | "SOURCE_INVALID"
+  | "DATA_SOURCE_INVALID";
 export type ApiFactorDiagnosticStatus =
   | "READY_TO_DIAGNOSE"
   | "SANDBOX_READY"
@@ -3262,9 +3273,19 @@ export type ApiFactorQuarantineCandidate = {
   target_factor_id?: string | null;
   created_at: string;
   updated_at: string;
+  last_quarantine_at?: string | null;
   published_at?: string | null;
   rejected_reason?: string | null;
   latest_run?: Record<string, unknown>;
+  target_layer?: "L1" | "L2" | "L3" | string;
+  operator_chain?: ApiFactorOperatorChainStep[];
+  composition_methods?: ApiFactorCompositionMethod[];
+  investment_logic?: string;
+  scoring_detail?: ApiFactorScoringCandidate;
+  admission_report?: ApiFactorAdmissionReportRow[];
+  quarantine_result?: "PASS" | "WARN" | "FAIL" | string;
+  reason_summary?: string;
+  detail_modal_enabled?: boolean;
 };
 
 export type ApiFactorQuarantineCandidateListResponse = {
@@ -3312,6 +3333,93 @@ export type ApiFactorFactoryGatePolicy = {
   residual_enabled: boolean;
   max_drawdown_relative_to_benchmark: number;
   min_oos_to_is_ratio: number;
+  [key: string]: unknown;
+};
+
+export type ApiFactorOperatorChainStep = {
+  code: string;
+  label: string;
+  description?: string;
+};
+
+export type ApiFactorCompositionMethod = {
+  key: string;
+  label: string;
+};
+
+export type ApiFactorTaskStatus = "待开始" | "进行中" | "已完成";
+
+export type ApiFactorFactoryTaskRow = {
+  id: string;
+  task_date: string;
+  kind: "mining" | "refinement" | "composition" | string;
+  title: string;
+  summary?: string;
+  status: ApiFactorTaskStatus | string;
+  target_layer: "L1" | "L2" | "L3" | string;
+  delivered_candidate_count?: number | null;
+  current_candidate_count?: number | null;
+  expected_candidate_count?: number | null;
+  operator_chain?: ApiFactorOperatorChainStep[];
+  parent_factor_ids?: string[];
+  [key: string]: unknown;
+};
+
+export type ApiFactorScoringCandidate = {
+  candidate_id: string;
+  display_id: string;
+  score?: number | null;
+  status?: "PASS" | "WARN" | "FAIL" | string;
+  target_layer: "L1" | "L2" | "L3" | string;
+  submitted_at?: string | null;
+  predictive_power?: Record<string, unknown>;
+  stability_turnover?: Record<string, unknown>;
+  risk_orthogonality?: Record<string, unknown>;
+  data_health?: Record<string, unknown>;
+  thresholds?: Record<string, unknown>;
+  operator_chain?: ApiFactorOperatorChainStep[];
+  composition_methods?: ApiFactorCompositionMethod[];
+  investment_logic?: string;
+  collapsed_by_default?: boolean;
+  submit_mode?: "AUTO_AFTER_TASK" | "MANUAL_BULK" | string;
+  detail_modal_enabled?: boolean;
+  quarantine_candidate_id?: string;
+  quarantine_result?: "PASS" | "WARN" | "FAIL" | string;
+  [key: string]: unknown;
+};
+
+export type ApiFactorQuarantineResultRow = {
+  candidate_id: string;
+  submitted_at?: string | null;
+  factor_name: string;
+  target_layer: "L1" | "L2" | "L3" | string;
+  quarantine_result: "PASS" | "WARN" | "FAIL" | string;
+  reason_summary: string;
+  detail_modal_enabled?: boolean;
+  [key: string]: unknown;
+};
+
+export type ApiFactorAdmissionReportRow = {
+  check: string;
+  value?: number | string | null;
+  value_label?: string;
+  status: "PASS" | "WARN" | "FAIL" | string;
+  agent_d_advice: string;
+  [key: string]: unknown;
+};
+
+export type ApiPublishableFactorRow = {
+  candidate_id?: string;
+  factor_id: string;
+  factor_name?: string;
+  target_layer: "L1" | "L2" | "L3" | string;
+  score?: number | null;
+  quarantine_status: "PASS" | "WARN" | string;
+  parent_factor_ids?: string[];
+  operator_chain?: ApiFactorOperatorChainStep[];
+  composition_methods?: ApiFactorCompositionMethod[];
+  investment_logic?: string;
+  detail_modal_enabled?: boolean;
   [key: string]: unknown;
 };
 
@@ -3369,6 +3477,12 @@ export type ApiFactorFactoryOverview = {
   gate_policy: ApiFactorFactoryGatePolicy;
   daily_run?: ApiFactorFactoryRun;
   manual_run?: ApiFactorFactoryRun;
+  task_summary?: Record<string, unknown>;
+  task_rows?: ApiFactorFactoryTaskRow[];
+  scoring_candidates?: ApiFactorScoringCandidate[];
+  quarantine_result_rows?: ApiFactorQuarantineResultRow[];
+  publishable_factors?: ApiPublishableFactorRow[];
+  phase2_contract?: Record<string, unknown>;
   [key: string]: unknown;
 };
 
@@ -3382,6 +3496,7 @@ export type ApiFactorFactoryAutomationPayload = {
 export type ApiFactorFactoryRunNowPayload = {
   request?: ApiFactorMiningJobCreatePayload;
   gate_policy?: Partial<ApiFactorFactoryGatePolicy>;
+  pipeline_scope?: "B1_B2_B3_B4" | "B1_ONLY" | "B2_B3" | "FULL";
 };
 
 export type ApiFactorModelComponentPayload = {
@@ -3706,6 +3821,9 @@ export type DemoApi = {
     status?: string;
     source_job_id?: string;
     cluster?: string;
+    date?: string;
+    factor_name?: string;
+    result?: "ALL" | "PASS" | "WARN" | "FAIL" | string;
   }) => Promise<ApiFactorQuarantineCandidateListResponse>;
   factorQuarantineIntake?: (
     payload?: ApiFactorQuarantineIntakePayload,

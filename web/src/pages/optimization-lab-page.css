@@ -1347,6 +1347,8 @@
 
 .optimization-progress-panel .optimization-metric-tile strong {
   line-height: 1.12;
+  white-space: normal !important;
+  overflow-wrap: anywhere;
 }
 
 .optimization-progress-panel .optimization-summary-list {
@@ -1422,6 +1424,12 @@
   font-size: 1.7rem;
   line-height: 1;
   white-space: nowrap;
+}
+
+.optimization-progress-panel .optimization-metric-tile strong {
+  line-height: 1.12;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .optimization-results-summary {
