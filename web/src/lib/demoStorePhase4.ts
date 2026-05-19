@@ -2570,7 +2570,7 @@ function buildFactorGovernanceOverview(items = buildDemoFactors()): ApiFactorGov
         affected_factor_ids: ['s_vol_downside_252d_rank'],
         severity: 'info',
         optimized_factor: {
-          id: 'm_vol_downsiderev_252d_rank',
+          id: 's_alpha_vol_downsiderev_std_rk',
           name: '反向下行波动率代理（252日）',
           expression: 'DownsideStd(Return(Close, 1), 252)',
           direction: 'HIGH_IS_BETTER',
@@ -2851,7 +2851,22 @@ function buildDemoFactorFactoryOverview(
 function buildDemoFactorModelPreview(payload: ApiFactorModelPreviewPayload): ApiFactorModelPreviewResponse {
   const totalWeight = payload.components.reduce((total, item) => total + Math.abs(Number(item.weight ?? 0)), 0) || 1;
   const neutralizationBlocked = payload.neutralization.enabled;
+  const isComposite = payload.strategy_type === 'COMPOSITE_FACTOR';
+  const compositeRisk = isComposite ? {
+    can_create: true,
+    warning_count: 0,
+    blocked_count: 0,
+    warnings: [],
+    hard_blockers: [],
+    summary_label: 'READY',
+    summary: 'Composite factor admission passed.',
+    eligibility: { completed_ops: ['W', 'N', 'Z', 'T'], missing_ops: [] },
+    diagnostic_summary: { status: 'COMPLETED', rank_ic: 0.061, ir: 1.34, coverage: 0.92, weak_sectors: [{ group: 'Utilities', mean_return: -0.018 }] },
+    sector_cap_forecast: { cut_weight_pct: 11.4, residual_cash_pct: payload.weight_mapping?.cap_redistribution_mode === 'proportional_refill' ? 0 : 0.6, invested_pct: payload.weight_mapping?.cap_redistribution_mode === 'proportional_refill' ? 100 : 99.4 },
+    cost_forecast: { average_slippage_bps: 6.8, fixed_cost_bps: 1.5, impact_beta: 0.65, max_impact_bps: 75 },
+  } : undefined;
   return {
+    strategy_type: isComposite ? 'COMPOSITE_FACTOR' : 'MULTI_FACTOR',
     status: neutralizationBlocked ? 'BLOCKED' : 'READY',
     normalized_weights: payload.components.map((component) => ({
       ...component,
@@ -2887,12 +2902,17 @@ function buildDemoFactorModelPreview(payload: ApiFactorModelPreviewPayload): Api
           status: 'DISABLED',
           blockers: [],
         },
+    strategy_creation_risk: compositeRisk,
+    diagnostic_summary: compositeRisk?.diagnostic_summary,
+    sector_cap_forecast: compositeRisk?.sector_cap_forecast,
+    cost_forecast: compositeRisk?.cost_forecast,
     warnings: neutralizationBlocked ? ['行业 PIT 覆盖缺失，第一步只返回 blocker，不展示已执行。'] : [],
   };
 }
 
 function buildDemoFactorModelStrategy(payload: ApiFactorModelCreatePayload): ApiStrategyDetail {
   const preview = buildDemoFactorModelPreview(payload);
+  const strategyType = payload.strategy_type ?? 'MULTI_FACTOR';
   if (preview.status === 'BLOCKED') {
     throw new ApiError({
       status: 400,
@@ -2903,20 +2923,30 @@ function buildDemoFactorModelStrategy(payload: ApiFactorModelCreatePayload): Api
   const id = nextId('strat-mf');
   const parameterVersionId = `${id}-v1`;
   const parameters: Record<string, ParameterValue> = {
+    strategy_type: strategyType,
+    factor_model_type: strategyType,
     factor_ids: payload.components.map((component) => component.factor_id),
     weights: Object.fromEntries(payload.components.map((component) => [component.factor_id, component.weight])),
     directions: Object.fromEntries(payload.components.map((component) => [component.factor_id, component.direction])),
     neutralization: payload.neutralization,
-    top_n: payload.top_n ?? 8,
+    top_n: payload.top_n ?? (strategyType === 'COMPOSITE_FACTOR' ? 50 : 8),
     scoring_method: payload.scoring_method,
     rebalance_frequency: payload.rebalance_frequency,
-    pit_snapshot_refs: preview.coverage,
+    pit_snapshot_refs: preview.coverage ?? null,
+    universe_filter: payload.universe_filter ?? null,
+    weight_mapping: payload.weight_mapping ?? null,
+    rebalance_logic: payload.rebalance_logic ?? null,
+    execution_constraints: payload.execution_constraints ?? null,
+    strategy_creation_risk: preview.strategy_creation_risk ?? null,
+    diagnostic_summary: preview.diagnostic_summary ?? null,
+    sector_cap_forecast: preview.sector_cap_forecast ?? null,
+    cost_forecast: preview.cost_forecast ?? null,
   };
   const strategy = createStrategy({
     id,
     name: payload.name ?? '多因子核心模型',
     description: payload.description ?? '由因子库多因子构建器创建的可回测策略。',
-    strategy_type: 'MULTI_FACTOR',
+    strategy_type: strategyType,
     universe_name: payload.universe,
     rebalance_frequency: payload.rebalance_frequency,
     latest_run_id: null,
@@ -3767,7 +3797,7 @@ export const demoApi: DemoApi = {
       const createdFactor = created
         ? {
             ...created,
-            id: 'm_vol_downsiderev_252d_rank',
+            id: 's_alpha_vol_downsiderev_std_rk',
             name: '反向下行波动率代理（252日）',
             source: 'MANUAL' as const,
             lifecycle_status: 'VERIFIED' as const,

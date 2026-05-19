@@ -1,5 +1,12 @@
 # Grit 策略回测平台
 
+## Git Fast / Impact / Full
+
+- `git-fast` 使用 `scripts/codex-validate-fast.ps1`，也是 pre-push 默认门禁；它只跑日常精准增量测试，目标 5 分钟内完成，发现 contract、验证脚本、跨栈或未映射源码改动时返回 `not-fast`，不会自动进入长跑测试。
+- `git-impact` 使用 `scripts/codex-validate-impact.ps1`，用于 fast 判定不适合后手动运行；它按 owner map 加影响面 fanout 运行 backend/frontend targeted checks，并会跑前端 `tsc --noEmit`。
+- `git-full` 使用 `scripts/codex-validate-full.ps1`，用于大版本、发版、合并主线或 fixture/live acceptance 前的完整门禁。
+- `output/ui-artifact-trace/**`、`output/logs/grit-coder/**`、`harness/reports/**`、项目内 `designs/**` 和证据型 `artifacts/**` 文件会保留在报告里，但不参与 fast 文件数、domain 判定或测试选择。
+
 Grit Strategy Lab 的本地策略研究与回测工作台。当前仓库包含可运行的 FastAPI 后端、React/Vite 前端，以及一条已经接通的主链路：`workspace -> creation -> backtest -> run detail -> optimization`。
 
 ## 当前范围

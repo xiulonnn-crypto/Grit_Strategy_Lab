@@ -532,6 +532,7 @@ def test_sec_edgar_provider_resolves_identity_and_emits_report_filed(monkeypatch
 
     identity = provider.resolve_identity("AAPL")
     actions = provider.fetch_report_filings("AAPL", date(2026, 1, 1), date(2026, 4, 2))
+    corporate_probe = provider.fetch_corporate_actions("AAPL", date(2026, 1, 1), date(2026, 4, 2))
 
     assert provider.availability().available is True
     assert identity is not None
@@ -539,6 +540,18 @@ def test_sec_edgar_provider_resolves_identity_and_emits_report_filed(monkeypatch
     assert identity["company_name"] == "Apple Inc."
     assert [action["payload"]["form"] for action in actions] == ["10-Q", "8-K"]
     assert all(action["action_type"] == "report_filed" for action in actions)
+    assert actions[1]["payload"]["submission_text_url"].endswith(
+        "/Archives/edgar/data/320193/000032019326000009/0000320193-26-000009.txt"
+    )
+    assert actions[1]["payload"]["primary_document_url"].endswith(
+        "/Archives/edgar/data/320193/000032019326000009/aapl-8k.htm"
+    )
+    assert corporate_probe["probe_complete"] is True
+    assert corporate_probe["metadata"]["event_scope"] == "sec_8k_lifecycle_filings"
+    assert [action["action_type"] for action in corporate_probe["actions"]] == ["sec_8k_filing"]
+    assert corporate_probe["actions"][0]["payload"]["archive_index_url"].endswith(
+        "/Archives/edgar/data/320193/000032019326000009/"
+    )
 
 
 def test_sec_edgar_provider_resolves_legacy_ticker_alias(monkeypatch):
@@ -980,6 +993,12 @@ def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(
         ("stooq_provider", ("StooqZipPriceProvider", "StooqPriceProvider")): SimpleNamespace(
             provider_name="stooq", fetch_history=lambda *args, **kwargs: None
         ),
+        ("eodhd_provider", ("EodhdMarketDataProvider",)): SimpleNamespace(
+            provider_name="eodhd",
+            fetch_history=lambda *args, **kwargs: None,
+            fetch_corporate_actions=lambda symbol, start_date, end_date: {"actions": []},
+            supports_action_enrichment=True,
+        ),
         ("finnhub_provider", ("FinnhubProvider",)): SimpleNamespace(
             provider_name="finnhub",
             fetch_history=lambda *args, **kwargs: None,
@@ -1016,6 +1035,7 @@ def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(
         "fmp",
         "nasdaq_wiki",
         "stooq",
+        "eodhd",
         "finnhub",
         "alpha_vantage",
         "sec_edgar",
@@ -1029,6 +1049,7 @@ def test_runtime_market_data_provider_builder_orders_price_and_identity_sources(
         "fmp",
         "nasdaq_wiki",
         "stooq",
+        "eodhd",
     ]
     assert [provider.provider_name for provider in runtime.identity_providers] == [
         "tiingo_symbology",

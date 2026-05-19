@@ -3,7 +3,7 @@
   "title": "组合因子策略创建页 UI 稿",
   "created_at": "2026-05-18T00:00:00+08:00",
   "route": "#/factor-models/new?strategyType=COMPOSITE_FACTOR",
-  "source_plan": "合成因子策略计划，包含 Sector Cap 与 Diagnostic Summary",
+  "source_plan": "组合因子策略计划，包含 Sector Cap 与 Diagnostic Summary",
   "canonical_html": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\composite-factor-strategy-creation-20260518\\composite-factor-strategy-creation.html",
   "desktop_png": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\composite-factor-strategy-creation-20260518\\composite-factor-strategy-creation-desktop.png",
   "mobile_png": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\composite-factor-strategy-creation-20260518\\composite-factor-strategy-creation-mobile.png",

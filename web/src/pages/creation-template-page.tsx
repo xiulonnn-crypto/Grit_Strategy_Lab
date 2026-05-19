@@ -150,6 +150,12 @@ const templates: TemplateCard[] = [
     actionLabel: '创建多因子策略',
   },
   {
+    strategyType: 'COMPOSITE_FACTOR',
+    label: '组合因子策略',
+    description: '选取一个已完成 WNZT、S/A 级、L3 美股因子，配置股票池过滤、行业硬上限、再平衡和实盘约束。',
+    actionLabel: '创建组合因子策略',
+  },
+  {
     strategyType: 'GENERAL',
     label: '通用策略',
     description: '用于定义非模板化交易逻辑，适合需要自定义规则的研究场景。',
@@ -158,6 +164,7 @@ const templates: TemplateCard[] = [
 ];
 
 const STRATEGY_TYPE_LABELS: Record<StrategyType, string> = {
+  COMPOSITE_FACTOR: '组合因子策略',
   MOMENTUM: '动量 / 趋势跟随',
   GRID: '网格交易',
   MEAN_REVERSION: '均值回归',
@@ -710,6 +717,10 @@ export function CreationTemplatePage(): JSX.Element {
       }
       if (strategyType === 'MULTI_FACTOR') {
         navigateTo('/factor-models/new');
+        return;
+      }
+      if (strategyType === 'COMPOSITE_FACTOR') {
+        navigateTo('/factor-models/new?strategy_type=COMPOSITE_FACTOR&source=strategy_modal');
         return;
       }
       const session = await api.createCreationSession({ strategy_type: strategyType });

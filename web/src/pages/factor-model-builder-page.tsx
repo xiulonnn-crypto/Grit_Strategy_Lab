@@ -9,6 +9,10 @@ export type FactorModelOption = {
   family: string;
   categoryLabel?: string;
   factorLevelLabel?: string;
+  market?: string | null;
+  tierLevel?: string | null;
+  factorLevel?: string | null;
+  opCompleted?: string[];
   rankIcLabel?: string;
   irLabel?: string;
   rankIc?: number | null;
@@ -38,11 +42,42 @@ export type FactorModelNeutralizationConfig = {
 };
 
 export type FactorModelPreviewPayload = {
+  strategyType?: 'MULTI_FACTOR' | 'COMPOSITE_FACTOR';
   modelName: string;
   factors: FactorModelSelection[];
   neutralization: FactorModelNeutralizationConfig;
   rebalanceFrequency: string;
   topN: number;
+  universeFilter?: {
+    minAdvUsd: number;
+    advWindow: '20D' | '60D';
+    excludeHalted: boolean;
+    excludeOtcPink: boolean;
+    excludeLuldPaused: boolean;
+    delistingWindowDays: number;
+    sectorOverrides: Record<string, boolean>;
+  };
+  weightMapping?: {
+    method: 'equal_top_k' | 'score_proportional' | 'risk_heuristic';
+    sectorCapPct: number;
+    maxPositionPct: number;
+    minTargetWeightPct: number;
+    capRedistributionMode: 'cash' | 'proportional_refill';
+  };
+  rebalanceLogic?: {
+    frequency: 'daily' | 'weekly' | 'monthly';
+    calendarRule: string;
+    exitRankPercentile: number;
+    minTradeNotionalUsd: number;
+  };
+  executionConstraints?: {
+    notionalUsd: number;
+    commissionBps: number;
+    stampTaxBps: number;
+    baseSlippageBps: number;
+    impactBeta: number;
+    maxImpactBps: number;
+  };
 };
 
 export type FactorModelPreviewWeight = {
@@ -88,6 +123,10 @@ export type FactorModelStrategyCreationRisk = {
   hard_blockers?: FactorModelRiskItem[];
   summary_label?: string;
   summary?: string;
+  eligibility?: Record<string, unknown>;
+  diagnostic_summary?: Record<string, unknown>;
+  sector_cap_forecast?: Record<string, unknown>;
+  cost_forecast?: Record<string, unknown>;
 };
 
 export type FactorModelPreview = {
@@ -105,6 +144,9 @@ export type FactorModelPreview = {
   warnings: string[];
   strategyCreationRisk?: FactorModelStrategyCreationRisk;
   strategy_creation_risk?: FactorModelStrategyCreationRisk;
+  diagnosticSummary?: Record<string, unknown> | null;
+  sectorCapForecast?: Record<string, unknown> | null;
+  costForecast?: Record<string, unknown> | null;
 };
 
 export type FactorModelCreateResponse = {
@@ -123,6 +165,7 @@ export type FactorModelBuilderPageProps = {
   factors?: FactorModelOption[];
   initialPrefill?: {
     source?: string;
+    strategyType?: 'MULTI_FACTOR' | 'COMPOSITE_FACTOR';
     factorIds: string[];
     weights: number[];
     directions: string[];
@@ -141,6 +184,43 @@ const FACTOR_ORDER = [
   's_vol_252d_rank',
   's_size_cur_log',
 ] as const;
+
+const DEFAULT_COMPOSITE_UNIVERSE_FILTER: NonNullable<FactorModelPreviewPayload['universeFilter']> = {
+  minAdvUsd: 5_000_000,
+  advWindow: '20D',
+  excludeHalted: true,
+  excludeOtcPink: true,
+  excludeLuldPaused: true,
+  delistingWindowDays: 30,
+  sectorOverrides: {
+    utilities: false,
+    realEstate: false,
+  },
+};
+
+const DEFAULT_COMPOSITE_WEIGHT_MAPPING: NonNullable<FactorModelPreviewPayload['weightMapping']> = {
+  method: 'equal_top_k',
+  sectorCapPct: 20,
+  maxPositionPct: 2,
+  minTargetWeightPct: 0.25,
+  capRedistributionMode: 'cash',
+};
+
+const DEFAULT_COMPOSITE_REBALANCE_LOGIC: NonNullable<FactorModelPreviewPayload['rebalanceLogic']> = {
+  frequency: 'monthly',
+  calendarRule: 'first_trading_day',
+  exitRankPercentile: 20,
+  minTradeNotionalUsd: 10_000,
+};
+
+const DEFAULT_COMPOSITE_EXECUTION_CONSTRAINTS: NonNullable<FactorModelPreviewPayload['executionConstraints']> = {
+  notionalUsd: 10_000_000,
+  commissionBps: 1.5,
+  stampTaxBps: 0,
+  baseSlippageBps: 2.5,
+  impactBeta: 0.65,
+  maxImpactBps: 75,
+};
 
 const FACTOR_DESIGN: Record<string, { displayName: string; family: string; weightPct: number; direction: FactorDirection }> = {
   s_mom_12m1m_rank: {
@@ -214,6 +294,17 @@ function defaultTopNForFactorCount(factorCount: number): number {
 
 function pct(value: number, digits = 1): string {
   return `${value.toFixed(digits)}%`;
+}
+
+function recordNumber(record: Record<string, unknown> | null | undefined, key: string, fallback = 0): number {
+  const value = record?.[key];
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function recordString(record: Record<string, unknown> | null | undefined, key: string, fallback = ''): string {
+  const value = record?.[key];
+  return typeof value === 'string' && value.trim() ? value : fallback;
 }
 
 function designFactor(factor: FactorModelOption): FactorModelOption {
@@ -301,6 +392,21 @@ function isSelectableModelFactor(factor: FactorModelOption): boolean {
     !INVALID_FACTOR_DIAGNOSTIC_STATES.has(diagnostic) &&
     lifecycle !== 'DECAYED' &&
     uiState !== 'decayed'
+  );
+}
+
+function isCompositeModelFactor(factor: FactorModelOption): boolean {
+  const market = String(factor.market ?? '').trim().toUpperCase();
+  const tier = String(factor.tierLevel ?? '').trim().toUpperCase();
+  const level = String(factor.factorLevel ?? '').trim().toUpperCase();
+  const diagnostic = String(factor.diagnosticStatus ?? '').trim().toUpperCase();
+  const completed = new Set((factor.opCompleted ?? []).map((item) => String(item).trim().toUpperCase()));
+  return (
+    market === 'US' &&
+    (tier === 'F3' || tier === 'L3') &&
+    (level === 'S' || level === 'A') &&
+    diagnostic === 'COMPLETED' &&
+    ['W', 'N', 'Z', 'T'].every((code) => completed.has(code))
   );
 }
 
@@ -486,15 +592,23 @@ export function FactorModelBuilderPage({
   defaultSelectAll = true,
   onCreated,
 }: FactorModelBuilderPageProps): JSX.Element {
-  const basketFactors = useMemo(() => modelBasket(factors, useDefaultFallback), [factors, useDefaultFallback]);
-  const [modelName, setModelName] = useState(DEFAULT_MODEL_NAME);
+  const isCompositeMode = initialPrefill?.strategyType === 'COMPOSITE_FACTOR';
+  const basketFactors = useMemo(() => {
+    const basket = modelBasket(factors, useDefaultFallback);
+    return isCompositeMode ? basket.filter(isCompositeModelFactor) : basket;
+  }, [factors, isCompositeMode, useDefaultFallback]);
+  const [modelName, setModelName] = useState(isCompositeMode ? '组合因子策略' : DEFAULT_MODEL_NAME);
   const [selectedIds, setSelectedIds] = useState<string[]>(() =>
     defaultSelectAll ? basketFactors.map((factor) => factor.id) : [],
   );
   const [selections, setSelections] = useState<FactorModelSelection[]>(() => normalizeSelections(factors, useDefaultFallback));
   const [neutralizationEnabled, setNeutralizationEnabled] = useState(false);
   const [rebalanceFrequency, setRebalanceFrequency] = useState('monthly');
-  const [topN, setTopN] = useState(() => defaultTopNForFactorCount(basketFactors.length));
+  const [topN, setTopN] = useState(() => (isCompositeMode ? 50 : defaultTopNForFactorCount(basketFactors.length)));
+  const [universeFilter, setUniverseFilter] = useState(DEFAULT_COMPOSITE_UNIVERSE_FILTER);
+  const [weightMapping, setWeightMapping] = useState(DEFAULT_COMPOSITE_WEIGHT_MAPPING);
+  const [rebalanceLogic, setRebalanceLogic] = useState(DEFAULT_COMPOSITE_REBALANCE_LOGIC);
+  const [executionConstraints, setExecutionConstraints] = useState(DEFAULT_COMPOSITE_EXECUTION_CONSTRAINTS);
   const [preview, setPreview] = useState<FactorModelPreview | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [isPreviewing, setIsPreviewing] = useState(false);
@@ -512,10 +626,11 @@ export function FactorModelBuilderPage({
     [selectedIds, selections],
   );
   const weightTotal = selectedSelections.reduce((total, selection) => total + selection.weightPct, 0);
+  const effectiveWeightTotal = isCompositeMode && selectedFactors.length ? 100 : weightTotal;
   const minPitCoverage = selectedFactors.length
     ? Math.min(...selectedFactors.map((factor) => factor.pitCoveragePct))
     : 0;
-  const weightBlocked = Math.round(weightTotal) !== 100;
+  const weightBlocked = Math.round(effectiveWeightTotal) !== 100;
   const modelNameBlocked = modelName.trim().length === 0;
   const topNBlocked = !Number.isInteger(topN) || topN < 1 || topN > 500;
   const topNValidationMessage = '持仓数量必须是 1 到 500 的整数。';
@@ -528,12 +643,19 @@ export function FactorModelBuilderPage({
   }), [neutralizationEnabled]);
 
   const payload: FactorModelPreviewPayload = useMemo(() => ({
+    strategyType: isCompositeMode ? 'COMPOSITE_FACTOR' : 'MULTI_FACTOR',
     modelName: modelName.trim(),
-    factors: selectedSelections,
+    factors: isCompositeMode ? selectedSelections.slice(0, 1).map((selection) => ({ ...selection, weightPct: 100 })) : selectedSelections,
     neutralization,
-    rebalanceFrequency,
+    rebalanceFrequency: isCompositeMode ? rebalanceLogic.frequency : rebalanceFrequency,
     topN,
-  }), [modelName, neutralization, rebalanceFrequency, selectedSelections, topN]);
+    ...(isCompositeMode ? {
+      universeFilter,
+      weightMapping,
+      rebalanceLogic,
+      executionConstraints,
+    } : {}),
+  }), [executionConstraints, isCompositeMode, modelName, neutralization, rebalanceFrequency, rebalanceLogic, selectedSelections, topN, universeFilter, weightMapping]);
   const payloadKey = useMemo(() => JSON.stringify(payload), [payload]);
   const prefillKey = useMemo(() => JSON.stringify(initialPrefill ?? null), [initialPrefill]);
   const localPreview = useMemo(
@@ -587,6 +709,9 @@ export function FactorModelBuilderPage({
     !isPreviewing;
   const toggleFactor = (factor: FactorModelOption): void => {
     setSelectedIds((current) => {
+      if (isCompositeMode) {
+        return current.includes(factor.id) ? [] : [factor.id];
+      }
       if (current.includes(factor.id)) {
         return current.filter((id) => id !== factor.id);
       }
@@ -599,10 +724,11 @@ export function FactorModelBuilderPage({
     const availableIds = new Set(basketFactors.map((factor) => factor.id));
     const nextIds = initialPrefill.factorIds.filter((factorId) => availableIds.has(factorId));
     if (!nextIds.length) return;
-    const appliedKey = `${prefillKey}:${nextIds.join('|')}`;
+    const effectiveNextIds = isCompositeMode ? nextIds.slice(0, 1) : nextIds;
+    const appliedKey = `${prefillKey}:${effectiveNextIds.join('|')}`;
     if (prefillAppliedRef.current === appliedKey) return;
     prefillAppliedRef.current = appliedKey;
-    setSelectedIds(nextIds);
+    setSelectedIds(effectiveNextIds);
     setSelections((current) => {
       const currentById = new Map(current.map((selection) => [selection.factorId, selection]));
       return basketFactors.map((factor) => {
@@ -617,7 +743,7 @@ export function FactorModelBuilderPage({
         const weight = initialPrefill.weights[prefillIndex];
         return {
           factorId: factor.id,
-          weightPct: Number.isFinite(weight) ? Math.max(0, Math.min(100, Number(weight))) : defaultSelection.weightPct,
+          weightPct: isCompositeMode ? 100 : Number.isFinite(weight) ? Math.max(0, Math.min(100, Number(weight))) : defaultSelection.weightPct,
           direction: normalizePrefillDirection(initialPrefill.directions[prefillIndex], defaultSelection.direction),
         };
       });
@@ -626,7 +752,7 @@ export function FactorModelBuilderPage({
       setModelName(initialPrefill.modelName);
     }
     setNotice('治理任务已代入因子与建议权重，当前仍为待审查草稿。');
-  }, [basketFactors, initialPrefill, prefillKey]);
+  }, [basketFactors, initialPrefill, isCompositeMode, prefillKey]);
 
   const updateWeight = (factorId: string, rawValue: string): void => {
     const value = Math.max(0, Math.min(100, Number(rawValue) || 0));
@@ -752,7 +878,7 @@ export function FactorModelBuilderPage({
     new Set([
       ...(modelNameBlocked ? ['策略名称未填写'] : []),
       ...(topNBlocked ? [topNValidationMessage] : []),
-      ...(weightBlocked ? [`权重合计为 ${pct(weightTotal, 0)}`] : []),
+      ...(weightBlocked ? [`权重合计为 ${pct(effectiveWeightTotal, 0)}`] : []),
     ]),
   ).filter(Boolean);
   const warningLabels = Array.from(new Set(strategyWarnings.map(riskItemLabel).filter(Boolean)));
@@ -787,7 +913,7 @@ export function FactorModelBuilderPage({
     { label: '压力场景覆盖', value: explicitStrategyRisk ? '审计提示' : '等待 API', tone: warningLabels.length ? 'warn' : 'good' },
     { label: '策略名称', value: modelNameBlocked ? '待填写' : '已填写', tone: modelNameBlocked ? 'bad' : 'good' },
     { label: '持仓数量', value: topNBlocked ? '无效' : String(topN), tone: topNBlocked ? 'bad' : 'good' },
-    { label: '权重合计', value: pct(weightTotal, 0), tone: weightBlocked ? 'bad' : 'good' },
+    { label: '权重合计', value: pct(effectiveWeightTotal, 0), tone: weightBlocked ? 'bad' : 'good' },
     { label: '再平衡配置', value: selectedRebalanceOption.label, tone: 'good' },
     { label: '预览状态', value: localizePreviewStatus(activePreview.status), tone: previewTone(activePreview.status, policyBlockers) },
     {
@@ -826,6 +952,210 @@ export function FactorModelBuilderPage({
   const minScore = scoreValues.length ? Math.min(...scoreValues) : 0;
   const maxScore = scoreValues.length ? Math.max(...scoreValues) : 0;
   const scoreSpan = Math.max(maxScore - minScore, 0.0001);
+  const compositeDiagnostic = (activePreview.diagnosticSummary ?? strategyRisk?.diagnostic_summary ?? {}) as Record<string, unknown>;
+  const compositeSectorForecast = (activePreview.sectorCapForecast ?? strategyRisk?.sector_cap_forecast ?? {}) as Record<string, unknown>;
+  const compositeCostForecast = (activePreview.costForecast ?? strategyRisk?.cost_forecast ?? {}) as Record<string, unknown>;
+  const compositeEligibility = (strategyRisk?.eligibility ?? {}) as Record<string, unknown>;
+  const compositeCompletedOps = new Set(
+    Array.isArray(compositeEligibility.completed_ops) ? compositeEligibility.completed_ops.map(String) : [],
+  );
+  const compositeMissingOps = new Set(
+    Array.isArray(compositeEligibility.missing_ops) ? compositeEligibility.missing_ops.map(String) : [],
+  );
+  const weakSectors = Array.isArray(compositeDiagnostic.weak_sectors)
+    ? compositeDiagnostic.weak_sectors.slice(0, 3).filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+    : [];
+
+  if (isCompositeMode) {
+    const selectedCompositeFactor = selectedFactors[0] ?? null;
+    const createBlockedCopy = policyBlockers.length || inputBlockers.length
+      ? [...policyBlockers, ...inputBlockers].slice(0, 3).join('；')
+      : '准入、权重与成本参数已完成预检。';
+    return (
+      <main className="factor-phase2-page factor-model-builder-page factor-model-builder-page--composite" data-page-root="factor-model-builder">
+        <section className="factor-phase2-hero" aria-labelledby="composite-factor-title">
+          <div>
+            <p className="factor-phase2-hero__eyebrow">COMPOSITE_FACTOR / 美股 L3 因子策略</p>
+            <h1 id="composite-factor-title">组合因子策略创建</h1>
+            <p>以一个已完成 WNZT、S/A 级、L3 美股因子为信号源，配置股票池、权重映射、再平衡和实盘约束后直接进入回测与优化。</p>
+          </div>
+          <div className="factor-phase2-actions" aria-label="组合因子策略操作">
+            <button className="factor-phase2-button" type="button" onClick={saveDraft}>保存草稿</button>
+            <button className="factor-phase2-button" type="button" disabled={isPreviewing} onClick={() => void runPreview()}>
+              {isPreviewing ? '预检中' : '刷新预检'}
+            </button>
+            <button className="factor-phase2-button factor-phase2-button--primary" type="button" disabled={!canCreate} onClick={() => void createModel()}>
+              创建回测
+            </button>
+          </div>
+        </section>
+
+        <section className="factor-phase2-workbench factor-phase2-workbench--model composite-builder-grid" aria-label="组合因子策略配置">
+          <section className="factor-phase2-panel composite-source-panel" aria-labelledby="composite-factor-source">
+            <div className="factor-phase2-panel__header">
+              <div>
+                <h2 id="composite-factor-source">因子来源</h2>
+                <p>仅支持 WNZT 完成、S/A 级、L3 的美股因子，单因子权重固定为 100%。</p>
+              </div>
+            </div>
+            <div className="factor-phase2-panel__body">
+              <label className="factor-model-name-control">
+                <span>策略名称</span>
+                <input aria-label="策略名称" maxLength={80} onChange={(event) => setModelName(event.target.value)} type="text" value={modelName} />
+              </label>
+              <div className="factor-phase2-list factor-model-selector-list composite-factor-list">
+                {!basketFactors.length ? (
+                  <div className="factor-phase2-empty">暂无可配置候选。仅显示已完成 WNZT、S/A 级、L3 的美股因子。</div>
+                ) : null}
+                {basketFactors.map((factor) => {
+                  const isSelected = selectedIds.includes(factor.id);
+                  return (
+                    <div className={`factor-pick${isSelected ? '' : ' factor-pick--inactive'}`} key={factor.id}>
+                      <input aria-label={`选择${factor.displayName}`} checked={isSelected} onChange={() => toggleFactor(factor)} type="checkbox" />
+                      <div>
+                        <strong>{factor.displayName}</strong>
+                        <span className="factor-id">{factor.id}</span>
+                        <FactorMetricTags factor={factor} context="因子准入" />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="locked-weight">
+                <span>因子权重</span>
+                <strong>100%</strong>
+              </div>
+              <article className="diagnostic-card">
+                <div>
+                  <span>Diagnostic Summary</span>
+                  <strong>{selectedCompositeFactor?.displayName ?? '请选择一个合格因子'}</strong>
+                </div>
+                <dl className="diagnostic-kpis">
+                  <div><dt>Rank IC</dt><dd>{recordNumber(compositeDiagnostic, 'rank_ic', 0).toFixed(3)}</dd></div>
+                  <div><dt>IR</dt><dd>{recordNumber(compositeDiagnostic, 'ir', 0).toFixed(2)}</dd></div>
+                  <div><dt>覆盖率</dt><dd>{pct(recordNumber(compositeDiagnostic, 'coverage', 0) * (recordNumber(compositeDiagnostic, 'coverage', 0) <= 1 ? 100 : 1), 1)}</dd></div>
+                </dl>
+                <div className="diagnostic-weak-list">
+                  {weakSectors.length ? weakSectors.map((sector, index) => (
+                    <span key={`${recordString(sector, 'group', `weak-${index}`)}-${index}`}>
+                      {recordString(sector, 'group', recordString(sector, 'sector', '弱势分组'))}: {recordNumber(sector, 'mean_return', 0).toFixed(3)}
+                    </span>
+                  )) : <span>等待预检返回行业诊断。</span>}
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section className="factor-phase2-panel composite-steps-panel" aria-labelledby="composite-config-flow">
+            <div className="factor-phase2-panel__header">
+              <div>
+                <h2 id="composite-config-flow">配置流程</h2>
+                <p>先定义不可交易边界，再把因子分数转成目标仓位，并估算换手与交易成本。</p>
+              </div>
+            </div>
+            <div className="factor-phase2-panel__body composite-step-stack">
+              <article className="composite-step-card" aria-label="股票池过滤">
+                <header><span>01</span><strong>股票池过滤</strong></header>
+                <div className="control-grid control-grid--two">
+                  <label><span>成交额门槛 ADV</span><input aria-label="成交额门槛 ADV" type="number" value={universeFilter.minAdvUsd} onChange={(event) => setUniverseFilter((current) => ({ ...current, minAdvUsd: Number(event.target.value) || 0 }))} /></label>
+                  <label><span>统计周期</span><select aria-label="ADV 统计周期" value={universeFilter.advWindow} onChange={(event) => setUniverseFilter((current) => ({ ...current, advWindow: event.target.value as '20D' | '60D' }))}><option value="20D">20D</option><option value="60D">60D</option></select></label>
+                  <label><span>退市窗口</span><input aria-label="退市窗口" type="number" value={universeFilter.delistingWindowDays} onChange={(event) => setUniverseFilter((current) => ({ ...current, delistingWindowDays: Number(event.target.value) || 0 }))} /></label>
+                  <label><span>行业干预</span><select aria-label="行业干预" value={universeFilter.sectorOverrides.utilities ? 'utilities' : universeFilter.sectorOverrides.realEstate ? 'realEstate' : 'none'} onChange={(event) => setUniverseFilter((current) => ({ ...current, sectorOverrides: { utilities: event.target.value === 'utilities', realEstate: event.target.value === 'realEstate' } }))}><option value="none">不调整</option><option value="utilities">公用事业保守降权</option><option value="realEstate">房地产压力检查</option></select></label>
+                </div>
+                <div className="check-row">
+                  <label><input type="checkbox" checked={universeFilter.excludeHalted} onChange={(event) => setUniverseFilter((current) => ({ ...current, excludeHalted: event.target.checked }))} />停牌</label>
+                  <label><input type="checkbox" checked={universeFilter.excludeOtcPink} onChange={(event) => setUniverseFilter((current) => ({ ...current, excludeOtcPink: event.target.checked }))} />OTC/Pink</label>
+                  <label><input type="checkbox" checked={universeFilter.excludeLuldPaused} onChange={(event) => setUniverseFilter((current) => ({ ...current, excludeLuldPaused: event.target.checked }))} />LULD 暂停</label>
+                  <label><input type="checkbox" checked={universeFilter.delistingWindowDays > 0} onChange={(event) => setUniverseFilter((current) => ({ ...current, delistingWindowDays: event.target.checked ? 30 : 0 }))} />退市窗口</label>
+                </div>
+              </article>
+
+              <article className="composite-step-card" aria-label="权重映射">
+                <header><span>02</span><strong>权重映射</strong></header>
+                <div className="segmented-control" role="group" aria-label="映射模式">
+                  {[
+                    ['equal_top_k', '等权 Top-K'],
+                    ['score_proportional', '分值比例法'],
+                    ['risk_heuristic', '风险优化启发式'],
+                  ].map(([value, label]) => (
+                    <button key={value} className={weightMapping.method === value ? 'is-active' : ''} type="button" onClick={() => setWeightMapping((current) => ({ ...current, method: value as typeof weightMapping.method }))}>{label}</button>
+                  ))}
+                </div>
+                <div className="control-grid control-grid--four">
+                  <label><span>Top-N</span><input aria-label="Top-N" type="number" value={topN} onChange={(event) => updateTopN(event.target.value)} /></label>
+                  <label><span>行业上限 %</span><input aria-label="行业硬上限" type="number" value={weightMapping.sectorCapPct} onChange={(event) => setWeightMapping((current) => ({ ...current, sectorCapPct: Number(event.target.value) || 0 }))} /></label>
+                  <label><span>个股上限 %</span><input aria-label="个股权重上限" type="number" value={weightMapping.maxPositionPct} onChange={(event) => setWeightMapping((current) => ({ ...current, maxPositionPct: Number(event.target.value) || 0 }))} /></label>
+                  <label><span>最小权重 %</span><input aria-label="最小目标权重" type="number" value={weightMapping.minTargetWeightPct} onChange={(event) => setWeightMapping((current) => ({ ...current, minTargetWeightPct: Number(event.target.value) || 0 }))} /></label>
+                </div>
+                <div className="allocation-switch">
+                  <span>裁断权重重分配</span>
+                  <button type="button" className={weightMapping.capRedistributionMode === 'cash' ? 'is-active' : ''} onClick={() => setWeightMapping((current) => ({ ...current, capRedistributionMode: 'cash' }))}>保持现金</button>
+                  <button type="button" className={weightMapping.capRedistributionMode === 'proportional_refill' ? 'is-active' : ''} onClick={() => setWeightMapping((current) => ({ ...current, capRedistributionMode: 'proportional_refill' }))}>按比例回填</button>
+                </div>
+              </article>
+
+              <article className="composite-step-card" aria-label="再平衡逻辑">
+                <header><span>03</span><strong>再平衡逻辑</strong></header>
+                <div className="control-grid control-grid--four">
+                  <label><span>调仓频率</span><select aria-label="调仓频率" value={rebalanceLogic.frequency} onChange={(event) => setRebalanceLogic((current) => ({ ...current, frequency: event.target.value as typeof rebalanceLogic.frequency }))}><option value="daily">每日</option><option value="weekly">每周</option><option value="monthly">每月</option></select></label>
+                  <label><span>日历规则</span><select aria-label="调仓日历规则" value={rebalanceLogic.calendarRule} onChange={(event) => setRebalanceLogic((current) => ({ ...current, calendarRule: event.target.value }))}><option value="first_trading_day">首个交易日</option><option value="last_trading_day">最后交易日</option><option value="monday">周一</option></select></label>
+                  <label><span>退出阈值 %</span><input aria-label="排名退出阈值" type="number" value={rebalanceLogic.exitRankPercentile} onChange={(event) => setRebalanceLogic((current) => ({ ...current, exitRankPercentile: Number(event.target.value) || 0 }))} /></label>
+                  <label><span>最小交易额</span><input aria-label="最小交易金额" type="number" value={rebalanceLogic.minTradeNotionalUsd} onChange={(event) => setRebalanceLogic((current) => ({ ...current, minTradeNotionalUsd: Number(event.target.value) || 0 }))} /></label>
+                </div>
+              </article>
+
+              <article className="composite-step-card" aria-label="实盘约束">
+                <header><span>04</span><strong>实盘约束</strong></header>
+                <div className="control-grid control-grid--three">
+                  <label><span>初始本金</span><input aria-label="初始本金" type="number" value={executionConstraints.notionalUsd} onChange={(event) => setExecutionConstraints((current) => ({ ...current, notionalUsd: Number(event.target.value) || 0 }))} /></label>
+                  <label><span>佣金 bps</span><input aria-label="佣金 bps" type="number" value={executionConstraints.commissionBps} onChange={(event) => setExecutionConstraints((current) => ({ ...current, commissionBps: Number(event.target.value) || 0 }))} /></label>
+                  <label><span>印花税 bps</span><input aria-label="印花税 bps" type="number" value={executionConstraints.stampTaxBps} onChange={(event) => setExecutionConstraints((current) => ({ ...current, stampTaxBps: Number(event.target.value) || 0 }))} /></label>
+                  <label><span>基础滑点 bps</span><input aria-label="基础滑点 bps" type="number" value={executionConstraints.baseSlippageBps} onChange={(event) => setExecutionConstraints((current) => ({ ...current, baseSlippageBps: Number(event.target.value) || 0 }))} /></label>
+                  <label><span>冲击系数</span><input aria-label="冲击系数" type="number" value={executionConstraints.impactBeta} onChange={(event) => setExecutionConstraints((current) => ({ ...current, impactBeta: Number(event.target.value) || 0 }))} /></label>
+                  <label><span>最大冲击 bps</span><input aria-label="最大冲击 bps" type="number" value={executionConstraints.maxImpactBps} onChange={(event) => setExecutionConstraints((current) => ({ ...current, maxImpactBps: Number(event.target.value) || 0 }))} /></label>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section className="factor-phase2-panel composite-validator-panel" aria-labelledby="composite-validator">
+            <div className="factor-phase2-panel__header">
+              <div>
+                <h2 id="composite-validator">策略创建风险</h2>
+                <p>根据当前配置实时校验准入、行业裁断和交易成本。</p>
+              </div>
+            </div>
+            <div className="factor-phase2-panel__body">
+              <div className={`strategy-risk-module strategy-risk-module--${riskSummaryTone}`}>
+                <span className={`factor-phase2-chip factor-phase2-chip--${riskSummaryTone}`}>{riskTitle}</span>
+                <p>{createBlockedCopy}</p>
+              </div>
+              <div className="wznt-strip" aria-label="WNZT 准入检查">
+                {['W', 'N', 'Z', 'T'].map((code) => (
+                  <span className={compositeCompletedOps.has(code) && !compositeMissingOps.has(code) ? 'is-active' : 'is-missing'} key={code}>{code}</span>
+                ))}
+              </div>
+              <div className="risk-kpi-grid">
+                <div><span>裁断权重</span><strong>{pct(recordNumber(compositeSectorForecast, 'cut_weight_pct', 0), 1)}</strong></div>
+                <div><span>残余现金</span><strong>{pct(recordNumber(compositeSectorForecast, 'residual_cash_pct', 0), 1)}</strong></div>
+                <div><span>满仓率</span><strong>{pct(recordNumber(compositeSectorForecast, 'invested_pct', 0), 1)}</strong></div>
+                <div><span>平均滑点</span><strong>{recordNumber(compositeCostForecast, 'average_slippage_bps', 0).toFixed(1)} bps</strong></div>
+              </div>
+              <div className="strategy-risk-list strategy-risk-list--warning">
+                <strong>美股执行过滤</strong>
+                <span>停牌、OTC/Pink、LULD 暂停与退市窗口均纳入预检。</span>
+              </div>
+              <button className="factor-phase2-button factor-phase2-button--primary factor-model-submit" disabled={!canCreate} type="button" onClick={() => void createModel()}>
+                创建回测
+              </button>
+            </div>
+          </section>
+        </section>
+
+        <p className="sr-only" role="status">{notice ?? ''}</p>
+      </main>
+    );
+  }
 
   return (
     <main className="factor-phase2-page factor-model-builder-page" data-page-root="factor-model-builder">

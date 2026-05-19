@@ -135,6 +135,52 @@ def test_stooq_online_fallback_fetches_csv_and_writes_manifest(monkeypatch, tmp_
     assert (cache_dir / "AAPL.csv").is_file()
 
 
+def test_stooq_online_fallback_runs_when_archive_misses_symbol(monkeypatch, tmp_path):
+    archive_path = tmp_path / "d_us_txt.zip"
+    cache_dir = tmp_path / "stooq-cache"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(
+            "data/daily/us/nasdaq stocks/1/aapl.us.txt",
+            "\n".join(
+                [
+                    "<TICKER>,<PER>,<DATE>,<TIME>,<OPEN>,<HIGH>,<LOW>,<CLOSE>,<VOL>,<OPENINT>",
+                    "AAPL.US,D,20260401,000000,100,101,99,100.5,1000,0",
+                ]
+            ),
+        )
+
+    class _Response(BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setenv("GRIT_STOOQ_US_DAILY_ZIP", str(archive_path))
+    monkeypatch.setenv("GRIT_ENABLE_STOOQ_ONLINE", "1")
+    monkeypatch.setenv("GRIT_STOOQ_ONLINE_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(
+        stooq_provider_module.urllib.request,
+        "urlopen",
+        lambda url, timeout=20: _Response(
+            "\n".join(
+                [
+                    "Date,Open,High,Low,Close,Volume",
+                    "2026-04-01,20,21,19,20.5,2000",
+                ]
+            ).encode("utf-8")
+        ),
+    )
+
+    result = StooqZipPriceProvider().fetch_history("ABGX", date(2026, 4, 1), date(2026, 4, 1))
+
+    assert len(result.bars) == 1
+    assert result.fallback_source == "stooq_offline_zip"
+    assert result.metadata["mode"] == "online_csv_after_offline_miss"
+    assert result.metadata["offline_fallback_reason"] == "symbol_invalid"
+    assert result.warnings[0] == "Stooq offline ZIP fallback: symbol_invalid."
+
+
 def test_stooq_online_fallback_classifies_empty_csv(monkeypatch, tmp_path):
     missing_archive = tmp_path / "missing.zip"
     cache_dir = tmp_path / "stooq-cache"

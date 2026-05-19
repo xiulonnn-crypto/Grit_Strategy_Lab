@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from tests.api_test_support import assert_ok, create_test_client
 from tests.test_factor_mining_api import seed_factor_mining_price_snapshot, wait_for_factor_mining_job
+from tests.test_pit_preprocessing_f1_catalog import _seed_price_snapshot_with_l1_gap
 
 
 def _runtime_dir(name: str) -> Path:
@@ -95,17 +96,19 @@ def test_factor_factory_run_auto_intakes_and_executes_quarantine() -> None:
     overview = assert_ok(client.get("/factor-factory/overview"))
     summary = overview["latest_run"]["summary"]
     assert overview["latest_run"]["request"]["generation_mode"] == "HYBRID_COMPOSITION"
-    assert summary["generation_mode"] == "HYBRID_COMPOSITION"
-    assert summary["composition_candidate_count"] >= 1
+    assert summary["generation_mode"] == "OPERATOR_ENGINE"
+    assert summary["operator_engine"]["backend"] == "pandas_bottleneck"
+    assert summary["operator_engine"]["deduped_formula_count"] >= 1
     assert summary["auto_quarantine_status"] == "COMPLETED"
     assert summary["auto_intake_count"] >= 1
     assert summary["auto_quarantine_count"] >= 1
-    assert overview["phase2_contract"]["flow"] == "B1-B2-B3-B4"
-    assert overview["phase2_contract"]["l2_operator_chain"] == "Raw -> Winsorize -> Neutralize -> Z-Score -> Rank"
-    assert [row["kind"] for row in overview["task_rows"]] == ["mining", "refinement", "composition"]
+    assert overview["phase2_contract"]["flow"] == "B1-B2-B3"
+    assert overview["phase2_contract"]["l2_operator_chain"] == "F1 -> OperatorEngine -> Raw_F2 -> WNZT -> Refined F2"
+    assert [row["kind"] for row in overview["task_rows"]] == ["mining", "refinement", "quarantine"]
     assert {row["status"] for row in overview["task_rows"]} <= {"待开始", "进行中", "已完成"}
     assert overview["task_rows"][0]["target_layer"] == "L2"
-    assert "原子信号" in overview["task_rows"][0]["title"]
+    assert "每日挖掘任务" in overview["task_rows"][0]["title"]
+    assert overview["monitor_summary"]["yesterday_formula_count"] >= 1
     assert overview["scoring_candidates"] == []
     assert overview["quarantine_result_rows"]
     assert all(row["quarantine_result"] in {"PASS", "WARN", "FAIL"} for row in overview["quarantine_result_rows"])
@@ -130,6 +133,62 @@ def test_factor_factory_run_now_does_not_enable_daily_automation() -> None:
     assert run_now["manual_run"]["trigger"] == "MANUAL"
     assert run_now["manual_run"]["summary"]["daily_automation"] is False
     assert run_now["manual_run"]["summary"]["pit_gate_mode"] == "DIAGNOSTIC_ONLY"
+
+
+def test_factor_factory_run_references_immutable_f1_and_operator_snapshots() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-factory-config-snapshot"))
+    seed_factor_mining_price_snapshot(client)
+
+    config = assert_ok(client.get("/factor-factory/operator-config"))
+    assert config["latest_f1_catalog_snapshot"]["snapshot_id"]
+    assert [item for item in config["registry_items"] if item["enabled"]]
+    assert {item["operator_id"] for item in config["registry_items"] if item["enabled"]} == {
+        "TS_Return",
+        "TS_Rank",
+        "TS_Corr",
+    }
+
+    snapshot = assert_ok(client.post("/factor-factory/operator-config/snapshots", json=config["draft"]))
+    assert snapshot["snapshot_id"]
+    assert snapshot["enabled_operators"] == ["TS_Return", "TS_Rank", "TS_Corr"]
+    assert snapshot["daily_formula_budget"] == 10000
+    assert snapshot["compute_backend"] == "pandas_bottleneck"
+
+    payload = _factory_payload(candidate_count=6)
+    payload["operator_config_snapshot_id"] = snapshot["snapshot_id"]
+    payload["f1_catalog_snapshot_id"] = config["latest_f1_catalog_snapshot"]["snapshot_id"]
+    run_now = assert_ok(client.post("/factor-factory/run-now", json=payload))
+    summary = run_now["manual_run"]["summary"]
+    request_snapshot = run_now["manual_run"]["request"]["config_snapshot"]
+
+    assert summary["operator_config_snapshot_id"] == snapshot["snapshot_id"]
+    assert summary["f1_catalog_snapshot_id"] == config["latest_f1_catalog_snapshot"]["snapshot_id"]
+    assert summary["enabled_operators"] == ["TS_Return", "TS_Rank", "TS_Corr"]
+    assert summary["daily_formula_budget"] == 10000
+    assert summary["compute_backend"] == "pandas_bottleneck"
+    assert request_snapshot["operator_config_snapshot_id"] == snapshot["snapshot_id"]
+    assert request_snapshot["f1_catalog_snapshot_id"] == config["latest_f1_catalog_snapshot"]["snapshot_id"]
+    assert run_now["manual_run"]["config_signature"]
+
+
+def test_factor_factory_run_excludes_data_source_blocked_f1_fields() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-factory-blocked-f1"))
+    _seed_price_snapshot_with_l1_gap(client)
+
+    config = assert_ok(client.get("/factor-factory/operator-config"))
+    snapshot = assert_ok(client.post("/factor-factory/operator-config/snapshots", json=config["draft"]))
+
+    payload = _factory_payload(candidate_count=3)
+    payload["operator_config_snapshot_id"] = snapshot["snapshot_id"]
+    payload["f1_catalog_snapshot_id"] = config["latest_f1_catalog_snapshot"]["snapshot_id"]
+    payload["request"]["source_factor_ids"] = ["f1_price_close", "s_mom_6m_rank"]
+    run_now = assert_ok(client.post("/factor-factory/run-now", json=payload))
+    request = run_now["manual_run"]["request"]
+
+    assert "f1_price_close" not in request["source_factor_ids"]
+    assert "s_mom_6m_rank" in request["source_factor_ids"]
+    assert request["excluded_source_factor_ids"] == ["f1_price_close"]
+    assert request["blocked_field_policy"] == "排除 DATA_SOURCE_BLOCKED 字段；缺失 L1 保持 NaN。"
 
 
 def test_factor_factory_cancel_marks_factory_run_cancelled() -> None:

@@ -81,6 +81,7 @@ function normalizeCandidate(item: unknown): ApiFactorQuarantineCandidate | null 
     pit_evidence: asRecord(item.pit_evidence),
     publish_eligibility: asRecord(item.publish_eligibility),
     target_factor_id: asText(item.target_factor_id) || null,
+    publish_naming_rule: asText(item.publish_naming_rule) || null,
     created_at: asText(item.created_at),
     updated_at: asText(item.updated_at),
     published_at: asText(item.published_at) || null,

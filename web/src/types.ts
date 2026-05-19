@@ -5,8 +5,9 @@ export type StrategyType =
   | "MEAN_REVERSION"
   | "BUY_AND_HOLD"
   | "ASSET_ALLOCATION"
-  | "MULTI_FACTOR";
-export type CreationSessionStrategyType = Exclude<StrategyType, "MULTI_FACTOR">;
+  | "MULTI_FACTOR"
+  | "COMPOSITE_FACTOR";
+export type CreationSessionStrategyType = Exclude<StrategyType, "MULTI_FACTOR" | "COMPOSITE_FACTOR">;
 export type BacktestRunStatus =
   | "QUEUED"
   | "RUNNING"
@@ -1148,6 +1149,13 @@ export type ApiDatasetSnapshotMetadata = Record<string, unknown> & {
   covered_symbol_count?: number;
   total_symbol_count?: number;
   missing_symbols?: string[];
+  available_fields?: string[];
+  raw_covered_symbol_count?: number;
+  raw_coverage_pct?: number;
+  effective_covered_symbol_count?: number;
+  effective_coverage_pct?: number;
+  unclassified_missing_symbol_count?: number;
+  fundamental_gap_policy?: Record<string, unknown>;
   selected_latest_symbols?: string[];
   selected_symbols?: string[];
   covered_symbols?: string[];
@@ -3271,6 +3279,7 @@ export type ApiFactorQuarantineCandidate = {
   pit_evidence: Record<string, unknown>;
   publish_eligibility: Record<string, unknown>;
   target_factor_id?: string | null;
+  publish_naming_rule?: string | null;
   created_at: string;
   updated_at: string;
   last_quarantine_at?: string | null;
@@ -3333,7 +3342,119 @@ export type ApiFactorFactoryGatePolicy = {
   residual_enabled: boolean;
   max_drawdown_relative_to_benchmark: number;
   min_oos_to_is_ratio: number;
+  p_value_max?: number;
+  max_s_grade_correlation?: number;
+  capacity_floor?: number;
+  crowding_max?: number;
   [key: string]: unknown;
+};
+
+export type ApiF1AdmissionState =
+  | "READY"
+  | "READY_WITH_WARNING"
+  | "OBSERVE"
+  | "DATA_SOURCE_BLOCKED"
+  | "MISSING_TIMING"
+  | string;
+
+export type ApiF1CatalogField = {
+  factor_id: string;
+  name: string;
+  category: string;
+  pit_layer: "L1" | "L2" | "L3" | "L4" | string;
+  source_refs?: Record<string, unknown>;
+  coverage_ratio: number;
+  available_symbol_count?: number;
+  total_symbol_count?: number;
+  missing_symbols?: string[];
+  missing_symbol_count?: number;
+  publish_date_rule?: string;
+  available_at_rule?: string;
+  missing_policy?: string;
+  blocker_code?: string | null;
+  admission_state: ApiF1AdmissionState;
+  future_leakage_risk?: string | null;
+  last_updated_at?: string | null;
+  metadata?: Record<string, unknown>;
+};
+
+export type ApiF1CatalogSnapshot = {
+  id: string;
+  snapshot_id: string;
+  run_id?: string | null;
+  as_of_date?: string | null;
+  generated_at?: string | null;
+  field_count: number;
+  callable_count: number;
+  blocked_count: number;
+  timing_gap_count: number;
+  summary?: Record<string, unknown>;
+  created_at?: string | null;
+};
+
+export type ApiF1CatalogResponse = {
+  snapshot?: ApiF1CatalogSnapshot | null;
+  items: ApiF1CatalogField[];
+  summary: Record<string, unknown>;
+};
+
+export type ApiOperatorRegistryItem = {
+  operator_id: string;
+  operator_group: "TS" | "CS" | "NONLINEAR" | string;
+  enabled: boolean;
+  display_name?: string;
+  definition: string;
+  economic_meaning: string;
+  input_types: string[];
+  output_dimension: string;
+  default_params?: Record<string, unknown>;
+  allowed_window_space: number[];
+  min_periods_rule: string;
+  domain_rules?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+};
+
+export type ApiOperatorConfigDraft = {
+  enabled_operators: string[];
+  window_space: number[];
+  default_depth: number;
+  daily_formula_budget: number;
+  compute_backend: "pandas_bottleneck" | string;
+  min_periods_policy: string;
+  blocked_field_policy: string;
+  governance_protocol?: {
+    wnzt_standard_flow?: boolean;
+    winsorize_enabled?: boolean;
+    neutralize_enabled?: boolean;
+    zscore_enabled?: boolean;
+    ts_smooth_enabled?: boolean;
+    orthogonalization_enabled?: boolean;
+    turnover_filter_enabled?: boolean;
+    [key: string]: unknown;
+  };
+  notes?: string;
+  f1_catalog_snapshot_id?: string | null;
+  created_by?: string | null;
+};
+
+export type ApiOperatorConfigSnapshot = ApiOperatorConfigDraft & {
+  id: string;
+  snapshot_id: string;
+  generated_at?: string | null;
+  status?: string;
+  operator_count: number;
+  items?: ApiOperatorRegistryItem[];
+};
+
+export type ApiFactorFactoryOperatorConfigResponse = {
+  profile_id: string;
+  draft: ApiOperatorConfigDraft;
+  registry_items: ApiOperatorRegistryItem[];
+  latest_f1_catalog_snapshot?: ApiF1CatalogSnapshot | null;
+  latest_operator_config_snapshot?: ApiOperatorConfigSnapshot | null;
+  defaults?: ApiOperatorConfigDraft;
+  profile?: ApiFactorFactoryProfile;
+  saved?: boolean;
 };
 
 export type ApiFactorOperatorChainStep = {
@@ -3466,6 +3587,16 @@ export type ApiFactorFactoryFunnel = {
   [key: string]: unknown;
 };
 
+export type ApiFactorFactoryMonitorSummary = {
+  yesterday_formula_count?: number;
+  initial_screen_pass_count?: number;
+  quarantine_pass_count?: number;
+  s_grade_promotion_count?: number;
+  alpha_concentration?: number;
+  failure_reason_distribution?: Record<string, number>;
+  [key: string]: unknown;
+};
+
 export type ApiFactorFactoryOverview = {
   profile: ApiFactorFactoryProfile;
   active_run?: ApiFactorFactoryRun | null;
@@ -3478,11 +3609,13 @@ export type ApiFactorFactoryOverview = {
   daily_run?: ApiFactorFactoryRun;
   manual_run?: ApiFactorFactoryRun;
   task_summary?: Record<string, unknown>;
+  monitor_summary?: ApiFactorFactoryMonitorSummary;
   task_rows?: ApiFactorFactoryTaskRow[];
   scoring_candidates?: ApiFactorScoringCandidate[];
   quarantine_result_rows?: ApiFactorQuarantineResultRow[];
   publishable_factors?: ApiPublishableFactorRow[];
   phase2_contract?: Record<string, unknown>;
+  operator_config?: ApiFactorFactoryOperatorConfigResponse;
   [key: string]: unknown;
 };
 
@@ -3491,12 +3624,16 @@ export type ApiFactorFactoryAutomationPayload = {
   schedule_time?: string;
   request?: ApiFactorMiningJobCreatePayload;
   gate_policy?: Partial<ApiFactorFactoryGatePolicy>;
+  operator_config_snapshot_id?: string | null;
+  f1_catalog_snapshot_id?: string | null;
 };
 
 export type ApiFactorFactoryRunNowPayload = {
   request?: ApiFactorMiningJobCreatePayload;
   gate_policy?: Partial<ApiFactorFactoryGatePolicy>;
   pipeline_scope?: "B1_B2_B3_B4" | "B1_ONLY" | "B2_B3" | "FULL";
+  operator_config_snapshot_id?: string | null;
+  f1_catalog_snapshot_id?: string | null;
 };
 
 export type ApiFactorModelComponentPayload = {
@@ -3511,6 +3648,7 @@ export type ApiFactorModelNeutralizationPayload = {
 };
 
 export type ApiFactorModelPreviewPayload = {
+  strategy_type?: "MULTI_FACTOR" | "COMPOSITE_FACTOR";
   name?: string | null;
   universe: string;
   rebalance_frequency: string;
@@ -3518,9 +3656,14 @@ export type ApiFactorModelPreviewPayload = {
   scoring_method: string;
   components: ApiFactorModelComponentPayload[];
   neutralization: ApiFactorModelNeutralizationPayload;
+  universe_filter?: Record<string, unknown>;
+  weight_mapping?: Record<string, unknown>;
+  rebalance_logic?: Record<string, unknown>;
+  execution_constraints?: Record<string, unknown>;
 };
 
 export type ApiFactorModelPreviewResponse = {
+  strategy_type?: "MULTI_FACTOR" | "COMPOSITE_FACTOR";
   status: "READY" | "BLOCKED";
   normalized_weights: Array<ApiFactorModelComponentPayload & {
     normalized_weight: number;
@@ -3534,6 +3677,9 @@ export type ApiFactorModelPreviewResponse = {
   neutralization_status: Record<string, unknown>;
   warnings: string[];
   strategy_creation_risk?: ApiFactorStrategyCreationRisk;
+  diagnostic_summary?: Record<string, unknown> | null;
+  sector_cap_forecast?: Record<string, unknown> | null;
+  cost_forecast?: Record<string, unknown> | null;
 };
 
 export type ApiFactorModelCreatePayload = ApiFactorModelPreviewPayload & {
@@ -3790,6 +3936,12 @@ export type DemoApi = {
     status?: string;
     lifecycle?: "online" | "offline" | "all" | "sandbox" | "to_be_verified" | "archived" | string;
   }) => Promise<ApiFactorListResponse>;
+  getF1Catalog?: (params?: {
+    snapshot_id?: string;
+    layer?: string;
+    status?: string;
+    q?: string;
+  }) => Promise<ApiF1CatalogResponse>;
   createFactor: (payload: ApiFactorCreatePayload) => Promise<ApiFactorDetail>;
   getFactor: (id: string) => Promise<ApiFactorDetail>;
   runFactorDiagnostics: (
@@ -3804,6 +3956,13 @@ export type DemoApi = {
   getFactorMiningJob: (id: string) => Promise<ApiFactorMiningJob>;
   cancelFactorMiningJob: (id: string) => Promise<ApiFactorMiningJob>;
   getFactorFactoryOverview?: () => Promise<ApiFactorFactoryOverview>;
+  getFactorFactoryOperatorConfig?: () => Promise<ApiFactorFactoryOperatorConfigResponse>;
+  saveFactorFactoryOperatorConfig?: (
+    payload: ApiOperatorConfigDraft,
+  ) => Promise<ApiFactorFactoryOperatorConfigResponse>;
+  createFactorFactoryOperatorConfigSnapshot?: (
+    payload: ApiOperatorConfigDraft,
+  ) => Promise<ApiOperatorConfigSnapshot>;
   startFactorFactoryAutomation?: (
     payload?: ApiFactorFactoryAutomationPayload,
   ) => Promise<ApiFactorFactoryOverview>;

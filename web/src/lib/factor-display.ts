@@ -6,11 +6,16 @@ const CANONICAL_FACTOR_ALIASES: Record<string, string> = {
   size_log_market_cap: 's_size_cur_log',
   quality_roe_ltm: 's_qlty_roe_ltm_raw',
   quality_fcf_yield: 's_qlty_fcfy_ttm_raw',
+  m_alpha_overnight_21d_raw: 's_f2_mom_ovn_mean_21d',
 };
 
 const CANONICAL_FACTOR_DISPLAY_NAMES: Record<string, string> = {
+  a_alpha_custom_cur_raw: '风险调整现金流回报 (精炼版)',
   a_mom_ret_126d_z: '126日收益动量标准化因子',
+  s_f2_mom_ovn_mean_21d: '21日隔夜动量均值',
   s_alpha_ffblend_cur_rank: '法玛-弗伦奇风格合成阿尔法排名',
+  s_alpha_ffblend_resid_mkt_rank: '法玛-弗伦奇市场残差合成阿尔法排名',
+  s_alpha_valvol_blend_resid_std_rk: '风险调整现金流回报 (精炼版)',
   s_mom_12m1m_rank: '12-1月截面动量排名',
   s_mom_6m_rank: '6月截面动量排名',
   s_val_ep_ltm_raw: '滚动市盈率倒数 (LTM)',
@@ -39,6 +44,7 @@ const FACTOR_TOKEN_LABELS: Record<string, string> = {
   cur: '当前',
   downside: '下行',
   ep: '盈利价格比',
+  f2: 'F2',
   fcfy: '自由现金流收益率',
   ffblend: '法玛-弗伦奇风格合成',
   inv: '投资',
@@ -48,6 +54,8 @@ const FACTOR_TOKEN_LABELS: Record<string, string> = {
   ltm: '最近十二个月',
   market: '市场',
   mom: '动量',
+  mean: '均值',
+  ovn: '隔夜',
   qlty: '质量',
   rank: '排名',
   raw: '原始值',
@@ -57,6 +65,7 @@ const FACTOR_TOKEN_LABELS: Record<string, string> = {
   turnover: '换手率',
   ttm: '过去十二个月',
   val: '估值',
+  valvol: '价值/波动比',
   vol: '波动率',
   z: 'Z分数',
 };

@@ -51,7 +51,7 @@ const STEP_META: Record<StepKey, { title: string; description: string }> = {
   risk: { title: TEXT.stepRisk, description: TEXT.stepRiskCopy },
   other: { title: TEXT.stepOther, description: TEXT.stepOtherCopy },
 };
-const STRATEGY_LABELS: Record<StrategyType, string> = {
+const STRATEGY_LABELS: Partial<Record<StrategyType, string>> = {
   GENERAL: '通用', GRID: '网格', MOMENTUM: '动量 / 趋势跟随', MEAN_REVERSION: '均值回归', BUY_AND_HOLD: '定投', ASSET_ALLOCATION: '资产配置', MULTI_FACTOR: '多因子',
 };
 const BENCHMARK_OPTIONS: FieldOption[] = [

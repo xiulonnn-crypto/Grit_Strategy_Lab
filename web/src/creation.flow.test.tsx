@@ -451,7 +451,7 @@ describe('creation flow', () => {
     const templateNames = screen
       .getAllByRole('heading', { level: 3 })
       .map((heading) => heading.textContent);
-    expect(templateNames.slice(-3)).toEqual(['资产配置型', '多因子策略', '通用策略']);
+    expect(templateNames.slice(-3)).toEqual(['多因子策略', '组合因子策略', '通用策略']);
 
     fireEvent.click(screen.getByRole('button', { name: '创建资产配置策略' }));
 
@@ -467,6 +467,16 @@ describe('creation flow', () => {
 
     expect(fakeApi.createCreationSession).not.toHaveBeenCalled();
     expect(window.location.hash).toBe('#/factor-models/new');
+  });
+
+  it('routes the composite factor template to the factor model builder in composite mode', async () => {
+    render(<CreationTemplatePage />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建策略' }));
+
+    fireEvent.click(screen.getByRole('button', { name: '创建组合因子策略' }));
+
+    expect(fakeApi.createCreationSession).not.toHaveBeenCalled();
+    expect(window.location.hash).toBe('#/factor-models/new?strategy_type=COMPOSITE_FACTOR&source=strategy_modal');
   });
 
   it('renders the strategy library table and links horizon returns to run detail', async () => {

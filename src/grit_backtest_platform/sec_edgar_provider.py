@@ -20,6 +20,7 @@ SEC_SEARCH_INDEX_URL = "https://efts.sec.gov/LATEST/search-index"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 SEC_COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 REPORT_FORMS = {"10-K", "10-Q", "8-K", "20-F", "6-K"}
+CORPORATE_ACTION_FILING_FORMS = {"8-K"}
 FUNDAMENTAL_REPORT_FORMS = {"10-K", "10-Q", "20-F", "40-F"}
 _EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
 
@@ -161,6 +162,13 @@ def _parse_float(value: Any) -> float | None:
         return None
 
 
+def _form_matches(form: Any, accepted: set[str]) -> bool:
+    normalized = str(form or "").strip().upper()
+    if not normalized:
+        return False
+    return normalized in accepted or (normalized.endswith("/A") and normalized[:-2] in accepted)
+
+
 def _extract_email(value: str) -> str:
     match = _EMAIL_PATTERN.search(str(value or "").strip())
     return match.group(0) if match else ""
@@ -212,6 +220,23 @@ def _company_name_tokens(value: Any) -> set[str]:
 
 def _normalized_company_name(value: Any) -> str:
     return " ".join(sorted(_company_name_tokens(value)))
+
+
+def _filing_archive_payload(cik: str, accession_number: Any, primary_document: Any = None) -> dict[str, Any]:
+    accession = str(accession_number or "").strip()
+    if not accession:
+        return {}
+    cik_path = str(int(cik)) if str(cik or "").strip().isdigit() else str(cik or "").strip().lstrip("0")
+    accession_path = accession.replace("-", "")
+    base_url = f"https://www.sec.gov/Archives/edgar/data/{cik_path}/{accession_path}"
+    payload = {
+        "archive_index_url": f"{base_url}/",
+        "submission_text_url": f"{base_url}/{accession}.txt",
+    }
+    primary = str(primary_document or "").strip()
+    if primary:
+        payload["primary_document_url"] = f"{base_url}/{primary}"
+    return payload
 
 
 class SecEdgarProvider:
@@ -474,7 +499,7 @@ class SecEdgarProvider:
             if index >= len(forms):
                 continue
             form = str(forms[index] or "").strip().upper()
-            if form not in REPORT_FORMS:
+            if not _form_matches(form, REPORT_FORMS):
                 continue
             normalized_date = _parse_iso_date(filing_date)
             if not normalized_date:
@@ -491,12 +516,78 @@ class SecEdgarProvider:
                         "form": form,
                         "accession_number": accession_numbers[index] if index < len(accession_numbers) else None,
                         "primary_document": primary_documents[index] if index < len(primary_documents) else None,
+                        **_filing_archive_payload(
+                            cik,
+                            accession_numbers[index] if index < len(accession_numbers) else None,
+                            primary_documents[index] if index < len(primary_documents) else None,
+                        ),
                         "cik": cik,
                         "company_name": identity.get("company_name"),
                     },
                 }
             )
         return actions
+
+    def fetch_corporate_actions(self, symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
+        identity = self.resolve_identity(symbol)
+        if not identity or not identity.get("cik"):
+            raise RuntimeError(f"No SEC identity mapping available for {symbol}.")
+        cik = str(identity["cik"]).zfill(10)
+        payload = self._request_json(SEC_SUBMISSIONS_URL.format(cik=cik))
+        filings = ((payload or {}).get("filings") or {}).get("recent") or {}
+        dates = filings.get("filingDate") or []
+        forms = filings.get("form") or []
+        accession_numbers = filings.get("accessionNumber") or []
+        primary_documents = filings.get("primaryDocument") or []
+
+        actions: list[dict[str, Any]] = []
+        for index, filing_date in enumerate(dates):
+            if index >= len(forms):
+                continue
+            form = str(forms[index] or "").strip().upper()
+            if not _form_matches(form, CORPORATE_ACTION_FILING_FORMS):
+                continue
+            normalized_date = _parse_iso_date(filing_date)
+            if not normalized_date:
+                continue
+            if normalized_date < start_date.isoformat() or normalized_date > end_date.isoformat():
+                continue
+            actions.append(
+                {
+                    "date": normalized_date,
+                    "action_type": "sec_8k_filing",
+                    "value": None,
+                    "source": self.provider_name,
+                    "payload": {
+                        "form": form,
+                        "accession_number": accession_numbers[index] if index < len(accession_numbers) else None,
+                        "primary_document": primary_documents[index] if index < len(primary_documents) else None,
+                        **_filing_archive_payload(
+                            cik,
+                            accession_numbers[index] if index < len(accession_numbers) else None,
+                            primary_documents[index] if index < len(primary_documents) else None,
+                        ),
+                        "cik": cik,
+                        "company_name": identity.get("company_name"),
+                        "event_scope": "sec_8k_lifecycle_filings",
+                    },
+                }
+            )
+        return {
+            "source": self.provider_name,
+            "actions": actions,
+            "probe_complete": True,
+            "metadata": {
+                "provider": self.provider_name,
+                "cik": cik,
+                "company_name": identity.get("company_name"),
+                "actions_supported": True,
+                "probe_complete": True,
+                "access_tier": "free_account",
+                "event_scope": "sec_8k_lifecycle_filings",
+                "sec_form_filter": sorted(CORPORATE_ACTION_FILING_FORMS),
+            },
+        }
 
     def fetch_company_facts(self, symbol: str) -> dict[str, Any]:
         identity = self.resolve_identity(symbol)

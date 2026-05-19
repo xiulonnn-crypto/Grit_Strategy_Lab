@@ -9,6 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -249,7 +250,24 @@ class StooqZipPriceProvider:
     def fetch_history(self, symbol: str, start_date: date, end_date: date) -> SymbolMarketData:
         if not self.archive_path.is_file() and _stooq_online_enabled():
             return self._fetch_history_online(symbol, start_date, end_date)
-        return self._fetch_history_from_zip(symbol, start_date, end_date)
+        try:
+            return self._fetch_history_from_zip(symbol, start_date, end_date)
+        except ProviderExecutionSignal as exc:
+            if not _stooq_online_enabled() or exc.reason not in {"symbol_invalid", "no_history"}:
+                raise
+            online_payload = self._fetch_history_online(symbol, start_date, end_date)
+            warnings = list(online_payload.warnings or [])
+            warnings.insert(0, f"Stooq offline ZIP fallback: {exc.reason}.")
+            metadata = dict(online_payload.metadata or {})
+            metadata["offline_archive_path"] = str(self.archive_path)
+            metadata["offline_fallback_reason"] = exc.reason
+            metadata["mode"] = "online_csv_after_offline_miss"
+            return replace(
+                online_payload,
+                fallback_source="stooq_offline_zip",
+                warnings=warnings,
+                metadata=metadata,
+            )
 
     def _fetch_history_from_zip(self, symbol: str, start_date: date, end_date: date) -> SymbolMarketData:
         archive_path = self._ensure_archive_available()

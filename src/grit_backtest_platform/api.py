@@ -58,6 +58,7 @@ from .models import (
     FactorFactoryAutomationRequest,
     FactorFactoryRunNowRequest,
     FactorGovernanceExecuteRequest,
+    OperatorConfigRequest,
     FactorMiningJobCreateRequest,
     FactorModelSuggestionRequest,
     FactorModelCreateRequest,
@@ -75,6 +76,7 @@ from .models import (
     PitIdentityOverrideRequest,
     PitDataOverviewResponseModel,
     PitIdentityScraperRestartRequest,
+    PitPreprocessingRunRequest,
     PitResearchWaiverRequest,
     ResumeBacktestRunRequest,
     ResumeOptimizationJobRequest,
@@ -112,6 +114,7 @@ def _supports_corporate_action_probe(provider_or_name: Any) -> bool:
         "openbb_yfinance",
         "openbb_tiingo",
         "openbb_fmp",
+        "eodhd",
     }
 
 
@@ -938,6 +941,7 @@ def build_runtime_market_data_provider() -> RuntimeMarketDataProvider:
         ("fmp", "fmp_identity_provider", ("FmpIdentityRepairProvider", "FmpMarketDataProvider", "FmpPriceRepairProvider")),
         ("nasdaq_wiki", "nasdaq_wiki_provider", ("NasdaqWikiPriceProvider",)),
         ("stooq", "stooq_provider", ("StooqZipPriceProvider", "StooqPriceProvider")),
+        ("eodhd", "eodhd_provider", ("EodhdMarketDataProvider",)),
         ("finnhub", "finnhub_provider", ("FinnhubProvider",)),
         ("alpha_vantage", "alpha_vantage_provider", ("AlphaVantageProvider", "AlphaVantageEventProvider", "AlphaVantageMarketDataProvider")),
         ("sec_edgar", "sec_edgar_provider", ("SecEdgarEventProvider", "SecEdgarProvider")),
@@ -1598,6 +1602,18 @@ def create_app(
     def factor_factory_overview():
         return invoke(service.get_factor_factory_overview)
 
+    @app.get('/factor-factory/operator-config')
+    def factor_factory_operator_config():
+        return invoke(service.get_factor_factory_operator_config)
+
+    @app.put('/factor-factory/operator-config')
+    def factor_factory_operator_config_save(payload: OperatorConfigRequest):
+        return invoke(service.save_factor_factory_operator_config, payload)
+
+    @app.post('/factor-factory/operator-config/snapshots')
+    def factor_factory_operator_config_snapshot(payload: OperatorConfigRequest):
+        return invoke(service.create_factor_factory_operator_config_snapshot, payload)
+
     @app.post('/factor-factory/automation/start')
     def factor_factory_automation_start(payload: FactorFactoryAutomationRequest):
         return invoke(service.start_factor_factory_automation, payload)
@@ -1613,6 +1629,32 @@ def create_app(
     @app.post('/factor-factory/runs/{run_id}/cancel')
     def factor_factory_run_cancel(run_id: str):
         return invoke(service.cancel_factor_factory_run, run_id)
+
+    @app.post('/admin/pit-preprocessing-runs')
+    def pit_preprocessing_run_create(payload: PitPreprocessingRunRequest | None = None):
+        request_payload = payload or PitPreprocessingRunRequest()
+        return invoke(service.create_pit_preprocessing_run, request_payload)
+
+    @app.get('/pit-preprocessing/runs')
+    def pit_preprocessing_runs(limit: int = Query(20, ge=1, le=100)):
+        return invoke(service.list_pit_preprocessing_runs, limit)
+
+    @app.get('/pit-preprocessing/runs/{run_id}')
+    def pit_preprocessing_run_detail(run_id: str):
+        return invoke(service.get_pit_preprocessing_run, run_id)
+
+    @app.get('/factors/f1-catalog/latest')
+    def f1_catalog_latest():
+        return invoke(service.get_f1_catalog_latest)
+
+    @app.get('/factors/f1-catalog')
+    def f1_catalog(
+        snapshot_id: str | None = None,
+        layer: str | None = None,
+        status: str | None = None,
+        q: str | None = None,
+    ):
+        return invoke(service.list_f1_catalog, snapshot_id=snapshot_id, layer=layer, status=status, q=q)
 
     @app.post('/factor-quarantine/intake')
     def factor_quarantine_intake(payload: FactorQuarantineIntakeRequest):

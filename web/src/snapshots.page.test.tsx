@@ -808,6 +808,9 @@ describe('SnapshotsPage', () => {
     expect(readRule('.snapshots-equity-view .snapshots-equity-overview .metric-card small')).toContain(
       'font-size: 14px',
     );
+    expect(readRule('.snapshots-equity-view .layer-stack')).toContain('gap: 8px');
+    expect(readRule('.snapshots-equity-view .layer-row')).toContain('padding: 10px 12px');
+    expect(readRule('.snapshots-equity-view .layer-row__title span')).toContain('-webkit-line-clamp: 1');
     expect(readRule('.snapshots-equity-view .bond-core-card')).not.toMatch(/min-height:\s*(?:3[0-9]\d|[4-9]\d{2,})px/);
     expect(readRule('.snapshots-equity-view .detail-rail .rail-panel:last-child')).not.toMatch(/min-height:\s*(?:3[0-9]\d|[4-9]\d{2,})px/);
     expect(readRule('.snapshots-equity-view .snapshots-bond-source-stack')).toContain('gap: 8px');
@@ -882,8 +885,10 @@ describe('SnapshotsPage', () => {
     expect(screen.getByText('ds-analyst-consensus')).toBeInTheDocument();
     expect(screen.queryByText('ds-short-volume')).not.toBeInTheDocument();
     expect(screen.queryByText('ds-macro-rates / ds-option-skew')).not.toBeInTheDocument();
-    expect(document.querySelector('.layer-stack')?.textContent).toContain('2026-04-01 03:48');
-    expect(document.querySelector('.layer-stack')?.textContent).toContain('2026-03-31 21:00');
+    const layerStack = document.querySelector('.layer-stack');
+    expect(layerStack).not.toBeNull();
+    expect(layerStack?.querySelector('.layer-row__stats')).toBeNull();
+    expect(layerStack?.querySelector('.small-stat')).toBeNull();
     expect(screen.getByRole('button', { name: '复制设置并重启命令' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '刷新股票快照' }));
     await waitFor(() =>

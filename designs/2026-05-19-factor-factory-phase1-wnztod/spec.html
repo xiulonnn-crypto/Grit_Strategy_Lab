@@ -1,0 +1,1261 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>因子工厂 Phase 1 WNZT UI 稿</title>
+  <style>
+    :root {
+      --gsl-bg-main: #f0f2f5;
+      --gsl-bg-surface: #ffffff;
+      --gsl-bg-surface-soft: #fbfcfd;
+      --gsl-bg-subtle: #f9fafb;
+      --gsl-bg-accent-soft: #f5fbf8;
+      --gsl-color-primary: #1f877b;
+      --gsl-color-primary-strong: #176b61;
+      --gsl-color-primary-soft: #e6f4f1;
+      --gsl-color-benchmark: #4c78c7;
+      --gsl-color-blue-soft: #eef5ff;
+      --gsl-color-success: #2b8a3e;
+      --gsl-color-success-soft: #ecfdf3;
+      --gsl-color-warning: #b86813;
+      --gsl-color-warning-soft: #fff7e8;
+      --gsl-color-danger: #c45c4f;
+      --gsl-color-danger-soft: #fff8f7;
+      --gsl-color-border: #e5e7eb;
+      --gsl-color-border-soft: #eef2f4;
+      --gsl-color-border-strong: #d7e1e5;
+      --gsl-text-title: #111827;
+      --gsl-text-main: #1f2937;
+      --gsl-text-sub: #64748b;
+      --gsl-text-muted: #94a3b8;
+      --gsl-shadow-card: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.05);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--gsl-bg-main);
+      color: var(--gsl-text-main);
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+
+    .app-shell {
+      display: grid;
+      grid-template-columns: 240px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      position: sticky;
+      top: 0;
+      align-self: start;
+      height: 100vh;
+      padding: 22px 16px;
+      border-right: 1px solid var(--gsl-color-border);
+      background: var(--gsl-bg-surface);
+    }
+
+    .brand {
+      display: grid;
+      gap: 2px;
+      margin-bottom: 28px;
+    }
+
+    .brand strong {
+      color: var(--gsl-text-title);
+      font-size: 18px;
+      line-height: 1.2;
+    }
+
+    .brand span,
+    .nav-group > span {
+      color: var(--gsl-text-muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .nav-group {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 24px;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      min-height: 38px;
+      padding: 0 12px;
+      border-radius: 6px;
+      color: var(--gsl-text-sub);
+      font-weight: 700;
+    }
+
+    .nav-item.is-active {
+      box-shadow: inset 3px 0 0 var(--gsl-color-primary);
+      background: var(--gsl-color-primary-soft);
+      color: var(--gsl-color-primary-strong);
+    }
+
+    .factor-phase2-page {
+      display: grid;
+      gap: 18px;
+      width: 100%;
+      max-width: 1960px;
+      margin: 0 auto;
+      padding: 32px;
+      color: #1f2933;
+    }
+
+    .factor-phase2-hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      align-items: end;
+      width: 100%;
+      margin: 0;
+      padding: 22px 24px;
+      border: 1px solid #d8e1e8;
+      border-radius: 8px;
+      background: linear-gradient(180deg, #fbfcfd 0%, #f4f8fa 100%);
+      box-shadow: 0 12px 30px rgba(31, 41, 51, 0.06);
+    }
+
+    .factor-phase2-hero__eyebrow,
+    .factor-phase2-panel__eyebrow {
+      margin: 0 0 6px;
+      color: #5b6770;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .factor-phase2-hero h1 {
+      margin: 0;
+      color: var(--gsl-text-title);
+      font-size: 30px;
+      line-height: 1.18;
+      letter-spacing: 0;
+    }
+
+    .factor-phase2-hero p {
+      max-width: 860px;
+      margin: 8px 0 0;
+      color: #52616d;
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    .factor-phase2-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+
+    .factor-phase2-button {
+      min-height: 36px;
+      padding: 0 14px;
+      border: 1px solid #cbd6de;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #23424a;
+      font-weight: 700;
+      cursor: default;
+    }
+
+    .factor-phase2-button--primary {
+      border-color: var(--gsl-color-primary);
+      background: var(--gsl-color-primary);
+      color: #ffffff;
+    }
+
+    .factor-phase2-button--small {
+      min-height: 30px;
+      padding: 0 10px;
+      font-size: 12px;
+    }
+
+    .factor-phase2-chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 0 8px;
+      border: 1px solid #cbd6de;
+      border-radius: 999px;
+      background: #f6f8fa;
+      color: #41505a;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .factor-phase2-chip--good {
+      border-color: #b9dbd1;
+      background: #e9f7f1;
+      color: #23675c;
+    }
+
+    .factor-phase2-chip--warn {
+      border-color: #efc888;
+      background: var(--gsl-color-warning-soft);
+      color: var(--gsl-color-warning);
+    }
+
+    .factor-phase2-chip--bad {
+      border-color: #f2b9b1;
+      background: var(--gsl-color-danger-soft);
+      color: var(--gsl-color-danger);
+    }
+
+    .factor-phase2-chip--info {
+      border-color: #c8d7f0;
+      background: var(--gsl-color-blue-soft);
+      color: #315f9d;
+    }
+
+    .factor-factory-status-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      padding: 12px 14px;
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 8px;
+      background: var(--gsl-bg-surface);
+      box-shadow: var(--gsl-shadow-card);
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .factor-phase2-metrics {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .factor-phase2-metric {
+      min-width: 0;
+      padding: 14px 16px;
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 8px;
+      background: #ffffff;
+      box-shadow: var(--gsl-shadow-card);
+    }
+
+    .factor-phase2-metric__label {
+      margin: 0;
+      color: var(--gsl-text-muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .factor-phase2-metric__value {
+      margin: 8px 0 2px;
+      color: var(--gsl-text-title);
+      font-size: 24px;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+
+    .factor-phase2-metric__hint {
+      margin: 0;
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .factor-factory-workbench--b1b4 {
+      display: grid;
+      grid-template-columns: minmax(310px, 0.82fr) minmax(218px, 0.54fr) minmax(552px, 1.42fr);
+      gap: 14px;
+      align-items: start;
+    }
+
+    .factor-phase2-panel {
+      min-width: 0;
+      border: 1px solid #d8e1e8;
+      border-radius: 8px;
+      background: #ffffff;
+      overflow: hidden;
+      box-shadow: var(--gsl-shadow-card);
+    }
+
+    .factor-phase2-panel__header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 16px 16px 12px;
+      border-bottom: 1px solid #edf1f4;
+    }
+
+    .factor-phase2-panel__header h2,
+    .factor-phase2-panel__header h3 {
+      margin: 0;
+      color: var(--gsl-text-title);
+      font-size: 18px;
+      line-height: 1.3;
+      letter-spacing: 0;
+    }
+
+    .factor-phase2-panel__body {
+      display: grid;
+      gap: 12px;
+      padding: 14px 16px 16px;
+    }
+
+    .factor-factory-task-family-tabs {
+      display: grid;
+      gap: 8px;
+    }
+
+    .factor-factory-task-card,
+    .factor-factory-score-card,
+    .factor-factory-result-row,
+    .factor-factory-admission-rules article {
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 8px;
+      background: var(--gsl-bg-surface-soft);
+    }
+
+    .factor-factory-task-card {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+    }
+
+    .factor-phase2-row__top,
+    .factor-phase2-row__meta,
+    .factor-phase2-inline {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .factor-factory-task-card h3,
+    .factor-factory-score-card strong {
+      margin: 0;
+      color: var(--gsl-text-title);
+      font-size: 14px;
+      line-height: 1.4;
+    }
+
+    .factor-factory-task-card small,
+    .factor-factory-score-card small,
+    .factor-phase2-copy {
+      color: #5b6770;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .factor-factory-task-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+    }
+
+    .factor-factory-task-meta span,
+    .factor-factory-task-meta strong {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 0 8px;
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 999px;
+      background: #ffffff;
+      font-weight: 700;
+    }
+
+    .factor-factory-task-meta strong {
+      color: var(--gsl-color-primary);
+    }
+
+    .task-flow {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 8px;
+      background: #ffffff;
+    }
+
+    .task-flow__row {
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr) 70px;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .task-flow__row b {
+      color: var(--gsl-color-primary-strong);
+      font-size: 12px;
+    }
+
+    .task-flow__row span {
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .task-flow__row strong {
+      color: var(--gsl-text-title);
+      font-size: 12px;
+      text-align: right;
+    }
+
+    .wnzt-strip {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+    }
+
+    .wnzt-step {
+      display: grid;
+      gap: 5px;
+      min-height: 66px;
+      padding: 8px;
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 8px;
+      background: #ffffff;
+    }
+
+    .wnzt-step b {
+      color: var(--gsl-color-primary-strong);
+      font-size: 13px;
+    }
+
+    .wnzt-step span {
+      color: var(--gsl-text-sub);
+      font-size: 11px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .optional-governance {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+    }
+
+    .optional-governance__item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 34px;
+      padding: 7px 8px;
+      border: 1px dashed var(--gsl-color-border-strong);
+      border-radius: 8px;
+      background: #ffffff;
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .optional-governance__item b {
+      color: var(--gsl-text-title);
+      font-size: 12px;
+    }
+
+    .factor-factory-score-card {
+      display: grid;
+      gap: 7px;
+      padding: 10px;
+    }
+
+    .factor-factory-score-card__head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: flex-start;
+    }
+
+    .factor-factory-score-card__head > div {
+      min-width: 0;
+    }
+
+    .factor-factory-score-card strong {
+      display: block;
+      overflow-wrap: anywhere;
+    }
+
+    .factor-factory-score-card__head b {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 32px;
+      min-height: 32px;
+      border-radius: 999px;
+      background: var(--gsl-bg-accent-soft);
+      color: var(--gsl-color-primary);
+    }
+
+    .factor-factory-score-card__chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .factor-factory-score-card .factor-phase2-chip {
+      min-height: 20px;
+      padding: 0 7px;
+      font-size: 11px;
+    }
+
+    .factor-factory-filter-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: end;
+    }
+
+    .factor-factory-filter-row label {
+      display: grid;
+      gap: 5px;
+      color: var(--gsl-text-muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .factor-factory-filter-row input,
+    .factor-factory-filter-row select {
+      min-height: 34px;
+      padding: 0 10px;
+      border: 1px solid var(--gsl-color-border-strong);
+      border-radius: 6px;
+      background: #ffffff;
+      color: var(--gsl-text-title);
+    }
+
+    .factor-factory-result-table {
+      display: grid;
+      gap: 8px;
+    }
+
+    .factor-factory-result-row {
+      display: grid;
+      grid-template-columns: 78px minmax(132px, 1.05fr) 54px minmax(152px, 1.45fr) 44px;
+      gap: 10px;
+      align-items: center;
+      padding: 10px;
+      box-shadow: none;
+    }
+
+    .factor-factory-result-row--head {
+      background: var(--gsl-bg-subtle);
+      color: var(--gsl-text-muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .factor-factory-result-row span {
+      min-width: 0;
+      color: var(--gsl-text-main);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .factor-factory-admission-rules {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .factor-factory-admission-rules article {
+      padding: 14px;
+      box-shadow: var(--gsl-shadow-card);
+    }
+
+    .factor-factory-admission-rules h3 {
+      margin: 0 0 6px;
+      color: var(--gsl-text-title);
+      font-size: 14px;
+    }
+
+    .factor-factory-admission-rules p {
+      margin: 0;
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .modal-backdrop {
+      padding: 36px 0;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.05);
+    }
+
+    .factor-config-modal {
+      width: min(1500px, 100%);
+      min-height: 760px;
+      max-height: calc(100vh - 72px);
+      margin: 0 auto;
+      border: 1px solid #d8e1e8;
+      border-radius: 18px;
+      background: #ffffff;
+      box-shadow: 0 18px 40px rgba(17, 24, 39, 0.12);
+      overflow: hidden;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+    }
+
+    .factor-config-modal header,
+    .factor-config-modal__footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--gsl-color-border-soft);
+    }
+
+    .factor-config-modal header h2 {
+      margin: 0;
+      color: var(--gsl-text-title);
+      font-size: 20px;
+    }
+
+    .factor-config-subtitle {
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+    }
+
+    .factor-config-tabs {
+      display: grid;
+      align-content: start;
+      gap: 8px;
+      padding: 16px 12px;
+      border-right: 1px solid var(--gsl-color-border);
+      background: var(--gsl-bg-surface-soft);
+    }
+
+    .factor-config-tab {
+      min-height: 34px;
+      padding: 0 10px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+      font-weight: 800;
+      text-align: left;
+    }
+
+    .factor-config-tab.is-active {
+      background: var(--gsl-color-primary-soft);
+      color: var(--gsl-color-primary-strong);
+      box-shadow: inset 3px 0 0 var(--gsl-color-primary);
+    }
+
+    .factor-config-modal__body {
+      display: grid;
+      grid-template-columns: 196px minmax(0, 1fr) 330px;
+      gap: 0;
+      min-height: 0;
+      padding: 0;
+    }
+
+    .factor-config-main,
+    .factor-config-side {
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+
+    .factor-config-side section,
+    .evidence-step,
+    .decision-card {
+      border: 1px solid var(--gsl-color-border-soft);
+      border-radius: 8px;
+      background: var(--gsl-bg-surface-soft);
+    }
+
+    .factor-config-side h3,
+    .decision-card h3 {
+      margin: 0;
+      color: var(--gsl-text-title);
+      font-size: 13px;
+    }
+
+    .factor-config-side p,
+    .decision-card p {
+      margin: 0;
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .factor-config-main {
+      min-width: 0;
+      padding: 16px;
+      overflow: auto;
+      background: #ffffff;
+    }
+
+    .factor-config-side {
+      min-width: 0;
+      padding: 16px;
+      overflow: auto;
+      border-left: 1px solid var(--gsl-color-border);
+      background: var(--gsl-bg-surface-soft);
+    }
+
+    .evidence-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .evidence-step {
+      display: grid;
+      gap: 7px;
+      min-height: 118px;
+      padding: 11px;
+    }
+
+    .evidence-step strong {
+      color: var(--gsl-text-title);
+      font-size: 13px;
+    }
+
+    .evidence-step span {
+      color: var(--gsl-text-sub);
+      font-size: 12px;
+    }
+
+    .decision-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .decision-card {
+      padding: 10px;
+    }
+
+    .decision-card strong {
+      display: block;
+      margin-top: 5px;
+      color: var(--gsl-text-title);
+      font-size: 16px;
+    }
+
+    .factor-config-side section {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+    }
+
+    .factor-config-modal__footer {
+      justify-content: flex-end;
+      border-top: 1px solid var(--gsl-color-border-soft);
+      border-bottom: 0;
+      background: var(--gsl-bg-subtle);
+    }
+
+    .mono {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    @media (max-width: 1280px) {
+      .app-shell {
+        grid-template-columns: 92px minmax(0, 1fr);
+      }
+
+      .sidebar {
+        padding: 18px 10px;
+      }
+
+      .brand span,
+      .nav-group > span,
+      .nav-item span {
+        display: none;
+      }
+
+      .nav-item {
+        justify-content: center;
+      }
+
+      .factor-phase2-metrics {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .factor-factory-workbench--b1b4,
+      .factor-config-modal__body {
+        grid-template-columns: 1fr;
+      }
+
+      .factor-config-tabs {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        border-right: 0;
+        border-bottom: 1px solid var(--gsl-color-border);
+      }
+
+      .factor-config-side {
+        border-left: 0;
+        border-top: 1px solid var(--gsl-color-border);
+      }
+
+      .factor-factory-admission-rules {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 820px) {
+      .app-shell {
+        display: block;
+      }
+
+      .sidebar {
+        position: static;
+        height: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--gsl-color-border);
+      }
+
+      .factor-phase2-page {
+        padding: 20px;
+      }
+
+      .modal-backdrop {
+        padding: 12px;
+      }
+
+      .factor-config-modal {
+        width: 100%;
+        min-height: 0;
+        max-height: none;
+      }
+
+      .factor-phase2-hero {
+        grid-template-columns: 1fr;
+      }
+
+      .factor-phase2-actions {
+        justify-content: flex-start;
+      }
+
+      .factor-phase2-metrics,
+      .wnzt-strip,
+      .optional-governance,
+      .factor-factory-admission-rules,
+      .evidence-grid,
+      .decision-grid,
+      .factor-factory-filter-row {
+        grid-template-columns: 1fr;
+      }
+
+      .factor-factory-result-row,
+      .factor-factory-result-row--head {
+        grid-template-columns: 1fr;
+      }
+
+      .factor-factory-result-row--head {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="主导航">
+      <div class="brand">
+        <strong>GSL</strong>
+        <span>策略研究工作台</span>
+      </div>
+      <nav>
+        <div class="nav-group">
+          <span>组合</span>
+          <div class="nav-item"><span>组合中心</span></div>
+          <div class="nav-item"><span>资产腿库</span></div>
+        </div>
+        <div class="nav-group">
+          <span>策略</span>
+          <div class="nav-item"><span>策略库</span></div>
+          <div class="nav-item"><span>回测运行</span></div>
+        </div>
+        <div class="nav-group">
+          <span>因子</span>
+          <div class="nav-item"><span>因子库</span></div>
+          <div class="nav-item is-active"><span>因子工厂</span></div>
+        </div>
+        <div class="nav-group">
+          <span>数据</span>
+          <div class="nav-item"><span>PIT 清洗中心</span></div>
+          <div class="nav-item"><span>数据快照</span></div>
+        </div>
+      </nav>
+    </aside>
+
+    <main class="factor-phase2-page factor-factory-page factor-factory-b1b4-page" data-page-root="factor-factory">
+      <section class="factor-phase2-hero factor-factory-hero">
+        <div>
+          <p class="factor-phase2-hero__eyebrow">因子工厂</p>
+          <h1>每日因子生产台</h1>
+          <p>按挖掘、治理、检疫组织每日生产。F1 经算子展开为 Raw_F2，Raw_F2 完成 WNZT 标准治理后形成 Refined F2；O/T 扩展默认关闭，仅在配置快照中显式启用。</p>
+        </div>
+        <div class="factor-phase2-actions">
+          <button class="factor-phase2-button factor-phase2-button--primary">启动调度</button>
+          <button class="factor-phase2-button">暂停调度</button>
+          <button class="factor-phase2-button">立即执行</button>
+          <button class="factor-phase2-button">工厂配置</button>
+        </div>
+      </section>
+
+      <section class="factor-factory-status-strip" aria-label="因子工厂状态">
+        <span class="factor-phase2-chip factor-phase2-chip--good">生产调度已启用</span>
+        <span>执行时点：GMT+8 14:00</span>
+        <span>生产批次：2026-05-19</span>
+        <span class="mono">配置快照 cfg_20260519_a17c</span>
+        <span class="factor-phase2-chip factor-phase2-chip--info">运行快照已锁定</span>
+      </section>
+
+      <section class="factor-phase2-metrics factor-factory-funnel" aria-label="因子工厂摘要">
+        <div class="factor-phase2-metric">
+          <p class="factor-phase2-metric__label">昨日公式量</p>
+          <p class="factor-phase2-metric__value">10,000</p>
+          <p class="factor-phase2-metric__hint">日预算执行完成</p>
+        </div>
+        <div class="factor-phase2-metric">
+          <p class="factor-phase2-metric__label">初筛通过</p>
+          <p class="factor-phase2-metric__value">842</p>
+          <p class="factor-phase2-metric__hint">RankIC 与覆盖率达标</p>
+        </div>
+        <div class="factor-phase2-metric">
+          <p class="factor-phase2-metric__label">检疫通过</p>
+          <p class="factor-phase2-metric__value">37</p>
+          <p class="factor-phase2-metric__hint">可进入发布准入</p>
+        </div>
+        <div class="factor-phase2-metric">
+          <p class="factor-phase2-metric__label">S 级晋升</p>
+          <p class="factor-phase2-metric__value">3</p>
+          <p class="factor-phase2-metric__hint">待投研确认</p>
+        </div>
+        <div class="factor-phase2-metric">
+          <p class="factor-phase2-metric__label">Alpha 浓度</p>
+          <p class="factor-phase2-metric__value">0.42</p>
+          <p class="factor-phase2-metric__hint">同族暴露受控</p>
+        </div>
+        <div class="factor-phase2-metric">
+          <p class="factor-phase2-metric__label">阻断原因</p>
+          <p class="factor-phase2-metric__value">6 类</p>
+          <p class="factor-phase2-metric__hint">OOS / 显著性 / 相关性</p>
+        </div>
+      </section>
+
+      <section class="factor-factory-workbench factor-factory-workbench--b1b4">
+        <article class="factor-phase2-panel factor-factory-fixed-panel" data-factory-section="tasks">
+          <div class="factor-phase2-panel__header">
+            <div>
+              <p class="factor-phase2-panel__eyebrow">B1 任务流</p>
+              <h2>每日生产任务</h2>
+            </div>
+            <span class="factor-phase2-chip factor-phase2-chip--info">自动调度</span>
+          </div>
+          <div class="factor-phase2-panel__body factor-factory-scroll-body">
+            <article class="factor-factory-task-card">
+              <div class="factor-phase2-row__top">
+                <div>
+                  <h3>今日挖掘任务</h3>
+                  <small>F1 字段经算子族展开，生成 Raw_F2 候选池。</small>
+                </div>
+                <span class="factor-phase2-chip factor-phase2-chip--warn">待开始</span>
+              </div>
+              <div class="task-flow" aria-label="每日挖掘算子展开">
+                <div class="task-flow__row">
+                  <b>TS_Return</b>
+                  <span class="mono">TS_Return(F1, n) -> Raw_F2 return signal</span>
+                  <strong>3,420</strong>
+                </div>
+                <div class="task-flow__row">
+                  <b>TS_Rank</b>
+                  <span class="mono">TS_Rank(TS_Return(F1, n), m) -> Raw_F2 momentum</span>
+                  <strong>4,580</strong>
+                </div>
+                <div class="task-flow__row">
+                  <b>TS_Corr</b>
+                  <span class="mono">TS_Corr(F1_a, F1_b, n) -> Raw_F2 relation</span>
+                  <strong>2,000</strong>
+                </div>
+              </div>
+              <div class="factor-factory-task-meta">
+                <span>F1 字段池 128</span>
+                <span>窗口 3/5/10/21/63/126/252</span>
+                <strong>10,000 公式预算</strong>
+                <strong>842 初筛通过</strong>
+              </div>
+            </article>
+
+            <article class="factor-factory-task-card">
+              <div class="factor-phase2-row__top">
+                <div>
+                  <h3>今日治理任务</h3>
+                  <small>Raw_F2 进入 WNZT 标准流，治理后生成 Refined F2。</small>
+                </div>
+                <span class="factor-phase2-chip factor-phase2-chip--info">治理中</span>
+              </div>
+              <div class="wnzt-strip" aria-label="WNZT 标准治理流">
+                <div class="wnzt-step"><b>W</b><span>去极值并记录裁剪率</span></div>
+                <div class="wnzt-step"><b>N</b><span>行业 / 市值 / 风格中性化</span></div>
+                <div class="wnzt-step"><b>Z</b><span>截面标准化</span></div>
+                <div class="wnzt-step"><b>T</b><span>时序平滑与换手约束</span></div>
+              </div>
+              <div class="optional-governance" aria-label="可选治理配置">
+                <div class="optional-governance__item"><b>O 正交化</b><span class="factor-phase2-chip">默认关闭</span></div>
+                <div class="optional-governance__item"><b>T 扩展滤波</b><span class="factor-phase2-chip">默认关闭</span></div>
+              </div>
+              <div class="factor-factory-task-meta">
+                <span>Raw_F2 842</span>
+                <span>WNZT 完整 216</span>
+                <strong>Refined F2 37</strong>
+                <strong>O/T 关闭</strong>
+              </div>
+            </article>
+          </div>
+        </article>
+
+        <article class="factor-phase2-panel factor-factory-fixed-panel" data-factory-section="scoring">
+          <div class="factor-phase2-panel__header">
+            <div>
+              <p class="factor-phase2-panel__eyebrow">B2 候选评分</p>
+              <h2>治理候选</h2>
+            </div>
+            <span class="factor-phase2-chip factor-phase2-chip--info">默认收起</span>
+          </div>
+          <div class="factor-phase2-panel__body factor-factory-scroll-body">
+            <article class="factor-factory-score-card">
+              <div class="factor-factory-score-card__head">
+                <div>
+                  <strong>f2_ts_rank_return_close_21_63</strong>
+                  <small>WNZT 4/4</small>
+                </div>
+                <b>91</b>
+              </div>
+              <div class="factor-factory-score-card__chips">
+                <span class="factor-phase2-chip factor-phase2-chip--good">RankIC 0.047</span>
+                <span class="factor-phase2-chip factor-phase2-chip--good">OOS/IS 0.81</span>
+              </div>
+            </article>
+            <article class="factor-factory-score-card">
+              <div class="factor-factory-score-card__head">
+                <div>
+                  <strong>f2_ts_corr_volume_mcap_126</strong>
+                  <small>WNZT 4/4</small>
+                </div>
+                <b>68</b>
+              </div>
+              <div class="factor-factory-score-card__chips">
+                <span class="factor-phase2-chip factor-phase2-chip--warn">O/T 关闭</span>
+                <span class="factor-phase2-chip factor-phase2-chip--info">P-value 0.041</span>
+              </div>
+            </article>
+            <article class="factor-factory-score-card">
+              <div class="factor-factory-score-card__head">
+                <div>
+                  <strong>f2_ts_rank_return_open_5_21</strong>
+                  <small>WNZT 4/4</small>
+                </div>
+                <b>42</b>
+              </div>
+              <div class="factor-factory-score-card__chips">
+                <span class="factor-phase2-chip factor-phase2-chip--bad">OOS 崩盘熔断</span>
+                <span class="factor-phase2-chip factor-phase2-chip--bad">P-value 0.093</span>
+              </div>
+            </article>
+          </div>
+        </article>
+
+        <article class="factor-phase2-panel factor-factory-fixed-panel" data-factory-section="quarantine">
+          <div class="factor-phase2-panel__header">
+            <div>
+              <p class="factor-phase2-panel__eyebrow">B3 检疫建议</p>
+              <h2>发布准入建议</h2>
+            </div>
+            <span class="factor-phase2-chip factor-phase2-chip--info">显示 4/37</span>
+          </div>
+          <div class="factor-phase2-panel__body factor-factory-scroll-body">
+            <div class="factor-factory-filter-row" aria-label="历史检疫筛选">
+              <label>日期<input type="date" value="2026-05-19" /></label>
+              <label>因子名<input type="text" value="f2_" /></label>
+              <label>裁决<select><option>全部裁决</option></select></label>
+              <button class="factor-phase2-button factor-phase2-button--small">查询</button>
+            </div>
+            <div class="factor-factory-result-table" role="table" aria-label="因子发布准入建议列表">
+              <div class="factor-factory-result-row factor-factory-result-row--head" role="row">
+                <span role="columnheader">日期</span>
+                <span role="columnheader">因子名</span>
+                <span role="columnheader">裁决</span>
+                <span role="columnheader">原因</span>
+                <span role="columnheader">操作</span>
+              </div>
+              <div class="factor-factory-result-row" role="row">
+                <span role="cell">2026-05-19</span>
+                <span role="cell">f2_ts_rank_return_close_21_63</span>
+                <span role="cell"><i class="factor-phase2-chip factor-phase2-chip--good">PASS</i></span>
+                <span role="cell">WNZT 完整，OOS/IS 0.81，S 级相关 0.41，容量通过。</span>
+                <span role="cell"><button class="factor-phase2-button factor-phase2-button--small">详情</button></span>
+              </div>
+              <div class="factor-factory-result-row" role="row">
+                <span role="cell">2026-05-19</span>
+                <span role="cell">f2_ts_corr_volume_mcap_126</span>
+                <span role="cell"><i class="factor-phase2-chip factor-phase2-chip--warn">WARN</i></span>
+                <span role="cell">O/T 扩展未启用，主干证据完整，进入观察池。</span>
+                <span role="cell"><button class="factor-phase2-button factor-phase2-button--small">详情</button></span>
+              </div>
+              <div class="factor-factory-result-row" role="row">
+                <span role="cell">2026-05-19</span>
+                <span role="cell">f2_ts_rank_return_open_5_21</span>
+                <span role="cell"><i class="factor-phase2-chip factor-phase2-chip--bad">FAIL</i></span>
+                <span role="cell">OOS 崩盘熔断，P-value 不显著，自动剔除。</span>
+                <span role="cell"><button class="factor-phase2-button factor-phase2-button--small">详情</button></span>
+              </div>
+              <div class="factor-factory-result-row" role="row">
+                <span role="cell">2026-05-19</span>
+                <span role="cell">f2_ts_corr_close_sector_63</span>
+                <span role="cell"><i class="factor-phase2-chip factor-phase2-chip--bad">FAIL</i></span>
+                <span role="cell">与 S 级动量因子相关性 0.74，大于 0.70 自动废弃。</span>
+                <span role="cell"><button class="factor-phase2-button factor-phase2-button--small">详情</button></span>
+              </div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="factor-factory-admission-rules" aria-label="发布准入规则">
+        <article>
+          <h3>挖掘产物</h3>
+          <p>F1 只保留 PIT 原始事实字段。任何 Return、Rank、Corr 等算子展开结果都进入 Raw_F2。</p>
+        </article>
+        <article>
+          <h3>治理主干</h3>
+          <p>Raw_F2 完成 WNZT 四段证据后进入检疫；O/T 扩展默认关闭，由配置快照显式开启。</p>
+        </article>
+        <article>
+          <h3>检疫闸门</h3>
+          <p>OOS 崩盘、P-value 不显著、S 级相关性大于 0.70 均为自动剔除。</p>
+        </article>
+        <article>
+          <h3>快照隔离</h3>
+          <p>保存配置草稿不影响当前 run。生成快照后，下一次自动任务引用新版本。</p>
+        </article>
+      </section>
+
+      <div class="modal-backdrop" role="presentation">
+        <section class="factor-config-modal" aria-label="因子工厂配置弹层" role="dialog" aria-modal="true">
+          <header>
+            <div>
+              <p class="factor-phase2-panel__eyebrow">工厂配置</p>
+              <h2>因子工厂配置</h2>
+              <span class="factor-config-subtitle">算子预算、治理协议、准入闸门和快照版本在此统一维护。</span>
+            </div>
+            <span class="factor-phase2-chip factor-phase2-chip--warn">草稿已变更</span>
+          </header>
+
+          <div class="factor-config-modal__body">
+            <nav class="factor-config-tabs" aria-label="工厂配置标签">
+              <button class="factor-config-tab">算子注册</button>
+              <button class="factor-config-tab">治理协议</button>
+              <button class="factor-config-tab">准入闸门</button>
+              <button class="factor-config-tab is-active">WNZT 证据与检疫裁决</button>
+              <button class="factor-config-tab">配置快照</button>
+            </nav>
+
+          <main class="factor-config-main">
+            <div class="factor-phase2-row__top">
+              <div>
+                <h3 class="mono">f2_ts_rank_return_close_21_63</h3>
+                <small>Raw_F2 来源：TS_Rank(TS_Return(Close, 21), 63) · WNZT 治理候选</small>
+              </div>
+              <span class="factor-phase2-chip factor-phase2-chip--good">PASSED + ELIGIBLE</span>
+            </div>
+
+            <section class="evidence-grid" aria-label="WNZT 证据">
+              <article class="evidence-step">
+                <strong>W 去极值</strong>
+                <span>1% / 99% 分位裁剪，裁剪率 1.8%，覆盖率 97.4%。</span>
+                <span class="factor-phase2-chip factor-phase2-chip--good">PASS</span>
+              </article>
+              <article class="evidence-step">
+                <strong>N 中性化</strong>
+                <span>行业 + 市值残差化，最大风格相关 0.18。</span>
+                <span class="factor-phase2-chip factor-phase2-chip--good">PASS</span>
+              </article>
+              <article class="evidence-step">
+                <strong>Z 标准化</strong>
+                <span>截面均值 0.00，标准差 1.00，异常日 0。</span>
+                <span class="factor-phase2-chip factor-phase2-chip--good">PASS</span>
+              </article>
+              <article class="evidence-step">
+                <strong>T 平滑</strong>
+                <span>3 日 EWMA，换手下降 22%，信号毛刺可控。</span>
+                <span class="factor-phase2-chip factor-phase2-chip--good">PASS</span>
+              </article>
+              <article class="evidence-step">
+                <strong>O 正交化</strong>
+                <span>可选扩展项，默认不剔除同族或既有风格成分。</span>
+                <span class="factor-phase2-chip">默认关闭</span>
+              </article>
+              <article class="evidence-step">
+                <strong>T 扩展滤波</strong>
+                <span>可选扩展项，默认不追加高阶平滑或额外换手惩罚。</span>
+                <span class="factor-phase2-chip">默认关闭</span>
+              </article>
+            </section>
+
+            <section class="decision-grid" aria-label="检疫裁决指标">
+              <article class="decision-card"><h3>RankIC</h3><strong>0.047</strong><p>高于初筛门槛 0.03。</p></article>
+              <article class="decision-card"><h3>IC_IR</h3><strong>1.72</strong><p>Newey-West 修正后通过。</p></article>
+              <article class="decision-card"><h3>OOS/IS</h3><strong>0.81</strong><p>未触发样本外崩盘熔断。</p></article>
+              <article class="decision-card"><h3>P-value</h3><strong>0.018</strong><p>显著性通过。</p></article>
+              <article class="decision-card"><h3>S 级相关</h3><strong>0.41</strong><p>低于自动废弃阈值 0.70。</p></article>
+              <article class="decision-card"><h3>容量与回撤</h3><strong>PASS</strong><p>容量、拥挤度和回撤均通过。</p></article>
+            </section>
+          </main>
+
+          <aside class="factor-config-side" aria-label="裁决摘要">
+            <section>
+              <h3>发布边界</h3>
+              <p>该候选可进入 F2 发布准入，但发布记录必须携带配置快照、WNZT 证据和检疫报告。</p>
+            </section>
+            <section>
+              <h3>阻断规则</h3>
+              <p>任一 WNZT 主干证据缺失、OOS 熔断、P-value 不显著或 S 相关性超过 0.70 时，发布保持禁用。</p>
+            </section>
+            <section>
+              <h3>快照引用</h3>
+              <p class="mono">cfg_20260519_a17c<br />f1cat_20260519_full<br />gate_wnzt_v2</p>
+            </section>
+          </aside>
+          </div>
+
+          <footer class="factor-config-modal__footer">
+            <button class="factor-phase2-button">取消</button>
+            <button class="factor-phase2-button">保存草稿</button>
+            <button class="factor-phase2-button factor-phase2-button--primary">生成配置快照</button>
+          </footer>
+        </section>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

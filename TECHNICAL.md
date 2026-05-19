@@ -1,6 +1,22 @@
 # TECHNICAL（技术手册）
 
+## Phase 1 因子工厂自动矿机
+
+- 自动矿机继续复用现有 `#/factors/factory` 与 `/factor-factory/*`，不新建平行运行系统。
+- `OperatorEngine` 是工厂 run 的公式生成边界，MVP 后端为 `pandas_bottleneck`；默认每日预算为 `10,000` 公式，预算和 backend 固化到 `operator_config_snapshot`。
+- 当前工厂 run 必须引用不可变 `f1_catalog_snapshot_id` 与 `operator_config_snapshot_id`；保存配置草稿不会影响已运行或运行中的 run。
+- Raw_F2 必须进入 WNZT 治理与检疫，不能绕过检疫直发；发布边界要求 WNZT 完整、检疫 `PASS`、`publish_status=ELIGIBLE`，并保留配置快照和检疫证据。
+- 相关验证优先跑：`tests/test_operator_engine.py`、`tests/test_operator_registry.py`、`tests/test_factor_factory_api.py`、`tests/test_factor_quarantine_api.py`，再按影响面跑固定 backend/frontend scripts。
+
 本文件是 Grit Backtest Platform 的工程规则手册，用来整理当前仓库已经存在的技术真相、任务路由规则、验证路径与完成定义。
+
+## Git Fast / Impact / Full 当前真相
+
+- `git-fast` 对应 `scripts/codex-validate-fast.ps1`，也是 pre-push 默认门禁；它只做日常精准增量验证，目标 5 分钟内完成，不会自动升级到长跑影响面测试。
+- `git-impact` 对应 `scripts/codex-validate-impact.ps1`，用于 fast 返回 `not-fast` 后手动运行；它过滤证据资产后按 owner map 加影响面 fanout 运行 backend/frontend targeted checks，并运行前端 `tsc --noEmit`。
+- `git-full` 对应 `scripts/codex-validate-full.ps1`，用于大版本、发版、合并主线或 fixture/live acceptance 前的完整验证。
+- 证据资产不参与 fast 的文件数、domain 判定或测试选择，包括 `output/ui-artifact-trace/**`、`output/logs/grit-coder/**`、`harness/reports/**`、项目内 `designs/**`，以及证据型 `artifacts/**` 文件。
+- pre-push 只调用 fast；当 fast 返回 `not-fast` 时阻止 push 并提示运行 impact/full，紧急推送必须由操作者显式选择 `git push --no-verify`。
 
 - 本文件统一以 UTF-8 保存。
 - 本文件不替代代码，也不替代 `ARCHITECTURE.md`。
@@ -39,6 +55,27 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - **允许偏离登记**：任何与批准稿不同的 live 字段替换、状态合并、模块缺省、顺序调整、密度变化，都必须在矩阵里写成 `approved_deviation` 并说明批准来源；没有来源即为设计漂移。
 - **截图目检结论**：最终报告必须说明已经打开最终截图并肉眼检查。保存截图、DOM 断言或测试绿色都不能单独支撑“UI 稿一致”。
 - **Reviewer 否决权**：reviewer 发现矩阵未覆盖批准稿条件模块、仅验证当前 live 数据、或截图显示明显结构/密度偏差时，必须拒收并要求补齐矩阵或重新实现。
+
+#### 1.3.2 UI 交付前冻结与语义一致性门禁
+
+本次 Phase 0 因子库和因子工厂 UI 复盘确认，返工拖长的主因不是单个 CSS 问题，而是设计稿验收矩阵在实现后才补齐，且缺少状态语义、业务文案、控件真实性和移动端溢出的前置拒收项。后续 design-locked UI 必须在编辑代码前完成以下冻结：
+
+- **前置验收矩阵**：在 `output/ui-artifact-trace/<scope>/trace-matrix.md` 或同等证据文件中先写明设计源、live route、desktop/mobile viewport、shared shell 范围、截图目标、模块顺序、字段/控件清单、状态/颜色/文案映射、交互清单和允许偏离。
+- **状态语义一致性**：同一行、卡片或弹层内的准入、阻塞、风险、来源列必须使用同一套业务语义。因子/PIT 页面推荐口径为 `可调用 / 审慎可调用 / 暂不可调用` 与 `无阻塞 / 需复核 / 源阻塞 / 时点缺口`；不得出现“无阻塞”却同时解释为“覆盖或时点待确认”的前后矛盾。
+- **业务文案闸门**：主表、KPI、弹层和配置页不得向用户暴露 `NaN`、填 0、raw enum、英文 key、内部处理策略或工程说明语气，除非批准稿明确要求。底层实现语义可以保留在 metadata、tooltip 或审计明细，但前台主舞台必须用简洁中文金融风险语言表达。
+- **真实控件闸门**：设计稿中可见的 tab、rail、筛选、搜索、开关、保存、生成快照等控件必须真实可交互；若暂不实现，必须在 Trace Matrix 里登记为批准偏离，不能用静态按钮样式冒充已实现交互。
+- **移动端与溢出闸门**：桌面和移动最终截图都必须打开目检。移动端如表格列宽导致文字重叠、横向滚动或信息不可读，应切换为卡片行/摘要行，而不是简单隐藏 overflow。
+- **条件状态强制可见**：批准稿定义的弹层默认 tab、READY/WARN/BLOCKED 行、空态/错误态、dirty close、保存成功和筛选搜索结果必须至少覆盖代表状态。live 数据缺少状态时，使用可审计 fixture/种子数据；无法构造时标记验收 blocked。
+
+#### 1.3.3 UI 开发后 Trace Matrix 签核门禁
+
+`GRIT_Coder` 完成开发后，必须把 Trace Matrix 当作交付签核表，而不是事后说明材料。只要用户要求“100% 一致”，或任务引用批准 UI 稿，交付前必须执行以下规则：
+
+- **逐项签核**：Trace Matrix 每一行必须有 `PASS / FAIL / BLOCKED / NOT_CHECKED` 状态、证据路径和简短结论。只有 `FAIL=0`、`BLOCKED=0`、`NOT_CHECKED=0` 时，才能声明“UI 稿 100% 一致”。
+- **不得自我放行**：`GRIT_Coder` 自验只是进入正式 review 的前置条件；不能用“Would reviewer refuse this? No”代替逐项矩阵证据。若存在 reviewer/Verification owner，必须允许其基于任何未签核项拒收。
+- **截图必须目检**：最终 desktop/mobile 截图必须被打开并检查模块顺序、密度、字体、字号、留白、滚动、重叠、弹层默认态和条件状态。未目检的截图按 `NOT_CHECKED` 处理。
+- **偏离即失败**：任何未登记批准来源的视觉、文案、状态、控件或响应式偏离，均记为 `FAIL`。不能把“功能可用”或“数据真实”作为设计稿偏离的默认豁免。
+- **交付声明格式**：UI 交付最终说明必须包含 Trace Matrix 路径、设计截图、live 截图、签核统计、未通过项或批准偏离。缺少这些信息时，默认 UI 验收未完成。
 
 所有 UI 实现页面（新增、改造、修复、重构）只要存在 `DESIGN.md`、批准 HTML/SPEC、截图、设计稿或用户给出的目标页面，就必须把这些材料作为 UI 实施硬基线，不能只把它们当作参考图。
 
@@ -97,6 +134,15 @@ Codex 在本仓库的默认阅读顺序固定如下：
 | `codex-validate-fast.ps1` | 日常推云默认入口，保留 fetch/merge-base/ahead-behind、diff check 与按改动范围选择后端/前端校验 | pre-push 会在 CHANGELOG/版本快照无待提交后调用 committed scope |
 | `codex-validate-full.ps1` | 大改、发版或合并前入口，复用固定 backend/frontend 脚本并默认并行执行 | 需要串行排障时传 `-Sequential` |
 | `README.md` 中的 Codex smoke 描述 | 仍偏旧 | 若与脚本行为冲突，以 `scripts/codex-*.ps1` 和本文件为准 |
+
+### 1.5.1 Phase 0 F1 与算子配置当前真相
+
+- Phase 0 数据链路为 `PIT 数据源 -> F1 原始字段目录 -> 算子注册表/配置快照 -> Factor Factory Run 快照引用`，不新建第二套因子工厂运行系统。
+- `POST /admin/pit-preprocessing-runs` 会生成 `pit_preprocessing_runs` 批次与 `f1_raw_factor_catalog_snapshots`/`f1_raw_factor_fields` 目录。`GET /factors/f1-catalog/latest` 与 `GET /factors/f1-catalog` 是前端 F1 tab 的查询入口。
+- F1 原始字段不使用 RankIC/IR/OOS 作为准入硬门槛；只治理 PIT、coverage、publish_date/available_at、缺失阻塞和未来函数风险。缺失 L1 必须保持 `NaN` 语义，并标记 `DATA_SOURCE_BLOCKED`。
+- `GET/PUT /factor-factory/operator-config` 保存默认 profile 草稿；`POST /factor-factory/operator-config/snapshots` 生成不可变 `operator_config_snapshot_id`。默认只启用 `TS_Return`、`TS_Rank`、`TS_Corr`，窗口为 `[3,5,10,21,63,126,252]`，默认 depth 为 `2`。
+- `POST /factor-factory/run-now` 与每日自动化会把 `f1_catalog_snapshot_id`、`operator_config_snapshot_id`、启用算子、窗口空间、默认 depth、阻塞字段策略写入 `factor_factory_runs.request_json.config_snapshot` 与 summary；`config_signature` 包含两个快照 ID。
+- `DATA_SOURCE_BLOCKED` 的 F1 字段会按配置策略从 `source_factor_ids` 中排除，挖掘候选仍必须走 `sandbox -> quarantine -> publish`。
 
 ### 1.6 CHANGELOG 维护规则
 
@@ -265,6 +311,8 @@ Codex 对话默认不要直接反复重启本地脚本。先使用 `powershell -
 | `SEC_USER_AGENT` | SEC EDGAR 身份/生命周期确权 user agent，必须包含可联系邮箱；只读环境变量，不落库 |
 | `GRIT_ENABLE_STOOQ_ONLINE` | 设为 `1` / `true` / `yes` / `on` 后，Stooq offline ZIP 不可用时允许按单标的在线 CSV 补丁 |
 | `GRIT_STOOQ_ONLINE_CACHE_DIR` | 覆盖 Stooq 在线 CSV manifest/cache 目录；默认 `.tmp/pit-bulk-cache/stooq` |
+| `EODHD_API_TOKEN` / `EODHD_API_KEY` | EODHD 退市标的价格、分红拆分与基础面授权源；只读取环境变量，不落库 |
+| `GRIT_ENABLE_YAHOO_HTML_HISTORY` | 允许 Yahoo 历史页作为最后观测探针；只有解析到带日期的 OHLCV 行时才能落正式价格点 |
 | `FRED_API_KEY` | OpenBB FRED 固定收益曲线凭证，运行时映射到 `fred_api_key`，不写入本地 OpenBB 设置文件 |
 | `GRIT_PYTHON_RUNTIME_SOURCE` | 为 QuickStart 指定可复制的 Python runtime 来源 |
 | `GRIT_OPTIMIZATION_STEP_DELAY_SECONDS` | 覆盖优化 trial 之间的人工延迟；默认运行态为 `0`，测试态保持极小延迟以稳定观察进度刷新 |
@@ -458,7 +506,7 @@ OpenBB 是可选 extra，不属于默认安装面。需要真实 OpenBB 验收�
 - 多因子创建页只接受治理任务传入的因子、方向和建议权重作为草稿预填，仍必须走预览、PIT 门禁和人工确认；不得直接覆盖生产策略版本，下线因子必须被 preview/create 拒绝或排除。
 - 本轮后端切片覆盖 `tests/test_factor_factory_api.py`、`tests/test_factor_mining_api.py`、`tests/test_factor_quarantine_api.py` 与 `tests/test_factor_research_api.py` 的工厂自动化、B1-B4 read-model、F1 PIT-only 发布门禁、L2 标准算子链、L3 组合手段、fitness、Auto-Residual、检疫历史查询、治理执行、软下线和策略模型阻断；前端切片为 `web/src/factor.factory.test.tsx`、`web/src/factor.model-builder.test.tsx` 与 `web/src/app.routes.foundation.test.tsx` 的工厂路由兼容、自动化按钮、固定高度生产台、默认收起打分卡、一键送检、一键发布、日期/因子名/结果筛选、详情弹层、治理任务、二次确认、路由预填、热力图筛选和检疫工作台断言。固定验证仍使用 `scripts/codex-test-backend.ps1`、`scripts/codex-test-frontend.ps1`，契约变更后补 `-StrictGlobalTypes`。
 - 默认五类常用因子固定使用 7 个 baseline 分层描述符 canonical ID：`s_val_ep_ltm_raw`、`s_val_bp_latest_raw`、`s_mom_12m1m_rank`、`s_qlty_roe_ltm_raw`、`s_qlty_fcfy_ttm_raw`、`s_vol_252d_rank` 与 `s_size_cur_log`。Factor Zoo 种子层可继续 additive 扩展 beta、投资、流动性、alpha blend 等自研描述符，但必须仍走本项目白名单表达式引擎，不能引入外部 factor 包或第三方 factor 代码。旧默认 ID 只作为 alias 兼容读取，不能出现在 `GET /factors` 列表展示中。`POST /factors` 必须携带 `source_category_metric_window_operator` 描述符，人工因子 ID 由 `m_<category>_<metric>_<window>_<operator>` 生成，重复 descriptor 返回 409。
-- 基础面 PIT 数据平面由 `ds-fundamentals`、`dataset_fundamental_points` 与 `dataset_fundamental_coverage` 承载；基本面点位必须有 `available_at`，诊断只能读取 `available_at <= observation_date/as_of_date` 的观测，不能用财报期末日替代可得日。市值默认由复权收盘价乘 `shares_outstanding` 推导，供应商市值只保留差异；企业价值优先使用供应商 EV，缺失时回退为 `MarketCap + TotalDebt - CashAndEquivalents`。若 `ds-fundamentals` 缺失或字段不全，应显示明确的 `基础面 PIT 缺口` 并阻止诊断。
+- 基础面 PIT 数据平面由 `ds-fundamentals`、`dataset_fundamental_points` 与 `dataset_fundamental_coverage` 承载；基本面点位必须有 `available_at`，诊断只能读取 `available_at <= observation_date/as_of_date` 的观测，不能用财报期末日替代可得日。市值默认由复权收盘价乘 `shares_outstanding` 推导，供应商市值只保留差异；企业价值优先使用供应商 EV，缺失时回退为 `MarketCap + TotalDebt - CashAndEquivalents`。若 `ds-fundamentals` 缺失或字段不全，应显示明确的 `基础面 PIT 缺口` 并阻止诊断；若 rawF2 缺口已通过 `fundamental_gap_policy` 分类为 ETF/基金 `financial_logic=N/A` 或旧退市 `Thin_Data_Stock`，不得补造财务行，只能开放量价类因子并在 readiness 中展示 raw 覆盖率与逻辑覆盖率。
 - 表达式引擎统一供诊断、挖掘和多因子打分使用，白名单只允许价格字段、基础四则、`Lag`、`Return`、`Std`、`Log`、`Rank`、`Winsorize`、`ZScore` 等安全算子；必须拒绝 `import`、`eval`、`__`、分号、未知字段、未知算子、过深 AST 与 `t+N` 未来引用。行业中性化在缺少 PIT 行业字段时只能返回未执行 blocker，不能展示已执行。
 - 前台因子状态统一使用四类：`robust/稳健`、`needs_calibration/待校准`、`decayed/失效`、`sandbox/沙箱`；软下线的 `DEPRECATED/PRUNED` 只在已下线 tab 以“已下线/冗余挂起”展示，并保留下线原因与时间。高相关、同族重叠、IC/IR 不稳定、换手衰减、coverage 边缘和诊断过期是 warning；在因子工厂发布链路中 PIT 缺口是 diagnostic warning 而非单独 hard blocker，但未来函数、不可回放/current-only 字段、unsafe expression、缺失 `available_at`、启用中性化但缺行业 PIT、下线因子参与策略创建，以及检疫硬拒绝项仍是 hard blocker。
 - `POST /factor-models` 必须复用现有 `strategies` 与 `strategy_parameter_versions`，写入 `strategy_type=MULTI_FACTOR` 和参数快照；创建前必须重新跑 preview，并消费 `strategy_creation_risk`。只有 hard blocker 或启用行业中性化但缺 PIT 行业字段时拒绝物化；高相关、同族重叠和 `VERIFIED_PIT_WINDOW_INCOMPLETE` 只提示风险，不能阻断创建。当 PIT 价格缺口仅落在非核心成员、核心/历史核心缺口为 0 且非核心缺口市值权重为 0 时，`strategy_creation_risk` 必须把 `PRICE_SNAPSHOT_NOT_READY` / `PIT_GATE_BLOCKED` 转为 warning，发布 `summary_label=低风险准入` 并允许创建；行业中性化缺字段、基础面 PIT、unsafe/current-only 仍保持硬阻断。`#/factor-models/new` 本期只新增/替换右侧策略创建风险模块，选择因子、权重预览、中性化控制和创建按钮结构不得跟随设计稿扩展重做。`#/strategies` 新建策略弹层中的“创建多因子策略”只跳转 `#/factor-models/new`，不得调用旧 creation session。
@@ -775,6 +823,8 @@ Factor routes: `#/factors/factory` is the canonical production workbench. `#/fac
 - `Stooq` reads `GRIT_STOOQ_US_DAILY_ZIP` first, then prefers the repo-local archive at `data/vendor/stooq/d_us_txt.zip`, and only falls back to `~/Downloads/d_us_txt.zip`. The provider reads the ZIP archive in place and does not require manual extraction.
 - `Stooq` online CSV fallback is opt-in only. It is enabled by `GRIT_ENABLE_STOOQ_ONLINE=1` when the offline ZIP is unavailable, fetches one symbol at a time using the `.US` suffix, writes a manifest/cache under `.tmp/pit-bulk-cache/stooq` by default, and remains price-only.
 - `Stooq` must not be counted as a company-action source. It emits daily price bars only, stores `adj_close` as a close proxy, and is excluded from `incremental` current-window refreshes.
+- `EODHD` is a paid optional delisted-aware provider. When `EODHD_API_TOKEN` or `EODHD_API_KEY` is configured, the runtime can try `SYMBOL.US` and `SYMBOL_old.US`, parse EOD OHLCV, and attach dividend/split evidence. It stays behind explicit credentials and must not hide quota or entitlement failures.
+- Yahoo historical HTML is observation-only unless a parser extracts dated OHLCV rows. It is controlled by `GRIT_ENABLE_YAHOO_HTML_HISTORY` and should not turn a 404 chart endpoint into a synthetic READY row.
 - Company-action snapshot completeness is now defined by formal `dividend/split/reverse_split` probe coverage, not by “every symbol must have at least one event row”.
 - When an action-capable provider successfully probes a symbol and finds no formal events, the pipeline writes a `dataset_symbol_coverage` row with `coverage_kind=corporate_probe` and `probe_status=complete_no_events`.
 - `earnings_report` and `report_filed` remain stored as supplementary action rows, but they do not satisfy formal company-action completeness on their own.
@@ -790,7 +840,7 @@ Factor routes: `#/factors/factory` is the canonical production workbench. `#/fac
 ## 2026-05-05 PIT External Source Repair
 
 - `/pit-data` additive exposes `external_source_readiness` for the PIT external-source path. It summarizes Kaggle credential presence, Kaggle cache manifests, S&P 500 historical component Matrix coverage, DuckDB/Parquet catalog readiness, Polygon credential presence, source-specific blockers, and the top critical Polygon repair candidates.
-- PIT 修复队列统一按 `Tiingo -> FMP -> Nasdaq WIKI/Tables EOD/Stooq/Kaggle -> Finnhub/SEC/CIK -> Polygon` 展示下一步动作。`queue_sample[]` 可选返回 `next_provider`、`provider_priority`、`required_evidence` 与 `trust_blocker`；Nasdaq WIKI/Tables EOD/Stooq/Kaggle 是 price-only，Finnhub/SEC/CIK 是 identity-only 或辅助身份源，这些来源都不能单独升级 Full Ready。
+- PIT 修复队列统一按 `Tiingo -> FMP -> Nasdaq WIKI/Tables EOD/Stooq/Kaggle -> Finnhub/SEC/CIK -> EODHD -> Polygon` 展示下一步动作。`queue_sample[]` 可选返回 `next_provider`、`provider_priority`、`required_evidence` 与 `trust_blocker`；Nasdaq WIKI/Tables EOD/Stooq/Kaggle 是 price-only，Finnhub/SEC/CIK 是 identity-only 或辅助身份源，EODHD/Polygon 属于显式授权补数 lane，这些来源都不能在缺少证据时单独伪装 Full Ready。
 - `zero_event_certificates[]` 是真实投影而不是空数组占位：候选应包含 symbol、CIK、成员退出日期、last filing evidence、price/action negative result、结论和不可恢复原因。它只说明“可进入证书确认流程”，不能把抓取失败或 SEC 停止申报直接写成破产/无事件结论。
 - Credential handling is status-only. `KAGGLE_API_TOKEN`, `KAGGLE_USERNAME`/`KAGGLE_KEY`, `~/.kaggle/access_token`, `~/.kaggle/kaggle.json`, `MASSIVE_API_KEY`, `NASDAQ_DATA_LINK_API_KEY`, and `FINNHUB_API_KEY` may be detected as present/missing/invalid, but secret values must never be written to tracked repo files, logs, SQLite payloads, manifests, screenshots, or docs. Prefer Windows User environment variables for persistence; `QuickStart-Grit.local.ps1` is allowed only as a gitignored, operator-owned local override. Any token pasted in chat or logs must be revoked before use.
 - The fixed PIT bulk cache directory is `.tmp/pit-bulk-cache` unless `GRIT_PIT_BULK_CACHE_DIR` is explicitly set. If a recovered or copied cache package sits under `.tmp/pit-bulk-cache/grit-pit-bulk-cache`, PIT readiness resolves that child as the active cache when the outer root has no direct artifacts, and the PIT overview cache signature watches the same resolved directory. Large Kaggle ZIP/CSV files, DuckDB catalogs, manifests, and partitioned Parquet output stay inside the project temp area rather than `C:\tmp`.

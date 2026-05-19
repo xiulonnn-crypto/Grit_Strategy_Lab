@@ -47,6 +47,11 @@ DEFAULT_COMPOSITION_RECIPE_FAMILIES = (
     "residual_neutralized",
     "ts_denoise",
 )
+VALUE_VOL_WNZT_RATIO_EXPRESSION = (
+    "Rank(Neutralize(ZScore(Winsorize(s_val_cfp_ltm_raw, 3)))) / "
+    "Rank(Neutralize(ZScore(Winsorize(s_vol_downside_252d_rank, 3))))"
+)
+VALUE_VOL_WNZT_RATIO_COMPACT = re.sub(r"\s+", "", VALUE_VOL_WNZT_RATIO_EXPRESSION).lower()
 _FACTOR_REFERENCE_PATTERN = re.compile(r"\bs_[a-z0-9_]+(?:_raw|_rank)?\b", re.IGNORECASE)
 _BINARY_FACTOR_REFERENCE_PATTERN = re.compile(
     r"^\s*(s_[a-z0-9_]+(?:_raw|_rank)?)\s*([+\-*/])\s*(s_[a-z0-9_]+(?:_raw|_rank)?)\s*$",
@@ -633,12 +638,16 @@ def _composition_template_specs() -> tuple[CompositionCandidateSpec, ...]:
             composition_metadata={"label": "Risk-Adjusted Momentum", "publish_boundary": "manual_after_quarantine"},
         ),
         CompositionCandidateSpec(
-            expression='ZScore(Residual(s_val_cfp_ltm_raw, by="s_size_cur_log"))',
-            source_factor_ids=("s_val_cfp_ltm_raw", "s_size_cur_log"),
+            expression=VALUE_VOL_WNZT_RATIO_EXPRESSION,
+            source_factor_ids=("s_val_cfp_ltm_raw", "s_vol_downside_252d_rank"),
             recipe_kind="template",
             recipe_family="value_anchor",
-            orthogonality_intent="size_neutral_cashflow_value",
-            composition_metadata={"label": "Value-Cashflow Anchor", "publish_boundary": "manual_after_quarantine"},
+            orthogonality_intent="wnzt_value_volatility_ratio",
+            composition_metadata={
+                "label": "Composite Value/Volatility Ratio",
+                "operator_chain": ("W", "N", "Z", "T"),
+                "publish_boundary": "manual_after_quarantine",
+            },
         ),
         CompositionCandidateSpec(
             expression="s_mom_6m_rank - s_vol_downside_252d_rank",
@@ -891,6 +900,11 @@ def _evaluate_factor_mining_expression(
             _series_return(_close_series(symbol_data), int(ts_rank.group(1))),
             int(ts_rank.group(2)),
         )
+
+    if re.sub(r"\s+", "", formula).lower() == VALUE_VOL_WNZT_RATIO_COMPACT:
+        value = _series_from_factor_reference("s_val_cfp_ltm_raw", symbol_data)
+        downside = _series_from_factor_reference("s_vol_downside_252d_rank", symbol_data)
+        return _series_binary(value, downside, "/")
 
     residual = _RESIDUAL_FACTOR_REFERENCE_PATTERN.match(formula)
     if residual:

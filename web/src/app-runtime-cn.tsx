@@ -18,6 +18,7 @@ import type {
   FactorModelOption,
   FactorModelPreview,
   FactorModelPreviewPayload,
+  FactorModelStrategyCreationRisk,
 } from './pages/factor-model-builder-page';
 import { ShellFrameCn } from './shell-frame-cn';
 import type {
@@ -351,11 +352,18 @@ function mapFactorOption(factor: ApiFactorListItem): FactorModelOption {
   const categoryLabel = factorCategoryLabel(factor);
   const rankIc = factorMetricValue(diagnosticSummary.rank_ic);
   const ir = factorMetricValue(diagnosticSummary.ir);
+  const opCompleted = Array.isArray(factor.op_status?.completed)
+    ? factor.op_status.completed.map(String)
+    : [];
   return {
     id: factor.id,
     displayName: factor.name,
     family: categoryLabel,
     categoryLabel,
+    market: factor.market ?? null,
+    tierLevel: factor.tier_level ?? factor.tier_projection?.key ?? null,
+    factorLevel: factor.factor_level ?? factor.factor_level_projection?.key ?? null,
+    opCompleted,
     rankIc,
     ir,
     rankIcLabel: factorMetricLabel('Rank IC', rankIc, 3),
@@ -390,6 +398,7 @@ export async function loadFactorModelOptions(api: ApiClient): Promise<FactorMode
 
 function mapModelPayload(payload: FactorModelPreviewPayload) {
   return {
+    strategy_type: payload.strategyType ?? 'MULTI_FACTOR',
     name: payload.modelName,
     universe: 'SP500',
     rebalance_frequency: payload.rebalanceFrequency,
@@ -404,6 +413,37 @@ function mapModelPayload(payload: FactorModelPreviewPayload) {
       enabled: payload.neutralization.enabled,
       method: 'industry',
     },
+    universe_filter: payload.universeFilter ? {
+      min_adv_usd: payload.universeFilter.minAdvUsd,
+      adv_window: payload.universeFilter.advWindow,
+      exclude_halted: payload.universeFilter.excludeHalted,
+      exclude_otc_pink: payload.universeFilter.excludeOtcPink,
+      exclude_luld_paused: payload.universeFilter.excludeLuldPaused,
+      delisting_window_days: payload.universeFilter.delistingWindowDays,
+      sector_overrides: payload.universeFilter.sectorOverrides,
+    } : undefined,
+    weight_mapping: payload.weightMapping ? {
+      method: payload.weightMapping.method,
+      top_n: payload.topN,
+      sector_cap_pct: payload.weightMapping.sectorCapPct,
+      max_position_pct: payload.weightMapping.maxPositionPct,
+      min_target_weight_pct: payload.weightMapping.minTargetWeightPct,
+      cap_redistribution_mode: payload.weightMapping.capRedistributionMode,
+    } : undefined,
+    rebalance_logic: payload.rebalanceLogic ? {
+      frequency: payload.rebalanceLogic.frequency,
+      calendar_rule: payload.rebalanceLogic.calendarRule,
+      exit_rank_percentile: payload.rebalanceLogic.exitRankPercentile,
+      min_trade_notional_usd: payload.rebalanceLogic.minTradeNotionalUsd,
+    } : undefined,
+    execution_constraints: payload.executionConstraints ? {
+      notional_usd: payload.executionConstraints.notionalUsd,
+      commission_bps: payload.executionConstraints.commissionBps,
+      stamp_tax_bps: payload.executionConstraints.stampTaxBps,
+      base_slippage_bps: payload.executionConstraints.baseSlippageBps,
+      impact_beta: payload.executionConstraints.impactBeta,
+      max_impact_bps: payload.executionConstraints.maxImpactBps,
+    } : undefined,
   };
 }
 
@@ -433,6 +473,10 @@ function mapModelPreview(response: Awaited<ReturnType<ApiClient['previewFactorMo
     ? neutralization.source_names.map(String).filter(Boolean)
     : [];
   const estimatedTurnover = Number(response.estimated_turnover ?? 0);
+  const strategyCreationRisk = response.strategy_creation_risk as FactorModelStrategyCreationRisk | undefined;
+  const diagnosticSummary = (response.diagnostic_summary ?? strategyCreationRisk?.diagnostic_summary ?? null) as Record<string, unknown> | null;
+  const sectorCapForecast = (response.sector_cap_forecast ?? strategyCreationRisk?.sector_cap_forecast ?? null) as Record<string, unknown> | null;
+  const costForecast = (response.cost_forecast ?? strategyCreationRisk?.cost_forecast ?? null) as Record<string, unknown> | null;
   return {
     status: String(response.status ?? 'UNKNOWN'),
     coveragePct: estimatedCoverage > 1 ? estimatedCoverage : estimatedCoverage * 100,
@@ -460,7 +504,10 @@ function mapModelPreview(response: Awaited<ReturnType<ApiClient['previewFactorMo
       sourceNames: neutralizationSourceNames,
     },
     warnings: Array.isArray(response.warnings) ? response.warnings.map(String) : [],
-    strategyCreationRisk: response.strategy_creation_risk,
+    strategyCreationRisk,
+    diagnosticSummary,
+    sectorCapForecast,
+    costForecast,
   };
 }
 

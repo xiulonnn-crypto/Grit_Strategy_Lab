@@ -13,6 +13,7 @@ from grit_backtest_platform.factor_mining import (
     FactorMiningRunner,
     FactorMiningJobCreateRequest,
     FactorMiningJobResult,
+    VALUE_VOL_WNZT_RATIO_EXPRESSION,
     create_synthetic_market_data,
     factor_ir_from_rank_ic,
     factor_mining_job_id_for_request,
@@ -293,7 +294,7 @@ def test_factor_mining_hybrid_composition_emits_templates_and_pairwise_candidate
 
     assert result.status == "COMPLETED"
     assert "s_mom_6m_rank * s_qlty_roe_ltm_raw" in expressions
-    assert 'ZScore(Residual(s_val_cfp_ltm_raw, by="s_size_cur_log"))' in expressions
+    assert VALUE_VOL_WNZT_RATIO_EXPRESSION in expressions
     assert any(candidate.recipe_kind == "exploratory_pairwise" for candidate in composed)
     assert all(candidate.source_factor_ids or candidate.recipe_family == "ts_denoise" for candidate in composed)
     assert len({(candidate.expression, tuple(sorted(candidate.source_factor_ids))) for candidate in composed}) == len(composed)

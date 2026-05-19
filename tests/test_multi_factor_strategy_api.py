@@ -14,7 +14,12 @@ from tests.api_test_support import (
     refresh_snapshots,
     submit_backtest,
 )
-from tests.test_factor_research_api import mark_price_snapshot_incomplete, seed_ready_pit_data
+from tests.test_factor_research_api import (
+    governance_ready_summary,
+    mark_price_snapshot_incomplete,
+    seed_factor_diagnostic_summary,
+    seed_ready_pit_data,
+)
 
 
 def _model_payload(
@@ -38,6 +43,104 @@ def _model_payload(
         ],
         "neutralization": {"enabled": neutralization_enabled, "method": "industry"},
     }
+
+
+def _composite_payload(
+    *,
+    cap_redistribution_mode: str = "cash",
+    sector_cap_pct: float = 20.0,
+    top_n: int = 50,
+) -> dict:
+    return {
+        "strategy_type": "COMPOSITE_FACTOR",
+        "name": "Composite factor strategy",
+        "universe": "SP500",
+        "rebalance_frequency": "monthly",
+        "top_n": top_n,
+        "scoring_method": "zscore_weighted",
+        "components": [
+            {"factor_id": "s_mom_12m1m_rank", "weight": 100, "direction": "HIGH_IS_BETTER"},
+        ],
+        "neutralization": {"enabled": False, "method": "industry"},
+        "universe_filter": {
+            "min_adv_usd": 5_000_000,
+            "adv_window": "20D",
+            "exclude_halted": True,
+            "exclude_otc_pink": True,
+            "exclude_luld_paused": True,
+            "delisting_window_days": 30,
+            "sector_overrides": {"utilities": True, "real_estate": False},
+        },
+        "weight_mapping": {
+            "method": "equal_top_k",
+            "sector_cap_pct": sector_cap_pct,
+            "max_position_pct": 8,
+            "min_target_weight_pct": 0.25,
+            "cap_redistribution_mode": cap_redistribution_mode,
+        },
+        "rebalance_logic": {
+            "frequency": "monthly",
+            "calendar_rule": "first_trading_day",
+            "exit_rank_percentile": 20,
+            "min_trade_notional_usd": 10_000,
+        },
+        "execution_constraints": {
+            "notional_usd": 10_000_000,
+            "commission_bps": 1.5,
+            "stamp_tax_bps": 0,
+            "base_slippage_bps": 2.5,
+            "impact_beta": 0.65,
+            "max_impact_bps": 75,
+        },
+    }
+
+
+def _patch_composite_factor_admission(client, monkeypatch, factor_id: str = "s_mom_12m1m_rank") -> None:
+    service = client.app.state.service
+    original_list_factors = service.list_factors
+
+    def patched_list_factors(*args, **kwargs):
+        result = original_list_factors(*args, **kwargs)
+        items = []
+        for item in result.get("items") or []:
+            row = dict(item)
+            if row.get("id") == factor_id:
+                row.update(
+                    {
+                        "market": "US",
+                        "tier_level": "F3",
+                        "tier_projection": {"key": "F3"},
+                        "factor_level": "S",
+                        "factor_level_projection": {"key": "S"},
+                        "diagnostic_status": "COMPLETED",
+                        "op_status": {
+                            "completed": ["W", "N", "Z", "T"],
+                            "missing": [],
+                            "lights": [
+                                {"code": code, "key": code, "label": code, "active": True, "status": "done"}
+                                for code in ["W", "N", "Z", "T"]
+                            ],
+                        },
+                        "latest_diagnostic_summary": {
+                            **dict(row.get("latest_diagnostic_summary") or {}),
+                            "status": "COMPLETED",
+                            "rank_ic": 0.061,
+                            "ic": 0.052,
+                            "ir": 1.34,
+                            "coverage": 0.92,
+                            "group_returns": [
+                                {"group": "Technology", "mean_return": 0.024, "sample_count": 120},
+                                {"group": "Utilities", "mean_return": -0.018, "sample_count": 48},
+                                {"group": "Real Estate", "mean_return": -0.012, "sample_count": 36},
+                            ],
+                            "risk_flags": ["Utilities underperformed in diagnostics"],
+                        },
+                    }
+                )
+            items.append(row)
+        return {**result, "items": items}
+
+    monkeypatch.setattr(service, "list_factors", patched_list_factors)
 
 
 def _seed_direct_price_history(client) -> None:
@@ -283,6 +386,31 @@ def _patch_factor_strategy_risks(client, monkeypatch, risks_by_factor: dict[str,
     monkeypatch.setattr(service, "list_factors", patched_list_factors)
 
 
+def test_composite_factor_sector_cap_refill_preserves_cut_weight_and_full_investment(tmp_path) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    service = client.app.state.service
+
+    capped, cut_weight, residual_cash, sectors = service._apply_factor_weight_caps(
+        {"AAPL": 0.30, "MSFT": 0.30, "JNJ": 0.20, "JPM": 0.20},
+        {"AAPL": 0.9, "MSFT": 0.8, "JNJ": 0.7, "JPM": 0.6},
+        {"AAPL": "Technology", "MSFT": "Technology", "JNJ": "Health Care", "JPM": "Financials"},
+        max_position_pct=100,
+        sector_cap_pct=40,
+        redistribution_mode="proportional_refill",
+    )
+
+    by_sector: dict[str, float] = {}
+    for symbol, weight in capped.items():
+        sector = {"AAPL": "Technology", "MSFT": "Technology", "JNJ": "Health Care", "JPM": "Financials"}[symbol]
+        by_sector[sector] = by_sector.get(sector, 0.0) + weight
+    assert by_sector["Technology"] == pytest.approx(0.40)
+    assert sum(capped.values()) == pytest.approx(1.0)
+    assert cut_weight == pytest.approx(0.20)
+    assert residual_cash == pytest.approx(0.0)
+    assert sectors[0]["sector"] == "Technology"
+    assert sectors[0]["cut_pct"] == pytest.approx(20.0)
+
+
 def test_factor_model_preview_returns_gate_status_and_weight_projection(tmp_path) -> None:
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
@@ -319,6 +447,67 @@ def test_factor_model_preview_returns_gate_status_and_weight_projection(tmp_path
         item["code"] == "MISSING_INDUSTRY_PIT"
         for item in neutralized["strategy_creation_risk"]["hard_blockers"]
     )
+
+
+def test_composite_factor_preview_reports_admission_diagnostic_sector_cap_and_cost(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    _seed_sp500_industry_pit_metadata(client)
+    _patch_composite_factor_admission(client, monkeypatch)
+
+    preview = assert_ok(client.post("/factor-models/preview", json=_composite_payload()))
+
+    assert preview["strategy_type"] == "COMPOSITE_FACTOR"
+    assert preview["status"] == "READY"
+    risk = preview["strategy_creation_risk"]
+    assert risk["eligibility"]["can_create"] is True
+    assert risk["eligibility"]["completed_ops"] == ["N", "T", "W", "Z"]
+    assert risk["eligibility"]["missing_ops"] == []
+    assert preview["diagnostic_summary"]["weak_sectors"]
+    assert preview["diagnostic_summary"]["weak_sectors"][0]["group"] in {"Utilities", "Real Estate"}
+    assert preview["sector_cap_forecast"]["top_n"] == 50
+    assert preview["sector_cap_forecast"]["cap_redistribution_mode"] == "cash"
+    assert preview["sector_cap_forecast"]["residual_cash_pct"] >= 0
+    assert preview["cost_forecast"]["average_slippage_bps"] > 0
+
+    blocked_payload = _composite_payload()
+    blocked_payload["components"] = [
+        {"factor_id": "s_mom_12m1m_rank", "weight": 50, "direction": "HIGH_IS_BETTER"},
+        {"factor_id": "s_val_ep_ltm_raw", "weight": 50, "direction": "HIGH_IS_BETTER"},
+    ]
+    blocked = assert_ok(client.post("/factor-models/preview", json=blocked_payload))
+
+    assert blocked["status"] == "BLOCKED"
+    assert blocked["strategy_creation_risk"]["eligibility"]["can_create"] is False
+    blocker_codes = {item["code"] for item in blocked["strategy_creation_risk"]["hard_blockers"]}
+    assert "COMPOSITE_SINGLE_FACTOR" in blocker_codes
+
+
+def test_composite_factor_preview_accepts_wnzt_ffblend_seed(tmp_path) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    _seed_sp500_industry_pit_metadata(client)
+    assert_ok(client.get("/factors"))
+    seed_factor_diagnostic_summary(
+        client,
+        "s_alpha_ffblend_resid_mkt_rank",
+        governance_ready_summary(rank_ic=0.058, ir=1.18, coverage=98.0),
+        run_id="diag-alpha-ffblend-wnzt",
+    )
+
+    payload = _composite_payload()
+    payload["components"] = [
+        {"factor_id": "s_alpha_ffblend_resid_mkt_rank", "weight": 100, "direction": "HIGH_IS_BETTER"},
+    ]
+    preview = assert_ok(client.post("/factor-models/preview", json=payload))
+
+    assert preview["status"] == "READY"
+    risk = preview["strategy_creation_risk"]
+    assert risk["eligibility"]["can_create"] is True
+    assert risk["eligibility"]["completed_ops"] == ["N", "T", "W", "Z"]
+    assert risk["eligibility"]["missing_ops"] == []
+    assert preview["score_preview"]
+    assert len({item["score"] for item in preview["score_preview"]}) > 1
 
 
 def test_factor_model_industry_neutralization_uses_seeded_sp500_gics_pit(tmp_path) -> None:
@@ -781,6 +970,63 @@ def test_legacy_multi_factor_strategy_rows_backfill_default_top_n_for_library_an
         field for field in detail["multi_factor_parameter_ranges"] if field["key"] == "top_n"
     )
     assert top_n_range["current"] == 8
+
+
+def test_composite_factor_create_runs_backtest_and_optimization_path(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    _seed_sp500_industry_pit_metadata(client)
+    _patch_composite_factor_admission(client, monkeypatch)
+
+    created = assert_ok(
+        client.post(
+            "/factor-models",
+            json=_composite_payload(cap_redistribution_mode="proportional_refill", sector_cap_pct=35),
+        )
+    )
+
+    assert created["strategy_type"] == "COMPOSITE_FACTOR"
+    assert created["parameters"]["strategy_type"] == "COMPOSITE_FACTOR"
+    assert created["parameters"]["factor_model_type"] == "COMPOSITE_FACTOR"
+    assert created["parameters"]["factor_ids"] == ["s_mom_12m1m_rank"]
+    assert created["parameters"]["weights"] == {"s_mom_12m1m_rank": 100}
+    assert created["parameters"]["top_n"] == 50
+    assert created["parameters"]["weight_mapping"]["sector_cap_pct"] == 35
+    assert created["parameters"]["weight_mapping"]["cap_redistribution_mode"] == "proportional_refill"
+    assert created["parameters"]["sector_cap_forecast"]["cap_redistribution_mode"] == "proportional_refill"
+    assert created["parameters"]["cost_forecast"]["average_slippage_bps"] > 0
+    assert created["multi_factor_profile"]["coverage_summary"]["factor_count"] == 1
+
+    strategy_id = created["id"]
+    refresh_snapshots(client, mode="repair", targets=["corporate"])
+    _seed_direct_price_history(client)
+
+    preview = preview_backtest(
+        client,
+        strategy_id,
+        start_date="2024-01-02",
+        end_date="2024-06-28",
+    )
+    assert preview["multi_factor_precheck"]["factor_count"] == 1
+    assert preview["multi_factor_precheck"]["status"] in {"PASS", "WARN"}
+
+    run = submit_backtest(
+        client,
+        strategy_id,
+        start_date="2024-01-02",
+        end_date="2024-06-28",
+    )
+    assert run["parameter_snapshot"]["strategy_type"] == "COMPOSITE_FACTOR"
+    assert run["parameter_snapshot"]["weight_mapping"]["sector_cap_pct"] == 35
+
+    job = create_optimization_job(
+        client,
+        strategy_id,
+        budget_combinations=1,
+        wait_until_complete=False,
+    )
+    keys = {field["key"] for field in job["request"]["search_space"]}
+    assert {"top_n", "scoring_method", "rebalance_frequency"}.issubset(keys)
 
 
 def test_factor_model_create_materializes_existing_strategy_and_rejects_missing_industry_pit(tmp_path, monkeypatch) -> None:

@@ -1,0 +1,9 @@
+{
+  "status": "draft_for_review",
+  "canonical_html": "factor-phase0-f1-operator-ui-preview.html",
+  "canonical_pngs": [
+    "factor-library-f1-raw-tab.png",
+    "factor-factory-config-modal.png"
+  ],
+  "notes": "已完成中文金融台账语言优化；待用户确认后再将稳定设计规则同步到 DESIGN.md。"
+}

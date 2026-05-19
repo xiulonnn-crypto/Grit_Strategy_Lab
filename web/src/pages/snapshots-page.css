@@ -787,6 +787,10 @@
   gap: 12px;
 }
 
+.snapshots-equity-view .layer-stack {
+  gap: 8px;
+}
+
 .snapshots-equity-view .layer-row,
 .snapshots-equity-view .alert-card,
 .snapshots-equity-view .evidence-card {
@@ -796,6 +800,11 @@
   padding: 14px;
   display: grid;
   gap: 10px;
+}
+
+.snapshots-equity-view .layer-row {
+  gap: 6px;
+  padding: 10px 12px;
 }
 
 .snapshots-equity-view .layer-row__top,
@@ -808,6 +817,10 @@
   gap: 12px;
 }
 
+.snapshots-equity-view .layer-row__top {
+  align-items: center;
+}
+
 .snapshots-equity-view .layer-row__title,
 .snapshots-equity-view .alert-card__title,
 .snapshots-equity-view .evidence-card__title,
@@ -815,6 +828,10 @@
   display: grid;
   gap: 4px;
   min-width: 0;
+}
+
+.snapshots-equity-view .layer-row__title {
+  gap: 2px;
 }
 
 .snapshots-equity-view .layer-row__title strong,
@@ -831,6 +848,13 @@
   color: var(--muted);
   font-size: 12px;
   line-height: 18px;
+}
+
+.snapshots-equity-view .layer-row__title span {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
 }
 
 .snapshots-equity-view .layer-row__stats {

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { navigateTo } from '../lib/appRouteContext';
 import { useApiClient } from '../lib/demoStoreContext';
 import { formatDateTime } from '../lib/format';
@@ -10,6 +10,8 @@ import type {
   ApiFactorDiagnosticSummary,
   ApiFactorGovernanceAction,
   ApiFactorGovernanceOverview,
+  ApiF1CatalogField,
+  ApiF1CatalogResponse,
   ApiFactorListItem,
   ApiFactorListResponse,
   ApiPitDataOverview,
@@ -333,6 +335,27 @@ type FactorLifecycleTab = 'all' | 'sandbox' | 'online' | 'offline' | 'to_be_veri
 type FactorLifecycleKey = Exclude<FactorLifecycleTab, 'all'>;
 type FactorTierFilter = 'all' | 'F1' | 'F2' | 'F3';
 type FactorLedgerStatusMode = 'lifecycle' | 'data_quality';
+type F1CatalogFilters = { layer: string; status: string; q: string };
+
+function initialFactorTierFilterFromHash(): FactorTierFilter {
+  if (typeof window === 'undefined') return 'F1';
+  const hash = window.location.hash || '';
+  const queryIndex = hash.indexOf('?');
+  if (queryIndex < 0) return 'F1';
+  const params = new URLSearchParams(hash.slice(queryIndex + 1));
+  const layer = String(params.get('layer') || '').toUpperCase();
+  if (layer === 'ALL') return 'all';
+  return layer === 'F1' || layer === 'F2' || layer === 'F3' ? layer : 'F1';
+}
+
+function factorLibraryErrorMessage(error: unknown, fallback: string): string {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  if (!message) return fallback;
+  if (/failed to fetch|networkerror|load failed/i.test(message)) {
+    return `${fallback}：网络请求失败，请确认本地后端服务已启动。`;
+  }
+  return /[\u4e00-\u9fa5]/.test(message) ? message : `${fallback}：${message}`;
+}
 const RAW_DATA_QUALITY_LABELS: Partial<Record<FactorLifecycleKey, string>> = {
   online: '正式诊断可用',
   to_be_verified: '待校准',
@@ -355,9 +378,9 @@ const F1_DATA_QUALITY_TABS: Array<{ key: FactorLifecycleTab; label: string; coun
 ];
 
 const FACTOR_LAYER_TABS: Array<{ key: 'F1' | 'F2' | 'F3'; title: string; description: string; countKey: 'f1Count' | 'f2Count' | 'f3Count' }> = [
-  { key: 'F1', title: 'F1 原始库', description: 'API/DB 直连字段，只增不改', countKey: 'f1Count' },
-  { key: 'F2', title: 'F2 改造库', description: '去极值、中性化、标准化与排名', countKey: 'f2Count' },
-  { key: 'F3', title: 'F3 组合库', description: '风格复合、风险调节与背离惩罚', countKey: 'f3Count' },
+  { key: 'F1', title: 'F1 原始库', description: 'PIT 原始字段，按时点与覆盖准入', countKey: 'f1Count' },
+  { key: 'F2', title: 'F2 改造库', description: '标准处理后的研究字段', countKey: 'f2Count' },
+  { key: 'F3', title: 'F3 组合库', description: '组合层 Alpha 与审计资产', countKey: 'f3Count' },
 ];
 
 const FACTOR_TIER_FILTERS: Array<{ key: FactorTierFilter; label: string }> = [
@@ -826,6 +849,7 @@ const MANUAL_FACTOR_DESCRIPTION_BY_ID: Record<string, string> = {
   m_vol_asym_updown_60d_raw: '逻辑：分别计算上涨日和下跌日收益波动。作用：识别下跌波动更剧烈的恐慌盘，可作为回撤惩罚项。',
   m_liq_vol_conc_21d_raw: '逻辑：计算成交量与绝对收益率相关性。作用：筛选大幅价格变动伴随真实放量、机构介入度较高的标的。',
   m_vol_ret_skew_252d_raw: '逻辑：衡量过去一年收益率分布偏度。作用：过滤高偏度、博彩型、暴涨暴跌标的。',
+  s_f2_mom_ovn_mean_21d: '逻辑：衡量过去一个月平均隔夜收益。作用：捕捉非交易时段信息流入，但诊断中保留日内承接风险提示。',
   m_alpha_overnight_21d_raw: '逻辑：衡量过去一个月平均隔夜收益。作用：捕捉非交易时段信息流入，但诊断中保留日内承接风险提示。',
 };
 
@@ -1835,6 +1859,27 @@ function isFactorModelStrategySuggestionCandidate(
     !isFactorOffline(factor) &&
     !strategyUsageFactorIds.has(factor.id)
   );
+}
+
+function isCompositeFactorStrategyCandidate(factor: ApiFactorListItem): boolean {
+  if (isFactorOffline(factor)) return false;
+  const market = String(factor.market ?? '').toUpperCase();
+  const tier = String(factor.tier_level ?? factor.tier_projection?.key ?? '').toUpperCase();
+  const level = String(factor.factor_level ?? factor.factor_level_projection?.key ?? '').toUpperCase();
+  const diagnostic = String(factor.diagnostic_status ?? factor.latest_diagnostic_summary?.status ?? '').toUpperCase();
+  const completedOps = new Set(
+    (factor.op_status?.completed ?? [])
+      .map((item) => String(item).toUpperCase())
+      .filter(Boolean),
+  );
+  return market === 'US' && tier === 'F3' && ['S', 'A'].includes(level) && diagnostic === 'COMPLETED' && ['W', 'N', 'Z', 'T'].every((code) => completedOps.has(code));
+}
+
+function buildCompositeFactorStrategyRoute(factor: ApiFactorListItem): string {
+  const factorId = encodeURIComponent(factor.id);
+  const modelName = encodeURIComponent(`${factor.name || factor.id} 组合因子策略`);
+  const direction = encodeURIComponent(String(factor.direction ?? 'HIGH_IS_BETTER'));
+  return `/factor-models/new?strategy_type=COMPOSITE_FACTOR&source=factor_library&factor_id=${factorId}&factorIds=${factorId}&weights=100&directions=${direction}&modelName=${modelName}`;
 }
 
 function openGovernanceAction(action: ApiFactorGovernanceAction): void {
@@ -4062,6 +4107,338 @@ export function PitCleaningCenterPage({
   );
 }
 
+function f1StateLabel(state: string | undefined | null): string {
+  const key = String(state || '').toUpperCase();
+  if (key === 'READY') return '可调用';
+  if (key === 'READY_WITH_WARNING') return '审慎可调用';
+  if (key === 'OBSERVE') return '观察池';
+  if (key === 'DATA_SOURCE_BLOCKED') return '暂不可调用';
+  if (key === 'MISSING_TIMING') return '时点待补';
+  return key || '待确认';
+}
+
+function f1StateClass(state: string | undefined | null): string {
+  const key = String(state || '').toUpperCase();
+  if (key === 'READY') return 'is-ready';
+  if (key === 'READY_WITH_WARNING' || key === 'OBSERVE') return 'is-warn';
+  return 'is-blocked';
+}
+
+function formatF1Coverage(field: ApiF1CatalogField): string {
+  const ratio = Number.isFinite(field.coverage_ratio) ? field.coverage_ratio : 0;
+  const pctValue = ratio <= 1 ? ratio * 100 : ratio;
+  return `${pctValue.toFixed(1)}%`;
+}
+
+function f1CoverageWidth(field: ApiF1CatalogField): number {
+  const ratio = Number.isFinite(field.coverage_ratio) ? field.coverage_ratio : 0;
+  return Math.min(100, Math.max(0, ratio <= 1 ? ratio * 100 : ratio));
+}
+
+function f1CoverageClass(field: ApiF1CatalogField): string {
+  const width = f1CoverageWidth(field);
+  if (String(field.admission_state).toUpperCase() === 'DATA_SOURCE_BLOCKED') return 'is-blocked';
+  if (width < 90) return 'is-warn';
+  return 'is-ready';
+}
+
+function f1LayerLabel(layer: string | undefined | null): string {
+  const key = String(layer || '').toUpperCase();
+  if (key === 'L1') return 'L1 量价';
+  if (key === 'L2') return 'L2 财务';
+  if (key === 'L3') return 'L3 结构';
+  if (key === 'L4') return 'L4 期权';
+  return key || '未分层';
+}
+
+function f1LayerClass(layer: string | undefined | null): string {
+  const key = String(layer || '').toUpperCase();
+  if (key === 'L2') return 'is-l2';
+  if (key === 'L3') return 'is-l3';
+  if (key === 'L4') return 'is-l4';
+  return 'is-l1';
+}
+
+function f1DisplayText(value: unknown, fallback = '待确认'): string {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return fallback;
+}
+
+function f1SourceRefs(field: ApiF1CatalogField): string[] {
+  const refs = field.source_refs ?? {};
+  const values = [
+    refs.dataset_snapshot_id,
+    refs.source,
+    refs.provider,
+    refs.table,
+  ]
+    .map((value) => f1DisplayText(value, ''))
+    .filter(Boolean);
+  return Array.from(new Set(values)).slice(0, 3);
+}
+
+function f1BlockerView(field: ApiF1CatalogField): { label: string; detail: string; className: string } {
+  const blocker = f1DisplayText(field.blocker_code, '').toUpperCase();
+  const state = f1DisplayText(field.admission_state, '').toUpperCase();
+  const missingCount = Number(field.missing_symbol_count ?? field.missing_symbols?.length ?? 0);
+  const coverage = Number(field.coverage_ratio ?? 0);
+  if (blocker.includes('DATA_SOURCE_BLOCKED') || state.includes('DATA_SOURCE_BLOCKED')) {
+    return { label: '源阻塞', detail: missingCount > 0 ? `缺 ${missingCount} 个标的，暂不可调用` : '行情源缺失，暂不可调用', className: 'is-blocked' };
+  }
+  if (blocker.includes('MISSING_TIMING') || state.includes('MISSING_TIMING')) {
+    return { label: '时点缺口', detail: '发布时间未确认，暂不准入', className: 'is-warn' };
+  }
+  if (blocker.includes('FUTURE') || state.includes('FUTURE')) {
+    return { label: '时点风险', detail: '可得时点待复核，谨慎使用', className: 'is-warn' };
+  }
+  if (state.includes('OBSERVE')) {
+    return { label: '观察', detail: '来源待补证，谨慎使用', className: 'is-warn' };
+  }
+  if (state.includes('READY_WITH_WARNING')) {
+    return { label: '需复核', detail: '审慎可调用，来源/时点待确认', className: 'is-warn' };
+  }
+  if (missingCount > 0) return { label: '需关注', detail: `缺 ${missingCount} 个标的，需关注覆盖率`, className: 'is-warn' };
+  if (coverage > 0 && coverage < 0.95) return { label: '需关注', detail: '覆盖偏低，谨慎使用', className: 'is-warn' };
+  return { label: '无阻塞', detail: '覆盖完整，可调用', className: 'is-ready' };
+}
+
+function f1Header(label: string, fieldKey?: string): JSX.Element {
+  return (
+    <th key={label} scope="col">
+      <span>{label}</span>
+      {fieldKey ? <code aria-hidden="true">{fieldKey}</code> : null}
+    </th>
+  );
+}
+
+function F1RawCatalogPanel({
+  catalog,
+  loading,
+  error,
+  filters,
+  onFilterChange,
+  onRefresh,
+}: {
+  catalog: ApiF1CatalogResponse | null;
+  loading: boolean;
+  error: string | null;
+  filters: F1CatalogFilters;
+  onFilterChange: (filters: F1CatalogFilters) => void;
+  onRefresh: () => void;
+}): JSX.Element {
+  const items = catalog?.items ?? [];
+  const summary = catalog?.summary ?? {};
+  const snapshot = catalog?.snapshot ?? null;
+  const callableCount = Number(summary.callable_count ?? snapshot?.callable_count ?? 0);
+  const blockedCount = Number(summary.blocked_count ?? snapshot?.blocked_count ?? 0);
+  const timingGapCount = Number(summary.timing_gap_count ?? snapshot?.timing_gap_count ?? 0);
+  const totalCount = Number(summary.item_count ?? snapshot?.field_count ?? items.length);
+  const observeCount = Math.max(0, totalCount - callableCount - blockedCount);
+  const layerCounts = snapshot?.summary && typeof snapshot.summary.layer_counts === 'object'
+    ? snapshot.summary.layer_counts as Record<string, unknown>
+    : summary.layer_counts && typeof summary.layer_counts === 'object'
+      ? summary.layer_counts as Record<string, unknown>
+      : null;
+  const sourceSignature = layerCounts
+    ? ['L1', 'L2', 'L3', 'L4'].map((layer) => `${layer} ${Number(layerCounts[layer] ?? 0)}`).join(' · ')
+    : 'L1/L2/L3/L4 数据源签名待确认';
+  const statusTabs = [
+    { label: '全部字段', value: '', count: totalCount },
+    { label: '可调用', value: 'READY', count: callableCount },
+    { label: '阻塞', value: 'DATA_SOURCE_BLOCKED', count: blockedCount },
+    { label: '待诊断', value: 'OBSERVE', count: Math.max(timingGapCount, observeCount) },
+  ];
+  return (
+    <div className="f1-raw-catalog" data-testid="f1-raw-catalog">
+      <section className="f1-raw-kpis" aria-label="F1 原始库摘要">
+        {[
+          ['F1 原始字段', totalCount, snapshot?.snapshot_id ?? '待生成快照'],
+          ['可调用字段', callableCount, '仅按 PIT、覆盖率、时点准入'],
+          ['源阻塞字段', blockedCount, '缺失 L1 输出 NaN'],
+          ['时点缺口', timingGapCount, 'publish_date / available_at'],
+        ].map(([label, value, hint]) => (
+          <article className="f1-raw-kpi" key={String(label)}>
+            <span>{label}</span>
+            <strong>{String(value)}</strong>
+            <p>{String(hint)}</p>
+          </article>
+        ))}
+      </section>
+
+      <section className="f1-raw-panel">
+        <div className="f1-raw-panel__header">
+          <div className="f1-raw-panel__title">
+            <p>Phase 0 数据台账</p>
+            <h2>F1 原始字段目录</h2>
+            <span>
+              {snapshot?.snapshot_id ? `目录快照 ${snapshot.snapshot_id}` : '暂无目录快照'}
+              {snapshot?.generated_at ? ` · ${formatDateTime(snapshot.generated_at)}` : ''}
+            </span>
+          </div>
+          <div className="f1-raw-status-tabs" role="tablist" aria-label="F1 字段状态">
+            {statusTabs.map((tab) => (
+              <button
+                aria-selected={(filters.status || '') === tab.value}
+                className={(filters.status || '') === tab.value ? 'is-active' : ''}
+                key={tab.label}
+                onClick={() => onFilterChange({ ...filters, status: tab.value })}
+                role="tab"
+                type="button"
+              >
+                <span>{tab.label}</span>
+                <strong>{tab.count}</strong>
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="f1-raw-batch-strip" aria-label="F1 目录批次">
+          <dl>
+            <div><dt>最新批次</dt><dd>{snapshot?.run_id ?? '待关联'}</dd></div>
+            <div><dt>数据源签名</dt><dd>{sourceSignature}</dd></div>
+            <div><dt>更新时间</dt><dd>{snapshot?.generated_at ? formatDateTime(snapshot.generated_at) : '待更新'}</dd></div>
+          </dl>
+          <button className="factor-btn factor-btn--small" type="button" onClick={onRefresh}>查看预处理记录</button>
+        </div>
+        <div className="f1-raw-filters" aria-label="F1 原始字段筛选">
+          <label className="f1-filter-search">
+            <span>字段</span>
+            <input value={filters.q} onChange={(event) => onFilterChange({ ...filters, q: event.target.value })} placeholder="搜索字段、来源、阻塞" />
+          </label>
+          <label>
+            <span>层级</span>
+            <select value={filters.layer} onChange={(event) => onFilterChange({ ...filters, layer: event.target.value })}>
+              <option value="">全部</option>
+              <option value="L1">L1 价格量价</option>
+              <option value="L2">L2 财务质量</option>
+              <option value="L3">L3 预期/卖空</option>
+              <option value="L4">L4 宏观/期权</option>
+            </select>
+          </label>
+          <div className="f1-filter-field"><span>覆盖率</span><strong>≥90%</strong></div>
+          <div className="f1-filter-field"><span>未来函数</span><strong>全部</strong></div>
+          <button className="factor-btn factor-btn--small" type="button" onClick={onRefresh}>导出目录</button>
+        </div>
+        {loading ? <div className="factor-empty">正在加载 F1 原始库...</div> : null}
+        {error ? <div className="factor-panel factor-panel--danger">{error}</div> : null}
+        <div className="f1-raw-table-wrap">
+          <table className="f1-raw-table">
+            <thead>
+              <tr>
+                {f1Header('字段', 'factor_info')}
+                {f1Header('层级', 'pit_layer')}
+                {f1Header('覆盖', 'available_symbols')}
+                {f1Header('时点', 'available_at')}
+                {f1Header('阻塞', 'missing_policy')}
+                {f1Header('来源', 'source')}
+                {f1Header('准入', 'admission')}
+                {f1Header('更新', 'updated_at')}
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((field) => (
+                <tr key={field.factor_id}>
+                  <td>
+                    <div className="f1-factor-cell">
+                      <strong>{field.name}</strong>
+                      <code>{field.factor_id}</code>
+                      <span>{field.category}</span>
+                    </div>
+                  </td>
+                  <td><i className={f1LayerClass(field.pit_layer)}>{f1LayerLabel(field.pit_layer)}</i></td>
+                  <td>
+                    <div className="f1-coverage-cell">
+                      <b>{formatF1Coverage(field)}</b>
+                      <div className={`f1-coverage-bar ${f1CoverageClass(field)}`}><span style={{ width: `${f1CoverageWidth(field)}%` }} /></div>
+                      <small>{field.available_symbol_count ?? 0}/{field.total_symbol_count ?? 0} · 缺失 {field.missing_symbol_count ?? field.missing_symbols?.length ?? 0}</small>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="f1-stack">
+                      <strong>{field.available_at_rule || '待确认'}</strong>
+                      <span>{field.publish_date_rule || '待确认 publish_date'}</span>
+                      <code>可得时点</code>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="f1-blocker-cell" data-blocker-code={field.blocker_code ?? undefined}>
+                      {(() => {
+                        const blockerView = f1BlockerView(field);
+                        return (
+                          <>
+                            <strong className={blockerView.className}>{blockerView.label}</strong>
+                            <span>{blockerView.detail}</span>
+                          </>
+                        );
+                      })()}
+                    </div>
+                  </td>
+                  <td>
+                    <div className="f1-source-list">
+                      {f1SourceRefs(field).map((source) => <span key={source}>{source}</span>)}
+                    </div>
+                  </td>
+                  <td><mark className={f1StateClass(field.admission_state)}>{f1StateLabel(field.admission_state)}</mark></td>
+                  <td>
+                    <div className="f1-stack">
+                      <strong>{field.last_updated_at ? formatDateTime(field.last_updated_at) : '待更新'}</strong>
+                      <span>{snapshot?.run_id ?? '未关联批次'}</span>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {!items.length && !loading ? (
+                <tr><td colSpan={8}><div className="factor-empty">暂无符合条件的 F1 字段。</div></td></tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="f1-raw-audit" aria-label="F1 准入口径">
+        <article>
+          <h3>F1 准入口径</h3>
+          <p>只检查 PIT、覆盖率、可得时点、缺失阻塞与未来函数风险；不设 IC 门槛。</p>
+        </article>
+        <article>
+          <h3>快照追踪</h3>
+          <p>后续工厂运行只引用 `f1_catalog_snapshot_id` 与 `operator_config_snapshot_id`，不读取运行态草稿。</p>
+        </article>
+      </section>
+    </div>
+  );
+}
+
+function FactorLayerCards({
+  selected,
+  counts,
+  onSelect,
+}: {
+  selected: FactorTierFilter;
+  counts: Record<FactorTierFilter, number>;
+  onSelect: (layer: FactorTierFilter) => void;
+}): JSX.Element {
+  return (
+    <section className="factor-layer-cards" aria-label="F1/F2/F3 因子库分层">
+      {FACTOR_LAYER_TABS.map((tab) => (
+        <button
+          aria-pressed={selected === tab.key}
+          className={selected === tab.key ? 'factor-layer-card is-active' : 'factor-layer-card'}
+          key={tab.key}
+          onClick={() => onSelect(tab.key)}
+          type="button"
+        >
+          <span>
+            <strong>{tab.title}</strong>
+            <small>{tab.description}</small>
+          </span>
+          <b>{counts[tab.key]}</b>
+        </button>
+      ))}
+    </section>
+  );
+}
+
 export function FactorLibraryPage({
   initialSource,
   initialStatus,
@@ -4076,8 +4453,13 @@ export function FactorLibraryPage({
   const api = useApiClient();
   const [payload, setPayload] = useState<ApiFactorListResponse | null>(null);
   const status = initialStatus ?? '';
-  const [tierFilter, setTierFilter] = useState<FactorTierFilter>('all');
+  const [tierFilter, setTierFilter] = useState<FactorTierFilter>(() => initialFactorTierFilterFromHash());
   const [lifecycleTab, setLifecycleTab] = useState<FactorLifecycleTab>('all');
+  const [f1Catalog, setF1Catalog] = useState<ApiF1CatalogResponse | null>(null);
+  const [f1CatalogLoading, setF1CatalogLoading] = useState(false);
+  const [f1CatalogError, setF1CatalogError] = useState<string | null>(null);
+  const [f1CatalogFilters, setF1CatalogFilters] = useState<F1CatalogFilters>({ layer: '', status: '', q: '' });
+  const [f1CatalogReloadNonce, setF1CatalogReloadNonce] = useState(0);
   const [reloadNonce, setReloadNonce] = useState(0);
   const [categoryFilters, setCategoryFilters] = useState<string[]>([]);
   const [levelFilters, setLevelFilters] = useState<FactorLevelKey[]>(() => [...DEFAULT_FACTOR_LEVEL_FILTERS]);
@@ -4128,7 +4510,7 @@ export function FactorLibraryPage({
           }
         }
       } catch (err) {
-        if (alive) setError((err as Error).message || 'Failed to load factors.');
+        if (alive) setError(factorLibraryErrorMessage(err, '因子资产加载失败'));
       }
     };
     if (initialLoadDelayMs > 0 && payload === null) {
@@ -4145,6 +4527,36 @@ export function FactorLibraryPage({
       alive = false;
     };
   }, [api, initialLoadDelayMs, initialSource, initialTag, reloadNonce, status]);
+  useEffect(() => {
+    if (tierFilter !== 'F1') return;
+    let alive = true;
+    const loadF1Catalog = async (): Promise<void> => {
+      const getF1Catalog = api.getF1Catalog;
+      if (!getF1Catalog) {
+        setF1CatalogError('F1 原始库 API 尚未接入。');
+        return;
+      }
+      setF1CatalogLoading(true);
+      setF1CatalogError(null);
+      try {
+        const catalog = await getF1Catalog({
+          layer: f1CatalogFilters.layer || undefined,
+          status: f1CatalogFilters.status || undefined,
+          q: f1CatalogFilters.q || undefined,
+        });
+        if (!alive) return;
+        setF1Catalog(catalog);
+      } catch (err) {
+        if (alive) setF1CatalogError(factorLibraryErrorMessage(err, 'F1 原始库加载失败'));
+      } finally {
+        if (alive) setF1CatalogLoading(false);
+      }
+    };
+    void loadF1Catalog();
+    return () => {
+      alive = false;
+    };
+  }, [api, f1CatalogFilters.layer, f1CatalogFilters.q, f1CatalogFilters.status, f1CatalogReloadNonce, tierFilter]);
   useEffect(() => {
     if (governanceOverview || !governanceOpen) return;
     const getFactorGovernanceOverview = (api as {
@@ -4236,6 +4648,15 @@ export function FactorLibraryPage({
         ? { key, direction: current.direction === 'desc' ? 'asc' : 'desc' }
         : { key, direction: 'desc' }
     ));
+  };
+  const selectTierFilter = (nextTier: FactorTierFilter) => {
+    setTierFilter(nextTier);
+    setLifecycleTab('all');
+    setComparisonFactorIds([]);
+    setSelectedCorrelationFactorId(undefined);
+    setLineagePreviewFactorId(null);
+    setGapPopoverFactorId(null);
+    setDiagnosticPopoverFactorId(null);
   };
   const toggleLevelFilter = (level: FactorLevelKey) => {
     setLevelFilters((current) => (
@@ -4395,6 +4816,10 @@ export function FactorLibraryPage({
     };
   }, [governanceActions.length, governanceOverview, localGovernanceTaskCount, payload?.items, payload?.summary]);
   const pitStatus = recordString(payload?.summary, 'pit_status');
+  const layerCardCounts = useMemo(() => ({
+    ...tierFilterCounts,
+    F1: Number(f1Catalog?.summary?.item_count ?? f1Catalog?.snapshot?.field_count ?? tierFilterCounts.F1),
+  }), [f1Catalog?.snapshot?.field_count, f1Catalog?.summary?.item_count, tierFilterCounts]);
   const confirmGovernanceCommand = confirmGovernanceAction
     ? String(confirmGovernanceAction.command ?? confirmGovernanceAction.kind ?? '').toUpperCase()
     : '';
@@ -4429,7 +4854,9 @@ export function FactorLibraryPage({
       <PageHero
         eyebrow="Alpha 资产"
         title="因子库"
-        description="按 F1/F2/F3 管理因子、血缘、质量与生命周期。"
+        description={tierFilter === 'F1'
+          ? '按 F1/F2/F3 管理因子资产。F1 只校验 PIT、覆盖率、可得时点与数据阻塞。'
+          : '按 F1/F2/F3 管理因子、血缘、质量与生命周期。'}
         meta={
           <>
             <span className="factor-hero-pill">PIT 准入：{pitStatus ? factorPitAdmissionLabel(pitStatus) : '正式诊断可用'}</span>
@@ -4450,6 +4877,8 @@ export function FactorLibraryPage({
           </>
         }
       />
+      <FactorLayerCards selected={tierFilter} counts={layerCardCounts} onSelect={selectTierFilter} />
+      {tierFilter !== 'F1' ? (
       <section className="factor-card-grid factor-card-grid--metrics factor-library-summary" aria-label="因子库摘要指标">
         <article className="factor-mini-card">
           <span>F1 原始指标</span>
@@ -4472,6 +4901,7 @@ export function FactorLibraryPage({
           <p>数据断流、跳空、环境变更或相关性冗余触发复核。</p>
         </article>
       </section>
+      ) : null}
       {governanceOpen ? (
         <div className="factor-governance-modal" role="dialog" aria-modal="true" aria-label="治理任务">
           <div className="factor-governance-modal__panel">
@@ -4641,6 +5071,16 @@ export function FactorLibraryPage({
           </div>
         </div>
       ) : null}
+      {tierFilter === 'F1' ? (
+        <F1RawCatalogPanel
+          catalog={f1Catalog}
+          loading={f1CatalogLoading}
+          error={f1CatalogError}
+          filters={f1CatalogFilters}
+          onFilterChange={setF1CatalogFilters}
+          onRefresh={() => setF1CatalogReloadNonce((current) => current + 1)}
+        />
+      ) : (
       <section className="factor-panel factor-ledger-panel">
         <div className="factor-ledger-header">
           <div>
@@ -4681,12 +5121,7 @@ export function FactorLibraryPage({
                 aria-selected={tierFilter === tab.key}
                 className={tierFilter === tab.key ? 'is-active' : ''}
                 key={tab.key}
-                onClick={() => {
-                  setTierFilter(tab.key);
-                  setComparisonFactorIds([]);
-                  setSelectedCorrelationFactorId(undefined);
-                  setLineagePreviewFactorId(null);
-                }}
+                onClick={() => selectTierFilter(tab.key)}
               >
                 {tab.label} <span>{String(tierFilterCounts[tab.key])}</span>
               </button>
@@ -4816,6 +5251,9 @@ export function FactorLibraryPage({
                   </td>
                   <td>
                     <div className="factor-row-actions">
+                      {isCompositeFactorStrategyCandidate(factor) ? (
+                        <button className="factor-link" onClick={() => navigateTo(buildCompositeFactorStrategyRoute(factor))} type="button">配置策略</button>
+                      ) : null}
                       <button className="factor-link" onClick={() => navigateTo(`/factors/${factor.id}`)} type="button">详情</button>
                     </div>
                   </td>
@@ -4831,13 +5269,15 @@ export function FactorLibraryPage({
           </table>
         </div>
       </section>
-      {lineagePreviewFactor ? (
+      )}
+      {tierFilter !== 'F1' && lineagePreviewFactor ? (
         <FactorLineagePreview
           factor={lineagePreviewFactor}
           factors={payload?.items ?? []}
           onClose={() => setLineagePreviewFactorId(null)}
         />
       ) : null}
+      {tierFilter !== 'F1' ? (
       <section className="factor-panel factor-correlation-panel">
         <div className="factor-section-title">
           <span>正交性热力图</span>
@@ -4849,8 +5289,23 @@ export function FactorLibraryPage({
           onSelect={setSelectedCorrelationFactorId}
         />
       </section>
+      ) : null}
     </div>
   );
+}
+
+type FactorDetailDiagnosticToast = {
+  tone: 'info' | 'success' | 'error';
+  title: string;
+  detail: string;
+};
+
+function diagnosticElapsedLabel(startedAt: number): string {
+  const elapsedMs = Math.max(0, Date.now() - startedAt);
+  if (elapsedMs >= 1000) {
+    return `${(elapsedMs / 1000).toFixed(1)}s`;
+  }
+  return `${elapsedMs}ms`;
 }
 
 export function FactorDetailPage({ factorId }: { factorId: string }): JSX.Element {
@@ -4860,13 +5315,23 @@ export function FactorDetailPage({ factorId }: { factorId: string }): JSX.Elemen
   const [summary, setSummary] = useState<ApiFactorDiagnosticSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pitError, setPitError] = useState<string | null>(null);
+  const [diagnosticRunning, setDiagnosticRunning] = useState(false);
+  const [diagnosticToast, setDiagnosticToast] = useState<FactorDetailDiagnosticToast | null>(null);
+  const diagnosticToastTimers = useRef<number[]>([]);
+  const clearDiagnosticToastTimers = useCallback(() => {
+    diagnosticToastTimers.current.forEach((timer) => window.clearTimeout(timer));
+    diagnosticToastTimers.current = [];
+  }, []);
   useEffect(() => {
     let alive = true;
+    clearDiagnosticToastTimers();
     setFactor(null);
     setPit(null);
     setSummary(null);
     setError(null);
     setPitError(null);
+    setDiagnosticRunning(false);
+    setDiagnosticToast(null);
     api
       .getFactor(factorId)
       .then((factorPayload) => {
@@ -4887,8 +5352,9 @@ export function FactorDetailPage({ factorId }: { factorId: string }): JSX.Elemen
       });
     return () => {
       alive = false;
+      clearDiagnosticToastTimers();
     };
-  }, [api, factorId]);
+  }, [api, clearDiagnosticToastTimers, factorId]);
   const hasExistingDiagnostic = Boolean(summary?.run_id ?? factor?.last_diagnostic_run_id) ||
     factor?.diagnostic_status === 'COMPLETED' ||
     summary?.status === 'COMPLETED';
@@ -4902,23 +5368,71 @@ export function FactorDetailPage({ factorId }: { factorId: string }): JSX.Elemen
     factor?.diagnostic_status === 'COMPLETED'
   );
   const runDiagnostic = () => {
+    if (diagnosticRunning) return;
     if (!factor || !pit) {
       setPitError('PIT 版本信息仍在加载，暂不能提交诊断。');
       return;
     }
     const windowConfig = diagnosticMode === 'SANDBOX' ? pit.diagnostic_windows?.sandbox : pit.diagnostic_windows?.verified;
+    const startDate = windowConfig?.start_date ?? subtractYears(pit.as_of_date, diagnosticMode === 'SANDBOX' ? 3 : 10);
+    const endDate = windowConfig?.end_date ?? pit.as_of_date;
+    const startedAt = Date.now();
+    clearDiagnosticToastTimers();
+    setError(null);
+    setPitError(null);
+    setDiagnosticRunning(true);
+    setDiagnosticToast({
+      tone: 'info',
+      title: '正在重新诊断...',
+      detail: `${factor.id} · ${diagnosticMode} · ${startDate} 至 ${endDate} · ${pit.dataset_snapshot_id}/${pit.universe_snapshot_id}`,
+    });
+    diagnosticToastTimers.current = [
+      window.setTimeout(() => {
+        setDiagnosticToast({
+          tone: 'info',
+          title: '仍在计算横截面 IC',
+          detail: `${factor.id} 正在按 ${diagnosticMode} 窗口聚合 PIT 样本，请保持页面打开。`,
+        });
+      }, 3000),
+      window.setTimeout(() => {
+        setDiagnosticToast({
+          tone: 'info',
+          title: '诊断耗时较长',
+          detail: '正在读取 PIT 样本与基础面字段，请保持页面打开；完成后会自动刷新诊断摘要。',
+        });
+      }, 10000),
+    ];
     api
       .runFactorDiagnostics(factor.id, {
-        start_date: windowConfig?.start_date ?? subtractYears(pit.as_of_date, diagnosticMode === 'SANDBOX' ? 3 : 10),
-        end_date: pit.as_of_date,
+        start_date: startDate,
+        end_date: endDate,
         dataset_snapshot_id: pit.dataset_snapshot_id,
         universe_snapshot_id: pit.universe_snapshot_id,
         return_window_days: 21,
         group_count: 5,
         diagnostic_mode: diagnosticMode,
       })
-      .then((result) => setSummary(result.summary))
-      .catch((err: Error) => setError(err.message || '诊断失败。'));
+      .then((result) => {
+        setSummary(result.summary);
+        setDiagnosticToast({
+          tone: 'success',
+          title: '诊断完成',
+          detail: `run_id ${result.run_id} · 客户端耗时 ${diagnosticElapsedLabel(startedAt)}`,
+        });
+      })
+      .catch((err: Error) => {
+        const message = err.message || '诊断失败。';
+        setError(message);
+        setDiagnosticToast({
+          tone: 'error',
+          title: '诊断失败',
+          detail: message,
+        });
+      })
+      .finally(() => {
+        clearDiagnosticToastTimers();
+        setDiagnosticRunning(false);
+      });
   };
   const turnover = summary?.turnover_decay;
   const compliance = summary?.compliance_trail;
@@ -4977,8 +5491,14 @@ export function FactorDetailPage({ factorId }: { factorId: string }): JSX.Elemen
           </div>
         </div>
         <div className="factor-detail-hero__actions">
-          <button className="factor-detail-action-btn factor-detail-action-btn--primary" disabled={!canRun} onClick={runDiagnostic} type="button">
-            {primaryActionLabel}
+          <button
+            className="factor-detail-action-btn factor-detail-action-btn--primary"
+            disabled={!canRun || diagnosticRunning}
+            aria-busy={diagnosticRunning || undefined}
+            onClick={runDiagnostic}
+            type="button"
+          >
+            {diagnosticRunning ? '诊断中...' : primaryActionLabel}
           </button>
           {reportHref ? (
             <a className="factor-detail-action-btn" href={reportHref} target="_blank" rel="noreferrer">生成投委会 PDF</a>
@@ -4987,8 +5507,18 @@ export function FactorDetailPage({ factorId }: { factorId: string }): JSX.Elemen
           )}
         </div>
       </section>
-      {error ? <div className="factor-panel factor-panel--danger">{error}</div> : null}
-      {pitError ? <div className="factor-panel factor-panel--danger">{pitError}</div> : null}
+      {diagnosticToast ? (
+        <div
+          className={`factor-detail-toast factor-detail-toast--${diagnosticToast.tone}`}
+          role={diagnosticToast.tone === 'error' ? 'alert' : 'status'}
+          aria-live={diagnosticToast.tone === 'error' ? 'assertive' : 'polite'}
+        >
+          <strong>{diagnosticToast.title}</strong>
+          <span>{diagnosticToast.detail}</span>
+        </div>
+      ) : null}
+      {error ? <div className="factor-panel factor-panel--danger" role="alert">{error}</div> : null}
+      {pitError ? <div className="factor-panel factor-panel--danger" role="alert">{pitError}</div> : null}
       {factor ? (
         <>
           {!summary ? (

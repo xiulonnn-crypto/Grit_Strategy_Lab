@@ -39,6 +39,7 @@ StrategyType = Literal[
     'BUY_AND_HOLD',
     'ASSET_ALLOCATION',
     'MULTI_FACTOR',
+    'COMPOSITE_FACTOR',
 ]
 FieldSource = Literal['user_input', 'system_inference', 'system_default', 'manual_override']
 BacktestRunStatus = Literal['QUEUED', 'RUNNING', 'INTERRUPTED', 'COMPLETED', 'COMPLETED_WITH_WARNINGS', 'FAILED']
@@ -89,6 +90,8 @@ FactorGovernanceStatus = Literal['WATCH', 'REVIEW', 'DECAYED', 'CROWDED', 'SUSPE
 FactorFactoryAutomationStatus = Literal['ACTIVE', 'PAUSED']
 FactorFactoryRunStatus = Literal['QUEUED', 'RUNNING', 'CANCEL_REQUESTED', 'CANCELLED', 'COMPLETED', 'FAILED']
 FactorFactoryRunTrigger = Literal['DAILY', 'MANUAL']
+F1AdmissionState = Literal['READY', 'READY_WITH_WARNING', 'OBSERVE', 'DATA_SOURCE_BLOCKED', 'MISSING_TIMING']
+PitPreprocessingMode = Literal['DAILY', 'MANUAL', 'SNAPSHOT_REFRESH']
 
 
 class FactorDescriptorRequest(BaseModel):
@@ -171,6 +174,10 @@ class FactorFactoryGatePolicy(BaseModel):
     residual_enabled: bool = True
     max_drawdown_relative_to_benchmark: float = Field(default=1.5, gt=0.0)
     min_oos_to_is_ratio: float = Field(default=0.6, ge=0.0, le=1.0)
+    p_value_max: float = Field(default=0.05, ge=0.0, le=1.0)
+    max_s_grade_correlation: float = Field(default=0.70, ge=0.0, le=1.0)
+    capacity_floor: float = Field(default=0.0, ge=0.0)
+    crowding_max: float = Field(default=1.0, ge=0.0)
 
 
 class FactorFactoryProfile(BaseModel):
@@ -187,12 +194,91 @@ class FactorFactoryAutomationRequest(BaseModel):
     schedule_time: str = Field(default='14:00', pattern=r'^\d{2}:\d{2}$')
     request: FactorMiningJobCreateRequest = Field(default_factory=FactorMiningJobCreateRequest)
     gate_policy: FactorFactoryGatePolicy = Field(default_factory=FactorFactoryGatePolicy)
+    operator_config_snapshot_id: str | None = None
+    f1_catalog_snapshot_id: str | None = None
 
 
 class FactorFactoryRunNowRequest(BaseModel):
     request: FactorMiningJobCreateRequest = Field(default_factory=FactorMiningJobCreateRequest)
     gate_policy: FactorFactoryGatePolicy = Field(default_factory=FactorFactoryGatePolicy)
     pipeline_scope: Literal['B1_B2_B3_B4', 'B1_ONLY', 'B2_B3', 'FULL'] = 'B1_B2_B3_B4'
+    operator_config_snapshot_id: str | None = None
+    f1_catalog_snapshot_id: str | None = None
+
+
+class PitPreprocessingRunRequest(BaseModel):
+    as_of_date: str | None = None
+    mode: PitPreprocessingMode = 'MANUAL'
+
+
+class F1CatalogFieldModel(BaseModel):
+    factor_id: str
+    name: str
+    category: str
+    pit_layer: Literal['L1', 'L2', 'L3', 'L4']
+    source_refs: dict[str, Any] = Field(default_factory=dict)
+    coverage_ratio: float = 0.0
+    available_symbol_count: int = 0
+    total_symbol_count: int = 0
+    missing_symbols: list[str] = Field(default_factory=list)
+    missing_symbol_count: int = 0
+    publish_date_rule: str = ''
+    available_at_rule: str = ''
+    missing_policy: str = ''
+    blocker_code: str | None = None
+    admission_state: F1AdmissionState
+    future_leakage_risk: str = 'REVIEW_REQUIRED'
+    last_updated_at: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class F1CatalogSnapshotModel(BaseModel):
+    id: str
+    snapshot_id: str
+    run_id: str | None = None
+    as_of_date: str | None = None
+    generated_at: str | None = None
+    field_count: int = 0
+    callable_count: int = 0
+    blocked_count: int = 0
+    timing_gap_count: int = 0
+    summary: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+
+
+class F1CatalogResponse(BaseModel):
+    snapshot: F1CatalogSnapshotModel | None = None
+    items: list[F1CatalogFieldModel] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorConfigRequest(BaseModel):
+    enabled_operators: list[str] = Field(default_factory=lambda: ['TS_Return', 'TS_Rank', 'TS_Corr'])
+    window_space: list[int] = Field(default_factory=lambda: [3, 5, 10, 21, 63, 126, 252])
+    default_depth: int = Field(default=2, ge=1, le=8)
+    daily_formula_budget: int = Field(default=10000, ge=1, le=10000)
+    compute_backend: Literal['pandas_bottleneck'] = 'pandas_bottleneck'
+    min_periods_policy: str = 'TS 默认 min_periods=n；TS_Return 需要 n+1 个有效观测；不足输出 NaN。'
+    blocked_field_policy: str = '排除 DATA_SOURCE_BLOCKED 字段；缺失 L1 保持 NaN。'
+    governance_protocol: dict[str, Any] = Field(default_factory=dict)
+    notes: str = ''
+    f1_catalog_snapshot_id: str | None = None
+    created_by: str | None = None
+
+    @field_validator('enabled_operators')
+    @classmethod
+    def _clean_enabled_operators(cls, value: list[str]) -> list[str]:
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    @field_validator('window_space')
+    @classmethod
+    def _clean_window_space(cls, value: list[int]) -> list[int]:
+        cleaned = sorted(dict.fromkeys(int(item) for item in value))
+        if not cleaned:
+            raise ValueError('window_space must not be empty')
+        if any(item <= 0 for item in cleaned):
+            raise ValueError('window_space must contain positive integers')
+        return cleaned
 
 
 class FactorQuarantineIntakeRequest(BaseModel):
@@ -236,7 +322,42 @@ class FactorModelNeutralizationRequest(BaseModel):
     method: str = Field(default='industry')
 
 
+class CompositeUniverseFilterRequest(BaseModel):
+    min_adv_usd: float = Field(default=5_000_000.0, ge=0.0)
+    adv_window: Literal['20D', '60D'] = '20D'
+    exclude_halted: bool = True
+    exclude_otc_pink: bool = True
+    exclude_luld_paused: bool = True
+    delisting_window_days: int = Field(default=30, ge=0, le=365)
+    sector_overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+class CompositeWeightMappingRequest(BaseModel):
+    method: Literal['equal_top_k', 'score_proportional', 'risk_heuristic'] = 'equal_top_k'
+    sector_cap_pct: float = Field(default=20.0, ge=0.0, le=100.0)
+    max_position_pct: float = Field(default=2.0, gt=0.0, le=100.0)
+    min_target_weight_pct: float = Field(default=0.25, ge=0.0, le=100.0)
+    cap_redistribution_mode: Literal['cash', 'proportional_refill'] = 'cash'
+
+
+class CompositeRebalanceLogicRequest(BaseModel):
+    frequency: Literal['daily', 'weekly', 'monthly'] = 'monthly'
+    calendar_rule: str = Field(default='first_trading_day')
+    exit_rank_percentile: float = Field(default=20.0, ge=0.0, le=100.0)
+    min_trade_notional_usd: float = Field(default=10_000.0, ge=0.0)
+
+
+class CompositeExecutionConstraintsRequest(BaseModel):
+    notional_usd: float = Field(default=10_000_000.0, gt=0.0)
+    commission_bps: float = Field(default=1.5, ge=0.0)
+    stamp_tax_bps: float = Field(default=0.0, ge=0.0)
+    base_slippage_bps: float = Field(default=2.5, ge=0.0)
+    impact_beta: float = Field(default=0.65, ge=0.0)
+    max_impact_bps: float = Field(default=75.0, ge=0.0)
+
+
 class FactorModelPreviewRequest(BaseModel):
+    strategy_type: Literal['MULTI_FACTOR', 'COMPOSITE_FACTOR'] = 'MULTI_FACTOR'
     name: str | None = None
     universe: str = Field(default='SP500', min_length=1)
     rebalance_frequency: str = Field(default='monthly', min_length=1)
@@ -244,6 +365,10 @@ class FactorModelPreviewRequest(BaseModel):
     scoring_method: str = Field(default='zscore_weighted', min_length=1)
     components: list[FactorModelComponentRequest] = Field(default_factory=list, min_length=1)
     neutralization: FactorModelNeutralizationRequest = Field(default_factory=FactorModelNeutralizationRequest)
+    universe_filter: CompositeUniverseFilterRequest = Field(default_factory=CompositeUniverseFilterRequest)
+    weight_mapping: CompositeWeightMappingRequest = Field(default_factory=CompositeWeightMappingRequest)
+    rebalance_logic: CompositeRebalanceLogicRequest = Field(default_factory=CompositeRebalanceLogicRequest)
+    execution_constraints: CompositeExecutionConstraintsRequest = Field(default_factory=CompositeExecutionConstraintsRequest)
 
 
 class FactorModelCreateRequest(FactorModelPreviewRequest):
@@ -619,6 +744,13 @@ class DatasetSnapshotMetadataModel(BaseModel):
     covered_symbol_count: int | None = None
     total_symbol_count: int | None = None
     missing_symbols: list[str] = Field(default_factory=list)
+    available_fields: list[str] = Field(default_factory=list)
+    raw_covered_symbol_count: int | None = None
+    raw_coverage_pct: float | None = None
+    effective_covered_symbol_count: int | None = None
+    effective_coverage_pct: float | None = None
+    unclassified_missing_symbol_count: int | None = None
+    fundamental_gap_policy: dict[str, Any] = Field(default_factory=dict)
     benchmark_etf_coverage: dict[str, Any] = Field(default_factory=dict)
     probe_status_breakdown: dict[str, int] = Field(default_factory=dict)
     coverage_kind_breakdown: dict[str, int] = Field(default_factory=dict)

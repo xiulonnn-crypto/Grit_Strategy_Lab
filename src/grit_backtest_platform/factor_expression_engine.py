@@ -74,18 +74,42 @@ FIELD_NAMES = frozenset(FIELD_ALIASES)
 FUNCTION_NAMES = frozenset(
     {
         "Return",
+        "TS_Return",
         "Std",
         "StdDev",
+        "TS_Std",
         "Mean",
+        "TS_Mean",
         "Sum",
+        "TS_Sum",
         "Abs",
+        "Sign",
+        "Signed_Power",
+        "If_Then_Else",
         "Correlation",
+        "TS_Corr",
+        "TS_Cov",
+        "Reg_Slope",
+        "Reg_Resid",
         "Skew",
+        "TS_Skew",
+        "TS_Kurt",
         "Ts_Rank",
         "TsRank",
+        "TS_Rank",
+        "TS_Max",
+        "TS_Min",
+        "TS_Delta",
+        "Decay_Linear",
+        "High_Day",
+        "Sum_Out_Of",
         "Log",
         "Rank",
+        "CS_Rank",
         "ZScore",
+        "CS_ZScore",
+        "CS_Scale",
+        "CS_Neutral",
         "Winsorize",
         "Lag",
     }
@@ -375,48 +399,113 @@ class _Evaluator:
         if name == "Lag":
             self._expect_arg_count(name, node.args, 2)
             return _lag_series(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
-        if name == "Return":
+        if name in {"Return", "TS_Return"}:
             if len(node.args) not in {1, 2}:
                 raise FactorExpressionError("Return accepts one series and an optional lag")
             periods = self._positive_int(node.args[1]) if len(node.args) == 2 else 1
             return _return_series(self.to_series(self.evaluate(node.args[0])), periods)
-        if name == "Std":
+        if name in {"Std", "TS_Std"}:
             self._expect_arg_count(name, node.args, 2)
             return _rolling_std(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
         if name == "StdDev":
             self._expect_arg_count(name, node.args, 2)
             return _rolling_std(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
-        if name == "Mean":
+        if name in {"Mean", "TS_Mean"}:
             self._expect_arg_count(name, node.args, 2)
             return _rolling_mean(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
-        if name == "Sum":
+        if name in {"Sum", "TS_Sum"}:
             self._expect_arg_count(name, node.args, 2)
             return _rolling_sum(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
+        if name == "TS_Max":
+            self._expect_arg_count(name, node.args, 2)
+            return _rolling_extreme(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]), max)
+        if name == "TS_Min":
+            self._expect_arg_count(name, node.args, 2)
+            return _rolling_extreme(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]), min)
+        if name == "TS_Delta":
+            self._expect_arg_count(name, node.args, 2)
+            series = self.to_series(self.evaluate(node.args[0]))
+            return _binary_series(series, _lag_series(series, self._positive_int(node.args[1])), lambda a, b: a - b, self._length)
         if name == "Abs":
             self._expect_arg_count(name, node.args, 1)
             return _map_series(self.to_series(self.evaluate(node.args[0])), abs)
-        if name == "Correlation":
+        if name == "Sign":
+            self._expect_arg_count(name, node.args, 1)
+            return _map_series(self.to_series(self.evaluate(node.args[0])), _sign)
+        if name == "Signed_Power":
+            self._expect_arg_count(name, node.args, 2)
+            power = float(self.evaluate(node.args[1]))
+            return _map_series(self.to_series(self.evaluate(node.args[0])), lambda value: _signed_power(value, power))
+        if name == "If_Then_Else":
+            self._expect_arg_count(name, node.args, 3)
+            return _if_then_else_series(
+                self.to_series(self.evaluate(node.args[0])),
+                self.evaluate(node.args[1]),
+                self.evaluate(node.args[2]),
+                self._length,
+            )
+        if name in {"Correlation", "TS_Corr"}:
             self._expect_arg_count(name, node.args, 3)
             return _rolling_correlation(
                 self.to_series(self.evaluate(node.args[0])),
                 self.to_series(self.evaluate(node.args[1])),
                 self._positive_int(node.args[2]),
             )
-        if name == "Skew":
+        if name == "TS_Cov":
+            self._expect_arg_count(name, node.args, 3)
+            return _rolling_covariance(
+                self.to_series(self.evaluate(node.args[0])),
+                self.to_series(self.evaluate(node.args[1])),
+                self._positive_int(node.args[2]),
+            )
+        if name == "Reg_Slope":
+            self._expect_arg_count(name, node.args, 3)
+            return _rolling_regression_slope(
+                self.to_series(self.evaluate(node.args[0])),
+                self.to_series(self.evaluate(node.args[1])),
+                self._positive_int(node.args[2]),
+            )
+        if name == "Reg_Resid":
+            self._expect_arg_count(name, node.args, 3)
+            return _rolling_regression_residual(
+                self.to_series(self.evaluate(node.args[0])),
+                self.to_series(self.evaluate(node.args[1])),
+                self._positive_int(node.args[2]),
+            )
+        if name in {"Skew", "TS_Skew"}:
             self._expect_arg_count(name, node.args, 2)
             return _rolling_skew(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
-        if name in {"Ts_Rank", "TsRank"}:
+        if name == "TS_Kurt":
+            self._expect_arg_count(name, node.args, 2)
+            return _rolling_kurtosis(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
+        if name in {"Ts_Rank", "TsRank", "TS_Rank"}:
             self._expect_arg_count(name, node.args, 2)
             return _rolling_ts_rank(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
+        if name == "Decay_Linear":
+            self._expect_arg_count(name, node.args, 2)
+            return _decay_linear(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
+        if name == "High_Day":
+            self._expect_arg_count(name, node.args, 2)
+            return _high_day(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
+        if name == "Sum_Out_Of":
+            self._expect_arg_count(name, node.args, 2)
+            return _sum_out_of(self.to_series(self.evaluate(node.args[0])), self._positive_int(node.args[1]))
         if name == "Log":
             self._expect_arg_count(name, node.args, 1)
             return _map_series(self.to_series(self.evaluate(node.args[0])), _safe_log)
-        if name == "Rank":
+        if name in {"Rank", "CS_Rank"}:
             self._expect_arg_count(name, node.args, 1)
             return _rank_series(self.to_series(self.evaluate(node.args[0])))
-        if name == "ZScore":
+        if name in {"ZScore", "CS_ZScore"}:
             self._expect_arg_count(name, node.args, 1)
             return _zscore_series(self.to_series(self.evaluate(node.args[0])))
+        if name == "CS_Scale":
+            self._expect_arg_count(name, node.args, 1)
+            return _scale_series(self.to_series(self.evaluate(node.args[0])))
+        if name == "CS_Neutral":
+            if len(node.args) not in {1, 2}:
+                raise FactorExpressionError("CS_Neutral accepts a series and an optional group placeholder")
+            return self.to_series(self.evaluate(node.args[0]))
         if name == "Winsorize":
             if len(node.args) not in {1, 2}:
                 raise FactorExpressionError("Winsorize accepts one series and an optional MAD scale")
@@ -521,6 +610,20 @@ def _safe_log(value: float) -> float | None:
     return math.log(value) if value > 0 else None
 
 
+def _sign(value: float) -> float:
+    if value > 0:
+        return 1.0
+    if value < 0:
+        return -1.0
+    return 0.0
+
+
+def _signed_power(value: float, power: float) -> float | None:
+    if not math.isfinite(power):
+        return None
+    return _sign(value) * (abs(value) ** power)
+
+
 def _lag_series(series: Series, periods: int) -> Series:
     return [None] * periods + series[:-periods]
 
@@ -589,6 +692,18 @@ def _rolling_sum(series: Series, window: int) -> Series:
     return result
 
 
+def _rolling_extreme(series: Series, window: int, op: Any) -> Series:
+    result: Series = []
+    for index in range(len(series)):
+        if index + 1 < window:
+            result.append(None)
+            continue
+        window_values = series[index + 1 - window : index + 1]
+        finite_values = [value for value in window_values if value is not None]
+        result.append(op(finite_values) if len(finite_values) == window else None)
+    return result
+
+
 def _rolling_correlation(left: Series, right: Series, window: int) -> Series:
     result: Series = []
     for index in range(len(left)):
@@ -603,6 +718,51 @@ def _rolling_correlation(left: Series, right: Series, window: int) -> Series:
         left_finite = [float(value) for value in left_values if value is not None]
         right_finite = [float(value) for value in right_values if value is not None]
         result.append(_pearson_series(left_finite, right_finite))
+    return result
+
+
+def _rolling_covariance(left: Series, right: Series, window: int) -> Series:
+    result: Series = []
+    for index in range(len(left)):
+        if index + 1 < window:
+            result.append(None)
+            continue
+        left_values = left[index + 1 - window : index + 1]
+        right_values = right[index + 1 - window : index + 1]
+        if any(value is None for value in left_values) or any(value is None for value in right_values):
+            result.append(None)
+            continue
+        left_finite = [float(value) for value in left_values if value is not None]
+        right_finite = [float(value) for value in right_values if value is not None]
+        if len(left_finite) != window or window < 2:
+            result.append(None)
+            continue
+        left_mean = statistics.fmean(left_finite)
+        right_mean = statistics.fmean(right_finite)
+        result.append(sum((x - left_mean) * (y - right_mean) for x, y in zip(left_finite, right_finite)) / window)
+    return result
+
+
+def _rolling_regression_slope(y_series: Series, x_series: Series, window: int) -> Series:
+    cov = _rolling_covariance(y_series, x_series, window)
+    x_var = _rolling_covariance(x_series, x_series, window)
+    return _binary_series(cov, x_var, lambda a, b: None if abs(b) <= 1e-12 else a / b, len(y_series))
+
+
+def _rolling_regression_residual(y_series: Series, x_series: Series, window: int) -> Series:
+    slope = _rolling_regression_slope(y_series, x_series, window)
+    result: Series = []
+    for index, (y_value, x_value, beta) in enumerate(zip(y_series, x_series, slope)):
+        if index + 1 < window or y_value is None or x_value is None or beta is None:
+            result.append(None)
+            continue
+        y_window = [value for value in y_series[index + 1 - window : index + 1] if value is not None]
+        x_window = [value for value in x_series[index + 1 - window : index + 1] if value is not None]
+        if len(y_window) != window or len(x_window) != window:
+            result.append(None)
+            continue
+        intercept = statistics.fmean(y_window) - beta * statistics.fmean(x_window)
+        result.append(y_value - (intercept + beta * x_value))
     return result
 
 
@@ -624,6 +784,26 @@ def _rolling_skew(series: Series, window: int) -> Series:
             continue
         count = len(finite_values)
         result.append(count / ((count - 1) * (count - 2)) * sum(((value - mean) / stdev) ** 3 for value in finite_values))
+    return result
+
+
+def _rolling_kurtosis(series: Series, window: int) -> Series:
+    result: Series = []
+    for index in range(len(series)):
+        if index + 1 < window:
+            result.append(None)
+            continue
+        window_values = series[index + 1 - window : index + 1]
+        finite_values = [float(value) for value in window_values if value is not None]
+        if len(finite_values) != window or len(finite_values) < 4:
+            result.append(None)
+            continue
+        mean = statistics.fmean(finite_values)
+        stdev = statistics.pstdev(finite_values)
+        if stdev <= 0:
+            result.append(None)
+            continue
+        result.append(sum(((value - mean) / stdev) ** 4 for value in finite_values) / len(finite_values) - 3.0)
     return result
 
 
@@ -663,6 +843,72 @@ def _rank_series(series: Series) -> Series:
     for rank, (index, _value) in enumerate(sorted_values):
         ranks[index] = rank / denominator
     return [ranks.get(index) for index in range(len(series))]
+
+
+def _scale_series(series: Series) -> Series:
+    denominator = sum(abs(value) for value in series if value is not None)
+    if denominator <= 0:
+        return [None if value is None else 0.0 for value in series]
+    return [None if value is None else value / denominator for value in series]
+
+
+def _if_then_else_series(condition: Series, true_value: ScalarOrSeries, false_value: ScalarOrSeries, length: int) -> Series:
+    true_series = _as_series(true_value, length)
+    false_series = _as_series(false_value, length)
+    result: Series = []
+    for cond, left, right in zip(condition, true_series, false_series):
+        if cond is None:
+            result.append(None)
+        else:
+            result.append(left if cond > 0 else right)
+    return result
+
+
+def _decay_linear(series: Series, window: int) -> Series:
+    weights = [float(index + 1) for index in range(window)]
+    denominator = sum(weights)
+    result: Series = []
+    for index in range(len(series)):
+        if index + 1 < window:
+            result.append(None)
+            continue
+        window_values = series[index + 1 - window : index + 1]
+        if any(value is None for value in window_values):
+            result.append(None)
+            continue
+        result.append(sum(float(value) * weight for value, weight in zip(window_values, weights) if value is not None) / denominator)
+    return result
+
+
+def _high_day(series: Series, window: int) -> Series:
+    result: Series = []
+    for index in range(len(series)):
+        if index + 1 < window:
+            result.append(None)
+            continue
+        window_values = series[index + 1 - window : index + 1]
+        if any(value is None for value in window_values):
+            result.append(None)
+            continue
+        finite_values = [float(value) for value in window_values if value is not None]
+        high = max(finite_values)
+        high_index = max(idx for idx, value in enumerate(finite_values) if value == high)
+        result.append(float(window - 1 - high_index))
+    return result
+
+
+def _sum_out_of(series: Series, window: int) -> Series:
+    result: Series = []
+    for index in range(len(series)):
+        if index + 1 < window:
+            result.append(None)
+            continue
+        window_values = series[index + 1 - window : index + 1]
+        if any(value is None for value in window_values):
+            result.append(None)
+            continue
+        result.append(float(sum(1 for value in window_values if value is not None and value > 0)))
+    return result
 
 
 def _zscore_series(series: Series) -> Series:

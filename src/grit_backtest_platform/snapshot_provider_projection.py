@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import os
 from collections.abc import Sequence as SequenceABC
 from dataclasses import dataclass
@@ -8,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from .fallback_provider import provider_access_tier
-from .pit_external_sources import kaggle_credential_status, polygon_credential_status
+from .pit_external_sources import eodhd_credential_status, kaggle_credential_status, polygon_credential_status
 
 
 OPENBB_ENABLE_VALUES = {"1", "true", "yes", "on"}
@@ -54,6 +55,16 @@ SOURCE_GOVERNANCE: dict[str, dict[str, Any]] = {
         "license": "public_sec_data",
         "source_manifest_required": False,
     },
+    "edgartools": {
+        "source_url": "https://edgartools.readthedocs.io/en/latest/guides/financial-data/",
+        "license": "public_sec_data_via_python_library",
+        "source_manifest_required": False,
+    },
+    "iex_cloud_legacy": {
+        "source_url": "https://iexcloud.org/",
+        "license": "retired_legacy_or_sandbox_terms",
+        "source_manifest_required": False,
+    },
     "github_sp500_historical_components": {
         "source_url": "https://github.com/fja05680/sp500",
         "license": "upstream_repository",
@@ -73,6 +84,26 @@ SOURCE_GOVERNANCE: dict[str, dict[str, Any]] = {
         "source_url": "https://massive.com/docs/rest/stocks/aggregates/custom-bars",
         "license": "account_terms",
         "source_manifest_required": False,
+    },
+    "eodhd": {
+        "source_url": "https://eodhd.com/financial-apis/quick-start-with-our-financial-data-apis/",
+        "license": "account_terms",
+        "source_manifest_required": False,
+    },
+    "sharadar": {
+        "source_url": "https://www.sharadar.com/data",
+        "license": "nasdaq_data_link_account_terms",
+        "source_manifest_required": True,
+    },
+    "norgate_us_equities": {
+        "source_url": "https://norgatedata.com/data-content-tables.php",
+        "license": "account_terms",
+        "source_manifest_required": True,
+    },
+    "crsp_us_stock": {
+        "source_url": "https://www.crsp.org/crsp_pdf/crsp-us-stock-indexes-databases-data-descriptions-guide-crspaccess/",
+        "license": "wrds_crsp_subscription_terms",
+        "source_manifest_required": True,
     },
 }
 
@@ -244,6 +275,54 @@ PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
             pit_notes=("Polygon/Massive precision repair is gated by MASSIVE_API_KEY and should be reserved for critical gaps.",),
         ),
         _definition(
+            "eodhd",
+            "EODHD",
+            "paid_optional",
+            ("price_history", "corporate_actions", "fundamentals", "delisted_price_history", "identity"),
+            fallback_order={"price_history": 4, "corporate_actions": 4, "fundamentals": 2, "delisted_price_history": 1, "identity": 4},
+            required_env_vars=("EODHD_API_TOKEN",),
+            optional_layer="paid_external",
+            pit_mode="evidence_source",
+            can_upgrade_pit_readiness=True,
+            pit_notes=("Delisted tickers use provider-specific old-symbol identity and must be mapped before PIT import.",),
+        ),
+        _definition(
+            "sharadar",
+            "Sharadar",
+            "paid_optional",
+            ("price_history", "corporate_actions", "fundamentals", "delisted_price_history", "identity"),
+            fallback_order={"price_history": 5, "corporate_actions": 5, "fundamentals": 3, "delisted_price_history": 2, "identity": 5},
+            required_env_vars=("NASDAQ_DATA_LINK_API_KEY",),
+            optional_layer="paid_external",
+            pit_mode="survivorship_bias_free_bundle",
+            can_upgrade_pit_readiness=True,
+            pit_notes=("Use as a licensed bundle source; record table version, import date, and entitlement in the manifest.",),
+        ),
+        _definition(
+            "norgate_us_equities",
+            "Norgate US Equities",
+            "paid_optional",
+            ("price_history", "corporate_actions", "delisted_price_history", "historical_constituents", "identity"),
+            fallback_order={"price_history": 3, "corporate_actions": 3, "delisted_price_history": 1, "historical_constituents": 1, "identity": 3},
+            required_env_vars=("NORGATE_DATA_PATH",),
+            optional_layer="paid_external",
+            pit_mode="survivorship_bias_free_bundle",
+            can_upgrade_pit_readiness=True,
+            pit_notes=("Local Norgate export path is required; do not persist vendor data outside the licensed runtime cache.",),
+        ),
+        _definition(
+            "crsp_us_stock",
+            "CRSP US Stock",
+            "institutional_subscription",
+            ("price_history", "corporate_actions", "delisted_returns", "historical_constituents", "identity"),
+            fallback_order={"price_history": 1, "corporate_actions": 1, "delisted_returns": 1, "historical_constituents": 1, "identity": 1},
+            required_env_vars=("CRSP_DATA_PATH",),
+            optional_layer="institutional_external",
+            pit_mode="institutional_gold_source",
+            can_upgrade_pit_readiness=True,
+            pit_notes=("Use only from a licensed CRSP/WRDS export; preserve PERMNO/PERMCO and delisting-return lineage.",),
+        ),
+        _definition(
             "fmp",
             "Financial Modeling Prep",
             "free_account",
@@ -279,6 +358,18 @@ PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
             required_env_vars=("ALPHAVANTAGE_API_KEY",),
         ),
         _definition(
+            "iex_cloud_legacy",
+            "IEX Cloud Legacy/Sandbox",
+            "retired_legacy_sandbox",
+            ("price_history", "corporate_actions", "identity"),
+            fallback_order={"price_history": 12, "corporate_actions": 10, "identity": 6},
+            pit_mode="sandbox_observation",
+            can_upgrade_pit_readiness=False,
+            pit_notes=(
+                "IEX Cloud API products were retired in 2024; use only for an explicitly configured legacy or sandbox account.",
+            ),
+        ),
+        _definition(
             "finra_short_volume",
             "FINRA Short Volume",
             "public_web",
@@ -303,6 +394,20 @@ PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
             pit_mode="identity_only",
             can_upgrade_pit_readiness=True,
             pit_notes=("CIK and filing history provide identity/lifecycle evidence; SEC EDGAR does not provide OHLCV price bars.",),
+        ),
+        _definition(
+            "edgartools",
+            "Edgartools",
+            "free_account",
+            ("fundamentals", "filings", "identity"),
+            fallback_order={"fundamentals": 1, "filings": 2, "identity": 6},
+            required_env_vars=("SEC_USER_AGENT",),
+            optional_layer="python_optional",
+            pit_mode="sec_companyfacts_helper",
+            can_upgrade_pit_readiness=True,
+            pit_notes=(
+                "Python helper over SEC companyfacts and filings; cache must stay under the project or another approved local path.",
+            ),
         ),
         _definition(
             "wikipedia_revision_history",
@@ -534,6 +639,22 @@ TRUST_PROFILE_OVERRIDES: dict[str, dict[str, Any]] = {
         "limitations": ["identity-only；SEC EDGAR 不提供价格，也不能把停止申报直接写成破产结论。"],
         "operator_action": "配置含联系邮箱的 SEC_USER_AGENT，用 CIK 证明身份和生命周期上下文。",
     },
+    "edgartools": {
+        "trust_tier": "sec_python_helper",
+        "evidence_scope": ["SEC companyfacts", "SEC submissions", "XBRL facts"],
+        "can_upgrade_full_ready": True,
+        "pit_role": "SEC 财务与申报 Python 辅助通道。",
+        "limitations": ["不提供 OHLCV；依赖 SEC CIK 映射和本地缓存目录权限。"],
+        "operator_action": "安装 edgartools，配置 SEC_USER_AGENT，并把 EDGAR_LOCAL_DATA_DIR 指向项目内受控缓存。",
+    },
+    "iex_cloud_legacy": {
+        "trust_tier": "retired_observation_only",
+        "evidence_scope": ["legacy/sandbox quote and chart probes when a token still works"],
+        "can_upgrade_full_ready": False,
+        "pit_role": "IEX Cloud legacy/sandbox 观测探针，不作为 2026 可靠补数主链。",
+        "limitations": ["IEX Cloud API 产品已在 2024 年退役；缺 token 或端点失效不应阻断主修复路径。"],
+        "operator_action": "仅在确认 legacy/sandbox 账号仍可用时配置 IEX_TOKEN 或 IEX_CLOUD_TOKEN；否则优先 SEC/Stooq/Alpha/OpenBB/Tiingo。",
+    },
     "finnhub": {
         "trust_tier": "identity_listing_crosscheck",
         "evidence_scope": ["company profile", "listing status", "targeted candle fallback"],
@@ -558,6 +679,38 @@ TRUST_PROFILE_OVERRIDES: dict[str, dict[str, Any]] = {
         "limitations": ["需要 MASSIVE_API_KEY；仅用于关键缺口，不作为默认免费链。"],
         "operator_action": "有 key 时用于关键 delisted、生命周期或公司行动精修候选。",
     },
+    "eodhd": {
+        "trust_tier": "paid_delisted_bundle",
+        "evidence_scope": ["EOD OHLCV", "splits/dividends", "fundamentals", "delisted symbols"],
+        "can_upgrade_full_ready": True,
+        "pit_role": "Paid delisted-aware L1/L2 repair source.",
+        "limitations": ["Requires plan entitlement and old-symbol mapping; provider rows must be imported with a manifest."],
+        "operator_action": "Configure EODHD_API_TOKEN, fetch delisted symbol list, then import EOD, splits/dividends, and fundamentals into ds-price/ds-corporate-actions/ds-fundamentals.",
+    },
+    "sharadar": {
+        "trust_tier": "paid_survivorship_bias_free_bundle",
+        "evidence_scope": ["survivorship-bias-free fundamentals", "daily prices", "active and delisted coverage"],
+        "can_upgrade_full_ready": True,
+        "pit_role": "Licensed L1/L2 bundle for historical active and delisted US equities.",
+        "limitations": ["Requires Nasdaq Data Link/Sharadar entitlement; every imported table needs source version and manifest evidence."],
+        "operator_action": "Configure NASDAQ_DATA_LINK_API_KEY with Sharadar entitlement, then import price, fundamentals, action, and ticker tables through the licensed bulk path.",
+    },
+    "norgate_us_equities": {
+        "trust_tier": "paid_survivorship_bias_free_bundle",
+        "evidence_scope": ["delisted stocks", "historical index constituents", "dividend/split-adjusted indicators"],
+        "can_upgrade_full_ready": True,
+        "pit_role": "Licensed local bundle for PIT US equity history and constituents.",
+        "limitations": ["Requires US package entitlement and a local export path; not an API fallback."],
+        "operator_action": "Set NORGATE_DATA_PATH to a licensed local export, then import prices, actions, delisted symbols, and historical constituent rows with manifest checks.",
+    },
+    "crsp_us_stock": {
+        "trust_tier": "institutional_gold_source",
+        "evidence_scope": ["prices", "returns", "delisting returns", "name history", "index membership"],
+        "can_upgrade_full_ready": True,
+        "pit_role": "Institutional gold source for delisting-aware L1 PIT repair.",
+        "limitations": ["Requires licensed CRSP/WRDS export; preserve PERMNO/PERMCO lineage and delisting-return semantics."],
+        "operator_action": "Set CRSP_DATA_PATH to a licensed export and import through a manifest-checked institutional lane.",
+    },
 }
 
 DATA_TRUST_LAYER_DEFINITIONS: tuple[dict[str, Any], ...] = (
@@ -565,7 +718,19 @@ DATA_TRUST_LAYER_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "id": "price_primary_chain",
         "label": "价格主链",
         "role": "可审计 EOD OHLCV",
-        "provider_ids": ("tiingo", "yahoo", "yfinance", "fmp", "openbb_tiingo", "openbb_yfinance", "openbb_fmp"),
+        "provider_ids": (
+            "crsp_us_stock",
+            "norgate_us_equities",
+            "sharadar",
+            "eodhd",
+            "tiingo",
+            "yahoo",
+            "yfinance",
+            "fmp",
+            "openbb_tiingo",
+            "openbb_yfinance",
+            "openbb_fmp",
+        ),
         "preferred_provider": "tiingo",
         "evidence_scope": ["EOD OHLCV", "adjusted close", "repair queue price evidence"],
         "full_ready_gate": "价格缺口必须由可审计 provider 入库，price-only 源不能替代公司行动或身份门禁。",
@@ -583,16 +748,25 @@ DATA_TRUST_LAYER_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "id": "delisted_identity",
         "label": "退市 / 身份",
         "role": "ticker 生命周期和 CIK",
-        "provider_ids": ("sec_edgar", "tiingo_symbology", "fmp", "finnhub", "alpha_vantage"),
+        "provider_ids": ("crsp_us_stock", "norgate_us_equities", "sharadar", "eodhd", "sec_edgar", "edgartools", "tiingo_symbology", "fmp", "finnhub", "alpha_vantage"),
         "preferred_provider": "sec_edgar",
         "evidence_scope": ["CIK", "delisting metadata", "canonical symbol", "filing lifecycle"],
         "full_ready_gate": "identity-only 源不能补 OHLCV；用于证明标的身份和不可恢复缺口上下文。",
     },
     {
+        "id": "fundamentals_primary_chain",
+        "label": "财务截面",
+        "role": "PIT fundamentals and filing-date availability",
+        "provider_ids": ("crsp_us_stock", "norgate_us_equities", "sharadar", "eodhd", "sec_edgar", "edgartools", "fmp", "openbb_fmp"),
+        "preferred_provider": "sec_edgar",
+        "evidence_scope": ["SEC companyfacts", "publish_date", "available_at", "structured ratios"],
+        "full_ready_gate": "L2 必须保留 publish_date/available_at；FMP/OpenBB 只能补结构化字段，不能覆盖 SEC filed-date PIT 语义。",
+    },
+    {
         "id": "corporate_actions_zero_event",
         "label": "公司行动 / 零事件",
         "role": "dividend/split 或 zero-event certificate",
-        "provider_ids": ("tiingo", "yahoo", "alpha_vantage", "fmp", "sec_edgar", "polygon"),
+        "provider_ids": ("crsp_us_stock", "norgate_us_equities", "sharadar", "eodhd", "tiingo", "yahoo", "alpha_vantage", "fmp", "sec_edgar", "polygon"),
         "preferred_provider": "tiingo",
         "evidence_scope": ["dividend events", "split events", "zero-event certificate context"],
         "full_ready_gate": "公司行动缺口必须由事件 provider 或 zero-event certificate 关闭。",
@@ -601,7 +775,7 @@ DATA_TRUST_LAYER_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "id": "long_history_patch",
         "label": "长周期补丁",
         "role": "70/80/90 年代价格补丁",
-        "provider_ids": ("nasdaq_wiki", "stooq", "kaggle_huge_stock_market_dataset", "kaggle_delisted_bulk_archive"),
+        "provider_ids": ("crsp_us_stock", "norgate_us_equities", "sharadar", "eodhd", "nasdaq_wiki", "stooq", "kaggle_huge_stock_market_dataset", "kaggle_delisted_bulk_archive"),
         "preferred_provider": "nasdaq_wiki",
         "evidence_scope": ["long-horizon OHLCV", "delisted price rows"],
         "full_ready_gate": "price-only，只能修复价格缺口，不能单独通过公司行动或身份门禁。",
@@ -748,23 +922,56 @@ def _credential_requirements(provider_id: str, definition: ProviderDefinition | 
             "credential_status": status.get("credential_status"),
             "secret_persistence": "disabled",
         }
+    if provider_id == "eodhd":
+        status = eodhd_credential_status()
+        return {
+            "required_env_vars": status.get("required_env_vars", ["EODHD_API_TOKEN"]),
+            "accepted_env_vars": status.get("accepted_env_vars", ["EODHD_API_TOKEN", "EODHD_API_KEY"]),
+            "configured": bool(status.get("configured")),
+            "configured_env_vars": status.get("configured_env_vars", []),
+            "missing_env_vars": status.get("missing_env_vars", []),
+            "credential_status": status.get("credential_status"),
+            "secret_persistence": "disabled",
+            "notes": ["EODHD delisted tickers may require provider-specific old-symbol mapping such as SYMBOL_old.US."],
+        }
+    if provider_id == "iex_cloud_legacy":
+        accepted = ["IEX_TOKEN", "IEX_CLOUD_TOKEN"]
+        configured = [name for name in accepted if str(os.getenv(name) or "").strip()]
+        return {
+            "required_env_vars": ["IEX_TOKEN or IEX_CLOUD_TOKEN"],
+            "accepted_env_vars": accepted,
+            "configured": bool(configured),
+            "configured_env_vars": configured,
+            "missing_env_vars": [] if configured else accepted,
+            "credential_status": "present" if configured else "missing",
+            "secret_persistence": "disabled",
+            "notes": [
+                "IEX Cloud legacy/sandbox is treated as observation-only until a live legacy account is explicitly configured."
+            ],
+        }
     required = list(definition.required_env_vars if definition else ())
     if isinstance(metadata, Mapping):
         required.extend(str(item) for item in (metadata.get("required_env_vars") or []) if str(item).strip())
     required = list(dict.fromkeys(required))
     configured = [name for name in required if str(os.getenv(name) or "").strip()]
     missing = [name for name in required if name not in configured]
+    notes: list[str] = []
+    if provider_id.startswith("openbb_"):
+        notes.append("OpenBB credentials are read from environment variables only.")
+    if provider_id == "edgartools":
+        notes.append(
+            "Python package 'edgar' is installed and importable."
+            if importlib.util.find_spec("edgar") is not None
+            else "Install the optional edgartools package before running the Python helper path."
+        )
     return {
         "required_env_vars": required,
         "configured": len(missing) == 0,
         "configured_env_vars": configured,
         "missing_env_vars": missing,
         "secret_persistence": "disabled",
-        "notes": (
-            ["OpenBB credentials are read from environment variables only."]
-            if provider_id.startswith("openbb_")
-            else []
-        ),
+        "notes": notes,
+        "python_package_available": importlib.util.find_spec("edgar") is not None if provider_id == "edgartools" else None,
     }
 
 

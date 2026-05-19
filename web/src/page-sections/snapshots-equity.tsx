@@ -862,6 +862,8 @@ function formatEquitySourceLabel(value?: string | null): string {
       return 'Stooq 长周期价格';
     case 'nasdaq_wiki':
       return 'Nasdaq WIKI 历史价格';
+    case 'eodhd':
+      return 'EODHD';
     case 'kaggle_huge_stock_market_dataset':
       return 'Kaggle 批量价格';
     case 'kaggle_delisted_bulk_archive':
@@ -911,7 +913,10 @@ function getStringList(metadata: Record<string, unknown>, key: string): string[]
 
 function getCoverageCounts(item: ApiDatasetSnapshot): { covered: number; total: number } | null {
   const metadata = getMetadata(item);
-  const covered = getNumber(metadata, 'covered_symbol_count');
+  const covered =
+    item.id === 'ds-fundamentals'
+      ? getNumber(metadata, 'effective_covered_symbol_count') ?? getNumber(metadata, 'covered_symbol_count')
+      : getNumber(metadata, 'covered_symbol_count');
   const total = getNumber(metadata, 'total_symbol_count');
   if (covered === null || total === null || total <= 0) {
     return null;
@@ -1212,7 +1217,10 @@ function translateSnapshotNote(raw?: string | null): string | null {
 }
 function describeDataset(item: ApiDatasetSnapshot): EquityRuntimeRow {
   const metadata = getMetadata(item);
-  const covered = getNumber(metadata, 'covered_symbol_count');
+  const covered =
+    item.id === 'ds-fundamentals'
+      ? getNumber(metadata, 'effective_covered_symbol_count') ?? getNumber(metadata, 'covered_symbol_count')
+      : getNumber(metadata, 'covered_symbol_count');
   const total = getNumber(metadata, 'total_symbol_count');
   const missing = getStringList(metadata, 'missing_symbols');
   const coverage =
@@ -2190,6 +2198,9 @@ function credentialProviderAliases(key: string): string[] {
       return ['finnhub', 'delisted_identity', 'identity', 'lifecycle'];
     case 'MASSIVE_API_KEY':
       return ['polygon', 'massive', 'option_skew', 'precision_repair'];
+    case 'EODHD_API_TOKEN':
+    case 'EODHD_API_KEY':
+      return ['eodhd', 'delisted_price_history', 'corporate_actions', 'fundamentals'];
     default:
       return [key.toLowerCase()];
   }
@@ -2406,7 +2417,6 @@ type SnapshotWorkbenchDisplayRow = {
   summary: string;
   status: string;
   statusLabel: string;
-  stats: string[];
 };
 
 type SnapshotAnomalyDisplayRow = {
@@ -2459,14 +2469,6 @@ function buildSnapshotWorkbenchRows(layerDisplays: SnapshotLayerDisplay[]): Snap
     summary: layer.summary,
     status: layer.status,
     statusLabel: layer.statusLabel,
-    stats: [
-      `${layer.primaryMetric.label} ${layer.primaryMetric.value}`,
-      ...layer.supportingMetrics
-        .filter((metric) => metric.value !== layer.updatedLabel)
-        .slice(0, 2)
-        .map((metric) => `${metric.label} ${metric.value}`),
-      layer.providerLabel,
-    ].filter(Boolean),
   }));
 }
 
@@ -3223,13 +3225,6 @@ export function EquitySnapshotsTab({
                     <span>{row.summary}</span>
                   </div>
                   <span className={statusChipClassName(row.status)}>{row.statusLabel}</span>
-                </div>
-                <div className="layer-row__stats">
-                  {row.stats.map((stat) => (
-                    <span className="small-stat" key={`${row.key}-${stat}`}>
-                      {stat}
-                    </span>
-                  ))}
                 </div>
               </article>
             ))}

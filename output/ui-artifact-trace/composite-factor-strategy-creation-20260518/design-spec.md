@@ -2,7 +2,7 @@
 
 生成时间：2026-05-18
 目标路由：`#/factor-models/new?strategyType=COMPOSITE_FACTOR`
-设计源：`DESIGN.md`、现有 `#/factor-models/new` 页面结构、上游合成因子策略方案
+设计源：`DESIGN.md`、现有 `#/factor-models/new` 页面结构、上游组合因子策略方案
 冻结稿：`C:\Fin\Grit_Strategy_Lab\output\ui-artifact-trace\composite-factor-strategy-creation-20260518\composite-factor-strategy-creation.html`
 
 ## 1. 页面目标与用户

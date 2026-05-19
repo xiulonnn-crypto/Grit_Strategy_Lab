@@ -18,6 +18,120 @@ function jsonResponse(payload: unknown, status = 200): Response {
   });
 }
 
+function operatorConfigPayload() {
+  return {
+    profile_id: 'default',
+    draft: {
+      enabled_operators: ['TS_Return', 'TS_Rank', 'TS_Corr'],
+      window_space: [3, 5, 10, 21, 63, 126, 252],
+      default_depth: 2,
+      daily_formula_budget: 10000,
+      compute_backend: 'pandas_bottleneck',
+      min_periods_policy: 'TS 默认 min_periods=n；TS_Return 需要 n+1 个有效观测；不足输出 NaN。',
+      blocked_field_policy: '排除 DATA_SOURCE_BLOCKED 字段；缺失 L1 保持 NaN。',
+      governance_protocol: {
+        winsorize_enabled: true,
+        neutralize_enabled: true,
+        zscore_enabled: true,
+        smoothing_enabled: true,
+        orthogonalization_enabled: false,
+        turnover_filter_enabled: false,
+      },
+      notes: 'Phase 0 默认草稿',
+      f1_catalog_snapshot_id: 'f1_catalog_snapshot_20260519_001',
+      created_by: 'ui',
+    },
+    registry_items: [
+      {
+        operator_id: 'TS_Return',
+        operator_group: 'TS',
+        enabled: true,
+        definition: 'x_t / x_{t-n} - 1',
+        economic_meaning: '度量 n 日收益率。',
+        input_types: ['series'],
+        output_dimension: 'time_series',
+        default_params: { n: 21 },
+        allowed_window_space: [3, 5, 10, 21, 63, 126, 252],
+        min_periods_rule: 'n+1',
+      },
+      {
+        operator_id: 'TS_Rank',
+        operator_group: 'TS',
+        enabled: true,
+        definition: 'rank(x_t, window=n)',
+        economic_meaning: '度量局部相对强弱。',
+        input_types: ['series'],
+        output_dimension: 'time_series',
+        default_params: { n: 21 },
+        allowed_window_space: [3, 5, 10, 21, 63, 126, 252],
+        min_periods_rule: 'n',
+      },
+      {
+        operator_id: 'TS_Corr',
+        operator_group: 'MULTI',
+        enabled: true,
+        definition: 'corr(x, y, n)',
+        economic_meaning: '度量两个序列的滚动相关。',
+        input_types: ['series', 'series'],
+        output_dimension: 'time_series',
+        default_params: { n: 21 },
+        allowed_window_space: [3, 5, 10, 21, 63, 126, 252],
+        min_periods_rule: 'n',
+      },
+      {
+        operator_id: 'CS_ZScore',
+        operator_group: 'CS',
+        enabled: false,
+        definition: '(x - mean) / std',
+        economic_meaning: '截面标准化。',
+        input_types: ['cross_section'],
+        output_dimension: 'cross_section',
+        default_params: {},
+        allowed_window_space: [],
+        min_periods_rule: 'valid_cross_section',
+      },
+    ],
+    latest_f1_catalog_snapshot: {
+      id: 'f1_catalog_snapshot_20260519_001',
+      snapshot_id: 'f1_catalog_snapshot_20260519_001',
+      run_id: 'pit_pre_20260519_001',
+      as_of_date: '2026-05-19',
+      generated_at: '2026-05-19T08:00:00Z',
+      field_count: 25,
+      callable_count: 18,
+      blocked_count: 3,
+      timing_gap_count: 1,
+      summary: { ic_ir_gate: 'NOT_APPLIED' },
+    },
+    latest_operator_config_snapshot: {
+      id: 'op_config_snapshot_20260519_001',
+      snapshot_id: 'op_config_snapshot_20260519_001',
+      generated_at: '2026-05-19T08:10:00Z',
+      status: 'ACTIVE',
+      operator_count: 25,
+      enabled_operators: ['TS_Return', 'TS_Rank', 'TS_Corr'],
+      window_space: [3, 5, 10, 21, 63, 126, 252],
+      default_depth: 2,
+      daily_formula_budget: 10000,
+      compute_backend: 'pandas_bottleneck',
+      min_periods_policy: 'TS 默认 min_periods=n；TS_Return 需要 n+1 个有效观测；不足输出 NaN。',
+      blocked_field_policy: '排除 DATA_SOURCE_BLOCKED 字段；缺失 L1 保持 NaN。',
+      governance_protocol: {
+        winsorize_enabled: true,
+        neutralize_enabled: true,
+        zscore_enabled: true,
+        smoothing_enabled: true,
+        orthogonalization_enabled: false,
+        turnover_filter_enabled: false,
+      },
+      notes: '已冻结',
+      f1_catalog_snapshot_id: 'f1_catalog_snapshot_20260519_001',
+      created_by: 'ui',
+      items: [],
+    },
+  };
+}
+
 function factoryOverview(overrides: Partial<ApiFactorFactoryOverview> = {}): ApiFactorFactoryOverview {
   const request = {
     universe: 'SP500',
@@ -204,6 +318,7 @@ function factoryOverview(overrides: Partial<ApiFactorFactoryOverview> = {}): Api
       investment_logic: '质量驱动动量组合。',
       detail_modal_enabled: true,
     }],
+    operator_config: operatorConfigPayload(),
   };
   return { ...overview, ...overrides };
 }
@@ -230,11 +345,118 @@ describe('FactorFactoryPage', () => {
     expect(screen.getByRole('heading', { name: '可发布因子名单' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '一键发布' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '因子任务' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: '因子打分' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: '因子检疫' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '治理候选' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '发布准入建议' })).toBeInTheDocument();
     expect(document.querySelector('.factor-factory-b1b4-page')).toBeInTheDocument();
     expect(document.querySelectorAll('.factor-factory-fixed-panel')).toHaveLength(3);
     expect(screen.getByLabelText('因子任务类型')).toBeInTheDocument();
+  });
+
+  it('opens Phase 0 operator config modal, saves draft, snapshots config, and confirms dirty close', async () => {
+    const config = operatorConfigPayload();
+    const overview = factoryOverview({ operator_config: config });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.pathname === '/factor-factory/operator-config/snapshots') {
+        return jsonResponse({
+          ...config.latest_operator_config_snapshot,
+          snapshot_id: 'op_config_snapshot_20260519_saved',
+          id: 'op_config_snapshot_20260519_saved',
+        });
+      }
+      if (url.pathname === '/factor-factory/operator-config' && method === 'PUT') {
+        return jsonResponse({ ...config, draft: JSON.parse(String(init?.body ?? '{}')), saved: true });
+      }
+      if (url.pathname === '/factor-factory/operator-config') {
+        return jsonResponse(config);
+      }
+      return jsonResponse(overview);
+    });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    renderFactory();
+
+    fireEvent.click(await screen.findByRole('button', { name: '工厂配置' }));
+    const dialog = await screen.findByRole('dialog', { name: '因子工厂配置' });
+    expect(within(dialog).getByText('算子预算、治理协议、准入闸门和快照版本在此统一维护。')).toBeInTheDocument();
+    const tablist = within(dialog).getByRole('navigation', { name: '工厂配置标签' });
+    expect(within(tablist).getByRole('tab', { name: '算子注册' })).toBeInTheDocument();
+    expect(within(tablist).getByRole('tab', { name: '治理协议' })).toBeInTheDocument();
+    expect(within(tablist).getByRole('tab', { name: '准入闸门' })).toBeInTheDocument();
+    expect(within(tablist).getByRole('tab', { name: '算子注册' })).toHaveAttribute('aria-selected', 'true');
+    expect(within(tablist).getByRole('tab', { name: 'WNZT 证据与检疫裁决' })).toHaveAttribute('aria-selected', 'false');
+    expect(within(tablist).getByRole('tab', { name: '配置快照' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('heading', { name: '算子注册表' })).toBeInTheDocument();
+    expect(within(dialog).getByText('25 个核心算子，默认启用 3 个。RankIC/IR/OOS 不参与 F1 准入，仅在 F2/F3 诊断中使用。')).toBeInTheDocument();
+    expect(within(dialog).getByText('核心算子库')).toBeInTheDocument();
+    expect(within(dialog).getByText('定义、含义、输入、输出、窗口与 min_periods')).toBeInTheDocument();
+    expect(within(dialog).getAllByText('TS 时间序列类').length).toBeGreaterThanOrEqual(1);
+    expect(within(dialog).getAllByText('CS / 多元 / 非线性 / 技术类').length).toBeGreaterThanOrEqual(1);
+    expect(within(dialog).getByText('TS_Return')).toBeInTheDocument();
+    expect(within(dialog).getByText('x_t / x_{t-n} - 1')).toBeInTheDocument();
+    expect(within(dialog).getByText('TS_Rank')).toBeInTheDocument();
+    expect(within(dialog).getByText('TS_Corr')).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: '停用 TS_Return' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(dialog).getByRole('button', { name: '停用 TS_Rank' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(dialog).getByRole('button', { name: '停用 TS_Corr' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(dialog).getByRole('button', { name: '启用 TS_Mean' })).toHaveAttribute('aria-pressed', 'false');
+    expect(within(dialog).getByText('引用快照')).toBeInTheDocument();
+    expect(within(dialog).getByText('准入规则')).toBeInTheDocument();
+    expect(within(dialog).getByText('运行预算')).toBeInTheDocument();
+    expect(within(dialog).getByText('表达式上限')).toBeInTheDocument();
+    expect(within(dialog).queryByText('发布边界')).not.toBeInTheDocument();
+    expect(within(dialog).queryByText('阻断规则')).not.toBeInTheDocument();
+
+    const groupSelect = within(dialog).getByLabelText('算子分组筛选') as HTMLSelectElement;
+    const operatorSearch = within(dialog).getByLabelText('搜索算子或定义') as HTMLInputElement;
+    expect(groupSelect.value).toBe('all');
+    fireEvent.change(groupSelect, { target: { value: 'cross' } });
+    expect(within(dialog).queryByText('TS_Mean')).not.toBeInTheDocument();
+    expect(within(dialog).getByText('TS_Corr')).toBeInTheDocument();
+    expect(within(dialog).getByText('CS_Rank / CS_ZScore / CS_Scale / CS_Neutral')).toBeInTheDocument();
+    fireEvent.change(groupSelect, { target: { value: 'all' } });
+    fireEvent.change(operatorSearch, { target: { value: 'TS_Return' } });
+    expect(within(dialog).getByText('TS_Return')).toBeInTheDocument();
+    expect(within(dialog).queryByText('TS_Rank')).not.toBeInTheDocument();
+    fireEvent.change(operatorSearch, { target: { value: '' } });
+
+    fireEvent.click(within(tablist).getByRole('tab', { name: 'WNZT 证据与检疫裁决' }));
+    expect(within(dialog).getByText('W 去极值')).toBeInTheDocument();
+    expect(within(dialog).getByText('N 中性化')).toBeInTheDocument();
+    expect(within(dialog).getByText('Z 标准化')).toBeInTheDocument();
+    expect(within(dialog).getAllByText('默认关闭')).toHaveLength(2);
+    expect(within(dialog).getByText('引用快照')).toBeInTheDocument();
+    expect(within(dialog).getByText('准入规则')).toBeInTheDocument();
+    expect(within(dialog).getByText('运行预算')).toBeInTheDocument();
+
+    fireEvent.click(within(tablist).getByRole('tab', { name: '准入闸门' }));
+    expect(within(dialog).getByText(/F1 原始库不设 IC 门槛/)).toBeInTheDocument();
+
+    fireEvent.click(within(tablist).getByRole('tab', { name: '治理协议' }));
+    expect(within(dialog).getByText('WNZT 标准流')).toBeInTheDocument();
+    const optionalButtons = within(dialog).getAllByRole('button', { name: '默认关闭' });
+    expect(optionalButtons).toHaveLength(2);
+    optionalButtons.forEach((button) => expect(button).toHaveAttribute('aria-pressed', 'false'));
+
+    fireEvent.click(within(tablist).getByRole('tab', { name: '算子注册' }));
+    expect(within(dialog).getAllByText('启用').length).toBeGreaterThanOrEqual(3);
+    expect(within(dialog).getByText('算子注册表')).toBeInTheDocument();
+    expect(within(dialog).getAllByText('窗口空间').length).toBeGreaterThanOrEqual(1);
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '启用 TS_Mean' }));
+    expect(within(dialog).getByText('草稿已变更')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: '关闭' }));
+    expect(confirmSpy).toHaveBeenCalledWith('配置草稿尚未保存，确认关闭弹层？');
+    expect(screen.getByRole('dialog', { name: '因子工厂配置' })).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存草稿' }));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledWith(
+      expect.stringContaining('/factor-factory/operator-config'),
+      expect.objectContaining({ method: 'PUT' }),
+    ));
+    fireEvent.click(within(dialog).getByRole('button', { name: '生成配置快照' }));
+    expect(await screen.findByText(/op_config_snapshot_20260519_saved/)).toBeInTheDocument();
   });
 
   it('keeps fixed factory panels scrollable instead of clipping their body content', () => {
@@ -314,9 +536,87 @@ describe('FactorFactoryPage', () => {
     const scoreCards = Array.from(document.querySelectorAll('.factor-factory-score-card'));
     expect(scoreCards[0]).toHaveTextContent('Return(Close, 21)');
     expect(scoreCards[0]).toHaveTextContent('2026-05-15');
-    const resultRows = Array.from(document.querySelectorAll('.factor-factory-result-row:not(.factor-factory-result-row--head)'));
+    let resultRows = Array.from(document.querySelectorAll('.factor-factory-result-row:not(.factor-factory-result-row--head)'));
+    expect(resultRows).toHaveLength(1);
     expect(resultRows[0]).toHaveTextContent('Return(Close, 21)');
     expect(resultRows[0]).toHaveTextContent('2026-05-15');
+    const dateInput = document.querySelector('.factor-factory-filter-row input[type="date"]') as HTMLInputElement;
+    fireEvent.change(dateInput, { target: { value: '2026-05-12' } });
+    resultRows = Array.from(document.querySelectorAll('.factor-factory-result-row:not(.factor-factory-result-row--head)'));
+    expect(resultRows).toHaveLength(1);
+    expect(resultRows[0]).toHaveTextContent('Return(Close, 3)');
+    expect(resultRows[0]).toHaveTextContent('2026-05-12');
+    fireEvent.change(dateInput, { target: { value: '' } });
+    resultRows = Array.from(document.querySelectorAll('.factor-factory-result-row:not(.factor-factory-result-row--head)'));
+    expect(resultRows).toHaveLength(2);
+    expect(resultRows[0]).toHaveTextContent('Return(Close, 21)');
+    expect(resultRows[1]).toHaveTextContent('Return(Close, 3)');
+  });
+
+  it('aligns task and metric counts to the active quarantine date and exposes metric tooltips', async () => {
+    const overview = factoryOverview();
+    const makeRow = (index: number, result: 'PASS' | 'FAIL', date = '2026-05-19') => ({
+      candidate_id: `fq_${date}_${index}`,
+      submitted_at: `${date}T09:${String(index).padStart(2, '0')}:00Z`,
+      factor_name: `Factory Candidate ${date} ${index}`,
+      target_layer: 'L2',
+      quarantine_result: result,
+      reason_summary: result === 'PASS' ? 'accepted' : 'blocked',
+      detail_modal_enabled: true,
+    });
+    const currentRows = [
+      ...Array.from({ length: 4 }, (_, index) => makeRow(index + 1, 'PASS')),
+      ...Array.from({ length: 5 }, (_, index) => makeRow(index + 5, 'FAIL')),
+    ];
+    const olderRows = Array.from({ length: 4 }, (_, index) => makeRow(index + 1, 'PASS', '2026-05-15'));
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({
+      ...overview,
+      latest_run: { ...overview.latest_run!, run_date: '2026-05-19' },
+      task_rows: [
+        { id: '2026-05-19-mining', task_date: '2026-05-19', kind: 'mining', title: '2026-05-19 mining', status: 'COMPLETED', target_layer: 'L2', current_candidate_count: 10, delivered_candidate_count: 10 },
+        { id: '2026-05-19-refinement', task_date: '2026-05-19', kind: 'refinement', title: '2026-05-19 refinement', status: 'COMPLETED', target_layer: 'L2', current_candidate_count: 24, delivered_candidate_count: 24 },
+        { id: '2026-05-19-quarantine', task_date: '2026-05-19', kind: 'quarantine', title: '2026-05-19 quarantine', status: 'COMPLETED', target_layer: 'L2', current_candidate_count: 26, delivered_candidate_count: 26 },
+      ],
+      monitor_summary: {
+        yesterday_formula_count: 0,
+        initial_screen_pass_count: 10,
+        quarantine_pass_count: 8,
+        s_grade_promotion_count: 0,
+        alpha_concentration: 0,
+        failure_reason_distribution: {
+          a: 1,
+          b: 1,
+          c: 1,
+          d: 1,
+          e: 1,
+          f: 1,
+          g: 1,
+        },
+      },
+      scoring_candidates: [],
+      quarantine: { ...overview.quarantine, items: [], summary: { total: currentRows.length + olderRows.length } },
+      quarantine_result_rows: [...currentRows, ...olderRows],
+      publishable_factors: [],
+    }));
+
+    renderFactory();
+
+    await waitFor(() => expect((document.querySelector('.factor-factory-filter-row input[type="date"]') as HTMLInputElement)?.value).toBe('2026-05-19'));
+    const metricValue = (key: string) => document.querySelector(`[data-metric-key="${key}"] .factor-phase2-metric__value`) as HTMLElement;
+    expect(metricValue('initial_screen_pass')).toHaveTextContent('10');
+    expect(metricValue('quarantine_pass')).toHaveTextContent('4');
+    expect(metricValue('failure_candidate')).toHaveTextContent('5');
+    expect(document.querySelectorAll('.factor-factory-metric-tooltip')).toHaveLength(6);
+    expect(document.querySelector('[data-metric-key="quarantine_pass"] .factor-factory-metric-tooltip')).toHaveAttribute(
+      'title',
+      expect.stringContaining('当前日期'),
+    );
+
+    const taskDelivered = (kind: string) => document.querySelector(`[data-task-kind="${kind}"] .factor-factory-task-meta strong`) as HTMLElement;
+    expect(taskDelivered('mining')).toHaveTextContent('10');
+    expect(taskDelivered('refinement')).toHaveTextContent('9');
+    expect(taskDelivered('quarantine')).toHaveTextContent('9');
+    expect(document.querySelectorAll('.factor-factory-result-row:not(.factor-factory-result-row--head)')).toHaveLength(9);
   });
 
   it('keeps submitted factors in quarantine history instead of sending them back to scoring', async () => {
@@ -368,8 +668,12 @@ describe('FactorFactoryPage', () => {
     await screen.findByText('暂无待送检候选；已送检因子已移至 B3 因子检疫列表。');
     expect(document.querySelector('.factor-factory-score-card')).not.toBeInTheDocument();
     await waitFor(() => expect((document.querySelector('.factor-factory-filter-row input[type="date"]') as HTMLInputElement)?.value).toBe('2026-05-15'));
-    expect(screen.getByText('显示 2/2')).toBeInTheDocument();
-    const resultRows = Array.from(document.querySelectorAll('.factor-factory-result-row:not(.factor-factory-result-row--head)'));
+    const dateInput = document.querySelector('.factor-factory-filter-row input[type="date"]') as HTMLInputElement;
+    let resultRows = Array.from(document.querySelectorAll('.factor-factory-result-row:not(.factor-factory-result-row--head)'));
+    expect(resultRows).toHaveLength(1);
+    expect(resultRows[0]).toHaveTextContent('Return(Close, 21)');
+    fireEvent.change(dateInput, { target: { value: '' } });
+    resultRows = Array.from(document.querySelectorAll('.factor-factory-result-row:not(.factor-factory-result-row--head)'));
     expect(resultRows).toHaveLength(2);
     expect(resultRows[0]).toHaveTextContent('Return(Close, 21)');
     expect(resultRows[1]).toHaveTextContent('Return(Close, 3)');
@@ -451,11 +755,11 @@ describe('FactorFactoryPage', () => {
     expect(await screen.findByLabelText('历史检疫筛选')).toBeInTheDocument();
     expect(screen.getByLabelText('日期')).toBeInTheDocument();
     expect(screen.getByLabelText('因子名')).toBeInTheDocument();
-    expect(screen.getByLabelText('结果')).toBeInTheDocument();
+    expect(screen.getByLabelText('裁决')).toBeInTheDocument();
     const table = screen.getByRole('table', { name: '因子检疫结果列表' });
     expect(within(table).getByText('日期')).toBeInTheDocument();
     expect(within(table).getByText('因子名')).toBeInTheDocument();
-    expect(within(table).getByText('结果')).toBeInTheDocument();
+    expect(within(table).getByText('裁决')).toBeInTheDocument();
     expect(within(table).getByText('原因')).toBeInTheDocument();
     expect(within(table).getByText('操作')).toBeInTheDocument();
 
@@ -506,6 +810,15 @@ describe('FactorFactoryPage', () => {
     expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining('/factor-factory/run-now'), expect.objectContaining({ method: 'POST' }));
     expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining('/factor-quarantine/intake'), expect.objectContaining({ method: 'POST' }));
     expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining('/factor-quarantine/candidates/fq_factory_001/publish'), expect.objectContaining({ method: 'POST' }));
+
+    const startCall = fetchSpy.mock.calls.find(([url]) => String(url).includes('/factor-factory/automation/start'));
+    const runNowCall = fetchSpy.mock.calls.find(([url]) => String(url).includes('/factor-factory/run-now'));
+    const startBody = JSON.parse(String((startCall?.[1] as RequestInit | undefined)?.body ?? '{}'));
+    const runNowBody = JSON.parse(String((runNowCall?.[1] as RequestInit | undefined)?.body ?? '{}'));
+    expect(startBody.operator_config_snapshot_id).toBe('op_config_snapshot_20260519_001');
+    expect(startBody.f1_catalog_snapshot_id).toBe('f1_catalog_snapshot_20260519_001');
+    expect(runNowBody.operator_config_snapshot_id).toBe('op_config_snapshot_20260519_001');
+    expect(runNowBody.f1_catalog_snapshot_id).toBe('f1_catalog_snapshot_20260519_001');
   });
 
   it('hides publishable queue when no candidate is publishable and does not render sample rows on API failure', async () => {

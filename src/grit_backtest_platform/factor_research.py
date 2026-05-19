@@ -32,6 +32,7 @@ SANDBOX_DIAGNOSTIC_YEARS = 3
 GROUP_MONOTONICITY_WINDOW_PERIODS = 3
 GROUP_INVERSION_REQUIRED_STREAK = 3
 FACTOR_DESCRIPTOR_SCHEMA_VERSION = "factor_descriptor_v1"
+PUBLISHED_FACTOR_NAMING_SCHEMA_VERSION = "factor_publish_naming_v3"
 FACTOR_QUARANTINE_RULE_VERSION = "factor_quarantine_v2_0"
 FUNDAMENTAL_SEED_VERSION = "v3_asset_growth_shares"
 QUARANTINE_MIN_NEWEY_WEST_IR = 0.1
@@ -115,6 +116,54 @@ FUNDAMENTAL_FIELD_REQUIREMENTS_BY_TOKEN = {
     token.lower(): requirement
     for token, requirement in FUNDAMENTAL_FIELD_REQUIREMENTS.items()
 }
+FUNDAMENTAL_GAP_POLICY_SCHEMA_VERSION = "fundamental_gap_policy_v1"
+FUNDAMENTAL_FINANCIAL_LOGIC_NA_SYMBOLS = {
+    "DIA",
+    "EEM",
+    "EFA",
+    "GLD",
+    "HYG",
+    "IWM",
+    "LQD",
+    "QQQ",
+    "SLV",
+    "SPY",
+    "TLT",
+    "USO",
+    "XLB",
+    "XLE",
+    "XLF",
+    "XLI",
+    "XLK",
+    "XLP",
+    "XLRE",
+    "XLU",
+    "XLV",
+    "XLY",
+}
+FUNDAMENTAL_FINANCIAL_LOGIC_NA_NAME_MARKERS = (
+    " ETF",
+    "EXCHANGE TRADED",
+    "SPDR",
+    "ISHARES",
+    "INVESCO",
+    "POWERSHARES",
+    "PROSHARES",
+    "VANGUARD",
+    "VANECK",
+    "DIREXION",
+    "WISDOMTREE",
+    "FIRST TRUST",
+    "GUGGENHEIM",
+    " CLOSED-END",
+    "CLOSED END",
+    " INCOME FUND",
+    " MUNICIPAL FUND",
+    " SECURITIES FUND",
+    " PORTFOLIO",
+    " FUND ",
+    " TRUST ",
+)
 DATA_REQUIREMENT_ORDER = (
     "adj_close",
     "open",
@@ -241,10 +290,37 @@ DESCRIPTOR_SOURCE_TO_PREFIX = {
     value: key for key, value in DESCRIPTOR_SOURCE_PREFIX_TO_SOURCE.items()
 }
 ALLOWED_DESCRIPTOR_CATEGORIES = {"alpha", "beta", "inv", "liq", "mom", "qlty", "size", "val", "vol"}
-ALLOWED_DESCRIPTOR_OPERATORS = {"rank", "z", "raw", "log"}
-FACTOR_REFERENCE_TOKEN_SOURCE = (
+ALLOWED_DESCRIPTOR_OPERATORS = {
+    "blend",
+    "dec",
+    "delta",
+    "log",
+    "mean",
+    "neut",
+    "rank",
+    "ratio",
+    "raw",
+    "resid",
+    "ret",
+    "rk",
+    "std",
+    "tsm",
+    "tsr",
+    "z",
+}
+LEGACY_FACTOR_REFERENCE_TOKEN_SOURCE = (
     rf"[sma]_(?:{'|'.join(sorted(ALLOWED_DESCRIPTOR_CATEGORIES))})_"
     rf"(?:[a-z0-9]+_)*[a-z0-9]+_(?:{'|'.join(sorted(ALLOWED_DESCRIPTOR_OPERATORS))})"
+)
+PUBLISHED_FACTOR_REFERENCE_TOKEN_SOURCE = (
+    r"(?:"
+    r"f1_[a-z0-9]+(?:_[a-z0-9]+)*"
+    r"|s_f2_(?:mom|val|qlty|vol|liq)_[a-z0-9]+(?:_[a-z0-9]+)*"
+    r"|s_alpha_[a-z0-9]+(?:_[a-z0-9]+)*"
+    r")"
+)
+FACTOR_REFERENCE_TOKEN_SOURCE = (
+    rf"(?:{LEGACY_FACTOR_REFERENCE_TOKEN_SOURCE}|{PUBLISHED_FACTOR_REFERENCE_TOKEN_SOURCE})"
 )
 FACTOR_REFERENCE_TOKEN_PATTERN = re.compile(rf"^{FACTOR_REFERENCE_TOKEN_SOURCE}$")
 RESIDUAL_BY_KEYWORD_PATTERN = re.compile(r"\bResidual\s*\([^)]*\bby\s*=", re.DOTALL)
@@ -253,6 +329,17 @@ RESIDUAL_FACTOR_REFERENCE_PATTERN = re.compile(
     r"Residual\s*\(\s*(?P<target>[A-Za-z_][A-Za-z0-9_]*)\s*,\s*"
     r"by\s*=\s*[\"'](?P<by>[A-Za-z_][A-Za-z0-9_]*)[\"']\s*\)\s*\)?\s*$"
 )
+OVERNIGHT_MEAN_FACTOR_ID = "s_f2_mom_ovn_mean_21d"
+OVERNIGHT_MEAN_FACTOR_NAME = "21日隔夜动量均值"
+OVERNIGHT_MEAN_DESCRIPTION = "逻辑：衡量过去一个月平均隔夜收益。作用：捕捉非交易时段信息流入，但诊断中保留日内承接风险提示。"
+VALUE_VOL_WNZT_F3_FACTOR_ID = "s_alpha_valvol_blend_resid_std_rk"
+VALUE_VOL_WNZT_F3_FACTOR_NAME = "风险调整现金流回报 (精炼版)"
+VALUE_VOL_WNZT_F3_EXPRESSION = (
+    "Rank(Neutralize(ZScore(Winsorize(s_val_cfp_ltm_raw, 3)))) / "
+    "Rank(Neutralize(ZScore(Winsorize(s_vol_downside_252d_rank, 3))))"
+)
+VALUE_VOL_WNZT_F3_PARENTS = ("s_val_cfp_ltm_raw", "s_vol_downside_252d_rank")
+VALUE_VOL_WNZT_F3_COMPACT = re.sub(r"\s+", "", VALUE_VOL_WNZT_F3_EXPRESSION).lower()
 OLD_DEFAULT_FACTOR_ALIASES = {
     "momentum_12m_1m": "s_mom_12m1m_rank",
     "value_ep_ltm": "s_val_ep_ltm_raw",
@@ -261,6 +348,8 @@ OLD_DEFAULT_FACTOR_ALIASES = {
     "size_log_market_cap": "s_size_cur_log",
     "quality_roe_ltm": "s_qlty_roe_ltm_raw",
     "quality_fcf_yield": "s_qlty_fcfy_ttm_raw",
+    "s_alpha_ffblend_cur_rank": "s_alpha_ffblend_resid_mkt_rank",
+    "m_alpha_overnight_21d_raw": OVERNIGHT_MEAN_FACTOR_ID,
 }
 DEFAULT_FACTOR_ALIAS_BY_CANONICAL = {
     canonical: legacy for legacy, canonical in OLD_DEFAULT_FACTOR_ALIASES.items()
@@ -271,7 +360,8 @@ FACTOR_REFERENCE_EVALUATION_ALIASES = {
     "s_vol_252d_raw": "s_vol_252d_rank",
 }
 FACTOR_REFERENCE_DATA_REQUIREMENTS = {
-    "s_alpha_ffblend_cur_rank": ("market_cap", "ltm_earnings", "book_value_equity"),
+    "s_alpha_ffblend_resid_mkt_rank": ("market_cap", "ltm_earnings", "book_value_equity"),
+    VALUE_VOL_WNZT_F3_FACTOR_ID: ("operating_cash_flow", "market_cap", "adj_close", "price_history", "returns"),
     "s_inv_assetgrowth_1y_rank": ("shares_outstanding", "total_shares", "capex", "market_cap"),
     "s_inv_capex_ltm_raw": ("capex", "market_cap"),
     "s_liq_turnover_20d_rank": ("shares_outstanding", "total_shares"),
@@ -744,14 +834,25 @@ DEFAULT_SEED_FACTORS: tuple[SeedFactor, ...] = (
         diagnostic_status="READY_TO_DIAGNOSE",
     ),
     SeedFactor(
-        id="s_alpha_ffblend_cur_rank",
+        id="s_alpha_ffblend_resid_mkt_rank",
         name="Fama-French 风格合成 Alpha",
-        descriptor=FactorDescriptor("s", "alpha", "ffblend", "cur", "rank"),
-        expression="FFBlend(Momentum252, ValueEP, QualityROE, Size)",
+        descriptor=FactorDescriptor("s", "alpha", "ffblend_resid", "mkt", "rank"),
+        expression="Rank(ZScore(Residual(Winsorize(FFBlend(Momentum252, ValueEP, QualityROE, Size), 3), s_beta_market_252d_raw)))",
         direction="HIGH_IS_BETTER",
         tags=("system_seed", "alpha_blend", "fundamental_pit"),
         data_requirements=("adj_close", "price_history", "returns", "ltm_earnings", "book_value_equity", "market_cap"),
         institutional_note="Composite alpha blends momentum, value, quality and size PIT inputs instead of reusing momentum.",
+        diagnostic_status="READY_TO_DIAGNOSE",
+    ),
+    SeedFactor(
+        id=VALUE_VOL_WNZT_F3_FACTOR_ID,
+        name=VALUE_VOL_WNZT_F3_FACTOR_NAME,
+        descriptor=FactorDescriptor("s", "alpha", "valvol_blend_resid_std", "cur", "rk"),
+        expression=VALUE_VOL_WNZT_F3_EXPRESSION,
+        direction="HIGH_IS_BETTER",
+        tags=("system_seed", "alpha_blend", "value_risk_ratio", "wnzt"),
+        data_requirements=("operating_cash_flow", "market_cap", "adj_close", "price_history", "returns"),
+        institutional_note="F3 composite factor that ranks WNZT-processed cash-flow value against WNZT-processed downside volatility.",
         diagnostic_status="READY_TO_DIAGNOSE",
     ),
 )
@@ -778,7 +879,8 @@ MANUAL_FACTOR_DESCRIPTION_BY_ID = {
     "m_vol_asym_updown_60d_raw": "逻辑：分别计算上涨日和下跌日收益波动。作用：识别下跌波动更剧烈的恐慌盘，可作为回撤惩罚项。",
     "m_liq_vol_conc_21d_raw": "逻辑：计算成交量与绝对收益率相关性。作用：筛选大幅价格变动伴随真实放量、机构介入度较高的标的。",
     "m_vol_ret_skew_252d_raw": "逻辑：衡量过去一年收益率分布偏度。作用：过滤高偏度、博彩型、暴涨暴跌标的。",
-    "m_alpha_overnight_21d_raw": "逻辑：衡量过去一个月平均隔夜收益。作用：捕捉非交易时段信息流入，但诊断中保留日内承接风险提示。",
+    OVERNIGHT_MEAN_FACTOR_ID: OVERNIGHT_MEAN_DESCRIPTION,
+    "m_alpha_overnight_21d_raw": OVERNIGHT_MEAN_DESCRIPTION,
 }
 
 
@@ -1131,8 +1233,93 @@ def _descriptor_from_payload(payload: Mapping[str, Any], *, default_source_prefi
     )
 
 
+def _compact_factor_expression(expression: str) -> str:
+    return re.sub(r"\s+", "", str(expression or ""))
+
+
+def _overnight_mean_window_days(expression: str) -> int | None:
+    match = re.fullmatch(
+        r"Mean\(Open/Close\(t-1\),(\d+)\)",
+        _compact_factor_expression(expression),
+        flags=re.IGNORECASE,
+    )
+    return int(match.group(1)) if match else None
+
+
+def _overnight_mean_canonical_factor_id(expression: str) -> str | None:
+    window = _overnight_mean_window_days(expression)
+    if window == 21:
+        return OVERNIGHT_MEAN_FACTOR_ID
+    return None
+
+
+def _overnight_mean_descriptor(window: int = 21) -> dict[str, str]:
+    window_token = f"{window}d"
+    canonical_id = OVERNIGHT_MEAN_FACTOR_ID if window == 21 else f"s_f2_mom_ovn_mean_{window_token}"
+    return {
+        "source_prefix": "s",
+        "category": "mom",
+        "metric": "ovn_mean",
+        "window": window_token,
+        "operator": "raw",
+        "schema_version": FACTOR_DESCRIPTOR_SCHEMA_VERSION,
+        "canonical_id": canonical_id,
+    }
+
+
 def _descriptor_from_factor_id(factor_id: str, source: str = "") -> dict[str, str]:
     canonical = OLD_DEFAULT_FACTOR_ALIASES.get(factor_id, factor_id)
+    if canonical.startswith("f1_"):
+        parts = canonical.split("_")
+        source_type = parts[1] if len(parts) > 1 else "raw"
+        raw_field = "_".join(parts[2:]) if len(parts) > 2 else "field"
+        source_category = {
+            "alt": "liq",
+            "fin": "qlty",
+            "mkt": "liq",
+            "opt": "vol",
+            "px": "price",
+            "short": "liq",
+        }.get(source_type, "price")
+        return {
+            "source_prefix": "f1",
+            "category": source_category,
+            "metric": raw_field or source_type,
+            "window": "pit" if raw_field.endswith("_pit") else "cur",
+            "operator": "raw",
+            "schema_version": PUBLISHED_FACTOR_NAMING_SCHEMA_VERSION,
+            "canonical_id": canonical,
+        }
+    if canonical == OVERNIGHT_MEAN_FACTOR_ID:
+        return _overnight_mean_descriptor(21)
+    if canonical.startswith("s_f2_"):
+        parts = canonical.split("_")
+        category = parts[2] if len(parts) > 2 else "mom"
+        operator = parts[3] if len(parts) > 3 else "raw"
+        window = parts[4] if len(parts) > 4 else "cur"
+        alias = "_".join(parts[5:]) if len(parts) > 5 else ""
+        return {
+            "source_prefix": "s",
+            "category": category,
+            "metric": "_".join(part for part in [operator, alias] if part),
+            "window": window,
+            "operator": operator,
+            "schema_version": PUBLISHED_FACTOR_NAMING_SCHEMA_VERSION,
+            "canonical_id": canonical,
+        }
+    if canonical.startswith("s_alpha_"):
+        parts = canonical.split("_")
+        group = parts[2] if len(parts) > 2 else "alpha"
+        chain = parts[3:] if len(parts) > 3 else ["blend"]
+        return {
+            "source_prefix": "s",
+            "category": "alpha",
+            "metric": "_".join([group, *chain[:-1]]) if len(chain) > 1 else group,
+            "window": "cur",
+            "operator": chain[-1] if chain else "blend",
+            "schema_version": PUBLISHED_FACTOR_NAMING_SCHEMA_VERSION,
+            "canonical_id": canonical,
+        }
     for seed in DEFAULT_SEED_FACTORS:
         if seed.id == canonical:
             return seed.descriptor.as_dict()
@@ -1187,6 +1374,153 @@ def _repair_factor_identity_json(value: Any, *, old_id: str, new_id: str, new_na
     return dumps(replace(payload))
 
 
+def _repair_factor_definition_identity(
+    conn: Any,
+    *,
+    old_id: str,
+    new_id: str,
+    new_name: str,
+    now: str,
+    new_source: str | None = None,
+) -> bool:
+    if not old_id or not new_id or old_id == new_id:
+        return False
+    collision = conn.execute(
+        "SELECT id FROM factor_definitions WHERE id = ? AND id <> ? AND deleted_at IS NULL",
+        (new_id, old_id),
+    ).fetchone()
+    if not collision:
+        conn.execute(
+            """
+            INSERT INTO factor_definitions (
+                id, name, market, universe, source, lifecycle_status, diagnostic_status,
+                direction, frequency, expression, tags_json, data_requirements_json,
+                institutional_note, created_by, created_at, updated_at,
+                offline_reason, offline_at, offline_command, offline_detail_json, deleted_at
+            )
+            SELECT
+                ?, ?, market, universe, COALESCE(?, source), lifecycle_status, diagnostic_status,
+                direction, frequency, expression, tags_json, data_requirements_json,
+                institutional_note, created_by, created_at, ?,
+                offline_reason, offline_at, offline_command, offline_detail_json, deleted_at
+            FROM factor_definitions
+            WHERE id = ?
+            """,
+            (new_id, new_name, new_source, now, old_id),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE factor_definitions
+            SET name = ?,
+                source = COALESCE(?, source),
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (new_name, new_source, now, new_id),
+        )
+    old_version_id = f"{old_id}-v1"
+    desired_version_id = f"{new_id}-v1"
+    desired_version_exists = conn.execute(
+        "SELECT id FROM factor_versions WHERE id = ?",
+        (desired_version_id,),
+    ).fetchone()
+    if desired_version_exists:
+        conn.execute(
+            "UPDATE factor_versions SET factor_id = ? WHERE factor_id = ?",
+            (new_id, old_id),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE factor_versions
+            SET id = CASE WHEN id = ? THEN ? ELSE id END,
+                factor_id = ?
+            WHERE factor_id = ?
+            """,
+            (old_version_id, desired_version_id, new_id, old_id),
+        )
+    diagnostic_rows = conn.execute(
+        """
+        SELECT id, summary_json
+        FROM factor_diagnostic_runs
+        WHERE factor_id = ?
+        """,
+        (old_id,),
+    ).fetchall()
+    for diagnostic_row in diagnostic_rows:
+        conn.execute(
+            """
+            UPDATE factor_diagnostic_runs
+            SET factor_id = ?,
+                summary_json = ?
+            WHERE id = ?
+            """,
+            (
+                new_id,
+                _repair_factor_identity_json(
+                    diagnostic_row.get("summary_json"),
+                    old_id=old_id,
+                    new_id=new_id,
+                    new_name=new_name,
+                ),
+                diagnostic_row["id"],
+            ),
+        )
+    event_rows = conn.execute(
+        """
+        SELECT id, before_json, after_json
+        FROM factor_publish_events
+        WHERE factor_id = ?
+        """,
+        (old_id,),
+    ).fetchall()
+    for event_row in event_rows:
+        conn.execute(
+            """
+            UPDATE factor_publish_events
+            SET factor_id = ?,
+                before_json = ?,
+                after_json = ?
+            WHERE id = ?
+            """,
+            (
+                new_id,
+                _repair_factor_identity_json(
+                    event_row.get("before_json"),
+                    old_id=old_id,
+                    new_id=new_id,
+                    new_name=new_name,
+                ),
+                _repair_factor_identity_json(
+                    event_row.get("after_json"),
+                    old_id=old_id,
+                    new_id=new_id,
+                    new_name=new_name,
+                ),
+                event_row["id"],
+            ),
+        )
+    conn.execute(
+        "UPDATE factor_lineage_edges SET target_id = ? WHERE target_type = 'factor' AND target_id = ?",
+        (new_id, old_id),
+    )
+    conn.execute(
+        "UPDATE factor_lineage_edges SET source_id = ? WHERE source_type = 'factor' AND source_id = ?",
+        (new_id, old_id),
+    )
+    conn.execute(
+        "UPDATE factor_crowding_snapshots SET factor_id = ? WHERE factor_id = ?",
+        (new_id, old_id),
+    )
+    conn.execute(
+        "UPDATE factor_quarantine_candidates SET target_factor_id = ? WHERE target_factor_id = ?",
+        (new_id, old_id),
+    )
+    conn.execute("DELETE FROM factor_definitions WHERE id = ?", (old_id,))
+    return True
+
+
 LEGACY_AUTO_MINED_FACTOR_ID_PATTERN = AUTO_MINED_FACTOR_ID_PATTERN
 
 
@@ -1199,6 +1533,286 @@ class AutoMinedFormulaIdentity:
     operator: str
     signal_label: str
     operator_label: str
+
+
+@dataclass(frozen=True)
+class PublishedFactorIdentity:
+    factor_id: str
+    descriptor: dict[str, str]
+    tier: str
+    naming_rule: str
+
+
+F1_RAW_FIELD_FACTOR_IDS = {
+    "adjclose": "f1_px_adj_close",
+    "adj_close": "f1_px_adj_close",
+    "bookvalueequity": "f1_fin_book_value_equity",
+    "book_value_equity": "f1_fin_book_value_equity",
+    "capex": "f1_fin_capex",
+    "cashandequivalents": "f1_fin_cash_and_equivalents",
+    "cash_and_equivalents": "f1_fin_cash_and_equivalents",
+    "close": "f1_px_adj_close",
+    "enterprisevalue": "f1_fin_enterprise_value",
+    "enterprise_value": "f1_fin_enterprise_value",
+    "eps": "f1_fin_eps_ttm",
+    "eps_ttm": "f1_fin_eps_ttm",
+    "high": "f1_px_high",
+    "industry": "f1_mkt_industry",
+    "iv30d": "f1_opt_iv_30d",
+    "iv_30d": "f1_opt_iv_30d",
+    "low": "f1_px_low",
+    "ltmearnings": "f1_fin_ltm_earnings",
+    "ltm_earnings": "f1_fin_ltm_earnings",
+    "marketcap": "f1_mkt_market_cap",
+    "market_cap": "f1_mkt_market_cap",
+    "netincome": "f1_fin_net_income",
+    "net_income": "f1_fin_net_income",
+    "news_sentiment": "f1_alt_news_sentiment",
+    "newssentiment": "f1_alt_news_sentiment",
+    "open": "f1_px_open",
+    "operatingcashflow": "f1_fin_operating_cash_flow",
+    "operating_cash_flow": "f1_fin_operating_cash_flow",
+    "sector": "f1_mkt_sector",
+    "sharesoutstanding": "f1_mkt_shares_outstanding",
+    "shares_outstanding": "f1_mkt_shares_outstanding",
+    "short_bal_ratio": "f1_short_bal_ratio",
+    "shortbalratio": "f1_short_bal_ratio",
+    "totaldebt": "f1_fin_total_debt",
+    "total_debt": "f1_fin_total_debt",
+    "totalshares": "f1_mkt_total_shares",
+    "total_shares": "f1_mkt_total_shares",
+    "volume": "f1_mkt_volume",
+}
+
+
+def _factor_id_token(value: Any, default: str = "x") -> str:
+    token = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+    token = re.sub(r"_+", "_", token)
+    return token or default
+
+
+def _factor_id_tokens(values: Iterable[Any]) -> list[str]:
+    tokens: list[str] = []
+    for value in values:
+        token = _factor_id_token(value, "")
+        if token and token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
+def _raw_field_key(value: Any) -> str:
+    return _factor_id_token(value, "").replace("_", "")
+
+
+def _published_f1_factor_id(expression: str, *, pit: bool = False) -> str:
+    raw = str(expression or "").strip()
+    key = _factor_id_token(raw, "")
+    compact_key = _raw_field_key(raw)
+    factor_id = F1_RAW_FIELD_FACTOR_IDS.get(key) or F1_RAW_FIELD_FACTOR_IDS.get(compact_key)
+    if not factor_id:
+        factor_id = f"f1_alt_{_factor_id_token(raw or 'field')}"
+    if pit and not factor_id.endswith("_pit"):
+        factor_id = f"{factor_id}_pit"
+    return factor_id
+
+
+def _factor_category_from_reference(factor_id: str, default: str = "mom") -> str:
+    lowered = str(factor_id or "").lower()
+    if lowered.startswith("s_f2_"):
+        parts = lowered.split("_")
+        if len(parts) > 2 and parts[2] in {"mom", "val", "qlty", "vol", "liq"}:
+            return parts[2]
+    if "_mom_" in lowered:
+        return "mom"
+    if "_val_" in lowered:
+        return "val"
+    if "_qlty_" in lowered or "_quality" in lowered:
+        return "qlty"
+    if "_vol_" in lowered or "_beta_" in lowered:
+        return "vol"
+    if "_liq_" in lowered or "turnover" in lowered or "amihud" in lowered:
+        return "liq"
+    return default
+
+
+def _f1_alias_from_expression(expression: str) -> str:
+    formula = str(expression or "")
+    if re.search(r"\b(Volume|Turnover|DollarVolume|Amihud)\b", formula, flags=re.IGNORECASE):
+        return "vol"
+    if re.search(r"\b(MarketCap|SharesOutstanding|TotalShares)\b", formula, flags=re.IGNORECASE):
+        return "mktcap"
+    if re.search(r"\b(BookValueEquity)\b", formula, flags=re.IGNORECASE):
+        return "book"
+    if re.search(r"\b(LtmEarnings|NetIncome|EPS)\b", formula, flags=re.IGNORECASE):
+        return "earn"
+    if re.search(r"\b(ROE|QualityROE)\b", formula, flags=re.IGNORECASE):
+        return "roe"
+    return "px"
+
+
+def _f1_alias_from_factor_id(factor_id: str) -> str:
+    lowered = str(factor_id or "").lower()
+    if lowered.startswith("f1_"):
+        parts = lowered.split("_")
+        return parts[1] if len(parts) > 1 else "raw"
+    if "roe" in lowered:
+        return "roe"
+    if "mcap" in lowered or "size" in lowered or "market_cap" in lowered:
+        return "mktcap"
+    if "volume" in lowered or "turnover" in lowered or "liq" in lowered:
+        return "vol"
+    if "ep" in lowered or "earn" in lowered:
+        return "earn"
+    return "px"
+
+
+def _published_f2_parts(expression: str, metrics: Mapping[str, Any] | None = None) -> tuple[str, str, str, str]:
+    formula = str(expression or "").strip()
+    metrics = metrics or {}
+    residual = _parse_residual_factor_reference(formula)
+    if residual:
+        target_id = residual["target_factor_id"]
+        return (
+            _factor_category_from_reference(target_id),
+            "resid",
+            "cur",
+            _f1_alias_from_factor_id(target_id),
+        )
+    std_return = re.search(
+        r"\bStd(?:Dev)?\s*\(\s*Return\s*\(\s*Close\s*,\s*\d+\s*\)\s*,\s*(\d+)\s*\)",
+        formula,
+        flags=re.IGNORECASE,
+    )
+    if std_return:
+        return "vol", "std", f"{std_return.group(1)}d", "px"
+    ts_rank_return = re.search(
+        r"\bTs_?Rank\s*\(\s*Return\s*\(\s*Close\s*,\s*(\d+)\s*\)\s*,\s*(\d+)\s*\)",
+        formula,
+        flags=re.IGNORECASE,
+    )
+    if ts_rank_return:
+        return "mom", "rk", f"{ts_rank_return.group(2)}d", "px"
+    rank_return = re.search(
+        r"\bRank\s*\(\s*Return\s*\(\s*Close\s*,\s*(\d+)\s*\)\s*\)",
+        formula,
+        flags=re.IGNORECASE,
+    )
+    if rank_return:
+        return "mom", "rk", f"{rank_return.group(1)}d", "px"
+    return_window = re.search(r"\bReturn\s*\(\s*Close\s*,\s*(\d+)\s*\)", formula, flags=re.IGNORECASE)
+    if return_window:
+        return "mom", "ret", f"{return_window.group(1)}d", "px"
+    delta_window = re.search(r"\bDelta\s*\(\s*Close\s*,\s*(\d+)\s*\)", formula, flags=re.IGNORECASE)
+    if delta_window:
+        return "mom", "delta", f"{delta_window.group(1)}d", "px"
+    mean_window = re.search(r"\bMean\s*\(.+,\s*(\d+)\s*\)", formula, flags=re.IGNORECASE)
+    if mean_window:
+        return "mom", "tsm", f"{mean_window.group(1)}d", _f1_alias_from_expression(formula)
+    if re.search(r"\b(MarketCap|BookValueEquity|LtmEarnings|NetIncome)\b", formula, flags=re.IGNORECASE):
+        operator = "log" if re.search(r"\bLog\s*\(", formula, flags=re.IGNORECASE) else "ratio"
+        return "val", operator, "cur", _f1_alias_from_expression(formula)
+    if re.search(r"\b(Volume|Turnover|DollarVolume|Amihud)\b", formula, flags=re.IGNORECASE):
+        return "liq", "tsm" if mean_window else "raw", "cur", _f1_alias_from_expression(formula)
+    explicit_category = _factor_id_token(metrics.get("category") or metrics.get("feature_category") or "", "")
+    if explicit_category in {"mom", "val", "qlty", "vol", "liq"}:
+        return explicit_category, "raw", "cur", _f1_alias_from_expression(formula)
+    return "mom", "raw", "cur", _f1_alias_from_expression(formula)
+
+
+def _published_f2_factor_id(expression: str, metrics: Mapping[str, Any] | None = None) -> str:
+    category, operator, window, alias = _published_f2_parts(expression, metrics)
+    return "_".join(
+        ["s", "f2", _factor_id_token(category), _factor_id_token(operator), _factor_id_token(window), _factor_id_token(alias)]
+    )
+
+
+def _alpha_group_from_expression(expression: str, metrics: Mapping[str, Any] | None = None) -> str:
+    formula = str(expression or "").lower()
+    metrics = metrics or {}
+    recipe_family = _factor_id_token(metrics.get("recipe_family") or "", "")
+    source_factor_ids = [str(item).lower() for item in metrics.get("source_factor_ids") or [] if str(item).strip()]
+    source_factor_set = set(source_factor_ids)
+    if (
+        set(VALUE_VOL_WNZT_F3_PARENTS).issubset(source_factor_set)
+        or all(parent in formula for parent in VALUE_VOL_WNZT_F3_PARENTS)
+    ):
+        return "valvol"
+    if recipe_family in {"style_blend", "blend", "ffblend"}:
+        return "ffblend"
+    if "ffblend" in formula or len(source_factor_ids) >= 2:
+        return "ffblend"
+    if "mom" in formula:
+        return "mom"
+    if "vol" in formula or "beta" in formula or "downside" in formula:
+        return "vol"
+    if "val" in formula:
+        return "val"
+    return "alpha"
+
+
+def _published_f3_factor_id(expression: str, metrics: Mapping[str, Any] | None = None) -> str:
+    formula = str(expression or "")
+    formula_lower = formula.lower()
+    metrics = metrics or {}
+    group = _alpha_group_from_expression(formula, metrics)
+    source_factor_ids = [str(item) for item in metrics.get("source_factor_ids") or [] if str(item).strip()]
+    chain: list[str] = []
+    has_blend = len(source_factor_ids) >= 2 or "blend" in formula_lower or str(metrics.get("recipe_family") or "").strip()
+    if has_blend:
+        chain.append("blend")
+    if "residual" in formula_lower or "neutral" in formula_lower or str(metrics.get("orthogonality_intent") or "").strip():
+        chain.append("resid")
+        if any(token in formula_lower for token in ("market", "mkt", "beta")):
+            chain.append("mkt")
+    if "zscore" in formula_lower or "z_score" in formula_lower or "standard" in formula_lower:
+        chain.append("std")
+    if "decay" in formula_lower or "decayed" in formula_lower:
+        chain.append("dec")
+    if "rank(" in formula_lower or "tsrank" in formula_lower or "ts_rank" in formula_lower:
+        chain.append("rk")
+    if not any(item in {"blend", "resid", "std", "dec"} for item in chain):
+        chain.insert(0, "blend" if has_blend else "std")
+    return "_".join(["s", "alpha", _factor_id_token(group), *_factor_id_tokens(chain)])
+
+
+def _published_factor_identity(
+    expression: str,
+    *,
+    target_layer: str,
+    metrics: Mapping[str, Any] | None = None,
+) -> PublishedFactorIdentity:
+    layer = str(target_layer or "").upper()
+    if layer == "L1":
+        factor_id = _published_f1_factor_id(expression)
+        tier = "F1"
+    elif layer == "L3":
+        factor_id = _published_f3_factor_id(expression, metrics)
+        tier = "F3"
+    else:
+        factor_id = _published_f2_factor_id(expression, metrics)
+        tier = "F2"
+    return PublishedFactorIdentity(
+        factor_id=factor_id,
+        descriptor=_descriptor_from_factor_id(factor_id, "AUTO_MINED"),
+        tier=tier,
+        naming_rule=PUBLISHED_FACTOR_NAMING_SCHEMA_VERSION,
+    )
+
+
+def _optimized_factor_publish_identity(source_descriptor: Mapping[str, Any]) -> PublishedFactorIdentity:
+    category = _factor_id_token(source_descriptor.get("category") or "alpha")
+    metric = _factor_id_token(source_descriptor.get("metric") or "factor")
+    if metric.endswith("rev"):
+        group = f"{category}_{metric}"
+    else:
+        group = f"{category}_{metric}rev"
+    factor_id = f"s_alpha_{group}_std_rk"
+    return PublishedFactorIdentity(
+        factor_id=factor_id,
+        descriptor=_descriptor_from_factor_id(factor_id, "AUTO_MINED"),
+        tier="F3",
+        naming_rule=PUBLISHED_FACTOR_NAMING_SCHEMA_VERSION,
+    )
 
 
 AUTO_MINED_CATEGORY_NAME_LABELS = {
@@ -1269,6 +1883,13 @@ def _auto_mined_formula_identity(expression: str) -> AutoMinedFormulaIdentity:
         operator = "rank"
         operator_label = AUTO_MINED_OPERATOR_NAME_LABELS.get("rank", "")
         signal_label = "risk adjusted momentum"
+    elif "s_val_cfp_ltm_raw" in formula_compact and "s_vol_downside_252d_rank" in formula_compact and "/" in formula_compact:
+        category = "alpha"
+        metric = "valvol"
+        window = "ltm"
+        operator = "rank"
+        operator_label = AUTO_MINED_OPERATOR_NAME_LABELS.get("rank", "")
+        signal_label = VALUE_VOL_WNZT_F3_FACTOR_NAME
     elif "s_val_cfp_ltm_raw" in formula_compact and "s_size_cur_log" in formula_compact:
         category = "alpha"
         metric = "valcfpsize"
@@ -1345,11 +1966,26 @@ def _auto_mined_formula_identity(expression: str) -> AutoMinedFormulaIdentity:
 
 
 def _auto_mined_factor_id_from_expression(expression: str) -> str:
-    return _auto_mined_formula_identity(expression).factor_id
+    normalized = str(expression or "").strip()
+    key = re.sub(r"[^a-z0-9]+", "_", normalized.lower()).strip("_")
+    compact_key = re.sub(r"[^a-z0-9]+", "", normalized.lower())
+    raw_keys = {re.sub(r"[^a-z0-9]+", "_", item.lower()).strip("_") for item in PHASE2_L1_RAW_FIELDS}
+    raw_compact_keys = {re.sub(r"[^a-z0-9]+", "", item.lower()) for item in PHASE2_L1_RAW_FIELDS}
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", normalized) and (key in raw_keys or compact_key in raw_compact_keys):
+        target_layer = "L1"
+    elif len(re.findall(FACTOR_REFERENCE_TOKEN_SOURCE, normalized)) >= 2 or any(
+        token in normalized.lower() for token in ("ffblend", "blend(", "neutralize(", "residual(")
+    ):
+        target_layer = "L3"
+    else:
+        target_layer = "L2"
+    return _published_factor_identity(normalized, target_layer=target_layer, metrics={}).factor_id
 
 
 def _auto_mined_factor_name(factor_id: str, expression: str) -> str:
     identity = _auto_mined_formula_identity(expression)
+    if identity.category == "alpha" and identity.metric.endswith("valvol"):
+        return VALUE_VOL_WNZT_F3_FACTOR_NAME
     category_label = AUTO_MINED_CATEGORY_NAME_LABELS.get(identity.category, identity.category.upper())
     family = f"{category_label}{identity.operator_label}" if identity.operator_label else category_label
     return f"{family}因子（{identity.signal_label}）"
@@ -1373,6 +2009,7 @@ def _is_legacy_auto_mined_factor_name(name: Any, factor_id: str) -> bool:
         or normalized_name == f"[auto-mined] {normalized_id}"
         or normalized_name.startswith("[auto-mined]")
         or raw_name.startswith("自动挖掘")
+        or "composite value volatility ratio" in normalized_name
     )
 
 
@@ -1384,8 +2021,10 @@ def _factor_display_name_from_fields(
     expression: Any,
 ) -> str:
     source_name = str(source or "").strip().upper()
-    if source_name == "AUTO_MINED" and _is_legacy_auto_mined_factor_name(name, factor_id):
-        return _auto_mined_factor_name(factor_id, str(expression or ""))
+    if source_name == "AUTO_MINED":
+        generated_name = _auto_mined_factor_name(factor_id, str(expression or ""))
+        if generated_name == VALUE_VOL_WNZT_F3_FACTOR_NAME or _is_legacy_auto_mined_factor_name(name, factor_id):
+            return generated_name
     return str(name or factor_id).strip() or str(factor_id)
 
 
@@ -2310,6 +2949,109 @@ def _load_symbol_identity_rows(market_data_repository: Any, symbols: Iterable[st
         return list(market_data_repository.load_symbol_identity_rows(symbols))
     except Exception:
         return []
+
+
+def _normalize_fundamental_gap_symbols(symbols: Iterable[str] | None) -> list[str]:
+    return sorted({str(symbol or "").strip().upper() for symbol in (symbols or []) if str(symbol or "").strip()})
+
+
+def _identity_symbol_keys(identity: Mapping[str, Any]) -> set[str]:
+    return {
+        str(identity.get(key) or "").strip().upper()
+        for key in ("symbol", "canonical_symbol", "raw_symbol", "ticker")
+        if str(identity.get(key) or "").strip()
+    }
+
+
+def _is_financial_logic_na_symbol(symbol: str, identity: Mapping[str, Any] | None) -> bool:
+    normalized_symbol = str(symbol or "").strip().upper()
+    if normalized_symbol in FUNDAMENTAL_FINANCIAL_LOGIC_NA_SYMBOLS:
+        return True
+    identity = identity or {}
+    text = " ".join(
+        str(identity.get(key) or "").strip().upper()
+        for key in ("company_name", "name", "security_name", "description", "source")
+        if str(identity.get(key) or "").strip()
+    )
+    padded_text = f" {text} "
+    return any(marker in padded_text for marker in FUNDAMENTAL_FINANCIAL_LOGIC_NA_NAME_MARKERS)
+
+
+def build_fundamental_gap_policy(
+    *,
+    missing_symbols: Iterable[str] | None,
+    identity_rows: Sequence[Mapping[str, Any]] | None = None,
+    covered_symbol_count: int = 0,
+    total_symbol_count: int = 0,
+    existing_policy: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_missing = _normalize_fundamental_gap_symbols(missing_symbols)
+    identities_by_symbol: dict[str, Mapping[str, Any]] = {}
+    for identity in identity_rows or []:
+        if not isinstance(identity, Mapping):
+            continue
+        for key in _identity_symbol_keys(identity):
+            identities_by_symbol[key] = identity
+
+    financial_logic_na_symbols: list[str] = []
+    thin_data_stock_symbols: list[str] = []
+    for symbol in normalized_missing:
+        identity = identities_by_symbol.get(symbol)
+        if _is_financial_logic_na_symbol(symbol, identity):
+            financial_logic_na_symbols.append(symbol)
+        else:
+            thin_data_stock_symbols.append(symbol)
+
+    try:
+        raw_covered = max(0, int(covered_symbol_count or 0))
+    except (TypeError, ValueError):
+        raw_covered = 0
+    try:
+        raw_total = max(0, int(total_symbol_count or 0))
+    except (TypeError, ValueError):
+        raw_total = 0
+    raw_total = max(raw_total, raw_covered + len(normalized_missing))
+    classified_symbols = sorted({*financial_logic_na_symbols, *thin_data_stock_symbols})
+    explicit_unclassified = sorted(set(normalized_missing).difference(classified_symbols))
+    unlisted_missing_count = max(0, raw_total - raw_covered - len(normalized_missing))
+    unclassified_missing_count = len(explicit_unclassified) + unlisted_missing_count
+    logical_covered = min(raw_total, raw_covered + len(classified_symbols))
+
+    def pct(numerator: int, denominator: int) -> float:
+        return round(min(1.0, numerator / max(1, denominator)) * 100.0, 2)
+
+    return {
+        **dict(existing_policy or {}),
+        "schema_version": FUNDAMENTAL_GAP_POLICY_SCHEMA_VERSION,
+        "mode": "downgrade_non_applicable_financials",
+        "rawF2_policy": "do_not_impute_missing_fundamentals",
+        "financial_logic_na_symbols": sorted(financial_logic_na_symbols),
+        "financial_logic_na_symbol_count": len(financial_logic_na_symbols),
+        "thin_data_stock_symbols": sorted(thin_data_stock_symbols),
+        "thin_data_stock_symbol_count": len(thin_data_stock_symbols),
+        "classified_missing_symbols": classified_symbols,
+        "classified_missing_symbol_count": len(classified_symbols),
+        "unclassified_missing_symbols": explicit_unclassified,
+        "unlisted_missing_symbol_count": unlisted_missing_count,
+        "unclassified_missing_symbol_count": unclassified_missing_count,
+        "raw_covered_symbol_count": raw_covered,
+        "raw_total_symbol_count": raw_total,
+        "raw_coverage_pct": pct(raw_covered, raw_total) if raw_total else 0.0,
+        "logical_covered_symbol_count": logical_covered,
+        "logical_total_symbol_count": raw_total,
+        "logical_coverage_pct": pct(logical_covered, raw_total) if raw_total else 0.0,
+        "coverage_gate": "READY" if raw_total > 0 and unclassified_missing_count == 0 else "PARTIAL",
+        "allowed_factor_families": {
+            "financial_logic_na": ["price_volume", "momentum", "volatility", "liquidity"],
+            "thin_data_stock": ["price_volume", "momentum", "volatility", "liquidity"],
+            "rawF2": ["quality", "value", "investment"],
+        },
+        "notes": [
+            "ETF/fund symbols are excluded from rawF2 financial logic.",
+            "Thin-data legacy symbols remain eligible for price-volume factors only.",
+            "No synthetic financial rows are created for classified gaps.",
+        ],
+    }
 
 
 def _load_latest_market_caps(
@@ -3913,6 +4655,20 @@ def build_factor_list_pit_overview(market_data_repository: Any) -> dict[str, Any
         or fundamental_metadata.get("coverage_rows")
         or 0
     )
+    fundamental_gap_policy = build_fundamental_gap_policy(
+        missing_symbols=fundamental_metadata.get("missing_symbols") or [],
+        identity_rows=_load_symbol_identity_rows(
+            market_data_repository,
+            fundamental_metadata.get("missing_symbols") or [],
+        ),
+        covered_symbol_count=fundamental_coverage_count,
+        total_symbol_count=int(fundamental_metadata.get("total_symbol_count") or 0),
+        existing_policy=(
+            fundamental_metadata.get("fundamental_gap_policy")
+            if isinstance(fundamental_metadata.get("fundamental_gap_policy"), Mapping)
+            else {}
+        ),
+    )
     counts = {"price_bars": price_bar_count}
     fundamental_counts = {
         "fundamental_points": fundamental_point_count,
@@ -4060,6 +4816,7 @@ def build_factor_list_pit_overview(market_data_repository: Any) -> dict[str, Any
         fundamental_status == "READY"
         and fundamental_point_rows > 0
         and FUNDAMENTAL_REQUIREMENTS <= fundamental_field_set
+        and str(fundamental_gap_policy.get("coverage_gate") or "").upper() == "READY"
     )
     return {
         "dataset_snapshot_id": dataset_snapshot_id,
@@ -4083,6 +4840,7 @@ def build_factor_list_pit_overview(market_data_repository: Any) -> dict[str, Any
             "source_snapshot_status": fundamental_status,
             "source_snapshot_updated_at": (fundamental_snapshot or {}).get("updated_at"),
             "seed_version": fundamental_metadata.get("seed_version"),
+            "fundamental_gap_policy": fundamental_gap_policy,
         },
         "blocking_items": blocker_items,
         "factor_admission_coverage": factor_admission_coverage,
@@ -4429,15 +5187,37 @@ def build_pit_data_overview(
         fundamental_coverage_total = max(len(fundamental_coverage_rows), 1)
     if fundamental_coverage_ready <= 0:
         fundamental_coverage_ready = len(fundamental_coverage_rows)
+    fundamental_gap_policy = build_fundamental_gap_policy(
+        missing_symbols=fundamental_metadata.get("missing_symbols") or [],
+        identity_rows=_load_symbol_identity_rows(
+            market_data_repository,
+            fundamental_metadata.get("missing_symbols") or [],
+        ),
+        covered_symbol_count=fundamental_coverage_ready,
+        total_symbol_count=fundamental_coverage_total,
+        existing_policy=(
+            fundamental_metadata.get("fundamental_gap_policy")
+            if isinstance(fundamental_metadata.get("fundamental_gap_policy"), Mapping)
+            else {}
+        ),
+    )
+    fundamental_gap_policy_ready = str(fundamental_gap_policy.get("coverage_gate") or "").upper() == "READY"
+    fundamental_logical_coverage_pct = float(
+        fundamental_gap_policy.get("logical_coverage_pct") or 0.0
+    )
     fundamental_ready = (
         fundamental_status == "READY"
         and fundamental_point_rows > 0
         and fundamental_required_ready
+        and fundamental_gap_policy_ready
     )
     fundamental_coverage_pct = round(
         min(1.0, fundamental_coverage_ready / fundamental_coverage_total) * 100.0,
         2,
     ) if fundamental_coverage_total else 0.0
+    fundamental_effective_coverage_pct = (
+        fundamental_logical_coverage_pct if fundamental_gap_policy else fundamental_coverage_pct
+    )
     coverage_gap = _build_coverage_gap_with_identity(
         market_data_repository=market_data_repository,
         price_snapshot=price_snapshot,
@@ -4727,6 +5507,8 @@ def build_pit_data_overview(
     macro_feature_ready = macro_gate_status == "READY"
     iv_feature_ready = iv_skew_gate_status == "READY"
     l4_has_feature_ready = macro_feature_ready or iv_feature_ready
+    l4_full_feature_ready = macro_feature_ready and iv_feature_ready
+    return_diagnostic_full_ready = price_replay_full_ready and universe_history_ready
     price_replay_gate_status = "READY" if price_replay_ready else "BLOCKED"
     l1_status = _pit_layer_status(
         ready=price_replay_full_ready and corporate_status == "READY",
@@ -4749,10 +5531,10 @@ def build_pit_data_overview(
         disabled=analyst_gate_status == "DISABLED" and short_volume_gate_status == "DISABLED",
     )
     l4_status = _pit_layer_status(
-        ready=macro_feature_ready and iv_feature_ready and return_diagnostic_ready,
-        partial=l4_has_feature_ready and not (macro_feature_ready and iv_feature_ready and return_diagnostic_ready),
+        ready=l4_full_feature_ready and return_diagnostic_full_ready,
+        partial=l4_full_feature_ready and return_diagnostic_ready and not return_diagnostic_full_ready,
         blocked=not sandbox_enabled and not l4_has_feature_ready,
-        calibrating=sandbox_enabled and not l4_has_feature_ready,
+        calibrating=not (l4_full_feature_ready and return_diagnostic_ready) and (sandbox_enabled or l4_has_feature_ready),
     )
     l1_blocked_checks = [
         check_id
@@ -4809,7 +5591,7 @@ def build_pit_data_overview(
         for check_id, ready in (
             ("rate_beta_calibration", macro_feature_ready),
             ("iv_skew_feed", iv_feature_ready),
-            ("price_replay_gate", price_replay_ready),
+            ("price_replay_gate", price_replay_full_ready),
             ("universe_history_gate", universe_history_ready),
         )
         if not ready
@@ -4819,7 +5601,7 @@ def build_pit_data_overview(
         for check_id, ready in (
             ("rate_beta_calibration", macro_feature_ready),
             ("iv_skew_feed", iv_feature_ready),
-            ("price_replay_gate", price_replay_ready),
+            ("price_replay_gate", price_replay_full_ready),
             ("universe_history_gate", universe_history_ready),
         )
         if ready
@@ -4857,8 +5639,24 @@ def build_pit_data_overview(
     macro_capability = _pit_capability(
         "factor.macro_derivatives",
         factor_groups=["macro_derivatives"],
-        mode="VERIFIED" if verified_enabled and macro_feature_ready and iv_feature_ready and return_diagnostic_ready else ("PARTIAL_READY" if l4_has_feature_ready else ("SANDBOX" if sandbox_enabled else "BLOCKED")),
-        allowed_actions=(["run_verified_diagnostics", "factor_mining"] if verified_enabled and macro_feature_ready and iv_feature_ready and return_diagnostic_ready else (["feature_preview", "research_preview"] if l4_has_feature_ready else (["run_sandbox_diagnostics"] if sandbox_enabled else []))),
+        mode=(
+            "VERIFIED"
+            if verified_enabled and l4_full_feature_ready and return_diagnostic_full_ready
+            else (
+                "PARTIAL_READY"
+                if l4_full_feature_ready and return_diagnostic_ready
+                else ("SANDBOX" if sandbox_enabled or l4_has_feature_ready else "BLOCKED")
+            )
+        ),
+        allowed_actions=(
+            ["run_verified_diagnostics", "factor_mining"]
+            if verified_enabled and l4_full_feature_ready and return_diagnostic_full_ready
+            else (
+                ["feature_preview", "research_preview"]
+                if l4_has_feature_ready
+                else (["run_sandbox_diagnostics"] if sandbox_enabled else [])
+            )
+        ),
         required_checks=["rate_beta_calibration", "iv_skew_feed", "price_replay_gate", "universe_history_gate"],
         satisfied_checks=macro_satisfied_checks,
         blocked_checks=macro_blocked_checks,
@@ -4951,6 +5749,7 @@ def build_pit_data_overview(
                 "missing_available_at_count": missing_available_at_count,
                 "missing_publish_date_count": missing_publish_date_count,
             },
+            "gap_policy": fundamental_gap_policy,
             "submodules": [
                 _pit_submodule(
                     submodule_id="fundamental_fields",
@@ -4962,6 +5761,8 @@ def build_pit_data_overview(
                         "available_field_count": len(fundamental_fields),
                         "fundamental_point_rows": fundamental_point_rows,
                         "coverage_pct": fundamental_coverage_pct,
+                        "effective_coverage_pct": fundamental_effective_coverage_pct,
+                        "gap_policy_coverage_gate": fundamental_gap_policy.get("coverage_gate"),
                     },
                     blockers=[] if fundamental_ready and fundamental_time_contract_ready else sorted(FUNDAMENTAL_REQUIREMENTS.difference(fundamental_field_set))[:5],
                     upstream_capabilities=[quality_capability],
@@ -5152,8 +5953,8 @@ def build_pit_data_overview(
             "group_id": "macro_derivatives",
             "title_cn": "宏观/衍生品型",
             "status": _pit_factor_group_status(
-                verified=verified_enabled and macro_feature_ready and iv_feature_ready and return_diagnostic_ready,
-                partial=l4_has_feature_ready and not (macro_feature_ready and iv_feature_ready and return_diagnostic_ready),
+                verified=verified_enabled and l4_full_feature_ready and return_diagnostic_full_ready,
+                partial=l4_full_feature_ready and return_diagnostic_ready and not return_diagnostic_full_ready,
                 sandbox=sandbox_enabled and return_diagnostic_ready,
                 blocked=not sandbox_enabled and not l4_has_feature_ready,
             ),
@@ -5342,6 +6143,10 @@ def build_pit_data_overview(
             "covered_symbol_count": fundamental_coverage_ready,
             "total_symbol_count": fundamental_coverage_total,
             "coverage_pct": fundamental_coverage_pct,
+            "effective_covered_symbol_count": int(fundamental_gap_policy.get("logical_covered_symbol_count") or 0),
+            "effective_total_symbol_count": int(fundamental_gap_policy.get("logical_total_symbol_count") or 0),
+            "effective_coverage_pct": fundamental_effective_coverage_pct,
+            "unclassified_missing_symbol_count": int(fundamental_gap_policy.get("unclassified_missing_symbol_count") or 0),
             "fundamental_point_rows": fundamental_point_rows,
             "coverage_rows": len(fundamental_coverage_rows),
             "available_fields": fundamental_fields,
@@ -5352,6 +6157,7 @@ def build_pit_data_overview(
             "missing_available_at_count": missing_available_at_count,
             "missing_publish_date_count": missing_publish_date_count,
             "time_contract": str(fundamental_metadata.get("time_contract") or ""),
+            "fundamental_gap_policy": fundamental_gap_policy,
         },
         "blocking_items": blocker_items,
         "status_reasons": status_reasons,
@@ -5419,6 +6225,9 @@ class FactorResearchService:
         self._diagnostic_data_cache_seconds = 600.0
         self._diagnostic_data_cache_lock = threading.Lock()
         self._diagnostic_data_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._diagnostic_summary_cache_seconds = 600.0
+        self._diagnostic_summary_cache_lock = threading.Lock()
+        self._diagnostic_summary_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._factor_list_pit_overview_cache_seconds = 300.0
         self._factor_list_pit_overview_cache_lock = threading.Lock()
         self._factor_list_pit_overview_cache: tuple[float, dict[str, Any]] | None = None
@@ -5634,6 +6443,25 @@ class FactorResearchService:
                     ),
                 )
                 self._upsert_seed_factor_lineage(conn, seed, now)
+            known_expression_rows = conn.execute(
+                """
+                SELECT id, expression
+                FROM factor_definitions
+                WHERE deleted_at IS NULL
+                """
+            ).fetchall()
+            for row in known_expression_rows:
+                old_id = str(row.get("id") or "")
+                desired_id = _overnight_mean_canonical_factor_id(str(row.get("expression") or ""))
+                if desired_id and old_id != desired_id:
+                    _repair_factor_definition_identity(
+                        conn,
+                        old_id=old_id,
+                        new_id=desired_id,
+                        new_name=OVERNIGHT_MEAN_FACTOR_NAME,
+                        now=now,
+                        new_source="SYSTEM_SEED",
+                    )
             auto_rows = conn.execute(
                 """
                 SELECT id, name, expression, source
@@ -6571,18 +7399,8 @@ class FactorResearchService:
         if not group_shape.get("inverted"):
             return None
         source_descriptor = factor.get("descriptor") if isinstance(factor.get("descriptor"), Mapping) else {}
-        category = str(source_descriptor.get("category") or "vol")
-        metric = str(source_descriptor.get("metric") or "downside")
-        window = str(source_descriptor.get("window") or "252d")
-        operator = str(source_descriptor.get("operator") or "rank")
-        optimized_descriptor = FactorDescriptor(
-            "m",
-            category,
-            f"{metric}rev",
-            window,
-            operator,
-        )
-        optimized_factor_id = optimized_descriptor.canonical_id
+        optimized_identity = _optimized_factor_publish_identity(source_descriptor)
+        optimized_factor_id = optimized_identity.factor_id
         existing = self.storage.fetch_one(
             "SELECT id FROM factor_definitions WHERE id = ? AND deleted_at IS NULL",
             (optimized_factor_id,),
@@ -6616,19 +7434,21 @@ class FactorResearchService:
                 "optimized_factor_id": optimized_factor_id,
                 "admission_grade_min": "B",
                 "user_confirmation_required": confirmable,
+                "publish_naming_rule": optimized_identity.naming_rule,
             },
             "optimized_factor": {
                 "id": optimized_factor_id,
                 "name": "反向下行波动率代理（252日）",
                 "expression": str(factor.get("expression") or "DownsideStd(Return(Close, 1), 252)"),
                 "direction": "HIGH_IS_BETTER",
-                "descriptor": optimized_descriptor.as_dict(),
+                "descriptor": optimized_identity.descriptor,
                 "diagnostic_summary": optimized_summary,
                 "grade": grade_label,
                 "grade_score": grade_score,
                 "confirmable": confirmable,
                 "user_confirmation_required": confirmable,
                 "source_factor_id": factor_id,
+                "publish_naming_rule": optimized_identity.naming_rule,
             },
             "offline_detail": {
                 "source_factor_id": factor_id,
@@ -6636,6 +7456,7 @@ class FactorResearchService:
                 "source_group_shape": group_shape,
                 "reverse_grade": grade_label,
                 "confirmable": confirmable,
+                "publish_naming_rule": optimized_identity.naming_rule,
             },
         }
 
@@ -7228,7 +8049,9 @@ class FactorResearchService:
         if target_layer == "L2":
             return "F2"
         if target_layer == "L1":
-            return "F1"
+            return "F1" if FactorResearchService._factor_phase2_is_l1_raw_expression(expression) else "F2"
+        if _overnight_mean_window_days(expression):
+            return "F2"
         if category == "alpha" or any(token in expression_lower for token in ("ffblend(", "composite", "blend(")):
             return "F3"
         if source == "AUTO_MINED":
@@ -7250,12 +8073,33 @@ class FactorResearchService:
     def _factor_processing_ops(factor: Mapping[str, Any]) -> dict[str, Any]:
         descriptor = FactorResearchService._factor_descriptor_mapping(factor)
         operator = str(descriptor.get("operator") or "").strip().lower()
+        factor_id = str(factor.get("id") or "").strip().lower()
         expression_lower = str(factor.get("expression") or "").lower()
+        is_strategy_ready = factor_id.startswith("s_alpha_")
+        summary = factor.get("latest_diagnostic_summary") if isinstance(factor.get("latest_diagnostic_summary"), Mapping) else {}
+        composition_methods = summary.get("composition_methods") if isinstance(summary, Mapping) else []
+        composition_method_tokens = {
+            str(value).strip().lower()
+            for item in (composition_methods if isinstance(composition_methods, Sequence) and not isinstance(composition_methods, (str, bytes)) else [])
+            if isinstance(item, Mapping)
+            for value in (item.get("key"), item.get("label"))
+            if str(value or "").strip()
+        }
+        is_quarantine_l3 = (
+            str(summary.get("target_layer") or "").upper() == "L3"
+            and isinstance(composition_methods, Sequence)
+            and not isinstance(composition_methods, (str, bytes))
+            and len(composition_methods) > 0
+        )
+        has_temporal_denoise = any(
+            token in composition_method_tokens
+            for token in {"ts_denoise", "time_series_denoise", "temporal_denoise", "时序降噪", "时序排名"}
+        )
         done = {
-            "winsorize": any(token in expression_lower for token in ("winsor", "mad(")),
-            "neutralize": any(token in expression_lower for token in ("neutral", "residual", "beta")),
-            "zscore": operator == "z" or any(token in expression_lower for token in ("zscore", "z_score")),
-            "tsrank": operator == "rank" or any(token in expression_lower for token in ("rank(", "tsrank", "ts_rank")),
+            "winsorize": is_quarantine_l3 or any(token in expression_lower for token in ("winsor", "mad(")),
+            "neutralize": is_quarantine_l3 or any(token in expression_lower for token in ("neutral", "residual", "beta")),
+            "zscore": is_quarantine_l3 or operator == "z" or (is_strategy_ready and "_std" in factor_id) or any(token in expression_lower for token in ("zscore", "z_score")),
+            "tsrank": has_temporal_denoise or operator in {"rank", "rk"} or (is_strategy_ready and factor_id.endswith("_rk")) or any(token in expression_lower for token in ("rank(", "tsrank", "ts_rank")),
         }
         lights = [
             {
@@ -7376,10 +8220,25 @@ class FactorResearchService:
         factor_id = str(factor.get("id") or "")
         tier_key = FactorResearchService._factor_tier_key(factor)
         expression = str(factor.get("expression") or "")
-        if factor_id == "s_alpha_ffblend_cur_rank":
+        if factor_id == "s_alpha_ffblend_resid_mkt_rank":
             return [
                 {"source_type": "factor", "source_id": parent_id, "relation_type": "COMPOSED_FROM", "metadata": {"virtual": True}, "created_at": None}
                 for parent_id in ("s_mom_12m1m_rank", "s_val_ep_ltm_raw", "s_qlty_roe_ltm_raw", "s_size_cur_log")
+            ]
+        if factor_id == VALUE_VOL_WNZT_F3_FACTOR_ID:
+            return [
+                {
+                    "source_type": "factor",
+                    "source_id": parent_id,
+                    "relation_type": "COMPOSED_FROM",
+                    "metadata": {
+                        "virtual": True,
+                        "operator_chain": "WNZT",
+                        "expression": VALUE_VOL_WNZT_F3_EXPRESSION,
+                    },
+                    "created_at": None,
+                }
+                for parent_id in VALUE_VOL_WNZT_F3_PARENTS
             ]
         if tier_key == "F1":
             return [{
@@ -7714,6 +8573,20 @@ class FactorResearchService:
                 "risk_flags_json": dumps(item.get("risk_flags") or []),
                 "summary_json": dumps(item),
                 "created_at": job.get("created_at") or iso_now(),
+                "operator_engine": item.get("operator_engine") if isinstance(item.get("operator_engine"), Mapping) else {},
+                "operator_config_snapshot_id": item.get("operator_config_snapshot_id"),
+                "f1_catalog_snapshot_id": item.get("f1_catalog_snapshot_id"),
+                "raw_f2": item.get("raw_f2"),
+                "refined_f2": item.get("refined_f2"),
+                "wnzt_complete": item.get("wnzt_complete"),
+                "wnzt_evidence": item.get("wnzt_evidence") if isinstance(item.get("wnzt_evidence"), Mapping) else {},
+                "decay_diagnostics": item.get("decay_diagnostics") if isinstance(item.get("decay_diagnostics"), Mapping) else {},
+                "p_value": item.get("p_value"),
+                "s_grade_correlation": item.get("s_grade_correlation"),
+                "oos_to_is_ratio": item.get("oos_to_is_ratio"),
+                "capacity_score": item.get("capacity_score"),
+                "crowding_score": item.get("crowding_score"),
+                "artifact_refs": item.get("artifact_refs") if isinstance(item.get("artifact_refs"), Mapping) else {},
             })
         return rows
 
@@ -7796,8 +8669,14 @@ class FactorResearchService:
             ),
         )
 
+    def _published_identity_for_candidate(self, candidate: Mapping[str, Any]) -> PublishedFactorIdentity:
+        expression = str(candidate.get("expression") or "")
+        metrics = candidate.get("candidate_metrics") if isinstance(candidate.get("candidate_metrics"), Mapping) else {}
+        target_layer = str(candidate.get("target_layer") or "").upper() or self._factor_phase2_target_layer(expression, metrics)
+        return _published_factor_identity(expression, target_layer=target_layer, metrics=metrics)
+
     def _infer_auto_factor_id(self, expression: str) -> str:
-        return _auto_mined_factor_id_from_expression(expression)
+        return _published_factor_identity(expression, target_layer="L2", metrics={}).factor_id
 
     def _factor_expression_signatures(self) -> dict[str, str]:
         rows = self.storage.fetch_all(
@@ -7904,6 +8783,10 @@ class FactorResearchService:
 
     def _factor_phase2_metadata(self, expression: str, metrics: Mapping[str, Any]) -> dict[str, Any]:
         target_layer = self._factor_phase2_target_layer(expression, metrics)
+        evidence_value = metrics.get("wnzt_evidence")
+        evidence = evidence_value if isinstance(evidence_value, Mapping) else {}
+        wnzt_missing = self._factor_phase2_wnzt_missing(expression)
+        wnzt_complete = bool(metrics.get("wnzt_complete") or evidence.get("complete") or not wnzt_missing)
         metadata: dict[str, Any] = {
             "target_layer": target_layer,
             "operator_chain": list(PHASE2_L2_OPERATOR_CHAIN) if target_layer == "L2" else [],
@@ -7911,11 +8794,13 @@ class FactorResearchService:
             "investment_logic": "",
         }
         if target_layer == "L2":
-            missing = self._factor_phase2_wnzt_missing(expression)
+            missing = [] if wnzt_complete else wnzt_missing
             metadata.update({
                 "processing_status": "RAW_SIGNAL" if missing else "WNZT_PROCESSED",
                 "processing_status_label": "Raw Signal" if missing else "WNZT 已处理",
                 "wnzt_missing": missing,
+                "wnzt_complete": wnzt_complete,
+                "wnzt_evidence": dict(evidence),
             })
         if target_layer == "L3":
             recipe_family = str(metrics.get("recipe_family") or "").strip()
@@ -7924,6 +8809,10 @@ class FactorResearchService:
                 methods.insert(0, {"key": recipe_family, "label": recipe_family})
             metadata.update({
                 "composition_methods": methods,
+                "operator_chain": list(PHASE2_L2_OPERATOR_CHAIN) if wnzt_complete else [],
+                "wnzt_missing": [] if wnzt_complete else wnzt_missing,
+                "wnzt_complete": wnzt_complete,
+                "wnzt_evidence": dict(evidence),
                 "investment_logic": (
                     str((metrics.get("composition_metadata") or {}).get("investment_logic") or "")
                     if isinstance(metrics.get("composition_metadata"), Mapping)
@@ -8152,12 +9041,16 @@ class FactorResearchService:
             or str(candidate.get("rejected_reason") or "").strip()
             or ("准入通过，可进入发布名单。" if result == "PASS" else "等待检疫或人工复核。")
         )
+        published_identity = self._published_identity_for_candidate({**candidate, **phase2})
+        if not candidate.get("target_factor_id") and status != "PUBLISHED":
+            candidate["target_factor_id"] = published_identity.factor_id
         candidate.update({
             **phase2,
             "scoring_detail": scoring,
             "admission_report": report,
             "quarantine_result": result,
             "reason_summary": reason,
+            "publish_naming_rule": published_identity.naming_rule,
             "detail_modal_enabled": True,
         })
         return candidate
@@ -8266,6 +9159,24 @@ class FactorResearchService:
                         "composition_metadata": row.get("composition_metadata") if isinstance(row.get("composition_metadata"), Mapping) else {},
                         "sandbox_rank": int(_coerce_float(row.get("sandbox_rank"), 9999.0)),
                     }
+                    for evidence_key in (
+                        "operator_engine",
+                        "operator_config_snapshot_id",
+                        "f1_catalog_snapshot_id",
+                        "raw_f2",
+                        "refined_f2",
+                        "wnzt_complete",
+                        "wnzt_evidence",
+                        "decay_diagnostics",
+                        "p_value",
+                        "s_grade_correlation",
+                        "oos_to_is_ratio",
+                        "capacity_score",
+                        "crowding_score",
+                        "artifact_refs",
+                    ):
+                        if row.get(evidence_key) is not None:
+                            metrics[evidence_key] = row.get(evidence_key)
                     metrics.update(self._factor_phase2_metadata(expression, metrics))
                     self.storage.execute(
                         """
@@ -8328,6 +9239,24 @@ class FactorResearchService:
                 "composition_metadata": row.get("composition_metadata") if isinstance(row.get("composition_metadata"), Mapping) else {},
                 "sandbox_rank": int(_coerce_float(row.get("sandbox_rank"), 9999.0)),
             }
+            for evidence_key in (
+                "operator_engine",
+                "operator_config_snapshot_id",
+                "f1_catalog_snapshot_id",
+                "raw_f2",
+                "refined_f2",
+                "wnzt_complete",
+                "wnzt_evidence",
+                "decay_diagnostics",
+                "p_value",
+                "s_grade_correlation",
+                "oos_to_is_ratio",
+                "capacity_score",
+                "crowding_score",
+                "artifact_refs",
+            ):
+                if row.get(evidence_key) is not None:
+                    metrics[evidence_key] = row.get(evidence_key)
             metrics.update(self._factor_phase2_metadata(expression, metrics))
             gate_summary = {
                 "pit": "Full Ready" if pit_status == "READY" else ("研究态观察" if pit_status == "LIMITED_READY" else "PIT 待补证据"),
@@ -8521,6 +9450,8 @@ class FactorResearchService:
         oos_rank_ic = _safe_round(rank_ic * 0.65, 4) if rank_ic else 0.0
         decay_rate_pct = 0.0 if not rank_ic else _safe_round(max(0.0, (1.0 - abs(oos_rank_ic / rank_ic)) * 100.0), 2)
         oos_to_is_ratio = abs(oos_rank_ic / rank_ic) if rank_ic else 0.0
+        if metrics.get("oos_to_is_ratio") is not None:
+            oos_to_is_ratio = _coerce_float(metrics.get("oos_to_is_ratio"), oos_to_is_ratio)
         existing_signatures = self._factor_expression_signatures()
         expression_signature = self._expression_signature(expression)
         duplicate_factor_ids = [
@@ -8539,6 +9470,18 @@ class FactorResearchService:
         cluster_id = candidate.get("cluster_id") or self._cluster_id_for_expression(expression)
         source_factor_ids = [str(item) for item in metrics.get("source_factor_ids") or [] if str(item).strip()]
         target_layer = self._factor_phase2_target_layer(expression, metrics)
+        published_identity = _published_factor_identity(expression, target_layer=target_layer, metrics=metrics)
+        wnzt_evidence = metrics.get("wnzt_evidence") if isinstance(metrics.get("wnzt_evidence"), Mapping) else {}
+        wnzt_complete = bool(metrics.get("wnzt_complete") or wnzt_evidence.get("complete"))
+        raw_f2_requires_governance = bool(metrics.get("raw_f2")) and target_layer != "L1"
+        p_value = _coerce_float(metrics.get("p_value"), 0.02 if raw_f2_requires_governance else 0.0)
+        p_value_max = _coerce_float(metrics.get("p_value_max"), 0.05)
+        s_grade_correlation = abs(_coerce_float(metrics.get("s_grade_correlation"), _coerce_float(metrics.get("max_style_correlation"), 0.0)))
+        max_s_grade_correlation = _coerce_float(metrics.get("max_s_grade_correlation"), 0.70)
+        capacity_score = _coerce_float(metrics.get("capacity_score"), 1.0)
+        capacity_floor = _coerce_float(metrics.get("capacity_floor"), 0.0)
+        crowding_score = _coerce_float(metrics.get("crowding_score"), 0.0)
+        crowding_max = _coerce_float(metrics.get("crowding_max"), 1.0)
         composition_summary = {
             "source_factor_ids": source_factor_ids,
             "recipe_kind": metrics.get("recipe_kind"),
@@ -8587,6 +9530,11 @@ class FactorResearchService:
             "orthogonal": "NOT_REQUIRED_FOR_L1" if target_layer == "L1" else ("PASSED" if abs(max_corr) < 0.3 else "FAILED"),
             "dedupe": "FAILED" if duplicate_factor_ids else "PASSED",
             "auto_residual": "NOT_REQUIRED_FOR_L1" if target_layer == "L1" else ("PASSED" if residual_passed else ("FAILED" if residual_applied else "NOT_REQUIRED")),
+            "wnzt": "NOT_REQUIRED_FOR_L1" if target_layer == "L1" else ("PASSED" if (not raw_f2_requires_governance or wnzt_complete) else "FAILED"),
+            "p_value": "PASSED" if target_layer == "L1" or p_value <= p_value_max else "FAILED",
+            "s_grade_correlation": "PASSED" if target_layer == "L1" or s_grade_correlation <= max_s_grade_correlation else "FAILED",
+            "capacity": "PASSED" if target_layer == "L1" or capacity_score >= capacity_floor else "FAILED",
+            "crowding": "PASSED" if target_layer == "L1" or crowding_score <= crowding_max else "FAILED",
             "max_drawdown_relative_to_benchmark": _safe_round(drawdown_ratio, 4),
             "drawdown_threshold": 1.2,
             "ir_method": "newey_west_overlap_adjusted",
@@ -8603,6 +9551,16 @@ class FactorResearchService:
         if target_layer == "L1":
             if pit_status not in {"READY", "LIMITED_READY"}:
                 blockers.append("PIT 准入审计未通过，L1 原始字段候选不可发布。")
+        if raw_f2_requires_governance and not wnzt_complete:
+            blockers.append("Raw_F2 缺少 WNZT 完整治理证据，禁止进入发布准入。")
+        if target_layer != "L1" and p_value > p_value_max:
+            blockers.append(f"P-value {p_value:.4f} 超过 {p_value_max:.2f} 显著性闸门。")
+        if target_layer != "L1" and s_grade_correlation > max_s_grade_correlation:
+            blockers.append(f"与 S 级因子相关性 {s_grade_correlation:.2f} 超过 {max_s_grade_correlation:.2f}。")
+        if target_layer != "L1" and capacity_score < capacity_floor:
+            blockers.append(f"容量评分 {capacity_score:.2f} 低于准入底线 {capacity_floor:.2f}。")
+        if target_layer != "L1" and crowding_score > crowding_max:
+            blockers.append(f"拥挤度 {crowding_score:.2f} 超过上限 {crowding_max:.2f}。")
         if target_layer != "L1" and gate_summary["is"] != "PASSED":
             blockers.append("IS Rank IC、Newey-West IR 或覆盖率未达到准入阈值。")
         if target_layer != "L1" and gate_summary["oos"] != "PASSED":
@@ -8727,9 +9685,17 @@ class FactorResearchService:
             "publish_reason": reason,
             "diagnostic_warnings": diagnostic_warnings,
             "pit_evidence": pit_evidence,
+            "wnzt_evidence": dict(wnzt_evidence),
+            "wnzt_complete": wnzt_complete,
+            "decay_diagnostics": metrics.get("decay_diagnostics") if isinstance(metrics.get("decay_diagnostics"), Mapping) else {},
             "composition": composition_summary,
             "scoring_detail": scoring_detail,
             "admission_report": admission_report,
+            "publish_naming": {
+                "target_factor_id": published_identity.factor_id,
+                "tier": published_identity.tier,
+                "rule_version": published_identity.naming_rule,
+            },
             "quarantine_checks": {
                 "oos_decay": admission_report[0],
                 "stress_test": admission_report[2],
@@ -8754,6 +9720,7 @@ class FactorResearchService:
                     "ic_series": f"artifacts/factor-quarantine/{run_id}/ic-series.json",
                     "correlation": f"artifacts/factor-quarantine/{run_id}/correlation.json",
                     "auto_residual": f"artifacts/factor-quarantine/{run_id}/auto-residual.json",
+                    "wnzt_evidence": f"artifacts/factor-quarantine/{run_id}/wnzt-evidence.json",
                 }),
                 "created_at": now,
                 "completed_at": now,
@@ -8768,6 +9735,7 @@ class FactorResearchService:
                 gate_summary_json = ?,
                 publish_eligibility_json = ?,
                 pit_evidence_json = ?,
+                target_factor_id = ?,
                 cluster_id = ?,
                 updated_at = ?,
                 rejected_reason = ?
@@ -8779,6 +9747,7 @@ class FactorResearchService:
                 dumps(gate_summary),
                 dumps({"status": publish_status, "reason": reason, "rule_version": FACTOR_QUARANTINE_RULE_VERSION}),
                 dumps(pit_evidence),
+                published_identity.factor_id,
                 cluster_id,
                 now,
                 reason if status == "REJECTED" else None,
@@ -8939,7 +9908,16 @@ class FactorResearchService:
         if candidate.get("status") != "PASSED" or candidate.get("publish_status") != "ELIGIBLE":
             raise ValueError("只有 PASSED 且 ELIGIBLE 的检疫候选允许 Auto-Publish。")
         expression = str(candidate.get("expression") or "")
-        factor_id = self._infer_auto_factor_id(expression)
+        candidate_metrics = candidate.get("candidate_metrics") if isinstance(candidate.get("candidate_metrics"), Mapping) else {}
+        target_layer = str(candidate.get("target_layer") or candidate_metrics.get("target_layer") or "L2").upper()
+        wnzt_evidence = candidate_metrics.get("wnzt_evidence") if isinstance(candidate_metrics.get("wnzt_evidence"), Mapping) else {}
+        if bool(candidate_metrics.get("raw_f2")) and target_layer != "L1":
+            if not bool(candidate_metrics.get("wnzt_complete") or wnzt_evidence.get("complete")):
+                raise ValueError("Raw_F2 缺少 WNZT 完整治理证据，不能发布。")
+            if not candidate_metrics.get("operator_config_snapshot_id") or not candidate_metrics.get("f1_catalog_snapshot_id"):
+                raise ValueError("Raw_F2 缺少工厂配置或 F1 快照引用，不能发布。")
+        published_identity = _published_factor_identity(expression, target_layer=target_layer, metrics=candidate_metrics)
+        factor_id = published_identity.factor_id
         now = iso_now()
         existing = self.storage.fetch_one(
             "SELECT id FROM factor_definitions WHERE id = ? AND deleted_at IS NULL",
@@ -8950,8 +9928,6 @@ class FactorResearchService:
         latest_run = candidate.get("latest_run") if isinstance(candidate.get("latest_run"), Mapping) else {}
         run_summary = latest_run.get("summary") if isinstance(latest_run.get("summary"), Mapping) else {}
         gate_summary = candidate.get("gate_summary") if isinstance(candidate.get("gate_summary"), Mapping) else {}
-        candidate_metrics = candidate.get("candidate_metrics") if isinstance(candidate.get("candidate_metrics"), Mapping) else {}
-        target_layer = str(candidate.get("target_layer") or candidate_metrics.get("target_layer") or "L2").upper()
         operator_chain = candidate.get("operator_chain") or candidate_metrics.get("operator_chain") or []
         composition_methods = candidate.get("composition_methods") or candidate_metrics.get("composition_methods") or []
         investment_logic = str(candidate.get("investment_logic") or candidate_metrics.get("investment_logic") or "").strip()
@@ -9005,10 +9981,12 @@ class FactorResearchService:
                 "cluster_id": candidate.get("cluster_id"),
                 "gate_summary": gate_summary,
                 "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
+                "publish_naming_rule": published_identity.naming_rule,
                 "diagnostic_warnings": diagnostic_warnings,
                 "target_layer": target_layer,
                 "operator_chain": operator_chain,
                 "composition_methods": composition_methods,
+                "wnzt_evidence": dict(wnzt_evidence),
             },
             "promotion_eligible": True,
         }
@@ -9054,6 +10032,7 @@ class FactorResearchService:
                     dumps({
                         "source_candidate_id": candidate_id,
                         "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
+                        "publish_naming_rule": published_identity.naming_rule,
                         "target_layer": target_layer,
                         "operator_chain": operator_chain,
                         "composition_methods": composition_methods,
@@ -9105,6 +10084,7 @@ class FactorResearchService:
                         "target_layer": target_layer,
                         "operator_chain": operator_chain,
                         "composition_methods": composition_methods,
+                        "publish_naming_rule": published_identity.naming_rule,
                         "pit_gate_mode": pit_evidence.get("gate_mode") or "DIAGNOSTIC_ONLY",
                         "diagnostic_warnings": diagnostic_warnings,
                     }),
@@ -9128,7 +10108,10 @@ class FactorResearchService:
                         source_id,
                         factor_id,
                         relation_type,
-                        dumps({"rule_version": FACTOR_QUARANTINE_RULE_VERSION}),
+                        dumps({
+                            "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
+                            "publish_naming_rule": published_identity.naming_rule,
+                        }),
                         now,
                     ),
                 )
@@ -9158,6 +10141,7 @@ class FactorResearchService:
                             "recipe_family": candidate_metrics.get("recipe_family"),
                             "orthogonality_intent": candidate_metrics.get("orthogonality_intent"),
                             "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
+                            "publish_naming_rule": published_identity.naming_rule,
                         }),
                         now,
                     ),
@@ -9549,7 +10533,7 @@ class FactorResearchService:
             if not isinstance(parameters, Mapping):
                 continue
             strategy_type = str(row.get("strategy_type") or parameters.get("strategy_type") or "").upper()
-            if strategy_type != "MULTI_FACTOR":
+            if strategy_type not in {"MULTI_FACTOR", "COMPOSITE_FACTOR"}:
                 continue
             for item in parameters.get("factor_ids") or []:
                 factor_id = str(item).strip()
@@ -9571,15 +10555,23 @@ class FactorResearchService:
         source = str(factor.get("source") or "").upper()
         if source != "AUTO_MINED":
             return False
+        if str(factor.get("market") or "").upper() != "US":
+            return False
         tier = str(factor.get("tier_level") or self._factor_tier_key(factor)).upper()
         level = str(factor.get("factor_level") or "").upper()
+        summary = self._latest_diagnostic_summary(factor)
+        summary_level = str(self._factor_grade_label(self._factor_grade_score(summary)) or "").upper() if summary else ""
+        if summary_level:
+            level = summary_level
         if not level:
             projection = factor.get("factor_level_projection") if isinstance(factor.get("factor_level_projection"), Mapping) else {}
             level = str(projection.get("key") or "").upper()
         if not level:
-            summary = self._latest_diagnostic_summary(factor)
             level = str(self._factor_grade_label(self._factor_grade_score(summary)) or "").upper() if summary else ""
-        return tier == "F3" and level in {"S", "A"}
+        summary_status = str((summary or {}).get("status") or factor.get("diagnostic_status") or "").upper()
+        op_status = factor.get("op_status") if isinstance(factor.get("op_status"), Mapping) else self._factor_processing_ops(factor)
+        completed_ops = {str(item).upper() for item in (op_status.get("completed") or [])}
+        return tier == "F3" and level in {"S", "A"} and summary_status == "COMPLETED" and {"W", "N", "Z", "T"}.issubset(completed_ops)
 
     def _factor_model_suggestion_action(
         self,
@@ -9617,11 +10609,14 @@ class FactorResearchService:
         strategy_name = model_name or "自动挖掘因子待审查组合"
         query = {
             "source": source,
+            "strategy_type": "COMPOSITE_FACTOR" if selected_weight_pct == 100.0 and anchor_limit == 0 else "MULTI_FACTOR",
             "factorIds": ",".join(item["factor_id"] for item in weights),
             "weights": ",".join(str(int(item["weight_pct"])) for item in weights),
             "directions": ",".join(str(item["direction"]) for item in weights),
             "modelName": "自动挖掘因子待审查组合",
         }
+        if selected_weight_pct == 100.0 and anchor_limit == 0 and weights:
+            query["factor_id"] = weights[0]["factor_id"]
         query["modelName"] = strategy_name
         action = {
             "id": f"gq_model_{self._signature_hash('|'.join(merged), 10)}",
@@ -9722,6 +10717,9 @@ class FactorResearchService:
         diagnostic_summary["factor_id"] = optimized_factor_id
         diagnostic_summary["status"] = "COMPLETED"
         diagnostic_summary["source_factor_id"] = source_factor_id
+        diagnostic_summary["publish_naming_rule"] = str(
+            optimized.get("publish_naming_rule") or PUBLISHED_FACTOR_NAMING_SCHEMA_VERSION
+        )
         data_requirements = _merge_factor_data_requirements(
             expression,
             source_factor.get("data_requirements") or (),
@@ -9763,6 +10761,7 @@ class FactorResearchService:
                         "source": "factor_governance_optimization",
                         "source_factor_id": source_factor_id,
                         "descriptor": descriptor,
+                        "publish_naming_rule": diagnostic_summary["publish_naming_rule"],
                         "action_id": action_id,
                         "request_detail": dict(detail_payload),
                     }),
@@ -9786,6 +10785,7 @@ class FactorResearchService:
                         "source": "factor_governance_optimization",
                         "action_id": action_id,
                         "source_factor_id": source_factor_id,
+                        "publish_naming_rule": diagnostic_summary["publish_naming_rule"],
                         "reason": reason,
                     }),
                     dumps(diagnostic_summary),
@@ -10101,10 +11101,10 @@ class FactorResearchService:
             "fundamental_seed_version": fundamental_cache["seed_version"],
             "universe_snapshot_id": universe_snapshot_id,
             "cleaning_version": str(pit_overview.get("cleaning_version") or ""),
-            "as_of_date": str(pit_overview.get("as_of_date") or ""),
+            "as_of_date": str(pit_overview.get("as_of_date") or "")[:10],
             "diagnostic_mode": diagnostic_mode,
-            "start_date": start_date,
-            "end_date": end_date,
+            "start_date": str(start_date)[:10],
+            "end_date": str(end_date)[:10],
             "return_window_days": return_window_days,
             "requires_fundamental": bool(requires_fundamental),
             "ignored_symbols": sorted(str(symbol).strip().upper() for symbol in ignored_symbols if str(symbol).strip()),
@@ -10154,6 +11154,141 @@ class FactorResearchService:
                     if now - stored_at > self._diagnostic_data_cache_seconds:
                         self._diagnostic_data_cache.pop(key, None)
 
+    def _diagnostic_summary_cache_key(
+        self,
+        *,
+        factor: Mapping[str, Any],
+        payload: Mapping[str, Any],
+        pit_overview: Mapping[str, Any],
+        diagnostic_mode: str,
+        ignored_symbols: Sequence[str],
+        diagnostic_data_cache: Mapping[str, Any],
+    ) -> str:
+        dataset_snapshot_id, universe_snapshot_id, start_date, end_date, return_window_days, group_count = (
+            self._diagnostic_payload_defaults(payload, pit_overview, diagnostic_mode)
+        )
+        fundamental_cache = self._fundamental_cache_metadata(pit_overview)
+        research_waiver = pit_overview.get("research_waiver") if isinstance(pit_overview.get("research_waiver"), Mapping) else {}
+        cache_payload = {
+            "version": "formal-factor-diagnostic-summary-v1",
+            "factor_id": str(factor.get("id") or ""),
+            "expression": str(factor.get("expression") or ""),
+            "direction": str(factor.get("direction") or ""),
+            "descriptor": factor.get("descriptor") if isinstance(factor.get("descriptor"), Mapping) else {},
+            "data_requirements": [str(item) for item in (factor.get("data_requirements") or [])],
+            "dataset_snapshot_id": dataset_snapshot_id,
+            "fundamental_snapshot_id": str(pit_overview.get("fundamental_snapshot_id") or DATASET_FUNDAMENTALS_SNAPSHOT_ID),
+            "fundamental_snapshot_updated_at": fundamental_cache["updated_at"],
+            "fundamental_seed_version": fundamental_cache["seed_version"],
+            "universe_snapshot_id": universe_snapshot_id,
+            "cleaning_version": str(pit_overview.get("cleaning_version") or ""),
+            "as_of_date": str(pit_overview.get("as_of_date") or "")[:10],
+            "diagnostic_mode": diagnostic_mode,
+            "start_date": str(start_date)[:10],
+            "end_date": str(end_date)[:10],
+            "return_window_days": return_window_days,
+            "group_count": group_count,
+            "pit_readiness_mode": str(pit_overview.get("overall_status") or "BLOCKED").upper(),
+            "research_waiver_id": str(research_waiver.get("id") or ""),
+            "research_waiver_updated_at": str(research_waiver.get("updated_at") or ""),
+            "ignored_symbols": sorted(str(symbol).strip().upper() for symbol in ignored_symbols if str(symbol).strip()),
+            "symbols": [str(symbol) for symbol in (diagnostic_data_cache.get("symbols") or [])],
+        }
+        return self._diagnostic_cache_digest(cache_payload)
+
+    def _cached_diagnostic_summary(self, cache_key: str) -> dict[str, Any] | None:
+        now = time.monotonic()
+        with self._diagnostic_summary_cache_lock:
+            cached = self._diagnostic_summary_cache.get(cache_key)
+            if not cached:
+                return None
+            stored_at, summary = cached
+            if now - stored_at > self._diagnostic_summary_cache_seconds:
+                self._diagnostic_summary_cache.pop(cache_key, None)
+                return None
+            return _json_mapping_clone(summary)
+
+    def _store_diagnostic_summary_cache(self, cache_key: str, summary: Mapping[str, Any]) -> None:
+        now = time.monotonic()
+        with self._diagnostic_summary_cache_lock:
+            self._diagnostic_summary_cache[cache_key] = (now, _json_mapping_clone(summary))
+            if len(self._diagnostic_summary_cache) > 16:
+                for key, (stored_at, _value) in list(self._diagnostic_summary_cache.items()):
+                    if now - stored_at > self._diagnostic_summary_cache_seconds:
+                        self._diagnostic_summary_cache.pop(key, None)
+
+    def _diagnostic_request_cache_signature(
+        self,
+        payload: Mapping[str, Any],
+        pit_overview: Mapping[str, Any],
+        diagnostic_mode: str,
+    ) -> dict[str, Any]:
+        dataset_snapshot_id, universe_snapshot_id, start_date, end_date, return_window_days, group_count = (
+            self._diagnostic_payload_defaults(payload, pit_overview, diagnostic_mode)
+        )
+        return {
+            "dataset_snapshot_id": dataset_snapshot_id,
+            "universe_snapshot_id": universe_snapshot_id,
+            "start_date": str(start_date)[:10],
+            "end_date": str(end_date)[:10],
+            "return_window_days": return_window_days,
+            "group_count": group_count,
+            "diagnostic_mode": diagnostic_mode,
+        }
+
+    def _rehydrate_cached_diagnostic_summary(self, summary: Mapping[str, Any], *, run_id: str, now: str) -> dict[str, Any]:
+        refreshed = _json_mapping_clone(summary)
+        refreshed["run_id"] = run_id
+        refreshed["status"] = "COMPLETED"
+        refreshed["artifact_refs"] = {
+            "ic_series": f"artifacts/factors/{run_id}/ic-series.json",
+            "matrix": f"artifacts/factors/{run_id}/diagnostic-matrix.json",
+        }
+        compliance = dict(refreshed.get("compliance_trail") or {})
+        compliance["diagnosed_at"] = now
+        compliance["operator"] = "researcher"
+        refreshed["compliance_trail"] = compliance
+        return refreshed
+
+    def _cached_recent_formal_diagnostic_summary(
+        self,
+        *,
+        factor_id: str,
+        payload: Mapping[str, Any],
+        pit_overview: Mapping[str, Any],
+        diagnostic_mode: str,
+        now: str,
+    ) -> dict[str, Any] | None:
+        now_dt = _parse_datetime_utc(now) or datetime.now(timezone.utc)
+        current_signature = self._diagnostic_request_cache_signature(payload, pit_overview, diagnostic_mode)
+        rows = self.storage.fetch_all(
+            """
+            SELECT request_json, summary_json, completed_at, created_at
+            FROM factor_diagnostic_runs
+            WHERE factor_id = ? AND status = 'COMPLETED'
+            ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC, id DESC
+            LIMIT 8
+            """,
+            (factor_id,),
+        )
+        for row in rows:
+            completed_at = _parse_datetime_utc(row.get("completed_at") or row.get("created_at"))
+            if completed_at is None:
+                continue
+            if (now_dt - completed_at).total_seconds() > self._diagnostic_summary_cache_seconds:
+                continue
+            stored_payload = loads(row.get("request_json"), {})
+            stored_mode = str(stored_payload.get("diagnostic_mode") or diagnostic_mode).upper()
+            if stored_mode not in {"VERIFIED", "SANDBOX"}:
+                stored_mode = diagnostic_mode
+            stored_signature = self._diagnostic_request_cache_signature(stored_payload, pit_overview, stored_mode)
+            if stored_signature != current_signature:
+                continue
+            summary = loads(row.get("summary_json"), {})
+            if isinstance(summary, Mapping) and str(summary.get("status") or "").upper() == "COMPLETED":
+                return dict(summary)
+        return None
+
     def _compute_factor_diagnostic_summary(
         self,
         *,
@@ -10168,6 +11303,7 @@ class FactorResearchService:
         now: str,
         preview: bool = False,
         diagnostic_data_cache: Mapping[str, Any] | None = None,
+        snapshot_binding_validated: bool = False,
     ) -> dict[str, Any]:
         resolved_factor_id = str(factor.get("id") or "")
         (
@@ -10180,7 +11316,7 @@ class FactorResearchService:
         ) = self._diagnostic_payload_defaults(payload, pit_overview, diagnostic_mode)
         if not dataset_snapshot_id or not universe_snapshot_id:
             raise ValueError("诊断必须绑定 dataset_snapshot_id 与 universe_snapshot_id。")
-        if not preview:
+        if not preview and not snapshot_binding_validated:
             self._validate_diagnostic_snapshot_binding(
                 dataset_snapshot_id=dataset_snapshot_id,
                 universe_snapshot_id=universe_snapshot_id,
@@ -10240,7 +11376,7 @@ class FactorResearchService:
                     f"估算 IC 扰动 {waiver_impact_estimate.get('estimated_ic_delta_abs')}。"
                 )
             risk_flags.append(
-                f"Limited Ready 诊断忽略 {len(ignored_symbols)} 个 symbol；{impact_label}不能晋升为 Full Ready。"
+                f"Limited Ready 研究态豁免诊断忽略 {len(ignored_symbols)} 个 symbol；{impact_label}不能晋升为 Full Ready。"
             )
         artifact_refs = (
             {
@@ -11025,11 +12161,20 @@ class FactorResearchService:
         expression = str(payload.get("expression") or "").strip()
         risks = validate_factor_expression(expression)
         descriptor = _descriptor_from_payload(payload, default_source_prefix="m")
-        if descriptor.source_prefix != "m":
+        canonical_expression_factor_id = _overnight_mean_canonical_factor_id(expression)
+        if descriptor.source_prefix != "m" and not canonical_expression_factor_id:
             raise ValueError("人工因子描述符来源必须使用 m。")
-        factor_id = descriptor.canonical_id
+        factor_id = canonical_expression_factor_id or descriptor.canonical_id
+        source = "SYSTEM_SEED" if canonical_expression_factor_id else "MANUAL"
+        created_by = "system" if canonical_expression_factor_id else "researcher"
+        metadata_descriptor = (
+            _descriptor_from_factor_id(factor_id, source)
+            if canonical_expression_factor_id
+            else descriptor.as_dict()
+        )
         now = iso_now()
         tags = [str(item).strip() for item in payload.get("tags") or [] if str(item).strip()]
+        factor_name = OVERNIGHT_MEAN_FACTOR_NAME if canonical_expression_factor_id else str(payload.get("name") or "").strip()
         description = str(payload.get("description") or payload.get("institutional_note") or "").strip()
         if not description:
             description = "人工因子，需通过 PIT 诊断后才能进入已验证状态。"
@@ -11056,13 +12201,14 @@ class FactorResearchService:
                     direction, frequency, expression, tags_json, data_requirements_json,
                     institutional_note, created_by, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, 'MANUAL', 'DRAFT', ?, ?, ?, ?, ?, ?, ?, 'researcher', ?, ?)
+                VALUES (?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     factor_id,
-                    str(payload.get("name") or "").strip(),
+                    factor_name,
                     str(payload.get("market") or "US").strip() or "US",
                     str(payload.get("universe") or "SP500").strip() or "SP500",
+                    source,
                     diagnostic_status,
                     str(payload.get("direction") or "HIGH_IS_BETTER"),
                     str(payload.get("frequency") or "DAILY"),
@@ -11070,6 +12216,7 @@ class FactorResearchService:
                     dumps(tags),
                     dumps(data_requirements),
                     "人工因子，需通过 PIT 诊断后才能进入已验证状态。",
+                    created_by,
                     now,
                     now,
                 ),
@@ -11079,7 +12226,7 @@ class FactorResearchService:
                 INSERT INTO factor_versions (id, factor_id, version, expression, status, metadata_json, created_at)
                 VALUES (?, ?, 1, ?, 'ACTIVE', ?, ?)
                 """,
-                (f"{factor_id}-v1", factor_id, expression, dumps({"risks": risks, "descriptor": descriptor.as_dict()}), now),
+                (f"{factor_id}-v1", factor_id, expression, dumps({"risks": risks, "descriptor": metadata_descriptor}), now),
             )
             conn.execute(
                 "UPDATE factor_definitions SET institutional_note = ?, updated_at = ? WHERE id = ?",
@@ -11337,6 +12484,8 @@ class FactorResearchService:
         factor_cache = factor_cache or {}
         if not window_days or window_days <= 0:
             return False, None
+        if factor_id == OVERNIGHT_MEAN_FACTOR_ID or metric == "ovn_mean":
+            return False, None
         if category == "mom":
             if index < window_days or prices[index - window_days] <= 0:
                 return True, None
@@ -11433,6 +12582,18 @@ class FactorResearchService:
                 factor_cache=factor_cache,
             )
 
+        if _compact_factor_expression(inner).lower() == VALUE_VOL_WNZT_F3_COMPACT:
+            left_recognized, left_value = value_for("s_val_cfp_ltm_raw")
+            right_recognized, right_value = value_for("s_vol_downside_252d_rank")
+            if not left_recognized or not right_recognized:
+                return False, None
+            if left_value is None or right_value is None:
+                return True, None
+            denominator = right_value
+            if abs(denominator) <= 1e-12:
+                denominator = 1e-12 if denominator >= 0 else -1e-12
+            return True, left_value / denominator
+
         if FACTOR_REFERENCE_TOKEN_PATTERN.fullmatch(inner):
             return value_for(inner)
         residual_match = RESIDUAL_FACTOR_REFERENCE_PATTERN.fullmatch(inner)
@@ -11493,6 +12654,35 @@ class FactorResearchService:
         market_returns_by_date = market_returns_by_date or {}
         fundamental_history = fundamental_history or []
         factor_cache = factor_cache or {}
+        if _compact_factor_expression(normalized).lower() == VALUE_VOL_WNZT_F3_COMPACT:
+            left_value = self._factor_value(
+                "s_val_cfp_ltm_raw",
+                "",
+                prices,
+                index,
+                fundamental,
+                rows=rows,
+                market_returns_by_date=market_returns_by_date,
+                fundamental_history=fundamental_history,
+                factor_cache=factor_cache,
+            )
+            right_value = self._factor_value(
+                "s_vol_downside_252d_rank",
+                "",
+                prices,
+                index,
+                fundamental,
+                rows=rows,
+                market_returns_by_date=market_returns_by_date,
+                fundamental_history=fundamental_history,
+                factor_cache=factor_cache,
+            )
+            if left_value is None or right_value is None:
+                return None
+            denominator = right_value
+            if abs(denominator) <= 1e-12:
+                denominator = 1e-12 if denominator >= 0 else -1e-12
+            return left_value / denominator
         reference_expression_recognized, reference_expression_value = self._factor_reference_expression_value(
             normalized,
             prices,
@@ -11829,7 +13019,7 @@ class FactorResearchService:
             )
             if "NetIncome-OperatingCashFlow" in normalized and "TotalAssets" in normalized:
                 return -((net_income - operating_cash_flow) / total_assets) if total_assets > 0 else None
-            if factor_id == "s_alpha_ffblend_cur_rank" or normalized.startswith("FFBlend("):
+            if factor_id == "s_alpha_ffblend_resid_mkt_rank" or normalized.startswith("FFBlend("):
                 if index < 252 or prices[index - 252] <= 0 or market_cap <= 0:
                     return None
                 momentum = prices[index] / prices[index - 252] - 1.0
@@ -11974,7 +13164,7 @@ class FactorResearchService:
             set(infer_factor_data_requirements(expression)) & FUNDAMENTAL_REQUIREMENTS
             or factor_id
             in {
-                "s_alpha_ffblend_cur_rank",
+                "s_alpha_ffblend_resid_mkt_rank",
                 "s_inv_assetgrowth_1y_rank",
                 "s_liq_turnover_20d_rank",
             }
@@ -12295,145 +13485,64 @@ class FactorResearchService:
             raise ValueError(f"完整 Verified PIT 门禁未通过：{detail}。")
         run_id = f"fdiag_{uuid4().hex[:12]}"
         now = iso_now()
-        dataset_snapshot_id = str(payload.get("dataset_snapshot_id") or "")
-        universe_snapshot_id = str(payload.get("universe_snapshot_id") or "")
+        dataset_snapshot_id, universe_snapshot_id, start_date, end_date, _return_window_days, _group_count = (
+            self._diagnostic_payload_defaults(payload, pit_overview, diagnostic_mode)
+        )
         if not dataset_snapshot_id or not universe_snapshot_id:
-            raise ValueError("诊断必须绑定 dataset_snapshot_id 与 universe_snapshot_id。")
-        start_date = str(payload.get("start_date"))
-        end_date = str(payload.get("end_date"))
-        self._validate_diagnostic_snapshot_binding(
-            dataset_snapshot_id=dataset_snapshot_id,
-            universe_snapshot_id=universe_snapshot_id,
-            start_date=start_date,
-            end_date=end_date,
-            diagnostic_mode=diagnostic_mode,
-        )
-        return_window_days = int(payload.get("return_window_days") or 21)
-        group_count = int(payload.get("group_count") or 5)
-        observations, series_by_symbol, requested_symbols = self._diagnostic_observations(
+            raise ValueError("诊断请求必须包含 dataset_snapshot_id 和 universe_snapshot_id。")
+        cached_summary = self._cached_recent_formal_diagnostic_summary(
             factor_id=resolved_factor_id,
-            expression=str(factor["expression"]),
-            direction=str(factor["direction"]),
-            descriptor=factor.get("descriptor") if isinstance(factor.get("descriptor"), Mapping) else {},
-            dataset_snapshot_id=dataset_snapshot_id,
-            fundamental_snapshot_id=str(pit_overview.get("fundamental_snapshot_id") or DATASET_FUNDAMENTALS_SNAPSHOT_ID),
-            universe_snapshot_id=universe_snapshot_id,
-            start_date=start_date,
-            end_date=end_date,
-            return_window_days=return_window_days,
-            allow_current_membership=diagnostic_mode == "SANDBOX",
-            excluded_symbols=ignored_symbols,
+            payload=payload,
+            pit_overview=pit_overview,
+            diagnostic_mode=diagnostic_mode,
+            now=now,
         )
-        if not observations:
-            raise ValueError("诊断区间内没有足够横截面观测，无法计算 IC。")
-        ic_values = [item["ic"] for item in observations if item.get("ic") is not None]
-        rank_ic_values = [item["rank_ic"] for item in observations if item.get("rank_ic") is not None]
-        rank_ic_mean = _mean(rank_ic_values)
-        rank_ic_std = _std(rank_ic_values)
-        ir = (rank_ic_mean / rank_ic_std * math.sqrt(12.0)) if rank_ic_mean is not None and rank_ic_std and rank_ic_std > 1e-12 else None
-        group_return_series = self._factor_group_return_series(observations, group_count)
-        group_returns = self._rolling_group_returns(group_return_series)
-        monotonicity = self._factor_group_return_shape(
-            {"group_returns": group_returns, "group_return_series": group_return_series}
-        )
-        coverage_detail = _factor_diagnostic_coverage_detail(observations, requested_symbols, series_by_symbol)
-        coverage = float(coverage_detail["coverage"])
-        risk_flags = []
-        if abs(rank_ic_mean or 0.0) < 0.02:
-            risk_flags.append("Rank IC 接近 0，预测性较弱。")
-        if str(factor["id"]) in {"s_mom_12m1m_rank", "momentum_12m_1m"}:
-            risk_flags.append("市场风格切换时需关注动量崩溃。")
-        if coverage < 80:
-            risk_flags.append("覆盖率不足 80%，请优先检查 PIT 样本池和价格覆盖。")
-        waiver_impact_estimate = (
-            research_waiver.get("impact_estimate")
-            if isinstance(research_waiver, Mapping) and isinstance(research_waiver.get("impact_estimate"), Mapping)
-            else None
-        )
-        if ignored_symbols:
-            impact_label = ""
-            if waiver_impact_estimate:
-                impact_label = (
-                    f"估算市值权重 {waiver_impact_estimate.get('mcap_weight_pct')}%，"
-                    f"潜在 IC 扰动约 {waiver_impact_estimate.get('estimated_ic_delta_abs')}。"
-                )
-            risk_flags.append(
-                f"研究态豁免已排除 {len(ignored_symbols)} 个 symbol，{impact_label}晋升前必须 Full Ready 复算。"
+        if cached_summary is not None:
+            summary = self._rehydrate_cached_diagnostic_summary(cached_summary, run_id=run_id, now=now)
+        else:
+            self._validate_diagnostic_snapshot_binding(
+                dataset_snapshot_id=dataset_snapshot_id,
+                universe_snapshot_id=universe_snapshot_id,
+                start_date=start_date,
+                end_date=end_date,
+                diagnostic_mode=diagnostic_mode,
             )
-        summary = {
-            "run_id": run_id,
-            "factor_id": resolved_factor_id,
-            "status": "COMPLETED",
-            "diagnostic_mode": diagnostic_mode,
-            "descriptor": factor.get("descriptor"),
-            "dataset_snapshot_id": dataset_snapshot_id,
-            "fundamental_snapshot_id": pit_overview.get("fundamental_snapshot_id"),
-            "universe_snapshot_id": universe_snapshot_id,
-            "cleaning_version": pit_overview.get("cleaning_version"),
-            "ic": _safe_round(_mean(ic_values), 4),
-            "rank_ic": _safe_round(rank_ic_mean, 4),
-            "ir": _safe_round(ir, 4),
-            "coverage": coverage,
-            "coverage_detail": coverage_detail,
-            "group_returns": group_returns,
-            "group_return_series": group_return_series[-36:],
-            "monotonicity": monotonicity,
-            "ic_series": [
-                {
-                    "date": item["date"],
-                    "ic": _safe_round(item.get("ic"), 4),
-                    "rank_ic": _safe_round(item.get("rank_ic"), 4),
-                    "symbol_count": item["symbol_count"],
-                }
-                for item in observations[-36:]
-            ],
-            "evidence_heatmap": self._evidence_heatmap(rank_ic_values),
-            "turnover_decay": self._turnover_decay_summary(factor_id),
-            "stress_scenarios": self._stress_scenarios(factor_id),
-            "risk_flags": risk_flags,
-            "admission": {
-                "mode": diagnostic_mode,
-                "label": "Sandbox 预览" if diagnostic_mode == "SANDBOX" else ("Limited Ready 研究诊断" if pit_readiness_mode == "LIMITED_READY" else "Verified 正式诊断"),
-                "verified_gate": "limited" if pit_readiness_mode == "LIMITED_READY" else ("passed" if diagnostic_mode == "VERIFIED" else "pending"),
-                "missing_windows": (
-                    (((pit_overview.get("diagnostic_windows") or {}).get("verified") or {}).get("missing_windows") or [])
-                    if diagnostic_mode == "SANDBOX"
-                    else []
-                ),
-                "note": (
-                    f"Sandbox 仅用于最近 {SANDBOX_DIAGNOSTIC_YEARS} 年试跑，不会把因子升级为 Verified。"
-                    if diagnostic_mode == "SANDBOX"
-                    else (
-                        "Limited Ready 只允许研究阶段使用，策略晋升仍要求 Full Ready。"
-                        if pit_readiness_mode == "LIMITED_READY"
-                        else f"Verified 诊断要求完整 {FORMAL_DIAGNOSTIC_YEARS} 年 PIT 窗口。"
-                    )
-                ),
-            },
-            "compliance_trail": {
-                "factor_logic": factor["expression"],
-                "descriptor": factor.get("descriptor"),
-                "dataset_snapshot_id": dataset_snapshot_id,
-                "fundamental_snapshot_id": pit_overview.get("fundamental_snapshot_id"),
-                "universe_snapshot_id": universe_snapshot_id,
-                "cleaning_version": pit_overview.get("cleaning_version"),
-                "diagnosed_at": now,
-                "operator": "researcher",
-            },
-            "artifact_refs": {
-                "ic_series": f"artifacts/factors/{run_id}/ic-series.json",
-                "matrix": f"artifacts/factors/{run_id}/diagnostic-matrix.json",
-            },
-            "symbol_count": len(series_by_symbol),
-            "observation_count": coverage_detail["observation_count"],
-            "average_symbol_count": coverage_detail["average_symbol_count"],
-            "cross_section_threshold": coverage_detail["min_cross_section_symbols"],
-            "pit_readiness_mode": pit_readiness_mode,
-            "waiver_id": research_waiver.get("id") if isinstance(research_waiver, Mapping) else None,
-            "ignored_symbol_count": len(ignored_symbols),
-            "waiver_impact_estimate": waiver_impact_estimate,
-            "promotion_eligible": pit_readiness_mode == "READY" and diagnostic_mode == "VERIFIED",
-        }
+            diagnostic_data_cache = self._build_diagnostic_batch_data_cache(
+                factors=[factor],
+                payload=payload,
+                pit_overview=pit_overview,
+                diagnostic_mode=diagnostic_mode,
+                ignored_symbols=ignored_symbols,
+            )
+            summary_cache_key = self._diagnostic_summary_cache_key(
+                factor=factor,
+                payload=payload,
+                pit_overview=pit_overview,
+                diagnostic_mode=diagnostic_mode,
+                ignored_symbols=ignored_symbols,
+                diagnostic_data_cache=diagnostic_data_cache,
+            )
+            cached_summary = self._cached_diagnostic_summary(summary_cache_key)
+            if cached_summary is not None:
+                summary = self._rehydrate_cached_diagnostic_summary(cached_summary, run_id=run_id, now=now)
+            else:
+                summary = self._compute_factor_diagnostic_summary(
+                    factor=factor,
+                    payload=payload,
+                    pit_overview=pit_overview,
+                    research_waiver=research_waiver,
+                    pit_readiness_mode=pit_readiness_mode,
+                    ignored_symbols=ignored_symbols,
+                    diagnostic_mode=diagnostic_mode,
+                    run_id=run_id,
+                    now=now,
+                    preview=False,
+                    diagnostic_data_cache=diagnostic_data_cache,
+                    snapshot_binding_validated=True,
+                )
+                self._store_diagnostic_summary_cache(summary_cache_key, summary)
+        dataset_snapshot_id = str(summary.get("dataset_snapshot_id") or payload.get("dataset_snapshot_id") or "")
+        universe_snapshot_id = str(summary.get("universe_snapshot_id") or payload.get("universe_snapshot_id") or "")
         with self.storage.connection() as conn:
             conn.execute(
                 """

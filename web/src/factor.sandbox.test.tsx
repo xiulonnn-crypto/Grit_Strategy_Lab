@@ -319,6 +319,6 @@ describe('FactorSandboxPage', () => {
     expect(css).toMatch(/\.factor-phase2-hero\s*\{[^}]*margin:\s*0;/s);
     expect(css).toMatch(/\.factor-phase2-workbench\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1\.1fr\)\s*minmax\(0,\s*1fr\)\s*minmax\(320px,\s*0\.78fr\);/s);
     expect(css).toMatch(/\.factor-sandbox-page\s+\.factor-phase2-list--scroll\s*\{[^}]*max-height:\s*calc\([^}]*overflow-y:\s*auto;/s);
-    expect(css).toMatch(/@media\s*\(max-width:\s*1180px\)\s*\{[^}]*\.factor-phase2-hero,[^}]*\.factor-phase2-workbench,[^}]*\.factor-quarantine-grid,[^}]*\.factor-factory-workbench,[^}]*\.factor-factory-gate-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
+    expect(css).toMatch(/@media\s*\(max-width:\s*1180px\)\s*\{[^}]*\.factor-phase2-hero,[^}]*\.factor-phase2-workbench,[^}]*\.factor-quarantine-grid,[^}]*\.factor-factory-workbench,[^}]*\.factor-factory-gate-grid,[^{}]*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
   });
 });

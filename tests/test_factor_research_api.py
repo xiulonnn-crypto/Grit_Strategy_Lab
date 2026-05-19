@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from datetime import date, timedelta
 
 from grit_backtest_platform import _real_service_rebuilt as real_service_module
-from grit_backtest_platform.factor_research import validate_factor_expression
+from grit_backtest_platform.factor_research import (
+    VALUE_VOL_WNZT_F3_EXPRESSION,
+    VALUE_VOL_WNZT_F3_FACTOR_ID,
+    VALUE_VOL_WNZT_F3_FACTOR_NAME,
+    VALUE_VOL_WNZT_F3_PARENTS,
+    validate_factor_expression,
+)
 from grit_backtest_platform.storage import dumps
 from tests.api_test_support import assert_ok, create_test_client
 
@@ -1224,7 +1231,8 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
         "s_inv_capex_ltm_raw",
         "s_mom_6m_rank",
         "s_liq_amihud_20d_rank",
-        "s_alpha_ffblend_cur_rank",
+        "s_alpha_ffblend_resid_mkt_rank",
+        VALUE_VOL_WNZT_F3_FACTOR_ID,
     }
     legacy_ids = {
         "momentum_12m_1m",
@@ -1234,6 +1242,7 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
         "quality_roe_ltm",
         "quality_fcf_yield",
         "size_log_market_cap",
+        "s_alpha_ffblend_cur_rank",
     }
     assert canonical_ids.issubset(ids)
     assert expanded_seed_ids.issubset(ids)
@@ -1241,9 +1250,10 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
     assert payload["summary"]["blocked_data_count"] == 0
 
     by_id = {item["id"]: item for item in payload["items"]}
+    assert by_id[VALUE_VOL_WNZT_F3_FACTOR_ID]["name"] == VALUE_VOL_WNZT_F3_FACTOR_NAME
     assert by_id["s_beta_market_252d_raw"]["name"] == "市场贝塔代理（252日）"
     assert by_id["s_val_cfp_ltm_raw"]["name"] == "现金流市值比（LTM）"
-    assert by_id["s_alpha_ffblend_cur_rank"]["name"] == "Fama-French 风格合成 Alpha"
+    assert by_id["s_alpha_ffblend_resid_mkt_rank"]["name"] == "Fama-French 风格合成 Alpha"
     assert payload["summary"]["f1_count"] >= 1
     assert payload["summary"]["f2_count"] >= 1
     assert payload["summary"]["f3_count"] >= 1
@@ -1255,22 +1265,30 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
     assert by_id["s_price_adjclose_cur_raw"]["tier_level"] == "F1"
     assert by_id["s_val_ep_ltm_raw"]["tier_level"] == "F2"
     assert by_id["s_mom_12m1m_rank"]["tier_level"] == "F2"
-    assert by_id["s_alpha_ffblend_cur_rank"]["tier_level"] == "F3"
-    assert by_id["s_alpha_ffblend_cur_rank"]["tier_label"] == "F3 组合"
+    assert by_id["s_alpha_ffblend_resid_mkt_rank"]["tier_level"] == "F3"
+    assert by_id["s_alpha_ffblend_resid_mkt_rank"]["tier_label"] == "F3 组合"
+    assert by_id["s_alpha_ffblend_resid_mkt_rank"]["descriptor"]["canonical_id"] == "s_alpha_ffblend_resid_mkt_rank"
     assert by_id["s_mom_12m1m_rank"]["lifecycle"] == "online"
     assert by_id["s_mom_12m1m_rank"]["lifecycle_label"] == "线上"
     assert by_id["s_mom_12m1m_rank"]["factor_level"] in {"B", "C"}
     assert by_id["s_mom_12m1m_rank"]["factor_level_label"] in {"B合格", "C微弱"}
     assert "T" in by_id["s_mom_12m1m_rank"]["op_status"]["completed"]
     assert {light["code"] for light in by_id["s_mom_12m1m_rank"]["op_status"]["lights"]} == {"W", "N", "Z", "T"}
-    assert by_id["s_alpha_ffblend_cur_rank"]["lineage_summary"]["parent_count"] >= 4
-    assert by_id["s_alpha_ffblend_cur_rank"]["lineage_summary"]["has_lineage"] is True
-    assert set(by_id["s_alpha_ffblend_cur_rank"]["lineage_summary"]["parent_ids"]) >= {
+    assert by_id["s_alpha_ffblend_resid_mkt_rank"]["op_status"]["completed"] == ["W", "N", "Z", "T"]
+    assert by_id["s_alpha_ffblend_resid_mkt_rank"]["op_status"]["missing"] == []
+    assert by_id["s_alpha_ffblend_resid_mkt_rank"]["lineage_summary"]["parent_count"] >= 4
+    assert by_id["s_alpha_ffblend_resid_mkt_rank"]["lineage_summary"]["has_lineage"] is True
+    assert set(by_id["s_alpha_ffblend_resid_mkt_rank"]["lineage_summary"]["parent_ids"]) >= {
         "s_mom_12m1m_rank",
         "s_val_ep_ltm_raw",
         "s_qlty_roe_ltm_raw",
         "s_size_cur_log",
     }
+    assert by_id[VALUE_VOL_WNZT_F3_FACTOR_ID]["tier_level"] == "F3"
+    assert by_id[VALUE_VOL_WNZT_F3_FACTOR_ID]["op_status"]["completed"] == ["W", "N", "Z", "T"]
+    assert by_id[VALUE_VOL_WNZT_F3_FACTOR_ID]["op_status"]["missing"] == []
+    assert by_id[VALUE_VOL_WNZT_F3_FACTOR_ID]["lineage_summary"]["has_lineage"] is True
+    assert set(by_id[VALUE_VOL_WNZT_F3_FACTOR_ID]["lineage_summary"]["parent_ids"]) == set(VALUE_VOL_WNZT_F3_PARENTS)
     assert by_id["s_size_cur_log"]["lineage_summary"]["parent_ids"] == ["s_size_mcap_cur_raw"]
     assert by_id["s_mom_12m1m_rank"]["lineage_summary"]["parent_ids"] == ["s_price_adjclose_cur_raw"]
     assert set(by_id["s_size_mcap_cur_raw"]["lineage_summary"]["relation_types"]) >= {"DIRECT_SOURCE"}
@@ -1310,8 +1328,10 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
     assert legacy_detail["name"] == "滚动市盈率倒数 (LTM)"
     assert assert_ok(client.get("/factors/value_bp_latest"))["id"] == "s_val_bp_latest_raw"
     assert assert_ok(client.get("/factors/quality_roe_ltm"))["id"] == "s_qlty_roe_ltm_raw"
-    detail = assert_ok(client.get("/factors/s_alpha_ffblend_cur_rank"))
-    assert detail["lineage_tree"]["node"]["id"] == "s_alpha_ffblend_cur_rank"
+    detail = assert_ok(client.get("/factors/s_alpha_ffblend_resid_mkt_rank"))
+    assert detail["lineage_tree"]["node"]["id"] == "s_alpha_ffblend_resid_mkt_rank"
+    legacy_detail = assert_ok(client.get("/factors/s_alpha_ffblend_cur_rank"))
+    assert legacy_detail["id"] == "s_alpha_ffblend_resid_mkt_rank"
     assert detail["lineage_tree"]["parent_count"] >= 4
     assert {parent["id"] for parent in detail["lineage_tree"]["parents"]} >= {
         "s_mom_12m1m_rank",
@@ -1329,6 +1349,142 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
     assert momentum_detail["lineage_tree"]["parents"][0]["id"] == "s_price_adjclose_cur_raw"
     assert momentum_detail["lineage_tree"]["parents"][0]["label"] == "复权收盘价"
     assert momentum_detail["lineage_tree"]["parents"][0]["tier_level"] == "F1"
+
+
+def test_factor_library_keeps_return_raw_signals_in_f2_even_with_legacy_l1_summary(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    assert_ok(client.get("/factors"))
+    now = "2026-05-19T09:30:00Z"
+    legacy_return_factors = {
+        "a_mom_ret_252d_raw": "Return(Close, 252)",
+        "a_mom_ret_3d_raw": "Return(Close, 3)",
+        "a_mom_ret_5d_raw": "Return(Close, 5)",
+        "a_mom_ret_63d_raw": "Return(Close, 63)",
+    }
+    with client.app.state.service.storage.connection() as conn:
+        for factor_id, expression in legacy_return_factors.items():
+            conn.execute(
+                """
+                INSERT INTO factor_definitions (
+                    id, name, market, universe, source, lifecycle_status, diagnostic_status,
+                    direction, frequency, expression, tags_json, data_requirements_json,
+                    institutional_note, created_by, created_at, updated_at
+                )
+                VALUES (?, ?, 'US', 'SP500', 'AUTO_MINED', 'VERIFIED', 'COMPLETED',
+                        'HIGH_IS_BETTER', 'DAILY', ?, ?, ?, ?, 'unit_test', ?, ?)
+                """,
+                (
+                    factor_id,
+                    f"Return raw signal {factor_id}",
+                    expression,
+                    dumps(["auto_mined", "legacy_l1_summary"]),
+                    dumps(["adj_close", "price_history", "returns"]),
+                    "Legacy auto-mined return raw signal.",
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO factor_diagnostic_runs (
+                    id, factor_id, status, dataset_snapshot_id, universe_snapshot_id,
+                    request_json, summary_json, artifact_refs_json, created_at, completed_at
+                )
+                VALUES (?, ?, 'COMPLETED', 'ds-price', 'un-sp500', '{}', ?, '{}', ?, ?)
+                """,
+                (
+                    f"fdiag_{factor_id}_legacy_l1",
+                    factor_id,
+                    dumps({
+                        **governance_ready_summary(rank_ic=0.041, ir=0.91, coverage=98.0),
+                        "run_id": f"fdiag_{factor_id}_legacy_l1",
+                        "factor_id": factor_id,
+                        "target_layer": "L1",
+                    }),
+                    now,
+                    now,
+                ),
+            )
+
+    payload = assert_ok(client.get("/factors?lifecycle=all"))
+    by_id = {item["id"]: item for item in payload["items"]}
+
+    for factor_id, expression in legacy_return_factors.items():
+        factor = by_id[factor_id]
+        assert factor["expression"] == expression
+        assert factor["latest_diagnostic_summary"]["target_layer"] == "L1"
+        assert factor["tier_level"] == "F2"
+        assert factor["tier_projection"]["key"] == "F2"
+
+
+def test_factor_library_repairs_legacy_cashflow_risk_adjusted_alpha_name_and_wnzt_status(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    assert_ok(client.get("/factors"))
+    storage = client.app.state.service.storage
+    now = "2026-05-19T10:30:00Z"
+    factor_id = "a_alpha_custom_cur_raw"
+    expression = "s_val_cfp_ltm_raw / s_vol_downside_252d_rank"
+    with storage.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO factor_definitions (
+                id, name, market, universe, source, lifecycle_status, diagnostic_status,
+                direction, frequency, expression, tags_json, data_requirements_json,
+                institutional_note, created_by, created_at, updated_at
+            )
+            VALUES (?, 'Alpha排序因子（composite value volatility ratio）', 'US', 'SP500', 'AUTO_MINED',
+                    'VERIFIED', 'COMPLETED', 'HIGH_IS_BETTER', 'DAILY', ?, ?, ?, ?,
+                    'unit_test', ?, ?)
+            """,
+            (
+                factor_id,
+                expression,
+                dumps(["自动挖掘", "检疫通过", "L3"]),
+                dumps(["adj_close", "price_history", "returns", "market_cap", "operating_cash_flow"]),
+                "Legacy auto-mined value-volatility factor.",
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO factor_diagnostic_runs (
+                id, factor_id, status, dataset_snapshot_id, universe_snapshot_id,
+                request_json, summary_json, artifact_refs_json, created_at, completed_at
+            )
+            VALUES (?, ?, 'COMPLETED', 'ds-price', 'un-sp500', '{}', ?, '{}', ?, ?)
+            """,
+            (
+                f"fdiag_{factor_id}_legacy_publish",
+                factor_id,
+                dumps({
+                    **governance_ready_summary(rank_ic=0.3455, ir=6.91, coverage=100.0),
+                    "run_id": f"fdiag_{factor_id}_legacy_publish",
+                    "factor_id": factor_id,
+                    "factor_name": "Alpha因子（自定义公式）",
+                    "target_layer": "L3",
+                    "operator_chain": [],
+                    "composition_methods": [
+                        {"key": "style_blend", "label": "风格复合"},
+                        {"key": "risk_adjusted", "label": "风险调节"},
+                        {"key": "ts_denoise", "label": "时序降噪"},
+                    ],
+                }),
+                now,
+                now,
+            ),
+        )
+
+    payload = assert_ok(client.get("/factors?lifecycle=all"))
+    by_id = {item["id"]: item for item in payload["items"]}
+    factor = by_id[factor_id]
+
+    assert factor["name"] == "风险调整现金流回报 (精炼版)"
+    assert factor["op_status"]["completed"] == ["W", "N", "Z", "T"]
+    assert factor["op_status"]["missing"] == []
+    assert storage.fetch_one("SELECT name FROM factor_definitions WHERE id = ?", (factor_id,))["name"] == "风险调整现金流回报 (精炼版)"
 
 
 def test_factor_library_lifecycle_queries_accept_phase1_aliases(tmp_path):
@@ -1362,7 +1518,7 @@ def test_factor_library_projects_standard_factor_categories(tmp_path):
     assert by_id["s_inv_capex_ltm_raw"]["factor_family"] == "质量"
     assert by_id["s_liq_turnover_20d_rank"]["descriptor"]["category"] == "liq"
     assert by_id["s_liq_turnover_20d_rank"]["factor_family"] == "情绪"
-    assert by_id["s_alpha_ffblend_cur_rank"]["factor_family"] == "其他"
+    assert by_id["s_alpha_ffblend_resid_mkt_rank"]["factor_family"] == "其他"
 
 
 def test_factor_library_migrates_system_seed_expression_versions(tmp_path):
@@ -1370,13 +1526,13 @@ def test_factor_library_migrates_system_seed_expression_versions(tmp_path):
     assert_ok(client.get("/factors"))
     storage = client.app.state.service.storage
     legacy_expressions = {
-        "s_alpha_ffblend_cur_rank": "Rank(Return(Close, 252))",
+        "s_alpha_ffblend_resid_mkt_rank": "Rank(Return(Close, 252))",
         "s_beta_market_252d_raw": "Return(Close, 252)",
         "s_beta_resid_252d_z": "ZScore(Return(Close, 252))",
         "s_inv_assetgrowth_1y_rank": "Return(Close, 252)",
     }
     expected_expressions = {
-        "s_alpha_ffblend_cur_rank": "FFBlend(Momentum252, ValueEP, QualityROE, Size)",
+        "s_alpha_ffblend_resid_mkt_rank": "Rank(ZScore(Residual(Winsorize(FFBlend(Momentum252, ValueEP, QualityROE, Size), 3), s_beta_market_252d_raw)))",
         "s_beta_market_252d_raw": "BetaToMarket(Close, 252)",
         "s_beta_resid_252d_z": "ResidualVolatility(Close, 252)",
         "s_inv_assetgrowth_1y_rank": "SharesOutstandingGrowth(252) + CapexLTM / MarketCap",
@@ -1534,7 +1690,7 @@ def test_factor_library_projects_real_preview_metrics_for_new_factors(tmp_path):
             json={
                 "batch": True,
                 "factor_ids": [
-                    "s_alpha_ffblend_cur_rank",
+                    "s_alpha_ffblend_resid_mkt_rank",
                     "s_beta_market_252d_raw",
                     "s_beta_resid_252d_z",
                     "s_inv_assetgrowth_1y_rank",
@@ -1550,7 +1706,7 @@ def test_factor_library_projects_real_preview_metrics_for_new_factors(tmp_path):
         for factor_id in style_by_id
     }
     assert set(style_by_id) == {
-        "s_alpha_ffblend_cur_rank",
+        "s_alpha_ffblend_resid_mkt_rank",
         "s_beta_market_252d_raw",
         "s_beta_resid_252d_z",
         "s_inv_assetgrowth_1y_rank",
@@ -1564,7 +1720,7 @@ def test_factor_library_projects_real_preview_metrics_for_new_factors(tmp_path):
         assert by_id[factor_id]["strategy_creation_risk"]["blocked_count"] == 0
         assert by_id[factor_id]["blocker_reason_summary"]["status"] in {"warning", "clear"}
     assert len({round(value, 4) for value in style_rank_ics.values() if isinstance(value, float)}) >= 2
-    assert round(style_rank_ics["s_alpha_ffblend_cur_rank"], 4) != round(style_rank_ics["s_beta_market_252d_raw"], 4)
+    assert round(style_rank_ics["s_alpha_ffblend_resid_mkt_rank"], 4) != round(style_rank_ics["s_beta_market_252d_raw"], 4)
 
 
 def test_factor_library_hot_path_does_not_call_heavy_pit_overview(tmp_path):
@@ -1597,9 +1753,9 @@ def test_factor_detail_hot_path_does_not_call_heavy_pit_overview(tmp_path):
 
     service.get_pit_data_overview = fail_if_called
 
-    payload = assert_ok(client.get("/factors/s_alpha_ffblend_cur_rank"))
+    payload = assert_ok(client.get("/factors/s_alpha_ffblend_resid_mkt_rank"))
 
-    assert payload["id"] == "s_alpha_ffblend_cur_rank"
+    assert payload["id"] == "s_alpha_ffblend_resid_mkt_rank"
     assert payload["name"] == "Fama-French 风格合成 Alpha"
     assert payload["diagnostic_status"] in {"READY_TO_DIAGNOSE", "SANDBOX_READY", "COMPLETED"}
 
@@ -1945,7 +2101,8 @@ def test_factor_governance_optimizes_inverted_downside_factor_and_publishes_reve
     assert deprecate_action["offline_reason"] == "强制下线：3 期滑动均值连续 3 期 Q1 低于 Q5，因子封存复盘。"
     optimized = optimize_action["optimized_factor"]
     assert optimize_action["command"] == "PUBLISH_OPTIMIZED_FACTOR"
-    assert optimized["id"] == "m_vol_downsiderev_252d_rank"
+    assert optimized["id"] == "s_alpha_vol_downsiderev_std_rk"
+    assert optimized["publish_naming_rule"] == "factor_publish_naming_v3"
     assert optimized["name"] == "反向下行波动率代理（252日）"
     assert optimized["direction"] == "HIGH_IS_BETTER"
     assert optimized["grade"] in {"A", "B"}
@@ -1972,13 +2129,14 @@ def test_factor_governance_optimizes_inverted_downside_factor_and_publishes_reve
         )
     )
     assert executed["command"] == "PUBLISH_OPTIMIZED_FACTOR"
-    assert executed["created_factor_id"] == "m_vol_downsiderev_252d_rank"
-    created = assert_ok(client.get("/factors/m_vol_downsiderev_252d_rank"))
+    assert executed["created_factor_id"] == "s_alpha_vol_downsiderev_std_rk"
+    created = assert_ok(client.get("/factors/s_alpha_vol_downsiderev_std_rk"))
     assert created["name"] == "反向下行波动率代理（252日）"
     assert created["source"] == "MANUAL"
     assert created["lifecycle_status"] == "VERIFIED"
     assert created["direction"] == "HIGH_IS_BETTER"
     assert created["latest_diagnostic_summary"]["status"] == "COMPLETED"
+    assert created["latest_diagnostic_summary"]["publish_naming_rule"] == "factor_publish_naming_v3"
     assert created["latest_diagnostic_summary"]["data_lineage"]["kind"] == "GOVERNANCE_REVERSE_FACTOR_PREVIEW"
     assert created["blocker_reason_summary"]["status"] in {"clear", "warning"}
     assert not any(
@@ -2628,6 +2786,7 @@ def test_factor_governance_suggests_l3_sa_factor_strategy_until_used_online(tmp_
         """
         UPDATE factor_definitions
         SET name = '质量动量组合因子',
+            expression = 'ZScore(Residual(Winsorize(Rank(s_mom_12m1m_rank + s_val_ep_ltm_raw)), by=sector_beta))',
             source = 'AUTO_MINED',
             lifecycle_status = 'VERIFIED',
             diagnostic_status = 'COMPLETED'
@@ -2661,6 +2820,8 @@ def test_factor_governance_suggests_l3_sa_factor_strategy_until_used_online(tmp_
     assert action["target"]["route"] == "#/factor-models/new"
     assert action["target"]["query"] == {
         "source": "governance_queue",
+        "strategy_type": "COMPOSITE_FACTOR",
+        "factor_id": factor_id,
         "factorIds": factor_id,
         "weights": "100",
         "directions": "HIGH_IS_BETTER",
@@ -2944,6 +3105,69 @@ def test_factor_batch_preview_hot_cache_reuses_loaded_pit_frame(tmp_path, monkey
     assert second["items"] == first["items"]
 
 
+def test_factor_formal_diagnostics_hot_cache_still_writes_new_runs(tmp_path, monkeypatch):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    pit = assert_ok(client.get("/pit-data"))
+    factor_service = client.app.state.service._factor_research_service()
+    original_loader = factor_service._load_diagnostic_price_bars
+    original_observations = factor_service._diagnostic_observations
+    original_validator = factor_service._validate_diagnostic_snapshot_binding
+    load_calls = 0
+    observation_calls = 0
+    validation_calls = 0
+
+    def counted_loader(*args, **kwargs):
+        nonlocal load_calls
+        load_calls += 1
+        return original_loader(*args, **kwargs)
+
+    def counted_observations(*args, **kwargs):
+        nonlocal observation_calls
+        observation_calls += 1
+        return original_observations(*args, **kwargs)
+
+    def counted_validator(*args, **kwargs):
+        nonlocal validation_calls
+        validation_calls += 1
+        return original_validator(*args, **kwargs)
+
+    monkeypatch.setattr(factor_service, "_load_diagnostic_price_bars", counted_loader)
+    monkeypatch.setattr(factor_service, "_diagnostic_observations", counted_observations)
+    monkeypatch.setattr(factor_service, "_validate_diagnostic_snapshot_binding", counted_validator)
+    verified_window = pit["diagnostic_windows"]["verified"]
+    request_payload = {
+        "start_date": verified_window["start_date"],
+        "end_date": verified_window["end_date"],
+        "dataset_snapshot_id": pit["dataset_snapshot_id"],
+        "universe_snapshot_id": pit["universe_snapshot_id"],
+        "return_window_days": 21,
+        "group_count": 5,
+        "diagnostic_mode": "VERIFIED",
+    }
+
+    first = assert_ok(client.post("/factors/s_mom_12m1m_rank/diagnostics", json=request_payload))
+    second = assert_ok(client.post("/factors/s_mom_12m1m_rank/diagnostics", json=request_payload))
+
+    assert load_calls == 1
+    assert observation_calls == 1
+    assert validation_calls == 1
+    assert first["run_id"] != second["run_id"]
+    assert first["summary"]["status"] == "COMPLETED"
+    assert second["summary"]["status"] == "COMPLETED"
+    rows = client.app.state.service.storage.fetch_all(
+        "SELECT id, request_json FROM factor_diagnostic_runs WHERE id IN (?, ?) ORDER BY created_at",
+        (first["run_id"], second["run_id"]),
+    )
+    rows_by_id = {row["id"]: row for row in rows}
+    assert set(rows_by_id) == {first["run_id"], second["run_id"]}
+    for row in rows_by_id.values():
+        stored_request = json.loads(row["request_json"])
+        assert stored_request["diagnostic_mode"] == "VERIFIED"
+        assert stored_request["dataset_snapshot_id"] == pit["dataset_snapshot_id"]
+        assert stored_request["universe_snapshot_id"] == pit["universe_snapshot_id"]
+
+
 def test_factor_batch_preview_skips_governance_queue_build(tmp_path, monkeypatch):
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
@@ -3172,29 +3396,109 @@ def test_planned_manual_factor_description_repairs_prior_formula_fallback(tmp_pa
         )
     )
 
-    assert created["id"] == "m_alpha_overnight_21d_raw"
+    assert created["id"] == "s_f2_mom_ovn_mean_21d"
+    assert created["name"] == "21\u65e5\u9694\u591c\u52a8\u91cf\u5747\u503c"
+    assert created["descriptor"]["canonical_id"] == "s_f2_mom_ovn_mean_21d"
+    assert created["tier_level"] == "F2"
     assert created["description"] == expected_description
 
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             "UPDATE factor_definitions SET institutional_note = ? WHERE id = ?",
-            (stale_description, "m_alpha_overnight_21d_raw"),
+            (stale_description, "s_f2_mom_ovn_mean_21d"),
         )
 
     client.app.state.service._factor_research_service().ensure_default_factors()
     repaired = assert_ok(client.get("/factors/m_alpha_overnight_21d_raw"))
 
+    assert repaired["id"] == "s_f2_mom_ovn_mean_21d"
+    assert repaired["tier_level"] == "F2"
     assert repaired["description"] == expected_description
     assert repaired["institutional_note"] == expected_description
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT institutional_note FROM factor_definitions WHERE id = ?",
-            ("m_alpha_overnight_21d_raw",),
+            ("s_f2_mom_ovn_mean_21d",),
         ).fetchone()
 
     assert row is not None
     assert row["institutional_note"] == expected_description
+
+
+def test_overnight_mean_legacy_alpha_factor_is_canonical_f2(tmp_path):
+    client, db_path = create_test_client(tmp_path)
+    stale_description = (
+        "逻辑：开盘/收盘跳空因子根据公式 Mean(Open / Close(t-1),21) 构造可回放截面信号。"
+        "作用：用于因子库诊断、排序和模型候选评估。"
+    )
+    now = "2026-05-19T09:30:00Z"
+    with client.app.state.service.storage.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO factor_definitions (
+                id, name, market, universe, source, lifecycle_status, diagnostic_status,
+                direction, frequency, expression, tags_json, data_requirements_json,
+                institutional_note, created_by, created_at, updated_at
+            )
+            VALUES (?, ?, 'US', 'SP500', 'MANUAL', 'DRAFT', 'READY_TO_DIAGNOSE',
+                'HIGH_IS_BETTER', 'DAILY', ?, ?, ?, ?, 'researcher', ?, ?)
+            """,
+            (
+                "m_alpha_overnight_21d_raw",
+                "Overnight Alpha",
+                "Mean(Open / Close(t-1),21)",
+                dumps(["manual", "factor_zoo"]),
+                dumps(["adj_close", "open", "price_history"]),
+                stale_description,
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO factor_versions (id, factor_id, version, expression, status, metadata_json, created_at)
+            VALUES (?, ?, 1, ?, 'ACTIVE', ?, ?)
+            """,
+            (
+                "m_alpha_overnight_21d_raw-v1",
+                "m_alpha_overnight_21d_raw",
+                "Mean(Open / Close(t-1),21)",
+                dumps({"descriptor": manual_descriptor(category="alpha", metric="overnight", window="21d", operator="raw")}),
+                now,
+            ),
+        )
+
+    payload = assert_ok(client.get("/factors?lifecycle=all"))
+    by_id = {item["id"]: item for item in payload["items"]}
+
+    assert "m_alpha_overnight_21d_raw" not in by_id
+    factor = by_id["s_f2_mom_ovn_mean_21d"]
+    assert factor["name"] == "21日隔夜动量均值"
+    assert factor["expression"] == "Mean(Open / Close(t-1),21)"
+    assert factor["descriptor"]["canonical_id"] == "s_f2_mom_ovn_mean_21d"
+    assert factor["descriptor"]["category"] == "mom"
+    assert factor["descriptor"]["metric"] == "ovn_mean"
+    assert factor["tier_level"] == "F2"
+    assert factor["tier_projection"]["key"] == "F2"
+
+    legacy_detail = assert_ok(client.get("/factors/m_alpha_overnight_21d_raw"))
+    assert legacy_detail["id"] == "s_f2_mom_ovn_mean_21d"
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        old_row = conn.execute(
+            "SELECT id FROM factor_definitions WHERE id = ?",
+            ("m_alpha_overnight_21d_raw",),
+        ).fetchone()
+        new_row = conn.execute(
+            "SELECT id, source FROM factor_definitions WHERE id = ?",
+            ("s_f2_mom_ovn_mean_21d",),
+        ).fetchone()
+
+    assert old_row is None
+    assert new_row is not None
+    assert new_row["source"] == "SYSTEM_SEED"
 
 
 def test_planned_manual_factor_zoo_formulas_create_with_descriptions_and_diagnose(tmp_path):
@@ -3267,7 +3571,7 @@ def test_planned_manual_factor_zoo_formulas_create_with_descriptions_and_diagnos
             "逻辑：衡量过去一年收益率分布偏度。作用：过滤高偏度、博彩型、暴涨暴跌标的。",
         ),
         (
-            "m_alpha_overnight_21d_raw",
+            "s_f2_mom_ovn_mean_21d",
             "Overnight Alpha",
             "Mean(Open / Close(t-1),21)",
             "HIGH_IS_BETTER",
@@ -3973,7 +4277,7 @@ def test_factor_preview_accepts_planned_composition_recipes(tmp_path):
     expressions = [
         "s_mom_6m_rank * s_qlty_roe_ltm_raw",
         "s_mom_6m_rank / s_vol_252d_rank",
-        'ZScore(Residual(s_val_cfp_ltm_raw, by="s_size_cur_log"))',
+        VALUE_VOL_WNZT_F3_EXPRESSION,
         "s_mom_6m_rank - s_vol_downside_252d_rank",
         'ZScore(Residual(s_liq_amihud_20d_rank, by="s_size_cur_log"))',
         "TsRank(Return(Close, 5), 252)",

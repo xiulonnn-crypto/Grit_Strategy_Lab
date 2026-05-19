@@ -860,6 +860,88 @@ def test_fundamental_snapshot_progress_backfill_uses_fundamental_coverage_rows(t
     assert metadata["missing_symbols"] == ["NVDA"]
 
 
+def test_fundamental_gap_policy_downgrades_non_raw_f2_symbols(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    fields = [
+        "ltm_earnings",
+        "revenue",
+        "gross_profit",
+        "net_income",
+        "market_cap",
+        "book_value_equity",
+        "operating_cash_flow",
+        "capex",
+        "enterprise_value",
+        "total_shares",
+        "shares_outstanding",
+        "total_assets",
+        "current_assets",
+        "current_liabilities",
+        "long_term_debt",
+        "total_debt",
+        "cash_and_equivalents",
+    ]
+    service.market_data_repository.upsert_symbol_identity(
+        {"symbol": "SPY", "company_name": "SPDR S&P 500 ETF Trust", "source": "unit_test"}
+    )
+    service.market_data_repository.upsert_symbol_identity(
+        {"symbol": "OLDX", "company_name": "Old Delisted Industrial Corp", "source": "unit_test"}
+    )
+    service.market_data_repository.replace_fundamental_snapshot(
+        {
+            "id": "ds-fundamentals",
+            "name": "Fundamental PIT data",
+            "status": "READY",
+            "as_of": "2026-05-15",
+            "freshness_label": "unit-test policy",
+            "start_date": "2025-12-31",
+            "end_date": "2025-12-31",
+            "row_count": 1,
+            "source": "sec_edgar",
+            "metadata": {
+                "covered_symbol_count": 1,
+                "total_symbol_count": 3,
+                "missing_symbols": ["SPY", "OLDX"],
+                "available_fields": fields,
+                "time_contract": "publish_date_and_available_at_required",
+            },
+        },
+        fundamental_points=[
+            {
+                "symbol": "AAPL",
+                "date": "2025-12-31",
+                "period_end_date": "2025-12-31",
+                "publish_date": "2026-02-15",
+                "available_at": "2026-02-15",
+                **{field: 1.0 for field in fields},
+            }
+        ],
+        fundamental_coverage=[
+            {
+                "symbol": "AAPL",
+                "start_date": "2025-12-31",
+                "end_date": "2025-12-31",
+                "observation_count": 1,
+                "fields": fields,
+                "source": "sec_edgar",
+            }
+        ],
+    )
+
+    overview = assert_ok(client.get("/data-snapshots/overview"))
+    fundamental_snapshot = next(item for item in overview["dataset_snapshots"] if item["id"] == "ds-fundamentals")
+    policy = fundamental_snapshot["metadata"]["fundamental_gap_policy"]
+    layers = {item["layer_id"]: item for item in overview["data_layer_readiness"]}
+
+    assert policy["financial_logic_na_symbols"] == ["SPY"]
+    assert policy["thin_data_stock_symbols"] == ["OLDX"]
+    assert policy["unclassified_missing_symbol_count"] == 0
+    assert policy["logical_coverage_pct"] == 100.0
+    assert fundamental_snapshot["metadata"]["effective_covered_symbol_count"] == 3
+    assert layers["l2_fundamental_data"]["status"] == "READY"
+
+
 def test_phase2_fundamental_batches_merge_without_replacing_prior_symbols(tmp_path, monkeypatch):
     client, _ = create_test_client(tmp_path)
     service = client.app.state.service
@@ -2314,6 +2396,52 @@ def test_scoped_market_data_provider_keeps_polygon_available_for_targeted_price_
         {"excluded": set(), "allow_targeted_price_repair": True}
     ]
     assert [provider.provider_name for provider in scoped.providers] == ["yfinance", "polygon"]
+
+
+def test_scoped_market_data_provider_keeps_eodhd_available_for_targeted_price_repair(tmp_path, monkeypatch):
+    monkeypatch.delenv("GRIT_ENABLE_PAID_OPTIONAL_PROVIDERS", raising=False)
+
+    class _NamedProvider:
+        def __init__(self, provider_name: str) -> None:
+            self.provider_name = provider_name
+
+    class _FakeRuntimeProvider:
+        provider_name = "runtime"
+
+        def __init__(self, providers: list[_NamedProvider], captured: list[dict[str, object]] | None = None) -> None:
+            self.providers = list(providers)
+            self.missing_providers: list[str] = []
+            self.universe_history_providers: list[object] = []
+            self.captured = captured if captured is not None else []
+
+        def scoped_copy(self, *, exclude_provider_names=None, allow_targeted_price_repair=None):
+            excluded = {str(item) for item in (exclude_provider_names or [])}
+            self.captured.append(
+                {
+                    "excluded": excluded,
+                    "allow_targeted_price_repair": bool(allow_targeted_price_repair),
+                }
+            )
+            return _FakeRuntimeProvider(
+                [provider for provider in self.providers if provider.provider_name not in excluded],
+                captured=self.captured,
+            )
+
+    runtime_provider = _FakeRuntimeProvider(
+        [_NamedProvider("yfinance"), _NamedProvider("eodhd")]
+    )
+    service = RealBacktestPlatformService(tmp_path / "scoped-targeted-repair-eodhd.db", market_data_provider=runtime_provider)
+
+    scoped = service._scoped_market_data_provider(
+        mode="repair",
+        window_start=date(2026, 4, 1),
+        allow_targeted_price_repair=True,
+    )
+
+    assert runtime_provider.captured == [
+        {"excluded": set(), "allow_targeted_price_repair": True}
+    ]
+    assert [provider.provider_name for provider in scoped.providers] == ["yfinance", "eodhd"]
 
 
 def test_start_snapshot_refresh_subprocess_preserves_repair_symbol_limit(tmp_path, monkeypatch):

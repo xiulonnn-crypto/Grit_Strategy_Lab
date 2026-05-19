@@ -1141,7 +1141,7 @@ export function StrategyDetailPage({ strategyId }: { strategyId: string }): JSX.
     try {
       setOpeningRevision(true);
       setActionError(null);
-      if (strategy.strategy_type === 'MULTI_FACTOR') {
+      if (strategy.strategy_type === 'MULTI_FACTOR' || strategy.strategy_type === 'COMPOSITE_FACTOR') {
         navigateTo('/factor-models/new');
         return;
       }

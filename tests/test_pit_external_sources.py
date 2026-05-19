@@ -7,6 +7,8 @@ import pytest
 
 from grit_backtest_platform.pit_external_sources import (
     build_external_source_readiness,
+    eodhd_credential_status,
+    free_repair_route_status,
     kaggle_credential_status,
     matrix_manifest_from_events,
     parse_sp500_matrix_csv,
@@ -84,6 +86,41 @@ def test_polygon_credential_status_accepts_massive_or_legacy_env(monkeypatch):
     assert status["configured"] is True
     assert status["configured_env_vars"] == ["MASSIVE_API_KEY"]
     assert status["missing_env_vars"] == []
+
+
+def test_eodhd_credential_status_accepts_token_alias(monkeypatch):
+    monkeypatch.delenv("EODHD_API_TOKEN", raising=False)
+    monkeypatch.setenv("EODHD_API_KEY", "eodhd-unit-key")
+
+    status = eodhd_credential_status()
+
+    assert status["configured"] is True
+    assert status["configured_env_vars"] == ["EODHD_API_KEY"]
+    assert status["delisted_symbol_pattern"] == "{symbol}_old.US"
+
+
+def test_free_repair_route_status_tracks_edgartools_openbb_and_iex(monkeypatch, tmp_path):
+    monkeypatch.setenv("SEC_USER_AGENT", "Codex Test test@example.com")
+    monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "alpha-unit-key")
+    monkeypatch.setenv("GRIT_ENABLE_STOOQ_ONLINE", "1")
+    monkeypatch.setenv("GRIT_ENABLE_OPENBB_PROVIDER", "1")
+    monkeypatch.setenv("IEX_CLOUD_TOKEN", "iex-unit-token")
+    monkeypatch.setenv("EDGAR_LOCAL_DATA_DIR", str(tmp_path / "edgar-cache"))
+
+    status = free_repair_route_status()
+    readiness = build_external_source_readiness(cache_dir=tmp_path / "pit-bulk-cache")
+
+    assert status["sec_user_agent"] == "present"
+    assert status["alpha_vantage"] == "present"
+    assert status["stooq_online_enabled"] is True
+    assert status["yahoo_history_html_enabled"] is False
+    assert status["openbb_enabled"] is True
+    assert status["iex_legacy_token_configured"] is True
+    assert "sec_companyfacts_edgartools" in {
+        item["provider_id"] for item in status["recommendations"]
+    }
+    assert readiness["free_repair_routes"]["edgar_local_data_dir_configured"] is True
+    assert "free_l1_l2_repair_routes" in readiness["source_recommendations"]
 
 
 def test_external_readiness_does_not_mark_empty_catalog_ready(tmp_path, monkeypatch):

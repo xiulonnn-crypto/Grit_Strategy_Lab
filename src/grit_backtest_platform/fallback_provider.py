@@ -47,6 +47,7 @@ FREE_ACCOUNT_PROVIDER_NAMES = {
 }
 
 PAID_OPTIONAL_PROVIDER_NAMES = {
+    "eodhd",
     "longbridge",
     "longbridge_static_info",
     "futu",

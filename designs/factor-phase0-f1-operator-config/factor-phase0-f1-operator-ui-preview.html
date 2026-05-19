@@ -1,0 +1,778 @@
+<!doctype html>
+<html lang="zh-CN" data-screen="board">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Grit Strategy Lab 因子 Phase 0 UI 稿</title>
+  <script>
+    document.documentElement.dataset.screen = new URLSearchParams(location.search).get("screen") || "board";
+  </script>
+  <style>
+    :root {
+      --bg-main: #f0f2f5;
+      --bg-surface: #ffffff;
+      --bg-soft: #fbfcfd;
+      --bg-subtle: #f7f9fb;
+      --primary: #1f877b;
+      --primary-strong: #176b61;
+      --primary-soft: #e6f4f1;
+      --blue: #4c78c7;
+      --blue-soft: #eef4ff;
+      --indigo: #5065b1;
+      --indigo-soft: #f0f2ff;
+      --success: #2b8a3e;
+      --success-soft: #ecfdf3;
+      --warning: #b86813;
+      --warning-soft: #fff7e8;
+      --danger: #c45c4f;
+      --danger-soft: #fff8f7;
+      --border: #e5e7eb;
+      --border-soft: #eef2f4;
+      --border-strong: #d7e1e5;
+      --text-title: #111827;
+      --text-main: #1f2937;
+      --text-sub: #64748b;
+      --text-muted: #94a3b8;
+      --shadow-card: 0 1px 3px rgba(15, 23, 42, 0.06);
+      --shadow-float: 0 18px 40px rgba(17, 24, 39, 0.14);
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      background: var(--bg-main);
+      color: var(--text-main);
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+    button, input, select { font: inherit; }
+
+    html[data-screen="f1"] .screen:not(#factor-library-f1),
+    html[data-screen="factory"] .screen:not(#factor-factory-config) { display: none; }
+    html[data-screen="board"] .screen { margin-bottom: 32px; }
+
+    .screen { min-height: 100vh; background: var(--bg-main); }
+    .app-shell {
+      display: grid;
+      grid-template-columns: 236px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+    .sidebar {
+      background: #ffffff;
+      border-right: 1px solid var(--border);
+      padding: 22px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+    .brand { display: grid; gap: 4px; padding: 0 8px; }
+    .brand strong { color: var(--text-title); font-size: 17px; letter-spacing: 0; }
+    .brand span { color: var(--text-sub); font-size: 12px; font-weight: 700; }
+    .nav-group { display: grid; gap: 8px; }
+    .nav-heading { padding: 0 10px; color: var(--text-muted); font-size: 11px; font-weight: 800; }
+    .nav-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 38px;
+      padding: 0 10px;
+      border-radius: 8px;
+      color: var(--text-sub);
+      font-weight: 700;
+    }
+    .nav-item.is-active {
+      background: var(--primary-soft);
+      color: var(--primary-strong);
+      box-shadow: inset 3px 0 0 var(--primary);
+    }
+
+    .main {
+      min-width: 0;
+      padding: 26px 30px 36px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .hero {
+      min-height: 124px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
+      box-shadow: var(--shadow-card);
+      padding: 18px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+    }
+    .eyebrow { margin: 0 0 4px; color: var(--primary); font-size: 12px; font-weight: 800; }
+    .hero h1 { margin: 0; color: var(--text-title); font-size: 26px; line-height: 30px; letter-spacing: 0; }
+    .hero p { max-width: 820px; margin: 6px 0 0; color: var(--text-sub); line-height: 20px; }
+    .hero-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+
+    .btn {
+      min-height: 38px;
+      border-radius: 8px;
+      border: 1px solid var(--border-strong);
+      background: #ffffff;
+      color: var(--text-main);
+      font-weight: 800;
+      padding: 0 14px;
+      cursor: default;
+      white-space: nowrap;
+    }
+    .btn.primary { border-color: var(--primary); background: var(--primary); color: #ffffff; }
+    .btn.danger { border-color: rgba(196, 92, 79, 0.34); background: var(--danger-soft); color: var(--danger); }
+    .btn.small { min-height: 30px; padding: 0 9px; font-size: 12px; }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 26px;
+      border-radius: 999px;
+      padding: 0 10px;
+      color: var(--primary-strong);
+      background: var(--primary-soft);
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .pill::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: currentColor;
+      flex: 0 0 auto;
+    }
+    .pill.blue { color: #325aa8; background: var(--blue-soft); }
+    .pill.indigo { color: var(--indigo); background: var(--indigo-soft); }
+    .pill.warn { color: var(--warning); background: var(--warning-soft); }
+    .pill.danger { color: var(--danger); background: var(--danger-soft); }
+    .pill.success { color: var(--success); background: var(--success-soft); }
+    .pill.gray { color: var(--text-sub); background: #f3f4f6; }
+
+    .metric-grid, .layer-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+    .layer-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .metric-card, .panel, .audit-card, .factory-card {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: var(--bg-surface);
+      box-shadow: var(--shadow-card);
+    }
+    .metric-card {
+      min-height: 118px;
+      padding: 18px;
+      display: grid;
+      gap: 8px;
+    }
+    .metric-card span { color: var(--text-sub); font-size: 12px; font-weight: 800; }
+    .metric-card strong { color: var(--text-title); font-size: 26px; line-height: 30px; }
+    .metric-card p { margin: 0; color: var(--text-sub); font-size: 13px; line-height: 19px; }
+
+    .layer-tab {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: #ffffff;
+      min-height: 94px;
+      padding: 15px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      box-shadow: var(--shadow-card);
+    }
+    .layer-tab.is-active {
+      border-color: rgba(31, 135, 123, 0.42);
+      background: linear-gradient(180deg, #ffffff 0%, #f5fbf8 100%);
+    }
+    .layer-tab strong { color: var(--text-title); font-size: 15px; }
+    .layer-tab span { display: block; margin-top: 4px; color: var(--text-sub); font-size: 12px; line-height: 18px; }
+    .layer-tab em { color: var(--text-title); font-style: normal; font-size: 24px; font-weight: 800; }
+
+    .panel { padding: 18px; display: grid; gap: 14px; }
+    .panel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+    .panel-title { display: grid; gap: 3px; }
+    .panel-title strong { color: var(--text-title); font-size: 17px; }
+    .muted { color: var(--text-sub); font-size: 12px; }
+    .mono { font-family: var(--mono); }
+
+    .run-strip {
+      display: grid;
+      grid-template-columns: 1.08fr 0.9fr 0.9fr auto;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      border: 1px solid var(--border-soft);
+      border-radius: 12px;
+      background: var(--bg-subtle);
+    }
+    .run-cell { display: grid; gap: 3px; min-width: 0; }
+    .run-cell span { color: var(--text-sub); font-size: 11px; font-weight: 800; }
+    .run-cell strong { color: var(--text-title); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .filter-row { display: flex; gap: 9px; flex-wrap: wrap; }
+    .field {
+      min-height: 34px;
+      min-width: 142px;
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      background: #ffffff;
+      color: var(--text-main);
+      padding: 0 10px;
+      display: flex;
+      align-items: center;
+      font-weight: 700;
+    }
+    .search-field { min-width: 254px; color: var(--text-sub); }
+    .lifecycle-tabs {
+      display: inline-flex;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #ffffff;
+    }
+    .lifecycle-tabs button {
+      border: 0;
+      border-right: 1px solid var(--border);
+      background: #ffffff;
+      min-height: 32px;
+      padding: 0 12px;
+      color: var(--text-sub);
+      font-weight: 800;
+    }
+    .lifecycle-tabs button:last-child { border-right: 0; }
+    .lifecycle-tabs .is-active { color: var(--primary-strong); background: var(--primary-soft); }
+
+    .table-wrap { overflow-x: auto; border: 1px solid var(--border-soft); border-radius: 12px; background: #ffffff; }
+    table { width: max-content; min-width: 100%; table-layout: auto; border-collapse: collapse; background: #ffffff; }
+    th, td { padding: 12px 14px; border-bottom: 1px solid var(--border-soft); text-align: left; vertical-align: top; }
+    th { background: #f9fafb; color: var(--text-sub); font-size: 11px; font-weight: 800; white-space: nowrap; }
+    th code { display: block; margin-top: 2px; color: var(--text-muted); font-family: var(--mono); font-size: 10px; font-weight: 600; }
+    td { color: var(--text-main); font-size: 13px; }
+    tr:last-child td { border-bottom: 0; }
+    .factor-cell { min-width: 250px; display: grid; gap: 4px; }
+    .factor-cell strong { color: var(--text-title); font-size: 14px; }
+    .factor-cell code { color: var(--text-muted); font-family: var(--mono); font-size: 11px; }
+    .coverage { min-width: 138px; display: grid; gap: 6px; }
+    .bar { height: 8px; border-radius: 999px; background: #eef2f4; overflow: hidden; }
+    .bar span { display: block; height: 100%; border-radius: inherit; background: var(--primary); }
+    .bar.warn span { background: var(--warning); }
+    .bar.danger span { background: var(--danger); }
+    .stack { display: grid; gap: 5px; min-width: 132px; }
+    .stack strong { color: var(--text-title); font-size: 12px; }
+    .stack span, .stack code { color: var(--text-sub); font-size: 11px; }
+    .stack code { font-family: var(--mono); }
+    .source-list { display: flex; gap: 6px; flex-wrap: wrap; min-width: 180px; }
+
+    .bottom-grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 14px; }
+    .audit-card { padding: 16px; display: grid; gap: 12px; }
+    .audit-card h3 { margin: 0; color: var(--text-title); font-size: 16px; line-height: 22px; }
+    .audit-list { display: grid; gap: 10px; }
+    .audit-item {
+      display: grid;
+      grid-template-columns: 118px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px;
+      border: 1px solid var(--border-soft);
+      border-radius: 10px;
+      background: #ffffff;
+    }
+    .audit-item strong { color: var(--text-title); font-size: 13px; }
+    .audit-item span { color: var(--text-sub); font-size: 12px; }
+
+    .factory-bg { position: relative; min-height: 100vh; overflow: hidden; }
+    .factory-bg .main { filter: saturate(0.86); }
+    .factory-grid { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 14px; }
+    .factory-card { padding: 18px; min-height: 180px; }
+    .factory-card h3 { margin: 0 0 10px; color: var(--text-title); font-size: 16px; }
+    .mini-steps { display: grid; gap: 9px; }
+    .mini-step {
+      display: grid;
+      grid-template-columns: 28px 1fr auto;
+      align-items: center;
+      gap: 10px;
+      padding: 9px;
+      border: 1px solid var(--border-soft);
+      border-radius: 10px;
+      background: #ffffff;
+    }
+    .mini-step b {
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      color: var(--primary-strong);
+      background: var(--primary-soft);
+    }
+    .mini-step strong { color: var(--text-title); font-size: 13px; }
+    .mini-step span { color: var(--text-sub); font-size: 12px; }
+
+    .modal-backdrop {
+      position: absolute;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.34);
+      display: grid;
+      place-items: center;
+      padding: 40px;
+    }
+    .config-modal {
+      width: min(1500px, calc(100vw - 96px));
+      max-height: calc(100vh - 86px);
+      border-radius: 18px;
+      background: #ffffff;
+      box-shadow: var(--shadow-float);
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      overflow: hidden;
+    }
+    .modal-head {
+      padding: 18px 22px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+    }
+    .modal-head h2 { margin: 0; color: var(--text-title); font-size: 22px; line-height: 28px; }
+    .modal-head p { margin: 5px 0 0; color: var(--text-sub); line-height: 20px; }
+    .modal-body { min-height: 0; display: grid; grid-template-columns: 196px minmax(0, 1fr) 330px; }
+    .config-rail { border-right: 1px solid var(--border); background: #fbfcfd; padding: 16px 12px; display: grid; align-content: start; gap: 8px; }
+    .config-rail button {
+      min-height: 38px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--text-sub);
+      text-align: left;
+      padding: 0 10px;
+      font-weight: 800;
+    }
+    .config-rail button.is-active {
+      background: var(--primary-soft);
+      color: var(--primary-strong);
+      box-shadow: inset 3px 0 0 var(--primary);
+    }
+    .config-content { min-width: 0; padding: 16px; background: #ffffff; overflow: auto; display: grid; gap: 14px; align-content: start; }
+    .config-side { border-left: 1px solid var(--border); background: #fbfcfd; padding: 16px; overflow: auto; display: grid; gap: 14px; align-content: start; }
+    .config-kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .config-kpi { border: 1px solid var(--border-soft); border-radius: 12px; padding: 12px; background: #ffffff; display: grid; gap: 5px; }
+    .config-kpi span { color: var(--text-sub); font-size: 11px; font-weight: 800; }
+    .config-kpi strong { color: var(--text-title); font-size: 22px; line-height: 26px; }
+    .operator-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+    .operator-section { border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: #ffffff; }
+    .operator-section header {
+      min-height: 42px;
+      padding: 0 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #f9fafb;
+      border-bottom: 1px solid var(--border-soft);
+    }
+    .operator-section header strong { color: var(--text-title); }
+    .operator-row {
+      display: grid;
+      grid-template-columns: 46px 1.1fr 1fr 0.9fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border-soft);
+    }
+    .operator-row:last-child { border-bottom: 0; }
+    .toggle { width: 38px; height: 22px; border-radius: 999px; border: 1px solid var(--border-strong); background: #e5e7eb; position: relative; }
+    .toggle::after {
+      content: "";
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      top: 2px;
+      left: 3px;
+      border-radius: 999px;
+      background: #ffffff;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.18);
+    }
+    .toggle.on { background: var(--primary); border-color: var(--primary); }
+    .toggle.on::after { left: 17px; }
+    .op-name { display: grid; gap: 2px; }
+    .op-name strong { color: var(--text-title); font-size: 13px; }
+    .op-name code { color: var(--text-muted); font-family: var(--mono); font-size: 11px; }
+    .op-desc { color: var(--text-sub); font-size: 12px; line-height: 18px; }
+    .window-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .window-chip { min-height: 24px; border-radius: 999px; padding: 2px 8px; background: #f3f4f6; color: var(--text-sub); font-size: 11px; font-weight: 800; }
+    .side-card { border: 1px solid var(--border-soft); border-radius: 12px; padding: 12px; background: #ffffff; display: grid; gap: 9px; }
+    .side-card h3 { margin: 0; color: var(--text-title); font-size: 14px; }
+    .side-card dl { margin: 0; display: grid; gap: 7px; }
+    .side-card dl > div { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; color: var(--text-sub); font-size: 12px; }
+    .side-card dt { font-weight: 800; }
+    .side-card dd { margin: 0; color: var(--text-title); text-align: right; font-family: var(--mono); overflow-wrap: anywhere; }
+    .rule-list { display: grid; gap: 7px; }
+    .rule-list span { padding: 8px; border-radius: 8px; background: #f7f9fb; color: var(--text-main); font-size: 12px; }
+    .modal-foot {
+      padding: 14px 22px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: #ffffff;
+    }
+    .modal-foot .left { color: var(--text-sub); font-size: 12px; }
+
+    @media (max-width: 1180px) {
+      .app-shell { grid-template-columns: 92px minmax(0, 1fr); }
+      .brand span, .nav-heading, .nav-item small { display: none; }
+      .metric-grid, .bottom-grid, .factory-grid { grid-template-columns: 1fr; }
+      .modal-body { grid-template-columns: 168px minmax(0, 1fr); }
+      .config-side { display: none; }
+    }
+    @media (max-width: 760px) {
+      .app-shell { grid-template-columns: 1fr; }
+      .sidebar { display: none; }
+      .main { padding: 20px; }
+      .hero, .panel-header, .run-strip { display: grid; grid-template-columns: 1fr; }
+      .layer-tabs, .metric-grid, .config-kpis { grid-template-columns: 1fr; }
+      .modal-backdrop { padding: 12px; }
+      .config-modal { width: calc(100vw - 24px); max-height: calc(100vh - 24px); }
+      .modal-body { grid-template-columns: 1fr; }
+      .config-rail { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <section class="screen" id="factor-library-f1">
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand"><strong>Grit Strategy Lab</strong><span>投研、回测、组合治理</span></div>
+        <div class="nav-group">
+          <div class="nav-heading">组合</div>
+          <div class="nav-item">工作台 <small>12</small></div>
+          <div class="nav-item">组合中心 <small>8</small></div>
+          <div class="nav-item">资产腿库 <small>31</small></div>
+        </div>
+        <div class="nav-group">
+          <div class="nav-heading">策略</div>
+          <div class="nav-item">策略库 <small>18</small></div>
+          <div class="nav-item">运行记录 <small>46</small></div>
+          <div class="nav-item">优化实验 <small>7</small></div>
+        </div>
+        <div class="nav-group">
+          <div class="nav-heading">因子</div>
+          <div class="nav-item is-active">因子库 <small>F1</small></div>
+          <div class="nav-item">因子工厂 <small>3</small></div>
+          <div class="nav-item">隔离队列 <small>9</small></div>
+        </div>
+        <div class="nav-group">
+          <div class="nav-heading">数据</div>
+          <div class="nav-item">PIT 数据 <small>L1-L4</small></div>
+          <div class="nav-item">快照中心 <small>权益</small></div>
+        </div>
+      </aside>
+      <main class="main">
+        <section class="hero">
+          <div>
+            <p class="eyebrow">Alpha 因子治理</p>
+            <h1>因子库</h1>
+            <p>按 F1/F2/F3 管理因子资产。F1 只校验 PIT、覆盖率、可得时点与数据阻塞。</p>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">
+              <span class="pill warn">PIT：部分通过</span>
+              <span class="pill blue">10年样本已闭合</span>
+              <span class="pill danger">3 类源阻塞</span>
+            </div>
+          </div>
+          <div class="hero-actions">
+            <button class="btn">待治理 <span>4</span></button>
+            <button class="btn primary">新建因子</button>
+          </div>
+        </section>
+
+        <section class="layer-tabs" aria-label="因子分层">
+          <article class="layer-tab is-active">
+            <div><strong>F1 原始库</strong><span>PIT 原始字段，按时点与覆盖准入</span></div>
+            <em>42</em>
+          </article>
+          <article class="layer-tab">
+            <div><strong>F2 改造库</strong><span>标准处理后的研究字段</span></div>
+            <em>24</em>
+          </article>
+          <article class="layer-tab">
+            <div><strong>F3 组合库</strong><span>组合层 Alpha 与审计资产</span></div>
+            <em>5</em>
+          </article>
+        </section>
+
+        <section class="metric-grid" aria-label="F1 原始库摘要">
+          <article class="metric-card"><span>F1 原始字段</span><strong>42</strong><p>量价、收益、财务、宏观与衍生品原始项。</p></article>
+          <article class="metric-card"><span>可调用字段</span><strong>28</strong><p>PIT、coverage 与缺失规则已通过。</p></article>
+          <article class="metric-card"><span>源阻塞字段</span><strong>9</strong><p>缺失输出 NaN，保留 DATA_SOURCE_BLOCKED 证据。</p></article>
+          <article class="metric-card"><span>时点缺口</span><strong>5</strong><p>缺 publish_date 或 available_at，暂不进算子池。</p></article>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div class="panel-title">
+              <strong>F1 原始字段目录</strong>
+              <div class="muted">按 PIT 时点、覆盖率与源阻塞排序</div>
+            </div>
+            <div class="lifecycle-tabs" role="tablist" aria-label="F1 状态">
+              <button class="is-active">全部字段</button>
+              <button>可调用</button>
+              <button>阻塞</button>
+              <button>待诊断</button>
+            </div>
+          </div>
+
+          <div class="run-strip" aria-label="最近 PIT 预处理批次">
+            <div class="run-cell"><span>最近批次</span><strong class="mono">pit_f1_20260519_1400</strong></div>
+            <div class="run-cell"><span>source_signature</span><strong class="mono">l1:9f21 · l2:31ab · l3:74cf</strong></div>
+            <div class="run-cell"><span>更新时间</span><strong>2026-05-19 14:06 HKT</strong></div>
+            <button class="btn small">查看预处理记录</button>
+          </div>
+
+          <div class="toolbar">
+            <div class="filter-row">
+              <div class="field search-field">搜索字段、来源、阻塞</div>
+              <div class="field">层级：全部</div>
+              <div class="field">覆盖率：≥ 90%</div>
+              <div class="field">未来函数：全部</div>
+            </div>
+            <button class="btn small">导出目录</button>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th><span>字段</span><code>factor_info</code></th>
+                  <th><span>层级</span><code>pit_layer</code></th>
+                  <th><span>覆盖率</span><code>available_symbols</code></th>
+                  <th><span>可得时点</span><code>publish_date / available_at</code></th>
+                  <th><span>缺失/阻塞</span><code>missing / blocker</code></th>
+                  <th><span>来源</span><code>source_refs</code></th>
+                  <th><span>准入</span><code>admission</code></th>
+                  <th><span>更新</span><code>last_updated</code></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><div class="factor-cell"><strong>复权收盘价</strong><code>f1_px_adjusted_close</code><span class="muted">价格 · L1</span></div></td>
+                  <td><span class="pill blue">L1 量价</span></td>
+                  <td><div class="coverage"><strong>99.4%</strong><div class="bar"><span style="width:99.4%"></span></div><span class="muted">缺 14 / 2,361</span></div></td>
+                  <td><div class="stack"><strong>T+0 16:20</strong><span>同日发布</span><code>available_at=16:32</code></div></td>
+                  <td><span class="pill success">无阻塞</span></td>
+                  <td><div class="source-list"><span class="pill gray">vendor_price_daily</span><span class="pill gray">corporate_action</span></div></td>
+                  <td><span class="pill success">可调用</span></td>
+                  <td><div class="stack"><strong>14:06</strong><span>run pit_f1_20260519_1400</span></div></td>
+                </tr>
+                <tr>
+                  <td><div class="factor-cell"><strong>5日收益率</strong><code>f1_return_5d_raw</code><span class="muted">收益 · L1 衍生</span></div></td>
+                  <td><span class="pill blue">L1 量价</span></td>
+                  <td><div class="coverage"><strong>98.1%</strong><div class="bar"><span style="width:98.1%"></span></div><span class="muted">停牌为 NaN</span></div></td>
+                  <td><div class="stack"><strong>T+0 16:25</strong><span>随价格可得</span><code>min_periods=5</code></div></td>
+                  <td><span class="pill success">NaN 标记</span></td>
+                  <td><div class="source-list"><span class="pill gray">f1_px_adjusted_close</span></div></td>
+                  <td><span class="pill success">可调用</span></td>
+                  <td><div class="stack"><strong>14:06</strong><span>L1 同批</span></div></td>
+                </tr>
+                <tr>
+                  <td><div class="factor-cell"><strong>成交活跃度</strong><code>f1_turnover_value_raw</code><span class="muted">成交 · 流动性</span></div></td>
+                  <td><span class="pill blue">L1 量价</span></td>
+                  <td><div class="coverage"><strong>94.8%</strong><div class="bar warn"><span style="width:94.8%"></span></div><span class="muted">微盘缺口偏高</span></div></td>
+                  <td><div class="stack"><strong>T+0 16:35</strong><span>量价源延迟 10 分钟</span><code>available_at=16:45</code></div></td>
+                  <td><span class="pill warn">观察</span></td>
+                  <td><div class="source-list"><span class="pill gray">vendor_volume_daily</span><span class="pill gray">exchange_calendar</span></div></td>
+                  <td><span class="pill warn">可调用 · 带警告</span></td>
+                  <td><div class="stack"><strong>14:06</strong><span>覆盖率预警</span></div></td>
+                </tr>
+                <tr>
+                  <td><div class="factor-cell"><strong>LTM 净利</strong><code>f1_net_income_ltm</code><span class="muted">财务质量 · L2</span></div></td>
+                  <td><span class="pill indigo">L2 财务</span></td>
+                  <td><div class="coverage"><strong>91.6%</strong><div class="bar warn"><span style="width:91.6%"></span></div><span class="muted">披露节奏差异</span></div></td>
+                  <td><div class="stack"><strong>披露日 + 1</strong><span>按公告时点入库</span><code>publish_date required</code></div></td>
+                  <td><span class="pill warn">缺 2026Q1 160 家</span></td>
+                  <td><div class="source-list"><span class="pill gray">fundamental_statement</span><span class="pill gray">filing_calendar</span></div></td>
+                  <td><span class="pill warn">审慎可调用</span></td>
+                  <td><div class="stack"><strong>13:58</strong><span>待补齐</span></div></td>
+                </tr>
+                <tr>
+                  <td><div class="factor-cell"><strong>卖空余额</strong><code>f1_short_interest_balance</code><span class="muted">卖空 · 市场结构</span></div></td>
+                  <td><span class="pill warn">L3 结构</span></td>
+                  <td><div class="coverage"><strong>76.2%</strong><div class="bar danger"><span style="width:76.2%"></span></div><span class="muted">非覆盖市场 NaN</span></div></td>
+                  <td><div class="stack"><strong>T+2 09:00</strong><span>交易所延迟发布</span><code>available_at required</code></div></td>
+                  <td><span class="pill danger">DATA_SOURCE_BLOCKED</span></td>
+                  <td><div class="source-list"><span class="pill gray">exchange_short_balance</span></div></td>
+                  <td><span class="pill danger">暂不可调用</span></td>
+                  <td><div class="stack"><strong>12:10</strong><span>待补档</span></div></td>
+                </tr>
+                <tr>
+                  <td><div class="factor-cell"><strong>IV Skew 30D</strong><code>f1_option_iv_skew_30d</code><span class="muted">期权 · L4</span></div></td>
+                  <td><span class="pill warn">L4 期权</span></td>
+                  <td><div class="coverage"><strong>68.4%</strong><div class="bar danger"><span style="width:68.4%"></span></div><span class="muted">仅期权标的</span></div></td>
+                  <td><div class="stack"><strong>T+0 17:30</strong><span>曲面完成后可得</span><code>surface_timestamp</code></div></td>
+                  <td><span class="pill danger">曲面缺口</span></td>
+                  <td><div class="source-list"><span class="pill gray">option_surface_eod</span><span class="pill gray">risk_free_curve</span></div></td>
+                  <td><span class="pill warn">观察池</span></td>
+                  <td><div class="stack"><strong>11:40</strong><span>源延迟</span></div></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="bottom-grid">
+          <article class="audit-card">
+            <h3>F1 准入口径</h3>
+            <div class="audit-list">
+              <div class="audit-item"><strong>PIT 优先</strong><span>记录 publish_date 与 available_at，历史可得性优先。</span><span class="pill success">硬规则</span></div>
+              <div class="audit-item"><strong>不设 IC 门槛</strong><span>IC/IR/OOS 进入后续研究，不影响 F1 收录。</span><span class="pill blue">准入规则</span></div>
+              <div class="audit-item"><strong>L1 缺失</strong><span>量价缺失输出 NaN，并保留阻塞或自然缺失原因。</span><span class="pill danger">禁止填 0</span></div>
+            </div>
+          </article>
+          <article class="audit-card">
+            <h3>快照追踪</h3>
+            <div class="audit-list">
+              <div class="audit-item"><strong>目录快照</strong><span class="mono">f1_catalog_snapshot_20260519_1406</span><span class="pill success">已生成</span></div>
+              <div class="audit-item"><strong>源阻塞</strong><span>short_interest、option_surface、macro_beta 待补。</span><span class="pill warn">3 类</span></div>
+              <div class="audit-item"><strong>下游快照</strong><span>Factory run 引用快照 ID，不读取运行态草稿。</span><span class="pill blue">快照化</span></div>
+            </div>
+          </article>
+        </section>
+      </main>
+    </div>
+  </section>
+
+  <section class="screen" id="factor-factory-config">
+    <div class="app-shell factory-bg">
+      <aside class="sidebar">
+        <div class="brand"><strong>Grit Strategy Lab</strong><span>投研、回测、组合治理</span></div>
+        <div class="nav-group"><div class="nav-heading">组合</div><div class="nav-item">工作台 <small>12</small></div><div class="nav-item">组合中心 <small>8</small></div></div>
+        <div class="nav-group"><div class="nav-heading">因子</div><div class="nav-item">因子库 <small>F1</small></div><div class="nav-item is-active">因子工厂 <small>3</small></div><div class="nav-item">隔离队列 <small>9</small></div></div>
+        <div class="nav-group"><div class="nav-heading">数据</div><div class="nav-item">PIT 数据 <small>L1-L4</small></div><div class="nav-item">快照中心 <small>权益</small></div></div>
+      </aside>
+      <main class="main">
+        <section class="hero">
+          <div>
+            <p class="eyebrow">Factor Factory</p>
+            <h1>因子工厂</h1>
+            <p>按 F1 目录快照与算子配置快照生成候选表达式；候选进入 D1 沙箱，再流转 D2 隔离队列。</p>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px"><span class="pill success">深度 2</span><span class="pill blue">7 档窗口</span><span class="pill warn">3 个算子启用</span></div>
+          </div>
+          <div class="hero-actions"><button class="btn">最近运行</button><button class="btn primary">配置</button></div>
+        </section>
+        <section class="metric-grid">
+          <article class="metric-card"><span>今日候选</span><strong>1,248</strong><p>按深度 2 与启用算子展开。</p></article>
+          <article class="metric-card"><span>D1 入池</span><strong>86</strong><p>通过数据可得性与表达式校验。</p></article>
+          <article class="metric-card"><span>D2 待审</span><strong>14</strong><p>待确认经济含义与拥挤风险。</p></article>
+          <article class="metric-card"><span>配置快照</span><strong>3</strong><p>最近保存：2026-05-19 13:42。</p></article>
+        </section>
+        <section class="factory-grid">
+          <article class="factory-card">
+            <h3>日终链路</h3>
+            <div class="mini-steps">
+              <div class="mini-step"><b>1</b><div><strong>锁定 F1 快照</strong><span>字段、coverage、available_at 与阻塞状态</span></div><span class="pill success">已锁定</span></div>
+              <div class="mini-step"><b>2</b><div><strong>展开算子空间</strong><span>默认启用 TS_Return、TS_Rank、TS_Corr</span></div><span class="pill blue">depth 2</span></div>
+              <div class="mini-step"><b>3</b><div><strong>写入 D1 沙箱</strong><span>候选不直写正式因子库</span></div><span class="pill warn">待运行</span></div>
+            </div>
+          </article>
+          <article class="factory-card">
+            <h3>配置快照</h3>
+            <div class="audit-list">
+              <div class="audit-item"><strong>operator_snapshot</strong><span class="mono">op_cfg_20260519_1342</span><span class="pill success">有效</span></div>
+              <div class="audit-item"><strong>f1_catalog_snapshot</strong><span class="mono">f1_catalog_snapshot_20260519_1406</span><span class="pill blue">引用</span></div>
+              <div class="audit-item"><strong>factory_depth</strong><span>默认 2，运行上限 3。</span><span class="pill warn">受控</span></div>
+            </div>
+          </article>
+        </section>
+      </main>
+
+      <div class="modal-backdrop" role="presentation">
+        <section class="config-modal" role="dialog" aria-modal="true" aria-labelledby="config-title">
+          <header class="modal-head">
+            <div>
+              <h2 id="config-title">因子工厂配置</h2>
+              <p>保存后生成可复现快照；后续运行只引用快照 ID 与运行参数。</p>
+            </div>
+            <div class="hero-actions"><button class="btn small">重置为默认</button><button class="btn small danger">关闭</button></div>
+          </header>
+          <div class="modal-body">
+            <nav class="config-rail" aria-label="配置分组">
+              <button class="is-active">算子注册表</button>
+              <button>窗口空间</button>
+              <button>字段准入</button>
+              <button>运行预算</button>
+              <button>输出快照</button>
+            </nav>
+            <div class="config-content">
+              <section class="config-kpis" aria-label="配置摘要">
+                <div class="config-kpi"><span>启用算子</span><strong>3 / 24</strong><div class="muted">TS_Return、TS_Rank、TS_Corr</div></div>
+                <div class="config-kpi"><span>挖掘深度</span><strong>2</strong><div class="muted">范围 1-3，Phase 0 固定为 2</div></div>
+                <div class="config-kpi"><span>窗口空间</span><strong>7 档</strong><div class="muted mono">[3,5,10,21,63,126,252]</div></div>
+              </section>
+
+              <div class="operator-toolbar">
+                <div class="panel-title"><strong>核心算子库</strong><div class="muted">定义、含义、输入、输出、窗口与 min_periods</div></div>
+                <div class="filter-row"><div class="field">分组：全部</div><div class="field search-field">搜索算子或定义</div></div>
+              </div>
+
+              <section class="operator-section">
+                <header><strong>TS 时间序列类</strong><span class="pill success">3 个启用</span></header>
+                <div class="operator-row"><div class="toggle on"></div><div class="op-name"><strong>TS_Return</strong><code>x_t / x_{t-n} - 1</code></div><div class="op-desc">n 日收益变动，输出标的 × 日期矩阵。</div><div class="window-chips"><span class="window-chip">n: 3-252</span><span class="window-chip">min=n</span></div><span class="pill success">启用</span></div>
+                <div class="operator-row"><div class="toggle on"></div><div class="op-name"><strong>TS_Rank</strong><code>rank(x_t, window=n)</code></div><div class="op-desc">当前值在自身历史窗口中的分位。</div><div class="window-chips"><span class="window-chip">n: 5-252</span><span class="window-chip">min=ceil(n·0.6)</span></div><span class="pill success">启用</span></div>
+                <div class="operator-row"><div class="toggle"></div><div class="op-name"><strong>TS_Mean</strong><code>mean(x, n)</code></div><div class="op-desc">窗口均值，用于趋势平滑。</div><div class="window-chips"><span class="window-chip">n: 3-252</span><span class="window-chip">min=ceil(n·0.8)</span></div><span class="pill gray">禁用</span></div>
+                <div class="operator-row"><div class="toggle"></div><div class="op-name"><strong>TS_Std / TS_Skew / TS_Kurt</strong><code>moment(x, n)</code></div><div class="op-desc">波动、偏度与峰度，Phase 0 登记不启用。</div><div class="window-chips"><span class="window-chip">n: 21-252</span><span class="window-chip">min=ceil(n·0.8)</span></div><span class="pill gray">禁用</span></div>
+              </section>
+
+              <section class="operator-section">
+                <header><strong>CS / 多元 / 非线性 / 技术类</strong><span class="pill blue">21 个登记</span></header>
+                <div class="operator-row"><div class="toggle on"></div><div class="op-name"><strong>TS_Corr</strong><code>corr(x, y, n)</code></div><div class="op-desc">两个 F1 字段的滚动相关。</div><div class="window-chips"><span class="window-chip">输入: x,y</span><span class="window-chip">min=ceil(n·0.8)</span></div><span class="pill success">启用</span></div>
+                <div class="operator-row"><div class="toggle"></div><div class="op-name"><strong>CS_Rank / CS_ZScore / CS_Neutral</strong><code>cross_section(x)</code></div><div class="op-desc">横截面排序、标准化和中性化。</div><div class="window-chips"><span class="window-chip">按交易日</span><span class="window-chip">min_symbols=30</span></div><span class="pill gray">禁用</span></div>
+                <div class="operator-row"><div class="toggle"></div><div class="op-name"><strong>Reg_Slope / Reg_Resid</strong><code>ols(y ~ x, n)</code></div><div class="op-desc">滚动回归斜率与残差。</div><div class="window-chips"><span class="window-chip">n: 21-252</span><span class="window-chip">min=ceil(n·0.8)</span></div><span class="pill gray">禁用</span></div>
+                <div class="operator-row"><div class="toggle"></div><div class="op-name"><strong>Sign / Abs / Log / Signed_Power</strong><code>nonlinear(x)</code></div><div class="op-desc">符号、尺度和尾部变换，先做输入域校验。</div><div class="window-chips"><span class="window-chip">无窗口</span><span class="window-chip">domain check</span></div><span class="pill gray">禁用</span></div>
+                <div class="operator-row"><div class="toggle"></div><div class="op-name"><strong>Decay_Linear / High_Day / Sum_Out_Of</strong><code>technical(x, n)</code></div><div class="op-desc">衰减、高点距离和条件计数。</div><div class="window-chips"><span class="window-chip">n: 3-252</span><span class="window-chip">min rule</span></div><span class="pill gray">禁用</span></div>
+              </section>
+            </div>
+            <aside class="config-side">
+              <section class="side-card">
+                <h3>引用快照</h3>
+                <dl>
+                  <div><dt>F1 目录</dt><dd>f1_catalog_snapshot_20260519_1406</dd></div>
+                  <div><dt>算子配置</dt><dd>op_cfg_draft_20260519_1418</dd></div>
+                  <div><dt>运行时区</dt><dd>Asia/Hong_Kong</dd></div>
+                </dl>
+              </section>
+              <section class="side-card">
+                <h3>准入规则</h3>
+                <div class="rule-list">
+                  <span>字段须来自 F1 可调用或审慎可调用状态。</span>
+                  <span>历史不足输出 NaN，并记录 min_periods。</span>
+                  <span>DATA_SOURCE_BLOCKED 不参与表达式展开。</span>
+                  <span>RankIC/IR 不阻止 F1 进入候选池。</span>
+                </div>
+              </section>
+              <section class="side-card">
+                <h3>运行预算</h3>
+                <dl>
+                  <div><dt>表达式上限</dt><dd>50,000</dd></div>
+                  <div><dt>单批并发</dt><dd>8 workers</dd></div>
+                  <div><dt>超时阈值</dt><dd>45 min</dd></div>
+                </dl>
+              </section>
+            </aside>
+          </div>
+          <footer class="modal-foot">
+            <div class="left">保存后冻结为运行快照；草稿不影响已排队任务。</div>
+            <div class="hero-actions"><button class="btn">取消</button><button class="btn">保存草稿</button><button class="btn primary">生成配置快照</button></div>
+          </footer>
+        </section>
+      </div>
+    </div>
+  </section>
+</body>
+</html>

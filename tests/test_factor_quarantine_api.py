@@ -184,6 +184,34 @@ def test_factor_quarantine_intake_run_publish_lineage_and_governance() -> None:
     assert factor["id"] in suggestion["action"]["target"]["query"]["factorIds"]
 
 
+def test_factor_quarantine_rejects_raw_f2_without_wnzt_evidence() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-quarantine-raw-f2-wnzt"))
+    seed_ready_pit_data(client, start=date(2014, 1, 2), day_count=3200)
+    _seed_mining_candidate(
+        client,
+        job_id="mine_raw_f2_missing_wnzt",
+        candidate_id="cand_raw_f2_missing_wnzt",
+        expression="TS_Rank(TS_Return(f1_price_close, 21), 63)",
+        rank_ic=0.052,
+        coverage=98.0,
+        extra_candidate={
+            "raw_f2": True,
+            "target_layer": "L2",
+            "p_value": 0.02,
+            "s_grade_correlation": 0.22,
+        },
+    )
+
+    intake = assert_ok(client.post("/factor-quarantine/intake", json={"mining_job_id": "mine_raw_f2_missing_wnzt"}))
+    candidate = intake["items"][0]
+    run = assert_ok(client.post(f"/factor-quarantine/candidates/{candidate['id']}/run", json={"reason": "unit-test"}))
+
+    assert run["status"] == "REJECTED"
+    assert run["publish_status"] == "BLOCKED"
+    assert run["gate_summary"]["wnzt"] == "FAILED"
+    assert "Raw_F2" in run["rejected_reason"]
+
+
 def test_factor_quarantine_publish_uses_chinese_auto_mined_name_from_id_and_formula() -> None:
     client, _db_path = create_test_client(_runtime_dir("factor-quarantine-publish-name"))
     seed_ready_pit_data(client, start=date(2014, 1, 2), day_count=3200)
@@ -210,7 +238,7 @@ def test_factor_quarantine_publish_uses_chinese_auto_mined_name_from_id_and_form
     )
     factor = published["factor"]
     expected_name = "动量标准化因子（126日收益）"
-    assert factor["id"] == "a_mom_ret_126d_z"
+    assert factor["id"] == "s_f2_mom_ret_126d_px"
     assert factor["name"] == expected_name
     assert "[Auto-Mined]" not in factor["name"]
     assert "自动挖掘" not in factor["name"]
@@ -449,6 +477,7 @@ def test_direct_raw_field_candidate_is_l1_and_gated_by_pit_admission() -> None:
     intake = assert_ok(client.post("/factor-quarantine/intake", json={"mining_job_id": "mine_l1_raw_field"}))
     candidate = intake["items"][0]
     assert candidate["target_layer"] == "L1"
+    assert candidate["target_factor_id"] == "f1_px_open"
     assert candidate["scoring_detail"]["status"] == "PASS"
     assert candidate["scoring_detail"]["gate_basis"] == "PIT 准入审计"
 
@@ -470,6 +499,8 @@ def test_direct_raw_field_candidate_is_l1_and_gated_by_pit_admission() -> None:
     )
     assert published["candidate"]["status"] == "PUBLISHED"
     assert published["candidate"]["target_layer"] == "L1"
+    assert published["candidate"]["target_factor_id"] == "f1_px_open"
+    assert published["factor"]["id"] == "f1_px_open"
 
 
 def test_return_operator_candidate_is_l2_raw_signal_not_l1_pit_only() -> None:
@@ -549,9 +580,10 @@ def test_return_operator_candidate_publishes_as_l2_atomic_raw_signal_with_risk_n
         )
     )
     factor = published["factor"]
-    assert factor["id"] == "a_mom_ret_5d_raw"
+    assert factor["id"] == "s_f2_mom_ret_5d_px"
     assert factor["latest_diagnostic_summary"]["target_layer"] == "L2"
     assert factor["latest_diagnostic_summary"]["quarantine"]["target_layer"] == "L2"
+    assert factor["latest_diagnostic_summary"]["quarantine"]["publish_naming_rule"] == "factor_publish_naming_v3"
     assert published["candidate"]["target_layer"] == "L2"
 
 

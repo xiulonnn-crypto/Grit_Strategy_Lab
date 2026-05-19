@@ -6,7 +6,11 @@ param(
     [string]$BaseRef,
     [switch]$SkipFetch,
     [switch]$RequireSynced,
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [switch]$PlanOnly,
+    [int]$MaxSeconds = 300,
+    [ValidateSet('fast', 'impact')]
+    [string]$GateMode = 'fast'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,17 +19,22 @@ Set-StrictMode -Version Latest
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $webDir = Join-Path $repoRoot 'web'
 $reportDir = Join-Path $repoRoot 'harness\reports\smoke'
-$summaryPath = Join-Path $reportDir 'latest-fast-gate.md'
-$backendReportPath = Join-Path $reportDir 'latest-fast-backend.txt'
-$typesReportPath = Join-Path $reportDir 'latest-fast-frontend-types.txt'
-$vitestReportPath = Join-Path $reportDir 'latest-fast-frontend-vitest.txt'
+$gateTitle = if ($GateMode -eq 'impact') { 'Impact' } else { 'Fast' }
+$reportPrefix = if ($GateMode -eq 'impact') { 'impact' } else { 'fast' }
+$summaryPath = Join-Path $reportDir "latest-$reportPrefix-gate.md"
+$backendReportPath = Join-Path $reportDir "latest-$reportPrefix-backend.txt"
+$typesReportPath = Join-Path $reportDir "latest-$reportPrefix-frontend-types.txt"
+$vitestReportPath = Join-Path $reportDir "latest-$reportPrefix-frontend-vitest.txt"
 $venvPython = Join-Path $repoRoot '.venv\Scripts\python.exe'
+$plannerPath = Join-Path $PSScriptRoot 'git_gate_plan.py'
 
 New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
 Set-Location -LiteralPath $repoRoot
 
 $startedAt = Get-Date
 $stepResults = [System.Collections.Generic.List[string]]::new()
+$script:ResolvedBaseRef = ''
+$script:Plan = $null
 
 function Add-StepResult {
     param(
@@ -40,19 +49,58 @@ function Add-StepResult {
     }
 }
 
+function ConvertTo-StringArray {
+    param(
+        [object]$Value
+    )
+
+    if ($null -eq $Value) {
+        return @()
+    }
+    if ($Value -is [System.Array]) {
+        return @($Value | ForEach-Object { [string]$_ })
+    }
+    return @([string]$Value)
+}
+
+function Format-ListSection {
+    param(
+        [System.Collections.Generic.List[string]]$Lines,
+        [string]$Title,
+        [string[]]$Items
+    )
+
+    [void]$Lines.Add('')
+    [void]$Lines.Add($Title)
+    if ($Items.Count -eq 0) {
+        [void]$Lines.Add('- <none>')
+        return
+    }
+    foreach ($item in $Items) {
+        [void]$Lines.Add("- $item")
+    }
+}
+
 function Write-Summary {
     param(
         [string]$Status,
-        [string[]]$ChangedFiles,
-        [string[]]$BackendTests,
-        [string[]]$FrontendTests,
         [string]$Failure = ''
     )
 
     $finishedAt = Get-Date
+    $plan = $script:Plan
+    $rawChanged = @(ConvertTo-StringArray $plan.raw_changed_files)
+    $evidenceFiles = @(ConvertTo-StringArray $plan.evidence_asset_files)
+    $docFiles = @(ConvertTo-StringArray $plan.documentation_files)
+    $engineeringFiles = @(ConvertTo-StringArray $plan.engineering_files)
+    $backendTests = @(ConvertTo-StringArray $plan.backend_tests)
+    $frontendTests = @(ConvertTo-StringArray $plan.frontend_tests)
+    $domains = @(ConvertTo-StringArray $plan.domains)
+    $reasons = @(ConvertTo-StringArray $plan.ineligible_reasons)
+
     $lines = [System.Collections.Generic.List[string]]::new()
     foreach ($line in @(
-        '# Codex Fast Gate',
+        "# Codex $gateTitle Gate",
         '',
         ('- status: ' + $Status),
         ('- started_at: ' + $startedAt.ToString('o')),
@@ -63,39 +111,26 @@ function Write-Summary {
         ('- skip_fetch: ' + $SkipFetch.IsPresent),
         ('- require_synced: ' + $RequireSynced.IsPresent),
         ('- skip_tests: ' + $SkipTests.IsPresent),
+        ('- plan_only: ' + $PlanOnly.IsPresent),
+        ('- max_seconds: ' + $(if ($GateMode -eq 'fast') { $MaxSeconds } else { '<none>' })),
+        ('- raw_changed_count: ' + $rawChanged.Count),
+        ('- evidence_asset_count: ' + $evidenceFiles.Count),
+        ('- documentation_count: ' + $docFiles.Count),
+        ('- engineering_count: ' + $engineeringFiles.Count),
+        ('- domains: ' + $(if ($domains.Count -eq 0) { '<none>' } else { $domains -join ', ' })),
+        ('- contract_changed: ' + $plan.contract_changed),
+        ('- validation_tooling_changed: ' + $plan.validation_tooling_changed),
+        ('- eligible: ' + $plan.eligible),
         ''
     )) {
         [void]$lines.Add($line)
     }
 
-    [void]$lines.Add('## Changed files')
-    if ($ChangedFiles.Count -eq 0) {
-        [void]$lines.Add('- <none>')
-    } else {
-        foreach ($file in $ChangedFiles) {
-            [void]$lines.Add("- $file")
-        }
-    }
-
-    [void]$lines.Add('')
-    [void]$lines.Add('## Selected backend tests')
-    if ($BackendTests.Count -eq 0) {
-        [void]$lines.Add('- <none>')
-    } else {
-        foreach ($test in $BackendTests) {
-            [void]$lines.Add("- $test")
-        }
-    }
-
-    [void]$lines.Add('')
-    [void]$lines.Add('## Selected frontend tests')
-    if ($FrontendTests.Count -eq 0) {
-        [void]$lines.Add('- <none>')
-    } else {
-        foreach ($test in $FrontendTests) {
-            [void]$lines.Add("- $test")
-        }
-    }
+    Format-ListSection -Lines $lines -Title '## Ineligible reasons' -Items $reasons
+    Format-ListSection -Lines $lines -Title '## Evidence assets excluded from impact' -Items $evidenceFiles
+    Format-ListSection -Lines $lines -Title '## Engineering files' -Items $engineeringFiles
+    Format-ListSection -Lines $lines -Title '## Selected backend tests' -Items $backendTests
+    Format-ListSection -Lines $lines -Title '## Selected frontend tests' -Items $frontendTests
 
     [void]$lines.Add('')
     [void]$lines.Add('## Steps')
@@ -146,11 +181,11 @@ function Get-GitLines {
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
-    if ($exitCode -ne 0) {
+
+    if ($exitCode -ne 0 -or $null -eq $output) {
         return @()
     }
-
-    return @($output | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    return @($output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { [string]$_ })
 }
 
 function Invoke-GitCheck {
@@ -159,7 +194,6 @@ function Invoke-GitCheck {
         [string]$Label
     )
 
-    Write-Host "fast-gate: $Label" -ForegroundColor Cyan
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
@@ -168,12 +202,29 @@ function Invoke-GitCheck {
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
+
     if ($output) {
         $output | ForEach-Object { Write-Host $_ }
     }
     if ($exitCode -ne 0) {
-        throw "$Label failed with exit code $exitCode."
+        throw "Git check failed: $Label"
     }
+}
+
+function Invoke-GitCheckForPaths {
+    param(
+        [string[]]$Arguments,
+        [string[]]$Paths,
+        [string]$Label
+    )
+
+    if ($Paths.Count -eq 0) {
+        Add-StepResult -Label $Label -Status 'skip' -Details 'only evidence assets changed'
+        return
+    }
+
+    Invoke-GitCheck -Arguments ($Arguments + @('--') + $Paths) -Label $Label
+    Add-StepResult -Label $Label -Status 'ok' -Details (($Arguments + @('--') + $Paths) -join ' ')
 }
 
 function Test-GitCommitRef {
@@ -217,252 +268,111 @@ function Resolve-BaseRef {
     return ''
 }
 
-function Add-UniqueString {
+function Invoke-GatePlan {
+    $pythonExe = Get-PythonExecutable
+    if (-not (Test-Path -LiteralPath $plannerPath)) {
+        throw "Gate planner is missing: $plannerPath"
+    }
+
+    $args = @($plannerPath, '--mode', $GateMode, '--scope', $Scope, '--remote', $Remote, '--repo-root', $repoRoot)
+    if (-not [string]::IsNullOrWhiteSpace($script:ResolvedBaseRef)) {
+        $args += @('--base-ref', $script:ResolvedBaseRef)
+    }
+
+    $json = & $pythonExe @args
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($json | Out-String))) {
+        throw 'Gate planner failed.'
+    }
+    $script:Plan = $json | ConvertFrom-Json
+    $rawCount = @(ConvertTo-StringArray $script:Plan.raw_changed_files).Count
+    $engineeringCount = @(ConvertTo-StringArray $script:Plan.engineering_files).Count
+    $evidenceCount = @(ConvertTo-StringArray $script:Plan.evidence_asset_files).Count
+    Add-StepResult -Label 'gate plan' -Status 'ok' -Details "mode=$GateMode raw=$rawCount engineering=$engineeringCount evidence=$evidenceCount"
+}
+
+function Get-ValidationPaths {
+    $docs = @(ConvertTo-StringArray $script:Plan.documentation_files)
+    $engineering = @(ConvertTo-StringArray $script:Plan.engineering_files)
+    return @($docs + $engineering)
+}
+
+function Assert-FastBudget {
     param(
-        [System.Collections.Generic.List[string]]$List,
-        [string]$Value
+        [string]$Step
     )
 
-    $normalized = Normalize-RepoPath -PathValue $Value
-    if (-not [string]::IsNullOrWhiteSpace($normalized) -and -not $List.Contains($normalized)) {
-        [void]$List.Add($normalized)
+    if ($GateMode -ne 'fast' -or $MaxSeconds -le 0) {
+        return
+    }
+    $elapsed = ((Get-Date) - $startedAt).TotalSeconds
+    if ($elapsed -gt $MaxSeconds) {
+        throw "Fast gate exceeded ${MaxSeconds}s before $Step."
     }
 }
 
-function Normalize-RepoPath {
-    param(
-        [string]$PathValue
-    )
-
-    return ([string]$PathValue).Trim() -replace '\\', '/'
-}
-
-function Add-ChangedFilesFromGit {
-    param(
-        [System.Collections.Generic.List[string]]$List,
-        [string[]]$Arguments
-    )
-
-    foreach ($line in (Get-GitLines -Arguments $Arguments)) {
-        Add-UniqueString -List $List -Value $line
+function Invoke-PythonCompile {
+    $targets = @(ConvertTo-StringArray $script:Plan.python_compile_files)
+    if ($targets.Count -eq 0) {
+        Add-StepResult -Label 'python source compile' -Status 'skip' -Details 'no changed Python source files'
+        return
     }
+
+    Assert-FastBudget -Step 'python compile'
+    $pythonExe = Get-PythonExecutable
+    Write-Host "$reportPrefix-gate: python compile -> $($targets -join ', ')" -ForegroundColor Cyan
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $pythonExe -m py_compile @targets 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($output) {
+        $output | ForEach-Object { Write-Host $_ }
+    }
+    if ($exitCode -ne 0) {
+        throw "Python source compile failed for $($targets -join ', ')."
+    }
+    Add-StepResult -Label 'python source compile' -Status 'ok' -Details ($targets -join ', ')
 }
 
-function Get-ChangedFiles {
-    $files = [System.Collections.Generic.List[string]]::new()
+function Invoke-PowerShellSyntax {
+    $engineering = @(ConvertTo-StringArray $script:Plan.engineering_files)
+    $targets = @($engineering | Where-Object { $_ -like '*.ps1' })
+    if ($targets.Count -eq 0) {
+        Add-StepResult -Label 'PowerShell syntax checks' -Status 'skip' -Details 'no changed PowerShell targets'
+        return
+    }
 
-    $includeCommitted = $Scope -in @('All', 'Committed', 'Auto')
-    $includeWorkingTree = $Scope -in @('All', 'WorkingTree', 'Auto')
-
-    if ($includeCommitted) {
-        if (-not [string]::IsNullOrWhiteSpace($script:ResolvedBaseRef)) {
-            Add-ChangedFilesFromGit -List $files -Arguments @('diff', '--name-only', "$script:ResolvedBaseRef...HEAD")
-        } elseif ($Scope -eq 'Committed') {
-            Add-ChangedFilesFromGit -List $files -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')
+    foreach ($path in $targets) {
+        $fullPath = Join-Path $repoRoot ($path -replace '/', '\')
+        if (-not (Test-Path -LiteralPath $fullPath)) {
+            continue
+        }
+        $errors = $null
+        [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $fullPath), [ref]$null, [ref]$errors) | Out-Null
+        if ($errors.Count -gt 0) {
+            $messages = ($errors | ForEach-Object { $_.Message }) -join '; '
+            throw "PowerShell syntax check failed for ${path}: $messages"
         }
     }
 
-    if ($includeWorkingTree) {
-        Add-ChangedFilesFromGit -List $files -Arguments @('diff', '--cached', '--name-only')
-        Add-ChangedFilesFromGit -List $files -Arguments @('diff', '--name-only')
-        Add-ChangedFilesFromGit -List $files -Arguments @('ls-files', '--others', '--exclude-standard')
-    }
-
-    return [string[]]$files
-}
-
-function Test-DocPath {
-    param(
-        [string]$PathValue
-    )
-
-    $path = Normalize-RepoPath -PathValue $PathValue
-    if ($path -eq 'CHANGELOG.md') { return $true }
-    if ($path -match '^(docs|harness/acceptance|output/ui-artifact-trace)/') { return $true }
-    if ($path -match '^(src|tests|web/src|web/scripts|scripts)/') { return $false }
-    if ($path -match '\.(md|mdx|rst|adoc|txt|png|jpg|jpeg|gif)$') { return $true }
-    return $false
-}
-
-function Test-ContractPath {
-    param(
-        [string]$PathValue
-    )
-
-    $path = Normalize-RepoPath -PathValue $PathValue
-    return $path -in @(
-        'src/grit_backtest_platform/api.py',
-        'src/grit_backtest_platform/models.py',
-        'web/src/types.ts',
-        'web/src/lib/workspace-adapters.ts',
-        'web/src/lib/demoStoreContext.tsx'
-    )
-}
-
-function Test-BackendRelatedPath {
-    param(
-        [string]$PathValue
-    )
-
-    $path = Normalize-RepoPath -PathValue $PathValue
-    return (
-        $path -like 'src/grit_backtest_platform/*' -or
-        $path -like 'tests/*' -or
-        $path -eq 'pyproject.toml' -or
-        $path -eq 'scripts/pre_push_hook.py'
-    )
-}
-
-function Test-FrontendRelatedPath {
-    param(
-        [string]$PathValue
-    )
-
-    $path = Normalize-RepoPath -PathValue $PathValue
-    return (
-        $path -like 'web/src/*' -or
-        $path -like 'web/scripts/*' -or
-        $path -eq 'web/package.json' -or
-        $path -eq 'web/package-lock.json' -or
-        $path -eq 'web/vite.config.ts' -or
-        $path -eq 'web/preview-server.mjs'
-    )
-}
-
-function Add-BackendTest {
-    param(
-        [System.Collections.Generic.List[string]]$Tests,
-        [string]$TestPath
-    )
-
-    if ((Test-Path -LiteralPath (Join-Path $repoRoot $TestPath)) -and -not $Tests.Contains($TestPath)) {
-        [void]$Tests.Add($TestPath)
-    }
-}
-
-function Get-BackendTargetTests {
-    param(
-        [string[]]$ChangedFiles,
-        [bool]$ContractChanged
-    )
-
-    $tests = [System.Collections.Generic.List[string]]::new()
-
-    foreach ($file in $ChangedFiles) {
-        $path = Normalize-RepoPath -PathValue $file
-        if ($path -like 'tests/test_*.py') {
-            Add-BackendTest -Tests $tests -TestPath ($path -replace '/', '\')
-        }
-
-        if ($path -match 'release_workflow|pre_push_hook') { Add-BackendTest -Tests $tests -TestPath 'tests\test_release_workflow.py' }
-        if ($path -match 'composition') { Add-BackendTest -Tests $tests -TestPath 'tests\test_composition_api.py' }
-        if ($path -match 'creation') { Add-BackendTest -Tests $tests -TestPath 'tests\test_creation_session_refresh.py' }
-        if ($path -match 'real_backtest|backtest') { Add-BackendTest -Tests $tests -TestPath 'tests\test_real_backtest_api.py' }
-        if ($path -match 'factor_research') { Add-BackendTest -Tests $tests -TestPath 'tests\test_factor_research_api.py' }
-        if ($path -match 'factor_expression') { Add-BackendTest -Tests $tests -TestPath 'tests\test_factor_expression_engine.py' }
-        if ($path -match 'factor_factory') { Add-BackendTest -Tests $tests -TestPath 'tests\test_factor_factory_api.py' }
-        if ($path -match 'factor_mining') { Add-BackendTest -Tests $tests -TestPath 'tests\test_factor_mining_api.py' }
-        if ($path -match 'factor_quarantine') { Add-BackendTest -Tests $tests -TestPath 'tests\test_factor_quarantine_api.py' }
-        if ($path -match 'multi_factor') { Add-BackendTest -Tests $tests -TestPath 'tests\test_multi_factor_strategy_api.py' }
-        if ($path -match 'optimization') {
-            Add-BackendTest -Tests $tests -TestPath 'tests\test_optimization_execution_resume.py'
-            Add-BackendTest -Tests $tests -TestPath 'tests\test_optimization_resume_api.py'
-        }
-        if ($path -match 'runtime_supervisor') { Add-BackendTest -Tests $tests -TestPath 'tests\test_runtime_supervisor.py' }
-        if ($path -match 'strateg') { Add-BackendTest -Tests $tests -TestPath 'tests\test_strategies_smoke.py' }
-        if ($path -match 'snapshot|pit|provider|market_data|universe') {
-            Add-BackendTest -Tests $tests -TestPath 'tests\test_backend_api.py'
-            Add-BackendTest -Tests $tests -TestPath 'tests\test_snapshot_data_plane.py'
-        }
-    }
-
-    if ($ContractChanged) {
-        Add-BackendTest -Tests $tests -TestPath 'tests\test_backend_api.py'
-    }
-
-    if ($tests.Count -eq 0) {
-        Add-BackendTest -Tests $tests -TestPath 'tests\test_backend_api.py'
-    }
-
-    return [string[]]$tests
-}
-
-function Add-FrontendTest {
-    param(
-        [System.Collections.Generic.List[string]]$Tests,
-        [string]$TestPath
-    )
-
-    if ((Test-Path -LiteralPath (Join-Path $webDir ("src\" + ($TestPath -replace '/', '\')))) -and -not $Tests.Contains($TestPath)) {
-        [void]$Tests.Add($TestPath)
-    }
-}
-
-function Get-FrontendTargetTests {
-    param(
-        [string[]]$ChangedFiles,
-        [bool]$ContractChanged
-    )
-
-    $tests = [System.Collections.Generic.List[string]]::new()
-
-    foreach ($file in $ChangedFiles) {
-        $path = Normalize-RepoPath -PathValue $file
-        if ($path -like 'web/src/*.test.ts' -or $path -like 'web/src/*.test.tsx' -or $path -like 'web/src/page-sections/*.test.tsx') {
-            Add-FrontendTest -Tests $tests -TestPath ($path.Substring('web/src/'.Length))
-        }
-
-        if ($path -match 'workspace') { Add-FrontendTest -Tests $tests -TestPath 'workspace.dashboard.test.tsx' }
-        if ($path -match 'snapshots') { Add-FrontendTest -Tests $tests -TestPath 'snapshots.page.test.tsx' }
-        if ($path -match 'composition') {
-            Add-FrontendTest -Tests $tests -TestPath 'composition.dashboard.test.tsx'
-            Add-FrontendTest -Tests $tests -TestPath 'composition.workbench.test.tsx'
-            Add-FrontendTest -Tests $tests -TestPath 'composition.detail.test.tsx'
-            Add-FrontendTest -Tests $tests -TestPath 'composition.global-index.test.tsx'
-        }
-        if ($path -match 'leg') { Add-FrontendTest -Tests $tests -TestPath 'leg.inventory.test.tsx' }
-        if ($path -match 'factor') {
-            Add-FrontendTest -Tests $tests -TestPath 'factor.factory.test.tsx'
-            Add-FrontendTest -Tests $tests -TestPath 'factor.sandbox.test.tsx'
-            Add-FrontendTest -Tests $tests -TestPath 'factor.quarantine.test.tsx'
-            Add-FrontendTest -Tests $tests -TestPath 'factor.model-builder.test.tsx'
-        }
-        if ($path -match 'optimization') { Add-FrontendTest -Tests $tests -TestPath 'optimization.module.test.tsx' }
-        if ($path -match 'creation') {
-            Add-FrontendTest -Tests $tests -TestPath 'creation-template.route.test.tsx'
-            Add-FrontendTest -Tests $tests -TestPath 'creation.flow.test.tsx'
-        }
-        if ($path -match 'run-detail|runs') {
-            Add-FrontendTest -Tests $tests -TestPath 'run-detail.page.test.tsx'
-            Add-FrontendTest -Tests $tests -TestPath 'runs.index.page.test.tsx'
-        }
-        if ($path -match 'shell|route|app-runtime|appRouteContext|demoStoreContext') {
-            Add-FrontendTest -Tests $tests -TestPath 'app.routes.foundation.test.tsx'
-            Add-FrontendTest -Tests $tests -TestPath 'shell-frame.page-heading.test.tsx'
-        }
-        if ($path -match 'quickstart|preview-server') { Add-FrontendTest -Tests $tests -TestPath 'quickstart.preview.test.ts' }
-    }
-
-    if ($ContractChanged) {
-        Add-FrontendTest -Tests $tests -TestPath 'app.routes.foundation.test.tsx'
-    }
-
-    if ($tests.Count -eq 0) {
-        Add-FrontendTest -Tests $tests -TestPath 'app.routes.foundation.test.tsx'
-    }
-
-    return [string[]]$tests
+    Add-StepResult -Label 'PowerShell syntax checks' -Status 'ok' -Details ($targets -join ', ')
 }
 
 function Invoke-BackendTests {
-    param(
-        [string[]]$Tests
-    )
+    $tests = @(ConvertTo-StringArray $script:Plan.backend_tests)
+    if ($tests.Count -eq 0) {
+        Add-StepResult -Label 'backend targeted tests' -Status 'skip' -Details 'no backend owner tests selected'
+        return
+    }
 
+    Assert-FastBudget -Step 'backend targeted tests'
     $pythonExe = Get-PythonExecutable
     $pytestTempRoot = Join-Path $repoRoot '.tmp\pytest-runtime'
     $pythonTemp = Join-Path $pytestTempRoot 'python-temp'
-    $baseTemp = Join-Path $pytestTempRoot ("codex-fast-{0}" -f (Get-Date -Format 'yyyyMMddHHmmssfff'))
+    $baseTemp = Join-Path $pytestTempRoot ("codex-$reportPrefix-{0}" -f (Get-Date -Format 'yyyyMMddHHmmssfff'))
     New-Item -ItemType Directory -Path $pythonTemp -Force | Out-Null
     New-Item -ItemType Directory -Path $baseTemp -Force | Out-Null
 
@@ -475,8 +385,8 @@ function Invoke-BackendTests {
         $env:TMP = $pythonTemp
         $env:TMPDIR = $pythonTemp
 
-        $args = @('-m', 'pytest') + $Tests + @('--basetemp', $baseTemp)
-        Write-Host "fast-gate: backend targeted pytest -> $($Tests -join ', ')" -ForegroundColor Cyan
+        $args = @('-m', 'pytest') + $tests + @('--basetemp', $baseTemp)
+        Write-Host "$reportPrefix-gate: backend targeted pytest -> $($tests -join ', ')" -ForegroundColor Cyan
         $previousErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         try {
@@ -486,7 +396,7 @@ function Invoke-BackendTests {
             $ErrorActionPreference = $previousErrorActionPreference
         }
         @(
-            '# Codex Fast Backend',
+            "# Codex $gateTitle Backend",
             "started_at = $(Get-Date -Format o)",
             "command = $pythonExe $($args -join ' ')",
             ''
@@ -495,6 +405,7 @@ function Invoke-BackendTests {
         if ($exitCode -ne 0) {
             throw "Backend targeted tests failed. See $backendReportPath"
         }
+        Add-StepResult -Label 'backend targeted tests' -Status 'ok' -Details "see $backendReportPath"
     } finally {
         if ($null -ne $originalTemp) { $env:TEMP = $originalTemp } else { Remove-Item Env:TEMP -ErrorAction SilentlyContinue }
         if ($null -ne $originalTmp) { $env:TMP = $originalTmp } else { Remove-Item Env:TMP -ErrorAction SilentlyContinue }
@@ -503,156 +414,89 @@ function Invoke-BackendTests {
 }
 
 function Invoke-FrontendTypes {
+    if ($GateMode -ne 'impact') {
+        Add-StepResult -Label 'frontend TypeScript' -Status 'skip' -Details 'fast gate skips global tsc'
+        return
+    }
+
+    $frontendTests = @(ConvertTo-StringArray $script:Plan.frontend_tests)
+    $domains = @(ConvertTo-StringArray $script:Plan.domains)
+    if ($frontendTests.Count -eq 0 -and -not $domains.Contains('frontend')) {
+        Add-StepResult -Label 'frontend TypeScript' -Status 'skip' -Details 'no frontend impact'
+        return
+    }
+
     $nodeExe = Get-NodeExecutable
     $tscEntry = Join-Path $webDir 'node_modules\typescript\bin\tsc'
     if (-not (Test-Path -LiteralPath $tscEntry)) {
         throw "Required TypeScript entrypoint missing: $tscEntry"
     }
+    $tsconfigPath = Join-Path $webDir 'tsconfig.json'
+    if (-not (Test-Path -LiteralPath $tsconfigPath)) {
+        throw "Required TypeScript config missing: $tsconfigPath"
+    }
 
-    Write-Host 'fast-gate: frontend TypeScript -> tsc --noEmit' -ForegroundColor Cyan
+    Write-Host 'impact-gate: frontend TypeScript -> tsc --project web/tsconfig.json --noEmit' -ForegroundColor Cyan
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $output = & $nodeExe $tscEntry '--noEmit' 2>&1
+        $output = & $nodeExe $tscEntry '--project' $tsconfigPath '--noEmit' 2>&1
         $exitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
     @(
-        '# Codex Fast Frontend Types',
+        "# Codex $gateTitle Frontend Types",
         "started_at = $(Get-Date -Format o)",
-        "command = $nodeExe $tscEntry --noEmit",
+        "command = $nodeExe $tscEntry --project $tsconfigPath --noEmit",
         ''
     ) + $output | Set-Content -LiteralPath $typesReportPath -Encoding utf8
     $output | ForEach-Object { Write-Host $_ }
     if ($exitCode -ne 0) {
         throw "Frontend TypeScript validation failed. See $typesReportPath"
     }
+    Add-StepResult -Label 'frontend TypeScript' -Status 'ok' -Details "see $typesReportPath"
 }
 
 function Invoke-FrontendTests {
-    param(
-        [string[]]$Tests
-    )
+    $tests = @(ConvertTo-StringArray $script:Plan.frontend_tests)
+    if ($tests.Count -eq 0) {
+        Add-StepResult -Label 'frontend targeted tests' -Status 'skip' -Details 'no frontend owner tests selected'
+        return
+    }
 
+    Assert-FastBudget -Step 'frontend targeted tests'
     $nodeExe = Get-NodeExecutable
     $vitestRunner = Join-Path $webDir 'scripts\run-vitest-fixed.cjs'
     if (-not (Test-Path -LiteralPath $vitestRunner)) {
         throw "Required Vitest runner missing: $vitestRunner"
     }
 
-    Write-Host "fast-gate: frontend targeted Vitest -> $($Tests -join ', ')" -ForegroundColor Cyan
+    Write-Host "$reportPrefix-gate: frontend targeted Vitest -> $($tests -join ', ')" -ForegroundColor Cyan
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
+    $previousLocation = Get-Location
     try {
-        $output = & $nodeExe $vitestRunner @Tests 2>&1
+        Set-Location -LiteralPath $webDir
+        $output = & $nodeExe $vitestRunner @tests 2>&1
         $exitCode = $LASTEXITCODE
     } finally {
+        Set-Location -LiteralPath $previousLocation
         $ErrorActionPreference = $previousErrorActionPreference
     }
     @(
-        '# Codex Fast Frontend Vitest',
+        "# Codex $gateTitle Frontend Vitest",
         "started_at = $(Get-Date -Format o)",
-        "command = $nodeExe $vitestRunner $($Tests -join ' ')",
+        "cwd = $webDir",
+        "command = $nodeExe $vitestRunner $($tests -join ' ')",
         ''
     ) + $output | Set-Content -LiteralPath $vitestReportPath -Encoding utf8
     $output | ForEach-Object { Write-Host $_ }
     if ($exitCode -ne 0) {
         throw "Frontend targeted tests failed. See $vitestReportPath"
     }
+    Add-StepResult -Label 'frontend targeted tests' -Status 'ok' -Details "see $vitestReportPath"
 }
-
-function Get-ToolingSyntaxTargets {
-    param(
-        [string[]]$ChangedFiles
-    )
-
-    $targets = [ordered]@{
-        PowerShell = [System.Collections.Generic.List[string]]::new()
-        Python = [System.Collections.Generic.List[string]]::new()
-    }
-
-    foreach ($file in $ChangedFiles) {
-        $path = Normalize-RepoPath -PathValue $file
-        if ($path -like 'scripts/*.ps1' -or $path -like '.githooks/*.ps1') {
-            if (-not $targets.PowerShell.Contains($path)) {
-                [void]$targets.PowerShell.Add($path)
-            }
-        }
-        if ($path -like 'scripts/*.py') {
-            if (-not $targets.Python.Contains($path)) {
-                [void]$targets.Python.Add($path)
-            }
-        }
-    }
-
-    return $targets
-}
-
-function Invoke-ToolingSyntaxChecks {
-    param(
-        [string[]]$ChangedFiles
-    )
-
-    $targets = Get-ToolingSyntaxTargets -ChangedFiles $ChangedFiles
-    $checked = [System.Collections.Generic.List[string]]::new()
-
-    foreach ($path in $targets.PowerShell) {
-        $fullPath = Join-Path $repoRoot ($path -replace '/', '\')
-        if (-not (Test-Path -LiteralPath $fullPath)) {
-            continue
-        }
-
-        $errors = $null
-        [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $fullPath), [ref]$null, [ref]$errors) | Out-Null
-        if ($errors.Count -gt 0) {
-            $messages = ($errors | ForEach-Object { $_.Message }) -join '; '
-            throw "PowerShell syntax check failed for ${path}: $messages"
-        }
-        [void]$checked.Add($path)
-    }
-
-    if ($targets.Python.Count -gt 0) {
-        $pythonExe = Get-PythonExecutable
-        $pythonTargets = @()
-        foreach ($path in $targets.Python) {
-            $fullPath = Join-Path $repoRoot ($path -replace '/', '\')
-            if (Test-Path -LiteralPath $fullPath) {
-                $pythonTargets += $path
-            }
-        }
-        if ($pythonTargets.Count -gt 0) {
-            $previousErrorActionPreference = $ErrorActionPreference
-            $ErrorActionPreference = 'Continue'
-            try {
-                $output = & $pythonExe -m py_compile @pythonTargets 2>&1
-                $exitCode = $LASTEXITCODE
-            } finally {
-                $ErrorActionPreference = $previousErrorActionPreference
-            }
-            if ($output) {
-                $output | ForEach-Object { Write-Host $_ }
-            }
-            if ($exitCode -ne 0) {
-                throw "Python script compile check failed for $($pythonTargets -join ', ')."
-            }
-            foreach ($path in $pythonTargets) {
-                [void]$checked.Add($path)
-            }
-        }
-    }
-
-    if ($checked.Count -gt 0) {
-        Add-StepResult -Label 'tooling syntax checks' -Status 'ok' -Details ($checked -join ', ')
-    } else {
-        Add-StepResult -Label 'tooling syntax checks' -Status 'skip' -Details 'no changed PowerShell or scripts/*.py targets'
-    }
-}
-
-$script:ResolvedBaseRef = ''
-$changedFiles = @()
-$backendTests = @()
-$frontendTests = @()
 
 try {
     if (-not $SkipFetch) {
@@ -684,99 +528,84 @@ try {
         Add-StepResult -Label 'merge-base/ahead-behind' -Status 'skip' -Details 'no upstream or base ref found'
     }
 
-    Invoke-GitCheck -Arguments @('diff', '--cached', '--check') -Label 'git diff --cached --check'
-    Add-StepResult -Label 'cached whitespace check' -Status 'ok' -Details 'git diff --cached --check'
+    Invoke-GatePlan
+    $validationPaths = @(Get-ValidationPaths)
+    if (@(ConvertTo-StringArray $script:Plan.raw_changed_files).Count -eq 0) {
+        Add-StepResult -Label 'change scope' -Status 'ok' -Details 'no changed files detected'
+        Write-Summary -Status 'ok'
+        Write-Host "$reportPrefix-gate: no changed files detected." -ForegroundColor Green
+        exit 0
+    }
+
+    Invoke-GitCheckForPaths -Arguments @('diff', '--cached', '--check') -Paths $validationPaths -Label 'cached whitespace check'
 
     $includeWorkingTreeChecks = $Scope -in @('All', 'WorkingTree', 'Auto')
     $includeCommittedChecks = $Scope -in @('All', 'Committed', 'Auto')
 
     if ($includeWorkingTreeChecks) {
-        Invoke-GitCheck -Arguments @('diff', '--check') -Label 'git diff --check'
-        Add-StepResult -Label 'working-tree whitespace check' -Status 'ok' -Details 'git diff --check'
+        Invoke-GitCheckForPaths -Arguments @('diff', '--check') -Paths $validationPaths -Label 'working-tree whitespace check'
     } else {
         Add-StepResult -Label 'working-tree whitespace check' -Status 'skip' -Details "scope=$Scope"
     }
 
     if ($includeCommittedChecks -and -not [string]::IsNullOrWhiteSpace($script:ResolvedBaseRef)) {
-        Invoke-GitCheck -Arguments @('diff', '--check', "$script:ResolvedBaseRef...HEAD") -Label "git diff --check $script:ResolvedBaseRef...HEAD"
-        Add-StepResult -Label 'committed whitespace check' -Status 'ok' -Details "git diff --check $script:ResolvedBaseRef...HEAD"
+        Invoke-GitCheckForPaths -Arguments @('diff', '--check', "$script:ResolvedBaseRef...HEAD") -Paths $validationPaths -Label 'committed whitespace check'
     } elseif ($includeCommittedChecks) {
         Add-StepResult -Label 'committed whitespace check' -Status 'skip' -Details 'no upstream or base ref found'
     } else {
         Add-StepResult -Label 'committed whitespace check' -Status 'skip' -Details "scope=$Scope"
     }
 
-    $changedFiles = @(Get-ChangedFiles)
-    if ($changedFiles.Count -eq 0) {
-        Add-StepResult -Label 'change scope' -Status 'ok' -Details 'no changed files detected'
-        Write-Host 'fast-gate: no changed files detected; no backend/frontend tests selected.' -ForegroundColor Green
-        Write-Summary -Status 'ok' -ChangedFiles $changedFiles -BackendTests @() -FrontendTests @()
+    if ($PlanOnly) {
+        $status = if ($GateMode -eq 'fast' -and -not [bool]$script:Plan.eligible) { 'not-fast' } else { 'ok' }
+        Add-StepResult -Label 'tests' -Status 'skip' -Details 'plan only'
+        Write-Summary -Status $status
+        Write-Host "$reportPrefix-gate: plan written. Summary: $summaryPath" -ForegroundColor Cyan
         exit 0
     }
 
-    $docOnly = $true
-    $contractChanged = $false
-    $backendNeeded = $false
-    $frontendNeeded = $false
-
-    foreach ($file in $changedFiles) {
-        if (-not (Test-DocPath -PathValue $file)) { $docOnly = $false }
-        if (Test-ContractPath -PathValue $file) { $contractChanged = $true }
-        if (Test-BackendRelatedPath -PathValue $file) { $backendNeeded = $true }
-        if (Test-FrontendRelatedPath -PathValue $file) { $frontendNeeded = $true }
+    if ($GateMode -eq 'fast' -and -not [bool]$script:Plan.eligible) {
+        Add-StepResult -Label 'fast eligibility' -Status 'not-fast' -Details (@(ConvertTo-StringArray $script:Plan.ineligible_reasons) -join '; ')
+        Write-Summary -Status 'not-fast'
+        Write-Host "fast-gate: not fast eligible. Summary: $summaryPath" -ForegroundColor Yellow
+        Write-Host 'fast-gate: run .\scripts\codex-validate-impact.ps1 -Scope Committed for broad impacted validation, or .\scripts\codex-validate-full.ps1 for release/full validation.' -ForegroundColor Yellow
+        exit 2
     }
-
-    Invoke-ToolingSyntaxChecks -ChangedFiles $changedFiles
-
-    if ($contractChanged) {
-        $backendNeeded = $true
-        $frontendNeeded = $true
-    }
-
-    if ($docOnly) {
-        Add-StepResult -Label 'affected validation' -Status 'skip' -Details 'documentation/changelog/artifact-only changes'
-        Write-Host 'fast-gate: documentation-only change set; backend/frontend tests skipped.' -ForegroundColor Green
-        Write-Summary -Status 'ok' -ChangedFiles $changedFiles -BackendTests @() -FrontendTests @()
-        exit 0
-    }
-
-    if ($backendNeeded) {
-        $backendTests = @(Get-BackendTargetTests -ChangedFiles $changedFiles -ContractChanged $contractChanged)
-    }
-    if ($frontendNeeded) {
-        $frontendTests = @(Get-FrontendTargetTests -ChangedFiles $changedFiles -ContractChanged $contractChanged)
-    }
-
-    Add-StepResult -Label 'affected validation' -Status 'ok' -Details "backend=$backendNeeded frontend=$frontendNeeded contract=$contractChanged"
 
     if ($SkipTests) {
         Add-StepResult -Label 'tests' -Status 'skip' -Details 'skipped by caller'
-        Write-Summary -Status 'ok' -ChangedFiles $changedFiles -BackendTests $backendTests -FrontendTests $frontendTests
+        Write-Summary -Status 'ok'
         exit 0
     }
 
-    if ($backendNeeded) {
-        Invoke-BackendTests -Tests $backendTests
-        Add-StepResult -Label 'backend targeted tests' -Status 'ok' -Details "see $backendReportPath"
-    } else {
-        Add-StepResult -Label 'backend targeted tests' -Status 'skip' -Details 'no backend/API contract changes detected'
-    }
+    Invoke-PowerShellSyntax
+    Invoke-PythonCompile
+    Invoke-BackendTests
+    Invoke-FrontendTypes
+    Invoke-FrontendTests
 
-    if ($frontendNeeded) {
-        Invoke-FrontendTypes
-        Add-StepResult -Label 'frontend TypeScript' -Status 'ok' -Details "see $typesReportPath"
-        Invoke-FrontendTests -Tests $frontendTests
-        Add-StepResult -Label 'frontend targeted tests' -Status 'ok' -Details "see $vitestReportPath"
-    } else {
-        Add-StepResult -Label 'frontend TypeScript/Vitest' -Status 'skip' -Details 'no frontend/API contract changes detected'
-    }
-
-    Write-Summary -Status 'ok' -ChangedFiles $changedFiles -BackendTests $backendTests -FrontendTests $frontendTests
-    Write-Host "fast-gate: passed. Summary: $summaryPath" -ForegroundColor Green
+    Assert-FastBudget -Step 'summary'
+    Write-Summary -Status 'ok'
+    Write-Host "$reportPrefix-gate: passed. Summary: $summaryPath" -ForegroundColor Green
 } catch {
     $message = $_.Exception.Message
-    Add-StepResult -Label 'fast gate' -Status 'failed' -Details $message
-    Write-Summary -Status 'failed' -ChangedFiles $changedFiles -BackendTests $backendTests -FrontendTests $frontendTests -Failure $message
-    Write-Host "fast-gate: failed. Summary: $summaryPath" -ForegroundColor Red
+    Add-StepResult -Label "$reportPrefix gate" -Status 'failed' -Details $message
+    if ($null -eq $script:Plan) {
+        $script:Plan = [pscustomobject]@{
+            raw_changed_files = @()
+            evidence_asset_files = @()
+            documentation_files = @()
+            engineering_files = @()
+            backend_tests = @()
+            frontend_tests = @()
+            domains = @()
+            ineligible_reasons = @()
+            contract_changed = $false
+            validation_tooling_changed = $false
+            eligible = $false
+        }
+    }
+    Write-Summary -Status 'failed' -Failure $message
+    Write-Host "$reportPrefix-gate: failed. Summary: $summaryPath" -ForegroundColor Red
     throw
 }

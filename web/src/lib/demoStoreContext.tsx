@@ -43,7 +43,9 @@ import type {
   ApiFactorDiagnosticPreview,
   ApiFactorDiagnosticPreviewPayload,
   ApiFactorDiagnosticRunResponse,
+  ApiF1CatalogResponse,
   ApiFactorFactoryAutomationPayload,
+  ApiFactorFactoryOperatorConfigResponse,
   ApiFactorFactoryOverview,
   ApiFactorFactoryRun,
   ApiFactorFactoryRunNowPayload,
@@ -63,6 +65,8 @@ import type {
   ApiFactorModelCreatePayload,
   ApiFactorModelPreviewPayload,
   ApiFactorModelPreviewResponse,
+  ApiOperatorConfigDraft,
+  ApiOperatorConfigSnapshot,
   ApiPitIdentityOverridePayload,
   ApiPitIdentityScraperRestartPayload,
   ApiPitIdentityScraperRestartResponse,
@@ -800,6 +804,15 @@ function createHttpApiClient(): DemoApi {
       const suffix = search.toString();
       return requestJson<ApiFactorListResponse>(`/factors${suffix ? `?${suffix}` : ''}`);
     },
+    getF1Catalog: (params = {}) => {
+      const search = new URLSearchParams();
+      if (params.snapshot_id) search.set('snapshot_id', params.snapshot_id);
+      if (params.layer) search.set('layer', params.layer);
+      if (params.status) search.set('status', params.status);
+      if (params.q) search.set('q', params.q);
+      const suffix = search.toString();
+      return requestJson<ApiF1CatalogResponse>(suffix ? `/factors/f1-catalog?${suffix}` : '/factors/f1-catalog/latest');
+    },
     createFactor: (payload: ApiFactorCreatePayload) =>
       requestJson<ApiFactorDetail>('/factors', withJsonBody(payload, { method: 'POST' })),
     getFactor: (id: string) => requestJson<ApiFactorDetail>(`/factors/${encodeURIComponent(id)}`),
@@ -821,6 +834,18 @@ function createHttpApiClient(): DemoApi {
     cancelFactorMiningJob: (id: string) =>
       requestJson<ApiFactorMiningJob>(`/factor-mining/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
     getFactorFactoryOverview: () => requestJson<ApiFactorFactoryOverview>('/factor-factory/overview'),
+    getFactorFactoryOperatorConfig: () =>
+      requestJson<ApiFactorFactoryOperatorConfigResponse>('/factor-factory/operator-config'),
+    saveFactorFactoryOperatorConfig: (payload: ApiOperatorConfigDraft) =>
+      requestJson<ApiFactorFactoryOperatorConfigResponse>(
+        '/factor-factory/operator-config',
+        withJsonBody(payload, { method: 'PUT' }),
+      ),
+    createFactorFactoryOperatorConfigSnapshot: (payload: ApiOperatorConfigDraft) =>
+      requestJson<ApiOperatorConfigSnapshot>(
+        '/factor-factory/operator-config/snapshots',
+        withJsonBody(payload, { method: 'POST' }),
+      ),
     startFactorFactoryAutomation: (payload?: ApiFactorFactoryAutomationPayload) =>
       requestJson<ApiFactorFactoryOverview>(
         '/factor-factory/automation/start',

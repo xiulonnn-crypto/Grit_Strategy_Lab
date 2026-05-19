@@ -45,6 +45,111 @@ KAGGLE_DATASET_RECOMMENDATIONS = [
     },
 ]
 
+PAID_DATASET_RECOMMENDATIONS = [
+    {
+        "provider_id": "crsp_us_stock",
+        "label": "CRSP US Stock",
+        "source_url": "https://www.crsp.org/crsp_pdf/crsp-us-stock-indexes-databases-data-descriptions-guide-crspaccess/",
+        "target": "institutional_price_actions_delisting_returns",
+        "required_env_vars": ["CRSP_DATA_PATH"],
+        "coverage_note": "Licensed institutional source for prices, name history, delisting returns, and index membership. Best fit when L1 must reach 100% for old delisted constituents.",
+        "pit_mode": "institutional_gold_source",
+    },
+    {
+        "provider_id": "norgate_us_equities",
+        "label": "Norgate US Equities",
+        "source_url": "https://norgatedata.com/data-content-tables.php",
+        "target": "survivorship_bias_free_us_equities",
+        "required_env_vars": ["NORGATE_DATA_PATH"],
+        "coverage_note": "Licensed local source for US delisted stocks and historical index constituents. Needs a manifest-checked export path.",
+        "pit_mode": "survivorship_bias_free_bundle",
+    },
+    {
+        "provider_id": "sharadar",
+        "label": "Sharadar",
+        "source_url": "https://www.sharadar.com/data",
+        "target": "survivorship_bias_free_prices_fundamentals",
+        "required_env_vars": ["NASDAQ_DATA_LINK_API_KEY"],
+        "coverage_note": "Licensed bundle candidate for active and delisted US prices and fundamentals. Requires active Sharadar entitlement.",
+        "pit_mode": "survivorship_bias_free_bundle",
+    },
+    {
+        "provider_id": "eodhd",
+        "label": "EODHD",
+        "source_url": "https://eodhd.com/",
+        "target": "delisted_prices_actions_fundamentals",
+        "required_env_vars": ["EODHD_API_TOKEN"],
+        "coverage_note": "API candidate for delisted symbols, EOD prices, splits/dividends, and fundamentals. Requires plan entitlement and old-symbol mapping.",
+        "pit_mode": "paid_delisted_bundle",
+    },
+]
+
+FREE_REPAIR_ROUTE_RECOMMENDATIONS = [
+    {
+        "provider_id": "alpha_vantage_delisted_list",
+        "label": "Alpha Vantage Listing Status",
+        "source_url": "https://www.alphavantage.co/documentation/#listing-status",
+        "target": "delisted_symbol_identity",
+        "required_env_vars": ["ALPHAVANTAGE_API_KEY"],
+        "coverage_note": "Official CSV endpoint for active/delisted symbol lifecycle discovery; rate-limited and should only seed targeted repair queues.",
+        "pit_mode": "identity_listing_seed",
+    },
+    {
+        "provider_id": "stooq_online",
+        "label": "Stooq Online CSV",
+        "source_url": "https://stooq.com/q/d/l/",
+        "target": "delisted_price_history",
+        "required_env_vars": ["GRIT_ENABLE_STOOQ_ONLINE"],
+        "coverage_note": "Public single-symbol daily CSV fallback for price-only repairs when the local Stooq archive misses an old ticker.",
+        "pit_mode": "price_only",
+    },
+    {
+        "provider_id": "yahoo_history_html",
+        "label": "Yahoo Finance Historical Page",
+        "source_url": "https://finance.yahoo.com/quote/{symbol}/history",
+        "target": "last_resort_price_page_probe",
+        "required_env_vars": ["GRIT_ENABLE_YAHOO_HTML_HISTORY"],
+        "coverage_note": "Observation-only HTML page probe for old tickers when the chart endpoint returns 404. Use landed rows only when a parser extracts dated OHLCV rows; otherwise keep it as evidence.",
+        "pit_mode": "html_probe_observation",
+    },
+    {
+        "provider_id": "sec_edgar_8k",
+        "label": "SEC EDGAR 8-K Filings",
+        "source_url": "https://www.sec.gov/edgar/sec-api-documentation",
+        "target": "corporate_action_lifecycle_filings",
+        "required_env_vars": ["SEC_USER_AGENT"],
+        "coverage_note": "Free lifecycle filing evidence for mergers, acquisitions, ticker changes, and other material events; not an OHLCV source.",
+        "pit_mode": "filing_lifecycle_evidence",
+    },
+    {
+        "provider_id": "sec_companyfacts_edgartools",
+        "label": "SEC Companyfacts via Edgartools",
+        "source_url": "https://edgartools.readthedocs.io/en/latest/guides/financial-data/",
+        "target": "fundamentals",
+        "required_env_vars": ["SEC_USER_AGENT", "EDGAR_LOCAL_DATA_DIR"],
+        "coverage_note": "Python helper path over SEC companyfacts/XBRL; preserves filed-date PIT semantics when mapped through CIK aliases.",
+        "pit_mode": "sec_companyfacts_helper",
+    },
+    {
+        "provider_id": "openbb_sdk",
+        "label": "OpenBB SDK Provider Chain",
+        "source_url": "https://docs.openbb.co/odp/python/extensions/providers",
+        "target": "provider_chain_probe",
+        "required_env_vars": ["GRIT_ENABLE_OPENBB_PROVIDER"],
+        "coverage_note": "Optional provider wrapper for yfinance/Tiingo/FMP/Alpha/SEC extensions. It does not host data and still depends on underlying provider keys.",
+        "pit_mode": "optional_provider_wrapper",
+    },
+    {
+        "provider_id": "iex_cloud_legacy",
+        "label": "IEX Cloud Legacy/Sandbox",
+        "source_url": "https://iexcloud.org/",
+        "target": "legacy_observation",
+        "required_env_vars": ["IEX_TOKEN or IEX_CLOUD_TOKEN"],
+        "coverage_note": "Observation-only because IEX Cloud API products were retired in 2024; do not rely on it for L1/L2 readiness.",
+        "pit_mode": "sandbox_observation",
+    },
+]
+
 MATRIX_SOURCE_RECOMMENDATIONS = [
     {
         "provider_id": "github_sp500_historical_components",
@@ -109,6 +214,15 @@ def _classify_secret_value(value: str) -> str:
     return "present"
 
 
+def _classify_sec_user_agent(value: str) -> str:
+    stripped = value.strip()
+    if not stripped:
+        return "missing"
+    if stripped.startswith("<") and stripped.endswith(">"):
+        return "invalid_placeholder_wrapped"
+    return "present" if "@" in stripped else "invalid_missing_contact_email"
+
+
 def kaggle_credential_status() -> dict[str, Any]:
     api_token_status = _classify_secret_value(str(os.getenv("KAGGLE_API_TOKEN") or ""))
     username_status = _classify_secret_value(str(os.getenv("KAGGLE_USERNAME") or ""))
@@ -166,6 +280,52 @@ def polygon_credential_status() -> dict[str, Any]:
         "accepted_env_vars": accepted_env_vars,
         "configured_env_vars": configured_env_vars,
         "missing_env_vars": [] if configured else accepted_env_vars,
+        "secret_persistence": "disabled",
+    }
+
+
+def eodhd_credential_status() -> dict[str, Any]:
+    accepted_env_vars = ["EODHD_API_TOKEN", "EODHD_API_KEY"]
+    configured_env_vars = [name for name in accepted_env_vars if str(os.getenv(name) or "").strip()]
+    configured = bool(configured_env_vars)
+    return {
+        "configured": configured,
+        "credential_status": "present" if configured else "missing",
+        "required_env_vars": ["EODHD_API_TOKEN"],
+        "accepted_env_vars": accepted_env_vars,
+        "configured_env_vars": configured_env_vars,
+        "missing_env_vars": [] if configured else ["EODHD_API_TOKEN"],
+        "secret_persistence": "disabled",
+        "delisted_symbol_pattern": "{symbol}_old.US",
+    }
+
+
+def free_repair_route_status() -> dict[str, Any]:
+    sec_user_agent = _classify_sec_user_agent(str(os.getenv("SEC_USER_AGENT") or ""))
+    alpha_vantage = _classify_secret_value(str(os.getenv("ALPHAVANTAGE_API_KEY") or ""))
+    stooq_online = str(os.getenv("GRIT_ENABLE_STOOQ_ONLINE") or "").strip().lower() in {"1", "true", "yes", "on"}
+    yahoo_html_enabled = str(os.getenv("GRIT_ENABLE_YAHOO_HTML_HISTORY") or "").strip().lower() in {"1", "true", "yes", "on"}
+    openbb_enabled = str(os.getenv("GRIT_ENABLE_OPENBB_PROVIDER") or "").strip().lower() in {"1", "true", "yes", "on"}
+    iex_configured = bool(str(os.getenv("IEX_TOKEN") or "").strip() or str(os.getenv("IEX_CLOUD_TOKEN") or "").strip())
+    edgar_cache_dir = str(os.getenv("EDGAR_LOCAL_DATA_DIR") or "").strip()
+    return {
+        "sec_user_agent": sec_user_agent,
+        "alpha_vantage": alpha_vantage,
+        "stooq_online_enabled": stooq_online,
+        "yahoo_history_html_enabled": yahoo_html_enabled,
+        "openbb_enabled": openbb_enabled,
+        "iex_legacy_token_configured": iex_configured,
+        "edgar_local_data_dir_configured": bool(edgar_cache_dir),
+        "edgar_local_data_dir": edgar_cache_dir or None,
+        "python_packages": {
+            "edgar": _optional_import_status("edgar"),
+            "openbb": _optional_import_status("openbb"),
+            "openbb_yfinance": _optional_import_status("openbb_yfinance"),
+            "openbb_alpha_vantage": _optional_import_status("openbb_alpha_vantage"),
+            "openbb_fmp": _optional_import_status("openbb_fmp"),
+            "openbb_sec": _optional_import_status("openbb_sec"),
+        },
+        "recommendations": FREE_REPAIR_ROUTE_RECOMMENDATIONS,
         "secret_persistence": "disabled",
     }
 
@@ -404,6 +564,8 @@ def build_external_source_readiness(
             "critical_candidate_limit": POLYGON_CRITICAL_CANDIDATE_LIMIT,
             "target_types": ["price_history", "corporate_actions", "identity"],
         },
+        "free_repair_routes": free_repair_route_status(),
+        "eodhd_status": eodhd_credential_status(),
         "critical_polygon_candidates": critical_candidates,
         "remaining_blockers_by_source": _remaining_blockers_by_source(
             repair_plan=repair_plan,
@@ -415,6 +577,8 @@ def build_external_source_readiness(
             "search_terms": KAGGLE_SEARCH_TERMS,
             "kaggle": KAGGLE_DATASET_RECOMMENDATIONS,
             "matrix": MATRIX_SOURCE_RECOMMENDATIONS,
+            "free_l1_l2_repair_routes": FREE_REPAIR_ROUTE_RECOMMENDATIONS,
+            "paid_l1_l2_full_coverage": PAID_DATASET_RECOMMENDATIONS,
         },
     }
 
@@ -447,11 +611,14 @@ def preflight_report(cache_dir: str | Path | None = None) -> dict[str, Any]:
         },
         "kaggle_auth_status": kaggle_credential_status(),
         "polygon_status": polygon_credential_status(),
+        "eodhd_status": eodhd_credential_status(),
+        "free_repair_routes": free_repair_route_status(),
         "duckdb": _optional_import_status("duckdb"),
         "pyarrow": _optional_import_status("pyarrow"),
         "disk": disk,
         "recommended_search_terms": KAGGLE_SEARCH_TERMS,
         "recommended_datasets": KAGGLE_DATASET_RECOMMENDATIONS,
+        "recommended_paid_l1_l2_sources": PAID_DATASET_RECOMMENDATIONS,
     }
 
 

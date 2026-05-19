@@ -9,6 +9,38 @@
 
 ## [Unreleased]
 
+### 新增 (Added)
+
+- **免费 L1/L2 补数链路治理**: Provider Registry 与 PIT 外部源预检新增 Edgartools、SEC 8-K、Alpha Vantage delisted list、Stooq online、OpenBB SDK 与 IEX legacy/sandbox 路线状态，用于区分可实写补数、观测探针、缺凭证和退役端点。
+- **L1/L2 授权补数源治理**: Provider Registry 与 PIT 外部源预检新增 CRSP、Norgate US Equities、Sharadar、EODHD 候选源，用于标识价格、公司行动、退市历史、历史成分股与财务截面的 100% 覆盖授权路径。
+- **EODHD 退市补数适配器**: 新增受 `EODHD_API_TOKEN`/`EODHD_API_KEY` 门控的价格与公司行动 provider，支持 `SYMBOL.US` 与 `SYMBOL_old.US` 尝试、EOD OHLCV、分红和拆分证据解析。
+- **EODHD 修复链放行**: PIT `repair` 模式在 `allow_targeted_price_repair` 打开时会放行已授权的 EODHD，不再需要全局开启所有 paid optional provider 才能尝试退市标的补数。
+- **EODHD 历史深度诊断**: EODHD 返回免费订阅仅 1 年历史时会标记为订阅历史限制，不再误报为无历史数据。
+- **Phase 0 F1 原始库**: 新增 PIT 预处理批次、F1 原始字段目录与查询 API，F1 只按 PIT、覆盖率、可得时点、缺失阻塞和未来函数风险准入，缺失 L1 保持 `NaN` 并标记 `DATA_SOURCE_BLOCKED`。
+- **算子配置快照**: 新增 25 个核心算子注册表、默认算子配置草稿与不可变配置快照，因子工厂 run 会引用 `f1_catalog_snapshot_id` 与 `operator_config_snapshot_id`，避免读取运行态草稿。
+- **因子工厂每日自动挖掘、治理与检疫闭环**: Phase 1 自动矿机新增 `OperatorEngine` 抽象与 `pandas_bottleneck` 配置快照字段，每日预算默认 `10,000` 公式；Raw_F2 自动进入 WNZT 治理与检疫，发布准入必须满足 WNZT 完整、检疫 PASS 与 `ELIGIBLE`。
+- **因子库 F1 tab 与工厂配置弹层**: 因子库恢复 F1/F2/F3 tab 中的 F1 原始库专表，因子工厂新增算子配置弹层，覆盖算子启用、窗口空间、min_periods、阻塞字段策略、草稿保存和配置快照生成。
+- **F3 风险调整现金流回报 (精炼版)**: 因子库新增由 `s_val_cfp_ltm_raw` 与 `s_vol_downside_252d_rank` 分别 WNZT 处理后相除的 F3 发布因子，保留父因子血缘、WNZT 状态和 F3 命名展示。
+
+### 优化 (Changed)
+
+- **L2 财务截面分类降级**: `ds-fundamentals` 对无法取得 rawF2 基本面的缺口新增 `fundamental_gap_policy`，将 ETF/基金标记为 `financial_logic=N/A`，将无 XBRL 或旧退市标的标记为 `Thin_Data_Stock`，只开放量价类因子并保留真实 raw 覆盖率。
+- **SEC 生命周期证据**: SEC 8-K / report filing 行新增 EDGAR Archive 原文与主文档 URL，方便对无 XBRL 的旧退市标的下载原始 8-K 文本做人工或离线解析。
+- **因子发布命名规则**: 检疫发布与治理优化发布统一使用 F1/F2/F3 分层命名，F1 写入 `f1_*` 原始字段、F2 写入 `s_f2_*` 标准化特征、F3 写入 `s_alpha_*` 策略就绪因子，并在发布审计元数据中记录命名规则版本。
+- **推云增量门禁**: 日常推云拆分为 fast、impact、full 三档，fast 只跑精准增量测试并过滤 UI 证据资产，跨栈、契约或验证脚本改动会提示改用 impact/full。
+- **UI 验收前置门禁**: `GRIT_Coder` 与 `grit-review` 的 UI 交付流程新增设计冻结、状态语义一致性、业务文案、真实控件、桌面/移动截图目检和条件状态覆盖要求，减少交付后反复对齐。
+- **UI 验收签核门禁**: 设计锁定页面开发完成后必须逐项签核 Trace Matrix，只有全部验收项通过且无未批准偏离时，才能声明 UI 稿 100% 一致。
+
+### 修复 (Fixed)
+
+- **因子库旧 Alpha 命名与 WNZT 灯**: `a_alpha_custom_cur_raw` 统一显示为“风险调整现金流回报 (精炼版)”，并在 L3 检疫摘要包含时序降噪证据时点亮 T 状态灯，避免只显示 W/N/Z 三个灯。
+- **因子工厂配置弹层**: 算子注册 tab 对齐 Phase 0 UI 稿的三栏弹层、摘要卡、左侧 rail、右侧快照/准入/预算信息、核心算子库、两段算子清单、开关样式，并补齐分组筛选与搜索交互；打开弹层后默认进入算子注册。
+- **F1 原始库列表**: 阻塞列改为 `无阻塞/需复核/源阻塞/时点缺口` 的简洁中文风险口径，并与“可调用/审慎可调用/暂不可调用”准入状态保持一致，避免向用户暴露 `NaN`/填充值等工程处理规则；表格桌面端自适应列宽，移动端切换为字段卡片行，避免页面横向滚动和文字重叠。
+- **Stooq 与 SEC 免费补数探针**: Stooq 本地 ZIP 存在但缺退市 ticker 时继续走 online CSV fallback；SEC EDGAR 新增 8-K 公司行动探针，可为有价格覆盖的标的补充生命周期 filing evidence。
+- **因子库隔夜动量归类**: `Mean(Open / Close(t-1),21)` 统一修正为 `s_f2_mom_ovn_mean_21d`，旧 `m_alpha_overnight_21d_raw` 兼容跳转到新 ID，并在因子库归入 F2 改造库而不是 F3 组合库。
+- **F3 合成 Alpha 准入**: `s_alpha_ffblend_resid_mkt_rank` 种子因子显式保留 WNZT 处理链，并在组合因子策略预览中产出真实打分样本；旧 `s_alpha_ffblend_cur_rank` 作为别名兼容。
+- **因子库 F2 归类**: `Return(Close, 3/5/63/252)` 自动挖掘收益因子即使保留旧 `target_layer=L1` 诊断摘要，也会在因子库归入 F2 Raw Signal，而不是误归入 F1 原始库。
+
 ## [0.1.1-022] - 2026-05-18 - 新增因子工厂 B1-B4 生产台、L1 原始字段 PIT 准入，并优化推云验证门禁、优化计算快路径等
 
 ### 新增 (Added)

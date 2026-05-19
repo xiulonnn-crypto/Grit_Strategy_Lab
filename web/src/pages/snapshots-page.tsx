@@ -54,6 +54,8 @@ const SOURCE_LABELS: Record<string, string> = {
   FmpHistoricalConstituent: 'FMP 历史成分',
   nasdaq_wiki: 'Nasdaq WIKI 历史价格',
   NasdaqWiki: 'Nasdaq WIKI 历史价格',
+  eodhd: 'EODHD',
+  Eodhd: 'EODHD',
   openbb_yfinance: 'OpenBB Yahoo 行情',
   openbb_tiingo: 'OpenBB Tiingo 行情',
   openbb_alpha_vantage: 'OpenBB Alpha Vantage 修复',
@@ -481,7 +483,10 @@ function getUniverseDetailLines(item: ApiUniverseSnapshot): string[] {
 
 function getDatasetRefreshLabel(item: ApiDatasetSnapshot): string {
   const metadata = getSnapshotMetadata(item);
-  const covered = getMetadataCount(metadata, 'covered_symbol_count');
+  const covered =
+    item.id === 'ds-fundamentals'
+      ? getMetadataCount(metadata, 'effective_covered_symbol_count') ?? getMetadataCount(metadata, 'covered_symbol_count')
+      : getMetadataCount(metadata, 'covered_symbol_count');
   const total = getMetadataCount(metadata, 'total_symbol_count');
   if (covered !== null && total !== null && total > 0) {
     return `${covered.toLocaleString('zh-HK')}/${total.toLocaleString('zh-HK')}`;

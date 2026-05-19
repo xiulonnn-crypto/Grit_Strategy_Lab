@@ -111,6 +111,21 @@ def _run_fast_gate(repo_root: Path, remote: str | None, push_updates: list[list[
         command.extend(["-BaseRef", base_ref])
 
     completed = subprocess.run(command, cwd=repo_root, check=False)
+    if completed.returncode == 2:
+        print(
+            "pre-push: not fast eligible; fast gate did not run broad impacted tests automatically.",
+            file=sys.stderr,
+        )
+        print(
+            "pre-push: run `powershell -ExecutionPolicy Bypass -File .\\scripts\\codex-validate-impact.ps1 -Scope Committed` "
+            "for impacted validation, or `powershell -ExecutionPolicy Bypass -File .\\scripts\\codex-validate-full.ps1` "
+            "for release/full validation.",
+            file=sys.stderr,
+        )
+        print(
+            "pre-push: for an urgent operator-approved push, rerun git push with --no-verify.",
+            file=sys.stderr,
+        )
     return completed.returncode
 
 

@@ -38,6 +38,7 @@ export type AppRoute =
       kind: 'factor-model-builder';
       prefill?: {
         source?: string;
+        strategyType?: 'MULTI_FACTOR' | 'COMPOSITE_FACTOR';
         factorIds: string[];
         weights: number[];
         directions: string[];
@@ -67,12 +68,14 @@ function parseCompositionBacktestTab(value: string | null): 'diagnosis' | 'order
 }
 
 function parseFactorModelPrefill(searchParams: URLSearchParams): AppRoute & { kind: 'factor-model-builder' } {
-  const factorIds = (searchParams.get('factorIds') ?? searchParams.get('factor_ids') ?? '')
+  const strategyTypeValue = (searchParams.get('strategy_type') ?? searchParams.get('modelType') ?? searchParams.get('model_type') ?? '').toUpperCase();
+  const strategyType = strategyTypeValue === 'COMPOSITE_FACTOR' ? 'COMPOSITE_FACTOR' : strategyTypeValue === 'MULTI_FACTOR' ? 'MULTI_FACTOR' : undefined;
+  const factorIds = (searchParams.get('factorIds') ?? searchParams.get('factor_ids') ?? searchParams.get('factor_id') ?? '')
     .split(',')
     .map((item) => decodeURIComponent(item).trim())
     .filter(Boolean);
   if (!factorIds.length) {
-    return { kind: 'factor-model-builder' };
+    return strategyType ? { kind: 'factor-model-builder', prefill: { strategyType, factorIds: [], weights: [], directions: [] } } : { kind: 'factor-model-builder' };
   }
   const weights = (searchParams.get('weights') ?? '')
     .split(',')
@@ -88,6 +91,7 @@ function parseFactorModelPrefill(searchParams: URLSearchParams): AppRoute & { ki
     kind: 'factor-model-builder',
     prefill: {
       source: source ? decodeURIComponent(source) : undefined,
+      strategyType,
       factorIds,
       weights,
       directions,

@@ -1,0 +1,35 @@
+{
+  "package": "factor-phase0-f1-operator-config",
+  "status": "draft_for_review",
+  "created_at": "2026-05-19T14:18:00+08:00",
+  "reference": "C:/Fin/Grit_Strategy_Lab/artifacts/grit-design/factors-phase1-f1-f2-f3-ui.html",
+  "artifacts": {
+    "html_preview": "C:/Fin/Grit_Strategy_Lab/designs/factor-phase0-f1-operator-config/factor-phase0-f1-operator-ui-preview.html",
+    "f1_png": "C:/Fin/Grit_Strategy_Lab/designs/factor-phase0-f1-operator-config/factor-library-f1-raw-tab.png",
+    "factory_modal_png": "C:/Fin/Grit_Strategy_Lab/designs/factor-phase0-f1-operator-config/factor-factory-config-modal.png",
+    "spec": "C:/Fin/Grit_Strategy_Lab/designs/factor-phase0-f1-operator-config/factor-phase0-f1-operator-ui-spec.md"
+  },
+  "canonical_screens": [
+    {
+      "key": "factor-library-f1",
+      "route": "#/factors",
+      "html_query": "?screen=f1",
+      "viewport": "1960x1420"
+    },
+    {
+      "key": "factor-factory-config-modal",
+      "route": "#/factors/factory",
+      "html_query": "?screen=factory",
+      "viewport": "1960x1420"
+    }
+  ],
+  "implementation_scope": [
+    "F1 raw catalog tab on #/factors",
+    "Factor factory configuration modal on #/factors/factory",
+    "Operator registry default enablement and snapshot handoff contract"
+  ],
+  "approved_deviations": [
+    "F1 page uses mock business counts until backend catalog snapshot contract is implemented",
+    "The prior F2-active reference has been retargeted to F1-active state for Phase 0"
+  ]
+}

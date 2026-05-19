@@ -67,6 +67,14 @@ OPTIMIZATION_SELECTION_KEYS: dict[str, tuple[str, ...]] = {
         "rebalance_frequency",
         "neutralization_method",
     ),
+    "COMPOSITE_FACTOR": (
+        "top_n",
+        "rebalance_frequency",
+        "weighting_method",
+        "sector_cap_pct",
+        "max_position_pct",
+        "cap_redistribution_mode",
+    ),
 }
 
 OPTIMIZATION_IGNORED_KEYS = {
@@ -3352,10 +3360,10 @@ class BacktestPlatformService:
             )
             if str(item).strip()
         ]
-        if strategy_type != "MULTI_FACTOR" and not factor_ids:
+        if strategy_type not in {"MULTI_FACTOR", "COMPOSITE_FACTOR"} and not factor_ids:
             return snapshot
 
-        snapshot["strategy_type"] = "MULTI_FACTOR"
+        snapshot["strategy_type"] = strategy_type if strategy_type in {"MULTI_FACTOR", "COMPOSITE_FACTOR"} else "MULTI_FACTOR"
         if factor_ids and not snapshot.get("factor_ids"):
             snapshot["factor_ids"] = factor_ids
 
@@ -3423,7 +3431,7 @@ class BacktestPlatformService:
         normalized = dict(entry)
         parameters = dict(strategy.get("parameters") or {})
         strategy_type = str(strategy.get("strategy_type") or parameters.get("strategy_type") or "").upper()
-        if strategy_type != "MULTI_FACTOR":
+        if strategy_type not in {"MULTI_FACTOR", "COMPOSITE_FACTOR"}:
             return normalized
         key = str(normalized.get("key") or "").strip()
         if key not in {"rebalance_frequency", "scoring_method"}:
@@ -3540,7 +3548,7 @@ class BacktestPlatformService:
 
         parameters = dict(strategy.get("parameters") or {})
         strategy_type = str(strategy.get("strategy_type") or parameters.get("strategy_type") or "GENERAL").upper()
-        if strategy_type == "MULTI_FACTOR":
+        if strategy_type in {"MULTI_FACTOR", "COMPOSITE_FACTOR"}:
             factor_ids = [
                 str(item).strip()
                 for item in parameters.get("factor_ids") or []
@@ -3569,7 +3577,7 @@ class BacktestPlatformService:
                         "tag": "因子权重",
                     }
                 )
-            default_top_n = max(min(len(factor_ids) * 2, 10), 5)
+            default_top_n = 50 if strategy_type == "COMPOSITE_FACTOR" else max(min(len(factor_ids) * 2, 10), 5)
             top_n_current = max(
                 int(_as_float(parameters.get("top_n"), float(default_top_n)) or float(default_top_n)),
                 1,
@@ -20956,7 +20964,7 @@ class BacktestPlatformService:
         parameter_snapshot: Mapping[str, Any] | None = None,
     ) -> bool:
         parameters = dict(parameter_snapshot or strategy.get("parameters") or {})
-        return str(strategy.get("strategy_type") or parameters.get("strategy_type") or "").upper() == "MULTI_FACTOR" or bool(
+        return str(strategy.get("strategy_type") or parameters.get("strategy_type") or "").upper() in {"MULTI_FACTOR", "COMPOSITE_FACTOR"} or bool(
             parameters.get("factor_ids")
         )
 

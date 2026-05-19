@@ -347,6 +347,104 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS pit_preprocessing_runs (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL UNIQUE,
+        as_of_date TEXT NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'MANUAL',
+        status TEXT NOT NULL DEFAULT 'COMPLETED',
+        source_signature_json TEXT NOT NULL DEFAULT '{}',
+        provider_summary_json TEXT NOT NULL DEFAULT '{}',
+        blocker_summary_json TEXT NOT NULL DEFAULT '{}',
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        error_message TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS f1_raw_factor_catalog_snapshots (
+        id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL UNIQUE,
+        run_id TEXT NOT NULL,
+        as_of_date TEXT NOT NULL,
+        generated_at TEXT NOT NULL,
+        field_count INTEGER NOT NULL DEFAULT 0,
+        callable_count INTEGER NOT NULL DEFAULT 0,
+        blocked_count INTEGER NOT NULL DEFAULT 0,
+        timing_gap_count INTEGER NOT NULL DEFAULT 0,
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS f1_raw_factor_fields (
+        id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL,
+        factor_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL,
+        pit_layer TEXT NOT NULL,
+        source_refs_json TEXT NOT NULL DEFAULT '{}',
+        coverage_ratio REAL NOT NULL DEFAULT 0,
+        available_symbol_count INTEGER NOT NULL DEFAULT 0,
+        total_symbol_count INTEGER NOT NULL DEFAULT 0,
+        missing_symbols_json TEXT NOT NULL DEFAULT '[]',
+        publish_date_rule TEXT NOT NULL DEFAULT '',
+        available_at_rule TEXT NOT NULL DEFAULT '',
+        missing_policy TEXT NOT NULL DEFAULT '',
+        blocker_code TEXT,
+        admission_state TEXT NOT NULL DEFAULT 'OBSERVE',
+        future_leakage_risk TEXT NOT NULL DEFAULT 'REVIEW_REQUIRED',
+        last_updated_at TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        UNIQUE(snapshot_id, factor_id),
+        FOREIGN KEY (snapshot_id) REFERENCES f1_raw_factor_catalog_snapshots(snapshot_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS operator_registry_snapshots (
+        id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL UNIQUE,
+        generated_at TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'ACTIVE',
+        default_depth INTEGER NOT NULL DEFAULT 2,
+        daily_formula_budget INTEGER NOT NULL DEFAULT 10000,
+        compute_backend TEXT NOT NULL DEFAULT 'pandas_bottleneck',
+        window_space_json TEXT NOT NULL DEFAULT '[]',
+        enabled_operators_json TEXT NOT NULL DEFAULT '[]',
+        operator_count INTEGER NOT NULL DEFAULT 0,
+        min_periods_policy TEXT NOT NULL DEFAULT 'TS 默认 min_periods=n；TS_Return 需要 n+1 个有效观测；不足输出 NaN。',
+        blocked_field_policy TEXT NOT NULL DEFAULT '排除 DATA_SOURCE_BLOCKED 字段；缺失 L1 保持 NaN。',
+        governance_protocol_json TEXT NOT NULL DEFAULT '{}',
+        created_by TEXT NOT NULL DEFAULT 'operator',
+        notes TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS operator_registry_items (
+        id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL,
+        operator_id TEXT NOT NULL,
+        operator_group TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        display_name TEXT NOT NULL,
+        definition TEXT NOT NULL,
+        economic_meaning TEXT NOT NULL,
+        input_types_json TEXT NOT NULL DEFAULT '[]',
+        output_dimension TEXT NOT NULL,
+        default_params_json TEXT NOT NULL DEFAULT '{}',
+        allowed_window_space_json TEXT NOT NULL DEFAULT '[]',
+        min_periods_rule TEXT NOT NULL DEFAULT '',
+        domain_rules_json TEXT NOT NULL DEFAULT '{}',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        UNIQUE(snapshot_id, operator_id),
+        FOREIGN KEY (snapshot_id) REFERENCES operator_registry_snapshots(snapshot_id) ON DELETE CASCADE
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS factor_quarantine_candidates (
         id TEXT PRIMARY KEY,
         mining_candidate_id TEXT,
@@ -799,6 +897,11 @@ MIGRATION_COLUMNS = {
         ("offline_command", "TEXT"),
         ("offline_detail_json", "TEXT NOT NULL DEFAULT '{}'"),
     ],
+    "operator_registry_snapshots": [
+        ("governance_protocol_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("daily_formula_budget", "INTEGER NOT NULL DEFAULT 10000"),
+        ("compute_backend", "TEXT NOT NULL DEFAULT 'pandas_bottleneck'"),
+    ],
 }
 
 
@@ -861,6 +964,26 @@ POST_MIGRATION_INDEX_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_factor_factory_run_items_run_stage
     ON factor_factory_run_items(run_id, stage, status, updated_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_pit_preprocessing_runs_recent
+    ON pit_preprocessing_runs(as_of_date, updated_at, run_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_f1_raw_factor_catalog_recent
+    ON f1_raw_factor_catalog_snapshots(as_of_date, generated_at, snapshot_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_f1_raw_factor_fields_filter
+    ON f1_raw_factor_fields(snapshot_id, pit_layer, admission_state, category)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_operator_registry_snapshots_recent
+    ON operator_registry_snapshots(generated_at, snapshot_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_operator_registry_items_snapshot_group
+    ON operator_registry_items(snapshot_id, operator_group, enabled)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_factor_quarantine_candidates_status
