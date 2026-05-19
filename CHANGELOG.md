@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [0.1.1-023] - 2026-05-19 - 新增免费 L1/L2 补数链路治理、L1/L2 授权补数源治理等，并优化L2 财务截面分类降级、SEC 生命周期证据等
+
 ### 新增 (Added)
 
 - **免费 L1/L2 补数链路治理**: Provider Registry 与 PIT 外部源预检新增 Edgartools、SEC 8-K、Alpha Vantage delisted list、Stooq online、OpenBB SDK 与 IEX legacy/sandbox 路线状态，用于区分可实写补数、观测探针、缺凭证和退役端点。
