@@ -1,0 +1,64 @@
+[
+  {
+    "id": "a_alpha_custom_cur_raw",
+    "factor_family": "其他",
+    "has_composite_view": true,
+    "composite_view": {
+      "quality": {
+        "sharpe": null,
+        "sharpe_label": "待补",
+        "max_drawdown_pct": 45.53,
+        "max_drawdown_label": "45.53%",
+        "incremental_ir": 0.5527
+      },
+      "capacity": {
+        "status": "PASS",
+        "label": "容量通过",
+        "score": null,
+        "source": "turnover_derived"
+      },
+      "turnover_cost": {
+        "turnover_rate_weekly": 18,
+        "turnover_rate_weekly_label": "18.00%/周",
+        "cost_bps": null,
+        "cost_bps_label": "待补"
+      },
+      "style_exposure": {
+        "style_corr": 0.26,
+        "style_corr_label": "0.260",
+        "status": "PASS",
+        "label": "风格中性"
+      },
+      "execution": {
+        "portfolio_id": null,
+        "portfolio_label": "未绑定",
+        "execution_tag": null,
+        "execution_tag_label": "未绑定"
+      },
+      "blend_info": {
+        "component_count": 4,
+        "component_ids": [
+          "s_val_cfp_ltm_raw",
+          "s_vol_downside_252d_rank",
+          "s_val_cfp_ltm_raw/s_vol_downside_252d_rank",
+          "fq_c8496a044a83cb"
+        ],
+        "method_labels": [
+          "pairwise_cross_family",
+          "风格复合",
+          "风险调节",
+          "估值锚定",
+          "背离惩罚",
+          "残差/中性化",
+          "时序降噪"
+        ],
+        "label": "4 个 F2 成分"
+      },
+      "source": {
+        "summary_run_id": "fdiag_a_alpha_custom_cur_raw_publish",
+        "scoring_detail": true,
+        "data_health_coverage": 100
+      }
+    }
+  }
+]

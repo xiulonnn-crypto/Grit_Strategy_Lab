@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from uuid import uuid4
 
+from grit_backtest_platform.factor_research import FactorResearchService
+from grit_backtest_platform.storage import dumps
 from tests.api_test_support import assert_ok, create_test_client
 from tests.test_factor_mining_api import seed_factor_mining_price_snapshot, wait_for_factor_mining_job
 from tests.test_pit_preprocessing_f1_catalog import _seed_price_snapshot_with_l1_gap
@@ -61,16 +64,100 @@ def _factory_payload(candidate_count: int = 8) -> dict:
     }
 
 
+def _seed_online_f2_factor(
+    client,
+    *,
+    factor_id: str,
+    expression: str,
+    name: str = "Online Raw F2 Momentum",
+    source: str = "AUTO_MINED",
+    lifecycle_status: str = "VERIFIED",
+    diagnostic_status: str = "COMPLETED",
+) -> None:
+    now = "2026-05-20T08:00:00Z"
+    summary = {
+        "status": "COMPLETED",
+        "rank_ic": 0.041,
+        "pure_rank_ic": 0.041,
+        "ir": 0.91,
+        "coverage": 98.5,
+        "turnover": 12.0,
+    }
+    with client.app.state.service.storage.connection() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO factor_definitions (
+                id, name, market, universe, source, lifecycle_status, diagnostic_status,
+                direction, frequency, expression, tags_json, data_requirements_json,
+                institutional_note, created_by, created_at, updated_at
+            )
+            VALUES (?, ?, 'US', 'SP500', ?, ?, ?,
+                'HIGH_IS_BETTER', 'DAILY', ?, ?, ?, ?, 'factor_factory_test', ?, ?)
+            """,
+            (
+                factor_id,
+                name,
+                source,
+                lifecycle_status,
+                diagnostic_status,
+                expression,
+                json.dumps(["online", "f2"], ensure_ascii=False),
+                json.dumps(["adj_close", "price_history", "returns"], ensure_ascii=False),
+                "Online F2 seed for one-off refinement tests.",
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO factor_versions (id, factor_id, version, expression, status, metadata_json, created_at)
+            VALUES (?, ?, 1, ?, 'ACTIVE', '{}', ?)
+            """,
+            (f"{factor_id}-v1", factor_id, expression, now),
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO factor_diagnostic_runs (
+                id, factor_id, status, dataset_snapshot_id, universe_snapshot_id,
+                request_json, summary_json, artifact_refs_json, created_at, completed_at
+            )
+            VALUES (?, ?, 'COMPLETED', 'ds-price', 'un-sp500', '{}', ?, '{}', ?, ?)
+            """,
+            (f"fdiag_{factor_id}", factor_id, json.dumps(summary), now, now),
+        )
+
+
+def _factory_payload_with_operator_snapshot(
+    client,
+    *,
+    candidate_count: int = 8,
+    daily_formula_budget: int = 12,
+) -> dict:
+    config = assert_ok(client.get("/factor-factory/operator-config"))
+    draft = {
+        **config["draft"],
+        "enabled_operators": ["TS_Return", "TS_Rank"],
+        "window_space": [5, 21],
+        "daily_formula_budget": daily_formula_budget,
+    }
+    snapshot = assert_ok(client.post("/factor-factory/operator-config/snapshots", json=draft))
+    payload = _factory_payload(candidate_count=candidate_count)
+    payload["operator_config_snapshot_id"] = snapshot["snapshot_id"]
+    payload["f1_catalog_snapshot_id"] = config["latest_f1_catalog_snapshot"]["snapshot_id"]
+    return payload
+
+
 def test_factor_factory_overview_and_daily_start_are_idempotent() -> None:
     client, _db_path = create_test_client(_runtime_dir("factor-factory-start"))
     seed_factor_mining_price_snapshot(client)
+    payload = _factory_payload_with_operator_snapshot(client)
 
     initial = assert_ok(client.get("/factor-factory/overview"))
     assert initial["profile"]["status"] == "PAUSED"
     assert initial["profile"]["schedule_time"] == "14:00"
     assert initial["gate_policy"]["pit_gate_mode"] == "DIAGNOSTIC_ONLY"
 
-    started = assert_ok(client.post("/factor-factory/automation/start", json=_factory_payload()))
+    started = assert_ok(client.post("/factor-factory/automation/start", json=payload))
     assert started["profile"]["status"] == "ACTIVE"
     assert started["profile"]["timezone"] == "Asia/Hong_Kong"
     assert started["daily_run"]["trigger"] == "DAILY"
@@ -79,7 +166,7 @@ def test_factor_factory_overview_and_daily_start_are_idempotent() -> None:
     assert mining_job_id
     wait_for_factor_mining_job(client, mining_job_id)
 
-    duplicate = assert_ok(client.post("/factor-factory/automation/start", json=_factory_payload()))
+    duplicate = assert_ok(client.post("/factor-factory/automation/start", json=payload))
     assert duplicate["daily_run"]["id"] == started["daily_run"]["id"]
     assert duplicate["funnel"]["mined_candidates"] >= 1
 
@@ -87,8 +174,9 @@ def test_factor_factory_overview_and_daily_start_are_idempotent() -> None:
 def test_factor_factory_run_auto_intakes_and_executes_quarantine() -> None:
     client, _db_path = create_test_client(_runtime_dir("factor-factory-auto-quarantine"))
     seed_factor_mining_price_snapshot(client)
+    payload = _factory_payload_with_operator_snapshot(client, candidate_count=6, daily_formula_budget=12)
 
-    run_now = assert_ok(client.post("/factor-factory/run-now", json=_factory_payload(candidate_count=6)))
+    run_now = assert_ok(client.post("/factor-factory/run-now", json=payload))
     mining_job_id = run_now["manual_run"]["mining_job_id"]
     assert mining_job_id
     wait_for_factor_mining_job(client, mining_job_id)
@@ -98,37 +186,368 @@ def test_factor_factory_run_auto_intakes_and_executes_quarantine() -> None:
     assert overview["latest_run"]["request"]["generation_mode"] == "HYBRID_COMPOSITION"
     assert summary["generation_mode"] == "OPERATOR_ENGINE"
     assert summary["operator_engine"]["backend"] == "pandas_bottleneck"
-    assert summary["operator_engine"]["deduped_formula_count"] >= 1
+    operator_summary = summary["operator_engine"]
+    assert operator_summary["deduped_formula_count"] >= 1
+    assert operator_summary["raw_f2_batch_delivered_count"] == operator_summary["deduped_formula_count"]
+    assert operator_summary["refined_f2_batch_delivered_count"] == operator_summary["raw_f2_batch_delivered_count"]
+    assert operator_summary["f3_composition_candidate_count"] >= 1
+    assert operator_summary["composition_methods"]
+    assert operator_summary["raw_f2_batch_delivered_count"] >= operator_summary["top_preview_count"]
+    assert operator_summary["top_preview_count"] == 6
+    assert Path(operator_summary["artifact_refs"]["formula_manifest"]).exists()
+    assert Path(operator_summary["artifact_refs"]["raw_f2_matrix"]).exists()
     assert summary["auto_quarantine_status"] == "COMPLETED"
-    assert summary["auto_intake_count"] >= 1
-    assert summary["auto_quarantine_count"] >= 1
+    delivered_candidate_count = (
+        operator_summary["refined_f2_batch_delivered_count"]
+        + operator_summary.get("f3_composition_candidate_count", 0)
+    )
+    assert summary["auto_intake_count"] == delivered_candidate_count
+    assert summary["auto_quarantine_count"] == delivered_candidate_count
+    assert summary["auto_intake_skipped_raw_f2_needs_refinement_count"] == 0
     assert overview["phase2_contract"]["flow"] == "B1-B2-B3"
     assert overview["phase2_contract"]["l2_operator_chain"] == "F1 -> OperatorEngine -> Raw_F2 -> WNZT -> Refined F2"
-    assert [row["kind"] for row in overview["task_rows"]] == ["mining", "refinement", "quarantine"]
+    assert [row["kind"] for row in overview["task_rows"]] == ["mining", "composition"]
     assert {row["status"] for row in overview["task_rows"]} <= {"待开始", "进行中", "已完成"}
     assert overview["task_rows"][0]["target_layer"] == "L2"
-    assert "每日挖掘任务" in overview["task_rows"][0]["title"]
-    assert overview["monitor_summary"]["yesterday_formula_count"] >= 1
+    assert "因子挖掘任务" in overview["task_rows"][0]["title"]
+    assert overview["task_rows"][0]["flow"] == ["F1", "算子展开", "Raw_F2", "WNZT", "Refined_F2"]
+    assert overview["task_rows"][0]["metric_label"] == "Raw_F2因子交付量"
+    assert overview["task_rows"][0]["metric_value"] == operator_summary["raw_f2_batch_delivered_count"]
+    assert overview["task_rows"][0]["secondary_metric_label"] == "Refined_F2因子交付量"
+    assert overview["task_rows"][0]["secondary_metric_value"] == operator_summary["refined_f2_batch_delivered_count"]
+    assert overview["task_rows"][1]["target_layer"] == "L3"
+    assert overview["task_rows"][1]["metric_label"] == "组合候选量"
+    assert "因子组合任务" in overview["task_rows"][1]["title"]
+    assert overview["monitor_summary"]["formula_count"] == operator_summary["deduped_formula_count"]
+    assert overview["monitor_summary"]["initial_screen_pass_count"] == operator_summary["refined_f2_batch_delivered_count"]
     assert overview["scoring_candidates"] == []
     assert overview["quarantine_result_rows"]
     assert all(row["quarantine_result"] in {"PASS", "WARN", "FAIL"} for row in overview["quarantine_result_rows"])
+    assert all("?" not in row["reason_summary"] for row in overview["quarantine_result_rows"][:10])
     assert all(row["target_layer"] != "L1" for row in overview["quarantine_result_rows"] if "Return(" in row["factor_name"])
+    redundancy_pruning = overview["latest_run"]["summary"]["redundancy_pruning"]
+    assert redundancy_pruning["status"] == "COMPLETED"
+    publishable_factor_ids = [row["factor_id"] for row in overview["publishable_factors"]]
+    assert len(publishable_factor_ids) == len(set(publishable_factor_ids))
+    assert overview["publishable_factors"]
+    publishable_names = [row["display_name_cn"] for row in overview["publishable_factors"]]
+    assert len(publishable_names) == len(set(publishable_names))
+    assert all(
+        row["display_name_cn"] == row["base_display_name_cn"]
+        for row in overview["publishable_factors"]
+        if row.get("base_display_name_cn")
+    )
+    assert all(row.get("compact_display_name_cn") for row in overview["publishable_factors"])
+    publishable = overview["publishable_factors"][0]
+    assert publishable["candidate_metrics"]["rank_ic"]
+    assert publishable["scoring_detail"]["predictive_power"]["rank_ic"]
+    assert publishable["admission_report"]
+    assert publishable["raw_expression"].startswith("TS_Rank(TS_Return(")
+    assert publishable["refined_expression"] == publishable["expression"]
 
     quarantine = assert_ok(client.get(f"/factor-quarantine/candidates?source_job_id={mining_job_id}"))
     assert quarantine["items"]
+    assert quarantine["summary"]["total"] == delivered_candidate_count
+    assert quarantine["summary"]["page_size"] == 50
+    assert len(quarantine["items"]) == min(50, delivered_candidate_count)
     assert {item["status"] for item in quarantine["items"]}.isdisjoint({"PENDING", "RUNNING"})
     assert all(item["publish_status"] != "PUBLISHED" for item in quarantine["items"])
     assert any(item["candidate_metrics"].get("source_factor_ids") for item in quarantine["items"])
+    f3_item = next(item for item in quarantine["items"] if item["target_layer"] == "L3")
+    f3_metrics = f3_item["candidate_metrics"]
+    assert f3_metrics["composition_metadata"]["method_id"]
+    assert f3_metrics["composition_metadata"]["method_type"] in {
+        "LINEAR_WEIGHTING",
+        "RATIO_RISK_ADJUSTED",
+        "RESIDUAL_ORTHOGONAL",
+        "RANK_POOLING",
+        "FFBLEND_STYLE",
+        "DIVERGENCE_PENALTY",
+        "TIME_SERIES_DENOISE",
+    }
+    assert f3_metrics["composition_metadata"]["publish_boundary"] == "D2_QUARANTINE_ONLY"
+    assert f3_metrics["persisted_to_factor_definitions"] is False
+    assert f3_item["display_name_cn"] == f3_item["base_display_name_cn"]
+    assert f3_item.get("compact_display_name_cn")
+    raw_item = next(item for item in quarantine["items"] if item["target_layer"] == "L2")
+    assert raw_item["display_name_cn"] == raw_item["base_display_name_cn"]
+    assert raw_item.get("compact_display_name_cn")
+    assert raw_item["candidate_metrics"]["raw_f2"] is True
+    assert raw_item["candidate_metrics"]["refined_f2"] is True
+    assert raw_item["wnzt_complete"] is True
+    assert raw_item["raw_expression"].startswith("TS_Rank(TS_Return(")
+    assert raw_item["refined_expression"] == raw_item["expression"]
+    assert "Winsorize(" in raw_item["expression"]
+    assert "Neutralize(" in raw_item["expression"]
+    assert "ZScore(" in raw_item["expression"]
+    assert raw_item["wnzt_missing"] == []
+    assert "Raw_F2" not in str(raw_item.get("rejected_reason") or "")
+
+    second_page = assert_ok(client.get(f"/factor-quarantine/candidates?source_job_id={mining_job_id}&page=2&page_size=50"))
+    assert second_page["summary"]["page"] == 2
+    assert second_page["summary"]["total"] == quarantine["summary"]["total"]
+
+
+def test_factor_factory_refines_online_raw_f2_library_factors_to_quarantine() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-factory-online-raw-f2"))
+    seed_factor_mining_price_snapshot(client)
+    raw_factor_id = "s_f2_online_raw_mom_21d"
+    raw_expression = "TS_Rank(Return(Close, 21), 63)"
+    _seed_online_f2_factor(client, factor_id=raw_factor_id, expression=raw_expression)
+    snapshot_payload = _factory_payload_with_operator_snapshot(client, candidate_count=4, daily_formula_budget=8)
+
+    response = assert_ok(client.post(
+        "/factor-factory/refine-online-raw-f2",
+        json={
+            "gate_policy": snapshot_payload["gate_policy"],
+            "factor_ids": [raw_factor_id],
+            "candidate_limit": 10,
+            "operator_config_snapshot_id": snapshot_payload["operator_config_snapshot_id"],
+            "f1_catalog_snapshot_id": snapshot_payload["f1_catalog_snapshot_id"],
+        },
+    ))
+
+    run = response["online_raw_f2_run"]
+    mining_job_id = run["mining_job_id"]
+    assert run["summary"]["one_time_task"] is True
+    assert run["summary"]["generation_mode"] == "ONLINE_RAW_F2_REFINEMENT"
+    overview = assert_ok(client.get("/factor-factory/overview"))
+    operator_summary = overview["latest_run"]["summary"]["operator_engine"]
+    assert operator_summary["source"] == "online_factor_library_raw_f2"
+    assert operator_summary["raw_f2_batch_delivered_count"] == 1
+    assert operator_summary["refined_f2_batch_delivered_count"] == 1
+    assert operator_summary["source_factor_ids"] == [raw_factor_id]
+
+    manifest_path = Path(operator_summary["artifact_refs"]["formula_manifest"])
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["job_id"] == mining_job_id
+    assert manifest["source_job_id"] == mining_job_id
+    assert manifest["formula_count"] == 1
+    assert manifest["refined_count"] == 1
+    assert manifest["created_at"]
+    assert manifest["hash"]
+
+    quarantine = assert_ok(client.get(f"/factor-quarantine/candidates?source_job_id={mining_job_id}"))
+    assert quarantine["summary"]["total"] == 1
+    item = quarantine["items"][0]
+    metrics = item["candidate_metrics"]
+    assert metrics["source_factor_ids"] == [raw_factor_id]
+    assert metrics["raw_expression"] == raw_expression
+    assert metrics["refined_expression"] == item["expression"]
+    assert metrics["artifact_refs"]["source_factor_id"] == raw_factor_id
+    assert item["wnzt_complete"] is True
+    assert item["target_layer"] == "L2"
+    assert "Winsorize(" in item["expression"]
+    assert "Neutralize(" in item["expression"]
+    assert "ZScore(" in item["expression"]
+
+
+def test_factor_factory_refines_all_raw_f2_library_scope_not_only_active() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-factory-all-raw-f2"))
+    seed_factor_mining_price_snapshot(client)
+    snapshot_payload = _factory_payload_with_operator_snapshot(client, candidate_count=4, daily_formula_budget=8)
+    client.app.state.service._factor_research_service().ensure_default_factors()  # noqa: SLF001
+    archived_raw_factor_id = "x_archived_blocked_raw_f2"
+    _seed_online_f2_factor(
+        client,
+        factor_id=archived_raw_factor_id,
+        expression="Return(Close, 9)",
+        source="SYSTEM_SEED",
+        lifecycle_status="PRUNED",
+        diagnostic_status="BLOCKED_DATA",
+    )
+    active_alias_factor_id = "x_active_alias_raw_f2"
+    _seed_online_f2_factor(
+        client,
+        factor_id=active_alias_factor_id,
+        expression="Return(Close, 9)",
+        source="AUTO_MINED",
+        lifecycle_status="VERIFIED",
+        diagnostic_status="COMPLETED",
+    )
+    rows = client.app.state.service.storage.fetch_all(
+        """
+        SELECT id, expression
+        FROM factor_definitions
+        WHERE deleted_at IS NULL
+        """
+    )
+    expected_ids = {
+        row["id"]
+        for row in rows
+        if FactorResearchService._factor_tier_key(row) == "F2"
+        and FactorResearchService._factor_phase2_wnzt_missing(row.get("expression") or "")
+    }
+    assert "s_vol_252d_rank" in expected_ids
+    assert archived_raw_factor_id in expected_ids
+    assert active_alias_factor_id in expected_ids
+    assert len(expected_ids) > 1
+
+    response = assert_ok(client.post(
+        "/factor-factory/refine-online-raw-f2",
+        json={
+            "gate_policy": snapshot_payload["gate_policy"],
+            "candidate_limit": 100,
+            "operator_config_snapshot_id": snapshot_payload["operator_config_snapshot_id"],
+            "f1_catalog_snapshot_id": snapshot_payload["f1_catalog_snapshot_id"],
+        },
+    ))
+
+    operator_summary = response["online_raw_f2_run"]["summary"]["operator_engine"]
+    source_ids = set(operator_summary["source_factor_ids"])
+    assert operator_summary["raw_f2_batch_delivered_count"] == len(expected_ids)
+    assert operator_summary["refined_f2_batch_delivered_count"] == len(expected_ids)
+    assert source_ids == expected_ids
+    assert operator_summary["source_factor_scope"] == "all_raw_f2_factor_definitions"
+    assert "s_vol_252d_rank" in source_ids
+    assert archived_raw_factor_id in source_ids
+    assert active_alias_factor_id in source_ids
+
+    quarantine = assert_ok(client.get(f"/factor-quarantine/candidates?source_job_id={response['online_raw_f2_run']['mining_job_id']}&page_size=200"))
+    quarantine_source_ids = {
+        source_id
+        for item in quarantine["items"]
+        for source_id in item["candidate_metrics"].get("source_factor_ids", [])
+    }
+    assert source_ids == quarantine_source_ids
+    assert any(
+        {archived_raw_factor_id, active_alias_factor_id}.issubset(set(item["candidate_metrics"].get("source_factor_ids", [])))
+        for item in quarantine["items"]
+    )
+    assert all(
+        item["display_name_cn"] == item["base_display_name_cn"]
+        for item in quarantine["items"]
+        if item.get("base_display_name_cn")
+    )
+    overview = assert_ok(client.get("/factor-factory/overview"))
+    publishable_names = [row["display_name_cn"] for row in overview["publishable_factors"]]
+    assert len(publishable_names) == len(set(publishable_names))
+
+
+def test_factor_factory_online_raw_f2_refinement_skips_already_refined_f2() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-factory-online-refined-skip"))
+    seed_factor_mining_price_snapshot(client)
+    refined_expression = 'ZScore(Neutralize(Winsorize(TS_Rank(Return(Close, 21), 63), method="MAD"), by="industry,market_cap"))'
+    _seed_online_f2_factor(
+        client,
+        factor_id="s_f2_online_refined_mom_21d",
+        expression=refined_expression,
+        name="Online Refined F2 Momentum",
+    )
+    snapshot_payload = _factory_payload_with_operator_snapshot(client, candidate_count=4, daily_formula_budget=8)
+
+    response = assert_ok(client.post(
+        "/factor-factory/refine-online-raw-f2",
+        json={
+            "gate_policy": snapshot_payload["gate_policy"],
+            "factor_ids": ["s_f2_online_refined_mom_21d"],
+            "candidate_limit": 10,
+            "operator_config_snapshot_id": snapshot_payload["operator_config_snapshot_id"],
+            "f1_catalog_snapshot_id": snapshot_payload["f1_catalog_snapshot_id"],
+        },
+    ))
+
+    run = response["online_raw_f2_run"]
+    mining_job_id = run["mining_job_id"]
+    operator_summary = run["summary"]["operator_engine"]
+    assert operator_summary["raw_f2_batch_delivered_count"] == 0
+    assert operator_summary["refined_f2_batch_delivered_count"] == 0
+    manifest = json.loads(Path(operator_summary["artifact_refs"]["formula_manifest"]).read_text(encoding="utf-8"))
+    assert manifest["formula_count"] == 0
+    assert manifest["refined_count"] == 0
+    quarantine = assert_ok(client.get(f"/factor-quarantine/candidates?source_job_id={mining_job_id}"))
+    assert quarantine["summary"]["total"] == 0
+
+
+def test_factor_factory_publishable_recomputes_complex_f2_identity_and_skips_existing_factor() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-factory-publishable-existing"))
+    service = client.app.state.service
+    storage = service.storage
+    source_job_id = "mine_publishable_existing"
+    existing_expression = (
+        'ZScore(Neutralize(Winsorize(TS_Rank(TS_Return(f1_financial_release_timing, 3), 3), '
+        'method="MAD"), by="industry,market_cap"))'
+    )
+    _seed_online_f2_factor(
+        client,
+        factor_id="s_f2_mom_raw_cur_f1_financial_release_timing",
+        expression=existing_expression,
+        name="Published timing factor",
+    )
+    now = "2026-05-20T09:30:00Z"
+    candidate_rows = [
+        (
+            "fq_existing_identity",
+            existing_expression,
+            "f1_financial_release_timing",
+            0.061,
+        ),
+        (
+            "fq_new_identity",
+            'ZScore(Neutralize(Winsorize(Rank(s_mom_6m_rank / s_vol_downside_126d_raw), method="MAD"), by="industry,market_cap"))',
+            "m_mom_longdra_126d_rank",
+            0.059,
+        ),
+    ]
+    for candidate_id, expression, source_factor_id, score in candidate_rows:
+        metrics = {
+            "rank_ic": 0.05,
+            "ir": 0.2,
+            "score": score,
+            "fitness_score": score,
+            "target_layer": "L2",
+            "source_factor_ids": [source_factor_id],
+            "raw_f2": True,
+            "refined_f2": True,
+            "wnzt_complete": True,
+            "pipeline_version": "raw_refined_f2_v2",
+            "raw_expression": expression,
+            "refined_expression": expression,
+        }
+        storage.insert_json_row(
+            "factor_quarantine_candidates",
+            {
+                "id": candidate_id,
+                "mining_candidate_id": candidate_id.replace("fq_", "rawf2_"),
+                "source_mining_job_id": source_job_id,
+                "expression": expression,
+                "status": "PASSED",
+                "publish_status": "ELIGIBLE",
+                "gate_summary_json": dumps({"redundancy_pruning": "PASSED"}),
+                "cluster_id": f"cluster_{candidate_id}",
+                "candidate_metrics_json": dumps(metrics),
+                "failure_samples_json": dumps([]),
+                "pit_evidence_json": dumps({"status": "READY"}),
+                "publish_eligibility_json": dumps({"status": "ELIGIBLE"}),
+                "target_factor_id": "s_f2_mom_raw_cur_px",
+                "created_at": now,
+                "updated_at": now,
+                "published_at": None,
+                "rejected_reason": None,
+            },
+        )
+
+    publishable = service._factor_factory_publishable_factors(  # noqa: SLF001
+        source_mining_job_id=source_job_id,
+        fallback_items=[],
+    )
+
+    by_candidate = {row["candidate_id"]: row for row in publishable}
+    assert "fq_existing_identity" not in by_candidate
+    assert by_candidate["fq_new_identity"]["factor_id"] == "s_f2_mom_raw_cur_m_mom_longdra_126d_rank"
+    assert by_candidate["fq_new_identity"]["factor_id"] != "s_f2_mom_raw_cur_px"
 
 
 def test_factor_factory_run_now_does_not_enable_daily_automation() -> None:
     client, _db_path = create_test_client(_runtime_dir("factor-factory-run-now"))
     seed_factor_mining_price_snapshot(client)
+    payload = _factory_payload_with_operator_snapshot(client, candidate_count=6, daily_formula_budget=12)
 
     paused = assert_ok(client.post("/factor-factory/automation/pause"))
     assert paused["profile"]["status"] == "PAUSED"
 
-    run_now = assert_ok(client.post("/factor-factory/run-now", json=_factory_payload(candidate_count=6)))
+    run_now = assert_ok(client.post("/factor-factory/run-now", json=payload))
     assert run_now["profile"]["status"] == "PAUSED"
     assert run_now["manual_run"]["trigger"] == "MANUAL"
     assert run_now["manual_run"]["summary"]["daily_automation"] is False
@@ -148,10 +567,15 @@ def test_factor_factory_run_references_immutable_f1_and_operator_snapshots() -> 
         "TS_Corr",
     }
 
-    snapshot = assert_ok(client.post("/factor-factory/operator-config/snapshots", json=config["draft"]))
+    snapshot = assert_ok(client.post("/factor-factory/operator-config/snapshots", json={
+        **config["draft"],
+        "enabled_operators": ["TS_Return", "TS_Rank"],
+        "window_space": [5, 21],
+        "daily_formula_budget": 12,
+    }))
     assert snapshot["snapshot_id"]
-    assert snapshot["enabled_operators"] == ["TS_Return", "TS_Rank", "TS_Corr"]
-    assert snapshot["daily_formula_budget"] == 10000
+    assert snapshot["enabled_operators"] == ["TS_Return", "TS_Rank"]
+    assert snapshot["daily_formula_budget"] == 12
     assert snapshot["compute_backend"] == "pandas_bottleneck"
 
     payload = _factory_payload(candidate_count=6)
@@ -163,12 +587,87 @@ def test_factor_factory_run_references_immutable_f1_and_operator_snapshots() -> 
 
     assert summary["operator_config_snapshot_id"] == snapshot["snapshot_id"]
     assert summary["f1_catalog_snapshot_id"] == config["latest_f1_catalog_snapshot"]["snapshot_id"]
-    assert summary["enabled_operators"] == ["TS_Return", "TS_Rank", "TS_Corr"]
-    assert summary["daily_formula_budget"] == 10000
+    assert summary["enabled_operators"] == ["TS_Return", "TS_Rank"]
+    assert summary["daily_formula_budget"] == 12
     assert summary["compute_backend"] == "pandas_bottleneck"
     assert request_snapshot["operator_config_snapshot_id"] == snapshot["snapshot_id"]
     assert request_snapshot["f1_catalog_snapshot_id"] == config["latest_f1_catalog_snapshot"]["snapshot_id"]
     assert run_now["manual_run"]["config_signature"]
+
+
+def test_factor_factory_composition_snapshot_drives_enabled_f3_methods_and_signature() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-factory-composition-snapshot"))
+    seed_factor_mining_price_snapshot(client)
+
+    config = assert_ok(client.get("/factor-factory/operator-config"))
+    rank_pooling_methods = [
+        {**method, "enabled": method["id"] == "rank_pooling"}
+        for method in config["draft"]["composition_methods"]
+    ]
+    rank_pooling_snapshot = assert_ok(client.post("/factor-factory/operator-config/snapshots", json={
+        **config["draft"],
+        "enabled_operators": ["TS_Return", "TS_Rank"],
+        "window_space": [5, 21],
+        "daily_formula_budget": 4,
+        "composition_methods": rank_pooling_methods,
+    }))
+    default_snapshot = assert_ok(client.post("/factor-factory/operator-config/snapshots", json={
+        **config["draft"],
+        "enabled_operators": ["TS_Return", "TS_Rank"],
+        "window_space": [5, 21],
+        "daily_formula_budget": 4,
+    }))
+
+    payload = _factory_payload(candidate_count=4)
+    service = client.app.state.service
+    rank_request = service._factor_factory_request_with_composition_config(  # noqa: SLF001
+        payload["request"],
+        {
+            "operator_config_snapshot_id": rank_pooling_snapshot["snapshot_id"],
+            "f1_catalog_snapshot_id": config["latest_f1_catalog_snapshot"]["snapshot_id"],
+            **rank_pooling_snapshot,
+        },
+    )
+    default_request = service._factor_factory_request_with_composition_config(  # noqa: SLF001
+        payload["request"],
+        {
+            "operator_config_snapshot_id": default_snapshot["snapshot_id"],
+            "f1_catalog_snapshot_id": config["latest_f1_catalog_snapshot"]["snapshot_id"],
+            **default_snapshot,
+        },
+    )
+
+    assert rank_request["recipe_families"] == ["rank_pooling"]
+    assert [method["id"] for method in rank_request["composition_policy"]["composition_methods"]] == ["rank_pooling"]
+    rank_signature = service._factor_factory_config_signature(rank_request, payload["gate_policy"], rank_pooling_snapshot)  # noqa: SLF001
+    default_signature = service._factor_factory_config_signature(default_request, payload["gate_policy"], default_snapshot)  # noqa: SLF001
+    assert rank_signature != default_signature
+
+    payload["operator_config_snapshot_id"] = rank_pooling_snapshot["snapshot_id"]
+    payload["f1_catalog_snapshot_id"] = config["latest_f1_catalog_snapshot"]["snapshot_id"]
+    run_now = assert_ok(client.post("/factor-factory/run-now", json=payload))
+    mining_job_id = run_now["manual_run"]["mining_job_id"]
+    overview = assert_ok(client.get("/factor-factory/overview"))
+    operator_summary = overview["latest_run"]["summary"]["operator_engine"]
+    assert operator_summary["f3_composition_candidate_count"] == 1
+    quarantine = assert_ok(client.get(f"/factor-quarantine/candidates?source_job_id={mining_job_id}"))
+    method_ids = {
+        item["candidate_metrics"]["composition_metadata"]["method_id"]
+        for item in quarantine["items"]
+        if item["target_layer"] == "L3"
+    }
+    f3_expressions = [
+        item["expression"]
+        for item in quarantine["items"]
+        if item["target_layer"] == "L3"
+    ]
+    placeholders = ",".join("?" for _ in f3_expressions)
+    direct_writes = service.storage.fetch_one(
+        f"SELECT COUNT(*) AS count FROM factor_definitions WHERE expression IN ({placeholders})",
+        tuple(f3_expressions),
+    )["count"]
+    assert method_ids == {"rank_pooling"}
+    assert direct_writes == 0
 
 
 def test_factor_factory_run_excludes_data_source_blocked_f1_fields() -> None:
@@ -176,7 +675,12 @@ def test_factor_factory_run_excludes_data_source_blocked_f1_fields() -> None:
     _seed_price_snapshot_with_l1_gap(client)
 
     config = assert_ok(client.get("/factor-factory/operator-config"))
-    snapshot = assert_ok(client.post("/factor-factory/operator-config/snapshots", json=config["draft"]))
+    snapshot = assert_ok(client.post("/factor-factory/operator-config/snapshots", json={
+        **config["draft"],
+        "enabled_operators": ["TS_Return", "TS_Rank"],
+        "window_space": [5, 21],
+        "daily_formula_budget": 3,
+    }))
 
     payload = _factory_payload(candidate_count=3)
     payload["operator_config_snapshot_id"] = snapshot["snapshot_id"]
@@ -194,7 +698,10 @@ def test_factor_factory_run_excludes_data_source_blocked_f1_fields() -> None:
 def test_factor_factory_cancel_marks_factory_run_cancelled() -> None:
     client, _db_path = create_test_client(_runtime_dir("factor-factory-cancel"))
     seed_factor_mining_price_snapshot(client)
-    run_now = assert_ok(client.post("/factor-factory/run-now", json=_factory_payload(candidate_count=6)))
+    run_now = assert_ok(client.post(
+        "/factor-factory/run-now",
+        json=_factory_payload_with_operator_snapshot(client, candidate_count=6, daily_formula_budget=12),
+    ))
 
     cancelled = assert_ok(client.post(f"/factor-factory/runs/{run_now['manual_run']['id']}/cancel"))
 

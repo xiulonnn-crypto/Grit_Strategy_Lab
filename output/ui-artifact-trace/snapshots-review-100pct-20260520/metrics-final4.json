@@ -1,0 +1,439 @@
+{
+  "designMetrics": {
+    "mode": "design",
+    "url": "file:///C:/Fin/Grit_Strategy_Lab/designs/2026-05-20-snapshots-equity-redesign/spec.html",
+    "main": {
+      "top": 0,
+      "left": 240,
+      "width": 1720,
+      "height": 3237,
+      "bottom": 3237
+    },
+    "header": {
+      "top": 28,
+      "left": 268,
+      "width": 1664,
+      "height": 137,
+      "bottom": 165
+    },
+    "health": {
+      "top": 181,
+      "left": 268,
+      "width": 1664,
+      "height": 317,
+      "bottom": 498
+    },
+    "queue": {
+      "top": 514,
+      "left": 268,
+      "width": 1664,
+      "height": 480,
+      "bottom": 994
+    },
+    "queueRow": {
+      "top": 514,
+      "left": 268,
+      "width": 1664,
+      "height": 480,
+      "bottom": 994
+    },
+    "drill": {
+      "top": 1010,
+      "left": 268,
+      "width": 1664,
+      "height": 392,
+      "bottom": 1402
+    },
+    "ledger": {
+      "top": 1418,
+      "left": 268,
+      "width": 1664,
+      "height": 567.5,
+      "bottom": 1985.5
+    },
+    "foot": {
+      "top": 2001.5,
+      "left": 268,
+      "width": 1664,
+      "height": 617,
+      "bottom": 2618.5
+    },
+    "modalStage": {
+      "top": 2634.5,
+      "left": 268,
+      "width": 1664,
+      "height": 558.5,
+      "bottom": 3193
+    },
+    "healthGrid": {
+      "top": 254,
+      "left": 287,
+      "width": 1626,
+      "height": 227,
+      "bottom": 481
+    },
+    "healthCard": {
+      "top": 254,
+      "left": 287,
+      "width": 397.5,
+      "height": 227,
+      "bottom": 481
+    },
+    "impactRows": [
+      {
+        "top": 587,
+        "height": 90,
+        "width": 342
+      },
+      {
+        "top": 687,
+        "height": 90,
+        "width": 342
+      },
+      {
+        "top": 787,
+        "height": 90,
+        "width": 342
+      },
+      {
+        "top": 887,
+        "height": 90,
+        "width": 342
+      }
+    ],
+    "ledgerRowHeights": [
+      62.5,
+      62.5,
+      62.5,
+      62.5,
+      62.5,
+      62.5,
+      62.5
+    ],
+    "credRowHeights": [
+      59,
+      59,
+      59,
+      59,
+      59,
+      59,
+      58
+    ],
+    "healthCards": 0,
+    "queueItems": 3,
+    "drillCards": 4,
+    "ledgerRows": 7,
+    "credentialRows": 7,
+    "evidenceButtons": 7,
+    "drillButtons": 3,
+    "bodyOverflow": 0,
+    "scrollHeight": 3237,
+    "hasRawLeak": false,
+    "hasBondEvidenceRows": true,
+    "overflowEls": [
+      {
+        "tag": "DIV",
+        "cls": "evidence-block",
+        "text": "快照身份bond_fixed_income::UST_CURVE",
+        "clientWidth": 189,
+        "scrollWidth": 196
+      },
+      {
+        "tag": "DIV",
+        "cls": "evidence-block",
+        "text": "阻断码CORPORATE_ACTIONS_INCOMPLETE",
+        "clientWidth": 189,
+        "scrollWidth": 223
+      }
+    ]
+  },
+  "liveMetrics": {
+    "mode": "live",
+    "url": "http://127.0.0.1:4173/?v=1779273464427#/snapshots",
+    "main": {
+      "top": 28,
+      "left": 268,
+      "width": 1660,
+      "height": 2668.81,
+      "bottom": 2696.81
+    },
+    "header": {
+      "top": 28,
+      "left": 268,
+      "width": 1660,
+      "height": 137,
+      "bottom": 165
+    },
+    "health": {
+      "top": 185,
+      "left": 268,
+      "width": 1660,
+      "height": 346.63,
+      "bottom": 531.63
+    },
+    "queue": {
+      "top": 547.63,
+      "left": 268,
+      "width": 1264,
+      "height": 454,
+      "bottom": 1001.63
+    },
+    "queueRow": {
+      "top": 547.63,
+      "left": 268,
+      "width": 1660,
+      "height": 491,
+      "bottom": 1038.63
+    },
+    "drill": {
+      "top": 1054.63,
+      "left": 268,
+      "width": 1660,
+      "height": 396,
+      "bottom": 1450.63
+    },
+    "ledger": {
+      "top": 1466.63,
+      "left": 268,
+      "width": 1660,
+      "height": 575.5,
+      "bottom": 2042.13
+    },
+    "foot": {
+      "top": 2058.13,
+      "left": 268,
+      "width": 1660,
+      "height": 638.69,
+      "bottom": 2696.81
+    },
+    "modalStage": null,
+    "healthGrid": {
+      "top": 267,
+      "left": 289,
+      "width": 1618,
+      "height": 245.63,
+      "bottom": 512.63
+    },
+    "healthCard": {
+      "top": 267,
+      "left": 289,
+      "width": 395.5,
+      "height": 245.63,
+      "bottom": 512.63
+    },
+    "impactRows": [
+      {
+        "top": 629.63,
+        "height": 90,
+        "width": 338
+      },
+      {
+        "top": 729.63,
+        "height": 90,
+        "width": 338
+      },
+      {
+        "top": 829.63,
+        "height": 90,
+        "width": 338
+      },
+      {
+        "top": 929.63,
+        "height": 90,
+        "width": 338
+      }
+    ],
+    "ledgerRowHeights": [
+      62,
+      62,
+      62,
+      62,
+      62,
+      62,
+      62
+    ],
+    "credRowHeights": [
+      60,
+      60,
+      60,
+      60,
+      60,
+      60,
+      59
+    ],
+    "healthCards": 4,
+    "queueItems": 3,
+    "drillCards": 4,
+    "ledgerRows": 7,
+    "credentialRows": 7,
+    "evidenceButtons": 7,
+    "drillButtons": 2,
+    "bodyOverflow": 0,
+    "scrollHeight": 2729,
+    "hasRawLeak": false,
+    "hasBondEvidenceRows": true,
+    "overflowEls": []
+  },
+  "refreshModalMetrics": {
+    "rows": 4,
+    "hasL1L4": true,
+    "hasSource": true,
+    "rect": {
+      "top": 600.25,
+      "left": 390,
+      "width": 1180,
+      "height": 399.5
+    }
+  },
+  "evidenceModalMetrics": {
+    "hasCurve": true,
+    "hasEligible": true,
+    "hasAudit": true,
+    "hasSource": true,
+    "rect": {
+      "top": 340,
+      "left": 520,
+      "width": 920,
+      "height": 920
+    }
+  },
+  "mobileMetrics": {
+    "mode": "mobile",
+    "url": "http://127.0.0.1:4173/?v=1779273464428#/snapshots",
+    "main": {
+      "top": 38,
+      "left": 38,
+      "width": 314,
+      "height": 7701.94,
+      "bottom": 7739.94
+    },
+    "header": {
+      "top": 38,
+      "left": 38,
+      "width": 314,
+      "height": 299,
+      "bottom": 337
+    },
+    "health": {
+      "top": 357,
+      "left": 38,
+      "width": 314,
+      "height": 1182,
+      "bottom": 1539
+    },
+    "queue": {
+      "top": 1555,
+      "left": 38,
+      "width": 314,
+      "height": 859,
+      "bottom": 2414
+    },
+    "queueRow": {
+      "top": 1555,
+      "left": 38,
+      "width": 314,
+      "height": 1379,
+      "bottom": 2934
+    },
+    "drill": {
+      "top": 2950,
+      "left": 38,
+      "width": 314,
+      "height": 1475,
+      "bottom": 4425
+    },
+    "ledger": {
+      "top": 4441,
+      "left": 38,
+      "width": 314,
+      "height": 716.5,
+      "bottom": 5157.5
+    },
+    "foot": {
+      "top": 5173.5,
+      "left": 38,
+      "width": 314,
+      "height": 2566.44,
+      "bottom": 7739.94
+    },
+    "modalStage": null,
+    "healthGrid": {
+      "top": 496,
+      "left": 53,
+      "width": 284,
+      "height": 1028,
+      "bottom": 1524
+    },
+    "healthCard": {
+      "top": 496,
+      "left": 53,
+      "width": 284,
+      "height": 281,
+      "bottom": 777
+    },
+    "impactRows": [
+      {
+        "top": 2529,
+        "height": 90,
+        "width": 284
+      },
+      {
+        "top": 2629,
+        "height": 90,
+        "width": 284
+      },
+      {
+        "top": 2729,
+        "height": 90,
+        "width": 284
+      },
+      {
+        "top": 2829,
+        "height": 90,
+        "width": 284
+      }
+    ],
+    "ledgerRowHeights": [
+      62,
+      62,
+      62,
+      62,
+      62,
+      62,
+      62
+    ],
+    "credRowHeights": [
+      230,
+      212,
+      230,
+      230,
+      212,
+      230,
+      211
+    ],
+    "healthCards": 4,
+    "queueItems": 3,
+    "drillCards": 4,
+    "ledgerRows": 7,
+    "credentialRows": 7,
+    "evidenceButtons": 7,
+    "drillButtons": 2,
+    "bodyOverflow": 0,
+    "scrollHeight": 7778,
+    "hasRawLeak": false,
+    "hasBondEvidenceRows": true,
+    "overflowEls": [
+      {
+        "tag": "DIV",
+        "cls": "snapshots-ops-table-scroll",
+        "text": "快照层级状态覆盖 / 行数来源影响操作价格历史ds-priceL1 基础行情部分可用1,266/1,482 · 6,485,875 行混合来源 / 混合补源动量、波动、样本池下钻证据公司行动ds-co",
+        "clientWidth": 284,
+        "scrollWidth": 1120
+      }
+    ]
+  },
+  "liveErrors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ],
+  "liveFailed": []
+}

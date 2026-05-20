@@ -1,0 +1,68 @@
+[preview] Rebuilding frontend because of: startup
+[36mvite v5.4.21 [32mbuilding for production...[36m[39m
+transforming...
+[32m✓[39m 111 modules transformed.
+rendering chunks...
+computing gzip size...
+[2m.tmp/preview-dist-next/[22m[32mindex.html                                            [39m[1m[2m  0.56 kB[22m[1m[22m[2m │ gzip:  0.35 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/composition-backtest-config-page-CoUlErtP.css  [39m[1m[2m  3.69 kB[22m[1m[22m[2m │ gzip:  0.91 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/workspace-recent-runs-lane-b-tij6si_L.css      [39m[1m[2m  4.73 kB[22m[1m[22m[2m │ gzip:  1.25 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/asset-allocation-config-page-BYDEI2jD.css      [39m[1m[2m  6.76 kB[22m[1m[22m[2m │ gzip:  1.72 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/strategy-detail-page-CEQyVcUI.css              [39m[1m[2m  7.79 kB[22m[1m[22m[2m │ gzip:  1.68 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/workspace-page-lane-b-01mJkG8J.css             [39m[1m[2m  9.34 kB[22m[1m[22m[2m │ gzip:  2.14 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/composition-dashboard-page-C0w6RP7k.css        [39m[1m[2m  9.42 kB[22m[1m[22m[2m │ gzip:  1.80 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/runs-index-page-BFa1_9p5.css                   [39m[1m[2m 17.05 kB[22m[1m[22m[2m │ gzip:  3.84 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/composition-global-index-page-DAM_aBQX.css     [39m[1m[2m 17.90 kB[22m[1m[22m[2m │ gzip:  3.18 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/leg-inventory-view-Bz6Tqrwy.css                [39m[1m[2m 23.08 kB[22m[1m[22m[2m │ gzip:  4.21 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/composition-backtest-result-page-C0zrmXz2.css  [39m[1m[2m 25.15 kB[22m[1m[22m[2m │ gzip:  4.22 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/composition-workbench-page-BXWm3FkO.css        [39m[1m[2m 30.30 kB[22m[1m[22m[2m │ gzip:  5.38 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/optimization-lab-page-CRoFV3hp.css             [39m[1m[2m 31.97 kB[22m[1m[22m[2m │ gzip:  4.99 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/run-detail-page-COgKmwIF.css                   [39m[1m[2m 32.43 kB[22m[1m[22m[2m │ gzip:  6.04 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/composition-allocation-page-C0zypfJS.css       [39m[1m[2m 34.01 kB[22m[1m[22m[2m │ gzip:  5.56 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/composition-detail-page-BP4IflJs.css           [39m[1m[2m 42.05 kB[22m[1m[22m[2m │ gzip:  6.55 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/index-CYw5dWeJ.css                             [39m[1m[2m 48.85 kB[22m[1m[22m[2m │ gzip:  8.32 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/snapshots-page-BAqT5dzn.css                    [39m[1m[2m 60.10 kB[22m[1m[22m[2m │ gzip:  9.28 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/factor-phase2-pages-CmMWWaCx.css               [39m[1m[2m 63.04 kB[22m[1m[22m[2m │ gzip:  9.99 kB[22m
+[2m.tmp/preview-dist-next/[22m[35massets/factors-page-CQbE20fJ.css                      [39m[1m[2m 83.48 kB[22m[1m[22m[2m │ gzip: 13.55 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/optimization-routes-4bJI3wSL.js                [39m[1m[2m  0.42 kB[22m[1m[22m[2m │ gzip:  0.24 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/format-Bjk81z9u.js                             [39m[1m[2m  0.92 kB[22m[1m[22m[2m │ gzip:  0.46 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/composition-diagnostics-7ShGNcYb.js            [39m[1m[2m  1.40 kB[22m[1m[22m[2m │ gzip:  0.91 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/leg-inventory-page-DUto6Zfp.js                 [39m[1m[2m  3.92 kB[22m[1m[22m[2m │ gzip:  1.80 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/compose-display-qcdjFZNI.js                    [39m[1m[2m  6.23 kB[22m[1m[22m[2m │ gzip:  3.17 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/workspace-adapters-BlehicT0.js                 [39m[1m[2m  7.10 kB[22m[1m[22m[2m │ gzip:  3.42 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/composition-backtest-config-page-DnWXSRZE.js   [39m[1m[2m  7.37 kB[22m[1m[22m[2m │ gzip:  2.67 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/backtest-submit-page-cn-Cy5cXQJP.js            [39m[1m[2m 11.04 kB[22m[1m[22m[2m │ gzip:  4.02 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/factor-quarantine-page-DoLPE7dK.js             [39m[1m[2m 11.95 kB[22m[1m[22m[2m │ gzip:  3.98 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/factor-sandbox-page-C0ZVnSVw.js                [39m[1m[2m 14.17 kB[22m[1m[22m[2m │ gzip:  4.71 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/saved-strategy-leg-inventory-BdwQPgrQ.js       [39m[1m[2m 16.82 kB[22m[1m[22m[2m │ gzip:  5.12 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/asset-allocation-config-page-zpOOi4g2.js       [39m[1m[2m 18.55 kB[22m[1m[22m[2m │ gzip:  5.96 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/workspace-page-lane-b-DgBlXzp5.js              [39m[1m[2m 23.73 kB[22m[1m[22m[2m │ gzip:  7.95 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/composition-dashboard-page-ktJuujTc.js         [39m[1m[2m 24.78 kB[22m[1m[22m[2m │ gzip:  8.24 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/creation-session-page-DuK7MWfI.js              [39m[1m[2m 27.88 kB[22m[1m[22m[2m │ gzip:  8.25 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/strategy-detail-page-BoOq9eoC.js               [39m[1m[2m 34.13 kB[22m[1m[22m[2m │ gzip: 11.47 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/factor-model-builder-page-RVksCq-Q.js          [39m[1m[2m 36.08 kB[22m[1m[22m[2m │ gzip: 12.17 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/runs-index-page-DWKHzFAp.js                    [39m[1m[2m 36.94 kB[22m[1m[22m[2m │ gzip: 11.76 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/composition-global-index-page-BdzbLbWV.js      [39m[1m[2m 43.91 kB[22m[1m[22m[2m │ gzip: 12.84 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/composition-workbench-page-BM7yqFyk.js         [39m[1m[2m 50.15 kB[22m[1m[22m[2m │ gzip: 16.01 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/snapshots-page-DwXJp3C1.js                     [39m[1m[2m 51.79 kB[22m[1m[22m[2m │ gzip: 15.52 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/composition-allocation-page-BOhTkoE-.js        [39m[1m[2m 58.54 kB[22m[1m[22m[2m │ gzip: 18.67 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/composition-backtest-result-page-TKFEj7Zg.js   [39m[1m[2m 62.61 kB[22m[1m[22m[2m │ gzip: 19.24 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/run-detail-page-OWEik2PL.js                    [39m[1m[2m 66.30 kB[22m[1m[22m[2m │ gzip: 21.39 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/leg-inventory-view-CWJiwePv.js                 [39m[1m[2m 72.79 kB[22m[1m[22m[2m │ gzip: 20.34 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/factor-factory-page-rOaQUZdU.js                [39m[1m[2m 76.85 kB[22m[1m[22m[2m │ gzip: 22.77 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/composition-detail-page-CGqxaRYo.js            [39m[1m[2m 79.21 kB[22m[1m[22m[2m │ gzip: 24.70 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/optimization-lab-page-Ch2v7oX6.js              [39m[1m[2m108.47 kB[22m[1m[22m[2m │ gzip: 31.13 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/factors-page-BP290HLr.js                       [39m[1m[2m126.50 kB[22m[1m[22m[2m │ gzip: 43.05 kB[22m
+[2m.tmp/preview-dist-next/[22m[36massets/index-DrAn3T8L.js                              [39m[1m[2m277.64 kB[22m[1m[22m[2m │ gzip: 87.19 kB[22m
+[32m✓ built in 1.85s[39m
+[preview] Rebuild completed in 2.3s.
+Static preview listening on http://127.0.0.1:4173
+[preview] Auto rebuild is enabled for local frontend changes.
+[preview] Watching src recursively for rebuilds.
+[preview] Watching index.html for rebuilds.
+[preview] Watching package.json for rebuilds.
+[preview] Watching tsconfig.json for rebuilds.
+[preview] Watching vite.config.js for rebuilds.
+[preview] Watching vite.config.ts for rebuilds.
+
+[exit code=null signal=SIGTERM]

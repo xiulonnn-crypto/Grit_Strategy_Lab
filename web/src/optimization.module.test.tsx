@@ -2501,6 +2501,9 @@ describe("optimization module flow", () => {
     fireEvent.change(objectiveSelect!, {
       target: { value: "annualized_return" },
     });
+    await waitFor(() =>
+      expect(objectiveSelect?.value).toBe("annualized_return"),
+    );
     fireEvent.click(refilterButton!);
 
     await waitFor(() => {
@@ -2555,6 +2558,9 @@ describe("optimization module flow", () => {
     fireEvent.change(objectiveSelect!, {
       target: { value: "annualized_return" },
     });
+    await waitFor(() =>
+      expect(objectiveSelect?.value).toBe("annualized_return"),
+    );
     fireEvent.click(refilterButton!);
 
     await waitFor(() => {
@@ -2685,6 +2691,9 @@ describe("optimization module flow", () => {
     fireEvent.change(objectiveSelect!, {
       target: { value: "composite_score" },
     });
+    await waitFor(() =>
+      expect(objectiveSelect?.value).toBe("composite_score"),
+    );
     fireEvent.click(refilterButton!);
 
     await waitFor(() => {
@@ -3966,20 +3975,22 @@ describe("optimization module flow", () => {
       ),
     );
     expect(container.textContent).toContain("未通过 1");
-    expect(
-      (
-        container.querySelector(
-          "#optimization-results-constraint-max_drawdown_pct",
-        ) as HTMLInputElement | null
-      )?.value,
-    ).toBe("55");
-    expect(
-      (
-        container.querySelector(
-          "#optimization-results-constraint-stability",
-        ) as HTMLInputElement | null
-      )?.value,
-    ).toBe("2");
+    await waitFor(() => {
+      expect(
+        (
+          container.querySelector(
+            "#optimization-results-constraint-max_drawdown_pct",
+          ) as HTMLInputElement | null
+        )?.value,
+      ).toBe("55");
+      expect(
+        (
+          container.querySelector(
+            "#optimization-results-constraint-stability",
+          ) as HTMLInputElement | null
+        )?.value,
+      ).toBe("2");
+    });
   });
 
   it("keeps hero action buttons wrapped with consistent sizing instead of vertical text columns", async () => {
@@ -4563,8 +4574,8 @@ describe("optimization module flow", () => {
     await waitFor(() =>
       expect(container.querySelector(".optimization-config-grid")).not.toBeNull(),
     );
-    expect(container.textContent).toContain("因子权重 · 12-1月截面动量排名");
-    expect(container.textContent).toContain("因子权重 · 滚动市盈率倒数 (LTM)");
+    expect(container.textContent).toContain("因子权重 · Rank-12-1月截面动量 (排序)");
+    expect(container.textContent).toContain("因子权重 · 盈利收益率 (LTM) (原始)");
     expect(container.textContent).toContain("持仓数量");
     expect(container.textContent).toContain("中性化方法");
     expect(container.textContent).not.toContain("是否启用行业中性化");

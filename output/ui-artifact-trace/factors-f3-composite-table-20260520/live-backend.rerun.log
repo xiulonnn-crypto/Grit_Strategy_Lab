@@ -1,0 +1,12 @@
+INFO:     Started server process [7596]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:54888 - "GET /healthz HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54891 - "GET /healthz HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54893 - "GET /healthz HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54891 - "GET /factors HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61529 - "GET /factors?lifecycle=all HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56765 - "GET /factors?lifecycle=all HTTP/1.1" 200 OK
+
+[exit code=null signal=SIGTERM]

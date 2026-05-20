@@ -106,7 +106,7 @@ function f1CatalogPayload() {
 
 describe('FactorLibraryPage Phase 0 F1 catalog', () => {
   it('renders the dedicated F1 raw catalog tab with PIT-only admission copy and table columns', async () => {
-    window.location.hash = '#/factors';
+    window.location.hash = '#/factors?layer=F1';
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = new URL(String(input));
       if (url.pathname === '/factors/f1-catalog') return jsonResponse(f1CatalogPayload());

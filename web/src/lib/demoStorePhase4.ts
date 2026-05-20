@@ -2312,7 +2312,7 @@ function buildDemoFactors(): ApiFactorListItem[] {
   const seedFactors: Array<Omit<ApiFactorListItem, 'ic_sparkline' | 'ic_sparkline_window' | 'readiness_blockers' | 'gate_fix_target'>> = [
     {
       id: 's_mom_12m1m_rank',
-      name: '12-1月截面动量排名',
+      name: 'Rank-12-1月截面动量 (排序)',
       market: 'US',
       universe: 'SP500',
       source: 'SYSTEM_SEED',
@@ -2330,7 +2330,7 @@ function buildDemoFactors(): ApiFactorListItem[] {
     },
     {
       id: 's_vol_252d_rank',
-      name: '252日年化波动率排名',
+      name: 'Rank-252日波动率 (排序)',
       market: 'US',
       universe: 'SP500',
       source: 'SYSTEM_SEED',
@@ -2348,7 +2348,7 @@ function buildDemoFactors(): ApiFactorListItem[] {
     },
     {
       id: 's_val_ep_ltm_raw',
-      name: '滚动市盈率倒数 (LTM)',
+      name: '盈利收益率 (LTM) (原始)',
       market: 'US',
       universe: 'SP500',
       source: 'SYSTEM_SEED',
@@ -2365,7 +2365,7 @@ function buildDemoFactors(): ApiFactorListItem[] {
     },
     {
       id: 's_val_bp_latest_raw',
-      name: '最新账面市值比',
+      name: '账面市值比 (最新) (原始)',
       market: 'US',
       universe: 'SP500',
       source: 'SYSTEM_SEED',
@@ -2382,7 +2382,7 @@ function buildDemoFactors(): ApiFactorListItem[] {
     },
     {
       id: 's_qlty_fcfy_ttm_raw',
-      name: '自由现金流收益率 (TTM)',
+      name: '自由现金流收益率 (TTM) (原始)',
       market: 'US',
       universe: 'SP500',
       source: 'SYSTEM_SEED',
@@ -2399,7 +2399,7 @@ function buildDemoFactors(): ApiFactorListItem[] {
     },
     {
       id: 's_qlty_roe_ltm_raw',
-      name: 'LTM 净资产收益率',
+      name: '净资产收益率 (LTM) (原始)',
       market: 'US',
       universe: 'SP500',
       source: 'SYSTEM_SEED',
@@ -2416,7 +2416,7 @@ function buildDemoFactors(): ApiFactorListItem[] {
     },
     {
       id: 's_size_cur_log',
-      name: '即时对数总市值',
+      name: '对数市值 (当前) (原始)',
       market: 'US',
       universe: 'SP500',
       source: 'SYSTEM_SEED',
@@ -2521,13 +2521,13 @@ function buildFactorGovernanceOverview(items = buildDemoFactors()): ApiFactorGov
         factor_ids: ['s_val_bp_latest_raw'],
         affected_factor_ids: ['s_val_bp_latest_raw'],
         keep_factor_id: 's_val_ep_ltm_raw',
-        offline_reason: '冗余裁剪：同簇高相关且弱于滚动市盈率倒数 (LTM)',
+        offline_reason: '冗余裁剪：同簇高相关且弱于盈利收益率 (LTM) (原始)',
         offline_detail: {
           keep_factor_id: 's_val_ep_ltm_raw',
           correlation: 0.93,
           comparison: {
-            candidate: { factor_id: 's_val_bp_latest_raw', factor_name: '最新账面市值比' },
-            mvp: { factor_id: 's_val_ep_ltm_raw', factor_name: '滚动市盈率倒数 (LTM)' },
+            candidate: { factor_id: 's_val_bp_latest_raw', factor_name: '账面市值比 (最新) (原始)' },
+            mvp: { factor_id: 's_val_ep_ltm_raw', factor_name: '盈利收益率 (LTM) (原始)' },
           },
         },
         severity: 'warning',
@@ -2565,13 +2565,13 @@ function buildFactorGovernanceOverview(items = buildDemoFactors()): ApiFactorGov
         command: 'PUBLISH_OPTIMIZED_FACTOR',
         label: '因子优化',
         title: '下行波动率代理（252日） 生成反向因子待入库',
-        detail: '分组收益连续倒挂，已生成反向下行波动率代理并再次诊断为 Grade B，等待确认入库。',
+        detail: '分组收益连续倒挂，已生成反向下行风险 Alpha 并再次诊断为 Grade B，等待确认入库。',
         factor_ids: ['s_vol_downside_252d_rank'],
         affected_factor_ids: ['s_vol_downside_252d_rank'],
         severity: 'info',
         optimized_factor: {
           id: 's_alpha_vol_downsiderev_std_rk',
-          name: '反向下行波动率代理（252日）',
+          name: '反向下行风险 Alpha (精炼)',
           expression: 'DownsideStd(Return(Close, 1), 252)',
           direction: 'HIGH_IS_BETTER',
           grade: 'B',
@@ -3798,7 +3798,7 @@ export const demoApi: DemoApi = {
         ? {
             ...created,
             id: 's_alpha_vol_downsiderev_std_rk',
-            name: '反向下行波动率代理（252日）',
+            name: '反向下行风险 Alpha (精炼)',
             source: 'MANUAL' as const,
             lifecycle_status: 'VERIFIED' as const,
             diagnostic_status: 'COMPLETED' as const,

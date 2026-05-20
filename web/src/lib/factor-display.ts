@@ -1,3 +1,7 @@
+export const FACTOR_DISPLAY_NAME_SCHEMA_VERSION = 'factor_display_name_v4';
+export const FACTOR_DISPLAY_NAME_PROTOCOL_VERSION = 'factor_display_name_v4_structured';
+export const FACTOR_DISPLAY_NAME_DEDUPE_STRATEGY = 'parameter_first_then_sha8';
+
 const CANONICAL_FACTOR_ALIASES: Record<string, string> = {
   momentum_12m_1m: 's_mom_12m1m_rank',
   value_ep_ltm: 's_val_ep_ltm_raw',
@@ -7,67 +11,83 @@ const CANONICAL_FACTOR_ALIASES: Record<string, string> = {
   quality_roe_ltm: 's_qlty_roe_ltm_raw',
   quality_fcf_yield: 's_qlty_fcfy_ttm_raw',
   m_alpha_overnight_21d_raw: 's_f2_mom_ovn_mean_21d',
+  s_alpha_ffblend_cur_rank: 's_alpha_ffblend_resid_mkt_rank',
 };
 
 const CANONICAL_FACTOR_DISPLAY_NAMES: Record<string, string> = {
-  a_alpha_custom_cur_raw: '风险调整现金流回报 (精炼版)',
-  a_mom_ret_126d_z: '126日收益动量标准化因子',
-  s_f2_mom_ovn_mean_21d: '21日隔夜动量均值',
-  s_alpha_ffblend_cur_rank: '法玛-弗伦奇风格合成阿尔法排名',
-  s_alpha_ffblend_resid_mkt_rank: '法玛-弗伦奇市场残差合成阿尔法排名',
-  s_alpha_valvol_blend_resid_std_rk: '风险调整现金流回报 (精炼版)',
-  s_mom_12m1m_rank: '12-1月截面动量排名',
-  s_mom_6m_rank: '6月截面动量排名',
-  s_val_ep_ltm_raw: '滚动市盈率倒数 (LTM)',
-  s_val_bp_latest_raw: '最新账面市值比',
-  s_qlty_roe_ltm_raw: '滚动净资产收益率 (LTM)',
-  s_qlty_fcfy_ttm_raw: '自由现金流收益率 (TTM)',
-  s_vol_252d_rank: '252日实现波动率排名',
-  s_vol_downside_252d_rank: '252日下行波动率排名',
-  s_size_cur_log: '市值规模对数',
-  s_liq_turnover_20d_rank: '20日换手率流动性排名',
-  s_beta_market_252d_raw: '252日市场贝塔',
+  a_alpha_custom_cur_raw: '自定义 Alpha 信号 (原始)',
+  a_mom_ret_126d_z: 'ZScore-126日收益率 (精炼)',
+  f1_price_close: '交易所-复权收盘价 (原始)',
+  f1_price_adjclose: '交易所-复权收盘价 (原始)',
+  f1_return_1d_base: '交易所-1日收益率基准 (原始)',
+  f1_short_balance: 'FINRA-空头余额 (原始)',
+  f1_short_vol: 'FINRA-当日卖空成交量 (原始)',
+  s_price_adjclose_cur_raw: '交易所-复权收盘价 (原始)',
+  s_size_mcap_cur_raw: '交易所-总市值 (原始)',
+  s_f2_mom_ovn_mean_21d: '隔夜动量均值 (21日) (原始)',
+  s_mom_12m1m_rank: 'Rank-12-1月截面动量 (排序)',
+  s_mom_6m_rank: 'Rank-6月截面动量 (排序)',
+  s_val_ep_ltm_raw: '盈利收益率 (LTM) (原始)',
+  s_val_bp_latest_raw: '账面市值比 (最新) (原始)',
+  s_val_cfp_ltm_raw: '现金流收益率 (LTM) (原始)',
+  s_val_evocf_ltm_raw: '经营现金流企业价值比 (LTM) (原始)',
+  s_qlty_roe_ltm_raw: '净资产收益率 (LTM) (原始)',
+  s_qlty_fcfy_ttm_raw: '自由现金流收益率 (TTM) (原始)',
+  s_qlty_leverage_cur_raw: '杠杆率 (当前) (原始)',
+  s_inv_assetgrowth_1y_rank: 'Rank-1年资产增长率 (排序)',
+  s_inv_capex_ltm_raw: '资本开支率 (LTM) (原始)',
+  s_vol_252d_rank: 'Rank-252日波动率 (排序)',
+  s_vol_downside_252d_rank: 'Rank-252日下行波动率 (排序)',
+  s_liq_turnover_20d_rank: 'Rank-20日换手率 (排序)',
+  s_liq_amihud_20d_rank: 'Rank-20日非流动性 (排序)',
+  s_beta_market_252d_raw: '市场 Beta (252日) (原始)',
+  s_size_cur_log: '对数市值 (当前) (原始)',
+  s_alpha_ffblend_resid_mkt_rank: 'GSL-多因子全能动力',
+  s_alpha_valvol_blend_resid_std_rk: '风险调整现金流回报 (精炼)',
+  s_alpha_vol_downsiderev_std_rk: '反向下行风险 Alpha (精炼)',
 };
 
 export type FactorDisplayNameLookup = Record<string, string | null | undefined>;
 
 const FACTOR_TOKEN_LABELS: Record<string, string> = {
-  a: '自动挖掘',
-  s: '截面',
-  m: '市场',
-  alpha: '阿尔法',
-  amihud: 'Amihud流动性',
+  alpha: 'Alpha',
+  amihud: '非流动性',
   assetgrowth: '资产增长',
-  beta: '贝塔',
+  beta: 'Beta',
   bp: '账面市值比',
   capex: '资本开支',
+  cfp: '现金流收益率',
+  close: '收盘价',
   cur: '当前',
   downside: '下行',
-  ep: '盈利价格比',
+  ep: '盈利收益率',
+  f1: 'F1',
   f2: 'F2',
   fcfy: '自由现金流收益率',
-  ffblend: '法玛-弗伦奇风格合成',
+  ffblend: '多因子融合',
   inv: '投资',
   latest: '最新',
   liq: '流动性',
   log: '对数',
-  ltm: '最近十二个月',
+  ltm: 'LTM',
   market: '市场',
+  mcap: '总市值',
   mom: '动量',
   mean: '均值',
   ovn: '隔夜',
+  price: '价格',
   qlty: '质量',
-  rank: '排名',
-  raw: '原始值',
-  ret: '收益',
+  rank: '排序',
+  raw: '原始',
+  ret: '收益率',
   roe: '净资产收益率',
   size: '规模',
   turnover: '换手率',
-  ttm: '过去十二个月',
-  val: '估值',
-  valvol: '价值/波动比',
+  ttm: 'TTM',
+  val: '价值',
+  valvol: '价值波动',
   vol: '波动率',
-  z: 'Z分数',
+  z: 'ZScore',
 };
 
 function normalizeFactorId(factorId: unknown): string {
@@ -114,7 +134,7 @@ function describeRawFactorId(value: string): string | null {
   const labels = tokens
     .map((token) => formatWindowToken(token) ?? FACTOR_TOKEN_LABELS[token] ?? null)
     .filter((label): label is string => Boolean(label));
-  return labels.length ? labels.join('') : null;
+  return labels.length ? `${labels.join('')} (原始)` : null;
 }
 
 function isEnglishOnlyFallback(value: string): boolean {
@@ -146,7 +166,21 @@ export function formatFactorDisplayName(
     return fallback;
   }
 
-  return normalizedFactorId || fallback || '未命名因子';
+  return normalizedFactorId || fallback || '未知因子';
+}
+
+export function formatStructuredFactorDisplayName(input: {
+  factorId?: unknown;
+  fallbackName?: string | null;
+  baseDisplayNameCn?: string | null;
+  nameDedupeSuffix?: string | null;
+}): string {
+  const base = String(input.baseDisplayNameCn ?? '').trim();
+  const suffix = String(input.nameDedupeSuffix ?? '').trim();
+  if (base) {
+    return suffix && suffix.startsWith('[') && !base.includes(suffix) ? `${base} ${suffix}` : base;
+  }
+  return formatFactorDisplayName(input.factorId, input.fallbackName);
 }
 
 export function factorIdFromWeightKey(key: string): string | null {
@@ -165,5 +199,5 @@ export function formatFactorList(factorIds: unknown[], lookup?: FactorDisplayNam
   const rendered = factorIds
     .map((factorId) => formatFactorDisplayName(factorId, fallbackForFactorId(factorId, lookup)))
     .filter((item) => item.trim().length > 0);
-  return rendered.length ? rendered.join(' / ') : '未配置因子';
+  return rendered.length ? rendered.join(' / ') : '未选择因子';
 }

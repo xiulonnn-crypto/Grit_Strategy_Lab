@@ -1,0 +1,1433 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>数据快照治理台</title>
+  <style>
+    :root {
+      --bg-main: #f0f2f5;
+      --bg-surface: #ffffff;
+      --bg-soft: #fbfcfd;
+      --bg-subtle: #f9fafb;
+      --primary: #1f877b;
+      --primary-strong: #176b61;
+      --primary-soft: #e6f4f1;
+      --benchmark: #4c78c7;
+      --success: #2b8a3e;
+      --success-soft: #ecfdf3;
+      --warning: #b86813;
+      --warning-soft: #fff7e8;
+      --danger: #c45c4f;
+      --danger-soft: #fff8f7;
+      --border: #e5e7eb;
+      --border-soft: #eef2f4;
+      --border-strong: #d7e1e5;
+      --text-title: #111827;
+      --text-main: #1f2937;
+      --text-sub: #64748b;
+      --text-muted: #94a3b8;
+      --shadow-card: 0 1px 3px rgba(15, 23, 42, 0.05), 0 1px 2px rgba(15, 23, 42, 0.04);
+      --shadow-float: 0 16px 36px rgba(15, 23, 42, 0.12);
+      color-scheme: light;
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg-main);
+      color: var(--text-main);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 240px minmax(0, 1fr);
+    }
+
+    .sidebar {
+      background: #ffffff;
+      border-right: 1px solid var(--border);
+      padding: 24px 18px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+    }
+
+    .brand {
+      display: grid;
+      gap: 4px;
+      margin-bottom: 28px;
+    }
+
+    .brand strong {
+      font-size: 18px;
+      line-height: 24px;
+      color: var(--text-title);
+    }
+
+    .brand span,
+    .nav-group span {
+      color: var(--text-sub);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .nav {
+      display: grid;
+      gap: 22px;
+    }
+
+    .nav-group {
+      display: grid;
+      gap: 8px;
+    }
+
+    .nav-item {
+      height: 36px;
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      border-radius: 10px;
+      color: var(--text-main);
+      font-weight: 600;
+    }
+
+    .nav-item.is-active {
+      background: var(--primary-soft);
+      color: var(--primary-strong);
+    }
+
+    .main {
+      padding: 28px 28px 44px;
+      min-width: 0;
+    }
+
+    .page {
+      max-width: 1664px;
+      margin: 0 auto;
+      display: grid;
+      gap: 16px;
+    }
+
+    .header {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 20px 22px 16px;
+      box-shadow: var(--shadow-card);
+      display: grid;
+      gap: 14px;
+    }
+
+    .header-row,
+    .section-head,
+    .card-head,
+    .table-toolbar {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .eyebrow {
+      margin: 0 0 5px;
+      color: var(--primary-strong);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 28px;
+      line-height: 34px;
+      color: var(--text-title);
+    }
+
+    h2 {
+      font-size: 18px;
+      line-height: 24px;
+      color: var(--text-title);
+    }
+
+    h3 {
+      font-size: 15px;
+      line-height: 22px;
+      color: var(--text-title);
+    }
+
+    .subtitle {
+      max-width: 1080px;
+      color: var(--text-sub);
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .btn {
+      border: 1px solid var(--border-strong);
+      background: #ffffff;
+      color: var(--text-main);
+      min-height: 38px;
+      padding: 0 14px;
+      border-radius: 9px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #ffffff;
+    }
+
+    .btn-link {
+      border: 0;
+      background: transparent;
+      color: var(--primary-strong);
+      padding: 0;
+      min-height: auto;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 8px;
+      border-top: 1px solid var(--border-soft);
+      padding-top: 12px;
+    }
+
+    .tab {
+      border: 1px solid var(--border);
+      background: var(--bg-subtle);
+      padding: 8px 14px;
+      border-radius: 999px;
+      color: var(--text-sub);
+      font-weight: 700;
+    }
+
+    .tab.is-active {
+      background: var(--primary-soft);
+      border-color: #cbe7e1;
+      color: var(--primary-strong);
+    }
+
+    .panel {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 16px 18px;
+      box-shadow: var(--shadow-card);
+      min-width: 0;
+    }
+
+    .layer-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .layer-card {
+      border: 1px solid var(--border);
+      background: var(--bg-soft);
+      border-radius: 14px;
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+      min-height: 188px;
+    }
+
+    .layer-card.is-active {
+      border-color: #91ccc3;
+      box-shadow: 0 0 0 2px rgba(31, 135, 123, 0.08);
+      background: #ffffff;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      min-height: 24px;
+      padding: 0 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .status-ready {
+      color: var(--success);
+      background: var(--success-soft);
+    }
+
+    .status-partial,
+    .status-watch {
+      color: var(--warning);
+      background: var(--warning-soft);
+    }
+
+    .status-blocked {
+      color: var(--danger);
+      background: var(--danger-soft);
+    }
+
+    .status-soft {
+      color: var(--text-sub);
+      background: #f3f6f8;
+    }
+
+    .metric-line {
+      display: grid;
+      gap: 4px;
+    }
+
+    .metric-line strong {
+      color: var(--text-title);
+      font-size: 22px;
+      line-height: 26px;
+    }
+
+    .metric-line span,
+    .small-note {
+      color: var(--text-sub);
+      font-size: 12px;
+      line-height: 18px;
+    }
+
+    .mini-list {
+      display: grid;
+      gap: 6px;
+      margin-top: auto;
+    }
+
+    .mini-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--text-sub);
+      font-size: 12px;
+      padding-top: 6px;
+      border-top: 1px solid var(--border-soft);
+    }
+
+    .mini-row strong {
+      color: var(--text-main);
+    }
+
+    .ops-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.12fr) 380px;
+      gap: 16px;
+      align-items: start;
+      order: 2;
+    }
+
+    .drilldown-panel {
+      order: 3;
+    }
+
+    .ledger-panel {
+      order: 4;
+    }
+
+    .queue {
+      display: grid;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .queue-item {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: start;
+      background: var(--bg-soft);
+    }
+
+    .queue-item.is-action {
+      border-color: #f2d9ac;
+      background: #fffaf1;
+    }
+
+    .queue-item p {
+      color: var(--text-sub);
+      margin-top: 3px;
+    }
+
+    .queue-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 9px;
+    }
+
+    .pill {
+      border-radius: 999px;
+      padding: 4px 8px;
+      background: #f3f6f8;
+      color: var(--text-sub);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .impact-grid {
+      display: grid;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .impact-row {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      display: grid;
+      gap: 8px;
+      background: var(--bg-soft);
+    }
+
+    .impact-row > div {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .impact-row p {
+      color: var(--text-sub);
+      font-size: 12px;
+    }
+
+    .drilldown-grid {
+      display: grid;
+      grid-template-columns: 1.05fr 1.15fr 1.2fr 0.9fr;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .drill-card {
+      border: 1px solid #cbe7e1;
+      border-radius: 12px;
+      background: var(--bg-soft);
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+      min-height: 208px;
+    }
+
+    .drill-card.is-primary {
+      background: #ffffff;
+      box-shadow: 0 0 0 2px rgba(31, 135, 123, 0.08);
+    }
+
+    .drill-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .bond-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .bond-mini {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--bg-subtle);
+      padding: 9px 10px;
+      display: grid;
+      gap: 2px;
+    }
+
+    .bond-mini strong {
+      color: var(--text-title);
+      font-size: 13px;
+    }
+
+    .bond-mini span {
+      color: var(--text-sub);
+      font-size: 12px;
+    }
+
+    .curve-row {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 6px;
+    }
+
+    .check-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .check-row {
+      display: grid;
+      grid-template-columns: 78px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border-soft);
+    }
+
+    .check-row:last-child {
+      border-bottom: 0;
+    }
+
+    .ledger-panel {
+      display: grid;
+      gap: 12px;
+    }
+
+    .filters {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .filter {
+      min-height: 32px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: #ffffff;
+      color: var(--text-sub);
+      padding: 0 11px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .filter.is-active {
+      border-color: #b8ded8;
+      background: var(--primary-soft);
+      color: var(--primary-strong);
+    }
+
+    .search {
+      min-width: 220px;
+      height: 34px;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 0 11px;
+      color: var(--text-main);
+      background: #ffffff;
+    }
+
+    .table-scroll {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      min-width: 1180px;
+      border-collapse: collapse;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #ffffff;
+    }
+
+    th,
+    td {
+      text-align: left;
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--border-soft);
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+
+    th {
+      color: var(--text-sub);
+      background: #f7f9fb;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    td {
+      color: var(--text-main);
+      font-size: 13px;
+    }
+
+    td:first-child,
+    th:first-child {
+      white-space: normal;
+      min-width: 220px;
+    }
+
+    .dataset-name {
+      display: grid;
+      gap: 2px;
+    }
+
+    .dataset-name strong {
+      color: var(--text-title);
+    }
+
+    .dataset-name span {
+      color: var(--text-muted);
+      font-size: 12px;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    }
+
+    .credential-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .credential-card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 11px 12px;
+      background: var(--bg-soft);
+      display: grid;
+      gap: 7px;
+    }
+
+    .credential-card strong {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 12px;
+      color: var(--text-title);
+    }
+
+    .provider-summary {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .provider-stat {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--bg-subtle);
+      padding: 9px 10px;
+      display: grid;
+      gap: 2px;
+    }
+
+    .provider-stat strong {
+      color: var(--text-title);
+      font-size: 18px;
+      line-height: 22px;
+    }
+
+    .provider-stat span {
+      color: var(--text-sub);
+      font-size: 12px;
+    }
+
+    .credential-list {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      margin-top: 12px;
+    }
+
+    .credential-row {
+      display: grid;
+      grid-template-columns: 230px 108px 116px minmax(0, 1fr) 112px;
+      gap: 12px;
+      align-items: center;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border-soft);
+      background: #ffffff;
+    }
+
+    .credential-row:last-child {
+      border-bottom: 0;
+    }
+
+    .credential-row.is-head {
+      background: #f7f9fb;
+      color: var(--text-sub);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .credential-key {
+      display: grid;
+      gap: 2px;
+    }
+
+    .credential-key strong {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      color: var(--text-title);
+      font-size: 12px;
+    }
+
+    .credential-key span,
+    .credential-row p {
+      color: var(--text-sub);
+      font-size: 12px;
+      margin: 0;
+    }
+
+    .action-cluster {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .mini-action {
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      background: #ffffff;
+      color: var(--primary-strong);
+      min-height: 30px;
+      padding: 0 9px;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .command-box {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #10231f;
+      color: #d4efe9;
+      padding: 12px;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 12px;
+      line-height: 18px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .foot-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(360px, 0.75fr);
+      gap: 16px;
+      order: 5;
+    }
+
+    .modal-stage {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+      align-items: start;
+      order: 6;
+    }
+
+    .modal-card {
+      background: #ffffff;
+      border: 1px solid var(--border-strong);
+      border-radius: 16px;
+      box-shadow: var(--shadow-float);
+      overflow: hidden;
+    }
+
+    .modal-card__header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--border-soft);
+      background: #fbfcfd;
+    }
+
+    .modal-card__body {
+      padding: 16px 18px 18px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .modal-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .evidence-block {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--bg-subtle);
+      padding: 10px 11px;
+      display: grid;
+      gap: 4px;
+    }
+
+    .evidence-block strong {
+      color: var(--text-title);
+      font-size: 13px;
+    }
+
+    .evidence-block span,
+    .modal-card li {
+      color: var(--text-sub);
+      font-size: 12px;
+    }
+
+    .modal-card ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .modal-card table {
+      min-width: 0;
+    }
+
+    .modal-card th,
+    .modal-card td {
+      white-space: normal;
+    }
+
+    .tone-success {
+      color: var(--success);
+    }
+
+    .tone-warning {
+      color: var(--warning);
+    }
+
+    .tone-danger {
+      color: var(--danger);
+    }
+
+    @media (max-width: 1120px) {
+      .app {
+        grid-template-columns: 92px minmax(0, 1fr);
+      }
+
+      .brand span,
+      .nav-group span,
+      .nav-item:not(.is-active) {
+        display: none;
+      }
+
+      .layer-grid,
+      .drilldown-grid,
+      .ops-grid,
+      .foot-grid,
+      .modal-stage,
+      .modal-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .app {
+        display: block;
+      }
+
+      .sidebar {
+        position: static;
+        height: auto;
+        padding: 14px 18px;
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .nav {
+        display: none;
+      }
+
+      .main {
+        padding: 18px;
+      }
+
+      .header-row,
+      .section-head,
+      .card-head,
+      .table-toolbar,
+      .impact-row > div {
+        display: grid;
+      }
+
+      .actions,
+      .filters {
+        justify-content: flex-start;
+      }
+
+      .credential-grid,
+      .provider-summary {
+        grid-template-columns: 1fr;
+      }
+
+      .credential-row {
+        grid-template-columns: 1fr;
+      }
+
+      .bond-grid,
+      .curve-row {
+        grid-template-columns: 1fr;
+      }
+
+      .search {
+        width: 100%;
+      }
+
+      table {
+        min-width: 980px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" aria-label="主导航">
+      <div class="brand">
+        <strong>GSL</strong>
+        <span>Grit Strategy Lab</span>
+      </div>
+      <nav class="nav">
+        <div class="nav-group">
+          <span>组合</span>
+          <div class="nav-item">组合仪表板</div>
+          <div class="nav-item">资产库</div>
+        </div>
+        <div class="nav-group">
+          <span>策略</span>
+          <div class="nav-item">策略库</div>
+          <div class="nav-item">优化实验室</div>
+        </div>
+        <div class="nav-group">
+          <span>因子</span>
+          <div class="nav-item">因子库</div>
+          <div class="nav-item">因子工厂</div>
+        </div>
+        <div class="nav-group">
+          <span>数据</span>
+          <div class="nav-item">PIT 清洗中心</div>
+          <div class="nav-item is-active">数据快照</div>
+        </div>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <div class="page">
+        <section class="header">
+          <div class="header-row">
+            <div>
+              <p class="eyebrow">数据治理 / 全资产快照</p>
+              <h1>数据快照治理台</h1>
+              <p class="subtitle">统一查看股票、指数、债券、财务、情绪、宏观与衍生品快照的可用性、缺口影响和修复入口。债券不再作为独立页签，而是并入 L1 基础行情，供资产腿、风险预算和组合引用共享同一套来源判定。</p>
+            </div>
+            <div class="actions">
+              <button class="btn">查看刷新日志</button>
+              <button class="btn btn-primary">刷新基础行情</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <h2>L1-L4 数据层健康</h2>
+              <p class="small-note">卡片只保留决策必要信息；点击任一层进入证据、缺口和修复动作。</p>
+            </div>
+            <span class="status status-watch">2 层部分可用</span>
+          </div>
+          <div class="layer-grid" style="margin-top: 14px;">
+            <article class="layer-card is-active" data-layer="l1">
+              <div class="card-head">
+                <h3>L1 基础行情</h3>
+                <span class="status status-partial">部分可用</span>
+              </div>
+              <div class="metric-line">
+                <strong>股票 1266 / 1482 · 债券 7 / 7</strong>
+                <span>10Y PIT 价格回放可用；固定收益运行态来源已就绪；30Y Full Ready 与公司行为补链仍在修复队列。</span>
+              </div>
+              <div class="mini-list">
+                <div class="mini-row"><span>可用于</span><strong>动量 / 波动 / 债券资产腿</strong></div>
+                <div class="mini-row"><span>待修复</span><strong>公司行为、长历史补价</strong></div>
+                <button class="btn btn-link">下钻缺口</button>
+              </div>
+            </article>
+            <article class="layer-card" data-layer="l2">
+              <div class="card-head">
+                <h3>L2 财务截面</h3>
+                <span class="status status-ready">已就绪</span>
+              </div>
+              <div class="metric-line">
+                <strong>940 / 1482</strong>
+                <span>财务字段与发布时点门禁可进入质量、估值和稳健性因子研究。</span>
+              </div>
+              <div class="mini-list">
+                <div class="mini-row"><span>字段数</span><strong>18</strong></div>
+                <div class="mini-row"><span>观察项</span><strong>财务平衡校验</strong></div>
+                <button class="btn btn-link">查看观察项</button>
+              </div>
+            </article>
+            <article class="layer-card" data-layer="l3">
+              <div class="card-head">
+                <h3>L3 分析师与情绪</h3>
+                <span class="status status-ready">已就绪</span>
+              </div>
+              <div class="metric-line">
+                <strong>3 / 3</strong>
+                <span>一致预期与卖空微观结构已形成正式快照，可进入研究监测。</span>
+              </div>
+              <div class="mini-list">
+                <div class="mini-row"><span>一致预期</span><strong>3855 行</strong></div>
+                <div class="mini-row"><span>卖空链路</span><strong>2824 行</strong></div>
+                <button class="btn btn-link">查看证据</button>
+              </div>
+            </article>
+            <article class="layer-card" data-layer="l4">
+              <div class="card-head">
+                <h3>L4 宏观与衍生品</h3>
+                <span class="status status-partial">部分可用</span>
+              </div>
+              <div class="metric-line">
+                <strong>10 / 10</strong>
+                <span>利率 Beta、IV Skew 可作为特征源；正式 IC 诊断依赖 L1 样本池门禁。</span>
+              </div>
+              <div class="mini-list">
+                <div class="mini-row"><span>可用</span><strong>利率、期权偏度</strong></div>
+                <div class="mini-row"><span>上游依赖</span><strong>L1 样本池</strong></div>
+                <button class="btn btn-link">下钻依赖</button>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel drilldown-panel" aria-label="L1 基础行情详情">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">当前下钻</p>
+              <h2>L1 基础行情</h2>
+              <p class="small-note">横向展示可用证据、固定收益基础行情、不可用部分和修复入口；切换 L2-L4 时复用同一位置，不再占用右侧长栏。</p>
+            </div>
+            <span class="status status-partial">部分可用</span>
+          </div>
+          <div class="drilldown-grid" style="margin-top: 14px;">
+            <article class="drill-card is-primary">
+              <div class="card-head">
+                <h3>可用边界</h3>
+                <span class="status status-ready">研究可用</span>
+              </div>
+              <p class="small-note">10Y PIT 价格和历史样本池可支撑研究回放；债券运行态来源可进入资产腿创建和风险预算预检。</p>
+              <div class="mini-list">
+                <div class="mini-row"><span>股票价格</span><strong>1266 / 1482</strong></div>
+                <div class="mini-row"><span>债券来源</span><strong>7 / 7 就绪</strong></div>
+                <div class="mini-row"><span>允许动作</span><strong>研究回放 / 资产腿</strong></div>
+              </div>
+            </article>
+            <article class="drill-card">
+              <h3>可用证据</h3>
+              <div class="drill-list">
+                <div class="check-row"><span class="status status-ready">已可用</span><div>价格行数 6485875，覆盖 1266 / 1482。</div></div>
+                <div class="check-row"><span class="status status-ready">已可用</span><div>10Y PIT 回放可服务动量、波动和基础回测。</div></div>
+                <div class="check-row"><span class="status status-ready">已可用</span><div>债券来源 7 / 7 就绪，可进入资产腿创建。</div></div>
+              </div>
+            </article>
+            <article class="drill-card">
+              <h3>固定收益基础行情</h3>
+              <div class="bond-grid">
+                <div class="bond-mini"><strong>国债曲线</strong><span>3M 3.69% · 2Y 3.95% · 10Y 4.45% · 30Y 5.02%</span></div>
+                <div class="bond-mini"><strong>曲线审计</strong><span>10Y-2Y 利差 +50 bps，处于审计带内。</span></div>
+                <div class="bond-mini"><strong>通胀保护债</strong><span>TIPS 5Y / 10Y 已具备真实收益率与通胀因子。</span></div>
+                <div class="bond-mini"><strong>信用债代理</strong><span>LQD 可入风险预算；跟踪误差来源已记录。</span></div>
+              </div>
+            </article>
+            <article class="drill-card">
+              <h3>不可用与修复</h3>
+              <div class="drill-list">
+                <div class="check-row"><span class="status status-watch">待补</span><div>公司行为链路未完成，影响 30Y Full Ready 和复权审计。</div></div>
+                <div class="check-row"><span class="status status-watch">待配置</span><div>CRSP_DATA_PATH、NORGATE_DATA_PATH 缺失。</div></div>
+              </div>
+              <button class="btn btn-primary">运行 L1 修复</button>
+              <button class="btn">生成本机路径配置命令</button>
+            </article>
+          </div>
+        </section>
+
+        <section class="ops-grid">
+            <article class="panel">
+              <div class="section-head">
+                <div>
+                  <h2>待处理队列</h2>
+                  <p class="small-note">只展示有明确执行入口的阻断、缺凭据、权限、限流和刷新失败。</p>
+                </div>
+                <span class="status status-watch">3 项需处理</span>
+              </div>
+              <div class="queue">
+                <div class="queue-item is-action">
+                  <div>
+                    <h3>L1 公司行为补链未完成</h3>
+                    <p>公司行为快照沿用上一批 96165 行，缺口主要影响 30Y Full Ready，不影响 10Y 因子准入。</p>
+                    <div class="queue-meta">
+                      <span class="pill">目标 ds-corporate-actions</span>
+                      <span class="pill">影响 452 个符号</span>
+                      <span class="pill">非硬阻断</span>
+                    </div>
+                  </div>
+                  <button class="btn btn-primary">修复 L1</button>
+                </div>
+                <div class="queue-item is-action">
+                  <div>
+                    <h3>CRSP 与 Norgate 本机数据路径缺失</h3>
+                    <p>影响长历史补价、退市身份确权和精修来源；当前可用公开来源已能支撑研究态回放。</p>
+                    <div class="queue-meta">
+                      <span class="pill">CRSP_DATA_PATH</span>
+                      <span class="pill">NORGATE_DATA_PATH</span>
+                    </div>
+                  </div>
+                  <button class="btn">配置路径</button>
+                </div>
+                <div class="queue-item">
+                  <div>
+                    <h3>财务平衡校验部分可用</h3>
+                    <p>publish_date 与 available_at 已完整；会计恒等式作为观察项保留，不再占用主告警位。</p>
+                    <div class="queue-meta">
+                      <span class="pill">观察项</span>
+                      <span class="pill">2463 / 3332 通过</span>
+                    </div>
+                  </div>
+                  <button class="btn">查看台账</button>
+                </div>
+              </div>
+            </article>
+
+            <article class="panel">
+              <div class="section-head">
+                <div>
+                  <h2>因子影响摘要</h2>
+                  <p class="small-note">把矩阵收敛为“允许动作”，完整因子映射在下钻中查看。</p>
+                </div>
+              </div>
+              <div class="impact-grid">
+                <div class="impact-row">
+                  <div><strong>价格与流动性</strong><span class="status status-partial">研究可用</span></div>
+                  <p>动量、波动、流动性过滤可运行；30Y Full Ready 前不作为长期档案完成证明。</p>
+                </div>
+                <div class="impact-row">
+                  <div><strong>固定收益与资产腿</strong><span class="status status-ready">可创建</span></div>
+                  <p>国债曲线、TIPS 与 LQD 来源进入 L1 基础行情；仅已就绪运行态行可创建债券资产腿。</p>
+                </div>
+                <div class="impact-row">
+                  <div><strong>质量与估值</strong><span class="status status-ready">可入库</span></div>
+                  <p>财务字段和发布时点可用；平衡校验观察项不阻断基础因子诊断。</p>
+                </div>
+                <div class="impact-row">
+                  <div><strong>宏观与衍生品</strong><span class="status status-partial">研究可用</span></div>
+                  <p>利率 Beta 与 IV Skew 可作为特征源；正式 IC 诊断等待 L1 样本池门禁。</p>
+                </div>
+              </div>
+            </article>
+        </section>
+
+        <section class="panel ledger-panel">
+          <div class="table-toolbar">
+            <div>
+              <h2>原始快照清单</h2>
+              <p class="small-note">用表格承载台账，支持按层级、状态、来源和关键字过滤。</p>
+            </div>
+            <div class="filters">
+              <button class="filter is-active">全部</button>
+              <button class="filter">待处理</button>
+              <button class="filter">L1</button>
+              <button class="filter">债券</button>
+              <button class="filter">L2</button>
+              <button class="filter">L4</button>
+              <input class="search" placeholder="搜索快照或来源" aria-label="搜索快照" />
+            </div>
+          </div>
+          <div class="table-scroll">
+          <table aria-label="原始快照清单">
+            <thead>
+              <tr>
+                <th>快照</th>
+                <th>层级</th>
+                <th>状态</th>
+                <th>覆盖 / 行数</th>
+                <th>来源</th>
+                <th>影响</th>
+                <th>动作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><div class="dataset-name"><strong>股票价格数据</strong><span>ds-price</span></div></td>
+                <td>L1</td>
+                <td><span class="status status-partial">部分可用</span></td>
+                <td>1266 / 1482 · 6485875 行</td>
+                <td>mixed_sources</td>
+                <td>动量、波动、样本池</td>
+                <td><div class="action-cluster"><button class="btn btn-link">下钻</button><button class="btn btn-link">证据</button></div></td>
+              </tr>
+              <tr>
+                <td><div class="dataset-name"><strong>公司行为数据</strong><span>ds-corporate-actions</span></div></td>
+                <td>L1</td>
+                <td><span class="status status-watch">待补</span></td>
+                <td>1030 / 1482 · 96165 行</td>
+                <td>mixed_sources</td>
+                <td>复权审计、30Y Full Ready</td>
+                <td><div class="action-cluster"><button class="btn btn-link">下钻</button><button class="btn btn-link">证据</button></div></td>
+              </tr>
+              <tr>
+                <td><div class="dataset-name"><strong>美国国债曲线</strong><span>bond_fixed_income::UST_CURVE</span></div></td>
+                <td>L1 · 债券</td>
+                <td><span class="status status-ready">已就绪</span></td>
+                <td>4 / 4 · 3M-30Y</td>
+                <td>us_treasury_xml</td>
+                <td>资产腿、利率 Beta、风险预算</td>
+                <td><div class="action-cluster"><button class="btn btn-link">证据</button><button class="btn btn-link">下钻</button></div></td>
+              </tr>
+              <tr>
+                <td><div class="dataset-name"><strong>TIPS 与信用债代理</strong><span>bond_fixed_income::TIPS_LQD</span></div></td>
+                <td>L1 · 债券</td>
+                <td><span class="status status-ready">已就绪</span></td>
+                <td>3 / 3 · 可创建资产腿</td>
+                <td>us_treasury_xml / ishares</td>
+                <td>通胀保护、信用债暴露</td>
+                <td><div class="action-cluster"><button class="btn btn-link">证据</button></div></td>
+              </tr>
+              <tr>
+                <td><div class="dataset-name"><strong>基础面 PIT 数据</strong><span>ds-fundamentals</span></div></td>
+                <td>L2</td>
+                <td><span class="status status-ready">已就绪</span></td>
+                <td>940 / 1482 · 140734 行</td>
+                <td>sec_edgar</td>
+                <td>质量、估值、稳健性</td>
+                <td><div class="action-cluster"><button class="btn btn-link">证据</button><button class="btn btn-link">观察项</button></div></td>
+              </tr>
+              <tr>
+                <td><div class="dataset-name"><strong>宏观利率序列</strong><span>ds-macro-rates</span></div></td>
+                <td>L4</td>
+                <td><span class="status status-ready">已就绪</span></td>
+                <td>10 / 10 · 1483 行</td>
+                <td>fred_macro_series</td>
+                <td>利率 Beta</td>
+                <td><div class="action-cluster"><button class="btn btn-link">证据</button></div></td>
+              </tr>
+              <tr>
+                <td><div class="dataset-name"><strong>期权偏度数据</strong><span>ds-option-skew</span></div></td>
+                <td>L4</td>
+                <td><span class="status status-ready">已就绪</span></td>
+                <td>729 / 729 · 2187 行</td>
+                <td>polygon</td>
+                <td>IV Skew</td>
+                <td><div class="action-cluster"><button class="btn btn-link">证据</button></div></td>
+              </tr>
+            </tbody>
+          </table>
+          </div>
+        </section>
+
+        <section class="foot-grid">
+          <article class="panel">
+            <div class="section-head">
+              <div>
+                <h2>凭据与本机配置</h2>
+                <p class="small-note">读取线上来源注册表；只展示可执行的 key、路径、冷却和无效凭据状态。</p>
+              </div>
+              <span class="status status-watch">3 缺失 · 2 冷却 · 1 无效</span>
+            </div>
+            <div class="provider-summary" aria-label="来源注册表汇总">
+              <div class="provider-stat"><strong>45</strong><span>注册来源</span></div>
+              <div class="provider-stat"><strong>14</strong><span>当前启用</span></div>
+              <div class="provider-stat"><strong>11</strong><span>可用来源</span></div>
+              <div class="provider-stat"><strong>21</strong><span>已配置 key/path</span></div>
+              <div class="provider-stat"><strong>OpenBB 关闭</strong><span>可选增强未启用</span></div>
+            </div>
+            <div class="credential-list" aria-label="凭据与本机路径状态">
+              <div class="credential-row is-head">
+                <span>凭据 / 路径</span>
+                <span>配置</span>
+                <span>运行状态</span>
+                <span>影响</span>
+                <span>操作</span>
+              </div>
+              <div class="credential-row">
+                <div class="credential-key"><strong>TIINGO_API_TOKEN</strong><span>Tiingo / Tiingo Symbology</span></div>
+                <span class="status status-ready">已配置</span>
+                <span class="status status-watch">价格冷却</span>
+                <p>价格与公司行为最近限流；符号映射链路仍可用。</p>
+                <button class="mini-action">查看窗口</button>
+              </div>
+              <div class="credential-row">
+                <div class="credential-key"><strong>ALPHAVANTAGE_API_KEY</strong><span>Alpha Vantage</span></div>
+                <span class="status status-ready">已配置</span>
+                <span class="status status-watch">冷却中</span>
+                <p>免费层触发限流，下一轮刷新等待冷却窗口。</p>
+                <button class="mini-action">查看窗口</button>
+              </div>
+              <div class="credential-row">
+                <div class="credential-key"><strong>MASSIVE_API_KEY</strong><span>Polygon.io / 期权偏度</span></div>
+                <span class="status status-ready">已配置</span>
+                <span class="status status-blocked">凭据无效</span>
+                <p>精修行情链路返回 invalid credentials；期权快照已有历史行但后续修复需换 key。</p>
+                <button class="mini-action">更换 key</button>
+              </div>
+              <div class="credential-row">
+                <div class="credential-key"><strong>CRSP_DATA_PATH</strong><span>CRSP US Stock</span></div>
+                <span class="status status-watch">缺失</span>
+                <span class="status status-soft">未启用</span>
+                <p>影响长历史、退市收益、身份确权和 30Y Full Ready 归档。</p>
+                <button class="mini-action">配置路径</button>
+              </div>
+              <div class="credential-row">
+                <div class="credential-key"><strong>NORGATE_DATA_PATH</strong><span>Norgate US Equities</span></div>
+                <span class="status status-watch">缺失</span>
+                <span class="status status-soft">未启用</span>
+                <p>影响长历史补价、退市身份和精修来源。</p>
+                <button class="mini-action">配置路径</button>
+              </div>
+              <div class="credential-row">
+                <div class="credential-key"><strong>IEX_TOKEN / IEX_CLOUD_TOKEN</strong><span>IEX Legacy</span></div>
+                <span class="status status-watch">缺失</span>
+                <span class="status status-soft">旧链路</span>
+                <p>旧版 IEX 沙箱未接入，不影响当前 L1/L4 主链路。</p>
+                <button class="mini-action">暂不处理</button>
+              </div>
+              <div class="credential-row">
+                <div class="credential-key"><strong>FMP / FINNHUB / EODHD / SEC</strong><span>已配置来源组</span></div>
+                <span class="status status-ready">已配置</span>
+                <span class="status status-ready">可用</span>
+                <p>用于历史成分、身份、定向修复与 SEC 证据链。</p>
+                <button class="mini-action">查看来源</button>
+              </div>
+            </div>
+          </article>
+          <article class="panel">
+            <div class="section-head">
+              <div>
+                <h2>重启命令</h2>
+                <p class="small-note">仅在更新凭据或本机路径后执行；不提交后端、不落库。</p>
+              </div>
+              <button class="btn">复制命令</button>
+            </div>
+            <pre class="command-box">powershell -ExecutionPolicy Bypass -File .\QuickStart-Grit.ps1 -ForceRestart -RestartReason "snapshot provider credentials updated"</pre>
+          </article>
+        </section>
+
+        <section class="modal-stage" aria-label="快照弹层状态">
+          <article class="modal-card" aria-label="快照证据详情">
+            <div class="modal-card__header">
+              <div>
+                <p class="eyebrow">快照证据详情</p>
+                <h2>美国国债曲线</h2>
+                <p class="small-note">来自固定收益基础行情；用于债券资产腿、利率 Beta 与风险预算预检。</p>
+              </div>
+              <button class="btn">关闭</button>
+            </div>
+            <div class="modal-card__body">
+              <div class="modal-grid">
+                <div class="evidence-block"><strong>快照身份</strong><span>bond_fixed_income::UST_CURVE</span></div>
+                <div class="evidence-block"><strong>资产腿准入</strong><span>7 / 7 可创建 · 7 / 7 可入风险预算</span></div>
+                <div class="evidence-block"><strong>刷新锚点</strong><span>2026-05-05 08:46:02Z · us_treasury_xml</span></div>
+                <div class="evidence-block"><strong>质量审计</strong><span>价格一致性通过 · 久期/凸性完整</span></div>
+              </div>
+              <table aria-label="债券曲线证据">
+                <thead>
+                  <tr>
+                    <th>期限</th>
+                    <th>收益率</th>
+                    <th>利差</th>
+                    <th>久期</th>
+                    <th>凸性</th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td>3M</td><td>3.69%</td><td>-26 bps</td><td>0.25</td><td>0.00</td><td><span class="status status-ready">可创建</span></td></tr>
+                  <tr><td>2Y</td><td>3.95%</td><td>0 bps</td><td>1.924</td><td>0.0555</td><td><span class="status status-ready">可创建</span></td></tr>
+                  <tr><td>10Y</td><td>4.45%</td><td>50 bps</td><td>9.574</td><td>1.0083</td><td><span class="status status-ready">可创建</span></td></tr>
+                  <tr><td>30Y</td><td>5.02%</td><td>107 bps</td><td>28.566</td><td>8.4322</td><td><span class="status status-ready">可创建</span></td></tr>
+                </tbody>
+              </table>
+              <ul>
+                <li>10Y-2Y 利差为 +50 bps，处于 -100 至 300 bps 审计带内。</li>
+                <li>T-Bill 应计利息豁免已记录，TIPS 5Y / 10Y 具备真实收益率与通胀因子。</li>
+                <li>LQD 信用债代理可进入风险预算，跟踪误差来源已记录。</li>
+              </ul>
+            </div>
+          </article>
+
+          <article class="modal-card" aria-label="刷新覆盖与入库明细">
+            <div class="modal-card__header">
+              <div>
+                <p class="eyebrow">刷新日志</p>
+                <h2>L1-L4 覆盖与入库明细</h2>
+                <p class="small-note">以任务 snap_57ae046824c9 为口径，说明每个层级当前覆盖、本次入库及入库来源。</p>
+              </div>
+              <button class="btn">关闭</button>
+            </div>
+            <div class="modal-card__body">
+              <div class="modal-grid">
+                <div class="evidence-block"><strong>任务状态</strong><span>INCOMPLETE · repair</span></div>
+                <div class="evidence-block"><strong>刷新目标</strong><span>price / corporate</span></div>
+                <div class="evidence-block"><strong>阻断码</strong><span>CORPORATE_ACTIONS_INCOMPLETE</span></div>
+                <div class="evidence-block"><strong>更新时间</strong><span>2026-05-19 10:55:58Z</span></div>
+              </div>
+              <table aria-label="L1-L4 刷新明细">
+                <thead>
+                  <tr>
+                    <th>层级</th>
+                    <th>当前覆盖</th>
+                    <th>本次入库</th>
+                    <th>入库来源 / 尝试来源</th>
+                    <th>当前缺口</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>L1 基础行情</td>
+                    <td>价格 1266 / 1482 · 公司行为 1030 / 1482 · 债券 7 / 7</td>
+                    <td>0 符号 · 0 行</td>
+                    <td>EODHD、SEC EDGAR、Tiingo、Yahoo；Polygon 凭据无效，yfinance 未安装</td>
+                    <td><button class="btn btn-link">下钻 L1 缺口</button></td>
+                  </tr>
+                  <tr>
+                    <td>L2 财务截面</td>
+                    <td>940 / 1482 · 140734 行</td>
+                    <td>本任务未入库</td>
+                    <td>SEC EDGAR</td>
+                    <td><button class="btn btn-link">查看平衡观察项</button></td>
+                  </tr>
+                  <tr>
+                    <td>L3 分析师与情绪</td>
+                    <td>一致预期 3855 行 · 卖空 2824 行</td>
+                    <td>本任务未入库</td>
+                    <td>Alpha Vantage、FINRA Short Volume</td>
+                    <td><button class="btn btn-link">查看证据</button></td>
+                  </tr>
+                  <tr>
+                    <td>L4 宏观与衍生品</td>
+                    <td>宏观 10 / 10 · 期权偏度 729 / 729</td>
+                    <td>本任务未入库</td>
+                    <td>FRED Macro Series、Polygon 历史快照</td>
+                    <td><button class="btn btn-link">下钻依赖</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

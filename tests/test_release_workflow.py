@@ -72,6 +72,50 @@ def test_pre_push_hook_does_not_guess_base_for_new_or_multi_ref_push() -> None:
     )
 
 
+def test_pre_push_accepts_matching_impact_gate_evidence() -> None:
+    fields = {
+        "status": "ok",
+        "scope": "Committed",
+        "plan_only": "False",
+        "skip_tests": "False",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "elapsed_seconds": "439.838",
+    }
+
+    ok, reason = pre_push_hook._impact_gate_matches_push(
+        fields,
+        report_text="## Steps\n- [ok] backend targeted tests (duration=405.4s)\n",
+        expected_head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        expected_base_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+
+    assert ok is True
+    assert "matches" in reason
+
+
+def test_pre_push_rejects_stale_or_plan_only_impact_evidence() -> None:
+    fields = {
+        "status": "ok",
+        "scope": "Committed",
+        "plan_only": "True",
+        "skip_tests": "False",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "elapsed_seconds": "1.2",
+    }
+
+    ok, reason = pre_push_hook._impact_gate_matches_push(
+        fields,
+        report_text="## Steps\n- [skip] tests (duration=1ms)\n",
+        expected_head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        expected_base_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+
+    assert ok is False
+    assert "PlanOnly" in reason
+
+
 def test_prepare_push_creates_revision_snapshot_and_resets_unreleased(tmp_path: Path) -> None:
     _write_repo_files(
         tmp_path,

@@ -160,6 +160,9 @@ def test_factor_quarantine_intake_run_publish_lineage_and_governance() -> None:
     assert factor["source"] == "AUTO_MINED"
     assert factor["lifecycle_status"] == "VERIFIED"
     assert factor["latest_diagnostic_summary"]["audit_trail"]
+    assert factor["latest_diagnostic_summary"]["naming_protocol_version"] == "factor_display_name_v4_structured"
+    assert factor["latest_diagnostic_summary"]["publish_metadata"]["dedupe_strategy"] == "parameter_first_then_sha8"
+    assert factor["latest_diagnostic_summary"]["publish_metadata"]["base_display_name_cn"]
     assert published["candidate"]["status"] == "PUBLISHED"
 
     events = storage.fetch_one("SELECT COUNT(*) AS count FROM factor_publish_events WHERE candidate_id = ?", (candidate["id"],))
@@ -184,7 +187,7 @@ def test_factor_quarantine_intake_run_publish_lineage_and_governance() -> None:
     assert factor["id"] in suggestion["action"]["target"]["query"]["factorIds"]
 
 
-def test_factor_quarantine_rejects_raw_f2_without_wnzt_evidence() -> None:
+def test_factor_quarantine_intake_skips_raw_f2_without_wnzt_evidence() -> None:
     client, _db_path = create_test_client(_runtime_dir("factor-quarantine-raw-f2-wnzt"))
     seed_ready_pit_data(client, start=date(2014, 1, 2), day_count=3200)
     _seed_mining_candidate(
@@ -203,13 +206,12 @@ def test_factor_quarantine_rejects_raw_f2_without_wnzt_evidence() -> None:
     )
 
     intake = assert_ok(client.post("/factor-quarantine/intake", json={"mining_job_id": "mine_raw_f2_missing_wnzt"}))
-    candidate = intake["items"][0]
-    run = assert_ok(client.post(f"/factor-quarantine/candidates/{candidate['id']}/run", json={"reason": "unit-test"}))
 
-    assert run["status"] == "REJECTED"
-    assert run["publish_status"] == "BLOCKED"
-    assert run["gate_summary"]["wnzt"] == "FAILED"
-    assert "Raw_F2" in run["rejected_reason"]
+    assert intake["items"] == []
+    assert intake["summary"]["intake_count"] == 0
+    assert intake["summary"]["skipped_raw_f2_needs_refinement_count"] == 1
+    queue = assert_ok(client.get("/factor-quarantine/candidates?source_job_id=mine_raw_f2_missing_wnzt"))
+    assert queue["summary"]["total"] == 0
 
 
 def test_factor_quarantine_publish_uses_chinese_auto_mined_name_from_id_and_formula() -> None:
@@ -237,7 +239,7 @@ def test_factor_quarantine_publish_uses_chinese_auto_mined_name_from_id_and_form
         )
     )
     factor = published["factor"]
-    expected_name = "动量标准化因子（126日收益）"
+    expected_name = "ZScore-126日收益率 (精炼)"
     assert factor["id"] == "s_f2_mom_ret_126d_px"
     assert factor["name"] == expected_name
     assert "[Auto-Mined]" not in factor["name"]
@@ -322,6 +324,54 @@ def test_factor_quarantine_publish_uses_chinese_auto_mined_name_from_id_and_form
     assert all(item["id"] != legacy_id for item in factors["items"])
 
 
+def test_factor_quarantine_publish_uses_source_identity_for_complex_f2_fallbacks() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-quarantine-complex-f2-id"))
+    seed_ready_pit_data(client, start=date(2014, 1, 2), day_count=3200)
+    candidates = [
+        (
+            "mine_complex_f2_a",
+            "cand_complex_f2_a",
+            "Rank(s_mom_6m_rank / s_vol_downside_126d_raw)",
+            "m_mom_longdra_126d_rank",
+        ),
+        (
+            "mine_complex_f2_b",
+            "cand_complex_f2_b",
+            "TS_Rank(TS_Return(f1_financial_release_timing, 3), 3)",
+            "f1_financial_release_timing",
+        ),
+    ]
+    published_ids: list[str] = []
+    for job_id, candidate_id, expression, source_factor_id in candidates:
+        _seed_mining_candidate(
+            client,
+            job_id=job_id,
+            candidate_id=candidate_id,
+            expression=expression,
+            rank_ic=0.055,
+            coverage=100.0,
+            extra_candidate={
+                "target_layer": "L2",
+                "source_factor_ids": [source_factor_id],
+                "p_value": 0.02,
+                "s_grade_correlation": 0.22,
+                "oos_to_is_ratio": 0.72,
+                "capacity_score": 0.8,
+                "crowding_score": 0.2,
+            },
+        )
+        intake = assert_ok(client.post("/factor-quarantine/intake", json={"mining_job_id": job_id}))
+        candidate = intake["items"][0]
+        run = assert_ok(client.post(f"/factor-quarantine/candidates/{candidate['id']}/run", json={"reason": "unit-test"}))
+        assert run["status"] == "PASSED"
+        published = assert_ok(client.post(f"/factor-quarantine/candidates/{candidate['id']}/publish"))
+        published_ids.append(published["factor"]["id"])
+
+    assert published_ids[0] == "s_f2_mom_raw_cur_m_mom_longdra_126d_rank"
+    assert published_ids[1] == "s_f2_mom_raw_cur_f1_financial_release_timing"
+    assert len(published_ids) == len(set(published_ids))
+
+
 def test_factor_quarantine_preserves_composition_parent_lineage() -> None:
     client, _db_path = create_test_client(_runtime_dir("factor-quarantine-composition-lineage"))
     seed_ready_pit_data(client, start=date(2014, 1, 2), day_count=3200)
@@ -367,8 +417,9 @@ def test_factor_quarantine_preserves_composition_parent_lineage() -> None:
     assert run["target_layer"] == "L3"
     assert [item["label"] for item in run["composition_methods"]] == [
         "风格复合",
-        "风险调节",
-        "估值锚定",
+        "比例/风险调整（含估值锚定）",
+        "排名均值/交集",
+        "Fama-French 风格融合",
         "背离惩罚",
         "残差/中性化",
         "时序降噪",
@@ -583,7 +634,7 @@ def test_return_operator_candidate_publishes_as_l2_atomic_raw_signal_with_risk_n
     assert factor["id"] == "s_f2_mom_ret_5d_px"
     assert factor["latest_diagnostic_summary"]["target_layer"] == "L2"
     assert factor["latest_diagnostic_summary"]["quarantine"]["target_layer"] == "L2"
-    assert factor["latest_diagnostic_summary"]["quarantine"]["publish_naming_rule"] == "factor_publish_naming_v3"
+    assert factor["latest_diagnostic_summary"]["quarantine"]["publish_naming_rule"] == "factor_display_name_v4"
     assert published["candidate"]["target_layer"] == "L2"
 
 

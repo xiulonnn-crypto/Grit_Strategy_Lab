@@ -71,7 +71,9 @@ from .factor_research import (
     build_pit_data_overview,
     ensure_default_fundamental_snapshot,
     factor_ir_from_rank_ic,
+    factor_display_name_projection_v4,
     _descriptor_from_factor_id,
+    _published_factor_identity,
 )
 from .operator_registry import (
     default_operator_config,
@@ -83,6 +85,7 @@ from .operator_engine import (
     DEFAULT_DAILY_FORMULA_BUDGET,
     OperatorEngineConfig,
     PandasBottleneckOperatorEngine,
+    materialize_operator_engine_result,
 )
 from .pit_preprocessing import (
     decode_f1_field_row,
@@ -962,6 +965,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
     def create_factor(self, request: Any) -> dict[str, Any]:
         return self._factor_research_service().create_factor(request)
 
+    def backfill_factor_display_names_v4(self, request: Any | None = None) -> dict[str, Any]:
+        return self._factor_research_service().backfill_factor_display_names_v4(request)
+
     def get_factor(self, factor_id: str) -> dict[str, Any]:
         return self._factor_research_service().get_factor(factor_id)
 
@@ -986,6 +992,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
         date: str | None = None,
         factor_name: str | None = None,
         result: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
     ) -> dict[str, Any]:
         return self._factor_research_service().list_factor_quarantine_candidates(
             status=status,
@@ -994,6 +1002,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
             date=date,
             factor_name=factor_name,
             result=result,
+            page=page,
+            page_size=page_size,
         )
 
     def get_factor_quarantine_candidate(self, candidate_id: str) -> dict[str, Any]:
@@ -1681,6 +1691,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "style_blend",
                 "risk_adjusted",
                 "value_anchor",
+                "rank_pooling",
+                "ffblend_style",
                 "divergence",
                 "residual_neutralized",
                 "ts_denoise",
@@ -1729,6 +1741,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "recipe_families",
                     "exploration_budget",
                     "composition_policy",
+                    "composition_methods",
                 )
                 if key in payload
             }
@@ -1763,6 +1776,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "min_periods_policy",
                 "blocked_field_policy",
                 "governance_protocol",
+                "composition_methods",
                 "notes",
             )
             if key in payload
@@ -1837,6 +1851,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "min_periods_policy": row.get("min_periods_policy"),
             "blocked_field_policy": row.get("blocked_field_policy"),
             "governance_protocol": loads(row.get("governance_protocol_json"), {}),
+            "composition_methods": normalize_operator_config({
+                "composition_methods": loads(row.get("composition_methods_json"), []),
+            }).get("composition_methods", default_operator_config().get("composition_methods", [])),
             "created_by": row.get("created_by"),
             "notes": row.get("notes"),
             "created_at": row.get("created_at"),
@@ -1904,6 +1921,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "daily_formula_budget": (config_snapshot or {}).get("daily_formula_budget"),
             "compute_backend": (config_snapshot or {}).get("compute_backend"),
             "blocked_field_policy": (config_snapshot or {}).get("blocked_field_policy"),
+            "composition_methods": (config_snapshot or {}).get("composition_methods"),
         })
         return hashlib.sha1(f"{request_signature}|{policy_signature}|{snapshot_signature}".encode("utf-8")).hexdigest()[:16]
 
@@ -2025,6 +2043,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "factory_run_id": run_id,
         })
         intake_items = intake.get("items") if isinstance(intake.get("items"), list) else []
+        intake_summary = intake.get("summary") if isinstance(intake.get("summary"), Mapping) else {}
         self._record_factor_factory_run_item(
             run_id=run_id,
             stage="QUARANTINE_INTAKE",
@@ -2033,6 +2052,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
             status="COMPLETED",
             summary={
                 "intake_count": len(intake_items),
+                "skipped_raw_f2_needs_refinement_count": int(
+                    _coerce_float(intake_summary.get("skipped_raw_f2_needs_refinement_count"), 0.0)
+                ),
                 "source_mining_job_id": mining_job_id,
             },
         )
@@ -2050,6 +2072,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "factory_run_id": run_id,
                 "source_mining_job_id": mining_job_id,
             })
+            self.storage.execute(
+                """
+                UPDATE factor_quarantine_candidates
+                SET source_mining_job_id = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (mining_job_id, iso_now(), candidate_id),
+            )
             quarantine_results.append(result)
             self._record_factor_factory_run_item(
                 run_id=run_id,
@@ -2063,10 +2093,17 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "gate_summary": result.get("gate_summary"),
                 },
             )
+        redundancy_pruning = self._apply_factor_factory_redundancy_pruning(
+            source_mining_job_id=mining_job_id,
+        )
         current_summary.update({
             "auto_intake_count": len(intake_items),
+            "auto_intake_skipped_raw_f2_needs_refinement_count": int(
+                _coerce_float(intake_summary.get("skipped_raw_f2_needs_refinement_count"), 0.0)
+            ),
             "auto_quarantine_count": len(quarantine_results),
             "auto_quarantine_status": "COMPLETED",
+            "redundancy_pruning": redundancy_pruning,
             "quarantine_candidate_ids": [
                 str(item.get("id"))
                 for item in quarantine_results
@@ -2142,17 +2179,191 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
     def _factor_factory_funnel(self) -> dict[str, int]:
         mining_jobs = self.list_factor_mining_jobs()
-        quarantine = self.list_factor_quarantine_candidates()
         mining_items = mining_jobs.get("items") if isinstance(mining_jobs.get("items"), list) else []
-        quarantine_items = quarantine.get("items") if isinstance(quarantine.get("items"), list) else []
-        mined = sum(len(item.get("top_candidates") or []) for item in mining_items if isinstance(item, Mapping))
+        mined = 0
+        for item in mining_items:
+            if not isinstance(item, Mapping):
+                continue
+            summary = item.get("summary") if isinstance(item.get("summary"), Mapping) else {}
+            operator_engine = summary.get("operator_engine") if isinstance(summary.get("operator_engine"), Mapping) else {}
+            mined += int(
+                operator_engine.get("raw_f2_batch_delivered_count")
+                or operator_engine.get("deduped_formula_count")
+                or len(item.get("top_candidates") or [])
+            )
+        quarantine_counts = self.storage.fetch_one(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN status = 'PASSED' THEN 1 ELSE 0 END) AS passed,
+                SUM(CASE WHEN status = 'PUBLISHED' THEN 1 ELSE 0 END) AS published,
+                SUM(CASE WHEN status = 'REJECTED' THEN 1 ELSE 0 END) AS rejected,
+                SUM(CASE WHEN status NOT IN ('PASSED', 'PUBLISHED', 'REJECTED') THEN 1 ELSE 0 END) AS review_or_observation
+            FROM factor_quarantine_candidates
+            """
+        ) or {}
         return {
             "mined_candidates": mined,
-            "quarantine_candidates": len(quarantine_items),
-            "passed": sum(1 for item in quarantine_items if isinstance(item, Mapping) and item.get("status") == "PASSED"),
-            "review_or_observation": sum(1 for item in quarantine_items if isinstance(item, Mapping) and item.get("status") == "NEEDS_REVIEW"),
-            "rejected": sum(1 for item in quarantine_items if isinstance(item, Mapping) and item.get("status") == "REJECTED"),
-            "published": sum(1 for item in quarantine_items if isinstance(item, Mapping) and item.get("status") == "PUBLISHED"),
+            "quarantine_candidates": int(quarantine_counts.get("total") or 0),
+            "passed": int(quarantine_counts.get("passed") or 0),
+            "review_or_observation": int(quarantine_counts.get("review_or_observation") or 0),
+            "rejected": int(quarantine_counts.get("rejected") or 0),
+            "published": int(quarantine_counts.get("published") or 0),
+        }
+
+    @staticmethod
+    def _factor_factory_redundancy_keys(
+        *,
+        factor_id: Any,
+        name_collision_key: Any,
+        base_display_name_cn: Any,
+        expression: Any,
+    ) -> set[str]:
+        keys: set[str] = set()
+        factor_key = re.sub(r"\s+", "", str(factor_id or "").strip().lower())
+        if factor_key:
+            keys.add(f"factor:{factor_key}")
+        name_key = str(name_collision_key or base_display_name_cn or "").strip().lower()
+        name_key = re.sub(r"\s+", "", name_key)
+        if name_key:
+            keys.add(f"name:{name_key}")
+        expression_key = re.sub(r"\s+", "", str(expression or "").strip().lower())
+        if not keys and expression_key:
+            keys.add(f"expr:{expression_key}")
+        return keys
+
+    @staticmethod
+    def _append_factor_factory_redundancy_group(
+        groups: list[dict[str, Any]],
+        *,
+        keys: set[str],
+        item: Any,
+    ) -> None:
+        if not keys:
+            groups.append({"keys": set(), "items": [item]})
+            return
+        matches = [
+            index
+            for index, group in enumerate(groups)
+            if keys.intersection(group.get("keys") or set())
+        ]
+        if not matches:
+            groups.append({"keys": set(keys), "items": [item]})
+            return
+        primary = groups[matches[0]]
+        primary.setdefault("keys", set()).update(keys)
+        primary.setdefault("items", []).append(item)
+        for index in reversed(matches[1:]):
+            primary["keys"].update(groups[index].get("keys") or set())
+            primary["items"].extend(groups[index].get("items") or [])
+            del groups[index]
+
+    def _apply_factor_factory_redundancy_pruning(self, *, source_mining_job_id: str) -> dict[str, Any]:
+        source_mining_job_id = str(source_mining_job_id or "").strip()
+        if not source_mining_job_id:
+            return {"status": "SKIPPED", "kept": 0, "pruned": 0, "groups": 0}
+        rows = self.storage.fetch_all(
+            """
+            SELECT id, target_factor_id, expression, candidate_metrics_json, gate_summary_json
+            FROM factor_quarantine_candidates
+            WHERE source_mining_job_id = ?
+              AND status = 'PASSED'
+              AND publish_status = 'ELIGIBLE'
+            """,
+            (source_mining_job_id,),
+        )
+        groups: list[dict[str, Any]] = []
+        for row in rows:
+            metrics = loads(row.get("candidate_metrics_json"), {})
+            if not isinstance(metrics, Mapping):
+                metrics = {}
+            if str(metrics.get("pipeline_version") or "") != "raw_refined_f2_v2":
+                continue
+            if bool(metrics.get("raw_f2")) and not (bool(metrics.get("refined_f2")) and bool(metrics.get("wnzt_complete"))):
+                continue
+            expression = str(row.get("expression") or "").strip()
+            target_layer = str(metrics.get("target_layer") or "L2").upper()
+            target_factor_id = _published_factor_identity(
+                expression,
+                target_layer=target_layer,
+                metrics=metrics,
+            ).factor_id
+            projection = factor_display_name_projection_v4(
+                factor_id=target_factor_id or str(row.get("id") or ""),
+                source="AUTO_MINED",
+                expression=expression,
+                tier_level=target_layer.replace("L", "F"),
+                neutralization_scope=metrics.get("neutralization_scope") or metrics.get("orthogonality_intent"),
+                residual_control=metrics.get("residual_control") or ("market_beta" if "beta" in expression.lower() else None),
+            )
+            keys = self._factor_factory_redundancy_keys(
+                factor_id=target_factor_id,
+                name_collision_key=projection.get("name_collision_key"),
+                base_display_name_cn=projection.get("base_display_name_cn"),
+                expression=expression,
+            )
+            score = _coerce_float(
+                metrics.get("fitness_score") if metrics.get("fitness_score") is not None else metrics.get("score"),
+                0.0,
+            )
+            self._append_factor_factory_redundancy_group(
+                groups,
+                keys=keys,
+                item=(row, dict(metrics), score),
+            )
+        kept = 0
+        pruned = 0
+        reason = "冗余裁剪：同一发布因子仅保留当前批次最高分候选。"
+        now = iso_now()
+        for group in groups:
+            items = group.get("items") or []
+            if not items:
+                continue
+            group_key = "|".join(sorted(group.get("keys") or set()))
+            items.sort(key=lambda item: (item[2], str(item[0].get("id") or "")), reverse=True)
+            winner_id = str(items[0][0].get("id") or "")
+            kept += 1
+            for row, metrics, _score in items[1:]:
+                gate_summary = loads(row.get("gate_summary_json"), {})
+                if not isinstance(gate_summary, Mapping):
+                    gate_summary = {}
+                metrics.update({
+                    "redundancy_pruned": True,
+                    "redundancy_group_key": group_key,
+                    "redundancy_kept_candidate_id": winner_id,
+                })
+                next_gate = {
+                    **dict(gate_summary),
+                    "redundancy_pruning": "FAILED",
+                    "redundancy_kept_candidate_id": winner_id,
+                }
+                self.storage.execute(
+                    """
+                    UPDATE factor_quarantine_candidates
+                    SET status = 'REJECTED',
+                        publish_status = 'BLOCKED',
+                        candidate_metrics_json = ?,
+                        gate_summary_json = ?,
+                        publish_eligibility_json = ?,
+                        updated_at = ?,
+                        rejected_reason = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        dumps(metrics),
+                        dumps(next_gate),
+                        dumps({"status": "BLOCKED", "reason": reason, "rule_version": "factor_quarantine_v2_0"}),
+                        now,
+                        reason,
+                        row.get("id"),
+                    ),
+                )
+                pruned += 1
+        return {
+            "status": "COMPLETED",
+            "kept": kept,
+            "pruned": pruned,
+            "groups": len(groups),
         }
 
     @staticmethod
@@ -2192,6 +2403,216 @@ class RealBacktestPlatformService(BacktestPlatformService):
             or candidate.get("created_at")
         )
 
+    @staticmethod
+    def _factor_factory_text_is_unreadable(value: Any) -> bool:
+        text_value = str(value or "").strip()
+        if not text_value:
+            return True
+        if set(text_value) <= {"?"}:
+            return True
+        question_count = text_value.count("?")
+        surrogate_count = sum(1 for char in text_value if 0xDC80 <= ord(char) <= 0xDCFF)
+        return question_count >= 3 or surrogate_count >= max(2, len(text_value) // 8)
+
+    def _factor_factory_quarantine_reason_summary(self, item: Mapping[str, Any]) -> str:
+        publish_eligibility = item.get("publish_eligibility") if isinstance(item.get("publish_eligibility"), Mapping) else {}
+        latest_run = item.get("latest_run") if isinstance(item.get("latest_run"), Mapping) else {}
+        latest_summary = latest_run.get("summary") if isinstance(latest_run.get("summary"), Mapping) else {}
+        result = self._factor_factory_quarantine_result(item)
+        candidates = [
+            item.get("reason_summary"),
+            item.get("rejected_reason"),
+            publish_eligibility.get("reason"),
+            latest_summary.get("publish_reason"),
+        ]
+        for candidate in candidates:
+            if not self._factor_factory_text_is_unreadable(candidate):
+                reason = str(candidate).strip()
+                if result != "PASS" and ("检疫通过" in reason or "可上线发布" in reason or "允许" in reason):
+                    continue
+                return reason
+        publish_status = str(item.get("publish_status") or publish_eligibility.get("status") or "").upper()
+        if result == "PASS" and publish_status == "ELIGIBLE":
+            return "D2 检疫通过，已进入可上线发布队列。"
+        if result == "PASS":
+            return "D2 检疫通过，等待发布状态复核。"
+        if result == "FAIL":
+            return "未通过检疫硬闸门，需在详情中复核 OOS、P-value、拥挤度、回撤或容量。"
+        return "检疫观察中，需人工复核后再发布。"
+
+    def _factor_factory_quarantine_signatures_for_job(self, source_job_id: str) -> set[str]:
+        source_job_id = str(source_job_id or "").strip()
+        if not source_job_id:
+            return set()
+        factor_service = self._factor_research_service()
+        rows = self.storage.fetch_all(
+            """
+            SELECT expression
+            FROM factor_quarantine_candidates
+            WHERE source_mining_job_id = ?
+            """,
+            (source_job_id,),
+        )
+        return {
+            factor_service._expression_signature(str(row.get("expression") or ""))
+            for row in rows
+            if str(row.get("expression") or "").strip()
+        }
+
+    def _factor_factory_publishable_factors(
+        self,
+        *,
+        source_mining_job_id: str,
+        fallback_items: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        rows: list[Mapping[str, Any]] = []
+        source_mining_job_id = str(source_mining_job_id or "").strip()
+        factor_service = self._factor_research_service()
+        if source_mining_job_id:
+            rows = self.storage.fetch_all(
+                """
+                SELECT *
+                FROM factor_quarantine_candidates
+                WHERE source_mining_job_id = ?
+                  AND status = 'PASSED'
+                  AND publish_status = 'ELIGIBLE'
+                """,
+                (source_mining_job_id,),
+            )
+        else:
+            rows = list(fallback_items)
+        existing_factor_ids: set[str] = set()
+        groups: list[dict[str, Any]] = []
+        for row in rows:
+            if source_mining_job_id:
+                candidate = factor_service._decode_quarantine_candidate_row(row)
+            else:
+                candidate = dict(row)
+                if not isinstance(candidate.get("candidate_metrics"), Mapping):
+                    candidate["candidate_metrics"] = loads(candidate.get("candidate_metrics_json"), {})
+                if not isinstance(candidate.get("gate_summary"), Mapping):
+                    candidate["gate_summary"] = loads(candidate.get("gate_summary_json"), {})
+                if not isinstance(candidate.get("pit_evidence"), Mapping):
+                    candidate["pit_evidence"] = loads(candidate.get("pit_evidence_json"), {})
+                if not isinstance(candidate.get("publish_eligibility"), Mapping):
+                    candidate["publish_eligibility"] = loads(candidate.get("publish_eligibility_json"), {})
+                candidate = factor_service._hydrate_factor_phase2_candidate(candidate)
+            metrics = (
+                candidate.get("candidate_metrics")
+                if isinstance(candidate.get("candidate_metrics"), Mapping)
+                else {}
+            )
+            if not isinstance(metrics, Mapping):
+                metrics = {}
+            if str(metrics.get("pipeline_version") or "") != "raw_refined_f2_v2":
+                continue
+            if bool(metrics.get("raw_f2")) and not (bool(metrics.get("refined_f2")) and bool(metrics.get("wnzt_complete"))):
+                continue
+            expression = str(candidate.get("expression") or "").strip()
+            target_layer = str(candidate.get("target_layer") or metrics.get("target_layer") or "L2").upper()
+            factor_id = _published_factor_identity(
+                expression,
+                target_layer=target_layer,
+                metrics=metrics,
+            ).factor_id
+            if factor_id not in existing_factor_ids:
+                existing = self.storage.fetch_one(
+                    "SELECT id FROM factor_definitions WHERE id = ? AND deleted_at IS NULL",
+                    (factor_id,),
+                )
+                if existing:
+                    existing_factor_ids.add(factor_id)
+            if factor_id in existing_factor_ids:
+                continue
+            projection = factor_display_name_projection_v4(
+                factor_id=factor_id,
+                source="AUTO_MINED",
+                expression=expression,
+                tier_level=target_layer.replace("L", "F"),
+                neutralization_scope=metrics.get("neutralization_scope") or metrics.get("orthogonality_intent"),
+                residual_control=metrics.get("residual_control") or ("market_beta" if "beta" in expression.lower() else None),
+            )
+            display_name = str(
+                projection.get("base_display_name_cn")
+                or candidate.get("display_name_cn")
+                or candidate.get("factor_name")
+                or candidate.get("name")
+                or projection.get("display_name_cn")
+                or expression
+            )
+            keys = self._factor_factory_redundancy_keys(
+                factor_id=factor_id,
+                name_collision_key=projection.get("name_collision_key"),
+                base_display_name_cn=projection.get("base_display_name_cn") or display_name,
+                expression=expression,
+            )
+            score = _coerce_float(
+                metrics.get("fitness_score") if metrics.get("fitness_score") is not None else metrics.get("score"),
+                0.0,
+            )
+            candidate_row = {
+                "candidate_id": candidate.get("id"),
+                "factor_id": factor_id or candidate.get("id"),
+                "expression": expression,
+                "raw_expression": candidate.get("raw_expression") or metrics.get("raw_expression"),
+                "refined_expression": candidate.get("refined_expression") or metrics.get("refined_expression"),
+                "factor_name": display_name,
+                "display_name_cn": display_name,
+                "base_display_name_cn": projection.get("base_display_name_cn"),
+                "compact_display_name_cn": projection.get("display_name_cn") or candidate.get("compact_display_name_cn"),
+                "name_collision_key": projection.get("name_collision_key"),
+                "name_dedupe_suffix": projection.get("name_dedupe_suffix") or "",
+                "name_collision_group": projection.get("name_collision_group") or [],
+                "name_audit": projection.get("name_audit") or {},
+                "governance_badges": projection.get("governance_badges") or candidate.get("governance_badges") or [],
+                "name_schema_version": projection.get("name_schema_version") or candidate.get("name_schema_version"),
+                "naming_protocol_version": projection.get("naming_protocol_version"),
+                "target_layer": target_layer,
+                "score": score,
+                "quarantine_status": "PASS",
+                "quarantine_result": candidate.get("quarantine_result") or "PASS",
+                "reason_summary": candidate.get("reason_summary"),
+                "parent_factor_ids": list(metrics.get("source_factor_ids") or []),
+                "operator_chain": list(candidate.get("operator_chain") or metrics.get("operator_chain") or []),
+                "composition_methods": list(candidate.get("composition_methods") or metrics.get("composition_methods") or []),
+                "investment_logic": str(candidate.get("investment_logic") or metrics.get("investment_logic") or ""),
+                "candidate_metrics": dict(metrics),
+                "gate_summary": dict(candidate.get("gate_summary") or {}) if isinstance(candidate.get("gate_summary"), Mapping) else {},
+                "pit_evidence": dict(candidate.get("pit_evidence") or {}) if isinstance(candidate.get("pit_evidence"), Mapping) else {},
+                "publish_eligibility": dict(candidate.get("publish_eligibility") or {}) if isinstance(candidate.get("publish_eligibility"), Mapping) else {},
+                "latest_run": dict(candidate.get("latest_run") or {}) if isinstance(candidate.get("latest_run"), Mapping) else {},
+                "scoring_detail": dict(candidate.get("scoring_detail") or {}) if isinstance(candidate.get("scoring_detail"), Mapping) else {},
+                "admission_report": list(candidate.get("admission_report") or []) if isinstance(candidate.get("admission_report"), list) else [],
+                "wnzt_missing": list(candidate.get("wnzt_missing") or []) if isinstance(candidate.get("wnzt_missing"), list) else [],
+                "wnzt_complete": bool(candidate.get("wnzt_complete")),
+                "wnzt_evidence": dict(candidate.get("wnzt_evidence") or {}) if isinstance(candidate.get("wnzt_evidence"), Mapping) else {},
+                "artifact_refs": dict(candidate.get("artifact_refs") or {}) if isinstance(candidate.get("artifact_refs"), Mapping) else {},
+                "created_at": candidate.get("created_at"),
+                "updated_at": candidate.get("updated_at"),
+                "last_quarantine_at": candidate.get("last_quarantine_at"),
+                "published_at": candidate.get("published_at"),
+                "detail_modal_enabled": True,
+                "redundancy_pruning": "PASSED",
+            }
+            candidate_row["redundancy_group_key"] = "|".join(sorted(keys))
+            self._append_factor_factory_redundancy_group(
+                groups,
+                keys=keys,
+                item=candidate_row,
+            )
+        winners = [
+            max(
+                group.get("items") or [],
+                key=lambda item: (_coerce_float(item.get("score"), 0.0), str(item.get("candidate_id") or "")),
+            )
+            for group in groups
+            if group.get("items")
+        ]
+        return sorted(
+            winners,
+            key=lambda item: (-_coerce_float(item.get("score"), 0.0), str(item.get("factor_id") or "")),
+        )
+
     def _factor_factory_phase2_rows(
         self,
         *,
@@ -2203,106 +2624,103 @@ class RealBacktestPlatformService(BacktestPlatformService):
     ) -> dict[str, Any]:
         mining_items = mining.get("items") if isinstance(mining.get("items"), list) else []
         quarantine_items = quarantine.get("items") if isinstance(quarantine.get("items"), list) else []
+        quarantine_summary = quarantine.get("summary") if isinstance(quarantine.get("summary"), Mapping) else {}
         run_date = str((latest_run or {}).get("run_date") or self._factor_factory_today())
+        latest_summary = latest_run.get("summary") if isinstance((latest_run or {}).get("summary"), Mapping) else {}
+        operator_engine_summary = (
+            latest_summary.get("operator_engine")
+            if isinstance(latest_summary.get("operator_engine"), Mapping)
+            else {}
+        )
+        source_mining_job_id = str((latest_run or {}).get("mining_job_id") or latest_summary.get("mining_job_id") or "")
+        f1_snapshot_id = str(
+            latest_summary.get("f1_catalog_snapshot_id")
+            or operator_engine_summary.get("f1_catalog_snapshot_id")
+            or ""
+        )
+        f1_count = 0
+        if f1_snapshot_id:
+            count_row = self.storage.fetch_one(
+                "SELECT COUNT(*) AS count FROM f1_raw_factor_fields WHERE snapshot_id = ?",
+                (f1_snapshot_id,),
+            )
+            f1_count = int((count_row or {}).get("count") or 0)
         top_candidates = []
         if latest_run and isinstance(latest_run.get("mining_job"), Mapping):
             top_candidates = list(latest_run["mining_job"].get("top_candidates") or [])
         elif mining_items:
             top_candidates = list((mining_items[0] or {}).get("top_candidates") or [])
-        l2_count = sum(1 for item in quarantine_items if isinstance(item, Mapping) and item.get("target_layer") == "L2")
-        l3_count = sum(1 for item in quarantine_items if isinstance(item, Mapping) and item.get("target_layer") == "L3")
+        raw_f2_count = int(
+            operator_engine_summary.get("raw_f2_batch_delivered_count")
+            or operator_engine_summary.get("deduped_formula_count")
+            or len(top_candidates)
+        )
+        refined_f2_count = int(operator_engine_summary.get("refined_f2_batch_delivered_count") or 0)
+        source_candidate_metric_rows: list[Mapping[str, Any]] = []
+        if source_mining_job_id:
+            source_candidate_metric_rows = self.storage.fetch_all(
+                """
+                SELECT candidate_metrics_json
+                FROM factor_quarantine_candidates
+                WHERE source_mining_job_id = ?
+                """,
+                (source_mining_job_id,),
+            )
+        if source_candidate_metric_rows and refined_f2_count <= 0:
+            refined_f2_count = sum(
+                1
+                for row in source_candidate_metric_rows
+                if bool(loads(row.get("candidate_metrics_json"), {}).get("refined_f2"))
+            )
+        l3_candidate_count = sum(
+            1
+            for row in source_candidate_metric_rows
+            if str(loads(row.get("candidate_metrics_json"), {}).get("target_layer") or "").upper() == "L3"
+        )
+        if not source_candidate_metric_rows:
+            l3_candidate_count = sum(
+                1
+                for item in quarantine_items
+                if isinstance(item, Mapping) and str(item.get("target_layer") or "").upper() == "L3"
+            )
+        quarantine_total = int(quarantine_summary.get("total") or len(quarantine_items))
         task_status = self._factor_factory_task_status(latest_run)
+        delivered_count = raw_f2_count if task_status == "已完成" else None
         task_rows = [
             {
                 "id": f"{run_date}-mining",
                 "task_date": run_date,
                 "kind": "mining",
-                "title": f"{run_date} PIT 原子信号挖掘",
-                "summary": "L1 仅保留原始字段；Return/MA/Std 等算子候选进入 L2 Raw Signal。",
+                "title": f"{run_date} 因子挖掘任务",
+                "summary": "F1 按算子展开生成 Raw_F2，并经过 WNZT 治理形成 Refined_F2。",
                 "status": task_status,
                 "target_layer": "L2",
-                "delivered_candidate_count": len(top_candidates) if task_status == "已完成" else None,
-                "current_candidate_count": len(top_candidates),
-                "expected_candidate_count": ((profile.get("request") or {}).get("candidate_count") if isinstance(profile.get("request"), Mapping) else None),
-            },
-            {
-                "id": f"{run_date}-refinement",
-                "task_date": run_date,
-                "kind": "refinement",
-                "title": f"{run_date} Raw 标准链改造",
-                "summary": "Raw -> Winsorize -> Neutralize -> Z-Score -> Rank。",
-                "status": task_status,
-                "target_layer": "L2",
-                "operator_chain": [
-                    {"code": "RAW", "label": "Raw"},
-                    {"code": "MAD", "label": "Winsorize"},
-                    {"code": "N", "label": "Neutralize"},
-                    {"code": "Z", "label": "Z-Score"},
-                    {"code": "R", "label": "Rank"},
-                ],
-                "delivered_candidate_count": l2_count,
-                "current_candidate_count": l2_count,
+                "flow": ["F1", "算子展开", "Raw_F2", "WNZT", "Refined_F2"],
+                "delivered_candidate_count": delivered_count,
+                "current_candidate_count": raw_f2_count,
+                "expected_candidate_count": raw_f2_count,
+                "metric_label": "Raw_F2因子交付量",
+                "metric_value": raw_f2_count,
+                "secondary_metric_label": "Refined_F2因子交付量",
+                "secondary_metric_value": refined_f2_count,
+                "source_metric_label": "F1因子量",
+                "source_metric_value": f1_count,
             },
             {
                 "id": f"{run_date}-composition",
                 "task_date": run_date,
                 "kind": "composition",
-                "title": f"{run_date} L3 组合因子生成",
-                "summary": "风格复合、风险调节、估值锚定、背离惩罚、残差/中性化、时序降噪。",
+                "title": f"{run_date} 因子组合任务",
+                "summary": "从 Refined_F2 构建 F3 组合候选，发布前仍需检疫通过和人工确认。",
                 "status": task_status,
                 "target_layer": "L3",
-                "parent_factor_ids": list(((profile.get("request") or {}).get("source_factor_ids") or []) if isinstance(profile.get("request"), Mapping) else []),
-                "delivered_candidate_count": l3_count,
-                "current_candidate_count": l3_count,
-            },
-        ]
-        delivered_count = len(top_candidates) if task_status == "已完成" else None
-        task_rows = [
-            {
-                "id": f"{run_date}-mining",
-                "task_date": run_date,
-                "kind": "mining",
-                "title": f"{run_date} 每日挖掘任务",
-                "summary": "F1 字段按算子空间展开为 Raw_F2 候选。",
-                "status": task_status,
-                "target_layer": "L2",
-                "flow": ["F1", "算子展开", "Raw_F2"],
-                "delivered_candidate_count": delivered_count,
-                "current_candidate_count": len(top_candidates),
-                "expected_candidate_count": ((profile.get("request") or {}).get("candidate_count") if isinstance(profile.get("request"), Mapping) else None),
-            },
-            {
-                "id": f"{run_date}-refinement",
-                "task_date": run_date,
-                "kind": "refinement",
-                "title": f"{run_date} 每日治理任务",
-                "summary": "Raw_F2 完成 WNZT 标准流后生成 Refined F2；O/T 扩展默认关闭。",
-                "status": task_status,
-                "target_layer": "L2",
-                "flow": ["Raw_F2", "WNZT", "Refined F2"],
-                "operator_chain": [
-                    {"code": "W", "label": "Winsorize"},
-                    {"code": "N", "label": "Neutralize"},
-                    {"code": "Z", "label": "Z-Score"},
-                    {"code": "T", "label": "Time Filter"},
-                ],
-                "optional_chain": [
-                    {"code": "O", "label": "Orthogonalization", "enabled": False},
-                    {"code": "T_EXT", "label": "Turnover Filter", "enabled": False},
-                ],
-                "delivered_candidate_count": l2_count,
-                "current_candidate_count": l2_count,
-            },
-            {
-                "id": f"{run_date}-quarantine",
-                "task_date": run_date,
-                "kind": "quarantine",
-                "title": f"{run_date} 因子检疫任务",
-                "summary": "检疫执行 OOS、P-value、S 级相关性、拥挤度、回撤与容量硬闸门。",
-                "status": task_status,
-                "target_layer": "L2",
-                "delivered_candidate_count": len(quarantine_items),
-                "current_candidate_count": len(quarantine_items),
+                "flow": ["Refined_F2", "F3组合", "检疫", "发布确认"],
+                "delivered_candidate_count": l3_candidate_count if task_status == "已完成" else None,
+                "current_candidate_count": l3_candidate_count,
+                "expected_candidate_count": raw_f2_count,
+                "metric_label": "组合候选量",
+                "metric_value": l3_candidate_count,
+                "parent_factor_ids": list((profile.get("request") or {}).get("source_factor_ids") or []),
             },
         ]
         ranked_quarantine_items = sorted(
@@ -2311,11 +2729,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
             reverse=True,
         )
         factor_service = self._factor_research_service()
-        submitted_signatures = {
-            factor_service._expression_signature(str(item.get("expression") or ""))
-            for item in ranked_quarantine_items
-            if str(item.get("expression") or "").strip()
-        }
+        submitted_signatures = (
+            self._factor_factory_quarantine_signatures_for_job(source_mining_job_id)
+            if source_mining_job_id
+            else {
+                factor_service._expression_signature(str(item.get("expression") or ""))
+                for item in ranked_quarantine_items
+                if str(item.get("expression") or "").strip()
+            }
+        )
         scoring_candidates = []
         for index, item in enumerate(top_candidates):
             if not isinstance(item, Mapping):
@@ -2341,10 +2763,23 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 },
             }
             detail = factor_service._factor_phase2_scoring_detail(pending_candidate)
+            display_projection = factor_display_name_projection_v4(
+                factor_id=candidate_id,
+                name=item.get("factor_name") or item.get("name"),
+                source="AUTO_MINED",
+                expression=expression,
+                tier_level=detail.get("target_layer") or "F2",
+            )
+            display_name = str(display_projection.get("base_display_name_cn") or display_projection["display_name_cn"])
             scoring_candidates.append({
                 **dict(detail),
                 "candidate_id": candidate_id,
-                "display_id": expression,
+                "display_id": display_name,
+                "display_name_cn": display_name,
+                "compact_display_name_cn": display_projection.get("display_name_cn"),
+                "short_name_cn": display_projection.get("short_name_cn"),
+                "governance_badges": display_projection.get("governance_badges") or [],
+                "name_schema_version": display_projection.get("name_schema_version"),
                 "target_layer": detail.get("target_layer") or "L2",
                 "submitted_at": pending_candidate["updated_at"],
                 "quarantine_candidate_id": None,
@@ -2354,50 +2789,33 @@ class RealBacktestPlatformService(BacktestPlatformService):
         for item in ranked_quarantine_items:
             if not isinstance(item, Mapping):
                 continue
-            publish_eligibility = item.get("publish_eligibility") if isinstance(item.get("publish_eligibility"), Mapping) else {}
-            reason_summary = (
-                item.get("reason_summary")
-                or item.get("rejected_reason")
-                or publish_eligibility.get("reason")
-                or "等待检疫或人工复核。"
-            )
+            reason_summary = self._factor_factory_quarantine_reason_summary(item)
             event_time = self._factor_factory_candidate_event_time(item)
+            display_name = item.get("display_name_cn") or item.get("base_display_name_cn") or item.get("factor_name") or item.get("name") or item.get("expression")
             quarantine_result_rows.append({
                 "candidate_id": item.get("id"),
                 "submitted_at": event_time,
-                "factor_name": item.get("expression"),
+                "factor_name": display_name,
+                "display_name_cn": display_name,
+                "governance_badges": item.get("governance_badges") or [],
+                "name_schema_version": item.get("name_schema_version"),
                 "target_layer": item.get("target_layer") or "L2",
                 "quarantine_result": self._factor_factory_quarantine_result(item),
                 "reason_summary": reason_summary,
                 "detail_modal_enabled": True,
             })
-        publishable_factors = [
-            {
-                "candidate_id": item.get("id"),
-                "factor_id": item.get("target_factor_id") or item.get("id"),
-                "factor_name": item.get("expression"),
-                "target_layer": item.get("target_layer") or "L2",
-                "score": (item.get("scoring_detail") or {}).get("score") if isinstance(item.get("scoring_detail"), Mapping) else None,
-                "quarantine_status": self._factor_factory_quarantine_result(item),
-                "parent_factor_ids": list((item.get("candidate_metrics") or {}).get("source_factor_ids") or []) if isinstance(item.get("candidate_metrics"), Mapping) else [],
-                "operator_chain": item.get("operator_chain") or [],
-                "composition_methods": item.get("composition_methods") or [],
-                "investment_logic": item.get("investment_logic") or "",
-                "detail_modal_enabled": True,
-            }
-            for item in quarantine_items
-            if isinstance(item, Mapping)
-            and str(item.get("status") or "").upper() == "PASSED"
-            and str(item.get("publish_status") or "").upper() == "ELIGIBLE"
-        ]
+        publishable_factors = self._factor_factory_publishable_factors(
+            source_mining_job_id=source_mining_job_id,
+            fallback_items=[item for item in quarantine_items if isinstance(item, Mapping)],
+        )
         return {
             "task_summary": {
                 "total_tasks": len(task_rows),
                 "delivered_candidates": sum(int(row.get("current_candidate_count") or 0) for row in task_rows),
-                "submitted_to_quarantine": len(quarantine_items),
+                "submitted_to_quarantine": quarantine_total,
                 "publishable_count": len(publishable_factors),
-                "rejected_history_count": sum(1 for item in quarantine_items if isinstance(item, Mapping) and str(item.get("status") or "").upper() == "REJECTED"),
-                "hard_blocked_count": sum(1 for item in quarantine_items if isinstance(item, Mapping) and self._factor_factory_quarantine_result(item) == "FAIL"),
+                "rejected_history_count": int(quarantine_summary.get("rejected_count") or 0),
+                "hard_blocked_count": int(quarantine_summary.get("rejected_count") or 0),
             },
             "task_rows": task_rows,
             "scoring_candidates": scoring_candidates,
@@ -2410,7 +2828,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "daily_formula_budget": DEFAULT_DAILY_FORMULA_BUDGET,
                 "l2_operator_chain": "F1 -> OperatorEngine -> Raw_F2 -> WNZT -> Refined F2",
                 "optional_governance": {"orthogonalization": False, "turnover_filter": False},
-                "l3_composition_methods": ["风格复合", "风险调节", "估值锚定", "背离惩罚", "残差/中性化", "时序降噪"],
+                "l3_composition_methods": [
+                    "风格复合",
+                    "比例/风险调整（含估值锚定）",
+                    "排名均值/交集",
+                    "Fama-French 风格融合",
+                    "背离惩罚",
+                    "残差/中性化",
+                    "时序降噪",
+                ],
             },
         }
 
@@ -2560,10 +2986,6 @@ class RealBacktestPlatformService(BacktestPlatformService):
         if status:
             where.append("UPPER(admission_state) = ?")
             params.append(str(status).upper())
-        if q:
-            where.append("(LOWER(factor_id) LIKE ? OR LOWER(name) LIKE ? OR LOWER(category) LIKE ?)")
-            needle = f"%{str(q).lower()}%"
-            params.extend([needle, needle, needle])
         rows = self.storage.fetch_all(
             f"""
             SELECT *
@@ -2573,7 +2995,29 @@ class RealBacktestPlatformService(BacktestPlatformService):
             """,
             params,
         )
-        items = [decode_f1_field_row(row) for row in rows]
+        items = []
+        for row in rows:
+            item = decode_f1_field_row(row)
+            projection = factor_display_name_projection_v4(
+                factor_id=str(item.get("factor_id") or ""),
+                name=item.get("name"),
+                source="F1_CATALOG",
+                expression=str(item.get("factor_id") or ""),
+                tier_level="F1",
+            )
+            item.update(projection)
+            item["name"] = projection["display_name_cn"]
+            items.append(item)
+        if q:
+            needle = str(q).strip().lower()
+            items = [
+                item
+                for item in items
+                if needle in str(item.get("factor_id") or "").lower()
+                or needle in str(item.get("name") or "").lower()
+                or needle in str(item.get("category") or "").lower()
+                or any(needle in str(alias).lower() for alias in item.get("legacy_name_aliases") or [])
+            ]
         summary = dict(snapshot.get("summary") or {})
         summary.update({
             "snapshot_id": active_snapshot_id,
@@ -2603,6 +3047,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "min_periods_policy": (latest or {}).get("min_periods_policy") or default_operator_config()["min_periods_policy"],
                 "blocked_field_policy": (latest or {}).get("blocked_field_policy") or default_operator_config()["blocked_field_policy"],
                 "governance_protocol": (latest or {}).get("governance_protocol") or default_operator_config()["governance_protocol"],
+                "composition_methods": (latest or {}).get("composition_methods") or default_operator_config().get("composition_methods", []),
                 "notes": (latest or {}).get("notes") or "",
             }
         config = normalize_operator_config(draft)
@@ -2655,6 +3100,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "min_periods_policy": config["min_periods_policy"],
                 "blocked_field_policy": config["blocked_field_policy"],
                 "governance_protocol_json": dumps(config.get("governance_protocol") or {}),
+                "composition_methods_json": dumps(config.get("composition_methods") or []),
                 "created_by": str(payload.get("created_by") or "operator"),
                 "notes": str(config.get("notes") or ""),
                 "created_at": now,
@@ -2702,7 +3148,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
         latest_run = self._decode_factor_factory_run_row(refreshed_rows[0]) if refreshed_rows else None
         runs = [self._decode_factor_factory_run_row(row) for row in refreshed_rows]
         mining = self.list_factor_mining_jobs()
-        quarantine = self.list_factor_quarantine_candidates()
+        latest_mining_job_id = str((latest_run or {}).get("mining_job_id") or "")
+        quarantine = self.list_factor_quarantine_candidates(
+            source_job_id=latest_mining_job_id or None,
+            page=1,
+            page_size=50,
+        )
         overview = {
             "profile": profile,
             "active_run": latest_run if latest_run and latest_run.get("status") in {"QUEUED", "RUNNING"} else None,
@@ -2717,6 +3168,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         latest_summary = latest_run.get("summary") if isinstance((latest_run or {}).get("summary"), Mapping) else {}
         operator_engine_summary = latest_summary.get("operator_engine") if isinstance(latest_summary.get("operator_engine"), Mapping) else {}
         quarantine_items = quarantine.get("items") if isinstance(quarantine.get("items"), list) else []
+        quarantine_summary = quarantine.get("summary") if isinstance(quarantine.get("summary"), Mapping) else {}
         rejected_reasons: dict[str, int] = {}
         for item in quarantine_items:
             if not isinstance(item, Mapping):
@@ -2727,12 +3179,32 @@ class RealBacktestPlatformService(BacktestPlatformService):
             reason = str(item.get("rejected_reason") or eligibility.get("reason") or "unknown")
             key = reason.split(";", 1)[0][:48] if reason else "unknown"
             rejected_reasons[key] = rejected_reasons.get(key, 0) + 1
+        formula_count = int(
+            operator_engine_summary.get("deduped_formula_count")
+            or operator_engine_summary.get("generated_formula_count")
+            or 0
+        )
+        raw_f2_count = int(operator_engine_summary.get("raw_f2_batch_delivered_count") or formula_count)
+        refined_f2_count = int(operator_engine_summary.get("refined_f2_batch_delivered_count") or 0)
+        quarantine_pass_count = int(quarantine_summary.get("passed_count") or 0) + int(quarantine_summary.get("published_count") or 0)
+        failure_count = int(quarantine_summary.get("rejected_count") or 0)
         overview["monitor_summary"] = {
-            "yesterday_formula_count": int(operator_engine_summary.get("deduped_formula_count") or operator_engine_summary.get("generated_formula_count") or 0),
-            "initial_screen_pass_count": len((latest_run.get("mining_job") or {}).get("top_candidates") or []) if isinstance((latest_run or {}).get("mining_job"), Mapping) else 0,
-            "quarantine_pass_count": sum(1 for item in quarantine_items if isinstance(item, Mapping) and str(item.get("status") or "").upper() in {"PASSED", "PUBLISHED"}),
-            "s_grade_promotion_count": sum(1 for item in quarantine_items if isinstance(item, Mapping) and str(item.get("publish_status") or "").upper() == "ELIGIBLE"),
+            "formula_count": formula_count,
+            "selected_date_formula_count": formula_count,
+            "yesterday_formula_count": formula_count,
+            "raw_f2_delivered_count": raw_f2_count,
+            "refined_f2_delivered_count": refined_f2_count,
+            "initial_screen_pass_count": refined_f2_count,
+            "quarantine_pass_count": quarantine_pass_count,
+            "s_grade_promotion_count": sum(
+                1
+                for item in quarantine_items
+                if isinstance(item, Mapping)
+                and str(item.get("publish_status") or "").upper() == "ELIGIBLE"
+                and bool(item.get("wnzt_complete"))
+            ),
             "alpha_concentration": round(max((_coerce_float((item.get("candidate_metrics") or {}).get("s_grade_correlation"), 0.0) for item in quarantine_items if isinstance(item, Mapping) and isinstance(item.get("candidate_metrics"), Mapping)), default=0.0), 4),
+            "failure_candidate_count": failure_count,
             "failure_reason_distribution": rejected_reasons,
         }
         overview.update(self._factor_factory_phase2_rows(
@@ -2792,7 +3264,164 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "min_periods_policy": operator_snapshot.get("min_periods_policy"),
             "blocked_field_policy": operator_snapshot.get("blocked_field_policy"),
             "governance_protocol": operator_snapshot.get("governance_protocol"),
+            "composition_methods": operator_snapshot.get("composition_methods") or default_operator_config().get("composition_methods", []),
         }
+
+    def _factor_factory_enabled_composition_methods(
+        self,
+        config_snapshot: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        raw_methods = config_snapshot.get("composition_methods")
+        if not isinstance(raw_methods, Sequence) or isinstance(raw_methods, (str, bytes)):
+            raw_methods = default_operator_config().get("composition_methods", [])
+        methods: list[dict[str, Any]] = []
+        for item in raw_methods or []:
+            if not isinstance(item, Mapping):
+                continue
+            method = dict(item)
+            if method.get("enabled") is False:
+                continue
+            method["publish_boundary"] = "D2_QUARANTINE_ONLY"
+            methods.append(method)
+        return methods
+
+    def _factor_factory_request_with_composition_config(
+        self,
+        request_payload: Mapping[str, Any],
+        config_snapshot: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        payload = dict(request_payload)
+        methods = self._factor_factory_enabled_composition_methods(config_snapshot)
+        if not methods:
+            return payload
+        family_map = {
+            "LINEAR_WEIGHTING": ("style_blend",),
+            "RATIO_RISK_ADJUSTED": ("risk_adjusted", "value_anchor"),
+            "RESIDUAL_ORTHOGONAL": ("residual_neutralized",),
+            "RANK_POOLING": ("rank_pooling",),
+            "FFBLEND_STYLE": ("ffblend_style",),
+            "DIVERGENCE_PENALTY": ("divergence",),
+            "TIME_SERIES_DENOISE": ("ts_denoise",),
+        }
+        recipe_families: list[str] = []
+        source_factor_ids = [str(item).strip() for item in payload.get("source_factor_ids") or [] if str(item).strip()]
+        for method in methods:
+            method_type = str(method.get("method_type") or "").strip().upper()
+            params = method.get("params") if isinstance(method.get("params"), Mapping) else {}
+            configured_families = None
+            if isinstance(params, Mapping):
+                configured_families = params.get("recipe_families") or params.get("recipe_family")
+            if isinstance(configured_families, str):
+                method_families = (configured_families,)
+            elif isinstance(configured_families, Sequence):
+                method_families = tuple(str(item) for item in configured_families)
+            else:
+                method_families = family_map.get(method_type, ())
+            recipe_families.extend(str(item).strip() for item in method_families if str(item).strip())
+            raw_sources = method.get("source_factor_ids")
+            if isinstance(raw_sources, Sequence) and not isinstance(raw_sources, (str, bytes)):
+                source_factor_ids.extend(str(item).strip() for item in raw_sources if str(item).strip())
+        payload["generation_mode"] = "HYBRID_COMPOSITION"
+        payload["recipe_families"] = list(dict.fromkeys(recipe_families))
+        payload["source_factor_ids"] = list(dict.fromkeys(source_factor_ids))
+        policy = dict(payload.get("composition_policy") or {})
+        policy["composition_methods"] = methods
+        policy["publish_boundary"] = "D2_QUARANTINE_ONLY"
+        policy["legacy_publish_boundary"] = policy.get("legacy_publish_boundary") or "manual_after_quarantine"
+        policy["auto_intake_to_quarantine"] = True
+        payload["composition_policy"] = policy
+        return payload
+
+    def _factor_factory_configured_f3_candidates(
+        self,
+        *,
+        run_id: str,
+        request_payload: Mapping[str, Any],
+        config_snapshot: Mapping[str, Any],
+    ) -> tuple[list[dict[str, Any]], list[Mapping[str, object]]]:
+        methods = self._factor_factory_enabled_composition_methods(config_snapshot)
+        if not methods:
+            return [], []
+        symbols = self._factor_universe_symbols(request_payload.get("universe"))
+        policy = dict(request_payload.get("composition_policy") or {})
+        policy["composition_methods"] = methods
+        policy["publish_boundary"] = "D2_QUARANTINE_ONLY"
+        try:
+            mining_request = MiningJobRequest(
+                universe=tuple(symbols),
+                start_date=str(request_payload.get("start_date") or ""),
+                end_date=str(request_payload.get("end_date") or ""),
+                operators=tuple(str(item) for item in request_payload.get("operators") or ("return", "rank")),
+                candidate_count=max(1, len(methods)),
+                random_seed=int(request_payload.get("random_seed") if request_payload.get("random_seed") is not None else 0),
+                min_rank_ic=_coerce_float(request_payload.get("min_rank_ic")),
+                max_depth=int(request_payload.get("max_depth") or 3),
+                generation_mode="HYBRID_COMPOSITION",
+                source_factor_ids=tuple(str(item) for item in request_payload.get("source_factor_ids") or ()),
+                recipe_families=tuple(str(item) for item in request_payload.get("recipe_families") or ()),
+                exploration_budget=0,
+                composition_policy=policy,
+            )
+            mining_request.validate()
+            market_data = self._factor_mining_market_data(
+                symbols,
+                start_date=mining_request.start_date,
+                end_date=mining_request.end_date,
+            )
+            result = run_factor_mining_job(
+                mining_request,
+                market_data=market_data,
+                top_k=max(1, len(methods)),
+            )
+        except Exception as exc:
+            return [], [
+                {
+                    "reason": "COMPOSITION_EXECUTION_FAILED",
+                    "error_message": str(exc),
+                    "candidate_generated": False,
+                    "persisted_to_factor_definitions": False,
+                    "publish_boundary": "D2_QUARANTINE_ONLY",
+                }
+            ]
+
+        candidates: list[dict[str, Any]] = []
+        for candidate in getattr(result, "all_candidates", ()) or ():
+            if getattr(candidate, "recipe_kind", None) != "configured_method":
+                continue
+            projected = self._project_mining_candidate(candidate)
+            metadata = projected.get("composition_metadata") if isinstance(projected.get("composition_metadata"), Mapping) else {}
+            digest = hashlib.sha1(f"{run_id}|{projected.get('candidate_id')}".encode("utf-8")).hexdigest()
+            candidate_id = f"f3_{digest[:16]}"
+            method_payload = {
+                "id": metadata.get("method_id"),
+                "key": metadata.get("recipe_family"),
+                "label": metadata.get("label") or metadata.get("method_id"),
+                "method_type": metadata.get("method_type"),
+                "recipe_family": metadata.get("recipe_family"),
+                "publish_boundary": "D2_QUARANTINE_ONLY",
+            }
+            projected.update({
+                "id": candidate_id,
+                "candidate_id": candidate_id,
+                "operator_config_snapshot_id": config_snapshot.get("operator_config_snapshot_id"),
+                "f1_catalog_snapshot_id": config_snapshot.get("f1_catalog_snapshot_id"),
+                "target_layer": "L3",
+                "composition_methods": [method_payload],
+                "investment_logic": str(method_payload.get("label") or "Configured F3 composition"),
+                "pipeline_version": "configured_f3_composition_v1",
+                "raw_f2": False,
+                "refined_f2": False,
+                "publish_boundary": "D2_QUARANTINE_ONLY",
+                "generation_mode": "HYBRID_COMPOSITION",
+                "artifact_refs": {
+                    "source": "operator_config_snapshot.composition_methods",
+                    "operator_config_snapshot_id": config_snapshot.get("operator_config_snapshot_id"),
+                    "f1_catalog_snapshot_id": config_snapshot.get("f1_catalog_snapshot_id"),
+                },
+                "persisted_to_factor_definitions": False,
+            })
+            candidates.append(projected)
+        return candidates, list(getattr(result, "composition_skip_evidence", ()) or ())
 
     def _apply_factor_factory_blocked_field_policy(
         self,
@@ -2863,7 +3492,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
         ]
 
     @staticmethod
-    def _factor_factory_wnzt_evidence(config_snapshot: Mapping[str, Any], candidate: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def _factor_factory_wnzt_evidence(
+        config_snapshot: Mapping[str, Any],
+        candidate: Mapping[str, Any] | None = None,
+        *,
+        expression: str = "",
+    ) -> dict[str, Any]:
         protocol = dict(config_snapshot.get("governance_protocol") or {})
         o_enabled = bool(protocol.get("orthogonalization_enabled", False))
         t_ext_enabled = bool(protocol.get("turnover_filter_enabled", False))
@@ -2872,15 +3506,19 @@ class RealBacktestPlatformService(BacktestPlatformService):
         if isinstance(candidate, Mapping):
             nan_ratio = _coerce_float(candidate.get("nan_ratio"), 0.0)
             coverage = _coerce_float(candidate.get("coverage"), 100.0)
+        missing = FactorResearchService._factor_phase2_wnzt_missing(expression)
+        missing_codes = {item.split(" ", 1)[0] for item in missing}
+        complete = not missing
         return {
             "protocol": "WNZT",
-            "complete": True,
-            "refined_output": "Refined F2",
+            "complete": complete,
+            "missing": missing,
+            "refined_output": "Refined F2" if complete else None,
             "stages": {
-                "W": {"status": "PASS", "winsorize_method": "MAD", "clip_ratio": 0.01, "coverage": coverage},
-                "N": {"status": "PASS", "neutralize_by": ["industry", "market_cap"], "residual_quality": "PASS"},
-                "Z": {"status": "PASS", "cross_section_mean": 0.0, "cross_section_std": 1.0, "exception_days": 0},
-                "T": {"status": "PASS", "smoothing": "rolling_median", "nan_ratio": nan_ratio, "forward_fill": False, "zero_fill": False},
+                "W": {"status": "MISSING" if "W" in missing_codes else "PASS", "winsorize_method": "MAD", "clip_ratio": 0.01, "coverage": coverage},
+                "N": {"status": "MISSING" if "N" in missing_codes else "PASS", "neutralize_by": ["industry", "market_cap"], "residual_quality": "PASS" if "N" not in missing_codes else "MISSING"},
+                "Z": {"status": "MISSING" if "Z" in missing_codes else "PASS", "cross_section_mean": 0.0 if "Z" not in missing_codes else None, "cross_section_std": 1.0 if "Z" not in missing_codes else None, "exception_days": 0},
+                "T": {"status": "MISSING" if "T" in missing_codes else "PASS", "smoothing": "rolling_median", "nan_ratio": nan_ratio, "forward_fill": False, "zero_fill": False},
                 "O": {"status": "CONFIGURED" if o_enabled else "SKIPPED", "enabled": o_enabled},
                 "T_EXT": {"status": "CONFIGURED" if t_ext_enabled else "SKIPPED", "enabled": t_ext_enabled},
             },
@@ -2892,16 +3530,32 @@ class RealBacktestPlatformService(BacktestPlatformService):
             },
         }
 
+    @staticmethod
+    def _factor_factory_refined_f2_expression(raw_expression: str) -> str:
+        expression = str(raw_expression or "").strip()
+        if not expression:
+            return expression
+        refined = f'ZScore(Neutralize(Winsorize({expression}, method="MAD"), by="industry,market_cap"))'
+        if not re.search(r"(?:rank\s*\(|ts_rank|tsrank)", expression, flags=re.IGNORECASE):
+            refined = f"TS_Rank({refined}, 3)"
+        return refined
+
     def _factor_factory_operator_engine_candidate(
         self,
         raw_candidate: Mapping[str, Any],
         *,
+        run_id: str,
         rank: int,
         config_snapshot: Mapping[str, Any],
         gate_policy: Mapping[str, Any],
     ) -> dict[str, Any]:
-        expression = str(raw_candidate.get("expression") or "")
-        digest = hashlib.sha1(expression.encode("utf-8")).hexdigest()
+        raw_expression = str(raw_candidate.get("expression") or "").strip()
+        expression = self._factor_factory_refined_f2_expression(raw_expression)
+        source_factor_ids = [str(item) for item in raw_candidate.get("source_factor_ids") or [] if str(item).strip()]
+        candidate_identity = str(raw_candidate.get("candidate_id") or "|".join(source_factor_ids) or raw_expression)
+        digest = hashlib.sha1(f"{candidate_identity}|{raw_expression}".encode("utf-8")).hexdigest()
+        run_scoped_digest = hashlib.sha1(f"{run_id}|{candidate_identity}|{raw_expression}".encode("utf-8")).hexdigest()
+        candidate_id = f"rawf2_{run_scoped_digest[:16]}"
         rank_ic = round(0.034 + (rank % 9) * 0.002, 4)
         holding_period = int(_coerce_float((raw_candidate.get("min_periods") or {}).get("max_window"), 21))
         ir = factor_ir_from_rank_ic(rank_ic, max(1, holding_period)) or 0.75
@@ -2909,12 +3563,16 @@ class RealBacktestPlatformService(BacktestPlatformService):
         wnzt_evidence = self._factor_factory_wnzt_evidence(config_snapshot, {
             **dict(raw_candidate),
             "rank_ic": rank_ic,
-        })
+        }, expression=expression)
+        wnzt_missing = list(wnzt_evidence.get("missing") or [])
         return {
-            "id": raw_candidate.get("candidate_id") or f"rawf2_{digest[:16]}",
-            "candidate_id": raw_candidate.get("candidate_id") or f"rawf2_{digest[:16]}",
+            "id": candidate_id,
+            "candidate_id": candidate_id,
+            "operator_candidate_id": raw_candidate.get("candidate_id") or f"rawf2_{digest[:16]}",
             "rank": rank,
             "expression": expression,
+            "raw_expression": raw_expression,
+            "refined_expression": expression,
             "score": rank_ic,
             "rank_ic": rank_ic,
             "pure_rank_ic": rank_ic,
@@ -2933,20 +3591,25 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "max_drawdown_pct": 8.0,
             "benchmark_max_drawdown_pct": 10.0,
             "drawdown_vs_benchmark_ratio": 0.8,
-            "source_factor_ids": list(raw_candidate.get("source_factor_ids") or []),
+            "source_factor_ids": source_factor_ids,
             "operator_chain": list(raw_candidate.get("operator_chain") or []),
             "operator_engine": {
                 "backend": config_snapshot.get("compute_backend") or DEFAULT_COMPUTE_BACKEND,
                 "candidate_id": raw_candidate.get("candidate_id"),
+                "mining_candidate_id": candidate_id,
                 "normalized_expression": raw_candidate.get("normalized_expression"),
             },
             "operator_config_snapshot_id": config_snapshot.get("operator_config_snapshot_id"),
             "f1_catalog_snapshot_id": config_snapshot.get("f1_catalog_snapshot_id"),
             "raw_f2": True,
             "refined_f2": True,
-            "wnzt_complete": True,
+            "wnzt_complete": not wnzt_missing,
+            "wnzt_missing": wnzt_missing,
             "wnzt_evidence": wnzt_evidence,
             "decay_diagnostics": wnzt_evidence.get("decay_diagnostics"),
+            "processing_status": "WNZT_PROCESSED" if not wnzt_missing else "RAW_SIGNAL",
+            "processing_status_label": "Refined F2" if not wnzt_missing else "Raw Signal",
+            "target_layer": "L2",
             "turnover": 12.0 + (rank % 4),
             "coverage": coverage,
             "nan_ratio": raw_candidate.get("nan_ratio"),
@@ -2954,6 +3617,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "artifact_refs": raw_candidate.get("artifact_refs") or {},
             "risk_flags": [],
             "status": "COMPLETED",
+            "pipeline_version": "raw_refined_f2_v2",
             "persisted_to_factor_definitions": False,
         }
 
@@ -2970,17 +3634,56 @@ class RealBacktestPlatformService(BacktestPlatformService):
         fields = self._factor_factory_operator_engine_fields(config_snapshot, request_payload)
         engine = PandasBottleneckOperatorEngine()
         result = engine.generate_candidates(f1_fields=fields, config=engine_config)
+        materialized = materialize_operator_engine_result(result, run_id=run_id)
+        candidate_artifact_refs = materialized.get("candidate_artifact_refs") if isinstance(materialized.get("candidate_artifact_refs"), Mapping) else {}
         preview_limit = max(1, min(50, int(request_payload.get("candidate_count") or 10)))
-        top_candidates = [
-            self._factor_factory_operator_engine_candidate(
-                candidate.to_dict(),
-                rank=index + 1,
-                config_snapshot=config_snapshot,
-                gate_policy=gate_policy,
+        full_candidates = []
+        for index, candidate in enumerate(result.candidates):
+            raw_payload = candidate.to_dict()
+            artifact_refs = candidate_artifact_refs.get(candidate.candidate_id)
+            if isinstance(artifact_refs, Mapping):
+                raw_payload["artifact_refs"] = dict(artifact_refs)
+            full_candidates.append(
+                self._factor_factory_operator_engine_candidate(
+                    raw_payload,
+                    run_id=run_id,
+                    rank=index + 1,
+                    config_snapshot=config_snapshot,
+                    gate_policy=gate_policy,
+                )
             )
-            for index, candidate in enumerate(result.candidates[:preview_limit])
-        ]
+        raw_f2_candidate_count = len(full_candidates)
+        f3_candidates, composition_skip_evidence = self._factor_factory_configured_f3_candidates(
+            run_id=run_id,
+            request_payload=request_payload,
+            config_snapshot=config_snapshot,
+        )
+        for offset, candidate in enumerate(f3_candidates, start=raw_f2_candidate_count + 1):
+            candidate["rank"] = offset
+        full_candidates.extend(f3_candidates)
         job_id = f"mine_op_{hashlib.sha1(run_id.encode('utf-8')).hexdigest()[:16]}"
+        top_candidates = [
+            candidate
+            for candidate in full_candidates[:preview_limit]
+        ]
+        refined_candidate_ledger_rel = (
+            f"artifacts/factor-factory/operator-engine/{run_id}/refined-f2-candidates.json"
+        )
+        refined_candidate_ledger_path = Path(refined_candidate_ledger_rel)
+        refined_candidate_ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        refined_candidate_ledger_path.write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "mining_job_id": job_id,
+                    "candidate_count": len(full_candidates),
+                    "candidates": full_candidates,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         progress = {
             "total_candidates": result.deduped_formula_count,
             "evaluated_candidates": result.deduped_formula_count,
@@ -2998,16 +3701,28 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "failed_sample_count": 0,
             "persisted_to_factor_definitions": False,
             "generation_mode": "OPERATOR_ENGINE",
-            "composition_candidate_count": 0,
+            "composition_candidate_count": len(f3_candidates),
             "composition_policy": dict(request_payload.get("composition_policy") or {}),
             "operator_engine": {
                 "backend": result.backend,
                 "requested_budget": result.requested_budget,
                 "generated_formula_count": result.generated_formula_count,
                 "deduped_formula_count": result.deduped_formula_count,
+                "raw_f2_batch_delivered_count": raw_f2_candidate_count,
+                "refined_f2_batch_delivered_count": sum(
+                    1
+                    for candidate in full_candidates
+                    if candidate.get("target_layer") == "L2" and candidate.get("refined_f2") and candidate.get("wnzt_complete")
+                ),
+                "f3_composition_candidate_count": len(f3_candidates),
+                "composition_skip_evidence": composition_skip_evidence,
+                "composition_methods": list(request_payload.get("composition_policy", {}).get("composition_methods") or []),
                 "top_preview_count": len(top_candidates),
                 "truncated": result.truncated,
-                "artifact_refs": dict(result.artifact_refs),
+                "artifact_refs": {
+                    **dict(materialized.get("artifact_refs") or result.artifact_refs),
+                    "refined_f2_candidate_ledger": refined_candidate_ledger_rel,
+                },
             },
             "f1_catalog_snapshot_id": config_snapshot.get("f1_catalog_snapshot_id"),
             "operator_config_snapshot_id": config_snapshot.get("operator_config_snapshot_id"),
@@ -3042,7 +3757,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 dumps(candidate),
                 created_at,
             )
-            for candidate in top_candidates
+            for candidate in full_candidates
         ]
         if candidate_rows:
             self.storage.executemany(
@@ -3059,6 +3774,271 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "status": "COMPLETED",
             "operator_engine": summary["operator_engine"],
             "top_candidates": top_candidates,
+        }
+
+    def _factor_factory_online_raw_f2_candidates(
+        self,
+        *,
+        factor_ids: Sequence[str],
+        candidate_limit: int,
+    ) -> list[dict[str, Any]]:
+        self._factor_research_service().ensure_default_factors()
+        requested_ids = {str(item).strip() for item in factor_ids if str(item).strip()}
+        if requested_ids:
+            placeholders = ",".join("?" for _ in requested_ids)
+            rows = self.storage.fetch_all(
+                f"""
+                SELECT *
+                FROM factor_definitions
+                WHERE deleted_at IS NULL
+                  AND id IN ({placeholders})
+                ORDER BY name ASC, id ASC
+                """,
+                tuple(sorted(requested_ids)),
+            )
+            factors = [dict(row) for row in rows]
+        else:
+            rows = self.storage.fetch_all(
+                """
+                SELECT *
+                FROM factor_definitions
+                WHERE deleted_at IS NULL
+                ORDER BY name ASC, id ASC
+                """
+            )
+            factors = [dict(row) for row in rows]
+        diagnostic_rows = self.storage.fetch_all(
+            """
+            SELECT factor_id, summary_json
+            FROM factor_diagnostic_runs
+            WHERE factor_id IN (
+                SELECT id
+                FROM factor_definitions
+                WHERE deleted_at IS NULL
+            )
+            ORDER BY created_at DESC, id DESC
+            """
+        )
+        diagnostics: dict[str, Mapping[str, Any]] = {}
+        for row in diagnostic_rows:
+            factor_id = str(row.get("factor_id") or "")
+            if not factor_id or factor_id in diagnostics:
+                continue
+            summary = loads(row.get("summary_json"), {})
+            diagnostics[factor_id] = summary if isinstance(summary, Mapping) else {}
+        raw_candidates: list[dict[str, Any]] = []
+        for factor in factors:
+            if not isinstance(factor, Mapping):
+                continue
+            factor_id = str(factor.get("id") or "").strip()
+            if not factor_id or (requested_ids and factor_id not in requested_ids):
+                continue
+            if str(FactorResearchService._factor_tier_key(factor) or "").upper() != "F2":
+                continue
+            expression = str(factor.get("expression") or "").strip()
+            if not expression or not FactorResearchService._factor_phase2_wnzt_missing(expression):
+                continue
+            diagnostic = diagnostics.get(factor_id, {})
+            coverage = _coerce_float(diagnostic.get("coverage"), 96.0)
+            if 0 < coverage <= 1.0:
+                coverage *= 100.0
+            rank_ic = _coerce_float(
+                diagnostic.get("rank_ic") if diagnostic.get("rank_ic") is not None else diagnostic.get("pure_rank_ic"),
+                0.034,
+            )
+            raw_candidates.append({
+                "candidate_id": f"online_rawf2_{hashlib.sha1(factor_id.encode('utf-8')).hexdigest()[:16]}",
+                "expression": expression,
+                "normalized_expression": expression,
+                "source_factor_ids": [factor_id],
+                "source_factor_name": factor.get("name"),
+                "source_factor_lifecycle": factor.get("lifecycle") or "all",
+                "source_factor_status": factor.get("lifecycle_status"),
+                "rank_ic": rank_ic,
+                "pure_rank_ic": rank_ic,
+                "coverage": coverage,
+                "turnover": _coerce_float(diagnostic.get("turnover"), 12.0),
+                "operator_chain": ["online_factor_library", "WNZT"],
+                "artifact_refs": {
+                    "source_factor_id": factor_id,
+                    "source_factor_expression": expression,
+                },
+            })
+        raw_candidates.sort(key=lambda item: (-abs(_coerce_float(item.get("rank_ic"))), str((item.get("source_factor_ids") or [""])[0])))
+        return raw_candidates[:max(1, min(10000, int(_coerce_float(candidate_limit, 10000.0))))]
+
+    def _create_factor_factory_online_raw_f2_job(
+        self,
+        *,
+        run_id: str,
+        raw_candidates: Sequence[Mapping[str, Any]],
+        candidate_limit: int,
+        gate_policy: Mapping[str, Any],
+        config_snapshot: Mapping[str, Any],
+        created_at: str,
+    ) -> dict[str, Any]:
+        full_candidates = [
+            self._factor_factory_operator_engine_candidate(
+                candidate,
+                run_id=run_id,
+                rank=index + 1,
+                config_snapshot=config_snapshot,
+                gate_policy=gate_policy,
+            )
+            for index, candidate in enumerate(raw_candidates)
+        ]
+        job_id = f"mine_online_rawf2_{hashlib.sha1(run_id.encode('utf-8')).hexdigest()[:16]}"
+        source_factor_ids = [
+            str(source_id)
+            for candidate in full_candidates
+            for source_id in (candidate.get("source_factor_ids") or [])
+            if str(source_id).strip()
+        ]
+        preview_limit = min(50, max(1, int(_coerce_float(candidate_limit, 10000.0))))
+        top_candidates = full_candidates[:preview_limit]
+        artifact_dir_rel = Path("artifacts") / "factor-factory" / "online-raw-f2" / run_id
+        artifact_dir_rel.mkdir(parents=True, exist_ok=True)
+        ledger_rel = artifact_dir_rel / "refined-f2-candidates.json"
+        manifest_rel = artifact_dir_rel / "formula-manifest.json"
+        manifest_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "source_factor_ids": source_factor_ids,
+                    "candidates": full_candidates,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        refined_count = sum(
+            1
+            for candidate in full_candidates
+            if candidate.get("refined_f2") and candidate.get("wnzt_complete")
+        )
+        ledger_rel.write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "mining_job_id": job_id,
+                    "source": "online_factor_library_raw_f2",
+                    "candidate_count": len(full_candidates),
+                    "candidates": full_candidates,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        manifest_payload = {
+            "job_id": job_id,
+            "source_job_id": job_id,
+            "source": "online_factor_library_raw_f2",
+            "formula_count": len(full_candidates),
+            "refined_count": refined_count,
+            "hash": manifest_hash,
+            "created_at": created_at,
+            "source_factor_count": len(source_factor_ids),
+            "source_factor_ids": source_factor_ids,
+        }
+        manifest_rel.write_text(
+            json.dumps(manifest_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        operator_engine_summary = {
+            "backend": config_snapshot.get("compute_backend") or DEFAULT_COMPUTE_BACKEND,
+            "source": "online_factor_library_raw_f2",
+            "requested_budget": candidate_limit,
+            "generated_formula_count": len(raw_candidates),
+            "deduped_formula_count": len(full_candidates),
+            "raw_f2_batch_delivered_count": len(full_candidates),
+            "refined_f2_batch_delivered_count": refined_count,
+            "top_preview_count": len(top_candidates),
+            "truncated": len(raw_candidates) > len(full_candidates),
+            "source_factor_count": len(source_factor_ids),
+            "source_factor_ids": source_factor_ids,
+            "source_factor_scope": "all_raw_f2_factor_definitions",
+            "artifact_refs": {
+                "formula_manifest": str(manifest_rel),
+                "refined_f2_candidate_ledger": str(ledger_rel),
+            },
+        }
+        summary = {
+            "universe_symbol_count": 0,
+            "price_symbol_count": 0,
+            "dataset_snapshot_id": DATASET_PRICE_SNAPSHOT_ID,
+            "market_data_source": "online_factor_library_raw_f2",
+            "synthetic_market_data": False,
+            "top_candidate_count": len(top_candidates),
+            "failed_sample_count": 0,
+            "persisted_to_factor_definitions": False,
+            "generation_mode": "ONLINE_RAW_F2_REFINEMENT",
+            "composition_candidate_count": 0,
+            "operator_engine": operator_engine_summary,
+            "f1_catalog_snapshot_id": config_snapshot.get("f1_catalog_snapshot_id"),
+            "operator_config_snapshot_id": config_snapshot.get("operator_config_snapshot_id"),
+        }
+        progress = {
+            "total_candidates": len(full_candidates),
+            "evaluated_candidates": len(full_candidates),
+            "failed_candidates": 0,
+            "throughput_per_second": float(len(full_candidates)),
+            "percent": 100.0,
+        }
+        self.storage.insert_json_row(
+            "factor_mining_jobs",
+            {
+                "id": job_id,
+                "status": "COMPLETED",
+                "request_json": dumps({
+                    "generation_mode": "ONLINE_RAW_F2_REFINEMENT",
+                    "source": "online_factor_library_raw_f2",
+                    "candidate_limit": candidate_limit,
+                    "source_factor_ids": source_factor_ids,
+                    "config_snapshot": dict(config_snapshot),
+                    "operator_engine": operator_engine_summary,
+                }),
+                "progress_json": dumps(progress),
+                "summary_json": dumps(summary),
+                "top_candidates_json": dumps(top_candidates),
+                "failed_samples_json": dumps([]),
+                "created_at": created_at,
+                "updated_at": created_at,
+                "completed_at": created_at,
+                "error_message": None,
+            },
+        )
+        candidate_rows = [
+            (
+                str(candidate.get("id")),
+                job_id,
+                str(candidate.get("expression") or ""),
+                _coerce_float(candidate.get("fitness_score"), _coerce_float(candidate.get("rank_ic"))),
+                _coerce_float(candidate.get("rank_ic")),
+                _coerce_float(candidate.get("turnover")),
+                _coerce_float(candidate.get("coverage")),
+                int(_coerce_float(candidate.get("depth"), 0.0)),
+                dumps([]),
+                dumps(candidate),
+                created_at,
+            )
+            for candidate in full_candidates
+        ]
+        if candidate_rows:
+            self.storage.executemany(
+                """
+                INSERT OR REPLACE INTO factor_mining_candidates (
+                    id, job_id, expression, score, rank_ic, turnover, coverage,
+                    depth, risk_flags_json, summary_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                candidate_rows,
+            )
+        return {
+            "id": job_id,
+            "status": "COMPLETED",
+            "operator_engine": operator_engine_summary,
+            "top_candidates": top_candidates,
+            "summary": summary,
         }
 
     def _create_factor_factory_run(
@@ -3088,7 +4068,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "compute_backend": operator_snapshot.get("compute_backend"),
                 "min_periods_policy": operator_snapshot.get("min_periods_policy"),
                 "blocked_field_policy": operator_snapshot.get("blocked_field_policy"),
+                "composition_methods": operator_snapshot.get("composition_methods") or default_operator_config().get("composition_methods", []),
             }
+        request_payload = self._factor_factory_request_with_composition_config(request_payload, config_snapshot_payload)
         request_payload = self._apply_factor_factory_blocked_field_policy(request_payload, config_snapshot_payload)
         config_signature = self._factor_factory_config_signature(request_payload, gate_policy, config_snapshot_payload)
         if trigger == "DAILY":
@@ -3140,6 +4122,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "compute_backend": config_snapshot_payload.get("compute_backend"),
             "operator_engine": mining_job.get("operator_engine") if isinstance(mining_job, Mapping) else {},
             "blocked_field_policy": config_snapshot_payload.get("blocked_field_policy"),
+            "composition_methods": config_snapshot_payload.get("composition_methods") or [],
             "funnel": self._factor_factory_funnel(),
         }
         self.storage.insert_json_row(
@@ -3233,6 +4216,101 @@ class RealBacktestPlatformService(BacktestPlatformService):
             config_snapshot=config_snapshot,
         )
         return {**self.get_factor_factory_overview(), "manual_run": run}
+
+    def run_factor_factory_online_raw_f2_refinement(self, request: Any | None = None) -> dict[str, Any]:
+        payload = dict(_as_mapping(request or {}))
+        gate_policy = self._factor_factory_gate_policy_payload(request)
+        config_snapshot = self._factor_factory_run_config_snapshot_from_payload(payload)
+        candidate_limit = max(1, min(10000, int(_coerce_float(payload.get("candidate_limit"), 10000.0))))
+        raw_candidates = self._factor_factory_online_raw_f2_candidates(
+            factor_ids=[
+                str(item).strip()
+                for item in payload.get("factor_ids") or []
+                if str(item).strip()
+            ],
+            candidate_limit=candidate_limit,
+        )
+        run_id = f"ffr_online_rawf2_{uuid4().hex[:12]}"
+        now = iso_now()
+        mining_job = self._create_factor_factory_online_raw_f2_job(
+            run_id=run_id,
+            raw_candidates=raw_candidates,
+            candidate_limit=candidate_limit,
+            gate_policy=gate_policy,
+            config_snapshot=config_snapshot,
+            created_at=now,
+        )
+        mining_job_id = str(mining_job.get("id") or "")
+        request_payload = {
+            "generation_mode": "ONLINE_RAW_F2_REFINEMENT",
+            "source": "online_factor_library_raw_f2",
+            "candidate_limit": candidate_limit,
+            "source_factor_ids": [
+                str(source_id)
+                for candidate in raw_candidates
+                for source_id in (candidate.get("source_factor_ids") or [])
+                if str(source_id).strip()
+            ],
+        }
+        config_signature = self._factor_factory_config_signature(request_payload, gate_policy, config_snapshot)
+        summary = {
+            "trigger": "MANUAL",
+            "daily_automation": False,
+            "one_time_task": True,
+            "source": "online_factor_library_raw_f2",
+            "generation_mode": "ONLINE_RAW_F2_REFINEMENT",
+            "pit_gate_mode": gate_policy.get("pit_gate_mode", "DIAGNOSTIC_ONLY"),
+            "residual_enabled": bool(gate_policy.get("residual_enabled", True)),
+            "drawdown_threshold": gate_policy.get("max_drawdown_relative_to_benchmark", 1.5),
+            "mining_job_id": mining_job_id,
+            "config_snapshot": config_snapshot,
+            "operator_config_snapshot_id": config_snapshot.get("operator_config_snapshot_id"),
+            "f1_catalog_snapshot_id": config_snapshot.get("f1_catalog_snapshot_id"),
+            "enabled_operators": config_snapshot.get("enabled_operators"),
+            "window_space": config_snapshot.get("window_space"),
+            "default_depth": config_snapshot.get("default_depth"),
+            "daily_formula_budget": config_snapshot.get("daily_formula_budget"),
+            "compute_backend": config_snapshot.get("compute_backend"),
+            "operator_engine": mining_job.get("operator_engine") if isinstance(mining_job, Mapping) else {},
+            "raw_library_source_count": len(request_payload["source_factor_ids"]),
+            "funnel": self._factor_factory_funnel(),
+        }
+        self.storage.insert_json_row(
+            "factor_factory_runs",
+            {
+                "id": run_id,
+                "profile_id": "default",
+                "run_date": self._factor_factory_today(),
+                "trigger": "MANUAL",
+                "status": "COMPLETED",
+                "request_json": dumps({**request_payload, "config_snapshot": config_snapshot}),
+                "gate_policy_json": dumps(dict(gate_policy)),
+                "config_signature": config_signature,
+                "mining_job_id": mining_job_id,
+                "summary_json": dumps(summary),
+                "started_at": now,
+                "completed_at": now,
+                "created_at": now,
+                "updated_at": now,
+                "error_message": None,
+            },
+        )
+        self._record_factor_factory_run_item(
+            run_id=run_id,
+            stage="ONLINE_RAW_F2_REFINEMENT",
+            source_id=None,
+            target_id=mining_job_id,
+            status="COMPLETED",
+            summary={
+                "source": "online_factor_library_raw_f2",
+                "source_factor_count": len(request_payload["source_factor_ids"]),
+                "operator_engine": mining_job.get("operator_engine") if isinstance(mining_job, Mapping) else {},
+            },
+        )
+        row = self.storage.fetch_one("SELECT * FROM factor_factory_runs WHERE id = ?", (run_id,))
+        refreshed = self._refresh_factor_factory_run_row(row or {})
+        run = self._decode_factor_factory_run_row(refreshed)
+        return {**self.get_factor_factory_overview(), "online_raw_f2_run": run}
 
     def cancel_factor_factory_run(self, run_id: str) -> dict[str, Any]:
         row = self.storage.fetch_one("SELECT * FROM factor_factory_runs WHERE id = ?", (run_id,))

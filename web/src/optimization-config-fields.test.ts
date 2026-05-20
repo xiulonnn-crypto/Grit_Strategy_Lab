@@ -97,8 +97,8 @@ describe("collectOptimizationParameterSeeds", () => {
       "rebalance_frequency",
       "neutralization_method",
     ]);
-    expect(seeds.find((seed) => seed.key === "factor_weight__s_mom_12m1m_rank_pct")?.label).toBe("因子权重 · 12-1月截面动量排名");
-    expect(seeds.find((seed) => seed.key === "factor_weight__s_val_ep_ltm_raw_pct")?.label).toBe("因子权重 · 滚动市盈率倒数 (LTM)");
+    expect(seeds.find((seed) => seed.key === "factor_weight__s_mom_12m1m_rank_pct")?.label).toBe("因子权重 · Rank-12-1月截面动量 (排序)");
+    expect(seeds.find((seed) => seed.key === "factor_weight__s_val_ep_ltm_raw_pct")?.label).toBe("因子权重 · 盈利收益率 (LTM) (原始)");
     expect(seeds.find((seed) => seed.key === "factor_weight__s_mom_12m1m_rank_pct")?.value).toBe(60);
     expect(seeds.find((seed) => seed.key === "top_n")?.value).toBe(8);
     expect(seeds.find((seed) => seed.key === "neutralization_enabled")).toBeUndefined();

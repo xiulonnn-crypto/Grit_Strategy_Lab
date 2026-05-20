@@ -2,8 +2,21 @@
 
 ## Git Fast / Impact / Full
 
+- `latest-fast-gate.md` 和 `latest-impact-gate.md` 会在 `## Steps` 中记录每个 gate step 的 `duration=...`，用于直接判断 git checks、backend、TypeScript、Vitest 各自耗时。
+- 日常改 backend/API/shared contract 后，先跑 owner slice；impact planner 也会强制纳入同一组：
+  `.\.venv\Scripts\python.exe -m pytest tests/test_factor_research_api.py tests/test_backend_api.py tests/test_factor_mining_api.py tests/test_factor_factory_api.py tests/test_factor_quarantine_api.py -q`
+- 改异步 job、后台任务或 completed/progress/candidate_rows 发布顺序后，单独跑；impact gate 也会把该测试按 `async_repeat_count` 重复执行：
+  `.\.venv\Scripts\python.exe -m pytest tests/test_factor_mining_api.py::test_factor_mining_api_runs_one_thousand_candidates_without_factor_library_write -q`
+- 改 F1/F2 前端后，在 `web/` 下跑；impact planner 也会强制纳入这组 Vitest：
+  `node scripts/run-vitest-fixed.cjs factors.phase0.f1.test.tsx factor.model-builder.test.tsx factor.factory.test.tsx app.routes.foundation.test.tsx`
+- 改验证脚本或 gate 逻辑后，先自测：
+  `powershell -ExecutionPolicy Bypass -File .\scripts\codex-validate-impact.ps1 -PlanOnly`
+  与 `powershell -ExecutionPolicy Bypass -File .\scripts\codex-validate-fast.ps1`
+- 提交前可先跑 `powershell -ExecutionPolicy Bypass -File .\scripts\codex-validate-impact.ps1 -Scope WorkingTree`，避免影响面问题拖到最终推送才暴露。
+
 - `git-fast` 使用 `scripts/codex-validate-fast.ps1`，也是 pre-push 默认门禁；它只跑日常精准增量测试，目标 5 分钟内完成，发现 contract、验证脚本、跨栈或未映射源码改动时返回 `not-fast`，不会自动进入长跑测试。
 - `git-impact` 使用 `scripts/codex-validate-impact.ps1`，用于 fast 判定不适合后手动运行；它按 owner map 加影响面 fanout 运行 backend/frontend targeted checks，并会跑前端 `tsc --noEmit`。
+- pre-push 在 fast 返回 `not-fast` 时会尝试复用当前 `HEAD/base` 匹配且非 PlanOnly、未 skip tests、带 step duration 的 `latest-impact-gate.md`；匹配则直接放行，不再需要默认 `--no-verify`。
 - `git-full` 使用 `scripts/codex-validate-full.ps1`，用于大版本、发版、合并主线或 fixture/live acceptance 前的完整门禁。
 - `output/ui-artifact-trace/**`、`output/logs/grit-coder/**`、`harness/reports/**`、项目内 `designs/**` 和证据型 `artifacts/**` 文件会保留在报告里，但不参与 fast 文件数、domain 判定或测试选择。
 

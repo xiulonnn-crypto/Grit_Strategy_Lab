@@ -1,0 +1,219 @@
+{
+  "route": "http://127.0.0.1:4173/?v=<ts>#/factors/factory",
+  "desktop": {
+    "screenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factor-factory-composition-methods\\live-composition-config-desktop.png",
+    "title": "Grit Backtest Platform V1",
+    "viewport": "1440x980",
+    "bodyOverflow": 0,
+    "activeTabText": "组合方法",
+    "rowCount": 7,
+    "hasSignatureText": true,
+    "saveDisabled": false,
+    "snapshotDisabled": false,
+    "checked": [
+      {
+        "selector": ".factor-detail-modal.factor-config-modal",
+        "className": "factor-detail-modal factor-config-modal",
+        "x": 48,
+        "y": 36,
+        "width": 1344,
+        "height": 908,
+        "scrollWidth": 1342,
+        "clientWidth": 1342,
+        "overflow": 0
+      },
+      {
+        "selector": ".factor-config-main",
+        "className": "factor-config-main",
+        "x": 245,
+        "y": 146,
+        "width": 816,
+        "height": 728,
+        "scrollWidth": 816,
+        "clientWidth": 816,
+        "overflow": 0
+      },
+      {
+        "selector": ".composition-method-workbench",
+        "className": "composition-method-workbench",
+        "x": 263,
+        "y": 526,
+        "width": 780,
+        "height": 715,
+        "scrollWidth": 780,
+        "clientWidth": 780,
+        "overflow": 0
+      },
+      {
+        "selector": ".composition-method-list",
+        "className": "composition-method-list",
+        "x": 263,
+        "y": 526,
+        "width": 488,
+        "height": 715,
+        "scrollWidth": 488,
+        "clientWidth": 488,
+        "overflow": 0
+      }
+    ],
+    "rows": [
+      {
+        "text": "线性加权合成风格复合 · 源因子 3 个LINEAR_WEIGHTING开启F3 = sum(w_i * ZScore(F2_i))权重模式：equal动态窗口：21源因子 3D2 检疫",
+        "x": 263,
+        "y": 526,
+        "width": 488,
+        "height": 86
+      },
+      {
+        "text": "比例/风险调整合成风险调节 · 源因子 4 个RATIO_RISK_ADJUSTED开启F3 = Rank(F2_alpha) / max(Rank(F2_risk), denominator_floor)Rank 空间：开启floor：未配置源因子 4D2 检疫",
+        "x": 263,
+        "y": 621,
+        "width": 488,
+        "height": 130
+      },
+      {
+        "text": "残差/正交化合成残差/中性化 · 源因子 2 个RESIDUAL_ORTHOGONAL开启F3 = Residual(F2_A, by=F2_B)窗口：未配置更新：未配置源因子 2D2 检疫",
+        "x": 263,
+        "y": 759,
+        "width": 488,
+        "height": 89
+      },
+      {
+        "text": "排名均值/交集法均衡严选 · 源因子 2 个RANK_POOLING开启F3 = Rank(F2_A) + Rank(F2_B)阈值：未配置方向：HIGH_IS_BETTER源因子 2D2 检疫",
+        "x": 263,
+        "y": 856,
+        "width": 488,
+        "height": 101
+      },
+      {
+        "text": "FFBlend 风格融合风格复合 · 源因子 4 个FFBLEND_STYLE开启F3 = FFBlend(Value, Momentum, Quality, Size)单风格上限：未配置decay：0.94源因子 4D2 检疫",
+        "x": 263,
+        "y": 965,
+        "width": 488,
+        "height": 89
+      },
+      {
+        "text": "背离惩罚背离惩罚 · 源因子 2 个DIVERGENCE_PENALTY关闭F3 = Rank(primary) - penalty * Rank(control)penalty：0.35control：未配置源因子 2D2 检疫",
+        "x": 263,
+        "y": 1062,
+        "width": 488,
+        "height": 86
+      },
+      {
+        "text": "时序降噪时序降噪 · 源因子 1 个TIME_SERIES_DENOISE关闭F3 = TsRank(signal, 252)窗口：252方式：TsRank源因子 1D2 检疫",
+        "x": 263,
+        "y": 1156,
+        "width": 488,
+        "height": 85
+      }
+    ]
+  },
+  "mobile": {
+    "screenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factor-factory-composition-methods\\live-composition-config-mobile.png",
+    "title": "Grit Backtest Platform V1",
+    "viewport": "390x844",
+    "bodyOverflow": 0,
+    "activeTabText": "组合方法",
+    "rowCount": 7,
+    "hasSignatureText": true,
+    "saveDisabled": false,
+    "snapshotDisabled": false,
+    "checked": [
+      {
+        "selector": ".factor-detail-modal.factor-config-modal",
+        "className": "factor-detail-modal factor-config-modal",
+        "x": 12,
+        "y": 12,
+        "width": 366,
+        "height": 820,
+        "scrollWidth": 364,
+        "clientWidth": 364,
+        "overflow": 0
+      },
+      {
+        "selector": ".factor-config-main",
+        "className": "factor-config-main",
+        "x": 13,
+        "y": 491,
+        "width": 364,
+        "height": 2913,
+        "scrollWidth": 364,
+        "clientWidth": 364,
+        "overflow": 0
+      },
+      {
+        "selector": ".composition-method-workbench",
+        "className": "composition-method-workbench",
+        "x": 31,
+        "y": 1324,
+        "width": 328,
+        "height": 2062,
+        "scrollWidth": 328,
+        "clientWidth": 328,
+        "overflow": 0
+      },
+      {
+        "selector": ".composition-method-list",
+        "className": "composition-method-list",
+        "x": 31,
+        "y": 1324,
+        "width": 328,
+        "height": 1371,
+        "scrollWidth": 328,
+        "clientWidth": 328,
+        "overflow": 0
+      }
+    ],
+    "rows": [
+      {
+        "text": "线性加权合成风格复合 · 源因子 3 个LINEAR_WEIGHTING开启F3 = sum(w_i * ZScore(F2_i))权重模式：equal动态窗口：21源因子 3D2 检疫",
+        "x": 31,
+        "y": 1324,
+        "width": 328,
+        "height": 183
+      },
+      {
+        "text": "比例/风险调整合成风险调节 · 源因子 4 个RATIO_RISK_ADJUSTED开启F3 = Rank(F2_alpha) / max(Rank(F2_risk), denominator_floor)Rank 空间：开启floor：未配置源因子 4D2 检疫",
+        "x": 31,
+        "y": 1514,
+        "width": 328,
+        "height": 198
+      },
+      {
+        "text": "残差/正交化合成残差/中性化 · 源因子 2 个RESIDUAL_ORTHOGONAL开启F3 = Residual(F2_A, by=F2_B)窗口：未配置更新：未配置源因子 2D2 检疫",
+        "x": 31,
+        "y": 1720,
+        "width": 328,
+        "height": 183
+      },
+      {
+        "text": "排名均值/交集法均衡严选 · 源因子 2 个RANK_POOLING开启F3 = Rank(F2_A) + Rank(F2_B)阈值：未配置方向：HIGH_IS_BETTER源因子 2D2 检疫",
+        "x": 31,
+        "y": 1911,
+        "width": 328,
+        "height": 183
+      },
+      {
+        "text": "FFBlend 风格融合风格复合 · 源因子 4 个FFBLEND_STYLE开启F3 = FFBlend(Value, Momentum, Quality, Size)单风格上限：未配置decay：0.94源因子 4D2 检疫",
+        "x": 31,
+        "y": 2101,
+        "width": 328,
+        "height": 198
+      },
+      {
+        "text": "背离惩罚背离惩罚 · 源因子 2 个DIVERGENCE_PENALTY关闭F3 = Rank(primary) - penalty * Rank(control)penalty：0.35control：未配置源因子 2D2 检疫",
+        "x": 31,
+        "y": 2307,
+        "width": 328,
+        "height": 198
+      },
+      {
+        "text": "时序降噪时序降噪 · 源因子 1 个TIME_SERIES_DENOISE关闭F3 = TsRank(signal, 252)窗口：252方式：TsRank源因子 1D2 检疫",
+        "x": 31,
+        "y": 2512,
+        "width": 328,
+        "height": 183
+      }
+    ]
+  }
+}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -82,6 +83,63 @@ def _remote_base_ref(push_updates: list[list[str]]) -> str | None:
     return remote_sha
 
 
+def _parse_gate_summary_text(text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        match = re.match(r"^-\s+([a-zA-Z0-9_]+):\s+(.*)$", line)
+        if match:
+            fields[match.group(1)] = match.group(2).strip()
+    return fields
+
+
+def _is_false(value: str | None) -> bool:
+    return (value or "").strip().lower() == "false"
+
+
+def _impact_gate_matches_push(
+    fields: dict[str, str],
+    *,
+    report_text: str,
+    expected_head_sha: str | None,
+    expected_base_sha: str | None,
+) -> tuple[bool, str]:
+    if fields.get("status") != "ok":
+        return False, f"latest impact status is {fields.get('status', '<missing>')}, not ok"
+    if fields.get("scope") != "Committed":
+        return False, f"latest impact scope is {fields.get('scope', '<missing>')}, not Committed"
+    if not _is_false(fields.get("plan_only")):
+        return False, "latest impact was PlanOnly; full impacted tests did not run"
+    if not _is_false(fields.get("skip_tests")):
+        return False, "latest impact skipped tests"
+    if expected_head_sha and fields.get("head_sha") != expected_head_sha:
+        return False, "latest impact head_sha does not match current HEAD"
+    if expected_base_sha and fields.get("base_sha") != expected_base_sha:
+        return False, "latest impact base_sha does not match the remote push base"
+    if "duration=" not in report_text or "elapsed_seconds" not in fields:
+        return False, "latest impact summary is missing step duration evidence"
+    return True, "latest impact evidence matches current push"
+
+
+def _impact_gate_allows_push(
+    repo_root: Path,
+    *,
+    expected_base_sha: str | None,
+) -> tuple[bool, str]:
+    summary_path = repo_root / "harness" / "reports" / "smoke" / "latest-impact-gate.md"
+    if not summary_path.exists():
+        return False, f"latest impact summary is missing: {summary_path}"
+
+    report_text = summary_path.read_text(encoding="utf-8")
+    fields = _parse_gate_summary_text(report_text)
+    head_sha = _git_stdout(repo_root, ["rev-parse", "HEAD"])
+    return _impact_gate_matches_push(
+        fields,
+        report_text=report_text,
+        expected_head_sha=head_sha,
+        expected_base_sha=expected_base_sha,
+    )
+
+
 def _run_fast_gate(repo_root: Path, remote: str | None, push_updates: list[list[str]]) -> int:
     script_path = repo_root / "scripts" / "codex-validate-fast.ps1"
     if not script_path.exists():
@@ -112,10 +170,18 @@ def _run_fast_gate(repo_root: Path, remote: str | None, push_updates: list[list[
 
     completed = subprocess.run(command, cwd=repo_root, check=False)
     if completed.returncode == 2:
+        impact_ok, impact_reason = _impact_gate_allows_push(repo_root, expected_base_sha=base_ref)
+        if impact_ok:
+            print(
+                f"pre-push: fast gate returned not-fast, but {impact_reason}; allowing push.",
+                file=sys.stderr,
+            )
+            return 0
         print(
             "pre-push: not fast eligible; fast gate did not run broad impacted tests automatically.",
             file=sys.stderr,
         )
+        print(f"pre-push: latest impact evidence was not reusable: {impact_reason}", file=sys.stderr)
         print(
             "pre-push: run `powershell -ExecutionPolicy Bypass -File .\\scripts\\codex-validate-impact.ps1 -Scope Committed` "
             "for impacted validation, or `powershell -ExecutionPolicy Bypass -File .\\scripts\\codex-validate-full.ps1` "

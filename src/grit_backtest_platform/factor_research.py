@@ -8,6 +8,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from uuid import uuid4
 
@@ -32,7 +33,10 @@ SANDBOX_DIAGNOSTIC_YEARS = 3
 GROUP_MONOTONICITY_WINDOW_PERIODS = 3
 GROUP_INVERSION_REQUIRED_STREAK = 3
 FACTOR_DESCRIPTOR_SCHEMA_VERSION = "factor_descriptor_v1"
-PUBLISHED_FACTOR_NAMING_SCHEMA_VERSION = "factor_publish_naming_v3"
+FACTOR_DISPLAY_NAME_SCHEMA_VERSION = "factor_display_name_v4"
+PUBLISHED_FACTOR_NAMING_SCHEMA_VERSION = FACTOR_DISPLAY_NAME_SCHEMA_VERSION
+FACTOR_DISPLAY_NAME_PROTOCOL_VERSION = "factor_display_name_v4_structured"
+FACTOR_DISPLAY_NAME_DEDUPE_STRATEGY = "parameter_first_then_sha8"
 FACTOR_QUARANTINE_RULE_VERSION = "factor_quarantine_v2_0"
 FUNDAMENTAL_SEED_VERSION = "v3_asset_growth_shares"
 QUARANTINE_MIN_NEWEY_WEST_IR = 0.1
@@ -46,8 +50,9 @@ PHASE2_L2_OPERATOR_CHAIN = [
 ]
 PHASE2_L3_COMPOSITION_METHODS = [
     {"key": "style_blend", "label": "风格复合"},
-    {"key": "risk_adjusted", "label": "风险调节"},
-    {"key": "value_anchor", "label": "估值锚定"},
+    {"key": "risk_adjusted", "label": "比例/风险调整（含估值锚定）"},
+    {"key": "rank_pooling", "label": "排名均值/交集"},
+    {"key": "ffblend_style", "label": "Fama-French 风格融合"},
     {"key": "divergence", "label": "背离惩罚"},
     {"key": "residual_neutralized", "label": "残差/中性化"},
     {"key": "ts_denoise", "label": "时序降噪"},
@@ -330,10 +335,10 @@ RESIDUAL_FACTOR_REFERENCE_PATTERN = re.compile(
     r"by\s*=\s*[\"'](?P<by>[A-Za-z_][A-Za-z0-9_]*)[\"']\s*\)\s*\)?\s*$"
 )
 OVERNIGHT_MEAN_FACTOR_ID = "s_f2_mom_ovn_mean_21d"
-OVERNIGHT_MEAN_FACTOR_NAME = "21日隔夜动量均值"
+OVERNIGHT_MEAN_FACTOR_NAME = "隔夜动量均值 (21日) (原始)"
 OVERNIGHT_MEAN_DESCRIPTION = "逻辑：衡量过去一个月平均隔夜收益。作用：捕捉非交易时段信息流入，但诊断中保留日内承接风险提示。"
 VALUE_VOL_WNZT_F3_FACTOR_ID = "s_alpha_valvol_blend_resid_std_rk"
-VALUE_VOL_WNZT_F3_FACTOR_NAME = "风险调整现金流回报 (精炼版)"
+VALUE_VOL_WNZT_F3_FACTOR_NAME = "风险调整现金流回报 (精炼)"
 VALUE_VOL_WNZT_F3_EXPRESSION = (
     "Rank(Neutralize(ZScore(Winsorize(s_val_cfp_ltm_raw, 3)))) / "
     "Rank(Neutralize(ZScore(Winsorize(s_vol_downside_252d_rank, 3))))"
@@ -386,6 +391,70 @@ FACTOR_FAMILY_LABELS = {
     "size": "\u89c4\u6a21",
     "val": "\u4f30\u503c",
     "vol": "\u98ce\u9669",
+}
+FACTOR_DISPLAY_NAME_V4_OVERRIDES = {
+    "f1_price_close": "交易所-复权收盘价 (原始)",
+    "f1_price_adjclose": "交易所-复权收盘价 (原始)",
+    "f1_return_1d_base": "交易所-1日收益率基准 (原始)",
+    "f1_short_balance": "FINRA-空头余额 (原始)",
+    "f1_short_vol": "FINRA-当日卖空成交量 (原始)",
+    "s_price_adjclose_cur_raw": "交易所-复权收盘价 (原始)",
+    "s_size_mcap_cur_raw": "交易所-总市值 (原始)",
+    "s_mom_12m1m_rank": "Rank-12-1月截面动量 (排序)",
+    "s_mom_6m_rank": "Rank-6月截面动量 (排序)",
+    "s_f2_mom_ovn_mean_21d": OVERNIGHT_MEAN_FACTOR_NAME,
+    "s_val_ep_ltm_raw": "盈利收益率 (LTM) (原始)",
+    "s_val_bp_latest_raw": "账面市值比 (最新) (原始)",
+    "s_val_cfp_ltm_raw": "现金流收益率 (LTM) (原始)",
+    "s_val_evocf_ltm_raw": "经营现金流企业价值比 (LTM) (原始)",
+    "s_qlty_roe_ltm_raw": "净资产收益率 (LTM) (原始)",
+    "s_qlty_fcfy_ttm_raw": "自由现金流收益率 (TTM) (原始)",
+    "s_qlty_leverage_cur_raw": "杠杆率 (当前) (原始)",
+    "s_inv_assetgrowth_1y_rank": "Rank-1年资产增长率 (排序)",
+    "s_inv_capex_ltm_raw": "资本开支率 (LTM) (原始)",
+    "s_vol_252d_rank": "Rank-252日波动率 (排序)",
+    "s_vol_downside_252d_rank": "Rank-252日下行波动率 (排序)",
+    "s_liq_turnover_20d_rank": "Rank-20日换手率 (排序)",
+    "s_liq_amihud_20d_rank": "Rank-20日非流动性 (排序)",
+    "s_beta_market_252d_raw": "市场 Beta (252日) (原始)",
+    "s_size_cur_log": "对数市值 (当前) (原始)",
+    "s_alpha_ffblend_resid_mkt_rank": "GSL-多因子全能动力",
+    VALUE_VOL_WNZT_F3_FACTOR_ID: VALUE_VOL_WNZT_F3_FACTOR_NAME,
+    "s_alpha_vol_downsiderev_std_rk": "反向下行风险 Alpha (精炼)",
+}
+FACTOR_DISPLAY_NAME_V4_CATEGORY_LABELS = {
+    "alpha": "Alpha",
+    "beta": "Beta",
+    "inv": "投资",
+    "liq": "流动性",
+    "mom": "动量",
+    "price": "价格",
+    "qlty": "质量",
+    "size": "规模",
+    "val": "价值",
+    "vol": "风险",
+}
+FACTOR_DISPLAY_NAME_V4_METRIC_LABELS = {
+    "amihud": "非流动性",
+    "assetgrowth": "资产增长率",
+    "bp": "账面市值比",
+    "capex": "资本开支率",
+    "cfp": "现金流收益率",
+    "downside": "下行波动率",
+    "ep": "盈利收益率",
+    "evocf": "经营现金流企业价值比",
+    "fcfy": "自由现金流收益率",
+    "leverage": "杠杆率",
+    "mcap": "总市值",
+    "momrisk": "风险调整动量",
+    "momqlty": "质量驱动动量",
+    "ovn_mean": "隔夜动量均值",
+    "ret": "收益率",
+    "ret_px": "收益率",
+    "roe": "净资产收益率",
+    "turnover": "换手率",
+    "valcfpsize": "规模中性现金流收益率",
+    "valvol": "现金流与下行风险",
 }
 FACTOR_GOVERNANCE_CATEGORY_BY_DESCRIPTOR = {
     "alpha": "other",
@@ -1342,6 +1411,511 @@ def _descriptor_from_factor_id(factor_id: str, source: str = "") -> dict[str, st
     }
 
 
+def _factor_display_window_label(window: Any) -> str:
+    token = str(window or "").strip().lower()
+    if not token:
+        return ""
+    fixed = {"cur": "当前", "latest": "最新", "ltm": "LTM", "ttm": "TTM", "pit": "PIT", "12m1m": "12-1月"}
+    if token in fixed:
+        return fixed[token]
+    match = re.fullmatch(r"(\d+)(d|m|y)", token)
+    if match:
+        unit = {"d": "日", "m": "月", "y": "年"}[match.group(2)]
+        return f"{match.group(1)}{unit}"
+    return token.upper()
+
+
+def _factor_display_compact_expression(expression: Any) -> str:
+    return re.sub(r"\s+", "", str(expression or "").strip())
+
+
+def _factor_display_base_semantic(
+    *,
+    factor_id: str,
+    descriptor: Mapping[str, Any],
+    expression: Any,
+) -> tuple[str, str]:
+    metric = str(descriptor.get("metric") or "").strip().lower()
+    category = str(descriptor.get("category") or "").strip().lower()
+    window = _factor_display_window_label(descriptor.get("window"))
+    compact_expression = _factor_display_compact_expression(expression)
+    std_window = re.search(
+        r"(DownsideStd|Std)\s*\(\s*Return\s*\(\s*Close\s*,\s*\d+\s*\)\s*,\s*(\d+)\s*\)",
+        compact_expression,
+        flags=re.IGNORECASE,
+    )
+    return_window = re.search(r"Return\s*\(\s*Close\s*,\s*(\d+)\s*\)", compact_expression, flags=re.IGNORECASE)
+    delta_window = re.search(r"Delta\s*\(\s*Close\s*,\s*(\d+)\s*\)", compact_expression, flags=re.IGNORECASE)
+    if std_window:
+        label = "下行波动率" if std_window.group(1).lower() == "downsidestd" else "波动率"
+        return f"{std_window.group(2)}日{label}", ""
+    if return_window:
+        return f"{return_window.group(1)}日收益率", ""
+    if delta_window:
+        return f"{delta_window.group(1)}日价格变化", ""
+    metric_label = FACTOR_DISPLAY_NAME_V4_METRIC_LABELS.get(metric)
+    if not metric_label:
+        tokens = [token for token in metric.split("_") if token]
+        metric_label = "".join(
+            FACTOR_DISPLAY_NAME_V4_METRIC_LABELS.get(token, FACTOR_DISPLAY_NAME_V4_CATEGORY_LABELS.get(token, token.upper()))
+            for token in tokens
+        )
+    if not metric_label:
+        metric_label = FACTOR_DISPLAY_NAME_V4_CATEGORY_LABELS.get(category, category.upper() or "因子")
+    return metric_label, window
+
+
+def _factor_display_inferred_tier(
+    *,
+    factor_id: str,
+    descriptor: Mapping[str, Any],
+    expression: Any,
+    explicit_tier: Any = None,
+) -> str:
+    explicit = str(explicit_tier or "").strip().upper()
+    if explicit in {"F1", "F2", "F3"}:
+        return explicit
+    canonical = OLD_DEFAULT_FACTOR_ALIASES.get(str(factor_id or ""), str(factor_id or ""))
+    if canonical.startswith("f1_") or canonical in {"s_price_adjclose_cur_raw", "s_size_mcap_cur_raw"}:
+        return "F1"
+    if canonical.startswith("s_alpha_"):
+        return "F3"
+    if canonical.startswith("s_f2_"):
+        return "F2"
+    category = str(descriptor.get("category") or "").strip().lower()
+    operator = str(descriptor.get("operator") or "").strip().lower()
+    expression_text = str(expression or "").strip()
+    if category == "alpha":
+        return "F3"
+    if operator == "raw" and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", expression_text):
+        return "F1"
+    return "F2"
+
+
+def _factor_display_state(
+    *,
+    tier: str,
+    descriptor: Mapping[str, Any],
+    expression: Any,
+    op_status: Mapping[str, Any] | None,
+) -> tuple[str, list[str], str]:
+    expression_lower = str(expression or "").lower()
+    operator = str(descriptor.get("operator") or "").strip().lower()
+    completed = {
+        str(item).strip().upper()
+        for item in ((op_status or {}).get("completed") or [])
+        if str(item).strip()
+    }
+    badges: list[str] = []
+    if "winsor" in expression_lower or "W" in completed:
+        badges.append("WNZT")
+    if "neutral" in expression_lower or "N" in completed:
+        badges.append("WNZT")
+    if "zscore" in expression_lower or "z_score" in expression_lower or operator in {"z", "std"} or "Z" in completed:
+        badges.append("WNZT")
+    if "rank(" in expression_lower or "tsrank" in expression_lower or operator in {"rank", "rk"} or "T" in completed:
+        badges.append("Rank")
+    if "residual" in expression_lower or "resid" in expression_lower or "beta" in expression_lower:
+        badges.append("Resid")
+    if "blend" in expression_lower or "ffblend" in expression_lower or tier == "F3":
+        badges.append("Blend")
+    if tier == "F1":
+        badges.append("Raw")
+        return "原始", list(dict.fromkeys(badges)), ""
+    if "Resid" in badges and tier == "F3":
+        return "超额", list(dict.fromkeys(badges)), ""
+    if "WNZT" in badges and tier in {"F2", "F3"}:
+        zscore_like = operator in {"z", "std"} or "zscore" in expression_lower or "z_score" in expression_lower
+        return "精炼", list(dict.fromkeys(badges)), "ZScore-" if zscore_like else ""
+    if "Rank" in badges:
+        return "排序", list(dict.fromkeys(badges)), "Rank-"
+    badges.append("Raw")
+    return "原始", list(dict.fromkeys(badges)), ""
+
+
+def _factor_display_short_name(display_name: str) -> str:
+    short = re.sub(r"\s*\((?:原始|精炼|排序|超额)\)\s*$", "", str(display_name or "").strip())
+    short = re.sub(r"\s*\((?:Raw|WNZT|Rank|Resid|Blend)\)\s*$", "", short)
+    return short or display_name
+
+
+def _factor_display_unique_tokens(items: Sequence[Any]) -> list[str]:
+    tokens: list[str] = []
+    for item in items:
+        token = str(item or "").strip()
+        if token and token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
+def _factor_display_structured_governance(
+    *,
+    badges: Sequence[str],
+    expression: Any,
+    descriptor: Mapping[str, Any],
+    tier: str,
+) -> str:
+    badge_set = {str(item).strip() for item in badges if str(item).strip()}
+    expression_lower = str(expression or "").lower()
+    operator = str(descriptor.get("operator") or "").strip().lower()
+    if "Resid" in badge_set:
+        if any(token in expression_lower for token in ("market", "mkt", "beta")):
+            return "Market-Neutral"
+        return "Orthogonal"
+    if "WNZT" in badge_set and ("Rank" in badge_set or operator in {"rank", "rk"}):
+        return "Standard-Rank"
+    if "WNZT" in badge_set:
+        return "Refined"
+    if "Rank" in badge_set:
+        return "Standard-Rank"
+    if tier == "F1" or "Raw" in badge_set:
+        return "Raw"
+    return "Refined" if tier == "F3" else "Raw"
+
+
+def _factor_display_parameter_tokens(
+    *,
+    factor_id: str,
+    descriptor: Mapping[str, Any],
+    expression: Any,
+) -> list[str]:
+    canonical = str(factor_id or "").strip().lower()
+    metric = str(descriptor.get("metric") or "").strip().lower()
+    window_label = _factor_display_window_label(descriptor.get("window"))
+    expression_text = str(expression or "")
+    expression_lower = expression_text.lower()
+    compact_expression = _factor_display_compact_expression(expression_text)
+    tokens: list[str] = []
+    if window_label and window_label not in {"当前", "最新"}:
+        tokens.append(window_label)
+    elif window_label in {"当前", "最新"} and not expression_text:
+        tokens.append(window_label)
+    std_outer_windows = [
+        match.group(1)
+        for match in re.finditer(
+            r"(?:Std|DownsideStd)\s*\(\s*Return\s*\(\s*Close\s*,\s*\d+\s*\)\s*,\s*(\d+)\s*\)",
+            compact_expression,
+            flags=re.IGNORECASE,
+        )
+    ]
+    for match in re.finditer(r"(?:Return|Delta)\s*\(\s*Close\s*,\s*(\d+)\s*\)", compact_expression, flags=re.IGNORECASE):
+        if not std_outer_windows:
+            tokens.append(f"{match.group(1)}d")
+    for window in std_outer_windows:
+        tokens.append(f"{window}d")
+    for match in re.finditer(
+        r"(?:Std|DownsideStd)\s*\(\s*(?!Return\b)[^,]+,\s*(\d+)\s*\)",
+        compact_expression,
+        flags=re.IGNORECASE,
+    ):
+        tokens.append(f"{match.group(1)}d")
+    for match in re.finditer(r"_(\d+)(d|m|y)(?:_|$)", f"{canonical}_{expression_lower}"):
+        tokens.append(f"{match.group(1)}{match.group(2)}")
+    if any(token in f"{canonical} {metric} {expression_lower}" for token in ("ltm", "rolling_twelve")):
+        tokens.append("LTM")
+    if "ttm" in f"{canonical} {metric} {expression_lower}":
+        tokens.append("TTM")
+    if any(token in f"{canonical} {metric} {expression_lower}" for token in ("mean", "avg", "average")):
+        tokens.append("均值")
+    if "/" in expression_text or any(token in f"{canonical} {metric}" for token in ("ratio", "valvol", "risk_adjusted")):
+        tokens.append("波动比" if any(token in expression_lower for token in ("vol", "downside", "risk")) else "比值")
+    if "ffblend" in expression_lower or "blend" in expression_lower or "blend" in metric:
+        tokens.append("多因子")
+    return _factor_display_unique_tokens(tokens) or ["当前"]
+
+
+def _factor_display_core_semantic(
+    *,
+    factor_id: str,
+    descriptor: Mapping[str, Any],
+    expression: Any,
+    tier: str,
+    fallback_semantic: str,
+) -> str:
+    canonical = str(factor_id or "").strip().lower()
+    metric = str(descriptor.get("metric") or "").strip().lower()
+    expression_lower = str(expression or "").lower()
+    combined = f"{canonical} {metric} {expression_lower}"
+    if any(token in combined for token in ("cfp", "cashflow", "cash_flow", "operating_cash_flow")) and any(
+        token in combined for token in ("vol", "downside", "risk")
+    ):
+        return "现金流回报"
+    if "ffblend" in combined or ("blend" in combined and tier == "F3"):
+        return "多因子综合"
+    if "residual" in combined or "resid" in combined:
+        return "超额 Alpha"
+    if tier == "F3" and any(token in combined for token in ("mom", "return", "ret")):
+        return "成长动能 Alpha"
+    return fallback_semantic or ("多因子综合" if tier == "F3" else "因子信号")
+
+
+def _factor_display_benchmark_label(
+    *,
+    expression: Any,
+    descriptor: Mapping[str, Any],
+    neutralization_scope: Any = None,
+    residual_control: Any = None,
+) -> tuple[str, list[str]]:
+    text = " ".join(
+        str(item or "")
+        for item in (
+            expression,
+            descriptor.get("metric"),
+            descriptor.get("operator"),
+            neutralization_scope,
+            residual_control,
+        )
+    ).lower()
+    if any(token in text for token in ("sp500", "s&p500", "s&p 500", "spy", "spx")):
+        return "对标 SP500", []
+    if any(token in text for token in ("nasdaq100", "nasdaq_100", "nasdaq 100", "ndx", "qqq")):
+        return "对标 纳指100", []
+    if any(token in text for token in ("market_beta", "market beta", "mkt", "beta")):
+        return "剥离市场Beta", ["benchmark_missing"]
+    if any(token in text for token in ("residual", "resid")):
+        return "", ["benchmark_missing"]
+    return "", []
+
+
+def _factor_display_structured_projection(
+    *,
+    factor_id: str,
+    descriptor: Mapping[str, Any],
+    expression: Any,
+    tier: str,
+    badges: Sequence[str],
+    display_name: str,
+    fallback_semantic: str,
+    fallback_window: str,
+    neutralization_scope: Any = None,
+    residual_control: Any = None,
+) -> dict[str, Any]:
+    if tier == "F1":
+        return {
+            "base_display_name_cn": display_name,
+            "structured_display_name_cn": display_name,
+            "name_collision_key": re.sub(r"\s+", "", display_name.lower()),
+            "structured_components": {
+                "core_semantic": fallback_semantic,
+                "parameter_label": fallback_window or "原始字段",
+                "governance_level": "Raw",
+                "benchmark_label": "",
+                "audit_gaps": [],
+            },
+        }
+    parameter_tokens = _factor_display_parameter_tokens(
+        factor_id=factor_id,
+        descriptor=descriptor,
+        expression=expression,
+    )
+    governance_level = _factor_display_structured_governance(
+        badges=badges,
+        expression=expression,
+        descriptor=descriptor,
+        tier=tier,
+    )
+    core_semantic = _factor_display_core_semantic(
+        factor_id=factor_id,
+        descriptor=descriptor,
+        expression=expression,
+        tier=tier,
+        fallback_semantic=fallback_semantic,
+    )
+    benchmark_label, audit_gaps = _factor_display_benchmark_label(
+        expression=expression,
+        descriptor=descriptor,
+        neutralization_scope=neutralization_scope,
+        residual_control=residual_control,
+    )
+    parameter_label = "/".join(parameter_tokens)
+    structured_name = f"{core_semantic} - {parameter_label} [{governance_level}]"
+    if benchmark_label:
+        structured_name = f"{structured_name} - {benchmark_label}"
+    return {
+        "base_display_name_cn": structured_name,
+        "structured_display_name_cn": structured_name,
+        "name_collision_key": re.sub(r"\s+", "", structured_name.lower()),
+        "structured_components": {
+            "core_semantic": core_semantic,
+            "parameter_label": parameter_label,
+            "governance_level": governance_level,
+            "benchmark_label": benchmark_label,
+            "audit_gaps": audit_gaps,
+        },
+    }
+
+
+def _factor_display_stable_sha8(
+    *,
+    factor_id: Any,
+    expression: Any,
+    parent_factor_ids: Sequence[Any] | None = None,
+    processing_chain: Sequence[Any] | None = None,
+    benchmark: Any = None,
+) -> str:
+    payload = "|".join(
+        [
+            str(factor_id or ""),
+            str(expression or ""),
+            ",".join(str(item) for item in parent_factor_ids or []),
+            ",".join(str(item) for item in processing_chain or []),
+            str(benchmark or ""),
+        ]
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
+
+
+def factor_display_name_projection_v4(
+    *,
+    factor_id: str,
+    name: Any = None,
+    source: Any = None,
+    expression: Any = None,
+    descriptor: Mapping[str, Any] | None = None,
+    tier_level: Any = None,
+    op_status: Mapping[str, Any] | None = None,
+    neutralization_scope: Any = None,
+    residual_control: Any = None,
+) -> dict[str, Any]:
+    canonical = OLD_DEFAULT_FACTOR_ALIASES.get(str(factor_id or "").strip(), str(factor_id or "").strip())
+    descriptor_map = dict(descriptor or _descriptor_from_factor_id(canonical, str(source or "")))
+    tier = _factor_display_inferred_tier(
+        factor_id=canonical,
+        descriptor=descriptor_map,
+        expression=expression,
+        explicit_tier=tier_level,
+    )
+    display_name = FACTOR_DISPLAY_NAME_V4_OVERRIDES.get(canonical)
+    state, badges, prefix = _factor_display_state(
+        tier=tier,
+        descriptor=descriptor_map,
+        expression=expression,
+        op_status=op_status,
+    )
+    semantic, window = _factor_display_base_semantic(
+        factor_id=canonical,
+        descriptor=descriptor_map,
+        expression=expression,
+    )
+    if display_name is None:
+        expression_lower = str(expression or "").lower()
+        if tier == "F1":
+            source_label = "交易所"
+            if any(token in canonical.lower() or token in expression_lower for token in ("sec", "fundamental", "operatingcashflow")):
+                source_label = "SEC"
+            elif any(token in canonical.lower() or token in expression_lower for token in ("finra", "short")):
+                source_label = "FINRA"
+            display_name = f"{source_label}-{semantic} (原始)"
+        elif tier == "F3":
+            if "residual" in expression_lower or "resid" in canonical.lower():
+                display_name = "超额 Alpha (剥离市场 Beta)"
+            elif (
+                any(token in expression_lower for token in ("cfp", "cashflow", "cash_flow", "cash"))
+                and any(token in expression_lower for token in ("vol", "downside", "risk"))
+                and "/" in str(expression or "")
+            ):
+                display_name = "风险调整现金流回报 (精炼)"
+            elif "blend" in expression_lower or "ffblend" in expression_lower:
+                display_name = f"多维{semantic}评分 (精炼)"
+            else:
+                display_name = f"{semantic}合成信号 (精炼)"
+        else:
+            window_part = f" ({window})" if window else ""
+            if "residual" in expression_lower or "resid" in canonical.lower():
+                control = "市场 Beta" if any(token in expression_lower for token in ("market", "mkt", "beta")) else "规模"
+                display_name = f"超额{semantic} (剥离{control})"
+            elif "neutral" in expression_lower:
+                display_name = f"行业中性化-{semantic}{window_part} (精炼)"
+            else:
+                display_name = f"{prefix}{semantic}{window_part} ({state})"
+    if "原始" in display_name and "Raw" not in badges:
+        badges.append("Raw")
+    if "精炼" in display_name and "WNZT" not in badges:
+        badges.append("WNZT")
+    if "排序" in display_name and "Rank" not in badges:
+        badges.append("Rank")
+    if "超额" in display_name and "Resid" not in badges:
+        badges.append("Resid")
+    if "多因子" in display_name and "Blend" not in badges:
+        badges.append("Blend")
+    structured_projection = _factor_display_structured_projection(
+        factor_id=canonical,
+        descriptor=descriptor_map,
+        expression=expression,
+        tier=tier,
+        badges=list(dict.fromkeys(badges)),
+        display_name=display_name,
+        fallback_semantic=semantic,
+        fallback_window=window,
+        neutralization_scope=neutralization_scope,
+        residual_control=residual_control,
+    )
+    stored_name = str(name or "").strip()
+    legacy_aliases = [
+        item
+        for item in (stored_name, str(factor_id or "").strip(), DEFAULT_FACTOR_ALIAS_BY_CANONICAL.get(canonical))
+        if item and item != display_name
+    ]
+    return {
+        "display_name_cn": display_name,
+        "short_name_cn": _factor_display_short_name(display_name),
+        "semantic_key": re.sub(r"[^a-z0-9]+", "_", canonical.lower()).strip("_"),
+        "governance_badges": list(dict.fromkeys(badges)),
+        "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
+        "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+        "base_display_name_cn": structured_projection["base_display_name_cn"],
+        "name_collision_key": structured_projection["name_collision_key"],
+        "name_dedupe_suffix": "",
+        "name_collision_group": [],
+        "legacy_name_aliases": list(dict.fromkeys(legacy_aliases)),
+        "name_audit": {
+            "previous_display_name": stored_name or None,
+            "new_display_name": display_name,
+            "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
+            "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+            "dedupe_strategy": FACTOR_DISPLAY_NAME_DEDUPE_STRATEGY,
+            "rename_reason": "display_name_v4_projection",
+            "structured_components": structured_projection["structured_components"],
+            "base_display_name_cn": structured_projection["base_display_name_cn"],
+        },
+    }
+
+
+def factor_publish_metadata_v4(
+    *,
+    factor_id: str,
+    display_name_cn: str,
+    governance_badges: Sequence[str] | None = None,
+    base_display_name_cn: Any = None,
+    name_collision_key: Any = None,
+    name_dedupe_suffix: Any = None,
+    name_collision_group: Sequence[Any] | None = None,
+    name_audit: Mapping[str, Any] | None = None,
+    parent_factor_ids: Sequence[str] | None = None,
+    operator_chain: Sequence[Any] | None = None,
+    composition_methods: Sequence[Any] | None = None,
+    neutralization_scope: Any = None,
+    residual_control: Any = None,
+) -> dict[str, Any]:
+    return {
+        "naming_rule_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
+        "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+        "dedupe_strategy": FACTOR_DISPLAY_NAME_DEDUPE_STRATEGY,
+        "display_name_cn": display_name_cn,
+        "base_display_name_cn": base_display_name_cn,
+        "name_collision_key": name_collision_key,
+        "name_dedupe_suffix": name_dedupe_suffix,
+        "name_collision_group": [str(item) for item in name_collision_group or [] if str(item).strip()],
+        "governance_badges": [str(item) for item in governance_badges or [] if str(item).strip()],
+        "parent_factor_ids": [str(item) for item in parent_factor_ids or [] if str(item).strip()],
+        "processing_chain": list(operator_chain or []),
+        "neutralization_scope": neutralization_scope,
+        "residual_control": residual_control,
+        "composition_method": list(composition_methods or []),
+        "name_audit": dict(name_audit or {}),
+    }
+
+
 AUTO_MINED_FACTOR_ID_PATTERN = re.compile(
     r"^a_([a-z0-9]+)_auto_([0-9a-f]{8,16})_([a-z0-9]+)$",
     re.IGNORECASE,
@@ -1666,6 +2240,21 @@ def _f1_alias_from_factor_id(factor_id: str) -> str:
     return "px"
 
 
+def _fallback_f2_alias_from_expression(expression: str, metrics: Mapping[str, Any] | None = None) -> str:
+    metrics = metrics or {}
+    source_factor_ids = [str(item).strip() for item in metrics.get("source_factor_ids") or [] if str(item).strip()]
+    if len(source_factor_ids) == 1:
+        return _factor_id_token(source_factor_ids[0])
+    if len(source_factor_ids) > 1:
+        joined = "|".join(sorted(source_factor_ids))
+        return f"blend_{hashlib.sha1(joined.encode('utf-8')).hexdigest()[:8]}"
+    alias = _f1_alias_from_expression(expression)
+    if alias != "px":
+        return alias
+    digest = hashlib.sha1(str(expression or "").strip().lower().encode("utf-8")).hexdigest()[:8]
+    return f"expr_{digest}"
+
+
 def _published_f2_parts(expression: str, metrics: Mapping[str, Any] | None = None) -> tuple[str, str, str, str]:
     formula = str(expression or "").strip()
     metrics = metrics or {}
@@ -1715,8 +2304,8 @@ def _published_f2_parts(expression: str, metrics: Mapping[str, Any] | None = Non
         return "liq", "tsm" if mean_window else "raw", "cur", _f1_alias_from_expression(formula)
     explicit_category = _factor_id_token(metrics.get("category") or metrics.get("feature_category") or "", "")
     if explicit_category in {"mom", "val", "qlty", "vol", "liq"}:
-        return explicit_category, "raw", "cur", _f1_alias_from_expression(formula)
-    return "mom", "raw", "cur", _f1_alias_from_expression(formula)
+        return explicit_category, "raw", "cur", _fallback_f2_alias_from_expression(formula, metrics)
+    return "mom", "raw", "cur", _fallback_f2_alias_from_expression(formula, metrics)
 
 
 def _published_f2_factor_id(expression: str, metrics: Mapping[str, Any] | None = None) -> str:
@@ -1983,6 +2572,14 @@ def _auto_mined_factor_id_from_expression(expression: str) -> str:
 
 
 def _auto_mined_factor_name(factor_id: str, expression: str) -> str:
+    projected = factor_display_name_projection_v4(
+        factor_id=factor_id,
+        name="",
+        source="AUTO_MINED",
+        expression=expression,
+    )
+    if projected.get("display_name_cn"):
+        return str(projected["display_name_cn"])
     identity = _auto_mined_formula_identity(expression)
     if identity.category == "alpha" and identity.metric.endswith("valvol"):
         return VALUE_VOL_WNZT_F3_FACTOR_NAME
@@ -2020,12 +2617,13 @@ def _factor_display_name_from_fields(
     source: Any,
     expression: Any,
 ) -> str:
-    source_name = str(source or "").strip().upper()
-    if source_name == "AUTO_MINED":
-        generated_name = _auto_mined_factor_name(factor_id, str(expression or ""))
-        if generated_name == VALUE_VOL_WNZT_F3_FACTOR_NAME or _is_legacy_auto_mined_factor_name(name, factor_id):
-            return generated_name
-    return str(name or factor_id).strip() or str(factor_id)
+    projection = factor_display_name_projection_v4(
+        factor_id=str(factor_id or ""),
+        name=name,
+        source=source,
+        expression=expression,
+    )
+    return str(projection.get("display_name_cn") or name or factor_id).strip() or str(factor_id)
 
 
 def _factor_display_name_from_row(row: Mapping[str, Any]) -> str:
@@ -6318,9 +6916,16 @@ class FactorResearchService:
         now = iso_now()
         with self.storage.connection() as conn:
             for seed in DEFAULT_SEED_FACTORS:
-                seed_note = _factor_formula_description(
+                seed_display_name = factor_display_name_projection_v4(
                     factor_id=seed.id,
                     name=seed.name,
+                    source="SYSTEM_SEED",
+                    expression=seed.expression,
+                    descriptor=seed.descriptor.as_dict(),
+                )["display_name_cn"]
+                seed_note = _factor_formula_description(
+                    factor_id=seed.id,
+                    name=str(seed_display_name),
                     expression=seed.expression,
                     direction=seed.direction,
                 )
@@ -6330,7 +6935,7 @@ class FactorResearchService:
                     requirements_json = dumps(list(seed.data_requirements))
                     version_metadata_json = dumps(self._factor_version_metadata_for_seed(seed))
                     changed = (
-                        str(existing.get("name") or "") != seed.name
+                        str(existing.get("name") or "") != seed_display_name
                         or str(existing.get("expression") or "") != seed.expression
                         or str(existing.get("direction") or "") != seed.direction
                         or str(existing.get("tags_json") or "") != tags_json
@@ -6351,7 +6956,7 @@ class FactorResearchService:
                             WHERE id = ? AND source = 'SYSTEM_SEED'
                             """,
                             (
-                                seed.name,
+                                seed_display_name,
                                 seed.expression,
                                 seed.direction,
                                 tags_json,
@@ -6418,7 +7023,7 @@ class FactorResearchService:
                     """,
                     (
                         seed.id,
-                        seed.name,
+                        seed_display_name,
                         seed.diagnostic_status,
                         seed.direction,
                         seed.expression,
@@ -7412,6 +8017,47 @@ class FactorResearchService:
             optimized_factor_id=optimized_factor_id,
             source_factor_id=factor_id,
         )
+        optimized_projection = factor_display_name_projection_v4(
+            factor_id=optimized_factor_id,
+            name=None,
+            source="MANUAL",
+            expression=str(factor.get("expression") or "DownsideStd(Return(Close, 1), 252)"),
+            descriptor=optimized_identity.descriptor,
+            tier_level=optimized_identity.tier,
+            residual_control="source_factor_inversion",
+        )
+        optimized_projection = self._resolve_factor_display_name_for_scope(
+            {
+                "id": optimized_factor_id,
+                "source": "MANUAL",
+                "lifecycle_status": "VERIFIED",
+                "lifecycle": "online",
+                "tier_level": optimized_identity.tier,
+                "expression": str(factor.get("expression") or "DownsideStd(Return(Close, 1), 252)"),
+                "descriptor": optimized_identity.descriptor,
+                "parent_factor_ids": [factor_id],
+                **optimized_projection,
+            }
+        )
+        optimized_name = str(optimized_projection["display_name_cn"])
+        optimized_publish_metadata = factor_publish_metadata_v4(
+            factor_id=optimized_factor_id,
+            display_name_cn=optimized_name,
+            governance_badges=optimized_projection.get("governance_badges") or [],
+            base_display_name_cn=optimized_projection.get("base_display_name_cn"),
+            name_collision_key=optimized_projection.get("name_collision_key"),
+            name_dedupe_suffix=optimized_projection.get("name_dedupe_suffix"),
+            name_collision_group=optimized_projection.get("name_collision_group") or [],
+            name_audit=optimized_projection.get("name_audit") if isinstance(optimized_projection.get("name_audit"), Mapping) else {},
+            parent_factor_ids=[factor_id],
+            operator_chain=["REVERSE", "ZScore", "Rank"],
+            composition_methods=["Residual"],
+            residual_control="source_factor_inversion",
+        )
+        optimized_summary["factor_name"] = optimized_name
+        optimized_summary["display_name_cn"] = optimized_name
+        optimized_summary["name_schema_version"] = FACTOR_DISPLAY_NAME_SCHEMA_VERSION
+        optimized_summary["publish_metadata"] = optimized_publish_metadata
         grade_score = self._factor_grade_score(optimized_summary)
         grade_label = self._factor_grade_label(grade_score)
         confirmable = bool(grade_score is not None and grade_score >= 3)
@@ -7439,6 +8085,16 @@ class FactorResearchService:
             "optimized_factor": {
                 "id": optimized_factor_id,
                 "name": "反向下行波动率代理（252日）",
+                "name": optimized_name,
+                "display_name_cn": optimized_name,
+                "short_name_cn": optimized_projection.get("short_name_cn"),
+                "governance_badges": optimized_projection.get("governance_badges") or [],
+                "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
+                "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+                "base_display_name_cn": optimized_projection.get("base_display_name_cn"),
+                "name_collision_key": optimized_projection.get("name_collision_key"),
+                "name_dedupe_suffix": optimized_projection.get("name_dedupe_suffix"),
+                "name_collision_group": optimized_projection.get("name_collision_group") or [],
                 "expression": str(factor.get("expression") or "DownsideStd(Return(Close, 1), 252)"),
                 "direction": "HIGH_IS_BETTER",
                 "descriptor": optimized_identity.descriptor,
@@ -7449,6 +8105,7 @@ class FactorResearchService:
                 "user_confirmation_required": confirmable,
                 "source_factor_id": factor_id,
                 "publish_naming_rule": optimized_identity.naming_rule,
+                "publish_metadata": optimized_publish_metadata,
             },
             "offline_detail": {
                 "source_factor_id": factor_id,
@@ -8194,6 +8851,172 @@ class FactorResearchService:
             "sparkline_window": factor.get("ic_sparkline_window"),
         }
 
+    @staticmethod
+    def _factor_optional_number(value: Any, digits: int = 4) -> float | None:
+        if value is None:
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed):
+            return None
+        return round(parsed, digits)
+
+    @staticmethod
+    def _factor_first_number(*values: Any, digits: int = 4) -> float | None:
+        for value in values:
+            parsed = FactorResearchService._factor_optional_number(value, digits=digits)
+            if parsed is not None:
+                return parsed
+        return None
+
+    @staticmethod
+    def _factor_nested_mapping(value: Any, key: str) -> Mapping[str, Any]:
+        if not isinstance(value, Mapping):
+            return {}
+        nested = value.get(key)
+        return nested if isinstance(nested, Mapping) else {}
+
+    @staticmethod
+    def _factor_string_or_none(value: Any) -> str | None:
+        text = str(value or "").strip()
+        return text or None
+
+    @staticmethod
+    def _factor_composite_method_labels(summary: Mapping[str, Any], scoring_detail: Mapping[str, Any]) -> list[str]:
+        raw_methods = summary.get("composition_methods")
+        if not raw_methods and isinstance(scoring_detail.get("composition_methods"), Sequence):
+            raw_methods = scoring_detail.get("composition_methods")
+        labels: list[str] = []
+        if isinstance(raw_methods, Sequence) and not isinstance(raw_methods, (str, bytes)):
+            for item in raw_methods:
+                label = ""
+                if isinstance(item, Mapping):
+                    label = str(item.get("label") or item.get("key") or "").strip()
+                else:
+                    label = str(item or "").strip()
+                if label and label not in labels:
+                    labels.append(label)
+        return labels
+
+    @staticmethod
+    def _factor_composite_capacity_status(turnover_weekly: float | None, explicit_status: Any = None) -> tuple[str, str]:
+        explicit = str(explicit_status or "").strip().upper()
+        if explicit in {"PASS", "WARN", "FAIL", "UNKNOWN"}:
+            status = explicit
+        elif turnover_weekly is None:
+            status = "UNKNOWN"
+        elif turnover_weekly > 30.0:
+            status = "FAIL"
+        elif turnover_weekly > 20.0:
+            status = "WARN"
+        else:
+            status = "PASS"
+        labels = {
+            "PASS": "容量通过",
+            "WARN": "容量观察",
+            "FAIL": "容量受限",
+            "UNKNOWN": "待评估",
+        }
+        return status, labels.get(status, "待评估")
+
+    def _factor_composite_view(self, factor: Mapping[str, Any]) -> dict[str, Any]:
+        summary = self._latest_diagnostic_summary(factor)
+        if not isinstance(summary, Mapping):
+            summary = {}
+        scoring_detail = self._factor_nested_mapping(summary, "scoring_detail")
+        predictive = self._factor_nested_mapping(scoring_detail, "predictive_power")
+        stability = self._factor_nested_mapping(scoring_detail, "stability_turnover")
+        risk = self._factor_nested_mapping(scoring_detail, "risk_orthogonality")
+        data_health = self._factor_nested_mapping(scoring_detail, "data_health")
+        publish_metadata = self._factor_nested_mapping(summary, "publish_metadata")
+        metadata = factor.get("metadata") if isinstance(factor.get("metadata"), Mapping) else {}
+        lineage = factor.get("lineage_summary") if isinstance(factor.get("lineage_summary"), Mapping) else self._factor_lineage_summary(factor)
+        parent_ids = [str(item) for item in lineage.get("parent_ids") or [] if str(item).strip()]
+        method_labels = self._factor_composite_method_labels(summary, scoring_detail)
+        turnover_weekly = self._factor_first_number(
+            stability.get("turnover_rate_weekly"),
+            summary.get("turnover_rate_weekly"),
+            publish_metadata.get("turnover_rate_weekly"),
+            digits=2,
+        )
+        turnover_cost_bps = self._factor_first_number(
+            summary.get("turnover_cost_bps"),
+            summary.get("impact_cost_bps"),
+            publish_metadata.get("turnover_cost_bps"),
+            digits=2,
+        )
+        max_drawdown_pct = self._factor_first_number(
+            risk.get("max_drawdown"),
+            summary.get("max_drawdown_pct"),
+            publish_metadata.get("max_drawdown_pct"),
+            digits=2,
+        )
+        style_corr = self._factor_first_number(
+            risk.get("style_corr"),
+            summary.get("style_corr"),
+            publish_metadata.get("style_corr"),
+            digits=4,
+        )
+        capacity_status, capacity_label = self._factor_composite_capacity_status(
+            turnover_weekly,
+            scoring_detail.get("capacity_status") or summary.get("capacity_status") or publish_metadata.get("capacity_status"),
+        )
+        style_status = "UNKNOWN"
+        if style_corr is not None:
+            style_status = "PASS" if style_corr < 0.3 else ("WARN" if style_corr < 0.5 else "FAIL")
+        sharpe = self._factor_first_number(
+            summary.get("sharpe"),
+            scoring_detail.get("sharpe"),
+            publish_metadata.get("sharpe"),
+            digits=3,
+        )
+        return {
+            "quality": {
+                "sharpe": sharpe,
+                "sharpe_label": f"{sharpe:.2f}" if sharpe is not None else "待补",
+                "max_drawdown_pct": max_drawdown_pct,
+                "max_drawdown_label": f"{max_drawdown_pct:.2f}%" if max_drawdown_pct is not None else "待补",
+                "incremental_ir": self._factor_first_number(risk.get("incremental_ir"), predictive.get("rank_icir"), summary.get("ir"), digits=4),
+            },
+            "capacity": {
+                "status": capacity_status,
+                "label": capacity_label,
+                "score": self._factor_first_number(scoring_detail.get("capacity_score"), summary.get("capacity_score"), publish_metadata.get("capacity_score"), digits=2),
+                "source": "turnover_derived" if turnover_weekly is not None else "missing_capacity_contract",
+            },
+            "turnover_cost": {
+                "turnover_rate_weekly": turnover_weekly,
+                "turnover_rate_weekly_label": f"{turnover_weekly:.2f}%/周" if turnover_weekly is not None else "待补",
+                "cost_bps": turnover_cost_bps,
+                "cost_bps_label": f"{turnover_cost_bps:.1f} bps" if turnover_cost_bps is not None else "待补",
+            },
+            "style_exposure": {
+                "style_corr": style_corr,
+                "style_corr_label": f"{style_corr:.3f}" if style_corr is not None else "待补",
+                "status": style_status,
+                "label": "风格中性" if style_status == "PASS" else ("需观察" if style_status == "WARN" else ("暴露偏高" if style_status == "FAIL" else "待补")),
+            },
+            "execution": {
+                "portfolio_id": self._factor_string_or_none(factor.get("portfolio_id") or metadata.get("portfolio_id") or publish_metadata.get("portfolio_id")),
+                "portfolio_label": self._factor_string_or_none(factor.get("portfolio_id") or metadata.get("portfolio_id") or publish_metadata.get("portfolio_id")) or "未绑定",
+                "execution_tag": self._factor_string_or_none(factor.get("execution_tag") or metadata.get("execution_tag") or publish_metadata.get("execution_tag")),
+                "execution_tag_label": self._factor_string_or_none(factor.get("execution_tag") or metadata.get("execution_tag") or publish_metadata.get("execution_tag")) or "未绑定",
+            },
+            "blend_info": {
+                "component_count": int(lineage.get("parent_count") or len(parent_ids)),
+                "component_ids": parent_ids[:12],
+                "method_labels": method_labels,
+                "label": f"{int(lineage.get('parent_count') or len(parent_ids))} 个 F2 成分" if (lineage.get("parent_count") or parent_ids) else "待补成分",
+            },
+            "source": {
+                "summary_run_id": summary.get("run_id") or factor.get("last_diagnostic_run_id"),
+                "scoring_detail": bool(scoring_detail),
+                "data_health_coverage": self._factor_first_number(data_health.get("coverage"), summary.get("coverage"), digits=2),
+            },
+        }
+
     def _factor_lineage_rows(self, factor_id: str) -> list[dict[str, Any]]:
         rows = self.storage.fetch_all(
             """
@@ -8436,12 +9259,27 @@ class FactorResearchService:
         factor["op_status"] = self._factor_processing_ops(factor)
         factor["lineage_summary"] = self._factor_lineage_summary(factor)
         factor["quality_view"] = self._factor_quality_view(factor)
+        if tier["key"] == "F3":
+            factor["composite_view"] = self._factor_composite_view(factor)
+        else:
+            factor.pop("composite_view", None)
         factor["ui_state"] = ui_state
         factor["ui_state_label"] = ui_state_label
         factor["correlation_cluster_summary"] = correlation_summary
         factor["blocker_reason_summary"] = self._build_blocker_reason_summary(policy)
         factor["batch_diagnostic_summary"] = self._build_batch_diagnostic_summary(factor, policy)
         factor["strategy_creation_risk"] = self._build_strategy_creation_risk(factor, policy)
+        naming_projection = factor_display_name_projection_v4(
+            factor_id=str(factor.get("id") or ""),
+            name=factor.get("stored_name") or factor.get("name"),
+            source=factor.get("source"),
+            expression=factor.get("expression"),
+            descriptor=factor.get("descriptor") if isinstance(factor.get("descriptor"), Mapping) else None,
+            tier_level=factor.get("tier_level"),
+            op_status=factor.get("op_status") if isinstance(factor.get("op_status"), Mapping) else None,
+        )
+        factor.update(naming_projection)
+        factor["name"] = naming_projection["display_name_cn"]
         return factor
 
     def _expression_signature(self, expression: str) -> str:
@@ -8451,6 +9289,170 @@ class FactorResearchService:
 
     def _signature_hash(self, expression: str, length: int = 10) -> str:
         return hashlib.sha1(self._expression_signature(expression).encode("utf-8")).hexdigest()[:length]
+
+    def _factor_name_online_unique_scope(self, factor: Mapping[str, Any]) -> bool:
+        tier = str(factor.get("tier_level") or "").upper()
+        if tier not in {"F2", "F3"}:
+            return False
+        lifecycle = str(factor.get("lifecycle") or "").lower()
+        lifecycle_status = str(factor.get("lifecycle_status") or "").upper()
+        source = str(factor.get("source") or "").upper()
+        if lifecycle_status in {"ARCHIVED", "DELETED", "DEPRECATED", "PRUNED"}:
+            return False
+        if source == "SYSTEM_SEED":
+            return True
+        return lifecycle == "online" or lifecycle_status in {"VERIFIED", "COMPLETED", "ACTIVE"}
+
+    def _factor_name_collision_identity(self, factor: Mapping[str, Any]) -> str:
+        return str(factor.get("id") or factor.get("factor_id") or factor.get("candidate_id") or "").strip()
+
+    def _factor_name_collision_group_key(self, factor: Mapping[str, Any]) -> str:
+        key = str(factor.get("name_collision_key") or factor.get("base_display_name_cn") or factor.get("display_name_cn") or "").strip()
+        return re.sub(r"\s+", "", key.lower())
+
+    def _factor_name_hash_input(self, factor: Mapping[str, Any]) -> str:
+        audit = factor.get("name_audit") if isinstance(factor.get("name_audit"), Mapping) else {}
+        components = audit.get("structured_components") if isinstance(audit.get("structured_components"), Mapping) else {}
+        benchmark = components.get("benchmark_label") if isinstance(components, Mapping) else ""
+        parent_ids = factor.get("parent_factor_ids") or []
+        if not parent_ids:
+            summary = factor.get("lineage_summary") if isinstance(factor.get("lineage_summary"), Mapping) else {}
+            parent_ids = summary.get("parent_factor_ids") or []
+        op_status = factor.get("op_status") if isinstance(factor.get("op_status"), Mapping) else {}
+        processing_chain = op_status.get("completed") if isinstance(op_status, Mapping) else []
+        return "|".join(
+            [
+                self._factor_name_collision_identity(factor),
+                str(factor.get("expression") or ""),
+                ",".join(str(item) for item in parent_ids or []),
+                ",".join(str(item) for item in processing_chain or []),
+                str(benchmark or ""),
+            ]
+        )
+
+    def _apply_factor_display_name_collision_resolution(self, factors: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+        resolved = [dict(item) for item in factors]
+        eligible = [item for item in resolved if self._factor_name_online_unique_scope(item)]
+        if not eligible:
+            return resolved
+        current_name_groups: dict[str, list[dict[str, Any]]] = {}
+        base_groups: dict[str, list[dict[str, Any]]] = {}
+        for item in eligible:
+            current_key = re.sub(r"\s+", "", str(item.get("display_name_cn") or item.get("name") or "").lower())
+            base_key = self._factor_name_collision_group_key(item)
+            if current_key:
+                current_name_groups.setdefault(current_key, []).append(item)
+            if base_key:
+                base_groups.setdefault(base_key, []).append(item)
+        collision_ids: set[str] = set()
+        collision_group_by_id: dict[str, list[str]] = {}
+        for groups in (current_name_groups, base_groups):
+            for group in groups.values():
+                identities = sorted(
+                    {
+                        self._factor_name_collision_identity(item)
+                        for item in group
+                        if self._factor_name_collision_identity(item)
+                    }
+                )
+                if len(identities) <= 1:
+                    continue
+                for item in group:
+                    identity = self._factor_name_collision_identity(item)
+                    if not identity:
+                        continue
+                    collision_ids.add(identity)
+                    collision_group_by_id[identity] = sorted(set(collision_group_by_id.get(identity, []) + identities))
+        final_names: dict[str, list[dict[str, Any]]] = {}
+        for item in eligible:
+            identity = self._factor_name_collision_identity(item)
+            if identity in collision_ids:
+                final_name = str(item.get("base_display_name_cn") or item.get("display_name_cn") or item.get("name") or identity).strip()
+            else:
+                final_name = str(item.get("display_name_cn") or item.get("name") or item.get("base_display_name_cn") or identity).strip()
+            final_names.setdefault(re.sub(r"\s+", "", final_name.lower()), []).append(item)
+            item["_candidate_final_display_name_cn"] = final_name
+        duplicate_final_keys = {
+            key
+            for key, group in final_names.items()
+            if len({self._factor_name_collision_identity(item) for item in group}) > 1
+        }
+        for item in eligible:
+            identity = self._factor_name_collision_identity(item)
+            final_name = str(item.pop("_candidate_final_display_name_cn", item.get("display_name_cn") or "")).strip()
+            suffix = ""
+            final_key = re.sub(r"\s+", "", final_name.lower())
+            if identity in collision_ids and final_key in duplicate_final_keys:
+                suffix = f"[{_factor_display_stable_sha8(factor_id=identity, expression=item.get('expression'), parent_factor_ids=item.get('parent_factor_ids') or [], processing_chain=(item.get('op_status') or {}).get('completed') if isinstance(item.get('op_status'), Mapping) else [], benchmark=(item.get('name_audit') or {}).get('structured_components') if isinstance(item.get('name_audit'), Mapping) else None)}]"
+                final_name = f"{final_name} {suffix}"
+            elif identity in collision_ids and final_name != str(item.get("display_name_cn") or ""):
+                suffix = "参数/治理链"
+            group = collision_group_by_id.get(identity, [])
+            if identity in collision_ids:
+                item["display_name_cn"] = final_name
+                item["name"] = final_name
+                item["short_name_cn"] = _factor_display_short_name(final_name)
+            item["name_dedupe_suffix"] = suffix
+            item["name_collision_group"] = group
+            audit = dict(item.get("name_audit") or {})
+            audit.update(
+                {
+                    "new_display_name": item.get("display_name_cn"),
+                    "base_display_name_cn": item.get("base_display_name_cn"),
+                    "name_collision_group": group,
+                    "name_dedupe_suffix": suffix,
+                    "dedupe_strategy": FACTOR_DISPLAY_NAME_DEDUPE_STRATEGY,
+                    "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+                    "fallback_hash_input_sha8": self._signature_hash(self._factor_name_hash_input(item), 8),
+                }
+            )
+            item["name_audit"] = audit
+        return resolved
+
+    def _resolve_factor_display_name_for_scope(self, factor: dict[str, Any]) -> dict[str, Any]:
+        rows = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM factor_definitions
+            WHERE deleted_at IS NULL
+              AND UPPER(COALESCE(lifecycle_status, '')) NOT IN ('ARCHIVED', 'DELETED', 'DEPRECATED', 'PRUNED')
+            """
+        )
+        pit_overview = self._factor_list_pit_overview()
+        existing: list[dict[str, Any]] = []
+        target_id = self._factor_name_collision_identity(factor)
+        for row in rows:
+            row_factor = self._apply_factor_governance_projection(self._decode_factor_row(row, pit_overview))
+            if self._factor_name_collision_identity(row_factor) != target_id:
+                existing.append(row_factor)
+        resolved = self._apply_factor_display_name_collision_resolution([*existing, factor])
+        return next(
+            (item for item in resolved if self._factor_name_collision_identity(item) == target_id),
+            factor,
+        )
+
+    def _assert_factor_display_name_unique_for_online_scope(self, *, factor_id: str, display_name: str) -> None:
+        name = str(display_name or "").strip()
+        if not name:
+            return
+        rows = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM factor_definitions
+            WHERE deleted_at IS NULL
+              AND id <> ?
+              AND name = ?
+              AND UPPER(COALESCE(lifecycle_status, '')) NOT IN ('ARCHIVED', 'DELETED', 'DEPRECATED', 'PRUNED')
+            """,
+            (factor_id, name),
+        )
+        if not rows:
+            return
+        pit_overview = self._factor_list_pit_overview()
+        for row in rows:
+            factor = self._apply_factor_governance_projection(self._decode_factor_row(row, pit_overview))
+            if self._factor_name_online_unique_scope(factor):
+                raise ValueError(f"线上 F2/F3 因子展示名已存在：{name}。")
 
     def _cluster_id_for_expression(self, expression: str) -> str:
         return f"cluster_{self._signature_hash(expression, 12)}"
@@ -8518,7 +9520,35 @@ class FactorResearchService:
         candidate_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         job_id = str(job.get("id") or "").strip()
-        top_candidates = _decode_json_list(job.get("top_candidates_json"))
+        stored_candidates = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM factor_mining_candidates
+            WHERE job_id = ?
+            ORDER BY score DESC, created_at DESC, id
+            """,
+            (job_id,),
+        ) if job_id else []
+        top_candidates = []
+        if stored_candidates:
+            for stored in stored_candidates:
+                item = _decode_json_dict(stored.get("summary_json"))
+                item.update({
+                    "id": stored.get("id"),
+                    "candidate_id": stored.get("id"),
+                    "expression": stored.get("expression"),
+                    "score": stored.get("score"),
+                    "rank_ic": stored.get("rank_ic"),
+                    "turnover": stored.get("turnover"),
+                    "coverage": stored.get("coverage"),
+                    "depth": stored.get("depth"),
+                    "risk_flags": _decode_json_list(stored.get("risk_flags_json")),
+                })
+                top_candidates.append(item)
+        else:
+            top_candidates = self._candidate_items_from_mining_job_ledger(job)
+            if not top_candidates:
+                top_candidates = _decode_json_list(job.get("top_candidates_json"))
         rows: list[dict[str, Any]] = []
         for index, item in enumerate(top_candidates):
             if not isinstance(item, Mapping):
@@ -8587,18 +9617,79 @@ class FactorResearchService:
                 "capacity_score": item.get("capacity_score"),
                 "crowding_score": item.get("crowding_score"),
                 "artifact_refs": item.get("artifact_refs") if isinstance(item.get("artifact_refs"), Mapping) else {},
+                "raw_expression": item.get("raw_expression"),
+                "refined_expression": item.get("refined_expression"),
+                "wnzt_missing": item.get("wnzt_missing") if isinstance(item.get("wnzt_missing"), list) else [],
+                "pipeline_version": item.get("pipeline_version"),
+                "persisted_to_factor_definitions": item.get("persisted_to_factor_definitions"),
+                "publish_boundary": item.get("publish_boundary"),
+                "composition_methods": item.get("composition_methods") if isinstance(item.get("composition_methods"), list) else [],
+                "target_layer": item.get("target_layer"),
+                "processing_status": item.get("processing_status"),
+                "processing_status_label": item.get("processing_status_label"),
             })
         return rows
 
+    def _candidate_items_from_mining_job_ledger(self, job: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        summary = _decode_json_dict(job.get("summary_json"))
+        operator_engine = summary.get("operator_engine") if isinstance(summary.get("operator_engine"), Mapping) else {}
+        artifact_refs = (
+            operator_engine.get("artifact_refs")
+            if isinstance(operator_engine.get("artifact_refs"), Mapping)
+            else {}
+        )
+        ledger_ref = str(artifact_refs.get("refined_f2_candidate_ledger") or "").strip()
+        if not ledger_ref:
+            return []
+        ledger_path = Path(ledger_ref)
+        if not ledger_path.is_absolute():
+            ledger_path = Path.cwd() / ledger_path
+        if not ledger_path.exists():
+            return []
+        payload = loads(ledger_path.read_text(encoding="utf-8"), {})
+        candidates = payload.get("candidates") if isinstance(payload, Mapping) else []
+        return [item for item in candidates if isinstance(item, Mapping)]
+
     def _dedupe_mining_candidate_rows_by_expression(self, rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
         seen: set[str] = set()
-        deduped: list[Mapping[str, Any]] = []
+        deduped: list[dict[str, Any]] = []
+        by_signature: dict[str, dict[str, Any]] = {}
+
+        def merge_strings(existing: Any, incoming: Any) -> list[str]:
+            merged: list[str] = []
+            for values in (existing, incoming):
+                if isinstance(values, str):
+                    values = [values]
+                if not isinstance(values, Sequence):
+                    continue
+                for value in values:
+                    text = str(value).strip()
+                    if text and text not in merged:
+                        merged.append(text)
+            return merged
+
         for row in rows:
             signature = self._expression_signature(str(row.get("expression") or ""))
-            if not signature or signature in seen:
+            if not signature:
+                continue
+            if signature in seen:
+                existing = by_signature.get(signature)
+                if existing is not None:
+                    existing["source_factor_ids"] = merge_strings(existing.get("source_factor_ids"), row.get("source_factor_ids"))
+                    existing["deduped_mining_candidate_ids"] = merge_strings(
+                        existing.get("deduped_mining_candidate_ids"),
+                        row.get("id") or row.get("mining_candidate_id"),
+                    )
+                    existing["deduped_expression_count"] = int(_coerce_float(existing.get("deduped_expression_count"), 1.0)) + 1
+                    existing["deduped_source_factor_count"] = len(existing.get("source_factor_ids") or [])
                 continue
             seen.add(signature)
-            deduped.append(row)
+            copied = dict(row)
+            copied["deduped_expression_count"] = 1
+            copied["deduped_mining_candidate_ids"] = merge_strings([], copied.get("id") or copied.get("mining_candidate_id"))
+            copied["deduped_source_factor_count"] = len(copied.get("source_factor_ids") or [])
+            by_signature[signature] = copied
+            deduped.append(copied)
         return sorted(
             deduped,
             key=lambda item: (
@@ -8607,6 +9698,17 @@ class FactorResearchService:
                 str(item.get("id") or ""),
             ),
         )
+
+    @staticmethod
+    def _mining_candidate_row_needs_refined_f2(row: Mapping[str, Any]) -> bool:
+        if not bool(row.get("raw_f2")):
+            return False
+        if not bool(row.get("refined_f2")):
+            return True
+        if bool(row.get("wnzt_complete")):
+            return False
+        expression = str(row.get("expression") or "")
+        return bool(FactorResearchService._factor_phase2_wnzt_missing(expression))
 
     def _current_sandbox_signature_context(self) -> tuple[set[str], dict[str, int]]:
         unique_jobs = self._recent_unique_factor_mining_job_rows()
@@ -8722,7 +9824,37 @@ class FactorResearchService:
             }
             if latest_run_at:
                 candidate["last_quarantine_at"] = latest_run_at
-        return self._hydrate_factor_phase2_candidate(candidate)
+        candidate = self._hydrate_factor_phase2_candidate(candidate)
+        metrics = candidate.get("candidate_metrics") if isinstance(candidate.get("candidate_metrics"), Mapping) else {}
+        expression = str(candidate.get("expression") or "")
+        target_layer = str(candidate.get("target_layer") or metrics.get("target_layer") or "L2").upper()
+        published_identity = _published_factor_identity(expression, target_layer=target_layer, metrics=metrics)
+        factor_id = str(candidate.get("target_factor_id") or published_identity.factor_id)
+        naming_projection = factor_display_name_projection_v4(
+            factor_id=factor_id,
+            name=candidate.get("factor_name") or candidate.get("name"),
+            source="AUTO_MINED",
+            expression=expression,
+            descriptor=published_identity.descriptor,
+            tier_level=published_identity.tier,
+            neutralization_scope=metrics.get("neutralization_scope") or metrics.get("orthogonality_intent"),
+            residual_control=metrics.get("residual_control") or ("market_beta" if "beta" in expression.lower() else None),
+        )
+        structured_display_name = str(
+            naming_projection.get("base_display_name_cn")
+            or naming_projection.get("display_name_cn")
+            or factor_id
+        )
+        name_audit = dict(naming_projection.get("name_audit") or {})
+        name_audit["compact_display_name_cn"] = naming_projection.get("display_name_cn")
+        name_audit["new_display_name"] = structured_display_name
+        candidate.update(naming_projection)
+        candidate["compact_display_name_cn"] = naming_projection.get("display_name_cn")
+        candidate["display_name_cn"] = structured_display_name
+        candidate["factor_name"] = structured_display_name
+        candidate["name"] = structured_display_name
+        candidate["name_audit"] = name_audit
+        return candidate
 
     def _candidate_metric_float(self, candidate: Mapping[str, Any], key: str, default: float = 0.0) -> float:
         metrics = candidate.get("candidate_metrics") if isinstance(candidate.get("candidate_metrics"), Mapping) else {}
@@ -8786,12 +9918,25 @@ class FactorResearchService:
         evidence_value = metrics.get("wnzt_evidence")
         evidence = evidence_value if isinstance(evidence_value, Mapping) else {}
         wnzt_missing = self._factor_phase2_wnzt_missing(expression)
-        wnzt_complete = bool(metrics.get("wnzt_complete") or evidence.get("complete") or not wnzt_missing)
+        raw_f2 = bool(metrics.get("raw_f2"))
+        refined_f2 = bool(metrics.get("refined_f2"))
+        wnzt_complete = bool(
+            not wnzt_missing
+            and (
+                refined_f2
+                or bool(evidence.get("complete"))
+                or not raw_f2
+            )
+        )
+        raw_expression = str(metrics.get("raw_expression") or expression or "")
+        refined_expression = str(metrics.get("refined_expression") or "").strip() if wnzt_complete else ""
         metadata: dict[str, Any] = {
             "target_layer": target_layer,
             "operator_chain": list(PHASE2_L2_OPERATOR_CHAIN) if target_layer == "L2" else [],
             "composition_methods": [],
             "investment_logic": "",
+            "raw_expression": raw_expression,
+            "refined_expression": refined_expression or None,
         }
         if target_layer == "L2":
             missing = [] if wnzt_complete else wnzt_missing
@@ -8804,7 +9949,23 @@ class FactorResearchService:
             })
         if target_layer == "L3":
             recipe_family = str(metrics.get("recipe_family") or "").strip()
-            methods = list(PHASE2_L3_COMPOSITION_METHODS)
+            composition_metadata = metrics.get("composition_metadata") if isinstance(metrics.get("composition_metadata"), Mapping) else {}
+            methods: list[dict[str, Any]] = []
+            if composition_metadata:
+                method_key = str(composition_metadata.get("recipe_family") or recipe_family or composition_metadata.get("method_id") or "").strip()
+                if method_key:
+                    default_method = next((item for item in PHASE2_L3_COMPOSITION_METHODS if item["key"] == method_key), {})
+                    methods.append({
+                        "key": method_key,
+                        "label": str(composition_metadata.get("label") or default_method.get("label") or method_key),
+                        "method_id": composition_metadata.get("method_id"),
+                        "method_type": composition_metadata.get("method_type"),
+                        "recipe_family": composition_metadata.get("recipe_family") or recipe_family,
+                        "publish_boundary": composition_metadata.get("publish_boundary"),
+                    })
+            for item in PHASE2_L3_COMPOSITION_METHODS:
+                if not any(existing.get("key") == item["key"] for existing in methods):
+                    methods.append(dict(item))
             if recipe_family and not any(item["key"] == recipe_family for item in methods):
                 methods.insert(0, {"key": recipe_family, "label": recipe_family})
             metadata.update({
@@ -9035,6 +10196,16 @@ class FactorResearchService:
                 "rejected_reason": None,
             })
         status = str(candidate.get("status") or "").upper()
+        if (
+            target_layer != "L1"
+            and bool(metrics.get("raw_f2"))
+            and not bool(phase2.get("wnzt_complete"))
+            and status in {"PASSED", "PUBLISHED"}
+        ):
+            candidate["status"] = "REJECTED"
+            candidate["publish_status"] = "BLOCKED"
+            candidate["rejected_reason"] = "Raw_F2 缺少 WNZT 完整治理证据，需重新生成 Refined_F2 后再进入发布名单。"
+            status = "REJECTED"
         result = "PASS" if status in {"PASSED", "PUBLISHED"} else ("FAIL" if status == "REJECTED" else "WARN")
         reason = (
             str((candidate.get("publish_eligibility") or {}).get("reason") if isinstance(candidate.get("publish_eligibility"), Mapping) else "").strip()
@@ -9078,9 +10249,17 @@ class FactorResearchService:
             source_job_ids = [str(job.get("id") or "") for job in jobs if str(job.get("id") or "")]
             for job in jobs:
                 rows.extend(self._candidate_rows_from_mining_job_top_candidates(job))
-        rows = self._dedupe_mining_candidate_rows_by_expression(rows)[:50]
+        rows = self._dedupe_mining_candidate_rows_by_expression(rows)
         if not requested_job_id and source_job_ids:
             requested_job_id = source_job_ids[0]
+        eligible_rows: list[Mapping[str, Any]] = []
+        skipped_unrefined_raw_rows: list[Mapping[str, Any]] = []
+        for row in rows:
+            if self._mining_candidate_row_needs_refined_f2(row):
+                skipped_unrefined_raw_rows.append(row)
+                continue
+            eligible_rows.append(row)
+        rows = eligible_rows
         now = iso_now()
         inserted = []
         pit_overview = self._factor_list_pit_overview()
@@ -9153,11 +10332,21 @@ class FactorResearchService:
                         "drawdown_vs_benchmark_ratio": _safe_round(_coerce_float(row.get("drawdown_vs_benchmark_ratio"), 0.0), 4),
                         "auto_residual_summary": row.get("auto_residual_summary") if isinstance(row.get("auto_residual_summary"), Mapping) else {},
                         "source_factor_ids": [str(item) for item in row.get("source_factor_ids") or [] if str(item).strip()],
+                        "deduped_expression_count": int(_coerce_float(row.get("deduped_expression_count"), 1.0)),
+                        "deduped_source_factor_count": int(_coerce_float(row.get("deduped_source_factor_count"), 0.0)),
+                        "deduped_mining_candidate_ids": [
+                            str(item)
+                            for item in row.get("deduped_mining_candidate_ids") or []
+                            if str(item).strip()
+                        ],
                         "recipe_kind": row.get("recipe_kind"),
                         "recipe_family": row.get("recipe_family"),
                         "orthogonality_intent": row.get("orthogonality_intent"),
                         "composition_metadata": row.get("composition_metadata") if isinstance(row.get("composition_metadata"), Mapping) else {},
                         "sandbox_rank": int(_coerce_float(row.get("sandbox_rank"), 9999.0)),
+                        "target_layer": row.get("target_layer"),
+                        "processing_status": row.get("processing_status"),
+                        "processing_status_label": row.get("processing_status_label"),
                     }
                     for evidence_key in (
                         "operator_engine",
@@ -9174,6 +10363,13 @@ class FactorResearchService:
                         "capacity_score",
                         "crowding_score",
                         "artifact_refs",
+                        "raw_expression",
+                        "refined_expression",
+                        "wnzt_missing",
+                        "pipeline_version",
+                        "persisted_to_factor_definitions",
+                        "publish_boundary",
+                        "composition_methods",
                     ):
                         if row.get(evidence_key) is not None:
                             metrics[evidence_key] = row.get(evidence_key)
@@ -9233,11 +10429,21 @@ class FactorResearchService:
                 "drawdown_vs_benchmark_ratio": _safe_round(_coerce_float(row.get("drawdown_vs_benchmark_ratio"), 0.0), 4),
                 "auto_residual_summary": row.get("auto_residual_summary") if isinstance(row.get("auto_residual_summary"), Mapping) else {},
                 "source_factor_ids": [str(item) for item in row.get("source_factor_ids") or [] if str(item).strip()],
+                "deduped_expression_count": int(_coerce_float(row.get("deduped_expression_count"), 1.0)),
+                "deduped_source_factor_count": int(_coerce_float(row.get("deduped_source_factor_count"), 0.0)),
+                "deduped_mining_candidate_ids": [
+                    str(item)
+                    for item in row.get("deduped_mining_candidate_ids") or []
+                    if str(item).strip()
+                ],
                 "recipe_kind": row.get("recipe_kind"),
                 "recipe_family": row.get("recipe_family"),
                 "orthogonality_intent": row.get("orthogonality_intent"),
                 "composition_metadata": row.get("composition_metadata") if isinstance(row.get("composition_metadata"), Mapping) else {},
                 "sandbox_rank": int(_coerce_float(row.get("sandbox_rank"), 9999.0)),
+                "target_layer": row.get("target_layer"),
+                "processing_status": row.get("processing_status"),
+                "processing_status_label": row.get("processing_status_label"),
             }
             for evidence_key in (
                 "operator_engine",
@@ -9254,6 +10460,13 @@ class FactorResearchService:
                 "capacity_score",
                 "crowding_score",
                 "artifact_refs",
+                "raw_expression",
+                "refined_expression",
+                "wnzt_missing",
+                "pipeline_version",
+                "persisted_to_factor_definitions",
+                "publish_boundary",
+                "composition_methods",
             ):
                 if row.get(evidence_key) is not None:
                     metrics[evidence_key] = row.get(evidence_key)
@@ -9346,6 +10559,7 @@ class FactorResearchService:
                 "intake_count": len(items),
                 "source_mining_job_id": requested_job_id or None,
                 "sandbox_candidates_persisted_to_factor_definitions": False,
+                "skipped_raw_f2_needs_refinement_count": len(skipped_unrefined_raw_rows),
             },
         }
 
@@ -9358,7 +10572,11 @@ class FactorResearchService:
         date: str | None = None,
         factor_name: str | None = None,
         result: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
     ) -> dict[str, Any]:
+        page = max(1, int(page or 1))
+        page_size = min(200, max(1, int(page_size or 50)))
         params: list[Any] = []
         where = []
         if status:
@@ -9386,18 +10604,55 @@ class FactorResearchService:
                 """
             )
             params.extend([filtered_date, filtered_date, filtered_date])
-        if factor_name:
-            where.append("(expression LIKE ? OR id LIKE ? OR target_factor_id LIKE ?)")
-            pattern = f"%{str(factor_name).strip()}%"
-            params.extend([pattern, pattern, pattern])
+        factor_name_needle = str(factor_name or "").strip().lower()
         normalized_result = str(result or "").strip().upper()
-        if normalized_result and normalized_result != "ALL":
-            if normalized_result == "PASS":
-                where.append("status IN ('PASSED', 'PUBLISHED')")
-            elif normalized_result == "WARN":
-                where.append("status IN ('PENDING', 'RUNNING', 'NEEDS_REVIEW', 'SUPERSEDED')")
-            elif normalized_result == "FAIL":
-                where.append("status = 'REJECTED'")
+        if source_job_id and not factor_name_needle:
+            if normalized_result and normalized_result != "ALL":
+                if normalized_result == "PASS":
+                    where.append("status IN ('PASSED', 'PUBLISHED')")
+                elif normalized_result == "FAIL":
+                    where.append("status = 'REJECTED'")
+                elif normalized_result == "WARN":
+                    where.append("status NOT IN ('PASSED', 'PUBLISHED', 'REJECTED')")
+            where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+            total_row = self.storage.fetch_one(
+                f"""
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status = 'PASSED' THEN 1 ELSE 0 END) AS passed_count,
+                    SUM(CASE WHEN status = 'PUBLISHED' THEN 1 ELSE 0 END) AS published_count,
+                    SUM(CASE WHEN status = 'REJECTED' THEN 1 ELSE 0 END) AS rejected_count,
+                    SUM(CASE WHEN status NOT IN ('PASSED', 'PUBLISHED', 'REJECTED') THEN 1 ELSE 0 END) AS needs_review_count
+                FROM factor_quarantine_candidates
+                {where_sql}
+                """,
+                tuple(params),
+            ) or {}
+            total = int(total_row.get("total") or 0)
+            offset = (page - 1) * page_size
+            rows = self.storage.fetch_all(
+                f"""
+                SELECT *
+                FROM factor_quarantine_candidates
+                {where_sql}
+                ORDER BY updated_at DESC, created_at DESC, id
+                LIMIT ? OFFSET ?
+                """,
+                tuple([*params, page_size, offset]),
+            )
+            return {
+                "items": [self._decode_quarantine_candidate_row(row) for row in rows],
+                "summary": {
+                    "total": total,
+                    "page": page,
+                    "page_size": page_size,
+                    "total_pages": max(1, math.ceil(total / page_size)) if total else 1,
+                    "passed_count": int(total_row.get("passed_count") or 0),
+                    "needs_review_count": int(total_row.get("needs_review_count") or 0),
+                    "published_count": int(total_row.get("published_count") or 0),
+                    "rejected_count": int(total_row.get("rejected_count") or 0),
+                },
+            }
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         rows = self.storage.fetch_all(
             f"""
@@ -9405,20 +10660,48 @@ class FactorResearchService:
             FROM factor_quarantine_candidates
             {where_sql}
             ORDER BY updated_at DESC, created_at DESC, id
-            LIMIT 100
             """,
             tuple(params),
         )
-        items = [self._decode_quarantine_candidate_row(row) for row in rows]
-        if not status and not source_job_id and not cluster and not date and not factor_name and not normalized_result:
-            items = self._dedupe_quarantine_items_for_display(items)
+        all_items = [self._decode_quarantine_candidate_row(row) for row in rows]
+        if not source_job_id:
+            all_items = self._dedupe_quarantine_items_for_display(all_items)
+        if factor_name_needle:
+            def _candidate_name_matches(item: Mapping[str, Any]) -> bool:
+                aliases = item.get("legacy_name_aliases") if isinstance(item.get("legacy_name_aliases"), list) else []
+                values = [
+                    item.get("id"),
+                    item.get("expression"),
+                    item.get("target_factor_id"),
+                    item.get("factor_name"),
+                    item.get("display_name_cn"),
+                    item.get("short_name_cn"),
+                    item.get("name"),
+                    *aliases,
+                ]
+                return any(factor_name_needle in str(value or "").lower() for value in values)
+
+            all_items = [item for item in all_items if _candidate_name_matches(item)]
+        if normalized_result and normalized_result != "ALL":
+            all_items = [
+                item
+                for item in all_items
+                if str(item.get("quarantine_result") or "").upper() == normalized_result
+            ]
+        total = len(all_items)
+        offset = (page - 1) * page_size
+        items = all_items[offset: offset + page_size]
         return {
             "items": items,
             "summary": {
-                "total": len(items),
-                "passed_count": sum(1 for item in items if item.get("status") == "PASSED"),
-                "needs_review_count": sum(1 for item in items if item.get("status") == "NEEDS_REVIEW"),
-                "published_count": sum(1 for item in items if item.get("status") == "PUBLISHED"),
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": max(1, math.ceil(total / page_size)) if total else 1,
+                "passed_count": sum(1 for item in all_items if str(item.get("quarantine_result") or "").upper() == "PASS"),
+                "needs_review_count": sum(1 for item in all_items if str(item.get("quarantine_result") or "").upper() == "WARN"),
+                "published_count": sum(1 for item in all_items if str(item.get("status") or "").upper() == "PUBLISHED"),
+                "rejected_count": sum(1 for item in all_items if str(item.get("quarantine_result") or "").upper() == "FAIL"),
             },
         }
 
@@ -9427,6 +10710,37 @@ class FactorResearchService:
         if not row:
             raise KeyError(f"Factor quarantine candidate not found: {candidate_id}")
         return self._decode_quarantine_candidate_row(row)
+
+    def _better_same_cluster_candidate(
+        self,
+        *,
+        candidate_id: str,
+        cluster_id: str | None,
+        score: float,
+    ) -> str | None:
+        if not cluster_id:
+            return None
+        rows = self.storage.fetch_all(
+            """
+            SELECT id, candidate_metrics_json
+            FROM factor_quarantine_candidates
+            WHERE cluster_id = ?
+              AND id <> ?
+              AND status IN ('PASSED', 'PUBLISHED')
+              AND publish_status IN ('ELIGIBLE', 'PUBLISHED')
+            ORDER BY updated_at DESC, created_at DESC, id
+            """,
+            (cluster_id, candidate_id),
+        )
+        for row in rows:
+            metrics = _decode_json_dict(row.get("candidate_metrics_json"))
+            peer_score = _coerce_float(
+                metrics.get("fitness_score") if metrics.get("fitness_score") is not None else metrics.get("score"),
+                0.0,
+            )
+            if peer_score >= score:
+                return str(row.get("id") or "")
+        return None
 
     def _run_factor_quarantine_candidate_v2(self, candidate_id: str, request: Any | None = None) -> dict[str, Any]:
         candidate = self.get_factor_quarantine_candidate(candidate_id)
@@ -9471,8 +10785,15 @@ class FactorResearchService:
         source_factor_ids = [str(item) for item in metrics.get("source_factor_ids") or [] if str(item).strip()]
         target_layer = self._factor_phase2_target_layer(expression, metrics)
         published_identity = _published_factor_identity(expression, target_layer=target_layer, metrics=metrics)
-        wnzt_evidence = metrics.get("wnzt_evidence") if isinstance(metrics.get("wnzt_evidence"), Mapping) else {}
-        wnzt_complete = bool(metrics.get("wnzt_complete") or wnzt_evidence.get("complete"))
+        phase2_metadata = self._factor_phase2_metadata(expression, metrics)
+        wnzt_evidence = phase2_metadata.get("wnzt_evidence") if isinstance(phase2_metadata.get("wnzt_evidence"), Mapping) else {}
+        wnzt_complete = bool(phase2_metadata.get("wnzt_complete"))
+        metrics = {
+            **dict(metrics),
+            **phase2_metadata,
+            "wnzt_complete": wnzt_complete,
+            "wnzt_evidence": dict(wnzt_evidence),
+        }
         raw_f2_requires_governance = bool(metrics.get("raw_f2")) and target_layer != "L1"
         p_value = _coerce_float(metrics.get("p_value"), 0.02 if raw_f2_requires_governance else 0.0)
         p_value_max = _coerce_float(metrics.get("p_value_max"), 0.05)
@@ -9578,6 +10899,27 @@ class FactorResearchService:
             if drawdown_ratio >= 1.5:
                 drawdown_reason += "最大回撤相对基准超过 1.5x。"
             blockers.append(drawdown_reason)
+        if target_layer != "L1" and not blockers:
+            redundancy_corr = max(
+                abs(_coerce_float(metrics.get("redundancy_correlation"), 0.0)),
+                abs(_coerce_float(metrics.get("matrix_max_correlation"), 0.0)),
+                abs(_coerce_float(metrics.get("s_grade_correlation"), 0.0)),
+            )
+            redundant_with = self._better_same_cluster_candidate(
+                candidate_id=candidate_id,
+                cluster_id=cluster_id,
+                score=_coerce_float(
+                    metrics.get("fitness_score") if metrics.get("fitness_score") is not None else metrics.get("score"),
+                    0.0,
+                ),
+            )
+            if redundant_with and redundancy_corr > 0.9:
+                gate_summary["redundancy_pruning"] = "FAILED"
+                blockers.append(
+                    f"冗余裁剪失败：同簇候选相关性 {redundancy_corr:.2f} > 0.90，已保留 {redundant_with}。"
+                )
+            else:
+                gate_summary["redundancy_pruning"] = "PASSED"
         if duplicate_factor_ids:
             blockers.append("表达式与已有因子逻辑重复。")
         explicit_capacity_turnover = metrics.get("capacity_turnover_rate")
@@ -9733,6 +11075,7 @@ class FactorResearchService:
             SET status = ?,
                 publish_status = ?,
                 gate_summary_json = ?,
+                candidate_metrics_json = ?,
                 publish_eligibility_json = ?,
                 pit_evidence_json = ?,
                 target_factor_id = ?,
@@ -9745,6 +11088,7 @@ class FactorResearchService:
                 status,
                 publish_status,
                 dumps(gate_summary),
+                dumps(metrics),
                 dumps({"status": publish_status, "reason": reason, "rule_version": FACTOR_QUARANTINE_RULE_VERSION}),
                 dumps(pit_evidence),
                 published_identity.factor_id,
@@ -9910,10 +11254,13 @@ class FactorResearchService:
         expression = str(candidate.get("expression") or "")
         candidate_metrics = candidate.get("candidate_metrics") if isinstance(candidate.get("candidate_metrics"), Mapping) else {}
         target_layer = str(candidate.get("target_layer") or candidate_metrics.get("target_layer") or "L2").upper()
-        wnzt_evidence = candidate_metrics.get("wnzt_evidence") if isinstance(candidate_metrics.get("wnzt_evidence"), Mapping) else {}
+        phase2_metadata = self._factor_phase2_metadata(expression, candidate_metrics)
+        wnzt_evidence = phase2_metadata.get("wnzt_evidence") if isinstance(phase2_metadata.get("wnzt_evidence"), Mapping) else {}
         if bool(candidate_metrics.get("raw_f2")) and target_layer != "L1":
-            if not bool(candidate_metrics.get("wnzt_complete") or wnzt_evidence.get("complete")):
+            if not bool(phase2_metadata.get("wnzt_complete")):
                 raise ValueError("Raw_F2 缺少 WNZT 完整治理证据，不能发布。")
+            if str(candidate_metrics.get("pipeline_version") or "") != "raw_refined_f2_v2":
+                raise ValueError("Raw_F2 候选来自旧治理流水线，需重新生成后再发布。")
             if not candidate_metrics.get("operator_config_snapshot_id") or not candidate_metrics.get("f1_catalog_snapshot_id"):
                 raise ValueError("Raw_F2 缺少工厂配置或 F1 快照引用，不能发布。")
         published_identity = _published_factor_identity(expression, target_layer=target_layer, metrics=candidate_metrics)
@@ -9932,7 +11279,47 @@ class FactorResearchService:
         composition_methods = candidate.get("composition_methods") or candidate_metrics.get("composition_methods") or []
         investment_logic = str(candidate.get("investment_logic") or candidate_metrics.get("investment_logic") or "").strip()
         pit_evidence = run_summary.get("pit_evidence") if isinstance(run_summary.get("pit_evidence"), Mapping) else {}
-        factor_name = _auto_mined_factor_name(factor_id, expression)
+        naming_projection = factor_display_name_projection_v4(
+            factor_id=factor_id,
+            name=_auto_mined_factor_name(factor_id, expression),
+            source="AUTO_MINED",
+            expression=expression,
+            descriptor=published_identity.descriptor,
+            tier_level=published_identity.tier,
+            neutralization_scope=candidate_metrics.get("neutralization_scope") or candidate_metrics.get("orthogonality_intent"),
+            residual_control=candidate_metrics.get("residual_control") or ("market_beta" if "beta" in expression.lower() else None),
+        )
+        naming_projection = self._resolve_factor_display_name_for_scope(
+            {
+                "id": factor_id,
+                "source": "AUTO_MINED",
+                "lifecycle_status": "VERIFIED",
+                "lifecycle": "online",
+                "tier_level": published_identity.tier,
+                "expression": expression,
+                "descriptor": published_identity.descriptor,
+                "parent_factor_ids": candidate_metrics.get("source_factor_ids") or [],
+                "operator_chain": operator_chain,
+                **naming_projection,
+            }
+        )
+        factor_name = str(naming_projection["display_name_cn"])
+        self._assert_factor_display_name_unique_for_online_scope(factor_id=factor_id, display_name=factor_name)
+        publish_metadata = factor_publish_metadata_v4(
+            factor_id=factor_id,
+            display_name_cn=factor_name,
+            governance_badges=naming_projection.get("governance_badges") or [],
+            base_display_name_cn=naming_projection.get("base_display_name_cn"),
+            name_collision_key=naming_projection.get("name_collision_key"),
+            name_dedupe_suffix=naming_projection.get("name_dedupe_suffix"),
+            name_collision_group=naming_projection.get("name_collision_group") or [],
+            name_audit=naming_projection.get("name_audit") if isinstance(naming_projection.get("name_audit"), Mapping) else {},
+            parent_factor_ids=candidate_metrics.get("source_factor_ids") or [],
+            operator_chain=operator_chain,
+            composition_methods=composition_methods,
+            neutralization_scope=candidate_metrics.get("neutralization_scope") or candidate_metrics.get("orthogonality_intent"),
+            residual_control=candidate_metrics.get("residual_control") or ("market_beta" if "beta" in expression.lower() else None),
+        )
         raw_diagnostic_warnings = run_summary.get("diagnostic_warnings")
         diagnostic_warnings = [str(item) for item in raw_diagnostic_warnings] if isinstance(raw_diagnostic_warnings, list) else []
         audit_trail = self._build_factor_audit_trail(
@@ -9945,6 +11332,16 @@ class FactorResearchService:
             "run_id": f"fdiag_{factor_id}_publish",
             "factor_id": factor_id,
             "factor_name": factor_name,
+            "display_name_cn": factor_name,
+            "short_name_cn": naming_projection.get("short_name_cn"),
+            "governance_badges": naming_projection.get("governance_badges") or [],
+            "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
+            "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+            "base_display_name_cn": naming_projection.get("base_display_name_cn"),
+            "name_collision_key": naming_projection.get("name_collision_key"),
+            "name_dedupe_suffix": naming_projection.get("name_dedupe_suffix"),
+            "name_collision_group": naming_projection.get("name_collision_group") or [],
+            "publish_metadata": publish_metadata,
             "status": "COMPLETED",
             "diagnostic_mode": "VERIFIED",
             "dataset_snapshot_id": pit_evidence.get("dataset_snapshot_id") or "ds-price",
@@ -9982,6 +11379,8 @@ class FactorResearchService:
                 "gate_summary": gate_summary,
                 "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
                 "publish_naming_rule": published_identity.naming_rule,
+                "naming_rule_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
+                "publish_metadata": publish_metadata,
                 "diagnostic_warnings": diagnostic_warnings,
                 "target_layer": target_layer,
                 "operator_chain": operator_chain,
@@ -10033,6 +11432,9 @@ class FactorResearchService:
                         "source_candidate_id": candidate_id,
                         "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
                         "publish_naming_rule": published_identity.naming_rule,
+                        "publish_metadata": publish_metadata,
+                        "display_name_cn": factor_name,
+                        "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
                         "target_layer": target_layer,
                         "operator_chain": operator_chain,
                         "composition_methods": composition_methods,
@@ -10079,12 +11481,15 @@ class FactorResearchService:
                     dumps({
                         "factor_id": factor_id,
                         "factor_name": factor_name,
+                        "display_name_cn": factor_name,
+                        "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
                         "source": "AUTO_MINED",
                         "lifecycle_status": "VERIFIED",
                         "target_layer": target_layer,
                         "operator_chain": operator_chain,
                         "composition_methods": composition_methods,
                         "publish_naming_rule": published_identity.naming_rule,
+                        "publish_metadata": publish_metadata,
                         "pit_gate_mode": pit_evidence.get("gate_mode") or "DIAGNOSTIC_ONLY",
                         "diagnostic_warnings": diagnostic_warnings,
                     }),
@@ -10111,6 +11516,8 @@ class FactorResearchService:
                         dumps({
                             "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
                             "publish_naming_rule": published_identity.naming_rule,
+                            "publish_metadata": publish_metadata,
+                            "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
                         }),
                         now,
                     ),
@@ -10142,6 +11549,8 @@ class FactorResearchService:
                             "orthogonality_intent": candidate_metrics.get("orthogonality_intent"),
                             "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
                             "publish_naming_rule": published_identity.naming_rule,
+                            "publish_metadata": publish_metadata,
+                            "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
                         }),
                         now,
                     ),
@@ -10712,6 +12121,33 @@ class FactorResearchService:
         now = iso_now()
         expression = str(optimized.get("expression") or source_factor.get("expression") or "").strip()
         descriptor = dict(optimized.get("descriptor") or {})
+        naming_projection = self._resolve_factor_display_name_for_scope(
+            {
+                "id": optimized_factor_id,
+                "source": "MANUAL",
+                "lifecycle_status": "VERIFIED",
+                "lifecycle": "online",
+                "tier_level": str(optimized.get("tier_level") or descriptor.get("tier_level") or "F3"),
+                "expression": expression,
+                "descriptor": descriptor,
+                "parent_factor_ids": [source_factor_id],
+                "display_name_cn": optimized.get("display_name_cn") or optimized.get("name") or optimized_factor_id,
+                "short_name_cn": optimized.get("short_name_cn"),
+                "governance_badges": optimized.get("governance_badges") or [],
+                "name_schema_version": optimized.get("name_schema_version") or FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
+                "naming_protocol_version": optimized.get("naming_protocol_version") or FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+                "base_display_name_cn": optimized.get("base_display_name_cn") or optimized.get("display_name_cn") or optimized_factor_id,
+                "name_collision_key": optimized.get("name_collision_key"),
+                "name_dedupe_suffix": optimized.get("name_dedupe_suffix") or "",
+                "name_collision_group": optimized.get("name_collision_group") or [],
+                "name_audit": optimized.get("name_audit") if isinstance(optimized.get("name_audit"), Mapping) else {},
+            }
+        )
+        optimized_display_name = str(naming_projection.get("display_name_cn") or optimized.get("display_name_cn") or optimized_factor_id)
+        self._assert_factor_display_name_unique_for_online_scope(
+            factor_id=optimized_factor_id,
+            display_name=optimized_display_name,
+        )
         diagnostic_summary = dict(optimized.get("diagnostic_summary") or {})
         diagnostic_summary["run_id"] = str(diagnostic_summary.get("run_id") or f"fdiag_{optimized_factor_id}_governance_preview")
         diagnostic_summary["factor_id"] = optimized_factor_id
@@ -10720,6 +12156,29 @@ class FactorResearchService:
         diagnostic_summary["publish_naming_rule"] = str(
             optimized.get("publish_naming_rule") or PUBLISHED_FACTOR_NAMING_SCHEMA_VERSION
         )
+        diagnostic_summary["name_schema_version"] = str(
+            optimized.get("name_schema_version") or FACTOR_DISPLAY_NAME_SCHEMA_VERSION
+        )
+        diagnostic_summary["display_name_cn"] = optimized_display_name
+        diagnostic_summary["base_display_name_cn"] = naming_projection.get("base_display_name_cn")
+        diagnostic_summary["name_collision_key"] = naming_projection.get("name_collision_key")
+        diagnostic_summary["name_dedupe_suffix"] = naming_projection.get("name_dedupe_suffix")
+        diagnostic_summary["name_collision_group"] = naming_projection.get("name_collision_group") or []
+        diagnostic_summary["naming_protocol_version"] = FACTOR_DISPLAY_NAME_PROTOCOL_VERSION
+        publish_metadata = dict(optimized["publish_metadata"]) if isinstance(optimized.get("publish_metadata"), Mapping) else {}
+        publish_metadata.update(
+            {
+                "display_name_cn": optimized_display_name,
+                "base_display_name_cn": naming_projection.get("base_display_name_cn"),
+                "name_collision_key": naming_projection.get("name_collision_key"),
+                "name_dedupe_suffix": naming_projection.get("name_dedupe_suffix"),
+                "name_collision_group": naming_projection.get("name_collision_group") or [],
+                "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+                "dedupe_strategy": FACTOR_DISPLAY_NAME_DEDUPE_STRATEGY,
+                "name_audit": naming_projection.get("name_audit") if isinstance(naming_projection.get("name_audit"), Mapping) else {},
+            }
+        )
+        diagnostic_summary["publish_metadata"] = publish_metadata
         data_requirements = _merge_factor_data_requirements(
             expression,
             source_factor.get("data_requirements") or (),
@@ -10738,7 +12197,7 @@ class FactorResearchService:
                 """,
                 (
                     optimized_factor_id,
-                    str(optimized.get("name") or "反向下行波动率代理（252日）"),
+                    optimized_display_name,
                     str(optimized.get("direction") or "HIGH_IS_BETTER"),
                     expression,
                     dumps(["manual", "governance_optimized", "reverse_factor"]),
@@ -10762,6 +12221,9 @@ class FactorResearchService:
                         "source_factor_id": source_factor_id,
                         "descriptor": descriptor,
                         "publish_naming_rule": diagnostic_summary["publish_naming_rule"],
+                        "publish_metadata": diagnostic_summary.get("publish_metadata") or {},
+                        "display_name_cn": diagnostic_summary.get("display_name_cn"),
+                        "name_schema_version": diagnostic_summary["name_schema_version"],
                         "action_id": action_id,
                         "request_detail": dict(detail_payload),
                     }),
@@ -11813,6 +13275,7 @@ class FactorResearchService:
 
     def _decode_factor_row(self, row: Mapping[str, Any], pit_overview: Mapping[str, Any]) -> dict[str, Any]:
         factor = dict(row)
+        factor["stored_name"] = str(factor.get("name") or "").strip()
         factor["name"] = _factor_display_name_from_row(row)
         factor["description"] = factor.get("institutional_note") or None
         factor["tags"] = [str(item) for item in _decode_json_list(factor.pop("tags_json", "[]"))]
@@ -11831,6 +13294,15 @@ class FactorResearchService:
             str(factor.get("id") or ""),
             str(factor.get("source") or ""),
         )
+        naming_projection = factor_display_name_projection_v4(
+            factor_id=str(factor.get("id") or ""),
+            name=factor.get("stored_name"),
+            source=factor.get("source"),
+            expression=factor.get("expression"),
+            descriptor=factor["descriptor"],
+        )
+        factor.update(naming_projection)
+        factor["name"] = naming_projection["display_name_cn"]
         descriptor_category = str(factor["descriptor"].get("category") or "")
         factor["factor_family"] = FACTOR_FAMILY_LABELS.get(descriptor_category, descriptor_category or "自定义")
         factor["formula_version"] = (
@@ -12065,6 +13537,7 @@ class FactorResearchService:
             if str(row.get("id") or "") not in OLD_DEFAULT_FACTOR_ALIASES
         ]
         factors = [self._apply_factor_governance_projection(item) for item in factors]
+        factors = self._apply_factor_display_name_collision_resolution(factors)
         if source:
             factors = [item for item in factors if item["source"] == source]
         if market:
@@ -12153,6 +13626,128 @@ class FactorResearchService:
                 "strategy_usage_factor_count": len(strategy_usage_factor_ids),
                 "strategy_usage_factor_ids": strategy_usage_factor_ids,
                 "pit_status": pit_overview.get("overall_status"),
+            },
+        }
+
+    def backfill_factor_display_names_v4(self, request: Any | None = None) -> dict[str, Any]:
+        payload = dict(_as_mapping(request)) if request is not None else {}
+        dry_run = bool(payload.get("dry_run", True))
+        existing_count = self.storage.fetch_one("SELECT COUNT(*) AS count FROM factor_definitions WHERE deleted_at IS NULL")
+        if int((existing_count or {}).get("count") or 0) == 0:
+            self.ensure_default_factors()
+        pit_overview = self._factor_list_pit_overview()
+        rows = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM factor_definitions
+            WHERE deleted_at IS NULL
+              AND UPPER(COALESCE(lifecycle_status, '')) NOT IN ('ARCHIVED', 'DELETED', 'DEPRECATED', 'PRUNED')
+            ORDER BY source DESC, id ASC
+            """
+        )
+        items: list[dict[str, Any]] = []
+        pending: list[tuple[Mapping[str, Any], dict[str, Any]]] = []
+        skipped_count = 0
+        now = iso_now()
+        for row in rows:
+            if str(row.get("id") or "") in OLD_DEFAULT_FACTOR_ALIASES:
+                skipped_count += 1
+                continue
+            factor = self._apply_factor_governance_projection(self._decode_factor_row(row, pit_overview))
+            if not self._factor_name_online_unique_scope(factor):
+                skipped_count += 1
+                continue
+            pending.append((row, factor))
+        resolved_factors = self._apply_factor_display_name_collision_resolution([factor for _, factor in pending])
+        resolved_by_id = {
+            str(item.get("id") or ""): item
+            for item in resolved_factors
+            if str(item.get("id") or "").strip()
+        }
+        for row, original_factor in pending:
+            factor = resolved_by_id.get(str(original_factor.get("id") or ""), original_factor)
+            previous_name = str(row.get("name") or "").strip()
+            new_name = str(factor.get("display_name_cn") or factor.get("name") or row.get("id") or "").strip()
+            if not new_name:
+                skipped_count += 1
+                continue
+            changed = previous_name != new_name
+            item = {
+                "factor_id": row.get("id"),
+                "canonical_id": factor.get("descriptor", {}).get("canonical_id") if isinstance(factor.get("descriptor"), Mapping) else row.get("id"),
+                "previous_display_name": previous_name,
+                "new_display_name": new_name,
+                "display_name_cn": new_name,
+                "short_name_cn": factor.get("short_name_cn"),
+                "governance_badges": factor.get("governance_badges") or [],
+                "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
+                "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+                "base_display_name_cn": factor.get("base_display_name_cn"),
+                "name_collision_key": factor.get("name_collision_key"),
+                "name_dedupe_suffix": factor.get("name_dedupe_suffix"),
+                "name_collision_group": factor.get("name_collision_group") or [],
+                "name_audit": factor.get("name_audit") or {},
+                "renamed_at": None if dry_run else now,
+                "rename_reason": "display_name_v4_backfill",
+                "legacy_name_aliases": factor.get("legacy_name_aliases") or [],
+                "would_change": changed,
+            }
+            if changed:
+                items.append(item)
+        if not dry_run and items:
+            with self.storage.connection() as conn:
+                for item in items:
+                    factor_id = str(item["factor_id"])
+                    conn.execute(
+                        """
+                        UPDATE factor_definitions
+                        SET name = ?, updated_at = ?
+                        WHERE id = ? AND deleted_at IS NULL
+                        """,
+                        (item["new_display_name"], now, factor_id),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO factor_display_name_renames (
+                            id, factor_id, previous_display_name, new_display_name,
+                            name_schema_version, renamed_at, rename_reason, dry_run, metadata_json
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+                        """,
+                        (
+                            f"fdnr_{self._signature_hash(factor_id + now, 16)}",
+                            factor_id,
+                            item["previous_display_name"],
+                            item["new_display_name"],
+                            FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
+                            now,
+                            "display_name_v4_backfill",
+                            dumps({
+                                "legacy_name_aliases": item.get("legacy_name_aliases") or [],
+                                "governance_badges": item.get("governance_badges") or [],
+                                "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+                                "dedupe_strategy": FACTOR_DISPLAY_NAME_DEDUPE_STRATEGY,
+                                "base_display_name_cn": item.get("base_display_name_cn"),
+                                "name_collision_key": item.get("name_collision_key"),
+                                "name_dedupe_suffix": item.get("name_dedupe_suffix"),
+                                "name_collision_group": item.get("name_collision_group") or [],
+                                "name_audit": item.get("name_audit") or {},
+                            }),
+                        ),
+                    )
+        return {
+            "dry_run": dry_run,
+            "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
+            "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+            "dedupe_strategy": FACTOR_DISPLAY_NAME_DEDUPE_STRATEGY,
+            "items": items,
+            "summary": {
+                "candidate_count": len(rows),
+                "rename_count": len(items),
+                "skipped_count": skipped_count,
+                "applied_count": 0 if dry_run else len(items),
+                "rename_reason": "display_name_v4_backfill",
+                "unchanged_count": max(0, len(rows) - skipped_count - len(items)),
             },
         }
 
@@ -12262,6 +13857,7 @@ class FactorResearchService:
         ]
         factor["correlation_cluster"] = self._correlation_cluster(resolved_factor_id)
         self._apply_factor_governance_projection(factor)
+        factor = self._resolve_factor_display_name_for_scope(factor)
         factor["lineage_tree"] = self._factor_lineage_tree(factor)
         return factor
 

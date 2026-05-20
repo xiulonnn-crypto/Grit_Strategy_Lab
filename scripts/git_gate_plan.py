@@ -57,6 +57,37 @@ CONTRACT_PATHS = {
     "web/src/lib/workspace-adapters.ts",
     "web/src/lib/demoStoreContext.tsx",
 }
+BACKEND_CONTRACT_OWNER_TESTS = (
+    "tests/test_factor_research_api.py",
+    "tests/test_backend_api.py",
+    "tests/test_factor_mining_api.py",
+    "tests/test_factor_factory_api.py",
+    "tests/test_factor_quarantine_api.py",
+)
+ASYNC_LIFECYCLE_REPEAT_TESTS = (
+    "tests/test_factor_mining_api.py::test_factor_mining_api_runs_one_thousand_candidates_without_factor_library_write",
+)
+ASYNC_LIFECYCLE_PATTERNS = (
+    r"^src/grit_backtest_platform/api\.py$",
+    r"^src/grit_backtest_platform/_real_service_rebuilt\.py$",
+    r"^src/grit_backtest_platform/factor_research\.py$",
+    r"factor_mining",
+    r"factor_factory",
+)
+F1_F2_FRONTEND_OWNER_TESTS = (
+    "factors.phase0.f1.test.tsx",
+    "factor.model-builder.test.tsx",
+    "factor.factory.test.tsx",
+    "app.routes.foundation.test.tsx",
+)
+F1_F2_FRONTEND_PATTERNS = (
+    r"^web/src/pages/factors-page\.(tsx|css)$",
+    r"^web/src/pages/factor-factory-page\.tsx$",
+    r"^web/src/pages/factor-model-builder-page\.tsx$",
+    r"^web/src/lib/factor-display\.ts$",
+    r"^web/src/types\.ts$",
+    r"factor",
+)
 VALIDATION_TOOLING_PATTERNS = (
     "scripts/codex-validate-*.ps1",
     "scripts/git_gate_plan.py",
@@ -160,6 +191,8 @@ class GatePlan:
     backend_tests: list[str]
     frontend_tests: list[str]
     python_compile_files: list[str]
+    async_lifecycle_repeat_tests: list[str] = field(default_factory=list)
+    validation_self_test_required: bool = False
     selection_reasons: dict[str, list[str]] = field(default_factory=dict)
 
 
@@ -319,7 +352,7 @@ def select_owner_tests(
 
     if mode == "impact":
         if contract_changed:
-            add_selection(backend_tests, reasons, ("tests/test_backend_api.py",), "contract change")
+            add_selection(backend_tests, reasons, BACKEND_CONTRACT_OWNER_TESTS, "contract owner slice")
             add_selection(frontend_tests, reasons, ("app.routes.foundation.test.tsx",), "contract change")
         if validation_tooling_changed:
             add_selection(backend_tests, reasons, ("tests/test_release_workflow.py",), "validation tooling change")
@@ -329,6 +362,22 @@ def select_owner_tests(
             add_selection(frontend_tests, reasons, ("app.routes.foundation.test.tsx",), "frontend fallback")
 
     return backend_tests, frontend_tests, reasons, unmatched
+
+
+def requires_async_lifecycle_repeat(engineering_files: Sequence[str]) -> bool:
+    return any(
+        re.search(pattern, normalize_path(path))
+        for path in engineering_files
+        for pattern in ASYNC_LIFECYCLE_PATTERNS
+    )
+
+
+def requires_f1_f2_frontend_owner_slice(engineering_files: Sequence[str]) -> bool:
+    return any(
+        re.search(pattern, normalize_path(path))
+        for path in engineering_files
+        for pattern in F1_F2_FRONTEND_PATTERNS
+    )
 
 
 def classify_domains(engineering_files: Sequence[str]) -> list[str]:
@@ -364,6 +413,22 @@ def build_plan(mode: str, scope: str, changed_files: Sequence[str]) -> GatePlan:
         contract_changed=contract_changed,
         validation_tooling_changed=validation_tooling_changed,
     )
+    async_lifecycle_repeat_tests: list[str] = []
+    if mode == "impact" and requires_async_lifecycle_repeat(engineering_files):
+        async_lifecycle_repeat_tests = list(ASYNC_LIFECYCLE_REPEAT_TESTS)
+        add_selection(
+            backend_tests,
+            reasons,
+            ("tests/test_factor_mining_api.py",),
+            "async lifecycle repeat owner",
+        )
+    if mode == "impact" and requires_f1_f2_frontend_owner_slice(engineering_files):
+        add_selection(
+            frontend_tests,
+            reasons,
+            F1_F2_FRONTEND_OWNER_TESTS,
+            "F1/F2 frontend owner slice",
+        )
     python_compile_files = [
         path
         for path in engineering_files
@@ -409,6 +474,8 @@ def build_plan(mode: str, scope: str, changed_files: Sequence[str]) -> GatePlan:
         backend_tests=backend_tests,
         frontend_tests=frontend_tests,
         python_compile_files=python_compile_files,
+        async_lifecycle_repeat_tests=async_lifecycle_repeat_tests,
+        validation_self_test_required=validation_tooling_changed,
         selection_reasons=reasons,
     )
 

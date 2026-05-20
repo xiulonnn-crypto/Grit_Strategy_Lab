@@ -1025,6 +1025,24 @@
   overflow-wrap: anywhere;
 }
 
+.factor-factory-publish-card.is-name-collision {
+  border-color: #f59e0b;
+  background: #fffaf0;
+  box-shadow: inset 3px 0 0 #f59e0b;
+}
+
+.factor-name-diff-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+  min-width: 0;
+}
+
+.factor-factory-result-row .factor-name-diff-chips {
+  margin-top: 5px;
+}
+
 .factor-factory-task-flow {
   display: flex;
   flex-wrap: wrap;
@@ -1386,6 +1404,17 @@
   font-style: normal;
 }
 
+.factor-factory-pagination {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  color: var(--factory-text-sub);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .factor-factory-admission-rules {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1480,6 +1509,38 @@
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
+}
+
+.factor-factory-expression-stack {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.factor-factory-expression-stack div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--factory-border-soft);
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.factor-factory-expression-stack span {
+  color: var(--factory-text-sub);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.factor-factory-expression-stack code {
+  min-width: 0;
+  color: var(--factory-text-title);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 @media (max-width: 1360px) {
@@ -3070,6 +3131,11 @@
   color: #64748b;
 }
 
+.operator-status-pill.is-missing-source {
+  background: #fff7e8;
+  color: #b86813;
+}
+
 .operator-row {
   display: grid;
   grid-template-columns: 34px minmax(150px, 0.86fr) minmax(220px, 1.14fr) minmax(148px, 0.7fr) 74px;
@@ -3170,6 +3236,271 @@
   font-size: 11px;
   font-weight: 760;
   line-height: 1.25;
+}
+
+.factor-config-section-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #e1e8ed;
+  border-radius: 8px;
+  background: #fbfdfe;
+}
+
+.factor-config-section-head h3,
+.factor-config-section-head p {
+  margin: 0;
+}
+
+.factor-config-section-head h3 {
+  color: #0b1f35;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.factor-config-section-head p {
+  margin-top: 5px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.factor-config-section-head__chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
+.composition-method-toolbar .composition-enabled-filter {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid #d9e3ea;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.composition-method-toolbar .composition-enabled-filter.is-active {
+  border-color: #16897b;
+  background: #e8f7f4;
+  color: #0f7469;
+}
+
+.composition-method-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.8fr);
+  gap: 12px;
+  min-width: 0;
+}
+
+.composition-method-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  align-content: start;
+}
+
+.composition-method-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 0.9fr) minmax(0, 0.82fr) minmax(0, 1.1fr) minmax(0, 0.65fr) minmax(0, 0.68fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #e1e8ed;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.composition-method-row.is-active {
+  border-color: rgba(22, 137, 123, 0.48);
+  box-shadow: inset 3px 0 0 #16897b;
+}
+
+.composition-method-row.is-enabled {
+  background: #fbfffe;
+}
+
+.composition-method-name {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.composition-method-name strong {
+  overflow-wrap: anywhere;
+  color: #0b1f35;
+  font-size: 13px;
+  line-height: 1.32;
+}
+
+.composition-method-name span,
+.composition-method-params span {
+  overflow-wrap: anywhere;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 760;
+  line-height: 1.35;
+}
+
+.composition-method-type,
+.composition-method-boundary,
+.composition-method-params {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+  align-items: center;
+}
+
+.composition-method-type code,
+.composition-method-formula,
+.composition-detail-grid code {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  border-radius: 5px;
+  background: #eef2f7;
+  padding: 2px 5px;
+  color: #334155;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.composition-method-formula {
+  display: block;
+}
+
+.composition-method-detail {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #dfe7ee;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.composition-method-detail__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.composition-method-detail h3,
+.composition-method-detail p {
+  margin: 0;
+}
+
+.composition-method-detail h3 {
+  color: #0b1f35;
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.composition-method-detail p {
+  margin-top: 5px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.composition-detail-grid,
+.composition-control-grid {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+}
+
+.composition-detail-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.composition-detail-grid > div,
+.composition-control-grid label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #e6edf2;
+  border-radius: 8px;
+  background: #fbfdfe;
+}
+
+.composition-detail-grid span,
+.composition-control-grid span {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.composition-detail-grid strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #0f172a;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.composition-control-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.composition-control-grid input,
+.composition-control-grid select {
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 9px;
+  border: 1px solid #cbd6de;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #0f172a;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.composition-segmented {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.composition-segmented button {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid #d8e1e8;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.composition-segmented button.is-active {
+  border-color: #16897b;
+  background: #e8f7f4;
+  color: #0f7469;
 }
 
 .factor-config-operator-toolbar {
@@ -3394,13 +3725,26 @@
   .evidence-grid,
   .decision-grid,
   .factor-config-snapshot-list,
-  .factor-config-wnzt-strip {
+  .factor-config-wnzt-strip,
+  .composition-method-workbench,
+  .composition-detail-grid,
+  .composition-control-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .factor-config-modal {
     width: calc(100vw - 24px);
     max-height: calc(100vh - 24px);
+  }
+
+  .factor-config-modal__body {
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .factor-config-main,
+  .factor-config-side {
+    overflow: visible;
   }
 
   .factor-config-tabs,
@@ -3423,6 +3767,27 @@
   .operator-row .window-chips,
   .operator-row .operator-status-pill {
     grid-column: 2;
+  }
+
+  .composition-method-row {
+    grid-template-columns: 32px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .composition-method-type,
+  .composition-method-formula,
+  .composition-method-params,
+  .composition-method-boundary {
+    grid-column: 2;
+  }
+
+  .factor-config-section-head,
+  .composition-method-detail__head {
+    flex-wrap: wrap;
+  }
+
+  .factor-config-section-head__chips {
+    justify-content: flex-start;
   }
 
   .operator-toolbar {

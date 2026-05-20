@@ -418,6 +418,7 @@ SCHEMA_STATEMENTS = [
         min_periods_policy TEXT NOT NULL DEFAULT 'TS 默认 min_periods=n；TS_Return 需要 n+1 个有效观测；不足输出 NaN。',
         blocked_field_policy TEXT NOT NULL DEFAULT '排除 DATA_SOURCE_BLOCKED 字段；缺失 L1 保持 NaN。',
         governance_protocol_json TEXT NOT NULL DEFAULT '{}',
+        composition_methods_json TEXT NOT NULL DEFAULT '[]',
         created_by TEXT NOT NULL DEFAULT 'operator',
         notes TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL
@@ -496,6 +497,20 @@ SCHEMA_STATEMENTS = [
         created_by TEXT NOT NULL DEFAULT 'system_rule',
         created_at TEXT NOT NULL,
         FOREIGN KEY (candidate_id) REFERENCES factor_quarantine_candidates(id),
+        FOREIGN KEY (factor_id) REFERENCES factor_definitions(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS factor_display_name_renames (
+        id TEXT PRIMARY KEY,
+        factor_id TEXT NOT NULL,
+        previous_display_name TEXT NOT NULL,
+        new_display_name TEXT NOT NULL,
+        name_schema_version TEXT NOT NULL,
+        renamed_at TEXT NOT NULL,
+        rename_reason TEXT NOT NULL,
+        dry_run INTEGER NOT NULL DEFAULT 0,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
         FOREIGN KEY (factor_id) REFERENCES factor_definitions(id)
     )
     """,
@@ -901,6 +916,7 @@ MIGRATION_COLUMNS = {
         ("governance_protocol_json", "TEXT NOT NULL DEFAULT '{}'"),
         ("daily_formula_budget", "INTEGER NOT NULL DEFAULT 10000"),
         ("compute_backend", "TEXT NOT NULL DEFAULT 'pandas_bottleneck'"),
+        ("composition_methods_json", "TEXT NOT NULL DEFAULT '[]'"),
     ],
 }
 
@@ -1000,6 +1016,10 @@ POST_MIGRATION_INDEX_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_factor_publish_events_candidate
     ON factor_publish_events(candidate_id, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_factor_display_name_renames_factor
+    ON factor_display_name_renames(factor_id, renamed_at)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_factor_lineage_edges_target
@@ -1116,12 +1136,34 @@ def _ensure_table_columns(conn: sqlite3.Connection, table_name: str, columns: li
             conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_ddl}")
 
 
+def _default_composition_methods_json() -> str:
+    from .operator_registry import default_composition_methods
+
+    return dumps(default_composition_methods())
+
+
+def _backfill_operator_registry_composition_methods(conn: sqlite3.Connection) -> None:
+    if "composition_methods_json" not in _table_columns(conn, "operator_registry_snapshots"):
+        return
+    conn.execute(
+        """
+        UPDATE operator_registry_snapshots
+        SET composition_methods_json = ?
+        WHERE composition_methods_json IS NULL
+           OR composition_methods_json = ''
+           OR composition_methods_json = '[]'
+        """,
+        (_default_composition_methods_json(),),
+    )
+
+
 def initialize_storage_schema(conn: sqlite3.Connection) -> None:
     _apply_pragmas(conn)
     for statement in SCHEMA_STATEMENTS:
         conn.execute(statement)
     for table_name, columns in MIGRATION_COLUMNS.items():
         _ensure_table_columns(conn, table_name, columns)
+    _backfill_operator_registry_composition_methods(conn)
     for statement in PRE_MIGRATION_INDEX_STATEMENTS:
         conn.execute(statement)
     for statement in POST_MIGRATION_INDEX_STATEMENTS:
@@ -1174,6 +1216,8 @@ class SQLiteStorage:
             conn.executemany(sql, rows)
 
     def insert_json_row(self, table: str, payload: Mapping[str, Any]) -> None:
+        if table == "operator_registry_snapshots" and "composition_methods_json" not in payload:
+            payload = {**dict(payload), "composition_methods_json": _default_composition_methods_json()}
         columns = list(payload)
         values = [payload[column] for column in columns]
         names = ", ".join(columns)

@@ -1,0 +1,11 @@
+{
+  "viewport": "390x844",
+  "visibleRows": [
+    "比例/风险调整合成风险调节 · 源因子 4 个RATIO_RISK_ADJUSTED开启F3 = Rank(F2_alpha) / max(Rank(F2_risk), denom",
+    "残差/正交化合成残差/中性化 · 源因子 2 个RESIDUAL_ORTHOGONAL开启F3 = Residual(F2_A, by=F2_B)窗口：未配置更新：未配置源因子 2",
+    "排名均值/交集法均衡严选 · 源因子 2 个RANK_POOLING开启F3 = Rank(F2_A) + Rank(F2_B)阈值：未配置方向：HIGH_IS_BETTER源因子",
+    "FFBlend 风格融合风格复合 · 源因子 4 个FFBLEND_STYLE开启F3 = FFBlend(Value, Momentum, Quality, Size)单风格上限",
+    "背离惩罚背离惩罚 · 源因子 2 个DIVERGENCE_PENALTY关闭F3 = Rank(primary) - penalty * Rank(control)penalty："
+  ],
+  "bodyOverflow": 0
+}

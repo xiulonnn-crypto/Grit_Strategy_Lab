@@ -372,7 +372,7 @@ describe('App runtime routes', () => {
   it('highlights a targeted equity snapshot from a route query', async () => {
     await renderApp('#/snapshots?tab=equity&target=ds-price');
 
-    expect(await screen.findByRole('heading', { level: 1, name: '数据快照' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: '数据快照治理台' })).toBeInTheDocument();
     await waitFor(() =>
       expect(document.querySelector('[data-snapshot-id="ds-price"]')).toHaveClass('dense-row--highlight'),
     );
@@ -409,7 +409,7 @@ describe('App runtime routes', () => {
     await renderApp('#/factors/momentum_12m_1m');
 
     expect(document.querySelector('[data-page-root="factor-detail"]')).not.toBeNull();
-    expect(await screen.findByRole('heading', { level: 1, name: '12-1月截面动量排名诊断报告' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: 'Rank-12-1月截面动量 (排序)诊断报告' })).toBeInTheDocument();
     const verifyButton = screen.getByRole('button', { name: '重新诊断' });
     expect(verifyButton).toHaveClass('factor-detail-action-btn', 'factor-detail-action-btn--primary');
     expect(screen.getByRole('link', { name: '生成投委会 PDF' })).toHaveClass('factor-detail-action-btn');

@@ -2967,9 +2967,70 @@ export type ApiFactorQualityView = {
   [key: string]: unknown;
 };
 
+export type ApiFactorCompositeView = {
+  quality?: {
+    sharpe?: number | null;
+    sharpe_label?: string | null;
+    max_drawdown_pct?: number | null;
+    max_drawdown_label?: string | null;
+    incremental_ir?: number | null;
+    [key: string]: unknown;
+  };
+  capacity?: {
+    status?: "PASS" | "WARN" | "FAIL" | "UNKNOWN" | string;
+    label?: string | null;
+    score?: number | null;
+    source?: string | null;
+    [key: string]: unknown;
+  };
+  turnover_cost?: {
+    turnover_rate_weekly?: number | null;
+    turnover_rate_weekly_label?: string | null;
+    cost_bps?: number | null;
+    cost_bps_label?: string | null;
+    [key: string]: unknown;
+  };
+  style_exposure?: {
+    style_corr?: number | null;
+    style_corr_label?: string | null;
+    status?: "PASS" | "WARN" | "FAIL" | "UNKNOWN" | string;
+    label?: string | null;
+    [key: string]: unknown;
+  };
+  execution?: {
+    portfolio_id?: string | null;
+    portfolio_label?: string | null;
+    execution_tag?: string | null;
+    execution_tag_label?: string | null;
+    [key: string]: unknown;
+  };
+  blend_info?: {
+    component_count?: number | null;
+    component_ids?: string[];
+    method_labels?: string[];
+    label?: string | null;
+    [key: string]: unknown;
+  };
+  source?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
 export type ApiFactorListItem = {
   id: string;
   name: string;
+  display_name_cn?: string | null;
+  short_name_cn?: string | null;
+  semantic_key?: string | null;
+  governance_badges?: string[];
+  name_schema_version?: string | null;
+  naming_protocol_version?: string | null;
+  base_display_name_cn?: string | null;
+  name_collision_key?: string | null;
+  name_dedupe_suffix?: string | null;
+  name_collision_group?: string[];
+  legacy_name_aliases?: string[];
+  name_audit?: Record<string, unknown>;
+  stored_name?: string | null;
   market: string;
   universe: string;
   created_at?: string | null;
@@ -2989,6 +3050,7 @@ export type ApiFactorListItem = {
   op_status?: ApiFactorOpStatus;
   lineage_summary?: ApiFactorLineageSummary;
   quality_view?: ApiFactorQualityView;
+  composite_view?: ApiFactorCompositeView;
   offline_reason?: string | null;
   offline_at?: string | null;
   offline_command?: "DEPRECATE" | "PRUNE" | string | null;
@@ -3059,6 +3121,36 @@ export type ApiFactorDetail = ApiFactorListItem & {
 export type ApiFactorListResponse = {
   items: ApiFactorListItem[];
   summary: Record<string, unknown>;
+};
+
+export type ApiFactorDisplayNameBackfillItem = {
+  factor_id: string;
+  canonical_id?: string | null;
+  previous_display_name?: string | null;
+  new_display_name: string;
+  display_name_cn: string;
+  short_name_cn?: string | null;
+  governance_badges?: string[];
+  name_schema_version: string;
+  renamed_at?: string | null;
+  rename_reason: string;
+  legacy_name_aliases?: string[];
+  would_change?: boolean;
+};
+
+export type ApiFactorDisplayNameBackfillResponse = {
+  dry_run: boolean;
+  name_schema_version: string;
+  items: ApiFactorDisplayNameBackfillItem[];
+  summary: {
+    candidate_count?: number;
+    rename_count?: number;
+    skipped_count?: number;
+    applied_count?: number;
+    rename_reason?: string;
+    unchanged_count?: number;
+    [key: string]: unknown;
+  };
 };
 
 export type ApiFactorCreatePayload = {
@@ -3267,9 +3359,25 @@ export type ApiFactorGovernanceOverview = {
 
 export type ApiFactorQuarantineCandidate = {
   id: string;
+  name?: string | null;
+  factor_name?: string | null;
+  display_name_cn?: string | null;
+  short_name_cn?: string | null;
+  semantic_key?: string | null;
+  governance_badges?: string[];
+  name_schema_version?: string | null;
+  naming_protocol_version?: string | null;
+  base_display_name_cn?: string | null;
+  name_collision_key?: string | null;
+  name_dedupe_suffix?: string | null;
+  name_collision_group?: string[];
+  legacy_name_aliases?: string[];
+  name_audit?: Record<string, unknown>;
   mining_candidate_id?: string | null;
   source_mining_job_id?: string | null;
   expression: string;
+  raw_expression?: string | null;
+  refined_expression?: string | null;
   status: string;
   publish_status: string;
   gate_summary: Record<string, unknown>;
@@ -3290,6 +3398,12 @@ export type ApiFactorQuarantineCandidate = {
   operator_chain?: ApiFactorOperatorChainStep[];
   composition_methods?: ApiFactorCompositionMethod[];
   investment_logic?: string;
+  processing_status?: string;
+  processing_status_label?: string;
+  wnzt_missing?: string[];
+  wnzt_complete?: boolean;
+  wnzt_evidence?: Record<string, unknown>;
+  artifact_refs?: Record<string, unknown>;
   scoring_detail?: ApiFactorScoringCandidate;
   admission_report?: ApiFactorAdmissionReportRow[];
   quarantine_result?: "PASS" | "WARN" | "FAIL" | string;
@@ -3299,7 +3413,17 @@ export type ApiFactorQuarantineCandidate = {
 
 export type ApiFactorQuarantineCandidateListResponse = {
   items: ApiFactorQuarantineCandidate[];
-  summary: Record<string, unknown>;
+  summary: {
+    total?: number;
+    page?: number;
+    page_size?: number;
+    total_pages?: number;
+    passed_count?: number;
+    needs_review_count?: number;
+    published_count?: number;
+    rejected_count?: number;
+    [key: string]: unknown;
+  };
 };
 
 export type ApiFactorQuarantineIntakePayload = {
@@ -3360,6 +3484,18 @@ export type ApiF1AdmissionState =
 export type ApiF1CatalogField = {
   factor_id: string;
   name: string;
+  display_name_cn?: string | null;
+  short_name_cn?: string | null;
+  semantic_key?: string | null;
+  governance_badges?: string[];
+  name_schema_version?: string | null;
+  naming_protocol_version?: string | null;
+  base_display_name_cn?: string | null;
+  name_collision_key?: string | null;
+  name_dedupe_suffix?: string | null;
+  name_collision_group?: string[];
+  legacy_name_aliases?: string[];
+  name_audit?: Record<string, unknown>;
   category: string;
   pit_layer: "L1" | "L2" | "L3" | "L4" | string;
   source_refs?: Record<string, unknown>;
@@ -3414,6 +3550,27 @@ export type ApiOperatorRegistryItem = {
   metadata?: Record<string, unknown>;
 };
 
+export type CompositionMethodType =
+  | "LINEAR_WEIGHTING"
+  | "RATIO_RISK_ADJUSTED"
+  | "RESIDUAL_ORTHOGONAL"
+  | "RANK_POOLING"
+  | "FFBLEND_STYLE"
+  | "DIVERGENCE_PENALTY"
+  | "TIME_SERIES_DENOISE";
+
+export type CompositionMethodConfig = {
+  id: string;
+  label: string;
+  theme: string;
+  method_type: CompositionMethodType | string;
+  enabled: boolean;
+  formula_template: string;
+  source_factor_ids: string[];
+  params: Record<string, unknown>;
+  publish_boundary: "D2_QUARANTINE_ONLY" | string;
+};
+
 export type ApiOperatorConfigDraft = {
   enabled_operators: string[];
   window_space: number[];
@@ -3432,6 +3589,7 @@ export type ApiOperatorConfigDraft = {
     turnover_filter_enabled?: boolean;
     [key: string]: unknown;
   };
+  composition_methods?: CompositionMethodConfig[];
   notes?: string;
   f1_catalog_snapshot_id?: string | null;
   created_by?: string | null;
@@ -3481,6 +3639,10 @@ export type ApiFactorFactoryTaskRow = {
   delivered_candidate_count?: number | null;
   current_candidate_count?: number | null;
   expected_candidate_count?: number | null;
+  metric_label?: string;
+  metric_value?: number | null;
+  secondary_metric_label?: string;
+  secondary_metric_value?: number | null;
   operator_chain?: ApiFactorOperatorChainStep[];
   parent_factor_ids?: string[];
   [key: string]: unknown;
@@ -3489,6 +3651,15 @@ export type ApiFactorFactoryTaskRow = {
 export type ApiFactorScoringCandidate = {
   candidate_id: string;
   display_id: string;
+  display_name_cn?: string | null;
+  short_name_cn?: string | null;
+  governance_badges?: string[];
+  name_schema_version?: string | null;
+  naming_protocol_version?: string | null;
+  base_display_name_cn?: string | null;
+  name_collision_key?: string | null;
+  name_dedupe_suffix?: string | null;
+  name_collision_group?: string[];
   score?: number | null;
   status?: "PASS" | "WARN" | "FAIL" | string;
   target_layer: "L1" | "L2" | "L3" | string;
@@ -3513,6 +3684,13 @@ export type ApiFactorQuarantineResultRow = {
   candidate_id: string;
   submitted_at?: string | null;
   factor_name: string;
+  display_name_cn?: string | null;
+  base_display_name_cn?: string | null;
+  name_collision_key?: string | null;
+  name_dedupe_suffix?: string | null;
+  name_collision_group?: string[];
+  governance_badges?: string[];
+  name_audit?: Record<string, unknown>;
   target_layer: "L1" | "L2" | "L3" | string;
   quarantine_result: "PASS" | "WARN" | "FAIL" | string;
   reason_summary: string;
@@ -3533,6 +3711,13 @@ export type ApiPublishableFactorRow = {
   candidate_id?: string;
   factor_id: string;
   factor_name?: string;
+  display_name_cn?: string | null;
+  base_display_name_cn?: string | null;
+  name_collision_key?: string | null;
+  name_dedupe_suffix?: string | null;
+  name_collision_group?: string[];
+  governance_badges?: string[];
+  name_audit?: Record<string, unknown>;
   target_layer: "L1" | "L2" | "L3" | string;
   score?: number | null;
   quarantine_status: "PASS" | "WARN" | string;
@@ -3588,11 +3773,16 @@ export type ApiFactorFactoryFunnel = {
 };
 
 export type ApiFactorFactoryMonitorSummary = {
+  formula_count?: number;
+  selected_date_formula_count?: number;
   yesterday_formula_count?: number;
+  raw_f2_delivered_count?: number;
+  refined_f2_delivered_count?: number;
   initial_screen_pass_count?: number;
   quarantine_pass_count?: number;
   s_grade_promotion_count?: number;
   alpha_concentration?: number;
+  failure_candidate_count?: number;
   failure_reason_distribution?: Record<string, number>;
   [key: string]: unknown;
 };
@@ -3608,6 +3798,7 @@ export type ApiFactorFactoryOverview = {
   gate_policy: ApiFactorFactoryGatePolicy;
   daily_run?: ApiFactorFactoryRun;
   manual_run?: ApiFactorFactoryRun;
+  online_raw_f2_run?: ApiFactorFactoryRun;
   task_summary?: Record<string, unknown>;
   monitor_summary?: ApiFactorFactoryMonitorSummary;
   task_rows?: ApiFactorFactoryTaskRow[];
@@ -3632,6 +3823,14 @@ export type ApiFactorFactoryRunNowPayload = {
   request?: ApiFactorMiningJobCreatePayload;
   gate_policy?: Partial<ApiFactorFactoryGatePolicy>;
   pipeline_scope?: "B1_B2_B3_B4" | "B1_ONLY" | "B2_B3" | "FULL";
+  operator_config_snapshot_id?: string | null;
+  f1_catalog_snapshot_id?: string | null;
+};
+
+export type ApiFactorFactoryOnlineRawF2Payload = {
+  gate_policy?: Partial<ApiFactorFactoryGatePolicy>;
+  factor_ids?: string[];
+  candidate_limit?: number;
   operator_config_snapshot_id?: string | null;
   f1_catalog_snapshot_id?: string | null;
 };
@@ -3942,6 +4141,9 @@ export type DemoApi = {
     status?: string;
     q?: string;
   }) => Promise<ApiF1CatalogResponse>;
+  backfillFactorDisplayNamesV4?: (
+    payload?: { dry_run?: boolean },
+  ) => Promise<ApiFactorDisplayNameBackfillResponse>;
   createFactor: (payload: ApiFactorCreatePayload) => Promise<ApiFactorDetail>;
   getFactor: (id: string) => Promise<ApiFactorDetail>;
   runFactorDiagnostics: (
@@ -3970,6 +4172,9 @@ export type DemoApi = {
   runFactorFactoryNow?: (
     payload?: ApiFactorFactoryRunNowPayload,
   ) => Promise<ApiFactorFactoryOverview>;
+  runFactorFactoryOnlineRawF2Refinement?: (
+    payload?: ApiFactorFactoryOnlineRawF2Payload,
+  ) => Promise<ApiFactorFactoryOverview>;
   cancelFactorFactoryRun?: (id: string) => Promise<ApiFactorFactoryRun>;
   getFactorGovernanceOverview?: () => Promise<ApiFactorGovernanceOverview>;
   executeFactorGovernanceAction?: (
@@ -3983,6 +4188,8 @@ export type DemoApi = {
     date?: string;
     factor_name?: string;
     result?: "ALL" | "PASS" | "WARN" | "FAIL" | string;
+    page?: number;
+    page_size?: number;
   }) => Promise<ApiFactorQuarantineCandidateListResponse>;
   factorQuarantineIntake?: (
     payload?: ApiFactorQuarantineIntakePayload,

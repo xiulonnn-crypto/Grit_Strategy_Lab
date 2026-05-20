@@ -573,8 +573,8 @@ describe('RunDetailPage', () => {
       document.querySelectorAll<HTMLElement>('.run-detail-factor-attribution__bar-track span'),
     ).map((bar) => bar.style.width);
     expect(new Set(barWidths).size).toBeGreaterThan(1);
-    expect(screen.getByText('12-1月截面动量排名')).toBeInTheDocument();
-    expect(screen.getByText('滚动市盈率倒数 (LTM)')).toBeInTheDocument();
+    expect(screen.getByText('Rank-12-1月截面动量 (排序)')).toBeInTheDocument();
+    expect(screen.getByText('盈利收益率 (LTM) (原始)')).toBeInTheDocument();
     expect(screen.queryByText('s_mom_12m1m_rank')).not.toBeInTheDocument();
     expect(screen.getByText('信息技术')).toBeInTheDocument();
     expect(screen.getByText('当前归因基于因子权重估算。')).toBeInTheDocument();

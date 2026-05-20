@@ -39,12 +39,14 @@ import type {
   ApiCompositionVersion,
   ApiFactorCreatePayload,
   ApiFactorDetail,
+  ApiFactorDisplayNameBackfillResponse,
   ApiFactorDiagnosticPayload,
   ApiFactorDiagnosticPreview,
   ApiFactorDiagnosticPreviewPayload,
   ApiFactorDiagnosticRunResponse,
   ApiF1CatalogResponse,
   ApiFactorFactoryAutomationPayload,
+  ApiFactorFactoryOnlineRawF2Payload,
   ApiFactorFactoryOperatorConfigResponse,
   ApiFactorFactoryOverview,
   ApiFactorFactoryRun,
@@ -815,6 +817,11 @@ function createHttpApiClient(): DemoApi {
     },
     createFactor: (payload: ApiFactorCreatePayload) =>
       requestJson<ApiFactorDetail>('/factors', withJsonBody(payload, { method: 'POST' })),
+    backfillFactorDisplayNamesV4: (payload?: { dry_run?: boolean }) =>
+      requestJson<ApiFactorDisplayNameBackfillResponse>(
+        '/factors/display-name-v4-backfill',
+        withJsonBody(payload ?? { dry_run: true }, { method: 'POST' }),
+      ),
     getFactor: (id: string) => requestJson<ApiFactorDetail>(`/factors/${encodeURIComponent(id)}`),
     runFactorDiagnostics: (id: string, payload: ApiFactorDiagnosticPayload) =>
       requestJson<ApiFactorDiagnosticRunResponse>(
@@ -858,6 +865,11 @@ function createHttpApiClient(): DemoApi {
         '/factor-factory/run-now',
         withJsonBody(payload ?? {}, { method: 'POST' }),
       ),
+    runFactorFactoryOnlineRawF2Refinement: (payload?: ApiFactorFactoryOnlineRawF2Payload) =>
+      requestJson<ApiFactorFactoryOverview>(
+        '/factor-factory/refine-online-raw-f2',
+        withJsonBody(payload ?? {}, { method: 'POST' }),
+      ),
     cancelFactorFactoryRun: (id: string) =>
       requestJson<ApiFactorFactoryRun>(`/factor-factory/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
     getFactorGovernanceOverview: () =>
@@ -875,6 +887,8 @@ function createHttpApiClient(): DemoApi {
       if (params?.date) search.set('date', params.date);
       if (params?.factor_name) search.set('factor_name', params.factor_name);
       if (params?.result) search.set('result', params.result);
+      if (params?.page) search.set('page', String(params.page));
+      if (params?.page_size) search.set('page_size', String(params.page_size));
       const suffix = search.toString();
       return requestJson<ApiFactorQuarantineCandidateListResponse>(
         `/factor-quarantine/candidates${suffix ? `?${suffix}` : ''}`,

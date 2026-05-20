@@ -11,6 +11,100 @@ DEFAULT_DAILY_FORMULA_BUDGET = 10_000
 DEFAULT_COMPUTE_BACKEND = "pandas_bottleneck"
 DEFAULT_MIN_PERIODS_POLICY = "TS 默认 min_periods=n；TS_Return 需要 n+1 个有效观测；不足输出 NaN。"
 DEFAULT_BLOCKED_FIELD_POLICY = "排除 DATA_SOURCE_BLOCKED 字段；缺失 L1 保持 NaN。"
+DEFAULT_COMPOSITION_PUBLISH_BOUNDARY = "D2_QUARANTINE_ONLY"
+COMPOSITION_METHOD_TYPES = (
+    "LINEAR_WEIGHTING",
+    "RATIO_RISK_ADJUSTED",
+    "RESIDUAL_ORTHOGONAL",
+    "RANK_POOLING",
+    "FFBLEND_STYLE",
+    "DIVERGENCE_PENALTY",
+    "TIME_SERIES_DENOISE",
+)
+DEFAULT_COMPOSITION_METHODS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "linear_weighting",
+        "label": "线性加权合成",
+        "theme": "风格复合",
+        "method_type": "LINEAR_WEIGHTING",
+        "enabled": True,
+        "formula_template": "F3 = sum(w_i * ZScore(F2_i))",
+        "source_factor_ids": ["s_mom_6m_rank", "s_qlty_roe_ltm_raw", "s_val_cfp_ltm_raw"],
+        "params": {"weight_mode": "equal", "dynamic_window": 21, "dynamic_weighting_enabled": False},
+        "publish_boundary": DEFAULT_COMPOSITION_PUBLISH_BOUNDARY,
+    },
+    {
+        "id": "ratio_risk_adjusted",
+        "label": "比例/风险调整合成",
+        "theme": "风险调节",
+        "method_type": "RATIO_RISK_ADJUSTED",
+        "enabled": True,
+        "formula_template": "F3 = Rank(F2_alpha) / max(Rank(F2_risk), denominator_floor)",
+        "source_factor_ids": [
+            "s_mom_6m_rank",
+            "s_vol_252d_rank",
+            "s_val_cfp_ltm_raw",
+            "s_vol_downside_252d_rank",
+        ],
+        "params": {"denominator_floor": 0.05, "rank_space": True},
+        "publish_boundary": DEFAULT_COMPOSITION_PUBLISH_BOUNDARY,
+    },
+    {
+        "id": "residual_orthogonal",
+        "label": "残差/正交化合成",
+        "theme": "残差/中性化",
+        "method_type": "RESIDUAL_ORTHOGONAL",
+        "enabled": True,
+        "formula_template": "F3 = Residual(F2_A, by=F2_B)",
+        "source_factor_ids": ["s_liq_amihud_20d_rank", "s_size_cur_log"],
+        "params": {"rolling_window": 252, "rebalance_frequency": "MONTHLY"},
+        "publish_boundary": DEFAULT_COMPOSITION_PUBLISH_BOUNDARY,
+    },
+    {
+        "id": "rank_pooling",
+        "label": "排名均值/交集法",
+        "theme": "均衡严选",
+        "method_type": "RANK_POOLING",
+        "enabled": True,
+        "formula_template": "F3 = Rank(F2_A) + Rank(F2_B)",
+        "source_factor_ids": ["s_mom_6m_rank", "s_qlty_roe_ltm_raw"],
+        "params": {"rank_direction": "HIGH_IS_BETTER", "top_pct": 0.10, "intersection_policy": "SUM_AND_INTERSECT"},
+        "publish_boundary": DEFAULT_COMPOSITION_PUBLISH_BOUNDARY,
+    },
+    {
+        "id": "ffblend_style",
+        "label": "FFBlend 风格融合",
+        "theme": "风格复合",
+        "method_type": "FFBLEND_STYLE",
+        "enabled": True,
+        "formula_template": "F3 = FFBlend(Value, Momentum, Quality, Size)",
+        "source_factor_ids": ["s_val_cfp_ltm_raw", "s_mom_6m_rank", "s_qlty_roe_ltm_raw", "s_size_cur_log"],
+        "params": {"style_buckets": ["Value", "Momentum", "Quality", "Size"], "single_style_cap": 0.45, "decay": 0.94},
+        "publish_boundary": DEFAULT_COMPOSITION_PUBLISH_BOUNDARY,
+    },
+    {
+        "id": "divergence_penalty",
+        "label": "背离惩罚",
+        "theme": "背离惩罚",
+        "method_type": "DIVERGENCE_PENALTY",
+        "enabled": False,
+        "formula_template": "F3 = Rank(primary) - penalty * Rank(control)",
+        "source_factor_ids": ["s_mom_6m_rank", "s_vol_downside_252d_rank"],
+        "params": {"penalty": 0.35, "control_role": "risk"},
+        "publish_boundary": DEFAULT_COMPOSITION_PUBLISH_BOUNDARY,
+    },
+    {
+        "id": "ts_denoise",
+        "label": "时序降噪",
+        "theme": "时序降噪",
+        "method_type": "TIME_SERIES_DENOISE",
+        "enabled": False,
+        "formula_template": "F3 = TsRank(signal, 252)",
+        "source_factor_ids": ["s_mom_6m_rank"],
+        "params": {"smoothing_window": 252, "denoise_method": "TsRank"},
+        "publish_boundary": DEFAULT_COMPOSITION_PUBLISH_BOUNDARY,
+    },
+)
 DEFAULT_GOVERNANCE_PROTOCOL = {
     "wnzt_standard_flow": True,
     "winsorize_enabled": True,
@@ -20,6 +114,88 @@ DEFAULT_GOVERNANCE_PROTOCOL = {
     "orthogonalization_enabled": False,
     "turnover_filter_enabled": False,
 }
+
+
+def default_composition_methods() -> list[dict[str, Any]]:
+    return [
+        {
+            **method,
+            "source_factor_ids": list(method.get("source_factor_ids") or []),
+            "params": dict(method.get("params") or {}),
+        }
+        for method in DEFAULT_COMPOSITION_METHODS
+    ]
+
+
+def _normalize_composition_method(raw: Mapping[str, Any], defaults: Mapping[str, Any]) -> dict[str, Any]:
+    merged = {**dict(defaults), **dict(raw)}
+    method_id = str(merged.get("id") or "").strip()
+    if not method_id:
+        raise ValueError("composition method id must not be empty")
+    method_type = str(merged.get("method_type") or "").strip().upper()
+    if method_type not in COMPOSITION_METHOD_TYPES:
+        raise ValueError(f"unsupported composition method_type: {method_type}")
+    enabled = merged.get("enabled")
+    if not isinstance(enabled, bool):
+        raise ValueError(f"composition method {method_id} enabled must be a boolean")
+    publish_boundary = str(merged.get("publish_boundary") or "").strip().upper()
+    if publish_boundary != DEFAULT_COMPOSITION_PUBLISH_BOUNDARY:
+        raise ValueError("composition method publish_boundary must be D2_QUARANTINE_ONLY")
+    params = merged.get("params")
+    if not isinstance(params, Mapping):
+        raise ValueError(f"composition method {method_id} params must be an object")
+    normalized_params = dict(params)
+    if method_type == "RATIO_RISK_ADJUSTED":
+        floor = normalized_params.get("denominator_floor", normalized_params.get("floor"))
+        if floor is None:
+            raise ValueError("RATIO_RISK_ADJUSTED requires denominator_floor")
+        try:
+            floor_value = float(floor)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("RATIO_RISK_ADJUSTED denominator_floor must be numeric") from exc
+        if floor_value <= 0:
+            raise ValueError("RATIO_RISK_ADJUSTED denominator_floor must be positive")
+        normalized_params["denominator_floor"] = floor_value
+    return {
+        "id": method_id,
+        "label": str(merged.get("label") or method_id).strip(),
+        "theme": str(merged.get("theme") or "").strip(),
+        "method_type": method_type,
+        "enabled": enabled,
+        "formula_template": str(merged.get("formula_template") or "").strip(),
+        "source_factor_ids": [
+            str(item).strip()
+            for item in (merged.get("source_factor_ids") or [])
+            if str(item).strip()
+        ],
+        "params": normalized_params,
+        "publish_boundary": DEFAULT_COMPOSITION_PUBLISH_BOUNDARY,
+    }
+
+
+def normalize_composition_methods(value: Any = None) -> list[dict[str, Any]]:
+    defaults = default_composition_methods()
+    if not value:
+        return defaults
+    if not isinstance(value, list):
+        raise ValueError("composition_methods must be a list")
+    default_by_id = {str(method["id"]): method for method in defaults}
+    raw_by_id: dict[str, Mapping[str, Any]] = {}
+    extras: list[Mapping[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise ValueError("composition_methods entries must be objects")
+        method_id = str(item.get("id") or "").strip()
+        if method_id in default_by_id:
+            raw_by_id[method_id] = item
+        else:
+            extras.append(item)
+    normalized = [
+        _normalize_composition_method(raw_by_id.get(str(default["id"]), {}), default)
+        for default in defaults
+    ]
+    normalized.extend(_normalize_composition_method(item, {}) for item in extras)
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -158,6 +334,7 @@ def default_operator_config() -> dict[str, Any]:
         "min_periods_policy": DEFAULT_MIN_PERIODS_POLICY,
         "blocked_field_policy": DEFAULT_BLOCKED_FIELD_POLICY,
         "governance_protocol": dict(DEFAULT_GOVERNANCE_PROTOCOL),
+        "composition_methods": default_composition_methods(),
         "notes": "",
     }
 
@@ -201,6 +378,7 @@ def normalize_operator_config(payload: Mapping[str, Any] | None = None) -> dict[
         "min_periods_policy": str(raw.get("min_periods_policy") or defaults["min_periods_policy"]),
         "blocked_field_policy": str(raw.get("blocked_field_policy") or defaults["blocked_field_policy"]),
         "governance_protocol": protocol,
+        "composition_methods": normalize_composition_methods(raw.get("composition_methods") or defaults["composition_methods"]),
         "notes": str(raw.get("notes") or ""),
     }
 

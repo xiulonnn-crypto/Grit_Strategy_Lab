@@ -300,6 +300,209 @@ def test_factor_mining_hybrid_composition_emits_templates_and_pairwise_candidate
     assert len({(candidate.expression, tuple(sorted(candidate.source_factor_ids))) for candidate in composed}) == len(composed)
 
 
+def test_factor_mining_hybrid_composition_uses_configured_methods_metadata() -> None:
+    request = FactorMiningJobCreateRequest(
+        universe=("AAPL", "MSFT", "NVDA", "AMZN", "JPM", "XOM"),
+        start_date="2018-01-01",
+        end_date="2024-12-31",
+        operators=("return", "rank"),
+        candidate_count=10,
+        random_seed=7,
+        min_rank_ic=0.0,
+        max_depth=4,
+        generation_mode="HYBRID_COMPOSITION",
+        source_factor_ids=DEFAULT_COMPOSITION_SOURCE_FACTORS,
+        recipe_families=(
+            *DEFAULT_COMPOSITION_RECIPE_FAMILIES,
+            "rank_pooling",
+            "ffblend_style",
+        ),
+        exploration_budget=0,
+        composition_policy={
+            "mode": "configured_methods",
+            "publish_boundary": "D2_QUARANTINE_ONLY",
+            "composition_methods": [
+                {
+                    "id": "linear_weighting",
+                    "method_type": "LINEAR_WEIGHTING",
+                    "enabled": True,
+                    "formula_template": "F3 = sum(w_i * ZScore(F2_i))",
+                    "source_factor_ids": ["s_mom_6m_rank", "s_qlty_roe_ltm_raw"],
+                    "params": {"weights": [0.55, 0.45]},
+                    "publish_boundary": "D2_QUARANTINE_ONLY",
+                },
+                {
+                    "id": "ratio_risk_adjusted",
+                    "method_type": "RATIO_RISK_ADJUSTED",
+                    "enabled": True,
+                    "source_factor_ids": ["s_mom_6m_rank", "s_vol_252d_rank"],
+                    "params": {"floor": 0.05},
+                    "publish_boundary": "D2_QUARANTINE_ONLY",
+                },
+                {
+                    "id": "ratio_value_anchor",
+                    "method_type": "RATIO_RISK_ADJUSTED",
+                    "enabled": True,
+                    "recipe_family": "value_anchor",
+                    "source_factor_ids": ["s_val_cfp_ltm_raw", "s_vol_downside_252d_rank"],
+                    "params": {"floor": 0.05},
+                    "publish_boundary": "D2_QUARANTINE_ONLY",
+                },
+                {
+                    "id": "residual_orthogonal",
+                    "method_type": "RESIDUAL_ORTHOGONAL",
+                    "enabled": True,
+                    "source_factor_ids": ["s_liq_amihud_20d_rank", "s_size_cur_log"],
+                    "params": {"window": 252},
+                    "publish_boundary": "D2_QUARANTINE_ONLY",
+                },
+                {
+                    "id": "rank_pooling",
+                    "method_type": "RANK_POOLING",
+                    "enabled": True,
+                    "source_factor_ids": ["s_mom_6m_rank", "s_qlty_roe_ltm_raw"],
+                    "params": {"top_quantile": 0.1},
+                    "publish_boundary": "D2_QUARANTINE_ONLY",
+                },
+                {
+                    "id": "ffblend_style",
+                    "method_type": "FFBLEND_STYLE",
+                    "enabled": True,
+                    "source_factor_ids": [
+                        "s_val_cfp_ltm_raw",
+                        "s_mom_6m_rank",
+                        "s_qlty_roe_ltm_raw",
+                        "s_size_cur_log",
+                    ],
+                    "params": {"decay": 0.94},
+                    "publish_boundary": "D2_QUARANTINE_ONLY",
+                },
+                {
+                    "id": "divergence_penalty",
+                    "method_type": "DIVERGENCE_PENALTY",
+                    "enabled": False,
+                    "source_factor_ids": ["s_mom_6m_rank", "s_vol_downside_252d_rank"],
+                    "publish_boundary": "D2_QUARANTINE_ONLY",
+                },
+                {
+                    "id": "ts_denoise",
+                    "method_type": "TIME_SERIES_DENOISE",
+                    "enabled": True,
+                    "source_factor_ids": ["s_mom_6m_rank"],
+                    "params": {"window": 126},
+                    "publish_boundary": "D2_QUARANTINE_ONLY",
+                },
+            ],
+        },
+    )
+
+    result = run_factor_mining_job(request, top_k=10)
+    configured = [candidate for candidate in result.all_candidates if candidate.recipe_kind == "configured_method"]
+    by_method = {str(candidate.composition_metadata["method_id"]): candidate for candidate in configured}
+
+    assert result.status == "COMPLETED"
+    assert set(by_method) == {
+        "linear_weighting",
+        "ratio_risk_adjusted",
+        "ratio_value_anchor",
+        "residual_orthogonal",
+        "rank_pooling",
+        "ffblend_style",
+        "ts_denoise",
+    }
+    assert "divergence_penalty" not in by_method
+    assert by_method["linear_weighting"].recipe_family == "style_blend"
+    assert by_method["ratio_risk_adjusted"].recipe_family == "risk_adjusted"
+    assert by_method["ratio_value_anchor"].recipe_family == "value_anchor"
+    assert by_method["ratio_value_anchor"].expression == VALUE_VOL_WNZT_RATIO_EXPRESSION
+    assert by_method["residual_orthogonal"].recipe_family == "residual_neutralized"
+    assert by_method["rank_pooling"].recipe_family == "rank_pooling"
+    assert by_method["ffblend_style"].recipe_family == "ffblend_style"
+    assert by_method["ts_denoise"].recipe_family == "ts_denoise"
+    assert by_method["ts_denoise"].expression == "TsRank(s_mom_6m_rank, 126)"
+    for candidate in by_method.values():
+        metadata = candidate.composition_metadata
+        assert metadata["method_id"]
+        assert metadata["method_type"]
+        assert metadata["recipe_family"] == candidate.recipe_family
+        assert metadata["source_factor_ids"] == list(candidate.source_factor_ids)
+        assert metadata["formula_template"]
+        assert isinstance(metadata["params"], dict)
+        assert metadata["publish_boundary"] == "D2_QUARANTINE_ONLY"
+        assert candidate.persisted_to_factor_definitions is False
+    assert result.composition_skip_evidence == ()
+
+
+def test_factor_mining_hybrid_composition_skips_disabled_and_insufficient_methods_with_evidence() -> None:
+    request = FactorMiningJobCreateRequest(
+        universe=("AAPL", "MSFT", "NVDA", "AMZN", "JPM", "XOM"),
+        start_date="2018-01-01",
+        end_date="2024-12-31",
+        operators=("return",),
+        candidate_count=4,
+        random_seed=7,
+        min_rank_ic=0.0,
+        max_depth=4,
+        generation_mode="HYBRID_COMPOSITION",
+        source_factor_ids=("s_mom_6m_rank", "s_qlty_roe_ltm_raw"),
+        recipe_families=("style_blend", "residual_neutralized", "ts_denoise"),
+        exploration_budget=0,
+        composition_policy={
+            "mode": "configured_methods",
+            "publish_boundary": "D2_QUARANTINE_ONLY",
+            "composition_methods": [
+                {
+                    "id": "disabled_linear",
+                    "method_type": "LINEAR_WEIGHTING",
+                    "enabled": False,
+                    "source_factor_ids": ["s_mom_6m_rank", "s_qlty_roe_ltm_raw"],
+                    "publish_boundary": "D2_QUARANTINE_ONLY",
+                },
+                {
+                    "id": "missing_residual_source",
+                    "method_type": "RESIDUAL_ORTHOGONAL",
+                    "enabled": True,
+                    "source_factor_ids": ["s_mom_6m_rank"],
+                    "publish_boundary": "D2_QUARANTINE_ONLY",
+                },
+                {
+                    "id": "outside_pool_denoise",
+                    "method_type": "TIME_SERIES_DENOISE",
+                    "enabled": True,
+                    "source_factor_ids": ["s_vol_252d_rank"],
+                    "publish_boundary": "D2_QUARANTINE_ONLY",
+                },
+                {
+                    "id": "valid_linear",
+                    "method_type": "LINEAR_WEIGHTING",
+                    "enabled": True,
+                    "source_factor_ids": ["s_mom_6m_rank", "s_qlty_roe_ltm_raw"],
+                    "publish_boundary": "D2_QUARANTINE_ONLY",
+                },
+            ],
+        },
+    )
+
+    result = run_factor_mining_job(request, top_k=4)
+    configured_method_ids = {
+        str(candidate.composition_metadata["method_id"])
+        for candidate in result.all_candidates
+        if candidate.recipe_kind == "configured_method"
+    }
+    skip_by_id = {str(item["method_id"]): item for item in result.composition_skip_evidence}
+
+    assert result.status == "COMPLETED"
+    assert configured_method_ids == {"valid_linear"}
+    assert "disabled_linear" not in configured_method_ids
+    assert "disabled_linear" not in skip_by_id
+    assert skip_by_id["missing_residual_source"]["reason"] == "INSUFFICIENT_SOURCE_FACTORS"
+    assert skip_by_id["outside_pool_denoise"]["reason"] == "SOURCE_FACTORS_OUTSIDE_ACTIVE_POOL"
+    for evidence in skip_by_id.values():
+        assert evidence["candidate_generated"] is False
+        assert evidence["persisted_to_factor_definitions"] is False
+        assert evidence["publish_boundary"] == "D2_QUARANTINE_ONLY"
+
+
 def test_factor_mining_unknown_operator_is_contained_as_failed_sample() -> None:
     result = run_factor_mining_job(_request(candidate_count=5, operators=("return", "UnknownOp")))
 

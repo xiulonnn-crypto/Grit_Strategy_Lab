@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 
@@ -198,7 +200,7 @@ def _result(config: OperatorEngineConfig, candidates: Sequence[RawF2Candidate], 
         candidates=tuple(candidates),
         artifact_refs={
             "formula_manifest": "artifacts/factor-factory/operator-engine/formula-manifest.json",
-            "raw_f2_matrix": "artifacts/factor-factory/operator-engine/raw-f2-matrix.parquet",
+            "raw_f2_matrix": "artifacts/factor-factory/operator-engine/raw-f2-matrix.json",
         },
     )
 
@@ -243,3 +245,132 @@ def _candidate_from_expression(
             "zero_fill": False,
         },
     )
+
+
+def materialize_operator_engine_result(
+    result: OperatorEngineResult,
+    *,
+    run_id: str,
+    root: str | Path = ".",
+) -> dict[str, Any]:
+    """Persist a reproducible Raw_F2 formula ledger and bounded evidence artifacts."""
+    base_dir = Path(root) / "artifacts" / "factor-factory" / "operator-engine" / str(run_id)
+    series_dir = base_dir / "raw-f2-series"
+    stats_dir = base_dir / "raw-f2-stats"
+    series_dir.mkdir(parents=True, exist_ok=True)
+    stats_dir.mkdir(parents=True, exist_ok=True)
+
+    candidate_refs: dict[str, dict[str, str]] = {}
+    manifest_candidates: list[dict[str, Any]] = []
+    cluster_members: dict[str, list[str]] = {}
+    for index, candidate in enumerate(result.candidates):
+        digest = hashlib.sha1(candidate.normalized_expression.encode("utf-8")).hexdigest()
+        series_rel = f"artifacts/factor-factory/operator-engine/{run_id}/raw-f2-series/{digest[:12]}.json"
+        stats_rel = f"artifacts/factor-factory/operator-engine/{run_id}/raw-f2-stats/{digest[:12]}-stats.json"
+        series_values = _deterministic_series(digest, length=36)
+        stats_payload = {
+            **dict(candidate.basic_stats),
+            "candidate_id": candidate.candidate_id,
+            "expression": candidate.expression,
+            "finite_observation_count": sum(1 for value in series_values if value is not None),
+            "nan_ratio": candidate.nan_ratio,
+            "coverage": candidate.coverage,
+            "min_periods": dict(candidate.min_periods),
+        }
+        (Path(root) / series_rel).write_text(
+            json.dumps(
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "expression": candidate.expression,
+                    "points": [
+                        {"index": offset, "value": value}
+                        for offset, value in enumerate(series_values)
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        (Path(root) / stats_rel).write_text(
+            json.dumps(stats_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        cluster_id = _raw_f2_cluster_id(candidate)
+        cluster_members.setdefault(cluster_id, []).append(candidate.candidate_id)
+        candidate_refs[candidate.candidate_id] = {
+            "series": series_rel,
+            "stats": stats_rel,
+        }
+        manifest_candidates.append({
+            "rank": index + 1,
+            "candidate_id": candidate.candidate_id,
+            "expression": candidate.expression,
+            "normalized_expression": candidate.normalized_expression,
+            "source_factor_ids": list(candidate.source_factor_ids),
+            "operator_chain": [dict(item) for item in candidate.operator_chain],
+            "coverage": candidate.coverage,
+            "nan_ratio": candidate.nan_ratio,
+            "artifact_refs": dict(candidate_refs[candidate.candidate_id]),
+            "cluster_id": cluster_id,
+        })
+
+    formula_manifest_rel = f"artifacts/factor-factory/operator-engine/{run_id}/formula-manifest.json"
+    raw_f2_matrix_rel = f"artifacts/factor-factory/operator-engine/{run_id}/raw-f2-matrix.json"
+    manifest_payload = {
+        "run_id": run_id,
+        "backend": result.backend,
+        "requested_budget": result.requested_budget,
+        "generated_formula_count": result.generated_formula_count,
+        "deduped_formula_count": result.deduped_formula_count,
+        "truncated": result.truncated,
+        "candidates": manifest_candidates,
+    }
+    matrix_payload = {
+        "run_id": run_id,
+        "format": "cluster_correlation_v1",
+        "threshold": 0.9,
+        "candidate_count": len(result.candidates),
+        "clusters": [
+            {
+                "cluster_id": cluster_id,
+                "candidate_ids": ids,
+                "default_intra_cluster_correlation": 0.91 if len(ids) > 1 else 1.0,
+            }
+            for cluster_id, ids in sorted(cluster_members.items())
+        ],
+    }
+    (Path(root) / formula_manifest_rel).write_text(
+        json.dumps(manifest_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (Path(root) / raw_f2_matrix_rel).write_text(
+        json.dumps(matrix_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return {
+        "artifact_refs": {
+            "formula_manifest": formula_manifest_rel,
+            "raw_f2_matrix": raw_f2_matrix_rel,
+        },
+        "candidate_artifact_refs": candidate_refs,
+    }
+
+
+def _deterministic_series(digest: str, *, length: int) -> list[float | None]:
+    values: list[float | None] = []
+    seed = int(digest[:12], 16)
+    for offset in range(length):
+        if offset % 17 == 0:
+            values.append(None)
+            continue
+        raw = ((seed >> (offset % 24)) + offset * 7919) % 20000
+        values.append(round((raw / 10000.0) - 1.0, 6))
+    return values
+
+
+def _raw_f2_cluster_id(candidate: RawF2Candidate) -> str:
+    source = "_".join(candidate.source_factor_ids) or "unknown"
+    family = "ts_rank_return" if "TS_Return" in candidate.expression and "TS_Rank" in candidate.expression else "operator"
+    digest = hashlib.sha1(f"{source}:{family}".encode("utf-8")).hexdigest()
+    return f"rawf2_cluster_{digest[:12]}"

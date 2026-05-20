@@ -1,18 +1,17 @@
-import { useEffect, useMemo, useState } from 'react';
-import { navigateTo, useAppRoute } from '../lib/appRouteContext';
+import { useEffect, useState } from 'react';
+import { useAppRoute } from '../lib/appRouteContext';
 import { formatDateTime } from '../lib/format';
 import { useApiClient } from '../lib/demoStoreContext';
-import {
-  BondFixedIncomeSnapshotsTab,
-  normalizeBondFixedIncomeOverview,
-} from '../page-sections/snapshots-bond-fixed-income';
-import { EquitySnapshotsTab } from '../page-sections/snapshots-equity';
+import { normalizeBondFixedIncomeOverview } from '../page-sections/snapshots-bond-fixed-income';
+import { SnapshotOperationsConsole } from '../page-sections/snapshots-operations-console';
 import type {
   ApiDatasetSnapshot,
   ApiBondSnapshotEligibleInstrument,
   ApiSnapshotBlocker,
   ApiSnapshotJob,
   ApiSnapshotOverview,
+  ApiSnapshotProviderAttempts,
+  ApiSnapshotProviderRegistry,
   ApiSnapshotProviderSummary,
   ApiSnapshotRefreshRequest,
   ApiUniverseSnapshot,
@@ -22,6 +21,17 @@ import './run-detail-page.css';
 import './snapshots-page.css';
 
 const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 80;
+
+async function captureOptional<T>(promise: Promise<T> | undefined): Promise<{ value: T | null; error: string | null }> {
+  if (!promise) {
+    return { value: null, error: null };
+  }
+  try {
+    return { value: await promise, error: null };
+  } catch (caught) {
+    return { value: null, error: (caught as Error).message };
+  }
+}
 
 const DATASET_COPY: Record<string, string> = {
   公司行为数据: '1996-01-01 至今的公司事件日期（拆股 / 合股 / 股息 / 财报等）。',
@@ -892,11 +902,16 @@ export function SnapshotsPage(): JSX.Element {
   const [refreshing, setRefreshing] = useState(false);
   const [optimisticRefreshing, setOptimisticRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [providerRegistry, setProviderRegistry] = useState<ApiSnapshotProviderRegistry | null>(null);
+  const [providerAttempts, setProviderAttempts] = useState<ApiSnapshotProviderAttempts | null>(null);
+  const [providerRegistryError, setProviderRegistryError] = useState<string | null>(null);
   const [creatingBondAssetLegId, setCreatingBondAssetLegId] = useState<string | null>(null);
   const [bondCreateError, setBondCreateError] = useState<string | null>(null);
   const [bondCreateMessage, setBondCreateMessage] = useState<string | null>(null);
-  const activeTab = route.kind === 'snapshots' ? route.tab ?? 'equity' : 'equity';
-  const highlightTarget = route.kind === 'snapshots' ? route.target : undefined;
+  const [openRefreshLogToken, setOpenRefreshLogToken] = useState(0);
+  const routeTab = route.kind === 'snapshots' ? route.tab : undefined;
+  const highlightTarget =
+    route.kind === 'snapshots' ? (route.target ?? (routeTab === 'bond' ? 'bond_fixed_income' : undefined)) : undefined;
 
   useEffect(() => {
     let cancelled = false;
@@ -911,9 +926,16 @@ export function SnapshotsPage(): JSX.Element {
         if (cancelled) {
           return;
         }
-        const response = await api.getSnapshotOverview();
+        const [response, registryResult, attemptsResult] = await Promise.all([
+          api.getSnapshotOverview(),
+          captureOptional(api.getSnapshotProviderRegistry?.()),
+          captureOptional(api.getSnapshotProviderAttempts?.({ limit: 80 })),
+        ]);
         if (!cancelled) {
           setOverview(normalizeSnapshotOverview(response));
+          setProviderRegistry(registryResult.value);
+          setProviderAttempts(attemptsResult.value);
+          setProviderRegistryError(registryResult.error ? `配置源暂不可用：${registryResult.error}` : null);
         }
       } catch (caught) {
         if (!cancelled) {
@@ -952,19 +974,12 @@ export function SnapshotsPage(): JSX.Element {
   async function handleRefresh(requestOverride?: ApiSnapshotRefreshRequest): Promise<void> {
     try {
       const requestedAt = new Date().toISOString();
-      const isBondRefresh = activeTab === 'bond';
-      const refreshTargets: SnapshotRefreshTarget[] = isBondRefresh
-        ? ALL_SNAPSHOT_REFRESH_TARGETS
-        : ['price', 'corporate', 'valuations', 'universes', 'fundamentals', 'sentiment', 'macro_derivatives'];
-      const refreshReason = isBondRefresh
-        ? 'manual-refresh-bond-complete'
-        : 'manual-refresh-latest-and-repair';
       const refreshPayload: ApiSnapshotRefreshRequest = {
-        mode: isBondRefresh ? 'full' : 'repair',
-        targets: refreshTargets,
-        reason: refreshReason,
-        phase2_scope: isBondRefresh ? undefined : 'sp500_10y',
-        phase2_max_symbols: isBondRefresh ? undefined : 25,
+        mode: 'repair',
+        targets: ALL_SNAPSHOT_REFRESH_TARGETS,
+        reason: 'manual-refresh-snapshots-console',
+        phase2_scope: 'sp500_10y',
+        phase2_max_symbols: 25,
         ...requestOverride,
       };
       setRefreshing(true);
@@ -1044,99 +1059,44 @@ export function SnapshotsPage(): JSX.Element {
     }
   }
 
-  const datasetSnapshots = useMemo(() => overview?.dataset_snapshots ?? [], [overview]);
-  const universeSnapshots = useMemo(() => overview?.universe_snapshots ?? [], [overview]);
-  const bondFixedIncomeOverview = useMemo(
-    () => overview?.bond_fixed_income ?? normalizeBondFixedIncomeOverview(null, overview),
-    [overview],
-  );
-  const pageStatus = getStatusLabel(overview?.overall_status);
   const isSnapshotJobRunning =
     String(overview?.latest_job?.status ?? overview?.overall_status ?? '').toUpperCase() === 'RUNNING';
   const isRefreshRunning = refreshing || optimisticRefreshing || isSnapshotJobRunning;
   const isRefreshDisabled = loading || isRefreshRunning;
-  const pageBlocked = Boolean(
-    overview?.blocking_code &&
-      ['FAILED', 'BLOCKED'].includes(String(overview?.overall_status ?? '').toUpperCase()),
-  );
-  const isBondTab = activeTab === 'bond';
-  const isEquityTab = activeTab === 'equity';
-  const usesApprovedSnapshotsHeader = isBondTab || isEquityTab;
-  const pageTitle = '数据快照';
-  const headerEyebrow = 'DATA SNAPSHOTS';
+  const pageTitle = '数据快照治理台';
+  const headerEyebrow = '数据治理 / 全资产快照';
   const headerBody =
-    usesApprovedSnapshotsHeader
-      ? '以股票与指数快照为主视角，统一呈现行情、财务、情绪和宏观数据的覆盖、时效与可计算性，为因子入库、诊断与回放提供同一套数据判定口径。'
-      : getOverviewMessage(overview);
-  const refreshButtonLabel = isRefreshRunning
-    ? '刷新中...'
-    : isBondTab
-      ? '刷新债券快照'
-      : '刷新股票快照';
+    '统一查看股票、指数、债券、财务、情绪、宏观与衍生品快照的可用性、缺口影响和修复入口。债券不再作为独立页签，而是并入 L1 基础行情，供资产腿、风险预算和组合引用共享同一套来源判定。';
+  const refreshButtonLabel = isRefreshRunning ? '刷新中...' : routeTab === 'bond' ? '刷新债券快照' : '刷新基础行情';
 
   return (
-    <div className={`stack snapshots-page snapshots-page--${activeTab}`}>
-      <section
-        className={`page-heading hero-card snapshots-header-card ${
-          usesApprovedSnapshotsHeader ? 'snapshots-header-card--standard' : ''
-        }`}
-      >
+    <div className={`stack snapshots-page snapshots-page--operations ${routeTab === 'bond' ? 'snapshots-page--bond-compat' : ''}`}>
+      <section className="page-heading hero-card snapshots-header-card snapshots-header-card--standard">
         <div className="snapshots-header">
           <div className="snapshots-header__copy">
             <p className="page-heading__eyebrow">{headerEyebrow}</p>
             <h1 className="snapshots-header__title">{pageTitle}</h1>
             <p className="snapshots-header__body">{headerBody}</p>
-            {usesApprovedSnapshotsHeader ? null : (
-              <div className="snapshots-header__meta">
-                {shouldRenderStatusChip(overview?.overall_status, pageBlocked) ? (
-                  <span className={getStatusChipClassName(overview?.overall_status, pageBlocked)}>
-                    {pageStatus}
-                  </span>
-                ) : null}
-                <span className="status-chip status-chip--soft snapshots-header__summary">
-                  {getLastRefreshSummaryLabel(overview, { optimisticRefreshing })}
-                </span>
-              </div>
-            )}
-            <div className="snapshots-tabs snapshots-tab-strip" role="tablist" aria-label="快照标签">
-              <button
-                aria-selected={activeTab === 'equity'}
-                className={`snapshots-tab ${activeTab === 'equity' ? 'snapshots-tab--active' : ''}`}
-                onClick={() => {
-                  navigateTo('/snapshots');
-                }}
-                role="tab"
-                type="button"
-              >
-                股票/指数
-              </button>
-              <button
-                aria-selected={activeTab === 'bond'}
-                className={`snapshots-tab ${activeTab === 'bond' ? 'snapshots-tab--active' : ''}`}
-                onClick={() => {
-                  navigateTo('/snapshots?tab=bond');
-                }}
-                role="tab"
-                type="button"
-              >
-                债券/固定收益
-              </button>
-            </div>
           </div>
-          {usesApprovedSnapshotsHeader ? null : (
-            <div className="snapshots-header__actions">
-              <button
-                className="primary-button snapshots-header__primary"
-                disabled={isRefreshDisabled}
-                onClick={() => {
-                  void handleRefresh();
-                }}
-                type="button"
-              >
-                {refreshButtonLabel}
-              </button>
-            </div>
-          )}
+          <div className="snapshots-header__actions">
+            <button
+              className="secondary-button snapshots-header__secondary"
+              onClick={() => setOpenRefreshLogToken((value) => value + 1)}
+              type="button"
+            >
+              查看刷新日志
+            </button>
+            <button
+              className="primary-button snapshots-header__primary"
+              disabled={isRefreshDisabled}
+              onClick={() => {
+                void handleRefresh();
+              }}
+              type="button"
+            >
+              {refreshButtonLabel}
+            </button>
+          </div>
         </div>
       </section>
 
@@ -1144,30 +1104,22 @@ export function SnapshotsPage(): JSX.Element {
 
       {loading ? (
         <section className="panel snapshots-feedback-panel">
-          <p>正在加载快照概览...</p>
+          <p>正在加载快照操作台...</p>
         </section>
       ) : null}
 
-      {!loading && activeTab === 'equity' ? (
-        <EquitySnapshotsTab
+      {!loading ? (
+        <SnapshotOperationsConsole
           highlightTarget={highlightTarget}
+          openRefreshLogToken={openRefreshLogToken}
           overview={overview}
-          onRefresh={() => {
-            void handleRefresh();
-          }}
-          refreshDisabled={isRefreshDisabled}
-          refreshLabel={refreshButtonLabel}
-        />
-      ) : null}
-
-      {!loading && activeTab === 'bond' ? (
-        <BondFixedIncomeSnapshotsTab
-          overview={bondFixedIncomeOverview}
-          snapshotOverview={overview}
+          providerAttempts={providerAttempts}
+          providerRegistry={providerRegistry}
+          providerRegistryError={providerRegistryError}
+          creatingBondAssetLegId={creatingBondAssetLegId}
           createAssetLegError={bondCreateError}
           createAssetLegMessage={bondCreateMessage}
-          creatingAssetLegId={creatingBondAssetLegId}
-          onCreateAssetLeg={(instrument) => {
+          onCreateBondAssetLeg={(instrument) => {
             void handleCreateBondAssetLeg(instrument);
           }}
           onRefresh={(payload) => {

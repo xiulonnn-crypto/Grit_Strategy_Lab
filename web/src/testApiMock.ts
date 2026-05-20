@@ -345,6 +345,13 @@ export function installMockApiServer() {
       }
       if (
         method === 'POST' &&
+        url.pathname === '/factor-factory/refine-online-raw-f2' &&
+        demoApi.runFactorFactoryOnlineRawF2Refinement
+      ) {
+        return json(await demoApi.runFactorFactoryOnlineRawF2Refinement(body as import('./types').ApiFactorFactoryOnlineRawF2Payload));
+      }
+      if (
+        method === 'POST' &&
         segments[0] === 'factor-factory' &&
         segments[1] === 'runs' &&
         segments[3] === 'cancel' &&
@@ -372,6 +379,11 @@ export function installMockApiServer() {
           status: url.searchParams.get('status') ?? undefined,
           source_job_id: url.searchParams.get('source_job_id') ?? undefined,
           cluster: url.searchParams.get('cluster') ?? undefined,
+          date: url.searchParams.get('date') ?? undefined,
+          factor_name: url.searchParams.get('factor_name') ?? undefined,
+          result: url.searchParams.get('result') ?? undefined,
+          page: url.searchParams.get('page') ? Number(url.searchParams.get('page')) : undefined,
+          page_size: url.searchParams.get('page_size') ? Number(url.searchParams.get('page_size')) : undefined,
         }));
       }
       if (method === 'POST' && url.pathname === '/factor-quarantine/intake' && demoApi.factorQuarantineIntake) {

@@ -21,6 +21,7 @@ import type {
   FactorModelStrategyCreationRisk,
 } from './pages/factor-model-builder-page';
 import { ShellFrameCn } from './shell-frame-cn';
+import { formatFactorDisplayName } from './lib/factor-display';
 import type {
   ApiFactorDiagnosticPreview,
   ApiFactorDirection,
@@ -357,7 +358,7 @@ function mapFactorOption(factor: ApiFactorListItem): FactorModelOption {
     : [];
   return {
     id: factor.id,
-    displayName: factor.name,
+    displayName: formatFactorDisplayName(factor.id, factor.display_name_cn ?? factor.name),
     family: categoryLabel,
     categoryLabel,
     market: factor.market ?? null,

@@ -1,0 +1,262 @@
+{
+  "designMetrics": {
+    "mode": "design",
+    "url": "file:///C:/Fin/Grit_Strategy_Lab/designs/2026-05-20-snapshots-equity-redesign/spec.html",
+    "main": {
+      "top": 0,
+      "left": 240,
+      "width": 1720,
+      "height": 3237,
+      "bottom": 3237
+    },
+    "header": {
+      "top": 28,
+      "left": 268,
+      "width": 1664,
+      "height": 137,
+      "bottom": 165
+    },
+    "health": null,
+    "queue": {
+      "top": 514,
+      "left": 268,
+      "width": 1664,
+      "height": 480,
+      "bottom": 994
+    },
+    "drill": {
+      "top": 1010,
+      "left": 268,
+      "width": 1664,
+      "height": 392,
+      "bottom": 1402
+    },
+    "ledger": {
+      "top": 1418,
+      "left": 268,
+      "width": 1664,
+      "height": 567.5,
+      "bottom": 1985.5
+    },
+    "foot": {
+      "top": 2001.5,
+      "left": 268,
+      "width": 1664,
+      "height": 617,
+      "bottom": 2618.5
+    },
+    "modalStage": {
+      "top": 2634.5,
+      "left": 268,
+      "width": 1664,
+      "height": 558.5,
+      "bottom": 3193
+    },
+    "healthCards": 0,
+    "queueItems": 3,
+    "drillCards": 4,
+    "ledgerRows": 0,
+    "credentialRows": 7,
+    "evidenceButtons": 7,
+    "drillButtons": 3,
+    "bodyOverflow": 0,
+    "scrollHeight": 3237,
+    "viewport": {
+      "width": 1960,
+      "height": 1600
+    },
+    "hasRawEnglishLeak": false,
+    "hasBondEvidenceRows": true,
+    "overflowEls": [
+      {
+        "tag": "DIV",
+        "cls": "evidence-block",
+        "text": "快照身份bond_fixed_income::UST_CURVE",
+        "clientWidth": 189,
+        "scrollWidth": 196
+      },
+      {
+        "tag": "DIV",
+        "cls": "evidence-block",
+        "text": "阻断码CORPORATE_ACTIONS_INCOMPLETE",
+        "clientWidth": 189,
+        "scrollWidth": 223
+      }
+    ]
+  },
+  "liveMetrics": {
+    "mode": "live",
+    "url": "http://127.0.0.1:4173/?v=1779273053278#/snapshots",
+    "main": {
+      "top": 28,
+      "left": 268,
+      "width": 1660,
+      "height": 2884.81,
+      "bottom": 2912.81
+    },
+    "header": {
+      "top": 28,
+      "left": 268,
+      "width": 1660,
+      "height": 137,
+      "bottom": 165
+    },
+    "health": {
+      "top": 185,
+      "left": 268,
+      "width": 1660,
+      "height": 374.63,
+      "bottom": 559.63
+    },
+    "queue": {
+      "top": 575.63,
+      "left": 268,
+      "width": 1264,
+      "height": 567,
+      "bottom": 1142.63
+    },
+    "drill": {
+      "top": 1158.63,
+      "left": 268,
+      "width": 1660,
+      "height": 396,
+      "bottom": 1554.63
+    },
+    "ledger": {
+      "top": 1570.63,
+      "left": 268,
+      "width": 1660,
+      "height": 623.5,
+      "bottom": 2194.13
+    },
+    "foot": {
+      "top": 2210.13,
+      "left": 268,
+      "width": 1660,
+      "height": 702.69,
+      "bottom": 2912.81
+    },
+    "modalStage": null,
+    "healthCards": 4,
+    "queueItems": 3,
+    "drillCards": 4,
+    "ledgerRows": 7,
+    "credentialRows": 7,
+    "evidenceButtons": 7,
+    "drillButtons": 2,
+    "bodyOverflow": 0,
+    "scrollHeight": 2945,
+    "viewport": {
+      "width": 1960,
+      "height": 1600
+    },
+    "hasRawEnglishLeak": false,
+    "hasBondEvidenceRows": true,
+    "overflowEls": []
+  },
+  "refreshModalMetrics": {
+    "dialog": {
+      "top": 585,
+      "left": 390,
+      "width": 1180,
+      "height": 430
+    },
+    "rows": 4,
+    "hasL1L4": true,
+    "hasSource": true
+  },
+  "evidenceModalMetrics": {
+    "dialog": {
+      "top": 340,
+      "left": 520,
+      "width": 920,
+      "height": 920
+    },
+    "hasCurve": true,
+    "hasEligible": true,
+    "hasAudit": false,
+    "hasBondSource": true
+  },
+  "mobileMetrics": {
+    "mode": "mobile",
+    "url": "http://127.0.0.1:4173/?v=1779273053279#/snapshots",
+    "main": {
+      "top": 38,
+      "left": 38,
+      "width": 314,
+      "height": 8084.94,
+      "bottom": 8122.94
+    },
+    "header": {
+      "top": 38,
+      "left": 38,
+      "width": 314,
+      "height": 299,
+      "bottom": 337
+    },
+    "health": {
+      "top": 357,
+      "left": 38,
+      "width": 314,
+      "height": 1302,
+      "bottom": 1659
+    },
+    "queue": {
+      "top": 1675,
+      "left": 38,
+      "width": 314,
+      "height": 859,
+      "bottom": 2534
+    },
+    "drill": {
+      "top": 3146,
+      "left": 38,
+      "width": 314,
+      "height": 1475,
+      "bottom": 4621
+    },
+    "ledger": {
+      "top": 4637,
+      "left": 38,
+      "width": 314,
+      "height": 764.5,
+      "bottom": 5401.5
+    },
+    "foot": {
+      "top": 5417.5,
+      "left": 38,
+      "width": 314,
+      "height": 2705.44,
+      "bottom": 8122.94
+    },
+    "modalStage": null,
+    "healthCards": 4,
+    "queueItems": 3,
+    "drillCards": 4,
+    "ledgerRows": 7,
+    "credentialRows": 7,
+    "evidenceButtons": 7,
+    "drillButtons": 2,
+    "bodyOverflow": 0,
+    "scrollHeight": 8161,
+    "viewport": {
+      "width": 390,
+      "height": 1200
+    },
+    "hasRawEnglishLeak": false,
+    "hasBondEvidenceRows": true,
+    "overflowEls": [
+      {
+        "tag": "DIV",
+        "cls": "snapshots-ops-table-scroll",
+        "text": "快照层级状态覆盖 / 行数来源影响操作价格历史ds-priceL1 基础行情部分可用1,266/1,482 · 6,485,875 行混合来源 / 混合补源动量",
+        "clientWidth": 284,
+        "scrollWidth": 1120
+      }
+    ]
+  },
+  "liveErrors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ],
+  "liveFailed": []
+}

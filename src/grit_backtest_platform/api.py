@@ -55,7 +55,9 @@ from .models import (
     FactorCreateRequest,
     FactorDiagnosticPreviewRequest,
     FactorDiagnosticRequest,
+    FactorDisplayNameBackfillRequest,
     FactorFactoryAutomationRequest,
+    FactorFactoryOnlineRawF2RefinementRequest,
     FactorFactoryRunNowRequest,
     FactorGovernanceExecuteRequest,
     OperatorConfigRequest,
@@ -1578,6 +1580,10 @@ def create_app(
     def create_factor(payload: FactorCreateRequest):
         return invoke(service.create_factor, payload)
 
+    @app.post('/factors/display-name-v4-backfill')
+    def backfill_factor_display_names_v4(payload: FactorDisplayNameBackfillRequest):
+        return invoke(service.backfill_factor_display_names_v4, payload)
+
     @app.post('/factors/diagnostics/preview')
     def preview_factor_diagnostics(payload: FactorDiagnosticPreviewRequest):
         return invoke(service.preview_factor_diagnostics, payload)
@@ -1626,6 +1632,10 @@ def create_app(
     def factor_factory_run_now(payload: FactorFactoryRunNowRequest):
         return invoke(service.run_factor_factory_now, payload)
 
+    @app.post('/factor-factory/refine-online-raw-f2')
+    def factor_factory_refine_online_raw_f2(payload: FactorFactoryOnlineRawF2RefinementRequest):
+        return invoke(service.run_factor_factory_online_raw_f2_refinement, payload)
+
     @app.post('/factor-factory/runs/{run_id}/cancel')
     def factor_factory_run_cancel(run_id: str):
         return invoke(service.cancel_factor_factory_run, run_id)
@@ -1668,6 +1678,8 @@ def create_app(
         date: str | None = Query(default=None),
         factor_name: str | None = Query(default=None),
         result: str | None = Query(default=None),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=50, ge=1, le=200),
     ):
         return invoke(
             service.list_factor_quarantine_candidates,
@@ -1677,6 +1689,8 @@ def create_app(
             date=date,
             factor_name=factor_name,
             result=result,
+            page=page,
+            page_size=page_size,
         )
 
     @app.get('/factor-quarantine/candidates/{candidate_id}')

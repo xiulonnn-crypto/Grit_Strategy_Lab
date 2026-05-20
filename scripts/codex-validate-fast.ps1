@@ -8,7 +8,9 @@ param(
     [switch]$RequireSynced,
     [switch]$SkipTests,
     [switch]$PlanOnly,
+    [switch]$SkipGateSelfTest,
     [int]$MaxSeconds = 300,
+    [int]$AsyncRepeatCount = 3,
     [ValidateSet('fast', 'impact')]
     [string]$GateMode = 'fast'
 )
@@ -23,6 +25,7 @@ $gateTitle = if ($GateMode -eq 'impact') { 'Impact' } else { 'Fast' }
 $reportPrefix = if ($GateMode -eq 'impact') { 'impact' } else { 'fast' }
 $summaryPath = Join-Path $reportDir "latest-$reportPrefix-gate.md"
 $backendReportPath = Join-Path $reportDir "latest-$reportPrefix-backend.txt"
+$asyncRepeatReportPath = Join-Path $reportDir "latest-$reportPrefix-async-lifecycle.txt"
 $typesReportPath = Join-Path $reportDir "latest-$reportPrefix-frontend-types.txt"
 $vitestReportPath = Join-Path $reportDir "latest-$reportPrefix-frontend-vitest.txt"
 $venvPython = Join-Path $repoRoot '.venv\Scripts\python.exe'
@@ -33,8 +36,20 @@ Set-Location -LiteralPath $repoRoot
 
 $startedAt = Get-Date
 $stepResults = [System.Collections.Generic.List[string]]::new()
+$script:LastStepAt = $startedAt
 $script:ResolvedBaseRef = ''
 $script:Plan = $null
+
+function Format-StepDuration {
+    param(
+        [TimeSpan]$Duration
+    )
+
+    if ($Duration.TotalSeconds -lt 1) {
+        return ('{0}ms' -f [Math]::Round($Duration.TotalMilliseconds))
+    }
+    return ('{0:n1}s' -f $Duration.TotalSeconds)
+}
 
 function Add-StepResult {
     param(
@@ -43,7 +58,12 @@ function Add-StepResult {
         [string]$Details = ''
     )
 
-    [void]$stepResults.Add("- [$Status] $Label")
+    $now = Get-Date
+    $duration = $now - $script:LastStepAt
+    $script:LastStepAt = $now
+    $durationText = Format-StepDuration -Duration $duration
+
+    [void]$stepResults.Add("- [$Status] $Label (duration=$durationText)")
     if (-not [string]::IsNullOrWhiteSpace($Details)) {
         [void]$stepResults.Add("  $Details")
     }
@@ -89,14 +109,21 @@ function Write-Summary {
 
     $finishedAt = Get-Date
     $plan = $script:Plan
-    $rawChanged = @(ConvertTo-StringArray $plan.raw_changed_files)
-    $evidenceFiles = @(ConvertTo-StringArray $plan.evidence_asset_files)
-    $docFiles = @(ConvertTo-StringArray $plan.documentation_files)
-    $engineeringFiles = @(ConvertTo-StringArray $plan.engineering_files)
-    $backendTests = @(ConvertTo-StringArray $plan.backend_tests)
-    $frontendTests = @(ConvertTo-StringArray $plan.frontend_tests)
-    $domains = @(ConvertTo-StringArray $plan.domains)
-    $reasons = @(ConvertTo-StringArray $plan.ineligible_reasons)
+    [string[]]$rawChanged = @(ConvertTo-StringArray $plan.raw_changed_files)
+    [string[]]$evidenceFiles = @(ConvertTo-StringArray $plan.evidence_asset_files)
+    [string[]]$docFiles = @(ConvertTo-StringArray $plan.documentation_files)
+    [string[]]$engineeringFiles = @(ConvertTo-StringArray $plan.engineering_files)
+    [string[]]$backendTests = @(ConvertTo-StringArray $plan.backend_tests)
+    [string[]]$frontendTests = @(ConvertTo-StringArray $plan.frontend_tests)
+    [string[]]$asyncRepeatTests = @(ConvertTo-StringArray $plan.async_lifecycle_repeat_tests)
+    [string[]]$domains = @(ConvertTo-StringArray $plan.domains)
+    [string[]]$reasons = @(ConvertTo-StringArray $plan.ineligible_reasons)
+    $headSha = [string[]]@(Get-GitLines -Arguments @('rev-parse', 'HEAD'))
+    [string[]]$baseSha = if ([string]::IsNullOrWhiteSpace($script:ResolvedBaseRef)) {
+        [string[]]@()
+    } else {
+        [string[]]@(Get-GitLines -Arguments @('rev-parse', $script:ResolvedBaseRef))
+    }
 
     $lines = [System.Collections.Generic.List[string]]::new()
     foreach ($line in @(
@@ -105,6 +132,7 @@ function Write-Summary {
         ('- status: ' + $Status),
         ('- started_at: ' + $startedAt.ToString('o')),
         ('- finished_at: ' + $finishedAt.ToString('o')),
+        ('- elapsed_seconds: ' + [Math]::Round(($finishedAt - $startedAt).TotalSeconds, 3)),
         ('- scope: ' + $Scope),
         ('- remote: ' + $Remote),
         ('- base_ref: ' + $(if ([string]::IsNullOrWhiteSpace($script:ResolvedBaseRef)) { '<none>' } else { $script:ResolvedBaseRef })),
@@ -112,7 +140,11 @@ function Write-Summary {
         ('- require_synced: ' + $RequireSynced.IsPresent),
         ('- skip_tests: ' + $SkipTests.IsPresent),
         ('- plan_only: ' + $PlanOnly.IsPresent),
+        ('- skip_gate_self_test: ' + $SkipGateSelfTest.IsPresent),
         ('- max_seconds: ' + $(if ($GateMode -eq 'fast') { $MaxSeconds } else { '<none>' })),
+        ('- async_repeat_count: ' + $(if ($asyncRepeatTests.Count -eq 0) { 0 } else { $AsyncRepeatCount })),
+        ('- head_sha: ' + $(if ($headSha.Count -eq 0) { '<none>' } else { $headSha[0] })),
+        ('- base_sha: ' + $(if ($baseSha.Count -eq 0) { '<none>' } else { $baseSha[0] })),
         ('- raw_changed_count: ' + $rawChanged.Count),
         ('- evidence_asset_count: ' + $evidenceFiles.Count),
         ('- documentation_count: ' + $docFiles.Count),
@@ -130,6 +162,7 @@ function Write-Summary {
     Format-ListSection -Lines $lines -Title '## Evidence assets excluded from impact' -Items $evidenceFiles
     Format-ListSection -Lines $lines -Title '## Engineering files' -Items $engineeringFiles
     Format-ListSection -Lines $lines -Title '## Selected backend tests' -Items $backendTests
+    Format-ListSection -Lines $lines -Title '## Async lifecycle repeat tests' -Items $asyncRepeatTests
     Format-ListSection -Lines $lines -Title '## Selected frontend tests' -Items $frontendTests
 
     [void]$lines.Add('')
@@ -413,6 +446,118 @@ function Invoke-BackendTests {
     }
 }
 
+function Invoke-AsyncLifecycleRepeat {
+    $tests = @(ConvertTo-StringArray $script:Plan.async_lifecycle_repeat_tests)
+    if ($tests.Count -eq 0) {
+        Add-StepResult -Label 'async lifecycle repeat tests' -Status 'skip' -Details 'no async lifecycle repeat tests selected'
+        return
+    }
+    if ($AsyncRepeatCount -le 0) {
+        Add-StepResult -Label 'async lifecycle repeat tests' -Status 'skip' -Details "async_repeat_count=$AsyncRepeatCount"
+        return
+    }
+
+    Assert-FastBudget -Step 'async lifecycle repeat tests'
+    $pythonExe = Get-PythonExecutable
+    $pytestTempRoot = Join-Path $repoRoot '.tmp\pytest-runtime'
+    $pythonTemp = Join-Path $pytestTempRoot 'python-temp'
+    New-Item -ItemType Directory -Path $pythonTemp -Force | Out-Null
+
+    $originalTemp = $env:TEMP
+    $originalTmp = $env:TMP
+    $originalTmpDir = $env:TMPDIR
+    $report = [System.Collections.Generic.List[string]]::new()
+    [void]$report.Add("# Codex $gateTitle Async Lifecycle Repeat")
+    [void]$report.Add("started_at = $(Get-Date -Format o)")
+    [void]$report.Add("repeat_count = $AsyncRepeatCount")
+    [void]$report.Add("tests = $($tests -join ' ')")
+    [void]$report.Add('')
+
+    try {
+        $env:TEMP = $pythonTemp
+        $env:TMP = $pythonTemp
+        $env:TMPDIR = $pythonTemp
+
+        for ($index = 1; $index -le $AsyncRepeatCount; $index++) {
+            $baseTemp = Join-Path $pytestTempRoot ("codex-$reportPrefix-async-{0}-{1}" -f $index, (Get-Date -Format 'yyyyMMddHHmmssfff'))
+            New-Item -ItemType Directory -Path $baseTemp -Force | Out-Null
+            $args = @('-m', 'pytest') + $tests + @('--basetemp', $baseTemp)
+            Write-Host "$reportPrefix-gate: async lifecycle repeat $index/$AsyncRepeatCount -> $($tests -join ', ')" -ForegroundColor Cyan
+            $previousErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                $output = & $pythonExe @args 2>&1
+                $exitCode = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $previousErrorActionPreference
+            }
+            [void]$report.Add("## repeat $index")
+            [void]$report.Add("command = $pythonExe $($args -join ' ')")
+            foreach ($line in @($output)) {
+                [void]$report.Add([string]$line)
+            }
+            [void]$report.Add('')
+            $output | ForEach-Object { Write-Host $_ }
+            if ($exitCode -ne 0) {
+                $report | Set-Content -LiteralPath $asyncRepeatReportPath -Encoding utf8
+                throw "Async lifecycle repeat tests failed on repeat $index. See $asyncRepeatReportPath"
+            }
+        }
+        $report | Set-Content -LiteralPath $asyncRepeatReportPath -Encoding utf8
+        Add-StepResult -Label 'async lifecycle repeat tests' -Status 'ok' -Details "repeat_count=$AsyncRepeatCount see $asyncRepeatReportPath"
+    } finally {
+        if ($null -ne $originalTemp) { $env:TEMP = $originalTemp } else { Remove-Item Env:TEMP -ErrorAction SilentlyContinue }
+        if ($null -ne $originalTmp) { $env:TMP = $originalTmp } else { Remove-Item Env:TMP -ErrorAction SilentlyContinue }
+        if ($null -ne $originalTmpDir) { $env:TMPDIR = $originalTmpDir } else { Remove-Item Env:TMPDIR -ErrorAction SilentlyContinue }
+    }
+}
+
+function Invoke-GateSelfTest {
+    if ($SkipGateSelfTest -or -not [bool]$script:Plan.validation_self_test_required) {
+        Add-StepResult -Label 'gate self-test' -Status 'skip' -Details 'not required'
+        return
+    }
+
+    $scriptPath = $PSCommandPath
+    $powerShellCommand = Get-Command powershell.exe -ErrorAction SilentlyContinue
+    if ($null -eq $powerShellCommand) {
+        $powerShellCommand = Get-Command powershell -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $powerShellCommand) {
+        $powerShellCommand = Get-Command pwsh -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $powerShellCommand) {
+        throw 'PowerShell executable not found for gate self-test.'
+    }
+    $powerShellExe = $powerShellCommand.Source
+    $baseArgs = @('-Scope', $Scope, '-Remote', $Remote, '-SkipFetch', '-PlanOnly', '-SkipGateSelfTest')
+    if (-not [string]::IsNullOrWhiteSpace($BaseRef)) {
+        $baseArgs += @('-BaseRef', $BaseRef)
+    }
+    if ($RequireSynced) {
+        $baseArgs += '-RequireSynced'
+    }
+
+    foreach ($mode in @('impact', 'fast')) {
+        $selfTestArgs = @('-GateMode', $mode) + $baseArgs
+        $commandArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $scriptPath) + $selfTestArgs
+        Write-Host "$reportPrefix-gate: self-test $mode plan -> $powerShellExe $($commandArgs -join ' ')" -ForegroundColor Cyan
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $powerShellExe @commandArgs
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        $accepted = $exitCode -eq 0 -or ($mode -eq 'fast' -and $exitCode -eq 2)
+        if (-not $accepted) {
+            throw "Gate self-test failed for $mode plan with exit code $exitCode."
+        }
+    }
+    Add-StepResult -Label 'gate self-test' -Status 'ok' -Details 'impact PlanOnly passed; fast PlanOnly produced a valid plan/not-fast decision'
+}
+
 function Invoke-FrontendTypes {
     if ($GateMode -ne 'impact') {
         Add-StepResult -Label 'frontend TypeScript' -Status 'skip' -Details 'fast gate skips global tsc'
@@ -572,6 +717,8 @@ try {
         exit 2
     }
 
+    Invoke-GateSelfTest
+
     if ($SkipTests) {
         Add-StepResult -Label 'tests' -Status 'skip' -Details 'skipped by caller'
         Write-Summary -Status 'ok'
@@ -581,6 +728,7 @@ try {
     Invoke-PowerShellSyntax
     Invoke-PythonCompile
     Invoke-BackendTests
+    Invoke-AsyncLifecycleRepeat
     Invoke-FrontendTypes
     Invoke-FrontendTests
 
@@ -598,10 +746,12 @@ try {
             engineering_files = @()
             backend_tests = @()
             frontend_tests = @()
+            async_lifecycle_repeat_tests = @()
             domains = @()
             ineligible_reasons = @()
             contract_changed = $false
             validation_tooling_changed = $false
+            validation_self_test_required = $false
             eligible = $false
         }
     }

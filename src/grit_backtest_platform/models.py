@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictBool, field_validator, model_validator
 
 AllowedAction = Literal[
     'start_backtest',
@@ -92,6 +92,16 @@ FactorFactoryRunStatus = Literal['QUEUED', 'RUNNING', 'CANCEL_REQUESTED', 'CANCE
 FactorFactoryRunTrigger = Literal['DAILY', 'MANUAL']
 F1AdmissionState = Literal['READY', 'READY_WITH_WARNING', 'OBSERVE', 'DATA_SOURCE_BLOCKED', 'MISSING_TIMING']
 PitPreprocessingMode = Literal['DAILY', 'MANUAL', 'SNAPSHOT_REFRESH']
+CompositionMethodType = Literal[
+    'LINEAR_WEIGHTING',
+    'RATIO_RISK_ADJUSTED',
+    'RESIDUAL_ORTHOGONAL',
+    'RANK_POOLING',
+    'FFBLEND_STYLE',
+    'DIVERGENCE_PENALTY',
+    'TIME_SERIES_DENOISE',
+]
+CompositionPublishBoundary = Literal['D2_QUARANTINE_ONLY']
 
 
 class FactorDescriptorRequest(BaseModel):
@@ -206,6 +216,14 @@ class FactorFactoryRunNowRequest(BaseModel):
     f1_catalog_snapshot_id: str | None = None
 
 
+class FactorFactoryOnlineRawF2RefinementRequest(BaseModel):
+    gate_policy: FactorFactoryGatePolicy = Field(default_factory=FactorFactoryGatePolicy)
+    factor_ids: list[str] = Field(default_factory=list)
+    candidate_limit: int = Field(default=10000, ge=1, le=10000)
+    operator_config_snapshot_id: str | None = None
+    f1_catalog_snapshot_id: str | None = None
+
+
 class PitPreprocessingRunRequest(BaseModel):
     as_of_date: str | None = None
     mode: PitPreprocessingMode = 'MANUAL'
@@ -252,6 +270,38 @@ class F1CatalogResponse(BaseModel):
     summary: dict[str, Any] = Field(default_factory=dict)
 
 
+class CompositionMethodConfig(BaseModel):
+    id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    theme: str = Field(min_length=1)
+    method_type: CompositionMethodType
+    enabled: StrictBool
+    formula_template: str = Field(min_length=1)
+    source_factor_ids: list[str] = Field(default_factory=list)
+    params: dict[str, Any] = Field(default_factory=dict)
+    publish_boundary: CompositionPublishBoundary = 'D2_QUARANTINE_ONLY'
+
+    @field_validator('source_factor_ids')
+    @classmethod
+    def _clean_source_factor_ids(cls, value: list[str]) -> list[str]:
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    @model_validator(mode='after')
+    def _validate_method_contract(self) -> 'CompositionMethodConfig':
+        if self.method_type == 'RATIO_RISK_ADJUSTED':
+            floor = self.params.get('denominator_floor', self.params.get('floor'))
+            if floor is None:
+                raise ValueError('RATIO_RISK_ADJUSTED requires denominator_floor')
+            try:
+                floor_value = float(floor)
+            except (TypeError, ValueError) as exc:
+                raise ValueError('RATIO_RISK_ADJUSTED denominator_floor must be numeric') from exc
+            if floor_value <= 0:
+                raise ValueError('RATIO_RISK_ADJUSTED denominator_floor must be positive')
+            self.params = {**self.params, 'denominator_floor': floor_value}
+        return self
+
+
 class OperatorConfigRequest(BaseModel):
     enabled_operators: list[str] = Field(default_factory=lambda: ['TS_Return', 'TS_Rank', 'TS_Corr'])
     window_space: list[int] = Field(default_factory=lambda: [3, 5, 10, 21, 63, 126, 252])
@@ -261,6 +311,7 @@ class OperatorConfigRequest(BaseModel):
     min_periods_policy: str = 'TS 默认 min_periods=n；TS_Return 需要 n+1 个有效观测；不足输出 NaN。'
     blocked_field_policy: str = '排除 DATA_SOURCE_BLOCKED 字段；缺失 L1 保持 NaN。'
     governance_protocol: dict[str, Any] = Field(default_factory=dict)
+    composition_methods: list[CompositionMethodConfig] = Field(default_factory=list)
     notes: str = ''
     f1_catalog_snapshot_id: str | None = None
     created_by: str | None = None
@@ -294,6 +345,10 @@ class FactorQuarantineRunRequest(BaseModel):
 class FactorQuarantinePublishRequest(BaseModel):
     operator: str | None = None
     rule_version: str | None = None
+
+
+class FactorDisplayNameBackfillRequest(BaseModel):
+    dry_run: bool = True
 
 
 class FactorGovernanceExecuteRequest(BaseModel):

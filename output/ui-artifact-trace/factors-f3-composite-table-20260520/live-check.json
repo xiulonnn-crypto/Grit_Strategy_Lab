@@ -1,0 +1,46 @@
+{
+  "url": "http://127.0.0.1:4173/?v=f3-composite-1779271020537#/factors?layer=F3",
+  "headers": [
+    "因子基本信息",
+    "血缘溯源",
+    "Blend Info",
+    "组合质量",
+    "容量/摩擦",
+    "风格暴露",
+    "实盘身份",
+    "因子级别↕?因子级别：Rank IC 均值和 IR (稳定性) 先取绝对值，再按较弱一项保守评级。S顶级: Rank IC > 0.03, IR > 2.0; 你的因子在此！极其罕见，具备极高的实战价值，建议作为组合的核心权重。A优秀: Rank IC 0.02 ~ 0.03, IR 1.0 ~ 2.0; 非常优秀的因子，可以稳定贡献超额收益。B合格: Rank IC 0.01 ~ 0.02, IR 0.5 ~ 1.0; 中规中矩，可以作为辅助因子增加组合的多元化。C微弱: Rank IC 0.005 ~ 0.01, IR 0.2 ~ 0.5; 信号较弱，容易被交易成本吞噬，需观察长期表现。D噪声: Rank IC < 0.005, IR < 0.2; 基本属于统计噪声，不建议在实盘中使用。其他: F1 原始因子作为上层因子的底层水源，只按数据质量状态治理，不参与 Rank IC/IR 投资评级。未完成真实或预览诊断的因子显示为未评级，不参与等级排序。",
+    "生命周期",
+    "创建时间↓",
+    "操作"
+  ],
+  "firstRowText": "风险调整现金流回报 (精炼)\n估值\n?\na_alpha_custom_cur_raw\n\t查看血缘\t\n4 个 F2 成分\npairwise_cross_family / 风格复合 / 风险调节 / 估值锚定 / 背离惩罚 / 残差/中性化 / 时序降噪\n\t\nSharpe 待补\n最大回撤 45.5%\n\t\nCapacity 容量通过\nTurnover 18.00%/周\nCost 待补\n\t\n风格中性\nStyle Corr 0.260\n\t\nPortfolio 未绑定\nTag 未绑定\n\t\nS\n顶级\n\t线上\t5月19日 下午05:53\t\n生成组合策略\n详情",
+  "f3ContractCount": 1,
+  "f3ContractCompositeCount": 1,
+  "checks": {
+    "familyFilterPresent": 1,
+    "localTierTabsPresent": 0,
+    "levelFilterPresent": 1,
+    "lifecycleFilterPresent": 1,
+    "hasBlendInfo": true,
+    "hasCompositeQuality": true,
+    "hasCapacityFriction": true,
+    "hasStyleExposure": true,
+    "hasExecutionIdentity": true,
+    "hasOldOperatorHeader": false,
+    "hasOldQualityHeader": false,
+    "firstRowHasRankIC": false,
+    "firstRowHasWNZT": false,
+    "actionVisible": true,
+    "actionDisabled": false,
+    "beforeClickHash": "#/factors?layer=F3",
+    "afterClickHash": "#/factor-models/new?strategy_type=COMPOSITE_FACTOR&source=factor_library&factor_id=a_alpha_custom_cur_raw&factorIds=a_alpha_custom_cur_raw&weights=100&directions=HIGH_IS_BETTER&modelName=%E9%A3%8E%E9%99%A9%E8%B0%83%E6%95%B4%E7%8E%B0%E9%87%91%E6%B5%81%E5%9B%9E%E6%8A%A5%20(%E7%B2%BE%E7%82%BC)%20%E7%BB%84%E5%90%88%E5%9B%A0%E5%AD%90%E7%AD%96%E7%95%A5",
+    "valueTextIncludesValue": true,
+    "valueTextIsEmptyState": false,
+    "riskTextIncludesValue": false,
+    "riskTextIsEmptyState": true
+  },
+  "screenshots": {
+    "desktop": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factors-f3-composite-table-20260520\\desktop-f3-composite.png",
+    "mobile": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factors-f3-composite-table-20260520\\mobile-f3-composite.png"
+  }
+}

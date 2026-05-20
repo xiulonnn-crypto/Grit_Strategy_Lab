@@ -1,16 +1,62 @@
 # TECHNICAL（技术手册）
 
+## Factor display naming and dedupe gate
+
+- Before changing factor Chinese display names, `display_name_cn`, `short_name_cn`, `base_display_name_cn`, `name_collision_*`, aliases, search keywords, backfill, quarantine publish, governance publish, factor factory publishable lists, factor detail, model builder, or run-detail factor projection, build a read-only duplicate-name fact table for online-visible F2/F3 factors. The table must include `factor_id`, `stored_name`, `projected_name`, `base_display_name_cn`, `tier_level`, `lifecycle_status`, `expression`, `parent_factor_ids`, `op_status`, `benchmark` or `residual_control`, and collision group.
+- Treat naming as a deterministic projection contract. Pure parser tests must cover `Return`, `Std(Return)`, `DownsideStd(Return)`, `Residual`, `FFBlend`, cashflow/volatility ratios, window or parameter extraction, missing benchmark metadata, and the rule that the system must not fabricate `SP500` or any benchmark when the metadata is absent.
+- All read and write paths must call the same naming resolver: `GET /factors`, `GET /factors/{factor_id}`, `display-name-v4-backfill` dry-run/apply, quarantine publish, and governance optimized-factor publish. The protocol version is `factor_display_name_v4_structured`; the dedupe strategy is `parameter_first_then_sha8`.
+- Backfill is display-only. It may update the stored Chinese display name, alias/search keywords, and `factor_display_name_renames` audit rows, but it must not change `id`, `canonical_id`, `factor_versions.expression`, `factor_lineage_edges`, diagnostic summaries, or historical publish events.
+- Collision audit must record `previous_display_name`, `new_display_name`, `base_display_name_cn`, `name_collision_key`, `name_collision_group`, `name_dedupe_suffix`, `name_schema_version`, `renamed_at`, `rename_reason`, chosen differentiating parameters, and a non-secret fallback hash input summary when `[SHA-8]` is used.
+- UI evidence is part of the naming gate. `#/factors/factory` publishable factors and B3 quarantine rows must highlight same-base-name candidates and show difference chips for window/parameter, governance chain, benchmark, RankIC, IR, and score. The detail modal must show base name, final name, dedupe reason, expression, parent factors, governance chain, and benchmark.
+- Windows ad hoc debugging must be reproducible in PowerShell. Use `@' ... '@ | python -` or a short `.tmp/` script for Python snippets; do not paste Bash heredocs into PowerShell transcripts.
+- Required validation for code changes in this area: backend owner slice `.\.venv\Scripts\python.exe -m pytest tests/test_factor_research_api.py tests/test_backend_api.py tests/test_factor_mining_api.py tests/test_factor_factory_api.py tests/test_factor_quarantine_api.py -q`; frontend owner slice from `web/`: `node scripts/run-vitest-fixed.cjs factors.phase0.f1.test.tsx factor.model-builder.test.tsx factor.factory.test.tsx app.routes.foundation.test.tsx`; run-detail supplement from `web/`: `node scripts/run-vitest-fixed.cjs run-detail.page.test.tsx run-detail-kv-format.test.ts optimization-config-fields.test.ts`.
+
+## Factor Factory batch lineage repair gate
+
+- Before editing code for `#/factors/factory`, `/factor-factory/overview`, Raw_F2, Refined_F2, WNZT, quarantine, publishable factors, or batch-count anomalies, run the read-only preflight: `python scripts/factor_factory_lineage_preflight.py`. Use `--db <path>` when `GRIT_BACKTEST_DB` points at a non-root runtime DB, and `--strict` when mismatches should fail the review gate.
+- The preflight output is the first evidence item in the `$grit-review` chain. It must report `current_batch_id`, `source_job_id`, Raw_F2 count, Refined_F2 count, ledger artifact count, quarantine source-job count, status counts, and the UI summary source. If it reports `ledger_count_mismatch_*`, `quarantine_count_mismatch_*`, `ledger_source_job_mismatch`, or `preview_may_be_used_as_batch_total`, classify the issue as batch lineage before touching UI code.
+- Preview is never canonical. `top_candidates`, `top_preview_count`, default `page_size=50`, first-page quarantine rows, and UI preview lists are bounded projections only. Factor factory tests must guard that no preview or paged result is used as batch total, source-job truth, or publishable-factor truth.
+- Full Raw_F2 and Refined_F2 artifacts must carry a manifest contract: `job_id`, `source_job_id`, `formula_count`, `refined_count`, `hash`, and `created_at`. API responses and detail modals should echo this manifest or an explicit artifact reference. Missing manifest fields are a preflight warning and must block final acceptance for new artifact-producing work.
+- Debug with a small-budget red repro first: use a 20-50 formula operator snapshot to prove `Raw_F2 -> Refined_F2 -> Quarantine -> UI` count alignment and failure behavior, then run the 1470+ full budget once for acceptance.
+- Factor factory read models should converge on one current-batch resolver contract: `current_batch_id`, `source_job_id`, `artifact_id`, `is_preview`, `total_candidates`, and `page_count`. Task cards, quarantine pagination, publishable factors, and detail evidence must read from that contract or fields explicitly derived from it.
+- Live route evidence should be scripted where possible: open the cache-busted `#/factors/factory` route, capture task-card counts, pagination such as `1-50/1470`, publishable-factor duplicate groups, and the detail modal's Raw/Refined/WNZT evidence, then compare those values with API and manifest output. Screenshots remain required but should not be the only proof.
+
+## Factor Factory multi-agent kickoff package
+
+Cross-stack factor-factory work that touches backend contracts, execution, UI, tests, docs, or live acceptance must start from a small, auditable kickoff package before workers edit files.
+
+- Create `output/logs/grit-coder/<task-slug>/agent-task-matrix.md` before delegation. It must list `task_id`, `owner`, `branch`, `worktree_path`, `base_commit`, expected `HEAD`, write set, forbidden hotspot files, runtime boundary, focused tests, merge order, and final integration gate.
+- If independent worktrees are skipped, the matrix must record the skip reason, risk, and compensating validation. "Current checkout only" is acceptable only when the task is small, read-only, non-parallel, explicitly requested, or blocked by a repo/worktree limitation.
+- For approved HTML/SPEC/PNG work, create `output/ui-artifact-trace/<task-slug>/trace-matrix.md` as a skeleton before UI edits. Rows may start as `NOT_CHECKED`, but the file must already name design sources, route, desktop/mobile viewports, measurable geometry/overflow gates, interaction gates, screenshot filenames, and approved deviations.
+- Before any live route verification or restart decision, save the read-only runtime preflight output to `output/logs/grit-coder/<task-slug>/runtime-preflight.json`. Terminal summaries are not enough for final live evidence.
+- Use this default gate cadence for factor-factory composition or similar pipeline work: lineage preflight -> contract skeleton tests -> execution-core focused tests -> UI focused Vitest -> frontend owner slice -> runtime preflight -> live Trace Matrix screenshots/geometry -> final integration evidence.
+- Known unrelated dirty-worktree blockers must be recorded in `output/logs/grit-coder/<task-slug>/known-blockers.md` with failing command, failing file/test, owner area, and why it is outside the current task. Do not let unrelated failures silently dilute the current acceptance result.
+
 ## Phase 1 因子工厂自动矿机
 
 - 自动矿机继续复用现有 `#/factors/factory` 与 `/factor-factory/*`，不新建平行运行系统。
 - `OperatorEngine` 是工厂 run 的公式生成边界，MVP 后端为 `pandas_bottleneck`；默认每日预算为 `10,000` 公式，预算和 backend 固化到 `operator_config_snapshot`。
+- 工厂 run 必须物化完整 Raw_F2 批次清单、矩阵、series/stats artifact 与 `raw_f2_batch_delivered_count`；`top_candidates`/前端 50 条只允许作为预览或分页，不得作为任务入口总量。
 - 当前工厂 run 必须引用不可变 `f1_catalog_snapshot_id` 与 `operator_config_snapshot_id`；保存配置草稿不会影响已运行或运行中的 run。
-- Raw_F2 必须进入 WNZT 治理与检疫，不能绕过检疫直发；发布边界要求 WNZT 完整、检疫 `PASS`、`publish_status=ELIGIBLE`，并保留配置快照和检疫证据。
-- 相关验证优先跑：`tests/test_operator_engine.py`、`tests/test_operator_registry.py`、`tests/test_factor_factory_api.py`、`tests/test_factor_quarantine_api.py`，再按影响面跑固定 backend/frontend scripts。
+- Raw_F2 必须进入 WNZT 治理与检疫，不能绕过检疫直发；发布边界要求真实 Refined_F2、WNZT 完整、检疫 `PASS`、`publish_status=ELIGIBLE`，并保留配置快照和检疫证据。候选创建时不得仅靠布尔字段把 Raw_F2 标成已治理。
+- 相关验证优先跑：`tests/test_operator_engine.py`、`tests/test_operator_registry.py`、`tests/test_factor_factory_api.py`、`tests/test_factor_quarantine_api.py`，再按影响面跑固定 backend/frontend scripts。每次改变工厂 pipeline，必须分别验证完整批次口径、preview 截断口径和发布准入口径不会混用，并至少包含一条缺证据应失败的负向路径。
 
 本文件是 Grit Backtest Platform 的工程规则手册，用来整理当前仓库已经存在的技术真相、任务路由规则、验证路径与完成定义。
 
 ## Git Fast / Impact / Full 当前真相
+
+- `latest-fast-gate.md` 与 `latest-impact-gate.md` 的 `## Steps` 必须保留每一步 `duration=...`，用于直接定位 git checks、backend targeted tests、frontend TypeScript 与 frontend Vitest 的耗时来源，不能再依赖文件时间反推。
+- 改 backend/API/shared contract 后，impact planner 会强制纳入 owner slice；日常实现阶段也应先手工跑同一组：
+  `.\.venv\Scripts\python.exe -m pytest tests/test_factor_research_api.py tests/test_backend_api.py tests/test_factor_mining_api.py tests/test_factor_factory_api.py tests/test_factor_quarantine_api.py -q`
+- 改异步任务、后台 job、进度或 completed 状态发布顺序后，impact 会选择该时序测试并按 `async_repeat_count` 重复执行；日常实现阶段也应至少单独跑一次：
+  `.\.venv\Scripts\python.exe -m pytest tests/test_factor_mining_api.py::test_factor_mining_api_runs_one_thousand_candidates_without_factor_library_write -q`
+- 改 F1/F2 因子库、因子工厂或前端 view-model 后，impact planner 会强制纳入这组 Vitest；日常实现阶段先在 `web/` 下跑：
+  `node scripts/run-vitest-fixed.cjs factors.phase0.f1.test.tsx factor.model-builder.test.tsx factor.factory.test.tsx app.routes.foundation.test.tsx`
+- 改 `scripts/codex-validate-*`、`scripts/git_gate_plan.py`、pre-push hook 或门禁报告格式后，impact gate 会执行 PlanOnly 自测；日常实现阶段必须先跑：
+  `powershell -ExecutionPolicy Bypass -File .\scripts\codex-validate-impact.ps1 -PlanOnly`
+  与 `powershell -ExecutionPolicy Bypass -File .\scripts\codex-validate-fast.ps1`，用于提前暴露 tsc cwd、Vitest cwd、report path 和 eligibility 逻辑问题。
+- 提交前建议先跑 `powershell -ExecutionPolicy Bypass -File .\scripts\codex-validate-impact.ps1 -Scope WorkingTree`，把影响面问题留在实现阶段暴露，而不是等最后 git push。
+- impact 已通过但 pre-push 的 fast gate 返回 `not-fast` 时，`pre_push_hook.py` 会读取 `latest-impact-gate.md`，校验 `status/scope/plan_only/skip_tests/head_sha/base_sha/duration` 与当前 push 匹配后直接放行；不匹配时才提示重新运行 impact/full 或由操作者显式选择 `git push --no-verify`。
 
 - `git-fast` 对应 `scripts/codex-validate-fast.ps1`，也是 pre-push 默认门禁；它只做日常精准增量验证，目标 5 分钟内完成，不会自动升级到长跑影响面测试。
 - `git-impact` 对应 `scripts/codex-validate-impact.ps1`，用于 fast 返回 `not-fast` 后手动运行；它过滤证据资产后按 owner map 加影响面 fanout 运行 backend/frontend targeted checks，并运行前端 `tsc --noEmit`。
@@ -76,6 +122,22 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - **截图必须目检**：最终 desktop/mobile 截图必须被打开并检查模块顺序、密度、字体、字号、留白、滚动、重叠、弹层默认态和条件状态。未目检的截图按 `NOT_CHECKED` 处理。
 - **偏离即失败**：任何未登记批准来源的视觉、文案、状态、控件或响应式偏离，均记为 `FAIL`。不能把“功能可用”或“数据真实”作为设计稿偏离的默认豁免。
 - **交付声明格式**：UI 交付最终说明必须包含 Trace Matrix 路径、设计截图、live 截图、签核统计、未通过项或批准偏离。缺少这些信息时，默认 UI 验收未完成。
+- **交付口径冻结**：矩阵未达到 `FAIL=0 / BLOCKED=0 / NOT_CHECKED=0` 前，开发输出只能称为“验收候选”或“待 review”，不得使用“完成”“已交付”“100% 一致”等关闭口径。Coder 自测不能替代 reviewer 或 Verification owner 的拒收权。
+- **变更包收口**：设计锁定 UI 交付前必须对本次 ownership 路径运行 `git status --short -- <owned paths>`，确认源码、测试、Trace Matrix、截图和新增文件均已纳入变更包或作为证据资产登记。核心源码、测试或 view-model 文件处于 untracked 状态时，默认交付 blocked，不能只凭 live 页面已修好关闭。
+
+#### 1.3.4 UI Review 提效执行流
+
+设计稿验收不应靠反复手动截图和临场补矩阵。后续 `$grit-review` 针对 UI parity、视觉漂移或“100% 一致”任务时，默认采用以下快速路径：
+
+1. **先建骨架**：在 `output/ui-artifact-trace/<task-slug>/trace-matrix.md` 建立 skeleton，预先写入设计源、live route、desktop/mobile viewport、shared shell scope、截图文件名、条件态、几何/overflow gate、允许 live 替代字段。
+2. **先验 runtime**：live review 前运行 runtime preflight，确认 `8000/4173`、served bundle、API 200、runtime DB 和 cache-busting URL 可用；环境未 ready 时先修 runtime，不把 `Failed to fetch` 误判为 UI 缺陷。
+3. **一次采集证据**：优先用 Playwright 或脚本批量输出 design desktop、live desktop、live mobile、关键 modal/drawer/条件态截图、metrics JSON、overflow report、console errors 和 failed requests，避免逐项手动重跑。
+4. **三层并行验收**：矩阵按结构层、几何层、内容层同步填写。结构层核对模块顺序和 card/table/button 数量；几何层核对 top/width/height/overflow/sticky/scroll；内容层核对中文文案、状态、真实数据映射和 raw leak。
+5. **先定 shell 范围**：矩阵第一屏必须声明 shared shell 是否在本次验收范围内。若只验 page body，侧栏/顶栏差异只作为批准偏离或 out-of-scope 记录，不在后续重复争论。
+6. **先标 live 替代字段**：将字段标为 `frozen-design`、`live-substitutable` 或 `must-match-copy`。真实 registry/API 数值差异只有在矩阵中登记后才算批准偏离。
+7. **最后收口变更包**：交付前运行 `git status --short -- <owned paths>` 和 `git diff --check -- <owned paths>`。核心 source/test/view-model untracked 时，默认 blocked。
+
+最终报告必须包含 Trace Matrix 路径、截图目录、metrics JSON、runtime/API 证据、三层验收结论、批准偏离和 owner-path status 结果。缺少任一项时，只能交付为“验收候选”。
 
 所有 UI 实现页面（新增、改造、修复、重构）只要存在 `DESIGN.md`、批准 HTML/SPEC、截图、设计稿或用户给出的目标页面，就必须把这些材料作为 UI 实施硬基线，不能只把它们当作参考图。
 
@@ -100,7 +162,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - 表格单元格需要保持浏览器原生 `table-cell` 布局，不要把 `td` / `th` 本身改成 `display: grid`、`display: flex` 等。若单元格内部需要栅格或弹性排版，必须新增内部 wrapper；多行内容验收要比较该单元格高度与整行高度，确认分隔线不会提前断开。
 - live API 或 demo data 与静态设计稿不一致时，页面必须通过 view-model / formatter 统一前台展示，不能直接暴露 raw backend label、未翻译英文、乱码、占位符或实现说明语气。
 - Runtime 工作台页面不得在 API 空结果或失败时用本地样例补位；必须展示真实 empty/error 状态，并把页面按钮的 API 调用作为交互证明的一部分。mock fixture 只能用于单测，不能作为 live route 验收证据。
-- 因子工厂的检疫候选来源必须与挖掘队列保持同一投影：只接收 mining job 的 top candidates，不读取内部全量候选 ledger；列表按归一化表达式去重。L1 只允许 `Close/Open/Volume/MarketCap/Sector` 等未经算子的事实字段走 PIT-only 准入；只要表达式出现 `Return/MA/Std` 等算子，就归入 L2 Raw Signal 并继续通过泄露、OOS 衰减、逻辑重复、Auto-Residual/正交性、容量与回撤等硬闸门后才可自动发布。
+- 因子工厂旧沙盒兼容入口可以读取 mining job 的 top candidates；Phase 1 自动矿机不得把 top candidates 当作任务入口、检疫事实源或总量统计。完整 Raw_F2 batch ledger 是检疫来源，top candidates 只是 UI 预览或分页投影。L1 只允许 `Close/Open/Volume/MarketCap/Sector` 等未经算子的事实字段走 PIT-only 准入；只要表达式出现 `Return/MA/Std` 等算子，就归入 L2 Raw Signal，并在真实 WNZT/检疫证据齐备后才可进入发布准入。
 - 用户报告已批准 UI 在某个具体 live route 或对象 ID 上漂移时，验收必须抓取用户给出的精确 URL/ID；只抽样列表第一条、默认 demo 对象或旧截图不能作为该问题的完成证据。
 - 技术方案只决定数据契约、状态语义和交互责任；批准 HTML/SPEC/PNG 才决定前台模块数量、顺序、卡片数量、标题和密度。实现时不得把技术方案里“可以展示”的信息全部直接铺上页面，除非批准稿已给出位置，或 Trace Matrix 明确登记为批准偏离。
 - 对已批准稿明确定义了文案、状态值、统计数字或时间戳的设计锁定页，前台必须先通过 view-model / formatter / approved constants 冻结这些展示口径；未经 Trace Matrix 明确标注为“允许 live 替换”的字段，不能把实时 refresh delta、waiver 计数、诊断窗口、provider 缺口直接渗透到前台主舞台。
@@ -143,6 +205,25 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `GET/PUT /factor-factory/operator-config` 保存默认 profile 草稿；`POST /factor-factory/operator-config/snapshots` 生成不可变 `operator_config_snapshot_id`。默认只启用 `TS_Return`、`TS_Rank`、`TS_Corr`，窗口为 `[3,5,10,21,63,126,252]`，默认 depth 为 `2`。
 - `POST /factor-factory/run-now` 与每日自动化会把 `f1_catalog_snapshot_id`、`operator_config_snapshot_id`、启用算子、窗口空间、默认 depth、阻塞字段策略写入 `factor_factory_runs.request_json.config_snapshot` 与 summary；`config_signature` 包含两个快照 ID。
 - `DATA_SOURCE_BLOCKED` 的 F1 字段会按配置策略从 `source_factor_ids` 中排除，挖掘候选仍必须走 `sandbox -> quarantine -> publish`。
+
+### 1.5.2 Phase 0 / F1 / Operator 三段实施路径
+
+Phase 0 这类同时触及合同、执行、UI、测试和文档的任务，默认不得一次性合并为单个交付切片。除非用户明确要求“一次端到端落完”且改动面很小，否则按以下三段推进：
+
+| 切片 | 范围 | 最小验收 | 不做事项 |
+| --- | --- | --- | --- |
+| `Contract Skeleton` | schema、Pydantic/TS types、API route、storage helper、demo/mock、最小 read-model | 接口可查、旧请求兼容、快照 ID 可引用、contract tests 通过 | 不接完整 PIT resolver，不追 UI 100% |
+| `Execution Core` | PIT/F1 resolver、operator engine、factory run 引用、不可变快照、负向数据语义 | 数据链路正确、`DATA_SOURCE_BLOCKED` 策略正确、历史不足/缺证据负向路径失败、focused backend tests 通过 | 不扩展前台设计，不重做弹层密度 |
+| `UI Parity` | F1 tab、工厂配置弹层、中文 view-model、桌面/移动截图、Trace Matrix 签核 | Trace Matrix `FAIL=0/BLOCKED=0/NOT_CHECKED=0`、focused frontend tests 和截图目检通过 | 不新增后端能力，不改运行合同 |
+
+多代理计划必须优先按写入边界拆分，而不是只按产品职责拆分：
+
+- `contracts/storage`：`models.py`、`api.py`、storage helper、migration-safe schema。
+- `execution/service`：resolver、operator engine、factory run snapshot 引用、负向语义。
+- `UI/types/mock`：`web/src/types.ts`、demo/mock、页面、CSS、view-model。
+- `tests/docs/trace`：focused tests、Trace Matrix、TECHNICAL/ARCHITECTURE/CHANGELOG。
+
+`models.py`、`api.py`、`web/src/types.ts`、factory page、shared tests 属于集成热点，每次只能有一个 integration owner。跨 backend/frontend/contract 的工作默认先跑 owner slice 或 `git-impact`，不要先按小修 fast gate 试错。
 
 ### 1.6 CHANGELOG 维护规则
 
@@ -283,7 +364,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 
 ### 4.2 QuickStart 真相
 
-Codex 对话默认不要直接反复重启本地脚本。先使用 `powershell -ExecutionPolicy Bypass -File .\scripts\runtime-supervisor.ps1 status quickstart` 或 `start-if-not-running quickstart` 查看/提交意图；确需重启时使用 `restart <service> --force --reason ...`，让 supervisor 记录锁、冷却窗口、pending intent 和 `.tmp/runtime-supervisor/state/*.json` 状态镜像。人工仍可运行 `QuickStart-Grit.ps1`，但 QuickStart 启动前会调用 supervisor guard；如果 `8000` backend 与 `4173` preview 已健康运行，启动器会复用现有监听而不是默认 Stop-Process 重启。
+Codex 对话默认不要直接反复重启本地脚本。先使用 `powershell -ExecutionPolicy Bypass -File .\scripts\codex-grit-runtime-preflight.ps1 -Json` 做只读 preflight，读取 `quickstartOverall`、`decision`、`backendRepoOwned`、`frontendRepoOwned`、`frontendDistHash/frontendServedHash`、`portProbeStatus` 和 `browserProbeStatus` 后再决定复用、重建或重启。需要提交 supervisor 意图时再使用 `powershell -ExecutionPolicy Bypass -File .\scripts\runtime-supervisor.ps1 status quickstart`、`start-if-not-running quickstart` 或 `restart <service> --force --reason ...`；让 supervisor 记录锁、冷却窗口、pending intent 和 `.tmp/runtime-supervisor/state/*.json` 状态镜像。人工仍可运行 `QuickStart-Grit.ps1`，但 QuickStart 启动前会调用 supervisor guard；如果 `8000` backend 与 `4173` preview 已健康运行，启动器会复用现有监听而不是默认 Stop-Process 重启。
 
 `QuickStart-Grit.ps1` 是人工启动主入口，当前职责包括：
 
@@ -950,6 +1031,7 @@ Phase 1.2 验证时至少覆盖：
 
 当用户给出 `http://127.0.0.1:4173/...` 或其它本地 live URL 作为验收入口时，交付前必须验证当前正在监听的本地进程，而不能只引用 mocked tests 或 fixed slice。最低要求：
 
+- 先运行 `powershell -ExecutionPolicy Bypass -File .\scripts\codex-grit-runtime-preflight.ps1 -Json`。只有 `quickstartOverall=ready` 且 `decision=reuse` 时才直接进入浏览器/API live check；若返回 `rebuild-frontend-and-restart-preview`、`restart-*-via-supervisor`、`blocked-*` 或 `probe-degraded`，按 `nextAction` 处理后重新 preflight。
 - 确认 `8000` 的 `uvicorn` 和 `4173` 的 preview 进程是在最终代码之后启动的；如果不是，先停止 repo-local 旧监听并重启。
 - 重新执行 `npm run build`，避免 `preview-server.mjs` 因 dist promotion 失败继续服务旧 bundle。
 - 若前端构建或预览曾临时指定 `VITE_API_BASE_URL`，最终交付前必须恢复并验证 `http://127.0.0.1:8000`。`#/factors` 等页面出现 `Failed to fetch`、列表计数归零或空表时，先检查 `8000` 后端监听和构建包 API 指向，再判断页面代码问题。

@@ -8,6 +8,7 @@ their own parent controller thread.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import random
 import re
@@ -47,6 +48,37 @@ DEFAULT_COMPOSITION_RECIPE_FAMILIES = (
     "residual_neutralized",
     "ts_denoise",
 )
+COMPOSITION_METHOD_RECIPE_FAMILY_BY_TYPE = {
+    "LINEAR_WEIGHTING": "style_blend",
+    "RATIO_RISK_ADJUSTED": "risk_adjusted",
+    "RESIDUAL_ORTHOGONAL": "residual_neutralized",
+    "RANK_POOLING": "rank_pooling",
+    "FFBLEND_STYLE": "ffblend_style",
+    "DIVERGENCE_PENALTY": "divergence",
+    "TIME_SERIES_DENOISE": "ts_denoise",
+}
+COMPOSITION_METHOD_TYPE_ALIASES = {
+    "STYLE_BLEND": "LINEAR_WEIGHTING",
+    "RISK_ADJUSTED": "RATIO_RISK_ADJUSTED",
+    "VALUE_ANCHOR": "RATIO_RISK_ADJUSTED",
+    "RESIDUAL_NEUTRALIZED": "RESIDUAL_ORTHOGONAL",
+    "DIVERGENCE": "DIVERGENCE_PENALTY",
+    "TS_DENOISE": "TIME_SERIES_DENOISE",
+}
+COMPOSITION_METHOD_REQUIRED_SOURCE_COUNTS = {
+    "LINEAR_WEIGHTING": 2,
+    "RATIO_RISK_ADJUSTED": 2,
+    "RESIDUAL_ORTHOGONAL": 2,
+    "RANK_POOLING": 2,
+    "FFBLEND_STYLE": 2,
+    "DIVERGENCE_PENALTY": 2,
+    "TIME_SERIES_DENOISE": 1,
+}
+CONFIGURED_COMPOSITION_RECIPE_FAMILIES = (
+    *DEFAULT_COMPOSITION_RECIPE_FAMILIES,
+    "rank_pooling",
+    "ffblend_style",
+)
 VALUE_VOL_WNZT_RATIO_EXPRESSION = (
     "Rank(Neutralize(ZScore(Winsorize(s_val_cfp_ltm_raw, 3)))) / "
     "Rank(Neutralize(ZScore(Winsorize(s_vol_downside_252d_rank, 3))))"
@@ -64,6 +96,10 @@ _RESIDUAL_FACTOR_REFERENCE_PATTERN = re.compile(
 )
 _TS_RANK_RETURN_PATTERN = re.compile(
     r"^\s*Ts_?Rank\s*\(\s*Return\s*\(\s*Close\s*,\s*(\d+)\s*\)\s*,\s*(\d+)\s*\)\s*$",
+    re.IGNORECASE,
+)
+_TS_RANK_FACTOR_REFERENCE_PATTERN = re.compile(
+    r"^\s*Ts_?Rank\s*\(\s*(s_[a-z0-9_]+(?:_raw|_rank)?)\s*,\s*(\d+)\s*\)\s*$",
     re.IGNORECASE,
 )
 _FACTOR_ALIASES = {
@@ -226,6 +262,7 @@ class FactorMiningJobResult:
     failed_samples: tuple[FactorMiningFailedSample, ...] = ()
     top_candidates: tuple[FactorMiningCandidateSummary, ...] = ()
     all_candidates: tuple[FactorMiningCandidateSummary, ...] = field(default_factory=tuple)
+    composition_skip_evidence: tuple[Mapping[str, object], ...] = field(default_factory=tuple)
 
     def to_api_dict(self) -> dict[str, object]:
         return {
@@ -237,6 +274,7 @@ class FactorMiningJobResult:
             "throughput_per_second": self.throughput_per_second,
             "failed_samples": [sample.to_api_dict() for sample in self.failed_samples],
             "top_candidates": [candidate.to_api_dict() for candidate in self.top_candidates],
+            "composition_skip_evidence": [dict(item) for item in self.composition_skip_evidence],
         }
 
 
@@ -247,6 +285,7 @@ class FactorMiningRunner:
         request.validate()
         self.request = request
         self.job_id = _job_id_for_request(request)
+        self._composition_skip_evidence: tuple[Mapping[str, object], ...] = ()
 
     def run(
         self,
@@ -344,6 +383,7 @@ class FactorMiningRunner:
             failed_samples=tuple(failures[:20]),
             top_candidates=top_candidates,
             all_candidates=ranked_candidates,
+            composition_skip_evidence=self._composition_skip_evidence,
         )
 
     def _uses_composition_generation(self) -> bool:
@@ -361,7 +401,9 @@ class FactorMiningRunner:
 
     def _composition_candidate_specs(self, rng: random.Random) -> tuple[CompositionCandidateSpec, ...]:
         if not self._uses_composition_generation():
+            self._composition_skip_evidence = ()
             return ()
+        self._composition_skip_evidence = ()
         parent_pool = tuple(
             _canonical_factor_id(item)
             for item in (self.request.source_factor_ids or DEFAULT_COMPOSITION_SOURCE_FACTORS)
@@ -369,22 +411,41 @@ class FactorMiningRunner:
         )
         active_parents = tuple(dict.fromkeys(parent_pool or DEFAULT_COMPOSITION_SOURCE_FACTORS))
         active_parent_set = set(active_parents)
+        has_explicit_parent_pool = any(str(item).strip() for item in self.request.source_factor_ids)
         families = {
             str(item).strip().lower()
-            for item in (self.request.recipe_families or DEFAULT_COMPOSITION_RECIPE_FAMILIES)
+            for item in (self.request.recipe_families or CONFIGURED_COMPOSITION_RECIPE_FAMILIES)
             if str(item).strip()
-        } or set(DEFAULT_COMPOSITION_RECIPE_FAMILIES)
+        } or set(CONFIGURED_COMPOSITION_RECIPE_FAMILIES)
         specs: list[CompositionCandidateSpec] = []
-        for spec in _composition_template_specs():
-            if spec.recipe_family not in families:
-                continue
-            if spec.source_factor_ids and not set(spec.source_factor_ids).issubset(active_parent_set):
-                continue
-            specs.append(spec)
+        configured_methods = _configured_composition_methods(self.request.composition_policy)
+        skip_evidence: list[Mapping[str, object]] = []
+        if configured_methods is not None:
+            configured_specs, skip_evidence = _composition_specs_from_methods(
+                configured_methods,
+                active_parent_set=active_parent_set,
+                has_explicit_parent_pool=has_explicit_parent_pool,
+                families=families,
+                default_publish_boundary=str(
+                    self.request.composition_policy.get("publish_boundary")
+                    if isinstance(self.request.composition_policy, Mapping)
+                    else ""
+                )
+                or "manual_after_quarantine",
+            )
+            specs.extend(configured_specs)
+        else:
+            for spec in _composition_template_specs():
+                if spec.recipe_family not in families:
+                    continue
+                if spec.source_factor_ids and not set(spec.source_factor_ids).issubset(active_parent_set):
+                    continue
+                specs.append(spec)
 
         exploration_budget = max(0, int(self.request.exploration_budget or 0))
         if exploration_budget:
             specs.extend(_exploratory_pairwise_specs(active_parents, budget=exploration_budget, rng=rng))
+        self._composition_skip_evidence = tuple(skip_evidence)
 
         seen: set[tuple[str, tuple[str, ...]]] = set()
         unique_specs: list[CompositionCandidateSpec] = []
@@ -619,6 +680,357 @@ def _expression_signature(expression: str) -> str:
     return " ".join(str(expression or "").split()).lower()
 
 
+def _composition_metadata(
+    *,
+    label: str,
+    method_id: str,
+    method_type: str,
+    recipe_family: str,
+    source_factor_ids: Sequence[str],
+    formula_template: str,
+    params: Mapping[str, Any] | None = None,
+    publish_boundary: str = "manual_after_quarantine",
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    metadata = {
+        "label": label,
+        "method_id": method_id,
+        "method_type": method_type,
+        "recipe_family": recipe_family,
+        "source_factor_ids": list(source_factor_ids),
+        "formula_template": formula_template,
+        "params": dict(params or {}),
+        "publish_boundary": publish_boundary,
+    }
+    metadata.update(dict(extra or {}))
+    return metadata
+
+
+def _configured_composition_methods(policy: Mapping[str, Any] | None) -> tuple[Mapping[str, Any], ...] | None:
+    if not isinstance(policy, Mapping):
+        return None
+    method_key = next(
+        (
+            key
+            for key in ("composition_methods", "methods", "compositionMethods")
+            if key in policy
+        ),
+        None,
+    )
+    if method_key is None:
+        return None
+    raw_methods = policy.get(method_key)
+    if isinstance(raw_methods, Mapping):
+        methods: list[Mapping[str, Any]] = []
+        for method_key, raw_method in raw_methods.items():
+            if not isinstance(raw_method, Mapping):
+                continue
+            method = dict(raw_method)
+            method.setdefault("id", str(method_key))
+            methods.append(method)
+        return tuple(methods)
+    if isinstance(raw_methods, Sequence) and not isinstance(raw_methods, (str, bytes)):
+        return tuple(dict(item) for item in raw_methods if isinstance(item, Mapping))
+    return ()
+
+
+def _composition_specs_from_methods(
+    methods: Sequence[Mapping[str, Any]],
+    *,
+    active_parent_set: set[str],
+    has_explicit_parent_pool: bool,
+    families: set[str],
+    default_publish_boundary: str,
+) -> tuple[tuple[CompositionCandidateSpec, ...], list[Mapping[str, object]]]:
+    specs: list[CompositionCandidateSpec] = []
+    skip_evidence: list[Mapping[str, object]] = []
+    for raw_method in methods:
+        method = dict(raw_method)
+        method_id = _composition_method_id(method)
+        method_type = _composition_method_type(method)
+        if not _composition_method_is_enabled(method):
+            continue
+        recipe_family = _composition_recipe_family(method_type, method)
+        source_factor_ids = _composition_method_source_factor_ids(method)
+        formula_template = str(method.get("formula_template") or method.get("formulaTemplate") or "").strip()
+        params = _composition_method_params(method)
+        publish_boundary = str(method.get("publish_boundary") or method.get("publishBoundary") or default_publish_boundary).strip()
+        publish_boundary = publish_boundary or default_publish_boundary
+        label = str(method.get("label") or method.get("name") or method_id).strip() or method_id
+
+        if not method_type or method_type not in COMPOSITION_METHOD_RECIPE_FAMILY_BY_TYPE:
+            skip_evidence.append(
+                _composition_skip_evidence(
+                    method_id=method_id,
+                    method_type=method_type,
+                    recipe_family=recipe_family,
+                    source_factor_ids=source_factor_ids,
+                    formula_template=formula_template,
+                    params=params,
+                    publish_boundary=publish_boundary,
+                    reason="UNSUPPORTED_METHOD_TYPE",
+                )
+            )
+            continue
+        if recipe_family not in families:
+            skip_evidence.append(
+                _composition_skip_evidence(
+                    method_id=method_id,
+                    method_type=method_type,
+                    recipe_family=recipe_family,
+                    source_factor_ids=source_factor_ids,
+                    formula_template=formula_template,
+                    params=params,
+                    publish_boundary=publish_boundary,
+                    reason="RECIPE_FAMILY_NOT_REQUESTED",
+                )
+            )
+            continue
+        if has_explicit_parent_pool and not set(source_factor_ids).issubset(active_parent_set):
+            skip_evidence.append(
+                _composition_skip_evidence(
+                    method_id=method_id,
+                    method_type=method_type,
+                    recipe_family=recipe_family,
+                    source_factor_ids=source_factor_ids,
+                    formula_template=formula_template,
+                    params=params,
+                    publish_boundary=publish_boundary,
+                    reason="SOURCE_FACTORS_OUTSIDE_ACTIVE_POOL",
+                )
+            )
+            continue
+        unsupported_sources = tuple(item for item in source_factor_ids if item not in _FACTOR_FAMILIES)
+        if unsupported_sources:
+            skip_evidence.append(
+                _composition_skip_evidence(
+                    method_id=method_id,
+                    method_type=method_type,
+                    recipe_family=recipe_family,
+                    source_factor_ids=source_factor_ids,
+                    formula_template=formula_template,
+                    params={**params, "unsupported_source_factor_ids": list(unsupported_sources)},
+                    publish_boundary=publish_boundary,
+                    reason="UNSUPPORTED_SOURCE_FACTORS",
+                )
+            )
+            continue
+        required_sources = COMPOSITION_METHOD_REQUIRED_SOURCE_COUNTS[method_type]
+        if len(source_factor_ids) < required_sources:
+            skip_evidence.append(
+                _composition_skip_evidence(
+                    method_id=method_id,
+                    method_type=method_type,
+                    recipe_family=recipe_family,
+                    source_factor_ids=source_factor_ids,
+                    formula_template=formula_template,
+                    params={**params, "required_source_count": required_sources},
+                    publish_boundary=publish_boundary,
+                    reason="INSUFFICIENT_SOURCE_FACTORS",
+                )
+            )
+            continue
+        expression = _expression_for_composition_method(method_type, recipe_family, source_factor_ids, params)
+        metadata = _composition_metadata(
+            label=label,
+            method_id=method_id,
+            method_type=method_type,
+            recipe_family=recipe_family,
+            source_factor_ids=source_factor_ids,
+            formula_template=formula_template or expression,
+            params=params,
+            publish_boundary=publish_boundary,
+            extra={"configured_method": True},
+        )
+        specs.append(
+            CompositionCandidateSpec(
+                expression=expression,
+                source_factor_ids=source_factor_ids,
+                recipe_kind="configured_method",
+                recipe_family=recipe_family,
+                orthogonality_intent=_composition_orthogonality_intent(method_type, recipe_family, method_id),
+                composition_metadata=metadata,
+            )
+        )
+    return tuple(specs), skip_evidence
+
+
+def _composition_method_id(method: Mapping[str, Any]) -> str:
+    value = method.get("id") or method.get("method_id") or method.get("key") or method.get("methodId")
+    if value is None:
+        value = _composition_method_type(method).lower() or "composition_method"
+    return str(value).strip() or "composition_method"
+
+
+def _composition_method_type(method: Mapping[str, Any]) -> str:
+    value = method.get("method_type") or method.get("methodType") or method.get("type")
+    if value is None:
+        value = method.get("key") or method.get("id") or ""
+    normalized = str(value).strip().upper().replace("-", "_")
+    return COMPOSITION_METHOD_TYPE_ALIASES.get(normalized, normalized)
+
+
+def _composition_method_is_enabled(method: Mapping[str, Any]) -> bool:
+    if "disabled" in method:
+        return not _coerce_bool(method.get("disabled"), default=False)
+    return _coerce_bool(method.get("enabled"), default=True)
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "y", "on", "enabled"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "off", "disabled"}:
+        return False
+    return default
+
+
+def _composition_recipe_family(method_type: str, method: Mapping[str, Any]) -> str:
+    explicit = str(method.get("recipe_family") or method.get("recipeFamily") or "").strip().lower()
+    if explicit:
+        if method_type == "RATIO_RISK_ADJUSTED" and explicit in {"value", "valuation", "value_anchor"}:
+            return "value_anchor"
+        return explicit
+    if method_type == "RATIO_RISK_ADJUSTED":
+        signature = " ".join(
+            str(method.get(key) or "")
+            for key in ("id", "method_id", "key", "label", "theme", "formula_template")
+        ).lower()
+        source_factor_ids = _composition_method_source_factor_ids(method)
+        if "value" in signature or "valuation" in signature or any("val" in item for item in source_factor_ids):
+            return "value_anchor"
+    return COMPOSITION_METHOD_RECIPE_FAMILY_BY_TYPE.get(method_type, "")
+
+
+def _composition_method_source_factor_ids(method: Mapping[str, Any]) -> tuple[str, ...]:
+    params = _composition_method_params(method)
+    raw_sources = (
+        method.get("source_factor_ids")
+        or method.get("sourceFactorIds")
+        or method.get("source_factors")
+        or method.get("sourceFactors")
+        or params.get("source_factor_ids")
+        or params.get("sourceFactorIds")
+        or ()
+    )
+    return tuple(
+        dict.fromkeys(
+            _canonical_factor_id(item)
+            for item in _coerce_string_tuple(raw_sources)
+            if str(item).strip()
+        )
+    )
+
+
+def _composition_method_params(method: Mapping[str, Any]) -> dict[str, Any]:
+    raw_params = method.get("params")
+    return dict(raw_params) if isinstance(raw_params, Mapping) else {}
+
+
+def _composition_skip_evidence(
+    *,
+    method_id: str,
+    method_type: str,
+    recipe_family: str,
+    source_factor_ids: Sequence[str],
+    formula_template: str,
+    params: Mapping[str, Any],
+    publish_boundary: str,
+    reason: str,
+) -> Mapping[str, object]:
+    return {
+        "method_id": method_id,
+        "method_type": method_type,
+        "recipe_family": recipe_family,
+        "source_factor_ids": list(source_factor_ids),
+        "formula_template": formula_template,
+        "params": dict(params),
+        "publish_boundary": publish_boundary,
+        "reason": reason,
+        "candidate_generated": False,
+        "persisted_to_factor_definitions": False,
+    }
+
+
+def _expression_for_composition_method(
+    method_type: str,
+    recipe_family: str,
+    source_factor_ids: Sequence[str],
+    params: Mapping[str, Any],
+) -> str:
+    first = source_factor_ids[0]
+    second = source_factor_ids[1] if len(source_factor_ids) > 1 else source_factor_ids[0]
+    if method_type == "LINEAR_WEIGHTING":
+        return f"{first} * {second}"
+    if method_type == "RATIO_RISK_ADJUSTED":
+        if recipe_family == "value_anchor" and {"s_val_cfp_ltm_raw", "s_vol_downside_252d_rank"}.issubset(source_factor_ids):
+            return VALUE_VOL_WNZT_RATIO_EXPRESSION
+        alpha = _preferred_source(source_factor_ids, preferred_families=("momentum", "quality", "value")) or first
+        risk = _preferred_source(source_factor_ids, preferred_families=("risk",)) or second
+        if alpha == risk and len(source_factor_ids) > 1:
+            risk = second
+        return f"{alpha} / {risk}"
+    if method_type == "RESIDUAL_ORTHOGONAL":
+        return f'ZScore(Residual({first}, by="{second}"))'
+    if method_type == "RANK_POOLING":
+        return f"{first} + {second}"
+    if method_type == "FFBLEND_STYLE":
+        left = _preferred_source(source_factor_ids, preferred_families=("value", "momentum")) or first
+        right = _preferred_source(
+            [item for item in source_factor_ids if item != left],
+            preferred_families=("quality", "size", "risk"),
+        ) or second
+        return f"{left} * {right}"
+    if method_type == "DIVERGENCE_PENALTY":
+        primary = _preferred_source(source_factor_ids, preferred_families=("momentum", "value", "quality")) or first
+        control = _preferred_source(
+            [item for item in source_factor_ids if item != primary],
+            preferred_families=("risk", "size", "liquidity"),
+        ) or second
+        return f"{primary} - {control}"
+    if method_type == "TIME_SERIES_DENOISE":
+        window = _positive_param_int(params, "window", "lookback_window", "ts_window", default=252)
+        return f"TsRank({first}, {window})"
+    return f"{first} * {second}"
+
+
+def _preferred_source(source_factor_ids: Sequence[str], *, preferred_families: Sequence[str]) -> str | None:
+    preferred = set(preferred_families)
+    for factor_id in source_factor_ids:
+        if _FACTOR_FAMILIES.get(factor_id) in preferred:
+            return factor_id
+    return None
+
+
+def _positive_param_int(params: Mapping[str, Any], *keys: str, default: int) -> int:
+    for key in keys:
+        if key not in params:
+            continue
+        try:
+            value = int(params[key])
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return default
+
+
+def _composition_orthogonality_intent(method_type: str, recipe_family: str, method_id: str) -> str:
+    if method_type == "RESIDUAL_ORTHOGONAL":
+        return "configured_residual_orthogonal"
+    if method_type == "DIVERGENCE_PENALTY":
+        return "configured_divergence_penalty"
+    if method_type == "TIME_SERIES_DENOISE":
+        return "configured_time_series_denoise"
+    return f"configured_{recipe_family or method_id}"
+
+
 def _composition_template_specs() -> tuple[CompositionCandidateSpec, ...]:
     return (
         CompositionCandidateSpec(
@@ -627,7 +1039,14 @@ def _composition_template_specs() -> tuple[CompositionCandidateSpec, ...]:
             recipe_kind="template",
             recipe_family="style_blend",
             orthogonality_intent="quality_driven_momentum",
-            composition_metadata={"label": "Quality-Driven Momentum", "publish_boundary": "manual_after_quarantine"},
+            composition_metadata=_composition_metadata(
+                label="Quality-Driven Momentum",
+                method_id="style_blend_template",
+                method_type="LINEAR_WEIGHTING",
+                recipe_family="style_blend",
+                source_factor_ids=("s_mom_6m_rank", "s_qlty_roe_ltm_raw"),
+                formula_template="s_mom_6m_rank * s_qlty_roe_ltm_raw",
+            ),
         ),
         CompositionCandidateSpec(
             expression="s_mom_6m_rank / s_vol_252d_rank",
@@ -635,7 +1054,14 @@ def _composition_template_specs() -> tuple[CompositionCandidateSpec, ...]:
             recipe_kind="template",
             recipe_family="risk_adjusted",
             orthogonality_intent="risk_adjusted_momentum",
-            composition_metadata={"label": "Risk-Adjusted Momentum", "publish_boundary": "manual_after_quarantine"},
+            composition_metadata=_composition_metadata(
+                label="Risk-Adjusted Momentum",
+                method_id="risk_adjusted_template",
+                method_type="RATIO_RISK_ADJUSTED",
+                recipe_family="risk_adjusted",
+                source_factor_ids=("s_mom_6m_rank", "s_vol_252d_rank"),
+                formula_template="s_mom_6m_rank / s_vol_252d_rank",
+            ),
         ),
         CompositionCandidateSpec(
             expression=VALUE_VOL_WNZT_RATIO_EXPRESSION,
@@ -643,11 +1069,15 @@ def _composition_template_specs() -> tuple[CompositionCandidateSpec, ...]:
             recipe_kind="template",
             recipe_family="value_anchor",
             orthogonality_intent="wnzt_value_volatility_ratio",
-            composition_metadata={
-                "label": "Composite Value/Volatility Ratio",
-                "operator_chain": ("W", "N", "Z", "T"),
-                "publish_boundary": "manual_after_quarantine",
-            },
+            composition_metadata=_composition_metadata(
+                label="Composite Value/Volatility Ratio",
+                method_id="value_anchor_template",
+                method_type="RATIO_RISK_ADJUSTED",
+                recipe_family="value_anchor",
+                source_factor_ids=("s_val_cfp_ltm_raw", "s_vol_downside_252d_rank"),
+                formula_template=VALUE_VOL_WNZT_RATIO_EXPRESSION,
+                extra={"operator_chain": ("W", "N", "Z", "T")},
+            ),
         ),
         CompositionCandidateSpec(
             expression="s_mom_6m_rank - s_vol_downside_252d_rank",
@@ -655,7 +1085,14 @@ def _composition_template_specs() -> tuple[CompositionCandidateSpec, ...]:
             recipe_kind="template",
             recipe_family="divergence",
             orthogonality_intent="momentum_downside_divergence",
-            composition_metadata={"label": "Momentum Divergence", "publish_boundary": "manual_after_quarantine"},
+            composition_metadata=_composition_metadata(
+                label="Momentum Divergence",
+                method_id="divergence_template",
+                method_type="DIVERGENCE_PENALTY",
+                recipe_family="divergence",
+                source_factor_ids=("s_mom_6m_rank", "s_vol_downside_252d_rank"),
+                formula_template="s_mom_6m_rank - s_vol_downside_252d_rank",
+            ),
         ),
         CompositionCandidateSpec(
             expression='ZScore(Residual(s_liq_amihud_20d_rank, by="s_size_cur_log"))',
@@ -663,7 +1100,14 @@ def _composition_template_specs() -> tuple[CompositionCandidateSpec, ...]:
             recipe_kind="template",
             recipe_family="residual_neutralized",
             orthogonality_intent="size_neutral_liquidity_anomaly",
-            composition_metadata={"label": "Size-Neutral Liquidity", "publish_boundary": "manual_after_quarantine"},
+            composition_metadata=_composition_metadata(
+                label="Size-Neutral Liquidity",
+                method_id="residual_neutralized_template",
+                method_type="RESIDUAL_ORTHOGONAL",
+                recipe_family="residual_neutralized",
+                source_factor_ids=("s_liq_amihud_20d_rank", "s_size_cur_log"),
+                formula_template='ZScore(Residual(s_liq_amihud_20d_rank, by="s_size_cur_log"))',
+            ),
         ),
         CompositionCandidateSpec(
             expression="TsRank(Return(Close, 5), 252)",
@@ -671,7 +1115,15 @@ def _composition_template_specs() -> tuple[CompositionCandidateSpec, ...]:
             recipe_kind="template",
             recipe_family="ts_denoise",
             orthogonality_intent="short_return_time_series_denoise",
-            composition_metadata={"label": "Short-Horizon Return Denoise", "publish_boundary": "manual_after_quarantine"},
+            composition_metadata=_composition_metadata(
+                label="Short-Horizon Return Denoise",
+                method_id="ts_denoise_template",
+                method_type="TIME_SERIES_DENOISE",
+                recipe_family="ts_denoise",
+                source_factor_ids=(),
+                formula_template="TsRank(Return(Close, 5), 252)",
+                params={"signal_window": 5, "window": 252},
+            ),
         ),
     )
 
@@ -730,12 +1182,15 @@ def _exploratory_pairwise_specs(
                 recipe_kind="exploratory_pairwise",
                 recipe_family="pairwise_cross_family",
                 orthogonality_intent=intent,
-                composition_metadata={
-                    "label": "Bounded Pairwise Composition",
-                    "left_family": left_family,
-                    "right_family": right_family,
-                    "publish_boundary": "manual_after_quarantine",
-                },
+                composition_metadata=_composition_metadata(
+                    label="Bounded Pairwise Composition",
+                    method_id="pairwise_cross_family",
+                    method_type="PAIRWISE_EXPLORATION",
+                    recipe_family="pairwise_cross_family",
+                    source_factor_ids=parents,
+                    formula_template=expression,
+                    params={"left_family": left_family, "right_family": right_family},
+                ),
             )
         )
     return tuple(specs)
@@ -783,10 +1238,20 @@ def _job_id_for_request(request: FactorMiningJobCreateRequest) -> str:
                 ",".join(_canonical_factor_id(item) for item in request.source_factor_ids),
                 ",".join(str(item).strip().lower() for item in request.recipe_families),
                 str(max(0, int(request.exploration_budget or 0))),
+                _stable_json_signature(request.composition_policy),
             )
         ).encode("utf-8")
     ).hexdigest()[:12]
     return f"fm_{digest}"
+
+
+def _stable_json_signature(value: Mapping[str, Any] | None) -> str:
+    if not isinstance(value, Mapping):
+        return "{}"
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    except TypeError:
+        return json.dumps(dict(value), sort_keys=True, separators=(",", ":"), default=str)
 
 
 def _candidate_id(expression: str, index: int, *, source_factor_ids: Sequence[str] = ()) -> str:
@@ -899,6 +1364,13 @@ def _evaluate_factor_mining_expression(
         return _series_ts_rank(
             _series_return(_close_series(symbol_data), int(ts_rank.group(1))),
             int(ts_rank.group(2)),
+        )
+
+    ts_rank_factor = _TS_RANK_FACTOR_REFERENCE_PATTERN.match(formula)
+    if ts_rank_factor:
+        return _series_ts_rank(
+            _series_from_factor_reference(ts_rank_factor.group(1), symbol_data),
+            int(ts_rank_factor.group(2)),
         )
 
     if re.sub(r"\s+", "", formula).lower() == VALUE_VOL_WNZT_RATIO_COMPACT:

@@ -141,8 +141,19 @@ def test_contract_change_moves_from_fast_to_impact_contract_smoke() -> None:
 
     assert fast_plan.eligible is False
     assert any("contract files" in reason for reason in fast_plan.ineligible_reasons)
-    assert "tests/test_backend_api.py" in impact_plan.backend_tests
-    assert "app.routes.foundation.test.tsx" in impact_plan.frontend_tests
+    assert impact_plan.backend_tests == [
+        "tests/test_factor_research_api.py",
+        "tests/test_backend_api.py",
+        "tests/test_factor_mining_api.py",
+        "tests/test_factor_factory_api.py",
+        "tests/test_factor_quarantine_api.py",
+    ]
+    assert set(impact_plan.frontend_tests) >= {
+        "factors.phase0.f1.test.tsx",
+        "factor.model-builder.test.tsx",
+        "factor.factory.test.tsx",
+        "app.routes.foundation.test.tsx",
+    }
 
 
 def test_validation_tooling_change_moves_from_fast_to_impact_release_workflow() -> None:
@@ -152,6 +163,7 @@ def test_validation_tooling_change_moves_from_fast_to_impact_release_workflow() 
     assert fast_plan.eligible is False
     assert any("validation tooling" in reason for reason in fast_plan.ineligible_reasons)
     assert impact_plan.backend_tests == ["tests/test_release_workflow.py"]
+    assert impact_plan.validation_self_test_required is True
 
 
 def test_unmapped_source_is_not_fast_but_impact_has_backend_fallback() -> None:
@@ -161,6 +173,26 @@ def test_unmapped_source_is_not_fast_but_impact_has_backend_fallback() -> None:
     assert fast_plan.eligible is False
     assert any("unmapped engineering file" in reason for reason in fast_plan.ineligible_reasons)
     assert impact_plan.backend_tests == ["tests/test_backend_api.py"]
+
+
+def test_impact_factor_frontend_runs_f1_f2_owner_slice() -> None:
+    impact_plan = planner.build_plan("impact", "Committed", ["web/src/pages/factors-page.tsx"])
+
+    assert set(impact_plan.frontend_tests) >= {
+        "factors.phase0.f1.test.tsx",
+        "factor.model-builder.test.tsx",
+        "factor.factory.test.tsx",
+        "app.routes.foundation.test.tsx",
+    }
+
+
+def test_impact_async_backend_selects_repeat_lifecycle_test() -> None:
+    impact_plan = planner.build_plan("impact", "Committed", ["src/grit_backtest_platform/_real_service_rebuilt.py"])
+
+    assert "tests/test_factor_mining_api.py" in impact_plan.backend_tests
+    assert impact_plan.async_lifecycle_repeat_tests == [
+        "tests/test_factor_mining_api.py::test_factor_mining_api_runs_one_thousand_candidates_without_factor_library_write"
+    ]
 
 
 def test_cli_plan_only_shape_outputs_json_without_running_tests() -> None:
