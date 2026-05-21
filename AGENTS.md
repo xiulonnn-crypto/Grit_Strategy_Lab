@@ -75,7 +75,7 @@ This repository is a local-first strategy research and backtest workbench. Treat
   and `powershell -ExecutionPolicy Bypass -File .\scripts\codex-validate-fast.ps1`.
 - Before the final commit/push path for broad contract, validation-tooling, or cross-stack work, run `powershell -ExecutionPolicy Bypass -File .\scripts\codex-validate-impact.ps1 -Scope WorkingTree` so impact failures surface during implementation rather than at the last git operation.
 - `latest-fast-gate.md` and `latest-impact-gate.md` must keep per-step `duration=...` entries for git checks, backend targeted tests, frontend TypeScript, and frontend Vitest. Use those durations in closeout reports instead of guessing from file timestamps.
-- The pre-push hook may consume `latest-impact-gate.md` only when it is `status=ok`, `scope=Committed`, not PlanOnly, did not skip tests, includes step duration evidence, and matches current `HEAD` plus the remote push base. Otherwise rerun impact/full instead of assuming the report is reusable.
+- The pre-push hook may consume `latest-impact-gate.md` only when it is `status=ok`, `scope=Committed`, not PlanOnly, did not skip tests, includes step duration evidence, and matches the remote push base. It may also reuse a matching parent `HEAD` when the current tip is a single generated metadata commit that changes only `CHANGELOG.md` and/or `src/grit_backtest_platform/_version.py`; any other head mismatch must rerun impact/full instead of assuming the report is reusable.
 
 ## Promoted Memory Quick Checks
 

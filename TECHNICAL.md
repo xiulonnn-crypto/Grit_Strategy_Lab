@@ -56,7 +56,7 @@ Cross-stack factor-factory work that touches backend contracts, execution, UI, t
   `powershell -ExecutionPolicy Bypass -File .\scripts\codex-validate-impact.ps1 -PlanOnly`
   与 `powershell -ExecutionPolicy Bypass -File .\scripts\codex-validate-fast.ps1`，用于提前暴露 tsc cwd、Vitest cwd、report path 和 eligibility 逻辑问题。
 - 提交前建议先跑 `powershell -ExecutionPolicy Bypass -File .\scripts\codex-validate-impact.ps1 -Scope WorkingTree`，把影响面问题留在实现阶段暴露，而不是等最后 git push。
-- impact 已通过但 pre-push 的 fast gate 返回 `not-fast` 时，`pre_push_hook.py` 会读取 `latest-impact-gate.md`，校验 `status/scope/plan_only/skip_tests/head_sha/base_sha/duration` 与当前 push 匹配后直接放行；不匹配时才提示重新运行 impact/full 或由操作者显式选择 `git push --no-verify`。
+- impact 已通过但 pre-push 的 fast gate 返回 `not-fast` 时，`pre_push_hook.py` 会读取 `latest-impact-gate.md`，校验 `status/scope/plan_only/skip_tests/head_sha/base_sha/duration` 与当前 push 匹配后直接放行。若当前 HEAD 只是已验证提交的单个受控元数据子提交，且只改 `CHANGELOG.md` 和/或 `src/grit_backtest_platform/_version.py`，可复用父提交 impact 证据；其他 head/base 不匹配仍必须重新运行 impact/full，或由操作者显式选择 `git push --no-verify`。
 
 - `git-fast` 对应 `scripts/codex-validate-fast.ps1`，也是 pre-push 默认门禁；它只做日常精准增量验证，目标 5 分钟内完成，不会自动升级到长跑影响面测试。
 - `git-impact` 对应 `scripts/codex-validate-impact.ps1`，用于 fast 返回 `not-fast` 后手动运行；它过滤证据资产后按 owner map 加影响面 fanout 运行 backend/frontend targeted checks，并运行前端 `tsc --noEmit`。

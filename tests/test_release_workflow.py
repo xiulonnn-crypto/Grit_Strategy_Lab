@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
@@ -30,6 +31,18 @@ def _load_pre_push_hook_module():
 
 
 pre_push_hook = _load_pre_push_hook_module()
+
+
+def _git(repo_root: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    return completed.stdout.strip()
 
 
 def _write_repo_files(repo_root: Path, changelog: str, version: str = "0.1.1") -> None:
@@ -94,6 +107,29 @@ def test_pre_push_accepts_matching_impact_gate_evidence() -> None:
     assert "matches" in reason
 
 
+def test_pre_push_accepts_metadata_only_child_of_validated_impact_head() -> None:
+    fields = {
+        "status": "ok",
+        "scope": "Committed",
+        "plan_only": "False",
+        "skip_tests": "False",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "elapsed_seconds": "439.838",
+    }
+
+    ok, reason = pre_push_hook._impact_gate_matches_push(
+        fields,
+        report_text="## Steps\n- [ok] backend targeted tests (duration=405.4s)\n",
+        expected_head_sha="cccccccccccccccccccccccccccccccccccccccc",
+        expected_base_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        metadata_child_reason="current HEAD only adds generated push metadata: CHANGELOG.md",
+    )
+
+    assert ok is True
+    assert "validated parent" in reason
+
+
 def test_pre_push_rejects_stale_or_plan_only_impact_evidence() -> None:
     fields = {
         "status": "ok",
@@ -114,6 +150,137 @@ def test_pre_push_rejects_stale_or_plan_only_impact_evidence() -> None:
 
     assert ok is False
     assert "PlanOnly" in reason
+
+
+def test_pre_push_detects_single_generated_metadata_child(tmp_path: Path) -> None:
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "config", "user.name", "Test User")
+    _write_repo_files(
+        tmp_path,
+        """# 更新日志
+
+## [Unreleased]
+
+### 修复 (Fixed)
+
+- **初始条目**: 用于测试发布元数据。
+""",
+    )
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "feat: validated parent")
+    validated_head = _git(tmp_path, "rev-parse", "HEAD")
+
+    (tmp_path / "CHANGELOG.md").write_text(
+        """# 更新日志
+
+## [Unreleased]
+
+## [0.1.1-001] - 2026-05-21 - 修复初始条目
+
+### 修复 (Fixed)
+
+- **初始条目**: 用于测试发布元数据。
+""",
+        encoding="utf-8",
+    )
+    _git(tmp_path, "add", "CHANGELOG.md")
+    _git(tmp_path, "commit", "-m", "docs(changelog): snapshot 0.1.1-001")
+    current_head = _git(tmp_path, "rev-parse", "HEAD")
+
+    ok, reason = pre_push_hook._current_head_is_metadata_only_child(
+        tmp_path,
+        validated_head_sha=validated_head,
+        current_head_sha=current_head,
+    )
+
+    assert ok is True
+    assert "CHANGELOG.md" in reason
+
+
+def test_pre_push_rejects_non_metadata_child(tmp_path: Path) -> None:
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "config", "user.name", "Test User")
+    _write_repo_files(
+        tmp_path,
+        """# 更新日志
+
+## [Unreleased]
+
+### 修复 (Fixed)
+
+- **初始条目**: 用于测试发布元数据。
+""",
+    )
+    (tmp_path / "src" / "non_metadata.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "feat: validated parent")
+    validated_head = _git(tmp_path, "rev-parse", "HEAD")
+
+    (tmp_path / "src" / "non_metadata.py").write_text("VALUE = 2\n", encoding="utf-8")
+    _git(tmp_path, "add", "src/non_metadata.py")
+    _git(tmp_path, "commit", "-m", "feat: source child")
+    current_head = _git(tmp_path, "rev-parse", "HEAD")
+
+    ok, reason = pre_push_hook._current_head_is_metadata_only_child(
+        tmp_path,
+        validated_head_sha=validated_head,
+        current_head_sha=current_head,
+    )
+
+    assert ok is False
+    assert "non-managed" in reason
+
+
+def test_pre_push_rejects_metadata_merge_child(tmp_path: Path) -> None:
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "config", "user.name", "Test User")
+    _write_repo_files(
+        tmp_path,
+        """# 更新日志
+
+## [Unreleased]
+
+### 修复 (Fixed)
+
+- **初始条目**: 用于测试发布元数据。
+""",
+    )
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "feat: validated parent")
+    validated_head = _git(tmp_path, "rev-parse", "HEAD")
+
+    _git(tmp_path, "checkout", "-b", "metadata-side")
+    (tmp_path / "CHANGELOG.md").write_text(
+        """# 更新日志
+
+## [Unreleased]
+
+## [0.1.1-001] - 2026-05-21 - 修复初始条目
+
+### 修复 (Fixed)
+
+- **初始条目**: 用于测试发布元数据。
+""",
+        encoding="utf-8",
+    )
+    _git(tmp_path, "add", "CHANGELOG.md")
+    _git(tmp_path, "commit", "-m", "docs(changelog): snapshot 0.1.1-001")
+
+    _git(tmp_path, "checkout", "master")
+    _git(tmp_path, "merge", "--no-ff", "metadata-side", "-m", "merge metadata side")
+    current_head = _git(tmp_path, "rev-parse", "HEAD")
+
+    ok, reason = pre_push_hook._current_head_is_metadata_only_child(
+        tmp_path,
+        validated_head_sha=validated_head,
+        current_head_sha=current_head,
+    )
+
+    assert ok is False
+    assert "single-parent" in reason
 
 
 def test_prepare_push_creates_revision_snapshot_and_resets_unreleased(tmp_path: Path) -> None:

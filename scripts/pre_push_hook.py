@@ -61,6 +61,20 @@ def _git_stdout(repo_root: Path, args: list[str]) -> str | None:
     return completed.stdout.strip()
 
 
+def _git_lines(repo_root: Path, args: list[str]) -> list[str]:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if completed.returncode != 0:
+        return []
+    return [line.strip().replace("\\", "/") for line in completed.stdout.splitlines() if line.strip()]
+
+
 def _read_push_updates() -> list[list[str]]:
     if sys.stdin.isatty():
         return []
@@ -96,12 +110,49 @@ def _is_false(value: str | None) -> bool:
     return (value or "").strip().lower() == "false"
 
 
+def _current_head_is_metadata_only_child(
+    repo_root: Path,
+    *,
+    validated_head_sha: str | None,
+    current_head_sha: str | None,
+) -> tuple[bool, str]:
+    if not validated_head_sha or not current_head_sha:
+        return False, "missing validated or current HEAD"
+    if validated_head_sha == current_head_sha:
+        return False, "current HEAD already matches latest impact head"
+
+    parent_line = _git_stdout(repo_root, ["rev-list", "--parents", "-n", "1", current_head_sha])
+    parent_parts = parent_line.split() if parent_line else []
+    if len(parent_parts) != 2:
+        return False, "current HEAD is not a single-parent metadata commit"
+
+    parent_sha = parent_parts[1]
+    if parent_sha != validated_head_sha:
+        return False, "current HEAD is not a direct child of latest impact head"
+
+    commit_count = _git_stdout(repo_root, ["rev-list", "--count", f"{validated_head_sha}..{current_head_sha}"])
+    if commit_count != "1":
+        return False, "current HEAD is not a single metadata commit on top of latest impact head"
+
+    changed_files = _git_lines(repo_root, ["diff", "--name-only", f"{validated_head_sha}..{current_head_sha}"])
+    if not changed_files:
+        return False, "metadata child has no changed files"
+
+    managed_files = {path.replace("\\", "/") for path in _MANAGED_FILES}
+    unmanaged_files = [path for path in changed_files if path not in managed_files]
+    if unmanaged_files:
+        return False, f"metadata child changed non-managed files: {', '.join(unmanaged_files)}"
+
+    return True, f"current HEAD only adds generated push metadata: {', '.join(changed_files)}"
+
+
 def _impact_gate_matches_push(
     fields: dict[str, str],
     *,
     report_text: str,
     expected_head_sha: str | None,
     expected_base_sha: str | None,
+    metadata_child_reason: str | None = None,
 ) -> tuple[bool, str]:
     if fields.get("status") != "ok":
         return False, f"latest impact status is {fields.get('status', '<missing>')}, not ok"
@@ -111,12 +162,14 @@ def _impact_gate_matches_push(
         return False, "latest impact was PlanOnly; full impacted tests did not run"
     if not _is_false(fields.get("skip_tests")):
         return False, "latest impact skipped tests"
-    if expected_head_sha and fields.get("head_sha") != expected_head_sha:
-        return False, "latest impact head_sha does not match current HEAD"
     if expected_base_sha and fields.get("base_sha") != expected_base_sha:
         return False, "latest impact base_sha does not match the remote push base"
     if "duration=" not in report_text or "elapsed_seconds" not in fields:
         return False, "latest impact summary is missing step duration evidence"
+    if expected_head_sha and fields.get("head_sha") != expected_head_sha:
+        if metadata_child_reason:
+            return True, f"latest impact evidence matches validated parent; {metadata_child_reason}"
+        return False, "latest impact head_sha does not match current HEAD"
     return True, "latest impact evidence matches current push"
 
 
@@ -132,11 +185,17 @@ def _impact_gate_allows_push(
     report_text = summary_path.read_text(encoding="utf-8")
     fields = _parse_gate_summary_text(report_text)
     head_sha = _git_stdout(repo_root, ["rev-parse", "HEAD"])
+    metadata_child_ok, metadata_child_reason = _current_head_is_metadata_only_child(
+        repo_root,
+        validated_head_sha=fields.get("head_sha"),
+        current_head_sha=head_sha,
+    )
     return _impact_gate_matches_push(
         fields,
         report_text=report_text,
         expected_head_sha=head_sha,
         expected_base_sha=expected_base_sha,
+        metadata_child_reason=metadata_child_reason if metadata_child_ok else None,
     )
 
 

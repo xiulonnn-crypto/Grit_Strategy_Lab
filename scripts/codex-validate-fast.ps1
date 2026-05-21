@@ -38,6 +38,8 @@ $startedAt = Get-Date
 $stepResults = [System.Collections.Generic.List[string]]::new()
 $script:LastStepAt = $startedAt
 $script:ResolvedBaseRef = ''
+$script:ResolvedBaseSha = ''
+$script:ResolvedHeadSha = ''
 $script:Plan = $null
 
 function Format-StepDuration {
@@ -118,11 +120,16 @@ function Write-Summary {
     [string[]]$asyncRepeatTests = @(ConvertTo-StringArray $plan.async_lifecycle_repeat_tests)
     [string[]]$domains = @(ConvertTo-StringArray $plan.domains)
     [string[]]$reasons = @(ConvertTo-StringArray $plan.ineligible_reasons)
-    $headSha = [string[]]@(Get-GitLines -Arguments @('rev-parse', 'HEAD'))
-    [string[]]$baseSha = if ([string]::IsNullOrWhiteSpace($script:ResolvedBaseRef)) {
-        [string[]]@()
+    $headShaValue = if ([string]::IsNullOrWhiteSpace($script:ResolvedHeadSha)) {
+        $headSha = [string[]]@(Get-GitLines -Arguments @('rev-parse', 'HEAD'))
+        if ($headSha.Count -eq 0) { '<none>' } else { $headSha[0] }
     } else {
-        [string[]]@(Get-GitLines -Arguments @('rev-parse', $script:ResolvedBaseRef))
+        $script:ResolvedHeadSha
+    }
+    $baseShaValue = if ([string]::IsNullOrWhiteSpace($script:ResolvedBaseSha)) {
+        '<none>'
+    } else {
+        $script:ResolvedBaseSha
     }
 
     $lines = [System.Collections.Generic.List[string]]::new()
@@ -143,8 +150,8 @@ function Write-Summary {
         ('- skip_gate_self_test: ' + $SkipGateSelfTest.IsPresent),
         ('- max_seconds: ' + $(if ($GateMode -eq 'fast') { $MaxSeconds } else { '<none>' })),
         ('- async_repeat_count: ' + $(if ($asyncRepeatTests.Count -eq 0) { 0 } else { $AsyncRepeatCount })),
-        ('- head_sha: ' + $(if ($headSha.Count -eq 0) { '<none>' } else { $headSha[0] })),
-        ('- base_sha: ' + $(if ($baseSha.Count -eq 0) { '<none>' } else { $baseSha[0] })),
+        ('- head_sha: ' + $headShaValue),
+        ('- base_sha: ' + $baseShaValue),
         ('- raw_changed_count: ' + $rawChanged.Count),
         ('- evidence_asset_count: ' + $evidenceFiles.Count),
         ('- documentation_count: ' + $docFiles.Count),
@@ -651,8 +658,17 @@ try {
         Add-StepResult -Label 'git fetch' -Status 'skip' -Details 'skipped by caller'
     }
 
+    $headSha = @(Get-GitLines -Arguments @('rev-parse', 'HEAD'))
+    if ($headSha.Count -gt 0) {
+        $script:ResolvedHeadSha = $headSha[0]
+    }
+
     $script:ResolvedBaseRef = Resolve-BaseRef
     if (-not [string]::IsNullOrWhiteSpace($script:ResolvedBaseRef)) {
+        $baseSha = @(Get-GitLines -Arguments @('rev-parse', $script:ResolvedBaseRef))
+        if ($baseSha.Count -gt 0) {
+            $script:ResolvedBaseSha = $baseSha[0]
+        }
         Invoke-GitCheck -Arguments @('merge-base', '--is-ancestor', $script:ResolvedBaseRef, 'HEAD') -Label "merge-base $script:ResolvedBaseRef -> HEAD"
         $divergence = @(Get-GitLines -Arguments @('rev-list', '--left-right', '--count', "$script:ResolvedBaseRef...HEAD"))
         if ($divergence.Count -gt 0) {
